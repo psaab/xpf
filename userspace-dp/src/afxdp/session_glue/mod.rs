@@ -12,8 +12,8 @@ pub(in crate::afxdp) use install_table_purge::{
     INSTALL_TABLE_PURGE_BUDGET, InstallTablePurge, install_table_purge_predicate,
 };
 pub(in crate::afxdp) use promote::{
-    SharedSessionRefs, maybe_promote_synced_session, maybe_promote_synced_session_with_conntrack,
-    SessionHitVerdict,
+    ConntrackFds, SharedSessionRefs, Tick, maybe_promote_synced_session,
+    maybe_promote_synced_session_with_conntrack, SessionHitVerdict,
 };
 /// #10507 Cell 5a test seam: command-driven Demote/Refresh funnels for
 /// cross-module poll tests (unshared map, no BPF). Production `handle_*`
@@ -85,6 +85,9 @@ pub(crate) use worker_commands::{
     SESSION_REPLICATION_QUEUE_DEPTH_MAX, SESSION_REPLICATION_QUEUE_DEPTH_SUM,
     SESSION_REPLICATION_UPSERTS, session_delete_drop_epoch,
 };
+#[cfg(test)]
+#[path = "shared_session_refs_16185_tests.rs"]
+mod shared_session_refs_16185_tests;
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;

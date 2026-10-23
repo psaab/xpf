@@ -151,17 +151,18 @@ fn purge(sessions: &mut SessionTable, rule_id: &str) -> usize {
     purge_sessions_bound_to_deleted_first_policy(
         sessions,
         SteeringMap::unshared_for_test(-1),
-        -1,
-        -1,
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &peer_worker_commands,
-        crate::afxdp::empty_worker_commands_by_id(),
+        SharedSessionRefs {
+            sessions: &shared_sessions,
+            nat_sessions: &shared_nat_sessions,
+            forward_wire_sessions: &shared_forward_wire_sessions,
+            owner_rg_indexes: &shared_owner_rg_indexes,
+            peer_worker_commands: &peer_worker_commands,
+            worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
+            conntrack: ConntrackFds { v4: -1, v6: -1 },
+            tick: Tick { ns: 2, secs: 0 },
+        },
         &ForwardingState::default(),
         rule_id,
-        2,
         0,
     )
 }

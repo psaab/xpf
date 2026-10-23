@@ -216,17 +216,18 @@ pub(in crate::afxdp) fn production_rotation_purge_for_test(
     let purged = purge_sessions_with_removed_zone_ids(
         sessions,
         binding.bpf_maps.session_map.handle(),
-        -1,
-        -1,
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &peer_worker_commands,
-        crate::afxdp::empty_worker_commands_by_id(),
+        SharedSessionRefs {
+            sessions: &shared_sessions,
+            nat_sessions: &shared_nat_sessions,
+            forward_wire_sessions: &shared_forward_wire_sessions,
+            owner_rg_indexes: &shared_owner_rg_indexes,
+            peer_worker_commands: &peer_worker_commands,
+            worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
+            conntrack: ConntrackFds { v4: -1, v6: -1 },
+            tick: Tick { ns: now_ns, secs: 0 },
+        },
         new_forwarding,
         &removed_zone_ids,
-        now_ns,
         0,
     );
     (removed_zone_ids.len(), purged)

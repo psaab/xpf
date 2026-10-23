@@ -84,17 +84,11 @@ tcp_flags: u8,) -> (SessionLookup, bool) { if let Some(shared) = resolved.shared
 // promote/demote transitions can invalidate only the origin bit in the mirror.
 pub(in crate::afxdp) fn resolve_flow_session_decision(sessions: &mut SessionTable,
 session_map: SteeringMap<'_>,
-shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+shared: SharedSessionRefs<'_>,
 forwarding: &ForwardingState,
 ha_state: &BTreeMap<i32, HAGroupRuntime>,
 dynamic_neighbors: &Arc<ShardedNeighborMap>,
 flow: &SessionFlow,
-now_ns: u64,
-now_secs: u64,
 protocol: u8,
 tcp_flags: u8,
 ingress_ifindex: i32,
@@ -108,20 +102,11 @@ verdict: SessionHitVerdict,) -> Option<ResolvedFlowSessionDecision> {
     let mut resolved = resolve_flow_session_decision_with_conntrack_inner(
         sessions,
         session_map,
-        -1,
-        -1,
-        shared_sessions,
-        shared_nat_sessions,
-        shared_forward_wire_sessions,
-        shared_owner_rg_indexes,
-        peer_worker_commands,
-        empty_worker_commands_by_id(),
+        shared,
         forwarding,
         ha_state,
         dynamic_neighbors,
         flow,
-        now_ns,
-        now_secs,
         protocol,
         tcp_flags,
         0,
@@ -137,18 +122,8 @@ verdict: SessionHitVerdict,) -> Option<ResolvedFlowSessionDecision> {
     maybe_promote_synced_session_with_conntrack(
         sessions,
         session_map,
-        -1,
-        -1,
-        SharedSessionRefs {
-            sessions: shared_sessions,
-            nat_sessions: shared_nat_sessions,
-            forward_wire_sessions: shared_forward_wire_sessions,
-            owner_rg_indexes: shared_owner_rg_indexes,
-        },
-        peer_worker_commands,
-        empty_worker_commands_by_id(),
+        shared.with_conntrack_tick(ConntrackFds { v4: -1, v6: -1 }, shared.tick),
         forwarding,
-        now_ns,
         tcp_flags,
         worker_id,
         verdict,
@@ -198,20 +173,11 @@ verdict: SessionHitVerdict,) -> Option<ResolvedFlowSessionDecision> {
 pub(in crate::afxdp) fn resolve_flow_session_decision_with_conntrack_and_payload(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
-    conntrack_v4_fd: c_int,
-    conntrack_v6_fd: c_int,
-    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
-    worker_commands_by_id: &WorkerCommandQueues,
+    shared: SharedSessionRefs<'_>,
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     flow: &SessionFlow,
-    now_ns: u64,
-    now_secs: u64,
     protocol: u8,
     tcp_flags: u8,
     payload_len: u32,
@@ -224,10 +190,8 @@ pub(in crate::afxdp) fn resolve_flow_session_decision_with_conntrack_and_payload
     prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,
 ) -> Option<ResolvedFlowSessionDecision> {
     resolve_flow_session_decision_with_conntrack_inner(
-        sessions, session_map, conntrack_v4_fd, conntrack_v6_fd, shared_sessions,
-        shared_nat_sessions, shared_forward_wire_sessions, shared_owner_rg_indexes,
-        peer_worker_commands, worker_commands_by_id, forwarding, ha_state,
-        dynamic_neighbors, flow, now_ns, now_secs, protocol, tcp_flags, payload_len,
+        sessions, session_map, shared, forwarding, ha_state,
+        dynamic_neighbors, flow, protocol, tcp_flags, payload_len,
         ingress_ifindex, ingress_vlan_id, fabric_ingress, fabric_link_ingress,
         ha_startup_grace_until_secs, worker_id, prevalidated_forward_nat_match,
     )
@@ -268,20 +232,11 @@ pub(in crate::afxdp::session_glue) fn apply_deferred_shared_materialization(
 #[allow(clippy::too_many_arguments)]
 fn resolve_flow_session_decision_with_conntrack_inner(sessions: &mut SessionTable,
 session_map: SteeringMap<'_>,
-conntrack_v4_fd: c_int,
-conntrack_v6_fd: c_int,
-shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
-worker_commands_by_id: &WorkerCommandQueues,
+shared: SharedSessionRefs<'_>,
 forwarding: &ForwardingState,
 ha_state: &BTreeMap<i32, HAGroupRuntime>,
 dynamic_neighbors: &Arc<ShardedNeighborMap>,
 flow: &SessionFlow,
-now_ns: u64,
-now_secs: u64,
 protocol: u8,
 tcp_flags: u8,
 payload_len: u32,
@@ -298,25 +253,14 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
     {
         return None;
     }
-    // Bundle the four shared-session refs once per call. `SharedSessionRefs`
-    // is `#[derive(Copy)]`, so the three downstream uses below
-    // (purge_translated_synced_hit + 2× maybe_promote_synced_session) each
-    // get a free by-value copy — structurally same codegen as the
-    // explicit-argument form (4 pointer-sized fields, no Drop). cargo-asm
-    // 0.1.16 cannot parse this codebase's symbols, so the empirical gate
-    // is the smoke-plus-test-failover pass on the loss userspace cluster.
-    let shared = SharedSessionRefs {
-        sessions: shared_sessions,
-        nat_sessions: shared_nat_sessions,
-        forward_wire_sessions: shared_forward_wire_sessions,
-        owner_rg_indexes: shared_owner_rg_indexes,
-    };
+    let now_ns = shared.tick.ns;
+    let now_secs = shared.tick.secs;
     if let Some(mut hit) = lookup_session_across_scopes_with_shared_and_payload(
         sessions,
-        shared_sessions,
-        shared_nat_sessions,
-        shared_forward_wire_sessions,
-        shared_owner_rg_indexes,
+        shared.sessions,
+        shared.nat_sessions,
+        shared.forward_wire_sessions,
+        shared.owner_rg_indexes,
         &flow.forward_key,
         now_ns,
         tcp_flags,
@@ -365,7 +309,7 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
                     return None;
                 }
                 let key = hit.key.as_ref(&flow.forward_key);
-                lock_shared_recover(shared_sessions)
+                lock_shared_recover(shared.sessions)
                     .get(key)
                     .filter(|entry| entry.session_id == local_id)
                     .map(|entry| (entry.session_id, entry.generation))
@@ -700,8 +644,8 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
         };
         if current_match.key != prevalidated.key
             || !crate::afxdp::shared_ops::shared_forward_nat_candidate_is_unique(
-                shared_nat_sessions,
-                shared_owner_rg_indexes,
+                shared.nat_sessions,
+                shared.owner_rg_indexes,
                 &unique_reply_key,
                 &current_match.key,
                 current_match.decision.nat,
@@ -713,9 +657,9 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
     } else {
         lookup_forward_nat_across_scopes_at(
             sessions,
-            shared_nat_sessions,
+            shared.nat_sessions,
             forwarding,
-            shared_owner_rg_indexes,
+            shared.owner_rg_indexes,
             &flow.forward_key,
             reverse_ingress,
             now_ns,
@@ -724,12 +668,12 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
     let (resolved, reverse_installed) = install_reverse_session_from_forward_match(
         sessions,
         session_map,
-        shared_sessions,
-        shared_nat_sessions,
-        shared_forward_wire_sessions,
-        shared_owner_rg_indexes,
-        peer_worker_commands,
-        worker_commands_by_id,
+        shared.sessions,
+        shared.nat_sessions,
+        shared.forward_wire_sessions,
+        shared.owner_rg_indexes,
+        shared.peer_worker_commands,
+        shared.worker_commands_by_id,
         forwarding,
         ha_state,
         dynamic_neighbors,

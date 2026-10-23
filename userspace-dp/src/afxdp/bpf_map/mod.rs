@@ -897,6 +897,16 @@ thread_local! {
 #[cfg(test)]
 pub(crate) const CONNTRACK_TEST_MAP_FD: c_int = -2;
 
+/// #16261: family-distinct second test fd. The single sentinel above is
+/// accepted in either slot by the delete/lookup seams
+/// (`conntrack_v4_fd == CONNTRACK_TEST_MAP_FD || conntrack_v6_fd ==
+/// CONNTRACK_TEST_MAP_FD`), so a wiring cell placing it only in `v4`
+/// cannot distinguish a v4/v6 transposition through those seams. This
+/// value is recognised only in the family-correct slot of the delete
+/// path.
+#[cfg(test)]
+pub(crate) const CONNTRACK_TEST_MAP_FD_V6: c_int = -3;
+
 #[cfg(test)]
 thread_local! {
     static CONNTRACK_TEST_ROWS:
@@ -1415,6 +1425,13 @@ fn conntrack_maps_unavailable(conntrack_v4_fd: c_int, conntrack_v6_fd: c_int) ->
     if conntrack_v4_fd == CONNTRACK_TEST_MAP_FD || conntrack_v6_fd == CONNTRACK_TEST_MAP_FD {
         return false;
     }
+    // #16261: the family-sensitive sentinel also means a test map is
+    // present; without this a `-2`-free pair of negatives looks
+    // unavailable and the caller's delete silently no-ops.
+    #[cfg(test)]
+    if conntrack_v4_fd == CONNTRACK_TEST_MAP_FD_V6 || conntrack_v6_fd == CONNTRACK_TEST_MAP_FD_V6 {
+        return false;
+    }
     conntrack_v4_fd < 0 && conntrack_v6_fd < 0
 }
 
@@ -1454,6 +1471,16 @@ fn conntrack_entry_session_id(
 ) -> Result<Option<u64>, ()> {
     #[cfg(test)]
     if conntrack_v4_fd == CONNTRACK_TEST_MAP_FD || conntrack_v6_fd == CONNTRACK_TEST_MAP_FD {
+        return Ok(conntrack_row_for_test(key).map(|row| row.session_id));
+    }
+    // #16261: family-sensitive sentinel (see CONNTRACK_TEST_MAP_FD_V6):
+    // honoured only in the slot matching the key's address family, so a
+    // v4/v6 transposition falls through to the real-BPF branch on a
+    // negative fd and errors instead of touching the test rows.
+    #[cfg(test)]
+    if (matches!(key.src_ip, IpAddr::V4(_)) && conntrack_v4_fd == CONNTRACK_TEST_MAP_FD_V6)
+        || (matches!(key.src_ip, IpAddr::V6(_)) && conntrack_v6_fd == CONNTRACK_TEST_MAP_FD_V6)
+    {
         return Ok(conntrack_row_for_test(key).map(|row| row.session_id));
     }
     match (key.addr_family as i32, &key.src_ip, &key.dst_ip) {
@@ -1517,6 +1544,16 @@ fn delete_bpf_conntrack_entry_raw(
 ) -> bool {
     #[cfg(test)]
     if conntrack_v4_fd == CONNTRACK_TEST_MAP_FD || conntrack_v6_fd == CONNTRACK_TEST_MAP_FD {
+        return CONNTRACK_TEST_ROWS
+            .with(|rows| rows.borrow_mut().remove(&bare_conntrack_test_key(key)))
+            .is_some();
+    }
+    // #16261: family-sensitive sentinel (see conntrack_entry_session_id);
+    // a transposed pair leaves the test row untouched.
+    #[cfg(test)]
+    if (matches!(key.src_ip, IpAddr::V4(_)) && conntrack_v4_fd == CONNTRACK_TEST_MAP_FD_V6)
+        || (matches!(key.src_ip, IpAddr::V6(_)) && conntrack_v6_fd == CONNTRACK_TEST_MAP_FD_V6)
+    {
         return CONNTRACK_TEST_ROWS
             .with(|rows| rows.borrow_mut().remove(&bare_conntrack_test_key(key)))
             .is_some();
