@@ -61,6 +61,9 @@ pub(super) fn run_export_slice(
     if !exported_sequences.is_empty() || worker_export.is_some() {
         // Adopt: a timeout-then-rekick overwrites with purge-foreign (a
         // superseded window's leftovers must not poison the new one).
+        // #15950 (H39-02 arm 2): `exported_sequences` names exactly one
+        // window by construction (last-command-wins at command accept),
+        // so this adopt never merges two kicked commands' RG sets.
         if !exported_sequences.is_empty() {
             if let Some(token) = exported_sequences.iter().copied().max() {
                 // M2c: the window token IS the kicked command sequence

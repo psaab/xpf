@@ -78,6 +78,9 @@ mod p2_deadline_9506_tests;
 #[cfg(test)]
 #[path = "export_slice_delta_drain_13653_tests.rs"]
 mod export_slice_delta_drain_13653_tests;
+#[cfg(test)]
+#[path = "export_slice_batched_window_15950_tests.rs"]
+mod export_slice_batched_window_15950_tests;
 
 
 // #13075 (D4-12): cold snapshot-rotation reconciliation (discriminator,

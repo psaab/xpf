@@ -28,22 +28,26 @@ pub(in crate::afxdp) struct WorkerCommandResults {
     /// The worker loop applies them before later queued commands.
     pub session_import_repairs: Vec<worker_queue::SessionImportRepair>,
     pub exported_sequences: Vec<u64>,
-    /// #2653: the union of owner RGs requested by every
-    /// `ExportOwnerRGSessions` command processed this tick. The command
-    /// handler NO LONGER emits the open deltas itself — doing so pushed the
-    /// entire owned-session set (up to `DEFAULT_MAX_SESSIONS` = 32x the 4096
-    /// delta ring) into the ring in one shot, overflowing it and silently
-    /// dropping sessions 4097..N from the HA bulk snapshot. Instead the
-    /// handler records the RGs here and the worker loop performs the same
-    /// chunked drain-as-you-export the #2442 loss-of-sync resync uses
-    /// (collect candidates -> emit in < cap chunks -> drain between chunks),
-    /// so the complete snapshot ships without overflowing the ring.
+    /// #2653: the owner RGs requested by the LAST
+    /// `ExportOwnerRGSessions` command processed this tick (#15950:
+    /// last-command-wins — see `handle_export_owner_rg_sessions`). The
+    /// command handler NO LONGER emits the open deltas itself — doing so
+    /// pushed the entire owned-session set (up to
+    /// `DEFAULT_MAX_SESSIONS` = 32x the 4096 delta ring) into the ring in
+    /// one shot, overflowing it and silently dropping sessions 4097..N
+    /// from the HA bulk snapshot. Instead the handler records the RGs
+    /// here and the worker loop performs the same chunked
+    /// drain-as-you-export the #2442 loss-of-sync resync uses (collect
+    /// candidates -> emit in < cap chunks -> drain between chunks), so
+    /// the complete snapshot ships without overflowing the ring.
     pub export_owner_rgs: Vec<i32>,
-    /// #9856: kick epoch for this tick's export, captured at the FIRST
-    /// Export-command accept (`SessionTable::current_epoch`). None when no
-    /// Export command was accepted. NOTE (rebase duty): Eng9720's
-    /// `transition_debt_pending` lands LAST post-#10141-merge; this field
-    /// moves after it with the two guard strings updated in the same commit.
+    /// #9856: kick epoch for this tick's export window, captured at the
+    /// window's FIRST Export-command accept
+    /// (`SessionTable::current_epoch`); a superseding accept in the same
+    /// drain re-captures it. None when no Export command was accepted.
+    /// NOTE (rebase duty): Eng9720's `transition_debt_pending` lands
+    /// LAST post-#10141-merge; this field moves after it with the two
+    /// guard strings updated in the same commit.
     pub export_kick_epoch: Option<u64>,
     pub shaped_tx_requests: Vec<TxRequest>,
     /// #941 Work item C: set when at least one
