@@ -1,5 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Config: a literal `apply-groups-except` naming no defined group no
+    longer silently no-ops (#16003). The exclusion still removes nothing
+    and never errors (a shared cluster config may exclude a group only
+    the peer defines), but compilation now warns once per distinct
+    unresolved literal name on strict, tolerant, and per-node paths.
+    Dynamic `${...}` exclusions stay silent, since another node's view
+    may define the group they resolve to there.
+
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Snapshot summary counts verified (#16056, A6-06): the Rust
     apply handler now refuses a snapshot whose summary
     interface_count/zone_count disagree with the built sections,

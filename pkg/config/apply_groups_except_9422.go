@@ -1,5 +1,10 @@
 package config
 
+import (
+	"sort"
+	"strings"
+)
+
 // `apply-groups-except` — #9422.
 //
 // Junos: "Don't inherit configuration data from these groups"
@@ -35,11 +40,16 @@ package config
 // #7029 skip lists that keep it from being read as a zone/interface member are
 // still what stops that, and their fixtures stay non-vacuous.
 //
-// A name that matches no defined group is a no-op rather than an error: unlike
-// `apply-groups`, which fails to ADD configuration and therefore has to say so,
-// an exclusion that matches nothing removes nothing. Rejecting it would also
-// break a shared cluster config that excludes a `${node}` group defined only in
-// the peer's view.
+// #16003: a LITERAL name that matches no defined group still removes nothing
+// (never an error: rejecting it would break a shared cluster config that
+// excludes a `${node}` group defined only in the peer's view), but it is no
+// longer silent. compileTree collects every unresolved literal exclusion
+// once, sorted, into cfg.Warnings (see unresolvedApplyGroupsExcept16003); a
+// RAW name containing a `${...}` variable stays silent, because the peer's
+// view may define the group it resolves to there. Only the compiler
+// surfaces the warning — ExpandGroups alone has no Warnings channel, so a
+// direct expansion caller sees the same no-op as before, just diagnosed
+// upstream.
 
 // treeHasApplyGroupsExcept9862 reports whether the tree carries any
 // `apply-groups-except` statement anywhere, including inside group definitions
@@ -480,4 +490,141 @@ func pruneExcluded9862(nodes []*Node, group string, excluded map[string]bool) []
 		out = append(out, n)
 	}
 	return out
+}
+
+// unresolvedApplyGroupsExcept16003 returns the sorted, deduplicated literal
+// `apply-groups-except` names in tree that match no defined group — the
+// #16003 typo diagnostic. It MUST run on the pre-expansion tree (the groups
+// stanza expansion removes is its definition set) with the same vars the
+// expansion will use, so a `${node}` exclusion judged on this node resolves
+// exactly as mergeNodes resolved it.
+//
+// Collection mirrors the shapes expansion actually honours, nothing wider:
+// statement nodes anywhere (collectExceptNames9862's Keys/children rule,
+// reused per node so bracket and block spellings count once each) and the
+// packed-tail segment `groupPackedLeafUnmodelledTail` synthesizes when a
+// packed group leaf lands on a schema-container peer. A tail the modelled
+// grammar expands (packedBodyChildren) already became a real statement node
+// by diagnosis time is NOT true here — diagnosis precedes expansion — so
+// that shape is collected by replaying the same packedBodyChildren synthesis
+// mergeNodes would use, against the same schema lookup, and reading the
+// statement nodes it yields. Tails neither synthesis expands stay uncollected:
+// expansion drops them too, so warning would invent an exclusion.
+//
+// A RAW name containing `${` is dynamic and never reported: the peer's view
+// may define the group it resolves to there (the shared-cluster-config
+// reason an unresolved exclusion is a warning, never an error), even when
+// this node's own resolution is undefined. Bare `apply-groups-except;`
+// with no name carries nothing to report.
+//
+// dynamicExcept16003 reports whether a RAW (pre-resolution) exclusion name
+// is dynamic.
+func dynamicExcept16003(raw string) bool { return strings.Contains(raw, "${") }
+
+func unresolvedApplyGroupsExcept16003(tree *ConfigTree, vars map[string]string) []string {
+	if tree == nil {
+		return nil
+	}
+	defined := make(map[string]bool)
+	for _, child := range tree.Children {
+		if child == nil || child.Name() != "groups" {
+			continue
+		}
+		for _, g := range child.Children {
+			if g == nil || len(g.Keys) < 1 {
+				continue
+			}
+			name := g.Keys[0]
+			if len(g.Keys) > 1 {
+				name = g.Keys[1]
+			}
+			defined[name] = true
+		}
+	}
+	found := make(map[string]bool)
+	var collect func(nodes []*Node, ancestorPath [][]string)
+	collect = func(nodes []*Node, ancestorPath [][]string) {
+		for _, n := range nodes {
+			if n == nil || len(n.Keys) == 0 {
+				continue
+			}
+			if n.Name() == "apply-groups-except" {
+				for _, raw := range appendApplyGroupNames(nil, n, nil) {
+					if dynamicExcept16003(raw) {
+						continue
+					}
+					found[resolveVars(raw, vars)] = true
+				}
+			}
+			if n.IsLeaf {
+				// Packed group leaf: replay the two syntheses mergeNodes
+				// tries, in its order. The modelled body already yields real
+				// statement nodes; the unmodelled tail is a single leaf whose
+				// Keys tail starts with the keyword, so parse that segment
+				// directly (its synthesized node is NOT a statement node).
+				// Fresh synthesized nodes only; n is never mutated.
+				if body := groupPackedLeafBody(ancestorPath, n); body != nil {
+					collect(body, ancestorPath)
+				} else if tail := groupPackedLeafUnmodelledTail(ancestorPath, n); tail != nil {
+					for _, t := range tail {
+						for i, k := range t.Keys {
+							if k != "apply-groups-except" {
+								continue
+							}
+							seg := &Node{Keys: append([]string{"apply-groups-except"}, t.Keys[i+1:]...), IsLeaf: true}
+							if len(t.KeysQuoted) == len(t.Keys) {
+								seg.setKeysQuoted(append([]bool{false}, t.KeysQuoted[i+1:]...))
+							}
+							if len(t.KeysBracketed) == len(t.Keys) {
+								seg.setKeysBracketed(append([]bool{false}, t.KeysBracketed[i+1:]...), t.BracketedClosed)
+							}
+							for _, raw := range appendApplyGroupNames(nil, seg, nil) {
+								if dynamicExcept16003(raw) {
+									continue
+								}
+								found[resolveVars(raw, vars)] = true
+							}
+						}
+					}
+				}
+				continue
+			}
+			childPath := make([][]string, len(ancestorPath)+1)
+			copy(childPath, ancestorPath)
+			childPath[len(ancestorPath)] = n.Keys
+			collect(n.Children, childPath)
+		}
+	}
+	collect(tree.Children, nil)
+	var out []string
+	for name := range found {
+		if name == "" || defined[name] || strings.Contains(name, "${") {
+			continue
+		}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// treeHasNodeVarExcept16003 reports whether any `apply-groups-except`
+// statement name contains `${node}`, so the generic compile can mirror its
+// node0 fallback for diagnosis even when no `apply-groups` uses the variable.
+func treeHasNodeVarExcept16003(nodes []*Node) bool {
+	for _, n := range nodes {
+		if n == nil {
+			continue
+		}
+		if n.Name() == "apply-groups-except" {
+			for _, name := range appendApplyGroupNames(nil, n, nil) {
+				if strings.Contains(name, "${node}") {
+					return true
+				}
+			}
+		}
+		if treeHasNodeVarExcept16003(n.Children) {
+			return true
+		}
+	}
+	return false
 }
