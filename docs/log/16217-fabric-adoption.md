@@ -879,3 +879,80 @@ was NOT executed (one FAIL, not twice). Cluster restored: clean
 master 2c8575b70e (2f2f5cbf...b04 both nodes), RG0/1/2 node0
 primary, target OK, P4 12.9 Gbit/s. Do not merge as the
 aged-failover cure.
+
+## ct-slice HA emit of restamped evidence (FZFixWire23)
+
+Diagnosis (FZDiag23, head `c837083b4c`): the ONLY missing input on
+fw1 is `rev>0` evidence. fw0 holds `rev=103505` in ITS node-local
+shared map; no HA delta carries it (all emission is
+transition-only, and fw0's split forward half never locally
+transitions — its completion is served on fw1/fabric). fw1 cannot
+observe reverse pre-failover (the backup serves nothing), so the
+evidence must come from fw0. fw0's ct-slice ALREADY restamps fw0
+shared rows to wire=4 with rev counts; the missing vehicle was
+fw0 SENDING a stage/count Update for Established-shared rows.
+
+Fix (this commit, on `c837083b4c`):
+- `restamp_shared_handshakes_established` /
+  `restamp_shared_forward_wire_established`
+  (`shared_ops/lookup.rs`) now return the rows whose shared stage
+  TRANSITIONED to Established in that call — the restamp is the
+  transition detector on fw0, so already-at-wire=4 rows are not
+  re-detected and steady-state slices stay silent by construction.
+- `run_ct_slice` (now `&mut SessionTable`) queues, after its
+  canonical/count/alias restamps, one HA Update per collected
+  forward row via the new `SessionTable::emit_ct_slice_state_update`
+  (the counts are re-read post-restamp via the new
+  `shared_row_stage_and_counts` snapshot, so the Update carries
+  wire=4 + the rev/fwd counts). Trigger: shared stage first reaches
+  Established with `rev>0`, OR counts first become `rev>0`
+  (fwd>0 too) while still HandshakePending — the peer's scoped
+  adoption arm (b) evidence. Rate-limited per row inside the emit
+  (`SessionTable::ct_slice_emit_marks`, seeded, dropped with the
+  session): once per stage transition per node; regression re-arms.
+- Emit reuse/fail-closed: the delta is built exactly like the
+  transition Update (live forward counters, shared-evidence
+  Established stamp via `completion_evidence_with_shared`); TUN
+  silent; closing/reverse/zero-count/Opening rows never emit; a
+  pure peer replica's counts-first arm stays silent (no echo), and
+  the `SyncImport` Established-stage arm is the existing
+  stage-advancement carve-out (close class unchanged).
+- fw1 import consequence: the Update lands through the normal
+  delta -> SessionDeltaInfo -> SessionSyncRequest -> import path,
+  stamping `rev>0` + wire=4 on fw1's shared/local rows (counter
+  carriage + stage already on the wire), so fw1's promotion slice
+  and fabric-adoption gate qualify pre-failover instead of five
+  seconds after it.
+
+Tests: `cargo test 16217` 32/32 (new
+`ct_slice_emit_carries_established_stage_and_rev_counts_16217` —
+stage transition emits exactly one wire=4 Update, second slice
+silent; `ct_slice_emit_counts_first_and_fail_closed_arms_16217` —
+counts-first emits once then stage arm still fires, rev=0/Opening/
+SyncImport-counts-first silent, SyncImport stage-advance emits);
+`16223` 31/31; `session::` 518 passed with the same 2
+pre-existing failures as the unmodified head
+(`tcp_seq_15753`, `session_decision_typed_snat_layout_11064`).
+
+Live aged table (all-node0, P4 60 s, RG1 fw0->fw1 at 30 s age +
+failback, deb `99.16217.47.dirty` sha256 `56c2bb96...22e`, helper
+sha256 `acb54ac9...d1e` hash-proved `/proc/<pid>/exe` on BOTH
+nodes before traffic; evidence `cell54/`, `cell55/`):
+
+| Arm | Build | SUM zero intervals | Verdict |
+|---|---|---|---|
+| This fix run 1 (cell54) | 99.16217.47.dirty | 29 (from FO+1 s) | FAIL |
+| This fix run 2 (cell55) | 99.16217.47.dirty | 29 (from FO+1 s) | FAIL — twice on loss confirmed |
+
+Pre-FO no zeros both runs. Progress vs Wire22: at d28 fw1's Backup
+holders now uniformly read `Timeout: 1800` (was mixed 20/1800 —
+the ct-emit Update landed the Established stage on fw1 pre-FO).
+The remaining blackhole moved downstream: fw1's last resolution
+still reads `ha_inactive ingress-ifindex=4
+flow=172.16.80.8:<sport>->172.16.80.200:5211` and post-FO forward
+`Pkts: 0` for the heavy tuples — stage promotion now lands, but
+the post-adoption forward path still does not serve. **Do not
+merge as the aged-failover cure.** Cluster restored after each
+run: clean master `2c8575b70e`, helper `2f2f5cbf...b04` both
+nodes (hash-proved), RG0/1/2 node0 primary, target OK, P4
+verification 14.4 Gbit/s.

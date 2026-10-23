@@ -507,25 +507,77 @@ pub(in crate::afxdp) fn restamp_shared_packet_counts(
 /// reflects completions that landed on any local hit path (slow-path
 /// lookup, update/promotion, cache probe). One lock acquisition per
 /// slice; only ever advances the wire, never regresses it.
+/// #16217 (ct-slice HA emit): snapshot `(stage_wire, fwd, rev)` for
+/// ONE canonical forward key from the shared maps (canonical row,
+/// derived reverse, forward-wire alias — max counts, first-found
+/// stage on the forward rows). The ct-slice feeds this to
+/// `SessionTable::emit_ct_slice_state_update` so the emitted Update
+/// carries the shared row's evidence, not a stale local wire. Lock
+/// order: `shared_sessions` THEN `shared_forward_wire_sessions`.
+pub(in crate::afxdp) fn shared_row_stage_and_counts(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    forward_key: &SessionKey,
+    nat: crate::nat::NatDecision,
+) -> (u8, u64, u64) {
+    let reverse_key = crate::session::reverse_session_key(forward_key, nat);
+    let wire_key = crate::session::forward_wire_key(forward_key, nat);
+    let holders = lock_shared_recover(shared_sessions);
+    let wires = lock_shared_recover(shared_forward_wire_sessions);
+    let mut stage = 0u8;
+    let mut fwd = 0u64;
+    let mut rev = 0u64;
+    for (map, is_wire) in [(&*holders, false), (&*wires, true)] {
+        for entry in map.values() {
+            let vouches = if is_wire {
+                entry.key == *forward_key || entry.key == reverse_key || entry.key == wire_key
+            } else {
+                entry.key == *forward_key || entry.key == reverse_key
+            };
+            if !vouches {
+                continue;
+            }
+            if !entry.metadata.is_reverse {
+                stage = stage.max(entry.tcp_handshake_state);
+            }
+            fwd = fwd.max(entry.fwd_packets);
+            rev = rev.max(entry.rev_packets);
+        }
+    }
+    (stage, fwd, rev)
+}
+
 pub(in crate::afxdp) fn restamp_shared_handshakes_established(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     established_keys: &[(SessionKey, crate::nat::NatDecision)],
-) {
+) -> Vec<(SessionKey, crate::nat::NatDecision)> {
+    // #16217 (ct-slice HA emit): return the subset whose shared
+    // stage TRANSITIONED to Established in this call — the restamp
+    // is the transition detector the HA emit keys on. Rows already
+    // at wire=4 are not re-reported, so steady-state slices stay
+    // silent without any extra bookkeeping here.
+    let mut transitioned = Vec::new();
     if established_keys.is_empty() {
-        return;
+        return transitioned;
     }
     let established = crate::session::TcpHandshakeState::Established.to_wire();
     let mut sessions = lock_shared_recover(shared_sessions);
     for (forward_key, nat) in established_keys {
         let reverse_key = crate::session::reverse_session_key(forward_key, *nat);
+        let mut advanced = false;
         for candidate in [forward_key, &reverse_key] {
             if let Some(entry) = sessions.get_mut(candidate) {
                 if entry.tcp_handshake_state != established {
                     entry.tcp_handshake_state = established;
+                    advanced = true;
                 }
             }
         }
+        if advanced {
+            transitioned.push((forward_key.clone(), *nat));
+        }
     }
+    transitioned
 }
 
 /// #16217: advance the forward-wire KEY ALIAS slot
@@ -549,9 +601,9 @@ pub(in crate::afxdp) fn restamp_shared_forward_wire_established(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     established_keys: &[(SessionKey, crate::nat::NatDecision)],
-) {
+) -> Vec<(SessionKey, crate::nat::NatDecision)> {
     if established_keys.is_empty() {
-        return;
+        return Vec::new();
     }
     let established = crate::session::TcpHandshakeState::Established.to_wire();
     // Lock order: `shared_sessions` THEN `shared_forward_wire_sessions`
@@ -575,6 +627,7 @@ pub(in crate::afxdp) fn restamp_shared_forward_wire_established(
         }
     }
     let mut wire_sessions = lock_shared_recover(shared_forward_wire_sessions);
+    let mut transitioned = Vec::new();
     for (forward_key, nat) in established_keys {
         let wire_key = crate::session::forward_wire_key(forward_key, *nat);
         if wire_key == *forward_key {
@@ -583,13 +636,16 @@ pub(in crate::afxdp) fn restamp_shared_forward_wire_established(
         if let Some(entry) = wire_sessions.get_mut(&wire_key) {
             if entry.tcp_handshake_state != established {
                 entry.tcp_handshake_state = established;
+                transitioned.push((forward_key.clone(), *nat));
             }
         } else if let Some((_, canonical)) = canonicals.iter().find(|(wk, _)| *wk == wire_key) {
             let mut aliased = canonical.clone();
             aliased.tcp_handshake_state = established;
             wire_sessions.insert(wire_key, aliased);
+            transitioned.push((forward_key.clone(), *nat));
         }
     }
+    transitioned
 }
 
 #[derive(Clone, Copy)]

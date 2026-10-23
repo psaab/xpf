@@ -1558,3 +1558,144 @@ fn import_stamps_request_counters_16217() {
     assert_eq!(entry.rev_packets, 6789, "#16217: import must stamp rev count");
 }
 
+
+
+/// #16217 (ct-slice HA emit, FZDiag23): fw0's ct-slice restamps its
+/// shared rows to wire=4 with rev counts, but no HA delta carried
+/// that evidence (transition-only emission; fw0's split forward half
+/// never locally transitions). The ct-slice now queues a stage/count
+/// Update when a shared row's stage advances to Established (or its
+/// counts first become rev>0), rate-limited once per stage
+/// transition per node. This drives the production emit seam
+/// (`SessionTable::emit_ct_slice_state_update`) with the shared-row
+/// snapshot the ct-slice reads after its restamps.
+///
+/// MUTATION: drop the emit call in `run_ct_slice` (or make
+/// `emit_ct_slice_state_update` always return false) and the first
+/// assertion (exactly one Established Update) fails. Reverting the
+/// per-row mark makes the second-slice silence assertion fail.
+#[test]
+fn ct_slice_emit_carries_established_stage_and_rev_counts_16217() {
+    let established = TcpHandshakeState::Established.to_wire();
+    let pending = TcpHandshakeState::HandshakePending.to_wire();
+
+    // fw0 shape: locally-authored forward row still HandshakePending
+    // locally (split completion served elsewhere), shared row now
+    // wire=4 with rev>0 (restamped from fw0's own counters).
+    let (mut table, forward) = {
+        let forward = key_v4();
+        let mut table = SessionTable::new();
+        assert!(table.upsert_synced_with_origin(
+            SessionInstall {
+                key: forward.clone(),
+                decision: decision(),
+                metadata: metadata(),
+                origin: SessionOrigin::ForwardFlow,
+                now_ns: 1_000_000_000,
+                protocol: PROTO_TCP,
+                tcp_flags: 0,
+                session_id: 99,
+                tcp_close_class: 0,
+                tcp_handshake_state: pending,
+                source_nat_static: None,
+            },
+            false,
+        ));
+        (table, forward)
+    };
+    table.drain_deltas(64);
+    // First slice after the restamp transition: exactly one Update,
+    // stamped Established, carrying live counters.
+    assert!(
+        table.emit_ct_slice_state_update(&forward, established, 103_505, 1_953_288),
+        "#16217 ct-emit: stage transition must emit"
+    );
+    let updates: Vec<_> = table
+        .drain_deltas(64)
+        .into_iter()
+        .filter(|d| d.kind == SessionDeltaKind::Update)
+        .collect();
+    assert_eq!(updates.len(), 1, "#16217 ct-emit: exactly one Update per transition, got {updates:?}");
+    assert_eq!(
+        updates[0].tcp_handshake_state, established,
+        "#16217 ct-emit: Update must stamp wire=4 for the peer's import + gate"
+    );
+    assert_eq!(updates[0].key, forward, "#16217 ct-emit: Update keyed on the forward row");
+    // Second slice, same shared state: rate-limited silence.
+    assert!(
+        !table.emit_ct_slice_state_update(&forward, established, 103_505, 1_953_288),
+        "#16217 ct-emit: steady-state slice must stay silent (once per transition)"
+    );
+    assert!(
+        table.drain_deltas(64).is_empty(),
+        "#16217 ct-emit: no second Update may be queued"
+    );
+}
+
+/// #16217 (ct-slice HA emit): the counts-first arm — a shared row
+/// still HandshakePending whose counts first show rev>0 (+ fwd>0)
+/// emits once so the peer's scoped adoption arm (b) can qualify;
+/// zero-count, Opening (unanswered SYN), closing/reverse, and pure
+/// peer-replica count-first shapes stay silent. An Established-stage
+/// emit for a SyncImport row IS allowed (the stage-advancement
+/// carve-out: fw0 owns the authoritative row), mirroring
+/// `emit_session_state_update_inner`.
+#[test]
+fn ct_slice_emit_counts_first_and_fail_closed_arms_16217() {
+    let established = TcpHandshakeState::Established.to_wire();
+    let pending = TcpHandshakeState::HandshakePending.to_wire();
+    let opening = TcpHandshakeState::Opening.to_wire();
+    let now = 1_000_000_000u64;
+
+    let mk = |origin: SessionOrigin, wire: u8| -> (SessionTable, SessionKey) {
+        let forward = key_v4();
+        let mut table = SessionTable::new();
+        assert!(table.upsert_synced_with_origin(
+            SessionInstall {
+                key: forward.clone(),
+                decision: decision(),
+                metadata: metadata(),
+                origin,
+                now_ns: now,
+                protocol: PROTO_TCP,
+                tcp_flags: 0,
+                session_id: 100,
+                tcp_close_class: 0,
+                tcp_handshake_state: wire,
+                source_nat_static: None,
+            },
+            false,
+        ));
+        table.drain_deltas(64);
+        (table, forward)
+    };
+
+    // Counts-first (pending + rev>0 + fwd>0): emits once, then silent.
+    let (mut t, f) = mk(SessionOrigin::ForwardFlow, pending);
+    assert!(t.emit_ct_slice_state_update(&f, pending, 7, 12), "counts-first must emit");
+    let ups: Vec<_> = t.drain_deltas(64).into_iter().filter(|d| d.kind == SessionDeltaKind::Update).collect();
+    assert_eq!(ups.len(), 1, "counts-first: exactly one Update");
+    assert!(!t.emit_ct_slice_state_update(&f, pending, 7, 12), "counts-first: second slice silent");
+    // Later stage transition still emits (counts-first does not burn the stage arm).
+    assert!(t.emit_ct_slice_state_update(&f, established, 7, 12), "stage transition after counts-first must emit");
+
+    // Zero counts at Established stage: no evidence, silent.
+    let (mut t, f) = mk(SessionOrigin::ForwardFlow, pending);
+    assert!(!t.emit_ct_slice_state_update(&f, established, 0, 12), "rev=0 must not emit");
+
+    // Opening (unanswered SYN) with counts: never laundered.
+    let (mut t, f) = mk(SessionOrigin::ForwardFlow, opening);
+    assert!(!t.emit_ct_slice_state_update(&f, opening, 7, 12), "Opening row must not emit");
+
+    // Pure peer replica, counts-first (stage still pending): silent
+    // (fw1 must not echo fw0's evidence back).
+    let (mut t, f) = mk(SessionOrigin::SyncImport, pending);
+    assert!(!t.emit_ct_slice_state_update(&f, pending, 7, 12), "SyncImport counts-first must stay silent");
+    assert!(t.drain_deltas(64).is_empty(), "SyncImport counts-first must queue nothing");
+    // Same replica at the Established stage transition: the
+    // stage-advancement carve-out emits (fw0 owns the row).
+    assert!(t.emit_ct_slice_state_update(&f, established, 7, 12), "SyncImport stage-advance must emit");
+    let ups: Vec<_> = t.drain_deltas(64).into_iter().filter(|d| d.kind == SessionDeltaKind::Update).collect();
+    assert_eq!(ups.len(), 1);
+    assert_eq!(ups[0].tcp_handshake_state, established, "carve-out Update must carry wire=4");
+}
