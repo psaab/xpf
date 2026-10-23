@@ -324,6 +324,8 @@ func (s *Store) rebindRollbackMetadataLocked() {
 		// counts as success).
 		s.rollbackPersistDegraded = false
 	}
+}
+
 // rollbackMetadataSnapshot is the parsed rollback sidecar: generation, active
 // binding, and entries are the durable #10723 binding; NextActiveHash carries
 // the #16064 preparation binding for a commit whose active rename may already

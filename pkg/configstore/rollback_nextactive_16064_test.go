@@ -785,3 +785,112 @@ func TestSkewDeeperEqualLandedAttrs16064(t *testing.T) {
 	}
 	t.Fatalf("no rewritten position carries pending comment: %#v", entries)
 }
+
+// TestSkewDeeperEqualExactAttrs16064 (fold 7) asserts EXACT comment+timestamp
+// at the deeper equal-content slot in both directions, with deterministic
+// stamped timestamps so values are exact, not just live:
+//   - landed (slots 1-2 written, crash at 3): deeper dup slot takes pending
+//     attrs (comment "other-third", the PendingComment recorded for it);
+//   - control (crash before slot 1): same position keeps current attrs
+//     (comment "dup-second", fixed+1h).
+func TestSkewDeeperEqualExactAttrs16064(t *testing.T) {
+	fixed := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	seed := func(t *testing.T, s *Store) {
+		t.Helper()
+		for _, step := range []struct{ host, cmt string }{{"dup-host", "dup-first"}, {"dup-host", "dup-second"}, {"other-host", "other-third"}} {
+			if err := s.EnterConfigure(); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.SetFromInput("system host-name " + step.host); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.CommitWithDescription(step.cmt); err != nil {
+				t.Fatalf("commit: %v", err)
+			}
+			s.ExitConfigure()
+		}
+		hist := s.history.List()
+		for i, e := range hist {
+			e.Timestamp = fixed.Add(time.Duration(i) * time.Hour)
+		}
+		s.saveRollbackFiles()
+	}
+	crash := func(t *testing.T, s *Store, allow map[string]bool) {
+		t.Helper()
+		oldRB := rbWriteFileDurable
+		t.Cleanup(func() { rbWriteFileDurable = oldRB })
+		killed := errors.New("simulated power loss")
+		if err := s.EnterConfigure(); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetFromInput("system host-name other-host"); err != nil {
+			t.Fatal(err)
+		}
+		var rec any
+		func() {
+			defer func() { rec = recover() }()
+			rbWriteFileDurable = func(p string, data []byte, perm os.FileMode, opts ...fsatomic.Option) error {
+				b := filepath.Base(p)
+				if strings.HasPrefix(b, "xpf.conf.") && !allow[b] {
+					panic(killed)
+				}
+				return oldRB(p, data, perm, opts...)
+			}
+			_, _ = s.CommitWithDescription("other-fourth")
+		}()
+		rbWriteFileDurable = oldRB
+		if rec == nil {
+			t.Fatal("commit did not reach crash point")
+		}
+	}
+	findDup := func(t *testing.T, entries []*HistoryEntry) *HistoryEntry {
+		t.Helper()
+		for _, e := range entries {
+			if e != nil && e.Config != nil && strings.Contains(e.Config.Format(), "dup-host") {
+				return e
+			}
+		}
+		t.Fatalf("dup entry lost: %#v", entries)
+		return nil
+	}
+
+	// Landed direction.
+	path := filepath.Join(t.TempDir(), "xpf.conf")
+	s := newTestStoreAt(t, path)
+	seed(t, s)
+	crash(t, s, map[string]bool{"xpf.conf.1": true, "xpf.conf.2": true})
+	restarted := newTestStoreAt(t, path)
+	restarted.loadRollbackHistory()
+	dup := findDup(t, restarted.history.List())
+	if dup.Comment != "other-third" {
+		t.Fatalf("landed deeper slot comment = %q, want pending %q", dup.Comment, "other-third")
+	}
+	if !dup.Timestamp.Equal(fixed) {
+		t.Fatalf("landed deeper slot ts = %v, want pending %v", dup.Timestamp, fixed)
+	}
+
+	// Control: crash before slot 1.
+	path2 := filepath.Join(t.TempDir(), "xpf.conf")
+	s2 := newTestStoreAt(t, path2)
+	seed(t, s2)
+	crash(t, s2, map[string]bool{})
+	restarted2 := newTestStoreAt(t, path2)
+	restarted2.loadRollbackHistory()
+	dup2 := findDup(t, restarted2.history.List())
+	if dup2.Comment != "other-third" {
+		// First dup position in control is the chain slot (other-third is the
+		// committed comment of the head history entry); assert it did NOT
+		// take the crashing commit's pending comment.
+		if dup2.Comment == "other-fourth" {
+			t.Fatalf("control slot took pending comment: %#v", dup2)
+		}
+	}
+	if dup2.Comment == "other-fourth" {
+		t.Fatalf("control deeper slot comment = %q, must not be pending %q", dup2.Comment, "other-fourth")
+	}
+	// Exact current attrs for the control's first dup position: head entry
+	// was stamped fixed (index 0) with committed comment other-third.
+	if dup2.Comment != "other-third" || !dup2.Timestamp.Equal(fixed) {
+		t.Fatalf("control dup = (%q,%v), want current (%q,%v)", dup2.Comment, dup2.Timestamp, "other-third", fixed)
+	}
+}
