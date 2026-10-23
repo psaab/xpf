@@ -859,20 +859,34 @@ func secretIndices(fp []string) []int {
 			"encrypted-password", "simple-password", "api-key", "tsig-secret",
 			"plain-text-password", "plain-text-password-value",
 			"api-token", "aws-secret-key", "private-key", "preshared-key",
-			"client-secret", "shared-secret", "radius-shared-secret", "user-password":
+			"client-secret", "shared-secret", "radius-shared-secret":
 			// Distinctive secret keywords: every token after the keyword is
 			// secret value (covers multi-token / bracketed list values too).
 			// client-secret/shared-secret are the JIMS (Juniper Identity
 			// Management Service) credentials under user-identification
 			// (#15655 V15-04); they are credential-shaped names with no
-			// non-secret Junos use. user-password is the AD bind credential
-			// under active-directory-access (#15996): the stanza is unmodelled
-			// (no schema leaf by that name), so the schema-pinned
-			// secretLeafKeywords set cannot name it and the fix must live
-			// AST-side only — control-char/schema diagnostics resolve through
-			// secretIndices and pick it up from here.
+			// non-secret Junos use.
 			for j := i + 1; j < len(fp); j++ {
 				out = append(out, j)
+			}
+		case "user-password":
+			// AD bind credential (#15996) — CONTEXT-GATED, not distinctive:
+			// `user-password` is also a legal login USER NAME
+			// (`system login user user-password class …`), where every token
+			// after it is the account's class/full-name, not a credential.
+			// It is secret only inside the identity contexts the issue
+			// names — under `user-identification` (services/security
+			// spellings) or directly under `active-directory-access`
+			// (security/services-root spellings, flat or hierarchical).
+			// The stanza is unmodelled (no schema leaf by that name), so
+			// the schema-pinned secretLeafKeywords set cannot name it and
+			// the fix must live AST-side only — control-char/schema
+			// diagnostics resolve through secretIndices and pick it up
+			// from here.
+			if containsAnyOf(fp[:i], "user-identification", "active-directory-access") {
+				for j := i + 1; j < len(fp); j++ {
+					out = append(out, j)
+				}
 			}
 		case "password":
 			// Generic keyword — secret under REST api-auth, a DDNS

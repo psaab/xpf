@@ -178,6 +178,61 @@ func TestADUserPasswordRedacted15996(t *testing.T) {
 	})
 }
 
+// TestLoginUserNamedUserPasswordNotMasked15996 is the fold regression for the
+// context gate: `user-password` is also a legal login USER NAME
+// (`system login user user-password class … full-name …`), where the tokens
+// after it are the account's class/full-name — an operator-visible identity,
+// not a credential. The unqualified rule masked them; the gated rule must
+// render the login stanza verbatim while the AD shapes above stay masked.
+// Goes RED if the gate is dropped (class/full-name become placeholders).
+func TestLoginUserNamedUserPasswordNotMasked15996(t *testing.T) {
+	flat := buildRedactTree(t, []string{
+		"set system login user user-password class super-user",
+		`set system login user user-password full-name "AD Bind Helper"`,
+	})
+	for name, rendered := range map[string]string{
+		"Format":    flat.RedactedClone().Format(),
+		"FormatSet": flat.RedactedClone().FormatSet(),
+	} {
+		for _, want := range []string{"user-password", "super-user", "AD Bind Helper"} {
+			if !strings.Contains(rendered, want) {
+				t.Errorf("%s masked login identity token %q (over-redaction):\n%s", name, want, rendered)
+			}
+		}
+		if strings.Contains(rendered, SecretDataPlaceholder) {
+			t.Errorf("%s masked a login user named user-password:\n%s", name, rendered)
+		}
+	}
+	hier := parseHierText(t, `system {
+    login {
+        user user-password {
+            class super-user;
+            full-name "AD Bind Helper";
+        }
+    }
+}`)
+	out := hier.RedactedClone().Format()
+	for _, want := range []string{"user-password", "super-user", "AD Bind Helper"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("hierarchical masked login identity token %q (over-redaction):\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, SecretDataPlaceholder) {
+		t.Errorf("hierarchical masked a login user named user-password:\n%s", out)
+	}
+	// The placeholder-ingest guard must not refuse the login spelling either:
+	// RedactedClone never masks it, so the literal is a real user name.
+	if err := checkRedactionPlaceholder(flat); err != nil {
+		t.Errorf("checkRedactionPlaceholder refused login user named user-password: %v", err)
+	}
+	// Control-char resolution agrees: class token after login user-password
+	// is not a secret value.
+	fp := []string{"system", "login", "user", "user-password", "class", "super-user"}
+	if isSecretValueIndex(fp, 5) {
+		t.Errorf("login class token wrongly marked secret: %v", fp)
+	}
+}
+
 // TestADUserPasswordNotInSchemaPinnedSet15996 pins the filing constraint:
 // user-password is unmodelled, so it MUST NOT enter the schema-pinned
 // secretLeafKeywords set (TestSecretLeafKeywordsExistInSchema would fail);
