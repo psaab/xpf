@@ -241,3 +241,54 @@ func TestOrdinaryHigherPriorityStillDemotes16018(t *testing.T) {
 		t.Fatalf("counter = %d, want 0 for ordinary priority", got)
 	}
 }
+
+// Atomic admission+record (#16018 fold 2): the drop decision and the
+// record acceptance must be the SAME staleness verdict from one lock
+// hold. Split across two lock holds, an interleaved in-place update can
+// flip the horizon between them; these two pins fail if the handlers go
+// back to gate-then-record.
+//
+// Pin 1 (no double-count, no record on drop): a dropped 255 increments
+// the counter exactly ONCE and leaves priority/interval/source untouched
+// — a second admission inside the record path would count twice or
+// record the forged advert.
+func TestDroppedAdvertCountedOnceNotRecorded16018(t *testing.T) {
+	vi := newGateTestInstance(t, 100, true)
+	seedLearnedMaster16018(t, vi, net.IPv4(10, 0, 0, 2))
+	masterDown, advert, _ := longTimers(t)
+	vi.setState(StateMaster)
+	vi.handleMasterRx(&VRRPPacket{Priority: 255, MaxAdvertInt: 4095, SrcIP: net.IPv4(10, 0, 0, 3)}, masterDown, advert)
+	if got := vi.unrecognizedMasterAdverts.Load(); got != 1 {
+		t.Fatalf("counter = %d, want exactly 1 (admission and record must be one decision)", got)
+	}
+	vi.mu.RLock()
+	pri, interval := vi.lastMasterPriority, vi.masterAdverInterval
+	src := append(net.IP(nil), vi.lastMasterIPv4[:]...)
+	vi.mu.RUnlock()
+	if pri != 100 || interval != 1000*time.Millisecond || !src.Equal(net.IPv4(10, 0, 0, 2)) {
+		t.Fatalf("dropped advert was recorded: pri=%d interval=%v src=%v, want 100/1s/10.0.0.2", pri, interval, src)
+	}
+}
+
+// Pin 2 (stale verdict carried into record): an advert admitted BECAUSE
+// the record is stale must be recorded under that same verdict — its
+// learned interval (which widens the horizon 3x) must not be re-derived
+// between the halves. The new owner's interval and source land together.
+func TestStaleAdmissionRecordedAtomically16018(t *testing.T) {
+	vi := newGateTestInstance(t, 100, true)
+	seedLearnedMaster16018(t, vi, net.IPv4(10, 0, 0, 2))
+	vi.mu.Lock()
+	vi.lastMasterSeen = time.Now().Add(-time.Hour)
+	vi.mu.Unlock()
+	if drop := vi.admitAndRecord(&VRRPPacket{Priority: 255, MaxAdvertInt: 300, SrcIP: net.IPv4(10, 0, 0, 3)}); drop {
+		t.Fatal("stale new-owner 255 dropped; admission verdict not carried through")
+	}
+	vi.mu.RLock()
+	pri, interval := vi.lastMasterPriority, vi.masterAdverInterval
+	src := append(net.IP(nil), vi.lastMasterIPv4[:]...)
+	seen := vi.lastMasterSeen
+	vi.mu.RUnlock()
+	if pri != 255 || interval != 3000*time.Millisecond || !src.Equal(net.IPv4(10, 0, 0, 3)) || time.Since(seen) > time.Minute {
+		t.Fatalf("stale admission not recorded atomically: pri=%d interval=%v src=%v seen=%v", pri, interval, src, seen)
+	}
+}
