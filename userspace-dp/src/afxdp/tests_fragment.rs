@@ -136,9 +136,9 @@ fn h18_14239_live_forward_fragment_uses_frame_derived_ingress_protocol() {
             color_blind: true,
             committed_rate_bytes_per_sec: 1,
             committed_burst_bytes: 1,
-            peak_or_excess_rate_bytes_per_sec: 0,
             peak_or_excess_burst_bytes: 1,
             then_action: "discard".into(),
+            ..Default::default()
         }],
         class_of_service: Some(ClassOfServiceSnapshot {
             forwarding_classes: vec![

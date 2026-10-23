@@ -2501,16 +2501,11 @@ fn static_nat_snat_matches_when_zone_is_empty() {
     // Create a snapshot where from_zone is empty (matches any zone)
     let mut snapshot = static_nat_snapshot();
     snapshot.static_nat_rules = vec![StaticNATRuleSnapshot {
-        source_addresses: Vec::new(),
-        counter_id: 0,
         name: "web-server".to_string(),
         from_zone: String::new(), // matches any zone
-        from_interface: String::new(),
-        from_routing_instance: String::new(),
         external_ip: "203.0.113.10".to_string(),
         internal_ip: "192.168.1.10".to_string(),
-        match_destination_port: 0,
-        mapped_port: 0,
+        ..Default::default()
     }];
     let state = build_forwarding_state(&snapshot);
 
@@ -2532,16 +2527,10 @@ fn static_nat_takes_priority_over_interface_snat() {
     // Create snapshot with both static NAT and interface SNAT
     let mut snapshot = static_nat_snapshot();
     snapshot.static_nat_rules = vec![StaticNATRuleSnapshot {
-        source_addresses: Vec::new(),
-        counter_id: 0,
         name: "static-web".to_string(),
-        from_zone: String::new(),
-        from_interface: String::new(),
-        from_routing_instance: String::new(),
         external_ip: "203.0.113.10".to_string(),
         internal_ip: "192.168.1.10".to_string(),
-        match_destination_port: 0,
-        mapped_port: 0,
+        ..Default::default()
     }];
     snapshot.source_nat_rules = vec![SourceNATRuleSnapshot {
         name: "interface-snat".to_string(),
@@ -2571,16 +2560,10 @@ fn static_nat_takes_priority_over_interface_snat() {
 fn static_nat_v6_dnat_and_snat() {
     let mut snapshot = static_nat_snapshot();
     snapshot.static_nat_rules = vec![StaticNATRuleSnapshot {
-        source_addresses: Vec::new(),
-        counter_id: 0,
         name: "v6-server".to_string(),
-        from_zone: String::new(),
-        from_interface: String::new(),
-        from_routing_instance: String::new(),
         external_ip: "2001:db8::10".to_string(),
         internal_ip: "fd00::10".to_string(),
-        match_destination_port: 0,
-        mapped_port: 0,
+        ..Default::default()
     }];
     // Add v6 addresses to interfaces
     snapshot.interfaces[0]

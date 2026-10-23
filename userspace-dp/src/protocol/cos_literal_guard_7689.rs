@@ -248,16 +248,22 @@ const ADDITIVE_WIRE_EXHAUSTIVE_CEILING: &[(&str, usize)] = &[
     ("InjectPacketRequest", 1),
     ("InterfaceSnapshot", 0),
     ("MapPins", 0),
-    ("NAT64RuleSnapshot", 3),
-    ("NeighborSnapshot", 26),
+    // #16267: tightened 3 -> 0. Already 0 on master (the #15678/#15930-
+    // #16049 scope fields made every literal carry a tail); the stale
+    // ceiling was holding room for literals that no longer exist.
+    ("NAT64RuleSnapshot", 0),
     ("PacketResolution", 1),
     ("ProcessStatus", 1),
     ("SessionDeltaInfo", 1),
     ("SlowPathStatus", 1),
     ("SourceNATRuleSnapshot", 0),
     ("SourceNatPoolStatus", 1),
-    ("StaticNATRuleSnapshot", 34),
-    ("ThreeColorPolicerSnapshot", 2),
+    // #16267: tightened 34/2 -> 0. Every exhaustive literal of both
+    // structs gained a `..Default::default()` tail (only default-valued
+    // fields were dropped), so no exhaustive literal remains; the
+    // ceilings hold that ground instead of decaying into permission.
+    ("StaticNATRuleSnapshot", 0),
+    ("ThreeColorPolicerSnapshot", 0),
     ("ThreeColorPolicerStatus", 1),
     ("WgTunnelStatus", 2),
     ("WorkerRuntimeStatus", 1),
@@ -498,11 +504,15 @@ fn additive_wire_exhaustive_literals_only_ever_decrease_7689() {
 
     // The second floor: the population must still be FOUND. If every struct
     // were renamed or moved, every count would be 0 and the ratchet would read
-    // as a clean tree rather than a broken scan.
+    // as a clean tree rather than a broken scan. #16267: lowered 80 -> 25.
+    // Converting 40 literals (StaticNAT 35 + ThreeColorPolicer 5) plus the
+    // 26 already-tailed NeighborSnapshot literals the original ~124/80
+    // estimate had miscounted brought the measured total to 34 (sum of all
+    // ceilings); 25 still reds if the scan or the population disappears.
     assert!(
-        total >= 80,
+        total >= 25,
         "found only {total} exhaustive literals across the whole population \
-         (expected ~124). The structs were renamed or the detection stopped \
+         (expected ~34). The structs were renamed or the detection stopped \
          matching, so this ratchet is measuring nothing"
     );
 

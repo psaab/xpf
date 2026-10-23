@@ -414,16 +414,11 @@ fn static_nat_precedes_overlapping_dnat_pool_6473() {
     // Static 1:1 on the SAME external IP as the DNAT pool rule, pointing at
     // a DIFFERENT internal host.
     snapshot.static_nat_rules = vec![StaticNATRuleSnapshot {
-        source_addresses: Vec::new(),
-        counter_id: 0,
         name: "web-static".to_string(),
         from_zone: "wan".to_string(),
-        from_interface: String::new(),
-        from_routing_instance: String::new(),
         external_ip: "172.16.80.8".to_string(),
         internal_ip: "10.0.61.50".to_string(),
-        match_destination_port: 0,
-        mapped_port: 0,
+        ..Default::default()
     }];
     snapshot.neighbors.push(NeighborSnapshot {
         interface: "reth1.0".to_string(),

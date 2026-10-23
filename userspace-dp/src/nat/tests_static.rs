@@ -24,16 +24,11 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 fn static_nat_dnat_matches_external_ip_v4() {
     let table = StaticNatTable::from_snapshots(
         &[StaticNATRuleSnapshot {
-            source_addresses: Vec::new(),
-            counter_id: 0,
             name: "static-1".to_string(),
             from_zone: "untrust".to_string(),
-            from_interface: String::new(),
-            from_routing_instance: String::new(),
             external_ip: "203.0.113.10".to_string(),
             internal_ip: "192.168.1.10".to_string(),
-            match_destination_port: 0,
-            mapped_port: 0,
+            ..Default::default()
         }],
         &crate::nat::NatCounterStore::default(),
     );
@@ -52,16 +47,11 @@ fn static_nat_dnat_matches_external_ip_v4() {
 fn static_nat_snat_matches_internal_ip_v4() {
     let table = StaticNatTable::from_snapshots(
         &[StaticNATRuleSnapshot {
-            source_addresses: Vec::new(),
-            counter_id: 0,
             name: "static-1".to_string(),
             from_zone: "trust".to_string(),
-            from_interface: String::new(),
-            from_routing_instance: String::new(),
             external_ip: "203.0.113.10".to_string(),
             internal_ip: "192.168.1.10".to_string(),
-            match_destination_port: 0,
-            mapped_port: 0,
+            ..Default::default()
         }],
         &crate::nat::NatCounterStore::default(),
     );
@@ -80,16 +70,11 @@ fn static_nat_snat_matches_internal_ip_v4() {
 fn static_nat_dnat_matches_external_ip_v6() {
     let table = StaticNatTable::from_snapshots(
         &[StaticNATRuleSnapshot {
-            source_addresses: Vec::new(),
-            counter_id: 0,
             name: "static-v6".to_string(),
             from_zone: "untrust".to_string(),
-            from_interface: String::new(),
-            from_routing_instance: String::new(),
             external_ip: "2001:db8::1".to_string(),
             internal_ip: "fd00::1".to_string(),
-            match_destination_port: 0,
-            mapped_port: 0,
+            ..Default::default()
         }],
         &crate::nat::NatCounterStore::default(),
     );
@@ -108,16 +93,11 @@ fn static_nat_dnat_matches_external_ip_v6() {
 fn static_nat_snat_matches_internal_ip_v6() {
     let table = StaticNatTable::from_snapshots(
         &[StaticNATRuleSnapshot {
-            source_addresses: Vec::new(),
-            counter_id: 0,
             name: "static-v6".to_string(),
             from_zone: "trust".to_string(),
-            from_interface: String::new(),
-            from_routing_instance: String::new(),
             external_ip: "2001:db8::1".to_string(),
             internal_ip: "fd00::1".to_string(),
-            match_destination_port: 0,
-            mapped_port: 0,
+            ..Default::default()
         }],
         &crate::nat::NatCounterStore::default(),
     );
@@ -138,16 +118,11 @@ fn static_nat_snat_matches_internal_ip_v6() {
 
 fn block_snapshot(ext: &str, int: &str, from_zone: &str) -> StaticNATRuleSnapshot {
     StaticNATRuleSnapshot {
-        source_addresses: Vec::new(),
-        counter_id: 0,
         name: "block-1".to_string(),
         from_zone: from_zone.to_string(),
-        from_interface: String::new(),
-        from_routing_instance: String::new(),
         external_ip: ext.to_string(),
         internal_ip: int.to_string(),
-        match_destination_port: 0,
-        mapped_port: 0,
+        ..Default::default()
     }
 }
 
@@ -368,16 +343,11 @@ fn static_nat_host_v4_unchanged_with_block_support() {
     // pre-#3031 (exact 1:1, no offset math). Both directions.
     let table = StaticNatTable::from_snapshots(
         &[StaticNATRuleSnapshot {
-            source_addresses: Vec::new(),
-            counter_id: 0,
             name: "static-1".to_string(),
             from_zone: "untrust".to_string(),
-            from_interface: String::new(),
-            from_routing_instance: String::new(),
             external_ip: "203.0.113.10/32".to_string(),
             internal_ip: "192.168.1.10/32".to_string(),
-            match_destination_port: 0,
-            mapped_port: 0,
+            ..Default::default()
         }],
         &crate::nat::NatCounterStore::default(),
     );
@@ -408,16 +378,11 @@ fn static_nat_host_v4_unchanged_with_block_support() {
 fn static_nat_zone_mismatch_returns_none_for_dnat() {
     let table = StaticNatTable::from_snapshots(
         &[StaticNATRuleSnapshot {
-            source_addresses: Vec::new(),
-            counter_id: 0,
             name: "static-1".to_string(),
             from_zone: "untrust".to_string(),
-            from_interface: String::new(),
-            from_routing_instance: String::new(),
             external_ip: "203.0.113.10".to_string(),
             internal_ip: "192.168.1.10".to_string(),
-            match_destination_port: 0,
-            mapped_port: 0,
+            ..Default::default()
         }],
         &crate::nat::NatCounterStore::default(),
     );
@@ -451,18 +416,13 @@ fn static_nat_zone_mismatch_returns_none_for_dnat() {
 fn static_nat_snat_honors_egress_zone() {
     let table = StaticNatTable::from_snapshots(
         &[StaticNATRuleSnapshot {
-            source_addresses: Vec::new(),
-            counter_id: 0,
             name: "web-server".to_string(),
             // External zone of the rule: reverse SNAT applies only when the
             // packet egresses toward THIS zone.
             from_zone: "untrust".to_string(),
-            from_interface: String::new(),
-            from_routing_instance: String::new(),
             external_ip: "203.0.113.10".to_string(),
             internal_ip: "192.168.1.10".to_string(),
-            match_destination_port: 0,
-            mapped_port: 0,
+            ..Default::default()
         }],
         &crate::nat::NatCounterStore::default(),
     );
@@ -498,16 +458,10 @@ fn static_nat_snat_honors_egress_zone() {
 fn static_nat_snat_empty_zone_matches_any_egress() {
     let table = StaticNatTable::from_snapshots(
         &[StaticNATRuleSnapshot {
-            source_addresses: Vec::new(),
-            counter_id: 0,
             name: "wildcard".to_string(),
-            from_zone: String::new(),
-            from_interface: String::new(),
-            from_routing_instance: String::new(),
             external_ip: "203.0.113.10".to_string(),
             internal_ip: "192.168.1.10".to_string(),
-            match_destination_port: 0,
-            mapped_port: 0,
+            ..Default::default()
         }],
         &crate::nat::NatCounterStore::default(),
     );
@@ -524,16 +478,10 @@ fn static_nat_snat_empty_zone_matches_any_egress() {
 fn static_nat_empty_zone_matches_any() {
     let table = StaticNatTable::from_snapshots(
         &[StaticNATRuleSnapshot {
-            source_addresses: Vec::new(),
-            counter_id: 0,
             name: "static-any".to_string(),
-            from_zone: String::new(),
-            from_interface: String::new(),
-            from_routing_instance: String::new(),
             external_ip: "203.0.113.10".to_string(),
             internal_ip: "192.168.1.10".to_string(),
-            match_destination_port: 0,
-            mapped_port: 0,
+            ..Default::default()
         }],
         &crate::nat::NatCounterStore::default(),
     );
@@ -558,16 +506,11 @@ fn static_nat_empty_zone_matches_any() {
 fn static_nat_bidirectional_reverse() {
     let table = StaticNatTable::from_snapshots(
         &[StaticNATRuleSnapshot {
-            source_addresses: Vec::new(),
-            counter_id: 0,
             name: "static-1".to_string(),
             from_zone: "untrust".to_string(),
-            from_interface: String::new(),
-            from_routing_instance: String::new(),
             external_ip: "203.0.113.10".to_string(),
             internal_ip: "192.168.1.10".to_string(),
-            match_destination_port: 0,
-            mapped_port: 0,
+            ..Default::default()
         }],
         &crate::nat::NatCounterStore::default(),
     );
@@ -604,16 +547,11 @@ fn static_nat_bidirectional_reverse() {
 fn static_nat_no_match_returns_none() {
     let table = StaticNatTable::from_snapshots(
         &[StaticNATRuleSnapshot {
-            source_addresses: Vec::new(),
-            counter_id: 0,
             name: "static-1".to_string(),
             from_zone: "untrust".to_string(),
-            from_interface: String::new(),
-            from_routing_instance: String::new(),
             external_ip: "203.0.113.10".to_string(),
             internal_ip: "192.168.1.10".to_string(),
-            match_destination_port: 0,
-            mapped_port: 0,
+            ..Default::default()
         }],
         &crate::nat::NatCounterStore::default(),
     );
@@ -634,28 +572,16 @@ fn static_nat_invalid_ip_skipped() {
     let table = StaticNatTable::from_snapshots(
         &[
             StaticNATRuleSnapshot {
-                source_addresses: Vec::new(),
-                counter_id: 0,
                 name: "bad".to_string(),
-                from_zone: String::new(),
-                from_interface: String::new(),
-                from_routing_instance: String::new(),
                 external_ip: "not-an-ip".to_string(),
                 internal_ip: "192.168.1.10".to_string(),
-                match_destination_port: 0,
-                mapped_port: 0,
+                ..Default::default()
             },
             StaticNATRuleSnapshot {
-                source_addresses: Vec::new(),
-                counter_id: 0,
                 name: "good".to_string(),
-                from_zone: String::new(),
-                from_interface: String::new(),
-                from_routing_instance: String::new(),
                 external_ip: "203.0.113.10".to_string(),
                 internal_ip: "192.168.1.10".to_string(),
-                match_destination_port: 0,
-                mapped_port: 0,
+                ..Default::default()
             },
         ],
         &crate::nat::NatCounterStore::default(),
@@ -673,28 +599,16 @@ fn static_nat_external_ips_iterator() {
     let table = StaticNatTable::from_snapshots(
         &[
             StaticNATRuleSnapshot {
-                source_addresses: Vec::new(),
-                counter_id: 0,
                 name: "s1".to_string(),
-                from_zone: String::new(),
-                from_interface: String::new(),
-                from_routing_instance: String::new(),
                 external_ip: "203.0.113.10".to_string(),
                 internal_ip: "192.168.1.10".to_string(),
-                match_destination_port: 0,
-                mapped_port: 0,
+                ..Default::default()
             },
             StaticNATRuleSnapshot {
-                source_addresses: Vec::new(),
-                counter_id: 0,
                 name: "s2".to_string(),
-                from_zone: String::new(),
-                from_interface: String::new(),
-                from_routing_instance: String::new(),
                 external_ip: "203.0.113.20".to_string(),
                 internal_ip: "192.168.1.20".to_string(),
-                match_destination_port: 0,
-                mapped_port: 0,
+                ..Default::default()
             },
         ],
         &crate::nat::NatCounterStore::default(),
@@ -717,16 +631,11 @@ fn static_nat_canonical_cidr_mask_v4_installs_entry() {
     // the unfixed code (table is empty, every assertion is None).
     let table = StaticNatTable::from_snapshots(
         &[StaticNATRuleSnapshot {
-            source_addresses: Vec::new(),
-            counter_id: 0,
             name: "static-cidr".to_string(),
             from_zone: "untrust".to_string(),
-            from_interface: String::new(),
-            from_routing_instance: String::new(),
             external_ip: "203.0.113.5/32".to_string(),
             internal_ip: "10.0.0.5/32".to_string(),
-            match_destination_port: 0,
-            mapped_port: 0,
+            ..Default::default()
         }],
         &crate::nat::NatCounterStore::default(),
     );
@@ -848,16 +757,11 @@ fn static_nat_canonical_cidr_mask_v6_installs_entry() {
     // IPv6 canonical host form carries /128; same root cause as the v4 case.
     let table = StaticNatTable::from_snapshots(
         &[StaticNATRuleSnapshot {
-            source_addresses: Vec::new(),
-            counter_id: 0,
             name: "static-cidr-v6".to_string(),
             from_zone: "untrust".to_string(),
-            from_interface: String::new(),
-            from_routing_instance: String::new(),
             external_ip: "2001:db8::1/128".to_string(),
             internal_ip: "fd00::1/128".to_string(),
-            match_destination_port: 0,
-            mapped_port: 0,
+            ..Default::default()
         }],
         &crate::nat::NatCounterStore::default(),
     );
@@ -888,28 +792,16 @@ fn static_nat_cidr_and_bare_coexist() {
     let table = StaticNatTable::from_snapshots(
         &[
             StaticNATRuleSnapshot {
-                source_addresses: Vec::new(),
-                counter_id: 0,
                 name: "masked".to_string(),
-                from_zone: String::new(),
-                from_interface: String::new(),
-                from_routing_instance: String::new(),
                 external_ip: "203.0.113.5/32".to_string(),
                 internal_ip: "10.0.0.5".to_string(),
-                match_destination_port: 0,
-                mapped_port: 0,
+                ..Default::default()
             },
             StaticNATRuleSnapshot {
-                source_addresses: Vec::new(),
-                counter_id: 0,
                 name: "bare".to_string(),
-                from_zone: String::new(),
-                from_interface: String::new(),
-                from_routing_instance: String::new(),
                 external_ip: "203.0.113.6".to_string(),
                 internal_ip: "10.0.0.6/32".to_string(),
-                match_destination_port: 0,
-                mapped_port: 0,
+                ..Default::default()
             },
         ],
         &crate::nat::NatCounterStore::default(),
@@ -954,16 +846,10 @@ fn static_nat_non_host_mask_rejected() {
     ] {
         let table = StaticNatTable::from_snapshots(
             &[StaticNATRuleSnapshot {
-                source_addresses: Vec::new(),
-                counter_id: 0,
                 name: "bad-mask".to_string(),
-                from_zone: String::new(),
-                from_interface: String::new(),
-                from_routing_instance: String::new(),
                 external_ip: bad.to_string(),
                 internal_ip: "10.0.0.5".to_string(),
-                match_destination_port: 0,
-                mapped_port: 0,
+                ..Default::default()
             }],
             &crate::nat::NatCounterStore::default(),
         );
@@ -979,16 +865,13 @@ fn static_nat_non_host_mask_rejected() {
 
 fn mapped_port_snapshot() -> StaticNATRuleSnapshot {
     StaticNATRuleSnapshot {
-        source_addresses: Vec::new(),
-        counter_id: 0,
         name: "port-map".to_string(),
         from_zone: "untrust".to_string(),
-        from_interface: String::new(),
-        from_routing_instance: String::new(),
         external_ip: "203.0.113.1/32".to_string(),
         internal_ip: "10.0.0.5/32".to_string(),
         match_destination_port: 8080,
         mapped_port: 80,
+        ..Default::default()
     }
 }
 
@@ -1111,16 +994,11 @@ fn static_nat_snat_icmp_identifier_falls_back_to_whole_address() {
         &[
             mapped_port_snapshot(), // 203.0.113.1:8080 -> 10.0.0.5:80
             StaticNATRuleSnapshot {
-                source_addresses: Vec::new(),
-                counter_id: 0,
                 name: "whole".to_string(),
                 from_zone: "untrust".to_string(),
-                from_interface: String::new(),
-                from_routing_instance: String::new(),
                 external_ip: "203.0.113.10/32".to_string(),
                 internal_ip: "10.0.0.5/32".to_string(),
-                match_destination_port: 0,
-                mapped_port: 0,
+                ..Default::default()
             },
         ],
         &crate::nat::NatCounterStore::default(),
@@ -1157,16 +1035,11 @@ fn static_nat_port_mapped_and_whole_address_coexist() {
         &[
             mapped_port_snapshot(), // 203.0.113.1:8080 -> 10.0.0.5:80
             StaticNATRuleSnapshot {
-                source_addresses: Vec::new(),
-                counter_id: 0,
                 name: "whole".to_string(),
                 from_zone: "untrust".to_string(),
-                from_interface: String::new(),
-                from_routing_instance: String::new(),
                 external_ip: "203.0.113.1/32".to_string(),
                 internal_ip: "10.0.0.9/32".to_string(),
-                match_destination_port: 0,
-                mapped_port: 0,
+                ..Default::default()
             },
         ],
         &crate::nat::NatCounterStore::default(),
@@ -1191,16 +1064,12 @@ fn static_nat_port_mapped_and_whole_address_coexist() {
 fn static_nat_mapped_port_without_match_port_demotes_to_whole_address() {
     let table = StaticNatTable::from_snapshots(
         &[StaticNATRuleSnapshot {
-            source_addresses: Vec::new(),
-            counter_id: 0,
             name: "orphan".to_string(),
             from_zone: "untrust".to_string(),
-            from_interface: String::new(),
-            from_routing_instance: String::new(),
             external_ip: "203.0.113.1/32".to_string(),
             internal_ip: "10.0.0.5/32".to_string(),
-            match_destination_port: 0,
             mapped_port: 80,
+            ..Default::default()
         }],
         &crate::nat::NatCounterStore::default(),
     );
@@ -1230,16 +1099,12 @@ fn static_nat_mapped_port_without_match_port_demotes_to_whole_address() {
 fn static_nat_match_port_without_mapped_port_scopes_reverse_snat() {
     let table = StaticNatTable::from_snapshots(
         &[StaticNATRuleSnapshot {
-            source_addresses: Vec::new(),
-            counter_id: 0,
             name: "port-scoped-1to1".to_string(),
             from_zone: "untrust".to_string(),
-            from_interface: String::new(),
-            from_routing_instance: String::new(),
             external_ip: "203.0.113.1/32".to_string(),
             internal_ip: "10.0.0.5/32".to_string(),
             match_destination_port: 8080,
-            mapped_port: 0,
+            ..Default::default()
         }],
         &crate::nat::NatCounterStore::default(),
     );
@@ -1317,29 +1182,21 @@ fn static_nat_dnat_port_zone_mismatch_falls_back_to_whole_address() {
             // Port-specific entry constrained to a DIFFERENT zone than the
             // packet will arrive on. (203.0.113.1:8080 from "dmz" -> 10.0.0.5:80)
             StaticNATRuleSnapshot {
-                source_addresses: Vec::new(),
-                counter_id: 0,
                 name: "port-dmz".to_string(),
                 from_zone: "dmz".to_string(),
-                from_interface: String::new(),
-                from_routing_instance: String::new(),
                 external_ip: "203.0.113.1/32".to_string(),
                 internal_ip: "10.0.0.5/32".to_string(),
                 match_destination_port: 8080,
                 mapped_port: 80,
+                ..Default::default()
             },
             // Whole-address entry valid for the packet's actual ingress zone.
             StaticNATRuleSnapshot {
-                source_addresses: Vec::new(),
-                counter_id: 0,
                 name: "whole-untrust".to_string(),
                 from_zone: "untrust".to_string(),
-                from_interface: String::new(),
-                from_routing_instance: String::new(),
                 external_ip: "203.0.113.1/32".to_string(),
                 internal_ip: "10.0.0.9/32".to_string(),
-                match_destination_port: 0,
-                mapped_port: 0,
+                ..Default::default()
             },
         ],
         &crate::nat::NatCounterStore::default(),
@@ -1468,16 +1325,10 @@ fn static_nat_unparseable_source_constraint_surfaces_and_still_fails_closed_5190
 
 fn block_rule_7219(name: &str, external: &str, internal: &str) -> StaticNATRuleSnapshot {
     StaticNATRuleSnapshot {
-        source_addresses: Vec::new(),
-        counter_id: 0,
         name: name.to_string(),
-        from_zone: String::new(),
-        from_interface: String::new(),
-        from_routing_instance: String::new(),
         external_ip: external.to_string(),
         internal_ip: internal.to_string(),
-        match_destination_port: 0,
-        mapped_port: 0,
+        ..Default::default()
     }
 }
 
