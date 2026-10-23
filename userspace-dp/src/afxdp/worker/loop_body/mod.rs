@@ -931,6 +931,16 @@ pub(crate) fn worker_loop(
             // #10510: derive actual old-minus-new zone disappearance before
             // assigning the new snapshot. Empty producer maps are a safe no-op.
             let removed_zone_ids = removed_zone_ids_for_rotation(&forwarding, &new_forwarding);
+            // #16026 fold: single→multi-zone transition. Existing PASS
+            // rows in the pinned map were published under the old
+            // single-zone state and stay zoneless until their session
+            // ends; capture the transition BEFORE assignment (worker-
+            // local old vs new, like the removed-zone compare above —
+            // a worker that skipped generations still sees it). The
+            // demotion sweep itself runs after `forwarding` is rotated
+            // below, beside the lo0 republish.
+            let became_multi_zone =
+                !forwarding.has_multiple_zones && new_forwarding.has_multiple_zones;
             let extensive_rematch = new_forwarding.policy_rematch_extensive;
 
             // Use NEW values for dependent state updates (forwarding-site
@@ -1159,6 +1169,30 @@ pub(crate) fn worker_loop(
                     worker_id,
                     republished,
                 );
+            }
+            // #16026 fold: demote already-published PASS rows on the
+            // single→multi-zone transition captured above. Runs with
+            // the NEW forwarding state (has_multiple_zones set), so the
+            // republish writes REDIRECT and `publish_session_rows`
+            // migrates each entry's claims without a no-row window.
+            // `ha_state` is sampled here (not the later per-tick load)
+            // so `allow_replace_local` matches this rotation.
+            if became_multi_zone {
+                let demoted = demote_kernel_local_sessions_for_multiple_zones(
+                    &sessions,
+                    session_map.handle(),
+                    &forwarding,
+                    ha_state.load().as_ref(),
+                    loop_now_ns / 1_000_000_000,
+                    became_multi_zone,
+                );
+                if demoted > 0 {
+                    debug_log!(
+                        "MULTI_ZONE_STEERING_DEMOTE: worker={} sessions={}",
+                        worker_id,
+                        demoted,
+                    );
+                }
             }
 
             if cos_changed {
