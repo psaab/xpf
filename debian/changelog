@@ -77,6 +77,11 @@ xpf (0.0.0) unstable; urgency=medium
     clear-by-interface can no longer delete a sibling unit's sessions
     and flow-export sampling no longer judges both units by one
     sibling's name (daemon buildIfNames projects the same table).
+  * Fix the #15947 reverse-only RST teardown NAT reconstruction:
+    un-reverse with the canonical reverse tuple so the pool port
+    is actually freed.
+
+xpf (0.0.0) unstable; urgency=medium
   * Fix the #15947 RST teardown for a reverse-only survivor: run
     under the surviving entry's own key, release the forward NAT
     reservation and emit the forward Close; drop the duplicate

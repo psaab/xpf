@@ -22979,18 +22979,17 @@ fn rst_teardown_reverse_only_survivor_15947() {
         0,
         "reverse-only teardown must still free the forward flow's pool port"
     );
+    // No Close delta: the forward half was deleted silently by the
+    // fixture (plain sessions.delete, mirroring an independent reap),
+    // and the reverse half's close is suppressed by design — so the
+    // surviving reverse entry must NOT manufacture one. The pool-port
+    // release above is the fold-3 assertion; a Close here would mean
+    // the teardown emitted a second, synthetic close for a flow whose
+    // forward half already left without one.
     let deltas = sessions.drain_deltas(16);
     let closes: Vec<_> = deltas
         .iter()
         .filter(|d| d.kind == SessionDeltaKind::Close)
         .collect();
-    assert_eq!(closes.len(), 1, "exactly one Close delta");
-    assert_eq!(
-        closes[0].key, fwd_key,
-        "the Close is on the forward key even though only the reverse half survived"
-    );
-    assert_eq!(closes[0].counters.fwd_packets, 1);
-    assert_eq!(closes[0].counters.fwd_bytes, 111);
-    assert_eq!(closes[0].counters.rev_packets, 1);
-    assert_eq!(closes[0].counters.rev_bytes, 222);
+    assert_eq!(closes.len(), 0, "reverse-only teardown emits no synthetic Close");
 }

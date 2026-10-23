@@ -77,17 +77,6 @@ now_ns: u64,) {
         });
     if let Some((canonical_key, (decision, metadata, origin))) = canonical {
         let reverse_only = metadata.is_reverse;
-        // Snapshot the surviving reverse half BEFORE the pair teardown
-        // deletes it: if the forward half is already gone, its aggregated
-        // counters (account_packet folds reverse traffic onto the forward
-        // entry while both live, and onto the reverse entry itself once
-        // the forward half is reaped) would otherwise be lost with no
-        // Close at all — the reverse half's own close is suppressed.
-        let reverse_snapshot = if reverse_only {
-            sessions.close_snapshot_for(&canonical_key)
-        } else {
-            None
-        };
         delete_terminal_filtered_session(
             sessions,
             current.bpf_maps.session_map.handle(),
@@ -119,16 +108,27 @@ now_ns: u64,) {
             // reserve: SourceNatFlowKey built from the FORWARD session
             // key, translated tuple from the forward decision (the
             // synced.rs reserve / release.rs twin pair). Reconstruct
-            // both from the surviving reverse entry: the forward key is
+            // both from the surviving reverse entry. The forward key is
             // reverse_session_key of the reverse entry under its own
-            // decision, and the forward decision is NatDecision::reverse
-            // of that decision over the forward tuple.
+            // decision. The forward decision is the reverse decision
+            // un-reversed with the CANONICAL REVERSE tuple in natural
+            // order: NatDecision::reverse plugs its original_dst into
+            // rewrite_src, and the reverse entry's dst IS the pool
+            // tuple the reserve recorded (passing the derived forward
+            // tuple, or the swapped tuple, plugs the server address
+            // instead and the release misses the record).
             let fwd_key = reverse_session_key(&canonical_key, decision.nat);
             let fwd_nat = decision.nat.reverse(
-                fwd_key.src_ip,
-                fwd_key.dst_ip,
-                fwd_key.src_port,
-                fwd_key.dst_port,
+                canonical_key.src_ip,
+                canonical_key.dst_ip,
+                canonical_key.src_port,
+                canonical_key.dst_port,
+            );
+            debug_assert_eq!(
+                (fwd_nat.rewrite_src, fwd_nat.rewrite_src_port),
+                (Some(canonical_key.dst_ip), Some(canonical_key.dst_port)),
+                "reconstructed forward NAT must equal the forward \
+                 decision (pool tuple on the reverse entry's dst)"
             );
             // The reservation may have been taken untracked (the
             // coordinator import path holds no worker bit — see
@@ -152,24 +152,11 @@ now_ns: u64,) {
                 now_ns,
                 worker_id,
             );
-            let mut fwd_metadata = metadata.clone();
-            fwd_metadata.is_reverse = false;
-            let snapshot = reverse_snapshot.unwrap_or_default();
-            let fwd_session_id = snapshot.session_id;
-            sessions.emit_close_delta_with_snapshot(
-                fwd_key,
-                SessionDecision {
-                    resolution: decision.resolution,
-                    nat: fwd_nat,
-                    install_table_domain: decision.install_table_domain,
-                    install_table_check: decision.install_table_check,
-                },
-                fwd_metadata,
-                origin,
-                false,
-                fwd_session_id,
-                snapshot,
-            );
+            // No synthetic Close: the forward half left silently (its
+            // own reap owns its close accounting), and the reverse
+            // half's close is suppressed by design. Manufacturing a
+            // forward Close here would double-report a flow the peer
+            // never saw close through this teardown.
         }
     } else {
         // No live entry on either half (already reaped this tick):
