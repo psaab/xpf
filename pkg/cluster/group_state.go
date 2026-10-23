@@ -193,11 +193,15 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 	// unchanged set restores the persisted first-keyed time (and keeps
 	// the earliest of it and any in-memory anchor, so a backwards clock
 	// step cannot extend the grace); a changed set is a new first keying
-	// and re-anchors. Clearing the set clears the anchor.
+	// and re-anchors. Clearing the set clears the anchor AND deletes the
+	// persisted record (#16027), so reinstalling the same key is a fresh
+	// first keying (a stale record would otherwise be restored by digest
+	// match and deny the reinstall any grace).
 	keyConfigured := len(m.controlAuthKey) > 0 || len(m.controlAuthKeyAlt) > 0
 	if !keyConfigured {
 		m.controlAuthKeyConfiguredAt = time.Time{}
 		m.controlAuthKeySetDigest = ""
+		deleteFabricAuthGraceAnchor(fabricAuthGraceStatePath)
 	} else {
 		digest := controlAuthKeySetDigest(m.controlAuthKey, m.controlAuthKeyAlt)
 		if digest != m.controlAuthKeySetDigest || m.controlAuthKeyConfiguredAt.IsZero() {
@@ -209,7 +213,15 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 			m.controlAuthKeyConfiguredAt = anchor
 			m.controlAuthKeySetDigest = digest
 			if anchor.Equal(now) {
-				persistFabricAuthGraceAnchor(fabricAuthGraceStatePath, digest, anchor)
+				// A future-dated persisted stamp clamped to now also lands
+				// here (#16027); persisting would overwrite the stamp and
+				// lose the original first-keyed time for when the clock
+				// recovers. Only a record that is absent or already at
+				// `now` may be (re)written: when the on-disk stamp is in
+				// the future, leave it alone.
+				if onDisk := loadFabricAuthGraceAnchorRaw(fabricAuthGraceStatePath, digest); onDisk.IsZero() || !onDisk.After(now) {
+					persistFabricAuthGraceAnchor(fabricAuthGraceStatePath, digest, anchor)
+				}
 			}
 		}
 	}

@@ -39,8 +39,14 @@ package cluster
 // treats the apply as a fresh first keying (today's behaviour); the
 // residual is a node whose /var/lib/xpf was wiped, which is indistinguish-
 // able from a genuinely new keying without a stronger identity for the
-// file. A backwards clock step is handled by keeping the earliest valid
-// first-keyed time for the digest (see UpdateConfig).
+// file. A future-dated stamp (wall clock stepped backwards across a
+// restart) is CLAMPED to now rather than rejected (#16027): rejecting
+// it would treat the apply as a fresh first keying AND overwrite the
+// stamp, re-opening a full grace and losing the original first-keyed
+// time for when the clock recovers. Clamping shortens the grace (it
+// expires at now+5m instead of stamp+5m), never extends it, and the
+// stamp stays on disk. Clearing the key set DELETES the record, so
+// reinstalling the same key is a genuine new first keying.
 import (
 	"crypto/hmac"
 	"crypto/sha256"
@@ -104,7 +110,13 @@ func controlAuthKeySetDigest(primary, additional []byte) string {
 	return b.String()
 }
 
-func loadFabricAuthGraceAnchor(path, digest string) time.Time {
+// loadFabricAuthGraceAnchorRaw returns the persisted first-keyed time
+// for digest exactly as recorded, WITHOUT the future-stamp clamp that
+// loadFabricAuthGraceAnchor applies (#16027). UpdateConfig uses it to
+// decide whether persisting would overwrite a future-dated stamp that
+// must be preserved for when the clock recovers. A missing/corrupt/
+// mismatched record yields the zero Time.
+func loadFabricAuthGraceAnchorRaw(path, digest string) time.Time {
 	if digest == "" {
 		return time.Time{}
 	}
@@ -120,9 +132,23 @@ func loadFabricAuthGraceAnchor(path, digest string) time.Time {
 	if err != nil || nanos <= 0 {
 		return time.Time{}
 	}
-	at := time.Unix(0, nanos).UTC()
-	if at.After(fabricAuthGraceNow()) {
+	return time.Unix(0, nanos).UTC()
+}
+
+func loadFabricAuthGraceAnchor(path, digest string) time.Time {
+	at := loadFabricAuthGraceAnchorRaw(path, digest)
+	if at.IsZero() {
 		return time.Time{}
+	}
+	if now := fabricAuthGraceNow(); at.After(now) {
+		// Future-dated stamp (#16027): the wall clock stepped backwards
+		// across a restart. Clamp to now (grace expires at now+grace
+		// instead of stamp+grace — shortened, never extended) rather
+		// than rejecting the record, which would re-open a full grace
+		// AND overwrite the stamp with now, destroying the original
+		// first-keyed time for when the clock recovers. The stamp on
+		// disk is left untouched.
+		return now
 	}
 	return at
 }
@@ -153,6 +179,22 @@ func persistFabricAuthGraceAnchor(path, digest string, at time.Time) {
 		}
 		slog.Warn("cluster: fabric rollout-grace anchor persist failed; "+
 			"a restart under an unchanged key will re-open the tokenless read-only grace (#15262)",
+			"path", path, "err", err)
+	}
+}
+
+// deleteFabricAuthGraceAnchor removes the persisted anchor record
+// (#16027). Called when the accepted-key set is cleared: reinstalling
+// the same key afterwards is a genuine new first keying and must get a
+// fresh grace, not resume the cleared keying's (possibly long-expired)
+// anchor — which would deny it any grace at all. Best-effort like the
+// persist: a failed removal only logs, and a leftover record is still
+// keyed by digest, so the worst case is the pre-fix resume behaviour
+// for that one key. Removing a missing file is success.
+func deleteFabricAuthGraceAnchor(path string) {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		slog.Warn("cluster: fabric rollout-grace anchor delete failed; "+
+			"reinstalling the same key may resume the cleared anchor instead of a fresh grace (#16027)",
 			"path", path, "err", err)
 	}
 }
