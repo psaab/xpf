@@ -82,7 +82,7 @@ func TestValidateFirewallFilterFamilyAnyMatchesAST_EmptyKeysNoPanic(t *testing.T
 		}
 	}()
 	nodes := malformedFirewallFamilyTree()
-	if _, err := validateFirewallFilterFamilyAnyMatchesAST(nodes, false); err != nil {
+	if _, _, err := validateFirewallFilterFamilyAnyMatchesAST(nodes, false); err != nil {
 		t.Logf("validator returned an error for the malformed node (acceptable): %v", err)
 	}
 }

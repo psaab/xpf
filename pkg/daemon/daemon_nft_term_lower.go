@@ -302,6 +302,15 @@ func nftRulesFromTerm(term *config.FirewallFilterTerm, family string, prefixList
 			"term", term.Name)
 		return []string{nftRefuseUnrepresentableFrom}
 	}
+	// #16001: a sole-`except` prefix-list scope covering no address of this
+	// chain's family would render no predicate (empty except = match ALL)
+	// and install the term's action for every host-bound packet of the
+	// family. Refuse the whole load, retaining the prior generation.
+	if term.UncoveredFamilyExcept16001 {
+		slog.Warn("lo0 kernel nftables mirror: refusing load over uncovered-family except prefix-list",
+			"term", term.Name, "family", family)
+		return []string{nftRefuseUnrepresentableFrom}
+	}
 
 	addrParts, emitNoRule := nftTermAddrPredicates(term, family, prefixLists)
 	if emitNoRule {

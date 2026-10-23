@@ -1,5 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Firewall: poison the uncovered-family `except` arm on tolerant load
+    (#16001, EX-4). A sole-`except` prefix-list covering no address of
+    its pool's family (v4-only `except` under `family any` / `inet6`)
+    matched every packet of the uncovered family; the term is now
+    marked per-pool and the userspace snapshot plus both lo0 mirrors
+    refuse the candidate whole, retaining prior-good state. Positive
+    single-family lists still warn-but-apply.
+
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Harness: a refused or failed cluster deploy no longer leaves later
     gates with a bare exe_check=UNAVAILABLE VOID (#16290). cmd_deploy
     arms an EXIT-trap guard after manifest invalidation that records a

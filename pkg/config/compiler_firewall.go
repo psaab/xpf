@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 )
@@ -810,8 +811,18 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 				if _, colliding := fw.CollidingNames[filter.Name]; colliding {
 					continue
 				}
-				for _, dest := range dests {
-					dest[filter.Name] = filter
+				for i, dest := range dests {
+					if i == 0 {
+						dest[filter.Name] = filter
+					} else {
+						// #16001: a dual-compiled (`family any`) filter is
+						// ONE object in both pools today, so a per-pool
+						// marker would leak to the covered arm. Give each
+						// later pool its own copy (terms included) so
+						// per-pool state can diverge; field values are
+						// identical at this point.
+						dest[filter.Name] = cloneFirewallFilter16001(filter)
+					}
 				}
 			}
 		}
@@ -1154,6 +1165,7 @@ type effectiveTermProjection15997 struct {
 	UnknownFrom                   []string
 	ValuelessFrom                 []string
 	CrossFamilyMatchSpellings     []string
+	UncoveredFamilyExcept16001    bool
 }
 
 func projectTerm15997(t *FirewallFilterTerm) effectiveTermProjection15997 {
@@ -1179,6 +1191,7 @@ func projectTerm15997(t *FirewallFilterTerm) effectiveTermProjection15997 {
 		LossPriority: t.LossPriority, DSCPRewrite: t.DSCPRewrite, Policer: t.Policer,
 		FlexMatch: flex, HasFlexMatch: hasFlex, UnknownFlexMatch: t.UnknownFlexMatch, FlexMatchRangeNames: t.FlexMatchRangeNames,
 		UnknownFrom: t.UnknownFrom, ValuelessFrom: t.ValuelessFrom, CrossFamilyMatchSpellings: t.CrossFamilyMatchSpellings,
+		UncoveredFamilyExcept16001: t.UncoveredFamilyExcept16001,
 	}
 }
 
@@ -1486,6 +1499,26 @@ func firewallPrefixListFamilies(nodes []*Node) map[string]plFamily {
 // shape #4287 enables. An empty or undefined reference is left to the empty-set
 // semantics and validateFirewallPrefixListReferencesStrict respectively.
 //
+// #16001 (EX-4): the lenient arm of THIS gate used to warn and then install
+// the dual-compiled term verbatim, so a v4-only `except` list under `family
+// any` (or under `family inet6`, and the v6-only mirror) evaluated `except`
+// over an empty per-family set in the uncovered pool and matched EVERY
+// packet of that family — a fail-open over-accept on `then accept`. The
+// gate now also returns the uncovered (pool, filter, term) sites it found;
+// compileExpanded marks those compiled terms
+// UncoveredFamilyExcept16001 and every dataplane builder refuses the
+// candidate whole (prior-good retained). Only the sole-`except`
+// uncovered case is poisoned: a single-family POSITIVE list merely
+// under-blocks (its arm matches nothing and falls through, the pre-#4287
+// posture the committing binary already had), so warn-but-apply stays
+// correct there. See markUncoveredFamilyExcept16001.
+//
+// Fold (PR #16342): a direction carrying a SPECIFIC positive literal
+// alongside the except list is exempt — the resolver is positive-wins
+// there (#3359), the literal is preserved as the scope, and no
+// empty-except match-all forms. A match-any literal (0.0.0.0/0, ::/0,
+// any) composes INTO the sole-except form (#4338) and stays poisoned.
+//
 // The traversal mirrors compileFirewall's family/filter/term/from walk:
 // `from` statements are found with firewallTermFromNodes and each is
 // lowered with packedBody under the from-schema (#14682) — the SAME
@@ -1496,8 +1529,19 @@ func firewallPrefixListFamilies(nodes []*Node) map[string]plFamily {
 // `from source-prefix-list X;`), so #4296/#4426 never fired for them
 // under `family any` while dual-compilation installed them into both
 // pools. Aggregates across every top-level `firewall {}` block.
-func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]string, error) {
+// uncoveredFamilyExceptSite16001 identifies one compiled term (by pool,
+// filter name, term name) whose sole-`except` prefix-list scope covers no
+// address of that pool's family (#16001). Pool is "inet" or "inet6" — the
+// FiltersInet / FiltersInet6 key space compileFirewall installs into.
+type uncoveredFamilyExceptSite16001 struct {
+	pool   string
+	filter string
+	term   string
+}
+
+func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]string, []uncoveredFamilyExceptSite16001, error) {
 	var warnings []string
+	var uncovered []uncoveredFamilyExceptSite16001
 	plFamilies := firewallPrefixListFamilies(nodes)
 	// #9883: skip quarantined members — a filter that compiles to NOTHING
 	// cannot under-block any family, and flagging its matches would
@@ -1547,6 +1591,15 @@ func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]s
 						var posFam, excFam [2]plFamily
 						var hasPos, hasExc [2]bool
 						var dirNames [2][]string
+						// #16001 fold: a SPECIFIC positive literal in a
+						// direction makes the resolver positive-wins
+						// (ResolveFilterPrefixListAddrs, #3359): the
+						// `except` list is dropped and the literal is the
+						// scope, so there is no empty-except match-all to
+						// poison. A match-any literal (0.0.0.0/0, ::/0,
+						// any) composes INTO the sole-except form (#4338)
+						// and does NOT exempt. Index 0=source, 1=dest.
+						var hasSpecificLiteral [2]bool
 						fromNodes, _ := firewallTermFromNodes(termInst.node, termSchema)
 						for _, fromNode := range fromNodes {
 							for _, child := range packedBody(fromNode, fromSchema).Children {
@@ -1590,6 +1643,25 @@ func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]s
 									}
 									continue
 								}
+								// #16001 fold: record a SPECIFIC positive
+								// literal in this direction (see
+								// hasSpecificLiteral). Read with the same
+								// reader compileFilterFrom uses
+								// (firewallAddressValues strips a literal
+								// `except` modifier, whose shape is owned
+								// by #11334, so it never counts here).
+								if mname == "source-address" || mname == "destination-address" {
+									ldir := 0
+									if mname == "destination-address" {
+										ldir = 1
+									}
+									vals, _ := firewallAddressValues(child)
+									for _, v := range vals {
+										if filterLiteralSpecific16001(v) {
+											hasSpecificLiteral[ldir] = true
+										}
+									}
+								}
 								if af != "any" || !familyAnySpecificMatches[mname] {
 									continue
 								}
@@ -1601,7 +1673,7 @@ func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]s
 									"firewall filter %q term %q: `from %s` is a family-specific match not allowed under `family any` — a family any filter compiles into BOTH the inet (v4) and inet6 (v6) pools (#4287), and a single-family match (a v4/v6 address literal or a per-family icmp type/code) can never match the other family, silently under-blocking it; use `family inet` or `family inet6` (#4296)",
 									filterInst.name, termInst.name, detail)
 								if !lenient {
-									return nil, fmt.Errorf("%s", msg)
+									return nil, nil, fmt.Errorf("%s", msg)
 								}
 								warnings = append(warnings, msg)
 							}
@@ -1658,9 +1730,17 @@ func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]s
 										af, filterInst.name, termInst.name, keyword, names, listFam, af, af, af)
 								}
 								if !lenient {
-									return nil, fmt.Errorf("%s", msg)
+									return nil, nil, fmt.Errorf("%s", msg)
 								}
 								warnings = append(warnings, msg)
+								if except && !hasSpecificLiteral[dir] {
+									// #16001: this pool's matcher evaluates
+									// `except` over an empty family set. A
+									// specific literal in the direction is
+									// positive-wins at the resolver (#3359),
+									// so it is exempt — no match-all forms.
+									uncovered = append(uncovered, uncoveredFamilyExceptSite16001{pool: af, filter: filterInst.name, term: termInst.name})
+								}
 								continue
 							}
 							if except {
@@ -1691,16 +1771,46 @@ func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]s
 									filterInst.name, termInst.name, keyword, names, haveFam, missFam)
 							}
 							if !lenient {
-								return nil, fmt.Errorf("%s", msg)
+								return nil, nil, fmt.Errorf("%s", msg)
 							}
 							warnings = append(warnings, msg)
+							if except && !hasSpecificLiteral[dir] {
+								// #16001: the uncovered arm of the
+								// dual-compile (specific-literal directions
+								// are positive-wins and exempt, see above).
+								pool := "inet6"
+								if fam.hasV6 {
+									pool = "inet"
+								}
+								uncovered = append(uncovered, uncoveredFamilyExceptSite16001{pool: pool, filter: filterInst.name, term: termInst.name})
+							}
 						}
 					}
 				}
 			}
 		}
 	}
-	return warnings, nil
+	return warnings, uncovered, nil
+}
+
+// filterLiteralSpecific16001 reports whether a literal `from
+// source-address` / `destination-address` value is a SPECIFIC (constraining)
+// positive match, mirroring hasSpecificAddr in
+// validateFilterAddressExceptStrict (#3359/#4338) and addrsAllMatchAny in
+// the userspace resolver: the empty string and `any` are no-constraint
+// placeholders, a /0 CIDR of either family is the match-any universe, and
+// anything else — a bare host or a malformed token the address-literal
+// gate owns — constrains the direction.
+func filterLiteralSpecific16001(v string) bool {
+	if v == "" || v == "any" {
+		return false
+	}
+	_, ipnet, err := net.ParseCIDR(v)
+	if err != nil {
+		return true
+	}
+	ones, _ := ipnet.Mask.Size()
+	return ones != 0
 }
 
 // firewallMatchValues extracts every value carried by a `from` match-criterion
@@ -2564,6 +2674,93 @@ func recordFilterRoutingInstanceTarget(term *FirewallFilterTerm, target string) 
 	if term.routingInstanceTargetConflict == "" && target != term.routingInstanceTargetFirst {
 		term.routingInstanceTargetConflict = target
 	}
+}
+
+// markUncoveredFamilyExcept16001 stamps UncoveredFamilyExcept16001 on the
+// compiled terms the #4426 AST gate identified as sole-`except` scopes
+// covering no address of their pool's family (#16001). It runs after
+// compileSections so both pools exist; a site whose filter was quarantined
+// out of its pool (#15997) or never installed simply finds no term and is
+// dropped — that filter already refuses via its own channel. The marker is
+// per-pool: the covered arm of a `family any` dual-compile (the family the
+// list DOES cover) is never marked, so its authored `except` semantics
+// survive on the one family where they are meaningful.
+func markUncoveredFamilyExcept16001(cfg *Config, sites []uncoveredFamilyExceptSite16001) {
+	if cfg == nil || len(sites) == 0 {
+		return
+	}
+	for _, site := range sites {
+		var filters map[string]*FirewallFilter
+		switch site.pool {
+		case "inet":
+			filters = cfg.Firewall.FiltersInet
+		case "inet6":
+			filters = cfg.Firewall.FiltersInet6
+		default:
+			continue
+		}
+		filter := filters[site.filter]
+		if filter == nil {
+			continue
+		}
+		for _, term := range filter.Terms {
+			if term != nil && term.Name == site.term {
+				term.UncoveredFamilyExcept16001 = true
+			}
+		}
+	}
+}
+
+// cloneFirewallFilter16001 deep-copies a compiled filter (terms included,
+// slices copied) for the second pool of a `family any` dual-compile, so
+// per-pool markers (#16001) never leak between arms. Term structs are
+// copied by value; their slice fields are re-sliced so later appends on
+// one arm cannot alias the other.
+func cloneFirewallFilter16001(f *FirewallFilter) *FirewallFilter {
+	if f == nil {
+		return nil
+	}
+	out := *f
+	if f.Terms != nil {
+		out.Terms = make([]*FirewallFilterTerm, len(f.Terms))
+		for i, t := range f.Terms {
+			if t == nil {
+				continue
+			}
+			ct := *t
+			ct.SourceAddresses = append([]string(nil), t.SourceAddresses...)
+			ct.DestAddresses = append([]string(nil), t.DestAddresses...)
+			ct.SourcePrefixLists = append([]PrefixListRef(nil), t.SourcePrefixLists...)
+			ct.DestPrefixLists = append([]PrefixListRef(nil), t.DestPrefixLists...)
+			ct.DSCPs = append([]string(nil), t.DSCPs...)
+			ct.Protocols = append([]string(nil), t.Protocols...)
+			ct.DestinationPorts = append([]string(nil), t.DestinationPorts...)
+			ct.SourcePorts = append([]string(nil), t.SourcePorts...)
+			ct.SourcePortsExcept = append([]string(nil), t.SourcePortsExcept...)
+			ct.DestPortsExcept = append([]string(nil), t.DestPortsExcept...)
+			ct.ICMPTypes = append([]int(nil), t.ICMPTypes...)
+			ct.ICMPCodes = append([]int(nil), t.ICMPCodes...)
+			ct.UnknownICMPTypes = append([]string(nil), t.UnknownICMPTypes...)
+			ct.UnknownICMPCodes = append([]string(nil), t.UnknownICMPCodes...)
+			ct.UnknownPorts = append([]string(nil), t.UnknownPorts...)
+			ct.UnknownAddresses = append([]string(nil), t.UnknownAddresses...)
+			ct.TCPFlags = append([]string(nil), t.TCPFlags...)
+			ct.TerminalActions = append([]FilterAction(nil), t.TerminalActions...)
+			ct.UnknownActions = append([]string(nil), t.UnknownActions...)
+			ct.UnknownFlexMatch = append([]string(nil), t.UnknownFlexMatch...)
+			ct.FlexMatchRangeNames = append([]string(nil), t.FlexMatchRangeNames...)
+			ct.UnknownFrom = append([]string(nil), t.UnknownFrom...)
+			ct.ValuelessFrom = append([]string(nil), t.ValuelessFrom...)
+			ct.CrossFamilyMatchSpellings = append([]string(nil), t.CrossFamilyMatchSpellings...)
+			ct.unknownChildren = append([]string(nil), t.unknownChildren...)
+			if t.FlexMatch != nil {
+				fm := *t.FlexMatch
+				ct.FlexMatch = &fm
+			}
+			out.Terms[i] = &ct
+		}
+	}
+	return &out
 }
 
 // failClosedFilterTerminalConflicts makes a leniently compiled conflicting

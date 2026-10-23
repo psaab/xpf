@@ -897,7 +897,7 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	if opts.lenientFirewallFilterFamilyCollisions {
 		opts.firewallFilterCollisions = &firewallFilterCollisions
 	}
-	preWalkWarnings, err := runPreWalkGates(tree, opts)
+	preWalkWarnings, uncovered16001, err := runPreWalkGates(tree, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -969,6 +969,10 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	if err := compileSections(tree, cfg, opts); err != nil {
 		return nil, err
 	}
+	// #16001: mark the tolerated uncovered-family `except` terms the AST
+	// gate found, now that both pools are compiled. Builders refuse those
+	// candidates whole; the covered arm keeps its authored semantics.
+	markUncoveredFamilyExcept16001(cfg, uncovered16001)
 	// #15650: zero-ingress port-mirroring gate runs on the fully merged
 	// table (a later forwarding-options root may supply the ingress).
 	if err := validatePortMirroringZeroIngress15650(&cfg.ForwardingOptions, opts.lenientPortMirroring15256, &cfg.Warnings); err != nil {
