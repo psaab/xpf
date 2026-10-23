@@ -38,10 +38,106 @@ func discoverWire(t *testing.T, mac byte) []byte {
 	return pkt.ToBytes()
 }
 
-// admit drives one packet through the fold order — fairness first, then
-// the aggregate; neither refunds the other — and reports admission.
+// admit drives one packet through the composed production gate
+// (fairness, then aggregate, with the low-rate handoff) — exactly what
+// the read loops call.
 func admit[K comparable](fair *fairLimiter[K], agg *tokenBucket, key K) bool {
-	return fair.allowSender(key) && agg.allow()
+	return fair.admitWithAggregate(key, agg)
+}
+
+// TestFairLimiter_Rate1TwoSenderRotation is the fold-2 deterministic
+// rate-1 check: aggregate 1 pps (burst 2), frozen apart from explicit
+// 100ms steps. Sender A floods continuously; sender B arrives behind
+// it. First-come-first-served would give every refill to whichever
+// packet happens to be read first; the rotation instead queues B
+// behind A once, hands B the banked credit, and B progresses within a
+// bounded number of steps while A's total stays within burst +
+// rate*elapsed + the single handoff credit.
+func TestFairLimiter_Rate1TwoSenderRotation(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	clock := func() time.Time { return now }
+	agg := newTokenBucket(1, relayBurstFor(1), clock) // burst 2
+	fair := newFairLimiter[fairSenderKeyV4](1, clock)
+	keyA := fairSenderKeyV4{hlen: 6, chaddr: [16]byte{0x02, 0, 0, 0, 0, 0xA9}}
+	keyB := fairSenderKeyV4{hlen: 6, chaddr: [16]byte{0x02, 0, 0, 0, 0, 0xB9}}
+
+	// A consumes the burst (2 packets).
+	if !admit(fair, agg, keyA) || !admit(fair, agg, keyA) {
+		t.Fatal("A's initial burst at rate 1 must be admitted")
+	}
+	// Now interleave: each 100ms step, A floods 3 packets then B tries
+	// once. The rotation schedule this pins: the burst (2) is consumed
+	// by A; the first banked refill (~step 9) is granted to the head
+	// waiter (A, which queued first); B, queued second, is granted the
+	// second banked refill (~step 19-20). B therefore progresses within
+	// two aggregate intervals (<= 30 steps of margin) — bounded, and
+	// crucially not subject to B winning a refill race, because grants
+	// come from the banked pool in queue order.
+	bAt := -1
+	aCount := 2
+	for step := 0; step < 30 && bAt < 0; step++ {
+		now = now.Add(100 * time.Millisecond)
+		for range 3 {
+			if admit(fair, agg, keyA) {
+				aCount++
+			}
+		}
+		if admit(fair, agg, keyB) {
+			bAt = step
+		}
+	}
+	if bAt < 0 {
+		t.Fatalf("B never progressed behind A's rate-1 flood (A admitted %d)", aCount)
+	}
+	// A's total stays within burst + refills granted to it (<= 2 by
+	// the time B is granted) + the initial 2: no minted tokens.
+	if aCount > 5 {
+		t.Fatalf("A admitted %d by step %d — rotation minted aggregate tokens", aCount, bAt)
+	}
+}
+
+// TestFairSenderKeyV6FromWire pins the wire DUID peek against the parsed
+// key for the standard DUID forms (verified to agree byte-for-byte with
+// copyPending6DUID's typed encoding), plus the malformed arms: no
+// Client ID, truncated TLV, and an over-long option must all report
+// not-ok so the caller lumps them into the unknown sender.
+func TestFairSenderKeyV6FromWire(t *testing.T) {
+	duids := []dhcpv6.DUID{
+		&dhcpv6.DUIDUUID{UUID: [16]byte{0x10, 0x21, 0x32}},
+		&dhcpv6.DUIDLL{LinkLayerAddr: net.HardwareAddr{0x02, 0, 0, 0, 0, 9}},
+		&dhcpv6.DUIDEN{EnterpriseNumber: 42, EnterpriseIdentifier: []byte{1, 2, 3}},
+	}
+	for i, d := range duids {
+		m := newDHCPV6BindingMessage(t, dhcpv6.TransactionID{byte(i)})
+		m.Options.Del(dhcpv6.OptionClientID)
+		m.AddOption(dhcpv6.OptClientID(d))
+		wire := m.ToBytes()
+		got, ok := fairSenderKeyV6FromWire(wire)
+		if !ok {
+			t.Fatalf("duid %d: wire peek rejected a valid message", i)
+		}
+		want, wok := fairSenderKeyForV6(m)
+		if !wok || got != want {
+			t.Fatalf("duid %d: wire key %+v, want parsed %+v (ok=%v)", i, got, want, wok)
+		}
+	}
+	// No Client ID at all.
+	bare, err := dhcpv6.NewMessage()
+	if err != nil {
+		t.Fatalf("NewMessage: %v", err)
+	}
+	if _, ok := fairSenderKeyV6FromWire(bare.ToBytes()); ok {
+		t.Error("wire peek accepted a message with no Client ID")
+	}
+	// Truncated TLV: Client-ID header claims 100 bytes, datagram ends.
+	trunc := []byte{1, 0, 0, 0, 0, 1, 0, 100, 0xAA}
+	if _, ok := fairSenderKeyV6FromWire(trunc); ok {
+		t.Error("wire peek accepted a truncated Client-ID option")
+	}
+	// Too short for any option.
+	if _, ok := fairSenderKeyV6FromWire([]byte{1, 0}); ok {
+		t.Error("wire peek accepted a 2-byte datagram")
+	}
 }
 
 // TestFairLimiter_SecondSenderGetsShare is the unit decisive check: with

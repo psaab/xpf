@@ -706,24 +706,28 @@ set forwarding-options dhcp-relay group <g> overrides maximum-packet-rate <pps>
   injected clock (`TestTokenBucket_BurstThenRefill`); the end-to-end flood-drop
   is `TestRunRelay_RateLimit_5670` / `TestRunRelay_RateLimit_DefaultBound`.
 
-- **Per-sender fairness (#16087, folded on #16322).** The aggregate
-  bucket alone let one sender sustaining `>= maximum-packet-rate`
-  consume every refill, so other clients' DISCOVERs starved for the
-  flood's duration. Each distinct sender now also gets its own
-  sub-bucket (`fairLimiter` in `relay.go`), gated **before** the
-  aggregate with no refunds either way — the aggregate stays a hard
-  pre-parse bound on parsed work, fairness is additional, not
-  substitutive: sustained `ceil(rate / 256)` pps per sender (floored at
-  1 pps so a 1 pps segment still completes DORA and trickles), burst at
-  least 8 (a full DORA plus retransmissions clears instantly; at rates
-  <= 4 pps the burst is lifted to the aggregate burst). The v4 sender
-  key is the `chaddr` peeked from the fixed RFC 951 wire header (still
-  pre-parse); the DHCPv6 key is the Client-ID DUID, and senders with no
-  usable Client ID share one unknown-sender bucket. The table is
-  bounded at 256 senders per interface; a new sender is denied while
-  every slot is held by an active sender, and the longest-idle slot
-  (idle >= 30 s) is recycled. Fairness drops count in the same
-  `RequestsDroppedRateLimit` counter and throttled log.
+- **Per-sender fairness (#16087, folded twice on #16322).** The
+  aggregate bucket alone let one sender sustaining
+  `>= maximum-packet-rate` consume every refill, so other clients'
+  DISCOVERs starved for the flood's duration. Each distinct sender now
+  also gets its own sub-bucket (`fairLimiter` in `relay.go`), gated
+  **before** the aggregate and **before the parse** on both protocols
+  (v4: `chaddr` peeked from the fixed RFC 951 header; v6: Client-ID
+  DUID peeked from the wire options, `fairSenderKeyV6FromWire`), with
+  no refunds either way — the aggregate stays a hard pre-parse bound
+  on parsed work, fairness is additional, not substitutive. Sustained
+  `ceil(rate / 256)` pps per sender (floored at 1 pps), burst at least
+  8 (a full DORA plus retransmissions clears instantly; at rates
+  <= 4 pps the burst is lifted to the aggregate burst, and a waiter
+  rotation hands banked aggregate refill to queued senders in FIFO
+  order so a competing sender progresses at 1 pps instead of racing
+  refills). Senders with no usable identity share one unknown-sender
+  bucket. The table is bounded at 256 senders per interface; a new
+  sender is denied while every slot is held by an active sender, and
+  the longest-idle slot (idle >= 30 s) is recycled. Fairness drops
+  count in the same `RequestsDroppedRateLimit` counter and throttled
+  log. (v6 Relay-Reply dispatcher traffic keeps its aggregate-only
+  accounting; nested Relay-Forw is dropped ahead of both limiters.)
   - **Honest limit — read before relying on this.** The sender key is
     chosen by the client, so fairness stops a *naive* single-identity
     flooder — including the much more common accidental case of one
@@ -739,8 +743,9 @@ set forwarding-options dhcp-relay group <g> overrides maximum-packet-rate <pps>
   - Tests: `TestRunRelay_Fairness_SecondMACCompletesDORA` (the issue's
     decisive check — 1-MAC flood at the cap, second MAC completes
     DORA), `TestDHCPV6Fairness_SecondClientGetsShare`,
-    `TestFairLimiter_*` (share, refill, table bound, rotation, idle
-    recycling).
+    `TestFairLimiter_Rate1TwoSenderRotation`,
+    `TestFairSenderKeyV6FromWire`, `TestFairLimiter_*` (share, refill,
+    table bound, rotation, idle recycling).
 
 ### Trust override (#5414)
 

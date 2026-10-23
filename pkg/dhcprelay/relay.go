@@ -116,6 +116,28 @@ func (b *tokenBucket) allow() bool {
 	return false
 }
 
+// bankRefill accrues the bucket's elapsed refill and DRAINS the whole
+// balance (whole tokens plus fraction) into the caller's credit pool,
+// returning the drained amount. The fold-2 low-rate rotation calls it
+// on every packet — including dropped ones — so a waiting sender is
+// served by aggregate accrual rather than by winning a refill race.
+// Because the bucket is drained to zero each call, allow() afterwards
+// can only refill from post-bank accrual: total admissions still track
+// burst + rate*elapsed, just banked through the pool.
+func (b *tokenBucket) bankRefill() float64 {
+	now := b.now()
+	if elapsed := now.Sub(b.last).Seconds(); elapsed > 0 {
+		b.tokens += elapsed * b.rate
+		if b.tokens > b.burst {
+			b.tokens = b.burst
+		}
+		b.last = now
+	}
+	drained := b.tokens
+	b.tokens = 0
+	return drained
+}
+
 // relayBurstFor sizes the token-bucket burst capacity from the sustained rate:
 // two seconds' worth of packets, so a brief simultaneous-boot spike is admitted
 // instantly while the sustained rate still bounds a persistent flood.
@@ -184,6 +206,16 @@ type fairLimiter[K comparable] struct {
 	rate  int // aggregate sustained pps (for sub-rate derivation)
 	now   func() time.Time
 	table map[K]*fairBucket[K] // <= maxFairSenders; eviction scans for longest-idle
+	// credit/waiters/ticket implement the fold-2 low-rate handoff: the
+	// banked aggregate balance handed round-robin to queued senders.
+	// ticket is the sender holding a granted handoff: its next packet
+	// is admitted without fairness or aggregate spend (the grant was
+	// already paid from the banked pool). See admitWithAggregate.
+	credit  float64
+	waiters []K
+	waiting map[K]bool
+	ticket  K
+	hasTick bool
 }
 
 // newFairLimiter builds a fairness limiter for the given aggregate rate.
@@ -275,6 +307,132 @@ func (f *fairLimiter[K]) allowSender(key K) bool {
 	fb := &fairBucket[K]{bucket: newTokenBucket(sub, f.perSenderBurst(), f.now), last: now}
 	f.table[key] = fb
 	return fb.bucket.allow()
+}
+
+// fairAdmit is the low-rate fairness verdict: a sender ALREADY queued
+// in the waiter rotation is fairness-admitted without spending its
+// sub-bucket token. Without this, a flooder that burned its fairness
+// burst while queued can never re-present at the queue head (its own
+// fairness re-denies and re-queues it), and the rotation head is
+// maintenance-locked to a sender that can never be served — the exact
+// head-of-line lock the rotation exists to avoid. The aggregate (or
+// the banked pool) remains the hard bound for queued senders.
+func (f *fairLimiter[K]) fairAdmit(key K) bool {
+	if f.waiting[key] {
+		return true
+	}
+	return f.allowSender(key)
+}
+
+// lowRateRotation reports whether the fold-2 handoff is active: only
+// when the aggregate burst is no larger than the fairness burst floor
+// (rate <= 4 pps). Above that, per-sender buckets plus the aggregate
+// refill already give every sender timely progress and no handoff is
+// needed.
+func (f *fairLimiter[K]) lowRateRotation() bool {
+	return relayBurstFor(f.rate) <= fairBurstFloor
+}
+
+// admitWithAggregate is the composed fairness+aggregate gate (fold 2):
+// fairness first, then the aggregate, exactly as the loops call it.
+//
+// Normal rates: fairness-denied = dropped without spending aggregate;
+// aggregate-denied = dropped having spent fairness (strictly tighter).
+//
+// Tiny rates (lowRateRotation): first-come-first-served on the single
+// aggregate token would let a continuously retransmitting flooder win
+// every refill race against a competing sender, and gating fairness
+// first would burn the flooder's burst then hand its refills to itself.
+// Instead, every packet first banks whatever fractional refill the
+// aggregate has accrued into a shared credit pool. A queued waiter
+// costs no fairness token (fairness must not strand the sender the
+// rotation exists to serve). When the pool reaches one whole token the
+// waiter at the HEAD of the rotation is admitted for exactly one
+// packet on its next arrival and leaves the rotation — served by any
+// sender's arrival, so a competitor progresses within a bounded number
+// of aggregate intervals instead of racing refills. The credit is real
+// banked refill, not minted tokens: total admissions still track
+// burst + rate*elapsed.
+func (f *fairLimiter[K]) admitWithAggregate(key K, agg *tokenBucket) bool {
+	if !f.lowRateRotation() {
+		if !f.allowSender(key) {
+			return false
+		}
+		return agg.allow()
+	}
+	f.credit += agg.bankRefill()
+	// Ticket holder: a previous arrival granted this sender the
+	// handoff (paid from the pool). Admit without further spend.
+	if f.hasTick && f.ticket == key {
+		f.hasTick = false
+		return true
+	}
+	// Serve the queue head from the pool BEFORE this packet's fairness
+	// verdict — but only while no ticket is outstanding. A second grant
+	// while the first ticket holder has not yet returned would let the
+	// flooder's continuous arrivals burn every banked token on tickets
+	// for a competitor that arrives once per step, and the competitor's
+	// single arrival can only ever collect one of them.
+	if len(f.waiters) > 0 && f.credit >= 1 && !f.hasTick {
+		head := f.waiters[0]
+		f.credit--
+		f.leaveRotation(head)
+		if head == key {
+			return true
+		}
+		f.ticket, f.hasTick = head, true
+	}
+	// Fairness denial rotates a head waiter to the back (it must not
+	// head-of-line block others) and queues everyone else.
+	if !f.fairAdmit(key) {
+		if len(f.waiters) > 0 && f.waiters[0] == key {
+			f.waiters = append(f.waiters[1:], key)
+		} else {
+			f.joinRotation(key)
+		}
+		return false
+	}
+	// Fairness-admitted and present: if the banked pool can pay, take
+	// the current token now. Queued waiters keep priority for the NEXT
+	// banked token (their head position is untouched), but their
+	// absence must not veto present traffic — otherwise at rate 1 a
+	// sender arriving once per step watches the flooder re-queue ahead
+	// of it forever while the pool sits unspent between its arrivals.
+	if f.credit >= 1 {
+		f.credit--
+		return true
+	}
+	if len(f.waiters) == 0 && agg.allow() {
+		return true
+	}
+	f.joinRotation(key)
+	return false
+}
+
+// joinRotation appends key to the waiter FIFO if not already queued.
+func (f *fairLimiter[K]) joinRotation(key K) {
+	if f.waiting == nil {
+		f.waiting = make(map[K]bool)
+	}
+	if f.waiting[key] {
+		return
+	}
+	f.waiting[key] = true
+	f.waiters = append(f.waiters, key)
+}
+
+// leaveRotation removes key from the waiter FIFO, if present.
+func (f *fairLimiter[K]) leaveRotation(key K) {
+	if !f.waiting[key] {
+		return
+	}
+	delete(f.waiting, key)
+	for i, w := range f.waiters {
+		if w == key {
+			f.waiters = append(f.waiters[:i], f.waiters[i+1:]...)
+			return
+		}
+	}
 }
 
 // evictIdle removes the longest-idle bucket if it has been untouched for
@@ -1879,38 +2037,19 @@ func (m *Manager) runRelaySession(ctx context.Context,
 				continue
 			}
 
-			// #16087 fold: per-sender fairness gates BEFORE the aggregate.
-			// The v4 sender key (chaddr) sits at a fixed RFC 951 offset in
-			// the BOOTP header, so it is peeked from the wire bytes —
-			// still pre-parse — and a denied sender costs NO aggregate
-			// token (no refund exists: the aggregate stays a hard
-			// pre-parse bound on parsed work). Truncated/headerless
-			// datagrams share fairUnknownSenderV4.
+			// #16087 fold 2: fairness+aggregate composed gate BEFORE the
+			// parse. The v4 sender key (chaddr) sits at a fixed RFC 951
+			// offset in the BOOTP header, so it is peeked from the wire
+			// bytes — still pre-parse — and admitWithAggregate runs
+			// fairness first, then the aggregate (at tiny rates, the
+			// waiter-rotation handoff). No refund exists: the aggregate
+			// stays a hard pre-parse bound on parsed work.
+			// Truncated/headerless datagrams share fairUnknownSenderV4.
 			fairKey, fok := fairSenderKeyFromWire(buf[:n])
 			if !fok {
 				fairKey = fairUnknownSenderV4
 			}
-			if !fair.allowSender(fairKey) {
-				ir.requestsDroppedRateLimit.Add(1)
-				if !warnedRateLimit {
-					slog.Warn("dhcp-relay: client request rate limit exceeded, dropping excess",
-						"interface", ifaceName, "rate_pps", ir.maxPacketRate, "src", srcAddr)
-					warnedRateLimit = true
-				} else {
-					slog.Debug("dhcp-relay: client request rate limit exceeded, dropping",
-						"interface", ifaceName, "src", srcAddr)
-				}
-				continue
-			}
-
-			// #5670: bound the per-interface admit rate BEFORE the (variable-
-			// length TLV) dhcpv4.FromBytes parse and the Option-82 fan-out to
-			// EVERY configured server. Each admitted packet is a CPU cost and a
-			// 1→N amplification into the upstream DHCP servers, so an untrusted
-			// client segment flooding :67 must be throttled at the cheapest point.
-			// Excess is dropped and counted; the log is throttled (warn-once then
-			// Debug) so a sustained flood cannot spam the journal.
-			if !rateBucket.allow() {
+			if !fair.admitWithAggregate(fairKey, rateBucket) {
 				ir.requestsDroppedRateLimit.Add(1)
 				if !warnedRateLimit {
 					slog.Warn("dhcp-relay: client request rate limit exceeded, dropping excess",
