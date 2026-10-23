@@ -13,8 +13,9 @@ import (
 // dhcpChunkState.addChunk executed make([]SyncLease, 0, totalLeases) at
 // assembly completion BEFORE the len(complete) != totalLeases refusal.
 // One chunk header with total=1, totalLeases=0xFFFFFFFF therefore asked
-// the runtime for ~4.29e9-record capacity (~721 GiB virtual at the
-// documented ~168 B SyncLease) before any check refused the set.
+// the runtime for ~4.29e9-record capacity (~672 GiB virtual at the
+// documented ~168 B SyncLease; 721 GB decimal) before any check refused
+// the set.
 //
 // WHAT THIS ASSERTS, AND WHY IT IS NOT "THE PROCESS DIED" (the #8792
 // posture). Whether the oversized make() is fatal is a property of the
@@ -132,5 +133,86 @@ func TestDHCPChunkCompletionAllocationBounded16036(t *testing.T) {
 	}
 	if n := len(st.pending); n != 0 {
 		t.Fatalf("refused generation left %d pending assemblies; want 0", n)
+	}
+}
+
+// TestDHCPChunkSenderRefusesOverCapSet16036 is the sender twin of the
+// receiver bound (fold): queueDHCPLeaseSnapshot stamps totalLeases=kept
+// on every chunk, so with only a receiver guard a conforming-but-huge
+// local set (the memfile fallback and direct QueueDHCPLeaseSnapshot
+// callers have no 64 MiB Kea-response bound) would emit frames a new
+// receiver counts malformed — and the daemon re-pushes every 30s. The
+// sender must refuse before writing ANY frame.
+//
+// Fixture: (1<<20)+10 minimal leases. Each record is ~40 wire bytes
+// (min record 36 + 4-byte length prefix), so the encoded set is ~40 MiB
+// — provably over the 16 MiB cap, hence into the chunk branch — while
+// staying cheap to build. If the fixture ever fit one frame the fast
+// path would emit a legacy frame and this cell would be void, so the
+// cell asserts over-cap first.
+func TestDHCPChunkSenderRefusesOverCapSet16036(t *testing.T) {
+	leases := make([]dhcpserver.SyncLease, 0, dhcpChunkMaxTotalLeases+10)
+	for range dhcpChunkMaxTotalLeases + 10 {
+		leases = append(leases, dhcpserver.SyncLease{
+			Family: 4, Address: "10.0.0.1", HWAddress: "aa", LeaseType: "IA_NA",
+		})
+	}
+	if got := len(encodeDHCPLeasePayload(leases)); got <= maxSyncPayload {
+		t.Fatalf("FIXTURE: %d minimal leases encode to %d bytes, must exceed maxSyncPayload %d to reach the chunk branch",
+			len(leases), got, maxSyncPayload)
+	}
+	// Precondition: this count is over-cap for the chunk splitter too,
+	// one frame-budget chunk holds <1<<20 records, so rejecting chunks
+	// wholesale cannot strand a valid set: kept must exceed the cap.
+	if _, kept, _ := encodeDHCPLeaseChunkFrames(leases); kept <= dhcpChunkMaxTotalLeases {
+		t.Fatalf("FIXTURE: chunk splitter kept %d, want > cap %d (else the sender refusal would not trigger)", kept, dhcpChunkMaxTotalLeases)
+	}
+
+	sender := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	cc := &captureConn{}
+	sender.mu.Lock()
+	sender.conn0 = cc
+	sender.mu.Unlock()
+
+	before := sender.stats.MalformedRecordsDropped.Load()
+	sender.QueueDHCPLeases(4, leases)
+	if frames := cc.frames(); len(frames) != 0 {
+		t.Fatalf("over-cap sender emitted %d frame(s) announcing totalLeases>%d; want 0 frames — a conforming sender never announces a value the receiver must refuse (#16036 fold)", len(frames), dhcpChunkMaxTotalLeases)
+	}
+	if got := sender.stats.MalformedRecordsDropped.Load(); got <= before {
+		t.Fatalf("over-cap sender refusal not counted: MalformedRecordsDropped %d -> %d", before, got)
+	}
+}
+
+// TestDHCPChunkSenderWithinCapSetStillChunks16036 is the positive control:
+// the refusal must not break the normal chunk path — a large-but-within-cap
+// set still chunks and commits whole at the receiver. 260k realistic
+// leases are the existing #15160 overset (over the frame cap, far under
+// the lease-count cap).
+func TestDHCPChunkSenderWithinCapSetStillChunks16036(t *testing.T) {
+	leases := dhcpOverset15160(t, 260_000)
+	sender := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	cc := &captureConn{}
+	sender.mu.Lock()
+	sender.conn0 = cc
+	sender.mu.Unlock()
+	sender.QueueDHCPLeases(4, leases)
+	frames := cc.frames()
+	if len(frames) < 2 {
+		t.Fatalf("within-cap overset emitted %d frame(s), want chunked >=2", len(frames))
+	}
+	for i, f := range frames {
+		if f.msgType != syncMsgDHCPLeaseV4Chunk {
+			t.Fatalf("frame %d type=%d, want chunk type %d", i, f.msgType, syncMsgDHCPLeaseV4Chunk)
+		}
+		_, _, _, tl, _, ok := decodeDHCPLeaseChunkHeader(f.payload[:len(f.payload)-fullSetSeqTrailerLen])
+		if !ok || int(tl) != len(leases) {
+			t.Fatalf("frame %d totalLeases=%d ok=%v, want %d admitted within cap", i, tl, ok, len(leases))
+		}
+	}
+	recv := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	feedCaptured15160(t, recv, frames)
+	if got := len(recv.PeerDHCPLeases4()); got != len(leases) {
+		t.Fatalf("within-cap chunked set committed %d leases, want %d", got, len(leases))
 	}
 }

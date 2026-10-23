@@ -3573,7 +3573,11 @@ mechanism (PATH C of `docs/research/2239-dhcp-ha-lease-sync/plan.md`):
   `totalLeases=0xFFFFFFFF` sized the completion
   `make([]SyncLease, 0, totalLeases)` before the count check refused the
   set; `addChunk` also refuses `received > totalLeases` before that
-  allocation. Cells: `dhcp_chunk_totalleases_16036_test.go`.
+  allocation. The sender enforces the same cap (`kept >
+  dhcpChunkMaxTotalLeases` refuses before any frame is written, counted
+  via `MalformedRecordsDropped`), so a conforming sender never announces
+  a total a new receiver must refuse. Cells:
+  `dhcp_chunk_totalleases_16036_test.go`.
 - **Clock invariant** — each lease carries REMAINING LIFETIME, never an
   absolute wall-clock expiry (the channel only syncs a MONOTONIC offset). The
   promoting node re-anchors to its LOCAL clock at seed (`expire = now + remaining`),

@@ -44,6 +44,14 @@ import (
 // A single lease whose record cannot fit any frame is dropped and
 // counted by the caller — never emitted over-cap.
 
+// dhcpChunkMaxTotalLeases is the sender+receiver cap on chunked-set lease
+// count (#16036 fold): decodeDHCPLeaseChunkHeader refuses totalLeases
+// outside [1, dhcpChunkMaxTotalLeases] and queueDHCPLeaseSnapshot refuses
+// to chunk a set whose encoded-kept lease count exceeds it (counted via
+// MalformedRecordsDropped), so a conforming sender never announces a value
+// a new receiver must refuse. 1<<20 matches the `total` chunk bound.
+const dhcpChunkMaxTotalLeases = 1 << 20
+
 // dhcpChunkHeaderLen is the fixed chunk envelope: generation(8) +
 // index(4) + total(4) + totalLeases(4).
 const dhcpChunkHeaderLen = 20
@@ -99,11 +107,11 @@ func encodeDHCPLeaseChunkPayload(leaseBody []byte, generation uint64, index, tot
 // ok is false for any truncated or internally inconsistent header: index
 // must be < total, total must be in [1, 1<<20] (a real set needs a handful
 // of 16 MiB chunks; the bound keeps a forged total from preallocating
-// assembly state), and totalLeases must be in [1, 1<<20] (#16036: an
-// empty set always fits the legacy frame and is never chunked, and the
-// same bound keeps a forged totalLeases — e.g. 0xFFFFFFFF — from sizing
-// the completion make([]SyncLease, 0, totalLeases) in addChunk before
-// the count check refuses the set).
+// assembly state), and totalLeases must be in [1, dhcpChunkMaxTotalLeases]
+// (#16036: an empty set always fits the legacy frame and is never chunked,
+// and the same bound keeps a forged totalLeases — e.g. 0xFFFFFFFF — from
+// sizing the completion make([]SyncLease, 0, totalLeases) in addChunk
+// before the count check refuses the set).
 func decodeDHCPLeaseChunkHeader(payload []byte) (generation uint64, index, total, totalLeases uint32, body []byte, ok bool) {
 	if len(payload) < dhcpChunkHeaderLen {
 		return 0, 0, 0, 0, nil, false
@@ -112,7 +120,7 @@ func decodeDHCPLeaseChunkHeader(payload []byte) (generation uint64, index, total
 	index = binary.LittleEndian.Uint32(payload[8:12])
 	total = binary.LittleEndian.Uint32(payload[12:16])
 	totalLeases = binary.LittleEndian.Uint32(payload[16:20])
-	if generation == 0 || total == 0 || total > 1<<20 || index >= total || totalLeases == 0 || totalLeases > 1<<20 {
+	if generation == 0 || total == 0 || total > 1<<20 || index >= total || totalLeases == 0 || totalLeases > dhcpChunkMaxTotalLeases {
 		return 0, 0, 0, 0, nil, false
 	}
 	return generation, index, total, totalLeases, payload[dhcpChunkHeaderLen:], true
