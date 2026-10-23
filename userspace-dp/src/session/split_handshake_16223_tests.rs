@@ -1036,6 +1036,139 @@ fn backup_origin_row_publishes_to_shared_16217() {
     );
 }
 
+/// #16217 (backup arm): a HA-peer replica row (`SyncImport` /
+/// `SharedMaterialize`) that is still HandshakePending LOCALLY must
+/// be collected by `node_served_forward_slice` when the aggregated
+/// evidence proves the tuple completed — (b) the shared-map
+/// counters the #16217 counter carriage now stamps at import read
+/// `rev_packets>0` for the canonical key (fed here through the
+/// `shared_evidence` callback exactly as the ct-slice's
+/// `shared_completion_evidence` surfaces them), or a local
+/// reverse-served sibling in the same table folded `rev>0` onto
+/// the forward entry. The collection promotes ONLY the shared
+/// canonical+alias stage (the ct-slice restamp targets); the local
+/// row's stage must stay pending. Fail-closed: with zero evidence
+/// the pending replica collects nothing, and an Established
+/// replica with zero evidence still collects nothing from its own
+/// flags (the Wire8 guard above, unchanged).
+///
+/// FAIL-ON-REVERT: restoring the serving-origin `continue` gate in
+/// `node_served_forward_slice` drops every peer replica before the
+/// evidence arm and the two positive arms below collect nothing.
+#[test]
+fn sync_import_pending_row_collects_on_imported_reverse_evidence_16217() {
+    let forward = key_v4();
+    let reverse = reverse_session_key(&forward, crate::nat::NatDecision::default());
+    let now = 1_000_000_000u64;
+    let pending = TcpHandshakeState::HandshakePending.to_wire();
+
+    let mk = |origin: SessionOrigin| -> SessionTable {
+        let mut table = SessionTable::new();
+        assert!(table.upsert_synced_with_origin(
+            SessionInstall {
+                key: forward.clone(),
+                decision: decision(),
+                metadata: metadata(),
+                origin,
+                now_ns: now,
+                protocol: PROTO_TCP,
+                tcp_flags: 0,
+                session_id: 96,
+                tcp_close_class: 0,
+                tcp_handshake_state: pending,
+                source_nat_static: None,
+            },
+            false,
+        ));
+        table
+    };
+    let collect = |table: &SessionTable, shared: NodeServedEvidence| {
+        let mut out = Vec::new();
+        table.node_served_forward_slice(0, usize::MAX, &|_| shared, &mut out);
+        out
+    };
+
+    for origin in [
+        SessionOrigin::SyncImport,
+        SessionOrigin::SharedMaterialize,
+    ] {
+        // Premise: the replica is pending locally.
+        let table = mk(origin);
+        let e = table.entry_by_key(&forward).expect("row");
+        assert!(
+            e.established && e.handshake_pending && !e.closing && !e.metadata.is_reverse,
+            "premise {origin:?}: HandshakePending non-reverse replica"
+        );
+        // Negative: no evidence anywhere -> fail closed.
+        assert!(
+            !collect(&table, NodeServedEvidence::default()).iter().any(|(k, _)| k == &forward),
+            "#16217 backup arm: {origin:?} pending replica with zero evidence must not collect"
+        );
+        // Positive (wire arm): the imported counters read rev>0 on
+        // the shared wire -> the slice collects the tuple for the
+        // shared canonical+alias promotion...
+        let imported = NodeServedEvidence {
+            rev_packets_any: 6789,
+            ..NodeServedEvidence::default()
+        };
+        assert!(
+            collect(&table, imported).iter().any(|(k, _)| k == &forward),
+            "#16217 backup arm: {origin:?} pending row + imported rev>0 must collect"
+        );
+        // ...while the local row stage is unchanged (the promotion
+        // target is the shared stage only).
+        let e = table.entry_by_key(&forward).expect("row after collect");
+        assert!(
+            e.handshake_pending
+                && e.tcp_handshake_state_wire(PROTO_TCP) == TcpHandshakeState::HandshakePending.to_wire(),
+            "#16217 backup arm: {origin:?} local stage must stay HandshakePending, got established={} pending={}",
+            e.established,
+            e.handshake_pending
+        );
+    }
+
+    // Positive (sibling arm): a local reverse-served sibling in the
+    // SAME table folds rev>0 onto the forward entry, so the slice
+    // collects with zero shared-callback evidence.
+    let mut table = mk(SessionOrigin::SyncImport);
+    let mut rev_meta = metadata();
+    rev_meta.is_reverse = true;
+    rev_meta.ingress_zone = crate::test_zone_ids::TEST_WAN_ZONE_ID;
+    rev_meta.egress_zone = crate::test_zone_ids::TEST_LAN_ZONE_ID;
+    assert!(table.upsert_synced_with_origin(
+        SessionInstall {
+            key: reverse.clone(),
+            decision: decision(),
+            metadata: rev_meta,
+            origin: SessionOrigin::WorkerLocalImport,
+            now_ns: now,
+            protocol: PROTO_TCP,
+            tcp_flags: 0,
+            session_id: 96,
+            tcp_close_class: 0,
+            tcp_handshake_state: TcpHandshakeState::Established.to_wire(),
+            source_nat_static: None,
+        },
+        false,
+    ));
+    // Reverse traffic served locally folds onto the forward entry.
+    table.account_packet(&reverse, 1200, 0, 0);
+    table.account_packet(&reverse, 1200, 0, 0);
+    let counters = table.session_counters(&forward).expect("forward entry");
+    assert!(
+        counters.rev_packets > 0,
+        "premise: local reverse sibling must fold rev>0, got {counters:?}"
+    );
+    // The sibling reverse row's own Established flag must not leak
+    // into the forward replica's evidence as (a): node evidence for
+    // the forward key sees counters only, so collection here proves
+    // the rev>0 arm rather than a served-completion shortcut.
+    assert!(
+        collect(&table, NodeServedEvidence::default()).iter().any(|(k, _)| k == &forward),
+        "#16217 backup arm: SyncImport pending row + local reverse-served sibling must collect"
+    );
+}
+
 /// #16217 guard: a peer-synced row whose CLOSE class transitions
 /// (server RST) must stay silent — the carve-out is stage-only.
 #[test]

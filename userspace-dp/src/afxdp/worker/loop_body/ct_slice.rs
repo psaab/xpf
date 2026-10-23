@@ -142,6 +142,24 @@ pub(super) fn run_ct_slice(
             shared_sessions,
             &established,
         );
+        // #16217: the collected pairs' ACTUAL fwd+rev counts (folded
+        // by their serving workers; the promotion above only moved
+        // the stage) must ride onto the shared rows, or the peer's
+        // scoped adoption arm keeps reading the import-time counts.
+        for (key, nat) in &established {
+            let fwd = sessions.fwd_packets_for(key);
+            let rev = sessions.rev_packets_for(key);
+            if fwd > 0 || rev > 0 {
+                crate::afxdp::shared_ops::restamp_shared_packet_counts(
+                    shared_sessions,
+                    shared_forward_wire_sessions,
+                    key,
+                    *nat,
+                    fwd,
+                    rev,
+                );
+            }
+        }
         // #16217: advance the forward-wire KEY ALIAS slot beside the
         // canonical restamp so a completed fabric pair reads
         // Established under the NAT'd tuple too.

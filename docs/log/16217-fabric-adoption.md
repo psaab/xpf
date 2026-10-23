@@ -500,3 +500,68 @@ aged-failover cure; this closes the counter-carriage leg
 FZDiag19 prescribed. Cluster restored after each run: clean master
 `2c8575b70e`, helper `2f2f5cbf…b04` both nodes (hash-proved),
 RG0/1/2 node0 primary, target OK, P4 verification 13.7 Gbit/s.
+
+## Backup-arm slice admission + ct-slice count stamp (FZFixWire12)
+
+Per the FZDiag20 narrowing (no steady-state HA delta leaves fw0;
+all emission is transition-triggered), the remaining pre-failover
+leg is node-local on the BACKUP node: fw1's ct-slice must advance
+its shared rows to Established before the failover instant so the
+post-FO fabric/wire packets adopt instead of missing.
+
+Fix:
+- `node_served_forward_slice` (session/lookup.rs): the
+  serving-origin gate no longer drops HA-peer replicas before the
+  evidence arm. A `SyncImport`/`SharedMaterialize` forward row
+  that is still HandshakePending LOCALLY now collects when the
+  aggregated evidence proves completion — `rev_packets>0` via the
+  shared counters the counter carriage stamps at import
+  (`shared_completion_evidence`), or a local reverse-served
+  sibling. Promotion target is the shared canonical+alias stage
+  ONLY (the ct-slice restamps); the local row stage is unchanged,
+  and an Established replica with zero evidence still never
+  publishes from its own flags (fail-closed).
+- ct-slice (worker/loop_body/ct_slice.rs): after the stage
+  restamps, stamp each collected pair's ACTUAL fwd+rev counts
+  (`fwd_packets_for`/`rev_packets_for`) onto the shared canonical
+  + alias rows via `restamp_shared_packet_counts`. Runs on the
+  backup node identically (the slice is per-worker, role-blind).
+
+Tests: `cargo test 16217` 21/21 (new:
+`sync_import_pending_row_collects_on_imported_reverse_evidence_16217`
+— pending SyncImport/SharedMaterialize + imported rev>0 collects,
+local stage stays HandshakePending, zero-evidence fail-closed,
+local reverse-served sibling arm;
+`ct_slice_sequence_stamps_counts_for_pending_row_16217` — the
+stage+counts+alias sequence leaves canonical/alias at (12,5) and
+adoptable), `16223` 27/27.
+
+Live (builds `99.16217.32.dirty` deb `cd66f774…ab6`, helper
+`abf6483a…c4ae`; traced `99.16217.33.dirty`/`99.16217.34.dirty`,
+homogeneous `/proc/<pid>/exe` both nodes before traffic;
+evidence `/var/worktrees/fzadopt2/cell37/`, `cell38/`, `cell39/`):
+aged 30 s RG1 failover P4, all-node0, FO at 30 s — **FAIL, 25 SUM
+zero intervals (31 s→end) in every run**, no pre-FO zeros.
+Progress measured, not acceptance: (cell39, traced) every heavy
+tuple's Backup holder read `Timeout: 1800` at d28 on fw1 (the
+slice promotion + scoped evidence now qualify pre-FO — the cell37
+`Timeout: 20` Backup rows are gone), and post-FO the fabric
+packets DID adopt (fw1 emits SharedPromote Open/Update stage=4 at
+FO and serves reverse ACK trickle, Pkts>0 on the Backup rows).
+The next leg, in this lane's evidence: the adopted forward
+resolution on fw1 lands on `MissingNeighbor` for the direct
+server next-hop (`172.16.80.8:<sport> -> 172.16.80.200:5211`,
+`missing_neighbor ingress-ifindex=4 egress-ifindex=14` in fw1's
+dpstats at FO, already present at d28 in cell32) — the
+MissingNeighborSeed install for that tuple never forwards the
+bulk (one representative packet buffered per hop, resolution
+never completes for the direct neighbor in the helper's dynamic
+map), so the promoted session exists but the data plane discards
+every fabric packet after the first. That is a neighbor-
+resolution leg, distinct from the session-stage legs above; it
+needs its own fix (seed/retry completion for an adopted
+MissingNeighbor tuple) and is NOT closed here. Do not merge as
+the aged-failover cure. Cluster restored after each run: clean
+master `2c8575b70e`, helper `2f2f5cbf…b04` both nodes
+(hash-proved), RG0/1/2 node0 primary, target OK, P4 verification
+9.6–16.7 Gbit/s.

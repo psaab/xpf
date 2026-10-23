@@ -1949,6 +1949,62 @@ mod handshake_monotonic_16223_tests {
         assert_eq!(found.session_id, 91);
     }
 
+    /// #16217 (ct-slice count stamp): the maintenance sequence the
+    /// ct-slice runs for a collected pair — stage restamp, then the
+    /// collected row's ACTUAL fwd+rev counts, then the alias
+    /// restamp — must leave the shared rows adoptable by the scoped
+    /// gate even when the stage already read Established (so (a)
+    /// passed) but the counts still read import-time (0,0): the
+    /// counts are the only thing the peer-facing export/adoption
+    /// consumers can see. Here the canonical row starts pending
+    /// with zero counts; after the sequence the gate must hit and
+    /// the counts must read (12,5) on canonical AND alias.
+    ///
+    /// MUTATION: drop the `restamp_shared_packet_counts` leg of the
+    /// ct-slice sequence (or the counts leg of this sequence) and
+    /// the counts stay (0,0); the gate still hits on stage alone,
+    /// which is exactly why the count assertions are the pin.
+    #[test]
+    fn ct_slice_sequence_stamps_counts_for_pending_row_16217() {
+        let (shared, nat_map, wire_map, indexes) = maps();
+        let forward = key(43211);
+        let wire_key = crate::session::forward_wire_key(&forward, nat_decision());
+        let pending = crate::session::TcpHandshakeState::HandshakePending.to_wire();
+        let established = crate::session::TcpHandshakeState::Established.to_wire();
+        let mut fwd = entry(&forward, pending, 96, false);
+        fwd.origin = SessionOrigin::SyncImport;
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &fwd);
+        assert!(
+            lookup(&shared, &wire_map, &indexes, &wire_key).is_none(),
+            "premise: pending + zero counts must not adopt"
+        );
+        // The ct-slice sequence for one collected pair.
+        crate::afxdp::shared_ops::restamp_shared_handshakes_established(
+            &shared,
+            &[(forward.clone(), nat_decision())],
+        );
+        crate::afxdp::shared_ops::restamp_shared_packet_counts(
+            &shared, &wire_map, &forward, nat_decision(), 12, 5,
+        );
+        crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
+            &shared,
+            &wire_map,
+            &[(forward.clone(), nat_decision())],
+        );
+        assert_eq!(wire(&shared, &forward), established, "canonical stage must advance");
+        assert_eq!(wire(&wire_map, &wire_key), established, "alias stage must advance");
+        let canonical = lock_shared_recover(&shared).get(&forward).cloned().expect("canonical row");
+        assert_eq!(canonical.fwd_packets, 12, "#16217: canonical fwd count must be stamped");
+        assert_eq!(canonical.rev_packets, 5, "#16217: canonical rev count must be stamped");
+        let aliased = lock_shared_recover(&wire_map).get(&wire_key).cloned().expect("alias row");
+        assert_eq!(aliased.fwd_packets, 12, "#16217: alias fwd count must be stamped");
+        assert_eq!(aliased.rev_packets, 5, "#16217: alias rev count must be stamped");
+        assert!(
+            lookup(&shared, &wire_map, &indexes, &wire_key).is_some(),
+            "#16217: promoted + counted row must be adoptable"
+        );
+    }
+
     /// #16217 (scope): the evidence scan compares the FULL scoped key.
     /// Identical 5-tuple evidence in routing_domain 7 must not
     /// qualify the domain-0 pending row (Codex cross-VRF finding).
