@@ -211,11 +211,16 @@ type fairLimiter[K comparable] struct {
 	// ticket is the sender holding a granted handoff: its next packet
 	// is admitted without fairness or aggregate spend (the grant was
 	// already paid from the banked pool). See admitWithAggregate.
+	// Invariants (fold 3): credit is clamped to the aggregate burst;
+	// len(waiters) never exceeds len(table) (joinRotation requires a
+	// table entry); a ticket expires after fairTicketTTL so an absent
+	// grantee cannot block the FIFO forever.
 	credit  float64
 	waiters []K
 	waiting map[K]bool
 	ticket  K
 	hasTick bool
+	tickAt  time.Time
 }
 
 // newFairLimiter builds a fairness limiter for the given aggregate rate.
@@ -263,6 +268,14 @@ const fairRateFloor = 1
 // At tiny aggregates the burst is at least the aggregate burst, so a
 // single configured-pps segment completes a full DORA inside the burst.
 const fairBurstFloor = 8
+
+// fairTicketTTL bounds how long a granted handoff ticket stays valid
+// (fold 3). A grantee that never returns (client went silent after
+// queueing) must not block the FIFO: after this long the ticket is
+// discarded on the next packet's bank step and the rotation grants the
+// next waiter. One aggregate interval at the slowest rotation rate
+// (1 pps) plus margin; at higher tiny rates it is several intervals.
+const fairTicketTTL = 2 * time.Second
 
 // perSenderBurst returns one sender's burst capacity: twice its sustained
 // share, at least fairBurstFloor. Additionally, when the aggregate itself
@@ -361,18 +374,23 @@ func (f *fairLimiter[K]) admitWithAggregate(key K, agg *tokenBucket) bool {
 		return agg.allow()
 	}
 	f.credit += agg.bankRefill()
+	if cap := float64(relayBurstFor(f.rate)); f.credit > cap {
+		f.credit = cap // fold 3: pool never exceeds the aggregate burst
+	}
 	// Ticket holder: a previous arrival granted this sender the
-	// handoff (paid from the pool). Admit without further spend.
+	// handoff (paid from the pool). Admit without further spend —
+	// unless the ticket has expired (fold 3): an absent grantee must
+	// not block the FIFO, so a stale ticket is discarded and the
+	// rotation re-grants the next waiter below.
+	if f.hasTick && f.now().Sub(f.tickAt) > fairTicketTTL {
+		f.hasTick = false
+	}
 	if f.hasTick && f.ticket == key {
 		f.hasTick = false
 		return true
 	}
 	// Serve the queue head from the pool BEFORE this packet's fairness
-	// verdict — but only while no ticket is outstanding. A second grant
-	// while the first ticket holder has not yet returned would let the
-	// flooder's continuous arrivals burn every banked token on tickets
-	// for a competitor that arrives once per step, and the competitor's
-	// single arrival can only ever collect one of them.
+	// verdict — but only while no (unexpired) ticket is outstanding.
 	if len(f.waiters) > 0 && f.credit >= 1 && !f.hasTick {
 		head := f.waiters[0]
 		f.credit--
@@ -380,7 +398,7 @@ func (f *fairLimiter[K]) admitWithAggregate(key K, agg *tokenBucket) bool {
 		if head == key {
 			return true
 		}
-		f.ticket, f.hasTick = head, true
+		f.ticket, f.hasTick, f.tickAt = head, true, f.now()
 	}
 	// Fairness denial rotates a head waiter to the back (it must not
 	// head-of-line block others) and queues everyone else.
@@ -410,7 +428,16 @@ func (f *fairLimiter[K]) admitWithAggregate(key K, agg *tokenBucket) bool {
 }
 
 // joinRotation appends key to the waiter FIFO if not already queued.
+// Fold 3 bound: a key may queue only while it holds a sender-table
+// entry, so len(waiters) <= len(table) <= maxFairSenders always —
+// waiter state is capped by the sender table, never a second
+// unbounded structure. Callers create/refresh the table entry via
+// allowSender before queueing; a key whose entry was evicted queues
+// only after re-creating it (and paying fairness again).
 func (f *fairLimiter[K]) joinRotation(key K) {
+	if _, ok := f.table[key]; !ok {
+		return
+	}
 	if f.waiting == nil {
 		f.waiting = make(map[K]bool)
 	}

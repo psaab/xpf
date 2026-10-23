@@ -1,7 +1,7 @@
 xpf (0.0.0) unstable; urgency=medium
 
   * DHCP relay: add bounded per-sender fairness ahead of the
-    per-interface aggregate token bucket (#16087, folded twice on
+    per-interface aggregate token bucket (#16087, folded 3x on
     #16322). One sender sustaining the maximum-packet-rate no longer
     starves other clients: each chaddr / Client-ID DUID (both peeked
     from the wire, pre-parse) gets a 1/256 share of the rate (floored

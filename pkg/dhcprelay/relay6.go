@@ -1261,12 +1261,25 @@ func (m *dhcpV6Manager) runDHCPV6ClientLoop(ctx context.Context, relay *dhcpV6Re
 			}
 			continue
 		case dhcpv6.MessageTypeRelayForward:
-			// A downstream relay can only be trusted with an explicit
-			// trust policy. DHCPv6 has no such knob yet, so fail closed
-			// rather than letting an on-link host steer link selection.
-			// Ahead of the limiters: nested junk pays no token. Port is
-			// validated post-parse in the shared tail below, exactly as
-			// pre-fold for the non-limiter checks.
+			// Fold 3: Relay-Forw reaches the parse too, so it is gated
+			// like every other non-Relay-Reply type — only Relay-Reply
+			// (dispatcher traffic) is exempt. A Relay-Forw carries no
+			// direct Client ID at this layer, so it peeks as the
+			// unknown sender (inner identities are not unpacked
+			// pre-parse; nested relays are dropped in the tail anyway,
+			// now having paid the limiter like all other traffic).
+			if !fair.admitWithAggregate(fairUnknownSenderV6, rateBucket) {
+				relay.requestsDroppedRateLimit.Add(1)
+				if !warnedRateLimit {
+					slog.Warn("dhcpv6-relay: client request rate limit exceeded, dropping excess",
+						"interface", relay.ifaceName, "rate_pps", rate, "src", source)
+					warnedRateLimit = true
+				} else {
+					slog.Debug("dhcpv6-relay: client request rate limit exceeded, dropping",
+						"interface", relay.ifaceName, "src", source)
+				}
+				continue
+			}
 		default:
 			fairKey, fok := fairSenderKeyV6FromWire(buf[:n])
 			if !fok {

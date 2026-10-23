@@ -706,7 +706,7 @@ set forwarding-options dhcp-relay group <g> overrides maximum-packet-rate <pps>
   injected clock (`TestTokenBucket_BurstThenRefill`); the end-to-end flood-drop
   is `TestRunRelay_RateLimit_5670` / `TestRunRelay_RateLimit_DefaultBound`.
 
-- **Per-sender fairness (#16087, folded twice on #16322).** The
+- **Per-sender fairness (#16087, folded 3x on #16322).** The
   aggregate bucket alone let one sender sustaining
   `>= maximum-packet-rate` consume every refill, so other clients'
   DISCOVERs starved for the flood's duration. Each distinct sender now
@@ -721,13 +721,17 @@ set forwarding-options dhcp-relay group <g> overrides maximum-packet-rate <pps>
   <= 4 pps the burst is lifted to the aggregate burst, and a waiter
   rotation hands banked aggregate refill to queued senders in FIFO
   order so a competing sender progresses at 1 pps instead of racing
-  refills). Senders with no usable identity share one unknown-sender
-  bucket. The table is bounded at 256 senders per interface; a new
-  sender is denied while every slot is held by an active sender, and
-  the longest-idle slot (idle >= 30 s) is recycled. Fairness drops
-  count in the same `RequestsDroppedRateLimit` counter and throttled
-  log. (v6 Relay-Reply dispatcher traffic keeps its aggregate-only
-  accounting; nested Relay-Forw is dropped ahead of both limiters.)
+  refills — banked pool clamped to the aggregate burst, waiter count
+  capped by the 256-entry sender table, and a granted ticket expires
+  after 2 s so an absent grantee cannot block the queue). Senders
+  with no usable identity share one unknown-sender bucket. The table
+  is bounded at 256 senders per interface; a new sender is denied
+  while every slot is held by an active sender, and the longest-idle
+  slot (idle >= 30 s) is recycled. Fairness drops count in the same
+  `RequestsDroppedRateLimit` counter and throttled log. (Only v6
+  Relay-Reply dispatcher traffic is limiter-exempt, on aggregate-only
+  accounting; Relay-Forw is gated as the unknown sender and then
+  dropped as nested in the tail.)
   - **Honest limit — read before relying on this.** The sender key is
     chosen by the client, so fairness stops a *naive* single-identity
     flooder — including the much more common accidental case of one
@@ -743,7 +747,9 @@ set forwarding-options dhcp-relay group <g> overrides maximum-packet-rate <pps>
   - Tests: `TestRunRelay_Fairness_SecondMACCompletesDORA` (the issue's
     decisive check — 1-MAC flood at the cap, second MAC completes
     DORA), `TestDHCPV6Fairness_SecondClientGetsShare`,
+    `TestDHCPV6RelayForwardGatedByLimiter`,
     `TestFairLimiter_Rate1TwoSenderRotation`,
+    `TestFairLimiter_TicketExpiryUnblocksFIFO`,
     `TestFairSenderKeyV6FromWire`, `TestFairLimiter_*` (share, refill,
     table bound, rotation, idle recycling).
 

@@ -96,6 +96,152 @@ func TestFairLimiter_Rate1TwoSenderRotation(t *testing.T) {
 	}
 }
 
+// TestFairLimiter_TicketExpiryUnblocksFIFO pins fold-3 arm 2: a ticket
+// granted to a sender that never returns expires after fairTicketTTL,
+// so the rotation can grant the next waiter instead of blocking the
+// FIFO forever behind the absent grantee.
+func TestFairLimiter_TicketExpiryUnblocksFIFO(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	clock := func() time.Time { return now }
+	agg := newTokenBucket(1, relayBurstFor(1), clock)
+	fair := newFairLimiter[fairSenderKeyV4](1, clock)
+	keyA := fairSenderKeyV4{hlen: 6, chaddr: [16]byte{0x02, 0, 0, 0, 0, 0xA8}}
+	keyB := fairSenderKeyV4{hlen: 6, chaddr: [16]byte{0x02, 0, 0, 0, 0, 0xB8}}
+	keyC := fairSenderKeyV4{hlen: 6, chaddr: [16]byte{0x02, 0, 0, 0, 0, 0xC8}}
+
+	// Drain the burst AND A's fairness burst (8), so A's next packet
+	// fairness-denies and queues; B's packet queues behind it; then one
+	// banked interval grants the head (A) a ticket on the next arrival.
+	for range 8 {
+		admit(fair, agg, keyA)
+	}
+	admit(fair, agg, keyA) // fairness-denied: queues A
+	admit(fair, agg, keyB) // fairness-denied: queues B behind A
+	now = now.Add(time.Second)
+	admit(fair, agg, keyB) // banks one token: ticket granted to head A
+	if !fair.hasTick || fair.ticket != keyA {
+		t.Fatalf("ticket = (%v,%v), want granted to head A", fair.ticket, fair.hasTick)
+	}
+	// A never returns. Before expiry, C's arrival must not re-grant.
+	now = now.Add(fairTicketTTL / 2)
+	admit(fair, agg, keyC)
+	if !fair.hasTick || fair.ticket != keyA {
+		t.Fatal("unexpired ticket was re-granted — one outstanding grant violated")
+	}
+	// After expiry, the next arrival discards A's ticket and the
+	// rotation proceeds (B becomes grantable on a later bank).
+	now = now.Add(fairTicketTTL)
+	admit(fair, agg, keyC)
+	if fair.hasTick && fair.ticket == keyA {
+		t.Fatal("expired ticket for absent A still blocks the FIFO")
+	}
+	// B must now be servable: advance and present B until admitted.
+	served := false
+	for range 30 {
+		now = now.Add(100 * time.Millisecond)
+		admit(fair, agg, keyC)
+		if admit(fair, agg, keyB) {
+			served = true
+			break
+		}
+	}
+	if !served {
+		t.Fatal("B never served after A's ticket expired — FIFO still blocked")
+	}
+}
+
+// TestFairLimiter_WaitersBoundedByTableAndCreditClamped pins fold-3
+// arms 3+4: waiter state never exceeds the sender table, and the banked
+// credit pool never exceeds the aggregate burst.
+func TestFairLimiter_WaitersBoundedByTableAndCreditClamped(t *testing.T) {
+	frozen := time.Unix(1_700_000_000, 0)
+	clock := func() time.Time { return frozen }
+	agg := newTokenBucket(1, relayBurstFor(1), clock)
+	fair := newFairLimiter[fairSenderKeyV4](1, clock)
+	// Churn far more identities than the table holds at a frozen clock.
+	for i := range 3 * maxFairSenders {
+		k := fairSenderKeyV4{hlen: 6}
+		k.chaddr[0] = 0x02
+		k.chaddr[4] = byte(i >> 8)
+		k.chaddr[5] = byte(i)
+		admit(fair, agg, k)
+		if len(fair.waiters) > len(fair.table) {
+			t.Fatalf("waiters %d exceed sender table %d (step %d)", len(fair.waiters), len(fair.table), i)
+		}
+		if len(fair.waiters) > maxFairSenders {
+			t.Fatalf("waiters %d exceed maxFairSenders %d", len(fair.waiters), maxFairSenders)
+		}
+		if fair.credit > float64(relayBurstFor(1)) {
+			t.Fatalf("credit %.2f exceeds aggregate burst %d", fair.credit, relayBurstFor(1))
+		}
+	}
+}
+
+// TestDHCPV6RelayForwardGatedByLimiter pins fold-3 arm 1: Relay-Forw is
+// no longer exempt from the limiter. At rate 1 (burst 2) a burst of
+// Relay-Forw datagrams is admitted only up to the aggregate burst; the
+// excess counts as rate-limit drops and NONE of it counts as nested
+// drops (limiter runs first). Pre-fold-3 all of them reached the parse
+// and counted as nested with zero rate-limit drops.
+func TestDHCPV6RelayForwardGatedByLimiter(t *testing.T) {
+	client := newFakeDHCPV6Conn()
+	server := newFakeConn()
+	client.srcAddr = &net.UDPAddr{IP: net.ParseIP("fe80::2"), Port: dhcpv6RelayPort}
+	now := time.Unix(123, 0)
+	m := newDHCPV6Manager()
+	m.now = func() time.Time { return now }
+	relay := &dhcpV6Relay{
+		ifaceName:     "ge-0/0/0.0",
+		kernelName:    "ge-0/0/0.0",
+		maxPacketRate: 1,
+		pending:       newPendingTableOf[pending6Key, pending6Entry](64, pendingTTL, m.now),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		m.runDHCPV6ClientLoop(ctx, relay, client, server, net.ParseIP("2001:db8:1::1"),
+			[]*net.UDPAddr{{IP: net.ParseIP("2001:db8::5"), Port: dhcpv6RelayPort}}, nil)
+		close(done)
+	}()
+	inner := newDHCPV6TestMessage(t)
+	nested, err := dhcpv6.EncapsulateRelay(inner, dhcpv6.MessageTypeRelayForward,
+		net.ParseIP("2001:db8:1::1"), net.ParseIP("2001:db8:2::1"))
+	if err != nil {
+		t.Fatalf("EncapsulateRelay: %v", err)
+	}
+	const n = 6
+	for range n {
+		client.push(nested.ToBytes())
+	}
+	total := func() int {
+		return int(relay.requestsDroppedRateLimit.Load()) + int(relay.requestsDroppedNested.Load())
+	}
+	if !waitFor(func() bool { return total() >= n }) {
+		t.Fatalf("Relay-Forw flood processed %d of %d (rateLimit=%d nested=%d)",
+			total(), n, relay.requestsDroppedRateLimit.Load(), relay.requestsDroppedNested.Load())
+	}
+	// Burst 2 pass the limiter and are then dropped as nested in the
+	// tail; the other 4 are dropped by the limiter itself.
+	if got := relay.requestsDroppedNested.Load(); got != uint64(relayBurstFor(1)) {
+		t.Fatalf("nested drops=%d, want aggregate burst %d (limiter must gate Relay-Forw first)",
+			got, relayBurstFor(1))
+	}
+	if got := relay.requestsDroppedRateLimit.Load(); got != uint64(n-relayBurstFor(1)) {
+		t.Fatalf("rate-limit drops=%d, want %d", got, n-relayBurstFor(1))
+	}
+	if got := server.writeCount(); got != 0 {
+		t.Fatalf("Relay-Forw reached upstream: writes=%d", got)
+	}
+	cancel()
+	_ = client.Close()
+	_ = server.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("client loop did not stop")
+	}
+}
+
 // TestFairSenderKeyV6FromWire pins the wire DUID peek against the parsed
 // key for the standard DUID forms (verified to agree byte-for-byte with
 // copyPending6DUID's typed encoding), plus the malformed arms: no
