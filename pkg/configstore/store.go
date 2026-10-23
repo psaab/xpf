@@ -793,7 +793,13 @@ func compileTreeStrictWithCurrent(tree *config.ConfigTree, nodeID int, current *
 	// specific messages; this then runs the whole strict pipeline on the same
 	// rewritten peer tree, which covers every other strict gate and also the
 	// peer view that does not compile at all (the registry's skip arm).
-	if err := validatePeerStrictPipeline(peerTree, nodeID); err != nil {
+	// #16025 fold 3: the peer compile receives the same persisted current
+	// config as the local compile — in a synced cluster both nodes persist
+	// the same active primary, so the peer's staged-rotation exception is
+	// judged against the peer's own persisted primary derived from that
+	// active config, not left nil (which rejected every clustered staged
+	// migration at the peer gate even when the local gate admitted it).
+	if err := validatePeerStrictPipelineWithCurrent(peerTree, nodeID, current); err != nil {
 		return nil, err
 	}
 	return compiled, nil

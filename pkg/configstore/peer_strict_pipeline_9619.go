@@ -53,6 +53,20 @@ import (
 // tolerant ingresses do not call this, so a config already on disk that is
 // invalid for this node still loads with its warnings (#1960).
 func validatePeerStrictPipeline(peerTree *config.ConfigTree, nodeID int) error {
+	return validatePeerStrictPipelineWithCurrent(peerTree, nodeID, nil)
+}
+
+// validatePeerStrictPipelineWithCurrent is validatePeerStrictPipeline
+// with the peer's own persisted/current compiled config supplied for the
+// #16025 fold-3 staged-rotation gate. The peer view uses the same shared
+// candidate tree, but the exception's "existing primary" proof must be
+// the peer's persisted primary, not the local node's: both nodes hold
+// the same persisted primary in a synced cluster, yet the gate derives
+// it per-view so a peer whose persisted primary differs (or is absent)
+// does not inherit the local node's migration state. Callers without
+// persisted state pass nil, keeping the exception closed for the peer
+// exactly as fold 2 keeps it closed locally.
+func validatePeerStrictPipelineWithCurrent(peerTree *config.ConfigTree, nodeID int, peerCurrent *config.Config) error {
 	peerID, ok := config.PeerNodeID(nodeID)
 	if peerTree == nil || !ok {
 		return nil
@@ -60,7 +74,7 @@ func validatePeerStrictPipeline(peerTree *config.ConfigTree, nodeID int) error {
 	if err := schemaValidateExpandedTreeForNode(peerTree, peerID); err != nil {
 		return peerStrictError(peerID, err)
 	}
-	peerCompiled, err := config.CompileConfigForNode(peerTree, peerID)
+	peerCompiled, err := config.CompileConfigForNodeWithCurrentClusterPrimary(peerTree, peerID, peerCurrent)
 	if err != nil {
 		return peerStrictError(peerID, err)
 	}
