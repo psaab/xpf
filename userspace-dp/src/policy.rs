@@ -3790,10 +3790,12 @@ pub(crate) fn evaluate_policy_result_l3_aware_at(
 
 /// Evaluate a flow whose route lookup found no egress interface.
 ///
-/// Unlike a resolved egress in no zone, a NoRoute flow has no egress zone to
-/// adjudicate. Preserve its existing default-policy decision so default-permit
-/// can delegate the packet to the kernel; resolved egress zone 0 is denied by
-/// `evaluate_policy_result_l3_aware`.
+/// #16021: a NoRoute flow still adjudicates the egress-unconstrained tiers
+/// (`to-zone any`, both-any, and `junos-global` with an `Any` to-zone scope
+/// whose from-zone scope matches) on its ingress + L3/L4 identity; only an
+/// unmatched NoRoute flow reaches the default-policy decision, so
+/// default-permit can delegate the packet to the kernel. A resolved egress
+/// in zone 0 is denied by `evaluate_policy_result_l3_aware` instead.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_policy_result_l3_aware_unresolved_egress(
     state: &PolicyState,
@@ -3931,8 +3933,33 @@ fn evaluate_policy_result_counted(
     // egress zone is unknown does not belong to any DEFINED zone pair, so it
     // must NOT be eligible for zone-pair policies OR `junos-global` policies.
     // The gates after the tier walk reject an unzoned ingress or a resolved
-    // unzoned egress; a NoRoute flow has no egress identity and retains its
-    // default-policy decision.
+    // unzoned egress.
+    //
+    // #16021 (ZP-07): a NoRoute flow (`egress_resolved == false`, hence
+    // `to_id == 0`) has no egress zone, but it is NOT policy-free. Rules that
+    // do not constrain the egress side can still be adjudicated on the
+    // ingress + L3/L4 identity the packet does carry:
+    //   * `from-zone <from> to-zone any` (to_any, keyed by from_id),
+    //   * `from-zone any to-zone any` (both_any),
+    //   * `junos-global` rules whose to-zone scope is `Any` and whose
+    //     from-zone scope matches `from_id`.
+    // Rules that DO constrain the egress — the exact pair, `from-zone any
+    // to-zone <z>`, and global rules with a concrete to-zone scope — stay
+    // ineligible: they were never evaluated against the real egress zone.
+    // The eligible tiers keep their normal relative precedence
+    // (single-wildcard before both-any before global) and first-match
+    // order, so an explicit egress-unconstrained DENY/REJECT now beats the
+    // implicit default. Previously the whole walk was skipped for
+    // `to_id == 0`, so under `default-policy permit-all` a NoRoute packet
+    // was delegated to the kernel FIB and an explicit trust->untrust deny
+    // was bypassed during a flap / FIB-not-loaded / capped-import window.
+    // An eligible explicit PERMIT likewise decides the flow (kernel
+    // delegation stands); with no eligible match the default still decides.
+    // The from-any/exact-pair tiers remain skipped for `to_id == 0`; a
+    // resolved unzoned egress (`egress_resolved && to_id == 0`) still
+    // denies below, and a zone-0 ingress still denies below (the eligible
+    // lookups are keyed by / scoped to `from_id`, so they cannot fire for
+    // `from_id == 0`).
     //
     // #4569: fragment-association fail-closed. On the FLOWLESS path
     // (l4_present == false) a non-first fragment's post-IP bytes are payload,
@@ -3953,44 +3980,51 @@ fn evaluate_policy_result_counted(
     // from the SAME L3 as an overlapping port-bearing DENY is dropped (the Junos
     // security-over-availability default). A fragment-association cache keyed on
     // (src, dst, frag-id) that remembers the first-fragment's exact verdict is
-    // the deferred principled fix (#4569).
+    // the deferred principled fix (#4569). On the NoRoute path the same
+    // association applies within the eligible tiers above.
     let mut skipped_frag_deny: Option<SkippedFragDeny> = None;
-    if from_id != 0 && to_id != 0 {
-        let key = zone_pair_key(from_id, to_id);
-        if let Some(indices) = state.zone_pair_index.get(&key) {
-            for &idx in indices {
-                match try_match_rule(
-                    &state.rules[idx],
-                    state,
-                    src_ip,
-                    dst_ip,
-                    protocol,
-                    src_port,
-                    dst_port,
-                    packet_icmp,
-                    l4_present,
-                    scheduler_expired,
-                    !l4_present && skipped_frag_deny.is_none(),
-                ) {
-                    RuleMatchOutcome::Matched(mut result) => {
-                        // #3073: 1-based handle so the fast path can re-count
-                        // every packet of this flow against the same counter.
-                        result.policy_counter_idx = (idx as u32).saturating_add(1);
-                        return apply_frag_deny_override_and_count(
-                            result,
-                            skipped_frag_deny,
-                            &state.rules[idx],
-                            packet_len,
-                            hit_count,
-                        );
-                    }
-                    RuleMatchOutcome::Miss(reason) => {
-                        note_skipped_frag_deny(
-                            &mut skipped_frag_deny,
-                            &state.rules[idx],
-                            idx,
-                            reason,
-                        );
+    // #16021: `to_id == 0` with an unresolved egress is the NoRoute shape;
+    // every other `to_id == 0` caller is a resolved unzoned egress, denied
+    // below without a walk.
+    let unresolved_egress = !egress_resolved && to_id == 0;
+    if from_id != 0 && (to_id != 0 || unresolved_egress) {
+        if to_id != 0 {
+            let key = zone_pair_key(from_id, to_id);
+            if let Some(indices) = state.zone_pair_index.get(&key) {
+                for &idx in indices {
+                    match try_match_rule(
+                        &state.rules[idx],
+                        state,
+                        src_ip,
+                        dst_ip,
+                        protocol,
+                        src_port,
+                        dst_port,
+                        packet_icmp,
+                        l4_present,
+                        scheduler_expired,
+                        !l4_present && skipped_frag_deny.is_none(),
+                    ) {
+                        RuleMatchOutcome::Matched(mut result) => {
+                            // #3073: 1-based handle so the fast path can re-count
+                            // every packet of this flow against the same counter.
+                            result.policy_counter_idx = (idx as u32).saturating_add(1);
+                            return apply_frag_deny_override_and_count(
+                                result,
+                                skipped_frag_deny,
+                                &state.rules[idx],
+                                packet_len,
+                                hit_count,
+                            );
+                        }
+                        RuleMatchOutcome::Miss(reason) => {
+                            note_skipped_frag_deny(
+                                &mut skipped_frag_deny,
+                                &state.rules[idx],
+                                idx,
+                                reason,
+                            );
+                        }
                     }
                 }
             }
@@ -4010,11 +4044,20 @@ fn evaluate_policy_result_counted(
         // Each tier is a single FxHashMap O(1) lookup (or a Vec scan only when
         // such rules exist), so a config with no wildcard policy pays only two
         // empty-slice probes per cold-path evaluation — no N×N materialization.
-        let from_any = state
-            .from_any_index
-            .get(&to_id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
+        //
+        // #16021: on a NoRoute flow the `from-zone any` half is keyed by the
+        // unknown egress (to_id == 0) and stays ineligible; only the
+        // `to-zone any` half (keyed by the known ingress) is walked. The
+        // merge below collapses to that single ascending list.
+        let from_any: &[usize] = if unresolved_egress {
+            &[]
+        } else {
+            state
+                .from_any_index
+                .get(&to_id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+        };
         let to_any = state
             .to_any_index
             .get(&from_id)
@@ -4106,7 +4149,16 @@ fn evaluate_policy_result_counted(
             // fails the whole snapshot closed at parse time (#3402,
             // SnapshotIntegrityError::UnresolvableZoneReference), so a live
             // scope is only ever Any or a resolved Zone(id).
-            if !rule.global_from_zone.matches(from_id) || !rule.global_to_zone.matches(to_id) {
+            //
+            // #16021: on a NoRoute flow a concrete to-zone scope names an
+            // egress the flow does not have, so only `Any`-scoped globals
+            // are eligible; the from-zone scope still applies as usual.
+            let to_ok = if unresolved_egress {
+                matches!(rule.global_to_zone, GlobalZoneScope::Any)
+            } else {
+                rule.global_to_zone.matches(to_id)
+            };
+            if !rule.global_from_zone.matches(from_id) || !to_ok {
                 continue;
             }
             match try_match_rule(
@@ -4148,16 +4200,18 @@ fn evaluate_policy_result_counted(
     // table as the zone SSOT; `egress_zone_id` now reads the unambiguous zone
     // ledger instead, so correctly configured tunnels resolve to their actual
     // zone. The dedicated NoRoute entry point is the distinct no-egress case:
-    // it preserves the default decision because no egress interface exists.
-    // Host-inbound is NOT affected by these transit gates: LocalDelivery
-    // adjudicates through `evaluate_junos_host_policy_l3_aware`, which for
-    // `from_id == 0` consults only the from-any/global tiers (#10644) — an
-    // unmatched zone-0 host-bound flow still delivers. Lifelines (fxp0/em0/
-    // fab*/lo0) are unaffected throughout: `userspace_unbindable_netdev`
-    // excludes them by name, so they never bind and their host traffic never
-    // reaches either transit gate. UPGRADE NOTE (#10644 host-inbound half): a
-    // configured from-any/global `to-zone junos-host` DENY now fires for
-    // zone-0 host-bound ingress; intended explicit-deny semantics.
+    // it evaluates the egress-unconstrained tiers (#16021) and only an
+    // unmatched NoRoute flow reaches the default decision below, because no
+    // egress interface exists. Host-inbound is NOT affected by these transit
+    // gates: LocalDelivery adjudicates through
+    // `evaluate_junos_host_policy_l3_aware`, which for `from_id == 0`
+    // consults only the from-any/global tiers (#10644) — an unmatched zone-0
+    // host-bound flow still delivers. Lifelines (fxp0/em0/fab*/lo0) are
+    // unaffected throughout: `userspace_unbindable_netdev` excludes them by
+    // name, so they never bind and their host traffic never reaches either
+    // transit gate. UPGRADE NOTE (#10644 host-inbound half): a configured
+    // from-any/global `to-zone junos-host` DENY now fires for zone-0
+    // host-bound ingress; intended explicit-deny semantics.
     if from_id == 0 {
         // #9385: the unzoned cause counters obey the same count policy as the
         // per-rule and implicit-default counters — a side-effect-free

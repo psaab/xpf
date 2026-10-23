@@ -25,6 +25,15 @@ xpf (0.0.0) unstable; urgency=medium
 
 
 xpf (0.0.0) unstable; urgency=medium
+  * Policy: a NoRoute flow (no userspace FIB egress) now adjudicates
+    the egress-unconstrained tiers — `to-zone any`, both-any, and
+    `junos-global` with an `Any` to-zone scope — before the default
+    policy decides, so under `default-policy permit-all` an explicit
+    matching deny/reject drops the packet instead of delegating it to
+    the kernel FIB (#16021). Egress-constrained rules (exact pair,
+    `from-zone any to-zone <z>`, to-zone-scoped globals) stay
+    ineligible without an egress zone, and an unmatched NoRoute flow
+    still follows the default policy.
 
   * Fold (#16350): production PAT allocation now skips peer-owned
     candidates during the keyed probe (bounded by addresses x range,

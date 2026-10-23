@@ -142,22 +142,31 @@ fn noroute_is_delegated_when_the_default_permits_7480() {
 /// THE OPERATOR-SURPRISE CELL, and the one worth reading before an upgrade.
 ///
 /// A base NoRoute resolution has `egress_ifindex: 0`, so the to-zone is the
-/// #3110 unzoned sentinel — which makes the flow ineligible for zone-pair AND
-/// `junos-global` policies. So an explicit `permit` for the ingress zone pair
-/// does NOT rescue this zero-identity NoRoute frame: only the DEFAULT decides.
+/// #3110 unzoned sentinel — which makes the flow ineligible for the exact
+/// zone-pair AND egress-scoped `junos-global` policies. So an explicit
+/// `permit` for the ingress zone pair does NOT rescue this zero-identity
+/// NoRoute frame: only an egress-unconstrained rule (#16021) or the DEFAULT
+/// decides.
 #[test]
 fn a_zone_pair_permit_does_not_rescue_noroute_7480() {
-    let state = parse_policy_state(
-        "deny",
-        &[permit_lan_to_wan(Vec::new())],
-        &zones(),
-    );
+    let state = parse_policy_state("deny", &[permit_lan_to_wan(Vec::new())], &zones());
 
     // Sanity: the rule DOES permit when the egress zone actually resolves. If
     // this half ever fails the cell below proves nothing.
     assert!(
-        noroute_policy_denial(&state, LAN, WAN, 12, src(), dst(), 6, Some((40000, 443)), None, 64)
-            .is_none(),
+        noroute_policy_denial(
+            &state,
+            LAN,
+            WAN,
+            12,
+            src(),
+            dst(),
+            6,
+            Some((40000, 443)),
+            None,
+            64
+        )
+        .is_none(),
         "fixture premise: permit-lan-wan must permit a fully zoned flow"
     );
 
@@ -188,15 +197,22 @@ fn a_zone_pair_permit_does_not_rescue_noroute_7480() {
 /// preserved whenever a logical egress identity exists.
 #[test]
 fn flowless_ports_fail_closed_against_a_port_bearing_term_7480() {
-    let state = parse_policy_state(
-        "deny",
-        &[permit_lan_to_wan(vec![tcp_443_term()])],
-        &zones(),
-    );
+    let state = parse_policy_state("deny", &[permit_lan_to_wan(vec![tcp_443_term()])], &zones());
 
     assert!(
-        noroute_policy_denial(&state, LAN, WAN, 12, src(), dst(), 6, Some((40000, 443)), None, 64)
-            .is_none(),
+        noroute_policy_denial(
+            &state,
+            LAN,
+            WAN,
+            12,
+            src(),
+            dst(),
+            6,
+            Some((40000, 443)),
+            None,
+            64
+        )
+        .is_none(),
         "fixture premise: a flow-backed 443 flow must match the junos-https term"
     );
 
