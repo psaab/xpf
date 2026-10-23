@@ -12,6 +12,9 @@ xpf (0.0.0) unstable; urgency=medium
     worker's counters or reverse-row existence; retained victims have
     their queued Close delta cancelled and deferred sheds recheck the
     reply predicate; the stale-candidate scan per admission is bounded.
+    Fold 3: the reverse shared row itself is stamped with the forward
+    entry's rev counter at publish/promote/reverse-install, so the
+    cross-worker proof is readable on the row the check consults.
 
 xpf (0.0.0) unstable; urgency=medium
 

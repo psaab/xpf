@@ -554,6 +554,9 @@ pub(in crate::afxdp) fn install_reverse_session_from_forward_match(
     protocol: u8,
     tcp_flags: u8,
 ) -> (SessionLookup, bool) {
+    // #16019 fold 3: capture the forward key before the match is consumed —
+    // the reverse row's rev stamp reads the FORWARD entry's counters.
+    let forward_key_for_rev = forward_match.key.clone();
     let reverse = build_reverse_session_from_forward_match(
         forwarding,
         ha_state,
@@ -612,7 +615,9 @@ pub(in crate::afxdp) fn install_reverse_session_from_forward_match(
             tcp_close_class: 0,
             tcp_handshake_state: sessions.handshake_state_wire_for(reverse_key),
             pptp_call_ids: 0,
-            rev_packets: 0,
+            // #16019 fold 3: reverse row carries the FORWARD entry's rev
+            // counter (reverse packets fold onto the forward entry).
+            rev_packets: sessions.rev_packets_wire_for(&forward_key_for_rev),
             source_nat_static: reverse.aux.source_nat_static,
         };
         publish_shared_session(

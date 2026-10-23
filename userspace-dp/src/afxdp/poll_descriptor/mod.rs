@@ -7986,7 +7986,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 .expect("installed forward session info")
                                                 .handshake_state_wire,
                                             pptp_call_ids: 0,
-                                            rev_packets: 0,
+                                            // #16019 fold 3: stamp the REVERSE row
+                                            // with the forward entry's rev counter —
+                                            // shared_session_replied reads this row.
+                                            rev_packets: sessions
+                                                .rev_packets_wire_for(&flow.forward_key),
                                             source_nat_static: None,
                                         };
                                         publish_shared_session(
