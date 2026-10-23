@@ -603,6 +603,11 @@ type Daemon struct {
 	// reconciles against; production reads the LIVE active config so a commit
 	// removing flow export converges the loop.
 	flowRetryActiveCfg func() *config.Config
+	// #16303 F5: live session-counter poll feeding the flow trackers.
+	// Started once when the first exporter with a tracker publishes;
+	// test seam overrides the per-key counter source.
+	flowLiveFeedOnce sync.Once
+	flowLiveCounters func(key flowexport.FlowKey) (fwdPkts, fwdBytes, revPkts, revBytes uint64, ok bool)
 	// #4963 fixed-cardinality handoff-drop totals. Each exporter of a family
 	// is injected (SetHandoffCounter) with a pointer to the matching counter
 	// here, so a session-close record rejected because it reached an exporter

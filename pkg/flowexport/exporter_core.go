@@ -323,6 +323,23 @@ func (c *exporterCore) TouchFlow(key FlowKey, now time.Time, packets, bytes uint
 	}
 }
 
+// TouchFlowBidirectional feeds one live session snapshot's cumulative
+// forward+reverse counters (#16303 F5).
+func (c *exporterCore) TouchFlowBidirectional(key FlowKey, now time.Time, fwdPackets, fwdBytes, revPackets, revBytes uint64) {
+	if c.tracker != nil {
+		c.tracker.TouchBidirectional(key, now, fwdPackets, fwdBytes, revPackets, revBytes)
+	}
+}
+
+// TrackedKeys snapshots this exporter's tracked flow keys for the
+// daemon live-counter poll; nil when close-only.
+func (c *exporterCore) TrackedKeys() []FlowKey {
+	if c.tracker == nil {
+		return nil
+	}
+	return c.tracker.Keys()
+}
+
 // Tracked reports whether key is currently tracked or was selected at
 // open by a close-only exporter.
 func (c *exporterCore) Tracked(key FlowKey) bool {

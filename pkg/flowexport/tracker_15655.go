@@ -43,12 +43,14 @@ func FlowKeyFromClose(srcIP, dstIP net.IP, srcPort, dstPort uint16, proto uint8,
 }
 
 type trackedFlow struct {
-	key          FlowKey
-	start        time.Time
-	lastExport   time.Time
-	lastActivity time.Time
-	lastPackets  uint64
-	lastBytes    uint64
+	key            FlowKey
+	start          time.Time
+	lastExport     time.Time
+	lastActivity   time.Time
+	lastPackets    uint64
+	lastBytes      uint64
+	lastRevPackets uint64
+	lastRevBytes   uint64
 	// template fields copied onto emitted records
 	record FlowRecord
 }
@@ -98,7 +100,10 @@ func (t *FlowTracker) TrackFlowOpenSimple(key FlowKey, start time.Time) {
 }
 
 // Touch records cumulative counters for a flow at `now`; progress counts
-// as activity for the inactive timer.
+// as activity for the inactive timer. The daemon feeds this from live
+// session snapshots (#16303 F5), not only at close: without a live feed
+// the active timer exported zero counters and the inactive timer
+// removed continuously-active flows as if idle.
 func (t *FlowTracker) Touch(key FlowKey, now time.Time, packets, bytes uint64) {
 	if !t.enabled() {
 		return
@@ -116,6 +121,31 @@ func (t *FlowTracker) Touch(key FlowKey, now time.Time, packets, bytes uint64) {
 	}
 	f.record.Packets = packets
 	f.record.Bytes = bytes
+}
+
+// TouchBidirectional is Touch with the reverse-direction cumulative
+// counters the live session snapshot carries; IPFIX biflow records and
+// the close-time totals use the same forward+reverse sum the daemon's
+// close path feeds.
+func (t *FlowTracker) TouchBidirectional(key FlowKey, now time.Time, fwdPackets, fwdBytes, revPackets, revBytes uint64) {
+	if !t.enabled() {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	f, ok := t.flows[key]
+	if !ok {
+		return
+	}
+	packets := fwdPackets + revPackets
+	bytes := fwdBytes + revBytes
+	if packets > f.record.Packets+f.record.RevPackets || bytes > f.record.Bytes+f.record.RevBytes {
+		f.lastActivity = now
+	}
+	f.record.Packets = fwdPackets
+	f.record.Bytes = fwdBytes
+	f.record.RevPackets = revPackets
+	f.record.RevBytes = revBytes
 }
 
 // CollectDueExports returns interim (active-timeout) and final
@@ -141,6 +171,8 @@ func (t *FlowTracker) CollectDueExports(now time.Time) []FlowRecord {
 			f.lastExport = now
 			f.lastPackets = f.record.Packets
 			f.lastBytes = f.record.Bytes
+			f.lastRevPackets = f.record.RevPackets
+			f.lastRevBytes = f.record.RevBytes
 			// Window start for the next record is this export instant.
 			f.start = now
 		}
@@ -159,6 +191,8 @@ func (f *trackedFlow) deltaRecord(now time.Time) FlowRecord {
 	r.EndTime = now
 	r.Packets = f.record.Packets - f.lastPackets
 	r.Bytes = f.record.Bytes - f.lastBytes
+	r.RevPackets = f.record.RevPackets - f.lastRevPackets
+	r.RevBytes = f.record.RevBytes - f.lastRevBytes
 	return r
 }
 
@@ -173,6 +207,22 @@ func (t *FlowTracker) Close(key FlowKey) bool {
 	_, ok := t.flows[key]
 	delete(t.flows, key)
 	return ok
+}
+
+// Keys returns a snapshot of the currently tracked flow keys, so the
+// daemon's live-counter poll can address session lookups to exactly the
+// flows this tracker cares about instead of enumerating every session.
+func (t *FlowTracker) Keys() []FlowKey {
+	if !t.enabled() {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	keys := make([]FlowKey, 0, len(t.flows))
+	for k := range t.flows {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // Len reports tracked flow count (tests/metrics).

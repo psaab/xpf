@@ -45,6 +45,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/psaab/xpf/pkg/flowexport"
 	"github.com/psaab/xpf/pkg/logging"
 )
@@ -58,6 +59,102 @@ func (d *Daemon) ensureFlowExportOpenCallback() {
 	d.flowOpenCBOnce.Do(func() {
 		d.eventReader.AddCallback(d.flowExportOpenCallback)
 	})
+}
+
+// flowLiveFeedInterval is the live session-counter poll cadence. One
+// second matches the exporters' own 100ms collect tick granularity
+// without adding a control-plane round-trip per tick: each poll only
+// reads counters for flows some tracker actually holds.
+const flowLiveFeedInterval = time.Second
+
+// ensureFlowLiveFeed starts the daemon-lifetime poll that feeds live
+// session counters into every published exporter tracker (#16303 F5).
+// Before this, TouchFlow ran only inside the close callbacks, so the
+// active timer exported zero counters for long-lived flows and the
+// inactive timer forgot continuously-active flows as idle.
+func (d *Daemon) ensureFlowLiveFeed() {
+	if d == nil || d.daemonCtx == nil {
+		return
+	}
+	d.flowLiveFeedOnce.Do(func() {
+		go d.flowLiveFeedLoop(d.daemonCtx)
+	})
+}
+
+func (d *Daemon) flowLiveFeedLoop(ctx context.Context) {
+	t := time.NewTicker(flowLiveFeedInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			d.feedFlowLiveCounters(now)
+		}
+	}
+}
+
+// feedFlowLiveCounters polls the live counter source once per tracked
+// key per exporter group and touches that group's tracker. Keys are
+// unioned per group so a flow tracked by several template groups of one
+// instance is read once and fed to each. A key the source no longer
+// holds is skipped (its close or inactive expiry will forget it).
+func (d *Daemon) feedFlowLiveCounters(now time.Time) {
+	if b := d.flowBundle.Load(); b != nil {
+		for _, g := range b.groups {
+			for _, key := range g.exp.TrackedKeys() {
+				if fp, fb, rp, rb, ok := d.liveFlowCounters(key); ok {
+					g.exp.TouchFlowBidirectional(key, now, fp, fb, rp, rb)
+				}
+			}
+		}
+	}
+	if b := d.ipfixBundlePtr.Load(); b != nil {
+		for _, g := range b.groups {
+			for _, key := range g.exp.TrackedKeys() {
+				if fp, fb, rp, rb, ok := d.liveFlowCounters(key); ok {
+					g.exp.TouchFlowBidirectional(key, now, fp, fb, rp, rb)
+				}
+			}
+		}
+	}
+}
+
+// liveFlowCounters is the production per-key counter source: the
+// dataplane session store's forward entry for the tracked tuple. The
+// forward entry's counters already sum both directions' volume as the
+// helper maintains them (fwd = initiator direction, rev = responder).
+// Tests override d.flowLiveCounters instead of standing up a dataplane.
+func (d *Daemon) liveFlowCounters(key flowexport.FlowKey) (uint64, uint64, uint64, uint64, bool) {
+	if d.flowLiveCounters != nil {
+		return d.flowLiveCounters(key)
+	}
+	dp := d.dataplane()
+	if dp == nil {
+		return 0, 0, 0, 0, false
+	}
+	store := dp.Sessions()
+	if store == nil {
+		return 0, 0, 0, 0, false
+	}
+	if key.IsIPv6 {
+		var src, dst [16]byte
+		copy(src[:], parseHost(key.SrcIP).To16())
+		copy(dst[:], parseHost(key.DstIP).To16())
+		val, err := store.GetV6(dataplane.SessionKeyV6{SrcIP: src, DstIP: dst, SrcPort: key.SrcPort, DstPort: key.DstPort, Protocol: key.Protocol})
+		if err != nil {
+			return 0, 0, 0, 0, false
+		}
+		return val.FwdPackets, val.FwdBytes, val.RevPackets, val.RevBytes, true
+	}
+	var src, dst [4]byte
+	copy(src[:], parseHost(key.SrcIP).To4())
+	copy(dst[:], parseHost(key.DstIP).To4())
+	val, err := store.GetV4(dataplane.SessionKey{SrcIP: src, DstIP: dst, SrcPort: key.SrcPort, DstPort: key.DstPort, Protocol: key.Protocol})
+	if err != nil {
+		return 0, 0, 0, 0, false
+	}
+	return val.FwdPackets, val.FwdBytes, val.RevPackets, val.RevBytes, true
 }
 
 // v9Group is one running NetFlow v9 template-group exporter and its
@@ -299,6 +396,7 @@ func (d *Daemon) reconcileV9Exporter(cfg *config.Config) bool {
 		return true
 	}
 	d.ensureFlowExportOpenCallback()
+	d.ensureFlowLiveFeed()
 	d.flowCBOnce.Do(func() {
 		d.eventReader.AddCallback(d.flowExportCallback)
 	})
@@ -622,6 +720,7 @@ func (d *Daemon) reconcileIPFIXExporter(cfg *config.Config) bool {
 		return true
 	}
 	d.ensureFlowExportOpenCallback()
+	d.ensureFlowLiveFeed()
 	d.ipfixCBOnce.Do(func() {
 		d.eventReader.AddCallback(d.ipfixExportCallback)
 	})
