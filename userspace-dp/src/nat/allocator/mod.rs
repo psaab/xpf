@@ -6828,6 +6828,36 @@ impl SourceNatReservationSnapshot {
             {
                 return false;
             }
+            // #15948 fold 4: persistent retake. An idle address-only
+            // LEASE imported during the rollback gap owns the same
+            // reverse identity through the persistent indexes
+            // (owner counts / persistent_by_translated + grants), not
+            // the live map checked above. insert_address_only_owner
+            // would not touch those, but restoring would leave two
+            // owners of one reverse tuple — the imported lease for
+            // revalidation/GC, this flow live — and the lease's
+            // expiry could later free state under the live flow.
+            // Refuse when any OTHER idle address-only lease covers
+            // (translated, flow.dst) or any idle PAT lease covers it.
+            let no_lease_key = PersistentSourceKey {
+                protocol: self.flow.protocol,
+                src_ip: self.flow.src_ip,
+                src_port: 0,
+                routing_scope: self.flow.routing_scope,
+                remote: None,
+            };
+            let candidate = previous.persistent_key.as_ref().unwrap_or(&no_lease_key);
+            if live.persistent_address_only_contended_except(
+                &self.flow,
+                previous.translated,
+                previous.persistent_key,
+            ) || live.idle_pat_lease_covers(
+                previous.translated,
+                candidate,
+                Some((self.flow.dst_ip, self.flow.dst_port)),
+            ) {
+                return false;
+            }
         }
         // #15948 (H31-01): after a sole-holder rollback_flow the flow
         // entry is already unlinked, so absence is the expected

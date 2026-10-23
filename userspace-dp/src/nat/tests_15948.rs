@@ -164,6 +164,78 @@ fn restore_displaced_refuses_retaken_address_only_15948() {
     assert_eq!(alloc.debug_live_flow_translated(&retaker), Some(retaken));
 }
 
+/// H31-01 fold 4 — the exact lifecycle the reviewer specified:
+/// reserve an address-only incumbent, capture_and_replace it with a
+/// PAT replacement, roll the replacement back, let an IDLE LEASE
+/// IMPORT acquire the same reverse identity during the gap, then
+/// restore. The live-map guard cannot see the imported lease (it
+/// owns through the persistent indexes), so a restore that only
+/// checked live owners would overwrite the identity. Assert the
+/// restore refuses, the imported lease survives, and the owner
+/// counts are untouched.
+#[test]
+fn restore_displaced_refuses_persistent_retake_in_gap_15948() {
+    let alloc = PortAllocator::new(1, 1024, 65535);
+    let flow = v4_flow(40002);
+    let a1 = alloc
+        .reserve_address_only(flow, IpAddr::V4(POOL), 0, NatHolder::Untracked)
+        .expect("address-only reserve");
+    assert_eq!(a1.port, 40002);
+    let t2 = TranslatedTuple {
+        ip: IpAddr::V4(POOL),
+        port: 20022,
+    };
+    let mut snapshot = None;
+    assert!(alloc.reserve_flow_maybe_persistent(
+        flow,
+        t2,
+        0,
+        false,
+        2_000,
+        NatHolder::Untracked,
+        None,
+        true,
+        &mut snapshot,
+    ));
+    let snapshot = snapshot.expect("snapshot");
+    assert!(alloc.rollback_flow(flow, t2, 3_000, NatHolder::Untracked));
+    assert_eq!(alloc.debug_live_flow_translated(&flow), None);
+
+    // During the gap: an idle address-only lease import acquires
+    // (POOL, 40002) granting flow's exact remote (dst 8.8.8.8:443).
+    let addrs = vec![IpAddr::V4(POOL)];
+    let remote = (flow.dst_ip, flow.dst_port);
+    let src2 = Ipv4Addr::new(10, 0, 5, 5);
+    let rec = idle_record(src2, 11, remote, 40002);
+    assert_eq!(
+        alloc.import_idle_lease(&rec, &addrs, TIMEOUT_NS, 3_500),
+        IdleLeaseImport::Installed,
+        "the idle import must acquire the freed identity in the gap"
+    );
+    let counts_before = alloc.debug_persistent_address_only_owner_count();
+    assert!(counts_before > 0);
+
+    assert!(
+        !snapshot.restore_displaced(t2, 4_000),
+        "restore must refuse when an imported idle lease owns the identity"
+    );
+    // The imported lease and its accounting survive; the flow stays
+    // unrestored (fail-closed) rather than overwriting the identity.
+    assert_eq!(alloc.debug_live_flow_translated(&flow), None);
+    assert_eq!(
+        alloc.debug_persistent_address_only_owner_count(),
+        counts_before,
+        "refused restore must not disturb persistent owner counts"
+    );
+    // And the imported lease still contends a fresh import (it is the
+    // live owner of the identity, not debris).
+    let rec_again = idle_record(Ipv4Addr::new(10, 0, 6, 6), 12, remote, 40002);
+    assert_eq!(
+        alloc.import_idle_lease(&rec_again, &addrs, TIMEOUT_NS, 5_000),
+        IdleLeaseImport::SkippedIdentityBusy
+    );
+}
+
 fn idle_record(
     src: Ipv4Addr,
     egress_scope: u32,
