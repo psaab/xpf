@@ -65,6 +65,15 @@ TOTAL_CYCLES=12 CYCLE_INTERVAL=5 \
 ./scripts/userspace-ha-failover-validation.sh --duration 600 --parallel 8
 ```
 
+Dedicated aged-failover workflow (#16217 never-again gate; streams
+age 30 s before one RG1 failover, acceptance is zero zero-intervals —
+expect FAIL until the HA-inactive leg in
+[ha-failover-status.md](ha-failover-status.md) is closed):
+
+```bash
+./scripts/userspace-ha-failover-validation.sh --aged-failover --duration 60 --parallel 4
+```
+
 Dedicated steady-state split-RG fabric workflow:
 
 ```bash

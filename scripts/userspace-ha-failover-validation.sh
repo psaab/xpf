@@ -40,6 +40,8 @@ MAX_FAILOVER_POLICY_DENIED_DELTA="${MAX_FAILOVER_POLICY_DENIED_DELTA:-0}"
 MAX_RETRANSMITS="${MAX_RETRANSMITS:-}"
 MAX_RETRANSMITS_PER_GBPS="${MAX_RETRANSMITS_PER_GBPS:-}"
 POST_FAILOVER_OBSERVE="${POST_FAILOVER_OBSERVE:-10}"
+AGED_FAILOVER=0
+AGED_AGE="${AGED_AGE:-30}"
 TRANSITION_SAMPLE_SECONDS="${TRANSITION_SAMPLE_SECONDS:-10}"
 MAX_TRANSITION_KERNEL_RX_DROPPED_DELTA="${MAX_TRANSITION_KERNEL_RX_DROPPED_DELTA:-512}"
 MAX_TRANSITION_DIRECT_TX_NOFRAME_DELTA="${MAX_TRANSITION_DIRECT_TX_NOFRAME_DELTA:-512}"
@@ -69,6 +71,7 @@ while [[ $# -gt 0 ]]; do
 	--sync-wait) SYNC_WAIT="$2"; shift ;;
 	--failover-wait) FAILOVER_WAIT="$2"; shift ;;
 	--steady-only) STEADY_ONLY=1 ;;
+	--aged-failover) AGED_FAILOVER=1 ;;
 	*)
 		echo "unknown arg: $1" >&2
 		exit 2
@@ -82,6 +85,11 @@ if [[ -z "${IPERF_DURATION:-}" ]]; then
 	else
 		IPERF_DURATION=60
 	fi
+fi
+# Aged acceptance is NO zeros anywhere (the #16217 cells failed at
+# 25 SUM zero intervals); do not let a caller's looser default pass.
+if (( AGED_FAILOVER == 1 )); then
+	MAX_ZERO_INTERVALS=0
 fi
 
 # shellcheck disable=SC1090
@@ -114,14 +122,20 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 required_iperf_duration() {
 	local cycles="$1"
 	local interval="$2"
+	if (( AGED_FAILOVER == 1 )); then
+		printf '%s\n' "$(( AGED_AGE + 30 ))"
+		return 0
+	fi
 	if (( STEADY_ONLY == 1 )); then
 		printf '%s\n' "$(( PRE_FAILOVER_OBSERVE + SYNC_WAIT + 10 ))"
 		return 0
 	fi
 	if (( cycles > 1 )); then
 		printf '%s\n' "$(( PRE_FAILOVER_OBSERVE + SYNC_WAIT + cycles * (interval * 2 + FAILOVER_WAIT) + 20 ))"
+		return 0
 	else
 		printf '%s\n' "$(( POST_FAILOVER_OBSERVE + SYNC_WAIT + 10 ))"
+		return 0
 	fi
 }
 
@@ -1547,7 +1561,26 @@ fi
 
 validate_pre_failover_health "$SOURCE_VM" "$(node_name "$SOURCE_NODE")"
 
-if (( STEADY_ONLY == 1 )); then
+if (( AGED_FAILOVER == 1 )); then
+	if (( TOTAL_CYCLES != 1 )); then
+		die "--aged-failover requires a single failover cycle (TOTAL_CYCLES=1)"
+	fi
+	# Never-again gate for #16217: streams must AGE past the 20s TCP
+	# opening window and the 10s conntrack-refresh cycle before the
+	# failover, otherwise a young-flow pass hides every leg of the
+	# aged-failover chain (see docs/ha-failover-status.md). The
+	# pre-failover health window above only observes ~10s, so wait
+	# out the remainder here; pre-failover zeros still fail via
+	# validate_whole_run_metrics (MAX_PREFLIGHT_* defaults are 0).
+	aged_wait=$(( AGED_AGE - PRE_FAILOVER_OBSERVE - SYNC_WAIT ))
+	if (( aged_wait > 0 )); then
+		info "aged-failover: letting streams age ${aged_wait}s more (target age ${AGED_AGE}s) before RG${RG} failover"
+		if ! cycle_sleep "$aged_wait"; then
+			fail "aged-failover: iperf3 exited before streams reached ${AGED_AGE}s of age"
+		fi
+	fi
+	run_failover_phase 1 "$SOURCE_NODE" "$TARGET_NODE" "failover" 1
+elif (( STEADY_ONLY == 1 )); then
 	info "steady-only mode: skipping RG${RG} failover"
 elif (( TOTAL_CYCLES == 1 )); then
 	run_failover_phase 1 "$SOURCE_NODE" "$TARGET_NODE" "failover" 1
