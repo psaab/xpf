@@ -160,6 +160,86 @@ func TestRunRelay_RateLimit_5670(t *testing.T) {
 	}
 }
 
+// TestRunRelay_AggregateGate_MultiIdentity is the fold-6 aggregate-only
+// binder: many DISTINCT senders, each individually under its per-sender
+// fairness allowance, whose SUM exceeds the aggregate. Only the
+// aggregate gate can bound this traffic — fairness alone admits all of
+// it. It exists so the aggregate layer has its own fail-on-revert proof
+// independent of the fairness layer (the single-sender tests above go
+// red when EITHER layer is removed; this one isolates the aggregate).
+//
+// Shape (frozen clock, rate 5): aggregate burst = relayBurstFor(5) = 10;
+// per-sender fairness burst = fairBurstFloor = 8. Four senders x 4
+// packets = 16 packets, each sender at 4 <= 8 (fairness-clean), total
+// 16 > 10 (aggregate-exceeding). GREEN: exactly 10 relayed, 6 dropped.
+//
+// MUTATION (verified during the fold): remove ONLY the aggregate check
+// inside admitWithAggregate (fairness still enforced) -> all 16 are
+// relayed, 0 dropped -> this test goes RED on both assertions.
+// Removing fairness instead keeps this test GREEN (the aggregate still
+// caps at 10), which is exactly the isolation being pinned.
+func TestRunRelay_AggregateGate_MultiIdentity(t *testing.T) {
+	const rate = 5
+	aggBurst := relayBurstFor(rate) // 10
+	const senders = 4
+	const perSender = 4 // <= fairBurstFloor (8): fairness-clean per sender
+	n := senders * perSender
+
+	// Round-robin interleaving matters: the aggregate must be consumed
+	// across identities, not drained by sender 1 before others arrive.
+	pending := make([][]byte, 0, n)
+	for round := 0; round < perSender; round++ {
+		for s := 0; s < senders; s++ {
+			pending = append(pending, discoverWire(t, byte(0x10+s)))
+		}
+	}
+
+	client := newFakeConn()
+	client.pending = pending
+	server := newFakeConn()
+	factory, _ := recordingFactory(client, server)
+	m := testManager(factory)
+	frozen := time.Unix(1_700_000_000, 0)
+	m.now = func() time.Time { return frozen }
+
+	m.Apply(context.Background(), relayConfigWithRate(rate))
+	defer m.Stop()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for client.readCalls.Load() < int64(n+1) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := client.readCalls.Load(); got < int64(n+1) {
+		t.Fatalf("relay did not consume all %d datagrams (readCalls=%d)", n, got)
+	}
+
+	if got := server.writeCount(); got != aggBurst {
+		t.Errorf("relayed %d datagrams, want %d (aggregate burst) — "+
+			"multi-identity traffic not bounded by the aggregate gate "+
+			"(each sender was fairness-clean at %d <= %d)",
+			got, aggBurst, perSender, fairBurstFloor)
+	}
+	var relayed, dropped uint64
+	for _, s := range m.Stats() {
+		relayed += s.RequestsRelayed
+		dropped += s.RequestsDroppedRateLimit
+	}
+	if relayed != uint64(aggBurst) {
+		t.Errorf("RequestsRelayed = %d, want %d (aggregate burst)", relayed, aggBurst)
+	}
+	if dropped != uint64(n-aggBurst) {
+		t.Errorf("RequestsDroppedRateLimit = %d, want %d (aggregate excess) — "+
+			"aggregate gate not the binding constraint", dropped, n-aggBurst)
+	}
+	// Per-sender fairness-cleanliness witness: no single sender could
+	// have produced the drops — each sent only perSender <= burst. If a
+	// future change makes per-sender burst < perSender, this test's
+	// premise (not its assertions) is what must be revisited first.
+	if perSender > fairBurstFloor {
+		t.Fatalf("test premise broken: perSender %d > fairness burst %d", perSender, fairBurstFloor)
+	}
+}
+
 // TestRunRelay_RateLimit_DefaultBound proves an UNCONFIGURED relay still gets
 // both bounds: with no `overrides maximum-packet-rate`, the resolver applies
 // defaultMaxPacketRate (100 pps) so the aggregate burst is
