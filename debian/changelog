@@ -1,5 +1,20 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Snapshot summary counts verified (#16056, A6-06): the Rust
+    apply handler now refuses a snapshot whose summary
+    interface_count/zone_count disagree with the built sections,
+    and refuses an empty interfaces/zones install over a non-empty
+    installed set (both-zeroed shape), keeping prior forwarding
+    and counting the refusal on snapshot_policy_mismatch_total.
+    Go re-derives InterfaceCount/ZoneCount from the built sections
+    (post-quarantine for zones) in the full builder, the link
+    refresh, and the apply-time rebuild, and the send gate refuses
+    a mismatch known-unsent. Protocol v67 -> v68 fences a helper
+    that would ignore the counts and install a dropped section.
+
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Firewall: poison the uncovered-family `except` arm on tolerant load
     (#16001, EX-4). A sole-`except` prefix-list covering no address of
     its pool's family (v4-only `except` under `family any` / `inet6`)

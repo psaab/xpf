@@ -302,7 +302,13 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // MirrorConfigSnapshot carries ingress_unit; a v65 helper keys a
 // tunnel unit-scoped mirror by (ifindex, VID 0) alone and mirrors
 // every sibling tunnel unit — the defect.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 67;
+// v66 -> v67 (#15946): FlowSnapshot carries tcp_time_wait_session_ageout
+// and tcp_time_wait_apply_to_half_closed.
+// v67 -> v68 (#16056): SnapshotSummary.interface_count/zone_count now
+// count the BUILT interfaces/zones sections (post-quarantine for zones)
+// and the helper refuses a summary/section mismatch; a v67 helper
+// ignores the counts and would install a dropped-section snapshot.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 68;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

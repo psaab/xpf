@@ -21,6 +21,9 @@ use super::security::{
     ScreenMissingProfileRef, ScreenProfileSnapshot, ThreeColorPolicerSnapshot,
 };
 
+/// #16056: `interface_count`/`zone_count`/`policy_count` count the BUILT
+/// sections the helper installs (post-quarantine for zones); the apply
+/// handler refuses a summary/section mismatch at protocol v68.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct SnapshotSummary {
     #[serde(rename = "host_name")]

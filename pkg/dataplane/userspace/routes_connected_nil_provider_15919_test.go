@@ -101,6 +101,8 @@ func TestUnwiredPublishersRefuseClearedProvider15919(t *testing.T) {
 	peerRG1 := RGPrimaryProvider(func(rgID int) (bool, bool) { return rgID != 1, true })
 	snap := mustBuildSnapshot(t, cfg, config.UserspaceConfig{}, 7, 0)
 	snap.Interfaces = markConnectedRGPeerOwned(cfg, connectedRGInterfaces15742(), peerRG1)
+	snap.Summary.InterfaceCount = len(snap.Interfaces) // #16056: replaced rows above
+	snap.Summary.ZoneCount = len(snap.Zones)
 	var err error
 	snap.Routes, _, err = buildRouteSnapshotsWithRGPrimary(cfg, snap.Interfaces, nil, peerRG1)
 	if err != nil {

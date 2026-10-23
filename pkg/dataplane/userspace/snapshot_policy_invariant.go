@@ -238,6 +238,20 @@ func (m *Manager) validateSnapshotForSend(snap *ConfigSnapshot) error {
 				errSnapshotPolicyAction, snap.Policies[i].Name, snap.Policies[i].Action, snap.Generation)
 		}
 	}
+	// #16056 (A6-06): the interface/zone twin of the policy arm below.
+	// A dropped Interfaces/Zones section with the summary retained is
+	// refused known-unsent here (and again by the helper), so a partial
+	// publisher that zeroed a section never unbinds the dataplane.
+	if snap.Summary.InterfaceCount != len(snap.Interfaces) || snap.Summary.ZoneCount != len(snap.Zones) {
+		slog.Error("userspace: refusing snapshot send: summary section count does not match published sections",
+			"interface_count", snap.Summary.InterfaceCount,
+			"interfaces_len", len(snap.Interfaces),
+			"zone_count", snap.Summary.ZoneCount,
+			"zones_len", len(snap.Zones),
+			"generation", snap.Generation)
+		return fmt.Errorf("%w: summary interface_count=%d but snapshot carries %d interfaces, zone_count=%d but snapshot carries %d zones",
+			errSnapshotPolicyMismatch, snap.Summary.InterfaceCount, len(snap.Interfaces), snap.Summary.ZoneCount, len(snap.Zones))
+	}
 	if snap.Summary.PolicyCount != len(snap.Policies) {
 		slog.Error("userspace: refusing snapshot send: summary policy count does not match published policies",
 			"policy_count", snap.Summary.PolicyCount,

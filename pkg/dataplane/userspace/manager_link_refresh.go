@@ -161,10 +161,12 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 	} else {
 		next.ZoneSetValidated = len(next.Zones) > 0 && len(next.zoneIDCollisions) == 0
 	}
-	if len(next.zoneIDCollisions) > 0 {
-		next.Summary.ZoneCount = len(next.Zones)
-		next.Summary.PolicyCount = len(next.Policies)
-	}
+	// #16056: re-derive every resized section's summary count
+	// unconditionally (Interfaces were rebuilt above; quarantine may
+	// have shrunk Zones/Policies) — the helper refuses a mismatch.
+	next.Summary.InterfaceCount = len(next.Interfaces)
+	next.Summary.ZoneCount = len(next.Zones)
+	next.Summary.PolicyCount = len(next.Policies)
 	reportInterfaceSNATPoolOverlaps(&next)
 	// Policy refusal reasons must name the exact post-quarantine policy/zone
 	// sets this refresh publishes (builder.go recomputes them the same way);

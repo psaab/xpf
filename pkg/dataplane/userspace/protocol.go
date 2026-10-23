@@ -477,7 +477,13 @@ const (
 	// and tcp_time_wait_apply_to_half_closed; a v66 helper ignores them and
 	// keeps TIME_WAIT on its window even under `session-ageout`, and keeps
 	// half-closed sessions on the closing window (the defects).
-	ProtocolVersion = 67
+	// v67 -> v68 (#16056): SnapshotSummary.interface_count/zone_count now
+	// count the BUILT interfaces/zones sections (post-quarantine for
+	// zones) and the helper refuses a summary/section mismatch. A v67
+	// helper ignores the counts and would install a snapshot whose
+	// interfaces/zones section was dropped while the summary retained
+	// it — unbinding all workers and persisting as baseline.
+	ProtocolVersion = 68
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -1273,13 +1279,16 @@ type FlowSnapshot struct {
 }
 
 type SnapshotSummary struct {
-	HostName       string `json:"host_name"`
-	DataplaneType  string `json:"dataplane_type"`
-	InterfaceCount int    `json:"interface_count"`
-	ZoneCount      int    `json:"zone_count"`
-	PolicyCount    int    `json:"policy_count"`
-	SchedulerCount int    `json:"scheduler_count"`
-	HAEnabled      bool   `json:"ha_enabled"`
+	HostName      string `json:"host_name"`
+	DataplaneType string `json:"dataplane_type"`
+	// InterfaceCount/ZoneCount/PolicyCount count the BUILT sections the
+	// helper installs (post-quarantine for zones, #16056); the helper
+	// refuses a summary/section mismatch at protocol v68.
+	InterfaceCount int  `json:"interface_count"`
+	ZoneCount      int  `json:"zone_count"`
+	PolicyCount    int  `json:"policy_count"`
+	SchedulerCount int  `json:"scheduler_count"`
+	HAEnabled      bool `json:"ha_enabled"`
 }
 
 type InterfaceSnapshot struct {

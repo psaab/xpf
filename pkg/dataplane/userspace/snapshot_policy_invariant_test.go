@@ -365,8 +365,10 @@ func TestFullBuilderPopulatesEverySnapshotField(t *testing.T) {
 	if snap.Summary.ZoneCount != len(snap.Zones) {
 		t.Errorf("Summary.ZoneCount = %d, want len(Zones) = %d", snap.Summary.ZoneCount, len(snap.Zones))
 	}
-	if snap.Summary.InterfaceCount != len(cfg.Interfaces.Interfaces) {
-		t.Errorf("Summary.InterfaceCount = %d, want %d configured interfaces", snap.Summary.InterfaceCount, len(cfg.Interfaces.Interfaces))
+	// #16056: InterfaceCount counts the built rows the helper installs,
+	// not the authored interface map.
+	if snap.Summary.InterfaceCount != len(snap.Interfaces) {
+		t.Errorf("Summary.InterfaceCount = %d, want len(Interfaces) = %d built rows", snap.Summary.InterfaceCount, len(snap.Interfaces))
 	}
 	if snap.Summary.HostName != cfg.System.HostName || snap.Summary.DataplaneType != cfg.System.DataplaneType {
 		t.Errorf("Summary identity = %q/%q, want %q/%q from config", snap.Summary.HostName, snap.Summary.DataplaneType, cfg.System.HostName, cfg.System.DataplaneType)
@@ -863,6 +865,10 @@ func TestSyncRetryRemarksUnlandedClear(t *testing.T) {
 	retained.Config = nil // config-less retained clone: revalidation keeps author rows (no RG resample under the sync lock)
 	retained.Policies = nil
 	retained.Summary.PolicyCount = 0
+	// #16056: clearing policies legitimately empties only that section;
+	// Interfaces/Zones stay with their summary counts (the helper's
+	// empty-over-nonempty arm refuses a both-zeroed section with no
+	// full-clear signal for it).
 	retained.ClearPolicies = false // spent by the first send
 	retained.fullBuild = true      // still the Compile's own build in debt
 	retained.Generation = 8

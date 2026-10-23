@@ -2066,6 +2066,10 @@ fn apply_snapshot_with_wild_ifindex_is_refused_without_install_9900() {
         generation: 1,
         fib_generation: 1,
         generated_at: chrono::Utc::now(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![InterfaceSnapshot {
             name: "ge-0/0/0".to_string(),
             linux_name: "ge-0-0-0".to_string(),
@@ -2439,6 +2443,7 @@ fn apply_snapshot_policy_count_mismatch_is_refused_and_counted() {
             generation: 1,
             generated_at: chrono::Utc::now(),
             summary: SnapshotSummary {
+                zone_count: 2,
                 policy_count: 1,
                 ..SnapshotSummary::default()
             },
@@ -2559,6 +2564,10 @@ fn apply_snapshot_both_zeroed_over_installed_is_refused() {
             version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
             generation: 1,
             generated_at: chrono::Utc::now(),
+            summary: SnapshotSummary {
+                zone_count: 2,
+                ..SnapshotSummary::default()
+            },
             zones: zones(),
             ..ConfigSnapshot::default()
         });
@@ -2573,6 +2582,7 @@ fn apply_snapshot_both_zeroed_over_installed_is_refused() {
             generation: 1,
             generated_at: chrono::Utc::now(),
             summary: SnapshotSummary {
+                zone_count: 2,
                 policy_count: 1,
                 ..SnapshotSummary::default()
             },
@@ -2589,7 +2599,10 @@ fn apply_snapshot_both_zeroed_over_installed_is_refused() {
         version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
         generation: 2,
         generated_at: chrono::Utc::now(),
-        summary: SnapshotSummary::default(),
+        summary: SnapshotSummary {
+            zone_count: 2,
+            ..SnapshotSummary::default()
+        },
         policies: Vec::new(),
         zones: zones(),
         ..ConfigSnapshot::default()
@@ -2606,6 +2619,309 @@ fn apply_snapshot_both_zeroed_over_installed_is_refused() {
     assert_eq!(guard.status.last_snapshot_generation, 1);
     let installed = guard.snapshot.as_ref().expect("prior snapshot retained");
     assert_eq!(installed.policies.len(), 1, "prior policies must stay installed");
+}
+
+
+/// #16056 (A6-06): a snapshot whose summary.interface_count/zone_count
+/// disagree with the built sections it carries — interface_count=2 with
+/// interfaces=[] is the literal-omission shape one section over from
+/// 670274c712 — must be REFUSED before any mutation, keeping the prior
+/// snapshot/bindings, and counted on snapshot_policy_mismatch_total.
+/// The same holds for zone_count=2/zones=[] with global-only policies
+/// (zone-pair policies would already fail the preflight closed).
+///
+/// FAIL-ON-REVERT: removing the section-count arm from the apply handler
+/// installs both shapes below (zero bindings, prior unbound).
+#[test]
+fn apply_snapshot_section_count_mismatch_is_refused_and_counted_16056() {
+    use crate::protocol::snapshot::SnapshotSummary;
+    use crate::{ConfigSnapshot, PolicyRuleSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    let state = new_state(ProcessStatus::default());
+    let zones = || {
+        vec![
+            crate::ZoneSnapshot {
+                name: "lan".to_string(),
+                id: 100,
+                ..crate::ZoneSnapshot::default()
+            },
+            crate::ZoneSnapshot {
+                name: "wan".to_string(),
+                id: 200,
+                ..crate::ZoneSnapshot::default()
+            },
+        ]
+    };
+    let ifaces = || {
+        vec![
+            crate::protocol::snapshot::InterfaceSnapshot {
+                name: "ge-0/0/0".to_string(),
+                linux_name: "ge-0-0-0".to_string(),
+                ifindex: 10,
+                zone: "lan".to_string(),
+                ..crate::protocol::snapshot::InterfaceSnapshot::default()
+            },
+            crate::protocol::snapshot::InterfaceSnapshot {
+                name: "ge-0/0/1".to_string(),
+                linux_name: "ge-0-0-1".to_string(),
+                ifindex: 11,
+                zone: "wan".to_string(),
+                ..crate::protocol::snapshot::InterfaceSnapshot::default()
+            },
+        ]
+    };
+    // Seed a good snapshot: 1 global policy, 2 zones, 2 interfaces.
+    {
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            generation: 1,
+            generated_at: chrono::Utc::now(),
+            summary: SnapshotSummary {
+                interface_count: 2,
+                zone_count: 2,
+                policy_count: 1,
+                ..SnapshotSummary::default()
+            },
+            policies: vec![PolicyRuleSnapshot {
+                rule_id: "global/allow-all".to_string(),
+                name: "allow-all".to_string(),
+                from_zone: "junos-global".to_string(),
+                to_zone: "junos-global".to_string(),
+                source_addresses: vec!["any".to_string()],
+                destination_addresses: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                action: "permit".to_string(),
+                ..PolicyRuleSnapshot::default()
+            }],
+            zones: zones(),
+            interfaces: ifaces(),
+            ..ConfigSnapshot::default()
+        });
+        let response = run_request(state.clone(), request);
+        assert!(response.ok, "seed apply must succeed: {}", response.error);
+    }
+    // interface_count=2 but interfaces=[] (section dropped, summary kept).
+    {
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            generation: 2,
+            generated_at: chrono::Utc::now(),
+            summary: SnapshotSummary {
+                interface_count: 2,
+                zone_count: 2,
+                policy_count: 1,
+                ..SnapshotSummary::default()
+            },
+            policies: vec![PolicyRuleSnapshot {
+                rule_id: "global/allow-all".to_string(),
+                name: "allow-all".to_string(),
+                from_zone: "junos-global".to_string(),
+                to_zone: "junos-global".to_string(),
+                source_addresses: vec!["any".to_string()],
+                destination_addresses: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                action: "permit".to_string(),
+                ..PolicyRuleSnapshot::default()
+            }],
+            zones: zones(),
+            interfaces: Vec::new(),
+            ..ConfigSnapshot::default()
+        });
+        let response = run_request(state.clone(), request);
+        assert!(!response.ok, "interface-omission apply must be refused");
+        assert!(
+            response.error.contains("snapshot section count mismatch"),
+            "unexpected error: {}",
+            response.error
+        );
+    }
+    // zone_count=2 but zones=[] with global-only policies.
+    {
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            generation: 2,
+            generated_at: chrono::Utc::now(),
+            summary: SnapshotSummary {
+                interface_count: 2,
+                zone_count: 2,
+                policy_count: 1,
+                ..SnapshotSummary::default()
+            },
+            policies: vec![PolicyRuleSnapshot {
+                rule_id: "global/allow-all".to_string(),
+                name: "allow-all".to_string(),
+                from_zone: "junos-global".to_string(),
+                to_zone: "junos-global".to_string(),
+                source_addresses: vec!["any".to_string()],
+                destination_addresses: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                action: "permit".to_string(),
+                ..PolicyRuleSnapshot::default()
+            }],
+            zones: Vec::new(),
+            interfaces: ifaces(),
+            ..ConfigSnapshot::default()
+        });
+        let response = run_request(state.clone(), request);
+        assert!(!response.ok, "zone-omission apply must be refused");
+        assert!(
+            response.error.contains("snapshot section count mismatch"),
+            "unexpected error: {}",
+            response.error
+        );
+    }
+    let guard = state.lock().expect("state");
+    assert_eq!(
+        guard.snapshot_policy_mismatch_total, 2,
+        "each refused apply must increment the dedicated mismatch counter"
+    );
+    assert_eq!(
+        guard.status.snapshot_policy_mismatch_total, 2,
+        "refusals must be visible in status immediately"
+    );
+    assert_eq!(
+        guard.status.last_snapshot_generation, 1,
+        "refused applies must not advance the reported generation"
+    );
+    let installed = guard.snapshot.as_ref().expect("prior snapshot retained");
+    assert_eq!(installed.generation, 1, "prior snapshot must stay installed");
+    assert_eq!(installed.interfaces.len(), 2, "prior interfaces must stay installed");
+    assert_eq!(installed.zones.len(), 2, "prior zones must stay installed");
+    assert_eq!(installed.policies.len(), 1, "prior policies must stay installed");
+}
+
+/// #16056 (A6-06, joint-omission arm): both transmitted fields zeroed
+/// (interface_count=0/interfaces=[], zone_count=0/zones=[]) over a
+/// non-empty installed set must ALSO refuse. A legitimate empty FIRST
+/// apply (nothing installed) still succeeds.
+///
+/// FAIL-ON-REVERT: removing the empty-over-nonempty arm admits the
+/// both-zeroed shapes below over the installed snapshot.
+#[test]
+fn apply_snapshot_both_zeroed_sections_over_installed_is_refused_16056() {
+    use crate::protocol::snapshot::SnapshotSummary;
+    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    let zones = || {
+        vec![
+            crate::ZoneSnapshot {
+                name: "lan".to_string(),
+                id: 100,
+                ..crate::ZoneSnapshot::default()
+            },
+            crate::ZoneSnapshot {
+                name: "wan".to_string(),
+                id: 200,
+                ..crate::ZoneSnapshot::default()
+            },
+        ]
+    };
+    let ifaces = || {
+        vec![
+            crate::protocol::snapshot::InterfaceSnapshot {
+                name: "ge-0/0/0".to_string(),
+                linux_name: "ge-0-0-0".to_string(),
+                ifindex: 10,
+                zone: "lan".to_string(),
+                ..crate::protocol::snapshot::InterfaceSnapshot::default()
+            },
+            crate::protocol::snapshot::InterfaceSnapshot {
+                name: "ge-0/0/1".to_string(),
+                linux_name: "ge-0-0-1".to_string(),
+                ifindex: 11,
+                zone: "wan".to_string(),
+                ..crate::protocol::snapshot::InterfaceSnapshot::default()
+            },
+        ]
+    };
+    // Legitimate empty first apply: nothing installed yet.
+    {
+        let fresh = new_state(ProcessStatus::default());
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            generation: 1,
+            generated_at: chrono::Utc::now(),
+            ..ConfigSnapshot::default()
+        });
+        let response = run_request(fresh, request);
+        assert!(response.ok, "empty first apply must succeed: {}", response.error);
+    }
+    let state = new_state(ProcessStatus::default());
+    // Seed 2 zones + 2 interfaces.
+    {
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            generation: 1,
+            generated_at: chrono::Utc::now(),
+            summary: SnapshotSummary {
+                interface_count: 2,
+                zone_count: 2,
+                ..SnapshotSummary::default()
+            },
+            zones: zones(),
+            interfaces: ifaces(),
+            ..ConfigSnapshot::default()
+        });
+        let response = run_request(state.clone(), request);
+        assert!(response.ok, "seed apply must succeed: {}", response.error);
+    }
+    // Both-zeroed interfaces over the installed set.
+    {
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            generation: 2,
+            generated_at: chrono::Utc::now(),
+            summary: SnapshotSummary {
+                interface_count: 0,
+                zone_count: 2,
+                ..SnapshotSummary::default()
+            },
+            zones: zones(),
+            interfaces: Vec::new(),
+            ..ConfigSnapshot::default()
+        });
+        let response = run_request(state.clone(), request);
+        assert!(!response.ok, "both-zeroed interfaces over installed must be refused");
+        assert!(
+            response.error.contains("no full-clear signal"),
+            "unexpected error: {}",
+            response.error
+        );
+    }
+    // Both-zeroed zones over the installed set.
+    {
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            generation: 2,
+            generated_at: chrono::Utc::now(),
+            summary: SnapshotSummary {
+                interface_count: 2,
+                zone_count: 0,
+                ..SnapshotSummary::default()
+            },
+            zones: Vec::new(),
+            interfaces: ifaces(),
+            ..ConfigSnapshot::default()
+        });
+        let response = run_request(state.clone(), request);
+        assert!(!response.ok, "both-zeroed zones over installed must be refused");
+        assert!(
+            response.error.contains("no full-clear signal"),
+            "unexpected error: {}",
+            response.error
+        );
+    }
+    let guard = state.lock().expect("state");
+    assert_eq!(guard.snapshot_policy_mismatch_total, 2);
+    assert_eq!(guard.status.last_snapshot_generation, 1);
+    let installed = guard.snapshot.as_ref().expect("prior snapshot retained");
+    assert_eq!(installed.interfaces.len(), 2, "prior interfaces must stay installed");
+    assert_eq!(installed.zones.len(), 2, "prior zones must stay installed");
 }
 
 #[test]
@@ -2662,6 +2978,7 @@ fn apply_snapshot_reuses_policy_preflight_on_same_plan_refresh_11005() {
         fib_generation: generation as u32,
         generated_at: chrono::Utc::now(),
         summary: crate::protocol::snapshot::SnapshotSummary {
+            zone_count: 2,
             policy_count: 1,
             ..crate::protocol::snapshot::SnapshotSummary::default()
         },
@@ -2755,6 +3072,10 @@ fn apply_snapshot_same_plan_build_failure_rejects_and_keeps_prior_3766() {
         generation,
         fib_generation: generation as u32,
         generated_at: chrono::Utc::now(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![iface(address)],
         ..ConfigSnapshot::default()
     };
@@ -2911,6 +3232,10 @@ fn apply_snapshot_full_reconcile_build_failure_rejects_and_keeps_prior_3789() {
         generated_at: chrono::Utc::now(),
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![tunnel_iface_3789("10.0.0.0/33")],
         ..ConfigSnapshot::default()
     });
@@ -2968,6 +3293,10 @@ fn apply_snapshot_same_plan_needs_reconcile_build_failure_rejects_and_keeps_prio
         defer_workers: true,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![tunnel_iface_3789("10.0.0.1/24")],
         ..ConfigSnapshot::default()
     };
@@ -3008,6 +3337,10 @@ fn apply_snapshot_same_plan_needs_reconcile_build_failure_rejects_and_keeps_prio
         defer_workers: false,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![tunnel_iface_3789("10.0.0.0/33")],
         ..ConfigSnapshot::default()
     });
@@ -3082,6 +3415,11 @@ fn post_teardown_spawn_failure_fails_closed_no_persist_4952() {
         defer_workers: true,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 0,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![tunnel_iface_3789("10.0.0.1/24")],
         ..ConfigSnapshot::default()
     };
@@ -3132,6 +3470,11 @@ fn post_teardown_spawn_failure_fails_closed_no_persist_4952() {
         defer_workers: false,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 0,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![tunnel_iface_3789("10.0.0.1/24")],
         ..ConfigSnapshot::default()
     });
@@ -3272,6 +3615,11 @@ fn full_apply_post_teardown_spawn_failure_fails_closed_no_persist_6140() {
         defer_workers: false,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![data_iface_6140("ge-0/0/1", "ge-0-0-1", 11)],
         zones: vec![trust_zone_6140()],
         ..ConfigSnapshot::default()
@@ -3287,6 +3635,11 @@ fn full_apply_post_teardown_spawn_failure_fails_closed_no_persist_6140() {
         defer_workers: false,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![data_iface_6140("ge-0/0/2", "ge-0-0-2", 12)],
         zones: vec![trust_zone_6140()],
         ..ConfigSnapshot::default()
@@ -3449,6 +3802,11 @@ fn full_apply_post_spawn_inthread_bind_failure_fails_closed_no_persist_5143() {
         defer_workers: false,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![data_iface_6140("ge-0/0/1", "ge-0-0-1", 11)],
         zones: vec![trust_zone_6140()],
         ..ConfigSnapshot::default()
@@ -3464,6 +3822,11 @@ fn full_apply_post_spawn_inthread_bind_failure_fails_closed_no_persist_5143() {
         defer_workers: false,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![data_iface_6140("ge-0/0/2", "ge-0-0-2", 12)],
         zones: vec![trust_zone_6140()],
         ..ConfigSnapshot::default()
@@ -3604,6 +3967,11 @@ fn full_apply_post_teardown_rollback_restores_prior_bindings_14959() {
         defer_workers: false,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![data_iface_6140("ge-0/0/1", "ge-0-0-1", 11)],
         zones: vec![trust_zone_6140()],
         ..ConfigSnapshot::default()
@@ -3616,6 +3984,11 @@ fn full_apply_post_teardown_rollback_restores_prior_bindings_14959() {
         defer_workers: false,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![data_iface_6140("ge-0/0/2", "ge-0-0-2", 12)],
         zones: vec![trust_zone_6140()],
         ..ConfigSnapshot::default()
@@ -3723,6 +4096,11 @@ fn same_plan_post_teardown_rollback_restores_prior_bindings_14959() {
         defer_workers: true,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 0,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![tunnel_iface_3789("10.0.0.1/24")],
         ..ConfigSnapshot::default()
     };
@@ -3764,6 +4142,11 @@ fn same_plan_post_teardown_rollback_restores_prior_bindings_14959() {
         defer_workers: false,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 0,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![tunnel_iface_3789("10.0.0.1/24")],
         ..ConfigSnapshot::default()
     });
@@ -3852,6 +4235,10 @@ fn apply_snapshot_defer_workers_missing_map_pin_fails_closed_5171() {
         generated_at: chrono::Utc::now(),
         capabilities: forwarding_caps(),
         // map_pins default -> empty xsk -> mandatory-map integrity failure.
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![tunnel_iface_3789("10.0.0.1/24")], // config itself valid
         defer_workers: true,
         ..ConfigSnapshot::default()
@@ -3904,6 +4291,10 @@ fn apply_snapshot_defer_workers_forwarding_integrity_fails_closed_5171() {
         generated_at: chrono::Utc::now(),
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(), // all mandatory pins open
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![tunnel_iface_3789("10.0.0.0/33")], // unparseable addr
         defer_workers: true,
         ..ConfigSnapshot::default()
@@ -3950,6 +4341,10 @@ fn apply_snapshot_defer_workers_valid_config_applies_without_spawning_5171() {
         generated_at: chrono::Utc::now(),
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![tunnel_iface_3789("10.0.0.1/24")], // valid, buildable
         defer_workers: true,
         ..ConfigSnapshot::default()
@@ -5716,6 +6111,10 @@ fn wg1866_disarmed_same_plan_apply_does_not_hold_wg_ports() {
     let wg_snapshot = |generation: u64| ConfigSnapshot {
         version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
         generation,
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![crate::protocol::snapshot::InterfaceSnapshot {
             name: "wgt1866srv".to_string(),
             linux_name: "wgt1866srv".to_string(),
@@ -5878,6 +6277,10 @@ fn apply_snapshot_defer_plan_refusal_keeps_live_tunnel_threads_14131() {
         generated_at: chrono::Utc::now(),
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 2,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![wg_iface.clone(), gre_iface.clone()],
         tunnel_endpoints: vec![wg_endpoint, gre_endpoint],
         ..ConfigSnapshot::default()
@@ -5931,6 +6334,11 @@ fn apply_snapshot_defer_plan_refusal_keeps_live_tunnel_threads_14131() {
         generated_at: chrono::Utc::now(),
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![crate::protocol::snapshot::InterfaceSnapshot {
             name: "ge-0/0/0".to_string(),
             linux_name: "ge-0-0-0".to_string(),
@@ -10241,6 +10649,11 @@ fn same_plan_retry_after_bind_failure_reconciles_14130() {
         defer_workers: false,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![data_iface_6140("ge-0/0/1", "ge-0-0-1", 11)],
         zones: vec![trust_zone_6140()],
         content_digest: "digest-14130".to_string(),
@@ -10342,6 +10755,7 @@ fn apply_snapshot_authorized_clear_marker_installs_empty() {
             generation: 1,
             generated_at: chrono::Utc::now(),
             summary: SnapshotSummary {
+                zone_count: 2,
                 policy_count: 1,
                 ..SnapshotSummary::default()
             },
@@ -10369,7 +10783,10 @@ fn apply_snapshot_authorized_clear_marker_installs_empty() {
             version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
             generation: 2,
             generated_at: chrono::Utc::now(),
-            summary: SnapshotSummary::default(),
+            summary: SnapshotSummary {
+                zone_count: 2,
+                ..SnapshotSummary::default()
+            },
             policies: Vec::new(),
             clear_policies: true,
             zones: zones(),
@@ -10395,6 +10812,7 @@ fn apply_snapshot_authorized_clear_marker_installs_empty() {
             generation: 3,
             generated_at: chrono::Utc::now(),
             summary: SnapshotSummary {
+                zone_count: 2,
                 policy_count: 1,
                 ..SnapshotSummary::default()
             },
@@ -10419,7 +10837,10 @@ fn apply_snapshot_authorized_clear_marker_installs_empty() {
         version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
         generation: 4,
         generated_at: chrono::Utc::now(),
-        summary: SnapshotSummary::default(),
+        summary: SnapshotSummary {
+            zone_count: 2,
+            ..SnapshotSummary::default()
+        },
         policies: Vec::new(),
         zones: zones(),
         ..ConfigSnapshot::default()

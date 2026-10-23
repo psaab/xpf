@@ -95,6 +95,77 @@ pub(super) fn apply(
         );
         return;
     }
+    // #16056 (A6-06): the same literal-omission shape one section over.
+    // interface_count/zone_count are summary claims about the built
+    // sections the helper installs; a producer that drops the section
+    // while retaining the summary (interface_count>0, interfaces=[])
+    // would build forwarding with zero bindings, unbind all workers,
+    // ACK ok and persist as baseline. Zone omission is only reachable
+    // with global-only policies (zone-pair policies fail the preflight
+    // closed), so it must be refused here rather than installed. An
+    // empty-over-nonempty install is refused even when both transmitted
+    // counts agree (both zeroed): deleting every zone/interface is
+    // never legitimate on a partial publish, and the full-build path
+    // that legitimately empties a config re-derives its summary from
+    // the built sections, so it agrees with the (empty) section.
+    if snapshot.summary.interface_count != snapshot.interfaces.len()
+        || snapshot.summary.zone_count != snapshot.zones.len()
+    {
+        guard.snapshot_policy_mismatch_total =
+            guard.snapshot_policy_mismatch_total.saturating_add(1);
+        guard.status.snapshot_policy_mismatch_total = guard.snapshot_policy_mismatch_total;
+        response.ok = false;
+        response.error = format!(
+            "snapshot section count mismatch: summary.interface_count={} interfaces carries {}, summary.zone_count={} zones carries {}; refusing apply (keeping prior forwarding)",
+            snapshot.summary.interface_count,
+            snapshot.interfaces.len(),
+            snapshot.summary.zone_count,
+            snapshot.zones.len()
+        );
+        eprintln!(
+            "ERROR: apply_snapshot refused (snapshot section mismatch): interface_count={} interfaces_len={} zone_count={} zones_len={} generation={} total={}",
+            snapshot.summary.interface_count,
+            snapshot.interfaces.len(),
+            snapshot.summary.zone_count,
+            snapshot.zones.len(),
+            snapshot.generation,
+            guard.snapshot_policy_mismatch_total
+        );
+        return;
+    }
+    let installed_interfaces = guard
+        .snapshot
+        .as_ref()
+        .map_or(0, |installed| installed.interfaces.len());
+    let installed_zones = guard
+        .snapshot
+        .as_ref()
+        .map_or(0, |installed| installed.zones.len());
+    if (snapshot.interfaces.is_empty() && installed_interfaces > 0)
+        || (snapshot.zones.is_empty() && installed_zones > 0)
+    {
+        guard.snapshot_policy_mismatch_total =
+            guard.snapshot_policy_mismatch_total.saturating_add(1);
+        guard.status.snapshot_policy_mismatch_total = guard.snapshot_policy_mismatch_total;
+        response.ok = false;
+        response.error = format!(
+            "snapshot section count mismatch: apply carries {} interfaces / {} zones over {} installed interfaces / {} installed zones (no full-clear signal on the wire); refusing apply (keeping prior forwarding)",
+            snapshot.interfaces.len(),
+            snapshot.zones.len(),
+            installed_interfaces,
+            installed_zones
+        );
+        eprintln!(
+            "ERROR: apply_snapshot refused (snapshot section mismatch): interfaces_len={} zones_len={} installed_interfaces={} installed_zones={} generation={} total={}",
+            snapshot.interfaces.len(),
+            snapshot.zones.len(),
+            installed_interfaces,
+            installed_zones,
+            snapshot.generation,
+            guard.snapshot_policy_mismatch_total
+        );
+        return;
+    }
     // #5169: monotonicity gate for the FULL apply_snapshot path, mirroring the
     // #3767 H5 rollback guard on `bump_fib` below. Flow-cache validation is
     // EQUALITY based on the (config_generation, fib_generation) PAIR — an entry
