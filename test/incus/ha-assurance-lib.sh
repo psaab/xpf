@@ -990,6 +990,12 @@ import sys
 
 output = sys.argv[1]
 lines = [line.split() for line in output.splitlines() if line.strip()]
+# `ip route get` may append a single-token `cache` continuation line
+# (optionally with flags, e.g. `cache <mc>`) for the one route entry
+# (#16307). Strip that trailing line; any other second line stays
+# genuinely ambiguous and is rejected below.
+if len(lines) > 1 and lines[-1][0] == "cache":
+    lines.pop()
 if len(lines) != 1:
     print("route device: route output missing or ambiguous", file=sys.stderr)
     raise SystemExit(2)
@@ -1034,6 +1040,10 @@ if status_text != "0" or not output.strip():
     print(f"route lookup: capture unavailable (status={status_text})", file=sys.stderr)
     raise SystemExit(2)
 lines = [line.split() for line in output.splitlines() if line.strip()]
+# Trailing `cache` continuation of the one route entry (#16307); see
+# ha_route_device. Any other extra line stays ambiguous -> VOID.
+if len(lines) > 1 and lines[-1][0] == "cache":
+    lines.pop()
 if len(lines) != 1:
     print("route lookup: route output missing or ambiguous", file=sys.stderr)
     raise SystemExit(2)

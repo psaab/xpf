@@ -289,7 +289,7 @@ BURST="${BURST:-1000}"
 # Control is over-offered (1500 vs the 1000-observed floor) so routine path
 # loss cannot manufacture a capture-blind VOID. Must stay even (split runs).
 CONTROL_BURST="${CONTROL_BURST:-1500}"
-SINK="${SINK:-${MOUSE_TARGET_V4:-172.16.80.201}}"
+SINK="${SINK:-${MOUSE_TARGET_V4}}"
 APP_NAME="wire-9531-ctl"
 SET_NAME="wire-9531-set"
 SG="sg incus-admin -c"
@@ -357,7 +357,7 @@ echo "lan->sink reachability: OK"
 if ! $SG "incus exec $SINK -- sh -c 'command -v tcpdump'" >/dev/null 2>&1; then
 	# $SINK may be an IP, not an instance name — resolve via the mouse target
 	# name when the bare exec fails.
-	MOUSE_REF="${MOUSE_TARGET_NAME:-loss:xpf-mouse-target}"
+	MOUSE_REF="${MOUSE_TARGET_REF:-${MOUSE_TARGET_NAME}}"
 	if ! $SG "incus exec $MOUSE_REF -- sh -c 'command -v tcpdump'" >/dev/null 2>&1; then
 		echo "REFUSE: no managed capture point (tcpdump missing on sink $SINK / $MOUSE_REF)"
 		early_void no-prober

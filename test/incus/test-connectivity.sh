@@ -485,7 +485,7 @@ test_cluster() {
 		# pings; the same route devices scope the read-only neighbor queries.
 		local route4_output route4_rc route4_status route4_device route4_evidence
 		if route4_output=$(incus exec "$CLUSTER_LAN_HOST" -- \
-			ip route get 172.16.80.200 2>&1); then
+			ip route get "$IPERF_TARGET4" 2>&1); then
 			route4_rc=0
 		else
 			route4_rc=$?
@@ -497,7 +497,7 @@ test_cluster() {
 			route4_status=$?
 		fi
 		assurance_verdict "$route4_status" \
-			"cluster: Group12 IPv4 route (ip route get 172.16.80.200; rc=${route4_rc}; output=${route4_evidence:-<empty>})"
+			"cluster: Group12 IPv4 route (ip route get ${IPERF_TARGET4}; rc=${route4_rc}; output=${route4_evidence:-<empty>})"
 		route4_device=""
 		if (( route4_status == 0 )); then
 			route4_device=$(ha_route_device "$route4_output") || route4_device=""
@@ -505,7 +505,7 @@ test_cluster() {
 
 		local route6_output route6_rc route6_status route6_device route6_evidence
 		if route6_output=$(incus exec "$CLUSTER_LAN_HOST" -- \
-			ip -6 route get 2001:559:8585:80::200 2>&1); then
+			ip -6 route get "$IPERF_TARGET6" 2>&1); then
 			route6_rc=0
 		else
 			route6_rc=$?
@@ -517,7 +517,7 @@ test_cluster() {
 			route6_status=$?
 		fi
 		assurance_verdict "$route6_status" \
-			"cluster: Group12 IPv6 route (ip -6 route get 2001:559:8585:80::200; rc=${route6_rc}; output=${route6_evidence:-<empty>})"
+			"cluster: Group12 IPv6 route (ip -6 route get ${IPERF_TARGET6}; rc=${route6_rc}; output=${route6_evidence:-<empty>})"
 		route6_device=""
 		if (( route6_status == 0 )); then
 			route6_device=$(ha_route_device "$route6_output") || route6_device=""
@@ -525,7 +525,7 @@ test_cluster() {
 
 		local reach4_output reach4_rc reach4_status reach4_evidence
 		if reach4_output=$(incus exec "$CLUSTER_LAN_HOST" -- sh -c \
-			'LC_ALL=C ping -c 2 -W 1 172.16.80.200' 2>&1); then
+			"LC_ALL=C ping -c 2 -W 1 $IPERF_TARGET4" 2>&1); then
 			reach4_rc=0
 		else
 			reach4_rc=$?
@@ -537,11 +537,11 @@ test_cluster() {
 			reach4_status=$?
 		fi
 		assurance_verdict "$reach4_status" \
-			"cluster: Group12 IPv4 controlled reachability (LC_ALL=C ping -c 2 -W 1 172.16.80.200; rc=${reach4_rc}; output=${reach4_evidence:-<empty>})"
+			"cluster: Group12 IPv4 controlled reachability (LC_ALL=C ping -c 2 -W 1 ${IPERF_TARGET4}; rc=${reach4_rc}; output=${reach4_evidence:-<empty>})"
 
 		local reach6_output reach6_rc reach6_status reach6_evidence
 		if reach6_output=$(incus exec "$CLUSTER_LAN_HOST" -- sh -c \
-			'LC_ALL=C ping -6 -c 2 -W 1 2001:559:8585:80::200' 2>&1); then
+			"LC_ALL=C ping -6 -c 2 -W 1 $IPERF_TARGET6" 2>&1); then
 			reach6_rc=0
 		else
 			reach6_rc=$?
@@ -553,12 +553,12 @@ test_cluster() {
 			reach6_status=$?
 		fi
 		assurance_verdict "$reach6_status" \
-			"cluster: Group12 IPv6 controlled reachability (LC_ALL=C ping -6 -c 2 -W 1 2001:559:8585:80::200; rc=${reach6_rc}; output=${reach6_evidence:-<empty>})"
+			"cluster: Group12 IPv6 controlled reachability (LC_ALL=C ping -6 -c 2 -W 1 ${IPERF_TARGET6}; rc=${reach6_rc}; output=${reach6_evidence:-<empty>})"
 
 		local neigh4_output="" neigh4_rc=not_run neigh4_input=""
 		if [[ -n "$route4_device" ]]; then
 			if neigh4_output=$(incus exec "$CLUSTER_LAN_HOST" -- \
-				ip neigh show 172.16.80.200 dev "$route4_device" 2>&1); then
+				ip neigh show "$IPERF_TARGET4" dev "$route4_device" 2>&1); then
 				neigh4_rc=0
 				neigh4_input="$neigh4_output"
 			else
@@ -568,7 +568,7 @@ test_cluster() {
 		local neigh6_output="" neigh6_rc=not_run neigh6_input=""
 		if [[ -n "$route6_device" ]]; then
 			if neigh6_output=$(incus exec "$CLUSTER_LAN_HOST" -- \
-				ip -6 neigh show 2001:559:8585:80::200 dev "$route6_device" 2>&1); then
+				ip -6 neigh show "$IPERF_TARGET6" dev "$route6_device" 2>&1); then
 				neigh6_rc=0
 				neigh6_input="$neigh6_output"
 			else
@@ -606,7 +606,7 @@ test_cluster() {
 			fi
 		fi
 		assurance_verdict "$neighbor_status" \
-			"cluster: Group12 read-only neighbor identity (v4 ip neigh show 172.16.80.200 dev ${route4_device:-<no-route-device>} rc=${neigh4_rc} output=${neigh4_evidence:-<empty>}; v6 ip -6 neigh show 2001:559:8585:80::200 dev ${route6_device:-<no-route-device>} rc=${neigh6_rc} output=${neigh6_evidence:-<empty>})"
+			"cluster: Group12 read-only neighbor identity (v4 ip neigh show ${IPERF_TARGET4} dev ${route4_device:-<no-route-device>} rc=${neigh4_rc} output=${neigh4_evidence:-<empty>}; v6 ip -6 neigh show ${IPERF_TARGET6} dev ${route6_device:-<no-route-device>} rc=${neigh6_rc} output=${neigh6_evidence:-<empty>})"
 	else
 		skip "cluster: LAN host tests (${CLUSTER_LAN_HOST} not running)"
 		void "cluster: Group10 IPv4 TTL=1 (LAN host ${CLUSTER_LAN_HOST} unavailable)"

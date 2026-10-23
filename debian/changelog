@@ -1,4 +1,18 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Parameterize wire/connectivity harnesses from the cluster env
+    (#16305, #16306, #16307): cluster-env.sh derives LAN/DMZ/WAN
+    prefixes, DMZ and mouse-target addresses, PF/VLAN, and the
+    remote-qualified mouse-target ref from the sourced env (loss
+    values byte-identical); wire-zone-matrix and wire-policy-deny
+    consume them instead of loss literals; test-connectivity Group12
+    route/ping/neighbor cells use IPERF_TARGET4/6 for both families;
+    ha_route_lookup_verdict and ha_route_device accept a trailing
+    `cache` continuation line from `ip route get` while still
+    rejecting genuinely ambiguous multi-route output. Hermetic
+    selftests cover tcp/udp derivation, the ::211 stubs, and the
+    two-line cache route form.
+
+xpf (0.0.0) unstable; urgency=medium
   * Fix five CoS/filter defects (#15949): gate CoS TX selection on
     post-NAT or pre-NAT ingress family so cross-family NAT64 no longer
     bypasses ingress policers/forwarding-class/DSCP; emit per-packet

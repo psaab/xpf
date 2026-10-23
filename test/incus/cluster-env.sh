@@ -75,8 +75,35 @@ WAN_VIP4="${WAN_VIP4:-172.16.50.6}"
 IPERF_TARGET4="${IPERF_TARGET4:-172.16.100.200}"
 IPERF_TARGET6="${IPERF_TARGET6:-2001:559:8585:100::200}"
 
+# Wire-gate addressing (#16305). The VLAN-80/50 networks and the SR-IOV WAN
+# parent are shared lab topology; only the per-cluster host octets differ.
+# The DMZ (VLAN-50) prober reuses the mouse target's host octet (iperf
+# target octet + 1) on its own subnet so each cluster's probers stay
+# distinct (loss .201, tcp .211, udp .212). WAN_VIP4 in the env files
+# names the firewall's reth0.50 address (the route gateway for VLAN-80/50
+# hosts). Explicit caller overrides (DMZ_ADDR, MOUSE_TARGET_*, ...) win;
+# on the loss env every derived value equals the historical literal.
+_xpf_iperf_host="${IPERF_TARGET4##*.}"
+_xpf_iperf_host="${_xpf_iperf_host%%/*}"
+WAN_PREFIX4="${WAN_PREFIX4:-172.16.80.0/24}"
+DMZ_PREFIX4="${DMZ_PREFIX4:-172.16.50.0/24}"
+LAN_PREFIX4="${LAN_PREFIX4:-${LAN_HOST_IP%.*}.0/24}"
+DMZ_ADDR="${DMZ_ADDR:-172.16.50.$((_xpf_iperf_host + 1))}"
+DMZ_TARGET_V6="${DMZ_TARGET_V6:-2001:559:8585:50::$((_xpf_iperf_host + 1))}"
+DMZ_TARGET_PF="${DMZ_TARGET_PF:-${SRIOV_PARENT:-mlx0}}"
+DMZ_TARGET_VLAN="${DMZ_TARGET_VLAN:-50}"
+MOUSE_TARGET_NAME="${MOUSE_TARGET_NAME:-xpf-mouse-target}"
+MOUSE_TARGET_REF="${MOUSE_TARGET_REF:-$(_xpf_cluster_ref "$MOUSE_TARGET_NAME")}"
+MOUSE_TARGET_V4="${MOUSE_TARGET_V4:-${IPERF_TARGET4%.*}.$((_xpf_iperf_host + 1))}"
+MOUSE_TARGET_V6="${MOUSE_TARGET_V6:-2001:559:8585:80::$((_xpf_iperf_host + 1))}"
+MOUSE_TARGET_PF="${MOUSE_TARGET_PF:-${SRIOV_PARENT:-mlx0}}"
+unset _xpf_iperf_host
+
 export PROJECT_ROOT BPFRX_CLUSTER_ENV CLUSTER_CONF
 export FW0 FW1 CLUSTER_LAN_HOST
 export FW0_NAME FW1_NAME CLUSTER_LAN_HOST_NAME
 export LAN_HOST_IP LAN_VIP4 LAN_VIP6 WAN_GW4 WAN_VIP4
 export IPERF_TARGET4 IPERF_TARGET6
+export WAN_PREFIX4 DMZ_PREFIX4 LAN_PREFIX4 DMZ_ADDR DMZ_TARGET_V6
+export DMZ_TARGET_PF DMZ_TARGET_VLAN MOUSE_TARGET_NAME MOUSE_TARGET_REF
+export MOUSE_TARGET_V4 MOUSE_TARGET_V6 MOUSE_TARGET_PF
