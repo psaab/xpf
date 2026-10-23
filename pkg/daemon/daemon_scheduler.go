@@ -186,6 +186,11 @@ func policySchedulerConfigHash(cfg *config.Config) ([32]byte, bool) {
 		writePolicySchedulerHashBool(h, sched.Daily)
 		writePolicySchedulerHashBool(h, sched.AllDay)
 		writePolicySchedulerHashBool(h, sched.DailyExclude)
+		// #16010: an Unresolvable mark changes runtime activation without
+		// changing any window field, so it must force a scheduler
+		// re-prime; otherwise apply would reuse the previous generation's
+		// active state for a scheduler that must now fail closed.
+		writePolicySchedulerHashBool(h, sched.Unresolvable)
 		// Per-day windows, hashed in a stable weekday order so a change to
 		// any per-day arm forces a scheduler re-evaluation.
 		dayNames := make([]string, 0, len(sched.Days))

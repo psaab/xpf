@@ -37,6 +37,19 @@ type SchedulerConfig struct {
 	Daily        bool   // `daily` recurrence keyword present
 	AllDay       bool   // `daily all-day` — active the entire day
 	DailyExclude bool   // `daily exclude` — never active in the daily window
+	// Unresolvable (#16010) marks a scheduler whose tolerant-path compile
+	// admitted an all-day + complete-window conflict (or another
+	// scheduler-window-pair finding): the authored window has no single
+	// faithful representation, and the runtime evaluates all-day before
+	// time bounds, so keeping the union would resolve widest and enforce
+	// permits all day. The runtime evaluator (pkg/scheduler.isWithinWindow)
+	// fails closed for such a scheduler — never active — so permits fail
+	// closed; the snapshot builder keeps scheduled DENY/REJECT rules
+	// eligible (policyRuleInactiveForScheduler), since suppressing a deny
+	// would fail open. Populated only on the tolerant path; strict
+	// compilation rejects the conflict instead. Compile-time only; never
+	// serialized.
+	Unresolvable bool `json:"-"`
 
 	// Days holds per-weekday overrides keyed by lowercase weekday name
 	// ("monday".."sunday"). A present entry overrides the daily window for

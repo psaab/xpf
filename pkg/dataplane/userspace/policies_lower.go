@@ -278,7 +278,7 @@ func buildOneRuleSnapshot(
 		FromZone:             fromZone,
 		ToZone:               toZone,
 		SchedulerName:        schedulerName,
-		Inactive:             policyRuleInactiveForAction(schedulerName, pol.Action, activeState, failClosed),
+		Inactive:             policyRuleInactiveForScheduler(cfg, schedulerName, pol.Action, activeState, failClosed),
 		SourceAddresses:      sourceAddresses,
 		DestinationAddresses: destinationAddresses,
 		SourceBookIDs:        srcBookIDs,

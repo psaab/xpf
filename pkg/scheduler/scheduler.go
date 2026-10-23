@@ -593,6 +593,12 @@ func copyActiveState(in map[string]bool) map[string]bool {
 // failed to compile (or was left empty) must DENY, not permit 24/7. The old
 // "no times configured => active" shortcut was the fail-open bug.
 func isWithinWindow(now time.Time, sched *config.SchedulerConfig) bool {
+	// #16010: a scheduler marked unresolvable by the tolerant compile
+	// (all-day + complete-window conflict resolving widest) is never
+	// active, so permits gated by it fail closed.
+	if sched == nil || sched.Unresolvable {
+		return false
+	}
 	// Date-range gate (outer). A configured calendar range that now falls
 	// outside of closes the scheduler regardless of any time-of-day window.
 	inRange, ok := withinDateRange(now, sched)
