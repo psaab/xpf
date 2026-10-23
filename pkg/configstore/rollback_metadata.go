@@ -472,6 +472,14 @@ func rollbackSkewSlotAdmission(snap rollbackMetadataSnapshot, pendingSkew bool, 
 		slotHash == metadata[i-1].PendingHash {
 		return true, metadata[i-1].PendingTimestamp, metadata[i-1].PendingComment
 	}
+	// Fallback mapping (pre-shift chain): the crashed commit's predecessor
+	// list is [old active, old slot1, old slot2, ...] = [snap.ActiveHash,
+	// metadata[0].Hash, metadata[1].Hash, ...]. Slot i still holds the bytes
+	// of that predecessor list at index i-1 BEFORE the shift renumbers them,
+	// so slot 1 pairs with snap.ActiveHash and slot i>=2 pairs with
+	// metadata[i-2].Hash. This is the correct mapping, guarded by the exact
+	// loader regression below. (Old analysis: this was suspected off-by-one;
+	// byte-probing disk state showed pre-shift slot bytes match exactly.)
 	want := ""
 	if i == 1 {
 		want = snap.ActiveHash
