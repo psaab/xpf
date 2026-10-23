@@ -118,6 +118,7 @@ verdict: SessionHitVerdict,) -> Option<ResolvedFlowSessionDecision> {
         worker_id,
         None,
         None,
+        false,
     )?;
     let mut purged_keys = Vec::new();
     maybe_promote_synced_session_with_conntrack(
@@ -189,11 +190,20 @@ pub(in crate::afxdp) fn resolve_flow_session_decision_with_conntrack_and_payload
     ha_startup_grace_until_secs: u64,
     worker_id: u32,
     prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,
+    // #16217: set ONLY by the poll fabric-adoption callsite, where the
+    // gate (`fabric_adoption_established_for_wire`) has already proven
+    // this packet's tuple belongs to an Established session and this
+    // node is the RG owner post-takeover. When set, the HA-enforced
+    // resolution below bypasses the ha_inactive terminal for the
+    // adopted flow (see `fabric_adopted_resolution`); every other
+    // caller passes false and keeps the fail-closed enforcement.
+    fabric_adopted: bool,
 ) -> Option<ResolvedFlowSessionDecision> {
     resolve_flow_session_decision_with_conntrack_and_payload_and_ack(
         sessions, session_map, shared, forwarding, ha_state, dynamic_neighbors, flow, protocol,
         tcp_flags, payload_len, ingress_ifindex, ingress_vlan_id, fabric_ingress, fabric_link_ingress,
         ha_startup_grace_until_secs, worker_id, prevalidated_forward_nat_match, None,
+        fabric_adopted,
     )
 }
 
@@ -218,12 +228,14 @@ pub(in crate::afxdp) fn resolve_flow_session_decision_with_conntrack_and_payload
     worker_id: u32,
     prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,
     ack: Option<u32>,
+    fabric_adopted: bool,
 ) -> Option<ResolvedFlowSessionDecision> {
     resolve_flow_session_decision_with_conntrack_inner(
         sessions, session_map, shared, forwarding, ha_state,
         dynamic_neighbors, flow, protocol, tcp_flags, payload_len,
         ingress_ifindex, ingress_vlan_id, fabric_ingress, fabric_link_ingress,
         ha_startup_grace_until_secs, worker_id, prevalidated_forward_nat_match, ack,
+        fabric_adopted,
     )
 }
 
@@ -277,7 +289,8 @@ fabric_link_ingress: bool,
 ha_startup_grace_until_secs: u64,
 worker_id: u32,
 prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,
-ack: Option<u32>,) -> Option<ResolvedFlowSessionDecision> {
+ack: Option<u32>,
+fabric_adopted: bool,) -> Option<ResolvedFlowSessionDecision> {
     if !crate::session::PMechSessionDirectory::global()
         .probe_packet_key(&flow.forward_key)
         .is_fallthrough()
@@ -476,6 +489,13 @@ ack: Option<u32>,) -> Option<ResolvedFlowSessionDecision> {
             ingress_ifindex,
             ha_startup_grace_until_secs,
         );
+        // #16217: a fabric-adopted ForwardCandidate must not die on
+        // the ha_inactive terminal (see `fabric_adopted_resolution`).
+        let enforced_resolution = if fabric_adopted {
+            fabric_adopted_resolution(forwarding, looked_up_resolution, enforced_resolution)
+        } else {
+            enforced_resolution
+        };
         // #15958b: a stored FabricRedirect companion must not be
         // re-resolved onto a gateway/default route. On the punt origin
         // the connected LAN prefix is HA-suppressed, so the FIB lookup
@@ -743,6 +763,12 @@ ack: Option<u32>,) -> Option<ResolvedFlowSessionDecision> {
         ingress_ifindex,
         ha_startup_grace_until_secs,
     );
+    // #16217: same adopted-ForwardCandidate exemption as the hit arm.
+    let enforced_resolution = if fabric_adopted {
+        fabric_adopted_resolution(forwarding, looked_up_resolution, enforced_resolution)
+    } else {
+        enforced_resolution
+    };
     // #15958b: same retained-redirect guard as the hit arm above.
     if resolved.decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
         let rev_table = install_table_name_for_session(forwarding, resolved.decision, resolution_target_for_session(flow, resolved.decision));
@@ -860,6 +886,48 @@ ingress_zone: u16,) -> ForwardingResolution {
     resolve_fabric_redirect_for_ingress_zone(forwarding, Some(ingress_zone))
         .unwrap_or(resolution)
 }
+/// #16217: reclassify the HA-enforcement outcome for a FABRIC-ADOPTED
+/// flow. The poll fabric-adoption gate
+/// (`fabric_adoption_established_for_wire`) has already proven, for
+/// this exact NAT'd wire tuple, that the session is Established and
+/// that this node is the RG owner post-takeover; the adoption decision
+/// IS the HA-activity proof for this packet. A ForwardCandidate the
+/// ordinary slow path produced (the pre-failover serving shape) must
+/// therefore not be terminated as `HAInactive` /
+/// `ClusterTerminalHAInactive` by the poll_descriptor HA-activity
+/// enforcement on the receiving worker — that terminal is the last
+/// resolution the adopted tuples died on live (`ha_inactive
+/// ingress-ifindex=4 egress-ifindex=14` on fw1 while RG1 read active).
+/// Only the adopted resolution converts: a ForwardCandidate that HA
+/// enforcement demoted is restored verbatim, and any other enforced
+/// outcome (a genuine ForwardCandidate, a MissingNeighbor awaiting
+/// neighbor resolution, LocalDelivery, ...) is kept as enforced.
+/// Non-adopted flows never reach this helper (`fabric_adopted ==
+/// false` at every other callsite), so the fail-closed terminal
+/// stands for them bit-identically. HAInactive with unknown ownership
+/// (egress RG 0: resolution never named an owner) stays terminal even
+/// for adopted flows — adoption proved session establishment, not
+/// route ownership.
+pub(in crate::afxdp) fn fabric_adopted_resolution(
+    forwarding: &ForwardingState,
+    looked_up: ForwardingResolution,
+    enforced: ForwardingResolution,
+) -> ForwardingResolution {
+    if !matches!(
+        enforced.disposition,
+        ForwardingDisposition::HAInactive | ForwardingDisposition::ClusterTerminalHAInactive
+    ) {
+        return enforced;
+    }
+    if looked_up.disposition != ForwardingDisposition::ForwardCandidate {
+        return enforced;
+    }
+    if super::forwarding::owner_rg_for_resolution(forwarding, looked_up) <= 0 {
+        return enforced;
+    }
+    looked_up
+}
+
 
 pub(in crate::afxdp) fn enforce_session_ha_resolution(forwarding: &ForwardingState,
 ha_state: &BTreeMap<i32, HAGroupRuntime>,

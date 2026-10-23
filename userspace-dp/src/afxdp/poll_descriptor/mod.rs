@@ -2775,6 +2775,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 unique_unstamped_fabric_nat_match.take(),
                                 // #16042: parsed ack for the promote gate.
                                 pending_tcp_seq_note.map(|(_, ack, _, _)| ack),
+                                false,
                             )
                     {
                         // #10597 G5: a queued WireGuard record may only enter
@@ -4328,6 +4329,18 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // probe): a local non-reverse serving row that is
                         // Established qualifies; pending/closing/
                         // reverse-only never adopt (fail-closed).
+                        //
+                        // #16217 (ha_inactive leg): the gate's proof
+                        // (Established + this node is the RG owner
+                        // post-takeover) IS the HA-activity proof for
+                        // this packet, so the resolve runs with
+                        // `fabric_adopted = true`: a ForwardCandidate
+                        // it produces must not be terminated as
+                        // HAInactive/ClusterTerminalHAInactive by the
+                        // receiving worker's HA enforcement (the last
+                        // resolution the adopted tuples died on live).
+                        // Non-adopted resolves keep the fail-closed
+                        // terminal bit-identically.
                         let adopted = if fabric_link_ingress
                             && !crate::tcp_flags::has_syn(meta.tcp_flags)
                             && crate::afxdp::shared_ops::fabric_adoption_established_for_wire(
@@ -4366,6 +4379,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     ha_startup_grace_until_secs,
                                     worker_id,
                                     None,
+                                    // #16217: the gate above already
+                                    // proved Established + this node is
+                                    // the RG owner post-takeover; the
+                                    // adopted ForwardCandidate must not
+                                    // be terminated as ha_inactive by
+                                    // the receiving worker's HA-activity
+                                    // enforcement.
+                                    true,
                                 )
                             .filter(|resolved| {
                                 matches!(
