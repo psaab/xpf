@@ -42,6 +42,12 @@ fn active_ha_runtime(now_secs: u64) -> HAGroupRuntime {
     }
 }
 
+fn active_ha() -> std::collections::BTreeMap<i32, HAGroupRuntime> {
+    let mut ha = std::collections::BTreeMap::new();
+    ha.insert(1, active_ha_runtime(1));
+    ha
+}
+
 fn inactive_ha_runtime(watchdog_timestamp: u64) -> HAGroupRuntime {
     HAGroupRuntime {
         active: false,
@@ -3989,8 +3995,7 @@ fn resolve_flow_session_decision_promotes_translated_shared_hit_on_active_fabric
         dst_ip: translated_key.dst_ip,
         forward_key: translated_key.clone(),
     };
-    let resolved = resolve_flow_session_decision(
-        &mut sessions,
+    let resolved = resolve_flow_session_decision(&mut sessions,
         SteeringMap::unshared_for_test(-1),
         SharedSessionRefs {
             sessions: &shared_sessions,
@@ -4014,8 +4019,7 @@ fn resolve_flow_session_decision_promotes_translated_shared_hit_on_active_fabric
         true,
         0,
         0,
-        crate::afxdp::session_glue::SessionHitVerdict::Owner,
-    )
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,)
     .expect("translated shared hit should resolve");
 
     assert_eq!(
@@ -4180,17 +4184,20 @@ fn fabric_ingress_adopts_established_synced_wire_session_16217() {
     let resolved = resolve_flow_session_decision(
         &mut sessions,
         SteeringMap::unshared_for_test(-1),
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &peer_worker_commands,
+        SharedSessionRefs {
+            sessions: &shared_sessions,
+            nat_sessions: &shared_nat_sessions,
+            forward_wire_sessions: &shared_forward_wire_sessions,
+            owner_rg_indexes: &shared_owner_rg_indexes,
+            peer_worker_commands: &peer_worker_commands,
+            worker_commands_by_id: empty_worker_commands_by_id(),
+            conntrack: ConntrackFds { v4: -1, v6: -1 },
+            tick: Tick { ns: 1_000_000, secs: 1 },
+        },
         &forwarding,
         &ha_state,
         &dynamic_neighbors,
         &flow,
-        1_000_000,
-        1,
         PROTO_TCP,
         0x18,
         21,
@@ -4403,7 +4410,7 @@ fn adopted_forward_candidate_bypasses_ha_inactive_terminal_16217() {
         ..candidate
     };
     assert_eq!(
-        fabric_adopted_resolution(&forwarding, candidate, demoted),
+        fabric_adopted_resolution(&forwarding, &active_ha(), 1, candidate, demoted),
         candidate,
         "adopted: HAInactive-demoted ForwardCandidate is restored"
     );
@@ -4412,7 +4419,7 @@ fn adopted_forward_candidate_bypasses_ha_inactive_terminal_16217() {
         ..demoted
     };
     assert_eq!(
-        fabric_adopted_resolution(&forwarding, candidate, cluster_demoted),
+        fabric_adopted_resolution(&forwarding, &active_ha(), 1, candidate, cluster_demoted),
         candidate,
         "adopted: ClusterTerminalHAInactive-demoted ForwardCandidate is restored"
     );
@@ -4423,13 +4430,13 @@ fn adopted_forward_candidate_bypasses_ha_inactive_terminal_16217() {
         ..candidate
     };
     assert_eq!(
-        fabric_adopted_resolution(&forwarding, missing, demoted),
+        fabric_adopted_resolution(&forwarding, &active_ha(), 1, missing, demoted),
         demoted,
         "adopted: non-ForwardCandidate lookups keep the HA terminal"
     );
     // An active enforced outcome is kept verbatim.
     assert_eq!(
-        fabric_adopted_resolution(&forwarding, candidate, candidate),
+        fabric_adopted_resolution(&forwarding, &active_ha(), 1, candidate, candidate),
         candidate,
         "adopted: surviving ForwardCandidate is untouched"
     );
@@ -4444,7 +4451,7 @@ fn adopted_forward_candidate_bypasses_ha_inactive_terminal_16217() {
         ..unowned
     };
     assert_eq!(
-        fabric_adopted_resolution(&forwarding, unowned, unowned_demoted),
+        fabric_adopted_resolution(&forwarding, &active_ha(), 1, unowned, unowned_demoted),
         unowned_demoted,
         "adopted: unknown-egress-RG demotion stays fail-closed"
     );
@@ -4533,20 +4540,20 @@ fn adopted_forward_candidate_bypasses_ha_inactive_terminal_16217() {
         resolve_flow_session_decision_with_conntrack_and_payload(
             sessions,
             SteeringMap::unshared_for_test(-1),
-            -1,
-            -1,
-            &shared_sessions,
-            &shared_nat_sessions,
-            &shared_forward_wire_sessions,
-            &shared_owner_rg_indexes,
-            &peer_worker_commands,
-            empty_worker_commands_by_id(),
+            SharedSessionRefs {
+                sessions: &shared_sessions,
+                nat_sessions: &shared_nat_sessions,
+                forward_wire_sessions: &shared_forward_wire_sessions,
+                owner_rg_indexes: &shared_owner_rg_indexes,
+                peer_worker_commands: &peer_worker_commands,
+                worker_commands_by_id: empty_worker_commands_by_id(),
+                conntrack: ConntrackFds { v4: -1, v6: -1 },
+                tick: Tick { ns: 1_000_000, secs: 1 },
+            },
             &forwarding,
             &ha_state,
             &dynamic_neighbors,
             &flow,
-            1_000_000,
-            1,
             PROTO_TCP,
             0x18,
             0,
@@ -4562,8 +4569,8 @@ fn adopted_forward_candidate_bypasses_ha_inactive_terminal_16217() {
         .expect("wire session should resolve")
     };
     // Fail-closed control: the identical resolve WITHOUT adoption
-    // terminates HAInactive — this is the live drop being fixed, and
-    // it must remain the outcome for every non-adopted flow.
+    // terminates HAInactive -- the live drop being fixed; it must
+    // remain the outcome for every non-adopted flow.
     let mut control_sessions = SessionTable::new();
     assert_eq!(
         resolve_as(&mut control_sessions, false)

@@ -3845,6 +3845,7 @@ fn expired_scheduler_lease_evicts_scheduled_deny_cache_entries() {
                 &policy,
                 scheduler_expired,
                 &std::collections::BTreeMap::new(),
+                &ForwardingState::default(),
             )
             .is_none(),
         "a cache hit admitted by a scheduled rule must miss after lease expiry"
@@ -3860,6 +3861,7 @@ fn expired_scheduler_lease_evicts_scheduled_deny_cache_entries() {
                 &policy,
                 scheduler_expired,
                 &std::collections::BTreeMap::new(),
+                &ForwardingState::default(),
             )
             .is_some(),
         "expiry must not evict a flow not admitted by a scheduler-bound rule"
@@ -3972,7 +3974,8 @@ fn scheduler_lease_recovery_evicts_fail_closed_unscheduled_deny() {
                 64,
                 &policy,
                 true,
-                &std::collections::BTreeMap::new()
+                &std::collections::BTreeMap::new(),
+                &ForwardingState::default(),
             )
             .is_none()
     );
@@ -3988,7 +3991,8 @@ fn scheduler_lease_recovery_evicts_fail_closed_unscheduled_deny() {
                 64,
                 &policy,
                 true,
-                &std::collections::BTreeMap::new()
+                &std::collections::BTreeMap::new(),
+                &ForwardingState::default(),
             )
             .is_some(),
         "the fail-closed deny must hit while the lease is expired"
@@ -4023,7 +4027,8 @@ fn scheduler_lease_recovery_evicts_fail_closed_unscheduled_deny() {
                 64,
                 &policy,
                 false,
-                &std::collections::BTreeMap::new()
+                &std::collections::BTreeMap::new(),
+                &ForwardingState::default(),
             )
             .is_none(),
         "lease recovery must evict the fail-closed deny so the recovered scheduled permit can win (#13639)"

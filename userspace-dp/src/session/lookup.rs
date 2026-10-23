@@ -2227,7 +2227,8 @@ impl SessionTable {
 
     /// #16217 (fabric adoption): mark the row(s) behind `wire_key` as
     /// fabric-established. Called ONLY from the poll adoption site after the
-    /// gate proved the tuple Established with this node as RG owner and the
+    /// gate proved the tuple Established (and, at the poll site, this
+    /// node as forwarding-active owner of the egress RG) and the
     /// adopted resolve yielded a local `ForwardCandidate`. Marks the local
     /// serving row the gate qualified (canonical key via the wire alias, or
     /// the wire-keyed row itself); a no-op when no such row exists yet — the

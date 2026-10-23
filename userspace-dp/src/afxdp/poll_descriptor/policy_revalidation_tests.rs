@@ -7186,6 +7186,9 @@ fn fabric_nat64_scopeless_revoked_when_geometry_withdrawn_15948() {
     assert!(
         run(withdrawn).is_some(),
         "#15948: withdrawn NAT64 geometry must revoke a scopeless fabric session"
+    );
+}
+
 /// #16109: an imported row whose STORED resolution is terminal
 /// (egress 0, DiscardRoute / ClusterTerminalHAInactive) must be judged
 /// by the packet's re-resolved decision, not the stored one. The
@@ -7433,20 +7436,22 @@ fn imported_terminal_stored_resolution_judged_by_reresolved_16109() {
         dst_ip: key.dst_ip,
         forward_key: key.clone(),
     };
-    let resolved = crate::afxdp::session_glue::resolve_flow_session_decision(
-        &mut sessions,
+    let resolved = crate::afxdp::session_glue::resolve_flow_session_decision(&mut sessions,
         crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &peer_worker_commands,
+        SharedSessionRefs {
+            sessions: &shared_sessions,
+            nat_sessions: &shared_nat_sessions,
+            forward_wire_sessions: &shared_forward_wire_sessions,
+            owner_rg_indexes: &shared_owner_rg_indexes,
+            peer_worker_commands: &peer_worker_commands,
+            worker_commands_by_id: empty_worker_commands_by_id(),
+            conntrack: ConntrackFds { v4: -1, v6: -1 },
+            tick: Tick { ns: 1_000_000, secs: 1 },
+        },
         &hit_forwarding,
         &ha_state,
         &dynamic_neighbors,
         &flow,
-        1_000_000,
-        1,
         libc::IPPROTO_TCP as u8,
         0x18,
         12,
@@ -7454,8 +7459,7 @@ fn imported_terminal_stored_resolution_judged_by_reresolved_16109() {
         false,
         0,
         0,
-        crate::afxdp::session_glue::SessionHitVerdict::Owner,
-    )
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,)
     .expect("the refreshed imported row must resolve on its first hit");
     assert_eq!(
         resolved.decision.resolution.disposition,

@@ -407,11 +407,10 @@ func (m *Manager) fillSessionSyncValue(view *sessionSyncView, req *SessionSyncRe
 		req.TCPCloseClass = view.val4.TCPCloseClass
 		// #10888: forward handshake state separately from the close class.
 		req.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(view.val4.TCPHandshakeState)
-		req.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(val.TCPHandshakeState)
 		// #16217: forward the live counters so the peer helper stamps
 		// them onto its imported synced entry.
-		req.FwdPackets = val.FwdPackets
-		req.RevPackets = val.RevPackets
+		req.FwdPackets = view.val4.FwdPackets
+		req.RevPackets = view.val4.RevPackets
 		// #9752: forward the installing-table identity so the standby imports
 		// a PBR-steered session with the table its steer installed.
 		req.InstallTableDomain = view.val4.InstallTableDomain
@@ -440,38 +439,14 @@ func (m *Manager) fillSessionSyncValue(view *sessionSyncView, req *SessionSyncRe
 		req.RTFlowSessionID = view.val6.RTFlowSessionID
 		if req.RTFlowSessionID == 0 {
 			req.RTFlowSessionID = view.val6.SessionID
-			req.RTFlowSessionID = val.SessionID
-		}
-		// #7188: carry the tunnel session-identity discriminator (see V4).
-		req.TunnelDiscriminator = val.TunnelDiscriminator
-		req.PptpCallIDs = val.PptpCallIDs
-		// #9412: forward the close class so the standby imports the close state.
-		req.TCPCloseClass = val.TCPCloseClass
-		// #10888: v6 handshake state is independent from the close class.
-		req.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(val.TCPHandshakeState)
-		// #16217: forward the live counters (v6 twin of the v4 arm).
-		req.FwdPackets = val.FwdPackets
-		req.RevPackets = val.RevPackets
-		// #9752: forward the installing-table identity so the standby imports
-		// a PBR-steered session with the table its steer installed.
-		req.InstallTableDomain = val.InstallTableDomain
-		req.InstallTableCheck = val.InstallTableCheck
-		// #11064: preserve typed source-NAT rule identity on the install leg.
-		req.SourceNatICMPValid = val.SourceNatICMPValid
-		req.SourceNatICMPType = val.SourceNatICMPType
-		req.SourceNatICMPCode = val.SourceNatICMPCode
-		if val.Flags&dataplane.SessFlagSNAT == 0 {
-			req.NATSrcIP = ""
-			req.NATSrcPort = 0
-		}
-		if val.Flags&dataplane.SessFlagDNAT == 0 {
-			req.NATDstIP = ""
-			req.NATDstPort = 0
 		}
 		req.TunnelDiscriminator = view.val6.TunnelDiscriminator
 		req.PptpCallIDs = view.val6.PptpCallIDs
 		req.TCPCloseClass = view.val6.TCPCloseClass
 		req.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(view.val6.TCPHandshakeState)
+		// #16217: forward the live counters (v6 twin of the v4 arm).
+		req.FwdPackets = view.val6.FwdPackets
+		req.RevPackets = view.val6.RevPackets
 		req.InstallTableDomain = view.val6.InstallTableDomain
 		req.InstallTableCheck = view.val6.InstallTableCheck
 		req.SourceNatICMPValid = view.val6.SourceNatICMPValid

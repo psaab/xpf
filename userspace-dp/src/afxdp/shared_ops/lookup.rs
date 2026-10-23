@@ -192,6 +192,73 @@ pub(in crate::afxdp) fn fabric_adoption_established_for_wire(
     }
     sessions.local_established_for_wire_at(wire_key, now_ns).is_some()
 }
+
+/// #16217 (GLM N1): the fabric-adoption gate verified against CURRENT
+/// RG ownership. `fabric_adoption_established_for_wire` proves only
+/// that the session is Established; it does NOT prove this node owns
+/// the egress RG -- a non-owner that somehow holds an Established
+/// shared/local row would otherwise adopt and blackhole the flow
+/// locally. This wrapper adds the missing half: resolve the wire
+/// packet's destination through the live FIB and require the
+/// resolution's egress RG (`owner_rg_for_resolution`, tunnel-aware)
+/// to be forwarding-active on THIS node right now. Every arm fails
+/// closed: no Established evidence, no FIB egress, an unknown egress
+/// RG (0), a standalone node (empty HA map -- no RG owner exists to
+/// verify against, and fabric ingress cannot occur there), or a
+/// departed peer-owned egress RG all decline adoption; the packet
+/// then takes the ordinary miss path exactly as before.
+pub(in crate::afxdp) fn fabric_adoption_gate_for_wire(
+    forwarding: &crate::afxdp::ForwardingState,
+    ha_state: &std::collections::BTreeMap<i32, crate::afxdp::HAGroupRuntime>,
+    now_secs: u64,
+    sessions: &crate::session::SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    wire_key: &SessionKey,
+    now_ns: u64,
+) -> bool {
+    if !fabric_adoption_established_for_wire(
+        sessions,
+        shared_sessions,
+        shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
+        wire_key,
+        now_ns,
+    ) {
+        return false;
+    }
+    if ha_state.is_empty() {
+        return false;
+    }
+    let resolution = crate::afxdp::forwarding::lookup_forwarding_resolution(forwarding, wire_key.dst_ip).resolution;
+    // Tunnel resolutions name the endpoint RG via
+    // `owner_rg_for_resolution`; enforcement ADDITIONALLY gates the
+    // outer egress RG (#13980), so a tunnel candidate is owned only
+    // when BOTH RGs are forwarding-active locally. Plain resolutions
+    // gate on the egress RG alone.
+    let egress_rg = crate::afxdp::forwarding::owner_rg_for_resolution(forwarding, resolution);
+    if egress_rg <= 0
+        || !ha_state
+            .get(&egress_rg)
+            .is_some_and(|group| group.is_forwarding_active(now_secs))
+    {
+        return false;
+    }
+    if resolution.tunnel_endpoint_id != 0 {
+        let outer_rg = forwarding
+            .tunnel_outer_egress_rgs
+            .get(&resolution.tunnel_endpoint_id)
+            .copied();
+        return match outer_rg {
+            Some(rg) if rg > 0 => ha_state
+                .get(&rg)
+                .is_some_and(|group| group.is_forwarding_active(now_secs)),
+            _ => true,
+        };
+    }
+    true
+}
 /// #16217: INPUT evidence for the ct-slice collector and the export
 /// stamp — reverse service observed for the canonical key anywhere
 /// in the shared maps. Fail-closed: only an ACTUAL reverse packet

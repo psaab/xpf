@@ -707,15 +707,15 @@ FO+1 s.
 
 Fix part 1 (fence site, `flow_cache.rs::lookup_with_observed_bytes`):
 the epoch/lease fences no longer evict a cached `ForwardCandidate`
-whose stamp-owner RG has departed active service — admitted shapes are
-exactly: owner absent (lease-carrying stamp, stamp lease lapsed),
-owner `active == false`, or owner lease-lapsed with NO current runtime
-lease (`current_lease == 0`, the fw0 failover lease-drop; `active` may
-still read true in the lagging snapshot). Shortened-but-live runtime
-leases keep the #14943 fail-closed fence (the four pre-existing
-`14943`/`expired_owner_rg_lease` cells stay green unmodified), as do
-ownerless entries, standalone (empty map), and non-candidate
-dispositions. The admitted entry reaches `stage_flow_cache_hit`, where
+whose EGRESS RG (live FIB attribution via
+`owner_rg_for_resolution`, NOT the stamp-owner RG -- the live fw0
+entries carried `stamp_owner_rg=0` while egress RG1 had departed) is
+not forwarding-active locally on a clustered node. The supersession
+arm in `cached_flow_decision_invalid_reason_inner` likewise checks
+departure BEFORE enforce demotion, so the eviction attributes to
+`ForwardCandidateEgressDeparted` instead of being masked as
+`EnforceChanged`. Locally-active, unknown (rg 0), and standalone
+(empty map) shapes keep the pre-existing fences bit-identically. The admitted entry reaches `stage_flow_cache_hit`, where
 decision revalidation supersedes it (`PostHit…Departed` /
 `PostHitEnforceChanged`) and falls through to the slow-path re-resolve
 — HA-demote + `redirect_session_via_fabric_if_needed_at` →
@@ -757,5 +757,83 @@ pre-existing failures of the unmodified head
 `live_flow_cache_callsite_selected_admitted_clone_reaches_target_6304`,
 `gre_decap_flow_cache_hit_ttl_expiry_reads_inner_ttl_5615`,
 `tcp_seq_15753`, `session_decision_typed_snat_layout_11064`).
-Live aged P4 TWICE + failback: see the PR comment (this section's
-build). Do not merge as the aged-failover cure on unit evidence alone.
+Live aged P4: ONE run on this build (cell47: 29 SUM zero intervals
+-- acceptance NOT met; a second identical run was NOT executed).
+See the PR comment. Do not merge as the aged-failover cure on unit
+evidence alone.
+
+## Egress-RG fence, revalidated suppression, owner-verified gate (FZFixWire19)
+
+Review fold on `63e5c7268b` (the Wire18 head, which failed live with
+29 SUM zero intervals in its ONE executed run -- the earlier
+"TWICE" wording in this log and in the Wire18 commit Validation was
+an overclaim and is corrected above):
+
+1. **Departure before enforce** (`forwarding/ha.rs`):
+   `forward_candidate_egress_departed` is now checked BEFORE
+   `enforce_ha_resolution_snapshot` in
+   `cached_flow_decision_invalid_reason_inner`, so the eviction
+   attributes to `ForwardCandidateEgressDeparted` instead of being
+   masked as `EnforceChanged` (live fw0 post-FO read
+   `enforce_changed=5, departed=0`).
+2. **Egress-RG lookup fence** (`flow_cache.rs`): the fence admission
+   uses the SAME egress-RG predicate (`owner_rg_for_resolution` on
+   the cached resolution, tunnel-aware) as the hit stage, not the
+   stamp-owner RG. The live fw0 entries carried `stamp_owner_rg=0`
+   while egress RG1 had departed, so the stamp-owner fence never
+   admitted them. The production lookup now takes the live
+   `ForwardingState`; test seams pass `None` and keep the old fences.
+3. **Revalidated suppression** (`poll_descriptor/flow_cache_hit.rs`):
+   the marked-entry suppression keys on
+   `adopted_mark_revalidated` -- a marked entry suppresses the
+   `EnforceChanged` demotion only while
+   `revalidate_fabric_established` still holds for its cached
+   decision on THIS hit. An un-revalidated mark (adoption-window lag
+   or failback -- the same bits at cache level) falls through to
+   ordinary revalidation; with departure checked first, a departed
+   egress supersedes via the departed arm and re-resolves.
+4. **Owner-verified adoption gate** (GLM N1,
+   `shared_ops/lookup.rs::fabric_adoption_gate_for_wire`): both poll
+   gate callers (the session-miss adoption site and the session-hit
+   live-gate arm) now additionally require this node to be the
+   forwarding-active owner of the egress RG the live FIB names for
+   the wire destination. Established evidence alone never adopts on
+   a non-owner; unknown egress (rg 0), standalone (empty map), and
+   departed egress all fail closed to the ordinary miss path.
+   `fabric_adopted_resolution` keeps its named-egress guard.
+
+Tests: new `stage_hit_egress_rg_fence_and_nonowner_gate_16217`
+drives the REAL `stage_flow_cache_hit` for the stamp-owner-0 /
+egress-RG1 fence shape and the marked-departed shape, and the
+production gate for the non-owner decline + owner adoption.
+`lookup_fence_departed_candidate_reaches_hit_stage_16217` and
+`forward_candidate_egress_departed_falls_through_16270` now assert
+the DEPARTED arm specifically (0 EnforceChanged).
+`adopted_flow_survives_subsequent_packet_revalidation_16217`
+packet 2 now falls through (un-revalidated mark) while packet 3's
+session-hit adopted context still yields ForwardCandidate.
+`cargo test 16217` 29/29; `session::`+`forwarding::`+`flow_cache`
+1122 passed with exactly the 5 pre-existing failures of the
+unmodified head. Live aged P4 acceptance: see the PR comment for
+this build. Do not merge as the aged-failover cure on unit evidence
+alone.
+
+Live Wire19 run (pre-rebase head `ca3b9c3c32`, build
+`99.16217.42`, deb sha256 `1b556a11...055`, helper sha256
+`83073b1e...f95` homogeneous `/proc/<pid>/exe` both nodes before
+traffic; evidence `/var/worktrees/fzadopt2/cell49/`): aged 30 s
+RG1 failover P4, all-node0, FO at 30 s + failback -- **FAIL, 28
+SUM zero intervals**. Mechanism movement is real: fw0 post-FO now
+attributes `forward_candidate_egress_departed=4, enforce_changed=0`
+(the departed arm owns the eviction, as prescribed) and fw1 shows
+`forward_candidate_egress_departed=2`. The remaining blackhole is
+fw1-side: its last resolution for the adopted tuples still reads
+`ha_inactive ingress-ifindex=4 flow=172.16.80.8:<sport>->
+172.16.80.200:5211` and the canonical heavy rows still read
+`Timeout: 20` at d28, so the adoption gate's local-evidence arm
+does not fire for them on the receiving worker. Cluster restored:
+clean master `2c8575b70e`, helper `2f2f5cbf...b04` both nodes
+(hash-proved), RG0/1/2 node0 primary, target OK, P4 verification
+14.0 Gbit/s. A second identical run was NOT executed in this lane
+(the acceptance bar is ZERO zeros TWICE; reporting one FAIL run,
+not claiming twice). Do not merge as the aged-failover cure.

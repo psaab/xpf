@@ -1340,7 +1340,7 @@ impl FlowCache {
         // / pre-HA entries keep their pre-#14943 behaviour). Cells that
         // exercise the current-lease gate call `lookup_with_ha_state`.
         let empty_ha = BTreeMap::new();
-        self.lookup_with_observed_bytes(key, lookup, now_secs, rg_epochs, 0, None, false, &empty_ha)
+        self.lookup_with_observed_bytes(key, lookup, now_secs, rg_epochs, 0, None, false, &empty_ha, None)
     }
 
     #[cfg(test)]
@@ -1353,7 +1353,7 @@ impl FlowCache {
         rg_epochs: &[AtomicU32; MAX_RG_EPOCHS],
         ha_state: &BTreeMap<i32, HAGroupRuntime>,
     ) -> Option<&FlowCacheEntry> {
-        self.lookup_with_observed_bytes(key, lookup, now_secs, rg_epochs, 0, None, false, ha_state)
+        self.lookup_with_observed_bytes(key, lookup, now_secs, rg_epochs, 0, None, false, ha_state, None)
     }
 
     #[inline]
@@ -1375,6 +1375,7 @@ impl FlowCache {
             None,
             false,
             ha_state,
+            None,
         )
     }
 
@@ -1410,6 +1411,7 @@ impl FlowCache {
         policy: &crate::policy::PolicyState,
         scheduler_expired: bool,
         ha_state: &BTreeMap<i32, HAGroupRuntime>,
+        forwarding: &ForwardingState,
     ) -> Option<&FlowCacheEntry> {
         if scheduler_expired != self.scheduler_expired {
             let phase_can_change_verdict = if scheduler_expired {
@@ -1460,6 +1462,7 @@ impl FlowCache {
             Some(policy),
             scheduler_expired,
             ha_state,
+            Some(forwarding),
         )
     }
 
@@ -1474,6 +1477,7 @@ impl FlowCache {
         policy: Option<&crate::policy::PolicyState>,
         scheduler_expired: bool,
         ha_state: &BTreeMap<i32, HAGroupRuntime>,
+        forwarding: Option<&ForwardingState>,
     ) -> Option<&FlowCacheEntry> {
         let ingress_ifindex = if self.binding_ifindex != 0 {
             self.binding_ifindex
@@ -1517,55 +1521,48 @@ impl FlowCache {
                 // of never. Mirrors the worker session-expiry gate.
                 let owner = entry.stamp.owner_rg_id;
                 let current_epoch = rg_epochs[rg_epoch_index(owner)].load(Ordering::Relaxed);
-                // #16217 (fence preemption, FZFixWire17/Wire18): a cached
-                // `ForwardCandidate` whose egress RG has DEPARTED this node
-                // must NOT be fenced away here. The lookup fences
-                // (rg_epoch / lease) fire at the failover for exactly these
-                // entries, but a fence carries no decision: the slow path
-                // then re-serves / re-seeds the same candidate locally and
-                // the flow blackholes on a non-owner WAN egress (fw0 post-FO:
-                // lookup_rg_epoch/lease evictions, enforce_changed=0, zero
-                // redirect arms). Admit such an entry to the hit stage,
-                // whose decision revalidation
-                // (`cached_flow_decision_invalid_reason_for_flow`) owns the
-                // `ForwardCandidateEgressDeparted` arm and falls through to
-                // the slow-path re-resolve that HA-demotes and
-                // fabric-redirects to the new owner.
+                // #16217 (fence preemption): a cached `ForwardCandidate`
+                // whose egress RG has DEPARTED this node must NOT be
+                // fenced away here. The lookup fences (rg_epoch / lease)
+                // fire at the failover for exactly these entries, but a
+                // fence carries no decision: the slow path then
+                // re-serves / re-seeds the same candidate locally and
+                // the flow blackholes on a non-owner WAN egress (fw0
+                // post-FO: lookup_rg_epoch/lease evictions,
+                // enforce_changed=0, zero redirect arms). Admit such an
+                // entry to the hit stage, whose decision revalidation
+                // (`cached_flow_decision_invalid_reason_for_flow`) owns
+                // the `ForwardCandidateEgressDeparted` arm and falls
+                // through to the slow-path re-resolve that HA-demotes
+                // and fabric-redirects to the new owner.
                 //
-                // Departure is judged on the entry's STAMP OWNER (the
-                // seed-time flow owner RG — the lookup has no live FIB;
-                // the hit stage re-derives the precise egress RG): stamp
-                // owner > 0, clustered map non-empty, and the RG is gone
-                // from active service: ABSENT (lease-carrying entries
-                // only), INACTIVE (`active == false`), or lease-lapsed
-                // with NO current runtime lease (`current_lease == 0` and
-                // the stamp carried a lease). The lease-gone arm is what
-                // the fw0 cell proves: at the failover the lease drops to
-                // 0 while `active` may still read true in the lagging
-                // snapshot. Guards: a SHORTENED-but-live runtime lease
-                // (current lease > 0, merely earlier than the stamp — the
-                // #14943 renewed-short / genuinely-expired-runtime shapes
-                // whose stamp is still in force) is NOT departure and
-                // keeps the fail-closed fence, as does a locally-active RG
-                // with a live lease, an unknown owner (rg 0), a standalone
-                // node (empty map), and every non-candidate disposition. A
-                // marked (adopted) entry is unaffected — its exemption
-                // below still wins. Deny entries carry no ForwardCandidate
-                // and are never admitted.
-                let fence_departed_candidate = entry.decision.resolution.disposition
-                    == ForwardingDisposition::ForwardCandidate
-                    && !ha_state.is_empty()
-                    && owner > 0
-                    && match ha_state.get(&owner) {
-                        None => entry.stamp.owner_rg_lease_until != 0
-                            && now_secs > entry.stamp.owner_rg_lease_until,
-                        Some(group) => {
-                            !group.active
-                                || (entry.stamp.owner_rg_lease_until != 0
-                                    && !group.is_forwarding_active(now_secs)
-                                    && FlowCacheStamp::current_lease_until(owner, ha_state) == 0)
-                        }
-                    };
+                // Departure is judged with the SAME egress-RG
+                // predicate the hit stage uses —
+                // `forward_candidate_egress_departed`, i.e.
+                // `owner_rg_for_resolution` on the entry's cached
+                // resolution (tunnel-aware egress attribution), NOT
+                // the stamp-owner RG: the stamp names the seed-time
+                // flow owner, which can differ from the egress RG
+                // (the live fw0 entries carried stamp_owner_rg=0
+                // while egress RG1 had departed, so a stamp-owner
+                // fence never admitted them). When no live FIB is
+                // available (test seams passing `forwarding: None`)
+                // the predicate cannot be evaluated and the fences
+                // keep their pre-existing behaviour. A locally-active
+                // egress never qualifies, an unknown egress (rg 0)
+                // never qualifies, and a standalone node (empty map)
+                // never qualifies. A marked (adopted) entry is
+                // unaffected — its exemption below still wins. Deny
+                // entries carry no ForwardCandidate and are never
+                // admitted.
+                let fence_departed_candidate = forwarding.is_some_and(|fwd| {
+                    crate::afxdp::forwarding::forward_candidate_egress_departed(
+                        fwd,
+                        ha_state,
+                        now_secs,
+                        entry.decision.resolution,
+                    )
+                });
                 // the RG-epoch/lease lookup fences: the adoption gate already
                 // proved this node owns the egress RG, and the epoch bump +
                 // lease drop AT the failover are exactly the fences that
