@@ -396,10 +396,7 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 	// under an opaque node. No typed state is consumed -- the pass only
 	// preserves the raw AST all warning/redaction/show paths already read.
 	switch containerKeyword + " " + head {
-	case "services user-identification",
-		"services authentication-source",
-		"services device-information",
-		"security authentication-source",
+	case "security authentication-source",
 		"security device-information",
 		"security user-identification",
 		"user-identification authentication-source",
