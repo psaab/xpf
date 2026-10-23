@@ -523,6 +523,14 @@ impl PortAllocator {
             self.record_idle_lease_import_capacity();
             return IdleLeaseImport::SkippedCapacity;
         }
+        // #16013: an imported idle lease charges its source on the standby
+        // too, so a peer (or a compromised peer channel) cannot flood one
+        // source past the per-source ceiling. Reported through the same
+        // capacity outcome/counter as the pool-global refusal above.
+        if self.persistent_source_lease_capacity_reached(&mut live, &key, now_ns) {
+            self.record_idle_lease_import_capacity();
+            return IdleLeaseImport::SkippedCapacity;
+        }
         let translated = TranslatedTuple {
             ip: rec.translated_ip,
             port: rec.translated_port,

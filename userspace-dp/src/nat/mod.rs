@@ -167,6 +167,10 @@ mod tests_scope;
 #[cfg(test)]
 #[path = "tests_15948.rs"]
 mod tests_15948;
+// #16013: per-source fairness for persistent NAT leases.
+#[cfg(test)]
+#[path = "tests_persistent_per_source_16013.rs"]
+mod tests_persistent_per_source_16013;
 
 // #4800: SNAT pool allocator `live` map-mutex contention accounting.
 #[cfg(test)]

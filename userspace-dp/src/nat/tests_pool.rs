@@ -7463,7 +7463,7 @@ fn install_expired_idle_leases(
                 routing_scope: 0,
                 remote: None,
             };
-            live.persistent_by_source.insert(
+            live.insert_persistent_lease(
                 key,
                 PersistentLease {
                     translated: TranslatedTuple {
@@ -7569,7 +7569,7 @@ fn pool_snat_gc_chunked_spares_active_and_unexpired_leases() {
         let mut live = alloc.debug_live();
         // Active lease: active_flows = 1, deliberately NOT indexed (active
         // leases never sit in the expiry index — GC must not touch it).
-        live.persistent_by_source.insert(
+        live.insert_persistent_lease(
             active_key,
             PersistentLease {
                 translated: TranslatedTuple {
@@ -7594,7 +7594,7 @@ fn pool_snat_gc_chunked_spares_active_and_unexpired_leases() {
             },
         );
         // Idle but not-yet-expired lease (expiry 10_000, past now=1000).
-        live.persistent_by_source.insert(
+        live.insert_persistent_lease(
             future_key,
             PersistentLease {
                 translated: TranslatedTuple {
