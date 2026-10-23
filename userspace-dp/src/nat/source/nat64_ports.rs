@@ -51,6 +51,7 @@ pub(crate) fn allocate_nat64_pool_port_excluding(
         false, // address_persistent
         true,  // persistent_nat: BIB identity excludes the remote endpoint
         PersistentNatPermit::AnyRemoteHost,
+        0,                   // #16017: NAT64 BIBs have no authorizing source-NAT rule version
         300 * 1_000_000_000, // RFC 6146 idle BIB lifetime
         now_ns,
         holder,
@@ -215,7 +216,10 @@ pub(crate) fn reserve_nat64_pool_port_capture_and_replace(
         true,
         &mut previous_snapshot,
     );
-    (reserved, previous_snapshot.map(|snapshot| snapshot.holder_mask()))
+    (
+        reserved,
+        previous_snapshot.map(|snapshot| snapshot.holder_mask()),
+    )
 }
 
 /// #8115 R3: refuse a NAT64 mint whose translated identity a PEER allocator
@@ -264,7 +268,10 @@ pub(crate) fn nat64_refuse_if_interface_owns(
     now_ns: u64,
     holder: NatHolder,
 ) -> Result<(), SourceNatFailureReason> {
-    let tuple = TranslatedTuple { ip: IpAddr::V4(translated.0), port: translated.1 };
+    let tuple = TranslatedTuple {
+        ip: IpAddr::V4(translated.0),
+        port: translated.1,
+    };
     let owned = if let Some(o) = owners {
         std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
         o.interface_holds(flow, tuple, allocator) || direct_iface_owns(iface_allocs, flow, tuple)
@@ -278,22 +285,43 @@ pub(crate) fn nat64_refuse_if_interface_owns(
     Err(SourceNatFailureReason::PoolPeerAddressOverlap)
 }
 
-pub(crate) fn direct_iface_owns(iface_allocs: &InterfaceNatAllocators, flow: SourceNatFlowKey, translated: TranslatedTuple) -> bool {
+pub(crate) fn direct_iface_owns(
+    iface_allocs: &InterfaceNatAllocators,
+    flow: SourceNatFlowKey,
+    translated: TranslatedTuple,
+) -> bool {
     match iface_allocs.allocator_if_present(translated.ip) {
-        Some(a) => a.holds_address_only_identity(&super::super::allocator::AddressOnlyReverseKey::for_flow(&flow, translated.ip, translated.port)),
+        Some(a) => a.holds_address_only_identity(
+            &super::super::allocator::AddressOnlyReverseKey::for_flow(
+                &flow,
+                translated.ip,
+                translated.port,
+            ),
+        ),
         None => false,
     }
 }
 
 /// #14367: does any pool/NAT64 peer own candidate for interface mint?
 /// PAT bitmap remote-agnostic (PAT'd away), address-only remote-specific.
-pub(crate) fn peer_owns_for_interface(owners: Option<&PoolAddressOwners>, own_iface: &PortAllocator, flow: SourceNatFlowKey, translated: TranslatedTuple) -> bool {
-    let Some(o) = owners else { return false; };
+pub(crate) fn peer_owns_for_interface(
+    owners: Option<&PoolAddressOwners>,
+    own_iface: &PortAllocator,
+    flow: SourceNatFlowKey,
+    translated: TranslatedTuple,
+) -> bool {
+    let Some(o) = owners else {
+        return false;
+    };
     std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
     o.holds_for_interface(flow, translated, own_iface)
 }
 
-pub(crate) fn iface_owns_for_pool(iface_allocs: &InterfaceNatAllocators, flow: SourceNatFlowKey, translated: TranslatedTuple) -> bool {
+pub(crate) fn iface_owns_for_pool(
+    iface_allocs: &InterfaceNatAllocators,
+    flow: SourceNatFlowKey,
+    translated: TranslatedTuple,
+) -> bool {
     direct_iface_owns(iface_allocs, flow, translated)
 }
 

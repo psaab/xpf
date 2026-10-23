@@ -224,3 +224,84 @@ fn persistent_permit_tightening_to_target_host_revokes_any_remote_16017() {
         "#16017: tightening to target-host must revoke any-remote grant"
     );
 }
+
+#[test]
+fn imported_any_remote_grant_is_revoked_on_tightening_16017() {
+    use super::idle_lease_sync_8121::IdleLeaseImport;
+
+    let target: IpAddr = "198.51.100.20".parse().unwrap();
+    let non_target: IpAddr = "203.0.113.99".parse().unwrap();
+    let now = 1_000u64;
+    let rules1 = rules_with_permit("any-remote-host");
+    let translated = outbound(&rules1, target, 443, now);
+    let rule1 = &rules1[0];
+    assert!(rule1.pool_allocator.release_flow(
+        crate::nat::SourceNatFlowKey {
+            protocol: PROTO_TCP,
+            src_ip: "10.0.0.5".parse().unwrap(),
+            dst_ip: target,
+            src_port: 40_000,
+            dst_port: 443,
+            routing_scope: 0,
+        },
+        translated,
+        now,
+        NatHolder::Untracked,
+    ));
+    let exported = rule1.pool_allocator.export_idle_leases(now + 1);
+    assert_eq!(exported.len(), 1, "fixture: idle any-remote lease exports");
+
+    // Fresh allocator models the standby importing the grant before the
+    // permit change reaches it.
+    let standby_rules = rules_with_permit("any-remote-host");
+    let standby = &standby_rules[0];
+    let pool_addrs = vec![translated.ip];
+    assert_eq!(
+        standby.pool_allocator.import_idle_lease(
+            &exported[0],
+            &pool_addrs,
+            300_000_000_000,
+            now + 2
+        ),
+        IdleLeaseImport::Installed
+    );
+    assert!(
+        matches!(
+            inbound(standby, translated, non_target, 9_999, now + 2),
+            PersistentInbound::Permitted { .. }
+        ),
+        "fixture: imported any-remote grant admits before tightening"
+    );
+
+    // Reusing this allocator for the tightened generation must revoke the
+    // imported (version-0) grant, not treat version 0 as always current.
+    let tightened = crate::nat::parse_source_nat_rules_with_previous(
+        &[SourceNATRuleSnapshot {
+            name: "wan".to_string(),
+            from_zone: "trust".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["10.0.0.0/24".to_string()],
+            pool_name: "shared".to_string(),
+            pool_addresses: vec!["203.0.113.10".to_string()],
+            port_low: POOL_PORT,
+            port_high: POOL_PORT_HIGH,
+            persistent_nat: true,
+            persistent_nat_permit: "target-host-port".to_string(),
+            persistent_nat_inactivity_timeout: 300,
+            ..SourceNATRuleSnapshot::default()
+        }],
+        Some(&standby_rules),
+        &NatCounterStore::default(),
+        now + 3,
+    );
+    assert!(
+        standby
+            .pool_allocator
+            .same_allocator(&tightened[0].pool_allocator)
+    );
+    assert_eq!(
+        inbound(&tightened[0], translated, non_target, 9_999, now + 3),
+        PersistentInbound::Denied,
+        "#16017 fold: imported version-0 any-remote grant must be revoked on tightening"
+    );
+}

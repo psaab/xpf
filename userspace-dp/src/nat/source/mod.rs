@@ -958,7 +958,8 @@ fn resolve_pool_allocators(
         }
         if previous_allocators.contains_key(&key) {
             // #16017: reuse-allocator permit version, shared across rules naming this pool.
-            rule.persistent_permit_version = previous_allocators[&key].next_persistent_permit_version();
+            rule.persistent_permit_version =
+                previous_allocators[&key].next_persistent_permit_version();
         }
         let charge = pending.charge();
         if let Some(existing) = previous_allocators.get(&key) {
@@ -1048,7 +1049,7 @@ fn resolve_pool_allocators(
     {
         let mut synced: Vec<usize> = Vec::new();
         for i in 0..out.len() {
-            if out[i].persistent_permit_version == 0 {
+            if !out[i].persistent_nat || !out[i].pool_mode {
                 continue;
             }
             let alloc_ptr = out[i].pool_allocator.debug_shared_identity();
@@ -1067,7 +1068,11 @@ fn resolve_pool_allocators(
                 let from = rule.from_zone.clone();
                 let to = rule.to_zone.clone();
                 let scope = rule.persistent_rule_scope(&from, &to, &to, &NatScopeCtx::default());
-                scopes.push((scope, rule.persistent_nat_permit, rule.persistent_permit_version));
+                scopes.push((
+                    scope,
+                    rule.persistent_nat_permit,
+                    rule.persistent_permit_version,
+                ));
             }
             if !scopes.is_empty() {
                 out[i].pool_allocator.sync_persistent_permit_scopes(&scopes);
@@ -1504,8 +1509,17 @@ pub(crate) fn candidate_source_nat_translations(
 ) -> Result<Vec<NatDecision>, SourceNatFailure> {
     for rule in rules {
         if rule.matches(
-            scope, from_zone, to_zone, src_ip, dst_ip, false, protocol, src_port, dst_port,
-            false, packet_icmp,
+            scope,
+            from_zone,
+            to_zone,
+            src_ip,
+            dst_ip,
+            false,
+            protocol,
+            src_port,
+            dst_port,
+            false,
+            packet_icmp,
         ) == L4Match::NoMatch
         {
             continue;
@@ -1548,8 +1562,7 @@ pub(crate) fn candidate_source_nat_translations(
                         ));
                     }
                     if let Some(det) = rule.deterministic_v4 {
-                        let Some((ip_idx, _)) =
-                            crate::nat::deterministic_indices_v4(&det, src_v4)
+                        let Some((ip_idx, _)) = crate::nat::deterministic_indices_v4(&det, src_v4)
                         else {
                             return Err(SourceNatFailure::for_rule(
                                 rule,
@@ -1674,8 +1687,8 @@ pub(crate) fn source_nat_translation_matches(
             // take the portless branch merely because a reconstructed
             // decision lost its type/code. The portless branch is only for
             // translations that never allocated an identifier/port.
-            let icmp_query_pat = matches!(protocol, PROTO_ICMP | PROTO_ICMPV6)
-                && translated_src_port.is_some();
+            let icmp_query_pat =
+                matches!(protocol, PROTO_ICMP | PROTO_ICMPV6) && translated_src_port.is_some();
             if rule.no_translation
                 || (!icmp_query_pat
                     && !crate::ip_proto::has_l4_ports(protocol)
@@ -1723,9 +1736,8 @@ pub(crate) fn source_nat_translation_matches(
             // port-less protocol); accepting it because the ORIGINAL
             // `src_port` happens to fall in the new PAT range would keep a
             // translation the current PAT rule never allocated (#14128).
-            return translated_src_port.is_some_and(|port| {
-                (rule.pool_port_low..=rule.pool_port_high).contains(&port)
-            });
+            return translated_src_port
+                .is_some_and(|port| (rule.pool_port_low..=rule.pool_port_high).contains(&port));
         }
         return false;
     }
@@ -1797,9 +1809,7 @@ fn flowless_source_nat_l4_possible(
             (Some(want_type), want_code, Some((got_type, got_code))) => {
                 got_type == want_type && want_code.is_none_or(|want| want == got_code)
             }
-            (Some(_), _, None) => {
-                protocol_unknown || matches!(protocol, PROTO_ICMP | PROTO_ICMPV6)
-            }
+            (Some(_), _, None) => protocol_unknown || matches!(protocol, PROTO_ICMP | PROTO_ICMPV6),
         };
         icmp_possible
             && (term.ports.is_empty()

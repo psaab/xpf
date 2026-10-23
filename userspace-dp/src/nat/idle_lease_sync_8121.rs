@@ -62,7 +62,8 @@ use super::allocator::{
 };
 use std::sync::LazyLock;
 
-static EMPTY_PERMISSION_SCOPE: LazyLock<PersistentPermissionScope> = LazyLock::new(PersistentPermissionScope::default);
+static EMPTY_PERMISSION_SCOPE: LazyLock<PersistentPermissionScope> =
+    LazyLock::new(PersistentPermissionScope::default);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DeterministicPortedIdentity {
@@ -187,30 +188,38 @@ impl PortAllocator {
             })
             .flat_map(|(key, lease)| {
                 let permissions = live.persistent_permissions.get(key);
-                let mut buckets: Vec<(u32, &PersistentPermissionScope)> = permissions.map(|set| set.scopes.iter().map(|(s, g)| (*s, g)).collect()).unwrap_or_default();
-                if buckets.is_empty() { buckets.push((0, &EMPTY_PERMISSION_SCOPE)); }
+                let mut buckets: Vec<(u32, &PersistentPermissionScope)> = permissions
+                    .map(|set| set.scopes.iter().map(|(s, g)| (*s, g)).collect())
+                    .unwrap_or_default();
+                if buckets.is_empty() {
+                    buckets.push((0, &EMPTY_PERMISSION_SCOPE));
+                }
                 buckets.sort_unstable_by_key(|(s, _)| *s);
-                buckets.into_iter().map(move |(egress_scope, grants)| {
-                    let mut permitted_remotes: Vec<(IpAddr, u16)> = grants.remotes.iter().copied().collect();
-                    permitted_remotes.sort_unstable();
-                    IdleLeaseRecord {
-                        protocol: key.protocol,
-                        src_ip: key.src_ip,
-                        src_port: key.src_port,
-                        routing_scope: key.routing_scope,
-                        egress_scope,
-                        remote: None,
-                        permit_any_remote: grants.any_remote,
-                        permitted_remotes,
-                        translated_ip: lease.translated.ip,
-                        translated_port: lease.translated.port,
-                        address_only: lease.address_only,
-                        deterministic: lease.deterministic,
-                        deterministic_identity: lease.deterministic_identity,
-                        remaining_ns: lease.expires_at_ns.saturating_sub(now_ns),
-                        timeout_ns: lease.timeout_ns,
-                    }
-                }).collect::<Vec<_>>()
+                buckets
+                    .into_iter()
+                    .map(move |(egress_scope, grants)| {
+                        let mut permitted_remotes: Vec<(IpAddr, u16)> =
+                            grants.remotes.iter().copied().collect();
+                        permitted_remotes.sort_unstable();
+                        IdleLeaseRecord {
+                            protocol: key.protocol,
+                            src_ip: key.src_ip,
+                            src_port: key.src_port,
+                            routing_scope: key.routing_scope,
+                            egress_scope,
+                            remote: None,
+                            permit_any_remote: grants.any_remote,
+                            permitted_remotes,
+                            translated_ip: lease.translated.ip,
+                            translated_port: lease.translated.port,
+                            address_only: lease.address_only,
+                            deterministic: lease.deterministic,
+                            deterministic_identity: lease.deterministic_identity,
+                            remaining_ns: lease.expires_at_ns.saturating_sub(now_ns),
+                            timeout_ns: lease.timeout_ns,
+                        }
+                    })
+                    .collect::<Vec<_>>()
             })
             .collect()
     }
@@ -239,12 +248,23 @@ impl PortAllocator {
         live.persistent_by_source
             .iter()
             .filter(|(_, lease)| {
-                !lease.revoked && (lease.active_flows > 0 || lease.inbound_flows > 0 || lease.expires_at_ns > now_ns)
+                !lease.revoked
+                    && (lease.active_flows > 0
+                        || lease.inbound_flows > 0
+                        || lease.expires_at_ns > now_ns)
             })
             .map(|(key, lease)| {
                 let permissions = live.persistent_permissions.get(key);
-                let permit_any_remote = permissions.is_some_and(|set| set.scopes.values().any(|g| g.any_remote));
-                let mut permitted_remotes: Vec<(IpAddr, u16)> = permissions.map(|set| set.scopes.values().flat_map(|g| g.remotes.iter().copied()).collect()).unwrap_or_default();
+                let permit_any_remote =
+                    permissions.is_some_and(|set| set.scopes.values().any(|g| g.any_remote));
+                let mut permitted_remotes: Vec<(IpAddr, u16)> = permissions
+                    .map(|set| {
+                        set.scopes
+                            .values()
+                            .flat_map(|g| g.remotes.iter().copied())
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 permitted_remotes.sort_unstable();
                 permitted_remotes.dedup();
                 DisplayLeaseRecord {
@@ -370,7 +390,10 @@ impl PortAllocator {
         if fenced {
             return IdleLeaseImport::SkippedClearFenced;
         }
-        let expired_existing = live.persistent_by_source.get(&key).is_some_and(|l| l.active_flows == 0 && l.expires_at_ns <= now_ns);
+        let expired_existing = live
+            .persistent_by_source
+            .get(&key)
+            .is_some_and(|l| l.active_flows == 0 && l.expires_at_ns <= now_ns);
         if expired_existing {
             self.reclaim_expired_idle_lease_locked(&mut live, key, now_ns);
         }
@@ -471,9 +494,9 @@ impl PortAllocator {
                 // remote.
                 let idle_pat_busy = (widen_any
                     && live.idle_pat_lease_covers(translated, &key, None))
-                    || new_remotes.iter().any(|remote| {
-                        live.idle_pat_lease_covers(translated, &key, Some(*remote))
-                    });
+                    || new_remotes
+                        .iter()
+                        .any(|remote| live.idle_pat_lease_covers(translated, &key, Some(*remote)));
                 let merge_busy = (widen_any && (contended(None) && any_contended_by_other))
                     || idle_pat_busy
                     || new_remotes.iter().any(|remote| {
@@ -493,7 +516,11 @@ impl PortAllocator {
                 };
                 {
                     let current = live.persistent_permissions.entry(key).or_default();
-                    let total = current.scopes.values().map(|g| g.remotes.len()).sum::<usize>();
+                    let total = current
+                        .scopes
+                        .values()
+                        .map(|g| g.remotes.len())
+                        .sum::<usize>();
                     let bucket = current.scopes.entry(rec.egress_scope).or_default();
                     let additions = rec
                         .permitted_remotes
@@ -501,7 +528,16 @@ impl PortAllocator {
                         .filter(|r| !bucket.remotes.contains(r))
                         .count();
                     if total.saturating_add(additions) <= MAX_PERSISTENT_PERMITTED_REMOTES {
+                        let was_any_remote = bucket.any_remote;
                         bucket.any_remote |= rec.permit_any_remote;
+                        if bucket.any_remote && !was_any_remote {
+                            // A repeated import explicitly re-authorizes a
+                            // grant revoked by a permit change. A grant that
+                            // was already locally current stays on its own
+                            // authorizing version.
+                            bucket.permit_change_authorized = true;
+                            bucket.any_remote_permit_version = 0;
+                        }
                         bucket.remotes.extend(rec.permitted_remotes.iter().copied());
                     }
                 }
@@ -544,11 +580,7 @@ impl PortAllocator {
         } else {
             rec.permitted_remotes.iter().any(|remote| {
                 if rec.address_only {
-                    live.import_idle_address_only_contended(
-                        rec.protocol,
-                        translated,
-                        Some(*remote),
-                    )
+                    live.import_idle_address_only_contended(rec.protocol, translated, Some(*remote))
                 } else {
                     live.import_idle_pat_address_only_contended(
                         rec.protocol,
@@ -577,7 +609,16 @@ impl PortAllocator {
         // the bucket must exist when indexing runs (mirrors removal, which
         // reads the stored map before dropping it).
         let mut permissions = PersistentPermissions::default();
-        permissions.scopes.insert(rec.egress_scope, PersistentPermissionScope { any_remote: rec.permit_any_remote, remotes: rec.permitted_remotes.iter().copied().collect(), mint_from_zone: None, any_remote_permit_version: 0 });
+        permissions.scopes.insert(
+            rec.egress_scope,
+            PersistentPermissionScope {
+                any_remote: rec.permit_any_remote,
+                remotes: rec.permitted_remotes.iter().copied().collect(),
+                mint_from_zone: None,
+                any_remote_permit_version: 0,
+                permit_change_authorized: true,
+            },
+        );
         live.persistent_permissions.insert(key, permissions);
         live.insert_persistent_lease(
             key,
