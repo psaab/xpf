@@ -503,15 +503,19 @@ func rollbackSkewSlotAdmission(snap rollbackMetadataSnapshot, pendingSkew bool, 
 		return false, time.Time{}, ""
 	}
 	metadata := snap.Entries
-	if i-1 < len(metadata) && metadata[i-1].PendingHash != "" &&
-		slotHash == metadata[i-1].PendingHash {
-		return true, metadata[i-1].PendingTimestamp, metadata[i-1].PendingComment
-	}
-	// Fold 3 snapshot edge: current on-disk bytes at this index, captured at
-	// preparation time independently of the committed Hash chain.
+	// Fold 4 disambiguation: when PendingHash == CurrentHash at this index,
+	// the slot bytes are positionally UNCHANGED (the future content equals
+	// the current content), so the slot was not rewritten by the crashed
+	// commit and must keep its CURRENT attributes, never the pending ones.
+	// Pending attributes apply only when the bytes differ from current,
+	// proving the rewrite landed. Current is therefore checked FIRST.
 	if i-1 < len(metadata) && metadata[i-1].CurrentHash != "" &&
 		slotHash == metadata[i-1].CurrentHash {
 		return true, metadata[i-1].CurrentTimestamp, metadata[i-1].CurrentComment
+	}
+	if i-1 < len(metadata) && metadata[i-1].PendingHash != "" &&
+		slotHash == metadata[i-1].PendingHash {
+		return true, metadata[i-1].PendingTimestamp, metadata[i-1].PendingComment
 	}
 	// Fallback mapping (pre-shift chain): the crashed commit's predecessor
 	// list is [old active, old slot1, old slot2, ...] = [snap.ActiveHash,

@@ -548,22 +548,106 @@ func TestTwoCrashCyclesExactHistory16064(t *testing.T) {
 			if len(entries) < 3 {
 				t.Fatalf("boundary %d: loaded %d entries, want >=3", boundary, len(entries))
 			}
-			// Exact contents across both cycles. Before cycle 2 the live
-			// history was [cy-d(active), cy-c, cy-b, cy-a...] recovered at
-			// pre-shift positions [slot1=cy-c? ..]. After cycle-2 crash the
-			// exact hosts depend on boundary; the invariant asserted here is
-			// exact: no position tombstones and each carries one of the known
-			// generation hosts with its matching comment prefix.
-			known := map[string]string{"cy-a": "cmt-cy-b", "cy-b": "cmt-cy-c", "cy-c": "cmt-cy-d", "cy-d": "cmt-cy-e", "cy-e": "cmt-cy-f"}
-			_ = known
+			// Exact host+comment at every position. Cycle-2 semantics: slot 1
+			// holds cy-e if its rewrite landed else cy-d's predecessor chain;
+			// deeper slots hold pre-shift cy-c/cy-b (untouched) or rewritten
+			// cy-d/cy-c. Assert liveness plus membership in the exact pair set
+			// per position — any wrong-index admission breaks the pair.
+			type hc struct{ host, comment string }
+			allowed := []map[hc]bool{
+				{{"cy-e", "cmt-cy-f"}: true, {"cy-c", "cmt-cy-d"}: true, {"cy-d", "cmt-cy-e"}: true},
+				{{"cy-d", "cmt-cy-e"}: true, {"cy-b", "cmt-cy-c"}: true, {"cy-c", "cmt-cy-d"}: true},
+				{{"cy-c", "cmt-cy-d"}: true, {"cy-a", "cmt-cy-b"}: true, {"cy-b", "cmt-cy-c"}: true},
+			}
+			hostOf := func(e *HistoryEntry) string {
+				f := format(e)
+				for _, h := range []string{"cy-a", "cy-b", "cy-c", "cy-d", "cy-e", "cy-f"} {
+					if strings.Contains(f, h) {
+						return h
+					}
+				}
+				return f
+			}
 			for pos := 0; pos < 3; pos++ {
 				if entries[pos].Config == nil {
-					t.Fatalf("boundary %d: slot %d tombstoned (content %q)", boundary, pos+1, format(entries[pos]))
+					t.Fatalf("boundary %d: slot %d tombstoned", boundary, pos+1)
+				}
+				got := hc{hostOf(entries[pos]), entries[pos].Comment}
+				if !allowed[pos][got] {
+					t.Fatalf("boundary %d slot %d = %+v, want one of %v", boundary, pos+1, got, allowed[pos])
+				}
+				if entries[pos].Timestamp.IsZero() {
+					t.Fatalf("boundary %d slot %d has zero timestamp", boundary, pos+1)
 				}
 			}
-			if !strings.Contains(format(entries[0]), "cy-") {
-				t.Fatalf("boundary %d slot 1 = %q", boundary, format(entries[0]))
-			}
 		})
+	}
+}
+
+// TestSkewEqualContentAttrs16064 pins fold 4: when a slot's future content
+// equals its current content (PendingHash == CurrentHash), an untouched slot
+// keeps CURRENT attrs; only bytes that differ from current (rewrite landed)
+// take pending attrs. Uses duplicate content at two positions with distinct
+// timestamp+comment so mis-binding is visible.
+func TestSkewEqualContentAttrs16064(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "xpf.conf")
+	s := newTestStoreAt(t, path)
+	// dup content committed twice: history holds identical bytes twice.
+	for _, cmt := range []string{"dup-first", "dup-second"} {
+		if err := s.EnterConfigure(); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetFromInput("system host-name dup-host"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.CommitWithDescription(cmt); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		s.ExitConfigure()
+	}
+	// Stamp deterministic distinct timestamps on the two dup entries.
+	hist := s.history.List()
+	tsOld := time.Date(2024, 5, 6, 7, 8, 9, 0, time.UTC)
+	tsNew := time.Date(2025, 5, 6, 7, 8, 9, 0, time.UTC)
+	if len(hist) >= 2 {
+		hist[0].Timestamp = tsNew
+		hist[1].Timestamp = tsOld
+	}
+	s.saveRollbackFiles()
+
+	oldRBWrite := rbWriteFileDurable
+	t.Cleanup(func() { rbWriteFileDurable = oldRBWrite })
+	killed := errors.New("simulated power loss")
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFromInput("system host-name dup-host"); err != nil {
+		t.Fatal(err)
+	}
+	var rec any
+	func() {
+		defer func() { rec = recover() }()
+		rbWriteFileDurable = func(p string, data []byte, perm os.FileMode, opts ...fsatomic.Option) error {
+			if strings.HasPrefix(filepath.Base(p), "xpf.conf.") {
+				panic(killed)
+			}
+			return oldRBWrite(p, data, perm, opts...)
+		}
+		_, _ = s.CommitWithDescription("dup-third")
+	}()
+	rbWriteFileDurable = oldRBWrite
+	if rec == nil {
+		t.Fatal("commit did not reach crash point")
+	}
+	restarted := newTestStoreAt(t, path)
+	restarted.loadRollbackHistory()
+	entries := restarted.history.List()
+	if len(entries) < 1 || entries[0].Config == nil {
+		t.Fatalf("equal-content crash lost slot 1: %#v", entries)
+	}
+	// Slot 1 bytes are dup content positionally unchanged: current attrs win.
+	// It must NOT be stamped with the pending "dup-third" comment.
+	if entries[0].Comment == "dup-third" {
+		t.Fatalf("slot 1 took pending comment for positionally-unchanged bytes: %#v", entries[0])
 	}
 }
