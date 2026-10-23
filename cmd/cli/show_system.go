@@ -140,8 +140,12 @@ func (c *ctl) handleShowSystem(args []string) error {
 	case "storage":
 		return c.showCommand("show system storage")
 	case "license":
-		fmt.Println("License: open-source (no license required)")
-		return nil
+		// #15944 H21-02: route through the ShowText RPC (topic
+		// "license", wired to the shared config.LicenseText) like
+		// every sibling arm. The hardcoded constant never called the
+		// RPC, so configured autoupdate URLs / inert notice that the
+		// local CLI renders were invisible to remote operators.
+		return c.showCommand("show system license")
 	case "services":
 		return c.showCommand("show system services")
 	case "ntp":
