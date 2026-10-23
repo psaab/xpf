@@ -1,4 +1,13 @@
 xpf (0.0.0) unstable; urgency=medium
+
+  * Make the #15947 cache-drop rollback an exact inverse: restore
+    pre-probe snapshots (counters, observed flags/ToS, handshake
+    Booleans, timestamps, expiry, SYN-pressure membership) keyed by
+    the canonical session identity, covering reverse-only and
+    translated-alias probes, instead of reconstructing state from
+    the dropped packet's flags.
+
+xpf (0.0.0) unstable; urgency=medium
   * Undo the flow-cache probe on cached output drops (#15947
     H29-04 arm 2): a completing ACK dropped by the cached
     output-filter or policer verdicts had already charged the
