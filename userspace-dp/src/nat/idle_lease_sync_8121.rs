@@ -577,7 +577,7 @@ impl PortAllocator {
         // the bucket must exist when indexing runs (mirrors removal, which
         // reads the stored map before dropping it).
         let mut permissions = PersistentPermissions::default();
-        permissions.scopes.insert(rec.egress_scope, PersistentPermissionScope { any_remote: rec.permit_any_remote, remotes: rec.permitted_remotes.iter().copied().collect(), mint_from_zone: None });
+        permissions.scopes.insert(rec.egress_scope, PersistentPermissionScope { any_remote: rec.permit_any_remote, remotes: rec.permitted_remotes.iter().copied().collect(), mint_from_zone: None, any_remote_permit_version: 0 });
         live.persistent_permissions.insert(key, permissions);
         live.insert_persistent_lease(
             key,

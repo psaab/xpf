@@ -15,6 +15,14 @@ xpf (0.0.0) unstable; urgency=medium
     Fold 3: the reverse shared row itself is stamped with the forward
     entry's rev counter at publish/promote/reverse-install, so the
     cross-worker proof is readable on the row the check consults.
+  * NAT: persistent-NAT permit tightening now revokes stored
+    any-remote grants on allocator reuse (#16017). A reused pool
+    allocator stamps its any-remote buckets with a permit version;
+    tightening to target-host/target-host-port on rebuild leaves the
+    stamp stale so inbound lookup denies non-target remotes, while
+    an unchanged any-remote permit restamps and preserves the grant.
+    Exact target-host/port grants remain permitted under tighter modes.
+
 
 xpf (0.0.0) unstable; urgency=medium
 

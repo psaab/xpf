@@ -323,6 +323,9 @@ pub(super) struct PersistentPermissionScope {
     /// (recorded_from, arrival). None for legacy/imported buckets
     /// (idle-lease sync, NAT64 BIBs); those never take the fallback.
     pub(super) mint_from_zone: Option<String>,
+    /// #16017: permit version under which `any_remote` was granted.
+    /// `remotes` never needs one (see `PersistentPermissions::permits`).
+    pub(super) any_remote_permit_version: u64,
 }
 
 /// Grants bucketed by egress scope, with the 1024-remote cap across all buckets.
@@ -365,6 +368,7 @@ impl PersistentPermissions {
         flow: SourceNatFlowKey,
         egress_scope: u32,
         mint_from_zone: Option<&str>,
+        permit_version: u64,
     ) -> bool {
         if !self.can_record(permit, flow, egress_scope) {
             return false;
@@ -374,7 +378,10 @@ impl PersistentPermissions {
             scope.mint_from_zone = mint_from_zone.map(str::to_string);
         }
         match permit {
-            PersistentNatPermit::AnyRemoteHost => scope.any_remote = true,
+            PersistentNatPermit::AnyRemoteHost => {
+                scope.any_remote = true;
+                scope.any_remote_permit_version = permit_version;
+            }
             PersistentNatPermit::TargetHost => {
                 scope.remotes.insert((flow.dst_ip, 0));
             }
@@ -384,9 +391,30 @@ impl PersistentPermissions {
         }
         true
     }
-    pub(super) fn permits(&self, egress_scope: u32, remote_ip: IpAddr, remote_port: u16) -> bool {
+    /// #16017: does the current rule permit still authorize this bucket's
+    /// any-remote grant? Version 0 (legacy/imported/NAT64 buckets) always
+    /// matches; a stamped version differing from the live rule's version is
+    /// stale only when the live permit is no longer AnyRemoteHost.
+    fn any_remote_current(
+        scope: &PersistentPermissionScope,
+        permit: PersistentNatPermit,
+        permit_version: u64,
+    ) -> bool {
+        scope.any_remote
+            && (scope.any_remote_permit_version == 0
+                || scope.any_remote_permit_version == permit_version
+                || permit == PersistentNatPermit::AnyRemoteHost)
+    }
+    pub(super) fn permits(
+        &self,
+        egress_scope: u32,
+        remote_ip: IpAddr,
+        remote_port: u16,
+        permit: PersistentNatPermit,
+        permit_version: u64,
+    ) -> bool {
         let granted = |s: &PersistentPermissionScope| {
-            s.any_remote
+            Self::any_remote_current(s, permit, permit_version)
                 || s.remotes.contains(&(remote_ip, 0))
                 || s.remotes.contains(&(remote_ip, remote_port))
         };
@@ -422,6 +450,8 @@ impl PersistentPermissions {
         arrival_zone: &str,
         remote_ip: IpAddr,
         remote_port: u16,
+        permit: PersistentNatPermit,
+        permit_version: u64,
     ) -> Option<bool> {
         let mut saw = false;
         let mut permitted = false;
@@ -439,7 +469,7 @@ impl PersistentPermissions {
                 continue;
             }
             saw = true;
-            if scope.any_remote
+            if Self::any_remote_current(scope, permit, permit_version)
                 || scope.remotes.contains(&(remote_ip, 0))
                 || scope.remotes.contains(&(remote_ip, remote_port))
             {
@@ -1270,6 +1300,7 @@ impl PortAllocatorLiveState {
         flow: SourceNatFlowKey,
         egress_scope: u32,
         mint_from_zone: Option<&str>,
+        permit_version: u64,
     ) -> bool {
         let lease = self.persistent_by_source.get(&key).copied();
         let before = lease
@@ -1279,7 +1310,7 @@ impl PortAllocatorLiveState {
             .persistent_permissions
             .entry(key)
             .or_default()
-            .record_with_zones(permit, flow, egress_scope, mint_from_zone);
+            .record_with_zones(permit, flow, egress_scope, mint_from_zone, permit_version);
         if recorded {
             if let Some(l) = lease {
                 if l.address_only && !l.revoked {
@@ -1384,7 +1415,13 @@ impl PortAllocatorLiveState {
             let Some(permissions) = self.persistent_permissions.get(key) else {
                 return false;
             };
-            permissions.permits(PERSISTENT_NAT_EGRESS_UNSCOPED, flow.dst_ip, flow.dst_port)
+            permissions.permits(
+                PERSISTENT_NAT_EGRESS_UNSCOPED,
+                flow.dst_ip,
+                flow.dst_port,
+                PersistentNatPermit::AnyRemoteHost,
+                0,
+            )
         }) || self
             .persistent_by_translated
             .get(&base)
@@ -1548,7 +1585,13 @@ impl PortAllocatorLiveState {
             match remote {
                 None => true,
                 Some((dst_ip, dst_port)) => {
-                    permissions.permits(PERSISTENT_NAT_EGRESS_UNSCOPED, dst_ip, dst_port)
+                    permissions.permits(
+                        PERSISTENT_NAT_EGRESS_UNSCOPED,
+                        dst_ip,
+                        dst_port,
+                        PersistentNatPermit::AnyRemoteHost,
+                        0,
+                    )
                 }
             }
         })
@@ -1794,6 +1837,8 @@ struct PortAllocatorShared {
     /// observation) and the `debug_*` test/diagnostic accessors.
     live_lock_acquisitions: AtomicU64,
     live_lock_contended: AtomicU64,
+    /// #16017: current permit version for this allocator (starts at 1; 0 = legacy bucket).
+    persistent_permit_version: AtomicU64,
     max_tracked_flows: usize,
     /// #4676 test seam: counts how many times `gc_expired_chunked` acquired the
     /// `live` mutex. A std `Mutex` is non-reentrant, so N > 1 acquisitions over
@@ -1872,6 +1917,7 @@ impl Default for PortAllocator {
                 persistent_declined_total: AtomicU64::new(0),
                 live_lock_acquisitions: AtomicU64::new(0),
                 live_lock_contended: AtomicU64::new(0),
+                persistent_permit_version: AtomicU64::new(1),
                 max_tracked_flows: 0,
                 #[cfg(test)]
                 gc_lock_acquisitions: AtomicUsize::new(0),
@@ -1980,6 +2026,7 @@ impl PortAllocator {
                 persistent_declined_total: AtomicU64::new(0),
                 live_lock_acquisitions: AtomicU64::new(0),
                 live_lock_contended: AtomicU64::new(0),
+                persistent_permit_version: AtomicU64::new(1),
                 max_tracked_flows,
                 #[cfg(test)]
                 gc_lock_acquisitions: AtomicUsize::new(0),
@@ -2024,6 +2071,39 @@ impl PortAllocator {
             .live_lock_contended
             .fetch_add(1, Ordering::Relaxed);
         self.shared.live.write().unwrap_or_else(|e| e.into_inner())
+    }
+    /// #16017: current permit version (1 before first reuse sync).
+    pub(crate) fn persistent_permit_version(&self) -> u64 {
+        self.shared.persistent_permit_version.load(Ordering::Relaxed)
+    }
+    /// #16017: allocate the next permit version for a reused allocator.
+    pub(crate) fn next_persistent_permit_version(&self) -> u64 {
+        self.shared.persistent_permit_version.fetch_add(1, Ordering::Relaxed) + 1
+    }
+    /// #16017: re-derive stored grants under a tightened permit. Restamps
+    /// every bucket's any-remote version to `permit_version` when the new
+    /// permit is still AnyRemoteHost; otherwise leaves stamps so `permits`
+    /// denies stale any-remote grants while exact `remotes` stay permitted.
+    pub(crate) fn sync_persistent_permit_scopes(
+        &self,
+        scopes: &[(u32, super::source::PersistentNatPermit, u64)],
+    ) {
+        if scopes.is_empty() {
+            return;
+        }
+        let mut live = self.lock_live();
+        for permissions in live.persistent_permissions.values_mut() {
+            for (scope_id, permit, version) in scopes {
+                if *permit != super::source::PersistentNatPermit::AnyRemoteHost {
+                    continue;
+                }
+                if let Some(scope) = permissions.scopes.get_mut(scope_id) {
+                    if scope.any_remote {
+                        scope.any_remote_permit_version = *version;
+                    }
+                }
+            }
+        }
     }
 
     /// #15956 fold: shared (`RwLock` read) access to the retained
@@ -2163,12 +2243,27 @@ impl PortAllocator {
             // from_zone does not pin the pair. Zone-authored rules keep the
             // exact bucket as the whole answer.
             let exact_permitted =
-                permissions.is_some_and(|p| p.permits(arrival_scope, remote_ip, remote_port));
+                permissions.is_some_and(|p| {
+                    p.permits(
+                        arrival_scope,
+                        remote_ip,
+                        remote_port,
+                        rule.persistent_nat_permit,
+                        rule.persistent_permit_version,
+                    )
+                });
             let (has, permitted) = if exact_permitted {
                 (true, true)
             } else if rule.from_zone.is_empty() {
                 match permissions.and_then(|p| {
-                    p.permits_authored_any_from(rule, ingress_zone, remote_ip, remote_port)
+                    p.permits_authored_any_from(
+                        rule,
+                        ingress_zone,
+                        remote_ip,
+                        remote_port,
+                        rule.persistent_nat_permit,
+                        rule.persistent_permit_version,
+                    )
                 }) {
                     Some(permitted) => (true, permitted),
                     None => (
@@ -2248,7 +2343,13 @@ impl PortAllocator {
             }
             saw_lease = true;
             let permitted = permissions.is_some_and(|permissions| {
-                permissions.permits(arrival_scope, remote_ip, remote_port)
+                permissions.permits(
+                    arrival_scope,
+                    remote_ip,
+                    remote_port,
+                    PersistentNatPermit::AnyRemoteHost,
+                    0,
+                )
             });
             if !permitted {
                 continue;
@@ -2388,6 +2489,7 @@ impl PortAllocator {
                 flow,
                 egress_scope,
                 mint_from_zone,
+                self.persistent_permit_version(),
             );
         }
     }
@@ -2570,8 +2672,7 @@ impl PortAllocator {
     /// Test-only: identity of the shared allocator state, for proving a
     /// re-apply REUSED the previous allocator (same Arc) instead of building
     /// a fresh bitmap (#6812 reuse-before-build).
-    #[cfg(test)]
-    pub(super) fn debug_shared_identity(&self) -> usize {
+    pub(crate) fn debug_shared_identity(&self) -> usize {
         Arc::as_ptr(&self.shared) as usize
     }
 
@@ -3514,6 +3615,7 @@ impl PortAllocator {
                         flow,
                         egress_scope,
                         mint_from_zone,
+                        self.persistent_permit_version(),
                     );
                     return Ok(translated);
                 }
@@ -3652,6 +3754,7 @@ impl PortAllocator {
                         flow,
                         egress_scope,
                         mint_from_zone,
+                        self.persistent_permit_version(),
                     );
                 }
                 self.shared.flows.insert_in_shard(
@@ -7213,6 +7316,7 @@ impl PortAllocator {
                 flow,
                 egress_scope,
                 mint_from_zone,
+                self.persistent_permit_version(),
             );
         }
         let mut __shard = self.shared.flows.get_mut_shard(&flow);
