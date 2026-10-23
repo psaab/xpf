@@ -56,8 +56,9 @@ func (c *xpfCollector) initDHCPDescriptors() {
 	)
 	c.dhcpDDNSUnsignedActive = prometheus.NewDesc(
 		"xpf_dhcp_ddns_unsigned_nonloopback_active",
-		"1 while any enabled RFC2136 DHCP DDNS family targets a non-loopback "+
-			"update-server with no TSIG key, so its rcode is forgeable (#15992), else 0.",
+		"1 while any RFC2136 DHCP DDNS family targets a non-loopback "+
+			"update-server with no TSIG key, or owned records are still pending "+
+			"cleanup at such a server, so its rcode is forgeable (#15992), else 0.",
 		nil, nil,
 	)
 	c.dhcpDDNSLastReconcileTs = prometheus.NewDesc(
@@ -110,7 +111,8 @@ func (c *xpfCollector) initDHCPDescriptors() {
 	c.surfaceADDNSUnsignedActive = prometheus.NewDesc(
 		"xpf_ddns_surface_a_unsigned_nonloopback_active",
 		"1 while any RFC2136 Surface A provider targets a non-loopback "+
-			"update-server with no TSIG key, so its rcode is forgeable (#15992), else 0.",
+			"update-server with no TSIG key, or owned records are still pending "+
+			"cleanup at such a server, so its rcode is forgeable (#15992), else 0.",
 		nil, nil,
 	)
 }

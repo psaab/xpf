@@ -463,8 +463,17 @@ type SurfaceAManager struct {
 	// Guarded by mu.
 	deleteCoowned uint64
 	// unsignedNonLoopbackActive (#15992): current forgeable-rcode posture
-	// from the last reconcile catalog. Guarded by mu.
+	// from the last reconcile catalog plus owned records pending cleanup.
+	// Guarded by mu.
 	unsignedNonLoopbackActive bool
+	// cleanupUnsignedNonLoopback (#15992): fingerprint -> posture map for
+	// providers that published owned records, captured while the provider
+	// was still in the catalog. After a provider/binding is removed, the
+	// catalog entry may be gone but pending withdrawals (or kept orphan
+	// ownership) still implicate that endpoint, so the gauge consults
+	// this retained posture keyed by the record's stored fingerprint.
+	// Guarded by mu.
+	cleanupUnsignedNonLoopback map[string]bool
 
 	// leaseCoowners, when non-nil, returns the wire-RR claims currently owned by
 	// the SEPARATE Surface B DHCP lease surface (Manager.state.records, rdata in
@@ -866,20 +875,24 @@ func (m *SurfaceAManager) Reconcile(ctx context.Context, scopes []SurfaceAScope,
 
 	// #15992: refresh the forgeable-rcode posture gauge from this pass's
 	// catalog so it stays visible for as long as any non-loopback unsigned
-	// provider is configured, not once per process.
+	// provider is configured, not once per process. The cleanup path is
+	// covered too: capture each catalog provider's posture under its
+	// endpoint fingerprint NOW (while it is still resolvable), then after
+	// the pass (below) keep the gauge set while any owned record's stored
+	// fingerprint retains an unsigned non-loopback posture — including
+	// after the provider/binding is removed and withdrawals (or kept
+	// orphan ownership) still implicate that endpoint.
+	if m.cleanupUnsignedNonLoopback == nil {
+		m.cleanupUnsignedNonLoopback = map[string]bool{}
+	}
+	for _, p := range catalog {
+		if fp := backendFingerprint(p); fp != "" {
+			m.cleanupUnsignedNonLoopback[fp] = providerUnsignedNonLoopback(p)
+		}
+	}
 	m.unsignedNonLoopbackActive = false
 	for _, p := range catalog {
-		if p == nil {
-			continue
-		}
-		backend := p.Backend
-		if backend == "" {
-			backend = "rfc2136"
-		}
-		if backend != "rfc2136" || p.UpdateServer == "" || p.TSIGKeyName != "" {
-			continue
-		}
-		if server, err := normalizeUpdateServer(p.UpdateServer); err == nil && !updateServerIsLoopback(server) {
+		if providerUnsignedNonLoopback(p) {
 			m.unsignedNonLoopbackActive = true
 			break
 		}
@@ -1068,6 +1081,22 @@ func (m *SurfaceAManager) Reconcile(ctx context.Context, scopes []SurfaceAScope,
 			continue
 		}
 		noteErr(m.withdrawScopeLocked(ctx, owned, backend, rt, owned.FQDN, 0, now))
+	}
+
+	// #15992 cleanup term: owned records still pending withdrawal/orphan
+	// cleanup at a retained unsigned non-loopback endpoint keep the gauge
+	// set after provider/binding removal, until the last such record goes.
+	// Recompute (not just OR-in): a pass that completes cleanup must clear
+	// a posture the catalog no longer supports.
+	if len(m.state.all()) == 0 {
+		// No ownership: the catalog term above already reflects this pass.
+	} else if !m.unsignedNonLoopbackActive {
+		for _, owned := range m.state.all() {
+			if owned.BackendFingerprint != "" && m.cleanupUnsignedNonLoopback[owned.BackendFingerprint] {
+				m.unsignedNonLoopbackActive = true
+				break
+			}
+		}
 	}
 
 	if err := m.state.save(); err != nil {
@@ -2496,8 +2525,10 @@ type SurfaceAStats struct {
 	// plus the quarantine path of the bad file, if any). Empty when not degraded.
 	DegradedReason string
 	// UnsignedNonLoopbackActive (#15992): true while any rfc2136 provider
-	// in the last reconcile catalog targets a non-loopback update-server
-	// with no TSIG key — the forgeable-rcode posture, as a live gauge.
+	// targets a non-loopback update-server with no TSIG key, or owned
+	// records are still pending cleanup at such an endpoint (including
+	// after provider/binding removal) — the forgeable-rcode posture, as
+	// a live gauge.
 	UnsignedNonLoopbackActive bool
 }
 

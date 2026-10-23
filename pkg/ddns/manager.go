@@ -324,10 +324,13 @@ type Stats struct {
 	// DegradedReason is a human-readable explanation of Degraded (the load error
 	// plus the quarantine path of the bad file, if any). Empty when not degraded.
 	DegradedReason string
-	// UnsignedNonLoopbackActive (#15992) is true while any enabled rfc2136
-	// family resolves to a non-loopback update-server with no TSIG key.
-	// It is a current-posture gauge, not a once-per-process log: it stays
-	// set for as long as the forgeable-rcode posture persists.
+	// UnsignedNonLoopbackActive (#15992) is true while any rfc2136 family
+	// trusts unsigned rcodes from a non-loopback server: an enabled family
+	// configured that way, OR owned records still pending cleanup whose
+	// withdrawal will be sent unsigned to such a server (including after
+	// the family is disabled/removed). It is a current-posture gauge, not
+	// a once-per-process log: it stays set for as long as the
+	// forgeable-rcode posture persists, including the cleanup path.
 	UnsignedNonLoopbackActive bool
 }
 
@@ -465,8 +468,18 @@ type Manager struct {
 	lastReconcileN atomic.Int64
 
 	// unsignedNonLoopbackActive (#15992): current forgeable-rcode posture,
-	// refreshed on every ReconcileScoped from the resolved families.
+	// refreshed on every ReconcileScoped from the resolved families plus
+	// any owned records still pending unsigned non-loopback cleanup.
 	unsignedNonLoopbackActive atomic.Bool
+	// cleanupUnsignedNonLoopback (#15992): per-family posture of the last
+	// live cleanup endpoint retained for owned records, captured while its
+	// config/updater was still resolvable. Once a family is disabled or
+	// its config removed, the live config/updater may be gone (nop), but
+	// pending withdrawals still target this endpoint — so the gauge reads
+	// this retained posture (guarded by mu, alongside lastLiveUpdater)
+	// for as long as the family owns records. A keyed/loopback retained
+	// endpoint, or no owned records, clears it.
+	cleanupUnsignedNonLoopback [2]bool
 
 	// lastPolicy is the last resolved aggregate policy (for Stats()).
 	lastPolicy atomic.Pointer[ddnsPolicy]
@@ -983,6 +996,24 @@ func (m *Manager) ReconcileScoped(ctx context.Context, cfg *config.DHCPServerCon
 			m.lastLiveUpdater[1] = env.updater[1]
 			m.lastLiveFP[1] = env.backendFP[1]
 		}
+		// #15992 cleanup posture: remember, per family, whether the live
+		// endpoint that will withdraw owned records is unsigned +
+		// non-loopback. The current config is the source when it still
+		// describes a live endpoint; otherwise the retained updater is.
+		// Captured BEFORE the pass mutates the store, read after it below.
+		cfgs := [2]*config.DHCPDynamicDNSConfig{ddns4, ddns6}
+		for i := range cfgs {
+			if ddnsConfigUnsignedNonLoopback(cfgs[i]) {
+				m.cleanupUnsignedNonLoopback[i] = true
+			} else if updaterUnsignedNonLoopback(env.updater[i]) {
+				m.cleanupUnsignedNonLoopback[i] = true
+			} else if updaterUnsignedNonLoopback(m.lastLiveUpdater[i]) {
+				// Keep the retained posture: a nop/disabled cycle must not
+				// erase the endpoint pending withdrawals still target.
+			} else {
+				m.cleanupUnsignedNonLoopback[i] = false
+			}
+		}
 	}
 
 	now := m.now()
@@ -1035,6 +1066,15 @@ func (m *Manager) ReconcileScoped(ctx context.Context, cfg *config.DHCPServerCon
 		} else if err6 != nil {
 			passErr = err6
 		}
+	}
+	// #15992: the gauge covers the cleanup path too. Owned records whose
+	// family still retains an unsigned non-loopback cleanup endpoint keep
+	// the posture active after disable/removal, until the last such record
+	// is withdrawn (or the retained endpoint is keyed/loopback). Computed
+	// after the pass so a pass that completes cleanup clears it promptly.
+	if m.familyOwnsRecords(4) && m.cleanupUnsignedNonLoopback[0] ||
+		m.familyOwnsRecords(6) && m.cleanupUnsignedNonLoopback[1] {
+		m.unsignedNonLoopbackActive.Store(true)
 	}
 	m.recordReconcilePass(passErr)
 	return passErr

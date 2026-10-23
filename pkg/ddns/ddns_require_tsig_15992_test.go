@@ -11,8 +11,8 @@ import (
 )
 
 // TestRFC2136RequireTSIGRefusesUnsigned15992 pins #15992's runtime backstop:
-// a require-tsig updater with no key refuses a non-loopback exchange before
-// any byte is sent, so a forged rcode can never record durable ownership.
+// a require-tsig updater with no key refuses a non-loopback UPDATE before
+// sending, so a forged rcode can never record durable ownership.
 // A keyed control publishes, and a loopback server is exempt (same
 // predicate the strict commit gate applies).
 func TestRFC2136RequireTSIGRefusesUnsigned15992(t *testing.T) {
@@ -151,3 +151,174 @@ func TestDDNSUnsignedGaugeViaReconcile15992(t *testing.T) {
 		t.Fatal("SurfaceA Stats().UnsignedNonLoopbackActive = true with keyed provider; gauge must clear")
 	}
 }
+
+// TestDDNSUnsignedGaugeCleanupAfterDisable15992 pins the cleanup-path half
+// of the gauge: after a family/provider is disabled or removed, owned
+// records pending cleanup still send unsigned UPDATEs to the old
+// non-loopback server, so the gauge must stay 1 until the last such record
+// is withdrawn — and clear then. Fail-on-revert: computing the gauge only
+// from the current enabled config reports 0 in the disabled/removed pass.
+func TestDDNSUnsignedGaugeCleanupAfterDisable15992(t *testing.T) {
+	ctx := context.Background()
+	nowFn := func() time.Time { return time.Unix(1_700_000_000, 0) }
+
+	// --- Surface B (DHCP lease DDNS) ---
+	srv := newFakeDNSServer(t, nil)
+	m, src := prodManagerTo(t, srv)
+	// The fake server is loopback; the retained cleanup endpoint must be
+	// the non-loopback authored server, so the factory dials the fake
+	// but reports the authored endpoint posture (postureUpdater15992).
+	m.newUpdater = func(pol ddnsPolicy, c *config.DHCPDynamicDNSConfig) (DNSUpdater, error) {
+		if pol.backend != "rfc2136" || c == nil || c.UpdateServer == "" {
+			return nopUpdater{}, nil
+		}
+		authored := c.UpdateServer
+		c2 := *c
+		c2.UpdateServer = srv.addrUDP
+		u, err := newRFC2136Updater(pol, &c2, nil,
+			func() { m.skippedPTRNotAuth.Add(1) },
+			func() { m.skippedConflict.Add(1) })
+		if err != nil {
+			return nil, err
+		}
+		// Gauge posture keys on the authored endpoint, wire on the fake.
+		return &postureUpdater15992{inner: u, server: authored}, nil
+	}
+	cfg := ddnsCfg("192.0.2.53")
+	src.v4 = laptopMacLease()
+	if err := m.Reconcile(ctx, cfg); err != nil {
+		t.Fatalf("publish reconcile: %v", err)
+	}
+	if got := m.Stats().OwnedRecords; got != 1 {
+		t.Fatalf("owned records = %d, want 1 after publish", got)
+	}
+	if !m.Stats().UnsignedNonLoopbackActive {
+		t.Fatal("gauge 0 while enabled unsigned non-loopback (precondition)")
+	}
+	// Disable DDNS: cleanup UPDATEs still go out unsigned, but the record
+	// is withdrawn this pass, so afterwards the gauge must clear.
+	disabled := &config.DHCPServerConfig{DynamicDNS: &config.DHCPDynamicDNSConfig{Enabled: false, Domain: "example.com", TTLSeconds: 300, Backend: "rfc2136", UpdateServer: "192.0.2.53"}}
+	src.v4 = nil
+	if err := m.Reconcile(ctx, disabled); err != nil {
+		t.Fatalf("disabled reconcile: %v", err)
+	}
+	if got := m.Stats().OwnedRecords; got != 0 {
+		t.Fatalf("owned records = %d, want 0 after disabled cleanup", got)
+	}
+	if m.Stats().UnsignedNonLoopbackActive {
+		t.Fatal("gauge stuck at 1 after cleanup completed (no owned records)")
+	}
+
+	// Republish, then make cleanup FAIL so ownership is retained across a
+	// disabled pass: the gauge must stay 1 while cleanup is pending, even
+	// though the current config is disabled.
+	src.v4 = laptopMacLease()
+	if err := m.Reconcile(ctx, cfg); err != nil {
+		t.Fatalf("republish reconcile: %v", err)
+	}
+	if got := m.Stats().OwnedRecords; got != 1 {
+		t.Fatalf("owned records = %d, want 1 after republish", got)
+	}
+	// Force withdraw failure via a failing factory on the disabled pass.
+	m.newUpdater = func(pol ddnsPolicy, c *config.DHCPDynamicDNSConfig) (DNSUpdater, error) {
+		return &postureUpdater15992{inner: &failDeleteUpdater15992{}, server: "192.0.2.53"}, nil
+	}
+	if err := m.Reconcile(ctx, disabled); err == nil {
+		// A delete failure surfaces as a reconcile error; either way
+		// ownership must be retained.
+		t.Logf("disabled failing-cleanup reconcile returned nil (checked via ownership below)")
+	}
+	if got := m.Stats().OwnedRecords; got != 1 {
+		t.Fatalf("owned records = %d, want 1 retained after failed cleanup", got)
+	}
+	if !m.Stats().UnsignedNonLoopbackActive {
+		t.Fatal("gauge 0 while owned records pending unsigned non-loopback cleanup after disable")
+	}
+
+	// --- Surface A ---
+	dir := t.TempDir()
+	fu := newFakeUpdater()
+	sa := newSurfaceAManagerForTesting(filepath.Join(dir, "iface.json"), fu, nowFn)
+	prov := &config.DDNSProvider{Name: "p1", Backend: "rfc2136", UpdateServer: "192.0.2.53"}
+	sc := surfaceAScope("wan.example.net", FamilyV4, 0)
+	sc.Key.PolicyID = "p1"
+	sc.Provider = prov
+	catalog := map[string]*config.DDNSProvider{"p1": prov}
+	if err := sa.Reconcile(ctx, []SurfaceAScope{sc}, fixedObserver("203.0.113.5"), nil, catalog); err != nil {
+		t.Fatalf("surface-a publish: %v", err)
+	}
+	if got := sa.Stats().Scopes; got != 1 {
+		t.Fatalf("surface-a scopes = %d, want 1 after publish", got)
+	}
+	if !sa.Stats().UnsignedNonLoopbackActive {
+		t.Fatal("surface-a gauge 0 while unsigned non-loopback (precondition)")
+	}
+	// Remove binding AND provider, with withdraw failing: ownership is
+	// retained, cleanup still implicates the old unsigned endpoint.
+	fu.failDel["wan.example.net"] = true
+	if err := sa.Reconcile(ctx, nil, fixedObserver("203.0.113.5"), nil, map[string]*config.DDNSProvider{}); err != nil {
+		t.Logf("surface-a removed failing-cleanup reconcile: %v (checked via ownership below)", err)
+	}
+	if got := sa.Stats().Scopes; got != 1 {
+		t.Fatalf("surface-a scopes = %d, want 1 retained after failed cleanup", got)
+	}
+	if !sa.Stats().UnsignedNonLoopbackActive {
+		t.Fatal("surface-a gauge 0 while owned records pending unsigned cleanup after provider removal")
+	}
+	// Let cleanup succeed: gauge clears with the last owned record. The
+	// failing withdraw armed a backoff window, so advance past it by
+	// clearing the scope runtime backoff is not exposed — instead use a
+	// fresh manager over the same persisted state (restart semantics:
+	// ownership reloads, backoff does not).
+	fu.failDel = map[string]bool{}
+	sa = newSurfaceAManagerForTesting(filepath.Join(dir, "iface.json"), fu, nowFn)
+	if err := sa.Reconcile(ctx, nil, fixedObserver("203.0.113.5"), nil, map[string]*config.DDNSProvider{"p1": prov}); err != nil {
+		t.Fatalf("surface-a cleanup reconcile: %v", err)
+	}
+	if got := sa.Stats().Scopes; got != 0 {
+		t.Fatalf("surface-a scopes = %d, want 0 after cleanup", got)
+	}
+	// One empty-catalog pass: no provider, no owned records — the gauge
+	// must now report 0 (the previous pass's catalog still carried p1).
+	if err := sa.Reconcile(ctx, nil, fixedObserver("203.0.113.5"), nil, map[string]*config.DDNSProvider{}); err != nil {
+		t.Fatalf("surface-a empty reconcile: %v", err)
+	}
+	if sa.Stats().UnsignedNonLoopbackActive {
+		t.Fatal("surface-a gauge stuck at 1 after cleanup completed")
+	}
+}
+
+// postureUpdater15992 wraps a resolved updater and reports a fixed
+// authored server for gauge-posture purposes in tests. The wire behaviour
+// is the inner updater's.
+type postureUpdater15992 struct {
+	inner  DNSUpdater
+	server string
+}
+
+func (p *postureUpdater15992) UpsertLease(ctx context.Context, rec LeaseDNSRecord) error {
+	return p.inner.UpsertLease(ctx, rec)
+}
+func (p *postureUpdater15992) DeleteLease(ctx context.Context, rec LeaseDNSRecord) error {
+	return p.inner.DeleteLease(ctx, rec)
+}
+
+// DDNSUpdaterEndpoint reports the authored endpoint posture for the gauge.
+func (p *postureUpdater15992) DDNSUpdaterEndpoint() (string, bool) { return p.server, false }
+
+type failDeleteUpdater15992 struct{ fakeUpdater }
+
+func (f *failDeleteUpdater15992) DeleteLease(_ context.Context, rec LeaseDNSRecord) error {
+	return errFailDelete15992
+}
+
+// DDNSUpdaterEndpoint reports the authored endpoint posture for the gauge.
+func (f *failDeleteUpdater15992) DDNSUpdaterEndpoint() (string, bool) {
+	return "192.0.2.53", false
+}
+
+var errFailDelete15992 = errString15992("fake: delete failed (cleanup pending)")
+
+type errString15992 string
+
+func (e errString15992) Error() string { return string(e) }

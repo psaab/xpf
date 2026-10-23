@@ -1153,11 +1153,13 @@ regressed.
   **#15992 adds the durable half:** the posture is also a LIVE gauge —
   `xpf_dhcp_ddns_unsigned_nonloopback_active` /
   `xpf_ddns_surface_a_unsigned_nonloopback_active` stay at 1 for as long as
-  any enabled non-loopback unsigned server is active (refreshed every
-  reconcile, not once per process). And an operator can opt into fail-closed
+  any non-loopback unsigned server is active — including owned records
+  still pending cleanup at such a server after disable/removal, whose
+  withdrawals still send unsigned UPDATEs (refreshed every reconcile,
+  not once per process). And an operator can opt into fail-closed
   with the `require-tsig` leaf on either surface: strict commit then refuses
   a non-loopback `update-server` with no `tsig-key`, and the runtime backend
-  refuses the exchange before any byte is sent if such a config arrives via
+  refuses the UPDATE before sending if such a config arrives via
   the tolerant load path. The default (no `require-tsig`) is unchanged, so
   legitimate source-IP-ACL unsigned BIND keeps working.
 

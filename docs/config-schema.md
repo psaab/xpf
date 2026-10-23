@@ -12704,7 +12704,7 @@ reserved for whole-dataplane selection where a rewrite shim
   `xpf_ddns_surface_a_unsigned_nonloopback_active`), and the valueless
   `require-tsig` leaf (both DDNS surfaces) opts into fail-closed: strict
   commit refuses a non-loopback `update-server` with no `tsig-key`, and the
-  backend refuses the exchange before sending if such a config arrives via
+  backend refuses the UPDATE before sending if such a config arrives via
   tolerant load. Default (no `require-tsig`) keeps unsigned source-IP-ACL
   publishing working. `tsig-secret` is
   SENSITIVE: it is redacted in `DHCPDynamicDNSConfig.String()` (logging) AND,
