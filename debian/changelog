@@ -1,12 +1,14 @@
 xpf (0.0.0) unstable; urgency=medium
 
-  * DHCP relay: add bounded per-sender fairness under the per-interface
-    aggregate token bucket (#16087). One sender sustaining the
-    maximum-packet-rate no longer starves other clients: each chaddr
-    (DHCPv4) / Client-ID DUID (DHCPv6) gets a 1/256 share of the rate
-    with a burst of at least 8, in a 256-entry table. Stops a naive
-    single-identity flood; identity rotation still needs switch
-    controls (documented in pkg/dhcprelay/README.md).
+  * DHCP relay: add bounded per-sender fairness ahead of the
+    per-interface aggregate token bucket (#16087, folded on #16322).
+    One sender sustaining the maximum-packet-rate no longer starves
+    other clients: each chaddr (DHCPv4, peeked from the wire header) /
+    Client-ID DUID (DHCPv6) gets a 1/256 share of the rate (floored at
+    1 pps, burst at least 8) in a 256-entry table. No aggregate refund:
+    the aggregate stays the hard pre-parse bound and fairness is
+    additional to it. Stops a naive single-identity flood; identity
+    rotation still needs switch controls (pkg/dhcprelay/README.md).
 
 xpf (0.0.0) unstable; urgency=medium
 

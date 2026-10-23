@@ -38,10 +38,18 @@ func discoverWire(t *testing.T, mac byte) []byte {
 	return pkt.ToBytes()
 }
 
+// admit drives one packet through the fold order — fairness first, then
+// the aggregate; neither refunds the other — and reports admission.
+func admit[K comparable](fair *fairLimiter[K], agg *tokenBucket, key K) bool {
+	return fair.allowSender(key) && agg.allow()
+}
+
 // TestFairLimiter_SecondSenderGetsShare is the unit decisive check: with
 // the clock frozen, sender A floods far past the aggregate burst; sender B
-// must still be admitted up to B's own fairness burst. Pre-fix (aggregate
-// only) B would be admitted 0 times once A drained the bucket.
+// must still be admitted up to B's own fairness burst. Because fairness
+// gates first, A's excess costs no aggregate tokens, so B's share of the
+// aggregate is still there. Pre-fix (aggregate only) B would be admitted
+// 0 times once A drained the bucket.
 func TestFairLimiter_SecondSenderGetsShare(t *testing.T) {
 	frozen := time.Unix(1_700_000_000, 0)
 	clock := func() time.Time { return frozen }
@@ -54,13 +62,8 @@ func TestFairLimiter_SecondSenderGetsShare(t *testing.T) {
 
 	admittedA := 0
 	for range 500 {
-		if !agg.allow() {
-			continue
-		}
-		if fair.allowSender(keyA) {
+		if admit(fair, agg, keyA) {
 			admittedA++
-		} else {
-			agg.refund() // production: fairness denial refunds the aggregate
 		}
 	}
 	if admittedA != fairBurstFloor {
@@ -68,13 +71,8 @@ func TestFairLimiter_SecondSenderGetsShare(t *testing.T) {
 	}
 	admittedB := 0
 	for range 50 {
-		if !agg.allow() {
-			continue
-		}
-		if fair.allowSender(keyB) {
+		if admit(fair, agg, keyB) {
 			admittedB++
-		} else {
-			agg.refund()
 		}
 	}
 	if admittedB != fairBurstFloor {
@@ -97,7 +95,7 @@ func TestFairLimiter_RefillSharesEqually(t *testing.T) {
 	drain := func(k fairSenderKeyV4) int {
 		n := 0
 		for range 10000 {
-			if agg.allow() && fair.allowSender(k) {
+			if admit(fair, agg, k) {
 				n++
 			}
 		}
@@ -112,6 +110,59 @@ func TestFairLimiter_RefillSharesEqually(t *testing.T) {
 	}
 	if got := drain(keyB); got != 100 {
 		t.Fatalf("second sender after 1s refill admitted %d, want per-sender 100", got)
+	}
+}
+
+// TestFairLimiter_TinyRateFloorCompletesDORA pins the fold's rate floor:
+// at an aggregate of 1 pps a bare 1/256 sustained share would strand a
+// DORA after its first exchange (~256s per later packet). The floor
+// (sustained >= 1 pps, burst >= aggregate burst) lets one sender finish
+// a whole DORA inside the burst and keep trickling at 1 pps.
+func TestFairLimiter_TinyRateFloorCompletesDORA(t *testing.T) {
+	frozen := time.Unix(1_700_000_000, 0)
+	clock := func() time.Time { return frozen }
+	agg := newTokenBucket(1, relayBurstFor(1), clock) // burst 2
+	fair := newFairLimiter[fairSenderKeyV4](1, clock)
+	if got := fair.perSenderRate(); got != fairRateFloor {
+		t.Fatalf("per-sender rate at aggregate 1 = %d, want floor %d", got, fairRateFloor)
+	}
+	if got, want := fair.perSenderBurst(), relayBurstFor(1); got < want {
+		t.Fatalf("per-sender burst at aggregate 1 = %d, want >= aggregate burst %d", got, want)
+	}
+	key := fairSenderKeyV4{hlen: 6, chaddr: [16]byte{0x02, 0, 0, 0, 0, 0x77}}
+	// DISCOVER + REQUEST must both clear at the frozen instant (the
+	// aggregate burst is 2, so only a fairness burst >= 2 allows both).
+	if !admit(fair, agg, key) || !admit(fair, agg, key) {
+		t.Fatal("DORA at aggregate 1 pps did not clear the fairness+aggregate bursts")
+	}
+}
+
+// TestFairSenderKeyFromWire pins the RFC 951 header peek against the
+// parsed key for a real wire packet, plus the truncated/odd-hlen arms.
+func TestFairSenderKeyFromWire(t *testing.T) {
+	wire := discoverWire(t, 0x5A)
+	pkt, err := dhcpv4.FromBytes(wire)
+	if err != nil {
+		t.Fatalf("FromBytes: %v", err)
+	}
+	got, ok := fairSenderKeyFromWire(wire)
+	if !ok {
+		t.Fatal("wire peek rejected a valid DISCOVER")
+	}
+	if want := fairSenderKeyForV4(pkt); got != want {
+		t.Fatalf("wire key = %+v, want parsed key %+v", got, want)
+	}
+	if _, ok := fairSenderKeyFromWire(wire[:20]); ok {
+		t.Fatal("wire peek accepted a truncated datagram")
+	}
+	bad := append([]byte(nil), wire...)
+	bad[v4HlenOff] = 0
+	if _, ok := fairSenderKeyFromWire(bad); ok {
+		t.Fatal("wire peek accepted hlen 0")
+	}
+	bad[v4HlenOff] = 17
+	if _, ok := fairSenderKeyFromWire(bad); ok {
+		t.Fatal("wire peek accepted hlen 17")
 	}
 }
 
@@ -224,10 +275,11 @@ func TestRunRelay_Fairness_SecondMACCompletesDORA(t *testing.T) {
 		t.Fatalf("relay did not consume the flood + DORA requests (readCalls=%d)", client.readCalls.Load())
 	}
 
-	// Upstream: exactly A's fairness burst + B's DISCOVER + B's REQUEST.
-	wantUp := fairBurstFloor + 2
+	// Upstream: the aggregate burst (10) is the hard cap on parsed work;
+	// fairness decides WHO fills it — A's 8, then B's DISCOVER + REQUEST.
+	wantUp := relayBurstFor(rate)
 	if got := server.writeCount(); got != wantUp {
-		t.Fatalf("relayed upstream %d datagrams, want %d (A burst %d + B DISCOVER/REQUEST) — "+
+		t.Fatalf("relayed upstream %d datagrams, want %d (A fairness burst %d + B DISCOVER/REQUEST) — "+
 			"second MAC starved by the single-MAC flood", got, wantUp, fairBurstFloor)
 	}
 	// The last two upstream datagrams must be B's, in order.

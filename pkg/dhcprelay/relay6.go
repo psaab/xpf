@@ -1214,7 +1214,7 @@ func (m *dhcpV6Manager) runDHCPV6ClientLoop(ctx context.Context, relay *dhcpV6Re
 	interfaceID := effectiveDHCPv6InterfaceID(relay.spec.interfaceID, relay.ifaceName)
 	rate := resolveMaxPacketRate(relay.maxPacketRate)
 	rateBucket := newTokenBucket(rate, relayBurstFor(rate), m.now)
-	// #16087: per-sender fairness (Client-ID DUID-keyed) under the aggregate.
+	// #16087 fold: per-sender fairness gates additional to the aggregate.
 	fair := newFairLimiter[fairSenderKeyV6](rate, m.now)
 	warnedRateLimit := false
 	buf := make([]byte, readBufSize)
@@ -1223,19 +1223,22 @@ func (m *dhcpV6Manager) runDHCPV6ClientLoop(ctx context.Context, relay *dhcpV6Re
 		if err != nil {
 			return
 		}
-		if !rateBucket.allow() {
-			relay.requestsDroppedRateLimit.Add(1)
-			if !warnedRateLimit {
-				slog.Warn("dhcpv6-relay: client request rate limit exceeded, dropping excess",
-					"interface", relay.ifaceName, "rate_pps", rate, "src", source)
-				warnedRateLimit = true
-			} else {
-				slog.Debug("dhcpv6-relay: client request rate limit exceeded, dropping",
-					"interface", relay.ifaceName, "src", source)
-			}
-			continue
-		}
+		// Relay-Reply on the client socket is dispatcher traffic, not a
+		// new client request: it stays on the pre-fold aggregate-only
+		// accounting (#10198 pinned counts), ahead of fairness.
 		if n > 0 && dhcpv6.MessageType(buf[0]) == dhcpv6.MessageTypeRelayReply {
+			if !rateBucket.allow() {
+				relay.requestsDroppedRateLimit.Add(1)
+				if !warnedRateLimit {
+					slog.Warn("dhcpv6-relay: client request rate limit exceeded, dropping excess",
+						"interface", relay.ifaceName, "rate_pps", rate, "src", source)
+					warnedRateLimit = true
+				} else {
+					slog.Debug("dhcpv6-relay: client request rate limit exceeded, dropping",
+						"interface", relay.ifaceName, "src", source)
+				}
+				continue
+			}
 			packet, err := dhcpv6.FromBytes(buf[:n])
 			if err != nil {
 				if dispatcher := m.replyDispatcherSnapshot(); dispatcher != nil {
@@ -1266,6 +1269,15 @@ func (m *dhcpV6Manager) runDHCPV6ClientLoop(ctx context.Context, relay *dhcpV6Re
 			relay.requestsDroppedPort.Add(1)
 			continue
 		}
+		if packet.IsRelay() {
+			// A downstream relay can only be trusted with an explicit
+			// trust policy. DHCPv6 has no such knob yet, so fail closed
+			// rather than letting an on-link host steer link selection.
+			// Checked ahead of the limiters so nested junk pays no
+			// fairness/aggregate token at all.
+			relay.requestsDroppedNested.Add(1)
+			continue
+		}
 		if shouldRelay != nil && !shouldRelay(relay.ifaceName) {
 			relay.requestsDroppedBackup.Add(1)
 			continue
@@ -1275,21 +1287,29 @@ func (m *dhcpV6Manager) runDHCPV6ClientLoop(ctx context.Context, relay *dhcpV6Re
 			relay.requestsDroppedPeer.Add(1)
 			continue
 		}
-		if packet.IsRelay() {
-			// A downstream relay can only be trusted with an explicit
-			// trust policy. DHCPv6 has no such knob yet, so fail closed
-			// rather than letting an on-link host steer link selection.
-			relay.requestsDroppedNested.Add(1)
+		// #16087 fold: fairness BEFORE the aggregate; neither refunds
+		// the other (fairness denied = no aggregate token spent;
+		// aggregate denied = fairness token already spent, strictly
+		// tighter). A sender with no usable Client ID is lumped into
+		// fairUnknownSenderV6, and fairness now gates every
+		// non-Relay-Reply request (the IsRelay arm returned above).
+		fairKey, fok := fairSenderKeyForV6(packet)
+		if !fok {
+			fairKey = fairUnknownSenderV6
+		}
+		if !fair.allowSender(fairKey) {
+			relay.requestsDroppedRateLimit.Add(1)
+			if !warnedRateLimit {
+				slog.Warn("dhcpv6-relay: client request rate limit exceeded, dropping excess",
+					"interface", relay.ifaceName, "rate_pps", rate, "src", source)
+				warnedRateLimit = true
+			} else {
+				slog.Debug("dhcpv6-relay: client request rate limit exceeded, dropping",
+					"interface", relay.ifaceName, "src", source)
+			}
 			continue
 		}
-		// #16087: per-sender fairness. Runs after the nested-relay drop so
-		// only genuine client messages consume a sender identity (a
-		// Relay-Forw has no direct Client ID here and is dropped above
-		// anyway), and before any forwarding work. A sender with no usable
-		// Client ID keeps aggregate-only treatment. The denied packet's
-		// aggregate token is refunded, as on the v4 path.
-		if fairKey, ok := fairSenderKeyForV6(packet); ok && !fair.allowSender(fairKey) {
-			rateBucket.refund()
+		if !rateBucket.allow() {
 			relay.requestsDroppedRateLimit.Add(1)
 			if !warnedRateLimit {
 				slog.Warn("dhcpv6-relay: client request rate limit exceeded, dropping excess",

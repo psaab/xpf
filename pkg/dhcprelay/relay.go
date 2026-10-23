@@ -116,18 +116,6 @@ func (b *tokenBucket) allow() bool {
 	return false
 }
 
-// refund returns one previously consumed token (capped at burst). The
-// #16087 fairness layer runs after the aggregate allow(), because the
-// sender key needs the parsed packet; a fairness denial refunds the
-// aggregate token so the flooder's denied packets do not burn the
-// aggregate budget that other senders are supposed to share. Only the
-// single read-loop goroutine touches the bucket, so no lock is needed.
-func (b *tokenBucket) refund() {
-	if b.tokens < b.burst {
-		b.tokens++
-	}
-}
-
 // relayBurstFor sizes the token-bucket burst capacity from the sustained rate:
 // two seconds' worth of packets, so a brief simultaneous-boot spike is admitted
 // instantly while the sustained rate still bounds a persistent flood.
@@ -216,37 +204,64 @@ func newFairLimiter[K comparable](aggregateRate int, now func() time.Time) *fair
 }
 
 // perSenderRate returns the sustained pps one sender may consume: its
-// 1/maxFairSenders share of the aggregate, rounded up, at least 1.
+// 1/maxFairSenders share of the aggregate, rounded up, floored at
+// fairRateFloor. The floor is load-bearing at tiny configured rates
+// (#16087 fold): at an aggregate of 1 pps a bare 1/256 share would admit
+// a sender's second packet only after ~256s, stranding every DORA after
+// the first exchange — fairness must never make a working low-rate
+// segment unusable. The floor lets each active sender trickle at the
+// floor rate; the aggregate token bucket still hard-caps total parsed
+// work at the configured rate regardless of how many sender buckets
+// hold tokens, so the floor costs no CPU bound.
 func (f *fairLimiter[K]) perSenderRate() int {
 	r := (f.rate + maxFairSenders - 1) / maxFairSenders
-	if r < 1 {
-		return 1
+	if r < fairRateFloor {
+		return fairRateFloor
 	}
 	return r
 }
+
+// fairRateFloor is the minimum per-sender sustained rate (pps).
+const fairRateFloor = 1
 
 // fairBurstFloor is the minimum per-sender burst: a complete legitimate
 // exchange (DISCOVER/REQUEST plus RFC 2131 retransmissions, or a v6
 // Solicit/Request/Renew sequence) must clear instantly even though the
 // per-sender sustained rate is only ~1 pps at the default aggregate.
+// At tiny aggregates the burst is at least the aggregate burst, so a
+// single configured-pps segment completes a full DORA inside the burst.
 const fairBurstFloor = 8
 
-// perSenderBurst returns one sender's burst capacity.
+// perSenderBurst returns one sender's burst capacity: twice its sustained
+// share, at least fairBurstFloor. Additionally, when the aggregate itself
+// is tiny (relayBurstFor(rate) <= fairBurstFloor, i.e. rate <= 4 pps) the
+// burst is lifted to the aggregate burst, so a 1-2 pps segment completes
+// a full DORA inside the burst. The lift is capped at the fairness floor
+// on purpose: at ordinary rates bursting one sender to the whole
+// aggregate burst would hand a lone flooder the entire burst that other
+// senders are supposed to share.
 func (f *fairLimiter[K]) perSenderBurst() int {
-	if b := relayBurstFor(f.perSenderRate()); b > fairBurstFloor {
-		return b
+	b := relayBurstFor(f.perSenderRate())
+	if b < fairBurstFloor {
+		b = fairBurstFloor
 	}
-	return fairBurstFloor
+	if agg := relayBurstFor(f.rate); agg <= fairBurstFloor && b < agg {
+		b = agg
+	}
+	return b
 }
 
 // allowSender reports whether a packet from sender key may pass the
-// fairness layer. It must be called only after the aggregate bucket
-// admitted the packet. A known sender is admitted while its sub-bucket
-// holds a token. A NEW sender is admitted (creating its bucket) unless
-// the table is full and no bucket has been idle for fairIdleEvict — in
-// that case the packet is denied by fairness so established senders keep
-// their share against identity rotation; the caller still counts it as a
-// rate-limit drop.
+// fairness layer. Callers gate fairness BEFORE the aggregate bucket and
+// never refund either: a fairness denial consumes no aggregate token,
+// and an aggregate denial has already consumed the fairness token (the
+// flooder's burst then also pays its fairness toll — strictly tighter,
+// and fairness tokens are per-sender-cheap). A known sender is admitted
+// while its sub-bucket holds a token. A NEW sender is admitted
+// (creating its bucket) unless the table is full and no bucket has been
+// idle for fairIdleEvict — in that case the packet is denied by fairness
+// so established senders keep their share against identity rotation;
+// the caller still counts it as a rate-limit drop.
 func (f *fairLimiter[K]) allowSender(key K) bool {
 	now := f.now()
 	if fb, ok := f.table[key]; ok {
@@ -300,6 +315,41 @@ func fairSenderKeyForV4(pkt *dhcpv4.DHCPv4) fairSenderKeyV4 {
 	k.hlen = uint8(n)
 	return k
 }
+
+// v4HlenOff is the byte offset of hlen in a BOOTP/DHCPv4 wire packet
+// (op 1 + htype 1); chaddr follows at v4ChaddrOff. The offsets are fixed
+// by RFC 951, so the fairness key can be peeked from the wire header
+// without a full TLV parse.
+const (
+	v4HlenOff   = 2
+	v4ChaddrOff = 28
+)
+
+// fairSenderKeyFromWire peeks the fairness key from the fixed BOOTP
+// header BEFORE the aggregate allow() and before dhcpv4.FromBytes, so
+// fairness can gate ahead of the aggregate (fold on #16322). It reports
+// ok=false for datagrams too short to contain the header or with an
+// hlen of 0 or > 16; the caller lumps those into fairUnknownSenderV4 (a
+// truncated datagram has no client identity to be fair to, and
+// FromBytes will drop it right after the aggregate admits it).
+func fairSenderKeyFromWire(buf []byte) (fairSenderKeyV4, bool) {
+	if len(buf) < v4ChaddrOff+16 {
+		return fairSenderKeyV4{}, false
+	}
+	hlen := int(buf[v4HlenOff])
+	if hlen <= 0 || hlen > 16 {
+		return fairSenderKeyV4{}, false
+	}
+	k := fairSenderKeyV4{hlen: uint8(hlen)}
+	copy(k.chaddr[:], buf[v4ChaddrOff:v4ChaddrOff+hlen])
+	return k, true
+}
+
+// fairUnknownSenderV4 is the shared fairness identity for v4 datagrams
+// whose wire header carries no usable chaddr. They stay bounded by the
+// aggregate bucket (checked first in effect: fairness denies only
+// throttle unparseable traffic further), never legitimate clients.
+var fairUnknownSenderV4 = fairSenderKeyV4{hlen: 0xFF}
 
 // readBufSize is the size of the per-loop read buffer for both the
 // client-facing and server-facing UDP sockets.
@@ -1811,7 +1861,7 @@ func (m *Manager) runRelaySession(ctx context.Context,
 		// per the project logging rules).
 		rateBucket := newTokenBucket(ir.maxPacketRate,
 			relayBurstFor(ir.maxPacketRate), m.now)
-		// #16087: per-sender fairness (chaddr-keyed) under the aggregate.
+		// #16087 fold: per-sender fairness (wire-peeked chaddr) ahead of the aggregate.
 		fair := newFairLimiter[fairSenderKeyV4](ir.maxPacketRate, m.now)
 		warnedRateLimit := false
 		for {
@@ -1826,6 +1876,30 @@ func (m *Manager) runRelaySession(ctx context.Context,
 				}
 				slog.Warn("dhcp-relay: read error",
 					"interface", ifaceName, "err", err)
+				continue
+			}
+
+			// #16087 fold: per-sender fairness gates BEFORE the aggregate.
+			// The v4 sender key (chaddr) sits at a fixed RFC 951 offset in
+			// the BOOTP header, so it is peeked from the wire bytes —
+			// still pre-parse — and a denied sender costs NO aggregate
+			// token (no refund exists: the aggregate stays a hard
+			// pre-parse bound on parsed work). Truncated/headerless
+			// datagrams share fairUnknownSenderV4.
+			fairKey, fok := fairSenderKeyFromWire(buf[:n])
+			if !fok {
+				fairKey = fairUnknownSenderV4
+			}
+			if !fair.allowSender(fairKey) {
+				ir.requestsDroppedRateLimit.Add(1)
+				if !warnedRateLimit {
+					slog.Warn("dhcp-relay: client request rate limit exceeded, dropping excess",
+						"interface", ifaceName, "rate_pps", ir.maxPacketRate, "src", srcAddr)
+					warnedRateLimit = true
+				} else {
+					slog.Debug("dhcp-relay: client request rate limit exceeded, dropping",
+						"interface", ifaceName, "src", srcAddr)
+				}
 				continue
 			}
 
@@ -1863,30 +1937,6 @@ func (m *Manager) runRelaySession(ctx context.Context,
 
 			msgType := pkt.MessageType()
 			if !clientRequestRelayable(msgType) {
-				continue
-			}
-
-			// #16087: per-sender fairness under the aggregate bucket. The
-			// aggregate check above cannot key by sender (it runs before
-			// the parse, at the cheapest point); now that chaddr is known,
-			// deny a sender that has exhausted its own sub-bucket so one
-			// flooding identity cannot consume every aggregate refill.
-			// The denied packet's aggregate token is refunded: without it
-			// the flooder's own drops would burn the burst that the next
-			// sender is supposed to share. Counted in the same rate-limit
-			// counter (same operator meaning: this sender exceeded its
-			// share of the pps bound).
-			if !fair.allowSender(fairSenderKeyForV4(pkt)) {
-				rateBucket.refund()
-				ir.requestsDroppedRateLimit.Add(1)
-				if !warnedRateLimit {
-					slog.Warn("dhcp-relay: client request rate limit exceeded, dropping excess",
-						"interface", ifaceName, "rate_pps", ir.maxPacketRate, "src", srcAddr)
-					warnedRateLimit = true
-				} else {
-					slog.Debug("dhcp-relay: client request rate limit exceeded, dropping",
-						"interface", ifaceName, "src", srcAddr)
-				}
 				continue
 			}
 

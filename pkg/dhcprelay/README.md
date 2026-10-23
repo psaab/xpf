@@ -706,20 +706,23 @@ set forwarding-options dhcp-relay group <g> overrides maximum-packet-rate <pps>
   injected clock (`TestTokenBucket_BurstThenRefill`); the end-to-end flood-drop
   is `TestRunRelay_RateLimit_5670` / `TestRunRelay_RateLimit_DefaultBound`.
 
-- **Per-sender fairness (#16087).** The aggregate bucket alone let one
-  sender sustaining `>= maximum-packet-rate` consume every refill, so
-  other clients' DISCOVERs starved for the flood's duration. Under the
-  aggregate, each distinct sender now gets its own sub-bucket
-  (`fairLimiter` in `relay.go`): sustained
-  `ceil(rate / 256)` pps per sender, burst at least 8 (a full DORA plus
-  retransmissions always clears instantly). The v4 sender key is the
-  packet `chaddr`; the DHCPv6 key is the Client-ID DUID (a v6 sender
-  with no usable Client ID gets aggregate-only treatment). A fairness
-  denial refunds the aggregate token, so the flooder's drops do not
-  burn the burst other senders share. The table is bounded at 256
-  senders per interface; a new sender is denied while every slot is
-  held by an active sender, and the longest-idle slot (idle >= 30 s)
-  is recycled. Fairness drops count in the same
+- **Per-sender fairness (#16087, folded on #16322).** The aggregate
+  bucket alone let one sender sustaining `>= maximum-packet-rate`
+  consume every refill, so other clients' DISCOVERs starved for the
+  flood's duration. Each distinct sender now also gets its own
+  sub-bucket (`fairLimiter` in `relay.go`), gated **before** the
+  aggregate with no refunds either way — the aggregate stays a hard
+  pre-parse bound on parsed work, fairness is additional, not
+  substitutive: sustained `ceil(rate / 256)` pps per sender (floored at
+  1 pps so a 1 pps segment still completes DORA and trickles), burst at
+  least 8 (a full DORA plus retransmissions clears instantly; at rates
+  <= 4 pps the burst is lifted to the aggregate burst). The v4 sender
+  key is the `chaddr` peeked from the fixed RFC 951 wire header (still
+  pre-parse); the DHCPv6 key is the Client-ID DUID, and senders with no
+  usable Client ID share one unknown-sender bucket. The table is
+  bounded at 256 senders per interface; a new sender is denied while
+  every slot is held by an active sender, and the longest-idle slot
+  (idle >= 30 s) is recycled. Fairness drops count in the same
   `RequestsDroppedRateLimit` counter and throttled log.
   - **Honest limit — read before relying on this.** The sender key is
     chosen by the client, so fairness stops a *naive* single-identity
