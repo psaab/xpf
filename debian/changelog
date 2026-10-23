@@ -1,5 +1,18 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Screen: tolerant bad numerics no longer zero syn-flood subfields or
+    limit-session (#16006, A3-M3). A bad syn-flood
+    alarm/source/destination-threshold or timeout now keeps its Junos
+    default (512/4000/4000/20) on the tolerant load/peer-sync path
+    instead of falling to disabled behind a warning; a bad limit-session
+    value has no default, so the profile is treated as unresolved and
+    referencing zones get the substituted conservative default
+    (malformed-packet checks only) rather than the profile with a cap
+    silently off. Strict commit still rejects every bad value.
+
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Config: a literal `apply-groups-except` naming no defined group no
     longer silently no-ops (#16003). The exclusion still removes nothing
     and never errors (a shared cluster config may exclude a group only

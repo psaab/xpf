@@ -47,6 +47,16 @@ func buildScreenSnapshots(cfg *config.Config) []ScreenProfileSnapshot {
 		if sp == nil {
 			continue
 		}
+		// #16006: a profile marked BadNumericUnresolved (a bad
+		// limit-session value on the tolerant path, which has no Junos
+		// default to substitute) is treated as unresolved: publish no
+		// screens entry so the zone falls into the missing-profile set
+		// below and the dataplane substitutes the conservative default
+		// (#7168) instead of enforcing the profile with a configured
+		// cap silently disabled.
+		if sp.BadNumericUnresolved {
+			continue
+		}
 		snap := ScreenProfileSnapshot{
 			Zone:         zone.Name,
 			Land:         sp.TCP.Land,
@@ -409,8 +419,10 @@ func checkScreenBlockBeforeAnchor(out, blockName, disposition, emptyInventory st
 }
 
 // buildScreenMissingProfileRefs records every zone that REFERENCES a screen
-// profile which is NOT defined in the config (#3082). buildScreenSnapshots
-// silently skips these zones (`sp == nil`), so without this the dataplane
+// profile which is NOT defined in the config (#3082), or whose profile is
+// marked BadNumericUnresolved (#16006: a bad limit-session value on the
+// tolerant path with no Junos default to substitute). buildScreenSnapshots
+// silently skips these zones, so without this the dataplane
 // cannot tell "zone has no screen configured" (legit Pass) apart from "zone
 // references a MISSING screen" (unresolved → should signal). Reachable on the
 // lenient/HA-sync path where a dangling screen reference loads with only an
@@ -447,9 +459,11 @@ func buildScreenMissingProfileRefs(cfg *config.Config) []ScreenMissingProfileRef
 		if _, excluded := zoneExclusions[name]; excluded {
 			continue
 		}
-		if zone.ScreenProfile != "" && cfg.Security.Screen[zone.ScreenProfile] != nil {
-			// Reference resolves to a defined profile.
-			continue
+		if zone.ScreenProfile != "" {
+			if p := cfg.Security.Screen[zone.ScreenProfile]; p != nil && !p.BadNumericUnresolved {
+				// Reference resolves to a defined, resolved profile.
+				continue
+			}
 		}
 		// The loop iterates sorted map KEYS but labels with zone.Name. Those are
 		// two different expressions, and the divergence was raised and REFUTED in
@@ -672,7 +686,7 @@ func userspaceSynCookieProtectionActive(cfg *config.Config) bool {
 			continue
 		}
 		profile := cfg.Security.Screen[zone.ScreenProfile]
-		if profile != nil && profile.TCP.SynFlood != nil &&
+		if profile != nil && !profile.BadNumericUnresolved && profile.TCP.SynFlood != nil &&
 			profile.TCP.SynFlood.AttackThreshold > 0 {
 			return true
 		}
@@ -764,6 +778,9 @@ func buildScreenInertProfileRefs(cfg *config.Config) []ScreenMissingProfileRef {
 		}
 		if cfg.Security.Screen[zone.ScreenProfile] == nil {
 			continue // UNDEFINED — that is ScreenMissingProfileRefs' surface, not this one
+		}
+		if cfg.Security.Screen[zone.ScreenProfile].BadNumericUnresolved {
+			continue // #16006 UNRESOLVED — ScreenMissingProfileRefs' surface, not inert
 		}
 		if _, ok := published[zone.Name]; ok {
 			continue // defined AND enforcing at least one check

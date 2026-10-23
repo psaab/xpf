@@ -1758,6 +1758,25 @@ type ScreenProfile struct {
 	// reads this to reject the commit fail-closed. Each entry is the full
 	// `<family> <leaf>` path under the ids-option.
 	UnknownLeaves []string
+
+	// BadNumericUnresolved marks a profile that carries a BadNumeric entry
+	// for a leaf with no Junos default to fall back to (#16006): the
+	// limit-session source/destination-ip-based caps. (The syn-flood
+	// subfields do carry Junos defaults and are repaired in compileScreen
+	// instead, so they never set this flag.) On the
+	// tolerant load / peer-sync path such a leaf would otherwise compile
+	// to 0/disabled behind a warning only, silently dropping a configured
+	// protection while the rest of the profile (including the aggregate
+	// syn-flood gate) stayed armed. The snapshot builder treats a marked
+	// profile as unresolved — it publishes no screens entry for zones
+	// referencing it and routes those zones through the missing-profile
+	// (conservative-default) path instead — so the tolerant leg keeps the
+	// threshold-free malformed-packet floor and loses every configured
+	// threshold, exactly like an undefined profile (#7168). Strict commit
+	// already rejects the bad value (#3317); this flag only changes the
+	// tolerant disposition. Compile-only (`json:"-"`): derived from
+	// BadNumeric on every compile, never persisted.
+	BadNumericUnresolved bool `json:"-"`
 }
 
 // ScreenBadNumeric records a screen numeric leaf whose explicitly-provided value
