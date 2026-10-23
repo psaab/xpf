@@ -1334,7 +1334,7 @@ func dhcpLocalServerGroupSchema(fam string) *schemaNode {
 					"access-profile":        {desc: "Per-interface access profile (parsed, not implemented)", args: 1, placeholder: "<profile>", children: nil},
 					"client-discover-match": {desc: "Client discover match option (parsed, not implemented)", args: 1, placeholder: "<match>", children: nil},
 					"dynamic-profile":       {desc: "Per-interface dynamic profile (parsed, not implemented)", args: 1, placeholder: "<profile>", children: nil},
-					"exclude":               {desc: "Exclude this interface from the group (parsed, not implemented)", children: nil},
+					"exclude":               {desc: "Exclude this interface from the group (#16004)", children: nil},
 					"overrides":             {desc: "Per-interface overrides (parsed, not implemented)", children: nil},
 					"service-profile":       {desc: "Per-interface service profile (parsed, not implemented)", args: 1, placeholder: "<profile>", children: nil},
 					"short-cycle-protection-lockout-max-time": {desc: "Short-cycle lockout max time (parsed, not implemented)", args: 1, placeholder: "<seconds>", children: nil},

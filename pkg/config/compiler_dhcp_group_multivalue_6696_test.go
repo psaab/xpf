@@ -214,40 +214,28 @@ func TestDHCPv6Group6696SpellingsAgree(t *testing.T) {
 }
 
 // TestDHCPGroup6696PerInterfaceModifierIsNotAnInterface is the
-// counter-direction, and it is the reason `interface` is read from Keys
-// alone rather than through firewallMatchValues.
+// counter-direction for non-exclude modifiers, and it is the reason
+// `interface` is read from Keys alone rather than through
+// firewallMatchValues.
 //
-// A per-interface Junos modifier (`interface ge-0/0/0.0 exclude`, `...
-// upgrade-server <addr>`) is not an interface NAME. xpf parses and ignores
-// these — as it did before #6696, where the single-value read dropped them
-// — and they must not be promoted into the list, because group.Interfaces
-// is handed to Kea as interfaces-config.interfaces and a name no device
-// answers to takes the WHOLE DHCP server down, not just that group.
-//
-// The spelling-differential gate does not state this direction: it detects
-// a dropped value, not a promoted modifier. Measured — swapping in
-// firewallMatchValues does red that gate, but only indirectly, at the
-// modelled `interface <if> <modifier>` sub-leaf sites, which exist only
-// because the modifiers are modelled; removing those children leaves the
-// gate green with the promotion still present, and only this test red.
+// A per-interface Junos modifier (`... upgrade-server <addr>`) is not an
+// interface NAME and must not be promoted into the list, because
+// group.Interfaces is handed to Kea as interfaces-config.interfaces and a
+// name no device answers to takes the WHOLE DHCP server down, not just
+// that group. #16004: `exclude` is the exception — it is honoured by
+// omitting its interface (see TestDHCPExclude16004Honoured), so it is no
+// longer in this inert-modifier table.
 //
 // FAIL-ON-REVERT: replacing dhcpGroupInterfaceValues with
 // firewallMatchValues — the union reader used for every other multi-value
-// leaf — makes `exclude` an interface and reds this test.
+// leaf — makes a modifier keyword an interface and reds this test.
 func TestDHCPGroup6696PerInterfaceModifierIsNotAnInterface(t *testing.T) {
 	cases := []struct {
 		name  string
 		build func() *ConfigTree
 	}{
-		{"flat set exclude", func() *ConfigTree {
-			return setTree6696(t, `set system services dhcp-local-server group g1 interface ge-0/0/0.0 exclude`)
-		}},
 		{"flat set upgrade-server", func() *ConfigTree {
 			return setTree6696(t, `set system services dhcp-local-server group g1 interface ge-0/0/0.0 upgrade-server 192.0.2.9`)
-		}},
-		{"brace modifier body", func() *ConfigTree {
-			return parseHierText(t, "system {\n services {\n  dhcp-local-server {\n   group g1 {\n"+
-				"    interface ge-0/0/0.0 {\n     exclude;\n    }\n   }\n  }\n }\n}\n")
 		}},
 	}
 
@@ -264,6 +252,90 @@ func TestDHCPGroup6696PerInterfaceModifierIsNotAnInterface(t *testing.T) {
 					"whole DHCP server fails to start (#6696)", g.Interfaces)
 			}
 		})
+	}
+}
+
+// TestDHCPExclude16004Honoured pins #16004: `interface <if> exclude` was
+// parsed but silently ignored, so the excluded interface was still handed
+// to Kea. Every spelling must omit the excluded interface (and only it),
+// on both families, while a non-excluded sibling survives.
+//
+// FAIL-ON-REVERT: restoring the pre-#16004 dhcpGroupInterfaceValues (ignore
+// children / Keys tail) keeps the excluded interface and reds every row.
+func TestDHCPExclude16004Honoured(t *testing.T) {
+	cases := []struct {
+		name  string
+		build func() *ConfigTree
+		want  string // comma-joined v4 Interfaces; "" means none
+	}{
+		{"flat set exclude sole", func() *ConfigTree {
+			return setTree6696(t, `set system services dhcp-local-server group g1 interface ge-0/0/0.0 exclude`)
+		}, ""},
+		{"hier flat exclude sole", func() *ConfigTree {
+			return parseHierText(t, "system { services { dhcp-local-server { group g1 { interface ge-0/0/0.0 exclude; } } } }")
+		}, ""},
+		{"brace modifier body sole", func() *ConfigTree {
+			return parseHierText(t, "system {\n services {\n  dhcp-local-server {\n   group g1 {\n"+
+				"    interface ge-0/0/0.0 {\n     exclude;\n    }\n   }\n  }\n }\n}\n")
+		}, ""},
+		{"exclude one of two repeated", func() *ConfigTree {
+			return setTree6696(t,
+				`set system services dhcp-local-server group g1 interface ge-0/0/0.0 exclude`,
+				`set system services dhcp-local-server group g1 interface ge-0/0/1.0`)
+		}, "ge-0/0/1.0"},
+		{"bare block nested exclude", func() *ConfigTree {
+			return parseHierText(t, "system { services { dhcp-local-server { group g1 { interface { ge-0/0/0.0 { exclude; } ge-0/0/1.0; } } } } }")
+		}, "ge-0/0/1.0"},
+		{"bracket with exclude body excluded", func() *ConfigTree {
+			return parseHierText(t, "system { services { dhcp-local-server { group g1 { interface [ ge-0/0/0.0 ge-0/0/1.0 ] { exclude; } } } } }")
+		}, ""},
+		{"v6 flat set exclude", func() *ConfigTree {
+			return setTree6696(t, `set system services dhcpv6-local-server group g1 interface ge-0/0/0.0 exclude`, `set system services dhcpv6-local-server group g1 interface ge-0/0/1.0`)
+		}, ""}, // v4 groups empty; v6 asserted below via strict cfg
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			groups := dhcpGroups6696(t, tc.build)
+			got := ""
+			if g := groups["g1"]; g != nil {
+				got = strings.Join(g.Interfaces, ",")
+			}
+			// The v6 row has no v4 group; its want is checked on v6 below.
+			if tc.name == "v6 flat set exclude" {
+				cfg, err := CompileConfig(tc.build())
+				if err != nil {
+					t.Fatalf("strict compile: %v", err)
+				}
+				var v6got string
+				if cfg.System.DHCPServer.DHCPv6LocalServer != nil {
+					if g := cfg.System.DHCPServer.DHCPv6LocalServer.Groups["g1"]; g != nil {
+						v6got = strings.Join(g.Interfaces, ",")
+					}
+				}
+				if v6got != "ge-0/0/1.0" {
+					t.Fatalf("v6 Interfaces=%q, want [ge-0/0/1.0] — exclude not honoured (#16004)", v6got)
+				}
+				return
+			}
+			if got != tc.want {
+				t.Fatalf("Interfaces=%q, want %q — `exclude` was ignored and the interface would still be handed to Kea (#16004)", got, tc.want)
+			}
+			for _, iface := range strings.Split(got, ",") {
+				if iface == "exclude" {
+					t.Fatalf("`exclude` promoted to an interface name: %q", got)
+				}
+			}
+		})
+	}
+	// Control: same group without exclude keeps both interfaces, proving
+	// the rows above prove exclusion rather than a broken group.
+	groups := dhcpGroups6696(t, func() *ConfigTree {
+		return setTree6696(t,
+			`set system services dhcp-local-server group g1 interface ge-0/0/0.0`,
+			`set system services dhcp-local-server group g1 interface ge-0/0/1.0`)
+	})
+	if got := strings.Join(groups["g1"].Interfaces, ","); got != "ge-0/0/0.0,ge-0/0/1.0" {
+		t.Fatalf("control Interfaces=%q, want both", got)
 	}
 }
 
