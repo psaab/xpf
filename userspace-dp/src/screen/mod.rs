@@ -1184,16 +1184,18 @@ impl ScreenState {
             // #3908: mirror the flow-present `check_packet_with_zone_id` None
             // branch so the flowless path is as observable as the flow path.
             // A zone that REFERENCES a screen profile undefined at
-            // snapshot-build time (lenient/HA-sync fail-open) gets a
+            // snapshot-build time (lenient/HA-sync tolerant load) gets a
             // rate-limited runtime WARN; a zone with no screen configured
-            // passes silently (the helper distinguishes the two). Verdict is
-            // still Pass in BOTH cases — watch-log-only, no drop-behavior
-            // change (the fail-closed-vs-pass posture is the deferred #3082
-            // design decision). O(1): one hashmap lookup + a rate-limited
-            // increment; no unwrap/panic on the hot flowless path.
-            // #7168: substituted conservative default rather than a bare Pass.
-            // `addrs_known` is forwarded so LAND is skipped when the caller had
-            // no real L3 addresses, exactly as the resolved path below does.
+            // passes silently (the helper distinguishes the two). Since
+            // #7168 the verdict for a referencing zone is NOT Pass in either
+            // path: `missing_profile_verdict` evaluates it against
+            // `ScreenProfile::conservative_default()` (threshold-free
+            // malformed-packet checks only, no flood/scan/session-limit
+            // thresholds synthesised). O(1): one hashmap lookup + a
+            // rate-limited increment; no unwrap/panic on the hot flowless
+            // path. `addrs_known` is forwarded so LAND is skipped when the
+            // caller had no real L3 addresses, exactly as the resolved path
+            // below does.
             return self.missing_profile_verdict(zone, pkt, now_secs, addrs_known);
         };
         // --- Stateless, source-independent checks (side-effect-free) ---

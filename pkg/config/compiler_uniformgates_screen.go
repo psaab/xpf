@@ -10,14 +10,16 @@ import "fmt"
 // strict ordering (invariant #6) and the tolerant warning-accumulation
 // order (invariant #7) are preserved. See runUniformGates.
 func runUniformGatesScreen(tree *ConfigTree, cfg *Config, opts compileOpts) error {
-	// #3066 zone screen-profile reference fail-open gate. Strict on commit /
+	// #3066 zone screen-profile reference gate. Strict on commit /
 	// commit-check (hard-reject a zone whose `screen <name>` references a
-	// screen-ids-option profile the config never defines — at runtime the
-	// dataplane fails OPEN for a missing profile, silently skipping every
-	// screen check for that zone); lenient on load / peer-sync (warn so an
-	// already-persisted or peer-synced config still boots — #1960 no-brick).
-	// Unlike the policy gates the runtime is NOT independently safe on the
-	// lenient path, so the strict commit gate is the real fix.
+	// screen-ids-option profile the config never defines); lenient on load /
+	// peer-sync (warn so an already-persisted or peer-synced config still
+	// boots — #1960 no-brick). Since #7168 the dataplane does NOT fail open
+	// for a missing profile: it substitutes ScreenProfile::conservative_default()
+	// (threshold-free malformed-packet checks only, no flood/scan/
+	// session-limit thresholds), so on the lenient path the zone keeps that
+	// floor but loses every configured threshold — the strict commit gate is
+	// what keeps a bad reference from reaching the dataplane.
 	if err := validateScreenProfileReferencesStrict(cfg); err != nil {
 		if opts.lenientScreenProfileRefs {
 			cfg.Warnings = append(cfg.Warnings,

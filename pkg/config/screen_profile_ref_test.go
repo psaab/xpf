@@ -9,14 +9,15 @@ import (
 // `screen <name>` references a screen-ids-option profile the configuration
 // never defines is HARD-REJECTED at commit (#3066).
 //
-// This is the fail-on-revert guard for the screen-bypass fail-open bug: before
-// the fix such a reference was only a warning, the commit succeeded, and at
-// runtime the userspace dataplane fails OPEN (screen/mod.rs returns
-// ScreenVerdict::Pass for a missing profile), silently skipping every screen
-// check for the zone while the operator believes screening is active. Remove
-// validateScreenProfileReferencesStrict (or its dispatch in compiler.go) and
-// this subtest goes green on the BAD config, which is exactly the regression
-// this test exists to catch.
+// This is the fail-on-revert guard for the screen-profile reference gate:
+// before #3066 such a reference was only a warning and the commit succeeded.
+// Since #7168 the dataplane does NOT fail open for a missing profile — it
+// substitutes ScreenProfile::conservative_default() (threshold-free
+// malformed-packet checks only, no flood/scan/session-limit thresholds) — so
+// the residual harm is loss of the configured thresholds, not loss of all
+// screening. Remove validateScreenProfileReferencesStrict (or its dispatch)
+// and this test goes green on the BAD config, which is exactly the
+// regression it exists to catch.
 func TestZoneUndefinedScreenProfileFailsCommit(t *testing.T) {
 	tree := buildTree(t, []string{
 		// "wan-screen" is defined; the zone references the typo "wan-scren".
