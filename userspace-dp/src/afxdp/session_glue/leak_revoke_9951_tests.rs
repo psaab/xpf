@@ -170,6 +170,7 @@ fn reverse_worker_entry_fixture(
         tcp_close_class: 0,
         tcp_handshake_state: 0,
         pptp_call_ids: 0,
+        rev_packets: 0,
         source_nat_static: None,
     };
     (reverse_flow, entry, incarnation)
@@ -642,6 +643,7 @@ fn peer_shared_materialize_promote_rechecks_removed_leak_9951() {
         tcp_close_class: 0,
         tcp_handshake_state: 0,
         pptp_call_ids: 0,
+        rev_packets: 0,
         source_nat_static: None,
     };
     publish_shared_session(
@@ -773,6 +775,7 @@ fn demoted_shared_leak_rematerialization_rechecks_removed_leak_9951() {
         tcp_close_class: 0,
         tcp_handshake_state: 0,
         pptp_call_ids: 0,
+        rev_packets: 0,
         source_nat_static: None,
     };
     publish_shared_session(
@@ -1407,6 +1410,7 @@ fn peer_upsert_recomputes_ri_reverse_leak_stamp_10312() {
         tcp_close_class: 0,
         tcp_handshake_state: 0,
         pptp_call_ids: 0,
+        rev_packets: 0,
         source_nat_static: None,
     };
     let mut sessions = SessionTable::new();
@@ -1465,6 +1469,7 @@ fn shared_materialize_recomputes_ri_reverse_leak_stamp_10312() {
         tcp_close_class: 0,
         tcp_handshake_state: 0,
         pptp_call_ids: 0,
+        rev_packets: 0,
         source_nat_static: None,
     };
     publish_shared_session(

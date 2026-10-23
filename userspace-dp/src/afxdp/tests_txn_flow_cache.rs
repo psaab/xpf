@@ -493,6 +493,7 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
                     tcp_close_class: 0,
                     tcp_handshake_state: 1,
                     pptp_call_ids: 0,
+                rev_packets: 0,
                 },
             );
     }
@@ -594,7 +595,7 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
         policy_id: established_replacement.metadata.policy_id,
     };
     assert!(
-        !super::poll_descriptor::is_pressure_shed_shared_opening(
+        !super::poll_descriptor::is_pressure_shed_shared_unreplied(
             &established_replacement,
             &replacement_shed,
         ),
@@ -620,18 +621,62 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
         session_id: opening_replacement.session_id.wrapping_add(1),
     };
     assert!(
-        !super::poll_descriptor::is_pressure_shed_shared_opening(
+        !super::poll_descriptor::is_pressure_shed_shared_unreplied(
             &opening_replacement,
             &victim_shed,
         ),
         "a same-tuple OPENING replacement with a different session_id must survive the shed"
     );
     assert!(
-        super::poll_descriptor::is_pressure_shed_shared_opening(
+        super::poll_descriptor::is_pressure_shed_shared_unreplied(
             &opening_replacement,
             &replacement_shed,
         ),
         "the victim incarnation itself (same session_id) must still match"
+    );
+    // #16019: a non-TCP shared row carries handshake state 0 by
+    // construction and must still match its own shed victim (the
+    // session_id/decision/metadata fence is the incarnation guard);
+    // a different session_id must not match.
+    let mut udp_shared = opening_replacement.clone();
+    udp_shared.key.protocol = crate::ip_proto::PROTO_UDP;
+    udp_shared.tcp_handshake_state = 0;
+    let udp_shed = crate::session::PressureShedSession {
+        key: udp_shared.key.clone(),
+        session_id: udp_shared.session_id,
+        decision: udp_shared.decision,
+        is_reverse: udp_shared.metadata.is_reverse,
+        ingress_zone: udp_shared.metadata.ingress_zone,
+        egress_zone: udp_shared.metadata.egress_zone,
+        ingress_zone_check: udp_shared.metadata.ingress_zone_check,
+        egress_zone_check: udp_shared.metadata.egress_zone_check,
+        ingress_ifindex: udp_shared.metadata.ingress_ifindex,
+        ingress_vlan_id: udp_shared.metadata.ingress_vlan_id,
+        owner_rg_id: udp_shared.metadata.owner_rg_id,
+        policy_id: udp_shared.metadata.policy_id,
+    };
+    assert!(
+        super::poll_descriptor::is_pressure_shed_shared_unreplied(&udp_shared, &udp_shed),
+        "#16019: a non-TCP victim incarnation must match its shed"
+    );
+    let mut udp_other = udp_shed.clone();
+    udp_other.session_id = udp_shared.session_id.wrapping_add(1);
+    assert!(
+        !super::poll_descriptor::is_pressure_shed_shared_unreplied(&udp_shared, &udp_other),
+        "#16019: a non-TCP replacement incarnation must survive the shed"
+    );
+    // #16019 fold (1): a peer-synced shared row is never shed — its
+    // reply evidence lives outside the shedding worker's counters.
+    let mut udp_synced = udp_shared.clone();
+    udp_synced.origin = crate::session::SessionOrigin::WorkerLocalImport;
+    assert!(
+        !super::poll_descriptor::is_pressure_shed_shared_unreplied(&udp_synced, &udp_shed),
+        "#16019 fold: peer-synced shared rows must survive pressure shedding"
+    );
+    udp_synced.origin = crate::session::SessionOrigin::SyncImport;
+    assert!(
+        !super::poll_descriptor::is_pressure_shed_shared_unreplied(&udp_synced, &udp_shed),
+        "#16019 fold: HA-imported shared rows must survive pressure shedding"
     );
     if opening_a_removed {
         assert!(sessions.probe_with_origin(&opening_a_reverse).is_none());
@@ -806,6 +851,7 @@ fn txn_missing_neighbor_pressure_shed_gate_failure_retries_nat64_cleanup_13764()
             tcp_close_class: 0,
             tcp_handshake_state: 1,
             pptp_call_ids: 0,
+        rev_packets: 0,
         },
     );
     let held_lease = crate::afxdp::bpf_map::global_tuple_gate()
@@ -1007,6 +1053,7 @@ fn txn_pressure_shed_nat_pool_hold_behavior(gate_blocks_cleanup: bool) {
                 tcp_close_class: 0,
                 tcp_handshake_state: 1,
                 pptp_call_ids: 0,
+            rev_packets: 0,
             },
         );
     let _held_lease = if gate_blocks_cleanup {
@@ -5897,4 +5944,159 @@ fn txn_static_input_count_charged_on_non_cacheable_session_hit_13641() {
     );
     // #14656: counters are coalesced per-thread in every build; flush before asserting.
     // #14656: counters are coalesced per-thread in every build; flush before asserting.
+}
+
+#[test]
+fn cross_worker_reply_evidence_retains_victim_16019() {
+    // #16019 fold 3: two workers, one shared map. Worker B (the reply
+    // worker) accounts the reverse packet on ITS table and publishes
+    // the reverse shared row stamped with the forward entry's rev
+    // counter. Worker A (the shedding worker) has never seen the reply
+    // locally — its counters read unreplied — yet shared_session_replied
+    // must return true from B's row, and false before B publishes /
+    // with a zero stamp (install-time existence proves nothing).
+    use std::net::Ipv4Addr as V4;
+    let forward_key = crate::session::SessionKey {
+        addr_family: 2,
+        protocol: crate::ip_proto::PROTO_UDP,
+        src_ip: std::net::IpAddr::V4(V4::new(10, 0, 0, 1)),
+        dst_ip: std::net::IpAddr::V4(V4::new(8, 8, 8, 8)),
+        src_port: 12345,
+        dst_port: 53,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let nat = crate::nat::NatDecision::default();
+    let reverse_key = crate::session::reverse_session_key(&forward_key, nat);
+    let shared_sessions = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::afxdp::types::FastMap::default(),
+    ));
+    let shared_nat = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::afxdp::types::FastMap::default(),
+    ));
+    let shared_wire = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::afxdp::types::FastMap::default(),
+    ));
+    let indexes = SharedSessionOwnerRgIndexes::default();
+
+    // Install-time reverse row (rev_packets 0): NOT reply proof.
+    let mut meta = crate::session::SessionMetadata {
+        ingress_zone: TEST_WAN_ZONE_ID,
+        egress_zone: TEST_LAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        owner_rg_id: 0,
+        fabric_ingress: false,
+        is_reverse: true,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+        nat_scope_ifindex: None,
+    };
+    let decision = {
+        let mut sessions = SessionTable::new();
+        let _ = sessions;
+        crate::session::SessionDecision {
+            resolution: crate::afxdp::ForwardingResolution {
+                disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(std::net::IpAddr::V4(V4::new(172, 16, 50, 1))),
+                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+                src_mac: None,
+                tx_vlan_id: 0,
+                source_ifindex: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat,
+            install_table_domain: 0,
+            install_table_check: 0,
+        }
+    };
+    let reverse_entry = |rev_packets: u64| SyncedSessionEntry {
+        key: reverse_key.clone(),
+        decision,
+        metadata: meta.clone(),
+        source_nat_static: None,
+        leak_incarnation: 0,
+        origin: SessionOrigin::ReverseFlow,
+        protocol: crate::ip_proto::PROTO_UDP,
+        tcp_flags: 0,
+        generation: 0,
+        session_id: 7,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        pptp_call_ids: 0,
+        rev_packets,
+    };
+    crate::afxdp::shared_ops::publish_shared_session(
+        &shared_sessions,
+        &shared_nat,
+        &shared_wire,
+        &indexes,
+        &reverse_entry(0),
+    );
+    assert!(
+        !crate::afxdp::shared_ops::shared_session_replied(&shared_sessions, &forward_key, nat),
+        "install-time reverse row with rev_packets 0 is not reply proof"
+    );
+
+    // Worker B accounts the reply on its own table, then publishes the
+    // reverse row stamped from B's forward entry — the fold-3 fix.
+    let mut worker_b = SessionTable::new();
+    let now = 1_000_000_000u64;
+    assert!(worker_b.install_with_protocol(
+        forward_key.clone(),
+        decision,
+        {
+            let mut m = meta.clone();
+            m.is_reverse = false;
+            m.ingress_zone = TEST_LAN_ZONE_ID;
+            m.egress_zone = TEST_WAN_ZONE_ID;
+            m
+        },
+        now,
+        crate::ip_proto::PROTO_UDP,
+        0,
+    ));
+    let mut rev_meta = meta.clone();
+    assert!(worker_b.install_with_protocol(
+        reverse_key.clone(),
+        decision,
+        rev_meta.clone(),
+        now,
+        crate::ip_proto::PROTO_UDP,
+        0,
+    ));
+    worker_b.account_packet(&reverse_key, 100, 0, 0);
+    assert!(worker_b.session_replied(&forward_key), "B saw the reply locally");
+    let stamped = worker_b.rev_packets_wire_for(&forward_key);
+    assert_eq!(stamped, 1, "B's forward entry folded one reverse packet");
+    crate::afxdp::shared_ops::publish_shared_session(
+        &shared_sessions,
+        &shared_nat,
+        &shared_wire,
+        &indexes,
+        &reverse_entry(stamped),
+    );
+
+    // Worker A never accounted anything; shared evidence alone retains.
+    let worker_a = SessionTable::new();
+    assert!(!worker_a.session_replied(&forward_key), "A has no local reply evidence");
+    assert!(
+        crate::afxdp::shared_ops::shared_session_replied(&shared_sessions, &forward_key, nat),
+        "cross-worker reply proof: B's stamped reverse row retains the victim on A"
+    );
+    meta.is_reverse = false;
+    let _ = meta;
 }

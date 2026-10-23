@@ -15,7 +15,7 @@ fn pressure_shed_close_harvests_counters_and_timestamps_13973() {
     table.account_packet(&key, 111, 0x10, 0);
     table.account_packet(&reverse, 222, 0x10, 0);
 
-    let (admitted, shed) = table.can_admit_new_syn(1, PROTO_TCP, 0x02);
+    let (admitted, shed) = table.can_admit_new_flow(1, PROTO_TCP, 0x02);
     assert!(admitted);
     assert_eq!(shed.len(), 2);
     assert!(table.entry_by_key(&key).is_none());
@@ -55,7 +55,7 @@ fn pressure_shed_batch_keeps_each_sessions_close_counters_13973() {
     table.account_packet(&reverse_two, 422, 0x10, 0);
     table.set_max_sessions_for_test(2);
 
-    let (admitted, shed) = table.can_admit_new_syn(1, PROTO_TCP, 0x02);
+    let (admitted, shed) = table.can_admit_new_flow(1, PROTO_TCP, 0x02);
     assert!(admitted);
     assert_eq!(shed.len(), 4);
     let closes: Vec<_> = table

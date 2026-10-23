@@ -1765,6 +1765,7 @@ fn synced_replica_entry_keeps_peer_synced_entries_promotable() {
         tcp_close_class: 0,
         tcp_handshake_state: 0,
         pptp_call_ids: 0,
+        rev_packets: 0,
         source_nat_static: None,
     };
     let replica = synced_replica_entry(&entry);
@@ -1830,6 +1831,7 @@ fn synced_replica_entry_marks_local_entries_worker_local() {
         tcp_close_class: 0,
         tcp_handshake_state: 0,
         pptp_call_ids: 0,
+        rev_packets: 0,
         source_nat_static: None,
     };
     let replica = synced_replica_entry(&entry);
@@ -1897,6 +1899,7 @@ fn reconcile_stop_preserves_shared_synced_sessions() {
         tcp_close_class: 0,
         tcp_handshake_state: 0,
         pptp_call_ids: 0,
+        rev_packets: 0,
         source_nat_static: None,
     };
     publish_shared_session(
@@ -1975,6 +1978,7 @@ fn replay_synced_sessions_requeues_preserved_entries_for_new_workers() {
         tcp_close_class: 0,
         tcp_handshake_state: 0,
         pptp_call_ids: 0,
+        rev_packets: 0,
         source_nat_static: None,
     };
     let worker_command_queues = WorkerCommandQueues::new(BTreeMap::from([
@@ -2083,6 +2087,7 @@ fn replay_synced_sessions_publishes_kernel_local_for_local_delivery_13675() {
         tcp_close_class: 0,
         tcp_handshake_state: 0,
         pptp_call_ids: 0,
+        rev_packets: 0,
         source_nat_static: None,
     };
     let queues = WorkerCommandQueues::new(BTreeMap::from([(
@@ -3120,6 +3125,7 @@ fn a_sibling_workers_replica_carries_zero_counters_for_a_live_session_7919() {
         tcp_close_class: 0,
         tcp_handshake_state: 0,
         pptp_call_ids: 0,
+        rev_packets: 0,
         source_nat_static: None,
     });
     let mut sibling = crate::session::SessionTable::new();

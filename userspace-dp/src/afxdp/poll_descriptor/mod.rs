@@ -883,7 +883,7 @@ pub(super) fn dns_illegal_reply_drop(
         && dns_reply_qr_set(packet_frame, meta)
 }
 
-pub(super) fn is_pressure_shed_shared_opening(
+pub(super) fn is_pressure_shed_shared_unreplied(
     current: &SyncedSessionEntry,
     shed: &crate::session::PressureShedSession,
 ) -> bool {
@@ -893,6 +893,17 @@ pub(super) fn is_pressure_shed_shared_opening(
     // The install-stamped identity subset fences the incarnation; the
     // comparison runs inside the shared-removal lock, so the entry judged
     // is the entry removed.
+    // #16019: the shared entry carries no reply counters, so the state
+    // arm is protocol-shaped: TCP fences on handshake state 1..=3
+    // (Opening/HandshakePending/SynAckFirstPending, never Established);
+    // non-TCP carries handshake state 0 by construction
+    // (`tcp_handshake_state_wire`) and the session_id/decision/metadata
+    // fence above is the incarnation guard.
+    // #16019 fold: peer-synced rows are never shed from shared — a
+    // SyncImport/SharedMaterialize/WorkerLocalImport row means this
+    // node (or a sibling worker) holds the flow as replicated state
+    // whose reply evidence lives outside the shedding worker's local
+    // counters; only local-origin rows may be removed here.
     current.session_id == shed.session_id
         && current.decision == shed.decision
         && current.metadata.is_reverse == shed.is_reverse
@@ -904,7 +915,9 @@ pub(super) fn is_pressure_shed_shared_opening(
         && current.metadata.ingress_vlan_id == shed.ingress_vlan_id
         && current.metadata.owner_rg_id == shed.owner_rg_id
         && current.metadata.policy_id == shed.policy_id
-        && matches!(current.tcp_handshake_state, 1..=3)
+        && !current.origin.is_peer_synced()
+        && (current.key.protocol != crate::ip_proto::PROTO_TCP
+            || matches!(current.tcp_handshake_state, 1..=3))
 }
 
 #[inline]
@@ -6869,7 +6882,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // passing preflight makes both installs below
                                     // infallible within this descriptor iteration.
                                     // Once validated policy admits a TCP initial
-                                    // SYN, #10890 sheds local handshake-incomplete
+                                    // SYN, #10890/#16019 sheds local unreplied
                                     // TCP sessions first at 90% capacity; no
                                     // established session is evicted. Any
                                     // remaining refusal follows the normal
@@ -6903,7 +6916,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         if needed_sessions == 0 || reuse_fits {
                                             (true, crate::session::PressureShedSessions::new())
                                         } else {
-                                            sessions.can_admit_new_syn(
+                                            sessions.can_admit_new_flow(
                                                 needed_sessions,
                                                 meta.protocol,
                                                 meta.tcp_flags,
@@ -6924,10 +6937,42 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         .iter()
                                         .map(|shed| shed.key.clone())
                                         .collect();
+                                    // #16019 fold 2: node-level reply evidence.
+                                    // Local removal already happened; before tearing
+                                    // down shared/BPF/NAT authority, retain any victim
+                                    // with reply proof (rev counter > 0 on the shared
+                                    // reverse row, or local reverse accounting) and
+                                    // cancel its still-queued Close delta, else the
+                                    // flush would delete shared/BPF and replicate
+                                    // sibling deletes for a live flow.
+                                    let replied_sheds: Vec<bool> = pressure_shed_sessions
+                                        .iter()
+                                        .map(|shed| {
+                                            !shed.is_reverse
+                                                && (sessions.session_replied(&shed.key)
+                                                    || crate::afxdp::shared_ops::shared_session_replied(
+                                                        worker_ctx.shared_sessions,
+                                                        &shed.key,
+                                                        shed.decision.nat,
+                                                    ))
+                                        })
+                                        .collect();
                                     let shed_lease = crate::afxdp::bpf_map::global_tuple_gate()
                                         .acquire_lease(shed_keys);
                                     if shed_lease.is_ok() {
-                                        for shed in pressure_shed_sessions {
+                                        for (shed_idx, shed) in
+                                            pressure_shed_sessions.into_iter().enumerate()
+                                        {
+                                            if replied_sheds[shed_idx] {
+                                                // Suppress the enqueued Close so its
+                                                // flush cannot delete shared/BPF or
+                                                // replicate sibling deletes (#16019 fold 2).
+                                                sessions.cancel_pending_close(
+                                                    &shed.key,
+                                                    shed.session_id,
+                                                );
+                                                continue;
+                                            }
                                             // Remove shared authority before this
                                             // worker processes another descriptor
                                             // in the batch. The Close delta is
@@ -6940,7 +6985,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                     worker_ctx.shared_owner_rg_indexes,
                                                     &shed.key,
                                                     |current| {
-                                                        is_pressure_shed_shared_opening(
+                                                        is_pressure_shed_shared_unreplied(
                                                             current, &shed,
                                                         )
                                                     },
@@ -7540,6 +7585,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 .handshake_state_wire,
                                             pptp_call_ids: sessions
                                                 .pptp_call_ids_wire_for(&flow.forward_key),
+                                            rev_packets: sessions
+                                                .rev_packets_wire_for(&flow.forward_key),
                                         };
                                         // #1789: count failed publishes so
                                         // map-at-capacity / stale-fd
@@ -7939,6 +7986,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 .expect("installed forward session info")
                                                 .handshake_state_wire,
                                             pptp_call_ids: 0,
+                                            // #16019 fold 3: stamp the REVERSE row
+                                            // with the forward entry's rev counter —
+                                            // shared_session_replied reads this row.
+                                            rev_packets: sessions
+                                                .rev_packets_wire_for(&flow.forward_key),
                                             source_nat_static: None,
                                         };
                                         publish_shared_session(
@@ -12278,7 +12330,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         if reuse_fits {
                                             (true, crate::session::PressureShedSessions::new())
                                         } else {
-                                            sessions.can_admit_new_syn(
+                                            sessions.can_admit_new_flow(
                                                 1,
                                                 meta.protocol,
                                                 meta.tcp_flags,
@@ -12291,10 +12343,33 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         .iter()
                                         .map(|shed| shed.key.clone())
                                         .collect();
+                                    // #16019 fold 2: node-level reply evidence (see
+                                    // the ForwardCandidate shed site).
+                                    let replied_sheds: Vec<bool> = pressure_shed_sessions
+                                        .iter()
+                                        .map(|shed| {
+                                            !shed.is_reverse
+                                                && (sessions.session_replied(&shed.key)
+                                                    || crate::afxdp::shared_ops::shared_session_replied(
+                                                        worker_ctx.shared_sessions,
+                                                        &shed.key,
+                                                        shed.decision.nat,
+                                                    ))
+                                        })
+                                        .collect();
                                     let shed_lease = crate::afxdp::bpf_map::global_tuple_gate()
                                         .acquire_lease(shed_keys);
                                     if shed_lease.is_ok() {
-                                        for shed in pressure_shed_sessions {
+                                        for (shed_idx, shed) in
+                                            pressure_shed_sessions.into_iter().enumerate()
+                                        {
+                                            if replied_sheds[shed_idx] {
+                                                sessions.cancel_pending_close(
+                                                    &shed.key,
+                                                    shed.session_id,
+                                                );
+                                                continue;
+                                            }
                                             let shared_removal =
                                                 crate::afxdp::shared_ops::remove_shared_session_if(
                                                     worker_ctx.shared_sessions,
@@ -12303,7 +12378,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                     &worker_ctx.shared_owner_rg_indexes,
                                                     &shed.key,
                                                     |current| {
-                                                        is_pressure_shed_shared_opening(
+                                                        is_pressure_shed_shared_unreplied(
                                                             current, &shed,
                                                         )
                                                     },
@@ -12555,6 +12630,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 .expect("installed neighbor seed info")
                                                 .handshake_state_wire,
                                             pptp_call_ids: 0,
+                                        rev_packets: 0,
                                         };
                                         publish_shared_session(
                                             worker_ctx.shared_sessions,

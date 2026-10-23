@@ -251,6 +251,7 @@ fn replay_filter_drops_purged_forward_and_derived_reverse_companion() {
             tcp_close_class: 0,
             tcp_handshake_state: 0,
             pptp_call_ids: 0,
+            rev_packets: 0,
             source_nat_static: None,
         };
     let unrelated_key = SessionKey {
@@ -382,6 +383,7 @@ fn replay_filter_preserves_order_and_survivors_across_many_drops() {
             tcp_close_class: 0,
             tcp_handshake_state: 0,
             pptp_call_ids: 0,
+            rev_packets: 0,
             source_nat_static: None,
         };
 
@@ -1194,6 +1196,7 @@ fn replay_filter_drops_stale_zone_pair_and_keeps_tunnel_semantics_10612() {
         tcp_close_class: 0,
         tcp_handshake_state: 0,
         pptp_call_ids: 0,
+        rev_packets: 0,
         source_nat_static: None,
     };
 

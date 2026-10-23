@@ -1,5 +1,23 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Sessions: pressure shedding is protocol-symmetric and keyed on
+    never-replied state (#16019). Rotating spoofed-source UDP/ICMP
+    singles previously filled the session table while only a TCP
+    initial-SYN newcomer could shed handshake-incomplete victims;
+    now any qualifying new flow (TCP initial SYN, or any non-TCP first
+    packet) at the 90% watermark sheds unreplied local sessions of
+    any protocol, and replied/established flows are never victims.
+    Fold: victim reply evidence is node-level (shared-map reverse
+    row rev counter > 0 + peer-synced fence), not just the shedding
+    worker's counters or reverse-row existence; retained victims have
+    their queued Close delta cancelled and deferred sheds recheck the
+    reply predicate; the stale-candidate scan per admission is bounded.
+    Fold 3: the reverse shared row itself is stamped with the forward
+    entry's rev counter at publish/promote/reverse-install, so the
+    cross-worker proof is readable on the row the check consults.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Fold (#16350): production PAT allocation now skips peer-owned
     candidates during the keyed probe (bounded by addresses x range,
     fail-closed with PoolPeerAddressOverlap on exclusion-exhaustion)
