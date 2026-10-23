@@ -136,12 +136,14 @@ const MaxCollectedTypedLeafViolations16012 = 16
 
 // SchemaValidateCollectTypedLeaves returns up to
 // MaxCollectedTypedLeafViolations16012 independent typed-leaf violations
-// (#16012). Strict callers keep SchemaValidate (first error, unchanged);
-// the tolerant configstore path uses this so every typed-leaf violation
-// is logged and persisted as its own warning, not just the first.
-func SchemaValidateCollectTypedLeaves(tree, defsSource *ConfigTree) []error {
-	errs, _ := schemaValidateCollect(tree, defsSource, true)
-	return errs
+// (#16012) and, separately, the first non-typed schema error if one stopped
+// the walk. Typed errors collected before that structural error are
+// preserved rather than discarded. Strict callers keep SchemaValidate
+// (first error, unchanged); the tolerant configstore path uses this so
+// every typed-leaf violation reached before any structural error is
+// logged and persisted as its own warning.
+func SchemaValidateCollectTypedLeaves(tree, defsSource *ConfigTree) ([]error, error) {
+	return schemaValidateCollect(tree, defsSource, true)
 }
 
 func schemaValidateCollect(tree, defsSource *ConfigTree, collect bool) ([]error, error) {
@@ -260,11 +262,17 @@ func schemaValidateImpl(tree, defsSource *ConfigTree, collect bool) ([]error, er
 	if collect {
 		var errs []error
 		cvc := &walkContext{refs: refs, collectErrs: &errs, collectMax: MaxCollectedTypedLeafViolations16012}
-		if err := walkSchemaChildren(tree.Children, setSchema, nil, cvc, false); err != nil {
-			return nil, scrubSchemaErrorSecrets(tree, err)
-		}
+		walkErr := walkSchemaChildren(tree.Children, setSchema, nil, cvc, false)
 		for i, e := range errs {
 			errs[i] = scrubSchemaErrorSecrets(tree, e)
+		}
+		if walkErr != nil {
+			// #16012 fold: a later non-typed structural error ends the
+			// walk, but does not erase independent typed-leaf violations
+			// already collected. Return both, scrubbed; the tolerant
+			// caller persists the typed subset and classifies the
+			// structural error through its existing first-error path.
+			return errs, scrubSchemaErrorSecrets(tree, walkErr)
 		}
 		return errs, nil
 	}
@@ -1859,6 +1867,7 @@ func validateMultiValueLeaf(node *Node, leafSchema *schemaNode, parentPath []str
 	path := append(append([]string(nil), parentPath...), leafName)
 
 	validatedAny := false
+	attemptedAny := false
 	lastWasSeparator := false
 	for _, tok := range node.Keys[1:] {
 		// #4556 L-01: the fixed mid-token `to` is only a RANGE separator
@@ -1869,19 +1878,31 @@ func validateMultiValueLeaf(node *Node, leafSchema *schemaNode, parentPath []str
 		// rejected) as such, not silently skipped.
 		if leafSchema.rangeSeparator && tok == "to" {
 			if !validatedAny || lastWasSeparator {
-				return typedLeafErrorf(path, "missing value")
+				err := typedLeafErrorf(path, "missing value")
+				if vc.recordTypedLeaf(err) {
+					continue
+				}
+				return err
 			}
 			lastWasSeparator = true
 			continue
 		}
+		attemptedAny = true
 		if err := leafSchema.checkToken(vc, tok); err != nil {
-			return typedLeafInvalidErrorf(path, tok, err)
+			verr := typedLeafInvalidErrorf(path, tok, err)
+			if vc.recordTypedLeaf(verr) {
+				continue
+			}
+			return verr
 		}
 		validatedAny = true
 		lastWasSeparator = false
 	}
 	if lastWasSeparator {
-		return typedLeafErrorf(path, "missing value")
+		err := typedLeafErrorf(path, "missing value")
+		if !vc.recordTypedLeaf(err) {
+			return err
+		}
 	}
 
 	// Block-list children default to one compiler-consumed value per child.
@@ -1895,15 +1916,24 @@ func validateMultiValueLeaf(node *Node, leafSchema *schemaNode, parentPath []str
 			keys = c.Keys
 		}
 		for _, tok := range keys {
+			attemptedAny = true
 			if err := leafSchema.checkToken(vc, tok); err != nil {
-				return typedLeafInvalidErrorf(path, tok, err)
+				verr := typedLeafInvalidErrorf(path, tok, err)
+				if vc.recordTypedLeaf(verr) {
+					continue
+				}
+				return verr
 			}
 			validatedAny = true
 		}
 	}
 
-	if !validatedAny {
-		return typedLeafErrorf(path, "missing value")
+	if !validatedAny && !attemptedAny {
+		err := typedLeafErrorf(path, "missing value")
+		if vc.recordTypedLeaf(err) {
+			return nil
+		}
+		return err
 	}
 	return nil
 }

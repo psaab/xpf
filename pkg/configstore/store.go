@@ -950,7 +950,7 @@ func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, err
 	// tolerant log + persisted warnings; first-error schemaErr above
 	// still drives classification and the redaction-placeholder guard.
 	var typedErrs16012 []error
-	if collected, cerr := s.schemaValidateExpandedTreeCollect16012(tree); cerr == nil {
+	if collected, _ := s.schemaValidateExpandedTreeCollect16012(tree); len(collected) > 0 {
 		typedErrs16012 = collected
 	}
 	if len(typedErrs16012) > 1 {
@@ -986,7 +986,7 @@ func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, err
 		compiled, err = config.CompileConfigLenient(tree)
 	}
 	if err == nil && compiled != nil {
-		if config.IsTypedLeafSchemaError(schemaErr) {
+		if config.IsTypedLeafSchemaError(schemaErr) || len(typedErrs16012) > 0 {
 			// Keep the pre-compile typed-leaf error on the compiled object. The
 			// typed compiler may discard the offending token while preserving
 			// tolerant no-brick behaviour. Schema validation owns redaction for
@@ -1065,9 +1065,10 @@ func (s *Store) schemaValidateExpandedTree(tree *config.ConfigTree) error {
 // schemaValidateExpandedTreeCollect16012 is the #16012 tolerant variant:
 // same expansion as schemaValidateExpandedTree, but collects every
 // independent typed-leaf violation (bounded) instead of the first only.
-// A non-typed-leaf schema error is returned as fatal (single error slice
-// is not used); callers fall back to the first-error path for those.
-func (s *Store) schemaValidateExpandedTreeCollect16012(tree *config.ConfigTree) ([]error, error) {
+// The second return is the first non-typed schema error if one stopped
+// the walk; typed errors collected before it are still returned in the
+// first value. Callers classify structural errors via schemaErr.
+func (s *Store) schemaValidateExpandedTreeCollect16012(tree *config.ConfigTree) ([]error, error) { // typed errors preserved even when second return is a later structural error
 	if tree == nil {
 		return nil, nil
 	}
@@ -1078,12 +1079,12 @@ func (s *Store) schemaValidateExpandedTreeCollect16012(tree *config.ConfigTree) 
 		if err := expanded.ExpandGroupsWithVars(vars); err != nil {
 			return nil, fmt.Errorf("apply-groups: %w", err)
 		}
-		return config.SchemaValidateCollectTypedLeaves(expanded, stripped), nil
+		return config.SchemaValidateCollectTypedLeaves(expanded, stripped)
 	}
 	if _, err := expanded.ExpandGroupsNodeFallback15031(false); err != nil {
 		return nil, fmt.Errorf("apply-groups: %w", err)
 	}
-	return config.SchemaValidateCollectTypedLeaves(expanded, stripped), nil
+	return config.SchemaValidateCollectTypedLeaves(expanded, stripped)
 }
 
 func schemaValidateExpandedTreeForNode(tree *config.ConfigTree, nodeID int) error {
