@@ -755,7 +755,9 @@ use cookie_reply::{SynCookieReply, enqueue_syn_cookie_reply};
 use nat_exception::{record_source_nat_failure, source_nat_decision_for_flow};
 use prerouting_scope::{PreroutingIngressScope, prerouting_ingress_scope};
 use reject_reply::{deny_reply_and_emit, enqueue_filter_reject_reply, enqueue_session_miss_rst};
-use resolver_enqueue::{note_kernel_probe, probe_throttled, try_enqueue_resolver};
+use resolver_enqueue::{
+    claim_window_attempt, note_kernel_probe, probe_throttled, try_enqueue_resolver,
+};
 
 use filter::{
     NonPbrInputFilterEval, SessionHitInputFilterEval, SessionHitPbrRouteRevalidation,
@@ -11829,59 +11831,61 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // never probe-loops a denied flow. Buffer-and-translate
                                 // parity (zero cold-start loss) is a deferred follow-up.
                                 if nat64_dst_v4.is_some() {
-                                    // #15948 (H36-02): the fail-closed
-                                    // drop must still trigger resolution
-                                    // of the v4 egress hop, once per
-                                    // throttle window. Window-start
-                                    // detection: the early arm writes
-                                    // (key, now_ns) via note_kernel_probe
-                                    // BEFORE this block, so a stored
-                                    // timestamp EQUAL to this packet's
-                                    // now_ns marks the window's first
-                                    // packet — fire then; a strictly
-                                    // older timestamp is a live window
-                                    // (suppress), and no timestamp
-                                    // means the early arm skipped the
-                                    // write (already probing), so the
-                                    // pending check governs.
+                                    // #15948 (H36-02, fold 2): the
+                                    // fail-closed drop must still
+                                    // trigger resolution of the v4
+                                    // egress hop — exactly ONE attempt
+                                    // per throttle window. The early
+                                    // arm recorded (key, now_ns) via
+                                    // note_kernel_probe without sending
+                                    // anything; claim_window_attempt
+                                    // converts that record into a
+                                    // deadline marker (now_ns + window,
+                                    // unequal to any packet timestamp)
+                                    // so same-timestamp batch packets
+                                    // cannot each fire.
                                     if let Some(next_hop) = decision.resolution.next_hop {
                                         let key = (neigh_if, next_hop);
-                                        let window_start = binding
-                                            .resolver_enqueue_throttle
-                                            .get(&key)
-                                            .is_some_and(|t| *t == now_ns);
-                                        if window_start
-                                            && !binding.pending_neigh.contains_key(&key)
-                                        {
-                                            if let Some(resolver) = worker_ctx.neighbor_resolver {
-                                                // Throttle already recorded
-                                                // by the early arm for this
-                                                // window; enqueue directly
-                                                // via try_ would re-check and
-                                                // self-suppress, so record
-                                                // the resolver attempt by
-                                                // enqueuing without throttle.
-                                                if let Some(name) = worker_ctx
-                                                    .forwarding
-                                                    .ifindex_to_name
-                                                    .get(&neigh_if)
-                                                {
-                                                    resolver.enqueue(neigh_if, next_hop, name.clone());
-                                                }
-                                            }
-                                            if let Some(name) = worker_ctx
-                                                .forwarding
-                                                .ifindex_to_name
-                                                .get(&neigh_if)
-                                                .map(String::as_str)
-                                            {
-                                                if trigger_kernel_arp_probe(name, neigh_if, next_hop) {
-                                                    worker_ctx.dynamic_neighbors.record_neighbor_probe(
-                                                        key,
-                                                        monotonic_nanos(),
-                                                    );
-                                                }
-                                            }
+                                        if !binding.pending_neigh.contains_key(&key) {
+                                            let _ = claim_window_attempt(
+                                                &mut binding.resolver_enqueue_throttle,
+                                                key,
+                                                now_ns,
+                                                || {
+                                                    if let Some(resolver) =
+                                                        worker_ctx.neighbor_resolver
+                                                    {
+                                                        if let Some(name) = worker_ctx
+                                                            .forwarding
+                                                            .ifindex_to_name
+                                                            .get(&neigh_if)
+                                                        {
+                                                            resolver.enqueue(
+                                                                neigh_if,
+                                                                next_hop,
+                                                                name.clone(),
+                                                            );
+                                                        }
+                                                    }
+                                                    if let Some(name) = worker_ctx
+                                                        .forwarding
+                                                        .ifindex_to_name
+                                                        .get(&neigh_if)
+                                                        .map(String::as_str)
+                                                    {
+                                                        if trigger_kernel_arp_probe(
+                                                            name, neigh_if, next_hop,
+                                                        ) {
+                                                            worker_ctx
+                                                                .dynamic_neighbors
+                                                                .record_neighbor_probe(
+                                                                    key,
+                                                                    monotonic_nanos(),
+                                                                );
+                                                        }
+                                                    }
+                                                },
+                                            );
                                         }
                                     }
                                     telemetry.dbg.nat64_missing_neigh_drop += 1;
