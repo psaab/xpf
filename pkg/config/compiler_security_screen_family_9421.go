@@ -112,14 +112,32 @@ func screenNormalizeFamilies(body *Node, idsSchema *schemaNode) *Node {
 	return &clone
 }
 
-// screenFamilyBody expands one family node's packed tail into the CHAIN shape
-// the flat-set parser produces for the identical statement.
+// screenFamilyBody expands one family node's packed tail into the shape
+// the nested spelling produces: sibling statements stay SIBLINGS.
 //
 // schema is the FAMILY's own schema node (`icmp`), used to learn how many
 // leading Keys are the family's identity and how many tokens each tail
 // statement consumes. A family the schema does not model (nil schema) is
 // returned untouched — compileScreen's top-level switch already records it as
 // an unknown family, so there is nothing to normalise for.
+//
+// #15944 H13-03: the walk keeps the open levels it has entered (the
+// packedBodyChildren discipline), attaching each token to the deepest
+// open level that declares it and popping back to that level. The
+// previous single-cursor chain refined `cur` into each new node and
+// never popped, so after a value-bearing leaf (`alarm-threshold 100`)
+// the next sibling (`attack-threshold 500`) resolved against the
+// leaf's (childless) schema, failed, and chained UNDER the leaf —
+// compileScreen's named-child reads then lost every option after the
+// first in a depth-1 packed run such as
+// `tcp syn-flood alarm-threshold 100 attack-threshold 500;`, and the
+// mis-nested token surfaced as a spurious strict rejection.
+//
+// A token no open level declares is kept visible in the chain shape
+// the flat-set parser builds for the identical tokens, so
+// compileScreen's recorders name it exactly as the flat path does and
+// the strict gate rejects it rather than silently dropping it — the
+// #9421 backstop this normalizer exists to provide.
 //
 // Synthesized nodes are FRESH allocations and the input node is never mutated.
 func screenFamilyBody(node *Node, schema *schemaNode) *Node {
@@ -132,12 +150,123 @@ func screenFamilyBody(node *Node, schema *schemaNode) *Node {
 		return node
 	}
 	tail := node.Keys[consumed:]
+	// #9421: a BRACKETED tail (`icmp [ ping-death fragment ]`) is a list
+	// spelling the screen grammar does not model (`icmp` declares
+	// children, not multi:). It must keep the flat-set CHAIN shape so
+	// the unknown-leaf gate records `icmp ping-death fragment` and
+	// strict compile rejects it; expanding it as siblings would accept
+	// a shape the flat path refuses. Detect the bracket on the tail's
+	// first token and keep the original single-chain walk for it.
+	bracketed := consumed < len(node.Keys) && node.KeyBracketed(consumed)
+	if bracketed {
+		return screenFamilyBodyChain(node, schema, consumed, cur)
+	}
 
+	type openLevel struct {
+		schema *schemaNode
+		node   *Node // nil for the family's synthetic root level
+	}
+	levels := []openLevel{{schema: cur}}
+	// path holds the synthesized ancestors of the current position, so
+	// an unresolvable token can be re-emitted in the CHAIN shape the
+	// flat-set parser builds for the identical tokens
+	// (`[tcp]>[land]>[bogus-tail]`): compileScreen's recordKeyExtras /
+	// recordChildExtras then name it exactly as the flat path does
+	// (`tcp land bogus-tail`) instead of inventing a new spelling.
+	var roots []*Node
+	var last *Node
+	var path []*Node
+	chainUnder := func(keys []string) *Node {
+		next := &Node{Keys: keys, IsLeaf: true}
+		if len(path) == 0 {
+			roots = append(roots, next)
+		} else {
+			parent := path[len(path)-1]
+			parent.Children = append(parent.Children, next)
+			parent.IsLeaf = false
+		}
+		path = append(path, next)
+		last = next
+		return next
+	}
+	for len(tail) > 0 {
+		at := -1
+		var childSchema *schemaNode
+		for i := len(levels) - 1; i >= 0; i-- {
+			if cs := resolveSchemaChild(levels[i].schema, tail[0]); cs != nil {
+				at, childSchema = i, cs
+				break
+			}
+		}
+		if childSchema == nil {
+			// No open level declares this token. Keep it visible in
+			// the flat chain shape under the deepest synthesized
+			// node (or at the family root when nothing is open), so
+			// the unknown-leaf gate records the same path the flat
+			// spelling produces. The level stack is rebuilt to mirror
+			// the chain: each chain node is unresolvable (nil schema),
+			// so a later token only resolves again at the family root.
+			chainUnder(append([]string(nil), tail[0]))
+			levels = []openLevel{{schema: cur}}
+			for _, p := range path {
+				levels = append(levels, openLevel{schema: nil, node: p})
+			}
+			tail = tail[1:]
+			continue
+		}
+		n := 1
+		var refined *schemaNode
+		if c, r := consumeNodeKeys(tail, childSchema); c > 0 && c <= len(tail) {
+			n, refined = c, r
+		}
+		next := &Node{Keys: append([]string(nil), tail[:n]...), IsLeaf: true}
+		if levels[at].node == nil && at == 0 {
+			roots = append(roots, next)
+			path = []*Node{next}
+		} else if levels[at].node != nil {
+			levels[at].node.Children = append(levels[at].node.Children, next)
+			levels[at].node.IsLeaf = false
+			path = append(append([]*Node(nil), path[:at]...), next)
+		} else {
+			// `at` indexes a chain level built by the unknown-token
+			// arm (node marker nil but not the root): attach under
+			// the chain node at that depth.
+			parent := path[at-1]
+			parent.Children = append(parent.Children, next)
+			parent.IsLeaf = false
+			path = append(append([]*Node(nil), path[:at]...), next)
+		}
+		levels = append(levels[:at+1], openLevel{schema: refined, node: next})
+		last = next
+		tail = tail[n:]
+	}
+
+	// A node may carry a packed tail AND a braced body at once
+	// (`icmp flood { threshold 500; }` elides to [icmp flood] + children).
+	// The two halves spell ONE path, so the body belongs UNDER the deepest
+	// packed node, never beside it — the #6821 / #8850 rule.
+	if len(node.Children) > 0 && last != nil {
+		last.Children = append(last.Children, node.Children...)
+		last.IsLeaf = false
+	}
+
+	clone := *node
+	clone.Keys = append([]string(nil), node.Keys[:consumed]...)
+	clone.Children = roots
+	clone.IsLeaf = false
+	return &clone
+}
+
+// screenFamilyBodyChain is the original #9421 single-chain expansion,
+// retained for BRACKETED tails only (see screenFamilyBody): a bracketed
+// list is not a modelled screen spelling, and the chain shape is what
+// makes the flat-set unknown-leaf record (`icmp ping-death fragment`)
+// — and therefore the strict rejection — reachable. Unbracketed packed
+// runs take the sibling-preserving walk above (#15944 H13-03).
+func screenFamilyBodyChain(node *Node, schema *schemaNode, consumed int, cur *schemaNode) *Node {
+	tail := node.Keys[consumed:]
 	var head, last *Node
 	for len(tail) > 0 {
-		// Default to one token per node — what SetPath does once the grammar
-		// runs out. When the schema DOES model the token, consume its declared
-		// args with it so a `threshold 500` value stays on its own leaf.
 		n := 1
 		var refined *schemaNode
 		if cur != nil {
@@ -158,16 +287,10 @@ func screenFamilyBody(node *Node, schema *schemaNode) *Node {
 		tail = tail[n:]
 		cur = refined
 	}
-
-	// A node may carry a packed tail AND a braced body at once
-	// (`icmp flood { threshold 500; }` elides to [icmp flood] + children).
-	// The two halves spell ONE path, so the body belongs UNDER the deepest
-	// packed node, never beside it — the #6821 / #8850 rule.
-	if len(node.Children) > 0 {
+	if len(node.Children) > 0 && last != nil {
 		last.Children = append(last.Children, node.Children...)
 		last.IsLeaf = false
 	}
-
 	clone := *node
 	clone.Keys = append([]string(nil), node.Keys[:consumed]...)
 	clone.Children = []*Node{head}
