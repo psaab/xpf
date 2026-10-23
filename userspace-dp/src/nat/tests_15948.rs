@@ -282,6 +282,65 @@ fn idle_lease_merge_refuses_live_contended_remote_15948() {
     );
 }
 
+/// H31-02 fold 3: an IDLE PAT lease holds its tuple via the occupancy
+/// bit (no live owner count). Merging an address-only lease at the
+/// same tuple to add a remote the PAT lease already grants — or
+/// widening to any-remote — must refuse, exactly as a fresh PAT
+/// import's bitmap claim refuses an occupied port.
+#[test]
+fn idle_lease_merge_refuses_idle_pat_contended_15948() {
+    let addrs = vec![IpAddr::V4(POOL)];
+    let standby = PortAllocator::new(1, 1024, 65535);
+    let r1 = (IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 443u16);
+    let r2 = (IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 443u16);
+    // Idle PAT lease at (POOL, 21003) granting R2.
+    let pat_src = Ipv4Addr::new(10, 0, 3, 3);
+    let mut pat_rec = idle_record(pat_src, 11, r2, 21003);
+    pat_rec.address_only = false;
+    assert_eq!(
+        standby.import_idle_lease(&pat_rec, &addrs, TIMEOUT_NS, 1_000),
+        IdleLeaseImport::Installed,
+        "idle PAT import must claim its port"
+    );
+    // Address-only lease at the same tuple granting only disjoint R1.
+    let src = Ipv4Addr::new(10, 0, 1, 1);
+    let rec1 = idle_record(src, 11, r1, 21003);
+    assert_eq!(
+        standby.import_idle_lease(&rec1, &addrs, TIMEOUT_NS, 2_000),
+        IdleLeaseImport::Installed
+    );
+    let counts_before = standby.debug_persistent_address_only_owner_count();
+    // Merge R2: the idle PAT lease already grants it.
+    let rec2 = idle_record(src, 22, r2, 21003);
+    assert_eq!(
+        standby.import_idle_lease(&rec2, &addrs, TIMEOUT_NS, 3_000),
+        IdleLeaseImport::SkippedIdentityBusy,
+        "merge must refuse a remote an idle PAT lease already grants"
+    );
+    assert_eq!(
+        standby.debug_persistent_address_only_owner_count(),
+        counts_before,
+        "refused idle-PAT merge must not change owner counts"
+    );
+    // Any-remote widening over the idle PAT tuple must also refuse.
+    let mut rec_any = idle_record(src, 23, r1, 21003);
+    rec_any.permit_any_remote = true;
+    rec_any.permitted_remotes = Vec::new();
+    assert_eq!(
+        standby.import_idle_lease(&rec_any, &addrs, TIMEOUT_NS, 4_000),
+        IdleLeaseImport::SkippedIdentityBusy,
+        "any-remote widening over an idle PAT lease must be refused"
+    );
+    // Control: merging a genuinely disjoint remote still succeeds.
+    let r3 = (IpAddr::V4(Ipv4Addr::new(7, 7, 7, 7)), 443u16);
+    let rec3 = idle_record(src, 24, r3, 21003);
+    assert_eq!(
+        standby.import_idle_lease(&rec3, &addrs, TIMEOUT_NS, 5_000),
+        IdleLeaseImport::SkippedExisting,
+        "disjoint merge must still succeed"
+    );
+}
+
 /// H31-03: a freshly minted deterministic BIB is active and must not be
 /// in either idle-expiry index; after release of all flows the indexes
 /// are empty again (no stale key left by an active join).

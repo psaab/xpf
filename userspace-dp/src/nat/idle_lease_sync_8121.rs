@@ -60,7 +60,6 @@ use super::allocator::{
     PersistentPermissionScope, PersistentPermissions, PersistentSourceKey, PortAllocator,
     TranslatedTuple,
 };
-use super::source::SourceNatFlowKey;
 use std::sync::LazyLock;
 
 static EMPTY_PERMISSION_SCOPE: LazyLock<PersistentPermissionScope> = LazyLock::new(PersistentPermissionScope::default);
@@ -465,7 +464,18 @@ impl PortAllocator {
                 // only this lease's own idle contribution).
                 let any_contended_by_other =
                     live.idle_merge_any_contended_by_other(rec.protocol, translated, &key);
+                // #15948 fold: an IDLE PAT lease holding this tuple
+                // (bitmap bit + grants, no live owner count) contends
+                // exactly as a fresh PAT import's bitmap claim would
+                // refuse it — check it for the widening and each new
+                // remote.
+                let idle_pat_busy = (widen_any
+                    && live.idle_pat_lease_covers(translated, &key, None))
+                    || new_remotes.iter().any(|remote| {
+                        live.idle_pat_lease_covers(translated, &key, Some(*remote))
+                    });
                 let merge_busy = (widen_any && (contended(None) && any_contended_by_other))
+                    || idle_pat_busy
                     || new_remotes.iter().any(|remote| {
                         // A new remote self-hits only if an own grant
                         // already covers it — impossible after the

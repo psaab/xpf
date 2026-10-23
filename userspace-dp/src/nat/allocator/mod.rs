@@ -1321,6 +1321,48 @@ impl PortAllocatorLiveState {
             })
     }
 
+    /// #15948 (H31-02, fold): does an IDLE PAT lease (address_only ==
+    /// false) hold `translated` with a grant covering `remote` (or any
+    /// remote when `remote` is None)? An idle PAT lease keeps its
+    /// occupancy bit and its permission grants until expiry —
+    /// exactly the identity a fresh PAT import refuses via the bitmap
+    /// claim — but it has no live PAT owner count and no address-only
+    /// owner keys, so idle_import_identity_contended cannot see it.
+    /// The merge path must refuse the same grant overlap the fresh
+    /// path would. `candidate_key`'s own lease never contends.
+    pub(super) fn idle_pat_lease_covers(
+        &self,
+        translated: TranslatedTuple,
+        candidate_key: &PersistentSourceKey,
+        remote: Option<(IpAddr, u16)>,
+    ) -> bool {
+        self.persistent_by_source.iter().any(|(k, lease)| {
+            if k == candidate_key
+                || lease.address_only
+                || lease.revoked
+                || lease.active_flows != 0
+                || lease.inbound_flows != 0
+                || lease.translated != translated
+            {
+                return false;
+            }
+            let Some(permissions) = self.persistent_permissions.get(k) else {
+                // No grants recorded: a PAT lease without permission
+                // buckets still owns the tuple itself (bitmap bit);
+                // treat it as covering every remote for merge safety.
+                return true;
+            };
+            match remote {
+                None => true,
+                Some((dst_ip, dst_port)) => permissions.permits(
+                    PERSISTENT_NAT_EGRESS_UNSCOPED,
+                    dst_ip,
+                    dst_port,
+                ),
+            }
+        })
+    }
+
     fn add_live_reverse_owner_count(
         &mut self,
         protocol: u8,
