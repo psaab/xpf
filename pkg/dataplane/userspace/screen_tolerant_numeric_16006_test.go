@@ -70,6 +70,61 @@ func TestScreenBadNumericUnresolvedRoutesToMissing16006(t *testing.T) {
 	}
 }
 
+// Fold (#16006, Opus): an unresolved profile that authored
+// alarm-without-drop must preserve the modifier through the missing-profile
+// path. Before the fold buildScreenMissingProfileRefs emitted the ref with
+// AlarmWithoutDrop always false, so the dataplane hard-dropped the
+// substituted conservative default's malformed set instead of logging and
+// forwarding — the exact inverse of the operator's audit request, the
+// #9425 defect on the new arm.
+func TestScreenUnresolvedPreservesAlarmWithoutDrop16006(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"trust":   {Name: "trust", ScreenProfile: "bad-audit"},
+		"untrust": {Name: "untrust", ScreenProfile: "ghost"},
+		"dmz":     {Name: "dmz", ScreenProfile: "bad-plain"},
+	}
+	cfg.Security.Screen = map[string]*config.ScreenProfile{
+		"bad-audit": {
+			Name:                 "bad-audit",
+			TCP:                  config.TCPScreen{Land: true},
+			AlarmWithoutDrop:     true,
+			BadNumericUnresolved: true,
+		},
+		"bad-plain": {
+			Name:                 "bad-plain",
+			TCP:                  config.TCPScreen{Land: true},
+			BadNumericUnresolved: true,
+		},
+	}
+	missing := ScreenMissingProfileRefs(cfg)
+	byZone := map[string]ScreenMissingProfileRef{}
+	for _, r := range missing {
+		byZone[r.Zone] = r
+	}
+	if len(missing) != 3 {
+		t.Fatalf("missing = %+v, want trust/untrust/dmz", missing)
+	}
+	if !byZone["trust"].AlarmWithoutDrop {
+		t.Errorf("defined-but-unresolved audit profile must carry AlarmWithoutDrop=true, got %+v", byZone["trust"])
+	}
+	if byZone["dmz"].AlarmWithoutDrop {
+		t.Errorf("unresolved profile without the modifier must stay false, got %+v", byZone["dmz"])
+	}
+	if byZone["untrust"].AlarmWithoutDrop {
+		t.Errorf("truly undefined profile has no modifier to carry, got %+v", byZone["untrust"])
+	}
+	// The full snapshot wire must carry the same flag.
+	snap := mustBuildSnapshot(t, cfg, config.UserspaceConfig{}, 1, 0)
+	wire := map[string]bool{}
+	for _, r := range snap.ScreenMissingProfiles {
+		wire[r.Zone] = r.AlarmWithoutDrop
+	}
+	if !wire["trust"] || wire["dmz"] || wire["untrust"] {
+		t.Errorf("snapshot missing-profile audit flags = %v, want trust=true only", wire)
+	}
+}
+
 // A defined-but-inert profile (no BadNumeric) still lands in the inert
 // set and NOT the missing set — the #16006 arm must not reclassify it.
 func TestScreenInertUnaffectedBy16006(t *testing.T) {

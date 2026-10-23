@@ -34,29 +34,36 @@ use rustc_hash::FxHashMap;
 /// default. They exist to select the WARN text, because "the profile does not
 /// exist" and "the profile exists and enforces nothing" send an operator to
 /// two different places.
-/// #9425: what an INERT screen reference carries beyond the profile name.
+/// #9425: what an unresolved screen reference carries beyond the profile name.
 ///
 /// The map value was a bare `String` (the profile name). It is a struct now
-/// because the inert state must also carry the operator's `alarm-without-drop`
-/// request: an inert zone has no `zones` entry, so
+/// because an unresolved-but-defined profile must also carry the operator's
+/// `alarm-without-drop` request: such a zone has no `zones` entry, so
 /// `ScreenState::alarm_without_drop`'s resolved lookup misses and the #7888
 /// substituted conservative default HARD-DROPS — the exact inverse of what an
-/// operator who wrote `alarm-without-drop` and nothing else asked for, and that
-/// is the single most likely way to reach the inert state at all.
+/// operator who wrote `alarm-without-drop` asked for. This covers both the
+/// inert state (#9425) and the #16006 defined-but-unresolved state (a bad
+/// limit-session value with no Junos default). A truly undefined profile
+/// never populates this struct on the missing arm — there is no profile to
+/// read the modifier from.
 ///
 /// Deliberately NOT a second parallel map keyed on zone: two structures keyed
 /// the same way can disagree about which zones they cover, and the disagreement
 /// is silent.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub(crate) struct InertProfileRef {
+pub(crate) struct UnresolvedProfileRef {
     pub profile: String,
     /// The profile IS defined and carries `alarm-without-drop`. Honouring it
     /// changes only the terminal disposition: the substituted checks still RUN,
     /// still count, and now ALARM instead of dropping. The #7888 posture (do
-    /// not silently pass an inert zone) is preserved — this is drop-vs-alarm,
-    /// not drop-vs-pass.
+    /// not silently pass an unresolved zone) is preserved — this is
+    /// drop-vs-alarm, not drop-vs-pass.
     pub alarm_without_drop: bool,
 }
+
+/// The pre-#16006 name for this struct was `InertProfileRef`; #16006 reuses
+/// the same carrier on the defined-but-unresolved (missing) arm, so the
+/// name now covers both defined-profile unresolved states.
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum UnresolvedScreen {
@@ -118,11 +125,15 @@ pub(super) fn inert_profile_warn_message(zone: &str, profile: &str) -> String {
     )
 }
 impl ScreenState {
-    /// #3082: replace the set of zones that reference an undefined screen
+    /// #3082: replace the set of zones that reference an unresolved screen
     /// profile (called on config update alongside `update_profiles`). Retains
     /// only the WARN rate counters for zones still in the set so a removed /
-    /// fixed reference stops warning and frees its counter.
-    pub fn update_missing_profiles(&mut self, missing: FxHashMap<String, String>) {
+    /// fixed reference stops warning and frees its counter. #16006: the
+    /// value is an `UnresolvedProfileRef` so a defined-but-unresolved
+    /// profile (bad limit-session value) can carry its authored
+    /// `alarm-without-drop`; a truly undefined profile always carries
+    /// `alarm_without_drop: false`.
+    pub fn update_missing_profiles(&mut self, missing: FxHashMap<String, UnresolvedProfileRef>) {
         self.missing_profile_warn_counters
             .retain(|k, _| missing.contains_key(k));
         self.missing_profile_refs = missing;
@@ -133,7 +144,7 @@ impl ScreenState {
     /// `update_missing_profiles`). Retains only the WARN rate counters for
     /// zones still in the set, so a profile that gains a check stops warning
     /// and frees its counter.
-    pub fn update_inert_profiles(&mut self, inert: FxHashMap<String, InertProfileRef>) {
+    pub fn update_inert_profiles(&mut self, inert: FxHashMap<String, UnresolvedProfileRef>) {
         self.inert_profile_warn_counters
             .retain(|k, _| inert.contains_key(k));
         self.inert_profile_refs = inert;
@@ -286,10 +297,11 @@ impl ScreenState {
         let limited = counter.increment(now_secs, MISSING_PROFILE_WARN_RATE_LIMIT_PER_SEC);
         if !limited {
             self.missing_profile_warn_count = self.missing_profile_warn_count.wrapping_add(1);
-            let profile = self
+            let profile = &self
                 .missing_profile_refs
                 .get(zone)
-                .expect("missing profile checked above");
+                .expect("missing profile checked above")
+                .profile;
             eprintln!("{}", missing_profile_warn_message(zone, profile));
         }
     }

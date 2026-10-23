@@ -20,7 +20,7 @@ use crate::policy::{
 };
 use crate::prefix::{PrefixV4, PrefixV6};
 use crate::screen::{
-    InertProfileRef, ScreenProfile, ScreenState, ScreenVerdict, extract_screen_info,
+    UnresolvedProfileRef, ScreenProfile, ScreenState, ScreenVerdict, extract_screen_info,
 };
 use crate::session::{
     ForwardSessionMatch, SessionCounters, SessionDecision, SessionDelta, SessionDeltaKind,

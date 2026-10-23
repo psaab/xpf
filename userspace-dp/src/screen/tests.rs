@@ -6415,7 +6415,7 @@ fn scan_table_pressure_event_fires_rarely_under_flood() {
 fn missing_profile_reference_warns_and_is_rate_limited() {
     let mut state = ScreenState::new();
     let mut missing = FxHashMap::default();
-    missing.insert("trust".to_string(), "ghost".to_string());
+    missing.insert("trust".to_string(), UnresolvedProfileRef { profile: "ghost".to_string(), alarm_without_drop: false });
     state.update_missing_profiles(missing);
 
     let src = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1));
@@ -6529,7 +6529,7 @@ fn empty_missing_set_passes_without_warn() {
 fn missing_profile_reference_warns_on_flowless_path_but_passes() {
     let mut state = ScreenState::new();
     let mut missing = FxHashMap::default();
-    missing.insert("trust".to_string(), "ghost".to_string());
+    missing.insert("trust".to_string(), UnresolvedProfileRef { profile: "ghost".to_string(), alarm_without_drop: false });
     state.update_missing_profiles(missing);
 
     let src = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1));
@@ -7375,7 +7375,13 @@ fn screen_ext_header_depth_agrees_with_the_forwarding_walker_6885() {
 fn missing_ref_state(zone: &str, profile: &str) -> ScreenState {
     let mut state = ScreenState::new();
     let mut missing = FxHashMap::default();
-    missing.insert(zone.to_string(), profile.to_string());
+    missing.insert(
+        zone.to_string(),
+        UnresolvedProfileRef {
+            profile: profile.to_string(),
+            alarm_without_drop: false,
+        },
+    );
     state.update_missing_profiles(missing);
     state
 }
@@ -7556,7 +7562,7 @@ fn inert_ref_state_with_audit(zone: &str, profile: &str, audit: bool) -> ScreenS
     let mut inert = FxHashMap::default();
     inert.insert(
         zone.to_string(),
-        InertProfileRef {
+        UnresolvedProfileRef {
             profile: profile.to_string(),
             alarm_without_drop: audit,
         },
@@ -8028,14 +8034,14 @@ fn inert_profile_without_the_modifier_still_hard_drops_9425() {
 fn undefined_profile_never_reports_audit_mode_9425() {
     let mut state = ScreenState::new();
     let mut missing = FxHashMap::default();
-    missing.insert("trust".to_string(), "ghost".to_string());
+    missing.insert("trust".to_string(), UnresolvedProfileRef { profile: "ghost".to_string(), alarm_without_drop: false });
     state.update_missing_profiles(missing);
     // Also seed the INERT map for a DIFFERENT zone in audit mode, so the cell
     // fails if the lookup ever answers from the wrong set or ignores the key.
     let mut inert = FxHashMap::default();
     inert.insert(
         "dmz".to_string(),
-        InertProfileRef {
+        UnresolvedProfileRef {
             profile: "p".to_string(),
             alarm_without_drop: true,
         },
@@ -8054,6 +8060,74 @@ fn undefined_profile_never_reports_audit_mode_9425() {
     );
 }
 
+// ===================== #16006 fold =====================
+//
+// A DEFINED-but-unresolved profile (#16006: bad limit-session value on the
+// tolerant path, no Junos default) lands on the MISSING arm, not the inert
+// one — but it IS defined, so its authored `alarm-without-drop` is a real
+// operator statement. Before the fold `alarm_without_drop` consulted only
+// the inert map, so the substituted default hard-dropped a LAND packet the
+// operator asked to log-and-forward — the #9425 inverse-request defect on
+// the new arm.
+
+fn missing_ref_state_with_audit(zone: &str, profile: &str, audit: bool) -> ScreenState {
+    let mut state = ScreenState::new();
+    let mut missing = FxHashMap::default();
+    missing.insert(
+        zone.to_string(),
+        UnresolvedProfileRef {
+            profile: profile.to_string(),
+            alarm_without_drop: audit,
+        },
+    );
+    state.update_missing_profiles(missing);
+    state
+}
+
+/// The fix: same missing-arm zone, same LAND packet, but the defined
+/// profile carries `alarm-without-drop` — the consumers must be told to
+/// suppress the drop.
+#[test]
+fn unresolved_defined_profile_honours_alarm_without_drop_16006() {
+    let mut state = missing_ref_state_with_audit("trust", "bad", true);
+    let same = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1));
+    let land = tcp_pkt(same, same, 5000, 5000, TCP_SYN);
+    assert!(
+        matches!(
+            state.check_packet("trust", &land, 1),
+            ScreenVerdict::Drop(_)
+        ),
+        "the substituted check must still run and trip — #16006 changes the \
+         terminal disposition, not whether the check happens"
+    );
+    assert_eq!(state.substituted_default_drops(), 1);
+    assert!(
+        state.alarm_without_drop("trust"),
+        "a DEFINED-but-unresolved zone whose profile carries alarm-without-drop \
+         must report audit mode; before the fold only the inert map was \
+         consulted, so the packet was hard-dropped instead of logged+forwarded"
+    );
+}
+
+/// NEGATIVE CONTROL — the same missing-arm zone WITHOUT the modifier keeps
+/// the hard-drop posture, and a truly undefined ref (flag false by
+/// construction) does too.
+#[test]
+fn unresolved_without_the_modifier_still_hard_drops_16006() {
+    let mut state = missing_ref_state_with_audit("trust", "bad", false);
+    let same = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1));
+    let land = tcp_pkt(same, same, 5000, 5000, TCP_SYN);
+    assert!(matches!(
+        state.check_packet("trust", &land, 1),
+        ScreenVerdict::Drop(_)
+    ));
+    assert!(
+        !state.alarm_without_drop("trust"),
+        "a missing-arm zone that did NOT ask for audit mode must keep the \
+         hard-drop posture"
+    );
+}
+
 /// A RESOLVED zone must be answered from its `zones` entry, not from a stale
 /// inert reference. This is the precedence a two-source lookup can get wrong:
 /// if a zone appears in both (a malformed or mid-transition snapshot), the
@@ -8067,7 +8141,7 @@ fn resolved_zone_profile_outranks_a_stale_inert_ref_9425() {
     let mut inert = FxHashMap::default();
     inert.insert(
         "trust".to_string(),
-        InertProfileRef {
+        UnresolvedProfileRef {
             profile: "p".to_string(),
             alarm_without_drop: true,
         },

@@ -12747,7 +12747,7 @@ fn undefined_screen_profiles_do_not_leak_into_the_inert_map_7888() {
         state
             .screen_missing_profiles
             .get("trust")
-            .map(String::as_str),
+            .map(|r| r.profile.as_str()),
         Some("ghost")
     );
     assert!(
@@ -12919,18 +12919,20 @@ fn inert_screen_profile_audit_flag_survives_the_decode_9425() {
     }
 }
 
-/// The mirror control: an UNDEFINED reference must never carry the flag into the
-/// helper. The wire struct is shared by both sets, so a decoder that read the
-/// field on the undefined path would let that set inherit the inert set's
-/// meaning.
+/// The mirror control, updated for #16006: the wire struct is shared, and a
+/// defined-but-unresolved reference legitimately carries the flag on the
+/// missing set — but it must never materialise an INERT entry (the two sets
+/// stay disjoint and select different WARN texts). A truly undefined
+/// reference from Go always carries `false` (no profile to read); this cell
+/// forces `true` on the wire to prove the decoder at least keeps the sets
+/// disjoint, and `undefined_profile_never_reports_audit_mode_9425` proves
+/// the runtime answers audit mode only from a defined profile's statement.
 #[test]
 fn undefined_screen_profile_never_carries_an_audit_flag_9425() {
     let snapshot = ConfigSnapshot {
         screen_missing_profile_zones: vec![crate::ScreenMissingProfileRef {
             zone: "trust".into(),
             profile: "ghost".into(),
-            // Even if a malformed or hostile sender sets it, the undefined path
-            // has no field to put it in and the zone must keep hard-dropping.
             alarm_without_drop: true,
         }],
         ..Default::default()
@@ -12938,13 +12940,42 @@ fn undefined_screen_profile_never_carries_an_audit_flag_9425() {
     let state = build_forwarding_state(&snapshot);
     assert!(
         state.screen_inert_profiles.is_empty(),
-        "an undefined reference must not materialise an inert entry, which is the only \
-         place an audit flag could be honoured"
+        "a missing-arm reference must not materialise an inert entry"
     );
     assert!(
         state.screen_missing_profiles.contains_key("trust"),
-        "POSITIVE CONTROL: the undefined reference itself must still decode"
+        "POSITIVE CONTROL: the missing reference itself must still decode"
     );
+}
+
+/// #16006: the defined-but-unresolved reference's audit flag must survive
+/// the decode on the MISSING set (it previously had no field to travel in
+/// on the runtime side because the map value was a bare String).
+#[test]
+fn unresolved_screen_profile_audit_flag_survives_the_decode_16006() {
+    for audit in [true, false] {
+        let snapshot = ConfigSnapshot {
+            screen_missing_profile_zones: vec![crate::ScreenMissingProfileRef {
+                zone: "trust".into(),
+                profile: "bad".into(),
+                alarm_without_drop: audit,
+            }],
+            ..Default::default()
+        };
+        let state = build_forwarding_state(&snapshot);
+        let got = state
+            .screen_missing_profiles
+            .get("trust")
+            .unwrap_or_else(|| panic!("POSITIVE CONTROL: the missing ref must decode at all"));
+        assert_eq!(
+            got.alarm_without_drop, audit,
+            "the audit modifier must travel with the defined-but-unresolved \
+             reference (audit={audit}); it is the ONLY channel by which such a \
+             zone's alarm-without-drop can reach the helper, because the zone \
+             gets no `screens` entry"
+        );
+        assert_eq!(got.profile, "bad");
+    }
 }
 
 /// #9512: kernel-learned IPv6 routes whose next hop is the SAME link-local

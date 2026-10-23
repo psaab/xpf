@@ -191,7 +191,7 @@ mod zone;
 
 pub(crate) use extract::extract_screen_info;
 pub(crate) use packet::{ScreenPacketInfo, ScreenProfile, ScreenVerdict};
-pub(crate) use unresolved::InertProfileRef;
+pub(crate) use unresolved::UnresolvedProfileRef;
 // `ScreenParseError` is named only by `extract.rs` (via the `packet`
 // path) and by the test module. Production call sites in `afxdp/`
 // consume the error by calling `.screen_reason()` on the value returned
@@ -316,8 +316,9 @@ pub(crate) struct ScreenState {
     port_scan: PortScanTracker,
     ip_sweep: IpSweepTracker,
     last_cleanup_secs: u64,
-    /// #3082: zone → name of a screen profile the zone REFERENCES but that was
-    /// undefined when the snapshot was built (lenient/HA-sync path). A zone in
+    /// #3082: zone → a screen profile the zone REFERENCES but that was
+    /// unresolved when the snapshot was built (undefined, or — #16006 —
+    /// defined but marked BadNumericUnresolved on the tolerant path). A zone in
     /// this map but absent from `zones` is enforced against the #7168
     /// SUBSTITUTED conservative default — the `None` branch of
     /// `check_packet_with_zone_id` distinguishes it from a zone with no screen
@@ -325,8 +326,10 @@ pub(crate) struct ScreenState {
     /// malformed-packet subset rather than passing outright. Kept
     /// SEPARATE from `zones` (#4969): its keys are zones that have NO resolved
     /// profile, so they never appear in `zones` and folding them in would muddy
-    /// the "one value per configured zone" invariant.
-    missing_profile_refs: FxHashMap<String, String>,
+    /// the "one value per configured zone" invariant. #16006: the value is an
+    /// `UnresolvedProfileRef` so a defined-but-unresolved profile carries its
+    /// authored `alarm-without-drop`; a truly undefined profile carries false.
+    missing_profile_refs: FxHashMap<String, UnresolvedProfileRef>,
     /// #7888: zone -> profile name for zones whose screen profile IS DEFINED
     /// but enables no check (the #7059 third state). A zone in this map is
     /// enforced against the SAME #7168 substituted conservative default as an
@@ -346,10 +349,10 @@ pub(crate) struct ScreenState {
     /// is the same either way, so only the WARN wording is affected.
     ///
     /// #9425: the value carries the profile's `alarm-without-drop` alongside
-    /// its name (see `InertProfileRef`), because an inert zone has no `zones`
+    /// its name (see `UnresolvedProfileRef`), because an inert zone has no `zones`
     /// entry and this map is the ONLY place the operator's audit request
     /// survives for it.
-    inert_profile_refs: FxHashMap<String, InertProfileRef>,
+    inert_profile_refs: FxHashMap<String, UnresolvedProfileRef>,
     /// #3082: per-zone rate counter that bounds the missing-profile WARN to
     /// `MISSING_PROFILE_WARN_RATE_LIMIT_PER_SEC` per zone so a flood of packets
     /// to a misconfigured zone cannot spam the log (CLAUDE.md log-flood rule).
@@ -554,14 +557,26 @@ impl ScreenState {
     /// silently PASS an inert zone — is untouched; that was drop-over-pass, and
     /// this is alarm-over-drop.
     ///
-    /// The UNDEFINED set is deliberately not consulted: there is no profile to
-    /// have carried the modifier, so there is no operator statement to honour.
+    /// A TRULY UNDEFINED profile is not honoured: there is no profile to
+    /// have carried the modifier (its ref always carries `false`). But a
+    /// DEFINED-but-unresolved profile (#16006: bad limit-session value on
+    /// the tolerant path) lands on the missing arm WITH its authored
+    /// modifier, and that statement must be honoured exactly like the
+    /// inert one — otherwise the substituted default hard-drops a packet
+    /// the operator asked to log-and-forward.
     #[inline]
     pub(crate) fn alarm_without_drop(&self, zone: &str) -> bool {
         if let Some(z) = self.zones.get(zone) {
             return z.profile.alarm_without_drop;
         }
-        self.inert_profile_refs
+        if self
+            .inert_profile_refs
+            .get(zone)
+            .is_some_and(|r| r.alarm_without_drop)
+        {
+            return true;
+        }
+        self.missing_profile_refs
             .get(zone)
             .is_some_and(|r| r.alarm_without_drop)
     }

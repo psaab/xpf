@@ -8,7 +8,10 @@ xpf (0.0.0) unstable; urgency=medium
     value has no default, so the profile is treated as unresolved and
     referencing zones get the substituted conservative default
     (malformed-packet checks only) rather than the profile with a cap
-    silently off. Strict commit still rejects every bad value.
+    silently off — preserving any authored alarm-without-drop modifier
+    through that unresolved path so a substituted drop is logged and
+    forwarded, not enforced. Strict commit still rejects every bad
+    value.
 
 
 xpf (0.0.0) unstable; urgency=medium

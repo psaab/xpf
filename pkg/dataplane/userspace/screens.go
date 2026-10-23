@@ -489,10 +489,19 @@ func buildScreenMissingProfileRefs(cfg *config.Config) []ScreenMissingProfileRef
 		// production path can produce, and switching this to `name` would change
 		// nothing observable. Left as zone.Name deliberately: it says what the
 		// label MEANS.
-		out = append(out, ScreenMissingProfileRef{
+		ref := ScreenMissingProfileRef{
 			Zone:    zone.Name,
 			Profile: zone.ScreenProfile,
-		})
+		}
+		// #16006 fold: a BadNumericUnresolved profile IS defined, so its
+		// authored alarm-without-drop modifier is a real operator statement
+		// and must ride this reference. A truly undefined profile leaves it
+		// false — there is nothing to read it from. The Rust side consults
+		// it only for a defined-but-unresolved reference.
+		if p := cfg.Security.Screen[zone.ScreenProfile]; p != nil && p.BadNumericUnresolved {
+			ref.AlarmWithoutDrop = p.AlarmWithoutDrop
+		}
+		out = append(out, ref)
 	}
 	return out
 }
