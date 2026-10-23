@@ -127,7 +127,27 @@ func schemaPathErrorf(fullPath []string, format string, args ...interface{}) err
 // SchemaValidateWithDefinitions so definitions living only in un-applied
 // groups survive (expansion removes the groups stanza outright).
 func SchemaValidate(tree *ConfigTree) error {
-	return SchemaValidateWithDefinitions(tree, nil)
+	_, err := schemaValidateCollect(tree, nil, false)
+	return err
+}
+
+// MaxCollectedTypedLeafViolations16012 bounds the #16012 collect-all walk.
+const MaxCollectedTypedLeafViolations16012 = 16
+
+// SchemaValidateCollectTypedLeaves returns up to
+// MaxCollectedTypedLeafViolations16012 independent typed-leaf violations
+// (#16012) and, separately, the first non-typed schema error if one stopped
+// the walk. Typed errors collected before that structural error are
+// preserved rather than discarded. Strict callers keep SchemaValidate
+// (first error, unchanged); the tolerant configstore path uses this so
+// every typed-leaf violation reached before any structural error is
+// logged and persisted as its own warning.
+func SchemaValidateCollectTypedLeaves(tree, defsSource *ConfigTree) ([]error, error) {
+	return schemaValidateCollect(tree, defsSource, true)
+}
+
+func schemaValidateCollect(tree, defsSource *ConfigTree, collect bool) ([]error, error) {
+	return schemaValidateImpl(tree, defsSource, collect)
 }
 
 // SchemaValidateWithDefinitions is SchemaValidate with a separate
@@ -142,8 +162,13 @@ func SchemaValidate(tree *ConfigTree) error {
 // the permissive union the schemaRefs contract documents. defsSource
 // may be nil (refs come from tree alone).
 func SchemaValidateWithDefinitions(tree, defsSource *ConfigTree) error {
+	_, err := schemaValidateImpl(tree, defsSource, false)
+	return err
+}
+
+func schemaValidateImpl(tree, defsSource *ConfigTree, collect bool) ([]error, error) {
 	if tree == nil {
-		return nil
+		return nil, nil
 	}
 	// #2008 H1: do not validate `inactive:`-marked nodes. Junos parks
 	// work-in-progress under `inactive:` and accepts a deactivated leaf
@@ -187,7 +212,7 @@ func SchemaValidateWithDefinitions(tree, defsSource *ConfigTree) error {
 	// stored configuration as a side effect of validating it.
 	tree = normalizeCompactForValidation(tree)
 	if err := validateStaticRouteQNHTails12813(tree.Children); err != nil {
-		return scrubSchemaErrorSecrets(tree, err)
+		return nil, scrubSchemaErrorSecrets(tree, err)
 	}
 	// #4060: reject the raw-AST redaction placeholder ("##SECRET-DATA##") on
 	// commit-ingest. This is the symmetric guard for #4051 display redaction:
@@ -200,7 +225,7 @@ func SchemaValidateWithDefinitions(tree, defsSource *ConfigTree) error {
 	// scrubSchemaErrorSecrets re-wraps the %w sentinel, preserving
 	// IsRedactionPlaceholderIngestError / IsRedactedURLIngestError.
 	if err := checkRedactionPlaceholder(tree); err != nil {
-		return scrubSchemaErrorSecrets(tree, err)
+		return nil, scrubSchemaErrorSecrets(tree, err)
 	}
 	refs := collectSchemaRefs(tree)
 	if defsSource != nil {
@@ -227,17 +252,34 @@ func SchemaValidateWithDefinitions(tree, defsSource *ConfigTree) error {
 	// the commit path, which is why the gate below closes ONE level and
 	// inherits nothing.
 	if err := checkUnknownTopLevelStanza(tree); err != nil {
-		return scrubSchemaErrorSecrets(tree, err)
+		return nil, scrubSchemaErrorSecrets(tree, err)
 	}
 	vc := &walkContext{refs: refs}
 	// closed=false: the top-level walk is open-world. The per-subtree
 	// closed-world flag (#4313) is inherited from schemaNode.closedWorld as
 	// the walker descends. No count here — see the keyword-resolution gate
 	// below for why prose must not state how many subtrees are armed.
-	if err := walkSchemaChildren(tree.Children, setSchema, nil, vc, false); err != nil {
-		return scrubSchemaErrorSecrets(tree, err)
+	if collect {
+		var errs []error
+		cvc := &walkContext{refs: refs, collectErrs: &errs, collectMax: MaxCollectedTypedLeafViolations16012}
+		walkErr := walkSchemaChildren(tree.Children, setSchema, nil, cvc, false)
+		for i, e := range errs {
+			errs[i] = scrubSchemaErrorSecrets(tree, e)
+		}
+		if walkErr != nil {
+			// #16012 fold: a later non-typed structural error ends the
+			// walk, but does not erase independent typed-leaf violations
+			// already collected. Return both, scrubbed; the tolerant
+			// caller persists the typed subset and classifies the
+			// structural error through its existing first-error path.
+			return errs, scrubSchemaErrorSecrets(tree, walkErr)
+		}
+		return errs, nil
 	}
-	return nil
+	if err := walkSchemaChildren(tree.Children, setSchema, nil, vc, false); err != nil {
+		return nil, scrubSchemaErrorSecrets(tree, err)
+	}
+	return nil, nil
 }
 
 // scrubSchemaErrorSecrets is the exit half of the #16066 shared choke
@@ -495,6 +537,24 @@ func extractLocName(err error) string {
 // always-nil cfg ferry is retired; LeafValidator takes only the token).
 type walkContext struct {
 	refs *schemaRefs
+	// #16012 collect mode: when non-nil, typed-leaf errors are appended
+	// (bounded) and the walk continues; nil preserves first-error strict.
+	collectErrs *[]error
+	collectMax  int
+}
+
+func (vc *walkContext) collecting() bool { return vc != nil && vc.collectErrs != nil }
+
+// recordTypedLeaf appends err in collect mode and reports whether the
+// caller should continue (true) instead of returning err (false).
+func (vc *walkContext) recordTypedLeaf(err error) bool {
+	if !vc.collecting() || !IsTypedLeafSchemaError(err) {
+		return false
+	}
+	if len(*vc.collectErrs) < vc.collectMax {
+		*vc.collectErrs = append(*vc.collectErrs, err)
+	}
+	return true
 }
 
 // collectedRefs is a nil-receiver-safe accessor: the white-box walker
@@ -651,7 +711,13 @@ func walkSchemaChildren(nodes []*Node, parent *schemaNode, path []string, vc *wa
 		if node == nil || len(node.Keys) == 0 {
 			continue
 		}
+		if vc.collecting() && len(*vc.collectErrs) >= vc.collectMax {
+			return nil
+		}
 		if err := walkSchemaNode(node, parent, path, vc, nodes, closed); err != nil {
+			if vc.recordTypedLeaf(err) {
+				continue
+			}
 			return err
 		}
 	}
@@ -778,7 +844,13 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	// unit rather than token-by-token. Takes precedence over the generic
 	// typed-leaf / container paths.
 	if childSchema.tailValidator != nil {
-		return validateTailLeaf(node, childSchema, path, siblings)
+		if err := validateTailLeaf(node, childSchema, path, siblings); err != nil {
+			if vc.recordTypedLeaf(err) {
+				return nil
+			}
+			return err
+		}
+		return nil
 	}
 
 	exactMatch := parent.children != nil && parent.children[keyword] == childSchema
@@ -827,11 +899,20 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 		// this path replaces both validateTypedLeaf and the modifier
 		// loop below.
 		if childSchema.multi && childSchema.children == nil {
-			return validateMultiValueLeaf(node, childSchema, path, vc)
+			if err := validateMultiValueLeaf(node, childSchema, path, vc); err != nil {
+				if vc.recordTypedLeaf(err) {
+					return nil
+				}
+				return err
+			}
+			return nil
 		}
 		// Typed leaf: node.Keys[1:] are the value/modifier tokens. The leaf
 		// keyword is the only identity token.
 		if err := validateTypedLeaf(node, childSchema, path, siblings, vc); err != nil {
+			if vc.recordTypedLeaf(err) {
+				return nil
+			}
 			return err
 		}
 		// #6774: for a blockValue leaf written in the BLOCK spelling
@@ -866,6 +947,9 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 		leafPath := append(append([]string(nil), path...), keyword)
 		for _, c := range node.Children {
 			if err := validateModifierChild(c, childSchema, leafPath, vc); err != nil {
+				if vc.recordTypedLeaf(err) {
+					continue
+				}
 				return err
 			}
 		}
@@ -1152,6 +1236,9 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 		baseArgIdx := consumed - 1
 		for _, c := range node.Children {
 			if err := walkInstanceChildren(c, childSchema, missingArgs, baseArgIdx, newPath, vc, childClosed); err != nil {
+				if vc.recordTypedLeaf(err) {
+					continue
+				}
 				return err
 			}
 		}
@@ -1261,6 +1348,9 @@ func walkInstanceChildren(node *Node, containerSchema *schemaNode, remaining, ba
 		// into it by the caller in walkSchemaNode (#4313).
 		for _, c := range node.Children {
 			if err := walkInstanceChildren(c, containerSchema, stillMissing, baseArgIdx+consume, newPath, vc, closed); err != nil {
+				if vc.recordTypedLeaf(err) {
+					continue
+				}
 				return err
 			}
 		}
@@ -1777,6 +1867,7 @@ func validateMultiValueLeaf(node *Node, leafSchema *schemaNode, parentPath []str
 	path := append(append([]string(nil), parentPath...), leafName)
 
 	validatedAny := false
+	attemptedAny := false
 	lastWasSeparator := false
 	for _, tok := range node.Keys[1:] {
 		// #4556 L-01: the fixed mid-token `to` is only a RANGE separator
@@ -1787,19 +1878,31 @@ func validateMultiValueLeaf(node *Node, leafSchema *schemaNode, parentPath []str
 		// rejected) as such, not silently skipped.
 		if leafSchema.rangeSeparator && tok == "to" {
 			if !validatedAny || lastWasSeparator {
-				return typedLeafErrorf(path, "missing value")
+				err := typedLeafErrorf(path, "missing value")
+				if vc.recordTypedLeaf(err) {
+					continue
+				}
+				return err
 			}
 			lastWasSeparator = true
 			continue
 		}
+		attemptedAny = true
 		if err := leafSchema.checkToken(vc, tok); err != nil {
-			return typedLeafInvalidErrorf(path, tok, err)
+			verr := typedLeafInvalidErrorf(path, tok, err)
+			if vc.recordTypedLeaf(verr) {
+				continue
+			}
+			return verr
 		}
 		validatedAny = true
 		lastWasSeparator = false
 	}
 	if lastWasSeparator {
-		return typedLeafErrorf(path, "missing value")
+		err := typedLeafErrorf(path, "missing value")
+		if !vc.recordTypedLeaf(err) {
+			return err
+		}
 	}
 
 	// Block-list children default to one compiler-consumed value per child.
@@ -1813,15 +1916,24 @@ func validateMultiValueLeaf(node *Node, leafSchema *schemaNode, parentPath []str
 			keys = c.Keys
 		}
 		for _, tok := range keys {
+			attemptedAny = true
 			if err := leafSchema.checkToken(vc, tok); err != nil {
-				return typedLeafInvalidErrorf(path, tok, err)
+				verr := typedLeafInvalidErrorf(path, tok, err)
+				if vc.recordTypedLeaf(verr) {
+					continue
+				}
+				return verr
 			}
 			validatedAny = true
 		}
 	}
 
-	if !validatedAny {
-		return typedLeafErrorf(path, "missing value")
+	if !validatedAny && !attemptedAny {
+		err := typedLeafErrorf(path, "missing value")
+		if vc.recordTypedLeaf(err) {
+			return nil
+		}
+		return err
 	}
 	return nil
 }
