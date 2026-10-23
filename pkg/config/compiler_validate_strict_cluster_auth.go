@@ -75,22 +75,40 @@ func validateClusterAuthKeyStrict(cfg *Config) error {
 	// it — the right direction on the strict path. (The difference stays
 	// observable on the tolerant path; see pkg/cluster/README.md "Key
 	// strength".) #16025: this is also an ENTROPY floor on the strict path —
-	// a non-empty key shorter than MinAdvisedControlLinkKeyLen is rejected
-	// here, because the heartbeat/fabric/session-sync HMAC over known frame
-	// bodies is an offline dictionary oracle for a short PSK. The tolerant
-	// path downgrades this rejection to a warning (lenientClusterAuthKey),
-	// so a persisted weak key still boots with a warning and never bricks.
+	// a non-empty primary key shorter than MinAdvisedControlLinkKeyLen is
+	// rejected here, because the heartbeat/fabric/session-sync HMAC over
+	// known frame bodies is an offline dictionary oracle for a short PSK.
+	// The tolerant path downgrades this rejection to a warning
+	// (lenientClusterAuthKey), so a persisted weak key still boots with a
+	// warning and never bricks.
+	//
+	// ROTATION EXCEPTION (#16025 fold): an existing short primary may remain
+	// temporarily on the strict path while a distinct additional key of at
+	// least the floor is staged. That is step 1/2 of the documented
+	// no-outage #6630 rotation: the node still signs with the existing
+	// primary, accepts the staged replacement, and can then swap the primary
+	// in steps 3/4 without either peer rejecting its frames. Without this
+	// exception, the operator would have to replace the signing key before
+	// the replacement was accepted anywhere, recreating the outage the
+	// overlap exists to avoid. The exception is migration-only: a short or
+	// identical additional key does not satisfy it, and the short primary is
+	// still rejected once no qualifying replacement is staged.
 	if key := strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal()); key != "" {
-		if len(key) < MinAdvisedControlLinkKeyLen {
-			return fmt.Errorf("chassis cluster: `authentication-key` is %d "+
-				"characters; at least %d are required on commit — a short PSK "+
-				"can be dictionary-guessed offline from a captured heartbeat "+
-				"or fabric frame and then used to forge the control channel; "+
-				"set `chassis cluster authentication-key <key>` to a key "+
-				"generated with `openssl rand -base64 32` on both nodes",
-				len(key), MinAdvisedControlLinkKeyLen)
+		if len(key) >= MinAdvisedControlLinkKeyLen {
+			return nil
 		}
-		return nil
+		alt := strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal())
+		if len(alt) >= MinAdvisedControlLinkKeyLen && alt != key {
+			return nil
+		}
+		return fmt.Errorf("chassis cluster: `authentication-key` is %d "+
+			"characters; at least %d are required on commit — a short PSK "+
+			"can be dictionary-guessed offline from a captured heartbeat "+
+			"or fabric frame and then used to forge the control channel; "+
+			"generate a replacement with `openssl rand -base64 32`, stage it as "+
+			"`chassis cluster additional-authentication-key <key>` on both nodes, "+
+			"then rotate it into `authentication-key` using the #6630 overlap",
+			len(key), MinAdvisedControlLinkKeyLen)
 	}
 	if strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal()) != "" {
 		// #6630: the additional key is ACCEPTED, never SIGNED with, so a
@@ -201,13 +219,17 @@ const MinAdvisedControlLinkKeyLen = 16
 // while remaining trivially forgeable by anyone who has read the repo.
 var clusterAuthKeyPlaceholderMarkers = []string{"change-me", "example-only"}
 
-// ClusterAuthKeyStrengthWarnings reports control-link PSK weaknesses that are
-// real but do not justify refusing the config: a key that is short, or one
-// copied verbatim from a shipped reference config. These are WARNINGS on both
-// the strict and tolerant paths — unlike absence, which is binary and is
-// rejected, key strength is a continuum, and hard-rejecting a short key would
-// brick a commit (and, via bootstrapFromFile, a provision) for an operator who
-// already configured authentication.
+// ClusterAuthKeyStrengthWarnings reports control-link PSK weaknesses: a
+// key that is short, or one copied verbatim from a shipped reference
+// config. Placeholder weakness remains warning-only on both paths. Short
+// PRIMARY keys are rejected on strict commit by
+// validateClusterAuthKeyStrict unless a distinct replacement of at least
+// MinAdvisedControlLinkKeyLen is staged as additional-authentication-key
+// for the #6630 migration; on the tolerant path, and during that staged
+// rotation, short keys warn rather than refusing the config. A short
+// additional key likewise warns on both paths (it is accept-only and the
+// staged value must be replaced before it becomes the signing primary,
+// at which point the strict floor applies).
 //
 // The warning never renders the key. It reports the LENGTH only, and for a
 // placeholder it says that one matched WITHOUT naming which.

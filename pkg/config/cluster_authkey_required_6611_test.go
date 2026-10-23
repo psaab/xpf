@@ -134,6 +134,64 @@ func TestShortClusterAuthKeyRejectedOnStrict16025(t *testing.T) {
 	}
 }
 
+// TestShortPrimaryWithStagedStrongAdditionalKeyCommits16025 pins the
+// no-outage rotation exception: an existing short primary may remain on
+// strict commit while a distinct floor-length replacement is staged as
+// additional-authentication-key. Short/identical staging does not qualify.
+func TestShortPrimaryWithStagedStrongAdditionalKeyCommits16025(t *testing.T) {
+	staged := buildTree(t, []string{
+		"set chassis cluster cluster-id 1",
+		"set chassis cluster authentication-key legacy-short",
+		"set chassis cluster additional-authentication-key 1234567890123456",
+	})
+	cfg, err := CompileConfig(staged)
+	if err != nil {
+		t.Fatalf("strict commit rejected short primary with strong staged replacement: %v", err)
+	}
+	if cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal() != "legacy-short" ||
+		cfg.Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal() != "1234567890123456" {
+		t.Fatalf("staged rotation keys not preserved: primary/alt lengths %d/%d",
+			len(cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal()),
+			len(cfg.Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal()))
+	}
+	// The migration is temporary and remains visible as a strength warning.
+	found := false
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "authentication-key is 12 characters") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("staged short primary produced no strength warning: %v", cfg.Warnings)
+	}
+
+	for name, alt := range map[string]string{
+		"short additional":     "short-alt",
+		"identical additional": "legacy-short",
+	} {
+		t.Run(name, func(t *testing.T) {
+			tree := buildTree(t, []string{
+				"set chassis cluster cluster-id 1",
+				"set chassis cluster authentication-key legacy-short",
+				"set chassis cluster additional-authentication-key " + alt,
+			})
+			if _, err := CompileConfig(tree); err == nil {
+				t.Fatalf("strict commit accepted short primary with %s", name)
+			}
+		})
+	}
+	// Final rotation state: strong primary + old short additional warns but
+	// commits (accept-only), and deleting the additional slot remains clean.
+	finalizing := buildTree(t, []string{
+		"set chassis cluster cluster-id 1",
+		"set chassis cluster authentication-key 1234567890123456",
+		"set chassis cluster additional-authentication-key legacy-short",
+	})
+	if _, err := CompileConfig(finalizing); err != nil {
+		t.Fatalf("strict commit rejected strong primary with old short additional: %v", err)
+	}
+}
+
 // TestPlaceholderClusterAuthKeyWarns_6611 covers the copied-reference-config
 // case: the shipped configs carry PUBLISHED lab values, so a config using one
 // satisfies the gate while remaining forgeable by anyone who has read the repo.
