@@ -53,6 +53,8 @@ import (
 //	community (under snmp)     SNMP v1/v2c community string (the identity token)
 //	secret (under radius-server | tacplus-server | accounting)
 //	                          RADIUS/TACACS+ shared secret (#15019)
+//	user-password              AD bind credential under active-directory-access
+//	                          (#15996; unmodelled stanza, AST-side only)
 
 // SecretDataPlaceholder is the mask emitted in place of a secret leaf value on
 // the raw-AST render/display paths. It mirrors the Junos SECRET-DATA idiom and
@@ -867,6 +869,30 @@ func secretIndices(fp []string) []int {
 			for j := i + 1; j < len(fp); j++ {
 				out = append(out, j)
 			}
+		case "user-password":
+			// AD bind credential (#15996) — STRUCTURALLY GATED, not
+			// distinctive: `user-password` is also a legal login USER NAME
+			// (`system login user user-password class …`), where every token
+			// after it is the account's class/full-name, not a credential.
+			// An ancestor scan is not enough either: a config GROUP named
+			// `active-directory-access`/`user-identification` (apply-groups
+			// bodies flatten to `groups <name> system login user
+			// user-password …`) would put those tokens earlier in the path
+			// and mask the login identity. The leaf is secret only in the
+			// exact structural position the issue names — the token
+			// sequence (services|security) [user-identification]
+			// active-directory-access immediately before it, i.e. the
+			// stanza is its immediate parent chain at the tree root.
+			// The stanza is unmodelled (no schema leaf by that name), so
+			// the schema-pinned secretLeafKeywords set cannot name it and
+			// the fix must live AST-side only — control-char/schema
+			// diagnostics resolve through secretIndices and pick it up
+			// from here.
+			if isADUserPasswordLeaf15996(fp, i) {
+				for j := i + 1; j < len(fp); j++ {
+					out = append(out, j)
+				}
+			}
 		case "password":
 			// Generic keyword — secret under REST api-auth, a DDNS
 			// provider, an archive-site transfer credential (#7511), or an
@@ -939,6 +965,58 @@ func secretIndices(fp []string) []int {
 		}
 	}
 	return out
+}
+
+// isADUserPasswordLeaf15996 reports whether fp[i] (a `user-password` token)
+// is the value leaf of the AD identity stanza in one of the spellings the
+// issue names. Structural position — never an ancestor scan — so any other
+// subtree merely NAMED active-directory-access / user-identification cannot
+// arm it, and a login user named user-password (system login user …) never
+// matches.
+//
+// Accepted flattened shapes (prefix = "" | "groups <name>", root =
+// services|security, ADA = active-directory-access, UP = user-password at i):
+//
+//	prefix root ADA [user-name <name>] UP    (root spellings, pair optional)
+//	prefix root user-identification ADA [user-name <name>] UP
+//
+// The groups spelling is the same stanza DEFINED inside a config group
+// (`groups g1 services user-identification …`, applied via apply-groups);
+// the raw groups render is itself a PermView surface, so it must mask too.
+// The stanza may carry sibling leaves before user-password (domain-name,
+// user-name <name>, … — Junos AD access profiles do), but the identity
+// stanza must be the leaf's parent chain rooted at services/security
+// (optionally under one groups <name> prefix): nothing may intervene
+// between root and the stanza, nor between ADA and the pair.
+func isADUserPasswordLeaf15996(fp []string, i int) bool {
+	if i < 2 || i >= len(fp) || fp[i] != "user-password" {
+		return false
+	}
+	// Embedded change-configuration commands are judged as lexed `set …`
+	// token slices; skip the verb so the structural chain aligns.
+	off := 0
+	if fp[0] == "set" {
+		off = 1
+	}
+	// Optional config-group definition prefix: groups <name>.
+	if off+1 < len(fp) && fp[off] == "groups" {
+		off += 2
+	}
+	p := i - 1 // index of the token immediately before user-password
+	// Optional bind-user pair: user-name <name> directly before it.
+	if p-off >= 2 && fp[p-1] == "user-name" {
+		p -= 2
+	}
+	if p-off < 1 || fp[p] != "active-directory-access" {
+		return false
+	}
+	switch p - off {
+	case 1: // [prefix] root ADA …
+		return fp[off] == "services" || fp[off] == "security"
+	case 2: // [prefix] root user-identification ADA …
+		return (fp[off] == "services" || fp[off] == "security") && fp[off+1] == "user-identification"
+	}
+	return false
 }
 
 // keyHasOSPFMD5Ancestor reports whether the flattened path fp contains a

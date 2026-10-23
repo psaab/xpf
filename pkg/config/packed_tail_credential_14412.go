@@ -20,7 +20,7 @@ func isPackedTailCredentialToken14412(tok string) bool {
 		"authentication-password", "privacy-password",
 		"encrypted-password", "simple-password",
 		"pre-shared-key", "preshared-key", "private-key",
-		"api-key", "api-token", "aws-secret-key", "tsig-secret":
+		"api-key", "api-token", "aws-secret-key", "tsig-secret", "user-password":
 		return true
 	}
 	return false
