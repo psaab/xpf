@@ -53,6 +53,8 @@ import (
 //	community (under snmp)     SNMP v1/v2c community string (the identity token)
 //	secret (under radius-server | tacplus-server | accounting)
 //	                          RADIUS/TACACS+ shared secret (#15019)
+//	user-password              AD bind credential under active-directory-access
+//	                          (#15996; unmodelled stanza, AST-side only)
 
 // SecretDataPlaceholder is the mask emitted in place of a secret leaf value on
 // the raw-AST render/display paths. It mirrors the Junos SECRET-DATA idiom and
@@ -857,13 +859,18 @@ func secretIndices(fp []string) []int {
 			"encrypted-password", "simple-password", "api-key", "tsig-secret",
 			"plain-text-password", "plain-text-password-value",
 			"api-token", "aws-secret-key", "private-key", "preshared-key",
-			"client-secret", "shared-secret", "radius-shared-secret":
+			"client-secret", "shared-secret", "radius-shared-secret", "user-password":
 			// Distinctive secret keywords: every token after the keyword is
 			// secret value (covers multi-token / bracketed list values too).
 			// client-secret/shared-secret are the JIMS (Juniper Identity
 			// Management Service) credentials under user-identification
 			// (#15655 V15-04); they are credential-shaped names with no
-			// non-secret Junos use.
+			// non-secret Junos use. user-password is the AD bind credential
+			// under active-directory-access (#15996): the stanza is unmodelled
+			// (no schema leaf by that name), so the schema-pinned
+			// secretLeafKeywords set cannot name it and the fix must live
+			// AST-side only — control-char/schema diagnostics resolve through
+			// secretIndices and pick it up from here.
 			for j := i + 1; j < len(fp); j++ {
 				out = append(out, j)
 			}
