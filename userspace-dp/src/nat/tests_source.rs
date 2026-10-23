@@ -355,9 +355,10 @@ fn snat_all_malformed_destination_match_fails_closed_v4() {
 
 /// #2398 (v6 destination): a SNAT rule with a non-empty but ALL-malformed v6
 /// destination match set must match NOTHING. The fail-closed logic
-/// (`destination_constrained` + `nets_match_v6`) is identical to the v4
-/// destination path, so without this test a v6-destination-only regression
-/// (e.g. `nets_match_v6` reverted to empty=match-any) would slip through. This
+/// (`destination_constrained` + shared `crate::prefix::nets_match` with
+/// explicit `except == false`, #16128) is identical to the v4 destination
+/// path, so without this test a v6-destination-only regression
+/// (e.g. the shared empty arm reverted to empty=match-any) would slip through. This
 /// test FAILS (SNAT fires) if the v6 destination fail-closed path reverts.
 #[test]
 fn snat_all_malformed_destination_match_fails_closed_v6() {
@@ -386,6 +387,62 @@ fn snat_all_malformed_destination_match_fails_closed_v6() {
         decision, None,
         "all-malformed SNAT v6 destination match must fail closed (#2398)"
     );
+}
+
+/// #16128: the NAT arm of the shared `crate::prefix::nets_match` — explicit
+/// `except == false` — must keep ALL-malformed (constrained-but-empty) sets
+/// fail-closed on BOTH axes and families after the dedup. FAIL-ON-REVERT:
+/// pass the filter's empty-except arm (or `except = constrained`) at the NAT
+/// call site and every cell below translates (fail-open). The four #2398
+/// cells above pin source/destination separately; this cell pins a rule
+/// malformed on BOTH axes at once, v4 and v6.
+#[test]
+fn nat_shared_nets_match_explicit_false_16128() {
+    for (name, src_addrs, dst_addrs, src, dst, egress_v4, egress_v6) in [
+        (
+            "both-malformed-v4",
+            vec!["not-an-ip".to_string()],
+            vec!["also-bogus".to_string()],
+            "10.0.61.102".parse().expect("src"),
+            "172.16.80.200".parse().expect("dst"),
+            Some("172.16.80.8".parse().expect("egress")),
+            None,
+        ),
+        (
+            "both-malformed-v6",
+            vec!["garbage".to_string()],
+            vec!["::/999".to_string()],
+            "2001:559:8585:ef00::100".parse().expect("src"),
+            "2001:559:8585:80::200".parse().expect("dst"),
+            None,
+            Some("2001:559:8585:80::8".parse().expect("egress")),
+        ),
+    ] {
+        let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+            name: name.to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: src_addrs,
+            destination_addresses: dst_addrs,
+            interface_mode: true,
+            ..SourceNATRuleSnapshot::default()
+        }]);
+        let decision = match_source_nat(
+            &InterfaceNatAllocators::default(),
+            &rules,
+            &NatScopeCtx::default(),
+            "lan",
+            "wan",
+            src,
+            dst,
+            egress_v4,
+            egress_v6,
+        );
+        assert_eq!(
+            decision, None,
+            "{name}: NAT shared nets_match with explicit except=false must fail closed (#16128/#2398)"
+        );
+    }
 }
 
 /// #2398: a bare host v4 destination match IP (no `/prefix`) correctly scopes

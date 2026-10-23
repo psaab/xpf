@@ -195,13 +195,53 @@ fn protocol_bitmap_matches(term: &FilterTerm, protocol: u8, extra: TermMatchExtr
     (term.protocol_bitmap[(protocol / 64) as usize] & (1u64 << (protocol % 64))) != 0
 }
 
+/// #16128: family-generic term match behind the v4/v6 wrappers. One body so a
+/// fix lands on both families at once. The address direction flags stay
+/// per-direction and shared across families (FilterTerm keeps one
+/// `source_except`/`dest_except` pair); only the prefix vec + address differ
+/// per family, selected by `F`.
+pub(super) trait AddrFamily {
+    type Addr: Copy;
+    type Prefix: crate::prefix::AddrPrefix<Addr = Self::Addr>;
+    fn src_nets(term: &FilterTerm) -> &[Self::Prefix];
+    fn dst_nets(term: &FilterTerm) -> &[Self::Prefix];
+}
+
+pub(super) struct V4Family;
+pub(super) struct V6Family;
+
+impl AddrFamily for V4Family {
+    type Addr = Ipv4Addr;
+    type Prefix = PrefixV4;
+    #[inline(always)]
+    fn src_nets(term: &FilterTerm) -> &[PrefixV4] {
+        &term.source_v4
+    }
+    #[inline(always)]
+    fn dst_nets(term: &FilterTerm) -> &[PrefixV4] {
+        &term.dest_v4
+    }
+}
+
+impl AddrFamily for V6Family {
+    type Addr = Ipv6Addr;
+    type Prefix = PrefixV6;
+    #[inline(always)]
+    fn src_nets(term: &FilterTerm) -> &[PrefixV6] {
+        &term.source_v6
+    }
+    #[inline(always)]
+    fn dst_nets(term: &FilterTerm) -> &[PrefixV6] {
+        &term.dest_v6
+    }
+}
 
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-pub(super) fn term_matches_v4(
+pub(super) fn term_matches_family<F: AddrFamily>(
     term: &FilterTerm,
-    src_ip: Ipv4Addr,
-    dst_ip: Ipv4Addr,
+    src_ip: F::Addr,
+    dst_ip: F::Addr,
     protocol: u8,
     src_port: u16,
     dst_port: u16,
@@ -211,18 +251,18 @@ pub(super) fn term_matches_v4(
     if !protocol_bitmap_matches(term, protocol, extra) {
         return false;
     }
-    if !nets_match_v4(
+    if !crate::prefix::nets_match(
         term.source_addr_constrained,
         term.source_except,
-        &term.source_v4,
+        F::src_nets(term),
         src_ip,
     ) {
         return false;
     }
-    if !nets_match_v4(
+    if !crate::prefix::nets_match(
         term.dest_addr_constrained,
         term.dest_except,
-        &term.dest_v4,
+        F::dst_nets(term),
         dst_ip,
     ) {
         return false;
@@ -239,55 +279,33 @@ pub(super) fn term_matches_v4(
     true
 }
 
-/// #2400 (032-18) + #2506: match a v4 IP against a filter term's address set.
-///
-/// - `constrained == false` (the term wrote no source/dest scope — no literal
-///   address and no prefix-list ref): match any IP — unchanged unscoped
-///   behavior. `except` is irrelevant: there is no scope to invert.
-/// - `constrained == true` but `nets` empty for THIS family: the operator wrote
-///   a scope that yielded no prefixes for this family. Return `except` — the
-///   Junos empty-set semantic:
-///     * positive (`except == false`): "match addresses in {}" = match NOTHING
-///       (fail closed). This is the #2400 all-malformed / #2506 empty-positive
-///       (defined-empty or lenient-unresolved prefix-list) case — never the
-///       pre-#2400 collapse to match-any.
-///     * `except == true`: "match addresses NOT in {}" = match ALL. This also
-///       gives the correct CROSS-FAMILY answer: a v4-only `... except` list has
-///       an empty v6 vec, and a v6 source is trivially "not in" a v4 list, so a
-///       v6 packet matches the except term (the v4 list does not constrain v6).
-///   The `constrained` input is derived in the compiler from the EXPLICIT
-///   `source_constrained` / `destination_constrained` snapshot flag (OR'd with
-///   the address-length test), so an empty-resolving prefix-list still counts as
-///   constrained and does not fall through to the `!constrained` match-any arm.
-/// - otherwise: membership XOR `except`. `except == false` is the plain
-///   `addr ∈ prefixes`; `except == true` is "match every address NOT in the
-///   set".
-///
-/// Mirrors `nat::source::nets_match_v4` (#2398).
 #[inline(always)]
-fn nets_match_v4(constrained: bool, except: bool, nets: &[PrefixV4], ip: Ipv4Addr) -> bool {
-    if !constrained {
-        return true;
-    }
-    if nets.is_empty() {
-        return except;
-    }
-    nets.iter().any(|net| net.contains(ip)) ^ except
+#[allow(clippy::too_many_arguments)]
+pub(super) fn term_matches_v4(
+    term: &FilterTerm,
+    src_ip: Ipv4Addr,
+    dst_ip: Ipv4Addr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+    extra: TermMatchExtra<'_>,
+) -> bool {
+    term_matches_family::<V4Family>(term, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra)
 }
 
-/// #2400 (032-18) + #2506: v6 sibling of `nets_match_v4` (same empty-set and
-/// `except` inversion semantics).
-#[inline(always)]
-fn nets_match_v6(constrained: bool, except: bool, nets: &[PrefixV6], ip: Ipv6Addr) -> bool {
-    if !constrained {
-        return true;
-    }
-    if nets.is_empty() {
-        return except;
-    }
-    nets.iter().any(|net| net.contains(ip)) ^ except
-}
-
+/// #2400 (032-18) + #2506: the address membership body lives once in
+/// `crate::prefix::nets_match` (#16128) with `except` EXPLICIT. The filter
+/// keeps both empty-set arms documented there: positive empty = match
+/// NOTHING (fail closed), `except` empty = match ALL (incl. cross-family,
+/// where the other family's vec is empty). Source NAT consumes the same fn
+/// with `except == false` so its empty set stays fail-closed (#2398); the
+/// two answers are NOT merged into one paragraph — they are two explicit
+/// argument values at two call sites.
+///
+/// Port empty-set semantics DIFFER on purpose (#3205): `port_match` below
+/// fails closed in both directions; see its doc.
+///
 /// #2400 (032-19) + #2622: match a port against a filter term's port matcher
 /// with fail-closed semantics for an all-malformed list, and optional `except`
 /// inversion for the negated `source-port-except` / `destination-port-except`
@@ -309,7 +327,7 @@ fn nets_match_v6(constrained: bool, except: bool, nets: &[PrefixV6], ip: Ipv6Add
 ///   (validateFilterMatchValuesStrict) now rejects such a term, so this is
 ///   defense-in-depth on the tolerant load / peer-sync path. (The Junos
 ///   "empty-except = match all" semantic still applies to the ADDRESS path —
-///   `nets_match_v4`/`nets_match_v6` — where an empty prefix-list scope is
+///   `crate::prefix::nets_match` — where an empty prefix-list scope is
 ///   reachable and legitimate.)
 /// - otherwise: `matcher.matches(port) XOR except`. `except == false` is the
 ///   plain positive membership; `except == true` matches every port NOT in the
@@ -444,33 +462,5 @@ pub(super) fn term_matches_v6(
     dscp: u8,
     extra: TermMatchExtra<'_>,
 ) -> bool {
-    if !protocol_bitmap_matches(term, protocol, extra) {
-        return false;
-    }
-    if !nets_match_v6(
-        term.source_addr_constrained,
-        term.source_except,
-        &term.source_v6,
-        src_ip,
-    ) {
-        return false;
-    }
-    if !nets_match_v6(
-        term.dest_addr_constrained,
-        term.dest_except,
-        &term.dest_v6,
-        dst_ip,
-    ) {
-        return false;
-    }
-    if !port_terms_match(term, protocol, extra, src_port, dst_port) {
-        return false;
-    }
-    if term.dscp_match_enabled && (term.dscp_bitmap & (1u64 << dscp)) == 0 {
-        return false;
-    }
-    if !per_packet_l4_matches(term, protocol, extra) {
-        return false;
-    }
-    true
+    term_matches_family::<V6Family>(term, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra)
 }

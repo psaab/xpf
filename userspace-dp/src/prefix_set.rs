@@ -12,7 +12,7 @@
 //! - `Ranges(Vec)` — >16 prefixes; sorted, merged, non-overlapping
 //!   `[lo, hi]` inclusive ranges with binary search (#15091).
 //!
-//! The semantics are exactly the legacy `nets_match_v4/v6`:
+//! The semantics are exactly the legacy shared `crate::prefix::nets_match` (#16128):
 //! "match if any prefix in the set covers the IP". No
 //! longest-prefix tiebreak is performed; this is a boolean-only
 //! membership test.

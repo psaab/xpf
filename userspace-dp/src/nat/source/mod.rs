@@ -71,7 +71,7 @@ use std::sync::atomic::Ordering;
 // own module AND that module's descendants: everything that stayed here and is
 // called from a submodule (SourceNatRule::matches, matches_ignoring_scope,
 // address_has_draining_pool_occupancy, parse_match_prefix, port_in_ranges,
-// nets_match_v4/v6) needed no edit at all.
+// `crate::prefix::nets_match`) needed no edit at all.
 //
 // DECLINED seam, recorded because it is the one the issue named first: the
 // pending-allocator resolution pass (PreviousPool / PendingPoolAllocator /
@@ -1283,15 +1283,36 @@ impl SourceNatRule {
     /// Does the flow satisfy this rule's `match source-address` /
     /// `match destination-address` sets? A cross-family (v4 source, v6
     /// destination or vice versa) tuple can never match a rule.
+    ///
+    /// #2398 + #16128: address membership is the shared
+    /// `crate::prefix::nets_match` called with `except == false` on both
+    /// axes. Constrained-but-empty therefore matches NOTHING (fail closed,
+    /// never the pre-#2398 collapse to match-any), and NAT never inherits
+    /// the filter's empty-except match-all arm (#2400/#2506) because
+    /// `except` is an explicit `false` argument, not a shared default.
     fn address_matches(&self, src_ip: IpAddr, dst_ip: IpAddr) -> bool {
         match (src_ip, dst_ip) {
             (IpAddr::V4(src), IpAddr::V4(dst)) => {
-                nets_match_v4(self.source_constrained, &self.source_v4, src)
-                    && nets_match_v4(self.destination_constrained, &self.destination_v4, dst)
+                // #16128: shared `crate::prefix::nets_match` with `except`
+                // EXPLICITLY `false` — NAT has no except polarity, so its
+                // constrained-but-empty set stays fail-closed (#2398), never
+                // the filter's empty-except match-all (#2400/#2506).
+                crate::prefix::nets_match(self.source_constrained, false, &self.source_v4, src)
+                    && crate::prefix::nets_match(
+                        self.destination_constrained,
+                        false,
+                        &self.destination_v4,
+                        dst,
+                    )
             }
             (IpAddr::V6(src), IpAddr::V6(dst)) => {
-                nets_match_v6(self.source_constrained, &self.source_v6, src)
-                    && nets_match_v6(self.destination_constrained, &self.destination_v6, dst)
+                crate::prefix::nets_match(self.source_constrained, false, &self.source_v6, src)
+                    && crate::prefix::nets_match(
+                        self.destination_constrained,
+                        false,
+                        &self.destination_v6,
+                        dst,
+                    )
             }
             _ => false,
         }
@@ -1913,7 +1934,7 @@ fn parse_source_nat_rules_inner(
         };
         // #2398: record whether each match set was scoped at all (snapshot list
         // non-empty), independent of how many prefixes parse. These flags drive
-        // the fail-closed distinction in `nets_match_*`: a rule that WAS scoped
+        // the fail-closed distinction in `crate::prefix::nets_match`: a rule that WAS scoped
         // but whose configured prefixes ALL fail to parse must match NOTHING,
         // not collapse to match-any (the pre-#2398 fail-open broadening). An
         // unscoped (empty) set keeps "match any" (anti-over-restrict).
@@ -2132,7 +2153,7 @@ fn source_nat_runtime_compatible(new_rule: &SourceNatRule, old_rule: &SourceNatR
 /// `IpNet::from_str` rejects — falls back to a /32 (v4) or /128 (v6). A prefix
 /// that parses as neither is dropped (it narrows the match rather than widening
 /// it); the `*_constrained` flag, set from the snapshot list being non-empty,
-/// makes an all-malformed set fail closed in `nets_match_*`.
+/// makes an all-malformed set fail closed in `crate::prefix::nets_match` (with explicit `except == false`).
 fn parse_match_prefix(
     prefix: &str,
     v4: &mut Vec<PrefixV4>,
@@ -2178,32 +2199,4 @@ fn parse_match_prefix(
 /// #3429: is `port` within any inclusive (low, high) range in `ranges`?
 fn port_in_ranges(port: u16, ranges: &[(u16, u16)]) -> bool {
     ranges.iter().any(|&(lo, hi)| port >= lo && port <= hi)
-}
-
-/// #2398: match a v4 IP against a rule's match set.
-///
-/// - `constrained == false` (unscoped match set): match any IP (unchanged).
-/// - `constrained == true` but `nets` empty (every configured prefix failed to
-///   parse): match NOTHING — fail closed, never the pre-#2398 collapse to
-///   match-any fail-open broadening.
-/// - otherwise: the IP must fall in one of the parsed prefixes.
-fn nets_match_v4(constrained: bool, nets: &[PrefixV4], ip: Ipv4Addr) -> bool {
-    if !constrained {
-        return true;
-    }
-    if nets.is_empty() {
-        return false;
-    }
-    nets.iter().any(|net| net.contains(ip))
-}
-
-/// #2398: match a v6 IP against a rule's match set. See `nets_match_v4`.
-fn nets_match_v6(constrained: bool, nets: &[PrefixV6], ip: Ipv6Addr) -> bool {
-    if !constrained {
-        return true;
-    }
-    if nets.is_empty() {
-        return false;
-    }
-    nets.iter().any(|net| net.contains(ip))
 }

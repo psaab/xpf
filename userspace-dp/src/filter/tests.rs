@@ -9851,7 +9851,7 @@ fn empty_except_prefix_list_scope_matches_all() {
 // The Go fix flips the emitted flag from the second shape to the first; this
 // test locks the matcher contract the fix depends on.
 //
-// FAIL-ON-REVERT: revert the `nets_match_v4`/`nets_match_v6` empty guard from
+// FAIL-ON-REVERT: revert the `crate::prefix::nets_match` empty guard from
 // `return except` to a hardcoded `return false` (the pre-#2506 collapse) and the
 // FIXED-lowering assertion below flips Discard -> Accept and goes RED.
 #[test]
@@ -12847,4 +12847,379 @@ fn three_color_forwarding_class_meters_without_dropping_9882() {
     assert_eq!(status[0].green_packets, 1);
     assert_eq!(status[0].red_packets, 1, "the excess is still metered");
     assert_eq!(status[0].drop_packets, 0, "and nothing is dropped");
+}
+
+// === #16128: per-family differential for the one generic term-walk ===
+//
+// The v4/v6 evaluators are now ONE family-generic body
+// (`term_matches_family` / `evaluate_*_family`) behind thin wrappers, and
+// address membership is the shared `crate::prefix::nets_match` with `except`
+// EXPLICIT (filter passes its flag; source NAT passes `false`). These tests
+// run the SAME term shape through both families and assert identical
+// verdicts on the empty / except / port-exception cells. Four of the eight
+// collapsed generic walk bodies are exercised directly: the full counted
+// walk (Cells 1-5, via `evaluate_filter`), TX-selection counted, cached
+// TX-selection, and cached input-counter capture (the second test below,
+// empty cells only). NOT directly exercised here: routing-instance
+// evaluation, non-routing evaluation / terminal-deny replay, and cached
+// input-policer capture — those bodies are covered by their pre-existing
+// tests, not by these cells. The NAT
+// explicit-`false` arm and the cross-family empty-except cell are pinned in
+// `nat_shared_nets_match_explicit_false_16128` (nat/tests_source.rs) and
+// Cell 5 below respectively. FAIL-ON-REVERT: (a) make the shared empty guard
+// return a hardcoded `false` and the empty-except Discard cells flip to
+// Accept; (b) drop `except` (treat it as always false) and the non-empty
+// except + port-exception cells flip; (c) revert only ONE family's wrapper
+// to a hand-rolled body that ignores `except` and that family's cells flip
+// while the other family's stay green — the drift class this collapse kills.
+
+#[test]
+fn family_differential_empty_except_port_except_16128() {
+    // One helper builds the same two-term filter in either family:
+    //   t0: fall-through `then count c0; then log; then next term`
+    //   t1: the scoped discard under test
+    //   (implicit Accept if nothing matches — deliberate, filter/README.md)
+    fn build(family: &str, scoped: FirewallTermSnapshot) -> FilterState {
+        make_filter_state(
+            &[FirewallFilterSnapshot {
+                name: "diff".into(),
+                family: family.into(),
+                terms: vec![
+                    FirewallTermSnapshot {
+                        name: "count-log-fallthrough".into(),
+                        action: String::new(),
+                        next_term: true,
+                        count: "c0".into(),
+                        log: true,
+                        ..Default::default()
+                    },
+                    scoped,
+                ],
+            }],
+            &[],
+        )
+    }
+    fn verdict(
+        state: &FilterState,
+        key: &str,
+        src: IpAddr,
+        dst: IpAddr,
+        dst_port: u16,
+    ) -> (FilterAction, Option<(u32, u32, FilterAction)>, u64) {
+        let r = evaluate_filter(
+            state,
+            key,
+            src,
+            dst,
+            PROTO_TCP,
+            12345,
+            dst_port,
+            0,
+            TermMatchExtra::default(),
+        );
+        let lm = r
+            .log_match
+            .map(|m| (m.filter_id, m.term_id, m.action));
+        let filter = state.filters.get(key).expect("filter compiled");
+        crate::filter::flush_recorded_filter_counters();
+        crate::policy::flush_recorded_policy_hit_counters();
+        let bumped = filter.terms[0].counter.packets.load(Ordering::Relaxed);
+        (r.action, lm, bumped)
+    }
+
+    let v4_src_in = IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3));
+    let v4_src_out = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    let v4_dst = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+    let v6_src_in: IpAddr = "2001:db8::1".parse().unwrap();
+    let v6_src_out: IpAddr = "2001:dead::1".parse().unwrap();
+    let v6_dst: IpAddr = "2001:db8:ffff::1".parse().unwrap();
+
+    // Cell 1: empty + except -> match ALL in BOTH families.
+    for (family, key, src_in) in [
+        ("inet", "inet:diff", v4_src_in),
+        ("inet6", "inet6:diff", v6_src_in),
+    ] {
+        let dst = if key.starts_with("inet6") { v6_dst } else { v4_dst };
+        let state = build(
+            family,
+            FirewallTermSnapshot {
+                name: "empty-except-discard".into(),
+                source_addresses: vec![],
+                source_except: true,
+                source_constrained: true,
+                action: "discard".into(),
+                ..Default::default()
+            },
+        );
+        let (action, lm, bumped) = verdict(&state, key, src_in, dst, 443);
+        assert_eq!(action, FilterAction::Discard, "{family}: empty+except must match all");
+        assert_eq!(bumped, 1, "{family}: fall-through counter must bump once");
+        let lm = lm.expect("fall-through log term must produce log_match");
+        assert_eq!(lm.2, FilterAction::Discard, "{family}: log_match action follows verdict");
+    }
+
+    // Cell 2: empty + positive -> match NOTHING in BOTH families.
+    for (family, key, src_in, dst) in [
+        ("inet", "inet:diff", v4_src_in, v4_dst),
+        ("inet6", "inet6:diff", v6_src_in, v6_dst),
+    ] {
+        let state = build(
+            family,
+            FirewallTermSnapshot {
+                name: "empty-positive-discard".into(),
+                source_addresses: vec![],
+                source_constrained: true,
+                action: "discard".into(),
+                ..Default::default()
+            },
+        );
+        let (action, _, bumped) = verdict(&state, key, src_in, dst, 443);
+        assert_eq!(action, FilterAction::Accept, "{family}: empty+positive must match nothing (implicit Accept)");
+        assert_eq!(bumped, 1, "{family}: fall-through counter still bumps");
+    }
+
+    // Cell 3: non-empty except membership in BOTH families.
+    for (family, key, nets, src_in, src_out, dst) in [
+        ("inet", "inet:diff", vec!["10.0.0.0/8".to_string()], v4_src_in, v4_src_out, v4_dst),
+        ("inet6", "inet6:diff", vec!["2001:db8::/32".to_string()], v6_src_in, v6_src_out, v6_dst),
+    ] {
+        let state = build(
+            family,
+            FirewallTermSnapshot {
+                name: "except-discard".into(),
+                source_addresses: nets,
+                source_except: true,
+                source_constrained: true,
+                action: "discard".into(),
+                ..Default::default()
+            },
+        );
+        let (inside, _, _) = verdict(&state, key, src_in, dst, 443);
+        assert_eq!(inside, FilterAction::Accept, "{family}: in-set source is excepted");
+        let (outside, _, _) = verdict(&state, key, src_out, dst, 443);
+        assert_eq!(outside, FilterAction::Discard, "{family}: out-of-set source is discarded");
+    }
+
+    // Cell 4: port-exception in BOTH families (incl. the #3205 fail-closed
+    // unresolved cell through the snapshot compiler).
+    for (family, key, src, dst) in [
+        ("inet", "inet:diff", v4_src_out, v4_dst),
+        ("inet6", "inet6:diff", v6_src_out, v6_dst),
+    ] {
+        let state = build(
+            family,
+            FirewallTermSnapshot {
+                name: "port-except-discard".into(),
+                protocols: vec!["tcp".into()],
+                destination_ports_except: vec!["22".into()],
+                action: "discard".into(),
+                ..Default::default()
+            },
+        );
+        let (excepted, _, _) = verdict(&state, key, src, dst, 22);
+        assert_eq!(excepted, FilterAction::Accept, "{family}: dst port 22 is excepted");
+        let (other, _, _) = verdict(&state, key, src, dst, 443);
+        assert_eq!(other, FilterAction::Discard, "{family}: dst port 443 matches port-except discard");
+
+        // Unresolved port-except: constrained + zero ranges must match
+        // NOTHING in both families (#3205), never invert to match-all.
+        let state = build(
+            family,
+            FirewallTermSnapshot {
+                name: "port-except-unresolved".into(),
+                protocols: vec!["tcp".into()],
+                destination_ports_except: vec!["notaport".into()],
+                action: "discard".into(),
+                ..Default::default()
+            },
+        );
+        let (action, _, _) = verdict(&state, key, src, dst, 443);
+        assert_eq!(action, FilterAction::Accept, "{family}: unresolved port-except must fail closed (fall through to implicit Accept)");
+    }
+
+    // Cell 5: cross-family empty-except (helper-level property, NOT a
+    // supported configuration). A v4-only `except` scope evaluated
+    // for a v6 packet: the v6 vec is empty while `source_except` (shared
+    // across families) is true, so "not in {}" matches ALL — the v6 packet
+    // is discarded. The snapshot compiler rejects a wrong-family-ONLY scope
+    // (#14446), so fabricate the term directly (the #8630 precedent): clone
+    // a compiled term and override its address fields. This pins the
+    // `term_matches_family::<V6Family>` empty-vec answer only; it is not
+    // evidence that wrong-family-only terms are admissible configuration.
+    {
+        let state = build(
+            "inet",
+            FirewallTermSnapshot {
+                name: "cross-base".into(),
+                action: "accept".into(),
+                ..Default::default()
+            },
+        );
+        let base = state
+            .filters
+            .get("inet:diff")
+            .expect("filter compiled")
+            .terms[1]
+            .clone();
+        let cross = FilterTerm {
+            source_v4: vec![PrefixV4::from_net("10.0.0.0/8".parse().expect("v4 net"))],
+            source_v6: vec![],
+            source_addr_constrained: true,
+            source_except: true,
+            dest_addr_constrained: false,
+            dest_except: false,
+            action: FilterAction::Discard,
+            counter: Arc::new(FilterTermCounter::default()),
+            ..base
+        };
+        let mut filter: Filter = (**state.filters.get("inet:diff").unwrap()).clone();
+        filter.terms = vec![cross];
+        let mut st = FilterState::default();
+        st.filters.insert("inet:diff".into(), Arc::new(filter));
+        let r = evaluate_filter(
+            &st,
+            "inet:diff",
+            v6_src_in,
+            v6_dst,
+            PROTO_TCP,
+            12345,
+            443,
+            0,
+            TermMatchExtra::default(),
+        );
+        assert_eq!(
+            r.action,
+            FilterAction::Discard,
+            "cross-family: v6 packet vs v4-only except scope (empty v6 vec) must match-all and discard"
+        );
+        // Positive cross-family control: same shape without `except` matches
+        // NOTHING for v6 (empty vec, positive) — implicit Accept.
+        let mut cross_pos = st
+            .filters
+            .get("inet:diff")
+            .expect("filter compiled")
+            .terms[0]
+            .clone();
+        cross_pos.source_except = false;
+        let mut filter2: Filter = (**st.filters.get("inet:diff").unwrap()).clone();
+        filter2.terms = vec![cross_pos];
+        let mut st2 = FilterState::default();
+        st2.filters.insert("inet:diff".into(), Arc::new(filter2));
+        let r2 = evaluate_filter(
+            &st2,
+            "inet:diff",
+            v6_src_in,
+            v6_dst,
+            PROTO_TCP,
+            12345,
+            443,
+            0,
+            TermMatchExtra::default(),
+        );
+        assert_eq!(
+            r2.action,
+            FilterAction::Accept,
+            "cross-family: v6 packet vs v4-only positive scope (empty v6 vec) must match nothing"
+        );
+    }
+}
+
+// === #16128: the OTHER collapsed walkers agree with `evaluate_filter` ===
+//
+// The differential above drives `evaluate_filter_ref_counted_family`. The
+// cached TX-selection walk (`cache_sensitive.rs`), the cached input-counter
+// capture, and the TX-selection counted walk (`tx_selection.rs`) are separate
+// generic bodies; a regression in any one of them (e.g. a wrapper rewired to
+// ignore `except`) must red HERE, not pass because the counted path is green.
+#[test]
+fn family_differential_other_walkers_16128() {
+    // Same empty-except discard term in both families, driven through an
+    // interface input filter so the cached counter capture is reachable.
+    for (family, input_field_v4, src, dst) in [
+        ("inet", true, IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3)), IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))),
+        ("inet6", false, "2001:db8::1".parse::<IpAddr>().unwrap(), "2001:db8:ffff::1".parse::<IpAddr>().unwrap()),
+    ] {
+        let is_v6 = !input_field_v4;
+        let scoped = FirewallTermSnapshot {
+            name: "empty-except-discard".into(),
+            source_addresses: vec![],
+            source_except: true,
+            source_constrained: true,
+            action: "discard".into(),
+            count: "scoped-hit".into(),
+            ..Default::default()
+        };
+        let iface = if input_field_v4 {
+            crate::InterfaceSnapshot { ifindex: 7, filter_input_v4: "diff".into(), ..Default::default() }
+        } else {
+            crate::InterfaceSnapshot { ifindex: 7, filter_input_v6: "diff".into(), ..Default::default() }
+        };
+        let state = make_filter_state_with_interfaces(
+            &[FirewallFilterSnapshot {
+                name: "diff".into(),
+                family: family.into(),
+                terms: vec![scoped],
+            }],
+            &[iface],
+        );
+        let filter = if is_v6 {
+            state.iface_filter_v6_fast.get(&7).expect("v6 input filter")
+        } else {
+            state.iface_filter_v4_fast.get(&7).expect("v4 input filter")
+        };
+        // (a) TX-selection counted walk: empty+except matches -> Discard.
+        let tx = evaluate_filter_ref_tx_selection_counted(
+            filter, src, dst, PROTO_TCP, 12345, 443, 0, TermMatchExtra::default(), 100,
+        );
+        assert_eq!(tx.action, FilterAction::Discard, "{family}: tx-selection walk must match empty+except");
+        // (b) Cached TX-selection walk: same term, action + counter handle.
+        let cached = evaluate_filter_ref_tx_selection_cached(
+            filter, src, dst, PROTO_TCP, 12345, 443, 0,
+        );
+        assert_eq!(cached.action, FilterAction::Discard, "{family}: cached tx-selection walk must match empty+except");
+        assert_eq!(cached.counters.len(), 1, "{family}: cached walk must capture the matched term counter");
+        // (c) Cached input-counter capture: matched term's counter collected.
+        let counters = evaluate_interface_input_filter_counters_cached(
+            &state, 7, is_v6, src, dst, PROTO_TCP, 12345, 443, 0,
+        );
+        assert_eq!(counters.len(), 1, "{family}: cached input-counter capture must collect the empty+except term");
+        // Control: positive empty scope matches NOTHING on all three walks.
+        let scoped_pos = FirewallTermSnapshot {
+            name: "empty-positive-discard".into(),
+            source_addresses: vec![],
+            source_constrained: true,
+            action: "discard".into(),
+            count: "scoped-hit".into(),
+            ..Default::default()
+        };
+        let state = make_filter_state_with_interfaces(
+            &[FirewallFilterSnapshot {
+                name: "diff".into(),
+                family: family.into(),
+                terms: vec![scoped_pos],
+            }],
+            &[if input_field_v4 {
+                crate::InterfaceSnapshot { ifindex: 7, filter_input_v4: "diff".into(), ..Default::default() }
+            } else {
+                crate::InterfaceSnapshot { ifindex: 7, filter_input_v6: "diff".into(), ..Default::default() }
+            }],
+        );
+        let filter = if is_v6 {
+            state.iface_filter_v6_fast.get(&7).expect("v6 input filter")
+        } else {
+            state.iface_filter_v4_fast.get(&7).expect("v4 input filter")
+        };
+        let tx = evaluate_filter_ref_tx_selection_counted(
+            filter, src, dst, PROTO_TCP, 12345, 443, 0, TermMatchExtra::default(), 100,
+        );
+        assert_eq!(tx.action, FilterAction::Accept, "{family}: tx-selection walk must not match empty+positive");
+        let cached = evaluate_filter_ref_tx_selection_cached(
+            filter, src, dst, PROTO_TCP, 12345, 443, 0,
+        );
+        assert_eq!(cached.action, FilterAction::Accept, "{family}: cached walk must not match empty+positive");
+        let counters = evaluate_interface_input_filter_counters_cached(
+            &state, 7, is_v6, src, dst, PROTO_TCP, 12345, 443, 0,
+        );
+        assert_eq!(counters.len(), 0, "{family}: cached counter capture must be empty for empty+positive");
+    }
 }

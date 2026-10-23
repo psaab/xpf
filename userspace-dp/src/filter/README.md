@@ -45,7 +45,22 @@ Mirrors the BPF firewall-filter pipeline in userspace.
     the helper-boundary backstop against version/snapshot drift.
 - `engine/` — per-term evaluation, first-match-wins (the #1546 split of
   the monolithic `engine.rs` into `mod.rs` / `eval.rs` / `matching.rs` /
-  `policer.rs` / `tx_selection.rs` / `cache_sensitive*.rs`). It carries the
+  `policer.rs` / `tx_selection.rs` / `cache_sensitive*.rs`). Since #16128
+  each evaluator flavour is ONE family-generic term-walk
+  (`term_matches_family` / `evaluate_*_family` behind thin v4/v6 wrappers,
+  monomorphised; `term_matches_family` and `crate::prefix::nets_match` are
+  `#[inline(always)]`, most generic walk bodies and wrappers are
+  `#[inline]` — except the cached TX-selection walk
+  (`evaluate_filter_ref_tx_selection_cached_family` and its v4/v6
+  wrappers), which carries no inline attribute) and address membership is
+  the shared `crate::prefix::nets_match` with `except` EXPLICIT: filter
+  passes its per-direction flag, source NAT passes `false` (its
+  constrained-but-empty set stays fail-closed, #2398; the filter's
+  empty-except match-all, #2400/#2506, is never inherited). The
+  `FilterTerm` data shape is unchanged — the constrained/except flags stay
+  per-direction and shared across families, because the cross-family
+  empty-except answer is computed from that one flag against the other
+  family's empty vec. It carries the
   matched `then policer ...` name in the filter result. Routing-instance
   evaluation can also return log/action/filter/term metadata so AF_XDP
   can emit PBR RT_FLOW filter-log events without re-evaluating the term
@@ -734,7 +749,7 @@ discard-all (fail-OPEN filter broadening, codex 032-18 / 032-19).
 `source_port_constrained` / `dest_port_constrained` — set at compile time when
 the snapshot list held at least one REAL entry (`addr_is_real` ignores the empty
 string and the literal `any`; `port_is_real` ignores the empty string). The
-matcher (`engine/matching.rs` `nets_match_v4` / `nets_match_v6` / `port_match`)
+matcher (`crate::prefix::nets_match` via `engine/matching.rs`, plus `port_match`)
 then distinguishes:
 
 - unconstrained (no real entry) → match any (unchanged unscoped behavior);
@@ -770,8 +785,8 @@ per-direction wire flags on `FirewallTermSnapshot` — `source_except` /
 `destination_except` (Go `pkg/dataplane/userspace/protocol.go`, Rust
 `protocol/security.rs` with `serde(default)` for #1961 wire parity). They map to
 `FilterTerm.source_except` / `dest_except`, and the matcher
-(`engine/matching.rs` `nets_match_v4` / `nets_match_v6`) evaluates
-`nets.iter().any(contains) ^ except`. The except flags are compared in
+(`crate::prefix::nets_match`, #16128) evaluates
+`nets.iter().any(contains) ^ except` with `except` explicit. The except flags are compared in
 `filter_term_semantics_match` (`engine/cache_sensitive/rotation.rs`) — they flip the
 address decision without changing the parsed vecs, so a flow-cache rebuild must
 catch a toggle.
@@ -1225,7 +1240,7 @@ per-direction `source_port_except` / `dest_port_except` inversion flag on
 present — there is no single matcher that expresses "ports in A but not B", same
 fold as the address mixed case). The matcher `port_match`
 (`engine/matching.rs`) evaluates `matcher.matches(port) ^ except`, mirroring
-`nets_match_v4` / `nets_match_v6`:
+`crate::prefix::nets_match` (#16128):
 
 - positive (`except == false`), `PortMatcher::Any` while constrained → match
   NOTHING (the #2400 all-malformed fail-closed case);
