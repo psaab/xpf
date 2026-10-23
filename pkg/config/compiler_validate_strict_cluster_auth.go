@@ -74,12 +74,22 @@ func validateClusterAuthKeyStrict(cfg *Config) error {
 	// this gate deliberately STRICTER than the runtime rather than identical to
 	// it — the right direction on the strict path. (The difference stays
 	// observable on the tolerant path; see pkg/cluster/README.md "Key
-	// strength".) This is an EMPTINESS floor, not an entropy floor — a
-	// one-character key passes here. Key strength is a continuum and is
-	// surfaced by ClusterAuthKeyStrengthWarnings rather than rejected, so a
-	// weak-but-real key never becomes a new brick class for an operator who
-	// already did the right thing.
-	if strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal()) != "" {
+	// strength".) #16025: this is also an ENTROPY floor on the strict path —
+	// a non-empty key shorter than MinAdvisedControlLinkKeyLen is rejected
+	// here, because the heartbeat/fabric/session-sync HMAC over known frame
+	// bodies is an offline dictionary oracle for a short PSK. The tolerant
+	// path downgrades this rejection to a warning (lenientClusterAuthKey),
+	// so a persisted weak key still boots with a warning and never bricks.
+	if key := strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal()); key != "" {
+		if len(key) < MinAdvisedControlLinkKeyLen {
+			return fmt.Errorf("chassis cluster: `authentication-key` is %d "+
+				"characters; at least %d are required on commit — a short PSK "+
+				"can be dictionary-guessed offline from a captured heartbeat "+
+				"or fabric frame and then used to forge the control channel; "+
+				"set `chassis cluster authentication-key <key>` to a key "+
+				"generated with `openssl rand -base64 32` on both nodes",
+				len(key), MinAdvisedControlLinkKeyLen)
+		}
 		return nil
 	}
 	if strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal()) != "" {

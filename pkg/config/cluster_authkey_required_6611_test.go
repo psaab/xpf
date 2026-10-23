@@ -89,41 +89,48 @@ func TestKeyedClusterCommitsClean_6611(t *testing.T) {
 	}
 }
 
-// TestShortClusterAuthKeyWarnsNotRejected_6611 pins the deliberate asymmetry
-// between absence and weakness. Absence is binary and is rejected; strength is
-// a continuum, so a short key WARNS on both paths and still commits. Rejecting
-// it would create a new brick class — including via bootstrapFromFile, which is
-// unattended — for an operator who already configured authentication.
-func TestShortClusterAuthKeyWarnsNotRejected_6611(t *testing.T) {
+// TestShortClusterAuthKeyRejectedOnStrict16025 pins #16025: a non-empty
+// key shorter than MinAdvisedControlLinkKeyLen (16) is REJECTED on the
+// strict commit path (previously it warned and committed — an offline
+// HMAC dictionary oracle), while the tolerant path still boots it with
+// a warning (no-brick for persisted weak keys).
+func TestShortClusterAuthKeyRejectedOnStrict16025(t *testing.T) {
+	for _, key := range []string{"a", "password1", "123456789012345"} {
+		tree := buildTree(t, []string{
+			"set chassis cluster cluster-id 1",
+			"set chassis cluster authentication-key " + key,
+		})
+		if _, err := CompileConfig(tree); err == nil {
+			t.Fatalf("strict commit accepted %d-char cluster PSK (#16025 requires >=16)", len(key))
+		} else if strings.Contains(err.Error(), key) && len(key) > 1 {
+			t.Fatalf("strict rejection leaked the key: %v", err)
+		}
+	}
+	// Boundary control: exactly 16 chars commits clean.
 	tree := buildTree(t, []string{
+		"set chassis cluster cluster-id 1",
+		"set chassis cluster authentication-key 1234567890123456",
+	})
+	if _, err := CompileConfig(tree); err != nil {
+		t.Fatalf("strict commit rejected a 16-char cluster PSK: %v", err)
+	}
+	// Tolerant control: persisted weak key boots with a warning.
+	weak := buildTree(t, []string{
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster authentication-key abc",
 	})
-	cfg, err := CompileConfig(tree)
+	cfg, err := CompileConfigLenient(weak)
 	if err != nil {
-		t.Fatalf("commit rejected a short but real key (must warn, not reject): %v", err)
+		t.Fatalf("tolerant load rejected a persisted weak key (no-brick violated): %v", err)
 	}
-	var found string
+	found := false
 	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "authentication-key is 3 characters") {
-			found = w
-			break
+		if strings.Contains(w, "authentication-key") {
+			found = true
 		}
 	}
-	if found == "" {
-		t.Fatalf("no key-strength warning for a 3-character key; warnings=%v", cfg.Warnings)
-	}
-	if !strings.Contains(found, "16 or more is advised") {
-		t.Fatalf("strength warning does not state the advised floor: %q", found)
-	}
-	if !strings.Contains(found, "duplicate-identity beacon") ||
-		!strings.Contains(found, "forge") {
-		t.Fatalf("short-key warning omits the beacon forgery risk: %q", found)
-	}
-
-	// The key itself must never be rendered.
-	if strings.Contains(found, "abc") {
-		t.Fatalf("strength warning leaked the key: %q", found)
+	if !found {
+		t.Fatalf("tolerant weak key produced no warning; warnings=%v", cfg.Warnings)
 	}
 }
 
@@ -392,9 +399,11 @@ func TestStrengthWarningNeverRendersTheKey_6611(t *testing.T) {
 			"set chassis cluster authentication-key " + key,
 			"set chassis cluster redundancy-group 1 node 0 priority 200",
 		})
-		cfg, err := CompileConfig(tree)
+		// #16025: short placeholder keys are strict-rejected, so exercise
+		// the warning via the tolerant path (persisted keys still warn).
+		cfg, err := CompileConfigLenient(tree)
 		if err != nil {
-			t.Fatalf("key %q: compile: %v", key, err)
+			t.Fatalf("key %q: lenient compile: %v", key, err)
 		}
 		warnings := ClusterAuthKeyStrengthWarnings(cfg)
 		if len(warnings) == 0 {

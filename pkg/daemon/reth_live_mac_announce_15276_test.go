@@ -38,7 +38,7 @@ func c10DirectDaemon(t *testing.T) (*Daemon, chan int) {
 	for _, line := range []string{
 		"chassis cluster cluster-id 1",
 		"chassis cluster node 0",
-		"chassis cluster authentication-key test-15276-psk",
+		"chassis cluster authentication-key test-15276-psk-16chars",
 		"chassis cluster no-reth-vrrp",
 		"chassis cluster redundancy-group 1 node 0 priority 200",
 	} {
@@ -186,7 +186,7 @@ func TestC10LiveMACChangeNoAnnounce(t *testing.T) {
 		for _, line := range []string{
 			"chassis cluster cluster-id 1",
 			"chassis cluster node 0",
-			"chassis cluster authentication-key test-15276-psk",
+			"chassis cluster authentication-key test-15276-psk-16chars",
 			"chassis cluster no-private-rg-election",
 			"chassis cluster redundancy-group 1 node 0 priority 200",
 		} {

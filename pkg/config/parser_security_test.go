@@ -2872,7 +2872,7 @@ func TestValidateConfigWarnsSynCookieOnUnkeyedCluster9173(t *testing.T) {
 }
 
 func TestValidateConfigDoesNotWarnSynCookieOnKeyedCluster9173(t *testing.T) {
-	keyed := append(append([]string{}, unkeyedCluster9173...), "set chassis cluster authentication-key secret123")
+	keyed := append(append([]string{}, unkeyedCluster9173...), "set chassis cluster authentication-key secret1234567890ab")
 	warnings := synCookieWarnings9173(t, CompileConfig, synCookieLines9173(synFloodScreen9173, keyed...)...)
 	if strings.Contains(warnings, synCookieUnkeyedClusterWarning9173) {
 		t.Fatalf("unexpected SYN-cookie warning on a keyed cluster: %s", warnings)
