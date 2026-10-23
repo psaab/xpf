@@ -257,6 +257,12 @@ func (s *Store) commitWithDescriptionLocked(description, principal string) (*con
 	// — whereas C is already the durable content, so converging to it needs
 	// no further write to hold the invariant.
 	resolutionDrained := false
+	// #16064: publish the old-history/next-active dual binding before the active
+	// rename. This is best-effort history protection only; active.json remains
+	// canonical and a preparation write failure must not reject the commit.
+	if err := s.prepareRollbackForCommit(committedTree, description); err != nil {
+		slog.Warn("failed to prepare rollback metadata for commit", "err", err)
+	}
 	if err := s.writeActive(committedTree); err != nil {
 		if !isPostRenameDurabilityFailure(err) {
 			return nil, fmt.Errorf("commit failed: persist active config: %w", err)
@@ -691,6 +697,11 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 		}
 	}
 	runCommitConfirmedCrashHook(commitConfirmedStageRecord)
+	// #16064: same best-effort rollback preparation as the plain commit path,
+	// after the durable confirm record and immediately before active rename.
+	if err := s.prepareRollbackForCommit(committedTree, ""); err != nil {
+		slog.Warn("failed to prepare rollback metadata for commit confirmed", "err", err)
+	}
 	if err := s.writeActive(committedTree); err != nil {
 		if !isPostRenameDurabilityFailure(err) {
 			if s.confirmTimer == nil && !s.confirmResolvePendingPersist {
@@ -1644,7 +1655,8 @@ func (s *Store) saveRollbackFiles() {
 	}
 
 	entries := s.history.List() // most-recent-first
-	previousGeneration, _, _, _ := s.readRollbackMetadataSnapshot()
+	snap := s.readRollbackMetadataSnapshotFull()
+	previousGeneration := snap.Generation
 	generation := previousGeneration + 1
 	if generation == 0 {
 		generation = 1
@@ -1783,18 +1795,26 @@ func (s *Store) loadRollbackHistory() {
 
 	var entries []*HistoryEntry
 
-	generation, metadataActiveHash, metadataActiveIdentity, metadata := s.readRollbackMetadataSnapshot()
+	snap := s.readRollbackMetadataSnapshotFull()
+	generation, metadataActiveHash, metadataActiveIdentity, metadata := snap.Generation, snap.ActiveHash, snap.Identity, snap.Entries
 	currentActiveHash, currentActiveIdentity, currentActiveOK := s.rollbackActiveBindingFromDisk()
 
 	migrationStage, migrationStageOK := s.readAPIAuthMigrationStaging()
 	migrationAlias := currentActiveOK && apiAuthMigrationAliasMatches(
 		migrationStage, migrationStageOK, metadataActiveHash, metadataActiveIdentity,
 		currentActiveHash, currentActiveIdentity)
-	generationMismatch := generation != 0 && metadataActiveIdentity.Inode != 0 && currentActiveOK &&
+	strictMismatch := generation != 0 && metadataActiveIdentity.Inode != 0 && currentActiveOK &&
 		(metadataActiveHash != currentActiveHash ||
 			metadataActiveIdentity.Device != currentActiveIdentity.Device ||
 			metadataActiveIdentity.Inode != currentActiveIdentity.Inode ||
-			!metadataActiveIdentity.ModTime.Equal(currentActiveIdentity.ModTime)) && !migrationAlias
+			!metadataActiveIdentity.ModTime.Equal(currentActiveIdentity.ModTime))
+	// #16064: a durable preparation record certifies exactly one skew: the
+	// sidecar still binds the previous active hash, while active.json now holds
+	// the recorded next-active hash. Any other mismatch remains fail-closed.
+	nextActiveCertifiesDisk := snap.NextActiveHash != "" && currentActiveOK &&
+		snap.NextActiveHash == currentActiveHash
+	generationMismatch := strictMismatch && !migrationAlias && !nextActiveCertifiesDisk
+	pendingSkew := strictMismatch && nextActiveCertifiesDisk
 	for i := 1; i <= s.history.MaxSize(); i++ {
 		path := s.rollbackPath(i)
 		// #8597 (muse-004 K70): bounded, like every other authoritative read in
@@ -1848,12 +1868,33 @@ func (s *Store) loadRollbackHistory() {
 				slotComment = comment
 			}
 		}
+		// #16064 pending recovery at PRE-SHIFT positions. When active.json is
+		// the recorded next active, slots were not renumbered by the crashed
+		// commit: the old slot bytes still sit at their pre-crash indices.
+		// Slot 1 survives when it is the old active tree (it hashes to the
+		// sidecar's committed active hash); slot i>1 survives when its bytes
+		// are old slot i's bytes, which hash to the committed entry at i-2 in
+		// the shifted history [old active, old slot 1, ...] — equivalently
+		// pending[i-1] — or when the partially completed rewrite already
+		// placed the prepared future bytes at this position (PendingHash).
+		skewSlotValid := false
+		if pendingSkew {
+			if valid, ts, comment := rollbackSkewSlotAdmission(snap, pendingSkew, i, rollbackSlotHash(data), identity, identityOK); valid {
+				skewSlotValid = true
+				if !ts.IsZero() || comment != "" {
+					slotTimestamp = ts
+					slotComment = comment
+				}
+			}
+		}
 		// A changed active hash or file identity means the sidecar predates the
 		// active generation, so every old numbered slot may now occupy the wrong
 		// index. A staged api-auth migration is the sole exception: it changes
 		// credentials without shifting slots, and only exact staged slot bytes
 		// may bypass the old per-slot hash while that transition converges.
-		if generationMismatch || (generation != 0 && !metadataValid && !migrationSlotValid) {
+		// The #16064 preparation record is the second exception, gated on
+		// next_active_hash being exactly the durable active hash.
+		if (generationMismatch && !skewSlotValid) || (generation != 0 && !metadataValid && !migrationSlotValid && !skewSlotValid) {
 			slog.Warn("rollback slot does not match its saved generation; refusing this slot",
 				"path", path, "slot", i, "generation", generation)
 			entries = append(entries, &HistoryEntry{Timestamp: slotTimestamp, Comment: slotComment})

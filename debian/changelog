@@ -1072,6 +1072,11 @@ xpf (0.0.0) unstable; urgency=medium
     authentication-source/device-information.
 
 xpf (0.0.0) unstable; urgency=medium
+  * Preserve generation-bound rollback history when power is lost after a
+    commit's active rename but before rollback-slot metadata is republished:
+    commits now record a next-active rollback preparation binding so restart
+    can verify unchanged slots, while uncertified active rewrites remain
+    fail-closed (#16064).
 
   * Preserve `to-zone junos-host` application's configured inactivity-timeout
     on LocalDelivery sessions. Matched host-local permit sessions now age on
