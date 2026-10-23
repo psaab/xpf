@@ -3757,14 +3757,16 @@ impl SessionTable {
     /// `len`/`tcp_flags` are retained for call-site symmetry but
     /// no longer reconstruct anything.
     ///
-    /// Keepalive exception (fold 2): `last_seen_ns` and
-    /// `expires_after_ns` are NOT restored. The probe's throttled
-    /// keepalive refresh stands even when the packet is dropped,
-    /// preserving the documented pre-fusion keepalive-before-drop
-    /// behaviour for cache-served packets (`probe_hit` doc): a
-    /// dropped packet still proves the peer is alive, it just must
-    /// not charge, complete, or publish. The wheel is re-pushed
-    /// with the entry's current (kept) timestamp.
+    /// Keepalive exception (fold 2/3): `last_seen_ns` is NOT
+    /// restored — the probe's throttled refresh stands even when
+    /// the packet is dropped, preserving the documented pre-fusion
+    /// keepalive-before-drop behaviour (`probe_hit` doc). But the
+    /// expiry DURATION is restored (fold 3): a re-pended handshake
+    /// must carry its opening duration (snapshot value, incl. any
+    /// per-zone opening override), not the established duration
+    /// completion stamped. Net effect: deadline = kept last_seen +
+    /// restored opening duration. The wheel is re-pushed with the
+    /// kept timestamp so it re-buckets on that deadline.
     ///
     /// Returns true when a deferred completion was rolled back. Call
     /// only for the exact dropped packet, before any later packet is
@@ -3804,8 +3806,13 @@ impl SessionTable {
                 entry.established = snap.established;
                 entry.handshake_pending = snap.handshake_pending;
                 entry.syn_ack_first = snap.syn_ack_first;
-                // Fold 2 keepalive exception: last_seen_ns and
-                // expires_after_ns keep the probe's refreshed values.
+                // Fold 2/3: last_seen_ns keeps the probe's refreshed
+                // value (keepalive), but expires_after_ns DURATION is
+                // restored from the snapshot — a re-pended handshake
+                // must return to its opening duration (or per-zone
+                // opening override captured in it), not keep the
+                // established duration the completion stamped.
+                entry.expires_after_ns = snap.expires_after_ns;
                 seen = entry.last_seen_ns;
             }
             table.push_to_wheel(half_key, seen);

@@ -1,5 +1,13 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Restore the opening expiry duration on the #15947 cache-drop
+    rollback (fold 3): a re-pended handshake regains its snapshot
+    opening duration (including any per-zone override) while keeping
+    the probe-refreshed last_seen, instead of carrying the
+    established duration completion stamped.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Preserve keepalive on the #15947 cache-drop rollback: restore
     every pre-probe field except last_seen/expiry, so a dropped
     cache-served packet still refreshes session liveness as the

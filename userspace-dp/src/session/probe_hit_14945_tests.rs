@@ -35,7 +35,7 @@ struct ProbeSnapshot {
 }
 
 /// #15947 fold 2: a post-rollback snapshot with the keepalive fields
-/// (last_seen_ns, expires_after_ns) taken from the CURRENT entry —
+/// (last_seen_ns only) taken from the CURRENT entry —
 /// rollback deliberately keeps the probe's refresh, so equality is
 /// judged on every other field. `rolled_back_of` projects an expected
 /// pre-probe snapshot into the same shape.
@@ -59,7 +59,7 @@ impl ProbeSnapshot {
             handshake_pending: self.handshake_pending,
             syn_ack_first: self.syn_ack_first,
             closing: self.closing,
-            expires_after_ns: None,
+            expires_after_ns: self.expires_after_ns,
         }
     }
 }
@@ -477,6 +477,24 @@ fn dropped_deferring_probe_rolls_back_completion_and_charge_15947() {
     // Fold 2: the dropped completing ACK still refreshes liveness —
     // the probe's last_seen stamp stands, it is not rewound.
     assert_eq!(table.last_seen_ns(&forward), Some(now + 2 * SEC));
+    // Fold 3: the re-pended half keeps the probe-refreshed last_seen
+    // (asserted above) but must carry its OPENING duration again,
+    // not the established duration completion stamped. Opening is
+    // 20s and established 1800s by default, so the classes are
+    // distinguishable without any override.
+    assert_eq!(
+        Some(entry.expires_after_ns), before_fwd.expires_after_ns,
+        "fold3: forward half must regain its pre-completion (opening) duration"
+    );
+    assert_ne!(
+        entry.expires_after_ns, 1_800_000_000_000u64,
+        "fold3: established duration must not survive re-pending"
+    );
+    let rev_entry = table.entry_by_key(&reverse).expect("reverse half");
+    assert_eq!(
+        Some(rev_entry.expires_after_ns), before_rev.expires_after_ns,
+        "fold3: reverse half must regain its pre-completion (opening) duration"
+    );
     assert_eq!(
         table.pressure_shed_openings.contains_key(&forward),
         shed_before,
@@ -508,6 +526,61 @@ fn dropped_deferring_probe_rolls_back_completion_and_charge_15947() {
         .collect();
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].key, forward);
+}
+
+#[test]
+fn dropped_completion_restores_zone_opening_duration_15947() {
+    // Fold 3 with a per-zone opening override: the forward half's
+    // ingress zone (TEST_LAN_ZONE_ID from metadata()) carries a 7s
+    // syn-flood opening window, distinct from both the 20s global
+    // opening and the 1800s established durations. A dropped
+    // completing ACK must re-pend on 7s from the kept last_seen.
+    let mut table = SessionTable::new();
+    table.set_opening_overrides(
+        [(crate::test_zone_ids::TEST_LAN_ZONE_ID, 7 * SEC)]
+            .into_iter()
+            .collect(),
+    );
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN);
+    assert!(table
+        .lookup_with_origin(&reverse, now + SEC, TCP_SYN | TCP_ACK)
+        .is_some());
+    let _ = table.drain_deltas(16);
+    let before_fwd = snapshot(&table, &forward);
+    assert_eq!(
+        before_fwd.expires_after_ns,
+        Some(7 * SEC),
+        "premise: pending forward half carries the zone opening override"
+    );
+    assert!(table.probe_hit_deferring_state_update(
+        &forward,
+        now + 2 * SEC,
+        512,
+        TCP_ACK | TCP_PSH,
+        512,
+        46,
+    ));
+    let completed = table.entry_by_key(&forward).expect("forward half");
+    assert_eq!(
+        completed.expires_after_ns, 1_800_000_000_000u64,
+        "premise: completion stamps the established duration"
+    );
+    assert!(table.rollback_dropped_probe_hit(&forward, 512, TCP_ACK | TCP_PSH));
+    let entry = table.entry_by_key(&forward).expect("forward half");
+    assert!(entry.handshake_pending);
+    assert_eq!(
+        entry.expires_after_ns,
+        7 * SEC,
+        "fold3: re-pended half must regain the ZONE opening duration, \
+         not established (1800s) or global opening (20s)"
+    );
+    assert_eq!(
+        table.last_seen_ns(&forward),
+        Some(now + 2 * SEC),
+        "fold3: last_seen keeps the probe refresh (deadline = kept stamp + zone duration)"
+    );
 }
 
 #[test]
