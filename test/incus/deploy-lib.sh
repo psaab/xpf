@@ -261,7 +261,7 @@ deploy_verify_running_xpf_userspace_dp() {
 	fi
 	info "Verified running xpf-userspace-dp on $rinst matches the pushed build ($local_sum)."
 }
-# ── Deploy attestation manifest (#11765) ─────────────────────────────
+# ── Deploy attestation manifest (#11765, refused-deploy record #16290) ──
 # The gate used to hash the worktree's CURRENT ./xpfd and compare it with
 # the LIVE process image. Any rebuild between deploy and gate — even of the
 # same commit — differs, because two stamped LDFLAGS are never stable:
@@ -279,6 +279,20 @@ deploy_verify_running_xpf_userspace_dp() {
 # an all-node deploy invalidates the whole manifest. Successful writes replace
 # the affected slot(s) atomically and preserve a successfully deployed peer.
 # Missing, invalid, or stale provenance fails closed.
+#
+# #16290: invalidation runs BEFORE the deploy body, but the new manifest is
+# written only AFTER it succeeds. A refused cut (e.g. `xpfd upgrade
+# --rolling` refuse-before-PREFLIGHT on a re-staged version tag) aborts
+# under `set -e` before the write, leaving NO manifest at all. The nodes
+# still run the previous build, yet every later gate recorded a bare
+# VOID/exe_check=UNAVAILABLE with no pointer to the refusal. So a failed
+# deploy now drops a sidecar marker next to the (absent) manifest naming
+# the target and reason; the gate surfaces it in the VOID reason. The
+# marker never attests binaries and never revives stale provenance: the
+# manifest itself stays absent/invalidated (fail-closed), and a later
+# successful deploy_write_manifest clears the marker atomically with
+# the new record. A partially-cut rolling deploy likewise leaves the
+# marker — completed nodes re-attest only on overall deploy success.
 #
 # Schema: schema=2, nodes {"0": <deploy record>, "1": <deploy record>}.
 # Each record carries build_git_sha (HEAD + -dirty, ledger-excluded, cf.
@@ -301,9 +315,117 @@ deploy_manifest_path() {
 # available to a later gate. A single-node attempt clears only that node's slot
 # so a successfully deployed peer remains attestable.
 
+# deploy_manifest_failure_path [project_root]
+# Echo the refused/failed-deploy marker path: the manifest path with a
+# .failed suffix, so XPF_DEPLOY_MANIFEST fixtures isolate it automatically.
+deploy_manifest_failure_path() {
+	local manifest
+	manifest=$(deploy_manifest_path "${1:-}") || return 1
+	printf '%s.failed\n' "$manifest"
+}
+
+# deploy_manifest_record_failure <project_root> <0|1|all> <reason>
+# Record WHY the last deploy left no (or partial) attestation, so a later
+# gate's VOID names the refused deploy instead of a bare
+# exe_check=UNAVAILABLE (#16290). The reason is flattened to one line and
+# bounded; the marker is a plain key=value file (no JSON parser needed on
+# the read side). It is NOT provenance: it carries no binary identity and
+# deploy_manifest_sha never reads it.
+deploy_manifest_record_failure() {
+	local root="$1" scope="${2:-all}" reason="${3:-deploy failed}"
+	local marker flat
+	[[ "$scope" == 0 || "$scope" == 1 || "$scope" == all ]] || return 1
+	marker=$(deploy_manifest_failure_path "$root") || return 1
+	flat=$(printf '%s' "$reason" | tr '\r\n\t' '   ' | tr -s ' ')
+	flat="${flat:0:300}"
+	[[ -n "$flat" ]] || flat="deploy failed"
+	mkdir -p "$(dirname "$marker")" || return 1
+	local tmp="$marker.tmp.$$"
+	{
+		printf 'target=%s\n' "$scope"
+		printf 'failed_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+		printf 'reason=%s\n' "$flat"
+	} >"$tmp" || { rm -f "$tmp"; return 1; }
+	mv -f "$tmp" "$marker" || { rm -f "$tmp"; return 1; }
+}
+
+# deploy_manifest_failure_reason <project_root>
+# Echo "deploy <target> failed: <reason>" from the marker, or nothing
+# (rc 1) when no failed deploy is recorded. Gates append this to the
+# exe_check=UNAVAILABLE VOID reason.
+deploy_manifest_failure_reason() {
+	local marker target="" reason=""
+	marker=$(deploy_manifest_failure_path "$1") || return 1
+	[[ -f "$marker" ]] || return 1
+	local key value
+	while IFS='=' read -r key value; do
+		case "$key" in
+			target) target="$value" ;;
+			reason) reason="$value" ;;
+		esac
+	done <"$marker"
+	[[ -n "$reason" ]] || return 1
+	case "$target" in 0|1|all) ;; *) target="all" ;; esac
+	printf 'deploy %s failed: %s\n' "$target" "$reason"
+}
+
+# deploy_manifest_clear_failure [project_root]
+# Drop the failed-deploy marker. Called by deploy_write_manifest after a
+# successful attestation write and by deploy_manifest_invalidate before a
+# new attempt, so a stale refusal never outlives the state it described.
+deploy_manifest_clear_failure() {
+	local marker
+	marker=$(deploy_manifest_failure_path "${1:-}") || return 1
+	rm -f -- "$marker"
+}
+
+# deploy_manifest_arm_failure_guard <project_root> <0|1|all>
+# Arm the EXIT-trap guard cmd_deploy installs right after invalidation
+# (#16290). ALL guard state lives in globals: the EXIT trap fires after
+# the arming function has returned and its locals are gone, so a trap
+# referencing a function-local target/step would die unbound under
+# `set -u` and record nothing (the Opus fold on PR #16338). The target
+# in particular is captured into the global _deploy_guard_target here —
+# a caller's `local target` is exactly what must not be trapped over.
+# The first trap action captures the pending exit status before any
+# other command can clobber $?. Split out of cluster-setup.sh so the
+# hermetic selftest can drive the REAL trap (arm, abort a subshell,
+# observe the marker) instead of hand-calling the recorder.
+deploy_manifest_arm_failure_guard() {
+	local root="$1" scope="${2:-all}"
+	[[ "$scope" == 0 || "$scope" == 1 || "$scope" == all ]] || return 1
+	# Globals on purpose — do NOT declare these local (see above).
+	_deploy_guard_root="$root"
+	_deploy_guard_target="$scope"
+	_deploy_guard_step="deploy dispatch"
+	_deploy_guard_rc=0
+	_deploy_guard_pending=1
+	trap '_deploy_guard_rc=$?; if (( _deploy_guard_pending )); then
+		deploy_manifest_record_failure "$_deploy_guard_root" "$_deploy_guard_target" "attestation manifest absent because deploy ${_deploy_guard_step} failed (rc=${_deploy_guard_rc}); no new build was attested" || true
+		warn "deploy attestation: manifest absent because deploy ${_deploy_guard_step} failed (rc=${_deploy_guard_rc}); later gates will VOID naming this deploy (#16290)"
+	fi' EXIT
+}
+
+# deploy_manifest_guard_step <step label>
+# Label the deploy step the guard will name if the shell aborts now.
+deploy_manifest_guard_step() {
+	_deploy_guard_step="$1"
+}
+
+# deploy_manifest_guard_disarm
+# Explicit die paths record their own specific reason and then disarm,
+# so the EXIT backstop cannot overwrite it with the generic step text.
+# The success path disarms too, then the caller removes the trap.
+deploy_manifest_guard_disarm() {
+	_deploy_guard_pending=0
+}
+
 deploy_manifest_invalidate() {
 	local manifest scope="${2:-all}"
 	manifest=$(deploy_manifest_path "$1") || return 1
+	# A new attempt supersedes any recorded failure of the previous one;
+	# the attempt's own outcome re-records or (on success) stays clear.
+	deploy_manifest_clear_failure "$1" || return 1
 	case "$scope" in
 	all)
 		rm -f -- "$manifest" || return 1
@@ -513,6 +635,11 @@ PY
 		warn "deploy manifest: failed to write $manifest"
 		return 1
 	fi
+	# A successful attestation supersedes any recorded refusal (#16290).
+	deploy_manifest_clear_failure "$root" || {
+		warn "deploy manifest: cannot clear failed-deploy marker for $manifest"
+		return 1
+	}
 	info "Deploy manifest recorded $manifest (nodes=$scope mode=$mode xpfd=$xpfd_sha)."
 }
 
