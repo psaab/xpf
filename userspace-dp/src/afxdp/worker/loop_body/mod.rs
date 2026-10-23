@@ -78,6 +78,9 @@ mod p2_deadline_9506_tests;
 #[cfg(test)]
 #[path = "export_slice_delta_drain_13653_tests.rs"]
 mod export_slice_delta_drain_13653_tests;
+#[cfg(test)]
+#[path = "export_slice_batched_window_15950_tests.rs"]
+mod export_slice_batched_window_15950_tests;
 
 
 // #13075 (D4-12): cold snapshot-rotation reconciliation (discriminator,
@@ -1307,7 +1310,8 @@ pub(crate) fn worker_loop(
             mut deleted_synced_keys,
             mut stale_replay_dropped_keys,
             session_import_repairs,
-            exported_sequences,
+            exported_sequences: _exported_sequences_dispatch_log,
+            export_window_sequences,
             export_owner_rgs,
             export_kick_epoch,
             shaped_tx_requests,
@@ -1717,7 +1721,7 @@ pub(crate) fn worker_loop(
             &binding_lookup,
             forwarding.as_ref(),
             &mut worker_export,
-            exported_sequences,
+            export_window_sequences,
             export_owner_rgs,
             export_kick_epoch,
             &export_buffer,

@@ -29,7 +29,7 @@ pub(super) fn run_export_slice(
     binding_lookup: &WorkerBindingLookup,
     forwarding: &ForwardingState,
     worker_export: &mut Option<WorkerExportState>,
-    exported_sequences: Vec<u64>,
+    export_window_sequences: Vec<u64>,
     export_owner_rgs: Vec<i32>,
     export_kick_epoch: Option<u64>,
     export_buffer: &crate::afxdp::binding_state::ExportBufferState,
@@ -58,11 +58,16 @@ pub(super) fn run_export_slice(
     const EXPORT_SLICE_BUDGET: usize = 1024; // max slab slots scanned per slice
     const EXPORT_SLICE_EMITS: usize = 256; // max sessions converted per slice
     const EXPORT_SLICE_DEADLINE_NS: u64 = 500_000; // 500us slice cap
-    if !exported_sequences.is_empty() || worker_export.is_some() {
+    if !export_window_sequences.is_empty() || worker_export.is_some() {
         // Adopt: a timeout-then-rekick overwrites with purge-foreign (a
         // superseded window's leftovers must not poison the new one).
-        if !exported_sequences.is_empty() {
-            if let Some(token) = exported_sequences.iter().copied().max() {
+        // #15950 (H39-02 arm 2): `export_window_sequences` names exactly
+        // one window by construction (last-command-wins at command
+        // accept), so this adopt never merges two kicked commands' RG
+        // sets. (`exported_sequences` remains the never-reset #7201
+        // dispatch log and plays no part here.)
+        if !export_window_sequences.is_empty() {
+            if let Some(token) = export_window_sequences.iter().copied().max() {
                 // M2c: the window token IS the kicked command sequence
                 // (M3 replaces this with the opaque continuation token).
                 export_buffer.purge_foreign(token);
@@ -70,7 +75,7 @@ pub(super) fn run_export_slice(
                     cursor: 0,
                     kick_epoch: export_kick_epoch.unwrap_or(u64::MAX),
                     owner_rgs: export_owner_rgs.clone(),
-                    sequences: exported_sequences.clone(),
+                    sequences: export_window_sequences.clone(),
                     token,
                 });
             }
