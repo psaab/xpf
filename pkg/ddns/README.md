@@ -1149,9 +1149,17 @@ regressed.
   with no `tsig-key`, AND a once-per-update-server RUNTIME `slog.Warn`
   (`warnUnsignedOnce` in `backend_rfc2136.go`, deduped in the package-level
   `unsignedUpdateWarned` map so the per-cycle backend rebuild does not re-warn)
-  the first time an unsigned UPDATE is actually sent. Forcing TCP or an explicit
-  `no-tsig` opt-in acknowledgment are possible follow-ups; the warn is the
-  minimum that makes the operator aware.
+  the first time an unsigned UPDATE is actually sent.
+  **#15992 adds the durable half:** the posture is also a LIVE gauge —
+  `xpf_dhcp_ddns_unsigned_nonloopback_active` /
+  `xpf_ddns_surface_a_unsigned_nonloopback_active` stay at 1 for as long as
+  any enabled non-loopback unsigned server is active (refreshed every
+  reconcile, not once per process). And an operator can opt into fail-closed
+  with the `require-tsig` leaf on either surface: strict commit then refuses
+  a non-loopback `update-server` with no `tsig-key`, and the runtime backend
+  refuses the exchange before any byte is sent if such a config arrives via
+  the tolerant load path. The default (no `require-tsig`) is unchanged, so
+  legitimate source-IP-ACL unsigned BIND keeps working.
 
 The HA writer gate (`ddnsWriterGateOpen`) stays in `pkg/daemon/daemon_ddns.go`
 (it reads cluster RG state); P1a did not move or change it.

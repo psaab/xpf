@@ -251,16 +251,18 @@ type xpfCollector struct {
 	dhcpDDNSOwnedRecords       *prometheus.Desc
 	dhcpDDNSPTRPending         *prometheus.Desc
 	dhcpDDNSDegraded           *prometheus.Desc
+	dhcpDDNSUnsignedActive     *prometheus.Desc
 	dhcpDDNSLastReconcileTs    *prometheus.Desc
 	dhcpDDNSLastReconcileN     *prometheus.Desc
 
 	// Surface A (router/interface-address) DDNS metrics (#2691 P2).
-	surfaceADDNSUpsertsTotal *prometheus.Desc
-	surfaceADDNSDeletesTotal *prometheus.Desc
-	surfaceADDNSSkippedTotal *prometheus.Desc
-	surfaceADDNSScopes       *prometheus.Desc
-	surfaceADDNSOrphaned     *prometheus.Desc
-	surfaceADDNSDegraded     *prometheus.Desc
+	surfaceADDNSUpsertsTotal   *prometheus.Desc
+	surfaceADDNSDeletesTotal   *prometheus.Desc
+	surfaceADDNSSkippedTotal   *prometheus.Desc
+	surfaceADDNSScopes         *prometheus.Desc
+	surfaceADDNSOrphaned       *prometheus.Desc
+	surfaceADDNSDegraded       *prometheus.Desc
+	surfaceADDNSUnsignedActive *prometheus.Desc
 
 	// System metrics
 	sysCPUUser   *prometheus.Desc
@@ -1261,6 +1263,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.dhcpDDNSOwnedRecords
 	ch <- c.dhcpDDNSPTRPending
 	ch <- c.dhcpDDNSDegraded
+	ch <- c.dhcpDDNSUnsignedActive
 	ch <- c.dhcpDDNSLastReconcileTs
 	ch <- c.dhcpDDNSLastReconcileN
 	ch <- c.surfaceADDNSUpsertsTotal
@@ -1269,6 +1272,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.surfaceADDNSScopes
 	ch <- c.surfaceADDNSOrphaned
 	ch <- c.surfaceADDNSDegraded
+	ch <- c.surfaceADDNSUnsignedActive
 	ch <- c.sysCPUUser
 	ch <- c.sysCPUSystem
 	ch <- c.sysMemTotal

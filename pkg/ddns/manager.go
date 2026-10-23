@@ -324,6 +324,11 @@ type Stats struct {
 	// DegradedReason is a human-readable explanation of Degraded (the load error
 	// plus the quarantine path of the bad file, if any). Empty when not degraded.
 	DegradedReason string
+	// UnsignedNonLoopbackActive (#15992) is true while any enabled rfc2136
+	// family resolves to a non-loopback update-server with no TSIG key.
+	// It is a current-posture gauge, not a once-per-process log: it stays
+	// set for as long as the forgeable-rcode posture persists.
+	UnsignedNonLoopbackActive bool
 }
 
 // Manager owns the DDNS reconcile loop and the ownership store. It is
@@ -458,6 +463,10 @@ type Manager struct {
 
 	lastReconcile  atomic.Int64 // unix nanos
 	lastReconcileN atomic.Int64
+
+	// unsignedNonLoopbackActive (#15992): current forgeable-rcode posture,
+	// refreshed on every ReconcileScoped from the resolved families.
+	unsignedNonLoopbackActive atomic.Bool
 
 	// lastPolicy is the last resolved aggregate policy (for Stats()).
 	lastPolicy atomic.Pointer[ddnsPolicy]
@@ -874,6 +883,7 @@ func (m *Manager) ReconcileScoped(ctx context.Context, cfg *config.DHCPServerCon
 	m.lastPolicy.Store(&agg)
 	pols := [2]ddnsPolicy{pol4, pol6}
 	m.lastPolicies.Store(&pols)
+	m.unsignedNonLoopbackActive.Store(ddnsUnsignedNonLoopback(pol4, ddns4) || ddnsUnsignedNonLoopback(pol6, ddns6))
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -2119,25 +2129,26 @@ func (m *Manager) Stats() Stats {
 	m.mu.Unlock()
 
 	st := Stats{
-		Degraded:              degraded,
-		DegradedReason:        degradedReason,
-		UpsertOK:              m.upsertOK.Load(),
-		UpsertFail:            m.upsertFail.Load(),
-		DeleteOK:              m.deleteOK.Load(),
-		DeleteFail:            m.deleteFail.Load(),
-		DeleteCoowned:         m.deleteCoowned.Load(),
-		SkippedNoName:         m.skippedNoName.Load(),
-		SkippedNonAddress:     m.skippedNonAddress.Load(),
-		SkippedNoBackend:      m.skippedNoBackend.Load(),
-		SkippedPTRNotAuth:     m.skippedPTRNotAuth.Load(),
-		SkippedConflict:       m.skippedConflict.Load(),
-		PTRDeferred:           m.ptrDeferred.Load(),
-		PTRPendingNow:         pendingNow,
-		OrphanedBackendChange: m.orphanedBackendChange.Load(),
-		ReconcileOK:           m.reconcileOK.Load(),
-		ReconcileFail:         m.reconcileFail.Load(),
-		OwnedRecords:          n,
-		LastReconcileN:        int(m.lastReconcileN.Load()),
+		Degraded:                  degraded,
+		DegradedReason:            degradedReason,
+		UpsertOK:                  m.upsertOK.Load(),
+		UpsertFail:                m.upsertFail.Load(),
+		DeleteOK:                  m.deleteOK.Load(),
+		DeleteFail:                m.deleteFail.Load(),
+		DeleteCoowned:             m.deleteCoowned.Load(),
+		SkippedNoName:             m.skippedNoName.Load(),
+		SkippedNonAddress:         m.skippedNonAddress.Load(),
+		SkippedNoBackend:          m.skippedNoBackend.Load(),
+		SkippedPTRNotAuth:         m.skippedPTRNotAuth.Load(),
+		SkippedConflict:           m.skippedConflict.Load(),
+		PTRDeferred:               m.ptrDeferred.Load(),
+		PTRPendingNow:             pendingNow,
+		OrphanedBackendChange:     m.orphanedBackendChange.Load(),
+		ReconcileOK:               m.reconcileOK.Load(),
+		ReconcileFail:             m.reconcileFail.Load(),
+		OwnedRecords:              n,
+		LastReconcileN:            int(m.lastReconcileN.Load()),
+		UnsignedNonLoopbackActive: m.unsignedNonLoopbackActive.Load(),
 	}
 	if ns := m.lastReconcile.Load(); ns > 0 {
 		st.LastReconcile = time.Unix(0, ns)

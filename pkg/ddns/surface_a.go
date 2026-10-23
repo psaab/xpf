@@ -462,6 +462,9 @@ type SurfaceAManager struct {
 	// it). So this counter tallies deferred passes, not one-shot suppressions.
 	// Guarded by mu.
 	deleteCoowned uint64
+	// unsignedNonLoopbackActive (#15992): current forgeable-rcode posture
+	// from the last reconcile catalog. Guarded by mu.
+	unsignedNonLoopbackActive bool
 
 	// leaseCoowners, when non-nil, returns the wire-RR claims currently owned by
 	// the SEPARATE Surface B DHCP lease surface (Manager.state.records, rdata in
@@ -716,6 +719,7 @@ func newSurfaceARFC2136(p *config.DDNSProvider, _ string, resolveIf ...func(stri
 		TSIGKeyName:          p.TSIGKeyName,
 		TSIGAlgorithm:        p.TSIGAlgorithm,
 		TSIGSecret:           p.TSIGSecret,
+		RequireTSIG:          p.RequireTSIG,
 		SourceAddress:        p.SourceAddress,
 		DestinationInterface: p.DestinationInterface,
 		RoutingInstance:      p.RoutingInstance,
@@ -859,6 +863,27 @@ func (m *SurfaceAManager) Reconcile(ctx context.Context, scopes []SurfaceAScope,
 	// per-RG gate below still decides which scopes this node may actually write.
 	force := m.forceRefresh
 	m.forceRefresh = false
+
+	// #15992: refresh the forgeable-rcode posture gauge from this pass's
+	// catalog so it stays visible for as long as any non-loopback unsigned
+	// provider is configured, not once per process.
+	m.unsignedNonLoopbackActive = false
+	for _, p := range catalog {
+		if p == nil {
+			continue
+		}
+		backend := p.Backend
+		if backend == "" {
+			backend = "rfc2136"
+		}
+		if backend != "rfc2136" || p.UpdateServer == "" || p.TSIGKeyName != "" {
+			continue
+		}
+		if server, err := normalizeUpdateServer(p.UpdateServer); err == nil && !updateServerIsLoopback(server) {
+			m.unsignedNonLoopbackActive = true
+			break
+		}
+	}
 
 	now := m.now()
 	var firstErr error
@@ -2470,6 +2495,10 @@ type SurfaceAStats struct {
 	// DegradedReason is a human-readable explanation of Degraded (the load error
 	// plus the quarantine path of the bad file, if any). Empty when not degraded.
 	DegradedReason string
+	// UnsignedNonLoopbackActive (#15992): true while any rfc2136 provider
+	// in the last reconcile catalog targets a non-loopback update-server
+	// with no TSIG key — the forgeable-rcode posture, as a live gauge.
+	UnsignedNonLoopbackActive bool
 }
 
 // ForceRefresh arms the operator force-now latch (#3276): the NEXT reconcile
@@ -2490,18 +2519,19 @@ func (m *SurfaceAManager) Stats() SurfaceAStats {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return SurfaceAStats{
-		Scopes:           len(m.state.records),
-		UpsertOK:         m.upsertOK,
-		UpsertFail:       m.upsertFail,
-		DeleteOK:         m.deleteOK,
-		DeleteFail:       m.deleteFail,
-		Skipped:          m.skipped,
-		BackedOff:        m.backedOff,
-		SkippedNoBackend: m.skippedNoBackend,
-		DeleteCoowned:    m.deleteCoowned,
-		Orphaned:         len(m.orphans),
-		Degraded:         m.degraded,
-		DegradedReason:   m.degradedReason,
+		Scopes:                    len(m.state.records),
+		UpsertOK:                  m.upsertOK,
+		UpsertFail:                m.upsertFail,
+		DeleteOK:                  m.deleteOK,
+		DeleteFail:                m.deleteFail,
+		Skipped:                   m.skipped,
+		BackedOff:                 m.backedOff,
+		SkippedNoBackend:          m.skippedNoBackend,
+		DeleteCoowned:             m.deleteCoowned,
+		Orphaned:                  len(m.orphans),
+		Degraded:                  m.degraded,
+		DegradedReason:            m.degradedReason,
+		UnsignedNonLoopbackActive: m.unsignedNonLoopbackActive,
 	}
 }
 
@@ -2557,4 +2587,11 @@ func familyInt(a netip.Addr) int {
 		return 4
 	}
 	return 6
+}
+
+// NewSurfaceAManagerForTesting builds a SurfaceAManager with an injectable
+// state path, backend, and clock for cross-package tests (e.g. pkg/api
+// gauge wiring). Test-only seam; not for production callers.
+func NewSurfaceAManagerForTesting(statePath string, backend DNSUpdater, now func() time.Time) *SurfaceAManager {
+	return newSurfaceAManagerForTesting(statePath, backend, now)
 }

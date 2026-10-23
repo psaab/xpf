@@ -1134,6 +1134,7 @@ COMPARED	system services dhcp-local-server dynamic-dns destination-interface
 COMPARED	system services dhcp-local-server dynamic-dns domain
 flag (read, but value-less)	system services dhcp-local-server dynamic-dns enable
 COMPARED	system services dhcp-local-server dynamic-dns hostname-source
+flag (read, but value-less)	system services dhcp-local-server dynamic-dns require-tsig
 COMPARED	system services dhcp-local-server dynamic-dns routing-instance
 COMPARED	system services dhcp-local-server dynamic-dns source-address
 COMPARED	system services dhcp-local-server dynamic-dns tsig-algorithm
@@ -1167,6 +1168,7 @@ COMPARED	system services dhcpv6-local-server dynamic-dns destination-interface
 COMPARED	system services dhcpv6-local-server dynamic-dns domain
 flag (read, but value-less)	system services dhcpv6-local-server dynamic-dns enable
 COMPARED	system services dhcpv6-local-server dynamic-dns hostname-source
+flag (read, but value-less)	system services dhcpv6-local-server dynamic-dns require-tsig
 COMPARED	system services dhcpv6-local-server dynamic-dns routing-instance
 COMPARED	system services dhcpv6-local-server dynamic-dns source-address
 COMPARED	system services dhcpv6-local-server dynamic-dns tsig-algorithm
@@ -1208,6 +1210,7 @@ COMPARED	system services dynamic-dns provider <*> destination-interface
 COMPARED	system services dynamic-dns provider <*> hosted-zone-id
 COMPARED	system services dynamic-dns provider <*> ok-response
 COMPARED	system services dynamic-dns provider <*> password
+flag (read, but value-less)	system services dynamic-dns provider <*> require-tsig
 COMPARED	system services dynamic-dns provider <*> routing-instance
 COMPARED	system services dynamic-dns provider <*> server
 COMPARED	system services dynamic-dns provider <*> source-address

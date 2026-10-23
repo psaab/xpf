@@ -12699,7 +12699,14 @@ reserved for whole-dataplane selection where a rewrite shim
   Both are WARN-only (a hard reject would brick a previously-inert config); the
   backend also emits a once-per-update-server runtime `slog.Warn`
   (`warnUnsignedOnce` in `pkg/ddns/backend_rfc2136.go`) the first time it
-  actually sends an unsigned UPDATE. `tsig-secret` is
+  actually sends an unsigned UPDATE. Since #15992 the posture is also a live
+  Prometheus gauge (`xpf_dhcp_ddns_unsigned_nonloopback_active` /
+  `xpf_ddns_surface_a_unsigned_nonloopback_active`), and the valueless
+  `require-tsig` leaf (both DDNS surfaces) opts into fail-closed: strict
+  commit refuses a non-loopback `update-server` with no `tsig-key`, and the
+  backend refuses the exchange before sending if such a config arrives via
+  tolerant load. Default (no `require-tsig`) keeps unsigned source-IP-ACL
+  publishing working. `tsig-secret` is
   SENSITIVE: it is redacted in `DHCPDynamicDNSConfig.String()` (logging) AND,
   since #2053, by its `config.Secret` field type on every JSON/YAML marshal
   (so the compiled-config dump on `GET /api/v1/config` never leaks it — see

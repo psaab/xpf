@@ -54,6 +54,12 @@ func (c *xpfCollector) initDHCPDescriptors() {
 			"operator resolves the quarantined state file (#2650).",
 		nil, nil,
 	)
+	c.dhcpDDNSUnsignedActive = prometheus.NewDesc(
+		"xpf_dhcp_ddns_unsigned_nonloopback_active",
+		"1 while any enabled RFC2136 DHCP DDNS family targets a non-loopback "+
+			"update-server with no TSIG key, so its rcode is forgeable (#15992), else 0.",
+		nil, nil,
+	)
 	c.dhcpDDNSLastReconcileTs = prometheus.NewDesc(
 		"xpf_dhcp_ddns_last_reconcile_timestamp_seconds",
 		"Unix timestamp of the last DHCP dynamic-DNS reconcile pass.",
@@ -99,6 +105,12 @@ func (c *xpfCollector) initDHCPDescriptors() {
 		"xpf_ddns_surface_a_degraded",
 		"1 when the Surface A DDNS ownership state is unloadable and the "+
 			"manager is fail-closed (publishing/withdrawals suspended), else 0.",
+		nil, nil,
+	)
+	c.surfaceADDNSUnsignedActive = prometheus.NewDesc(
+		"xpf_ddns_surface_a_unsigned_nonloopback_active",
+		"1 while any RFC2136 Surface A provider targets a non-loopback "+
+			"update-server with no TSIG key, so its rcode is forgeable (#15992), else 0.",
 		nil, nil,
 	)
 }

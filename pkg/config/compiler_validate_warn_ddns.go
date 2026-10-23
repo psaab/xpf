@@ -333,6 +333,90 @@ func ddnsAllowlistMalformedTokens(s string) []string {
 	return bad
 }
 
+// ddnsUpdateServerIsLoopback reports whether an update-server's host is
+// loopback (127.0.0.0/8, ::1, or "localhost"). A hostname that is not a
+// literal IP is treated as non-loopback (fail-closed for require-tsig):
+// xpf cannot prove a name resolves only to loopback at commit time.
+func ddnsUpdateServerIsLoopback(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(s)
+	if err != nil {
+		host = s
+		if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
+			host = host[1 : len(host)-1]
+		}
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	return ip.IsLoopback()
+}
+
+// validateDDNSRequireTSIG (#15992) is the strict gate behind the
+// `require-tsig` leaf. When require-tsig is set on an rfc2136 policy whose
+// update-server is non-loopback and no tsig-key is configured, it returns
+// an error. The caller downgrades it to a warning on the tolerant path.
+// Default posture (require-tsig unset) is unchanged: unsigned updates to
+// source-IP-ACL servers keep working (warn-only, #4483).
+func validateDDNSRequireTSIG(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	checkDHCP := func(d *DHCPDynamicDNSConfig, label string) error {
+		if d == nil || !d.Enabled || !d.RequireTSIG {
+			return nil
+		}
+		backend := d.Backend
+		if backend == "" {
+			backend = "rfc2136"
+		}
+		if backend != "rfc2136" || d.UpdateServer == "" || d.TSIGKeyName != "" {
+			return nil
+		}
+		if ddnsUpdateServerIsLoopback(d.UpdateServer) {
+			return nil
+		}
+		return fmt.Errorf("%s require-tsig is set but update-server %q has no tsig-key; "+
+			"refusing to trust an unsigned, forgeable rcode from a non-loopback server — "+
+			"set tsig-key/tsig-secret or remove require-tsig", label, d.UpdateServer)
+	}
+	if err := checkDHCP(cfg.System.DHCPServer.DynamicDNS, "dhcp dynamic-dns"); err != nil {
+		return err
+	}
+	if err := checkDHCP(cfg.System.DHCPServer.DynamicDNSv6, "dhcpv6 dynamic-dns"); err != nil {
+		return err
+	}
+	if cfg.System.Services != nil && cfg.System.Services.DynamicDNS != nil {
+		for name, p := range cfg.System.Services.DynamicDNS.Providers {
+			if p == nil || !p.RequireTSIG {
+				continue
+			}
+			backend := p.Backend
+			if backend == "" {
+				backend = "rfc2136"
+			}
+			if backend != "rfc2136" || p.UpdateServer == "" || p.TSIGKeyName != "" {
+				continue
+			}
+			if ddnsUpdateServerIsLoopback(p.UpdateServer) {
+				continue
+			}
+			return fmt.Errorf("system services dynamic-dns provider %q require-tsig is set but "+
+				"update-server %q has no tsig-key; refusing to trust an unsigned, forgeable "+
+				"rcode from a non-loopback server — set tsig-key/tsig-secret or remove "+
+				"require-tsig", name, p.UpdateServer)
+		}
+	}
+	return nil
+}
+
 // validateSurfaceADDNSWarnings emits WARN-only commit-time messages for the
 // Surface A router/interface-address DDNS bindings + provider catalog (#2691
 // P2). It never returns an error: the typed schema already accepts the leaves,

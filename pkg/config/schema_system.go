@@ -1095,6 +1095,11 @@ func dhcpDynamicDNSSchema() *schemaNode {
 			placeholder: "<secret>",
 			children:    nil,
 		},
+		"require-tsig": {
+			desc:     "Require TSIG for RFC 2136 updates to a non-loopback update-server (#15992)",
+			args:     0,
+			children: nil,
+		},
 		// #2691 P1b / #2665: source/VRF binding for the RFC 2136 UPDATE
 		// transport (multi-WAN / VRF parity). All three are free-form leaves
 		// (an IP literal / interface name / routing-instance name) — the live
@@ -1150,6 +1155,7 @@ func ddnsServicesSchema() *schemaNode {
 			"tsig-key":              {desc: "TSIG key name for authenticated updates", args: 1, placeholder: "<key-name>", children: nil},
 			"tsig-algorithm":        {desc: "TSIG algorithm (e.g. hmac-sha256)", args: 1, placeholder: "<algorithm>", children: nil},
 			"tsig-secret":           {desc: "TSIG shared secret (sensitive; redacted in show output)", args: 1, placeholder: "<secret>", children: nil},
+			"require-tsig":          {desc: "Require TSIG for RFC 2136 updates to a non-loopback update-server (#15992)", args: 0, children: nil},
 			"source-address":        {desc: "Source address to bind the UPDATE socket to (#2665)", args: 1, placeholder: "<ip>", children: nil},
 			"destination-interface": {desc: "Egress interface to pin the UPDATE to (SO_BINDTODEVICE, #2665)", args: 1, placeholder: "<interface>", children: nil},
 			"routing-instance":      {desc: "Routing instance / VRF the UPDATE egresses from (#2665)", args: 1, placeholder: "<instance>", children: nil},

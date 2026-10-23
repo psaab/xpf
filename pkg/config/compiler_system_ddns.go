@@ -247,6 +247,12 @@ func compileDDNSProvider(name string, nodes ...*Node) *DDNSProvider {
 		}
 		for i := start; i < len(n.Keys); i++ {
 			k := n.Keys[i]
+			if k == "require-tsig" {
+				if _, ok := cur[k]; !ok {
+					cur[k] = "true"
+				}
+				continue
+			}
 			if ddnsProviderStringProps[k] && i+1 < len(n.Keys) {
 				if _, ok := cur[k]; !ok {
 					cur[k] = n.Keys[i+1]
@@ -275,6 +281,7 @@ func compileDDNSProvider(name string, nodes ...*Node) *DDNSProvider {
 		TSIGKeyName:          props["tsig-key"],
 		TSIGAlgorithm:        props["tsig-algorithm"],
 		TSIGSecret:           NewSecret(props["tsig-secret"]),
+		RequireTSIG:          props["require-tsig"] == "true",
 		SourceAddress:        props["source-address"],
 		DestinationInterface: props["destination-interface"],
 		RoutingInstance:      props["routing-instance"],
@@ -293,7 +300,7 @@ func compileDDNSProvider(name string, nodes ...*Node) *DDNSProvider {
 		CheckIPAllowlist:     props["checkip-allowlist"],
 	}
 	if p.Backend == "" && p.UpdateServer == "" && p.ForwardZone == "" && p.ReverseZone == "" && p.TSIGKeyName == "" &&
-		p.TSIGAlgorithm == "" && p.TSIGSecret.Reveal() == "" && p.SourceAddress == "" &&
+		p.TSIGAlgorithm == "" && p.TSIGSecret.Reveal() == "" && !p.RequireTSIG && p.SourceAddress == "" &&
 		p.DestinationInterface == "" && p.RoutingInstance == "" &&
 		p.Server == "" && p.Username == "" && p.Password.Reveal() == "" &&
 		p.URLTemplate == "" && p.OKResponse == "" && p.APIToken.Reveal() == "" &&

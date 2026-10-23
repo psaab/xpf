@@ -430,6 +430,10 @@ type DDNSProvider struct {
 	TSIGKeyName   string
 	TSIGAlgorithm string
 	TSIGSecret    Secret
+	// RequireTSIG (#15992) rejects a strict commit that sets this provider
+	// to rfc2136 with a non-loopback update-server but no tsig-key. The
+	// default (false) keeps unsigned source-IP-ACL BIND publishing working.
+	RequireTSIG bool
 	// SourceAddress / DestinationInterface / RoutingInstance scope the UPDATE
 	// TRANSPORT for this provider (the same source-binding model as the Surface B
 	// per-family leaves, #2665). All optional. As of #2846 the HTTP backends
@@ -1961,6 +1965,10 @@ type DHCPDynamicDNSConfig struct {
 	TSIGKeyName   string
 	TSIGAlgorithm string
 	TSIGSecret    Secret
+	// RequireTSIG (#15992) rejects a strict commit with a non-loopback
+	// update-server but no tsig-key. Default (false) preserves unsigned
+	// source-IP-ACL BIND publishing.
+	RequireTSIG bool
 	// SourceAddress / DestinationInterface / RoutingInstance scope the RFC
 	// 2136 UPDATE TRANSPORT (#2691 P1b / #2665). In a multi-WAN / VRF
 	// deployment a DNS UPDATE must egress from the right source IP, the right
