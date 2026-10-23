@@ -11831,30 +11831,43 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 if nat64_dst_v4.is_some() {
                                     // #15948 (H36-02): the fail-closed
                                     // drop must still trigger resolution
-                                    // of the v4 egress hop, throttled
-                                    // per (neigh_if, next_hop) exactly
-                                    // like the early sites, or no actor
-                                    // ever probes and every packet repeats
-                                    // this no-op. The throttle record
-                                    // above already bounds the window;
-                                    // fire only when it admits.
+                                    // of the v4 egress hop, once per
+                                    // throttle window. Window-start
+                                    // detection: the early arm writes
+                                    // (key, now_ns) via note_kernel_probe
+                                    // BEFORE this block, so a stored
+                                    // timestamp EQUAL to this packet's
+                                    // now_ns marks the window's first
+                                    // packet — fire then; a strictly
+                                    // older timestamp is a live window
+                                    // (suppress), and no timestamp
+                                    // means the early arm skipped the
+                                    // write (already probing), so the
+                                    // pending check governs.
                                     if let Some(next_hop) = decision.resolution.next_hop {
                                         let key = (neigh_if, next_hop);
-                                        if !binding.pending_neigh.contains_key(&key)
-                                            && !probe_throttled(
-                                                &binding.resolver_enqueue_throttle,
-                                                &key,
-                                                now_ns,
-                                            )
+                                        let window_start = binding
+                                            .resolver_enqueue_throttle
+                                            .get(&key)
+                                            .is_some_and(|t| *t == now_ns);
+                                        if window_start
+                                            && !binding.pending_neigh.contains_key(&key)
                                         {
                                             if let Some(resolver) = worker_ctx.neighbor_resolver {
-                                                try_enqueue_resolver(
-                                                    resolver,
-                                                    &mut binding.resolver_enqueue_throttle,
-                                                    &worker_ctx.forwarding.ifindex_to_name,
-                                                    key,
-                                                    now_ns,
-                                                );
+                                                // Throttle already recorded
+                                                // by the early arm for this
+                                                // window; enqueue directly
+                                                // via try_ would re-check and
+                                                // self-suppress, so record
+                                                // the resolver attempt by
+                                                // enqueuing without throttle.
+                                                if let Some(name) = worker_ctx
+                                                    .forwarding
+                                                    .ifindex_to_name
+                                                    .get(&neigh_if)
+                                                {
+                                                    resolver.enqueue(neigh_if, next_hop, name.clone());
+                                                }
                                             }
                                             if let Some(name) = worker_ctx
                                                 .forwarding

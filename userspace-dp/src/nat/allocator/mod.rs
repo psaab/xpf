@@ -1294,6 +1294,33 @@ impl PortAllocatorLiveState {
         }
     }
 
+    /// #15948 (H31-02): is the translated base owned by anyone OTHER
+    /// than `candidate_key`'s idle lease, for an any-remote widening?
+    /// Live owners (either live map) and other idle address-only
+    /// leases count; the candidate's own counted Any key does not.
+    pub(super) fn idle_merge_any_contended_by_other(
+        &self,
+        protocol: u8,
+        translated: TranslatedTuple,
+        candidate_key: &PersistentSourceKey,
+    ) -> bool {
+        let base = ReverseIdentityBaseKey {
+            protocol,
+            translated_ip: translated.ip,
+            translated_port: translated.port,
+        };
+        self.address_only_owner_counts_by_base.contains_key(&base)
+            || self.pat_owner_counts_by_base.contains_key(&base)
+            || self.persistent_by_source.iter().any(|(k, l)| {
+                k != candidate_key
+                    && l.address_only
+                    && !l.revoked
+                    && l.active_flows == 0
+                    && l.inbound_flows == 0
+                    && l.translated == translated
+            })
+    }
+
     fn add_live_reverse_owner_count(
         &mut self,
         protocol: u8,
@@ -6739,12 +6766,38 @@ impl SourceNatReservationSnapshot {
             }
         }
         let mut live = self.allocator.lock_live();
+        // Address-only retake: the old reverse identity may have been
+        // claimed live by another flow while the snapshot was
+        // outstanding (owns_old_bit is false for address-only, so the
+        // bitmap precheck cannot see it). Refuse rather than let
+        // insert_address_only_owner overwrite that flow below.
+        if previous.address_only {
+            let old_key = AddressOnlyReverseKey {
+                protocol: self.flow.protocol,
+                translated_ip: previous.translated.ip,
+                translated_port: previous.translated.port,
+                dst_ip: self.flow.dst_ip,
+                dst_port: self.flow.dst_port,
+            };
+            if live
+                .address_only_owners
+                .get(&old_key)
+                .is_some_and(|owner| *owner != self.flow)
+            {
+                return false;
+            }
+        }
         // #15948 (H31-01): after a sole-holder rollback_flow the flow
         // entry is already unlinked, so absence is the expected
         // sole-holder shape, not a refusal. A present entry must still
-        // name the replacement; a different tuple means retaken.
+        // name the replacement; a different tuple means retaken. A
+        // present entry with SURVIVING holders means rollback
+        // deliberately retained the replacement for those holders
+        // (drop_holder_locked) — overwriting it would strand their
+        // occupancy bit / reverse-owner token and erase their mask,
+        // so refuse and leave the replacement untouched.
         if let Some(current) = live.live_by_flow.get(&self.flow).copied() {
-            if current.translated != replacement {
+            if current.translated != replacement || current.holders != 0 {
                 return false;
             }
         }

@@ -61,11 +61,13 @@ fn restore_displaced_after_sole_holder_rollback_15948() {
     );
 }
 
-/// H31-01 control: multi-holder persistent restore still works (the arm
-/// the triage says survives). Exercised via the non-persistent twin's
-/// holder mask: a second holder keeps the entry present.
+/// H31-01 guard (review fold): when another holder survives rollback,
+/// the replacement is deliberately retained — restore must REFUSE and
+/// leave T2 (and its holder mask) untouched, not overwrite it and
+/// strand Worker(1)'s ownership. After Worker(1) releases, the sole-
+/// holder restore shape is what may proceed.
 #[test]
-fn restore_displaced_multi_holder_still_restores_15948() {
+fn restore_displaced_refuses_surviving_holder_15948() {
     let alloc = PortAllocator::new(1, 1024, 65535);
     let flow = v4_flow(40001);
     let t1 = TranslatedTuple {
@@ -93,8 +95,73 @@ fn restore_displaced_multi_holder_still_restores_15948() {
     assert!(alloc.reserve_flow(flow, t2, 0, false, 2_500, NatHolder::Worker(1)));
     let snapshot = snapshot.expect("snapshot");
     assert!(!alloc.rollback_flow(flow, t2, 3_000, NatHolder::Worker(0)));
-    assert!(snapshot.restore_displaced(t2, 4_000));
-    assert_eq!(alloc.debug_live_flow_translated(&flow), Some(t1));
+    assert!(
+        !snapshot.restore_displaced(t2, 4_000),
+        "restore must refuse while Worker(1) still holds the replacement"
+    );
+    assert_eq!(
+        alloc.debug_live_flow_translated(&flow),
+        Some(t2),
+        "the surviving holder's replacement must be left untouched"
+    );
+    let mask = alloc.holder_mask_for_flow(&flow).expect("holder mask");
+    assert_ne!(mask, 0, "the surviving holder mask must be preserved");
+    // Worker(1) can still release T2 cleanly (would be refused had
+    // restore overwritten the tuple).
+    assert!(alloc.release_flow(flow, t2, 5_000, NatHolder::Worker(1)));
+    assert_eq!(alloc.debug_live_flow_translated(&flow), None);
+}
+
+/// H31-01 guard: an address-only incumbent whose reverse identity was
+/// retaken by another flow while the snapshot was outstanding must
+/// not be restored over that flow.
+#[test]
+fn restore_displaced_refuses_retaken_address_only_15948() {
+    let alloc = PortAllocator::new(1, 1024, 65535);
+    let flow = v4_flow(40002);
+    let other = SourceNatFlowKey {
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)),
+        ..v4_flow(40003)
+    };
+    // Address-only preserves the source port, so flow's tuple is
+    // (POOL, 40002) and other's would collide only via the same dst.
+    let a1 = alloc
+        .reserve_address_only(flow, IpAddr::V4(POOL), 0, NatHolder::Untracked)
+        .expect("address-only reserve");
+    assert_eq!(a1.port, 40002);
+    let t2 = TranslatedTuple {
+        ip: IpAddr::V4(POOL),
+        port: 20022,
+    };
+    let mut snapshot = None;
+    assert!(alloc.reserve_flow_maybe_persistent(
+        flow,
+        t2,
+        0,
+        false,
+        2_000,
+        NatHolder::Untracked,
+        None,
+        true,
+        &mut snapshot,
+    ));
+    let snapshot = snapshot.expect("snapshot");
+    // A flow with the SAME source port + dst retakes the freed
+    // address-only reverse identity (POOL, 40002, dst).
+    let retaker = SourceNatFlowKey {
+        src_port: 40002,
+        ..other
+    };
+    let retaken = alloc
+        .reserve_address_only(retaker, IpAddr::V4(POOL), 0, NatHolder::Untracked)
+        .expect("retake of the freed address-only identity");
+    assert_eq!(retaken, a1);
+    assert!(alloc.rollback_flow(flow, t2, 3_000, NatHolder::Untracked));
+    assert!(
+        !snapshot.restore_displaced(t2, 4_000),
+        "restore must refuse when another flow retook the address-only identity"
+    );
+    assert_eq!(alloc.debug_live_flow_translated(&retaker), Some(retaken));
 }
 
 fn idle_record(
@@ -157,6 +224,61 @@ fn idle_lease_merge_updates_owner_counts_15948() {
         standby.import_idle_lease(&rec_other, &addrs, TIMEOUT_NS, 3_000),
         IdleLeaseImport::SkippedIdentityBusy,
         "the merged R2 grant must contend against a colliding lease"
+    );
+}
+
+/// H31-02 fold: merging a remote already owned by a LIVE flow (or
+/// widening to any-remote over another owner) must be refused with
+/// counts unchanged — contention may not be cleared by the
+/// candidate's own idle grants.
+#[test]
+fn idle_lease_merge_refuses_live_contended_remote_15948() {
+    let addrs = vec![IpAddr::V4(POOL)];
+    let standby = PortAllocator::new(1, 1024, 65535);
+    let src = Ipv4Addr::new(10, 0, 1, 1);
+    let r1 = (IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 443u16);
+    let r2 = (IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 443u16);
+    let rec1 = idle_record(src, 11, r1, 21002);
+    assert_eq!(
+        standby.import_idle_lease(&rec1, &addrs, TIMEOUT_NS, 1_000),
+        IdleLeaseImport::Installed
+    );
+    let live_flow = SourceNatFlowKey {
+        protocol: 6,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 7, 7)),
+        dst_ip: r2.0,
+        src_port: 21002,
+        dst_port: r2.1,
+        routing_scope: 0,
+    };
+    let live_tuple = standby
+        .reserve_address_only(live_flow, IpAddr::V4(POOL), 0, NatHolder::Untracked)
+        .expect("live flow must own the disjoint remote");
+    assert_eq!(live_tuple.port, 21002);
+    let counts_before = standby.debug_persistent_address_only_owner_count();
+    let rec2 = idle_record(src, 22, r2, 21002);
+    assert_eq!(
+        standby.import_idle_lease(&rec2, &addrs, TIMEOUT_NS, 2_000),
+        IdleLeaseImport::SkippedIdentityBusy,
+        "merge into a live-contended remote must be refused"
+    );
+    assert_eq!(
+        standby.debug_persistent_address_only_owner_count(),
+        counts_before,
+        "a refused merge must not change owner counts"
+    );
+    let mut rec_any = idle_record(src, 23, r1, 21002);
+    rec_any.permit_any_remote = true;
+    rec_any.permitted_remotes = Vec::new();
+    assert_eq!(
+        standby.import_idle_lease(&rec_any, &addrs, TIMEOUT_NS, 3_000),
+        IdleLeaseImport::SkippedIdentityBusy,
+        "any-remote widening over another owner must be refused"
+    );
+    assert_eq!(
+        standby.import_idle_lease(&rec1, &addrs, TIMEOUT_NS, 4_000),
+        IdleLeaseImport::SkippedExisting,
+        "idempotent self-merge must not be refused"
     );
 }
 
