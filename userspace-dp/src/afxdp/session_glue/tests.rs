@@ -783,6 +783,7 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
         0,
         0,
         None,
+        false,
     )
     .expect("resolved");
 
@@ -4370,6 +4371,225 @@ fn fabric_gate_adopts_on_local_established_when_shared_pending_16217() {
         assert!(!gate(&sessions), "reverse-only local row must not adopt");
     }
 }
+/// #16217: the adopted ForwardCandidate must not be terminated as
+/// ha_inactive by the receiving worker's HA-activity enforcement.
+/// Live shape (cell40/41): fw1's last resolution for the heavy wire
+/// tuples read `ha_inactive ingress-ifindex=4 egress-ifindex=14
+/// next-hop=172.16.80.200` while fw1's own HA groups already read
+/// `rg1 active=true` — the adoption gate had proven Established +
+/// this node is the RG owner post-takeover, yet the resolution the
+/// adoption re-resolve produced (a local WAN ForwardCandidate,
+/// egress 14 in the unit fixture's ifindex-12 spelling) was demoted
+/// and the poll filter (`ForwardCandidate` only) discarded it, so
+/// every adopted tuple dropped forever. The adopted resolution must
+/// bypass the terminal; the SAME resolution without adoption stays
+/// fail-closed.
+///
+/// FAIL-ON-REVERT: drop the `fabric_adopted_resolution` conversion
+/// (or the `true` at the poll adoption callsite) and the adopted leg
+/// resolves HAInactive instead of ForwardCandidate.
+#[test]
+fn adopted_forward_candidate_bypasses_ha_inactive_terminal_16217() {
+    // (a) Pure reclassification, all sub-arms.
+    let forwarding = test_forwarding_state_with_fabric();
+    let candidate = ForwardingResolution {
+        egress_ifindex: 12,
+        ..test_resolution()
+    };
+    let demoted = ForwardingResolution {
+        disposition: ForwardingDisposition::HAInactive,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+        ..candidate
+    };
+    assert_eq!(
+        fabric_adopted_resolution(&forwarding, candidate, demoted),
+        candidate,
+        "adopted: HAInactive-demoted ForwardCandidate is restored"
+    );
+    let cluster_demoted = ForwardingResolution {
+        disposition: ForwardingDisposition::ClusterTerminalHAInactive,
+        ..demoted
+    };
+    assert_eq!(
+        fabric_adopted_resolution(&forwarding, candidate, cluster_demoted),
+        candidate,
+        "adopted: ClusterTerminalHAInactive-demoted ForwardCandidate is restored"
+    );
+    // A non-candidate lookup stays terminal even when adopted
+    // (adoption proved establishment, not a route).
+    let missing = ForwardingResolution {
+        disposition: ForwardingDisposition::MissingNeighbor,
+        ..candidate
+    };
+    assert_eq!(
+        fabric_adopted_resolution(&forwarding, missing, demoted),
+        demoted,
+        "adopted: non-ForwardCandidate lookups keep the HA terminal"
+    );
+    // An active enforced outcome is kept verbatim.
+    assert_eq!(
+        fabric_adopted_resolution(&forwarding, candidate, candidate),
+        candidate,
+        "adopted: surviving ForwardCandidate is untouched"
+    );
+    // Unknown owner (egress names no EgressInterface row) stays
+    // terminal: adoption proved the session, not route ownership.
+    let unowned = ForwardingResolution {
+        egress_ifindex: 999,
+        ..candidate
+    };
+    let unowned_demoted = ForwardingResolution {
+        disposition: ForwardingDisposition::HAInactive,
+        ..unowned
+    };
+    assert_eq!(
+        fabric_adopted_resolution(&forwarding, unowned, unowned_demoted),
+        unowned_demoted,
+        "adopted: unknown-egress-RG demotion stays fail-closed"
+    );
+
+    // (b) End-to-end through the production resolver: an Established
+    // synced wire session whose local WAN egress RG reads INACTIVE
+    // in this worker's HA snapshot (the receiving-worker enforcement
+    // shape). Without adoption the resolve is HAInactive (the live
+    // drop); with adoption it is the local ForwardCandidate.
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    let decision = SessionDecision {
+        resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
+            .expect("fabric redirect"),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let translated_key = forward_wire_key(&key, decision.nat);
+    let established = crate::session::TcpHandshakeState::Established.to_wire();
+    let entry = SyncedSessionEntry { key: translated_key.clone(),
+    decision,
+    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x18,
+    generation: 0,
+    session_id: 4243,
+    tcp_close_class: 0, tcp_handshake_state: established, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
+    let mut forwarding = test_forwarding_state_with_fabric();
+    forwarding.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        host: Ipv4Addr::new(172, 16, 80, 0),
+        ifindex: 12,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding.neighbors.insert(
+        (12, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+        NeighborEntry {
+            mac: [0xde, 0xad, 0xbe, 0xef, 0x80, 0x00],
+        },
+    );
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry,
+    );
+    // Premise: the adoption gate qualifies this tuple.
+    assert!(
+        crate::afxdp::shared_ops::fabric_adoption_established_for_wire(
+            &sessions,
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &translated_key,
+            1_000_000,
+        ),
+        "premise: gate must qualify the Established wire tuple"
+    );
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let peer_worker_commands = Vec::new();
+    // Receiving-worker HA snapshot: RG1 reads INACTIVE here even
+    // though the adoption gate proved this node is the owner.
+    let mut ha_state = BTreeMap::new();
+    ha_state.insert(1, inactive_ha_runtime(1));
+    let flow = SessionFlow {
+        src_ip: translated_key.src_ip,
+        dst_ip: translated_key.dst_ip,
+        forward_key: translated_key.clone(),
+    };
+    let resolve_as = |sessions: &mut SessionTable, adopted: bool| {
+        resolve_flow_session_decision_with_conntrack_and_payload(
+            sessions,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &peer_worker_commands,
+            empty_worker_commands_by_id(),
+            &forwarding,
+            &ha_state,
+            &dynamic_neighbors,
+            &flow,
+            1_000_000,
+            1,
+            PROTO_TCP,
+            0x18,
+            0,
+            21,
+            0,
+            true,
+            true,
+            0,
+            0,
+            None,
+            adopted,
+        )
+        .expect("wire session should resolve")
+    };
+    // Fail-closed control: the identical resolve WITHOUT adoption
+    // terminates HAInactive — this is the live drop being fixed, and
+    // it must remain the outcome for every non-adopted flow.
+    let mut control_sessions = SessionTable::new();
+    assert_eq!(
+        resolve_as(&mut control_sessions, false)
+            .decision
+            .resolution
+            .disposition,
+        ForwardingDisposition::HAInactive,
+        "non-adopted resolve must stay fail-closed on the HA terminal"
+    );
+    // Adopted: the ForwardCandidate survives enforcement, exactly
+    // the outcome the poll adoption filter admits.
+    let adopted = resolve_as(&mut sessions, true);
+    assert_eq!(
+        adopted.decision.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "adopted ForwardCandidate must bypass the ha_inactive terminal"
+    );
+    assert_eq!(adopted.decision.resolution.egress_ifindex, 12);
+    // With RG1 reading inactive the synced hit stays transient
+    // (`keep_transient`): the worker row lands via the poll loop's
+    // Owner-verdict purge/promote after this resolve in production.
+    // The resolve contract under test here is the disposition the
+    // adoption filter admits.
+    assert!(adopted.deferred_synced_purge.is_some());
+}
+
 
 #[test]
 fn resolve_flow_session_decision_promotes_local_synced_translated_hit_on_active_fabric_ingress() {
@@ -13592,6 +13812,7 @@ fn local_hit_purge_removes_shared_and_replicates_14666() {
         0,
         0,
         None,
+        false,
     );
     let mut resolved = resolved_opt.expect("transient local hit must resolve");
     assert!(
@@ -13724,6 +13945,7 @@ fn local_hit_purge_preserves_replacement_shared_entry_14666() {
         0,
         0,
         None,
+        false,
     )
     .expect("hit resolves");
     let shared = SharedSessionRefs {
