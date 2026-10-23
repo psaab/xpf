@@ -93,10 +93,58 @@ func TestHostInbound16000PaddedAnyServiceDoesNotSurvivePoison(t *testing.T) {
 			t.Fatalf("recognized token %q survived poison: %q", tok, poisoned)
 		}
 	}
-	// Padded known operand is NOT unknown: ` SSH ` except under `all`
-	// must subtract, not poison the whole dimension.
-	if hostInboundHasUnknownExceptOperand([]string{" SSH "}, KnownHostInboundSystemServices) {
-		t.Fatal("padded known operand misclassified as unknown")
+	// Padded known operand is NOT unknown: `" SSH "` except under `all`
+	// must subtract at compile time — asserted on compiled semantics
+	// (ssh NOT admitted), not on the helper's return value. Before the
+	// filter normalized its excluded tokens, the padded operand built no
+	// exclusion and ssh stayed in the `all` expansion.
+	paddedTree, errs := NewParser(`security { zones { security-zone trust { host-inbound-traffic {
+		system-services { all; " SSH " except; }
+	} } } }`).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("parse: %v", errs)
+	}
+	paddedCfg, err := CompileConfigLenient(paddedTree)
+	if err != nil {
+		t.Fatalf("lenient: %v", err)
+	}
+	paddedHIB := paddedCfg.Security.Zones["trust"].HostInboundTraffic
+	if len(paddedHIB.SystemServices) == 0 {
+		t.Fatal("padded known exclusion poisoned the dimension; want all-minus-ssh")
+	}
+	for _, tok := range paddedHIB.SystemServices {
+		if hostInboundEffectiveToken(tok) == "ssh" {
+			t.Fatalf("padded \" SSH \" except left ssh admitted: %q", paddedHIB.SystemServices)
+		}
+		for _, m := range HostInboundServiceMatch(tok, "ip") {
+			for _, em := range HostInboundServiceMatch("ssh", "ip") {
+				if !m.Reject && !em.Reject && m.Proto == em.Proto {
+					for _, p := range m.Ports {
+						for _, ep := range em.Ports {
+							if p == ep {
+								t.Fatalf("token %q still admits ssh tuple %v/%d", tok, m.Proto, p)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	// Same for protocols: padded `" OSPF "` except must remove ospf.
+	protoTree, errs := NewParser(`security { zones { security-zone trust { host-inbound-traffic {
+		protocols { all; " OSPF " except; }
+	} } } }`).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("parse: %v", errs)
+	}
+	protoCfg, err := CompileConfigLenient(protoTree)
+	if err != nil {
+		t.Fatalf("lenient: %v", err)
+	}
+	for _, tok := range protoCfg.Security.Zones["trust"].HostInboundTraffic.Protocols {
+		if hostInboundEffectiveToken(tok) == "ospf" {
+			t.Fatalf("padded \" OSPF \" except left ospf admitted: %q", protoCfg.Security.Zones["trust"].HostInboundTraffic.Protocols)
+		}
 	}
 	// End-to-end through the merged view: a padded any-service contributor
 	// unioned with an unknown-except contributor admits nothing.

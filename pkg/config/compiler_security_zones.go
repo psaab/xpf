@@ -368,7 +368,11 @@ func hostInboundFilterExcept(tokens, excluded []string, protocols bool) []string
 	}
 	excludedSet := make(map[string]bool, len(excluded))
 	for _, token := range excluded {
-		canonical := strings.ToLower(token)
+		// Normalize (trim + lower-case) before lookup: a padded `" SSH "`
+		// operand is the ssh exclusion enforcement sees, so it must build
+		// the same exclusion set — otherwise it subtracts nothing and ssh
+		// stays admitted under `all`.
+		canonical := hostInboundEffectiveToken(token)
 		known := KnownHostInboundProtocols[canonical]
 		if !protocols {
 			known = KnownHostInboundSystemServices[canonical]
@@ -388,7 +392,7 @@ func hostInboundFilterExcept(tokens, excluded []string, protocols bool) []string
 		// These meta-tokens have no tuple of their own. In particular,
 		// expanding an excluded `all` here would poison the union against
 		// every concrete token.
-		canonical := strings.ToLower(token)
+		canonical := hostInboundEffectiveToken(token)
 		if canonical == "all" || canonical == "any-service" {
 			continue
 		}
@@ -415,7 +419,7 @@ func hostInboundFilterExcept(tokens, excluded []string, protocols bool) []string
 	out := make([]string, 0, len(tokens)+len(expansion))
 	invalidExcept := false
 	for _, token := range tokens {
-		canonical := strings.ToLower(token)
+		canonical := hostInboundEffectiveToken(token)
 		if canonical == "except" {
 			invalidExcept = true
 			continue
