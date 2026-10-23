@@ -1142,3 +1142,90 @@ deploy_install_deb() {
 		die "installed $base on $rinst but could not remove temporary .deb slot $tmpdir"
 	fi
 }
+
+# ── Prebuilt-deb selection (#16308) ─────────────────────────────────
+# `make cluster-deploy` used to unconditionally rebuild a stock deb via
+# its .PHONY `deb` prerequisite, silently discarding a prebuilt
+# high-version deb (e.g. `make deb DEB_VERSION=99.0.x+…`, the #16219
+# downgrade-avoidance workflow) and then dying inside apt on the
+# downgrade. Selection here is by Debian VERSION (dpkg --compare-versions),
+# never mtime: mtime is what the just-rebuilt stock deb always wins.
+#
+# deploy_deb_version <deb_path> -> echo the version parsed from the
+# package filename (xpf_<version>_<arch>.deb), or nothing (rc 1) when the
+# name does not parse. Filename, not `dpkg-deb -f`: every deb the Makefile
+# stages is named for the DEB_VERSION it was built with, and the parse
+# must also work on fixture files in the hermetic selftest.
+deploy_deb_version() {
+	local base ver
+	base=$(basename "$1")
+	case "$base" in
+		xpf_*_*.deb) ;;
+		*) return 1 ;;
+	esac
+	ver="${base#xpf_}"
+	ver="${ver%_*}"
+	[[ -n "$ver" ]] || return 1
+	printf '%s\n' "$ver"
+}
+
+# deploy_deb_newest <dir> -> echo the path of the highest-version
+# xpf_*.deb in <dir> by dpkg version ordering, or nothing (rc 1) when the
+# dir holds no parseable deb. Ties (same version, different arch/build)
+# break by newest mtime so the result is deterministic, matching the old
+# `ls -t` behaviour within a single version.
+deploy_deb_newest() {
+	local dir="$1" deb ver best="" best_ver=""
+	[[ -d "$dir" ]] || return 1
+	for deb in "$dir"/xpf_*.deb; do
+		[[ -f "$deb" ]] || continue
+		ver=$(deploy_deb_version "$deb") || continue
+		if [[ -z "$best" ]]; then
+			best="$deb"; best_ver="$ver"; continue
+		fi
+		if dpkg --compare-versions "$ver" gt "$best_ver" 2>/dev/null; then
+			best="$deb"; best_ver="$ver"
+		elif [[ "$ver" == "$best_ver" && "$deb" -nt "$best" ]]; then
+			best="$deb"
+		fi
+	done
+	[[ -n "$best" ]] || return 1
+	printf '%s\n' "$best"
+}
+
+# deploy_select_deb <dir> -> echo the deb to deploy in <dir>:
+#   1. XPF_DEPLOY_DEB_PATH: that exact file (absolute, or relative to
+#      <dir>), die if missing/unparseable. An explicit PATH is the most
+#      specific pin and WINS over XPF_DEPLOY_DEB_VERSION when both are
+#      set (per-invocation candidate pins, e.g. test-rolling-upgrade,
+#      must not be overridden by a version pin from the environment).
+#   2. XPF_DEPLOY_DEB_VERSION (exported by the Makefile deploy targets
+#      when DEB_VERSION was explicit): the xpf_<version>_*.deb in <dir>,
+#      die if absent — an explicitly built deb must deploy even if a
+#      higher stale deb sits beside it.
+#   3. Otherwise the highest Debian version present (deploy_deb_newest).
+# Used by every deploy/attestation site so they can never disagree about
+# which artifact shipped (#16308).
+deploy_select_deb() {
+	local dir="$1" pin="${XPF_DEPLOY_DEB_PATH:-}" want="${XPF_DEPLOY_DEB_VERSION:-}" cand
+	if [[ -n "$pin" ]]; then
+		cand="$pin"
+		[[ "$cand" = /* ]] || cand="$dir/$cand"
+		[[ -f "$cand" ]] ||
+			die "XPF_DEPLOY_DEB_PATH=$pin does not name an existing .deb (looked for $cand)"
+		deploy_deb_version "$cand" >/dev/null ||
+			die "XPF_DEPLOY_DEB_PATH=$pin is not a parseable xpf_<version>_<arch>.deb"
+		printf '%s\n' "$cand"
+		return 0
+	fi
+	if [[ -n "$want" ]]; then
+		for cand in "$dir"/xpf_"$want"_*.deb; do
+			if [[ -f "$cand" ]]; then
+				printf '%s\n' "$cand"
+				return 0
+			fi
+		done
+		die "XPF_DEPLOY_DEB_VERSION=$want: no xpf_${want}_*.deb in $dir (was 'make deb DEB_VERSION=$want' run?)"
+	fi
+	deploy_deb_newest "$dir"
+}
