@@ -2150,6 +2150,108 @@ impl SessionTable {
         }
         Some(entry.metadata.ingress_zone == arrival_zone)
     }
+    /// #16217 (fabric adoption): is the row behind `wire_key` marked
+    /// fabric-established (adopted via the fabric path)? The canonical key is
+    /// derived exactly as the adoption gate derives it — forward-wire alias
+    /// (ambiguity fails closed) or a direct probe of the wire key — and only
+    /// a marked, non-reverse, non-closing, Established, pending-cleared,
+    /// non-idle-crossed row qualifies. Anything else is `false`, so
+    /// non-adopted flows keep the fail-closed HA terminal bit-identically.
+    pub(crate) fn fabric_established_for_wire_at(&self, wire_key: &SessionKey, now_ns: u64) -> bool {
+        if let Some((matched, _origin)) =
+            self.find_forward_wire_match_with_origin_at(wire_key, now_ns)
+            && let Some(entry) = self.entry_by_key(&matched.key)
+            && entry.fabric_established
+            && !entry.metadata.is_reverse
+            && !entry.closing
+            && entry.established
+            && !entry.handshake_pending
+        {
+            return true;
+        }
+        if let Some(record) = self.probe_record_with_origin(wire_key)
+            && now_ns.saturating_sub(record.entry.last_seen_ns) <= record.entry.expires_after_ns
+            && record.entry.fabric_established
+            && !record.entry.metadata.is_reverse
+            && !record.entry.closing
+            && record.entry.established
+            && !record.entry.handshake_pending
+        {
+            return true;
+        }
+        false
+    }
+
+    /// #16217 (fabric adoption): mark the row(s) behind `wire_key` as
+    /// fabric-established. Called ONLY from the poll adoption site after the
+    /// gate proved the tuple Established with this node as RG owner and the
+    /// adopted resolve yielded a local `ForwardCandidate`. Marks the local
+    /// serving row the gate qualified (canonical key via the wire alias, or
+    /// the wire-keyed row itself); a no-op when no such row exists yet — the
+    /// resolve that follows materializes it and the adoption site marks again
+    /// on the resolved key.
+    pub(crate) fn mark_fabric_established_for_wire(&mut self, wire_key: &SessionKey, now_ns: u64) {
+        if let Some(canonical) = self.local_established_for_wire_at(wire_key, now_ns)
+            && let Some(entry) = self.entry_by_key_mut(&canonical)
+        {
+            entry.fabric_established = true;
+        }
+        if let Some(record_key) = self.probe_record_with_origin(wire_key).map(|r| r.key.clone())
+            && let Some(entry) = self.entry_by_key_mut(&record_key)
+            && !entry.metadata.is_reverse
+        {
+            entry.fabric_established = true;
+        }
+    }
+
+    /// #16217 (serving context): does a SHARED synced row for `wire_key`
+    /// (either map, canonical/reverse/wire orientation) carry the Established
+    /// handshake wire? This is the post-failover serving proof for a flow the
+    /// peer established and this node now owns: the session-hit re-resolve of
+    /// such a tuple runs with the adopted exemption even when no local row
+    /// was marked (the local row may live on another worker). Scope-exact:
+    /// full `SessionKey` equality (incl. routing domain) against the row's
+    /// key, its reverse companion, or its NAT'd wire key — never `bare_tuple`.
+    pub(crate) fn shared_established_for_wire_at(
+        &self,
+        shared_sessions: &std::sync::Arc<std::sync::Mutex<rustc_hash::FxHashMap<SessionKey, crate::afxdp::SyncedSessionEntry>>>,
+        shared_forward_wire_sessions: &std::sync::Arc<std::sync::Mutex<rustc_hash::FxHashMap<SessionKey, crate::afxdp::SyncedSessionEntry>>>,
+        wire_key: &SessionKey,
+    ) -> bool {
+        let established = crate::session::TcpHandshakeState::Established.to_wire();
+        for map in [shared_sessions, shared_forward_wire_sessions] {
+            let Ok(guard) = map.lock() else { continue };
+            for entry in guard.values() {
+                if entry.tcp_handshake_state != established {
+                    continue;
+                }
+                if entry.key == *wire_key {
+                    return true;
+                }
+                let reverse_key = crate::session::reverse_session_key(&entry.key, entry.decision.nat);
+                if reverse_key == *wire_key {
+                    return true;
+                }
+                let entry_wire = crate::session::forward_wire_key(&entry.key, entry.decision.nat);
+                if entry_wire == *wire_key {
+                    return true;
+                }
+                let rev_wire = crate::session::forward_wire_key(&reverse_key, entry.decision.nat);
+                if rev_wire == *wire_key {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// #16217: test-only read of the fabric-established mark.
+    #[cfg(test)]
+    pub(crate) fn fabric_established_for_test(&self, key: &SessionKey) -> bool {
+        self.entry_by_key(key)
+            .map(|entry| entry.fabric_established)
+            .unwrap_or(false)
+    }
 
     pub fn entry_with_origin(
         &self,

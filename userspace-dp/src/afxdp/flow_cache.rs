@@ -351,6 +351,18 @@ pub(super) struct FlowCacheEntry {
     /// (no resolved next-hop, e.g. a fabric/local disposition); such a flow
     /// is never neighbor-stale.
     pub(super) neighbor_shard: u16,
+    /// #16217 (fabric adoption): this entry was seeded by the fabric-adoption
+    /// resolve — the adoption gate (`fabric_adoption_established_for_wire`)
+    /// had already proven, for this exact wire tuple, an Established session
+    /// and this node as the RG owner post-takeover. Cache-hit revalidation
+    /// must not evict such an entry on the `EnforceChanged` arm: the receiving
+    /// worker's HA snapshot may still read the egress RG inactive (the exact
+    /// stale-snapshot shape the adoption resolve bypasses), so evicting here
+    /// only re-runs the same demotion on the session-hit path. Sticky for the
+    /// entry's life; only ever set at seed time from the adoption outcome
+    /// (`stage_flow_cache_seed(fabric_established = true)`), never by an
+    /// ordinary slow-path resolve — non-adopted flows stay fail-closed.
+    pub(super) fabric_established: bool,
 }
 
 /// #5147: sentinel `neighbor_shard` for a cached flow with no resolved
@@ -770,6 +782,7 @@ impl FlowCacheEntry {
             // and re-resolved to the current neighbor state.
             neighbor_mac_epoch,
             neighbor_shard,
+            fabric_established: false,
         })
     }
     #[allow(clippy::too_many_arguments)]
@@ -905,6 +918,7 @@ impl FlowCacheEntry {
             last_used_epoch: 0,
             neighbor_mac_epoch: 0,
             neighbor_shard: NEIGHBOR_SHARD_NONE,
+            fabric_established: false,
         })
     }
 }
@@ -1497,7 +1511,17 @@ impl FlowCache {
                 // of never. Mirrors the worker session-expiry gate.
                 let owner = entry.stamp.owner_rg_id;
                 let current_epoch = rg_epochs[rg_epoch_index(owner)].load(Ordering::Relaxed);
-                if current_epoch != entry.stamp.owner_rg_epoch {
+                // #16217: a fabric-established (adopted) entry is exempt from
+                // the RG-epoch/lease lookup fences: the adoption gate already
+                // proved this node owns the egress RG, and the epoch bump +
+                // lease drop AT the failover are exactly the fences that
+                // evicted adopted entries before the hit path could serve
+                // them (fw0 post-FO stats: lookup_rg_epoch/lease evictions,
+                // enforce_changed=0). Other fences (generation, deny expiry,
+                // scheduler) still apply.
+                if entry.fabric_established {
+                    // skip epoch + lease fences for adopted entries
+                } else if current_epoch != entry.stamp.owner_rg_epoch {
                     self.entries[entry_idx] = None;
                     self.note_eviction(FlowCacheEvictionArm::LookupRgEpoch);
                     self.demote_lru(set, way as u8);
@@ -1521,7 +1545,7 @@ impl FlowCache {
                 // `cached_flow_decision_valid` re-checks HA against the
                 // same live map on the production path.
                 let current_lease = FlowCacheStamp::current_lease_until(owner, ha_state);
-                if entry.stamp.owner_rg_lease_until != 0
+                if !entry.fabric_established && entry.stamp.owner_rg_lease_until != 0
                     && !ha_state.is_empty()
                     && (current_lease == 0 || now_secs > current_lease)
                 {

@@ -225,13 +225,22 @@ pub(super) fn stage_flow_cache_hit(
         let neighbor_mac_stale = cached.neighbor_mac_epoch_stale(worker_ctx.dynamic_neighbors);
         // #16220: sub-attribute the decision revalidation so the live
         // readout names the exact rejecting check.
+        // #16217: an entry seeded by the fabric-adoption resolve carries
+        // `fabric_established` — the adoption gate already proved this exact
+        // tuple Established with this node as RG owner. The `EnforceChanged`
+        // arm must not evict it: the receiving worker's HA snapshot may still
+        // read the egress RG inactive (the stale-snapshot shape the adoption
+        // resolve itself bypasses), and evicting only re-runs that demotion
+        // on the session-hit path. Only `EnforceChanged` is suppressed; the
+        // neighbor-MAC, generation, lease, and remaining decision arms still
+        // revalidate the entry every hit. Non-adopted entries are untouched.
         let invalid_reason = if neighbor_mac_stale
             || (fabric_link_ingress
                 && cached.decision.resolution.disposition == ForwardingDisposition::FabricRedirect)
         {
             None
         } else {
-            crate::afxdp::forwarding::cached_flow_decision_invalid_reason_for_flow(
+            let reason = crate::afxdp::forwarding::cached_flow_decision_invalid_reason_for_flow(
                 worker_ctx.forwarding,
                 worker_ctx.ha_state,
                 worker_ctx.dynamic_neighbors,
@@ -247,7 +256,20 @@ pub(super) fn stage_flow_cache_hit(
                     resolution_target_for_session(flow, cached.decision),
                 ),
                 cached.decision.resolution,
-            )
+            );
+            if cached.fabric_established
+                && matches!(
+                    reason,
+                    Some(
+                        crate::afxdp::forwarding::CachedDecisionInvalid::EnforceChanged
+                            | crate::afxdp::forwarding::CachedDecisionInvalid::ForwardCandidateEgressDeparted
+                    )
+                )
+            {
+                None
+            } else {
+                reason
+            }
         };
         // #16222 DISC (scratch observability, debug-log builds only):
         // per-tuple dump for starved-tuple diagnosis — seeded decision
