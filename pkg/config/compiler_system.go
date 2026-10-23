@@ -715,10 +715,22 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 			for _, dstNode := range child.FindChildren("destination") {
 				dsts = append(dsts, firewallMatchValues(dstNode)...)
 			}
-			// Deduplicate exact repeats (a bracket list repeated as a
-			// second leaf installs one route, not two identical ones).
-			seenDst := make(map[string]bool, len(dsts))
-			sys.BackupRouterDsts = sys.BackupRouterDsts[:0]
+			// #15944 H21-01: ACCUMULATE across backup-router nodes, do
+			// not reset. A second node — a bare next-hop update
+			// (`backup-router <nh2>;` with no destination), a sibling
+			// destination statement, or a second top-level `system`
+			// root re-entering compileSystem via per-root dispatch —
+			// previously truncated the list to that one node's
+			// destinations, and a bare node wiped it entirely, so the
+			// management-VRF builder fell back to the implicit
+			// family default route instead of the authored prefixes.
+			// Deduplicate exact repeats across the accumulated set (a
+			// bracket list repeated as a second leaf installs one
+			// route, not two identical ones).
+			seenDst := make(map[string]bool, len(sys.BackupRouterDsts)+len(dsts))
+			for _, d := range sys.BackupRouterDsts {
+				seenDst[d] = true
+			}
 			for _, d := range dsts {
 				if d == "" || seenDst[d] {
 					continue
@@ -728,8 +740,6 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 			}
 			if len(sys.BackupRouterDsts) > 0 {
 				sys.BackupRouterDst = sys.BackupRouterDsts[0]
-			} else {
-				sys.BackupRouterDst = ""
 			}
 		case "commit":
 			for _, key := range child.Keys[1:] {
@@ -1428,12 +1438,19 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 		// can warn and `show system services` can report it as
 		// configured-but-not-served instead of a silent no-op; svcNode
 		// children carry the packed spellings (#13089 shapes).
-		if ncNode := svcNode.FindChild("netconf"); ncNode != nil &&
-			blockHasNetconfSSH15781(ncNode) {
-			if sys.Services == nil {
-				sys.Services = &SystemServicesConfig{}
+		// #15944 H21-03: iterate EVERY `netconf` sibling, not only the
+		// first. `netconf { } netconf { ssh; }` under one services node
+		// keeps both siblings, and the singular FindChild consulted
+		// only the empty first node, so NetconfSSH stayed false and
+		// both the show row and the typed-flag warning vanished.
+		for _, ncNode := range svcNode.FindChildren("netconf") {
+			if blockHasNetconfSSH15781(ncNode) {
+				if sys.Services == nil {
+					sys.Services = &SystemServicesConfig{}
+				}
+				sys.Services.NetconfSSH = true
+				break
 			}
-			sys.Services.NetconfSSH = true
 		}
 		// DNS service (#15698: iterate every `dns` sibling — a bare
 		// `set system services dns` leaf beside a braced dns container
