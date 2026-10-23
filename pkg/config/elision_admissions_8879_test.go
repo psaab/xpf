@@ -1322,15 +1322,9 @@ func TestUnadmittedTopLevelPairsAreAdjudicated8925(t *testing.T) {
 		// packedBodyChildren, which is what keeps `snmp client-list` out of the
 		// #2419 divergence inventory.
 		"snmp client-list": reasonNoBody,
-		// #15943: direct security identity spellings are a single opaque
-		// schema node each (accepted-only leaves), so no body is stranded.
-		"security authentication-source": reasonNoBody,
-		"security device-information":    reasonNoBody,
-		// user-identification declares opaque sub-stanza names but its own
-		// stanza is compiler-read from raw AST and warned; eliding it packs
-		// the same keys the warning walker scans, so it is not admitted to
-		// compact scopes but does not silently vanish.
-		"security user-identification": "declined: measured SAME for accepted-only identity diagnostics — braced/flat/packed forms all warn via userIdentificationWarnings and carry no typed runtime state",
+		// #15943 security identity pairs were initially registered here, but
+		// fold-2 admitted them to compactNormalizeInScope (leaf preservation),
+		// so they correctly leave this un-admitted population.
 	}
 
 	got := map[string]string{}

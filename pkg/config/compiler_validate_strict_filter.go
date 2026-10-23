@@ -1148,10 +1148,6 @@ func validateFilterMatchValuesStrict(cfg *Config) error {
 // operator-visible at commit. The walk is deterministic (filters sorted by name,
 // terms in config order). On the tolerant load / peer-sync path the caller
 // downgrades the returned error to a warning (#1960 no-brick).
-func validateFilterFlexMatchStrict(cfg *Config) error {
-	return validateFilterFlexMatchStrictOpts(cfg, false)
-}
-
 func validateFilterFlexMatchStrictOpts(cfg *Config, allowValueMissing bool) error {
 	if cfg == nil {
 		return nil
