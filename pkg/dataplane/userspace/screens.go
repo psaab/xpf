@@ -211,21 +211,23 @@ func ScreenMissingProfileRefs(cfg *config.Config) []ScreenMissingProfileRef {
 }
 
 // ScreenUnresolvedDisposition describes what the dataplane CURRENTLY does with a
-// zone whose screen profile does not resolve. It is deliberately narrow: the
-// screen checks are skipped, and nothing else about the packet's treatment
-// changes. An earlier draft said the traffic "is forwarded UNSCREENED", which
-// reads as a permit — an operator could take it to mean the firewall is passing
-// traffic it would otherwise deny. It is not: zone security policy still
-// evaluates the packet normally.
+// zone whose screen profile does not resolve. It is deliberately narrow: only
+// the substituted conservative default (see screenSubstitutedDefaultTail)
+// applies, and nothing else about the packet's treatment changes. An earlier
+// draft said the traffic "is forwarded UNSCREENED", which reads as a permit —
+// an operator could take it to mean the firewall is passing traffic it would
+// otherwise deny. It is not: zone security policy still evaluates the packet
+// normally.
 //
 // The #5806 tag in the text is load-bearing, NOT decoration. The decision this
 // sentence describes lives in the Rust runtime
-// (userspace-dp/src/screen/mod.rs returns ScreenVerdict::Pass on the None
-// branch) and is NOT derivable from the Go control plane, so this string is a
-// hardcoded claim about code that lives somewhere else — precisely the shape
-// that goes stale silently when the other side changes. The fail-closed-vs-pass
-// posture is an OPEN design decision owned by #5806; when it is settled, a grep
-// for 5806 must land on every place that asserts today's behaviour, including
+// (userspace-dp/src/screen/unresolved.rs: missing_profile_verdict evaluates
+// the zone against ScreenProfile::conservative_default()) and is NOT
+// derivable from the Go control plane, so this string is a hardcoded claim
+// about code that lives somewhere else — precisely the shape that goes stale
+// silently when the other side changes. The fail-closed-vs-pass posture is
+// an OPEN design decision owned by #5806; when it is settled, a grep for
+// 5806 must land on every place that asserts today's behaviour, including
 // this one.
 // #7888 RE-SHARED the consequence half, which #7168 had split.
 //
@@ -410,10 +412,13 @@ func checkScreenBlockBeforeAnchor(out, blockName, disposition, emptyInventory st
 // profile which is NOT defined in the config (#3082). buildScreenSnapshots
 // silently skips these zones (`sp == nil`), so without this the dataplane
 // cannot tell "zone has no screen configured" (legit Pass) apart from "zone
-// references a MISSING screen" (error → should signal). Reachable on the
+// references a MISSING screen" (unresolved → should signal). Reachable on the
 // lenient/HA-sync path where a dangling screen reference loads with only an
 // apply-time warning. The dataplane uses this to emit a rate-limited runtime
-// WARN; the verdict stays Pass (the fail-closed posture is deferred).
+// WARN; since #7168 the verdict is NOT Pass for a missing profile —
+// missing_profile_verdict evaluates the zone against
+// ScreenProfile::conservative_default() (threshold-free malformed-packet
+// checks only, no flood/scan/session-limit thresholds synthesised).
 //
 // #5806: exported through ScreenMissingProfileRefs so the observability
 // surfaces share this computation instead of re-deriving the predicate.

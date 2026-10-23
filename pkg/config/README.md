@@ -1191,16 +1191,16 @@ policy-deny record), which commit flags WARN-only. See `docs/config-schema.md`
 "#3534".
 **Zone screen-profile reference is fail-closed (#3066):** a security zone's
 `screen <name>` that references a screen-ids-option profile the config never
-defines historically committed with a warning only, and at runtime the
-userspace dataplane fails OPEN — `screen/mod.rs` returns `ScreenVerdict::Pass`
-for a missing profile, silently skipping every screen check for that zone while
-the operator believes screening is active. `validateScreenProfileReferencesStrict`
-(`compiler_validate_strict.go`) hard-rejects an undefined screen-profile
-reference at commit. Unlike the policy gates the dataplane is NOT independently
-safe on the tolerant load/peer-sync path (the missing profile still fails
-open), so that path only downgrades to a warning to preserve #1960 no-brick
-boot — the strict commit gate, which keeps a bad reference from ever reaching
-the dataplane, is the real fix.
+defines historically committed with a warning only. Since #7168 the dataplane
+does NOT fail open for a missing profile: it substitutes
+`ScreenProfile::conservative_default()` — the threshold-free malformed-packet
+checks only, with NO flood, scan or session-limit thresholds synthesised — so
+the zone keeps that floor but loses every configured threshold.
+`validateScreenProfileReferencesStrict` (`compiler_validate_strict_screen.go`)
+hard-rejects an undefined screen-profile reference at commit. On the tolerant
+load/peer-sync path the gate only downgrades to a (threshold-loss-naming)
+warning to preserve #1960 no-brick boot — the strict commit gate, which keeps
+a bad reference from ever reaching the dataplane, is the real fix.
 
 **Reserved zone names are rejected at definition (#3055):** a `security zones
 security-zone <name>` whose name is a reserved sentinel — `junos-global`, `any`,

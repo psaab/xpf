@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -29,6 +30,91 @@ func TestUndefinedScreenProfileErrorDescribesSubstitutedDefault_9415(t *testing.
 	for _, want := range []string{`undefined screen profile "wan-scren"`, "set security screen ids-option wan-scren", "substituted conservative default"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error missing %q: %s", want, msg)
+		}
+	}
+}
+
+// #16005 (A3-M2): the strict error above is pinned, but the tolerant leg and
+// the gate-site comments were not. The tolerant warning must name the actual
+// residual — loss of flood/scan/session-limit thresholds under the substituted
+// conservative default — not the pre-#7168 fail-open, and strict must still
+// reject the same config.
+func TestDanglingScreenProfileThresholdLoss16005(t *testing.T) {
+	lines := []string{
+		"set security screen ids-option wan-screen tcp land",
+		"set security zones security-zone untrust screen wan-scren",
+	}
+	if _, err := CompileConfig(buildTree(t, lines)); err == nil {
+		t.Fatal("strict commit must reject a dangling screen profile reference")
+	}
+	cfg, err := CompileConfigLenient(buildTree(t, lines))
+	if err != nil {
+		t.Fatalf("tolerant compile must boot a dangling screen reference (#1960): %v", err)
+	}
+	var warn string
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "zone screen profile reference") {
+			warn = w
+			break
+		}
+	}
+	if warn == "" {
+		t.Fatalf("tolerant compile must warn on dangling screen reference, got %v", cfg.Warnings)
+	}
+	for _, want := range []string{"substituted conservative default", "no flood, scan or session-limit thresholds"} {
+		if !strings.Contains(warn, want) {
+			t.Errorf("tolerant warning must name threshold loss (%q): %s", want, warn)
+		}
+	}
+	for _, stale := range []string{"fails open", "fails OPEN", "NO screen protection", "silently skipping every screen"} {
+		if strings.Contains(warn, stale) {
+			t.Errorf("tolerant warning still teaches pre-#7168 fail-open (%q): %s", stale, warn)
+		}
+	}
+}
+
+// #16005: the comments at the exact gate sites a maintainer reads before
+// touching this gate must not assert the pre-#7168 fail-open. Source-scan
+// those files (the established pattern for cross-language posture claims);
+// restoring any stale claim reds this test.
+func TestScreenGateCommentsDoNotClaimFailOpen16005(t *testing.T) {
+	files := []struct {
+		path  string
+		stale []string
+	}{
+		{"compiler_opts.go", []string{
+			"dataplane fails OPEN (screen/mod.rs returns ScreenVerdict::Pass",
+			"a missing profile fails open",
+			"NOT independently safe on the lenient path",
+		}},
+		{"compiler_uniformgates_screen.go", []string{
+			"dataplane fails OPEN for a missing profile",
+		}},
+		{"screen_profile_ref_test.go", []string{
+			"ScreenVerdict::Pass for a missing profile), silently skipping",
+		}},
+		{"../dataplane/userspace/screens.go", []string{
+			"the verdict stays Pass (the fail-closed posture is deferred)",
+			"returns ScreenVerdict::Pass on the None",
+		}},
+		{"../../userspace-dp/src/screen/mod.rs", []string{
+			"still Pass in BOTH cases",
+			"lenient/HA-sync fail-open",
+			"the fail-closed-vs-pass posture is the deferred #3082",
+		}},
+	}
+	for _, f := range files {
+		b, err := os.ReadFile(f.path)
+		if err != nil {
+			t.Fatalf("read %s: %v", f.path, err)
+		}
+		for _, stale := range f.stale {
+			if strings.Contains(string(b), stale) {
+				t.Errorf("%s still asserts stale fail-open %q (#16005)", f.path, stale)
+			}
+		}
+		if !strings.Contains(string(b), "conservative_default") {
+			t.Errorf("%s must describe the #7168 conservative_default substitution (#16005)", f.path)
 		}
 	}
 }

@@ -2505,17 +2505,19 @@ type compileOpts struct {
 	// compile error to a cfg.Warnings entry. The strict commit / commit-check
 	// path hard-rejects a security zone whose `screen <name>` references a
 	// screen-ids-option profile the config never defines. Before this gate the
-	// reference was warned only, so the commit succeeded; at runtime the
-	// userspace dataplane fails OPEN (screen/mod.rs returns ScreenVerdict::Pass
-	// for a missing profile), silently skipping every screen check for the zone
-	// while the operator believes screening is active. The tolerant load /
-	// peer-sync paths downgrade to a warning so an already-persisted or
-	// peer-synced config that an older binary accepted still BOOTS (#1960
-	// no-brick). Unlike the policy gates, the dataplane is NOT independently
-	// safe on the lenient path (a missing profile fails open), so the strict
-	// commit gate — keeping a bad reference from ever reaching the dataplane —
-	// is the real fix; the warning is the only signal on a leniently-loaded
-	// config. Same doctrine as lenientPolicyZoneRefs.
+	// reference was warned only, so the commit succeeded. Since #7168 the
+	// dataplane does NOT fail open for a missing profile: both None branches
+	// route through missing_profile_verdict, which evaluates the zone against
+	// ScreenProfile::conservative_default() — the nine threshold-free
+	// malformed-packet checks, with NO flood, scan or session-limit thresholds
+	// synthesised. The tolerant load / peer-sync paths downgrade to a warning
+	// so an already-persisted or peer-synced config that an older binary
+	// accepted still BOOTS (#1960 no-brick); on that path the zone keeps the
+	// malformed-packet floor but loses every configured threshold, so the
+	// strict commit gate — keeping a bad reference from ever reaching the
+	// dataplane — remains the real fix, and the (threshold-loss-naming)
+	// warning is the operator's signal on a leniently-loaded config. Same
+	// doctrine as lenientPolicyZoneRefs.
 	lenientScreenProfileRefs bool
 	// lenientScreenNumeric (#3317) downgrades the screen numeric-value gate
 	// (validateScreenNumericStrict) from a hard compile error to a cfg.Warnings

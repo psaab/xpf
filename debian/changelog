@@ -11,6 +11,18 @@ xpf (0.0.0) unstable; urgency=medium
 
 xpf (0.0.0) unstable; urgency=medium
 
+  * Screen: correct stale pre-#7168 fail-open comments at the dangling
+    screen-profile gate sites (#16005, A3-M2). Since #7168 the dataplane
+    substitutes ScreenProfile::conservative_default() (nine threshold-free
+    malformed-packet checks) for an unresolved profile; the residual is
+    loss of flood/scan/session-limit thresholds on the tolerant leg, not
+    loss of all screening. Strict still rejects; the tolerant warning now
+    is pinned by test to name that threshold loss, and the gate-site
+    comments/docs no longer assert ScreenVerdict::Pass fail-open.
+
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Snapshot summary counts verified (#16056, A6-06): the Rust
     apply handler now refuses a snapshot whose summary
     interface_count/zone_count disagree with the built sections,
