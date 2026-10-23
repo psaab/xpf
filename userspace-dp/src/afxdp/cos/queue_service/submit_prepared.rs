@@ -221,7 +221,8 @@ fn dropped_prepared_positions(binding: &BindingWorker) -> ([u16; TX_BATCH_SIZE],
 /// items from `queue` (DESCENDING original position, so each
 /// positional removal only touches already-removed-above entries —
 /// the #15172 contract). No-op when nothing was dropped.
-fn remove_dropped_prepared_snapshots(
+/// #15949: the recorded list is in phase order, not sorted; sort first.
+pub(super) fn remove_dropped_prepared_snapshots(
     queue: &mut crate::afxdp::types::CoSQueueRuntime,
     dropped: &[u16],
     retry_len: usize,
@@ -229,7 +230,16 @@ fn remove_dropped_prepared_snapshots(
     if dropped.is_empty() {
         return;
     }
-    for &pos in dropped.iter().rev() {
+    // #15949 (H35-01): `scratch_prepared_dropped_orig_idx` is appended in
+    // PHASE order (stage, then rewrite, then verify), so cross-phase drops
+    // are NOT ascending (e.g. stage drops 2, rewrite drops 0 -> [2, 0]).
+    // The reverse walk below assumes descending order; sort a bounded
+    // stack copy ascending first (<= TX_BATCH_SIZE entries, no alloc).
+    let mut sorted = [0u16; TX_BATCH_SIZE];
+    let n = dropped.len().min(TX_BATCH_SIZE);
+    sorted[..n].copy_from_slice(&dropped[..n]);
+    sorted[..n].sort_unstable();
+    for &pos in sorted[..n].iter().rev() {
         let _ = cos_queue_remove_orphan_snapshot_at(queue, usize::from(pos));
     }
     if let Some(ff) = queue.flow_fair_state.as_ref() {

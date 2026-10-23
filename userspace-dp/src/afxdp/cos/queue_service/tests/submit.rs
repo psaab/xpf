@@ -1220,3 +1220,25 @@ fn submit_local_records_tx_batch_histogram() {
     assert_eq!(snap.tx_kick_batch_descriptors, 3);
     assert_eq!(snap.tx_kick_batch_hist[2], 1);
 }
+
+#[test]
+fn remove_dropped_prepared_snapshots_sorts_phase_order_15949() {
+    // #15949 H35-01: dropped list in phase order [2,0] must remove snapshots
+    // at positions 2 and 0 (descending after sort), leaving survivor at 1.
+    let mut root = crate::afxdp::tx::test_support::test_cos_runtime_with_queues(
+        1_000_000,
+        vec![crate::afxdp::types::CoSQueueConfig { queue_id: 0, forwarding_class: "be".into(), priority: 5, transmit_rate_bytes: 500_000, guarantee_enabled: true, exact: true, surplus_sharing: false, equal_flow_enforcement: false, equal_flow_target_policy: crate::afxdp::types::EqualFlowTargetPolicy::Slowest, surplus_weight: 1, buffer_bytes: 128_000, dscp_rewrite: None, codel_target_ns: 0 }],
+    );
+    let queue = &mut root.queues[0];
+    crate::afxdp::tx::test_support::enable_test_flow_fair(queue);
+    {
+        let ff = queue.flow_fair_state.as_mut().unwrap();
+        for bucket in [10u16, 20, 30] {
+            ff.pop_snapshot_stack.push(crate::afxdp::types::CoSQueuePopSnapshot { bucket, pre_pop_head_finish: 0, pre_pop_tail_finish: 0, pre_pop_queue_vtime: 0 });
+        }
+    }
+    super::submit_prepared::remove_dropped_prepared_snapshots(queue, &[2, 0], 1);
+    let ff = queue.flow_fair_state.as_ref().unwrap();
+    assert_eq!(ff.pop_snapshot_stack.len(), 1, "exactly two dropped snapshots removed");
+    assert_eq!(ff.pop_snapshot_stack[0].bucket, 20, "survivor snapshot (orig pos 1) must remain; unsorted removal would delete it");
+}

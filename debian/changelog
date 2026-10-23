@@ -1,4 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Fix five CoS/filter defects (#15949): gate CoS TX selection on
+    post-NAT or pre-NAT ingress family so cross-family NAT64 no longer
+    bypasses ingress policers/forwarding-class/DSCP; emit per-packet
+    `then log` on static session hits and clear zombie LocalDelivery
+    policers on revalidation; sort prepared-drop indices before CoS
+    pop-snapshot unwind; refresh materialized queues' V_min floor and
+    shared_exact on shared-root lease swaps. Miss-path late-metering
+    ordering (H34-04 arm 2) deferred to avoid poll_descriptor/mod.rs
+    collision with open PRs.
+
+xpf (0.0.0) unstable; urgency=medium
   * Snapshot neighbor resolution netlink state once per pass: interface
     names are fetched once per link and neighbor tables once per
     (link, family) instead of once per target, preserving the usable-entry

@@ -1286,6 +1286,50 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
 /// red, NoLocalEntry red/conforming) return `false`: `apply_cached_three_color_policers`
 /// meters token buckets only and never charges a `FilterTermCounter`, so the
 /// caller must still charge `then count` via its cached-counter walk.
+/// #15949 (H34-03): static session hits owe a per-packet `then log`.
+/// Derive the log-only match (no counters, no metering) for an ACCEPTED
+/// static hit; `None` when the filter has no log term. Mirrors the
+/// flow-cache replay semantics (per-packet), not once-per-session.
+#[cold]
+#[inline(never)]
+pub(super) fn static_hit_log(
+    forwarding: &ForwardingState,
+    filter: &crate::filter::Filter,
+    flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+    logical_ingress_ifindex: i32,
+    extra: crate::filter::TermMatchExtra<'_>,
+) -> Option<CachedInputFilterLog> {
+    if !filter.has_log_terms {
+        return None;
+    }
+    let is_v6 = matches!(flow.dst_ip, IpAddr::V6(_));
+    let log_match = crate::filter::evaluate_interface_filter_log_match(
+        &forwarding.filter_state,
+        logical_ingress_ifindex,
+        is_v6,
+        flow.src_ip,
+        flow.dst_ip,
+        flow.forward_key.protocol,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+        meta.dscp,
+        extra,
+        true,
+    )?;
+    Some(CachedInputFilterLog {
+        log_match,
+        ingress_zone_id: filter_log_ingress_zone_id(
+            forwarding,
+            meta,
+            ingress_zone_override,
+            logical_ingress_ifindex,
+        ),
+        l4_present: extra.l4_present,
+    })
+}
+
 #[inline]
 pub(super) fn evaluate_input_filter_on_session_hit(
     forwarding: &ForwardingState,
@@ -1507,6 +1551,32 @@ pub(super) fn evaluate_input_filter_on_session_hit(
                     );
                 }
             }
+            // #15949 (H34-03): already judged, nothing counted — but a
+            // static `then log` term still owes a per-packet FilterLog.
+            if filter.has_log_terms {
+                if let Some(cached_log) = static_hit_log(
+                    forwarding,
+                    filter,
+                    flow,
+                    meta,
+                    ingress_zone_override,
+                    ingress_ifindex,
+                    term_match_extra_from_frame(frame, meta),
+                ) {
+                    return (
+                        Some(SessionHitInputFilterEval {
+                            eval: NonPbrInputFilterEval {
+                                action: crate::filter::FilterAction::Accept,
+                                cached_log: Some(cached_log),
+                                policer_drop: false,
+                            },
+                            revoked_key: None,
+                            log_source: FilterLogSource::Input,
+                        }),
+                        false,
+                    );
+                }
+            }
             // #10566: already judged under the live pair — nothing counted.
             (None, false)
         }
@@ -1537,24 +1607,32 @@ pub(super) fn evaluate_input_filter_on_session_hit(
             // so those policers were silently disabled after any generation
             // bump. Port-scoped terms read ports from the flow itself and
             // were never the gap; the frame-derived extra covers them too.
-            if result.0.is_none()
-                && meter == crate::filter::InputPolicerMeter::Inline
-                && filter.has_three_color_policer_terms
-            {
-                let policers = crate::filter::evaluate_interface_input_filter_policers_cached(
-                    &forwarding.filter_state,
-                    ingress_ifindex,
-                    is_v6,
-                    flow.src_ip,
-                    flow.dst_ip,
-                    flow.forward_key.protocol,
-                    flow.forward_key.src_port,
-                    flow.forward_key.dst_port,
-                    meta.dscp,
-                    term_match_extra_from_frame(frame, meta),
-                );
+            // #15949 (H34-04): refresh the stored handles on EVERY stale
+            // LocalDelivery revalidation, even when the live filter has no
+            // policer terms left. Previously set only when the new list was
+            // non-empty, so removing the policer (or the last policer term,
+            // or adding an earlier unpoliced accept) left gen-1 handles
+            // metering the session indefinitely (zombie policer).
+            if result.0.is_none() && meter == crate::filter::InputPolicerMeter::Inline {
+                let policers = if filter.has_three_color_policer_terms {
+                    crate::filter::evaluate_interface_input_filter_policers_cached(
+                        &forwarding.filter_state,
+                        ingress_ifindex,
+                        is_v6,
+                        flow.src_ip,
+                        flow.dst_ip,
+                        flow.forward_key.protocol,
+                        flow.forward_key.src_port,
+                        flow.forward_key.dst_port,
+                        meta.dscp,
+                        term_match_extra_from_frame(frame, meta),
+                    )
+                } else {
+                    crate::filter::CachedThreeColorPolicers::default()
+                };
+                // Always overwrite (empty clears zombie handles).
+                sessions.set_input_policers(&canonical_key, policers.clone());
                 if !policers.is_empty() {
-                    sessions.set_input_policers(&canonical_key, policers.clone());
                     let action = crate::filter::apply_cached_three_color_policers(
                         &policers,
                         now_ns,
@@ -1575,6 +1653,31 @@ pub(super) fn evaluate_input_filter_on_session_hit(
                             false,
                         );
                     }
+                }
+            }
+            // #15949 (H34-03): stale ACCEPT revalidation also owes log.
+            if result.0.is_none() && filter.has_log_terms {
+                if let Some(cached_log) = static_hit_log(
+                    forwarding,
+                    filter,
+                    flow,
+                    meta,
+                    ingress_zone_override,
+                    ingress_ifindex,
+                    term_match_extra_from_frame(frame, meta),
+                ) {
+                    return (
+                        Some(SessionHitInputFilterEval {
+                            eval: NonPbrInputFilterEval {
+                                action: crate::filter::FilterAction::Accept,
+                                cached_log: Some(cached_log),
+                                policer_drop: false,
+                            },
+                            revoked_key: None,
+                            log_source: FilterLogSource::Input,
+                        }),
+                        result.1,
+                    );
                 }
             }
             result
@@ -1646,7 +1749,55 @@ pub(super) fn evaluate_input_filter_on_session_hit(
                     // #15794: metered and conforming, but the cached policer
                     // replay charges no `FilterTermCounter` — report uncounted
                     // so the caller charges `then count` exactly once.
+                    // #15949 (H34-03): conforming sessionless hit owes log.
+                    if let Some(cached_log) = static_hit_log(
+                        forwarding,
+                        filter,
+                        flow,
+                        meta,
+                        ingress_zone_override,
+                        ingress_ifindex,
+                        term_match_extra_from_frame(frame, meta),
+                    ) {
+                        return (
+                            Some(SessionHitInputFilterEval {
+                                eval: NonPbrInputFilterEval {
+                                    action: crate::filter::FilterAction::Accept,
+                                    cached_log: Some(cached_log),
+                                    policer_drop: false,
+                                },
+                                revoked_key: None,
+                                log_source: FilterLogSource::Input,
+                            }),
+                            false,
+                        );
+                    }
                     return (None, false);
+                }
+            }
+            // #15949 (H34-03): sessionless ACCEPT also owes per-packet log.
+            if verdict.is_none() && filter.has_log_terms {
+                if let Some(cached_log) = static_hit_log(
+                    forwarding,
+                    filter,
+                    flow,
+                    meta,
+                    ingress_zone_override,
+                    ingress_ifindex,
+                    term_match_extra_from_frame(frame, meta),
+                ) {
+                    return (
+                        Some(SessionHitInputFilterEval {
+                            eval: NonPbrInputFilterEval {
+                                action: crate::filter::FilterAction::Accept,
+                                cached_log: Some(cached_log),
+                                policer_drop: false,
+                            },
+                            revoked_key: None,
+                            log_source: FilterLogSource::Input,
+                        }),
+                        counted,
+                    );
                 }
             }
             (verdict, counted)

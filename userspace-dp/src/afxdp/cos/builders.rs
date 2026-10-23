@@ -15,9 +15,9 @@ use crate::afxdp::types::{
     CoSTimerWheelRuntime, ExactDemandQueueMask,
     ForwardingState, VMinQueueState,
 };
+use crate::afxdp::worker::BindingWorker;
 #[allow(unused_imports)]
 use CoSOversubscriptionPolicy as _;
-use crate::afxdp::worker::BindingWorker;
 
 #[inline]
 pub(in crate::afxdp) fn ensure_cos_interface_runtime(
@@ -276,12 +276,50 @@ pub(in crate::afxdp) fn build_cos_interface_runtime(
 /// shared_exact traffic at a stale shard count. Must be called after every
 /// `binding.cos.cos_fast_interfaces = ...` assignment. Cold path.
 pub(in crate::afxdp) fn refresh_cos_runtime_shared_root_leases(binding: &mut BindingWorker) {
+    // #15949 (H35-02): collect (queue, fast-path) pairs first so the root
+    // lease refresh and the per-queue vtime_floor/shared_exact refresh share
+    // one fast-map lookup per interface. Materialized queues cached their
+    // floor Arc + shared_exact at promotion; without this they keep
+    // publishing into the dead pre-swap Arc while peers read the new one.
+    let mut updates: Vec<(
+        i32,
+        usize,
+        Option<std::sync::Arc<crate::afxdp::types::SharedCoSQueueVtimeFloor>>,
+        bool,
+    )> = Vec::new();
     for (root_ifindex, root) in binding.cos.cos_interfaces.iter_mut() {
         root.shared_root_lease = binding
             .cos
             .cos_fast_interfaces
             .get(root_ifindex)
             .and_then(|iface_fast| iface_fast.shared_root_lease.clone());
+        if let Some(iface_fast) = binding.cos.cos_fast_interfaces.get(root_ifindex) {
+            for (idx, queue) in root.queues.iter().enumerate() {
+                if let Some(qf) = iface_fast.queue_fast_path.get(idx) {
+                    // Only queues already promoted (flow-fair state present)
+                    // carry a cached floor; never-promoted queues must not
+                    // gain one here (publish path expects flow_fair).
+                    if queue.flow_fair_state.is_some() {
+                        updates.push((*root_ifindex, idx, qf.vtime_floor.clone(), qf.shared_exact));
+                    }
+                }
+            }
+        }
+    }
+    for (root_ifindex, idx, floor, shared_exact) in updates {
+        if let Some(queue) = binding
+            .cos
+            .cos_interfaces
+            .get_mut(&root_ifindex)
+            .and_then(|root| root.queues.get_mut(idx))
+        {
+            queue.v_min.vtime_floor = floor;
+            queue.config.shared_exact = shared_exact;
+            // Republish backlogged slot into the NEW floor immediately,
+            // mirroring the exact-backlog republish in the loop body;
+            // publish_committed_queue_vtime vacates when no active buckets.
+            super::queue_ops::publish_committed_queue_vtime(Some(queue));
+        }
     }
 }
 
