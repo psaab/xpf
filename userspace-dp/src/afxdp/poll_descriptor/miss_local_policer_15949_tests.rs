@@ -426,3 +426,252 @@ fn miss_local_non_syn_red_leaves_no_permit_log_15949() {
         "#15949: red non-cacheable packet must NOT emit a PERMIT FilterLog"
     );
 }
+
+/// Fold (Opus) classifier pin: the gate covers exactly the
+/// LocalDelivery decision kind — every transit/other disposition is
+/// excluded, so a ForwardCandidate routed via a local-set VIP cannot
+/// be double-metered, and a LocalDelivery target outside the address
+/// sets cannot be skipped. This is the classification the address-set
+/// version got wrong in both directions.
+#[test]
+fn gate_covers_only_local_delivery_kind_15949() {
+    assert!(miss_input_policer_gate_covers(
+        ForwardingDisposition::LocalDelivery
+    ));
+    for disposition in [
+        ForwardingDisposition::ForwardCandidate,
+        ForwardingDisposition::FabricRedirect,
+        ForwardingDisposition::HAInactive,
+        ForwardingDisposition::ClusterTerminalHAInactive,
+        ForwardingDisposition::PolicyDenied,
+        ForwardingDisposition::NoRoute,
+        ForwardingDisposition::MissingNeighbor,
+        ForwardingDisposition::DiscardRoute,
+        ForwardingDisposition::RejectRoute,
+        ForwardingDisposition::NextTableUnsupported,
+        ForwardingDisposition::TableUnavailable,
+    ] {
+        assert!(
+            !miss_input_policer_gate_covers(disposition),
+            "#15949 fold: {disposition:?} must NOT be covered by the LocalDelivery gate"
+        );
+    }
+}
+
+fn policer_counts(f: &ForwardingState) -> (u64, u64) {
+    let status = f.filter_state.three_color_policer_statuses();
+    let s = status
+        .iter()
+        .find(|s| s.name == "host-pol")
+        .expect("host-pol policer status");
+    (s.green_packets, s.drop_packets)
+}
+
+/// Fold shape 1 (LocalDelivery outside the address sets): the WAN
+/// interface address 172.16.80.8 is excluded from `local_v4` by the
+/// interface-mode SNAT egress matrix (lan->wan in `nat_snapshot`), yet
+/// a packet to it resolves LocalDelivery. The address-set gate skipped
+/// it (unmetered); the decision-kind gate must meter it: the second
+/// 900-byte packet turns red, is not delivered, and emits no PERMIT.
+#[test]
+fn snat_excluded_local_target_still_meters_15949() {
+    let mut snapshot = nat_snapshot();
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    // Keep the lan->wan interface-mode SNAT rules from nat_snapshot:
+    // they are what excludes 172.16.80.8 from local_v4.
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "police-tcp".into(),
+            protocols: vec!["tcp".into()],
+            policer: "host-pol".into(),
+            action: "accept".into(),
+            log: true,
+            ..Default::default()
+        }],
+    }];
+    snapshot.three_color_policers = vec![ThreeColorPolicerSnapshot {
+        name: "host-pol".into(),
+        mode: "single-rate".into(),
+        color_blind: true,
+        committed_rate_bytes_per_sec: 1,
+        committed_burst_bytes: 1_000,
+        peak_or_excess_burst_bytes: 50,
+        then_action: "discard".into(),
+        ..Default::default()
+    }];
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == 24 {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    assert!(
+        !forwarding.local_v4.contains(&Ipv4Addr::new(172, 16, 80, 8)),
+        "precondition: SNAT matrix must exclude the WAN address from local_v4"
+    );
+    assert!(
+        forwarding
+            .configured_iface_v4
+            .contains(&Ipv4Addr::new(172, 16, 80, 8)),
+        "precondition: the WAN address is still a configured interface address"
+    );
+
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = std::sync::Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let local_tunnel_deliveries = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+        std::collections::BTreeMap::new(),
+    ));
+    let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
+        16,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
+        },
+    );
+    let mut frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(172, 16, 80, 8),
+        12345,
+        179,
+        TCP_FLAG_SYN,
+        TEST_LAN_MAC,
+    );
+    frame.resize(900, 0);
+    let meta = meta_900();
+
+    let (_b1, dbg1) = txn_run_descriptor_with_event_stream(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        &local_tunnel_deliveries,
+        &event_handle,
+    );
+    assert_eq!(dbg1.local, 1, "WAN-address packet must take LocalDelivery");
+    assert_eq!(
+        policer_counts(&forwarding).0,
+        1,
+        "first packet meters green"
+    );
+    while event_rx.try_recv().is_ok() {}
+
+    let (_b2, _dbg2) = txn_run_descriptor_with_event_stream(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        &local_tunnel_deliveries,
+        &event_handle,
+    );
+    assert_eq!(
+        binding.live.slow_path_drops.load(Ordering::Relaxed),
+        1,
+        "#15949 fold: red packet to a set-excluded LocalDelivery target must NOT be delivered"
+    );
+    assert!(
+        policer_counts(&forwarding).1 >= 1,
+        "#15949 fold: set-excluded LocalDelivery target must still be metered (drop charged)"
+    );
+    let mut saw_permit = false;
+    while let Ok(frame) = event_rx.try_recv() {
+        if let Some(event) = frame.decode_dataplane_event() {
+            if event.kind == crate::event_stream::codec::DataplaneEventKind::FilterLog
+                && event.action == 1
+            {
+                saw_permit = true;
+            }
+        }
+    }
+    assert!(
+        !saw_permit,
+        "#15949 fold: red set-excluded LocalDelivery packet must NOT emit PERMIT"
+    );
+}
+
+/// Fold shape 2 (transit via a local-set VIP): the DNAT VIP
+/// 172.16.80.8:443 IS in `local_v4` (late-stage NAT append), but the
+/// packet translates to backend 10.0.61.102:8443 and resolves
+/// ForwardCandidate — transit. The address-set gate metered it at the
+/// miss gate AND again in TX selection; the decision-kind gate must
+/// leave it to TX selection alone: exactly one green charge for the
+/// forwarded packet, no miss-gate drop.
+#[test]
+fn transit_via_local_vip_not_double_metered_15949() {
+    let mut snapshot = inbound_dnat_snapshot(wan_to_lan_permit("10.0.61.102/32", "wan-in"));
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "police-tcp".into(),
+            protocols: vec!["tcp".into()],
+            policer: "host-pol".into(),
+            action: "accept".into(),
+            log: true,
+            ..Default::default()
+        }],
+    }];
+    snapshot.three_color_policers = vec![ThreeColorPolicerSnapshot {
+        name: "host-pol".into(),
+        mode: "single-rate".into(),
+        color_blind: true,
+        committed_rate_bytes_per_sec: 1_000_000,
+        committed_burst_bytes: 1_000_000,
+        peak_or_excess_burst_bytes: 50,
+        then_action: "discard".into(),
+        ..Default::default()
+    }];
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == 12 {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    assert!(
+        forwarding.local_v4.contains(&Ipv4Addr::new(172, 16, 80, 8)),
+        "precondition: the DNAT VIP must be in local_v4 (the old gate's trigger)"
+    );
+
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = std::sync::Arc::<str>::from("reth0.80");
+    let mut sessions = SessionTable::new();
+    // Client on WAN -> VIP 172.16.80.8:443 (DNAT to 10.0.61.102:8443).
+    let frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(198, 51, 100, 10),
+        Ipv4Addr::new(172, 16, 80, 8),
+        54321,
+        443,
+        TCP_FLAG_SYN,
+        TEST_WAN_MAC,
+    );
+    let mut meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
+    meta.pkt_len = frame.len() as u16;
+
+    let (_b, dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
+    assert_eq!(dbg.session_miss, 1, "packet must take the miss path");
+    assert_eq!(dbg.forward, 1, "transit packet must forward via DNAT");
+    let (green, drop) = policer_counts(&forwarding);
+    assert_eq!(
+        green, 1,
+        "#15949 fold: transit via a local VIP must meter exactly once (TX selection), not twice"
+    );
+    assert_eq!(drop, 0, "#15949 fold: no miss-gate drop on transit");
+}

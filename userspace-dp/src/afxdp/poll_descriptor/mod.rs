@@ -4740,98 +4740,39 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             } else {
                                 false
                             };
-                        // #15949 (H34-04 arm 2): a LocalDelivery packet's
-                        // ingress policer meters HERE — before the PERMIT
-                        // FilterLog below, before lo0, before junos-host,
-                        // and before any closing-pair eviction or
-                        // persistent-hold anchoring — so a red packet
-                        // leaves none of those side effects. The precheck
-                        // deferred metering to the TX-selection leg, which
-                        // host-bound traffic never takes; the late arms at
-                        // the install site metered only after all of them.
-                        // Transit packets are untouched: their policer
-                        // meters exactly once in TX selection. The
-                        // PERMIT log is deferred until the gate passes;
-                        // a red packet's log (if any) is re-emitted with
-                        // a truthful DENY action, mirroring the
-                        // session-hit RED fold (#15949 arm 1).
-                        let mut deferred_input_filter_log = None;
+                        // #15949 (H34-04 arm 2): the input-filter PERMIT
+                        // log is NOT emitted here. Whether this packet's
+                        // ingress policer meters at the early LocalDelivery
+                        // gate below depends on its FINAL disposition
+                        // (route/PBR/HA resolution has not run yet), so
+                        // emission defers until that classification is
+                        // known — immediately after HA finalization,
+                        // before lo0/junos-host. At HEAD the emit fired
+                        // here unconditionally and the LocalDelivery
+                        // policer metered only at the install site, so a
+                        // red host-bound packet left a false PERMIT audit
+                        // record. Classifying on the effective target's
+                        // address-family sets instead (the first attempt)
+                        // missed LocalDelivery targets outside
+                        // local_v4/local_v6 and double-metered transit
+                        // packets routed via a local-set VIP; the gate
+                        // below keys on `decision.resolution.disposition`
+                        // via `miss_input_policer_gate_covers`.
                         let mut miss_local_input_policers =
                             crate::filter::CachedThreeColorPolicers::default();
-                        // The final disposition is not decided yet
-                        // (route/HA/fabric transforms follow), so gate on
-                        // the packet's effective target: a destination in
-                        // the FIB's local-address sets (interface hosts
-                        // and NAT externals — the same sets the local-
-                        // delivery decision consults). A transit target
-                        // is in neither set, so transit packets keep
-                        // their single TX-selection meter.
-                        let gate_is_local = match effective_resolution_target {
-                            IpAddr::V4(ip) => worker_ctx.forwarding.local_v4.contains(&ip),
-                            IpAddr::V6(ip) => worker_ctx.forwarding.local_v6.contains(&ip),
-                        };
-                        if gate_is_local {
-                            let (verdict, policers) = meter_miss_local_input_policers(
-                                worker_ctx.forwarding,
-                                packet_frame,
-                                flow,
-                                meta,
-                                now_ns,
-                            );
-                            miss_local_input_policers = policers;
-                            if verdict == MissLocalPolicerVerdict::Drop {
-                                if let Some(mut cached_log) = input_filter_eval.cached_log {
-                                    cached_log.log_match.action =
-                                        crate::filter::FilterAction::Discard;
-                                    emit_input_filter_log_match(
-                                        worker_ctx.forwarding,
-                                        worker_ctx.event_stream,
-                                        flow,
-                                        meta,
-                                        cached_log,
-                                        FilterLogSource::Input,
-                                        false,
-                                        now_ns,
-                                    );
-                                }
-                                telemetry.dbg.local += 1;
-                                telemetry.dbg.policy_deny += 1;
-                                telemetry.counters.touched = true;
-                                if persistent_lease_hold_outer.is_some() {
-                                    rollback_persistent_inbound_hold(
-                                        worker_ctx.forwarding,
-                                        persistent_lease_hold,
-                                        now_ns,
-                                    );
-                                    persistent_lease_hold_outer = None;
-                                }
-                                binding.scratch.scratch_recycle.push(desc.addr);
-                                continue;
-                            }
-                            deferred_input_filter_log = input_filter_eval.cached_log;
-                        }
-                        // LocalDelivery: emit the deferred PERMIT log
-                        // only now that the policer gate has passed.
-                        // Every other disposition emits exactly as
-                        // before, at this same site.
-                        let emit_log = if gate_is_local {
-                            deferred_input_filter_log
-                        } else {
-                            input_filter_eval.cached_log
-                        };
-                        if let Some(cached_log) = emit_log {
-                            emit_input_filter_log_match(
-                                worker_ctx.forwarding,
-                                worker_ctx.event_stream,
-                                flow,
-                                meta,
-                                cached_log,
-                                FilterLogSource::Input,
-                                reject_reply_enqueued,
-                                now_ns,
-                            );
-                        }
                         if input_filter_eval.action != crate::filter::FilterAction::Accept {
+                            if let Some(cached_log) = input_filter_eval.cached_log {
+                                emit_input_filter_log_match(
+                                    worker_ctx.forwarding,
+                                    worker_ctx.event_stream,
+                                    flow,
+                                    meta,
+                                    cached_log,
+                                    FilterLogSource::Input,
+                                    reject_reply_enqueued,
+                                    now_ns,
+                                );
+                            }
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
@@ -5355,6 +5296,68 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             from_zone_id,
                             ha_startup_grace_until_secs,
                         );
+                        // #15949 fold (Opus): NOW the disposition is
+                        // final — route/PBR resolution, fabric preference,
+                        // and HA enforcement have all run — so classify
+                        // the policer gate on the actual decision kind,
+                        // not on any address set. A LocalDelivery packet
+                        // meters HERE, before lo0/junos-host, closing-pair
+                        // eviction, and hold anchoring; a red packet emits
+                        // a truthful DENY log and recycles. Every other
+                        // disposition emits its deferred log unchanged at
+                        // this point and meters (if at all) in TX
+                        // selection exactly once.
+                        if miss_input_policer_gate_covers(decision.resolution.disposition) {
+                            let (verdict, policers) = meter_miss_local_input_policers(
+                                worker_ctx.forwarding,
+                                packet_frame,
+                                flow,
+                                meta,
+                                now_ns,
+                            );
+                            miss_local_input_policers = policers;
+                            if verdict == MissLocalPolicerVerdict::Drop {
+                                if let Some(mut cached_log) = input_filter_eval.cached_log {
+                                    cached_log.log_match.action =
+                                        crate::filter::FilterAction::Discard;
+                                    emit_input_filter_log_match(
+                                        worker_ctx.forwarding,
+                                        worker_ctx.event_stream,
+                                        flow,
+                                        meta,
+                                        cached_log,
+                                        FilterLogSource::Input,
+                                        false,
+                                        now_ns,
+                                    );
+                                }
+                                telemetry.dbg.local += 1;
+                                telemetry.dbg.policy_deny += 1;
+                                telemetry.counters.touched = true;
+                                if persistent_lease_hold_outer.is_some() {
+                                    rollback_persistent_inbound_hold(
+                                        worker_ctx.forwarding,
+                                        persistent_lease_hold,
+                                        now_ns,
+                                    );
+                                    persistent_lease_hold_outer = None;
+                                }
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            }
+                        }
+                        if let Some(cached_log) = input_filter_eval.cached_log {
+                            emit_input_filter_log_match(
+                                worker_ctx.forwarding,
+                                worker_ctx.event_stream,
+                                flow,
+                                meta,
+                                cached_log,
+                                FilterLogSource::Input,
+                                reject_reply_enqueued,
+                                now_ns,
+                            );
+                        }
                         // Triple-review fold: a cryptographically
                         // validated SYN-cookie ACK earns its ACK-RST only
                         // now, after this miss path has selected the
@@ -13102,6 +13105,23 @@ pub(super) fn poll_binding_process_descriptor(
 pub(super) enum MissLocalPolicerVerdict {
     Pass,
     Drop,
+}
+
+/// #15949 fold (Opus): whether a miss-path packet's input policer is
+/// owned by the LocalDelivery early gate. This is a function of the
+/// packet's FINAL decision (its forwarding disposition), not of any
+/// address-family/ownership set: a `LocalDelivery` target that is not
+/// in `local_v4`/`local_v6` — e.g. a NAT64/NPTv6-translated host
+/// target, or an interface address excluded from those sets by the
+/// SNAT egress matrix — still never takes a TX-selection leg, so its
+/// policer must meter here; a transit `ForwardCandidate` whose
+/// destination happens to be a local-set address (e.g. a DNAT VIP on
+/// an interface IP translating to a backend host) meters exactly once
+/// in TX selection and must NOT also meter here. Classifying on the
+/// address sets got both directions wrong.
+#[inline]
+pub(super) fn miss_input_policer_gate_covers(disposition: ForwardingDisposition) -> bool {
+    disposition == ForwardingDisposition::LocalDelivery
 }
 
 /// #15949 (H34-04 arm 2): the miss-path LocalDelivery policer must
