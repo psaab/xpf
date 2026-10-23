@@ -1194,26 +1194,20 @@ deploy_deb_newest() {
 }
 
 # deploy_select_deb <dir> -> echo the deb to deploy in <dir>:
-#   1. XPF_DEPLOY_DEB_VERSION (exported by the Makefile targets when
-#      DEB_VERSION was explicit): the xpf_<version>_*.deb in <dir>, die
-#      if absent — an explicitly built deb must deploy even if a higher
-#      stale deb sits beside it.
-#   2. XPF_DEPLOY_DEB_PATH: that exact file (absolute, or relative to
-#      <dir>), die if missing/unparseable.
+#   1. XPF_DEPLOY_DEB_PATH: that exact file (absolute, or relative to
+#      <dir>), die if missing/unparseable. An explicit PATH is the most
+#      specific pin and WINS over XPF_DEPLOY_DEB_VERSION when both are
+#      set (per-invocation candidate pins, e.g. test-rolling-upgrade,
+#      must not be overridden by a version pin from the environment).
+#   2. XPF_DEPLOY_DEB_VERSION (exported by the Makefile deploy targets
+#      when DEB_VERSION was explicit): the xpf_<version>_*.deb in <dir>,
+#      die if absent — an explicitly built deb must deploy even if a
+#      higher stale deb sits beside it.
 #   3. Otherwise the highest Debian version present (deploy_deb_newest).
 # Used by every deploy/attestation site so they can never disagree about
 # which artifact shipped (#16308).
 deploy_select_deb() {
 	local dir="$1" pin="${XPF_DEPLOY_DEB_PATH:-}" want="${XPF_DEPLOY_DEB_VERSION:-}" cand
-	if [[ -n "$want" ]]; then
-		for cand in "$dir"/xpf_"$want"_*.deb; do
-			if [[ -f "$cand" ]]; then
-				printf '%s\n' "$cand"
-				return 0
-			fi
-		done
-		die "XPF_DEPLOY_DEB_VERSION=$want: no xpf_${want}_*.deb in $dir (was 'make deb DEB_VERSION=$want' run?)"
-	fi
 	if [[ -n "$pin" ]]; then
 		cand="$pin"
 		[[ "$cand" = /* ]] || cand="$dir/$cand"
@@ -1223,6 +1217,15 @@ deploy_select_deb() {
 			die "XPF_DEPLOY_DEB_PATH=$pin is not a parseable xpf_<version>_<arch>.deb"
 		printf '%s\n' "$cand"
 		return 0
+	fi
+	if [[ -n "$want" ]]; then
+		for cand in "$dir"/xpf_"$want"_*.deb; do
+			if [[ -f "$cand" ]]; then
+				printf '%s\n' "$cand"
+				return 0
+			fi
+		done
+		die "XPF_DEPLOY_DEB_VERSION=$want: no xpf_${want}_*.deb in $dir (was 'make deb DEB_VERSION=$want' run?)"
 	fi
 	deploy_deb_newest "$dir"
 }

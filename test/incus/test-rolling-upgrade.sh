@@ -101,15 +101,19 @@ for instance in "$FW0" "$FW1" "$CLUSTER_LAN_HOST"; do
 	incus info "$instance" &>/dev/null 2>&1 || { void "$instance is unavailable"; finish; }
 done
 
-# The candidate is PINNED per invocation: the Makefile `deb` prerequisite
-# built exactly xpf_$(DEB_VERSION)_*.deb for THIS gate and exports its path
-# as XPF_DEPLOY_DEB_PATH, so selection must not fall back to the
-# highest-version deb in dist-deb/ — that could be a foreign prebuilt
-# (e.g. a 99.0.x from another source tree) and the gate would attest the
-# wrong bits. Missing pin => no candidate => VOID (fail-closed).
-# Selected via deploy_select_deb (#16308): Debian version order, not mtime.
+# The candidate is PINNED per invocation, fail-closed: the Makefile `deb`
+# prerequisite built exactly xpf_$(DEB_VERSION)_*.deb for THIS gate and
+# exports its path as XPF_DEPLOY_DEB_PATH. Without that pin this script
+# must NOT select anything — highest-version fallback could attest a
+# foreign prebuilt (e.g. a 99.0.x from another source tree) instead of
+# the bits this gate just built. Unset/empty pin, or a pinned file that
+# is missing/unparseable, => VOID before any cluster mutation.
+if [[ -z "${XPF_DEPLOY_DEB_PATH:-}" ]]; then
+	void "no pinned runtime .deb candidate (XPF_DEPLOY_DEB_PATH unset); run via 'make test-rolling-upgrade' so the candidate is pinned"
+	finish
+fi
 deb=$(deploy_select_deb "$PROJECT_ROOT/dist-deb" 2>/dev/null || true)
-[[ -n "$deb" ]] || { void "no pinned runtime .deb candidate (XPF_DEPLOY_DEB_PATH=${XPF_DEPLOY_DEB_PATH:-unset}); make deb must complete first"; finish; }
+[[ -n "$deb" ]] || { void "pinned runtime .deb candidate unavailable (XPF_DEPLOY_DEB_PATH=$XPF_DEPLOY_DEB_PATH)"; finish; }
 candidate_sha=$(deploy_manifest_sha_from_deb "$deb" xpfd || true)
 [[ -n "$candidate_sha" ]] || { void "cannot read xpfd from candidate .deb: $deb"; finish; }
 

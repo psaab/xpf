@@ -2350,7 +2350,7 @@ test_cluster_setup_selects_by_version_wiring() {
 	grep -q 'deploy_select_deb "$PROJECT_ROOT/dist-deb"' "$setup" || missing+=("cluster-setup deploy/attest selection")
 	grep -q 'deploy_select_deb "$PROJECT_ROOT/dist-deb"' "$rolling" || missing+=("rolling-upgrade selection")
 	grep -q 'XPF_DEPLOY_DEB_PATH' "$rolling" || missing+=("rolling-upgrade names its pin (fail-closed VOID)")
-	if ! awk '/^test-rolling-upgrade:/,/^$/' "$SCRIPT_DIR/../../Makefile" | grep -q 'XPF_DEPLOY_DEB_PATH="$(DEB_OUT)/xpf_$(DEB_VERSION)_amd64.deb"'; then
+	if ! awk '/^test-rolling-upgrade:/,/^$/' "$SCRIPT_DIR/../../Makefile" | grep -q 'XPF_DEPLOY_DEB_PATH="$(CURDIR)/dist-deb/xpf_$(DEB_VERSION)_amd64.deb"'; then
 		missing+=("Makefile test-rolling-upgrade does not pin the built candidate")
 	fi
 	if grep -Eq 'ls -t .*dist-deb/xpf_' "$setup" "$rolling"; then
@@ -2396,10 +2396,20 @@ test_rolling_upgrade_candidate_is_pinned_to_built_deb() {
 	local out rc pin
 	out=$(_make_n test-rolling-upgrade); rc=$?
 	pin=$(printf '%s\n' "$out" | grep -o 'XPF_DEPLOY_DEB_PATH="[^"]*"' | head -1 || true)
-	if [[ $rc -eq 0 && "$out" == *"dpkg-buildpackage"* && -n "$pin" && "$pin" != *99.0.16308* && "$pin" == *"$MAKE_FIXTURE_OUT/xpf_"* ]]; then
+	if [[ $rc -eq 0 && "$out" == *"dpkg-buildpackage"* && -n "$pin" && "$pin" != *99.0.16308* && "$pin" == 'XPF_DEPLOY_DEB_PATH="/'*'/dist-deb/xpf_'* ]]; then
 		ok "rolling-upgrade: Makefile pins candidate to the just-built deb, not the foreign 99.0.x"
 	else
 		bad "rolling-upgrade pin: rc=$rc pin='$pin' out=$(printf '%s' "$out" | tail -3)"
+	fi
+	# Fold 2 (3): a relative DEB_OUT must not change or double-prefix the
+	# pin — the exported path is always the canonical absolute dist-deb/.
+	local out_rel pin_rel
+	out_rel=$(_make_n test-rolling-upgrade DEB_OUT=dist-deb); rc=$?
+	pin_rel=$(printf '%s\n' "$out_rel" | grep -o 'XPF_DEPLOY_DEB_PATH="[^"]*"' | head -1 || true)
+	if [[ "$pin_rel" == "$pin" && "$pin_rel" != *"dist-deb/dist-deb"* && "$pin_rel" != *'XPF_DEPLOY_DEB_PATH="dist-deb'* ]]; then
+		ok "rolling-upgrade: relative DEB_OUT still exports the canonical absolute pin (no double-prefix)"
+	else
+		bad "rolling-upgrade relative DEB_OUT: pin='$pin' pin_rel='$pin_rel'"
 	fi
 	# Selector level: with that pin set, deploy_select_deb returns the
 	# pinned stock deb even though a higher foreign deb sits beside it;
@@ -2412,6 +2422,15 @@ test_rolling_upgrade_candidate_is_pinned_to_built_deb() {
 		ok "rolling-upgrade: pinned selection returns the built candidate over the foreign 99.0.x"
 	else
 		bad "rolling-upgrade: pinned selection picked $got"
+	fi
+	# Fold 2 (1): PATH pin must WIN when a version pin is also set — an
+	# ambient XPF_DEPLOY_DEB_VERSION must not override the per-invocation
+	# candidate. (Pre-fix precedence picked the version pin's deb.)
+	got=$(XPF_DEPLOY_DEB_PATH="$MAKE_FIXTURE_OUT/$pinned_deb" XPF_DEPLOY_DEB_VERSION="99.0.16308+601c5462a991" deploy_select_deb "$MAKE_FIXTURE_OUT") || { bad "rolling-upgrade: PATH+VERSION select failed"; teardown_make_fixture; teardown_deb_fixture; return; }
+	if [[ "$got" == *"$pinned_deb" ]]; then
+		ok "deb select: PATH pin wins over VERSION pin when both are set"
+	else
+		bad "deb select: PATH+VERSION picked $got (version pin overrode the candidate pin)"
 	fi
 	got=$(deploy_select_deb "$MAKE_FIXTURE_OUT") || got=""
 	if [[ "$got" == *99.0.16308* ]]; then
@@ -2428,6 +2447,29 @@ test_rolling_upgrade_candidate_is_pinned_to_built_deb() {
 	teardown_make_fixture
 	teardown_deb_fixture
 }
+
+# Fold 2 (2): the rolling script itself refuses to run unpinned — even
+# with a usable package in dist-deb/ it must VOID before selecting.
+# (Static pin: the script cannot be executed hermetically — it enters a
+# destructive cluster cell on source — so the gate is asserted on the
+# script text plus the selector behaviour above.)
+test_rolling_upgrade_requires_pin_env() {
+	local rolling="$SCRIPT_DIR/test-rolling-upgrade.sh" missing=()
+	local gate_line select_line
+	gate_line=$(grep -n 'XPF_DEPLOY_DEB_PATH unset' "$rolling" | head -1 | cut -d: -f1)
+	select_line=$(grep -n 'deploy_select_deb' "$rolling" | head -1 | cut -d: -f1)
+	[[ -n "$gate_line" ]] || missing+=("no unset-pin VOID gate")
+	[[ -n "$select_line" ]] || missing+=("no deploy_select_deb call")
+	if [[ -n "$gate_line" && -n "$select_line" ]] && (( gate_line >= select_line )); then
+		missing+=("unset-pin gate does not precede selection")
+	fi
+	grep -q 'if \[\[ -z "${XPF_DEPLOY_DEB_PATH:-}" \]\]; then' "$rolling" || missing+=("gate is not an unset/empty check on XPF_DEPLOY_DEB_PATH")
+	if (( ${#missing[@]} == 0 )); then
+		ok "rolling-upgrade: unset pin VOIDs before any selection (fail-closed)"
+	else
+		bad "rolling-upgrade pin gate: ${missing[*]}"
+	fi
+}
 # ── Run ───────────────────────────────────────────────────────────────
 test_deb_version_parses_filename
 test_deb_newest_picks_highest_version_not_newest_mtime
@@ -2439,6 +2481,7 @@ test_prepare_deb_fresh_tree_builds_stock
 test_prepare_deb_explicit_version_builds
 test_prepare_deb_older_only_rebuilds
 test_rolling_upgrade_candidate_is_pinned_to_built_deb
+test_rolling_upgrade_requires_pin_env
 test_prepare_deb_fast_never_builds_deb
 test_cluster_setup_selects_by_version_wiring
 test_rolling_secondary_node0_primary
