@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/psaab/xpf/pkg/fsatomic"
 )
 
@@ -368,13 +370,132 @@ type keaLeaseGetAllArgs struct {
 	Leases []keaLeaseJSON `json:"leases"`
 }
 
+// errUntrustedKeaPeer marks a control-socket connection whose peer is
+// not the Kea runtime user (nor this process). It is a sentinel so
+// callers and tests can tell a hostile/squatted socket apart from an
+// ordinary dial failure.
+var errUntrustedKeaPeer = errors.New("untrusted Kea control-socket peer")
+
+// keaPeerUIDResolver reports the uid a Kea control-socket peer must
+// carry (the resolved _kea/kea runtime user), or ok=false when neither
+// Kea user exists on this host. It is a package seam so tests can pin
+// the expected uid without a real _kea account. Production resolves
+// the same user database names the memfile pre-seed uses (#2450),
+// uncached: the lookup runs once per dial, never on a packet path,
+// and caching it here would couple the peer check to a Manager the
+// dialer does not hold.
+var keaPeerUIDResolver = func() (int, bool) {
+	uid, _, ok := lookupKeaOwner()
+	return uid, ok
+}
+
+// keaPeerTrustError is the DECISION half of the peer check, split from
+// the syscall shell so every arm is reachable from a test on any
+// machine (a non-root test binary cannot manufacture a connection
+// from a foreign uid; see #9003). peerUID is trusted when it is:
+//
+//   - the resolved Kea runtime uid (_kea/kea): the production case —
+//     Kea runs as _kea, xpfd as root;
+//   - root or this process's own euid, mirroring the reinject fix
+//     (#16052, reinjectPeerTrustError16052) and the helper-socket
+//     check (#9003): the root arm covers a Kea packaged to run as
+//     root, and the euid arm lets a non-root test binary drive the
+//     real production dialer against a stub server it holds itself
+//     (in production xpfd is root, so the two arms coincide).
+//
+// Everything else — a foreign local user that won the pathname — is
+// refused. A missing credential (nil) never reads as trusted.
+func keaPeerTrustError(socketPath string, peerUID int) error {
+	return keaPeerTrustErrorAs(socketPath, peerUID, os.Geteuid())
+}
+
+// keaPeerTrustErrorAs is keaPeerTrustError with the daemon euid made
+// explicit, so a test can state the daemon/squatter relationship
+// deterministically whatever uid the test binary itself runs as.
+func keaPeerTrustErrorAs(socketPath string, peerUID, selfUID int) error {
+	if peerUID == 0 || peerUID == selfUID {
+		return nil
+	}
+	if keaUID, ok := keaPeerUIDResolver(); ok && peerUID == keaUID {
+		return nil
+	}
+	return fmt.Errorf("%w: %s is held by uid %d, not the Kea runtime user; refusing to trust its leases",
+		errUntrustedKeaPeer, socketPath, peerUID)
+}
+
+// keaGetsockoptUcred is the SO_PEERCRED syscall, seamed so a test can
+// force a read failure (see TestKeaPeerUIDReadFailsClosed16058).
+var keaGetsockoptUcred = unix.GetsockoptUcred
+
+// readKeaPeerUID is the syscall shell: it asks the kernel who is on the
+// other end of an AF_UNIX connection. It NEVER substitutes a zero
+// value for a failed read — a zeroed unix.Ucred has Uid 0, which
+// keaPeerTrustError accepts as root, so swallowing the error here
+// would convert the guard into a fail-open (the #9003 lesson).
+func readKeaPeerUID(socketPath string, conn net.Conn) (int, error) {
+	uc, ok := conn.(*net.UnixConn)
+	if !ok {
+		return 0, fmt.Errorf("%w: %s is not an AF_UNIX connection (%T), so its peer cannot be identified",
+			errUntrustedKeaPeer, socketPath, conn)
+	}
+	raw, err := uc.SyscallConn()
+	if err != nil {
+		return 0, fmt.Errorf("%w: %s: obtain raw connection: %v", errUntrustedKeaPeer, socketPath, err)
+	}
+	var (
+		cred    *unix.Ucred
+		credErr error
+	)
+	if err := raw.Control(func(fd uintptr) {
+		cred, credErr = keaGetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
+	}); err != nil {
+		return 0, fmt.Errorf("%w: %s: read peer credentials: %v", errUntrustedKeaPeer, socketPath, err)
+	}
+	if credErr != nil {
+		return 0, fmt.Errorf("%w: %s: read peer credentials: %v", errUntrustedKeaPeer, socketPath, credErr)
+	}
+	if cred == nil {
+		return 0, fmt.Errorf("%w: %s: kernel returned no peer credentials", errUntrustedKeaPeer, socketPath)
+	}
+	return int(cred.Uid), nil
+}
+
+// verifyKeaPeer reads SO_PEERCRED from a freshly dialed control-socket
+// connection and refuses any peer that is not the Kea runtime user,
+// root, or this process. It runs before a single command byte is
+// written, so a squatter on the pathname can neither feed fabricated
+// leases into HA sync nor receive lease-add commands.
+func verifyKeaPeer(socketPath string, conn net.Conn) error {
+	uid, err := readKeaPeerUID(socketPath, conn)
+	if err != nil {
+		return err
+	}
+	return keaPeerTrustError(socketPath, uid)
+}
+
+// keaPeerVerify is the peer check defaultKeaDialer applies to every
+// connection it returns. It is a seam so a test can substitute a
+// foreign-credential decision — a non-root test binary cannot
+// manufacture a connection from a foreign uid, so the squatter's
+// kernel credential cannot be produced directly (the #16052 shape).
+// Production always runs verifyKeaPeer.
+var keaPeerVerify = verifyKeaPeer
+
 // keaSocketDialer abstracts the unix-socket dial for tests (a stub server can
 // implement the lease_cmds wire). Production uses net.Dial.
 type keaSocketDialer func(ctx context.Context, socketPath string) (net.Conn, error)
 
 func defaultKeaDialer(ctx context.Context, socketPath string) (net.Conn, error) {
 	var d net.Dialer
-	return d.DialContext(ctx, "unix", socketPath)
+	conn, err := d.DialContext(ctx, "unix", socketPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := keaPeerVerify(socketPath, conn); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return conn, nil
 }
 
 // keaControl sends one command to the family control socket and decodes the
@@ -859,8 +980,18 @@ func (m *Manager) waitControlSocket(ctx context.Context, family int, within time
 		conn, err := dial(dctx, socket)
 		cancel()
 		if err == nil {
+			// #16058: a connectable squatter is not Kea. The production
+			// dialer already verified; verify again here so a custom
+			// dialer cannot make a squatted socket look ready — the seed
+			// that follows this wait would otherwise trust it.
+			if m.keaDial != nil {
+				err = verifyKeaPeer(socket, conn)
+			}
+			if err == nil {
+				conn.Close()
+				return true
+			}
 			conn.Close()
-			return true
 		}
 		if time.Now().After(deadline) {
 			return false

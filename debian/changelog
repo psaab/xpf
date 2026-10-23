@@ -1,5 +1,14 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Verify SO_PEERCRED on the Kea lease-sync control-socket dial
+    (#16058): the client previously bare-dialed the socket pathname,
+    so a wrong/squatted server was trusted as Kea and its fabricated
+    leases fed HA lease sync. The dial now refuses any peer that is
+    not the resolved Kea runtime user (_kea/kea), root, or the
+    daemon itself, before any command byte is written.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Load an `ascii-text` IPsec PSK that starts with `0x`/`0s` as its
     literal bytes (#15991): the gateway-group secret fold now carries
     each member PSK's authored encoding (pskValue{value, hex}) and
