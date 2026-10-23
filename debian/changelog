@@ -1,4 +1,13 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Repair the #15995 ancestor-denial surface fixtures: the gRPC, REST
+    and CLI suites committed a gateway-less PSK VPN that the #15989
+    strict commit gate now rejects at fixture setup, so the
+    descendant-pricing assertions never ran. The fixtures scope the key
+    with an inline IKE gateway, and the five-package authz pattern is
+    green again. Test-only; no gate logic changes.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Populate the wire specimens the #16132 completeness gate was red
     on: control_response_populated now carries the #16133 error_code
     and error_retry_class fields, the time-wait FlowSnapshot specimen

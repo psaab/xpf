@@ -50,7 +50,7 @@ security {
         }
     }
     ipsec {
-        vpn vpn1 { bind-interface st0.0; pre-shared-key ascii-text dummy15995; }
+        vpn vpn1 { bind-interface st0.0; ike { gateway 192.0.2.1; } pre-shared-key ascii-text dummy15995; }
     }
 }
 interfaces {
