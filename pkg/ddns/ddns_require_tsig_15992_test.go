@@ -481,3 +481,131 @@ var errFailDelete15992 = errString15992("fake: delete failed (cleanup pending)")
 type errString15992 string
 
 func (e errString15992) Error() string { return string(e) }
+
+// TestDDNSUnsignedGaugeSeededAtRestart15992 is the fresh-manager
+// regression: persisted ownership is on disk, DDNS is now DISABLED with
+// an unsigned non-loopback endpoint, and NO reconcile has run yet. A
+// fresh manager's Stats() must already report the posture (seeded at
+// construction+seed time), never the atomics' false zero value.
+// Fail-on-revert: without seeding, Stats() before the first reconcile
+// reads 0 while persisted ownership awaits unsigned cleanup.
+func TestDDNSUnsignedGaugeSeededAtRestart15992(t *testing.T) {
+	ctx := context.Background()
+	nowFn := func() time.Time { return time.Unix(1_700_000_000, 0) }
+	disabledUnsigned := &config.DHCPServerConfig{DynamicDNS: &config.DHCPDynamicDNSConfig{
+		Enabled: false, Domain: "example.com", TTLSeconds: 300, Backend: "rfc2136", UpdateServer: "192.0.2.53",
+	}}
+
+	// --- Surface B: persist ownership, then a FRESH manager. ---
+	srv := newFakeDNSServer(t, nil)
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	src1 := &fakeLeaseSource{}
+	m1 := newManagerForTesting(src1.parser(), nopUpdater{}, statePath,
+		filepath.Join(dir, "l4.csv"), filepath.Join(dir, "l6.csv"), "node0", nowFn)
+	m1.newUpdater = func(pol ddnsPolicy, c *config.DHCPDynamicDNSConfig) (DNSUpdater, error) {
+		if pol.backend != "rfc2136" || c == nil || c.UpdateServer == "" {
+			return nopUpdater{}, nil
+		}
+		authored := c.UpdateServer
+		c2 := *c
+		c2.UpdateServer = srv.addrUDP
+		u, err := newRFC2136Updater(pol, &c2, nil,
+			func() { m1.skippedPTRNotAuth.Add(1) }, func() { m1.skippedConflict.Add(1) })
+		if err != nil {
+			return nil, err
+		}
+		return &postureUpdater15992{inner: u, server: authored}, nil
+	}
+	src1.v4 = laptopMacLease()
+	if err := m1.Reconcile(ctx, ddnsCfg("192.0.2.53")); err != nil {
+		t.Fatalf("seed publish: %v", err)
+	}
+	if got := m1.Stats().OwnedRecords; got != 1 {
+		t.Fatalf("owned = %d, want 1 persisted", got)
+	}
+	// Fresh manager over the SAME persisted state (restart). The daemon
+	// seeds from the active (disabled unsigned) config at wiring time.
+	m2 := newManagerForTesting(nil, nopUpdater{}, statePath,
+		filepath.Join(dir, "l4.csv"), filepath.Join(dir, "l6.csv"), "node0", nowFn)
+	if m2.Stats().UnsignedNonLoopbackActive {
+		t.Fatal("pre-seed fresh manager already reports 1 (test precondition broken)")
+	}
+	m2.SeedUnsignedPosture(disabledUnsigned)
+	if !m2.Stats().UnsignedNonLoopbackActive {
+		t.Fatal("fresh manager Stats() = 0 before first reconcile despite persisted ownership + disabled unsigned endpoint")
+	}
+	// The seeded posture must also hold through the first (cleanup) pass
+	// and clear when cleanup completes.
+	m2.newUpdater = m1.newUpdater
+	src2 := &fakeLeaseSource{}
+	m2.leaseParser = src2.parser()
+	if err := m2.Reconcile(ctx, disabledUnsigned); err != nil {
+		t.Fatalf("first cleanup reconcile: %v", err)
+	}
+	if got := m2.Stats().OwnedRecords; got != 0 {
+		t.Fatalf("owned = %d, want 0 after cleanup", got)
+	}
+	if m2.Stats().UnsignedNonLoopbackActive {
+		t.Fatal("gauge stuck at 1 after post-restart cleanup completed")
+	}
+
+	// Negative controls: keyed / loopback / no-ownership seed 0.
+	keyedDisabled := &config.DHCPServerConfig{DynamicDNS: &config.DHCPDynamicDNSConfig{
+		Enabled: false, Domain: "example.com", Backend: "rfc2136", UpdateServer: "192.0.2.53",
+		TSIGKeyName: "k1", TSIGAlgorithm: "hmac-sha256", TSIGSecret: config.NewSecret("c2VjcmV0"),
+	}}
+	mKeyed := newManagerForTesting(nil, nopUpdater{}, statePath,
+		filepath.Join(dir, "l4.csv"), filepath.Join(dir, "l6.csv"), "node0", nowFn)
+	mKeyed.SeedUnsignedPosture(keyedDisabled)
+	if mKeyed.Stats().UnsignedNonLoopbackActive {
+		t.Fatal("keyed endpoint seeded 1 (false alarm)")
+	}
+	loopDisabled := &config.DHCPServerConfig{DynamicDNS: &config.DHCPDynamicDNSConfig{
+		Enabled: false, Domain: "example.com", Backend: "rfc2136", UpdateServer: "127.0.0.1",
+	}}
+	mLoop := newManagerForTesting(nil, nopUpdater{}, statePath,
+		filepath.Join(dir, "l4.csv"), filepath.Join(dir, "l6.csv"), "node0", nowFn)
+	mLoop.SeedUnsignedPosture(loopDisabled)
+	if mLoop.Stats().UnsignedNonLoopbackActive {
+		t.Fatal("loopback endpoint seeded 1 (false alarm)")
+	}
+	emptyPath := filepath.Join(t.TempDir(), "empty.json")
+	mEmpty := newManagerForTesting(nil, nopUpdater{}, emptyPath, "", "", "node0", nowFn)
+	mEmpty.SeedUnsignedPosture(disabledUnsigned)
+	if mEmpty.Stats().UnsignedNonLoopbackActive {
+		// Enabled term is false (disabled) and there is no ownership:
+		// a bare disabled unsigned config with nothing to clean seeds 0.
+		t.Fatal("record-free disabled config seeded 1 (false alarm)")
+	}
+
+	// --- Surface A fresh manager. ---
+	saDir := t.TempDir()
+	saPath := filepath.Join(saDir, "iface.json")
+	fu := newFakeUpdater()
+	sa1 := newSurfaceAManagerForTesting(saPath, fu, nowFn)
+	prov := &config.DDNSProvider{Name: "p1", Backend: "rfc2136", UpdateServer: "192.0.2.53"}
+	sc := surfaceAScope("wan.example.net", FamilyV4, 0)
+	sc.Key.PolicyID = "p1"
+	sc.Provider = prov
+	if err := sa1.Reconcile(ctx, []SurfaceAScope{sc}, fixedObserver("203.0.113.5"), nil, map[string]*config.DDNSProvider{"p1": prov}); err != nil {
+		t.Fatalf("surface seed publish: %v", err)
+	}
+	sa2 := newSurfaceAManagerForTesting(saPath, newFakeUpdater(), nowFn)
+	if sa2.Stats().UnsignedNonLoopbackActive {
+		t.Fatal("pre-seed fresh surface manager already 1 (precondition broken)")
+	}
+	// Binding removed while down; provider still in catalog (cleanup
+	// endpoint for the first reconcile) -> seeds 1 before any reconcile.
+	sa2.SeedUnsignedPosture(map[string]*config.DDNSProvider{"p1": prov})
+	if !sa2.Stats().UnsignedNonLoopbackActive {
+		t.Fatal("fresh surface Stats() = 0 before first reconcile despite persisted ownership + unsigned cleanup provider")
+	}
+	// Keyed provider control seeds 0.
+	sa3 := newSurfaceAManagerForTesting(saPath, newFakeUpdater(), nowFn)
+	keyedProv := &config.DDNSProvider{Name: "p1", Backend: "rfc2136", UpdateServer: "192.0.2.53", TSIGKeyName: "k1", TSIGSecret: config.NewSecret("c2VjcmV0")}
+	sa3.SeedUnsignedPosture(map[string]*config.DDNSProvider{"p1": keyedProv})
+	if sa3.Stats().UnsignedNonLoopbackActive {
+		t.Fatal("keyed surface provider seeded 1 (false alarm)")
+	}
+}

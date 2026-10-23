@@ -2658,3 +2658,50 @@ func familyInt(a netip.Addr) int {
 func NewSurfaceAManagerForTesting(statePath string, backend DNSUpdater, now func() time.Time) *SurfaceAManager {
 	return newSurfaceAManagerForTesting(statePath, backend, now)
 }
+
+// SeedUnsignedPosture (#15992) seeds the Surface A unsigned-posture gauge
+// at manager start, before the first reconcile. The owner that has both
+// the freshly constructed manager (persisted ownership already loaded by
+// NewSurfaceAManager) and the boot/active catalog calls it at wiring
+// time, before any reconcile or Stats scrape.
+//
+// Seeded 1 iff persisted Surface A ownership exists AND the cleanup
+// endpoint for that ownership — the provider the first reconcile will
+// consult for withdrawn/orphaned records — is unsigned non-loopback.
+// The catalog passed here is that first-reconcile catalog: a provider
+// REMOVED from it (binding+provider deleted while the daemon was down)
+// leaves only the stored fingerprint, which cannot be decoded back to a
+// server/key posture — so removal-while-down cannot seed (see the
+// fingerprint limitation in the commit); a still-present disabled-by-
+// removal-of-binding provider (in catalog, no scopes) DOES seed, as
+// does any unsigned non-loopback provider in the catalog. Keyed,
+// loopback, or record-free cases seed 0.
+func (m *SurfaceAManager) SeedUnsignedPosture(catalog map[string]*config.DDNSProvider) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cleanupUnsignedNonLoopback == nil {
+		m.cleanupUnsignedNonLoopback = map[string]bool{}
+	}
+	for _, prov := range catalog {
+		if fp := backendFingerprint(prov); fp != "" {
+			m.cleanupUnsignedNonLoopback[fp] = providerUnsignedNonLoopback(prov)
+		}
+	}
+	seeded := false
+	for _, prov := range catalog {
+		if providerUnsignedNonLoopback(prov) {
+			seeded = true
+			break
+		}
+	}
+	if !seeded && len(m.state.all()) > 0 {
+		for _, owned := range m.state.all() {
+			if owned.BackendFingerprint != "" && m.cleanupUnsignedNonLoopback[owned.BackendFingerprint] {
+				seeded = true
+				break
+			}
+		}
+	}
+	m.unsignedNonLoopbackActive = seeded
+	m.prevUnsignedNonLoopback = seeded
+}

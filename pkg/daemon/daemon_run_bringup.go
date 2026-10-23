@@ -130,6 +130,20 @@ func (d *Daemon) initManagers(failClosed bool) error {
 		// manager's mu can consult the peer with no lock-order cycle / deadlock.
 		d.ddns.SetSurfaceACoownerSource(d.surfaceA.mgr.WireRRClaims)
 		d.surfaceA.mgr.SetLeaseCoownerSource(d.ddns.WireRRClaims)
+		// #15992: seed the unsigned-posture gauges from persisted
+		// ownership + the boot config's endpoints BEFORE the first
+		// reconcile or scrape, so a restart with persisted ownership
+		// awaiting disabled unsigned cleanup never reports a false 0.
+		// ActiveConfig may be nil pre-boot-apply; seeding is then a
+		// no-op and the first reconcile establishes the posture.
+		if cfg := d.store.ActiveConfig(); cfg != nil {
+			d.ddns.SeedUnsignedPosture(&cfg.System.DHCPServer)
+			var catalog map[string]*config.DDNSProvider
+			if cfg.System.Services != nil && cfg.System.Services.DynamicDNS != nil {
+				catalog = cfg.System.Services.DynamicDNS.Providers
+			}
+			d.surfaceA.mgr.SeedUnsignedPosture(catalog)
+		}
 	}
 
 	// Create the RPM manager eagerly so the pointer is stable for the

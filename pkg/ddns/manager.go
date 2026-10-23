@@ -699,6 +699,57 @@ func NewManagerForTesting(
 	return m
 }
 
+// SeedUnsignedPosture (#15992) seeds the unsigned-posture gauge at manager
+// start, before the first reconcile. It must be called by the owner that
+// has BOTH the freshly constructed manager (persisted ownership already
+// loaded) and the boot/active config (endpoint identity), and before any
+// reconcile or Stats scrape can race it — the daemon calls it at manager
+// wiring time, right after construction.
+//
+// active=false models the endpoint the first reconcile will use for
+// cleanup of persisted records: a DISABLED (or removed => nil) DHCP DDNS
+// family whose update-server is unsigned non-loopback. If either family
+// owns persisted records and its cleanup endpoint is unsigned
+// non-loopback, the gauge starts at 1. An enabled unsigned family also
+// seeds 1 (it will publish unsigned from the first pass). Keyed,
+// loopback, missing, or record-free cases seed 0 — never a false alarm.
+func (m *Manager) SeedUnsignedPosture(cfg *config.DHCPServerConfig) {
+	if cfg == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	seeded := false
+	fams := [2]*config.DHCPDynamicDNSConfig{cfg.DynamicDNS, cfg.DynamicDNSv6}
+	// Mirror ReconcileScoped's single-block inheritance so a v4-only
+	// committed config seeds the v6 cleanup posture too.
+	if fams[0] == nil && fams[1] != nil {
+		fams[0] = fams[1]
+	} else if fams[1] == nil && fams[0] != nil {
+		fams[1] = fams[0]
+	}
+	for i, fam := range fams {
+		if fam == nil {
+			continue
+		}
+		if ddnsUnsignedNonLoopback(policyFromConfig(fam), fam) {
+			seeded = true
+		}
+		// Cleanup term: persisted ownership for this family + a disabled
+		// unsigned non-loopback endpoint. ddnsConfigUnsignedNonLoopback
+		// deliberately ignores Enabled (disabled families still send
+		// cleanup UPDATEs), so key on ownership, not on enablement.
+		if m.familyOwnsRecords([2]int{4, 6}[i]) && ddnsConfigUnsignedNonLoopback(fam) {
+			seeded = true
+			m.cleanupUnsignedNonLoopback[i] = true
+		}
+	}
+	// Seed BOTH the live value and the held (prev) value so the first
+	// in-flight pass holds the seeded posture instead of resetting it.
+	m.unsignedNonLoopbackActive.Store(seeded)
+	m.prevUnsignedNonLoopback.Store(seeded)
+}
+
 // ownerWatermark is the deterministic, node-stable owner id for a lease
 // identity (plan §5 invariant 2). It is a hash of identity+address ONLY —
 // the receiver's nodeID is DELIBERATELY NOT folded in — so EITHER HA node
