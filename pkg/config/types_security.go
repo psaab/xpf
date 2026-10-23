@@ -619,6 +619,12 @@ type HostInboundTraffic struct {
 	protocolsExcept      []string
 	systemServicesHasAll bool
 	protocolsHasAll      bool
+	// systemServicesHasFullAdmit records that the authored stanza carried
+	// an effective `any-service` token, even when #16000 poison stripped
+	// it from SystemServices. The #12054 full-admit gate reads this (via
+	// hostInboundFullAdmitToken) so its inert-except diagnostic survives
+	// the poison without the token reaching enforcement.
+	systemServicesHasFullAdmit bool
 	// Preserve wrong-case spellings that a case-insensitive exclusion may
 	// remove before the strict token gate can reject them.
 	nonCanonicalSystemServices []string

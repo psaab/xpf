@@ -51,6 +51,14 @@ func TestHostInbound16000UnknownExceptOperandPoisonsDimension(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := hostInbound16000(t, prefix+tc.inner+suffix)
+			if strings.HasPrefix(tc.name, "protocols") {
+				for _, p := range got.Protocols {
+					if KnownHostInboundProtocols[hostInboundEffectiveToken(p)] {
+						t.Fatalf("protocols = %v, recognized token %q survived the poison", got.Protocols, p)
+					}
+				}
+				return
+			}
 			for _, svc := range got.SystemServices {
 				// `any-service` may stay as the inert full-admit marker the
 				// #12054 gate diagnoses; it must not admit anything while an
@@ -59,11 +67,64 @@ func TestHostInbound16000UnknownExceptOperandPoisonsDimension(t *testing.T) {
 				if svc == "any-service" && tc.name == "services-any-service-typo" {
 					continue
 				}
-				if KnownHostInboundSystemServices[svc] {
+				if KnownHostInboundSystemServices[hostInboundEffectiveToken(svc)] {
 					t.Fatalf("system-services = %v, recognized token %q survived the poison (full admit retained)", got.SystemServices, svc)
 				}
 			}
 		})
+	}
+}
+
+// Review fold (Opus): a whitespace-padded `" any-service "` token is
+// recognized by enforcement (HostInboundFullAdmitService trims) but was
+// NOT recognized by the poison keep-decision, so it survived and trimmed
+// into a live full admit downstream. The poison must decide on the
+// normalized effective token. FAIL-ON-REVERT: drop the TrimSpace in
+// hostInboundEffectiveToken / the poison helpers and the padded token
+// survives again.
+func TestHostInbound16000PaddedAnyServiceDoesNotSurvivePoison(t *testing.T) {
+	poisoned := poisonUnknownExceptDimension(
+		[]string{" any-service ", "sh"}, []string{"sh"}, KnownHostInboundSystemServices)
+	for _, tok := range poisoned {
+		if HostInboundFullAdmitService(tok) {
+			t.Fatalf("padded full-admit token survived poison: %q in %q", tok, poisoned)
+		}
+		if KnownHostInboundSystemServices[hostInboundEffectiveToken(tok)] {
+			t.Fatalf("recognized token %q survived poison: %q", tok, poisoned)
+		}
+	}
+	// Padded known operand is NOT unknown: ` SSH ` except under `all`
+	// must subtract, not poison the whole dimension.
+	if hostInboundHasUnknownExceptOperand([]string{" SSH "}, KnownHostInboundSystemServices) {
+		t.Fatal("padded known operand misclassified as unknown")
+	}
+	// End-to-end through the merged view: a padded any-service contributor
+	// unioned with an unknown-except contributor admits nothing.
+	merged := MergeHostInboundTraffic(
+		&HostInboundTraffic{SystemServices: []string{" any-service "}},
+		&HostInboundTraffic{SystemServices: []string{"sh"}, systemServicesExcept: []string{"sh"}},
+	)
+	for _, tok := range merged.SystemServices {
+		if HostInboundFullAdmitService(tok) {
+			t.Fatalf("merged view retained full admit %q: %q", tok, merged.SystemServices)
+		}
+	}
+	// Quoted padded spelling through the real parser: tolerant compile
+	// must not retain a full admit.
+	tree, errs := NewParser(`security { zones { security-zone trust { host-inbound-traffic {
+		system-services { " any-service "; sh except; }
+	} } } }`).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("parse: %v", errs)
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient: %v", err)
+	}
+	for _, tok := range cfg.Security.Zones["trust"].HostInboundTraffic.SystemServices {
+		if HostInboundFullAdmitService(tok) {
+			t.Fatalf("tolerant compile retained full admit %q", tok)
+		}
 	}
 }
 

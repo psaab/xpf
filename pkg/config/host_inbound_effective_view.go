@@ -274,6 +274,7 @@ func MergeHostInboundTraffic(a, b *HostInboundTraffic) *HostInboundTraffic {
 	out.Protocols = poisonUnknownExceptDimension(out.Protocols, out.protocolsExcept, KnownHostInboundProtocols)
 	out.systemServicesHasAll = a.systemServicesHasAll || b.systemServicesHasAll
 	out.protocolsHasAll = a.protocolsHasAll || b.protocolsHasAll
+	out.systemServicesHasFullAdmit = a.systemServicesHasFullAdmit || b.systemServicesHasFullAdmit
 	appendUnique(&out.nonCanonicalSystemServices, a.nonCanonicalSystemServices)
 	appendUnique(&out.nonCanonicalSystemServices, b.nonCanonicalSystemServices)
 	appendUnique(&out.nonCanonicalProtocols, a.nonCanonicalProtocols)

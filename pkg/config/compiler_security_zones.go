@@ -90,14 +90,21 @@ func parseHostInboundNode(n *Node) *HostInboundTraffic {
 	}
 	hib.SystemServices = hostInboundFilterExcept(services, servicesExcept, false)
 	hib.Protocols = hostInboundFilterExcept(protocols, protocolsExcept, true)
-	// #16000: the operand token sits in the filtered list above so the
-	// strict token gate and tolerant token warning keep naming it; it
-	// admits nothing itself. hasAll is derived from the pre-poison list
-	// below so the except-without-base gate does not misreport the shape.
+	// A poisoned dimension must not retain a live full admit: the retained
+	// `any-service` marker above is only for the #12054 gate, so clear every
+	// effective full-admit token (trim-aware) from the enforcement list.
+	if servicesUnknownExcept {
+		hib.SystemServices = stripEffectiveFullAdmit16000(hib.SystemServices)
+	}
 	hib.systemServicesExcept = servicesExcept
 	hib.protocolsExcept = protocolsExcept
 	hib.systemServicesHasAll = hostInboundHasAllToken(services)
 	hib.protocolsHasAll = hostInboundHasAllToken(protocols)
+	for _, svc := range services {
+		if HostInboundFullAdmitService(svc) {
+			hib.systemServicesHasFullAdmit = true
+		}
+	}
 	hib.nonCanonicalSystemServices = hostInboundNonCanonicalTokens(services, KnownHostInboundSystemServices)
 	hib.nonCanonicalProtocols = hostInboundNonCanonicalTokens(protocols, KnownHostInboundProtocols)
 	hib.UnknownChildren = dedupHostInboundTokens(hib.UnknownChildren)
@@ -221,6 +228,40 @@ func hostInboundHasAllToken(tokens []string) bool {
 	return false
 }
 
+// hostInboundHasUnknownExceptOperand reports whether any exclusion operand is
+// outside the recognized token set for its dimension. Tokens are normalized
+// (trim + lower-case) before the decision: a whitespace-padded or wrong-case
+// spelling of a known token (e.g. `" any-service "`, `SSH`) is non-canonical,
+// which strict rejects separately, not unknown — and enforcement trims and
+// lower-cases before matching, so the poison decision must see the same
+// effective token or a padded `any-service` would survive as a full admit.
+func hostInboundHasUnknownExceptOperand(except []string, known map[string]bool) bool {
+	for _, token := range except {
+		if !known[hostInboundEffectiveToken(token)] {
+			return true
+		}
+	}
+	return false
+}
+
+// hostInboundEffectiveToken is the token enforcement actually sees:
+// whitespace-trimmed and case-folded. Every poison / keep decision is made
+// on this form, never on the raw authored spelling.
+func hostInboundEffectiveToken(token string) string {
+	return strings.ToLower(strings.TrimSpace(token))
+}
+
+func hostInboundNonCanonicalTokens(tokens []string, known map[string]bool) []string {
+	var out []string
+	for _, token := range tokens {
+		canonical := strings.ToLower(token)
+		if token != canonical && known[canonical] {
+			out = append(out, token)
+		}
+	}
+	return out
+}
+
 // keepUnknownExceptOperandsOnly reduces a poisoned dimension's positive list
 // to just its unrecognized exclusion operands, plus a retained `any-service`
 // full-admit token. Operands stay positive so the strict token gate and the
@@ -234,11 +275,11 @@ func keepUnknownExceptOperandsOnly(tokens, except []string, known map[string]boo
 	var out []string
 	for _, token := range tokens {
 		for _, operand := range except {
-			if token == operand && !known[strings.ToLower(operand)] {
+			if token == operand && !known[hostInboundEffectiveToken(operand)] {
 				out = append(out, token)
 			}
 		}
-		if strings.EqualFold(token, "any-service") {
+		if HostInboundFullAdmitService(token) {
 			out = append(out, token)
 		}
 	}
@@ -254,7 +295,7 @@ func stripUnknownExceptOperands(tokens, except []string, known map[string]bool) 
 	for _, token := range tokens {
 		unknownOperand := false
 		for _, operand := range except {
-			if token == operand && !known[strings.ToLower(operand)] {
+			if token == operand && !known[hostInboundEffectiveToken(operand)] {
 				unknownOperand = true
 			}
 		}
@@ -268,34 +309,31 @@ func stripUnknownExceptOperands(tokens, except []string, known map[string]bool) 
 	return out
 }
 
-// hostInboundHasUnknownExceptOperand reports whether any exclusion operand is
-// outside the recognized token set for its dimension. Matching is
-// case-insensitive: a wrong-case spelling of a known token (e.g. `SSH`) is
-// non-canonical, which strict rejects separately, not unknown.
-func hostInboundHasUnknownExceptOperand(except []string, known map[string]bool) bool {
-	for _, token := range except {
-		if !known[strings.ToLower(token)] {
-			return true
-		}
-	}
-	return false
-}
-
-func hostInboundNonCanonicalTokens(tokens []string, known map[string]bool) []string {
-	var out []string
+// stripEffectiveFullAdmit16000 removes every token whose effective
+// (trimmed, case-folded) form is the full-admit token. Used on a poisoned
+// dimension so neither `any-service` nor a padded `" any-service "` can
+// reach enforcement as a live packet-wide admit.
+func stripEffectiveFullAdmit16000(tokens []string) []string {
+	out := tokens[:0]
 	for _, token := range tokens {
-		canonical := strings.ToLower(token)
-		if token != canonical && known[canonical] {
+		if !HostInboundFullAdmitService(token) {
 			out = append(out, token)
 		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
 
 // poisonUnknownExceptDimension clears every recognized admission from an
 // effective token list when the combined exclusion provenance carries an
-// unrecognized operand (#16000). Unrecognized tokens themselves survive:
-// they admit nothing on either enforcement surface and keep the strict /
+// unrecognized operand (#16000). The keep decision uses the normalized
+// (trim + lower-case) token enforcement sees, so a padded `" any-service "`
+// is recognized as the full-admit token and cleared like any other
+// recognized admission instead of surviving to be trimmed into a live
+// full admit downstream. Unrecognized tokens themselves survive: they
+// admit nothing on either enforcement surface and keep the strict /
 // tolerant token diagnostics naming the operand.
 func poisonUnknownExceptDimension(tokens, except []string, known map[string]bool) []string {
 	if !hostInboundHasUnknownExceptOperand(except, known) {
@@ -303,7 +341,7 @@ func poisonUnknownExceptDimension(tokens, except []string, known map[string]bool
 	}
 	out := tokens[:0]
 	for _, token := range tokens {
-		if !known[strings.ToLower(token)] {
+		if !known[hostInboundEffectiveToken(token)] {
 			out = append(out, token)
 		}
 	}
@@ -466,6 +504,7 @@ func mergeHostInbound(dst, src *HostInboundTraffic) *HostInboundTraffic {
 	dst.protocolsExcept = append(dst.protocolsExcept, src.protocolsExcept...)
 	dst.systemServicesHasAll = dst.systemServicesHasAll || src.systemServicesHasAll
 	dst.protocolsHasAll = dst.protocolsHasAll || src.protocolsHasAll
+	dst.systemServicesHasFullAdmit = dst.systemServicesHasFullAdmit || src.systemServicesHasFullAdmit
 	dst.nonCanonicalSystemServices = append(dst.nonCanonicalSystemServices, src.nonCanonicalSystemServices...)
 	dst.nonCanonicalProtocols = append(dst.nonCanonicalProtocols, src.nonCanonicalProtocols...)
 	dst.UnknownChildren = dedupHostInboundTokens(append(dst.UnknownChildren, src.UnknownChildren...))
@@ -506,6 +545,7 @@ func cloneHostInbound(src *HostInboundTraffic) *HostInboundTraffic {
 		protocolsExcept:            append([]string(nil), src.protocolsExcept...),
 		systemServicesHasAll:       src.systemServicesHasAll,
 		protocolsHasAll:            src.protocolsHasAll,
+		systemServicesHasFullAdmit: src.systemServicesHasFullAdmit,
 		nonCanonicalSystemServices: append([]string(nil), src.nonCanonicalSystemServices...),
 		nonCanonicalProtocols:      append([]string(nil), src.nonCanonicalProtocols...),
 	}
