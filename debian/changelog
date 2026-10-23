@@ -1,5 +1,23 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Adopted MissingNeighbor restore (#16217): post-failover transient
+    replies hit the session-HIT with the gate snapshot still reading
+    the egress RG inactive, so the look-up answered MissingNeighbor
+    and HA enforcement stripped it to HAInactive; the adopted
+    restore required ForwardCandidate and kept the terminal. The
+    restore now recomputes the neighbor/egress from the live FIB
+    for an adopted MissingNeighbor with a known egress RG and
+    restores only a recomputed ForwardCandidate carrying a resolved
+    neighbor MAC (still-missing / unknown-egress stays fail-closed).
+    A MissingNeighbor decision also never seeds the flow cache, so
+    a transient entry cannot be peeked forever by silent
+    retransmits. Live aged P4 still fails (29 / 25 SUM zeros, twice
+    on loss); the fw0 fabric-delivery leg remains open.
+
+ -- xpf maintainers <noreply@anthropic.com>  Fri, 23 Oct 2026 00:00:00 +0000
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Carry fw0's restamped Established evidence to the peer on an HA
     Update (#16217): the conntrack-refresh slice restamps fw0's
     shared rows to wire=4 with reverse counts, but that evidence

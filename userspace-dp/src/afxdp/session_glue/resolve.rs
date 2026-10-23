@@ -459,7 +459,7 @@ fabric_adopted: bool,) -> Option<ResolvedFlowSessionDecision> {
         // #16217: a fabric-adopted ForwardCandidate must not die on
         // the ha_inactive terminal (see `fabric_adopted_resolution`).
         let enforced_resolution = if fabric_adopted {
-            fabric_adopted_resolution(forwarding, ha_state, now_secs, looked_up_resolution, enforced_resolution)
+            fabric_adopted_resolution(forwarding, ha_state, now_secs, looked_up_resolution, enforced_resolution, dynamic_neighbors, resolution_target)
         } else {
             enforced_resolution
         };
@@ -731,7 +731,7 @@ fabric_adopted: bool,) -> Option<ResolvedFlowSessionDecision> {
     );
     // #16217: same adopted-ForwardCandidate exemption as the hit arm.
     let enforced_resolution = if fabric_adopted {
-        fabric_adopted_resolution(forwarding, ha_state, now_secs, looked_up_resolution, enforced_resolution)
+        fabric_adopted_resolution(forwarding, ha_state, now_secs, looked_up_resolution, enforced_resolution, dynamic_neighbors, resolution_target)
     } else {
         enforced_resolution
     };
@@ -866,8 +866,36 @@ ingress_zone: u16,) -> ForwardingResolution {
 /// ingress-ifindex=4 egress-ifindex=14` on fw1 while RG1 read active).
 /// Only the adopted resolution converts: a ForwardCandidate that HA
 /// enforcement demoted is restored verbatim, and any other enforced
-/// outcome (a genuine ForwardCandidate, a MissingNeighbor awaiting
-/// neighbor resolution, LocalDelivery, ...) is kept as enforced.
+/// outcome (a genuine ForwardCandidate, LocalDelivery, ...) is kept
+/// as enforced.
+///
+/// #16217 (FZDiag24): the second adoptable shape is a looked-up
+/// `MissingNeighbor` whose egress RG is known. At the takeover
+/// instant the new owner's FIB already nominates the WAN egress
+/// (egress 14, next-hop 172.16.80.200) but the neighbor is not yet
+/// resolved, so the FIB answers `MissingNeighbor` with
+/// `neighbor_mac == None`; HA enforcement then strips it at
+/// `forwarding/ha.rs` (`!is_forwarding_active -> HAInactive`, which
+/// keeps `..resolution` and therefore the neighbor-less shape). The
+/// pre-fix helper required `looked_up == ForwardCandidate`, so this
+/// demoted `MissingNeighbor` was kept as `HAInactive` forever and
+/// every post-FO transient reply hit the session-HIT with
+/// `session_hit_fabric_adopted=true` yet still dropped (FZDiag24:
+/// 3,308 `MissingNeighbor -> HAInactive` + 2,688
+/// `ClusterTerminalHAInactive` resolutions, zero misses). For an
+/// adopted flow the neighbor must be RECOMPUTED from the live FIB
+/// instead of trusting the stripped shape: a fresh FIB lookup for
+/// the packet destination that yields a `ForwardCandidate` (neighbor
+/// now resolved, egress RG known) restores that candidate verbatim.
+/// If the fresh lookup still answers `MissingNeighbor` (or anything
+/// else), the HA terminal stands — adoption proved establishment and
+/// (via the gate) ownership, not that the neighbor has landed, so a
+/// still-unresolved adopted tuple stays fail-closed rather than
+/// forwarding on a neighbor-less candidate. The recompute is gated
+/// on the looked-up egress RG being known (>0): an unknown egress
+/// (rg 0, incl. the `ClusterTerminalHAInactive` shape whose egress
+/// was zeroed before enforcement) never restores.
+///
 /// Non-adopted flows never reach this helper (`fabric_adopted ==
 /// false` at every other callsite), so the fail-closed terminal
 /// stands for them bit-identically. HAInactive with unknown ownership
@@ -875,13 +903,17 @@ ingress_zone: u16,) -> ForwardingResolution {
 /// for adopted flows -- adoption proved session establishment, not
 /// route ownership. Positive non-ownership is enforced at the
 /// adoption gate and on every subsequent hit, not by re-imposing the
-/// lagging snapshot's terminal here.
+/// lagging snapshot's terminal here. The `dynamic_neighbors` /
+/// `target` arguments are used ONLY by the MissingNeighbor recompute;
+/// the ForwardCandidate arm ignores them.
 pub(in crate::afxdp) fn fabric_adopted_resolution(
     forwarding: &ForwardingState,
     _ha_state: &BTreeMap<i32, HAGroupRuntime>,
     _now_secs: u64,
     looked_up: ForwardingResolution,
     enforced: ForwardingResolution,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    target: IpAddr,
 ) -> ForwardingResolution {
     if !matches!(
         enforced.disposition,
@@ -889,29 +921,54 @@ pub(in crate::afxdp) fn fabric_adopted_resolution(
     ) {
         return enforced;
     }
-    if looked_up.disposition != ForwardingDisposition::ForwardCandidate {
+    if looked_up.disposition == ForwardingDisposition::ForwardCandidate {
+        // #16217 (GLM N1): adoption proved session establishment, not route
+        // ownership. Restore the candidate only when its egress RG is
+        // KNOWN (>0) and this node is not PROVEN a non-owner of it:
+        // restore when the RG is forwarding-active locally, OR when the
+        // gate's ownership evidence is the only fresh proof and the
+        // worker snapshot has not caught up (the adoption window -- the
+        // HA demotion this helper exists to bypass is itself proof the
+        // snapshot lags). Restore is refused only when ownership is
+        // positively disproven for a NAMED egress: the egress row is
+        // absent from the FIB (unknown egress, rg 0 via a missing row)
+        // -- there adoption proved establishment, not a route. A named
+        // egress RG that a clustered snapshot shows peer-owned is judged
+        // at the gate (`fabric_adoption_gate_for_wire`) and at every
+        // later hit (`revalidate_fabric_established`); this one-shot
+        // restore may not re-impose the lagging snapshot's terminal.
+        let egress_rg = super::forwarding::owner_rg_for_resolution(forwarding, looked_up);
+        if egress_rg <= 0 {
+            return enforced;
+        }
+        return looked_up;
+    }
+    if looked_up.disposition == ForwardingDisposition::MissingNeighbor {
+        // FZDiag24 arm: HA enforcement stripped the (already
+        // neighbor-less) MissingNeighbor to HAInactive. Recompute the
+        // neighbor/egress from the FIB: only a fresh ForwardCandidate
+        // (neighbor resolved since the look-up that produced
+        // `looked_up`) may replace the terminal. A still-missing
+        // neighbor keeps the terminal fail-closed.
+        let egress_rg = super::forwarding::owner_rg_for_resolution(forwarding, looked_up);
+        if egress_rg <= 0 {
+            return enforced;
+        }
+        let recomputed = super::forwarding::lookup_forwarding_resolution_with_dynamic(
+            forwarding,
+            dynamic_neighbors,
+            target,
+        )
+        .resolution;
+        if recomputed.disposition == ForwardingDisposition::ForwardCandidate
+            && recomputed.neighbor_mac.is_some()
+            && super::forwarding::owner_rg_for_resolution(forwarding, recomputed) > 0
+        {
+            return recomputed;
+        }
         return enforced;
     }
-    // #16217 (GLM N1): adoption proved session establishment, not route
-    // ownership. Restore the candidate only when its egress RG is
-    // KNOWN (>0) and this node is not PROVEN a non-owner of it:
-    // restore when the RG is forwarding-active locally, OR when the
-    // gate's ownership evidence is the only fresh proof and the
-    // worker snapshot has not caught up (the adoption window -- the
-    // HA demotion this helper exists to bypass is itself proof the
-    // snapshot lags). Restore is refused only when ownership is
-    // positively disproven for a NAMED egress: the egress row is
-    // absent from the FIB (unknown egress, rg 0 via a missing row)
-    // -- there adoption proved establishment, not a route. A named
-    // egress RG that a clustered snapshot shows peer-owned is judged
-    // at the gate (`fabric_adoption_gate_for_wire`) and at every
-    // later hit (`revalidate_fabric_established`); this one-shot
-    // restore may not re-impose the lagging snapshot's terminal.
-    let egress_rg = super::forwarding::owner_rg_for_resolution(forwarding, looked_up);
-    if egress_rg <= 0 {
-        return enforced;
-    }
-    looked_up
+    enforced
 }
 
 

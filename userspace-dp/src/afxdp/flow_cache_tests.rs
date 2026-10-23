@@ -1144,6 +1144,89 @@ fn from_forward_decision_round_trip() {
     assert!(!entry.metadata.fabric_ingress);
 }
 
+/// #16217 (FZDiag24, arm 2): a transient `MissingNeighbor` decision
+/// must never seed the flow cache — driven through the production
+/// seed constructor `from_forward_decision`, not just the
+/// `is_cacheable` predicate. A MissingNeighbor entry seeded during
+/// the post-failover burst would be peeked by every silent
+/// retransmit and never evict (no live neighbor binding to go stale
+/// against), blackholing the flow on the neighbor-less shape.
+/// FAIL-ON-REVERT: drop the MissingNeighbor guard / cacheability
+/// exclusion and this constructor returns Some.
+#[test]
+fn missing_neighbor_never_seeds_flow_cache_16217() {
+    let rg_epochs = default_rg_epochs();
+    let key = make_key();
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    let meta = UserspaceDpMeta {
+        protocol: PROTO_TCP,
+        addr_family: libc::AF_INET as u8,
+        ingress_ifindex: 7,
+        tcp_flags: 0x10,
+        config_generation: 10,
+        fib_generation: 3,
+        ..Default::default()
+    };
+    let validation = ValidationState {
+        snapshot_installed: true,
+        config_generation: 10,
+        fib_generation: 3,
+        neighbor_generation: 0,
+    };
+    let mut forwarding = ForwardingState::default();
+    forwarding.egress.insert(
+        6,
+        EgressInterface {
+            bind_ifindex: 6,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x00, 0x01, 0x01],
+            zone_id: TEST_TRUST_ZONE_ID,
+            redundancy_group: 1,
+            primary_v4: Some(Ipv4Addr::new(10, 0, 1, 1)),
+            primary_v6: None,
+        },
+    );
+    let ha = BTreeMap::from([(
+        1,
+        HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: 95,
+            lease: HAForwardingLease::ActiveUntil(100),
+        },
+    )]);
+    let build = |disposition| {
+        FlowCacheEntry::from_forward_decision(
+            &flow,
+            meta,
+            validation,
+            make_decision(disposition),
+            1,
+            Some(3),
+            Some(7),
+            None,
+            crate::filter::CachedFilterCounters::default(),
+            &forwarding,
+            &ha,
+            false,
+            &rg_epochs,
+            0,
+        )
+    };
+    assert!(
+        build(ForwardingDisposition::MissingNeighbor).is_none(),
+        "MissingNeighbor must never seed the flow cache"
+    );
+    assert!(
+        build(ForwardingDisposition::ForwardCandidate).is_some(),
+        "control: ForwardCandidate with the same tuple still seeds"
+    );
+}
+
 // ----------------------------------------------------------------
 // (h-family) #963 PR-A: from_forward_decision refuses to *cache*
 // descriptors whose decision.nat carries IPs of a different family
