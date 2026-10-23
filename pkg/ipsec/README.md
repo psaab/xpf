@@ -881,7 +881,7 @@ all files stay in `package ipsec`, so the public API is unchanged.
   `sanitizeSwanctlValue` control-char belt (sanitize first, then
   escape). Identity values are now always emitted quoted so a DN with
   spaces/commas parses as a single value.
-- **Hexadecimal PSKs (#15027, A16-04).** A key authored as
+- **Hexadecimal PSKs (#15027, A16-04; provenance #15991).** A key authored as
   `pre-shared-key hexadecimal <hex>` (IKE policy or VPN level) carries
   `PSKHex` on the compiled policy/VPN and renders unquoted as
   `secret = 0x<hex>`, so strongSwan hex-decodes it to the raw bytes a
@@ -890,7 +890,13 @@ all files stay in `package ipsec`, so the public API is unchanged.
   hexadecimal value is refused at strict commit
   (`validateIPsecPSKQualifierStrict`, warning on tolerant load), and
   a hex-flagged value reaching render in a malformed state is
-  skipped by name rather than rendered as ASCII digits.
+  skipped by name rather than rendered as ASCII digits. The authored
+  encoding travels through the gateway-group fold as `pskValue{value,
+  hex}` (#15991): an `ascii-text` value that literally starts with
+  `0x` (e.g. `ascii-text 0x61626364`) renders quoted as
+  `secret = "0x61626364"` — never as raw hex bytes — and stays a
+  distinct grouped element from a hexadecimal key with the same
+  digits; the string prefix alone never decides the encoding.
 - **PSK secret `id` selectors (#3952).** Each `secrets { ike-<conn> {
   secret = ... } }` PSK block now emits `id-<n>` selector(s) scoping the
   secret to its peer (`pskIDSelectors` in `policy.go`). A PSK secret with

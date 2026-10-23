@@ -1,5 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Render an `ascii-text` IPsec PSK that literally starts with `0x`
+    quoted as ASCII (#15991): the gateway-group secret fold now carries
+    each member PSK's authored encoding (pskValue{value, hex}) instead
+    of a bare `0x`-prefixed string, so a lone ASCII `0x61626364` renders
+    `secret = "0x61626364"` rather than the raw hex bytes
+    `secret = 0x61626364`, and an ASCII `0x…` member no longer collapses
+    into a hexadecimal member with the same digits. Hexadecimal keys
+    (#15027) and all other PSK renders are unchanged.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Document that in-VM tcpdump is blind to AF_XDP fast-path flows
     (#16111): testing-docs/failover-testing.md now names the working
     observation points (LAN/WAN host and gRPC endpoint captures, plus
