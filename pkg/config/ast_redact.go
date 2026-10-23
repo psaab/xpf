@@ -870,20 +870,25 @@ func secretIndices(fp []string) []int {
 				out = append(out, j)
 			}
 		case "user-password":
-			// AD bind credential (#15996) — CONTEXT-GATED, not distinctive:
-			// `user-password` is also a legal login USER NAME
+			// AD bind credential (#15996) — STRUCTURALLY GATED, not
+			// distinctive: `user-password` is also a legal login USER NAME
 			// (`system login user user-password class …`), where every token
 			// after it is the account's class/full-name, not a credential.
-			// It is secret only inside the identity contexts the issue
-			// names — under `user-identification` (services/security
-			// spellings) or directly under `active-directory-access`
-			// (security/services-root spellings, flat or hierarchical).
+			// An ancestor scan is not enough either: a config GROUP named
+			// `active-directory-access`/`user-identification` (apply-groups
+			// bodies flatten to `groups <name> system login user
+			// user-password …`) would put those tokens earlier in the path
+			// and mask the login identity. The leaf is secret only in the
+			// exact structural position the issue names — the token
+			// sequence (services|security) [user-identification]
+			// active-directory-access immediately before it, i.e. the
+			// stanza is its immediate parent chain at the tree root.
 			// The stanza is unmodelled (no schema leaf by that name), so
 			// the schema-pinned secretLeafKeywords set cannot name it and
 			// the fix must live AST-side only — control-char/schema
 			// diagnostics resolve through secretIndices and pick it up
 			// from here.
-			if containsAnyOf(fp[:i], "user-identification", "active-directory-access") {
+			if isADUserPasswordLeaf15996(fp, i) {
 				for j := i + 1; j < len(fp); j++ {
 					out = append(out, j)
 				}
@@ -960,6 +965,51 @@ func secretIndices(fp []string) []int {
 		}
 	}
 	return out
+}
+
+// isADUserPasswordLeaf15996 reports whether fp[i] (a `user-password` token)
+// is the value leaf of the AD identity stanza in one of the spellings the
+// issue names. Structural position — never an ancestor scan — so a config
+// group or any other subtree merely NAMED active-directory-access /
+// user-identification cannot arm it, and a login user named user-password
+// (system login user …) never matches.
+//
+// Accepted flattened shapes (root = services|security, ADA =
+// active-directory-access, UP = user-password at i):
+//
+//	root ADA [user-name <name>] UP           (root spellings, pair optional)
+//	root user-identification ADA [user-name <name>] UP
+//
+// The stanza may carry sibling leaves before user-password (domain-name,
+// user-name <name>, … — Junos AD access profiles do), but the identity
+// stanza must be the leaf's parent chain rooted at services/security:
+// nothing may intervene between root and the stanza, nor between ADA and
+// the user-name/user-password pair.
+func isADUserPasswordLeaf15996(fp []string, i int) bool {
+	if i < 2 || i >= len(fp) || fp[i] != "user-password" {
+		return false
+	}
+	// Embedded change-configuration commands are judged as lexed `set …`
+	// token slices; skip the verb so the structural chain aligns.
+	off := 0
+	if fp[0] == "set" {
+		off = 1
+	}
+	p := i - 1 // index of the token immediately before user-password
+	// Optional bind-user pair: user-name <name> directly before it.
+	if p-off >= 2 && fp[p-1] == "user-name" {
+		p -= 2
+	}
+	if p-off < 1 || fp[p] != "active-directory-access" {
+		return false
+	}
+	switch p - off {
+	case 1: // root ADA …
+		return fp[off] == "services" || fp[off] == "security"
+	case 2: // root user-identification ADA …
+		return (fp[off] == "services" || fp[off] == "security") && fp[off+1] == "user-identification"
+	}
+	return false
 }
 
 // keyHasOSPFMD5Ancestor reports whether the flattened path fp contains a

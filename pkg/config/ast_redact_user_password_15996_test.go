@@ -148,7 +148,7 @@ func TestADUserPasswordRedacted15996(t *testing.T) {
 	// Embedded change-configuration command carrying the same leaf must mask
 	// through the same secretIndices resolution.
 	t.Run("embedded command", func(t *testing.T) {
-		cmd := "set services user-identification active-directory-access user-password " + secret
+		cmd := "set services user-identification active-directory-access user-name bind-svc-account user-password " + secret
 		if got := RedactEmbeddedChangeConfigCommand(cmd); strings.Contains(got, secret) || !strings.Contains(got, SecretDataPlaceholder) {
 			t.Errorf("embedded command leaked user-password: %q", got)
 		}
@@ -230,6 +230,79 @@ func TestLoginUserNamedUserPasswordNotMasked15996(t *testing.T) {
 	fp := []string{"system", "login", "user", "user-password", "class", "super-user"}
 	if isSecretValueIndex(fp, 5) {
 		t.Errorf("login class token wrongly marked secret: %v", fp)
+	}
+}
+
+// TestGroupNamedIdentityDoesNotMaskLoginUser15996 is the fold-2 regression for
+// the structural gate: a config GROUP named active-directory-access (or
+// user-identification) puts those tokens earlier in the flattened path
+// (`groups <name> system login user user-password class …`). The previous
+// ancestor-scan gate masked the login user's class; the structural gate —
+// (services|security) [user-identification] active-directory-access as the
+// leaf's immediate parent chain at the root — must not. Goes RED if the gate
+// regresses to containsAnyOf over ancestors.
+func TestGroupNamedIdentityDoesNotMaskLoginUser15996(t *testing.T) {
+	for _, group := range []string{"active-directory-access", "user-identification"} {
+		t.Run(group, func(t *testing.T) {
+			flat := buildRedactTree(t, []string{
+				"set groups " + group + " system login user user-password class super-user",
+				`set groups ` + group + ` system login user user-password full-name "AD Bind Helper"`,
+			})
+			hier := parseHierText(t, `groups {
+    `+group+` {
+        system {
+            login {
+                user user-password {
+                    class super-user;
+                }
+            }
+        }
+    }
+}`)
+			for name, rendered := range map[string]string{
+				"flat FormatSet": flat.RedactedClone().FormatSet(),
+				"flat Format":    flat.RedactedClone().Format(),
+				"hier Format":    hier.RedactedClone().Format(),
+			} {
+				for _, want := range []string{"user-password", "super-user"} {
+					if !strings.Contains(rendered, want) {
+						t.Errorf("%s masked login identity token %q under group %q (over-redaction):\n%s", name, want, group, rendered)
+					}
+				}
+				if strings.Contains(rendered, SecretDataPlaceholder) {
+					t.Errorf("%s masked a login user under group %q:\n%s", name, group, rendered)
+				}
+			}
+			if got := flat.RedactedClone().FormatSet(); !strings.Contains(got, "AD Bind Helper") {
+				t.Errorf("full-name masked under group %q:\n%s", group, got)
+			}
+			// Structural resolution agrees at the flattened-path level.
+			fp := []string{"groups", group, "system", "login", "user", "user-password", "class", "super-user"}
+			if isSecretValueIndex(fp, 7) {
+				t.Errorf("group-named path wrongly marked secret: %v", fp)
+			}
+		})
+	}
+	// Positive structural controls: the exact leaf positions stay secret.
+	for _, fp := range [][]string{
+		{"services", "active-directory-access", "user-password", "x"},
+		{"security", "active-directory-access", "user-password", "x"},
+		{"services", "user-identification", "active-directory-access", "user-password", "x"},
+		{"security", "user-identification", "active-directory-access", "user-password", "x"},
+	} {
+		if !isSecretValueIndex(fp, len(fp)-1) {
+			t.Errorf("AD leaf position not marked secret: %v", fp)
+		}
+	}
+	// Negative structural controls: same tokens, wrong position/root.
+	for _, fp := range [][]string{
+		{"groups", "active-directory-access", "system", "login", "user", "user-password", "class", "super-user"},
+		{"system", "active-directory-access", "user-password", "x"},
+		{"services", "foo", "active-directory-access", "user-password", "x"},
+	} {
+		if isSecretValueIndex(fp, len(fp)-1) {
+			t.Errorf("non-AD position wrongly marked secret: %v", fp)
+		}
 	}
 }
 
