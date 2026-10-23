@@ -2426,6 +2426,28 @@ impl SessionTable {
     /// + forward-wire alias only); the local pending row stays
     /// pending until it itself serves/completes or the
     /// post-failover gate adopts from the now-Established wire.
+    /// #16217 (fw1 rev=0 leg): every non-reverse, non-closing forward
+    /// pair this table holds, regardless of origin or stage. The
+    /// ct-slice stamps each such pair's OWN live counters (folded by
+    /// `account_packet` where packets land, incl. onto `SyncImport`
+    /// replicas that serve reverse traffic on the backup) onto its
+    /// shared rows BEFORE the evidence read, so `rev_packets` on the
+    /// shared row tracks this node's actual service instead of the
+    /// import-time zero. Bounded by table size, one walk per slice.
+    pub(crate) fn ct_slice_forward_pairs(
+        &self,
+    ) -> Vec<(SessionKey, crate::nat::NatDecision)> {
+        let mut out = Vec::new();
+        let cap = self.slot_high_watermark.min(self.entries.capacity());
+        for idx in 0..cap {
+            if let Some(record) = self.entries.get(idx) {
+                if !record.entry.metadata.is_reverse && !record.entry.closing {
+                    out.push((record.key.clone(), record.entry.decision.nat));
+                }
+            }
+        }
+        out
+    }
     pub(crate) fn node_served_forward_slice(
         &self,
         cursor: usize,

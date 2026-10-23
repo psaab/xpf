@@ -322,6 +322,7 @@ fn drive_packets(
         mirror_targets: &mirror_targets,
         forwarding: &forwarding,
         ha_state: &ha_state,
+        forwarding_active_rgs: &*EMPTY_FWD_ACTIVE_RGS_16217,
         dynamic_neighbors: &dynamic_neighbors,
         neighbor_resolver: None,
         shared_sessions: &shared_sessions,

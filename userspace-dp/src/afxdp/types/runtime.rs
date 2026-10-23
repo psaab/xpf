@@ -1145,12 +1145,23 @@ pub(in crate::afxdp) struct DebugPollCounters {
 ///
 /// Constructed once per RX-batch call at the
 /// `poll_binding_process_descriptor` call site. `'a` is covariant.
+/// #16217: empty authoritative RG set for test WorkerContexts that
+/// never exercise the adoption gate (fail-closed: no RG is active).
+pub(in crate::afxdp) static EMPTY_FWD_ACTIVE_RGS_16217: std::sync::LazyLock<
+    std::collections::BTreeSet<i32>,
+> = std::sync::LazyLock::new(std::collections::BTreeSet::new);
+
 pub(in crate::afxdp) struct WorkerContext<'a> {
     pub(in crate::afxdp) ident: &'a BindingIdentity,
     pub(in crate::afxdp) binding_lookup: &'a WorkerBindingLookup,
     pub(in crate::afxdp) mirror_targets: &'a MirrorTargetMap,
     pub(in crate::afxdp) forwarding: &'a ForwardingState,
     pub(in crate::afxdp) ha_state: &'a BTreeMap<i32, HAGroupRuntime>,
+    /// #16217 (ownership lag): authoritative RG forwarding-active set
+    /// freshly loaded from the coordinator `rg_runtime` ArcSwap by
+    /// the worker loop for this batch; the adoption gate reads THIS,
+    /// not the cached `ha_state` snapshot above.
+    pub(in crate::afxdp) forwarding_active_rgs: &'a std::collections::BTreeSet<i32>,
     pub(in crate::afxdp) dynamic_neighbors: &'a Arc<super::sharded_neighbor::ShardedNeighborMap>,
     /// #7699: the PPTP control-segment inbox the data path copies a TCP/1723
     /// segment into.

@@ -1643,6 +1643,7 @@ pub(crate) fn worker_loop(
                 ha_startup_grace_until_secs,
                 &forwarding,
                 ha_runtime.as_ref(),
+                &ha_state,
                 &dynamic_neighbors,
                 &pptp_control,
                 neighbor_resolver.as_ref(),

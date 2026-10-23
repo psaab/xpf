@@ -201,15 +201,24 @@ pub(in crate::afxdp) fn fabric_adoption_established_for_wire(
 /// locally. This wrapper adds the missing half: resolve the wire
 /// packet's destination through the live FIB and require the
 /// resolution's egress RG (`owner_rg_for_resolution`, tunnel-aware)
-/// to be forwarding-active on THIS node right now. Every arm fails
-/// closed: no Established evidence, no FIB egress, an unknown egress
-/// RG (0), a standalone node (empty HA map -- no RG owner exists to
-/// verify against, and fabric ingress cannot occur there), or a
-/// departed peer-owned egress RG all decline adoption; the packet
-/// then takes the ordinary miss path exactly as before.
+/// to be forwarding-active on THIS node right now.
+/// #16217 (ownership lag): `forwarding_active_rgs` is the AUTHORITATIVE
+/// RG forwarding-active set freshly loaded from the coordinator's
+/// `rg_runtime` ArcSwap by the worker loop for THIS packet, NOT the
+/// worker's cached per-tick `ha_state` snapshot (which lags RG
+/// activation by up to a tick -- at the failover instant it still
+/// reads the just-activated RG inactive, so the gate declined every
+/// adopted tuple and the packet died `ha_inactive`). The egress RG
+/// (and tunnel outer RG) must be in that fresh set; `ha_state` is
+/// retained only for the standalone (empty-map) fail-closed shape.
+/// Every arm fails closed: no Established evidence, no FIB egress,
+/// an unknown egress RG (0), a standalone node, or a departed
+/// peer-owned egress RG all decline adoption; the packet then takes
+/// the ordinary miss path exactly as before.
 pub(in crate::afxdp) fn fabric_adoption_gate_for_wire(
     forwarding: &crate::afxdp::ForwardingState,
     ha_state: &std::collections::BTreeMap<i32, crate::afxdp::HAGroupRuntime>,
+    forwarding_active_rgs: &std::collections::BTreeSet<i32>,
     now_secs: u64,
     sessions: &crate::session::SessionTable,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -238,11 +247,7 @@ pub(in crate::afxdp) fn fabric_adoption_gate_for_wire(
     // when BOTH RGs are forwarding-active locally. Plain resolutions
     // gate on the egress RG alone.
     let egress_rg = crate::afxdp::forwarding::owner_rg_for_resolution(forwarding, resolution);
-    if egress_rg <= 0
-        || !ha_state
-            .get(&egress_rg)
-            .is_some_and(|group| group.is_forwarding_active(now_secs))
-    {
+    if egress_rg <= 0 || !forwarding_active_rgs.contains(&egress_rg) {
         return false;
     }
     if resolution.tunnel_endpoint_id != 0 {
@@ -251,9 +256,7 @@ pub(in crate::afxdp) fn fabric_adoption_gate_for_wire(
             .get(&resolution.tunnel_endpoint_id)
             .copied();
         return match outer_rg {
-            Some(rg) if rg > 0 => ha_state
-                .get(&rg)
-                .is_some_and(|group| group.is_forwarding_active(now_secs)),
+            Some(rg) if rg > 0 => forwarding_active_rgs.contains(&rg),
             _ => true,
         };
     }

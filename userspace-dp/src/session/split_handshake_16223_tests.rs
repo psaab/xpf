@@ -1169,6 +1169,91 @@ fn sync_import_pending_row_collects_on_imported_reverse_evidence_16217() {
     );
 }
 
+/// #16217 (fw1 rev=0 leg, production seam): the ct-slice pairs
+/// collector must include a pending `SyncImport` forward row so the
+/// slice stamps its OWN live counters onto the shared row. Pre-fix
+/// the slice stamped only `established` pairs
+/// (`established_forward_slice`: Established + !pending + rev>0),
+/// so this row was never in the stamp set and its shared row kept
+/// rev=0 forever. Here reverse packets are folded via the real
+/// `account_packet` seam (the sibling reverse row), the forward
+/// row's counters move, and `ct_slice_forward_pairs` must name it;
+/// a reverse-only or closing row must not be named.
+///
+/// FAIL-ON-REVERT: revert the ct-slice stamp set to `established`
+/// only and this row is absent from the pairs.
+#[test]
+fn ct_slice_pairs_include_pending_sync_import_with_live_rev_16217() {
+    let forward = key_v4();
+    let reverse = reverse_session_key(&forward, crate::nat::NatDecision::default());
+    let now = 1_000_000_000u64;
+    let pending = TcpHandshakeState::HandshakePending.to_wire();
+    let mut table = SessionTable::new();
+    assert!(table.upsert_synced_with_origin(
+        SessionInstall {
+            key: forward.clone(),
+            decision: decision(),
+            metadata: metadata(),
+            origin: SessionOrigin::SyncImport,
+            now_ns: now,
+            protocol: PROTO_TCP,
+            tcp_flags: 0,
+            session_id: 97,
+            tcp_close_class: 0,
+            tcp_handshake_state: pending,
+            source_nat_static: None,
+        },
+        false,
+    ));
+    let mut rev_meta = metadata();
+    rev_meta.is_reverse = true;
+    rev_meta.ingress_zone = crate::test_zone_ids::TEST_WAN_ZONE_ID;
+    rev_meta.egress_zone = crate::test_zone_ids::TEST_LAN_ZONE_ID;
+    assert!(table.upsert_synced_with_origin(
+        SessionInstall {
+            key: reverse.clone(),
+            decision: decision(),
+            metadata: rev_meta,
+            origin: SessionOrigin::WorkerLocalImport,
+            now_ns: now,
+            protocol: PROTO_TCP,
+            tcp_flags: 0,
+            session_id: 97,
+            tcp_close_class: 0,
+            tcp_handshake_state: TcpHandshakeState::Established.to_wire(),
+            source_nat_static: None,
+        },
+        false,
+    ));
+    // Premise: pending SyncImport forward, zero counters.
+    assert_eq!(table.fwd_packets_for(&forward), 0);
+    assert_eq!(table.rev_packets_for(&forward), 0);
+    // Serve reverse traffic through the production accounting seam.
+    table.account_packet(&reverse, 1200, 0, 0);
+    table.account_packet(&reverse, 1200, 0, 0);
+    table.account_packet(&reverse, 1200, 0, 0);
+    assert_eq!(table.rev_packets_for(&forward), 3, "premise: fw1 local replica counters DO move when it serves");
+    // Production seam: the ct-slice pair set must include this row
+    // (any origin, any stage), and must not include the reverse row.
+    let pairs = table.ct_slice_forward_pairs();
+    assert!(
+        pairs.iter().any(|(k, _)| k == &forward),
+        "#16217 fw1 leg: pending SyncImport forward with live rev must be in ct-slice pairs"
+    );
+    assert!(
+        !pairs.iter().any(|(k, _)| k == &reverse),
+        "#16217 fw1 leg: reverse row must not be a ct-slice forward pair"
+    );
+    // Strict-established set still excludes it (premise for why the
+    // old stamp set missed it).
+    let mut strict = Vec::new();
+    table.established_forward_slice(0, usize::MAX, &mut strict);
+    assert!(
+        !strict.iter().any(|(k, _)| k == &forward),
+        "premise: strict established slice excludes the pending replica"
+    );
+}
+
 /// #16217 guard: a peer-synced row whose CLOSE class transitions
 /// (server RST) must stay silent — the carve-out is stage-only.
 #[test]

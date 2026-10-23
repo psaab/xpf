@@ -2784,6 +2784,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             && crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
                                 worker_ctx.forwarding,
                                 worker_ctx.ha_state,
+                                worker_ctx.forwarding_active_rgs,
                                 now_secs,
                                 sessions,
                                 worker_ctx.shared_sessions,
@@ -4401,6 +4402,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             && crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
                                 worker_ctx.forwarding,
                                 worker_ctx.ha_state,
+                                worker_ctx.forwarding_active_rgs,
                                 now_secs,
                                 sessions,
                                 worker_ctx.shared_sessions,
