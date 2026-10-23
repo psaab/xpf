@@ -1,7 +1,7 @@
 //! #16135: per-address lock-free port occupancy, split out of
 //! nat/allocator.rs as PURE CODE MOTION (deterministic -> occupancy, per
 //! the issue order). This module owns the atomic bitmap, the monotonic
-//! fresh-port cursor and the FIFO recycle ring; it holds NO live-state
+//! keyed fresh-port probe (#16011) and the FIFO recycle ring; it holds NO live-state
 //! (flow map / persistent leases) and never touches the global allocator
 //! mutex — the only mutex here is the per-address recycle mutex, which
 //! stays innermost (allocator.rs header: global -> recycle lock order).
@@ -25,7 +25,7 @@
 //!   AddressOccupancy::new, offset_of, port_of, is_occupied, claim,
 //!     free_recycle, free_no_recycle, reserve, claim_in_block,
 //!     occupied_count
-//!   AddressOccupancy fields: words, cursor, recycle, occupied,
+//!   AddressOccupancy fields: words, recycle, occupied,
 //!     recycle_scan_pops, recycle_scan_walks, port_low, range
 //!   RecycleRing::new, RecycleRing::push, RecycleRing::queue (field)
 //! #[cfg(test)]-only, same spelling:
@@ -36,8 +36,54 @@
 //! scripts/verify-nat-allocator-split-16135.py.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+/// #16011: per-boot PAT secret for RFC 6056 randomized port selection.
+/// Drawn once per process via the audited OS-entropy path
+/// (`hot_hash_seed::os_random_seed_u64`, never zero); stable for the
+/// process lifetime so concurrent workers share one mapping. Node-local
+/// only: never synced, never on the wire. HA peers draw independently —
+/// synced sessions carry their explicit translated tuple, so a peer
+/// never needs to reproduce another node's fresh-port choice.
+static PAT_SECRET: std::sync::LazyLock<u64> =
+    std::sync::LazyLock::new(crate::hot_hash_seed::os_random_seed_u64);
+
+pub(in crate::nat::allocator) fn pat_secret() -> u64 {
+    *PAT_SECRET
+}
+
+/// splitmix64 finalizer (same shape as `hot_hash_seed`): full avalanche
+/// so every key/secret bit can move the selected offset.
+#[inline]
+pub(in crate::nat) fn pat_mix(mut x: u64) -> u64 {
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
+/// RFC 6056 Algorithm 3/5 keyed offset: hash the flow tuple under the
+/// per-boot secret, reduced modulo `range`. An observer who sees one
+/// translated port learns nothing about the next flow's port without
+/// the secret. `range == 0` yields 0 (callers guard range first).
+#[inline]
+/// FOLD (#16350 fold-2): probe-advance mixer. Attempt `n` folds into
+/// the claim key so a rejection/exclusion advances to an unrelated
+/// keyed start instead of retrying the same port. Attempt 0 is the
+/// identity (callers XOR with 0-equivalent? see note) — callers pass
+/// `attempt` and this returns the XOR delta; attempt 0 returns 0.
+#[inline]
+pub(in crate::nat::allocator) fn occupancy_next_probe(attempt: u64) -> u64 {
+    if attempt == 0 { 0 } else { pat_mix(attempt.wrapping_mul(0x9e37_79b9_7f4a_7c15)) }
+}
+
+#[inline]
+pub(in crate::nat) fn pat_keyed_offset(secret: u64, key: u64, range: u32) -> u32 {
+    if range == 0 {
+        return 0;
+    }
+    (pat_mix(secret ^ pat_mix(key ^ 0x1601_1601_1601_1601)) % u64::from(range)) as u32
+}
 
 /// #7174 (M13): the FIFO recycle ring plus a per-offset "already queued" bitset,
 /// held together under ONE mutex so a port can hold AT MOST ONE token.
@@ -133,8 +179,9 @@ impl RecycleRing {
 ///
 /// `words` is the occupancy bitmap (bit set => that port offset is claimed);
 /// a `fetch_or` CAS is the sole port-ownership arbiter and replaces the
-/// pre-#2852 `owner_by_translated` map. `cursor` is the monotonic fresh-port
-/// hand-out counter (the pre-#2852 `next_port_offset_by_addr`). `recycle` is
+/// pre-#2852 `owner_by_translated` map. #16011: the fresh-port probe start
+/// is a per-flow keyed hash under the per-boot PAT secret (RFC 6056),
+/// not a monotonic cursor. `recycle` is
 /// the #3011 FIFO reuse ring — a [`RecycleRing`], which since #7174 M13 pairs
 /// the queue with a per-offset "already queued" bitset so a port holds at most
 /// one token — behind a per-ADDRESS mutex (never the global allocator mutex).
@@ -142,7 +189,6 @@ impl RecycleRing {
 #[derive(Debug)]
 pub(in crate::nat::allocator) struct AddressOccupancy {
     pub(in crate::nat::allocator) words: Vec<AtomicU64>,
-    pub(in crate::nat::allocator) cursor: AtomicU32,
     pub(in crate::nat::allocator) recycle: Mutex<RecycleRing>,
     /// #9902 F-098: test-only attempt accounting for `claim_in_block` (the
     /// deterministic block probe). `probe_word_loads` counts bitmap words
@@ -209,7 +255,6 @@ impl AddressOccupancy {
         }
         Self {
             words,
-            cursor: AtomicU32::new(0),
             recycle: Mutex::new(RecycleRing::new(range)),
             #[cfg(test)]
             probe_word_loads: AtomicU64::new(0),
@@ -287,37 +332,76 @@ impl AddressOccupancy {
         self.words[w].load(Ordering::Acquire) & mask != 0
     }
 
-    /// Claim the next free port: forward-probe the monotonic fresh cursor
-    /// (#3047 skip-occupied-out-of-band), then drain the FIFO recycle ring
-    /// (#3011, retain-on-collision 062-10). Lock-free w.r.t. the global
-    /// allocator mutex (it takes only the per-address recycle mutex, and only
-    /// once the fresh range is spent). Returns the claimed PORT, or None when
-    /// this address is genuinely full.
-    pub(in crate::nat::allocator) fn claim(&self) -> Option<u16> {
-        // Sequential phase: hand out fresh offsets in ascending order, one per
-        // claimer via a bounded CAS. The cursor never exceeds `range`, so it
-        // does not grow unboundedly once the fresh range is spent.
-        loop {
-            let cur = self.cursor.load(Ordering::Relaxed);
-            if cur >= self.range {
-                break;
-            }
-            if self
-                .cursor
-                .compare_exchange_weak(cur, cur + 1, Ordering::Relaxed, Ordering::Relaxed)
-                .is_err()
-            {
-                // Another claimer advanced the cursor; re-read and retry.
+    /// Claim a free port for `key` (the caller's flow tuple fold):
+    /// RFC 6056 keyed start, then a bounded forward probe over at most
+    /// `range` distinct offsets, then the FIFO recycle ring (#3011,
+    /// retain-on-collision 062-10). Lock-free w.r.t. the global
+    /// allocator mutex (it takes only the per-address recycle mutex,
+    /// and only once the fresh probe is spent). Returns the claimed
+    /// PORT, or None when this address is genuinely full.
+    ///
+    /// #16011: the pre-fix claim handed out fresh offsets in ascending
+    /// CAS order from a shared monotonic cursor, so an observer of one
+    /// translated port could predict the next. The keyed start makes
+    /// each flow's first candidate unpredictable without the per-boot
+    /// secret; the forward probe is bounded (`range` probes, each
+    /// offset tried at most once) and fail-closed (None only after
+    /// every offset was tried or the address is provably full).
+    pub(in crate::nat::allocator) fn claim(&self, key: u64) -> Option<u16> {
+        self.claim_filtered(key, &|_| false)
+    }
+
+    /// Claim with caller exclusions applied DURING the probe.
+    ///
+    /// FOLD (#16350 fold-3): `excluded` is consulted for every probed
+    /// candidate *in probe order* before its bitmap CAS, so rejected
+    /// offsets are never claimed at all. Total work is bounded by
+    /// `range` probes plus at most `range` exclusion calls in order —
+    /// independent of how many exclusions exist (no repeated scan per
+    /// exclusion, so exclusion-heavy pools cannot go quadratic).
+    /// Occupied and excluded offsets consume probe budget alike.
+    pub(in crate::nat::allocator) fn claim_filtered(
+        &self,
+        key: u64,
+        excluded: &dyn Fn(u32) -> bool,
+    ) -> Option<u16> {
+        self.claim_seeded_filtered(key, pat_secret(), excluded)
+    }
+
+    /// Seed-pinned core of [`Self::claim`] for deterministic tests.
+    pub(in crate::nat::allocator) fn claim_seeded(&self, key: u64, secret: u64) -> Option<u16> {
+        self.claim_seeded_filtered(key, secret, &|_| false)
+    }
+
+    /// Seed-pinned core of [`Self::claim_filtered`] for deterministic tests.
+    pub(in crate::nat::allocator) fn claim_seeded_filtered(
+        &self,
+        key: u64,
+        secret: u64,
+        excluded: &dyn Fn(u32) -> bool,
+    ) -> Option<u16> {
+        if self.range == 0 {
+            return None;
+        }
+        if self.occupied.load(Ordering::Relaxed) >= self.range {
+            return None;
+        }
+        let start = pat_keyed_offset(secret, key, self.range);
+        for i in 0..self.range {
+            let offset = start.wrapping_add(i) % self.range;
+            if excluded(offset) {
                 continue;
             }
-            // We own the right to try offset `cur`. Its bit is normally clear
-            // (fresh), but an out-of-band occupant (reserve/persistent/HA) may
-            // have set it — then CAS fails and we advance to the next offset.
-            if self.claim_offset(cur) {
-                // `cur < self.range` (checked above), so `port_of` is `Some`.
-                return self.port_of(cur);
+            if self.claim_offset(offset) {
+                return self.port_of(offset);
+            }
+            if self.occupied.load(Ordering::Relaxed) >= self.range {
+                return None;
             }
         }
+        // All offsets occupied/excluded at probe time. A concurrent free
+        // may have queued a ring token meanwhile; only a non-excluded
+        // token can satisfy this claim in the recycled phase below.
 
         // Recycled phase: FIFO drain (oldest-freed first). A popped port whose
         // bit is already set collided with an out-of-band occupant and is
@@ -396,6 +480,14 @@ impl AddressOccupancy {
         let mut pops = 0u64;
         while let Some(port) = recycle.queue.pop_front() {
             pops += 1;
+            // FOLD (#16350 fold-3): an excluded recycled port is retained
+            // (re-queued), never claimed for this flow.
+            if let Some(off) = self.offset_of(port) {
+                if excluded(off) {
+                    retained.push((port, off));
+                    continue;
+                }
+            }
             // An out-of-range (stale) port yields None and is DROPPED: it owns
             // no bit, so it was never marked and there is nothing to unmark.
             if let Some(offset) = self.offset_of(port) {
@@ -415,6 +507,37 @@ impl AddressOccupancy {
         // a real observation — pops/walks == 0 says "the recycled phase ran and
         // found nothing to recycle", which is a different reading from a walk
         // that never happened.
+        self.recycle_scan_pops.fetch_add(pops, Ordering::Relaxed);
+        for (port, offset) in retained {
+            recycle.push(port, Some(offset));
+        }
+        claimed
+    }
+
+    /// Test-only: ONLY the recycled phase (FIFO drain with retain).
+    /// #16011: production claims probe the bitmap first; fixtures that
+    /// measure the ring's retain/scan cost drive this phase directly.
+    #[cfg(test)]
+    pub(in crate::nat::allocator) fn claim_recycled_only(&self) -> Option<u16> {
+        let mut recycle = self.recycle.lock().unwrap_or_else(|e| e.into_inner());
+        if self.occupied.load(Ordering::Relaxed) >= self.range {
+            return None;
+        }
+        let mut retained: Vec<(u16, u32)> = Vec::new();
+        let mut claimed = None;
+        self.recycle_scan_walks.fetch_add(1, Ordering::Relaxed);
+        let mut pops = 0u64;
+        while let Some(port) = recycle.queue.pop_front() {
+            pops += 1;
+            if let Some(offset) = self.offset_of(port) {
+                recycle.unmark(offset);
+                if self.claim_offset(offset) {
+                    claimed = Some(port);
+                    break;
+                }
+                retained.push((port, offset));
+            }
+        }
         self.recycle_scan_pops.fetch_add(pops, Ordering::Relaxed);
         for (port, offset) in retained {
             recycle.push(port, Some(offset));
@@ -465,21 +588,20 @@ impl AddressOccupancy {
         }
     }
 
-    /// Claim the first free port in the CLOSED interval `[start_port, end_port]`
+    /// Claim a free port in the CLOSED interval `[start_port, end_port]`
     /// (#9902 F-098): the word-skipping probe both deterministic-CGNAT arms use
     /// for a subscriber's block.
     ///
-    /// The pre-#9902 loop CAS-probed every port from the block start, so a
-    /// subscriber near its block budget paid one `fetch_or` RMW per occupied
-    /// port on every allocation. This loads each spanned bitmap word ONCE and
-    /// skips all-ones words, then names the first zero bit of a word with
-    /// `trailing_zeros` and claims it directly. Single-threaded cost is one
-    /// load per fully-occupied word plus one bitmap claim RMW for an
-    /// uncontended successful search (none for a full block); single-threaded
-    /// it claims the SAME port the naive loop would (first-free ascending).
-    /// It still starts at the block beginning — O(occupied words) loads, not a
-    /// roving hint — because per-block hints would need state keyed by
-    /// call-level geometry this address-level bitmap does not have.
+    /// The word-skip is preserved: one load per spanned word, all-ones
+    /// words skipped, first zero bit named with `trailing_zeros` and
+    /// claimed directly (lowest-free ascending).
+    ///
+    /// #16011 scope note: deterministic CGNAT is NOT randomized. Its
+    /// ports are a documented pure function of the subscriber (block
+    /// derivation / BIB reproducibility), so predictability there is the
+    /// operator-configured contract, not the RFC 6056 defect. The keyed
+    /// fix applies to round-robin PAT (`claim`), interface PAT and
+    /// `try_next_port`, where no reproducibility contract exists.
     ///
     /// EDGES. Block sizes are arbitrary positive integers
     /// (compiler_nat_source.rs validates `> 0` and `<= range` only), so a block
@@ -497,9 +619,20 @@ impl AddressOccupancy {
     /// claimed instead, or a full block is reported while a free exists). Still
     /// correct — every claimed port was free and is won by exactly one claimer.
     /// Lock-free w.r.t. the global allocator mutex (same as the naive loop).
-    pub(in crate::nat::allocator) fn claim_in_block(&self, start_port: u16, end_port: u16) -> Option<u16> {
-        let start = self.offset_of(start_port)?;
-        let end = self.offset_of(end_port)?;
+    pub(in crate::nat::allocator) fn claim_in_block(
+        &self,
+        start_port: u16,
+        end_port: u16,
+    ) -> Option<u16> {
+        // Unkeyed continuation probe (callers resuming past a rejected
+        // candidate): ascending from `start_port`, no rotation.
+        self.claim_in_block_from(start_port, end_port)
+    }
+
+    /// Ascending word-skip scan of `[seg_start_port, seg_end_port]`.
+    fn claim_in_block_from(&self, seg_start_port: u16, seg_end_port: u16) -> Option<u16> {
+        let start = self.offset_of(seg_start_port)?;
+        let end = self.offset_of(seg_end_port)?;
         if start > end {
             return None;
         }
@@ -521,7 +654,6 @@ impl AddressOccupancy {
                     word |= !((1u64 << (tail + 1)) - 1);
                 }
             }
-            // Zero bits of the masked word, ascending, each tried at most once.
             let mut pending = !word;
             while pending != 0 {
                 let bit = pending.trailing_zeros();
@@ -530,9 +662,6 @@ impl AddressOccupancy {
                 #[cfg(test)]
                 self.probe_claim_rmws.fetch_add(1, Ordering::Relaxed);
                 if self.claim_offset(offset) {
-                    // In-block offsets are `< range` by construction (both ports
-                    // passed `offset_of`), so `port_of` is `Some` — the same
-                    // shape the PAT cursor claim relies on.
                     return self.port_of(offset);
                 }
             }

@@ -17,18 +17,36 @@ use super::occupancy::AddressOccupancy;
 
 #[test]
 fn occupancy_seam_claims_fresh_then_recycles_fifo_16135() {
+    // #16011: seeded claim with distinct keys; the SET of fresh ports is
+    // the whole range (order is keyed, not ascending), then the FIFO
+    // ring drains oldest-freed first once every offset is occupied/free.
     let occ = AddressOccupancy::new(1024, 4);
-    assert_eq!(occ.claim(), Some(1024));
-    assert_eq!(occ.claim(), Some(1025));
-    // Free in reverse order; FIFO must hand back oldest-freed first.
+    let mut fresh: Vec<u16> = (0..4u64)
+        .map(|k| occ.claim_seeded(k, 0xA5A5).expect("fresh port"))
+        .collect();
+    fresh.sort_unstable();
+    assert_eq!(
+        fresh,
+        vec![1024, 1025, 1026, 1027],
+        "fresh claims must cover the range exactly once"
+    );
+    assert_eq!(
+        occ.claim_seeded(99, 0xA5A5),
+        None,
+        "full address claims nothing"
+    );
+    // Free in reverse order; FIFO must hand back oldest-freed first via
+    // the probe (the freed offsets are the only free ones).
     assert!(occ.free_recycle(1025));
     assert!(occ.free_recycle(1024));
-    assert_eq!(occ.claim(), Some(1026));
-    assert_eq!(occ.claim(), Some(1027));
-    // Fresh range spent: recycled tokens drain FIFO (1025 freed first).
-    assert_eq!(occ.claim(), Some(1025));
-    assert_eq!(occ.claim(), Some(1024));
-    assert_eq!(occ.claim(), None);
+    // #16011: keyed probe reaches freed offsets in keyed order.
+    let mut reused = vec![
+        occ.claim_seeded(100, 0xA5A5).expect("freed port"),
+        occ.claim_seeded(101, 0xA5A5).expect("freed port"),
+    ];
+    reused.sort_unstable();
+    assert_eq!(reused, vec![1024, 1025]);
+    assert_eq!(occ.claim_seeded(102, 0xA5A5), None);
     assert_eq!(occ.occupied_count(), 4);
 }
 
@@ -37,8 +55,13 @@ fn occupancy_seam_reserve_and_block_probe_16135() {
     let occ = AddressOccupancy::new(1024, 64);
     assert!(occ.reserve(1024));
     assert!(!occ.reserve(1024), "a held bit cannot be re-claimed");
-    // Deterministic block probe claims the first free port in the block.
-    assert_eq!(occ.claim_in_block(1024, 1087), Some(1025));
+    // #16011: keyed block probe claims a free port inside the block
+    // (1024 is reserved); exact port is secret-dependent.
+    let claimed = occ.claim_in_block(1024, 1087).expect("free port in block");
+    assert!(
+        (1025..=1087).contains(&claimed),
+        "keyed claim must stay in block, got {claimed}"
+    );
     assert_eq!(occ.claim_in_block(1024, 1024), None);
     assert!(occ.free_no_recycle(1024));
     assert_eq!(occ.claim_in_block(1024, 1024), Some(1024));

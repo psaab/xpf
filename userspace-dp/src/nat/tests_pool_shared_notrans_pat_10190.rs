@@ -225,9 +225,14 @@ fn persistent_pat_lease_reuse_skips_address_only_identity_10190() {
             PersistentNatPermit::AnyRemoteHost,
             300 * 1_000_000_000,
             1_000,
-            NatHolder::Untracked, 0)
+            NatHolder::Untracked,
+            0,
+        )
         .expect("first persistent PAT flow");
-    assert_eq!(translated.port, 20000);
+    assert!(
+        [20000, 20001].contains(&translated.port),
+        "#16011: keyed first port in range"
+    );
     assert!(
         alloc.release_flow(pat_flow, translated, 2_000, NatHolder::Untracked),
         "release must leave an idle PAT lease holding port 20000"
@@ -237,14 +242,14 @@ fn persistent_pat_lease_reuse_skips_address_only_identity_10190() {
         protocol: PROTO_TCP,
         src_ip: "10.0.0.7".parse().expect("address-only src"),
         dst_ip: REMOTE.parse().expect("dst"),
-        src_port: 20000,
+        src_port: translated.port,
         dst_port: 443,
         routing_scope: 0,
     };
     let preserved = alloc
         .reserve_address_only(address_only_flow, shared_ip(), 0, NatHolder::Untracked)
         .expect("address-only flow may claim the idle lease's exact token");
-    assert_eq!(preserved.port, 20000);
+    assert_eq!(preserved.port, translated.port);
 
     let rebound = alloc
         .allocate_translation(
@@ -256,13 +261,16 @@ fn persistent_pat_lease_reuse_skips_address_only_identity_10190() {
             PersistentNatPermit::AnyRemoteHost,
             300 * 1_000_000_000,
             3_000,
-            NatHolder::Untracked, 0)
+            NatHolder::Untracked,
+            0,
+        )
         .expect("PAT flow must fall back to a fresh non-conflicting port");
-    assert_eq!(
-        rebound.port, 20001,
-        "persistent lease reuse must not republish 20000 while the \
+    assert_ne!(
+        rebound.port, translated.port,
+        "persistent lease reuse must not republish the leased port while the \
          address-only reverse token owns that exact remote identity (#10190)"
     );
+    assert!([20000, 20001].contains(&rebound.port));
 }
 
 /// DIRECTION B: a PAT flow holding `(X, P)` toward `R` must block an
@@ -276,24 +284,21 @@ fn persistent_pat_lease_reuse_skips_address_only_identity_10190() {
 fn pat_first_blocks_address_only_to_same_remote_10190() {
     let rules = shared_rules();
 
-    // The PAT rule mints the pool's first candidate toward 8.8.8.8.
+    // The PAT rule mints a pool port toward 8.8.8.8 (#16011: keyed).
     let first = mint_to(&rules, "10.1.0.7", 33333, REMOTE);
-    assert_eq!(
-        identity(&first),
-        Some((shared_ip(), Some(20000))),
-        "fixture: the PAT rule must mint 203.0.113.1:20000 for the first flow. \
-         If this did not mint, the pool is not serving PAT and the cell is \
-         measuring nothing"
-    );
+    let first_port = identity(&first)
+        .and_then(|(_, p)| p)
+        .expect("fixture: the PAT rule must mint a port for the first flow");
+    assert_eq!(identity(&first).map(|(ip, _)| ip), Some(shared_ip()));
 
     // The address-only rule would preserve the same address:port toward the
     // same remote. It must be denied as exhaustion (the address-only capacity
     // limit), not admitted as a duplicate.
-    let second = mint_to(&rules, "10.0.0.7", 20000, REMOTE);
+    let second = mint_to(&rules, "10.0.0.7", first_port, REMOTE);
     assert_eq!(
         failure_reason(&second),
         Some(SourceNatFailureReason::AllocatorExhausted),
-        "the shared allocator preserved 203.0.113.1:20000 for an address-only \
+        "the shared allocator preserved the PAT-held identity for an address-only \
          flow while a PAT flow holds that exact wire identity toward the same \
          remote. The address-only arm consults only its own token map, and a \
          PAT flow owns no token (#10190)"
@@ -322,13 +327,11 @@ fn address_only_toward_another_remote_coexists_with_pat_10190() {
     let rules = shared_rules();
 
     let first = mint_to(&rules, "10.1.0.7", 33333, REMOTE);
-    assert_eq!(
-        identity(&first),
-        Some((shared_ip(), Some(20000))),
-        "fixture: the PAT flow holds 203.0.113.1:20000 toward 8.8.8.8"
-    );
+    let first_port = identity(&first)
+        .and_then(|(_, p)| p)
+        .expect("fixture: the PAT flow must mint a port toward 8.8.8.8");
 
-    let second = mint_to(&rules, "10.0.0.7", 20000, OTHER_REMOTE);
+    let second = mint_to(&rules, "10.0.0.7", first_port, OTHER_REMOTE);
     assert_eq!(
         identity(&second),
         Some((shared_ip(), None)),
@@ -355,12 +358,12 @@ fn pat_toward_another_remote_coexists_with_address_only_10190() {
     );
 
     let second = mint_to(&rules, "10.1.0.7", 33333, OTHER_REMOTE);
-    assert_eq!(
-        identity(&second),
-        Some((shared_ip(), Some(20000))),
+    assert!(
+        matches!(identity(&second), Some((ip, Some(_))) if ip == shared_ip()),
         "a PAT mint toward a DIFFERENT remote is not a duplicate and must still \
-         translate. A check that refuses here stops translating traffic that \
-         never collided"
+         translate (got {:?}). A check that refuses here stops translating traffic that \
+         never collided",
+        identity(&second)
     );
 }
 
@@ -379,16 +382,22 @@ fn single_pat_rule_still_mints_distinct_ports_10190() {
     let first = mint_to(&rules, "10.2.0.7", 11111, REMOTE);
     let second = mint_to(&rules, "10.2.0.8", 22222, REMOTE);
     let solo_ip: IpAddr = "203.0.113.7".parse().expect("solo");
-    assert_eq!(
+    assert_eq!(identity(&first).map(|(ip, _)| ip), Some(solo_ip));
+    assert_eq!(identity(&second).map(|(ip, _)| ip), Some(solo_ip));
+    assert_ne!(
         identity(&first),
-        Some((solo_ip, Some(20000))),
-        "fixture: first PAT flow mints the first port"
+        identity(&second),
+        "a lone PAT rule must still serve consecutive flows distinct ports"
     );
     assert_eq!(
-        identity(&second),
-        Some((solo_ip, Some(20001))),
-        "a lone PAT rule must still serve consecutive flows distinct ports — \
-         the #10190 probes consult the address-only domain, which is empty here"
+        [
+            identity(&first).and_then(|(_, p)| p),
+            identity(&second).and_then(|(_, p)| p)
+        ]
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>(),
+        [Some(20000), Some(20001)].into_iter().collect(),
+        "#16011: two flows cover the two ports (keyed order)"
     );
 }
 
@@ -417,10 +426,9 @@ fn distinct_allocator_pools_are_untouched_10190() {
     );
     let second = mint_to(&rules, "10.1.0.7", 33333, REMOTE);
     let pat_ip: IpAddr = "203.0.113.9".parse().expect("pat");
-    assert_eq!(
-        identity(&second),
-        Some((pat_ip, Some(20000))),
-        "the PAT pool translates to its own address — the same numeric port on \
-         a different address is not a collision"
+    assert!(
+        matches!(identity(&second), Some((ip, Some(20000 | 20001))) if ip == pat_ip),
+        "the PAT pool translates to its own address (got {:?}) — port on a different address is not a collision",
+        identity(&second)
     );
 }

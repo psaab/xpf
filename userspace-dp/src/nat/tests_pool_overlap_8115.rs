@@ -475,18 +475,21 @@ fn a_synced_import_is_refused_when_a_peer_pool_owns_the_identity_8115() {
         pat_rule_two_ports("r2", "b", "10.1.0.0/24"),
     ]);
 
-    // A LOCAL flow takes 203.0.113.1:20000 in pool `a`.
+    // A LOCAL flow takes a port in pool `a` (#16011: keyed, either of
+    // the two ports); the import below names THAT port.
     let local = mint_to(&rules, "10.0.0.7", 1111, REMOTE);
-    assert_eq!(
-        identity(&local),
-        Some((shared_ip(), Some(20000))),
-        "fixture: the local flow must own the identity the import will claim"
-    );
+    let local_port = identity(&local)
+        .and_then(|(_, p)| p)
+        .expect("fixture: local flow must mint a port");
 
     // The active node's decision names that same identity, and the importing
     // flow's source only matches rule r2 — so pass 1 narrows to pool `b`, whose
     // bitmap knows nothing about pool `a`.
-    let accepted = import(&rules, &synced_key("10.1.0.7", 40000, REMOTE), Some(20000));
+    let accepted = import(
+        &rules,
+        &synced_key("10.1.0.7", 40000, REMOTE),
+        Some(local_port),
+    );
     assert!(
         !accepted,
         "the import must be REFUSED: a local flow in peer pool `a` already owns \
@@ -510,9 +513,16 @@ fn a_synced_import_of_an_unowned_identity_is_still_reserved_8115() {
     ]);
 
     let local = mint_to(&rules, "10.0.0.7", 1111, REMOTE);
-    assert_eq!(identity(&local), Some((shared_ip(), Some(20000))), "fixture");
+    let local_port = identity(&local)
+        .and_then(|(_, p)| p)
+        .expect("fixture: local flow must mint a port");
+    let other_port = if local_port == 20000 { 20001 } else { 20000 };
 
-    let accepted = import(&rules, &synced_key("10.1.0.7", 40000, REMOTE), Some(20001));
+    let accepted = import(
+        &rules,
+        &synced_key("10.1.0.7", 40000, REMOTE),
+        Some(other_port),
+    );
     assert!(
         accepted,
         "port 20001 is owned by no peer, so the import must be reserved. A \
@@ -569,11 +579,7 @@ fn a_synced_address_only_import_toward_another_remote_is_reserved_8115() {
     let local = mint_to(&rules, "10.0.0.7", 20000, REMOTE);
     assert_eq!(identity(&local), Some((shared_ip(), None)), "fixture");
 
-    let accepted = import(
-        &rules,
-        &synced_key("10.1.0.7", 20000, OTHER_REMOTE),
-        None,
-    );
+    let accepted = import(&rules, &synced_key("10.1.0.7", 20000, OTHER_REMOTE), None);
     assert!(
         accepted,
         "a different remote is a different reverse identity — the import must \
@@ -667,36 +673,39 @@ fn a_refused_synced_redecision_keeps_the_incumbent_reservation_15145() {
         pat_rule_two_ports("r1", "a", "10.0.0.0/24"),
         pat_rule_two_ports("r2", "b", "10.1.0.0/24"),
     ]);
-    // The importing flow's incumbent in ITS OWN pool `b`: tuple 20001.
+    // Mint the peer-local flow FIRST (#16011: keyed port), then pick
+    // the incumbent in pool `b` as the OTHER port, so the re-decision
+    // below is onto a genuinely different port.
+    let local_first = mint_to(&rules, "10.0.0.7", 1111, REMOTE);
+    let local_port_pre = identity(&local_first).and_then(|(_, p)| p).expect("local mint");
+    let incumbent_port = if local_port_pre == 20000 { 20001 } else { 20000 };
     let key = synced_key("10.1.0.7", 40000, REMOTE);
     assert!(
-        import(&rules, &key, Some(20001)),
-        "fixture: the incumbent import must reserve 203.0.113.1:20001 in pool b"
+        import(&rules, &key, Some(incumbent_port)),
+        "fixture: the incumbent import must reserve the incumbent port in pool b"
     );
     assert!(
-        rules[1].pool_allocator.debug_is_port_occupied(0, 20001),
+        rules[1].pool_allocator.debug_is_port_occupied(0, incumbent_port),
         "fixture: pool b must hold the incumbent port"
     );
-    // A LOCAL flow takes 203.0.113.1:20000 in peer pool `a`.
+    // A LOCAL flow takes a port in peer pool `a` (#16011: keyed).
     let local = mint_to(&rules, "10.0.0.7", 1111, REMOTE);
-    assert_eq!(
-        identity(&local),
-        Some((shared_ip(), Some(20000))),
-        "fixture: the local flow must own the identity the re-decision will claim"
-    );
-    // The peer re-decides the SAME flow onto 20000 — peer `a` owns it.
+    let local_port = identity(&local)
+        .and_then(|(_, p)| p)
+        .expect("fixture: local flow must own the identity the re-decision will claim");
+    // The peer re-decides the SAME flow onto that port — peer `a` owns it.
     assert!(
-        !import(&rules, &key, Some(20000)),
-        "the re-decision must still be REFUSED: peer pool a owns 203.0.113.1:20000"
+        !import(&rules, &key, Some(local_port)),
+        "the re-decision must still be REFUSED: peer pool a owns the local port"
     );
     assert!(
-        rules[1].pool_allocator.debug_is_port_occupied(0, 20001),
+        rules[1].pool_allocator.debug_is_port_occupied(0, incumbent_port),
         "#15145: the refused re-decision must leave the incumbent reservation \
-         (203.0.113.1:20001 in pool b) intact — on master the reserve evicted \
-         it before the peer refusal rolled the replacement back"
+         intact — on master the reserve evicted it before the peer refusal \
+         rolled the replacement back"
     );
     assert!(
-        !rules[1].pool_allocator.debug_is_port_occupied(0, 20000),
+        !rules[1].pool_allocator.debug_is_port_occupied(0, local_port),
         "the refused replacement must not linger in pool b either"
     );
     assert_eq!(
@@ -715,7 +724,10 @@ fn an_admissible_synced_redecision_still_replaces_the_incumbent_15145() {
         pat_rule_two_ports("r2", "b", "10.1.0.0/24"),
     ]);
     let key = synced_key("10.1.0.7", 40000, REMOTE);
-    assert!(import(&rules, &key, Some(20001)), "fixture: incumbent import");
+    assert!(
+        import(&rules, &key, Some(20001)),
+        "fixture: incumbent import"
+    );
     // Nobody owns 20000 anywhere: the re-decision is admissible.
     assert!(
         import(&rules, &key, Some(20000)),

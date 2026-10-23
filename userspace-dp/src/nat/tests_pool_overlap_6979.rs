@@ -264,14 +264,20 @@ fn peer_overlap_rollback_restores_imported_lease_origin_10789_f4() {
         "the imported tuple is peer-owned and production admission must reject it"
     );
     let live = rules[1].pool_allocator.debug_live();
-    let restored = live.persistent_by_source.get(&key).expect("rollback keeps the lease");
+    let restored = live
+        .persistent_by_source
+        .get(&key)
+        .expect("rollback keeps the lease");
     assert!(restored.imported, "rollback must restore peer origin");
     assert_eq!(restored.active_flows, 0);
     assert_eq!(restored.timeout_ns, imported_timeout_ns);
     assert_eq!(restored.expires_at_ns, imported_at_ns + remaining_ns);
     drop(live);
     assert!(
-        rules[1].pool_allocator.export_idle_leases(20_000).is_empty(),
+        rules[1]
+            .pool_allocator
+            .export_idle_leases(20_000)
+            .is_empty(),
         "a rejected local reserve must not echo the peer lease"
     );
 }
@@ -325,7 +331,6 @@ fn a_match_only_edit_keeps_the_reservation_and_mints_no_second_identity_6979() {
     );
 }
 
-
 // ---------------------------------------------------------------------------
 // The check must refuse the DUPLICATE, and nothing else.
 // ---------------------------------------------------------------------------
@@ -355,17 +360,31 @@ fn an_overlapping_pool_still_mints_an_identity_its_peer_does_not_own_6979() {
     // The peer's first attempt lands on the identity pool `a` is holding and is
     // refused. Its allocator cursor has moved on, so the NEXT flow finds the
     // free port and translates.
-    assert_eq!(
-        failure_reason(&mint(&rules, "10.1.0.7", 2222)),
+    // #16011: keyed order — the peer's first mint may land on either
+    // port; if it lands on `first` it is refused (overlap), otherwise
+    // it succeeds with the other port. Either way the peer must end up
+    // with a DIFFERENT identity and never a duplicate of `first`.
+    let mut peer_identity = None;
+    for (src, sport) in [
+        ("10.1.0.7", 2222u16),
+        ("10.1.0.8", 3333),
+        ("10.1.0.9", 4444),
+    ] {
+        match mint(&rules, src, sport) {
+            m if identity(&m).is_some() => {
+                peer_identity = identity(&m);
+                break;
+            }
+            m => assert_eq!(
+                failure_reason(&m),
         Some(SourceNatFailureReason::PoolPeerAddressOverlap),
-        "fixture: the peer's first mint must be the colliding one"
-    );
-    let third = identity(&mint(&rules, "10.1.0.8", 3333))
-        .expect("the peer must still be able to mint a port its peer does not own");
-    assert_ne!(
-        third, first,
-        "the peer's next mint must be a DIFFERENT identity"
-    );
+                "a refused peer mint must be the overlap refusal"
+            ),
+        }
+    }
+    let third =
+        peer_identity.expect("the peer must still be able to mint a port its peer does not own");
+    assert_ne!(third, first, "the peer's mint must be a DIFFERENT identity");
 }
 
 /// CONTROL. Two rules naming ONE pool are one allocator and one occupancy
@@ -658,7 +677,6 @@ fn a_deterministic_collision_refuses_the_subscriber_6979() {
     }
 }
 
-
 /// MIXED FAMILY. A peer pool whose shared address is v6 while it ALSO carries a
 /// v4 address must be probed at `v4_len + position`, not at `position`.
 ///
@@ -672,12 +690,7 @@ fn a_mixed_family_peers_v6_index_is_offset_past_its_v4_addresses_6979() {
     const SHARED_V6: &str = "2001:db8::1";
     const REMOTE_V6: &str = "2001:4860:4860::8888";
 
-    fn mixed_rule(
-        name: &str,
-        pool: &str,
-        source: &str,
-        addrs: &[&str],
-    ) -> SourceNATRuleSnapshot {
+    fn mixed_rule(name: &str, pool: &str, source: &str, addrs: &[&str]) -> SourceNATRuleSnapshot {
         SourceNATRuleSnapshot {
             name: name.to_string(),
             from_zone: "lan".to_string(),
@@ -775,12 +788,20 @@ fn duplicate_pool_members_mint_distinct_ports_10700() {
     // Same remote (REMOTE:443/TCP), distinct inside ports — the #10700 probe.
     let t1 = identity(&mint(&rules, "10.0.0.7", 1111)).expect("the first flow must mint");
     let t2 = identity(&mint(&rules, "10.0.0.8", 2222)).expect("the second flow must mint");
-    assert_eq!(t1.0, t2.0, "both flows translate from the pool's one address");
-    assert_eq!(t1.1, Some(20000), "first occurrence keeps pool order and gets port_low");
     assert_eq!(
-        t2.1,
-        Some(20001),
-        "the second flow must get a distinct reverse tuple"
+        t1.0, t2.0,
+        "both flows translate from the pool's one address"
+    );
+    assert_ne!(
+        t1.1, t2.1,
+        "distinct flows must get distinct reverse tuples"
+    );
+    assert_eq!(
+        [t1.1, t2.1]
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>(),
+        [Some(20000), Some(20001)].into_iter().collect(),
+        "#16011: the two flows must cover the two ports (keyed order)"
     );
 
     // Nested and repeated prefixes dedupe across members while preserving
@@ -991,10 +1012,16 @@ fn idle_import_post_claim_peer_conflict_rolls_back_pat_claim_11496() {
         imported.remote,
         imported.address_only,
     ));
-    assert!(rules[0].pool_allocator.rollback_idle_lease_import(&imported));
+    assert!(
+        rules[0]
+            .pool_allocator
+            .rollback_idle_lease_import(&imported)
+    );
     assert_eq!(rules[0].pool_allocator.snapshot().persistent_leases, 0);
     assert!(
-        !rules[0].pool_allocator.holds_port(0, imported.translated_port),
+        !rules[0]
+            .pool_allocator
+            .holds_port(0, imported.translated_port),
         "post-claim refusal must return the imported PAT bit"
     );
 }

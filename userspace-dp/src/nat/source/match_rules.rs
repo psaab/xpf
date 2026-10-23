@@ -72,6 +72,36 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// for an address-only record: #6528's `unlink_live_allocation_locked` clears
 /// the reverse-identity token and frees NO port bit for an `address_only`
 /// allocation, which is exactly what this mint claimed.
+
+/// FOLD (#16350 fold-2): pure overlap predicate behind
+/// [`reject_peer_owned_identity`] — true when a peer pool / interface
+/// allocator / static external already owns this wire identity.
+/// No rollback side effect, so the retry loop can consult it BEFORE
+/// publishing (via allocator exclusions) as well as after.
+fn pat_identity_excluded(
+    rule: &SourceNatRule,
+    flow: SourceNatFlowKey,
+    translated: TranslatedTuple,
+    iface_allocs: Option<&InterfaceNatAllocators>,
+) -> bool {
+    let peer = peer_owns_wire_identity(rule, flow, translated);
+    let iface = match (iface_allocs, rule.iface_overlap_owners.as_deref()) {
+        (Some(ia), Some(o)) => {
+            std::sync::atomic::fence(Ordering::SeqCst);
+            o.interface_holds(flow, translated, &rule.pool_allocator)
+                || super::nat64_ports::direct_iface_owns(ia, flow, translated)
+        }
+        (Some(ia), None) => super::nat64_ports::direct_iface_owns(ia, flow, translated),
+        _ => false,
+    };
+    let static_owns = static_owns_wire_identity(
+        rule.static_externals.as_deref(),
+        translated.ip,
+        translated.port,
+    );
+    peer || iface || static_owns
+}
+
 fn reject_peer_owned_address_only_identity(
     rule: &SourceNatRule,
     flow: SourceNatFlowKey,
@@ -84,14 +114,19 @@ fn reject_peer_owned_address_only_identity(
     let iface = match (iface_allocs, rule.iface_overlap_owners.as_deref()) {
         (Some(ia), Some(o)) => {
             std::sync::atomic::fence(Ordering::SeqCst);
-            o.interface_holds(flow, translated, &rule.pool_allocator) || super::nat64_ports::direct_iface_owns(ia, flow, translated)
+            o.interface_holds(flow, translated, &rule.pool_allocator)
+                || super::nat64_ports::direct_iface_owns(ia, flow, translated)
         }
         (Some(ia), None) => super::nat64_ports::direct_iface_owns(ia, flow, translated),
         _ => false,
     };
     // #14368: a static external covering this tuple publishes it
     // unconditionally, so refuse alongside the peer/iface checks.
-    let static_owns = static_owns_wire_identity(rule.static_externals.as_deref(), translated.ip, translated.port);
+    let static_owns = static_owns_wire_identity(
+        rule.static_externals.as_deref(),
+        translated.ip,
+        translated.port,
+    );
     if !peer && !iface && !static_owns {
         return None;
     }
@@ -111,19 +146,7 @@ fn reject_peer_owned_identity(
     holder: NatHolder,
     iface_allocs: Option<&InterfaceNatAllocators>,
 ) -> Option<SourceNatLookup> {
-    let peer = peer_owns_wire_identity(rule, flow, translated);
-    let iface = match (iface_allocs, rule.iface_overlap_owners.as_deref()) {
-        (Some(ia), Some(o)) => {
-            std::sync::atomic::fence(Ordering::SeqCst);
-            o.interface_holds(flow, translated, &rule.pool_allocator) || super::nat64_ports::direct_iface_owns(ia, flow, translated)
-        }
-        (Some(ia), None) => super::nat64_ports::direct_iface_owns(ia, flow, translated),
-        _ => false,
-    };
-    // #14368: a static external covering this tuple publishes it
-    // unconditionally, so refuse alongside the peer/iface checks.
-    let static_owns = static_owns_wire_identity(rule.static_externals.as_deref(), translated.ip, translated.port);
-    if !peer && !iface && !static_owns {
+    if !pat_identity_excluded(rule, flow, translated, iface_allocs) {
         return None;
     }
     rule.pool_allocator
@@ -134,11 +157,6 @@ fn reject_peer_owned_identity(
     )))
 }
 
-/// TEST-ONLY address-only wrapper: allocates as `NatHolder::Untracked`
-/// (single-holder contract). Production flow matching threads an explicit
-/// worker holder through `match_source_nat_result_for_tuple` — a production
-/// caller of this wrapper would silently mint untracked allocations, so the
-/// compiler refuses it (#9902 review).
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn match_source_nat(
@@ -544,12 +562,30 @@ fn match_source_nat_result_for_tuple_inner(
                 matches!(protocol, PROTO_ICMP | PROTO_ICMPV6) && icmp_identifier_present;
             if !crate::ip_proto::has_l4_ports(protocol) && !iface_icmp_query {
                 // #14367: address-only interface mint vs pool/NAT64.
-                let cand = TranslatedTuple { ip: rewrite_src, port: flow.src_port };
-                let peer_owned = super::nat64_ports::peer_owns_for_interface(rule.iface_overlap_owners.as_deref(), &alloc, flow, cand)
-                    || rules.iter().any(|r| r.overlap_owners.is_some() && super::nat64_ports::peer_owns_for_interface(r.overlap_owners.as_deref(), &alloc, flow, cand));
+                let cand = TranslatedTuple {
+                    ip: rewrite_src,
+                    port: flow.src_port,
+                };
+                let peer_owned = super::nat64_ports::peer_owns_for_interface(
+                    rule.iface_overlap_owners.as_deref(),
+                    &alloc,
+                    flow,
+                    cand,
+                ) || rules.iter().any(|r| {
+                    r.overlap_owners.is_some()
+                        && super::nat64_ports::peer_owns_for_interface(
+                            r.overlap_owners.as_deref(),
+                            &alloc,
+                            flow,
+                            cand,
+                        )
+                });
                 if peer_owned {
                     crate::nat::INTERFACE_SNAT_IDENTITY_EXHAUSTION.fetch_add(1, Ordering::Relaxed);
-                    return SourceNatLookup::Unavailable(SourceNatFailure::for_rule(rule, SourceNatFailureReason::InterfaceIdentityExhausted));
+                    return SourceNatLookup::Unavailable(SourceNatFailure::for_rule(
+                        rule,
+                        SourceNatFailureReason::InterfaceIdentityExhausted,
+                    ));
                 }
                 return match alloc.reserve_address_only(flow, rewrite_src, 0, holder) {
                     Ok(_) => SourceNatLookup::Matched(NatDecision {
@@ -572,26 +608,70 @@ fn match_source_nat_result_for_tuple_inner(
             // exclude every peer-owned PAT candidate, rather than minting
             // a synthetic dummy flow (whose rollback could unlink a real
             // host aliasing the fabricated key).
-            let owners_combined = rule.iface_overlap_owners.clone().or_else(|| rules.iter().find_map(|r| r.overlap_owners.clone()));
+            let owners_combined = rule
+                .iface_overlap_owners
+                .clone()
+                .or_else(|| rules.iter().find_map(|r| r.overlap_owners.clone()));
             let peer_owns = |port: u16| {
-                let cand = TranslatedTuple { ip: rewrite_src, port };
-                super::nat64_ports::peer_owns_for_interface(owners_combined.as_deref(), &alloc, flow, cand)
-                    || rules.iter().any(|r| super::nat64_ports::peer_owns_for_interface(r.overlap_owners.as_deref(), &alloc, flow, cand))
+                let cand = TranslatedTuple {
+                    ip: rewrite_src,
+                    port,
+                };
+                super::nat64_ports::peer_owns_for_interface(
+                    owners_combined.as_deref(),
+                    &alloc,
+                    flow,
+                    cand,
+                ) || rules.iter().any(|r| {
+                    super::nat64_ports::peer_owns_for_interface(
+                        r.overlap_owners.as_deref(),
+                        &alloc,
+                        flow,
+                        cand,
+                    )
+                })
             };
             let must_pat = peer_owns(flow.src_port);
-            return match alloc.allocate_interface_identity_excluding(flow, rewrite_src, holder, must_pat, &peer_owns) {
+            return match alloc.allocate_interface_identity_excluding(
+                flow,
+                rewrite_src,
+                holder,
+                must_pat,
+                &peer_owns,
+            ) {
                 Ok(identity) => {
-                    let cand = TranslatedTuple { ip: rewrite_src, port: identity.port };
+                    let cand = TranslatedTuple {
+                        ip: rewrite_src,
+                        port: identity.port,
+                    };
                     if peer_owns(identity.port) {
                         alloc.rollback_flow(flow, cand, now_ns, holder);
-                        crate::nat::INTERFACE_SNAT_IDENTITY_EXHAUSTION.fetch_add(1, Ordering::Relaxed);
-                        SourceNatLookup::Unavailable(SourceNatFailure::for_rule(rule, SourceNatFailureReason::InterfaceIdentityExhausted))
+                        crate::nat::INTERFACE_SNAT_IDENTITY_EXHAUSTION
+                            .fetch_add(1, Ordering::Relaxed);
+                        SourceNatLookup::Unavailable(SourceNatFailure::for_rule(
+                            rule,
+                            SourceNatFailureReason::InterfaceIdentityExhausted,
+                        ))
                     } else {
-                        SourceNatLookup::Matched(NatDecision { rewrite_src: Some(rewrite_src), rewrite_dst: None, rewrite_src_port: identity.patted.then_some(identity.port), ..NatDecision::default() })
+                        SourceNatLookup::Matched(NatDecision {
+                            rewrite_src: Some(rewrite_src),
+                            rewrite_dst: None,
+                            rewrite_src_port: identity.patted.then_some(identity.port),
+                            ..NatDecision::default()
+                        })
                     }
                 }
                 Err(reason) => {
-                    match reason { SourceNatFailureReason::InterfaceRegistryCap => { crate::nat::INTERFACE_SNAT_REGISTRY_CAP_EXHAUSTION.fetch_add(1, Ordering::Relaxed); } _ => { crate::nat::INTERFACE_SNAT_IDENTITY_EXHAUSTION.fetch_add(1, Ordering::Relaxed); } }
+                    match reason {
+                        SourceNatFailureReason::InterfaceRegistryCap => {
+                            crate::nat::INTERFACE_SNAT_REGISTRY_CAP_EXHAUSTION
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                        _ => {
+                            crate::nat::INTERFACE_SNAT_IDENTITY_EXHAUSTION
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
                     SourceNatLookup::Unavailable(SourceNatFailure::for_rule(rule, reason))
                 }
             };
@@ -721,7 +801,7 @@ fn match_source_nat_result_for_tuple_inner(
                             let port = if rule.no_translation {
                                 None
                             } else {
-                                match rule.pool_allocator.try_next_port(ip_idx) {
+                                match rule.pool_allocator.try_next_port_for(ip_idx, &flow) {
                                     Ok(port) => Some(port),
                                     Err(reason) => {
                                         return SourceNatLookup::Unavailable(
@@ -777,7 +857,14 @@ fn match_source_nat_result_for_tuple_inner(
                                 // The refusal path rolls the record back, and a
                                 // rollback keyed on the wrong holder is how a
                                 // partial free happens.
-                                if let Some(refused) = reject_peer_owned_address_only_identity(rule, flow, translated, now_ns, holder, Some(iface_allocs)) {
+                                if let Some(refused) = reject_peer_owned_address_only_identity(
+                                    rule,
+                                    flow,
+                                    translated,
+                                    now_ns,
+                                    holder,
+                                    Some(iface_allocs),
+                                ) {
                                     return refused;
                                 }
                                 return SourceNatLookup::Matched(NatDecision {
@@ -818,9 +905,14 @@ fn match_source_nat_result_for_tuple_inner(
                     // deterministic block is fixed per subscriber, so there is
                     // nowhere else for the collider to go — which is exactly
                     // why it must fail closed rather than publish a duplicate.
-                    if let Some(failure) =
-                        reject_peer_owned_identity(rule, flow, translated, now_ns, holder, Some(iface_allocs))
-                    {
+                    if let Some(failure) = reject_peer_owned_identity(
+                        rule,
+                        flow,
+                        translated,
+                        now_ns,
+                        holder,
+                        Some(iface_allocs),
+                    ) {
                         return failure;
                     }
                     return SourceNatLookup::Matched(NatDecision {
@@ -859,8 +951,9 @@ fn match_source_nat_result_for_tuple_inner(
                         let port = if rule.no_translation {
                             None
                         } else {
-                            match rule.pool_allocator.try_next_port(
+                            match rule.pool_allocator.try_next_port_for(
                                 addr_idx.expect("synthetic address-only path selects an address"),
+                                &flow,
                             ) {
                                 Ok(port) => Some(port),
                                 Err(reason) => {
@@ -898,7 +991,8 @@ fn match_source_nat_result_for_tuple_inner(
                     // lease consumes no round-robin choice. The per-flow reverse-identity
                     // token is still minted for the #5269 collision guard.
                     let reserved = if rule.persistent_nat {
-                        rule.pool_allocator.reserve_address_only_persistent_with_zones(
+                        rule.pool_allocator
+                            .reserve_address_only_persistent_with_zones(
                             flow,
                             PoolAddressFamily::V4(&rule.pool_addresses_v4),
                             0,
@@ -906,7 +1000,9 @@ fn match_source_nat_result_for_tuple_inner(
                             rule.persistent_nat_permit,
                             rule.persistent_nat_timeout_ns,
                             now_ns,
-                            holder, flow_egress_scope, Some(from_zone),
+                                holder,
+                                flow_egress_scope,
+                                Some(from_zone),
                 )
                     } else {
                         // #6226: probe the WHOLE pool from the round-robin start
@@ -931,7 +1027,14 @@ fn match_source_nat_result_for_tuple_inner(
                             // #8115 R1: an address-only mint publishes a wire
                             // identity too, so it owes the same peer-pool check
                             // the PAT arms run.
-                            if let Some(refused) = reject_peer_owned_address_only_identity(rule, flow, translated, now_ns, holder, Some(iface_allocs)) {
+                            if let Some(refused) = reject_peer_owned_address_only_identity(
+                                rule,
+                                flow,
+                                translated,
+                                now_ns,
+                                holder,
+                                Some(iface_allocs),
+                            ) {
                                 return refused;
                             }
                             return SourceNatLookup::Matched(NatDecision {
@@ -949,7 +1052,23 @@ fn match_source_nat_result_for_tuple_inner(
                         }
                     }
                 }
-                let translated = match rule.pool_allocator.allocate_translation_with_zones(
+                // FOLD (#16350 fold-2): peer-owned candidates are
+                // excluded DURING the keyed probe (address resolved per
+                // candidate index), so a rejection advances the probe
+                // instead of re-minting the same deterministic port and
+                // rolling back. Post-mint reject stays as the race net.
+                let v4_excluded = |addr_idx: usize, port: u16| {
+                    let Some(&ip) = rule.pool_addresses_v4.get(addr_idx) else {
+                        return false;
+                    };
+                    pat_identity_excluded(
+                        rule,
+                        flow,
+                        TranslatedTuple { ip: IpAddr::V4(ip), port },
+                        Some(iface_allocs),
+                    )
+                };
+                let translated = match rule.pool_allocator.allocate_translation_with_exclusions_and_zones(
                     flow,
                     PoolAddressFamily::V4(&rule.pool_addresses_v4),
                     0,
@@ -958,20 +1077,36 @@ fn match_source_nat_result_for_tuple_inner(
                     rule.persistent_nat_permit,
                     rule.persistent_nat_timeout_ns,
                     now_ns,
-                    holder, flow_egress_scope, Some(from_zone),
+                    holder,
+                    flow_egress_scope,
+                    Some(from_zone),
+                    &v4_excluded,
                 ) {
                     Ok(translated) => translated,
                     Err(reason) => {
+                        // FOLD (#16350 fold-2): probe advanced past a
+                        // peer-owned candidate into exhaustion => the
+                        // overlap is the terminal reason, not generic
+                        // exhaustion (single-port overlap cells).
+                        let reason = if reason == SourceNatFailureReason::AllocatorExhausted && rule.pool_allocator.probe_excluded_hit() {
+                            SourceNatFailureReason::PoolPeerAddressOverlap
+                        } else { reason };
                         return SourceNatLookup::Unavailable(SourceNatFailure::for_rule(
                             rule, reason,
                         ));
                     }
                 };
                 // #6979 F6: refuse an identity a peer pool over the same
-                // address already owns.
-                if let Some(failure) =
-                    reject_peer_owned_identity(rule, flow, translated, now_ns, holder, Some(iface_allocs))
-                {
+                // address already owns (race net; normally unreachable
+                // because the probe already excluded it).
+                if let Some(failure) = reject_peer_owned_identity(
+                    rule,
+                    flow,
+                    translated,
+                    now_ns,
+                    holder,
+                    Some(iface_allocs),
+                ) {
                     return failure;
                 }
                 return SourceNatLookup::Matched(NatDecision {
@@ -1007,8 +1142,9 @@ fn match_source_nat_result_for_tuple_inner(
                         let port = if rule.no_translation {
                             None
                         } else {
-                            match rule.pool_allocator.try_next_port(
+                            match rule.pool_allocator.try_next_port_for(
                                 addr_idx.expect("synthetic address-only path selects an address"),
+                                &flow,
                             ) {
                                 Ok(port) => Some(port),
                                 Err(reason) => {
@@ -1036,7 +1172,8 @@ fn match_source_nat_result_for_tuple_inner(
                     // permit scope (the lease selects the address itself; its
                     // fresh-lease selection owns the sole `address_index` call).
                     let reserved = if rule.persistent_nat {
-                        rule.pool_allocator.reserve_address_only_persistent_with_zones(
+                        rule.pool_allocator
+                            .reserve_address_only_persistent_with_zones(
                             flow,
                             PoolAddressFamily::V6(&rule.pool_addresses_v6),
                             v6_offset,
@@ -1044,7 +1181,9 @@ fn match_source_nat_result_for_tuple_inner(
                             rule.persistent_nat_permit,
                             rule.persistent_nat_timeout_ns,
                             now_ns,
-                            holder, flow_egress_scope, Some(from_zone),
+                                holder,
+                                flow_egress_scope,
+                                Some(from_zone),
                 )
                     } else {
                         // #6226: probe the WHOLE pool from the round-robin start
@@ -1068,7 +1207,14 @@ fn match_source_nat_result_for_tuple_inner(
                             // #8115 R1: an address-only mint publishes a wire
                             // identity too, so it owes the same peer-pool check
                             // the PAT arms run.
-                            if let Some(refused) = reject_peer_owned_address_only_identity(rule, flow, translated, now_ns, holder, Some(iface_allocs)) {
+                            if let Some(refused) = reject_peer_owned_address_only_identity(
+                                rule,
+                                flow,
+                                translated,
+                                now_ns,
+                                holder,
+                                Some(iface_allocs),
+                            ) {
                                 return refused;
                             }
                             return SourceNatLookup::Matched(NatDecision {
@@ -1086,7 +1232,26 @@ fn match_source_nat_result_for_tuple_inner(
                         }
                     }
                 }
-                let translated = match rule.pool_allocator.allocate_translation_with_zones(
+                // FOLD (#16350 fold-2): see the v4 arm — exclusions
+                // resolve the candidate address via the absolute index.
+                let v6_excluded = |addr_idx: usize, port: u16| {
+                    let Some(rel) = addr_idx.checked_sub(v6_offset) else {
+                        return false;
+                    };
+                    let Some(&ip) = rule.pool_addresses_v6.get(rel) else {
+                        return false;
+                    };
+                    pat_identity_excluded(
+                        rule,
+                        flow,
+                        TranslatedTuple {
+                            ip: IpAddr::V6(ip),
+                            port,
+                        },
+                        Some(iface_allocs),
+                    )
+                };
+                let translated = match rule.pool_allocator.allocate_translation_with_exclusions_and_zones(
                     flow,
                     PoolAddressFamily::V6(&rule.pool_addresses_v6),
                     v6_offset,
@@ -1095,20 +1260,31 @@ fn match_source_nat_result_for_tuple_inner(
                     rule.persistent_nat_permit,
                     rule.persistent_nat_timeout_ns,
                     now_ns,
-                    holder, flow_egress_scope, Some(from_zone),
+                    holder,
+                    flow_egress_scope,
+                    Some(from_zone),
+                    &v6_excluded,
                 ) {
                     Ok(translated) => translated,
                     Err(reason) => {
+                        let reason = if reason == SourceNatFailureReason::AllocatorExhausted && rule.pool_allocator.probe_excluded_hit() {
+                            SourceNatFailureReason::PoolPeerAddressOverlap
+                        } else { reason };
                         return SourceNatLookup::Unavailable(SourceNatFailure::for_rule(
                             rule, reason,
                         ));
                     }
                 };
                 // #6979 F6: refuse an identity a peer pool over the same
-                // address already owns.
-                if let Some(failure) =
-                    reject_peer_owned_identity(rule, flow, translated, now_ns, holder, Some(iface_allocs))
-                {
+                // address already owns (race net).
+                if let Some(failure) = reject_peer_owned_identity(
+                    rule,
+                    flow,
+                    translated,
+                    now_ns,
+                    holder,
+                    Some(iface_allocs),
+                ) {
                     return failure;
                 }
                 return SourceNatLookup::Matched(NatDecision {

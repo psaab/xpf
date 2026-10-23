@@ -29,7 +29,22 @@ pub(crate) fn allocate_nat64_pool_port(
     // #6522: the allocating worker — see `match_source_nat_result_for_tuple`.
     holder: NatHolder,
 ) -> Result<(Ipv4Addr, u16), SourceNatFailureReason> {
-    let translated = allocator.allocate_translation(
+    allocate_nat64_pool_port_excluding(allocator, flow, pool_v4, now_ns, holder, &|_, _| false)
+}
+
+/// FOLD (#16350 fold-2): NAT64 mint with probe exclusions, for callers
+/// that know peer/static owners. Excluded `(addr_idx, port)` candidates
+/// are skipped during the keyed probe; the probe advances instead of
+/// re-minting the same port and rolling back.
+pub(crate) fn allocate_nat64_pool_port_excluding(
+    allocator: &PortAllocator,
+    flow: SourceNatFlowKey,
+    pool_v4: &[Ipv4Addr],
+    now_ns: u64,
+    holder: NatHolder,
+    excluded: &dyn Fn(usize, u16) -> bool,
+) -> Result<(Ipv4Addr, u16), SourceNatFailureReason> {
+    let translated = allocator.allocate_translation_with_exclusions(
         flow,
         PoolAddressFamily::V4(pool_v4),
         0,     // family_offset — NAT64 pool addresses start at index 0
@@ -40,6 +55,7 @@ pub(crate) fn allocate_nat64_pool_port(
         now_ns,
         holder,
         0,
+        excluded,
     )?;
     match translated.ip {
         IpAddr::V4(v4) => Ok((v4, translated.port)),

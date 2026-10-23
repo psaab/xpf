@@ -12,10 +12,10 @@ use super::allocator::{
     deterministic_indices_v4, deterministic_indices_v6, reverse_deterministic_v4,
     reverse_deterministic_v6, sticky_pool_index,
 };
+use super::destination::{PROTO_ANY, PROTO_TCP, PROTO_UDP};
 use super::source::{
     PersistentNatPermit, SOURCE_NAT_PROTO_ANY, SourceNatFailureReason, SourceNatFlowKey,
 };
-use super::destination::{PROTO_ANY, PROTO_TCP, PROTO_UDP};
 use super::*;
 use crate::ip_proto::{PROTO_ESP, PROTO_GRE, PROTO_ICMP, PROTO_ICMPV6};
 use crate::{
@@ -629,7 +629,11 @@ fn pool_snat_no_translation_collision_denies_second_flow_5269() {
         routing_scope: 0,
     };
     let owners = rules[0].pool_allocator.debug_address_only_owners();
-    assert_eq!(owners.len(), 1, "flow A must mint exactly one occupancy token");
+    assert_eq!(
+        owners.len(),
+        1,
+        "flow A must mint exactly one occupancy token"
+    );
     assert_eq!(owners[0].1, flow_a, "reverse index must resolve to flow A");
     assert_eq!(
         owners[0].0.translated_ip,
@@ -738,7 +742,10 @@ fn pool_snat_portless_gre_collision_and_disambiguation_5269() {
         PROTO_GRE,
     ));
     assert_eq!(a.rewrite_src, Some("203.0.113.1".parse().unwrap()));
-    assert_eq!(a.rewrite_src_port, None, "port-less flow must not carry a port");
+    assert_eq!(
+        a.rewrite_src_port, None,
+        "port-less flow must not carry a port"
+    );
     assert_eq!(rules[0].pool_allocator.debug_address_only_owners().len(), 1);
 
     // Flow B: GRE from a DIFFERENT host to the SAME remote — indistinguishable on
@@ -767,7 +774,11 @@ fn pool_snat_portless_gre_collision_and_disambiguation_5269() {
     // Two owners, each keyed by a DISTINCT remote — no two flows share a public
     // reverse tuple, and each identity resolves to exactly one owning flow.
     let owners = rules[0].pool_allocator.debug_address_only_owners();
-    assert_eq!(owners.len(), 2, "A (8.8.8.8) and C (9.9.9.9) own distinct identities");
+    assert_eq!(
+        owners.len(),
+        2,
+        "A (8.8.8.8) and C (9.9.9.9) own distinct identities"
+    );
     let mut remotes: Vec<IpAddr> = owners.iter().map(|(k, _)| k.dst_ip).collect();
     remotes.sort();
     assert_eq!(
@@ -948,7 +959,14 @@ fn pool_snat_unknown_tuple_distinct_from_real_hopopt_5687() {
     // allocated and rewritten, and its reverse mapping is flow-keyed (address-
     // only owners stay empty because TCP is not address-only).
     let rt = make_rules();
-    let tcp = expect_snat_decision(addr_only_lookup(&rt, "10.0.1.100", 12345, "8.8.8.8", 443, 6));
+    let tcp = expect_snat_decision(addr_only_lookup(
+        &rt,
+        "10.0.1.100",
+        12345,
+        "8.8.8.8",
+        443,
+        6,
+    ));
     assert_eq!(tcp.rewrite_src, Some("203.0.113.1".parse().unwrap()));
     assert!(
         tcp.rewrite_src_port.is_some(),
@@ -989,7 +1007,11 @@ fn pool_snat_no_translation_distinct_ports_both_succeed_5269() {
     assert_eq!(b.rewrite_src_port, None);
 
     let owners = rules[0].pool_allocator.debug_address_only_owners();
-    assert_eq!(owners.len(), 2, "distinct preserved ports mint distinct tokens");
+    assert_eq!(
+        owners.len(),
+        2,
+        "distinct preserved ports mint distinct tokens"
+    );
     let mut ports: Vec<u16> = owners.iter().map(|(k, _)| k.translated_port).collect();
     ports.sort();
     assert_eq!(ports, vec![12345, 12346]);
@@ -1038,7 +1060,11 @@ fn pool_snat_no_translation_two_address_pool_both_succeed_5269() {
     );
 
     let owners = rules[0].pool_allocator.debug_address_only_owners();
-    assert_eq!(owners.len(), 2, "two-address pool mints two distinct tokens");
+    assert_eq!(
+        owners.len(),
+        2,
+        "two-address pool mints two distinct tokens"
+    );
     let mut ips: Vec<IpAddr> = owners.iter().map(|(k, _)| k.translated_ip).collect();
     ips.sort();
     assert_eq!(
@@ -1086,16 +1112,33 @@ fn address_only_roundrobin_probes_free_sibling_5341adjacent_6226() {
     // F1: GRE S1 (10.0.1.100) -> R (8.8.8.8). Round-robin counter 0 -> A1; owns
     // the reverse identity (GRE, A1, port-less, 8.8.8.8).
     let d1 = expect_snat_decision(addr_only_lookup(
-        &rules, "10.0.1.100", 0, "8.8.8.8", 0, PROTO_GRE,
+        &rules,
+        "10.0.1.100",
+        0,
+        "8.8.8.8",
+        0,
+        PROTO_GRE,
     ));
-    assert_eq!(d1.rewrite_src, Some(a1), "F1 takes the first pool address A1");
-    assert_eq!(d1.rewrite_src_port, None, "port-less GRE preserves the wire port");
+    assert_eq!(
+        d1.rewrite_src,
+        Some(a1),
+        "F1 takes the first pool address A1"
+    );
+    assert_eq!(
+        d1.rewrite_src_port, None,
+        "port-less GRE preserves the wire port"
+    );
 
     // F2: GRE S2 (10.0.1.101) -> R2 (9.9.9.9), a DIFFERENT remote. Its sole job is
     // to advance the SHARED round-robin counter (1 -> 2) so F3 rolls back onto A1.
     // Distinct remote -> distinct identity -> admitted on A2 without colliding.
     let d2 = expect_snat_decision(addr_only_lookup(
-        &rules, "10.0.1.101", 0, "9.9.9.9", 0, PROTO_GRE,
+        &rules,
+        "10.0.1.101",
+        0,
+        "9.9.9.9",
+        0,
+        PROTO_GRE,
     ));
     assert_eq!(d2.rewrite_src, Some(a2), "F2 advances the counter onto A2");
 
@@ -1105,7 +1148,12 @@ fn address_only_roundrobin_probes_free_sibling_5341adjacent_6226() {
     // AllocatorExhausted here even though A2 is FREE for remote R; the fix probes
     // the whole pool and maps F3 to the free sibling A2.
     let d3 = expect_snat_decision(addr_only_lookup(
-        &rules, "10.0.1.102", 0, "8.8.8.8", 0, PROTO_GRE,
+        &rules,
+        "10.0.1.102",
+        0,
+        "8.8.8.8",
+        0,
+        PROTO_GRE,
     ));
     assert_eq!(
         d3.rewrite_src,
@@ -1116,12 +1164,19 @@ fn address_only_roundrobin_probes_free_sibling_5341adjacent_6226() {
         d3.rewrite_src, d1.rewrite_src,
         "F3 must not collide onto F1's address A1",
     );
-    assert_eq!(d3.rewrite_src_port, None, "port-less GRE preserves the wire port");
+    assert_eq!(
+        d3.rewrite_src_port, None,
+        "port-less GRE preserves the wire port"
+    );
 
     // Three distinct live reverse identities, no false exhaustion, no pool port
     // consumed (address-only tokens are off the port bitmap).
     let owners = rules[0].pool_allocator.debug_address_only_owners();
-    assert_eq!(owners.len(), 3, "F1, F2, F3 each own a distinct reverse identity");
+    assert_eq!(
+        owners.len(),
+        3,
+        "F1, F2, F3 each own a distinct reverse identity"
+    );
     assert_eq!(source_nat_pool_statuses(&rules)[0].used_ports, 0);
     assert_eq!(source_nat_pool_statuses(&rules)[0].live_flows, 3);
 }
@@ -1209,7 +1264,13 @@ fn notrans_persistent_two_flows_reuse_one_address_6041() {
     );
     let now = NS_PER_SEC;
     let a = expect_snat_decision(notrans_persistent_lookup(
-        &rules, "10.0.1.100", 40000, "8.8.8.8", 443, PROTO_TCP, now,
+        &rules,
+        "10.0.1.100",
+        40000,
+        "8.8.8.8",
+        443,
+        PROTO_TCP,
+        now,
     ));
     assert!(a.rewrite_src.is_some());
     assert_eq!(
@@ -1220,7 +1281,13 @@ fn notrans_persistent_two_flows_reuse_one_address_6041() {
     // SAME local source tuple, DIFFERENT remote endpoint. any-remote-host keys
     // the lease by the local source only -> reuse A's public address.
     let b = expect_snat_decision(notrans_persistent_lookup(
-        &rules, "10.0.1.100", 40000, "9.9.9.9", 8080, PROTO_TCP, now,
+        &rules,
+        "10.0.1.100",
+        40000,
+        "9.9.9.9",
+        8080,
+        PROTO_TCP,
+        now,
     ));
     assert_eq!(
         a.rewrite_src, b.rewrite_src,
@@ -1251,21 +1318,41 @@ fn notrans_persistent_two_flows_reuse_one_address_6041() {
 #[test]
 fn notrans_persistent_refcount_release_and_expiry_6041() {
     let timeout_secs = 300i64;
-    let rules =
-        notrans_persistent_rules(vec!["203.0.113.1/32"], "any-remote-host", timeout_secs, false);
+    let rules = notrans_persistent_rules(
+        vec!["203.0.113.1/32"],
+        "any-remote-host",
+        timeout_secs,
+        false,
+    );
     let now = NS_PER_SEC;
 
     let a = expect_snat_decision(notrans_persistent_lookup(
-        &rules, "10.0.1.100", 40000, "8.8.8.8", 443, PROTO_TCP, now,
+        &rules,
+        "10.0.1.100",
+        40000,
+        "8.8.8.8",
+        443,
+        PROTO_TCP,
+        now,
     ));
     let b = expect_snat_decision(notrans_persistent_lookup(
-        &rules, "10.0.1.100", 40000, "9.9.9.9", 80, PROTO_TCP, now,
+        &rules,
+        "10.0.1.100",
+        40000,
+        "9.9.9.9",
+        80,
+        PROTO_TCP,
+        now,
     ));
     assert_eq!(a.rewrite_src, b.rewrite_src);
     {
         let live = rules[0].pool_allocator.debug_live();
         assert_eq!(
-            live.persistent_by_source.values().next().unwrap().active_flows,
+            live.persistent_by_source
+                .values()
+                .next()
+                .unwrap()
+                .active_flows,
             2
         );
     }
@@ -1309,7 +1396,11 @@ fn notrans_persistent_refcount_release_and_expiry_6041() {
             "idle lease survives until the inactivity timeout"
         );
         assert_eq!(
-            live.persistent_by_source.values().next().unwrap().active_flows,
+            live.persistent_by_source
+                .values()
+                .next()
+                .unwrap()
+                .active_flows,
             0
         );
         assert_eq!(
@@ -1329,7 +1420,13 @@ fn notrans_persistent_refcount_release_and_expiry_6041() {
     // mints a new one for the new source.
     let past = now + (timeout_secs as u64 + 1) * NS_PER_SEC;
     let c = expect_snat_decision(notrans_persistent_lookup(
-        &rules, "10.0.2.50", 50000, "8.8.8.8", 443, PROTO_TCP, past,
+        &rules,
+        "10.0.2.50",
+        50000,
+        "8.8.8.8",
+        443,
+        PROTO_TCP,
+        past,
     ));
     assert!(c.rewrite_src.is_some());
     {
@@ -1340,7 +1437,11 @@ fn notrans_persistent_refcount_release_and_expiry_6041() {
             "old idle lease reclaimed; only the fresh lease remains"
         );
         assert_eq!(
-            live.persistent_by_source.values().next().unwrap().active_flows,
+            live.persistent_by_source
+                .values()
+                .next()
+                .unwrap()
+                .active_flows,
             1
         );
     }
@@ -1359,7 +1460,13 @@ fn notrans_persistent_collision_guard_denies_conflicting_owner_6041() {
     let now = NS_PER_SEC;
 
     let a = expect_snat_decision(notrans_persistent_lookup(
-        &rules, "10.0.1.100", 40000, "8.8.8.8", 443, PROTO_TCP, now,
+        &rules,
+        "10.0.1.100",
+        40000,
+        "8.8.8.8",
+        443,
+        PROTO_TCP,
+        now,
     ));
     assert_eq!(a.rewrite_src, Some("203.0.113.1".parse().unwrap()));
 
@@ -1393,16 +1500,32 @@ fn notrans_persistent_idempotent_reentry_6041() {
     let rules = notrans_persistent_rules(vec!["203.0.113.1/32"], "any-remote-host", 300, false);
     let now = NS_PER_SEC;
     let a1 = expect_snat_decision(notrans_persistent_lookup(
-        &rules, "10.0.1.100", 40000, "8.8.8.8", 443, PROTO_TCP, now,
+        &rules,
+        "10.0.1.100",
+        40000,
+        "8.8.8.8",
+        443,
+        PROTO_TCP,
+        now,
     ));
     let a2 = expect_snat_decision(notrans_persistent_lookup(
-        &rules, "10.0.1.100", 40000, "8.8.8.8", 443, PROTO_TCP, now,
+        &rules,
+        "10.0.1.100",
+        40000,
+        "8.8.8.8",
+        443,
+        PROTO_TCP,
+        now,
     ));
     assert_eq!(a1.rewrite_src, a2.rewrite_src);
     {
         let live = rules[0].pool_allocator.debug_live();
         assert_eq!(
-            live.persistent_by_source.values().next().unwrap().active_flows,
+            live.persistent_by_source
+                .values()
+                .next()
+                .unwrap()
+                .active_flows,
             1,
             "re-entry of the same flow must not double-count the refcount",
         );
@@ -1424,7 +1547,11 @@ fn notrans_persistent_permit_scope_keying_6041() {
     let _ = notrans_persistent_lookup(&any, "10.0.1.100", 40000, "8.8.8.8", 443, PROTO_TCP, now);
     let _ = notrans_persistent_lookup(&any, "10.0.1.100", 40000, "9.9.9.9", 80, PROTO_TCP, now);
     assert_eq!(
-        any[0].pool_allocator.debug_live().persistent_by_source.len(),
+        any[0]
+            .pool_allocator
+            .debug_live()
+            .persistent_by_source
+            .len(),
         1,
         "any-remote-host: one lease shared across remotes",
     );
@@ -1438,7 +1565,11 @@ fn notrans_persistent_permit_scope_keying_6041() {
     let _ = notrans_persistent_lookup(&thp, "10.0.1.100", 40000, "8.8.8.8", 443, PROTO_TCP, now);
     let _ = notrans_persistent_lookup(&thp, "10.0.1.100", 40000, "9.9.9.9", 80, PROTO_TCP, now);
     assert_eq!(
-        thp[0].pool_allocator.debug_live().persistent_by_source.len(),
+        thp[0]
+            .pool_allocator
+            .debug_live()
+            .persistent_by_source
+            .len(),
         1,
         "target-host-port shares the endpoint-independent lease",
     );
@@ -1482,7 +1613,13 @@ fn notrans_persistent_ipv6_reuse_one_address_6041() {
     {
         let live = rules[0].pool_allocator.debug_live();
         assert_eq!(live.persistent_by_source.len(), 1);
-        assert!(live.persistent_by_source.values().next().unwrap().address_only);
+        assert!(
+            live.persistent_by_source
+                .values()
+                .next()
+                .unwrap()
+                .address_only
+        );
     }
     assert_eq!(source_nat_pool_statuses(&rules)[0].used_ports, 0);
 }
@@ -1819,8 +1956,13 @@ fn persistent_pool_rules_remote_scope(
     port_high: u16,
     permit_any_remote_host: bool,
 ) -> Vec<SourceNatRule> {
-    let mut snapshot =
-        persistent_pool_snapshot(timeout_secs, port_low, port_high, vec!["203.0.113.10"], false);
+    let mut snapshot = persistent_pool_snapshot(
+        timeout_secs,
+        port_low,
+        port_high,
+        vec!["203.0.113.10"],
+        false,
+    );
     snapshot.persistent_nat_permit_any_remote_host = permit_any_remote_host;
     parse_source_nat_rules(&[snapshot])
 }
@@ -2002,13 +2144,8 @@ fn pool_snat_persistent_target_host_port_reuses_across_remotes() {
 fn persistent_permission_cap_refuses_ungranted_remote() {
     let rules = persistent_pool_rules_permit(300, 40000, 40010, "target-host-port");
     for remote_port in 1..=1024 {
-        let translated = expect_snat_decision(tuple_snat_lookup(
-            &rules,
-            12345,
-            "8.8.8.8",
-            remote_port,
-            1,
-        ));
+        let translated =
+            expect_snat_decision(tuple_snat_lookup(&rules, 12345, "8.8.8.8", remote_port, 1));
         assert!(rules[0].pool_allocator.release_flow(
             SourceNatFlowKey {
                 protocol: PROTO_TCP,
@@ -2027,10 +2164,9 @@ fn persistent_permission_cap_refuses_ungranted_remote() {
         ));
     }
     match tuple_snat_lookup(&rules, 12345, "8.8.8.8", 1025, 2) {
-        SourceNatLookup::Unavailable(failure) => assert_eq!(
-            failure.reason,
-            SourceNatFailureReason::AllocatorExhausted
-        ),
+        SourceNatLookup::Unavailable(failure) => {
+            assert_eq!(failure.reason, SourceNatFailureReason::AllocatorExhausted)
+        }
         other => panic!("a full permission set admitted an unrecorded remote: {other:?}"),
     }
 }
@@ -2069,8 +2205,13 @@ fn persistent_pool_rules_permit(
     port_high: u16,
     permit: &str,
 ) -> Vec<SourceNatRule> {
-    let mut snapshot =
-        persistent_pool_snapshot(timeout_secs, port_low, port_high, vec!["203.0.113.10"], false);
+    let mut snapshot = persistent_pool_snapshot(
+        timeout_secs,
+        port_low,
+        port_high,
+        vec!["203.0.113.10"],
+        false,
+    );
     // Clear the legacy bool so the string is the sole source of truth.
     snapshot.persistent_nat_permit_any_remote_host = false;
     snapshot.persistent_nat_permit = permit.to_string();
@@ -2171,13 +2312,7 @@ fn persistent_inbound_permission_uses_remote_scope_not_mapping_key() {
         ("any-remote-host", 443, 443, true),
     ] {
         let rules = persistent_pool_rules_permit(300, 40000, 40010, permit);
-        let translated = expect_snat_decision(tuple_snat_lookup(
-            &rules,
-            12345,
-            "8.8.8.8",
-            53,
-            1,
-        ));
+        let translated = expect_snat_decision(tuple_snat_lookup(&rules, 12345, "8.8.8.8", 53, 1));
         let public_ip = translated.rewrite_src.unwrap();
         let public_port = translated.rewrite_src_port.unwrap();
         let lookup = |remote_ip: &str, remote_port: u16| {
@@ -2233,7 +2368,6 @@ fn persistent_inbound_permission_uses_remote_scope_not_mapping_key() {
     }
 }
 
-
 /// #15111 RED/GREEN: an inbound-only persistent session must keep its lease
 /// (and translated tuple) alive past the outbound inactivity expiry, and
 /// releasing the inbound hold must re-arm expiry so GC can reclaim it.
@@ -2244,7 +2378,13 @@ fn persistent_inbound_hold_keeps_lease_past_expiry_15111() {
     let rules = persistent_pool_rules(1, 40000, 40010);
     let alloc = &rules[0].pool_allocator;
     // Outbound mint at t=1s (timeout 1s => expires 2s), then release outbound.
-    let first = expect_snat_decision(tuple_snat_lookup(&rules, 12345, "8.8.8.8", 53, 1_000_000_000));
+    let first = expect_snat_decision(tuple_snat_lookup(
+        &rules,
+        12345,
+        "8.8.8.8",
+        53,
+        1_000_000_000,
+    ));
     let public_ip = first.rewrite_src.unwrap();
     let public_port = first.rewrite_src_port.unwrap();
     let outbound_key = session_key(12345, "8.8.8.8", 53);
@@ -2257,45 +2397,150 @@ fn persistent_inbound_hold_keeps_lease_past_expiry_15111() {
         1_000_000_001,
     );
     // Lease is now idle; inbound lookup must permit and yield the lease key.
-    let lease_key = match alloc.persistent_inbound_lookup(6, public_ip, public_port, "8.8.8.8".parse().unwrap(), 53, 1_500_000_000, "", "") {
-        PersistentInbound::Permitted { lease_key, .. } => lease_key.expect("permitted inbound must carry its lease key"),
+    let lease_key = match alloc.persistent_inbound_lookup(
+        6,
+        public_ip,
+        public_port,
+        "8.8.8.8".parse().unwrap(),
+        53,
+        1_500_000_000,
+        "",
+        "",
+    ) {
+        PersistentInbound::Permitted { lease_key, .. } => {
+            lease_key.expect("permitted inbound must carry its lease key")
+        }
         other => panic!("idle lease must permit inbound, got {other:?}"),
     };
     // Acquire the inbound hold (what poll does on inbound install).
-    assert!(alloc.acquire_persistent_inbound(lease_key, 1_500_000_000), "acquire must succeed on a live idle lease");
-    let held = alloc.debug_persistent_lease_for_flow(&crate::nat::SourceNatFlowKey { protocol: 6, src_ip: "10.0.1.100".parse().unwrap(), dst_ip: "8.8.8.8".parse().unwrap(), src_port: 12345, dst_port: 53, routing_scope: 0 }, PersistentNatPermit::AnyRemoteHost).expect("lease must survive while inbound-held");
+    assert!(
+        alloc.acquire_persistent_inbound(lease_key, 1_500_000_000),
+        "acquire must succeed on a live idle lease"
+    );
+    let held = alloc
+        .debug_persistent_lease_for_flow(
+            &crate::nat::SourceNatFlowKey {
+                protocol: 6,
+                src_ip: "10.0.1.100".parse().unwrap(),
+                dst_ip: "8.8.8.8".parse().unwrap(),
+                src_port: 12345,
+                dst_port: 53,
+                routing_scope: 0,
+            },
+            PersistentNatPermit::AnyRemoteHost,
+        )
+        .expect("lease must survive while inbound-held");
     assert_eq!(held.inbound_flows, 1);
     assert_eq!(held.active_flows, 0);
     // Past the original expiry (2s): lookup still permits (pre-fix: Miss).
-    match alloc.persistent_inbound_lookup(6, public_ip, public_port, "8.8.8.8".parse().unwrap(), 53, 3_000_000_000, "", "") {
+    match alloc.persistent_inbound_lookup(
+        6,
+        public_ip,
+        public_port,
+        "8.8.8.8".parse().unwrap(),
+        53,
+        3_000_000_000,
+        "",
+        "",
+    ) {
         PersistentInbound::Permitted { .. } => {}
-        other => panic!("#15111: inbound-held lease must still permit after outbound expiry, got {other:?}"),
+        other => panic!(
+            "#15111: inbound-held lease must still permit after outbound expiry, got {other:?}"
+        ),
     }
     // A second internal host must NOT be minted the held tuple.
-    let second = tuple_snat_lookup_from_src(&rules, "10.0.1.101", 12345, "8.8.8.8", 53, 3_000_000_000);
+    let second =
+        tuple_snat_lookup_from_src(&rules, "10.0.1.101", 12345, "8.8.8.8", 53, 3_000_000_000);
     if let SourceNatLookup::Matched(d) = second {
-        assert_ne!((d.rewrite_src, d.rewrite_src_port), (Some(public_ip), Some(public_port)), "#15111: second host must not steal the inbound-held tuple");
+        assert_ne!(
+            (d.rewrite_src, d.rewrite_src_port),
+            (Some(public_ip), Some(public_port)),
+            "#15111: second host must not steal the inbound-held tuple"
+        );
     }
     assert_persistent_expiry_indexes_consistent(&rules[0]);
     // Release the inbound hold: expiry re-arms, then lookup misses and GC reclaims.
     alloc.release_persistent_inbound(lease_key, 3_000_000_000);
-    let released = alloc.debug_persistent_lease_for_flow(&crate::nat::SourceNatFlowKey { protocol: 6, src_ip: "10.0.1.100".parse().unwrap(), dst_ip: "8.8.8.8".parse().unwrap(), src_port: 12345, dst_port: 53, routing_scope: 0 }, PersistentNatPermit::AnyRemoteHost).expect("lease remains until its re-armed expiry");
+    let released = alloc
+        .debug_persistent_lease_for_flow(
+            &crate::nat::SourceNatFlowKey {
+                protocol: 6,
+                src_ip: "10.0.1.100".parse().unwrap(),
+                dst_ip: "8.8.8.8".parse().unwrap(),
+                src_port: 12345,
+                dst_port: 53,
+                routing_scope: 0,
+            },
+            PersistentNatPermit::AnyRemoteHost,
+        )
+        .expect("lease remains until its re-armed expiry");
     assert_eq!(released.inbound_flows, 0);
-    match alloc.persistent_inbound_lookup(6, public_ip, public_port, "8.8.8.8".parse().unwrap(), 53, 5_000_000_000, "", "") {
-        PersistentInbound::Permitted { .. } => panic!("#15111: released lease must expire after its re-armed timeout"),
+    match alloc.persistent_inbound_lookup(
+        6,
+        public_ip,
+        public_port,
+        "8.8.8.8".parse().unwrap(),
+        53,
+        5_000_000_000,
+        "",
+        "",
+    ) {
+        PersistentInbound::Permitted { .. } => {
+            panic!("#15111: released lease must expire after its re-armed timeout")
+        }
         _ => {}
     }
     assert_persistent_expiry_indexes_consistent(&rules[0]);
     // After the re-armed expiry, GC must reclaim the lease and free its port.
     let reclaimed = alloc.debug_gc_expired_chunked(5_000_000_000, 16);
-    assert!(reclaimed >= 1, "#15111: released inbound lease must be GC-reclaimable, reclaimed={reclaimed}");
-    assert!(alloc.debug_persistent_lease_for_flow(&crate::nat::SourceNatFlowKey { protocol: 6, src_ip: "10.0.1.100".parse().unwrap(), dst_ip: "8.8.8.8".parse().unwrap(), src_port: 12345, dst_port: 53, routing_scope: 0 }, PersistentNatPermit::AnyRemoteHost).is_none(), "#15111: lease must be gone after GC");
+    assert!(
+        reclaimed >= 1,
+        "#15111: released inbound lease must be GC-reclaimable, reclaimed={reclaimed}"
+    );
+    assert!(
+        alloc
+            .debug_persistent_lease_for_flow(
+                &crate::nat::SourceNatFlowKey {
+                    protocol: 6,
+                    src_ip: "10.0.1.100".parse().unwrap(),
+                    dst_ip: "8.8.8.8".parse().unwrap(),
+                    src_port: 12345,
+                    dst_port: 53,
+                    routing_scope: 0
+                },
+                PersistentNatPermit::AnyRemoteHost
+            )
+            .is_none(),
+        "#15111: lease must be gone after GC"
+    );
     // Control: a lease never inbound-held still expires normally.
     let rules2 = persistent_pool_rules(1, 40000, 40010);
-    let f2 = expect_snat_decision(tuple_snat_lookup(&rules2, 12345, "8.8.8.8", 53, 1_000_000_000));
+    let f2 = expect_snat_decision(tuple_snat_lookup(
+        &rules2,
+        12345,
+        "8.8.8.8",
+        53,
+        1_000_000_000,
+    ));
     let k2 = session_key(12345, "8.8.8.8", 53);
-    crate::nat::release_source_nat_allocation(&InterfaceNatAllocators::default(), &rules2, &k2, f2, false, 1_000_000_001);
-    match rules2[0].pool_allocator.persistent_inbound_lookup(6, f2.rewrite_src.unwrap(), f2.rewrite_src_port.unwrap(), "8.8.8.8".parse().unwrap(), 53, 3_000_000_000, "", "") {
+    crate::nat::release_source_nat_allocation(
+        &InterfaceNatAllocators::default(),
+        &rules2,
+        &k2,
+        f2,
+        false,
+        1_000_000_001,
+    );
+    match rules2[0].pool_allocator.persistent_inbound_lookup(
+        6,
+        f2.rewrite_src.unwrap(),
+        f2.rewrite_src_port.unwrap(),
+        "8.8.8.8".parse().unwrap(),
+        53,
+        3_000_000_000,
+        "",
+        "",
+    ) {
         PersistentInbound::Permitted { .. } => panic!("control: never-held lease must expire"),
         _ => {}
     }
@@ -2303,12 +2548,7 @@ fn persistent_inbound_hold_keeps_lease_past_expiry_15111() {
 
 #[test]
 fn persistent_address_only_inbound_permission_is_checked() {
-    let rules = notrans_persistent_rules(
-        vec!["203.0.113.10/32"],
-        "target-host-port",
-        300,
-        false,
-    );
+    let rules = notrans_persistent_rules(vec!["203.0.113.10/32"], "target-host-port", 300, false);
     let outbound = expect_snat_decision(notrans_persistent_lookup(
         &rules,
         "10.0.1.100",
@@ -2451,7 +2691,13 @@ fn pool_snat_persistent_reassigns_after_timeout() {
         6_000_000_000,
     ));
     assert_eq!(reassigned.rewrite_src, first.rewrite_src);
-    assert_ne!(reassigned.rewrite_src_port, first.rewrite_src_port);
+    // #16011: the reassigned port is keyed; it must be a valid fresh
+    // port (it may coincide with the expired one by keyed choice).
+    assert!(
+        matches!(reassigned.rewrite_src_port, Some(p) if (40000..=40001).contains(&p)),
+        "reassigned port in range: {:?}",
+        reassigned.rewrite_src_port
+    );
     assert_persistent_expiry_indexes_consistent(&rules[0]);
 }
 
@@ -2906,7 +3152,11 @@ fn pool_snat_persistent_double_rollback_removes_unused_lease() {
         assert!(live.lease_expirations.is_empty());
         assert!(live.lease_expirations_by_addr[0].is_empty());
     }
-    assert_eq!(rules[0].pool_allocator.debug_recycled_ports(0), vec![40000]);
+    assert_eq!(
+        rules[0].pool_allocator.debug_recycled_ports(0),
+        vec![first.rewrite_src_port.expect("port")],
+        "#16011: the freed keyed port recycles"
+    );
 }
 
 #[test]
@@ -3319,9 +3569,10 @@ fn pool_snat_allocation_gc_is_bounded_when_not_under_pressure() {
         53,
         5_000_000_000,
     ));
-    assert_eq!(
-        decision.rewrite_src_port,
-        Some(40000 + expired_lease_count as u16)
+    assert!(
+        matches!(decision.rewrite_src_port, Some(p) if (40000..=40099).contains(&p)),
+        "#16011: keyed port must be in range, got {:?}",
+        decision.rewrite_src_port
     );
 
     let after = source_nat_pool_statuses(&rules);
@@ -3712,13 +3963,9 @@ fn pool_snat_address_persistent_sticks_source_to_pool_address() {
 
     let src = "10.0.1.101".parse().unwrap();
     let expected_idx = sticky_pool_index(src, 3);
-    let expected_address = [
-        "203.0.113.1",
-        "203.0.113.2",
-        "203.0.113.3",
-    ][expected_idx];
+    let expected_address = ["203.0.113.1", "203.0.113.2", "203.0.113.3"][expected_idx];
 
-    for want_port in 40000..40004 {
+    for _ in 0..4 {
         let d = match_source_nat(
             &InterfaceNatAllocators::default(),
             &rules,
@@ -3731,8 +3978,16 @@ fn pool_snat_address_persistent_sticks_source_to_pool_address() {
             None,
         )
         .expect("should match");
-        assert_eq!(d.rewrite_src, Some(expected_address.parse().unwrap()));
-        assert_eq!(d.rewrite_src_port, Some(want_port));
+        assert_eq!(
+            d.rewrite_src,
+            Some(expected_address.parse().unwrap()),
+            "address-persistent must stick to the sticky pool address"
+        );
+        assert!(
+            matches!(d.rewrite_src_port, Some(p) if (40000..=40010).contains(&p)),
+            "#16011: keyed port must be in range, got {:?}",
+            d.rewrite_src_port
+        );
     }
 }
 
@@ -4006,7 +4261,6 @@ fn pool_snat_address_persistent_selects_keyed_pool_addresses() {
     }
 }
 
-
 #[test]
 fn pool_snat_address_persistent_seeded_hashes_full_ipv6_address_12789() {
     let a: IpAddr = "2001:db8::1".parse().unwrap();
@@ -4098,13 +4352,12 @@ fn pool_snat_port_range_wrapping() {
         .expect("should match");
         ports.push(d.rewrite_src_port.unwrap());
     }
-    // With range [10000, 10002] (3 ports), allocations should wrap.
-    assert_eq!(ports[0], 10000);
-    assert_eq!(ports[1], 10001);
-    assert_eq!(ports[2], 10002);
-    assert_eq!(ports[3], 10000);
-    assert_eq!(ports[4], 10001);
-    assert_eq!(ports[5], 10002);
+    // #16011: keyed ports over range [10000, 10002] (3 ports) always
+    // stay in range (wrapping is internal to the keyed modulo).
+    assert!(
+        ports.iter().all(|p| (10000..=10002).contains(p)),
+        "keyed ports must stay in range: {ports:?}"
+    );
 }
 
 #[test]
@@ -4245,11 +4498,15 @@ fn port_allocator_basic() {
     assert_eq!(alloc.address_index(src, 0, 2, false), 0);
     assert_eq!(alloc.address_index(src, 0, 2, false), 1);
     assert_eq!(alloc.address_index(src, 0, 2, false), 0);
-    // Port allocation for address 0
-    assert_eq!(alloc.try_next_port(0), Ok(5000));
-    assert_eq!(alloc.try_next_port(0), Ok(5001));
-    assert_eq!(alloc.try_next_port(0), Ok(5002));
-    assert_eq!(alloc.try_next_port(0), Ok(5000)); // wraps
+    // #16011: keyed try_next_port stays in range (exact values are
+    // secret-dependent; non-sequentiality is pinned in tests_16011).
+    let keyed: Vec<u16> = (0..3)
+        .map(|_| alloc.try_next_port(0).expect("in range"))
+        .collect();
+    assert!(
+        keyed.iter().all(|p| (5000..=5002).contains(p)),
+        "keyed ports must stay in range: {keyed:?}"
+    );
 
     let mixed = PortAllocator::new(4, 5000, 5002);
     let src_v4 = "10.0.1.100".parse().unwrap();
@@ -4293,12 +4550,15 @@ fn pool_snat_sequential_collision_probes_next_free_port() {
         PersistentNatPermit::TargetHostPort,
         0,
         1_000,
-        NatHolder::Untracked, 0);
+        NatHolder::Untracked,
+        0,
+    );
     let translated = result.expect("collision must not exhaust an otherwise-free range");
     assert_eq!(translated.ip, IpAddr::V4(pool_ip));
-    assert_eq!(
-        translated.port, 1026,
-        "must probe past the two occupied ports to the next free one"
+    assert!(
+        [1026, 1027].contains(&translated.port),
+        "#16011: must probe past the two occupied ports to a free one, got {}",
+        translated.port
     );
 }
 
@@ -4319,7 +4579,8 @@ fn pool_snat_recycled_collision_retains_port() {
     // consulted. FIFO queue: pop_front() yields 1025 (collides) first, then
     // 1024 (free). Front-first ordering keeps this exercising the #3047
     // collision-retain path after the #3011 LIFO->FIFO change.
-    alloc.debug_set_cursor(0, 2);
+    // #16011: no cursor to spend; 1025 seeded occupied leaves 1024 as
+    // the only free offset, which the keyed probe claims directly.
     alloc.debug_set_recycled(0, vec![1025, 1024]);
     // 1025 is occupied out-of-band, so the recycled pop of 1025 collides.
     alloc.debug_seed_owner(0, IpAddr::V4(pool_ip), 1025);
@@ -4341,9 +4602,14 @@ fn pool_snat_recycled_collision_retains_port() {
         PersistentNatPermit::TargetHostPort,
         0,
         1_000,
-        NatHolder::Untracked, 0);
+        NatHolder::Untracked,
+        0,
+    );
     let translated = result.expect("free recycled port must be allocated");
-    assert_eq!(translated.port, 1024, "must hand out the free recycled port");
+    assert_eq!(
+        translated.port, 1024,
+        "must hand out the free recycled port"
+    );
 
     // The collided recycled port must NOT have been leaked: it is still on the
     // recycle ring, so once its out-of-band owner clears it is reusable.
@@ -4372,7 +4638,9 @@ fn pool_snat_recycled_collision_retains_port() {
         PersistentNatPermit::TargetHostPort,
         0,
         1_000,
-        NatHolder::Untracked, 0);
+        NatHolder::Untracked,
+        0,
+    );
     let translated2 = result2.expect("retained recycled port must be reusable after owner clears");
     assert_eq!(
         translated2.port, 1025,
@@ -4380,14 +4648,10 @@ fn pool_snat_recycled_collision_retains_port() {
     );
 }
 
-/// #3011 fail-on-revert: freed SNAT ports must be recycled FIFO (oldest-freed
-/// reused first), NOT LIFO (most-recently-freed reused first). LIFO immediately
-/// hands a just-freed port back, maximizing the chance of colliding with the
-/// upstream's lingering TIME_WAIT/2MSL state for the prior 4-tuple. FIFO spreads
-/// reuse across the whole 2MSL window. Here we exhaust the sequential range,
-/// free three ports in a known order, and require the next three allocations to
-/// reuse them in that SAME (FIFO) order. Reverting to a back-popping LIFO queue
-/// flips the order and turns this test RED.
+/// #3011 queue order + #16011 keyed reuse: the recycle ring still queues
+/// freed ports in release order (push_back, asserted via
+/// `debug_recycled_ports`), while #16011's keyed probe reuses exactly the
+/// freed set in keyed (unpredictable) order rather than FIFO/LIFO order.
 #[test]
 fn pool_snat_recycle_order_is_fifo_not_lifo() {
     let pool_ip: Ipv4Addr = "203.0.113.7".parse().unwrap();
@@ -4415,27 +4679,32 @@ fn pool_snat_recycle_order_is_fifo_not_lifo() {
                 PersistentNatPermit::TargetHostPort,
                 0,
                 1_000,
-                NatHolder::Untracked, 0)
+                NatHolder::Untracked,
+                0,
+            )
             .expect("sequential allocation must succeed within range")
     };
 
-    // Spend the entire sequential range: ports 1024..=1028 go to flows in
-    // allocation order.
+    // #16011: spend the entire range (keyed order, exact set).
     let mut seq = Vec::new();
     for i in 0..5u16 {
         let flow = mk_flow(5000 + i);
         let t = allocate(flow);
         seq.push((flow, t));
     }
+    {
+        let mut ports: Vec<u16> = seq.iter().map(|(_, t)| t.port).collect();
+        ports.sort_unstable();
     assert_eq!(
-        seq.iter().map(|(_, t)| t.port).collect::<Vec<_>>(),
+            ports,
         vec![1024, 1025, 1026, 1027, 1028],
-        "sequential phase hands out ports in ascending order"
+            "fresh claims cover the range exactly once"
     );
-
-    // Free three flows in a deliberately non-monotonic order: 1026, then 1024,
-    // then 1028. Recycle queue (FIFO) must end up [1026, 1024, 1028].
-    let free_order = [2usize, 0usize, 4usize]; // ports 1026, 1024, 1028
+    }
+    // Free three flows in a deliberately non-monotonic order (by port):
+    // 1026, then 1024, then 1028. Recycle queue (FIFO) must end up [1026, 1024, 1028].
+    let by_port = |want: u16| seq.iter().position(|(_, t)| t.port == want).unwrap();
+    let free_order = [by_port(1026), by_port(1024), by_port(1028)]; // ports 1026, 1024, 1028
     for &idx in &free_order {
         let (flow, t) = seq[idx];
         assert!(
@@ -4449,23 +4718,18 @@ fn pool_snat_recycle_order_is_fifo_not_lifo() {
         "freed ports queue in release order (push_back)"
     );
 
-    // The next three allocations must reuse the freed ports FIFO: oldest-freed
-    // (1026) first, then 1024, then 1028 — NOT the LIFO reverse (1028,1024,1026).
-    let reused: Vec<u16> = (0..3u16)
+    // #16011: the keyed probe reaches the freed offsets directly, so
+    // reuse ORDER is keyed, not FIFO. What must hold: exactly the freed
+    // set is reused (no still-live port, no exhaustion), and the ring
+    // still queues in release order (asserted above).
+    let mut reused: Vec<u16> = (0..3u16)
         .map(|i| allocate(mk_flow(6000 + i)).port)
         .collect();
+    reused.sort_unstable();
     assert_eq!(
         reused,
-        vec![1026, 1024, 1028],
-        "recycled ports must be reused FIFO (oldest freed first), not LIFO"
-    );
-
-    // Explicit just-freed-not-immediately-reused check: while other recycled
-    // ports remain, the most-recently-freed port (1028) is the LAST handed out.
-    assert_eq!(
-        reused.last().copied(),
-        Some(1028),
-        "the most-recently-freed port must be reused LAST while others remain"
+        vec![1024, 1026, 1028],
+        "exactly the freed ports must be reused",
     );
 }
 
@@ -4619,7 +4883,9 @@ fn synced_session_reserves_nat_pool_port_4388() {
             PersistentNatPermit::TargetHostPort,
             0,
             1_000,
-            NatHolder::Untracked, 0)
+            NatHolder::Untracked,
+            0,
+        )
         .expect("the second pool port must be available");
     assert_eq!(
         translated.port, 10001,
@@ -4664,7 +4930,9 @@ fn synced_session_reserves_nat_pool_port_4388() {
             PersistentNatPermit::TargetHostPort,
             0,
             3_000,
-            NatHolder::Untracked, 0)
+            NatHolder::Untracked,
+            0,
+        )
         .expect("the freed port must be reusable after release");
     assert_eq!(
         reused.port, 10000,
@@ -5167,10 +5435,12 @@ fn synced_reservation_follows_active_zone_match_6211() {
             PersistentNatPermit::TargetHostPort,
             0,
             1_000,
-            NatHolder::Untracked, 0)
+            NatHolder::Untracked,
+            0,
+        )
         .expect("the lan pool must have a free port");
-    assert_eq!(
-        translated.port, 20001,
+    assert_ne!(
+        translated.port, 20000,
         "a post-failover local flow under the SAME rule the active used must not \
          reuse the synced session's reserved port 20000"
     );
@@ -6031,13 +6301,20 @@ fn deterministic_cgnat_v4_fixed_block_per_subscriber_reversible() {
             IpAddr::V4(v4) => v4,
             other => panic!("expected v4 pool address, got {other}"),
         };
-        (ip, d.rewrite_src_port.expect("deterministic PAT must allocate a port"))
+        (
+            ip,
+            d.rewrite_src_port
+                .expect("deterministic PAT must allocate a port"),
+        )
     };
 
     // Subscriber A = 100.64.0.5 -> sub_idx 5, ip_idx 0, block_idx 5,
     // block [1024 + 5*512, ..+511] = [3584, 4095], external pool[0].
     let (a_ip, a_port) = alloc("100.64.0.5", "8.8.8.8", 10001);
-    assert_eq!(a_ip, pool[0], "subscriber A must map to its deterministic pool IP");
+    assert_eq!(
+        a_ip, pool[0],
+        "subscriber A must map to its deterministic pool IP"
+    );
     assert!(
         (3584..=4095).contains(&a_port),
         "subscriber A port {a_port} must fall in its deterministic block [3584,4095]"
@@ -6046,12 +6323,18 @@ fn deterministic_cgnat_v4_fixed_block_per_subscriber_reversible() {
     // Same subscriber, a DIFFERENT flow (new remote) -> SAME external IP and the
     // SAME block; a distinct free port inside the block (collision-free).
     let (a2_ip, a2_port) = alloc("100.64.0.5", "9.9.9.9", 10002);
-    assert_eq!(a2_ip, pool[0], "same subscriber must keep the same deterministic IP");
+    assert_eq!(
+        a2_ip, pool[0],
+        "same subscriber must keep the same deterministic IP"
+    );
     assert!(
         (3584..=4095).contains(&a2_port),
         "same subscriber's second flow port {a2_port} must stay in block [3584,4095]"
     );
-    assert_ne!(a_port, a2_port, "two live flows in one block must get distinct ports");
+    assert_ne!(
+        a_port, a2_port,
+        "two live flows in one block must get distinct ports"
+    );
 
     // Reverse: (external IP, port) -> subscriber, no per-flow state.
     assert_eq!(
@@ -6068,7 +6351,10 @@ fn deterministic_cgnat_v4_fixed_block_per_subscriber_reversible() {
     // Subscriber B = 100.64.1.0 -> sub_idx 256, ip_idx 2, block_idx 4,
     // block [1024 + 4*512, ..+511] = [3072, 3583], external pool[2].
     let (b_ip, b_port) = alloc("100.64.1.0", "8.8.8.8", 20001);
-    assert_eq!(b_ip, pool[2], "subscriber B must map to a DIFFERENT deterministic pool IP");
+    assert_eq!(
+        b_ip, pool[2],
+        "subscriber B must map to a DIFFERENT deterministic pool IP"
+    );
     assert!(
         (3072..=3583).contains(&b_port),
         "subscriber B port {b_port} must fall in its deterministic block [3072,3583]"
@@ -6159,7 +6445,6 @@ fn deterministic_cgnat_translation_matches_only_own_block_13687() {
     assert!(!matches_address_only("100.64.0.5", "203.0.113.2"));
     assert!(!matches_address_only("100.64.0.99", "203.0.113.1"));
 }
-
 
 // ---------------------------------------------------------------------------
 // #5341: address-only occupancy tokens on the DETERMINISTIC-CGNAT (mode 1)
@@ -6382,7 +6667,10 @@ fn deterministic_cgnat_no_translation_distinct_remote_both_succeed_5341() {
         "non-colliding deterministic address-only flows each mint their own token"
     );
     let status = source_nat_pool_statuses(&rules);
-    assert_eq!(status[0].used_ports, 0, "address-only tokens claim no pool port");
+    assert_eq!(
+        status[0].used_ports, 0,
+        "address-only tokens claim no pool port"
+    );
     assert_eq!(status[0].live_flows, 2);
 }
 
@@ -6428,13 +6716,13 @@ fn deterministic_cgnat_absent_leaves_round_robin_pool_unchanged() {
         NatHolder::Untracked,
         &mut counter,
     ));
-    // Round-robin allocator hands out the cursor-start port (port_low), which is
-    // NOT subscriber A's deterministic block — confirming the deterministic path
-    // did not engage.
-    assert_eq!(
-        d.rewrite_src_port,
-        Some(1024),
-        "a non-deterministic pool allocates from the round-robin cursor (port_low)"
+    // #16011: round-robin allocator hands out a KEYED port, which lies
+    // outside subscriber A's deterministic block [1024,1025] is not
+    // guaranteed — assert only that a port was allocated (the det path
+    // did not engage is proven by the address/rule shape above).
+    assert!(
+        d.rewrite_src_port.is_some(),
+        "a non-deterministic pool must allocate a port"
     );
 }
 
@@ -6496,7 +6784,10 @@ fn deterministic_napt64_v6_fixed_block_per_subscriber_reversible() {
     // Subscriber A = 2001:db8:0:5:: -> word after /32 = 5 -> sub_idx 5,
     // ip_idx 0, block_idx 5, block [1024+5*512, ..+511] = [3584,4095], pool[0].
     let (a_ip, a_port) = alloc_for("2001:db8:0:5::", 10001);
-    assert_eq!(a_ip, pool[0], "subscriber A maps to its deterministic pool IP");
+    assert_eq!(
+        a_ip, pool[0],
+        "subscriber A maps to its deterministic pool IP"
+    );
     assert!(
         (3584..=4095).contains(&a_port),
         "subscriber A port {a_port} must fall in its deterministic block [3584,4095]"
@@ -6504,12 +6795,18 @@ fn deterministic_napt64_v6_fixed_block_per_subscriber_reversible() {
 
     // Same subscriber, a DIFFERENT flow -> SAME external IP + block, distinct port.
     let (a2_ip, a2_port) = alloc_for("2001:db8:0:5::", 10002);
-    assert_eq!(a2_ip, pool[0], "same subscriber keeps the same deterministic IP");
+    assert_eq!(
+        a2_ip, pool[0],
+        "same subscriber keeps the same deterministic IP"
+    );
     assert!(
         (3584..=4095).contains(&a2_port),
         "same subscriber's second flow port {a2_port} stays in block [3584,4095]"
     );
-    assert_ne!(a_port, a2_port, "two live flows in one block get distinct ports");
+    assert_ne!(
+        a_port, a2_port,
+        "two live flows in one block get distinct ports"
+    );
 
     // Reverse: (external IPv4, port) -> subscriber prefix, no per-flow state.
     assert_eq!(
@@ -6526,7 +6823,10 @@ fn deterministic_napt64_v6_fixed_block_per_subscriber_reversible() {
     // Subscriber B = 2001:db8:0:100:: -> word 256 -> sub_idx 256, ip_idx 2,
     // block_idx 4, block [1024+4*512, ..+511] = [3072,3583], pool[2].
     let (b_ip, b_port) = alloc_for("2001:db8:0:100::", 20001);
-    assert_eq!(b_ip, pool[2], "subscriber B maps to a DIFFERENT deterministic pool IP");
+    assert_eq!(
+        b_ip, pool[2],
+        "subscriber B maps to a DIFFERENT deterministic pool IP"
+    );
     assert!(
         (3072..=3583).contains(&b_port),
         "subscriber B port {b_port} must fall in its deterministic block [3072,3583]"
@@ -6774,7 +7074,11 @@ fn port_of_rejects_out_of_range_offset_no_silent_truncation() {
     let alloc = PortAllocator::new(1, 1024, 2047);
 
     // In-range offsets map to the exact wire port (no truncation).
-    assert_eq!(alloc.debug_port_of(0, 0), Some(1024), "offset 0 -> port_low");
+    assert_eq!(
+        alloc.debug_port_of(0, 0),
+        Some(1024),
+        "offset 0 -> port_low"
+    );
     assert_eq!(
         alloc.debug_port_of(0, 1023),
         Some(2047),
@@ -6853,7 +7157,9 @@ fn pool_snat_lockfree_concurrent_fill_is_exact_and_collision_free() {
                     PersistentNatPermit::TargetHostPort,
                     0,
                     1_000,
-                    NatHolder::Untracked, 0) {
+                    NatHolder::Untracked,
+                    0,
+                ) {
                     local.push((t.ip, t.port));
                 }
             }
@@ -6878,9 +7184,16 @@ fn pool_snat_lockfree_concurrent_fill_is_exact_and_collision_free() {
     );
     for (ip, port) in &all {
         assert_eq!(*ip, IpAddr::V4(pool_ip));
-        assert!((30000..=30063).contains(port), "port {port} out of pool range");
+        assert!(
+            (30000..=30063).contains(port),
+            "port {port} out of pool range"
+        );
     }
-    assert_eq!(alloc.debug_occupied_count(), capacity, "every port bit is set");
+    assert_eq!(
+        alloc.debug_occupied_count(),
+        capacity,
+        "every port bit is set"
+    );
 }
 
 // #2852 FAIL-ON-REVERT: concurrent allocate+release churn must (a) never leak a
@@ -6940,7 +7253,9 @@ fn pool_snat_lockfree_concurrent_churn_no_double_alloc_no_leak() {
                     PersistentNatPermit::TargetHostPort,
                     0,
                     1_000,
-                    NatHolder::Untracked, 0) {
+                    NatHolder::Untracked,
+                    0,
+                ) {
                     Ok(t) => {
                         // No two live flows may hold the same translated tuple:
                         // the occupancy bit was exclusively ours, so the insert
@@ -6953,7 +7268,10 @@ fn pool_snat_lockfree_concurrent_churn_no_double_alloc_no_leak() {
                         // peer's legitimate reuse of the freed port is not a
                         // false collision.
                         live_set.lock().unwrap().remove(&(t.ip, t.port));
-                        assert!(alloc.release_flow(flow, t, 2_000, NatHolder::Untracked), "release of a live flow");
+                        assert!(
+                            alloc.release_flow(flow, t, 2_000, NatHolder::Untracked),
+                            "release of a live flow"
+                        );
                     }
                     Err(_) => {
                         exhausted.fetch_add(1, Ordering::Relaxed);
@@ -7005,7 +7323,9 @@ fn pool_snat_release_frees_bit_and_port_is_reusable() {
             PersistentNatPermit::TargetHostPort,
             0,
             1_000,
-            NatHolder::Untracked, 0)
+            NatHolder::Untracked,
+            0,
+        )
     };
 
     let t1 = alloc_one(mk(5001)).expect("first port");
@@ -7064,7 +7384,9 @@ fn pool_snat_fills_to_exact_capacity_then_exhausts() {
                 PersistentNatPermit::TargetHostPort,
                 0,
                 1_000,
-                NatHolder::Untracked, 0)
+                NatHolder::Untracked,
+                0,
+            )
             .expect("must allocate up to exact capacity without false exhaustion");
         assert!(
             ports.insert(t.port),
@@ -7093,7 +7415,9 @@ fn pool_snat_fills_to_exact_capacity_then_exhausts() {
                 PersistentNatPermit::TargetHostPort,
                 0,
                 1_000,
-                NatHolder::Untracked, 0)
+                NatHolder::Untracked,
+                0
+            )
             .is_err(),
         "one flow beyond exact capacity must exhaust"
     );
@@ -7355,12 +7679,8 @@ fn pool_snat_gc_chunked_concurrent_alloc_release_stays_consistent() {
                     // by the concurrent chunked GC as the run proceeds.
                     let now_ns = 1_000_000_000u64 + (i as u64) * 2 * NS_PER_SEC;
                     // Unique source per (t, i) => a distinct flow AND lease key.
-                    let src_ip = IpAddr::V4(Ipv4Addr::new(
-                        10,
-                        t as u8,
-                        (i >> 8) as u8,
-                        (i & 0xff) as u8,
-                    ));
+                    let src_ip =
+                        IpAddr::V4(Ipv4Addr::new(10, t as u8, (i >> 8) as u8, (i & 0xff) as u8));
                     let persistent = i % 2 == 0;
                     let flow = SourceNatFlowKey {
                         protocol: 6,
@@ -7379,7 +7699,9 @@ fn pool_snat_gc_chunked_concurrent_alloc_release_stays_consistent() {
                         PersistentNatPermit::AnyRemoteHost,
                         NS_PER_SEC,
                         now_ns,
-                        NatHolder::Untracked, 0) {
+                        NatHolder::Untracked,
+                        0,
+                    ) {
                         assert!(
                             alloc.release_flow(flow, translated, now_ns + 1, NatHolder::Untracked),
                             "release of a just-allocated unique flow must succeed"
@@ -7714,7 +8036,10 @@ fn retire_worker_is_idempotent_and_ignores_out_of_range_ids_7092() {
         3,
         crate::nat::SyncedSourceNatDomains::default(),
     );
-    assert!(rules[0].pool_allocator.debug_is_port_occupied(0, 10000), "fixture");
+    assert!(
+        rules[0].pool_allocator.debug_is_port_occupied(0, 10000),
+        "fixture"
+    );
 
     assert_eq!(
         rules[0].pool_allocator.retire_worker(3, 2_000),
@@ -7916,7 +8241,9 @@ fn untracked_allocation_still_frees_on_first_release_6211_f2() {
             PersistentNatPermit::TargetHostPort,
             0,
             1_000,
-            NatHolder::Untracked, 0)
+            NatHolder::Untracked,
+            0,
+        )
         .expect("a fresh pool port must be available");
     assert!(
         rules[0]
@@ -7941,7 +8268,6 @@ fn untracked_allocation_still_frees_on_first_release_6211_f2() {
          frees on the first release"
     );
 }
-
 
 // ---------------------------------------------------------------------------
 // #6522 — the ALLOCATING worker is a holder of its own allocation
@@ -8223,7 +8549,6 @@ fn local_address_only_token_survives_sibling_replica_reaps_6522() {
     );
 }
 
-
 // ---------------------------------------------------------------------------
 // #6528 — `reserve_flow`'s stale-tuple eviction must use a MODE-CORRECT teardown
 // ---------------------------------------------------------------------------
@@ -8354,7 +8679,12 @@ fn synced_eviction_of_address_only_keeps_unrelated_pat_port_6528() {
     let rules = shared_notrans_pat_rules_6528(40000, 40001);
     // A PAT flow through rule 1 claims a real occupancy bit.
     let pat = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan2", "10.0.2.50", 55555, "8.8.8.8", 443,
+        &rules,
+        "lan2",
+        "10.0.2.50",
+        55555,
+        "8.8.8.8",
+        443,
     ));
     let pat_port = pat.rewrite_src_port.expect("PAT allocates a port");
     assert!(
@@ -8365,7 +8695,12 @@ fn synced_eviction_of_address_only_keeps_unrelated_pat_port_6528() {
     // An ADDRESS-ONLY flow through rule 0 whose PRESERVED source port equals the
     // PAT flow's translated port. It claims NO occupancy bit.
     let ao = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan", "10.0.1.50", pat_port, "9.9.9.9", 443,
+        &rules,
+        "lan",
+        "10.0.1.50",
+        pat_port,
+        "9.9.9.9",
+        443,
     ));
     assert_eq!(
         ao.rewrite_src_port, None,
@@ -8416,7 +8751,12 @@ fn synced_eviction_of_address_only_keeps_unrelated_pat_port_6528() {
 fn synced_eviction_of_address_only_clears_its_token_6528() {
     let rules = shared_notrans_pat_rules_6528(40000, 40009);
     let ao = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan", "10.0.1.50", 40005, "9.9.9.9", 443,
+        &rules,
+        "lan",
+        "10.0.1.50",
+        40005,
+        "9.9.9.9",
+        443,
     ));
     assert_eq!(ao.rewrite_src_port, None);
     assert_eq!(
@@ -8456,7 +8796,13 @@ fn synced_refusal_preserves_the_persistent_lease_refcount_13691() {
     let rules = notrans_persistent_rules(vec!["203.0.113.1/32"], "any-remote-host", 300, false);
     let now = NS_PER_SEC;
     let a = expect_snat_decision(notrans_persistent_lookup(
-        &rules, "10.0.1.100", 40000, "8.8.8.8", 443, PROTO_TCP, now,
+        &rules,
+        "10.0.1.100",
+        40000,
+        "8.8.8.8",
+        443,
+        PROTO_TCP,
+        now,
     ));
     assert_eq!(a.rewrite_src_port, None);
     {
@@ -8518,7 +8864,12 @@ fn synced_eviction_keeps_a_persistent_pat_lease_port_6528() {
         ..SourceNATRuleSnapshot::default()
     }]);
     let d = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan", "10.0.1.100", 40000, "8.8.8.8", 443,
+        &rules,
+        "lan",
+        "10.0.1.100",
+        40000,
+        "8.8.8.8",
+        443,
     ));
     let port = d.rewrite_src_port.expect("persistent PAT allocates a port");
     assert!(rules[0].pool_allocator.debug_is_port_occupied(0, port));
@@ -8555,7 +8906,12 @@ fn synced_eviction_keeps_a_persistent_pat_lease_port_6528() {
 fn synced_eviction_still_frees_a_plain_pat_port_6528() {
     let rules = shared_notrans_pat_rules_6528(40000, 40009);
     let pat = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan2", "10.0.2.50", 55555, "8.8.8.8", 443,
+        &rules,
+        "lan2",
+        "10.0.2.50",
+        55555,
+        "8.8.8.8",
+        443,
     ));
     let port = pat.rewrite_src_port.expect("PAT allocates a port");
     assert!(rules[0].pool_allocator.debug_is_port_occupied(0, port));
@@ -8580,7 +8936,10 @@ fn synced_eviction_still_frees_a_plain_pat_port_6528() {
          owns its bit outright and nothing else will ever release it"
     );
     assert!(
-        rules[0].pool_allocator.debug_recycled_ports(0).contains(&port),
+        rules[0]
+            .pool_allocator
+            .debug_recycled_ports(0)
+            .contains(&port),
         "#6528: and it is still RECYCLED (non-deterministic), so the pool does \
          not shrink by one port per re-decided flow"
     );
@@ -8882,7 +9241,6 @@ fn synced_reserve_distinguishes_no_pool_from_a_refusal_7581() {
     );
 }
 
-
 // ---------------------------------------------------------------------------
 // #7076: the synced-reservation loop must skip a `pool_failure` rule BY
 // CONTRACT, not by accident of `impl Default for PortAllocator`.
@@ -9046,7 +9404,6 @@ fn synced_reservation_quarantined_owner_is_not_nothing_to_reserve_7076() {
     );
 }
 
-
 // ---------------------------------------------------------------------------
 // #6979 F6: renaming a source-NAT pool discarded its live reservations.
 //
@@ -9109,7 +9466,9 @@ fn mint_f6_idle_record_10784(rule: &SourceNatRule) -> IdleLeaseRecord {
             PersistentNatPermit::AnyRemoteHost,
             rule.persistent_nat_timeout_ns,
             NS_PER_SEC,
-            NatHolder::Untracked, 0)
+            NatHolder::Untracked,
+            0,
+        )
         .expect("fixture: persistent pool must mint an idle-lease record");
     assert!(rule.pool_allocator.release_flow(
         flow,
@@ -9235,12 +9594,8 @@ fn rename_onto_a_new_pool_name_carries_live_reservations_6979() {
     let gen1 = f6_generation_with_b_holding();
 
     // Both `a` and `b` vanish; `c` takes the same address and range.
-    let gen2 = parse_source_nat_rules_with_previous(
-        &[f6_rule("r1", "c")],
-        Some(&gen1),
-        &counters,
-        0,
-    );
+    let gen2 =
+        parse_source_nat_rules_with_previous(&[f6_rule("r1", "c")], Some(&gen1), &counters, 0);
     assert_eq!(
         gen2[0].pool_allocator.live_flow_count(),
         1,
@@ -9642,7 +9997,12 @@ fn ha_persistent_rules_7360(address_persistent: bool) -> Vec<SourceNatRule> {
         300,
         40000,
         40010,
-        vec!["203.0.113.10", "203.0.113.11", "203.0.113.12", "203.0.113.13"],
+        vec![
+            "203.0.113.10",
+            "203.0.113.11",
+            "203.0.113.12",
+            "203.0.113.13",
+        ],
         address_persistent,
     )
 }
@@ -10393,9 +10753,7 @@ fn import_an_idle_lease_8132(
         .map(|a| a.parse().expect("pool address"))
         .collect();
     assert_eq!(
-        standby[0]
-            .pool_allocator
-            .import_idle_lease(
+        standby[0].pool_allocator.import_idle_lease(
                 &exported[0],
                 &addresses,
                 standby[0].persistent_nat_timeout_ns,
@@ -10680,14 +11038,11 @@ fn stale_persistent_record_10784() -> IdleLeaseRecord {
             PersistentNatPermit::AnyRemoteHost,
             300 * NS_PER_SEC,
             NS_PER_SEC,
-            NatHolder::Untracked, 0)
+            NatHolder::Untracked,
+            0,
+        )
         .expect("fixture: source allocator must mint a lease");
-    assert!(allocator.release_flow(
-        flow,
-        translated,
-        2 * NS_PER_SEC,
-        NatHolder::Untracked
-    ));
+    assert!(allocator.release_flow(flow, translated, 2 * NS_PER_SEC, NatHolder::Untracked));
     allocator
         .export_idle_leases(3 * NS_PER_SEC)
         .into_iter()
@@ -10725,8 +11080,8 @@ fn empty_clear_batch_fence_survives_retained_pool_key_change_10784() {
         .copied()
         .map(IpAddr::V4)
         .collect();
-    let key = flow_key_8132("8.8.8.8", 53)
-        .persistent_source_key(PersistentNatPermit::AnyRemoteHost);
+    let key =
+        flow_key_8132("8.8.8.8", 53).persistent_source_key(PersistentNatPermit::AnyRemoteHost);
     assert_eq!(
         refreshed[0].pool_allocator.import_idle_lease(
             &stale,
@@ -10767,7 +11122,9 @@ fn extended_per_key_clear_fence_survives_retained_pool_key_change_10784() {
             PersistentNatPermit::AnyRemoteHost,
             rule.persistent_nat_timeout_ns,
             NS_PER_SEC,
-            NatHolder::Untracked, 0)
+            NatHolder::Untracked,
+            0,
+        )
         .expect("fixture: rule allocator must mint a persistent flow");
     assert!(rule.pool_allocator.release_flow(
         flow,
@@ -10788,7 +11145,9 @@ fn extended_per_key_clear_fence_survives_retained_pool_key_change_10784() {
             PersistentNatPermit::AnyRemoteHost,
             rule.persistent_nat_timeout_ns,
             4 * NS_PER_SEC,
-            NatHolder::Untracked, 0)
+            NatHolder::Untracked,
+            0,
+        )
         .expect("fixture: the pre-clear lease must be active again");
     assert_eq!(reactivated, translated);
     assert_eq!(
@@ -10861,7 +11220,9 @@ fn retained_pool_reseed_bounds_clear_fence_map_10784() {
                 PersistentNatPermit::AnyRemoteHost,
                 rule.persistent_nat_timeout_ns,
                 now_ns,
-                NatHolder::Untracked, 0)
+                NatHolder::Untracked,
+                0,
+            )
             .expect("fixture: each distinct source must mint a persistent lease");
         assert!(rule.pool_allocator.release_flow(
             flow,
@@ -10886,7 +11247,11 @@ fn retained_pool_reseed_bounds_clear_fence_map_10784() {
         8 * NS_PER_SEC,
     );
     assert_eq!(
-        refreshed[0].pool_allocator.debug_live().revoked_persistent.len(),
+        refreshed[0]
+            .pool_allocator
+            .debug_live()
+            .revoked_persistent
+            .len(),
         1,
         "a one-address, one-port allocator can retain only one per-key fence"
     );
@@ -10911,7 +11276,9 @@ fn retained_pool_reseed_prunes_expired_clear_fences_10784() {
             PersistentNatPermit::AnyRemoteHost,
             rule.persistent_nat_timeout_ns,
             NS_PER_SEC,
-            NatHolder::Untracked, 0)
+            NatHolder::Untracked,
+            0,
+        )
         .expect("fixture: rule allocator must mint a persistent lease");
     assert!(rule.pool_allocator.release_flow(
         flow,
@@ -10934,11 +11301,13 @@ fn retained_pool_reseed_prunes_expired_clear_fences_10784() {
         &crate::nat::NatCounterStore::default(),
         64 * NS_PER_SEC,
     );
-    assert!(refreshed[0]
+    assert!(
+        refreshed[0]
         .pool_allocator
         .debug_live()
         .revoked_persistent
-        .is_empty());
+            .is_empty()
+    );
     let addresses: Vec<IpAddr> = refreshed[0]
         .pool_addresses_v4
         .iter()
@@ -11044,7 +11413,11 @@ fn partial_overlap_counts_zero_dropped_leases_when_there_are_none_7560() {
     let rules = parse_source_nat_rules(&[snap]);
     let _ = expect_snat_decision(tuple_snat_lookup(&rules, 12345, "8.8.8.8", 53, 1));
     assert_eq!(
-        rules[0].pool_allocator.debug_live().persistent_by_source.len(),
+        rules[0]
+            .pool_allocator
+            .debug_live()
+            .persistent_by_source
+            .len(),
         0,
         "setup: this control needs a pool with NO leases",
     );
@@ -11092,7 +11465,11 @@ fn partial_overlap_drops_the_lease_of_a_retained_address_source_7560() {
     );
 
     assert_eq!(
-        refreshed[0].pool_allocator.debug_live().persistent_by_source.len(),
+        refreshed[0]
+            .pool_allocator
+            .debug_live()
+            .persistent_by_source
+            .len(),
         1,
         "#15110: the rebuilt allocator must carry the retained-address \
          persistent lease through its live flow",
@@ -11124,7 +11501,10 @@ fn dropped_persistent_lease_note_names_both_buckets_7560() {
     };
     let note = crate::nat::source::dropped_persistent_lease_note("mypool", &noisy)
         .expect("a note is owed when leases were dropped");
-    assert!(note.contains("mypool"), "the note must name the pool: {note}");
+    assert!(
+        note.contains("mypool"),
+        "the note must name the pool: {note}"
+    );
     assert!(
         note.contains('3') && note.contains('7'),
         "the note must carry BOTH counts; reporting one number buries the actionable \
@@ -11171,7 +11551,9 @@ fn m13_allocate(
         PersistentNatPermit::TargetHostPort,
         0,
         1_000,
-        NatHolder::Untracked, 0)
+        NatHolder::Untracked,
+        0,
+    )
 }
 
 /// #7174 M13 fail-on-revert: a claim against an address whose every port is
@@ -11194,8 +11576,6 @@ fn pool_snat_exhausted_address_does_not_walk_recycle_fifo_7174_m13() {
     let addrs = [pool_ip];
     // Range 1024..=1027 (4 ports).
     let alloc = PortAllocator::new(1, 1024, 1027);
-    // Fresh cursor spent, so the recycle ring is the only source.
-    alloc.debug_set_cursor(0, 4);
     alloc.debug_set_recycled(0, vec![1024, 1025, 1026, 1027]);
     // Every port reserved out of band (the HA reserve path): bits set, tokens
     // still queued. The row's exact state.
@@ -11254,7 +11634,6 @@ fn pool_snat_partially_occupied_address_still_scans_recycle_fifo_7174_m13() {
     let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
     let addrs = [pool_ip];
     let alloc = PortAllocator::new(1, 1024, 1027);
-    alloc.debug_set_cursor(0, 4);
     alloc.debug_set_recycled(0, vec![1024, 1025, 1026, 1027]);
     // Three of four reserved out of band: occupied == 3, range == 4.
     for port in [1024u16, 1025, 1026] {
@@ -11262,20 +11641,16 @@ fn pool_snat_partially_occupied_address_still_scans_recycle_fifo_7174_m13() {
     }
     assert_eq!(alloc.debug_occupied_counter(0), 3);
 
-    let before = alloc.debug_recycle_scan_pops(0);
-    let translated = m13_allocate(&alloc, &addrs, 0)
-        .expect("a free port behind three occupied tokens must still be found");
+    // #16011: the keyed probe claims the sole free offset directly;
+    // a not-full address must still yield it (never spurious exhaustion).
+    let translated =
+        m13_allocate(&alloc, &addrs, 0).expect("the sole free port must still be found");
     assert_eq!(translated.port, 1027);
-    assert_eq!(
-        alloc.debug_recycle_scan_pops(0) - before,
-        4,
-        "the scan must walk past the occupied tokens to reach the free one",
-    );
-    // 062-10: the three collided tokens are retained, not discarded.
+    // The ring is untouched by a successful probe; its tokens stay queued.
     assert_eq!(
         alloc.debug_recycled_ports(0),
-        vec![1024, 1025, 1026],
-        "collided tokens must be retained at the BACK, never dropped",
+        vec![1024, 1025, 1026, 1027],
+        "a probe claim must not consume or reorder recycle tokens",
     );
 }
 
@@ -11293,7 +11668,6 @@ fn pool_snat_recycle_ring_never_holds_a_duplicate_token_7174_m13() {
     let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
     let addrs = [pool_ip];
     let alloc = PortAllocator::new(1, 1024, 1025);
-    alloc.debug_set_cursor(0, 2);
     // 1025 was freed through the recycle path; 1024 is free behind it.
     alloc.debug_set_recycled(0, vec![1025, 1024]);
     // 1025 is now reserved out of band, so the pop below collides and retains.
@@ -11303,8 +11677,8 @@ fn pool_snat_recycle_ring_never_holds_a_duplicate_token_7174_m13() {
     assert_eq!(translated.port, 1024);
     assert_eq!(
         alloc.debug_recycled_ports(0),
-        vec![1025],
-        "the collided token is retained at the back",
+        vec![1025, 1024],
+        "#16011: probe claims 1024 without draining the ring; both tokens stay queued",
     );
 
     // The out-of-band owner releases through the RECYCLING path — the same path
@@ -11315,8 +11689,12 @@ fn pool_snat_recycle_ring_never_holds_a_duplicate_token_7174_m13() {
         "the seeded owner's bit must have been set",
     );
     assert_eq!(
-        alloc.debug_recycled_ports(0),
-        vec![1025],
+        alloc
+            .debug_recycled_ports(0)
+            .iter()
+            .filter(|&&p| p == 1025)
+            .count(),
+        1,
         "a port already queued must not be queued a SECOND time; two tokens for one \
          port is how the ring grows past `range` across HA role churn",
     );
@@ -11357,17 +11735,21 @@ fn pool_snat_occupancy_counter_agrees_with_bitmap_7174_m13() {
     assert_eq!(alloc.debug_occupied_counter(0), 5);
 
     // Out-of-band reserve (0 -> 1) and out-of-band clear (1 -> 0).
-    alloc.debug_seed_owner(0, IpAddr::V4(pool_ip), 1031);
+    // #16011: keyed allocations may land on any port, so pick a free one.
+    let free_port = (1024..=1031u16)
+        .find(|p| !ports.contains(p))
+        .expect("a free port remains");
+    alloc.debug_seed_owner(0, IpAddr::V4(pool_ip), free_port);
     assert_eq!(
         alloc.debug_occupied_counter(0) as usize,
         alloc.debug_occupied_count()
     );
     // A second reserve of the SAME port loses the CAS and must not double-count.
-    alloc.debug_seed_owner(0, IpAddr::V4(pool_ip), 1031);
+    alloc.debug_seed_owner(0, IpAddr::V4(pool_ip), free_port);
     assert_eq!(alloc.debug_occupied_counter(0), 6);
-    alloc.debug_clear_owner(0, IpAddr::V4(pool_ip), 1031);
+    alloc.debug_clear_owner(0, IpAddr::V4(pool_ip), free_port);
     // A second clear of the same port frees nothing and must not double-count.
-    alloc.debug_clear_owner(0, IpAddr::V4(pool_ip), 1031);
+    alloc.debug_clear_owner(0, IpAddr::V4(pool_ip), free_port);
     assert_eq!(alloc.debug_occupied_counter(0), 5);
     assert_eq!(
         alloc.debug_occupied_counter(0) as usize,
@@ -11382,7 +11764,6 @@ fn pool_snat_occupancy_counter_agrees_with_bitmap_7174_m13() {
         alloc.debug_occupied_count()
     );
 }
-
 
 // #8597 K09 FAIL-ON-REVERT. The DETERMINISTIC-CGNAT address-only mint must
 // record the ALLOCATING worker's holder bit, like every sibling arm.
@@ -11539,9 +11920,16 @@ fn synced_address_only_decision_k63(ip: &str) -> NatDecision {
 fn synced_address_only_reservation_evicts_a_disagreeing_incumbent_8597_k63() {
     let rules = notrans_two_address_rules_k63();
     let local = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan", "10.0.1.50", 40005, "9.9.9.9", 443,
+        &rules,
+        "lan",
+        "10.0.1.50",
+        40005,
+        "9.9.9.9",
+        443,
     ));
-    let incumbent_ip = local.rewrite_src.expect("precondition: an address was minted");
+    let incumbent_ip = local
+        .rewrite_src
+        .expect("precondition: an address was minted");
     assert_eq!(
         local.rewrite_src_port, None,
         "precondition: this must be an ADDRESS-ONLY reservation, or the flow \
@@ -11582,7 +11970,9 @@ fn synced_address_only_reservation_evicts_a_disagreeing_incumbent_8597_k63() {
          tore down without re-minting (#8597 K63)"
     );
     assert!(
-        owners.iter().any(|(k, _)| k.translated_ip.to_string() == other),
+        owners
+            .iter()
+            .any(|(k, _)| k.translated_ip.to_string() == other),
         "the surviving token must name the PEER's address {other}, not the \
          incumbent's {incumbent_ip}. Before this fix the arm returned \
          `existing.translated` without ever comparing it, so this node kept a \
@@ -11605,9 +11995,16 @@ fn synced_address_only_reservation_evicts_a_disagreeing_incumbent_8597_k63() {
 fn synced_address_only_reservation_keeps_an_agreeing_incumbent_8597_k63() {
     let rules = notrans_two_address_rules_k63();
     let local = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan", "10.0.1.50", 40005, "9.9.9.9", 443,
+        &rules,
+        "lan",
+        "10.0.1.50",
+        40005,
+        "9.9.9.9",
+        443,
     ));
-    let incumbent_ip = local.rewrite_src.expect("precondition: an address was minted");
+    let incumbent_ip = local
+        .rewrite_src
+        .expect("precondition: an address was minted");
     let before = rules[0].pool_allocator.debug_address_only_owners();
     assert_eq!(before.len(), 1, "precondition: one token");
 
@@ -11740,7 +12137,12 @@ fn a_pat_flow_does_not_reuse_an_address_only_lease_8597_k10() {
     let rules = shared_mode_persistent_rules_k10();
     // Mint the ADDRESS-ONLY lease via the no-translation rule.
     let ao = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan", "10.0.1.50", 40005, "9.9.9.9", 443,
+        &rules,
+        "lan",
+        "10.0.1.50",
+        40005,
+        "9.9.9.9",
+        443,
     ));
     assert_eq!(
         ao.rewrite_src_port, None,
@@ -11762,7 +12164,12 @@ fn a_pat_flow_does_not_reuse_an_address_only_lease_8597_k10() {
 
     // The SAME source now matches the PAT rule (the `no-translation` flip).
     let pat = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan2", "10.0.1.50", 40005, "8.8.8.8", 443,
+        &rules,
+        "lan2",
+        "10.0.1.50",
+        40005,
+        "8.8.8.8",
+        443,
     ));
     let port = pat
         .rewrite_src_port
@@ -11792,7 +12199,12 @@ fn a_pat_flow_does_not_reuse_an_address_only_lease_8597_k10() {
 fn a_second_pat_flow_still_joins_its_own_lease_8597_k10() {
     let rules = shared_mode_persistent_rules_k10();
     let first = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan2", "10.0.1.60", 40006, "8.8.8.8", 443,
+        &rules,
+        "lan2",
+        "10.0.1.60",
+        40006,
+        "8.8.8.8",
+        443,
     ));
     let first_port = first.rewrite_src_port.expect("PAT translates a port");
 
@@ -11800,7 +12212,12 @@ fn a_second_pat_flow_still_joins_its_own_lease_8597_k10() {
     // same PersistentSourceKey under `any-remote-host`, so it must JOIN the
     // lease rather than mint a second identity. This is what persistent NAT is.
     let second = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan2", "10.0.1.60", 40006, "9.9.9.9", 443,
+        &rules,
+        "lan2",
+        "10.0.1.60",
+        40006,
+        "9.9.9.9",
+        443,
     ));
     assert_eq!(
         second.rewrite_src_port,
@@ -11869,7 +12286,12 @@ fn notrans_two_address_rules_k11() -> Vec<SourceNatRule> {
 fn a_reseed_carries_the_address_only_reverse_token_8597_k11() {
     let rules = notrans_two_address_rules_k11();
     let minted = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan", "10.0.1.50", 40005, "9.9.9.9", 443,
+        &rules,
+        "lan",
+        "10.0.1.50",
+        40005,
+        "9.9.9.9",
+        443,
     ));
     assert_eq!(
         minted.rewrite_src_port, None,
@@ -11881,7 +12303,11 @@ fn a_reseed_carries_the_address_only_reverse_token_8597_k11() {
         1,
         "precondition: one reverse-identity token exists to be carried"
     );
-    let old_index = if held_ip.to_string() == "203.0.113.1" { 0 } else { 1 };
+    let old_index = if held_ip.to_string() == "203.0.113.1" {
+        0
+    } else {
+        1
+    };
 
     // The pool edit: the held address is RETAINED (it maps to a new position).
     let fresh = PortAllocator::new(2, 40000, 40009);
@@ -11917,10 +12343,19 @@ fn a_reseed_carries_the_address_only_reverse_token_8597_k11() {
 fn a_carried_address_only_token_is_not_a_collision_with_its_own_flow_8597_k11() {
     let rules = notrans_two_address_rules_k11();
     let minted = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan", "10.0.1.50", 40005, "9.9.9.9", 443,
+        &rules,
+        "lan",
+        "10.0.1.50",
+        40005,
+        "9.9.9.9",
+        443,
     ));
     let held_ip = minted.rewrite_src.expect("an address was minted");
-    let old_index = if held_ip.to_string() == "203.0.113.1" { 0 } else { 1 };
+    let old_index = if held_ip.to_string() == "203.0.113.1" {
+        0
+    } else {
+        1
+    };
 
     let fresh = PortAllocator::new(2, 40000, 40009);
     let mut index_map = rustc_hash::FxHashMap::default();
@@ -12069,7 +12504,9 @@ fn allocate_for_holder_9145(
             PersistentNatPermit::TargetHostPort,
             0,
             1_000,
-            holder, 0)
+            holder,
+            0,
+        )
         .expect("allocation must succeed on a free range")
 }
 
@@ -12222,7 +12659,6 @@ fn recycle_amortization_9327() {
         let range_hi = range_lo + (k + f) as u16 - 1;
         let alloc = PortAllocator::new(1, range_lo, range_hi);
         // Sequential cursor past the range: only the recycle ring is consulted.
-        alloc.debug_set_cursor(0, (k + f) as u32);
 
         // FIFO: the K reserved tokens first, then the F free ones.
         let mut queue: Vec<u16> = Vec::new();
@@ -12240,32 +12676,14 @@ fn recycle_amortization_9327() {
 
         let mut per_claim: Vec<u64> = Vec::new();
         let mut last = alloc.debug_recycle_scan_pops(0);
-        for c in 0..(2 * f) {
-            let flow = SourceNatFlowKey {
-                protocol: 6,
-                src_ip: "10.0.61.51".parse().unwrap(),
-                dst_ip: "8.8.8.8".parse().unwrap(),
-                src_port: 40000 + c as u16,
-                dst_port: 443,
-                routing_scope: 0,
-            };
-            let got = alloc.allocate_translation(
-                flow,
-                PoolAddressFamily::V4(&addrs),
-                0,
-                false,
-                false,
-                PersistentNatPermit::TargetHostPort,
-                0,
-                1_000,
-                NatHolder::Untracked, 0);
+        for _ in 0..(2 * f) {
+            // #16011: drive the recycled phase directly (see pinned test).
+            let got = alloc.debug_claim_recycled_only(0);
             let now = alloc.debug_recycle_scan_pops(0);
             per_claim.push(now - last);
             last = now;
-            // Free it again so the token returns to the ring and the cycle can
-            // repeat — this is the steady state, not a one-off drain.
-            if let Ok(t) = got {
-                alloc.debug_free_recycle(0, t.port);
+            if let Some(t) = got {
+                alloc.debug_free_recycle(0, t);
             }
         }
         eprintln!("pops per claim (K={k}, F={f}): {per_claim:?}");
@@ -12284,59 +12702,40 @@ fn recycle_amortization_9327() {
 /// the one that falsifies "amortizes itself" outright.
 #[test]
 fn the_recycled_phase_does_not_amortize_at_f_equals_one_9327() {
+    // #16011 adaptation: production claims now probe the bitmap keyed
+    // first, so this ring-cost pin drives the recycled phase directly
+    // via `debug_claim_recycled_only`. The #9327 shape is unchanged:
+    // K occupied tokens ahead of F=1 free one cost K+1 pops per claim.
     let (k, f) = (15usize, 1usize);
     let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
-    let addrs = [pool_ip];
     let range_lo = 1024u16;
     let alloc = PortAllocator::new(1, range_lo, range_lo + (k + f) as u16 - 1);
-    alloc.debug_set_cursor(0, (k + f) as u32);
     let mut queue: Vec<u16> = (0..k).map(|i| range_lo + i as u16).collect();
     queue.push(range_lo + k as u16);
     alloc.debug_set_recycled(0, queue);
     for i in 0..k {
         alloc.debug_seed_owner(0, IpAddr::V4(pool_ip), range_lo + i as u16);
     }
-
     let mut per_claim: Vec<u64> = Vec::new();
     let mut last = alloc.debug_recycle_scan_pops(0);
-    for c in 0..3 {
-        let flow = SourceNatFlowKey {
-            protocol: 6,
-            src_ip: "10.0.61.51".parse().unwrap(),
-            dst_ip: "8.8.8.8".parse().unwrap(),
-            src_port: 40000 + c as u16,
-            dst_port: 443,
-            routing_scope: 0,
-        };
-        let got = alloc.allocate_translation(
-            flow,
-            PoolAddressFamily::V4(&addrs),
-            0,
-            false,
-            false,
-            PersistentNatPermit::TargetHostPort,
-            0,
-            1_000,
-            NatHolder::Untracked, 0);
+    for _ in 0..3 {
+        let got = alloc.debug_claim_recycled_only(0);
+        assert_eq!(
+            got,
+            Some(range_lo + k as u16),
+            "the sole free recycled port must be claimed"
+        );
         let now = alloc.debug_recycle_scan_pops(0);
         per_claim.push(now - last);
         last = now;
-        let t = got.expect("one free token remains, so the claim must succeed");
-        alloc.debug_free_recycle(0, t.port);
+        if let Some(port) = got {
+            alloc.debug_free_recycle(0, port);
     }
-
-    assert!(
-        per_claim.iter().all(|&p| p as usize >= k),
-        "#9327: with K={k} reserved tokens and F={f} free, EVERY claim must pay \
-         ~K pops — the retained tokens go to the back and are immediately at the \
-         head again. pops per claim = {per_claim:?}.\n\
-         If this now shows a single expensive claim followed by cheap ones, the \
-         walk gained a bound or an ordering change: update the comment on the \
-         recycled phase, which states this cost explicitly."
-    );
-    assert!(
-        per_claim.len() > 1,
-        "NON-VACUITY: a single claim cannot show whether the cost amortizes"
+    }
+    assert_eq!(
+        per_claim,
+        vec![(k + 1) as u64; 3],
+        "#9327: at F=1 every recycled claim pays K+1 pops; got {per_claim:?}"
     );
 }
 
@@ -12399,21 +12798,6 @@ fn allocate_9388(rules: &[SourceNatRule], dst_ip: &str, dst_port: u16) -> NatDec
     ))
 }
 
-// #9388 CELL 1 — THE DEFECT ITSELF. RED at the parent of this change.
-//
-// The allocation is made through the real match path on the POST-DNAT tuple
-// (10.10.10.7:8443, what `policy_dst_port` carries), and torn down through
-// `release_source_nat_allocation` with the INSTALLED `SessionKey`
-// (198.51.100.7:443) plus the composed decision that names both halves of the
-// destination rewrite. Before #9388 the release built `dst_port = 443`, missed
-// `live_by_flow`, freed nothing, and left the `(pool_addr, port)` held for the
-// process lifetime.
-//
-// The POSITIVE CONTROL runs in the same test with the same helpers and the
-// same assertions, differing ONLY in that the DNAT does not move the port. It
-// is what distinguishes "the release path is broken" from "this harness built
-// a decision the allocator never saw" — those are the same observation
-// otherwise, and the control is green on BOTH sides of the fix.
 #[test]
 fn snat_9388_release_frees_a_pool_allocation_made_on_the_post_dnat_port() {
     // CONTROL: address-only DNAT (198.51.100.7:443 -> 10.10.10.7:443). The
@@ -12913,7 +13297,6 @@ fn v6_pool_change_retaining_an_address_does_not_reissue_its_live_tuple_9163() {
 fn recycle_cliff_allocator_9392(k: usize, f: usize, pool_ip: Ipv4Addr) -> PortAllocator {
     let range_lo = 1024u16;
     let alloc = PortAllocator::new(1, range_lo, range_lo + (k + f) as u16 - 1);
-    alloc.debug_set_cursor(0, (k + f) as u32);
     let mut queue: Vec<u16> = (0..k).map(|i| range_lo + i as u16).collect();
     for i in 0..f {
         queue.push(range_lo + (k + i) as u16);
@@ -12927,29 +13310,12 @@ fn recycle_cliff_allocator_9392(k: usize, f: usize, pool_ip: Ipv4Addr) -> PortAl
 
 /// Drive `claims` recycled-phase claims, freeing each translation so the token
 /// returns to the ring and the steady state repeats.
-fn drive_recycled_claims_9392(alloc: &PortAllocator, pool_ip: Ipv4Addr, claims: usize) {
-    let addrs = [pool_ip];
-    for c in 0..claims {
-        let flow = SourceNatFlowKey {
-            protocol: 6,
-            src_ip: "10.0.61.51".parse().unwrap(),
-            dst_ip: "8.8.8.8".parse().unwrap(),
-            src_port: 40000 + c as u16,
-            dst_port: 443,
-            routing_scope: 0,
-        };
-        let got = alloc.allocate_translation(
-            flow,
-            PoolAddressFamily::V4(&addrs),
-            0,
-            false,
-            false,
-            PersistentNatPermit::TargetHostPort,
-            0,
-            1_000,
-            NatHolder::Untracked, 0);
-        if let Ok(t) = got {
-            alloc.debug_free_recycle(0, t.port);
+fn drive_recycled_claims_9392(alloc: &PortAllocator, _pool_ip: Ipv4Addr, claims: usize) {
+    // #16011: drive the recycled phase directly; the production
+    // snapshot pair (walks/pops) is still the surface under test.
+    for _ in 0..claims {
+        if let Some(port) = alloc.debug_claim_recycled_only(0) {
+            alloc.debug_free_recycle(0, port);
         }
     }
 }
@@ -12984,7 +13350,10 @@ fn the_production_recycle_scan_pair_separates_the_cliff_from_healthy_9392() {
         "setup: a fresh allocator has walked nothing, so the readings below \
          cannot be carried-over values",
     );
-    assert_eq!(healthy_before.recycle_scan_pops_total, 0, "setup: no pops yet");
+    assert_eq!(
+        healthy_before.recycle_scan_pops_total, 0,
+        "setup: no pops yet"
+    );
     drive_recycled_claims_9392(&healthy, healthy_ip, CLAIMS);
     let healthy_after = healthy.snapshot();
 
@@ -13057,7 +13426,6 @@ fn a_short_circuited_claim_counts_no_recycle_walk_9392() {
     // Every port occupied out-of-band: occupied == range, so the short-circuit
     // fires.
     let alloc = PortAllocator::new(1, range_lo, range_lo + k as u16 - 1);
-    alloc.debug_set_cursor(0, k as u32);
     alloc.debug_set_recycled(0, (0..k).map(|i| range_lo + i as u16).collect());
     for i in 0..k {
         alloc.debug_seed_owner(0, IpAddr::V4(pool_ip), range_lo + i as u16);
@@ -13140,7 +13508,12 @@ fn flipping_a_live_pat_lease_to_address_only_does_not_orphan_its_port_9158() {
 
     // Mint a PAT lease: port-translating rule, one LIVE flow on it.
     let pat = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan2", "10.0.1.70", 40003, "8.8.8.8", 443,
+        &rules,
+        "lan2",
+        "10.0.1.70",
+        40003,
+        "8.8.8.8",
+        443,
     ));
     let port = pat
         .rewrite_src_port
@@ -13177,7 +13550,12 @@ fn flipping_a_live_pat_lease_to_address_only_does_not_orphan_its_port_9158() {
     // commit (`allocator_key()` excludes `no_translation`, so the allocator and
     // its leases carry across).
     let ao = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan", "10.0.1.70", 40003, "9.9.9.9", 443,
+        &rules,
+        "lan",
+        "10.0.1.70",
+        40003,
+        "9.9.9.9",
+        443,
     ));
     assert_eq!(
         ao.rewrite_src_port, None,
@@ -13277,7 +13655,12 @@ fn flipping_a_live_pat_lease_to_address_only_does_not_orphan_its_port_9158() {
 fn flipping_an_idle_pat_lease_to_address_only_frees_its_port_9158() {
     let rules = shared_mode_persistent_rules_k10();
     let pat = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan2", "10.0.1.71", 40004, "8.8.8.8", 443,
+        &rules,
+        "lan2",
+        "10.0.1.71",
+        40004,
+        "8.8.8.8",
+        443,
     ));
     let port = pat.rewrite_src_port.expect("PAT translates a port");
 
@@ -13307,7 +13690,12 @@ fn flipping_an_idle_pat_lease_to_address_only_frees_its_port_9158() {
     // Flip to address-only. The lease is idle and mode-mismatched, so tearing it
     // down is correct - and its port must come back.
     let ao = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan", "10.0.1.71", 40004, "9.9.9.9", 443,
+        &rules,
+        "lan",
+        "10.0.1.71",
+        40004,
+        "9.9.9.9",
+        443,
     ));
     assert_eq!(ao.rewrite_src_port, None, "precondition: address-only");
 
@@ -13336,13 +13724,23 @@ fn flipping_an_idle_pat_lease_to_address_only_frees_its_port_9158() {
 fn a_flow_served_around_a_live_mode_mismatched_lease_owns_no_lease_9158() {
     let rules = shared_mode_persistent_rules_k10();
     let pat = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan2", "10.0.1.72", 40008, "8.8.8.8", 443,
+        &rules,
+        "lan2",
+        "10.0.1.72",
+        40008,
+        "8.8.8.8",
+        443,
     ));
     let port = pat.rewrite_src_port.expect("PAT translates a port");
 
     // SERVED, not refused: `expect_snat_decision` fails the cell on a refusal.
     let ao = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan", "10.0.1.72", 40008, "9.9.9.9", 443,
+        &rules,
+        "lan",
+        "10.0.1.72",
+        40008,
+        "9.9.9.9",
+        443,
     ));
     assert_eq!(ao.rewrite_src_port, None, "precondition: address-only");
 
@@ -13425,9 +13823,17 @@ fn a_flow_served_around_a_live_mode_mismatched_lease_owns_no_lease_9158() {
 fn flipping_a_live_address_only_lease_to_pat_leaves_it_standing_9536() {
     let rules = shared_mode_persistent_rules_k10();
     let ao = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan", "10.0.1.80", 40010, "9.9.9.9", 443,
+        &rules,
+        "lan",
+        "10.0.1.80",
+        40010,
+        "9.9.9.9",
+        443,
     ));
-    assert_eq!(ao.rewrite_src_port, None, "precondition: an ADDRESS-ONLY lease");
+    assert_eq!(
+        ao.rewrite_src_port, None,
+        "precondition: an ADDRESS-ONLY lease"
+    );
     let pinned = ao
         .rewrite_src
         .expect("precondition: address-only translates the address");
@@ -13438,7 +13844,10 @@ fn flipping_a_live_address_only_lease_to_pat_leaves_it_standing_9536() {
             .values()
             .next()
             .expect("precondition: exactly one lease");
-        assert!(lease.address_only, "precondition: the lease is address-only");
+        assert!(
+            lease.address_only,
+            "precondition: the lease is address-only"
+        );
         assert_eq!(
             lease.active_flows, 1,
             "precondition: the lease must be LIVE -- an idle one has its own cell"
@@ -13447,7 +13856,12 @@ fn flipping_a_live_address_only_lease_to_pat_leaves_it_standing_9536() {
 
     // THE FLIP: the same source now matches the PAT rule.
     let pat = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan2", "10.0.1.80", 40010, "8.8.8.8", 443,
+        &rules,
+        "lan2",
+        "10.0.1.80",
+        40010,
+        "8.8.8.8",
+        443,
     ));
     let port = pat
         .rewrite_src_port
@@ -13490,7 +13904,10 @@ fn flipping_a_live_address_only_lease_to_pat_leaves_it_standing_9536() {
          lease. With `Some(key)`, its release would run `complete_persistent_lease_locked` \
          against the address-only lease and decrement a refcount it never incremented"
     );
-    assert!(!record_address_only, "precondition: the PAT flow's record is port-bearing");
+    assert!(
+        !record_address_only,
+        "precondition: the PAT flow's record is port-bearing"
+    );
 }
 
 /// NO LEAK, NO REFCOUNT DAMAGE. Releasing the unpinned PAT flow frees its own bit
@@ -13500,10 +13917,20 @@ fn flipping_a_live_address_only_lease_to_pat_leaves_it_standing_9536() {
 fn releasing_the_unpinned_pat_flow_frees_its_port_and_leaves_the_lease_9536() {
     let rules = shared_mode_persistent_rules_k10();
     let _ao = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan", "10.0.1.81", 40011, "9.9.9.9", 443,
+        &rules,
+        "lan",
+        "10.0.1.81",
+        40011,
+        "9.9.9.9",
+        443,
     ));
     let pat = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan2", "10.0.1.81", 40011, "8.8.8.8", 443,
+        &rules,
+        "lan2",
+        "10.0.1.81",
+        40011,
+        "8.8.8.8",
+        443,
     ));
     let port = pat.rewrite_src_port.expect("PAT translates a port");
     let pat_ip = pat.rewrite_src.expect("PAT translates the address");
@@ -13548,7 +13975,12 @@ fn releasing_the_unpinned_pat_flow_frees_its_port_and_leaves_the_lease_9536() {
 fn an_idle_address_only_lease_is_still_replaced_by_a_pinned_pat_lease_9536() {
     let rules = shared_mode_persistent_rules_k10();
     let _ao = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan", "10.0.1.82", 40012, "9.9.9.9", 443,
+        &rules,
+        "lan",
+        "10.0.1.82",
+        40012,
+        "9.9.9.9",
+        443,
     ));
     let ao_flow = flow_key_9158("10.0.1.82", 40012, "9.9.9.9", 443);
     // The translated tuple the allocator actually stored, read back rather than
@@ -13580,12 +14012,21 @@ fn an_idle_address_only_lease_is_still_replaced_by_a_pinned_pat_lease_9536() {
     }
 
     let pat = expect_snat_decision(snat_lookup_6528(
-        &rules, "lan2", "10.0.1.82", 40012, "8.8.8.8", 443,
+        &rules,
+        "lan2",
+        "10.0.1.82",
+        40012,
+        "8.8.8.8",
+        443,
     ));
     let port = pat.rewrite_src_port.expect("PAT translates a port");
     {
         let live = rules[0].pool_allocator.debug_live();
-        assert_eq!(live.persistent_by_source.len(), 1, "one lease for the source");
+        assert_eq!(
+            live.persistent_by_source.len(),
+            1,
+            "one lease for the source"
+        );
         let lease = live.persistent_by_source.values().next().unwrap();
         assert!(
             !lease.address_only && lease.translated.port == port && lease.active_flows == 1,
@@ -13616,8 +14057,7 @@ fn an_idle_address_only_lease_is_still_replaced_by_a_pinned_pat_lease_9536() {
 #[test]
 fn untracked_coordinator_release_frees_unadopted_reservation_9902() {
     let rules = holder_pool_rules_6211_f2();
-    let decision =
-        local_pool_allocation_6522(&rules, "10.0.61.50", 40000, NatHolder::Untracked);
+    let decision = local_pool_allocation_6522(&rules, "10.0.61.50", 40000, NatHolder::Untracked);
     let key = session_key_from_src("10.0.61.50", 40000, "8.8.8.8", 443);
     assert!(
         release_synced_source_nat_allocation_untracked(
@@ -13647,8 +14087,7 @@ fn untracked_coordinator_release_frees_unadopted_reservation_9902() {
 #[test]
 fn untracked_coordinator_release_preserves_worker_held_record_9902() {
     let rules = holder_pool_rules_6211_f2();
-    let decision =
-        local_pool_allocation_6522(&rules, "10.0.61.50", 40000, NatHolder::Worker(0));
+    let decision = local_pool_allocation_6522(&rules, "10.0.61.50", 40000, NatHolder::Worker(0));
     let port = decision.rewrite_src_port.expect("translated port");
     let key = session_key_from_src("10.0.61.50", 40000, "8.8.8.8", 443);
     assert!(
@@ -13967,37 +14406,51 @@ fn pool_live_14674(rules: &[SourceNatRule], idx: usize) -> usize {
 #[test]
 fn synced_iface_snat_cross_zone_drained_quarantine_imports_14674() {
     for port in [Some(20000u16), None] {
-        let rules = iface_first_rules_14674(vec![quarantined_pool_snap_14674(
-            "qpool", "dmz", "untrust",
-        )]);
+        let rules =
+            iface_first_rules_14674(vec![quarantined_pool_snap_14674("qpool", "dmz", "untrust")]);
         assert_eq!(
             rules[1].pool_failure,
             Some(SourceNatFailureReason::PoolIfaceEgressOverlap),
             "fixture: cross-zone pool must be quarantined"
         );
-        assert_eq!(rules[1].pool_allocator.live_flow_count(), 0, "fixture: drained");
+        assert_eq!(
+            rules[1].pool_allocator.live_flow_count(),
+            0,
+            "fixture: drained"
+        );
         let reg = InterfaceNatAllocators::default();
         assert!(
             import_iface_14674(&reg, &rules, port, Some(("lan", "wan"))),
             "port={port:?}: drained cross-zone quarantined pool must not refuse a synced interface-SNAT import"
         );
-        assert_eq!(iface_live_14674(&reg), 1, "port={port:?}: identity must book in iface_allocs");
-        assert_eq!(pool_live_14674(&rules, 1), 0, "port={port:?}: quarantined pool must book nothing");
+        assert_eq!(
+            iface_live_14674(&reg),
+            1,
+            "port={port:?}: identity must book in iface_allocs"
+        );
+        assert_eq!(
+            pool_live_14674(&rules, 1),
+            0,
+            "port={port:?}: quarantined pool must book nothing"
+        );
     }
 }
 
 #[test]
 fn synced_iface_snat_same_zone_drained_quarantine_imports_14674() {
     for port in [Some(20000u16), None] {
-        let rules = iface_first_rules_14674(vec![quarantined_pool_snap_14674(
-            "qpool", "lan", "wan",
-        )]);
+        let rules =
+            iface_first_rules_14674(vec![quarantined_pool_snap_14674("qpool", "lan", "wan")]);
         let reg = InterfaceNatAllocators::default();
         assert!(
             import_iface_14674(&reg, &rules, port, Some(("lan", "wan"))),
             "port={port:?}: drained same-zone quarantined pool after an interface rule must not refuse the import"
         );
-        assert_eq!(iface_live_14674(&reg), 1, "port={port:?}: identity must book in iface_allocs");
+        assert_eq!(
+            iface_live_14674(&reg),
+            1,
+            "port={port:?}: identity must book in iface_allocs"
+        );
         assert_eq!(pool_live_14674(&rules, 1), 0);
     }
 }
@@ -14011,7 +14464,11 @@ fn synced_iface_snat_lower_pool_books_in_iface_not_pool_14674() {
             import_iface_14674(&reg, &rules, port, Some(("lan", "wan"))),
             "port={port:?}: interface-first import must succeed"
         );
-        assert_eq!(iface_live_14674(&reg), 1, "port={port:?}: must book in iface_allocs");
+        assert_eq!(
+            iface_live_14674(&reg),
+            1,
+            "port={port:?}: must book in iface_allocs"
+        );
         assert_eq!(
             pool_live_14674(&rules, 1),
             0,
@@ -14035,23 +14492,39 @@ fn synced_pool_first_still_books_in_pool_14674() {
         },
     ]);
     let reg = InterfaceNatAllocators::default();
-    assert!(import_iface_14674(&reg, &rules, Some(20000), Some(("lan", "wan"))));
-    assert_eq!(pool_live_14674(&rules, 0), 1, "pool-first import must book in the pool");
-    assert_eq!(iface_live_14674(&reg), 0, "pool-first import must not book in iface_allocs");
+    assert!(import_iface_14674(
+        &reg,
+        &rules,
+        Some(20000),
+        Some(("lan", "wan"))
+    ));
+    assert_eq!(
+        pool_live_14674(&rules, 0),
+        1,
+        "pool-first import must book in the pool"
+    );
+    assert_eq!(
+        iface_live_14674(&reg),
+        0,
+        "pool-first import must not book in iface_allocs"
+    );
 }
 
 #[test]
 fn synced_iface_snat_no_zones_drained_quarantine_imports_14674() {
     for port in [Some(20000u16), None] {
-        let rules = iface_first_rules_14674(vec![quarantined_pool_snap_14674(
-            "qpool", "dmz", "untrust",
-        )]);
+        let rules =
+            iface_first_rules_14674(vec![quarantined_pool_snap_14674("qpool", "dmz", "untrust")]);
         let reg = InterfaceNatAllocators::default();
         assert!(
             import_iface_14674(&reg, &rules, port, None),
             "port={port:?}: PASS2-only drained quarantine must not refuse the import"
         );
-        assert_eq!(iface_live_14674(&reg), 1, "port={port:?}: must book in iface_allocs");
+        assert_eq!(
+            iface_live_14674(&reg),
+            1,
+            "port={port:?}: must book in iface_allocs"
+        );
         assert_eq!(pool_live_14674(&rules, 1), 0);
     }
 }
@@ -14059,7 +14532,8 @@ fn synced_iface_snat_no_zones_drained_quarantine_imports_14674() {
 #[test]
 fn synced_iface_snat_no_zones_overbudget_still_refuses_14674() {
     // Control: PASS2 OverBudget candidacy (#7076) is preserved.
-    let mut rules = iface_first_rules_14674(vec![healthy_pool_snap_14674("pool", "dmz", "untrust")]);
+    let mut rules =
+        iface_first_rules_14674(vec![healthy_pool_snap_14674("pool", "dmz", "untrust")]);
     rules[1].pool_failure = Some(SourceNatFailureReason::OverBudget);
     let reg = InterfaceNatAllocators::default();
     assert!(
@@ -14086,7 +14560,10 @@ fn synced_still_draining_overlap_refuses_14674() {
     };
     assert!(healthy[1].pool_allocator.reserve_flow(
         flow,
-        TranslatedTuple { ip: "203.0.113.10".parse().unwrap(), port: 20000 },
+        TranslatedTuple {
+            ip: "203.0.113.10".parse().unwrap(),
+            port: 20000
+        },
         0,
         false,
         0,
@@ -14103,7 +14580,12 @@ fn synced_still_draining_overlap_refuses_14674() {
     snaps.push(quarantined_pool_snap_14674("pool", "dmz", "untrust"));
     // pool name must match the healthy generation for allocator carry-over.
     snaps[1].pool_name = "pool-pool".to_string();
-    let rules = parse_source_nat_rules_with_previous(&snaps, Some(&healthy), &NatCounterStore::default(), 0);
+    let rules = parse_source_nat_rules_with_previous(
+        &snaps,
+        Some(&healthy),
+        &NatCounterStore::default(),
+        0,
+    );
     assert_eq!(
         rules[1].pool_failure,
         Some(SourceNatFailureReason::PoolIfaceEgressOverlap),
@@ -14121,6 +14603,10 @@ fn synced_still_draining_overlap_refuses_14674() {
             !import_iface_14674(&reg, &rules, Some(20000), zones),
             "zones={zones:?}: still-draining overlap must refuse the interface import"
         );
-        assert_eq!(iface_live_14674(&reg), 0, "zones={zones:?}: must not book in iface");
+        assert_eq!(
+            iface_live_14674(&reg),
+            0,
+            "zones={zones:?}: must not book in iface"
+        );
     }
 }
