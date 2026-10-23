@@ -465,3 +465,49 @@ fn deterministic_v6_active_bib_not_in_expiry_index_15948() {
     );
     let _ = PersistentNatPermit::AnyRemoteHost;
 }
+
+/// #15956 fold: displaced restore must respect the tracked-flow
+/// cap when the incumbent slot is ABSENT (sole-holder rollback
+/// already unlinked it). Pre-fold the tail inserted
+/// unconditionally, pushing the count past `max_tracked_flows`.
+#[test]
+fn restore_displaced_refuses_at_cap_15956() {
+    // 10 ports -> max_tracked_flows == 10 (capacity = ports x
+    // addresses, capped by MAX_SOURCE_NAT_POOL_TRACKED_FLOWS).
+    let alloc = PortAllocator::new(1, 1024, 1033);
+    let flow = v4_flow(40000);
+    let t1 = TranslatedTuple { ip: IpAddr::V4(POOL), port: 1024 };
+    let t2 = TranslatedTuple { ip: IpAddr::V4(POOL), port: 1025 };
+    assert!(alloc.reserve_flow(flow, t1, 0, false, 1_000, NatHolder::Untracked));
+    let mut snapshot = None;
+    assert!(alloc.reserve_flow_maybe_persistent(
+        flow, t2, 0, false, 2_000, NatHolder::Untracked, None, true, &mut snapshot,
+    ));
+    let snapshot = snapshot.expect("capture must produce a snapshot");
+    assert!(alloc.rollback_flow(flow, t2, 3_000, NatHolder::Untracked));
+    assert_eq!(alloc.live_flow_count(), 0);
+    // Fill to the cap with ADDRESS-ONLY records: each consumes a
+    // tracked-flow slot but no bitmap bit, so T1's port (1024)
+    // stays free for the restore's bitmap precheck and the CAP
+    // is provably the refusing check.
+    for i in 0..10u16 {
+        let f = v4_flow(41000 + i);
+        alloc
+            .reserve_address_only(f, IpAddr::V4(POOL), 0, NatHolder::Untracked)
+            .expect("address-only fill must succeed");
+    }
+    assert_eq!(alloc.live_flow_count(), 10);
+    assert!(
+        !snapshot.restore_displaced(t2, 4_000),
+        "restore of an absent incumbent at cap must refuse, not overshoot max_tracked_flows"
+    );
+    assert_eq!(alloc.live_flow_count(), 10, "refusal must not change the tracked count");
+    assert_eq!(alloc.debug_live_flow_translated(&flow), None);
+    // Free one slot: the same restore now fits exactly.
+    let f0 = v4_flow(41000);
+    let t0 = TranslatedTuple { ip: IpAddr::V4(POOL), port: 41000 };
+    assert!(alloc.release_flow(f0, t0, 5_000, NatHolder::Untracked));
+    assert!(snapshot.restore_displaced(t2, 6_000), "restore fits once a slot frees");
+    assert_eq!(alloc.debug_live_flow_translated(&flow), Some(t1));
+    assert_eq!(alloc.live_flow_count(), 10);
+}

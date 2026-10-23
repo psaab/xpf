@@ -337,3 +337,102 @@ fn cross_shard_cap_is_exact_15956() {
     allocate(&alloc, &addrs, 40010, 5_000);
     assert_eq!(alloc.live_flow_count(), 4);
 }
+
+/// #15956 fold: retire_worker must COMPLETE the persistent lease
+/// of a last-holder flow it unlinks, exactly as release_flow does.
+/// Before the fold it only unlinked the record: the lease kept
+/// `active_flows == 1`, never entered the idle-expiry index, and
+/// no GC path could reclaim it (or its port).
+#[test]
+fn retire_worker_completes_persistent_lease_15956() {
+    let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+    let addrs = [pool_ip];
+    let alloc = PortAllocator::new(1, 1024, 65535);
+    let flow = pool_flow(41000);
+    let translated = alloc
+        .allocate_translation(
+            flow,
+            PoolAddressFamily::V4(&addrs),
+            0,
+            false,
+            true,
+            PersistentNatPermit::TargetHostPort,
+            60_000_000_000,
+            1_000,
+            crate::nat::NatHolder::Worker(0),
+            0,
+        )
+        .expect("persistent allocation must succeed");
+    let before = alloc
+        .debug_persistent_lease_for_flow(&flow, PersistentNatPermit::TargetHostPort)
+        .expect("lease must exist while the flow is live");
+    assert_eq!(before.active_flows, 1, "fixture: lease must start with one active flow");
+    assert_eq!(
+        alloc.retire_worker(0, 2_000),
+        1,
+        "retiring the sole holder must free exactly the one record"
+    );
+    assert_eq!(alloc.live_flow_count(), 0, "the retired flow's record must be gone");
+    let after = alloc
+        .debug_persistent_lease_for_flow(&flow, PersistentNatPermit::TargetHostPort)
+        .expect("the idle lease record itself survives completion");
+    assert_eq!(
+        after.active_flows, 0,
+        "retire must complete the lease (active_flows 1 -> 0); without completion the lease is never idle and no GC path can reclaim it"
+    );
+    assert_eq!(after.completed_flows, before.completed_flows + 1);
+    assert!(
+        alloc.debug_is_port_occupied(0, translated.port),
+        "the completed idle lease keeps its port bit until expiry — completion reclaims via the expiry index, not by freeing the bit here"
+    );
+}
+
+/// #15956 fold (narrowed claim): the non-persistent admission
+/// fast path is shard + SHARED `live` read — it must complete
+/// while another thread holds the `live` READ guard (readers are
+/// concurrent under the RwLock), which the pre-fold Mutex design
+/// could not do. The write guard is still taken, briefly and
+/// only, by lease-coupled/pressure paths and the try-only PAT
+/// publish; an allocation that falls into those may wait for a
+/// writer, bounded by that writer's critical section.
+#[test]
+fn new_flow_allocation_completes_under_held_live_read_15956() {
+    let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+    let addrs = [pool_ip];
+    let alloc = Arc::new(PortAllocator::new(1, 1024, 65535));
+    let guard = alloc.debug_hold_live_read();
+    let done = Arc::new(AtomicBool::new(false));
+    let worker = {
+        let alloc = Arc::clone(&alloc);
+        let done = Arc::clone(&done);
+        std::thread::spawn(move || {
+            let addrs2 = [pool_ip];
+            alloc
+                .allocate_translation(
+                    pool_flow(42000),
+                    PoolAddressFamily::V4(&addrs2),
+                    0,
+                    false,
+                    false,
+                    PersistentNatPermit::TargetHostPort,
+                    0,
+                    2_000,
+                    crate::nat::NatHolder::Untracked,
+                    0,
+                )
+                .expect("new-flow allocation must succeed under held live read guard");
+            done.store(true, Ordering::SeqCst);
+        })
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !done.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(
+        done.load(Ordering::SeqCst),
+        "new-flow allocation blocked while the live READ lock was held — admission still serializes on the retained state lock (#15956 fold)"
+    );
+    drop(guard);
+    worker.join().expect("worker must not panic");
+    assert_eq!(alloc.live_flow_count(), 1);
+}

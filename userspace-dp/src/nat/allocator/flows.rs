@@ -13,13 +13,19 @@
 //! write lock, so the `>= max_tracked_flows` check under that lock
 //! never overshoots and never falsely exhausts (#4676 F4).
 //! Holder-mask mutation stays under the shard write lock.
-//! Lock order is UNIFORM: `live` THEN shard, whenever both are
-//! needed. std Mutex is not reentrant, so a shard guard must
-//! never be re-acquired for the same flow while one is held, and
-//! a helper that inserts/removes under the shard must be given
-//! the held guard (the `*_in_shard` forms), never let to lock
-//! again. Loaders/checks that hold no shard (cap `len()`) are
-//! atomic reads and take no lock.
+//! Lock order: the retained `live` mutex (`RwLock`) is only ever
+//! taken BEFORE a shard, never while holding one, and writers
+//! hold the one shard for their flow across the whole admission
+//! (reuse check, cap check, wire-identity/owner publish, insert)
+//! so a same-flow race cannot slip between check and insert.
+//! std Mutex is not reentrant, so a shard guard must never be
+//! re-acquired for the same flow while one is held, and a helper
+//! that inserts/removes under the shard must be given the held
+//! guard (the `*_in_shard` forms), never let to lock again.
+//! Read-only `live` consumers (notably the non-persistent
+//! new-flow admission check) take the `RwLock` read guard, so
+//! distinct new flows proceed concurrently; only lease/index
+//! writers serialize on the write guard.
 
 use super::LiveAllocation;
 use crate::nat::SourceNatFlowKey;
@@ -93,6 +99,31 @@ impl LiveFlowMap {
 
     pub(in crate::nat::allocator) fn len(&self) -> usize {
         self.count.load(Ordering::Relaxed)
+    }
+
+    /// Exact-cap admission under a HELD shard guard: the count
+    /// cannot move for THIS flow's key while the guard is held,
+    /// and every other insert bumps it only under its own shard,
+    /// so `len() >= max` here can never be raced past by a
+    /// same-flow insert. Returns false (cap reached) without
+    /// inserting. Replacing an existing key always succeeds.
+    pub(in crate::nat::allocator) fn try_insert_in_shard(
+        &self,
+        shard: &mut LiveFlowShard,
+        flow: SourceNatFlowKey,
+        alloc: LiveAllocation,
+        max_tracked: usize,
+    ) -> bool {
+        if shard.map.contains_key(&flow) {
+            shard.map.insert(flow, alloc);
+            return true;
+        }
+        if self.count.load(Ordering::Relaxed) >= max_tracked {
+            return false;
+        }
+        shard.map.insert(flow, alloc);
+        self.count.fetch_add(1, Ordering::Relaxed);
+        true
     }
 
     /// Counted shard write guard for the #4800 telemetry pair:

@@ -1,7 +1,7 @@
 // Pool-mode SNAT port allocator + persistent lease state machine.
 //
 // #2852 Phase 1 (lock-free port claim): the port-ownership state is no
-// longer serialized behind the single `Mutex<PortAllocatorLiveState>`.
+// longer serialized behind the single `RwLock<PortAllocatorLiveState>`.
 // Per-pool-address occupancy is an atomic bitmap (`AddressOccupancy`,
 // `Vec<AtomicU64>` + an atomic fresh-port cursor); a CAS on the bit IS the
 // port-ownership token (a set bit cannot be re-claimed), replacing the
@@ -15,11 +15,14 @@
 // proved the pre-Phase-1 single mutex negative-scales (2.87M->0.62M
 // allocs/sec, M=1->8); Phase 1 is 1.4-1.6x at M=6/8.
 //
-// What stays under `Mutex<PortAllocatorLiveState>`: the persistent-lease
+// What stays under `RwLock<PortAllocatorLiveState>`: the persistent-lease
 // lifecycle (`persistent_by_source` + the expiration indexes), the
 // ownership indexes, and `gc_counter`. #15956 Phase 2: the flow map
 // (`live_by_flow`) is sharded in flows.rs (16 shards); the measured
-// residual-mutex contention (59% @M=8) warranted it.
+// residual-mutex contention (59% @M=8) warranted it. Writers take
+// the write guard; the non-persistent new-flow admission check
+// takes only the read guard, so distinct new flows no longer
+// serialize on this lock at all.
 //
 // F4 (global tracked-flow cap): kept EXACT with no overshoot. The cap is
 // the sharded map's atomic count — bumped only on actual insert/remove
@@ -158,13 +161,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::Hasher;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-// #4800: both are now used unconditionally by `PortAllocator::lock_live`
-// (previously `MutexGuard` was test-only, for `debug_live`).
-#[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::sync::{MutexGuard, TryLockError};
+use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{MutexGuard, RwLockReadGuard, RwLockWriteGuard, TryLockError};
 
 pub(super) const NS_PER_SEC: u64 = 1_000_000_000;
 // The lease sync stream re-primes every 30s and retires a silent connection
@@ -1580,7 +1580,7 @@ struct PortAllocatorShared {
     occupancy: Vec<AddressOccupancy>,
     // #15956: sharded live-flow map (flows.rs, Mutex shards).
     flows: flows::LiveFlowMap,
-    live: Mutex<PortAllocatorLiveState>,
+    live: RwLock<PortAllocatorLiveState>,
     allocations_total: AtomicU64,
     reuses_total: AtomicU64,
     exhaustion_total: AtomicU64,
@@ -1645,7 +1645,7 @@ pub(crate) struct PortAllocator {
 /// installation through the same guard, so a worker release/upsert cannot land
 /// in a capture-to-reserve gap.
 pub(super) struct CapturedLiveGuard<'a> {
-    live: MutexGuard<'a, PortAllocatorLiveState>,
+    live: RwLockWriteGuard<'a, PortAllocatorLiveState>,
     shard: MutexGuard<'a, flows::LiveFlowShard>,
     previous_snapshot: Option<SourceNatReservationSnapshot>,
 }
@@ -1680,7 +1680,7 @@ impl Default for PortAllocator {
                 addr_counter_v6: AtomicU32::new(0),
                 occupancy: Vec::new(),
                 flows: flows::LiveFlowMap::new(),
-                live: Mutex::new(PortAllocatorLiveState::default()),
+                live: RwLock::new(PortAllocatorLiveState::default()),
                 allocations_total: AtomicU64::new(0),
                 reuses_total: AtomicU64::new(0),
                 exhaustion_total: AtomicU64::new(0),
@@ -1787,7 +1787,7 @@ impl PortAllocator {
                 addr_counter_v6: AtomicU32::new(0),
                 occupancy,
                 flows: flows::LiveFlowMap::new(),
-                live: Mutex::new(PortAllocatorLiveState::new(num_addresses)),
+                live: RwLock::new(PortAllocatorLiveState::new(num_addresses)),
                 allocations_total: AtomicU64::new(0),
                 reuses_total: AtomicU64::new(0),
                 exhaustion_total: AtomicU64::new(0),
@@ -1827,11 +1827,11 @@ impl PortAllocator {
     /// goes through here. `snapshot()` deliberately does NOT — it is the
     /// ~1s status poll that reads these very counters, and counting it
     /// would inject the observer into the observation.
-    pub(super) fn lock_live(&self) -> MutexGuard<'_, PortAllocatorLiveState> {
+    pub(super) fn lock_live(&self) -> RwLockWriteGuard<'_, PortAllocatorLiveState> {
         self.shared
             .live_lock_acquisitions
             .fetch_add(1, Ordering::Relaxed);
-        match self.shared.live.try_lock() {
+        match self.shared.live.try_write() {
             Ok(guard) => return guard,
             Err(TryLockError::Poisoned(poisoned)) => return poisoned.into_inner(),
             Err(TryLockError::WouldBlock) => {}
@@ -1839,10 +1839,34 @@ impl PortAllocator {
         self.shared
             .live_lock_contended
             .fetch_add(1, Ordering::Relaxed);
-        self.shared.live.lock().unwrap_or_else(|e| e.into_inner())
+        self.shared.live.write().unwrap_or_else(|e| e.into_inner())
     }
-    // #15956: counted shard write guard for flow-only critical
-    // sections that previously went through `lock_live()`; keeps
+
+
+    /// #15956 fold: shared (`RwLock` read) access to the retained
+    /// lease/ownership state for read-only admission checks — the
+    /// non-persistent new-flow hot path. Concurrent readers do not
+    /// serialize; only writers (lease/index mutation) exclude.
+    /// Deliberately NOT #4800-counted: a shared acquisition is not
+    /// the serialized critical section the pair measures.
+    pub(super) fn read_live(&self) -> RwLockReadGuard<'_, PortAllocatorLiveState> {
+        self.shared.live.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Test seam: hold the `live` WRITE guard so a test can prove a
+    /// new-flow admission does (writers) or does not (readers
+    /// only) block behind it.
+    #[cfg(test)]
+    pub(super) fn debug_hold_live_write(&self) -> RwLockWriteGuard<'_, PortAllocatorLiveState> {
+        self.lock_live()
+    }
+    /// Test seam: hold the `live` READ guard (shared) so a test can
+    /// prove new-flow admission proceeds concurrently with readers.
+    #[cfg(test)]
+    pub(super) fn debug_hold_live_read(&self) -> RwLockReadGuard<'_, PortAllocatorLiveState> {
+        self.read_live()
+    }
+
     // the #4800 acquisition/contention pair comparable.
     pub(super) fn lock_flow_shard_counted(&self, flow: &SourceNatFlowKey) -> MutexGuard<'_, flows::LiveFlowShard> {
         self.shared.flows.write_shard_counted(flow, &self.shared.live_lock_acquisitions, &self.shared.live_lock_contended)
@@ -2282,8 +2306,8 @@ impl PortAllocator {
         self.capture_and_replace(flow, false)
     }
     #[cfg(test)]
-    pub(super) fn debug_live(&self) -> MutexGuard<'_, PortAllocatorLiveState> {
-        self.shared.live.lock().unwrap_or_else(|e| e.into_inner())
+    pub(super) fn debug_live(&self) -> RwLockWriteGuard<'_, PortAllocatorLiveState> {
+        self.shared.live.write().unwrap_or_else(|e| e.into_inner())
     }
     /// Test-only: total persistent address-only identity reference count.
     #[cfg(test)]
@@ -2828,7 +2852,7 @@ impl PortAllocator {
                 self.address_index(flow.src_ip, family_offset, family_len, address_persistent);
             let start_rel = start_abs.saturating_sub(family_offset);
             let address_attempts = if address_persistent { 1 } else { family_len };
-            for offset in 0..address_attempts {
+            'addresses: for offset in 0..address_attempts {
                 let rel = (start_rel + offset) % family_len;
                 let abs = family_offset + rel;
                 let Some(occ) = self.shared.occupancy.get(abs) else {
@@ -2855,10 +2879,16 @@ impl PortAllocator {
                     // the lock-free bitmap, so GC here is opportunistic cleanup, not
                     // load-bearing for this allocation).
                     self.gc_expired_chunked(now_ns, ALLOCATION_GC_BUDGET);
-                    // #15956 unified order: lease mutex first, then
-                    // the flow's shard (both held for the tiny insert
-                    // CS, exactly as the legacy single mutex behaved).
-                    let mut live = self.lock_live();
+                    // #15956 fold: shard-first admission. The flow's
+                    // shard is held across reuse-check, cap-check and
+                    // insert, so a same-flow race cannot slip between
+                    // them; the retained `live` state is consulted
+                    // under its RwLock READ guard (wire-identity
+                    // check) and the PAT-owner publish runs after the
+                    // insert under the write guard. Distinct flows on
+                    // distinct shards therefore never touch the `live`
+                    // write lock on this path — they only share the
+                    // counted shard (#4800) and the read guard.
                     let mut __shard = self.lock_flow_shard_counted(&flow);
                     if let Some(slot) = __shard.map.get_mut(&flow) {
                         // Idempotent re-entry for an already-allocated flow (a second
@@ -2894,8 +2924,27 @@ impl PortAllocator {
                     // after claiming the PAT bit and before publishing the flow.
                     // The exact remote endpoint remains part of the identity:
                     // another remote is a distinct reverse tuple.
-                    if live.address_only_owns_wire_identity(&flow, translated) {
-                        drop(live);
+                    // Writer active: the check cannot be answered
+                    // now, and probing further ports would burn the
+                    // whole range against the same writer. Free the
+                    // claimed bit and fall through to the locked
+                    // path, whose shard-first re-check answers a
+                    // racing insert and whose lease section performs
+                    // this check under the write guard — the flow
+                    // still completes without waiting on THIS
+                    // candidate, and no port is leaked.
+                    let wire_owned = match self.shared.live.try_read() {
+                        Ok(live) => live.address_only_owns_wire_identity(&flow, translated),
+                        Err(_) => {
+                            drop(__shard);
+                            self.free_translated_port(abs, port);
+                            for rejected_port in rejected_ports.drain(..) {
+                                self.free_translated_port(abs, rejected_port);
+                            }
+                            break 'addresses;
+                        }
+                    };
+                    if wire_owned {
                         drop(__shard);
                         // The colliding port is unavailable to this reverse
                         // identity, but another PAT port on the same address may
@@ -2904,19 +2953,10 @@ impl PortAllocator {
                         rejected_ports.push(port);
                         continue 'ports;
                     }
-                    if self.shared.flows.len() >= self.shared.max_tracked_flows {
-                        // Exact cap (F4): count maintained under the shard
-                        // write lock is authoritative — no overshoot.
-                        self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
-                        drop(live);
-                        drop(__shard);
-                        self.free_translated_port(abs, port);
-                        for rejected_port in rejected_ports.drain(..) {
-                            self.free_translated_port(abs, rejected_port);
-                        }
-                        return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
-                    }
-                    self.shared.flows.insert_in_shard(
+                    // Exact cap (F4) + insert, atomically under the held
+                    // shard: count is bumped only on actual insert under
+                    // a shard write lock, so this can never overshoot.
+                    if !self.shared.flows.try_insert_in_shard(
                         &mut __shard,
                         flow,
                         LiveAllocation {
@@ -2936,13 +2976,29 @@ impl PortAllocator {
                             promotion_timeout_ns: None,
                             holders: holder.bit(),
                         },
-                    );
-                    live.record_pat_owner(&flow, translated);
+                        self.shared.max_tracked_flows,
+                    ) {
+                        self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+                        drop(__shard);
+                        self.free_translated_port(abs, port);
+                        for rejected_port in rejected_ports.drain(..) {
+                            self.free_translated_port(abs, rejected_port);
+                        }
+                        return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
+                    }
+                    drop(__shard);
+                    // PAT-owner publish: try the write guard once.
+                    // The flow record is already published and its
+                    // occupancy bit held, so a contended writer must
+                    // not stall the new flow; skipping the hint is
+                    // safe because the occupancy bit already blocks
+                    // PAT-vs-PAT reuse of this tuple.
+                    if let Ok(mut live) = self.shared.live.try_write() {
+                        live.record_pat_owner(&flow, translated);
+                    }
                     self.shared
                         .allocations_total
                         .fetch_add(1, Ordering::Relaxed);
-                    drop(live);
-                    drop(__shard);
                     for rejected_port in rejected_ports.drain(..) {
                         self.free_translated_port(abs, rejected_port);
                     }
@@ -2994,6 +3050,26 @@ impl PortAllocator {
         mint_from_zone: Option<&str>,
     ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
         let family_len = family_addresses.len();
+        // #15956 fold: shard-first re-check before the write lock.
+        // A flow inserted by the shard path while this call was on
+        // its way here (bitmap full / persistent) must be answered
+        // without the `live` write lock at all; only a genuine
+        // miss proceeds to the lease-coupled section below.
+        {
+            let mut __shard = self.shared.flows.get_mut_shard(&flow);
+            if let Some(slot) = __shard.map.get_mut(&flow) {
+                slot.holders |= holder.bit();
+                let existing = slot.translated;
+                self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
+                return Ok(existing);
+            }
+            if !persistent_nat
+                && self.shared.flows.len() >= self.shared.max_tracked_flows
+            {
+                self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+                return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
+            }
+        }
         let mut live = self.lock_live();
         self.gc_expired_locked(&mut live, now_ns, ALLOCATION_GC_BUDGET);
 
@@ -3790,6 +3866,7 @@ impl PortAllocator {
             let mut __shard = self.shared.flows.get_mut_shard(&flow);
             self.unlink_live_allocation_locked(&mut live, &mut __shard, &flow, existing);
             drop(__shard);
+            Self::complete_persistent_lease_locked(&mut live, existing, now_ns);
             freed += 1;
         }
         freed
@@ -6513,7 +6590,7 @@ impl PortAllocator {
     pub(super) fn debug_address_only_owners(
         &self,
     ) -> Vec<(AddressOnlyReverseKey, SourceNatFlowKey)> {
-        let live = self.shared.live.lock().unwrap_or_else(|e| e.into_inner());
+        let live = self.shared.live.read().unwrap_or_else(|e| e.into_inner());
         live.address_only_owners
             .iter()
             .map(|(k, v)| (*k, *v))
@@ -6521,7 +6598,7 @@ impl PortAllocator {
     }
 
     pub(crate) fn snapshot(&self) -> PortAllocatorSnapshot {
-        let live = self.shared.live.lock().unwrap_or_else(|e| e.into_inner());
+        let live = self.shared.live.read().unwrap_or_else(|e| e.into_inner());
         let live_flows = self.shared.flows.len() as u64;
         let persistent_leases = live.persistent_by_source.len() as u64;
         drop(live);
@@ -6620,6 +6697,17 @@ impl PortAllocator {
     fn gc_expired_chunked(&self, now_ns: u64, budget: usize) -> usize {
         if now_ns == 0 || budget == 0 {
             return 0;
+        }
+        // #15956 fold: GC is opportunistic on the new-flow path —
+        // never stall admission behind a `live` writer for it.
+        // Try the shared read guard: empty index (common case)
+        // skips the sweep with no write acquisition; a contended
+        // lock (writer active) also skips, and the next admission
+        // or release retries.
+        match self.shared.live.try_read() {
+            Ok(live) if live.lease_expirations.is_empty() => return 0,
+            Ok(_) => {}
+            Err(_) => return 0,
         }
         let mut reclaimed = 0;
         let mut freed: Vec<(usize, u16)> = Vec::new();
@@ -7009,20 +7097,23 @@ impl SourceNatReservationSnapshot {
             let _ = now_ns;
             return true;
         }
-        // #15948 (H31-01): the caller rolled the replacement back before
-        // calling here, so for a sole-holder replacement live_by_flow no
-        // longer names it — the non-persistent tail below is exactly the
-        // arm that must run. The pre-lock check above already refused a
-        // retaken occupancy bit; a still-present entry here can only be
-        // the not-yet-unlinked replacement, which this tail replaces.
-        if owns_old_bit
-            && !self
-                .allocator
-                .shared
-                .occupancy
-                .get(previous.addr_index)
-                .is_some_and(|occ| occ.reserve(previous.translated.port))
+        // #15956 fold: displaced-restore cap. Restoring an ABSENT
+        // incumbent consumes a tracked-flow slot, so it must
+        // refuse at the cap exactly like a fresh insert — the
+        // pre-fold tail inserted unconditionally and could push
+        // the sharded count past `max_tracked_flows`. A PRESENT
+        // entry (the not-yet-unlinked replacement, checked above)
+        // is replaced in its own slot and consumes nothing.
+        // Checked under the held shard + `live` write guard, so
+        // no same-flow insert can race past it; on refusal the
+        // bitmap bit reserved above is handed back.
+        let slot_present = __shard.map.contains_key(&self.flow);
+        if !slot_present
+            && self.allocator.shared.flows.len() >= self.allocator.shared.max_tracked_flows
         {
+            if owns_old_bit {
+                self.allocator.free_translated_port(previous.addr_index, previous.translated.port);
+            }
             return false;
         }
         if previous.address_only {
