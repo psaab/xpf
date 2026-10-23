@@ -37,6 +37,16 @@ func TestUnimplementedJunosStatementBesideARetainedConstraintIsRefused9603(t *te
 		{"udp/111 + rpc-program-number", `application a { protocol udp; destination-port 111; rpc-program-number 100003; }`, nil, want9603("rpc-program-number")},
 		{"icmpv6 type 128 + icmp6-code 0", `application a { protocol icmpv6; icmp-type 128; icmp6-code 0; }`, nil, want9603("icmp6-code")},
 		{"tcp/21 + application-protocol ftp", `application a { protocol tcp; destination-port 21; application-protocol ftp; }`, nil, want9603("application-protocol")},
+		// #16002: an L7 `signature` beside a retained tcp/80 must poison
+		// the reference, not stay armed for every payload on port 80.
+		{"direct tcp/80 + signature", `application a { protocol tcp; destination-port 80; signature custom-http; }`, nil, want9603("signature")},
+		{"term tcp/80 + signature", `application a { term t1 { protocol tcp; destination-port 80; signature custom-http; } }`, nil, want9603("signature")},
+		{"flat lines tcp/80, then signature", "", []string{
+			"set applications application a protocol tcp",
+			"set applications application a destination-port 80",
+			"set applications application a signature custom-http"}, want9603("signature")},
+		{"flat chain tcp/80 signature", "", []string{"set applications application a protocol tcp destination-port 80 signature custom-http"}, want9603("signature")},
+		{"signature parked behind a stray keyword in one statement", `application a { protocol tcp; destination-port 80; bogus 7 signature custom-http; }`, nil, want9603("signature")},
 	} {
 		t.Run(r.name, func(t *testing.T) { check9595(t, r) })
 	}
@@ -67,6 +77,11 @@ func TestNonTableStatementsBesideARetainedConstraintStayArmed9603(t *testing.T) 
 		{"residual: tcp/80 + source-poort 1024", `application a { protocol tcp; destination-port 80; source-poort 1024; }`, nil, ""},
 		{"residual: icmp type 8 + icmp-cod 0", `application a { protocol icmp; icmp-type 8; icmp-cod 0; }`, nil, ""},
 		{"exact grammar: tcp/135 + uuidd word", `application a { protocol tcp; destination-port 135; uuidd word; }`, nil, ""},
+		// #16002 controls: a near miss and the upper-case spelling are
+		// not the exact `signature` statement, so they stay on the
+		// #9595 stray line beside a retained port.
+		{"exact grammar: tcp/80 + signatures word", `application a { protocol tcp; destination-port 80; signatures word; }`, nil, ""},
+		{"exact case: tcp/80 + SIGNATURE word", `application a { protocol tcp; destination-port 80; SIGNATURE word; }`, nil, ""},
 		{"exact case: tcp/135 + UUID word", `application a { protocol tcp; destination-port 135; UUID word; }`, nil, ""},
 		{"an SRX setting, not a match statement: udp/53 + do-not-translate-A-query-to-AAAA-query", `application a { protocol udp; destination-port 53; do-not-translate-A-query-to-AAAA-query; }`, nil, ""},
 		{"not SRX grammar (MX services): udp/161 + snmp-command get", `application a { protocol udp; destination-port 161; snmp-command get; }`, nil, ""},
@@ -93,10 +108,11 @@ func TestTableNamesNoImplementedStatement9603(t *testing.T) {
 }
 
 // The closed set, pinned against the SRX grammar it was taken from,
-// junos-es-conf-applications@2024-01-01 (see docs/log/9603.md). A change to
-// the table must change this list and the log.
+// junos-es-conf-applications@2024-01-01 (see docs/log/9603.md), plus
+// `signature` (#16002). A change to the table must change this list and
+// the log.
 func TestTableIsTheDocumentedClosedSet9603(t *testing.T) {
-	want := []string{"application-protocol", "ether-type", "icmp6-code", "icmp6-type", "rpc-program-number", "uuid"}
+	want := []string{"application-protocol", "ether-type", "icmp6-code", "icmp6-type", "rpc-program-number", "signature", "uuid"}
 	got := make([]string, 0, len(junosApplicationLeavesNotImplemented9603))
 	for n := range junosApplicationLeavesNotImplemented9603 {
 		got = append(got, n)

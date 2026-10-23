@@ -34,12 +34,26 @@ import "fmt"
 // from other Junos families' application grammar (the MX services
 // `snmp-command`, `ttl-threshold`, `gate-timeout`) are not SRX grammar and are
 // not listed either.
+//
+// #16002 adds `signature`: the L7 signature constraint operators author as
+// `applications application <name> signature ...` (custom L7 signatures,
+// docs/services-application-identification.md: "config schema present,
+// runtime is port-only"). It is not in the 2024-01-01 YANG extract above --
+// that extract pre-dates this filing's census -- but it is Junos application
+// grammar xpf does not implement: no payload pattern is compiled, so beside
+// a retained `protocol tcp; destination-port 80;` the term stayed armed for
+// every payload on port 80 instead of only payloads matching the signature.
+// That is exactly the widening this table exists to poison. Like the table
+// entries, it is matched case-sensitively and only as an unrecognized token,
+// so a value that merely spells "signature" after a recognized leaf is not
+// mistaken for the statement.
 var junosApplicationLeavesNotImplemented9603 = map[string]bool{
 	"application-protocol": true,
 	"ether-type":           true,
 	"icmp6-code":           true,
 	"icmp6-type":           true,
 	"rpc-program-number":   true,
+	"signature":            true,
 	"uuid":                 true,
 }
 
