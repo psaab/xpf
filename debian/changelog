@@ -1,4 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Undo the flow-cache probe on cached output drops (#15947
+    H29-04 arm 2): a completing ACK dropped by the cached
+    output-filter or policer verdicts had already charged the
+    session and promoted both handshake halves locally, with its
+    HA Update merely withheld. The drop arm now rolls the probe
+    back — un-charge, discard the withheld Update, restore the
+    pending handshake — so a dropped packet leaves no session
+    effect; a retransmitted ACK completes and publishes normally.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Repair the #15995 ancestor-denial surface fixtures: the gRPC, REST
     and CLI suites committed a gateway-less PSK VPN that the #15989
     strict commit gate now rejects at fixture setup, so the

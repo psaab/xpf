@@ -607,6 +607,15 @@ pub(super) fn stage_flow_cache_hit(
             now_ns,
         );
         if cached_descriptor.tx_selection.drop || policer_action.drop {
+            // #15947 (H29-04 arm 2): the deferring probe above already
+            // charged this packet and may have completed the handshake
+            // locally. A dropped packet must leave neither behind, and
+            // its withheld HA Update is discarded, never published.
+            sessions.rollback_dropped_probe_hit(
+                &flow.forward_key,
+                meta.pkt_len as u64,
+                meta.tcp_flags,
+            );
             telemetry.counters.record_transit_output_filter_drop();
             if cached_descriptor.tx_selection.drop {
                 // #15958 (F1): a cached `then discard`/`then reject` verdict

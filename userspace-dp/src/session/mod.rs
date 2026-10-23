@@ -3706,6 +3706,104 @@ impl SessionTable {
         }
     }
 
+    /// Undo the local effects of a deferring probe whose packet was
+    /// dropped before TX admission (#15947 H29-04 arm 2).
+    ///
+    /// The probe charged the canonical entry, observed the packet, may
+    /// have completed the handshake (promoting both halves) and queued
+    /// a deferred HA Update. A dropped packet must leave none of that
+    /// behind: drop the withheld Update, un-charge the canonical
+    /// entry, and when this probe completed the handshake restore both
+    /// halves to pending on their opening expiry.
+    ///
+    /// Returns true when a deferred completion was rolled back. Call
+    /// only for the exact dropped packet, before any later packet is
+    /// admitted on the session; a retransmitted completing ACK re-runs
+    /// the probe and completes (and, if admitted, publishes) normally.
+    pub fn rollback_dropped_probe_hit(
+        &mut self,
+        key: &SessionKey,
+        len: u64,
+        tcp_flags: u8,
+    ) -> bool {
+        let pending_wire = self
+            .pending_probe_state_updates
+            .iter()
+            .find(|(k, _, _)| k == key)
+            .map(|(_, _, handshake)| *handshake)
+            .unwrap_or(0);
+        let had_deferred = pending_wire != 0
+            || self
+                .pending_probe_state_updates
+                .iter()
+                .any(|(matched_key, _, _)| matched_key == key);
+        self.pending_probe_state_updates
+            .retain(|(matched_key, _, _)| matched_key != key);
+        let (canonical_key, is_reverse) = match self.record_by_key(key) {
+            Some(record) => {
+                let record_key = record.key.clone();
+                let is_reverse = record.entry.metadata.is_reverse;
+                let canonical = if is_reverse {
+                    reverse_session_key(&record_key, record.entry.decision.nat)
+                } else {
+                    record_key
+                };
+                (canonical, is_reverse)
+            }
+            None => return had_deferred,
+        };
+        if let Some(entry) = self.entry_by_key_mut(&canonical_key) {
+            if is_reverse {
+                entry.counters.rev_packets =
+                    entry.counters.rev_packets.saturating_sub(1);
+                entry.counters.rev_bytes =
+                    entry.counters.rev_bytes.saturating_sub(len);
+            } else {
+                entry.counters.fwd_packets =
+                    entry.counters.fwd_packets.saturating_sub(1);
+                entry.counters.fwd_bytes =
+                    entry.counters.fwd_bytes.saturating_sub(len);
+            }
+            entry.observed_tcp_flags &= !tcp_flags;
+        }
+        if !had_deferred {
+            return false;
+        }
+        let timeouts = self.timeouts;
+        let opening_override_ns = self
+            .entry_by_key(key)
+            .map(|entry| entry.metadata.ingress_zone)
+            .and_then(|zone| self.opening_override_for(zone));
+        let companion_key = match self.record_by_key(key) {
+            Some(record) => {
+                reverse_session_key(&record.key.clone(), record.entry.decision.nat)
+            }
+            None => key.clone(),
+        };
+        for half in [key.clone(), companion_key] {
+            let last_seen = self.last_seen_ns(&half);
+            if let Some(entry) = self.entry_by_key_mut(&half) {
+                let syn_ack_first = pending_wire
+                    == TcpHandshakeState::SynAckFirstPending.to_wire();
+                entry.established = syn_ack_first;
+                entry.handshake_pending = true;
+                entry.syn_ack_first = syn_ack_first;
+                entry.expires_after_ns = session_timeout_ns(
+                    half.protocol,
+                    tcp_flags,
+                    false,
+                    &timeouts,
+                    entry.metadata.inactivity_timeout_ns,
+                    opening_override_ns,
+                );
+            }
+            if let Some(seen) = last_seen {
+                self.push_to_wheel(&half, seen);
+            }
+        }
+        true
+    }
+
     fn probe_hit_inner(
         &mut self,
         key: &SessionKey,

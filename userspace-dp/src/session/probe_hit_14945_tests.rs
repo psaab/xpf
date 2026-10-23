@@ -394,6 +394,89 @@ fn deferred_probe_update_overflow_publishes_oldest_and_latches_resync_15947() {
     assert_eq!(updates[0].key, first_forward.expect("first flow"));
     assert!(table.take_delta_loss(), "overflow must latch resync");
 }
+
+#[test]
+fn dropped_deferring_probe_rolls_back_completion_and_charge_15947() {
+    // #15947 H29-04 arm 2: a completing ACK dropped by the cached
+    // output-filter/policer verdicts must not complete the handshake,
+    // charge the session, or leave a publishable deferred Update.
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN);
+    assert!(table
+        .lookup_with_origin(&reverse, now + SEC, TCP_SYN | TCP_ACK)
+        .is_some());
+    let _ = table.drain_deltas(16);
+    let before = table.session_counters(&forward).expect("forward counters");
+    assert!(table.probe_hit_deferring_state_update(
+        &forward,
+        now + 2 * SEC,
+        512,
+        TCP_ACK | TCP_PSH,
+        512,
+        46,
+    ));
+    let completed = table.entry_by_key(&forward).expect("forward half");
+    assert!(completed.established && !completed.handshake_pending);
+    assert!(table.rollback_dropped_probe_hit(&forward, 512, TCP_ACK | TCP_PSH));
+    let entry = table.entry_by_key(&forward).expect("forward half");
+    assert!(
+        !entry.established && entry.handshake_pending,
+        "dropped completing ACK must restore the pending handshake"
+    );
+    assert_eq!(
+        table.session_counters(&forward),
+        Some(before),
+        "dropped packet must not charge the session"
+    );
+    table.emit_probe_hit_state_update(&forward);
+    assert!(
+        table
+            .drain_deltas(16)
+            .iter()
+            .all(|d| d.kind != SessionDeltaKind::Update),
+        "rolled-back completion must never publish an HA Update"
+    );
+    // A retransmitted completing ACK completes again; when admitted
+    // it publishes exactly one Update.
+    assert!(table.probe_hit_deferring_state_update(
+        &forward,
+        now + 3 * SEC,
+        512,
+        TCP_ACK | TCP_PSH,
+        512,
+        46,
+    ));
+    table.emit_probe_hit_state_update(&forward);
+    let updates: Vec<_> = table
+        .drain_deltas(16)
+        .into_iter()
+        .filter(|d| d.kind == SessionDeltaKind::Update)
+        .collect();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].key, forward);
+}
+
+#[test]
+fn dropped_deferring_probe_unwinds_plain_charge_15947() {
+    // Non-completing packet: rollback un-charges without touching the
+    // established state and reports no completion was rolled back.
+    let (mut table, forward, _reverse, now) = pair_table();
+    let before = table.session_counters(&forward).expect("forward counters");
+    assert!(table.probe_hit_deferring_state_update(
+        &forward,
+        now + SEC,
+        256,
+        TCP_ACK | TCP_PSH,
+        256,
+        46,
+    ));
+    assert!(!table.rollback_dropped_probe_hit(&forward, 256, TCP_ACK | TCP_PSH));
+    assert_eq!(table.session_counters(&forward), Some(before));
+    let entry = table.entry_by_key(&forward).expect("forward half");
+    assert!(entry.established && !entry.handshake_pending);
+}
 /// #14935/#10885: closing gates survive the fusion — an RST-aborted entry
 /// is served (live) but never re-stamped; a FIN-owning direction with
 /// payload progress re-stamps, matching the unfused keepalive.
