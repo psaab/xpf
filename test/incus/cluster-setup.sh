@@ -701,7 +701,7 @@ cmd_deploy() {
 			die "deploy completed but its executable attestation manifest could not be written"
 	else
 		local attestation_deb
-		attestation_deb=$(ls -t "$PROJECT_ROOT"/dist-deb/xpf_*.deb 2>/dev/null | head -1 || true)
+		attestation_deb=$(deploy_select_deb "$PROJECT_ROOT/dist-deb" 2>/dev/null || true)
 		[[ -n "$attestation_deb" ]] ||
 			die "deploy completed but no xpf .deb is available to attest"
 		deploy_write_manifest "$PROJECT_ROOT" "$attestation_deb" "$deploy_git_sha" "$target" ||
@@ -738,10 +738,15 @@ deploy_vm_deb() {
 	if ! incus info "$rinst" &>/dev/null 2>&1; then
 		die "Instance $vm does not exist. Run '$0 create' first."
 	fi
-	# Locate the freshly-built .deb (Makefile deb: target output dir is
-	# dist-deb/; install the runtime xpf_*.deb, NOT the xpf-appliance meta).
-	deb=$(ls -t "$PROJECT_ROOT"/dist-deb/xpf_*.deb 2>/dev/null | head -1 || true)
+	# Select the deb to deploy via deploy_select_deb: an explicit
+	# XPF_DEPLOY_DEB_VERSION / XPF_DEPLOY_DEB_PATH pin if set, else the
+	# highest Debian version in dist-deb/ (Makefile deb: target output
+	# dir; install the runtime xpf_*.deb, NOT the xpf-appliance meta).
+	# Version, not mtime (#16308): a prebuilt 99.0.x deb must win over a
+	# just-rebuilt stock deb regardless of which is newer on disk.
+	deb=$(deploy_select_deb "$PROJECT_ROOT/dist-deb" 2>/dev/null || true)
 	[[ -n "$deb" ]] || die "no xpf_*.deb found in dist-deb/ — run 'make deb' first (the default deploy build)"
+	info "Deploying deb: $deb (version $(deploy_deb_version "$deb"))"
 
 	# NOTICE: the deb path preserves node config — it does NOT push
 	# $CLUSTER_CONF, clear the config DB, or push Phase-0 artifacts the way

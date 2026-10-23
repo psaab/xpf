@@ -1634,10 +1634,15 @@ endif
 ifneq ($(XPF_DEPLOY_DEB),)
 export XPF_DEPLOY_DEB
 endif
+# #16308: prepare-deb (order-only) reuses a prebuilt deb whose version is
+# >= the stock version `make deb` would produce, instead of the .PHONY
+# deb prerequisite unconditionally rebuilding (and then deploying) a
+# stock deb over the operator's DEB_VERSION bump. See prepare-deb below.
 ifeq ($(XPF_DEPLOY_FAST),1)
 CLUSTER_DEPLOY_PREREQS = build build-ctl
 else
-CLUSTER_DEPLOY_PREREQS = deb
+CLUSTER_DEPLOY_PREREQS =
+CLUSTER_DEPLOY_ORDER_ONLY = | prepare-deb
 endif
 
 # Deploy and its smoke in one lock cell (#12651). Exact checkout
@@ -1645,22 +1650,22 @@ endif
 # must not be papered over as a valid attestation.
 .PHONY: cluster-deploy-and-gate
 CLUSTER_GATE ?= test-connectivity
-cluster-deploy-and-gate: $(CLUSTER_DEPLOY_PREREQS)
+cluster-deploy-and-gate: $(CLUSTER_DEPLOY_PREREQS) $(CLUSTER_DEPLOY_ORDER_ONLY)
 	./test/incus/with-cluster.sh "cluster deploy + $(CLUSTER_GATE)" -- \
-		bash -c 'source ./test/incus/deploy-lib.sh; deploy_gate_wave "$$PWD" "$$1" "$(MAKE)" env BPFRX_CLUSTER_ENV="$(CLUSTER_ENV)" $(if $(filter 1,$(XPF_DEPLOY_FAST)),,XPF_CLUSTER_SKIP_BUILD=1) ./test/incus/cluster-setup.sh deploy "$(NODE)"' -- "$(CLUSTER_GATE)"
+		bash -c 'source ./test/incus/deploy-lib.sh; deploy_gate_wave "$$PWD" "$$1" "$(MAKE)" env BPFRX_CLUSTER_ENV="$(CLUSTER_ENV)" $(if $(filter 1,$(XPF_DEPLOY_FAST)),,XPF_CLUSTER_SKIP_BUILD=1) $(if $(DEB_VERSION_EXPLICIT),XPF_DEPLOY_DEB_VERSION="$(DEB_VERSION)",) ./test/incus/cluster-setup.sh deploy "$(NODE)"' -- "$(CLUSTER_GATE)"
 
-cluster-deploy: $(CLUSTER_DEPLOY_PREREQS)
-# The prereq already built, so the deb branch skips cmd_deploy's internal
-# rebuild (deb is .PHONY: without the guard it rebuilds the multi-minute
-# .deb a second time). The raw branch keeps the internal build: it also
-# builds the userspace-dp helper, which the prereq deliberately omits
-# (cargo may be absent; the script degrades gracefully, make would not).
+cluster-deploy: $(CLUSTER_DEPLOY_PREREQS) $(CLUSTER_DEPLOY_ORDER_ONLY)
+# prepare-deb already built (or reused) the deb, so the deb branch skips
+# cmd_deploy's internal rebuild. The raw branch keeps the internal build:
+# it also builds the userspace-dp helper, which the prereq deliberately
+# omits (cargo may be absent; the script degrades gracefully, make would not).
+# An explicit DEB_VERSION is threaded as XPF_DEPLOY_DEB_VERSION so the
+# script deploys exactly the just-built deb, not a higher stale one.
 ifeq ($(XPF_DEPLOY_FAST),1)
 	$(CLUSTER_SETUP) deploy $(NODE)
 else
-	XPF_CLUSTER_SKIP_BUILD=1 $(CLUSTER_SETUP) deploy $(NODE)
+	XPF_CLUSTER_SKIP_BUILD=1 $(if $(DEB_VERSION_EXPLICIT),XPF_DEPLOY_DEB_VERSION="$(DEB_VERSION)" ,)$(CLUSTER_SETUP) deploy $(NODE)
 endif
-
 cluster-destroy:
 	$(CLUSTER_SETUP) destroy
 
@@ -1702,15 +1707,14 @@ loss-cluster-init:
 loss-cluster-create:
 	$(LOSS_CLUSTER_SETUP) create
 
-loss-cluster-deploy: $(CLUSTER_DEPLOY_PREREQS)
-# Same prereq/guard split as cluster-deploy above (deb prereq + skip;
+loss-cluster-deploy: $(CLUSTER_DEPLOY_PREREQS) $(CLUSTER_DEPLOY_ORDER_ONLY)
+# Same prereq/guard split as cluster-deploy above (prepare-deb + skip;
 # raw prereq + internal build for the helper).
 ifeq ($(XPF_DEPLOY_FAST),1)
 	$(LOSS_CLUSTER_SETUP) deploy $(NODE)
 else
-	XPF_CLUSTER_SKIP_BUILD=1 $(LOSS_CLUSTER_SETUP) deploy $(NODE)
+	XPF_CLUSTER_SKIP_BUILD=1 $(if $(DEB_VERSION_EXPLICIT),XPF_DEPLOY_DEB_VERSION="$(DEB_VERSION)" ,)$(LOSS_CLUSTER_SETUP) deploy $(NODE)
 endif
-
 loss-cluster-destroy:
 	$(LOSS_CLUSTER_SETUP) destroy
 
@@ -1761,6 +1765,52 @@ DEB_VERSION ?= 0.0.$(DEB_GIT_COUNT)+g$(DEB_GIT_SHA)$(DEB_GIT_DIRTY)
 # `dist/` would ship unsigned. publish.py's default-deny sweep now REFUSES any
 # stray file under `dist/`, so debs stage in the `dist-deb/` sibling instead.
 DEB_OUT ?= $(CURDIR)/dist-deb
+
+# #16308: cluster-deploy must respect a prebuilt deb instead of silently
+# rebuilding a stock one. prepare-deb RESOLVES the deb to deploy:
+#   1. An explicit DEB_VERSION (command line or environment, detected via
+#      $(origin) at parse time into DEB_VERSION_EXPLICIT) always builds
+#      that deb via the `deb` recipe (dirty-suffix hygiene lives there) —
+#      the explicit-bump path is unchanged.
+#   2. Else, if dist-deb/ already holds an xpf_*.deb whose filename version
+#      is >= the stock version `make deb` would produce, it is REUSED
+#      (no rebuild) and its path is announced.
+#   3. Else (fresh tree, or only older debs present) build stock via `deb`.
+# cluster-setup.sh then selects the SAME artifact by version via
+# deploy_select_deb / deploy_deb_newest (deploy-lib.sh), never mtime, so
+# a surviving prebuilt 99.0.x still wins over a just-built stock deb.
+# Parse-time only: the candidate is expanded directly against the
+# filesystem (no $(shell), no recipe eval); $(sort) order is filename
+# version order for the xpf_<ver>_<arch>.deb shape in our version space.
+ifeq ($(origin DEB_VERSION),file)
+DEB_VERSION_EXPLICIT :=
+else
+DEB_VERSION_EXPLICIT := 1
+endif
+XPF_DEB_CANDIDATES := $(wildcard $(DEB_OUT)/xpf_*.deb)
+ifeq ($(XPF_DEB_CANDIDATES),)
+XPF_DEB_REUSE :=
+else
+XPF_DEB_REUSE := $(lastword $(sort $(XPF_DEB_CANDIDATES)))
+endif
+.PHONY: prepare-deb
+prepare-deb:
+ifeq ($(XPF_DEPLOY_FAST),1)
+	@true
+else ifneq ($(DEB_VERSION_EXPLICIT),)
+	$(MAKE) --no-print-directory deb
+else ifneq ($(XPF_DEB_REUSE),)
+	@reuse="$(XPF_DEB_REUSE)"; stock="$(DEB_VERSION)"; \
+	  pver=$$(basename "$$reuse" | sed -E 's/^xpf_([^_]+)_.*/\1/'); \
+	  if dpkg --compare-versions "$$pver" ge "$$stock" 2>/dev/null; then \
+	    echo "==> Reusing prebuilt deb: $$reuse (version $$pver >= stock $$stock) — no rebuild (#16308)"; \
+	  else \
+	    echo "==> Prebuilt deb $$reuse (version $$pver) is older than stock $$stock; rebuilding" >&2; \
+	    $(MAKE) --no-print-directory deb; \
+	  fi
+else
+	$(MAKE) --no-print-directory deb
+endif
 
 .PHONY: deb
 deb:

@@ -101,10 +101,9 @@ for instance in "$FW0" "$FW1" "$CLUSTER_LAN_HOST"; do
 	incus info "$instance" &>/dev/null 2>&1 || { void "$instance is unavailable"; finish; }
 done
 
-# The Makefile's `deb` prerequisite builds before this script acquires the
-# cluster lock. Attest the package contents directly; never substitute a
-# source-tree hash or an installed-path hash for the candidate process image.
-deb=$(ls -t "$PROJECT_ROOT"/dist-deb/xpf_*.deb 2>/dev/null | head -1 || true)
+# #16308: select by Debian version (the deployed identity), not mtime —
+# a prebuilt high-version deb must not lose to a just-rebuilt stock deb.
+deb=$(deploy_select_deb "$PROJECT_ROOT/dist-deb" 2>/dev/null || true)
 [[ -n "$deb" ]] || { void "no runtime .deb in dist-deb; make deb must complete first"; finish; }
 candidate_sha=$(deploy_manifest_sha_from_deb "$deb" xpfd || true)
 [[ -n "$candidate_sha" ]] || { void "cannot read xpfd from candidate .deb: $deb"; finish; }

@@ -2172,7 +2172,223 @@ if [[ "${DEPLOY_LIB_SELFTEST_DUAL_ACTIVE_ONLY:-0}" == 1 ]]; then
 	[[ $FAIL -eq 0 ]]
 	exit $?
 fi
+# ── #16308 prebuilt-deb selection: version, never mtime ──────────────
+# The defect: `make cluster-deploy` rebuilt a stock deb (its .PHONY deb
+# prereq), which then won `ls -t` selection in cluster-setup.sh and died
+# in apt as a downgrade over the operator's prebuilt 99.0.x. These cells
+# pin (a) the version-ordered selector, (b) the explicit-pin contract,
+# and (c) the Makefile prepare-deb wiring (reuse vs rebuild), driven
+# hermetically with a stubbed `dpkg-buildpackage` on PATH.
+DEB_FIXTURE_DIR=""
+setup_deb_fixture() {
+	DEB_FIXTURE_DIR=$(mktemp -d)
+}
+teardown_deb_fixture() {
+	[[ -n "$DEB_FIXTURE_DIR" ]] && rm -rf "$DEB_FIXTURE_DIR"
+	DEB_FIXTURE_DIR=""
+}
+# mkdeb <name> <age-seconds-ago>
+mkdeb() {
+	local f="$DEB_FIXTURE_DIR/$1"
+	: > "$f"
+	touch -d "@$(( $(date +%s) - $2 ))" "$f"
+}
+
+test_deb_version_parses_filename() {
+	local v
+	v=$(deploy_deb_version "/x/dist-deb/xpf_99.0.16308+601c5462a991_amd64.deb") || { bad "deb version: 99 filename did not parse"; return; }
+	[[ "$v" == "99.0.16308+601c5462a991" ]] && ok "deb version: parses xpf_<ver>_<arch>.deb" || bad "deb version: got '$v'"
+	if deploy_deb_version "/x/xpf-appliance_1.2.3_amd64.deb" >/dev/null 2>&1; then
+		bad "deb version: appliance meta must not parse as runtime deb"
+	else
+		ok "deb version: appliance meta rejected"
+	fi
+}
+
+test_deb_newest_picks_highest_version_not_newest_mtime() {
+	setup_deb_fixture
+	# Stock deb is NEWEST on disk (the just-rebuilt shape); 99.0.x is older.
+	mkdeb "xpf_99.0.16308+601c5462a991_amd64.deb" 3600
+	mkdeb "xpf_0.0.23371+g30638bcad36b_amd64.deb" 0
+	local got
+	got=$(deploy_deb_newest "$DEB_FIXTURE_DIR") || { bad "deb newest: no selection"; teardown_deb_fixture; return; }
+	[[ "$got" == *"xpf_99.0.16308"* ]] && ok "deb newest: highest version wins over newest mtime (#16308)" || bad "deb newest: picked $got (mtime regression)"
+	teardown_deb_fixture
+}
+
+test_deb_newest_stock_only_and_empty() {
+	setup_deb_fixture
+	if deploy_deb_newest "$DEB_FIXTURE_DIR" >/dev/null 2>&1; then
+		bad "deb newest: empty dir must fail"
+	else
+		ok "deb newest: empty dir fails closed"
+	fi
+	mkdeb "xpf_0.0.23371+g30638bcad36b_amd64.deb" 0
+	local got
+	got=$(deploy_deb_newest "$DEB_FIXTURE_DIR") || { bad "deb newest: stock-only no selection"; teardown_deb_fixture; return; }
+	[[ "$got" == *"xpf_0.0.23371"* ]] && ok "deb newest: stock-only selects the stock deb" || bad "deb newest: stock-only picked $got"
+	teardown_deb_fixture
+}
+
+test_deb_select_pin_wins_and_bad_pin_dies() {
+	setup_deb_fixture
+	mkdeb "xpf_99.0.16308+601c5462a991_amd64.deb" 3600
+	mkdeb "xpf_0.0.23371+g30638bcad36b_amd64.deb" 0
+	local got
+	got=$(XPF_DEPLOY_DEB_PATH="xpf_0.0.23371+g30638bcad36b_amd64.deb" deploy_select_deb "$DEB_FIXTURE_DIR") || { bad "deb select: pin failed"; teardown_deb_fixture; return; }
+	[[ "$got" == *"xpf_0.0.23371"* ]] && ok "deb select: explicit pin wins over higher version" || bad "deb select: pin picked $got"
+	if ( XPF_DEPLOY_DEB_PATH="xpf_1.2.3_amd64.deb" deploy_select_deb "$DEB_FIXTURE_DIR" ) >/dev/null 2>&1; then
+		bad "deb select: missing pin must die"
+	else
+		ok "deb select: missing pin dies (fail-closed)"
+	fi
+	teardown_deb_fixture
+}
+
+# Makefile wiring: drive `make prepare-deb` / `make -n cluster-deploy`
+# against the REAL Makefile with DEB_OUT redirected to a fixture dir.
+# The decision cells are decided by make's parse-time state (what exists
+# in DEB_OUT, whether DEB_VERSION was explicit) and are asserted from
+# `make -n` dry-run output, so no dpkg-buildpackage ever runs and the
+# cells stay hermetic and fast.
+MAKE_FIXTURE_OUT=""
+setup_make_fixture() {
+	MAKE_FIXTURE_OUT=$(mktemp -d)
+}
+teardown_make_fixture() {
+	[[ -n "$MAKE_FIXTURE_OUT" ]] && rm -rf "$MAKE_FIXTURE_OUT"
+	MAKE_FIXTURE_OUT=""
+}
+_make_n() { # extra make args...
+	(cd "$SCRIPT_DIR/../.." && make --no-print-directory -n "$@" DEB_OUT="$MAKE_FIXTURE_OUT" 2>&1)
+}
+
+test_prepare_deb_reuses_prebuilt_99() {
+	setup_make_fixture
+	: > "$MAKE_FIXTURE_OUT/xpf_99.0.16308+601c5462a991_amd64.deb"
+	local out rc
+	out=$(_make_n prepare-deb); rc=$?
+	if [[ $rc -eq 0 && "$out" == *'Reusing prebuilt deb'*99.0.16308* && "$out" != *"dpkg-buildpackage"* ]]; then
+		ok "prepare-deb: prebuilt 99.0.x reused, no stock rebuild (#16308)"
+	else
+		bad "prepare-deb reuse: rc=$rc out=$out"
+	fi
+	# And the full deploy path must carry the reuse decision through.
+	out=$(_make_n cluster-deploy); rc=$?
+	if [[ $rc -eq 0 && "$out" == *'Reusing prebuilt deb'* && "$out" == *"cluster-setup.sh deploy"* && "$out" != *"dpkg-buildpackage"* ]]; then
+		ok "cluster-deploy: prebuilt 99.0.x reused end-to-end (no stock rebuild)"
+	else
+		bad "cluster-deploy reuse: rc=$rc out=$out"
+	fi
+	teardown_make_fixture
+}
+
+test_prepare_deb_fresh_tree_builds_stock() {
+	setup_make_fixture
+	local out rc
+	out=$(_make_n prepare-deb); rc=$?
+	if [[ $rc -eq 0 && "$out" == *"dpkg-buildpackage"* ]]; then
+		ok "prepare-deb: fresh tree builds stock deb"
+	else
+		bad "prepare-deb fresh: rc=$rc out=$out"
+	fi
+	out=$(_make_n cluster-deploy); rc=$?
+	if [[ $rc -eq 0 && "$out" == *"dpkg-buildpackage"* && "$out" == *"cluster-setup.sh deploy"* ]]; then
+		ok "cluster-deploy: fresh tree builds then deploys"
+	else
+		bad "cluster-deploy fresh: rc=$rc out=$out"
+	fi
+	teardown_make_fixture
+}
+
+test_prepare_deb_older_only_rebuilds() {
+	setup_make_fixture
+	: > "$MAKE_FIXTURE_OUT/xpf_0.0.1+gabc_amd64.deb"
+	local out rc
+	out=$(_make_n prepare-deb); rc=$?
+	if [[ $rc -eq 0 && "$out" == *"is older than stock"* && "$out" == *"dpkg-buildpackage"* ]]; then
+		ok "prepare-deb: older-only prebuilt rebuilds stock (not reused)"
+	else
+		bad "prepare-deb older-only: rc=$rc out=$out"
+	fi
+	teardown_make_fixture
+}
+
+test_prepare_deb_explicit_version_builds() {
+	setup_make_fixture
+	: > "$MAKE_FIXTURE_OUT/xpf_99.0.16308+601c5462a991_amd64.deb"
+	local out rc
+	out=$(_make_n prepare-deb DEB_VERSION=99.0.5+selftest); rc=$?
+	if [[ $rc -eq 0 && "$out" == *"dpkg-buildpackage"* && "$out" != *"Reusing prebuilt deb"* ]]; then
+		ok "prepare-deb: explicit DEB_VERSION builds (no reuse shortcut)"
+	else
+		bad "prepare-deb explicit: rc=$rc out=$out"
+	fi
+	out=$(_make_n cluster-deploy DEB_VERSION=99.0.5+selftest); rc=$?
+	if [[ $rc -eq 0 && "$out" == *'XPF_DEPLOY_DEB_VERSION="99.0.5+selftest"'* ]]; then
+		ok "cluster-deploy: explicit DEB_VERSION threaded to script selection"
+	else
+		bad "cluster-deploy explicit threading: rc=$rc out=$out"
+	fi
+	teardown_make_fixture
+}
+
+test_prepare_deb_fast_never_builds_deb() {
+	setup_make_fixture
+	local out rc
+	out=$(_make_n cluster-deploy XPF_DEPLOY_FAST=1); rc=$?
+	if [[ $rc -eq 0 && "$out" != *"dpkg-buildpackage"* && "$out" != *"prepare-deb"* && "$out" == *"cluster-setup.sh deploy"* ]]; then
+		ok "cluster-deploy FAST: raw path, no deb build"
+	else
+		bad "cluster-deploy FAST: rc=$rc out=$out"
+	fi
+	teardown_make_fixture
+}
+
+test_cluster_setup_selects_by_version_wiring() {
+	local setup="$SCRIPT_DIR/cluster-setup.sh" rolling="$SCRIPT_DIR/test-rolling-upgrade.sh" missing=()
+	grep -q 'deploy_select_deb "$PROJECT_ROOT/dist-deb"' "$setup" || missing+=("cluster-setup deploy/attest selection")
+	grep -q 'deploy_select_deb "$PROJECT_ROOT/dist-deb"' "$rolling" || missing+=("rolling-upgrade selection")
+	if grep -Eq 'ls -t .*dist-deb/xpf_' "$setup" "$rolling"; then
+		missing+=("retired ls -t dist-deb selection still present")
+	fi
+	if grep -Eq '^cluster-deploy:.*\bdeb\b' "$SCRIPT_DIR/../../Makefile" || grep -q 'CLUSTER_DEPLOY_PREREQS = deb' "$SCRIPT_DIR/../../Makefile"; then
+		missing+=("Makefile still rebuilds via .PHONY deb prereq")
+	fi
+	grep -q 'prepare-deb' "$SCRIPT_DIR/../../Makefile" || missing+=("Makefile prepare-deb")
+	if (( ${#missing[@]} == 0 )); then
+		ok "wiring: cluster-setup + rolling select by version; Makefile uses prepare-deb (#16308)"
+	else
+		bad "wiring #16308: ${missing[*]}"
+	fi
+}
+
+test_deb_select_version_wins_and_missing_dies() {
+	setup_deb_fixture
+	mkdeb "xpf_99.0.16308+601c5462a991_amd64.deb" 3600
+	mkdeb "xpf_0.0.23371+g30638bcad36b_amd64.deb" 0
+	local got
+	got=$(XPF_DEPLOY_DEB_VERSION="0.0.23371+g30638bcad36b" deploy_select_deb "$DEB_FIXTURE_DIR") || { bad "deb select: version pin failed"; teardown_deb_fixture; return; }
+	[[ "$got" == *"xpf_0.0.23371"* ]] && ok "deb select: explicit version wins over higher version" || bad "deb select: version pin picked $got"
+	if ( XPF_DEPLOY_DEB_VERSION="1.2.3+missing" deploy_select_deb "$DEB_FIXTURE_DIR" ) >/dev/null 2>&1; then
+		bad "deb select: missing explicit version must die"
+	else
+		ok "deb select: missing explicit version dies (fail-closed)"
+	fi
+	teardown_deb_fixture
+}
 # ── Run ───────────────────────────────────────────────────────────────
+test_deb_version_parses_filename
+test_deb_newest_picks_highest_version_not_newest_mtime
+test_deb_newest_stock_only_and_empty
+test_deb_select_pin_wins_and_bad_pin_dies
+test_deb_select_version_wins_and_missing_dies
+test_prepare_deb_reuses_prebuilt_99
+test_prepare_deb_fresh_tree_builds_stock
+test_prepare_deb_explicit_version_builds
+test_prepare_deb_older_only_rebuilds
+test_prepare_deb_fast_never_builds_deb
+test_cluster_setup_selects_by_version_wiring
 test_rolling_secondary_node0_primary
 test_rolling_secondary_node0_secondary
 test_rolling_secondary_multi_rg_scoped_to_rg0
