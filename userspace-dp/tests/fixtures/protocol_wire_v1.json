@@ -961,6 +961,8 @@
       }
     ],
     "error": "16132-error",
+    "error_code": "16132-error-code",
+    "error_retry_class": "retry_debt",
     "fib_generation": 0,
     "fib_routes": [
       {
