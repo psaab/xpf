@@ -1300,12 +1300,51 @@ pub(super) fn static_hit_log(
     ingress_zone_override: Option<u16>,
     logical_ingress_ifindex: i32,
     extra: crate::filter::TermMatchExtra<'_>,
-) -> Option<CachedInputFilterLog> {
+) -> Option<(CachedInputFilterLog, FilterLogSource)> {
+    // Source without evaluating: Pbr iff the routing walk terminates on a
+    // routing-instance term (mirrors static_input_filter_deny_eval/14121).
+    static_hit_log_for_action(forwarding, filter, flow, meta, ingress_zone_override, logical_ingress_ifindex, extra, None)
+}
+
+/// #15949 fold: like `static_hit_log`, but when `final_action` is Some the
+/// carried log's action is rewritten to it. An inline-policer RED drop must
+/// log DENY (Discard), not the Accept placeholder a logged accept term
+/// carries — same normalization `evaluate_filter_ref_log_match` applies
+/// for terminal discards. Also returns the FilterLogSource: Pbr when the
+/// terminating term is a routing-instance term, else Input.
+pub(super) fn static_hit_log_for_action(
+    forwarding: &ForwardingState,
+    filter: &crate::filter::Filter,
+    flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+    logical_ingress_ifindex: i32,
+    extra: crate::filter::TermMatchExtra<'_>,
+    final_action: Option<crate::filter::FilterAction>,
+) -> Option<(CachedInputFilterLog, FilterLogSource)> {
     if !filter.has_log_terms {
         return None;
     }
+    // Determine source: routing-instance walk terminating => Pbr.
+    let is_pbr = filter.affects_route_lookup
+        && crate::filter::evaluate_filter_ref_routing_instance_uncounted(
+            filter,
+            flow.src_ip,
+            flow.dst_ip,
+            flow.forward_key.protocol,
+            flow.forward_key.src_port,
+            flow.forward_key.dst_port,
+            meta.dscp,
+            extra,
+        )
+        .is_some();
+    let source = if is_pbr {
+        FilterLogSource::Pbr
+    } else {
+        FilterLogSource::Input
+    };
     let is_v6 = matches!(flow.dst_ip, IpAddr::V6(_));
-    let log_match = crate::filter::evaluate_interface_filter_log_match(
+    let mut log_match = crate::filter::evaluate_interface_filter_log_match(
         &forwarding.filter_state,
         logical_ingress_ifindex,
         is_v6,
@@ -1318,16 +1357,22 @@ pub(super) fn static_hit_log(
         extra,
         true,
     )?;
-    Some(CachedInputFilterLog {
-        log_match,
-        ingress_zone_id: filter_log_ingress_zone_id(
-            forwarding,
-            meta,
-            ingress_zone_override,
-            logical_ingress_ifindex,
-        ),
-        l4_present: extra.l4_present,
-    })
+    if let Some(action) = final_action {
+        log_match.action = action;
+    }
+    Some((
+        CachedInputFilterLog {
+            log_match,
+            ingress_zone_id: filter_log_ingress_zone_id(
+                forwarding,
+                meta,
+                ingress_zone_override,
+                logical_ingress_ifindex,
+            ),
+            l4_present: extra.l4_present,
+        },
+        source,
+    ))
 }
 
 #[inline]
@@ -1536,15 +1581,28 @@ pub(super) fn evaluate_input_filter_on_session_hit(
                     meta.pkt_len as u64,
                 );
                 if action.drop {
+                    // #15949 fold: RED drop still owes `then log` (DENY action).
+                    let (red_log, red_source) = static_hit_log_for_action(
+                        forwarding,
+                        filter,
+                        flow,
+                        meta,
+                        ingress_zone_override,
+                        ingress_ifindex,
+                        term_match_extra_from_frame(frame, meta),
+                        Some(crate::filter::FilterAction::Discard),
+                    )
+                    .map(|(l, s)| (Some(l), s))
+                    .unwrap_or((None, FilterLogSource::Input));
                     return (
                         Some(SessionHitInputFilterEval {
                             eval: NonPbrInputFilterEval {
                                 action: crate::filter::FilterAction::Discard,
-                                cached_log: None,
+                                cached_log: red_log,
                                 policer_drop: true,
                             },
                             revoked_key: None,
-                            log_source: FilterLogSource::Input,
+                            log_source: red_source,
                         }),
                         // #15794: meter-only replay charged no term counter.
                         false,
@@ -1554,7 +1612,7 @@ pub(super) fn evaluate_input_filter_on_session_hit(
             // #15949 (H34-03): already judged, nothing counted — but a
             // static `then log` term still owes a per-packet FilterLog.
             if filter.has_log_terms {
-                if let Some(cached_log) = static_hit_log(
+                if let Some((cached_log, hit_log_source)) = static_hit_log(
                     forwarding,
                     filter,
                     flow,
@@ -1571,7 +1629,7 @@ pub(super) fn evaluate_input_filter_on_session_hit(
                                 policer_drop: false,
                             },
                             revoked_key: None,
-                            log_source: FilterLogSource::Input,
+                            log_source: hit_log_source,
                         }),
                         false,
                     );
@@ -1639,15 +1697,28 @@ pub(super) fn evaluate_input_filter_on_session_hit(
                         meta.pkt_len as u64,
                     );
                     if action.drop {
+                        // #15949 fold: RED drop still owes `then log` (DENY action).
+                        let (red_log, red_source) = static_hit_log_for_action(
+                            forwarding,
+                            filter,
+                            flow,
+                            meta,
+                            ingress_zone_override,
+                            ingress_ifindex,
+                            term_match_extra_from_frame(frame, meta),
+                            Some(crate::filter::FilterAction::Discard),
+                        )
+                        .map(|(l, s)| (Some(l), s))
+                        .unwrap_or((None, FilterLogSource::Input));
                         return (
                             Some(SessionHitInputFilterEval {
                                 eval: NonPbrInputFilterEval {
                                     action: crate::filter::FilterAction::Discard,
-                                    cached_log: None,
+                                    cached_log: red_log,
                                     policer_drop: true,
                                 },
                                 revoked_key: None,
-                                log_source: FilterLogSource::Input,
+                                log_source: red_source,
                             }),
                             // #15794: meter-only replay charged no term counter.
                             false,
@@ -1657,7 +1728,7 @@ pub(super) fn evaluate_input_filter_on_session_hit(
             }
             // #15949 (H34-03): stale ACCEPT revalidation also owes log.
             if result.0.is_none() && filter.has_log_terms {
-                if let Some(cached_log) = static_hit_log(
+                if let Some((cached_log, hit_log_source)) = static_hit_log(
                     forwarding,
                     filter,
                     flow,
@@ -1674,7 +1745,7 @@ pub(super) fn evaluate_input_filter_on_session_hit(
                                 policer_drop: false,
                             },
                             revoked_key: None,
-                            log_source: FilterLogSource::Input,
+                            log_source: hit_log_source,
                         }),
                         result.1,
                     );
@@ -1732,15 +1803,28 @@ pub(super) fn evaluate_input_filter_on_session_hit(
                         meta.pkt_len as u64,
                     );
                     if action.drop {
+                        // #15949 fold: RED drop still owes `then log` (DENY action).
+                        let (red_log, red_source) = static_hit_log_for_action(
+                            forwarding,
+                            filter,
+                            flow,
+                            meta,
+                            ingress_zone_override,
+                            ingress_ifindex,
+                            term_match_extra_from_frame(frame, meta),
+                            Some(crate::filter::FilterAction::Discard),
+                        )
+                        .map(|(l, s)| (Some(l), s))
+                        .unwrap_or((None, FilterLogSource::Input));
                         return (
                             Some(SessionHitInputFilterEval {
                                 eval: NonPbrInputFilterEval {
                                     action: crate::filter::FilterAction::Discard,
-                                    cached_log: None,
+                                    cached_log: red_log,
                                     policer_drop: true,
                                 },
                                 revoked_key: None,
-                                log_source: FilterLogSource::Input,
+                                log_source: red_source,
                             }),
                             // #15794: meter-only replay charged no term counter.
                             false,
@@ -1750,7 +1834,7 @@ pub(super) fn evaluate_input_filter_on_session_hit(
                     // replay charges no `FilterTermCounter` — report uncounted
                     // so the caller charges `then count` exactly once.
                     // #15949 (H34-03): conforming sessionless hit owes log.
-                    if let Some(cached_log) = static_hit_log(
+                    if let Some((cached_log, hit_log_source)) = static_hit_log(
                         forwarding,
                         filter,
                         flow,
@@ -1767,7 +1851,7 @@ pub(super) fn evaluate_input_filter_on_session_hit(
                                     policer_drop: false,
                                 },
                                 revoked_key: None,
-                                log_source: FilterLogSource::Input,
+                                log_source: hit_log_source,
                             }),
                             false,
                         );
@@ -1777,7 +1861,7 @@ pub(super) fn evaluate_input_filter_on_session_hit(
             }
             // #15949 (H34-03): sessionless ACCEPT also owes per-packet log.
             if verdict.is_none() && filter.has_log_terms {
-                if let Some(cached_log) = static_hit_log(
+                if let Some((cached_log, hit_log_source)) = static_hit_log(
                     forwarding,
                     filter,
                     flow,
@@ -1794,7 +1878,7 @@ pub(super) fn evaluate_input_filter_on_session_hit(
                                 policer_drop: false,
                             },
                             revoked_key: None,
-                            log_source: FilterLogSource::Input,
+                            log_source: hit_log_source,
                         }),
                         counted,
                     );

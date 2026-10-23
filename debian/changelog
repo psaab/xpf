@@ -5,7 +5,9 @@ xpf (0.0.0) unstable; urgency=medium
     `then log` on static session hits and clear zombie LocalDelivery
     policers on revalidation; sort prepared-drop indices before CoS
     pop-snapshot unwind; refresh materialized queues' V_min floor and
-    shared_exact on shared-root lease swaps. Miss-path late-metering
+    shared_exact on shared-root lease swaps; policer-RED session hits
+    carry their `then log` as DENY and routing-instance accepted hits
+    log with Pbr source. Miss-path late-metering
     ordering (H34-04 arm 2) deferred to avoid poll_descriptor/mod.rs
     collision with open PRs.
 
