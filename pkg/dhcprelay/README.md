@@ -706,6 +706,53 @@ set forwarding-options dhcp-relay group <g> overrides maximum-packet-rate <pps>
   injected clock (`TestTokenBucket_BurstThenRefill`); the end-to-end flood-drop
   is `TestRunRelay_RateLimit_5670` / `TestRunRelay_RateLimit_DefaultBound`.
 
+- **Per-sender fairness (#16087, folded 6x on #16322).** The
+  aggregate bucket alone let one sender sustaining
+  `>= maximum-packet-rate` consume every refill, so other clients'
+  DISCOVERs starved for the flood's duration. Each distinct sender now
+  also gets its own sub-bucket (`fairLimiter` in `relay.go`), gated
+  **before** the aggregate and **before the parse** on both protocols
+  (v4: `chaddr` peeked from the fixed RFC 951 header; v6: Client-ID
+  DUID peeked from the wire options, `fairSenderKeyV6FromWire`), with
+  no refunds either way — the aggregate stays a hard pre-parse bound
+  on parsed work, fairness is additional, not substitutive. Sustained
+  `ceil(rate / 256)` pps per sender (floored at 1 pps), burst at least
+  8 (a full DORA plus retransmissions clears instantly; at rates
+  <= 4 pps the burst is lifted to the aggregate burst, and a waiter
+  rotation hands banked aggregate refill to queued senders in FIFO
+  order so a competing sender progresses at 1 pps instead of racing
+  refills — banked pool clamped to the aggregate burst, waiter count
+  capped by the 256-entry sender table, and a granted ticket expires
+  after 2 s so an absent grantee cannot block the queue). Senders
+  with no usable identity share one unknown-sender bucket. The table
+  is bounded at 256 senders per interface; a new sender is denied
+  while every slot is held by an active sender, and the longest-idle
+  slot (idle >= 30 s) is recycled. Fairness drops count in the same
+  `RequestsDroppedRateLimit` counter and throttled log. (Only v6
+  Relay-Reply dispatcher traffic is limiter-exempt, on aggregate-only
+  accounting; Relay-Forw is gated as the unknown sender and then
+  dropped as nested in the tail.)
+  - **Honest limit — read before relying on this.** The sender key is
+    chosen by the client, so fairness stops a *naive* single-identity
+    flooder — including the much more common accidental case of one
+    looping client wedging a segment — not an attacker rotating
+    MACs/DUIDs per packet. Rotation is still bounded by the aggregate
+    bucket (CPU/amplification) and cannot evict established senders
+    from the fairness table, but it can deny *new* senders during the
+    flood. Per-port fairness against identity rotation needs
+    trustworthy ingress-port identity: use switch controls (DHCP
+    snooping, per-port rate limits / storm control) on segments where
+    that threat matters. Multi-MAC floods likewise need switch
+    controls; no relay-side keying can distinguish them.
+  - Tests: `TestRunRelay_Fairness_SecondMACCompletesDORA` (the issue's
+    decisive check — 1-MAC flood at the cap, second MAC completes
+    DORA), `TestDHCPV6Fairness_SecondClientGetsShare`,
+    `TestDHCPV6RelayForwardGatedByLimiter`,
+    `TestFairLimiter_Rate1TwoSenderRotation`,
+    `TestFairLimiter_TicketExpiryUnblocksFIFO`,
+    `TestFairSenderKeyV6FromWire`, `TestFairLimiter_*` (share, refill,
+    table bound, rotation, idle recycling).
+
 ### Trust override (#5414)
 
 ```

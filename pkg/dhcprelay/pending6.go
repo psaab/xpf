@@ -174,6 +174,78 @@ func pending6IALessKey(key pending6Key) pending6Key {
 	return key
 }
 
+// fairSenderKeyV6 is the DHCPv6 fairness identity (#16087): the Client-ID
+// DUID bytes alone — no xid, no IAID — so every transaction from one
+// client shares one sub-bucket. A message with no Client ID (or an
+// unrepresentable DUID) reports ok=false; the caller (#16087 fold) lumps
+// those into fairUnknownSenderV6 so the fairness gate covers every
+// request, while identified clients keep distinct identities.
+type fairSenderKeyV6 struct {
+	duid    [pending6MaxDUIDSize]byte
+	duidLen uint8
+}
+
+// fairUnknownSenderV6 is the shared fairness identity for DHCPv6
+// requests carrying no usable Client ID.
+var fairUnknownSenderV6 = fairSenderKeyV6{duidLen: 0xFF}
+
+func fairSenderKeyForV6(packet dhcpv6.DHCPv6) (fairSenderKeyV6, bool) {
+	k, ok := pending6KeyFor(packet)
+	if !ok || k.duidLen == 0 {
+		return fairSenderKeyV6{}, false
+	}
+	return fairSenderKeyV6{duid: k.duid, duidLen: k.duidLen}, true
+}
+
+// v6MsgHeaderLen is the DHCPv6 client-message header (type 1 + xid 3,
+// RFC 8415 §8); options follow as code/len/value TLVs.
+const v6MsgHeaderLen = 4
+
+// fairSenderKeyV6FromWire peeks the Client-ID DUID from the wire options
+// BEFORE dhcpv6.FromBytes (fold 2 on #16322, mirroring the v4 BOOTP
+// peek), walking at most the first Client-ID option (code 1, RFC 8415
+// §21.2). It never allocates: the DUID bytes are copied into the fixed
+// key array, truncated at pending6MaxDUIDSize exactly as the parsed key
+// clamps. Malformed framing (truncated TLV, length overrunning the
+// datagram, missing Client ID) reports ok=false and the caller lumps
+// the packet into fairUnknownSenderV6 — no lumped class gets more than
+// the unknown sender's own fairness share, so junk cannot buy identity.
+//
+// NOTE on key-space consistency: pending6KeyFor builds the same bytes
+// via copyPending6DUID's typed encoding (type(2) + fields), whereas
+// this peek copies the raw wire DUID. The two encodings agree for the
+// wire form the library parses (verified by
+// TestFairSenderKeyV6FromWire). Relay messages report ok=false here;
+// the caller routes them ahead of the fairness gate.
+func fairSenderKeyV6FromWire(buf []byte) (fairSenderKeyV6, bool) {
+	if len(buf) <= v6MsgHeaderLen {
+		return fairSenderKeyV6{}, false
+	}
+	opts := buf[v6MsgHeaderLen:]
+	for len(opts) >= 4 {
+		code := int(opts[0])<<8 | int(opts[1])
+		l := int(opts[2])<<8 | int(opts[3])
+		if l > len(opts)-4 {
+			return fairSenderKeyV6{}, false // TLV runs past the datagram
+		}
+		if code == int(dhcpv6.OptionClientID) {
+			if l == 0 {
+				return fairSenderKeyV6{}, false
+			}
+			k := fairSenderKeyV6{}
+			n := l
+			if n > pending6MaxDUIDSize {
+				n = pending6MaxDUIDSize
+			}
+			copy(k.duid[:], opts[4:4+n])
+			k.duidLen = uint8(n)
+			return k, true
+		}
+		opts = opts[4+l:]
+	}
+	return fairSenderKeyV6{}, false
+}
+
 // insertPending6 records the binding for a client request the relay is
 // about to forward upstream: the primary IA-bound key, plus — for the
 // request types in pending6MayReplyWithoutIA whose Reply may legally

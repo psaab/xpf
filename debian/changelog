@@ -1,5 +1,19 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * DHCP relay: add bounded per-sender fairness ahead of the
+    per-interface aggregate token bucket (#16087, folded 6x on
+    #16322). One sender sustaining the maximum-packet-rate no longer
+    starves other clients: each chaddr / Client-ID DUID (both peeked
+    from the wire, pre-parse) gets a 1/256 share of the rate (floored
+    at 1 pps, burst at least 8) in a 256-entry table, with a banked-
+    refill waiter rotation so a competing sender progresses even at
+    1 pps. No aggregate refund: the aggregate stays the hard
+    pre-parse bound and fairness is additional to it. Stops a naive
+    single-identity flood; identity rotation still needs switch
+    controls (pkg/dhcprelay/README.md).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Convert every exhaustive StaticNATRuleSnapshot (35) and
     ThreeColorPolicerSnapshot (5) literal to a
     `..Default::default()` tail, dropping only default-valued

@@ -116,12 +116,464 @@ func (b *tokenBucket) allow() bool {
 	return false
 }
 
+// bankRefill accrues the bucket's elapsed refill and DRAINS the whole
+// balance (whole tokens plus fraction) into the caller's credit pool,
+// returning the drained amount. The fold-2 low-rate rotation calls it
+// on every packet — including dropped ones — so a waiting sender is
+// served by aggregate accrual rather than by winning a refill race.
+// Because the bucket is drained to zero each call, allow() afterwards
+// can only refill from post-bank accrual: total admissions still track
+// burst + rate*elapsed, just banked through the pool.
+func (b *tokenBucket) bankRefill() float64 {
+	now := b.now()
+	if elapsed := now.Sub(b.last).Seconds(); elapsed > 0 {
+		b.tokens += elapsed * b.rate
+		if b.tokens > b.burst {
+			b.tokens = b.burst
+		}
+		b.last = now
+	}
+	drained := b.tokens
+	b.tokens = 0
+	return drained
+}
+
 // relayBurstFor sizes the token-bucket burst capacity from the sustained rate:
 // two seconds' worth of packets, so a brief simultaneous-boot spike is admitted
 // instantly while the sustained rate still bounds a persistent flood.
 func relayBurstFor(rate int) int {
 	return rate * 2
 }
+
+// --- Bounded per-sender fairness within the aggregate bucket (#16087) ---
+//
+// #5670's aggregate bucket is the CPU/amplification bound and stays the
+// outer gate. Alone it lets one sender that sustains >= rate consume every
+// refill, so a second sender's DISCOVERs are admitted only in proportion to
+// the flood's gaps — for a saturating single-MAC flood, effectively never.
+// fairLimiter layers a bounded per-sender sub-limit under the aggregate:
+// each distinct sender key gets its own token bucket of
+// ceil(aggregateRate/maxFairSenders) sustained (burst perSenderBurst), so
+// any one sender can consume at most ~1/maxFairSenders of the aggregate
+// sustained rate and the remaining share stays available to other senders.
+// With maxFairSenders senders flooding simultaneously every sub-bucket is
+// full-tilt and their sum still cannot exceed the aggregate rate, so the
+// aggregate bound is preserved. The trade-off is deliberate: a LONE sender
+// is also capped at the per-sender rate, not the full aggregate. That is
+// far above legitimate DHCP client behaviour (a handful of packets per
+// lease, renewals hours apart, retransmissions on a 4/8/16s backoff), and
+// perSenderBurst still admits a whole DORA exchange plus retransmissions
+// instantly; in exchange, a second sender is guaranteed its own share the
+// moment it appears, instead of competing for aggregate refills.
+//
+// HONEST LIMIT (Codex dissent on A10-17, recorded in #16087): the sender
+// key is attacker-chosen (v4 chaddr, v6 Client-ID DUID). This stops a
+// NAIVE single-identity flooder — including the far more common accidental
+// case of one looping/misbehaving client — not a flooder that rotates
+// identities per packet. Rotating identities is bounded by the aggregate
+// bucket (CPU/amplification) and by maxFairSenders: each new identity gets
+// a fresh sub-bucket, so after maxFairSenders rotations the table is full
+// and further NEW identities are denied at the fairness layer while known
+// senders keep their reserved share — rotation can deny service to other
+// NEWcomers during the flood, but cannot evict established senders.
+// Per-port fairness against identity rotation needs trustworthy
+// ingress-port identity, which belongs at the switch (DHCP snooping /
+// port rate limits); that is documented, not implemented here.
+//
+// MEMORY BOUND: the table holds at most maxFairSenders buckets, created
+// lazily and evicted longest-idle-first when full. The per-sender drain
+// uses the same clock seam as the aggregate bucket, so tests are
+// deterministic. Owned solely by the single per-interface read-loop
+// goroutine (v4 main loop / v6 client loop), so it needs no lock, exactly
+// like tokenBucket.
+const maxFairSenders = 256
+
+// fairIdleEvict is how long a sender bucket may sit untouched before it is
+// preferred for eviction. It only orders eviction among idle buckets; a
+// bucket that keeps sending is never evicted under it.
+const fairIdleEvict = pendingTTL
+
+// fairBucket is one sender's sub-bucket plus its last-touch time for
+// idle eviction.
+type fairBucket[K comparable] struct {
+	bucket *tokenBucket
+	last   time.Time
+}
+
+// fairLimiter is the per-sender fairness layer under the aggregate bucket.
+// The zero value is not usable; construct with newFairLimiter.
+type fairLimiter[K comparable] struct {
+	rate  int // aggregate sustained pps (for sub-rate derivation)
+	now   func() time.Time
+	table map[K]*fairBucket[K] // <= maxFairSenders; eviction scans for longest-idle
+	// credit/waiters/ticket implement the fold-2 low-rate handoff: the
+	// banked aggregate balance handed round-robin to queued senders.
+	// ticket is the sender holding a granted handoff: its next packet
+	// is admitted without fairness or aggregate spend (the grant was
+	// already paid from the banked pool). See admitWithAggregate.
+	// Invariants (folds 3-5): pool credit + any outstanding ticket
+	// together never exceed the aggregate burst; len(waiters) never
+	// exceeds len(table) (joinRotation requires a table entry,
+	// evictIdle reconciles); a ticket expires after fairTicketTTL so
+	// an absent grantee cannot block the FIFO forever; every admit
+	// attempt refreshes the sender's last-seen.
+	credit  float64
+	waiters []K
+	waiting map[K]bool
+	ticket  K
+	hasTick bool
+	tickAt  time.Time
+}
+
+// newFairLimiter builds a fairness limiter for the given aggregate rate.
+// The per-sender sustained rate is ceil(aggregate/maxFairSenders) with a
+// floor of 1 pps, so even a huge configured aggregate never gives one
+// sender a sub-rate that can starve the rest, and a tiny aggregate still
+// lets every sender make progress at 1 pps. A nil clock defaults to
+// time.Now.
+func newFairLimiter[K comparable](aggregateRate int, now func() time.Time) *fairLimiter[K] {
+	if now == nil {
+		now = time.Now
+	}
+	return &fairLimiter[K]{
+		rate:  resolveMaxPacketRate(aggregateRate),
+		now:   now,
+		table: make(map[K]*fairBucket[K]),
+	}
+}
+
+// perSenderRate returns the sustained pps one sender may consume: its
+// 1/maxFairSenders share of the aggregate, rounded up, floored at
+// fairRateFloor. The floor is load-bearing at tiny configured rates
+// (#16087 fold): at an aggregate of 1 pps a bare 1/256 share would admit
+// a sender's second packet only after ~256s, stranding every DORA after
+// the first exchange — fairness must never make a working low-rate
+// segment unusable. The floor lets each active sender trickle at the
+// floor rate; the aggregate token bucket still hard-caps total parsed
+// work at the configured rate regardless of how many sender buckets
+// hold tokens, so the floor costs no CPU bound.
+func (f *fairLimiter[K]) perSenderRate() int {
+	r := (f.rate + maxFairSenders - 1) / maxFairSenders
+	if r < fairRateFloor {
+		return fairRateFloor
+	}
+	return r
+}
+
+// fairRateFloor is the minimum per-sender sustained rate (pps).
+const fairRateFloor = 1
+
+// fairBurstFloor is the minimum per-sender burst: a complete legitimate
+// exchange (DISCOVER/REQUEST plus RFC 2131 retransmissions, or a v6
+// Solicit/Request/Renew sequence) must clear instantly even though the
+// per-sender sustained rate is only ~1 pps at the default aggregate.
+// At tiny aggregates the burst is at least the aggregate burst, so a
+// single configured-pps segment completes a full DORA inside the burst.
+const fairBurstFloor = 8
+
+// fairTicketTTL bounds how long a granted handoff ticket stays valid
+// (fold 3). A grantee that never returns (client went silent after
+// queueing) must not block the FIFO: after this long the ticket is
+// discarded on the next packet's bank step and the rotation grants the
+// next waiter. One aggregate interval at the slowest rotation rate
+// (1 pps) plus margin; at higher tiny rates it is several intervals.
+const fairTicketTTL = 2 * time.Second
+
+// perSenderBurst returns one sender's burst capacity: twice its sustained
+// share, at least fairBurstFloor. Additionally, when the aggregate itself
+// is tiny (relayBurstFor(rate) <= fairBurstFloor, i.e. rate <= 4 pps) the
+// burst is lifted to the aggregate burst, so a 1-2 pps segment completes
+// a full DORA inside the burst. The lift is capped at the fairness floor
+// on purpose: at ordinary rates bursting one sender to the whole
+// aggregate burst would hand a lone flooder the entire burst that other
+// senders are supposed to share.
+func (f *fairLimiter[K]) perSenderBurst() int {
+	b := relayBurstFor(f.perSenderRate())
+	if b < fairBurstFloor {
+		b = fairBurstFloor
+	}
+	if agg := relayBurstFor(f.rate); agg <= fairBurstFloor && b < agg {
+		b = agg
+	}
+	return b
+}
+
+// allowSender reports whether a packet from sender key may pass the
+// fairness layer. Callers gate fairness BEFORE the aggregate bucket and
+// never refund either: a fairness denial consumes no aggregate token,
+// and an aggregate denial has already consumed the fairness token (the
+// flooder's burst then also pays its fairness toll — strictly tighter,
+// and fairness tokens are per-sender-cheap). A known sender is admitted
+// while its sub-bucket holds a token. A NEW sender is admitted
+// (creating its bucket) unless the table is full and no bucket has been
+// idle for fairIdleEvict — in that case the packet is denied by fairness
+// so established senders keep their share against identity rotation;
+// the caller still counts it as a rate-limit drop.
+func (f *fairLimiter[K]) allowSender(key K) bool {
+	now := f.now()
+	if fb, ok := f.table[key]; ok {
+		fb.last = now
+		return fb.bucket.allow()
+	}
+	if len(f.table) >= maxFairSenders && !f.evictIdle(now) {
+		return false
+	}
+	sub := f.perSenderRate()
+	fb := &fairBucket[K]{bucket: newTokenBucket(sub, f.perSenderBurst(), f.now), last: now}
+	f.table[key] = fb
+	return fb.bucket.allow()
+}
+
+// touch refreshes a sender's last-seen time without spending fairness.
+// Fold 5: the queued/ticket shortcut paths in admitWithAggregate admit
+// (or queue) a sender without an allowSender call, so without this the
+// sender's table entry went stale while it was actively contending —
+// after fairIdleEvict an actively-queued waiter became the preferred
+// eviction victim. Every admit attempt touches its sender's entry.
+func (f *fairLimiter[K]) touch(key K) {
+	if fb, ok := f.table[key]; ok {
+		fb.last = f.now()
+	}
+}
+
+// fairAdmit is the low-rate fairness verdict: a sender ALREADY queued
+// in the waiter rotation is fairness-admitted without spending its
+// sub-bucket token. Without this, a flooder that burned its fairness
+// burst while queued can never re-present at the queue head (its own
+// fairness re-denies and re-queues it), and the rotation head is
+// maintenance-locked to a sender that can never be served — the exact
+// head-of-line lock the rotation exists to avoid. The aggregate (or
+// the banked pool) remains the hard bound for queued senders.
+func (f *fairLimiter[K]) fairAdmit(key K) bool {
+	if f.waiting[key] {
+		f.touch(key)
+		return true
+	}
+	return f.allowSender(key)
+}
+
+// lowRateRotation reports whether the fold-2 handoff is active: only
+// when the aggregate burst is no larger than the fairness burst floor
+// (rate <= 4 pps). Above that, per-sender buckets plus the aggregate
+// refill already give every sender timely progress and no handoff is
+// needed.
+func (f *fairLimiter[K]) lowRateRotation() bool {
+	return relayBurstFor(f.rate) <= fairBurstFloor
+}
+
+// admitWithAggregate is the composed fairness+aggregate gate (fold 2):
+// fairness first, then the aggregate, exactly as the loops call it.
+//
+// Normal rates: fairness-denied = dropped without spending aggregate;
+// aggregate-denied = dropped having spent fairness (strictly tighter).
+//
+// Tiny rates (lowRateRotation): first-come-first-served on the single
+// aggregate token would let a continuously retransmitting flooder win
+// every refill race against a competing sender, and gating fairness
+// first would burn the flooder's burst then hand its refills to itself.
+// Instead, every packet first banks whatever fractional refill the
+// aggregate has accrued into a shared credit pool. A queued waiter
+// costs no fairness token (fairness must not strand the sender the
+// rotation exists to serve). When the pool reaches one whole token the
+// waiter at the HEAD of the rotation is admitted for exactly one
+// packet on its next arrival and leaves the rotation — served by any
+// sender's arrival, so a competitor progresses within a bounded number
+// of aggregate intervals instead of racing refills. The credit is real
+// banked refill, not minted tokens: total admissions still track
+// burst + rate*elapsed.
+func (f *fairLimiter[K]) admitWithAggregate(key K, agg *tokenBucket) bool {
+	// Fold 5: every admit attempt refreshes the sender's last-seen, so
+	// actively-contending queued/ticketed senders are never the idle
+	// eviction victims allowSender's table-full path would pick.
+	f.touch(key)
+	if !f.lowRateRotation() {
+		if !f.allowSender(key) {
+			return false
+		}
+		return agg.allow()
+	}
+	f.credit += agg.bankRefill()
+	// Fold 5: the cap covers pool + outstanding paid ticket together.
+	// A granted ticket was already paid out of the pool (credit-- at
+	// grant), so clamping the pool alone let pool+ticket reach
+	// burst+1 banked admissions. The outstanding ticket is subtracted
+	// from the room before clamping.
+	room := float64(relayBurstFor(f.rate))
+	if f.hasTick {
+		room--
+	}
+	if f.credit > room {
+		f.credit = room // pool + outstanding ticket <= aggregate burst
+	}
+	// Ticket holder: a previous arrival granted this sender the
+	// handoff (paid from the pool). Admit without further spend —
+	// unless the ticket has expired (fold 3): an absent grantee must
+	// not block the FIFO, so a stale ticket is discarded and the
+	// rotation re-grants the next waiter below.
+	if f.hasTick && f.now().Sub(f.tickAt) > fairTicketTTL {
+		f.hasTick = false
+	}
+	if f.hasTick && f.ticket == key {
+		f.hasTick = false
+		return true
+	}
+	// Serve the queue head from the pool BEFORE this packet's fairness
+	// verdict — but only while no (unexpired) ticket is outstanding.
+	if len(f.waiters) > 0 && f.credit >= 1 && !f.hasTick {
+		head := f.waiters[0]
+		f.credit--
+		f.leaveRotation(head)
+		if head == key {
+			return true
+		}
+		f.ticket, f.hasTick, f.tickAt = head, true, f.now()
+	}
+	// Fairness denial rotates a head waiter to the back (it must not
+	// head-of-line block others) and queues everyone else.
+	if !f.fairAdmit(key) {
+		if len(f.waiters) > 0 && f.waiters[0] == key {
+			f.waiters = append(f.waiters[1:], key)
+		} else {
+			f.joinRotation(key)
+		}
+		return false
+	}
+	// Fairness-admitted and present: if the banked pool can pay, take
+	// the current token now. Queued waiters keep priority for the NEXT
+	// banked token (their head position is untouched), but their
+	// absence must not veto present traffic — otherwise at rate 1 a
+	// sender arriving once per step watches the flooder re-queue ahead
+	// of it forever while the pool sits unspent between its arrivals.
+	if f.credit >= 1 {
+		f.credit--
+		return true
+	}
+	if len(f.waiters) == 0 && agg.allow() {
+		return true
+	}
+	f.joinRotation(key)
+	return false
+}
+
+// joinRotation appends key to the waiter FIFO if not already queued.
+// Fold 3 bound: a key may queue only while it holds a sender-table
+// entry, so len(waiters) <= len(table) <= maxFairSenders always —
+// waiter state is capped by the sender table, never a second
+// unbounded structure. Callers create/refresh the table entry via
+// allowSender before queueing; a key whose entry was evicted queues
+// only after re-creating it (and paying fairness again).
+func (f *fairLimiter[K]) joinRotation(key K) {
+	if _, ok := f.table[key]; !ok {
+		return
+	}
+	if f.waiting == nil {
+		f.waiting = make(map[K]bool)
+	}
+	if f.waiting[key] {
+		return
+	}
+	f.waiting[key] = true
+	f.waiters = append(f.waiters, key)
+}
+
+// leaveRotation removes key from the waiter FIFO, if present.
+func (f *fairLimiter[K]) leaveRotation(key K) {
+	if !f.waiting[key] {
+		return
+	}
+	delete(f.waiting, key)
+	for i, w := range f.waiters {
+		if w == key {
+			f.waiters = append(f.waiters[:i], f.waiters[i+1:]...)
+			return
+		}
+	}
+}
+
+// evictIdle removes the longest-idle bucket if it has been untouched for
+// at least fairIdleEvict, reporting whether a slot was freed. Fold 4:
+// eviction reconciles the rotation state for the evicted key — it is
+// dropped from waiters/waiting, and if it held the outstanding ticket
+// the ticket is forfeited (tickAt zeroed with hasTick). Without this, a
+// table-full eviction left an orphan waiter (inflating the queue past
+// the len(waiters) <= len(table) invariant) and an orphan ticket whose
+// phantom holder could still be admitted by a later key match.
+func (f *fairLimiter[K]) evictIdle(now time.Time) bool {
+	var oldest K
+	var oldestAt time.Time
+	found := false
+	for k, fb := range f.table {
+		if !found || fb.last.Before(oldestAt) {
+			oldest, oldestAt, found = k, fb.last, true
+		}
+	}
+	if !found || now.Sub(oldestAt) < fairIdleEvict {
+		return false
+	}
+	delete(f.table, oldest)
+	f.leaveRotation(oldest)
+	if f.hasTick && f.ticket == oldest {
+		f.hasTick = false
+		f.tickAt = time.Time{}
+	}
+	return true
+}
+
+// fairSenderKeyV4 derives the v4 fairness key: the chaddr (clamped like
+// pendingKeyFor) WITHOUT the xid — fairness is per client identity, not
+// per transaction, so retransmissions and renewals from one client share
+// one sub-bucket. The hlen participates so different-length addresses do
+// not collide.
+type fairSenderKeyV4 struct {
+	hlen   uint8
+	chaddr [16]byte
+}
+
+func fairSenderKeyForV4(pkt *dhcpv4.DHCPv4) fairSenderKeyV4 {
+	k := fairSenderKeyV4{}
+	n := len(pkt.ClientHWAddr)
+	if n > len(k.chaddr) {
+		n = len(k.chaddr)
+	}
+	copy(k.chaddr[:], pkt.ClientHWAddr[:n])
+	k.hlen = uint8(n)
+	return k
+}
+
+// v4HlenOff is the byte offset of hlen in a BOOTP/DHCPv4 wire packet
+// (op 1 + htype 1); chaddr follows at v4ChaddrOff. The offsets are fixed
+// by RFC 951, so the fairness key can be peeked from the wire header
+// without a full TLV parse.
+const (
+	v4HlenOff   = 2
+	v4ChaddrOff = 28
+)
+
+// fairSenderKeyFromWire peeks the fairness key from the fixed BOOTP
+// header BEFORE the aggregate allow() and before dhcpv4.FromBytes, so
+// fairness can gate ahead of the aggregate (fold on #16322). It reports
+// ok=false for datagrams too short to contain the header or with an
+// hlen of 0 or > 16; the caller lumps those into fairUnknownSenderV4 (a
+// truncated datagram has no client identity to be fair to, and
+// FromBytes will drop it right after the aggregate admits it).
+func fairSenderKeyFromWire(buf []byte) (fairSenderKeyV4, bool) {
+	if len(buf) < v4ChaddrOff+16 {
+		return fairSenderKeyV4{}, false
+	}
+	hlen := int(buf[v4HlenOff])
+	if hlen <= 0 || hlen > 16 {
+		return fairSenderKeyV4{}, false
+	}
+	k := fairSenderKeyV4{hlen: uint8(hlen)}
+	copy(k.chaddr[:], buf[v4ChaddrOff:v4ChaddrOff+hlen])
+	return k, true
+}
+
+// fairUnknownSenderV4 is the shared fairness identity for v4 datagrams
+// whose wire header carries no usable chaddr. They stay bounded by the
+// aggregate bucket (checked first in effect: fairness denies only
+// throttle unparseable traffic further), never legitimate clients.
+var fairUnknownSenderV4 = fairSenderKeyV4{hlen: 0xFF}
 
 // readBufSize is the size of the per-loop read buffer for both the
 // client-facing and server-facing UDP sockets.
@@ -1633,6 +2085,8 @@ func (m *Manager) runRelaySession(ctx context.Context,
 		// per the project logging rules).
 		rateBucket := newTokenBucket(ir.maxPacketRate,
 			relayBurstFor(ir.maxPacketRate), m.now)
+		// #16087 fold: per-sender fairness (wire-peeked chaddr) ahead of the aggregate.
+		fair := newFairLimiter[fairSenderKeyV4](ir.maxPacketRate, m.now)
 		warnedRateLimit := false
 		for {
 			n, srcAddr, err := conn.ReadFrom(buf)
@@ -1649,14 +2103,19 @@ func (m *Manager) runRelaySession(ctx context.Context,
 				continue
 			}
 
-			// #5670: bound the per-interface admit rate BEFORE the (variable-
-			// length TLV) dhcpv4.FromBytes parse and the Option-82 fan-out to
-			// EVERY configured server. Each admitted packet is a CPU cost and a
-			// 1→N amplification into the upstream DHCP servers, so an untrusted
-			// client segment flooding :67 must be throttled at the cheapest point.
-			// Excess is dropped and counted; the log is throttled (warn-once then
-			// Debug) so a sustained flood cannot spam the journal.
-			if !rateBucket.allow() {
+			// #16087 fold 2: fairness+aggregate composed gate BEFORE the
+			// parse. The v4 sender key (chaddr) sits at a fixed RFC 951
+			// offset in the BOOTP header, so it is peeked from the wire
+			// bytes — still pre-parse — and admitWithAggregate runs
+			// fairness first, then the aggregate (at tiny rates, the
+			// waiter-rotation handoff). No refund exists: the aggregate
+			// stays a hard pre-parse bound on parsed work.
+			// Truncated/headerless datagrams share fairUnknownSenderV4.
+			fairKey, fok := fairSenderKeyFromWire(buf[:n])
+			if !fok {
+				fairKey = fairUnknownSenderV4
+			}
+			if !fair.admitWithAggregate(fairKey, rateBucket) {
 				ir.requestsDroppedRateLimit.Add(1)
 				if !warnedRateLimit {
 					slog.Warn("dhcp-relay: client request rate limit exceeded, dropping excess",
@@ -1685,12 +2144,6 @@ func (m *Manager) runRelaySession(ctx context.Context,
 			if !clientRequestRelayable(msgType) {
 				continue
 			}
-
-			slog.Debug("dhcp-relay: received client request",
-				"interface", ifaceName,
-				"type", msgType,
-				"client_mac", pkt.ClientHWAddr,
-				"src", srcAddr)
 
 			// #2456: HA master-state gate. On a shared client segment both the
 			// cluster MASTER and the BACKUP node receive the client broadcast;

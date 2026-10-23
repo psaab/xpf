@@ -1214,6 +1214,8 @@ func (m *dhcpV6Manager) runDHCPV6ClientLoop(ctx context.Context, relay *dhcpV6Re
 	interfaceID := effectiveDHCPv6InterfaceID(relay.spec.interfaceID, relay.ifaceName)
 	rate := resolveMaxPacketRate(relay.maxPacketRate)
 	rateBucket := newTokenBucket(rate, relayBurstFor(rate), m.now)
+	// #16087 fold: per-sender fairness gates additional to the aggregate.
+	fair := newFairLimiter[fairSenderKeyV6](rate, m.now)
 	warnedRateLimit := false
 	buf := make([]byte, readBufSize)
 	for {
@@ -1221,19 +1223,32 @@ func (m *dhcpV6Manager) runDHCPV6ClientLoop(ctx context.Context, relay *dhcpV6Re
 		if err != nil {
 			return
 		}
-		if !rateBucket.allow() {
-			relay.requestsDroppedRateLimit.Add(1)
-			if !warnedRateLimit {
-				slog.Warn("dhcpv6-relay: client request rate limit exceeded, dropping excess",
-					"interface", relay.ifaceName, "rate_pps", rate, "src", source)
-				warnedRateLimit = true
-			} else {
-				slog.Debug("dhcpv6-relay: client request rate limit exceeded, dropping",
-					"interface", relay.ifaceName, "src", source)
-			}
-			continue
+		// Fold 2: fairness+aggregate gate BEFORE dhcpv6.FromBytes for
+		// client messages, mirroring the v4 wire peek. The DUID key is
+		// peeked from the wire options (fairSenderKeyV6FromWire);
+		// Relay-Forw (type 12) and Relay-Reply (type 13) carry no direct
+		// Client ID at this layer and are handled by their own arms
+		// below. Malformed/short datagrams peek as the unknown sender.
+		msgType := dhcpv6.MessageType(0)
+		if n > 0 {
+			msgType = dhcpv6.MessageType(buf[0])
 		}
-		if n > 0 && dhcpv6.MessageType(buf[0]) == dhcpv6.MessageTypeRelayReply {
+		switch msgType {
+		case dhcpv6.MessageTypeRelayReply:
+			// Dispatcher traffic: pre-fold aggregate-only accounting
+			// (#10198 pinned counts), ahead of fairness.
+			if !rateBucket.allow() {
+				relay.requestsDroppedRateLimit.Add(1)
+				if !warnedRateLimit {
+					slog.Warn("dhcpv6-relay: client request rate limit exceeded, dropping excess",
+						"interface", relay.ifaceName, "rate_pps", rate, "src", source)
+					warnedRateLimit = true
+				} else {
+					slog.Debug("dhcpv6-relay: client request rate limit exceeded, dropping",
+						"interface", relay.ifaceName, "src", source)
+				}
+				continue
+			}
 			packet, err := dhcpv6.FromBytes(buf[:n])
 			if err != nil {
 				if dispatcher := m.replyDispatcherSnapshot(); dispatcher != nil {
@@ -1245,6 +1260,43 @@ func (m *dhcpV6Manager) runDHCPV6ClientLoop(ctx context.Context, relay *dhcpV6Re
 				dispatcher.dispatchFromClientSocket(packet, source, relay)
 			}
 			continue
+		case dhcpv6.MessageTypeRelayForward:
+			// Fold 3: Relay-Forw reaches the parse too, so it is gated
+			// like every other non-Relay-Reply type — only Relay-Reply
+			// (dispatcher traffic) is exempt. A Relay-Forw carries no
+			// direct Client ID at this layer, so it peeks as the
+			// unknown sender (inner identities are not unpacked
+			// pre-parse; nested relays are dropped in the tail anyway,
+			// now having paid the limiter like all other traffic).
+			if !fair.admitWithAggregate(fairUnknownSenderV6, rateBucket) {
+				relay.requestsDroppedRateLimit.Add(1)
+				if !warnedRateLimit {
+					slog.Warn("dhcpv6-relay: client request rate limit exceeded, dropping excess",
+						"interface", relay.ifaceName, "rate_pps", rate, "src", source)
+					warnedRateLimit = true
+				} else {
+					slog.Debug("dhcpv6-relay: client request rate limit exceeded, dropping",
+						"interface", relay.ifaceName, "src", source)
+				}
+				continue
+			}
+		default:
+			fairKey, fok := fairSenderKeyV6FromWire(buf[:n])
+			if !fok {
+				fairKey = fairUnknownSenderV6
+			}
+			if !fair.admitWithAggregate(fairKey, rateBucket) {
+				relay.requestsDroppedRateLimit.Add(1)
+				if !warnedRateLimit {
+					slog.Warn("dhcpv6-relay: client request rate limit exceeded, dropping excess",
+						"interface", relay.ifaceName, "rate_pps", rate, "src", source)
+					warnedRateLimit = true
+				} else {
+					slog.Debug("dhcpv6-relay: client request rate limit exceeded, dropping",
+						"interface", relay.ifaceName, "src", source)
+				}
+				continue
+			}
 		}
 		sourceAddr, ok := source.(*net.UDPAddr)
 		if !ok {
@@ -1264,6 +1316,10 @@ func (m *dhcpV6Manager) runDHCPV6ClientLoop(ctx context.Context, relay *dhcpV6Re
 			relay.requestsDroppedPort.Add(1)
 			continue
 		}
+		if packet.IsRelay() {
+			relay.requestsDroppedNested.Add(1)
+			continue
+		}
 		if shouldRelay != nil && !shouldRelay(relay.ifaceName) {
 			relay.requestsDroppedBackup.Add(1)
 			continue
@@ -1271,13 +1327,6 @@ func (m *dhcpV6Manager) runDHCPV6ClientLoop(ctx context.Context, relay *dhcpV6Re
 		peer := udpAddrIP(source)
 		if peer == nil || peer.To16() == nil || peer.To4() != nil || peer.IsUnspecified() || peer.IsMulticast() {
 			relay.requestsDroppedPeer.Add(1)
-			continue
-		}
-		if packet.IsRelay() {
-			// A downstream relay can only be trusted with an explicit
-			// trust policy. DHCPv6 has no such knob yet, so fail closed
-			// rather than letting an on-link host steer link selection.
-			relay.requestsDroppedNested.Add(1)
 			continue
 		}
 		forwardLinkAddr := relayForwardV6LinkAddress(linkAddr, peer, false)
