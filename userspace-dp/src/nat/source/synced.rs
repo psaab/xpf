@@ -407,6 +407,28 @@ fn reserve_synced_source_nat_allocation_with_holder(
     if domains.owns_no_reservation(nat, rewrite_src) {
         return true;
     }
+    // #16015 fold: a DYNAMIC synced rewrite_src inside an installed
+    // NPTv6 external prefix names a pool/interface tuple NPTv6 also
+    // publishes statelessly — but domains.owns_no_reservation above
+    // cannot express it: it has no pool-rule view and its NPTv6 arm
+    // answers "no reservation needed" (the NPTv6-rewrite shape), which
+    // would publish this import as success BEFORE any overlap check.
+    // A pool/NAT decision (not the NPTv6 bit, not static provenance)
+    // whose address a covered pool rule's NPTv6 view owns must refuse
+    // here, before PASS1/PASS2/interface success returns below.
+    if !nat.nptv6
+        && domains.source_nat_static != Some(true)
+        && rules.iter().any(|r| {
+            r.pool_mode
+                && nptv6_owns_wire_identity(
+                    r.nptv6_externals.as_deref().map(|v| &v[..]),
+                    rewrite_src,
+                    None,
+                )
+        })
+    {
+        return false;
+    }
     let flow = SourceNatFlowKey {
         protocol: key.protocol,
         src_ip: key.src_ip,
@@ -681,6 +703,20 @@ fn reserve_synced_interface_identity(
         return false;
     };
     let translated_port = nat.rewrite_src_port.unwrap_or(flow.src_port);
+    // #16015 fold: an interface-domain import whose address sits inside
+    // an installed NPTv6 external prefix (carried on the interface rule
+    // itself or a sibling pool rule) collides with the stateless
+    // NPTv6 publish at the preserved port — refuse before booking.
+    if rules.iter().any(|r| {
+        nptv6_owns_wire_identity(
+            r.nptv6_externals.as_deref().map(|v| &v[..]),
+            rewrite_src,
+            None,
+        )
+    }) {
+        crate::nat::INTERFACE_SNAT_SYNC_IDENTITY_CONFLICT_DROPS.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
     // #15146: refuse when a pool/NAT64 peer already owns this identity.
     // This is the synced twin of the #14367 interface-mint peer check
     // (`peer_owns_for_interface`); without it an import lands on an

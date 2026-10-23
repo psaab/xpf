@@ -885,6 +885,15 @@ pub(crate) fn wire_nptv6_overlap_peers(
     }
     let shared = Arc::new(nptv6);
     for rule in rules.iter_mut() {
+        if rule.interface_mode {
+            // #16015 fold: an interface-only config has no pool rule to
+            // carry the view, and the interface mint reads sibling rules
+            // — so the interface rule itself must hold it. Wiring is
+            // unconditional here (egress address is runtime-resolved,
+            // not config-static); the mint check is zone-aware.
+            rule.nptv6_externals = Some(Arc::clone(&shared));
+            continue;
+        }
         if !rule.pool_mode {
             continue;
         }
@@ -900,9 +909,7 @@ pub(crate) fn wire_nptv6_overlap_peers(
         }
     }
     // NAT64 prefixes take no field: their pools are v4-only and a v6
-    // NPTv6 prefix can never contain them. The parameter stays so the
-    // call site mirrors wire_static_overlap_peers and a future v6
-    // NAT64 pool has an obvious wiring point.
+    // NPTv6 prefix can never contain them.
     let _ = prefixes;
 }
 

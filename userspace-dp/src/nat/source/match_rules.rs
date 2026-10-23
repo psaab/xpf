@@ -648,7 +648,13 @@ fn match_source_nat_result_for_tuple_inner(
             // for this egress zone is published by NPTv6 statelessly;
             // refuse before any interface mint (both arms below).
             {
-                let nptv6_hit = rules.iter().any(|r| {
+                // Own view first (interface-only configs carry it on
+                // the interface rule itself, #16015 fold), then siblings.
+                let nptv6_hit = nptv6_owns_wire_identity(
+                    rule.nptv6_externals.as_deref().map(|v| &v[..]),
+                    rewrite_src,
+                    Some(to_zone),
+                ) || rules.iter().any(|r| {
                     nptv6_owns_wire_identity(
                         r.nptv6_externals.as_deref().map(|v| &v[..]),
                         rewrite_src,
