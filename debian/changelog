@@ -12,6 +12,14 @@ xpf (0.0.0) unstable; urgency=medium
     collision with open PRs.
 
 xpf (0.0.0) unstable; urgency=medium
+  * Fix NAT allocator/scope defects (#15948): restore displaced
+    non-persistent reservations after sole-holder rollback, count
+    merged idle-lease grants and refuse contended merges, keep active
+    deterministic NAT64 BIBs out of the idle-expiry index, judge
+    fabric NAT64 sessions by geometry, thread NAT scope into
+    MissingNeighbor seeds, clamp NAT64 TCP MSS, probe the NAT64
+    egress hop on MissingNeighbor drops, and treat reject as terminal
+    in recursive static expansion.
   * Snapshot neighbor resolution netlink state once per pass: interface
     names are fetched once per link and neighbor tables once per
     (link, family) instead of once per target, preserving the usable-entry

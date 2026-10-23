@@ -505,7 +505,7 @@ fn recursive_static_target_v4<'a>(
             }
             let route = matching[offset];
             offset += 1;
-            if route.discard {
+            if route.discard || route.reject {
                 return Vec::new();
             }
             if !route.next_table.is_empty() {
@@ -644,7 +644,7 @@ fn recursive_static_target_v6<'a>(
             }
             let route = matching[offset];
             offset += 1;
-            if route.discard {
+            if route.discard || route.reject {
                 return Vec::new();
             }
             if !route.next_table.is_empty() {

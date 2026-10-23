@@ -69,6 +69,57 @@ pub(super) fn note_kernel_probe(
     true
 }
 
+/// #15948 fold 2: claim the ONE neighbor-resolution attempt for `key`'s
+/// current throttle window and, iff claimed, perform it (resolver
+/// enqueue + caller-side raw probe happen inside `fire`).
+///
+/// The early MissingNeighbor arm records `(key, now_ns)` via
+/// `note_kernel_probe` WITHOUT sending anything, so neither
+/// `probe_throttled` (self-suppresses: the record is from this packet)
+/// nor `try_enqueue_resolver` (same check) can by themselves admit
+/// exactly one later attempt: a plain equality `t == now_ns` admits
+/// EVERY packet sharing the window's timestamp (one batch = one
+/// `now_ns`), and a plain presence check re-opens nothing.
+///
+/// Instead the claim OVERWRITES the entry with a deadline marker —
+/// `now_ns + RESOLVER_ENQUEUE_THROTTLE_NS` — a value no packet
+/// timestamp in this window can equal (timestamps are non-decreasing
+/// within the window and strictly below the deadline). Admission
+/// requires an entry that is (a) present, (b) NOT marker-form, and
+/// (c) younger than one window — i.e. a live early-arm record no
+/// attempt has claimed yet. After the claim the entry IS the marker:
+/// later packets in the window (same `now_ns` included) fail (b),
+/// and packets in the NEXT window fail (a)/(c) until the early arm
+/// re-records — no separate fired-flag map to leak or expire.
+/// Returns true iff this call claimed and ran `fire`.
+#[inline]
+pub(super) fn claim_window_attempt(
+    throttle: &mut FastMap<(i32, IpAddr), u64>,
+    key: (i32, IpAddr),
+    now_ns: u64,
+    fire: impl FnOnce(),
+) -> bool {
+    let Some(&recorded) = throttle.get(&key) else {
+        return false;
+    };
+    // Marker-form entries are deadlines strictly above every timestamp
+    // the window can produce; an early-arm record equals a real packet
+    // timestamp and so is at most `now_ns` (clock reads never go back
+    // within a window in this caller).
+    if recorded > now_ns {
+        return false;
+    }
+    if now_ns.saturating_sub(recorded) >= RESOLVER_ENQUEUE_THROTTLE_NS {
+        return false;
+    }
+    throttle.insert(
+        key,
+        now_ns.saturating_add(RESOLVER_ENQUEUE_THROTTLE_NS),
+    );
+    fire();
+    true
+}
+
 /// #1769/#1912: per-key rate-limited enqueue of the shared neighbor
 /// resolver. Both the neg-cache fast-fail branch and the #1912 tunnel
 /// outer-hop branch use the identical throttle-check / `ifindex_to_name`

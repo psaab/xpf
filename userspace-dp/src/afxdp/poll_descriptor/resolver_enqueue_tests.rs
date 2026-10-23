@@ -113,17 +113,75 @@ mod try_enqueue_resolver_tests {
         assert!(probe_throttled(&throttle, &new_key, 1_002));
     }
 
-    // #13762: behavioral poll-loop coverage for the capacity/NAT64
+    // #15948 fold 2: same-timestamp batch. Every packet processed in
+    // one batch shares one now_ns. Simulates production order per
+    // packet: the early arm records (key, now_ns) via note_kernel_probe,
+    // then the NAT64 arm claims the window attempt. Exactly ONE claim
+    // may fire across the whole batch (and across later same-window
+    // packets); the next window's record claims again.
+    #[test]
+    fn claim_window_attempt_once_per_same_timestamp_batch() {
+        let mut throttle: FastMap<(i32, IpAddr), u64> = FastMap::default();
+        let mut names: FastMap<i32, String> = FastMap::default();
+        names.insert(12, "ge-0-0-2.80".to_string());
+        let key = (12, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1)));
+        let now = 5_000_000_000u64;
+        let fires = std::cell::Cell::new(0usize);
+        let packet = |throttle: &mut FastMap<(i32, IpAddr), u64>, at: u64| {
+            let _ = note_kernel_probe(throttle, &names, key, at);
+            claim_window_attempt(throttle, key, at, || fires.set(fires.get() + 1))
+        };
+        // Batch of 8 packets at the identical timestamp.
+        let mut claimed = 0usize;
+        for _ in 0..8 {
+            if packet(&mut throttle, now) {
+                claimed += 1;
+            }
+        }
+        assert_eq!(claimed, 1, "one batch timestamp must claim exactly once");
+        assert_eq!(fires.get(), 1);
+        // Later packets still inside the window do not refire.
+        assert!(!packet(&mut throttle, now + 1));
+        assert!(!packet(&mut throttle, now + RESOLVER_ENQUEUE_THROTTLE_NS - 1));
+        assert_eq!(fires.get(), 1);
+        // Next window: the early arm re-records (expired marker no
+        // longer throttles it), and the attempt claims again — once.
+        assert!(packet(&mut throttle, now + RESOLVER_ENQUEUE_THROTTLE_NS));
+        assert!(
+            !packet(&mut throttle, now + RESOLVER_ENQUEUE_THROTTLE_NS),
+            "second packet at the new window timestamp must not refire"
+        );
+        assert_eq!(fires.get(), 2);
+    }
+
+    // #15948 fold 2: the claim requires a live early-arm record; a
+    // missing entry or an already-claimed marker never fires.
+    #[test]
+    fn claim_window_attempt_requires_unclaimed_record() {
+        let mut throttle: FastMap<(i32, IpAddr), u64> = FastMap::default();
+        let key = (12, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1)));
+        let now = 7_000_000_000u64;
+        let fires = std::cell::Cell::new(0usize);
+        assert!(!claim_window_attempt(&mut throttle, key, now, || {
+            fires.set(fires.get() + 1)
+        }));
+        // A stale record (older than the window, never re-recorded)
+        // cannot resurrect an attempt on its own.
+        throttle.insert(key, now - RESOLVER_ENQUEUE_THROTTLE_NS);
+        assert!(!claim_window_attempt(&mut throttle, key, now, || {
+            fires.set(fires.get() + 1)
+        }));
+        assert_eq!(fires.get(), 0);
+    }
+
+    // #13762/#15948: behavioral poll-loop coverage for the NAT64
     // MissingNeighbor probe bound. Two identical permitted NAT64 packets
     // whose extracted-IPv4 next-hop (172.16.80.1 on ifindex 12) is
-    // unresolved are driven through the real descriptor path within one
-    // frozen 100ms window. The NAT64 fail-closed arm records the probe
-    // attempt via note_kernel_probe instead of buffering the frame, so
-    // the first packet must consume exactly one throttle window and the
-    // second must observe that same window without adding another entry.
-    // #14661: a discarded NAT64 packet emits NO wire probe at all (the
-    // probe is deferred to committed seeds only); the throttle-record
-    // assertions below still fail if capacity/NAT64 stops recording.
+    // unresolved are driven through the real descriptor path. The first
+    // packet claims the throttle window and fires exactly one kernel
+    // probe (#15948; #14661's zero-probe suppression left the hop
+    // unresolved forever); the second, inside the same window, fires
+    // none and leaves the claimed deadline marker untouched.
     #[test]
     fn nat64_missing_neighbor_poll_path_consumes_one_throttle_window() {
         use crate::afxdp::tests_support::{
@@ -190,8 +248,8 @@ mod try_enqueue_resolver_tests {
         assert_eq!(dbg1.nat64_missing_neigh_drop, 1);
         assert_eq!(
             kernel_arp_probe_test_capture_count(),
-            0,
-            "#14661: a discarded NAT64 miss must not invoke a kernel probe"
+            1,
+            "#15948: the first NAT64 miss fires exactly one probe"
         );
         let first_probe_at = *binding
             .resolver_enqueue_throttle
@@ -211,8 +269,8 @@ mod try_enqueue_resolver_tests {
         assert_eq!(dbg2.nat64_missing_neigh_drop, 1);
         assert_eq!(
             kernel_arp_probe_test_capture_count(),
-            0,
-            "#14661: discarded NAT64 misses never invoke a kernel probe"
+            1,
+            "#15948: the second NAT64 miss in the window fires no second probe"
         );
         stop_kernel_arp_probe_test_capture();
         assert_eq!(
@@ -223,12 +281,14 @@ mod try_enqueue_resolver_tests {
         assert_eq!(
             binding.resolver_enqueue_throttle.get(&throttle_key),
             Some(&first_probe_at),
-            "second same-key NAT64 miss must preserve the first probe timestamp"
+            "second same-key NAT64 miss must preserve the claimed window marker"
         );
+        // The claimed entry is a deadline marker (record + window), so
+        // one tick before the deadline it still reads throttled.
         assert!(probe_throttled(
             &binding.resolver_enqueue_throttle,
             &throttle_key,
-            first_probe_at,
+            first_probe_at - 1,
         ));
     }
 }

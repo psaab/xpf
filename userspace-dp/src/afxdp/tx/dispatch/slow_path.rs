@@ -366,13 +366,19 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame_with_outlet(
         );
         return false;
     }
+    let nat64_mss = crate::afxdp::forwarding::select_tcp_mss(
+        forwarding,
+        &decision,
+        &crate::afxdp::ForwardPacketMeta::from(meta),
+    );
     let packet = if decision.nat.nat64 {
-        crate::afxdp::frame::build_nat64_l3_packet_for_slow_path(
+        crate::afxdp::frame::build_nat64_l3_packet_for_slow_path_with_mss(
             frame,
             meta,
             &decision,
             nat64_reverse,
             forwarding.nat64.no_v6_frag_header,
+            nat64_mss,
         )
     } else {
         extract_l3_packet_with_nat(frame, meta, decision.nat)

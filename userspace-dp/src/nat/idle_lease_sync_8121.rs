@@ -412,13 +412,106 @@ impl PortAllocator {
                         );
                     }
                 }
-                let current = live.persistent_permissions.entry(key).or_default();
-                let total = current.scopes.values().map(|g| g.remotes.len()).sum::<usize>();
-                let bucket = current.scopes.entry(rec.egress_scope).or_default();
-                let additions = rec.permitted_remotes.iter().filter(|r| !bucket.remotes.contains(r)).count();
-                if total.saturating_add(additions) <= MAX_PERSISTENT_PERMITTED_REMOTES {
-                    bucket.any_remote |= rec.permit_any_remote;
-                    bucket.remotes.extend(rec.permitted_remotes.iter().copied());
+                // #15948 (H31-02): merge through the same contention +
+                // owner-count discipline as the fresh path. The fresh
+                // helpers consult live address-only/PAT owners and the
+                // idle owner-count map; the only false positive to
+                // subtract is THIS lease's own already-counted grants.
+                // Everything else — live flows, PAT owners, other idle
+                // leases, wildcard grants — stays contended. Evaluate
+                // the incoming delta: any-remote widening, plus each
+                // remote not already granted to this lease.
+                let translated = TranslatedTuple {
+                    ip: rec.translated_ip,
+                    port: rec.translated_port,
+                };
+                let own_any = live
+                    .persistent_permissions
+                    .get(&key)
+                    .is_some_and(|p| p.scopes.values().any(|s| s.any_remote));
+                let own_remotes: Vec<(std::net::IpAddr, u16)> = live
+                    .persistent_permissions
+                    .get(&key)
+                    .map(|p| {
+                        p.scopes
+                            .values()
+                            .flat_map(|s| s.remotes.iter().copied())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let widen_any = rec.permit_any_remote && !own_any;
+                let new_remotes: Vec<(std::net::IpAddr, u16)> = rec
+                    .permitted_remotes
+                    .iter()
+                    .copied()
+                    .filter(|r| !own_remotes.contains(r))
+                    .collect();
+                let contended = |remote: Option<(std::net::IpAddr, u16)>| {
+                    if rec.address_only {
+                        live.import_idle_address_only_contended(rec.protocol, translated, remote)
+                    } else {
+                        live.import_idle_pat_address_only_contended(
+                            rec.protocol,
+                            translated,
+                            remote,
+                        )
+                    }
+                };
+                // Own-grant subtraction: the counts map holds this
+                // lease's Any/AnyWildcard keys, so an any-remote query
+                // always self-hits. It is genuinely contended only
+                // when another owner holds the base (helper excludes
+                // only this lease's own idle contribution).
+                let any_contended_by_other =
+                    live.idle_merge_any_contended_by_other(rec.protocol, translated, &key);
+                // #15948 fold: an IDLE PAT lease holding this tuple
+                // (bitmap bit + grants, no live owner count) contends
+                // exactly as a fresh PAT import's bitmap claim would
+                // refuse it — check it for the widening and each new
+                // remote.
+                let idle_pat_busy = (widen_any
+                    && live.idle_pat_lease_covers(translated, &key, None))
+                    || new_remotes.iter().any(|remote| {
+                        live.idle_pat_lease_covers(translated, &key, Some(*remote))
+                    });
+                let merge_busy = (widen_any && (contended(None) && any_contended_by_other))
+                    || idle_pat_busy
+                    || new_remotes.iter().any(|remote| {
+                        // A new remote self-hits only if an own grant
+                        // already covers it — impossible after the
+                        // new_remotes filter except via own any-remote,
+                        // which is already counted and not contention.
+                        !own_any && contended(Some(*remote))
+                    });
+                if merge_busy {
+                    return IdleLeaseImport::SkippedIdentityBusy;
+                }
+                let before_keys = if existing.address_only && !existing.revoked {
+                    live.persistent_address_only_owner_keys(&key, &existing)
+                } else {
+                    Vec::new()
+                };
+                {
+                    let current = live.persistent_permissions.entry(key).or_default();
+                    let total = current.scopes.values().map(|g| g.remotes.len()).sum::<usize>();
+                    let bucket = current.scopes.entry(rec.egress_scope).or_default();
+                    let additions = rec
+                        .permitted_remotes
+                        .iter()
+                        .filter(|r| !bucket.remotes.contains(r))
+                        .count();
+                    if total.saturating_add(additions) <= MAX_PERSISTENT_PERMITTED_REMOTES {
+                        bucket.any_remote |= rec.permit_any_remote;
+                        bucket.remotes.extend(rec.permitted_remotes.iter().copied());
+                    }
+                }
+                if existing.address_only && !existing.revoked {
+                    let after_keys = live.persistent_address_only_owner_keys(&key, &existing);
+                    for owner_key in after_keys {
+                        if !before_keys.contains(&owner_key) {
+                            live.increment_persistent_address_only_owner(owner_key);
+                        }
+                    }
                 }
             }
             return IdleLeaseImport::SkippedExisting;

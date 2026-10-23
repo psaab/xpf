@@ -62,7 +62,9 @@ fn meta_v6_14661(src: Ipv6Addr, dst: Ipv6Addr, frame_len: usize) -> UserspaceDpM
 
 /// (a) NAT64-required: the extracted-v4 next hop (172.16.80.1) is
 /// unresolved, the flow is permitted, and the arm drops it fail-closed.
-/// Pre-fix: one kernel probe. Post-fix: zero probes, drop preserved.
+/// Pre-#15948: one early probe before the drop. #14661 suppressed it;
+/// #15948 fires exactly one throttled probe at the drop itself (the
+/// only actor that ever triggers resolution for this flow).
 #[test]
 fn nat64_missing_neighbor_no_probe_before_fail_closed_drop_14661() {
     let mut snapshot = nat64_snapshot(lan_to_wan_permit("8.8.8.8/32", "permit-nat64-14661"));
@@ -96,11 +98,56 @@ fn nat64_missing_neighbor_no_probe_before_fail_closed_drop_14661() {
         "NAT64 miss must still drop fail-closed"
     );
     assert_eq!(
-        probes, 0,
-        "#14661: a discarded NAT64 packet must not emit a kernel probe"
+        probes, 1,
+        "#15948: the NAT64 drop fires exactly one throttled probe (was 0 under #14661 suppression, which left the hop forever unresolved)"
     );
     assert_eq!(sessions.len(), 0, "NAT64 miss must not seed");
     assert!(binding.pending_neigh.is_empty(), "NAT64 miss must not park");
+}
+
+/// (a2) #15948 fold 2: a BATCH of permitted NAT64 misses sharing one
+/// frozen timestamp (one batch = one now_ns) must fire exactly one
+/// kernel probe total, not one per packet. The early arm records the
+/// throttle timestamp for the first packet; claim_window_attempt
+/// converts it to a deadline marker so packets 2..N at the same
+/// timestamp cannot each fire.
+#[test]
+fn nat64_missing_neighbor_batch_probes_once_15948() {
+    let mut snapshot = nat64_snapshot(lan_to_wan_permit("8.8.8.8/32", "permit-nat64-15948-batch"));
+    snapshot.neighbors.clear();
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+
+    let src: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("src v6");
+    let dst: Ipv6Addr = "64:ff9b::808:808".parse().expect("nat64 dst");
+    let frame = build_txn_tcp_syn_frame_v6(src, dst, 12345, 443, TEST_LAN_MAC);
+
+    start_kernel_arp_probe_test_capture();
+    let mut drops = 0usize;
+    for _ in 0..4 {
+        let (_batch, dbg) = txn_run_descriptor_checked(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &frame,
+            meta_v6_14661(src, dst, frame.len()),
+            true,
+        );
+        drops += dbg.nat64_missing_neigh_drop as usize;
+    }
+    let probes = kernel_arp_probe_test_capture_count();
+    stop_kernel_arp_probe_test_capture();
+
+    assert_eq!(drops, 4, "every batch packet must still drop fail-closed");
+    assert_eq!(
+        probes, 1,
+        "#15948: one same-timestamp batch must fire exactly one probe, got {probes}"
+    );
+    assert_eq!(sessions.len(), 0, "NAT64 misses must not seed");
 }
 
 /// (b) SNAT-exhausted: one-port pool (203.0.113.10:5000). Flow 1 commits

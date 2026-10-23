@@ -462,7 +462,18 @@ pub(super) fn build_nat64_forwarded_frames_with_commit_and_dynamic(
     dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
 ) -> Option<SmallVec<[(crate::afxdp::cos::redirect_pool::PooledBuffer, Option<wg::WgEncapCommit>); 1]>> {
     let meta = meta.into();
-    let inner = build_nat64_inner_frame(frame, meta, decision, nat64_reverse, no_v6_frag_header)?;
+    // #15948 (H33-03): NAT64 never reached the same-family MSS clamp
+    // (can_rewrite_in_place and the build path both exclude it), so an
+    // operator tcp-mss ceiling was silently bypassed in both
+    // directions. Select with the same per-packet context as the
+    // generic build and clamp each translated inner frame below.
+    let selected_tcp_mss = crate::afxdp::forwarding::select_tcp_mss(forwarding, decision, &meta);
+    let mut inner = build_nat64_inner_frame(frame, meta, decision, nat64_reverse, no_v6_frag_header)?;
+    if selected_tcp_mss > 0 {
+        if let Some(l3) = frame_l3_offset(&inner) {
+            let _ = tcp::clamp_tcp_mss_frame(&mut inner, l3, selected_tcp_mss);
+        }
+    }
     let inner_frames = if meta.addr_family as i32 == libc::AF_INET6 {
         fragment_nat64_ipv4_frame(inner, v4_egress_mtu)?
     } else {
@@ -640,6 +651,27 @@ fn fragment_nat64_ipv6_frame(
 /// the IP-family conversion and port mapping still must happen before handing
 /// the packet to the TUN. Preserve ingress TTL/Hop Limit so the kernel performs
 /// the single forwarding decrement or emits its usual Time Exceeded response.
+pub(super) fn build_nat64_l3_packet_for_slow_path_with_mss(
+    frame: &[u8],
+    meta: impl Into<ForwardPacketMeta>,
+    decision: &SessionDecision,
+    nat64_reverse: Option<&Nat64ReverseInfo>,
+    no_v6_frag_header: bool,
+    selected_tcp_mss: u16,
+) -> Option<Vec<u8>> {
+    let mut out = build_nat64_l3_packet_for_slow_path(
+        frame,
+        meta,
+        decision,
+        nat64_reverse,
+        no_v6_frag_header,
+    )?;
+    if selected_tcp_mss > 0 {
+        let _ = tcp::clamp_tcp_mss(&mut out, selected_tcp_mss);
+    }
+    Some(out)
+}
+
 pub(super) fn build_nat64_l3_packet_for_slow_path(
     frame: &[u8],
     meta: impl Into<ForwardPacketMeta>,

@@ -1684,6 +1684,11 @@ pub(super) fn build_missing_neighbor_session_metadata(
     // approximation forever — a routine cold-start case on a busy LAN.
     ingress_ifindex: u32,
     ingress_vlan_id: u16,
+    // #15948 (H32-04): the ingress NAT scope resolved for this frame, or
+    // None when no scope was recorded. Threaded instead of the former
+    // hardcoded None so a MissingNeighbor-born scoped SNAT/DNAT session
+    // can be revoked when its rule is withdrawn.
+    nat_scope_ifindex: Option<i32>,
     fabric_ingress: bool,
     decision: SessionDecision,
     // #10267/#13974: preserve both the evaluated timeout and policy-derived
@@ -1723,7 +1728,7 @@ pub(super) fn build_missing_neighbor_session_metadata(
                 .hit_counter_by_idx(r.policy_counter_idx)
                 .cloned()
         }),
-        nat_scope_ifindex: None,
+        nat_scope_ifindex,
     }
 }
 

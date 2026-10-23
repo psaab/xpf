@@ -15936,3 +15936,93 @@ fn wg_hostname_change_drops_stale_live_endpoint_15950() {
     let next4 = build_forwarding_state_with_policy_counters_and_previous(&snap("203.0.113.1:51820", &["10.1.0.0/24","10.2.0.0/24"]), &PolicyCounterStore::default(), &crate::nat::NatCounterStore::default(), Some(&prev4)).unwrap();
     assert_eq!(next4.wg_engines.get(&7).unwrap().peer_for_dest(dst), Some((pubk, Some(live))));
 }
+
+/// #15948 (H36-03): a reject intermediate route is terminal for recursive
+/// static expansion in both families — the indirect route must stay
+/// unresolved (ifindex 0) instead of falling through to the default.
+/// The Go producer premise (reject reaches the snapshot unfolded) is
+/// pinned by TestRouteSnapshotRejectSurvivesForRecursiveExpansion15948.
+#[test]
+fn recursive_static_reject_terminal_15948() {
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "ge-0-0-5".into(),
+                ifindex: 205,
+                addresses: vec![
+                    crate::protocol::snapshot::InterfaceAddressSnapshot {
+                        family: "inet".into(),
+                        address: "198.51.100.2/24".into(),
+                        ..Default::default()
+                    },
+                    crate::protocol::snapshot::InterfaceAddressSnapshot {
+                        family: "inet6".into(),
+                        address: "2001:db8:ffff::2/64".into(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        ],
+        routes: vec![
+            crate::RouteSnapshot {
+                table: "inet.0".into(),
+                family: "inet".into(),
+                destination: "0.0.0.0/0".into(),
+                next_hops: vec!["198.51.100.1@ge-0-0-5".into()],
+                ..Default::default()
+            },
+            crate::RouteSnapshot {
+                table: "inet.0".into(),
+                family: "inet".into(),
+                destination: "10.20.0.0/16".into(),
+                reject: true,
+                ..Default::default()
+            },
+            crate::RouteSnapshot {
+                table: "inet.0".into(),
+                family: "inet".into(),
+                destination: "172.16.50.0/24".into(),
+                next_hops: vec!["10.20.1.1".into()],
+                ..Default::default()
+            },
+            crate::RouteSnapshot {
+                table: "inet6.0".into(),
+                family: "inet6".into(),
+                destination: "::/0".into(),
+                next_hops: vec!["2001:db8:ffff::1@ge-0-0-5".into()],
+                ..Default::default()
+            },
+            crate::RouteSnapshot {
+                table: "inet6.0".into(),
+                family: "inet6".into(),
+                destination: "2001:db8:20::/48".into(),
+                reject: true,
+                ..Default::default()
+            },
+            crate::RouteSnapshot {
+                table: "inet6.0".into(),
+                family: "inet6".into(),
+                destination: "2001:db8:50::/64".into(),
+                next_hops: vec!["2001:db8:20::1".into()],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    let v4_probe: Ipv4Addr = "172.16.50.5".parse().unwrap();
+    let r4 = state.routes_v4.get("inet.0").unwrap().iter().find(|r| r.prefix.contains(v4_probe)).unwrap();
+    assert!(
+        r4.next_hops.iter().all(|nh| nh.ifindex == 0),
+        "v4 indirect via reject must stay unresolved, got {:?}",
+        r4.next_hops
+    );
+    let v6_probe: Ipv6Addr = "2001:db8:50::5".parse().unwrap();
+    let r6 = state.routes_v6.get("inet6.0").unwrap().iter().find(|r| r.prefix.contains(v6_probe)).unwrap();
+    assert!(
+        r6.next_hops.iter().all(|nh| nh.ifindex == 0),
+        "v6 indirect via reject must stay unresolved, got {:?}",
+        r6.next_hops
+    );
+}

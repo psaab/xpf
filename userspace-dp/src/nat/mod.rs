@@ -161,6 +161,10 @@ mod tests_l4_match;
 #[cfg(test)]
 #[path = "tests_aggregate_budget.rs"]
 mod tests_aggregate_budget;
+// #15948: NAT allocator/scope regression cells (H31-01/02/03).
+#[cfg(test)]
+#[path = "tests_15948.rs"]
+mod tests_15948;
 
 // #4800: SNAT pool allocator `live` map-mutex contention accounting.
 #[cfg(test)]
