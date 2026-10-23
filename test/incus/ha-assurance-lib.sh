@@ -240,10 +240,14 @@ PY
 # daemons did not start counting from the same epoch (e.g. the target
 # received creates before the source last restarted and zeroed its sent
 # counter), which made the gate time out forever on a fully caught-up pair.
-# A baseline counter that has moved backwards means a daemon restarted
-# mid-wait and reset the epoch: that is not idle (return 1) and the caller
-# must re-baseline on the next sample, never fail-open on rewound deltas.
-# drained is required and parseable, informational only.
+# Verdicts: 0 idle, 1 ordinary not-idle (baseline kept; an outstanding
+# unreceived delta must persist until received, never be absorbed into a
+# new baseline), 2 VOID (blind/malformed evidence, malformed baseline),
+# 3 counter rewind (a daemon restarted and reset the epoch; not idle, and
+# the ONLY verdict on which the caller re-baselines). Drained is required
+# and parseable, informational only. Every evidence field is parsed before
+# any baseline branch, so blind evidence is VOID even on the
+# baseline-establishing sample and even on a rewound sample.
 ha_session_sync_idle_sample() {
 	if [[ $# -ne 6 ]]; then
 		printf 'session sync sample: expected <source-node> <target-node> <source-stats> <target-stats> <baseline-sent> <baseline-received>\n' >&2
@@ -255,12 +259,17 @@ ha_session_sync_idle_sample() {
 	local target_path="$4"
 	local baseline_sent="$5"
 	local baseline_received="$6"
-	local sent received pending drained
-	if ! sent="$(ha_sync_stats_value "$source_path" "Session create" sent)"; then return 2; fi
-	if ! received="$(ha_sync_stats_value "$target_path" "Session create" received)"; then return 2; fi
-	if ! pending="$(ha_status_summary_value "$target_path" "Session delta pending")"; then return 2; fi
-	if ! drained="$(ha_status_summary_value "$target_path" "Session delta drained")"; then return 2; fi
+	local sent received pending drained parse_status=0
+	# Parse every evidence field before any baseline branch, so blind or
+	# malformed evidence is VOID (2) even on the baseline-establishing
+	# sample and even when the counters have rewound.
+	parse_status=0
+	sent="$(ha_sync_stats_value "$source_path" "Session create" sent)" || parse_status=2
+	received="$(ha_sync_stats_value "$target_path" "Session create" received)" || parse_status=2
+	pending="$(ha_status_summary_value "$target_path" "Session delta pending")" || parse_status=2
+	drained="$(ha_status_summary_value "$target_path" "Session delta drained")" || parse_status=2
 	: "$drained" # Required and parseable, informational only.
+	if (( parse_status == 2 )); then return 2; fi
 	if [[ -z "$baseline_sent" && -z "$baseline_received" ]]; then
 		# First sample of a wait: it only establishes the baseline. It is
 		# never idle by itself, so the 3-consecutive rule still requires
@@ -277,7 +286,7 @@ ha_session_sync_idle_sample() {
 	if (( sent < baseline_sent || received < baseline_received )); then
 		printf 'session sync %s->%s not idle: counters rewound since baseline (source sent=%s baseline=%s, target received=%s baseline=%s, pending=%s); re-baseline required\n' \
 			"$source_node" "$target_node" "$sent" "$baseline_sent" "$received" "$baseline_received" "$pending" >&2
-		return 1
+		return 3
 	fi
 	if (( sent - baseline_sent == received - baseline_received )) && [[ "$pending" == "0" ]]; then
 		return 0

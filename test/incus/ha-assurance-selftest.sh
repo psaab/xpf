@@ -561,12 +561,181 @@ Session delta pending: 3
 Session delta drained: 19
 EOF
 assert_helper_status 1 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET_PENDING}" 15 174
-# Counter rewind since baseline (daemon restart): not idle, re-baseline.
-assert_helper_status 1 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_TARGET}" 15 174
+# Counter rewind since baseline (daemon restart / epoch reset) is the
+# distinct re-baseline verdict 3, never idle and never VOID.
+assert_helper_status 3 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_TARGET}" 15 174
+# Blind evidence stays VOID even on a rewound sample and even on the
+# baseline-establishing sample (parse precedes every baseline branch).
+assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_MISSING_DRAINED}" 15 174
+assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_MISSING_DRAINED}" '' ''
 # Malformed / half-empty baselines are VOID, and the old 4-arg shape is gone.
 assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}" malformed 174
 assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}" 15 ''
 assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}"
+
+# #16289 stateful wait loops: an observed unreceived send must NOT be
+# absorbed by re-baselining. Both production wait loops are extracted
+# verbatim and driven offline (stubbed capture/sleep/pass/fail/void):
+# 15/174 -> 16/174 repeated must never idle; only 16/175 idles. The old
+# re-baseline-on-every-non-idle loop absorbed the 16 and PASSed.
+LOOP_DIR="${TMP_DIR}/sync-idle-loops"
+mkdir -p "$LOOP_DIR"
+LOOP_HELPERS="${LOOP_DIR}/wait-loops.sh"
+python3 - "${ROOT}/test/incus/test-failover.sh" "${ROOT}/scripts/userspace-ha-failover-validation.sh" "$LOOP_HELPERS" <<'PY'
+import pathlib
+import re
+import sys
+
+failover_text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+userspace_text = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+blocks = []
+for text, name in (
+    (failover_text, "ha_wait_for_session_sync_idle"),
+    (userspace_text, "wait_for_session_sync_idle"),
+    (userspace_text, "node_name"),
+    (userspace_text, "vm_artifact_suffix"),
+    (userspace_text, "sync_snapshot_path"),
+    (userspace_text, "capture_sync_snapshot"),
+):
+    match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", text, re.M | re.S)
+    if not match:
+        raise SystemExit(f"cannot extract {name} for #16289 loop coverage")
+    blocks.append(match.group(0))
+pathlib.Path(sys.argv[3]).write_text("".join(blocks), encoding="utf-8")
+PY
+
+write_sync_fixture() {
+	# $1=path $2=sent $3=received $4=pending
+	cat >"$1" <<EOF
+Services Synchronized:
+Session create $2 $3
+
+Session delta pending: $4
+Session delta drained: 0
+EOF
+}
+
+LOOP_RUNNER_FILE="${LOOP_DIR}/runner.sh"
+cat >"${LOOP_RUNNER_FILE}" <<'RUNNER_EOF'
+IFS="," read -r -a SEQ <<< "$SEQ_CSV"
+source "$1"
+source "$2"
+PASS=0 FAIL=0 VOID=0
+printf '0\n' > "${SEQ_INDEX_FILE}"
+printf '0\n' > "${SEQ_CALLS_FILE}"
+pass() { PASS=$((PASS + 1)); printf "PASS-MARK %s\n" "$*"; }
+fail() { FAIL=$((FAIL + 1)); printf "FAIL-MARK %s\n" "$*"; }
+void() { VOID=$((VOID + 1)); printf "VOID-MARK %s\n" "$*"; }
+sleep() { :; }
+run_vm() { :; }
+write_runner_fixture() {
+	cat >"$1" <<EOF
+Services Synchronized:
+Session create $2 $3
+
+Session delta pending: $4
+Session delta drained: 0
+EOF
+}
+write_seq_pair() {
+	# Index/calls live in files: captures run inside $(...) subshells in
+	# the failover loop, so shell variables would reset every attempt.
+	local idx pair sent rest recv pending calls
+	idx="$(cat "${SEQ_INDEX_FILE}")"
+	pair="${SEQ[$idx]}"
+	sent="${pair%%/*}"; rest="${pair#*/}"; recv="${rest%%/*}"; pending="${rest#*/}"
+	write_runner_fixture "$SEQ_SOURCE" "$sent" 0 0
+	write_runner_fixture "$SEQ_TARGET" 0 "$recv" "$pending"
+	if (( idx < ${#SEQ[@]} - 1 )); then printf '%s\n' "$((idx + 1))" > "${SEQ_INDEX_FILE}"; fi
+	calls="$(cat "${SEQ_CALLS_FILE}")"; printf '%s\n' "$((calls + 1))" > "${SEQ_CALLS_FILE}"
+}
+ha_capture_sync_stats() {
+	# Failover loop captures source then target per attempt; advance
+	# the sequence only on the source capture (one pair per attempt).
+	local label="$1" node_id="$2"
+	if [[ "$node_id" == "$SEQ_SOURCE_ID" ]]; then write_seq_pair; printf "%s\n" "$SEQ_SOURCE"; else printf "%s\n" "$SEQ_TARGET"; fi
+}
+capture_sync_snapshot() {
+	# Userspace loop captures source then target per iteration; advance
+	# only on the source capture (one pair per iteration).
+	local label="$2" path
+	path="$(sync_snapshot_path "$label" "$1")"
+	if [[ "$1" == "$SOURCE_VM" ]]; then write_seq_pair; cp "$SEQ_SOURCE" "$path"; else cp "$SEQ_TARGET" "$path"; fi
+}
+run_failover_loop() {
+	SEQ_SOURCE_ID=node0
+	if ha_wait_for_session_sync_idle loop node0 fw0 node1 fw1; then printf "LOOPRC=0\n"; else printf "LOOPRC=%s\n" "$?"; fi
+	printf "VERDICTS PASS=%s FAIL=%s VOID=%s CALLS=%s\n" "$PASS" "$FAIL" "$VOID" "$(cat "${SEQ_CALLS_FILE}")"
+}
+run_userspace_loop() {
+	SOURCE_VM="$FW0" TARGET_VM="$FW1"
+	if wait_for_session_sync_idle loop; then printf "LOOPRC=0\n"; else printf "LOOPRC=%s\n" "$?"; fi
+	printf "VERDICTS PASS=%s FAIL=%s VOID=%s CALLS=%s\n" "$PASS" "$FAIL" "$VOID" "$(cat "${SEQ_CALLS_FILE}")"
+}
+case "$3" in
+failover) run_failover_loop ;;
+userspace) run_userspace_loop ;;
+*) printf "unknown loop %s\n" "$3" >&2; exit 2 ;;
+esac
+RUNNER_EOF
+
+run_sync_loop_case() {
+	# $1=loop(failover|userspace) $2=timeout $3=expected full output $4=context; rest: sent/recv/pending sequence
+	local loop="$1" timeout="$2" expected="$3" context="$4"
+	shift 4
+	local seq_csv out
+	seq_csv="$(IFS=,; printf '%s' "$*")"
+	cp "${ROOT}/test/incus/ha-assurance-lib.sh" "$LOOP_DIR/lib.sh"
+	out="$(SEQ_CSV="$seq_csv" SESSION_SYNC_IDLE_TIMEOUT="$timeout" SESSION_SYNC_IDLE_STABLE_SAMPLES=3 \
+		SEQ_SOURCE="${LOOP_DIR}/seq-source.txt" SEQ_TARGET="${LOOP_DIR}/seq-target.txt" SEQ_INDEX_FILE="${LOOP_DIR}/seq-index" SEQ_CALLS_FILE="${LOOP_DIR}/seq-calls" \
+		ARTIFACT_DIR="$LOOP_DIR" SOURCE_NODE=0 TARGET_NODE=1 FW0=fw0 FW1=fw1 SEQ_EXPORT=1 \
+		bash -euo pipefail "$LOOP_RUNNER_FILE" "$LOOP_DIR/lib.sh" "$LOOP_HELPERS" "$loop" 2>&1)"
+	assert_eq "$out" "$expected" "$context"
+}
+
+# Stuck: baseline 15/174, one unreceived send 16/174 repeated forever.
+# Timeout 8 = baseline + 6 stuck repeats + FAIL; never PASS.
+run_sync_loop_case failover 8 'session sync node0->node1 baseline: source sent=15, target received=174, pending=0
+session sync node0->node1 not idle: source sent=16 (baseline 15), target received=174 (baseline 174), pending=0
+session sync node0->node1 not idle: source sent=16 (baseline 15), target received=174 (baseline 174), pending=0
+session sync node0->node1 not idle: source sent=16 (baseline 15), target received=174 (baseline 174), pending=0
+session sync node0->node1 not idle: source sent=16 (baseline 15), target received=174 (baseline 174), pending=0
+session sync node0->node1 not idle: source sent=16 (baseline 15), target received=174 (baseline 174), pending=0
+session sync node0->node1 not idle: source sent=16 (baseline 15), target received=174 (baseline 174), pending=0
+session sync node0->node1 not idle: source sent=16 (baseline 15), target received=174 (baseline 174), pending=0
+FAIL-MARK loop: session sync did not become idle within 8s (node0->node1)
+LOOPRC=1
+VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=8' 'failover loop: unreceived send is never absorbed' '15/174/0' '16/174/0'
+run_sync_loop_case userspace 8 'FAIL-MARK loop: session sync did not become idle before timeout (source_sent=16 target_recv=174 target_delta_pending=0 target_delta_drained=0)
+LOOPRC=1
+VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=8' 'userspace loop: unreceived send is never absorbed' '15/174/0' '16/174/0'
+# Catch-up: 15/174 -> 16/174 -> 16/175 x3 idle samples -> PASS at sample 5.
+run_sync_loop_case failover 30 'session sync node0->node1 baseline: source sent=15, target received=174, pending=0
+session sync node0->node1 not idle: source sent=16 (baseline 15), target received=174 (baseline 174), pending=0
+PASS-MARK loop: session sync idle (node0->node1, 3 consecutive samples)
+LOOPRC=0
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=5' 'failover loop: received catch-up idles' '15/174/0' '16/174/0' '16/175/0'
+run_sync_loop_case userspace 30 'PASS-MARK loop: session sync idle (source_sent=16 target_recv=175 target_delta_pending=0 target_delta_drained=0)
+LOOPRC=0
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=5' 'userspace loop: received catch-up idles' '15/174/0' '16/174/0' '16/175/0'
+# Rewind-only re-baseline: 15/174 -> restart 2/3 -> 2/3 x3 -> PASS sample 5.
+run_sync_loop_case failover 30 'session sync node0->node1 baseline: source sent=15, target received=174, pending=0
+session sync node0->node1 not idle: counters rewound since baseline (source sent=2 baseline=15, target received=3 baseline=174, pending=0); re-baseline required
+PASS-MARK loop: session sync idle (node0->node1, 3 consecutive samples)
+LOOPRC=0
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=5' 'failover loop: rewind re-baselines then idles' '15/174/0' '2/3/0'
+run_sync_loop_case userspace 30 'PASS-MARK loop: session sync idle (source_sent=2 target_recv=3 target_delta_pending=0 target_delta_drained=0)
+LOOPRC=0
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=5' 'userspace loop: rewind re-baselines then idles' '15/174/0' '2/3/0'
+# First sample establishes the baseline (minimum 4 samples to PASS).
+run_sync_loop_case failover 30 'session sync node0->node1 baseline: source sent=15, target received=174, pending=0
+PASS-MARK loop: session sync idle (node0->node1, 3 consecutive samples)
+LOOPRC=0
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=4' 'failover loop: first sample is never idle alone' '15/174/0'
+run_sync_loop_case userspace 30 'PASS-MARK loop: session sync idle (source_sent=15 target_recv=174 target_delta_pending=0 target_delta_drained=0)
+LOOPRC=0
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=4' 'userspace loop: first sample is never idle alone' '15/174/0'
+printf '#16289 stateful wait loops keep outstanding deltas until received\n'
 
 assert_helper_value 5 ha_nondecreasing_delta 10 15
 assert_helper_status 2 ha_nondecreasing_delta 15 10
