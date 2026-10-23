@@ -57,6 +57,41 @@ const (
 	defaultIPSweepThreshold  = 5000
 )
 
+// Junos SRX defaults for the syn-flood subfields that carry one (#16006).
+// These are the values the CLI detail view already renders as the Default
+// column (pkg/cli/cli_show_security_screen.go: alarm 512, source 4000,
+// destination 4000) and the Junos timeout default of 20 s (the same 20 s
+// EffectiveSynFloodTimeout falls back to). They apply ONLY when an
+// explicitly-provided value fails to parse on the tolerant path: the leaf
+// was authored, so keeping the Junos default preserves the operator's
+// intent to have the cap armed. An UNSET leaf (no value authored) stays
+// 0/disabled — the dataplane treats 0 as disabled and #15269 forbids
+// claiming an unconfigured cap is applied. limit-session has no Junos
+// default, so a bad limit-session value cannot take this arm and instead
+// marks the profile unresolved (see badNumericNoDefaultPaths).
+const (
+	defaultSynFloodAlarmThreshold       = 512
+	defaultSynFloodSourceThreshold      = 4000
+	defaultSynFloodDestinationThreshold = 4000
+	defaultSynFloodTimeout              = 20
+)
+
+// badNumericNoDefaultPaths lists the screen numeric leaf paths recorded by
+// parseThresh that have NO Junos default to fall back to (#16006). A bad
+// value on one of these leaves cannot be repaired by substituting a
+// default, so compileScreen marks the profile BadNumericUnresolved and
+// the snapshot builder routes zones referencing it through the
+// conservative-default (missing-profile) path rather than publishing the
+// profile with the cap silently disabled. Every other BadNumeric path
+// (icmp/udp flood, ip-sweep, port-scan, syn-flood attack-threshold and
+// the four syn-flood subfields above) has a Junos default applied in
+// compileScreen, so a bad value there degrades to that default behind
+// the existing #3317 warning and the profile stays resolved.
+var badNumericNoDefaultPaths = map[string]bool{
+	"limit-session source-ip-based":      true,
+	"limit-session destination-ip-based": true,
+}
+
 // synFloodSrcAttackRatioAdvisoryThreshold is the attack-threshold /
 // source-threshold ratio above which the dataplane's per-source count-min
 // sketch (SRC_COLS columns, #3315) can begin to false-throttle legitimate
@@ -165,7 +200,10 @@ func compileScreen(node *Node, sec *SecurityConfig) error {
 		// validateScreenNumericStrict (#3317): before this the strconv error was
 		// swallowed and the leaf silently became the default or zero/disabled
 		// (fail-open). ok=false on a bad value too, so the lenient / load path
-		// still falls back to the default and boots (#1960 no-brick).
+		// still boots (#1960 no-brick): leaves with a Junos default fall back
+		// to it, and a bad limit-session value instead marks the profile
+		// BadNumericUnresolved so the snapshot builder substitutes the
+		// conservative default for referencing zones (#16006).
 		parseThresh := func(path, val string) (int, bool) {
 			if val == "" {
 				return 0, false
@@ -187,6 +225,16 @@ func compileScreen(node *Node, sec *SecurityConfig) error {
 			if err != nil || n < 1 || int64(n) > math.MaxUint32 {
 				profile.BadNumeric = append(profile.BadNumeric,
 					ScreenBadNumeric{Path: path, Value: val})
+				// #16006: a bad value on a leaf with no Junos default
+				// (limit-session) cannot be repaired by substitution, so
+				// mark the profile unresolved; the snapshot builder then
+				// routes referencing zones through the conservative
+				// default instead of publishing the profile with the cap
+				// silently disabled. Leaves WITH a default are repaired
+				// by their callers below and stay resolved.
+				if badNumericNoDefaultPaths[path] {
+					profile.BadNumericUnresolved = true
+				}
 				return 0, false
 			}
 			return n, true
@@ -503,6 +551,34 @@ func compileScreen(node *Node, sec *SecurityConfig) error {
 					// even though the operator configured it (#3024).
 					if sf.AttackThreshold <= 0 {
 						sf.AttackThreshold = defaultSynFloodAttackThreshold
+					}
+					// #16006: an explicitly-authored syn-flood subfield
+					// whose value failed to parse keeps its Junos default
+					// on the tolerant path instead of falling to
+					// 0/disabled. Only a leaf recorded in BadNumeric is
+					// repaired — an unset leaf stays disabled (#15269:
+					// never claim an unconfigured cap is applied). Strict
+					// commit still rejects the bad value via #3317 before
+					// this value can be committed.
+					for _, bad := range profile.BadNumeric {
+						switch bad.Path {
+						case "tcp syn-flood alarm-threshold":
+							if sf.AlarmThreshold <= 0 {
+								sf.AlarmThreshold = defaultSynFloodAlarmThreshold
+							}
+						case "tcp syn-flood source-threshold":
+							if sf.SourceThreshold <= 0 {
+								sf.SourceThreshold = defaultSynFloodSourceThreshold
+							}
+						case "tcp syn-flood destination-threshold":
+							if sf.DestinationThreshold <= 0 {
+								sf.DestinationThreshold = defaultSynFloodDestinationThreshold
+							}
+						case "tcp syn-flood timeout":
+							if sf.Timeout <= 0 {
+								sf.Timeout = defaultSynFloodTimeout
+							}
+						}
 					}
 					profile.TCP.SynFlood = sf
 				case "port-scan":

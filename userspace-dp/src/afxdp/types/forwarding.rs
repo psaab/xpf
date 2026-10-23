@@ -557,11 +557,11 @@ pub(in crate::afxdp) struct ForwardingState {
     /// from `screen_profiles` is a lenient-path fail-open — the dataplane
     /// emits a rate-limited runtime WARN for it (verdict still Pass). A zone
     /// in neither map simply has no screen configured (legit Pass).
-    pub(in crate::afxdp) screen_missing_profiles: FastMap<String, String>,
+    pub(in crate::afxdp) screen_missing_profiles: FastMap<String, UnresolvedProfileRef>,
     /// #7888: zone -> screen profile name for zones whose profile IS DEFINED
     /// but enables no check. Kept separate from `screen_missing_profiles`
     /// because the two select different runtime WARN texts.
-    pub(in crate::afxdp) screen_inert_profiles: FastMap<String, InertProfileRef>,
+    pub(in crate::afxdp) screen_inert_profiles: FastMap<String, UnresolvedProfileRef>,
     pub(in crate::afxdp) syn_cookie_master_key: SynCookieMasterKey,
     /// #9173: the key ring from `ConfigSnapshot::syn_cookie_key_ring`, resolved:
     /// the published bases, from which the helper derives each rotation period's

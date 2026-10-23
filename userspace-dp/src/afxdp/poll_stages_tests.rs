@@ -173,7 +173,7 @@ fn tcp_v4_syn_meta_with_l2(frame: &[u8], vlan: Vlan) -> UserspaceDpMeta {
 fn missing_only_screen() -> ScreenState {
     let mut screen = ScreenState::new();
     let mut missing = FxHashMap::default();
-    missing.insert("lan".to_string(), "ghost".to_string());
+    missing.insert("lan".to_string(), UnresolvedProfileRef { profile: "ghost".to_string(), alarm_without_drop: false });
     screen.update_missing_profiles(missing);
     screen
 }
@@ -193,7 +193,7 @@ fn missing_plus_resolved_screen() -> ScreenState {
     let mut screen = ScreenState::new();
     screen.update_profiles(profiles);
     let mut missing = FxHashMap::default();
-    missing.insert("lan".to_string(), "ghost".to_string());
+    missing.insert("lan".to_string(), UnresolvedProfileRef { profile: "ghost".to_string(), alarm_without_drop: false });
     screen.update_missing_profiles(missing);
     screen
 }
@@ -884,7 +884,7 @@ fn screen_parse_fail_on_unscreened_zone_passes_12875() {
     let mut inert = FxHashMap::default();
     inert.insert(
         "lan".to_string(),
-        crate::screen::InertProfileRef {
+        crate::screen::UnresolvedProfileRef {
             profile: "inert-profile".to_string(),
             alarm_without_drop: false,
         },
@@ -6299,7 +6299,7 @@ fn inert_zone_audit_mode_forwards_the_substituted_default_9425() {
         let mut inert = FxHashMap::default();
         inert.insert(
             "lan".to_string(),
-            crate::screen::InertProfileRef {
+            crate::screen::UnresolvedProfileRef {
                 profile: "audit-only".to_string(),
                 alarm_without_drop: audit,
             },

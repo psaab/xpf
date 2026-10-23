@@ -100,9 +100,12 @@ func sortedScreenNames(screens map[string]*ScreenProfile) []string {
 // and the offending value. The walk is deterministic (profiles sorted by name,
 // BadNumeric in config order). On the tolerant load / peer-sync path the caller
 // downgrades the returned error to a warning (#1960 no-brick); compileScreen
-// applied the default for the bad value independently, so a leniently-loaded
-// profile is no worse than the pre-gate behavior — but the operator never
-// reaches that state through a commit. Mirrors validateFilterDSCPStrict.
+// applies the Junos default for a bad syn-flood subfield independently
+// (#16006), and a bad limit-session value — which has no default — marks the
+// profile BadNumericUnresolved so the snapshot builder substitutes the
+// conservative default for referencing zones instead of publishing the
+// profile with the cap silently disabled. The operator never reaches either
+// tolerant state through a commit. Mirrors validateFilterDSCPStrict.
 func validateScreenNumericStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil

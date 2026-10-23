@@ -2532,9 +2532,11 @@ type compileOpts struct {
 	// weakened the protection (fail-open). The tolerant load / peer-sync paths
 	// downgrade to a warning so an already-persisted or peer-synced config that
 	// an older binary accepted still BOOTS (#1960 no-brick); compileScreen
-	// independently applies the default for the bad value on that path, so the
-	// leniently-loaded profile is no worse than the pre-gate behavior. Same
-	// doctrine as lenientFilterDSCP.
+	// independently applies the Junos default for a bad syn-flood subfield on
+	// that path (#16006), and a bad limit-session value — which has no
+	// default — marks the profile BadNumericUnresolved so the snapshot
+	// builder substitutes the conservative default for referencing zones.
+	// Same doctrine as lenientFilterDSCP.
 	lenientScreenNumeric bool
 	// lenientScreenUnknown (#3318) downgrades the unknown-screen-leaf gate
 	// (validateScreenUnknownStrict) from a hard compile error to a cfg.Warnings

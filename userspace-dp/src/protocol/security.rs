@@ -108,12 +108,16 @@ pub(crate) struct ScreenMissingProfileRef {
     pub profile: String,
     /// #9425: the referenced profile's `alarm-without-drop` modifier.
     ///
-    /// MEANINGFUL ONLY on `screen_inert_profile_zones`, where the profile IS
-    /// defined and the operator's audit request is a real statement. On
-    /// `screen_missing_profile_zones` (UNDEFINED) there is no profile to read
-    /// it from and it is always false; `missing_profile_verdict` consults it
-    /// only on the inert arm, so the two sets sharing this struct cannot pick
-    /// up each other's meaning.
+    /// MEANINGFUL on `screen_inert_profile_zones` (profile defined, no
+    /// check) and — since #16006 — on the defined-but-unresolved subset
+    /// of `screen_missing_profile_zones` (profile defined but marked
+    /// BadNumericUnresolved for a bad limit-session value). In both
+    /// cases the operator's audit request is a real statement, and the
+    /// runtime honours it when substituting the conservative default.
+    /// For a TRULY UNDEFINED profile there is no profile to read it
+    /// from: Go leaves it false, and `alarm_without_drop` answers audit
+    /// mode only from that false-carrying ref, so no audit mode is
+    /// manufactured.
     ///
     /// Additive/skew-tolerant: an old Go binary that does not emit it decodes
     /// false here, which is the pre-#9425 hard-drop behaviour.

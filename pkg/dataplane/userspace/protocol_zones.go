@@ -102,13 +102,17 @@ type ScreenMissingProfileRef struct {
 	Zone    string `json:"zone"`
 	Profile string `json:"profile,omitempty"`
 	// AlarmWithoutDrop is the referenced profile's `alarm-without-drop`
-	// modifier (#9425). It is MEANINGFUL ONLY on the ScreenInertProfiles set:
-	// there the profile IS defined, so the operator's audit request is a real
-	// statement the dataplane must honour when it substitutes the conservative
-	// default. On the ScreenMissingProfiles (UNDEFINED) set there is no profile
-	// to read it from and it is always false — the Rust side consults it only
-	// on the inert arm, so the two sets cannot pick up each other's meaning
-	// from this shared struct.
+	// modifier (#9425). It is MEANINGFUL on two defined-profile sets: the
+	// ScreenInertProfiles set, and — since #16006 — the subset of the
+	// ScreenMissingProfiles set whose profile IS defined but marked
+	// BadNumericUnresolved (a bad limit-session value with no Junos
+	// default). In both cases the operator's audit request is a real
+	// statement the dataplane must honour when it substitutes the
+	// conservative default. For a TRULY UNDEFINED profile on the missing
+	// set there is no profile to read it from and it is always false —
+	// the Rust side consults it only on the inert and
+	// defined-but-unresolved arms, so the sets cannot pick up each
+	// other's meaning from this shared struct.
 	//
 	// Why it must travel: an inert zone gets NO `screens` entry, so
 	// ScreenState::alarm_without_drop's `zones` lookup misses and returns

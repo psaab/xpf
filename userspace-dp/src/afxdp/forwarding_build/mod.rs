@@ -128,13 +128,26 @@ pub(super) fn build_screen_profiles(snapshot: &ConfigSnapshot) -> FxHashMap<Stri
 /// "references a missing screen" (Pass + rate-limited runtime WARN).
 pub(super) fn build_screen_missing_profiles(
     snapshot: &ConfigSnapshot,
-) -> FxHashMap<String, String> {
+) -> FxHashMap<String, UnresolvedProfileRef> {
     let mut out = FxHashMap::default();
     for r in &snapshot.screen_missing_profile_zones {
         if r.zone.is_empty() {
             continue;
         }
-        out.insert(r.zone.clone(), r.profile.clone());
+        // #16006: a defined-but-unresolved profile (bad limit-session
+        // value) carries its authored alarm-without-drop on this
+        // reference, and the runtime honours it on the missing arm
+        // exactly like the inert one. Go leaves the field false for a
+        // truly undefined profile (there is no profile to read it
+        // from), so forwarding it verbatim cannot manufacture audit
+        // mode for an undefined reference from Go-produced snapshots.
+        out.insert(
+            r.zone.clone(),
+            UnresolvedProfileRef {
+                profile: r.profile.clone(),
+                alarm_without_drop: r.alarm_without_drop,
+            },
+        );
     }
     out
 }
@@ -146,7 +159,7 @@ pub(super) fn build_screen_missing_profiles(
 /// neither map" rather than a flag inside one.
 pub(super) fn build_screen_inert_profiles(
     snapshot: &ConfigSnapshot,
-) -> FxHashMap<String, InertProfileRef> {
+) -> FxHashMap<String, UnresolvedProfileRef> {
     let mut out = FxHashMap::default();
     for r in &snapshot.screen_inert_profile_zones {
         if r.zone.is_empty() {
@@ -158,7 +171,7 @@ pub(super) fn build_screen_inert_profiles(
             // only here, on the INERT set, is what keeps the shared wire struct
             // from leaking meaning into the UNDEFINED set, where the field is
             // always false because there is no profile to read it from.
-            InertProfileRef {
+            UnresolvedProfileRef {
                 profile: r.profile.clone(),
                 alarm_without_drop: r.alarm_without_drop,
             },
