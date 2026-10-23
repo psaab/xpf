@@ -675,3 +675,147 @@ fn transit_via_local_vip_not_double_metered_15949() {
     );
     assert_eq!(drop, 0, "#15949 fold: no miss-gate drop on transit");
 }
+
+/// Fold 2 (Opus): an input-filter ACCEPT with `then log` that is then
+/// dropped by the miss-path screen (here: per-source session limit)
+/// must STILL emit its FilterLog. The deferred emit runs before the
+/// screen drop branch; at the fold-1 head the screen branch
+/// `continue`d past the emit and the log was lost.
+///
+/// Shape: zone `lan` screen profile with `session_limit_src = 1`.
+/// Packet 1 (SYN #1) installs the LocalDelivery session and emits its
+/// PERMIT log. Packet 2 (new source port, same source IP) is filter-
+/// accepted with `then log` but trips the session limit — it must emit
+/// the PERMIT FilterLog AND the screen-drop event, install nothing,
+/// and not be delivered.
+#[test]
+fn accepted_then_screen_dropped_still_emits_filter_log_15949() {
+    let mut snapshot = gre_to_self_snapshot();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "police-tcp".into(),
+            protocols: vec!["tcp".into()],
+            action: "accept".into(),
+            log: true,
+            ..Default::default()
+        }],
+    }];
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == 24 {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    snapshot.screens = vec![crate::ScreenProfileSnapshot {
+        zone: "lan".to_string(),
+        session_limit_src: 1,
+        ..Default::default()
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = std::sync::Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let local_tunnel_deliveries = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+        std::collections::BTreeMap::new(),
+    ));
+    let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
+        32,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
+        },
+    );
+
+    let frame1 = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(10, 255, 0, 1),
+        12345,
+        179,
+        TCP_FLAG_SYN,
+        TEST_LAN_MAC,
+    );
+    let meta1 = txn_meta_v4(24, TCP_FLAG_SYN, frame1.len() as u16);
+    let (_b1, dbg1) = txn_run_descriptor_with_event_stream(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame1,
+        meta1,
+        &local_tunnel_deliveries,
+        &event_handle,
+    );
+    assert_eq!(dbg1.local, 1, "packet 1 must take LocalDelivery");
+    assert_eq!(
+        sessions.len(),
+        1,
+        "packet 1 installs the one allowed session"
+    );
+    let mut p1_filter_logs = 0usize;
+    while let Ok(f) = event_rx.try_recv() {
+        if let Some(ev) = f.decode_dataplane_event() {
+            if ev.kind == crate::event_stream::codec::DataplaneEventKind::FilterLog {
+                p1_filter_logs += 1;
+                assert_eq!(ev.action, 1, "packet 1 FilterLog must be PERMIT");
+            }
+        }
+    }
+    assert_eq!(p1_filter_logs, 1, "packet 1 emits exactly one FilterLog");
+
+    // Packet 2: new flow (fresh source port), same source IP — the
+    // session limit (1) now trips.
+    let frame2 = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(10, 255, 0, 1),
+        12346,
+        179,
+        TCP_FLAG_SYN,
+        TEST_LAN_MAC,
+    );
+    let meta2 = txn_meta_v4(24, TCP_FLAG_SYN, frame2.len() as u16);
+    let (_b2, _dbg2) = txn_run_descriptor_with_event_stream(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame2,
+        meta2,
+        &local_tunnel_deliveries,
+        &event_handle,
+    );
+    assert_eq!(sessions.len(), 1, "screen-dropped packet installs nothing");
+    assert_eq!(
+        binding.live.slow_path_drops.load(Ordering::Relaxed),
+        1,
+        "screen-dropped packet must not be delivered (only packet 1 reinjected)"
+    );
+    let mut filter_logs = 0usize;
+    let mut screen_drops = 0usize;
+    while let Ok(f) = event_rx.try_recv() {
+        if let Some(ev) = f.decode_dataplane_event() {
+            match ev.kind {
+                crate::event_stream::codec::DataplaneEventKind::FilterLog => {
+                    filter_logs += 1;
+                    assert_eq!(ev.src_port, 12346, "FilterLog must be packet 2's");
+                    assert_eq!(ev.action, 1, "accepted packet's FilterLog stays PERMIT");
+                }
+                crate::event_stream::codec::DataplaneEventKind::ScreenDrop => {
+                    screen_drops += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(
+        filter_logs, 1,
+        "#15949 fold 2: accepted-then-screen-dropped packet must still emit its FilterLog"
+    );
+    assert_eq!(
+        screen_drops, 1,
+        "the screen drop itself must still emit its drop event"
+    );
+}

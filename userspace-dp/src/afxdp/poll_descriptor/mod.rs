@@ -5239,6 +5239,78 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 event_now_ns_from_secs(now_secs),
                             );
                         }
+                        // #15949 fold 2 (Opus): this gate block now runs BEFORE the screen drop branch; HA finalization is
+                        // folded into the gate block immediately below
+                        // (before the screen drop branch), so the
+                        // deferred log emit and the LocalDelivery
+                        // policer gate classify on the FINAL disposition
+                        // and run before a screen drop can consume the
+                        // packet. `decision.resolution` is stamped there.
+                        {
+                            let final_resolution = finalize_new_flow_ha_resolution(
+                                worker_ctx.forwarding,
+                                worker_ctx.ha_state,
+                                now_secs,
+                                decision.resolution,
+                                packet_fabric_ingress,
+                                fabric_link_ingress,
+                                meta.ingress_ifindex as i32,
+                                from_zone_id,
+                                ha_startup_grace_until_secs,
+                            );
+                            decision.resolution = final_resolution;
+                            if miss_input_policer_gate_covers(final_resolution.disposition) {
+                                let (verdict, policers) = meter_miss_local_input_policers(
+                                    worker_ctx.forwarding,
+                                    packet_frame,
+                                    flow,
+                                    meta,
+                                    now_ns,
+                                );
+                                miss_local_input_policers = policers;
+                                if verdict == MissLocalPolicerVerdict::Drop {
+                                    if let Some(mut cached_log) = input_filter_eval.cached_log {
+                                        cached_log.log_match.action =
+                                            crate::filter::FilterAction::Discard;
+                                        emit_input_filter_log_match(
+                                            worker_ctx.forwarding,
+                                            worker_ctx.event_stream,
+                                            flow,
+                                            meta,
+                                            cached_log,
+                                            FilterLogSource::Input,
+                                            false,
+                                            now_ns,
+                                        );
+                                    }
+                                    telemetry.dbg.local += 1;
+                                    telemetry.dbg.policy_deny += 1;
+                                    telemetry.counters.touched = true;
+                                    if persistent_lease_hold_outer.is_some() {
+                                        rollback_persistent_inbound_hold(
+                                            worker_ctx.forwarding,
+                                            persistent_lease_hold,
+                                            now_ns,
+                                        );
+                                        persistent_lease_hold_outer = None;
+                                    }
+                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    continue;
+                                }
+                            }
+                            if let Some(cached_log) = input_filter_eval.cached_log {
+                                emit_input_filter_log_match(
+                                    worker_ctx.forwarding,
+                                    worker_ctx.event_stream,
+                                    flow,
+                                    meta,
+                                    cached_log,
+                                    FilterLogSource::Input,
+                                    reject_reply_enqueued,
+                                    now_ns,
+                                );
+                            }
+                        }
                         if let Some(reason) = new_flow_screen_reason {
                             // The screen verdict is already decided; reuse
                             // the single parse above for the drop/alarm
@@ -5284,79 +5356,6 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 binding.scratch.scratch_recycle.push(desc.addr);
                                 continue;
                             }
-                        }
-                        decision.resolution = finalize_new_flow_ha_resolution(
-                            worker_ctx.forwarding,
-                            worker_ctx.ha_state,
-                            now_secs,
-                            decision.resolution,
-                            packet_fabric_ingress,
-                            fabric_link_ingress,
-                            meta.ingress_ifindex as i32,
-                            from_zone_id,
-                            ha_startup_grace_until_secs,
-                        );
-                        // #15949 fold (Opus): NOW the disposition is
-                        // final — route/PBR resolution, fabric preference,
-                        // and HA enforcement have all run — so classify
-                        // the policer gate on the actual decision kind,
-                        // not on any address set. A LocalDelivery packet
-                        // meters HERE, before lo0/junos-host, closing-pair
-                        // eviction, and hold anchoring; a red packet emits
-                        // a truthful DENY log and recycles. Every other
-                        // disposition emits its deferred log unchanged at
-                        // this point and meters (if at all) in TX
-                        // selection exactly once.
-                        if miss_input_policer_gate_covers(decision.resolution.disposition) {
-                            let (verdict, policers) = meter_miss_local_input_policers(
-                                worker_ctx.forwarding,
-                                packet_frame,
-                                flow,
-                                meta,
-                                now_ns,
-                            );
-                            miss_local_input_policers = policers;
-                            if verdict == MissLocalPolicerVerdict::Drop {
-                                if let Some(mut cached_log) = input_filter_eval.cached_log {
-                                    cached_log.log_match.action =
-                                        crate::filter::FilterAction::Discard;
-                                    emit_input_filter_log_match(
-                                        worker_ctx.forwarding,
-                                        worker_ctx.event_stream,
-                                        flow,
-                                        meta,
-                                        cached_log,
-                                        FilterLogSource::Input,
-                                        false,
-                                        now_ns,
-                                    );
-                                }
-                                telemetry.dbg.local += 1;
-                                telemetry.dbg.policy_deny += 1;
-                                telemetry.counters.touched = true;
-                                if persistent_lease_hold_outer.is_some() {
-                                    rollback_persistent_inbound_hold(
-                                        worker_ctx.forwarding,
-                                        persistent_lease_hold,
-                                        now_ns,
-                                    );
-                                    persistent_lease_hold_outer = None;
-                                }
-                                binding.scratch.scratch_recycle.push(desc.addr);
-                                continue;
-                            }
-                        }
-                        if let Some(cached_log) = input_filter_eval.cached_log {
-                            emit_input_filter_log_match(
-                                worker_ctx.forwarding,
-                                worker_ctx.event_stream,
-                                flow,
-                                meta,
-                                cached_log,
-                                FilterLogSource::Input,
-                                reject_reply_enqueued,
-                                now_ns,
-                            );
                         }
                         // Triple-review fold: a cryptographically
                         // validated SYN-cookie ACK earns its ACK-RST only
