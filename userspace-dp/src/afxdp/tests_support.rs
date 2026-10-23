@@ -993,12 +993,12 @@ pub(super) fn run_input_filter_accept_log_poll(
         dbg: &mut dbg,
         counters: &mut batch,
     };
-    let area_ptr = binding.umem.area() as *const MmapArea;
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
 
     poll_binding_process_descriptor(
         &mut binding,
         0,
-        area_ptr,
+        &area_handle,
         1,
         &mut sessions,
         &mut screen,
@@ -1343,11 +1343,11 @@ pub(super) fn txn_run_descriptor_with_neighbors(
         dbg: &mut dbg,
         counters: &mut batch,
     };
-    let area_ptr = binding.umem.area() as *const MmapArea;
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
     poll_binding_process_descriptor(
         binding,
         0,
-        area_ptr,
+        &area_handle,
         1,
         sessions,
         &mut screen,
@@ -1499,13 +1499,13 @@ pub(super) fn txn_run_descriptor_with_injected(
         dbg: &mut dbg,
         counters: &mut batch,
     };
-    let area_ptr = binding.umem.area() as *const MmapArea;
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
     super::poll_descriptor::poll_binding_process_descriptor_with_injection(
         binding,
         0,
         &mut [],
         &mut [],
-        area_ptr,
+        &area_handle,
         0,
         Some(injected),
         sessions,
@@ -2192,11 +2192,11 @@ fn txn_run_descriptor_inner_with_slow_path_impl(
         dbg: &mut dbg,
         counters: &mut batch,
     };
-    let area_ptr = binding.umem.area() as *const MmapArea;
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
     poll_binding_process_descriptor(
         binding,
         0,
-        area_ptr,
+        &area_handle,
         1,
         sessions,
         screen,
@@ -2314,11 +2314,11 @@ pub(super) fn txn_run_descriptor_capturing_events(
         dbg: &mut dbg,
         counters: &mut batch,
     };
-    let area_ptr = binding.umem.area() as *const MmapArea;
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
     poll_binding_process_descriptor(
         binding,
         0,
-        area_ptr,
+        &area_handle,
         1,
         sessions,
         &mut screen,
@@ -3929,7 +3929,7 @@ pub(super) fn txn_run_multi_binding_15958(
         dbg: &mut dbg,
         counters: &mut batch,
     };
-    let area_ptr = binding.umem.area() as *const MmapArea;
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
     let ingress_ident = binding.identity();
     let ingress_live_ptr = &*binding.live as *const BindingLiveState;
     super::poll_descriptor::poll_binding_process_descriptor_with_injection(
@@ -3937,7 +3937,7 @@ pub(super) fn txn_run_multi_binding_15958(
         ingress_index,
         left,
         right,
-        area_ptr,
+        &area_handle,
         1,
         None,
         sessions,

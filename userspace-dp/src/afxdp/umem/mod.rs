@@ -140,6 +140,66 @@ impl WorkerUmem {
     }
 }
 
+/// #16184: Rc-clone UMEM-area handle for the poll / TX paths.
+///
+/// Replaces the raw area pointer that used to be threaded alongside
+/// `&mut BindingWorker` borrows. Holding a clone of the existing
+/// `WorkerUmem` (itself an `Rc<WorkerUmemInner>`) keeps the mmap'd
+/// area alive for exactly as long as the handle lives, independent
+/// of any mutable borrow of the owning binding — which is why this
+/// form compiles where a borrowed area reference cannot: the caller
+/// mints the handle from `binding.umem` BEFORE handing `binding`
+/// out mutably, and thereafter reborrows the area from its own
+/// owned clone. Cloning is one non-atomic `Rc` refcount bump, no
+/// allocation; production mints one handle per RX batch / forward
+/// batch, never per packet.
+#[derive(Clone)]
+pub(super) struct UmemAreaHandle {
+    umem: WorkerUmem,
+}
+
+impl UmemAreaHandle {
+    pub(super) fn from_umem(umem: &WorkerUmem) -> Self {
+        Self { umem: umem.clone() }
+    }
+
+    /// Shared borrow of the mmap'd UMEM area. The pointee outlives
+    /// this handle's callers because the handle owns an `Rc` clone
+    /// of the allocation; the only mutable escape hatch into the
+    /// inner UMEM (`WorkerUmem::umem_mut`, a `RefCell` borrow —
+    /// #15730) runs solely at bind time, never while polling, so
+    /// this shared reborrow cannot alias a mutable borrow.
+    pub(super) fn area(&self) -> &MmapArea {
+        self.umem.area()
+    }
+
+    /// Test-only: wrap a bare `MmapArea` (the flow-cache fixture's
+    /// aliasing staging buffer, which carries no libxdp UMEM) so the
+    /// stage's handle parameter can address it.
+    #[cfg(test)]
+    pub(super) fn from_mmap_area_for_test(area: MmapArea) -> Self {
+        use std::cell::RefCell;
+        Self {
+            umem: WorkerUmem {
+                inner: Rc::new(WorkerUmemInner {
+                    umem: RefCell::new(Umem::new_for_test(
+                        UmemConfig {
+                            fill_size: 1,
+                            complete_size: 1,
+                            frame_size: UMEM_FRAME_SIZE,
+                            headroom: UMEM_HEADROOM,
+                            flags: UMEM_CREATE_FLAGS,
+                        },
+                        area.as_nonnull_slice(),
+                    )),
+                    area,
+                    total_frames: 1,
+                }),
+            },
+        }
+    }
+}
+
 pub(super) struct WorkerUmemPool {
     pub(super) umem: WorkerUmem,
     pub(super) free_frames: VecDeque<u64>,

@@ -41,7 +41,7 @@ use super::*;
 #[inline]
 pub(super) fn record_rx_descriptor_telemetry(
     desc: XdpDesc,
-    area: *const MmapArea,
+    area: &UmemAreaHandle,
     telemetry: &mut TelemetryContext,
     worker_ctx: &WorkerContext,
 ) {
@@ -69,7 +69,7 @@ pub(super) fn record_rx_descriptor_telemetry(
         let meta_len = std::mem::size_of::<UserspaceDpMeta>();
         if (desc.addr as usize) >= meta_len {
             let meta_offset = (desc.addr as usize) - meta_len;
-            if let Some(pf_meta) = unsafe { &*area }.slice(meta_offset, meta_len) {
+            if let Some(pf_meta) = area.area().slice(meta_offset, meta_len) {
                 unsafe {
                     core::arch::x86_64::_mm_prefetch(
                         pf_meta.as_ptr() as *const i8,
@@ -88,7 +88,7 @@ pub(super) fn record_rx_descriptor_telemetry(
     // UMEM frames are cold (last touched by NIC DMA); this hides
     // ~100ns DRAM latency before metadata parse.
     #[cfg(target_arch = "x86_64")]
-    if let Some(pf) = unsafe { &*area }.slice(desc.addr as usize, 64.min(desc.len as usize)) {
+    if let Some(pf) = area.area().slice(desc.addr as usize, 64.min(desc.len as usize)) {
         unsafe {
             core::arch::x86_64::_mm_prefetch(
                 pf.as_ptr() as *const i8,
@@ -133,7 +133,7 @@ pub(super) fn record_rx_descriptor_telemetry(
     // TCP flag detection on RX
     if cfg!(feature = "debug-log") {
         if desc.len >= 54 {
-            if let Some(rx_frame) = unsafe { &*area }.slice(desc.addr as usize, desc.len as usize)
+            if let Some(rx_frame) = area.area().slice(desc.addr as usize, desc.len as usize)
             {
                 // Check for FIN, SYN+ACK, zero-window (#2151: shared predicates).
                 if let Some(tcp_info) = extract_tcp_flags_and_window(rx_frame) {
@@ -192,7 +192,7 @@ pub(super) fn record_rx_descriptor_telemetry(
     // Poison check: detect if kernel recycled descriptor without writing data
     if cfg!(feature = "debug-log") {
         if desc.len >= 8 {
-            if let Some(first8) = unsafe { &*area }.slice(desc.addr as usize, 8) {
+            if let Some(first8) = area.area().slice(desc.addr as usize, 8) {
                 if first8 == &0xDEAD_BEEF_DEAD_BEEFu64.to_ne_bytes() {
                     eprintln!(
                         "DBG POISON_DETECTED: if={} q={} desc.addr={:#x} desc.len={} — kernel returned poisoned frame!",
@@ -204,7 +204,7 @@ pub(super) fn record_rx_descriptor_telemetry(
     }
     if cfg!(feature = "debug-log") {
         if telemetry.dbg.rx <= 10 {
-            if let Some(rx_frame) = unsafe { &*area }.slice(desc.addr as usize, desc.len as usize)
+            if let Some(rx_frame) = area.area().slice(desc.addr as usize, desc.len as usize)
             {
                 // Decode IP+TCP details from the frame
                 let pkt_detail = decode_frame_summary(rx_frame);

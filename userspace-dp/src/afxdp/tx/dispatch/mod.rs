@@ -984,7 +984,10 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
     if pending_forwards.is_empty() {
         return;
     }
-    let ingress_area = ingress_binding.umem.area() as *const MmapArea;
+    // #16184: one owned handle per forward batch (never per request).
+    // The `Rc` clone keeps the ingress area alive across the
+    // `&mut ingress_binding` borrows taken while walking the batch.
+    let ingress_area = UmemAreaHandle::from_umem(&ingress_binding.umem);
     post_recycles.clear();
     // Walk the scratch vector in place. Moving large PendingForwardRequest
     // values through the iterator path was still forcing per-request memcpy
@@ -1275,7 +1278,8 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
         let source_frame = match &request.frame {
             PendingForwardFrame::Owned(frame) => frame.as_slice(),
             PendingForwardFrame::Live => {
-                if let Some(frame) = (unsafe { &*ingress_area })
+                if let Some(frame) = ingress_area
+                    .area()
                     .slice(request.desc.addr as usize, request.desc.len as usize)
                 {
                     frame
@@ -1615,7 +1619,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                             snapshot_staged_mirror_clone(staged, source_frame);
                         }
                         match rewrite_forwarded_frame_in_place(
-                            unsafe { &*ingress_area },
+                            ingress_area.area(),
                             request.desc,
                             request.meta,
                             &request.decision,

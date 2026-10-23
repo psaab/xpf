@@ -140,7 +140,7 @@ pub(super) fn stage_flow_cache_hit(
     binding_index: usize,
     ingress_umem: &WorkerUmem,
     desc: XdpDesc,
-    area: *const MmapArea,
+    area: &UmemAreaHandle,
     raw_frame: &[u8],
     owned_packet_frame: &mut Option<Vec<u8>>,
     meta: UserspaceDpMeta,
@@ -865,7 +865,7 @@ pub(super) fn stage_flow_cache_hit(
                 // for AF, NAT type, or checksum recomputation). Falls back to
                 // generic rewrite on port mismatch, NAT64, or NPTv6.
                 let rewrite_result = apply_rewrite_descriptor(
-                    unsafe { &*area },
+                    area.area(),
                     desc,
                     meta,
                     &cached_descriptor,
@@ -879,7 +879,7 @@ pub(super) fn stage_flow_cache_hit(
                     let selected_tcp_mss =
                         select_tcp_mss(worker_ctx.forwarding, &cached_decision, &meta.into());
                     rewrite_forwarded_frame_in_place(
-                        unsafe { &*area },
+                        area.area(),
                         desc,
                         meta,
                         &cached_decision,

@@ -1688,7 +1688,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
         dbg: &mut dbg,
         counters: &mut batch,
     };
-    let area_ptr = binding.umem.area() as *const MmapArea;
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
 
     if injected {
         super::poll_descriptor::poll_binding_process_descriptor_with_injection(
@@ -1696,7 +1696,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
             0,
             &mut [],
             &mut [],
-            area_ptr,
+            &area_handle,
             0,
             Some((frame.clone(), meta)),
             &mut sessions,
@@ -1719,7 +1719,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
         poll_binding_process_descriptor(
             &mut binding,
             0,
-            area_ptr,
+            &area_handle,
             1,
             &mut sessions,
             &mut screen,
@@ -6794,12 +6794,12 @@ fn run_pptp_control_reply_policy_case(policy_denied: bool) {
         dbg: &mut dbg,
         counters: &mut batch,
     };
-    let area_ptr = binding.umem.area() as *const MmapArea;
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
 
     poll_binding_process_descriptor(
         &mut binding,
         0,
-        area_ptr,
+        &area_handle,
         1,
         &mut sessions,
         &mut screen,
@@ -7119,12 +7119,12 @@ fn poll_descriptor_policy_deny_keys_logical_ingress_zone_3021() {
         dbg: &mut dbg,
         counters: &mut batch,
     };
-    let area_ptr = binding.umem.area() as *const MmapArea;
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
 
     poll_binding_process_descriptor(
         &mut binding,
         0,
-        area_ptr,
+        &area_handle,
         1,
         &mut sessions,
         &mut screen,
@@ -7329,12 +7329,12 @@ fn poll_descriptor_input_filter_discard_drops_and_logs() {
         dbg: &mut dbg,
         counters: &mut batch,
     };
-    let area_ptr = binding.umem.area() as *const MmapArea;
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
 
     poll_binding_process_descriptor(
         &mut binding,
         0,
-        area_ptr,
+        &area_handle,
         1,
         &mut sessions,
         &mut screen,
@@ -7568,12 +7568,12 @@ fn poll_descriptor_session_hit_rechecks_dscp_input_filter() {
         dbg: &mut dbg,
         counters: &mut batch,
     };
-    let area_ptr = binding.umem.area() as *const MmapArea;
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
 
     poll_binding_process_descriptor(
         &mut binding,
         0,
-        area_ptr,
+        &area_handle,
         1,
         &mut sessions,
         &mut screen,
@@ -7757,12 +7757,12 @@ fn poll_descriptor_lo0_filter_discard_drops_without_reinject() {
         dbg: &mut dbg,
         counters: &mut batch,
     };
-    let area_ptr = binding.umem.area() as *const MmapArea;
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
 
     poll_binding_process_descriptor(
         &mut binding,
         0,
-        area_ptr,
+        &area_handle,
         1,
         &mut sessions,
         &mut screen,
@@ -8034,12 +8034,12 @@ fn poll_descriptor_lo0_filter_drops_cached_local_delivery_session_hit() {
         dbg: &mut dbg,
         counters: &mut batch,
     };
-    let area_ptr = binding.umem.area() as *const MmapArea;
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
 
     poll_binding_process_descriptor(
         &mut binding,
         0,
-        area_ptr,
+        &area_handle,
         1,
         &mut sessions,
         &mut screen,
@@ -8346,12 +8346,12 @@ fn input_filter_discard_drops_the_embedded_icmp_reversal_7359() {
         dbg: &mut dbg,
         counters: &mut batch,
     };
-    let area_ptr = binding.umem.area() as *const MmapArea;
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
 
     poll_binding_process_descriptor(
         &mut binding,
         0,
-        area_ptr,
+        &area_handle,
         1,
         &mut sessions,
         &mut screen,
@@ -8677,12 +8677,12 @@ fn input_filter_count_term_advances_for_the_embedded_icmp_reversal_7359() {
         dbg: &mut dbg,
         counters: &mut batch,
     };
-    let area_ptr = binding.umem.area() as *const MmapArea;
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
 
     poll_binding_process_descriptor(
         &mut binding,
         0,
-        area_ptr,
+        &area_handle,
         1,
         &mut sessions,
         &mut screen,
@@ -9071,12 +9071,12 @@ fn gre_decapped_embedded_icmp_reversal_reads_the_inner_frame_8271() {
         dbg: &mut dbg,
         counters: &mut batch,
     };
-    let area_ptr = binding.umem.area() as *const MmapArea;
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
 
     poll_binding_process_descriptor(
         &mut binding,
         0,
-        area_ptr,
+        &area_handle,
         1,
         &mut sessions,
         &mut screen,
@@ -9500,12 +9500,12 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_for_pure_dnat_9030() {
         dbg: &mut dbg,
         counters: &mut batch,
     };
-    let area_ptr = binding.umem.area() as *const MmapArea;
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
 
     poll_binding_process_descriptor(
         &mut binding,
         0,
-        area_ptr,
+        &area_handle,
         1,
         &mut sessions,
         &mut screen,
@@ -11981,12 +11981,12 @@ fn poll_descriptor_untranslated_v4_error_admission_knob_impl(
         dbg: &mut dbg,
         counters: &mut batch,
     };
-    let area_ptr = binding.umem.area() as *const MmapArea;
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
 
     poll_binding_process_descriptor(
         &mut binding,
         0,
-        area_ptr,
+        &area_handle,
         1,
         &mut sessions,
         &mut screen,
@@ -12482,12 +12482,12 @@ fn poll_descriptor_untranslated_ptb_v6_admitted_10286_impl(
         dbg: &mut dbg,
         counters: &mut batch,
     };
-    let area_ptr = binding.umem.area() as *const MmapArea;
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
 
     poll_binding_process_descriptor(
         &mut binding,
         0,
-        area_ptr,
+        &area_handle,
         1,
         &mut sessions,
         &mut screen,
@@ -12869,12 +12869,12 @@ fn poll_descriptor_quoted_reply_frag_needed_reaches_server_10672_impl() {
         dbg: &mut dbg,
         counters: &mut batch,
     };
-    let area_ptr = binding.umem.area() as *const MmapArea;
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
 
     poll_binding_process_descriptor(
         &mut binding,
         0,
-        area_ptr,
+        &area_handle,
         1,
         &mut sessions,
         &mut screen,
@@ -13239,12 +13239,12 @@ fn poll_descriptor_quoted_reply_ptb_v6_reaches_server_10672() {
         dbg: &mut dbg,
         counters: &mut batch,
     };
-    let area_ptr = binding.umem.area() as *const MmapArea;
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
 
     poll_binding_process_descriptor(
         &mut binding,
         0,
-        area_ptr,
+        &area_handle,
         1,
         &mut sessions,
         &mut screen,
@@ -13418,12 +13418,12 @@ fn rx_and_post_admission_source_learns_cannot_overwrite_live_v6_neighbor_13644()
             dbg: &mut dbg,
             counters: &mut batch,
         };
-        let area_ptr = binding.umem.area() as *const MmapArea;
+        let area_handle = UmemAreaHandle::from_umem(&binding.umem);
 
         poll_binding_process_descriptor(
             &mut binding,
             0,
-            area_ptr,
+            &area_handle,
             1,
             &mut sessions,
             &mut screen,

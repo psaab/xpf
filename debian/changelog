@@ -289,6 +289,20 @@ xpf (0.0.0) unstable; urgency=medium
 
 xpf (0.0.0) unstable; urgency=medium
 
+  * Replace the raw UMEM area pointers threaded through the poll
+    and TX paths with an owned Rc-clone UmemAreaHandle wrapping the
+    existing WorkerUmem: worker/lifecycle mints one handle per RX
+    batch before handing the binding out mutably, poll_descriptor,
+    its rx_telemetry and flow-cache-hit stages, and the TX forward
+    dispatcher now reborrow the area through the handle instead of
+    dereferencing a threaded raw pointer, so the mmap'd area's
+    lifetime is structural (an Rc clone) rather than a comment
+    contract. No behaviour, UMEM/queue, batch, recycle, or FIFO
+    change; one non-atomic Rc refcount bump per batch, never per
+    packet (#16184).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Share the completion value provider and hint-roots table across the
     local CLI and the gRPC Complete RPC: pkg/config gains
     ProvideValues(cfg, hint, path, catalogueSuppressed) and HintRoots
