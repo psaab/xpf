@@ -1,4 +1,22 @@
 xpf (0.0.0) unstable; urgency=medium
+
+  * CLI: show security flow session renders stored session provenance
+    (#16110). Each row now carries Origin (local / cluster-synced, from
+    the SessFlagClusterSynced bit; promotion clears it so a promoted
+    row reads local) and Forwarding-ready (local forward packets), so a
+    standby copy is no longer indistinguishable from a locally
+    forwarding owner row. Address-only NAT (SNAT/DNAT flag set, stored
+    port 0) renders the preserved original port instead of a
+    synthesized /0 on CLI, REST and gRPC (the userspace conntrack
+    mirror now also stores the effective preserved source port), and
+    when the local and peer views of the same synced tuple carry
+    different translated ports the CLI prints an explicit NAT
+    divergence line naming both ports. Peer rows report the peer's own
+    Origin over a new SessionEntry.origin wire field (unknown from a
+    pre-change peer).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * FRR: restore per-qualified-next-hop metrics for routes redistributed
     into RIP (#12531). RIP now receives its QNH metric through
     ripd-native offset-lists in the router rip stanza (one

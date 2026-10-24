@@ -119,6 +119,95 @@ func flowSessionDisplayID(dpSessionID uint64, ordinalIdx int) uint64 {
 	return uint64(ordinalIdx)
 }
 
+// sessionOriginLabel renders a session row's stored provenance (#16110)
+// from the SessFlagClusterSynced bit (#10227): "cluster-synced" for a
+// peer-synced row, "local" otherwise. Promotion clears that bit in the
+// conntrack mirror (session_glue/promote.rs update_session_cluster_synced_origin),
+// so a promoted row truthfully reads "local" — there is no third stored
+// state to render. Forwarding-ready (FwdPackets) is the separate
+// locally-forwarded evidence. The session id cannot carry this signal:
+// a synced import adopts the peer's id (#5212).
+func sessionOriginLabel(flags uint16) string {
+	if flags&dataplane.SessFlagClusterSynced != 0 {
+		return "cluster-synced"
+	}
+	return "local"
+}
+
+// sessionForwardingReady reports whether the local row itself evidences
+// local forwarding (#16110): forward packets this node counted. It is
+// deliberately not derived from RG ownership — that derivation is the
+// HA column, and suffixing it with itself would answer nothing.
+func sessionForwardingReady(fwdPackets uint64) string {
+	if fwdPackets > 0 {
+		return "yes"
+	}
+	return "no"
+}
+
+// translatedSrcPort renders the effective SNAT destination of the Out:
+// line. The stored port is rendered as-is; when SNAT rewrote the address
+// but stored no port (address-only / `port no-translation`, whose wire
+// port is the packet's own source port) the preserved source port is
+// shown — never a synthesized 0 (#16110).
+func translatedSrcPort(flags uint16, natPort, srcPort uint16) uint16 {
+	if flags&dataplane.SessFlagSNAT != 0 && natPort == 0 {
+		return srcPort
+	}
+	return natPort
+}
+
+// translatedDstPort is the DNAT sibling of translatedSrcPort: an
+// address-only DNAT rewrite preserves the original destination port.
+func translatedDstPort(flags uint16, natPort, dstPort uint16) uint16 {
+	if flags&dataplane.SessFlagDNAT != 0 && natPort == 0 {
+		return dstPort
+	}
+	return natPort
+}
+
+// sessionTupleKey is the cross-node identity of a session row for the
+// #16110 divergence check: the forward 5-tuple both nodes render for the
+// same synced session. The dataplane SessionID is node-local (#6198), so
+// it cannot join the two views; the tuple can.
+type sessionTupleKey struct {
+	family   int
+	src, dst string
+	srcPort  uint16
+	dstPort  uint16
+	proto    uint8
+}
+
+// localTranslatedPort records what THIS node's row renders as the
+// translated source port, for comparison against the peer's view of
+// the same synced session.
+type localTranslatedPort struct {
+	port uint16
+}
+
+// natDivergenceWarning returns the explicit divergence line for one tuple
+// when the local and peer views of the same session carry different
+// translated source ports, or "" when they agree (or the peer carries no
+// NAT port to compare). Both ports are stated so the operator does not
+// have to spot the mismatch by eye across two CLI outputs (#16110).
+func natDivergenceWarning(tuple string, local, peer uint16, peerPresent bool) string {
+	if !peerPresent || local == peer {
+		return ""
+	}
+	return fmt.Sprintf("  NAT divergence: local translated port %d != peer translated port %d for %s (same synced session)\n", local, peer, tuple)
+}
+
+// peerSessionOriginLabel renders the peer row's provenance as reported by
+// the peer itself (#16110). A pre-#16110 peer sends no origin; rendering
+// "unknown" is honest, re-deriving it from the peer's HA flag would
+// repeat the original defect (an ownership guess dressed as provenance).
+func peerSessionOriginLabel(se *pb.SessionEntry) string {
+	if se == nil || se.Origin == "" {
+		return "unknown"
+	}
+	return se.Origin
+}
+
 func (c *CLI) showStatistics(detail bool) error {
 	if c.dp == nil || !c.dp.IsLoaded() {
 		fmt.Println("Statistics: dataplane not loaded")
@@ -234,6 +323,12 @@ func (c *CLI) showFlowSession(args []string) error {
 	}
 
 	count := 0
+
+	// #16110: this node's translated source port per forward tuple, for
+	// the divergence check against the peer's view below. Local rows are
+	// streamed before the peer fetch, so they are recorded here and
+	// compared when the peer rows render.
+	localNAT := make(map[sessionTupleKey]localTranslatedPort)
 
 	// In cluster mode, print node header before local sessions.
 	clusterMode := c.cluster != nil
@@ -395,12 +490,13 @@ func (c *CLI) showFlowSession(args []string) error {
 			polName = fmt.Sprintf("%d", val.PolicyID)
 		}
 		haState := sessionHAState(sessionIngressIf(val.IngressIfindex, val.IngressVlanID, val.IngressZone, inZone), sessionEgressIf(val.FibIfindex, val.FibVlanID, val.EgressZone, outZone), val.IngressZone, val.EgressZone)
+		origin := sessionOriginLabel(val.Flags)
 		if haState != "" {
-			fmt.Printf("Session ID: %d, Policy name: %s/%d, HA State: %s, Timeout: %d, Session State: Unknown (validity not tracked)\n",
-				sid, polName, val.PolicyID, haState, val.Timeout)
+			fmt.Printf("Session ID: %d, Policy name: %s/%d, HA State: %s, Timeout: %d, Origin: %s, Forwarding-ready: %s, Session State: Unknown (validity not tracked)\n",
+				sid, polName, val.PolicyID, haState, val.Timeout, origin, sessionForwardingReady(val.FwdPackets))
 		} else {
-			fmt.Printf("Session ID: %d, Policy name: %s/%d, Timeout: %d, Session State: Unknown (validity not tracked)\n",
-				sid, polName, val.PolicyID, val.Timeout)
+			fmt.Printf("Session ID: %d, Policy name: %s/%d, Timeout: %d, Origin: %s, Forwarding-ready: %s, Session State: Unknown (validity not tracked)\n",
+				sid, polName, val.PolicyID, val.Timeout, origin, sessionForwardingReady(val.FwdPackets))
 		}
 
 		inIf := sessionIngressIf(val.IngressIfindex, val.IngressVlanID, val.IngressZone, inZone)
@@ -414,15 +510,14 @@ func (c *CLI) showFlowSession(args []string) error {
 		outDstPort := srcPort
 		if val.Flags&dataplane.SessFlagSNAT != 0 {
 			natIP := uint32ToIP(val.NATSrcIP)
-			natPort := ntohs(val.NATSrcPort)
 			outDstIP = natIP.String()
-			outDstPort = natPort
+			outDstPort = translatedSrcPort(val.Flags, ntohs(val.NATSrcPort), srcPort)
+			localNAT[sessionTupleKey{family: 4, src: srcIP.String(), dst: dstIP.String(), srcPort: srcPort, dstPort: dstPort, proto: key.Protocol}] = localTranslatedPort{port: outDstPort}
 		}
 		if val.Flags&dataplane.SessFlagDNAT != 0 {
 			natIP := uint32ToIP(val.NATDstIP)
-			natPort := ntohs(val.NATDstPort)
 			outSrcIP = natIP.String()
-			outSrcPort = natPort
+			outSrcPort = translatedDstPort(val.Flags, ntohs(val.NATDstPort), dstPort)
 		}
 		outIf := sessionEgressIf(val.FibIfindex, val.FibVlanID, val.EgressZone, outZone)
 		fmt.Printf("  Out: %s/%d --> %s/%d;%s, Conn Tag: 0x0, If: %s, Zone: %s, Pkts: %d, Bytes: %d,\n",
@@ -525,12 +620,13 @@ func (c *CLI) showFlowSession(args []string) error {
 			polName = fmt.Sprintf("%d", val.PolicyID)
 		}
 		haState := sessionHAState(sessionIngressIf(val.IngressIfindex, val.IngressVlanID, val.IngressZone, inZone), sessionEgressIf(val.FibIfindex, val.FibVlanID, val.EgressZone, outZone), val.IngressZone, val.EgressZone)
+		origin := sessionOriginLabel(val.Flags)
 		if haState != "" {
-			fmt.Printf("Session ID: %d, Policy name: %s/%d, HA State: %s, Timeout: %d, Session State: Unknown (validity not tracked)\n",
-				sid, polName, val.PolicyID, haState, val.Timeout)
+			fmt.Printf("Session ID: %d, Policy name: %s/%d, HA State: %s, Timeout: %d, Origin: %s, Forwarding-ready: %s, Session State: Unknown (validity not tracked)\n",
+				sid, polName, val.PolicyID, haState, val.Timeout, origin, sessionForwardingReady(val.FwdPackets))
 		} else {
-			fmt.Printf("Session ID: %d, Policy name: %s/%d, Timeout: %d, Session State: Unknown (validity not tracked)\n",
-				sid, polName, val.PolicyID, val.Timeout)
+			fmt.Printf("Session ID: %d, Policy name: %s/%d, Timeout: %d, Origin: %s, Forwarding-ready: %s, Session State: Unknown (validity not tracked)\n",
+				sid, polName, val.PolicyID, val.Timeout, origin, sessionForwardingReady(val.FwdPackets))
 		}
 
 		inIf := sessionIngressIf(val.IngressIfindex, val.IngressVlanID, val.IngressZone, inZone)
@@ -544,15 +640,14 @@ func (c *CLI) showFlowSession(args []string) error {
 		outDstPort := srcPort
 		if val.Flags&dataplane.SessFlagSNAT != 0 {
 			natIP := net.IP(val.NATSrcIP[:])
-			natPort := ntohs(val.NATSrcPort)
 			outDstIP = natIP.String()
-			outDstPort = natPort
+			outDstPort = translatedSrcPort(val.Flags, ntohs(val.NATSrcPort), srcPort)
+			localNAT[sessionTupleKey{family: 6, src: srcIP.String(), dst: dstIP.String(), srcPort: srcPort, dstPort: dstPort, proto: key.Protocol}] = localTranslatedPort{port: outDstPort}
 		}
 		if val.Flags&dataplane.SessFlagDNAT != 0 {
 			natIP := net.IP(val.NATDstIP[:])
-			natPort := ntohs(val.NATDstPort)
 			outSrcIP = natIP.String()
-			outSrcPort = natPort
+			outSrcPort = translatedDstPort(val.Flags, ntohs(val.NATDstPort), dstPort)
 		}
 		outIf := sessionEgressIf(val.FibIfindex, val.FibVlanID, val.EgressZone, outZone)
 		fmt.Printf("  Out: %s/%d --> %s/%d;%s, Conn Tag: 0x0, If: %s, Zone: %s, Pkts: %d, Bytes: %d,\n",
@@ -771,8 +866,9 @@ func (c *CLI) showFlowSession(args []string) error {
 					if se.HaActive {
 						peerHAState = "Active"
 					}
-					fmt.Printf("Session ID: %d, Policy name: %s/%d, HA State: %s, Timeout: %d, Session State: Unknown (validity not tracked)\n",
-						peerFullSID, polDisplay, se.PolicyId, peerHAState, se.TimeoutSeconds)
+					peerOrigin := peerSessionOriginLabel(se)
+					fmt.Printf("Session ID: %d, Policy name: %s/%d, HA State: %s, Timeout: %d, Origin: %s, Forwarding-ready: %s, Session State: Unknown (validity not tracked)\n",
+						peerFullSID, polDisplay, se.PolicyId, peerHAState, se.TimeoutSeconds, peerOrigin, sessionForwardingReady(se.FwdPackets))
 					inZone := se.IngressZoneName
 					if inZone == "" {
 						inZone = fmt.Sprintf("%d", se.IngressZone)
@@ -794,7 +890,9 @@ func (c *CLI) showFlowSession(args []string) error {
 					fmt.Printf("  In: %s/%d --> %s/%d;%s, Conn Tag: 0x0, If: %s, Zone: %s, Pkts: %d, Bytes: %d,\n",
 						se.SrcAddr, se.SrcPort, se.DstAddr, se.DstPort,
 						se.Protocol, inIf, inZone, se.FwdPackets, se.FwdBytes)
-					// Out line: reverse direction with NAT applied
+					// Out line: reverse direction with NAT applied. A zero
+					// peer NAT port with a NAT address is the address-only
+					// preserve case, not port 0 (#16110).
 					outSrcAddr := se.DstAddr
 					outSrcPort := se.DstPort
 					outDstAddr := se.SrcAddr
@@ -802,14 +900,33 @@ func (c *CLI) showFlowSession(args []string) error {
 					if se.NatSrcAddr != "" {
 						outDstAddr = se.NatSrcAddr
 						outDstPort = se.NatSrcPort
+						if outDstPort == 0 {
+							outDstPort = se.SrcPort
+						}
 					}
 					if se.NatDstAddr != "" {
 						outSrcAddr = se.NatDstAddr
 						outSrcPort = se.NatDstPort
+						if outSrcPort == 0 {
+							outSrcPort = se.DstPort
+						}
 					}
 					fmt.Printf("  Out: %s/%d --> %s/%d;%s, Conn Tag: 0x0, If: %s, Zone: %s, Pkts: %d, Bytes: %d,\n",
 						outSrcAddr, outSrcPort, outDstAddr, outDstPort,
 						se.Protocol, outIf, outZone, se.RevPackets, se.RevBytes)
+					if se.NatSrcAddr != "" {
+						family := 4
+						if strings.Contains(se.SrcAddr, ":") {
+							family = 6
+						}
+						tuple := sessionTupleKey{family: family, src: se.SrcAddr, dst: se.DstAddr, srcPort: uint16(se.SrcPort), dstPort: uint16(se.DstPort), proto: protoNumFromName(se.Protocol)}
+						if local, ok := localNAT[tuple]; ok {
+							tupleText := fmt.Sprintf("%s/%d -> %s/%d", se.SrcAddr, se.SrcPort, se.DstAddr, se.DstPort)
+							if warn := natDivergenceWarning(tupleText, local.port, uint16(outDstPort), true); warn != "" {
+								fmt.Print(warn)
+							}
+						}
+					}
 					if se.Application != "" {
 						fmt.Printf("  Application: %s\n", se.Application)
 					}

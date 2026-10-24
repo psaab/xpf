@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/dataplane"
@@ -53,6 +54,35 @@ func protoNameToID(name string) string {
 		return "58"
 	default:
 		return name
+	}
+}
+
+// protoNumFromName is the numeric inverse of protoNameFromNum for the
+// names the session surfaces emit (#16110 tuple join). An unrecognized
+// name yields 0, which simply never matches a local tuple.
+func protoNumFromName(name string) uint8 {
+	switch strings.ToLower(name) {
+	case "tcp":
+		return 6
+	case "udp":
+		return 17
+	case "icmp":
+		return 1
+	case "gre":
+		return 47
+	case "esp":
+		return 50
+	case "ipip":
+		return 4
+	case "ipv6":
+		return 41
+	case "icmpv6":
+		return 58
+	default:
+		if n, err := strconv.Atoi(name); err == nil && n >= 0 && n <= 255 {
+			return uint8(n)
+		}
+		return 0
 	}
 }
 

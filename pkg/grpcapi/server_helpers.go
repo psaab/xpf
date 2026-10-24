@@ -118,6 +118,33 @@ func protoName(p uint8) string {
 	return fmt.Sprintf("%d", p)
 }
 
+// sessionOriginLabel renders a row's stored provenance (#16110), mirroring
+// pkg/cli's label: "local" or "cluster-synced" (peer-synced row).
+// Promotion clears the cluster-synced flag, so a promoted row reads
+// "local" — its stored provenance after promotion.
+func sessionOriginLabel(flags uint16) string {
+	if flags&dataplane.SessFlagClusterSynced != 0 {
+		return "cluster-synced"
+	}
+	return "local"
+}
+
+// effectiveNATSrcPort/DstPort: address-only NAT (flag set, stored port 0)
+// preserves the original port — never render a synthesized 0 (#16110).
+func effectiveNATSrcPort(flags uint16, natPort, srcPort uint16) uint16 {
+	if flags&dataplane.SessFlagSNAT != 0 && natPort == 0 {
+		return srcPort
+	}
+	return natPort
+}
+
+func effectiveNATDstPort(flags uint16, natPort, dstPort uint16) uint16 {
+	if flags&dataplane.SessFlagDNAT != 0 && natPort == 0 {
+		return dstPort
+	}
+	return natPort
+}
+
 func ntohs(v uint16) uint16 {
 	var b [2]byte
 	binary.BigEndian.PutUint16(b[:], v)
