@@ -7538,63 +7538,94 @@ fn claimed_only_cookie_ack_is_not_validated_16051() {
     assert_eq!(control_counters.syn_cookie_ack_valid, 1);
 }
 
-/// #16051 fold: claimed-only parse errors must not be attributed to
-/// sentinel zone 0 in either branch. A truncated IPv4 frame (18 bytes:
-/// Ethernet + 4 IP bytes) fails extract; with only claimed `wan`
-/// profiled and raw `lan` unprofiled, both the flow-present call
-/// (flow supplied synthetically is not used before extract on the raw
-/// path — the stage extracts first) and the flowless call must Pass
-/// with zero drops/events. Raw-present parse attribution is covered by
-/// the pre-existing #2146/#5190 cells.
+/// #16051 fold: claimed-only parse errors stay FAIL-CLOSED (#2146:
+/// Err => DROP), attributed to the actual claimed screened zone —
+/// never sentinel 0 and never a fail-open Pass. The frame carries
+/// complete IP/L4 headers but a malformed IPv4 option TLV (IHL 6,
+/// first length-prefixed option declares len 1 < 2 at
+/// extract.rs:304-305), so extraction Errs while the flow parser
+/// still yields a flow — a SYN|FIN must not evade the claimed
+/// syn-fin screen via the parse error. Both branches are exercised:
+/// flow-present (flow supplied) and flowless (flow withheld; the
+/// same frame parses flow-present, so flowless is forced by passing
+/// None, exercising the flowless Err arm on identical bytes).
+/// Fail-on-revert: restoring the claimed-only Pass arm (or zone-0
+/// attribution) turns the Recycle/zone assertions RED.
 #[test]
-fn claimed_only_parse_error_not_attributed_to_zone_zero_16051() {
+fn claimed_only_parse_error_drops_under_claimed_zone_16051() {
     use crate::test_zone_ids::TEST_WAN_ZONE_ID;
 
-    let forwarding = build_forwarding_state(&super::super::test_fixtures::nat_snapshot());
-    let rig = ScreenTestRig::new(forwarding);
-    let ctx = rig.ctx();
-
-    let mut profiles = FxHashMap::default();
-    profiles.insert(
-        "wan".to_string(),
-        ScreenProfile {
-            syn_fin: true,
-            ..ScreenProfile::default()
-        },
-    );
-    let mut screen = ScreenState::new();
-    screen.update_profiles(profiles);
-
-    // Ethernet header + only 4 bytes of IPv4 header: extract must Err.
+    // Complete headers, malformed options: IHL 6 (4 option bytes),
+    // option kind 0x80 (length-prefixed, not LSRR/SSRR) with len 1.
     let mut frame = tcp_v4_frame(
         Ipv4Addr::new(192, 0, 2, 10),
         Ipv4Addr::new(198, 51, 100, 20),
         49152,
         443,
-        TCP_FLAG_SYN,
+        TCP_FLAG_SYN | 0x01,
         1,
         0,
     );
-    frame.truncate(18);
-    let meta = tcp_v4_meta(&frame, TCP_FLAG_SYN);
-    // Flowless invocation exercises the flowless Err arm.
-    let mut counters = BatchCounters::default();
-    let outcome = stage_screen_check_with_ambiguous(
-        None,
-        &frame,
-        meta,
-        None,
-        Some(TEST_WAN_ZONE_ID),
-        TEST_NOW_NS,
-        TEST_NOW_SECS,
-        &mut screen,
-        &mut counters,
-        &ctx,
-    );
-    assert!(
-        matches!(outcome, StageOutcome::Continue(ScreenCheckOutcome::Pass)),
-        "claimed-only flowless parse error must Pass, not zone-0 drop"
-    );
-    assert_eq!(counters.screen_drops, 0);
-    assert!(rig.drain_events().is_empty(), "no zone-0 parse event may be emitted");
+    // Rebuild with IHL 6: insert 4 option bytes after the 20-byte IP
+    // header, fix IHL/total-len/checksums. tcp_v4_frame lays out
+    // eth(14) + ip(20) + tcp(20); splice options at offset 34.
+    let mut ihl6 = Vec::with_capacity(frame.len() + 4);
+    ihl6.extend_from_slice(&frame[..34]);
+    ihl6.extend_from_slice(&[0x80, 0x01, 0x00, 0x00]); // kind, len=1 (malformed), pad
+    ihl6.extend_from_slice(&frame[34..]);
+    ihl6[14] = 0x46; // version 4, IHL 6
+    let total = (ihl6.len() - 14) as u16;
+    ihl6[16..18].copy_from_slice(&total.to_be_bytes());
+    ihl6[24..26].copy_from_slice(&[0, 0]);
+    let csum = checksum16(&ihl6[14..38]);
+    ihl6[24..26].copy_from_slice(&csum.to_be_bytes());
+    frame = ihl6;
+    crate::afxdp::frame::recompute_l4_checksum_ipv4(&mut frame[14..], 24, PROTO_TCP, false)
+        .expect("tcp checksum with options");
+
+    let meta = tcp_v4_meta(&frame, TCP_FLAG_SYN | 0x01);
+    let flow = parse_session_flow_from_bytes(&frame, meta)
+        .expect("complete headers still yield a flow despite malformed options");
+
+    for (label, flow_arg) in [("flow", Some(&flow)), ("flowless", None)] {
+        let forwarding = build_forwarding_state(&super::super::test_fixtures::nat_snapshot());
+        let rig = ScreenTestRig::new(forwarding);
+        let ctx = rig.ctx();
+        let mut profiles = FxHashMap::default();
+        profiles.insert(
+            "wan".to_string(),
+            ScreenProfile {
+                syn_fin: true,
+                ..ScreenProfile::default()
+            },
+        );
+        let mut screen = ScreenState::new();
+        screen.update_profiles(profiles);
+
+        let mut counters = BatchCounters::default();
+        let outcome = stage_screen_check_with_ambiguous(
+            flow_arg,
+            &frame,
+            meta,
+            None,
+            Some(TEST_WAN_ZONE_ID),
+            TEST_NOW_NS,
+            TEST_NOW_SECS,
+            &mut screen,
+            &mut counters,
+            &ctx,
+        );
+        assert!(
+            matches!(outcome, StageOutcome::RecycleAndContinue),
+            "{label}: claimed-only parse error must DROP fail-closed, not Pass"
+        );
+        assert_eq!(counters.screen_drops, 1, "{label}: parse drop must be counted");
+        let events = rig.drain_events();
+        assert_eq!(events.len(), 1, "{label}: exactly one parse-drop event");
+        assert_eq!(
+            events[0].ingress_zone_id, TEST_WAN_ZONE_ID,
+            "{label}: parse drop must attribute to the claimed zone, never zone 0"
+        );
+        assert_eq!(events[0].action, 0, "{label}: parse drop action is DENY (0)");
+    }
 }

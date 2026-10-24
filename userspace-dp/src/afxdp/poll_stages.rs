@@ -1198,13 +1198,18 @@ pub(super) fn stage_screen_check_with_ambiguous(
             // screens is dropped on the flow path, so drop it here too rather
             // than admit an unparseable fragment unscreened.
             Err(err) => {
-                // #16051 fold: a claimed-only profile never lends its zone
-                // to raw parse-error attribution. The sentinel profile slot
-                // (zone_id = 0) is not a real zone, so a claimed-only packet
-                // passes rather than emitting/recording a zone-0 drop.
-                if !raw_zone_has_state {
+                // #16051 fold: preserve the fail-closed parse semantics
+                // (#2146: Err => DROP), attributed to the actual screened
+                // zone. Raw-present keeps the raw zone; claimed-only
+                // attributes to the claimed zone — never sentinel 0, never
+                // a fail-open Pass (a malformed-options SYN|FIN with
+                // complete headers must not evade the claimed screen).
+                let Some((err_zone_id, err_zone_name)) =
+                    raw_profile_zone.or(claimed_zone)
+                else {
                     return StageOutcome::Continue(ScreenCheckOutcome::Pass);
-                }
+                };
+                let _ = err_zone_name;
                 let reason = err.screen_reason();
                 emit_screen_drop_event(
                     worker_ctx.event_stream,
@@ -1214,13 +1219,13 @@ pub(super) fn stage_screen_check_with_ambiguous(
                     // protocol=0 / pkt_len=0 / 0.0.0.0.
                     &screen_parse_error_info_flowless(&meta, screen_src, screen_dst),
                     meta,
-                    zone_id,
+                    err_zone_id,
                     reason,
                     event_now_ns_from_secs(now_secs),
                 );
                 counters.record_screen_drop(
                     reason,
-                    zone_id,
+                    err_zone_id,
                     &worker_ctx.forwarding.flood_counter_slot_map,
                 );
                 return StageOutcome::RecycleAndContinue;
@@ -1346,24 +1351,26 @@ pub(super) fn stage_screen_check_with_ambiguous(
         // rather than admit it — a SYN-bearing frame with a truncated
         // FRAGMENT header must not bypass `syn-frag`.
         Err(err) => {
-            // #16051 fold: claimed-only handling must not attribute a parse
-            // failure to sentinel zone 0. Raw-present behavior is unchanged.
-            if !raw_zone_has_state {
+            // #16051 fold: preserve fail-closed parse semantics (#2146),
+            // attributed to the actual screened zone (raw if present, else
+            // claimed) — never sentinel 0, never a fail-open Pass.
+            let Some((err_zone_id, _err_zone_name)) = raw_profile_zone.or(claimed_zone)
+            else {
                 return StageOutcome::Continue(ScreenCheckOutcome::Pass);
-            }
+            };
             let reason = err.screen_reason();
             let drop_info = screen_parse_error_info(&meta, flow);
             emit_screen_drop_event(
                 worker_ctx.event_stream,
                 &drop_info,
                 meta,
-                zone_id,
+                err_zone_id,
                 reason,
                 event_now_ns_from_secs(now_secs),
             );
             counters.record_screen_drop(
                 reason,
-                zone_id,
+                err_zone_id,
                 &worker_ctx.forwarding.flood_counter_slot_map,
             );
             return StageOutcome::RecycleAndContinue;
