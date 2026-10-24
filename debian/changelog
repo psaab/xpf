@@ -1,4 +1,14 @@
 xpf (0.0.0) unstable; urgency=medium
+  * FRR: extract the `danglingRefs` helper in the policy term renderer
+    (#16207). The as-path (#9881), community (#10822) and prefix-list
+    (#14136) fail-closed term rules each open-coded the same
+    skip-empty / probe-each-distinct-name-once / any-dangling
+    collection over a `map[string]bool`; they now share the one
+    helper, which allocates the same single map per site and adds no
+    pass. Naming, goto targets, sequence numbering and emitted FRR
+    output are byte-for-byte unchanged (hash unification of generated
+    names remains rejected — those names are a stability contract).
+
   * Dataplane: the three string protocol carriers (filter, policy
     application, DNAT) now have per-carrier validation cells proving
     atomic `__unsupported__` poison preservation, both mixed-version

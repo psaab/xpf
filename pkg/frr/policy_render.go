@@ -796,6 +796,33 @@ func prefixListRefMissingAtRender(po *config.PolicyOptionsConfig, name, matchKW 
 	return true
 }
 
+// danglingRefs collects the per-name dangling verdicts for one term's
+// referenced names (#16207): empty names are skipped, each distinct
+// name is probed once via missing, and the returned map answers the
+// dispatch's per-branch lookups (a name absent from the map — including
+// the "" no-match sentinel — is never dangling). any reports whether
+// any distinct name dangles. This is exactly the collection idiom the
+// as-path (#9881), community (#10822) and prefix-list (#14136) term
+// rules each open-coded; it allocates the one map those sites already
+// allocated and adds no pass beyond theirs.
+func danglingRefs(names []string, missing func(string) bool) (refs map[string]bool, any bool) {
+	refs = make(map[string]bool, len(names))
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		if _, seen := refs[name]; seen {
+			continue
+		}
+		dangling := missing(name)
+		refs[name] = dangling
+		if dangling {
+			any = true
+		}
+	}
+	return refs, any
+}
+
 const nextPolicySequenceMarker = "on-match goto XPF_NEXT_POLICY_SEQUENCE"
 
 func policyHasNextPolicyTerm(ps *config.PolicyStatement) bool {
@@ -905,22 +932,9 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 		// (restrictive and permissive actions need opposite defaults), so a
 		// lenient-path restrictive modification can still be skipped past;
 		// documented residual, same class as the #6686 belt.
-		danglingAsp := make(map[string]bool, len(term.FromASPath))
-		for _, asp := range term.FromASPath {
-			if asp == "" {
-				continue
-			}
-			if _, seen := danglingAsp[asp]; !seen {
-				danglingAsp[asp] = asPathListMissingAtRender(po, asp)
-			}
-		}
-		anyDanglingAsp := false
-		for _, d := range danglingAsp {
-			if d {
-				anyDanglingAsp = true
-				break
-			}
-		}
+		danglingAsp, anyDanglingAsp := danglingRefs(term.FromASPath, func(name string) bool {
+			return asPathListMissingAtRender(po, name)
+		})
 		if anyDanglingAsp {
 			if action == "deny" {
 				slog.Warn("frr: reject term matches on as-path list absent from frr.conf; rendering deny-all",
@@ -939,22 +953,9 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 		// reference to either absent list dangles, so reject terms over any
 		// such OR-branch render deny-all; other terms skip the dangling branch
 		// in the dispatch below. Never emit a dangling community match.
-		danglingCommunity := make(map[string]bool, len(term.FromCommunity))
-		for _, community := range term.FromCommunity {
-			if community == "" {
-				continue
-			}
-			if _, seen := danglingCommunity[community]; !seen {
-				danglingCommunity[community] = communityListMissingAtRender(po, community)
-			}
-		}
-		anyDanglingCommunity := false
-		for _, dangling := range danglingCommunity {
-			if dangling {
-				anyDanglingCommunity = true
-				break
-			}
-		}
+		danglingCommunity, anyDanglingCommunity := danglingRefs(term.FromCommunity, func(name string) bool {
+			return communityListMissingAtRender(po, name)
+		})
 		if anyDanglingCommunity {
 			if action == "deny" {
 				slog.Warn("frr: reject term matches on community list absent from frr.conf; rendering deny-all",
@@ -988,17 +989,12 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 		// exactly as in the #14137 split route-filter case. For accept /
 		// non-terminating terms the dropped ref simply does not emit
 		// (subset direction, never broader).
-		danglingPrefixList := make(map[string]bool, len(term.PrefixList))
 		// prefixListDanglingFamilies records, per name, the per-family
 		// refs that dangle (mixed list with one all-malformed family).
+		// It is built inside the danglingRefs probe so each distinct
+		// name's refs are expanded exactly once, as before.
 		prefixListDanglingFamilies := make(map[string][]fromPrefixListRef)
-		for _, plName := range term.PrefixList {
-			if plName == "" {
-				continue
-			}
-			if _, seen := danglingPrefixList[plName]; seen {
-				continue
-			}
+		danglingPrefixList, anyDanglingPrefixList := danglingRefs(term.PrefixList, func(plName string) bool {
 			refs := fromPrefixListRefs(po, plName)
 			allMissing := len(refs) > 0
 			for _, ref := range refs {
@@ -1008,15 +1004,8 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 					allMissing = false
 				}
 			}
-			danglingPrefixList[plName] = allMissing
-		}
-		anyDanglingPrefixList := false
-		for _, dangling := range danglingPrefixList {
-			if dangling {
-				anyDanglingPrefixList = true
-				break
-			}
-		}
+			return allMissing
+		})
 		// hasPartialDanglingPrefixList: some name has a dangling family
 		// but also a rendered family.
 		hasPartialDanglingPrefixList := false
