@@ -18,6 +18,13 @@ xpf (0.0.0) unstable; urgency=medium
     2 GiB gate VM. Pinned by test_bake_hugepages_16243.py (incl. the
     review-16260 consumer-model spellings re-based on 90) and
     test_validate_memory_floor_16455.py.
+  * Config: reject unknown `chassis cluster` and `redundancy-group`
+    statements at commit (#16456). A misspelt `interface-monitor`,
+    `ip-monitoring`, `preempt`, `redundancy-group` or cluster-level
+    keyword previously committed clean and compiled nothing, so the RG
+    never failed over on the configured link/target loss. The scoped
+    pre-walk gate names the typo on strict commit and warns on tolerant
+    load/peer-sync (#1960); shipped cluster configs still commit.
   * Packaging: point the #15089 dpkg file triggers at the loader
     payloads dpkg actually unpacks (/usr/lib/shim,
     /usr/lib/grub/x86_64-efi-signed) instead of the ESP copies under

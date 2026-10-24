@@ -1770,6 +1770,35 @@ warns once per distinct finding and keeps the pre-existing compiled
 shape (#1960). Coverage:
 `pkg/config/applications_level_16459_test.go` (flat + hierarchical,
 packed, group-inherited, controls for term bodies and apply-macro).
+### Chassis cluster / redundancy-group levels — unknown statements are gated (#16456)
+
+The `chassis cluster` body and the `chassis cluster redundancy-group <n>`
+body were open-world: a misspelt keyword on one line (`interface-monitr`,
+`interface-monitors`, `preemt`, `ip-monitorng`, `redundancy-grup`,
+`heartbeat-intervalzq`, `peer-addresszq`, or any other unknown child such
+as `xpfbogus`) committed clean with byte-identical warnings and the line
+was dropped. A typo'd `interface-monitor` compiled no monitor, so the
+group never demoted on link-down; a typo'd `ip-monitoring` or `preempt`
+likewise never took effect, while `show configuration` still rendered
+the dropped line. The scoped pre-walk gate
+`validateChassisClusterUnknownAST16456` (in `runPreWalkGates`, beside the
+#6588 RG gates) judges exactly those two levels: the cluster body read
+through `normalizedClusterNode` against the `clusterStatements` splitter
+table (bound to the schema by `TestClusterSplitterAndSchemaAgree_6672`),
+and each RG body read through `redundancyGroupBody` against the
+`redundancyGroupStatements` dispatch table — the permitted sets are read
+from those SSOTs, so a statement declared later is permitted
+automatically. It is deliberately NOT `closedWorld` on `cluster` or on
+`redundancy-group`, which inherits and would close the
+`interface-monitor` / `ip-monitoring family inet <addr>` grammars beneath
+(#9017/#8882). Packed tails folded onto a known statement are judged past
+that statement's declared value slot; a flag statement's folded tail is
+owned by the #6588 arity gate when it carries the tokens. Apply
+statements (#7029) are never judged. Strict commit rejects the first
+offender naming it; tolerant load/peer-sync warns once per distinct
+finding and keeps the pre-existing compiled shape (#1960). Coverage:
+`pkg/config/chassis_cluster_unknown_16456_test.go` (flat + hierarchical +
+packed, group-inherited, shipped cluster configs).
 
 ## Strict commit-time validators → `pkg/config/compiler_validate_strict_*.go`
 

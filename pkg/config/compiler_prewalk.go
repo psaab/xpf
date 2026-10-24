@@ -904,6 +904,28 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, []uncoveredF
 		return nil, nil, err
 	}
 
+	// #16456: an unknown statement at the `chassis cluster` level or in a
+	// `redundancy-group` body. Both levels were open-world: compileChassis
+	// dispatches RG statements through redundancyGroupStatements with no
+	// else arm and reads the cluster body with FindChild calls that miss
+	// an unknown keyword, so a misspelt `interface-monitor`, `preempt`,
+	// `ip-monitoring`, `redundancy-group` or `heartbeat-interval`
+	// committed clean with byte-identical warnings and compiled no
+	// monitor, no ip-monitoring and no preempt — the RG never fails over
+	// on the link or target loss the operator configured. The compiled
+	// config carries no trace of the dropped token, so the check is on
+	// the AST, reading the RG body through redundancyGroupBody and the
+	// cluster body through normalizedClusterNode (the compiler's own
+	// splitters). Scoped to exactly those two levels — NOT closedWorld,
+	// which inherits into the monitor grammars (#9017/#8882). Strict:
+	// hard-reject; lenient: warn so a persisted config still boots
+	// (#1960).
+	clusterUnknownWarnings16456, err := validateChassisClusterUnknownAST16456(
+		tree.Children, opts.lenientChassisClusterUnknown16456)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	// The #6662 packed-login-body gate and the #6701 built-in-class-shadow gate
 	// used to run here, on the ALREADY-EXPANDED single-node view. They now run
 	// PRE-EXPANSION as both-node unions from compileTree /
@@ -995,6 +1017,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, []uncoveredF
 	warnings = append(warnings, rethRGWarnings...)
 	warnings = append(warnings, monitorWeightWarnings...)
 	warnings = append(warnings, rgArityWarnings...)
+	warnings = append(warnings, clusterUnknownWarnings16456...)
 	warnings = append(warnings, garpCountWarnings...)
 	warnings = append(warnings, bareLeafWarnings...)
 	warnings = append(warnings, staticRouteQNHWarnings...)
