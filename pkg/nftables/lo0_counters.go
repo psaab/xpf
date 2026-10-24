@@ -131,3 +131,45 @@ func ReadLo0Counters() ([]Lo0Count, error) {
 	}
 	return out, nil
 }
+
+// ResetLo0Counters zeroes the named `then count` counters in the kernel
+// `inet xpf_lo0` lo0 input-filter table via netlink, so `clear firewall all`
+// resets them together with the helper/dataplane filter counters (#16457).
+// Previously they reset only on table rebuild (every commit / DHCP
+// re-render), so a clear left the kernel counts — and the
+// xpf_lo0_counter_hits_total series — running.
+//
+// When the table is absent (no lo0 input filter is attached) it returns nil:
+// no filter means no counters to reset, mirroring ReadLo0Counters. A genuine
+// netlink failure is returned so the clear surfaces it rather than printing
+// an unqualified success.
+func ResetLo0Counters() error {
+	c, err := nftables.New()
+	if err != nil {
+		return fmt.Errorf("nftables conn: %w", err)
+	}
+	tables, err := c.ListTablesOfFamily(nftables.TableFamilyINet)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return nil
+		}
+		return fmt.Errorf("nftables list tables: %w", err)
+	}
+	var table *nftables.Table
+	for _, t := range tables {
+		if t != nil && t.Name == Lo0TableName {
+			table = t
+			break
+		}
+	}
+	if table == nil {
+		return nil
+	}
+	if _, err := c.ResetObjects(table); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return nil
+		}
+		return fmt.Errorf("nftables reset objects %s: %w", Lo0TableName, err)
+	}
+	return nil
+}

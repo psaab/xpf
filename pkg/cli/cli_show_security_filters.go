@@ -8,7 +8,17 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/firewallshow"
+	xnft "github.com/psaab/xpf/pkg/nftables"
 )
+
+// readLo0CountersCLI is the kernel lo0 counter source for the RAW show
+// views, a package var so tests can inject a fixture without netlink
+// (#16457), mirroring pkg/api's readLo0Counters seam.
+var readLo0CountersCLI = xnft.ReadLo0Counters
+
+// resetLo0CountersCLI is the `clear firewall all` kernel lo0 reset seam
+// (#16457).
+var resetLo0CountersCLI = xnft.ResetLo0Counters
 
 func (c *CLI) showFirewallFilters() error {
 	cfg := c.store.ActiveConfig()
@@ -37,6 +47,15 @@ func (c *CLI) showFirewallFilters() error {
 		userspaceStatus = &status
 	}
 	userspaceCounters := dpuserspace.BuildFirewallFilterTermCounterIndex(userspaceStatus)
+	// #16457: kernel lo0 counters for lo0-referenced filters.
+	var lo0Err error
+	lo0For := func(family, name string) []xnft.Lo0Count {
+		counts, err := firewallshow.Lo0CountersForFilter(cfg, family, name, readLo0CountersCLI)
+		if err != nil && lo0Err == nil {
+			lo0Err = err
+		}
+		return counts
+	}
 
 	// #3408: surface a filter counter read failure as a warning AFTER all
 	// filters, rather than printing clean-zero / omitted hit counts.
@@ -93,6 +112,11 @@ func (c *CLI) showFirewallFilters() error {
 					fmt.Printf("    Hit count: %d packets, %d bytes\n", totalPkts, totalBytes)
 				}
 			}
+			// #16457: kernel lo0 chain counts (fxp0/host-stack traffic the
+			// helper never sees), labelled by count name.
+			var lo0Buf strings.Builder
+			firewallshow.WriteLo0KernelCounters(&lo0Buf, f, lo0For(family, name))
+			fmt.Print(lo0Buf.String())
 			fmt.Println()
 		}
 	}
@@ -124,6 +148,9 @@ func (c *CLI) showFirewallFilters() error {
 	showFilters("inet6", cfg.Firewall.FiltersInet6, inet6Names)
 	if readErr != nil {
 		fmt.Printf("warning: filter counter read failed (hit counts may be incomplete): %v\n", readErr)
+	}
+	if lo0Err != nil {
+		fmt.Printf("warning: kernel lo0 counter read failed (lo0 kernel counts may be incomplete): %v\n", lo0Err)
 	}
 	return nil
 }
@@ -225,9 +252,17 @@ func (c *CLI) showFirewallFilter(name, requestedFamily string) error {
 			fmt.Printf("    Hit count: %d packets, %d bytes\n", totalPkts, totalBytes)
 		}
 	}
+	// #16457: kernel lo0 chain counts beside the helper counts.
+	lo0Counts, lo0Err := firewallshow.Lo0CountersForFilter(cfg, family, name, readLo0CountersCLI)
+	var lo0Buf strings.Builder
+	firewallshow.WriteLo0KernelCounters(&lo0Buf, filter, lo0Counts)
+	fmt.Print(lo0Buf.String())
 	fmt.Println()
 	if readErr != nil {
 		fmt.Printf("warning: filter counter read failed (hit counts may be incomplete): %v\n", readErr)
+	}
+	if lo0Err != nil {
+		fmt.Printf("warning: kernel lo0 counter read failed (lo0 kernel counts may be incomplete): %v\n", lo0Err)
 	}
 	return nil
 }

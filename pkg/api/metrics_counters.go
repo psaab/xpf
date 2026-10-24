@@ -113,9 +113,11 @@ func (c *xpfCollector) collectHostInboundJunosHostDenies(ch chan<- prometheus.Me
 
 // collectLo0Counters scrapes the per-`then count` named counters from the kernel
 // nftables lo0 input-filter chain (`inet xpf_lo0`, #4422) and emits them as
-// xpf_lo0_counter_hits_total. lo0 host-inbound traffic is enforced by the KERNEL
-// nft chain, so these counts are DISTINCT from the userspace-dp fast-path
-// xpf_filter_hits_total (they are not double counts).
+// xpf_lo0_counter_hits_total. The kernel chain enforces the lo0 filter for
+// all host-stack traffic (including fxp0), while the helper also evaluates
+// it for AF_XDP host-bound packets (#16457), so these counts are DISTINCT
+// from the userspace-dp fast-path xpf_filter_hits_total (they are not
+// double counts, and neither is the other's total).
 //
 // The lo0 table is installed by the daemon INDEPENDENT of dataplane load state,
 // so Collect calls this BEFORE the dataplane gate — the counters keep advancing

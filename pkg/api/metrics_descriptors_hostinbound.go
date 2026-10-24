@@ -160,9 +160,10 @@ func (c *xpfCollector) initHostInboundDescriptors() {
 	)
 	// #4422: per-`then count` hit counters for the kernel lo0 loopback input
 	// filter (`inet xpf_lo0` table). lo0 host-inbound traffic is enforced by
-	// the KERNEL nftables chain (not the userspace fast path), so its
-	// firewall-filter `then count <name>` counts live in nft named-counter
-	// objects, DISTINCT from xpf_filter_hits_total (which merges the
+	// BOTH the KERNEL nftables chain (all host-stack traffic, including
+	// fxp0) and the userspace helper (AF_XDP host-bound packets, #16457), so
+	// its firewall-filter `then count <name>` kernel counts live in nft
+	// named-counter objects, DISTINCT from xpf_filter_hits_total (which merges the
 	// userspace-dp fast-path per-term hits for data-interface filters,
 	// including FBF steering). Before #4422 nothing scraped the lo0 counters.
 	// The table is installed independent of dataplane load, so this is a

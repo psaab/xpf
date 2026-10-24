@@ -2202,7 +2202,15 @@ silently dumped every event instead of isolating the requested zone.
 The RAW view (`show firewall …`) prints the typed configuration as authored —
 literal addresses, `from source-prefix-list <name>` references by NAME,
 symbolic DSCP names, and each term's raw `then` selectors, alongside live
-per-term hit counters read from the dataplane.
+per-term hit counters read from the dataplane. For a filter referenced by
+`interfaces lo0 unit 0 family inet[6] filter input`, the view additionally
+prints the kernel `inet xpf_lo0` chain's named counters (`Kernel lo0
+counter <name>: …`, #16457), labelled by `then count` name: the kernel
+chain enforces the lo0 filter for all host-stack traffic (including fxp0
+management traffic), while the helper per-term counts cover only AF_XDP
+host-bound packets, so neither number is the lo0 total. `clear firewall
+all` resets both the helper/dataplane counters and the kernel lo0 named
+counters (#16457).
 
 The EFFECTIVE view (`… effective`, #4422) rebuilds and prints the
 `FirewallFilterSnapshot` the userspace dataplane actually receives — the exact

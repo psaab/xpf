@@ -85,6 +85,11 @@ func TestClearGlobalOnlyTrailingScopeRejected_5811(t *testing.T) {
 
 // The bare (exact-arity) form of each dp-backed global-only clear still runs.
 func TestClearGlobalOnlyBareStillClears_5811(t *testing.T) {
+	// #16457: `clear firewall all` also resets kernel lo0 counters via
+	// netlink; stub the seam so this arity test needs no CAP_NET_ADMIN.
+	origReset := resetLo0CountersCLI
+	resetLo0CountersCLI = func() error { return nil }
+	defer func() { resetLo0CountersCLI = origReset }()
 	tests := []struct {
 		name  string
 		call  func(c *CLI) error

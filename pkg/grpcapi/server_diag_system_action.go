@@ -536,6 +536,10 @@ func (s *Server) SystemAction(ctx context.Context, req *pb.SystemActionRequest) 
 		if err := s.dp.ClearFilterCounters(); err != nil {
 			return nil, dataplaneActionError(err)
 		}
+		// #16457: also reset the kernel lo0 named counters.
+		if err := resetLo0CountersGRPC(); err != nil {
+			return nil, status.Errorf(codes.Internal, "clear lo0 filter counters: %v", err)
+		}
 		return &pb.SystemActionResponse{Message: "Firewall filter counters cleared"}, nil
 
 	case "clear-nat-counters":
