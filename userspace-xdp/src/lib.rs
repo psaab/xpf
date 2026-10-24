@@ -1175,7 +1175,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         // A fragmented head cannot be inner-classified / decapped; the
         // helper reassembles the whole datagram first (#14645/#15102).
     } else {
-        let inner_action = classify_native_gre_inner(data, data_end, &parsed, ingress_domain);
+        let inner_action = classify_native_gre_inner(data, data_end, &parsed);
         if inner_action == USERSPACE_SESSION_ACTION_PASS_TO_KERNEL
             && native_gre_inner_pass_steers_to_kernel_typed(
                 OuterDestinationLocal::from_is_local_destination(is_local_destination(&parsed, ingress_domain)),
@@ -1428,7 +1428,7 @@ fn session_action_for_key(key: &UserspaceSessionKey) -> u8 {
 }
 
 #[inline(always)]
-fn classify_native_gre_inner(data: usize, data_end: usize, outer: &ParsedPacket, ingress_domain: u32) -> u8 {
+fn classify_native_gre_inner(data: usize, data_end: usize, outer: &ParsedPacket) -> u8 {
     let gre_offset = outer.l4_offset as usize;
     let Some(gre) = (unsafe { read_bytes(data, data_end, gre_offset, 4) }) else {
         return 0;
@@ -1441,14 +1441,14 @@ fn classify_native_gre_inner(data: usize, data_end: usize, outer: &ParsedPacket,
         return 0;
     };
     match gre_proto {
-        GRE_PROTO_IPV4 => classify_native_gre_inner_ipv4(data, data_end, inner_offset, ingress_domain),
-        GRE_PROTO_IPV6 => classify_native_gre_inner_ipv6(data, data_end, inner_offset, ingress_domain),
+        GRE_PROTO_IPV4 => classify_native_gre_inner_ipv4(data, data_end, inner_offset),
+        GRE_PROTO_IPV6 => classify_native_gre_inner_ipv6(data, data_end, inner_offset),
         _ => 0,
     }
 }
 
 #[inline(never)]
-fn classify_native_gre_inner_ipv4(data: usize, data_end: usize, l3_offset: usize, ingress_domain: u32) -> u8 {
+fn classify_native_gre_inner_ipv4(data: usize, data_end: usize, l3_offset: usize) -> u8 {
     let Some(iph) = (unsafe { read_bytes(data, data_end, l3_offset, 20) }) else {
         return 0;
     };
@@ -1537,79 +1537,36 @@ fn classify_native_gre_inner_ipv4(data: usize, data_end: usize, l3_offset: usize
     if key.src_addr == key.dst_addr {
         return 0;
     }
-    // dst_v4 (the #14323 big-endian map key) is derived below from key.dst_addr.
-    let action = session_action_for_key(&key);
-    if action != 0 {
-        return action;
-    }
-    // ICMP echo flows store the identifier in src_port in the userspace
-    // session-key shape. Dynamic SNAT-return DNAT entries use that identifier
-    // as the port key, so native GRE must use the same field here or the first
-    // reply falls through to the kernel path.
-    let dnat_port = if protocol == PROTO_ICMP { key.src_port } else { key.dst_port };
-    // #14323 big-endian map key, derived from the key's dst bytes.
-    let dst_v4 = ipv4_map_key([key.dst_addr[0], key.dst_addr[1], key.dst_addr[2], key.dst_addr[3]]);
-    if dnat_lookup_v4(protocol, dst_v4, dnat_port).is_some() {
-        return USERSPACE_SESSION_ACTION_REDIRECT;
-    }
-    // Native GRE owns inner-packet delivery. When the inner destination is a
-    // tunnel-local/control-plane address, passing the outer GRE packet to the
-    // kernel no longer works once the kernel GRE device has been replaced by a
-    // logical anchor. Keep these packets on the userspace dataplane instead.
-    if unsafe { USERSPACE_INTERFACE_NAT_V4.get(&UserspaceInterfaceNatV4Key { domain: ingress_domain, addr: dst_v4 }) }.is_some() {
-        return USERSPACE_SESSION_ACTION_REDIRECT;
-    }
-    if unsafe { USERSPACE_LOCAL_V4.get(&UserspaceLocalV4Key { domain: ingress_domain, addr: dst_v4 }) }.is_some() {
-        return USERSPACE_SESSION_ACTION_REDIRECT;
-    }
-    0
+    // #16241 residual (via #16695): the ONLY consumers of this classifier
+    // act on PASS_TO_KERNEL alone — the healthy arm tests
+    // `inner_action == PASS_TO_KERNEL` (plus a local outer) and the
+    // degraded twin folds the action through
+    // `InnerSessionAction::from_classifier_action`, which likewise only
+    // distinguishes PASS_TO_KERNEL. A REDIRECT (1) and a miss (0) are
+    // therefore indistinguishable to every caller: both keep the outer
+    // frame on the XSK path. The post-session DNAT / interface-NAT /
+    // local lookups that used to run here on a session miss returned
+    // REDIRECT-or-0, so they could never change any disposition — they
+    // spent up to five hash lookups per session-miss GRE packet (and
+    // verifier budget on an already-thin shim) on a steering role that
+    // does not exist. They are removed; the session hit above is the
+    // classifier's only steer, and a miss stays on the helper path
+    // where the worker decapsulates and adjudicates the inner packet
+    // (including its DNAT/local disposition) itself.
+    session_action_for_key(&key)
 }
 
-#[inline(always)]
-fn dnat_lookup_v4(protocol: u8, dst_ip: u32, dst_port: u16) -> Option<DnatValueV4> {
-    let exact = DnatKeyV4 {
-        protocol,
-        pad: [0; 3],
-        dst_ip,
-        dst_port,
-        pad2: 0,
-    };
-    if let Some(value) = unsafe { DNAT_TABLE.get(&exact).copied() } {
-        return Some(value);
-    }
-    let wildcard = DnatKeyV4 {
-        protocol,
-        pad: [0; 3],
-        dst_ip,
-        dst_port: 0,
-        pad2: 0,
-    };
-    unsafe { DNAT_TABLE.get(&wildcard).copied() }
-}
+// #16241 residual (via #16695): the `DNAT_TABLE`/`DNAT_TABLE_V6` shim
+// declarations above are deliberately RETAINED even though the GRE-inner
+// classifiers no longer look into them (the `dnat_lookup_*` helpers are
+// deleted with their only callers). The maps are a load-time ABI: the Go
+// loader replaces them with the pinned dataplane-owned tables
+// (`MapReplacements["dnat_table*"]`) and validates their declared shape,
+// so deleting the declarations would break shim loading, not just dead
+// code. What was disposition-dead was the post-session *lookup* in the
+// classifiers, not the map contract.
 
-// Exact-match only: an SNAT66-return entry always carries a concrete
-// snat_port (publish_dnat_table_entry v6 arm writes `snat_port`), so the
-// exact key is what hits for the #2406 PMTUD/traceroute case. The v4 path
-// also probes a port-0 wildcard to catch port-less STATIC DNAT config, but
-// the second HASH lookup pushed xdp_userspace_prog over the 1M-insn BPF
-// verifier cap (#1864 complexity gate) when added to the v6 GRE-inner
-// classify. Port-wildcard static-DNAT-v6 carried inside a native-GRE tunnel
-// is not steered by this path; non-GRE DNAT-v6 is unaffected (it rides the
-// binding redirect, not dnat_table). Kept #[inline(always)] so the single
-// lookup folds into the caller without a separate BPF program symbol.
-#[inline(always)]
-fn dnat_lookup_v6(protocol: u8, dst_ip: &[u8; 16], dst_port: u16) -> Option<DnatValueV6> {
-    let exact = DnatKeyV6 {
-        protocol,
-        pad: [0; 3],
-        dst_ip: *dst_ip,
-        dst_port,
-        from_zone: 0,
-    };
-    unsafe { DNAT_TABLE_V6.get(&exact).copied() }
-}
-
-fn classify_native_gre_inner_ipv6(data: usize, data_end: usize, l3_offset: usize, ingress_domain: u32) -> u8 {
+fn classify_native_gre_inner_ipv6(data: usize, data_end: usize, l3_offset: usize) -> u8 {
     let Some(ip6) = (unsafe { read_bytes(data, data_end, l3_offset, 40) }) else {
         return 0;
     };
@@ -1683,27 +1640,12 @@ fn classify_native_gre_inner_ipv6(data: usize, data_end: usize, l3_offset: usize
         }
         _ => {}
     }
-    let action = session_action_for_key(&key);
-    if action != 0 {
-        return action;
-    }
-    // SNAT66-return steering: an inbound ICMPv6 error (or reply) whose inner
-    // destination is a SNAT66 pool address has no live session of its own.
-    // The helper publishes the reverse mapping into dnat_table_v6; mirror the
-    // v4 path so the GRE-inner classify steers it to userspace for embedded-
-    // ICMP reverse-NAT (#2406). ICMPv6 echo flows key the dnat entry on the
-    // identifier (stored in src_port), matching publish_dnat_table_entry.
-    let dnat_port = if protocol == PROTO_ICMPV6 { key.src_port } else { key.dst_port };
-    if dnat_lookup_v6(protocol, &key.dst_addr, dnat_port).is_some() {
-        return USERSPACE_SESSION_ACTION_REDIRECT;
-    }
-    if unsafe { USERSPACE_INTERFACE_NAT_V6.get(&UserspaceInterfaceNatV6Key { domain: ingress_domain, addr: key.dst_addr }) }.is_some() {
-        return USERSPACE_SESSION_ACTION_REDIRECT;
-    }
-    if unsafe { USERSPACE_LOCAL_V6.get(&UserspaceLocalV6Key { domain: ingress_domain, addr: key.dst_addr }) }.is_some() {
-        return USERSPACE_SESSION_ACTION_REDIRECT;
-    }
-    0
+    // #16241 residual (via #16695): see the v4 classifier — only a
+    // PASS_TO_KERNEL session hit can steer, and REDIRECT/miss are
+    // indistinguishable to both consumers, so the post-session DNAT /
+    // interface-NAT / local lookups that returned REDIRECT-or-0 are
+    // removed rather than re-proven per packet.
+    session_action_for_key(&key)
 }
 
 // #15854: binding + heartbeat readiness as one outlined subprogram.
@@ -1993,7 +1935,7 @@ fn is_degraded_local_or_control(
         return native_gre_inner_pass_steers_to_kernel_typed(
             OuterDestinationLocal::from_is_local_destination(destination_is_local),
             InnerSessionAction::from_classifier_action(classify_native_gre_inner(
-                data, data_end, parsed, ingress_domain,
+                data, data_end, parsed,
             )),
         );
     }
