@@ -1029,25 +1029,30 @@ fn dropped_probe_snapshot_is_bounded_and_restores_16217() {
         0,
         "completing drop must roll back the Established stamp"
     );
-    // Final-decision arm (GLM MF1): pin the 4-SLOT shape, not just
-    // rollback. The two arms above produce at most 2 distinct
-    // snapshot candidates (matched + its reverse orientation; the
-    // default-NAT companion collapses onto them), so a cap-2
-    // mutation stays green there. This arm installs a NAT'd pair
-    // whose forward decision carries a source rewrite: the
-    // candidates are then FOUR distinct keys — matched forward,
-    // matched wire orientation, companion, companion wire
-    // orientation. Pre-seed DISTINCT node-served stamps on the two
-    // orientations the completing hit does NOT itself write (the
-    // reverse orientations), drop the probe, and assert BOTH
-    // pre-seeded stamps survive exactly while the written forward
-    // stamp is rolled back. A cap-2 snapshot restores only the
-    // first two candidates and loses one pre-seeded stamp
-    // The completing hit overwrites the companion-wire stamp
-    // (wire 0 -> Established); rollback must restore (0, 9)
-    // exactly. (The discriminating capacity mutation for this
-    // candidate order is cap-1: the written key sits at slot 1
-    // for a reverse probe — verified red on cap-1, green on 4.)
+    // Final-decision arm (GLM MF1, final7 MF1/MF2 corrected):
+    // pin the snapshot shape, not just rollback. The two arms
+    // above produce at most 2 distinct snapshot candidates
+    // (matched + its reverse orientation; the default-NAT
+    // companion collapses onto them). This arm installs a NAT'd
+    // pair whose forward decision carries a source rewrite, so
+    // the production candidate list names FOUR slots — matched
+    // forward, matched wire orientation, companion, companion
+    // wire orientation. MEASURED (final7): only THREE of those
+    // are distinct keys here, and the snapshot length is 2:
+    // candidate[2] (companion) dedups by construction, because
+    // companion == reverse_session_key(matched) == matched-wire.
+    // Capacity 4 in production is therefore HEADROOM for the
+    // general orientation set, not a measured requirement of
+    // this fixture — no "FOUR distinct" claim is made. What this
+    // arm pins: pre-seeded DISTINCT node-served stamps on the
+    // reverse orientations survive exactly while the written
+    // stamp is rolled back. The completing hit overwrites the
+    // companion-wire stamp (wire 0 -> Established); rollback
+    // must restore (0, 9) exactly. (The discriminating capacity
+    // mutation for this candidate order is cap-1: the written
+    // key sits at slot 1 for a reverse probe — verified red on
+    // cap-1, green on 4. A cap-2 claim would be false for this
+    // write pattern and is not made.)
     let mut table3 = SessionTable::new();
     let nat = NatDecision {
         rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))),
@@ -1080,7 +1085,7 @@ fn dropped_probe_snapshot_is_bounded_and_restores_16217() {
         TCP_SYN | TCP_ACK,
     ));
     let _ = table3.drain_deltas(16);
-    // Four distinct snapshot candidates for a forward probe:
+    // Four candidate slots (three distinct keys — see arm comment):
     let cand_matched = forward.clone();
     let cand_matched_wire = reverse_session_key(&forward, nat);
     let cand_companion = reverse3.clone();
@@ -1136,12 +1141,12 @@ fn dropped_probe_snapshot_is_bounded_and_restores_16217() {
     assert_eq!(
         table3.node_served_stamps.get(&cand_matched_wire).copied(),
         prior_wire,
-        "4-slot snapshot must restore the matched-wire pre-seeded stamp"
+        "snapshot must restore the matched-wire pre-seeded stamp"
     );
     assert_eq!(
         table3.node_served_stamps.get(&cand_companion_wire).copied(),
         prior_comp_wire,
-        "4-slot snapshot must restore the overwritten companion-wire stamp (cap-1 loses it)"
+        "snapshot must restore the overwritten companion-wire stamp (cap-1 loses it)"
     );
     assert_eq!(
         table3.node_served_evidence(&forward).handshake_wire,
