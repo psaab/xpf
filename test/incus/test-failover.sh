@@ -97,6 +97,9 @@ MAX_FAILOVER_ROUTE_MISS_DELTA="${MAX_FAILOVER_ROUTE_MISS_DELTA:-32}"
 MAX_FAILOVER_POLICY_DENIED_DELTA="${MAX_FAILOVER_POLICY_DENIED_DELTA:-0}"
 MAX_ZERO_INTERVALS="${MAX_ZERO_INTERVALS:-2}"
 MAX_STREAM_ZERO_INTERVALS="${MAX_STREAM_ZERO_INTERVALS:-0}"
+# #12618: whole-run per-stream budget applies only outside each
+# [T, T+3] transition window (full intervals only); see producer
+# --event-sec/--event-window-sec and the outside-events counters.
 MAX_PREFLIGHT_ZERO_INTERVALS="${MAX_PREFLIGHT_ZERO_INTERVALS:-0}"
 MAX_PREFLIGHT_STREAM_ZERO_INTERVALS="${MAX_PREFLIGHT_STREAM_ZERO_INTERVALS:-0}"
 MAX_RETRANSMITS="${MAX_RETRANSMITS:-}"
@@ -481,6 +484,7 @@ ha_preflight_json_metrics() {
 	local recent_error="${HA_CAPTURE_DIR}/pre-failover.recent.err"
 	local gate_output reason recent_value result=0
 	local avg_gbps zero_intervals_total stream_zero_intervals_total zero_streams_total
+	local stream_zero_intervals_outside_events_total zero_streams_outside_events_total
 	local retransmits collapse_detected collapse_reason completed observed_end_sec full_interval_count
 	if ! incus exec "$CLUSTER_LAN_HOST" -- cat /tmp/iperf3-failover.log >"$log" 2>/dev/null; then
 		void "pre-failover observation: aggregate zero-interval evidence unavailable"
@@ -564,6 +568,7 @@ ha_recent_dead_streams_cell() {
 	local parser_error="${HA_CAPTURE_DIR}/recent-${label//[^[:alnum:]]/-}.parser.err"
 	local gate_output reason dead_streams
 	local avg_gbps zero_intervals_total stream_zero_intervals_total zero_streams_total
+	local stream_zero_intervals_outside_events_total zero_streams_outside_events_total
 	local retransmits collapse_detected collapse_reason completed observed_end_sec full_interval_count
 	if ! main_iperf_running; then
 		void "${label}: recent dead-stream window lacked the main iperf load"
@@ -1818,7 +1823,9 @@ if ! incus exec "$CLUSTER_LAN_HOST" -- cat /tmp/iperf3-failover.log \
 	>"$LOCAL_IPERF_LOG" 2>/dev/null; then
 	printf '{"ok":false,"error":"metrics_capture_failed"}\n' >"$LOCAL_IPERF_METRICS"
 elif ! python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" \
-	"$LOCAL_IPERF_LOG" >"$LOCAL_IPERF_METRICS" 2>"$LOCAL_IPERF_PRODUCER_ERR"; then
+	"$LOCAL_IPERF_LOG" --event-sec "$failover_at_seconds" \
+	--event-sec "$failback_at_seconds" --event-window-sec 3 \
+	>"$LOCAL_IPERF_METRICS" 2>"$LOCAL_IPERF_PRODUCER_ERR"; then
 	printf '{"ok":false,"error":"metrics_parse_failed"}\n' >"$LOCAL_IPERF_METRICS"
 fi
 
@@ -1834,9 +1841,9 @@ fi
 if [[ "$iperf_gate_ok" == true ]]; then
 	ha_emit_verdict "iperf3 whole-run zero-throughput intervals (${zero_intervals_total}, limit ${MAX_ZERO_INTERVALS})" \
 		ha_counter_at_most_verdict "$zero_intervals_total" "$MAX_ZERO_INTERVALS" "whole-run zero intervals"
-	ha_emit_verdict "iperf3 whole-run per-stream zero intervals (${stream_zero_intervals_total}, limit ${MAX_STREAM_ZERO_INTERVALS}; ${zero_streams_total} affected stream(s))" \
-		ha_counter_at_most_verdict "$stream_zero_intervals_total" "$MAX_STREAM_ZERO_INTERVALS" "whole-run per-stream zero intervals"
-	info "iperf3 whole-run zero-throughput streams: ${zero_streams_total}"
+	ha_emit_verdict "iperf3 whole-run per-stream zero intervals outside transition windows (${stream_zero_intervals_outside_events_total}, limit ${MAX_STREAM_ZERO_INTERVALS} via MAX_STREAM_ZERO_INTERVALS; ${zero_streams_outside_events_total} affected stream(s); ${stream_zero_intervals_total} total)" \
+		ha_counter_at_most_verdict "$stream_zero_intervals_outside_events_total" "$MAX_STREAM_ZERO_INTERVALS" "whole-run per-stream zero intervals outside [T, T+3] windows (MAX_STREAM_ZERO_INTERVALS)"
+	info "iperf3 whole-run zero-throughput streams: ${zero_streams_total} (${zero_streams_outside_events_total} outside transition windows)"
 	pass "iperf3 sender retransmits ${retransmits}"
 	if [[ -n "$MAX_RETRANSMITS" ]]; then
 		ha_emit_verdict "iperf3 retransmits ${retransmits} (limit ${MAX_RETRANSMITS})" \

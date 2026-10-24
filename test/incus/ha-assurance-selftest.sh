@@ -101,6 +101,8 @@ metrics = {
     "avg_gbps": 1.0,
     "zero_intervals_total": 1,
     "stream_zero_intervals_total": 0,
+    "stream_zero_intervals_outside_events_total": 0,
+    "zero_streams_outside_events_total": 0,
     "zero_streams_total": 0,
     "retransmits": 7,
     "collapse_detected": False,
@@ -121,11 +123,11 @@ PY
 }
 
 write_raw_avg() {
-	printf '{"ok":true,"error":"","interval_gbps":[1.0],"avg_gbps":%s,"zero_intervals_total":0,"stream_zero_intervals_total":0,"zero_streams_total":0,"retransmits":0,"collapse_detected":false,"collapse_reason":"","completed":true,"observed_end_sec":60}\n' "$1" >"${LOCAL_IPERF_METRICS}"
+	printf '{"ok":true,"error":"","interval_gbps":[1.0],"avg_gbps":%s,"zero_intervals_total":0,"stream_zero_intervals_total":0,"stream_zero_intervals_outside_events_total":0,"zero_streams_outside_events_total":0,"zero_streams_total":0,"retransmits":0,"collapse_detected":false,"collapse_reason":"","completed":true,"observed_end_sec":60}\n' "$1" >"${LOCAL_IPERF_METRICS}"
 }
 
 write_raw_interval() {
-	printf '{"ok":true,"error":"","interval_gbps":[%s],"avg_gbps":1.0,"zero_intervals_total":0,"stream_zero_intervals_total":0,"zero_streams_total":0,"retransmits":0,"collapse_detected":false,"collapse_reason":"","completed":true,"observed_end_sec":60}\n' "$1" >"${LOCAL_IPERF_METRICS}"
+	printf '{"ok":true,"error":"","interval_gbps":[%s],"avg_gbps":1.0,"zero_intervals_total":0,"stream_zero_intervals_total":0,"stream_zero_intervals_outside_events_total":0,"zero_streams_outside_events_total":0,"zero_streams_total":0,"retransmits":0,"collapse_detected":false,"collapse_reason":"","completed":true,"observed_end_sec":60}\n' "$1" >"${LOCAL_IPERF_METRICS}"
 }
 
 assert_helper_status() {
@@ -274,7 +276,7 @@ write_metrics 'avg_gbps="0"'
 assert_void_consumer 'metrics field avg_gbps: malformed'
 write_metrics 'omit:collapse_detected'
 assert_void_consumer 'metrics field collapse_detected: absent'
-for field in avg_gbps zero_intervals_total stream_zero_intervals_total zero_streams_total retransmits observed_end_sec; do
+for field in avg_gbps zero_intervals_total stream_zero_intervals_total stream_zero_intervals_outside_events_total zero_streams_outside_events_total retransmits observed_end_sec; do
 	write_metrics "${field}=true"
 	assert_void_consumer "metrics field ${field}: malformed"
 done
@@ -1212,6 +1214,7 @@ if guard_at < 0:
     raise SystemExit(f"{reached_path}: no reached whole-run scalar guard follows the gate")
 reached_scalars = (
     "zero_intervals_total", "stream_zero_intervals_total", "zero_streams_total",
+    "stream_zero_intervals_outside_events_total", "zero_streams_outside_events_total",
     "retransmits", "avg_gbps", "collapse_detected", "collapse_reason",
     "completed", "observed_end_sec", "full_interval_count",
 )

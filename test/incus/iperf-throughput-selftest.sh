@@ -142,6 +142,20 @@ grep -q 'failback_at_seconds=$((SECONDS - iperf_start_seconds))' "$FAILOVER" \
 ! grep -q 'pass "iperf3 completed successfully (finished before' "$FAILOVER" \
 	|| bad "test-failover.sh accepts an iperf client that ended before failback"
 ok "test-failover wires crash and last-RG-moved timestamps and rejects early client completion"
+# #12618: test-failover applies the same [T, T+3] outside-window budget.
+grep -q -- '--event-sec "$failover_at_seconds"' "$FAILOVER" \
+	|| bad "test-failover.sh does not pass its crash instant to the window-excluded producer"
+grep -q -- '--event-sec "$failback_at_seconds"' "$FAILOVER" \
+	|| bad "test-failover.sh does not pass its failback instant to the window-excluded producer"
+grep -q -- '--event-window-sec 3' "$FAILOVER" \
+	|| bad "test-failover.sh does not pin the [T, T+3] window width"
+grep -q 'stream_zero_intervals_outside_events_total' "$FAILOVER" \
+	|| bad "test-failover.sh does not gate on the outside-window counter"
+grep -q 'MAX_STREAM_ZERO_INTERVALS:-0' "$FAILOVER" \
+	|| bad "test-failover.sh does not pin MAX_STREAM_ZERO_INTERVALS default 0 (#12618)"
+grep -q 'HA_SMOKE_MAX_STREAM_ZERO_INTERVALS:-0' "${SCRIPT_DIR}/ha-smoke-iperf-lib.sh" \
+	|| bad "ha-smoke lib does not pin HA_SMOKE_MAX_STREAM_ZERO_INTERVALS default 0 (#12618)"
+ok "test-failover and ha-smoke pin budget-0 outside [T, T+3] (full intervals only)"
 
 # Execute the production capture/gate/verdict blocks with an absent remote
 # artifact and the REAL metrics gate. The verdict symbol is observed only as a
@@ -164,7 +178,10 @@ for fixture_mode in absent malformed valid; do
 		# shellcheck disable=SC2034 # Used by the extracted production fixture.
 		MIN_THROUGHPUT=1.0
 		VOID=0
-		TMPDIR="${fixture_dir}/${fixture_mode}"
+		# shellcheck disable=SC2034 # Used by the extracted gate fixture producer call.
+		failover_at_seconds=0
+		# shellcheck disable=SC2034 # Used by the extracted gate fixture producer call.
+		failback_at_seconds=0
 		FIXTURE_MODE="$fixture_mode"
 		incus() {
 			case "$FIXTURE_MODE" in
@@ -430,14 +447,111 @@ PY
 late_stall_verdicts=$(HA_SMOKE_MAX_STREAM_ZERO_INTERVALS=0 \
 	MOCK_CAPTURE_FILE="$late_stall_fixture" \
 	ha_smoke_iperf_verdicts /fixture/late.jsonl 45 8 1 10 20)
-grep -q '^FAIL iperf3 whole-run per-stream zero intervals (21, limit 0; 1 affected stream(s)):' \
+grep -q '^FAIL iperf3 whole-run per-stream zero intervals (21, limit 0 via HA_SMOKE_MAX_STREAM_ZERO_INTERVALS; 1 affected stream(s); 21 total):' \
 	<<<"$late_stall_verdicts" \
-	|| bad "late stream stall must fail the whole-run per-stream zero budget"
+	|| bad "late stream stall must fail the whole-run per-stream zero budget (HA_SMOKE_MAX_STREAM_ZERO_INTERVALS)"
 grep -q '^PASS iperf3 transition 1 streams:' <<<"$late_stall_verdicts" \
 	|| bad "late stream stall must not be attributed to transition 1"
 grep -q '^PASS iperf3 transition 2 streams:' <<<"$late_stall_verdicts" \
 	|| bad "late stream stall must not be attributed to transition 2"
-ok "whole-run per-stream zero budget fails a late stall outside both recovery windows"
+ok "whole-run per-stream zero budget (HA_SMOKE_MAX_STREAM_ZERO_INTERVALS=0) fails a late stall outside both [T, T+3] windows"
+
+# #12618: a healthy crash signature -- zeros only as full intervals wholly
+# inside [T, T+3] for each transition -- must PASS at budget 0, while a
+# straddling interval and a partial interval inside the window must count.
+window_fixture="${fixture_dir}/window.jsonl"
+python3 - "$window_fixture" <<'PY'
+import json
+import pathlib
+import sys
+
+events = []
+for second in range(33):
+    streams = []
+    total_bps = 0
+    for stream_id in range(1, 5):
+        # Stream 4: zero at 10,11,12 (full, wholly inside [10,13]) -> excluded.
+        # Stream 3: zero at 9 (straddles [10,13] start) -> counted.
+        # Stream 3: zero at 20,21,22 (inside [20,23]) -> excluded.
+        stalled = (stream_id == 4 and 10 <= second <= 12) or (
+            stream_id == 3 and (second == 9 or 20 <= second <= 22)
+        )
+        bps = 0 if stalled else 6_000_000_000
+        total_bps += bps
+        streams.append({"socket": stream_id, "start": second, "end": second + 1, "bits_per_second": bps})
+    events.append({"event": "interval", "data": {"sum": {"start": second, "end": second + 1, "bits_per_second": total_bps}, "streams": streams}})
+events.append({"event": "end", "data": {"sum_sent": {"bits_per_second": 18_000_000_000, "retransmits": 0}, "sum_received": {"bits_per_second": 18_000_000_000}}})
+pathlib.Path(sys.argv[1]).write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+PY
+window_verdicts=$(HA_SMOKE_MAX_STREAM_ZERO_INTERVALS=0 \
+	MOCK_CAPTURE_FILE="$window_fixture" \
+	ha_smoke_iperf_verdicts /fixture/window.jsonl 33 4 1 10 20)
+grep -q '^FAIL iperf3 whole-run per-stream zero intervals (1, limit 0 via HA_SMOKE_MAX_STREAM_ZERO_INTERVALS; 1 affected stream(s); 7 total):' \
+	<<<"$window_verdicts" \
+	|| bad "only the straddling pre-window zero must count outside [T, T+3] (got: $window_verdicts)"
+window_pass_verdicts=$(HA_SMOKE_MAX_STREAM_ZERO_INTERVALS=1 \
+	MOCK_CAPTURE_FILE="$window_fixture" \
+	ha_smoke_iperf_verdicts /fixture/window.jsonl 33 4 1 10 20)
+grep -q '^PASS iperf3 whole-run per-stream zero intervals outside transition windows (1, limit 1 via HA_SMOKE_MAX_STREAM_ZERO_INTERVALS; 1 affected stream(s); 7 total)' \
+	<<<"$window_pass_verdicts" \
+	|| bad "outside-window count of 1 must pass at HA_SMOKE_MAX_STREAM_ZERO_INTERVALS=1"
+# In-window-only zeros pass at the pinned default budget 0.
+inwindow_fixture="${fixture_dir}/inwindow.jsonl"
+python3 - "$window_fixture" "$inwindow_fixture" <<'PY'
+import json
+import pathlib
+import sys
+
+events = []
+for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+    event = json.loads(line)
+    if event.get("event") == "interval":
+        second = event["data"]["sum"]["start"]
+        for stream in event["data"]["streams"]:
+            if stream["socket"] == 3 and second == 9:
+                stream["bits_per_second"] = 6_000_000_000
+        event["data"]["sum"]["bits_per_second"] = sum(s["bits_per_second"] for s in event["data"]["streams"])
+    events.append(event)
+pathlib.Path(sys.argv[2]).write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+PY
+inwindow_verdicts=$(HA_SMOKE_MAX_STREAM_ZERO_INTERVALS=0 \
+	MOCK_CAPTURE_FILE="$inwindow_fixture" \
+	ha_smoke_iperf_verdicts /fixture/inwindow.jsonl 33 4 1 10 20)
+grep -q '^PASS iperf3 whole-run per-stream zero intervals outside transition windows (0, limit 0 via HA_SMOKE_MAX_STREAM_ZERO_INTERVALS; 0 affected stream(s); 6 total)' \
+	<<<"$inwindow_verdicts" \
+	|| bad "zeros wholly inside [T, T+3] must pass at the pinned default HA_SMOKE_MAX_STREAM_ZERO_INTERVALS=0"
+ok "window-excluded counting: in-window full intervals excluded, straddling counted, default pinned at 0"
+# A shortened stream row inside an otherwise full-length interval keeps
+# interval-level exclusion (the strict oracle bounds intervals to 0.5-1.5s).
+python3 - "$window_fixture" <<'PY'
+import json
+import pathlib
+import subprocess
+import sys
+
+path = pathlib.Path(sys.argv[1])
+events = []
+for second in range(33):
+    streams = []
+    total = 0
+    for sid in range(1, 5):
+        bps = 0 if (sid == 4 and second == 11) else 6_000_000_000
+        total += bps
+        # Shorten only the zero interval to 0.5s (partial).
+        end = second + (0.5 if (sid == 4 and second == 11) else 1)
+        streams.append({"socket": sid, "start": second, "end": end, "bits_per_second": bps})
+    events.append({"event": "interval", "data": {"sum": {"start": second, "end": second + 1, "bits_per_second": total}, "streams": streams}})
+events.append({"event": "end", "data": {"sum_sent": {"bits_per_second": 18_000_000_000, "retransmits": 0}, "sum_received": {"bits_per_second": 18_000_000_000}}})
+path.write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+PY
+producer_out=$(python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$window_fixture" --event-sec 10 --event-sec 20)
+python3 - "$producer_out" <<'PY' || bad "zero in a full-length interval wholly inside a window must be excluded even if its stream row is shortened"
+import json, sys
+m = json.loads(sys.argv[1])
+assert m["stream_zero_intervals_total"] == 1, m
+assert m["stream_zero_intervals_outside_events_total"] == 0, m
+PY
+ok "producer exclusion is decided by the full-length interval bounds, not a shortened stream row"
 
 # Completion requires an end event or evidence that the expected duration ran.
 incomplete_fixture="${fixture_dir}/incomplete.jsonl"

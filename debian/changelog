@@ -20,6 +20,28 @@ xpf (0.0.0) unstable; urgency=medium
     gains a level). ForwardingState's 128-field definition stays intact in
     state.rs — this does not discharge the accepted-debt obligation to
     split that definition itself.
+  * Test: count whole-run per-stream iperf3 zero intervals only outside
+    each [T, T+3] transition window at the pinned budget 0 (#12618).
+    `scripts/iperf-json-metrics.py` gains repeatable `--event-sec` plus
+    `--event-window-sec 3` and emits
+    `stream_zero_intervals_outside_events_total` /
+    `zero_streams_outside_events_total`: only a full-length (>=0.95s)
+    per-stream interval wholly inside a window is excluded, so partial
+    or straddling intervals still count (fail-closed). The raw
+    `stream_zero_intervals_total` is retained for diagnostics.
+    `ha_metrics_gate` requires the new counters; `ha-smoke-iperf-lib.sh`
+    passes both recorded transition seconds and gates on the outside
+    count under `HA_SMOKE_MAX_STREAM_ZERO_INTERVALS` (named in the FAIL
+    cell), and `test-failover.sh` does the same for its crash/failback
+    seconds under `MAX_STREAM_ZERO_INTERVALS`. Hermetic pins in
+    `iperf-throughput-selftest.sh` cover in-window exclusion, straddle
+    and partial counting, the late-stall failure, and both budget-0
+    defaults; `ha-assurance-selftest.sh` pins gate malformed/absent
+    handling for the new fields. The 3s width is the issue's preferred
+    calibration hypothesis (lab silent-death detection ~1.0-2.2s plus
+    the strict 3s stream-resume oracle); healthy-lab runs of
+    test-double-failover, test-chained-crash and test-failover remain
+    the operator-gated acceptance for the width.
   * Lab: make the WAN target 172.16.80.200 declarative (#16213). It was
     a hand `ip addr add` alias on xpf-mouse-target beside the pinned
     .201 — any recreate/reboot silently dropped it while harnesses kept
