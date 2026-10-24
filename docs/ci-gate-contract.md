@@ -84,7 +84,7 @@ record; see the one-row-per-run contract in `test/incus/harness-result.sh`).
 
 | Gate | Command | Results |
 |---|---|---|
-| `make test-rust` | Pinned-toolchain `cargo check --benches` (leg 0), full release `cargo test --bins --tests` with `--test-threads=1` (leg 1), debug-leg oracle census + one debug argv (leg 2); see the `test-rust` recipe and its `check-userspace-dt-needed` prerequisite (#10204 release relink + DT_NEEDED check) in `Makefile` | Terminal output; no wire-ledger row. Durable result location is described below. |
+| `make test-rust` | Pinned-toolchain `cargo check --benches` (leg 0), full release `cargo test --bins --tests` with `--test-threads=1` (leg 1), debug-leg oracle census + one debug argv (leg 2), and Leg 3: the four `debug-log`-only cells run with `--features debug-log --bin xpf-userspace-dp`, each required exactly once in `--list` before the exact-named run (#16439); see the `test-rust` recipe and its `check-userspace-dt-needed` prerequisite (#10204 release relink + DT_NEEDED check) in `Makefile` | Terminal output; no wire-ledger row. Durable result location is described below. |
 
 Record each manual Rust run durably in the associated `docs/log/<issue>.md`
 entry: include the commit SHA, exact command, PASS/FAIL, and a concise result

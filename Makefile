@@ -96,12 +96,12 @@ build-userspace-dp:
 
 # Manual build check for the diagnostic `debug-log` feature (#1678).
 # The debug-log build is not the production target and is deliberately
-# NOT wired into `all`/`build`/`test`, mirroring the opt-in
-# `audit-check` precedent. The pull-request workflows do not invoke this
-# opt-in build, so this is a developer convenience, not an automated gate:
-# run it explicitly when validating the debug feature. It exists so the
-# #1678's earlier build break showed how this feature can silently rot; it
-# can be revalidated with one command before a commit. Compile-only; does not install.
+# NOT wired into `all`/`build`, mirroring the opt-in `audit-check`
+# precedent. The pull-request workflows do not invoke this opt-in
+# build. Compile-only; does not install. The executed regression
+# cells that exist only under this feature are gated separately by
+# Leg 3 of `test-rust` (#16439), which does not make this build
+# target part of `all`/`build`.
 build-userspace-dp-debug-log:
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned build --manifest-path userspace-dp/Cargo.toml --release --features debug-log
 
@@ -486,6 +486,25 @@ test-race-dp:
 # reject_rst_v4_for_syn_at_seq_max_wraps_ack_to_zero_9499 with "attempt to
 # add with overflow" (docs/log/9499.md). Measured on a loaded host: ~3.5 min
 # cold build, ~65 s run (2489 tests).
+#
+# #16439 Leg 3: the `debug-log`-only regression cells run in no other
+# leg. `accumulate_carries_policy_revoked_sessions_10021` lives in a
+# module gated `#[cfg(feature = "debug-log")]`, so it is absent from
+# every default-feature test binary; the discriminating assertions of
+# `direct_tx_tuple_mismatch_recycles_frame_exactly_once` (#4041) and
+# of the two #9782 no-false-mismatch cells sit inside
+# `if cfg!(feature = "debug-log")`, so they are dead without the
+# feature. This leg runs exactly those four cells with the feature
+# enabled, using `--exact` so a rename or deletion matches nothing —
+# and 0 passed is a failure, because the leg first greps Cargo's
+# `--list` output for the four full paths and requires each exactly
+# once before executing any of them. Deleting
+# `interval.policy_revoked_sessions` from `accumulate` or restoring
+# the #4041 duplicate `push_front` reds this leg. Profile is dev
+# (matching Leg 2), not `--release`: the feature, not the profile,
+# is what gates these cells, and a second release-feature build
+# would double the cold cost for no additional oracle.
+DEBUG_LOG_CELLS_16439 := afxdp::worker::loop_body::debug_report::policy_revoked_sessions_fold_tests::accumulate_carries_policy_revoked_sessions_10021 afxdp::tx::dispatch::tests::enqueue_failure::direct_tx_tuple_mismatch_recycles_frame_exactly_once afxdp::tx::dispatch::tests::enqueue_failure::direct_tx_pat_translation_is_not_a_tuple_mismatch_9782 afxdp::tx::dispatch::tests::segmentation::segmentation_pat_translation_survives_expected_ports_9782
 test-rust: check-userspace-dt-needed
 	# Leg 0: compile bench invariants only; benches are never executed.
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned check --manifest-path userspace-dp/Cargo.toml --benches
@@ -496,6 +515,8 @@ test-rust: check-userspace-dt-needed
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp python3 scripts/debug-leg-census.py --manifest userspace-dp/Cargo.toml --cargo "$(CARGO)" --toolchain "$$pinned"
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned test --manifest-path userspace-dp/Cargo.toml \
 		--bins --tests -- --test-threads=1 --exact $$(cut -f2 userspace-dp/debug-leg.tests | tr '\n' ' ')
+	# Leg 3 (#16439): debug-log-only cells, exact-named and listed first.
+	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp sh -c 'set -eu; listed="$$("$$0" +"$$1" test --manifest-path userspace-dp/Cargo.toml --features debug-log --bin xpf-userspace-dp -- --list)"; for cell in $(DEBUG_LOG_CELLS_16439); do count=$$(printf "%s\n" "$$listed" | grep -c -F -x "$$cell: test" || true); if [ "$$count" != "1" ]; then echo "test-rust Leg 3 (#16439): expected exactly one listed debug-log cell $$cell, found $$count" >&2; exit 1; fi; done; "$$0" +"$$1" test --manifest-path userspace-dp/Cargo.toml --features debug-log --bin xpf-userspace-dp -- --test-threads=1 --exact $(DEBUG_LOG_CELLS_16439)' "$(CARGO)" "$$pinned"
 
 # #10204: prove the release helper's static snapshot provenance and dynamic
 # dependency boundary on every Rust gate. The map must come from a fresh
