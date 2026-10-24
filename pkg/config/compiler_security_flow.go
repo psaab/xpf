@@ -887,6 +887,9 @@ func compileFlow(node *Node, sec *SecurityConfig) error {
 	if node.FindChild("require-authenticated-fabric-stamps") != nil {
 		sec.Flow.RequireAuthenticatedFabricStamps = true
 	}
+	if node.FindChild("drop-foreign-session-hits") != nil {
+		sec.Flow.DropForeignSessionHits = true
+	}
 
 	// gre-performance-acceleration
 	if node.FindChild("gre-performance-acceleration") != nil {

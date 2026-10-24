@@ -488,7 +488,11 @@ const (
 	// helper ignores both and would honour a forged stamp on an
 	// unauthenticated fabric the operator required authenticated — a
 	// fail-open the exact-equality fence must refuse.
-	ProtocolVersion = 69
+	// v69 -> v70 (#16044): FlowSnapshot.drop_foreign_session_hits drops a
+	// foreign session hit outright. A v69 helper ignores it and forwards
+	// the packet on the owner's entry/NAT/egress — the exact fail-open
+	// the operator enabled the knob to close.
+	ProtocolVersion = 70
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -1225,6 +1229,7 @@ type FlowSnapshot struct {
 	AllowEmbeddedICMP                bool `json:"allow_embedded_icmp,omitempty"`
 	AllowUnstampedFabricIngress      bool `json:"allow_unstamped_fabric_ingress,omitempty"`
 	RequireAuthenticatedFabricStamps bool `json:"require_authenticated_fabric_stamps,omitempty"`
+	DropForeignSessionHits           bool `json:"drop_foreign_session_hits,omitempty"`
 	TCPMSSAllTCP                     int  `json:"tcp_mss_all_tcp,omitempty"`
 	TCPMSSIPsecVPN                   int  `json:"tcp_mss_ipsec_vpn,omitempty"`
 	TCPMSSGreIn                      int  `json:"tcp_mss_gre_in,omitempty"`

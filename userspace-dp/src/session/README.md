@@ -918,6 +918,16 @@ policy does not permit them; it revokes nothing. A non-zero value right after
 a commit is the expected, intended reading — it is what the operator's
 narrowed policy did.
 
+With `security flow drop-foreign-session-hits` (#16044) the same counter also
+counts foreign hits that their own zone's policy WOULD permit: the knob
+removes the adjudicate-in-place permit arm, so every non-host-bound foreign
+hit is dropped instead of being forwarded on the owner's entry, NAT and
+egress. It is off by default (asymmetric / multi-homed arrivals keep
+forwarding), drops only the packet (never revokes the session, emits no
+POLICY_DENY event and credits no denying rule), and leaves host-bound hits
+to the arrival zone's host-inbound / `junos-host` gate. Snapshot protocol
+v70 fences a v69 helper that would ignore the knob and fail open.
+
 Regression coverage: `session/policy_revalidation_8356_tests.rs` (stamp
 lifecycle, generation-only keying, and the two stamps' mutual independence) and
 `afxdp/tests_policy_revocation_8356.rs` (the verdict and the WIRING, driven

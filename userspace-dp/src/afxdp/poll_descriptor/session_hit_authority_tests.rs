@@ -656,6 +656,103 @@ fn foreign_hit_verdict_uses_descriptor_time_12868() {
     ));
 }
 
+#[test]
+fn drop_foreign_knob_turns_a_permitted_foreign_hit_into_a_drop_16044() {
+    // Same fixture as foreign_hit_verdict_uses_descriptor_time_12868: at
+    // SCHED_RECEIPT_NS the dmz -> wan `allow-other` permit is live, so the
+    // default (knob off) adjudicates in place and forwards.
+    let metadata = session(TEST_LAN_ZONE_ID, LAN_A, 0, false);
+    let flow = icmp_flow();
+    let frame = icmp_echo_frame();
+    let decision = forward_decision();
+    let sessions = SessionTable::new();
+    let key = flow.forward_key.clone();
+    let mut fw = scheduled_icmp_forwarding();
+    assert!(
+        matches!(
+            foreign_hit_verdict(
+                &fw,
+                &sessions,
+                &key,
+                &metadata,
+                decision,
+                &flow,
+                icmp_meta(),
+                &frame,
+                TEST_DMZ_ZONE_ID,
+                false,
+                SCHED_RECEIPT_NS,
+            ),
+            ForeignHitVerdict::Forward
+        ),
+        "control: knob off keeps adjudicate-in-place forwarding"
+    );
+    fw.drop_foreign_session_hits = true;
+    assert!(
+        matches!(
+            foreign_hit_verdict(
+                &fw,
+                &sessions,
+                &key,
+                &metadata,
+                decision,
+                &flow,
+                icmp_meta(),
+                &frame,
+                TEST_DMZ_ZONE_ID,
+                false,
+                SCHED_RECEIPT_NS,
+            ),
+            ForeignHitVerdict::DropForeign
+        ),
+        "knob on: a policy-permitted foreign hit is dropped, not forwarded on the owner's entry"
+    );
+    // Deny arm unchanged: at the expired instant the permit no longer
+    // matches, so the verdict stays the attributed Drop, knob or not.
+    assert!(
+        matches!(
+            foreign_hit_verdict(
+                &fw,
+                &sessions,
+                &key,
+                &metadata,
+                decision,
+                &flow,
+                icmp_meta(),
+                &frame,
+                TEST_DMZ_ZONE_ID,
+                false,
+                SCHED_EXPIRED_NS,
+            ),
+            ForeignHitVerdict::Drop(_)
+        ),
+        "knob on: a denied foreign hit keeps its attributed Drop shape"
+    );
+    // Host-bound exemption: a LocalDelivery foreign hit is judged by the
+    // arrival zone's host-inbound plane downstream, never here.
+    let mut host_decision = forward_decision();
+    host_decision.resolution.disposition = ForwardingDisposition::LocalDelivery;
+    assert!(
+        matches!(
+            foreign_hit_verdict(
+                &fw,
+                &sessions,
+                &key,
+                &metadata,
+                host_decision,
+                &flow,
+                icmp_meta(),
+                &frame,
+                TEST_DMZ_ZONE_ID,
+                false,
+                SCHED_RECEIPT_NS,
+            ),
+            ForeignHitVerdict::Forward
+        ),
+        "knob on: host-bound foreign hits still pass to the host-inbound gate"
+    );
+}
+
 fn cookie_resolution(disposition: ForwardingDisposition) -> ForwardingResolution {
     ForwardingResolution {
         disposition,

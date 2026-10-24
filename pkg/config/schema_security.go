@@ -1338,6 +1338,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 		"allow-embedded-icmp":                 {desc: "Legacy no-op in the userspace dataplane; ICMP errors use session matching and unmatched errors use zone policy", children: nil},
 		"allow-unstamped-fabric-ingress":      {desc: "ROLLING-UPGRADE WINDOW ONLY: allow absent fabric stamps to use legacy MAIN routing on routing-instance nodes (invalid stamps still drop). Remove once all peers emit zone-encoded stamps (#11061)", children: nil},
 		"require-authenticated-fabric-stamps": {desc: "Honour V1/V2 fabric stamps only on link-authenticated fabric links (operator MACsec/802.1X marked authenticated at compile); unauthenticated stamps drop as invalid. Pair with chassis cluster fabric-interface-authenticated (#16023)", children: nil},
+		"drop-foreign-session-hits":           {desc: "Drop a session hit whose arrival zone is not the zone that admitted the session, instead of adjudicating it in place under the arrival zone's policy and forwarding it on the owner's NAT/egress. For deployments that do not need asymmetric/multi-homed arrival (#16044)", children: nil},
 		"gre-performance-acceleration":        {desc: "Enable GRE performance acceleration", children: nil},
 		"power-mode-disable":                  {desc: "Disable power mode", children: nil},
 		// #4231 (fable-167 P-3): five `security flow` knobs previously had no

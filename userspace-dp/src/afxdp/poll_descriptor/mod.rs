@@ -3568,6 +3568,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     now_ns,
                                 ) {
                                     ForeignHitVerdict::Forward => None,
+                                    // #16044: knob-driven drop of a
+                                    // policy-permitted foreign hit. No
+                                    // POLICY_DENY event: no policy denied
+                                    // it. Count and recycle only.
+                                    ForeignHitVerdict::DropForeign => {
+                                        telemetry.dbg.foreign_authority_drops += 1;
+                                        binding.scratch.scratch_recycle.push(desc.addr);
+                                        continue;
+                                    }
                                     ForeignHitVerdict::Drop(deny) => {
                                         emit_session_hit_policy_deny_event(
                                             worker_ctx.forwarding,

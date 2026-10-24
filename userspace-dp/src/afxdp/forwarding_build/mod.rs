@@ -688,6 +688,7 @@ fn build_fallible_forwarding_state(
     state.no_ipv6_reject_zero_hop_limit = snapshot.no_ipv6_reject_zero_hop_limit;
     state.allow_unstamped_fabric_ingress = snapshot.flow.allow_unstamped_fabric_ingress;
     state.require_authenticated_fabric_stamps = snapshot.flow.require_authenticated_fabric_stamps;
+    state.drop_foreign_session_hits = snapshot.flow.drop_foreign_session_hits;
     state.alg_disable_flags = snapshot.flow.alg_disable_flags;
     // #2008 M5: compile the application-identification catalog so session
     // create can stamp app_id from the 5-tuple.

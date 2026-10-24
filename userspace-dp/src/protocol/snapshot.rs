@@ -386,6 +386,12 @@ pub(crate) struct FlowSnapshot {
     /// fence prevents a v68 helper from ignoring an enabled requirement.
     #[serde(rename = "require_authenticated_fabric_stamps", default)]
     pub require_authenticated_fabric_stamps: bool,
+    /// #16044: drop foreign session hits outright instead of
+    /// adjudicating them in place. Missing/false preserves #9519
+    /// behaviour; the v70 fence prevents a v69 helper from ignoring an
+    /// enabled drop requirement (it would forward on the owner's NAT).
+    #[serde(rename = "drop_foreign_session_hits", default)]
+    pub drop_foreign_session_hits: bool,
     #[serde(rename = "tcp_mss_all_tcp", default)]
     pub tcp_mss_all_tcp: u16,
     #[serde(rename = "tcp_mss_ipsec_vpn", default)]

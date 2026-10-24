@@ -1886,3 +1886,17 @@ xpf (0.0.0) unstable; urgency=medium
     third-L2-speaker clone of the public FNV zone stamp. Default off
     preserves #10105 document-and-constrain; snapshot protocol v69 fences
     a v68 helper that would ignore the requirement and fail open.
+
+
+xpf (0.0.0) unstable; urgency=medium
+
+  * Sessions: opt-in drop of foreign session hits (#16044).
+    `security flow drop-foreign-session-hits` makes the dataplane drop
+    a session hit whose arrival zone is not the zone that admitted the
+    session, instead of adjudicating it in place under the arrival
+    zone's policy and forwarding it on the owner's entry, NAT and
+    egress. Default off preserves asymmetric / multi-homed arrival;
+    the drop counts in foreign_authority_drops, never revokes the
+    session, and host-bound hits stay with the arrival zone's
+    host-inbound gate. Snapshot protocol v70 fences a v69 helper that
+    would ignore the knob and fail open.
