@@ -537,6 +537,49 @@ impl SessionTable {
         false
     }
 
+    /// #16479: read-only pre-handshake state for the strict-syn-check
+    /// hit gate. Returns `(established, handshake_pending, syn_ack_first,
+    /// closing)` of the entry `key` resolves to (direct, NAT alias, or a
+    /// live forward-wire candidate), or `None` when there is no live
+    /// entry at `now_ns` (a miss, not a hit — the MISS gate owns it).
+    /// Mirrors `has_session_hit_at`'s resolution order and idle deadline
+    /// so the gate judges exactly the entry the hit path will consume.
+    /// Never mutates: a dropped pre-handshake segment must not refresh,
+    /// promote, or complete the session it was dropped for.
+    pub(crate) fn strict_pre_handshake_state(
+        &self,
+        key: &SessionKey,
+        now_ns: u64,
+    ) -> Option<(bool, bool, bool, bool)> {
+        let live = |entry: &SessionEntry| {
+            (now_ns.saturating_sub(entry.last_seen_ns) <= entry.expires_after_ns).then_some((
+                entry.established,
+                entry.handshake_pending,
+                entry.syn_ack_first,
+                entry.closing,
+            ))
+        };
+        if let Some(record) = self.probe_record_with_origin(key) {
+            return live(&record.entry);
+        }
+        let bucket = self.forward_wire_index.get(key)?;
+        for &handle in bucket.iter() {
+            let Some(record) = self.entries.get(handle as usize) else {
+                continue;
+            };
+            let entry = &record.entry;
+            if entry.metadata.is_reverse
+                || forward_wire_key(&record.key, entry.decision.nat) != *key
+            {
+                continue;
+            }
+            if let Some(state) = live(entry) {
+                return Some(state);
+            }
+        }
+        None
+    }
+
     pub fn lookup(
         &mut self,
         key: &SessionKey,

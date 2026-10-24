@@ -7327,3 +7327,9 @@ mod unreplied_pressure_16019_tests;
 #[cfg(test)]
 #[path = "handshake_ack_16042_tests.rs"]
 mod handshake_ack_16042_tests;
+
+// #16479: read-only pre-handshake state probe for the strict-syn-check
+// session-HIT gate (pending vs established vs SYN-ACK-first vs miss).
+#[cfg(test)]
+#[path = "strict_syn_16479_tests.rs"]
+mod strict_syn_16479_tests;

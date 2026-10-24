@@ -58,6 +58,19 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 		}
 	}
 
+	// #16479 strict-syn-check mutual exclusion. Junos refuses
+	// `strict-syn-check` beside `no-syn-check` / `no-syn-check-in-tunnel`.
+	// Strict on commit / commit-check; lenient on load / peer-sync (warn,
+	// #1960 no-brick — the dataplane keeps strict-wins precedence there).
+	if err := validateStrictSynCheckStrict(cfg); err != nil {
+		if opts.lenientStrictSynCheck16479 {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("strict-syn-check (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #4434 chassis-cluster heartbeat wire-width gate. Strict on commit /
 	// commit-check (hard-reject a redundancy-group cardinality or id that
 	// exceeds the single-byte heartbeat count / GroupID fields — 256 RGs

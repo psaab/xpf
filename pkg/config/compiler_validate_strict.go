@@ -183,6 +183,42 @@ func validateFlowAgingStrict(cfg *Config) error {
 	return nil
 }
 
+// validateStrictSynCheckStrict is the #16479 commit-time gate for
+// `security flow tcp-session strict-syn-check`. Junos: "The
+// `strict-syn-check` option cannot be enabled if `no-syn-check` or
+// `no-syn-check-in-tunnel` is enabled." Before #16479 xpf accepted the
+// combination and documented strict as "overriding" no-syn-check, so an
+// operator who set strict to restore handshake integrity beside a
+// leftover no-syn-check got a config Junos would refuse, silently
+// re-interpreted. Strict on commit / commit-check; the call site
+// downgrades to a warning on the tolerant load / peer-sync path so an
+// already-persisted or peer-synced config still boots (#1960 no-brick)
+// — there the dataplane keeps its fail-closed precedence (strict wins
+// at the session-MISS gate), so a leniently-loaded combination is
+// bounded to the stricter behavior, never the looser one.
+func validateStrictSynCheckStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	ts := cfg.Security.Flow.TCPSession
+	if ts == nil || !ts.StrictSynCheck {
+		return nil
+	}
+	if ts.NoSynCheck {
+		return fmt.Errorf(
+			"security flow tcp-session: `strict-syn-check` cannot be enabled " +
+				"if `no-syn-check` is enabled (Junos mutual exclusion, #16479); " +
+				"remove one of the two leaves")
+	}
+	if ts.NoSynCheckInTunnel {
+		return fmt.Errorf(
+			"security flow tcp-session: `strict-syn-check` cannot be enabled " +
+				"if `no-syn-check-in-tunnel` is enabled (Junos mutual exclusion, #16479); " +
+				"remove one of the two leaves")
+	}
+	return nil
+}
+
 // #1830 (e): the #1733 MaxEqualFlowWorkers constant and
 // validateEqualFlowWorkerCapStrict were retired together with the Rust
 // MAX_WORKERS_SCRATCH cap they mirrored. The v8 lease rotation scratch

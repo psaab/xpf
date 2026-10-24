@@ -827,6 +827,12 @@ impl LiveCallSiteFixture {
         self
     }
 
+    /// #16479: enable strict-syn-check on the fixture's forwarding state.
+    fn with_strict_syn_check(mut self) -> Self {
+        self.forwarding.tcp_strict_syn_check = true;
+        self
+    }
+
     fn with_ingress_primary_v4(mut self) -> Self {
         self.forwarding.egress.insert(
             LOGICAL_INGRESS_IFINDEX,
@@ -7427,5 +7433,69 @@ fn gate_resolves_in_session_install_table_not_main_16217() {
             &dyn_neigh,
         ),
         "#16217 N1: MAIN-only (RG1) ownership must NOT adopt a blue-table session"
+    );
+}
+
+/// #16479 (b) flow-cache cell: a data-bearing segment on a
+/// handshake-incomplete session must NOT be served from the flow cache
+/// under strict-syn-check. The cache entry is seeded (as a SYN-ACK
+/// would seed it), the backing session is installed from a bare SYN
+/// (OPENING), and an ACK+data frame carrying payload must fall through
+/// to the slow path (which drops it) instead of being Consumed.
+/// Fail-on-revert: remove the strict fence in `stage_flow_cache_hit`
+/// and the run below is Consumed with a staged TX frame.
+#[test]
+fn strict_pre_handshake_data_not_served_from_cache_16479() {
+    let fixture =
+        LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_strict_syn_check();
+    // Build an ACK frame carrying 4 payload bytes: extend the stock
+    // frame's declared lengths so `tcp_payload_len` reports 4.
+    let mut frame = tcp_v4_ack_frame();
+    let payload = [0xde, 0xad, 0xbe, 0xef];
+    // IPv4 total_len at frame[20..22] (l3 at 18, +2); frame len grows.
+    let total = u16::from_be_bytes([frame[20], frame[21]]) + 4;
+    frame[20..22].copy_from_slice(&total.to_be_bytes());
+    frame.extend_from_slice(&payload);
+    let mut meta = test_meta(&frame);
+    // PSH+ACK data segment (cache-eligible flags), payload present.
+    meta.tcp_flags = 0x18;
+    meta.payload_offset = (frame.len() - 4) as u16;
+    meta.pkt_len = frame.len() as u16;
+    // Backing session from a bare SYN: OPENING, handshake incomplete.
+    let seed = StageSeed {
+        session: Some((1_000_000, PROTO_TCP, 0x02)),
+        ..StageSeed::default()
+    };
+    let run = run_stage_seeded(&fixture, &frame, meta, cached_entry(), 0, seed);
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "#16479: pre-handshake data must fall through, not be cache-served"
+    );
+    assert!(
+        run.tx_frame.is_none() && run.tx_pipeline.pending_tx_prepared.is_empty(),
+        "#16479: pre-handshake data must not stage a TX frame from cache"
+    );
+    // Positive control 1: knob OFF — the same cache hit is served.
+    let fixture_off = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let seed_off = StageSeed {
+        session: Some((1_000_000, PROTO_TCP, 0x02)),
+        ..StageSeed::default()
+    };
+    let run_off = run_stage_seeded(&fixture_off, &frame, meta, cached_entry(), 0, seed_off);
+    assert!(
+        matches!(run_off.outcome, FlowCacheOutcome::Consumed),
+        "#16479 control: without strict the cached data hit is still served"
+    );
+    // Positive control 2: strict ON but the session was installed from
+    // an established (ACK) first packet — not handshake-incomplete —
+    // so the cached data hit is served.
+    let seed_est = StageSeed {
+        session: Some((1_000_000, PROTO_TCP, 0x10)),
+        ..StageSeed::default()
+    };
+    let run_est = run_stage_seeded(&fixture, &frame, meta, cached_entry(), 0, seed_est);
+    assert!(
+        matches!(run_est.outcome, FlowCacheOutcome::Consumed),
+        "#16479 control: established session data must still be cache-served under strict"
     );
 }
