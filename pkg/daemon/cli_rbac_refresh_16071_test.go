@@ -100,7 +100,7 @@ func TestConsoleClassRefresher16071(t *testing.T) {
 			shell := &refreshShell16071{}
 			// Startup resolution, exactly as daemon_run.go does.
 			applyCLILoginClass(shell, active, bob)
-			refresh := consoleClassRefresher(shell, func() *config.Config { return active }, bob)
+			refresh := consoleClassRefresher(shell, func() *config.Config { return active }, bob, active)
 			// A refresh against the unchanged config must be a no-op.
 			refresh()
 			// Config apply: the active config changes generation.
@@ -125,9 +125,43 @@ func TestConsoleClassRefresher16071(t *testing.T) {
 // refresh (store not yet populated) must not panic or set a class.
 func TestConsoleClassRefresherNilActive16071(t *testing.T) {
 	shell := &refreshShell16071{}
-	refresh := consoleClassRefresher(shell, func() *config.Config { return nil }, osident.Identity{UID: 1001, Name: "bob"})
+	refresh := consoleClassRefresher(shell, func() *config.Config { return nil }, osident.Identity{UID: 1001, Name: "bob"}, nil)
 	refresh()
 	if len(shell.calls) != 0 {
 		t.Fatalf("SetUserClass calls = %v, want none for nil active config", shell.calls)
+	}
+}
+
+// TestConsoleClassRefresherSeedIsResolvedConfig16071 pins the startup
+// race the #16391 fold closes: the shell is resolved from generation
+// A, but by the time the refresher is constructed the active config
+// is already generation B (a commit landed between the two reads in
+// daemon_run.go). Seeding from B would mark B already-applied and the
+// stale A class would survive; seeding from the RESOLVED config (A)
+// makes the first refresh re-resolve to B.
+//
+// FAIL-ON-REVERT: seed the refresher from `active()` (a second read)
+// and this row keeps "super-user" — SetUserClass is never called with
+// "read-only".
+func TestConsoleClassRefresherSeedIsResolvedConfig16071(t *testing.T) {
+	bob := osident.Identity{UID: 1001, Name: "bob"}
+	genA := cfgWithLogin([2]string{"bob", "super-user"})
+	genB := cfgWithLogin([2]string{"bob", "read-only"})
+
+	shell := &refreshShell16071{}
+	// Startup: shell resolved from genA (the single daemon_run read).
+	applyCLILoginClass(shell, genA, bob)
+	// Active has already moved to genB when the refresher is built.
+	active := genB
+	refresh := consoleClassRefresher(shell, func() *config.Config { return active }, bob, genA)
+	refresh()
+	want := []string{"super-user", "read-only"}
+	if len(shell.calls) != len(want) {
+		t.Fatalf("SetUserClass calls = %v, want %v — refresher seeded from a config newer than the resolved one (#16071 startup race)", shell.calls, want)
+	}
+	for i, w := range want {
+		if shell.calls[i] != w {
+			t.Fatalf("SetUserClass call %d = %q, want %q (all calls %v)", i, shell.calls[i], w, shell.calls)
+		}
 	}
 }

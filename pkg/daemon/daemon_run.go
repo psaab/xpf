@@ -1009,12 +1009,17 @@ func (d *Daemon) Run(ctx context.Context) error {
 		// every command under both (`userClass == ""` short-circuits;
 		// super-user holds PermAll) and showConfigRedacted is false for both,
 		// so secrets render in cleartext either way (permissions.go).
-		applyCLILoginClass(shell, d.store.ActiveConfig(), osident.Current())
+		// #16071: ONE ActiveConfig() read feeds BOTH the startup
+		// resolution and the refresher's seed, so the refresher can
+		// never mistake a generation newer than the resolved one for
+		// already-applied (which would strand the stale class).
+		startupCfg := d.store.ActiveConfig()
+		applyCLILoginClass(shell, startupCfg, osident.Current())
 		// #16071: keep the assignment fresh — re-resolve when the
 		// active config's `system login` projection changes, so a
 		// revoked or re-classed console user loses (or gains) the
 		// class on their next command, not at the next restart.
-		shell.SetRefreshUserClassFn(consoleClassRefresher(shell, d.store.ActiveConfig, osident.Current()))
+		shell.SetRefreshUserClassFn(consoleClassRefresher(shell, d.store.ActiveConfig, osident.Current(), startupCfg))
 
 		// Run CLI in a goroutine so we can still handle signals
 		errCh := make(chan error, 1)

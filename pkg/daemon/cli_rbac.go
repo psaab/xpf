@@ -134,13 +134,20 @@ func applyCLILoginClass(shell userClassSetter, cfg *config.Config, id osident.Id
 func consoleClassRefresher(shell interface {
 	userClassSetter
 	SetRefreshUserClassFn(func())
-}, active func() *config.Config, id osident.Identity) func() {
-	// Seed with the login projection of the config the startup
-	// resolution already used, so the first dispatch with an
-	// unchanged config does not re-resolve (or re-log).
+}, active func() *config.Config, id osident.Identity, seeded *config.Config) func() {
+	// Seed with the login projection of `seeded` — the EXACT config
+	// object the startup applyCLILoginClass resolved the shell's
+	// class from in daemon_run.go (single ActiveConfig() read). A
+	// second ActiveConfig() read here could observe a NEWER
+	// generation than the one the shell was resolved from (a commit
+	// landing between the two reads): the refresher would then treat
+	// that newer projection as already-applied and never re-resolve,
+	// leaving the stale startup class in force until the NEXT login
+	// change. Seeding from the resolved config makes the first
+	// dispatch re-resolve whenever active has moved past it.
 	var last *loginProjection
-	if cfg := active(); cfg != nil {
-		p := projectLogin(cfg)
+	if seeded != nil {
+		p := projectLogin(seeded)
 		last = &p
 	}
 	return func() {
