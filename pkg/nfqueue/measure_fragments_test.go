@@ -2,6 +2,7 @@ package nfqueue
 
 import (
 	"errors"
+	"os"
 	"sort"
 	"testing"
 	"time"
@@ -17,14 +18,21 @@ const (
 )
 
 // TestMeasureFragments9506 is M4 from the Phase-0 plan. It feeds the bounded
-// pool v4 and v6 fragment payloads, measures completion insertion with 100
-// stalled flows, and applies the p99 <= 5x baseline kill gate. The input is a
-// synthetic capture of the six-fragment shape; lower-lo MTU/kernel-generated
-// XFRM fragments remain a loss-cluster validation item. This cell intentionally
-// does not authorize the assembled copy: an eventual production path must
-// release exactly the retained/original fragment set or drop overlaps.
+// pool v4 and v6 fragment payloads and measures completion insertion with 100
+// stalled flows. The timing samples are baseline data, not a performance kill
+// gate (engineering-style "Time in tests (#8218)" clause 1: a pass criterion
+// must never be a ratio of durations): the p99 ratio is logged, never
+// asserted, and the deterministic FragPool capacity checks below are the
+// only verdict. When XPF_NFQUEUE_MEASURE_HOL is set the test opts into the
+// p99 <= 5x baseline kill gate as a measurement cell; without it the ratio
+// cannot fail the run. The input is a synthetic capture of the six-fragment
+// shape; lower-lo MTU/kernel-generated XFRM fragments remain a loss-cluster
+// validation item. This cell intentionally does not authorize the assembled
+// copy: an eventual production path must release exactly the
+// retained/original fragment set or drop overlaps.
 func TestMeasureFragments9506(t *testing.T) {
 	t.Log("M4 status: synthetic FragPool cell is GREEN; real lower-lo-MTU kernel fragment capture remains UNMET and cluster-gated")
+	measureHOL := os.Getenv("XPF_NFQUEUE_MEASURE_HOL") != ""
 	for _, version := range []uint8{4, 6} {
 		baseline := fragmentCompletionSamples(t, version, false)
 		loaded := fragmentCompletionSamples(t, version, true)
@@ -34,7 +42,7 @@ func TestMeasureFragments9506(t *testing.T) {
 		baseP99 := percentile99(baseline)
 		loadedP99 := percentile99(loaded)
 		t.Logf("M4 ip_version=%d baseline_p99_ns=%d loaded_p99_ns=%d ratio=%.2f", version, baseP99, loadedP99, float64(loadedP99)/float64(maxInt64(baseP99, 1)))
-		if loadedP99 > 5*maxInt64(baseP99, 1) {
+		if measureHOL && loadedP99 > 5*maxInt64(baseP99, 1) {
 			t.Fatalf("M4 IPv%d HOL gate: loaded p99=%d > 5x baseline p99=%d", version, loadedP99, baseP99)
 		}
 	}

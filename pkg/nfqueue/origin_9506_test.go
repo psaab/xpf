@@ -219,7 +219,9 @@ func TestParsePreservesProvenance9506(t *testing.T) {
 // an INPUT-hook divert holds a loopback UDP datagram and the parsed packet
 // carries nfgen=AF_INET, hook=LOCAL_IN(1), indev=lo.
 func TestProvenanceLiveNetns9506(t *testing.T) {
-	requireNetNS(t)
+	if !requireNetNS(t) {
+		return
+	}
 
 	q, err := Open(62)
 	if err != nil {

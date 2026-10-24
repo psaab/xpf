@@ -27,7 +27,9 @@ type stageShape struct {
 // not a performance kill gate. The UDP OUTPUT->INPUT harness is synthetic; the
 // FORWARD/iif==stN XFRM path remains a loss-cluster gate.
 func TestMeasureStages9506(t *testing.T) {
-	requireNetNS(t)
+	if !requireNetNS(t) {
+		return
+	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	cpus := measurementCPUs()

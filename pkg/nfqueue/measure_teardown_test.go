@@ -17,7 +17,9 @@ import (
 // Admission cutoff/atomic replacement and SA/tunnel-source teardown remain
 // mechanism-phase work.
 func TestMeasureTeardown9506(t *testing.T) {
-	requireNetNS(t)
+	if !requireNetNS(t) {
+		return
+	}
 	q1, err := Open(63)
 	if err != nil {
 		t.Fatalf("M3 Open q1: %v", err)
