@@ -1573,10 +1573,14 @@ impl SessionDomain {
     /// exactly as the locked path would) → fresh `active_lease_until` from
     /// incoming watchdog; mismatch + stored active + VALID lease → fresh
     /// lease for STORED active/watchdog (liveness only, ownership stays);
-    /// mismatch + stored inactive OR EXPIRED stored-active → keep stored
-    /// (owned by main — an expired lease is never resurrected against a
-    /// demotion/removal intent); zero refreshed → NeedsLock (pure no-op
-    /// never recorded as publish), else store + Served(count). Never
+    /// mismatch + stored inactive (activation pending, #16382) → NeedsLock
+    /// for the WHOLE set (an activation is published only by the locked
+    /// path; storing a mixed set would let a later tick launder the
+    /// pending activation into a match-arm mint); mismatch + EXPIRED
+    /// stored-active → keep stored (owned by main — an expired lease is
+    /// never resurrected against a demotion/removal intent); zero
+    /// refreshed → NeedsLock (pure no-op never recorded as publish),
+    /// else store + Served(count). Never
     /// changes active flags or membership off-lock.
     pub(crate) fn try_refresh_ha_leases(
         &self,
@@ -1741,7 +1745,25 @@ impl SessionDomain {
                 // Mismatch, stored inactive (activation pending): keep stored
                 // untouched (no mint — inactive stays `Inactive`). Owned by
                 // main with side effects; not counted as refreshed.
-                state.insert(*rg_id, *stored_runtime);
+                //
+                // #16382: the whole-set store below would otherwise LAUNDER
+                // this pending activation: a sibling RG's match refreshed
+                // the set, the store published, and the NEXT watchdog tick
+                // read stored==incoming(active) — so its match arm re-minted
+                // the lease WITHOUT the locked path's transition ever
+                // landing (no epoch bump, no RefreshOwnerRGS, no prewarm),
+                // and the servicing workers' fresh forwarding-active set
+                // stayed empty for seconds at the failover instant while
+                // the status view already read active. An activation must
+                // be published ONLY by the locked path; while any RG in
+                // the set is activation-pending, this refresh is not
+                // servable at all — NeedsLock routes the set to main,
+                // whose retry publishes the transition with side effects
+                // (the watchdog treats NeedsLock as throttle-success only
+                // for the set it attempted; the reconcile/UpdateRGActive
+                // retry is the activation's owner, exactly as for the
+                // pure-activation case refreshed==0 already routes).
+                return HaRefreshOutcome::NeedsLock;
             }
         }
         if refreshed == 0 {
@@ -2432,5 +2454,66 @@ mod try_refresh_9629_tests {
             lease: crate::afxdp::HAForwardingLease::ActiveUntil(now_secs),
         };
         assert!(runtime.is_forwarding_active(now_secs));
+    }
+
+    /// #16382: a MIXED set — RG0/RG2 matching inactive (refreshable) and
+    /// RG1 activation-pending (stored inactive, incoming active) — must
+    /// route the WHOLE set to the locked path. Pre-fix the pending RG was
+    /// kept inactive but the set still stored (refreshed=2), so the next
+    /// tick read stored==incoming for RG0/RG2 only — and once any later
+    /// publish flipped RG1, its match arm re-minted without the locked
+    /// transition; live (D31) the servicing workers' cached snapshot
+    /// stayed active=false/Inactive for seconds at the failover instant
+    /// while the status view already read rg1 active=true.
+    /// FAIL-ON-REVERT: restoring keep-and-store makes this call Served.
+    #[test]
+    fn mixed_set_activation_pending_needs_lock_16382() {
+        let coordinator = Coordinator::new();
+        seed(&coordinator, &[(0, false), (1, false), (2, false)]);
+        let domain = coordinator.session_domain().clone();
+        let now_secs = crate::afxdp::monotonic_nanos() / 1_000_000_000;
+        assert_eq!(
+            domain.try_refresh_ha_leases(&[
+                group(0, false, now_secs),
+                group(1, true, now_secs),
+                group(2, false, now_secs)
+            ]),
+            HaRefreshOutcome::NeedsLock,
+            "an activation anywhere in the set is owned by the locked path"
+        );
+        assert_eq!(stored_active(&coordinator, 1), Some(false));
+        assert!(!stored_forwarding_active(&coordinator, 1));
+        // A repeated identical tick cannot launder the pending activation
+        // into a match-arm mint either.
+        assert_eq!(
+            domain.try_refresh_ha_leases(&[
+                group(0, false, now_secs),
+                group(1, true, now_secs),
+                group(2, false, now_secs)
+            ]),
+            HaRefreshOutcome::NeedsLock
+        );
+        assert_eq!(stored_active(&coordinator, 1), Some(false));
+        assert!(!stored_forwarding_active(&coordinator, 1));
+    }
+
+    /// #16382 (control): a matching set with NO activation pending still
+    /// serves on the fast path — steady-state watchdog refreshes must not
+    /// be routed to main.
+    #[test]
+    fn mixed_set_no_activation_still_served_16382() {
+        let coordinator = Coordinator::new();
+        seed(&coordinator, &[(0, false), (1, true), (2, false)]);
+        let domain = coordinator.session_domain().clone();
+        let now_secs = crate::afxdp::monotonic_nanos() / 1_000_000_000;
+        assert_eq!(
+            domain.try_refresh_ha_leases(&[
+                group(0, false, now_secs),
+                group(1, true, now_secs),
+                group(2, false, now_secs)
+            ]),
+            HaRefreshOutcome::Served(3)
+        );
+        assert!(stored_forwarding_active(&coordinator, 1));
     }
 }

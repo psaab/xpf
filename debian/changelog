@@ -1,4 +1,17 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Userspace-DP: an HA watchdog set containing an activation-pending
+    RG (stored inactive, incoming active) now routes the whole set to
+    the locked path instead of storing it from the session fast path
+    (#16382). Previously a mixed set still stored with sibling
+    refreshes counted, consuming the activation without the locked
+    path's epoch bump, RefreshOwnerRGS, prewarm or neighbor warm, and
+    a later tick could mint the lease from the match arm — at an RG
+    failover instant the fabric-adoption gate then read a stale
+    inactive snapshot and declined ha_inactive for seconds.
+    Activations are published only by Coordinator::update_ha_state;
+    demotion arms (valid-lease mint, expired never resurrected) and
+    steady-state matching sets are unchanged.
+
   * API: metrics descriptor init and Describe are now driven by one
     per-family descriptor table (#16202). The ~36 init calls in
     newCollector, the 630-line Describe enumeration, and the seven
