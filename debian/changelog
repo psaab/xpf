@@ -140,6 +140,37 @@ xpf (0.0.0) unstable; urgency=medium
     never failed over on the configured link/target loss. The scoped
     pre-walk gate names the typo on strict commit and warns on tolerant
     load/peer-sync (#1960); shipped cluster configs still commit.
+  * Userspace-DP: adopted fabric-ingress recovery now re-resolves in
+    the session's validated install table and restores only a
+    candidate whose egress RG equals the gate-proved RG (#16217,
+    Opus final4). Previously the recovery re-resolved in MAIN and
+    accepted any candidate with a known egress RG, so a tenant flow
+    could be restored onto a MAIN egress under a different RG than
+    the adoption gate proved. Non-adopted flows keep the HA terminal
+    bit-identically.
+  * Userspace-DP: established, traffic-carrying sessions are never
+    StaleSourceNat-revoked on reverse/fabric hits whose judged
+    forward row lacks forward VLAN provenance (#16217, FZDiag37);
+    the decline keeps the session and serves the packet, and only a
+    NAT-binding change under a newer config epoch revokes. The two
+    dead NoLocalEntry guards were removed (GLM F2) and imported
+    unjudged rows now decline instead of falling through the
+    epoch-0 hole.
+  * Userspace-DP: reverse cached flows whose owner RG departs are
+    superseded, reverse rows stamp the FORWARD owner (not the
+    reply-egress RG), and departure is judged by the destination's
+    connected owner (#16217, Wire33/FZDiag35).
+  * Userspace-DP: the connected-owner lookup on cache hits uses a
+    build-time longest-prefix index with exact legacy-scan
+    equivalence — named-RI ledger rows file under their own table
+    keys, empty-table rows are visible in every scope, the ledger
+    is consulted only on a FIB miss, and probes allocate nothing
+    (#16217, Codex #2/#3/#4/#6 + GLM F1). A deferred cache probe
+    that is dropped now also rolls back its stage-transition
+    marker and node-served stamps.
+  * Userspace-DP: reverse synthesis discriminates live vs synced
+    rows by an explicit origin flag on ForwardSessionMatch instead
+    of the session-id sentinel (#16217, FZCellsStrict).
   * Packaging: point the #15089 dpkg file triggers at the loader
     payloads dpkg actually unpacks (/usr/lib/shim,
     /usr/lib/grub/x86_64-efi-signed) instead of the ESP copies under
