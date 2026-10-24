@@ -966,7 +966,7 @@ func (s *sender) buildRA() *ndp.RouterAdvertisement {
 					"prefix", pfx.Prefix, "interface", s.cfg.Interface)
 				continue
 			}
-			if pfx.Delegated {
+			if pfx.Delegated && !s.delegatedPinExempt12533(pfx, prefix.Masked()) {
 				if reason := config.DelegatedIPv6PrefixRefusalReason(prefix.Masked()); reason != "" {
 					slog.Warn("ra: refusing to advertise delegated prefix with blocked address class",
 						"prefix", pfx.Prefix, "interface", s.cfg.Interface,
@@ -1056,7 +1056,7 @@ func (s *sender) buildRA() *ndp.RouterAdvertisement {
 				"prefix", pfx.Prefix, "interface", s.cfg.Interface)
 			continue
 		}
-		if pfx.Delegated {
+		if pfx.Delegated && !s.delegatedPinExempt12533(pfx, prefix.Masked()) {
 			if reason := config.DelegatedIPv6PrefixRefusalReason(prefix.Masked()); reason != "" {
 				slog.Warn("ra: refusing to advertise delegated prefix with blocked address class",
 					"prefix", pfx.Prefix, "interface", s.cfg.Interface,
@@ -1070,7 +1070,7 @@ func (s *sender) buildRA() *ndp.RouterAdvertisement {
 			// still held from an earlier reply. ProtectedPrefixes is
 			// daemon-populated (nil for a sender driven by hand-built
 			// config, which has no box-wide knowledge). No pin mechanism
-			// exists yet, so every overlap is refused (#12533).
+			// is the only exception (#12533); unpinned overlaps are refused.
 			if hit := s.delegatedOverlapsProtected(prefix.Masked()); hit != "" {
 				slog.Warn("ra: refusing to advertise delegated prefix overlapping configured prefix",
 					"prefix", pfx.Prefix, "interface", s.cfg.Interface,
@@ -1419,4 +1419,28 @@ func (s *sender) delegatedOverlapsProtected(delegated netip.Prefix) string {
 		}
 	}
 	return ""
+}
+
+// pinnedCovers12533 reports whether this RA config's pin set covers the
+// delegated prefix under the #12533 exact/covering rule.
+func (s *sender) pinnedCovers12533(delegated netip.Prefix) bool {
+	for _, raw := range s.cfg.PinnedPrefixes {
+		pin, err := netip.ParsePrefix(raw)
+		if err != nil {
+			continue
+		}
+		if config.PinnedDelegatedPrefixCovers(pin, delegated) {
+			return true
+		}
+	}
+	return false
+}
+
+// delegatedPinExempt12533 is the sink-side scoped exception: ONLY a
+// delegated prefix explicitly marked Pinned AND covered by this RA
+// config's pin set bypasses the class/overlap refusals. A Pinned mark
+// without covering pin (stale provenance after pin removal, or a
+// hand-built config) does not exempt — fail closed.
+func (s *sender) delegatedPinExempt12533(pfx *config.RAPrefix, delegated netip.Prefix) bool {
+	return pfx.Delegated && pfx.Pinned && s.pinnedCovers12533(delegated)
 }

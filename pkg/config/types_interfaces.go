@@ -260,6 +260,12 @@ type DHCPv6ClientConfig struct {
 	PrefixDelegatingSubPrefLen int      // sub-prefix-length (0 = not set)
 	ReqOptions                 []string // dns-server, domain-name, etc.
 	UpdateRAInterface          string   // update-router-advertisement interface
+	// PinnedPrefixes are the operator-pinned IA_PD exception prefixes
+	// (#12533): `prefix-delegating pinned-prefix <cidr>` leaves, masked
+	// and sorted. A delegation contained by (or equal to) a pin is the
+	// ONLY delegation exempt from the #10856 class/overlap refusals, and
+	// only for the client whose stanza carries the pin.
+	PinnedPrefixes []string
 }
 
 // DHCPInetOptions holds DHCPv4 client options for family inet dhcp stanza.

@@ -4029,6 +4029,7 @@
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
                 "Delegated": false,
+                "Pinned": false,
                 "ValidExpiresAt": 0,
                 "PreferredExpiresAt": 0
               }
@@ -4041,6 +4042,7 @@
             "LinkMTU": 0,
             "SourceLinkLocal": "",
             "ProtectedPrefixes": null,
+            "PinnedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }
@@ -5491,6 +5493,7 @@
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
                 "Delegated": false,
+                "Pinned": false,
                 "ValidExpiresAt": 0,
                 "PreferredExpiresAt": 0
               }
@@ -5503,6 +5506,7 @@
             "LinkMTU": 0,
             "SourceLinkLocal": "",
             "ProtectedPrefixes": null,
+            "PinnedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }
@@ -6952,6 +6956,7 @@
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
                 "Delegated": false,
+                "Pinned": false,
                 "ValidExpiresAt": 0,
                 "PreferredExpiresAt": 0
               }
@@ -6964,6 +6969,7 @@
             "LinkMTU": 0,
             "SourceLinkLocal": "",
             "ProtectedPrefixes": null,
+            "PinnedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }
@@ -8413,6 +8419,7 @@
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
                 "Delegated": false,
+                "Pinned": false,
                 "ValidExpiresAt": 0,
                 "PreferredExpiresAt": 0
               }
@@ -8425,6 +8432,7 @@
             "LinkMTU": 0,
             "SourceLinkLocal": "",
             "ProtectedPrefixes": null,
+            "PinnedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }
@@ -9878,6 +9886,7 @@
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
                 "Delegated": false,
+                "Pinned": false,
                 "ValidExpiresAt": 0,
                 "PreferredExpiresAt": 0
               }
@@ -9890,6 +9899,7 @@
             "LinkMTU": 0,
             "SourceLinkLocal": "",
             "ProtectedPrefixes": null,
+            "PinnedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }
@@ -11342,6 +11352,7 @@
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
                 "Delegated": false,
+                "Pinned": false,
                 "ValidExpiresAt": 0,
                 "PreferredExpiresAt": 0
               }
@@ -11354,6 +11365,7 @@
             "LinkMTU": 0,
             "SourceLinkLocal": "",
             "ProtectedPrefixes": null,
+            "PinnedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }
@@ -12550,6 +12562,7 @@
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
                 "Delegated": false,
+                "Pinned": false,
                 "ValidExpiresAt": 0,
                 "PreferredExpiresAt": 0
               }
@@ -12562,6 +12575,7 @@
             "LinkMTU": 0,
             "SourceLinkLocal": "",
             "ProtectedPrefixes": null,
+            "PinnedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }
@@ -13639,6 +13653,7 @@
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
                 "Delegated": false,
+                "Pinned": false,
                 "ValidExpiresAt": 0,
                 "PreferredExpiresAt": 0
               }
@@ -13651,6 +13666,7 @@
             "LinkMTU": 0,
             "SourceLinkLocal": "",
             "ProtectedPrefixes": null,
+            "PinnedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }
@@ -14727,6 +14743,7 @@
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
                 "Delegated": false,
+                "Pinned": false,
                 "ValidExpiresAt": 0,
                 "PreferredExpiresAt": 0
               }
@@ -14739,6 +14756,7 @@
             "LinkMTU": 0,
             "SourceLinkLocal": "",
             "ProtectedPrefixes": null,
+            "PinnedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }
@@ -15815,6 +15833,7 @@
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
                 "Delegated": false,
+                "Pinned": false,
                 "ValidExpiresAt": 0,
                 "PreferredExpiresAt": 0
               }
@@ -15827,6 +15846,7 @@
             "LinkMTU": 0,
             "SourceLinkLocal": "",
             "ProtectedPrefixes": null,
+            "PinnedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }
@@ -16907,6 +16927,7 @@
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
                 "Delegated": false,
+                "Pinned": false,
                 "ValidExpiresAt": 0,
                 "PreferredExpiresAt": 0
               }
@@ -16919,6 +16940,7 @@
             "LinkMTU": 0,
             "SourceLinkLocal": "",
             "ProtectedPrefixes": null,
+            "PinnedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }
@@ -17998,6 +18020,7 @@
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
                 "Delegated": false,
+                "Pinned": false,
                 "ValidExpiresAt": 0,
                 "PreferredExpiresAt": 0
               }
@@ -18010,6 +18033,7 @@
             "LinkMTU": 0,
             "SourceLinkLocal": "",
             "ProtectedPrefixes": null,
+            "PinnedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }

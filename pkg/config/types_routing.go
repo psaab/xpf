@@ -620,9 +620,16 @@ type RAInterfaceConfig struct {
 	// leaves it nil, so an operator-authored prefix is never refused against
 	// it. The sender consults it for delegated PIOs only — defense in depth
 	// behind the DHCPv6 decoder, which refuses the same overlaps at
-	// extraction time (#12533 tracks the future pin mechanism that will
-	// scope intentional exceptions).
+	// extraction time. #12533 pins are the scoped exception (see
+	// PinnedPrefixes on this config and RAPrefix.Pinned).
 	ProtectedPrefixes []string // configured prefixes a delegated prefix must not overlap
+	// PinnedPrefixes is the scoped operator-pin set (#12533) for this
+	// RA interface's delegated prefixes: masked CIDR strings stamped by
+	// buildRAConfigs from the DHCP clients that target this interface.
+	// A delegated PIO marked Pinned that is covered by one of these is
+	// emitted despite the class/overlap refusals; everything else keeps
+	// the #10856 refusal. Nil for hand-built configs.
+	PinnedPrefixes []string
 	// ReachableTime / RetransTimer are the RFC 4861 §4.2 RA header fields,
 	// in milliseconds (#4307). 0 = "unspecified" (host uses its own
 	// default), which is the pre-#4307 wire behavior.
@@ -695,6 +702,17 @@ type RAPrefix struct {
 	// Set ONLY by buildRAConfigs (pkg/daemon) on the PD path; the compiler
 	// leaves it false for operator-authored prefixes by construction.
 	Delegated bool
+	// Pinned marks a DELEGATED prefix whose acceptance came from an
+	// explicit operator pin (#12533) rather than the ordinary
+	// global-unicast / no-overlap path. It is a SEPARATE provenance bit
+	// from Delegated: Delegated says "came from a delegation", Pinned
+	// says "accepted only because the operator pinned covering space".
+	// Set ONLY by buildRAConfigs on the PD path from
+	// DelegatedPrefix.Pinned; the compiler leaves it false. The RA
+	// sender consults it (with the pin set on the RA config) to apply
+	// the same scoped exception at emission, and configEqual treats a
+	// change as wire-affecting.
+	Pinned bool
 	// ValidExpiresAt is the absolute wall-clock expiry of the valid
 	// lifetime for a delegated prefix (#15057): Obtained+granted-valid.
 	// Carrying the expiry rather than a decayed remaining value keeps the

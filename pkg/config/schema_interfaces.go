@@ -349,6 +349,23 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 							validator:     ValidateInteger(0, 128),
 							children:      nil,
 						},
+						// #12533: scoped operator pin. Only a delegation
+						// contained by (or equal to) a pinned prefix on
+						// THIS client is exempt from the #10856 class /
+						// configured-overlap refusals. Multi leaf so one
+						// client can pin several disjoint spaces.
+						"pinned-prefix": {
+							desc:          "Pinned IA_PD exception prefix",
+							args:          1,
+							multi:         true,
+							placeholder:   "<ipv6-prefix>",
+							valueType:     ValueCIDR,
+							valueDesc:     "IPv6 prefix a delegated IA_PD prefix must be contained by to be accepted despite ULA/overlap (#12533)",
+							valueExamples: []string{"fd00:1234::/48", "2001:db8:1::/48"},
+							keyValidator:  ValidateIPv6CIDR,
+							validator:     ValidateIPv6CIDR,
+							children:      nil,
+						},
 					}},
 					"client-identifier": {desc: "Client identifier", children: map[string]*schemaNode{
 						"duid-type": {desc: "DUID type", args: 1, placeholder: "<type>", valueType: ValueEnumOf, valueDesc: "DUID type (duid-ll | duid-llt)", valueExamples: []string{"duid-ll", "duid-llt"}, validator: ValidateEnum([]string{"duid-ll", "duid-llt"}), children: nil},

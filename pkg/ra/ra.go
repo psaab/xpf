@@ -1641,6 +1641,9 @@ func configEqual(a, b *config.RAInterfaceConfig) bool {
 			// records what omitting a wire-affecting field from this list
 			// cost last time: a stale advertisement.
 			a.Prefixes[i].Delegated != b.Prefixes[i].Delegated ||
+			// #12533: Pinned gates the pin exemption at the sink, so it
+			// is wire-affecting like Delegated.
+			a.Prefixes[i].Pinned != b.Prefixes[i].Pinned ||
 			// #15057: the absolute expiries decide the lifetimes buildRA
 			// stamps at send time; a renewal that moves them must restart
 			// the sender, while the decay itself must not.
@@ -1675,6 +1678,11 @@ func configEqual(a, b *config.RAInterfaceConfig) bool {
 	// Prefixes derives order from Go map iteration, so raw/order compare
 	// would spurious-restart senders on every no-op reconcile.
 	if !protectedPrefixesEqual(a.ProtectedPrefixes, b.ProtectedPrefixes) {
+		return false
+	}
+	// #12533: same gating argument for the pin set — adding/removing a
+	// pin must restart the sender even when prefixes are unchanged.
+	if !protectedPrefixesEqual(a.PinnedPrefixes, b.PinnedPrefixes) {
 		return false
 	}
 
