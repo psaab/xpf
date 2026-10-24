@@ -40,16 +40,46 @@
 # sites in pkg/routing/tunnel_keepalive_vrf_12083_test.go: +7 total, +5
 # privilege-absent, and +2 other. Bank each delta separately and preserve
 # both attributions in the commit body.
-total        = 474
+# #16474 banks the drift measured at a12d4aca (2026-10-24) against the
+# aff843a4ec floors above: total 474 -> 557, priv-absent 81 -> 103,
+# priv-present 14 -> 18, other 378 -> 435, unparsed unchanged at 1. The
+# raw census reads 558/104 because it counts, inside a string literal in
+# pkg/nfqueue/measure_gate_16436_test.go, the `t.Skip("netns child
+# completed")` text that cell asserts is ABSENT from harness_test.go --
+# a quoted fixture, not a call site (see that file). The floors below
+# bank the corrected 557/103; the census script now excludes skip calls
+# inside string literals, so its raw count and the floors agree.
+# Gross movement since aff843a4ec (multiset by file+message, net in
+# parens): priv-absent +24/-1 (+23: netns/VRF/dummy-interface creation
+# guards in daemon routing-instance, mgmt-VRF and RPM kernel cells,
+# flowexport routemask netns, frrconf service-group/root fixtures,
+# kea perms root-only arms, dhcp-keep-survival unshare probe, authz
+# loopback refusal; -1 the nfqueue harness Skip-on-success removed by
+# #16436, whose quoted mention is the false positive above). priv-
+# present +5/-1 (+4: root-bypass directory-permission arms in authz,
+# first-commit teardown, zeroize seal and primary-listener holder;
+# -1 the same zeroize arm moved from pkg/grpcapi to pkg/factoryreset).
+# other +66/-9 (+57: loopback/interface/tool/fixture-gated cells --
+# IPv6/loopback absence, dash/VLAN host-interface absence, vtysh
+# absence, /dev/full, /proc, symlink and immutable-bit availability,
+# golden-regen opt-in, -short timing probes, and fixture-stale premise
+# guards that skip only when the collision they exercise no longer
+# occurs; -9 removed or relocated cells including the zeroize trio's
+# move and stale unix-socket guards). Every added site gates on
+# execution-environment availability or on its premise being
+# exercisable; none was un-skipped here because the gating condition
+# is real on the hosts that lack it -- banking with these reasons is
+# the #16474 acceptance path, and CI now ratchets any NEXT skip.
+total        = 557
 
 # Privilege-dependent, split by DIRECTION because that split is the finding:
 # no single run examines both groups. Running the suite as root does not close
 # the gap, it swaps which subjects go unexamined.
-priv-absent  = 81
-priv-present = 14
+priv-absent  = 103
+priv-present = 18
 
 # Everything else: environment-, tool- and fixture-gated skips.
-other        = 378
+other        = 435
 
 # Skips this census counted but could NOT classify: `t.SkipNow()` (no message
 # by construction) and non-literal messages. Deliberately a REPORTED bucket

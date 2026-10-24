@@ -1897,7 +1897,7 @@ mod recursive_prefix_index_12617_tests {
     }
 
     #[test]
-    #[ignore = "manual learned-table build scaling probe for issue #12617"]
+    #[ignore = "MEASUREMENT: manual learned-table build scaling probe for issue #12617; prints timings, asserts nothing"]
     fn recursive_prefix_index_build_scaling_probe_12617() {
         for count in [1_000, 4_000, 16_000, 65_000] {
             let snapshot = snapshot_v4(count);
