@@ -2295,6 +2295,17 @@ they print the same `WARNING: dataplane is NOT enforcing the active
 configuration.` heading with a note that hit counters belong to the previous
 generation still being enforced and do NOT count the terms shown (#16451).
 
+On a leniently loaded (boot / peer-sync) config where a filter with a
+`then routing-instance` term is attached as input on a routing-instance
+member interface, the member attachment is rebound to a hidden synthesized
+clone (`__xpf_11589_suppressed_N`, #11589) whose steering term is stripped.
+Hit counters the dataplane publishes under the clone name — helper per-term
+counters, policer counters, and eBPF map slots — are folded into the
+authored filter's same-named terms on the RAW views and in the Prometheus
+`xpf_filter_hits_total` series (#16464), so the displayed/ exported totals
+cover both the member and non-member attachments; the clone itself never
+appears as a filter or series.
+
 This applies to the local CLI (`pkg/cli`) and, since #16451, to the remote
 CLI's gRPC `ShowText` path: the effective topics print the NOT-enforcing /
 compiled-desired warning whenever the active config is not the applied one,

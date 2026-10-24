@@ -1,27 +1,95 @@
 package userspace
 
+import "github.com/psaab/xpf/pkg/config"
+
 type FirewallFilterTermCounterKey struct {
 	Family     string
 	FilterName string
 	TermName   string
 }
 
+// CloneCounterFold16464 maps a suppressed-member clone filter name to its
+// authored source filter for one family (#16464). Empty when the clone is
+// unknown to cfg, so callers keep the clone counters unattributed rather
+// than guessing.
+type CloneCounterFold16464 map[string]string
+
+// BuildCloneCounterFold16464 derives the clone->source fold for both families
+// from cfg, keyed by family then clone name. Built once per render / scrape
+// from the same active config the counters are paired with.
+func BuildCloneCounterFold16464(cfg *config.Config) map[string]CloneCounterFold16464 {
+	out := make(map[string]CloneCounterFold16464)
+	if cfg == nil {
+		return out
+	}
+	add := func(family string, filters map[string]*config.FirewallFilter) {
+		for name, f := range filters {
+			if f == nil {
+				continue
+			}
+			if source, _ := f.SuppressedMemberFBF11321(); source != "" {
+				m := out[family]
+				if m == nil {
+					m = make(CloneCounterFold16464)
+					out[family] = m
+				}
+				m[name] = source
+			}
+		}
+	}
+	add("inet", cfg.Firewall.FiltersInet)
+	add("inet6", cfg.Firewall.FiltersInet6)
+	return out
+}
+
+// FoldCloneFilterName16464 returns the operator-visible filter name for a
+// helper-published counter row: the authored source when filterName is a
+// suppressed-member clone in this family, otherwise filterName unchanged.
+func FoldCloneFilterName16464(fold map[string]CloneCounterFold16464, family, filterName string) string {
+	if m, ok := fold[family]; ok {
+		if source, ok := m[filterName]; ok && source != "" {
+			return source
+		}
+	}
+	return filterName
+}
+
+// BuildFirewallFilterTermCounterIndex indexes helper counters by
+// (family,filter,term), summing duplicates (#15192). Clone rows are NOT
+// folded here: this builder has no config, so callers that pair counters
+// with an active config must fold first via
+// BuildFirewallFilterTermCounterIndexForConfig (#16464).
 func BuildFirewallFilterTermCounterIndex(status *ProcessStatus) map[FirewallFilterTermCounterKey]FirewallFilterTermCounterStatus {
+	return buildFilterTermCounterIndex(status, nil)
+}
+
+// BuildFirewallFilterTermCounterIndexForConfig is
+// BuildFirewallFilterTermCounterIndex with each suppressed-member clone
+// row folded into its authored source filter (same family, same term
+// name; the clone carries identical term names/order) before summing, so
+// member-unit hits are not lost when readers skip clones (#16464).
+func BuildFirewallFilterTermCounterIndexForConfig(status *ProcessStatus, cfg *config.Config) map[FirewallFilterTermCounterKey]FirewallFilterTermCounterStatus {
+	if cfg == nil {
+		return BuildFirewallFilterTermCounterIndex(status)
+	}
+	return buildFilterTermCounterIndex(status, BuildCloneCounterFold16464(cfg))
+}
+
+func buildFilterTermCounterIndex(status *ProcessStatus, fold map[string]CloneCounterFold16464) map[FirewallFilterTermCounterKey]FirewallFilterTermCounterStatus {
 	index := make(map[FirewallFilterTermCounterKey]FirewallFilterTermCounterStatus)
 	if status == nil {
 		return index
 	}
 	for _, counter := range status.FilterTermCounters {
+		counter.FilterName = FoldCloneFilterName16464(fold, counter.Family, counter.FilterName)
 		key := FirewallFilterTermCounterKey{
 			Family:     counter.Family,
 			FilterName: counter.FilterName,
 			TermName:   counter.TermName,
 		}
-		// #15192: a duplicated (family,filter,term) key — two same-named
-		// terms in one filter, each with its own runtime counter — must
-		// SUM, not last-wins. Every consumer of this index (Prometheus,
-		// CLI, gRPC) keys by the same triple, so last-wins silently
-		// dropped one term's hits.
+		// #15192: a duplicated (family,filter,term) key must SUM, not
+		// last-wins. Folding a clone into its source deliberately
+		// creates such a duplicate (authored + member hits).
 		if existing, ok := index[key]; ok {
 			counter.Packets += existing.Packets
 			counter.Bytes += existing.Bytes
@@ -54,6 +122,22 @@ type ThreeColorPolicerStatusKey struct {
 // other terms' traffic. A nil status yields an empty index, mirroring
 // BuildFirewallFilterTermCounterIndex.
 func BuildThreeColorPolicerStatusIndex(status *ProcessStatus) map[ThreeColorPolicerStatusKey]ThreeColorPolicerStatus {
+	return buildThreeColorPolicerStatusIndex(status, nil)
+}
+
+// BuildThreeColorPolicerStatusIndexForConfig is
+// BuildThreeColorPolicerStatusIndex with suppressed-member clone rows
+// folded into their authored source filter before summing (#16464), so a
+// policer term rendered under the source also shows member-unit policer
+// counters instead of dropping them with the hidden clone.
+func BuildThreeColorPolicerStatusIndexForConfig(status *ProcessStatus, cfg *config.Config) map[ThreeColorPolicerStatusKey]ThreeColorPolicerStatus {
+	if cfg == nil {
+		return BuildThreeColorPolicerStatusIndex(status)
+	}
+	return buildThreeColorPolicerStatusIndex(status, BuildCloneCounterFold16464(cfg))
+}
+
+func buildThreeColorPolicerStatusIndex(status *ProcessStatus, fold map[string]CloneCounterFold16464) map[ThreeColorPolicerStatusKey]ThreeColorPolicerStatus {
 	index := make(map[ThreeColorPolicerStatusKey]ThreeColorPolicerStatus)
 	if status == nil {
 		return index
@@ -62,6 +146,7 @@ func BuildThreeColorPolicerStatusIndex(status *ProcessStatus) map[ThreeColorPoli
 		if policer.Name == "" || policer.Family == "" || policer.FilterName == "" || policer.TermName == "" {
 			continue
 		}
+		policer.FilterName = FoldCloneFilterName16464(fold, policer.Family, policer.FilterName)
 		key := ThreeColorPolicerStatusKey{
 			Family:     policer.Family,
 			FilterName: policer.FilterName,
