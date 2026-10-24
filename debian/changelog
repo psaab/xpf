@@ -20,6 +20,20 @@ xpf (0.0.0) unstable; urgency=medium
     single session-timeout resolver and the show-path now use those
     values, while a promoted session's application
     inactivity-timeout still wins.
+  * Userspace DP: include round-robin NAT64 BIB leases in the
+    persistent-NAT show table, clear verb, and HA idle export
+    (#16488). Every round-robin NAT64 flow mints a persistent
+    AnyRemoteHost BIB lease (#13946), but the coordinator's idle
+    export, display export, and clear loops gated on
+    `deterministic_v6` (#14676/#14091 covered only deterministic
+    NAT64), so round-robin BIBs were invisible to
+    `show security nat source persistent-nat-table`, survived
+    `clear security nat source persistent-nat-table`, and never
+    reached the HA peer while idle. The three loops now cover every
+    NAT64 prefix (round-robin under `nat64-{idx}`), and imports of
+    `nat64-{idx}` records validate pool membership, the allocator's
+    live port range, and peer/static/interface ownership with the
+    clear fence before installing.
   * Userspace DP: count a Stage-11 IPsec pre-claim PBR drop exactly once
     (#16480). The #14314 pre-claim probe resolved the input-filter PBR
     override uncounted and recycled on `RouteOverride::Drop`, but that

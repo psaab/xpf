@@ -589,3 +589,116 @@ fn deterministic_nat64_display_and_clear_revoke_and_fence_14676() {
         "stale NAT64 import must be clear-fenced, not installed: {counts:?}"
     );
 }
+
+/// #16488: round-robin NAT64 BIB leases (persistent since #13946) must be
+/// visible to SHOW, exported idle, revoked by clear, and clear-fenced on
+/// re-import — the same legs #14676 gave deterministic NAT64.
+#[test]
+fn round_robin_nat64_display_export_clear_and_fence_16488() {
+    let snap = crate::NAT64RuleSnapshot {
+        name: "napt64-rr".into(),
+        prefix: "64:ff9b::/96".into(),
+        pool_addresses: vec!["203.0.113.1".into()],
+        ..Default::default()
+    };
+    let mut coord = Coordinator::new();
+    coord.forwarding.nat64 = crate::nat64::Nat64State::from_snapshots(&[snap.clone()]);
+    let prefix = &coord.forwarding.nat64.prefixes[0];
+    assert!(prefix.deterministic_v6.is_none(), "fixture must be round-robin");
+    let flow = crate::nat::SourceNatFlowKey {
+        protocol: 6,
+        src_ip: "2001:db8::1".parse().unwrap(),
+        dst_ip: "8.8.8.8".parse().unwrap(),
+        src_port: 40000,
+        dst_port: 443,
+        routing_scope: 0,
+    };
+    let (ip, port) = crate::nat::allocate_nat64_pool_port(
+        &prefix.port_allocator,
+        flow,
+        &prefix.pool_v4,
+        1,
+        crate::nat::NatHolder::Untracked,
+    )
+    .unwrap();
+    assert_eq!(ip.to_string(), "203.0.113.1");
+    assert!(crate::nat::release_nat64_pool_port(
+        &prefix.port_allocator,
+        flow,
+        ip,
+        port,
+        20,
+        false,
+        crate::nat::NatHolder::Untracked
+    ));
+    let exported = coord.export_idle_persistent_leases(21);
+    assert_eq!(exported.len(), 1, "round-robin NAT64 idle BIB must export: {exported:?}");
+    assert_eq!(exported[0].pool_name, "nat64-0");
+    assert!(!exported[0].lease.deterministic);
+    assert!(exported[0].lease.permit_any_remote, "NAT64 BIB is AnyRemoteHost");
+    let display = coord.export_display_persistent_leases(21);
+    assert_eq!(display.len(), 1, "round-robin NAT64 lease must appear in SHOW: {display:?}");
+    assert_eq!(display[0].pool_name, "nat64-0");
+    let mut standby = Coordinator::new();
+    standby.forwarding.nat64 = crate::nat64::Nat64State::from_snapshots(&[snap.clone()]);
+    let counts = standby.import_idle_persistent_leases(&exported, 1000);
+    assert_eq!(counts.installed, 1, "round-robin BIB must import on standby: {counts:?}");
+    let cleared = coord.clear_persistent_nat_leases();
+    assert_eq!(cleared, 1, "clear must revoke the round-robin NAT64 lease");
+    assert!(coord.export_idle_persistent_leases(22).is_empty(), "cleared BIB must not export");
+    assert!(coord.export_display_persistent_leases(22).is_empty(), "cleared BIB must not show");
+    let counts = coord.import_idle_persistent_leases(&exported, 23);
+    assert_eq!(counts.installed, 0, "stale round-robin BIB must not reinstall after clear: {counts:?}");
+    assert_eq!(counts.skipped_clear_fenced, 1, "stale round-robin import must be clear-fenced: {counts:?}");
+}
+
+/// #16488 import validation: out-of-pool / out-of-range records must not install.
+#[test]
+fn round_robin_nat64_import_rejects_out_of_pool_and_range_16488() {
+    let snap = crate::NAT64RuleSnapshot {
+        name: "napt64-rr".into(),
+        prefix: "64:ff9b::/96".into(),
+        pool_addresses: vec!["203.0.113.1".into()],
+        ..Default::default()
+    };
+    let mut coord = Coordinator::new();
+    coord.forwarding.nat64 = crate::nat64::Nat64State::from_snapshots(&[snap.clone()]);
+    let prefix = &coord.forwarding.nat64.prefixes[0];
+    let flow = crate::nat::SourceNatFlowKey {
+        protocol: 6,
+        src_ip: "2001:db8::1".parse().unwrap(),
+        dst_ip: "8.8.8.8".parse().unwrap(),
+        src_port: 40000,
+        dst_port: 443,
+        routing_scope: 0,
+    };
+    let (ip, port) = crate::nat::allocate_nat64_pool_port(
+        &prefix.port_allocator,
+        flow,
+        &prefix.pool_v4,
+        1,
+        crate::nat::NatHolder::Untracked,
+    )
+    .unwrap();
+    assert!(crate::nat::release_nat64_pool_port(
+        &prefix.port_allocator, flow, ip, port, 20, false, crate::nat::NatHolder::Untracked
+    ));
+    let exported = coord.export_idle_persistent_leases(21);
+    assert_eq!(exported.len(), 1);
+    let mut standby = Coordinator::new();
+    standby.forwarding.nat64 = crate::nat64::Nat64State::from_snapshots(&[snap]);
+    let mut bad_addr = exported[0].clone();
+    bad_addr.lease.translated_ip = "203.0.113.99".parse().unwrap();
+    let counts = standby.import_idle_persistent_leases(&[bad_addr], 1000);
+    assert_eq!(counts.installed, 0, "out-of-pool BIB must not install: {counts:?}");
+    assert_eq!(counts.skipped_unknown_address, 1, "{counts:?}");
+    let mut bad_port = exported[0].clone();
+    bad_port.lease.translated_port = 80;
+    let counts = standby.import_idle_persistent_leases(&[bad_port], 1000);
+    assert_eq!(counts.installed, 0, "out-of-range BIB must not install: {counts:?}");
+    assert_eq!(counts.skipped_identity_busy, 1, "{counts:?}");
+    let mut det_shaped = exported[0].clone();
+    det_shaped.lease.deterministic = true;
+    let counts = standby.import_idle_persistent_leases(&[det_shaped], 1000);
+    assert_eq!(counts.installed, 0, "deterministic-shaped rr record must not install: {counts:?}");
+}
