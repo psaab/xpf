@@ -415,7 +415,7 @@ mod tcp_syn_check_tests {
         no_syn_check: bool,
         strict_syn_check: bool,
     ) -> bool {
-        if strict_syn_check_drops_new_flow(PROTO_TCP, flags, false, no_syn_check, strict_syn_check) {
+        if strict_syn_check_drops_new_flow_with_payload(PROTO_TCP, flags, false, no_syn_check, strict_syn_check, 0) {
             return false;
         }
         table.install_with_protocol_with_origin(
@@ -443,7 +443,7 @@ mod tcp_syn_check_tests {
             TCP_RST | TCP_ACK,
         ] {
             assert!(
-                strict_syn_check_drops_new_flow(PROTO_TCP, flags, false, false, false),
+                strict_syn_check_drops_new_flow_with_payload(PROTO_TCP, flags, false, false, false, 0),
                 "non-SYN TCP flags 0x{flags:02x} must drop on a default-policy miss"
             );
         }
@@ -451,14 +451,14 @@ mod tcp_syn_check_tests {
         // carry a closing flag; a SYN|ACK without FIN/RST supports asymmetric
         // routing, but closing SYNs must never seed an immediately-closing
         // session.
-        assert!(!strict_syn_check_drops_new_flow(
-            PROTO_TCP, TCP_SYN, false, false, false
+        assert!(!strict_syn_check_drops_new_flow_with_payload(
+            PROTO_TCP, TCP_SYN, false, false, false, 0
         ));
-        assert!(!strict_syn_check_drops_new_flow(
+        assert!(!strict_syn_check_drops_new_flow_with_payload(
             PROTO_TCP,
             TCP_SYN | TCP_ACK, false,
             false,
-            false
+            false, 0
         ));
         for flags in [
             TCP_SYN | TCP_FIN,
@@ -467,7 +467,7 @@ mod tcp_syn_check_tests {
             TCP_SYN | TCP_ACK | TCP_RST,
         ] {
             assert!(
-                strict_syn_check_drops_new_flow(PROTO_TCP, flags, false, false, false),
+                strict_syn_check_drops_new_flow_with_payload(PROTO_TCP, flags, false, false, false, 0),
                 "closing SYN flags 0x{flags:02x} must drop"
             );
         }
@@ -478,7 +478,7 @@ mod tcp_syn_check_tests {
         let mut table = SessionTable::new();
         for (port, flags) in [(40400, TCP_ACK), (40401, TCP_ACK | TCP_PSH)] {
             assert!(
-                !strict_syn_check_drops_new_flow(PROTO_TCP, flags, false, true, false),
+                !strict_syn_check_drops_new_flow_with_payload(PROTO_TCP, flags, false, true, false, 0),
                 "no-syn-check must admit non-closing TCP flags 0x{flags:02x}"
             );
             assert!(
@@ -493,8 +493,8 @@ mod tcp_syn_check_tests {
             (40404, TCP_RST | TCP_ACK),
             (40405, TCP_FIN | TCP_ACK),
         ] {
-            assert!(strict_syn_check_drops_new_flow(
-                PROTO_TCP, flags, false, true, false
+            assert!(strict_syn_check_drops_new_flow_with_payload(
+                PROTO_TCP, flags, false, true, false, 0
             ));
             assert!(
                 !install_on_miss_with_checks(&mut table, tcp_key(port), flags, true, false),
@@ -502,11 +502,11 @@ mod tcp_syn_check_tests {
             );
         }
         // Explicit strict mode has precedence if both knobs are configured.
-        assert!(strict_syn_check_drops_new_flow(
+        assert!(strict_syn_check_drops_new_flow_with_payload(
             PROTO_TCP,
             TCP_ACK | TCP_PSH, false,
             true,
-            true
+            true, 0
         ));
         assert!(
             !install_on_miss_with_checks(&mut table, tcp_key(40406), TCP_ACK, true, true),
@@ -518,11 +518,11 @@ mod tcp_syn_check_tests {
     #[test]
     fn tunnel_no_syn_check_admits_only_tunnel_midstream_15753() {
         // Tunnel ACK admitted only when is_tunnel && knob set.
-        assert!(!strict_syn_check_drops_new_flow_tunnel(PROTO_TCP, TCP_ACK, false, false, false, true, true));
-        assert!(strict_syn_check_drops_new_flow_tunnel(PROTO_TCP, TCP_ACK, false, false, false, true, false), "non-tunnel must still drop");
-        assert!(strict_syn_check_drops_new_flow_tunnel(PROTO_TCP, TCP_ACK, false, false, false, false, true), "tunnel without knob drops");
-        assert!(strict_syn_check_drops_new_flow_tunnel(PROTO_TCP, TCP_ACK, false, false, true, true, true), "strict overrides tunnel opt-out");
-        assert!(strict_syn_check_drops_new_flow_tunnel(PROTO_TCP, TCP_RST, false, false, false, true, true), "closing tunnel still drops");
+        assert!(!strict_syn_check_drops_new_flow_tunnel_with_payload(PROTO_TCP, TCP_ACK, false, false, false, true, true, 0));
+        assert!(strict_syn_check_drops_new_flow_tunnel_with_payload(PROTO_TCP, TCP_ACK, false, false, false, true, false, 0), "non-tunnel must still drop");
+        assert!(strict_syn_check_drops_new_flow_tunnel_with_payload(PROTO_TCP, TCP_ACK, false, false, false, false, true, 0), "tunnel without knob drops");
+        assert!(strict_syn_check_drops_new_flow_tunnel_with_payload(PROTO_TCP, TCP_ACK, false, false, true, true, true, 0), "strict overrides tunnel opt-out");
+        assert!(strict_syn_check_drops_new_flow_tunnel_with_payload(PROTO_TCP, TCP_RST, false, false, false, true, true, 0), "closing tunnel still drops");
     }
 
     #[test]
@@ -717,11 +717,11 @@ mod tcp_syn_check_tests {
         for flags in [TCP_SYN, TCP_ACK, TCP_ACK | TCP_PSH, TCP_FIN, 0] {
             for (no_syn, strict) in [(false, false), (true, false), (false, true), (true, true)] {
                 assert!(
-                    !strict_syn_check_drops_new_flow(
+                    !strict_syn_check_drops_new_flow_with_payload(
                         crate::ip_proto::PROTO_AH,
                         flags, false,
                         no_syn,
-                        strict
+                        strict, 0
                     ),
                     "proto AH flags 0x{flags:02x} (no_syn={no_syn}, strict={strict}) must never drop"
                 );
@@ -734,7 +734,7 @@ mod tcp_syn_check_tests {
 #[cfg(test)]
 mod tiny_frag_flags_unknown_tests_16007 {
     use super::super::session_admission::{
-        strict_syn_check_drops_new_flow, strict_syn_check_drops_new_flow_tunnel,
+        strict_syn_check_drops_new_flow_with_payload, strict_syn_check_drops_new_flow_tunnel_with_payload,
     };
     use crate::ip_proto::PROTO_TCP;
     use crate::tcp_flags::{TCP_ACK, TCP_SYN};
@@ -743,20 +743,166 @@ mod tiny_frag_flags_unknown_tests_16007 {
     fn unknown_flags_drop_in_all_modes_16007() {
         for (no_syn, strict) in [(false, false), (true, false), (false, true), (true, true)] {
             assert!(
-                strict_syn_check_drops_new_flow(PROTO_TCP, 0, true, no_syn, strict),
+                strict_syn_check_drops_new_flow_with_payload(PROTO_TCP, 0, true, no_syn, strict, 0),
                 "unknown flags must drop (no_syn={no_syn} strict={strict})"
             );
             assert!(
-                strict_syn_check_drops_new_flow_tunnel(PROTO_TCP, 0, true, no_syn, strict, true, true),
+                strict_syn_check_drops_new_flow_tunnel_with_payload(PROTO_TCP, 0, true, no_syn, strict, true, true, 0),
                 "unknown flags must drop even with tunnel opt-out"
             );
         }
         // Even a stamped SYN is not proven when unknown is set.
-        assert!(strict_syn_check_drops_new_flow(PROTO_TCP, TCP_SYN, true, true, false));
+        assert!(strict_syn_check_drops_new_flow_with_payload(PROTO_TCP, TCP_SYN, true, true, false, 0));
         // Controls: known flags keep prior semantics.
-        assert!(!strict_syn_check_drops_new_flow(PROTO_TCP, TCP_SYN, false, false, false));
-        assert!(!strict_syn_check_drops_new_flow(PROTO_TCP, TCP_ACK, false, true, false));
-        assert!(strict_syn_check_drops_new_flow(PROTO_TCP, TCP_ACK, false, false, false));
+        assert!(!strict_syn_check_drops_new_flow_with_payload(PROTO_TCP, TCP_SYN, false, false, false, 0));
+        assert!(!strict_syn_check_drops_new_flow_with_payload(PROTO_TCP, TCP_ACK, false, true, false, 0));
+        assert!(strict_syn_check_drops_new_flow_with_payload(PROTO_TCP, TCP_ACK, false, false, false, 0));
+    }
+}
+
+/// #16479: Junos strict-syn-check payload gates. (a) SYN+payload drops
+/// at the MISS gate only under strict; (b) data-bearing segments drop
+/// on a HIT while a SYN-first handshake is incomplete, and forward
+/// after the completing ACK (positive control).
+#[cfg(test)]
+mod strict_syn_16479_tests {
+    use super::super::session_admission::{
+        strict_syn_check_drops_new_flow_with_payload,
+        strict_syn_check_drops_pre_handshake_data,
+    };
+    use crate::ip_proto::PROTO_TCP;
+    use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_PSH, TCP_RST, TCP_SYN};
+
+    #[test]
+    fn syn_with_payload_drops_only_under_strict_16479() {
+        // SYN + 100 bytes payload: dropped only with strict on.
+        assert!(strict_syn_check_drops_new_flow_with_payload(
+            PROTO_TCP,
+            TCP_SYN,
+            false,
+            false,
+            true,
+            100
+        ));
+        assert!(strict_syn_check_drops_new_flow_with_payload(
+            PROTO_TCP,
+            TCP_SYN | TCP_PSH,
+            false,
+            false,
+            true,
+            100
+        ));
+        // Positive controls: same frame without strict, and bare SYN
+        // under strict, are admitted.
+        assert!(!strict_syn_check_drops_new_flow_with_payload(
+            PROTO_TCP,
+            TCP_SYN,
+            false,
+            false,
+            false,
+            100
+        ));
+        assert!(!strict_syn_check_drops_new_flow_with_payload(
+            PROTO_TCP,
+            TCP_SYN,
+            false,
+            true,
+            false,
+            100
+        ));
+        assert!(!strict_syn_check_drops_new_flow_with_payload(
+            PROTO_TCP,
+            TCP_SYN,
+            false,
+            false,
+            true,
+            0
+        ));
+        // SYN-ACK with payload under strict also drops; closing SYN
+        // drops regardless of payload (prior arm, unchanged).
+        assert!(strict_syn_check_drops_new_flow_with_payload(
+            PROTO_TCP,
+            TCP_SYN | TCP_ACK,
+            false,
+            false,
+            true,
+            100
+        ));
+        assert!(strict_syn_check_drops_new_flow_with_payload(
+            PROTO_TCP,
+            TCP_SYN | TCP_FIN,
+            false,
+            false,
+            false,
+            0
+        ));
+    }
+
+    #[test]
+    fn pre_handshake_data_drops_and_completed_forwards_16479() {
+        let data = TCP_ACK | TCP_PSH;
+        // ACK+data BEFORE the SYN-ACK (OPENING: !established): drop.
+        assert!(strict_syn_check_drops_pre_handshake_data(
+            true, data, 100, false, false, false, false
+        ));
+        // ACK+data AFTER the SYN-ACK, before the final ACK (pending): drop.
+        // This is also the completing ACK+data shape — pre-completion
+        // state, so it drops exactly as Junos prescribes.
+        assert!(strict_syn_check_drops_pre_handshake_data(
+            true, data, 100, true, true, false, false
+        ));
+        // SYN-ACK-first pending: drop.
+        assert!(strict_syn_check_drops_pre_handshake_data(
+            true, data, 100, false, true, true, false
+        ));
+        // POSITIVE CONTROL: data AFTER the handshake ACK forwards.
+        assert!(!strict_syn_check_drops_pre_handshake_data(
+            true, data, 100, true, false, false, false
+        ));
+        // Knob off: the same pending data forwards (default unchanged).
+        assert!(!strict_syn_check_drops_pre_handshake_data(
+            false, data, 100, true, true, false, false
+        ));
+        // Payload-free segments never drop (SYN-ACK, completing ACK pass).
+        assert!(!strict_syn_check_drops_pre_handshake_data(
+            true,
+            TCP_SYN | TCP_ACK,
+            0,
+            false,
+            false,
+            false,
+            false
+        ));
+        assert!(!strict_syn_check_drops_pre_handshake_data(
+            true, TCP_ACK, 0, true, true, false, false
+        ));
+        // SYN retransmit with payload on the hit path is handshake
+        // control here (the MISS gate owns SYN+payload drops).
+        assert!(!strict_syn_check_drops_pre_handshake_data(
+            true, TCP_SYN, 100, false, false, false, false
+        ));
+        // Closing traffic keeps teardown handling even with payload.
+        assert!(!strict_syn_check_drops_pre_handshake_data(
+            true,
+            TCP_FIN | TCP_ACK | TCP_PSH,
+            100,
+            true,
+            true,
+            false,
+            false
+        ));
+        assert!(!strict_syn_check_drops_pre_handshake_data(
+            true,
+            TCP_RST | TCP_ACK,
+            100,
+            true,
+            true,
+            false,
+            false
+        ));
+        assert!(!strict_syn_check_drops_pre_handshake_data(
+            true, data, 100, true, true, false, true
+        ));
     }
 }
 

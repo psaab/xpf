@@ -1540,6 +1540,57 @@ pub(in crate::afxdp) fn should_drop_tcp_session_hit_for_flags(
         || lock_shared_recover(shared_forward_wire_sessions).contains_key(key)
 }
 
+/// #16479 (b): strict-syn-check pre-handshake data drop on a session HIT.
+///
+/// Returns true when a data-bearing TCP segment must be dropped because
+/// the session it hits is a SYN-first session whose three-way handshake
+/// is not complete. Mirrors `should_drop_tcp_session_hit_for_flags`'s
+/// scope split: the local table is consulted first (read-only probe —
+/// a dropped segment never refreshes/promotes/completes the entry);
+/// when there is no local entry, the shared maps' carried handshake
+/// state (`tcp_handshake_state` 1..=3 = not Established, 0 = legacy
+/// established-import) decides, so a peer-synced pending session is
+/// gated identically. Established (wire 4, legacy 0, or a locally
+/// completed pair) and mid-stream pickups are never gated.
+///
+/// The `payload_len == 0` / closing / SYN arms live in the leaf
+/// predicate `strict_syn_check_drops_pre_handshake_data`; this wrapper
+/// only resolves WHICH entry the packet hits and reads its state.
+/// Callers must apply the leaf predicate to the returned state (the
+/// leaf also re-checks the cheap flag/payload arms).
+pub(in crate::afxdp) fn strict_pre_handshake_drop_state(
+    sessions: &SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    key: &SessionKey,
+    now_ns: u64,
+) -> Option<(bool, bool, bool, bool)> {
+    if !matches!(key.protocol, PROTO_TCP) {
+        return None;
+    }
+    if let Some(state) = sessions.strict_pre_handshake_state(key, now_ns) {
+        return Some(state);
+    }
+    // No live local entry: a shared row hit means the poll paths would
+    // materialize/serve this tuple, so gate it from the wire handshake
+    // state. 1=Opening 2=HandshakePending 3=SynAckFirstPending are all
+    // incomplete; 4=Established and 0=legacy-established are not.
+    let shared_state = |entry: &SyncedSessionEntry| -> (bool, bool, bool, bool) {
+        match entry.tcp_handshake_state {
+            1 => (false, false, false, false),
+            2 => (true, true, false, false),
+            3 => (false, true, true, false),
+            _ => (true, false, false, false),
+        }
+    };
+    if let Some(entry) = lookup_shared_session(shared_sessions, key) {
+        return Some(shared_state(&entry));
+    }
+    lookup_shared_forward_wire_match(shared_forward_wire_sessions, shared_owner_rg_indexes, key)
+        .map(|entry| shared_state(&entry))
+}
+
 /// A live closing pair matched by a bare SYN. This is only a probe: the poll
 /// path checks packet authority before deciding whether to miss the session,
 /// and evicts only after owner policy and replacement admission both succeed.

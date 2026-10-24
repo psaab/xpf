@@ -15066,8 +15066,16 @@ the value sits in a single typed slot:
     and `strict-syn-check` are carried in the additive flow snapshot and
     enforced at transit session-MISS admission (#10703): without either flag,
     non-SYN TCP misses are dropped; `no-syn-check` permits non-closing
-    mid-stream TCP misses, while `strict-syn-check` wins if both are set. Bare
-    RST/FIN misses still drop (#4400). Missing selector keys decode false, and
+    mid-stream TCP misses. Bare
+    RST/FIN misses still drop (#4400). #16479 completes `strict-syn-check`
+    to its Junos semantics: SYN segments carrying payload drop at the miss
+    gate, data-bearing segments drop on a session hit while the three-way
+    handshake is incomplete (only SYN-ACK and the payload-free completing
+    ACK pass, and a handshake-incomplete session is never served data from
+    the flow cache), and commit rejects `strict-syn-check` together with
+    `no-syn-check` / `no-syn-check-in-tunnel` (the lenient load path warns
+    and the dataplane keeps strict-wins precedence there). Missing selector
+    keys decode false, and
     the protocol-v34 exact-version gate rejects a v33 helper that would ignore
     an explicitly configured selector. #15753 enforces the remaining
     knobs: `no-syn-check-in-tunnel` admits tunnel-decapped mid-stream TCP,

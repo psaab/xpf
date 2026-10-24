@@ -1309,7 +1309,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				"session-ageout":             {desc: "Age out TIME_WAIT sessions", children: nil},
 				"apply-to-half-closed-state": {desc: "Apply TIME_WAIT handling to half-closed state", children: nil},
 			}},
-			"strict-syn-check": {desc: "Require SYN first for transit session creation; overrides no-syn-check", children: nil},
+			"strict-syn-check": {desc: "Strict TCP three-way handshake: drop SYN carrying data and pre-handshake data; mutually exclusive with no-syn-check/no-syn-check-in-tunnel (#16479)", children: nil},
 		}},
 		"udp-session": {desc: "UDP session timeout (default 60 seconds)", closedWorld: true, children: map[string]*schemaNode{
 			"timeout": {desc: "UDP session timeout in seconds", args: 1, placeholder: "<seconds>",

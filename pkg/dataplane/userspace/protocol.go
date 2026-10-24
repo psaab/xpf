@@ -1246,7 +1246,8 @@ type FlowSnapshot struct {
 	TCPTimeWaitTimeout int `json:"tcp_time_wait_timeout,omitempty"`
 	// #10703: TCP session-MISS SYN admission. The v34 version fence prevents a
 	// v33 helper from ignoring no-syn-check and silently keeping the default
-	// drop; strict-syn-check takes precedence when both fields are set.
+	// drop; strict-syn-check keeps precedence at runtime for leniently-loaded
+	// legacy combinations (#16479 commit rejects the pairing).
 	TCPNoSynCheck     bool `json:"tcp_no_syn_check,omitempty"`
 	TCPStrictSynCheck bool `json:"tcp_strict_syn_check,omitempty"`
 	// #15753: tunnel SYN opt-out, RST invalidate, sequence-check controls.

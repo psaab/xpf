@@ -423,8 +423,10 @@ pub(crate) struct FlowSnapshot {
     /// configured opt-out and keep dropping those packets.
     #[serde(rename = "tcp_no_syn_check", default)]
     pub tcp_no_syn_check: bool,
-    /// `security flow tcp-session strict-syn-check`: force SYN-first transit
-    /// session admission, even if no-syn-check is also configured.
+    /// `security flow tcp-session strict-syn-check`: strict three-way
+    /// handshake — SYN-first admission, SYN+payload and pre-handshake
+    /// data drops (#16479). Commit rejects it beside no-syn-check; the
+    /// runtime precedence below only governs leniently-loaded configs.
     #[serde(rename = "tcp_strict_syn_check", default)]
     pub tcp_strict_syn_check: bool,
     /// #15753: `no-syn-check-in-tunnel` — admit tunnel mid-stream TCP.

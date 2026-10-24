@@ -99,8 +99,8 @@ use nat64_icmp_error::try_translate_nat64_icmp_error;
 use noroute_adjudication::{noroute_policy_adjudication, noroute_policy_protocol};
 use rx_telemetry::record_rx_descriptor_telemetry;
 use session_admission::{
-    new_flow_session_limit_drop, strict_syn_check_drops_new_flow,
-    strict_syn_check_drops_new_flow_tunnel,
+    new_flow_session_limit_drop, strict_syn_check_drops_new_flow_tunnel_with_payload,
+    strict_syn_check_drops_pre_handshake_data,
 };
 use session_hit_authority::{
     ForeignHitVerdict, HitAuthority, HitPolicyDeny, OwnerHitIcmpVerdict, foreign_hit_verdict,
@@ -2697,6 +2697,46 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     // profile screen with a per-reason or per-zone ordinal.
                     telemetry.counters.record_screen_drop(
                         "tcp-session-hit-flags",
+                        0,
+                        &worker_ctx.forwarding.flood_counter_slot_map,
+                    );
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
+                }
+                // #16479 (b): strict-syn-check pre-handshake data drop.
+                // With the knob set, a data-bearing segment on a
+                // SYN-first session whose handshake is incomplete is
+                // dropped HERE — before session resolution — so it
+                // cannot refresh, promote, or complete the session, be
+                // counted, or be forwarded. Only SYN-ACK and the
+                // payload-free completing ACK pass (the leaf predicate
+                // admits them by construction). Non-strict configs pay
+                // one bool check; the state probe runs only for
+                // data-bearing TCP under strict.
+                if worker_ctx.forwarding.tcp_strict_syn_check
+                    && meta.protocol == crate::ip_proto::PROTO_TCP
+                    && let Some(flow) = flow.as_ref()
+                    && let Some((established, handshake_pending, syn_ack_first, closing)) =
+                        strict_pre_handshake_drop_state(
+                            sessions,
+                            worker_ctx.shared_sessions,
+                            worker_ctx.shared_forward_wire_sessions,
+                            &worker_ctx.shared_owner_rg_indexes,
+                            &flow.forward_key,
+                            now_ns,
+                        )
+                    && strict_syn_check_drops_pre_handshake_data(
+                        true,
+                        meta.tcp_flags,
+                        tcp_payload_len(packet_frame, meta),
+                        established,
+                        handshake_pending,
+                        syn_ack_first,
+                        closing,
+                    )
+                {
+                    telemetry.counters.record_screen_drop(
+                        "strict-syn-check",
                         0,
                         &worker_ctx.forwarding.flood_counter_slot_map,
                     );
@@ -6122,7 +6162,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         ) || (tcp_flags_unknown
                             && decision.resolution.disposition
                                 == ForwardingDisposition::LocalDelivery))
-                            && strict_syn_check_drops_new_flow_tunnel(
+                            && strict_syn_check_drops_new_flow_tunnel_with_payload(
                             syn_protocol,
                             meta.tcp_flags,
                             tcp_flags_unknown,
@@ -6130,6 +6170,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             worker_ctx.forwarding.tcp_strict_syn_check,
                             worker_ctx.forwarding.tcp_no_syn_check_in_tunnel,
                             meta.meta_flags & crate::afxdp::icmp::TUNNEL_DECAP_INGRESS_FLAG != 0,
+                            tcp_payload_len(packet_frame, meta),
                         ) {
                             // #11304: Junos `tcp-rst` applies at this transit
                             // session-miss drop, never at a policy-deny site.

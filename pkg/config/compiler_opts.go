@@ -2630,6 +2630,12 @@ type compileOpts struct {
 	// anyway (#3440 H1), so a leniently-loaded bad value is inert. Same
 	// doctrine as lenientScreenUnknown.
 	lenientFlowAging bool
+	// lenientStrictSynCheck16479 (#16479) downgrades the strict-syn-check
+	// mutual-exclusion gate (validateStrictSynCheckStrict) to a warning on
+	// the tolerant load / peer-sync path (#1960 no-brick). A leniently-loaded
+	// combination keeps the dataplane's fail-closed precedence (strict wins
+	// at the session-MISS gate), so it is bounded to the stricter behavior.
+	lenientStrictSynCheck16479 bool
 	// lenientChassisRG (#4434) downgrades the chassis-cluster heartbeat
 	// wire-width gate (validateChassisClusterStrict) from a hard compile
 	// error to a cfg.Warnings entry. The strict commit / commit-check path
@@ -3900,6 +3906,7 @@ func lenientCompileOpts() compileOpts {
 		lenientAddressBookMappedPrefixes:         true,
 		lenientAddressBookCIDRMaskSpelling:       true,
 		lenientFlowAging:                         true,
+		lenientStrictSynCheck16479:               true,
 		lenientChassisRG:                         true,
 		lenientVRRPGroupID:                       true,
 		lenientVRRPGroupPriority:                 true,

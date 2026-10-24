@@ -654,6 +654,42 @@ pub(super) fn stage_flow_cache_hit(
                 cached_decision.resolution.disposition,
                 ForwardingDisposition::ForwardCandidate | ForwardingDisposition::FabricRedirect
             ) && matches!(packet_ttl_would_expire(packet_frame, meta), Some(true));
+        // #16479 (b): strict-syn-check must never serve a data-bearing
+        // segment from the flow cache while the backing session's
+        // handshake is incomplete. A SYN-ACK seeds the cache
+        // (is_ack_only ignores payload-carrying PSH), so without this
+        // fence the completing ACK+data would take the fast path and
+        // bypass the poll-loop pre-handshake drop. Fall through BEFORE
+        // the fused probe below (which would complete the handshake
+        // and account the segment): the slow path's strict gate drops
+        // it, and a payload-free completing segment re-seeds/completes
+        // normally. Gated on the knob, so non-strict fast paths pay
+        // one bool check. Not a served hit, so move the tally to miss.
+        let strict_payload_len = if worker_ctx.forwarding.tcp_strict_syn_check
+            && meta.protocol == crate::ip_proto::PROTO_TCP
+        {
+            super::tcp_payload_len(packet_frame, meta)
+        } else {
+            0
+        };
+        if strict_payload_len > 0
+            && sessions
+                .strict_pre_handshake_state(&flow.forward_key, now_ns)
+                .is_some_and(|(established, handshake_pending, syn_ack_first, closing)| {
+                    super::session_admission::strict_syn_check_drops_pre_handshake_data(
+                        true,
+                        meta.tcp_flags,
+                        strict_payload_len,
+                        established,
+                        handshake_pending,
+                        syn_ack_first,
+                        closing,
+                    )
+                })
+        {
+            flow_state.flow_cache.reclassify_hit_as_miss();
+            return FlowCacheOutcome::FallThrough;
+        }
         let session_live = if ttl_would_expire {
             fabric_session_live || sessions.session_is_live_at(&flow.forward_key, now_ns)
         } else {
