@@ -91,6 +91,86 @@ func TestHandleShowFirewallFilterHonorsFamilyAndUserspaceCounters(t *testing.T) 
 	}
 }
 
+// #16460: a leniently-loaded filter with two same-named terms must print
+// each instance's OWN counter from the fake helper status (30 under
+// the first `t`, 70 under the second), never the summed 100 under
+// both. The duplicate text is compiled leniently (strict rejects it,
+// #15192) and installed via SetCompiledForTesting — the same Terms
+// slice a persisted legacy config yields at boot.
+// FAIL-ON-REVERT: a name-keyed lookup prints 100 under both terms.
+func TestHandleShowFirewallFilterDupTermPerInstanceCounters16460(t *testing.T) {
+	text := `
+firewall {
+    family inet {
+        filter edge {
+            term t {
+                from {
+                    destination-port 80;
+                }
+                then {
+                    count hits;
+                    discard;
+                }
+            }
+            term t {
+                from {
+                    destination-port 443;
+                }
+                then {
+                    count hits;
+                    accept;
+                }
+            }
+        }
+    }
+}
+`
+	tree, errs := config.NewParser(text).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("Parse() errors = %v", errs)
+	}
+	cfg, err := config.CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient() error = %v", err)
+	}
+	if cfg == nil || cfg.Firewall.FiltersInet["edge"] == nil || len(cfg.Firewall.FiltersInet["edge"].Terms) != 2 {
+		t.Fatalf("lenient config = %+v, want edge with 2 terms", cfg)
+	}
+	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
+	store.SetCompiledForTesting(cfg)
+	c := &CLI{
+		store: store,
+		dp: &firewallFilterUserspaceDP{
+			Manager: dataplane.New(),
+			status: dpuserspace.ProcessStatus{
+				FilterTermCounters: []dpuserspace.FirewallFilterTermCounterStatus{
+					{Family: "inet", FilterName: "edge", TermName: "t", TermOrdinal: 0, Packets: 30, Bytes: 3000},
+					{Family: "inet", FilterName: "edge", TermName: "t", TermOrdinal: 1, Packets: 70, Bytes: 7000},
+				},
+			},
+		},
+	}
+	var callErr error
+	out := captureStdout(t, func() {
+		callErr = c.showFirewallFilter("edge", "inet")
+	})
+	if callErr != nil {
+		t.Fatalf("showFirewallFilter() error = %v", callErr)
+	}
+	if strings.Contains(out, "Hit count: 100 packets") {
+		t.Fatalf("output printed the summed 100 under a term instance (#16460):\n%s", out)
+	}
+	if got := strings.Count(out, "Hit count: 30 packets, 3000 bytes"); got != 1 {
+		t.Fatalf("output has %d '30' hit counts, want 1:\n%s", got, out)
+	}
+	if got := strings.Count(out, "Hit count: 70 packets, 7000 bytes"); got != 1 {
+		t.Fatalf("output has %d '70' hit counts, want 1:\n%s", got, out)
+	}
+	if i30, i70 := strings.Index(out, "Hit count: 30"), strings.Index(out, "Hit count: 70"); i30 > i70 {
+		t.Fatalf("instances out of order (30@%d after 70@%d):\n%s", i30, i70, out)
+	}
+}
+
 func TestScreenSYNCookieCounterRowsUsesUserspaceStatus(t *testing.T) {
 	c := &CLI{
 		dp: &firewallFilterUserspaceDP{

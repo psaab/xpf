@@ -1279,6 +1279,11 @@ impl super::Coordinator {
                     family: filter.family.clone(),
                     filter_name: filter.name.clone(),
                     term_name: term.name.clone(),
+                    // #16460: `term.id` is the compiled position within
+                    // the filter, so two same-named instances publish
+                    // distinct (family, filter, ordinal) rows instead of
+                    // an unresolvable name collision.
+                    term_ordinal: term.id,
                     packets: term.counter.packets.load(Ordering::Relaxed),
                     bytes: term.counter.bytes.load(Ordering::Relaxed),
                 });

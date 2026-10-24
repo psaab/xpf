@@ -170,6 +170,9 @@ func (s *Server) showFirewall(cfg *config.Config, buf *strings.Builder) {
 			}
 			ruleOffset := ruleStart
 
+			// #16460: the per-instance ordinal counts non-nil instances
+			// in order; a nil slot owns no runtime counter.
+			termOrdinal := uint32(0)
 			for _, term := range filter.Terms {
 				if term == nil {
 					continue
@@ -216,8 +219,9 @@ func (s *Server) showFirewall(cfg *config.Config, buf *strings.Builder) {
 					}
 				}
 				userspaceCounter, userspaceOk := userspaceCounters[dpuserspace.FirewallFilterTermCounterKey{
-					Family: family, FilterName: name, TermName: term.Name,
+					Family: family, FilterName: name, TermOrdinal: termOrdinal,
 				}]
+				termOrdinal++
 				if userspaceOk {
 					totalPkts += userspaceCounter.Packets
 					totalBytes += userspaceCounter.Bytes
@@ -666,6 +670,8 @@ func (s *Server) showFirewallFilter(req *pb.ShowTextRequest, cfg *config.Config,
 			}
 			fmt.Fprintf(buf, "Filter: %s (family %s)\n", filterName, family)
 			ruleOffset := ruleStart
+			// #16460: per-instance ordinal among non-nil instances.
+			termOrdinal := uint32(0)
 			for _, term := range filter.Terms {
 				if term == nil {
 					continue
@@ -716,8 +722,9 @@ func (s *Server) showFirewallFilter(req *pb.ShowTextRequest, cfg *config.Config,
 					}
 				}
 				userspaceCounter, userspaceOk := userspaceCounters[dpuserspace.FirewallFilterTermCounterKey{
-					Family: family, FilterName: filterName, TermName: term.Name,
+					Family: family, FilterName: filterName, TermOrdinal: termOrdinal,
 				}]
+				termOrdinal++
 				if userspaceOk {
 					totalPkts += userspaceCounter.Packets
 					totalBytes += userspaceCounter.Bytes

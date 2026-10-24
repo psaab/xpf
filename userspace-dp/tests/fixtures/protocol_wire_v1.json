@@ -1828,7 +1828,8 @@
     "family": "",
     "filter_name": "",
     "packets": 0,
-    "term_name": ""
+    "term_name": "",
+    "term_ordinal": 0
   },
   "firewall_term_snapshot": {
     "action": "",

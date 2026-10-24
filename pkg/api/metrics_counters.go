@@ -896,23 +896,26 @@ func (c *xpfCollector) collectFilterCounters(ch chan<- prometheus.Metric, dp api
 	}
 
 	// #3461: merge the userspace helper-published per-term hit counters
-	// (filter_term_counters) into xpf_filter_hits_total, exactly as the CLI
-	// (`show firewall filter`) and gRPC text paths do via
-	// BuildFirewallFilterTermCounterIndex. The userspace-dp runtime publishes
-	// filter hits HERE, not in the retired eBPF map, so without this merge the
-	// canonical metrics path reports 0/stale while the text commands show real
-	// hits. The userspace merge is independent of the eBPF apply result, so it
-	// must NOT be gated on cr/FilterIDs below.
+	// (filter_term_counters) into xpf_filter_hits_total. The userspace-dp
+	// runtime publishes filter hits HERE, not in the retired eBPF map, so
+	// without this merge the canonical metrics path reports 0/stale while
+	// the text commands show real hits. The userspace merge is independent
+	// of the eBPF apply result, so it must NOT be gated on cr/FilterIDs
+	// below.
 	//
 	// #5317: the ProcessStatus is fetched ONCE per scrape by Collect (via
-	// fetchUserspaceStatus) and shared with collectUserspaceStatus, so this no
-	// longer issues its own control-socket Status() round trip. A nil pointer —
-	// the helper exposes no Status() surface or the single round trip failed —
-	// yields an empty term index from BuildFirewallFilterTermCounterIndex, so the
-	// userspace merge is a no-op and the map path is unaffected, exactly as the
-	// prior per-collector fetch behaved on a missing/failed status.
-	// #16464: fold suppressed-member clone rows into their source.
-	userspaceCounters := dpuserspace.BuildFirewallFilterTermCounterIndexForConfig(userspaceStatus, cfg)
+	// fetchUserspaceStatus) and shared with collectUserspaceStatus, so this
+	// no longer issues its own control-socket Status() round trip. A nil
+	// pointer yields an empty name index, so the userspace merge is a
+	// no-op and the map path is unaffected.
+	// #16464: fold suppressed-member clone rows into their source before
+	// the name aggregation, so member-unit hits reach the source series.
+	// #16460: Prometheus has no ordinal label, so this collector folds
+	// the per-instance rows by (family, filter, term name) via
+	// AggregateFirewallFilterTermCountersByName, while the text paths key
+	// per instance. Folding here (not in the shared index) keeps the
+	// #15192 single-series-per-name guarantee.
+	userspaceCounters := dpuserspace.AggregateFirewallFilterTermCountersByNameForConfig(userspaceStatus, cfg)
 	cloneFold16464 := dpuserspace.BuildCloneCounterFold16464(cfg)
 
 	// The retired-eBPF/map counter path is gated on a compile result carrying
@@ -1048,7 +1051,7 @@ func (c *xpfCollector) collectFilterCounters(ch chan<- prometheus.Metric, dp api
 				}
 				mapFailed = mapFailed || cloneMapFailed16464
 
-				userspaceCounter, userspaceOk := userspaceCounters[dpuserspace.FirewallFilterTermCounterKey{
+				userspaceCounter, userspaceOk := userspaceCounters[dpuserspace.FirewallFilterTermCounterNameKey{
 					Family: family, FilterName: name, TermName: term.Name,
 				}]
 				if userspaceOk && !agg.userspaceIn {

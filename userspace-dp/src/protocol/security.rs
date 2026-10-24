@@ -724,7 +724,15 @@ pub(crate) struct FirewallFilterTermCounterStatus {
     pub filter_name: String,
     #[serde(rename = "term_name", default)]
     pub term_name: String,
-    #[serde(default)]
+    /// #16460: zero-based position of the term instance within
+    /// (family, filter), so two same-named terms keep distinct counters.
+    /// Additive `serde(default)`: an older helper omits it and every row
+    /// decodes as ordinal 0; Go renderers fall back to the summed
+    /// name-keyed view only when no row carries a distinct ordinal, so
+    /// a legacy status never misattributes one instance's hits to
+    /// another under a fabricated ordinal.
+    #[serde(rename = "term_ordinal", default)]
+    pub term_ordinal: u32,
     pub packets: u64,
     #[serde(default)]
     pub bytes: u64,

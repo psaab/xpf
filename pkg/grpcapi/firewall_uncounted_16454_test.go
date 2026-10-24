@@ -50,8 +50,8 @@ func uncounted16454Server(store *configstore.Store) *Server {
 			Manager: dataplane.New(),
 			status: dpuserspace.ProcessStatus{
 				FilterTermCounters: []dpuserspace.FirewallFilterTermCounterStatus{
-					{Family: "inet", FilterName: "edge", TermName: "block", Packets: 0, Bytes: 0},
-					{Family: "inet", FilterName: "edge", TermName: "counted-idle", Packets: 0, Bytes: 0},
+					{Family: "inet", FilterName: "edge", TermName: "block", TermOrdinal: 0, Packets: 0, Bytes: 0},
+					{Family: "inet", FilterName: "edge", TermName: "counted-idle", TermOrdinal: 1, Packets: 0, Bytes: 0},
 				},
 			},
 		},

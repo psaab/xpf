@@ -87,3 +87,15 @@ func (s *Store) SetConfirmPrevCfgForTesting(target *config.Config) {
 	defer s.mu.Unlock()
 	s.confirmPrevCfg = target
 }
+
+// SetCompiledForTesting installs a compiled config as the store's
+// active config without a strict commit (#16460). Renderers that read
+// ActiveConfig() can then be exercised against a leniently-compiled
+// shape (e.g. two same-named firewall terms) that a strict Commit
+// would reject. Not for production callers.
+func (s *Store) SetCompiledForTesting(cfg *config.Config) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.compiled = cfg
+	s.publishActiveLocked()
+}

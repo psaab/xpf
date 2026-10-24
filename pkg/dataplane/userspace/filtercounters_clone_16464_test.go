@@ -15,33 +15,33 @@ import (
 func TestBuildFilterTermCounterIndexForConfigFoldsClone16464(t *testing.T) {
 	realCfg := compileLenientSharedFBF16464(t)
 	status := &ProcessStatus{FilterTermCounters: []FirewallFilterTermCounterStatus{
-		{Family: "inet", FilterName: "shared-fbf", TermName: "steer", Packets: 40, Bytes: 4000},
-		{Family: "inet", FilterName: cloneNameOf16464(t, realCfg), TermName: "steer", Packets: 60, Bytes: 6000},
-		{Family: "inet", FilterName: "shared-fbf", TermName: "other", Packets: 7, Bytes: 70},
-		{Family: "inet6", FilterName: cloneNameOf16464(t, realCfg), TermName: "steer", Packets: 999, Bytes: 9990},
+		{Family: "inet", FilterName: "shared-fbf", TermName: "steer", TermOrdinal: 0, Packets: 40, Bytes: 4000},
+		{Family: "inet", FilterName: cloneNameOf16464(t, realCfg), TermName: "steer", TermOrdinal: 0, Packets: 60, Bytes: 6000},
+		{Family: "inet", FilterName: "shared-fbf", TermName: "other", TermOrdinal: 1, Packets: 7, Bytes: 70},
+		{Family: "inet6", FilterName: cloneNameOf16464(t, realCfg), TermName: "steer", TermOrdinal: 0, Packets: 999, Bytes: 9990},
 	}}
 	idx := BuildFirewallFilterTermCounterIndexForConfig(status, realCfg)
-	got := idx[FirewallFilterTermCounterKey{Family: "inet", FilterName: "shared-fbf", TermName: "steer"}]
+	got := idx[FirewallFilterTermCounterKey{Family: "inet", FilterName: "shared-fbf", TermOrdinal: 0}]
 	if got.Packets != 100 || got.Bytes != 10000 {
 		t.Fatalf("folded source steer = %d/%d, want 100/10000", got.Packets, got.Bytes)
 	}
-	if _, ok := idx[FirewallFilterTermCounterKey{Family: "inet", FilterName: cloneNameOf16464(t, realCfg), TermName: "steer"}]; ok {
+	if _, ok := idx[FirewallFilterTermCounterKey{Family: "inet", FilterName: cloneNameOf16464(t, realCfg), TermOrdinal: 0}]; ok {
 		t.Fatalf("clone key must not remain after fold: %+v", idx)
 	}
 	// Control: distinct term untouched; wrong-family clone row NOT folded.
-	if o := idx[FirewallFilterTermCounterKey{Family: "inet", FilterName: "shared-fbf", TermName: "other"}]; o.Packets != 7 {
+	if o := idx[FirewallFilterTermCounterKey{Family: "inet", FilterName: "shared-fbf", TermOrdinal: 1}]; o.Packets != 7 {
 		t.Fatalf("control term other = %d, want 7", o.Packets)
 	}
-	if w := idx[FirewallFilterTermCounterKey{Family: "inet6", FilterName: cloneNameOf16464(t, realCfg), TermName: "steer"}]; w.Packets != 999 {
+	if w := idx[FirewallFilterTermCounterKey{Family: "inet6", FilterName: cloneNameOf16464(t, realCfg), TermOrdinal: 0}]; w.Packets != 999 {
 		t.Fatalf("inet6 clone-named row must stay unfolded (clone is inet-only), got %d", w.Packets)
 	}
 	// Plain index (no config) must NOT fold — pins the opt-in.
 	plain := BuildFirewallFilterTermCounterIndex(status)
-	if p := plain[FirewallFilterTermCounterKey{Family: "inet", FilterName: "shared-fbf", TermName: "steer"}]; p.Packets != 40 {
+	if p := plain[FirewallFilterTermCounterKey{Family: "inet", FilterName: "shared-fbf", TermOrdinal: 0}]; p.Packets != 40 {
 		t.Fatalf("plain index source = %d, want 40 (no fold without cfg)", p.Packets)
 	}
 	// Nil cfg falls back to plain.
-	if n := BuildFirewallFilterTermCounterIndexForConfig(status, nil); n[FirewallFilterTermCounterKey{Family: "inet", FilterName: "shared-fbf", TermName: "steer"}].Packets != 40 {
+	if n := BuildFirewallFilterTermCounterIndexForConfig(status, nil); n[FirewallFilterTermCounterKey{Family: "inet", FilterName: "shared-fbf", TermOrdinal: 0}].Packets != 40 {
 		t.Fatalf("nil-cfg index must not fold")
 	}
 }
