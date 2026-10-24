@@ -344,12 +344,26 @@ case "$1" in
                 elif command -v nft >/dev/null 2>&1 && nft list table inet xpf_input_barrier 2>/dev/null | grep -qw drop; then
                     : # barrier already enforcing (DROP-bearing); nothing to inject (kernel truth)
                 else
-                    if systemctl is-active --quiet xpfd 2>/dev/null; then
-                        echo "xpf: active xpfd is neither handed off nor guarded; injecting the input barrier until its next apply hands off" >&2
+                    # #16458: on a host xpf does not own (a foreign,
+                    # never-committed host: no appliance marker and no
+                    # committed config subtree), do not inject the live DROP.
+                    # The pre-networkd unit stays enabled for owned hosts; the
+                    # daemon releases an already-standing barrier in bootstrap
+                    # on an unowned host (pkg/daemon: ownsInputBarrier16458).
+                    GUARD=0
+                    if [ -e /etc/xpf/appliance ] || [ -d /etc/xpf/.configdb ]; then
+                        GUARD=1
                     fi
-                    if ! systemctl enable --now xpf-input-closed.service 2>/dev/null; then
-                        echo "xpf: WARNING could not start xpf-input-closed on fresh install;" \
-                             "reboot before exposing host services (or run: systemctl enable --now xpf-input-closed)" >&2
+                    if [ "$GUARD" != 1 ]; then
+                        echo "xpf: host is not xpf-owned (no appliance marker or committed config); not enabling the live input barrier" >&2
+                    else
+                        if systemctl is-active --quiet xpfd 2>/dev/null; then
+                            echo "xpf: active xpfd is neither handed off nor guarded; injecting the input barrier until its next apply hands off" >&2
+                        fi
+                        if ! systemctl enable --now xpf-input-closed.service 2>/dev/null; then
+                            echo "xpf: WARNING could not start xpf-input-closed on fresh install;" \
+                                 "reboot before exposing host services (or run: systemctl enable --now xpf-input-closed)" >&2
+                        fi
                     fi
                 fi
             fi

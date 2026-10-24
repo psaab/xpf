@@ -161,13 +161,31 @@ func (d *Daemon) installFailClosedBootHostFences(failClosedLoad bool) {
 
 // installBootstrapInputProtection installs fail-closed input protection
 // during manager init: live-address fences when the last config failed to
-// load, then the bootstrap lifeline guard when in bootstrap mode.
-// Extracted so the fences-before-guard order and the bootstrap gate are
-// pinned through production code rather than re-sequenced in tests;
-// initManagers is the sole production caller.
+// load, then the bootstrap input posture when in bootstrap mode. On an
+// owned host (#10733: appliance marker, a committed store, or durable
+// ownership on disk) the lifeline guard keeps non-lifeline ingress
+// DROP-closed until the first commit. On a foreign, never-committed host
+// (#16458) the same table is released instead of swapped: it is the
+// #15147 input twin — the boot barrier was installed unconditionally,
+// and the unowned box must retain its own input posture the way an
+// unowned box retains its forwarding posture. Extracted so the
+// fences-before-gate order and the ownership gate are pinned through
+// production code rather than re-sequenced in tests; initManagers is the
+// sole production caller.
 func (d *Daemon) installBootstrapInputProtection(failClosedLoad bool) {
 	d.installFailClosedBootHostFences(failClosedLoad)
-	if d.inBootstrap() {
-		d.ensureEarlyInputBootstrapGuard()
+	if !d.inBootstrap() {
+		return
 	}
+	if !d.ownsInputBarrier16458() {
+		d.removeUnownedBootInputBarrier16458()
+		// The release races the name-driven ensure from
+		// setupBootstrapLifeline (PHASE 2 precedes initManagers): a
+		// just-reinstalled guard is removed here, but the unit itself
+		// is never re-started by the daemon. Each boot re-evaluates,
+		// so a foreign host stays open until the first commit or
+		// package removal.
+		return
+	}
+	d.ensureEarlyInputBootstrapGuard()
 }
