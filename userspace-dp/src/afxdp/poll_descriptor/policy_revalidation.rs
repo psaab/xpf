@@ -1223,10 +1223,11 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                     // is no local forward row to be established, so
                     // the fail-closed verdict stands exactly as
                     // before. Caller contract for the canonical-less
-                    // revocation: keep session (nothing local to
-                    // tear down), DROP this packet (the caller
-                    // recycles the descriptor and never forwards it;
-                    // pinned by the production-chain test).
+                    // revocation: the session is kept (nothing local
+                    // is claimed for teardown) and this packet is
+                    // dropped (the caller recycles the descriptor
+                    // and never forwards it; pinned by
+                    // `declined_reverse_hit_packet_outcomes_16217`).
                     return (!valid).then_some(PolicyRevocation {
                         canonical_key: None,
                         decision: forward_decision,

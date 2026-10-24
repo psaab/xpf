@@ -15,6 +15,8 @@
 //! Loaded as a sibling submodule via `#[path]` from session/mod.rs.
 
 use super::tests::{decision, install_forward_reverse_pair, key_v4, metadata};
+use crate::test_zone_ids::{TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID};
+use std::net::Ipv4Addr;
 use super::*;
 use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_PSH, TCP_RST, TCP_SYN};
 
@@ -1005,7 +1007,7 @@ fn dropped_probe_snapshot_is_bounded_and_restores_16217() {
     assert!(!table.take_probe_stage_transition(&forward));
     let ev = table.node_served_evidence(&forward);
     assert_eq!(ev.handshake_wire, 0, "non-completing drop leaves no Established stamp");
-    // Completing hit dropped: stamp/marker rolled back (bounded 4).
+    // Completing hit dropped: stamp/marker rolled back.
     let mut table2 = SessionTable::new();
     let reverse2 = install_forward_reverse_pair(&mut table2, &forward, now, TCP_SYN);
     assert!(table2
@@ -1026,5 +1028,124 @@ fn dropped_probe_snapshot_is_bounded_and_restores_16217() {
         table2.node_served_evidence(&forward).handshake_wire,
         0,
         "completing drop must roll back the Established stamp"
+    );
+    // Final-decision arm (GLM MF1): pin the 4-SLOT shape, not just
+    // rollback. The two arms above produce at most 2 distinct
+    // snapshot candidates (matched + its reverse orientation; the
+    // default-NAT companion collapses onto them), so a cap-2
+    // mutation stays green there. This arm installs a NAT'd pair
+    // whose forward decision carries a source rewrite: the
+    // candidates are then FOUR distinct keys — matched forward,
+    // matched wire orientation, companion, companion wire
+    // orientation. Pre-seed DISTINCT node-served stamps on the two
+    // orientations the completing hit does NOT itself write (the
+    // reverse orientations), drop the probe, and assert BOTH
+    // pre-seeded stamps survive exactly while the written forward
+    // stamp is rolled back. A cap-2 snapshot restores only the
+    // first two candidates and loses one pre-seeded stamp
+    // The completing hit overwrites the companion-wire stamp
+    // (wire 0 -> Established); rollback must restore (0, 9)
+    // exactly. (The discriminating capacity mutation for this
+    // candidate order is cap-1: the written key sits at slot 1
+    // for a reverse probe — verified red on cap-1, green on 4.)
+    let mut table3 = SessionTable::new();
+    let nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))),
+        rewrite_src_port: Some(50_000),
+        ..NatDecision::default()
+    };
+    let nat_decision = SessionDecision {
+        nat,
+        ..decision()
+    };
+    assert!(table3.install_with_protocol(
+        forward.clone(),
+        nat_decision,
+        metadata(),
+        now,
+        PROTO_TCP,
+        TCP_SYN,
+    ));
+    let mut reverse_metadata = metadata();
+    reverse_metadata.is_reverse = true;
+    reverse_metadata.ingress_zone = TEST_WAN_ZONE_ID;
+    reverse_metadata.egress_zone = TEST_LAN_ZONE_ID;
+    let reverse3 = reverse_session_key(&forward, nat);
+    assert!(table3.install_with_protocol(
+        reverse3.clone(),
+        nat_decision,
+        reverse_metadata,
+        now,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    let _ = table3.drain_deltas(16);
+    // Four distinct snapshot candidates for a forward probe:
+    let cand_matched = forward.clone();
+    let cand_matched_wire = reverse_session_key(&forward, nat);
+    let cand_companion = reverse3.clone();
+    let cand_companion_wire = reverse_session_key(&reverse3, nat);
+    let distinct: Vec<&SessionKey> = {
+        let mut v: Vec<&SessionKey> = vec![
+            &cand_matched,
+            &cand_matched_wire,
+            &cand_companion,
+            &cand_companion_wire,
+        ];
+        v.sort_by_key(|k| format!("{k:?}"));
+        v.dedup();
+        v
+    };
+    assert!(
+        distinct.len() > 2,
+        "fixture must produce >2 distinct snapshot candidates (got {})",
+        distinct.len()
+    );
+    // Pre-seed distinct stamps (prior values that must be restored).
+    // NOTE: a SECOND SYN-ACK lookup between install and probe would
+    // itself complete the pair non-deferringly and consume the undo
+    // slot, so the stamps are seeded WITHOUT a further lookup: the
+    // pair stays pending from its install flags (both halves
+    // installed with TCP_SYN), and the probe below is the completing
+    // hit. (The first two arms' lookups use identical keys where
+    // matched/companion collapse; here the NAT orientations differ.)
+    table3.note_node_served_handshake(&cand_matched_wire, 0, 7);
+    table3.note_node_served_handshake(&cand_companion_wire, 0, 9);
+    let prior_wire = table3.node_served_stamps.get(&cand_matched_wire).copied();
+    let prior_comp_wire = table3.node_served_stamps.get(&cand_companion_wire).copied();
+    assert_eq!(prior_wire, Some((0, 7)), "fixture: matched-wire prior stamp");
+    assert_eq!(prior_comp_wire, Some((0, 9)), "fixture: companion-wire prior stamp");
+    // SYN-ACK-first pair: the reverse half installed from the
+    // SYN-ACK stays pending (syn_ack_first); the completing hit is
+    // the reverse ACK probed on the reverse half — the classic
+    // predicate arms there (syn_ack_first == is_reverse).
+    assert!(table3.probe_hit_deferring_state_update(
+        &reverse3,
+        now + 2 * SEC,
+        512,
+        TCP_ACK | TCP_PSH,
+        512,
+        46,
+    ));
+    assert!(
+        table3.entry_by_key(&reverse3).is_some_and(|e| e.established),
+        "fixture: deferring probe must complete the SYN-ACK-first NAT'd pair"
+    );
+    assert!(table3.rollback_dropped_probe_hit(&reverse3, 512, TCP_ACK | TCP_PSH));
+    assert!(!table3.take_probe_stage_transition(&reverse3));
+    assert_eq!(
+        table3.node_served_stamps.get(&cand_matched_wire).copied(),
+        prior_wire,
+        "4-slot snapshot must restore the matched-wire pre-seeded stamp"
+    );
+    assert_eq!(
+        table3.node_served_stamps.get(&cand_companion_wire).copied(),
+        prior_comp_wire,
+        "4-slot snapshot must restore the overwritten companion-wire stamp (cap-1 loses it)"
+    );
+    assert_eq!(
+        table3.node_served_evidence(&forward).handshake_wire,
+        0,
+        "NAT'd completing drop must roll back the Established stamp"
     );
 }
