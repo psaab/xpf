@@ -421,6 +421,19 @@ sync.
     succeeds, which is after the session/policy and output-filter checks. The
     cold copy goes into `WorkerContext::pptp_control`; parsing, installing and
     broadcasting happen on the worker's periodic drain.
+    - **#16037 — teaching also requires an in-window data seq.**
+      Admission alone does not bind the segment to the tracked TCP
+      stream: a tuple-valid but out-of-window Outgoing-Call-Reply
+      could teach attacker-chosen call IDs. The non-closing capture
+      arm now requires `SessionTable::tcp_data_seq_verdict` to return
+      `Valid`: the segment lies inside the receiver window tracked
+      via `note_tcp_seq`, or it is the first payload segment on the
+      session (which starts the tracked stream — SYNs carry no data,
+      so legit control flows are unaffected). `Invalid` learns
+      nothing while the packet itself still forwards.
+      `tcp_no_sequence_check` opts out,
+      mirroring the closing-segment gate. A close still tears down
+      learned calls regardless of the verdict.
     - **Why capture is post-admission.** A pre-policy segment, including a
       spoofed Outgoing-Call-Reply, must not teach call IDs when its packet will
       be denied. The association is needed by later GRE data, not by the

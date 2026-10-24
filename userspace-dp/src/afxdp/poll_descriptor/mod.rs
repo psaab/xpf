@@ -10448,7 +10448,25 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     &flow.forward_key,
                                     now_ns,
                                 );
-                            } else {
+                            } else if worker_ctx.forwarding.tcp_no_sequence_check
+                                || matches!(
+                                    crate::afxdp::frame::extract_tcp_seq_ack_window(packet_frame).map(
+                                        |(seq, _, _)| {
+                                            sessions.tcp_data_seq_verdict(
+                                                &flow.forward_key,
+                                                seq,
+                                                tcp_payload_len(packet_frame, meta),
+                                            )
+                                        },
+                                    ),
+                                    Some(crate::session::SeqVerdict::Valid)
+                                )
+                            {
+                                // #16037: teach only from an in-window
+                                // data segment (or the first payload
+                                // segment, which starts the tracked
+                                // stream). Invalid learns nothing; the
+                                // packet itself still forwards.
                                 crate::afxdp::poll_stages::capture_pptp_control_segment_at_epoch(
                                     packet_frame,
                                     flow,

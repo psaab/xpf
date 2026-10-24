@@ -193,6 +193,67 @@ impl SessionTable {
             SeqVerdict::Invalid
         }
     }
+
+    /// #16037: validate a data (non-closing) segment's seq for PPTP
+    /// control teaching. The segment occupies [seq, seq+payload_len).
+    /// With tracked state it is teachable when it lies inside the
+    /// receiver's window: its start is at most `receiver_wnd` behind
+    /// `tcp_rcv_nxt` (retransmissions included), or it starts inside
+    /// the window ahead of `tcp_rcv_nxt` and ends by
+    /// `rcv_nxt + receiver_wnd`. `tcp_rcv_nxt` on the `key` entry is
+    /// the receiver's next-expected seq as advanced by accepted
+    /// prior segments in this direction; the window comes from the
+    /// companion entry — the same pairing
+    /// `tcp_closing_seq_verdict` uses.
+    ///
+    /// When the entry exists but has no seq state, a payload-carrying
+    /// segment is the first non-closing segment on the session (the
+    /// handshake's SYNs carry no data, so nothing could have been
+    /// noted yet; a HA-synced session is the same shape). It returns
+    /// `Valid`: sequence validation can only bind a segment once the
+    /// stream is tracked, and the caller notes this segment, so
+    /// every later segment is fully window-checked. This mirrors
+    /// `tcp_seq_valid`'s no-state pass. A no-payload segment returns
+    /// `Unknown` (nothing to teach); a missing entry is `Unknown`.
+    pub fn tcp_data_seq_verdict(
+        &self,
+        key: &SessionKey,
+        seq: u32,
+        payload_len: u32,
+    ) -> SeqVerdict {
+        let Some(entry) = self.entry_by_key(key) else {
+            return SeqVerdict::Unknown;
+        };
+        if !entry.tcp_seq_seen {
+            return if payload_len > 0 {
+                SeqVerdict::Valid
+            } else {
+                SeqVerdict::Unknown
+            };
+        }
+        let nat = entry.decision.nat;
+        let companion_key = reverse_session_key(key, nat);
+        let receiver_wnd = self
+            .entry_by_key(&companion_key)
+            .filter(|companion| companion.tcp_seq_seen)
+            .map(|companion| companion.tcp_rcv_wnd)
+            .unwrap_or(entry.tcp_rcv_wnd);
+        let wnd = receiver_wnd.max(1);
+        // Wrapping TCP-sequence arithmetic: the distance `rcv_nxt`
+        // lies ahead of the segment start.
+        let ahead = entry.tcp_rcv_nxt.wrapping_sub(seq);
+        if ahead <= wnd {
+            return SeqVerdict::Valid;
+        }
+        let behind = seq.wrapping_sub(entry.tcp_rcv_nxt);
+        if behind < wnd
+            && u64::from(behind) + u64::from(payload_len) <= u64::from(wnd)
+        {
+            SeqVerdict::Valid
+        } else {
+            SeqVerdict::Invalid
+        }
+    }
 }
 
 /// #4109: the TCP close / handshake-promotion state a `lookup_with_origin`

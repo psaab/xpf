@@ -19,6 +19,62 @@ fn in_window_rst_valid_blind_rst_invalid_15753() {
 }
 
 #[test]
+fn pptp_data_seq_verdict_in_out_unknown_16037() {
+    let forward = key_v4();
+    let mut table = SessionTable::new();
+    let t0 = 10_000_000_000u64;
+    let _rev = install_forward_reverse_pair(&mut table, &forward, t0, TCP_SYN);
+    // No seq noted yet: the first payload-carrying segment is the
+    // stream start (SYNs carry no data) and stays teachable; the
+    // synced-unknown shape is pinned at the poll gate below, and a
+    // no-payload segment teaches nothing.
+    assert_eq!(
+        table.tcp_data_seq_verdict(&forward, 1001, 10),
+        SeqVerdict::Valid,
+        "first payload segment is the stream start"
+    );
+    assert_eq!(
+        table.tcp_data_seq_verdict(&forward, 1001, 0),
+        SeqVerdict::Unknown,
+        "no-payload segment has nothing to teach"
+    );
+    table.note_tcp_seq(&forward, 1000, 0, 4096, 0, TCP_SYN, 0);
+    // SYN advanced rcv_nxt to 1001; receiver window 4096.
+    assert_eq!(
+        table.tcp_data_seq_verdict(&forward, 1001, 100),
+        SeqVerdict::Valid,
+        "in-window OCR segment must teach"
+    );
+    assert_eq!(
+        table.tcp_data_seq_verdict(&forward, 50_000, 100),
+        SeqVerdict::Invalid,
+        "out-of-window OCR must not teach"
+    );
+    assert_eq!(
+        table.tcp_data_seq_verdict(&forward, 1001u32.wrapping_sub(5000), 100),
+        SeqVerdict::Invalid,
+        "far-behind segment must not teach"
+    );
+    // Advance with a legitimate 100-byte segment: rcv_nxt 1101.
+    table.note_tcp_seq(&forward, 1001, 0, 4096, 100, TCP_ACK, 0);
+    assert_eq!(
+        table.tcp_data_seq_verdict(&forward, 1001, 100),
+        SeqVerdict::Valid,
+        "retransmission inside receiver window stays teachable"
+    );
+    assert_eq!(
+        table.tcp_data_seq_verdict(&forward, 1101, 32),
+        SeqVerdict::Valid,
+        "next in-window segment stays teachable"
+    );
+    // A long segment spilling past the window end is not teachable as a whole.
+    assert_eq!(
+        table.tcp_data_seq_verdict(&forward, 5000, 200),
+        SeqVerdict::Invalid
+    );
+}
+
+#[test]
 fn scaled_window_and_receiver_window_verdict_15947() {
     // #15947 (H29-02 arms 1-2): SYN WSOPT scale 7 + window 8192 (scaled
     // 1,048,576) under maximum-window 256K, then a legitimate FIN beyond
