@@ -729,6 +729,7 @@ impl SessionTable {
                             .copied()
                             .unwrap_or(0),
                     },
+                    synced_synthesis: false,
                 },
                 entry.origin,
             );
@@ -1577,6 +1578,7 @@ impl SessionTable {
             metadata: record.entry.metadata.clone(),
             forwarding_generation: record.entry.forwarding_generation,
             aux: SessionLookupAux::default(),
+            synced_synthesis: false,
         })
     }
 
@@ -1693,6 +1695,7 @@ impl SessionTable {
                 metadata: entry.metadata.clone(),
                 forwarding_generation: entry.forwarding_generation,
                 aux: SessionLookupAux::default(),
+                synced_synthesis: false,
             };
             if let Some(prev) = &first {
                 // #16014 (extends #14374): any second passing candidate with
@@ -1784,6 +1787,7 @@ impl SessionTable {
                 metadata: record.entry.metadata.clone(),
                 forwarding_generation: record.entry.forwarding_generation,
                 aux: SessionLookupAux::default(),
+                synced_synthesis: false,
             })
         } else {
             ForwardNatQuoteLookup::NoMatch
@@ -1830,6 +1834,7 @@ impl SessionTable {
             metadata: record.entry.metadata.clone(),
             forwarding_generation: record.entry.forwarding_generation,
             aux: SessionLookupAux::default(),
+            synced_synthesis: false,
         })
     }
 
@@ -1903,6 +1908,7 @@ impl SessionTable {
                 metadata: entry.metadata.clone(),
                 forwarding_generation: entry.forwarding_generation,
                 aux: SessionLookupAux::default(),
+                synced_synthesis: false,
             };
             if let Some(prev) = &first {
                 // #16014 (extends #14374): any second passing candidate with
@@ -2062,6 +2068,7 @@ impl SessionTable {
                             .copied()
                             .unwrap_or(0),
                     },
+                    synced_synthesis: false,
                 },
                 entry.origin,
             );

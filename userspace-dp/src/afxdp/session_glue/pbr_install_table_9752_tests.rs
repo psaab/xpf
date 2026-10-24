@@ -691,6 +691,7 @@ fn reverse_session_resolves_unstamped_in_default() {
     let forwarding = pbr_state();
     let forward = ForwardSessionMatch {
         aux: SessionLookupAux::default(),
+        synced_synthesis: false,
         key: pbr_key(),
         decision: stamped_decision(unusable_resolution()),
         metadata: pbr_metadata(),

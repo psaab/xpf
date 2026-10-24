@@ -64,23 +64,33 @@ pub(in crate::afxdp) fn build_reverse_session_from_forward_match(
 /// The LIVE reverse install (`install_reverse_session_from_forward_match`,
 /// worker poll path) builds its forward match from a locally-observed
 /// session lookup: the match's stored owner is this node's seed-time
-/// LAN-member RG — the stamp the failover arms must judge — and the
-/// match carries the forward session's real id in `aux.session_id`
-/// (the lookup aux of a live local row). The SYNCED synthesis
-/// (`synthesized_synced_reverse_entry*`, coordinator prewarm /
+/// LAN-member RG — the stamp the failover arms must judge. The SYNCED
+/// synthesis (`synthesized_synced_reverse_entry*`, coordinator prewarm /
 /// import repair) constructs its `ForwardSessionMatch` synthetically
-/// from a peer-imported `SyncedSessionEntry` with
-/// `SessionLookupAux::default()` (session_id 0): there is no local
-/// forward observation, and the companion's owner is the
-/// reply-egress owner THIS node derives from its own FIB (the
-/// #7209/#12086 filing + empty-table-NoRoute semantics the
-/// ha_tests cells pin: with no forwarding state the companion must
-/// carry owner 0, not the peer-supplied forward owner).
-/// FAIL-CLOSED DIRECTION: a live match whose aux id was somehow
-/// zeroed falls back to the reply-resolution derivation — the
-/// pre-fix behavior — never to a peer-supplied stamp.
+/// from a peer-imported `SyncedSessionEntry`: there is no local forward
+/// observation, and the companion's owner is the reply-egress owner
+/// THIS node derives from its own FIB (the #7209/#12086 filing +
+/// empty-table-NoRoute semantics the ha_tests cells pin: with no
+/// forwarding state the companion must carry owner 0, not the
+/// peer-supplied forward owner).
+///
+/// EXPLICIT FLAG, never inferred from `aux.session_id`: the first
+/// implementation keyed this off `aux.session_id == 0`, which inverted
+/// both populations — local table matches are built with a default
+/// aux (id 0) by the NAT lookup helpers in `session/lookup.rs`, so
+/// live hits fell back to the reply-resolution derivation (stamp=2,
+/// the bug this leg exists to fix); shared-map matches carry the
+/// peer's nonzero session id, so they were stamped with the PEER's
+/// forward owner instead of this node's own derivation. The flag is
+/// set at exactly one construction site
+/// (`synthesized_synced_reverse_entry_in_table`); every lookup-built
+/// match carries `false`.
+/// FAIL-CLOSED DIRECTION: a match whose provenance was somehow lost
+/// defaults to `false` at struct construction only via an explicit
+/// literal — there is no `Default` for `ForwardSessionMatch`, so a
+/// new construction site must state its provenance to compile.
 fn forward_match_is_synced_reverse_synthesis(forward_match: &ForwardSessionMatch) -> bool {
-    forward_match.aux.session_id == 0
+    forward_match.synced_synthesis
 }
 pub(in crate::afxdp) fn build_reverse_session_from_forward_match_in_table(
     forwarding: &ForwardingState,
@@ -306,6 +316,7 @@ pub(in crate::afxdp) fn synthesized_synced_reverse_entry_in_table(
             metadata: entry.metadata.clone(),
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux::default(),
+            synced_synthesis: true,
         },
         now_secs,
         0,

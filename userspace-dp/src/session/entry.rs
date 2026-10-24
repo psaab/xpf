@@ -523,6 +523,19 @@ pub(crate) struct ForwardSessionMatch {
     pub(crate) metadata: SessionMetadata,
     pub(crate) forwarding_generation: ForwardingGenerationStamp,
     pub(crate) aux: SessionLookupAux,
+    /// #16217: explicit provenance for reverse synthesis. `true` ONLY
+    /// when this match was constructed synthetically from a synced
+    /// (`SyncedSessionEntry`) forward row by
+    /// `synthesized_synced_reverse_entry_in_table` — there is no local
+    /// forward observation, so the reverse companion's owner must be
+    /// derived from this node's own reply resolution. Every locally
+    /// observed forward lookup (worker table or shared map) carries
+    /// `false`, so the companion stamps the forward row's stored
+    /// owner. Never inferred from `aux.session_id`: local table
+    /// matches are built with a default aux (id 0) by several lookup
+    /// helpers, while shared-map matches carry the peer's nonzero id
+    /// — keying on the id inverted the two populations.
+    pub(crate) synced_synthesis: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

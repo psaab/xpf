@@ -5685,6 +5685,7 @@ fn adopted_reverse_reply_converts_to_fabric_redirect_16217() {
         metadata: test_metadata(),
         forwarding_generation: ForwardingGenerationStamp::default(),
         aux: SessionLookupAux::default(),
+        synced_synthesis: false,
     };
     // Adopted shape: forward stored as FabricRedirect, LAN RG
     // peer-owned -> reply converts to FabricRedirect.
@@ -5821,9 +5822,13 @@ fn reverse_synth_stamps_forward_owner_not_reply_egress_16217() {
         // Forward flow's stored owner: RG1 (its LAN-member RG at seed).
         metadata: SessionMetadata { owner_rg_id: 1, ..test_metadata() },
         forwarding_generation: ForwardingGenerationStamp::default(),
-        // Live local forward row: nonzero session id (the discriminator
-        // the builder uses to select the forward-owner stamp).
-        aux: SessionLookupAux { session_id: 4242, ..SessionLookupAux::default() },
+        // Live local forward row: explicit local provenance (the flag
+        // the builder uses to select the forward-owner stamp). Its aux
+        // session id is deliberately ZERO below — a local table match
+        // built by the NAT lookup helpers carries a default aux, and
+        // the pre-flag discriminator keyed on that id inverted it.
+        aux: SessionLookupAux::default(),
+        synced_synthesis: false,
     };
     let reverse = build_reverse_session_from_forward_match(
         &forwarding,
@@ -5837,6 +5842,59 @@ fn reverse_synth_stamps_forward_owner_not_reply_egress_16217() {
     assert_eq!(
         reverse.metadata.owner_rg_id, 1,
         "#16217 FZDiag35: reverse stamp must be the forward flow's owner (RG1), not the reply-egress row's RG (RG2)"
+    );
+}
+
+/// #16217: the synced-synthesis twin of the stamp cell above. A
+/// match flagged `synced_synthesis` (the peer-import prewarm shape:
+/// forward owner supplied by the PEER, here RG1, with a NONZERO peer
+/// session id in aux) must keep the reply-resolution derivation
+/// (RG2, this node's own FIB answer), never the peer-supplied stamp.
+/// Together with the cell above (local flag + ZERO aux id stamps the
+/// forward owner RG1), this pins the explicit-flag discriminator in
+/// both directions: keying on `aux.session_id` inverts both —
+/// FAIL-ON-REVERT for that discriminator.
+#[test]
+fn reverse_synth_synced_match_keeps_reply_derivation_16217() {
+    let forwarding = test_forwarding_state_split_rgs();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut ha_state = BTreeMap::new();
+    ha_state.insert(1, active_ha_runtime(1));
+    ha_state.insert(2, active_ha_runtime(1));
+    let forward_match = ForwardSessionMatch {
+        key: test_key(),
+        decision: SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                ..test_resolution()
+            },
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                rewrite_src_port: Some(test_key().src_port),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: SessionMetadata { owner_rg_id: 1, ..test_metadata() },
+        forwarding_generation: ForwardingGenerationStamp::default(),
+        aux: SessionLookupAux { session_id: 4242, ..SessionLookupAux::default() },
+        synced_synthesis: true,
+    };
+    let reverse = build_reverse_session_from_forward_match(
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        forward_match,
+        1,
+        0,
+    );
+    assert!(reverse.metadata.is_reverse);
+    assert_eq!(
+        reverse.metadata.owner_rg_id, 2,
+        "#16217: synced synthesis must keep the reply-resolution derivation (RG2), not the peer-supplied forward owner (RG1)"
     );
 }
 
@@ -9502,6 +9560,7 @@ fn build_reverse_session_carries_inactivity_timeout_5153() {
             metadata,
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux::default(),
+            synced_synthesis: false,
         },
         1,
         0,
@@ -9524,6 +9583,7 @@ fn build_reverse_session_carries_inactivity_timeout_5153() {
             metadata: test_metadata(),
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux::default(),
+            synced_synthesis: false,
         },
         1,
         0,
@@ -9804,6 +9864,7 @@ fn reverse_session_from_tunnel_forward_bypasses_unseeded_ha_during_startup_grace
             nat_scope_ifindex: None },
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux::default(),
+            synced_synthesis: false,
         },
         100,
         110,
@@ -10141,6 +10202,7 @@ fn reverse_session_from_split_owner_fabric_redirect_uses_fabric_return_when_clie
             nat_scope_ifindex: None },
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux::default(),
+            synced_synthesis: false,
         },
         1,
         0,
@@ -19830,6 +19892,7 @@ fn reverse_companion_stamps_zero_install_table_9752() {
             metadata: forward_metadata,
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux::default(),
+            synced_synthesis: false,
         },
         1_000_000_000,
         0,
@@ -20368,6 +20431,7 @@ fn synthesized_reverse_companion_converges_session_id_across_workers_14667() {
             metadata: test_metadata(),
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux::default(),
+            synced_synthesis: false,
         };
         let (_lookup, installed) = install_reverse_session_from_forward_match(
             &mut worker0,

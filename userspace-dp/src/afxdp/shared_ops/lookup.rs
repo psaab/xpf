@@ -1902,6 +1902,7 @@ pub(in crate::afxdp) fn lookup_forward_nat_for_icmp_quote_at(
             source_nat_static: entry.source_nat_static,
             leak_incarnation: entry.leak_incarnation,
         },
+        synced_synthesis: false,
     });
     let shared_match = if let Some(shared) = shared_match {
         if !crate::session::is_quarantined_routing_domain(reply_key.routing_domain)
@@ -2008,6 +2009,7 @@ fn lookup_forward_nat_across_scopes_inner(
                     source_nat_static: entry.source_nat_static,
                     leak_incarnation: entry.leak_incarnation,
                 },
+                synced_synthesis: false,
             });
         }
         return Some(local);
@@ -2029,5 +2031,6 @@ fn lookup_forward_nat_across_scopes_inner(
             source_nat_static: entry.source_nat_static,
             leak_incarnation: entry.leak_incarnation,
         },
+        synced_synthesis: false,
     })
 }

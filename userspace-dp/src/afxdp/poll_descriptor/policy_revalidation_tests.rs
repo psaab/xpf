@@ -3101,6 +3101,7 @@ fn reverse_snat_case_from_production_13771(
             source_nat_static: provenance,
             leak_incarnation: 0,
         },
+        synced_synthesis: false,
     };
     let reverse = crate::afxdp::shared_ops::build_reverse_session_from_forward_match(
         forwarding,
@@ -4120,6 +4121,7 @@ fn reverse_only_icmp_pat_survives_revalidation_14128() {
             source_nat_static: Some(false),
             leak_incarnation: 0,
         },
+        synced_synthesis: false,
     };
     let mut forwarding = reverse_snat_forwarding_13771(true);
     forwarding.ifindex_unambiguous_zone_id.insert(11, 1);

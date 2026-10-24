@@ -1391,9 +1391,10 @@ derive from the reply-egress row (RG2, always active) — the correct
 owner is the forward flow's LAN-member RG (RG1) at seed. Fix:
 (1) `build_reverse_session_from_forward_match_in_table`
 (reverse_synth.rs) stamps `metadata.owner_rg_id` from the FORWARD
-match's stored owner for live installs (nonzero `aux.session_id`;
-the synced prewarm/import synthesis, which constructs its match
-with a default aux, keeps the reply-resolution derivation the
+match's stored owner for live installs (explicit
+`ForwardSessionMatch::synced_synthesis == false`; the synced
+prewarm/import synthesis — the one construction site that sets the
+flag — keeps the reply-resolution derivation the
 #7209/#12086 filing semantics pin). (2) The session-hit reverse
 conversion (resolve.rs, extracted as
 `reverse_hit_departed_destination_redirect`) drops the metadata
@@ -1414,6 +1415,24 @@ shape (FAIL-ON-REVERT on the new arm verified). `cargo test 16217`
 51/51, `16270`+`16223` 37/37, `policy_revalidation` 112/112,
 `session::` 527 passed with the 2 pre-existing failures identical
 on base.
+
+FZCellsStrict follow-up (same head `9dff39b45e`): the Wire33
+discriminator was confirmed inverted — it keyed live-vs-synced on
+`aux.session_id == 0`, but local table matches are built with a
+default aux (id 0) by the NAT lookup helpers in
+`session/lookup.rs` (live hits fell back to the reply derivation),
+while shared-map matches carry the peer's nonzero id (stamped with
+the peer's forward owner). Replaced with the explicit
+`synced_synthesis` flag on `ForwardSessionMatch`, set only in
+`synthesized_synced_reverse_entry_in_table`; every lookup-built
+match states `false` (no `Default` impl, so a new site must state
+its provenance to compile). The stamp cell now uses a local match
+with a ZERO aux id, and a new twin
+`reverse_synth_synced_match_keeps_reply_derivation_16217` uses a
+synced match with a NONZERO peer id: both FAIL when the predicate
+is reverted to the aux test. `cargo test 16217` 52/52, `16223`
+33/33, `policy_revalidation` 112/112, `session::` 527 passed with
+the same 2 pre-existing failures.
 
 Live aged table (all-node0, P4 85 s, RG1 fw0->fw1 at 30 s age,
 helper d91f3469 hash-proved /proc/<pid>/exe both nodes before
