@@ -50,15 +50,14 @@
 //! design, stated here so nobody mistakes it for a hole someone
 //! forgot.
 //!
-//! Known residue, named rather than hidden: the uncompiled orphan
-//! `afxdp/tx/dispatch/tests/nat64_attribution_6922.rs` (no `mod`
-//! declaration reaches it; it is not compiled) sits under a `tests/`
-//! directory whose compiled siblings ARE fixtures, so the graph
-//! leaves it "production" and its 6 hits are carried in the
-//! `afxdp/tx/dispatch/tests` ceiling. Counting an uncompiled file is
-//! conservative (it can only overstate the surface); deleting the
-//! orphan will red the improvement arm and force that ceiling to 0 —
-//! which is the ratchet working, not a reason to widen it.
+//! Residue formerly named here: the previously uncompiled orphan
+//! `afxdp/tx/dispatch/tests/nat64_attribution_6922.rs` was restored
+//! as a compiled `#[cfg(test)]` fixture by #16465 (`mod
+//! nat64_attribution_6922;` in `tx/dispatch/tests/mod.rs`), so the
+//! #12270 declaration graph now classifies it as test-only and its
+//! 6 hits leave the production population; the
+//! `afxdp/tx/dispatch/tests` ceiling is tightened to 0 in the same
+//! change, as the improvement arm requires.
 //!
 //! Both directions, same shape as #7689: a directory that GAINS
 //! unsafe reds (lower the ceiling only when unsafe is genuinely
@@ -122,8 +121,7 @@ const UNSAFE_CEILING_PER_DIR: &[(&str, usize)] = &[
     ("afxdp/shared_ops", 0),
     ("afxdp/tx", 8),
     ("afxdp/tx/dispatch", 5),
-    // Uncompiled orphan carried conservatively; see header.
-    ("afxdp/tx/dispatch/tests", 6),
+    ("afxdp/tx/dispatch/tests", 0),
     ("afxdp/tx/drain", 2),
     ("afxdp/tx/transmit", 2),
     ("afxdp/types", 1),

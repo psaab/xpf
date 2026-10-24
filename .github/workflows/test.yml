@@ -31,6 +31,12 @@ jobs:
         run: sh scripts/harness-census.sh
       - name: Self-test the census
         run: bash ./test/incus/harness-census-selftest.sh
+      # #16465: rust-source reachability — a deleted test `mod` line
+      # orphans a file `cargo check --all-targets` cannot see.
+      - name: Rust source census
+        run: |
+          python3 scripts/rust-source-census-13961.py --self-test
+          python3 scripts/rust-source-census-13961.py userspace-dp/src
 
   proto:
     name: Proto header and regen check
