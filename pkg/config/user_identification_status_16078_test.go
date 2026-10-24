@@ -65,6 +65,59 @@ func TestUserIdentificationConfigured16078(t *testing.T) {
 	}
 }
 
+// #16078 fold: shapes that warn at commit must also record — a bare
+// wrapper and a packed braced identity-management stanza previously
+// compiled with a warning but rendered "No user-identification
+// configured" on the status surface. Presence (warning) and record
+// (status) must agree for every authored shape.
+func TestUserIdentificationBareAndPackedBraced16078(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+		want string
+	}{
+		{"bare security wrapper", "security { user-identification; }", "user-identification"},
+		{"bare services wrapper", "services { user-identification; }", "user-identification"},
+		{"bare empty braces", "security { user-identification { } }", "user-identification"},
+		{"packed braced services top", "services user-identification identity-management { connection primary; }", "identity-management"},
+		{"packed braced security top", "security user-identification identity-management { connection primary; }", "identity-management"},
+		{"packed braced services nested", "services { user-identification identity-management { connection primary; } }", "identity-management"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree, errs := NewParser(tc.text).Parse()
+			if len(errs) > 0 {
+				t.Fatalf("parse: %v", errs)
+			}
+			cfg, err := CompileConfig(tree)
+			if err != nil {
+				t.Fatalf("compile: %v", err)
+			}
+			if len(cfg.Warnings) == 0 {
+				t.Fatalf("fixture must warn at commit (presence half): %s", tc.text)
+			}
+			got := cfg.UserIdentificationConfigured()
+			found := false
+			for _, s := range got {
+				if s == tc.want {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("configured=%v want containing %q (warns=%v)", got, tc.want, cfg.Warnings)
+			}
+			var b strings.Builder
+			RenderUserIdentificationStatus(&b, cfg)
+			out := b.String()
+			if strings.Contains(out, "No user-identification configured") {
+				t.Errorf("status says none configured but commit warned:\n%s", out)
+			}
+			if !strings.Contains(out, "INERT") || !strings.Contains(out, tc.want) {
+				t.Errorf("status must name %q INERT:\n%s", tc.want, out)
+			}
+		})
+	}
+}
+
 func TestRenderUserIdentificationStatus16078(t *testing.T) {
 	cfg, err := CompileConfig(buildTree(t, []string{
 		"set services user-identification active-directory-access domain-name corp.example",

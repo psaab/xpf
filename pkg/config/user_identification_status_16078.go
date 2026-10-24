@@ -34,92 +34,78 @@ const UserIdentificationStatusInert = "INERT (accepted-only; no runtime effect)"
 // It is the detection half of userIdentificationWarnings, shared so the
 // warning and the compiled record can never disagree about which stanzas a
 // config carries.
-// userIdentificationPresent reports whether any user-identification stanza
-// (named or bare) is present under node. A bare `security
-// user-identification;` yields no named stanza but must still warn.
-func userIdentificationPresent(node *Node) (stanzas []string, present bool) {
+// detectUserIdentification returns the named sub-stanzas under node and
+// whether any user-identification stanza (named or bare) is present. It
+// covers every authored shape: braced, flat-set, packed-root
+// (`services user-identification identity-management { ... }` — the root
+// Keys carry the stanza path AND the braced body is a child, so the scan
+// must not require zero children), and the bare wrapper
+// (`security { user-identification; }`, present with no named stanza).
+func detectUserIdentification(node *Node) (stanzas []string, present bool) {
 	if node == nil {
 		return nil, false
 	}
-	stanzas = userIdentificationStanzasIn(node)
-	if stanzas != nil {
-		return stanzas, true
-	}
-	// Bare forms: packed `security user-identification` on the root keys,
-	// or a childless `user-identification` / direct-stanza child.
-	for _, k := range node.Keys {
-		if k == "user-identification" {
-			return nil, true
-		}
-	}
-	for _, child := range node.Children {
-		if child.Name() == "user-identification" || userIdentificationStanzas[child.Name()] {
-			return nil, true
-		}
-	}
-	return nil, false
-}
-
-func userIdentificationStanzasIn(node *Node) []string {
-	if node == nil {
-		return nil
-	}
-	var stanzas []string
 	seen := make(map[string]bool)
-	sawUserID := false
 	add := func(name string) {
 		if userIdentificationStanzas[name] && !seen[name] {
 			seen[name] = true
 			stanzas = append(stanzas, name)
 		}
 	}
-	// Packed root: a flat single-line spelling (`services
-	// user-identification authentication-source ...;` or the elided
-	// `security authentication-source { ... }`) packs the stanza path
-	// onto the ROOT node's own Keys with no children. Scan those keys
-	// so every spelling is recorded identically (#16296: the child-only
-	// walk missed exactly this shape).
-	if len(node.Children) == 0 && len(node.Keys) > 1 {
+	// Packed root: the stanza path sits on the ROOT node's own Keys,
+	// with or without a braced-body child (#16296, #16078 fold).
+	if len(node.Keys) > 1 {
 		for i, k := range node.Keys {
 			if k == "user-identification" {
-				sawUserID = true
+				present = true
 				if i+1 < len(node.Keys) {
 					add(node.Keys[i+1])
 				}
 			} else if i > 0 && userIdentificationStanzas[k] && node.Keys[0] != "user-identification" {
 				// Direct stanza packed on the root line:
 				// `security authentication-source { ... }`.
-				sawUserID = true
+				present = true
 				add(k)
 			}
 		}
 	}
-	var walk func(n *Node)
-	walk = func(n *Node) {
-		for _, child := range n.Children {
-			switch child.Name() {
-			case "user-identification":
-				sawUserID = true
-				if len(child.Keys) > 1 {
-					add(child.Keys[1])
+	for _, child := range node.Children {
+		switch child.Name() {
+		case "user-identification":
+			present = true
+			if len(child.Keys) > 1 {
+				add(child.Keys[1])
+			}
+			for _, sub := range child.Children {
+				add(sub.Name())
+				// Deeper flat tails: `user-identification { authentication-source ... }`
+				if len(sub.Keys) > 1 {
+					add(sub.Keys[1])
 				}
-				for _, sub := range child.Children {
-					add(sub.Name())
-					// Deeper flat tails: `user-identification { authentication-source ... }`
-					if len(sub.Keys) > 1 {
-						add(sub.Keys[1])
-					}
-				}
-			default:
-				if userIdentificationStanzas[child.Name()] {
-					sawUserID = true
-					add(child.Name())
-				}
+			}
+		default:
+			if userIdentificationStanzas[child.Name()] {
+				present = true
+				add(child.Name())
 			}
 		}
 	}
-	walk(node)
-	if !sawUserID {
+	if len(stanzas) > 0 {
+		present = true
+	}
+	return stanzas, present
+}
+
+// userIdentificationPresent reports whether any user-identification stanza
+// (named or bare) is present under node. A bare `security
+// user-identification;` yields no named stanza but must still warn.
+func userIdentificationPresent(node *Node) (stanzas []string, present bool) {
+	return detectUserIdentification(node)
+}
+
+func userIdentificationStanzasIn(node *Node) []string {
+	stanzas, present := detectUserIdentification(node)
+	if !present {
 		return nil
 	}
 	return stanzas
@@ -128,8 +114,18 @@ func userIdentificationStanzasIn(node *Node) []string {
 // recordUserIdentification notes the user-identification stanzas under one
 // root node ("services" or "security") on cfg, deduplicated across roots in
 // first-seen order. Called from the section dispatch for both spellings.
+// A bare wrapper (no named sub-stanza) records the wrapper name itself, so
+// a config that warns at commit can never render "none configured" on the
+// status surface (#16078 fold).
 func (cfg *Config) recordUserIdentification(node *Node) {
-	for _, s := range userIdentificationStanzasIn(node) {
+	stanzas, present := detectUserIdentification(node)
+	if !present {
+		return
+	}
+	if len(stanzas) == 0 {
+		stanzas = []string{"user-identification"}
+	}
+	for _, s := range stanzas {
 		dup := false
 		for _, have := range cfg.userIdentificationStanzas {
 			if have == s {
@@ -145,8 +141,9 @@ func (cfg *Config) recordUserIdentification(node *Node) {
 
 // UserIdentificationConfigured returns the user-identification sub-stanzas
 // an operator configured (either spelling), deduplicated in first-seen
-// order, or nil when none are configured. Every name returned is inert:
-// xpf implements no user-identification engine (#10947/#16078).
+// order, or nil when none are configured. A bare wrapper with no named
+// sub-stanza is returned as "user-identification". Every name returned is
+// inert: xpf implements no user-identification engine (#10947/#16078).
 func (cfg *Config) UserIdentificationConfigured() []string {
 	if cfg == nil || len(cfg.userIdentificationStanzas) == 0 {
 		return nil
