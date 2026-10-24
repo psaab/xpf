@@ -1,6 +1,7 @@
 package factoryreset
 
 import (
+	"os"
 	"path/filepath"
 
 	"github.com/psaab/xpf/pkg/configstore"
@@ -14,7 +15,7 @@ import (
 // private vars) drive real wipes through it. Test-only: production
 // never calls it.
 func RedirectWipePathsForTesting(root string) (restore func()) {
-	oldMachine, oldSSH, oldRootSSHUser, oldHistory := wipeMachineIDPath, wipeSSHHostKeyDir, wipeRootSSHUserDir, wipeRootBashHistory
+	oldMachine, oldApplianceMarker, oldSSH, oldRootSSHUser, oldHistory := wipeMachineIDPath, wipeApplianceMarkerPath, wipeSSHHostKeyDir, wipeRootSSHUserDir, wipeRootBashHistory
 	oldEngineID, oldBoots, oldSeed := wipeSNMPEngineIDPath, wipeSNMPEngineBootsPath, wipeSystemdRandomSeed
 	oldFeedShrinkHistoryPath := wipeFeedShrinkHistoryPath
 	oldAptLists, oldAptArchive, oldUtmp := wipeAptListsDir, wipeAptArchiveDir, wipeRunUtmpPath
@@ -36,6 +37,14 @@ func RedirectWipePathsForTesting(root string) (restore func()) {
 	oldHistHomes := wipeCLIHistoryHomesOverride
 
 	wipeMachineIDPath = filepath.Join(root, "etc", "machine-id")
+	// Default redirected tree is an APPLIANCE host (#16448): every existing
+	// hermetic wipe fixture plants prior-tenant seal residue and asserts it
+	// is erased, which is the appliance contract. The file need not exist
+	// yet; wipeIsApplianceHost only stats it. Tests for the foreign-host
+	// posture remove it (see zeroize_foreign_host_16448_test.go).
+	wipeApplianceMarkerPath = filepath.Join(root, "etc", "xpf", "appliance")
+	_ = os.MkdirAll(filepath.Dir(wipeApplianceMarkerPath), 0o755)
+	_ = os.WriteFile(wipeApplianceMarkerPath, []byte("appliance\n"), 0o644)
 	wipeSSHHostKeyDir = filepath.Join(root, "etc", "ssh")
 	wipeRootSSHUserDir = filepath.Join(root, "root", ".ssh")
 	wipeRootBashHistory = filepath.Join(root, "root", ".bash_history")
@@ -117,7 +126,7 @@ func RedirectWipePathsForTesting(root string) (restore func()) {
 	configstore.ResetHandoffPath = filepath.Join(root, "etc", "xpf", ".reset-handoff")
 
 	return func() {
-		wipeMachineIDPath, wipeSSHHostKeyDir, wipeRootSSHUserDir, wipeRootBashHistory = oldMachine, oldSSH, oldRootSSHUser, oldHistory
+		wipeMachineIDPath, wipeApplianceMarkerPath, wipeSSHHostKeyDir, wipeRootSSHUserDir, wipeRootBashHistory = oldMachine, oldApplianceMarker, oldSSH, oldRootSSHUser, oldHistory
 		wipeSNMPEngineIDPath, wipeSNMPEngineBootsPath, wipeSystemdRandomSeed = oldEngineID, oldBoots, oldSeed
 		wipeFeedShrinkHistoryPath = oldFeedShrinkHistoryPath
 		wipeAptListsDir, wipeAptArchiveDir, wipeRunUtmpPath = oldAptLists, oldAptArchive, oldUtmp

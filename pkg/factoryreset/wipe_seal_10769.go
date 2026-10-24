@@ -29,6 +29,7 @@ import (
 // remain the image paths whose previous-tenant state must not survive reset.
 var (
 	wipeMachineIDPath         = "/etc/machine-id"
+	wipeApplianceMarkerPath   = "/etc/xpf/appliance"
 	wipeSSHHostKeyDir         = "/etc/ssh"
 	wipeRootSSHUserDir        = "/root/.ssh"
 	wipeRootBashHistory       = "/root/.bash_history"
@@ -110,11 +111,37 @@ func wipeEraseSSHHostKeys() error {
 	return errors.Join(errs...)
 }
 
+// wipeIsApplianceHost reports whether the bake-written appliance marker
+// (/etc/xpf/appliance, docs/install-images.md #7114) is present. Only an
+// appliance host is wholly xpf-owned: a foreign-host .deb install is a
+// guest on an operator-managed host, so the image-seal legs that erase
+// host-owned state must not run there (#16448). A probe error other than
+// absence fails closed (not appliance): skipping a destructive leg is
+// recoverable, deleting host data is not.
+func wipeIsApplianceHost() bool {
+	_, err := os.Stat(wipeApplianceMarkerPath)
+	return err == nil
+}
+
 // wipeImageSealResidue removes the safely-regenerable members of the
 // image's own factory seal set. It deliberately leaves files whose deletion
 // would destroy live service state or lacks a regeneration/ownership proof;
 // see the survivor decisions below.
+//
+// Host-owned legs — machine-id rotation, SSH host keys, root's .ssh and
+// shell history, apt caches, /tmp//var/tmp, /var/log, /etc/hosts,
+// /etc/hostname and the volatile journal — run ONLY on an appliance host
+// (wipeIsApplianceHost, #16448). On a foreign host they would irreversibly
+// delete data xpf does not own (root's unmarked SSH material, the host's
+// audit trail and scratch data); the ownership-aware legs below and the
+// marker-aware login teardown in performWipe own the foreign-host reset.
+// /etc/resolv.conf is the exception: xpfd owns it as a plain file on every
+// host (pkg/daemon masks systemd-resolved at startup), so resetting it
+// stays within xpf ownership on both postures. xpf-owned state (SNMP/feed/
+// day-0 state, xpf drop-ins, DHCP client serialization, editor backups of
+// xpf-rendered files, /run/xpf) is erased on both postures.
 func wipeImageSealResidue() error {
+	appliance := wipeIsApplianceHost()
 	var errs []error
 	fail := func(err error) {
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -122,38 +149,41 @@ func wipeImageSealResidue() error {
 		}
 	}
 
-	// machine-id is replaced with fresh random bytes (deliberately NOT
-	// the seal's truncate: v261 regenerates an empty id from the stable
-	// SMBIOS UUID on VMs, reproducing the prior DUID-EN). The D-Bus
-	// alias copy is removed in either shape it ships (symlink or file).
-	fail(wipeRotateMachineID(wipeMachineIDPath))
-	fail(wipeEraseDBusMachineID(wipeDBusMachineIDPath))
+	// Appliance-only: rotating the host's machine-id (and its D-Bus alias)
+	// re-identifies an operator-managed foreign host (#16448).
+	if appliance {
+		// machine-id is replaced with fresh random bytes (deliberately NOT
+		// the seal's truncate: v261 regenerates an empty id from the stable
+		// SMBIOS UUID on VMs, reproducing the prior DUID-EN). The D-Bus
+		// alias copy is removed in either shape it ships (symlink or file).
+		fail(wipeRotateMachineID(wipeMachineIDPath))
+		fail(wipeEraseDBusMachineID(wipeDBusMachineIDPath))
 
-	// The image seals every ssh_host_* private/public/certificate file. The
-	// dedicated xpf-ssh-hostkeys unit runs ssh-keygen -A before ssh.service
-	// whenever the keys are absent (#16445), so deleting these here
-	// regenerates a fresh device identity on reboot — including after an
-	// interrupted reset, whose pending marker still gates the day-0 loader.
-	fail(wipeEraseSSHHostKeys())
+		// The image seals every ssh_host_* private/public/certificate file. The
+		// dedicated xpf-ssh-hostkeys unit runs ssh-keygen -A before ssh.service
+		// whenever the keys are absent (#16445), so deleting these here
+		// regenerates a fresh device identity on reboot — including after an
+		// interrupted reset, whose pending marker still gates the day-0 loader.
+		fail(wipeEraseSSHHostKeys())
 
-	// The sysprep ssh-userdir and bash-history operations apply to root here.
-	// Provisioned non-root homes have already been handled by the marker-aware
-	// login teardown; unrelated operator accounts remain outside xpf ownership.
-	fail(wipeRemovePath(wipeRootSSHUserDir))
-	fail(wipeRemovePath(wipeRootBashHistory))
+		// The sysprep ssh-userdir and bash-history operations apply to root here.
+		// Provisioned non-root homes have already been handled by the marker-aware
+		// login teardown; unrelated operator accounts remain outside xpf ownership.
+		// On a foreign host root's unmarked .ssh is the operator's own SSH
+		// material: the marker-aware wipeRootLoginAccount owns root revocation
+		// there and preserves unmarked keys (#16448).
+		fail(wipeRemovePath(wipeRootSSHUserDir))
+		fail(wipeRemovePath(wipeRootBashHistory))
+	}
 
-	// SNMP engine identity, monotonicity state, and systemd's persisted random
-	// seed all regenerate on the next boot. Losing SNMP engineBoots alongside
-	// its EngineID is safe because the engine ID itself is replaced.
-	// Remove image-sealed caches plus the day-0 rejection and root-grow
-	// markers. They are disposable cache or first-boot state. The daemon's
-	// feed-shrink history is name-keyed tenant state and must not cross a reset.
+	// xpf-owned identity/state on every host: SNMP engine identity (the
+	// daemon regenerates it), the name-keyed feed-shrink history (tenant
+	// state that must not cross a reset), and the day-0 rejection /
+	// root-grow first-boot markers under /etc/xpf.
 	for _, path := range []string{
 		wipeSNMPEngineIDPath,
 		wipeSNMPEngineBootsPath,
 		wipeFeedShrinkHistoryPath,
-		wipeSystemdRandomSeed,
-		wipeRunUtmpPath,
 		wipeDay0RejectedPath,
 		wipeRootGrownPath,
 	} {
@@ -161,22 +191,32 @@ func wipeImageSealResidue() error {
 	}
 	fail(feeds.EraseShrinkHistoryCrashTemps(wipeFeedShrinkHistoryPath))
 
-	// NOTE: the passwd-/shadow-/group-/gshadow- backups are NOT erased here.
-	// Shadow tools recreate them on every userdel/passwd invocation, and the
-	// login-account teardown runs those commands after this function returns.
-	// wipeEraseAccountBackups runs after that teardown instead.
-	// Package lists and downloaded archives are caches and can be recreated
-	// by apt.
-	for _, dir := range []string{wipeAptListsDir, wipeAptArchiveDir} {
-		fail(wipeClearDir(dir))
+	// Appliance-only: systemd's persisted random seed and /run/utmp are
+	// host state the seal rotates/clears; apt lists and archives are the
+	// host's package caches. None is xpf-owned on a foreign host (#16448).
+	if appliance {
+		fail(wipeRemovePath(wipeSystemdRandomSeed))
+		fail(wipeRemovePath(wipeRunUtmpPath))
+		// NOTE: the passwd-/shadow-/group-/gshadow- backups are NOT erased here.
+		// Shadow tools recreate them on every userdel/passwd invocation, and the
+		// login-account teardown runs those commands after this function returns.
+		// wipeEraseAccountBackups runs after that teardown instead.
+		// Package lists and downloaded archives are caches and can be recreated
+		// by apt.
+		for _, dir := range []string{wipeAptListsDir, wipeAptArchiveDir} {
+			fail(wipeClearDir(dir))
+		}
 	}
 
-	// Temporary directories (seal tmp-files parity, #10769 d05-F6). /tmp and
-	// /var/tmp are cleared of tenant data; /dev/shm is cleared of
-	// xpf/DHCP-attributable entries only, since a full shm clear would pull
-	// live segments from under still-running host services.
-	for _, dir := range wipeTmpDirs {
-		fail(wipeClearTmpDir(dir))
+	// Appliance-only: /tmp and /var/tmp hold the host's scratch data on a
+	// foreign host (#16448). /dev/shm stays gated to xpf/DHCP-attributable
+	// entries on every host (wipeClearShmDir already scopes it).
+	if appliance {
+		// Temporary directories (seal tmp-files parity, #10769 d05-F6). /tmp and
+		// /var/tmp are cleared of tenant data.
+		for _, dir := range wipeTmpDirs {
+			fail(wipeClearTmpDir(dir))
+		}
 	}
 	fail(wipeClearShmDir(wipeShmDir))
 
@@ -205,9 +245,9 @@ func wipeImageSealResidue() error {
 	//     /run/systemd/netif/state (manager_save). Both are cleared.
 	//   - DUID is runtime-derived, never persisted: the default vendor
 	//     DUID is EN 43793 + hashed machine-id (networkd.conf(5)
-	//     DUIDType=vendor; sd-dhcp-duid.c performs no file I/O), so the
-	//     fresh machine-id installed above rotates it on every target
-	//     (truncate alone would regenerate the same firmware UUID on
+	//     DUIDType=vendor; sd-dhcp-duid.c performs no file I/O), so on an
+	//     appliance the fresh machine-id installed above rotates it on every
+	//     target (truncate alone would regenerate the same firmware UUID on
 	//     VMs). IAID defaults to a siphash of the persistent ifname/MAC
 	//     (dhcp_identifier_set_iaid): stable-by-design hardware identity,
 	//     not tenant-secret residue, likewise unpersisted.
@@ -224,41 +264,54 @@ func wipeImageSealResidue() error {
 	// new config with a rotated machine-id/DUID. Entries are cleared with
 	// their directories kept: networkd creates the subdirs at startup
 	// only, while files are rewritten via temp+rename on every save.
-	fail(wipeClearDir(wipeNetworkdLeaseDir))
-	fail(wipeClearDir(wipeNetifLeaseDir))
-	fail(wipeClearDir(wipeNetifLinksDir))
-	fail(wipeClearDir(wipeNetifServerLeaseDir))
-	fail(wipeRemovePath(wipeNetifStatePath))
-	for _, dir := range wipeDHCPClientStateDirs {
-		fail(wipeClearDir(dir))
+	if appliance {
+		fail(wipeClearDir(wipeNetworkdLeaseDir))
+		fail(wipeClearDir(wipeNetifLeaseDir))
+		fail(wipeClearDir(wipeNetifLinksDir))
+		fail(wipeClearDir(wipeNetifServerLeaseDir))
+		fail(wipeRemovePath(wipeNetifStatePath))
+		for _, dir := range wipeDHCPClientStateDirs {
+			fail(wipeClearDir(dir))
+		}
 	}
 
-	// Prior-tenant host trust, resolver, and static host mappings do not
-	// survive regardless of xpfd ownership headers: a prior root could strip
-	// a header to preserve hostile trust or nameservers, and any pre-reset
-	// value is the prior tenant's either way. Trust anchors are removed;
-	// resolver and hosts are rewritten to their factory defaults.
-	fail(wipeEraseKnownHosts(wipeManagedHostKeysPath))
+	// xpf-rendered drop-ins are xpf-owned on every host.
 	for _, path := range wipeManagedDropins {
 		fail(wipeRemovePath(path))
 	}
+	// /etc/resolv.conf is xpf-owned on every host (see the function doc):
+	// resetting it to the header-only default stays within xpf ownership.
 	fail(wipeResetResolvConf(wipeResolvConfPath))
-	fail(wipeResetHosts(wipeHostsPath))
 
-	// `logfiles` is part of SYSPREP_ENABLE_OPS. Empty /var/log while retaining
-	// the directory for the still-running reset action; post-reset log entries
-	// may be written before xpfd stops, but prior-tenant persisted entries are
-	// unlinked.
-	fail(wipeClearDir(wipeVarLogDir))
+	if appliance {
+		// Prior-tenant host trust and static host mappings do not
+		// survive regardless of xpfd ownership headers: a prior root could strip
+		// a header to preserve hostile trust, and any pre-reset
+		// value is the prior tenant's either way. Trust anchors are removed;
+		// hosts is rewritten to its factory default. On a foreign host the
+		// system-wide known-hosts file and /etc/hosts are the operator's own
+		// trust/mappings, not xpf's (#16448).
+		fail(wipeEraseKnownHosts(wipeManagedHostKeysPath))
+		fail(wipeResetHosts(wipeHostsPath))
+
+		// `logfiles` is part of SYSPREP_ENABLE_OPS. Empty /var/log while retaining
+		// the directory for the still-running reset action; post-reset log entries
+		// may be written before xpfd stops, but prior-tenant persisted entries are
+		// unlinked. On a foreign host /var/log is the host's audit trail; only
+		// the xpf-owned firewall logs (wipeFirewallLogs) are erased there.
+		fail(wipeClearDir(wipeVarLogDir))
+		// The volatile journal is host log state on a foreign host too.
+		fail(wipeClearDir(wipeRunJournalDir))
+	}
 	// Volatile tenant state (#10769 d05-F6): reset is wipe-then-stop with no
-	// reboot, so /run/xpf helper state and the volatile journal are cleared
-	// in-wipe (services that need them are already stopped) rather than
-	// left for a reboot that may never come.
+	// reboot, so /run/xpf helper state is cleared in-wipe (services that need
+	// it are already stopped) rather than left for a reboot that may never come.
 	fail(wipeClearRunXPFDir(wipeRunXPFDir))
-	fail(wipeClearDir(wipeRunJournalDir))
-	if len(errs) == 0 {
+	if appliance && len(errs) == 0 {
 		// Do not change the running device name until every earlier cleanup
 		// leg has succeeded; reset is recoverable when residue remains.
+		// Appliance-only: /etc/hostname and the live kernel name are the
+		// host's identity on a foreign host (#16448).
 		fail(wipeResetHostname(wipeHostnamePath))
 	}
 	if len(errs) != 0 {
