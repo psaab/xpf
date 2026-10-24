@@ -143,8 +143,13 @@ func TestLoadAndRollbackMeetTheConfigurationRegexes9633(t *testing.T) {
 			}
 		})
 	}
-	// Control: a class with no configuration regexes is not restricted by any of it.
-	open := loginCfg9633(&config.LoginClass{Name: "ops", Permissions: []string{"all"}})
+	// Control: a PermAll class with no configuration regexes is not
+	// restricted by any of it. (#16080: Permissions alone no longer
+	// suffices — the runtime evaluator reads MappedPermissions, so
+	// the fixture must carry PermAll there, as a compiled `all` class
+	// does. A no-PermAll class is surcharge-refused these
+	// whole-candidate ops; see credential_surcharge_16080_test.go.)
+	open := loginCfg9633(&config.LoginClass{Name: "ops", Permissions: []string{"all"}, MappedPermissions: []config.LoginClassPermission{config.PermAll}})
 	for _, req := range []any{
 		&pb.LoadRequest{Mode: "override", Content: "system { host-name x; }"},
 		&pb.LoadRequest{Mode: "rescue"},

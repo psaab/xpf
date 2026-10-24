@@ -324,6 +324,21 @@ and use it. What is worth stating plainly is that it happens **immediately and
 in the same session**, and that the narrowing row is what makes a mid-session
 revocation of a class's permissions actually effective.
 
+**Superseded in part by #16080.** Since #16080 a class holding `configure`
+without `all`/`super-user` (PermAll) can no longer do the thing the paragraph
+above relies on: mutations at or below `system login`,
+`system root-authentication`, and `system services web-management api-auth`
+(plus the legacy `system services rest api-auth` spelling) are denied by name
+in the shared `AuthorizeConfigMutation` decision on the CLI, gRPC, and REST
+surfaces — including `load`, group-expanded, embedded
+`change-configuration`, and whole-candidate (`override`/`rollback`) forms.
+Only a PermAll class may rewrite login/root/api credentials; a
+`*-configuration` allow cannot waive the fence. The commit advisory for a
+configure-without-super-user class now says so by name. The mid-session
+widening row above therefore no longer holds for credential paths: widening
+one's own class (`set system login class …`) is itself a fenced credential
+mutation.
+
 ### Where the class is enforced — per control surface (#5561)
 
 The class evaluator is shared (`config.ResolveClassPermissions` /

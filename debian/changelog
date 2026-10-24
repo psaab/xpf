@@ -18,6 +18,18 @@ xpf (0.0.0) unstable; urgency=medium
     gives root a key is corrected. `user root class` remains honoured
     and does not warn.
 
+  * Login: credential configuration paths are now priced above
+    `configure` (#16080). A login class holding PermConfig without
+    PermAll (e.g. a custom `[view configure]` class) is denied by name
+    when mutating `system login`, `system root-authentication`, or
+    `system services web-management api-auth` (plus the legacy
+    `system services rest api-auth` spelling) on the CLI, gRPC, and
+    REST surfaces — including load, group-expanded, embedded
+    change-configuration, override, and rollback forms — even when it
+    authored no *-configuration regexes or its regexes would allow the
+    path. Only a super-user (all) class may rewrite login/root/api
+    credentials, and the commit advisory for a configure-without-
+    super-user class now names that fence.
   * Login: the in-process console shell now re-resolves its user's
     `system login` class when the stanza changes, instead of keeping
     the assignment resolved once at daemon start (#16071). A console

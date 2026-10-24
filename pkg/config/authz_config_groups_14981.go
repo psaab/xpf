@@ -5,6 +5,45 @@ import (
 	"strings"
 )
 
+// authorizeExpandedCredentialDiff16080 is the #16080 leg of expanded-tree
+// adjudication, scoped to credential-touching diffs: for a class fenced
+// by the surcharge (PermConfig without PermAll, no regex restriction),
+// only diff lines whose resolved path touches a credential fence
+// (at/below it, or an ancestor of it) are adjudicated through
+// AuthorizeConfigMutation. Group-definition spellings are skipped:
+// expansion materializes applied bodies at the apply site, so a
+// surviving `groups …` line is not effective config. See fold (3) in
+// authorizeExpandedTree14981.
+func authorizeExpandedCredentialDiff16080(cfg *Config, class string, lines []string, activeSet map[string]bool) error {
+	for _, line := range lines {
+		if activeSet[line] {
+			continue
+		}
+		if expandedLineIsGroupDefinition14981(line) {
+			continue
+		}
+		parts, quoted, _ := lexConfigMutationLineStrict15167(line)
+		paths, gated := configMutationPaths(nil, parts, quoted)
+		if !gated {
+			continue
+		}
+		touches := false
+		for _, p := range paths {
+			if CredentialPathTouches16080(p) {
+				touches = true
+				break
+			}
+		}
+		if !touches {
+			continue
+		}
+		if err := AuthorizeConfigMutation(cfg, class, nil, line); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // #14981: `groups` / `apply-groups` inheritance bypassed deny-configuration
 // in Set, Load, and Commit.
 //
@@ -206,7 +245,21 @@ func authorizeExpandedTree14981(cfg *Config, class string, tree, active *ConfigT
 	if err != nil {
 		return fmt.Errorf("permission denied: login class %q has an invalid configuration regex: %w", class, err)
 	}
-	if !restricted {
+	// #16080 fold (3): the surcharge extension must be scoped to
+	// credential-touching diffs. Previously every expanded line of a
+	// no-regex configure class ran through AuthorizeConfigMutation,
+	// so staging an UNRELATED group edit (e.g. an interfaces
+	// description inherited from a group) was re-adjudicated — and
+	// any pre-existing candidate content the class could not have
+	// authored alone could refuse its commit. A regex-restricted
+	// class keeps the full expanded adjudication below; a merely
+	// surcharged class is checked only on diff lines that touch a
+	// credential fence.
+	fenced16080, ferr := CredentialSurchargeCheck16080(cfg, class)
+	if ferr != nil {
+		return ferr
+	}
+	if !restricted && !fenced16080 {
 		return nil
 	}
 	lines, err := ExpandedMutationLines(tree)
@@ -225,6 +278,10 @@ func authorizeExpandedTree14981(cfg *Config, class string, tree, active *ConfigT
 		for _, l := range strings.Split(active.FormatSet(), "\n") {
 			activeSet[strings.TrimSpace(l)] = true
 		}
+	}
+	if !restricted {
+		// Surcharged-only class: only credential-touching diffs.
+		return authorizeExpandedCredentialDiff16080(cfg, class, lines, activeSet)
 	}
 	for _, line := range lines {
 		if activeSet[line] {

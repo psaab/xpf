@@ -157,11 +157,15 @@ func TestLoadGroupExpansionDenied14981(t *testing.T) {
 	if err := AuthorizeConfigLoad(cfg, "limited", "merge", hierAllowed); err != nil {
 		t.Fatalf("allowed hierarchical group load refused: %v", err)
 	}
-	// Unrestricted class: nothing is refused.
-	open := cfg9892(t)
-	_ = open
-	if err := AuthorizeConfigLoad(cfg, "no-such-class", "merge", denied["flat"]); err != nil {
-		t.Fatalf("unknown/unrestricted class load refused: %v", err)
+	// #16080: an unknown class name resolves to no PermAll, so the
+	// credential fence denies its credential-carrying load; a
+	// non-credential load by the same name stays allowed (real
+	// callers deny unknown classes at the coarse gate first).
+	if err := AuthorizeConfigLoad(cfg, "no-such-class", "merge", denied["flat"]); err == nil {
+		t.Fatal("unknown class load carrying a credential path was ALLOWED (#16080)")
+	}
+	if err := AuthorizeConfigLoad(cfg, "no-such-class", "merge", allowed); err != nil {
+		t.Fatalf("unknown class non-credential load refused: %v", err)
 	}
 }
 
