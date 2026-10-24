@@ -20,6 +20,18 @@ xpf (0.0.0) unstable; urgency=medium
     kernel forcing leg runs and pins all 27 cells and rejects any
     skipped subtest, and an AST census fails if a new helper caller
     is not registered in the leg.
+  * Test: fix the `functional1944` tagged login-password test and stop
+    a build-tag census failure suppressing the Go suite (#16467).
+    Since #15990 made `config.Secret` a struct, the tagged test's raw
+    string assignments no longer compiled; it now uses
+    `config.NewSecret(...)`. In `test-go` the census ran as its own
+    recipe line before the test legs, so make aborted there and
+    `go test ./...` never ran. `test-go` now runs vet, the full test
+    leg, the uncached census leg and finally the build-tag census in
+    one status-capturing recipe (the #10496 aggregate shape): a
+    deliberately broken tagged file still invokes `go test ./...`
+    and exits nonzero, and no leg is weakened or skipped.
+
   * Config: warn on unknown `system`, `snmp` and class-of-service
     keywords (#16462). `syslog hots`/`hosts`, `ntp servr`,
     `name-sever`, `snmp comunity`, a bad syslog facility
