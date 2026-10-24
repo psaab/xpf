@@ -7138,3 +7138,463 @@ fn tiny_first_fragment_dropped_by_live_screen_stage_16007() {
     );
 }
 
+// ===================================================================
+// #16051 fold — positional screen roles must not collapse.
+// ===================================================================
+
+/// Build the smallest WorkerContext needed by the screen stages over
+/// `forwarding`, with an event stream whose payloads the caller drains
+/// through the returned receiver.
+#[allow(clippy::too_many_arguments)]
+fn screen_test_ctx<'a>(
+    forwarding: &'a ForwardingState,
+    ident: &'a BindingIdentity,
+    binding_lookup: &'a WorkerBindingLookup,
+    mirror_targets: &'a MirrorTargetMap,
+    ha_state: &'a BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &'a Arc<ShardedNeighborMap>,
+    shared_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &'a SharedSessionOwnerRgIndexes,
+    ike_exchanges: &'a Arc<crate::afxdp::forwarding::IkeExchangeTable>,
+    local_tunnel_deliveries: &'a Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>>,
+    recent_exceptions: &'a Arc<Mutex<ExceptionEventRing>>,
+    last_resolution: &'a Arc<Mutex<Option<ResolutionEvent>>>,
+    peer_worker_commands: &'a [Arc<Mutex<VecDeque<WorkerCommand>>>],
+    dnat_fds: &'a DnatTableFds,
+    rg_epochs: &'a [AtomicU32; MAX_RG_EPOCHS],
+    pptp_control: &'a Arc<crate::session::pptp_control::PptpControlInbox>,
+    event_handle: &'a crate::event_stream::EventStreamWorkerHandle,
+) -> WorkerContext<'a> {
+    WorkerContext {
+        pptp_control,
+        ident,
+        binding_lookup,
+        mirror_targets,
+        forwarding,
+        ha_state,
+        dynamic_neighbors,
+        neighbor_resolver: None,
+        shared_sessions,
+        shared_nat_sessions,
+        shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
+        ike_exchanges,
+        slow_path: None,
+        event_stream: Some(event_handle),
+        local_tunnel_deliveries,
+        recent_exceptions,
+        last_resolution,
+        peer_worker_commands,
+        worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
+        dnat_fds,
+        rg_epochs,
+        cold_path_sample_mask: 0xff,
+    }
+}
+
+struct ScreenTestRig {
+    forwarding: ForwardingState,
+    ident: BindingIdentity,
+    binding_lookup: WorkerBindingLookup,
+    mirror_targets: MirrorTargetMap,
+    ha_state: BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: Arc<ShardedNeighborMap>,
+    shared_sessions: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: SharedSessionOwnerRgIndexes,
+    ike_exchanges: Arc<crate::afxdp::forwarding::IkeExchangeTable>,
+    local_tunnel_deliveries: Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>>,
+    recent_exceptions: Arc<Mutex<ExceptionEventRing>>,
+    last_resolution: Arc<Mutex<Option<ResolutionEvent>>>,
+    peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    dnat_fds: DnatTableFds,
+    rg_epochs: [AtomicU32; MAX_RG_EPOCHS],
+    pptp_control: Arc<crate::session::pptp_control::PptpControlInbox>,
+    event_handle: crate::event_stream::EventStreamWorkerHandle,
+    event_rx: std::sync::mpsc::Receiver<crate::event_stream::codec::EventFrame>,
+}
+
+impl ScreenTestRig {
+    fn new(forwarding: ForwardingState) -> Self {
+        let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
+            16,
+            DataplaneEventRateLimitConfig {
+                events_per_second: 0,
+                burst: 0,
+                session_close_events_per_second: 0,
+                session_close_burst: 0,
+            },
+        );
+        Self {
+            forwarding,
+            ident: BindingIdentity {
+                slot: 0,
+                queue_id: 0,
+                worker_id: 0,
+                interface: Arc::<str>::from("reth1.0"),
+                ifindex: 24,
+            },
+            binding_lookup: WorkerBindingLookup::default(),
+            mirror_targets: MirrorTargetMap::default(),
+            ha_state: BTreeMap::new(),
+            dynamic_neighbors: Arc::new(ShardedNeighborMap::default()),
+            shared_sessions: Arc::new(Mutex::new(FastMap::default())),
+            shared_nat_sessions: Arc::new(Mutex::new(FastMap::default())),
+            shared_forward_wire_sessions: Arc::new(Mutex::new(FastMap::default())),
+            shared_owner_rg_indexes: SharedSessionOwnerRgIndexes::default(),
+            ike_exchanges: Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new()),
+            local_tunnel_deliveries: Arc::new(ArcSwap::from_pointee(BTreeMap::new())),
+            recent_exceptions: Arc::new(Mutex::new(ExceptionEventRing::new())),
+            last_resolution: Arc::new(Mutex::new(None)),
+            peer_worker_commands: Vec::new(),
+            dnat_fds: DnatTableFds::default(),
+            rg_epochs: std::array::from_fn(|_| AtomicU32::new(0)),
+            pptp_control: Arc::new(crate::session::pptp_control::PptpControlInbox::default()),
+            event_handle,
+            event_rx,
+        }
+    }
+
+    fn ctx(&self) -> WorkerContext<'_> {
+        screen_test_ctx(
+            &self.forwarding,
+            &self.ident,
+            &self.binding_lookup,
+            &self.mirror_targets,
+            &self.ha_state,
+            &self.dynamic_neighbors,
+            &self.shared_sessions,
+            &self.shared_nat_sessions,
+            &self.shared_forward_wire_sessions,
+            &self.shared_owner_rg_indexes,
+            &self.ike_exchanges,
+            &self.local_tunnel_deliveries,
+            &self.recent_exceptions,
+            &self.last_resolution,
+            &self.peer_worker_commands,
+            &self.dnat_fds,
+            &self.rg_epochs,
+            &self.pptp_control,
+            &self.event_handle,
+        )
+    }
+
+    fn drain_events(&self) -> Vec<crate::event_stream::codec::DataplaneEventPayload> {
+        std::iter::from_fn(|| {
+            self.event_rx
+                .try_recv()
+                .ok()
+                .map(|frame| frame.decode_dataplane_event())
+        })
+        .flatten()
+        .collect()
+    }
+}
+
+/// #16051 fold fail-on-revert: disposition is per-role. Raw `lan`
+/// (ifindex 24) trips syn-fin in audit mode; claimed `wan` trips the
+/// same screen enforcing. The enforcing claimed veto must recycle even
+/// though the raw verdict is a Drop that raw audit mode would convert
+/// to Pass. Reverting the claimed block to `if !matches!(verdict, Drop)`
+/// suppression turns this Pass and fails RED.
+#[test]
+fn raw_audit_drop_does_not_suppress_enforcing_claimed_veto_16051() {
+    use crate::test_zone_ids::TEST_WAN_ZONE_ID;
+
+    let forwarding = build_forwarding_state(&super::super::test_fixtures::nat_snapshot());
+    let rig = ScreenTestRig::new(forwarding);
+    let ctx = rig.ctx();
+
+    let mut profiles = FxHashMap::default();
+    profiles.insert(
+        "lan".to_string(),
+        ScreenProfile {
+            syn_fin: true,
+            alarm_without_drop: true,
+            ..ScreenProfile::default()
+        },
+    );
+    profiles.insert(
+        "wan".to_string(),
+        ScreenProfile {
+            syn_fin: true,
+            ..ScreenProfile::default()
+        },
+    );
+    let mut screen = ScreenState::new();
+    screen.update_profiles(profiles);
+
+    let frame = tcp_v4_frame(
+        Ipv4Addr::new(192, 0, 2, 10),
+        Ipv4Addr::new(198, 51, 100, 20),
+        49152,
+        443,
+        TCP_FLAG_SYN | 0x01,
+        1,
+        0,
+    );
+    let meta = tcp_v4_meta(&frame, TCP_FLAG_SYN | 0x01);
+    let flow = parse_session_flow_from_bytes(&frame, meta).expect("session flow from SYN|FIN");
+    let mut counters = BatchCounters::default();
+    let outcome = stage_screen_check_with_ambiguous(
+        Some(&flow),
+        &frame,
+        meta,
+        None,
+        Some(TEST_WAN_ZONE_ID),
+        TEST_NOW_NS,
+        TEST_NOW_SECS,
+        &mut screen,
+        &mut counters,
+        &ctx,
+    );
+
+    assert!(
+        matches!(outcome, StageOutcome::RecycleAndContinue),
+        "enforcing claimed veto must recycle despite raw audit-only Drop"
+    );
+    assert_eq!(counters.screen_drops, 1);
+    assert_eq!(
+        screen.alarm_without_drop_events(),
+        0,
+        "only the raw audit alarm is suppressed by claimed-first disposition; claimed itself enforces"
+    );
+    let events = rig.drain_events();
+    assert_eq!(events.len(), 1, "claimed drop emits exactly one event");
+    assert_eq!(events[0].ingress_zone_id, TEST_WAN_ZONE_ID);
+    assert_eq!(events[0].action, 0, "screen drop event action is DENY (0)");
+}
+
+/// #16051 fold fail-on-revert: claimed-only ACK validation must stay
+/// NotApplicable/Pass. The raw ingress (lan) has no profile; claimed
+/// `wan` alone carries an active SYN-cookie profile and a cookie minted
+/// under `wan`. Calling the stage with claimed in the full slot would
+/// validate/recycle or count it; positional handling must do neither.
+/// The raw-lan Validated control proves the same ACK/cookie machinery
+/// is live and would have validated had the zone been raw.
+#[test]
+fn claimed_only_cookie_ack_is_not_validated_16051() {
+    use crate::test_zone_ids::TEST_WAN_ZONE_ID;
+
+    // Mint a wan cookie directly against the ScreenState.
+    let mut wan_profiles = FxHashMap::default();
+    wan_profiles.insert(
+        "wan".to_string(),
+        ScreenProfile {
+            syn_flood_threshold: 1,
+            syn_cookie: true,
+            ..ScreenProfile::default()
+        },
+    );
+    let mut screen = ScreenState::new();
+    screen.update_profiles(wan_profiles);
+    screen.update_syn_cookie_master_key(Some([0x42; 16]));
+
+    let client = Ipv4Addr::new(192, 0, 2, 10);
+    let server = Ipv4Addr::new(198, 51, 100, 20);
+    let syn_frame = tcp_v4_frame(client, server, 49152, 443, TCP_FLAG_SYN, 1, 0);
+    let syn_meta = tcp_v4_meta(&syn_frame, TCP_FLAG_SYN);
+    let syn_flow =
+        parse_session_flow_from_bytes(&syn_frame, syn_meta).expect("session flow from SYN");
+    let syn_info = extract_screen_info(
+        &syn_frame,
+        syn_meta.addr_family,
+        syn_meta.protocol,
+        syn_meta.tcp_flags,
+        syn_meta.pkt_len,
+        syn_flow.src_ip,
+        syn_flow.dst_ip,
+        syn_flow.forward_key.src_port,
+        syn_flow.forward_key.dst_port,
+        syn_meta.l3_offset as usize,
+    )
+    .expect("valid SYN frame parses");
+    assert_eq!(
+        screen.check_packet_with_zone_id("wan", TEST_WAN_ZONE_ID, &syn_info, TEST_NOW_SECS),
+        ScreenVerdict::Pass
+    );
+    let challenge = match screen.check_packet_with_zone_id(
+        "wan",
+        TEST_WAN_ZONE_ID,
+        &syn_info,
+        TEST_NOW_SECS,
+    ) {
+        ScreenVerdict::SynCookieChallenge(challenge) => challenge,
+        other => panic!("expected wan SYN-cookie challenge, got {other:?}"),
+    };
+
+    let ack_frame = tcp_v4_frame(
+        client,
+        server,
+        49152,
+        443,
+        TCP_FLAG_ACK,
+        2,
+        challenge.cookie_isn.wrapping_add(1),
+    );
+    let ack_meta = tcp_v4_meta(&ack_frame, TCP_FLAG_ACK);
+    let ack_flow =
+        parse_session_flow_from_bytes(&ack_frame, ack_meta).expect("session flow from ACK");
+
+    let forwarding = build_forwarding_state(&super::super::test_fixtures::nat_snapshot());
+    let rig = ScreenTestRig::new(forwarding);
+    let ctx = rig.ctx();
+
+    // Claimed-only: ingress ifindex 24 is lan (raw, unprofiled); wan is
+    // passed only as the ambiguous claimed zone.
+    let mut claimed_counters = BatchCounters::default();
+    let claimed_outcome = stage_screen_syn_cookie_ack_on_session_miss_with_ambiguous(
+        Some(&ack_flow),
+        &ack_frame,
+        ack_meta,
+        None,
+        Some(TEST_WAN_ZONE_ID),
+        TEST_NOW_NS,
+        TEST_NOW_SECS,
+        &mut screen,
+        &mut claimed_counters,
+        &ctx,
+    );
+    assert!(
+        matches!(
+            claimed_outcome,
+            StageOutcome::Continue(SynCookieAckOutcome::Pass)
+        ),
+        "claimed-only cookie ACK must Pass without validation"
+    );
+    assert_eq!(claimed_counters.syn_cookie_ack_valid, 0);
+    assert_eq!(claimed_counters.syn_cookie_ack_invalid, 0);
+    assert_eq!(claimed_counters.screen_drops, 0);
+    assert!(
+        rig.drain_events().is_empty(),
+        "claimed-only ACK validation must not emit validation events"
+    );
+
+    // Control: the identical ACK under raw wan validates. This proves
+    // the cookie was live, so the claimed-only Pass above is positional,
+    // not a dead-cookie artifact. Use a fresh ScreenState minted the
+    // same way so the control does not inherit claimed-call state.
+    let mut control_screen = ScreenState::new();
+    let mut control_profiles = FxHashMap::default();
+    control_profiles.insert(
+        "wan".to_string(),
+        ScreenProfile {
+            syn_flood_threshold: 1,
+            syn_cookie: true,
+            ..ScreenProfile::default()
+        },
+    );
+    control_screen.update_profiles(control_profiles);
+    control_screen.update_syn_cookie_master_key(Some([0x42; 16]));
+    assert_eq!(
+        control_screen.check_packet_with_zone_id("wan", TEST_WAN_ZONE_ID, &syn_info, TEST_NOW_SECS),
+        ScreenVerdict::Pass
+    );
+    let control_challenge = match control_screen.check_packet_with_zone_id(
+        "wan",
+        TEST_WAN_ZONE_ID,
+        &syn_info,
+        TEST_NOW_SECS,
+    ) {
+        ScreenVerdict::SynCookieChallenge(challenge) => challenge,
+        other => panic!("expected control wan challenge, got {other:?}"),
+    };
+    let control_ack = tcp_v4_frame(
+        client,
+        server,
+        49152,
+        443,
+        TCP_FLAG_ACK,
+        2,
+        control_challenge.cookie_isn.wrapping_add(1),
+    );
+    let control_meta = tcp_v4_meta(&control_ack, TCP_FLAG_ACK);
+    let control_flow =
+        parse_session_flow_from_bytes(&control_ack, control_meta).expect("control ACK flow");
+    // Raw wan via override: the stage's raw slot is the validated zone.
+    let mut control_counters = BatchCounters::default();
+    let control_outcome = stage_screen_syn_cookie_ack_on_session_miss_with_ambiguous(
+        Some(&control_flow),
+        &control_ack,
+        control_meta,
+        Some(TEST_WAN_ZONE_ID),
+        None,
+        TEST_NOW_NS,
+        TEST_NOW_SECS,
+        &mut control_screen,
+        &mut control_counters,
+        &ctx,
+    );
+    assert!(
+        matches!(
+            control_outcome,
+            StageOutcome::Continue(SynCookieAckOutcome::Validated)
+        ),
+        "raw wan control ACK must validate"
+    );
+    assert_eq!(control_counters.syn_cookie_ack_valid, 1);
+}
+
+/// #16051 fold: claimed-only parse errors must not be attributed to
+/// sentinel zone 0 in either branch. A truncated IPv4 frame (18 bytes:
+/// Ethernet + 4 IP bytes) fails extract; with only claimed `wan`
+/// profiled and raw `lan` unprofiled, both the flow-present call
+/// (flow supplied synthetically is not used before extract on the raw
+/// path — the stage extracts first) and the flowless call must Pass
+/// with zero drops/events. Raw-present parse attribution is covered by
+/// the pre-existing #2146/#5190 cells.
+#[test]
+fn claimed_only_parse_error_not_attributed_to_zone_zero_16051() {
+    use crate::test_zone_ids::TEST_WAN_ZONE_ID;
+
+    let forwarding = build_forwarding_state(&super::super::test_fixtures::nat_snapshot());
+    let rig = ScreenTestRig::new(forwarding);
+    let ctx = rig.ctx();
+
+    let mut profiles = FxHashMap::default();
+    profiles.insert(
+        "wan".to_string(),
+        ScreenProfile {
+            syn_fin: true,
+            ..ScreenProfile::default()
+        },
+    );
+    let mut screen = ScreenState::new();
+    screen.update_profiles(profiles);
+
+    // Ethernet header + only 4 bytes of IPv4 header: extract must Err.
+    let mut frame = tcp_v4_frame(
+        Ipv4Addr::new(192, 0, 2, 10),
+        Ipv4Addr::new(198, 51, 100, 20),
+        49152,
+        443,
+        TCP_FLAG_SYN,
+        1,
+        0,
+    );
+    frame.truncate(18);
+    let meta = tcp_v4_meta(&frame, TCP_FLAG_SYN);
+    // Flowless invocation exercises the flowless Err arm.
+    let mut counters = BatchCounters::default();
+    let outcome = stage_screen_check_with_ambiguous(
+        None,
+        &frame,
+        meta,
+        None,
+        Some(TEST_WAN_ZONE_ID),
+        TEST_NOW_NS,
+        TEST_NOW_SECS,
+        &mut screen,
+        &mut counters,
+        &ctx,
+    );
+    assert!(
+        matches!(outcome, StageOutcome::Continue(ScreenCheckOutcome::Pass)),
+        "claimed-only flowless parse error must Pass, not zone-0 drop"
+    );
+    assert_eq!(counters.screen_drops, 0);
+    assert!(rig.drain_events().is_empty(), "no zone-0 parse event may be emitted");
+}
