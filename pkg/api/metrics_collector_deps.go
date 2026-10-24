@@ -54,6 +54,7 @@ type collectorDeps struct {
 
 	restConnRefusals func() uint64
 	restConnActive   func() int64
+	fabricConnStats  func() (uint64, int64)
 
 	configPersistDegradedFn              func() bool
 	rollbackHistoryDegradedFn            func() bool
@@ -136,6 +137,7 @@ func collectorDepsFromServer(srv *Server) collectorDeps {
 
 		restConnRefusals: srv.RestConnRefusals,
 		restConnActive:   srv.RestConnActive,
+		fabricConnStats:  srv.fabricConnStatsFn,
 
 		configPersistDegradedFn:              srv.configPersistDegradedFn,
 		rollbackHistoryDegradedFn:            srv.rollbackHistoryDegradedFn,

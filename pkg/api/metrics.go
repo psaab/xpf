@@ -124,6 +124,12 @@ type xpfCollector struct {
 	// collector to keep in step.
 	restConnRefusalsTotal *prometheus.Desc
 	restConnActive        *prometheus.Desc
+	// #16478: fabric gRPC connection-count bound refusals + occupancy.
+	// Declared here, emitted from metrics_fabric_conn_16478.go; the values
+	// live on the grpcapi Server's gate (read via the daemon-wired hook),
+	// so there is no counter state on the collector to keep in step.
+	fabricConnRefusalsTotal *prometheus.Desc
+	fabricConnActive        *prometheus.Desc
 
 	// #9019: work the dataplane DECLINED to do. Both counters existed with no
 	// reader; see metrics_dataplane_silent_skips_9019.go.
@@ -1199,6 +1205,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// after the dataplane gate would hide them in the case they matter most.
 	defer c.emitAdmissionRefusals(ch)
 	defer c.emitRESTConnBound(ch)
+	defer c.emitFabricConnBound(ch)
 	defer c.emitAuthzDenials(ch)
 	// #9019: also before the dataplane gate -- these report a dataplane that
 	// came up incompletely, so gating them on a healthy dataplane would hide

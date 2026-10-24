@@ -116,6 +116,7 @@ var collectorDescFamilies = []collectorDescFamily{
 	{name: "hatakeover", init: (*xpfCollector).initHATakeoverDescriptors13301, fields: collectorDescHATakeover},
 	{name: "snmpservebudget", init: (*xpfCollector).initSNMPServeBudgetDescriptors, fields: collectorDescSNMPServeBudget},
 	{name: "restconn", init: (*xpfCollector).initRESTConnDescriptors, fields: collectorDescRESTConn},
+	{name: "fabricconn", init: (*xpfCollector).initFabricConnDescriptors, fields: collectorDescFabricConn},
 	{name: "dataplanesafety", init: (*xpfCollector).initDataplaneSafetyDescriptors, fields: collectorDescDataplaneSafety},
 }
 
@@ -903,6 +904,12 @@ var collectorDescSNMPServeBudget = []int{
 var collectorDescRESTConn = []int{
 	xpfCollectorDescFieldIndex("restConnRefusalsTotal"),
 	xpfCollectorDescFieldIndex("restConnActive"),
+}
+
+// initFabricConnDescriptors (metrics_fabric_conn_16478.go).
+var collectorDescFabricConn = []int{
+	xpfCollectorDescFieldIndex("fabricConnRefusalsTotal"),
+	xpfCollectorDescFieldIndex("fabricConnActive"),
 }
 
 // initDataplaneSafetyDescriptors (metrics_dataplane_safety_13302.go).
