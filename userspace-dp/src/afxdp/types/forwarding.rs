@@ -101,6 +101,18 @@ pub(in crate::afxdp) struct ForwardingState {
     /// owned in EVERY table, mirroring `scope_ok`'s empty-instance wildcard.
     /// Interface host addresses are NEVER wildcarded (an interface IP genuinely
     /// lives in exactly one VRF).
+    /// #16131: interned twin of the string set below, kept ONLY as a
+    /// dual-carry agreement source while the string form remains
+    /// authoritative. Derived once per build by
+    /// `forwarding_build::intern_route_tables` from the authoritative
+    /// string sets and the published `route_table_identities`; never
+    /// written by any other code, never read on the packet path. The
+    /// agreement cell in `forwarding_build/intern.rs` proves both
+    /// carries agree on every built state — a disagreement fails the
+    /// build closed rather than letting an unproven interned form
+    /// near a lookup.
+    pub(in crate::afxdp) local_table_ids_v4: FastMap<Ipv4Addr, FastSet<RouteIdentity>>,
+    pub(in crate::afxdp) local_table_ids_v6: FastMap<Ipv6Addr, FastSet<RouteIdentity>>,
     pub(in crate::afxdp) local_tables_v4: FastMap<Ipv4Addr, FastSet<String>>,
     pub(in crate::afxdp) local_tables_v6: FastMap<Ipv6Addr, FastSet<String>>,
     pub(in crate::afxdp) local_nat_any_table_v4: FastSet<Ipv4Addr>,
@@ -132,8 +144,18 @@ pub(in crate::afxdp) struct ForwardingState {
     /// last-write-wins when two VRFs configured the same address on
     /// different interfaces. The nested form also keeps the per-packet
     /// lookup allocation-free (borrowed `&str` table key).
+    /// #16131: dual-carry interned twin of the nested string-keyed map
+    /// below; the inner map is keyed by the interned `RouteIdentity`
+    /// instead of the canonical table string. Derived at build by
+    /// `forwarding_build::intern_route_tables`; the string form stays
+    /// authoritative (see `local_table_ids_v4`).
+    pub(in crate::afxdp) interface_nat_ids_v4: FastMap<Ipv4Addr, FastMap<RouteIdentity, i32>>,
+    pub(in crate::afxdp) interface_nat_ids_v6: FastMap<Ipv6Addr, FastMap<RouteIdentity, i32>>,
     pub(in crate::afxdp) interface_nat_v4: FastMap<Ipv4Addr, FastMap<String, i32>>,
     pub(in crate::afxdp) interface_nat_v6: FastMap<Ipv6Addr, FastMap<String, i32>>,
+    /// #16131: dual-carry interned twin of the string set below; derived
+    /// at build by `forwarding_build::intern_route_tables`. The string
+    /// form stays authoritative.
     /// #12086: owning routing tables for interface-NAT local-delivery
     /// addresses. Like `local_tables_v*`, these interface addresses are not
     /// wildcarded across routing instances.
@@ -185,6 +207,12 @@ pub(in crate::afxdp) struct ForwardingState {
     /// Explicit canonical-table identity authority captured with this immutable
     /// FIB generation. Missing keys are never interpreted as the default table.
     pub(in crate::afxdp) route_table_identities: FastMap<String, RouteIdentity>,
+    /// #16131: false when any table name interned into the dual-carry
+    /// `*_ids_*` twins lacked a published `route_table_identities` row
+    /// (identity is never synthesized in that case — the name is simply
+    /// absent from the interned carry). Diagnostic only: the string
+    /// carry stays authoritative and the packet path never reads this.
+    pub(in crate::afxdp) route_table_interning_complete: bool,
     /// False when any selectable FIB table lacks an authoritative identity.
     pub(in crate::afxdp) route_table_identity_map_complete: bool,
     pub(in crate::afxdp) tunnel_endpoints: FastMap<u16, TunnelEndpoint>,
