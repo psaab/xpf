@@ -159,7 +159,40 @@ out=$( GO_SKIP_ROOT="$WORK" GO_SKIP_DIRS=pkg/gamma GO_SKIP_FLOORS="$WORK/gfloors
 echo "$out" | grep -q "2 skip call sites" && ok "both real calls still counted" ||
 	bad "a real call went missing: $out"
 
-echo
+# ── 8. String-literal contents are not a call site (#16474) ──
+# A test may pin the ABSENCE of a skip by quoting it in a string literal
+# (pkg/nfqueue/measure_gate_16436_test.go asserts harness_test.go does not
+# contain `t.Skip("netns child completed")`). That quoted text is a fixture,
+# not a call site: counting it banks a phantom skip and re-reds the census
+# on a tree whose real skip was removed. The paired real call on the next
+# line pins the other direction: blanking strings must not hide a genuine
+# call, and its message must still classify (recovered from the original
+# source at the same offset).
+mkdir -p "$WORK/pkg/delta"
+cat > "$WORK/pkg/delta/d_test.go" <<'GO'
+package delta
+func TestD(t *testing.T) {
+	if strings.Contains(src, `t.Skip("netns child completed")`) { t.Fatal("x") }
+	_ = "t.Skip(\"also just quoted text\")"
+	t.Skip("needs root for the delta fixture")
+}
+GO
+cat > "$WORK/dfloors" <<'F'
+total = 1
+priv-absent = 1
+priv-present = 0
+other = 0
+unparsed = 0
+F
+out=$( GO_SKIP_ROOT="$WORK" GO_SKIP_DIRS=pkg/delta GO_SKIP_FLOORS="$WORK/dfloors" \
+	sh "$ROOT/scripts/go-skip-census.sh" 2>&1 ); rc=$?
+[ "$rc" = "0" ] && ok "string-literal contents are not counted (quoted t.Skip fixture)" ||
+	bad "a quoted t.Skip moved the census: $out"
+echo "$out" | grep -q "1 skip call sites" && ok "only the real delta call is counted" ||
+	bad "string-literal cell counted the wrong population: $out"
+echo "$out" | grep -qE "^ +priv-absent +1( |$)" && ok "the real call's message still classifies from the original source" ||
+	bad "the real call behind blanked strings was misclassified: $out"
+
 echo "  go-skip census selftest: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
 # An empty sweep is not a pass: if the cells stopped executing, PASS is 0 and

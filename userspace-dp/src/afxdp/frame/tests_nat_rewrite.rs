@@ -2690,7 +2690,7 @@ fn nat64_15956_spare_capacity_build_is_byte_identical_with_poisoned_tail() {
 // 64/512/1460B payloads, through `build_nat64_forwarded_frame`. Run with:
 //   cargo test --release nat64_15956_build_bench -- --ignored --nocapture --test-threads=1
 #[test]
-#[ignore = "MEASUREMENT #15956: NAT64 build ns/pkt; prints numbers, asserts nothing"]
+#[ignore = "MEASUREMENT: NAT64 build ns/pkt (#15956); prints numbers, asserts nothing"]
 fn nat64_15956_build_bench() {
     use std::time::Instant;
     let client: Ipv6Addr = "2001:db8::1".parse().unwrap();
@@ -2763,7 +2763,7 @@ fn nat64_15956_build_bench() {
 // interleaved per round so host drift hits both. Run with:
 //   cargo test --release nat64_15956_resize_ab_bench -- --ignored --nocapture --test-threads=1
 #[test]
-#[ignore = "MEASUREMENT #15956: resize vs spare-capacity A/B; prints numbers, asserts nothing"]
+#[ignore = "MEASUREMENT: resize vs spare-capacity A/B (#15956); prints numbers, asserts nothing"]
 fn nat64_15956_resize_ab_bench() {
     use crate::afxdp::cos::redirect_pool;
     use std::time::Instant;

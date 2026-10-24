@@ -31,12 +31,25 @@ jobs:
         run: sh scripts/harness-census.sh
       - name: Self-test the census
         run: bash ./test/incus/harness-census-selftest.sh
-      # #16465: rust-source reachability — a deleted test `mod` line
+      # #16465: rust-source reachability -- a deleted test `mod` line
       # orphans a file `cargo check --all-targets` cannot see.
       - name: Rust source census
         run: |
           python3 scripts/rust-source-census-13961.py --self-test
           python3 scripts/rust-source-census-13961.py userspace-dp/src
+      # #16474: the remaining hermetic censuses. These ran only via
+      # `make test` / `make selftest`, so skip/ignore drift accumulated
+      # between manual runs with no merge-visible signal. Each is a
+      # pure file scan (no network, no toolchain beyond python3/sh):
+      # a new undeclared t.Skip or #[ignore] reds this job.
+      - name: Go skip census
+        run: bash scripts/go-skip-census.sh
+      - name: Ignored-cell census
+        run: sh scripts/ignored-cell-census.sh
+      - name: Self-test the Go skip census
+        run: bash ./test/incus/go-skip-census-selftest.sh
+      - name: Self-test the ignored-cell census
+        run: bash ./test/incus/ignored-cell-census-selftest.sh
 
   proto:
     name: Proto header and regen check

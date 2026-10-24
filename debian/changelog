@@ -14,6 +14,15 @@ xpf (0.0.0) unstable; urgency=medium
     deployed config on the shared v4/v6 segments and fails on any
     cross-stack address claim other than the documented
     172.16.80.7 leg.
+  * Test: bank go-skip census drift, declare the three measurement
+    #[ignore] cells, and run the hermetic censuses in CI (#16474).
+    The go-skip floors move to the measured 557/103/18/435/1 with
+    per-bucket reasons in scripts/go-skip-census.floors; the census
+    no longer counts t.Skip text quoted inside string literals (a
+    pinned-absence fixture), and the #12617/#15956 measurement
+    cells now declare MEASUREMENT:. The CI census job also runs
+    the go-skip and ignored-cell censuses and their self-tests, so
+    a new undeclared skip or ignore reds a merge-visible job.
   * Authz: judge the base spelling of selector-bearing commands on the
     remote gates (#16472). The gRPC/REST ShowText regex gates matched
     only the registry's selector spelling (`show firewall filter`,

@@ -90,13 +90,18 @@ CALL = re.compile(r'\b(?:t|tb|b|f)\.(Skipf|SkipNow|Skip)\s*\(')
 # A literal first argument, single or back-quoted, possibly concatenated.
 LITERAL = re.compile(r'^\s*(?:"((?:[^"\\]|\\.)*)"|`([^`]*)`)')
 
-# Comments are not call sites. A `t.Skip(` mentioned in `//` or `/* */` prose
-# (or commented out) must not count: without this the census is coupled to
-# prose — rewording a comment flips the total. Strings match FIRST so a `//`
-# inside a literal (a URL before a real call on the same line) cannot hide the
-# call. Comments blank to same-length spaces with newlines kept, so reported
-# line numbers are unchanged. Rune literals match exactly one char/escape so a
-# stray apostrophe cannot swallow code.
+# Comments and string contents are not call sites. A `t.Skip(` mentioned in
+# `//` or `/* */` prose (or commented out), or inside a string literal that a
+# test asserts about (e.g. pkg/nfqueue/measure_gate_16436_test.go pins the
+# ABSENCE of `t.Skip("netns child completed")` in another file), must not
+# count: without this the census is coupled to prose and fixtures --
+# rewording a comment or a pinned-absence string flips the total. So string
+# contents blank to same-length spaces (quotes kept), comments blank
+# likewise, newlines kept so reported line numbers are unchanged. A real
+# call's message is recovered from the ORIGINAL source at the same offset
+# (offsets are preserved), so blanking cannot lose or misclassify it. Rune
+# literals match exactly one char/escape so a stray apostrophe cannot
+# swallow code.
 STRIP = re.compile(r'"(?:[^"\\\n]|\\.)*"|`[^`]*`|\'(?:[^\'\\\n]|\\.)\'|//[^\n]*|/\*.*?\*/', re.S)
 
 
@@ -104,6 +109,12 @@ def _blank(m):
     s = m.group(0)
     if s.startswith('//') or s.startswith('/*'):
         return ''.join('\n' if ch == '\n' else ' ' for ch in s)
+    if s.startswith('"') or s.startswith('`'):
+        if len(s) <= 2:
+            return s
+        return s[0] + ''.join('\n' if ch == '\n' else ' ' for ch in s[1:-1]) + s[-1]
+    if s.startswith("'"):
+        return s
     return s
 
 ROOT_WORDS = re.compile(
@@ -124,10 +135,15 @@ for d in scan_dirs:
                 continue
             path = os.path.join(dirpath, fn)
             try:
-                src = open(path, encoding="utf-8").read()
+                orig = open(path, encoding="utf-8").read()
             except OSError:
                 continue
-            src = STRIP.sub(_blank, src)
+            # STRIP preserves length and newlines, so offsets and line
+            # numbers in `src` index `orig` identically. CALL runs over
+            # the blanked text (string contents cannot fake a call site);
+            # the message literal is recovered from `orig` at the same
+            # offset, where its contents are intact.
+            src = STRIP.sub(_blank, orig)
             for m in CALL.finditer(src):
                 line = src.count("\n", 0, m.start()) + 1
                 site = f"{path}:{line}"
@@ -139,7 +155,7 @@ for d in scan_dirs:
                     # saying so is the point.
                     buckets["unparsed"].append((site, "t.SkipNow() carries no message"))
                     continue
-                lit = LITERAL.match(src[m.end():])
+                lit = LITERAL.match(orig[m.end():])
                 if not lit:
                     buckets["unparsed"].append((site, "non-literal skip message"))
                     continue
