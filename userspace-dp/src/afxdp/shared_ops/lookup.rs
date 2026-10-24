@@ -1021,6 +1021,12 @@ pub(in crate::afxdp) struct ResolvedFlowSessionDecision {
     pub(in crate::afxdp) deferred_shared_materialization: Option<DeferredSharedMaterialization>,
     /// #12644: transient-hit teardown held until an Owner verdict.
     pub(in crate::afxdp) deferred_synced_purge: Option<DeferredSyncedPurge>,
+    /// #16217 (FZDiag30): true only when this resolve ran under the
+    /// poll fabric-adoption gate's proof (Established + this node is
+    /// the post-takeover RG owner). The deferred materialization may
+    /// then replace a non-peer-synced local incumbent; every other
+    /// resolve keeps the #10582 clobber refusal.
+    pub(in crate::afxdp) fabric_adopted: bool,
 }
 
 /// #12644: materialization of a shared hit held until the packet's authority

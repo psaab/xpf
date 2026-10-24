@@ -1230,3 +1230,50 @@ zero-zero cell lands; this closes the FZDiag29 stored-terminal leg.
 Cluster restored after each run: clean master `2c8575b70e`, helper
 `2f2f5cbf...b04` both nodes (hash-proved), RG0/1/2 node0 primary,
 target OK, P4 verification 14.0-18.6 Gbit/s.
+
+## FZDiag30 leg (FZFixWire28): adopted materialization replaces local incumbent
+
+FZDiag30 (head `cf4bd58904` + FZ30 FILE trace, aged P4 28 SUM zeros)
+proved fw1's adopted hits read `install_failed=true` on 2,231/2,237
+SEED lines: `upsert_synced_with_origin` (`session/install.rs:900`,
+`allow_replace_local=false` from `materialize_shared_session_hit`)
+refused to clobber the non-peer-synced incumbent, so
+`resolved.install_failed` stayed true, the seed gate
+(`flow_cache_seed.rs:133`) never installed an entry, and every packet
+re-took the slow path. A pre-adoption cached PolicyDenied for the NAT
+tuple was superseded 124x instead of being replaced.
+
+Fix: `materialize_shared_session_hit_adopted` threads the resolve's
+`fabric_adopted` proof (new `ResolvedFlowSessionDecision::fabric_adopted`,
+set only by the hit/reverse constructions from the inner resolver's
+`fabric_adopted` argument) into `allow_replace_local`. Non-adopted
+materializations keep the #10582 refusal bit-identically. The deny is
+then superseded by the adopted seed via the existing #13635/#16217
+`has_session_hit_at` deny arm (the adopted row now actually installs).
+
+Unit: `adopted_materialize_replaces_local_incumbent_16217` (adopted
+replaces ForwardFlow incumbent -> SharedMaterialize + adopted
+session_id; non-adopted control keeps refusal + incumbent);
+`shared_hit_local_clobber_sets_install_failed_10582` still green;
+`cargo test 16217` 41/41; `session::` 518 passed, 2 failures identical
+on base (`tcp_seq_15753`, `session_decision_typed_snat_layout_11064`);
+`flow_cache_hit` 76 passed, 2 failures identical on base.
+
+Live aged table (all-node0, P4 60 s, RG1 fw0->fw1 at 30 s age, deb
+`99.16217.56.dirty`, helper `dcb4fe7d...` hash-proved both nodes,
+evidence `/var/worktrees/fzwire28/cell{1,3,4}/`):
+
+| Arm | Build | SUM zero intervals | Verdict |
+|---|---|---|---|
+| Clean master (FZDiag8) | 2c8575b70e | 130 | FAIL |
+| #16215 third shape | ca91c55e5a | 25 | FAIL |
+| FZDiag30 (head cf4bd58904) | 99.16217.55.fz30 | 28 (all from FO+1 s) | FAIL |
+| This fix run 1 (cell1) | 99.16217.56.dirty | 1 (at FO+2 s) | near-pass |
+| This fix run 2 (cell2) | 99.16217.56.dirty | — (rolling-upgrade deploy abort before traffic) | no verdict |
+| **This fix run 3 (cell3)** | **99.16217.56.dirty** | **0** | **PASS** |
+| **This fix run 4 (cell4)** | **99.16217.56.dirty** | **0** | **PASS — ZERO TWICE CONSECUTIVELY** |
+
+Post-FO throughput ~1.3-2.6 Gbps through failback in the passing runs
+(dip at FO+1/2 s only). Cluster restored after each run: clean master
+`2c8575b70e`, helper `2f2f5cbf...b04` both nodes (hash-proved),
+RG0/1/2 node0 primary, target OK, P4 verification 8.6-14.1 Gbit/s.
