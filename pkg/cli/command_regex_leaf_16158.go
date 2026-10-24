@@ -249,6 +249,27 @@ func evaluateCommandRegex(
 		decision = config.LoginRegexDecision{Allowed: true, DecidedBy: config.LoginRegexNeither,
 			Reason: "distinct narrower selector command; no deny names it"}
 	}
+	// #16469 selector-form exception: when the only tier-deny
+	// verdicts are on selector forms (`show route table` minted from
+	// the placeholder-sibling walk) and the executed command itself
+	// is affirmatively allowed by a longer allow (the
+	// deny-with-exceptions idiom: `^show route table public-vrf$`
+	// beside `^show route table`), the selector spelling's denial
+	// prices the broader selector command, not this excepted value.
+	// EvaluateForms cannot see this geometry: its truncated-form
+	// veto measures the exception against the base/full forms, and a
+	// selector form is neither — pre-#15942 the full form WAS
+	// `show route table public-vrf`'s keyword run, so the exception
+	// fired there. The rescue is narrow (see
+	// selectorExceptionAllowed): no tier deny on the executed, base
+	// or full forms, and the executed command must be
+	// affirmatively allow-decided. A selector-spelling deny with no
+	// such exception (the #16469 regression cells) still denies,
+	// because the command form is then unaffirmed.
+	if !decision.Allowed && selectorExceptionAllowed(rules, matched, command, baseForm, fullForm, selectorForms) {
+		decision = config.LoginRegexDecision{Allowed: true, DecidedBy: config.LoginRegexNeither,
+			Reason: "selector form denied but the executed command is excepted by a longer allow"}
+	}
 	if decision.Allowed {
 		return nil
 	}
@@ -386,6 +407,68 @@ func distinctNarrowerAllowed(rules config.CompiledLoginRegexes, matched, command
 	return true
 }
 
+// selectorExceptionAllowed reports whether a denial driven ONLY by
+// selector forms is lifted by a deny-with-exceptions allow naming the
+// executed command (#16469, preserving the #9628 public-vrf cell:
+// allow `^show route table public-vrf$` beside deny `^show route
+// table`). EvaluateForms' truncated-form veto measures the exception
+// against the base/full forms; a selector form is neither, and
+// pre-#15942 the keyword-full form carried this geometry — the
+// pipe arm's core-exception check likewise never sees the selector
+// form as the vetoing truncated form. Conditions, all required:
+//
+//   - at least one selector form is tier-denied, and no other form
+//     among {command, base, full} is tier-denied: a tier deny on the
+//     executed spelling (a deny naming the value) vetoes, as does a
+//     base deny (the broader listing's price — #14687's rescue, not
+//     this one) or a full-form deny (a real subcommand's price). The
+//     piped form is deliberately not counted: the selector deny
+//     re-measured on the piped string (`^show route table` matching
+//     `show route table public-vrf | match 10.0`) is this same
+//     denial. A deny that additionally reaches into pipe text
+//     (`^show route table.*match secret`) is then indistinguishable
+//     from it at this seam and lifts too — the same trade
+//     EvaluateForms' core-exception geometry makes for truncated
+//     forms, and the exception allow still had to name the executed
+//     command exactly;
+//   - the executed command (value-bearing, pipe-less) is
+//     affirmatively allow-decided (DecidedBy==Allow, Allowed), so a
+//     deny-only class or an allowlist miss can never pass — in
+//     particular the #16469 anchored selector denies, whose executed
+//     commands carry no allow, still deny.
+//
+// Tier denial, not DecidedBy alone: an allowlist miss also carries
+// DecidedBy==Allow, and a form denied only for missing the allowlist
+// must not veto an exception the executed command satisfies.
+func selectorExceptionAllowed(rules config.CompiledLoginRegexes, matched, command, baseForm, fullForm string, selectorForms []string) bool {
+	if len(selectorForms) == 0 {
+		return false
+	}
+	cmdVerdict := rules.Evaluate(command)
+	if cmdVerdict.DecidedBy != config.LoginRegexAllow || !cmdVerdict.Allowed {
+		return false
+	}
+	tierDeny := func(form string) bool {
+		d := rules.Evaluate(form)
+		return !d.Allowed && d.DecidedBy == config.LoginRegexDeny
+	}
+	selectorTierDenied := false
+	for _, form := range selectorForms {
+		if tierDeny(form) {
+			selectorTierDenied = true
+		}
+	}
+	if !selectorTierDenied {
+		return false
+	}
+	for _, form := range []string{command, baseForm, fullForm} {
+		if tierDeny(form) {
+			return false
+		}
+	}
+	return true
+}
+
 // canonicalForms renders the argument-free command forms of a canonical
 // command for regex evaluation and audit (#15942 H1-01).
 //
@@ -459,7 +542,7 @@ func canonicalForms(canon []string) (string, string, []string, string) {
 	slotCompleted := false
 	slotVocab := false
 	slotOptions := false
-	for _, w := range canon {
+	for i, w := range canon {
 		if awaitValue {
 			// w is the value itself: data, never a keyword.
 			awaitValue = false
@@ -519,10 +602,19 @@ func canonicalForms(canon []string) (string, string, []string, string) {
 					slotOptions = node.Options
 					slotCompleted = false
 				} else if hasPlaceholderChild(node) {
+					// #16469: same keyword-peek as the top-level
+					// placeholder arm — a keyword child of this
+					// node must not be eaten as the placeholder's
+					// value; it resolves in the pending arm on
+					// the next iteration.
 					pendingChildren = node.Children
 					pendingSelector = selectorOpen
 					pendingOptions = node.Options
-					awaitValue = true
+					if i+1 < len(canon) {
+						if _, isKeyword := node.Children[canon[i+1]]; !isKeyword {
+							awaitValue = true
+						}
+					}
 				}
 				current = node.Children
 				continue
@@ -591,11 +683,25 @@ func canonicalForms(canon []string) (string, string, []string, string) {
 			continue
 		}
 		if hasPlaceholderChild(node) {
-			// Placeholder-only slot: the next token fills it. Do NOT
-			// open a pending-keyword walk, or a real sibling keyword
-			// (e.g. `table` beside `<destination>`) would be eaten
-			// as the placeholder's value.
-			awaitValue = true
+			// Placeholder beside keywords (#16469): the next token
+			// fills the placeholder ONLY if it is not a declared
+			// keyword child of this node. A keyword (`table`,
+			// `fib`, `summary` beside route's `<destination>`)
+			// must fall through to the normal arms below on the
+			// next iteration, so a RequiresValue selector mints
+			// its selector form (`show route table`) and a plain
+			// keyword extends base/full (`show route summary`).
+			// Canonicalize guarantees a keyword here is never the
+			// placeholder's value, so peeking canon[i+1] against
+			// node.Children restates its own ruling. Only a
+			// non-keyword token (or end of line) fills the slot.
+			// Consumers: canonicalForms and canonicalPrefix
+			// (audit, via canonicalForms) — both fixed here.
+			if i+1 < len(canon) {
+				if _, isKeyword := node.Children[canon[i+1]]; !isKeyword {
+					awaitValue = true
+				}
+			}
 			if node.Children == nil {
 				break
 			}

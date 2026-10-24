@@ -42,6 +42,21 @@ xpf (0.0.0) unstable; urgency=medium
     pool rule, the three cluster envs state them explicitly, and any
     disagreement VOIDs the phase instead of failing; the #8280 hermetic
     cells now cover all three shipped HA configs.
+  * CLI: restore anchored selector denies beside a placeholder
+    (#16469). Since #15942 the console's canonical-forms walk ate
+    the keyword after `show route`'s `<destination>` placeholder
+    as its value, so anchored `deny-commands "^show route table$"`
+    / `"^show route protocol$"` / `"^show route instance$"` no
+    longer denied `show route table <name>` (and siblings) on the
+    box while the remote CLI still denied them, and
+    `^show route$` wrongly denied the distinct `show route
+    summary`. The walk now resolves the next token against the
+    node's declared keyword children first — only a non-keyword
+    fills the placeholder — so selector spellings mint their
+    addressable form again and plain keywords (`fib`/`terse`/
+    `detail`/`summary`) extend the command form; the
+    deny-with-exceptions idiom for an excepted table name is
+    preserved.
   * Config: warn on unknown `system`, `snmp` and class-of-service
     keywords (#16462). `syslog hots`/`hosts`, `ntp servr`,
     `name-sever`, `snmp comunity`, a bad syslog facility
