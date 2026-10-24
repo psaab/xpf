@@ -3,10 +3,10 @@ use super::*;
 /// #16217 (scoped completion evidence): reverse + forward packet
 /// counts observed for ONE full scoped key (`SessionKey` equality:
 /// 5-tuple + routing domain + discriminator) in the shared maps.
-/// `shared_completion_evidence`'s bare-tuple scan stays for its
-/// existing consumers; the fabric-adoption gate uses this scoped
-/// form so a same-tuple row in another VRF can never qualify a
-/// pending row here (Codex cross-VRF finding).
+/// `shared_completion_evidence` uses the same scoped, keyed form
+/// (fold B2); both were bare-tuple full-map scans pre-fold, so a
+/// same-tuple row in another VRF could qualify a pending row here
+/// (Codex cross-VRF finding).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::afxdp) struct SharedCompletionEvidence {
     pub rev_packets: u64,
@@ -132,20 +132,28 @@ pub(in crate::afxdp) fn shared_scoped_completion_evidence(
     let holders = lock_shared_recover(shared_sessions);
     let wires = lock_shared_recover(shared_forward_wire_sessions);
     let mut ev = SharedCompletionEvidence::default();
-    for map in [&*holders, &*wires] {
-        for entry in map.values() {
-            // The alias slot retains the canonical key on
-            // `entry.key`, so canonical/reverse equality covers
-            // every map; the wire-key comparison covers a row
-            // stored directly under the NAT'd tuple.
-            if entry.key != *canonical_key
-                && entry.key != reverse_key
-                && entry.key != wire_key
-            {
-                continue;
+    // #16217 (folds B2+B5): O(1) keyed gets only — canonical,
+    // reverse-companion, and forward-wire alias keys. The pre-fold
+    // full-map `values()` scans were O(table) per gate call and
+    // (B2) scope-tied to `bare_tuple()` in the sibling
+    // `shared_completion_evidence`; keyed gets are scope-exact by
+    // construction (full `SessionKey` incl. routing domain +
+    // discriminator). The alias slot retains the canonical key on
+    // `entry.key`, so canonical/reverse gets cover every map; the
+    // wire-key get covers a row stored directly under the NAT'd
+    // tuple. A reverse-companion row stored under the wire key is
+    // found via the NAT'd reverse companion (`forward_wire_key` of
+    // the reverse key), so both NAT'd orientations stay covered.
+    let rev_wire_key = crate::session::forward_wire_key(&reverse_key, nat);
+    for (map, keys) in [
+        (&*holders, [canonical_key, &reverse_key, &wire_key, &rev_wire_key]),
+        (&*wires, [canonical_key, &reverse_key, &wire_key, &rev_wire_key]),
+    ] {
+        for k in keys {
+            if let Some(entry) = map.get(k) {
+                ev.rev_packets = ev.rev_packets.max(entry.rev_packets);
+                ev.fwd_packets = ev.fwd_packets.max(entry.fwd_packets);
             }
-            ev.rev_packets = ev.rev_packets.max(entry.rev_packets);
-            ev.fwd_packets = ev.fwd_packets.max(entry.fwd_packets);
         }
     }
     ev
@@ -269,15 +277,26 @@ pub(in crate::afxdp) fn fabric_adoption_gate_for_wire(
 /// snapshotted from the serving forward entry's admitted reverse
 /// counters at publish/restamp time). Mere existence of a synthesized
 /// reverse companion NEVER counts — it is published with
-/// `rev_packets = 0`. Which row may vouch: a REVERSE row for the
-/// tuple carries the forward pair's reverse count; a FORWARD row
-/// only counts when its stored key is the REVERSE tuple (its own
-/// counters then measure this pair's reverse direction). A shared
-/// row's Established WIRE is deliberately NOT read here: shared
-/// Established is an OUTPUT of the restamp this evidence feeds, so
-/// importing it would be chicken-and-egg. (The import/GC consumers
-/// that may trust the wire use `shared_node_served_evidence`
-/// instead.)
+/// `rev_packets = 0`. A shared row's Established WIRE is deliberately
+/// NOT read here: shared Established is an OUTPUT of the restamp this
+/// evidence feeds, so importing it would be chicken-and-egg. (The
+/// import/GC consumers that may trust the wire use
+/// `shared_node_served_evidence` instead.)
+///
+/// Scope (fold B2) + cost (fold B5): O(1) keyed gets only, full
+/// `SessionKey` equality. The pre-fold full-map scan compared
+/// `bare_tuple()`, so identical 5-tuples in another routing domain
+/// (or another tunnel discriminator) leaked reverse counts into
+/// this key's evidence — the adoption arm was scoped (Codex
+/// cross-VRF) but the ct-slice promotion and bulk-export stamp
+/// were not, so a cross-VRF sibling could promote/stamp a pending
+/// row Established here. A row vouches when its stored key IS the
+/// canonical key, the derived reverse companion, the forward-wire
+/// alias, or the NAT'd reverse companion. A reverse row's
+/// `rev_packets` IS this pair's reverse count by construction; a
+/// forward row stored under the canonical (or wire-alias) key
+/// carries the pair's counters too (snapshotted from the serving
+/// forward entry).
 ///
 /// Lock order: `shared_sessions` THEN `shared_forward_wire_sessions`
 /// — the single node-wide order for the shared maps. Every function
@@ -290,28 +309,26 @@ pub(in crate::afxdp) fn shared_completion_evidence(
 ) -> crate::session::NodeServedEvidence {
     // Both maps, canonical order (shared_sessions first), held
     // together so the two halves of the evidence are one snapshot.
+    // Companion keys derive from a canonical row's OWN NAT decision;
+    // without a canonical row, the no-NAT companions (identity) still
+    // find a plain tuple's reverse row.
     let holders = lock_shared_recover(shared_sessions);
     let wires = lock_shared_recover(shared_forward_wire_sessions);
     let mut ev = crate::session::NodeServedEvidence::default();
+    let nat = holders
+        .get(key)
+        .or_else(|| wires.get(key))
+        .map(|e| e.decision.nat)
+        .unwrap_or_default();
+    let reverse_key = crate::session::reverse_session_key(key, nat);
+    let wire_key = crate::session::forward_wire_key(key, nat);
+    let rev_wire_key = crate::session::forward_wire_key(&reverse_key, nat);
     for map in [&*holders, &*wires] {
-        for entry in map.values() {
-            if entry.rev_packets == 0 {
-                continue;
-            }
-            let same = entry.key.bare_tuple() == key.bare_tuple();
-            let reversed = crate::session::reverse_session_key(&entry.key, entry.decision.nat)
-                .bare_tuple()
-                == key.bare_tuple();
-            if !(same || reversed) {
-                continue;
-            }
-            // A forward row stored under the FORWARD tuple measures
-            // its own forward direction — its `rev_packets` IS this
-            // pair's reverse count, so it vouches. A forward row
-            // stored under some other tuple does not. A reverse row
-            // for the tuple carries the pair's reverse count by
-            // construction (snapshotted from its forward entry).
-            if entry.metadata.is_reverse || same {
+        for k in [key, &reverse_key, &wire_key, &rev_wire_key] {
+            if let Some(entry) = map.get(k)
+                && entry.rev_packets > 0
+                && (entry.metadata.is_reverse || *k == *key || *k == wire_key)
+            {
                 ev.rev_packets_any = ev.rev_packets_any.max(entry.rev_packets);
             }
         }

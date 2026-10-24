@@ -12947,20 +12947,24 @@ fn republication_ordering_connected_wins_16270() {
     assert_eq!(enforced.egress_ifindex, 12);
 }
 
-/// #16270 (option b): the connected-win for a non-cluster terminal.
-/// Fixture: an operator discard at 172.16.80.0/25 (LONGER than the
-/// connected /24) covering the target, so `select_v4_route`
-/// returns the terminal, not the connected row. The connected-win
-/// fires only when the table also holds a cluster-terminal
-/// (republication owed); without one the operator discard keeps
-/// its exact pre-fix semantics (control stays DiscardRoute).
+/// #16270 (option b) + #16217 (fold B3): the connected-win for a
+/// non-cluster terminal. Fixture: an operator discard at
+/// 172.16.80.0/25 (LONGER than the connected /24) covering the
+/// target, so `select_v4_route` returns the terminal, not the
+/// connected row. The win fires only when republication debt is
+/// outstanding FOR THE COVERING PREFIX: a cluster-terminal exists
+/// in the table AND the covering connected prefix is suppressed
+/// from `connected_v4` transit (peer-owned). The MIXED cell
+/// (cluster-terminal present for OTHER prefixes, but the covering
+/// /24 settled locally in transit) must keep the operator discard —
+/// the pre-fold table-wide guard forwarded exactly there.
 ///
-/// RED-on-revert: dropping the `table_has_cluster_terminal_v4`
-/// guard makes the control forward (fail-open on an operator
-/// discard); dropping the connected-win makes the owed cell drop.
+/// RED-on-revert: dropping the prefix-debt tie makes the mixed cell
+/// forward (fail-open on an operator discard); dropping the
+/// cluster-terminal arm makes the owed cell drop.
 #[test]
 fn connected_beats_operator_discard_only_when_cluster_terminal_present_16270() {
-    let build = |with_cluster: bool| {
+    let build = |with_cluster: bool, cover_peer_owned: bool| {
         let mut snapshot = nat_snapshot_with_fabric();
         snapshot.routes.retain(|r| r.destination != "0.0.0.0/0");
         snapshot.routes.push(RouteSnapshot {
@@ -12993,6 +12997,15 @@ fn connected_beats_operator_discard_only_when_cluster_terminal_present_16270() {
                 mtu: 0,
             });
         }
+        if cover_peer_owned {
+            // Suppress the covering /24 from transit: it survives only
+            // in `connected_v4_by_ifindex` (debt outstanding for IT).
+            for iface in &mut snapshot.interfaces {
+                if iface.name == "reth0.80" {
+                    iface.connected_rg_peer_owned = true;
+                }
+            }
+        }
         snapshot.neighbors.push(NeighborSnapshot {
             interface: "ge-0-0-0.80".to_string(),
             ifindex: 12,
@@ -13007,17 +13020,29 @@ fn connected_beats_operator_discard_only_when_cluster_terminal_present_16270() {
         build_forwarding_state(&snapshot)
     };
     let dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 100));
-    let owed = build(true);
+    // Owed for the covering prefix: connected /24 beats the discard.
+    let owed = build(true, true);
     let raw = lookup_forwarding_resolution(&owed, dst).resolution;
     assert_eq!(
         raw.disposition,
         ForwardingDisposition::ForwardCandidate,
-        "republication-owed: connected /24 must beat the /25 operator discard, got {:?}",
+        "republication-owed for the covering prefix: connected /24 must beat the /25 operator discard, got {:?}",
         raw.disposition
     );
     assert_eq!(raw.egress_ifindex, 12);
-    let settled = build(false);
+    // Mixed/settled table: cluster-terminal present, covering prefix
+    // settled locally (in transit) — operator discard must stand.
+    let settled = build(true, false);
     let raw = lookup_forwarding_resolution(&settled, dst).resolution;
+    assert_eq!(
+        raw.disposition,
+        ForwardingDisposition::DiscardRoute,
+        "mixed table (settled covering prefix, cluster-terminal elsewhere): operator discard must stay a drop, got {:?}",
+        raw.disposition
+    );
+    // No cluster-terminal at all: discard stands (pre-existing arm).
+    let control = build(false, true);
+    let raw = lookup_forwarding_resolution(&control, dst).resolution;
     assert_eq!(
         raw.disposition,
         ForwardingDisposition::DiscardRoute,

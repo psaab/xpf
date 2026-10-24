@@ -195,24 +195,22 @@ pub(super) fn stage_flow_cache_hit(
         false
     };
 
-    // #16217: on EVERY hit a marked (adopted) entry's ownership is
-    // re-derived BEFORE the mutating lookup (side-effect-free peek:
-    // no tallies/LRU/lease re-stamp) via
-    // `revalidate_fabric_established` -- the same helper the
-    // session-hit site shares. The mark suppresses ONLY the
-    // `EnforceChanged` demotion (the lagging-snapshot spelling); it
-    // NEVER suppresses `ForwardCandidateEgressDeparted`, which the
-    // validator now checks BEFORE enforce, so once the live
-    // snapshot + FIB attribute the egress RG to the peer the
-    // departed arm supersedes the entry despite the mark and the
-    // flow re-resolves toward FabricRedirect (failback). Failback
-    // shapes where enforce compares equal are likewise never
-    // suppressed (the departed arm is what fires there). The
-    // remaining lag-vs-failback ambiguity (egress row present,
-    // enforce-demoting) is bounded by the session side: a marked
-    // cache entry only exists behind a marked session row, and
-    // that row's re-resolve after any eviction runs under the
-    // current snapshot. Unmarked entries compute `false` and are
+    // #16217 (fold B6): on EVERY hit a marked (adopted) entry's
+    // ownership is re-derived BEFORE the mutating lookup
+    // (side-effect-free peek: no tallies/LRU/lease re-stamp) via
+    // `revalidate_fabric_established_fresh` — judged against the
+    // AUTHORITATIVE fresh RG set (`forwarding_active_rgs`, loaded
+    // from the coordinator ArcSwap for THIS packet), the same
+    // ownership evidence the adoption gate proves. The result DRIVES
+    // the `EnforceChanged` suppression below (a lapsed mark
+    // suppresses nothing). Pre-fold the fresh revalidation was
+    // computed against the lagging `ha_state` snapshot and then
+    // DISCARDED (`let _ = adopted_mark_revalidated;`), so the raw
+    // mark alone suppressed the demotion even after failback. The
+    // mark NEVER suppresses `ForwardCandidateEgressDeparted`
+    // (checked BEFORE enforce in the validator), so a departed
+    // egress supersedes despite a live mark and re-resolves toward
+    // FabricRedirect. Unmarked entries compute `false` and are
     // bit-identical.
     let (adopted_mark, adopted_mark_revalidated) = {
         let peek_lookup = FlowCacheLookup::for_packet(meta, validation, worker_ctx.forwarding);
@@ -222,10 +220,9 @@ pub(super) fn stage_flow_cache_hit(
         {
             Some(peeked) if peeked.fabric_established => (
                 true,
-                crate::afxdp::forwarding::revalidate_fabric_established(
+                crate::afxdp::forwarding::revalidate_fabric_established_fresh(
                     worker_ctx.forwarding,
-                    worker_ctx.ha_state,
-                    now_secs,
+                    worker_ctx.forwarding_active_rgs,
                     peeked.fabric_established,
                     peeked.decision.resolution,
                 ),
@@ -306,20 +303,19 @@ pub(super) fn stage_flow_cache_hit(
                 ),
                 cached.decision.resolution,
             );
-            // #16217: the mark suppresses ONLY the `EnforceChanged`
-            // demotion. Departure is checked BEFORE enforce in the
-            // validator, so a departed egress returns
+            // #16217 (fold B6): the mark suppresses ONLY the
+            // `EnforceChanged` demotion, and ONLY while the FRESH
+            // revalidation (peeked above, judged against
+            // `forwarding_active_rgs`) still proves this node owns
+            // the egress RG. Departure is checked BEFORE enforce in
+            // the validator, so a departed egress returns
             // `ForwardCandidateEgressDeparted` here and is never
-            // matched -- a marked entry with a departed egress evicts
+            // matched — a marked entry with a departed egress evicts
             // despite its mark and re-resolves toward FabricRedirect.
-            // `adopted_mark_revalidated` is computed every hit (peek
-            // above) and is the ownership fact the session side
-            // shares; the cache suppression deliberately does not
-            // key on it, because at the adoption instant the worker
-            // snapshot lags the gate and revalidation reads false
-            // for exactly the flows adoption just proved.
-            let _ = adopted_mark_revalidated;
-            if adopted_mark
+            // Pre-fold the revalidation result was discarded here
+            // (`let _ = adopted_mark_revalidated;`) and the raw mark
+            // alone suppressed the demotion.
+            if adopted_mark_revalidated
                 && matches!(
                     reason,
                     Some(crate::afxdp::forwarding::CachedDecisionInvalid::EnforceChanged)
@@ -866,11 +862,17 @@ pub(super) fn stage_flow_cache_hit(
         // The packet survived the cached output-filter/policer verdicts;
         // only now may a completing ACK's HA transition be published.
         sessions.emit_probe_hit_state_update(&flow.forward_key);
-        // #16217 (GLM B1): shared-map evidence restamps run ONLY on
-        // the handshake stage transition into Established — the
-        // completing packet — never per-packet on steady-state hits.
-        // The forward-wire alias advance stays beside them (it is
-        // itself transition-gated by the Established wire read).
+        // #16217 (GLM B1, completed): ALL cache-hit shared restamps run
+        // ONLY behind the handshake stage transition into Established
+        // (`take_probe_stage_transition`, consumed exactly once on the
+        // completing packet) — never per-packet on steady-state hits.
+        // Pre-fold the packet-count restamps were gated but the
+        // Established canonical + forward-wire alias restamps below
+        // ran on EVERY established cache hit (an
+        // `handshake_state_wire_for == Established` read), taking the
+        // shared-map locks per packet. The ct-slice (10 s cadence) is
+        // the backstop for completions that never take a completing
+        // cache hit.
         if sessions.take_probe_stage_transition(&flow.forward_key) {
             // #16217: snapshot the serving pair's ACTUAL forward +
             // reverse packet counts onto the shared rows — the
@@ -895,26 +897,21 @@ pub(super) fn stage_flow_cache_hit(
                     rev,
                 );
             }
-        }
-        // #16223: once the serving pair is established for this tuple,
-        // restamp the shared synced entries so sibling replica tables
-        // and the peer's expiry probe consult node-level proof instead
-        // of the replica's own stale Opening/syn_ack_first flags.
-        if sessions.handshake_state_wire_for(&flow.forward_key)
-            == crate::session::TcpHandshakeState::Established.to_wire()
-        {
+            // #16223: restamp the shared synced entries so sibling
+            // replica tables and the peer's expiry probe consult
+            // node-level proof instead of the replica's own stale
+            // Opening/syn_ack_first flags.
             crate::afxdp::shared_ops::restamp_shared_handshake_established(
                 worker_ctx.shared_sessions,
                 &flow.forward_key,
                 cached_decision.nat,
             );
             // #16217 (wire-cadence residual): the ct-slice restamp only
-            // runs on the 10 s conntrack-refresh cadence, so a heavy
-            // split stream's shared wire stayed HandshakePending (w=2)
-            // at failover. Advance the forward-wire KEY ALIAS slot here
-            // too - same packet path, same bounded work - so the
-            // fabric-ingress adoption gate sees Established under the
-            // NAT'd tuple without waiting for the ct-slice backstop.
+            // runs on the 10 s conntrack-refresh cadence, so advance
+            // the forward-wire KEY ALIAS slot on the completing packet
+            // too — same bounded work — so the fabric-ingress adoption
+            // gate sees Established under the NAT'd tuple without
+            // waiting for the ct-slice backstop.
             crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
                 worker_ctx.shared_sessions,
                 worker_ctx.shared_forward_wire_sessions,

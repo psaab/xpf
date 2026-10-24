@@ -265,26 +265,32 @@ impl crate::afxdp::Coordinator {
         // snapshot so each delta's stamp reads one consistent pair.
         let wire_sessions = lock_shared_recover(&self.sessions.forward_wire);
 
-        // #16217 (export stamp): per-tuple completion evidence over
-        // BOTH shared maps (canonical lock order above). Computed
-        // once per exported tuple from the guards already held — an
-        // actual reverse packet count > 0 on a reverse/forward row
-        // for the tuple (fail-closed: a synthesized companion with
-        // `rev_packets = 0` never stamps). A row's own Established
-        // wire is NOT evidence here (it is this stamp's output).
-        let evidence_for = |key: &crate::session::SessionKey| {
+        // #16217 (export stamp; folds B2+B5): per-tuple completion
+        // evidence over BOTH shared maps (canonical lock order above).
+        // Computed once per exported tuple from the guards already
+        // held — an actual reverse packet count > 0 on a
+        // reverse/forward row for the tuple (fail-closed: a
+        // synthesized companion with `rev_packets = 0` never stamps).
+        // A row's own Established wire is NOT evidence here (it is
+        // this stamp's output). Scope: full `SessionKey` keyed gets
+        // (canonical / reverse companion / forward-wire alias / NAT'd
+        // reverse companion, derived from the exported row's OWN NAT
+        // via this closure's key+nat) — the pre-fold bare-tuple scan
+        // leaked identical 5-tuples from another routing domain into
+        // this tuple's stamp, and cost O(table) per exported row.
+        let evidence_for = |key: &crate::session::SessionKey,
+                            nat: crate::nat::NatDecision|
+         -> crate::session::NodeServedEvidence {
+            let reverse_key = crate::session::reverse_session_key(key, nat);
+            let wire_key = crate::session::forward_wire_key(key, nat);
+            let rev_wire_key = crate::session::forward_wire_key(&reverse_key, nat);
             let mut ev = crate::session::NodeServedEvidence::default();
             for map in [&*sessions, &*wire_sessions] {
-                for e in map.values() {
-                    if e.rev_packets == 0 {
-                        continue;
-                    }
-                    let same = e.key.bare_tuple() == key.bare_tuple();
-                    let reversed =
-                        crate::session::reverse_session_key(&e.key, e.decision.nat)
-                            .bare_tuple()
-                            == key.bare_tuple();
-                    if (same || reversed) && (e.metadata.is_reverse || same) {
+                for k in [key, &reverse_key, &wire_key, &rev_wire_key] {
+                    if let Some(e) = map.get(k)
+                        && e.rev_packets > 0
+                        && (e.metadata.is_reverse || *k == *key || *k == wire_key)
+                    {
                         ev.rev_packets_any = ev.rev_packets_any.max(e.rev_packets);
                     }
                 }
@@ -391,7 +397,7 @@ impl crate::afxdp::Coordinator {
                 // #16217 (export stamp): Established when node-wide
                 // completion evidence holds for this tuple over the
                 // shared maps; otherwise the row's own wire.
-                tcp_handshake_state: if evidence_for(&entry.key).served_and_completed() {
+                tcp_handshake_state: if evidence_for(&entry.key, entry.decision.nat).served_and_completed() {
                     crate::session::TcpHandshakeState::Established.to_wire()
                 } else {
                     entry.tcp_handshake_state

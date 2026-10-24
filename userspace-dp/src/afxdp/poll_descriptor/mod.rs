@@ -2751,33 +2751,66 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // the adoption resolve bypassed. Non-adopted flows compute
                 // `false` here and stay fail-closed bit-identically.
                 //
-                // #16217: the LOCAL-MARK arm qualifies only on fabric-link
-                // ingress for a marked row (the same physical-arrival
-                // identity the adoption site required) -- a marked row hit
-                // on ordinary ingress never exempts. Ownership itself is
-                // NOT re-imposed here from the lagging worker snapshot:
-                // at the adoption instant that snapshot still reads the
-                // egress RG inactive (the lag the adoption resolve
-                // bypasses), so a snapshot revalidation would un-adopt
-                // every adopted flow at its first session hit. Positive
-                // non-ownership is enforced at the adoption gate and on
-                // every flow-cache hit (`adopted_mark_revalidated`); once
-                // the flow re-resolves after failback under a caught-up
-                // snapshot it runs unadopted. The live-gate arms below are inherently current
-                // (the gate re-proves Established + ownership per packet)
-                // and are unchanged.
+                // #16217 (fold B6): the LOCAL-MARK arm qualifies only on
+                // fabric-link ingress for a marked row (the same
+                // physical-arrival identity the adoption site required)
+                // AND only while the mark revalidates against the
+                // AUTHORITATIVE fresh RG set (`forwarding_active_rgs`,
+                // loaded from the coordinator ArcSwap for THIS packet)
+                // via `revalidate_fabric_established_fresh` over the
+                // marked row's stored decision. Pre-fold the mark alone
+                // granted the exemption with NO revalidation at this
+                // site ("Ownership itself is NOT re-imposed here"), so
+                // after failback a still-marked row kept the adopted
+                // exemption forever on this path. The fresh set IS the
+                // adoption gate's own ownership evidence (not the
+                // lagging per-tick `ha_state` snapshot), so a just-adopted
+                // flow on the true owner still qualifies — the gate
+                // proved the same fresh set on its adopting packet —
+                // while a departed egress lapses the mark here and the
+                // re-resolve runs unadopted (HA-demote + fabric
+                // conversion). The live-gate arms below are inherently
+                // current (the gate re-proves Established + ownership
+                // per packet) and are unchanged.
                 let session_hit_fabric_adopted = flow.as_ref().is_some_and(|flow| {
                     (fabric_link_ingress
                         && !crate::tcp_flags::has_syn(meta.tcp_flags)
                         && sessions
                             .fabric_established_decision_for_wire_at(&flow.forward_key, now_ns)
-                            .is_some())
+                            .is_some_and(|decision| {
+                                crate::afxdp::forwarding::revalidate_fabric_established_fresh(
+                                    worker_ctx.forwarding,
+                                    worker_ctx.forwarding_active_rgs,
+                                    true,
+                                    decision.resolution,
+                                )
+                            }))
                         || (fabric_link_ingress
                             && !crate::tcp_flags::has_syn(meta.tcp_flags)
                             && sessions.shared_established_for_wire_at(
                                 worker_ctx.shared_sessions,
                                 worker_ctx.shared_forward_wire_sessions,
                                 &flow.forward_key,
+                            )
+                            // #16217 (fold N1): Established evidence
+                            // alone must NOT grant the adopted
+                            // exemption (which Wire28 threads into
+                            // `allow_replace_local`): the shared-wire
+                            // arm folds through the SAME ownership gate
+                            // as arm 3, so a non-owner holding an
+                            // Established shared row cannot adopt (and
+                            // cannot replace a local incumbent).
+                            && crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
+                                worker_ctx.forwarding,
+                                worker_ctx.ha_state,
+                                worker_ctx.forwarding_active_rgs,
+                                now_secs,
+                                sessions,
+                                worker_ctx.shared_sessions,
+                                worker_ctx.shared_forward_wire_sessions,
+                                &worker_ctx.shared_owner_rg_indexes,
+                                &flow.forward_key,
+                                now_ns,
                             ))
                         || (fabric_link_ingress
                             && !crate::tcp_flags::has_syn(meta.tcp_flags)
