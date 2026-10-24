@@ -911,11 +911,13 @@ type compileOpts struct {
 	// boot while new strict commits reject them.
 	lenientForwardingFilters bool
 
-	// lenientQinQVLANStack (#5879) downgrades the canonical per-physical-
-	// interface QinQ / stacked-VLAN honesty gate (validateQinQVLANStackAST:
-	// an aggregate inner/second VLAN tag spelled `inner-vlan-id` OR
-	// `vlan-tags inner`, possibly split across statements or contributed by
-	// a peer-only group) from a hard error to a warning on the tolerant load
+	// lenientQinQVLANStack (#5879, #16433) downgrades the canonical
+	// per-physical-interface QinQ / stacked-VLAN honesty gate
+	// (validateQinQVLANStackAST: an aggregate inner/second VLAN tag spelled
+	// `inner-vlan-id` OR `vlan-tags inner`/`inner-*`, or a `vlan-tags`
+	// statement that is not exactly `outer <vid>` (#16433), possibly split
+	// across statements or contributed by a peer-only group) from a hard
+	// error to a warning on the tolerant load
 	// / peer-sync paths. The AF_XDP dataplane unwinds a single VLAN tag, so
 	// an inner tag was already silently dropped on every binary up to this
 	// gate; an already-persisted or peer-synced config may carry one, and an

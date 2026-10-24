@@ -107,6 +107,8 @@ func validateInterfaceNumeric9899(min, max uint64) LeafValidator {
 // (`vlan-tags { outer { 100; } }`). Returns (nil, false) when the node
 // carries no `outer` keyword at all. #15035 helper: compileInterfaces is
 // the only consumer; the gates keep their own positive-tag predicates.
+// #16433: callers must gate on vlanTagsIsOuterOnly first; this helper
+// only extracts the value after `outer`.
 func vlanTagsOuterValue15035(n *Node) ([]string, bool) {
 	for i, k := range n.Keys {
 		if k == "outer" {
@@ -728,9 +730,16 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 			// same unit wins; vlanTagsSeen makes first-wins hold for a
 			// bare `vlan-tags outer 0` too; skipUnit9899 (unit scope)
 			// quarantines the whole unit on the lenient path.
+			//
+			// #16433: only the exact outer-only form is read. Any
+			// other `vlan-tags` node (an `inner-*` spelling the gate
+			// classifies as QinQ, or a malformed tail such as
+			// `outer 100 bogus 7`) is skipped entirely, so on the
+			// lenient path its outer value never silently applies
+			// as a single tag beside the gate's warning.
 			vlanTagsSeen := unitNode.FindChild("vlan-id") != nil
 			for _, vtNode := range unitNode.FindChildren("vlan-tags") {
-				if vlanTagsHasToken(vtNode, "inner") {
+				if !vlanTagsIsOuterOnly(vtNode) {
 					continue
 				}
 				vals, hasOuter := vlanTagsOuterValue15035(vtNode)

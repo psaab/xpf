@@ -12076,6 +12076,24 @@ reserved for whole-dataplane selection where a rewrite shim
   Because rejection is a compile error, the candidate is never promoted — no
   partial outer/inner state survives. Regression coverage:
   `pkg/config/qinq_canonical_vlan_5879_test.go`.
+  **#16433 closes the `vlan-tags` world:** Junos also spells the second
+  tag `inner-list <vids>`, `inner-range <lo>-<hi>` and
+  `inner-vlan-id-range`, none of which carry the exact `inner` token, and
+  the #15035 reader ignored every token after the outer VID, so
+  `vlan-tags outer 100 inner-range 1-200` (and even
+  `vlan-tags outer 100 bogus 7`) committed as a plain single-tag
+  `VlanID=100` unit — single-tagged VID-100 frames entered a zone the
+  operator had scoped to double-tagged traffic. The gate now classifies
+  any `inner`/`inner-*` token as the inner tag (the existing #5879 QinQ
+  reject text), admits exactly `vlan-tags outer <vid>` (either AST
+  shape, including `vlan-tags { outer { 100; } }`) as the outer tag, and
+  rejects any other `vlan-tags` statement with a #16433 message naming
+  the statement. The #15035 reader likewise reads only the exact
+  outer-only form, so on the tolerant path a defective node never
+  silently applies as a single tag beside the gate warning. `vlan-tags
+  outer 100;` still compiles `VlanID=100`. Regression coverage:
+  `pkg/config/vlan_tags_closed_world_16433_test.go`,
+  `pkg/configstore/vlan_tags_closed_world_16433_test.go` (CheckText).
 - **#10655 (802.1ad S-tag unsupported):** on an XDP-adjudicated ingress,
   a single outer 0x88a8 S-tag is dropped and counted as `stag_drop`; it is
   never steered as the 802.1Q unit with the same VID. The userspace metadata
