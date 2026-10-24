@@ -48,11 +48,47 @@ func writeThreeColorPolicerStatus(buf *strings.Builder, ps dpuserspace.ThreeColo
 	fmt.Fprintf(buf, "      dropped:          %d packets, %d bytes\n", ps.DropPackets, ps.DropBytes)
 }
 
+// firewallCountersStaleGRPC reports whether counters printed beside the
+// active config's terms on the gRPC raw views belong to a previous
+// generation (#16451): the active config is not the applied one and a
+// userspace helper status was obtained (so counters are being attributed).
+// Undetermined (no helper status) carries no liveness claim, mirroring the
+// local CLI raw views.
+func (s *Server) firewallCountersStaleGRPC() bool {
+	if s == nil || s.store == nil || firewallshow.Applied(s.store) {
+		return false
+	}
+	if _, err := s.userspaceDataplaneStatus(); err != nil {
+		return false
+	}
+	return true
+}
+
+// writeFirewallStaleCounterWarning prepends the shared #16451 raw warning.
+func (s *Server) writeFirewallStaleCounterWarning(buf *strings.Builder) {
+	if s.firewallCountersStaleGRPC() {
+		buf.WriteString(firewallshow.StaleCounterWarning)
+	}
+}
+
+// writeFirewallNotEnforcingWarning prepends the shared #16451 effective-view
+// warning when the active config is not the applied one. Unlike the raw
+// views it fires even when helper status is unavailable: the effective view
+// certifies compiled content as the dataplane's, so an unstamped active
+// config must never be presented without the warning (fail-closed).
+func (s *Server) writeFirewallNotEnforcingWarning(buf *strings.Builder) {
+	if s == nil || s.store == nil || firewallshow.Applied(s.store) {
+		return
+	}
+	buf.WriteString(firewallshow.NotEnforcingWarning)
+}
+
 // showFirewall renders the `cli show firewall` output. Writes to
 // `buf`. Returns no error — the original case body had no error
 // returns; counters that fail to load are silently skipped (same
 // as the original).
 func (s *Server) showFirewall(cfg *config.Config, buf *strings.Builder) {
+	s.writeFirewallStaleCounterWarning(buf)
 	hasFilters := cfg != nil && (len(cfg.Firewall.FiltersInet) > 0 || len(cfg.Firewall.FiltersInet6) > 0)
 	if !hasFilters {
 		buf.WriteString("No firewall filters configured\n")
@@ -513,6 +549,7 @@ func (s *Server) showFirewallFilter(req *pb.ShowTextRequest, cfg *config.Config,
 				fmt.Fprintf(buf, "Filter not found: %s\n", filterName)
 			}
 		} else {
+			s.writeFirewallStaleCounterWarning(buf)
 			var userspaceStatus *dpuserspace.ProcessStatus
 			if status, err := s.userspaceDataplaneStatus(); err == nil {
 				userspaceStatus = &status
@@ -599,6 +636,7 @@ func (s *Server) showFirewallFilter(req *pb.ShowTextRequest, cfg *config.Config,
 func (s *Server) showEffectiveFirewallFilters(req *pb.ShowTextRequest, cfg *config.Config, buf *strings.Builder) (*pb.ShowTextResponse, error) {
 	family := strings.TrimPrefix(req.Topic, "firewall-effective")
 	family = strings.TrimPrefix(family, ":")
+	s.writeFirewallNotEnforcingWarning(buf)
 	if cfg == nil {
 		buf.WriteString("No active configuration\n")
 		return &pb.ShowTextResponse{Output: buf.String()}, nil
@@ -640,6 +678,7 @@ func (s *Server) showEffectiveFirewallFilter(req *pb.ShowTextRequest, cfg *confi
 		name = rest[:idx]
 		family = rest[idx+1:]
 	}
+	s.writeFirewallNotEnforcingWarning(buf)
 	if cfg == nil {
 		buf.WriteString("No active configuration\n")
 		return &pb.ShowTextResponse{Output: buf.String()}, nil

@@ -2239,37 +2239,57 @@ where compilation transforms the term:
 The heading carries a `[effective]` tag (`Filter: demo (family inet)
 [effective]`) so the compiled view is never confused with the raw output.
 
-**Generation-liveness banner (#5067).** The effective view compiles its
+**Generation-liveness banner (#5067, #16451).** The effective view compiles its
 snapshots from the ACTIVE config, which `commitAndApply` promotes via
 `store.Commit()` BEFORE the dataplane apply runs. A required-protocol-gate apply
 error (`applyErrSkipsPeerSync` / `compileErrorMustAbortApply`, see
 `pkg/daemon/daemon_apply.go`) leaves the dataplane DISARMED while the active
 config is already the new generation — so the compiled-desired snapshot is NOT
-what the dataplane is enforcing. The local CLI therefore binds the view to the
-HELPER-ACKNOWLEDGED generation before rendering:
+what the dataplane is enforcing. An in-band helper REFUSAL of the snapshot
+(#16451, e.g. a snapshot-integrity rejection) is worse for the old predicate:
+the helper keeps its prior snapshot and stays armed, so the helper-acknowledged
+generation and the daemon's last recorded apply generation BOTH stay at the
+prior generation and a generation-only compare reads coherent over the refused
+config. The local CLI therefore binds the view to the HELPER-ACKNOWLEDGED
+generation AND to the store's applied marker (`store.ActiveApplied()`, #4957)
+before rendering:
 
-- **Armed + acknowledged** (dataplane armed and the acknowledged generation is
-  at or ahead of the daemon's last applied generation): the snapshots are
+- **Armed + acknowledged + applied** (dataplane armed, the acknowledged
+  generation is at or ahead of the daemon's last applied generation, and the
+  active config is the one that completed an apply): the snapshots are
   prefixed with `Effective firewall filters — dataplane-acknowledged
   (generation N).` and are safe to read as live. Helper-ahead is benign — a
   scheduler-only republish (`Manager.UpdatePolicyScheduleState`) advances the
   helper's snapshot generation without bumping the last recorded apply
   generation, and it carries the same filter content, so the view is still live.
-- **Disarmed or generation drift**: the snapshots are prefixed with a prominent
+- **Disarmed, generation drift, or active config not applied** (including a
+  helper-refused snapshot, where both generations are frozen at the prior
+  generation): the snapshots are prefixed with a prominent
   `WARNING: dataplane is NOT enforcing the active configuration.` banner that
-  labels the output `COMPILED-DESIRED`, states the reason (dataplane disarmed, or
-  the helper is BEHIND the applied generation), and surfaces the last
-  dataplane-acknowledged generation versus the desired (active, not-yet-
-  acknowledged) configuration. The compiled snapshots are still printed under the
-  banner so the operator can inspect the desired compile, but they are never
-  certified as live.
+  labels the output `COMPILED-DESIRED`, states the reason (dataplane disarmed,
+  the helper is BEHIND the applied generation, or the active configuration is
+  not applied), and surfaces the last dataplane-acknowledged generation versus
+  the desired (active, not-yet-acknowledged) configuration. The compiled
+  snapshots are still printed under the banner so the operator can inspect the
+  desired compile, but they are never certified as live.
 - **Dataplane status unavailable** (no runtime wired): a soft note records that
   the snapshots are compiled-desired and the acknowledged generation could not be
   confirmed.
 
-This applies to the local CLI (`pkg/cli`). The remote CLI's gRPC `ShowText`
-path renders the same compiled snapshots without the liveness banner; adding the
-generation-liveness context to the gRPC surface is a follow-up.
+The RAW `show firewall` / `show firewall filter <name>` views (local CLI and
+gRPC/remote) pair the active config's terms with hit counters looked up only
+by (family, filter, term name). When the active config is not the applied one
+they print the same `WARNING: dataplane is NOT enforcing the active
+configuration.` heading with a note that hit counters belong to the previous
+generation still being enforced and do NOT count the terms shown (#16451).
+
+This applies to the local CLI (`pkg/cli`) and, since #16451, to the remote
+CLI's gRPC `ShowText` path: the effective topics print the NOT-enforcing /
+compiled-desired warning whenever the active config is not the applied one,
+and the raw topics print the previous-generation counter warning. The shared
+gate and warning text live in `pkg/firewallshow` (`Applied`,
+`StaleCounterWarning`, `NotEnforcingWarning`) so no surface can copy the
+generation-only predicate.
 
 Both the local and the remote (`cli`) CLI render this identically (#4967). The
 snapshot renderer is the single source of truth

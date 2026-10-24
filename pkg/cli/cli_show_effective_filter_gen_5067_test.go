@@ -43,8 +43,10 @@ func (d *effectiveGenCLIDP) Status() (dpuserspace.ProcessStatus, error) {
 // renders the compiled snapshots and certifies them as dataplane-acknowledged —
 // no drift banner.
 func TestShowEffectiveFirewallFiltersArmedAcknowledged(t *testing.T) {
+	store := newEffectiveFilterTestStore(t)
+	store.MarkActiveApplied() // #16451: live now also requires the applied marker
 	c := &CLI{
-		store: newEffectiveFilterTestStore(t),
+		store: store,
 		dp: &effectiveGenCLIDP{
 			Manager: dataplane.New(),
 			apply: &dataplane.ApplyResult{
@@ -194,8 +196,10 @@ func TestShowEffectiveFirewallFiltersGenerationDrift(t *testing.T) {
 // render LIVE with NO drift banner. An `==` coherence check would spuriously
 // warn "NOT enforcing" here; `>=` accepts helper-at-or-ahead.
 func TestShowEffectiveFirewallFiltersHelperAheadIsLive(t *testing.T) {
+	store := newEffectiveFilterTestStore(t)
+	store.MarkActiveApplied() // #16451: helper-ahead stays live only when applied
 	c := &CLI{
-		store: newEffectiveFilterTestStore(t),
+		store: store,
 		dp: &effectiveGenCLIDP{
 			Manager: dataplane.New(),
 			// Daemon's last recorded apply is generation 5.
@@ -251,5 +255,125 @@ func TestShowEffectiveFirewallFiltersNoRuntime(t *testing.T) {
 	}
 	if !strings.Contains(out, "Filter: demo (family inet) [effective]") {
 		t.Fatalf("output = %q, want compiled-desired snapshot body", out)
+	}
+}
+
+// refusedGenCLIDP models the #16451 refusal state: armed, both generations
+// frozen at the prior generation (7/7), with the previous generation's term
+// counters still published by the helper.
+func refusedGenCLIDP() *effectiveGenCLIDP {
+	return &effectiveGenCLIDP{
+		Manager: dataplane.New(),
+		apply: &dataplane.ApplyResult{
+			Generation:   7,
+			Capabilities: dataplane.Capabilities{ForwardingSupported: true},
+		},
+		status: dpuserspace.ProcessStatus{
+			Enabled:                true,
+			ForwardingArmed:        true,
+			Capabilities:           dpuserspace.UserspaceCapabilities{ForwardingSupported: true},
+			LastSnapshotGeneration: 7,
+			FilterTermCounters: []dpuserspace.FirewallFilterTermCounterStatus{
+				{Family: "inet", FilterName: "demo", TermName: "t2", Packets: 500, Bytes: 5000},
+			},
+		},
+	}
+}
+
+// TestShowEffectiveFirewallFiltersHelperRefused16451 is the #16451 refusal
+// cell: the helper refused the promoted config in-band, so helper ack (7) and
+// last recorded apply (7) are EQUAL and armed — the pre-fix predicate printed
+// "dataplane-acknowledged (generation 7)" over the refused config. The store
+// is deliberately NOT stamped (ActiveApplied()==false, as after Commit whose
+// apply was refused). The view must print the WARNING, never the live banner.
+// RED-on-revert: dropping the ActiveApplied() gate restores live=true here.
+func TestShowEffectiveFirewallFiltersHelperRefused16451(t *testing.T) {
+	store := newEffectiveFilterTestStore(t)
+	if store.ActiveApplied() {
+		t.Fatal("fixture: promoted-but-unstamped store must read not-applied")
+	}
+	c := &CLI{store: store, dp: refusedGenCLIDP()}
+
+	out := captureStdout(t, func() {
+		if err := c.showEffectiveFirewallFilters(""); err != nil {
+			t.Fatalf("showEffectiveFirewallFilters() error = %v", err)
+		}
+	})
+	if !strings.Contains(out, "WARNING: dataplane is NOT enforcing the active configuration.") {
+		t.Fatalf("output = %q, want NOT-enforcing WARNING for refused config", out)
+	}
+	if !strings.Contains(out, "active configuration not applied") {
+		t.Fatalf("output = %q, want not-applied reason", out)
+	}
+	if !strings.Contains(out, "Last dataplane-acknowledged generation: 7.") {
+		t.Fatalf("output = %q, want acknowledged generation 7 surfaced", out)
+	}
+	if strings.Contains(out, "Effective firewall filters — dataplane-acknowledged") {
+		t.Fatalf("output = %q, must NOT certify a refused config as acknowledged", out)
+	}
+	if !strings.Contains(out, "Filter: demo (family inet) [effective]") {
+		t.Fatalf("output = %q, want compiled-desired snapshot body under the banner", out)
+	}
+
+	// Control: the SAME 7/7/armed state with the active config stamped applied
+	// still prints the live banner (a stamped config is not spuriously warned).
+	store.MarkActiveApplied()
+	out = captureStdout(t, func() {
+		if err := c.showEffectiveFirewallFilters(""); err != nil {
+			t.Fatalf("showEffectiveFirewallFilters() error = %v", err)
+		}
+	})
+	if !strings.Contains(out, "Effective firewall filters — dataplane-acknowledged (generation 7).") {
+		t.Fatalf("output = %q, want live banner for stamped config", out)
+	}
+	if strings.Contains(out, "WARNING") {
+		t.Fatalf("output = %q, stamped config must not warn", out)
+	}
+}
+
+// TestShowFirewallRawStaleCounters16451 covers the RAW views in the same
+// refused state: they pair the active (refused) config's terms with the
+// previous generation's counters keyed only by (family, filter, term). Both
+// raw surfaces must warn that the counters belong to the previous generation.
+// RED-on-revert: removing the raw warning leaves the 500-packet counter
+// silently attributed to the refused config's term.
+func TestShowFirewallRawStaleCounters16451(t *testing.T) {
+	store := newEffectiveFilterTestStore(t)
+	c := &CLI{store: store, dp: refusedGenCLIDP()}
+
+	surfaces := map[string]func() error{
+		"show_firewall":        c.showFirewallFilters,
+		"show_firewall_filter": func() error { return c.showFirewallFilter("demo", "") },
+	}
+	for name, fn := range surfaces {
+		t.Run(name, func(t *testing.T) {
+			out := captureStdout(t, func() {
+				if err := fn(); err != nil {
+					t.Fatalf("render error = %v", err)
+				}
+			})
+			if !strings.Contains(out, "WARNING: dataplane is NOT enforcing the active configuration.") {
+				t.Fatalf("output = %q, want stale-counter WARNING", out)
+			}
+			if !strings.Contains(out, "belong to the previous generation") {
+				t.Fatalf("output = %q, want previous-generation counter note", out)
+			}
+			// The misleading pairing is still visible but now warned: the
+			// previous generation's 500 hits appear under term t2.
+			if !strings.Contains(out, "Hit count: 500 packets") {
+				t.Fatalf("output = %q, want previous-generation counter still shown under warning", out)
+			}
+		})
+	}
+
+	// Control: stamped applied — no stale warning on the raw view.
+	store.MarkActiveApplied()
+	out := captureStdout(t, func() {
+		if err := c.showFirewallFilters(); err != nil {
+			t.Fatalf("showFirewallFilters() error = %v", err)
+		}
+	})
+	if strings.Contains(out, "belong to the previous generation") {
+		t.Fatalf("output = %q, stamped config must not carry stale-counter warning", out)
 	}
 }

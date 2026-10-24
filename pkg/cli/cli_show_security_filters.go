@@ -22,6 +22,9 @@ func (c *CLI) showFirewallFilters() error {
 		return nil
 	}
 
+	// #16451: warn before pairing active-config terms with stale counters.
+	c.printFirewallRawCounterWarning()
+
 	// Look up filter IDs from compile result for counter display
 	var filterIDs map[string]uint32
 	if c.dp != nil && c.dp.IsLoaded() {
@@ -188,8 +191,9 @@ func (c *CLI) showFirewallFilter(name, requestedFamily string) error {
 	}
 	userspaceCounters := dpuserspace.BuildFirewallFilterTermCounterIndex(userspaceStatus)
 
+	// #16451: same stale-counter warning as the all-filters raw view.
+	c.printFirewallRawCounterWarning()
 	fmt.Printf("Filter: %s (family %s)\n", name, family)
-
 	ruleOffset := ruleStart
 	for _, term := range filter.Terms {
 		var tb strings.Builder
@@ -335,13 +339,24 @@ func renderEffectiveFilterSnapshot(snap *dpuserspace.FirewallFilterSnapshot) {
 
 // firewallEffectiveLiveness records whether the compiled firewall-filter
 // snapshots rendered by the `effective` view are actually what the dataplane is
-// enforcing (#5067). The view derives its content from ActiveConfig(), but
+// enforcing (#5067, #16451). The view derives its content from ActiveConfig(), but
 // commitAndApply promotes the active config via store.Commit() BEFORE
 // applyAndSyncCommitted runs the dataplane apply; a required-protocol-gate apply
 // error (applyErrSkipsPeerSync / compileErrorMustAbortApply) leaves the
 // dataplane DISARMED while ActiveConfig is already the new generation. This
 // binds the rendered content to the HELPER-ACKNOWLEDGED generation instead of
 // blindly certifying the promoted config as live.
+//
+// #16451: an in-band helper REFUSAL (ok=false, e.g. a snapshot-integrity
+// rejection) is a third window the generation compare alone cannot see: the
+// helper keeps its prior snapshot, stays armed, and nothing is adopted, so
+// LastApplyResult.Generation and LastSnapshotGeneration BOTH stay at the prior
+// generation N and `acked >= applied` reads coherent (N >= N) over the refused
+// config's compiled filters. Only store.ActiveApplied() binds the rendered
+// content (the active config text) to a completed apply: it is false after a
+// promotion whose apply has not succeeded — including after a refused apply
+// under degrade-not-fail — and is cleared by InvalidateAppliedDigest on any
+// failed apply. `live` therefore additionally requires ActiveApplied().
 type firewallEffectiveLiveness struct {
 	// determined is true when a dataplane runtime is loaded AND its helper
 	// status was obtained — i.e. we can actually compare the acknowledged
@@ -349,10 +364,11 @@ type firewallEffectiveLiveness struct {
 	// or status unavailable) the view is compiled-desired that we cannot
 	// confirm is live.
 	determined bool
-	// live is true only when the dataplane is armed AND the helper-acknowledged
+	// live is true only when the dataplane is armed, the helper-acknowledged
 	// snapshot generation is at or ahead of the daemon's last successfully-
-	// applied generation — the state in which the compiled snapshots equal what
-	// the dataplane is enforcing. (Helper-ahead is benign; see
+	// applied generation, AND the active config is the one that completed an
+	// apply (store.ActiveApplied) — the state in which the compiled snapshots
+	// equal what the dataplane is enforcing. (Helper-ahead is benign; see
 	// firewallEffectiveLiveness.)
 	live bool
 	// appliedGen is the daemon's last successfully-recorded apply generation
@@ -361,13 +377,15 @@ type firewallEffectiveLiveness struct {
 	// ackedGen is the generation the userspace helper reports it has applied
 	// (status.LastSnapshotGeneration).
 	ackedGen uint64
-	// reason explains why the view is not live (disarmed / generation drift).
+	// reason explains why the view is not live (disarmed / generation drift /
+	// active config not applied).
 	reason string
 }
 
-// firewallEffectiveLiveness inspects the dataplane apply-result and userspace
-// helper status to decide whether the `effective` firewall view can be
-// certified as dataplane-acknowledged (#5067).
+// firewallEffectiveLiveness inspects the dataplane apply-result, userspace
+// helper status, and the store's applied marker to decide whether the
+// `effective` firewall view can be certified as dataplane-acknowledged
+// (#5067, #16451).
 func (c *CLI) firewallEffectiveLiveness() firewallEffectiveLiveness {
 	var v firewallEffectiveLiveness
 	if !c.dataplaneLoaded() {
@@ -403,15 +421,52 @@ func (c *CLI) firewallEffectiveLiveness() firewallEffectiveLiveness {
 	// predicate (ForwardingArmed=false) independent of this compare, so
 	// accepting helper-ahead does not weaken the original fix.
 	coherent := cr != nil && status.LastSnapshotGeneration >= cr.Generation
+	// Applied requires the ACTIVE config text to be the one that completed a
+	// full apply (#16451). After an in-band helper refusal both generations
+	// stay frozen at the prior generation, so armed+coherent alone certify the
+	// refused config; ActiveApplied() is false in exactly that window (the
+	// promotion moved the active text off the stamped digest, and a failed
+	// apply clears the marker via InvalidateAppliedDigest). A nil store (only
+	// in tests that never wire one) cannot vouch for an apply, so it reads
+	// not-applied rather than certifying.
+	applied := firewallshow.Applied(c.store)
 	switch {
 	case !armed:
 		v.reason = "dataplane disarmed (forwarding not armed)"
 	case !coherent:
 		v.reason = "dataplane generation drift (helper is behind the applied configuration)"
+	case !applied:
+		v.reason = "active configuration not applied (dataplane is enforcing a previous configuration)"
 	default:
 		v.live = true
 	}
 	return v
+}
+
+// firewallCountersStale reports whether hit counters printed beside the
+// ACTIVE config's terms on the RAW `show firewall` views would belong to a
+// previous generation (#16451). The raw views look counters up only by
+// (family, filter, term name), so after a helper refusal the previous filter
+// set's counters appear under the refused config's same-named terms. The
+// counters are stale exactly when the dataplane is determined-live-able
+// (runtime loaded + helper status obtained) but the active config is not
+// the applied one — the same not-live predicate as the effective view,
+// minus the undetermined case (no counters can be attributed either way
+// when no helper status exists, and the raw view already carries no
+// liveness claim there).
+func (c *CLI) firewallCountersStale() bool {
+	v := c.firewallEffectiveLiveness()
+	return v.determined && !v.live
+}
+
+// printFirewallRawCounterWarning prints the #16451 stale-counter warning for
+// the RAW views. It is emitted BEFORE the filter listing so the previous
+// generation's counters are never read as the active config's.
+func (c *CLI) printFirewallRawCounterWarning() {
+	if !c.firewallCountersStale() {
+		return
+	}
+	fmt.Print(firewallshow.StaleCounterWarning)
 }
 
 // printFirewallEffectiveBanner prints the generation-liveness context for the
