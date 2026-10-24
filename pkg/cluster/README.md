@@ -4903,3 +4903,26 @@ it.
   returns, so it cannot interleave. The assertion is on final state, so it is
   deterministic in both shapes, and only the correct implementation depends on
   the (generous) wait EXPIRING.
+
+  **Peer liveness requires semantic acceptance, and every sync type has a
+  payload cap (#16041).** `receiveLoop` used to reset `missedHeartbeats`
+  and stamp `lastPeerRxMono` for any well-framed frame before
+  `handleMessage` judged it, so a keyed but faulty peer sending only
+  semantically rejected frames (unknown types, truncated records, stale
+  full-sets, impossible clock readings) stayed "healthy" forever and its
+  failover trigger never armed. Now `handleMessage` and every receive
+  handler report acceptance — applied, queued, or matched to a live
+  waiter/incarnation — and liveness refreshes only on acceptance; the
+  retired persistent-NAT types 38/39 are the deliberate exception (an old
+  peer sending only those is alive; the frames are ignored by migration
+  design). `syncPayloadCap` (`sync_payload_caps_16041.go`) gives every
+  dispatched type a cap derived from its encoder, enforced in
+  `receiveLoop` from the header before the payload is allocated or read;
+  over-cap frames increment `OversizeFramesRefused` (rendered in cluster
+  statistics when nonzero) and drop the connection, refining the global
+  `maxSyncPayload` posture per type. Unknown types keep only the global
+  cap so a newer peer's additive type stays forward-compatible — ignored,
+  and never liveness. Cells: `sync_liveness_caps_16041_test.go`
+  (receiveLoop-level rejected/accepted liveness, stale full-set,
+  header-only cap refusal, cap-table census over all 44 dispatched
+  labels).

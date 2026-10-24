@@ -717,6 +717,12 @@ func (m *Manager) FormatInformation() string {
 		if syncStats.BulkEndsEpochOnlyMatched > 0 {
 			fmt.Fprintf(&b, "  Bulk ends matched on epoch alone: %d\n", syncStats.BulkEndsEpochOnlyMatched)
 		}
+		// #16041: per-type payload cap refusals. A nonzero value means a
+		// keyed peer sent a frame larger than its type's encoder can emit;
+		// the connection was dropped. Conforming peers never trip this.
+		if syncStats.OversizeFramesRefused > 0 {
+			fmt.Fprintf(&b, "  Oversize frames refused (per-type cap): %d\n", syncStats.OversizeFramesRefused)
+		}
 	} else {
 		fmt.Fprintln(&b, "  Not configured")
 	}

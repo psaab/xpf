@@ -11,13 +11,13 @@ import (
 // avoids colliding with the pre-existing handleConfigKeyExchange and
 // handleAuthUpgrade* implementations these delegates call. Dispatch,
 // counters, and lock choreography are unchanged.
-func (s *SessionSync) handleConfigApplyNack(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleConfigApplyNack(conn net.Conn, payload []byte) bool {
 	// #7328: the peer did not apply a config generation this node pushed.
 	// Length-gated: a short/absent payload is ignored rather than treated
 	// as generation 0, which would be a valid-looking "legacy" value.
 	if len(payload) < 8 {
 		slog.Debug("cluster sync: short config-apply nack ignored", "len", len(payload))
-		return
+		return false
 	}
 	nackedGen := binary.LittleEndian.Uint64(payload[:8])
 	// Only a nack for the generation this node most recently sent can
@@ -27,7 +27,7 @@ func (s *SessionSync) handleConfigApplyNack(conn net.Conn, payload []byte) {
 	if sent := s.lastSentConfigGen.Load(); nackedGen != sent {
 		slog.Debug("cluster sync: ignoring stale config-apply nack",
 			"nacked_gen", nackedGen, "last_sent_gen", sent)
-		return
+		return false
 	}
 	s.stats.ConfigApplyNacksReceived.Add(1)
 	// #9569: the peer did not apply the config generation. A handover onto it
@@ -37,28 +37,29 @@ func (s *SessionSync) handleConfigApplyNack(conn net.Conn, payload []byte) {
 	if s.OnPeerConfigApplyFailed != nil {
 		s.OnPeerConfigApplyFailed(nackedGen)
 	}
+	return true
 }
 
-func (s *SessionSync) handleConfigApplyAck(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleConfigApplyAck(conn net.Conn, payload []byte) bool {
 	if len(payload) < 8 {
 		slog.Debug("cluster sync: short config-apply ack ignored", "len", len(payload))
-		return
+		return false
 	}
 	appliedGen := binary.LittleEndian.Uint64(payload[:8])
 	if appliedGen == 0 {
-		return
+		return false
 	}
 	s.mu.Lock()
 	if conn != nil && s.activeConnLocked() != conn {
 		s.mu.Unlock()
-		return
+		return false
 	}
 	lastSent := s.lastSentConfigGen.Load()
 	if lastSent == 0 || appliedGen > lastSent {
 		s.mu.Unlock()
 		slog.Debug("cluster sync: ignoring config-apply ack for an unsent generation",
 			"applied_gen", appliedGen, "last_sent_gen", lastSent)
-		return
+		return false
 	}
 	advanced := false
 	for {
@@ -76,11 +77,12 @@ func (s *SessionSync) handleConfigApplyAck(conn net.Conn, payload []byte) {
 		s.OnPeerConfigApplyAck(appliedGen)
 	}
 	slog.Debug("cluster sync: peer acknowledged applied config", "gen", appliedGen)
+	return true
 }
 
-func (s *SessionSync) handleHeartbeat(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleHeartbeat(conn net.Conn, payload []byte) bool {
 	if conn == nil {
-		return
+		return false
 	}
 	s.writeMu.Lock()
 	err := writeMsg(conn, syncMsgHeartbeatAck, nil)
@@ -90,23 +92,27 @@ func (s *SessionSync) handleHeartbeat(conn net.Conn, payload []byte) {
 		s.stats.Errors.Add(1)
 		s.handleDisconnect(conn)
 	}
+	return true
 }
 
-func (s *SessionSync) handleHeartbeatAck(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleHeartbeatAck(conn net.Conn, payload []byte) bool {
 	// #5718 C01a (fold F1): bind the capability to the peer INCARNATION
 	// that proved it — only a currently-installed fabric connection can
 	// speak for the current one. See noteHeartbeatAck (sync_conn.go).
-	s.noteHeartbeatAck(conn)
+	if conn == nil {
+		return true
+	}
+	return s.noteHeartbeatAck(conn)
 }
 
-func (s *SessionSync) handleConfig(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleConfig(conn net.Conn, payload []byte) bool {
 	// This legacy message type is the cleartext #6629 fallback. Pass its
 	// wire posture into the shared handler so receive totals and the
 	// cleartext subtotal are recorded in one order (#11773).
-	s.handleConfigPayload(conn, payload, true)
+	return s.handleConfigPayload(conn, payload, true)
 }
 
-func (s *SessionSync) handleConfigEncrypted(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleConfigEncrypted(conn net.Conn, payload []byte) bool {
 	// #6629: same payload, sealed under this connection's ephemeral key.
 	// Decrypt, then hand the plaintext to the SAME handler — the two arms
 	// must never diverge in ordering, generation accounting or apply
@@ -138,38 +144,38 @@ func (s *SessionSync) handleConfigEncrypted(conn net.Conn, payload []byte) {
 		s.stats.Errors.Add(1)
 		slog.Error("cluster sync: encrypted config received but no key was negotiated on "+
 			"this connection — dropping (#6629)", "remote", connRemoteAddrString(conn))
-		return
+		return false
 	}
 	plaintext, err := openConfigPayload(key, payload)
 	if err != nil {
 		s.stats.Errors.Add(1)
 		slog.Error("cluster sync: could not decrypt config payload — dropping (#6629)",
 			"err", err, "remote", connRemoteAddrString(conn))
-		return
+		return false
 	}
-	s.handleConfigPayload(conn, plaintext, false)
+	return s.handleConfigPayload(conn, plaintext, false)
 }
 
-func (s *SessionSync) handleConfigKeyExchangeFrame(conn net.Conn, payload []byte) {
-	s.handleConfigKeyExchange(conn, payload)
+func (s *SessionSync) handleConfigKeyExchangeFrame(conn net.Conn, payload []byte) bool {
+	return s.handleConfigKeyExchange(conn, payload)
 }
 
-func (s *SessionSync) handleAuthUpgradeRequestFrame(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleAuthUpgradeRequestFrame(conn net.Conn, payload []byte) bool {
 	// #6628: the responder-role peer committed a key and is asking THIS
 	// node (the initiator by node id) to start the exchange.
-	s.handleAuthUpgradeRequest(conn, payload)
+	return s.handleAuthUpgradeRequest(conn, payload)
 }
 
-func (s *SessionSync) handleAuthUpgradeHelloFrame(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleAuthUpgradeHelloFrame(conn net.Conn, payload []byte) bool {
 	// #6628: the peer committed a key and is offering to authenticate this
 	// established connection in place. Never drops it.
-	s.handleAuthUpgradeHello(conn, payload)
+	return s.handleAuthUpgradeHello(conn, payload)
 }
 
-func (s *SessionSync) handleAuthUpgradeProofFrame(conn net.Conn, payload []byte) {
-	s.handleAuthUpgradeProof(conn, payload)
+func (s *SessionSync) handleAuthUpgradeProofFrame(conn net.Conn, payload []byte) bool {
+	return s.handleAuthUpgradeProof(conn, payload)
 }
 
-func (s *SessionSync) handleAuthUpgradeConfirmFrame(conn net.Conn, payload []byte) {
-	s.handleAuthUpgradeConfirm(conn, payload)
+func (s *SessionSync) handleAuthUpgradeConfirmFrame(conn net.Conn, payload []byte) bool {
+	return s.handleAuthUpgradeConfirm(conn, payload)
 }

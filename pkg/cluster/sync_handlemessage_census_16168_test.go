@@ -203,7 +203,7 @@ func TestHandleMessageCaseCensus16168Mutations(t *testing.T) {
 	}
 
 	// Dropping a whole clause must change both counts.
-	mut2 := strings.Replace(src, "case syncMsgBarrierAck:\n\t\ts.handleBarrierAck(conn, payload)\n", "", 1)
+	mut2 := strings.Replace(src, "case syncMsgBarrierAck:\n\t\treturn s.handleBarrierAck(conn, payload)\n", "", 1)
 	if mut2 == src {
 		t.Fatalf("mutation setup failed: BarrierAck arm not found")
 	}
@@ -216,8 +216,8 @@ func TestHandleMessageCaseCensus16168Mutations(t *testing.T) {
 	// NOT count. (The line-regex scanner this replaces counted it,
 	// because it stripped only // comments.)
 	mut3 := strings.Replace(src,
-		"case syncMsgBarrierAck:\n\t\ts.handleBarrierAck(conn, payload)",
-		"/*\n\tcase syncMsgBarrierAck:\n\t\ts.handleBarrierAck(conn, payload)\n\t*/", 1)
+		"case syncMsgBarrierAck:\n\t\treturn s.handleBarrierAck(conn, payload)",
+		"/*\n\tcase syncMsgBarrierAck:\n\t\treturn s.handleBarrierAck(conn, payload)\n\t*/", 1)
 	if mut3 == src {
 		t.Fatalf("mutation setup failed: BarrierAck arm not found for block-comment mutation")
 	}

@@ -6,6 +6,18 @@ xpf (0.0.0) unstable; urgency=medium
     longer installs attacker-chosen call IDs, and a synced session
     with no sequence state learns nothing. `no-sequence-check`
     opts out, as for closing segments.
+  * Cluster: session-sync peer liveness now refreshes only on
+    semantically accepted frames, and every sync message type carries a
+    per-type payload cap (#16041). Well-framed but rejected frames
+    (unknown types, truncated records, stale full-sets, impossible
+    clock readings) previously reset the missed-heartbeat count and the
+    last-receive stamp before dispatch, so a faulty keyed peer could
+    mask its own failover trigger indefinitely. Over-cap headers are
+    refused before the payload is read, counted as
+    OversizeFramesRefused in cluster statistics, and drop the
+    connection; unknown types remain globally capped and ignored for
+    forward compatibility.
+
   * Cluster: an open control-key rotation now ages visibly and alarms
     when forgotten (#16029). UpdateConfig stamps when the current
     additional-authentication-key window opened (keyed on the additional

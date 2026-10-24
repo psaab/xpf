@@ -13,7 +13,7 @@ import (
 // from handleMessage LAST (#16168), preserving the ORDER MATTERS
 // sequence at the top of the original arm statement-for-statement:
 // both incarnation records land before the generation reset below.
-func (s *SessionSync) handleBulkStart(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleBulkStart(conn net.Conn, payload []byte) bool {
 	var epoch uint64
 	if len(payload) >= 8 {
 		epoch = binary.LittleEndian.Uint64(payload[:8])
@@ -85,7 +85,7 @@ func (s *SessionSync) handleBulkStart(conn net.Conn, payload []byte) {
 			"bulk_in_progress", active,
 			"accumulated_v4", v4, "accumulated_v6", v6,
 			"peer_incarnation", inc)
-		return
+		return false
 	}
 	s.bulkInProgress = true
 	s.bulkRecvSerial++
@@ -209,4 +209,5 @@ func (s *SessionSync) handleBulkStart(conn net.Conn, payload []byte) {
 	if !inc.known() {
 		s.warnUnincarnatedPrimeOnce(conn)
 	}
+	return true
 }

@@ -88,6 +88,16 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 			s.stats.Errors.Add(1)
 			return
 		}
+		// #16041: per-type payload cap, decided from the header BEFORE the
+		// payload is allocated or read. A known type declaring more than
+		// its encoder can emit is non-conforming; the length desyncs the
+		// stream, so the connection drops (the global-cap posture refined
+		// per type). Unknown types keep only the global bound below: a
+		// newer peer's additive type must stay forward-compatible.
+		if cap, known := syncPayloadCap(hdr.Type); known && hdr.Length > uint32(cap) {
+			s.refuseOversizeFrame(hdr.Type, hdr.Length, cap)
+			return
+		}
 		var payload []byte
 		if hdr.Length > 0 {
 			if hdr.Length > maxSyncPayload {
@@ -120,9 +130,14 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 				return
 			}
 		}
-		missedHeartbeats = 0
-		s.lastPeerRxMono.Store(MonotonicNanos())
-		s.handleMessage(conn, hdr.Type, payload)
+		// #16041: liveness refreshes ONLY on semantic accept. A
+		// well-framed but rejected frame (unknown type, malformed,
+		// stale, superseded) must not reset the missed-heartbeat count
+		// or the last-receive stamp, or a faulty keyed peer sending
+		// junk forever would mask its own failover trigger.
+		if s.handleMessage(conn, hdr.Type, payload) {
+			s.notePeerLiveness(&missedHeartbeats)
+		}
 	}
 }
 
@@ -148,93 +163,102 @@ func (s *SessionSync) bulkReceiveProgress(typ string, conn net.Conn) {
 		slog.Info("cluster sync: bulk receive progress", "epoch", epoch, "sessions", count, "type", typ, "local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
 	}
 }
-func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte) {
+
+// handleMessage dispatches one framed message to its receive handler and
+// reports whether the frame was semantically accepted (#16041): the handler
+// consumed it as a valid instance of its type (applied, queued, or matched
+// a live waiter/incarnation). Rejected frames — unknown type, malformed,
+// stale, out-of-order, superseded, undecryptable — return false, and
+// receiveLoop refreshes peer liveness only on true. See
+// sync_payload_caps_16041.go for the acceptance contract.
+func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte) bool {
 	switch msgType {
 	case syncMsgSessionV4:
-		s.handleSessionV4(conn, payload)
+		return s.handleSessionV4(conn, payload)
 	case syncMsgSessionV6:
-		s.handleSessionV6(conn, payload)
+		return s.handleSessionV6(conn, payload)
 	case syncMsgDeleteV4:
-		s.handleDeleteV4(conn, payload)
+		return s.handleDeleteV4(conn, payload)
 	case syncMsgDeleteV6:
-		s.handleDeleteV6(conn, payload)
+		return s.handleDeleteV6(conn, payload)
 	case syncMsgBulkRequest:
-		s.handleBulkRequest(conn, payload)
+		return s.handleBulkRequest(conn, payload)
 	case syncMsgBulkStart:
-		s.handleBulkStart(conn, payload)
+		return s.handleBulkStart(conn, payload)
 	case syncMsgBulkEnd:
-		s.handleBulkEnd(conn, payload)
+		return s.handleBulkEnd(conn, payload)
 	case syncMsgBulkAck:
-		s.handleBulkAck(conn, payload)
+		return s.handleBulkAck(conn, payload)
 	case syncMsgConfigApplyNack:
-		s.handleConfigApplyNack(conn, payload)
+		return s.handleConfigApplyNack(conn, payload)
 	case syncMsgConfigApplyAck:
-		s.handleConfigApplyAck(conn, payload)
+		return s.handleConfigApplyAck(conn, payload)
 	case syncMsgHeartbeat:
-		s.handleHeartbeat(conn, payload)
+		return s.handleHeartbeat(conn, payload)
 	case syncMsgHeartbeatAck:
-		s.handleHeartbeatAck(conn, payload)
+		return s.handleHeartbeatAck(conn, payload)
 	case syncMsgConfig:
-		s.handleConfig(conn, payload)
+		return s.handleConfig(conn, payload)
 	case syncMsgConfigEncrypted:
-		s.handleConfigEncrypted(conn, payload)
+		return s.handleConfigEncrypted(conn, payload)
 	case syncMsgConfigKeyExchange:
-		s.handleConfigKeyExchangeFrame(conn, payload)
+		return s.handleConfigKeyExchangeFrame(conn, payload)
 	case syncMsgAuthUpgradeRequest:
-		s.handleAuthUpgradeRequestFrame(conn, payload)
+		return s.handleAuthUpgradeRequestFrame(conn, payload)
 	case syncMsgAuthUpgradeHello:
-		s.handleAuthUpgradeHelloFrame(conn, payload)
+		return s.handleAuthUpgradeHelloFrame(conn, payload)
 	case syncMsgAuthUpgradeProof:
-		s.handleAuthUpgradeProofFrame(conn, payload)
+		return s.handleAuthUpgradeProofFrame(conn, payload)
 	case syncMsgAuthUpgradeConfirm:
-		s.handleAuthUpgradeConfirmFrame(conn, payload)
+		return s.handleAuthUpgradeConfirmFrame(conn, payload)
 	case syncMsgIPsecSA:
-		s.handleIPsecSA(conn, payload)
+		return s.handleIPsecSA(conn, payload)
 	case syncMsgPersistentNatLease:
-		s.handlePersistentNatLease(conn, payload)
+		return s.handlePersistentNatLease(conn, payload)
 	case syncMsgPersistentNatLeaseScoped:
-		s.handlePersistentNatLeaseScoped(conn, payload)
+		return s.handlePersistentNatLeaseScoped(conn, payload)
 	case syncMsgPersistentNatLeaseGeneration, syncMsgPersistentNatLeaseDeterministic:
-		s.handlePersistentNatLeaseGeneration(conn, msgType, payload)
+		return s.handlePersistentNatLeaseGeneration(conn, msgType, payload)
 	case syncMsgDHCPLeaseV4:
-		s.handleDHCPLeaseV4(conn, payload)
+		return s.handleDHCPLeaseV4(conn, payload)
 	case syncMsgDHCPLeaseV6:
-		s.handleDHCPLeaseV6(conn, payload)
+		return s.handleDHCPLeaseV6(conn, payload)
 	case syncMsgDHCPLeaseV4Chunk, syncMsgDHCPLeaseV6Chunk:
-		s.handleDHCPLeaseChunk(conn, msgType, payload)
+		return s.handleDHCPLeaseChunk(conn, msgType, payload)
 	case syncMsgFailover:
-		s.handleFailover(conn, payload)
+		return s.handleFailover(conn, payload)
 	case syncMsgFailoverAck:
-		s.handleFailoverAck(conn, payload)
+		return s.handleFailoverAck(conn, payload)
 	case syncMsgFailoverCommit:
-		s.handleFailoverCommitFrame(conn, payload)
+		return s.handleFailoverCommitFrame(conn, payload)
 	case syncMsgFailoverCommitAck:
-		s.handleFailoverCommitAck(conn, payload)
+		return s.handleFailoverCommitAck(conn, payload)
 	case syncMsgFailoverBatch:
-		s.handleFailoverBatchFrame(conn, payload)
+		return s.handleFailoverBatchFrame(conn, payload)
 	case syncMsgFailoverBatchAck:
-		s.handleFailoverBatchAck(conn, payload)
+		return s.handleFailoverBatchAck(conn, payload)
 	case syncMsgFailoverBatchCommit:
-		s.handleFailoverBatchCommitFrame(conn, payload)
+		return s.handleFailoverBatchCommitFrame(conn, payload)
 	case syncMsgFailoverBatchCommitAck:
-		s.handleFailoverBatchCommitAck(conn, payload)
+		return s.handleFailoverBatchCommitAck(conn, payload)
 	case syncMsgFailoverAbort:
-		s.handleFailoverAbortFrame(conn, payload)
+		return s.handleFailoverAbortFrame(conn, payload)
 	case syncMsgFailoverBatchAbort:
-		s.handleFailoverBatchAbortFrame(conn, payload)
+		return s.handleFailoverBatchAbortFrame(conn, payload)
 	case syncMsgFence:
-		s.handleFence(conn, payload)
+		return s.handleFence(conn, payload)
 	case syncMsgFenceAck:
-		s.handleFenceAck(conn, payload)
+		return s.handleFenceAck(conn, payload)
 	case syncMsgPeerCapabilities:
-		s.handlePeerCapabilities(conn, payload)
+		return s.handlePeerCapabilities(conn, payload)
 	case syncMsgClockSync:
-		s.handleClockSync(conn, payload)
+		return s.handleClockSync(conn, payload)
 	case syncMsgBarrier:
-		s.handleBarrier(conn, payload)
+		return s.handleBarrier(conn, payload)
 	case syncMsgBarrierAck:
-		s.handleBarrierAck(conn, payload)
+		return s.handleBarrierAck(conn, payload)
 	}
+	return false
 }
 
 // handleConfigPayload processes a decoded config-sync payload, whether it
@@ -247,7 +271,7 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 // the CONNECTION primed under, so a payload queued from a peer's prior boot can
 // be dropped at apply time rather than applying across a reset and stranding
 // the high-water.
-func (s *SessionSync) handleConfigPayload(conn net.Conn, payload []byte, cleartext bool) {
+func (s *SessionSync) handleConfigPayload(conn net.Conn, payload []byte, cleartext bool) bool {
 	s.stats.ConfigsReceived.Add(1)
 	if cleartext {
 		// Latch reception as well as sends: this node has the same exposure
@@ -304,7 +328,7 @@ func (s *SessionSync) handleConfigPayload(conn net.Conn, payload []byte, clearte
 			"item_incarnation", item.incarnation.String(),
 			"current_incarnation", s.PeerBootIncarnation().String(),
 			"gen", gen, "size", len(configText), "remote", connRemoteAddrString(conn))
-		return
+		return false
 	}
 	s.recordRecvConfigGen(gen)
 	// #3931: enqueue onto the single-consumer ordered apply queue instead
@@ -366,4 +390,5 @@ func (s *SessionSync) handleConfigPayload(conn net.Conn, payload []byte, clearte
 			s.sendConfigApplyNack(gen)
 		}
 	}
+	return true
 }

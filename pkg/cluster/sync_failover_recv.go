@@ -12,21 +12,22 @@ import (
 // suffix avoids colliding with the pre-existing handleRemoteFailover*
 // workers these delegates spawn. All go statements, counters, and
 // lock choreography are unchanged.
-func (s *SessionSync) handleFailover(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleFailover(conn net.Conn, payload []byte) bool {
 	if len(payload) < 9 {
 		slog.Warn("cluster sync: failover message too short")
-		return
+		return false
 	}
 	rgID := int(payload[0])
 	reqID := binary.LittleEndian.Uint64(payload[1:9])
 	slog.Info("cluster sync: remote failover request received", "rg", rgID, "req_id", reqID)
 	go s.handleRemoteFailover(conn, rgID, reqID)
+	return true
 }
 
-func (s *SessionSync) handleFailoverAck(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleFailoverAck(conn net.Conn, payload []byte) bool {
 	if len(payload) < 10 {
 		slog.Warn("cluster sync: failover ack message too short")
-		return
+		return false
 	}
 	rgID := int(payload[0])
 	status := payload[1]
@@ -34,23 +35,25 @@ func (s *SessionSync) handleFailoverAck(conn net.Conn, payload []byte) {
 	detail := string(payload[10:])
 	slog.Info("cluster sync: failover ack received", "rg", rgID, "req_id", reqID, "status", status, "detail", detail)
 	s.completeFailoverWait(rgID, reqID, failoverAck{status: status, detail: detail})
+	return true
 }
 
-func (s *SessionSync) handleFailoverCommitFrame(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleFailoverCommitFrame(conn net.Conn, payload []byte) bool {
 	if len(payload) < 9 {
 		slog.Warn("cluster sync: failover commit message too short")
-		return
+		return false
 	}
 	rgID := int(payload[0])
 	reqID := binary.LittleEndian.Uint64(payload[1:9])
 	slog.Info("cluster sync: remote failover commit received", "rg", rgID, "req_id", reqID)
 	go s.handleRemoteFailoverCommit(conn, rgID, reqID)
+	return true
 }
 
-func (s *SessionSync) handleFailoverCommitAck(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleFailoverCommitAck(conn net.Conn, payload []byte) bool {
 	if len(payload) < 10 {
 		slog.Warn("cluster sync: failover commit ack message too short")
-		return
+		return false
 	}
 	rgID := int(payload[0])
 	status := payload[1]
@@ -58,70 +61,77 @@ func (s *SessionSync) handleFailoverCommitAck(conn net.Conn, payload []byte) {
 	detail := string(payload[10:])
 	slog.Info("cluster sync: failover commit ack received", "rg", rgID, "req_id", reqID, "status", status, "detail", detail)
 	s.completeFailoverCommitWait(rgID, reqID, failoverAck{status: status, detail: detail})
+	return true
 }
 
-func (s *SessionSync) handleFailoverBatchFrame(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleFailoverBatchFrame(conn net.Conn, payload []byte) bool {
 	rgIDs, reqID, err := decodeFailoverBatchRequestPayload(payload)
 	if err != nil {
 		slog.Warn("cluster sync: batch failover message decode failed", "err", err)
-		return
+		return false
 	}
 	slog.Info("cluster sync: remote batch failover request received", "rgs", rgIDs, "req_id", reqID)
 	go s.handleRemoteFailoverBatch(conn, rgIDs, reqID)
+	return true
 }
 
-func (s *SessionSync) handleFailoverBatchAck(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleFailoverBatchAck(conn net.Conn, payload []byte) bool {
 	rgIDs, status, reqID, detail, err := decodeFailoverBatchAckPayload(payload)
 	if err != nil {
 		slog.Warn("cluster sync: batch failover ack decode failed", "err", err)
-		return
+		return false
 	}
 	slog.Info("cluster sync: batch failover ack received", "rgs", rgIDs, "req_id", reqID, "status", status, "detail", detail)
 	s.completeFailoverBatchWait(failoverBatchKey(rgIDs), reqID, failoverAck{status: status, detail: detail})
+	return true
 }
 
-func (s *SessionSync) handleFailoverBatchCommitFrame(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleFailoverBatchCommitFrame(conn net.Conn, payload []byte) bool {
 	rgIDs, reqID, err := decodeFailoverBatchRequestPayload(payload)
 	if err != nil {
 		slog.Warn("cluster sync: batch failover commit message decode failed", "err", err)
-		return
+		return false
 	}
 	slog.Info("cluster sync: remote batch failover commit received", "rgs", rgIDs, "req_id", reqID)
 	go s.handleRemoteFailoverCommitBatch(conn, rgIDs, reqID)
+	return true
 }
 
-func (s *SessionSync) handleFailoverBatchCommitAck(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleFailoverBatchCommitAck(conn net.Conn, payload []byte) bool {
 	rgIDs, status, reqID, detail, err := decodeFailoverBatchAckPayload(payload)
 	if err != nil {
 		slog.Warn("cluster sync: batch failover commit ack decode failed", "err", err)
-		return
+		return false
 	}
 	slog.Info("cluster sync: batch failover commit ack received", "rgs", rgIDs, "req_id", reqID, "status", status, "detail", detail)
 	s.completeFailoverBatchCommitWait(failoverBatchKey(rgIDs), reqID, failoverAck{status: status, detail: detail})
+	return true
 }
 
-func (s *SessionSync) handleFailoverAbortFrame(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleFailoverAbortFrame(conn net.Conn, payload []byte) bool {
 	if len(payload) < 9 {
 		slog.Warn("cluster sync: failover abort message too short")
-		return
+		return false
 	}
 	rgID := int(payload[0])
 	reqID := binary.LittleEndian.Uint64(payload[1:9])
 	slog.Info("cluster sync: remote failover abort received", "rg", rgID, "req_id", reqID)
 	go s.handleRemoteFailoverAbort(rgID, reqID)
+	return true
 }
 
-func (s *SessionSync) handleFailoverBatchAbortFrame(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleFailoverBatchAbortFrame(conn net.Conn, payload []byte) bool {
 	rgIDs, reqID, err := decodeFailoverBatchRequestPayload(payload)
 	if err != nil {
 		slog.Warn("cluster sync: batch failover abort message decode failed", "err", err)
-		return
+		return false
 	}
 	slog.Info("cluster sync: remote batch failover abort received", "rgs", rgIDs, "req_id", reqID)
 	go s.handleRemoteFailoverAbortBatch(rgIDs, reqID)
+	return true
 }
 
-func (s *SessionSync) handleFence(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleFence(conn net.Conn, payload []byte) bool {
 	s.stats.FencesReceived.Add(1)
 	// #7147: a fence may carry an 8-byte sequence number asking for a
 	// confirmation. A pre-#7147 sender writes a nil payload, which decodes
@@ -142,9 +152,10 @@ func (s *SessionSync) handleFence(conn net.Conn, payload []byte) {
 	if fenceSeq != 0 {
 		s.sendFenceAck(conn, fenceSeq, fenceRes)
 	}
+	return true
 }
 
-func (s *SessionSync) handleFenceAck(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleFenceAck(conn net.Conn, payload []byte) bool {
 	// #7147. A malformed or truncated ack is DROPPED rather than partially
 	// decoded: a short frame zero-filled into RGsFenced/RGsTotal/Status
 	// would decode to status 0 == FenceAckOK, i.e. a corrupt frame would
@@ -153,19 +164,21 @@ func (s *SessionSync) handleFenceAck(conn net.Conn, payload []byte) {
 	ack, ok := decodeFenceAckPayload(payload)
 	if !ok {
 		slog.Warn("cluster sync: fence ack message too short", "len", len(payload))
-		return
+		return false
 	}
+	matched := fenceAckWaiterPresent(s, ack.Seq)
 	s.completeFenceAckWait(ack)
+	return matched
 }
 
-func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) {
+func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) bool {
 	// #6650. Length-gated with the #2170 trailing-field discipline: a
 	// SHORTER frame than we expect is a peer we cannot interpret, so it is
 	// ignored (leaving the 0 = incapable default) rather than partially
 	// decoded; a LONGER one is a newer peer with extra fields we skip.
 	if len(payload) < 2 {
 		slog.Warn("cluster sync: peer capabilities message too short", "len", len(payload))
-		return
+		return false
 	}
 	peerProto := binary.LittleEndian.Uint16(payload[:2])
 	oldProto := s.peerSnapshotProtocol.Load()
@@ -219,7 +232,7 @@ func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) {
 	if conn != nil && !s.connIsCurrentIncarnationLocked(conn) {
 		s.mu.Unlock()
 		slog.Debug("cluster sync: ignoring capabilities from a superseded connection")
-		return
+		return false
 	}
 	if ac, ok := conn.(*authConn); ok {
 		ac.peerSnapshotVersion = peerProto
@@ -288,12 +301,13 @@ func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) {
 	}
 	slog.Info("cluster sync: peer advertised capabilities",
 		"version", peerProto, "flags", peerFlags, "session_sync_wire", peerWire)
+	return true
 }
 
-func (s *SessionSync) handleClockSync(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleClockSync(conn net.Conn, payload []byte) bool {
 	if len(payload) < 8 {
 		slog.Warn("cluster sync: clock sync message too short")
-		return
+		return false
 	}
 	peerMono := binary.LittleEndian.Uint64(payload[:8])
 	localMono := s.clockSyncLocalMono()
@@ -309,7 +323,7 @@ func (s *SessionSync) handleClockSync(conn net.Conn, payload []byte) {
 			slog.Warn("cluster sync: refusing clock sync with an impossible peer monotonic clock; the previous offset stays in force",
 				"peer_mono", peerMono, "local_mono", localMono, "refused_total", n, "remote", connRemoteAddrString(conn))
 		}
-		return
+		return false
 	}
 	offset := int64(localMono) - int64(peerMono)
 	// A bound cannot tell a plausible false reading from a true one, so the
@@ -321,26 +335,28 @@ func (s *SessionSync) handleClockSync(conn net.Conn, payload []byte) {
 	if !s.publishClockSyncIfCurrent(conn, offset) {
 		slog.Debug("cluster sync: dropping clock sync from a retired connection; the current incarnation's offset stays in force",
 			"peer_mono", peerMono, "local_mono", localMono, "remote", connRemoteAddrString(conn))
-		return
+		return false
 	}
 	slog.Info("cluster sync: clock synced with peer", "peer_mono", peerMono, "local_mono", localMono, "offset", offset)
+	return true
 }
 
-func (s *SessionSync) handleBarrier(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleBarrier(conn net.Conn, payload []byte) bool {
 	if len(payload) < 8 {
 		slog.Warn("cluster sync: barrier message too short")
-		return
+		return false
 	}
 	seq := binary.LittleEndian.Uint64(payload[:8])
 	stats := s.Stats()
 	slog.Info("cluster sync: barrier received", "seq", seq, "sessions_received", stats.SessionsReceived, "sessions_installed", stats.SessionsInstalled, "queue_len", len(s.sendCh), "queue_cap", cap(s.sendCh))
 	s.sendBarrierAck(conn, seq)
+	return true
 }
 
-func (s *SessionSync) handleBarrierAck(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleBarrierAck(conn net.Conn, payload []byte) bool {
 	if len(payload) < 8 {
 		slog.Warn("cluster sync: barrier ack message too short")
-		return
+		return false
 	}
 	seq := binary.LittleEndian.Uint64(payload[:8])
 	stats := s.Stats()
@@ -359,4 +375,5 @@ func (s *SessionSync) handleBarrierAck(conn net.Conn, payload []byte) {
 	}
 	s.stats.LastFenceAckAt.Store(time.Now().UnixNano())
 	s.completeBarrierWait(seq)
+	return true
 }
