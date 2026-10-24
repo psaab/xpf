@@ -68,20 +68,25 @@ _CELL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test/incus/cluster-cell.sh
 source "${_CELL_DIR}/cluster-cell.sh"
 xpf_enter_destructive_cluster_cell "cc-rollback-functional --arm $ARM" "$0" "$@"
+# Node/host/sink refs resolve through the cluster env (#16328) so the
+# Arm-B sink is the cluster's VLAN-80 target (loss xpf-mouse-target,
+# tcp xpf-tcp-target, udp xpf-udp-target), not a hardcoded loss name.
+# shellcheck source=test/incus/cluster-env.sh
+source "${_CELL_DIR}/cluster-env.sh"
+NODE="${NODE:-$FW0}"
+HOST="${HOST:-$CLUSTER_LAN_HOST}"
 # ── Arm B diagnostic-preserving helpers (#9531 §5d) ──────────────────
 # The Arm-A oracles (host_ping discards diagnostics; policy_present reads
 # absence from failed reads) are kept byte-identical for Arm A and NOT reused
 # for Arm B. Each helper below classifies BLIND explicitly; a BLIND read is a
 # VOID for its assertion, never a pass contribution.
 B_HOST="${B_HOST:-$HOST}"
-B_SINK="${B_SINK:-172.16.80.201}"
-B_SINK_REF="${B_SINK_REF:-loss:xpf-mouse-target}"
+B_SINK="${B_SINK:-${MOUSE_TARGET_V4}}"
+B_SINK_REF="${B_SINK_REF:-${MOUSE_TARGET_REF}}"
 B_PORT="${B_PORT:-54911}"
 B_SRC_PORT="${B_SRC_PORT:-54913}"
 B_POL="armb-9531-permit"
 B_APP="armb-9531-probe"
-# LAN host address for session-query context (this script does not source
-# cluster-env.sh; the value matches loss-userspace-cluster.env LAN_HOST_IP).
 LAN_HOST_IP="${LAN_HOST_IP:-10.0.61.102}"
 # run_cli_t — like run_cli but with a LOCAL timeout bound (GPT-3). Every
 # remote step already has a remote `timeout(1)`; that bounds nothing when

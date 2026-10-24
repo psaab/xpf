@@ -98,9 +98,12 @@ do_up() {
     done
 
     echo "installing packages"
+    # tcpdump/iperf3/python3 are the prober contract (#16328): a failed
+    # install must fail `up`, not WARN-and-continue into a capture-blind
+    # gate that only discovers the missing binary at preflight.
     inc exec "$ref" -- sh -c \
-        'apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq iperf3 python3 tcpdump >/dev/null 2>&1' \
-        || echo "WARN: package install returned non-zero; continuing to service setup"
+        'apt-get update -qq && apt-get install -y -qq iperf3 python3 tcpdump' || return 1
+    inc exec "$ref" -- sh -c 'command -v tcpdump && command -v iperf3 && command -v python3' >/dev/null || return 1
 
     echo "installing the address unit"
     inc exec "$ref" -- sh -c "cat > /etc/systemd/system/mouse-addr.service <<'UNIT'

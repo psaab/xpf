@@ -392,7 +392,7 @@ INCUS_REMOTE="${INCUS_REMOTE:-loss}"
 NODE="${NODE:-${FW0:-${INCUS_REMOTE}:xpf-userspace-fw0}}"
 NODE0="${FW0:-${INCUS_REMOTE}:xpf-userspace-fw0}"
 NODE1="${FW1:-${INCUS_REMOTE}:xpf-userspace-fw1}"
-TARGET="${TARGET:-${INCUS_REMOTE}:xpf-mouse-target}"
+TARGET="${TARGET:-${MOUSE_TARGET_REF}}"
 RI_NAME="${RI_NAME:-wire-10136}"
 [[ "$RI_NAME" =~ ^[A-Za-z][A-Za-z0-9_-]{0,31}$ ]] || {
     printf 'WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0 precommit_control_offered=0 precommit_control_observed=0 populated_offered=0 populated_observed=0 populated_control_offered=0 populated_control_observed=0 removed_offered=0 removed_observed=0 removed_control_offered=0 removed_control_observed=0\n'

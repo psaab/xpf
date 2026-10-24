@@ -237,7 +237,7 @@ if ! $SG "incus exec $CLUSTER_LAN_HOST -- ping -c2 -W2 $SINK" >/dev/null 2>&1; t
 	echo "REFUSE: lan host cannot reach sink $SINK"
 	early_void no-prober
 fi
-MOUSE_REF="${MOUSE_TARGET_NAME:-loss:xpf-mouse-target}"
+MOUSE_REF="${MOUSE_TARGET_REF:-${MOUSE_TARGET_NAME}}"
 if ! $SG "incus exec $MOUSE_REF -- sh -c 'command -v tcpdump'" >/dev/null 2>&1; then
 	echo "REFUSE: no managed capture point (tcpdump missing on $MOUSE_REF)"
 	early_void no-prober

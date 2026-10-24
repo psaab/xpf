@@ -425,8 +425,8 @@ source "${SCRIPT_DIR}/cluster-env.sh"
 INCUS_REMOTE="${INCUS_REMOTE:-loss}"
 NODE="${NODE:-${FW0:-xpf-userspace-fw0}}"
 TRUST_HOST="${TRUST_HOST:-${CLUSTER_LAN_HOST_NAME:-cluster-userspace-host}}"
-UNTRUST_HOST="${UNTRUST_HOST:-xpf-mouse-target}"
-DMZ_HOST="${DMZ_HOST:-xpf-zone-matrix-dmz}"
+UNTRUST_HOST="${UNTRUST_HOST:-${MOUSE_TARGET_NAME}}"
+DMZ_HOST="${DMZ_HOST:-${DMZ_TARGET_NAME}}"
 TRUST_HOST="${TRUST_HOST#*:}"
 UNTRUST_HOST="${UNTRUST_HOST#*:}"
 DMZ_HOST="${DMZ_HOST#*:}"
@@ -641,9 +641,20 @@ if grep -q "$POLICY_PREFIX\|$APP_NAME\|$BROKEN_POLICY" <<<"$POLICY_SNAP$APP_SNAP
 
 # Provision and identify the actual third-zone endpoint, then put only the
 # destination-network routes needed for reverse directions through the DUT.
-MOUSE_TARGET_NAME="$DMZ_HOST" MOUSE_TARGET_V4="$DMZ_ADDR" \
+# INCUS_REMOTE must reach mouse-target-setup.sh explicitly (#16328):
+# cluster-env.sh exports it, but the inline prefix alone left the child
+# defaulting to loss, so on tcp/udp the DMZ prober was created/checked on
+# the wrong remote. Setup output is preserved on failure, not discarded.
+DMZ_SETUP_LOG="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-zone-matrix-dmz-setup.XXXXXX")" || fail_void harness-void
+if ! INCUS_REMOTE="$INCUS_REMOTE" MOUSE_TARGET_NAME="$DMZ_HOST" MOUSE_TARGET_V4="$DMZ_ADDR" \
 MOUSE_TARGET_V6="$DMZ_TARGET_V6" MOUSE_TARGET_PF="$DMZ_TARGET_PF" MOUSE_TARGET_VLAN="$DMZ_TARGET_VLAN" \
-$SG "bash ${SCRIPT_DIR}/mouse-target-setup.sh up" >/dev/null 2>&1 || fail_void no-prober
+$SG "bash ${SCRIPT_DIR}/mouse-target-setup.sh up" >"$DMZ_SETUP_LOG" 2>&1; then
+    echo "REFUSE: DMZ prober setup failed on ${INCUS_REMOTE}:${DMZ_HOST}; setup output follows" >&2
+    cat "$DMZ_SETUP_LOG" >&2 || true
+    rm -f "$DMZ_SETUP_LOG"
+    fail_void no-prober
+fi
+rm -f "$DMZ_SETUP_LOG"
 for host in "${HOSTS[@]}"; do
     if ! $SG "incus exec ${INCUS_REMOTE}:${host} -- sh -c 'command -v tcpdump'" >/dev/null 2>&1; then
         if [[ "$host" == "$DMZ_HOST" || "$host" == "$UNTRUST_HOST" ]]; then

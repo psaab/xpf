@@ -21,6 +21,22 @@ xpf (0.0.0) unstable; urgency=medium
     diff, catching a .proto edited without regeneration independently
     of the header red. Local regeneration behaviour is unchanged.
 
+  * Parameterize mouse/DMZ target instance names per cluster env
+    (#16328): tcp declares MOUSE_TARGET_NAME=xpf-tcp-target and udp
+    declares xpf-udp-target (loss keeps xpf-mouse-target
+    byte-identical); cluster-env.sh derives remote-qualified
+    MOUSE_TARGET_REF/DMZ_TARGET_REF and exports INCUS_REMOTE.
+    Wire gates (policy-deny, appmatch-twins, zone-matrix,
+    hostinbound-deny, nat-frag-needed, conntrack-lifecycle,
+    routing-separation), test-host-inbound, test-fbf-steering and
+    cc-rollback resolve their VLAN-80/50 probers through those refs
+    instead of hardcoded loss names. wire-zone-matrix passes
+    INCUS_REMOTE explicitly to mouse-target-setup.sh and preserves
+    its output on DMZ-prober setup failure; mouse-target-setup
+    fails `up` when the iperf3/python3/tcpdump install fails.
+    cluster-env-selftest asserts the real per-cluster names.
+
+xpf (0.0.0) unstable; urgency=medium
   * API: metrics descriptor init and Describe are now driven by one
     per-family descriptor table (#16202). The ~36 init calls in
     newCollector, the 630-line Describe enumeration, and the seven

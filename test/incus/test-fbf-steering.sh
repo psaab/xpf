@@ -15,24 +15,27 @@
 #
 # Usage:
 #   ./test/incus/test-fbf-steering.sh [loss:xpf-userspace-fw0]
-#   FBF_EGRESS_HOST=loss:xpf-mouse-target  # managed VLAN-80 capture peer
+#   FBF_EGRESS_HOST=<remote>:<target>  # managed VLAN-80 capture peer;
+#     default resolves via cluster-env.sh ($MOUSE_TARGET_REF, #16328)
 #     provision it with ./test/incus/mouse-target-setup.sh up (installs tcpdump)
 #   FBF_PING_DST=172.16.80.201 FBF_PING_DST6=2001:559:8585:80::201 ...
-#   FBF_LAN_HOST=loss:cluster-userspace-host  # LAN traffic source
 #   FBF_FAILOVER_DEADLINE=120                 # IPv4 convergence deadline, seconds
 #
 set -euo pipefail
 
-TARGET="${1:-loss:xpf-userspace-fw0}"
+SCRIPT_DIR_EARLY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./cluster-env.sh
+source "${SCRIPT_DIR_EARLY}/cluster-env.sh"
+TARGET="${1:-$FW0}"
 [[ $# -le 1 ]] || { shift; echo "unexpected extra arguments: $*" >&2; exit 2; }
-LAN_HOST="${FBF_LAN_HOST:-loss:cluster-userspace-host}"
+LAN_HOST="${FBF_LAN_HOST:-$CLUSTER_LAN_HOST}"
 ISP_A_GW4="${FBF_ISP_A_GW4:-172.16.50.1}"
 ISP_B_GW4="${FBF_ISP_B_GW4:-172.16.80.1}"
 ISP_B_GW6="${FBF_ISP_B_GW6:-2001:559:8585:80::1}"
-EGRESS_HOST="${FBF_EGRESS_HOST:-${INCUS_REMOTE:-loss}:${MOUSE_TARGET_NAME:-xpf-mouse-target}}"
+EGRESS_HOST="${FBF_EGRESS_HOST:-${MOUSE_TARGET_REF}}"
 EGRESS_IFACE="${FBF_EGRESS_IFACE:-eth0}"
-PING_DST4="${FBF_PING_DST:-${MOUSE_TARGET_V4:-172.16.80.201}}"
-PING_DST6="${FBF_PING_DST6:-${MOUSE_TARGET_V6:-2001:559:8585:80::201}}"
+PING_DST4="${FBF_PING_DST:-${MOUSE_TARGET_V4}}"
+PING_DST6="${FBF_PING_DST6:-${MOUSE_TARGET_V6}}"
 PING_COUNT=5
 MIN_ECHO_REPLIES=3
 FAILOVER_DEADLINE="${FBF_FAILOVER_DEADLINE:-120}"
