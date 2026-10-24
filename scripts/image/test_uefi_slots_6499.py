@@ -22,6 +22,13 @@ hypotheticals:
   * empty-BootOrder no-write — a reseed built from an unreadable BootOrder
     would emit `--bootorder <A>,<B>`, WIPING every other entry: PXE, recovery,
     the firmware's own (r1 AGY destructive-wipe).
+  * distributor takeover (#16449) — a grub-efi-amd64-signed / shim-signed
+    postinst runs grub-install with NVRAM writes and prepends the Ubuntu
+    entry; without a recorded front the registrar preserved it as an
+    "operator choice" forever and the LANE-1 arm refused. The fix records
+    the front xpf leaves and re-asserts a recorded SLOT front when the
+    distributor entry appears in front; a genuine operator front (PXE, or
+    Ubuntu with no recorded slot front) is still preserved.
 
 Method: the REAL script, run by a REAL /bin/sh, with PATH shadowed by mocks:
 `efibootmgr` models NVRAM as two state files, and `findmnt`/`lsblk` provide the
@@ -51,6 +58,7 @@ HERE = Path(__file__).resolve().parent
 SCRIPT = HERE / "xpf-uefi-slots"
 
 UBUNTU = "0000|ubuntu|\\EFI\\ubuntu\\shimx64.efi"
+PXE2 = "0002|UEFI PXEv6|PciRoot(0x0)/Pci(0x2,0x0)/MAC(001122334466,1)"
 PXE = "0001|UEFI PXEv4|PciRoot(0x0)/Pci(0x2,0x0)/MAC(001122334455,1)"
 
 MOCK_EFIBOOTMGR = r"""#!/bin/sh
@@ -185,7 +193,6 @@ class _SlotsBase(unittest.TestCase):
         self.nvram.mkdir()
         (self.nvram / "entries").write_text("")
         (self.nvram / "order").write_text("")
-
         # Synthetic efivars dir + ESP. Both slots staged by default; a test
         # that models an unstaged slot removes one.
         self.efivars = self.tmp / "efivars"
@@ -197,7 +204,26 @@ class _SlotsBase(unittest.TestCase):
             (d / "shimx64.efi").write_text("shim")
             (d / "grubx64.efi").write_text("grub")
 
+        # #16449 recorded-front state, hermetic per test.
+        self.state_dir = self.tmp / "state"
+        self.state_dir.mkdir()
+        self.state_file = self.state_dir / "uefi-bootorder-front"
+
         self.env_extra = {}
+
+    def seed_recorded(self, front, slot, order):
+        self.state_file.write_text(
+            f"front={front}\nslot={slot}\norder={order}\n")
+
+    def recorded(self):
+        if not self.state_file.exists():
+            return {}
+        out = {}
+        for line in self.state_file.read_text().splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                out[k] = v
+        return out
 
     # ── NVRAM helpers ──
     def seed(self, entries, order):
@@ -234,6 +260,8 @@ class _SlotsBase(unittest.TestCase):
             "XPF_UEFI_SLOTS_DEV_ROOT": str(self.devroot),
             "XPF_UEFI_SLOTS_EFIVARS": str(self.efivars),
             "XPF_UEFI_SLOTS_ESP": str(self.esp),
+            "XPF_UEFI_SLOTS_STATE_DIR": str(self.state_dir),
+            "XPF_UEFI_SLOTS_STATE": str(self.state_file),
         })
         env.update(self.env_extra)
         res = subprocess.run(["/bin/sh", str(SCRIPT)], env=env,
@@ -426,6 +454,129 @@ class BootOrderTests(_SlotsBase):
         self.assertIn("no xpf-A slot id", res.stderr)
         self.assertEqual(self.order(), ["0000", "0001"])
         self.assertEqual([c for c in self.calls() if "--bootorder" in c], [])
+
+class DistributorTakeover16449Tests(_SlotsBase):
+    """#16449: a bootloader postinst prepends the distributor entry.
+
+    RED on master: with no recorded-front state the registrar preserved
+    ANY non-xpf front, so the Ubuntu entry a grub-efi-amd64-signed /
+    shim-signed postinst prepended (grub-install with NVRAM writes)
+    stayed in front forever and the LANE-1 arm refused.
+    """
+
+    def test_postinst_prepend_restores_recorded_slot_front(self):
+        # Boot 1: fresh box seeds A first and records it.
+        self.seed([UBUNTU, PXE], "0000,0001")
+        self.run_slots()
+        a = self.ids_for("xpf-A")[0]
+        b = self.ids_for("xpf-B")[0]
+        self.assertEqual(self.order()[0], a)
+        self.assertEqual(self.recorded().get("front"), a)
+        self.assertEqual(self.recorded().get("slot"), "xpf-A")
+        # Simulate the postinst: Ubuntu entry (re)created/prepended.
+        (self.nvram / "order").write_text(f"0000,{a},{b},0001")
+        calls_before = len(self.calls())
+        # Boot 2: the registrar must re-assert the recorded slot front.
+        res = self.run_slots()
+        self.assertIn("bootloader postinst rewrote NVRAM", res.stderr)
+        self.assertEqual(self.order(), [a, "0000", b, "0001"],
+                         "the distributor entry kept the front after a "
+                         "bootloader update — BootCurrent would be the "
+                         "ubuntu entry, not a slot, and the LANE-1 arm "
+                         "would refuse")
+        self.assertTrue(any("--bootorder" in c
+                            for c in self.calls()[calls_before:]))
+        self.assertEqual(self.recorded().get("front"), a)
+
+    def test_postinst_prepend_restores_promoted_slot_b(self):
+        # Promoted B is the recorded front; a postinst prepend of the
+        # distributor entry must restore B, never reseed to A.
+        self.seed(["0007|xpf-A|\\EFI\\xpf-A\\shimx64.efi",
+                   "0008|xpf-B|\\EFI\\xpf-B\\shimx64.efi", UBUNTU],
+                  "0008,0007,0000")
+        self.run_slots()
+        self.assertEqual(self.recorded().get("slot"), "xpf-B")
+        (self.nvram / "order").write_text("0000,0008,0007")
+        self.run_slots()
+        self.assertEqual(self.order(), ["0008", "0000", "0007"])
+
+    def test_operator_pxe_front_still_preserved(self):
+        # Acceptance control: a genuine operator PXE front (the existing
+        # operator-front test's shape) is NOT a distributor entry and
+        # must survive, recorded and on the next boot.
+        self.seed(["0007|xpf-A|\\EFI\\xpf-A\\shimx64.efi",
+                   "0008|xpf-B|\\EFI\\xpf-B\\shimx64.efi", UBUNTU, PXE],
+                  "0001,0007,0008,0000")
+        self.run_slots()
+        self.assertEqual(self.order(), ["0001", "0007", "0008", "0000"])
+        self.assertEqual(self.recorded().get("front"), "0001")
+        self.assertEqual(self.recorded().get("slot"), "")
+        self.run_slots()
+        self.assertEqual(self.order(), ["0001", "0007", "0008", "0000"])
+
+    def test_operator_ubuntu_front_without_recorded_slot_preserved(self):
+        # An operator who deliberately leads with the stock Ubuntu entry
+        # on a box with NO recorded slot front keeps that front. The
+        # first sight records it as the operator front; it is never
+        # taken over on missing state.
+        self.seed(["0007|xpf-A|\\EFI\\xpf-A\\shimx64.efi",
+                   "0008|xpf-B|\\EFI\\xpf-B\\shimx64.efi", UBUNTU],
+                  "0000,0007,0008")
+        res = self.run_slots()
+        self.assertIn("no recorded slot front", res.stderr)
+        self.assertEqual(self.order(), ["0000", "0007", "0008"])
+        self.assertEqual(self.recorded().get("front"), "0000")
+        self.assertEqual(self.recorded().get("slot"), "")
+        self.run_slots()
+        self.assertEqual(self.order(), ["0000", "0007", "0008"])
+
+    def test_distributor_front_with_operator_recorded_front_preserved(self):
+        # The operator front was recorded (PXE), then the operator
+        # switched the front to Ubuntu by hand: no recorded SLOT front,
+        # so the distributor front is preserved, not taken over.
+        self.seed_recorded("0001", "", "0001,0007,0008,0000")
+        self.seed(["0007|xpf-A|\\EFI\\xpf-A\\shimx64.efi",
+                   "0008|xpf-B|\\EFI\\xpf-B\\shimx64.efi", UBUNTU, PXE],
+                  "0000,0007,0008,0001")
+        self.run_slots()
+        self.assertEqual(self.order()[0], "0000")
+
+    def test_garbled_state_file_never_takes_over(self):
+        self.state_file.write_text("garbage\x00not a state file\n")
+        self.seed(["0007|xpf-A|\\EFI\\xpf-A\\shimx64.efi",
+                   "0008|xpf-B|\\EFI\\xpf-B\\shimx64.efi", UBUNTU],
+                  "0000,0007,0008")
+        self.run_slots()
+        self.assertEqual(self.order(), ["0000", "0007", "0008"],
+                         "garbled recorded state caused a takeover")
+
+    def test_missing_state_file_never_takes_over(self):
+        self.assertFalse(self.state_file.exists())
+        self.seed(["0007|xpf-A|\\EFI\\xpf-A\\shimx64.efi",
+                   "0008|xpf-B|\\EFI\\xpf-B\\shimx64.efi", UBUNTU],
+                  "0000,0008,0007")
+        self.run_slots()
+        self.assertEqual(self.order(), ["0000", "0008", "0007"])
+
+    def test_recorded_slot_deleted_recovers_via_surviving_slot(self):
+        # Recorded A was deleted from NVRAM (firmware reset took one
+        # entry); registration recreates it and the takeover re-asserts
+        # the recreated A rather than stranding on a stale id.
+        self.seed_recorded("0007", "xpf-A", "0007,0008,0000")
+        self.seed(["0008|xpf-B|\\EFI\\xpf-B\\shimx64.efi", UBUNTU],
+                  "0000,0008")
+        self.run_slots()
+        a = self.ids_for("xpf-A")[0]
+        self.assertEqual(self.order()[0], a)
+        self.assertEqual(self.recorded().get("front"), a)
+
+    def test_fresh_seed_records_slot_front(self):
+        self.seed([UBUNTU, PXE], "0000,0001")
+        self.run_slots()
+        a = self.ids_for("xpf-A")[0]
+        self.assertEqual(self.recorded(),
+                         {"front": a, "slot": "xpf-A",
+                          "order": ",".join(self.order())})
 
 
 class NonFatalDegradeTests(_SlotsBase):

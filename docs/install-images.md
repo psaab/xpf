@@ -692,6 +692,36 @@ touched by the refresh. A loader present in `EFI/ubuntu` must land in
 both slots; `mmx64.efi` absent from `EFI/ubuntu` (the bake's fallback
 shape) is left as-is rather than treated as drift.
 
+### BootOrder front after a bootloader update (#16449)
+
+The sentence above — "updates install only to `EFI/ubuntu`, while
+BootOrder boots the xpf slots" — was only half true. On the Ubuntu
+26.04 base, the `grub-efi-amd64-signed` / `shim-signed` postinst runs
+`grub-install` with NVRAM writes enabled (`grub2/update_nvram: true`),
+so a routine bootloader `-security` update (re)creates the `Ubuntu`
+Boot#### entry and moves it to `BootOrder[0]`. The firmware then boots
+`\EFI\ubuntu\shimx64.efi` (no `xpf.selector`, so the stock `10_linux`
+entries apply) instead of a slot, and the LANE-1 kernel arm refuses
+with "BootOrder front ... is neither A/B slot" — permanently, because
+`xpf-uefi-slots` used to preserve *any* non-xpf front as an operator
+choice.
+
+The registrar now records the front it leaves on every run in
+`/var/lib/xpf/uefi-bootorder-front` (`front=` / `slot=` / `order=`).
+When the current front is the distributor entry (`\EFI\ubuntu\shimx64.efi`)
+and the recorded front is an xpf slot, the registrar re-asserts the
+recorded slot front: the distributor entry appeared *after* xpf's last
+write, so it is the postinst's rewrite, not an operator choice. A
+genuine operator front is still preserved: a PXE (or any non-distributor)
+front is never taken over, and a distributor front with **no** recorded
+slot front (fresh state, or an operator front recorded earlier) is
+preserved and recorded as the operator front. Missing or garbled state
+never causes a takeover. The baked image never ships a recorded front
+(it is in the sysprep purge list), so a clone's first boot seeds and
+records its own slot front. After the recovery boot, `BootCurrent` is
+the slot again and the kernel arm proceeds.
+
+
 ### #7163 — session-sync is a FLAG DAY at wire version 2
 
 **Upgrading to a build carrying #7163 DROPS SYNCED SESSIONS. Both nodes must
