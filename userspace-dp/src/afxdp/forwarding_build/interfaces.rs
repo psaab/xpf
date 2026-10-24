@@ -1235,18 +1235,16 @@ pub(super) fn populate_interfaces(
                             .or_default()
                             .insert(connected_table_v4.clone());
                     } else {
-                        state.local_v4.insert(v4.addr());
+                        // #16208: paired insert via the ForwardingState
+                        // method (local_v4 + owning table atomically);
+                        // #3769: keyed by the HOST `.addr()`, NOT the
+                        // (masked) connected prefix, so a non-/32 interface
+                        // IP is recognised as locally-owned in its own VRF.
+                        state.insert_local_iface_addr(
+                            std::net::IpAddr::V4(v4.addr()),
+                            connected_table_v4.clone(),
+                        );
                         registered_local = true;
-                        // #3769: record the interface host address's owning
-                        // table for the table-scoped local-delivery DECISION.
-                        // Keyed by the HOST `.addr()`, NOT the (masked)
-                        // connected prefix, so a non-/32 interface IP is
-                        // recognised as locally-owned in its own VRF.
-                        state
-                            .local_tables_v4
-                            .entry(v4.addr())
-                            .or_default()
-                            .insert(connected_table_v4.clone());
                     }
                     let prefix = PrefixV4::from_net(v4);
                     if prefix.prefix_len() < 31 {
@@ -1307,15 +1305,13 @@ pub(super) fn populate_interfaces(
                             .or_default()
                             .insert(connected_table_v6.clone());
                     } else {
-                        state.local_v6.insert(v6.addr());
+                        // #16208: paired insert via the ForwardingState
+                        // method (see the v4 arm).
+                        state.insert_local_iface_addr(
+                            std::net::IpAddr::V6(v6.addr()),
+                            connected_table_v6.clone(),
+                        );
                         registered_local = true;
-                        // #3769: record the interface host address's owning
-                        // table (see the v4 arm).
-                        state
-                            .local_tables_v6
-                            .entry(v6.addr())
-                            .or_default()
-                            .insert(connected_table_v6.clone());
                     }
                     let prefix = PrefixV6::from_net(v6);
                     state
