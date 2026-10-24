@@ -427,7 +427,15 @@ func (s *Server) systemActionHandler(w http.ResponseWriter, r *http.Request) {
 			writeOK(w, map[string]string{"message": "No configuration lock held"})
 			return
 		}
+		// #16069: drop the evicted token's principal binding under the same
+		// binding lock, so the dead generation cannot carry its binding into
+		// a later tenure of the same token. The force-release itself
+		// advances the holder epoch, which also generation-orphans the old
+		// binding even if this delete were skipped.
+		s.restSessionsMu.Lock()
 		s.store.ForceExitConfigure()
+		delete(s.restSessions, holder)
+		s.restSessionsMu.Unlock()
 		writeOK(w, map[string]string{"message": fmt.Sprintf("Configuration lock cleared (was held by %s)", holder)})
 
 	default:

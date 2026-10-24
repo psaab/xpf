@@ -81,24 +81,44 @@ func restSessionOwner(r *http.Request) (string, bool) {
 	return restSessionBindingKey(p), true
 }
 
-// bindRESTSession records that sessionID was minted by owner. First mint wins
-// until the session is released or reclaimed.
-func (s *Server) bindRESTSession(sessionID, owner string) {
-	s.restSessionsMu.Lock()
-	defer s.restSessionsMu.Unlock()
-	if s.restSessions == nil {
-		s.restSessions = make(map[string]string)
-	}
-	if _, exists := s.restSessions[sessionID]; !exists {
-		s.restSessions[sessionID] = owner
-	}
+// restSessionBinding is the recorded mint of one REST config-session token:
+// the binding key of the principal that minted it plus the store holder
+// epoch observed immediately after that mint acquired/re-affirmed the
+// holder. The epoch makes release generation-checked: an exit that
+// releases holder generation N may only erase a binding minted at
+// generation N, never a binding a concurrent re-entry installed for a
+// later generation of the same token.
+type restSessionBinding struct {
+	owner string
+	epoch uint64
 }
 
-// unbindRESTSession drops the binding when the session ends.
-func (s *Server) unbindRESTSession(sessionID string) {
-	s.restSessionsMu.Lock()
-	defer s.restSessionsMu.Unlock()
+// bindRESTSessionLocked records that sessionID is held by owner at store
+// holder epoch epoch. Callers MUST hold restSessionsMu and MUST call this
+// under the same lock hold as the store EnterConfigureSession that
+// acquired/re-affirmed the holder, so the binding and the store holder
+// change atomically with respect to every other bind/unbind/verify.
+func (s *Server) bindRESTSessionLocked(sessionID, owner string, epoch uint64) {
+	if s.restSessions == nil {
+		s.restSessions = make(map[string]restSessionBinding)
+	}
+	s.restSessions[sessionID] = restSessionBinding{owner: owner, epoch: epoch}
+}
+
+// unbindRESTSessionLocked drops the binding for sessionID only when it is
+// still the exact binding (owner AND holder generation) the caller
+// observed before releasing the store holder. Callers MUST hold
+// restSessionsMu across the store ExitConfigureSession and this call: a
+// concurrent same-token re-entry that installed a newer-generation
+// binding is therefore never erased by a stale exit. Returns whether a
+// binding was erased.
+func (s *Server) unbindRESTSessionLocked(sessionID, owner string, epoch uint64) bool {
+	bound, ok := s.restSessions[sessionID]
+	if !ok || bound.owner != owner || bound.epoch != epoch {
+		return false
+	}
 	delete(s.restSessions, sessionID)
+	return true
 }
 
 // verifyRESTSessionOwner reports whether owner minted sessionID. A session
@@ -110,11 +130,18 @@ func (s *Server) unbindRESTSession(sessionID string) {
 func (s *Server) verifyRESTSessionOwner(sessionID, owner string) bool {
 	s.restSessionsMu.Lock()
 	defer s.restSessionsMu.Unlock()
+	return s.verifyRESTSessionOwnerLocked(sessionID, owner)
+}
+
+// verifyRESTSessionOwnerLocked is verifyRESTSessionOwner for callers that
+// already hold restSessionsMu (enter/exit, which hold it across the store
+// holder transition).
+func (s *Server) verifyRESTSessionOwnerLocked(sessionID, owner string) bool {
 	bound, ok := s.restSessions[sessionID]
 	if !ok {
 		return true
 	}
-	return bound == owner
+	return bound.owner == owner
 }
 
 // restConfigSessionID reads and validates the holder identity supplied by a
@@ -215,46 +242,81 @@ func (s *Server) configEnterHandler(w http.ResponseWriter, r *http.Request) {
 	} else if !validRESTConfigSessionID(sessionID) {
 		writeError(w, http.StatusBadRequest, "invalid "+restConfigSessionHeader+" header")
 		return
-	} else if !s.verifyRESTSessionOwner(sessionID, owner) {
+	}
+
+	// Hold restSessionsMu across BOTH the store holder transition and the
+	// binding update, and read the holder epoch inside that same lock hold.
+	// That serializes this enter against a concurrent exit of the same
+	// token: the exit can no longer interleave between the store releasing
+	// the holder and a re-entry restoring the binding (then have its stale
+	// erase delete the new mint), nor between the store acquiring the holder
+	// and the binding being recorded. The epoch captured here is the
+	// generation this binding belongs to; a later exit may erase the
+	// binding only for that exact generation (see configExitHandler).
+	s.restSessionsMu.Lock()
+	if !fresh && !s.verifyRESTSessionOwnerLocked(sessionID, owner) {
+		s.restSessionsMu.Unlock()
 		writeError(w, http.StatusForbidden, "config session token not bound to this principal")
 		return
 	}
-
 	if err := s.store.EnterConfigureSession(sessionID); err != nil {
+		s.restSessionsMu.Unlock()
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
-	if fresh {
-		s.bindRESTSession(sessionID, owner)
-	} else {
-		// Reclaim takeover: if the store just granted this token to a new
-		// holder (the previous lock was reclaimed as stale), the old binding
-		// must not survive to lock the new holder out or let the old owner
-		// keep using it. verify above already rejected a live different-owner
-		// binding, so any binding still present is either this owner's or
-		// stale from a reclaimed session — (re)bind to the current owner.
-		s.restSessionsMu.Lock()
-		if s.restSessions == nil {
-			s.restSessions = make(map[string]string)
-		}
-		s.restSessions[sessionID] = owner
-		s.restSessionsMu.Unlock()
-	}
+	// A same-session re-entry does not advance the store holder epoch, so
+	// refreshing the recorded epoch to the current one keeps one live
+	// generation per token; a takeover (stale-lease reclaim or
+	// release-then-re-enter) observes the advanced epoch and binds the new
+	// generation to the current owner.
+	s.bindRESTSessionLocked(sessionID, owner, s.store.HolderEpoch())
+	s.restSessionsMu.Unlock()
 	writeOK(w, map[string]string{"status": "ok", "session_id": sessionID})
 }
 
 func (s *Server) configExitHandler(w http.ResponseWriter, r *http.Request) {
-	sessionID, ok := s.restConfigSessionID(w, r)
-	if !ok {
+	// Parse + format-check the token without the full owner-checked helper:
+	// the owner check, the store release, and the unbind must share one
+	// restSessionsMu hold (below), so checking first via restConfigSessionID
+	// and releasing later would reopen exactly the race this handler closes.
+	sessionID := strings.TrimSpace(r.Header.Get(restConfigSessionHeader))
+	if sessionID == "" {
+		writeError(w, http.StatusBadRequest, "missing "+restConfigSessionHeader+" header")
 		return
 	}
-	// Release only the candidate held by this REST session. A stale or foreign
-	// token cannot clear another client's work (#5870), and #16069 adds that a
-	// token minted by a different principal cannot release it either (the
-	// owner check inside restConfigSessionID already denied that above).
-	if s.store.ExitConfigureSession(sessionID) {
-		s.unbindRESTSession(sessionID)
+	if !validRESTConfigSessionID(sessionID) {
+		writeError(w, http.StatusBadRequest, "invalid "+restConfigSessionHeader+" header")
+		return
 	}
+	owner, ok := restSessionOwner(r)
+	if !ok {
+		writeError(w, http.StatusForbidden, "config session principal unavailable")
+		return
+	}
+	// Release only the candidate held by this REST session, and only for
+	// the principal that minted it (#5870 holder check in the store, #16069
+	// binding here). Hold restSessionsMu across the owner check, the store
+	// release, and the unbind so no concurrent same-token re-entry can slip
+	// a new binding in between the release and the erase: the unbind is
+	// generation-checked against the (owner, epoch) observed under this
+	// lock hold, so it erases only the generation that was just released —
+	// a binding restored by a re-entry for a later generation survives.
+	s.restSessionsMu.Lock()
+	if !s.verifyRESTSessionOwnerLocked(sessionID, owner) {
+		s.restSessionsMu.Unlock()
+		writeError(w, http.StatusForbidden, "config session token not bound to this principal")
+		return
+	}
+	bound, boundKnown := s.restSessions[sessionID]
+	released := s.store.ExitConfigureSession(sessionID)
+	if released && boundKnown {
+		// The binding erased here is the one observed above under this
+		// same lock hold; holding restSessionsMu across the whole sequence
+		// means no re-entry can have replaced it in between, and the
+		// (owner, epoch) comparison refuses to erase anything else.
+		s.unbindRESTSessionLocked(sessionID, bound.owner, bound.epoch)
+	}
+	s.restSessionsMu.Unlock()
 	writeOK(w, map[string]string{"status": "ok"})
 }
 
