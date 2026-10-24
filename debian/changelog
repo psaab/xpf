@@ -63,6 +63,28 @@ xpf (0.0.0) unstable; urgency=medium
     so the covered baseline is shellcheck-clean.
 
 xpf (0.0.0) unstable; urgency=medium
+  * Harness: wire-gate captures are detached in-container with a
+    watchdog bound (#16329). A backgrounded `incus exec ... timeout
+    N tcpdump` orphaned tcpdump to PID 1 (unkillable from later exec
+    sessions) when the local client was killed — tcp runs hung
+    1263s/279s against a 120s STEP_TIMEOUT with no verdict.
+    wire-gate-lib.sh now starts each capture via one foreground exec
+    (`nohup tcpdump -w <pcap> & echo $! >pidfile` plus a detached
+    `( sleep <lifetime>; kill -TERM <pid> )` watchdog; TERM because
+    backgrounded processes inherit SIGINT-ignored), stops it by the
+    recorded pid from a fresh exec, VERIFIES via pgrep on the unique
+    savefile that nothing survives (loud VOID, never a discarded
+    pkill), and pulls/renders the pcap locally so all text reductions
+    are unchanged. Converted: wire-policy-deny, wire-zone-matrix,
+    wire-appmatch-twins, wire-hostinbound-deny,
+    wire-conntrack-lifecycle, wire-nat-frag-needed,
+    wire-routing-separation and test-fbf-steering's peer capture,
+    each with a stable remote pidfile base that is precleaned before
+    a new window. Hermetic stub selftests prove: stop works after
+    the starter exec is gone, an unkillable capture fails loud, and
+    with no stop at all the watchdog ends the capture (verified live
+    on a scratch container: SIGKILLed harness, `pgrep tcpdump`
+    empty within the lifetime).
   * Userspace-DP: an HA watchdog set containing an activation-pending
     RG (stored inactive, incoming active) now routes the whole set to
     the locked path instead of storing it from the session fast path

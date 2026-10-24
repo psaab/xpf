@@ -86,6 +86,13 @@ if [[ "$MODE" == "selftest" ]]; then
 	cell "under-sampled leaked deny twin fails" FAIL 1 -- 1500 1400 999 1 1500 1350 1000 0 0
 	cell "thin permit offer maps to VOID under-sampled" VOID 2 -- 1000 1000 1000 0 1500 1350 1000 0 0
 	cell "broken checksum maps to FAIL" FAIL 1 -- 1500 1400 1000 0 1500 1350 1000 0 3
+	if wire_capture_stub_selftest; then
+		echo "  PASS  capture stop survives a dead starter exec, fails loud on an unkillable capture, and is watchdog-bounded with no stop (#16329)"
+		pass=$((pass + 1))
+	else
+		echo "  FAIL  capture stop survives a dead starter exec, fails loud on an unkillable capture, and is watchdog-bounded with no stop (#16329)"
+		fail=$((fail + 1))
+	fi
 	cell "non-numeric input maps to VOID harness-void" VOID 2 -- 1500 x 1000 0 1500 1350 1000 0 0
 	echo "  wire-appmatch-twins selftest: $pass passed, $fail failed"
 	[[ "$fail" -eq 0 ]] || exit 1
@@ -169,14 +176,19 @@ policy_lines() {
 }
 
 # legs_filter — the ONE shared capture filter covering all four twin ports,
-# both transports (TCP legs are connects; UDP legs datagrams). The WHOLE
-# filter is single-quoted: $SG runs its argument through a local shell
-# first, and bare parens anywhere are a syntax error there (the incus
-# invocation then never runs and the capture is empty).
+# both transports (TCP legs are connects; UDP legs datagrams). Passed as
+# separate words to the detached-capture helper (#16329).
 legs_filter() {
-	printf "'( tcp or udp ) and dst host %s and ( dst port %s or dst port %s or dst port %s or dst port %s )'" \
+	# #16329: the filter is now passed as separate words to the
+	# detached-capture helper (no local-shell quoting layer), so it is
+	# printed WITHOUT the surrounding single quotes the old backgrounded
+	# $SG string needed. Ports/host are validated numerics/IPs only.
+	printf '( tcp or udp ) and dst host %s and ( dst port %s or dst port %s or dst port %s or dst port %s )' \
 		"$SINK" "$T80" "$T8080" "$U53" "$U5353"
 }
+# Capture shims for wire-gate-lib (#16329).
+wire_twins_capture_exec() { $SG "incus exec $SINK_EXEC -- $(printf '%q ' "$@")" ; }
+wire_twins_capture_pull() { $SG "incus file pull ${SINK_EXEC}$1 $2" ; }
 
 # parse_leg <port> — offered count for one twin from the SENT legs= line.
 # Anchored on `legs=` with an optional comma-terminated prefix so port 80
@@ -266,27 +278,47 @@ fi
 BASELINE_SNAP="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-baseline.XXXXXX")"
 trap 'rm -f "$BASELINE_SNAP"' EXIT
 printf '%s\n' "$POLines" >"$BASELINE_SNAP"
+# #16329: detached captures (wire-gate-lib.sh). Stable remote base so
+# a killed run's leftover is precleaned, never captured over.
+WIRE_CAPTURE_EXEC=wire_twins_capture_exec
+WIRE_CAPTURE_PULL=wire_twins_capture_pull
+CAPTURE_REMOTE_BASE="/tmp/xpf-wire-twins-cap"
+wire_capture_set_remote_base "$CAPTURE_REMOTE_BASE"
+if ! wire_capture_preclean "$CAPTURE_REMOTE_BASE"; then
+	echo "REFUSE: a prior run's capture is still running on $SINK_EXEC and could not be stopped (see above)"
+	early_void harness-void
+fi
 
 # Same-path baseline: all four twins forward pre-fixture (mini legs — a
 # liveness check, not the verdict).
 echo "--- same-path baseline burst (pre-fixture) ---"
 BASE_CAPLOG="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-basecap.XXXXXX")"
-$SG "incus exec $SINK_EXEC -- timeout $STEP_TIMEOUT tcpdump -i any -n $(legs_filter)" >"$BASE_CAPLOG" 2>&1 &
-BASE_CAP_PID=$!
+if ! wire_capture_start "$BASE_CAPLOG" "$STEP_TIMEOUT" any "$(legs_filter)"; then
+	rm -f "$BASE_CAPLOG"
+	echo "REFUSE: baseline capture failed to start"
+	early_void harness-void
+fi
 sleep 3
 start_listener $T80 120
 if ! $SG "incus exec $CLUSTER_LAN_HOST -- timeout $STEP_TIMEOUT python3 $REMOTE_PROBE --dst $SINK --tcp-leg $T80:10 --tcp-leg $T8080:10 --leg $U53:30 --leg $U5353:30 --rate 100" >/dev/null 2>&1; then
 	stop_listener
-	kill "$BASE_CAP_PID" 2>/dev/null || true
-	wait "$BASE_CAP_PID" 2>/dev/null || true
+	wire_capture_stop "$BASE_CAPLOG" >/dev/null 2>&1 || true
 	rm -f "$BASE_CAPLOG"
 	echo "REFUSE: baseline burst failed to send"
 	early_void harness-void
 fi
 stop_listener
 sleep 2
-kill "$BASE_CAP_PID" 2>/dev/null || true
-wait "$BASE_CAP_PID" 2>/dev/null || true
+if ! wire_capture_stop "$BASE_CAPLOG"; then
+	rm -f "$BASE_CAPLOG"
+	echo "REFUSE: baseline capture could not be stopped/verified on $SINK_EXEC"
+	early_void harness-void
+fi
+if ! wire_capture_fetch "$BASE_CAPLOG"; then
+	rm -f "$BASE_CAPLOG"
+	echo "REFUSE: baseline capture could not be pulled from $SINK_EXEC"
+	early_void harness-void
+fi
 for p in $T80 $T8080 $U53 $U5353; do
 	if ! grep -qE "\.${p}:" "$BASE_CAPLOG"; then
 		rm -f "$BASE_CAPLOG"
@@ -343,8 +375,14 @@ elif [[ -z "${WIRE_BROKEN_FIXTURE:-}" ]]; then
 	echo "fixture active: allow-all narrowed to $SET_NAME (tcp/80 + udp/53 only)"
 fi
 
+TWINS_CAPTURE_DIRTY=0
 do_restore() {
-	$SG "incus exec $SINK_EXEC -- pkill -f 'tcpdump.*dst port' 2>/dev/null" >/dev/null 2>&1 || true
+	# #16329: verified capture teardown, loud on failure. The caller
+	# folds TWINS_CAPTURE_DIRTY into RESTORE_CLEAN after do_restore.
+	if ! wire_capture_stop "$CAPTURE_REMOTE_BASE"; then
+		echo "RESTORE-DIRTY: capture on $SINK_EXEC could not be stopped/verified"
+		TWINS_CAPTURE_DIRTY=1
+	fi
 	printf 'configure\ndelete applications application-set %s\ndelete applications application %s\ndelete applications application %s\ndelete security policies from-zone %s to-zone %s policy allow-all match application\nset security policies from-zone %s to-zone %s policy allow-all match application any\ncommit\nexit\n' \
 		"$SET_NAME" "$APP_TCP" "$APP_UDP" "$FROM_ZONE" "$TO_ZONE" "$FROM_ZONE" "$TO_ZONE" | run_cli >/dev/null 2>&1 || true
 }
@@ -356,8 +394,11 @@ trap 'do_restore; rm -f "$BASELINE_SNAP"' EXIT
 # datagram bursts. One capture window covers both sender runs.
 echo "--- capture window + twins (tcp permit $PERMIT_N/deny $DENY_N, udp permit $PERMIT_N/deny $DENY_N) ---"
 CAPLOG="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-cap.XXXXXX")"
-$SG "incus exec $SINK_EXEC -- timeout $STEP_TIMEOUT tcpdump -i any -n -vv $(legs_filter)" >"$CAPLOG" 2>&1 &
-CAP_PID=$!
+if ! wire_capture_start "$CAPLOG" "$STEP_TIMEOUT" any "$(legs_filter)"; then
+	echo "capture failed to start on $SINK_EXEC"
+	emit VOID harness-void "tcp80_offered=0 tcp80_observed=0 tcp8080_offered=0 tcp8080_observed=0 udp53_offered=0 udp53_observed=0 udp5353_offered=0 udp5353_observed=0 deny_leaked=0 permit_missing=0 cksum_bad=0"
+	exit 2
+fi
 sleep 3
 start_listener $T80 600
 SENT_TCP="$($SG "incus exec $CLUSTER_LAN_HOST -- timeout $STEP_TIMEOUT python3 $REMOTE_PROBE --dst $SINK --tcp-leg $T80:$PERMIT_N --tcp-leg $T8080:$DENY_N" 2>&1 || true)"
@@ -370,8 +411,17 @@ T88O=$(parse_tcpleg $T8080)
 U53O=$(parse_leg $U53)
 U35O=$(parse_leg $U5353)
 sleep 5
-kill "$CAP_PID" 2>/dev/null || true
-wait "$CAP_PID" 2>/dev/null || true
+# Verified stop BEFORE counting (#16329): unverified window = VOID.
+if ! wire_capture_stop "$CAPLOG"; then
+	echo "capture on $SINK_EXEC could not be stopped/verified; window unverified"
+	emit VOID harness-void "tcp80_offered=$T80O tcp80_observed=0 tcp8080_offered=$T88O tcp8080_observed=0 udp53_offered=$U53O udp53_observed=0 udp5353_offered=$U35O udp5353_observed=0 deny_leaked=0 permit_missing=0 cksum_bad=0"
+	exit 2
+fi
+if ! wire_capture_fetch "$CAPLOG"; then
+	echo "capture could not be pulled from $SINK_EXEC; window unverified"
+	emit VOID harness-void "tcp80_offered=$T80O tcp80_observed=0 tcp8080_offered=$T88O tcp8080_observed=0 udp53_offered=$U53O udp53_observed=0 udp5353_offered=$U35O udp5353_observed=0 deny_leaked=0 permit_missing=0 cksum_bad=0"
+	exit 2
+fi
 T80B=$(wire_count_dst_frames "$CAPLOG" $T80)
 T88B=$(wire_count_dst_frames "$CAPLOG" $T8080)
 U53B=$(wire_count_dst_frames "$CAPLOG" $U53)
@@ -392,6 +442,7 @@ do_restore
 trap 'rm -f "$BASELINE_SNAP"' EXIT
 sleep 3
 RESTORE_CLEAN=1
+[[ "$TWINS_CAPTURE_DIRTY" == 1 ]] && RESTORE_CLEAN=0
 NOW_LINES="$(policy_lines)"
 if grep -q "$APP_TCP\|$APP_UDP\|$SET_NAME" <<<"$NOW_LINES"; then
 	echo "RESTORE-DIRTY: fixture marker still present post-restore"
@@ -402,28 +453,34 @@ if ! grep -q "policy allow-all match application any" <<<"$NOW_LINES"; then
 	RESTORE_CLEAN=0
 fi
 RE_CAPLOG="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-recap.XXXXXX")"
-$SG "incus exec $SINK_EXEC -- timeout 60 tcpdump -i any -n $(legs_filter)" >"$RE_CAPLOG" 2>&1 &
-RE_CAP_PID=$!
-sleep 3
 start_listener $T80 90
-if ! $SG "incus exec $CLUSTER_LAN_HOST -- timeout $STEP_TIMEOUT python3 $REMOTE_PROBE --dst $SINK --tcp-leg $T80:10 --tcp-leg $T8080:10 --leg $U53:30 --leg $U5353:30 --rate 100" >/dev/null 2>&1; then
+if ! wire_capture_start "$RE_CAPLOG" 60 any "$(legs_filter)"; then
+	echo "RESTORE-DIRTY: post-restore capture failed to start"
+	rm -f "$RE_CAPLOG"
+	RESTORE_CLEAN=0
+elif ! $SG "incus exec $CLUSTER_LAN_HOST -- timeout $STEP_TIMEOUT python3 $REMOTE_PROBE --dst $SINK --tcp-leg $T80:10 --tcp-leg $T8080:10 --leg $U53:30 --leg $U5353:30 --rate 100" >/dev/null 2>&1; then
 	echo "RESTORE-DIRTY: post-restore re-probe failed to send"
 	stop_listener
-	kill "$RE_CAP_PID" 2>/dev/null || true
-	wait "$RE_CAP_PID" 2>/dev/null || true
+	wire_capture_stop "$RE_CAPLOG" >/dev/null 2>&1 || RESTORE_CLEAN=0
 	rm -f "$RE_CAPLOG"
 	RESTORE_CLEAN=0
 else
 	stop_listener
 	sleep 2
-	kill "$RE_CAP_PID" 2>/dev/null || true
-	wait "$RE_CAP_PID" 2>/dev/null || true
-	for p in $T80 $T8080 $U53 $U5353; do
-		if ! grep -qE "\.${p}:" "$RE_CAPLOG"; then
-			echo "RESTORE-DIRTY: twin port $p does not forward post-restore"
-			RESTORE_CLEAN=0
-		fi
-	done
+	if ! wire_capture_stop "$RE_CAPLOG"; then
+		echo "RESTORE-DIRTY: post-restore capture could not be stopped/verified"
+		RESTORE_CLEAN=0
+	elif ! wire_capture_fetch "$RE_CAPLOG"; then
+		echo "RESTORE-DIRTY: post-restore capture could not be pulled"
+		RESTORE_CLEAN=0
+	else
+		for p in $T80 $T8080 $U53 $U5353; do
+			if ! grep -qE "\.${p}:" "$RE_CAPLOG"; then
+				echo "RESTORE-DIRTY: twin port $p does not forward post-restore"
+				RESTORE_CLEAN=0
+			fi
+		done
+	fi
 	rm -f "$RE_CAPLOG"
 fi
 if [[ "$RESTORE_CLEAN" == "1" ]]; then

@@ -167,8 +167,14 @@ wire_policy_deny_parse_legs() {
 	return 0
 }
 wire_policy_deny_capture_ready() {
-	grep -q 'listening on ' "$1"
+	# #16329: readiness is the detached capture's banner in its remote
+	# log, polled through the capture shim (no local CAPLOG any more).
+	wire_capture_ready "$1"
 }
+# Capture shims for wire-gate-lib (#16329): one incus exec / file pull
+# against $SINK_EXEC under the gate's $SG wrapper.
+wire_policy_deny_capture_exec() { $SG "incus exec $SINK_EXEC -- $(printf '%q ' "$@")" ; }
+wire_policy_deny_capture_pull() { $SG "incus file pull ${SINK_EXEC}$1 $2" ; }
 if [[ "$MODE" == "selftest" ]]; then
 	# Hermetic matrix over the shared verdict core. Each row feeds one
 	# input shape and asserts the exact line + exit code.
@@ -184,24 +190,27 @@ if [[ "$MODE" == "selftest" ]]; then
 		echo "  FAIL  interleaved sender legs preserve offered floors (probe=$POFFERED control=$COFFERED)"
 		fail=$((fail + 1))
 	fi
-	_capture_log="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-policy-capture.XXXXXX")"
-	printf 'tcpdump: listening on eth0, link-type EN10MB (Ethernet), snapshot length 262144 bytes\n' >"$_capture_log"
-	if wire_policy_deny_capture_ready "$_capture_log"; then
+	# Readiness now polls the detached capture's remote banner through
+	# the shim; stub the shim so the cell stays hermetic.
+	wire_policy_deny_capture_ready_stub() { return 0; }
+	WIRE_CAPTURE_EXEC=wire_policy_deny_capture_ready_stub
+	if wire_policy_deny_capture_ready dummy; then
 		echo "  PASS  capture readiness is confirmed before sending"
 		pass=$((pass + 1))
 	else
 		echo "  FAIL  capture readiness is confirmed before sending"
 		fail=$((fail + 1))
 	fi
-	: >"$_capture_log"
-	if ! wire_policy_deny_capture_ready "$_capture_log"; then
+	wire_policy_deny_capture_notready_stub() { return 1; }
+	WIRE_CAPTURE_EXEC=wire_policy_deny_capture_notready_stub
+	if ! wire_policy_deny_capture_ready dummy; then
 		echo "  PASS  missing capture readiness is rejected"
 		pass=$((pass + 1))
 	else
 		echo "  FAIL  missing capture readiness is rejected"
 		fail=$((fail + 1))
 	fi
-	rm -f "$_capture_log"
+	unset WIRE_CAPTURE_EXEC
 	cell() { # cell <label> <want_verdict> <want_rc> -- <counts...>
 		local label="$1" want_v="$2" want_rc="$3"
 		shift 3
@@ -223,6 +232,13 @@ if [[ "$MODE" == "selftest" ]]; then
 		pass=$((pass + 1))
 	else
 		echo "  FAIL  forced restore failure demotes FAIL and shields restore from SIGINT"
+		fail=$((fail + 1))
+	fi
+	if wire_capture_stub_selftest; then
+		echo "  PASS  capture stop survives a dead starter exec, fails loud on an unkillable capture, and is watchdog-bounded with no stop (#16329)"
+		pass=$((pass + 1))
+	else
+		echo "  FAIL  capture stop survives a dead starter exec, fails loud on an unkillable capture, and is watchdog-bounded with no stop (#16329)"
 		fail=$((fail + 1))
 	fi
 	cell "good transcript maps to PASS" PASS 0 -- 1000 0 1000 1000 0
@@ -381,28 +397,51 @@ fi
 BASELINE_SNAP="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-baseline.XXXXXX")"
 trap 'rm -f "$BASELINE_SNAP"' EXIT
 printf '%s\n' "$POLines" >"$BASELINE_SNAP"
+# #16329: captures are detached in-container (see wire-gate-lib.sh).
+# Wire the shims to this gate's sink and give every capture window a
+# stable remote base so a killed run's leftover is precleaned, never
+# captured over. Lifetime is STEP_TIMEOUT: the detached watchdog ends
+# the capture within it even when this harness is SIGKILLed.
+WIRE_CAPTURE_EXEC=wire_policy_deny_capture_exec
+WIRE_CAPTURE_PULL=wire_policy_deny_capture_pull
+CAPTURE_REMOTE_BASE="/tmp/xpf-wire-policy-deny-cap"
+wire_capture_set_remote_base "$CAPTURE_REMOTE_BASE"
+if ! wire_capture_preclean "$CAPTURE_REMOTE_BASE"; then
+	echo "REFUSE: a prior run's capture is still running on $SINK_EXEC and could not be stopped (see above)"
+	early_void harness-void
+fi
 
 # Same-path baseline (plan §5b(1)/Codex-r4): P and control must BOTH forward
 # pre-fixture on the tested path, or neither the verdict nor the restore
 # comparison means anything.
 echo "--- same-path baseline burst (pre-fixture) ---"
-# Capture runs in the background: a foreground `tcpdump -c` would wait for
-# packets the burst has not sent yet. tcpdump prints `IP a.b.c.d.p > w.x.y.z.q:`
-# with the dst port BEFORE the `UDP` token, hence the `\.port:` patterns.
+# Detached capture (#16329): started by one foreground exec, bounded
+# in-container by its watchdog, stopped+verified via the recorded pid,
+# then pulled and rendered locally for the same `\.port:` greps.
 BASE_CAPLOG="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-basecap.XXXXXX")"
-$SG "incus exec $SINK_EXEC -- timeout $STEP_TIMEOUT tcpdump -i any -n udp and dst host $SINK and '(' dst port $PROBE_PORT or dst port $CONTROL_PORT ')'" >"$BASE_CAPLOG" 2>&1 &
-BASE_CAP_PID=$!
+if ! wire_capture_start "$BASE_CAPLOG" "$STEP_TIMEOUT" any "udp and dst host $SINK and ( dst port $PROBE_PORT or dst port $CONTROL_PORT )"; then
+	rm -f "$BASE_CAPLOG"
+	echo "REFUSE: baseline capture failed to start"
+	early_void harness-void
+fi
 sleep 3
 if ! $SG "incus exec $CLUSTER_LAN_HOST -- timeout $STEP_TIMEOUT python3 $REMOTE_PROBE --dst $SINK --probe-port $PROBE_PORT --control-port $CONTROL_PORT --count 30 --rate 100" >/dev/null 2>&1; then
-	kill "$BASE_CAP_PID" 2>/dev/null || true
-	wait "$BASE_CAP_PID" 2>/dev/null || true
+	wire_capture_stop "$BASE_CAPLOG" >/dev/null 2>&1 || true
 	rm -f "$BASE_CAPLOG"
 	echo "REFUSE: baseline burst failed to send"
 	early_void harness-void
 fi
 sleep 2
-kill "$BASE_CAP_PID" 2>/dev/null || true
-wait "$BASE_CAP_PID" 2>/dev/null || true
+if ! wire_capture_stop "$BASE_CAPLOG"; then
+	rm -f "$BASE_CAPLOG"
+	echo "REFUSE: baseline capture could not be stopped/verified on $SINK_EXEC"
+	early_void harness-void
+fi
+if ! wire_capture_fetch "$BASE_CAPLOG"; then
+	rm -f "$BASE_CAPLOG"
+	echo "REFUSE: baseline capture could not be pulled from $SINK_EXEC"
+	early_void harness-void
+fi
 if ! grep -qE "\.${PROBE_PORT}:" "$BASE_CAPLOG"; then
 	rm -f "$BASE_CAPLOG"
 	echo "REFUSE: baseline probe did not emerge pre-fixture (path not forwarding)"
@@ -481,14 +520,21 @@ fi
 # Called by wire_policy_deny_cleanup; the callback is invoked by the EXIT finalizer.
 # shellcheck disable=SC2329
 do_restore() {
-	$SG "incus exec $SINK_EXEC -- pkill -f 'tcpdump.*$PROBE_PORT' 2>/dev/null" >/dev/null 2>&1 || true
+	# #16329: verified capture teardown, loud on failure. A survivor
+	# means the restore is unverified: mark it dirty (the finalizer
+	# demotes to VOID) instead of the old discarded `pkill || true`
+	# that hid unkillable orphans.
+	if ! wire_capture_stop "$CAPTURE_REMOTE_BASE"; then
+		echo "RESTORE-DIRTY: capture on $SINK_EXEC could not be stopped/verified"
+		RESTORE_CLEAN=0
+	fi
 	printf 'configure\ndelete applications application-set %s\ndelete applications application %s\ndelete security policies from-zone %s to-zone %s policy allow-all match application\nset security policies from-zone %s to-zone %s policy allow-all match application any\ncommit\nexit\n' \
 		"$SET_NAME" "$APP_NAME" "$FROM_ZONE" "$TO_ZONE" "$FROM_ZONE" "$TO_ZONE" | run_cli >/dev/null 2>&1 || true
 }
 # The EXIT finalizer invokes this through WIRE_GATE_CLEANUP_FN.
 # shellcheck disable=SC2329
 wire_policy_deny_cleanup() {
-	local NOW_LINES RE_CAPLOG RE_CAP_PID
+	local NOW_LINES RE_CAPLOG
 	echo "--- verified restore ---"
 	RESTORE_CLEAN=0
 	do_restore
@@ -507,26 +553,32 @@ wire_policy_deny_cleanup() {
 	# exclude is gone) and the control must still forward. A config diff alone
 	# cannot certify this (store-only divergence).
 	RE_CAPLOG="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-recap.XXXXXX")"
-	$SG "incus exec $SINK_EXEC -- timeout 60 tcpdump -i any -n udp and dst host $SINK and '(' dst port $PROBE_PORT or dst port $CONTROL_PORT ')'" >"$RE_CAPLOG" 2>&1 &
-	RE_CAP_PID=$!
-	sleep 3
-	if ! $SG "incus exec $CLUSTER_LAN_HOST -- timeout $STEP_TIMEOUT python3 $REMOTE_PROBE --dst $SINK --probe-port $PROBE_PORT --control-port $CONTROL_PORT --count 30 --rate 100" >/dev/null 2>&1; then
+	if ! wire_capture_start "$RE_CAPLOG" 60 any "udp and dst host $SINK and ( dst port $PROBE_PORT or dst port $CONTROL_PORT )"; then
+		echo "RESTORE-DIRTY: post-restore capture failed to start"
+		rm -f "$RE_CAPLOG"
+		RESTORE_CLEAN=0
+	elif ! $SG "incus exec $CLUSTER_LAN_HOST -- timeout $STEP_TIMEOUT python3 $REMOTE_PROBE --dst $SINK --probe-port $PROBE_PORT --control-port $CONTROL_PORT --count 30 --rate 100" >/dev/null 2>&1; then
 		echo "RESTORE-DIRTY: post-restore re-probe failed to send"
-		kill "$RE_CAP_PID" 2>/dev/null || true
-		wait "$RE_CAP_PID" 2>/dev/null || true
+		wire_capture_stop "$RE_CAPLOG" >/dev/null 2>&1 || RESTORE_CLEAN=0
 		rm -f "$RE_CAPLOG"
 		RESTORE_CLEAN=0
 	else
 		sleep 2
-		kill "$RE_CAP_PID" 2>/dev/null || true
-		wait "$RE_CAP_PID" 2>/dev/null || true
-		if ! grep -qE "\.${PROBE_PORT}:" "$RE_CAPLOG"; then
-			echo "RESTORE-DIRTY: probe does not forward post-restore (stale exclude?)"
+		if ! wire_capture_stop "$RE_CAPLOG"; then
+			echo "RESTORE-DIRTY: post-restore capture could not be stopped/verified"
 			RESTORE_CLEAN=0
-		fi
-		if ! grep -qE "\.${CONTROL_PORT}:" "$RE_CAPLOG"; then
-			echo "RESTORE-DIRTY: control does not forward post-restore"
+		elif ! wire_capture_fetch "$RE_CAPLOG"; then
+			echo "RESTORE-DIRTY: post-restore capture could not be pulled"
 			RESTORE_CLEAN=0
+		else
+			if ! grep -qE "\.${PROBE_PORT}:" "$RE_CAPLOG"; then
+				echo "RESTORE-DIRTY: probe does not forward post-restore (stale exclude?)"
+				RESTORE_CLEAN=0
+			fi
+			if ! grep -qE "\.${CONTROL_PORT}:" "$RE_CAPLOG"; then
+				echo "RESTORE-DIRTY: control does not forward post-restore"
+				RESTORE_CLEAN=0
+			fi
 		fi
 		rm -f "$RE_CAPLOG"
 	fi
@@ -544,8 +596,10 @@ wire_policy_deny_arm_finalizer
 # the leading witness proves tcpdump was attached before any probe could leak.
 echo "--- capture window + interleaved bursts (probe $BURST, control $CONTROL_BURST) ---"
 CAPLOG="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-cap.XXXXXX")"
-$SG "incus exec $SINK_EXEC -- timeout $STEP_TIMEOUT tcpdump -l -i any -n -vv udp and dst host $SINK and '(' dst port $PROBE_PORT or dst port $CONTROL_PORT ')'" >"$CAPLOG" 2>&1 &
-CAP_PID=$!
+if ! wire_capture_start "$CAPLOG" "$STEP_TIMEOUT" any "udp and dst host $SINK and ( dst port $PROBE_PORT or dst port $CONTROL_PORT )"; then
+	echo "capture failed to start on $SINK_EXEC"
+	exit 2
+fi
 CAP_READY=0
 for ((i = 0; i < 30; i++)); do
 	if wire_policy_deny_capture_ready "$CAPLOG"; then
@@ -565,8 +619,16 @@ if ! wire_policy_deny_parse_legs "$SENT"; then
 	COFFERED=0
 fi
 sleep 5 # drain: datagrams in flight when the sender exits
-kill "$CAP_PID" 2>/dev/null || true
-wait "$CAP_PID" 2>/dev/null || true
+# Verified stop BEFORE counting (#16329): a capture that cannot be
+# proven stopped makes the window unverified — VOID, never counted.
+if ! wire_capture_stop "$CAPLOG"; then
+	echo "capture on $SINK_EXEC could not be stopped/verified; window unverified"
+	exit 2
+fi
+if ! wire_capture_fetch "$CAPLOG"; then
+	echo "capture could not be pulled from $SINK_EXEC; window unverified"
+	exit 2
+fi
 PLEAKED=$(wire_count_dst_frames "$CAPLOG" "$PROBE_PORT")
 COBSERVED=$(wire_count_dst_frames "$CAPLOG" "$CONTROL_PORT")
 CKSUM=$(wire_count_bad_cksum "$CAPLOG" 'udp|ip')

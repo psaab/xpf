@@ -49,6 +49,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${SCRIPT_DIR}/fbf-two-upstream-config.set"
 REMOTE_SETS="/tmp/fbf-two-upstream-$$.set"
 REMOTE_CAPTURE_LOG="/tmp/fbf-steering-$$.log"
+REMOTE_CAPTURE_PCAP="/tmp/fbf-steering-$$.pcap"
 REMOTE_CAPTURE_PID="/tmp/fbf-steering-$$.pid"
 CLI=/usr/local/sbin/cli
 
@@ -120,8 +121,10 @@ metric_value() {
 cleanup_peer_capture() {
 	local failed=0
 	if (( PEER_CAPTURE_ACTIVE )); then
+		# #16329: TERM (a backgrounded process starts with SIGINT
+		# ignored) + verified absence; a survivor is a loud FAIL.
 		if ! incus exec "$EGRESS_HOST" -- sh -c \
-			"pid=\$(cat '$REMOTE_CAPTURE_PID' 2>/dev/null || true); if [ -n \"\$pid\" ] && kill -0 \"\$pid\" 2>/dev/null; then kill -INT \"\$pid\" 2>/dev/null || exit 1; fi; sleep 1" \
+			"pid=\$(cat '$REMOTE_CAPTURE_PID' 2>/dev/null || true); if [ -n \"\$pid\" ] && kill -0 \"\$pid\" 2>/dev/null; then kill -TERM \"\$pid\" 2>/dev/null || exit 1; fi; sleep 1; if [ -n \"\$pid\" ] && kill -0 \"\$pid\" 2>/dev/null; then exit 1; fi; pgrep -af 'tcpdump.*-w. $REMOTE_CAPTURE_PCAP' 2>/dev/null | awk '\$2==\"tcpdump\" || \$2 ~ /\\/tcpdump\$/ {found=1} END {exit found ? 0 : 1}' && exit 1; exit 0" \
 			>/dev/null 2>&1; then
 			echo "FAIL: could not stop VLAN-80 peer capture" >&2
 			failed=1
@@ -129,7 +132,7 @@ cleanup_peer_capture() {
 		PEER_CAPTURE_ACTIVE=0
 	fi
 	if (( PEER_CAPTURE_REQUIRED )); then
-		if ! incus exec "$EGRESS_HOST" -- rm -f "$REMOTE_CAPTURE_LOG" "$REMOTE_CAPTURE_PID" >/dev/null 2>&1; then
+		if ! incus exec "$EGRESS_HOST" -- rm -f "$REMOTE_CAPTURE_LOG" "$REMOTE_CAPTURE_PID" "$REMOTE_CAPTURE_PCAP" >/dev/null 2>&1; then
 			echo "FAIL: could not remove VLAN-80 peer capture files" >&2
 			failed=1
 		fi
@@ -142,12 +145,15 @@ start_peer_capture() {
 	local capture_filter
 	capture_filter="(icmp and dst host ${PING_DST4}) or (icmp6 and dst host ${PING_DST6})"
 	PEER_CAPTURE_REQUIRED=1
-	if ! incus exec "$EGRESS_HOST" -- rm -f "$REMOTE_CAPTURE_LOG" "$REMOTE_CAPTURE_PID" >/dev/null 2>&1; then
+	if ! incus exec "$EGRESS_HOST" -- rm -f "$REMOTE_CAPTURE_LOG" "$REMOTE_CAPTURE_PID" "$REMOTE_CAPTURE_PCAP" >/dev/null 2>&1; then
 		return 1
 	fi
 	PEER_CAPTURE_ACTIVE=1
+	# #16329: detached capture + detached watchdog (no `timeout`
+	# wrapper to orphan, no backgrounded exec to kill). Text is
+	# rendered from the pulled savefile at stop time.
 	if ! incus exec "$EGRESS_HOST" -- sh -c \
-		"timeout ${CAPTURE_SECONDS} tcpdump -i '$EGRESS_IFACE' -e -nn -vv -l '$capture_filter' > '$REMOTE_CAPTURE_LOG' 2>&1 & echo \$! > '$REMOTE_CAPTURE_PID'; sleep 1; pid=\$(cat '$REMOTE_CAPTURE_PID' 2>/dev/null || true); [ -n \"\$pid\" ] && kill -0 \"\$pid\"" \
+		"nohup tcpdump -i '$EGRESS_IFACE' -e -nn -vv -l -w '$REMOTE_CAPTURE_PCAP' '$capture_filter' > '$REMOTE_CAPTURE_LOG' 2>&1 </dev/null & echo \$! > '$REMOTE_CAPTURE_PID'; ( sleep ${CAPTURE_SECONDS}; kill -TERM \$(cat '$REMOTE_CAPTURE_PID' 2>/dev/null) 2>/dev/null ) </dev/null >/dev/null 2>&1 & sleep 1; pid=\$(cat '$REMOTE_CAPTURE_PID' 2>/dev/null || true); [ -n \"\$pid\" ] && kill -0 \"\$pid\"" \
 		>/dev/null 2>&1; then
 		return 1
 	fi
@@ -157,7 +163,13 @@ start_peer_capture() {
 stop_peer_capture() {
 	if (( PEER_CAPTURE_ACTIVE )); then
 		if ! incus exec "$EGRESS_HOST" -- sh -c \
-			"pid=\$(cat '$REMOTE_CAPTURE_PID' 2>/dev/null || true); if [ -n \"\$pid\" ] && kill -0 \"\$pid\" 2>/dev/null; then kill -INT \"\$pid\" 2>/dev/null || exit 1; fi; sleep 1" \
+			"pid=\$(cat '$REMOTE_CAPTURE_PID' 2>/dev/null || true); if [ -n \"\$pid\" ] && kill -0 \"\$pid\" 2>/dev/null; then kill -TERM \"\$pid\" 2>/dev/null || exit 1; fi; sleep 1; if [ -n \"\$pid\" ] && kill -0 \"\$pid\" 2>/dev/null; then exit 1; fi" \
+			>/dev/null 2>&1; then
+			return 1
+		fi
+		# Render the savefile into the text log consumers grep.
+		if ! incus exec "$EGRESS_HOST" -- sh -c \
+			"tcpdump -e -nn -vv -l -r '$REMOTE_CAPTURE_PCAP' > '$REMOTE_CAPTURE_LOG' 2>/dev/null" \
 			>/dev/null 2>&1; then
 			return 1
 		fi

@@ -122,11 +122,13 @@ case "$command" in
 		if [[ $text == *'command -v ip'* || $text == *'command -v ping'* ||
 			$text == *'command -v tcpdump'* ]]; then
 			:
-		elif [[ $text == *'timeout '*tcpdump* ]]; then
+		elif [[ $text == *'nohup tcpdump'* ]]; then
 			touch "${FBF_FAKE_STATE_DIR}/capture-active"
 			printf '9001\n' >"${FBF_FAKE_STATE_DIR}/capture.pid"
-		elif [[ $text == *'kill -INT'* ]]; then
+		elif [[ $text == *'kill -TERM'* ]]; then
 			rm -f "${FBF_FAKE_STATE_DIR}/capture-active"
+		elif [[ $text == *'tcpdump '*' -r '* ]]; then
+			:
 		elif [[ $text == *'ip -6 rule show'* ]]; then
 			printf '200\n'
 		elif [[ $text == *'ip -4 rule show'* || $text == *'ip rule show'* ]]; then
