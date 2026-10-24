@@ -1052,42 +1052,31 @@ fn lookup_forwarding_resolution_v4_inner(
         }
         Some(ResolvedRouteV4::Static { route, selected }) => {
             if route.discard || route.reject {
-                // #16270 (option b): a connected prefix covering `ip`
-                // in this table is more specific than any forwarding
-                // row this terminal shadows, so the republishing-owed
-                // connected row — not the terminal — is the correct
-                // route. This fires for ANY destination inside a
-                // locally present connected prefix, including when
-                // the terminal at the same LPM is a pref-5
-                // forwarding row whose member the HA gate would
-                // demote: the connected row must still win so its
-                // egress RG attribution is the connected row's, not
-                // the demoted forwarding row's. When the table also
-                // holds a cluster-terminal and the connected prefix's
-                // egress RG is locally forwarding-active — checked
-                // at enforce/HA time via the stamp this resolution
-                // already carries — the terminal defers.
-                // `select_v4_route` reaches here only when no
-                // connected route already won the LPM, so the
-                // connected scan below covers the case where the
-                // terminal is longer than the covering connected
-                // prefix (the exact live shape: pref-200 cluster
-                // /0 terminal selected after the connected /24 was
-                // suppressed peer-owned and not yet republished).
-                // In that window the connected prefix exists only in
-                // `connected_v4_by_ifindex` (peer-owned suppression
-                // removed it from `connected_v4` transit); prefer it
-                // only when the table holds a cluster-terminal —
-                // otherwise the operator discard/reject terminal
-                // keeps its exact pre-fix semantics.
-                if !route.cluster_terminal
+                // #16270 (option b; #16217 fold B3): a connected prefix
+                // covering `ip` beats this non-cluster terminal ONLY
+                // when republication debt is outstanding FOR THAT
+                // COVERING PREFIX: a cluster-terminal exists in this
+                // table AND the covering connected prefix is absent
+                // from `connected_v4` transit (peer-owned suppression,
+                // proven by `connected_*_by_ifindex` covering `ip`
+                // with no same-prefix transit row). Pre-fold any
+                // cluster-terminal ANYWHERE in the table let the win
+                // override an operator discard for destinations whose
+                // own connected prefix was settled locally. Mixed
+                // tables (settled connected + owed elsewhere) keep the
+                // operator discard bit-identically.
+                let owed_ifindex = if !route.cluster_terminal
                     && table_has_cluster_terminal_v4(state, table)
+                    && connected_win_republication_owed_v4(state, table, ip)
                 {
-                    if let Some(ifindex) = state
-                        .connected_v4
-                        .iter()
-                        .find(|entry| entry.table == table && entry.prefix.contains(ip))
-                        .map(|entry| entry.ifindex)
+                    // Transit row gone (suppressed): recover the egress
+                    // from the by-ifindex ledger. Settled row present:
+                    // no debt for this prefix, terminal stands.
+                    Some(connected_lpm_ifindex_v4(state, ip, table))
+                } else {
+                    None
+                };
+                if let Some(ifindex) = owed_ifindex.filter(|i| *i > 0) {
                     {
                         let neighbor = lookup_neighbor_entry(
                             state,
@@ -1421,18 +1410,18 @@ fn lookup_forwarding_resolution_v6_inner(
         }
         Some(ResolvedRouteV6::Static { route, selected }) => {
             if route.discard || route.reject {
-                // #16270 (option b): v6 twin of the v4 connected-win
-                // above — a covering connected prefix in this table
-                // beats a non-cluster terminal when the table also
-                // holds a cluster-terminal (republication owed).
-                if !route.cluster_terminal
+                // #16270 (option b; #16217 fold B3): v6 twin of the
+                // v4 connected-win — only when republication debt is
+                // outstanding for THIS covering prefix.
+                let owed_ifindex = if !route.cluster_terminal
                     && table_has_cluster_terminal_v6(state, table)
+                    && connected_win_republication_owed_v6(state, table, ip)
                 {
-                    if let Some(ifindex) = state
-                        .connected_v6
-                        .iter()
-                        .find(|entry| entry.table == table && entry.prefix.contains(ip))
-                        .map(|entry| entry.ifindex)
+                    Some(connected_lpm_ifindex_v6(state, ip, table))
+                } else {
+                    None
+                };
+                if let Some(ifindex) = owed_ifindex.filter(|i| *i > 0) {
                     {
                         let neighbor = lookup_neighbor_entry(
                             state,
@@ -2047,6 +2036,47 @@ fn table_has_cluster_terminal_v6(state: &ForwardingState, table: &str) -> bool {
         .routes_v6
         .get(table)
         .is_some_and(|routes| routes.iter().any(|r| r.cluster_terminal))
+}
+
+/// #16217 (fold B3): is republication debt outstanding for the
+/// CONNECTED PREFIX covering `ip` in `table`? Debt means the
+/// covering connected prefix is recorded in `connected_*_by_ifindex`
+/// (the peer-owned-suppression ledger — every interface address,
+/// owned or suppressed) but the SAME (ifindex, prefix) has no row
+/// in `connected_v4`/`connected_v6` transit. The pre-fold guard
+/// (`table_has_cluster_terminal_*`) tied the connected-win to ANY
+/// cluster-terminal in the table, so a destination whose own
+/// connected prefix was settled locally still overrode an operator
+/// discard whenever some UNRELATED prefix in the table was owed.
+/// "Same prefix" is exact (prefix + ifindex + table): a transit row
+/// for the identical prefix proves that prefix was republished.
+fn connected_win_republication_owed_v4(
+    state: &ForwardingState,
+    table: &str,
+    ip: Ipv4Addr,
+) -> bool {
+    let ifindex = connected_lpm_ifindex_v4(state, ip, table);
+    if ifindex <= 0 {
+        return false;
+    }
+    !state.connected_v4.iter().any(|entry| {
+        entry.table == table && entry.ifindex == ifindex && entry.prefix.contains(ip)
+    })
+}
+
+/// #16217 (fold B3): v6 twin of `connected_win_republication_owed_v4`.
+fn connected_win_republication_owed_v6(
+    state: &ForwardingState,
+    table: &str,
+    ip: Ipv6Addr,
+) -> bool {
+    let ifindex = connected_lpm_ifindex_v6(state, ip, table);
+    if ifindex <= 0 {
+        return false;
+    }
+    !state.connected_v6.iter().any(|entry| {
+        entry.table == table && entry.ifindex == ifindex && entry.prefix.contains(ip)
+    })
 }
 
 fn select_v6_route<'a>(

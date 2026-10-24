@@ -642,8 +642,10 @@ struct LiveCallSiteFixture {
     pptp_control: Arc<crate::session::pptp_control::PptpControlInbox>,
     dnat_fds: DnatTableFds,
     rg_epochs: [AtomicU32; MAX_RG_EPOCHS],
-    /// #6999: an event stream for the cached filter-LOG emissions to reach.
-    /// `None` on every pre-#6999 fixture, which is exactly why those two calls
+    /// #16217 (fold B6): fresh RG set handed to `worker_ctx`; tests
+    /// override it to prove the cache/session marks judge the fresh
+    /// set, not the lagging `ha_state` snapshot.
+    fresh_active_rgs: std::collections::BTreeSet<i32>,
     /// were severable with the whole crate green: `worker_ctx()` handed
     /// production a `None` sink, so both emissions ran to completion and
     /// produced nothing any test could look at.
@@ -762,6 +764,7 @@ impl LiveCallSiteFixture {
             pptp_control: Arc::new(crate::session::pptp_control::PptpControlInbox::default()),
             dnat_fds: DnatTableFds::default(),
             rg_epochs: std::array::from_fn(|_| AtomicU32::new(0)),
+            fresh_active_rgs: std::collections::BTreeSet::new(),
         }
     }
 
@@ -875,7 +878,7 @@ impl LiveCallSiteFixture {
             mirror_targets: &self.mirror_targets,
             forwarding: &self.forwarding,
             ha_state: &self.ha_state,
-            forwarding_active_rgs: &*EMPTY_FWD_ACTIVE_RGS_16217,
+            forwarding_active_rgs: &self.fresh_active_rgs,
             dynamic_neighbors: &self.dynamic_neighbors,
             neighbor_resolver: None,
             shared_sessions: &self.shared_sessions,
@@ -6708,7 +6711,10 @@ fn adopted_mark_revalidates_ownership_each_hit_16217() {
     );
     // Predicate-level pin (the same helper the hit stage and the poll
     // session-hit site share): ownership holding keeps the proof,
-    // departure lapses it, unmarked never holds it.
+    // departure lapses it, unmarked never holds it. (Fold B6: the
+    // packet-path sites now judge the FRESH-set twin
+    // `revalidate_fabric_established_fresh`, pinned directly below;
+    // the snapshot helper remains the fixture-level form.)
     let mut forwarding = ForwardingState::default();
     forwarding.egress.insert(
         EGRESS_IFINDEX,
@@ -6771,6 +6777,136 @@ fn adopted_mark_revalidates_ownership_each_hit_16217() {
     );
 }
 
+/// #16217 (fold B6): the FRESH-set revalidator the packet-path sites
+/// judge (`revalidate_fabric_established_fresh`, against
+/// `worker_ctx.forwarding_active_rgs`) — marked + egress RG in the
+/// fresh set holds the proof even when the per-tick `ha_state`
+/// snapshot still reads it inactive (adoption-window lag: the exact
+/// shape the fresh set exists for); marked + egress RG ABSENT from
+/// the fresh set lapses even when a stale snapshot reads it active
+/// (failback caught by the fresh set first); unknown RG (0) and
+/// unmarked never qualify; a marked FabricRedirect keeps the
+/// redirect-arm exemption.
+///
+/// MUTATION: judge against `ha_state` instead of the fresh set and
+/// both lag/failback cells invert.
+#[test]
+fn adopted_mark_fresh_set_revalidation_16217() {
+    let mut forwarding = ForwardingState::default();
+    forwarding.egress.insert(
+        EGRESS_IFINDEX,
+        EgressInterface {
+            bind_ifindex: EGRESS_IFINDEX,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x00, 0x01, 0x01],
+            zone_id: TEST_UNTRUST_ZONE_ID,
+            redundancy_group: 1,
+            primary_v4: None,
+            primary_v6: None,
+        },
+    );
+    let candidate = ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: EGRESS_IFINDEX,
+        tx_ifindex: EGRESS_IFINDEX,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    };
+    let fresh_owner: std::collections::BTreeSet<i32> = [1].into_iter().collect();
+    let fresh_departed: std::collections::BTreeSet<i32> = std::collections::BTreeSet::new();
+    assert!(
+        crate::afxdp::forwarding::revalidate_fabric_established_fresh(
+            &forwarding, &fresh_owner, true, candidate
+        ),
+        "marked + egress RG in fresh set: proof holds (adoption window)"
+    );
+    assert!(
+        !crate::afxdp::forwarding::revalidate_fabric_established_fresh(
+            &forwarding, &fresh_departed, true, candidate
+        ),
+        "marked + egress RG absent from fresh set: proof lapses (failback)"
+    );
+    assert!(
+        !crate::afxdp::forwarding::revalidate_fabric_established_fresh(
+            &forwarding, &fresh_owner, false, candidate
+        ),
+        "unmarked entries never hold the proof"
+    );
+    // Unknown egress RG (0): never qualifies even on the owner set.
+    let mut unknown = candidate;
+    unknown.egress_ifindex = 0;
+    assert!(
+        !crate::afxdp::forwarding::revalidate_fabric_established_fresh(
+            &forwarding, &fresh_owner, true, unknown
+        ),
+        "unknown egress RG never keeps the proof"
+    );
+    // Marked FabricRedirect: no local egress to depart — exemption.
+    let mut redirect = candidate;
+    redirect.disposition = ForwardingDisposition::FabricRedirect;
+    assert!(
+        crate::afxdp::forwarding::revalidate_fabric_established_fresh(
+            &forwarding, &fresh_departed, true, redirect
+        ),
+        "marked FabricRedirect keeps the redirect-arm exemption"
+    );
+}
+
+
+/// #16217 (fold B6, stage level): a marked entry whose fresh-set
+/// revalidation LAPSES must not suppress the `EnforceChanged`
+/// supersession even though the raw mark is set. Fixture: egress RG1,
+/// `ha_state` reads RG1 INACTIVE (so the validator's enforce arm
+/// demotes the candidate — the `EnforceChanged` shape the mark used
+/// to suppress), fresh set EMPTY (the authoritative set agrees the
+/// mark has lapsed). With the fold, fresh revalidation is false, so
+/// nothing suppresses the demotion and the entry falls through to
+/// re-resolve unadopted. Pre-fold the stage computed the
+/// revalidation, discarded it, and the raw mark suppressed it.
+///
+/// MUTATION: restore `let _ = adopted_mark_revalidated;` (raw-mark
+/// suppression) and this entry is Consumed instead of FallThrough.
+#[test]
+fn stage_hit_marked_entry_fresh_lapse_does_not_suppress_16217() {
+    let frame = tcp_v4_ack_frame();
+    let meta = test_meta(&frame);
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+    fixture
+        .forwarding
+        .egress
+        .get_mut(&EGRESS_IFINDEX)
+        .expect("zone-accounting fixture seeds the egress")
+        .redundancy_group = 1;
+    // Snapshot reads RG1 inactive (validator demotes via EnforceChanged);
+    // the fresh set excludes it too, so the mark has lapsed under BOTH.
+    fixture.ha_state.insert(
+        1,
+        HAGroupRuntime {
+            active: false,
+            watchdog_timestamp: 1,
+            lease: HAForwardingLease::Inactive,
+        },
+    );
+    fixture.fresh_active_rgs.clear();
+    let mut entry = cached_entry();
+    entry.fabric_established = true;
+    entry.metadata.owner_rg_id = 1;
+    entry.stamp.owner_rg_id = 1;
+    entry.stamp.owner_rg_lease_until = 0;
+    let run = run_stage_seeded(&fixture, &frame, meta, entry, 0, StageSeed::default());
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "#16217 B6: a marked entry whose fresh-set proof lapsed must fall through (no raw-mark suppression), got Consumed"
+    );
+}
 /// #16217 (egress-RG fence + revalidated suppression + gate): three
 /// production-path pins driven through `stage_flow_cache_hit` /
 /// `fabric_adoption_gate_for_wire`, NOT through helper-level hand-offs.

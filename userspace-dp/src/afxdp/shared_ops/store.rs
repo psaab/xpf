@@ -2091,4 +2091,86 @@ mod handshake_monotonic_16223_tests {
         publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&forward, pending, 95, false));
         assert_eq!(wire(&wire_map, &wire_key), pending, "new incarnation must not inherit alias stage");
     }
+
+    /// #16217 (fold B2): `shared_completion_evidence` (ct-slice
+    /// promotion + bulk-export stamp input) must be scope-exact like
+    /// the adoption arm: identical 5-tuple reverse counts in
+    /// routing_domain 7 (or under another discriminator) must NOT
+    /// leak into the domain-0 key's evidence; same-scope counts must
+    /// still vouch (no over-scoping regression).
+    ///
+    /// MUTATION: restore the bare-tuple full-map scan and the
+    /// cross-VRF count below wrongly completes the domain-0 key.
+    #[test]
+    fn completion_evidence_is_scope_exact_16217() {
+        let (shared, nat_map, wire_map, indexes) = maps();
+        let forward = key(43311);
+        let reverse = crate::session::reverse_session_key(&forward, nat_decision());
+        let pending = crate::session::TcpHandshakeState::HandshakePending.to_wire();
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&forward, pending, 97, false));
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&reverse, pending, 97, true));
+        // Cross-VRF sibling: same 5-tuple, domain 7, real counts.
+        let mut other = entry(&forward, pending, 98, false);
+        other.key.routing_domain = 7;
+        other.rev_packets = 9;
+        other.fwd_packets = 9;
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &other);
+        let mut other_rev = entry(&reverse, pending, 98, true);
+        other_rev.key.routing_domain = 7;
+        other_rev.rev_packets = 9;
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &other_rev);
+        let ev = crate::afxdp::shared_ops::shared_completion_evidence(&shared, &wire_map, &forward);
+        assert_eq!(
+            ev.rev_packets_any, 0,
+            "#16217 B2: cross-VRF rev count must not leak into scoped evidence"
+        );
+        assert!(
+            !ev.served_and_completed(),
+            "#16217 B2: cross-VRF evidence must not complete the domain-0 key"
+        );
+        // Same-scope evidence still vouches.
+        crate::afxdp::shared_ops::restamp_shared_rev_packets(
+            &shared,
+            &forward,
+            nat_decision(),
+            4,
+        );
+        let ev = crate::afxdp::shared_ops::shared_completion_evidence(&shared, &wire_map, &forward);
+        assert_eq!(ev.rev_packets_any, 4, "#16217 B2: same-scope count must still vouch");
+        assert!(ev.served_and_completed());
+    }
+
+    /// #16217 (fold B5): `shared_scoped_completion_evidence` must
+    /// find counts on rows stored under the forward-wire alias key
+    /// (direct wire-keyed row) — NAT'd reverse-companion orientation
+    /// included — via keyed gets, and must still refuse cross-VRF
+    /// rows. This pins the orientation set the keyed replacement
+    /// covers beyond canonical/reverse.
+    ///
+    /// MUTATION: drop the wire-key gets and the wire-stored counts
+    /// below read (0,0).
+    #[test]
+    fn scoped_evidence_finds_wire_keyed_rows_16217() {
+        let (shared, nat_map, wire_map, indexes) = maps();
+        let forward = key(43312);
+        let wire_key = crate::session::forward_wire_key(&forward, nat_decision());
+        let pending = crate::session::TcpHandshakeState::HandshakePending.to_wire();
+        assert_ne!(wire_key, forward, "SNAT fixture must produce a distinct wire key");
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&forward, pending, 99, false));
+        // A row stored DIRECTLY under the wire tuple (as the alias
+        // slot can hold after a NAT'd publish) carrying real counts.
+        {
+            let mut w = lock_shared_recover(&wire_map);
+            let mut row = entry(&forward, pending, 99, false);
+            row.key = wire_key.clone();
+            row.rev_packets = 6;
+            row.fwd_packets = 11;
+            w.insert(wire_key.clone(), row);
+        }
+        let ev = crate::afxdp::shared_ops::shared_scoped_completion_evidence(
+            &shared, &wire_map, &forward, nat_decision(),
+        );
+        assert_eq!(ev.rev_packets, 6, "#16217 B5: wire-keyed rev count must be found by keyed get");
+        assert_eq!(ev.fwd_packets, 11, "#16217 B5: wire-keyed fwd count must be found by keyed get");
+    }
 }

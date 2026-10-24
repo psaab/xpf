@@ -2072,6 +2072,14 @@ fn bulk_export_stamps_established_on_shared_reverse_count_16217() {
     let mut rev0 = mk(55202, 0, true);
     rev0.key = crate::session::reverse_session_key(&rev0.key, rev0.decision.nat);
     publish(&coordinator, &rev0);
+    // Cross-VRF control (fold B2): pending forward + a same-5-tuple
+    // reverse companion in routing_domain 7 carrying a real count
+    // must NOT stamp the domain-0 row Established.
+    publish(&coordinator, &mk(55203, 0, false));
+    let mut rev7 = mk(55203, 9, true);
+    rev7.key = crate::session::reverse_session_key(&rev7.key, rev7.decision.nat);
+    rev7.key.routing_domain = 7;
+    publish(&coordinator, &rev7);
 
     coordinator
         .update_ha_state(&[HAGroupStatus {
@@ -2095,6 +2103,10 @@ fn bulk_export_stamps_established_on_shared_reverse_count_16217() {
     assert_eq!(
         by_port[&55202].tcp_handshake_state, pending,
         "#16217: synthesized companion (count 0) must not stamp"
+    );
+    assert_eq!(
+        by_port[&55203].tcp_handshake_state, pending,
+        "#16217 B2: cross-VRF reverse count must not stamp the domain-0 row"
     );
 }
 /// #14960 (D26-04): the coordinator bulk export on peer connect must mirror

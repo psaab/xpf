@@ -1,5 +1,22 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Fold hardening for adopted flows (#16217, FZFixWire29):
+    FIB connected-win is tied to the covering prefix in the
+    connected ledger (not any cluster-terminal anywhere in the
+    table); shared completion/established evidence scans are
+    O(1) keyed lookups scoped to the full SessionKey (no bare-
+    tuple cross-VRF leak); cache-hit shared restamps run only
+    behind the handshake stage-transition gate; adopted marks
+    are revalidated against the fresh RG forwarding-active set
+    on the session-hit and flow-cache hit arms; and the
+    shared-wire adoption arm passes through the same ownership
+    gate as the other adoption arms.
+
+ -- xpf maintainers <noreply@anthropic.com>  Fri, 23 Oct 2026 00:00:00 +0000
+
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Adopted materialization replaces local incumbent (#16217,
     FZDiag30): fw1 session install refused to clobber a
     non-peer-synced existing entry on every adopted hit
@@ -24,6 +41,8 @@ xpf (0.0.0) unstable; urgency=medium
 
  -- xpf maintainers <noreply@anthropic.com>  Fri, 23 Oct 2026 00:00:00 +0000
 
+
+xpf (0.0.0) unstable; urgency=medium
 
   * Node-neighbor adopted restore + timer pending retry + stored-
     terminal target recovery (#16217): adopted recomputes now

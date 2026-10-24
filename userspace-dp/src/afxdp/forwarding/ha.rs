@@ -764,6 +764,11 @@ pub(in crate::afxdp) fn forward_candidate_egress_departed(
 /// candidate whose egress RG is departed in the judged snapshot, and
 /// for an unknown egress RG (0 — adoption proved ownership of a NAMED
 /// RG; an entry that no longer names one cannot keep the proof).
+/// NOTE (fold B6): the packet-path callers (poll session-hit marked
+/// arm, flow-cache hit arm) judge via
+/// `revalidate_fabric_established_fresh` against the authoritative
+/// fresh RG set; this snapshot form remains for unit fixtures and
+/// non-packet judges.
 pub(in crate::afxdp) fn revalidate_fabric_established(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -782,6 +787,35 @@ pub(in crate::afxdp) fn revalidate_fabric_established(
         && ha_state
             .get(&egress_rg)
             .is_some_and(|group| group.is_forwarding_active(now_secs))
+}
+
+/// #16217 (fold B6): fresh-set twin of `revalidate_fabric_established`.
+/// The adoption gate proves ownership against the AUTHORITATIVE
+/// `forwarding_active_rgs` set freshly loaded from the coordinator
+/// `rg_runtime` ArcSwap for THIS packet (worker loop construction),
+/// NOT the worker's cached per-tick `ha_state` snapshot, which lags
+/// RG activation by up to a tick. A mark judged only against that
+/// lagging snapshot can be honoured on a node whose fresh set already
+/// excludes the egress RG (or refused on the true owner). The marked
+/// session-hit arm and the flow-cache hit arm therefore judge the
+/// mark against the fresh set: `true` only for a marked entry naming
+/// a known egress RG (>0) present in the fresh set; `FabricRedirect`
+/// keeps the redirect-arm exemption (no local egress to depart);
+/// unknown RG (0) and unmarked entries never qualify.
+pub(in crate::afxdp) fn revalidate_fabric_established_fresh(
+    forwarding: &ForwardingState,
+    forwarding_active_rgs: &std::collections::BTreeSet<i32>,
+    fabric_established: bool,
+    resolution: ForwardingResolution,
+) -> bool {
+    if !fabric_established {
+        return false;
+    }
+    if resolution.disposition == ForwardingDisposition::FabricRedirect {
+        return true;
+    }
+    let egress_rg = owner_rg_for_resolution(forwarding, resolution);
+    egress_rg > 0 && forwarding_active_rgs.contains(&egress_rg)
 }
 
 pub(in crate::afxdp) fn finalize_new_flow_ha_resolution(

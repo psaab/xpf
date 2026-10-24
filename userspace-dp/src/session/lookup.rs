@@ -2003,29 +2003,45 @@ impl SessionTable {
         shared_forward_wire_sessions: &std::sync::Arc<std::sync::Mutex<rustc_hash::FxHashMap<SessionKey, crate::afxdp::SyncedSessionEntry>>>,
         wire_key: &SessionKey,
     ) -> bool {
+        // #16217 (fold B5): O(1) keyed gets only. A qualifying row is
+        // stored under `wire_key` itself, or under the canonical key
+        // whose forward-wire alias IS `wire_key`, or under the reverse
+        // companion whose wire form is `wire_key`. The pre-fold
+        // full-map scan derived companions from EVERY row's NAT to
+        // find those three shapes; keyed probing inverts it: a row
+        // under `wire_key` discloses its canonical key (`entry.key`,
+        // retained on alias slots) and its NAT, from which the
+        // canonical/reverse rows are fetched directly. FastMap
+        // iteration order never decides the answer.
         let established = crate::session::TcpHandshakeState::Established.to_wire();
         for map in [shared_sessions, shared_forward_wire_sessions] {
             let Ok(guard) = map.lock() else { continue };
-            for entry in guard.values() {
-                if entry.tcp_handshake_state != established {
-                    continue;
-                }
-                if entry.key == *wire_key {
-                    return true;
-                }
-                let reverse_key = crate::session::reverse_session_key(&entry.key, entry.decision.nat);
-                if reverse_key == *wire_key {
-                    return true;
-                }
-                let entry_wire = crate::session::forward_wire_key(&entry.key, entry.decision.nat);
-                if entry_wire == *wire_key {
-                    return true;
-                }
-                let rev_wire = crate::session::forward_wire_key(&reverse_key, entry.decision.nat);
-                if rev_wire == *wire_key {
-                    return true;
-                }
+            // Direct: a row stored under the wire tuple itself.
+            let direct = guard.get(wire_key);
+            if let Some(entry) = direct
+                && entry.tcp_handshake_state == established
+            {
+                return true;
             }
+            // Alias: the row under the wire tuple retains the canonical
+            // key on `entry.key`; its canonical and reverse-companion
+            // rows may carry the Established wire.
+            let Some(probe) = direct else { continue };
+            let canonical = probe.key.clone();
+            let nat = probe.decision.nat;
+            if let Some(entry) = guard.get(&canonical)
+                && entry.tcp_handshake_state == established
+            {
+                return true;
+            }
+            let reverse_key = crate::session::reverse_session_key(&canonical, nat);
+            if let Some(entry) = guard.get(&reverse_key)
+                && entry.tcp_handshake_state == established
+            {
+                return true;
+            }
+            // A reverse row stored under `wire_key` itself is the
+            // `direct` row above; nothing else can qualify.
         }
         false
     }
