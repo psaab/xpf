@@ -1,5 +1,22 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Adoption-gate ownership on the exact session resolution
+    (#16217, Codex N1 final + N1b): the fabric-adoption gate no
+    longer resolves the pre-DNAT wire destination destination-only
+    in MAIN. It re-resolves the candidate's own stored decision
+    (post-NAT rewrite_dst, validated install_table_domain/check,
+    per-flow ECMP) through the session resolver and gates on that
+    egress RG, so tenant-table sessions are judged in their tenant
+    (tenant-vs-MAIN mismatch test added). WireGuard tunnel outer
+    RGs are checked per-peer (wireguard_peer_outer_egress_rgs with
+    transport-table fallback, mirroring ha.rs) instead of reading
+    the GRE-only tunnel_outer_egress_rgs map as absent-equals-pass.
+
+ -- xpf maintainers <noreply@anthropic.com>  Fri, 23 Oct 2026 00:00:00 +0000
+
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Fold hardening for adopted flows (#16217, FZFixWire29):
     FIB connected-win is tied to the covering prefix in the
     connected ledger (not any cluster-terminal anywhere in the

@@ -7045,6 +7045,7 @@ fn stage_hit_egress_rg_fence_and_nonowner_gate_16217() {
             1,
             HAGroupRuntime { active: false, watchdog_timestamp: 1, lease: HAForwardingLease::Inactive },
         );
+        let dyn_neigh = Arc::new(crate::afxdp::sharded_neighbor::ShardedNeighborMap::new());
         assert!(
             !crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
                 &forwarding,
@@ -7057,6 +7058,7 @@ fn stage_hit_egress_rg_fence_and_nonowner_gate_16217() {
                 &shared_owner_rg_indexes,
                 &key,
                 1_000_000,
+                &dyn_neigh,
             ),
             "#16217 GLM N1: a non-owner (egress RG1 not forwarding-active) must NOT adopt despite Established evidence"
         );
@@ -7081,6 +7083,7 @@ fn stage_hit_egress_rg_fence_and_nonowner_gate_16217() {
                 &shared_owner_rg_indexes,
                 &key,
                 1_000_000,
+                &dyn_neigh,
             ),
             "#16217 GLM N1: the forwarding-active owner of egress RG1 adopts"
         );
@@ -7102,6 +7105,7 @@ fn stage_hit_egress_rg_fence_and_nonowner_gate_16217() {
                 &shared_owner_rg_indexes,
                 &key,
                 1_000_000,
+                &dyn_neigh,
             ),
             "#16217 ownership lag: fresh authoritative set without RG1 must decline even when cached snapshot says owner"
         );
@@ -7117,8 +7121,114 @@ fn stage_hit_egress_rg_fence_and_nonowner_gate_16217() {
                 &shared_owner_rg_indexes,
                 &key,
                 1_000_000,
+                &dyn_neigh,
             ),
             "#16217 ownership lag: fresh authoritative set with RG1 must adopt even when cached snapshot lags inactive"
         );
     }
+}
+
+/// #16217 (Codex N1 final): the gate must resolve ownership in the
+/// session's OWN installed table (tenant), not MAIN. Fixture: dst
+/// 172.16.50.200 connected in MAIN via egress 7 (RG1) and in tenant
+/// "blue" via egress 8 (RG2); the session carries blue's
+/// install_table_domain/check. Fresh set {2} (tenant owner only)
+/// must ADOPT; fresh set {1} (MAIN owner only) must DECLINE.
+/// FAIL-ON-REVERT: MAIN lookup flips both arms.
+#[test]
+fn gate_resolves_in_session_install_table_not_main_16217() {
+    let mut sessions = crate::session::SessionTable::new();
+    let key = test_key();
+    let (domain, check) = crate::session::install_table_identity("blue");
+    let mut forwarding = ForwardingState::default();
+    for (ifindex, rg, table) in [(EGRESS_IFINDEX, 1, "inet.0"), (8, 2, "blue.inet.0")] {
+        forwarding.connected_v4.push(ConnectedRouteV4 {
+            prefix: crate::prefix::PrefixV4::from_net(
+                Ipv4Net::new(Ipv4Addr::new(172, 16, 50, 0), 24).unwrap(),
+            ),
+            host: Ipv4Addr::new(172, 16, 50, 0),
+            ifindex,
+            tunnel_endpoint_id: 0,
+            table: table.to_string(),
+        });
+        forwarding.egress.insert(
+            ifindex,
+            EgressInterface {
+                bind_ifindex: ifindex,
+                vlan_id: 0,
+                mtu: 1500,
+                src_mac: [0x02, 0xbf, 0x72, 0x00, 0x01, 0x01],
+                zone_id: TEST_UNTRUST_ZONE_ID,
+                redundancy_group: rg,
+                primary_v4: None,
+                primary_v6: None,
+            },
+        );
+    }
+    forwarding.install_tables.insert(
+        domain,
+        InstallTables {
+            v4: Some("blue.inet.0".to_string()),
+            v6: None,
+            h2: check,
+        },
+    );
+    let mut entry = cached_entry();
+    entry.decision.install_table_domain = domain;
+    entry.decision.install_table_check = check;
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        entry.decision.clone(),
+        entry.metadata.clone(),
+        crate::session::SessionOrigin::WorkerLocalImport,
+        1_000_000,
+        PROTO_TCP,
+        0x18,
+    ));
+    let shared_sessions = Arc::new(std::sync::Mutex::new(crate::afxdp::FastMap::default()));
+    let shared_forward_wire_sessions =
+        Arc::new(std::sync::Mutex::new(crate::afxdp::FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let dyn_neigh = Arc::new(crate::afxdp::sharded_neighbor::ShardedNeighborMap::new());
+    let mut ha = BTreeMap::new();
+    ha.insert(
+        1,
+        HAGroupRuntime { active: true, watchdog_timestamp: 1, lease: HAForwardingLease::Inactive },
+    );
+    ha.insert(
+        2,
+        HAGroupRuntime { active: true, watchdog_timestamp: 1, lease: HAForwardingLease::Inactive },
+    );
+    assert!(
+        crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
+            &forwarding,
+            &ha,
+            &std::collections::BTreeSet::from([2]),
+            1,
+            &sessions,
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &key,
+            1_000_000,
+            &dyn_neigh,
+        ),
+        "#16217 N1: tenant-table (blue, RG2) owner must adopt even though MAIN egress is RG1"
+    );
+    assert!(
+        !crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
+            &forwarding,
+            &ha,
+            &std::collections::BTreeSet::from([1]),
+            1,
+            &sessions,
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &key,
+            1_000_000,
+            &dyn_neigh,
+        ),
+        "#16217 N1: MAIN-only (RG1) ownership must NOT adopt a blue-table session"
+    );
 }

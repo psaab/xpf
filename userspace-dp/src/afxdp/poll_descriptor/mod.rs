@@ -2719,6 +2719,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 &worker_ctx.shared_owner_rg_indexes,
                                 &flow.forward_key,
                                 now_ns,
+                                worker_ctx.dynamic_neighbors,
                             ))
                         || (fabric_link_ingress
                             && !crate::tcp_flags::has_syn(meta.tcp_flags)
@@ -2733,6 +2734,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 &worker_ctx.shared_owner_rg_indexes,
                                 &flow.forward_key,
                                 now_ns,
+                                worker_ctx.dynamic_neighbors,
                             ))
                 });
                 let mut decision = if let Some(flow) = flow.as_ref() {
@@ -4340,6 +4342,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 &worker_ctx.shared_owner_rg_indexes,
                                 &flow.forward_key,
                                 now_ns,
+                                worker_ctx.dynamic_neighbors,
                             )
                         {
                             resolve_flow_session_decision_with_conntrack_and_payload(
