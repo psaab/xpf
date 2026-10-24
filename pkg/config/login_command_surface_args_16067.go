@@ -65,19 +65,39 @@ func patternCandidateCommands(src string, cmds, samples []string) []string {
 		return nil
 	}
 	var out []string
+	// Expand alternations/optionals into alternative sources first
+	// (#16378 fold): a witness for `^show (route table secret|log x)$`
+	// lives under an alternative's literal spelling, not the combined
+	// pattern's. denyPatternAlternatives9340 preserves exactly which
+	// strings match, so each alternative is a sound source.
+	if alts, ok := denyPatternAlternatives9340(src); ok && len(alts) >= 2 {
+		for _, alt := range alts {
+			out = append(out, patternCandidateCommands(alt.display, cmds, samples)...)
+		}
+		return out
+	}
 	if lit, ok := literalPatternString(src); ok && lit != "" {
 		// The literal is a witness only where a sample proves an
-		// argument slot under the same command: either the literal is
-		// itself sample-shaped (appending words to a sampled command),
-		// or a sampled command extends a registered command the
-		// literal also extends (`show route table …`).
-		for _, s := range samples {
-			if lit == s || strings.HasPrefix(lit, s+" ") {
+		// argument slot under the same command, AND that slot is not
+		// itself the whole command: `show qqq-zzz` would need a
+		// sampled command `show <arg>`, and none exists (samples are
+		// `show route table …`, `show log …`) — the literal's head
+		// must be a sampled command's head or a registered command a
+		// sample extends (`show route table …`).
+		litWords := strings.Fields(lit)
+		for _, smp := range samples {
+			sWords := strings.Fields(smp)
+			if len(sWords) < 2 || len(litWords) == 0 {
+				continue
+			}
+			sHead := strings.Join(sWords[:len(sWords)-1], " ")
+			litHead := strings.Join(litWords[:len(litWords)-1], " ")
+			if lit == smp || litHead == sHead {
 				out = append(out, lit)
 				break
 			}
 			for _, c := range cmds {
-				if (lit == c || strings.HasPrefix(lit, c+" ")) && strings.HasPrefix(s, c+" ") {
+				if (lit == c || strings.HasPrefix(lit, c+" ")) && strings.HasPrefix(smp, c+" ") && litHead == sHead {
 					out = append(out, lit)
 					break
 				}
@@ -87,23 +107,129 @@ func patternCandidateCommands(src string, cmds, samples []string) []string {
 			}
 		}
 	}
-	if seg := longestLiteralSegment(src); seg != "" && !strings.Contains(seg, " ") &&
-		!strings.HasPrefix(src, "^") {
-		// An anchored pattern cannot fire on a witness that merely
-		// CONTAINS its literal segment at an argument position the
-		// anchor forbids (`^qqq-…` never matches `ping qqq-…`), so the
-		// segment shape is derived only for unanchored patterns. The
-		// literal shape above already covers anchored literals.
-		for _, s := range samples {
-			words := strings.Fields(s)
+	// Argument-word witnesses (#16378 fold): replace the LAST word of
+	// each sample with every literal word the pattern carries, so a
+	// pattern whose argument is a character class (`[a-z-]+`), an
+	// alternation branch, or a dotted literal (`10\.99\.`) gets a
+	// witness judged by the real rules. The witness is sound only
+	// where the sample proves the slot: the operator's word takes the
+	// sample's argument position, and denyPatternDecides still has to
+	// fire on the result — a candidate the pattern does not match
+	// (e.g. `^qqq-…` against `ping qqq-…` under its anchor) counts for
+	// nothing, exactly the spelling-independence bar #7172 set.
+	for _, seg := range literalSegments(src) {
+		if seg == "" || strings.Contains(seg, " ") {
+			continue
+		}
+		// The segment may only take the argument position of a sample
+		// whose command head the pattern itself names. An anchored
+		// pattern names its head literally (`^show route table …`,
+		// `^show qqq-zzz$`): witnesses exist only under samples whose
+		// head EXTENDS that named head by exactly the argument slot
+		// (`show route table` for the former; nothing for the latter,
+		// whose argument would follow bare `show`). An unanchored
+		// pattern names no head, so any proven slot may carry it.
+		namedHead := ""
+		if hw := literalHeadWords(src); strings.HasPrefix(src, "^") && len(hw) >= 1 {
+			namedHead = strings.Join(hw, " ")
+		}
+		for _, smp := range samples {
+			words := strings.Fields(smp)
 			if len(words) < 2 {
 				continue
 			}
-			out = append(out, strings.Join(words[:len(words)-1], " ")+" "+seg)
-			out = append(out, s+" "+seg)
+			head := strings.Join(words[:len(words)-1], " ")
+			if namedHead != "" && head != namedHead {
+				continue
+			}
+			out = append(out, head+" "+seg)
+		}
+	}
+	// Prefix witness: a pattern that anchors a literal HEAD
+	// (`^ping 10\.99\.`) fires on the sample's command carrying the
+	// pattern's remaining literal text in its slot. Derive it from the
+	// literal head before the first metacharacter, completed with the
+	// sample's argument where the pattern continues past the slot.
+	if strings.HasPrefix(src, "^") {
+		if head := literalHeadWords(src); len(head) >= 2 {
+			// The head witness is the pattern's own literal start; it
+			// is sound only where a sample proves an argument slot
+			// under that exact head (`ping` for `^ping 10\.99\.`).
+			// Without that check the head of `^show qqq-zzz$` — a
+			// fully literal pattern with no metacharacters — was
+			// offered as its own witness and silenced the advisory
+			// for a command no surface produces (#16378 fold).
+			headSampled := false
+			for _, s := range samples {
+				if w := strings.Fields(s); len(w) >= 2 && strings.Join(w[:len(w)-1], " ") == strings.Join(head[:len(head)-1], " ") {
+					headSampled = true
+				}
+			}
+			if headSampled {
+				for _, s := range samples {
+					words := strings.Fields(s)
+					if len(words) >= len(head) && strings.Join(words[:len(head)-1], " ") == strings.Join(head[:len(head)-1], " ") {
+						out = append(out, strings.Join(head, " "))
+						if segs := literalSegments(src); len(segs) > len(head) {
+							tail := head[len(head)-1]
+							for _, seg := range segs[len(head):] {
+								tail += "." + seg
+							}
+							completed := append(append([]string(nil), head[:len(head)-1]...), tail+".1")
+							out = append(out, strings.Join(completed, " "))
+						}
+						completed := append(append([]string(nil), head[:len(head)-1]...), words[len(head)-1])
+						out = append(out, strings.Join(completed, " "))
+					}
+				}
+			}
 		}
 	}
 	return out
+}
+
+// literalSegments returns the distinct literal words of a pattern:
+// maximal runs of non-metacharacter text, split on spaces. Used to
+// place the operator's own argument words into proven slots.
+func literalSegments(src string) []string {
+	s := strings.ReplaceAll(src, `\.`, ".")
+	var out []string
+	seen := map[string]bool{}
+	var cur strings.Builder
+	flush := func() {
+		for _, w := range strings.Fields(cur.String()) {
+			if !seen[w] {
+				seen[w] = true
+				out = append(out, w)
+			}
+		}
+		cur.Reset()
+	}
+	for _, r := range s {
+		switch r {
+		case '\\', '.', '[', ']', '{', '}', '(', ')', '*', '+', '?', '|', '^', '$':
+			flush()
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	flush()
+	return out
+}
+
+// literalHeadWords returns the literal words at the start of an
+// anchored pattern, up to the first metacharacter: `^ping 10\.99\.`
+// yields [ping 10].
+func literalHeadWords(src string) []string {
+	s := strings.TrimPrefix(strings.ReplaceAll(src, `\.`, "."), "^")
+	var b strings.Builder
+	for _, r := range s {
+		if strings.ContainsRune(`\.[]{}()*+?|$`, r) {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return strings.Fields(b.String())
 }
 
 // literalPatternString returns the plain string a pattern matches
@@ -120,29 +246,4 @@ func literalPatternString(src string) (string, bool) {
 		return "", false
 	}
 	return s, true
-}
-
-// longestLiteralSegment returns the longest run of literal text in the
-// pattern (the operator's own words, anchors and metacharacters
-// removed). Empty when the pattern has no literal word at all.
-func longestLiteralSegment(src string) string {
-	s := strings.ReplaceAll(src, `\.`, ".")
-	best := ""
-	var cur strings.Builder
-	flush := func() {
-		if seg := strings.TrimSpace(cur.String()); len(seg) > len(best) {
-			best = seg
-		}
-		cur.Reset()
-	}
-	for _, r := range s {
-		switch r {
-		case '\\', '.', '[', ']', '{', '}', '(', ')', '*', '+', '?', '|', '^', '$':
-			flush()
-		default:
-			cur.WriteRune(r)
-		}
-	}
-	flush()
-	return best
 }

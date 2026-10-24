@@ -86,6 +86,66 @@ func rpcArgumentForms(cfg *config.Config, fullMethod string, req any, base strin
 			return nil, false
 		}
 		return sessionArgumentForms(cfg, gr, base)
+	case "GetSessionSummary":
+		// #16378 fold: GetSessionSummary carries the SAME selector set
+		// as GetSessions (buildSessionSummaryFilter forwards every
+		// field), but it fell through to the bare
+		// `show security flow session summary` charge, so a filtered
+		// summary was judged as an unfiltered one — an argument-scoped
+		// deny on the selector never fired. Reconstruct the filtered
+		// list command; the summary charge stays a form so an anchored
+		// `^show security flow session summary$` deny still fires only
+		// on the unfiltered execution (its full form differs).
+		sr, isSum := req.(*pb.GetSessionSummaryRequest)
+		if !isSum || sr == nil {
+			return nil, false
+		}
+		forms, ok := sessionArgumentForms(cfg, &pb.GetSessionsRequest{
+			Zone:              sr.GetZone(),
+			Protocol:          sr.GetProtocol(),
+			SourcePrefix:      sr.GetSourcePrefix(),
+			DestinationPrefix: sr.GetDestinationPrefix(),
+			SourcePort:        sr.GetSourcePort(),
+			DestinationPort:   sr.GetDestinationPort(),
+			NatOnly:           sr.GetNatOnly(),
+			Application:       sr.GetApplication(),
+			InterfaceFilter:   sr.GetInterfaceFilter(),
+			SourceNatPool:     sr.GetSourceNatPool(),
+		}, "show security flow session")
+		if !ok {
+			return nil, false
+		}
+		if len(forms) == 1 {
+			// Unfiltered: the executed command IS the summary.
+			return []string{base}, true
+		}
+		return forms, true
+	case "GetZonePairSummary":
+		// No selectors (only include_peer); the bare charge executes.
+		return []string{base}, true
+	case "GetEvents":
+		// #16378 fold: GetEvents carries zone/action/protocol filters
+		// charged as `show log`; it fell through to the bare charge.
+		er, isEv := req.(*pb.GetEventsRequest)
+		if !isEv || er == nil {
+			return nil, false
+		}
+		return eventsArgumentForms(cfg, er, base)
+	case "ClearSessions":
+		cr, isClear := req.(*pb.ClearSessionsRequest)
+		if !isClear || cr == nil {
+			return nil, false
+		}
+		return clearSessionsArgumentForms(cr, base)
+	case "MonitorInterface":
+		mr, isMon := req.(*pb.MonitorInterfaceRequest)
+		if !isMon || mr == nil {
+			return nil, false
+		}
+		if mr.GetInterfaceName() == "" {
+			return []string{base}, true
+		}
+		return canonicalArgumentForms(base+" "+mr.GetInterfaceName(), base)
 	case "MatchPolicies":
 		mp, isMatch := req.(*pb.MatchPoliciesRequest)
 		if !isMatch || mp == nil {
@@ -100,10 +160,15 @@ func rpcArgumentForms(cfg *config.Config, fullMethod string, req any, base strin
 		if sd.GetFilter() == "" {
 			return []string{base}, true
 		}
-		// `show interfaces terse` takes no name; the handler ignores the
-		// filter in terse mode, so the executed command is the bare one.
+		// The handler applies the filter as a prefix in terse mode too
+		// (showInterfacesTerse receives filterName and skips
+		// non-matching rows), so a filtered terse request still
+		// executes the filtered command; the charge's bare form is a
+		// detail spelling, so judge the filter under the executed
+		// `show interfaces <name>` family rather than dropping it
+		// (#16378 fold).
 		if sd.GetTerse() {
-			return []string{base}, true
+			return canonicalArgumentForms("show interfaces "+sd.GetFilter(), base)
 		}
 		return canonicalArgumentForms(base+" "+sd.GetFilter(), base)
 	}
@@ -127,6 +192,78 @@ func canonicalArgumentForms(full, base string) ([]string, bool) {
 		return []string{base}, true
 	}
 	return []string{full, base}, true
+}
+
+// eventsArgumentForms rebuilds `show security log …` from a GetEvents
+// request. GetEvents is charged as `show log`, but it reads the
+// security event buffer (server_show_events.go), whose on-box command
+// is `show security log [zone Z] [protocol P] [action A]`; judging the
+// bare `show log` missed every selector (#16378 fold).
+func eventsArgumentForms(cfg *config.Config, er *pb.GetEventsRequest, base string) ([]string, bool) {
+	full := "show security log"
+	if er.GetHasZone() && er.GetZone() == 0 {
+		// Zone 0 is the selectable unknown zone (#3338); it has no
+		// configured name, so it cannot be spelled on-box.
+		return nil, false
+	}
+	if er.GetZone() != 0 {
+		name, ok := zoneNameForID(cfg, er.GetZone())
+		if !ok {
+			return nil, false
+		}
+		full += " zone " + name
+	}
+	if v := er.GetProtocol(); v != "" {
+		full += " protocol " + v
+	}
+	if v := er.GetAction(); v != "" {
+		full += " action " + v
+	}
+	if full == "show security log" {
+		return []string{base}, true
+	}
+	return canonicalArgumentForms(full, base)
+}
+
+// clearSessionsArgumentForms rebuilds `clear security flow session …`
+// from a ClearSessions request, whose selectors carry the zone NAME
+// already (unlike GetSessions' numeric zone ID).
+func clearSessionsArgumentForms(cr *pb.ClearSessionsRequest, base string) ([]string, bool) {
+	full := base
+	if v := cr.GetZone(); v != "" {
+		full += " zone " + v
+	}
+	if v := cr.GetProtocol(); v != "" {
+		full += " protocol " + v
+	}
+	if v := cr.GetSourcePrefix(); v != "" {
+		full += " source-prefix " + v
+	}
+	if v := cr.GetDestinationPrefix(); v != "" {
+		full += " destination-prefix " + v
+	}
+	if v := cr.GetSourcePort(); v != 0 {
+		full += " source-port " + strconv.Itoa(int(v))
+	}
+	if v := cr.GetDestinationPort(); v != 0 {
+		full += " destination-port " + strconv.Itoa(int(v))
+	}
+	if cr.GetNatOnly() {
+		full += " nat-only"
+	}
+	if v := cr.GetApplication(); v != "" {
+		full += " application " + v
+	}
+	if v := cr.GetInterface(); v != "" {
+		full += " interface " + v
+	}
+	if v := cr.GetSourceNatPool(); v != "" {
+		full += " source-nat-pool " + v
+	}
+	if full == base {
+		return []string{base}, true
+	}
+	return canonicalArgumentForms(full, base)
 }
 
 // showTextArgumentForms reconstructs the executed command from a ShowText

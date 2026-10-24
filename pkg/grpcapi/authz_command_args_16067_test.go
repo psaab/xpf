@@ -102,3 +102,40 @@ func TestMalformedPackedTopicDenies16067(t *testing.T) {
 		t.Errorf("unrestricted class must be unaffected by argument reconstruction: %v", err)
 	}
 }
+
+// #16378 fold: selector-bearing RPCs that fell through to the bare
+// charge — filtered GetSessionSummary, GetEvents, ClearSessions,
+// MonitorInterface, filtered terse ShowInterfacesDetail.
+func TestUnreconstructedSelectorRPCs16067(t *testing.T) {
+	trustID := uint32(config.StableZoneID("trust"))
+	for _, tc := range []struct {
+		name, pattern, method string
+		req                   any
+		wantDeny              bool
+	}{
+		{"filtered summary zone denied", `^show security flow session zone trust$`, "GetSessionSummary", &pb.GetSessionSummaryRequest{Zone: trustID}, true},
+		{"unfiltered summary allowed under zone deny", `^show security flow session zone trust$`, "GetSessionSummary", &pb.GetSessionSummaryRequest{}, false},
+		{"unfiltered summary denied by summary deny", `^show security flow session summary$`, "GetSessionSummary", &pb.GetSessionSummaryRequest{}, true},
+		{"filtered summary allowed under summary deny", `^show security flow session summary$`, "GetSessionSummary", &pb.GetSessionSummaryRequest{Zone: trustID}, false},
+		{"events zone denied", `^show security log zone trust$`, "GetEvents", &pb.GetEventsRequest{Zone: trustID, HasZone: true}, true},
+		{"events protocol denied", `^show security log protocol tcp$`, "GetEvents", &pb.GetEventsRequest{Protocol: "tcp"}, true},
+		{"events unfiltered allowed", `^show security log zone trust$`, "GetEvents", &pb.GetEventsRequest{}, false},
+		{"clear zone denied", `^clear security flow session zone trust$`, "ClearSessions", &pb.ClearSessionsRequest{Zone: "trust"}, true},
+		{"clear other zone allowed", `^clear security flow session zone trust$`, "ClearSessions", &pb.ClearSessionsRequest{Zone: "dmz"}, false},
+		{"monitor interface denied", `^monitor interface ge-0/0/9$`, "MonitorInterface", &pb.MonitorInterfaceRequest{InterfaceName: "ge-0/0/9"}, true},
+		{"monitor summary allowed", `^monitor interface ge-0/0/9$`, "MonitorInterface", &pb.MonitorInterfaceRequest{}, false},
+		{"terse filtered interfaces denied", `ge-0/0/9`, "ShowInterfacesDetail", &pb.ShowInterfacesDetailRequest{Filter: "ge-0/0/9", Terse: true}, true},
+		{"zonepair bare denied", `^show security flow session summary$`, "GetZonePairSummary", &pb.GetZonePairSummaryRequest{}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := cfg16067(t, tc.pattern, "")
+			err := gateDecide7172(t, cfg, tc.method, tc.req)
+			if tc.wantDeny && err == nil {
+				t.Errorf("deny %q over %s was ALLOWED; the selector must be reconstructed (#16378 fold)", tc.pattern, tc.method)
+			}
+			if !tc.wantDeny && err != nil {
+				t.Errorf("deny %q over %s refused a command it does not name: %v", tc.pattern, tc.method, err)
+			}
+		})
+	}
+}

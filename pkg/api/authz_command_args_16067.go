@@ -60,16 +60,28 @@ func restArgumentForms(cfg *config.Config, route string, r *http.Request, cmd st
 			full += " routing-instance " + req.RoutingInstance
 		}
 		return restCanonicalForms(full, cmd)
-	case "GET /api/v1/security/sessions", "GET /api/v1/security/sessions/summary",
-		"GET /api/v1/security/sessions/summary/zone-pairs":
+	case "GET /api/v1/security/sessions":
 		return restSessionForms(cfg, r, cmd)
+	case "GET /api/v1/security/sessions/summary", "GET /api/v1/security/sessions/summary/zone-pairs":
+		// The summary handlers execute NO session selectors: they walk
+		// the whole table (and optionally fan out to the peer). Judging
+		// the list selectors here would authorize a command the handler
+		// never performs — e.g. a zone-scoped deny would refuse an
+		// unfiltered summary, and a zone-scoped allow exception would
+		// admit one. The bare summary charge is the only form.
+		return []string{cmd}, true
 	case "GET /api/v1/security/match":
 		return restMatchForms(r, cmd)
 	case "GET /api/v1/interfaces/detail":
 		if name := r.URL.Query().Get("filter"); name != "" {
-			if r.URL.Query().Get("terse") == "true" {
-				return []string{cmd}, true
-			}
+			// interfacesDetailHandler applies the filter as a prefix
+			// even in terse mode (writeInterfacesTerse filters on it),
+			// and parses terse with =="true" only — so every other
+			// spelling still executes the FILTERED detail command and
+			// must be judged as it. Returning the bare charge for a
+			// filtered request was "unnameable" in reverse: it let a
+			// deny on `show interfaces detail <name>` be stepped
+			// around with ?filter=<name>&terse=1 (#16378 fold).
 			return restCanonicalForms(cmd+" "+name, cmd)
 		}
 		return []string{cmd}, true
@@ -364,8 +376,19 @@ func restSessionForms(cfg *config.Config, r *http.Request, base string) ([]strin
 	if v := q.Get("destination_port"); v != "" {
 		full += " destination-port " + v
 	}
-	if q.Get("nat_only") == "true" {
-		full += " nat-only"
+	if v := q.Get("nat_only"); v != "" {
+		// The handler parses with strconv.ParseBool (buildSessionQuery)
+		// and 400s on a malformed value, so every ParseBool spelling
+		// counts — checking only =="true" let nat_only=1 / =t / =TRUE
+		// execute the NAT-only list while the gate judged the
+		// unfiltered command (#16378 fold).
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, false
+		}
+		if b {
+			full += " nat-only"
+		}
 	}
 	if v := q.Get("application"); v != "" {
 		full += " application " + v
@@ -412,8 +435,17 @@ func restMatchForms(r *http.Request, base string) ([]string, bool) {
 	if v := q.Get("icmp_code"); v != "" {
 		full += " icmp-code " + v
 	}
-	if v := q.Get("non_first_fragment"); v == "true" || v == "1" {
-		full += " non-first-fragment"
+	if v := q.Get("non_first_fragment"); v != "" {
+		// matchPoliciesHandler parses with strconv.ParseBool and 400s
+		// on a malformed value; every ParseBool spelling must carry
+		// the fragment selector into the judged command (#16378 fold).
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, false
+		}
+		if b {
+			full += " non-first-fragment"
+		}
 	}
 	if v := q.Get("ingress_interface"); v != "" {
 		full += " ingress-interface " + v
