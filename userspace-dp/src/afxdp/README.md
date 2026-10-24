@@ -592,8 +592,8 @@ sync.
     `stage_screen_syn_cookie_ack_on_session_miss_with_ambiguous` (the
     poll loop passes `ambiguous_zone`; the plain wrappers pass `None`
     and are byte-identical to before) resolve
-    `screen_zone_candidates` = [raw ingress zone, claimed zone] and
-    charge the FULL profile (flood/cookie state, counters, challenge,
+    positional `screen_zone_roles` (raw ingress slot, claimed slot) and
+    preserve raw as the positional first role (even when unscreened) and charge the FULL profile (flood/cookie state, counters, challenge,
     validated-client bypass, cookie-ACK validation) to the raw zone
     only. The claimed zone contributes only a stateless veto via
     `ScreenState::stateless_screen_drop_for_zones` (LAND / TCP-flag /

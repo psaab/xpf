@@ -65,7 +65,7 @@ pub(super) enum SynCookieAckOutcome {
 /// #16051 (RN-04): stage 10 (screens + SYN-cookie) is the one
 /// consumer that cannot wait for that promotion — it runs before
 /// any resolution exists. It therefore judges an ambiguous arrival
-/// under the union in [`screen_zone_candidates`]: a stateless Drop
+/// under the union of positional [`screen_zone_roles`]: a stateless Drop
 /// in EITHER the raw ingress zone's or the claimed zone's profile
 /// recycles the packet, while rate/cookie state is charged to the
 /// raw zone only — never to the unproven claimed zone (see
@@ -947,34 +947,40 @@ pub(super) fn screen_zone_with_state<'a>(
     ingress_zone_override: Option<u16>,
     screen: &ScreenState,
 ) -> Option<(u16, &'a str)> {
-    screen_zone_candidates(worker_ctx, meta, ingress_zone_override, None, screen)
-        .into_iter()
-        .next()
+    let roles = screen_zone_roles(worker_ctx, meta, ingress_zone_override, None, screen);
+    roles
+        .raw_zone
+        .filter(|(_, name)| screen.zone_has_screen_state(name))
 }
 
-/// #16051 (RN-04): the screen-stage zone candidates for one packet, in
-/// adjudication order: the raw ingress zone (physical ifindex / VLAN /
-/// proved fabric override) first, then — for an ambiguous fabric
-/// arrival — the withheld claimed zone. Each entry has screen state of
-/// its own (#12875); a zone without state contributes nothing.
+/// Positional screen roles for one packet. The raw ingress role is returned
+/// whenever its zone is known, even when that zone has no screen state; the
+/// claimed role is separately screened-state-gated. Keeping these positions
+/// distinct prevents an unscreened raw ingress from silently promoting the
+/// claimed zone into the full-profile slot.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct ScreenZoneRoles<'a> {
+    pub(super) raw_zone: Option<(u16, &'a str)>,
+    pub(super) claimed_zone: Option<(u16, &'a str)>,
+}
+
+/// #16051 (RN-04): resolve positional screen roles without collapsing them.
 ///
-/// The claimed zone is NOT promoted here (no resolution exists yet at
-/// stage 10): it may only ADD a stateless drop, never grant a profile,
-/// a flood/cookie charge, or a bypass. Callers charge rate/cookie state
-/// to the first (raw) candidate only and consult the claimed candidate
-/// through the stateless union
-/// (`ScreenState::stateless_screen_drop_for_zones`). When there is no
-/// ambiguous claim the result is exactly the pre-#16051 single zone.
+/// `raw_zone` is the physical/VLAN/proved-override ingress zone and remains
+/// `Some` even if it has no screen state. `claimed_zone` is the withheld
+/// ambiguous fabric claim, returned only when distinct from raw and itself
+/// has screen state. This preserves the caller's distinction: full state is
+/// eligible only in the raw slot; claimed is consulted only statelessly.
 #[inline]
-pub(super) fn screen_zone_candidates<'a>(
+pub(super) fn screen_zone_roles<'a>(
     worker_ctx: &'a WorkerContext,
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
     ambiguous_zone: Option<u16>,
     screen: &ScreenState,
-) -> Vec<(u16, &'a str)> {
+) -> ScreenZoneRoles<'a> {
     if !screen.has_screen_state() {
-        return Vec::new();
+        return ScreenZoneRoles::default();
     }
     let logical_ifindex = resolve_ingress_logical_ifindex(
         worker_ctx.forwarding,
@@ -991,24 +997,26 @@ pub(super) fn screen_zone_candidates<'a>(
                 .get(&logical_ifindex)
                 .copied()
         });
-    let mut zones: Vec<(u16, &'a str)> = Vec::new();
-    for zone_id in raw_zone_id.into_iter().chain(ambiguous_zone) {
-        if zones.iter().any(|(id, _)| *id == zone_id) {
-            continue;
-        }
-        let Some(zone_name) = worker_ctx
+    let raw_zone = raw_zone_id.and_then(|zone_id| {
+        worker_ctx
             .forwarding
             .zone_id_to_name
             .get(&zone_id)
-            .map(|s| s.as_str())
-        else {
-            continue;
-        };
-        if screen.zone_has_screen_state(zone_name) {
-            zones.push((zone_id, zone_name));
+            .map(|name| (zone_id, name.as_str()))
+    });
+    let claimed_zone = ambiguous_zone.and_then(|zone_id| {
+        if raw_zone_id == Some(zone_id) {
+            return None;
         }
+        let zone_name = worker_ctx.forwarding.zone_id_to_name.get(&zone_id)?;
+        screen
+            .zone_has_screen_state(zone_name)
+            .then_some((zone_id, zone_name.as_str()))
+    });
+    ScreenZoneRoles {
+        raw_zone,
+        claimed_zone,
     }
-    zones
 }
 
 /// Stage 10 — screen / IDS slow-path check.
@@ -1073,12 +1081,20 @@ pub(super) fn stage_screen_check_with_ambiguous(
     // question: a zone with no screen configuration must not inherit
     // another zone's extract_screen_info parse cost and #2146 fail-close
     // drop.
-    let zone_candidates =
-        screen_zone_candidates(worker_ctx, meta, ingress_zone_override, ambiguous_zone, screen);
-    let Some(&(zone_id, zone_name)) = zone_candidates.first() else {
+    let roles =
+        screen_zone_roles(worker_ctx, meta, ingress_zone_override, ambiguous_zone, screen);
+    let claimed_zone = roles.claimed_zone;
+    let raw_profile_zone = roles
+        .raw_zone
+        .filter(|(_, name)| screen.zone_has_screen_state(name));
+    if raw_profile_zone.is_none() && claimed_zone.is_none() {
         return StageOutcome::Continue(ScreenCheckOutcome::Pass);
-    };
-    let claimed_zones: Vec<(u16, &str)> = zone_candidates[1..].to_vec();
+    }
+    // Only the raw slot may supply IDs/names to full-profile calls. When it
+    // is absent, these placeholders are never passed to a screen-state call;
+    // claimed-only handling uses claimed_zone explicitly.
+    let (zone_id, zone_name) = raw_profile_zone.unwrap_or((0, ""));
+    let raw_zone_has_state = raw_profile_zone.is_some();
     // #4155: a fabric-redirected packet (stage 9 set FABRIC_INGRESS_FLAG on
     // `meta.meta_flags`) was already rate-screened on the peer ingress node
     // before it crossed the fabric link. Skip the rate-based flood counters
@@ -1170,13 +1186,12 @@ pub(super) fn stage_screen_check_with_ambiguous(
         };
         // #16051: the claimed zone's stateless union also guards the
         // flowless branch (LAND / fragment / source-route need no flow).
-        if !claimed_zones.is_empty() {
+        if let Some((claimed_id, claimed_name)) = claimed_zone {
             if let Some(reason) = screen.stateless_screen_drop_for_zones(
-                claimed_zones.iter().map(|(_, name)| *name),
+                std::iter::once(claimed_name),
                 &screen_pkt,
                 addrs_known,
             ) {
-                let (claimed_id, claimed_name) = claimed_zones[0];
                 if screen.alarm_without_drop(claimed_name) {
                     emit_screen_alarm_event(
                         worker_ctx.event_stream,
@@ -1209,6 +1224,9 @@ pub(super) fn stage_screen_check_with_ambiguous(
                     return StageOutcome::RecycleAndContinue;
                 }
             }
+        }
+        if !raw_zone_has_state {
+            return StageOutcome::Continue(ScreenCheckOutcome::Pass);
         }
         let flowless_verdict = screen.check_flowless_screens_opts(
             zone_name,
@@ -1304,14 +1322,18 @@ pub(super) fn stage_screen_check_with_ambiguous(
             return StageOutcome::RecycleAndContinue;
         }
     };
-    let verdict = screen.check_packet_with_zone_id_opts(
-        zone_name,
-        zone_id,
-        &screen_pkt,
-        now_ns,
-        now_secs,
-        skip_rate_flood,
-    );
+    let verdict = if raw_zone_has_state {
+        screen.check_packet_with_zone_id_opts(
+            zone_name,
+            zone_id,
+            &screen_pkt,
+            now_ns,
+            now_secs,
+            skip_rate_flood,
+        )
+    } else {
+        ScreenVerdict::Pass
+    };
     // #3315: drain a pending SYN-flood alarm (alarm-threshold crossed below
     // attack-threshold). Like scan-table-pressure this is a log-only PERMIT
     // alarm — it does NOT drop and is rate-limited to ≤1/sec/zone in the screen
@@ -1332,18 +1354,17 @@ pub(super) fn stage_screen_check_with_ambiguous(
     // the raw verdict (Pass, Bypass, or even Challenge — no SYN-ACK may
     // be minted for a packet the claimed profile drops); a raw Drop
     // keeps precedence for attribution when both trip.
-    let claimed_drop = if claimed_zones.is_empty() {
-        None
-    } else {
+    let claimed_drop = claimed_zone.and_then(|(_, claimed_name)| {
         screen.stateless_screen_drop_for_zones(
-            claimed_zones.iter().map(|(_, name)| *name),
+            std::iter::once(claimed_name),
             &screen_pkt,
             true,
         )
-    };
+    });
     if let Some(reason) = claimed_drop {
         if !matches!(verdict, ScreenVerdict::Drop(_)) {
-            let (claimed_id, claimed_name) = claimed_zones[0];
+            let (claimed_id, claimed_name) =
+                claimed_zone.expect("claimed drop requires claimed zone");
             if screen.alarm_without_drop(claimed_name) {
                 emit_screen_alarm_event(
                     worker_ctx.event_stream,
@@ -1550,12 +1571,17 @@ pub(super) fn stage_screen_syn_cookie_ack_on_session_miss_with_ambiguous(
     // admitted (the tolerant-doctrine fail-close that stage 10 owns for
     // this same packet); a zone with a resolved profile keeps the full
     // validation and its parse fail-close.
-    let zone_candidates =
-        screen_zone_candidates(worker_ctx, meta, ingress_zone_override, ambiguous_zone, screen);
-    let Some(&(zone_id, zone_name)) = zone_candidates.first() else {
+    let roles =
+        screen_zone_roles(worker_ctx, meta, ingress_zone_override, ambiguous_zone, screen);
+    let claimed_zone = roles.claimed_zone;
+    let raw_profile_zone = roles
+        .raw_zone
+        .filter(|(_, name)| screen.zone_has_screen_state(name));
+    if raw_profile_zone.is_none() && claimed_zone.is_none() {
         return StageOutcome::Continue(SynCookieAckOutcome::Pass);
-    };
-    let claimed_zones: Vec<(u16, &str)> = zone_candidates[1..].to_vec();
+    }
+    let (zone_id, zone_name) = raw_profile_zone.unwrap_or((0, ""));
+    let raw_zone_has_state = raw_profile_zone.is_some();
     // See `stage_screen_check`: decide L3 offset on tag PRESENCE, not
     // VID > 0, so a priority-tagged VID-0 cookie ACK is parsed at the
     // correct offset (18) instead of mis-reading the tag bytes (#2145).
@@ -1580,6 +1606,9 @@ pub(super) fn stage_screen_syn_cookie_ack_on_session_miss_with_ambiguous(
         // FAIL-CLOSED (#2146): an unparseable L3 header on the
         // SYN-cookie ACK session-miss path is dropped, never admitted.
         Err(err) => {
+            if !raw_zone_has_state {
+                return StageOutcome::Continue(SynCookieAckOutcome::Pass);
+            }
             let reason = err.screen_reason();
             let drop_info = screen_parse_error_info(&meta, flow);
             emit_screen_drop_event(
@@ -1601,13 +1630,12 @@ pub(super) fn stage_screen_syn_cookie_ack_on_session_miss_with_ambiguous(
     // #16051: the claimed zone's stateless union vetoes even a
     // Validated ACK (no ACK-RST under a dropping claimed profile);
     // the raw zone's own Invalid/Budget verdicts keep precedence.
-    if !claimed_zones.is_empty() {
+    if let Some((claimed_id, claimed_name)) = claimed_zone {
         if let Some(reason) = screen.stateless_screen_drop_for_zones(
-            claimed_zones.iter().map(|(_, name)| *name),
+            std::iter::once(claimed_name),
             &screen_pkt,
             true,
         ) {
-            let (claimed_id, claimed_name) = claimed_zones[0];
             if screen.alarm_without_drop(claimed_name) {
                 emit_screen_alarm_event(
                     worker_ctx.event_stream,
@@ -1641,13 +1669,17 @@ pub(super) fn stage_screen_syn_cookie_ack_on_session_miss_with_ambiguous(
             }
         }
     }
-    match screen.validate_syn_cookie_ack_on_session_miss(
-        zone_name,
-        zone_id,
-        &screen_pkt,
-        now_ns,
-        now_secs,
-    ) {
+    match if raw_zone_has_state {
+        screen.validate_syn_cookie_ack_on_session_miss(
+            zone_name,
+            zone_id,
+            &screen_pkt,
+            now_ns,
+            now_secs,
+        )
+    } else {
+        SynCookieAckVerdict::NotApplicable
+    } {
         SynCookieAckVerdict::NotApplicable => StageOutcome::Continue(SynCookieAckOutcome::Pass),
         SynCookieAckVerdict::Validated => {
             counters.touched = true;

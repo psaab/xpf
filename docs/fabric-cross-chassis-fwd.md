@@ -1043,10 +1043,11 @@ yet resolving the profile from the raw fabric ingress alone skipped
 the claimed zone's profile entirely: a co-moved flow whose claimed
 zone carried a screen the fabric zone lacks was admitted unscreened
 and only then promoted. The stage now judges the packet under a
-UNION of the two candidate profiles (`screen_zone_candidates` →
+UNION of the two candidate profiles (`screen_zone_roles` →
 `ScreenState::stateless_screen_drop_for_zones`):
 
-- The RAW ingress zone keeps its full profile: flood/cookie state,
+- The RAW ingress zone is always the positional first role — even when
+  it has no screen state — and keeps its full profile: flood/cookie state,
   counters, and challenges are charged exactly as for a local arrival
   (plus the #4155 fabric rate-skip). This is also the zone that
   validates a returning cookie ACK — the peer that minted the cookie

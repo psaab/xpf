@@ -111,7 +111,7 @@ use super::poll_stages::{
     FabricIngressOutcome, IpsecPassthroughOutcome, ScreenCheckOutcome, StageOutcome,
     SynCookieAckOutcome, ike_host_inbound_gate_context,
     ike_host_inbound_gate_context_with_ambiguous, reinject_ipsec_passthrough,
-    screen_zone_candidates, stage_classify_fabric_ingress, stage_ipsec_passthrough_check,
+    screen_zone_roles, stage_classify_fabric_ingress, stage_ipsec_passthrough_check,
     stage_ipsec_passthrough_check_with_scope,
     stage_link_layer_classify, stage_native_gre_decap, stage_parse_flow_and_learn,
     stage_screen_check_with_ambiguous, stage_screen_syn_cookie_ack_on_session_miss_with_ambiguous,
@@ -1611,14 +1611,17 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // different zone must not buy this zone a filter re-walk.
                 // #16051: an ambiguous arrival has TWO candidate zones (raw
                 // ingress + withheld claimed); the walk runs if either does.
-                let screen_candidates = screen_zone_candidates(
+                let screen_roles = screen_zone_roles(
                     worker_ctx,
                     meta,
                     ingress_zone_override,
                     ambiguous_zone,
                     screen,
                 );
-                let input_filter_denied_before_screens = !screen_candidates.is_empty()
+                let input_filter_denied_before_screens = (screen_roles
+                    .raw_zone
+                    .is_some_and(|(_, name)| screen.zone_has_screen_state(name))
+                    || screen_roles.claimed_zone.is_some())
                     && input_filter_would_deny_before_screen(
                         worker_ctx.forwarding,
                         packet_frame,
