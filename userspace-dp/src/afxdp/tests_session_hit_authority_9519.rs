@@ -473,6 +473,48 @@ fn a_foreign_zones_permit_does_not_shield_the_owner_from_its_own_policy_9519() {
 }
 
 #[test]
+fn drop_foreign_knob_drops_a_permitted_foreign_hit_16044() {
+    // Admit under dmz-permit so the foreign packet's own zone permits it:
+    // the default adjudicates in place and forwards on the owner's entry.
+    let admitted_under = forwarding(Posture {
+        dmz_permit: true,
+        ..WAN_ONLY
+    });
+    let mut sessions = admitted(&admitted_under);
+    let mut live = forwarding(Posture {
+        dmz_permit: true,
+        ..WAN_ONLY
+    });
+    live.drop_foreign_session_hits = true;
+    let foreign = drive(&live, &mut sessions, client_ack(DMZ_IFINDEX));
+    assert_eq!(
+        foreign.session_hit, 1,
+        "the dmz packet must HIT the wan session, or this cell exercises the miss path"
+    );
+    assert_eq!(
+        foreign.tx, 0,
+        "knob on: a dmz-permitted foreign hit is dropped, not forwarded on the \
+         owner's DNAT/egress (#16044)"
+    );
+    assert_eq!(
+        foreign.foreign_authority_drops, 1,
+        "and it is counted as a foreign-authority drop"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        2,
+        "the knob drops the packet, never the owner's session"
+    );
+    // Control on the same table with the knob off: the next owner packet
+    // still forwards (the drop did not act on the session).
+    let owner = drive(&live, &mut sessions, client_ack(WAN_IFINDEX));
+    assert_eq!(
+        owner.tx, 1,
+        "control: the owner is still served after the foreign drop"
+    );
+}
+
+#[test]
 fn a_reply_from_a_zone_the_flow_did_not_go_to_is_dropped_9519() {
     let fw = forwarding(WAN_ONLY);
     let mut sessions = admitted(&fw);

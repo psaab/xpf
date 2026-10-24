@@ -312,7 +312,11 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // and FabricSnapshot.link_authenticated gate stamp honouring. A v68
 // helper ignores both and would honour a forged stamp on an
 // unauthenticated fabric the operator required authenticated.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 69;
+// v69 -> v70 (#16044): FlowSnapshot.drop_foreign_session_hits drops a
+// foreign session hit outright. A v69 helper ignores it and forwards the
+// packet on the owner's entry/NAT/egress — the exact fail-open the
+// operator enabled the knob to close.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 70;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

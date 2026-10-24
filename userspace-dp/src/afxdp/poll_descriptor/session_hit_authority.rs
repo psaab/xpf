@@ -64,6 +64,16 @@
 //! Either way it does not act on the session: no #7212 revocation, no #8356
 //! re-derivation or re-stamp, no host-inbound teardown, no flow-cache seed.
 //!
+//! With `security flow drop-foreign-session-hits` (#16044) the permit arm
+//! is removed: every non-host-bound foreign hit that its own zone permits
+//! is dropped and counted in `foreign_authority_drops` (no POLICY_DENY
+//! event and no denying-rule credit — no policy denied it). The deny and
+//! #9384 re-zone revocation arms are unchanged — the knob never makes a
+//! foreign packet act on the session. Host-bound (LocalDelivery) hits are
+//! exempt: their authority plane is the arrival zone's host-inbound /
+//! `junos-host` gate downstream, so dropping them here would discard
+//! traffic that plane may admit under the arrival zone's own rules.
+//!
 //! One foreign packet MAY revoke: one that arrived on the session's own
 //! admitting interface. That interface did not move between zones by itself —
 //! a commit moved it — so this is #9384's case, not a spoof, and the session is
@@ -230,6 +240,12 @@ pub(super) enum ForeignHitVerdict {
     /// The session's own admitting interface now sits in a zone that denies the
     /// flow (#9384): revoke it, through the same teardown #8356 uses.
     Revoke(PolicyRevocation),
+    /// #16044: `drop_foreign_session_hits` is set, so this foreign packet is
+    /// dropped even though its own zone's policy permits it. Counted as a
+    /// foreign-authority drop by the descriptor path, with NO policy-deny
+    /// event: no policy denied it, and the denying rule must not be credited
+    /// for a knob-driven drop (the event helper credits Deny/Reject rules).
+    DropForeign,
 }
 
 /// What the type-informed OWNER packet check does.
@@ -398,7 +414,14 @@ pub(super) fn foreign_hit_verdict(
         policy_packet_icmp(packet_frame, meta),
         now_ns,
     );
+    // #16044: with drop-foreign enabled, a foreign hit that its own zone
+    // permits is still dropped — the permit arm is removed. The drop is
+    // evaluated AFTER the policy question so a deny keeps its exact prior
+    // shape (attributed Drop / #9384 Revoke); only a permit is diverted.
     if matches!(result.action, crate::policy::PolicyAction::Permit) {
+        if forwarding.drop_foreign_session_hits {
+            return ForeignHitVerdict::DropForeign;
+        }
         return ForeignHitVerdict::Forward;
     }
     let deny = HitPolicyDeny {

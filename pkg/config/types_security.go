@@ -284,13 +284,21 @@ type FlowConfig struct {
 	// (operator MACsec / 802.1X). Unauthenticated stamps drop as Invalid.
 	// Off by default preserves #10105 document-and-constrain behaviour.
 	RequireAuthenticatedFabricStamps bool
-	GREPerformanceAcceleration       bool
-	PowerModeDisable                 bool
-	SynFloodProtectionMode           string // "syn-cookie" or "" (default = drop)
-	Traceoptions                     *FlowTraceoptions
-	AgingEarlyAgeout                 int // seconds (0 = disabled)
-	AgingHighWatermark               int // percent of max sessions (0 = disabled)
-	AgingLowWatermark                int // percent of max sessions (0 = disabled)
+	// DropForeignSessionHits is the #16044 opt-in
+	// (`security flow drop-foreign-session-hits`): when set, the
+	// userspace dataplane drops a session hit whose live arrival zone
+	// is not the zone that admitted the session, instead of the #9519
+	// adjudicate-in-place default (judge by the arrival zone, forward
+	// on the owner's entry/NAT/egress on permit). Off by default
+	// preserves asymmetric / multi-homed arrival forwarding.
+	DropForeignSessionHits     bool
+	GREPerformanceAcceleration bool
+	PowerModeDisable           bool
+	SynFloodProtectionMode     string // "syn-cookie" or "" (default = drop)
+	Traceoptions               *FlowTraceoptions
+	AgingEarlyAgeout           int // seconds (0 = disabled)
+	AgingHighWatermark         int // percent of max sessions (0 = disabled)
+	AgingLowWatermark          int // percent of max sessions (0 = disabled)
 	// AgingUnknownLeaves records `security flow aging` child keywords the
 	// compiler does not recognize (#3440 H2). The aging subtree previously
 	// silently dropped any unknown leaf; compileFlow now records them so

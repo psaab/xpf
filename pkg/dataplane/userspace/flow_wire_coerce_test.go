@@ -81,6 +81,29 @@ func TestBuildFlowSnapshotCarriesUnstampedFabricCompatibility(t *testing.T) {
 	}
 }
 
+func TestBuildFlowSnapshotCarriesDropForeign16044(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.Flow.DropForeignSessionHits = true
+	snap := buildFlowSnapshot(cfg)
+	if !snap.DropForeignSessionHits {
+		t.Fatal("flow snapshot dropped drop-foreign-session-hits")
+	}
+	wire, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("marshal flow snapshot: %v", err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(wire, &fields); err != nil {
+		t.Fatalf("decode flow snapshot JSON: %v", err)
+	}
+	if fields["drop_foreign_session_hits"] != true {
+		t.Fatalf("flow snapshot wire field = %v, want true", fields["drop_foreign_session_hits"])
+	}
+	if got := buildFlowSnapshot(&config.Config{}); got.DropForeignSessionHits {
+		t.Fatal("drop-foreign-session-hits must default off")
+	}
+}
+
 func TestBuildFlowExportSnapshotCoercesOutOfRange_1977(t *testing.T) {
 	mk := func(port int) *config.Config {
 		cfg := &config.Config{}

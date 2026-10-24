@@ -509,6 +509,15 @@ pub(in crate::afxdp) struct ForwardingState {
     /// #16023: when true, a V1/V2 stamp is honoured only on a
     /// link-authenticated fabric; otherwise it is Invalid (stage-9 drop).
     pub(in crate::afxdp) require_authenticated_fabric_stamps: bool,
+    /// #16044: `security flow drop-foreign-session-hits`. When true, a
+    /// session hit whose live arrival zone is not the zone that admitted
+    /// the session (including a differently-stamped fabric arrival) is
+    /// dropped outright instead of being adjudicated in place under the
+    /// arrival zone's policy and forwarded on the owner's entry, NAT and
+    /// egress. Off by default: adjudicate-in-place (#9519) is preserved,
+    /// so legitimately multi-homed / asymmetric arrivals keep forwarding.
+    /// Only the packet is dropped; the session is never revoked by it.
+    pub(in crate::afxdp) drop_foreign_session_hits: bool,
     /// `security alg <proto> disable` bitfield (#2008 H3/H4): bit 0 DNS,
     /// bit 1 FTP, bit 2 SIP, bit 3 TFTP, bit 4 PPTP (#15655). Read at
     /// session-create time to suppress ALG-type tagging for a disabled ALG
