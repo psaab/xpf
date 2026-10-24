@@ -21,7 +21,15 @@
 //
 // All three budgets are checked BEFORE the credential verify, so a locked-out
 // caller never reaches the (post-#10826 bcrypt) compare — the lockout is what
-// bounds attacker-driven verify CPU. Every lockout rejection is still counted
+// bounds attacker-driven verify CPU — with one #16068 exception: when ONLY
+// the global Basic bucket is locked (the caller's pair and source buckets are
+// clean), the attempt is admitted as a bounded probe (one concurrent verify
+// per username) so a correct password clears-then-admits the global bucket
+// instead of one sprayer locking the legitimate user out indefinitely.
+// Pair/source lockouts still refuse before verification and can never be
+// rescued by a correct credential from a different identity; probe failures
+// are dropped by chargeLocked while the bucket is locked, so they never
+// extend the existing lockout deadline. Every lockout rejection is still counted
 // under the existing rest_api_auth surface (a lockout rejection IS an
 // authentication failure); no second surface is created for the same event.
 //
@@ -61,6 +69,12 @@ const (
 	// authThrottleGlobalBasicFailures locks a claimed Basic username across
 	// sources after the same number of failures as the existing pair budget.
 	authThrottleGlobalBasicFailures = authThrottleAccountFailures
+	// authThrottleGlobalBasicProbes bounds concurrent verifier probes admitted
+	// for a Basic username while its global bucket is locked (#16068). A probe
+	// still pays the full credential verify; on success it clears-then-admits
+	// the global bucket, on failure it is charged like any other attempt.
+	// Bounding probes keeps locked-credential verify CPU capped.
+	authThrottleGlobalBasicProbes = 1
 	// authThrottleSourceFailures is the per-source-prefix failure budget within
 	// authThrottleWindow before the whole source locks. IPv6 sources use /64.
 	authThrottleSourceFailures = 20
@@ -165,7 +179,12 @@ type authThrottleReservation struct {
 	account       *authFailureBucket
 	globalAccount *authFailureBucket
 	sourceBucket  *authFailureBucket
-	completed     bool
+	// probeGlobal is non-nil when this reservation was admitted as a
+	// #16068 global-lockout probe; on success it is cleared-then-admitted
+	// (the bucket is wiped before the request proceeds). Equal to
+	// globalAccount when set.
+	probeGlobal *authFailureBucket
+	completed   bool
 }
 
 // reserve atomically checks active lockouts and reserves one slot in each
@@ -173,6 +192,19 @@ type authThrottleReservation struct {
 // verifiers occupy every slot, refuse transiently for one second rather than
 // running unbounded work or charging a request whose credential was not checked.
 // Dual headers also reserve the API-key pair before either verifier runs.
+//
+// #16068 exception: a locked pair or source bucket cannot be rescued by a
+// correct credential from a different identity — those buckets own distinct
+// (source, account) or source-prefix spray, so their lockouts still refuse
+// before verification. A locked GLOBAL Basic bucket alone does not refuse:
+// the attempt is admitted as a bounded probe (at most
+// authThrottleGlobalBasicProbes concurrent verifies for that username) so a
+// successful verify can clear-then-admit the bucket instead of one sprayer
+// locking the legitimate user out indefinitely. Probe failures are charged
+// like any other attempt; the pair/source buckets that sprayed the global
+// bucket stay locked regardless (clearGlobalBasicAccountLocked never touches
+// them, and clearAccountLocked for the probe's pair only runs when its
+// password verifies).
 func (t *authFailureTracker) reserve(source, account string, dualHeader bool) (authThrottleReservation, time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -188,16 +220,30 @@ func (t *authFailureTracker) reserve(source, account string, dualHeader bool) (a
 	if hasSecond {
 		secondBucket = t.accounts[source+"\x00"+authThrottleAPIKeyAccount]
 	}
-	if wait := authThrottleWaitLocked(now, accountBucket, globalBucket, sourceBucket, secondBucket); wait > 0 {
+	// Pair, source, and dual-header fallback lockouts remain hard
+	// pre-verification refusals. Only a global-only Basic lockout falls
+	// through to the bounded #16068 probe below.
+	probe := false
+	if globalBucket != nil && globalBucket.lockedUntil.After(now) {
+		if wait := authThrottleWaitLocked(now, accountBucket, nil, sourceBucket, secondBucket); wait > 0 {
+			return authThrottleReservation{}, wait
+		}
+		if globalBucket.inFlight >= authThrottleGlobalBasicProbes {
+			return authThrottleReservation{}, time.Second
+		}
+		probe = true
+	} else if wait := authThrottleWaitLocked(now, accountBucket, globalBucket, sourceBucket, secondBucket); wait > 0 {
 		return authThrottleReservation{}, wait
 	}
 	resetExpiredFailuresLocked(accountBucket, now)
-	resetExpiredFailuresLocked(globalBucket, now)
+	if !probe {
+		resetExpiredFailuresLocked(globalBucket, now)
+	}
 	resetExpiredFailuresLocked(sourceBucket, now)
 	resetExpiredFailuresLocked(secondBucket, now)
 
 	if (accountBucket != nil && accountBucket.failures+accountBucket.inFlight >= authThrottleAccountFailures) ||
-		(globalBucket != nil && globalBucket.failures+globalBucket.inFlight >= authThrottleGlobalBasicFailures) ||
+		(!probe && globalBucket != nil && globalBucket.failures+globalBucket.inFlight >= authThrottleGlobalBasicFailures) ||
 		(sourceBucket != nil && sourceBucket.failures+sourceBucket.inFlight >= authThrottleSourceFailures) ||
 		(secondBucket != nil && secondBucket.failures+secondBucket.inFlight >= authThrottleAccountFailures) {
 		return authThrottleReservation{}, time.Second
@@ -243,14 +289,18 @@ func (t *authFailureTracker) reserve(source, account string, dualHeader bool) (a
 	if secondBucket != nil {
 		secondBucket.inFlight++
 	}
-	return authThrottleReservation{
+	reservation := authThrottleReservation{
 		source:        source,
 		claimed:       account,
 		secondAccount: secondBucket,
 		account:       accountBucket,
 		globalAccount: globalBucket,
 		sourceBucket:  sourceBucket,
-	}, 0
+	}
+	if probe {
+		reservation.probeGlobal = globalBucket
+	}
+	return reservation, 0
 }
 
 func authThrottleWaitLocked(now time.Time, account, globalAccount, source, fallback *authFailureBucket) time.Duration {
@@ -290,6 +340,10 @@ func resetExpiredFailuresLocked(bucket *authFailureBucket, now time.Time) {
 // claimed identity even when the API-key fallback succeeds. Dual failures
 // charge both pairs, but charge the source only once. An unevaluated fallback
 // is released without charging or clearing its existing failures.
+//
+// A #16068 probe that fails verifies nothing, so it is charged like any other
+// failure; chargeLocked drops it while the global bucket is still locked, so
+// wrong-password probes never extend the existing lockout deadline.
 func (t *authFailureTracker) complete(reservation *authThrottleReservation, authorized bool, verified string, authorizationFailed bool) {
 	if reservation == nil {
 		return
@@ -316,6 +370,14 @@ func (t *authFailureTracker) complete(reservation *authThrottleReservation, auth
 			// only an empty reservation, never forgive existing key failures.
 			delete(t.accounts, reservation.source+"\x00"+authThrottleAPIKeyAccount)
 		}
+	}
+	if reservation.probeGlobal != nil && !(authorized && !authorizationFailed) {
+		if authorized && authorizationFailed && verified != "" && verified != reservation.claimed {
+			t.clearAccountLocked(reservation.source, verified, now)
+		}
+		t.chargeLocked(reservation.account, now, authThrottleAccountFailures)
+		t.chargeLocked(reservation.sourceBucket, now, authThrottleSourceFailures)
+		return
 	}
 	if authorized && !authorizationFailed {
 		t.clearAccountLocked(reservation.source, reservation.claimed, now)
