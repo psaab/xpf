@@ -1023,42 +1023,20 @@ fn build_fallible_forwarding_state(
             std::net::IpAddr::V4(v4) => state.configured_iface_v4.contains(&v4),
             std::net::IpAddr::V6(v6) => state.configured_iface_v6.contains(&v6),
         };
-        match ip {
-            std::net::IpAddr::V4(v4) => {
-                state
-                    .local_nat_to_self_v4
-                    .entry(v4)
-                    .and_modify(|all_to_self| *all_to_self &= to_self)
-                    .or_insert(to_self);
-                state.local_v4.insert(v4);
-                if wildcard {
-                    state.local_nat_any_table_v4.insert(v4);
-                } else {
-                    state
-                        .local_tables_v4
-                        .entry(v4)
-                        .or_default()
-                        .insert(table_v4);
-                }
-            }
-            std::net::IpAddr::V6(v6) => {
-                state
-                    .local_nat_to_self_v6
-                    .entry(v6)
-                    .and_modify(|all_to_self| *all_to_self &= to_self)
-                    .or_insert(to_self);
-                state.local_v6.insert(v6);
-                if wildcard {
-                    state.local_nat_any_table_v6.insert(v6);
-                } else {
-                    state
-                        .local_tables_v6
-                        .entry(v6)
-                        .or_default()
-                        .insert(table_v6);
-                }
-            }
-        }
+        // #16208: paired insert via the ForwardingState method
+        // (local_v* + local_nat_to_self_* + table attribution
+        // atomically). The per-family table string is selected here;
+        // the method records it in the matching family map, or the
+        // wildcard set when the rule is unscoped.
+        let table = if wildcard {
+            Some(None)
+        } else {
+            Some(Some(match ip {
+                std::net::IpAddr::V4(_) => table_v4,
+                std::net::IpAddr::V6(_) => table_v6,
+            }))
+        };
+        state.insert_nat_external(ip, table, to_self);
     }
 
     // Debug: dump zone mappings and policy rules

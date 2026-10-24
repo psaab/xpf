@@ -78,11 +78,15 @@ pub(in crate::afxdp) struct ForwardingState {
     /// `prefix.addr() == host` matched only a /32.) These maps
     /// record, for EVERY `local_v*` member (interface host address AND
     /// static-NAT/DNAT external IP), the set of canonical route tables that
-    /// own it, so the shortcut is gated on the resolving table. Every
-    /// `local_v*` insert has a paired `local_tables_v*` / `local_nat_any_table_v*`
-    /// insert: interface addresses in `populate_interfaces` (keyed by the host
-    /// `.addr()`, not the connected prefix), NAT/DNAT externals in the
-    /// `forwarding_build` late-stage NAT append. The connected scan is still
+    /// own it, so the shortcut is gated on the resolving table. Production
+    /// writers MUST add members only through
+    /// [`Self::insert_local_iface_addr`] (interface addresses, keyed by the
+    /// host `.addr()`, not the connected prefix) or
+    /// [`Self::insert_nat_external`] (NAT/DNAT externals in the
+    /// `forwarding_build` late-stage NAT append), which perform the paired
+    /// `local_tables_v*` / `local_nat_any_table_v*` attribution atomically
+    /// with the `local_v*` insert; a direct field insert would silently
+    /// drop the VRF gate. The connected scan is still
     /// used for the ifindex ATTRIBUTION — matching the row's unmasked host
     /// address since #10645 (any width, not just the #3151 /32-HA case);
     /// the membership DECISION now uses these maps.
@@ -1031,6 +1035,83 @@ impl ForwardingState {
         self.alg_disable_flags & 0x10 == 0
     }
 
+    /// #16208: paired insert for an interface host address: adds `addr`
+    /// to the family `local_v*` set AND records `table` as its owning
+    /// canonical route table in `local_tables_v*`, atomically. This is
+    /// the ONLY production writer for interface addresses; interface
+    /// addresses are never wildcarded (an interface IP lives in exactly
+    /// one VRF). Replaces the open-coded pair at the
+    /// `forwarding_build/interfaces.rs` writer site.
+    pub(in crate::afxdp) fn insert_local_iface_addr(&mut self, addr: IpAddr, table: String) {
+        match addr {
+            IpAddr::V4(v4) => {
+                self.local_v4.insert(v4);
+                self.local_tables_v4.entry(v4).or_default().insert(table);
+            }
+            IpAddr::V6(v6) => {
+                self.local_v6.insert(v6);
+                self.local_tables_v6.entry(v6).or_default().insert(table);
+            }
+        }
+    }
+
+    /// #16208: paired insert for a static-NAT/DNAT external address:
+    /// adds `addr` to the family `local_v*` set, accumulates the
+    /// `local_nat_to_self_*` conjunction (`true` only if every
+    /// configured translation for the external targets a configured
+    /// interface address, #11439), AND records its table attribution,
+    /// atomically. A wildcard (unscoped, `Some(None)`) rule is recorded
+    /// in the table-agnostic `local_nat_any_table_v*` set — owned in
+    /// EVERY table, mirroring `scope_ok`'s empty-instance wildcard;
+    /// `Some(Some(table))` records the specific canonical table in
+    /// `local_tables_v*`; `None` adds the address with no attribution
+    /// (fail-closed: the table-scoped local-delivery decision will not
+    /// own it). This is the ONLY production writer for NAT externals;
+    /// replaces the open-coded triple at the
+    /// `forwarding_build/mod.rs` late-stage writer site.
+    pub(in crate::afxdp) fn insert_nat_external(
+        &mut self,
+        addr: IpAddr,
+        table: Option<Option<String>>,
+        to_self: bool,
+    ) {
+        match addr {
+            IpAddr::V4(v4) => {
+                self.local_nat_to_self_v4
+                    .entry(v4)
+                    .and_modify(|all_to_self| *all_to_self &= to_self)
+                    .or_insert(to_self);
+                self.local_v4.insert(v4);
+                match table {
+                    Some(Some(table)) => {
+                        self.local_tables_v4.entry(v4).or_default().insert(table);
+                    }
+                    Some(None) => {
+                        self.local_nat_any_table_v4.insert(v4);
+                    }
+                    None => {}
+                }
+            }
+            IpAddr::V6(v6) => {
+                self.local_nat_to_self_v6
+                    .entry(v6)
+                    .and_modify(|all_to_self| *all_to_self &= to_self)
+                    .or_insert(to_self);
+                self.local_v6.insert(v6);
+                match table {
+                    Some(Some(table)) => {
+                        self.local_tables_v6.entry(v6).or_default().insert(table);
+                    }
+                    Some(None) => {
+                        self.local_nat_any_table_v6.insert(v6);
+                    }
+                    None => {}
+                }
+            }
+        }
+    }
+
+
     /// #3071: true iff zone `zone_id` has Junos `tcp-rst` enabled. Used by the
     /// strict-SYN transit session-miss path to decide whether a non-SYN TCP
     /// packet whose ingress (from) zone is `zone_id` gets a TCP RST. An
@@ -1354,11 +1435,100 @@ impl ForwardingState {
         }
     }
 }
+#[cfg(test)]
+mod paired_insert_16208_tests {
+    use super::*;
+
+    #[test]
+    fn insert_local_iface_addr_pairs_local_and_table_v4() {
+        let mut state = ForwardingState::default();
+        let addr = Ipv4Addr::new(192, 0, 2, 1);
+        state.insert_local_iface_addr(IpAddr::V4(addr), "tenant.inet.0".to_string());
+        assert!(state.local_v4.contains(&addr));
+        assert!(state
+            .local_tables_v4
+            .get(&addr)
+            .is_some_and(|t| t.contains("tenant.inet.0")));
+        assert!(!state.local_nat_any_table_v4.contains(&addr));
+        // Second table accumulates without dropping the first.
+        state.insert_local_iface_addr(IpAddr::V4(addr), "inet.0".to_string());
+        let tables = state.local_tables_v4.get(&addr).unwrap();
+        assert_eq!(tables.len(), 2);
+    }
+
+    #[test]
+    fn insert_local_iface_addr_pairs_local_and_table_v6() {
+        let mut state = ForwardingState::default();
+        let addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+        state.insert_local_iface_addr(IpAddr::V6(addr), "tenant.inet6.0".to_string());
+        assert!(state.local_v6.contains(&addr));
+        assert!(state
+            .local_tables_v6
+            .get(&addr)
+            .is_some_and(|t| t.contains("tenant.inet6.0")));
+        assert!(!state.local_nat_any_table_v6.contains(&addr));
+        assert!(state.local_v4.is_empty());
+    }
+
+    #[test]
+    fn insert_nat_external_scoped_records_table_and_to_self() {
+        let mut state = ForwardingState::default();
+        let addr = Ipv4Addr::new(198, 51, 100, 7);
+        state.insert_nat_external(
+            IpAddr::V4(addr),
+            Some(Some("tenant.inet.0".to_string())),
+            true,
+        );
+        assert!(state.local_v4.contains(&addr));
+        assert!(state
+            .local_tables_v4
+            .get(&addr)
+            .is_some_and(|t| t.contains("tenant.inet.0")));
+        assert!(!state.local_nat_any_table_v4.contains(&addr));
+        assert_eq!(state.local_nat_to_self_v4.get(&addr), Some(&true));
+    }
+
+    #[test]
+    fn insert_nat_external_wildcard_records_any_table() {
+        let mut state = ForwardingState::default();
+        let addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 9);
+        state.insert_nat_external(IpAddr::V6(addr), Some(None), false);
+        assert!(state.local_v6.contains(&addr));
+        assert!(state.local_nat_any_table_v6.contains(&addr));
+        assert!(!state.local_tables_v6.contains_key(&addr));
+        assert_eq!(state.local_nat_to_self_v6.get(&addr), Some(&false));
+    }
+
+    #[test]
+    fn insert_nat_external_to_self_is_conjunction() {
+        let mut state = ForwardingState::default();
+        let addr = Ipv4Addr::new(203, 0, 113, 5);
+        state.insert_nat_external(IpAddr::V4(addr), Some(None), true);
+        assert_eq!(state.local_nat_to_self_v4.get(&addr), Some(&true));
+        // A later transit target flips the conjunction to false and
+        // it never flips back.
+        state.insert_nat_external(IpAddr::V4(addr), Some(None), false);
+        assert_eq!(state.local_nat_to_self_v4.get(&addr), Some(&false));
+        state.insert_nat_external(IpAddr::V4(addr), Some(None), true);
+        assert_eq!(state.local_nat_to_self_v4.get(&addr), Some(&false));
+    }
+
+    #[test]
+    fn insert_nat_external_no_table_is_fail_closed() {
+        let mut state = ForwardingState::default();
+        let addr = Ipv4Addr::new(192, 0, 2, 99);
+        state.insert_nat_external(IpAddr::V4(addr), None, true);
+        assert!(state.local_v4.contains(&addr));
+        assert!(!state.local_tables_v4.contains_key(&addr));
+        assert!(!state.local_nat_any_table_v4.contains(&addr));
+        assert_eq!(state.local_nat_to_self_v4.get(&addr), Some(&true));
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::afxdp) struct MirrorRuntimeConfig {
-    pub(in crate::afxdp) output_ifindex: i32,
-    pub(in crate::afxdp) rate: u32,
+pub(in crate::afxdp) output_ifindex: i32,
+pub(in crate::afxdp) rate: u32,
 }
 
 /// One resolved weighted ECMP next-hop candidate for a route (#2389/#11402).
