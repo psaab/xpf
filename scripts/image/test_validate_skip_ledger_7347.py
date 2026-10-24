@@ -66,8 +66,15 @@ class _Recorder:
     def __init__(self, qcow2="/nonexistent.qcow2"):
         self.qcow2 = qcow2
         self.skipped = []
+        # #16196: scenario_qemu now dispatches through the runner seam.
+        # Bind the REAL dispatch methods so these cells exercise the seam
+        # itself, not a reimplementation of it.
+        self.runner, self.popen = None, None
 
     skip = validate.Harness.skip
+    run = validate.Harness.run
+    _run = validate.Harness._run
+    _popen = validate.Harness._popen
 
 
 class MissingToolIsAFailureTests(unittest.TestCase):
@@ -333,21 +340,22 @@ class KvmAccessGate13205Tests(unittest.TestCase):
             subprocess.run(["qemu-img", "create", "-f", "qcow2", qcow, str(size)],
                            check=True, capture_output=True)
             h = _Recorder(qcow2=qcow)
-            real_access, real_popen = os.access, validate.subprocess.Popen
+            real_access = os.access
             def fake_access(p, m):
                 return False if p == "/dev/kvm" else real_access(p, m)
             def checked_popen(argv, *args, **kwargs):
-                if argv[0] == shutil.which("qemu-system-x86_64"):
-                    raise AssertionError("QEMU must not launch without /dev/kvm R/W access")
-                return real_popen(argv, *args, **kwargs)
+                # #16196: the QEMU lifetime now constructs through the
+                # instance popen seam, so the "must not launch" guard
+                # belongs on the _Recorder instance, not on subprocess.
+                raise AssertionError("QEMU must not launch without /dev/kvm R/W access")
+            h.popen = checked_popen
             validate.os.access = fake_access
-            validate.subprocess.Popen = checked_popen
             try:
                 buf = io.StringIO()
                 with redirect_stdout(buf):
                     validate.Harness.scenario_qemu(h)
             finally:
-                validate.os.access, validate.subprocess.Popen = real_access, real_popen
+                validate.os.access = real_access
         self.assertEqual(len(h.skipped), 1, f"expected KVM skip, got {h.skipped}")
         self.assertIn("kvm_access=False", h.skipped[0][1],
                       "skip reason must reflect os.access R|W, not exists (#13205)")

@@ -1,4 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Build: inject a command-runner seam into the image validation
+    harness (#16196). `Harness` now takes optional `runner`/`popen`
+    callables (default: the current subprocess path, stored unresolved
+    so uninjected behaviour is unchanged); every child-command site in
+    validate.py — the module-level incus/guest helpers via bound
+    instance forms, virt-*/qemu-img/`rm`, the QEMU Popen lifetime, and
+    the `incus list` re-exec probe — dispatches through the one seam,
+    so ownership-refusal and skip-ledger paths are testable with a fake
+    runner and no incus present. Child commands owned by
+    make_config_drive and sign, and the `os.execvp` re-exec, are named
+    unreached in the new seam test's reach map, which an AST census
+    re-derives so the enumeration cannot drift silently.
   * Userspace-DP: an HA watchdog set containing an activation-pending
     RG (stored inactive, incoming active) now routes the whole set to
     the locked path instead of storing it from the session fast path

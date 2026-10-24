@@ -46,12 +46,12 @@ def _completed(rc, stdout="", stderr=""):
 
 class GuestAbsentTests(unittest.TestCase):
     def test_guest_says_absent(self):
-        with mock.patch.object(validate.subprocess, "run",
+        with mock.patch.object(validate, "_default_run",
                                return_value=_completed(0, "XPF_ABSENT\n")):
             self.assertTrue(validate.guest_absent("inst", "/etc/xpf/xpf.conf"))
 
     def test_guest_says_present(self):
-        with mock.patch.object(validate.subprocess, "run",
+        with mock.patch.object(validate, "_default_run",
                                return_value=_completed(0, "XPF_PRESENT\n")):
             self.assertFalse(validate.guest_absent("inst", "/etc/xpf/xpf.conf"))
 
@@ -63,7 +63,7 @@ class GuestAbsentTests(unittest.TestCase):
         being reached.
         """
         with mock.patch.object(
-                validate.subprocess, "run",
+                validate, "_default_run",
                 return_value=_completed(1, "", "Error: instance is not running")):
             with self.assertRaises(SystemExit) as cm:
                 validate.guest_absent("inst", "/etc/xpf/xpf.conf")
@@ -75,7 +75,7 @@ class GuestAbsentTests(unittest.TestCase):
         Distinct from the transport case, and equally not evidence of absence.
         A helper keyed only on the return code would accept this.
         """
-        with mock.patch.object(validate.subprocess, "run",
+        with mock.patch.object(validate, "_default_run",
                                return_value=_completed(0, "")):
             with self.assertRaises(SystemExit):
                 validate.guest_absent("inst", "/etc/xpf/xpf.conf")
@@ -94,7 +94,7 @@ class GuestAbsentTests(unittest.TestCase):
             captured["argv"] = argv
             return _completed(0, "XPF_ABSENT\n")
 
-        with mock.patch.object(validate.subprocess, "run", side_effect=_capture):
+        with mock.patch.object(validate, "_default_run", side_effect=_capture):
             validate.guest_absent("inst", "/etc/xpf/a file")
         script = captured["argv"][-1]
         self.assertIn("'/etc/xpf/a file'", script)
@@ -127,8 +127,10 @@ class CallSiteTests(unittest.TestCase):
             "a negative existence assertion is still comparing an in-guest "
             "probe's return code against 0, which cannot distinguish absence "
             "from an unobserved check (#7424): " + repr(offenders))
-        self.assertEqual(src.count("guest_absent("), 5,
-                         "expected 1 definition + 4 call sites")
+        # #16196: +1 module def, +1 Harness bound-method def, +1 bound
+        # delegation, +4 scenario call sites (now self.guest_absent).
+        self.assertEqual(src.count("guest_absent("), 7,
+                         "expected module def + bound def/delegation + 4 call sites")
 
     def test_the_census_still_permits_the_fail_closed_positive_form(self):
         """Guard the guard: the `!= 0` sites must remain permissible.

@@ -887,23 +887,49 @@ def fail(m):
     sys.exit(1)
 
 
-def incus(*args, check=True, capture=False):
-    return subprocess.run(["incus", *args], check=check,
-                          capture_output=capture, text=True)
+def _default_run(argv, **kwargs):
+    """Default command runner (#16196): the current subprocess path.
+
+    A runner is one callable invoked as ``runner(argv, **kwargs)`` with
+    the semantics of `subprocess.run`. ``runner=None`` everywhere in this
+    module means "this default" and is resolved inside `_dispatch_run`, so
+    an uninjected call is identical to the pre-#16196 direct call.
+    """
+    return subprocess.run(argv, **kwargs)
 
 
-def guest(inst, *cmd, check=True, capture=False):
-    return subprocess.run(["incus", "exec", inst, "--", *cmd],
-                          check=check, capture_output=capture, text=True)
+def _default_popen(argv, **kwargs):
+    """Default long-lived-process factory (#16196): `subprocess.Popen`.
+
+    Kept separate from the runner because the QEMU boot leg owns a process
+    LIFETIME — poll, communicate, terminate, wait, kill — that a
+    run-to-completion callable cannot express. A fake must return an object
+    with that surface; the seam is the constructor, not the lifecycle.
+    """
+    return subprocess.Popen(argv, **kwargs)
 
 
-def guest_sh(inst, script):
+def _dispatch_run(runner, argv, **kwargs):
+    return (runner if runner is not None else _default_run)(argv, **kwargs)
+
+
+def incus(*args, check=True, capture=False, runner=None):
+    return _dispatch_run(runner, ["incus", *args], check=check,
+                         capture_output=capture, text=True)
+
+
+def guest(inst, *cmd, check=True, capture=False, runner=None):
+    return _dispatch_run(runner, ["incus", "exec", inst, "--", *cmd],
+                         check=check, capture_output=capture, text=True)
+
+
+def guest_sh(inst, script, runner=None):
     """Run a shell snippet in the guest; return True on exit 0."""
-    return subprocess.run(["incus", "exec", inst, "--", "sh", "-c", script],
-                          capture_output=True, text=True).returncode == 0
+    return _dispatch_run(runner, ["incus", "exec", inst, "--", "sh", "-c", script],
+                         capture_output=True, text=True).returncode == 0
 
 
-def guest_absent(inst, path):
+def guest_absent(inst, path, runner=None):
     """Return True iff `path` is OBSERVABLY absent in the guest (#7424 row 2).
 
     The negative assertions this replaces ran an in-guest existence probe
@@ -929,7 +955,8 @@ def guest_absent(inst, path):
     clean run") and :704-706 ("a gate that could not observe the property it
     exists to assert has not asserted it").
     """
-    r = subprocess.run(
+    r = _dispatch_run(
+        runner,
         ["incus", "exec", inst, "--", "sh", "-c",
          f'if [ -e {shlex.quote(path)} ]; then echo XPF_PRESENT; else echo XPF_ABSENT; fi'],
         capture_output=True, text=True)
@@ -945,8 +972,18 @@ def guest_absent(inst, path):
 
 
 class Harness:
-    def __init__(self, qcow2, metadata, net, keep, verify_sig=True):
+    def __init__(self, qcow2, metadata, net, keep, verify_sig=True,
+                 runner=None, popen=None):
         self.qcow2, self.metadata, self.net, self.keep = qcow2, metadata, net, keep
+        # #16196 command-runner seam. `runner` is one callable with
+        # `subprocess.run` semantics (runner(argv, **kwargs)); None means the
+        # current subprocess path and is stored unresolved — dispatch falls
+        # back per call, so the module-level helpers remain independently
+        # fakeable without a Harness. Every child-command site routes via
+        # self.run / self._run / self._popen (see the reach map in
+        # test_validate_runner_seam_16196.py); the QEMU boot leg's process
+        # lifetime needs a Popen-CLASS factory, hence the separate `popen`.
+        self.runner, self.popen = runner, popen
         # verify_sig: True = verify if a .minisig is present (default),
         # "force" = require one, False = never (dev escape hatch).
         self.verify_sig = verify_sig
@@ -977,6 +1014,44 @@ class Harness:
         self.alias = f"{ALIAS}-{self.run_id}"
         self.imported_alias = False   # True once WE imported self.alias
 
+    # ── #16196 command dispatch (the one seam) ─────────────────────────
+    # All child-command shapes funnel through run / _run / _popen. The
+    # module-level incus/guest/guest_sh/guest_absent wrappers carry their
+    # own optional `runner` for their standalone (non-Harness) callers
+    # and tests; Harness code passes self.runner explicitly so ONE fake
+    # injected at construction observes the incus, guest, virt-*,
+    # qemu-img and rm shapes alike. The QEMU boot leg additionally needs
+    # a process lifetime, so it constructs through _popen.
+    def run(self, argv, **kwargs):
+        """Run one child command to completion through this run's seam."""
+        return _dispatch_run(self.runner, argv, **kwargs)
+
+    def _run(self, argv, **kwargs):
+        return self.run(argv, **kwargs)
+
+    def _popen(self, argv, **kwargs):
+        return (self.popen if self.popen is not None else _default_popen)(
+            argv, **kwargs)
+
+    # Thin instance forms of the module-level helpers, bound to this run's
+    # runner. Tests may patch these bound methods (validate.guest /
+    # validate.guest_sh patching no longer reaches Harness code — that is
+    # the point: the fake belongs to the instance under test, not the
+    # module). The module-level functions stay importable for their
+    # standalone callers with an identical optional `runner`.
+    def _incus(self, *args, check=True, capture=False):
+        return incus(*args, check=check, capture=capture, runner=self.runner)
+
+    def guest(self, inst, *cmd, check=True, capture=False):
+        return guest(inst, *cmd, check=check, capture=capture,
+                     runner=self.runner)
+
+    def guest_sh(self, inst, script):
+        return guest_sh(inst, script, runner=self.runner)
+
+    def guest_absent(self, inst, path):
+        return guest_absent(inst, path, runner=self.runner)
+
     def iname(self, suffix):
         """Run-namespaced instance name for a scenario slot (#4905-D)."""
         return f"xpf-image-{self.run_id}-{suffix}"
@@ -986,7 +1061,7 @@ class Harness:
         tag (user.xpf-owner == run_id). Refuses to delete an instance this run
         did not create — a concurrent bake or an unrelated same-named VM
         (#4905-D). A missing instance is a safe no-op."""
-        got = incus("config", "get", name, "user.xpf-owner",
+        got = self._incus("config", "get", name, "user.xpf-owner",
                     check=False, capture=True)
         if got.returncode != 0:
             return  # instance does not exist / not queryable — nothing to delete
@@ -996,7 +1071,7 @@ class Harness:
                  f"!= this run {self.run_id!r} (concurrent bake / unrelated VM) "
                  "— #4905-D")
             return
-        incus("delete", "-f", name, check=False, capture=True)
+        self._incus("delete", "-f", name, check=False, capture=True)
 
     # ── lifecycle ──
     def ensure_network(self):
@@ -1009,16 +1084,16 @@ class Harness:
         # positional naming (em0 + ge-7/0/N), and scenario d's control leg
         # needs none of the DNS records. Turning DNS off keeps DHCP — which is
         # all any scenario consumes — and removes the conflict.
-        if incus("network", "show", self.net, check=False, capture=True).returncode != 0:
+        if self._incus("network", "show", self.net, check=False, capture=True).returncode != 0:
             info(f"creating validation network {self.net} (NAT + DHCP, no DNS)")
-            incus("network", "create", self.net, "ipv4.address=10.199.99.1/24",
+            self._incus("network", "create", self.net, "ipv4.address=10.199.99.1/24",
                   "ipv4.nat=true", "ipv6.address=none", "dns.mode=none")
             self.created_net = True
         else:
             # A network left behind by an earlier run (or a concurrent bake)
             # may predate this setting. Idempotent, and harmless to a
             # concurrent run: no scenario resolves an instance by DNS.
-            incus("network", "set", self.net, "dns.mode=none", check=False,
+            self._incus("network", "set", self.net, "dns.mode=none", check=False,
                   capture=True)
 
     def freeze_artifacts(self):
@@ -1139,8 +1214,8 @@ class Harness:
             # virt-ls a DIRECTORY (not the glob) and filter here: virt-ls does
             # not expand shell globs, and an absent directory must read as "no
             # matches" rather than as an unobserved check.
-            r = subprocess.run(["virt-ls", "-a", self.qcow2, directory],
-                               capture_output=True, text=True)
+            r = self._run(["virt-ls", "-a", self.qcow2, directory],
+                          capture_output=True, text=True)
             if r.returncode != 0:
                 if "No such file or directory" in (r.stderr or ""):
                     found[glob] = []
@@ -1152,8 +1227,8 @@ class Harness:
                     for n in names if fnmatch.fnmatch(n, pattern)]
             found[glob] = hits
             if c["kind"] == "empty" and hits:
-                cat = subprocess.run(["virt-cat", "-a", self.qcow2, glob],
-                                     capture_output=True, text=True)
+                cat = self._run(["virt-cat", "-a", self.qcow2, glob],
+                                capture_output=True, text=True)
                 if cat.returncode != 0:
                     fail(f"could not read {glob} from {self.qcow2}: "
                          f"{(cat.stderr or '').strip()} (#6547 seal unverifiable)")
@@ -1169,9 +1244,9 @@ class Harness:
         # self.alias is run-namespaced, so a concurrent bake using the default
         # `xpf-image-validate` alias is NOT clobbered (#4905-D). The pre-delete
         # only targets our own unique alias (idempotent within a run).
-        incus("image", "delete", self.alias, check=False, capture=True)
+        self._incus("image", "delete", self.alias, check=False, capture=True)
         info(f"importing image into local incus as {self.alias}")
-        incus("image", "import", self.metadata, self.qcow2, "--alias", self.alias)
+        self._incus("image", "import", self.metadata, self.qcow2, "--alias", self.alias)
         self.imported_alias = True   # cleanup may now delete THIS alias (#4905-D)
 
     def launch(self, name, iso=None, root_size=None, extra_nics=0):
@@ -1187,7 +1262,7 @@ class Harness:
         # would silently degrade every scenario to SB-off and still pass. The
         # production posture is SB ON (test/incus/setup.sh:265-273, #1943), so
         # the gate states it.
-        incus("init", self.alias, name, "--vm", "--network", self.net,
+        self._incus("init", self.alias, name, "--vm", "--network", self.net,
               "-c", "limits.cpu=2", "-c", "limits.memory=2GiB",
               "-c", "security.secureboot=true",
               "-c", f"user.xpf-owner={self.run_id}", capture=True)
@@ -1203,18 +1278,18 @@ class Harness:
             # image (#1925 Scenario D). `device override root` materializes an
             # instance-local copy of the profile's root device so size= sticks
             # before the VM ever boots — the operator-resized-disk case.
-            incus("config", "device", "override", name, "root",
+            self._incus("config", "device", "override", name, "root",
                   f"size={root_size}", capture=True)
         # Additional NICs beyond the default fxp0 slot, so the daemon's
         # positional namer has em0 (idx 1) + ge-*/0/* (idx >= 2) to assign —
         # required to prove the cluster node-id naming (#4209 H-9 scenario e).
         for i in range(extra_nics):
-            incus("config", "device", "add", name, f"extranic{i}", "nic",
+            self._incus("config", "device", "add", name, f"extranic{i}", "nic",
                   f"network={self.net}", capture=True)
         if iso:
-            incus("config", "device", "add", name, "day0", "disk",
+            self._incus("config", "device", "add", name, "day0", "disk",
                   f"source={os.path.realpath(iso)}", capture=True)
-        incus("start", name)
+        self._incus("start", name)
         self.wait_agent(name)
 
     def drop(self, name):
@@ -1243,11 +1318,11 @@ class Harness:
         # run-namespaced name — never a bystander's `xpf-image-validate`
         # (#4905-D).
         if self.imported_alias:
-            incus("image", "delete", self.alias, check=False, capture=True)
+            self._incus("image", "delete", self.alias, check=False, capture=True)
         # created_net already gates the network delete to one WE created.
         if self.created_net:
-            incus("network", "delete", self.net, check=False, capture=True)
-        subprocess.run(["rm", "-rf", self.work], check=False)
+            self._incus("network", "delete", self.net, check=False, capture=True)
+        self._run(["rm", "-rf", self.work], check=False)
 
     # ── waiters ──
     def _wait(self, name, pred, tries, secs, what):
@@ -1258,16 +1333,16 @@ class Harness:
         fail(f"{name}: {what}")
 
     def wait_agent(self, name):
-        self._wait(name, lambda: guest(name, "true", check=False, capture=True).returncode == 0,
+        self._wait(name, lambda: self.guest(name, "true", check=False, capture=True).returncode == 0,
                    80, 3, "incus agent not ready after 240s")
 
     def wait_xpfd(self, name):
-        self._wait(name, lambda: guest(name, "systemctl", "is-active", "--quiet", "xpfd",
+        self._wait(name, lambda: self.guest(name, "systemctl", "is-active", "--quiet", "xpfd",
                                        check=False, capture=True).returncode == 0,
                    40, 3, "xpfd not active after 120s")
 
     def wait_fxp0_dhcp(self, name):
-        self._wait(name, lambda: guest_sh(name, 'ip -4 addr show fxp0 2>/dev/null | grep -q "inet "'),
+        self._wait(name, lambda: self.guest_sh(name, 'ip -4 addr show fxp0 2>/dev/null | grep -q "inet "'),
                    30, 3, "fxp0 has no IPv4 DHCP address after 90s")
 
     # ── scenarios ──
@@ -1277,38 +1352,38 @@ class Harness:
         self.launch(a)
 
         self.wait_xpfd(a)
-        layout = guest(a, "sh", "-c", seeded_runtime_layout_snippet(),
+        layout = self.guest(a, "sh", "-c", seeded_runtime_layout_snippet(),
                        check=False, capture=True)
         if layout.returncode != 0:
             detail = (layout.stderr or layout.stdout).strip()
             fail("first-install sbin links do not resolve through "
                  f"versions/current (#10771): {detail}")
-        kver = guest(a, "uname", "-r", capture=True).stdout.strip()
+        kver = self.guest(a, "uname", "-r", capture=True).stdout.strip()
         info(f"guest kernel: {kver}")
         rel = kver.split("-")[0]
         if not _kver_ge(rel, (6, 18)):
             fail(f"guest kernel {kver} < 6.18")
-        if not guest_sh(a, 'uname -r | grep -q -- -generic'):
+        if not self.guest_sh(a, 'uname -r | grep -q -- -generic'):
             fail("running kernel is not the -generic flavor")
-        if not guest_sh(a, 'test -d "/lib/modules/$(uname -r)/kernel/drivers/net/ethernet/mellanox"'):
+        if not self.guest_sh(a, 'test -d "/lib/modules/$(uname -r)/kernel/drivers/net/ethernet/mellanox"'):
             fail("linux-modules-extra (mlx5/i40e driver set) missing")
-        if not guest_sh(a, '[ "$(ls /lib/modules | wc -l)" -eq 1 ]'):
+        if not self.guest_sh(a, '[ "$(ls /lib/modules | wc -l)" -eq 1 ]'):
             fail("more than one kernel in /lib/modules — stale cloudimg kernel not purged")
         # #10171: mirror the bake-time bridge nf_tables floor against the
         # kernel that actually booted. The bake check protects the artifact;
         # this catches a foreign boot path or an image/kernel substitution
         # before the scenario claims an appliance kernel is covered.
-        floor = guest(a, "sh", "-c", bridge_floor_live_snippet(),
+        floor = self.guest(a, "sh", "-c", bridge_floor_live_snippet(),
                       check=False, capture=True)
         if floor.returncode != 0:
             detail = (floor.stderr or floor.stdout).strip()
             fail(f"bridge nf_tables kernel floor rejected: {detail}")
-        if not guest_sh(a, 'grep -qw init_on_alloc=0 /proc/cmdline'):
+        if not self.guest_sh(a, 'grep -qw init_on_alloc=0 /proc/cmdline'):
             fail("init_on_alloc=0 missing from the booted kernel cmdline")
         self.assert_kernel_hold(a)
         self.assert_secure_boot(a)
         info("in-guest verify-dataplane (the bake gate, image kernel)...")
-        if guest(a, "nice", "-n", "19", "/usr/local/sbin/xpfd", "verify-dataplane",
+        if self.guest(a, "nice", "-n", "19", "/usr/local/sbin/xpfd", "verify-dataplane",
                  check=False).returncode != 0:
             fail("in-guest verify-dataplane REJECTED — image must not ship")
         # #7114: the appliance marker is what re-enables the factory
@@ -1318,7 +1393,7 @@ class Harness:
         # the port below stays DOWN and unrenamed. Assert the marker FIRST so a
         # bake that stopped writing it fails with its own cause instead of as
         # the downstream "fxp0 has no address" timeout.
-        if not guest_sh(a, 'test -f /etc/xpf/appliance'):
+        if not self.guest_sh(a, 'test -f /etc/xpf/appliance'):
             fail("/etc/xpf/appliance missing — the bake did not write the #7114 "
                  "appliance-image marker; xpfd will hold the factory boot in the "
                  "console-only bootstrap state (no fxp0, no DHCP)")
@@ -1329,26 +1404,26 @@ class Harness:
         # keeps forwarding). It is NOT pulled in transitively by `frr`, so
         # assert presence here — package-name drift fails with a clear cause
         # rather than as the downstream "deleted route still active" symptom.
-        if not guest_sh(a, 'test -x /usr/lib/frr/frr-reload.py'):
+        if not self.guest_sh(a, 'test -x /usr/lib/frr/frr-reload.py'):
             fail("frr-reload.py missing (/usr/lib/frr/frr-reload.py) — "
                  "frr-pythontools not installed (#4172 FRR reload permanently "
                  "degraded; stale-config removal never converges)")
-        if not guest_sh(a, 'ss -tln | grep -q ":22 "'):
+        if not self.guest_sh(a, 'ss -tln | grep -q ":22 "'):
             fail("sshd not listening")
-        if not guest_sh(a,
+        if not self.guest_sh(a,
                         '/usr/sbin/sshd -T | grep -qxE "permitrootlogin (prohibit-password|without-password|no)"'):
             fail("sshd effective config does not refuse root password auth")
-        if not guest_sh(a, '/usr/sbin/sshd -T | grep -qx "permitemptypasswords no"'):
+        if not self.guest_sh(a, '/usr/sbin/sshd -T | grep -qx "permitemptypasswords no"'):
             fail("sshd effective config does not pin PermitEmptyPasswords no")
-        if not guest_sh(a, '/usr/sbin/sshd -T | grep -qx "passwordauthentication no"'):
+        if not self.guest_sh(a, '/usr/sbin/sshd -T | grep -qx "passwordauthentication no"'):
             fail("sshd effective config does not pin PasswordAuthentication no")
         self.assert_ab_kernel_channel(a)
         self.assert_ab_slot_boot(a, "xpf-A")
-        if not guest_absent(a, "/etc/xpf/xpf.conf"):
+        if not self.guest_absent(a, "/etc/xpf/xpf.conf"):
             fail("unexpected /etc/xpf/xpf.conf")
-        if not guest_absent(a, "/etc/xpf/.day0-config-applied"):
+        if not self.guest_absent(a, "/etc/xpf/.day0-config-applied"):
             fail("unexpected day-0 stamp")
-        if not guest_sh(a,
+        if not self.guest_sh(a,
                         'journalctl -u xpf-day0-config -b --no-pager | grep -q "no config medium found"'):
             fail("day-0 loader did not log the no-medium fallback")
         info("Scenario A PASS")
@@ -1372,9 +1447,9 @@ class Harness:
         with no in-guest behaviour to observe short of running an actual
         unattended-upgrade — so this asserts the half that has an observable.
         """
-        inst_pkgs = guest(inst, "sh", "-c", _INSTALLED_KERNEL_PKGS_PROBE,
+        inst_pkgs = self.guest(inst, "sh", "-c", _INSTALLED_KERNEL_PKGS_PROBE,
                           check=False, capture=True).stdout
-        held = guest(inst, "sh", "-c", "apt-mark showhold 2>/dev/null",
+        held = self.guest(inst, "sh", "-c", "apt-mark showhold 2>/dev/null",
                      check=False, capture=True).stdout
         ok, reason = _kernel_hold_verdict(inst_pkgs, held)
         if not ok:
@@ -1395,7 +1470,7 @@ class Harness:
         from the .deb on a real appliance, so it is not the loader's contract
         to pin here.
         """
-        out = guest(inst, "sh", "-c", _DAY0_CONF_STAT,
+        out = self.guest(inst, "sh", "-c", _DAY0_CONF_STAT,
                     check=False, capture=True).stdout
         ok, reason = _conf_mode_verdict(out)
         if not ok:
@@ -1423,13 +1498,13 @@ class Harness:
           - /sys/kernel/security/lockdown, corroborating only (lockdown can also
             be forced from the cmdline, so it never overrides a definite off).
         """
-        efivar = guest(inst, "sh", "-c",
+        efivar = self.guest(inst, "sh", "-c",
                        f"od -An -t u1 -j 4 -N 1 {_SECUREBOOT_EFIVAR} 2>/dev/null",
                        check=False, capture=True).stdout.strip()
-        mok = guest(inst, "sh", "-c",
+        mok = self.guest(inst, "sh", "-c",
                     "command -v mokutil >/dev/null 2>&1 && mokutil --sb-state 2>/dev/null",
                     check=False, capture=True).stdout.strip()
-        lock = guest(inst, "sh", "-c",
+        lock = self.guest(inst, "sh", "-c",
                      "cat /sys/kernel/security/lockdown 2>/dev/null",
                      check=False, capture=True).stdout.strip()
         ok, reason = _secureboot_verdict(efivar, mok, lock)
@@ -1444,7 +1519,7 @@ class Harness:
         info(f"Secure Boot: {reason}")
     def _show_unit(self, inst, unit, prop):
         """One `systemctl show -p <prop> --value <unit>` field from the guest."""
-        return guest(inst, "systemctl", "show", "-p", prop, "--value", unit,
+        return self.guest(inst, "systemctl", "show", "-p", prop, "--value", unit,
                      check=False, capture=True).stdout.strip()
 
     def assert_ab_kernel_channel(self, inst):
@@ -1486,7 +1561,7 @@ class Harness:
             self._show_unit(inst, "xpf-uefi-slots.service", "ActiveState"),
             self._show_unit(inst, "xpf-uefi-slots.service", "Result"))
         if not ok:
-            jrn = guest(inst, "journalctl", "-u", "xpf-uefi-slots", "-b",
+            jrn = self.guest(inst, "journalctl", "-u", "xpf-uefi-slots", "-b",
                         "--no-pager", check=False, capture=True).stdout
             fail(f"#1930 A/B slot registration: {reason}\n{jrn[-800:]}")
 
@@ -1495,8 +1570,8 @@ class Harness:
         # assert the staging BEFORE the NVRAM state — otherwise an unstaged
         # slot is diagnosed as "the oneshot did not register it", pointing at
         # the wrong half of the channel.
-        kver = guest(inst, "uname", "-r", capture=True).stdout.strip()
-        esp = guest(inst, "sh", "-c", _AB_SLOT_ESP_PROBE,
+        kver = self.guest(inst, "uname", "-r", capture=True).stdout.strip()
+        esp = self.guest(inst, "sh", "-c", _AB_SLOT_ESP_PROBE,
                     check=False, capture=True).stdout
         ok, reason = _ab_slot_esp_verdict(esp, kver)
         if not ok:
@@ -1504,7 +1579,7 @@ class Harness:
                  "\n--- probe ---\n" + esp)
         info(f"  ESP OK: {reason}")
 
-        hashes = guest(inst, "sh", "-c", _AB_SLOT_HASH_PROBE,
+        hashes = self.guest(inst, "sh", "-c", _AB_SLOT_HASH_PROBE,
                        check=False, capture=True).stdout
         ok, reason = _ab_slot_loader_hash_verdict(hashes)
         if not ok:
@@ -1512,7 +1587,7 @@ class Harness:
                  "\n--- hash probe ---\n" + hashes)
         info(f"  loader hashes OK: {reason}")
 
-        got = guest(inst, "efibootmgr", check=False, capture=True)
+        got = self.guest(inst, "efibootmgr", check=False, capture=True)
         if got.returncode != 0:
             fail("efibootmgr failed in the guest "
                  f"(rc={got.returncode}: {(got.stderr or '').strip()!r}) — the "
@@ -1531,10 +1606,10 @@ class Harness:
             self._show_unit(inst, "xpf-kernel-promote.service", "ActiveState"),
             self._show_unit(inst, "xpf-kernel-promote.service", "Result"))
         if not ok:
-            jrn = guest(inst, "journalctl", "-u", "xpf-kernel-promote", "-b",
+            jrn = self.guest(inst, "journalctl", "-u", "xpf-kernel-promote", "-b",
                         "--no-pager", check=False, capture=True).stdout
             fail(f"#1930 promotion gate: {reason}\n{jrn[-800:]}")
-        if not guest_sh(inst,
+        if not self.guest_sh(inst,
                         'journalctl -u xpf-kernel-promote -b --no-pager '
                         '| grep -q "no armed kernel candidate recorded"'):
             fail("#1930 promotion gate did not log the ordinary-boot path "
@@ -1551,7 +1626,7 @@ class Harness:
         slot. Arm a one-shot BootNext, restart the VM, and inspect firmware's
         BootCurrent after Linux is back up.
         """
-        got = guest(inst, "efibootmgr", check=False, capture=True)
+        got = self.guest(inst, "efibootmgr", check=False, capture=True)
         if got.returncode != 0:
             fail("cannot read efibootmgr before slot-boot probe: "
                  f"{(got.stderr or '').strip()}")
@@ -1560,12 +1635,12 @@ class Harness:
             fail(f"cannot force {slot} boot: no unique registered entry with "
                  "its expected shim loader")
 
-        armed = guest(inst, "efibootmgr", "--bootnext", slot_id,
+        armed = self.guest(inst, "efibootmgr", "--bootnext", slot_id,
                       check=False, capture=True)
         if armed.returncode != 0:
             fail(f"could not set BootNext={slot_id} for {slot}: "
                  f"{(armed.stderr or '').strip()}")
-        state = guest(inst, "efibootmgr", check=False, capture=True)
+        state = self.guest(inst, "efibootmgr", check=False, capture=True)
         next_id = _BOOTNEXT_RE.search(state.stdout or "")
         if state.returncode != 0 or next_id is None or \
                 next_id.group("id").upper() != slot_id.upper():
@@ -1573,11 +1648,11 @@ class Harness:
                  f"{(state.stdout or '').strip()}")
 
         info(f"restarting {inst} with BootNext={slot_id} ({slot})...")
-        incus("restart", inst)
+        self._incus("restart", inst)
         self.wait_agent(inst)
         self.wait_xpfd(inst)
 
-        current = guest(inst, "efibootmgr", check=False, capture=True)
+        current = self.guest(inst, "efibootmgr", check=False, capture=True)
         if current.returncode != 0:
             fail("cannot read efibootmgr after slot boot: "
                  f"{(current.stderr or '').strip()}")
@@ -1600,29 +1675,29 @@ class Harness:
                                                    validate=False)
         self.launch(b, iso)
         self.wait_xpfd(b)
-        if guest(b, "test", "-e", "/etc/xpf/.day0-config-applied", check=False).returncode != 0:
+        if self.guest(b, "test", "-e", "/etc/xpf/.day0-config-applied", check=False).returncode != 0:
             fail("day-0 stamp missing")
-        if guest(b, "test", "-s", "/etc/xpf/xpf.conf", check=False).returncode != 0:
+        if self.guest(b, "test", "-s", "/etc/xpf/xpf.conf", check=False).returncode != 0:
             fail("/etc/xpf/xpf.conf missing")
         self.assert_day0_conf_perms(b)
-        if not guest_sh(b,
+        if not self.guest_sh(b,
                         'journalctl -u xpf-day0-config -b --no-pager | grep -q "day-0 config installed"'):
             fail("day-0 loader did not log the install")
         self._wait(b,
-                   lambda: guest_sh(b,
+                   lambda: self.guest_sh(b,
                                     'echo "show configuration" | /usr/local/sbin/cli 2>/dev/null '
                                     '| grep -q "host-name xpf-day0-b"'),
                    20, 3, "committed config does not show host-name xpf-day0-b")
-        if not guest_sh(b, '[ "$(hostname)" = xpf-day0-b ]'):
+        if not self.guest_sh(b, '[ "$(hostname)" = xpf-day0-b ]'):
             fail("hostname not applied")
         info(f"rebooting {b} — second boot must NOT re-apply...")
-        incus("restart", b)
+        self._incus("restart", b)
         self.wait_agent(b)
         self.wait_xpfd(b)
-        if not guest_sh(b,
+        if not self.guest_sh(b,
                         '! journalctl -u xpf-day0-config -b --no-pager | grep -q "day-0 config installed"'):
             fail("second boot re-applied the day-0 config")
-        if not guest_sh(b,
+        if not self.guest_sh(b,
                         'systemctl show -p ConditionResult xpf-day0-config | grep -q "ConditionResult=no" '
                         '|| journalctl -u xpf-day0-config -b --no-pager | grep -q "already applied"'):
             fail("second boot: day-0 loader neither condition-skipped nor stamp-skipped")
@@ -1639,15 +1714,15 @@ class Harness:
                                                    validate=False)
         self.launch(c, iso)
         self.wait_xpfd(c)
-        if not guest_sh(c,
+        if not self.guest_sh(c,
                         'journalctl -u xpf-day0-config -b --no-pager | grep -q "REJECTED by commit-check"'):
             fail("day-0 loader did not log the commit-check REJECT")
-        if not guest_absent(c, "/etc/xpf/xpf.conf"):
+        if not self.guest_absent(c, "/etc/xpf/xpf.conf"):
             fail("invalid config was installed")
-        if not guest_absent(c, "/etc/xpf/.day0-config-applied"):
+        if not self.guest_absent(c, "/etc/xpf/.day0-config-applied"):
             fail("stamp written on REJECT")
         self.wait_fxp0_dhcp(c)
-        if not guest_sh(c, '[ "$(hostname)" != xpf-day0-c ]'):
+        if not self.guest_sh(c, '[ "$(hostname)" != xpf-day0-c ]'):
             fail("invalid config changed the hostname")
         info("Scenario C reject leg PASS (fallback reachable, boot survived)")
 
@@ -1667,30 +1742,30 @@ class Harness:
         good_iso = make_config_drive.build_config_drive(
             good, os.path.join(self.work, "day0-c-fixed.iso"), validate=False)
         # Replace the day0 medium in place, then reboot.
-        incus("config", "device", "remove", c, "day0", capture=True)
-        incus("config", "device", "add", c, "day0", "disk",
+        self._incus("config", "device", "remove", c, "day0", capture=True)
+        self._incus("config", "device", "add", c, "day0", "disk",
               f"source={os.path.realpath(good_iso)}", capture=True)
-        incus("restart", c)
+        self._incus("restart", c)
         self.wait_agent(c)
         self.wait_xpfd(c)
-        if guest(c, "test", "-e", "/etc/xpf/.day0-config-applied",
+        if self.guest(c, "test", "-e", "/etc/xpf/.day0-config-applied",
                  check=False).returncode != 0:
             fail("retry: day-0 stamp missing after fix+reboot — the retry "
                  "contract is broken (a rejected first boot could never be fixed)")
-        if not guest_sh(c,
+        if not self.guest_sh(c,
                         'journalctl -u xpf-day0-config -b --no-pager | grep -q '
                         '"day-0 config installed"'):
             fail("retry: day-0 loader did not install the fixed config on reboot")
         self.assert_day0_conf_perms(c)
         self._wait(c,
-                   lambda: guest_sh(c, '[ "$(hostname)" = xpf-day0-c-fixed ]'),
+                   lambda: self.guest_sh(c, '[ "$(hostname)" = xpf-day0-c-fixed ]'),
                    20, 3, "retry: fixed hostname xpf-day0-c-fixed not applied")
         info("Scenario C PASS (reject survived, fix+reboot applied — retry contract)")
         self.drop(c)
 
     def _root_fs_gib(self, name):
         """Total size of the root filesystem in GiB (float), via df."""
-        out = guest(name, "sh", "-c",
+        out = self.guest(name, "sh", "-c",
                     "df -B1 --output=size / | tail -n1", capture=True).stdout.strip()
         return int(out) / (1024.0 ** 3)
 
@@ -1698,24 +1773,24 @@ class Harness:
         """Total size of the partition backing / in GiB (float), via lsblk
         on the resolved root source device — proves the PARTITION grew, not
         just the fs."""
-        src = guest(name, "sh", "-c", "findmnt -no SOURCE /",
+        src = self.guest(name, "sh", "-c", "findmnt -no SOURCE /",
                     capture=True).stdout.strip()
-        out = guest(name, "sh", "-c",
+        out = self.guest(name, "sh", "-c",
                     f"lsblk -bno SIZE {src} | head -n1", capture=True).stdout.strip()
         return int(out) / (1024.0 ** 3)
 
     def _root_partition_count(self, name):
         """Count partitions on the disk that backs the guest's root filesystem."""
-        src = guest(name, "sh", "-c", "findmnt -no SOURCE /",
+        src = self.guest(name, "sh", "-c", "findmnt -no SOURCE /",
                     capture=True).stdout.strip()
         if not src:
             fail(f"{name}: could not resolve the root source for partition count")
-        disk = guest(name, "lsblk", "-no", "PKNAME", src,
+        disk = self.guest(name, "lsblk", "-no", "PKNAME", src,
                      capture=True).stdout.strip()
         if not disk:
             fail(f"{name}: could not resolve the root disk for partition count "
                  f"(root source {src})")
-        types = guest(name, "lsblk", "-ln", "-o", "TYPE", f"/dev/{disk}",
+        types = self.guest(name, "lsblk", "-ln", "-o", "TYPE", f"/dev/{disk}",
                       capture=True).stdout
         return sum(line.strip() == "part" for line in types.splitlines())
 
@@ -1732,14 +1807,14 @@ class Harness:
         # (#1925); a missing tool makes the grow a permanent no-op. Assert
         # presence first so package-name drift fails here with a clear cause
         # rather than as the downstream "partition still 8GiB" symptom.
-        if not guest_sh(d, 'command -v growpart >/dev/null'):
+        if not self.guest_sh(d, 'command -v growpart >/dev/null'):
             fail("growpart missing in the image — cloud-guest-utils not installed "
                  "(#1925 grow would no-op; the cloud-init purge orphaned it)")
-        if not guest_sh(d, 'command -v resize2fs >/dev/null'):
+        if not self.guest_sh(d, 'command -v resize2fs >/dev/null'):
             fail("resize2fs missing in the image — e2fsprogs not installed (#1925)")
-        if not guest_sh(d, 'systemctl is-active --quiet xpf-grow-root'):
+        if not self.guest_sh(d, 'systemctl is-active --quiet xpf-grow-root'):
             fail("xpf-grow-root.service is not active after first boot")
-        if guest(d, "test", "-e", "/etc/xpf/.root-grown",
+        if self.guest(d, "test", "-e", "/etc/xpf/.root-grown",
                  check=False).returncode != 0:
             fail("root-grow stamp /etc/xpf/.root-grown missing after grow")
         part = self._root_part_gib(d)
@@ -1753,21 +1828,21 @@ class Harness:
         if fs < 15.0:
             fail(f"root filesystem only {fs:.1f}GiB on a 20GiB disk — resize2fs did not run")
         # The grow must not have disturbed the dataplane gate.
-        if guest(d, "nice", "-n", "19", "/usr/local/sbin/xpfd",
+        if self.guest(d, "nice", "-n", "19", "/usr/local/sbin/xpfd",
                  "verify-dataplane", check=False).returncode != 0:
             fail("verify-dataplane REJECTED after root grow")
         # Confirm the ESP remains mounted, and record the partition count. The
         # bake-size control below provides the unchanged-layout baseline.
-        if not guest_sh(d, 'mountpoint -q /boot/efi'):
+        if not self.guest_sh(d, 'mountpoint -q /boot/efi'):
             fail("ESP (/boot/efi) not mounted after grow — boot substrate disturbed")
         partition_count = self._root_partition_count(d)
 
         # ── Idempotency: reboot must NOT re-grow / re-stamp. ──
         info("D1 idempotency: rebooting — second boot must skip the grow...")
-        incus("restart", d)
+        self._incus("restart", d)
         self.wait_agent(d)
         self.wait_xpfd(d)
-        if not guest_sh(d,
+        if not self.guest_sh(d,
                         'systemctl show -p ConditionResult xpf-grow-root | grep -q '
                         '"ConditionResult=no"'):
             fail("second boot did not condition-skip xpf-grow-root (stamp ineffective)")
@@ -1788,14 +1863,14 @@ class Harness:
         # The grow ran (one-shot fired) but was a no-op: growpart NOCHANGE +
         # resize2fs no-op. The stamp is written either way (clean exit), and
         # the box boots clean with the dataplane gate green.
-        if guest(d2, "test", "-e", "/etc/xpf/.root-grown",
+        if self.guest(d2, "test", "-e", "/etc/xpf/.root-grown",
                  check=False).returncode != 0:
             fail("root-grow stamp missing on the control (no-op) boot")
-        if not guest_sh(d2,
+        if not self.guest_sh(d2,
                         'journalctl -u xpf-grow-root -b --no-pager | '
                         'grep -qiE "NOCHANGE|done"'):
             fail("control boot: xpf-grow-root did not log a no-op grow")
-        if guest(d2, "nice", "-n", "19", "/usr/local/sbin/xpfd",
+        if self.guest(d2, "nice", "-n", "19", "/usr/local/sbin/xpfd",
                  "verify-dataplane", check=False).returncode != 0:
             fail("verify-dataplane REJECTED on the control boot")
         control_partition_count = self._root_partition_count(d2)
@@ -1843,11 +1918,11 @@ class Harness:
         # Two extra NICs so the namer has em0 (idx 1) and ge-7-0-0 (idx 2).
         self.launch(e, iso, extra_nics=2)
         self.wait_xpfd(e)
-        if guest(e, "test", "-e", "/etc/xpf/.day0-config-applied",
+        if self.guest(e, "test", "-e", "/etc/xpf/.day0-config-applied",
                  check=False).returncode != 0:
             fail("node-id drive: day-0 stamp missing")
         # node-id persisted verbatim.
-        nid = guest(e, "sh", "-c",
+        nid = self.guest(e, "sh", "-c",
                     "cat /etc/xpf/node-id 2>/dev/null",
                     capture=True).stdout.strip()
         if nid != "1":
@@ -1856,14 +1931,14 @@ class Harness:
         self.assert_day0_conf_perms(e)
         # Cluster-mode naming: node 1 uses FPC 7. em0 is assigned only in
         # cluster mode (position 2); ge-7/0/0 proves the node-1 FPC branch.
-        if not guest_sh(e, 'ip link show em0 >/dev/null 2>&1'):
+        if not self.guest_sh(e, 'ip link show em0 >/dev/null 2>&1'):
             fail("em0 not present — daemon did not enter cluster naming mode "
                  "for a node-id-present image")
         # KERNEL link name, not the Junos display name: the namer assigns
         # ge-{FPC}-0-{idx-2}, so `ip link show ge-7/0/0` could never match
         # whatever the daemon did (#7129). `show interfaces terse` is where
         # the slashes live.
-        if not guest_sh(e, 'ip link show ge-7-0-0 >/dev/null 2>&1'):
+        if not self.guest_sh(e, 'ip link show ge-7-0-0 >/dev/null 2>&1'):
             fail("ge-7-0-0 not present — node-1 FPC-7 positional naming did not "
                  "run (a node-0 image would name it ge-0-0-0)")
         info("Scenario E PASS (node-id=1 persisted, cluster em0 + ge-7-0-N naming)")
@@ -1923,16 +1998,16 @@ class Harness:
             fail("qemu-img not found — install qemu-utils. The qcow2's "
                  "structural validity cannot be probed without it, and an "
                  "unprobed image must not be signed as validated (#7347)")
-        raw = subprocess.run(["qemu-img", "info", "--output=json", self.qcow2],
-                             capture_output=True, text=True)
+        raw = self._run(["qemu-img", "info", "--output=json", self.qcow2],
+                        capture_output=True, text=True)
         if raw.returncode != 0:
             fail(f"qemu-img info failed on {self.qcow2}: {raw.stderr.strip()}")
         ok, reason = _qemu_img_verdict(json.loads(raw.stdout), BAKE_MIN_BYTES)
         if not ok:
             fail(f"qcow2 is not libvirt-bootable: {reason}")
         info(f"qcow2 structural probe OK: {reason}")
-        chk = subprocess.run(["qemu-img", "check", "-q", self.qcow2],
-                             capture_output=True, text=True)
+        chk = self._run(["qemu-img", "check", "-q", self.qcow2],
+                        capture_output=True, text=True)
         # qemu-img check exits 0 clean, 2/3 on leaked/corrupt clusters.
         if chk.returncode not in (0,):
             fail("qemu-img check reported qcow2 corruption:\n"
@@ -1991,8 +2066,8 @@ class Harness:
                 "-serial", f"file:{serial}", "-nic", "none"]
         info("booting the qcow2 under direct QEMU (serial-captured, snapshot, "
              f"secure-boot={'on' if sb_on else 'OFF'})...")
-        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        proc = self._popen(argv, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         try:
             deadline = time.time() + 360
             txt = ""
@@ -2036,8 +2111,13 @@ def _kver_ge(ver, floor):
     return parts >= floor
 
 
-def maybe_reexec_incus_admin():
-    if subprocess.run(["incus", "list"], capture_output=True).returncode == 0:
+def maybe_reexec_incus_admin(runner=None):
+    # The `incus list` probe routes through the #16196 runner; the
+    # `os.execvp("sg", ...)` re-exec below is an image replacement, not a
+    # run-to-completion child, and is deliberately NOT routed — faking it
+    # would fake away the process image the probe exists to preserve.
+    if _dispatch_run(runner, ["incus", "list"],
+                     capture_output=True).returncode == 0:
         return
     import grp
     try:

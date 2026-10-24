@@ -151,7 +151,7 @@ class FreezeTests(unittest.TestCase):
             calls.append(tuple(a))
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
-        with mock.patch.object(validate, "incus", side_effect=fake_incus):
+        with mock.patch.object(h, "_incus", side_effect=fake_incus):
             h.import_image()
         imports = [c for c in calls if c[:2] == ("image", "import")]
         self.assertEqual(len(imports), 1)
@@ -169,7 +169,7 @@ class FreezeTests(unittest.TestCase):
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
         with mock.patch.object(validate.shutil, "which", return_value="/usr/bin/x"), \
-                mock.patch.object(validate.subprocess, "run", side_effect=fake_run):
+                mock.patch.object(h, "_run", side_effect=fake_run):
             h.assert_image_sealed()
         self.assertTrue(h._frozen)
         qcow_refs = [a for call in argv_seen for a in call
