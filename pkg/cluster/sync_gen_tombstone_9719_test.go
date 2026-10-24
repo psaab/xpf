@@ -42,7 +42,7 @@ func TestTombstoneChurnDoesNotStarveANewLiveKey_9719(t *testing.T) {
 	// #9915: inject a small effective cap (decoupled from the 5M ceiling
 	// symbol); churn past it with no bulk, exactly the 9719 shape.
 	const wantCap = 1000
-	ss.recvGenGuardCap = wantCap
+	ss.genState.recvGenGuardCap = wantCap
 	next := churnInstallDeleteV4_9719(ss, wantCap+100)
 
 	// The new session is installed through the real apply path at a generation newer than every churn.
@@ -70,9 +70,9 @@ func TestTombstoneChurnDoesNotStarveANewLiveKey_9719(t *testing.T) {
 	if got := ss.stats.GenCapGrown.Load(); got != 0 {
 		t.Errorf("GenCapGrown = %d, want 0: tombstone churn must evict, not grow", got)
 	}
-	ss.recvGenMu.Lock()
-	size, tombs := len(ss.recvGenV4), ss.recvTombV4.size()
-	ss.recvGenMu.Unlock()
+	ss.genState.recvGenMu.Lock()
+	size, tombs := len(ss.genState.recvGenV4), ss.genState.recvTombV4.size()
+	ss.genState.recvGenMu.Unlock()
 	if size > wantCap || tombs > size {
 		t.Errorf("the map grew past the cap or the tombstone order outgrew the map: map=%d tombstones=%d cap=%d",
 			size, tombs, wantCap)
@@ -84,7 +84,7 @@ func TestTombstoneChurnDoesNotStarveANewLiveKey_9719(t *testing.T) {
 func TestTombstonesAreEvictedOldestFirst_9719(t *testing.T) {
 	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
 	// #9915: small injected cap (decoupled from the 5M ceiling symbol).
-	ss.recvGenGuardCap = 1000
+	ss.genState.recvGenGuardCap = 1000
 	const n = 1000 + 10
 	churnInstallDeleteV4_9719(ss, n)
 	// The map is full of tombstones. Make room for one more new key, which evicts exactly one.
@@ -116,24 +116,24 @@ func TestReinstallAndLegacyDeleteForgetTheTombstone_9719(t *testing.T) {
 
 	ss.recordInstalledGenV4(key, 5)
 	ss.deleteGenGuardV4(key, 6)
-	if got := ss.recvTombV4.size(); got != 1 {
+	if got := ss.genState.recvTombV4.size(); got != 1 {
 		t.Fatalf("FIXTURE: an applied non-zero delete must register one tombstone, got %d", got)
 	}
 	ss.recordInstalledGenV4(key, 7)
-	if got := ss.recvTombV4.size(); got != 0 {
+	if got := ss.genState.recvTombV4.size(); got != 0 {
 		t.Errorf("a re-install left the key in the tombstone order (%d); a later eviction would delete its "+
 			"LIVE generation", got)
 	}
 
 	ss.deleteGenGuardV4(key, 8)
 	ss.deleteGenGuardV4(key, 0)
-	ss.recvGenMu.Lock()
-	_, present := ss.recvGenV4[key]
-	ss.recvGenMu.Unlock()
+	ss.genState.recvGenMu.Lock()
+	_, present := ss.genState.recvGenV4[key]
+	ss.genState.recvGenMu.Unlock()
 	if present {
 		t.Fatal("FIXTURE: a gen-0 delete must evict the entry, as before")
 	}
-	if got := ss.recvTombV4.size(); got != 0 {
+	if got := ss.genState.recvTombV4.size(); got != 0 {
 		t.Errorf("a gen-0 delete left the key in the tombstone order (%d), out of step with the map", got)
 	}
 }
@@ -150,21 +150,21 @@ func TestUnstampedDeleteAfterStampOverflowCarriesAGenerationV4_9719(t *testing.T
 	// (growth refuses at the ceiling) instead of filling 5M entries.
 	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
 	const wantCap = 8
-	ss.sentGenGuardCap = wantCap
-	ss.genGuardMapCeilingOverride = wantCap
-	ss.genSentMu.Lock()
-	ss.genSentV4 = make(map[dataplane.SessionKey]uint64, wantCap)
-	for i := 0; len(ss.genSentV4) < wantCap; i++ {
-		ss.genSentV4[synthKeyV4(i)] = uint64(i + 1)
+	ss.genState.sentGenGuardCap = wantCap
+	ss.genState.genGuardMapCeilingOverride = wantCap
+	ss.genState.genSentMu.Lock()
+	ss.genState.genSentV4 = make(map[dataplane.SessionKey]uint64, wantCap)
+	for i := 0; len(ss.genState.genSentV4) < wantCap; i++ {
+		ss.genState.genSentV4[synthKeyV4(i)] = uint64(i + 1)
 	}
-	ss.genSentMu.Unlock()
+	ss.genState.genSentMu.Unlock()
 
 	live := gen2170KeyV4()
 	val := dataplane.SessionValue{}
 	ss.stampInstallGenV4(live, &val)
-	ss.genSentMu.Lock()
-	_, stamped := ss.genSentV4[live]
-	ss.genSentMu.Unlock()
+	ss.genState.genSentMu.Lock()
+	_, stamped := ss.genState.genSentV4[live]
+	ss.genState.genSentMu.Unlock()
 	if stamped {
 		t.Fatal("FIXTURE: the stamp map was not at the cap, so nothing was skipped")
 	}
@@ -185,17 +185,17 @@ func TestUnstampedDeleteAfterStampOverflowCarriesAGenerationV6_9719(t *testing.T
 	// (growth refuses at the ceiling) instead of filling 5M entries.
 	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
 	const wantCap = 8
-	ss.sentGenGuardCap = wantCap
-	ss.genGuardMapCeilingOverride = wantCap
-	ss.genSentMu.Lock()
-	ss.genSentV6 = make(map[dataplane.SessionKeyV6]uint64, wantCap)
-	for i := 0; len(ss.genSentV6) < wantCap; i++ {
+	ss.genState.sentGenGuardCap = wantCap
+	ss.genState.genGuardMapCeilingOverride = wantCap
+	ss.genState.genSentMu.Lock()
+	ss.genState.genSentV6 = make(map[dataplane.SessionKeyV6]uint64, wantCap)
+	for i := 0; len(ss.genState.genSentV6) < wantCap; i++ {
 		var k dataplane.SessionKeyV6
 		k.Protocol = 17
 		binary.LittleEndian.PutUint32(k.SrcIP[:4], uint32(i))
-		ss.genSentV6[k] = uint64(i + 1)
+		ss.genState.genSentV6[k] = uint64(i + 1)
 	}
-	ss.genSentMu.Unlock()
+	ss.genState.genSentMu.Unlock()
 
 	live := gen2170KeyV6()
 	val := dataplane.SessionValueV6{}

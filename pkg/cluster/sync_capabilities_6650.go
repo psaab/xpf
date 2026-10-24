@@ -63,7 +63,7 @@ func (s *SessionSync) PeerSnapshotProtocolVersion() uint16 {
 	if s == nil {
 		return 0
 	}
-	return uint16(s.peerSnapshotProtocol.Load())
+	return uint16(s.peerSnaps.peerSnapshotProtocol.Load())
 }
 
 // PeerSnapshotState is the capability observation that authorizes an outgoing
@@ -96,7 +96,7 @@ func (s *SessionSync) SnapshotPeerSnapshotProtocol() PeerSnapshotState {
 // are test fixtures and retain the injected session-level observation. Caller
 // holds s.mu.
 func (s *SessionSync) peerSnapshotStateLocked() PeerSnapshotState {
-	version := uint16(s.peerSnapshotProtocol.Load())
+	version := uint16(s.peerSnaps.peerSnapshotProtocol.Load())
 	selected := s.activeConnLocked()
 	if selected != nil && !s.connIsCurrentIncarnationLocked(selected) {
 		version = 0
@@ -105,7 +105,7 @@ func (s *SessionSync) peerSnapshotStateLocked() PeerSnapshotState {
 	}
 	return PeerSnapshotState{
 		Version:    version,
-		Generation: s.peerSnapshotProtocolGeneration,
+		Generation: s.peerSnaps.peerSnapshotProtocolGeneration,
 		Connected:  s.stats.Connected.Load(),
 	}
 }

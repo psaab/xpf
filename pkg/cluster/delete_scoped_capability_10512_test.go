@@ -135,7 +135,7 @@ func TestScopedWriteGateSeesHookFlipBeforeWrite10512(t *testing.T) {
 	}
 	// Adversarial flip at the last pre-write instant: unlearn the peer.
 	ss.testBeforeQueuedWrite = func() {
-		ss.peerSnapshotProtocol.Store(0)
+		ss.peerSnaps.peerSnapshotProtocol.Store(0)
 		ss.peerCapabilityFlags.Store(0)
 	}
 	ctx, cancel := context.WithCancel(context.Background())

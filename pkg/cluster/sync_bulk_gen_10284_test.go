@@ -414,10 +414,10 @@ func TestSameBootReprimePreservesDeleteTombstone10284(t *testing.T) {
 	if _, ok := receiverDP.v4sessions[liveKey]; !ok {
 		t.Fatal("#10284: same-boot re-prime discarded a live session after reclaiming its high-water")
 	}
-	receiver.recvGenMu.Lock()
-	stored := receiver.recvGenV4[key]
-	liveStored := receiver.recvGenV4[liveKey]
-	receiver.recvGenMu.Unlock()
+	receiver.genState.recvGenMu.Lock()
+	stored := receiver.genState.recvGenV4[key]
+	liveStored := receiver.genState.recvGenV4[liveKey]
+	receiver.genState.recvGenMu.Unlock()
 	if stored != 200 {
 		t.Fatalf("#10284: tombstone after same-boot re-prime = %d, want the delete's 200", stored)
 	}
@@ -433,25 +433,25 @@ func TestSameBootReprimePreservesDeleteTombstone10284(t *testing.T) {
 func TestSameNamespaceResetRetainsTombstoneCap10284(t *testing.T) {
 	ss, _ := receiver10284(t)
 	const wantCap = 8
-	ss.recvGenGuardCap = wantCap
-	ss.genGuardMapCeilingOverride = wantCap
+	ss.genState.recvGenGuardCap = wantCap
+	ss.genState.genGuardMapCeilingOverride = wantCap
 
-	ss.recvGenMu.Lock()
-	ss.recvGenV4 = make(map[dataplane.SessionKey]uint64, wantCap)
+	ss.genState.recvGenMu.Lock()
+	ss.genState.recvGenV4 = make(map[dataplane.SessionKey]uint64, wantCap)
 	for i := range wantCap {
 		key := key10284(byte(40+i), uint16(42200+i))
-		ss.recvGenV4[key] = uint64(i + 1)
-		ss.recvTombV4.mark(key)
+		ss.genState.recvGenV4[key] = uint64(i + 1)
+		ss.genState.recvTombV4.mark(key)
 	}
-	ss.recvGenMu.Unlock()
+	ss.genState.recvGenMu.Unlock()
 
 	ss.reclaimRecvLiveGen()
 
-	ss.recvGenMu.Lock()
-	gotCap := ss.recvGenGuardCap
-	gotSize := len(ss.recvGenV4)
-	gotTombs := ss.recvTombV4.size()
-	ss.recvGenMu.Unlock()
+	ss.genState.recvGenMu.Lock()
+	gotCap := ss.genState.recvGenGuardCap
+	gotSize := len(ss.genState.recvGenV4)
+	gotTombs := ss.genState.recvTombV4.size()
+	ss.genState.recvGenMu.Unlock()
 	if gotCap != wantCap {
 		t.Fatalf("#10284: same-namespace reset changed the preserved tombstone cap to %d, want %d", gotCap, wantCap)
 	}
@@ -463,11 +463,11 @@ func TestSameNamespaceResetRetainsTombstoneCap10284(t *testing.T) {
 	// live key rather than skip-recording it.
 	newKey := key10284(60, 42300)
 	ss.recordInstalledGenV4(newKey, 100)
-	ss.recvGenMu.Lock()
-	_, recorded := ss.recvGenV4[newKey]
-	gotSize = len(ss.recvGenV4)
-	gotTombs = ss.recvTombV4.size()
-	ss.recvGenMu.Unlock()
+	ss.genState.recvGenMu.Lock()
+	_, recorded := ss.genState.recvGenV4[newKey]
+	gotSize = len(ss.genState.recvGenV4)
+	gotTombs = ss.genState.recvTombV4.size()
+	ss.genState.recvGenMu.Unlock()
 	if !recorded {
 		t.Fatal("#10284: preserved-cap receiver skipped a new live key after re-prime")
 	}
@@ -477,29 +477,29 @@ func TestSameNamespaceResetRetainsTombstoneCap10284(t *testing.T) {
 
 	// A proven namespace reset is the one path that starts from the default.
 	ss.resetRecvGen()
-	ss.recvGenMu.Lock()
-	gotCap = ss.recvGenGuardCap
-	gotSize = len(ss.recvGenV4)
-	gotTombs = ss.recvTombV4.size()
-	ss.recvGenMu.Unlock()
+	ss.genState.recvGenMu.Lock()
+	gotCap = ss.genState.recvGenGuardCap
+	gotSize = len(ss.genState.recvGenV4)
+	gotTombs = ss.genState.recvTombV4.size()
+	ss.genState.recvGenMu.Unlock()
 	if gotCap != 0 || gotSize != 0 || gotTombs != 0 {
 		t.Fatalf("#10284: full namespace reset retained cap/map state: cap=%d map=%d tombstones=%d", gotCap, gotSize, gotTombs)
 	}
 	// A production-sized ceiling with only a few retained tombstones reclaims
 	// the default tier rather than carrying a formerly grown cap forever.
-	ss.genGuardMapCeilingOverride = 0
-	ss.recvGenGuardCap = genGuardMapDefaultCap * 2
+	ss.genState.genGuardMapCeilingOverride = 0
+	ss.genState.recvGenGuardCap = genGuardMapDefaultCap * 2
 	fewKey := key10284(61, 42301)
-	ss.recvGenMu.Lock()
-	ss.recvGenV4[fewKey] = 100
-	ss.recvTombV4.mark(fewKey)
-	ss.recvGenMu.Unlock()
+	ss.genState.recvGenMu.Lock()
+	ss.genState.recvGenV4[fewKey] = 100
+	ss.genState.recvTombV4.mark(fewKey)
+	ss.genState.recvGenMu.Unlock()
 	ss.reclaimRecvLiveGen()
-	ss.recvGenMu.Lock()
-	gotCap = ss.recvGenGuardCap
-	gotSize = len(ss.recvGenV4)
-	gotTombs = ss.recvTombV4.size()
-	ss.recvGenMu.Unlock()
+	ss.genState.recvGenMu.Lock()
+	gotCap = ss.genState.recvGenGuardCap
+	gotSize = len(ss.genState.recvGenV4)
+	gotTombs = ss.genState.recvTombV4.size()
+	ss.genState.recvGenMu.Unlock()
 	if gotCap != 0 || gotSize != 1 || gotTombs != 1 {
 		t.Fatalf("#10284: few-tombstone preserve did not reclaim default tier: cap=%d map=%d tombstones=%d", gotCap, gotSize, gotTombs)
 	}

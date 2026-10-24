@@ -319,10 +319,10 @@ func TestGenGuardCapGrowsOnLiveDemand_9915(t *testing.T) {
 	fillRecvGenV4ToCount(ss, live, genGuardMapDefaultCap)
 	newKey := dataplane.SessionKey{Protocol: 6, SrcPort: 0xBEEF, DstPort: 0xCAFE}
 	ss.recordInstalledGenV4(newKey, 1)
-	ss.recvGenMu.Lock()
-	_, stored := ss.recvGenV4[newKey]
+	ss.genState.recvGenMu.Lock()
+	_, stored := ss.genState.recvGenV4[newKey]
 	grown := ss.recvCap()
-	ss.recvGenMu.Unlock()
+	ss.genState.recvGenMu.Unlock()
 	if !stored {
 		t.Fatal("full-of-live map skip-recorded the new key instead of growing the cap (F-044)")
 	}
@@ -344,9 +344,9 @@ func TestGenGuardCapStaysDefaultWhenUnwired_9915(t *testing.T) {
 	fillRecvGenV4ToCount(ss, live, genGuardMapDefaultCap)
 	newKey := dataplane.SessionKey{Protocol: 6, SrcPort: 0xBEEF, DstPort: 0xCAFE}
 	ss.recordInstalledGenV4(newKey, 1)
-	ss.recvGenMu.Lock()
-	_, stored := ss.recvGenV4[newKey]
-	ss.recvGenMu.Unlock()
+	ss.genState.recvGenMu.Lock()
+	_, stored := ss.genState.recvGenV4[newKey]
+	ss.genState.recvGenMu.Unlock()
 	if stored {
 		t.Fatal("unwired map recorded past the default without provisioned capacity (F-044)")
 	}
@@ -553,19 +553,19 @@ func TestFenceAbortsWhenItsFabricIsEvicted_9915(t *testing.T) {
 // family, not only recvGenV4.
 func TestInstallTableMemoUnwiredBoundary_9915(t *testing.T) {
 	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
-	ss.genSentMu.Lock()
-	ss.installTableSentV4 = make(map[dataplane.SessionKey]sentInstallTable, genGuardMapDefaultCap)
-	for i := 0; len(ss.installTableSentV4) < genGuardMapDefaultCap; i++ {
+	ss.genState.genSentMu.Lock()
+	ss.genState.installTableSentV4 = make(map[dataplane.SessionKey]sentInstallTable, genGuardMapDefaultCap)
+	for i := 0; len(ss.genState.installTableSentV4) < genGuardMapDefaultCap; i++ {
 		k := synthKeyV4(0x500000 + i)
-		ss.installTableSentV4[k] = sentInstallTable{sessionID: uint64(i + 1), domain: 1, check: 2}
+		ss.genState.installTableSentV4[k] = sentInstallTable{sessionID: uint64(i + 1), domain: 1, check: 2}
 	}
-	ss.genSentMu.Unlock()
+	ss.genState.genSentMu.Unlock()
 	newKey := dataplane.SessionKey{Protocol: 6, SrcPort: 0xBEEF, DstPort: 0xCAFE}
 	val := dataplane.SessionValue{SessionID: 0x9915}
 	ss.stampInstallGenV4(newKey, &val)
-	ss.genSentMu.Lock()
-	_, stored := ss.installTableSentV4[newKey]
-	ss.genSentMu.Unlock()
+	ss.genState.genSentMu.Lock()
+	_, stored := ss.genState.installTableSentV4[newKey]
+	ss.genState.genSentMu.Unlock()
 	if stored {
 		t.Fatal("unwired sender memo recorded past the default without provisioned capacity (F-044 review)")
 	}
@@ -587,12 +587,12 @@ func TestInstallTableMemoReceiverUnwiredBoundary_9915(t *testing.T) {
 		v6sessions: make(map[dataplane.SessionKeyV6]dataplane.SessionValueV6),
 	}
 	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
-	ss.recvGenMu.Lock()
-	ss.installTableRecvV4 = make(map[dataplane.SessionKey]recvInstallTable, genGuardMapDefaultCap)
+	ss.genState.recvGenMu.Lock()
+	ss.genState.installTableRecvV4 = make(map[dataplane.SessionKey]recvInstallTable, genGuardMapDefaultCap)
 	for i := range genGuardMapDefaultCap {
-		ss.installTableRecvV4[synthKeyV4(0x600000+i)] = recvInstallTable{sessionID: uint64(i + 1), domain: 1, check: 2}
+		ss.genState.installTableRecvV4[synthKeyV4(0x600000+i)] = recvInstallTable{sessionID: uint64(i + 1), domain: 1, check: 2}
 	}
-	ss.installTableRecvV6 = make(map[dataplane.SessionKeyV6]recvInstallTable, genGuardMapDefaultCap)
+	ss.genState.installTableRecvV6 = make(map[dataplane.SessionKeyV6]recvInstallTable, genGuardMapDefaultCap)
 	for i := range genGuardMapDefaultCap {
 		var key dataplane.SessionKeyV6
 		binary.LittleEndian.PutUint32(key.SrcIP[:4], uint32(i))
@@ -600,9 +600,9 @@ func TestInstallTableMemoReceiverUnwiredBoundary_9915(t *testing.T) {
 		key.Protocol = 6
 		key.SrcPort = uint16(i)
 		key.DstPort = 443
-		ss.installTableRecvV6[key] = recvInstallTable{sessionID: uint64(i + 1), domain: 1, check: 2}
+		ss.genState.installTableRecvV6[key] = recvInstallTable{sessionID: uint64(i + 1), domain: 1, check: 2}
 	}
-	ss.recvGenMu.Unlock()
+	ss.genState.recvGenMu.Unlock()
 
 	key4 := dataplane.SessionKey{Protocol: 6, SrcPort: 0xA401, DstPort: 443}
 	key4.SrcIP = [4]byte{192, 0, 2, 41}
@@ -611,9 +611,9 @@ func TestInstallTableMemoReceiverUnwiredBoundary_9915(t *testing.T) {
 	}); !landed {
 		t.Fatal("receiver v4 install did not land while testing memo boundary")
 	}
-	ss.recvGenMu.Lock()
-	_, stored4 := ss.installTableRecvV4[key4]
-	ss.recvGenMu.Unlock()
+	ss.genState.recvGenMu.Lock()
+	_, stored4 := ss.genState.installTableRecvV4[key4]
+	ss.genState.recvGenMu.Unlock()
 	if stored4 {
 		t.Fatal("receiver v4 memo recorded past the default without provisioned capacity (F-044 review)")
 	}
@@ -625,9 +625,9 @@ func TestInstallTableMemoReceiverUnwiredBoundary_9915(t *testing.T) {
 	}); !landed {
 		t.Fatal("receiver v6 install did not land while testing memo boundary")
 	}
-	ss.recvGenMu.Lock()
-	_, stored6 := ss.installTableRecvV6[key6]
-	ss.recvGenMu.Unlock()
+	ss.genState.recvGenMu.Lock()
+	_, stored6 := ss.genState.installTableRecvV6[key6]
+	ss.genState.recvGenMu.Unlock()
 	if stored6 {
 		t.Fatal("receiver v6 memo recorded past the default without provisioned capacity (F-044 review)")
 	}
@@ -639,18 +639,18 @@ func TestInstallTableMemoReceiverUnwiredBoundary_9915(t *testing.T) {
 // path persists the clamp and counts it.
 func TestGenGuardCapClampsOnShrink_9915(t *testing.T) {
 	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
-	ss.genSentMu.Lock()
-	ss.sentGenGuardCap = 800000 // as if demand-grown under a larger ceiling
-	ss.genSentMu.Unlock()
+	ss.genState.genSentMu.Lock()
+	ss.genState.sentGenGuardCap = 800000 // as if demand-grown under a larger ceiling
+	ss.genState.genSentMu.Unlock()
 	ss.SetGenGuardSessionCap(200000) // replacement reports fewer workers
-	ss.genSentMu.Lock()
+	ss.genState.genSentMu.Lock()
 	if got := ss.sentCap(); got != 200000 {
-		ss.genSentMu.Unlock()
+		ss.genState.genSentMu.Unlock()
 		t.Fatalf("sentCap = %d, want 200000 clamped-at-read to the shrunken ceiling (F-044 review)", got)
 	}
 	grew := ss.growSentCap()
-	stored := ss.sentGenGuardCap
-	ss.genSentMu.Unlock()
+	stored := ss.genState.sentGenGuardCap
+	ss.genState.genSentMu.Unlock()
 	if grew {
 		t.Fatal("grow reported growth while clamping down (F-044 review)")
 	}
@@ -687,19 +687,19 @@ func TestGenGuardSessionCapZeroRetainsAfterWired_9915(t *testing.T) {
 func TestGenGuardCapConcurrentShrinkInterleave_9915(t *testing.T) {
 	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
 	ss.SetGenGuardSessionCap(400000)
-	ss.genSentMu.Lock()
-	ss.sentGenGuardCap = 200000
+	ss.genState.genSentMu.Lock()
+	ss.genState.sentGenGuardCap = 200000
 	shrunk := false
-	ss.testGenCapAfterCeilingRead = func() {
+	ss.genState.testGenCapAfterCeilingRead = func() {
 		if !shrunk {
 			shrunk = true
 			ss.SetGenGuardSessionCap(200000)
 		}
 	}
 	grew := ss.growSentCap()
-	storedAfterGrow := ss.sentGenGuardCap
+	storedAfterGrow := ss.genState.sentGenGuardCap
 	effectiveAfterGrow := ss.sentCap()
-	ss.genSentMu.Unlock()
+	ss.genState.genSentMu.Unlock()
 	if !grew {
 		t.Fatal("pinned 400000 ceiling did not grow the 200000 sender cap")
 	}
@@ -709,13 +709,13 @@ func TestGenGuardCapConcurrentShrinkInterleave_9915(t *testing.T) {
 	if effectiveAfterGrow != 200000 {
 		t.Fatalf("effective cap after concurrent shrink = %d, want 200000", effectiveAfterGrow)
 	}
-	ss.genSentMu.Lock()
+	ss.genState.genSentMu.Lock()
 	if ss.growSentCap() {
-		ss.genSentMu.Unlock()
+		ss.genState.genSentMu.Unlock()
 		t.Fatal("growth reported while the current ceiling is 200000")
 	}
-	storedAfterClamp := ss.sentGenGuardCap
-	ss.genSentMu.Unlock()
+	storedAfterClamp := ss.genState.sentGenGuardCap
+	ss.genState.genSentMu.Unlock()
 	if storedAfterClamp != 200000 {
 		t.Fatalf("stored cap after clamp = %d, want 200000", storedAfterClamp)
 	}

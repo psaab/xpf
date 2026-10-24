@@ -428,7 +428,7 @@ func (s *SessionSync) peerCapabilitiesLearned() bool {
 	if s == nil {
 		return false
 	}
-	return s.peerSnapshotProtocol.Load() != 0
+	return s.peerSnaps.peerSnapshotProtocol.Load() != 0
 }
 
 // sendFenceAck replies to a sequenced fence with what the local fence achieved.

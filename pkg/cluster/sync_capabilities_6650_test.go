@@ -61,14 +61,14 @@ func TestSetLocalSnapshotProtocolVersionRoundTrips6650(t *testing.T) {
 // represent, i.e. reintroduce the exact bug through the reconnect door.
 func TestPeerCapabilityIsScopedToThePeerIncarnation6650(t *testing.T) {
 	ss := &SessionSync{}
-	ss.peerSnapshotProtocol.Store(8)
+	ss.peerSnaps.peerSnapshotProtocol.Store(8)
 	if got := ss.PeerSnapshotProtocolVersion(); got != 8 {
 		t.Fatalf("setup: peer version = %d, want 8", got)
 	}
 
 	// Mirror what handleDisconnect does on a FULL disconnect. Asserted against
 	// the source below so this cannot drift from the real clear.
-	ss.peerSnapshotProtocol.Store(0)
+	ss.peerSnaps.peerSnapshotProtocol.Store(0)
 	if got := ss.PeerSnapshotProtocolVersion(); got != 0 {
 		t.Fatalf("peer version = %d after the incarnation ended, want 0", got)
 	}
@@ -82,7 +82,7 @@ func TestPeerCapabilityIsScopedToThePeerIncarnation6650(t *testing.T) {
 func TestDisconnectClearsPeerCapability6650(t *testing.T) {
 	t.Parallel()
 	src := readClusterSource(t, "sync_conn.go")
-	if !sourceContainsFlat(src, "s.peerSnapshotProtocol.Store(0)") {
+	if !sourceContainsFlat(src, "s.peerSnaps.peerSnapshotProtocol.Store(0)") {
 		t.Fatal("sync_conn.go's full-disconnect path does not clear peerSnapshotProtocol. " +
 			"The peer capability would then outlive the incarnation that proved it, so a " +
 			"reconnecting OLDER peer inherits the previous peer's capability and the gate " +
@@ -163,8 +163,8 @@ func TestPeerCapabilitiesPayloadIsLengthGated6650(t *testing.T) {
 	// Either spelling stores the decoded version; Swap additionally reports
 	// whether the advertisement changed, which gates the capabilities-changed
 	// callback so steady-state re-advertisements do not re-fire it (#10511).
-	if !sourceContainsFlat(src, "s.peerSnapshotProtocol.Store(uint32(peerProto))") &&
-		!sourceContainsFlat(src, "s.peerSnapshotProtocol.Swap(uint32(peerProto))") {
+	if !sourceContainsFlat(src, "s.peerSnaps.peerSnapshotProtocol.Store(uint32(peerProto))") &&
+		!sourceContainsFlat(src, "s.peerSnaps.peerSnapshotProtocol.Swap(uint32(peerProto))") {
 		t.Error("the handlePeerCapabilities delegate does not store the decoded version")
 	}
 }
@@ -214,7 +214,7 @@ func TestSendCapabilitiesAdvertisesUnconditionally6650_7147(t *testing.T) {
 	if got := ss.PeerSnapshotProtocolVersion(); got != 0 {
 		t.Fatalf("a peer that never advertised reads %d, want 0", got)
 	}
-	ss.peerSnapshotProtocol.Store(uint32(uint16(0)))
+	ss.peerSnaps.peerSnapshotProtocol.Store(uint32(uint16(0)))
 	if got := ss.PeerSnapshotProtocolVersion(); got != 0 {
 		t.Fatalf("a peer that advertised a literal 0 reads %d, want 0 — the two must "+
 			"stay indistinguishable, which is what makes the encoding change safe", got)

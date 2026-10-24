@@ -53,9 +53,9 @@ func (s *SessionSync) handleIPsecSA(conn net.Conn, payload []byte) bool {
 	applied := s.recvEpoch == commitEpoch &&
 		s.ipsecRecvSeq.advanceIfNewer(incarnation, seq)
 	if applied {
-		s.peerIPsecSAsMu.Lock()
-		s.peerIPsecSAs = names
-		s.peerIPsecSAsMu.Unlock()
+		s.peerSnaps.peerIPsecSAsMu.Lock()
+		s.peerSnaps.peerIPsecSAs = names
+		s.peerSnaps.peerIPsecSAsMu.Unlock()
 	}
 	s.recvSeqMu.Unlock()
 	if !applied {

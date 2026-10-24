@@ -190,9 +190,9 @@ func guardKeyV6_16173(idx int) dataplane.SessionKeyV6 {
 func tinyCapSync_16173(ceiling int) *SessionSync {
 	s := &SessionSync{}
 	if ceiling != 0 {
-		s.genGuardMapCeilingOverride = ceiling
-		s.sentGenGuardCap = ceiling
-		s.recvGenGuardCap = ceiling
+		s.genState.genGuardMapCeilingOverride = ceiling
+		s.genState.sentGenGuardCap = ceiling
+		s.genState.recvGenGuardCap = ceiling
 	}
 	return s
 }
@@ -244,24 +244,24 @@ func runGuardOpsV4_16173(ceiling int) []string {
 	out = append(out, senderTranscriptV4_16173(ceiling)...)
 	// Final recorded state, normalized (keyIdx/domain/gen only).
 	var state []string
-	for k, g := range s.recvGenV4 {
+	for k, g := range s.genState.recvGenV4 {
 		state = append(state, fmt.Sprintf("bare %d=%d", keyIdxV4_16173(k), g))
 	}
-	for sk, g := range s.recvGenScopedV4 {
+	for sk, g := range s.genState.recvGenScopedV4 {
 		state = append(state, fmt.Sprintf("scoped %d/%d=%d", sk.Domain, keyIdxV4_16173(sk.Key), g))
 	}
 	// Review F2: index membership + tombstone order must mirror the map
 	// exactly, in normalized form, not just the generations.
-	for tuple, set := range s.recvGenScopedByTupleV4.byTuple {
+	for tuple, set := range s.genState.recvGenScopedByTupleV4.byTuple {
 		for sk := range set {
-			if _, ok := s.recvGenScopedV4[sk]; !ok {
+			if _, ok := s.genState.recvGenScopedV4[sk]; !ok {
 				state = append(state, fmt.Sprintf("BADIX %d/%d", sk.Domain, keyIdxV4_16173(tuple)))
 			}
 		}
 	}
-	for sk := range s.recvGenScopedV4 {
+	for sk := range s.genState.recvGenScopedV4 {
 		found := false
-		for _, x := range s.recvGenScopedByTupleV4.keys(sk.Key) {
+		for _, x := range s.genState.recvGenScopedByTupleV4.keys(sk.Key) {
 			if x == sk {
 				found = true
 			}
@@ -271,7 +271,7 @@ func runGuardOpsV4_16173(ceiling int) []string {
 		}
 	}
 	state = append(state, fmt.Sprintf("tombs:%d evicted:%d overflow:%d",
-		s.recvTombV4.size()+s.recvTombScopedV4.size(), s.stats.GenTombstonesEvicted.Load(), s.stats.GenMapOverflow.Load()))
+		s.genState.recvTombV4.size()+s.genState.recvTombScopedV4.size(), s.stats.GenTombstonesEvicted.Load(), s.stats.GenMapOverflow.Load()))
 	sort.Strings(state)
 	return append(out, state...)
 }
@@ -314,22 +314,22 @@ func runGuardOpsV6_16173(ceiling int) []string {
 	}
 	out = append(out, senderTranscriptV6_16173(ceiling)...)
 	var state []string
-	for k, g := range s.recvGenV6 {
+	for k, g := range s.genState.recvGenV6 {
 		state = append(state, fmt.Sprintf("bare %d=%d", keyIdxV6_16173(k), g))
 	}
-	for sk, g := range s.recvGenScopedV6 {
+	for sk, g := range s.genState.recvGenScopedV6 {
 		state = append(state, fmt.Sprintf("scoped %d/%d=%d", sk.Domain, keyIdxV6_16173(sk.Key), g))
 	}
-	for tuple, set := range s.recvGenScopedByTupleV6.byTuple {
+	for tuple, set := range s.genState.recvGenScopedByTupleV6.byTuple {
 		for sk := range set {
-			if _, ok := s.recvGenScopedV6[sk]; !ok {
+			if _, ok := s.genState.recvGenScopedV6[sk]; !ok {
 				state = append(state, fmt.Sprintf("BADIX %d/%d", sk.Domain, keyIdxV6_16173(tuple)))
 			}
 		}
 	}
-	for sk := range s.recvGenScopedV6 {
+	for sk := range s.genState.recvGenScopedV6 {
 		found := false
-		for _, x := range s.recvGenScopedByTupleV6.keys(sk.Key) {
+		for _, x := range s.genState.recvGenScopedByTupleV6.keys(sk.Key) {
 			if x == sk {
 				found = true
 			}
@@ -339,7 +339,7 @@ func runGuardOpsV6_16173(ceiling int) []string {
 		}
 	}
 	state = append(state, fmt.Sprintf("tombs:%d evicted:%d overflow:%d",
-		s.recvTombV6.size()+s.recvTombScopedV6.size(), s.stats.GenTombstonesEvicted.Load(), s.stats.GenMapOverflow.Load()))
+		s.genState.recvTombV6.size()+s.genState.recvTombScopedV6.size(), s.stats.GenTombstonesEvicted.Load(), s.stats.GenMapOverflow.Load()))
 	sort.Strings(state)
 	return append(out, state...)
 }
@@ -417,7 +417,7 @@ func overflowTranscriptV4_16173(s *SessionSync, ceiling int) []string {
 		s.stampInstallGenV4(guardKeyV4_16173(10+i), &v)
 	}
 	out = append(out, fmt.Sprintf("senderOverflowDelta:%d sentLen:%d",
-		int(s.stats.GenMapOverflow.Load())-base, len(s.genSentV4)))
+		int(s.stats.GenMapOverflow.Load())-base, len(s.genState.genSentV4)))
 	// Skip-recorded key (past cap): take must draw fresh, not 0.
 	skipKey := guardKeyV4_16173(10 + ceiling + 2)
 	out = append(out, fmt.Sprintf("skipTakeFresh:%v", s.takeDeleteGenV4(skipKey) != 0))
@@ -442,7 +442,7 @@ func overflowTranscriptV6_16173(s *SessionSync, ceiling int) []string {
 		s.stampInstallGenV6(guardKeyV6_16173(10+i), &v)
 	}
 	out = append(out, fmt.Sprintf("senderOverflowDelta:%d sentLen:%d",
-		int(s.stats.GenMapOverflow.Load())-base, len(s.genSentV6)))
+		int(s.stats.GenMapOverflow.Load())-base, len(s.genState.genSentV6)))
 	skipKey := guardKeyV6_16173(10 + ceiling + 2)
 	out = append(out, fmt.Sprintf("skipTakeFresh:%v", s.takeDeleteGenV6(skipKey) != 0))
 	k0 := guardKeyV6_16173(10)
@@ -679,17 +679,17 @@ func TestTakeDeleteReadsCurrentRecvMaps16173(t *testing.T) {
 	// must clear the CURRENT maps, not the pre-hook ones.
 	s := &SessionSync{}
 	k := guardKeyV4_16173(1)
-	s.installTableRecvV4 = map[dataplane.SessionKey]recvInstallTable{k: {sessionID: 11, domain: 7, check: 8}}
-	s.sourceNatICMPRecvV4 = map[dataplane.SessionKey]sourceNatICMPMemo{k: {sessionID: 11, valid: true, typ: 3, code: 4}}
-	s.policyIdentityRecvV4 = map[dataplane.SessionKey]policyIdentityMemo{k: {sessionID: 11, ruleID: "old", counter: 1}}
-	oldTable, oldPolicy := s.installTableRecvV4, s.policyIdentityRecvV4
+	s.genState.installTableRecvV4 = map[dataplane.SessionKey]recvInstallTable{k: {sessionID: 11, domain: 7, check: 8}}
+	s.genState.sourceNatICMPRecvV4 = map[dataplane.SessionKey]sourceNatICMPMemo{k: {sessionID: 11, valid: true, typ: 3, code: 4}}
+	s.genState.policyIdentityRecvV4 = map[dataplane.SessionKey]policyIdentityMemo{k: {sessionID: 11, ruleID: "old", counter: 1}}
+	oldTable, oldPolicy := s.genState.installTableRecvV4, s.genState.policyIdentityRecvV4
 	s.testBeforeDeleteGen = func() {
-		s.installTableRecvV4 = map[dataplane.SessionKey]recvInstallTable{k: {sessionID: 11, domain: 9, check: 9}}
-		s.sourceNatICMPRecvV4 = map[dataplane.SessionKey]sourceNatICMPMemo{k: {sessionID: 11, valid: true, typ: 8, code: 8}}
-		s.policyIdentityRecvV4 = map[dataplane.SessionKey]policyIdentityMemo{k: {sessionID: 11, ruleID: "new", counter: 2}}
+		s.genState.installTableRecvV4 = map[dataplane.SessionKey]recvInstallTable{k: {sessionID: 11, domain: 9, check: 9}}
+		s.genState.sourceNatICMPRecvV4 = map[dataplane.SessionKey]sourceNatICMPMemo{k: {sessionID: 11, valid: true, typ: 8, code: 8}}
+		s.genState.policyIdentityRecvV4 = map[dataplane.SessionKey]policyIdentityMemo{k: {sessionID: 11, ruleID: "new", counter: 2}}
 	}
 	s.takeDeleteGenV4(k)
-	if len(s.installTableRecvV4) != 0 || len(s.sourceNatICMPRecvV4) != 0 || len(s.policyIdentityRecvV4) != 0 {
+	if len(s.genState.installTableRecvV4) != 0 || len(s.genState.sourceNatICMPRecvV4) != 0 || len(s.genState.policyIdentityRecvV4) != 0 {
 		t.Fatal("takeDeleteGenV4 deleted from a stale captured receiver map; current maps still hold the memo")
 	}
 	if len(oldTable) == 0 || len(oldPolicy) == 0 {
@@ -698,16 +698,16 @@ func TestTakeDeleteReadsCurrentRecvMaps16173(t *testing.T) {
 
 	s6 := &SessionSync{}
 	k6 := guardKeyV6_16173(1)
-	s6.installTableRecvV6 = map[dataplane.SessionKeyV6]recvInstallTable{k6: {sessionID: 11, domain: 7, check: 8}}
-	s6.sourceNatICMPRecvV6 = map[dataplane.SessionKeyV6]sourceNatICMPMemo{k6: {sessionID: 11, valid: true, typ: 3, code: 4}}
-	s6.policyIdentityRecvV6 = map[dataplane.SessionKeyV6]policyIdentityMemo{k6: {sessionID: 11, ruleID: "old", counter: 1}}
+	s6.genState.installTableRecvV6 = map[dataplane.SessionKeyV6]recvInstallTable{k6: {sessionID: 11, domain: 7, check: 8}}
+	s6.genState.sourceNatICMPRecvV6 = map[dataplane.SessionKeyV6]sourceNatICMPMemo{k6: {sessionID: 11, valid: true, typ: 3, code: 4}}
+	s6.genState.policyIdentityRecvV6 = map[dataplane.SessionKeyV6]policyIdentityMemo{k6: {sessionID: 11, ruleID: "old", counter: 1}}
 	s6.testBeforeDeleteGen = func() {
-		s6.installTableRecvV6 = map[dataplane.SessionKeyV6]recvInstallTable{k6: {sessionID: 11, domain: 9, check: 9}}
-		s6.sourceNatICMPRecvV6 = map[dataplane.SessionKeyV6]sourceNatICMPMemo{k6: {sessionID: 11, valid: true, typ: 8, code: 8}}
-		s6.policyIdentityRecvV6 = map[dataplane.SessionKeyV6]policyIdentityMemo{k6: {sessionID: 11, ruleID: "new", counter: 2}}
+		s6.genState.installTableRecvV6 = map[dataplane.SessionKeyV6]recvInstallTable{k6: {sessionID: 11, domain: 9, check: 9}}
+		s6.genState.sourceNatICMPRecvV6 = map[dataplane.SessionKeyV6]sourceNatICMPMemo{k6: {sessionID: 11, valid: true, typ: 8, code: 8}}
+		s6.genState.policyIdentityRecvV6 = map[dataplane.SessionKeyV6]policyIdentityMemo{k6: {sessionID: 11, ruleID: "new", counter: 2}}
 	}
 	s6.takeDeleteGenV6(k6)
-	if len(s6.installTableRecvV6) != 0 || len(s6.sourceNatICMPRecvV6) != 0 || len(s6.policyIdentityRecvV6) != 0 {
+	if len(s6.genState.installTableRecvV6) != 0 || len(s6.genState.sourceNatICMPRecvV6) != 0 || len(s6.genState.policyIdentityRecvV6) != 0 {
 		t.Fatal("takeDeleteGenV6 deleted from a stale captured receiver map; current maps still hold the memo")
 	}
 }
@@ -726,16 +726,16 @@ func TestStampRestoreReadsCurrentRecvMaps16173(t *testing.T) {
 	// Current (post-reset) receiver maps: empty. A stale record lives
 	// only in a retired map the field no longer points at.
 	retired := map[dataplane.SessionKey]recvInstallTable{k: {sessionID: 42, domain: 7, check: 8}}
-	s.installTableRecvV4 = map[dataplane.SessionKey]recvInstallTable{}
-	s.sourceNatICMPRecvV4 = map[dataplane.SessionKey]sourceNatICMPMemo{}
-	s.policyIdentityRecvV4 = map[dataplane.SessionKey]policyIdentityMemo{}
+	s.genState.installTableRecvV4 = map[dataplane.SessionKey]recvInstallTable{}
+	s.genState.sourceNatICMPRecvV4 = map[dataplane.SessionKey]sourceNatICMPMemo{}
+	s.genState.policyIdentityRecvV4 = map[dataplane.SessionKey]policyIdentityMemo{}
 	v := dataplane.SessionValue{SessionID: 42}
 	s.stampInstallGenV4(k, &v)
 	if v.InstallTableDomain != 0 || v.InstallTableCheck != 0 {
 		t.Fatalf("restored identity from a retired receiver map: %v/%v (retired=%v)", v.InstallTableDomain, v.InstallTableCheck, retired)
 	}
 	// And the current map's record IS what gets restored when present.
-	s.installTableRecvV4[k] = recvInstallTable{sessionID: 42, domain: 5, check: 6}
+	s.genState.installTableRecvV4[k] = recvInstallTable{sessionID: 42, domain: 5, check: 6}
 	v2 := dataplane.SessionValue{SessionID: 42}
 	s.stampInstallGenV4(k, &v2)
 	if v2.InstallTableDomain != 5 || v2.InstallTableCheck != 6 {
@@ -751,16 +751,16 @@ func TestStampRestoreReadsCurrentRecvMaps16173(t *testing.T) {
 func TestRecvMapResetRace16173(t *testing.T) {
 	s := &SessionSync{}
 	k := guardKeyV4_16173(1)
-	s.installTableRecvV4 = map[dataplane.SessionKey]recvInstallTable{k: {sessionID: 42, domain: 9, check: 9}}
-	s.sourceNatICMPRecvV4 = map[dataplane.SessionKey]sourceNatICMPMemo{}
-	s.policyIdentityRecvV4 = map[dataplane.SessionKey]policyIdentityMemo{}
+	s.genState.installTableRecvV4 = map[dataplane.SessionKey]recvInstallTable{k: {sessionID: 42, domain: 9, check: 9}}
+	s.genState.sourceNatICMPRecvV4 = map[dataplane.SessionKey]sourceNatICMPMemo{}
+	s.genState.policyIdentityRecvV4 = map[dataplane.SessionKey]policyIdentityMemo{}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for i := 0; i < 200; i++ {
-			s.recvGenMu.Lock()
-			s.installTableRecvV4 = map[dataplane.SessionKey]recvInstallTable{k: {sessionID: 42, domain: 9, check: 9}}
-			s.recvGenMu.Unlock()
+			s.genState.recvGenMu.Lock()
+			s.genState.installTableRecvV4 = map[dataplane.SessionKey]recvInstallTable{k: {sessionID: 42, domain: 9, check: 9}}
+			s.genState.recvGenMu.Unlock()
 		}
 	}()
 	for i := 0; i < 200; i++ {

@@ -178,8 +178,8 @@ func TestShouldApplyConfigGenLegacyUnconditional(t *testing.T) {
 // instead of refused as stale (#2198 F2 reasoning applied to config).
 func TestResetRecvGenResetsConfigGen(t *testing.T) {
 	s := &SessionSync{}
-	s.recvGenV4 = nil
-	s.recvGenV6 = nil
+	s.genState.recvGenV4 = nil
+	s.genState.recvGenV6 = nil
 	if !s.shouldApplyConfigGen(100) {
 		t.Fatal("gen 100 should admit")
 	}
@@ -577,7 +577,7 @@ func TestQueueConfigWithAncestryWireReceiveApplyChain10511(t *testing.T) {
 	})
 	sender.installConn(0, local)
 	sender.peerCapabilityFlags.Store(uint32(capFlagConfigAncestry))
-	sender.peerSnapshotProtocol.Store(1)
+	sender.peerSnaps.peerSnapshotProtocol.Store(1)
 
 	const (
 		text = "set security policies from-zone lan to-zone wan policy old\n"
@@ -636,7 +636,7 @@ func TestConfigAncestryCapabilityStateAndLegacyGate10511(t *testing.T) {
 	if s.ConfigAncestryCapable() {
 		t.Fatal("a fresh peer must not advertise ancestry capability")
 	}
-	s.peerSnapshotProtocol.Store(1)
+	s.peerSnaps.peerSnapshotProtocol.Store(1)
 	if !s.ConfigAncestryNegotiated() {
 		t.Fatal("a peer protocol advertisement must mark capability discovery complete")
 	}
@@ -671,7 +671,7 @@ func TestQueueConfigAncestryUnknownAndIncapablePeersUseLegacyPayload10511(t *tes
 			})
 			s.installConn(0, local)
 			if tc.known {
-				s.peerSnapshotProtocol.Store(1)
+				s.peerSnaps.peerSnapshotProtocol.Store(1)
 			}
 			queued := make(chan bool, 1)
 			go func() {
@@ -718,7 +718,7 @@ func TestQueueConfigWithAncestryWrapperUsesNegotiatedSidecar10511(t *testing.T) 
 		peer.Close()
 	})
 	s.installConn(0, local)
-	s.peerSnapshotProtocol.Store(1)
+	s.peerSnaps.peerSnapshotProtocol.Store(1)
 	s.peerCapabilityFlags.Store(uint32(capFlagConfigAncestry))
 	want := []configstore.RenameDescriptor{{
 		SourcePath:      []string{"security", "policies", "old"},
@@ -919,7 +919,7 @@ func TestReservedConfigGenerationIsHonoredNotRedrawn10511(t *testing.T) {
 		peer.Close()
 	})
 	s.installConn(0, local)
-	s.peerSnapshotProtocol.Store(1)
+	s.peerSnaps.peerSnapshotProtocol.Store(1)
 	s.peerCapabilityFlags.Store(uint32(capFlagConfigAncestry))
 	g1 := s.ReserveConfigGen()
 	g2 := s.ReserveConfigGen()

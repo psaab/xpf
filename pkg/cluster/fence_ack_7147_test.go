@@ -483,7 +483,7 @@ func TestDisconnectClearsFenceAckCapability7147(t *testing.T) {
 	// TestFenceSurvivesIdleFabricFlap_9915 /
 	// TestFenceAbortsWhenItsOwnFabricDrops_9915 (source grep cannot tell a
 	// scoped release from abort-all).
-	if !sourceContainsFlat(src, "s.peerSnapshotProtocol.Store(0)") {
+	if !sourceContainsFlat(src, "s.peerSnaps.peerSnapshotProtocol.Store(0)") {
 		t.Error("the #6650 clear these are anchored beside has moved; re-verify both " +
 			"#7147 clears are still on the FULL-disconnect path")
 	}

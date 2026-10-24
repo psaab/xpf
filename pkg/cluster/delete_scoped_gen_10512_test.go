@@ -45,15 +45,15 @@ func TestTakeDeleteGenScopedKeyed10512(t *testing.T) {
 	if got := s.takeDeleteGenScopedV4(8, key); got != 0 {
 		t.Fatalf("other-domain scoped take = %d, want 0 (per-domain stamps)", got)
 	}
-	s.genSentMu.Lock()
-	s.genSentOverflowScopedV4 = true
-	s.genSentMu.Unlock()
+	s.genState.genSentMu.Lock()
+	s.genState.genSentOverflowScopedV4 = true
+	s.genState.genSentMu.Unlock()
 	if got := s.takeDeleteGenScopedV4(7, scopedGenKeyV4(5010)); got == 0 {
 		t.Fatal("overflow-latched scoped take must draw fresh, got 0")
 	}
-	s.genSentMu.Lock()
-	bareStamps := len(s.genSentV4)
-	s.genSentMu.Unlock()
+	s.genState.genSentMu.Lock()
+	bareStamps := len(s.genState.genSentV4)
+	s.genState.genSentMu.Unlock()
 	if bareStamps != 1 {
 		t.Fatalf("bare stamps = %d, want exactly the install's 1", bareStamps)
 	}
@@ -82,12 +82,12 @@ func TestDeleteGenGuardScopedOrdersPerDomain10512(t *testing.T) {
 	if !s.deleteGenGuardScopedV4(8, key, 50) {
 		t.Fatal("a colliding domain must order independently of domain 7's tombstone")
 	}
-	s.recvGenMu.Lock()
-	defer s.recvGenMu.Unlock()
-	if got := s.recvGenScopedV4[scopedDeleteKeyV4{Domain: 7, Key: key}]; got != 150 {
+	s.genState.recvGenMu.Lock()
+	defer s.genState.recvGenMu.Unlock()
+	if got := s.genState.recvGenScopedV4[scopedDeleteKeyV4{Domain: 7, Key: key}]; got != 150 {
 		t.Fatalf("scoped tombstone = %d, want 150", got)
 	}
-	if got := s.recvGenScopedV4[scopedDeleteKeyV4{Domain: 8, Key: key}]; got != 50 {
+	if got := s.genState.recvGenScopedV4[scopedDeleteKeyV4{Domain: 8, Key: key}]; got != 50 {
 		t.Fatalf("colliding tombstone = %d, want 50", got)
 	}
 }
@@ -102,9 +102,9 @@ func TestDeleteGenGuardScopedZeroEvicts10512(t *testing.T) {
 	if !s.deleteGenGuardScopedV4(7, key, 0) {
 		t.Fatal("gen-0 scoped delete must apply")
 	}
-	s.recvGenMu.Lock()
-	defer s.recvGenMu.Unlock()
-	if _, ok := s.recvGenScopedV4[scopedDeleteKeyV4{Domain: 7, Key: key}]; ok {
+	s.genState.recvGenMu.Lock()
+	defer s.genState.recvGenMu.Unlock()
+	if _, ok := s.genState.recvGenScopedV4[scopedDeleteKeyV4{Domain: 7, Key: key}]; ok {
 		t.Fatal("gen-0 scoped delete must evict the entry")
 	}
 }
@@ -156,16 +156,16 @@ func TestScopedGenResetPreserveAndClear10512(t *testing.T) {
 		t.Fatal("FIXTURE: scoped delete must apply")
 	}
 	s.reclaimRecvLiveGen()
-	s.recvGenMu.Lock()
-	_, kept := s.recvGenScopedV4[skey]
-	s.recvGenMu.Unlock()
+	s.genState.recvGenMu.Lock()
+	_, kept := s.genState.recvGenScopedV4[skey]
+	s.genState.recvGenMu.Unlock()
 	if !kept {
 		t.Fatal("reclaim must retain scoped tombstones")
 	}
 	s.resetRecvGen()
-	s.recvGenMu.Lock()
-	_, kept = s.recvGenScopedV4[skey]
-	s.recvGenMu.Unlock()
+	s.genState.recvGenMu.Lock()
+	_, kept = s.genState.recvGenScopedV4[skey]
+	s.genState.recvGenMu.Unlock()
 	if kept {
 		t.Fatal("namespace reset must clear scoped tombstones")
 	}
@@ -177,16 +177,16 @@ func TestScopedGenResetPreserveAndClear10512(t *testing.T) {
 // count stays scoped-only.
 func TestScopedGenCapEvictsOldestTombstone10512(t *testing.T) {
 	s := &SessionSync{}
-	s.recvGenGuardCap = 2
-	s.genGuardMapCeilingOverride = 2
+	s.genState.recvGenGuardCap = 2
+	s.genState.genGuardMapCeilingOverride = 2
 	k1, k2, k3 := scopedGenKeyV4(5011), scopedGenKeyV4(5012), scopedGenKeyV4(5013)
 	s.deleteGenGuardScopedV4(7, k1, 10)
 	s.deleteGenGuardScopedV4(7, k2, 20)
 	s.deleteGenGuardScopedV4(7, k3, 30)
-	s.recvGenMu.Lock()
-	_, k1kept := s.recvGenScopedV4[scopedDeleteKeyV4{Domain: 7, Key: k1}]
-	n := len(s.recvGenScopedV4)
-	s.recvGenMu.Unlock()
+	s.genState.recvGenMu.Lock()
+	_, k1kept := s.genState.recvGenScopedV4[scopedDeleteKeyV4{Domain: 7, Key: k1}]
+	n := len(s.genState.recvGenScopedV4)
+	s.genState.recvGenMu.Unlock()
 	if k1kept || n != 2 {
 		t.Fatalf("oldest scoped tombstone must evict at cap (k1 kept=%v size=%d)", k1kept, n)
 	}
@@ -248,10 +248,10 @@ func TestScopedInstallTransitionsEntryLive10512(t *testing.T) {
 		t.Fatal("FIXTURE: scoped delete must apply")
 	}
 	s.recordInstalledGenScopedV4(7, key, 150)
-	s.recvGenMu.Lock()
-	got := s.recvGenScopedV4[skey]
-	tombs := s.recvTombScopedV4.size()
-	s.recvGenMu.Unlock()
+	s.genState.recvGenMu.Lock()
+	got := s.genState.recvGenScopedV4[skey]
+	tombs := s.genState.recvTombScopedV4.size()
+	s.genState.recvGenMu.Unlock()
 	if got != 150 {
 		t.Fatalf("scoped high-water = %d, want 150", got)
 	}
@@ -300,17 +300,17 @@ func TestScopedStampTakeDefaultDomain10512(t *testing.T) {
 func TestScopedSenderStampsBoundedAtCap10512(t *testing.T) {
 	s := &SessionSync{}
 	const wantCap = 8
-	s.sentGenGuardCap = wantCap
-	s.genGuardMapCeilingOverride = wantCap
+	s.genState.sentGenGuardCap = wantCap
+	s.genState.genGuardMapCeilingOverride = wantCap
 	for i := uint16(0); i < 2*uint16(wantCap); i++ {
 		key := scopedGenKeyV4(6000 + i)
 		val := dataplane.SessionValue{RoutingDomain: 7}
 		s.stampInstallGenV4(key, &val)
 	}
-	s.genSentMu.Lock()
-	n := len(s.genSentScopedV4)
-	latched := s.genSentOverflowScopedV4
-	s.genSentMu.Unlock()
+	s.genState.genSentMu.Lock()
+	n := len(s.genState.genSentScopedV4)
+	latched := s.genState.genSentOverflowScopedV4
+	s.genState.genSentMu.Unlock()
 	if n > wantCap {
 		t.Fatalf("scoped sender stamps = %d, want <= cap %d", n, wantCap)
 	}

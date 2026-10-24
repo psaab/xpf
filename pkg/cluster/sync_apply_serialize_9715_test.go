@@ -88,15 +88,15 @@ func installMarkedV6_9715(ss *SessionSync, key dataplane.SessionKeyV6, gen uint6
 }
 
 func storedGenV4_9715(ss *SessionSync, key dataplane.SessionKey) uint64 {
-	ss.recvGenMu.Lock()
-	defer ss.recvGenMu.Unlock()
-	return ss.recvGenV4[key]
+	ss.genState.recvGenMu.Lock()
+	defer ss.genState.recvGenMu.Unlock()
+	return ss.genState.recvGenV4[key]
 }
 
 func storedGenV6_9715(ss *SessionSync, key dataplane.SessionKeyV6) uint64 {
-	ss.recvGenMu.Lock()
-	defer ss.recvGenMu.Unlock()
-	return ss.recvGenV6[key]
+	ss.genState.recvGenMu.Lock()
+	defer ss.genState.recvGenMu.Unlock()
+	return ss.genState.recvGenV6[key]
 }
 
 // The serialized control: the operations of the install cell, applied one after another. This is

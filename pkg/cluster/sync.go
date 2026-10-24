@@ -802,6 +802,99 @@ func (s TransferReadinessSnapshot) Reason() string {
 
 // SessionSync manages TCP-based session state replication between cluster
 // peers for stateful failover.
+//
+// # Lock-order graph (#16159 PR-0 — the gate for the sub-struct extraction)
+//
+// Every SessionSync mutex, what it guards, and every nesting edge. An edge
+// A -> B means a site acquires B while holding A. The graph must stay
+// acyclic; a new edge that closes a cycle is a deadlock, not a style issue.
+// This comment is pinned by TestSessionSyncLockOrderGraphPinned16159
+// (sync_gen_state_16159_test.go), which source-scans the mutex set and the
+// documented edges — update this graph in the same commit as any lock or
+// nesting change or that test reds.
+//
+// Mutexes (guard domain in parentheses):
+//
+//	mu (conn registry, incarnation stamps, configCrypto, peer-incarnation
+//	  state, peerSnaps.peerSnapshotProtocolGeneration)
+//	writeMu (wire seal+write serialization on a conn)
+//	preAuthMu (pre-auth admission: preAuthInFlight, setupConns, peerIPs)
+//	queuedFrameMu (queued-frame watermarks)
+//	peerSnaps.peerIPsecSAsMu (held IPsec SA set)
+//	peerSnaps.peerDHCPLeasesMu (held DHCP lease snapshots)
+//	peerSnaps.peerSnapshotProtocolWriteMu (capability-incarnation changes
+//	  vs the final write of a gated config snapshot)
+//	fenceAckMu (fenceAckWaiters)
+//	zoneRGMu (zoneRGMap, foldRGMap, zoneRGMapGen; RWMutex)
+//	deleteJournalMu (deleteJournal, scopedDeleteJournal)
+//	bulkStartMu (table-truth snapshot -> BulkStart boundary)
+//	bulkSendMu (bulk send serialization)
+//	bulkSnapshotGenMu (authoritative snapshot read vs delete-gen draws)
+//	bulkMu (bulk receive window)
+//	barrierWaitMu (barrierWaiters)
+//	failoverWaitMu (failover waiters)
+//	genState.genSentMu (sender generation stamps + sent identity memos)
+//	genState.recvGenMu (receiver generations, tombstones + recv memos)
+//	applyMu (receive-side session apply serialization, #9715)
+//	configEpochRoleMu (config-epoch role/floor)
+//	configGenMu (config-generation marks; LEAF — see its field comment)
+//	configApplyMu (config-apply health streak)
+//	recvSeqMu (full-set sequence guards, recvEpoch)
+//	persistentNatLeaseApplyMu (persistent-NAT lease commit order)
+//	ipsecApplyMu (IPsec full-set commit order)
+//	dhcpApplyMu (DHCP full-set commit + chunk state)
+//
+// Nesting edges (holder -> acquired). Pin tokens in [brackets] are the
+// exact substrings the pin test searches for in this comment:
+//
+//	[mu -> peerSnapshotProtocolWriteMu] install/capability paths replace
+//	  the advertised protocol under mu, then serialize against gated
+//	  config writes; the gated writer also takes peerSnapshotProtocolWriteMu
+//	  under mu and then RELEASES mu while holding it over the write
+//	  (sync_conn_config.go) — it never acquires mu while holding it.
+//	[mu -> fenceAckMu] handleDisconnect/installConn hold mu and take
+//	  fenceAckMu to release scoped fence waiters.
+//	[bulkSnapshotGenMu -> genSentMu] takeDeleteGen* linearizes a queue-time
+//	  delete draw against an authoritative snapshot read.
+//	[bulkSnapshotGenMu -> recvGenMu] the same critical sections consult
+//	  the receiver guard while holding genSentMu (delete path only).
+//	[genSentMu -> recvGenMu] stampInstallGen* nests recvGenMu inside
+//	  genSentMu; recvGenMu never nests genSentMu. The install-table memo
+//	  restore documents the same direction as a leaf-ward nesting.
+//	[applyMu -> recvGenMu] every install/delete apply holds applyMu from
+//	  the guard through the dataplane write; nothing takes applyMu while
+//	  holding recvGenMu, bulkMu or configGenMu.
+//	[dhcpApplyMu -> recvSeqMu] each DHCP arm advances its full-set guard
+//	  and stores the held set (peerSnaps.peerDHCPLeasesMu, taken inside
+//	  the commit) under dhcpApplyMu; recvSeqMu is never held across the
+//	  OnDHCPLeasesReceived callback.
+//	[ipsecApplyMu -> recvSeqMu] IPsec commits serialize with the sequence
+//	  advance the same way (peerSnaps.peerIPsecSAsMu inside the commit).
+//	[persistentNatLeaseApplyMu -> recvSeqMu] persistent-NAT lease commits
+//	  follow the identical full-set commit order.
+//	[recvSeqMu -> peerDHCPLeasesMu] the DHCP commit advances the guard
+//	  and stores the held set in one recvSeqMu section (sync_lease_recv.go).
+//	[dhcpApplyMu -> peerDHCPLeasesMu] via the commit above; the lease
+//	  store is the innermost lock and never acquires another.
+//
+// Leaf locks (acquire no other SessionSync mutex while held): writeMu,
+// preAuthMu, queuedFrameMu, zoneRGMu, deleteJournalMu, bulkSendMu,
+// barrierWaitMu, failoverWaitMu, configGenMu, configApplyMu,
+// configEpochRoleMu, fenceAckMu, peerSnaps.peerIPsecSAsMu,
+// peerSnaps.peerDHCPLeasesMu. Atomics (genState.genCounter,
+// genState.genGuardSessionCap, and the *SeqCounter / epoch fields) are
+// lock-free by design: genGuardSessionCap is atomic precisely so the
+// daemon tick never contends the guard mutexes it gates.
+//
+// Sub-struct boundaries (#16159): genState (sessionGenState) owns
+// genSentMu/recvGenMu and every field they guard; peerSnaps
+// (peerSnapshotState) owns peerIPsecSAsMu/peerDHCPLeasesMu/
+// peerSnapshotProtocolWriteMu and the fields they guard, except
+// peerSnapshotProtocolGeneration which stays under mu with the
+// incarnation state it binds to. A sub-struct method must never acquire
+// a SessionSync lock outside its own domain while holding a domain lock;
+// cross-domain work goes through the existing *SessionSync forwarding
+// methods, which keep their names and signatures.
 type SessionSync struct {
 	// strictSessionAuth records the legacy #7441 node-local config leaf. The
 	// value is retained for compatibility and reporting, but keyed-node
@@ -1153,29 +1246,7 @@ type SessionSync struct {
 	OnPeerConnected func()
 	// OnPeerDisconnected fires when all fabric connections are lost.
 	OnPeerDisconnected func()
-	peerIPsecSAs       []string
-	peerIPsecSAsMu     sync.Mutex
-	// #2239/#10170: the standby holds the peer's most-recent full lease
-	// snapshot per family (the peerIPsecSAs precedent), including explicit
-	// receipt state, ownership generation, and served-scope proof. The
-	// legacy slices remain the aged lease view used by existing callers.
-	//
-	// #4871: peerDHCPLeases{4,6}RecvAt records WHEN this node received each
-	// family's held set. SyncLease.Remaining is seconds-of-lifetime-left at the
-	// SENDER's read time and carries no sample epoch, so a set held on the
-	// standby ages only if the receiver subtracts its own residence before
-	// seeding — otherwise a lease held for minutes is re-anchored to
-	// now_local+Remaining on takeover and RESURRECTED past its true expiry
-	// (duplicate allocation). RecvAt is a time.Now() reading (monotonic in
-	// production), so PeerDHCPLeases{4,6} subtract a monotonic residence.
-	peerDHCPLeases4        []dhcpserver.SyncLease
-	peerDHCPLeases6        []dhcpserver.SyncLease
-	peerDHCPLeaseSnapshot4 dhcpserver.LeaseSyncSnapshot
-	peerDHCPLeaseSnapshot6 dhcpserver.LeaseSyncSnapshot
-	peerDHCPLeases4RecvAt  time.Time
-	peerDHCPLeases6RecvAt  time.Time
-	peerDHCPLeasesMu       sync.Mutex
-	IsPrimaryFn            func() bool
+	IsPrimaryFn        func() bool
 	// IsPrimaryForRGFn reports whether the local node is primary for a given RG.
 	IsPrimaryForRGFn func(rgID int) bool
 	// PeerBootEpochFn reports the peer's across-reboot boot-epoch floor and
@@ -1312,10 +1383,6 @@ type SessionSync struct {
 	// sets it. Per-instance (not a package hook) so parallel tests cannot
 	// observe each other's frozen time. Set before driving syncSweep.
 	testSweepNow func() uint64
-	// testGenCapAfterCeilingRead runs after growGuardCapSide snapshots its
-	// ceiling and before it decides/stores the next cap. Test-only seam for a
-	// deterministic ceiling-shrink interleaving; production never sets it.
-	testGenCapAfterCeilingRead func()
 	// testClockPublishBeforeStore pauses a current ClockSync publication while
 	// s.mu is held. Test-only interleaving seam; production never sets it.
 	testClockPublishBeforeStore func()
@@ -1333,26 +1400,9 @@ type SessionSync struct {
 	// which suppresses the advertisement rather than advertising a false 0.
 	localSnapshotProtocol atomic.Uint32
 
-	// peerSnapshotProtocol is the peer's advertised config-snapshot protocol
-	// version, or 0 when the peer has not advertised one.
-	//
-	// 0 is NOT "unknown, assume compatible": a connected peer that advertises
-	// nothing is by definition running a build that predates #6650, so it also
-	// predates every snapshot version this gate could care about. It is cleared
-	// on full disconnect alongside clockSynced -- the capability belongs to the
-	// peer INCARNATION that proved it, and the peer that reconnects may be a
-	// different, older process.
-	peerSnapshotProtocol atomic.Uint32
-
-	// peerSnapshotProtocolWriteMu serializes capability-incarnation changes
-	// with the final write of a gated config snapshot. Lock order is mu then
-	// this mutex; the writer releases mu while holding this mutex over write.
-	peerSnapshotProtocolWriteMu sync.Mutex
-
-	// peerSnapshotProtocolGeneration advances when this incarnation's
-	// advertised snapshot version changes or is cleared, binding an outgoing
-	// config push to the observation that authorized it; guarded by mu.
-	peerSnapshotProtocolGeneration uint64
+	// Peer held snapshots + #6650 advertised protocol: see
+	// peerSnapshotState in sync_gen_state_16159.go.
+	peerSnaps peerSnapshotState
 
 	// peerCapabilityFlags holds the peer's advertised capability bits (#7147),
 	// carried in the trailing byte of syncMsgPeerCapabilities on top of #6650's
@@ -1594,149 +1644,14 @@ type SessionSync struct {
 	sessionMirrorWarnedV4      atomic.Bool
 	sessionMirrorWarnedV6      atomic.Bool
 
-	// #2170 HA deferred-delete generation guard.
-	//
-	// Sender side: genCounter is a single process-wide strictly-monotonic
-	// install generation, seeded at construction from CLOCK_MONOTONIC nanos
-	// so it never regresses below a value a peer may already hold across
-	// this node's restarts within a boot. Every session install (Queue*,
-	// sweep, bulk) draws genCounter.Add(1) and records it in genSentV4/V6
-	// keyed by the wire key. A delete draws a FRESH generation strictly
-	// greater than the install it cancels (takeDeleteGen*, #2221) and evicts
-	// the sender map entry, so the delete always out-ranks its install — the
-	// property that lets the receiver order a reordered delete/install pair.
-	// Generations are only ever compared per-(sender,key), never across keys,
-	// so a single sender-local counter is sufficient and no cross-node
-	// agreement on absolute values is required.
-	//
-	// Receiver side: recvGenV4/V6 is the authoritative per-key stored
-	// generation (the BPF C struct stays generation-free, SMR fix #3). It is
-	// set on install-apply and consulted by both the install guard and the
-	// delete guard. An applied non-zero delete upgrades the entry to the
-	// delete generation as a TOMBSTONE (#2221) rather than evicting, so a
-	// reordered older install of the cancelled session is refused; a gen-0
-	// (legacy) delete evicts.
-	genCounter atomic.Uint64
-	genSentMu  sync.Mutex
-	genSentV4  map[dataplane.SessionKey]uint64
-	genSentV6  map[dataplane.SessionKeyV6]uint64
-	// genSentScopedV4/V6 stamp per-(domain, tuple) install generations for
-	// scoped policy deletes (#10512, plan §1.2 keyed sender state):
-	// takeDeleteGenScoped draws fresh strictly greater than the last
-	// install it cancels. Guarded by genSentMu; same cap/overflow
-	// discipline as the bare stamp maps.
-	genSentScopedV4 map[scopedDeleteKeyV4]uint64
-	genSentScopedV6 map[scopedDeleteKeyV6]uint64
-	// scopedTupleIndex* invert the scoped stamp maps by bare tuple
-	// (#15039) so a bare close reclaims its tuple's scoped stamps in
-	// O(domains-per-tuple), not O(map). Guarded by genSentMu.
-	genSentScopedByTupleV4 scopedTupleIndex[dataplane.SessionKey, scopedDeleteKeyV4]
-	genSentScopedByTupleV6 scopedTupleIndex[dataplane.SessionKeyV6, scopedDeleteKeyV6]
-	// genSentOverflowV4/V6 latch, per family and for the life of the process, that
-	// the stamp map has ever been at its effective cap and skipped a key (#9719).
-	// After that, a delete for an unstamped key may be for a live session whose
-	// stamp was skipped, so takeDeleteGen* draws a fresh generation instead of 0.
-	// Guarded by genSentMu.
-	genSentOverflowV4 bool
-	genSentOverflowV6 bool
-	// genSentOverflowScopedV4/V6 are the #9719 overflow latches for the
-	// scoped stamp maps (see genSentOverflowV4). Guarded by genSentMu.
-	genSentOverflowScopedV4 bool
-	genSentOverflowScopedV6 bool
-	// sentGenGuardCap/recvGenGuardCap are the effective sender/receiver-side
-	// generation-guard caps (#9915 F-044): genGuardMapDefaultCap until demand
-	// growth doubles them toward genGuardMapCap. Zero means never grown.
-	// Guarded by genSentMu/recvGenMu respectively (see sentCap/growSentCap);
-	// resetRecvGen returns the receiver side to zero with the maps it bounds.
-	sentGenGuardCap int
-	recvGenGuardCap int
-	// genGuardSessionCap is the helper-provisioned session capacity wired by
-	// the daemon (SetGenGuardSessionCap tracks current, 0 = unwired). It
-	// bounds demand growth to provisioned RAM. Atomic so the daemon tick
-	// never contends the guard mutexes (a mutex here would invert lock order
-	// against the BPF-walking guard paths it gates).
-	genGuardSessionCap atomic.Uint64
-	// genGuardMapCeilingOverride injects a small growth ceiling for tests (0 =
-	// production ceiling). Skip/overflow paths are otherwise reachable only at
-	// 5M entries; the override keeps call-site coverage executed at unit-test
-	// volumes. Test-only; production never sets it. Same mutex as its side cap.
-	genGuardMapCeilingOverride int
+	// Generation-guard domain (#2170/#9915/#10512): see sessionGenState
+	// in sync_gen_state_16159.go and the lock-order graph above.
+	genState sessionGenState
 	// testClockNow overrides the local monotonic-seconds reading used by the
 	// ClockSync handler (nil = live clock). Test-only; production never sets
 	// it. Per-instance (not a package hook) so parallel test files cannot
 	// observe each other's frozen time. Set before driving handleMessage.
 	testClockNow func() uint64
-	// #9412: per tuple, the TCP close class this node last SENT for one session
-	// incarnation (matched on SessionID), so a mirror-sourced resend cannot
-	// regress it. Guarded by genSentMu, beside the generation maps it mirrors;
-	// see stampCloseClassLocked.
-	closeClassSentV4 map[dataplane.SessionKey]sentCloseClass
-	closeClassSentV6 map[dataplane.SessionKeyV6]sentCloseClass
-	// #10888: per tuple, the TCP handshake state this node last SENT for one
-	// session incarnation (matched on SessionID), so mirror-sourced sweeps
-	// cannot regress the opening/handshake phase to legacy zero. Guarded by
-	// genSentMu, beside the generation maps it mirrors.
-	tcpHandshakeSentV4 map[dataplane.SessionKey]sentTCPHandshakeState
-	tcpHandshakeSentV6 map[dataplane.SessionKeyV6]sentTCPHandshakeState
-	// #9752: per tuple, the installing-table identity this node last SENT for
-	// one session incarnation (matched on SessionID), so a mirror-sourced
-	// resend cannot regress it to (0,0). Guarded by genSentMu, beside the
-	// maps it mirrors; see stampInstallTableLocked.
-	installTableSentV4 map[dataplane.SessionKey]sentInstallTable
-	installTableSentV6 map[dataplane.SessionKeyV6]sentInstallTable
-	// #11064: source-NAT ICMP type used when the active selected its typed
-	// allocator. Like the table stamp, this sync-only identity is restored on
-	// mirror resends and is guarded by genSentMu.
-	sourceNatICMPSentV4 map[dataplane.SessionKey]sourceNatICMPMemo
-	sourceNatICMPSentV6 map[dataplane.SessionKeyV6]sourceNatICMPMemo
-	// #14359: per tuple, the admitting-policy identity (PolicyRuleID +
-	// PolicyCounterIdx) this node last SENT for one session incarnation
-	// (matched on SessionID), so a mirror-sourced resend cannot wipe it to
-	// ""/0. Guarded by genSentMu; see stampPolicyIdentityLocked.
-	policyIdentitySentV4 map[dataplane.SessionKey]policyIdentityMemo
-	policyIdentitySentV6 map[dataplane.SessionKeyV6]policyIdentityMemo
-	recvGenMu            sync.Mutex
-	// #9752 round 3: per tuple, the installing-table identity this node last
-	// RECEIVED for one session incarnation (matched on SessionID), so a
-	// stamp-less resend from an old sender cannot erase it. The BPF mirror
-	// cannot be the source — it drops sync-only fields on read — so the
-	// record lives here, beside the install generations, and is consulted on
-	// the receive apply before the dataplane write. Guarded by recvGenMu;
-	// see restoreInstallTableLocked.
-	installTableRecvV4 map[dataplane.SessionKey]recvInstallTable
-	installTableRecvV6 map[dataplane.SessionKeyV6]recvInstallTable
-	// #11064: last received source-NAT ICMP identity, kept outside the lossy
-	// BPF mirror so a promoted standby can resend the same allocator selector.
-	sourceNatICMPRecvV4 map[dataplane.SessionKey]sourceNatICMPMemo
-	sourceNatICMPRecvV6 map[dataplane.SessionKeyV6]sourceNatICMPMemo
-	// #14359: last RECEIVED policy identity, kept outside the lossy BPF
-	// mirror so a stamp-less resend cannot erase it and a promoted standby
-	// can resend the same binding. Guarded by recvGenMu.
-	policyIdentityRecvV4 map[dataplane.SessionKey]policyIdentityMemo
-	policyIdentityRecvV6 map[dataplane.SessionKeyV6]policyIdentityMemo
-	recvGenV4            map[dataplane.SessionKey]uint64
-	recvGenV6            map[dataplane.SessionKeyV6]uint64
-	// recvGenScopedV4/V6 + recvTombScopedV4/V6 are the #10512 scoped
-	// policy-delete receiver spaces, keyed by (domain, tuple). #14358
-	// couples deletes across spaces (a delete in either space tombstones
-	// the other at the same generation; install guards stay per-space).
-	// Guarded by recvGenMu; reclaimed/reset alongside the bare maps.
-	recvGenScopedV4 map[scopedDeleteKeyV4]uint64
-	recvGenScopedV6 map[scopedDeleteKeyV6]uint64
-	// recvGenScopedByTuple* invert the scoped receiver maps by bare tuple
-	// (#15039), guarded by recvGenMu, so a bare delete reaches its tuple's
-	// scoped entries without scanning the tombstone-pinned map.
-	recvGenScopedByTupleV4 scopedTupleIndex[dataplane.SessionKey, scopedDeleteKeyV4]
-	recvGenScopedByTupleV6 scopedTupleIndex[dataplane.SessionKeyV6, scopedDeleteKeyV6]
-	// recvTombV4/V6 order the TOMBSTONE entries of recvGenV4/V6, oldest first, so a
-	// map at its effective cap evicts the oldest tombstone to record a new key instead
-	// of skip-recording it (#9719). Guarded by recvGenMu; retained across same-namespace
-	// resets and cleared by a namespace reset.
-	recvTombV4 genTombstoneOrder[dataplane.SessionKey]
-	recvTombV6 genTombstoneOrder[dataplane.SessionKeyV6]
-	// Scoped tombstone orders (see the recvGenScoped comment above).
-	recvTombScopedV4 genTombstoneOrder[scopedDeleteKeyV4]
-	recvTombScopedV6 genTombstoneOrder[scopedDeleteKeyV6]
 	// applyMu serializes the receive-side session APPLY across receive loops
 	// (#9715).
 	//   - Every installClusterSynced* holds it from the guard, through the
@@ -2201,29 +2116,29 @@ func (s *SessionSync) initGenState() {
 	if seed == 0 {
 		seed = 1
 	}
-	s.genCounter.Store(seed)
-	s.genSentV4 = make(map[dataplane.SessionKey]uint64)
-	s.genSentV6 = make(map[dataplane.SessionKeyV6]uint64)
-	s.closeClassSentV4 = make(map[dataplane.SessionKey]sentCloseClass)
-	s.closeClassSentV6 = make(map[dataplane.SessionKeyV6]sentCloseClass)
-	s.tcpHandshakeSentV4 = make(map[dataplane.SessionKey]sentTCPHandshakeState)
-	s.tcpHandshakeSentV6 = make(map[dataplane.SessionKeyV6]sentTCPHandshakeState)
-	s.installTableSentV4 = make(map[dataplane.SessionKey]sentInstallTable)
-	s.installTableSentV6 = make(map[dataplane.SessionKeyV6]sentInstallTable)
-	s.sourceNatICMPSentV4 = make(map[dataplane.SessionKey]sourceNatICMPMemo)
-	s.sourceNatICMPSentV6 = make(map[dataplane.SessionKeyV6]sourceNatICMPMemo)
-	s.policyIdentitySentV4 = make(map[dataplane.SessionKey]policyIdentityMemo)
-	s.policyIdentitySentV6 = make(map[dataplane.SessionKeyV6]policyIdentityMemo)
-	s.recvGenV4 = make(map[dataplane.SessionKey]uint64)
-	s.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
-	s.installTableRecvV4 = make(map[dataplane.SessionKey]recvInstallTable)
-	s.installTableRecvV6 = make(map[dataplane.SessionKeyV6]recvInstallTable)
-	s.sourceNatICMPRecvV4 = make(map[dataplane.SessionKey]sourceNatICMPMemo)
-	s.sourceNatICMPRecvV6 = make(map[dataplane.SessionKeyV6]sourceNatICMPMemo)
-	s.policyIdentityRecvV4 = make(map[dataplane.SessionKey]policyIdentityMemo)
-	s.policyIdentityRecvV6 = make(map[dataplane.SessionKeyV6]policyIdentityMemo)
-	s.recvGenScopedV4 = make(map[scopedDeleteKeyV4]uint64)
-	s.recvGenScopedV6 = make(map[scopedDeleteKeyV6]uint64)
+	s.genState.genCounter.Store(seed)
+	s.genState.genSentV4 = make(map[dataplane.SessionKey]uint64)
+	s.genState.genSentV6 = make(map[dataplane.SessionKeyV6]uint64)
+	s.genState.closeClassSentV4 = make(map[dataplane.SessionKey]sentCloseClass)
+	s.genState.closeClassSentV6 = make(map[dataplane.SessionKeyV6]sentCloseClass)
+	s.genState.tcpHandshakeSentV4 = make(map[dataplane.SessionKey]sentTCPHandshakeState)
+	s.genState.tcpHandshakeSentV6 = make(map[dataplane.SessionKeyV6]sentTCPHandshakeState)
+	s.genState.installTableSentV4 = make(map[dataplane.SessionKey]sentInstallTable)
+	s.genState.installTableSentV6 = make(map[dataplane.SessionKeyV6]sentInstallTable)
+	s.genState.sourceNatICMPSentV4 = make(map[dataplane.SessionKey]sourceNatICMPMemo)
+	s.genState.sourceNatICMPSentV6 = make(map[dataplane.SessionKeyV6]sourceNatICMPMemo)
+	s.genState.policyIdentitySentV4 = make(map[dataplane.SessionKey]policyIdentityMemo)
+	s.genState.policyIdentitySentV6 = make(map[dataplane.SessionKeyV6]policyIdentityMemo)
+	s.genState.recvGenV4 = make(map[dataplane.SessionKey]uint64)
+	s.genState.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
+	s.genState.installTableRecvV4 = make(map[dataplane.SessionKey]recvInstallTable)
+	s.genState.installTableRecvV6 = make(map[dataplane.SessionKeyV6]recvInstallTable)
+	s.genState.sourceNatICMPRecvV4 = make(map[dataplane.SessionKey]sourceNatICMPMemo)
+	s.genState.sourceNatICMPRecvV6 = make(map[dataplane.SessionKeyV6]sourceNatICMPMemo)
+	s.genState.policyIdentityRecvV4 = make(map[dataplane.SessionKey]policyIdentityMemo)
+	s.genState.policyIdentityRecvV6 = make(map[dataplane.SessionKeyV6]policyIdentityMemo)
+	s.genState.recvGenScopedV4 = make(map[scopedDeleteKeyV4]uint64)
+	s.genState.recvGenScopedV6 = make(map[scopedDeleteKeyV6]uint64)
 	// #3931: seed the config generation from the same monotonic base so the
 	// sender's config-gen never regresses below a value the peer may hold
 	// across this node's restarts within a boot, and create the ordered
@@ -2501,7 +2416,7 @@ func (s *SessionSync) Stats() SyncStatsSnapshot {
 		RebaseSaturations:           s.stats.RebaseSaturations.Load(),
 		AuthUpgradeIdentityErrors:   s.stats.AuthUpgradeIdentityErrors.Load(),
 		DHCPLeasesDroppedNoIdentity: s.stats.DHCPLeasesDroppedNoIdentity.Load(),
-		GenGuardSessionCap:          s.genGuardSessionCap.Load(),
+		GenGuardSessionCap:          s.genState.genGuardSessionCap.Load(),
 	}
 }
 
@@ -2833,10 +2748,10 @@ func (s *SessionSync) FormatStats() string {
 }
 
 func (s *SessionSync) PeerIPsecSAs() []string {
-	s.peerIPsecSAsMu.Lock()
-	defer s.peerIPsecSAsMu.Unlock()
-	cp := make([]string, len(s.peerIPsecSAs))
-	copy(cp, s.peerIPsecSAs)
+	s.peerSnaps.peerIPsecSAsMu.Lock()
+	defer s.peerSnaps.peerIPsecSAsMu.Unlock()
+	cp := make([]string, len(s.peerSnaps.peerIPsecSAs))
+	copy(cp, s.peerSnaps.peerIPsecSAs)
 	return cp
 }
 
@@ -2923,19 +2838,19 @@ func (s *SessionSync) PeerDHCPLeases6() []dhcpserver.SyncLease {
 // time.Now(), whose monotonic reading makes the residence immune to wall-clock
 // steps.
 func (s *SessionSync) peerDHCPLeaseSnapshotAged(family int, now time.Time) dhcpserver.LeaseSyncSnapshot {
-	s.peerDHCPLeasesMu.Lock()
-	defer s.peerDHCPLeasesMu.Unlock()
+	s.peerSnaps.peerDHCPLeasesMu.Lock()
+	defer s.peerSnaps.peerDHCPLeasesMu.Unlock()
 	var snap dhcpserver.LeaseSyncSnapshot
 	var src []dhcpserver.SyncLease
 	var recvAt time.Time
 	if family == 6 {
-		snap = s.peerDHCPLeaseSnapshot6
-		src = s.peerDHCPLeases6
-		recvAt = s.peerDHCPLeases6RecvAt
+		snap = s.peerSnaps.peerDHCPLeaseSnapshot6
+		src = s.peerSnaps.peerDHCPLeases6
+		recvAt = s.peerSnaps.peerDHCPLeases6RecvAt
 	} else {
-		snap = s.peerDHCPLeaseSnapshot4
-		src = s.peerDHCPLeases4
-		recvAt = s.peerDHCPLeases4RecvAt
+		snap = s.peerSnaps.peerDHCPLeaseSnapshot4
+		src = s.peerSnaps.peerDHCPLeases4
+		recvAt = s.peerSnaps.peerDHCPLeases4RecvAt
 	}
 	if !snap.Received && src == nil && recvAt.IsZero() {
 		return snap
@@ -3010,17 +2925,17 @@ func (s *SessionSync) storePeerDHCPLeaseSnapshot(family int, snapshot dhcpserver
 	recvAt := time.Now()
 	snapshot.Leases = append([]dhcpserver.SyncLease(nil), snapshot.Leases...)
 	snapshot.Scopes = append([]dhcpserver.LeaseScopeAuthority(nil), snapshot.Scopes...)
-	s.peerDHCPLeasesMu.Lock()
+	s.peerSnaps.peerDHCPLeasesMu.Lock()
 	if family == 6 {
-		s.peerDHCPLeaseSnapshot6 = snapshot
-		s.peerDHCPLeases6 = snapshot.Leases
-		s.peerDHCPLeases6RecvAt = recvAt
+		s.peerSnaps.peerDHCPLeaseSnapshot6 = snapshot
+		s.peerSnaps.peerDHCPLeases6 = snapshot.Leases
+		s.peerSnaps.peerDHCPLeases6RecvAt = recvAt
 	} else {
-		s.peerDHCPLeaseSnapshot4 = snapshot
-		s.peerDHCPLeases4 = snapshot.Leases
-		s.peerDHCPLeases4RecvAt = recvAt
+		s.peerSnaps.peerDHCPLeaseSnapshot4 = snapshot
+		s.peerSnaps.peerDHCPLeases4 = snapshot.Leases
+		s.peerSnaps.peerDHCPLeases4RecvAt = recvAt
 	}
-	s.peerDHCPLeasesMu.Unlock()
+	s.peerSnaps.peerDHCPLeasesMu.Unlock()
 }
 
 // QueueDHCPLeases sends a legacy-compatible full-set DHCP-server lease push.
