@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/dataplane/mgmtview"
 	dpformat "github.com/psaab/xpf/pkg/dataplane/userspace/format"
 )
 
@@ -20,7 +20,7 @@ func (c *CLI) showSecurityWireguard(detail bool) error {
 	// operator the firewall is running a non-userspace dataplane — the
 	// r6-F3 defect at a site the dpProbe() conversion left behind. ONE
 	// resolution feeds both decisions, as in showSystemBuffers (r7).
-	backend := dataplane.Unwrap(c.dp)
+	backend := mgmtview.Probe(c.dp)
 	if backend == nil {
 		fmt.Println("Dataplane not loaded")
 		return nil
@@ -47,7 +47,7 @@ func (c *CLI) showSecurityWireguard(detail bool) error {
 func (c *CLI) showSecurityWireguardPublicKey() error {
 	// #2114/#6743 r2-B4: same single-resolution publication check as
 	// showSecurityWireguard.
-	backend := dataplane.Unwrap(c.dp)
+	backend := mgmtview.Probe(c.dp)
 	if backend == nil {
 		fmt.Println("Dataplane not loaded")
 		return nil

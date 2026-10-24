@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/dataplane/mgmtview"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/fwdstatus"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
@@ -155,7 +155,7 @@ func (c *CLI) forwardingStatusDataplane() fwdstatus.DataPlaneAccessor {
 	// wrapper and fwdstatus.Build reported "Buffer utilization 0 percent"
 	// with BufferKnown=TRUE — a zero that every downstream consumer is
 	// told to trust — where the nil-dp control says "unknown (see #878)".
-	backend := dataplane.Unwrap(c.dp)
+	backend := mgmtview.Probe(c.dp)
 	if backend == nil {
 		return nil
 	}

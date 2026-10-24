@@ -16,6 +16,7 @@ package cli
 import (
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/dataplane/mgmtview"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
@@ -124,21 +125,21 @@ type cliUserspaceControlProvider interface {
 }
 
 // dpProbe returns the value that OPTIONAL-capability assertions must be
-// made against. See pkg/grpcapi/runtime.go's dpProbe for the full #2114 /
-// #6743-F1 rationale: the daemon publishes a live indirection whose method
-// set is exactly cliRuntime, so probing it directly erases
-// cliUserspaceStatusProvider, cliUserspaceControlProvider, the session
-// cursor and the applied-NAT view for a healthy backend. Unwrap is the
-// identity for a plain backend and nil once the daemon has disowned one.
+// made against. It is the shared mgmtview.Probe: exactly one
+// dataplane.Unwrap per call, resolved fresh against the backend
+// published at this instant, never cached across backend replacement
+// (#2114/#6743-F1; see mgmtview.Probe for the full rationale). The nil
+// receiver answers nil so a probe after teardown fails closed.
 func (c *CLI) dpProbe() any {
 	if c == nil {
 		return nil
 	}
-	return dataplane.Unwrap(c.dp)
+	return mgmtview.Probe(c.dp)
 }
 
 // backendSessionCount and backendMapStats read the mandatory management
-// surface off an ALREADY-RESOLVED backend (Codex PR #6743 r7-F3).
+// surface off an ALREADY-RESOLVED backend via the shared mgmtview
+// helpers (Codex PR #6743 r7-F3).
 //
 // showSystemBuffers / showSystemBuffersDetail take exactly one
 // dataplane.Unwrap and must not take another: c.dp.SessionCount() and
@@ -152,17 +153,9 @@ func (c *CLI) dpProbe() any {
 // stored in CLI.dp satisfies them; the ok=false arms are the
 // forward-compatibility answer for a future backend that does not.
 func backendSessionCount(backend any) (v4, v6 int) {
-	c, ok := backend.(interface{ SessionCount() (int, int) })
-	if !ok {
-		return 0, 0
-	}
-	return c.SessionCount()
+	return mgmtview.SessionCount(backend)
 }
 
 func backendMapStats(backend any) []dataplane.MapStats {
-	m, ok := backend.(interface{ GetMapStats() []dataplane.MapStats })
-	if !ok {
-		return nil
-	}
-	return m.GetMapStats()
+	return mgmtview.MapStats(backend)
 }

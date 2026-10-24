@@ -14,7 +14,7 @@ import (
 	"github.com/psaab/xpf/pkg/clockskew"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
-	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/dataplane/mgmtview"
 	dpformat "github.com/psaab/xpf/pkg/dataplane/userspace/format"
 	"github.com/psaab/xpf/pkg/sysinfo"
 	"github.com/psaab/xpf/pkg/sysservices"
@@ -46,7 +46,7 @@ func (c *CLI) showSystemBuffers() error {
 	// cell again. Only the userspace arm had been converted. No CLI-side
 	// test asserted a load count at all, so nothing could catch it. Now
 	// bound by TestCLIShowSystemBuffersTakesOneCellLoad.
-	backend := dataplane.Unwrap(c.dp)
+	backend := mgmtview.Probe(c.dp)
 	if backend == nil {
 		fmt.Println("Dataplane not loaded")
 		return nil
@@ -123,7 +123,7 @@ func (c *CLI) showSystemBuffersDetail() error {
 	// including the session-count tail — which read c.dp.SessionCount()
 	// here too until the r4-F1 correction. Bound, for this render as well,
 	// by TestCLIShowSystemBuffersTakesOneCellLoad.
-	backend := dataplane.Unwrap(c.dp)
+	backend := mgmtview.Probe(c.dp)
 	if backend == nil {
 		fmt.Println("Dataplane not loaded")
 		return nil

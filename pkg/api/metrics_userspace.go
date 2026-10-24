@@ -2,7 +2,7 @@ package api
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/dataplane/mgmtview"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
@@ -26,7 +26,7 @@ func fetchUserspaceStatus(dp apiRuntimeDataPlane) *dpuserspace.ProcessStatus {
 	// asserting Status() on it returns !ok for a healthy userspace helper
 	// and suppresses every userspace metric family. Unwrap is the identity
 	// for a plain backend, nil once the daemon has disowned one.
-	provider, ok := dataplane.Unwrap(dp).(interface {
+	provider, ok := mgmtview.Probe(dp).(interface {
 		Status() (dpuserspace.ProcessStatus, error)
 	})
 	if !ok {
@@ -43,7 +43,7 @@ func fetchUserspaceStatus(dp apiRuntimeDataPlane) *dpuserspace.ProcessStatus {
 // separately from helper status, so their series remain available while the
 // helper is down.
 func fetchUserspaceEventStreamStatus(dp apiRuntimeDataPlane) *dpuserspace.EventStreamStatus {
-	provider, ok := dataplane.Unwrap(dp).(interface {
+	provider, ok := mgmtview.Probe(dp).(interface {
 		UserspaceEventStreamStatus() dpuserspace.EventStreamStatus
 	})
 	if !ok {

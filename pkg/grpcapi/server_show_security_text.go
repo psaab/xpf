@@ -30,6 +30,7 @@ import (
 	"github.com/psaab/xpf/pkg/clockskew"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/dataplane/mgmtview"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	dpformat "github.com/psaab/xpf/pkg/dataplane/userspace/format"
 	"github.com/psaab/xpf/pkg/feeds"
@@ -1485,7 +1486,7 @@ func (s *Server) showWireguard(buf *strings.Builder, detail bool) {
 	// takes exactly one (r7): a setDataplane(nil) landing between a
 	// publication check and a separate probe re-creates the confusion the
 	// check exists to prevent.
-	backend := dataplane.Unwrap(s.dp)
+	backend := mgmtview.Probe(s.dp)
 	if backend == nil {
 		buf.WriteString("Dataplane not loaded\n")
 		return
@@ -1510,7 +1511,7 @@ func (s *Server) showWireguard(buf *strings.Builder, detail bool) {
 func (s *Server) showWireguardPublicKey(buf *strings.Builder) {
 	// #2114/#6743 r2-B4: same single-resolution publication check as
 	// showWireguard — ask the cell, not the permanently non-nil field.
-	backend := dataplane.Unwrap(s.dp)
+	backend := mgmtview.Probe(s.dp)
 	if backend == nil {
 		buf.WriteString("Dataplane not loaded\n")
 		return

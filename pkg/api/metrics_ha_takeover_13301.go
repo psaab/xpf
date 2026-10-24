@@ -2,7 +2,7 @@ package api
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/dataplane/mgmtview"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
@@ -14,7 +14,7 @@ var haTakeoverBlockers13301 = [...]string{
 }
 
 func (c *xpfCollector) emitHATakeoverReadiness13301(ch chan<- prometheus.Metric, dp apiRuntimeDataPlane) {
-	provider, ok := dataplane.Unwrap(dp).(interface {
+	provider, ok := mgmtview.Probe(dp).(interface {
 		HATakeoverReadiness() dpuserspace.HATakeoverReadiness
 	})
 	if !ok {
