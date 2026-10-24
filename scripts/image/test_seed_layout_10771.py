@@ -3,19 +3,18 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 _HERE = Path(__file__).resolve().parent
-_SPEC = importlib.util.spec_from_file_location(
-    "seed_layout_10771", _HERE / "seed_layout_10771.py")
-seed_layout = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(seed_layout)
+seed_layout = load_subject("seed_layout_10771", _HERE / "seed_layout_10771.py")
 
 BINS = ("xpfd", "cli", "xpf-userspace-dp", "xpf-day0-config")
 

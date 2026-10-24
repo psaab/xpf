@@ -24,7 +24,6 @@ feeds the gate), `_node_protocol_versions` (the peer probe parse),
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import shutil
 import subprocess
@@ -33,12 +32,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-_SPEC = importlib.util.spec_from_file_location(
-    "xpf_deploy", Path(__file__).with_name("xpf-deploy.py")
-)
-xpf_deploy = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(xpf_deploy)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
+xpf_deploy = load_subject("xpf_deploy", Path(__file__).with_name("xpf-deploy.py"))
 
 
 # The Go parity fixture (imageversions_test.go sampleManifest): a bake

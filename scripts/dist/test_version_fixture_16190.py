@@ -17,11 +17,13 @@ TestVersionFixture16190 in pkg/upgrade.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
@@ -32,16 +34,9 @@ _FIXTURE = json.loads((_HERE / "version_fixture_16190.json").read_text())
 CASES = _FIXTURE["cases"]
 
 
-def _load(name, path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
-    return mod
 
-
-bake = _load("xpf_bake_16190", _ROOT / "scripts" / "image" / "bake.py")
-deploy = _load("xpf_deploy_16190", _ROOT / "scripts" / "deploy" / "xpf-deploy.py")
+bake = load_subject("xpf_bake_16190", _ROOT / "scripts" / "image" / "bake.py")
+deploy = load_subject("xpf_deploy_16190", _ROOT / "scripts" / "deploy" / "xpf-deploy.py")
 
 
 def _sign_ok(v):

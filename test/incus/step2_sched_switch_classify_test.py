@@ -13,7 +13,6 @@ Run:
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import sys
@@ -21,22 +20,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 
 _HERE = Path(__file__).resolve().parent
 _CLASSIFY_PATH = _HERE / "step2-sched-switch-classify.py"
 
 
-def _load_classifier():
-    spec = importlib.util.spec_from_file_location(
-        "step2_sched_switch_classify", str(_CLASSIFY_PATH)
-    )
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
-
-C = _load_classifier()
+C = load_subject("step2_sched_switch_classify", str(_CLASSIFY_PATH))
 
 
 def _write_jsonl(objs: list[dict]) -> Path:

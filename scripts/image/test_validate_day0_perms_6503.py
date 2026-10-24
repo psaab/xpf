@@ -31,15 +31,15 @@ Two details worth stating, because a naive version of this check has both bugs:
 
 from __future__ import annotations
 
-import importlib.util
+import sys
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 _HERE = Path(__file__).resolve().parent
-_SPEC = importlib.util.spec_from_file_location("validate", _HERE / "validate.py")
-validate = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(validate)
+validate = load_subject("validate", _HERE / "validate.py")
 
 GOOD = "600 root:root regular file"
 

@@ -18,21 +18,21 @@ RED on revert: drop the validate_apt_url call and every bad-URL case exits 0.
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 _DIST = Path(__file__).resolve().parent
 _INSTALLSH = _DIST / "install.sh"
 
-_SPEC = importlib.util.spec_from_file_location("publish", _DIST / "publish.py")
-publish = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(publish)
+publish = load_subject("publish", _DIST / "publish.py")
 
 _TEST_ARCHIVE_KEY = """\
 -----BEGIN PGP PUBLIC KEY BLOCK-----

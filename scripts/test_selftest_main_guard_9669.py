@@ -15,7 +15,8 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
 _GLOBS = ["scripts/image/test_*.py", "scripts/dist/test_*.py",
-          "scripts/deploy/test_*.py", "scripts/test_*.py"]
+          "scripts/deploy/test_*.py", "scripts/test_*.py",
+          "scripts/lib/test_*.py"]
 _GUARD = re.compile(r'^if __name__ == ["\']__main__["\']:', re.M)
 _TOPLEVEL_DEF = re.compile(r"^(class|def) ", re.M)
 

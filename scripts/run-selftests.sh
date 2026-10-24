@@ -259,12 +259,12 @@ else
 	skipl "shellcheck not installed (apt-get install shellcheck)"
 fi
 
-# ── 3. python unittest self-tests (image / deploy / scripts root) ──
+# ── 3. python unittest self-tests (image / deploy / scripts root / lib) ──
 # (#15241 A58-05): scripts/*_test.py is the suffix convention one level
 # down from scripts/test_*.py; without it
 # scripts/userspace_ha_validation_matrix_test.py ran in no gate.
 hdr "python self-tests"
-for t in scripts/image/test_*.py scripts/dist/test_*.py scripts/deploy/test_*.py scripts/test_*.py scripts/*_test.py; do
+for t in scripts/image/test_*.py scripts/dist/test_*.py scripts/deploy/test_*.py scripts/test_*.py scripts/*_test.py scripts/lib/test_*.py; do
 	[ -f "$t" ] || continue
 	run_py "$t"
 done

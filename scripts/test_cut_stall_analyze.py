@@ -11,7 +11,6 @@ Sep-13 journals.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import subprocess
 import sys
@@ -20,13 +19,10 @@ import textwrap
 import unittest
 from pathlib import Path
 
-_SPEC = importlib.util.spec_from_file_location(
-    "cut_stall_analyze", Path(__file__).with_name("cut_stall_analyze.py")
-)
-csa = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-sys.modules[_SPEC.name] = csa
-_SPEC.loader.exec_module(csa)
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
+csa = load_subject("cut_stall_analyze", Path(__file__).with_name("cut_stall_analyze.py"))
 
 
 IPERF_EXCERPT = """\

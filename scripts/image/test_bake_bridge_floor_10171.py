@@ -36,26 +36,22 @@ On revert (drop a helper, the splice, or a symbol) these go RED.
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import shutil
 import subprocess
+import sys
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 
 
-def _load(name):
-    spec = importlib.util.spec_from_file_location(name, HERE / f"{name}.py")
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
-
-bake = _load("bake")
-validate = _load("validate")
+bake = load_subject("bake", HERE / "bake.py")
+validate = load_subject("validate", HERE / "validate.py")
 
 SYMBOLS = ("CONFIG_BRIDGE", "CONFIG_NF_TABLES_BRIDGE")
 KV_FIX = "9.9.9-10171-test"

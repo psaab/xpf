@@ -32,8 +32,8 @@ DEFAULT_ROOT_SHAPE_BPS = 25_000_000_000.0
 # validator-local spellings because the manifest checks below key on
 # them; only the values' provenance changed.
 #
-# The sys.path insert is required for the spec_from_file_location loaders
-# the _test.py files use (they do not put test/incus on sys.path); it is
+# The sys.path insert is required for the module loads the _test.py
+# files perform (they do not put test/incus on sys.path); it is
 # the same self-location the cos-simul-load-smoke heredoc does (#4239
 # V-10).
 _HERE = str(Path(__file__).resolve().parent)

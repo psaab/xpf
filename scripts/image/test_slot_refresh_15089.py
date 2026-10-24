@@ -31,13 +31,16 @@ stays green.
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -46,10 +49,7 @@ HELPER = HERE / "xpf-uefi-slots"
 TRIGGERS = ROOT / "debian" / "xpf.triggers"
 POSTINST = ROOT / "debian" / "xpf.postinst"
 
-_spec = importlib.util.spec_from_file_location("validate", VALIDATE)
-validate = importlib.util.module_from_spec(_spec)
-assert _spec.loader is not None
-_spec.loader.exec_module(validate)
+validate = load_subject("validate", VALIDATE)
 
 LOADERS = ("shimx64.efi", "grubx64.efi", "mmx64.efi")
 

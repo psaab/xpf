@@ -2,21 +2,18 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 
 MODULE_PATH = Path(__file__).with_name("policy_scheduler_validate.py")
-SPEC = importlib.util.spec_from_file_location("policy_scheduler_validate", MODULE_PATH)
-assert SPEC is not None
-policy_validate = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-sys.modules["policy_scheduler_validate"] = policy_validate
-SPEC.loader.exec_module(policy_validate)
+policy_validate = load_subject("policy_scheduler_validate", MODULE_PATH)
 
 
 RULE_ID = "trust->untrust/scheduled-allow"

@@ -17,15 +17,14 @@ the traversal versions stop raising SystemExit — the asserts flip.
 
 from __future__ import annotations
 
-import importlib.util
 import unittest
 from pathlib import Path
 
-_SPEC = importlib.util.spec_from_file_location(
-    "xpf_bake", Path(__file__).with_name("bake.py"))
-bake = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(bake)
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
+bake = load_subject("xpf_bake", Path(__file__).with_name("bake.py"))
 
 
 _BAD = [
@@ -52,11 +51,9 @@ class BakeValidateVersionTests(unittest.TestCase):
     def test_charset_parity_with_deploy(self):
         # The bake and xpf-deploy validators must accept/reject the SAME
         # versions (both name xpf-<ver> artifacts) — a drift is a real bug.
-        deploy_spec = importlib.util.spec_from_file_location(
+        deploy = load_subject(
             "xpf_deploy_p", Path(__file__).resolve().parents[1]
             / "deploy" / "xpf-deploy.py")
-        deploy = importlib.util.module_from_spec(deploy_spec)
-        deploy_spec.loader.exec_module(deploy)
         for v in _GOOD + _BAD:
             bake_ok = deploy_ok = True
             try:

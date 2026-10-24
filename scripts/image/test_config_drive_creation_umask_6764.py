@@ -22,18 +22,17 @@ chmod cannot repair a window that has already closed.
 
 from __future__ import annotations
 
-import importlib.util
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-_SPEC = importlib.util.spec_from_file_location(
-    "make_config_drive", Path(__file__).with_name("make_config_drive.py"))
-mcd = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(mcd)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
+mcd = load_subject("make_config_drive", Path(__file__).with_name("make_config_drive.py"))
 
 
 class ConfigDriveCreationUmaskTests(unittest.TestCase):

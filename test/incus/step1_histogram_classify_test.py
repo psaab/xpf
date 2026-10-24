@@ -8,7 +8,6 @@ regression-tested for safety.
 """
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
 
 # #8136: pytest is not installed here and these run under `unittest
@@ -18,21 +17,16 @@ from pathlib import Path
 from unittest_shim import approx, collect_module_tests, raises
 import numpy as np
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 
-def _import_module(filename: str, mod_name: str):
-    spec = importlib.util.spec_from_file_location(
-        mod_name, SCRIPT_DIR / filename
-    )
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
-    return mod
 
-
-step1 = _import_module("step1-histogram-classify.py", "step1_histogram")
+step1 = load_subject("step1_histogram", SCRIPT_DIR / "step1-histogram-classify.py")
 
 
 def make_binding(

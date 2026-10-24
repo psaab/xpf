@@ -25,30 +25,25 @@ the swap cells.
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 _HERE = Path(__file__).resolve().parent
 
 
-def _load(name, directory):
-    spec = importlib.util.spec_from_file_location(
-        name, Path(directory) / f"{name}.py")
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
-    return mod
 
-
-bake = _load("bake", _HERE)
-sign = _load("sign", _HERE.parent / "dist")
+bake = load_subject("bake", _HERE / "bake.py")
+sign = load_subject("sign", _HERE.parent / "dist" / "sign.py")
 
 _HAVE_MINISIGN = shutil.which("minisign") is not None
 

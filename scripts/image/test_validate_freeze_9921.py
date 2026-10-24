@@ -17,7 +17,6 @@ live paths, main's ordering spy observes _frozen False.
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import stat
 import sys
@@ -27,11 +26,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 _HERE = Path(__file__).resolve().parent
-_SPEC = importlib.util.spec_from_file_location("validate", _HERE / "validate.py")
-validate = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(validate)
+validate = load_subject("validate", _HERE / "validate.py")
 
 
 def _live_pair(tmpdir, qbytes=b"ORIGINAL-QCOW-BYTES", mbytes=b"ORIGINAL-META-BYTES"):

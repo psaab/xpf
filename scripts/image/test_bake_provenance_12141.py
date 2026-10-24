@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import os
 import subprocess
@@ -16,12 +15,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 _HERE = Path(__file__).resolve().parent
 _REPO = _HERE.parent.parent
-_SPEC = importlib.util.spec_from_file_location("xpf_bake_provenance", _HERE / "bake.py")
-bake = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(bake)
+bake = load_subject("xpf_bake_provenance", _HERE / "bake.py")
 
 
 class BuildProvenanceTests(unittest.TestCase):
@@ -495,11 +494,8 @@ class BuildProvenanceTests(unittest.TestCase):
         # quote, in-quote backslash, single-quote backslash, VT). Ground
         # truth verified against /usr/lib/go-1.26 quoted.go via a go-run
         # driver (11 table cells + unterminated + 2 empty-input shapes).
-        _PROV_SPEC = importlib.util.spec_from_file_location(
+        _prov = load_subject(
             "xpf_build_provenance_head", _HERE / "build_provenance.py")
-        assert _PROV_SPEC.loader is not None
-        _prov = importlib.util.module_from_spec(_PROV_SPEC)
-        _PROV_SPEC.loader.exec_module(_prov)
         _split_go_flags = _prov._split_go_flags
         DQ, SQ, BS, VT, NB = chr(34), chr(39), chr(92), chr(11), chr(160)
         A = "/tmp/x.json"

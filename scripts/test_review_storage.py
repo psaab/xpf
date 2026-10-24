@@ -6,20 +6,18 @@ discovery, so no existing temporary reports, Git checkout metadata, or network
 access are needed. Publication and watcher behavior are not exercised here.
 """
 
-import importlib.util
 import io
 import json
+import sys
 from pathlib import Path
 import unittest
 from unittest.mock import call, patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+from load_subject import load_subject  # noqa: E402
 
-_SPEC = importlib.util.spec_from_file_location(
-    "review_dedup", Path(__file__).with_name("review-dedup-check.py")
-)
-dedup = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(dedup)
+
+dedup = load_subject("review_dedup", Path(__file__).with_name("review-dedup-check.py"))
 
 NEW_REPORT = "/var/tmp/deep-review-reports/gpt-5.6-sol-review-storage-001.md"
 FINISHED_REPORT = "/var/tmp/deep-review-finished/gpt-5.6-sol-review-storage-007.md"

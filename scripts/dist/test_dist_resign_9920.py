@@ -32,7 +32,6 @@ killing mutation as a `# kill:` comment.
 from __future__ import annotations
 
 import contextlib
-import importlib.util
 import io
 import os
 import re
@@ -45,21 +44,16 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
 sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_ROOT / "scripts" / "image"))
 import sign  # noqa: E402
-_SPEC = importlib.util.spec_from_file_location(
-    "xpf_bake", _ROOT / "scripts" / "image" / "bake.py")
-bake = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(bake)
-_PSPEC = importlib.util.spec_from_file_location(
-    "xpf_publish_9920", _HERE / "publish.py")
-publish = importlib.util.module_from_spec(_PSPEC)
-assert _PSPEC.loader is not None
-_PSPEC.loader.exec_module(publish)
+bake = load_subject("xpf_bake", _ROOT / "scripts" / "image" / "bake.py")
+publish = load_subject("xpf_publish_9920", _HERE / "publish.py")
 
 _HAVE_MINISIGN = shutil.which("minisign") is not None
 VER = "9.9.20"

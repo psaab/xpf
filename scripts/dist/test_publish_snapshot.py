@@ -18,19 +18,19 @@ mutable tree) the race test uploads the REPLACED bytes and goes RED.
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import shutil
 import stat
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 _DIST = Path(__file__).resolve().parent
-_SPEC = importlib.util.spec_from_file_location("publish", _DIST / "publish.py")
-publish = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(publish)
+publish = load_subject("publish", _DIST / "publish.py")
 
 
 class SnapshotIsolationTests(unittest.TestCase):

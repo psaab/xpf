@@ -2,21 +2,18 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 
 MODULE_PATH = Path(__file__).with_name("retire_ebpf_artifact_schema.py")
-SPEC = importlib.util.spec_from_file_location("retire_ebpf_artifact_schema", MODULE_PATH)
-assert SPEC is not None
-schema = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-sys.modules["retire_ebpf_artifact_schema"] = schema
-SPEC.loader.exec_module(schema)
+schema = load_subject("retire_ebpf_artifact_schema", MODULE_PATH)
 
 
 COMMIT = "a" * 40

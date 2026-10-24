@@ -7,7 +7,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import errno
-import importlib.util
 import io
 import json
 import os
@@ -20,15 +19,15 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parents[1]
 sys.path.insert(0, str(_ROOT / "scripts" / "dist"))
 import sign  # noqa: E402
 
-_SPEC = importlib.util.spec_from_file_location("xpf_deploy_10767", _HERE / "xpf-deploy.py")
-deploy = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(deploy)
+deploy = load_subject("xpf_deploy_10767", _HERE / "xpf-deploy.py")
 
 
 @unittest.skipUnless(shutil.which("minisign") and shutil.which("curl"),

@@ -16,17 +16,15 @@ must still cover the reference topology at the pinned 80 pages/binding.
 
 from __future__ import annotations
 
-import importlib.util
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-_SPEC = importlib.util.spec_from_file_location(
-    "bake", Path(__file__).with_name("bake.py")
-)
-bake = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(bake)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
+bake = load_subject("bake", Path(__file__).with_name("bake.py"))
 
 CONF_PATH_PREFIX = "/etc/sysctl.d/99-xpf-hugepages.conf:"
 

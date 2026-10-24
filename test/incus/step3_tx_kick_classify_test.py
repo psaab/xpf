@@ -8,7 +8,6 @@ source-of-truth split.
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 
@@ -18,21 +17,16 @@ from pathlib import Path
 # test functions, which unittest would otherwise not find at all.
 from unittest_shim import approx, collect_module_tests, raises
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 
-def _import_module(filename: str, mod_name: str):
-    spec = importlib.util.spec_from_file_location(
-        mod_name, SCRIPT_DIR / filename
-    )
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
-    return mod
 
-
-classify_mod = _import_module("step3-tx-kick-classify.py", "step3_tx_kick")
+classify_mod = load_subject("step3_tx_kick", SCRIPT_DIR / "step3-tx-kick-classify.py")
 
 
 def make_block(

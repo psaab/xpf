@@ -33,16 +33,16 @@ the bake holds would either red on a good image or certify an unprotected one.
 
 from __future__ import annotations
 
-import importlib.util
 import re
+import sys
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 _HERE = Path(__file__).resolve().parent
-_SPEC = importlib.util.spec_from_file_location("validate", _HERE / "validate.py")
-validate = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(validate)
+validate = load_subject("validate", _HERE / "validate.py")
 
 KVER = "7.0.0-15-generic"
 
