@@ -914,7 +914,22 @@ too.
 > `TestAnchoredDenyAgreesAcrossSurfaces9022` asserts the agreement rather than
 > each side separately. The separate ARGUMENT-TEXT gap recorded in
 > `pkg/grpcapi/authz_command_table_topics.go` (a regex written against argument
-> text matches on the box and not remotely) is unchanged and still open.
+> text matches on the box and not remotely) was closed by #16067.
+>
+> **The base spelling agrees too (#16472).** A selector-bearing command's
+> registry charge is its selector spelling (`show firewall filter`,
+> `show route table`), so an anchored deny on the BASE spelling
+> (`^show firewall$`, `^show route$`) — which the console reaches through
+> its selector-stripped forms — held on the console and not over the remote
+> CLI. The remote gates now judge the canonical base/full/selector
+> spellings of the executed line and of the bare charge (shared
+> `cmdtree` forms, plus the #14687 distinct-narrower rescue), so the two
+> surfaces agree for the anchored base, full and selector spellings;
+> `TestRemoteBaseDenyCrossSurface16472` asserts it per registry topic.
+> One asymmetry remains, in the fail-closed direction: the charge
+> spelling itself (`show route table`) is still judged remotely, so a
+> rule anchored to it can deny remotely where the console — which never
+> mints that spelling for the value-bearing line — allows.
 
 #### An EMPTY pattern is not an absent one
 

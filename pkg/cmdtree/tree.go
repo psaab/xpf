@@ -135,6 +135,10 @@ type Node struct {
 	// cannot express these. A dynamic node used to share this arm and its
 	// unbounded absorption; since #9505 it takes one value, like a typed leaf.
 	// Under an Options node the absorption stops at the next option keyword.
+	// Since #16472 the shared form walk (CanonicalForms /
+	// chargeTokens16472 in canonical_forms_16472.go) also reads this flag to
+	// end a command form at an AcceptsArgs node, as the pkg/cli walk did
+	// before the move; that is a deliberate second reader, not drift.
 	AcceptsArgs bool
 
 	// Options marks a node whose dispatcher parses its children as combinable
@@ -153,7 +157,12 @@ type Node struct {
 	// dispatches on args[0] and drops the rest, so `show route table X
 	// protocol Y` runs `show route table X`. Marking it would let an anchored
 	// deny on that command be stepped around with a sibling keyword, the
-	// bypass this flag must not reopen. Honoured only in Canonicalize.
+	// bypass this flag must not reopen. Honoured in Canonicalize and, since
+	// #16472, in CanonicalForms / chargeTokens16472
+	// (canonical_forms_16472.go) — the shared form walk that derives the
+	// spellings every login-class gate judges; it reads the flag to end a
+	// command form at an Options container exactly as the form walk in
+	// pkg/cli did before the move. No other reader is permitted.
 	Options bool
 
 	// RequiresValue marks a dynamic node (#14687) whose value is mandatory:

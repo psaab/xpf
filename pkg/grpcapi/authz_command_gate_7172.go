@@ -140,6 +140,15 @@ func (s *Server) authorizeRPCCommand(cfg *config.Config, class, fullMethod strin
 	// unanimity lets a deny that wins on any spelling veto it, while
 	// the argument-free charge stays a form so anchored path rules
 	// keep firing. An unreconstructable argument string denies.
+	//
+	// #16472: the form set now also carries the canonical base /
+	// keyword-full / selector spellings of the executed line and of
+	// the charge (see rpcArgumentForms / canonicalArgumentForms), so
+	// an anchored deny on the BASE spelling of a selector-bearing
+	// command (`^show firewall$` over `firewall-filter:F1`) fires
+	// here exactly as the console's canonicalForms make it fire
+	// there. The console's #14687 distinct-narrower rescue is applied
+	// in remoteDistinctRescue16472 via the shared cmdtree helper.
 	forms, named := rpcArgumentForms(cfg, fullMethod, req, cmd)
 	if !named {
 		return fmt.Errorf(
@@ -147,9 +156,36 @@ func (s *Server) authorizeRPCCommand(cfg *config.Config, class, fullMethod strin
 				"named as a command, so the restriction cannot be applied to it", class)
 	}
 	if decision := rules.EvaluateForms(forms[0], forms[0], forms[1:]...); !decision.Allowed {
+		if remoteDistinctRescue16472(rules, forms) {
+			return nil
+		}
 		return fmt.Errorf("login class %q denies %q (%s)", class, cmd, decision.Reason)
 	}
 	return nil
+}
+
+// remoteDistinctRescue16472 applies the #14687 distinct-narrower
+// rescue over the reconstructed form set, via the shared
+// cmdtree.DistinctNarrowerAllowed the console uses (#16472). The
+// executed spelling is forms[0] as rpcArgumentForms built it; its
+// chain form comes from CanonicalForms over its canonicalisation.
+// Free-text filter forms that do not canonicalise have no chain form
+// and are never rescued. Unlike the console it has no pipe text, so
+// matched == command and the shared pipe arms never engage.
+func remoteDistinctRescue16472(rules config.CompiledLoginRegexes, forms []string) bool {
+	if len(forms) == 0 {
+		return false
+	}
+	executed := forms[0]
+	canon, res := cmdtree.Canonicalize(cmdtree.OperationalTree, strings.Fields(executed))
+	if res != cmdtree.CanonicalOK || strings.Join(canon, " ") != executed {
+		return false
+	}
+	baseForm, fullForm, selectorForms, chainForm := canonicalFormsOf16472(canon)
+	if chainForm == "" {
+		return false
+	}
+	return cmdtree.DistinctNarrowerAllowed(rules, executed, executed, baseForm, fullForm, selectorForms)
 }
 
 // isCompleteMethod reports whether fullMethod is the Complete RPC.
