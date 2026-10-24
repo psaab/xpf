@@ -46,7 +46,7 @@ func (c *CLI) showFirewallFilters() error {
 	if status, err := c.userspaceDataplaneStatus(); err == nil {
 		userspaceStatus = &status
 	}
-	userspaceCounters := dpuserspace.BuildFirewallFilterTermCounterIndex(userspaceStatus)
+	userspaceCounters := dpuserspace.BuildFirewallFilterTermCounterIndexForConfig(userspaceStatus, cfg)
 	// #16457: kernel lo0 counters for lo0-referenced filters.
 	var lo0Err error
 	lo0For := func(family, name string) []xnft.Lo0Count {
@@ -60,6 +60,7 @@ func (c *CLI) showFirewallFilters() error {
 	// #3408: surface a filter counter read failure as a warning AFTER all
 	// filters, rather than printing clean-zero / omitted hit counts.
 	var readErr error
+	cloneFold16464 := dpuserspace.BuildCloneCounterFold16464(cfg)
 	showFilters := func(family string, filters map[string]*config.FirewallFilter, names []string) {
 		for _, name := range names {
 			f := filters[name]
@@ -79,6 +80,25 @@ func (c *CLI) showFirewallFilters() error {
 				}
 			}
 
+			// #16464: eBPF map slots for this source also include clone
+			// slots (compiler iterates every filter incl. clones).
+			cloneRuleStart16464 := make(map[string]uint32)
+			cloneHas16464 := make(map[string]bool)
+			if filterIDs != nil {
+				for cloneName, source := range cloneFold16464[family] {
+					if source != name {
+						continue
+					}
+					if fid, ok := filterIDs[family+":"+cloneName]; ok {
+						if fcfg, err := c.dp.ReadFilterConfig(fid); err == nil {
+							cloneRuleStart16464[cloneName] = fcfg.RuleStart
+							cloneHas16464[cloneName] = true
+						} else if readErr == nil {
+							readErr = err
+						}
+					}
+				}
+			}
 			ruleOffset := ruleStart
 			for _, term := range f.Terms {
 				if term == nil {
@@ -104,6 +124,39 @@ func (c *CLI) showFirewallFilters() error {
 					}
 					ruleOffset += numRules
 				}
+				// #16464: fold each clone's eBPF slots for this term
+				// (same-ordinal clone term) into the source total.
+				for cloneName := range cloneHas16464 {
+					var cloneFilter *config.FirewallFilter
+					if family == "inet" {
+						cloneFilter = cfg.Firewall.FiltersInet[cloneName]
+					} else {
+						cloneFilter = cfg.Firewall.FiltersInet6[cloneName]
+					}
+					if cloneFilter == nil {
+						continue
+					}
+					cloneOffset := cloneRuleStart16464[cloneName]
+					matched := false
+					for _, ct := range cloneFilter.Terms {
+						if ct == nil {
+							continue
+						}
+						cn := config.FilterTermExpansionCount(ct, cfg.PolicyOptions.PrefixLists)
+						if ct.Name == term.Name && !matched {
+							for i := uint32(0); i < cn; i++ {
+								if ctrs, err := c.dp.ReadFilterCounters(cloneOffset + i); err == nil {
+									totalPkts += ctrs.Packets
+									totalBytes += ctrs.Bytes
+								} else if readErr == nil {
+									readErr = err
+								}
+							}
+							matched = true
+						}
+						cloneOffset += cn
+					}
+				}
 				userspaceCounter, userspaceOk := userspaceCounters[dpuserspace.FirewallFilterTermCounterKey{
 					Family: family, FilterName: name, TermName: term.Name,
 				}]
@@ -111,11 +164,9 @@ func (c *CLI) showFirewallFilters() error {
 					totalPkts += userspaceCounter.Packets
 					totalBytes += userspaceCounter.Bytes
 				}
-				// #16454: a term without `then count` is not instrumented;
-				// never render a numeric Hit count for it (its retired-map /
-				// legacy-helper 0 would read as "never matched"). Counted
-				// terms keep rendering, including an idle 0.
-				if term.Count != "" && (hasCounters || userspaceOk) {
+				// #16454 + #16464: uncounted terms render no numeric Hit
+				// count; clone map slots only gate a counted term.
+				if term.Count != "" && (hasCounters || len(cloneHas16464) > 0 || userspaceOk) {
 					fmt.Printf("    Hit count: %d packets, %d bytes\n", totalPkts, totalBytes)
 				}
 			}
@@ -219,11 +270,32 @@ func (c *CLI) showFirewallFilter(name, requestedFamily string) error {
 			}
 		}
 	}
+	// #16464: clone eBPF slots folded into this source filter below.
+	cloneFold16464 := dpuserspace.BuildCloneCounterFold16464(cfg)
+	cloneRuleStart16464 := make(map[string]uint32)
+	cloneHas16464 := make(map[string]bool)
+	if c.dp != nil && c.dp.IsLoaded() {
+		if cr := c.applyResult(); cr != nil && cr.FilterIDs != nil {
+			for cloneName, source := range cloneFold16464[family] {
+				if source != name {
+					continue
+				}
+				if fid, ok := cr.FilterIDs[family+":"+cloneName]; ok {
+					if fcfg, err := c.dp.ReadFilterConfig(fid); err == nil {
+						cloneRuleStart16464[cloneName] = fcfg.RuleStart
+						cloneHas16464[cloneName] = true
+					} else if readErr == nil {
+						readErr = err
+					}
+				}
+			}
+		}
+	}
 	var userspaceStatus *dpuserspace.ProcessStatus
 	if status, err := c.userspaceDataplaneStatus(); err == nil {
 		userspaceStatus = &status
 	}
-	userspaceCounters := dpuserspace.BuildFirewallFilterTermCounterIndex(userspaceStatus)
+	userspaceCounters := dpuserspace.BuildFirewallFilterTermCounterIndexForConfig(userspaceStatus, cfg)
 
 	// #16451: same stale-counter warning as the all-filters raw view.
 	c.printFirewallRawCounterWarning()
@@ -251,6 +323,37 @@ func (c *CLI) showFirewallFilter(name, requestedFamily string) error {
 			}
 			ruleOffset += numRules
 		}
+		for cloneName := range cloneHas16464 {
+			var cloneFilter *config.FirewallFilter
+			if family == "inet" {
+				cloneFilter = cfg.Firewall.FiltersInet[cloneName]
+			} else {
+				cloneFilter = cfg.Firewall.FiltersInet6[cloneName]
+			}
+			if cloneFilter == nil {
+				continue
+			}
+			cloneOffset := cloneRuleStart16464[cloneName]
+			matched := false
+			for _, ct := range cloneFilter.Terms {
+				if ct == nil {
+					continue
+				}
+				cn := config.FilterTermExpansionCount(ct, cfg.PolicyOptions.PrefixLists)
+				if ct.Name == term.Name && !matched {
+					for i := uint32(0); i < cn; i++ {
+						if ctrs, err := c.dp.ReadFilterCounters(cloneOffset + i); err == nil {
+							totalPkts += ctrs.Packets
+							totalBytes += ctrs.Bytes
+						} else if readErr == nil {
+							readErr = err
+						}
+					}
+					matched = true
+				}
+				cloneOffset += cn
+			}
+		}
 		userspaceCounter, userspaceOk := userspaceCounters[dpuserspace.FirewallFilterTermCounterKey{
 			Family: family, FilterName: name, TermName: term.Name,
 		}]
@@ -258,9 +361,9 @@ func (c *CLI) showFirewallFilter(name, requestedFamily string) error {
 			totalPkts += userspaceCounter.Packets
 			totalBytes += userspaceCounter.Bytes
 		}
-		// #16454: see showFirewallFilters — uncounted terms render no
-		// numeric Hit count.
-		if term.Count != "" && (hasCounters || userspaceOk) {
+		// #16454 + #16464: uncounted terms render no numeric Hit
+		// count; clone map slots only gate a counted term.
+		if term.Count != "" && (hasCounters || len(cloneHas16464) > 0 || userspaceOk) {
 			fmt.Printf("    Hit count: %d packets, %d bytes\n", totalPkts, totalBytes)
 		}
 	}
