@@ -1,4 +1,14 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Refactoraudit: close the #15255 unregistered-test census blind spot
+    (#16442). The census keyed test-module-ness on basename alone, so
+    the 13 `tests.rs` files and every inline `#[cfg(test)] mod` were
+    never opened and a displaced `#[test]` there stayed green. It now
+    scans test regions — `tests.rs` and the historical basename/`tests/`
+    shapes, files loaded by cfg(test)-gated `#[path]` modules, and
+    inline cfg(test)/cfg_attr(test) module blocks (492 files: 389
+    whole-file, 103 inline-region) — with detector rows for each new
+    shape. The session/tests.rs acceptance mutant now reds; the
+    baseline stays green.
   * Userspace-dp: anchor the #15244 post-create-bind tripwire per arm
     (#16437). The fill-prime and non-zerocopy arms of try_open_bind must
     each carry `return Err(post_create_bind_error(...))` inside their
