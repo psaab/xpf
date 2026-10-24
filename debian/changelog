@@ -1,5 +1,19 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Logging: unify the raw-event wire parser behind logEvent and
+    DecodeRawEventRecord (#16127). parseRawEvent is now the single
+    offset parser (zero-allocation, caller-owned rawEvent) and
+    formatRawEventAddrs the single address renderer, so the live and
+    decode-only paths cannot diverge on offsets or family rendering.
+    Unknown-address-family policy is explicit and pinned: only
+    AF_INET (2) / AF_INET6 (10) are accepted — the decoder rejects and
+    the live path drops any other family byte, replacing the former
+    live-only "non-v6 means IPv4" fallback. Golden short / legacy-144 /
+    extended / IPv6 frames pin live-vs-decoded parity. Fanout is
+    unchanged (parser-only unification).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Cluster: heartbeat anti-replay latch now survives a daemon restart
     (#16022). The peer epoch-capable latch, boot-epoch floor and its
     bound sessions are persisted in a generation-ordered, key-set-scoped

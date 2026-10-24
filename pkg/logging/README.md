@@ -1050,6 +1050,20 @@ with no valueType and no validator, so any string reached the dialer's resolver.
   `DecodeRawEventRecord` already honored the wire stamp — under helper
   backlog or reconnect that drifted from the decision instant. Keep the two
   paths on the single `eventTimeFromWire` SSOT.
+- **One raw-event parser, explicit unknown-family REJECT (#16127).**
+  `parseRawEvent` (ringbuf.go) is the single wire parser behind the live
+  `logEvent` path (`Run`/`ProcessRawEvent`) and `DecodeRawEventRecord`;
+  `formatRawEventAddrs` renders the address strings for both. The parser
+  fills a caller-zeroed `rawEvent` in place and allocates nothing (pin:
+  `TestParseRawEventZeroAlloc16127`). Unknown-address-family policy,
+  decided for #16127: only `addrFamilyInet` (2) and `addrFamilyInet6`
+  (10) — the only families either producer emits — are accepted; any
+  other family byte is rejected by the decoder and dropped by the live
+  path (the former live-only "non-v6 means IPv4" rendering is gone).
+  Pins: `TestRawEventParserGolden16127` (short / legacy-144 / extended /
+  IPv6 golden frames, live-vs-decoded field parity) and
+  `TestRawEventFamilyPolicy16127`. Fanout stays live-only: unification
+  is parser-only, per the #16127 validators.
 - **Text-sink headers carry DECISION time too (#15699).** `logEvent`
   passes `rec.Time` to `SyslogClient.SendFromEventReaderAt` and
   `LocalLogWriter.SendFromEventReaderAt`; the timestamp rides
