@@ -444,6 +444,44 @@ pub(super) fn stage_flow_cache_hit(
             // Use alias-aware session resolution: reverse NAT companions can
             // be found by their translated wire tuple rather than their
             // canonical table key.
+            // #16217 (FZDiag28): next-hop version of the #13635 guard.
+            // A cached deny for this tuple was seeded while the FIB
+            // answered MissingNeighbor for `(egress_ifindex, next_hop)`;
+            // once the node neighbor map holds that hop (the warm pass at
+            // RG activation populates the node-wide dynamic map, and the
+            // FIB recompute reads that same map), the deny is
+            // stale-by-evidence: drop it and let the session-hit path
+            // recompute the adopted ForwardCandidate. No live neighbor
+            // entry, or a MAC contradicting the cached resolution, keeps
+            // the deny (fail-closed).
+            if let Some(next_hop) = cached_decision.resolution.next_hop {
+                let neigh_if = super::super::forwarding::outer_neighbor_ifindex(
+                    worker_ctx.forwarding,
+                    Some(worker_ctx.dynamic_neighbors),
+                    &cached_decision.resolution,
+                );
+                let neighbor_landed = super::super::forwarding::lookup_neighbor_entry(
+                    worker_ctx.forwarding,
+                    Some(worker_ctx.dynamic_neighbors),
+                    neigh_if,
+                    next_hop,
+                )
+                .is_some_and(|live| {
+                    cached_decision
+                        .resolution
+                        .neighbor_mac
+                        .is_none_or(|cached_mac| cached_mac == live.mac)
+                });
+                if neighbor_landed {
+                    flow_state
+                        .flow_cache
+                        .invalidate_slot(&flow.forward_key, meta.ingress_ifindex as i32);
+                    flow_state.flow_cache.reclassify_hit_as_miss_arm(
+                        crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitDenySuperseded,
+                    );
+                    return FlowCacheOutcome::FallThrough;
+                }
+            }
             if sessions.has_session_hit_at(&flow.forward_key, now_ns) {
                 flow_state
                     .flow_cache

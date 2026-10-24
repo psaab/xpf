@@ -1,5 +1,31 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Node-neighbor adopted restore + timer pending retry + stored-
+    terminal target recovery (#16217): adopted recomputes now
+    consult the node neighbor map (the shared dynamic map the
+    RG-activation warm pass and kernel monitor populate) via
+    adopted_resolution_from_node_neighbor_map, so a hop present only
+    there restores the adopted ForwardCandidate; a cached deny
+    seeded while the FIB answered MissingNeighbor is superseded
+    (PostHitDenySuperseded) once that hop lands in the node map with
+    a non-contradicting MAC. Parked pending_neigh representatives
+    are now also retried packet-independently from the worker loop
+    on the 100 ms ct-slice cadence (run_pending_neigh_timer), so a
+    resolved hop dispatches within one cadence even with zero RX.
+    FZDiag29: a stored ClusterTerminalHAInactive SyncImport row
+    whose FIB recompute also answers the terminal (connected prefix
+    HA-suppressed in connected_v4 post-failover, only in
+    connected_v4_by_ifindex) now recovers its egress from the
+    resolution target (dst) via the terminal source_ifindex stamp /
+    connected LPM and restores the ForwardCandidate (or retryable
+    MissingNeighbor) from there. Absent/contradicting neighbors
+    stay fail-closed.
+
+ -- xpf maintainers <noreply@anthropic.com>  Fri, 23 Oct 2026 00:00:00 +0000
+
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Adopted stored-terminal restore (#16217): adopted hits whose
     looked-up resolution IS ClusterTerminalHAInactive (the stored
     SyncImport terminal, egress 0) fell through the adopted restore
