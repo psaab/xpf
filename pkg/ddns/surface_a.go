@@ -1318,7 +1318,7 @@ func (m *SurfaceAManager) reconcileScopeLocked(ctx context.Context, sc SurfaceAS
 			// shows an "unpublished: no backend" row instead of omitting the scope
 			// entirely (#2843).
 			rt.noBackend = true
-			rt.lastErr = err.Error()
+			rt.lastErr = scrubLastErrorText(err.Error())
 			rt.lastErrAt = now
 			return nil
 		}
@@ -2239,6 +2239,47 @@ func (m *SurfaceAManager) clearOrphan(owned ownedRecord) {
 // binding — and its configured cap — is gone). fromWithdraw tags which wire op
 // armed the backoff (#4423 M03) so the window gates only that op and does not
 // delay the OTHER op when the observed intent flips.
+// scrubLastErrorText renders an error string safe for LastError/journald
+// (#16440): any verbatim rfc2136 update-server with userinfo inside it is
+// RedactURL-rendered. The server is identified from the scope's provider
+// when available; otherwise a generic userinfo scrub of host:port-shaped
+// tokens applies (see scrubUserinfoInText). This is the status-boundary
+// defence in depth behind the constructor/commit rejection: a tolerated
+// or directly-built backend must never re-disclose the credential here.
+func scrubLastErrorText(s string) string {
+	if !strings.Contains(s, "@") {
+		return s
+	}
+	return scrubUserinfoInText(s)
+}
+
+// scrubUserinfoInText replaces the userinfo of every whitespace-delimited
+// token that contains '@' with RedactURL's render of that token. Dial
+// errors embed the address mid-sentence ("lookup user:s3cr3t@host:53: no
+// such host"), so token-wise redaction is the boundary that catches them
+// without knowing the configured server. Tokens without '@' pass through
+// byte-identical; a token RedactURL cannot improve is left unchanged.
+func scrubUserinfoInText(s string) string {
+	fields := strings.Fields(s)
+	changed := false
+	for i, f := range fields {
+		if !strings.Contains(f, "@") {
+			continue
+		}
+		// Preserve trailing sentence punctuation RedactURL would treat
+		// as part of the authority (e.g. "host:53:" in a dial error is
+		// part of the token and must stay attached to the host).
+		if r := config.RedactURL(f); r != f {
+			fields[i] = r
+			changed = true
+		}
+	}
+	if !changed {
+		return s
+	}
+	return strings.Join(fields, " ")
+}
+
 func (m *SurfaceAManager) recordScopeError(rt *surfaceAState, fqdn string, maxBackoff time.Duration, err error, now time.Time, fromWithdraw bool) {
 	if maxBackoff <= 0 {
 		maxBackoff = defaultErrorBackoffMax
@@ -2253,11 +2294,14 @@ func (m *SurfaceAManager) recordScopeError(rt *surfaceAState, fqdn string, maxBa
 	}
 	rt.nextEligible = now.Add(rt.backoff)
 	rt.backoffFromWithdraw = fromWithdraw
-	rt.lastErr = err.Error()
+	// #16440: LastError and this journald line are PermView surfaces —
+	// never carry an update-server credential into either.
+	scrubbed := scrubLastErrorText(err.Error())
+	rt.lastErr = scrubbed
 	rt.lastErrAt = now
 	rt.noBackend = false
 	slog.Warn("ddns surface-a: scope DNS update failed; backing off",
-		"fqdn", fqdn, "backoff", rt.backoff, "err", err)
+		"fqdn", fqdn, "backoff", rt.backoff, "err", scrubbed)
 }
 
 // withdrawScopeLocked drives ONE withdraw of an owned record through `backend`
@@ -2378,7 +2422,7 @@ func (m *SurfaceAManager) StatusViews(scopes []SurfaceAScope) []SurfaceAStatusVi
 		rt := m.runtime[sid]
 		if rt != nil {
 			v.LastPublished = rt.lastPublished
-			v.LastError = rt.lastErr
+			v.LastError = scrubLastErrorText(rt.lastErr)
 			v.LastErrorAt = rt.lastErrAt
 		}
 		switch {
@@ -2442,7 +2486,7 @@ func (m *SurfaceAManager) StatusViews(scopes []SurfaceAScope) []SurfaceAStatusVi
 		}
 		if rt := m.runtime[sc.scopePrefix()]; rt != nil {
 			v.LastPublished = rt.lastPublished
-			v.LastError = rt.lastErr
+			v.LastError = scrubLastErrorText(rt.lastErr)
 			v.LastErrorAt = rt.lastErrAt
 		}
 		out = append(out, v)
