@@ -1857,8 +1857,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     }
                     _ => packet_frame,
                 };
-                // #14314: resolve the input-filter PBR route override
-                // BEFORE the Stage-11 claim, exactly once. The claim's
+                // #14314/#16480: resolve the input-filter PBR route
+                // override BEFORE the Stage-11 claim. The claim's
                 // local-ownership table must follow the steer: a
                 // `Table(vrf)` packet is adjudicated in that VRF (a dst
                 // owned only in `inet.0` is NOT claimed and takes the
@@ -1868,11 +1868,24 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // evaluated only after the claim and only its `Drop`
                 // arm was honoured, so PBR/fabric-steered IPsec was
                 // claimed (or missed) in the physical ingress VRF.
-                // Uncounted: the counted evaluation (and any reject
-                // reply) still runs exactly once, in the arm below for
-                // a claimed packet or on the ordinary miss path for an
-                // unclaimed one — counting here would double-count
-                // every steered IPsec packet.
+                //
+                // #16480: a `Drop` verdict is TERMINAL here — the packet
+                // never reaches the claimed arm or the ordinary miss
+                // path where the counted evaluation used to run — so the
+                // pre-claim evaluation must itself be the counted one,
+                // with the reject sink, or a PBR `reject`/`discard` term
+                // (and a `NativeRouteTable::Unresolvable` drop) would
+                // move no term counter, emit no filter log, synthesize
+                // no reject reply, and (on a quarantined domain) miss
+                // the #11061 ambiguous-fabric count. A non-drop verdict
+                // is NOT terminal: the packet proceeds to the claimed
+                // arm or the miss path, where the counted evaluation
+                // runs exactly once, so this pre-claim probe stays
+                // uncounted for `Table`/`None` — counting it would
+                // double-count (#13760) every steered IPsec packet and
+                // double-fire its reject reply/log. The Drop arm below
+                // therefore re-runs the evaluation counted, exactly
+                // once, mirroring the miss path's Drop handling.
                 let stage11_route_table: Option<String> = match flow.as_ref() {
                     Some(flow)
                         if crate::afxdp::forwarding::is_ipsec_traffic(
@@ -1890,6 +1903,35 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             None,
                         ) {
                             crate::afxdp::forwarding::RouteOverride::Drop => {
+                                // #16480: terminal Drop — run the counted
+                                // evaluation (with reject sink) exactly
+                                // once, then apply the #11061
+                                // ambiguous-quarantine count exactly as
+                                // the miss path's Drop arm does.
+                                let _ = crate::afxdp::forwarding::ingress_route_table_override(
+                                    worker_ctx.forwarding,
+                                    stage11_packet_frame,
+                                    meta,
+                                    flow,
+                                    ingress_zone_override.or(ambiguous_zone),
+                                    worker_ctx.event_stream,
+                                    now_ns,
+                                    Some(crate::afxdp::forwarding::PbrRejectSink {
+                                        tx_pipeline: &mut binding.tx_pipeline,
+                                        ingress_ifindex: binding.ifindex,
+                                        counters: telemetry.counters,
+                                    }),
+                                );
+                                if crate::afxdp::forwarding::effective_routing_domain_for_flow(
+                                    worker_ctx.forwarding,
+                                    flow.forward_key.routing_domain,
+                                    meta.ingress_ifindex as i32,
+                                    meta.ingress_vlan_id,
+                                    ingress_zone_override.or(ambiguous_zone),
+                                ) >= crate::session::AMBIGUOUS_FABRIC_DOMAIN_BASE
+                                {
+                                    telemetry.counters.record_ambiguous_fabric_zone_drop();
+                                }
                                 binding.scratch.scratch_recycle.push(desc.addr);
                                 continue;
                             }
@@ -13824,6 +13866,9 @@ pub(super) fn meter_miss_local_input_policers(
 #[cfg(test)]
 #[path = "miss_local_policer_15949_tests.rs"]
 mod miss_local_policer_15949_tests;
+#[cfg(test)]
+#[path = "stage11_pbr_drop_16480_tests.rs"]
+mod stage11_pbr_drop_16480_tests;
 
 #[cfg(test)]
 #[path = "pptp_domain_16055_tests.rs"]
