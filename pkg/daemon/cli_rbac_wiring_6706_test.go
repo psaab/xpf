@@ -251,17 +251,32 @@ func TestConsoleLoginClassIsWiredToOsidentCurrent_6706(t *testing.T) {
 			"RBAC class is no longer wired at all, or this scan is not reaching the source it "+
 			"claims to check", len(files))
 	}
-	if len(sites) != 1 {
+	// #16071: exactly TWO sites — the startup resolution in
+	// daemon_run.go and the consoleClassRefresher callback that
+	// re-resolves on `system login` change. Both must hand the
+	// resolver the kernel identity directly.
+	if len(sites) != 2 {
 		var where []string
 		for _, s := range sites {
 			where = append(where, s.pos)
 		}
 		sort.Strings(where)
-		t.Errorf("applyCLILoginClass is called from %d places (%s) — the identity the console's "+
-			"class is decided from must have ONE origin; a second site is a second policy",
+		t.Errorf("applyCLILoginClass is called from %d places (%s) — want exactly 2 "+
+			"(startup + #16071 refresher); a third site is a third policy",
 			len(sites), strings.Join(where, ", "))
 	}
 	for _, s := range sites {
+		if strings.HasSuffix(s.pos, "cli_rbac.go") || strings.Contains(s.pos, "cli_rbac.go:") {
+			// #16071 refresher: identity arrives as the `id` parameter
+			// consoleClassRefresher captured at wiring time from
+			// osident.Current() in daemon_run.go; the directness of
+			// THAT capture is pinned by the daemon_run.go site below
+			// plus the requirement that both sites exist.
+			if s.identity != "id" {
+				t.Errorf("%s: refresher applyCLILoginClass receives identity %s, want the captured `id` parameter", s.pos, s.identity)
+			}
+			continue
+		}
 		if !s.direct {
 			t.Errorf("%s: applyCLILoginClass receives identity %s, which is not a call to the "+
 				"package at %s — the RBAC class must be decided about the caller the KERNEL "+

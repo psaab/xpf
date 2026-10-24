@@ -131,7 +131,18 @@ type CLI struct {
 	hostname              string
 	username              string
 	uid                   int
-	userClass             string
+	// userClass is the RBAC login class (#6701, #16071). Guarded by
+	// userClassMu: the daemon re-resolves it when the active config
+	// changes while the console is running commands, so readers must
+	// not touch the bare field — use UserClass(). Written only via
+	// SetUserClass.
+	userClass   string
+	userClassMu sync.RWMutex
+	// refreshUserClassFn, when wired by the daemon, re-resolves
+	// userClass from the CURRENT active config (#16071). Nil outside
+	// the daemon (standalone/tests): no re-resolution, the class set
+	// at startup (or unset legacy mode) stands.
+	refreshUserClassFn func()
 	// configOwned records that THIS CLI session itself passed the gated
 	// `configure` verb and holds (or held) the local config lock under
 	// localConfigSessionID (#14986). dispatch must not infer ownership
@@ -455,9 +466,36 @@ func (c *CLI) SetVersion(v string) {
 	c.version = v
 }
 
+// UserClass returns the current RBAC login class. It is the only
+// sanctioned read of userClass (#16071): the daemon may re-resolve
+// the class on config apply while the console dispatches commands.
+func (c *CLI) UserClass() string {
+	c.userClassMu.RLock()
+	defer c.userClassMu.RUnlock()
+	return c.userClass
+}
+
 // SetUserClass sets the login class for RBAC permission checks.
 func (c *CLI) SetUserClass(class string) {
+	c.userClassMu.Lock()
+	defer c.userClassMu.Unlock()
 	c.userClass = class
+}
+
+// SetRefreshUserClassFn wires the daemon's re-resolution callback
+// (#16071). Called at dispatch entry so a committed change to the
+// console user's `system login` assignment takes effect on the next
+// command without a daemon restart.
+func (c *CLI) SetRefreshUserClassFn(fn func()) {
+	c.refreshUserClassFn = fn
+}
+
+// refreshUserClass re-resolves the login class from the active
+// config when the daemon wired a refresher; otherwise a no-op.
+func (c *CLI) refreshUserClass() {
+	if c.refreshUserClassFn != nil {
+		c.refreshUserClassFn()
+	}
 }
 
 // SetVRRPManager sets the VRRP manager for runtime state queries.

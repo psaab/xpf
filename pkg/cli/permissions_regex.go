@@ -80,7 +80,7 @@ func (c *CLI) checkCommandRegex(line string) error {
 	if c.store != nil {
 		cfg = c.store.ActiveConfig()
 	}
-	return checkCommandRegexWith(cfg, c.userClass, line, c.pendingPipeSuffix)
+	return checkCommandRegexWith(cfg, c.UserClass(), line, c.pendingPipeSuffix)
 }
 
 // checkCommandRegexWith is the store-free whole decision, including the

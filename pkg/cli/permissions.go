@@ -39,16 +39,16 @@ func (c *CLI) resolveClassPerms(class string) ([]config.LoginClassPermission, bo
 }
 
 func (c *CLI) checkPermission(parts []string) error {
-	if c.userClass == "" {
+	if c.UserClass() == "" {
 		return nil
 	}
 	if len(parts) == 0 {
 		return nil
 	}
 
-	perms, ok := c.resolveClassPerms(c.userClass)
+	perms, ok := c.resolveClassPerms(c.UserClass())
 	if !ok {
-		return fmt.Errorf("permission denied: unknown login class %q", c.userClass)
+		return fmt.Errorf("permission denied: unknown login class %q", c.UserClass())
 	}
 
 	required := requiredPermission(parts)
@@ -92,7 +92,7 @@ func (c *CLI) checkPermission(parts []string) error {
 // login` classes is bit-identical to before this change. Every other class,
 // including an UNKNOWN class, fails closed (redacted).
 func (c *CLI) showConfigRedacted() bool {
-	return c.userClass != "" && c.userClass != ClassRootDefault
+	return c.UserClass() != "" && c.UserClass() != ClassRootDefault
 }
 
 // showActiveConfigPath renders an active-config subtree as hierarchical text,

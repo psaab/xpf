@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"log/slog"
+	"reflect"
 
 	"github.com/psaab/xpf/pkg/cli"
 	"github.com/psaab/xpf/pkg/config"
@@ -102,4 +103,86 @@ func applyCLILoginClass(shell userClassSetter, cfg *config.Config, id osident.Id
 			"identity", id.String(), "uid", id.UID, "class", class, "reason", reason)
 	}
 	shell.SetUserClass(class)
+}
+
+// consoleClassRefresher returns a callback that re-resolves the
+// console shell's login class from the CURRENT active config
+// (#16071). The shell invokes it at command dispatch, so a committed
+// change to the console user's `system login` user→class assignment
+// — or a login stanza appearing for the first time — takes effect on
+// the next command without a daemon restart. This closes the stale-
+// assignment half of #16071: applyCLILoginClass alone ran once at
+// daemon start, while class DEFINITIONS were already re-read per
+// command (resolveClassPerms reads ActiveConfig every call) and the
+// remote surfaces resolve per-connection server-side.
+//
+// Only the LOGIN-RELEVANT projection gates a re-resolution: most
+// applies do not touch `system login`, and re-logging the resolution
+// on every command would spam the journal. When the projection is
+// unchanged the callback is a cheap no-op; when it changes, the full
+// applyCLILoginClass runs (and logs) exactly as at startup.
+//
+// The legacy no-login arm is preserved exactly: a config that never
+// had `system login` (Login == nil, not dropped-by-packing) leaves
+// the class unset, so the callback never calls SetUserClass for it.
+// If a login stanza later appears, the projection changes (nil →
+// non-nil) and the assignment is resolved then; if the stanza is
+// later removed, the projection changes back and the class returns
+// to unset, restoring the documented legacy mode for that config.
+// A dropped-by-packing stanza is part of the projection, so its
+// fail-closed resolution is likewise re-applied.
+func consoleClassRefresher(shell interface {
+	userClassSetter
+	SetRefreshUserClassFn(func())
+}, active func() *config.Config, id osident.Identity, seeded *config.Config) func() {
+	// Seed with the login projection of `seeded` — the EXACT config
+	// object the startup applyCLILoginClass resolved the shell's
+	// class from in daemon_run.go (single ActiveConfig() read). A
+	// second ActiveConfig() read here could observe a NEWER
+	// generation than the one the shell was resolved from (a commit
+	// landing between the two reads): the refresher would then treat
+	// that newer projection as already-applied and never re-resolve,
+	// leaving the stale startup class in force until the NEXT login
+	// change. Seeding from the resolved config makes the first
+	// dispatch re-resolve whenever active has moved past it.
+	var last *loginProjection
+	if seeded != nil {
+		p := projectLogin(seeded)
+		last = &p
+	}
+	return func() {
+		cfg := active()
+		if cfg == nil {
+			return
+		}
+		p := projectLogin(cfg)
+		if last != nil && reflect.DeepEqual(*last, p) {
+			return
+		}
+		last = &p
+		if cfg.System.Login == nil && !cfg.System.LoginDroppedByPacking {
+			// No `system login` stanza: return to the unset legacy
+			// mode. applyCLILoginClass deliberately does not call
+			// SetUserClass here (it must not disturb a class set
+			// before any stanza existed), so the refresher — which
+			// owns transitions — clears it explicitly.
+			shell.SetUserClass("")
+			return
+		}
+		applyCLILoginClass(shell, cfg, id)
+	}
+}
+
+// loginProjection is the `system login`-relevant slice of a config:
+// exactly the inputs cli.ResolveLoginClass consumes. Comparing
+// projections (rather than whole configs or generation counters)
+// makes the refresher fire precisely when the assignment could
+// change, and stay silent for unrelated applies.
+type loginProjection struct {
+	login   *config.LoginConfig
+	dropped bool
+}
+
+func projectLogin(cfg *config.Config) loginProjection {
+	return loginProjection{login: cfg.System.Login, dropped: cfg.System.LoginDroppedByPacking}
 }

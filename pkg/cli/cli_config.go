@@ -102,9 +102,9 @@ func (c *CLI) handleCopyRename(line string) error {
 		dstPath = config.PrependEditPathForCopyDst(editPath, srcPath, dstPath)
 	}
 	if cmd == "rename" {
-		return c.store.RenameAsPlantClass(c.cliConfigSessionID(), config.EventPlantClassForMutation(c.userClass), srcPath, dstPath)
+		return c.store.RenameAsPlantClass(c.cliConfigSessionID(), config.EventPlantClassForMutation(c.UserClass()), srcPath, dstPath)
 	}
-	return c.store.CopyAsPlantClass(c.cliConfigSessionID(), config.EventPlantClassForMutation(c.userClass), srcPath, dstPath)
+	return c.store.CopyAsPlantClass(c.cliConfigSessionID(), config.EventPlantClassForMutation(c.UserClass()), srcPath, dstPath)
 }
 
 // handleInsert handles:
@@ -130,7 +130,7 @@ func (c *CLI) handleInsert(line string) error {
 		return nil
 	}
 	refPath := config.InsertRefPath(elemPath, refTokens)
-	return c.store.InsertAsPlantClass(c.cliConfigSessionID(), config.EventPlantClassForMutation(c.userClass), elemPath, refPath, isBefore)
+	return c.store.InsertAsPlantClass(c.cliConfigSessionID(), config.EventPlantClassForMutation(c.UserClass()), elemPath, refPath, isBefore)
 }
 
 // readLine reads one line of terminal input, honouring the readLineFn test
@@ -156,10 +156,10 @@ func (c *CLI) handleLoad(args []string) error {
 		if c.store != nil {
 			loadCfg = c.store.ActiveConfig()
 		}
-		if err := config.AuthorizeConfigLoad(loadCfg, c.userClass, "rescue", ""); err != nil {
+		if err := config.AuthorizeConfigLoad(loadCfg, c.UserClass(), "rescue", ""); err != nil {
 			return err
 		}
-		if err := c.store.LoadRescueAsPlantClass(c.cliConfigSessionID(), config.EventPlantClassForMutation(c.userClass)); err != nil {
+		if err := c.store.LoadRescueAsPlantClass(c.cliConfigSessionID(), config.EventPlantClassForMutation(c.UserClass())); err != nil {
 			return fmt.Errorf("load rescue: %w", err)
 		}
 		fmt.Println("load rescue complete")
@@ -225,7 +225,7 @@ func (c *CLI) handleLoad(args []string) error {
 		if c.store != nil {
 			preCfg = c.store.ActiveConfig()
 		}
-		if err := config.PreflightConfigLoad(preCfg, c.userClass, mode); err != nil {
+		if err := config.PreflightConfigLoad(preCfg, c.UserClass(), mode); err != nil {
 			return err
 		}
 		// Read from file
@@ -262,13 +262,13 @@ func (c *CLI) handleLoad(args []string) error {
 	if c.store != nil {
 		loadCfg = c.store.ActiveConfig()
 	}
-	if err := config.AuthorizeConfigLoad(loadCfg, c.userClass, mode, content); err != nil {
+	if err := config.AuthorizeConfigLoad(loadCfg, c.UserClass(), mode, content); err != nil {
 		return err
 	}
 
 	switch mode {
 	case "set":
-		count, err := c.store.LoadSetAsPlantClass(c.cliConfigSessionID(), config.EventPlantClassForMutation(c.userClass), content)
+		count, err := c.store.LoadSetAsPlantClass(c.cliConfigSessionID(), config.EventPlantClassForMutation(c.UserClass()), content)
 		if err != nil {
 			return fmt.Errorf("load set: %w", err)
 		}
@@ -278,9 +278,9 @@ func (c *CLI) handleLoad(args []string) error {
 		var err error
 		switch mode {
 		case "override":
-			err = c.store.LoadOverrideAsPlantClass(c.cliConfigSessionID(), config.EventPlantClassForMutation(c.userClass), content)
+			err = c.store.LoadOverrideAsPlantClass(c.cliConfigSessionID(), config.EventPlantClassForMutation(c.UserClass()), content)
 		case "merge":
-			err = c.store.LoadMergeAsPlantClass(c.cliConfigSessionID(), config.EventPlantClassForMutation(c.userClass), content)
+			err = c.store.LoadMergeAsPlantClass(c.cliConfigSessionID(), config.EventPlantClassForMutation(c.UserClass()), content)
 		}
 		if err != nil {
 			return fmt.Errorf("load %s: %w", mode, err)
@@ -296,7 +296,7 @@ func (c *CLI) handleCommit(args []string) error {
 	if err := c.checkPermission([]string{"configure"}); err != nil {
 		return err
 	}
-	if holder, locked := c.store.ConfigHolder(); locked && holder != "" && holder != localConfigSessionID && (c.configOwned || c.userClass != "") {
+	if holder, locked := c.store.ConfigHolder(); locked && holder != "" && holder != localConfigSessionID && (c.configOwned || c.UserClass() != "") {
 		return fmt.Errorf("permission denied: configuration is locked by another session")
 	}
 	// #14981: commit promotes group-expanded paths never adjudicated as
@@ -479,7 +479,7 @@ func (c *CLI) journalPrincipal() string {
 	if c == nil {
 		return configstore.UnknownPrincipal
 	}
-	return configstore.FormatJournalPrincipal("local-shell", uint32(c.uid), c.username, c.userClass, "")
+	return configstore.FormatJournalPrincipal("local-shell", uint32(c.uid), c.username, c.UserClass(), "")
 }
 
 // commitCtx returns a cancellable context registered with the CLI's

@@ -140,7 +140,7 @@ func TestAnnotatePlainAllowedControl14717(t *testing.T) {
 // stamper's execution comparison ignores, so annotate alone does not
 // restamp. The plant-class defect is therefore bound at the call
 // site: the annotate arm must pass
-// EventPlantClassForMutation(c.userClass) to AnnotateAsPlantClass.
+// EventPlantClassForMutation(c.UserClass()) to AnnotateAsPlantClass.
 // This cell asserts the candidate annotation lands AND (via the
 // sibling-arm parity check in the packet test below) that the arm
 // carries the class. The behavioural stamp is exercised by
@@ -156,11 +156,11 @@ func TestAnnotateArmPassesPlantClass14717(t *testing.T) {
 	src := readCLISource14717(t, "cli_dispatch.go")
 	arm := annotateArm14717(t, src)
 	if strings.Contains(arm, "c.store.Annotate(") {
-		t.Fatalf("annotate arm calls store.Annotate (empty plant class); it must call AnnotateAsPlantClass with EventPlantClassForMutation(c.userClass) like every sibling arm:\n%s", arm)
+		t.Fatalf("annotate arm calls store.Annotate (empty plant class); it must call AnnotateAsPlantClass with EventPlantClassForMutation(c.UserClass()) like every sibling arm:\n%s", arm)
 	}
 	if !strings.Contains(arm, "AnnotateAsPlantClass") ||
-		!strings.Contains(arm, "EventPlantClassForMutation(c.userClass)") {
-		t.Fatalf("annotate arm does not pass EventPlantClassForMutation(c.userClass) to AnnotateAsPlantClass:\n%s", arm)
+		!strings.Contains(arm, "EventPlantClassForMutation(c.UserClass())") {
+		t.Fatalf("annotate arm does not pass EventPlantClassForMutation(c.UserClass()) to AnnotateAsPlantClass:\n%s", arm)
 	}
 }
 

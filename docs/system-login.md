@@ -95,7 +95,14 @@ below. `pkg/osident.Current()` reads the **real uid**
 is matched against `system login user <name>`. `pkg/daemon`
 `applyCLILoginClass` performs the lookup once, at shell start, and logs the
 outcome (identity, uid, resolved class, reason) so an operator locked out by
-their own config can see why in the journal.
+their own config can see why in the journal. Since #16071 the assignment is
+also re-resolved while the shell runs: the daemon wires a refresher that the
+shell invokes at each command dispatch, and when the active config's
+`system login` stanza changes (a user re-classed, removed, or a first login
+stanza appearing) the new assignment takes effect on the next command without
+a daemon restart. Removing the stanza returns the shell to the unset legacy
+mode described below. Class *definitions* were already re-read per command;
+before #16071 only the user→class assignment went stale until restart.
 
 Before #6701 the identity was `os.Getenv("USER")` and a non-match was handed
 **`super-user`**. Both halves were exploitable, and either alone sufficed:
