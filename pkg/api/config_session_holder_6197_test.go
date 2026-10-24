@@ -27,6 +27,10 @@ func enterRESTConfigSession(t *testing.T, s *Server, sessionID string) string {
 	req := httptest.NewRequest("POST", "/api/v1/config/enter", nil)
 	if sessionID != "" {
 		withRESTConfigSession(req, sessionID)
+	} else {
+		// Fresh enter carries no token header but must still carry the
+		// authorized principal the middleware would install (#16069 binding).
+		*req = *req.WithContext(context.WithValue(req.Context(), authorizedMutationPrincipalKey{}, authz.Principal{Superuser: true}))
 	}
 	rr := httptest.NewRecorder()
 	s.configEnterHandler(rr, req)

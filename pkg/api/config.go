@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 )
@@ -51,11 +52,79 @@ func validRESTConfigSessionID(sessionID string) bool {
 	return err == nil
 }
 
+// restSessionBindingKey is the identity a REST config-session token is bound
+// to at mint (#16069). It is derived server-side from the authorized principal
+// — never from caller-supplied data — so two principals are distinct even when
+// they share a login class, and the same principal re-derives the same key on
+// every request. Without this binding the 128-bit token alone was the holder
+// identity: any equally-privileged insider who obtained another operator's
+// token could commit or release that operator's candidate. The gRPC twin
+// never had the hole because its holder is the kernel connection identity.
+func restSessionBindingKey(p authz.Principal) string {
+	if p.Superuser {
+		if p.Username != "" {
+			return fmt.Sprintf("%s|uid=%d|user=%s|superuser", p.Source.String(), p.UID, p.Username)
+		}
+		return fmt.Sprintf("%s|uid=%d|superuser", p.Source.String(), p.UID)
+	}
+	return fmt.Sprintf("%s|uid=%d|user=%s|class=%s", p.Source.String(), p.UID, p.Username, p.Class)
+}
+
+// restSessionOwner resolves the binding key for the current request. Mutation
+// routes are gated by the authz middleware, which installs the principal; a
+// missing principal fails closed instead of binding to a shared empty key.
+func restSessionOwner(r *http.Request) (string, bool) {
+	p, ok := authorizedMutationPrincipal(r)
+	if !ok {
+		return "", false
+	}
+	return restSessionBindingKey(p), true
+}
+
+// bindRESTSession records that sessionID was minted by owner. First mint wins
+// until the session is released or reclaimed.
+func (s *Server) bindRESTSession(sessionID, owner string) {
+	s.restSessionsMu.Lock()
+	defer s.restSessionsMu.Unlock()
+	if s.restSessions == nil {
+		s.restSessions = make(map[string]string)
+	}
+	if _, exists := s.restSessions[sessionID]; !exists {
+		s.restSessions[sessionID] = owner
+	}
+}
+
+// unbindRESTSession drops the binding when the session ends.
+func (s *Server) unbindRESTSession(sessionID string) {
+	s.restSessionsMu.Lock()
+	defer s.restSessionsMu.Unlock()
+	delete(s.restSessions, sessionID)
+}
+
+// verifyRESTSessionOwner reports whether owner minted sessionID. A session
+// with no binding (entered directly in the store by a CLI/gRPC/internal path
+// or a test fixture) carries no REST owner to check against — the store's own
+// holder check remains the gate there, exactly as for the conn-* identities.
+// A bound session presented by a different principal is denied before the
+// store is called.
+func (s *Server) verifyRESTSessionOwner(sessionID, owner string) bool {
+	s.restSessionsMu.Lock()
+	defer s.restSessionsMu.Unlock()
+	bound, ok := s.restSessions[sessionID]
+	if !ok {
+		return true
+	}
+	return bound == owner
+}
+
 // restConfigSessionID reads and validates the holder identity supplied by a
 // follow-up REST config request. Missing/malformed identities fail closed
 // before the store is called, so they can never reach its sessionID==""
-// internal/system bypass.
-func restConfigSessionID(w http.ResponseWriter, r *http.Request) (string, bool) {
+// internal/system bypass. #16069: the format-valid token must also have been
+// minted by the same principal that presents it — a stolen token presented by
+// another equally-privileged principal is denied with 403 before any store
+// mutation, commit, or release can run.
+func (s *Server) restConfigSessionID(w http.ResponseWriter, r *http.Request) (string, bool) {
 	sessionID := strings.TrimSpace(r.Header.Get(restConfigSessionHeader))
 	if sessionID == "" {
 		writeError(w, http.StatusBadRequest, "missing "+restConfigSessionHeader+" header")
@@ -63,6 +132,15 @@ func restConfigSessionID(w http.ResponseWriter, r *http.Request) (string, bool) 
 	}
 	if !validRESTConfigSessionID(sessionID) {
 		writeError(w, http.StatusBadRequest, "invalid "+restConfigSessionHeader+" header")
+		return "", false
+	}
+	owner, ok := restSessionOwner(r)
+	if !ok {
+		writeError(w, http.StatusForbidden, "config session principal unavailable")
+		return "", false
+	}
+	if !s.verifyRESTSessionOwner(sessionID, owner) {
+		writeError(w, http.StatusForbidden, "config session token not bound to this principal")
 		return "", false
 	}
 	return sessionID, true
@@ -114,11 +192,20 @@ func journalPrincipalForRequest(r *http.Request, sessionID string) string {
 }
 
 func (s *Server) configEnterHandler(w http.ResponseWriter, r *http.Request) {
+	// #16069: the minting principal is bound to the token before the store is
+	// entered, and every follow-up request must present the same principal.
+	owner, ok := restSessionOwner(r)
+	if !ok {
+		writeError(w, http.StatusForbidden, "config session principal unavailable")
+		return
+	}
 	// An absent header starts a new session. Supplying the token returned by an
 	// earlier successful enter re-enters that same session and refreshes its
-	// idle lease; a different token remains a conflicting entrant.
+	// idle lease; a different token remains a conflicting entrant. A token
+	// supplied for re-entry must already belong to this principal (#16069).
 	sessionID := strings.TrimSpace(r.Header.Get(restConfigSessionHeader))
-	if sessionID == "" {
+	fresh := sessionID == ""
+	if fresh {
 		var err error
 		sessionID, err = newRESTConfigSessionID()
 		if err != nil {
@@ -128,23 +215,46 @@ func (s *Server) configEnterHandler(w http.ResponseWriter, r *http.Request) {
 	} else if !validRESTConfigSessionID(sessionID) {
 		writeError(w, http.StatusBadRequest, "invalid "+restConfigSessionHeader+" header")
 		return
+	} else if !s.verifyRESTSessionOwner(sessionID, owner) {
+		writeError(w, http.StatusForbidden, "config session token not bound to this principal")
+		return
 	}
 
 	if err := s.store.EnterConfigureSession(sessionID); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
+	if fresh {
+		s.bindRESTSession(sessionID, owner)
+	} else {
+		// Reclaim takeover: if the store just granted this token to a new
+		// holder (the previous lock was reclaimed as stale), the old binding
+		// must not survive to lock the new holder out or let the old owner
+		// keep using it. verify above already rejected a live different-owner
+		// binding, so any binding still present is either this owner's or
+		// stale from a reclaimed session — (re)bind to the current owner.
+		s.restSessionsMu.Lock()
+		if s.restSessions == nil {
+			s.restSessions = make(map[string]string)
+		}
+		s.restSessions[sessionID] = owner
+		s.restSessionsMu.Unlock()
+	}
 	writeOK(w, map[string]string{"status": "ok", "session_id": sessionID})
 }
 
 func (s *Server) configExitHandler(w http.ResponseWriter, r *http.Request) {
-	sessionID, ok := restConfigSessionID(w, r)
+	sessionID, ok := s.restConfigSessionID(w, r)
 	if !ok {
 		return
 	}
 	// Release only the candidate held by this REST session. A stale or foreign
-	// token cannot clear another client's work.
-	s.store.ExitConfigureSession(sessionID)
+	// token cannot clear another client's work (#5870), and #16069 adds that a
+	// token minted by a different principal cannot release it either (the
+	// owner check inside restConfigSessionID already denied that above).
+	if s.store.ExitConfigureSession(sessionID) {
+		s.unbindRESTSession(sessionID)
+	}
 	writeOK(w, map[string]string{"status": "ok"})
 }
 
@@ -165,7 +275,7 @@ func (s *Server) configSetHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "input required")
 		return
 	}
-	sessionID, ok := restConfigSessionID(w, r)
+	sessionID, ok := s.restConfigSessionID(w, r)
 	if !ok {
 		return
 	}
@@ -189,7 +299,7 @@ func (s *Server) configDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "input required")
 		return
 	}
-	sessionID, ok := restConfigSessionID(w, r)
+	sessionID, ok := s.restConfigSessionID(w, r)
 	if !ok {
 		return
 	}
@@ -219,7 +329,7 @@ func (s *Server) configDeactivateHandler(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "input required")
 		return
 	}
-	sessionID, ok := restConfigSessionID(w, r)
+	sessionID, ok := s.restConfigSessionID(w, r)
 	if !ok {
 		return
 	}
@@ -246,7 +356,7 @@ func (s *Server) configActivateHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "input required")
 		return
 	}
-	sessionID, ok := restConfigSessionID(w, r)
+	sessionID, ok := s.restConfigSessionID(w, r)
 	if !ok {
 		return
 	}
@@ -263,7 +373,7 @@ func (s *Server) configActivateHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) configCommitHandler(w http.ResponseWriter, r *http.Request) {
-	sessionID, ok := restConfigSessionID(w, r)
+	sessionID, ok := s.restConfigSessionID(w, r)
 	if !ok {
 		return
 	}
@@ -334,7 +444,7 @@ func (s *Server) configRollbackHandler(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("invalid n %d: rollback index must be non-negative (0 = revert to active)", req.N))
 		return
 	}
-	sessionID, ok := restConfigSessionID(w, r)
+	sessionID, ok := s.restConfigSessionID(w, r)
 	if !ok {
 		return
 	}
@@ -642,7 +752,7 @@ func (s *Server) configLoadHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "load rescue does not accept content")
 		return
 	}
-	sessionID, ok := restConfigSessionID(w, r)
+	sessionID, ok := s.restConfigSessionID(w, r)
 	if !ok {
 		return
 	}
@@ -690,7 +800,7 @@ func (s *Server) configCommitConfirmedHandler(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, "commit confirmed: timeout must be non-negative")
 		return
 	}
-	sessionID, ok := restConfigSessionID(w, r)
+	sessionID, ok := s.restConfigSessionID(w, r)
 	if !ok {
 		return
 	}
@@ -722,7 +832,7 @@ func (s *Server) configCommitConfirmedHandler(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) configConfirmHandler(w http.ResponseWriter, r *http.Request) {
-	sessionID, ok := restConfigSessionID(w, r)
+	sessionID, ok := s.restConfigSessionID(w, r)
 	if !ok {
 		return
 	}
@@ -827,7 +937,7 @@ func (s *Server) configAnnotateHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, Response{Error: "path and comment are required"})
 		return
 	}
-	sessionID, ok := restConfigSessionID(w, r)
+	sessionID, ok := s.restConfigSessionID(w, r)
 	if !ok {
 		return
 	}

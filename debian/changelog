@@ -10,6 +10,15 @@ xpf (0.0.0) unstable; urgency=medium
     `system login user` assignments. Strict commit still rejects the
     shadowing definition.
 
+  * REST config sessions: a session token is now bound to the principal
+    that minted it (#16069). POST /config/enter records the authorized
+    principal alongside the token, and every holder-scoped follow-up
+    (set/delete/activate/deactivate/load/rollback/annotate/commit/
+    commit-confirmed/confirm/exit and re-enter) must present the same
+    principal; a stolen token presented by another equally-privileged
+    principal is denied with 403 before the store is called. The
+    owner's own workflow and store-entered (CLI/gRPC/internal) sessions
+    are unchanged.
   * Login: argument-scoped allow/deny-commands regexes now fire on the
     gRPC and REST surfaces (#16067). Both gates rebuild the full
     canonicalised command from the decoded request (ShowText topic
