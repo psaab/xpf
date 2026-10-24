@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"log/slog"
 	"net"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -24,6 +25,9 @@ func TestRIMemberIsReBoundInTheKernel_9813(t *testing.T) {
 	enterPrivateNetns9813(t)
 	vrf := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: "vrf-blue"}, Table: 100}
 	if err := netlink.LinkAdd(vrf); err != nil {
+		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+			t.Fatalf("cannot create a VRF device in this netns (is the vrf module loaded?): %v (XPF_REQUIRE_NETNS is set)", err)
+		}
 		t.Skipf("cannot create a VRF device in this netns (is the vrf module loaded?): %v", err)
 	}
 	if err := netlink.LinkSetUp(vrf); err != nil {
@@ -31,6 +35,9 @@ func TestRIMemberIsReBoundInTheKernel_9813(t *testing.T) {
 	}
 	member := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "ge-0-0-5"}}
 	if err := netlink.LinkAdd(member); err != nil {
+		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+			t.Fatalf("cannot create a dummy member in this netns: %v (XPF_REQUIRE_NETNS is set)", err)
+		}
 		t.Skipf("cannot create a dummy member in this netns: %v", err)
 	}
 	if err := netlink.LinkSetUp(member); err != nil {
@@ -92,6 +99,9 @@ func TestRethRIMemberBindsLocalPhysicalInKernel12059(t *testing.T) {
 	enterPrivateNetns9813(t)
 	vrf := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: "vrf-blue"}, Table: 100}
 	if err := netlink.LinkAdd(vrf); err != nil {
+		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+			t.Fatalf("cannot create a VRF device in this netns (is the vrf module loaded?): %v (XPF_REQUIRE_NETNS is set)", err)
+		}
 		t.Skipf("cannot create a VRF device in this netns (is the vrf module loaded?): %v", err)
 	}
 	if err := netlink.LinkSetUp(vrf); err != nil {
@@ -99,6 +109,9 @@ func TestRethRIMemberBindsLocalPhysicalInKernel12059(t *testing.T) {
 	}
 	member := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "ge-0-0-2"}}
 	if err := netlink.LinkAdd(member); err != nil {
+		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+			t.Fatalf("cannot create a dummy RETH member in this netns: %v (XPF_REQUIRE_NETNS is set)", err)
+		}
 		t.Skipf("cannot create a dummy RETH member in this netns: %v", err)
 	}
 	if err := netlink.LinkSetUp(member); err != nil {

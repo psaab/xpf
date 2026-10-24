@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net"
 	"net/netip"
+	"os"
 	"slices"
 	"testing"
 
@@ -442,9 +443,15 @@ func TestMgmtDNSRulesSteerOnlyDefaultContextHostLookups11385(t *testing.T) {
 		{Name: config.ManagementVRFInstanceName, TableID: config.ManagementVRFTableID},
 		{Name: "tenant", TableID: 1001},
 	}); err != nil {
+		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+			t.Fatalf("cannot establish VRF miss-terminator control in this kernel: %v (XPF_REQUIRE_NETNS is set)", err)
+		}
 		t.Skipf("cannot establish VRF miss-terminator control in this kernel: %v", err)
 	}
 	if err := manager.BindInterfaceToVRF("fxp0", config.ManagementVRFInstanceName); err != nil {
+		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+			t.Fatalf("cannot bind fxp0 into the management VRF: %v (XPF_REQUIRE_NETNS is set)", err)
+		}
 		t.Skipf("cannot bind fxp0 into the management VRF: %v", err)
 	}
 	addDNSRuleTestAddress(t, fxp, "192.0.2.1/24")
@@ -544,6 +551,9 @@ func addDNSRuleTestDummyLink(t *testing.T, name string) netlink.Link {
 	t.Helper()
 	link := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: name}}
 	if err := netlink.LinkAdd(link); err != nil {
+		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+			t.Fatalf("cannot create %s in private netns: %v (XPF_REQUIRE_NETNS is set)", name, err)
+		}
 		t.Skipf("cannot create %s in private netns: %v", name, err)
 	}
 	if err := netlink.LinkSetUp(link); err != nil {

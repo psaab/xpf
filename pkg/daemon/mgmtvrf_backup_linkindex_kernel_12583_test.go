@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"net"
+	"os"
 	"testing"
 
 	"github.com/vishvananda/netlink"
@@ -32,6 +33,9 @@ func newBackupKernelEnv12583(t *testing.T) *backupKernelEnv12583 {
 		LinkAttrs: netlink.LinkAttrs{Name: mgmtVRFDeviceName},
 		Table:     uint32(mgmtVRFTableID),
 	}); err != nil {
+		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+			t.Fatalf("cannot create a table-%d VRF in this netns (is the vrf module loaded?): %v (XPF_REQUIRE_NETNS is set)", mgmtVRFTableID, err)
+		}
 		t.Skipf("cannot create a table-%d VRF in this netns (is the vrf module loaded?): %v", mgmtVRFTableID, err)
 	}
 	vrf, err := netlink.LinkByName(mgmtVRFDeviceName)

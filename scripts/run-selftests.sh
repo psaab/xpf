@@ -410,9 +410,10 @@ run_shell test/routing/selftest-routing-kernel_9812.sh
 # The probes pin missing-tool behavior and the -json=false argv contract.
 # Seven hermetic fixture cells: no Go build or netns.
 run_shell test/routing/selftest-routing-probes_9812.sh
-# #15241 (A58-06): the daemon real-kernel cells. The #9637 ingress,
+# #15241 (A58-06) + #16470: the daemon real-kernel cells. The #9637 ingress,
 # #11409 unzoned-ingress, #9637 reinject-TUN, #12034 shared-VRF, #12229
-# lifeline and #12087 secure-tunnel cells are the kernel halves of their
+# lifeline and #12087 secure-tunnel cells, plus the 21
+# enterPrivateNetns9813 cells (mgmt-VRF/RI-VRF/DHCP/#9506), are the kernel halves of their
 # fixes — all SKIP under a plain `go test` without a usable netns, and a
 # skipped cell reads identically to a passing one. This leg runs them
 # under `unshare -rn` with XPF_REQUIRE_NETNS=1, where (since A58-06) a
@@ -421,7 +422,7 @@ run_shell test/routing/selftest-routing-probes_9812.sh
 # user namespaces are unavailable.
 run_shell test/daemon/selftest-daemon-kernel_15241.sh
 # The probes pin missing-tool behavior and the -json=false argv contract.
-# Eleven hermetic fixture cells: no Go build or netns.
+# Thirteen hermetic fixture cells: no Go build or netns.
 run_shell test/daemon/selftest-daemon-probes_15241.sh
 # #10771: prove the BPF leg's privilege contract with fake tools: without
 # passwordless sudo it SKIPs; when available, the compiled probe is invoked as

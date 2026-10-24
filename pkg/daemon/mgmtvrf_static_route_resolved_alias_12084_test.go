@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"os"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -63,6 +64,9 @@ func TestMgmtStaticRouteResolvedGatewayAliasesInstallInKernel_12084(t *testing.T
 			if tc.vrf {
 				vrf := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: mgmtVRFDeviceName}, Table: mgmtVRFTableID}
 				if err := netlink.LinkAdd(vrf); err != nil {
+					if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+						t.Fatalf("cannot create management VRF in private netns: %v (XPF_REQUIRE_NETNS is set)", err)
+					}
 					t.Skipf("cannot create management VRF in private netns: %v", err)
 				}
 				if err := netlink.LinkSetUp(vrf); err != nil {
@@ -71,6 +75,9 @@ func TestMgmtStaticRouteResolvedGatewayAliasesInstallInKernel_12084(t *testing.T
 			}
 			fxp0 := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "fxp0"}}
 			if err := netlink.LinkAdd(fxp0); err != nil {
+				if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+					t.Fatalf("cannot create dummy fxp0 in private netns: %v (XPF_REQUIRE_NETNS is set)", err)
+				}
 				t.Skipf("cannot create dummy fxp0 in private netns: %v", err)
 			}
 			if err := netlink.LinkSetUp(fxp0); err != nil {
@@ -144,6 +151,9 @@ func TestMgmtStaticRouteTolerantNoInstallActionInstallsGateway_12084(t *testing.
 	enterPrivateNetns9813(t)
 	fxp0 := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "fxp0"}}
 	if err := netlink.LinkAdd(fxp0); err != nil {
+		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+			t.Fatalf("cannot create dummy fxp0 in private netns: %v (XPF_REQUIRE_NETNS is set)", err)
+		}
 		t.Skipf("cannot create dummy fxp0 in private netns: %v", err)
 	}
 	if err := netlink.LinkSetUp(fxp0); err != nil {

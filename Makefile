@@ -1046,10 +1046,12 @@ test-routing-kernel:
 	exit $$rc
 
 # Self-test the #9637/#11409/#12034/#12229/#12087 daemon real-kernel
-# cells (#15241 A58-06).
+# cells (#15241 A58-06) plus the 21 enterPrivateNetns9813 cells
+# (#16470).
 # They SKIP under plain `go test` without a usable netns; a skipped cell
 # reads like a pass, so this target runs them under `unshare -rn` with
-# XPF_REQUIRE_NETNS=1, where (since A58-06) a missing tool is a failure.
+# XPF_REQUIRE_NETNS=1, where (since A58-06, extended by #16470) a
+# missing tool or a skipped setup step is a failure.
 # It SKIPS as a whole (not fails) where user namespaces are unavailable,
 # matching the other tool-gated legs. All six kernel cells are pinned BY
 # NAME inside the script, so a rotted -run predicate cannot report a
@@ -1057,13 +1059,14 @@ test-routing-kernel:
 # Single-sourced with the `make selftest` legs: each script here is the
 # SAME script the aggregate runs, so the target and the aggregate cannot
 # drift into testing different things. The probes pin the leg's
-# missing-tool and output-flag contracts hermetically (eleven fixtures).
+# missing-tool and output-flag contracts hermetically (thirteen fixtures).
 test-daemon-kernel-lib:
 	sh ./test/daemon/selftest-daemon-kernel_15241.sh
 	sh ./test/daemon/selftest-daemon-probes_15241.sh
 
-# #15241 (A58-06): the daemon real-kernel cells (9637 x2, 11409, 12034,
-# 12229, 12087) are part of `make test`, not only the opt-in
+# #15241 (A58-06) + #16470: the daemon real-kernel cells (9637 x2,
+# 11409, 12034, 12229, 12087, plus the 21 enterPrivateNetns9813 cells)
+# are part of `make test`, not only the opt-in
 # `make selftest` / `test-daemon-kernel-lib`. They exercise kernel
 # host-inbound behaviour that ordinary Go tests cannot observe. The
 # forcing leg's by-name check catches an empty or stale `-run` selection.
@@ -1083,7 +1086,7 @@ test-daemon-kernel:
 			echo "test-daemon-kernel: FAIL — XPF_REQUIRE_NETNS=1, but the forcing prerequisites are unavailable."; \
 			exit 1; \
 		fi; \
-		echo "make test: NOT-EXAMINED — daemon-kernel (#9637 ingress, #11409 unzoned-ingress, #9637 reinject, #12034 shared-VRF, #12229 lifeline, #12087 secure-tunnel)."; \
+		echo "make test: NOT-EXAMINED — daemon-kernel (27 cells: #9637 ingress, #11409 unzoned-ingress, #9637 reinject, #12034 shared-VRF, #12229 lifeline, #12087 secure-tunnel, plus the 21 #16470 mgmt-VRF/RI-VRF/DHCP/#9506 cells)."; \
 		echo "  The host cannot create a private network namespace; the real-kernel cells did not run."; \
 		echo "  Run where unprivileged user namespaces are available, or set XPF_REQUIRE_NETNS=1 to fail instead."; \
 		exit 0; \

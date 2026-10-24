@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"os"
 	"reflect"
 	"testing"
 
@@ -60,6 +61,9 @@ func TestBareCrossSpelledMemberEnslavesVLANChildrenInKernel10174(t *testing.T) {
 			enterPrivateNetns9813(t)
 			vrf := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: "vrf-blue"}, Table: 100}
 			if err := netlink.LinkAdd(vrf); err != nil {
+				if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+					t.Fatalf("cannot create a VRF device in this netns (is the vrf module loaded?): %v (XPF_REQUIRE_NETNS is set)", err)
+				}
 				t.Skipf("cannot create a VRF device in this netns (is the vrf module loaded?): %v", err)
 			}
 			if err := netlink.LinkSetUp(vrf); err != nil {
@@ -67,6 +71,9 @@ func TestBareCrossSpelledMemberEnslavesVLANChildrenInKernel10174(t *testing.T) {
 			}
 			parent := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "ge-0-0-0"}}
 			if err := netlink.LinkAdd(parent); err != nil {
+				if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+					t.Fatalf("cannot create a dummy parent in this netns: %v (XPF_REQUIRE_NETNS is set)", err)
+				}
 				t.Skipf("cannot create a dummy parent in this netns: %v", err)
 			}
 			if err := netlink.LinkSetUp(parent); err != nil {
@@ -85,6 +92,9 @@ func TestBareCrossSpelledMemberEnslavesVLANChildrenInKernel10174(t *testing.T) {
 					Name: name, ParentIndex: live.Attrs().Index,
 				}, VlanId: vlanID}
 				if err := netlink.LinkAdd(child); err != nil {
+					if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+						t.Fatalf("cannot create an 802.1Q child in this netns: %v (XPF_REQUIRE_NETNS is set)", err)
+					}
 					t.Skipf("cannot create an 802.1Q child in this netns: %v", err)
 				}
 				if err := netlink.LinkSetUp(child); err != nil {

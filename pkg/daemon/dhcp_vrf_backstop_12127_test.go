@@ -200,6 +200,9 @@ func setupManagementVRFBackstopTopology12127(t *testing.T) netns.NsHandle {
 	peerNS, err := netns.New()
 	if err != nil {
 		testNS.Close()
+		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+			t.Fatalf("cannot create peer netns: %v (XPF_REQUIRE_NETNS is set)", err)
+		}
 		t.Skipf("cannot create peer netns: %v", err)
 	}
 	if err := netns.Set(testNS); err != nil {
@@ -232,6 +235,9 @@ func setupManagementVRFBackstopTopology12127(t *testing.T) netns.NsHandle {
 		Table:     config.ManagementVRFTableID,
 	}
 	if err := netlink.LinkAdd(vrf); err != nil {
+		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+			t.Fatalf("cannot create management VRF in this netns: %v (XPF_REQUIRE_NETNS is set)", err)
+		}
 		t.Skipf("cannot create management VRF in this netns: %v", err)
 	}
 	vrfLink, err := netlink.LinkByName(dhcpVRFMaster12127)

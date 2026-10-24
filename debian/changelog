@@ -12,6 +12,14 @@ xpf (0.0.0) unstable; urgency=medium
     persistent-nat-failover.sh resolve_pool (#9729). A hermetic
     configstore cell compiles every cluster env's CLUSTER_CONF and
     asserts WAN_VIP4/LAN_VIP4/LAN_VIP6 are configured addresses.
+  * Test: force the enterPrivateNetns9813 daemon kernel cells
+    (#16470). The 21 mgmt-VRF/RI-VRF/DHCP/#9506 kernel cells behind
+    that helper skipped on netns denial with no XPF_REQUIRE_NETNS
+    arm and ran in no gate (two parents passed over 7 skipped
+    subtests). They now fail under XPF_REQUIRE_NETNS, the daemon
+    kernel forcing leg runs and pins all 27 cells and rejects any
+    skipped subtest, and an AST census fails if a new helper caller
+    is not registered in the leg.
   * Config: warn on unknown `system`, `snmp` and class-of-service
     keywords (#16462). `syslog hots`/`hosts`, `ntp servr`,
     `name-sever`, `snmp comunity`, a bad syslog facility
