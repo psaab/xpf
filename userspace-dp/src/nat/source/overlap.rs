@@ -932,6 +932,15 @@ pub(crate) fn wire_static_overlap_peers(
     }
     let shared = Arc::new(statics);
     for rule in rules.iter_mut() {
+        if rule.interface_mode {
+            // #16034: an interface-only config has no pool rule to carry
+            // the view, and the interface mint resolves its egress address
+            // only at runtime — so the interface rule itself must hold it
+            // unconditionally (mirrors the #16015 NPTv6 wiring). The mint
+            // check is port-exact via `owns`.
+            rule.static_externals = Some(Arc::clone(&shared));
+            continue;
+        }
         if !rule.pool_mode {
             continue;
         }
