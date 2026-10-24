@@ -1,5 +1,18 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Cluster: an open control-key rotation now ages visibly and alarms
+    when forgotten (#16029). UpdateConfig stamps when the current
+    additional-authentication-key window opened (keyed on the additional
+    key's identity, so re-applying the identical config cannot launder
+    the age; swapping the additional key re-anchors, finalize clears).
+    `show chassis cluster statistics` renders the window's age on the
+    Key rotation line, and past 7 days the line carries an ALARM naming
+    the window by key ID — the retired key is still accepted, so a
+    forgotten step-5 finalize previously left it valid indefinitely.
+    The alarm never auto-finalizes (retiring a key the peer still signs
+    with reopens the dual-master window); the stamp is in-memory and
+    re-anchors at the first apply after a daemon restart, so a stale
+    alarm can be up to one restart late, never early.
   * Logging: unify the raw-event wire parser behind logEvent and
     DecodeRawEventRecord (#16127). parseRawEvent is now the single
     offset parser (zero-allocation, caller-owned rawEvent) and

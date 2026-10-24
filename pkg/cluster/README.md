@@ -2905,6 +2905,18 @@ wrong one reopens the dual-master window:
 | `peer is still signing <other-id> — do NOT finalize` | the peer is still on the retired key |
 | `peer key UNKNOWN — no authenticated peer frame seen` | usually the peer is down; **not** the same as "not safe" |
 
+Every open window also renders its age (`open for 3d`), and a window open
+longer than **7 days** carries an `ALARM` on the same line naming the
+window by its key IDs (#16029): the retired key is still accepted, so a
+forgotten step 5 leaves it valid indefinitely. The alarm never finalizes
+for the operator — retiring a key the peer still signs with reopens the
+dual-master window — it prompts the commit. The open-since stamp is
+anchored when the additional key's identity changes and is not moved by
+re-applying the identical config, so a routine commit cannot launder a
+forgotten rotation's age; it is in-memory, so after a daemon restart it
+re-anchors at the first apply that sees the window (a stale alarm can be
+up to one restart late, never early).
+
 "Both configs say B" is a statement about two files. "The peer is currently
 SIGNING with B" is a statement about the running system, and only the second
 makes retiring the old key safe. The value tracks the **latest** verified

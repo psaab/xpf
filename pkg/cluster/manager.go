@@ -500,6 +500,21 @@ type Manager struct {
 	peerEpochLastFlush        time.Time
 	peerEpochLastFlushOK      bool
 
+	// controlLinkRotationOpenedAt is the #16029 wall-clock instant the
+	// current additional-key window opened (the additional key's identity
+	// last changed from absent/different to present). Zero when no window
+	// is open. Re-applying the identical additional key does NOT move it,
+	// so a routine commit cannot launder the age of a forgotten rotation;
+	// changing or clearing the additional key re-anchors/clears it. It is
+	// in-memory only: a daemon restart re-anchors at the first apply that
+	// sees the window open (see control_key_rotation.go).
+	controlLinkRotationOpenedAt time.Time
+	// controlLinkRotationAltDigest identifies WHICH additional key
+	// controlLinkRotationOpenedAt was anchored for, so swapping the
+	// additional key (a new rotation) re-anchors while an unchanged
+	// re-apply does not. A digest, never key bytes; "" when closed.
+	controlLinkRotationAltDigest string
+
 	// peerControlKeyID is the #6630 id of the accepted key that last verified
 	// a peer control frame — the running-system evidence that makes
 	// finalizing a rotation safe. An ID, never a key; see controlLinkKeyID.
