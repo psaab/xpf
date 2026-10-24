@@ -340,6 +340,19 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, []uncoveredF
 		return nil, nil, err
 	}
 	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, fwFamilyTokenWarnings...)
+	// #16450: unknown children at the firewall root, family-member and
+	// filter levels (trem/fitler/fam/xpfbogus...). Same AST-level reason
+	// as the gates above: compileFirewall only visits `filter` children
+	// of a family member and `term`/`interface-specific` children of a
+	// filter, so a typo at those levels compiles to nothing or to a
+	// widened term with no trace left in the typed config. Strict
+	// rejects; lenient warns (#1960).
+	fwLevelWarnings16450, err := validateFirewallLevelChildrenAST16450(
+		tree.Children, opts.lenientFirewallFilterFamilyCollisions)
+	if err != nil {
+		return nil, nil, err
+	}
+	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, fwLevelWarnings16450...)
 	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, selfRepeatWarnings...)
 
 	// #9323 undeclared routing-instance child keyword. Same AST-level reason as
