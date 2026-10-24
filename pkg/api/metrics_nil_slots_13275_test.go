@@ -71,7 +71,7 @@ func metricsValue13275(t *testing.T, m prometheus.Metric) (map[string]string, fl
 func TestCollectFilterCountersSkipsNilSlots13275(t *testing.T) {
 	for _, family := range []string{"inet", "inet6"} {
 		t.Run(family+"-nil-filter", func(t *testing.T) {
-			store := newFilterStore(t, []string{"set firewall family " + family + " filter fin term t1 then accept"})
+			store := newFilterStore(t, []string{"set firewall family " + family + " filter fin term t1 then count c1", "set firewall family " + family + " filter fin term t1 then accept"})
 			cfg := store.ActiveConfig()
 			if cfg == nil {
 				t.Fatal("missing active config")
@@ -108,7 +108,9 @@ func TestCollectFilterCountersSkipsNilSlots13275(t *testing.T) {
 	for _, userspace := range []bool{false, true} {
 		t.Run(map[bool]string{false: "nil-term-map", true: "nil-term-userspace"}[userspace], func(t *testing.T) {
 			store := newFilterStore(t, []string{
+				"set firewall family inet filter fin term t1 then count c1",
 				"set firewall family inet filter fin term t1 then accept",
+				"set firewall family inet filter fin term t2 then count c2",
 				"set firewall family inet filter fin term t2 then accept",
 			})
 			cfg := store.ActiveConfig()

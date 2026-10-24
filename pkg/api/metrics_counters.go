@@ -1017,7 +1017,12 @@ func (c *xpfCollector) collectFilterCounters(ch chan<- prometheus.Metric, dp api
 				if mapFailed && !userspaceOk {
 					continue
 				}
-				if hasMap || userspaceOk {
+				// #16454: a term without `then count` is not instrumented;
+				// never emit an xpf_filter_hits_total series for it (a
+				// legacy helper / retired-map 0 would read as "never
+				// matched" and alerts on the series could never fire
+				// meaningfully). A counted duplicate instance still emits.
+				if term.Count != "" && (hasMap || userspaceOk) {
 					agg.emit = true
 				}
 			}

@@ -81,6 +81,9 @@ func (c *CLI) showFirewallFilters() error {
 
 			ruleOffset := ruleStart
 			for _, term := range f.Terms {
+				if term == nil {
+					continue
+				}
 				var tb strings.Builder
 				firewallshow.WriteTerm(&tb, term, false)
 				fmt.Print(tb.String())
@@ -108,7 +111,11 @@ func (c *CLI) showFirewallFilters() error {
 					totalPkts += userspaceCounter.Packets
 					totalBytes += userspaceCounter.Bytes
 				}
-				if hasCounters || userspaceOk {
+				// #16454: a term without `then count` is not instrumented;
+				// never render a numeric Hit count for it (its retired-map /
+				// legacy-helper 0 would read as "never matched"). Counted
+				// terms keep rendering, including an idle 0.
+				if term.Count != "" && (hasCounters || userspaceOk) {
 					fmt.Printf("    Hit count: %d packets, %d bytes\n", totalPkts, totalBytes)
 				}
 			}
@@ -223,6 +230,9 @@ func (c *CLI) showFirewallFilter(name, requestedFamily string) error {
 	fmt.Printf("Filter: %s (family %s)\n", name, family)
 	ruleOffset := ruleStart
 	for _, term := range filter.Terms {
+		if term == nil {
+			continue
+		}
 		var tb strings.Builder
 		firewallshow.WriteTerm(&tb, term, true)
 		fmt.Print(tb.String())
@@ -248,7 +258,9 @@ func (c *CLI) showFirewallFilter(name, requestedFamily string) error {
 			totalPkts += userspaceCounter.Packets
 			totalBytes += userspaceCounter.Bytes
 		}
-		if hasCounters || userspaceOk {
+		// #16454: see showFirewallFilters — uncounted terms render no
+		// numeric Hit count.
+		if term.Count != "" && (hasCounters || userspaceOk) {
 			fmt.Printf("    Hit count: %d packets, %d bytes\n", totalPkts, totalBytes)
 		}
 	}

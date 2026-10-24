@@ -2210,7 +2210,11 @@ chain enforces the lo0 filter for all host-stack traffic (including fxp0
 management traffic), while the helper per-term counts cover only AF_XDP
 host-bound packets, so neither number is the lo0 total. `clear firewall
 all` resets both the helper/dataplane counters and the kernel lo0 named
-counters (#16457).
+counters (#16457). Only `then count` terms are instrumented (#16454): the
+helper publishes no counter row for an uncounted term, and the CLI / gRPC /
+Prometheus (`xpf_filter_hits_total`) surfaces render no numeric hit count
+for one, so a counted-but-idle `Hit count: 0` is distinguishable from
+not-counted.
 
 The EFFECTIVE view (`… effective`, #4422) rebuilds and prints the
 `FirewallFilterSnapshot` the userspace dataplane actually receives — the exact

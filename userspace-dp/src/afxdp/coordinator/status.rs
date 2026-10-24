@@ -1251,6 +1251,12 @@ impl super::Coordinator {
         (statuses, active_counts, truncated)
     }
 
+    /// #16454: publish only `then count` terms. Every
+    /// `record_filter_counter` call site is gated on `has_count`, so an
+    /// uncounted term's counter stays 0 forever; publishing it made
+    /// `show firewall` / gRPC / Prometheus render that 0 as an
+    /// authoritative "never matched" instead of "not instrumented".
+    /// Counted-but-idle terms still publish (their 0 is real).
     pub fn filter_term_counters(&self) -> Vec<crate::protocol::FirewallFilterTermCounterStatus> {
         let mut filter_keys = self
             .forwarding
@@ -1266,6 +1272,9 @@ impl super::Coordinator {
                 continue;
             };
             for term in &filter.terms {
+                if !term.has_count {
+                    continue;
+                }
                 out.push(crate::protocol::FirewallFilterTermCounterStatus {
                     family: filter.family.clone(),
                     filter_name: filter.name.clone(),
