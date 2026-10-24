@@ -147,3 +147,74 @@ func TestDNATDiagnosticsSeePluralValues16143(t *testing.T) {
 		}
 	})
 }
+
+// TestSNATAbsentAxisStillCompilesWildcard16143 is the fold regression guard:
+// the *List() accessors return nil for an absent axis, but the SNAT
+// Cartesian loops must still run once with the empty operand (ID 0 = any),
+// as the pre-#16143 []string{scalar} fallback did even for an empty scalar.
+// Feeding nil straight to the loops zeroed every cell and dropped the
+// "source NAT rule compiled" / "source NAT off rule compiled" records.
+//
+// Fail-on-revert: drop the snatMatchOperands wrapper at either loop and the
+// fully-absent (and the per-axis absent) cases go RED (record absent).
+func TestSNATAbsentAxisStillCompilesWildcard16143(t *testing.T) {
+	run := func(t *testing.T, match config.NATMatch, off bool) string {
+		t.Helper()
+		buf := captureSlog16143(t)
+		cfg := &config.Config{}
+		cfg.Security.Zones = map[string]*config.ZoneConfig{
+			"trust": {Name: "trust"}, "untrust": {Name: "untrust"},
+		}
+		cfg.Security.NAT.SourcePools = map[string]*config.NATPool{
+			"sp": {Name: "sp", Addresses: []string{"192.0.2.10"}},
+		}
+		then := config.NATThen{Type: config.NATSource, PoolName: "sp"}
+		want := "source NAT rule compiled"
+		if off {
+			then = config.NATThen{Type: config.NATSource, Off: true}
+			want = "source NAT off rule compiled"
+		}
+		cfg.Security.NAT.Source = []*config.NATRuleSet{
+			{Name: "rs-snat", FromZone: "trust", ToZone: "untrust",
+				Rules: []*config.NATRule{{Name: "r1", Match: match, Then: then}}},
+		}
+		result := newValidationResult()
+		assignZoneIDs(result, cfg)
+		if err := compileNAT(&notAValidationDP{}, cfg, result); err != nil {
+			t.Fatalf("compileNAT: %v", err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, want) {
+			t.Errorf("absent axis must still compile the wildcard cell (%q missing); got:\n%s", want, out)
+		}
+		if !strings.Contains(out, "src_addr_id=0") {
+			t.Errorf("absent source axis must resolve to addr ID 0 (any); got:\n%s", out)
+		}
+		return out
+	}
+
+	t.Run("pool both axes absent", func(t *testing.T) {
+		run(t, config.NATMatch{}, false)
+	})
+	t.Run("pool source absent destination present", func(t *testing.T) {
+		out := run(t, config.NATMatch{DestinationAddresses: []string{"203.0.113.0/24"}}, false)
+		if !strings.Contains(out, "dst_addr=203.0.113.0/24") {
+			t.Errorf("present destination axis must still iterate its value; got:\n%s", out)
+		}
+	})
+	t.Run("pool destination absent source present", func(t *testing.T) {
+		out := run(t, config.NATMatch{SourceAddresses: []string{"10.1.0.0/16"}}, false)
+		if !strings.Contains(out, "dst_addr_id=0") {
+			t.Errorf("absent destination axis must resolve to addr ID 0 (any); got:\n%s", out)
+		}
+	})
+	t.Run("off both axes absent", func(t *testing.T) {
+		run(t, config.NATMatch{}, true)
+	})
+	t.Run("off destination absent source present", func(t *testing.T) {
+		out := run(t, config.NATMatch{SourceAddress: "10.9.0.0/16"}, true)
+		if !strings.Contains(out, "dst_addr_id=0") {
+			t.Errorf("off: absent destination axis must resolve to addr ID 0 (any); got:\n%s", out)
+		}
+	})
+}

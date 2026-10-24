@@ -52,6 +52,20 @@ func resolveSNATMatchAddr(dp DataPlane, cidr string, result *CompileResult) (uin
 	return addrID, nil
 }
 
+// snatMatchOperands adapts a NATMatch *List() accessor result for the
+// SNAT Cartesian compile loops. An absent axis is a wildcard: the loops
+// must still run once with the empty operand (resolveSNATMatchAddr maps
+// "" to ID 0 = any), as the pre-#16143 `[]string{scalar}` fallback did
+// even when the scalar was empty. The accessors return nil for an absent
+// criterion (other consumers test len==0 for "unconstrained"), so that
+// singleton-empty semantics lives here, not in the accessors.
+func snatMatchOperands(addrs []string) []string {
+	if len(addrs) == 0 {
+		return []string{""}
+	}
+	return addrs
+}
+
 // NAT counter-key type prefixes (#2218). The per-rule NAT translation hit
 // counter map is keyed by "natType/rulesetName/ruleName". The type prefix is
 // required because the same (rule-set, rule) name pair can be reused across
@@ -415,10 +429,10 @@ func compileNATWithStaging(dp DataPlane, cfg *config.Config, result *CompileResu
 			// source-nat off: exemption rule (no pool allocation)
 			if rule.Then.Off {
 				// Resolve source addresses (supports bracket lists)
-				srcAddrs := rule.Match.SourceAddressList()
+				srcAddrs := snatMatchOperands(rule.Match.SourceAddressList())
 
 				// Resolve destination addresses (supports bracket lists)
-				dstAddrs := rule.Match.DestinationAddressList()
+				dstAddrs := snatMatchOperands(rule.Match.DestinationAddressList())
 
 				for _, srcAddr := range srcAddrs {
 					srcAddrID, err := resolveSNATMatchAddr(dp, srcAddr, result)
@@ -609,8 +623,8 @@ func compileNATWithStaging(dp DataPlane, cfg *config.Config, result *CompileResu
 
 			// Resolve SNAT match addresses (supports bracket lists). Each
 			// distinct CIDR gets an implicit address-book ID in result.AddrIDs.
-			srcAddrs := rule.Match.SourceAddressList()
-			dstAddrs := rule.Match.DestinationAddressList()
+			srcAddrs := snatMatchOperands(rule.Match.SourceAddressList())
+			dstAddrs := snatMatchOperands(rule.Match.DestinationAddressList())
 
 			for _, srcAddr := range srcAddrs {
 				srcAddrID, err := resolveSNATMatchAddr(dp, srcAddr, result)
