@@ -1512,3 +1512,67 @@ per stream, twice" is NOT met on this head: 1 of 3 runs fully
 clean. Restore after every run: clean master `2c8575b70e`, helper
 `2f2f5cbf…b04` both nodes (hash-proved), RG0/1/2 node0 primary,
 target OK, P4 verification 9.9 / 17.8 / 18.2 Gbit/s, VERIFY_ZERO 0.
+
+## FZFixWire34 (FZDiag37 established-guard, head 28df67ec77)
+
+FZDiag37: on head 7ce8e78b4b the remaining aged-failover revocations
+were StaleSourceNat revocations at the reverse/fabric arms of
+`source_nat_revocation_on_session_hit_with_ingress`
+(policy_revalidation.rs :1150 missing-VLAN / :1212 judged on the
+reviewed head): companion-less fabric/synced reverse rows lacking
+forward VLAN/dynamic-SNAT provenance revoked 2 established tuples
+at failover (FZCellsStrict run2: fw0 snat_revoked 0->2 at FO+1,
+streams 59166/59168 deleted both nodes), while declined-shape rows
+survived.
+
+Fix (28df67ec77): established sessions — handshake complete
+(`established && !handshake_pending && !closing`) plus admitted
+traffic (`fwd_packets + rev_packets > 0`) — NEVER take a
+StaleSourceNat revocation on a reverse/fabric hit at the
+missing-VLAN arm, the companion-less judged arm, or the
+judged-with-companion arm when the forward row carries no forward
+VLAN provenance. Decline = keep session, drop packet. The escape
+is an actual NAT-binding change: a judged row revalidated under an
+older config generation with the live config epoch advanced past
+it still revokes (epoch = `ForwardingGenerationStamp.
+config_generation`; HA ownership transitions do not advance it).
+New `SessionTable` accessors: `forward_established_with_traffic`,
+`forwarding_revalidation_config_generation`,
+`source_nat_revalidated_config_generation`.
+Provenance-unknown (`None`) rows keep the #13910/#13771
+fail-close; forward hits and non-established rows are judged
+exactly as before.
+
+Unit: `established_reverse_hit_never_stale_snat_revoked_16217`
+(companion-less missing-VLAN shape declines + row survives;
+provenance-unknown companion-less control still fail-closes) and
+`established_reverse_hit_revokes_on_config_epoch_change_16217`
+(unchanged rule survives same-epoch; withdrawn rule under a new
+config epoch revokes with the canonical key). `cargo test
+policy_revalidation` 114 passed; `cargo test 16217` 55 passed.
+
+Live aged table (all-node0, P4 85s, RG1 fw0->fw1 at 30s age +
+failback, evidence `/var/worktrees/FZFixWire34/run{1,2}/`):
+provenance `make deb DEB_VERSION=99.16217.46` from 28df67ec77
+(no manual repack): deb sha256
+`4681f7c688723c77f17772331ce23deaceef0a0cef003b2396e6a859adc70406`,
+helper sha256
+`d2e95198dafcda8cb412e3f98256acbde3028de9f42b04d75f261f84902be214`
+extracted from the deb and hash-proved `/proc/<pid>/exe == expect`
+on BOTH nodes before traffic in every run. Transitions proven
+every run: `RG1_OWNER_BEFORE=node0`, `OWNER_FO5 fw0view=node1
+fw1view=node1` (failback CLI hit the 90s fabric-auth clock window
+in both runs — FO itself is the proven transition; posture after
+restore is node0). snat_revoked 0 on both nodes at every sample.
+
+| Run | Per-stream zeros | SUM zeros | snat_revoked | Verdict |
+|---|---|---|---|---|
+| run1 | {} — 0 | 0 | 0 both, all samples | PASS |
+| run2 | {} — 0 | 0 | 0 both, all samples | PASS |
+
+**Acceptance (ZERO per-stream zeros) met TWICE on loss** on this
+head — the FZCellsStrict run2 shape (2 streams, 108 zeros, SUM 0)
+does not recur. SUM sender 3.93 / 4.97 Gbit/s (pre-FO no zeros).
+Restore after each run: clean master `2c8575b70e`, helper
+`2f2f5cbf…b04` both nodes (hash-proved), RG0/1/2 node0 primary,
+target OK, P4 verification 16.2 / 13.5 Gbit/s, VERIFY_ZERO 0.
