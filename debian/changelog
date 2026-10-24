@@ -63,6 +63,19 @@ xpf (0.0.0) unstable; urgency=medium
     schema_walk.go. Same package, no statement, signature or
     behaviour change and no test file modified; imports pruned per
     file (#16152). The deferred PR2 nodeKind classifier is not added.
+  * Config: `BodyView` (Children/Find over the shared packed-body
+    expansion, with a per-family expansion hook) is adopted by the
+    screen family first (#16148). compileScreen's family lookups, the
+    ids-option packed-body read, family normalization and the
+    duplicate-family check now go through the view; the bespoke
+    `screenFamilyBodyChain` expander is deleted (its bracketed chain
+    is inlined into the one remaining screen walk). The plain
+    (nested) branch stays zero-allocation, pinned by an alloc gate,
+    and old-vs-new expander output is pinned node-for-node on
+    hierarchical/flat/packed/bracketed forms. No behaviour change:
+    the screen family's unknown-token backstop and expansion order
+    are preserved exactly, which is the per-family falsifying
+    experiment the campaign's stop-rule requires.
 
   * Dataplane: the three string protocol carriers (filter, policy
     application, DNAT) now have per-carrier validation cells proving

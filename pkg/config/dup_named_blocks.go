@@ -215,8 +215,9 @@ func validateDuplicateNamedBlockAST(tree *ConfigTree, lenient bool) ([]string, e
 				}
 				famSeen := map[string]bool{}
 				famReported := map[string]bool{}
-				body := packedBody(inst.node, idsSchema)
-				for _, fam := range body.Children {
+				// #16148: the packed body expansion compileScreen consumes,
+				// read through BodyView (plain branch: authored slice).
+				for _, fam := range bodyViewOf(inst.node, idsSchema).Children() {
 					fn := fam.Name()
 					if !screenIDSFamily[fn] {
 						continue

@@ -357,7 +357,9 @@ func compileScreen(node *Node, sec *SecurityConfig) error {
 			}
 		}
 
-		icmpNode := body.FindChild("icmp")
+		// #16148: family lookup through BodyView.Find over the already-
+		// normalised body (plain branch: same zero-copy scan as FindChild).
+		icmpNode := bodyViewOf(body, idsSchema).Find("icmp")
 		if icmpNode != nil {
 			icmpSchema := famSchema("icmp")
 			for _, rawOpt := range icmpNode.Children {
@@ -429,7 +431,7 @@ func compileScreen(node *Node, sec *SecurityConfig) error {
 			}
 		}
 
-		ipNode := body.FindChild("ip")
+		ipNode := bodyViewOf(body, idsSchema).Find("ip")
 		if ipNode != nil {
 			ipSchema := famSchema("ip")
 			for _, rawOpt := range ipNode.Children {
@@ -469,7 +471,7 @@ func compileScreen(node *Node, sec *SecurityConfig) error {
 			}
 		}
 
-		tcpNode := body.FindChild("tcp")
+		tcpNode := bodyViewOf(body, idsSchema).Find("tcp")
 		if tcpNode != nil {
 			tcpSchema := famSchema("tcp")
 			for _, rawOpt := range tcpNode.Children {
@@ -607,7 +609,7 @@ func compileScreen(node *Node, sec *SecurityConfig) error {
 			}
 		}
 
-		udpNode := body.FindChild("udp")
+		udpNode := bodyViewOf(body, idsSchema).Find("udp")
 		if udpNode != nil {
 			udpSchema := famSchema("udp")
 			for _, rawOpt := range udpNode.Children {
@@ -652,7 +654,7 @@ func compileScreen(node *Node, sec *SecurityConfig) error {
 			}
 		}
 
-		limitNode := body.FindChild("limit-session")
+		limitNode := bodyViewOf(body, idsSchema).Find("limit-session")
 		if limitNode != nil {
 			limitsessionSchema := famSchema("limit-session")
 			// #9792: a packed one-line run reaches this reader on the lenient path
