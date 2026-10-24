@@ -19,7 +19,6 @@ import (
 	"github.com/psaab/xpf/pkg/daemon"
 	"github.com/psaab/xpf/pkg/dataplane"
 	_ "github.com/psaab/xpf/pkg/dataplane/userspace"
-	"github.com/psaab/xpf/pkg/frr"
 )
 
 // Version information set at build time via ldflags.
@@ -236,47 +235,10 @@ func main() {
 		return
 
 	case cmdCleanup:
-		// #5322: cleanup takes NO flags or positional arguments; like #4869's
-		// `xpfd upgrade`, a stray operand (e.g. a typo'd path) is a hard usage
-		// error, not silently ignored while cleanup still GCs all pinned
-		// dataplane state and clears the FRR managed routes.
-		if err := parseCleanupArgs(os.Args[2:]); err != nil {
-			fmt.Fprintf(os.Stderr, "cleanup: %v\n", err)
-			os.Exit(1)
+		code := runCleanupSubcommand(os.Args[2:], os.Stdout, os.Stderr)
+		if code != 0 {
+			os.Exit(code)
 		}
-		// #9725: cleanup destroys pinned XDP links and runs without the daemon's
-		// periodic kernel-truth tick. Close and VERIFY transit BEFORE that
-		// destructive operation; on uncertainty leave the pins for the daemon's
-		// next start rather than knowingly opening a window.
-		if err := daemon.CloseKernelTransitForCleanup(); err != nil {
-			fmt.Fprintf(os.Stderr, "cleanup transit: %v\n", err)
-			os.Exit(1)
-		}
-		if err := dataplane.Cleanup(); err != nil {
-			fmt.Fprintf(os.Stderr, "cleanup BPF: %v\n", err)
-			os.Exit(1)
-		}
-		// Remove fabric IPVLAN interfaces created by the daemon.
-		daemon.CleanupFabricIPVLANs()
-		// Also clear FRR managed routes so the kernel routing table is
-		// clean. One-shot contract (#1880): no degraded-retry loop in
-		// this short-lived process; a degraded/failed reload is logged
-		// LOUDLY but keeps exit status 0 — deploy tooling wraps cleanup
-		// in `|| true`, and the deploy flow itself bounds convergence
-		// (the new daemon's first ApplyFull full-diffs any residue).
-		// Critically, Clear() never runs `systemctl reload frr`: the
-		// FRR 10.6 ExecReload bounces watchfrr (the unit MainPID) and
-		// parks frr.service in a 2-minute stop-sigterm that queued
-		// post-deploy reboots behind it (the #1880 failover-harness
-		// budget misses) and ended in systemd SIGKILLing FRR.
-		fm := frr.New()
-		fm.DisableDegradedRetry()
-		clearErr := fm.Clear()
-		fm.Stop()
-		// #10907: do not claim FRR managed routes were removed if Clear
-		// failed. Keep the #1880 one-shot exit behavior; the next daemon
-		// start reconciles any FRR residue.
-		reportCleanupFRRResult(os.Stdout, os.Stderr, clearErr)
 		return
 
 	case cmdUpgrade:

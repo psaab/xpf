@@ -367,7 +367,7 @@ Guard layers (`build-userspace-xdp.sh`):
    only `xpfd cleanup` does — also false. A bpffs pin outlives the process
    that created it, so releasing it means UNLINKING it, which is `Cleanup()`
    in `loader.go` doing `os.RemoveAll(bpfPinPath)`. `Cleanup()` has TWO
-   production callers: the `xpfd cleanup` subcommand (`cmd/xpfd/main.go`)
+   production callers: the `xpfd cleanup` subcommand (`cmd/xpfd/cleanup.go`)
    **and** `Manager.Teardown`. `daemon_run_shutdown.go` calls `Teardown` on
    every NON-hitless shutdown ("HA shutdown: tearing down BPF state"), so on
    that path the pins are already gone and a plain restart suffices. Only a

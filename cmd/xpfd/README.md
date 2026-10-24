@@ -58,7 +58,8 @@ real upgrade/cleanup side effects (`dispatch_test.go`,
 - `xpfd protocol-versions` — prints embedded HA, session-sync, and
   config-database protocol compatibility values.
 - `xpfd cleanup` — closes kernel transit, removes pinned BPF state, and clears
-  FRR-managed routes. Runs on uninstall.
+  FRR-managed routes. Runs on uninstall. Refuses beside a live daemon
+  (holds the daemon singleton; stop xpfd first — `systemctl stop xpfd`).
 - `xpfd upgrade` — runs the verified binary or kernel upgrade workflow.
 - `xpfd seed-runtime` — seeds the versioned runtime layout on first install.
 - `xpfd publish-generation` — publishes a complete staged binary generation.
