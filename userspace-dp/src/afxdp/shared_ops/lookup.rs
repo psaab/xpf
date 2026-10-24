@@ -313,7 +313,33 @@ pub(in crate::afxdp) fn fabric_adoption_gate_for_wire(
         candidate.decision,
     )
     .resolution;
+    // #16217 (FZDiag33 death point A): on the standby FIB the
+    // connected prefix covering the target is HA-suppressed in
+    // `connected_v4` (it survives only in `connected_*_by_ifindex`),
+    // so the re-resolution above falls to the pref-200 cluster Null0
+    // and answers `ClusterTerminalHAInactive` with egress 0 — even
+    // though the candidate's OWN stored decision is a
+    // `ForwardCandidate` naming the egress. The stored decision is
+    // the ownership proof (the Wire27 shape): the candidate only
+    // qualifies with Established/scoped completion evidence, so
+    // fall back to its stored egress RG exactly when the
+    // re-resolution is that cluster terminal with egress 0. Any
+    // other re-resolution (a real candidate, a missing neighbor, a
+    // named-egress terminal) is judged as before, and a stored
+    // decision that names no known egress RG (0) still declines.
     let egress_rg = crate::afxdp::forwarding::owner_rg_for_resolution(forwarding, resolution);
+    let egress_rg = if egress_rg <= 0
+        && resolution.disposition
+            == crate::afxdp::ForwardingDisposition::ClusterTerminalHAInactive
+        && resolution.egress_ifindex <= 0
+    {
+        crate::afxdp::forwarding::owner_rg_for_resolution(
+            forwarding,
+            candidate.decision.resolution,
+        )
+    } else {
+        egress_rg
+    };
     if egress_rg <= 0 || !forwarding_active_rgs.contains(&egress_rg) {
         return false;
     }

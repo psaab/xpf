@@ -5471,6 +5471,319 @@ fn adopted_cluster_terminal_live_fib_shape_16217() {
     assert_eq!(retryable.egress_ifindex, 12);
 }
 
+/// #16217 (FZDiag33 death point A): the adoption gate's
+/// re-resolution dies on the STANDBY FIB shape. Post-failover the
+/// connected /24 covering the target (172.16.80.200) is
+/// HA-suppressed in `connected_v4` — it survives only in
+/// `connected_v4_by_ifindex[12]` — so
+/// `lookup_forwarding_resolution_for_session` falls to the pref-200
+/// cluster Null0 and answers `ClusterTerminalHAInactive` egress 0.
+/// The candidate's OWN stored decision is a ForwardCandidate egress
+/// 12 (RG1, now forwarding-active locally): the gate must fall back
+/// to that stored egress RG (the stored decision is the ownership
+/// proof) instead of declining on egress_rg 0. NO `connected_v4`
+/// cover is inserted — that absence IS the live shape the Wire27
+/// fixtures missed.
+///
+/// FAIL-ON-REVERT: drop the stored fallback and the owner arm
+/// declines; drop the ClusterTerminal/egress-0 guard and the
+/// stored-terminal control adopts on a terminal it must decline.
+#[test]
+fn gate_falls_back_to_stored_forward_candidate_on_standby_fib_16217() {
+    let target = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+    let mac = [0x10, 0x66, 0x6a, 0x8b, 0x91, 0xa4];
+    let key = test_key();
+    let nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(key.src_port),
+        ..NatDecision::default()
+    };
+    let wire_key = forward_wire_key(&key, nat);
+    // Standby FIB: no connected_v4 cover for the target; /24 only in
+    // connected_v4_by_ifindex[12]; pref-200 cluster Null0 default.
+    let standby_fib = |stored: ForwardingResolution| {
+        let mut forwarding = test_forwarding_state_with_fabric();
+        assert!(
+            !forwarding
+                .connected_v4
+                .iter()
+                .any(|row| row.prefix.contains(Ipv4Addr::new(172, 16, 80, 200))),
+            "premise: no connected_v4 cover for the target (standby shape)"
+        );
+        forwarding.connected_v4_by_ifindex.insert(
+            12,
+            vec![PrefixV4::from_net(
+                Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap(),
+            )],
+        );
+        forwarding.routes_v4.insert(
+            "inet.0".to_string(),
+            vec![RouteEntryV4 {
+                prefix: PrefixV4::from_net(
+                    Ipv4Net::new(Ipv4Addr::new(0, 0, 0, 0), 0).unwrap(),
+                ),
+                next_hops: vec![],
+                discard: true,
+                reject: false,
+                cluster_terminal: true,
+                next_table: String::new(),
+                preference: 200,
+                mtu: 0,
+                rule_priority: 0,
+            }],
+        );
+        // Premise: plain re-resolution IS the cluster terminal.
+        let dyn_map = Arc::new(ShardedNeighborMap::new());
+        let raw = crate::afxdp::forwarding::lookup_forwarding_resolution_with_dynamic(
+            &forwarding,
+            &dyn_map,
+            target,
+        )
+        .resolution;
+        assert_eq!(
+            raw.disposition,
+            ForwardingDisposition::ClusterTerminalHAInactive,
+            "premise: standby re-resolution must answer the cluster terminal"
+        );
+        assert_eq!(raw.egress_ifindex, 0);
+        let decision = SessionDecision {
+            resolution: stored,
+            nat,
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
+        let established = crate::session::TcpHandshakeState::Established.to_wire();
+        let entry = SyncedSessionEntry { key: wire_key.clone(),
+        decision,
+        metadata: SessionMetadata { forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None, ..test_metadata() },
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x18,
+        generation: 0,
+        session_id: 4330,
+        tcp_close_class: 0, tcp_handshake_state: established, rev_packets: 7u64, fwd_packets: 9, pptp_call_ids: 0,
+        source_nat_static: None, };
+        let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        publish_shared_session(
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &entry,
+        );
+        (forwarding, dyn_map, shared_sessions, shared_nat_sessions, shared_forward_wire_sessions, shared_owner_rg_indexes)
+    };
+    let gate = |forwarding: &ForwardingState,
+                dyn_map: &Arc<ShardedNeighborMap>,
+                shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+                shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+                shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+                active: &std::collections::BTreeSet<i32>| {
+        let sessions = SessionTable::new();
+        let mut ha = BTreeMap::new();
+        ha.insert(1, active_ha_runtime(1));
+        crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
+            forwarding,
+            &ha,
+            active,
+            1,
+            &sessions,
+            shared_sessions,
+            shared_forward_wire_sessions,
+            shared_owner_rg_indexes,
+            &wire_key,
+            1_000_000,
+            dyn_map,
+        )
+    };
+    // Stored ForwardCandidate egress 12 (RG1): owner adopts via the
+    // stored fallback even though re-resolution is the terminal.
+    let stored_candidate = ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        egress_ifindex: 12,
+        tx_ifindex: 12,
+        next_hop: Some(target),
+        neighbor_mac: Some(mac),
+        ..test_resolution()
+    };
+    {
+        let (forwarding, dyn_map, ss, _sn, sfw, idx) = standby_fib(stored_candidate);
+        assert!(
+            gate(&forwarding, &dyn_map, &ss, &sfw, &idx, &std::collections::BTreeSet::from([1])),
+            "#16217 FZDiag33-A: owner must adopt via stored ForwardCandidate egress RG when re-resolution is ClusterTerminal egress 0"
+        );
+        assert!(
+            !gate(&forwarding, &dyn_map, &ss, &sfw, &idx, &std::collections::BTreeSet::new()),
+            "#16217 FZDiag33-A: non-owner (fresh set without RG1) must still decline via the stored fallback"
+        );
+    }
+    // Stored decision is itself the terminal (egress 0): no stored
+    // egress RG to fall back to — decline even for the owner.
+    let stored_terminal = ForwardingResolution {
+        disposition: ForwardingDisposition::ClusterTerminalHAInactive,
+        egress_ifindex: 0,
+        tx_ifindex: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        ..test_resolution()
+    };
+    {
+        let (forwarding, dyn_map, ss, _sn, sfw, idx) = standby_fib(stored_terminal);
+        assert!(
+            !gate(&forwarding, &dyn_map, &ss, &sfw, &idx, &std::collections::BTreeSet::from([1])),
+            "#16217 FZDiag33-A: stored terminal (egress 0) names no egress RG and must decline"
+        );
+    }
+}
+
+/// #16217 (FZDiag33 death point B): the reverse FabricRedirect
+/// conversion for adopted flows. Post-takeover the new owner serves
+/// the forward flow (its stored decision on the peer is a
+/// FabricRedirect — the client LAN is fabric-served), so server
+/// replies arriving on the WAN must cross the fabric BACK to the
+/// LAN owner. The reply target (10.0.61.102, on the connected LAN
+/// /24 egress 6 / RG2) is peer-owned on this node (RG1 active, RG2
+/// inactive): HA enforcement demotes the local candidate to
+/// HAInactive and, the reply having arrived on the WAN (not the
+/// fabric), no anti-loop-gated converter rescues it — the ACK dies.
+/// `build_reverse_session_from_forward_match` must convert the
+/// reverse resolution to FabricRedirect for exactly that shape.
+///
+/// FAIL-ON-REVERT: drop the gated arm and the adopted arm keeps
+/// HAInactive; drop the forward-shape gate and the non-redirect
+/// control converts too.
+#[test]
+fn adopted_reverse_reply_converts_to_fabric_redirect_16217() {
+    let forwarding = test_forwarding_state_split_rgs();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    // RG1 (WAN egress 12) active locally; RG2 (LAN egress 6) peer-owned.
+    let mut ha_state = BTreeMap::new();
+    ha_state.insert(1, active_ha_runtime(1));
+    ha_state.insert(2, inactive_ha_runtime(1));
+    let forward_match = |disposition: ForwardingDisposition| ForwardSessionMatch {
+        key: test_key(),
+        decision: SessionDecision {
+            resolution: ForwardingResolution {
+                disposition,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                ..test_resolution()
+            },
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                rewrite_src_port: Some(test_key().src_port),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: test_metadata(),
+        forwarding_generation: ForwardingGenerationStamp::default(),
+        aux: SessionLookupAux::default(),
+    };
+    // Adopted shape: forward stored as FabricRedirect, LAN RG
+    // peer-owned -> reply converts to FabricRedirect.
+    let adopted = build_reverse_session_from_forward_match(
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        forward_match(ForwardingDisposition::FabricRedirect),
+        1,
+        0,
+    );
+    assert_eq!(
+        adopted.decision.resolution.disposition,
+        ForwardingDisposition::FabricRedirect,
+        "#16217 FZDiag33-B: adopted reply to a peer-owned LAN must convert to FabricRedirect, got {:?}",
+        adopted.decision.resolution.disposition
+    );
+    // Control: forward NOT a FabricRedirect — the gated arm must
+    // NOT fire, so the reply keeps whatever the ordinary path
+    // produces. (On this fixture the pre-existing
+    // requires_fabric_return fabric-ingress arm also converts this
+    // shape, which is exactly why the adopted conversion needs its
+    // own gate: assert the gated helper directly below.)
+    let control = build_reverse_session_from_forward_match(
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        forward_match(ForwardingDisposition::ForwardCandidate),
+        1,
+        0,
+    );
+    assert_eq!(
+        control.decision.resolution.disposition,
+        ForwardingDisposition::FabricRedirect,
+        "#16217 FZDiag33-B: pre-existing fabric-return arm still converts the non-adopted shape (unchanged), got {:?}",
+        control.decision.resolution.disposition
+    );
+    // The gated helper directly: without the FabricRedirect proof
+    // (forward_is_fabric_redirect=false) and without fabric ingress,
+    // a peer-owned-LAN reply keeps the HA terminal; with the proof
+    // it converts. FAIL-ON-REVERT for the adopted arm lives here.
+    let gated_off = crate::afxdp::shared_ops::reverse_resolution_for_session_in_table_gated(
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        TEST_LAN_ZONE_ID,
+        false,
+        1,
+        false,
+        None,
+        false,
+    );
+    assert_eq!(
+        gated_off.disposition,
+        ForwardingDisposition::HAInactive,
+        "#16217 FZDiag33-B: gated helper without the proof must keep HAInactive, got {:?}",
+        gated_off.disposition
+    );
+    let gated_on = crate::afxdp::shared_ops::reverse_resolution_for_session_in_table_gated(
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        TEST_LAN_ZONE_ID,
+        false,
+        1,
+        false,
+        None,
+        true,
+    );
+    assert_eq!(
+        gated_on.disposition,
+        ForwardingDisposition::FabricRedirect,
+        "#16217 FZDiag33-B: gated helper with the proof must convert to FabricRedirect, got {:?}",
+        gated_on.disposition
+    );
+    // Control: LAN RG locally active (this node owns the client
+    // side too) -> reply forwards locally, never redirected.
+    let mut ha_both = BTreeMap::new();
+    ha_both.insert(1, active_ha_runtime(1));
+    ha_both.insert(2, active_ha_runtime(1));
+    let local = build_reverse_session_from_forward_match(
+        &forwarding,
+        &ha_both,
+        &dynamic_neighbors,
+        forward_match(ForwardingDisposition::FabricRedirect),
+        1,
+        0,
+    );
+    assert_eq!(
+        local.decision.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "#16217 FZDiag33-B: locally-owned LAN reply must forward locally, got {:?}",
+        local.decision.resolution.disposition
+    );
+    assert_eq!(local.decision.resolution.egress_ifindex, 6);
+}
+
 
 
 #[test]

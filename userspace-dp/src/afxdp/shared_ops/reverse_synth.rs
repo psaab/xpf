@@ -69,9 +69,10 @@ pub(in crate::afxdp) fn build_reverse_session_from_forward_match_in_table(
     ha_startup_grace_until_secs: u64,
     table: Option<&str>,
 ) -> SessionLookup {
-    let requires_fabric_return = forward_match.metadata.fabric_ingress
-        || forward_match.decision.resolution.disposition == ForwardingDisposition::FabricRedirect;
-    let resolution = reverse_resolution_for_session_in_table(
+    let forward_is_fabric_redirect =
+        forward_match.decision.resolution.disposition == ForwardingDisposition::FabricRedirect;
+    let requires_fabric_return = forward_match.metadata.fabric_ingress || forward_is_fabric_redirect;
+    let resolution = reverse_resolution_for_session_in_table_gated(
         forwarding,
         ha_state,
         dynamic_neighbors,
@@ -82,6 +83,7 @@ pub(in crate::afxdp) fn build_reverse_session_from_forward_match_in_table(
         forward_match.decision.resolution.tunnel_endpoint_id != 0
             && now_secs <= ha_startup_grace_until_secs,
         table,
+        forward_is_fabric_redirect,
     );
     let metadata = SessionMetadata {
         // #7169: this zone pair comes from the STORED forward session, i.e.
@@ -443,6 +445,40 @@ pub(in crate::afxdp) fn reverse_resolution_for_session_in_table(
     allow_unseeded_tunnel_local: bool,
     table: Option<&str>,
 ) -> ForwardingResolution {
+    reverse_resolution_for_session_in_table_gated(
+        forwarding,
+        ha_state,
+        dynamic_neighbors,
+        target_ip,
+        ingress_zone,
+        fabric_ingress,
+        now_secs,
+        allow_unseeded_tunnel_local,
+        table,
+        false,
+    )
+}
+
+/// #16217 (FZDiag33 death point B): `forward_is_fabric_redirect`
+/// marks a forward match whose stored decision is a FabricRedirect
+/// (the client side is fabric-served by the peer). Only for such
+/// matches may the non-fabric-ingress arm below convert a
+/// peer-owned-LAN reply resolution to FabricRedirect; ordinary
+/// reverse synthesis (new-flow install, TUN builders) passes false
+/// and stays bit-identical.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn reverse_resolution_for_session_in_table_gated(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    target_ip: IpAddr,
+    ingress_zone: u16,
+    fabric_ingress: bool,
+    now_secs: u64,
+    allow_unseeded_tunnel_local: bool,
+    table: Option<&str>,
+    forward_is_fabric_redirect: bool,
+) -> ForwardingResolution {
     let resolved = super::interface_nat_local_resolution(forwarding, target_ip, table)
         .unwrap_or_else(|| {
             super::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
@@ -500,6 +536,36 @@ pub(in crate::afxdp) fn reverse_resolution_for_session_in_table(
                 return redirected;
             }
         }
+    }
+    // #16217 (FZDiag33 death point B): the adopted-flow twin of the
+    // arm above. Post-takeover on the new owner the forward flow was
+    // FABRIC-ADOPTED (this node now owns the WAN egress RG), so its
+    // server replies arrive on the WAN and must cross the fabric BACK
+    // to the LAN owner (the old owner, which still owns the client
+    // LAN RG). The reply target (the client) resolves locally to a
+    // ForwardCandidate on the LAN egress, but that egress belongs to
+    // the peer-owned LAN RG: HA enforcement below demotes it to
+    // `HAInactive`, and the session-hit path's converters are
+    // anti-loop gated on fabric ingress — the reply packet arrived
+    // on the WAN, not the fabric — so nothing ever converts the
+    // terminal to `FabricRedirect` and the ACK dies on this node
+    // (live: reverse hits counted, zero fabric TX). The forward
+    // match's FabricRedirect shape is the proof the client side is
+    // fabric-served: when the forward decision is a FabricRedirect
+    // AND the connected destination RG for the reply target is
+    // known and NOT forwarding-active locally, convert the reply
+    // resolution to the fabric redirect for the ingress (LAN) zone
+    // instead of keeping the HA terminal. Unknown destination owner
+    // (dest_rg == 0) is not peer-ownership and never converts;
+    // locally-owned destinations keep the ordinary enforced path.
+    if !fabric_ingress
+        && forward_is_fabric_redirect
+        && dest_rg > 0
+        && !destination_owner_active
+        && let Some(redirect) =
+            super::forwarding::resolve_zone_encoded_fabric_redirect_by_id(forwarding, ingress_zone)
+    {
+        return redirect;
     }
     if fabric_ingress
         && owner_rg_id > 0
