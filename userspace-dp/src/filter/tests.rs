@@ -2638,6 +2638,147 @@ fn renamed_term_does_not_inherit_counter_15108() {
     assert_eq!(web_counter_15108(&refreshed), (0, 0));
 }
 
+// -- #16460: same-named term instances carry their OWN counter ------------
+//
+// A lenient load may keep two `term t` instances (different actions).
+// Matching the previous term by name alone found instance 1 for both:
+// instance 2 compared against the wrong shape and minted a fresh zero
+// counter on every refresh — and in the same-shape case it would have
+// aliased instance 1's Arc. Matching by (name, ordinal) keeps each
+// instance's own counter.
+//
+// FAIL-ON-REVERT: reverting parse_term to a name-only find makes
+// instance 2 compare against instance 1 (discard vs accept) and read
+// (0, 0) after the unchanged refresh.
+fn dup_name_filter_16460() -> Vec<FirewallFilterSnapshot> {
+    vec![FirewallFilterSnapshot {
+        name: "edge".into(),
+        family: "inet".into(),
+        terms: vec![
+            FirewallTermSnapshot {
+                name: "t".into(),
+                action: "discard".into(),
+                count: "hits".into(),
+                destination_ports: vec!["80".into()],
+                ..Default::default()
+            },
+            FirewallTermSnapshot {
+                name: "t".into(),
+                action: "accept".into(),
+                count: "hits".into(),
+                destination_ports: vec!["443".into()],
+                ..Default::default()
+            },
+        ],
+    }]
+}
+
+#[test]
+fn dup_name_terms_carry_own_counter_unchanged_refresh_16460() {
+    let filters = dup_name_filter_16460();
+    let state = make_filter_state(&filters, &[]);
+    // Seed both instances' counters directly: the terms match disjoint
+    // ports, so evaluating packets would need two flows; the invariant
+    // under test is Arc identity across the refresh, not matching.
+    state.filters["inet:edge"].terms[0]
+        .counter
+        .packets
+        .store(3, Ordering::Relaxed);
+    state.filters["inet:edge"].terms[0]
+        .counter
+        .bytes
+        .store(300, Ordering::Relaxed);
+    state.filters["inet:edge"].terms[1]
+        .counter
+        .packets
+        .store(5, Ordering::Relaxed);
+    state.filters["inet:edge"].terms[1]
+        .counter
+        .bytes
+        .store(500, Ordering::Relaxed);
+
+    let refreshed = parse_filter_state_with_three_color_preserving(
+        &filters,
+        &[],
+        &[],
+        &[],
+        "",
+        "",
+        Some(&state),
+    )
+    .expect("filter state compiles");
+    let before = &state.filters["inet:edge"].terms;
+    let after = &refreshed.filters["inet:edge"].terms;
+    assert!(
+        Arc::ptr_eq(&before[0].counter, &after[0].counter),
+        "instance 1 must carry its own counter Arc (#16460)"
+    );
+    assert!(
+        Arc::ptr_eq(&before[1].counter, &after[1].counter),
+        "instance 2 must carry its OWN counter Arc, not instance 1's or a fresh one (#16460)"
+    );
+    assert!(
+        !Arc::ptr_eq(&after[0].counter, &after[1].counter),
+        "same-named instances must not alias one counter (#16460)"
+    );
+    assert_eq!(
+        (
+            after[1].counter.packets.load(Ordering::Relaxed),
+            after[1].counter.bytes.load(Ordering::Relaxed)
+        ),
+        (5, 500),
+        "instance 2 keeps 5 after an unchanged refresh (#16460)"
+    );
+    assert_eq!(
+        (
+            after[0].counter.packets.load(Ordering::Relaxed),
+            after[0].counter.bytes.load(Ordering::Relaxed)
+        ),
+        (3, 300),
+        "instance 1 keeps 3 after an unchanged refresh (#16460)"
+    );
+}
+
+#[test]
+fn dup_name_same_shape_terms_do_not_alias_counter_16460() {
+    // Same name AND same shape: name-only matching would clone
+    // instance 1's Arc into instance 2, so both would report the same
+    // hits. Ordinal matching keeps them distinct.
+    let mut filters = dup_name_filter_16460();
+    filters[0].terms[1].action = "discard".into();
+    filters[0].terms[1].destination_ports = vec!["80".into()];
+    let state = make_filter_state(&filters, &[]);
+    state.filters["inet:edge"].terms[1]
+        .counter
+        .packets
+        .store(5, Ordering::Relaxed);
+    let refreshed = parse_filter_state_with_three_color_preserving(
+        &filters,
+        &[],
+        &[],
+        &[],
+        "",
+        "",
+        Some(&state),
+    )
+    .expect("filter state compiles");
+    let after = &refreshed.filters["inet:edge"].terms;
+    assert!(
+        !Arc::ptr_eq(&after[0].counter, &after[1].counter),
+        "identical same-named instances must keep distinct counters (#16460)"
+    );
+    assert_eq!(
+        after[1].counter.packets.load(Ordering::Relaxed),
+        5,
+        "instance 2 keeps its own 5 (#16460)"
+    );
+    assert_eq!(
+        after[0].counter.packets.load(Ordering::Relaxed),
+        0,
+        "instance 1 must not absorb instance 2's hits (#16460)"
+    );
+}
+
 #[test]
 fn unsupported_three_color_snapshots_fail_closed_in_rust_compiler() {
     let cases = vec![

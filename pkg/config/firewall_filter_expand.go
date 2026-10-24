@@ -15,7 +15,7 @@ import (
 //   - The LIVE userspace dataplane never materializes a term's cross-product.
 //     Its filter lowering (pkg/dataplane/userspace ResolveFilterPrefixListAddrs)
 //     stores prefix SETS matched by membership, and its per-term counters are
-//     NAME-keyed (FirewallFilterTermCounterKey{Family,FilterName,TermName}) —
+//     ORDINAL-keyed (FirewallFilterTermCounterKey{Family,FilterName,TermOrdinal}, #16460) —
 //     immune to any stride. A term referencing two 1500-entry prefix-lists
 //     (2.25M cross-product) is enforced natively at negligible cost.
 //   - The cross-product (and this stride) live ONLY on the RETIRED-eBPF path:
@@ -56,7 +56,7 @@ const MaxFilterTermExpansion = 1 << 20 // 1,048,576 — uint32 stride clamp thre
 // term's RuleStart offset and advances by the same `count`, so the next term
 // reads its OWN slots rather than a neighbour's (#3459). On the LIVE userspace
 // build the eBPF filter map is absent (hasMap == false) and per-term counters
-// are name-keyed, so this stride is unused there. It lives here, in the config
+// are ordinal-keyed (#16460), so this stride is unused there. It lives here, in the config
 // package, because it is pure config-field arithmetic with no dataplane
 // dependency — the readers already import config, and it keeps the
 // eBPF-retirement import boundary clean.

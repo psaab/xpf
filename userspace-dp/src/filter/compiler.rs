@@ -254,8 +254,9 @@ fn build_term_scoped_policer_runtimes(
 /// unrepresentable term rejects the whole snapshot.
 ///
 /// #15108: `previous` carries the prior compiled state so a term whose
-/// (family, filter, term) identity and compiled shape are unchanged reuses
-/// its `Arc<FilterTermCounter>` instead of minting a fresh zeroed one.
+/// (family, filter, ordinal) identity (#16460) and compiled shape are
+/// unchanged reuses its `Arc<FilterTermCounter>` instead of minting a
+/// fresh zeroed one.
 fn parse_filter_table(
     state: &mut FilterState,
     filters: &[FirewallFilterSnapshot],
@@ -828,15 +829,26 @@ fn parse_term(
         policer_runtime,
     );
     // #15108: carry the counter forward only when the previous term at the
-    // same (family, filter, term) identity has the same compiled shape.
+    // same (family, filter, ordinal) identity has the same compiled shape.
     // Any match/action/modifier/policer change (including a counter-name
     // change or a policer shape change, which already mints a fresh
     // runtime Arc) starts from zero so hits never leak across a different
     // contract. The id is excluded (positional); the counter itself is
     // excluded (it is the handle being carried).
+    // #16460: the positional id IS the identity discriminator for
+    // same-named terms: matching by name alone found instance 1 for every
+    // instance, so instance 2+ never carried its counter (shape mismatch)
+    // or aliased instance 1's (shape match). Matching name AND ordinal
+    // keeps each instance's own counter and still rejects a renamed term
+    // at the same position (renamed_term_does_not_inherit_counter_15108).
     if let Some(previous_term) = previous
         .and_then(|state| state.filters.get(&qualify_filter_key(filter_family, filter_name)))
-        .and_then(|filter| filter.terms.iter().find(|term| term.name == snap.name))
+        .and_then(|filter| {
+            filter
+                .terms
+                .iter()
+                .find(|term| term.id == id && term.name == snap.name)
+        })
     {
         if super::engine::filter_term_counter_shape_matches(previous_term, &term) {
             term.counter = previous_term.counter.clone();

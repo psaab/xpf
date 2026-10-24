@@ -2,10 +2,20 @@ package userspace
 
 import "github.com/psaab/xpf/pkg/config"
 
+// FirewallFilterTermCounterKey identifies ONE term instance in the
+// compiled filter: family, filter, and the zero-based position of the
+// term within the filter. The ordinal disambiguates two same-named
+// terms a lenient load may keep (#16460): both compile to their own
+// runtime counter, so keying by name alone forces every name-keyed
+// consumer to show the summed counter under each instance
+// (misattributing a discard term's hits to an accept term and doubling
+// the displayed total). The ordinal is the Rust `FilterTerm.id`
+// published on every counter row as `term_ordinal`, which the Rust
+// #15108 carry-forward now matches on as well.
 type FirewallFilterTermCounterKey struct {
-	Family     string
-	FilterName string
-	TermName   string
+	Family      string
+	FilterName  string
+	TermOrdinal uint32
 }
 
 // CloneCounterFold16464 maps a suppressed-member clone filter name to its
@@ -54,11 +64,25 @@ func FoldCloneFilterName16464(fold map[string]CloneCounterFold16464, family, fil
 	return filterName
 }
 
-// BuildFirewallFilterTermCounterIndex indexes helper counters by
-// (family,filter,term), summing duplicates (#15192). Clone rows are NOT
-// folded here: this builder has no config, so callers that pair counters
-// with an active config must fold first via
+// BuildFirewallFilterTermCounterIndex keys each published row by its
+// (family, filter, ordinal) instance identity so per-instance
+// renderers show the instance's OWN counter. Clone rows are NOT
+// folded here: this builder has no config, so callers that pair
+// counters with an active config must fold first via
 // BuildFirewallFilterTermCounterIndexForConfig (#16464).
+//
+// The name cohort a counter row belongs to is identified by
+// FirewallFilterTermCounterNameKey (below). Prometheus keeps the name
+// dimension because its labelset has no ordinal and duplicate series
+// would break Gather (#15192); name-scoped consumers aggregate over
+// ordinals with AggregateFirewallFilterTermCountersByName, while
+// per-instance renderers (`show firewall`) use
+// FirewallFilterTermCounterKey.
+//
+// Duplicated *ordinal* keys sum (#15192): a stale helper that
+// predates `term_ordinal` publishes every row at ordinal 0, so its
+// two same-named rows collapse here into the summed 0-key exactly as
+// the pre-#16460 name index summed them. Distinct ordinals never sum.
 func BuildFirewallFilterTermCounterIndex(status *ProcessStatus) map[FirewallFilterTermCounterKey]FirewallFilterTermCounterStatus {
 	return buildFilterTermCounterIndex(status, nil)
 }
@@ -83,9 +107,9 @@ func buildFilterTermCounterIndex(status *ProcessStatus, fold map[string]CloneCou
 	for _, counter := range status.FilterTermCounters {
 		counter.FilterName = FoldCloneFilterName16464(fold, counter.Family, counter.FilterName)
 		key := FirewallFilterTermCounterKey{
-			Family:     counter.Family,
-			FilterName: counter.FilterName,
-			TermName:   counter.TermName,
+			Family:      counter.Family,
+			FilterName:  counter.FilterName,
+			TermOrdinal: counter.TermOrdinal,
 		}
 		// #15192: a duplicated (family,filter,term) key must SUM, not
 		// last-wins. Folding a clone into its source deliberately
@@ -97,6 +121,69 @@ func buildFilterTermCounterIndex(status *ProcessStatus, fold map[string]CloneCou
 		index[key] = counter
 	}
 	return index
+}
+
+// AggregateFirewallFilterTermCountersByName folds the per-instance
+// rows back into one summed row per (family, filter, term name) for
+// name-scoped consumers (the Prometheus collector, whose labelset has
+// no ordinal dimension). This is the #15192 aggregation, preserved
+// after the index key became ordinal-scoped (#16460): the returned
+// map has one entry per name, so a duplicated term name still emits
+// exactly one series.
+func AggregateFirewallFilterTermCountersByName(status *ProcessStatus) map[FirewallFilterTermCounterNameKey]FirewallFilterTermCounterStatus {
+	byKey := make(map[FirewallFilterTermCounterNameKey]FirewallFilterTermCounterStatus)
+	if status == nil {
+		return byKey
+	}
+	for _, counter := range status.FilterTermCounters {
+		key := FirewallFilterTermCounterNameKey{
+			Family: counter.Family, FilterName: counter.FilterName, TermName: counter.TermName,
+		}
+		if existing, ok := byKey[key]; ok {
+			counter.Packets += existing.Packets
+			counter.Bytes += existing.Bytes
+			// The ordinal has no meaning at name scope; keep the
+			// first row's so the folded row is stable.
+			counter.TermOrdinal = existing.TermOrdinal
+		}
+		byKey[key] = counter
+	}
+	return byKey
+}
+
+// AggregateFirewallFilterTermCountersByNameForConfig is
+// AggregateFirewallFilterTermCountersByName with suppressed-member
+// clone rows folded into their authored source filter first (#16464),
+// so the Prometheus source series includes member-unit hits.
+func AggregateFirewallFilterTermCountersByNameForConfig(status *ProcessStatus, cfg *config.Config) map[FirewallFilterTermCounterNameKey]FirewallFilterTermCounterStatus {
+	if cfg == nil || status == nil {
+		return AggregateFirewallFilterTermCountersByName(status)
+	}
+	fold := BuildCloneCounterFold16464(cfg)
+	byKey := make(map[FirewallFilterTermCounterNameKey]FirewallFilterTermCounterStatus)
+	for _, counter := range status.FilterTermCounters {
+		counter.FilterName = FoldCloneFilterName16464(fold, counter.Family, counter.FilterName)
+		key := FirewallFilterTermCounterNameKey{
+			Family: counter.Family, FilterName: counter.FilterName, TermName: counter.TermName,
+		}
+		if existing, ok := byKey[key]; ok {
+			counter.Packets += existing.Packets
+			counter.Bytes += existing.Bytes
+			counter.TermOrdinal = existing.TermOrdinal
+		}
+		byKey[key] = counter
+	}
+	return byKey
+}
+
+// FirewallFilterTermCounterNameKey identifies the (family, filter,
+// term name) cohort a set of counter rows belongs to. It is the key
+// of AggregateFirewallFilterTermCountersByName; per-instance
+// consumers use FirewallFilterTermCounterKey instead.
+type FirewallFilterTermCounterNameKey struct {
+	Family     string
+	FilterName string
+	TermName   string
 }
 
 // ThreeColorPolicerStatusKey scopes a userspace-published three-color

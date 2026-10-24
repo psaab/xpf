@@ -52,8 +52,8 @@ func uncounted16454CLI(store *configstore.Store) *CLI {
 			status: dpuserspace.ProcessStatus{
 				FilterTermCounters: []dpuserspace.FirewallFilterTermCounterStatus{
 					// Legacy-helper row for the UNCOUNTED term: must be ignored.
-					{Family: "inet", FilterName: "edge", TermName: "block", Packets: 0, Bytes: 0},
-					{Family: "inet", FilterName: "edge", TermName: "counted-idle", Packets: 0, Bytes: 0},
+					{Family: "inet", FilterName: "edge", TermName: "block", TermOrdinal: 0, Packets: 0, Bytes: 0},
+					{Family: "inet", FilterName: "edge", TermName: "counted-idle", TermOrdinal: 1, Packets: 0, Bytes: 0},
 				},
 			},
 		},

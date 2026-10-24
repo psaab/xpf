@@ -1006,8 +1006,8 @@ func validateFilterActionsStrict(cfg *Config) error {
 //
 // This is deliberately NOT a strict commit gate. The cross-product and its
 // uint32 counter-slot stride are RETIRED-eBPF-path artifacts: the LIVE userspace
-// dataplane enforces the term natively (prefix-set membership, name-keyed
-// per-term counters — FirewallFilterTermCounterKey), never materializes the
+// dataplane enforces the term natively (prefix-set membership, ordinal-keyed
+// per-term counters — FirewallFilterTermCounterKey, #16460), never materializes the
 // cross-product, and is immune to stride drift. A term referencing, say, two
 // 1500-entry prefix-lists (2.25M cross-product) is handled trivially by the live
 // runtime, so REJECTING it at commit would false-reject a legitimate,
@@ -1049,7 +1049,7 @@ func warnFilterTermExpansionOverBound(cfg *Config) {
 							"addresses+prefixes × destination-ports × source-ports), "+
 							"above the %d per-term counter-stride bound; the userspace "+
 							"dataplane enforces this term natively (prefix-set membership, "+
-							"name-keyed counter) so it is COMMITTED, but per-rule "+
+							"ordinal-keyed counter, #16460) so it is COMMITTED, but per-rule "+
 							"`show firewall filter` counts on the retired-eBPF counter "+
 							"path would be clamped/inexact — split the term if you rely "+
 							"on per-rule firewall counters",

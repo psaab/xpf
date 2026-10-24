@@ -259,8 +259,19 @@ type FirewallFilterTermCounterStatus struct {
 	Family     string `json:"family,omitempty"`
 	FilterName string `json:"filter_name,omitempty"`
 	TermName   string `json:"term_name,omitempty"`
-	Packets    uint64 `json:"packets,omitempty"`
-	Bytes      uint64 `json:"bytes,omitempty"`
+	// TermOrdinal is the zero-based position of the term instance
+	// within (family, filter) (#16460). Two same-named terms under a
+	// lenient load each own a runtime counter; without this the Go
+	// counter index can only sum them, misattributing each instance's
+	// hits to the other in `show firewall`. An older helper omits the
+	// field, so every legacy row decodes as ordinal 0 and per-instance
+	// renderers keep the pre-#16460 summed fallback (never a fabricated
+	// per-instance split). It is also the ordinal the Rust #15108
+	// carry-forward matches on, so instance 2+ no longer compares
+	// against instance 1 and loses its counter on every refresh.
+	TermOrdinal uint32 `json:"term_ordinal,omitempty"`
+	Packets     uint64 `json:"packets,omitempty"`
+	Bytes       uint64 `json:"bytes,omitempty"`
 }
 
 // PolicyRuleCounterStatus is one per-rule security-policy hit counter reported

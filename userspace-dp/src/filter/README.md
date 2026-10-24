@@ -496,12 +496,15 @@ Mirrors the BPF firewall-filter pipeline in userspace.
 - Hit counters live on each `FilterTerm` (`Arc<FilterTermCounter>`)
   and are surfaced through the status JSON. #15108: a snapshot refresh
   (`parse_filter_state_with_three_color_preserving`) carries a term's
-  counter Arc forward when the term's (family, filter, term) identity
-  and compiled shape (`filter_term_counter_shape_matches`) are
-  unchanged, mirroring the three-color policer runtime reuse; any
-  match/action/modifier/policer change mints a fresh zeroed counter so
-  hits never leak across a different contract. HA failover and process
-  restart still rebuild counters from zero.
+  counter Arc forward when the term's (family, filter, ordinal)
+  identity (#16460) and compiled shape
+  (`filter_term_counter_shape_matches`) are unchanged, mirroring the
+  three-color policer runtime reuse; any match/action/modifier/policer
+  change mints a fresh zeroed counter so hits never leak across a
+  different contract. The ordinal is `FilterTerm.id`, published on
+  every status row as `term_ordinal` so Go `show firewall` keys each
+  same-named instance's own counter instead of the name sum. HA
+  failover and process restart still rebuild counters from zero.
 - `Filter.id` and `FilterTerm.id` are deterministic within the compiled
   snapshot order and are carried in userspace RT_FLOW filter-log records.
   Do not invent IDs beyond the compiled snapshot until the ApplyResult or
