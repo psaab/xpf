@@ -114,7 +114,8 @@ func TestAdmissionRefusalsMetricTracksTheRealLimiter8312(t *testing.T) {
 // undeclared Desc at scrape time; this names the family so a failure says which
 // one, and it is the cheap half of the same guarantee.
 //
-// MUTATION: remove `c.describeAdmissionRefusals(ch)` from Describe -> reds.
+// MUTATION (#16202): remove admissionRefusalsTotal from the global
+// row of collectorDescFamilies (metrics_descriptor_table.go) -> reds.
 func TestAdmissionRefusalsDescriptorIsDeclared8312(t *testing.T) {
 	c := newCollector(nil)
 	ch := make(chan *prometheus.Desc, 1024)

@@ -24,9 +24,6 @@ import (
 //
 // Cumulative and process-lifetime; a restart resets it, which is the ordinary
 // Prometheus counter contract and is handled by rate() at query time.
-func (c *xpfCollector) describeAuthzDenials(ch chan<- *prometheus.Desc) {
-	ch <- c.authzDenialsTotal
-}
 
 func (c *xpfCollector) emitAuthzDenials(ch chan<- prometheus.Metric) {
 	// denyaudit.Surfaces() is THE list -- the collector reads the same

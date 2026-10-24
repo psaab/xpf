@@ -19,9 +19,6 @@ import (
 // 0 for a helper that did not say would be a confident wrong answer: it may have
 // no live worker, or it may predate the field and enforce capped forwarding all
 // the same. Absent is the honest reading, and absent() is how to alert on it.
-func (c *xpfCollector) describeLearnedRouteImportCapped(ch chan<- *prometheus.Desc) {
-	ch <- c.learnedRouteImportCapped
-}
 
 func (c *xpfCollector) emitLearnedRouteImportCapped(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
 	if status.LearnedRouteImportCapped == nil {

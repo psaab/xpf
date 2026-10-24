@@ -30,9 +30,6 @@ import (
 //
 // Cumulative and process-lifetime, so a restart resets it — which is the
 // ordinary Prometheus counter contract and is handled by rate() at query time.
-func (c *xpfCollector) describeAdmissionRefusals(ch chan<- *prometheus.Desc) {
-	ch <- c.admissionRefusalsTotal
-}
 
 // admissionLimiters is the set sampled, with the label each carries.
 //

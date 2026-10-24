@@ -1,4 +1,14 @@
 xpf (0.0.0) unstable; urgency=medium
+  * API: metrics descriptor init and Describe are now driven by one
+    per-family descriptor table (#16202). The ~36 init calls in
+    newCollector, the 630-line Describe enumeration, and the seven
+    per-family describe helpers are replaced by a statically allocated
+    37-row table binding each family's init to the descriptor fields
+    it assigns; Describe allocates nothing per call and a new
+    agreement test fails if a family's init and its table row drift.
+    Metric names, help text, and the described set are unchanged
+    (648 descriptors, byte-identical), and Collect is untouched.
+
   * FRR: extract the `danglingRefs` helper in the policy term renderer
     (#16207). The as-path (#9881), community (#10822) and prefix-list
     (#14136) fail-closed term rules each open-coded the same
