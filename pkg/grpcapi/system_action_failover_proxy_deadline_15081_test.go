@@ -27,6 +27,12 @@ import (
 // tests (captured ctx deadline ~5s, not the cluster budget); removing
 // the timeout reconciliation fails the committed/unknown tests (bare
 // codes.DeadlineExceeded surfaces).
+//
+// #16432: the unknown arms (ownership did not move, peer unreachable)
+// return codes.Unknown with the verify text, not OK — SystemActionResponse
+// carries only message, so the RPC status is the only machine-readable
+// verdict. Committed-after-timeout stays OK. RED-on-revert for #16432:
+// returning (resp, nil) for unknown fails the codes.Unknown assertions.
 
 func failoverProxyServer15081(t *testing.T) *Server {
 	t.Helper()
@@ -147,9 +153,12 @@ func TestProxyFailoverContextDeadlineAfterPeerCommit15081(t *testing.T) {
 	}
 }
 
-// Peer reachable but did not commit: outcome unknown, still not a bare
-// DeadlineExceeded, and the message tells the operator to verify
-// ownership before retrying.
+// Peer reachable but did not commit: outcome unknown must be a
+// distinct non-OK status (#16432), still not a bare DeadlineExceeded,
+// and the message tells the operator to verify ownership before
+// retrying. SystemActionResponse carries only message, so the RPC
+// status is the only machine-readable verdict; unknown must not
+// share the committed OK status.
 func TestProxyFailoverTimeoutNotCommittedReportsUnknown15081(t *testing.T) {
 	s := failoverProxyServer15081(t)
 	s.cluster.SetPeerGroupStateForTesting(1, cluster.StateSecondary)
@@ -157,14 +166,14 @@ func TestProxyFailoverTimeoutNotCommittedReportsUnknown15081(t *testing.T) {
 		return nil, status.Error(codes.DeadlineExceeded, "context deadline exceeded")
 	}
 	resp, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1:node1"})
-	if err != nil {
-		t.Fatalf("SystemAction() error = %v, want outcome-unknown response", err)
+	if status.Code(err) != codes.Unknown {
+		t.Fatalf("SystemAction() error = %v (code %s), want codes.Unknown outcome-unknown (resp=%v); committed stays OK, unknown must be non-OK (#16432)", err, status.Code(err), resp)
 	}
-	if !strings.Contains(resp.Message, "outcome unknown") || !strings.Contains(resp.Message, "verify") {
-		t.Fatalf("response = %q, want outcome-unknown with verify guidance", resp.Message)
+	if !strings.Contains(err.Error(), "outcome unknown") || !strings.Contains(err.Error(), "verify") {
+		t.Fatalf("error = %q, want outcome-unknown with verify guidance", err.Error())
 	}
-	if strings.Contains(resp.Message, "transfer committed") && !strings.Contains(resp.Message, "timed out") {
-		t.Fatalf("response = %q must not claim a committed transfer", resp.Message)
+	if strings.Contains(err.Error(), "transfer committed") {
+		t.Fatalf("error = %q must not claim a committed transfer", err.Error())
 	}
 }
 
@@ -193,11 +202,11 @@ func TestProxyDataFailoverTimeoutReconciliation15081(t *testing.T) {
 		return nil, status.Error(codes.DeadlineExceeded, "context deadline exceeded")
 	}
 	resp, err = s2.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover-data:node1"})
-	if err != nil {
-		t.Fatalf("SystemAction() error = %v, want outcome-unknown response", err)
+	if status.Code(err) != codes.Unknown {
+		t.Fatalf("SystemAction() error = %v (code %s), want codes.Unknown outcome-unknown (resp=%v)", err, status.Code(err), resp)
 	}
-	if !strings.Contains(resp.Message, "outcome unknown") || !strings.Contains(resp.Message, "[1]") {
-		t.Fatalf("response = %q, want outcome-unknown naming peer-primary [1]", resp.Message)
+	if !strings.Contains(err.Error(), "outcome unknown") || !strings.Contains(err.Error(), "[1]") {
+		t.Fatalf("error = %q, want outcome-unknown naming peer-primary [1]", err.Error())
 	}
 }
 

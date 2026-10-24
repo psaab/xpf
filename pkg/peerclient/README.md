@@ -17,5 +17,8 @@ sizing), `IsDeadline` (deadline classification), and `Reconcile`
 Each frontend keeps its own dialer, its own RPC deadline construction,
 and its own fabric-auth credential/token construction. `Reconcile`
 takes an `Ownership` interface satisfied directly by
-`*cluster.Manager`; its message templates are byte-pinned by
+`*cluster.Manager`; it returns an `Outcome` verdict
+(`OutcomeCommitted` / `OutcomeUnknown` / `OutcomeNone`, #16432) so the
+frontends can map unknown to a distinct non-OK status without parsing
+the message; its message templates are byte-pinned by
 `peerclient_16154_test.go` against the pre-refactor twin wording.

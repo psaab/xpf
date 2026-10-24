@@ -19,8 +19,10 @@ import (
 	"github.com/psaab/xpf/pkg/peerclient"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 // fabricAuthKey resolves the #4107 control-link PSK the CLI attaches to peer
@@ -131,15 +133,17 @@ func (c *CLI) dialPeer() *grpc.ClientConn {
 // proxy leg hit a deadline against current RG ownership (#15081) via the
 // shared peerclient reconciliation table (#16154): the peer may have
 // committed after the proxy gave up, so a bare DeadlineExceeded must
-// never reach the operator for this path. It returns (message, true)
-// for deadline outcomes on targeted failovers and ("", false)
-// otherwise (the caller relays the original error). The CLI dialer,
-// its RPC deadline construction, and its fabric-auth credentials stay
-// in this package; only the pure reconciliation is shared.
-func (c *CLI) failoverProxyTimeoutMessage(action string, err error) (string, bool) {
+// never reach the operator for this path. It returns
+// (message, peerclient.OutcomeCommitted) for a committed transfer,
+// (message, peerclient.OutcomeUnknown) for an unknown one, and
+// ("", peerclient.OutcomeNone) otherwise (the caller relays the
+// original error). The CLI dialer, its RPC deadline construction, and
+// its fabric-auth credentials stay in this package; only the pure
+// reconciliation is shared.
+func (c *CLI) failoverProxyTimeoutMessage(action string, err error) (string, peerclient.Outcome) {
 	op, perr := clusterfailover.ParseAction(action)
 	if perr != nil {
-		return "", false
+		return "", peerclient.OutcomeNone
 	}
 	var view peerclient.Ownership
 	if c.cluster != nil {
@@ -169,8 +173,10 @@ func (c *CLI) requestPeerSystemActionWithPersistentNatGeneration(ctx context.Con
 	if c.peerSystemActionFn != nil {
 		msg, err := c.peerSystemActionFn(ctx, req)
 		if err != nil {
-			if message, ok := c.failoverProxyTimeoutMessage(action, err); ok {
+			if message, outcome := c.failoverProxyTimeoutMessage(action, err); outcome == peerclient.OutcomeCommitted {
 				return message, nil
+			} else if outcome == peerclient.OutcomeUnknown {
+				return "", status.Error(codes.Unknown, message)
 			}
 			return "", err
 		}
@@ -186,8 +192,18 @@ func (c *CLI) requestPeerSystemActionWithPersistentNatGeneration(ctx context.Con
 	defer cancel()
 	resp, err := pb.NewBpfrxServiceClient(conn).SystemAction(peerCtx, req)
 	if err != nil {
-		if message, ok := c.failoverProxyTimeoutMessage(action, err); ok {
+		if status.Code(err) == codes.Unknown {
+			// #16432: the proxying node already reconciled this
+			// deadline outcome as unknown; relay its verdict (and
+			// verify text) verbatim instead of re-reconciling
+			// against this node's view, which would downgrade it
+			// to a success message.
+			return "", err
+		}
+		if message, outcome := c.failoverProxyTimeoutMessage(action, err); outcome == peerclient.OutcomeCommitted {
 			return message, nil
+		} else if outcome == peerclient.OutcomeUnknown {
+			return "", status.Error(codes.Unknown, message)
 		}
 		return "", err
 	}

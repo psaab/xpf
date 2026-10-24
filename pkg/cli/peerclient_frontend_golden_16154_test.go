@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -109,6 +110,7 @@ func TestCLIFrontendGoldenThroughDialPath16154(t *testing.T) {
 		setPeer    func(mgr *cluster.Manager)
 		wantStdout string
 		wantAction string
+		wantError  bool // #16432: unknown cells error with codes.Unknown, no stdout
 	}{
 		{
 			name: "rg committed after timeout",
@@ -126,6 +128,7 @@ func TestCLIFrontendGoldenThroughDialPath16154(t *testing.T) {
 				mgr.SetPeerGroupStateForTesting(1, cluster.StateSecondary)
 			},
 			wantStdout: goldenCLIRGNotMoved16154,
+			wantError:  true,
 			wantAction: "cluster-failover:1:node1",
 		},
 		{
@@ -146,6 +149,7 @@ func TestCLIFrontendGoldenThroughDialPath16154(t *testing.T) {
 				mgr.SetPeerGroupStateForTesting(2, cluster.StateSecondary)
 			},
 			wantStdout: goldenCLIDataPartial16154,
+			wantError:  true,
 			wantAction: "cluster-failover-data:node1",
 		},
 		{
@@ -156,6 +160,7 @@ func TestCLIFrontendGoldenThroughDialPath16154(t *testing.T) {
 				mgr.SetPeerGroupStateForTesting(2, cluster.StateSecondary)
 			},
 			wantStdout: goldenCLIDataNoneMoved16154,
+			wantError:  true,
 			wantAction: "cluster-failover-data:node1",
 		},
 	}
@@ -167,11 +172,27 @@ func TestCLIFrontendGoldenThroughDialPath16154(t *testing.T) {
 			out := captureStdout(t, func() {
 				callErr = c.handleRequestChassisClusterFailover(tc.args)
 			})
-			if callErr != nil {
-				t.Fatalf("handleRequestChassisClusterFailover() error = %v, want reconciled (byte-golden) message", callErr)
-			}
-			if out != tc.wantStdout {
-				t.Fatalf("CLI stdout byte-drift:\n got: %q\nwant: %q", out, tc.wantStdout)
+			if tc.wantError {
+				// #16432: unknown is codes.Unknown (byte-golden message
+				// without Println newline), never a stdout success.
+				if status.Code(callErr) != codes.Unknown {
+					t.Fatalf("handleRequestChassisClusterFailover() error = %v (code %s), want codes.Unknown", callErr, status.Code(callErr))
+				}
+				st, _ := status.FromError(callErr)
+				wantMsg := strings.TrimSuffix(tc.wantStdout, "\n")
+				if st.Message() != wantMsg {
+					t.Fatalf("CLI unknown byte-drift:\n got: %q\nwant: %q", st.Message(), wantMsg)
+				}
+				if out != "" {
+					t.Fatalf("CLI stdout = %q, want no success stdout for unknown outcome", out)
+				}
+			} else {
+				if callErr != nil {
+					t.Fatalf("handleRequestChassisClusterFailover() error = %v, want reconciled (byte-golden) message", callErr)
+				}
+				if out != tc.wantStdout {
+					t.Fatalf("CLI stdout byte-drift:\n got: %q\nwant: %q", out, tc.wantStdout)
+				}
 			}
 			// The forwarded RPC the real server received must carry
 			// the cluster-budget deadline applied at the CLI's actual
@@ -244,11 +265,17 @@ func TestCLIFrontendGoldenPeerDown16154(t *testing.T) {
 			out := captureStdout(t, func() {
 				callErr = c.handleRequestChassisClusterFailover(tc.args)
 			})
-			if callErr != nil {
-				t.Fatalf("handleRequestChassisClusterFailover() error = %v, want peer-down golden", callErr)
+			// #16432: peer-down unknown is codes.Unknown, not stdout.
+			if status.Code(callErr) != codes.Unknown {
+				t.Fatalf("handleRequestChassisClusterFailover() error = %v (code %s), want codes.Unknown peer-down", callErr, status.Code(callErr))
 			}
-			if out != tc.wantStdout {
-				t.Fatalf("CLI peer-down stdout byte-drift:\n got: %q\nwant: %q", out, tc.wantStdout)
+			st, _ := status.FromError(callErr)
+			wantMsg := strings.TrimSuffix(tc.wantStdout, "\n")
+			if st.Message() != wantMsg {
+				t.Fatalf("CLI peer-down unknown byte-drift:\n got: %q\nwant: %q", st.Message(), wantMsg)
+			}
+			if out != "" {
+				t.Fatalf("CLI stdout = %q, want no success stdout for unknown outcome", out)
 			}
 		})
 	}

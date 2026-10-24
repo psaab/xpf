@@ -69,76 +69,76 @@ func TestReconcileGolden16154(t *testing.T) {
 	dataOp := clusterfailover.DataFailover(1)
 
 	cases := []struct {
-		name string
-		view *cluster.Manager
-		op   clusterfailover.Op
-		err  error
-		want string
-		ok   bool
+		name    string
+		view    *cluster.Manager
+		op      clusterfailover.Op
+		err     error
+		want    string
+		outcome peerclient.Outcome
 	}{
 		{
-			name: "rg committed after timeout",
-			view: goldenManager16154(1),
-			op:   rgOp,
-			err:  deadlineErrs16154["grpc-deadline"],
-			want: "Manual failover completed for redundancy group 1 (transfer committed on node 1; proxy response timed out after the peer committed)",
-			ok:   true,
+			name:    "rg committed after timeout",
+			view:    goldenManager16154(1),
+			op:      rgOp,
+			err:     deadlineErrs16154["grpc-deadline"],
+			want:    "Manual failover completed for redundancy group 1 (transfer committed on node 1; proxy response timed out after the peer committed)",
+			outcome: peerclient.OutcomeCommitted,
 		},
 		{
-			name: "rg peer reachable but not committed",
-			view: goldenManager16154(),
-			op:   rgOp,
-			err:  deadlineErrs16154["context-deadline"],
-			want: "Cluster failover outcome unknown for redundancy group 1: forwarded request to node 1 timed out; redundancy group 1 is not primary on node 1 — verify ownership before retrying",
-			ok:   true,
+			name:    "rg peer reachable but not committed",
+			view:    goldenManager16154(),
+			op:      rgOp,
+			err:     deadlineErrs16154["context-deadline"],
+			want:    "Cluster failover outcome unknown for redundancy group 1: forwarded request to node 1 timed out; redundancy group 1 is not primary on node 1 — verify ownership before retrying",
+			outcome: peerclient.OutcomeUnknown,
 		},
 		{
-			name: "rg peer down",
-			view: deadPeerManager16154(),
-			op:   rgOp,
-			err:  deadlineErrs16154["grpc-deadline"],
-			want: "Cluster failover outcome unknown for redundancy group 1: forwarded request to node 1 timed out and the peer is unreachable; verify redundancy group 1 ownership before retrying",
-			ok:   true,
+			name:    "rg peer down",
+			view:    deadPeerManager16154(),
+			op:      rgOp,
+			err:     deadlineErrs16154["grpc-deadline"],
+			want:    "Cluster failover outcome unknown for redundancy group 1: forwarded request to node 1 timed out and the peer is unreachable; verify redundancy group 1 ownership before retrying",
+			outcome: peerclient.OutcomeUnknown,
 		},
 		{
-			name: "data committed after timeout",
-			view: goldenManager16154(1, 2),
-			op:   dataOp,
-			err:  deadlineErrs16154["grpc-deadline"],
-			want: "Manual failover completed for data redundancy groups [1 2] (transfer committed on node 1; proxy response timed out after the peer committed)",
-			ok:   true,
+			name:    "data committed after timeout",
+			view:    goldenManager16154(1, 2),
+			op:      dataOp,
+			err:     deadlineErrs16154["grpc-deadline"],
+			want:    "Manual failover completed for data redundancy groups [1 2] (transfer committed on node 1; proxy response timed out after the peer committed)",
+			outcome: peerclient.OutcomeCommitted,
 		},
 		{
-			name: "data partially completed",
-			view: goldenManager16154(1),
-			op:   dataOp,
-			err:  deadlineErrs16154["context-deadline"],
-			want: "Data failover outcome unknown: forwarded request to node 1 timed out; data redundancy groups now primary on node 1: [1] — verify ownership before retrying",
-			ok:   true,
+			name:    "data partially completed",
+			view:    goldenManager16154(1),
+			op:      dataOp,
+			err:     deadlineErrs16154["context-deadline"],
+			want:    "Data failover outcome unknown: forwarded request to node 1 timed out; data redundancy groups now primary on node 1: [1] — verify ownership before retrying",
+			outcome: peerclient.OutcomeUnknown,
 		},
 		{
-			name: "data peer reachable none moved",
-			view: goldenManager16154(),
-			op:   dataOp,
-			err:  deadlineErrs16154["grpc-deadline"],
-			want: "Data failover outcome unknown: forwarded request to node 1 timed out; data redundancy groups now primary on node 1: [] — verify ownership before retrying",
-			ok:   true,
+			name:    "data peer reachable none moved",
+			view:    goldenManager16154(),
+			op:      dataOp,
+			err:     deadlineErrs16154["grpc-deadline"],
+			want:    "Data failover outcome unknown: forwarded request to node 1 timed out; data redundancy groups now primary on node 1: [] — verify ownership before retrying",
+			outcome: peerclient.OutcomeUnknown,
 		},
 		{
-			name: "data peer down",
-			view: deadPeerManager16154(),
-			op:   dataOp,
-			err:  deadlineErrs16154["wrapped-context"],
-			want: "Data failover outcome unknown: forwarded request to node 1 timed out and the peer is unreachable; verify redundancy group ownership before retrying",
-			ok:   true,
+			name:    "data peer down",
+			view:    deadPeerManager16154(),
+			op:      dataOp,
+			err:     deadlineErrs16154["wrapped-context"],
+			want:    "Data failover outcome unknown: forwarded request to node 1 timed out and the peer is unreachable; verify redundancy group ownership before retrying",
+			outcome: peerclient.OutcomeUnknown,
 		},
 		// Gates: anything that is not a deadline outcome on a targeted
-		// failover relays the original error (ok=false, empty message).
-		{name: "nil error", view: goldenManager16154(1), op: rgOp, err: nil, ok: false},
-		{name: "nil view", view: nil, op: rgOp, err: deadlineErrs16154["grpc-deadline"], ok: false},
-		{name: "non-deadline error", view: goldenManager16154(1), op: rgOp, err: status.Error(codes.FailedPrecondition, "not ready for takeover"), ok: false},
-		{name: "untargeted rg failover", view: goldenManager16154(1), op: clusterfailover.RGFailover(1), err: deadlineErrs16154["grpc-deadline"], ok: false},
-		{name: "reset kind", view: goldenManager16154(1), op: clusterfailover.ResetFailover(1), err: deadlineErrs16154["grpc-deadline"], ok: false},
+		// failover relays the original error (OutcomeNone, empty message).
+		{name: "nil error", view: goldenManager16154(1), op: rgOp, err: nil, outcome: peerclient.OutcomeNone},
+		{name: "nil view", view: nil, op: rgOp, err: deadlineErrs16154["grpc-deadline"], outcome: peerclient.OutcomeNone},
+		{name: "non-deadline error", view: goldenManager16154(1), op: rgOp, err: status.Error(codes.FailedPrecondition, "not ready for takeover"), outcome: peerclient.OutcomeNone},
+		{name: "untargeted rg failover", view: goldenManager16154(1), op: clusterfailover.RGFailover(1), err: deadlineErrs16154["grpc-deadline"], outcome: peerclient.OutcomeNone},
+		{name: "reset kind", view: goldenManager16154(1), op: clusterfailover.ResetFailover(1), err: deadlineErrs16154["grpc-deadline"], outcome: peerclient.OutcomeNone},
 	}
 
 	for _, tc := range cases {
@@ -147,9 +147,9 @@ func TestReconcileGolden16154(t *testing.T) {
 			if tc.view != nil {
 				view = tc.view
 			}
-			got, ok := peerclient.Reconcile(view, tc.op, tc.err)
-			if ok != tc.ok {
-				t.Fatalf("Reconcile() ok = %v, want %v (message %q)", ok, tc.ok, got)
+			got, outcome := peerclient.Reconcile(view, tc.op, tc.err)
+			if outcome != tc.outcome {
+				t.Fatalf("Reconcile() outcome = %v, want %v (message %q)", outcome, tc.outcome, got)
 			}
 			if got != tc.want {
 				t.Fatalf("Reconcile() message byte-drift:\n got: %q\nwant: %q", got, tc.want)

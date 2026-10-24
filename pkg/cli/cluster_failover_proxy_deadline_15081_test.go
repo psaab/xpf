@@ -78,11 +78,16 @@ func TestCLIFailoverTimeoutNotCommittedReportsUnknown15081(t *testing.T) {
 	out := captureStdout(t, func() {
 		callErr = c.handleRequestChassisClusterFailover([]string{"redundancy-group", "1", "node", "1"})
 	})
-	if callErr != nil {
-		t.Fatalf("handleRequestChassisClusterFailover() error = %v, want outcome-unknown message", callErr)
+	// #16432: unknown must be a distinct non-OK outcome, not a printed
+	// success message. The CLI loop prints it as "error: ..." on stderr.
+	if status.Code(callErr) != codes.Unknown {
+		t.Fatalf("handleRequestChassisClusterFailover() error = %v (code %s), want codes.Unknown outcome-unknown (stdout=%q)", callErr, status.Code(callErr), out)
 	}
-	if !strings.Contains(out, "outcome unknown") || !strings.Contains(out, "verify") {
-		t.Fatalf("stdout = %q, want outcome-unknown with verify guidance", out)
+	if !strings.Contains(callErr.Error(), "outcome unknown") || !strings.Contains(callErr.Error(), "verify") {
+		t.Fatalf("error = %q, want outcome-unknown with verify guidance (stdout=%q)", callErr.Error(), out)
+	}
+	if out != "" {
+		t.Fatalf("stdout = %q, want no success stdout for unknown outcome", out)
 	}
 }
 
@@ -97,11 +102,14 @@ func TestCLIDataFailoverTimeoutPartialReportsUnknown15081(t *testing.T) {
 	out := captureStdout(t, func() {
 		callErr = c.handleRequestChassisClusterFailover([]string{"data", "node", "1"})
 	})
-	if callErr != nil {
-		t.Fatalf("handleRequestChassisClusterFailover() error = %v, want outcome-unknown message", callErr)
+	if status.Code(callErr) != codes.Unknown {
+		t.Fatalf("handleRequestChassisClusterFailover() error = %v (code %s), want codes.Unknown outcome-unknown (stdout=%q)", callErr, status.Code(callErr), out)
 	}
-	if !strings.Contains(out, "outcome unknown") || !strings.Contains(out, "[1]") {
-		t.Fatalf("stdout = %q, want outcome-unknown naming peer-primary [1]", out)
+	if !strings.Contains(callErr.Error(), "outcome unknown") || !strings.Contains(callErr.Error(), "[1]") {
+		t.Fatalf("error = %q, want outcome-unknown naming peer-primary [1] (stdout=%q)", callErr.Error(), out)
+	}
+	if out != "" {
+		t.Fatalf("stdout = %q, want no success stdout for unknown outcome", out)
 	}
 }
 
