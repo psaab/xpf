@@ -5229,6 +5229,118 @@ fn ambiguous_ike_poll_descriptor_denies_under_claimed_zone_15925() {
     let _ = dbg;
 }
 
+/// #16051 (RN-04) decisive regression: an ambiguous fabric arrival
+/// (all bound RGs locally active — the co-moved shape) whose CLAIMED
+/// zone (`lan`) carries a stateless screen the RAW fabric ingress
+/// zone does not must be dropped by that claimed profile at stage 10,
+/// even though the claimed zone is not yet owner-promoted. Pre-fix the
+/// stage resolved only the raw ingress zone (the unzoned fabric
+/// parent), so the SYN+FIN sailed past the `lan` profile, was
+/// promoted at the miss, and installed a session. Post-fix: screen
+/// drop, no session, no forward, and — the already source-gated
+/// control — no premature SYN-ACK.
+///
+/// Fail-on-revert: dropping `ambiguous_zone` at the stage-10 call (or
+/// the claimed union in `stage_screen_check_with_ambiguous`) makes
+/// `screen_drops == 0` and the session installs.
+#[test]
+fn ambiguous_claimed_zone_screen_drop_applies_16051() {
+    let forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    // Co-moved placement: BOTH RGs forwarding-active locally, so the
+    // `lan` stamp is Ambiguous (withheld, not promoted at stage 9).
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
+    // SYN+FIN trips `lan`'s syn_fin stateless screen; the raw fabric
+    // ingress (ifindex 21, unzoned) has no profile at all.
+    let frame = stamped_fabric_frame(TEST_LAN_ZONE_ID, TCP_FLAG_SYN | 0x01);
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN | 0x01, frame.len() as u16);
+    assert!(matches!(
+        parse_zone_encoded_fabric_ingress_from_frame(&frame, meta, &forwarding, &ha_state, now_secs),
+        ZoneEncodedFabricStamp::Ambiguous { zone_id: TEST_LAN_ZONE_ID, .. }
+    ), "precondition: all-local lan stamp must be Ambiguous");
+
+    let mut profiles = FxHashMap::default();
+    profiles.insert(
+        "lan".to_string(),
+        crate::screen::ScreenProfile {
+            syn_fin: true,
+            ..crate::screen::ScreenProfile::default()
+        },
+    );
+    let mut screen = ScreenState::new();
+    screen.update_profiles(profiles);
+
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+    let (batch, dbg) = txn_run_descriptor_with_screen_state(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        &mut screen,
+    );
+    assert_eq!(dbg.rx, 1, "descriptor must arrive");
+    assert_eq!(
+        batch.screen_drops, 1,
+        "claimed lan profile's syn-fin drop must apply to the ambiguous arrival (#16051)"
+    );
+    assert_eq!(sessions.len(), 0, "screen-dropped ambiguous arrival must install no session");
+    assert!(
+        binding.scratch.scratch_forwards.is_empty(),
+        "screen-dropped ambiguous arrival must not forward"
+    );
+    assert_eq!(batch.syn_cookie_syn_ack_sent, 0, "no premature SYN-ACK (#16051 control)");
+    assert!(
+        binding.tx_pipeline.pending_tx_local.is_empty(),
+        "screen-dropped ambiguous arrival must not transmit"
+    );
+}
+
+/// #16051 control: the SAME ambiguous arrival WITHOUT the claimed
+/// stateless trip (plain SYN; `lan` profile carries only syn_fin)
+/// still reaches the promoted adjudication and installs — the union
+/// adds drops only, it does not fail closed on ambiguous arrivals.
+#[test]
+fn ambiguous_clean_syn_still_admitted_16051() {
+    let forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
+    let frame = stamped_fabric_frame(TEST_LAN_ZONE_ID, TCP_FLAG_SYN);
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+
+    let mut profiles = FxHashMap::default();
+    profiles.insert(
+        "lan".to_string(),
+        crate::screen::ScreenProfile {
+            syn_fin: true,
+            ..crate::screen::ScreenProfile::default()
+        },
+    );
+    let mut screen = ScreenState::new();
+    screen.update_profiles(profiles);
+
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+    let (batch, _dbg) = txn_run_descriptor_with_screen_state(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        &mut screen,
+    );
+    assert_eq!(batch.screen_drops, 0, "clean SYN must not trip the claimed syn-fin screen");
+    assert_eq!(
+        sessions.len(),
+        2,
+        "clean ambiguous arrival must still be promoted and admitted like local ingress"
+    );
+    assert_eq!(binding.scratch.scratch_forwards.len(), 1);
+}
+
 // ---------------------------------------------------------------------------
 // #15958: split-RG fabric return must egress the LAN binding.
 // ---------------------------------------------------------------------------

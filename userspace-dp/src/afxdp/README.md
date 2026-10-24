@@ -583,6 +583,27 @@ sync.
     and short-circuits BEFORE the take, so an unscreened zone leaves the
     flag pending for the next screened-zone packet instead of clearing it
     unserved.
+  - **#16051 (RN-04) — ambiguous fabric arrivals are screen-judged
+    under the union of raw + claimed profiles:** stage 10 runs before
+    any resolution exists, so the #15916 owner-RG promotion cannot
+    adjudicate its zone, and resolving only the raw fabric ingress
+    zone skipped the withheld claimed zone's profile entirely.
+    `stage_screen_check_with_ambiguous` /
+    `stage_screen_syn_cookie_ack_on_session_miss_with_ambiguous` (the
+    poll loop passes `ambiguous_zone`; the plain wrappers pass `None`
+    and are byte-identical to before) resolve
+    `screen_zone_candidates` = [raw ingress zone, claimed zone] and
+    charge the FULL profile (flood/cookie state, counters, challenge,
+    validated-client bypass, cookie-ACK validation) to the raw zone
+    only. The claimed zone contributes only a stateless veto via
+    `ScreenState::stateless_screen_drop_for_zones` (LAND / TCP-flag /
+    fragment / source-route; #7168 conservative default for an
+    unresolved claimed reference; claimed `alarm-without-drop` makes
+    it log-only): a claimed Drop recycles at stage 10 and vetoes even
+    a Validated cookie ACK, so no SYN-ACK/ACK-RST is earned under a
+    dropping claimed profile, and no claimed-zone flood/cookie state
+    is created before owner proof. See
+    `docs/fabric-cross-chassis-fwd.md` (#16051 section).
   - **#3291 — zone policy / input filter / PBR on the flowless TRANSIT
     arm:** #3064 restored only the *screen* engine on the flowless path;
     zone security policy, the interface input filter, and firewall-filter

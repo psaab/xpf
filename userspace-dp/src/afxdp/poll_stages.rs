@@ -61,6 +61,15 @@ pub(super) enum SynCookieAckOutcome {
 /// promotes it. `packet_fabric_ingress` still holds for such
 /// frames (the session-hit authority and TTL semantics of a fabric
 /// arrival apply), but `ingress_zone_override` stays `None`.
+///
+/// #16051 (RN-04): stage 10 (screens + SYN-cookie) is the one
+/// consumer that cannot wait for that promotion — it runs before
+/// any resolution exists. It therefore judges an ambiguous arrival
+/// under the union in [`screen_zone_candidates`]: a stateless Drop
+/// in EITHER the raw ingress zone's or the claimed zone's profile
+/// recycles the packet, while rate/cookie state is charged to the
+/// raw zone only — never to the unproven claimed zone (see
+/// `docs/fabric-cross-chassis-fwd.md`).
 pub(super) struct FabricIngressOutcome {
     pub(super) ingress_zone_override: Option<u16>,
     pub(super) ingress_nat_scope_ifindex: Option<i32>,
@@ -938,8 +947,34 @@ pub(super) fn screen_zone_with_state<'a>(
     ingress_zone_override: Option<u16>,
     screen: &ScreenState,
 ) -> Option<(u16, &'a str)> {
+    screen_zone_candidates(worker_ctx, meta, ingress_zone_override, None, screen)
+        .into_iter()
+        .next()
+}
+
+/// #16051 (RN-04): the screen-stage zone candidates for one packet, in
+/// adjudication order: the raw ingress zone (physical ifindex / VLAN /
+/// proved fabric override) first, then — for an ambiguous fabric
+/// arrival — the withheld claimed zone. Each entry has screen state of
+/// its own (#12875); a zone without state contributes nothing.
+///
+/// The claimed zone is NOT promoted here (no resolution exists yet at
+/// stage 10): it may only ADD a stateless drop, never grant a profile,
+/// a flood/cookie charge, or a bypass. Callers charge rate/cookie state
+/// to the first (raw) candidate only and consult the claimed candidate
+/// through the stateless union
+/// (`ScreenState::stateless_screen_drop_for_zones`). When there is no
+/// ambiguous claim the result is exactly the pre-#16051 single zone.
+#[inline]
+pub(super) fn screen_zone_candidates<'a>(
+    worker_ctx: &'a WorkerContext,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+    ambiguous_zone: Option<u16>,
+    screen: &ScreenState,
+) -> Vec<(u16, &'a str)> {
     if !screen.has_screen_state() {
-        return None;
+        return Vec::new();
     }
     let logical_ifindex = resolve_ingress_logical_ifindex(
         worker_ctx.forwarding,
@@ -947,7 +982,7 @@ pub(super) fn screen_zone_with_state<'a>(
         meta.ingress_vlan_id,
     )
     .unwrap_or(meta.ingress_ifindex as i32);
-    let zone_id = ingress_zone_override
+    let raw_zone_id = ingress_zone_override
         .filter(|id| worker_ctx.forwarding.zone_id_to_name.contains_key(id))
         .or_else(|| {
             worker_ctx
@@ -955,15 +990,25 @@ pub(super) fn screen_zone_with_state<'a>(
                 .ifindex_to_zone_id
                 .get(&logical_ifindex)
                 .copied()
-        })?;
-    let zone_name = worker_ctx
-        .forwarding
-        .zone_id_to_name
-        .get(&zone_id)
-        .map(|s| s.as_str())?;
-    screen
-        .zone_has_screen_state(zone_name)
-        .then_some((zone_id, zone_name))
+        });
+    let mut zones: Vec<(u16, &'a str)> = Vec::new();
+    for zone_id in raw_zone_id.into_iter().chain(ambiguous_zone) {
+        if zones.iter().any(|(id, _)| *id == zone_id) {
+            continue;
+        }
+        let Some(zone_name) = worker_ctx
+            .forwarding
+            .zone_id_to_name
+            .get(&zone_id)
+            .map(|s| s.as_str())
+        else {
+            continue;
+        };
+        if screen.zone_has_screen_state(zone_name) {
+            zones.push((zone_id, zone_name));
+        }
+    }
+    zones
 }
 
 /// Stage 10 — screen / IDS slow-path check.
@@ -990,6 +1035,37 @@ pub(super) fn stage_screen_check(
     counters: &mut BatchCounters,
     worker_ctx: &WorkerContext,
 ) -> StageOutcome<ScreenCheckOutcome> {
+    stage_screen_check_with_ambiguous(
+        flow, packet_frame, meta, ingress_zone_override, None, now_ns, now_secs, screen, counters,
+        worker_ctx,
+    )
+}
+
+/// #16051 (RN-04): stage 10 for an ambiguous fabric arrival. The raw
+/// ingress zone keeps its full profile (state, counters, cookie); the
+/// withheld claimed zone contributes ONLY a stateless drop (union —
+/// see `ScreenState::stateless_screen_drop_for_zones`). A claimed-zone
+/// stateless Drop recycles here; every other outcome follows the raw
+/// zone exactly as before, so no flood/cookie state is charged to a
+/// zone the packet may never be adjudicated under and no claimed-zone
+/// SYN-ACK can be minted pre-promotion (the deferred-challenge final
+/// admission below still governs any reply). When the claimed zone's
+/// profile is alarm-without-drop, its trip is log-only, mirroring the
+/// raw zone's own audit mode.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn stage_screen_check_with_ambiguous(
+    flow: Option<&SessionFlow>,
+    packet_frame: &[u8],
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+    ambiguous_zone: Option<u16>,
+    now_ns: u64,
+    now_secs: u64,
+    screen: &mut ScreenState,
+    counters: &mut BatchCounters,
+    worker_ctx: &WorkerContext,
+) -> StageOutcome<ScreenCheckOutcome> {
     // #12875: gate on the INGRESS zone's own screen state, not merely on
     // ANY zone having state. `screen_zone_with_state` keeps the #6860
     // global gate (has_screen_state, so the missing-profile WARN still
@@ -997,11 +1073,12 @@ pub(super) fn stage_screen_check(
     // question: a zone with no screen configuration must not inherit
     // another zone's extract_screen_info parse cost and #2146 fail-close
     // drop.
-    let Some((zone_id, zone_name)) =
-        screen_zone_with_state(worker_ctx, meta, ingress_zone_override, screen)
-    else {
+    let zone_candidates =
+        screen_zone_candidates(worker_ctx, meta, ingress_zone_override, ambiguous_zone, screen);
+    let Some(&(zone_id, zone_name)) = zone_candidates.first() else {
         return StageOutcome::Continue(ScreenCheckOutcome::Pass);
     };
+    let claimed_zones: Vec<(u16, &str)> = zone_candidates[1..].to_vec();
     // #4155: a fabric-redirected packet (stage 9 set FABRIC_INGRESS_FLAG on
     // `meta.meta_flags`) was already rate-screened on the peer ingress node
     // before it crossed the fabric link. Skip the rate-based flood counters
@@ -1091,6 +1168,48 @@ pub(super) fn stage_screen_check(
                 return StageOutcome::RecycleAndContinue;
             }
         };
+        // #16051: the claimed zone's stateless union also guards the
+        // flowless branch (LAND / fragment / source-route need no flow).
+        if !claimed_zones.is_empty() {
+            if let Some(reason) = screen.stateless_screen_drop_for_zones(
+                claimed_zones.iter().map(|(_, name)| *name),
+                &screen_pkt,
+                addrs_known,
+            ) {
+                let (claimed_id, claimed_name) = claimed_zones[0];
+                if screen.alarm_without_drop(claimed_name) {
+                    emit_screen_alarm_event(
+                        worker_ctx.event_stream,
+                        &screen_pkt,
+                        meta,
+                        claimed_id,
+                        reason,
+                        event_now_ns_from_secs(now_secs),
+                    );
+                    screen.record_alarm_without_drop();
+                    crate::afxdp::flood_counters::record_zone_flood_alarm(
+                        &worker_ctx.forwarding.flood_counter_slot_map,
+                        claimed_id,
+                        reason,
+                    );
+                } else {
+                    emit_screen_drop_event(
+                        worker_ctx.event_stream,
+                        &screen_pkt,
+                        meta,
+                        claimed_id,
+                        reason,
+                        event_now_ns_from_secs(now_secs),
+                    );
+                    counters.record_screen_drop(
+                        reason,
+                        claimed_id,
+                        &worker_ctx.forwarding.flood_counter_slot_map,
+                    );
+                    return StageOutcome::RecycleAndContinue;
+                }
+            }
+        }
         let flowless_verdict = screen.check_flowless_screens_opts(
             zone_name,
             &screen_pkt,
@@ -1207,6 +1326,57 @@ pub(super) fn stage_screen_check(
             "syn-flood-alarm",
             event_now_ns_from_secs(now_secs),
         );
+    }
+    // #16051: consult the claimed zone's stateless union BEFORE acting
+    // on the raw zone's verdict. A claimed Drop recycles regardless of
+    // the raw verdict (Pass, Bypass, or even Challenge — no SYN-ACK may
+    // be minted for a packet the claimed profile drops); a raw Drop
+    // keeps precedence for attribution when both trip.
+    let claimed_drop = if claimed_zones.is_empty() {
+        None
+    } else {
+        screen.stateless_screen_drop_for_zones(
+            claimed_zones.iter().map(|(_, name)| *name),
+            &screen_pkt,
+            true,
+        )
+    };
+    if let Some(reason) = claimed_drop {
+        if !matches!(verdict, ScreenVerdict::Drop(_)) {
+            let (claimed_id, claimed_name) = claimed_zones[0];
+            if screen.alarm_without_drop(claimed_name) {
+                emit_screen_alarm_event(
+                    worker_ctx.event_stream,
+                    &screen_pkt,
+                    meta,
+                    claimed_id,
+                    reason,
+                    event_now_ns_from_secs(now_secs),
+                );
+                screen.record_alarm_without_drop();
+                crate::afxdp::flood_counters::record_zone_flood_alarm(
+                    &worker_ctx.forwarding.flood_counter_slot_map,
+                    claimed_id,
+                    reason,
+                );
+                // Audit mode: fall through to the raw verdict below.
+            } else {
+                emit_screen_drop_event(
+                    worker_ctx.event_stream,
+                    &screen_pkt,
+                    meta,
+                    claimed_id,
+                    reason,
+                    event_now_ns_from_secs(now_secs),
+                );
+                counters.record_screen_drop(
+                    reason,
+                    claimed_id,
+                    &worker_ctx.forwarding.flood_counter_slot_map,
+                );
+                return StageOutcome::RecycleAndContinue;
+            }
+        }
     }
     match verdict {
         ScreenVerdict::Pass => StageOutcome::Continue(ScreenCheckOutcome::Pass),
@@ -1331,6 +1501,34 @@ pub(super) fn stage_screen_syn_cookie_ack_on_session_miss(
     counters: &mut BatchCounters,
     worker_ctx: &WorkerContext,
 ) -> StageOutcome<SynCookieAckOutcome> {
+    stage_screen_syn_cookie_ack_on_session_miss_with_ambiguous(
+        flow, packet_frame, meta, ingress_zone_override, None, now_ns, now_secs, screen, counters,
+        worker_ctx,
+    )
+}
+
+/// #16051 (RN-04): the cookie-ACK stage for an ambiguous fabric
+/// arrival. Cookie validation stays on the RAW ingress zone (the peer
+/// that minted the cookie screened under it); the withheld claimed
+/// zone may only veto via the stateless union — a claimed stateless
+/// Drop recycles even a Validated ACK, so no ACK-RST is earned under
+/// a profile that would have dropped the packet. The claimed zone
+/// never validates (its key ring entry is not consulted) and never
+/// seeds its validated-client cache.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn stage_screen_syn_cookie_ack_on_session_miss_with_ambiguous(
+    flow: Option<&SessionFlow>,
+    packet_frame: &[u8],
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+    ambiguous_zone: Option<u16>,
+    now_ns: u64,
+    now_secs: u64,
+    screen: &mut ScreenState,
+    counters: &mut BatchCounters,
+    worker_ctx: &WorkerContext,
+) -> StageOutcome<SynCookieAckOutcome> {
     // has_profiles is CORRECT as the GLOBAL arm here, unlike the #6860
     // change in stage_screen_check above. This stage only ENFORCES -- it
     // validates a SYN-cookie ACK against a zone's resolved profile and
@@ -1352,11 +1550,12 @@ pub(super) fn stage_screen_syn_cookie_ack_on_session_miss(
     // admitted (the tolerant-doctrine fail-close that stage 10 owns for
     // this same packet); a zone with a resolved profile keeps the full
     // validation and its parse fail-close.
-    let Some((zone_id, zone_name)) =
-        screen_zone_with_state(worker_ctx, meta, ingress_zone_override, screen)
-    else {
+    let zone_candidates =
+        screen_zone_candidates(worker_ctx, meta, ingress_zone_override, ambiguous_zone, screen);
+    let Some(&(zone_id, zone_name)) = zone_candidates.first() else {
         return StageOutcome::Continue(SynCookieAckOutcome::Pass);
     };
+    let claimed_zones: Vec<(u16, &str)> = zone_candidates[1..].to_vec();
     // See `stage_screen_check`: decide L3 offset on tag PRESENCE, not
     // VID > 0, so a priority-tagged VID-0 cookie ACK is parsed at the
     // correct offset (18) instead of mis-reading the tag bytes (#2145).
@@ -1399,6 +1598,49 @@ pub(super) fn stage_screen_syn_cookie_ack_on_session_miss(
             return StageOutcome::RecycleAndContinue;
         }
     };
+    // #16051: the claimed zone's stateless union vetoes even a
+    // Validated ACK (no ACK-RST under a dropping claimed profile);
+    // the raw zone's own Invalid/Budget verdicts keep precedence.
+    if !claimed_zones.is_empty() {
+        if let Some(reason) = screen.stateless_screen_drop_for_zones(
+            claimed_zones.iter().map(|(_, name)| *name),
+            &screen_pkt,
+            true,
+        ) {
+            let (claimed_id, claimed_name) = claimed_zones[0];
+            if screen.alarm_without_drop(claimed_name) {
+                emit_screen_alarm_event(
+                    worker_ctx.event_stream,
+                    &screen_pkt,
+                    meta,
+                    claimed_id,
+                    reason,
+                    event_now_ns_from_secs(now_secs),
+                );
+                screen.record_alarm_without_drop();
+                crate::afxdp::flood_counters::record_zone_flood_alarm(
+                    &worker_ctx.forwarding.flood_counter_slot_map,
+                    claimed_id,
+                    reason,
+                );
+            } else {
+                emit_screen_drop_event(
+                    worker_ctx.event_stream,
+                    &screen_pkt,
+                    meta,
+                    claimed_id,
+                    reason,
+                    event_now_ns_from_secs(now_secs),
+                );
+                counters.record_screen_drop(
+                    reason,
+                    claimed_id,
+                    &worker_ctx.forwarding.flood_counter_slot_map,
+                );
+                return StageOutcome::RecycleAndContinue;
+            }
+        }
+    }
     match screen.validate_syn_cookie_ack_on_session_miss(
         zone_name,
         zone_id,
