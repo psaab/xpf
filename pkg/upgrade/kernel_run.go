@@ -633,11 +633,20 @@ func (r *KernelRunner) Promote() (KernelRollOutcome, error) {
 	// Gate 1: did the firmware actually boot the candidate slot?
 	entries, err := sys.BootEntries()
 	if err != nil {
-		return KernelRollOutcome{}, r.revert(j, fmt.Errorf("read boot entries: %w", err))
+		// The candidate slot id is unknowable, so Gate 2/verify cannot run —
+		// but a blanket revert is still wrong: on a firmware-fallback boot
+		// the box may already be on the known-good kernel, where a reboot is
+		// redundant and the outcome is "discarded", not "reverted" (#16446,
+		// mirroring the #4872-A BootCurrent switch below). Discriminate on
+		// RunningKernel first.
+		return r.resolveUnconfirmedBoot(j, fmt.Errorf("read boot entries: %w", err))
 	}
 	candID, ok := entries[j.InactiveSlot]
 	if !ok {
-		return KernelRollOutcome{}, r.revert(j, fmt.Errorf("candidate slot %s vanished from NVRAM", j.InactiveSlot))
+		// Same discrimination: a vanished candidate slot on an already
+		// known-good boot needs no reboot; on the candidate it must revert
+		// (no slot id to promote); unreadable stays indeterminate.
+		return r.resolveUnconfirmedBoot(j, fmt.Errorf("candidate slot %s vanished from NVRAM", j.InactiveSlot))
 	}
 	cur, err := sys.BootCurrent()
 	if err != nil {
@@ -695,6 +704,36 @@ func (r *KernelRunner) Promote() (KernelRollOutcome, error) {
 		return KernelRollOutcome{}, r.revert(j, fmt.Errorf("running kernel %s != candidate %s", running, j.CandidateVersion))
 	}
 	return r.verifyAndPromote(j, candID, running)
+}
+
+// resolveUnconfirmedBoot discriminates the Gate-1 failures where the
+// candidate's NVRAM state is unconfirmed — BootEntries unreadable, or the
+// candidate slot missing from it — so no candID is available (#16446). It
+// mirrors the #4872-A BootCurrent switch, except that with no slot id the
+// candidate-running branch cannot enter verifyAndPromote (which needs candID
+// for the promote BootOrder reorder) and instead takes the controlled,
+// attempt-counted revert — which defers pruning the running candidate
+// (#14165) and still requests the exit-3 reboot. Positive non-candidate
+// evidence takes the no-reboot discarded cleanup; an unreadable running
+// kernel fails closed indeterminate (no prune, no reboot, journal kept).
+func (r *KernelRunner) resolveUnconfirmedBoot(j *KernelJournal, cause error) (KernelRollOutcome, error) {
+	sys := r.cfg.Sys
+	running, rkErr := sys.RunningKernel()
+	switch {
+	case rkErr != nil:
+		return KernelRollOutcome{}, r.recoverIndeterminate(j, fmt.Errorf(
+			"%v; running kernel also unreadable: %w", cause, rkErr))
+	case running == j.CandidateVersion:
+		// Running the candidate but cannot confirm or promote its slot:
+		// the controlled revert (bounded, prune deferred while it runs).
+		return KernelRollOutcome{}, r.revert(j, fmt.Errorf(
+			"%v; running kernel IS candidate %s but its NVRAM slot is unconfirmed", cause, running))
+	default:
+		// Positive evidence we booted a non-candidate (known-good) kernel:
+		// pruning the un-promoted candidate slot is safe, no reboot needed.
+		return r.cleanupAlreadyOnKnownGood(j, fmt.Errorf(
+			"%v; running kernel %s != candidate %s — on known-good", cause, running, j.CandidateVersion))
+	}
 }
 
 // verifyAndPromote runs the post-Gate-2 verification (verify-dataplane +
