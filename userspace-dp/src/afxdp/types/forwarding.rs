@@ -153,9 +153,11 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) interface_nat_ids_v6: FastMap<Ipv6Addr, FastMap<RouteIdentity, i32>>,
     pub(in crate::afxdp) interface_nat_v4: FastMap<Ipv4Addr, FastMap<String, i32>>,
     pub(in crate::afxdp) interface_nat_v6: FastMap<Ipv6Addr, FastMap<String, i32>>,
-    /// #16131: dual-carry interned twin of the string set below; derived
-    /// at build by `forwarding_build::intern_route_tables`. The string
-    /// form stays authoritative.
+    /// #16131: dual-carry interned twins of the string sets below;
+    /// derived at build by `forwarding_build::intern_route_tables`.
+    /// The string form stays authoritative.
+    pub(in crate::afxdp) interface_nat_table_ids_v4: FastMap<Ipv4Addr, FastSet<RouteIdentity>>,
+    pub(in crate::afxdp) interface_nat_table_ids_v6: FastMap<Ipv6Addr, FastSet<RouteIdentity>>,
     /// #12086: owning routing tables for interface-NAT local-delivery
     /// addresses. Like `local_tables_v*`, these interface addresses are not
     /// wildcarded across routing instances.
