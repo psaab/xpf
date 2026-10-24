@@ -610,8 +610,9 @@ func TestResolveRibTable(t *testing.T) {
 	}
 }
 
-// TestRibInstanceFromName (#2253) pins the EXACT-suffix family matcher that
-// resolveRibTable and the commit-time gate share in spirit. A loose ".inet"
+// TestRibInstanceFromName (#2253) pins the shared EXACT-suffix family matcher
+// (config.RibInstanceFromName, hoisted by #16203) that resolveRibTable and
+// the commit-time gate both call. A loose ".inet"
 // substring match accepted malformed family tokens (".inetX.0", ".inetfoo.0",
 // ".inet60.0") and trailing garbage (".inet.0.x"), mapping a typo'd rib onto
 // a real instance table. Restoring the substring match must break this test.
@@ -646,9 +647,9 @@ func TestRibInstanceFromName(t *testing.T) {
 		{"", "", false},
 	}
 	for _, tt := range tests {
-		instance, ok := ribInstanceFromName(tt.ribName)
+		instance, ok := config.RibInstanceFromName(tt.ribName)
 		if instance != tt.instance || ok != tt.ok {
-			t.Errorf("ribInstanceFromName(%q) = (%q, %v), want (%q, %v)",
+			t.Errorf("RibInstanceFromName(%q) = (%q, %v), want (%q, %v)",
 				tt.ribName, instance, ok, tt.instance, tt.ok)
 		}
 	}

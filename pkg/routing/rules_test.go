@@ -739,7 +739,7 @@ func TestRibGroupAdmissionCap(t *testing.T) {
 	t.Run("at-limit", func(t *testing.T) {
 		ops := newFakeRuleOps()
 		rg := &ribGroupManager{ops: ops}
-		ribGroups, instances, connected := mkConfig(maxRibGroupLeakRules)
+		ribGroups, instances, connected := mkConfig(config.MaxRibGroupLeakRules)
 		if err := rg.Apply(ribGroups, instances, connected); err != nil {
 			t.Fatalf("Apply: %v", err)
 		}
@@ -753,7 +753,7 @@ func TestRibGroupAdmissionCap(t *testing.T) {
 	t.Run("over-limit", func(t *testing.T) {
 		ops := newFakeRuleOps()
 		rg := &ribGroupManager{ops: ops}
-		ribGroups, instances, connected := mkConfig(maxRibGroupLeakRules + 25)
+		ribGroups, instances, connected := mkConfig(config.MaxRibGroupLeakRules + 25)
 		// Over-limit must surface a degraded Apply error (not swallowed).
 		if err := rg.Apply(ribGroups, instances, connected); err == nil {
 			t.Fatal("over-limit Apply must return a degraded error naming the cap")

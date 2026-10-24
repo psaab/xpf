@@ -179,8 +179,8 @@ func TestRibGroupImportRibMalformedFamilyRejected(t *testing.T) {
 	}
 }
 
-// #2253: the exact-suffix family matcher mirrored from
-// pkg/routing.ribInstanceFromName. Pins acceptance of valid
+// #2253: the shared exact-suffix family matcher (RibInstanceFromName,
+// hoisted to pkg/config by #16203). Pins acceptance of valid
 // "<instance>.inet.0" / "<instance>.inet6.0" and rejection of malformed
 // family tokens + trailing garbage + empty-prefix forms.
 func TestRibInstanceFromNameConfig(t *testing.T) {
@@ -205,9 +205,9 @@ func TestRibInstanceFromNameConfig(t *testing.T) {
 		{"", "", false},
 	}
 	for _, tt := range tests {
-		instance, ok := ribInstanceFromName(tt.ribName)
+		instance, ok := RibInstanceFromName(tt.ribName)
 		if instance != tt.instance || ok != tt.ok {
-			t.Errorf("ribInstanceFromName(%q) = (%q, %v), want (%q, %v)",
+			t.Errorf("RibInstanceFromName(%q) = (%q, %v), want (%q, %v)",
 				tt.ribName, instance, ok, tt.instance, tt.ok)
 		}
 	}

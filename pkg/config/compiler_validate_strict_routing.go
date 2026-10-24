@@ -1010,7 +1010,7 @@ func validateRibGroupImportRibReferencesStrict(cfg *Config) error {
 	}
 	// resolvable mirrors pkg/routing.resolveRibTable's definedness view:
 	// inet.0 / inet6.0, or "<defined-instance>.inet[6].0". The instance form
-	// requires an EXACT family suffix (see ribInstanceFromName) — a loose
+	// requires an EXACT family suffix (see RibInstanceFromName) — a loose
 	// ".inet" substring match would accept malformed names like
 	// "<instance>.inetX.0" and "<instance>.inet.0.garbage" (#2253). The
 	// commit-time gate and pkg/routing's runtime applier MUST agree on what
@@ -1019,7 +1019,7 @@ func validateRibGroupImportRibReferencesStrict(cfg *Config) error {
 		if ribName == "inet.0" || ribName == "inet6.0" {
 			return true
 		}
-		if instance, ok := ribInstanceFromName(ribName); ok {
+		if instance, ok := RibInstanceFromName(ribName); ok {
 			return definedInstance[instance]
 		}
 		return false
@@ -1220,24 +1220,6 @@ func validatePerInstanceInterfaceRoutesRibGroupStrict(cfg *Config) error {
 		}
 	}
 	return nil
-}
-
-// ribInstanceFromName extracts the routing-instance prefix from a non-default
-// rib name of the EXACT form "<instance>.inet.0" or "<instance>.inet6.0",
-// returning ok=false for any other shape. The instance prefix must be
-// non-empty. Bare "inet.0" / "inet6.0" (the main table) are NOT instance ribs
-// and are handled by callers directly. Malformed family tokens
-// (".inetX.0", ".inetfoo.0", ".inet60.0") and trailing garbage (".inet.0.x")
-// return ok=false (#2253). This mirrors pkg/routing.ribInstanceFromName — the
-// two MUST stay in lockstep so the commit-time gate and the runtime applier
-// agree on what resolves (#2226).
-func ribInstanceFromName(ribName string) (string, bool) {
-	for _, suffix := range []string{".inet.0", ".inet6.0"} {
-		if instance, ok := strings.CutSuffix(ribName, suffix); ok && instance != "" {
-			return instance, true
-		}
-	}
-	return "", false
 }
 
 // validateNextTableTargetReferencesStrict hard-rejects a static route whose

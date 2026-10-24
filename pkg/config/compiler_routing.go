@@ -3231,7 +3231,7 @@ func compileRibGroup(name string, node *Node) *RibGroup {
 
 // ribTargetKind classifies a rib-group import-rib name against a source
 // instance for the #3876 per-prefix leak. It mirrors pkg/routing.resolveRibTable
-// (via ribInstanceFromName, the shared exact-suffix matcher) and returns:
+// (via RibInstanceFromName, the shared exact-suffix matcher) and returns:
 //   - "main": the main table (inet.0 / inet6.0) — the Phase-1 leak target.
 //   - "self": the source instance's own rib (no leak needed).
 //   - "vrf":  another DEFINED instance's rib — a VRF→VRF import, deferred to
@@ -3242,7 +3242,7 @@ func ribTargetKind(ribName, selfInstance string, definedInstances map[string]boo
 	if ribName == "inet.0" || ribName == "inet6.0" {
 		return "main"
 	}
-	if instance, ok := ribInstanceFromName(ribName); ok {
+	if instance, ok := RibInstanceFromName(ribName); ok {
 		if instance == selfInstance {
 			return "self"
 		}
