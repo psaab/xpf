@@ -29,6 +29,9 @@ import (
 //     `filter`, and `simple-filter` are not consumed by an InterfaceUnit hook.
 //     Only one-name `filter input|output` under family inet|inet6 is wired;
 //     every other spelling would silently leave the interface unfiltered.
+//     #16453: the same default closes the direction slot itself — a typo'd
+//     or case-variant direction (`inpt`, `Input`, …) is an unknown knob,
+//     not a binding.
 //   - #15654: L2 content under `family ethernet-switching` / `family bridge`
 //     (interface-mode/port-mode, native VLAN, `vlan members`/`vlan-id`), and
 //     policer/sample bindings under every AF compileInterfaces does not
@@ -271,7 +274,30 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 
 			// H9: a per-unit ARP policer under family inet / inet6.
 			for _, fam := range unit.Children {
-				if fam.Name() != "family" || !isInetFamily(fam) {
+				if fam.Name() != "family" {
+					continue
+				}
+				// #16453: split `family { inet { … } }` — the AF body
+				// lives on the inet/inet6 child. Recurse once so the
+				// H9/#10293 checks below see that child as the family.
+				if !isInetFamily(fam) && len(fam.Keys) == 1 {
+					for _, afChild := range fam.Children {
+						if afChild == nil || (afChild.Name() != "inet" && afChild.Name() != "inet6") {
+							continue
+						}
+						for _, knob := range unsupportedInterfaceFilterKnobs(afChild) {
+							if err := emit(
+								"interfaces %s unit %s family %s: `%s` is not "+
+									"supported (xpf has no consumer for this interface "+
+									"binding; remove it) (#10293)",
+								ifName, unitID, afChild.Name(), knob); err != nil {
+								return nil, err
+							}
+						}
+					}
+					continue
+				}
+				if !isInetFamily(fam) {
 					continue
 				}
 				famName := familyAfterKeyword(fam)
@@ -290,7 +316,8 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 				// InterfaceUnit field or dataplane consumer. A single-name
 				// filter input/output binding remains supported; these
 				// unbound siblings must fail closed rather than promise
-				// enforcement and silently do nothing.
+				// enforcement and silently do nothing. #16453 extends
+				// the same gate to unknown direction tokens.
 				for _, knob := range unsupportedInterfaceFilterKnobs(fam) {
 					if err := emit(
 						"interfaces %s unit %s family %s: `%s` is not "+
@@ -985,6 +1012,13 @@ func packedFilterKeywordLabel12090(keyword string, rest []string) string {
 // children that compileInterfaces does not consume. It handles both AST
 // shapes: flat-set statements keep the tail in Keys, while hierarchical
 // statements put the leaf under the filter/policer container.
+//
+// #16453: the filter direction slot is closed-world. Anything that is not
+// exactly `input`/`output` in keyword position — a typo (`inpt`, `imput`),
+// a case variant (`Input`), or an unknown token — is reported as
+// `filter <token>` instead of being silently skipped, because
+// compileInterfaces binds no filter for it. A valid direction's VALUE is
+// never a knob: `filter input inpt` binds the filter NAMED inpt.
 func unsupportedInterfaceFilterKnobs(fam *Node) []string {
 	if fam == nil {
 		return nil
@@ -998,59 +1032,114 @@ func unsupportedInterfaceFilterKnobs(fam *Node) []string {
 		}
 		knobs = append(knobs, knob)
 	}
-	for _, c := range fam.Children {
-		switch c.Name() {
-		case "rpf-check":
-			add("rpf-check")
-		case "filter":
-			for i, key := range c.Keys[1:] {
-				switch key {
-				case "input-list", "output-list":
-					add("filter " + key)
-				case "input", "output":
-					// A packed filter child with more than one AUTHORED
-					// value for this direction leaves every value after
-					// nodeVal's first one unenforced. Direction keywords
-					// are statement boundaries, not values: a two-direction
-					// run (input F-IN output F-OUT) is two single-value
-					// statements, so a trailing direction bounds this
-					// direction to one value. (#14431)
-					if len(c.Keys[1:]) > i+2 && !isFilterDirection12090(c.Keys[i+3]) {
+	for _, famChild := range familyAFNodes16453(fam) {
+		for _, c := range famChild.Children {
+			switch c.Name() {
+			case "rpf-check":
+				add("rpf-check")
+			case "filter":
+				// Packed tail: `filter <dir> <name> [<dir> <name> …]`.
+				// Only the direction slot is keyword position; the
+				// token after a valid direction is its filter NAME
+				// (even if spelled like a typo, #16453 control), and
+				// two extra tokens after a direction with a further
+				// valid direction following stay the #14431/#10293
+				// multi-value case. Unknown tokens are examined only
+				// in the direction slot itself.
+				packed := c.Keys[1:]
+				for i := 0; i < len(packed); {
+					key := packed[i]
+					rest := len(packed) - i
+					switch key {
+					case "input-list", "output-list":
 						add("filter " + key)
+						i += 2
+					case "input", "output":
+						if rest > 3 && isFilterDirection12090(packed[i+3]) {
+							add("filter " + key)
+						} else if rest == 3 {
+							// `input f1 f2` with nothing after: the
+							// proven #10293 packed-tail multi-value.
+							add("filter " + key)
+						}
+						if rest == 4 {
+							// Ambiguous `input f1 <tok> f2`: <tok> may
+							// be a second value or a typo'd second
+							// direction. The #10293 multi-value and
+							// the #16453 unknown-direction reports
+							// coincide on strict (reject either way);
+							// on lenient both bindings are unenforced
+							// beyond the first, so reporting the
+							// unknown token by name is the honest
+							// single diagnostic when it is not a
+							// known direction.
+							if !isFilterDirection12090(packed[i+2]) {
+								add("filter " + packed[i+2])
+							} else {
+								add("filter " + key)
+							}
+						}
+						i += 2
+					default:
+						// #16453: unknown direction token in keyword
+						// position (typo / case variant). It binds
+						// nothing; fail closed naming the token.
+						add("filter " + key)
+						i += 2
 					}
 				}
-			}
-			for _, leaf := range c.Children {
-				switch leaf.Name() {
-				case "input-list", "output-list":
-					add("filter " + leaf.Name())
-				case "input", "output":
-					// Count every authored value across the parser's
-					// bracket, block, and packed-child shapes. nodeVal
-					// consumes only the first.
-					values := len(leaf.Keys) - 1
-					for _, child := range leaf.Children {
-						values += len(child.Keys)
-					}
-					if values > 1 {
+				for _, leaf := range c.Children {
+					switch leaf.Name() {
+					case "input-list", "output-list":
+						add("filter " + leaf.Name())
+					case "input", "output":
+						// Count every authored value across the parser's
+						// bracket, block, and packed-child shapes. nodeVal
+						// consumes only the first.
+						values := len(leaf.Keys) - 1
+						for _, child := range leaf.Children {
+							values += len(child.Keys)
+						}
+						if values > 1 {
+							add("filter " + leaf.Name())
+						}
+					default:
+						// #16453: braced/block unknown direction,
+						// e.g. `filter { inpt f1; }` or `inpt { f1; }`.
 						add("filter " + leaf.Name())
 					}
 				}
-			}
-		case "policer":
-			for _, key := range c.Keys[1:] {
-				if key == "input" || key == "output" {
-					add("policer " + key)
+			case "policer":
+				for _, key := range c.Keys[1:] {
+					if key == "input" || key == "output" {
+						add("policer " + key)
+					}
 				}
-			}
-			for _, leaf := range c.Children {
-				if leaf.Name() == "input" || leaf.Name() == "output" {
-					add("policer " + leaf.Name())
+				for _, leaf := range c.Children {
+					if leaf.Name() == "input" || leaf.Name() == "output" {
+						add("policer " + leaf.Name())
+					}
 				}
 			}
 		}
 	}
 	return knobs
+}
+
+// familyAFNodes16453 returns the nodes whose Children carry the family
+// body: fam itself for the compound `family inet` shape, plus the
+// `inet`/`inet6` child for the split `family { inet { … } }` shape
+// (the #12090 walk already treats that child as the AF node).
+func familyAFNodes16453(fam *Node) []*Node {
+	nodes := []*Node{fam}
+	if fam != nil && len(fam.Keys) == 1 {
+		for _, child := range fam.Children {
+			if child != nil && (child.Name() == "inet" || child.Name() == "inet6") {
+				nodes = append(nodes, child)
+			}
+		}
+	}
+	return nodes
 }
 
 // unitIdentity returns the unit number token for an error message. The
