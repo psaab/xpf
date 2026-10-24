@@ -1,10 +1,9 @@
 package format
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 
+	"github.com/psaab/xpf/internal/testgolden"
 	userspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
@@ -118,22 +117,5 @@ func goldenCoSSummaryStatus() *userspace.ProcessStatus {
 }
 
 func TestFormatCoSInterfaceSummaryGolden(t *testing.T) {
-	got := FormatCoSInterfaceSummary(testCoSConfig(), goldenCoSSummaryStatus(), "")
-	goldenPath := filepath.Join("testdata", "cos_summary.golden")
-	if *updateGolden {
-		if err := os.MkdirAll("testdata", 0o755); err != nil {
-			t.Fatalf("mkdir testdata: %v", err)
-		}
-		if err := os.WriteFile(goldenPath, []byte(got), 0o644); err != nil {
-			t.Fatalf("write golden: %v", err)
-		}
-		return
-	}
-	want, err := os.ReadFile(goldenPath)
-	if err != nil {
-		t.Fatalf("read golden (run with -update to generate): %v", err)
-	}
-	if got != string(want) {
-		t.Fatalf("FormatCoSInterfaceSummary output diverged from golden.\n--- got ---\n%s\n--- want ---\n%s", got, string(want))
-	}
+	testgolden.String(t, "testdata/cos_summary.golden", FormatCoSInterfaceSummary(testCoSConfig(), goldenCoSSummaryStatus(), ""))
 }

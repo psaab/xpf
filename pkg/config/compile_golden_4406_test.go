@@ -21,7 +21,7 @@ package config
 // Regenerate the baseline (only when a legitimate behavior change lands, or
 // to capture the origin/master baseline the first time) with:
 //
-//	GOLDEN_4406_UPDATE=1 go test ./pkg/config/ -run TestCompileGolden4406
+//	go test ./pkg/config/ -run TestCompileGolden4406 -update
 //
 // The corpus deliberately exercises the order-dependent surfaces the
 // decomposition plan calls out: the flat vSRX chassis-cluster config is
@@ -41,6 +41,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/internal/testgolden"
 )
 
 // goldenCase is one (config, matrix-cell) compile result. Config is the raw
@@ -181,7 +183,7 @@ func TestCompileGolden4406(t *testing.T) {
 	got = append(got, '\n')
 
 	goldenPath := filepath.Join(dir, "testdata", "golden_4406.json")
-	if os.Getenv("GOLDEN_4406_UPDATE") == "1" {
+	if testgolden.UpdateRequested() {
 		if err := os.MkdirAll(filepath.Dir(goldenPath), 0o755); err != nil {
 			t.Fatalf("golden: mkdir testdata: %v", err)
 		}
@@ -194,7 +196,7 @@ func TestCompileGolden4406(t *testing.T) {
 
 	want, err := os.ReadFile(goldenPath)
 	if err != nil {
-		t.Fatalf("golden: read baseline (create it once with GOLDEN_4406_UPDATE=1): %v", err)
+		t.Fatalf("golden: read baseline (create it once with -update): %v", err)
 	}
 	if bytes.Equal(got, want) {
 		return
