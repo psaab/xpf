@@ -29,7 +29,42 @@ import (
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
 )
+
+// Applied reports whether the current active config is the one that most
+// recently completed a full apply (#16451). It is the store binding every
+// firewall show surface must consult before certifying compiled content as
+// live or pairing active-config terms with dataplane counters: after an
+// in-band helper refusal the helper ack generation and the daemon's last
+// recorded apply generation both stay at the prior generation, so a
+// generation-only compare cannot distinguish refusal from success, while
+// the store marker is false for a promoted-but-unapplied (refused) config
+// and is cleared on any failed apply. A nil store reads not-applied.
+func Applied(store *configstore.Store) bool {
+	return store != nil && store.ActiveApplied()
+}
+
+// StaleCounterWarning is the #16451 warning printed on RAW `show firewall`
+// views when the active config is not the applied one: the terms shown come
+// from the active config, but hit counters are looked up only by
+// (family, filter, term name) and therefore belong to the previous
+// generation still being enforced. Shared by the local CLI and the gRPC
+// ShowText server so both raw surfaces carry the identical warning.
+const StaleCounterWarning = "WARNING: dataplane is NOT enforcing the active configuration.\n" +
+	"  Hit counters below (if any) belong to the previous generation\n" +
+	"  still being enforced; they do NOT count the terms shown.\n\n"
+
+// NotEnforcingWarning is the #16451 warning printed on the gRPC/remote
+// `show firewall ... effective` views when the active config is not the
+// applied one, so the banner port does not copy the generation-only
+// predicate: the compiled snapshots below are compiled-desired, not what the
+// dataplane enforces. The local CLI prints its richer generation banner
+// (pkg/cli printFirewallEffectiveBanner) for the same condition.
+const NotEnforcingWarning = "WARNING: dataplane is NOT enforcing the active configuration.\n" +
+	"  The firewall filters below are COMPILED-DESIRED (what the active\n" +
+	"  configuration compiles to), NOT what the dataplane is enforcing.\n" +
+	"  Reason: active configuration not applied (dataplane is enforcing a previous configuration).\n\n"
 
 // SortedFilterNames returns the non-nil, non-suppressed filter names in
 // deterministic order for the all-filters view.
