@@ -1475,3 +1475,40 @@ miss. `cargo test 16217` 53/53; `forwarding::tests` 334 passed
 with 1 failure identical on the unmodified head
 (`matched_family_pairs_are_still_admitted_7520`, pre-existing);
 `session::` 527 passed with the same 2 pre-existing failures.
+
+## FZCellsStrict re-run (head 872fb598b0, flag + index commits)
+
+Strict re-run of the aged acceptance from the FINAL head
+`872fb598b0` (= `9dff39b45e` + `8b64cde889` explicit-flag + this
+index commit), three runs, separate evidence dirs
+`/var/worktrees/FZCellsStrict/run{1,2,3}/` (complete cell log,
+iperf log, posture/session/dpstats/metrics snapshots per run).
+Helper built via `make deb DEB_VERSION=99.16217.45` from the exact
+head — NO manual repack (the prior `.43.dirty` repack caveat does
+not apply): deb sha256
+`32849c4a3d253a6e73d8ee2eadd7038933563baed4c71c82adc0d541d1704003`,
+helper sha256
+`349bbfbd01ab6143024fccd0cf6e1bdb69ab873d5efe65e16ca728bd61caa91e`
+(extracted from the deb; hash-proved `/proc/<pid>/exe == expect`
+on BOTH nodes before traffic in every run). Proven transitions
+every run: `RG1_OWNER_BEFORE=node0`, `OWNER_FO5 fw0view=node1
+fw1view=node1`. snat_revoked 0 on both nodes at every sample.
+
+| Run | Per-stream zero intervals | SUM zeros | Verdict |
+|---|---|---|---|
+| run1 | {} — 0 | 0 | PASS |
+| run2 | {59166: 54, 59168: 54} — 108 | 0 | FAIL (per-stream) |
+| run3 | {57446: 1 @31-32s} — 1 | 0 | FAIL (strict) |
+
+Per-stream accounting is the point: run2/run3 are SUM-clean but
+NOT per-stream clean — the old SUM-only table would have called
+all three PASS. Run2's two streams die at failover+1s and never
+recover (Cwnd pinned 1.41 KBytes, retransmits ~0-1/s — sender-side
+stall, the heavy-stream split shape); run3 loses exactly one
+interval on one stream at failover+1s and recovers. The fix legs
+(flag + dest-owner arms) hold in the majority of stream-shapes
+(run1 clean, run3 near-clean), but acceptance "no zero intervals
+per stream, twice" is NOT met on this head: 1 of 3 runs fully
+clean. Restore after every run: clean master `2c8575b70e`, helper
+`2f2f5cbf…b04` both nodes (hash-proved), RG0/1/2 node0 primary,
+target OK, P4 verification 9.9 / 17.8 / 18.2 Gbit/s, VERIFY_ZERO 0.
