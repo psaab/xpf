@@ -67,6 +67,7 @@ type statusSummaryAggregates struct {
 	flowCacheHits             uint64
 	flowCacheMisses           uint64
 	flowCacheEvictions        uint64
+	flowCacheEvictionsByArm   [19]uint64
 	sessionHits               uint64
 	sessionMisses             uint64
 	sessionCreates            uint64
@@ -252,6 +253,11 @@ func aggregateStatusSummary(status userspace.ProcessStatus) statusSummaryAggrega
 		agg.flowCacheHits += binding.FlowCacheHits
 		agg.flowCacheMisses += binding.FlowCacheMisses
 		agg.flowCacheEvictions += binding.FlowCacheEvictions
+		for i, n := range binding.FlowCacheEvictionsByArm {
+			if i < len(agg.flowCacheEvictionsByArm) {
+				agg.flowCacheEvictionsByArm[i] += n
+			}
+		}
 		agg.sessionHits += binding.SessionHits
 		agg.sessionMisses += binding.SessionMisses
 		agg.sessionCreates += binding.SessionCreates
@@ -525,6 +531,8 @@ func writeOverviewSection(b *strings.Builder, status userspace.ProcessStatus, ag
 	fmt.Fprintf(b, "  Flow cache hits:           %d\n", agg.flowCacheHits)
 	fmt.Fprintf(b, "  Flow cache misses:         %d\n", agg.flowCacheMisses)
 	fmt.Fprintf(b, "  Flow cache evictions:      %d\n", agg.flowCacheEvictions)
+	fmt.Fprintf(b, "  Flow cache evictions by arm: gen=%d rg_epoch=%d lease=%d deny_expiry=%d scheduler=%d phase_flush=%d collision=%d neighbor_mac=%d decision_invalid=%d deny_superseded=%d session_dead=%d enforce_changed=%d owner_active_redirect=%d fabric_local_wins=%d fabric_ingress_local_wins=%d fabric_redirect_on_fabric=%d fabric_local_same_owner=%d fabric_ingress_discard_now_local=%d forward_candidate_egress_departed=%d\n",
+		agg.flowCacheEvictionsByArm[0], agg.flowCacheEvictionsByArm[1], agg.flowCacheEvictionsByArm[2], agg.flowCacheEvictionsByArm[3], agg.flowCacheEvictionsByArm[4], agg.flowCacheEvictionsByArm[5], agg.flowCacheEvictionsByArm[6], agg.flowCacheEvictionsByArm[7], agg.flowCacheEvictionsByArm[8], agg.flowCacheEvictionsByArm[9], agg.flowCacheEvictionsByArm[10], agg.flowCacheEvictionsByArm[11], agg.flowCacheEvictionsByArm[12], agg.flowCacheEvictionsByArm[13], agg.flowCacheEvictionsByArm[14], agg.flowCacheEvictionsByArm[15], agg.flowCacheEvictionsByArm[16], agg.flowCacheEvictionsByArm[17], agg.flowCacheEvictionsByArm[18])
 	fmt.Fprintf(b, "  Session hits:              %d\n", agg.sessionHits)
 	fmt.Fprintf(b, "  Session misses:            %d\n", agg.sessionMisses)
 	fmt.Fprintf(b, "  Session creates:           %d\n", agg.sessionCreates)

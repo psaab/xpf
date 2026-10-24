@@ -96,6 +96,11 @@ impl BindingLiveState {
             flow_cache_hits: self.flow_cache_hits.load(Ordering::Relaxed),
             flow_cache_misses: self.flow_cache_misses.load(Ordering::Relaxed),
             flow_cache_evictions: self.flow_cache_evictions.load(Ordering::Relaxed),
+            flow_cache_evictions_by_arm: self
+                .flow_cache_evictions_by_arm
+                .iter()
+                .map(|slot| slot.load(Ordering::Relaxed))
+                .collect(),
             flow_cache_collision_evictions: self
                 .flow_cache_collision_evictions
                 .load(Ordering::Relaxed),

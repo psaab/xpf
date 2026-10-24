@@ -407,6 +407,10 @@ func (m *Manager) fillSessionSyncValue(view *sessionSyncView, req *SessionSyncRe
 		req.TCPCloseClass = view.val4.TCPCloseClass
 		// #10888: forward handshake state separately from the close class.
 		req.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(view.val4.TCPHandshakeState)
+		// #16217: forward the live counters so the peer helper stamps
+		// them onto its imported synced entry.
+		req.FwdPackets = view.val4.FwdPackets
+		req.RevPackets = view.val4.RevPackets
 		// #9752: forward the installing-table identity so the standby imports
 		// a PBR-steered session with the table its steer installed.
 		req.InstallTableDomain = view.val4.InstallTableDomain
@@ -440,6 +444,9 @@ func (m *Manager) fillSessionSyncValue(view *sessionSyncView, req *SessionSyncRe
 		req.PptpCallIDs = view.val6.PptpCallIDs
 		req.TCPCloseClass = view.val6.TCPCloseClass
 		req.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(view.val6.TCPHandshakeState)
+		// #16217: forward the live counters (v6 twin of the v4 arm).
+		req.FwdPackets = view.val6.FwdPackets
+		req.RevPackets = view.val6.RevPackets
 		req.InstallTableDomain = view.val6.InstallTableDomain
 		req.InstallTableCheck = view.val6.InstallTableCheck
 		req.SourceNatICMPValid = view.val6.SourceNatICMPValid

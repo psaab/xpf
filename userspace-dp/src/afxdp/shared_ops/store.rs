@@ -738,6 +738,56 @@ pub(in crate::afxdp) fn publish_shared_session(
         // #2402: recover poison so a peer-sync / promote publish is never
         // silently dropped because a worker panicked under this lock.
         let mut sessions = lock_shared_publish(shared_sessions);
+        // #16223: monotonic handshake stage at the single publish
+        // choke point — a republication of the same incarnation
+        // (install-time publish, HA resend, barrier replay) must not
+        // regress a stage this node already advanced (the ct-slice
+        // maintenance restamps Established once a worker's pair
+        // completes). A different session_id is a new incarnation
+        // and takes the incoming stage as-is.
+        let mut entry_owned;
+        let entry = if let Some(previous) = sessions.get(&entry.key) {
+            let same = entry.session_id == 0
+                || previous.session_id == 0
+                || entry.session_id == previous.session_id;
+            let rank = |wire: u8| match crate::session::TcpHandshakeState::from_wire(wire) {
+                Some(crate::session::TcpHandshakeState::Opening) => 1,
+                Some(crate::session::TcpHandshakeState::HandshakePending) => 2,
+                Some(crate::session::TcpHandshakeState::SynAckFirstPending) => 3,
+                Some(crate::session::TcpHandshakeState::Established) => 4,
+                None => 4,
+            };
+            // #16217: reverse-packet evidence is monotonic per
+            // incarnation too — a republication carrying a smaller
+            // (or zero) count must not erase observed reverse service.
+            // The forward-wire alias slot below applies the SAME
+            // merge: the alias is a republication of this forward
+            // row under the NAT'd tuple, and an install-time
+            // (HandshakePending) republication must not regress an
+            // Established alias the cache-hit restamp advanced
+            // (Codex alias-republish regression).
+            let keep_stage =
+                same && rank(entry.tcp_handshake_state) < rank(previous.tcp_handshake_state);
+            let keep_rev = same && entry.rev_packets < previous.rev_packets;
+            let keep_fwd = same && entry.fwd_packets < previous.fwd_packets;
+            if keep_stage || keep_rev || keep_fwd {
+                entry_owned = entry.clone();
+                if keep_stage {
+                    entry_owned.tcp_handshake_state = previous.tcp_handshake_state;
+                }
+                if keep_rev {
+                    entry_owned.rev_packets = previous.rev_packets;
+                }
+                if keep_fwd {
+                    entry_owned.fwd_packets = previous.fwd_packets;
+                }
+                &entry_owned
+            } else {
+                entry
+            }
+        } else {
+            entry
+        };
         let previous_owner_rg = sessions
             .insert(entry.key.clone(), entry.clone())
             .map(|existing| existing.metadata.owner_rg_id);
@@ -825,6 +875,49 @@ pub(in crate::afxdp) fn publish_shared_session(
             // `shared_sessions`.
             wire_ambiguities.observe_wire_owner(wire_key.clone(), entry.key.clone());
             let mut sessions = lock_shared_publish(shared_forward_wire_sessions);
+            // #16217 (Codex alias-republish regression): the alias
+            // slot must keep a monotonic handshake stage + packet
+            // counts exactly like the canonical row above. The
+            // cache-hit restamp advances this slot to Established
+            // on the completing packet; a later install-time /
+            // barrier republication of the same incarnation
+            // (HandshakePending, zero counts) must not regress it,
+            // or the adoption gate reads w=2 again at failover.
+            let mut alias_owned;
+            let entry = if let Some(previous) = sessions.get(&wire_key) {
+                let same_incarnation = previous.key == entry.key
+                    && (entry.session_id == 0
+                        || previous.session_id == 0
+                        || entry.session_id == previous.session_id);
+                let rank = |wire: u8| match crate::session::TcpHandshakeState::from_wire(wire) {
+                    Some(crate::session::TcpHandshakeState::Opening) => 1,
+                    Some(crate::session::TcpHandshakeState::HandshakePending) => 2,
+                    Some(crate::session::TcpHandshakeState::SynAckFirstPending) => 3,
+                    Some(crate::session::TcpHandshakeState::Established) => 4,
+                    None => 4,
+                };
+                let keep_stage = same_incarnation
+                    && rank(entry.tcp_handshake_state) < rank(previous.tcp_handshake_state);
+                let keep_rev = same_incarnation && entry.rev_packets < previous.rev_packets;
+                let keep_fwd = same_incarnation && entry.fwd_packets < previous.fwd_packets;
+                if keep_stage || keep_rev || keep_fwd {
+                    alias_owned = entry.clone();
+                    if keep_stage {
+                        alias_owned.tcp_handshake_state = previous.tcp_handshake_state;
+                    }
+                    if keep_rev {
+                        alias_owned.rev_packets = previous.rev_packets;
+                    }
+                    if keep_fwd {
+                        alias_owned.fwd_packets = previous.fwd_packets;
+                    }
+                    &alias_owned
+                } else {
+                    entry
+                }
+            } else {
+                entry
+            };
             let displaced = sessions.insert(wire_key.clone(), entry.clone());
             let wire_displaced = displaced
                 .as_ref()
@@ -1492,5 +1585,592 @@ fn remove_owner_rg_index_entry_locked(
         if keys.is_empty() {
             index.remove(&owner_rg_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod handshake_monotonic_16223_tests {
+    use super::*;
+    use crate::session::SessionOrigin;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn key(src_port: u16) -> SessionKey {
+        SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: crate::ip_proto::PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+            src_port,
+            dst_port: 5211,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        }
+    }
+
+    fn entry(key: &SessionKey, wire: u8, session_id: u64, reverse: bool) -> SyncedSessionEntry {
+        let mut metadata = crate::session::SessionMetadata {
+            ingress_zone: 1,
+            egress_zone: 2,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            owner_rg_id: 1,
+            fabric_ingress: false,
+            is_reverse: reverse,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+            nat_scope_ifindex: None,
+        };
+        metadata.is_reverse = reverse;
+        SyncedSessionEntry { key: key.clone(),
+        decision: crate::session::SessionDecision {
+            resolution: crate::afxdp::ForwardingResolution {
+                disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: None,
+                neighbor_mac: None,
+                src_mac: None,
+                tx_vlan_id: 0,
+                source_ifindex: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: crate::nat::NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                ..crate::nat::NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata,
+        source_nat_static: None,
+        leak_incarnation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        protocol: crate::ip_proto::PROTO_TCP,
+        tcp_flags: 0,
+        generation: 0,
+        session_id,
+        tcp_close_class: 0, tcp_handshake_state: wire, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, }
+    }
+
+    fn maps() -> (
+        Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        SharedSessionOwnerRgIndexes,
+    ) {
+        (
+            Arc::new(Mutex::new(FastMap::default())),
+            Arc::new(Mutex::new(FastMap::default())),
+            Arc::new(Mutex::new(FastMap::default())),
+            SharedSessionOwnerRgIndexes::default(),
+        )
+    }
+
+    fn nat_decision() -> crate::nat::NatDecision {
+        crate::nat::NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            ..crate::nat::NatDecision::default()
+        }
+    }
+
+    fn wire(
+        shared: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        key: &SessionKey,
+    ) -> u8 {
+        lock_shared_recover(shared)
+            .get(key)
+            .map(|e| e.tcp_handshake_state)
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn publish_never_regresses_handshake_stage_16223() {
+        let (shared, nat_map, wire_map, indexes) = maps();
+        let forward = key(43001);
+        let reverse = crate::session::reverse_session_key(&forward, nat_decision());
+        let opening = crate::session::TcpHandshakeState::Opening.to_wire();
+        let established = crate::session::TcpHandshakeState::Established.to_wire();
+        // Install-time publishes: forward Opening, reverse pending.
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&forward, opening, 77, false));
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&reverse, 3, 77, true));
+        // Serving maintenance advances both stored rows.
+        restamp_shared_handshakes_established(&shared, &[(forward.clone(), nat_decision())]);
+        assert_eq!(wire(&shared, &forward), established, "forward advanced");
+        assert_eq!(wire(&shared, &reverse), established, "derived reverse advanced");
+        // A stale Opening republication (same incarnation) must not regress.
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&forward, opening, 77, false));
+        assert_eq!(wire(&shared, &forward), established, "#16223: republication regressed forward");
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&reverse, opening, 77, true));
+        assert_eq!(wire(&shared, &reverse), established, "#16223: republication regressed reverse");
+        // A new incarnation takes the incoming stage as-is.
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&forward, opening, 78, false));
+        assert_eq!(wire(&shared, &forward), opening, "new incarnation must not inherit stage");
+    }
+
+    #[test]
+    fn forward_wire_alias_restamp_advances_wire_key_16217() {
+        let (shared, nat_map, wire_map, indexes) = maps();
+        let forward = key(43002);
+        let pending = crate::session::TcpHandshakeState::HandshakePending.to_wire();
+        let established = crate::session::TcpHandshakeState::Established.to_wire();
+        let nat = nat_decision();
+        let wire_key = crate::session::forward_wire_key(&forward, nat);
+        assert_ne!(wire_key, forward, "SNAT fixture must produce a distinct wire key");
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&forward, pending, 79, false));
+        assert_eq!(wire(&shared, &forward), pending);
+        // Canonical restamp is the caller's job (`restamp_shared_handshakes_established`
+        // in the ct-slice); the wrapper owns only the alias slot.
+        crate::afxdp::shared_ops::restamp_shared_handshakes_established(
+            &shared,
+            &[(forward.clone(), nat)],
+        );
+        crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
+            &shared,
+            &wire_map,
+            &[(forward.clone(), nat)],
+        );
+        assert_eq!(wire(&shared, &forward), established, "canonical advanced");
+        assert_eq!(wire(&wire_map, &wire_key), established, "wire alias advanced");
+        let aliased = lock_shared_recover(&wire_map)
+            .get(&wire_key)
+            .cloned()
+            .expect("wire alias row present");
+        assert_eq!(aliased.key, forward, "alias row retains the canonical key");
+        assert!(!aliased.metadata.is_reverse, "alias stays a forward entry");
+        assert!(
+            crate::afxdp::shared_ops::lookup_shared_established_for_wire(
+                &shared,
+                &wire_map,
+                &indexes,
+                &wire_key,
+            )
+            .is_some(),
+            "established wire alias must be adoptable"
+        );
+    }
+
+    fn rev_of(
+        shared: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        key: &SessionKey,
+    ) -> u64 {
+        lock_shared_recover(shared)
+            .get(key)
+            .map(|e| e.rev_packets)
+            .unwrap_or(0)
+    }
+
+    /// #16217 (fail-closed evidence, change 2): a synthesized reverse
+    /// companion's mere EXISTENCE in the shared maps must NOT count
+    /// as completion evidence — only an actual reverse packet count
+    /// > 0 on a row does. The old implementation set
+    /// `rev_packets_any = 1` for any reverse row present.
+    ///
+    /// MUTATION: restore the existence-based arm in
+    /// `shared_completion_evidence` and the zero-count case below
+    /// yields evidence, failing the first assertion.
+    #[test]
+    fn completion_evidence_requires_actual_reverse_count_16217() {
+        let (shared, nat_map, wire_map, indexes) = maps();
+        let forward = key(43011);
+        let reverse = crate::session::reverse_session_key(&forward, nat_decision());
+        let pending = crate::session::TcpHandshakeState::HandshakePending.to_wire();
+        // Forward + synthesized reverse companion, both rev_packets=0
+        // (the `entry` fixture publishes 0, as every synthesizer does).
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&forward, pending, 81, false));
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&reverse, pending, 81, true));
+        assert_eq!(rev_of(&shared, &reverse), 0, "premise: companion carries no count");
+        let ev = crate::afxdp::shared_ops::shared_completion_evidence(&shared, &wire_map, &forward);
+        assert_eq!(
+            ev.rev_packets_any, 0,
+            "#16217: synthesized companion existence must not be evidence"
+        );
+        assert!(
+            !ev.served_and_completed(),
+            "#16217: zero-count evidence must not complete"
+        );
+        // Actual reverse service: the serving worker stamps its real
+        // count onto the shared rows -> evidence appears.
+        crate::afxdp::shared_ops::restamp_shared_rev_packets(
+            &shared,
+            &forward,
+            nat_decision(),
+            7,
+        );
+        assert_eq!(rev_of(&shared, &forward), 7);
+        assert_eq!(rev_of(&shared, &reverse), 7);
+        let ev = crate::afxdp::shared_ops::shared_completion_evidence(&shared, &wire_map, &forward);
+        assert_eq!(ev.rev_packets_any, 7, "#16217: actual count must be evidence");
+        assert!(ev.served_and_completed());
+        // A republication carrying 0 must not erase the observed count.
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&forward, pending, 81, false));
+        assert_eq!(rev_of(&shared, &forward), 7, "#16217: republication must not regress the count");
+        // The forward-wire alias slot alone (rev count on the wire
+        // map's forward row) also vouches.
+        let (shared2, nat2, wire2, idx2) = maps();
+        publish_shared_session(&shared2, &nat2, &wire2, &idx2, &entry(&forward, pending, 82, false));
+        let wire_key = crate::session::forward_wire_key(&forward, nat_decision());
+        {
+            let mut w = lock_shared_recover(&wire2);
+            let row = w.get_mut(&wire_key).expect("wire alias row");
+            row.rev_packets = 3;
+        }
+        let ev = crate::afxdp::shared_ops::shared_completion_evidence(&shared2, &wire2, &forward);
+        assert_eq!(ev.rev_packets_any, 3, "#16217: wire-map count must be evidence");
+    }
+
+    /// #16217 (lock order, change 3): `restamp_shared_forward_wire_established`
+    /// and `shared_completion_evidence` must agree on ONE lock order
+    /// (shared_sessions then forward_wire) while both hold both maps.
+    /// Run the two concurrently on disjoint tuples: any AB-BA pairing
+    /// deadlocks (test harness timeout) or panics on poison; the
+    /// unified order completes with correct contents.
+    ///
+    /// MUTATION: restore the nested sessions-lock inside the
+    /// wire-held loop of the restamp and this races the evidence
+    /// reader's sessions->wire acquisition.
+    #[test]
+    fn restamp_and_evidence_share_one_lock_order_16217() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (shared, nat_map, wire_map, indexes) = maps();
+        let nat = nat_decision();
+        let established = crate::session::TcpHandshakeState::Established.to_wire();
+        // Seed 32 tuples through the real publish path.
+        let mut forwards = Vec::new();
+        for i in 0..32u16 {
+            let f = key(43100 + i);
+            publish_shared_session(
+                &shared,
+                &nat_map,
+                &wire_map,
+                &indexes,
+                &entry(&f, crate::session::TcpHandshakeState::HandshakePending.to_wire(), 83, false),
+            );
+            forwards.push(f);
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let shared = shared.clone();
+            let wire_map = wire_map.clone();
+            let stop = stop.clone();
+            let forwards = forwards.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    for f in &forwards {
+                        let _ = crate::afxdp::shared_ops::shared_completion_evidence(
+                            &shared, &wire_map, f,
+                        );
+                    }
+                }
+            })
+        };
+        for _ in 0..200 {
+            for f in &forwards {
+                crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
+                    &shared,
+                    &wire_map,
+                    &[(f.clone(), nat)],
+                );
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        reader.join().expect("evidence reader must not deadlock/panic");
+        for f in &forwards {
+            let wire_key = crate::session::forward_wire_key(f, nat);
+            assert_eq!(
+                wire(&wire_map, &wire_key),
+                established,
+                "#16217: alias must be Established after concurrent restamps"
+            );
+        }
+    }
+
+    fn lookup(
+        shared: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        wire_map: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        indexes: &SharedSessionOwnerRgIndexes,
+        wire_key: &SessionKey,
+    ) -> Option<SyncedSessionEntry> {
+        crate::afxdp::shared_ops::lookup_shared_established_for_wire(
+            shared, wire_map, indexes, wire_key,
+        )
+    }
+
+    /// #16217 (DECISION arm): a HandshakePending forward row qualifies
+    /// as Established-for-adoption when the canonical tuple shows
+    /// completed-handshake evidence — actual reverse count > 0 on a
+    /// synced row (incl. the reverse companion) AND forward count > 0.
+    /// Zero-count rows never qualify (fail-closed per FZFixWire6).
+    ///
+    /// MUTATION: drop the HandshakePending arm and the evidenced case
+    /// below returns None.
+    #[test]
+    fn pending_row_adopts_on_scoped_completion_evidence_16217() {
+        let (shared, nat_map, wire_map, indexes) = maps();
+        let forward = key(43201);
+        let reverse = crate::session::reverse_session_key(&forward, nat_decision());
+        let wire_key = crate::session::forward_wire_key(&forward, nat_decision());
+        let pending = crate::session::TcpHandshakeState::HandshakePending.to_wire();
+        // Canonical SyncImport row stuck at w=2, zero counts.
+        let mut fwd = entry(&forward, pending, 91, false);
+        fwd.origin = SessionOrigin::SyncImport;
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &fwd);
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&reverse, pending, 91, true));
+        assert!(
+            lookup(&shared, &wire_map, &indexes, &wire_key).is_none(),
+            "premise: pending + zero counts must not adopt"
+        );
+        // Forward traffic alone (no reverse service) must not adopt.
+        crate::afxdp::shared_ops::restamp_shared_packet_counts(
+            &shared, &wire_map, &forward, nat_decision(), 12, 0,
+        );
+        assert!(
+            lookup(&shared, &wire_map, &indexes, &wire_key).is_none(),
+            "forward-only counts must not adopt"
+        );
+        // Completed-handshake evidence: reverse count lands on the
+        // reverse companion row; forward count already > 0.
+        crate::afxdp::shared_ops::restamp_shared_packet_counts(
+            &shared, &wire_map, &forward, nat_decision(), 12, 5,
+        );
+        let found = lookup(&shared, &wire_map, &indexes, &wire_key)
+            .expect("pending + rev>0 + fwd>0 must adopt as Established-for-adoption");
+        assert_eq!(found.key, forward);
+        assert_eq!(found.session_id, 91);
+    }
+
+    /// #16217 (ct-slice count stamp): the maintenance sequence the
+    /// ct-slice runs for a collected pair — stage restamp, then the
+    /// collected row's ACTUAL fwd+rev counts, then the alias
+    /// restamp — must leave the shared rows adoptable by the scoped
+    /// gate even when the stage already read Established (so (a)
+    /// passed) but the counts still read import-time (0,0): the
+    /// counts are the only thing the peer-facing export/adoption
+    /// consumers can see. Here the canonical row starts pending
+    /// with zero counts; after the sequence the gate must hit and
+    /// the counts must read (12,5) on canonical AND alias.
+    ///
+    /// MUTATION: drop the `restamp_shared_packet_counts` leg of the
+    /// ct-slice sequence (or the counts leg of this sequence) and
+    /// the counts stay (0,0); the gate still hits on stage alone,
+    /// which is exactly why the count assertions are the pin.
+    #[test]
+    fn ct_slice_sequence_stamps_counts_for_pending_row_16217() {
+        let (shared, nat_map, wire_map, indexes) = maps();
+        let forward = key(43211);
+        let wire_key = crate::session::forward_wire_key(&forward, nat_decision());
+        let pending = crate::session::TcpHandshakeState::HandshakePending.to_wire();
+        let established = crate::session::TcpHandshakeState::Established.to_wire();
+        let mut fwd = entry(&forward, pending, 96, false);
+        fwd.origin = SessionOrigin::SyncImport;
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &fwd);
+        assert!(
+            lookup(&shared, &wire_map, &indexes, &wire_key).is_none(),
+            "premise: pending + zero counts must not adopt"
+        );
+        // The ct-slice sequence for one collected pair.
+        crate::afxdp::shared_ops::restamp_shared_handshakes_established(
+            &shared,
+            &[(forward.clone(), nat_decision())],
+        );
+        crate::afxdp::shared_ops::restamp_shared_packet_counts(
+            &shared, &wire_map, &forward, nat_decision(), 12, 5,
+        );
+        crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
+            &shared,
+            &wire_map,
+            &[(forward.clone(), nat_decision())],
+        );
+        assert_eq!(wire(&shared, &forward), established, "canonical stage must advance");
+        assert_eq!(wire(&wire_map, &wire_key), established, "alias stage must advance");
+        let canonical = lock_shared_recover(&shared).get(&forward).cloned().expect("canonical row");
+        assert_eq!(canonical.fwd_packets, 12, "#16217: canonical fwd count must be stamped");
+        assert_eq!(canonical.rev_packets, 5, "#16217: canonical rev count must be stamped");
+        let aliased = lock_shared_recover(&wire_map).get(&wire_key).cloned().expect("alias row");
+        assert_eq!(aliased.fwd_packets, 12, "#16217: alias fwd count must be stamped");
+        assert_eq!(aliased.rev_packets, 5, "#16217: alias rev count must be stamped");
+        assert!(
+            lookup(&shared, &wire_map, &indexes, &wire_key).is_some(),
+            "#16217: promoted + counted row must be adoptable"
+        );
+    }
+
+    /// #16217 (scope): the evidence scan compares the FULL scoped key.
+    /// Identical 5-tuple evidence in routing_domain 7 must not
+    /// qualify the domain-0 pending row (Codex cross-VRF finding).
+    ///
+    /// MUTATION: compare `bare_tuple()` in the scoped scan and the
+    /// cross-VRF case below wrongly adopts.
+    #[test]
+    fn pending_adoption_evidence_is_scope_exact_16217() {
+        let (shared, nat_map, wire_map, indexes) = maps();
+        let forward = key(43202);
+        let wire_key = crate::session::forward_wire_key(&forward, nat_decision());
+        let pending = crate::session::TcpHandshakeState::HandshakePending.to_wire();
+        let mut fwd = entry(&forward, pending, 92, false);
+        fwd.origin = SessionOrigin::SyncImport;
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &fwd);
+        // Same 5-tuple, different VRF, carrying both counts.
+        let mut other = entry(&forward, pending, 93, false);
+        other.key.routing_domain = 7;
+        other.rev_packets = 9;
+        other.fwd_packets = 9;
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &other);
+        // The scoped scan for the domain-0 key sees nothing.
+        let ev = crate::afxdp::shared_ops::shared_scoped_completion_evidence(
+            &shared, &wire_map, &forward, nat_decision(),
+        );
+        assert_eq!(ev.rev_packets, 0, "cross-VRF rev count must not leak");
+        assert_eq!(ev.fwd_packets, 0, "cross-VRF fwd count must not leak");
+        assert!(
+            lookup(&shared, &wire_map, &indexes, &wire_key).is_none(),
+            "cross-VRF evidence must not qualify the pending row"
+        );
+        // Same-scope evidence (restamp keys on the exact key) qualifies.
+        crate::afxdp::shared_ops::restamp_shared_packet_counts(
+            &shared, &wire_map, &forward, nat_decision(), 3, 2,
+        );
+        assert!(
+            lookup(&shared, &wire_map, &indexes, &wire_key).is_some(),
+            "same-scope evidence must qualify"
+        );
+    }
+
+    /// #16217 (Codex alias-republish regression): the forward-wire
+    /// alias slot keeps a monotonic stage + counts like the canonical
+    /// row. An install-time HandshakePending republication must not
+    /// regress an Established alias (nor erase its counts); a new
+    /// incarnation takes the incoming stage as-is.
+    ///
+    /// MUTATION: drop the alias merge in `publish_shared_session` and
+    /// the alias reads HandshakePending after republication.
+    #[test]
+    fn alias_republish_never_regresses_stage_16217() {
+        let (shared, nat_map, wire_map, indexes) = maps();
+        let forward = key(43203);
+        let nat = nat_decision();
+        let wire_key = crate::session::forward_wire_key(&forward, nat);
+        let pending = crate::session::TcpHandshakeState::HandshakePending.to_wire();
+        let established = crate::session::TcpHandshakeState::Established.to_wire();
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&forward, pending, 94, false));
+        // Cache-hit restamps advance canonical + alias and stamp counts.
+        crate::afxdp::shared_ops::restamp_shared_handshakes_established(
+            &shared,
+            &[(forward.clone(), nat)],
+        );
+        crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
+            &shared,
+            &wire_map,
+            &[(forward.clone(), nat)],
+        );
+        crate::afxdp::shared_ops::restamp_shared_packet_counts(
+            &shared, &wire_map, &forward, nat, 8, 4,
+        );
+        assert_eq!(wire(&wire_map, &wire_key), established, "premise: alias Established");
+        // Stale republication of the same incarnation must not regress.
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&forward, pending, 94, false));
+        assert_eq!(wire(&wire_map, &wire_key), established, "alias stage regressed on republication");
+        assert_eq!(wire(&shared, &forward), established, "canonical stage regressed on republication");
+        let aliased = lock_shared_recover(&wire_map)
+            .get(&wire_key)
+            .cloned()
+            .expect("alias row present");
+        assert_eq!(aliased.rev_packets, 4, "alias rev count erased on republication");
+        assert_eq!(aliased.fwd_packets, 8, "alias fwd count erased on republication");
+        // A new incarnation takes the incoming stage as-is.
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&forward, pending, 95, false));
+        assert_eq!(wire(&wire_map, &wire_key), pending, "new incarnation must not inherit alias stage");
+    }
+
+    /// #16217 (fold B2): `shared_completion_evidence` (ct-slice
+    /// promotion + bulk-export stamp input) must be scope-exact like
+    /// the adoption arm: identical 5-tuple reverse counts in
+    /// routing_domain 7 (or under another discriminator) must NOT
+    /// leak into the domain-0 key's evidence; same-scope counts must
+    /// still vouch (no over-scoping regression).
+    ///
+    /// MUTATION: restore the bare-tuple full-map scan and the
+    /// cross-VRF count below wrongly completes the domain-0 key.
+    #[test]
+    fn completion_evidence_is_scope_exact_16217() {
+        let (shared, nat_map, wire_map, indexes) = maps();
+        let forward = key(43311);
+        let reverse = crate::session::reverse_session_key(&forward, nat_decision());
+        let pending = crate::session::TcpHandshakeState::HandshakePending.to_wire();
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&forward, pending, 97, false));
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&reverse, pending, 97, true));
+        // Cross-VRF sibling: same 5-tuple, domain 7, real counts.
+        let mut other = entry(&forward, pending, 98, false);
+        other.key.routing_domain = 7;
+        other.rev_packets = 9;
+        other.fwd_packets = 9;
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &other);
+        let mut other_rev = entry(&reverse, pending, 98, true);
+        other_rev.key.routing_domain = 7;
+        other_rev.rev_packets = 9;
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &other_rev);
+        let ev = crate::afxdp::shared_ops::shared_completion_evidence(&shared, &wire_map, &forward);
+        assert_eq!(
+            ev.rev_packets_any, 0,
+            "#16217 B2: cross-VRF rev count must not leak into scoped evidence"
+        );
+        assert!(
+            !ev.served_and_completed(),
+            "#16217 B2: cross-VRF evidence must not complete the domain-0 key"
+        );
+        // Same-scope evidence still vouches.
+        crate::afxdp::shared_ops::restamp_shared_rev_packets(
+            &shared,
+            &forward,
+            nat_decision(),
+            4,
+        );
+        let ev = crate::afxdp::shared_ops::shared_completion_evidence(&shared, &wire_map, &forward);
+        assert_eq!(ev.rev_packets_any, 4, "#16217 B2: same-scope count must still vouch");
+        assert!(ev.served_and_completed());
+    }
+
+    /// #16217 (fold B5): `shared_scoped_completion_evidence` must
+    /// find counts on rows stored under the forward-wire alias key
+    /// (direct wire-keyed row) — NAT'd reverse-companion orientation
+    /// included — via keyed gets, and must still refuse cross-VRF
+    /// rows. This pins the orientation set the keyed replacement
+    /// covers beyond canonical/reverse.
+    ///
+    /// MUTATION: drop the wire-key gets and the wire-stored counts
+    /// below read (0,0).
+    #[test]
+    fn scoped_evidence_finds_wire_keyed_rows_16217() {
+        let (shared, nat_map, wire_map, indexes) = maps();
+        let forward = key(43312);
+        let wire_key = crate::session::forward_wire_key(&forward, nat_decision());
+        let pending = crate::session::TcpHandshakeState::HandshakePending.to_wire();
+        assert_ne!(wire_key, forward, "SNAT fixture must produce a distinct wire key");
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&forward, pending, 99, false));
+        // A row stored DIRECTLY under the wire tuple (as the alias
+        // slot can hold after a NAT'd publish) carrying real counts.
+        {
+            let mut w = lock_shared_recover(&wire_map);
+            let mut row = entry(&forward, pending, 99, false);
+            row.key = wire_key.clone();
+            row.rev_packets = 6;
+            row.fwd_packets = 11;
+            w.insert(wire_key.clone(), row);
+        }
+        let ev = crate::afxdp::shared_ops::shared_scoped_completion_evidence(
+            &shared, &wire_map, &forward, nat_decision(),
+        );
+        assert_eq!(ev.rev_packets, 6, "#16217 B5: wire-keyed rev count must be found by keyed get");
+        assert_eq!(ev.fwd_packets, 11, "#16217 B5: wire-keyed fwd count must be found by keyed get");
     }
 }

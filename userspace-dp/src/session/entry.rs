@@ -479,6 +479,16 @@ impl SessionMetadata {
 pub(crate) struct ForwardingGenerationStamp {
     pub(crate) config_generation: u64,
     pub(crate) fib_generation: u32,
+    /// #16109: helper-LOCAL neighbor-set generation. Deliberately NOT
+    /// the FIB generation: that counter is owned by the Go manager
+    /// (absolute values, rollback-fenced), so locally advancing it
+    /// desyncs the shim/userspace_ctrl stamp from helper validation
+    /// and every packet reads generation-mismatched. This component
+    /// lives only inside the helper: it advances exactly when the
+    /// effective neighbor set changes, making MissingNeighbor-era
+    /// resolutions stale so hits re-resolve, and never crosses a
+    /// process boundary.
+    pub(crate) neighbor_generation: u64,
     /// Peer-imported/shared lookups carry no local forwarding provenance.
     pub(crate) valid: bool,
 }

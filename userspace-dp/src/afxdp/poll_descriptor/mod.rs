@@ -1008,8 +1008,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
     // #11373: a session's cached route decision is valid only within the
     // current config/FIB pair. Publish the same validation read used by this
     // pass's metadata classifier before processing any descriptors.
-    sessions
-        .set_forwarding_revalidation_gen(validation.config_generation, validation.fib_generation);
+    sessions.set_forwarding_revalidation_gen_with_neighbor(
+        validation.config_generation,
+        validation.fib_generation,
+        validation.neighbor_generation,
+    );
     // #8356: the zone-policy verdict's generation, published from the SAME
     // `ValidationState` in the SAME statement pair, so the two stamps can never
     // be compared against generations from different publishes. They stay
@@ -2648,6 +2651,90 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // authority-scoped translation decision; preserve that provenance
                 // through the missing-neighbor fail-closed fence below.
                 let mut fragment_association_hit = false;
+                // #16217: adopted/serving context for the session-hit
+                // re-resolve below. A row marked fabric-established at
+                // adoption (or a tuple the adoption gate still qualifies)
+                // re-resolves with the adopted HA-enforcement exemption, so a
+                // subsequent packet cannot die on the ha_inactive terminal
+                // the adoption resolve bypassed. Non-adopted flows compute
+                // `false` here and stay fail-closed bit-identically.
+                //
+                // #16217 (fold B6): the LOCAL-MARK arm qualifies only on
+                // fabric-link ingress for a marked row (the same
+                // physical-arrival identity the adoption site required)
+                // AND only while the mark revalidates against the
+                // AUTHORITATIVE fresh RG set (`forwarding_active_rgs`,
+                // loaded from the coordinator ArcSwap for THIS packet)
+                // via `revalidate_fabric_established_fresh` over the
+                // marked row's stored decision. Pre-fold the mark alone
+                // granted the exemption with NO revalidation at this
+                // site ("Ownership itself is NOT re-imposed here"), so
+                // after failback a still-marked row kept the adopted
+                // exemption forever on this path. The fresh set IS the
+                // adoption gate's own ownership evidence (not the
+                // lagging per-tick `ha_state` snapshot), so a just-adopted
+                // flow on the true owner still qualifies — the gate
+                // proved the same fresh set on its adopting packet —
+                // while a departed egress lapses the mark here and the
+                // re-resolve runs unadopted (HA-demote + fabric
+                // conversion). The live-gate arms below are inherently
+                // current (the gate re-proves Established + ownership
+                // per packet) and are unchanged.
+                let session_hit_fabric_adopted = flow.as_ref().is_some_and(|flow| {
+                    (fabric_link_ingress
+                        && !crate::tcp_flags::has_syn(meta.tcp_flags)
+                        && sessions
+                            .fabric_established_decision_for_wire_at(&flow.forward_key, now_ns)
+                            .is_some_and(|decision| {
+                                crate::afxdp::forwarding::revalidate_fabric_established_fresh(
+                                    worker_ctx.forwarding,
+                                    worker_ctx.forwarding_active_rgs,
+                                    true,
+                                    decision.resolution,
+                                )
+                            }))
+                        || (fabric_link_ingress
+                            && !crate::tcp_flags::has_syn(meta.tcp_flags)
+                            && sessions.shared_established_for_wire_at(
+                                worker_ctx.shared_sessions,
+                                worker_ctx.shared_forward_wire_sessions,
+                                &flow.forward_key,
+                            )
+                            // #16217 (fold N1): Established evidence
+                            // alone must NOT grant the adopted
+                            // exemption (which Wire28 threads into
+                            // `allow_replace_local`): the shared-wire
+                            // arm folds through the SAME ownership gate
+                            // as arm 3, so a non-owner holding an
+                            // Established shared row cannot adopt (and
+                            // cannot replace a local incumbent).
+                            && crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
+                                worker_ctx.forwarding,
+                                worker_ctx.ha_state,
+                                worker_ctx.forwarding_active_rgs,
+                                now_secs,
+                                sessions,
+                                worker_ctx.shared_sessions,
+                                worker_ctx.shared_forward_wire_sessions,
+                                &worker_ctx.shared_owner_rg_indexes,
+                                &flow.forward_key,
+                                now_ns,
+                            ))
+                        || (fabric_link_ingress
+                            && !crate::tcp_flags::has_syn(meta.tcp_flags)
+                            && crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
+                                worker_ctx.forwarding,
+                                worker_ctx.ha_state,
+                                worker_ctx.forwarding_active_rgs,
+                                now_secs,
+                                sessions,
+                                worker_ctx.shared_sessions,
+                                worker_ctx.shared_forward_wire_sessions,
+                                &worker_ctx.shared_owner_rg_indexes,
+                                &flow.forward_key,
+                                now_ns,
+                            ))
+                });
                 let mut decision = if let Some(flow) = flow.as_ref() {
                     if !owner_syn_reuse
                         && let Some(mut resolved) =
@@ -2678,6 +2765,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 ha_startup_grace_until_secs,
                                 worker_id,
                                 unique_unstamped_fabric_nat_match.take(),
+                                // #16217: adopted/serving flows keep the
+                                // adopted HA-enforcement exemption on every
+                                // subsequent session-hit re-resolve.
+                                session_hit_fabric_adopted,
                             )
                     {
                         // #10597 G5: a queued WireGuard record may only enter
@@ -3659,6 +3750,22 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     .policy_revoked_sessions
                                     .fetch_add(1, Ordering::Relaxed);
                             }
+                            // #16215: a StaleSourceNat revocation was
+                            // previously counted nowhere operator-visible
+                            // (only the debug fold carried ZonePolicy), so
+                            // a failover blackhole caused by first-hit SNAT
+                            // revalidation was invisible in production.
+                            // Count it once per revoked session, like its
+                            // ZonePolicy sibling.
+                            if revocation.reason
+                                == policy_revalidation::PolicyRevocationReason::StaleSourceNat
+                            {
+                                telemetry.dbg.snat_revoked_sessions += 1;
+                                binding
+                                    .live
+                                    .snat_revoked_sessions
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
@@ -4166,6 +4273,134 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
+                        // Fabric-ingress adoption (#16217, FZDiag12):
+                        // the peer that owned the egress RG applied SNAT
+                        // and fabric-redirected this packet, so it
+                        // arrives here SNAT'd (`172.16.80.8:<sport>`) and
+                        // misses the worker-local pre-NAT session lookup.
+                        // The FIB demotes it ClusterTerminalHAInactive,
+                        // both HAInactive->FabricRedirect converters are
+                        // anti-loop gated on fabric ingress, and
+                        // ClusterTerminalHAInactive is not slow-path
+                        // eligible, so it discards forever with no
+                        // session ever installed on the new owner. When
+                        // the fabric LINK carried the packet (physical
+                        // fabric ifindex, not merely a zone stamp) and it
+                        // is not a SYN, adopt an ESTABLISHED session for
+                        // the exact NAT'd wire tuple: resolve through the
+                        // ordinary session-hit path, which materializes
+                        // the worker row from the synced entry and
+                        // re-resolves to a local WAN ForwardCandidate.
+                        // Only a ForwardCandidate outcome is adopted —
+                        // terminal-local, never re-redirected; anything
+                        // else falls through to the ordinary miss
+                        // discard, and a SYN keeps the existing
+                        // punt/seed behavior exactly.
+                        //
+                        // #16217 (FZDiag16): the shared synced maps alone
+                        // miss the heavy split tuples — on this node they
+                        // hold only SyncImport replicas imported from the
+                        // old owner, stuck at w=2 because every evidence
+                        // collector excludes peer-synced rows. This
+                        // node's OWN worker table may hold the completing
+                        // pair as a local serving row (WorkerLocalImport/
+                        // SharedPromote, Established). The gate therefore
+                        // ALSO consults the local table (canonical key
+                        // derived via the forward-wire alias / reverse-NAT
+                        // probe): a local non-reverse serving row that is
+                        // Established qualifies; pending/closing/
+                        // reverse-only never adopt (fail-closed).
+                        //
+                        // #16217 (ha_inactive leg): the gate's proof
+                        // (Established + this node is the forwarding-
+                        // active owner of the egress RG, verified by
+                        // `fabric_adoption_gate_for_wire` against the
+                        // live FIB + HA snapshot) IS the HA-activity
+                        // proof for this packet, so the resolve runs
+                        // with `fabric_adopted = true`: a
+                        // ForwardCandidate it produces must not be
+                        // terminated as HAInactive/
+                        // ClusterTerminalHAInactive by the receiving
+                        // worker's HA enforcement (the last resolution
+                        // the adopted tuples died on live), and
+                        // `fabric_adopted_resolution` re-checks that
+                        // ownership before restoring any candidate.
+                        // Non-adopted resolves keep the fail-closed
+                        // terminal bit-identically.
+                        let adopted = if fabric_link_ingress
+                            && !crate::tcp_flags::has_syn(meta.tcp_flags)
+                            && crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
+                                worker_ctx.forwarding,
+                                worker_ctx.ha_state,
+                                worker_ctx.forwarding_active_rgs,
+                                now_secs,
+                                sessions,
+                                worker_ctx.shared_sessions,
+                                worker_ctx.shared_forward_wire_sessions,
+                                &worker_ctx.shared_owner_rg_indexes,
+                                &flow.forward_key,
+                                now_ns,
+                            )
+                        {
+                            resolve_flow_session_decision_with_conntrack_and_payload(
+                                    sessions,
+                                    binding.bpf_maps.session_map.handle(),
+                                    crate::afxdp::session_glue::SharedSessionRefs {
+                                        sessions: worker_ctx.shared_sessions,
+                                        nat_sessions: worker_ctx.shared_nat_sessions,
+                                        forward_wire_sessions: worker_ctx.shared_forward_wire_sessions,
+                                        owner_rg_indexes: &worker_ctx.shared_owner_rg_indexes,
+                                        peer_worker_commands: worker_ctx.peer_worker_commands,
+                                        worker_commands_by_id: worker_ctx.worker_commands_by_id,
+                                        conntrack: crate::afxdp::session_glue::ConntrackFds { v4: conntrack_v4_fd, v6: conntrack_v6_fd },
+                                        tick: crate::afxdp::session_glue::Tick { ns: now_ns, secs: now_secs },
+                                    },
+                                    worker_ctx.forwarding,
+                                    worker_ctx.ha_state,
+                                    worker_ctx.dynamic_neighbors,
+                                    flow,
+                                    meta.protocol,
+                                    meta.tcp_flags,
+                                    tcp_payload_len(packet_frame, meta),
+                                    meta.ingress_ifindex as i32,
+                                    meta.ingress_vlan_id,
+                                    fabric_ingress_for_session,
+                                    fabric_link_ingress,
+                                    ha_startup_grace_until_secs,
+                                    worker_id,
+                                    None,
+                                    // #16217: the gate above already
+                                    // proved Established + this node is
+                                    // the RG owner post-takeover; the
+                                    // adopted ForwardCandidate must not
+                                    // be terminated as ha_inactive by
+                                    // the receiving worker's HA-activity
+                                    // enforcement.
+                                    true,
+                                )
+                            .filter(|resolved| {
+                                matches!(
+                                    resolved.decision.resolution.disposition,
+                                    ForwardingDisposition::ForwardCandidate
+                                )
+                            })
+                        } else {
+                            None
+                        };
+                        if let Some(resolved) = adopted {
+                            telemetry.counters.session_misses += 1;
+                            telemetry.dbg.session_miss += 1;
+                            // #16217: mark the session fabric-established at
+                            // adoption so every subsequent packet (flow-cache
+                            // hit revalidation and session-hit re-resolve)
+                            // keeps the adopted exemption instead of dying on
+                            // the ha_inactive terminal. Marks the gate's
+                            // local serving row and the row this resolve
+                            // materialized (its resolved key).
+                            sessions.mark_fabric_established_for_wire(&flow.forward_key, now_ns);
+                            sessions.mark_fabric_established_for_wire(&resolved.key, now_ns);
+                            resolved.decision
+                        } else {
                         telemetry.counters.session_misses += 1;
                         telemetry.dbg.session_miss += 1;
                         if !input_filter_denied_before_screens {
@@ -7561,34 +7796,28 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 }
                                             }
                                         }
-                                        let forward_entry = SyncedSessionEntry {
-                                            key: flow.forward_key.clone(),
-                                            decision,
-                                            metadata: forward_metadata,
-                                            source_nat_static,
-                                            leak_incarnation: leak_incarnation.unwrap_or(0),
-                                            origin: SessionOrigin::ForwardFlow,
-                                            protocol: meta.protocol,
-                                            tcp_flags: meta.tcp_flags,
-                                            // Local forward-flow learn (#2170): no peer gen.
-                                            generation: 0,
-                                            // #9582: carry the installer's stable id, so every
-                                            // worker replica ADOPTS it instead of minting one.
-                                            // A replica can then announce a close it alone
-                                            // sees with the same id the Open delta, the mirror
-                                            // row and the #9412 sender memo use (#5212).
-                                            session_id: forward_install_info
-                                                .expect("installed forward session info")
-                                                .session_id,
-                                            tcp_close_class: 0,
-                                            tcp_handshake_state: forward_install_info
-                                                .expect("installed forward session info")
-                                                .handshake_state_wire,
-                                            pptp_call_ids: sessions
-                                                .pptp_call_ids_wire_for(&flow.forward_key),
-                                            rev_packets: sessions
-                                                .rev_packets_wire_for(&flow.forward_key),
-                                        };
+                                        let forward_entry = SyncedSessionEntry { key: flow.forward_key.clone(),
+                                        decision,
+                                        metadata: forward_metadata,
+                                        source_nat_static,
+                                        leak_incarnation: leak_incarnation.unwrap_or(0),
+                                        origin: SessionOrigin::ForwardFlow,
+                                        protocol: meta.protocol,
+                                        tcp_flags: meta.tcp_flags,
+                                        // Local forward-flow learn (#2170): no peer gen.
+                                        generation: 0,
+                                        // #9582: carry the installer's stable id, so every
+                                        // worker replica ADOPTS it instead of minting one.
+                                        // A replica can then announce a close it alone
+                                        // sees with the same id the Open delta, the mirror
+                                        // row and the #9412 sender memo use (#5212).
+                                        session_id: forward_install_info
+                                            .expect("installed forward session info")
+                                            .session_id,
+                                        tcp_close_class: 0, tcp_handshake_state: forward_install_info
+                                            .expect("installed forward session info")
+                                            .handshake_state_wire, rev_packets: sessions.rev_packets_for(&flow.forward_key), fwd_packets: sessions.fwd_packets_for(&flow.forward_key), pptp_call_ids: sessions
+                                        .pptp_call_ids_wire_for(&flow.forward_key), };
                                         // #1789: count failed publishes so
                                         // map-at-capacity / stale-fd
                                         // failures are visible in release
@@ -7968,32 +8197,23 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             }
                                         }
                                         created += 1;
-                                        let reverse_entry = SyncedSessionEntry {
-                                            key: reverse_key,
-                                            decision: reverse_decision,
-                                            metadata: reverse_metadata,
-                                            leak_incarnation: reverse_leak_incarnation.unwrap_or(0),
-                                            origin: SessionOrigin::ReverseFlow,
-                                            protocol: meta.protocol,
-                                            tcp_flags: meta.tcp_flags,
-                                            // Local reverse-flow learn (#2170): no peer gen.
-                                            generation: 0,
-                                            // #5212: a reverse companion never emits
-                                            // RT_FLOW (is_reverse skip) and gets its own
-                                            // fresh id at install — no carried id.
-                                            session_id: 0,
-                                            tcp_close_class: 0,
-                                            tcp_handshake_state: forward_install_info
-                                                .expect("installed forward session info")
-                                                .handshake_state_wire,
-                                            pptp_call_ids: 0,
-                                            // #16019 fold 3: stamp the REVERSE row
-                                            // with the forward entry's rev counter —
-                                            // shared_session_replied reads this row.
-                                            rev_packets: sessions
-                                                .rev_packets_wire_for(&flow.forward_key),
-                                            source_nat_static: None,
-                                        };
+                                        let reverse_entry = SyncedSessionEntry { key: reverse_key,
+                                        decision: reverse_decision,
+                                        metadata: reverse_metadata,
+                                        leak_incarnation: reverse_leak_incarnation.unwrap_or(0),
+                                        origin: SessionOrigin::ReverseFlow,
+                                        protocol: meta.protocol,
+                                        tcp_flags: meta.tcp_flags,
+                                        // Local reverse-flow learn (#2170): no peer gen.
+                                        generation: 0,
+                                        // #5212: a reverse companion never emits
+                                        // RT_FLOW (is_reverse skip) and gets its own
+                                        // fresh id at install — no carried id.
+                                        session_id: 0,
+                                        tcp_close_class: 0, tcp_handshake_state: forward_install_info
+                                            .expect("installed forward session info")
+                                            .handshake_state_wire, rev_packets: sessions.rev_packets_for(&flow.forward_key), fwd_packets: 0, pptp_call_ids: 0,
+                                        source_nat_static: None, };
                                         publish_shared_session(
                                             worker_ctx.shared_sessions,
                                             worker_ctx.shared_nat_sessions,
@@ -8399,6 +8619,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             }
                         }
                         decision
+                        }
                     }
                 } else if let Some(hit) = packet_frame
                     .get(verified_l3_or_stamp(packet_frame, meta.l3_offset, meta.addr_family)..)
@@ -9890,6 +10111,45 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         decision.resolution = redirect;
                     }
                 }
+                // #16216: the DiscardRoute twin of the safety net above.
+                // A cluster-terminal row demoted to DiscardRoute (its
+                // peer-owned attribution missed at lookup time) still
+                // belongs to the peer owner: convert it with the same
+                // zone identity the net above computes, so the frame
+                // crosses the fabric instead of taking the terminal
+                // DiscardRoute arm and seeding a flow-cache deny that
+                // would strand every retransmit. Operator discards carry
+                // no provenance stamp and are untouched.
+                if decision.resolution.disposition == ForwardingDisposition::DiscardRoute
+                    && !fabric_link_ingress
+                    && crate::afxdp::forwarding::discard_route_is_cluster_terminal_peer_owned(
+                        worker_ctx.forwarding,
+                        worker_ctx.ha_state,
+                        now_secs,
+                        &decision.resolution,
+                    )
+                {
+                    let arrival_logical = resolve_ingress_logical_ifindex(
+                        worker_ctx.forwarding,
+                        meta.ingress_ifindex as i32,
+                        meta.ingress_vlan_id,
+                    )
+                    .unwrap_or(meta.ingress_ifindex as i32);
+                    let zone_id = session_ingress_zone.or_else(|| {
+                        worker_ctx
+                            .forwarding
+                            .ifindex_to_zone_id
+                            .get(&arrival_logical)
+                            .copied()
+                    });
+                    if let Some(redirect) = resolve_fabric_redirect_for_ingress_identity(
+                        worker_ctx.forwarding,
+                        zone_id,
+                        fabric_nat_scope_ifindex_for_redirect,
+                    ) {
+                        decision.resolution = redirect;
+                    }
+                }
                 let transit_destination = flow.as_ref().map(|flow| flow.dst_ip).or_else(|| {
                     ForwardPacketMeta::from(meta)
                         .l3_addrs_unfiltered()
@@ -10579,6 +10839,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 now_secs,
                                 admission_to_zone,
                                 apply_nat_on_fabric,
+                                // #16217: adopted/serving flows seed the
+                                // cache with the fabric-established mark so
+                                // hit revalidation keeps serving them.
+                                session_hit_fabric_adopted,
                                 &neighbor_epoch_snapshot,
                                 worker_ctx,
                             );
@@ -12612,29 +12876,24 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         if let Some(c) = source_nat_counter.as_ref() {
                                             c.add(nat_hit_len);
                                         }
-                                        let entry = SyncedSessionEntry {
-                                            key: flow.forward_key.clone(),
-                                            decision: pending_decision,
-                                            metadata: sess_meta,
-                                            source_nat_static,
-                                            leak_incarnation: pending_leak_incarnation.unwrap_or(0),
-                                            origin: SessionOrigin::MissingNeighborSeed,
-                                            protocol: meta.protocol,
-                                            tcp_flags: meta.tcp_flags,
-                                            // Local missing-neighbor seed (#2170): no peer gen.
-                                            generation: 0,
-                                            // #9582: carry the seed's stable id, so replicas
-                                            // adopt it (see the forward-flow publish above).
-                                            session_id: pending_install_info
-                                                .expect("installed neighbor seed info")
-                                                .session_id,
-                                            tcp_close_class: 0,
-                                            tcp_handshake_state: pending_install_info
-                                                .expect("installed neighbor seed info")
-                                                .handshake_state_wire,
-                                            pptp_call_ids: 0,
-                                        rev_packets: 0,
-                                        };
+                                        let entry = SyncedSessionEntry { key: flow.forward_key.clone(),
+                                        decision: pending_decision,
+                                        metadata: sess_meta,
+                                        source_nat_static,
+                                        leak_incarnation: pending_leak_incarnation.unwrap_or(0),
+                                        origin: SessionOrigin::MissingNeighborSeed,
+                                        protocol: meta.protocol,
+                                        tcp_flags: meta.tcp_flags,
+                                        // Local missing-neighbor seed (#2170): no peer gen.
+                                        generation: 0,
+                                        // #9582: carry the seed's stable id, so replicas
+                                        // adopt it (see the forward-flow publish above).
+                                        session_id: pending_install_info
+                                            .expect("installed neighbor seed info")
+                                            .session_id,
+                                        tcp_close_class: 0, tcp_handshake_state: pending_install_info
+                                            .expect("installed neighbor seed info")
+                                            .handshake_state_wire, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, };
                                         publish_shared_session(
                                             worker_ctx.shared_sessions,
                                             worker_ctx.shared_nat_sessions,

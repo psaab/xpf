@@ -32,6 +32,7 @@ fn metadata_classification_accepts_matching_generations() {
         snapshot_installed: true,
         config_generation: 11,
         fib_generation: 7,
+        neighbor_generation: 0,
     };
     assert_eq!(
         classify_metadata(valid_meta(), validation),
@@ -45,6 +46,7 @@ fn metadata_classification_rejects_generation_mismatch() {
         snapshot_installed: true,
         config_generation: 22,
         fib_generation: 9,
+        neighbor_generation: 0,
     };
     assert_eq!(
         classify_metadata(valid_meta(), validation),
@@ -54,6 +56,7 @@ fn metadata_classification_rejects_generation_mismatch() {
         snapshot_installed: true,
         config_generation: 11,
         fib_generation: 9,
+        neighbor_generation: 0,
     };
     assert_eq!(
         classify_metadata(valid_meta(), validation),
@@ -67,6 +70,7 @@ fn metadata_classification_rejects_unknown_address_family() {
         snapshot_installed: true,
         config_generation: 11,
         fib_generation: 7,
+        neighbor_generation: 0,
     };
     let mut meta = valid_meta();
     meta.addr_family = 0;
@@ -140,6 +144,85 @@ fn cached_flow_decision_invalidates_when_owner_rg_is_demoted() {
         None,
         resolution
     ));
+}
+
+/// #16220: production shape from the loss cluster — egress ifindex 14
+/// (ge-0-0-2.80, RG1) whose ForwardingState egress row is missing or
+/// carries redundancy_group 0 while HA rg1 is active. A ForwardCandidate
+/// cached on that egress must NOT be invalidated by
+/// `cached_flow_decision_valid`: with owner RG 0 on a clustered node,
+/// `enforce_ha_resolution_snapshot` rewrites it to HAInactive, so every
+/// cached hit self-evicts (the live 0-hit / decision_invalid=7.1M shape).
+/// Both fixture shapes (missing row, rg=0 row) must reproduce.
+#[test]
+fn cached_forward_candidate_with_unowned_egress_is_invalid_16220() {
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let target = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+
+    for (label, mut state) in [
+        (
+            "missing egress row",
+            build_forwarding_state(&nat_snapshot()),
+        ),
+        ("rg0 egress row", build_forwarding_state(&nat_snapshot())),
+    ] {
+        if label == "rg0 egress row" {
+            // Production: the .80 unit exists but is not RETH-owned.
+            state.egress.insert(
+                14,
+                EgressInterface {
+                    bind_ifindex: 14,
+                    redundancy_group: 0,
+                    ..state.egress.get(&12).cloned().expect("fixture egress 12")
+                },
+            );
+        }
+        let resolution = ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 14,
+            tx_ifindex: 14,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(target),
+            neighbor_mac: Some([0x10, 0x66, 0x6a, 0x8b, 0x91, 0xa4]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x01, 0x00]),
+            tx_vlan_id: 80,
+            source_ifindex: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        };
+        assert_eq!(
+            cached_flow_decision_invalid_reason(
+                &state,
+                &ha_state,
+                &dynamic_neighbors,
+                now_secs,
+                1,
+                false,
+                target,
+                None,
+                resolution,
+            ),
+            Some(CachedDecisionInvalid::EnforceChanged),
+            "{label}: an unowned ForwardCandidate egress on a clustered node must read EnforceChanged (HAInactive rewrite)"
+        );
+        assert!(
+            !cached_flow_decision_valid(
+                &state,
+                &ha_state,
+                &dynamic_neighbors,
+                now_secs,
+                1,
+                false,
+                target,
+                None,
+                resolution,
+            ),
+            "{label}: cached_flow_decision_valid must reject the unowned-egress candidate"
+        );
+    }
 }
 
 /// #13980: a tunnel resolution is HA-gated on BOTH the tunnel endpoint's RG
@@ -302,15 +385,22 @@ fn cached_flow_decision_invalidates_fabric_redirect_on_fabric_ingress_when_local
 }
 
 #[test]
-fn cached_flow_decision_invalidates_fabric_redirect_on_non_fabric_ingress_when_local_owner_active()
+fn cached_flow_decision_keeps_fabric_redirect_on_non_fabric_ingress_when_local_owner_active_16220()
 {
+    // #16220: was `..._invalidates_..._when_local_owner_active`. The
+    // owner-active arm fired on EVERY direct-ingress hit of a redirect
+    // cached under a locally-active owner, so the cache could never
+    // serve it (live: owner_active_redirect = 18,683/19,953 evictions,
+    // 0 hits). A direct hit's cached redirect is the serving decision;
+    // only fabric-ingress hits (packet already crossed to this node)
+    // still re-resolve locally. See the companion reason-level test.
     let state = build_forwarding_state(&nat_snapshot_with_fabric());
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let ha_state = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let resolution = resolve_fabric_redirect(&state).expect("fabric redirect");
 
-    assert!(!cached_flow_decision_valid(
+    assert!(cached_flow_decision_valid(
         &state,
         &ha_state,
         &dynamic_neighbors,
@@ -365,6 +455,356 @@ fn cached_flow_decision_keeps_fabric_redirect_on_non_fabric_ingress_when_local_o
     ));
 }
 
+/// #16220: reason-level pin for the owner-active arm split: direct
+/// ingress -> None (valid), fabric ingress -> OwnerActiveRedirect.
+#[test]
+fn fabric_redirect_owner_active_reason_splits_on_ingress_16220() {
+    let state = build_forwarding_state(&nat_snapshot_with_fabric());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let resolution = resolve_fabric_redirect(&state).expect("fabric redirect");
+    let target = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    assert_eq!(
+        cached_flow_decision_invalid_reason(
+            &state,
+            &ha_state,
+            &dynamic_neighbors,
+            now_secs,
+            1,
+            false,
+            target,
+            None,
+            resolution,
+        ),
+        None,
+        "direct-ingress redirect under an active owner must stay valid"
+    );
+    assert_eq!(
+        cached_flow_decision_invalid_reason(
+            &state,
+            &ha_state,
+            &dynamic_neighbors,
+            now_secs,
+            1,
+            true,
+            target,
+            None,
+            resolution,
+        ),
+        Some(CachedDecisionInvalid::OwnerActiveRedirect),
+        "fabric-ingress redirect whose owner is now local must re-resolve"
+    );
+}
+/// #16222: split-RG fabric-ingress revalidation must judge the cached
+/// redirect against the per-flow session resolution, not the
+/// destination-only lookup. ECMP route 203.0.113.0/24 with two WAN legs
+/// on different RGs: the destination-only hash picks one leg, a
+/// differing per-flow hash picks the other. The cached redirect's stamp
+/// owner is the LAN/ingress RG (2). Pre-fix the fabric-ingress hit
+/// evicted as FabricLocalWins; per-flow revalidation must serve it.
+#[test]
+fn fabric_ingress_redirect_per_flow_revalidation_keeps_split_rg_16222() {
+    let mut snapshot = nat_snapshot_with_fabric();
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "ge-0/0/2".to_string(),
+        zone: "wan".to_string(),
+        linux_name: "ge-0-0-2".to_string(),
+        ifindex: 30,
+        redundancy_group: 3,
+        hardware_addr: "02:bf:72:00:02:30".to_string(),
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".to_string(),
+            address: "192.0.3.1/24".to_string(),
+            scope: 0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-2".to_string(),
+        ifindex: 30,
+        family: "inet".to_string(),
+        ip: "192.0.3.2".to_string(),
+        mac: "00:11:22:33:44:77".to_string(),
+        state: "reachable".to_string(),
+        router: true,
+        link_local: false,
+        ..Default::default()
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-0.80".to_string(),
+        ifindex: 12,
+        family: "inet".to_string(),
+        ip: "192.0.2.2".to_string(),
+        mac: "00:11:22:33:44:88".to_string(),
+        state: "reachable".to_string(),
+        router: true,
+        link_local: false,
+        ..Default::default()
+    });
+    for iface in &mut snapshot.interfaces {
+        if iface.name == "reth0.80" {
+            for addr in &mut iface.addresses {
+                if addr.family == "inet" {
+                    addr.address = "192.0.2.8/24".to_string();
+                }
+            }
+        }
+    }
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        cluster_terminal: false,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "203.0.113.0/24".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec![
+            "192.0.2.2@reth0.80".to_string(),
+            "192.0.3.2@ge-0/0/2".to_string(),
+        ],
+        discard: false,
+        next_table: String::new(),
+        preference: 5,
+        rule_priority: 0,
+        mtu: 0,
+    });
+    let state = build_forwarding_state(&snapshot);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([
+        (1, active_ha_runtime(now_secs)),
+        (2, inactive_ha_runtime(now_secs)),
+        (3, active_ha_runtime(now_secs)),
+    ]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let resolution = resolve_fabric_redirect(&state).expect("fabric redirect");
+    let target = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5));
+    let cached_owner = 2;
+    let dst_only = lookup_forwarding_resolution_with_dynamic(
+        &state,
+        &dynamic_neighbors,
+        target,
+    )
+    .resolution;
+    assert!(
+        matches!(
+            dst_only.disposition,
+            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+        ),
+        "fixture: destination-only must produce a local candidate, got {:?}",
+        dst_only.disposition
+    );
+    let mut differing_key: Option<crate::session::SessionKey> = None;
+    for sport in 40000u16..42000 {
+        let key = crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: 6,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+            dst_ip: target,
+            src_port: sport,
+            dst_port: 5211,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let per_flow = lookup_forwarding_resolution_with_dynamic_for_flow(
+            &state,
+            &dynamic_neighbors,
+            target,
+            &key,
+        )
+        .resolution;
+        if per_flow.egress_ifindex != dst_only.egress_ifindex
+            && matches!(
+                per_flow.disposition,
+                ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+            )
+        {
+            differing_key = Some(key);
+            break;
+        }
+    }
+    let key = differing_key.expect(
+        "fixture must have a flow whose per-flow ECMP leg differs from destination-only",
+    );
+    // The destination-only entry point now also retains a fabric-ingress
+    // different-owner redirect (the non-supersession half of the fix).
+    assert_eq!(
+        cached_flow_decision_invalid_reason(
+            &state,
+            &ha_state,
+            &dynamic_neighbors,
+            now_secs,
+            cached_owner,
+            true,
+            target,
+            None,
+            resolution,
+        ),
+        None,
+        "fabric-ingress different-owner redirect must be retained"
+    );
+    assert_eq!(
+        cached_flow_decision_invalid_reason_for_flow(
+            &state,
+            &ha_state,
+            &dynamic_neighbors,
+            now_secs,
+            cached_owner,
+            true,
+            false,
+            Some(&key),
+            target,
+            None,
+            resolution,
+        ),
+        None,
+        "per-flow fabric-ingress revalidation must keep the split-RG redirect"
+    );
+}
+
+/// #16222: even when per-flow and destination-only agree on a local
+/// candidate owned by a different RG than the cached stamp, a
+/// fabric-ingress redirect must not be evicted as different-owner
+/// FabricLocalWins — the stamp names the ingress/LAN leg, the candidate
+/// the WAN egress leg. Same-owner fabric ingress (failback) still evicts.
+#[test]
+fn fabric_ingress_different_owner_does_not_evict_16222() {
+    let state = build_forwarding_state(&nat_snapshot_with_fabric());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([
+        (1, active_ha_runtime(now_secs)),
+        (2, inactive_ha_runtime(now_secs)),
+    ]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let resolution = resolve_fabric_redirect(&state).expect("fabric redirect");
+    let target = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    let key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        dst_ip: target,
+        src_port: 52490,
+        dst_port: 5211,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    // Local candidate egresses reth0.80/RG1 (active); cached stamp owner RG2.
+    assert_eq!(
+        cached_flow_decision_invalid_reason_for_flow(
+            &state,
+            &ha_state,
+            &dynamic_neighbors,
+            now_secs,
+            2,
+            true,
+            false,
+            Some(&key),
+            target,
+            None,
+            resolution,
+        ),
+        None,
+        "fabric-ingress different-owner must not evict the split-RG redirect"
+    );
+    // Control: same-owner (RG1 stamp, RG1 now active) on fabric ingress
+    // still re-resolves locally via OwnerActiveRedirect.
+    assert_eq!(
+        cached_flow_decision_invalid_reason_for_flow(
+            &state,
+            &ha_state,
+            &dynamic_neighbors,
+            now_secs,
+            1,
+            true,
+            false,
+            Some(&key),
+            target,
+            None,
+            resolution,
+        ),
+        Some(CachedDecisionInvalid::OwnerActiveRedirect),
+        "same-owner fabric ingress must still fail back to local forwarding"
+    );
+}
+
+/// #16222 round 2 (option B): the fw0 evicting shape is a DIRECT member
+/// ingress (not fabric ingress): a locally-seeded FabricRedirect stamp
+/// whose owner (RG2, the LAN leg) differs from the WAN egress RG1, served
+/// on LAN/WAN members with both fabric flags false. Round 1 only retained
+/// the redirect on fabric ingress, so this shape still evicted per packet.
+/// Option B: a different-owner local candidate supersedes ONLY if it
+/// serves the flow locally (per-flow resolution is ForwardCandidate with
+/// a locally-active egress RG). Here RG1 IS locally active, so a candidate
+/// that genuinely egresses locally on RG1 would serve — but the cached
+/// redirect's own stored resolution is FabricRedirect (egress = fabric
+/// parent), so the per-flow session resolution for this flow is the
+/// redirect, not a local candidate: the second packet must be served.
+#[test]
+fn direct_member_fabric_redirect_owner_mismatch_kept_16222() {
+    let state = build_forwarding_state(&nat_snapshot_with_fabric());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    // fw0 posture: RG1 (WAN) active locally, RG2 (LAN) peer-owned.
+    let ha_state = BTreeMap::from([
+        (1, active_ha_runtime(now_secs)),
+        (2, inactive_ha_runtime(now_secs)),
+    ]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let resolution = resolve_fabric_redirect(&state).expect("fabric redirect");
+    let target = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    let key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        dst_ip: target,
+        src_port: 52490,
+        dst_port: 5211,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    // Direct member ingress, stamp owner RG2 != WAN RG1: the round-1
+    // fabric-ingress retention does not apply, yet the redirect must be
+    // judged against its stored context and kept when the different-owner
+    // candidate does not supersede it under option B's local-serving test
+    // as exercised through the stored redirect resolution.
+    assert_eq!(
+        cached_flow_decision_invalid_reason_for_flow(
+            &state,
+            &ha_state,
+            &dynamic_neighbors,
+            now_secs,
+            2,
+            false,
+            false,
+            Some(&key),
+            target,
+            None,
+            resolution,
+        ),
+        None,
+        "direct-member FabricRedirect with owner mismatch must not evict per-packet (fw0 shape)"
+    );
+    // Control: same-owner stamp (RG1) on direct ingress with RG1 active
+    // retains via the #16220 same-owner rule (still None), and on fabric
+    // ingress same-owner still fails back via OwnerActiveRedirect.
+    assert_eq!(
+        cached_flow_decision_invalid_reason_for_flow(
+            &state,
+            &ha_state,
+            &dynamic_neighbors,
+            now_secs,
+            1,
+            true,
+            false,
+            Some(&key),
+            target,
+            None,
+            resolution,
+        ),
+        Some(CachedDecisionInvalid::OwnerActiveRedirect),
+        "same-owner fabric ingress must still fail back"
+    );
+}
+
 #[test]
 fn cached_local_delivery_decision_invalidates_when_owner_rg_is_demoted() {
     let state = build_forwarding_state(&nat_snapshot());
@@ -398,6 +838,161 @@ fn cached_local_delivery_decision_invalidates_when_owner_rg_is_demoted() {
         None,
         resolution
     ));
+}
+
+/// #16270 (cache supersession): the aged-failover shape — a cached
+/// ForwardCandidate egressing reth0.80 (ifindex 12, RG1) seeded while
+/// RG1 was locally active, then RG1 leaves this node (failover to the
+/// peer). The next hit must NOT serve locally: it supersedes
+/// (EnforceChanged where the egress row is present for enforce to
+/// demote, ForwardCandidateEgressDeparted where enforce compares
+/// equal — the live fw0 shape) so the hit path evicts and the slow
+/// path re-resolves (HA demotion + fabric redirect to the new owner).
+/// Controls pin the guard: RG1 still locally active -> valid
+/// (bit-identical); RG1 absent from the HA map (peer-owned by
+/// omission) -> also superseded; standalone (empty HA map) -> valid.
+/// RED-on-revert: drop the ForwardCandidateEgressDeparted arm AND
+/// the enforce demotion and the departed cases read None (served
+/// locally forever — the blackhole); with the arm alone reverted,
+/// the stage test's arm-sum still passes via EnforceChanged, which
+/// is why the arm exists for the enforce-equal live shape rather
+/// than as the sole supersession path.
+#[test]
+fn cached_forward_candidate_egress_rg_departed_supersedes_16270() {
+    let state = build_forwarding_state(&nat_snapshot());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let target = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    // Fresh resolution egresses reth0.80/12 (RG1) as ForwardCandidate.
+    let resolution =
+        lookup_forwarding_resolution(&state, target).resolution;
+    assert_eq!(
+        resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "fixture: target must resolve to a local ForwardCandidate"
+    );
+    assert_eq!(
+        owner_rg_for_resolution(&state, resolution),
+        1,
+        "fixture: egress reth0.80 must be owned by RG1"
+    );
+    let active = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
+    let departed = BTreeMap::from([(1, inactive_ha_runtime(now_secs))]);
+    let absent: BTreeMap<i32, HAGroupRuntime> = BTreeMap::new();
+    // Control: egress RG still locally forwarding-active -> unchanged.
+    assert_eq!(
+        cached_flow_decision_invalid_reason(
+            &state,
+            &active,
+            &dynamic_neighbors,
+            now_secs,
+            1,
+            false,
+            target,
+            None,
+            resolution,
+        ),
+        None,
+        "locally-active egress RG must keep the cached ForwardCandidate"
+    );
+    // Departed: RG1 inactive locally (failed over to the peer). On this
+    // fixture the egress row is present, so the pre-existing
+    // EnforceChanged arm fires first (enforce demotes to HAInactive) —
+    // the entry is superseded either way; the dedicated arm below owns
+    // the shapes where enforce compares equal (the live fw0 shape).
+    let departed_reason = cached_flow_decision_invalid_reason(
+        &state,
+        &departed,
+        &dynamic_neighbors,
+        now_secs,
+        1,
+        false,
+        target,
+        None,
+        resolution,
+    );
+    assert!(
+        matches!(
+            departed_reason,
+            Some(CachedDecisionInvalid::EnforceChanged)
+                | Some(CachedDecisionInvalid::ForwardCandidateEgressDeparted)
+        ),
+        "cached ForwardCandidate whose egress RG left must supersede to slow-path re-resolve, got {departed_reason:?}"
+    );
+    // Absent RG (clustered node, RG not in the map) also supersedes:
+    // a non-empty map with another RG proves this is not the standalone arm.
+    let absent_rg1 = BTreeMap::from([(2, active_ha_runtime(now_secs))]);
+    let absent_reason = cached_flow_decision_invalid_reason(
+        &state,
+        &absent_rg1,
+        &dynamic_neighbors,
+        now_secs,
+        1,
+        false,
+        target,
+        None,
+        resolution,
+    );
+    assert!(
+        matches!(
+            absent_reason,
+            Some(CachedDecisionInvalid::EnforceChanged)
+                | Some(CachedDecisionInvalid::ForwardCandidateEgressDeparted)
+        ),
+        "egress RG absent from a clustered HA map must supersede, got {absent_reason:?}"
+    );
+    // Standalone guard for the NEW arm: an empty HA map must never
+    // read ForwardCandidateEgressDeparted (every known RG would
+    // otherwise read as "absent" and fire). This fixture's clustered
+    // shape is still superseded by the pre-existing EnforceChanged
+    // arm (absent RG -> HAInactive), which is not the new arm — pin
+    // exactly that distinction.
+    assert_eq!(
+        cached_flow_decision_invalid_reason(
+            &state,
+            &absent,
+            &dynamic_neighbors,
+            now_secs,
+            1,
+            false,
+            target,
+            None,
+            resolution,
+        ),
+        Some(CachedDecisionInvalid::EnforceChanged),
+        "standalone read must never be the new ForwardCandidateEgressDeparted arm"
+    );
+    // The per-flow production entry point agrees on the departed case.
+    let key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        dst_ip: target,
+        src_port: 46248,
+        dst_port: 5211,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    assert!(
+        matches!(
+            cached_flow_decision_invalid_reason_for_flow(
+                &state,
+                &departed,
+                &dynamic_neighbors,
+                now_secs,
+                1,
+                false,
+                false,
+                Some(&key),
+                target,
+                None,
+                resolution,
+            ),
+            Some(CachedDecisionInvalid::EnforceChanged)
+                | Some(CachedDecisionInvalid::ForwardCandidateEgressDeparted)
+        ),
+        "per-flow hit path must supersede the departed ForwardCandidate"
+    );
 }
 
 #[test]
@@ -456,7 +1051,7 @@ fn split_rg_cluster_reject_does_not_shadow_forwarding_default_15742() {
     }
     snapshot.routes.push(RouteSnapshot {
         reject: true,
-            cluster_terminal: false,
+        cluster_terminal: false,
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "0.0.0.0/0".to_string(),
@@ -470,7 +1065,7 @@ fn split_rg_cluster_reject_does_not_shadow_forwarding_default_15742() {
     });
     snapshot.routes.push(RouteSnapshot {
         reject: true,
-            cluster_terminal: false,
+        cluster_terminal: false,
         table: "inet6.0".to_string(),
         family: "inet6".to_string(),
         destination: "::/0".to_string(),
@@ -685,6 +1280,122 @@ fn split_rg_cluster_discard_demotes_to_fabric_redirect_15742() {
     }
 }
 
+/// #16216: the demoted DiscardRoute must keep its cluster-terminal
+/// provenance and be rescuable by the fabric converters even when the
+/// peer-owned attribution is only available at conversion time. The
+/// pre-fix demotion zeroed `source_ifindex`, so the stranded row was
+/// indistinguishable from an operator discard and every retransmit
+/// dropped on the split node.
+///
+/// RED-on-revert: zeroing `source_ifindex` in the demotion (or dropping
+/// the DiscardRoute arm from the converters) makes the rescued cell
+/// resolve DiscardRoute; the operator control (no stamp) must stay a
+/// drop, and a fabric-ingress packet must never re-redirect.
+#[test]
+fn demoted_cluster_terminal_discard_route_rescues_via_fabric_16216() {
+    let mut snapshot = nat_snapshot_with_fabric();
+    for route in &mut snapshot.routes {
+        route.preference = 5;
+    }
+    for route in &mut snapshot.routes {
+        for nh in &mut route.next_hops {
+            if nh.starts_with("172.16.80.1") {
+                *nh = "172.16.80.1".to_string();
+            }
+        }
+    }
+    for iface in &mut snapshot.interfaces {
+        if iface.name == "reth0.80" {
+            iface.connected_rg_peer_owned = true;
+        }
+    }
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        cluster_terminal: true,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "0.0.0.0/0".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec![],
+        discard: true,
+        next_table: String::new(),
+        preference: 200,
+        rule_priority: 0,
+        mtu: 0,
+    });
+    let state = build_forwarding_state(&snapshot);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let inactive_map = BTreeMap::from([(1, inactive_ha_runtime(now_secs))]);
+    let active_map = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
+    let dst = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+
+    let raw = lookup_forwarding_resolution(&state, dst).resolution;
+    assert_eq!(
+        raw.disposition,
+        ForwardingDisposition::ClusterTerminalHAInactive,
+        "fixture must surface the cluster terminal, got {:?}",
+        raw.disposition
+    );
+    assert!(
+        raw.source_ifindex > 0,
+        "the FIB must stamp the would-be egress, got {}",
+        raw.source_ifindex
+    );
+
+    // Locally-owned at demotion time: demotes to DiscardRoute, and the
+    // demotion must PRESERVE the provenance stamp.
+    let demoted = enforce_ha_resolution_snapshot(&state, &active_map, now_secs, raw);
+    assert_eq!(demoted.disposition, ForwardingDisposition::DiscardRoute);
+    assert_eq!(
+        demoted.source_ifindex, raw.source_ifindex,
+        "the demotion must preserve cluster-terminal provenance (#16216)"
+    );
+    assert!(discard_route_is_cluster_terminal_peer_owned(
+        &state,
+        &inactive_map,
+        now_secs,
+        &demoted
+    ));
+    assert!(!discard_route_is_cluster_terminal_peer_owned(
+        &state,
+        &active_map,
+        now_secs,
+        &demoted
+    ));
+
+    // Rescued at conversion time (peer-owned now): fabric redirect.
+    let rescued =
+        redirect_via_fabric_if_needed_at(&state, &inactive_map, now_secs, demoted, 24, None);
+    assert_eq!(
+        rescued.disposition,
+        ForwardingDisposition::FabricRedirect,
+        "a peer-owned demoted cluster-terminal DiscardRoute must cross the fabric, got {:?}",
+        rescued.disposition
+    );
+    // Fabric ingress never re-redirects.
+    let fabric_ifindex = state.fabrics[0].parent_ifindex;
+    let not_rescued = redirect_via_fabric_if_needed_at(
+        &state,
+        &inactive_map,
+        now_secs,
+        demoted,
+        fabric_ifindex,
+        None,
+    );
+    assert_eq!(not_rescued.disposition, ForwardingDisposition::DiscardRoute);
+
+    // Operator discard (no provenance stamp) never rescues.
+    let mut operator = demoted;
+    operator.source_ifindex = 0;
+    let operator_out =
+        redirect_via_fabric_if_needed_at(&state, &inactive_map, now_secs, operator, 24, None);
+    assert_eq!(
+        operator_out.disposition,
+        ForwardingDisposition::DiscardRoute,
+        "an operator discard must stay a drop"
+    );
+}
+
 /// #15742 live shape: the WAN interface itself carries the connected
 /// 172.16.80.0/24 and 2001:559:8585:80::/64 prefixes, and the probe targets
 /// (172.16.80.200, 2001:559:8585:80::200) are inside them. Go marks the
@@ -699,7 +1410,7 @@ fn split_rg_connected_wan_prefix_does_not_shadow_default_15742() {
     }
     snapshot.routes.push(RouteSnapshot {
         reject: true,
-            cluster_terminal: false,
+        cluster_terminal: false,
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "0.0.0.0/0".to_string(),
@@ -713,7 +1424,7 @@ fn split_rg_connected_wan_prefix_does_not_shadow_default_15742() {
     });
     snapshot.routes.push(RouteSnapshot {
         reject: true,
-            cluster_terminal: false,
+        cluster_terminal: false,
         table: "inet6.0".to_string(),
         family: "inet6".to_string(),
         destination: "::/0".to_string(),
@@ -774,7 +1485,9 @@ fn split_rg_connected_wan_prefix_does_not_shadow_default_15742() {
     // either local map proves local-delivery state was preserved.
     assert!(
         state.local_v4.contains(&Ipv4Addr::new(172, 16, 80, 8))
-            || state.interface_nat_v4.contains_key(&Ipv4Addr::new(172, 16, 80, 8))
+            || state
+                .interface_nat_v4
+                .contains_key(&Ipv4Addr::new(172, 16, 80, 8))
     );
     assert!(state.connected_v4_by_ifindex.contains_key(&12));
 
@@ -1427,6 +2140,224 @@ fn zone_encoded_fabric_stamp_honored_for_multi_rg_zone_split_6458() {
             ifindex: None
         },
         "multi-RG zone with every RG locally active must be ambiguous (#15916)"
+    );
+}
+
+/// #16109: a changed manager-neighbor set advances the helper-LOCAL
+/// neighbor generation (NOT the Go-owned FIB generation — advancing
+/// that desyncs the shim stamp and every packet reads
+/// generation-mismatched), so a session stamped MissingNeighbor goes
+/// stale and its next hit re-resolves — to ForwardCandidate once the
+/// neighbor is in force. A same-content re-push must NOT move it.
+///
+/// RED-on-revert: reverting the advance leaves the neighbor component
+/// flat and the MissingNeighbor-era stamp never reads stale.
+#[test]
+fn neighbor_change_advances_neighbor_generation_and_reresolves_16109() {
+    // Route-side fixture: connected 172.16.80.0/24 on ifindex 13 (the
+    // ecmp_session_flow harness shape), so the re-resolve has a route
+    // whose only missing input is the neighbor.
+    let mut snapshot = ecmp_dual_enumeration_snapshot_11686(13, 15, false);
+    snapshot.routes = vec![crate::RouteSnapshot {
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "172.16.80.0/24".to_string(),
+        next_hops: vec!["@ge-0/0/1".to_string()],
+        ..Default::default()
+    }];
+    let mut coordinator = Coordinator::new();
+    coordinator
+        .refresh_runtime_snapshot(&snapshot)
+        .expect("baseline snapshot");
+    let state = build_forwarding_state(&snapshot);
+    let target = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let flow = SessionFlow {
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        dst_ip: target,
+        forward_key: crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+            dst_ip: target,
+            src_port: 51544,
+            dst_port: 5211,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+    };
+    let decision = SessionDecision {
+        resolution: no_route_resolution(None),
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    // Baseline: neighbor absent -> MissingNeighbor.
+    let before =
+        lookup_forwarding_resolution_for_session(&state, &dynamic_neighbors, &flow, decision)
+            .resolution;
+    assert_eq!(
+        before.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "without the neighbor the connected target must be MissingNeighbor"
+    );
+    let stamp_before = coordinator.published_validation();
+    // The baseline snapshot itself carries neighbors (empty -> set),
+    // so the snapshot arm has already advanced the component once.
+    // Capture it as the baseline; the manager push below must advance
+    // exactly once more. (Asserting 0 here contradicted the snapshot
+    // arm's own empty->set advance.)
+    // The neighbor lands through the manager push (the RG-activation
+    // recovery path on the new owner).
+    assert!(coordinator.apply_manager_neighbors(
+        true,
+        41,
+        &[(
+            13,
+            target,
+            NeighborEntry {
+                mac: [0x10, 0x66, 0x6a, 0x8b, 0x91, 0xa4],
+            },
+        )],
+    ));
+    let stamp_after = coordinator.published_validation();
+    // The Go-owned FIB generation must NOT move (desync hazard); the
+    // helper-local neighbor component must.
+    assert_eq!(
+        stamp_after.fib_generation, stamp_before.fib_generation,
+        "a neighbor change must NOT advance the Go-owned FIB generation"
+    );
+    assert_eq!(
+        stamp_after.neighbor_generation,
+        stamp_before.neighbor_generation + 1,
+        "a changed neighbor set must advance the helper-local neighbor generation"
+    );
+    // The session-stamp consequence: the MissingNeighbor-era stamp
+    // (neighbor component still 0) reads stale under the new one.
+    let mut sessions = crate::session::SessionTable::new();
+    sessions.set_forwarding_revalidation_gen_with_neighbor(
+        7,
+        stamp_after.fib_generation,
+        stamp_after.neighbor_generation,
+    );
+    assert!(
+        sessions.forwarding_resolution_is_stale(crate::session::ForwardingGenerationStamp {
+            config_generation: 7,
+            fib_generation: stamp_after.fib_generation,
+            neighbor_generation: stamp_before.neighbor_generation,
+            valid: true,
+        }),
+        "the MissingNeighbor-era stamp must read stale after the neighbor advance"
+    );
+    // And the re-resolve itself: neighbor in force -> ForwardCandidate.
+    let after_state = coordinator.forwarding.clone();
+    let after =
+        lookup_forwarding_resolution_for_session(&after_state, &dynamic_neighbors, &flow, decision)
+            .resolution;
+    assert_eq!(
+        after.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "with the neighbor in force the target must forward"
+    );
+    // Same-content re-push: neither component moves.
+    let stamp_now = coordinator.published_validation();
+    assert!(coordinator.apply_manager_neighbors(
+        true,
+        42,
+        &[(
+            13,
+            target,
+            NeighborEntry {
+                mac: [0x10, 0x66, 0x6a, 0x8b, 0x91, 0xa4],
+            },
+        )],
+    ));
+    assert_eq!(
+        coordinator.published_validation(),
+        stamp_now,
+        "a same-content neighbor re-push must not move either generation"
+    );
+}
+
+/// #16109 (snapshot arm): an apply_snapshot whose effective neighbor
+/// set differs from the retained one advances the helper-LOCAL
+/// neighbor generation (never the snapshot's FIB generation — that is
+/// Go-owned) — the RG-activation recovery shape (neighbors collapse,
+/// then return via apply_snapshot). Repeated identical applies must
+/// not move either component.
+///
+/// RED-on-revert: without the advance, the neighbor component stays
+/// flat and the MissingNeighbor-era stamps never go stale.
+#[test]
+fn snapshot_neighbor_change_advances_neighbor_generation_16109() {
+    let target = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+    let neigh = |mac: &str| crate::ConfigSnapshot {
+        neighbors: vec![NeighborSnapshot {
+            interface: "ge-0-0-2".to_string(),
+            ifindex: 13,
+            family: "inet".to_string(),
+            ip: target.to_string(),
+            mac: mac.to_string(),
+            state: "reachable".to_string(),
+            ..Default::default()
+        }],
+        fib_generation: 3,
+        ..Default::default()
+    };
+    let mut coordinator = Coordinator::new();
+    coordinator
+        .refresh_runtime_snapshot(&neigh("00:11:22:33:44:55"))
+        .expect("first apply");
+    // The build filters snapshot neighbor rows by MAC-solicitation
+    // provenance (an unconfirmed changed MAC is refused, prior kept),
+    // so the change control uses a different KEY-set, not a moved MAC.
+    // Apply #1: empty -> singleton (a change; neighbor component
+    // advances past 0, FIB stays at the snapshot's 3).
+    let first = coordinator.published_validation();
+    assert_eq!(
+        first.fib_generation, 3,
+        "the FIB generation must stay Go-owned (snapshot verbatim)"
+    );
+    assert!(
+        first.neighbor_generation > 0,
+        "the first apply (empty -> singleton) must advance the neighbor component"
+    );
+    // Repeated IDENTICAL applies must NEVER move either component:
+    // the refresh path rebuilds the static neighbor table from the
+    // snapshot alone (manager rows rotate into the dynamic map), so
+    // a static-vs-static diff reads empty->set on every apply. The
+    // diff is over the effective union (static ∪ manager dynamic).
+    coordinator
+        .refresh_runtime_snapshot(&neigh("00:11:22:33:44:55"))
+        .expect("same-set apply");
+    assert_eq!(
+        coordinator.published_validation(),
+        first,
+        "a repeated identical snapshot apply must not move either generation"
+    );
+    coordinator
+        .refresh_runtime_snapshot(&neigh("00:11:22:33:44:55"))
+        .expect("third identical apply");
+    assert_eq!(
+        coordinator.published_validation(),
+        first,
+        "a third identical apply must still not move either generation"
+    );
+    // A REAL change (set emptied) advances the neighbor component.
+    coordinator
+        .refresh_runtime_snapshot(&crate::ConfigSnapshot {
+            fib_generation: 3,
+            ..Default::default()
+        })
+        .expect("emptied-set apply");
+    assert!(
+        coordinator.published_validation().neighbor_generation > first.neighbor_generation,
+        "an emptied neighbor set must advance the neighbor component"
+    );
+    assert_eq!(
+        coordinator.published_validation().fib_generation,
+        3,
+        "the FIB generation must still be the snapshot's verbatim value"
     );
 }
 
@@ -3792,7 +4723,9 @@ fn helper_local_session_on_miss_stays_out_of_shared_alias_maps() {
     // #15950 contract: LocalMiss itself is published for cross-worker
     // FragAssoc liveness; transient seeds are not (see seed test below).
     let shared = shared_sessions.lock().expect("shared lock");
-    let published = shared.get(&key).expect("LocalMiss row must be in shared_sessions");
+    let published = shared
+        .get(&key)
+        .expect("LocalMiss row must be in shared_sessions");
     assert_eq!(published.origin, SessionOrigin::LocalMiss);
     assert_eq!(published.session_id, sessions.session_id_for(&key));
     drop(shared);
@@ -3855,23 +4788,18 @@ fn helper_local_session_on_miss_clears_stale_shared_aliases() {
         policy_counter: None,
         nat_scope_ifindex: None,
     };
-    let entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata: metadata.clone(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: metadata.clone(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
 
     // Install with SyncImport origin so take_synced_local recognizes
     // this as a peer-synced session.
@@ -3910,7 +4838,9 @@ fn helper_local_session_on_miss_clears_stale_shared_aliases() {
         false,
     ));
     let shared = shared_sessions.lock().expect("shared lock");
-    let published = shared.get(&key).expect("LocalMiss replacement must publish its row");
+    let published = shared
+        .get(&key)
+        .expect("LocalMiss replacement must publish its row");
     assert_eq!(published.origin, SessionOrigin::LocalMiss);
     drop(shared);
     assert!(
@@ -5032,7 +5962,7 @@ fn forwarding_resolution_falls_through_cross_table_rule_misses() {
         routes: vec![
             crate::RouteSnapshot {
                 reject: false,
-            cluster_terminal: false,
+                cluster_terminal: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "0.0.0.0/0".to_string(),
@@ -5046,7 +5976,7 @@ fn forwarding_resolution_falls_through_cross_table_rule_misses() {
             },
             crate::RouteSnapshot {
                 reject: false,
-            cluster_terminal: false,
+                cluster_terminal: false,
                 table: "red.inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "0.0.0.0/0".to_string(),
@@ -6610,7 +7540,7 @@ fn ecmp_down_interface_only_member_does_not_share_gateway_hashes_11404() {
         routes: vec![
             crate::RouteSnapshot {
                 reject: false,
-            cluster_terminal: false,
+                cluster_terminal: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "203.0.113.0/24".to_string(),
@@ -6624,7 +7554,7 @@ fn ecmp_down_interface_only_member_does_not_share_gateway_hashes_11404() {
             },
             crate::RouteSnapshot {
                 reject: false,
-            cluster_terminal: false,
+                cluster_terminal: false,
                 table: "inet6.0".to_string(),
                 family: "inet6".to_string(),
                 destination: "2001:db8:3::/64".to_string(),
@@ -6761,7 +7691,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths() {
     // One sfmix.inet.0 ECMP prefix with a mixed direct + tunnel next-hop set.
     snapshot.routes.push(crate::RouteSnapshot {
         reject: false,
-            cluster_terminal: false,
+        cluster_terminal: false,
         table: "sfmix.inet.0".to_string(),
         family: "inet".to_string(),
         destination: "203.0.113.0/24".to_string(),
@@ -6980,7 +7910,7 @@ fn ecmp_mixed_with_noroute_underlay_tunnel_uses_only_live_direct_hop() {
     });
     snapshot.routes.push(crate::RouteSnapshot {
         reject: false,
-            cluster_terminal: false,
+        cluster_terminal: false,
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "203.0.113.0/24".to_string(),
@@ -7075,7 +8005,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths_v6() {
     // (Disjoint from the GRE outer prefix 2602:ffd3:0:2::/64.)
     snapshot.routes.push(crate::RouteSnapshot {
         reject: false,
-            cluster_terminal: false,
+        cluster_terminal: false,
         table: "sfmix.inet6.0".to_string(),
         family: "inet6".to_string(),
         destination: "2001:db8:dead::/48".to_string(),
@@ -7567,7 +8497,7 @@ fn ecmp_dual_enumeration_snapshot_11686(
         routes: vec![
             crate::RouteSnapshot {
                 reject: false,
-            cluster_terminal: false,
+                cluster_terminal: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "203.0.113.0/24".to_string(),
@@ -7584,7 +8514,7 @@ fn ecmp_dual_enumeration_snapshot_11686(
             },
             crate::RouteSnapshot {
                 reject: false,
-            cluster_terminal: false,
+                cluster_terminal: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "198.51.100.0/24".to_string(),
@@ -7598,7 +8528,7 @@ fn ecmp_dual_enumeration_snapshot_11686(
             },
             crate::RouteSnapshot {
                 reject: false,
-            cluster_terminal: false,
+                cluster_terminal: false,
                 table: "inet6.0".to_string(),
                 family: "inet6".to_string(),
                 destination: "2001:db8:dead::/48".to_string(),
@@ -7897,7 +8827,7 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
             // WORSE route first (higher preference = less preferred).
             crate::RouteSnapshot {
                 reject: false,
-            cluster_terminal: false,
+                cluster_terminal: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "203.0.113.0/24".to_string(),
@@ -7912,7 +8842,7 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
             // BETTER route second (lower preference).
             crate::RouteSnapshot {
                 reject: false,
-            cluster_terminal: false,
+                cluster_terminal: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "203.0.113.0/24".to_string(),
@@ -11773,19 +12703,47 @@ fn terminal_attribution_equal_prefix_tie_lowest_ifindex_15917() {
 fn peer_owned_vip_local_delivery_gets_ifindex_15950() {
     let mut snapshot = nat_snapshot();
     for iface in &mut snapshot.interfaces {
-        if iface.name == "reth1.0" { iface.connected_rg_peer_owned = true; }
+        if iface.name == "reth1.0" {
+            iface.connected_rg_peer_owned = true;
+        }
     }
     let state = build_forwarding_state(&snapshot);
-    assert!(state.connected_v4.iter().all(|e| e.host != Ipv4Addr::new(10,0,61,1)));
-    let res = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(10,0,61,1))).resolution;
-    assert_eq!(res.disposition, ForwardingDisposition::LocalDelivery, "got {res:?}");
-    assert_eq!(res.local_ifindex, 24, "peer-owned VIP must attribute to its interface, not 0");
-    let now_secs = monotonic_nanos()/1_000_000_000;
-    let ha = Arc::new(ArcSwap::from_pointee(BTreeMap::from([(2, inactive_ha_runtime(now_secs)), (1, active_ha_runtime(now_secs))])));
+    assert!(
+        state
+            .connected_v4
+            .iter()
+            .all(|e| e.host != Ipv4Addr::new(10, 0, 61, 1))
+    );
+    let res =
+        lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1))).resolution;
+    assert_eq!(
+        res.disposition,
+        ForwardingDisposition::LocalDelivery,
+        "got {res:?}"
+    );
+    assert_eq!(
+        res.local_ifindex, 24,
+        "peer-owned VIP must attribute to its interface, not 0"
+    );
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha = Arc::new(ArcSwap::from_pointee(BTreeMap::from([
+        (2, inactive_ha_runtime(now_secs)),
+        (1, active_ha_runtime(now_secs)),
+    ])));
     let enforced = enforce_ha_resolution(&state, &ha, res);
-    assert_ne!(enforced.disposition, ForwardingDisposition::LocalDelivery, "peer-owned local delivery must be HA-gated, got {enforced:?}");
-    let res6 = lookup_forwarding_resolution(&state, IpAddr::V6("2001:559:8585:ef00::1".parse().unwrap())).resolution;
-    assert_eq!(res6.disposition, ForwardingDisposition::LocalDelivery, "got {res6:?}");
+    assert_ne!(
+        enforced.disposition,
+        ForwardingDisposition::LocalDelivery,
+        "peer-owned local delivery must be HA-gated, got {enforced:?}"
+    );
+    let res6 =
+        lookup_forwarding_resolution(&state, IpAddr::V6("2001:559:8585:ef00::1".parse().unwrap()))
+            .resolution;
+    assert_eq!(
+        res6.disposition,
+        ForwardingDisposition::LocalDelivery,
+        "got {res6:?}"
+    );
     assert_eq!(res6.local_ifindex, 24);
     assert!(state.connected_v4.iter().all(|e| e.ifindex != 24));
 }
@@ -11799,18 +12757,36 @@ fn local_miss_publishes_to_shared_15950() {
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     let state = build_forwarding_state(&nat_snapshot());
-    let key = SessionKey { addr_family: libc::AF_INET as u8, protocol: PROTO_TCP, src_ip: "172.16.80.8".parse().unwrap(), dst_ip: "172.16.80.200".parse().unwrap(), src_port: 40278, dst_port: 5201, discriminator: Default::default(), routing_domain: 0 };
-    let decision = SessionDecision { resolution: ingress_interface_local_resolution_on_session_miss(&state, 11, 80, key.src_ip, PROTO_TCP).expect("local"), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: "172.16.80.8".parse().unwrap(),
+        dst_ip: "172.16.80.200".parse().unwrap(),
+        src_port: 40278,
+        dst_port: 5201,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let decision = SessionDecision {
+        resolution: ingress_interface_local_resolution_on_session_miss(
+            &state, 11, 80, key.src_ip, PROTO_TCP,
+        )
+        .expect("local"),
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     // ingress helper may return wan iface resolution; use generic metadata
     let metadata = SessionMetadata { ingress_zone: TEST_LAN_ZONE_ID, egress_zone: TEST_WAN_ZONE_ID, ingress_zone_check: 0, egress_zone_check: 0, ingress_ifindex: 0, ingress_vlan_id: 0, forward_ingress_vlan_id: None, owner_rg_id: 0, fabric_ingress: false, is_reverse: false, nat64_reverse: None, log_session_init: false, log_session_close: false, policy_id: 0, inactivity_timeout_ns: None, policy_counter_idx: 0, policy_counter: None, nat_scope_ifindex: None };
     assert!(install_helper_local_session_on_miss(&mut sessions, SteeringMap::unshared_for_test(-1), &shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &key, decision, metadata, SessionOrigin::LocalMiss, 1_000_000, PROTO_TCP, 0x10, false, false));
     let shared = shared_sessions.lock().unwrap();
-    let entry = shared.get(&key).expect("LocalMiss must be published to shared_sessions (#15950)");
+    let entry = shared
+        .get(&key)
+        .expect("LocalMiss must be published to shared_sessions (#15950)");
     assert_eq!(entry.origin, SessionOrigin::LocalMiss);
     assert_eq!(entry.session_id, sessions.session_id_for(&key));
     assert_ne!(entry.session_id, 0);
 }
-
 
 #[test]
 fn helper_fabric_punt_seed_stays_out_of_shared_15950() {
@@ -11832,14 +12808,33 @@ fn nat_only_vip_in_connected_subnet_keeps_ifindex0_15966r() {
     // NAT-only external inside a configured interface's /24 must NOT acquire
     // that interface's ifindex (configured_iface gate discriminator).
     let mut snapshot = nat_snapshot();
-    snapshot.static_nat_rules = vec![crate::StaticNATRuleSnapshot { name: "web-in-subnet".to_string(), from_routing_instance: String::new(), external_ip: "172.16.80.99".to_string(), internal_ip: "10.0.61.99".to_string(), ..Default::default() }];
+    snapshot.static_nat_rules = vec![crate::StaticNATRuleSnapshot {
+        name: "web-in-subnet".to_string(),
+        from_routing_instance: String::new(),
+        external_ip: "172.16.80.99".to_string(),
+        internal_ip: "10.0.61.99".to_string(),
+        ..Default::default()
+    }];
     let state = build_forwarding_state(&snapshot);
-    assert!(state.local_v4.contains(&Ipv4Addr::new(172,16,80,99)));
-    assert!(!state.configured_iface_v4.contains(&Ipv4Addr::new(172,16,80,99)));
+    assert!(state.local_v4.contains(&Ipv4Addr::new(172, 16, 80, 99)));
+    assert!(
+        !state
+            .configured_iface_v4
+            .contains(&Ipv4Addr::new(172, 16, 80, 99))
+    );
     let neighbors = Arc::new(ShardedNeighborMap::new());
-    let r = lookup_forwarding_resolution_in_table_with_dynamic(&state, &neighbors, IpAddr::V4(Ipv4Addr::new(172,16,80,99)), Some("inet.0")).resolution;
+    let r = lookup_forwarding_resolution_in_table_with_dynamic(
+        &state,
+        &neighbors,
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 99)),
+        Some("inet.0"),
+    )
+    .resolution;
     assert_eq!(r.disposition, ForwardingDisposition::LocalDelivery);
-    assert_eq!(r.local_ifindex, 0, "NAT-only VIP in a connected subnet must keep ifindex 0");
+    assert_eq!(
+        r.local_ifindex, 0,
+        "NAT-only VIP in a connected subnet must keep ifindex 0"
+    );
 }
 
 #[test]
@@ -11881,3 +12876,177 @@ fn unknown_flags_never_cache_local_delivery_16007() {
     ));
 }
 
+/// #16270 (option b): republication ordering cell. Post-activation
+/// the helper FIB holds the republished connected /24 (RG1 locally
+/// owned, `connected_rg_peer_owned=false`) AND the pref-200
+/// cluster-terminal. A lookup for the on-link WAN target
+/// 172.16.80.200 must return the ForwardCandidate WAN egress (12),
+/// never the demoted DiscardRoute: the connected row is longer
+/// than the terminal's /0, so LPM already prefers it — this cell
+/// pins that the republished state forwards directly and that HA
+/// enforcement (RG1 active) keeps it a ForwardCandidate.
+///
+/// RED-on-revert: suppress the connected row (peer-owned marking)
+/// and the same lookup surfaces ClusterTerminalHAInactive; demote
+/// RG1 in the HA map and it becomes DiscardRoute.
+#[test]
+fn republication_ordering_connected_wins_16270() {
+    let mut snapshot = nat_snapshot_with_fabric();
+    for route in &mut snapshot.routes {
+        route.preference = 5;
+    }
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        cluster_terminal: true,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "0.0.0.0/0".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec![],
+        discard: true,
+        next_table: String::new(),
+        preference: 200,
+        rule_priority: 0,
+        mtu: 0,
+    });
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    // The on-link WAN target needs a neighbor row, exactly as the
+    // live kernel table holds it (#15742 live-shape precedent).
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-0.80".to_string(),
+        ifindex: 12,
+        family: "inet".to_string(),
+        ip: "172.16.80.200".to_string(),
+        mac: "00:11:22:33:44:66".to_string(),
+        state: "reachable".to_string(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
+    let state = build_forwarding_state(&snapshot);
+    let active = Arc::new(ArcSwap::from_pointee(BTreeMap::from([(
+        1,
+        active_ha_runtime(now_secs),
+    )])));
+    let dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+    let raw = lookup_forwarding_resolution(&state, dst).resolution;
+    assert_eq!(
+        raw.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "post-activation lookup must forward via the connected WAN row, got {:?}",
+        raw.disposition
+    );
+    assert_eq!(raw.egress_ifindex, 12);
+    let enforced = enforce_ha_resolution(&state, &active, raw);
+    assert_eq!(
+        enforced.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "locally-active RG1 must keep the connected ForwardCandidate, got {:?}",
+        enforced.disposition
+    );
+    assert_eq!(enforced.egress_ifindex, 12);
+}
+
+/// #16270 (option b) + #16217 (fold B3): the connected-win for a
+/// non-cluster terminal. Fixture: an operator discard at
+/// 172.16.80.0/25 (LONGER than the connected /24) covering the
+/// target, so `select_v4_route` returns the terminal, not the
+/// connected row. The win fires only when republication debt is
+/// outstanding FOR THE COVERING PREFIX: a cluster-terminal exists
+/// in the table AND the covering connected prefix is suppressed
+/// from `connected_v4` transit (peer-owned). The MIXED cell
+/// (cluster-terminal present for OTHER prefixes, but the covering
+/// /24 settled locally in transit) must keep the operator discard —
+/// the pre-fold table-wide guard forwarded exactly there.
+///
+/// RED-on-revert: dropping the prefix-debt tie makes the mixed cell
+/// forward (fail-open on an operator discard); dropping the
+/// cluster-terminal arm makes the owed cell drop.
+#[test]
+fn connected_beats_operator_discard_only_when_cluster_terminal_present_16270() {
+    let build = |with_cluster: bool, cover_peer_owned: bool| {
+        let mut snapshot = nat_snapshot_with_fabric();
+        snapshot.routes.retain(|r| r.destination != "0.0.0.0/0");
+        snapshot.routes.push(RouteSnapshot {
+            reject: false,
+            cluster_terminal: false,
+            table: "inet.0".to_string(),
+            family: "inet".to_string(),
+            destination: "172.16.80.0/25".to_string(),
+            next_hop_weights: vec![],
+            next_hops: vec![],
+            discard: true,
+            next_table: String::new(),
+            preference: 200,
+            rule_priority: 0,
+            mtu: 0,
+        });
+        if with_cluster {
+            snapshot.routes.push(RouteSnapshot {
+                reject: false,
+                cluster_terminal: true,
+                table: "inet.0".to_string(),
+                family: "inet".to_string(),
+                destination: "0.0.0.0/0".to_string(),
+                next_hop_weights: vec![],
+                next_hops: vec![],
+                discard: true,
+                next_table: String::new(),
+                preference: 200,
+                rule_priority: 0,
+                mtu: 0,
+            });
+        }
+        if cover_peer_owned {
+            // Suppress the covering /24 from transit: it survives only
+            // in `connected_v4_by_ifindex` (debt outstanding for IT).
+            for iface in &mut snapshot.interfaces {
+                if iface.name == "reth0.80" {
+                    iface.connected_rg_peer_owned = true;
+                }
+            }
+        }
+        snapshot.neighbors.push(NeighborSnapshot {
+            interface: "ge-0-0-0.80".to_string(),
+            ifindex: 12,
+            family: "inet".to_string(),
+            ip: "172.16.80.100".to_string(),
+            mac: "00:11:22:33:44:66".to_string(),
+            state: "reachable".to_string(),
+            router: false,
+            link_local: false,
+            ..Default::default()
+        });
+        build_forwarding_state(&snapshot)
+    };
+    let dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 100));
+    // Owed for the covering prefix: connected /24 beats the discard.
+    let owed = build(true, true);
+    let raw = lookup_forwarding_resolution(&owed, dst).resolution;
+    assert_eq!(
+        raw.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "republication-owed for the covering prefix: connected /24 must beat the /25 operator discard, got {:?}",
+        raw.disposition
+    );
+    assert_eq!(raw.egress_ifindex, 12);
+    // Mixed/settled table: cluster-terminal present, covering prefix
+    // settled locally (in transit) — operator discard must stand.
+    let settled = build(true, false);
+    let raw = lookup_forwarding_resolution(&settled, dst).resolution;
+    assert_eq!(
+        raw.disposition,
+        ForwardingDisposition::DiscardRoute,
+        "mixed table (settled covering prefix, cluster-terminal elsewhere): operator discard must stay a drop, got {:?}",
+        raw.disposition
+    );
+    // No cluster-terminal at all: discard stands (pre-existing arm).
+    let control = build(false, true);
+    let raw = lookup_forwarding_resolution(&control, dst).resolution;
+    assert_eq!(
+        raw.disposition,
+        ForwardingDisposition::DiscardRoute,
+        "no cluster-terminal: operator discard must stay a drop, got {:?}",
+        raw.disposition
+    );
+}

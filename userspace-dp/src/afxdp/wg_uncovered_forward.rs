@@ -636,6 +636,7 @@ mod tests {
             snapshot_installed: true,
             config_generation: 7,
             fib_generation: 9,
+            neighbor_generation: 0,
         };
         let (frame, meta) = build_injected_packet(
             &attached_descriptor(Some(0), valid_inner_v4(0b10)),
@@ -659,6 +660,7 @@ mod tests {
             snapshot_installed: true,
             config_generation: 7,
             fib_generation: 9,
+            neighbor_generation: 0,
         };
         let (frame, _) = build_injected_packet(
             &attached_descriptor(Some(0b11), valid_inner_v4(0b10)),
@@ -679,6 +681,7 @@ mod tests {
             snapshot_installed: true,
             config_generation: 8,
             fib_generation: 9,
+            neighbor_generation: 0,
         };
         assert!(
             build_injected_packet(
@@ -696,6 +699,7 @@ mod tests {
             snapshot_installed: true,
             config_generation: 7,
             fib_generation: 9,
+            neighbor_generation: 0,
         };
         assert!(
             build_injected_packet(&detached, &forwarding, current, 3).is_none(),
@@ -903,6 +907,7 @@ mod tests {
             snapshot_installed: true,
             config_generation: 7,
             fib_generation: 9,
+            neighbor_generation: 0,
         }
     }
 

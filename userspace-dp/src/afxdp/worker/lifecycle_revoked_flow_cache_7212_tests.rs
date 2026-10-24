@@ -131,10 +131,13 @@ fn seed_with_logical_ingress(
         },
         policy_deny: None,
         deny_expires_at_secs: 0,
+        cluster_terminal_source_ifindex: 0,
+        cluster_terminal_stamp_owner_rg: 0,
         observed_bytes: 0,
         last_used_epoch: 0,
         neighbor_mac_epoch: 0,
         neighbor_shard: crate::afxdp::flow_cache::NEIGHBOR_SHARD_NONE,
+        fabric_established: false,
     });
 }
 

@@ -123,6 +123,8 @@ pub struct WorkerRuntimeStatus {
     pub session_gc_aged_owner_rg_zero_active_node: u64,
     #[serde(rename = "session_gc_kept_alive_by_companion", default)]
     pub session_gc_kept_alive_by_companion: u64,
+    #[serde(rename = "session_gc_expired", default)]
+    pub session_gc_expired: u64,
     /// #1760: cumulative NAT reverse-key displacement events on this
     /// worker's SessionTable nat_reverse_index — the latent 1:N collision
     /// (#1758) made observable. A near-precise upper bound on live
@@ -558,6 +560,10 @@ pub(crate) struct BindingStatus {
     pub flow_cache_misses: u64,
     #[serde(rename = "flow_cache_evictions", default)]
     pub flow_cache_evictions: u64,
+    /// #16220: per-arm breakdown of `flow_cache_evictions`, indexed by
+    /// `FlowCacheEvictionArm` ordinal (see afxdp flow_cache). Length 11.
+    #[serde(rename = "flow_cache_evictions_by_arm", default)]
+    pub flow_cache_evictions_by_arm: Vec<u64>,
     /// #918: collision-driven subset of `flow_cache_evictions`. An
     /// insert that displaced a different-key entry from the LRU way
     /// of a full set increments this; stale-on-lookup evictions do
@@ -1704,4 +1710,18 @@ pub(crate) struct SessionDeltaInfo {
     /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionDeltaInfo`).
     #[serde(rename = "purge_retirement", default)]
     pub purge_retirement: bool,
+    /// #16217: live per-direction packet counters snapshotted from the
+    /// serving entry at delta production (Open/Update carry the live
+    /// counts, not the install-time zero). Carried so the peer's
+    /// scoped completion-evidence gate sees actual fwd/rev service
+    /// instead of the import-time zero. Additive: an old daemon
+    /// ignores the keys, an old helper omits them and `default`
+    /// decodes 0 (no evidence — fail-closed, pre-#16217 behavior).
+    ///
+    /// The renames MUST match the Go struct tags
+    /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionDeltaInfo`).
+    #[serde(rename = "fwd_packets", default)]
+    pub fwd_packets: u64,
+    #[serde(rename = "rev_packets", default)]
+    pub rev_packets: u64,
 }

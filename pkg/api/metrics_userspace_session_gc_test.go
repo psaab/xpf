@@ -11,10 +11,10 @@ import (
 func TestEmitSessionGCMetricsAggregatesAllClassifications13281(t *testing.T) {
 	c := newCollector(nil)
 	status := dpuserspace.ProcessStatus{WorkerRuntime: []dpuserspace.WorkerRuntimeStatus{
-		{SessionGCScanned: 1, SessionGCDroppedGone: 2, SessionGCDroppedStale: 3, SessionGCReBucketed: 4, SessionGCHeldStandby: 5, SessionGCReapedStaleSynced: 6, SessionGCHealedOnPromote: 7, SessionGCAgedOwnerRGZeroActiveNode: 8, SessionGCKeptAliveByCompanion: 9},
-		{SessionGCScanned: 10, SessionGCDroppedGone: 20, SessionGCDroppedStale: 30, SessionGCReBucketed: 40, SessionGCHeldStandby: 50, SessionGCReapedStaleSynced: 60, SessionGCHealedOnPromote: 70, SessionGCAgedOwnerRGZeroActiveNode: 80, SessionGCKeptAliveByCompanion: 90},
+		{SessionGCScanned: 1, SessionGCDroppedGone: 2, SessionGCDroppedStale: 3, SessionGCReBucketed: 4, SessionGCHeldStandby: 5, SessionGCReapedStaleSynced: 6, SessionGCHealedOnPromote: 7, SessionGCAgedOwnerRGZeroActiveNode: 8, SessionGCKeptAliveByCompanion: 9, SessionGCExpired: 10},
+		{SessionGCScanned: 10, SessionGCDroppedGone: 20, SessionGCDroppedStale: 30, SessionGCReBucketed: 40, SessionGCHeldStandby: 50, SessionGCReapedStaleSynced: 60, SessionGCHealedOnPromote: 70, SessionGCAgedOwnerRGZeroActiveNode: 80, SessionGCKeptAliveByCompanion: 90, SessionGCExpired: 100},
 	}}
-	ch := make(chan prometheus.Metric, 9)
+	ch := make(chan prometheus.Metric, 10)
 	c.emitSessionGCMetrics(ch, status)
 	close(ch)
 	got := map[string]float64{}
@@ -35,6 +35,7 @@ func TestEmitSessionGCMetricsAggregatesAllClassifications13281(t *testing.T) {
 		"xpf_userspace_session_gc_healed_on_promote_total":              77,
 		"xpf_userspace_session_gc_aged_owner_rg_zero_active_node_total": 88,
 		"xpf_userspace_session_gc_kept_alive_by_companion_total":        99,
+		"xpf_userspace_session_gc_expired_total":                        110,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d session GC metrics, want %d: %#v", len(got), len(want), got)

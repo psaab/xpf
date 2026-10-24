@@ -1516,6 +1516,7 @@ pub(crate) struct BindingLiveSnapshot {
     pub(crate) flow_cache_hits: u64,
     pub(crate) flow_cache_misses: u64,
     pub(crate) flow_cache_evictions: u64,
+    pub(crate) flow_cache_evictions_by_arm: Vec<u64>,
     pub(crate) flow_cache_collision_evictions: u64,
     /// #1219: snapshot count of distinct active flows on this binding's
     /// flow_cache (refreshed at the ~65ms debug-state tick).

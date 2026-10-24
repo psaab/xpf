@@ -266,34 +266,29 @@ pub(in crate::afxdp) fn synthesized_synced_reverse_entry_in_table(
         table,
     );
     let metadata = reverse.metadata;
-    Some(SyncedSessionEntry {
-        key: reverse_key,
-        decision: reverse.decision,
-        metadata,
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: entry.protocol,
-        tcp_flags: entry.tcp_flags,
-        // #2170: the reverse companion inherits the forward entry's install
-        // generation so a delete refusal is consistent across both halves.
-        generation: entry.generation,
-        // #14667: derive ONE companion identity from the forward's stable
-        // id so every worker adopts the same id verbatim. Publishing 0
-        // made each sibling mint a worker-local id, and the
-        // identity-captured DeletePolicyBatch companion check then
-        // missed on W-1 workers. A forward with no stable id (0)
-        // derives 0 and keeps the legacy per-worker fallback.
-        session_id: crate::session::synthesized_companion_session_id(entry.session_id),
-        // #9412: the reverse half carries the SAME close class as the forward
-        // import. With 0, every close-state Update (and the takeover prewarm)
-        // re-installed the reverse copy on the established window, and
-        // `companion_keeps_alive` then held the closing forward alive with it.
-        tcp_close_class: entry.tcp_close_class,
-        tcp_handshake_state: entry.tcp_handshake_state,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: entry.source_nat_static,
-    })
+    Some(SyncedSessionEntry { key: reverse_key,
+    decision: reverse.decision,
+    metadata,
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: entry.protocol,
+    tcp_flags: entry.tcp_flags,
+    // #2170: the reverse companion inherits the forward entry's install
+    // generation so a delete refusal is consistent across both halves.
+    generation: entry.generation,
+    // #14667: derive ONE companion identity from the forward's stable
+    // id so every worker adopts the same id verbatim. Publishing 0
+    // made each sibling mint a worker-local id, and the
+    // identity-captured DeletePolicyBatch companion check then
+    // missed on W-1 workers. A forward with no stable id (0)
+    // derives 0 and keeps the legacy per-worker fallback.
+    session_id: crate::session::synthesized_companion_session_id(entry.session_id),
+    // #9412: the reverse half carries the SAME close class as the forward
+    // import. With 0, every close-state Update (and the takeover prewarm)
+    // re-installed the reverse copy on the established window, and
+    // `companion_keeps_alive` then held the closing forward alive with it.
+    tcp_close_class: entry.tcp_close_class, tcp_handshake_state: entry.tcp_handshake_state, rev_packets: entry.rev_packets, fwd_packets: entry.fwd_packets, pptp_call_ids: 0,
+    source_nat_static: entry.source_nat_static, })
 }
 
 /// #10312: the reverse resolution plus the native installing-table identity
@@ -597,29 +592,22 @@ pub(in crate::afxdp) fn install_reverse_session_from_forward_match(
         {
             SESSION_PUBLISH_ERRORS_SHARED.fetch_add(1, Ordering::Relaxed);
         }
-        let reverse_entry = SyncedSessionEntry {
-            key: reverse_key.clone(),
-            decision: reverse.decision,
-            metadata: reverse.metadata.clone(),
-            leak_incarnation: reverse_leak_incarnation,
-            origin: SessionOrigin::ReverseFlow,
-            protocol,
-            tcp_flags,
-            // Local reverse-flow learning: no peer install generation (#2170).
-            generation: 0,
-            // #14667: publish the id this worker just minted for the
-            // companion, not 0. With 0 every sibling minted its own
-            // worker-namespaced id and the identity-captured
-            // DeletePolicyBatch companion check missed on W-1 workers.
-            session_id: sessions.session_id_for(reverse_key),
-            tcp_close_class: 0,
-            tcp_handshake_state: sessions.handshake_state_wire_for(reverse_key),
-            pptp_call_ids: 0,
-            // #16019 fold 3: reverse row carries the FORWARD entry's rev
-            // counter (reverse packets fold onto the forward entry).
-            rev_packets: sessions.rev_packets_wire_for(&forward_key_for_rev),
-            source_nat_static: reverse.aux.source_nat_static,
-        };
+        let reverse_entry = SyncedSessionEntry { key: reverse_key.clone(),
+        decision: reverse.decision,
+        metadata: reverse.metadata.clone(),
+        leak_incarnation: reverse_leak_incarnation,
+        origin: SessionOrigin::ReverseFlow,
+        protocol,
+        tcp_flags,
+        // Local reverse-flow learning: no peer install generation (#2170).
+        generation: 0,
+        // #14667: publish the id this worker just minted for the
+        // companion, not 0. With 0 every sibling minted its own
+        // worker-namespaced id and the identity-captured
+        // DeletePolicyBatch companion check missed on W-1 workers.
+        session_id: sessions.session_id_for(reverse_key),
+        tcp_close_class: 0, tcp_handshake_state: sessions.handshake_state_wire_for(reverse_key), rev_packets: sessions.rev_packets_for(&crate::session::reverse_session_key(reverse_key, reverse.decision.nat)), fwd_packets: sessions.fwd_packets_for(&crate::session::reverse_session_key(reverse_key, reverse.decision.nat)), pptp_call_ids: 0,
+        source_nat_static: reverse.aux.source_nat_static, };
         publish_shared_session(
             shared_sessions,
             shared_nat_sessions,

@@ -1889,6 +1889,14 @@ func decodeSessionEvent(payload []byte) (SessionDeltaInfo, bool) {
 						// #15176: trailing NAT-scope ifindex (i32 LE).
 						if off+4 <= len(payload) {
 							d.NatScopeIfindex = int32(binary.LittleEndian.Uint32(payload[off : off+4]))
+							off += 4
+							// #16217: trailing per-direction packet
+							// counters (u64 LE each), length-gated.
+							// An old helper omits them => 0 (no evidence).
+							if off+16 <= len(payload) {
+								d.FwdPackets = binary.LittleEndian.Uint64(payload[off : off+8])
+								d.RevPackets = binary.LittleEndian.Uint64(payload[off+8 : off+16])
+							}
 						}
 					}
 				}

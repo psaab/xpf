@@ -1435,6 +1435,19 @@ struct SessionEntry {
     /// True only when BOTH directions offered WSOPT (RFC 7323 requires
     /// bilateral negotiation before either window field is scaled).
     tcp_ws_negotiated: bool,
+    /// #16217 (fabric adoption): this row was materialized/served by the
+    /// fabric-adoption path — the adoption gate proved the tuple Established
+    /// with this node as RG owner post-takeover. Session-hit re-resolves for
+    /// an adopted row run with the adopted HA-enforcement exemption (the
+    /// receiving worker's HA snapshot may still read the egress RG inactive);
+    /// non-adopted rows never carry this flag and stay fail-closed. Set ONLY
+    /// by `mark_fabric_established` from the poll adoption site (and by the
+    /// adoption resolve's own materialization); never on an HA wire.
+    /// #16217 (Wire18, B2): the mark is a CLAIM, re-validated on every hit
+    /// against CURRENT RG ownership (`revalidate_fabric_established` on the
+    /// row's stored decision) — once the egress RG departs again the claim
+    /// lapses and the flow converts toward the fabric again (failback).
+    fabric_established: bool,
 }
 
 /// Snapshot of one live half after a policy rebind. The worker uses this
@@ -1858,6 +1871,12 @@ pub(crate) struct SessionTable {
     /// #15947 fold: exact pre-probe snapshots for deferring probes,
     /// held only until the cached verdict admits or drops the packet.
     pending_probe_undo: Vec<ProbeUndo>,
+    /// #16217 (GLM B1): keys whose deferred probe completion was a
+    /// handshake STAGE TRANSITION into Established — the only cache
+    /// hits allowed to restamp the shared maps' packet-count
+    /// evidence. Recorded in `probe_hit_inner` beside the deferred
+    /// Update; consumed by `take_probe_stage_transition`.
+    pending_probe_stage_transitions: Vec<SessionKey>,
     last_gc_ns: u64,
     max_sessions: usize,
     /// Raw session slots reserved by an outstanding IPsec install plan.
@@ -2110,6 +2129,22 @@ pub(crate) struct SessionTable {
     /// hash-floodable. Local matches use the entry TAT and never touch this
     /// map. Node-local (never synced).
     icmp_error_side_tats: SeededKeyMap<u64>,
+    /// #16223: node-level served-handshake evidence stamps, keyed by
+    /// the CANONICAL FORWARD key of a pair this worker serves. The
+    /// serving worker restamps this on admitted forward hits whose
+    /// forward entry carries reverse counters and on any completion it
+    /// lands; sibling workers' replica tables and the expiry pass read
+    /// it through `node_served_evidence` (production merges it with
+    /// the shared synced map's handshake wire). Seeded like the other
+    /// attacker-keyed side tables; entries are dropped with their
+    /// session via `remove_entry`. Node-local, never synced.
+    node_served_stamps: SeededKeyMap<(u8, u64)>,
+    /// #16217 (ct-slice HA emit): per-forward-key emit marks for the
+    /// ct-slice stage/count Update vehicle. One entry per forward row
+    /// this worker's ct-slice has collected; bounded by the forward
+    /// table size, seeded like `node_served_stamps`, and dropped with
+    /// its session via `remove_entry`. Node-local, never synced.
+    ct_slice_emit_marks: SeededKeyMap<CtSliceEmitMark>,
     /// #9856: terminal-removal harvests awaiting export (`remove_entry`
     /// with `RemovalKind::Terminal`). Drained every tick by the worker
     /// loop (`take_tombstones_into`) — pushed when a window is open,
@@ -2214,6 +2249,7 @@ impl SessionTable {
             deltas: VecDeque::with_capacity(MAX_SESSION_DELTAS.min(256)),
             pending_probe_state_updates: Vec::new(),
             pending_probe_undo: Vec::new(),
+            pending_probe_stage_transitions: Vec::new(),
             last_gc_ns: 0,
             max_sessions: DEFAULT_MAX_SESSIONS,
             reserved_session_slots: 0,
@@ -2256,7 +2292,11 @@ impl SessionTable {
             pmech_reservations: FxHashMap::default(),
             // #9901 (F-077): the error-budget side table is keyed by the
             // attacker-influenced matched key — seed it too.
-            icmp_error_side_tats: HashMap::with_hasher(state),
+            icmp_error_side_tats: HashMap::with_hasher(state.clone()),
+            // #16223: node-served evidence stamps share the seeded
+            // attacker-keyed placement (tuple-keyed, cross-worker read).
+            node_served_stamps: HashMap::with_hasher(state.clone()),
+            ct_slice_emit_marks: HashMap::with_hasher(state),
             // #4915: monotonic session-id counter starts at 1 (0 = "unknown"
             // sentinel on the wire); the node/worker namespace defaults to 0
             // until `set_session_id_namespace` is called at worker setup.
@@ -2462,9 +2502,25 @@ impl SessionTable {
         config_generation: u64,
         fib_generation: u32,
     ) {
+        self.set_forwarding_revalidation_gen_with_neighbor(
+            config_generation,
+            fib_generation,
+            self.forwarding_revalidation_gen.neighbor_generation,
+        );
+    }
+
+    /// #16109: as `set_forwarding_revalidation_gen`, plus the
+    /// helper-local neighbor-set generation the pass resolved against.
+    pub(crate) fn set_forwarding_revalidation_gen_with_neighbor(
+        &mut self,
+        config_generation: u64,
+        fib_generation: u32,
+        neighbor_generation: u64,
+    ) {
         self.forwarding_revalidation_gen = ForwardingGenerationStamp {
             config_generation,
             fib_generation,
+            neighbor_generation,
             valid: true,
         };
     }
@@ -3457,6 +3513,26 @@ impl SessionTable {
         }
         Some(record)
     }
+    /// #16223: quiet twin of `record_by_key` for evidence probes that
+    /// speculate about a companion/serving key which may legitimately
+    /// be absent (a replica table holds no companion). A speculative
+    /// miss is not a lookup failure and must not move the #7919 miss
+    /// counters, whose contract is that they measure only real lookup
+    /// failures on the packet path.
+    #[inline]
+    fn record_by_key_quiet(&self, key: &SessionKey) -> Option<&SessionRecord> {
+        let (handle, via_alias) = self.resolve_lookup_handle(key)?;
+        let record = self.entries.get(handle as usize)?;
+        if !Self::lookup_record_matches_key(record, key, via_alias) {
+            return None;
+        }
+        Some(record)
+    }
+
+    #[inline]
+    fn entry_by_key_quiet(&self, key: &SessionKey) -> Option<&SessionEntry> {
+        self.record_by_key_quiet(key).map(|r| &r.entry)
+    }
 
     /// Mutable twin of `record_by_key`, with the identical direct/alias
     /// resolution and stale-handle validation.
@@ -3631,6 +3707,59 @@ impl SessionTable {
             .map(|entry| entry.tcp_handshake_state_wire(key.protocol))
             .unwrap_or(0)
     }
+    /// #16217: does node-wide completion evidence hold for the pair
+    /// named by `key` (either half)? The table-side half of the export
+    /// stamp: local serving rows plus the per-table node-served stamps
+    /// (serving workers stamp admitted reverse counters / completions
+    /// here). Deliberately the OUTPUT-ONLY test — a shared row's
+    /// Established wire never feeds it. Callers that also hold the
+    /// shared maps merge `shared_completion_evidence` (which requires
+    /// an actual reverse packet count > 0 on a shared row) into this
+    /// via `completion_evidence_with_shared`.
+    pub(crate) fn completion_evidence_for(&self, key: &SessionKey) -> bool {
+        self.node_served_evidence(key).served_and_completed()
+    }
+
+    /// #16217: `completion_evidence_for` merged with shared-map
+    /// evidence gathered by the caller (shared-map locks stay with the
+    /// caller; this is a pure merge). Fail-closed: shared evidence
+    /// alone counts only via `served_and_completed`, whose shared half
+    /// is `rev_packets_any > 0` — an actual reverse packet count read
+    /// off a reverse row, never mere existence of a synthesized
+    /// reverse companion (published with `rev_packets = 0`).
+    pub(crate) fn completion_evidence_with_shared(
+        &self,
+        key: &SessionKey,
+        shared: NodeServedEvidence,
+    ) -> bool {
+        let mut evidence = self.node_served_evidence(key);
+        evidence.rev_packets_any = evidence
+            .rev_packets_any
+            .max(evidence.rev_packets)
+            .max(shared.rev_packets_any);
+        evidence.served_completed = evidence.served_completed || shared.served_completed;
+        evidence.served_and_completed()
+    }
+
+    /// #16217: actual reverse packets this table's forward entry for
+    /// `key` has forwarded (0 when the forward half is absent or has
+    /// served none). The count snapshotted onto shared rows at
+    /// publish/restamp time.
+    pub(crate) fn rev_packets_for(&self, key: &SessionKey) -> u64 {
+        self.entry_by_key(key)
+            .map(|entry| entry.counters.rev_packets)
+            .unwrap_or(0)
+    }
+
+    /// #16217: actual forward packets this table's forward entry for
+    /// `key` has forwarded (0 when absent / none served). Companion
+    /// to `rev_packets_for` for the adoption gate's forward count.
+    pub(crate) fn fwd_packets_for(&self, key: &SessionKey) -> u64 {
+        self.entry_by_key(key)
+            .map(|entry| entry.counters.fwd_packets)
+            .unwrap_or(0)
+    }
+
 
     /// #16019 fold: node-level reply evidence for the pressure-shed
     /// victim check — true once this worker's live entry has seen a
@@ -3893,6 +4022,24 @@ impl SessionTable {
         had_deferred
     }
 
+    /// #16217 (GLM B1): did the deferred probe completion for `key`
+    /// transition the handshake stage into Established? Consumes the
+    /// record. The flow-cache hit path restamps shared-map evidence
+    /// ONLY when this returns true — a steady-state established hit
+    /// (no transition) must never take the shared-map locks.
+    pub fn take_probe_stage_transition(&mut self, key: &SessionKey) -> bool {
+        if let Some(pos) = self
+            .pending_probe_stage_transitions
+            .iter()
+            .position(|k| k == key)
+        {
+            self.pending_probe_stage_transitions.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
     fn probe_hit_inner(
         &mut self,
         key: &SessionKey,
@@ -3904,6 +4051,11 @@ impl SessionTable {
         emit_state_update: bool,
     ) -> bool {
         let mut completing: Option<(SessionKey, crate::nat::NatDecision)> = None;
+        // #16223: split-path evidence of handshake progress observed on
+        // the COMPANION half (see `cache_hit_handshake_progress`).
+        let mut companion_progress = false;
+        // #16223: companion half already idle-crossed at probe time.
+        let mut companion_crossed = false;
         // #15947 (H29-04): wire state BEFORE the completion below, so the
         // HA Update emission can tell whether the handshake actually
         // transitioned (emit_session_state_update is transition-only).
@@ -3976,8 +4128,13 @@ impl SessionTable {
                 let entry = &mut record.entry;
                 let age = now_ns.saturating_sub(entry.last_seen_ns);
                 if age > entry.expires_after_ns {
-                    return false;
-                }
+                    // #16223: this half idle-crossed, but a live
+                    // companion may still prove the flow is active
+                    // (split-path replicas are never re-stamped on the
+                    // serving worker). Defer to the companion-aware
+                    // check after the borrow instead of refusing.
+                    companion_crossed = true;
+                } else {
                 // #14939 handshake completion (mirrors
                 // `touch_if_stale_with_payload`): not a keepalive refresh,
                 // so it applies even inside the throttle window.
@@ -3993,6 +4150,26 @@ impl SessionTable {
                         entry.tcp_handshake_state_wire(key.protocol);
                     close_class_before = entry.tcp_close_class_wire();
                     completing = Some((record.key.clone(), entry.decision.nat));
+                }
+                // #16223: split-RG / fabric-ingress / replica rows never
+                // observe the completing segment on the pending half:
+                // the fw0 forward rows expire `established=false,
+                // handshake_pending=false` (Opening — the predicate
+                // above never even arms) and the fw1 reverse rows stay
+                // `handshake_pending=true` while the completing forward
+                // ACK is cache-served on the fabric peer. What THIS hit
+                // proves, when it carries payload or a SYN-ACK: the
+                // handshake progressed past the bare SYN. Defer the
+                // verdict to the companion-aware check after the borrow
+                // (the companion may be the half that observed the
+                // SYN-ACK / completing ACK).
+                if completing.is_none()
+                    && !entry.closing
+                    && matches!(key.protocol, PROTO_TCP)
+                    && !is_closing(tcp_flags)
+                    && crate::tcp_flags::has_payload_progress(tcp_flags, payload_len)
+                {
+                    companion_progress = true;
                 }
                 let refresh_after = entry.expires_after_ns.max(SESSION_KEEPALIVE_DIVISOR)
                     / SESSION_KEEPALIVE_DIVISOR;
@@ -4015,8 +4192,81 @@ impl SessionTable {
                 } else {
                     reverse_fold = Some((record.key.clone(), entry.decision.nat));
                 }
+                }
             }
             None => return false,
+        }
+        // #16223: this half idle-crossed before the hit. Only a live,
+        // progressed companion can resurrect it (the GC companion
+        // probe's job, mirrored here so the SERVING hit — not a later
+        // GC pass — decides): complete + re-stamp via the arms below
+        // by treating the hit as progress evidence. A crossed half
+        // with no progressed companion stays refused, exactly as
+        // before (the caller falls through to the slow path / GC).
+        if companion_crossed {
+            if self.cache_hit_handshake_progress(key).is_none() {
+                return false;
+            }
+            companion_progress = true;
+        }
+        // #16223: the classic predicate above did not fire, but this hit
+        // carried handshake-progress evidence (payload / SYN-ACK) on a
+        // non-established or pending row. Complete the pair when the
+        // evidence — this hit plus the companion's observed TCP flags —
+        // proves the handshake progressed past the bare SYN (see
+        // `cache_hit_handshake_progress`). Runs before the refresh arm
+        // so the completing hit re-stamps `last_seen` itself.
+        if completing.is_none() && companion_progress {
+            if let Some((matched_key, nat)) = self.cache_hit_handshake_progress(key) {
+                if let Some(entry) = self.entry_by_key(&matched_key) {
+                    handshake_state_before =
+                        entry.tcp_handshake_state_wire(matched_key.protocol);
+                    close_class_before = entry.tcp_close_class_wire();
+                }
+                completing = Some((matched_key, nat));
+            }
+        }
+        // #16223 (second failure conjunct): the fused probe returns
+        // `false` once EITHER half idle-crosses (`age >
+        // expires_after`), and the GC companion probe refuses a
+        // never-established companion — so a pair whose hits were all
+        // throttled (`age < expires_after/4` re-stamps nothing) or
+        // whose serving worker never re-stamped the replica rows
+        // (live `last_seen == created` on every row) is reaped at
+        // 20 s while both nodes serve it. When this hit proves
+        // handshake progress but the classic completion did not land
+        // (e.g. the pair is SYN-ACK-first on the companion), keep the
+        // live pair alive: re-stamp BOTH halves on their current
+        // windows so the next progress hit can complete them instead
+        // of the GC reaping them mid-flow. Bounded: the re-stamp is
+        // THIS hit's real timestamp, so a flow that goes quiet still
+        // reaps one window after its last served packet.
+        if completing.is_none() && companion_progress {
+            if self.cache_hit_handshake_progress(key).is_some() {
+                let companion_key = {
+                    let hit_nat = self.entry_by_key(key).map(|e| e.decision.nat);
+                    hit_nat.map(|nat| reverse_session_key(key, nat))
+                };
+                let mut touched = false;
+                if let Some(entry) = self.entry_by_key_mut(key) {
+                    entry.last_seen_ns = now_ns;
+                    touched = true;
+                }
+                if let Some(companion_key) = companion_key {
+                    if companion_key != *key {
+                        if let Some(entry) = self.entry_by_key_mut(&companion_key) {
+                            entry.last_seen_ns = now_ns;
+                            touched = true;
+                        }
+                        if touched {
+                            self.push_to_wheel(&companion_key, now_ns);
+                        }
+                    }
+                }
+                if touched {
+                    self.push_to_wheel(key, now_ns);
+                }
+            }
         }
         if let Some((matched_key, nat)) = completing {
             let timeouts = self.timeouts;
@@ -4084,19 +4334,60 @@ impl SessionTable {
                     close_class_before,
                     handshake_state_before,
                 ));
+                // #16217 (GLM B1): `completing` only fires on the
+                // classic / companion completion arms, i.e. this hit
+                // TRANSITIONED the pair into Established
+                // (`handshake_state_before` was Opening/Pending).
+                // Record it so the cache-hit caller restamps shared
+                // evidence on this transition only, never per-packet.
+                if !self
+                    .pending_probe_stage_transitions
+                    .iter()
+                    .any(|k| k == &matched_key)
+                {
+                    self.pending_probe_stage_transitions.push(matched_key.clone());
+                }
             }
             self.push_to_wheel(&matched_key, now_ns);
+            // #16223: a completion landed here — stamp node-level
+            // evidence so sibling replica tables complete/retain on
+            // the same proof at their next hit or GC pass.
+            let (stamp_key, stamp_rev) = if let Some(entry) = self.entry_by_key(&matched_key) {
+                let fwd_key = if entry.metadata.is_reverse {
+                    reverse_session_key(&matched_key, nat)
+                } else {
+                    matched_key.clone()
+                };
+                let rev = self
+                    .entry_by_key(&fwd_key)
+                    .map(|fwd| fwd.counters.rev_packets)
+                    .unwrap_or(0);
+                (fwd_key, rev.max(1))
+            } else {
+                (matched_key.clone(), 1)
+            };
+            self.note_node_served_handshake(
+                &stamp_key,
+                TcpHandshakeState::Established.to_wire(),
+                stamp_rev,
+            );
         } else if let Some(canonical_key) = canonical_refresh_key {
             self.touch(&canonical_key, now_ns);
         }
         if let Some((record_key, nat)) = reverse_fold {
+            let mut stamped: Option<(SessionKey, u8, u64)> = None;
             let fwd_key = reverse_session_key(&record_key, nat);
             if let Some(entry) = self.entry_by_key_mut(&fwd_key) {
                 entry.counters.account(true, len);
                 entry.observed_tcp_flags |= tcp_flags;
+                let wire = entry.tcp_handshake_state_wire(fwd_key.protocol);
+                stamped = Some((fwd_key.clone(), wire, entry.counters.rev_packets));
             } else if let Some(entry) = self.entry_by_key_mut(key) {
                 entry.counters.account(true, len);
                 entry.observed_tcp_flags |= tcp_flags;
+            }
+            if let Some((forward_key, wire, rev)) = stamped {
+                self.note_node_served_handshake(&forward_key, wire, rev);
             }
         }
         if let Some(undo) = probe_undo {
@@ -4182,6 +4473,8 @@ impl SessionTable {
         payload_len: u32,
     ) -> bool {
         let mut completing: Option<(SessionKey, crate::nat::NatDecision)> = None;
+        // #16223: companion-progress evidence (see probe_hit_inner).
+        let mut companion_progress = false;
         // #15947 (H29-04): pre-completion wire state for the HA Update.
         let mut handshake_state_before = 0u8;
         let mut close_class_before = 0u8;
@@ -4209,6 +4502,18 @@ impl SessionTable {
                     close_class_before = entry.tcp_close_class_wire();
                     completing = Some((record.key.clone(), entry.decision.nat));
                 }
+                // #16223: payload / SYN-ACK on a non-established or
+                // pending row is handshake-progress evidence; defer to
+                // the companion-aware check after the borrow.
+                if completing.is_none()
+                    && !entry.closing
+                    && matches!(key.protocol, PROTO_TCP)
+                    && !is_closing(tcp_flags)
+                    && (!entry.established || entry.handshake_pending)
+                    && crate::tcp_flags::has_payload_progress(tcp_flags, payload_len)
+                {
+                    companion_progress = true;
+                }
                 let refresh_after = entry.expires_after_ns.max(SESSION_KEEPALIVE_DIVISOR)
                     / SESSION_KEEPALIVE_DIVISOR;
                 let payload_progress = entry.closing
@@ -4222,6 +4527,17 @@ impl SessionTable {
             }
             None => return false,
         };
+        // #16223: companion-aware completion (see probe_hit_inner).
+        if completing.is_none() && companion_progress {
+            if let Some((matched_key, nat)) = self.cache_hit_handshake_progress(key) {
+                if let Some(entry) = self.entry_by_key(&matched_key) {
+                    handshake_state_before =
+                        entry.tcp_handshake_state_wire(matched_key.protocol);
+                    close_class_before = entry.tcp_close_class_wire();
+                }
+                completing = Some((matched_key, nat));
+            }
+        }
         if let Some((matched_key, nat)) = completing {
             let timeouts = self.timeouts;
             let opening_override_ns = self
@@ -4321,6 +4637,15 @@ impl SessionTable {
                     record.entry.counters.account(false, len);
                     record.entry.observed_tos = dscp << 2;
                     record.entry.observed_tcp_flags |= tcp_flags;
+                    // #16223: an admitted forward hit on a promoted pair
+                    // restamps the node-level served evidence so sibling
+                    // replica tables / GC consult live serving counters.
+                    let rev = record.entry.counters.rev_packets;
+                    let wire = record.entry.tcp_handshake_state_wire(key.protocol);
+                    let forward_key = record.key.clone();
+                    if rev > 0 {
+                        self.note_node_served_handshake(&forward_key, wire, rev);
+                    }
                     return;
                 }
                 (record.key.clone(), record.entry.decision.nat)
@@ -4332,14 +4657,20 @@ impl SessionTable {
         // the responder's class of service), but its TCP flags ARE OR-folded
         // so the cumulative tcpControlBits reflects both half-flows.
         let fwd_key = reverse_session_key(&record_key, nat);
+        let mut stamped: Option<(SessionKey, u8, u64)> = None;
         if let Some(entry) = self.entry_by_key_mut(&fwd_key) {
             entry.counters.account(true, len);
             entry.observed_tcp_flags |= tcp_flags;
+            let wire = entry.tcp_handshake_state_wire(fwd_key.protocol);
+            stamped = Some((fwd_key.clone(), wire, entry.counters.rev_packets));
         } else if let Some(entry) = self.entry_by_key_mut(key) {
             // Forward entry already gone (independent expiry) — fall back to
             // the reverse entry so the count is not silently dropped.
             entry.counters.account(true, len);
             entry.observed_tcp_flags |= tcp_flags;
+        }
+        if let Some((forward_key, wire, rev)) = stamped {
+            self.note_node_served_handshake(&forward_key, wire, rev);
         }
     }
 
@@ -4383,6 +4714,202 @@ impl SessionTable {
         class_before: u8,
         handshake_state_before: u8,
     ) {
+        self.emit_session_state_update_inner(
+            matched_key,
+            class_before,
+            handshake_state_before,
+            None,
+        );
+    }
+
+    /// #16217 (export stamp): `emit_session_state_update` with the
+    /// shared-map half of the completion evidence merged in. When the
+    /// merged evidence holds for the forward tuple, the emitted
+    /// Update's `tcp_handshake_state` is Established even if this
+    /// table's row still reads Opening/Pending — the peer's adoption
+    /// gate must learn a completion a sibling worker observed.
+    /// Fail-closed: the shared half counts only through
+    /// `served_and_completed` (actual reverse packet count > 0 on a
+    /// shared row, never synthesized-companion existence). The
+    /// transition-only and peer-synced-silence gates are unchanged.
+    pub(in crate::session) fn emit_session_state_update_with_shared_evidence(
+        &mut self,
+        matched_key: &SessionKey,
+        class_before: u8,
+        handshake_state_before: u8,
+        shared: NodeServedEvidence,
+    ) {
+        self.emit_session_state_update_inner(
+            matched_key,
+            class_before,
+            handshake_state_before,
+            Some(shared),
+        );
+    }
+
+    /// #16217 (ct-slice HA emit): queue ONE stage/count Update for
+    /// `forward_key` when the ct-slice restamp has just advanced this
+    /// node's shared row for it. This is the ONLY vehicle that can
+    /// carry fw0's restamped wire=4 + `rev>0` evidence to fw1: fw0's
+    /// split forward half never locally transitions (its completion
+    /// is served on fw1/fabric), so the transition-only
+    /// `emit_session_state_update_inner` never fires for it, and the
+    /// shared-map restamp is node-local by construction.
+    ///
+    /// Trigger (rate-limited per row, once per stage transition per
+    /// node — the restamp IS the transition detector on fw0):
+    /// - the row's shared stage first reaches `Established` (wire=4)
+    ///   with `rev>0` counts on the shared row, OR
+    /// - the row's counts first become `rev>0` while its stage is
+    ///   still below `Established` (the evidence the peer's scoped
+    ///   adoption arm (b) reads: HandshakePending + rev>0 + fwd>0).
+    /// A key already emitted at wire=4 stays silent on later slices;
+    /// a key whose stage/counts regress (new incarnation) re-arms.
+    /// Closing / reverse / zero-count rows never emit.
+    ///
+    /// Origin gate mirrors `emit_session_state_update_inner`: TUN
+    /// stays silent; a pure HA-peer replica (`SyncImport` /
+    /// `SharedMaterialize`) stays silent UNLESS this is the
+    /// stage-advancement-only carve-out (stage alone advances to
+    /// Established, close class unchanged) — for a `SyncImport` row
+    /// on fw0 that carve-out is exactly this emit, since fw0 holds
+    /// the authoritative shared row for a session it owns. A
+    /// `WorkerLocalImport` replica announces only with a carried id,
+    /// as before. The emitted delta carries the FORWARD entry's live
+    /// counters and the shared-evidence Established stamp, exactly
+    /// as the transition Update would have.
+    ///
+    /// Returns true when an Update was queued.
+    pub(crate) fn emit_ct_slice_state_update(
+        &mut self,
+        forward_key: &SessionKey,
+        shared_stage_wire: u8,
+        shared_rev_packets: u64,
+        shared_fwd_packets: u64,
+    ) -> bool {
+        let established = TcpHandshakeState::Established.to_wire();
+        let pending = TcpHandshakeState::HandshakePending.to_wire();
+        // Fail-closed evidence: only an actual reverse count counts,
+        // and the scoped adoption arm additionally needs fwd>0. A
+        // stage below Opening (0/legacy) with rev>0 still counts as
+        // count-first evidence only when the local row is at least
+        // HandshakePending (a SYN-ACK crossed); never launder an
+        // unanswered SYN (wire 1) into peer evidence.
+        let stage_advances = shared_stage_wire == established && shared_rev_packets > 0;
+        let counts_first = shared_rev_packets > 0
+            && shared_fwd_packets > 0
+            && shared_stage_wire >= pending
+            && shared_stage_wire < established;
+        if !stage_advances && !counts_first {
+            return false;
+        }
+        let Some(forward) = self.entry_by_key(forward_key) else {
+            return false;
+        };
+        if forward.metadata.is_reverse || forward.closing {
+            return false;
+        }
+        // Rate-limit: once per stage transition per node. Re-arm on
+        // regression so a re-pended / reincarnated row can emit again.
+        {
+            let mark = self
+                .ct_slice_emit_marks
+                .entry(forward_key.clone())
+                .or_default();
+            if shared_stage_wire < mark.stage_wire {
+                *mark = CtSliceEmitMark::default();
+            }
+            if shared_rev_packets == 0 && mark.rev_emitted {
+                // Counts regressed (should not happen — restamps are
+                // max-only — but never let a stale mark suppress a
+                // future first-rev emit).
+                mark.rev_emitted = false;
+            }
+            let want_stage = stage_advances && mark.stage_wire < established;
+            let want_rev = counts_first && !mark.rev_emitted;
+            if !want_stage && !want_rev {
+                return false;
+            }
+            if want_stage {
+                mark.stage_wire = established;
+                mark.rev_emitted = true;
+            }
+            if want_rev {
+                mark.rev_emitted = true;
+                if mark.stage_wire < shared_stage_wire {
+                    mark.stage_wire = shared_stage_wire;
+                }
+            }
+        }
+        let forward = self.entry_by_key(forward_key).expect("forward checked above");
+        // Peer-synced silence, mirroring emit_session_state_update_inner:
+        // this emit IS the stage-advancement-only carve-out when the
+        // shared stage reaches Established (close class unchanged by
+        // construction — closing rows returned above). Count-first
+        // emits (stage still pending) are NOT a stage advancement, so
+        // pure peer replicas stay silent for them: fw1 must not echo
+        // fw0's evidence back. Locally-authored / serving rows
+        // (ForwardFlow, WorkerLocalImport with carried id,
+        // SharedPromote, ...) may emit either arm.
+        if forward.origin.is_local_tun_origin() {
+            return false;
+        }
+        if forward.origin.is_peer_synced() {
+            let carried = forward.origin == SessionOrigin::WorkerLocalImport
+                && self.session_id_carried_from_another_worker(forward.session_id);
+            if !stage_advances && !carried {
+                return false;
+            }
+        }
+        let class_wire = forward.tcp_close_class_wire();
+        if class_wire != 0 {
+            return false;
+        }
+        let shared = NodeServedEvidence {
+            rev_packets_any: shared_rev_packets,
+            served_completed: stage_advances,
+            ..NodeServedEvidence::default()
+        };
+        let completed = self.completion_evidence_with_shared(forward_key, shared)
+            || stage_advances;
+        let delta = SessionDelta {
+            provenance: crate::session::ExportProvenance::Incremental,
+            kind: SessionDeltaKind::Update,
+            key: forward_key.clone(),
+            decision: forward.decision,
+            metadata: forward.metadata.clone(),
+            policy_generation: forward.policy_generation,
+            origin: forward.origin,
+            fabric_redirect_sync: false,
+            created_ns: forward.created_ns,
+            last_seen_ns: forward.last_seen_ns,
+            counters: forward.counters,
+            observed_tos: forward.observed_tos,
+            observed_tcp_flags: forward.observed_tcp_flags,
+            session_id: forward.session_id,
+            bulk_resync: false,
+            is_admission: false,
+            tcp_close_class: class_wire,
+            purge_retirement: false,
+            tcp_handshake_state: if completed {
+                established
+            } else {
+                forward.tcp_handshake_state_wire(forward_key.protocol)
+            },
+            pptp_call_ids: self.pptp_call_ids_wire_for(forward_key),
+            source_nat_static: forward.source_nat_static,
+        };
+        self.push_delta(delta);
+        true
+    }
+
+    fn emit_session_state_update_inner(
+        &mut self,
+        matched_key: &SessionKey,
+        class_before: u8,
+        handshake_state_before: u8,
+        shared_evidence: Option<NodeServedEvidence>,
+    ) {
         let Some(matched) = self.entry_by_key(matched_key) else {
             return;
         };
@@ -4410,8 +4937,20 @@ impl SessionTable {
         // lets the next sweep resend class 0. Peer imports stay silent.
         // #10038 item 5: TUN-origin stays silent too (the peer holds no copy
         // — nothing Opened — so an Update would plant TUN-derived state).
+        // #16217 stage-advancement carve-out: when a peer-synced row's
+        // handshake STAGE alone advances to Established (close class
+        // unchanged), emit the Update so the peer's synced wire learns
+        // the completion. Split-path serving rows complete on a
+        // peer/sibling worker; without this delta the peer's adoption
+        // gate (`lookup_shared_established_for_wire`) stays at
+        // HandshakePending forever. Close-class transitions on
+        // peer-synced rows stay silent (no echo of the owner's close).
+        let stage_advancement_only = class_after == class_before
+            && handshake_state_after == TcpHandshakeState::Established.to_wire()
+            && handshake_state_before != handshake_state_after;
         if forward.origin.is_local_tun_origin()
             || (forward.origin.is_peer_synced()
+                && !stage_advancement_only
                 && !(forward.origin == SessionOrigin::WorkerLocalImport
                     && self.session_id_carried_from_another_worker(forward.session_id)))
         {
@@ -4432,7 +4971,10 @@ impl SessionTable {
             fabric_redirect_sync: false,
             created_ns: forward.created_ns,
             last_seen_ns: forward.last_seen_ns,
-            counters: SessionCounters::default(),
+            // #16217: live counters (the forward entry is in hand) so
+            // the stage-advance Update carries the service evidence
+            // the peer's adoption gate reads, not install-time zero.
+            counters: forward.counters,
             observed_tos: forward.observed_tos,
             observed_tcp_flags: forward.observed_tcp_flags,
             session_id: forward.session_id,
@@ -4440,11 +4982,238 @@ impl SessionTable {
             is_admission: false,
             tcp_close_class: forward.tcp_close_class_wire(),
             purge_retirement: false,
-            tcp_handshake_state: forward.tcp_handshake_state_wire(forward_key.protocol),
+            // #16217 (export stamp): Established when node-wide
+            // completion evidence holds for the forward tuple — the
+            // table half always, plus the caller-merged shared half
+            // (actual reverse packet count > 0 on a shared row,
+            // via `emit_session_state_update_with_shared_evidence`).
+            // Otherwise the row's live wire, unchanged.
+            tcp_handshake_state: {
+                let completed = match shared_evidence {
+                    Some(shared) => {
+                        self.completion_evidence_with_shared(&forward_key, shared)
+                    }
+                    None => self.completion_evidence_for(&forward_key),
+                };
+                if completed {
+                    TcpHandshakeState::Established.to_wire()
+                } else {
+                    forward.tcp_handshake_state_wire(forward_key.protocol)
+                }
+            },
             pptp_call_ids,
             source_nat_static: forward.source_nat_static,
         };
         self.push_delta(delta);
+    }
+
+    /// #16223: companion-aware handshake completion for hit paths.
+    ///
+    /// Split-RG / fabric-ingress / worker-replica rows never observe
+    /// the completing segment on the half that needs it. Node-level
+    /// evidence (a promoted serving companion for the tuple on this
+    /// node — shared synced map Established wire corroborated by the
+    /// serving pair's admitted reverse counters) is consulted FIRST,
+    /// before the local `syn_ack_first` / `handshake_pending`
+    /// refusals: the live dying rows are a `syn_ack_first=true`
+    /// reverse replica with no local companion and pure-Opening
+    /// forward replicas whose companion is also Opening. Without
+    /// node-level proof the classic guards apply unchanged — a
+    /// SYN-ACK-first row still waits for its reverse ACK (#4109) and a
+    /// pure Opening pair still needs a validated SYN-ACK
+    /// (#6752/#13679). Closing entries never complete (#14630).
+    ///
+    /// Returns the canonical forward key + NAT of the completed pair
+    /// so the caller performs the same completion block as the classic
+    /// arm (establish + re-window + companion propagation + HA
+    /// Update). Cost: one companion probe, only on progress-evidence
+    /// hits of non-established rows — never in steady state.
+    /// #16223: record node-level served evidence for `forward_key`
+    /// (canonical forward tuple). The serving worker calls this on
+    /// admitted hits whose forward entry carries reverse counters and
+    /// whenever a completion lands, so sibling replica tables and the
+    /// GC pass can consult proof that lives outside their own table.
+    /// Never regresses an Established stamp.
+    pub(crate) fn note_node_served_handshake(
+        &mut self,
+        forward_key: &SessionKey,
+        handshake_wire: u8,
+        rev_packets: u64,
+    ) {
+        if rev_packets == 0 && handshake_wire != TcpHandshakeState::Established.to_wire() {
+            return;
+        }
+        let stamp = self
+            .node_served_stamps
+            .entry(forward_key.clone())
+            .or_insert((0, 0));
+        if handshake_wire == TcpHandshakeState::Established.to_wire() {
+            stamp.0 = handshake_wire;
+        }
+        stamp.1 = stamp.1.max(rev_packets);
+    }
+
+    /// #16223: node-level served evidence for the pair named by `key`
+    /// (either half). Consults, in order: a promoted serving companion
+    /// in THIS table under either key orientation (the live split
+    /// serving pair sits under a SNAT-translated reverse key that
+    /// `reverse_session_key` on a replica does not derive), then the
+    /// cross-worker stamps + shared-map wire merged by production into
+    /// `node_served_stamps`. Returns zero evidence when nothing on the
+    /// node has promoted/served the tuple.
+    pub(crate) fn node_served_evidence(&self, key: &SessionKey) -> NodeServedEvidence {
+        let mut evidence = NodeServedEvidence::default();
+        // Local serving pair, either orientation: an established,
+        // non-pending, non-closing forward/reverse entry for the same
+        // bare tuple whose forward counters prove reverse service.
+        for candidate_key in [key.clone(), reverse_session_key(key, crate::nat::NatDecision::default())] {
+            if let Some(entry) = self.entry_by_key_quiet(&candidate_key) {
+                // A promoted-but-pending companion (`established &&
+                // handshake_pending`, the #6752 SYN-ACK-seen shape) is
+                // NOT served proof — only a fully completed pair
+                // (pending cleared) may stand as evidence, and only
+                // when it is a local SERVING row distinct from a pure
+                // HA-peer replica: locally-authored, `SharedPromote`,
+                // or `WorkerLocalImport` (this node's own replica
+                // across workers). `SyncImport`/`SharedMaterialize`
+                // peer replicas never stand as evidence.
+                let serving_origin = !entry.origin.is_peer_synced()
+                    || entry.origin == SessionOrigin::SharedPromote
+                    || entry.origin == SessionOrigin::WorkerLocalImport;
+                if serving_origin
+                    && entry.established
+                    && !entry.handshake_pending
+                    && !entry.closing
+                {
+                    evidence.handshake_wire = TcpHandshakeState::Established.to_wire();
+                }
+                // Forward entries fold both directions; a reverse
+                // entry's companion forward holds the counters.
+                let fwd = if entry.metadata.is_reverse {
+                    let fwd_key = reverse_session_key(&candidate_key, entry.decision.nat);
+                    self.entry_by_key_quiet(&fwd_key)
+                } else {
+                    Some(entry)
+                };
+                if let Some(fwd) = fwd {
+                    evidence.rev_packets = evidence.rev_packets.max(fwd.counters.rev_packets);
+                }
+            }
+        }
+        if let Some(&(wire, rev)) = self.node_served_stamps.get(key) {
+            if wire == TcpHandshakeState::Established.to_wire() {
+                evidence.handshake_wire = wire;
+            }
+            evidence.rev_packets = evidence.rev_packets.max(rev);
+        }
+        // The stamp is keyed by the canonical forward key; a reverse
+        // hit names its companion.
+        let companion_key = reverse_session_key(key, crate::nat::NatDecision::default());
+        if companion_key != *key {
+            if let Some(&(wire, rev)) = self.node_served_stamps.get(&companion_key) {
+                if wire == TcpHandshakeState::Established.to_wire() {
+                    evidence.handshake_wire = wire;
+                }
+                evidence.rev_packets = evidence.rev_packets.max(rev);
+            }
+        }
+        evidence
+    }
+
+    fn cache_hit_handshake_progress(
+        &self,
+        hit_key: &SessionKey,
+    ) -> Option<(SessionKey, crate::nat::NatDecision)> {
+        let hit = self.entry_by_key(hit_key)?;
+        if hit.closing || (hit.established && !hit.handshake_pending) {
+            return None;
+        }
+        // #16223 (node-level first): a promoted serving companion for
+        // this tuple on this node — shared-map Established wire plus
+        // admitted reverse counters on the serving pair — completes
+        // the replica/opening row BEFORE the local `syn_ack_first` /
+        // `handshake_pending` refusals below. The live dying rows are
+        // exactly `syn_ack_first=true` reverse replicas with no local
+        // companion and pure-Opening forward replicas; their completing
+        // ACK is consumed on the fabric peer, so only node-level proof
+        // can complete them. Without that proof the classic guards
+        // apply unchanged (#4109/#6752/#13679).
+        let node_evidence = self.node_served_evidence(hit_key);
+        if node_evidence.promoted_and_served() {
+            let hit_nat = hit.decision.nat;
+            return if hit.metadata.is_reverse {
+                Some((reverse_session_key(hit_key, hit_nat), hit_nat))
+            } else {
+                Some((hit_key.clone(), hit_nat))
+            };
+        }
+        if hit.syn_ack_first {
+            return None;
+        }
+        // #16223/#6752: only a pair the classic state machine already
+        // promoted past SYN-ACK-observed (`handshake_pending`, set by
+        // `promote_from_reverse` / synced import) may complete from
+        // companion evidence. A pure Opening pair
+        // (`established=false, handshake_pending=false`) has not had
+        // its SYN-ACK validated by any lookup arm, so payload progress
+        // alone must not establish it — the #13676 cell (forward
+        // SYN+ACK after a reverse SYN-ACK must stay pending). The fw0
+        // Opening rows in the live capture are retained by the expire
+        // companion arm while promotion lands; not completed here.
+        if !hit.handshake_pending {
+            return None;
+        }
+        let hit_nat = hit.decision.nat;
+        let hit_is_reverse = hit.metadata.is_reverse;
+        let companion_key = reverse_session_key(hit_key, hit_nat);
+        let Some(companion) = self.entry_by_key(&companion_key) else {
+            // No local companion: the fabric peer forwarded this
+            // payload, which proves the handshake progressed.
+            return if hit_is_reverse {
+                Some((companion_key, hit_nat))
+            } else {
+                Some((hit_key.clone(), hit_nat))
+            };
+        };
+        if companion.closing {
+            return None;
+        }
+        // Observed SYN alone is forgeable: a spoofed SYN-ACK that was
+        // dropped still ORs SYN into the folded flags (liveness and
+        // zone probes charge drops too). Require refreshed-freshness
+        // proof instead — a companion whose `last_seen_ns` advanced
+        // past its creation (or whose pair was already promoted by a
+        // real SYN-ACK: `established`) was genuinely served traffic.
+        // A never-refreshed replica (the #16223 expiry shape:
+        // `last_seen == created` on every row) carries no such proof
+        // and is left for the GC retention path below.
+        // SYN in the folded flags alone is forgeable (a dropped
+        // spoofed SYN-ACK is still charged by liveness probes).
+        // Require the SYN-ACK to have been genuinely SERVED: the
+        // companion was promoted by a real SYN-ACK (`established`),
+        // or either half was refreshed past its creation (a served
+        // hit), or the hit half itself carries reverse-direction
+        // counters — reverse bytes/packets are folded only by
+        // `account_packet`/`probe_hit` on an admitted hit, never by
+        // a dropped probe, so nonzero reverse counters prove the
+        // server direction was actually forwarded on this table.
+        let fwd_counters = if hit_is_reverse {
+            companion.counters
+        } else {
+            hit.counters
+        };
+        let companion_progressed = companion.established
+            || companion.last_seen_ns > companion.created_ns
+            || hit.last_seen_ns > hit.created_ns
+            || fwd_counters.rev_packets > 0;
+        if !companion_progressed {
+            return None;
+        }
+        if hit_is_reverse {
+            Some((companion_key, companion.decision.nat))
+        } else {
+            Some((hit_key.clone(), hit_nat))
+        }
     }
 
     pub(in crate::session) fn propagate_tcp_state_to_companion(
@@ -5510,6 +6279,17 @@ impl SessionTable {
     /// `ExpiredSession::in_export_window`.
     fn remove_entry(&mut self, key: &SessionKey, kind: RemovalKind) -> Option<SessionEntry> {
         self.leak_incarnations.remove(key);
+        // #16223: node-served evidence dies with its forward session so
+        // a reincarnated tuple cannot inherit a promoted stamp. Quiet
+        // probe: removal of a never-installed key is routine (install
+        // replacement) and must not count as a #7919 lookup miss.
+        if !self
+            .entry_by_key_quiet(key)
+            .is_some_and(|e| e.metadata.is_reverse)
+        {
+            self.node_served_stamps.remove(key);
+            self.ct_slice_emit_marks.remove(key);
+        }
         // The pressure-shed index contains only forward opening entries.
         // Remove by key here so every terminal and replacement path keeps it
         // paired with the authoritative session record.
@@ -6214,6 +6994,10 @@ mod close_state_sync_9412_acceptance_tests;
 #[cfg(test)]
 #[path = "opening_state_sync_10888_tests.rs"]
 mod opening_state_sync_10888_tests;
+// #16218: promoted/demoted opening rows must survive the failover GC pass.
+#[cfg(test)]
+#[path = "promoted_opening_gc_16218_tests.rs"]
+mod promoted_opening_gc_16218_tests;
 // #9582: a close seen only by a worker replica of a local session is announced, with
 // the installer's id. Written before the fix.
 #[cfg(test)]
@@ -6289,6 +7073,14 @@ mod handshake_cache_hit_14939_tests;
 #[cfg(test)]
 #[path = "probe_hit_14945_tests.rs"]
 mod probe_hit_14945_tests;
+
+// #16223: split-RG / fabric-ingress / worker-replica rows served only
+// via flow-cache hits never leave the TCP opening window; the pair
+// must promote under cache-hit service once reverse activity proves
+// the handshake progressed, and must survive GC while active.
+#[cfg(test)]
+#[path = "split_handshake_16223_tests.rs"]
+mod split_handshake_16223_tests;
 
 // #15087 (A62-01): L3 reverse bucket must stay O(1) under same-destination
 // SNAT fan-in (hashed membership + per-protocol counts, bounded probe).

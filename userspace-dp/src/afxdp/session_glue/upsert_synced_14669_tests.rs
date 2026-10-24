@@ -186,27 +186,22 @@ fn synced_entry(
     resolution: ForwardingResolution,
     nat: NatDecision,
 ) -> SyncedSessionEntry {
-    SyncedSessionEntry {
-        key,
-        decision: SessionDecision {
-            resolution,
-            nat,
-            install_table_domain: 0,
-            install_table_check: 0,
-        },
-        metadata: metadata(owner),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    }
+    SyncedSessionEntry { key,
+    decision: SessionDecision {
+        resolution,
+        nat,
+        install_table_domain: 0,
+        install_table_check: 0,
+    },
+    metadata: metadata(owner),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, }
 }
 
 fn apply_upsert(

@@ -1052,6 +1052,60 @@ fn lookup_forwarding_resolution_v4_inner(
         }
         Some(ResolvedRouteV4::Static { route, selected }) => {
             if route.discard || route.reject {
+                // #16270 (option b; #16217 fold B3): a connected prefix
+                // covering `ip` beats this non-cluster terminal ONLY
+                // when republication debt is outstanding FOR THAT
+                // COVERING PREFIX: a cluster-terminal exists in this
+                // table AND the covering connected prefix is absent
+                // from `connected_v4` transit (peer-owned suppression,
+                // proven by `connected_*_by_ifindex` covering `ip`
+                // with no same-prefix transit row). Pre-fold any
+                // cluster-terminal ANYWHERE in the table let the win
+                // override an operator discard for destinations whose
+                // own connected prefix was settled locally. Mixed
+                // tables (settled connected + owed elsewhere) keep the
+                // operator discard bit-identically.
+                let owed_ifindex = if !route.cluster_terminal
+                    && table_has_cluster_terminal_v4(state, table)
+                    && connected_win_republication_owed_v4(state, table, ip)
+                {
+                    // Transit row gone (suppressed): recover the egress
+                    // from the by-ifindex ledger. Settled row present:
+                    // no debt for this prefix, terminal stands.
+                    Some(connected_lpm_ifindex_v4(state, ip, table))
+                } else {
+                    None
+                };
+                if let Some(ifindex) = owed_ifindex.filter(|i| *i > 0) {
+                    {
+                        let neighbor = lookup_neighbor_entry(
+                            state,
+                            dynamic_neighbors,
+                            ifindex,
+                            IpAddr::V4(ip),
+                        );
+                        let mut resolution = ForwardingResolution {
+                            disposition: if neighbor.is_some() {
+                                ForwardingDisposition::ForwardCandidate
+                            } else {
+                                ForwardingDisposition::MissingNeighbor
+                            },
+                            local_ifindex: 0,
+                            egress_ifindex: ifindex,
+                            tx_ifindex: ifindex,
+                            tunnel_endpoint_id: 0,
+                            next_hop: Some(IpAddr::V4(ip)),
+                            neighbor_mac: neighbor.map(|entry| entry.mac),
+                            src_mac: None,
+                            tx_vlan_id: 0,
+                            source_ifindex: 0,
+                            route_mtu: 0,
+                            transport_route_mtu: 0,
+                        };
+                        populate_egress_resolution(state, ifindex, &mut resolution);
+                        return selected_route_lookup_result(state, table, resolution);
+                    }
+                }
                 let mut resolution = ForwardingResolution {
                     disposition: if route.cluster_terminal {
                         ForwardingDisposition::ClusterTerminalHAInactive
@@ -1356,6 +1410,47 @@ fn lookup_forwarding_resolution_v6_inner(
         }
         Some(ResolvedRouteV6::Static { route, selected }) => {
             if route.discard || route.reject {
+                // #16270 (option b; #16217 fold B3): v6 twin of the
+                // v4 connected-win — only when republication debt is
+                // outstanding for THIS covering prefix.
+                let owed_ifindex = if !route.cluster_terminal
+                    && table_has_cluster_terminal_v6(state, table)
+                    && connected_win_republication_owed_v6(state, table, ip)
+                {
+                    Some(connected_lpm_ifindex_v6(state, ip, table))
+                } else {
+                    None
+                };
+                if let Some(ifindex) = owed_ifindex.filter(|i| *i > 0) {
+                    {
+                        let neighbor = lookup_neighbor_entry(
+                            state,
+                            dynamic_neighbors,
+                            ifindex,
+                            IpAddr::V6(ip),
+                        );
+                        let mut resolution = ForwardingResolution {
+                            disposition: if neighbor.is_some() {
+                                ForwardingDisposition::ForwardCandidate
+                            } else {
+                                ForwardingDisposition::MissingNeighbor
+                            },
+                            local_ifindex: 0,
+                            egress_ifindex: ifindex,
+                            tx_ifindex: ifindex,
+                            tunnel_endpoint_id: 0,
+                            next_hop: Some(IpAddr::V6(ip)),
+                            neighbor_mac: neighbor.map(|entry| entry.mac),
+                            src_mac: None,
+                            tx_vlan_id: 0,
+                            source_ifindex: 0,
+                            route_mtu: 0,
+                            transport_route_mtu: 0,
+                        };
+                        populate_egress_resolution(state, ifindex, &mut resolution);
+                        return selected_route_lookup_result(state, table, resolution);
+                    }
+                }
                 let mut resolution = ForwardingResolution {
                     disposition: if route.cluster_terminal {
                         ForwardingDisposition::ClusterTerminalHAInactive
@@ -1921,6 +2016,67 @@ fn select_v4_route<'a>(
                 tunnel_endpoint_id: conn.tunnel_endpoint_id,
             })
         })
+}
+
+/// #16270: with the connected-RG republication still owed (the post-
+/// activation FIB lacks the /24 transit row), does `table` hold a
+/// cluster-terminal? After a synchronous-with-activation republish
+/// this is never true; the slow-path lookup consults it when the
+/// republish is delayed so the terminal defers to HAInactive.
+fn table_has_cluster_terminal_v4(state: &ForwardingState, table: &str) -> bool {
+    state
+        .routes_v4
+        .get(table)
+        .is_some_and(|routes| routes.iter().any(|r| r.cluster_terminal))
+}
+
+/// #16270: v6 twin of `table_has_cluster_terminal_v4`.
+fn table_has_cluster_terminal_v6(state: &ForwardingState, table: &str) -> bool {
+    state
+        .routes_v6
+        .get(table)
+        .is_some_and(|routes| routes.iter().any(|r| r.cluster_terminal))
+}
+
+/// #16217 (fold B3): is republication debt outstanding for the
+/// CONNECTED PREFIX covering `ip` in `table`? Debt means the
+/// covering connected prefix is recorded in `connected_*_by_ifindex`
+/// (the peer-owned-suppression ledger — every interface address,
+/// owned or suppressed) but the SAME (ifindex, prefix) has no row
+/// in `connected_v4`/`connected_v6` transit. The pre-fold guard
+/// (`table_has_cluster_terminal_*`) tied the connected-win to ANY
+/// cluster-terminal in the table, so a destination whose own
+/// connected prefix was settled locally still overrode an operator
+/// discard whenever some UNRELATED prefix in the table was owed.
+/// "Same prefix" is exact (prefix + ifindex + table): a transit row
+/// for the identical prefix proves that prefix was republished.
+fn connected_win_republication_owed_v4(
+    state: &ForwardingState,
+    table: &str,
+    ip: Ipv4Addr,
+) -> bool {
+    let ifindex = connected_lpm_ifindex_v4(state, ip, table);
+    if ifindex <= 0 {
+        return false;
+    }
+    !state.connected_v4.iter().any(|entry| {
+        entry.table == table && entry.ifindex == ifindex && entry.prefix.contains(ip)
+    })
+}
+
+/// #16217 (fold B3): v6 twin of `connected_win_republication_owed_v4`.
+fn connected_win_republication_owed_v6(
+    state: &ForwardingState,
+    table: &str,
+    ip: Ipv6Addr,
+) -> bool {
+    let ifindex = connected_lpm_ifindex_v6(state, ip, table);
+    if ifindex <= 0 {
+        return false;
+    }
+    !state.connected_v6.iter().any(|entry| {
+        entry.table == table && entry.ifindex == ifindex && entry.prefix.contains(ip)
+    })
 }
 
 fn select_v6_route<'a>(

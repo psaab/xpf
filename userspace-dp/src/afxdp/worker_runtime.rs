@@ -152,6 +152,8 @@ pub(crate) struct WorkerRuntimeCounters {
     pub session_gc_healed_on_promote: u64,
     pub session_gc_aged_owner_rg_zero_active_node: u64,
     pub session_gc_kept_alive_by_companion: u64,
+    /// #16218: entries removed by the timer wheel (normal Age expiry).
+    pub session_gc_expired: u64,
     pub session_table_entries: u64,
     pub max_sessions: u64,
     /// #1760: cumulative NAT reverse-key displacement events from this
@@ -270,6 +272,7 @@ pub(crate) struct WorkerRuntimeAtomics {
     pub session_gc_healed_on_promote: AtomicU64,
     pub session_gc_aged_owner_rg_zero_active_node: AtomicU64,
     pub session_gc_kept_alive_by_companion: AtomicU64,
+    pub session_gc_expired: AtomicU64,
     /// #1760: cumulative NAT reverse-key displacement events. Simple
     /// Relaxed cumulative counter (like `session_table_entries`), NOT part
     /// of the seqlock-published rolling-window tuple below.
@@ -376,6 +379,7 @@ impl WorkerRuntimeAtomics {
             session_gc_healed_on_promote: AtomicU64::new(0),
             session_gc_aged_owner_rg_zero_active_node: AtomicU64::new(0),
             session_gc_kept_alive_by_companion: AtomicU64::new(0),
+            session_gc_expired: AtomicU64::new(0),
             nat_reverse_key_collisions: AtomicU64::new(0),
             nat_reverse_key_collisions_distinct_src: AtomicU64::new(0),
             session_create_drops: AtomicU64::new(0),
@@ -469,6 +473,7 @@ impl WorkerRuntimeAtomics {
         );
         self.session_gc_kept_alive_by_companion
             .store(c.session_gc_kept_alive_by_companion, Ordering::Relaxed);
+        self.session_gc_expired.store(c.session_gc_expired, Ordering::Relaxed);
         self.nat_reverse_key_collisions
             .store(c.nat_reverse_key_collisions, Ordering::Relaxed);
         self.nat_reverse_key_collisions_distinct_src
@@ -623,6 +628,7 @@ impl WorkerRuntimeAtomics {
             session_gc_kept_alive_by_companion: self
                 .session_gc_kept_alive_by_companion
                 .load(Ordering::Relaxed),
+            session_gc_expired: self.session_gc_expired.load(Ordering::Relaxed),
             new_flow_installs: self.new_flow_installs.load(Ordering::Relaxed),
         }
     }

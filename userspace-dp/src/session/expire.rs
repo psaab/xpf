@@ -385,6 +385,34 @@ impl SessionTable {
                         self.last_pop_stats.kept_alive_by_companion += 1;
                         continue;
                     }
+                    // #16223: node-level evidence is consulted BEFORE
+                    // the local refusals inside
+                    // `opening_companion_keeps_alive`: the HA context's
+                    // shared-map/serving probe for this tuple, merged
+                    // with this table's own serving stamps. A replica
+                    // whose node-level serving pair has promoted and
+                    // served reverse traffic is retained even when its
+                    // local flags are Opening / syn_ack_first.
+                    let node_evidence = {
+                        let mut ev = self.node_served_evidence(&key);
+                        if let Some(ha) = ha {
+                            let shared = (ha.node_served)(&key);
+                            if shared.handshake_wire
+                                == TcpHandshakeState::Established.to_wire()
+                            {
+                                ev.handshake_wire = shared.handshake_wire;
+                            }
+                            ev.shared_established |= shared.shared_established;
+                            ev.rev_packets = ev.rev_packets.max(shared.rev_packets);
+                        }
+                        ev
+                    };
+                    if companion_eligible
+                        && self.opening_companion_keeps_alive(&key, e_nat, now_ns, node_evidence)
+                    {
+                        self.last_pop_stats.kept_alive_by_companion += 1;
+                        continue;
+                    }
                     if let Some(removed) = self.remove_entry(&key, RemovalKind::Terminal) {
                         self.last_pop_stats.expired += 1;
                         let decision = removed.decision;
@@ -703,6 +731,93 @@ impl SessionTable {
         true
     }
 
+
+    /// #16223: GC retention for a never-established (Opening /
+    /// handshake-pending) half. `companion_keeps_alive` refuses these
+    /// pairs by design (#6752/#13679: a SYN-ACK the client never ACKed
+    /// must not hold the pair), but in split posture the completing
+    /// segment is consumed on the fabric peer / sibling workers, so
+    /// the local pair stays Opening/pending while BOTH nodes serve it
+    /// continuously — and the replica rows are never re-stamped
+    /// (`last_seen == created` at expiry in the live capture). The
+    /// retention therefore keys on the same served-evidence proof as
+    /// the hit paths (`cache_hit_handshake_progress`: promoted
+    /// companion, refreshed half, or nonzero reverse counters folded
+    /// only on admitted hits) PLUS the companion being within its own
+    /// idle window right now. A handshake that never completes (no
+    /// reverse service at all) fails the proof and still reaps on
+    /// the opening window; a flow that goes quiet fails the window
+    /// check once the companion crosses, so both halves then reap
+    /// within one window of last activity (bounded, terminating).
+    fn opening_companion_keeps_alive(
+        &mut self,
+        key: &SessionKey,
+        entry_nat: NatDecision,
+        now_ns: u64,
+        node_evidence: NodeServedEvidence,
+    ) -> bool {
+        let Some(entry) = self.entry_by_key(key) else {
+            return false;
+        };
+        if key.protocol != PROTO_TCP || entry.closing {
+            return false;
+        }
+        // #16223 (node-level first): a promoted serving companion for
+        // this tuple on this node (shared-map Established +
+        // admitted reverse counters) retains the replica/opening row
+        // BEFORE the local `syn_ack_first` / `handshake_pending`
+        // refusals below — the live fw1 row is `syn_ack_first=true`
+        // with no local companion, and the fw0 replicas are pure
+        // Opening. Retain on the SERVING pair's activity: re-stamp
+        // from `now_ns` (this GC pass is the retention event; the
+        // serving pair's own hits keep its stamp fresh, so a flow
+        // that goes quiet still crosses one window later when the
+        // shared/serving proof stops advancing — production merges
+        // the serving last-activity through the same evidence).
+        if node_evidence.promoted_and_served() {
+            let Some(em) = self.entry_by_key_mut(key) else {
+                return false;
+            };
+            em.last_seen_ns = now_ns;
+            self.rebucket_alive_entry(key, now_ns);
+            return true;
+        }
+        // Classic arm: only SYN-ACK-observed pending halves whose
+        // completing segment was consumed elsewhere. Pure Opening and
+        // SYN-ACK-first pairs keep the #6752/#13679/#4109 refusals.
+        if entry.syn_ack_first || !entry.handshake_pending {
+            return false;
+        }
+        let companion_key = reverse_session_key(key, entry_nat);
+        let Some(companion) = self.entry_by_key(&companion_key) else {
+            return false;
+        };
+        if companion.closing || companion.syn_ack_first {
+            return false;
+        }
+        if now_ns.saturating_sub(companion.last_seen_ns) > companion.expires_after_ns {
+            return false;
+        }
+        if self.cache_hit_handshake_progress(key).is_none() {
+            return false;
+        }
+        let fwd = if companion.metadata.is_reverse {
+            self.entry_by_key(key)
+        } else {
+            Some(companion)
+        };
+        let served_reverse = fwd.is_some_and(|f| f.counters.rev_packets > 0);
+        if !served_reverse {
+            return false;
+        }
+        let companion_last_seen = companion.last_seen_ns;
+        let Some(em) = self.entry_by_key_mut(key) else {
+            return false;
+        };
+        em.last_seen_ns = companion_last_seen;
+        self.rebucket_alive_entry(key, now_ns);
+        true
+    }
     /// #2120: the standby retention decision for an idle-crossed entry.
     /// Pure (reads only the passed snapshot + the HA context closures),
     /// so it can be unit-tested in isolation and called from the expire
@@ -727,15 +842,26 @@ impl SessionTable {
         if fabric_ingress {
             return StandbyGateDecision::Age;
         }
-        // #10888: an opening import has only its original opening deadline.
-        // Once that deadline is crossed, a missing primary Close must not
-        // grant a second stale-ceiling interval based on its app timeout.
-        if is_opening
-            && origin.is_peer_synced()
-            && now_ns.saturating_sub(last_seen_ns) > expires_after_ns
-        {
-            return StandbyGateDecision::ReapStaleSynced;
-        }
+        // #10888/#16218: an opening import has only its original opening
+        // deadline. Once that deadline is crossed, a missing primary Close
+        // must not grant a second stale-ceiling interval based on its app
+        // timeout (86400s in the #10888 fixture). It must NOT, however, be
+        // reaped instantly at the deadline: at an RG failover the promoted
+        // copy can still be opening/handshake-pending on this node (its
+        // hits may have crossed the fabric or the flow cache without
+        // completing the local handshake state), and an instant reap at
+        // the first post-move GC pass deletes the live flow on BOTH nodes
+        // within seconds (#16218). Route opening rows through the same
+        // bounded HOLD ceiling as established rows instead: the ceiling is
+        // min(MULT x expires_after_ns, ABS) measured from first_held_ns, so
+        // a lost-Close opening still reaps at <=3x its opening window
+        // (60s at the 20s default), never at its app timeout. When this
+        // node now forwards the RG, the SelfHeal arm below re-stamps the
+        // row instead of holding it. The reap therefore only fires via
+        // the Hold arm's ceiling check; there is no separate instant arm.
+        // Opening rows take the same SelfHeal/Hold path as established
+        // rows (#16218); `is_opening` no longer selects a separate arm.
+        let _ = is_opening;
         let peer_synced = origin.is_peer_synced();
         // forwards_here: does THIS node forward this session right now?
         // (rg > 0 → per-RG predicate; rg <= 0 → node-level.)

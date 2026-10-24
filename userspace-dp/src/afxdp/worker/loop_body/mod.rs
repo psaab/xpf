@@ -81,6 +81,9 @@ mod export_slice_delta_drain_13653_tests;
 #[cfg(test)]
 #[path = "export_slice_batched_window_15950_tests.rs"]
 mod export_slice_batched_window_15950_tests;
+#[cfg(test)]
+#[path = "pending_timer_16217_tests.rs"]
+mod pending_timer_16217_tests;
 
 
 // #13075 (D4-12): cold snapshot-rotation reconciliation (discriminator,
@@ -119,7 +122,7 @@ use pptp_drain::run_pptp_control_drain;
 // #13075 (D4-12): conntrack-refresh slice + fabric/WG drains extracted
 // from `worker_loop` (ct_slice.rs). Loop-local.
 mod ct_slice;
-use ct_slice::run_ct_slice;
+use ct_slice::{run_ct_slice, PendingNeighTimer, run_pending_neigh_timer};
 
 // #13075 (D4-12): delta-loss resync + stale-session sweeps extracted
 // from `worker_loop` (delta_recovery.rs). Loop-local.
@@ -522,6 +525,10 @@ pub(crate) fn worker_loop(
     let mut ct_cycle_start_ns: u64 = 0;
     // Persistent slab-index cursor: 0 means "between cycles / at the top".
     let mut ct_refresh_cursor: usize = 0;
+    // #16223: cursor for the shared-wire Established maintenance walk.
+    let mut established_shared_cursor: usize = 0;
+    // #16217 (FZDiag28, part b): 100 ms timer pending-neighbor retry state.
+    let mut pending_neigh_timer = PendingNeighTimer::new();
     // #869: worker-runtime telemetry.  Local counters, published to
     // `runtime_atomics` on the ~1s cadence below.
     use crate::afxdp::worker_runtime::{
@@ -633,6 +640,7 @@ pub(crate) fn worker_loop(
                 wr_counters.session_gc_aged_owner_rg_zero_active_node =
                     gc.aged_owner_rg_zero_active_node as u64;
                 wr_counters.session_gc_kept_alive_by_companion = gc.kept_alive_by_companion as u64;
+                wr_counters.session_gc_expired = gc.expired as u64;
                 // #1760 W1: durable artifact for the reverse-key-collision
                 // watch. The in-process counters reset on every restart
                 // and the lab has no long-term Prometheus store, so a
@@ -1571,7 +1579,7 @@ pub(crate) fn worker_loop(
         );
         // #13075: conntrack-refresh slice + fabric/WG drains (ct_slice.rs).
         run_ct_slice(
-            &sessions,
+            &mut sessions,
             &mut forwarding,
             loop_now_ns,
             conntrack_v4_fd,
@@ -1584,6 +1592,25 @@ pub(crate) fn worker_loop(
             &wg_uncovered_queues,
             &mut wg_uncovered_batch,
             worker_id,
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &mut established_shared_cursor,
+        );
+        // #16217 (FZDiag28, part b): timer-driven pending-neighbor retry
+        // at the same 100 ms cadence, packet-independent: a parked
+        // representative dispatches within one cadence of its hop
+        // landing in the node neighbor map even when no binding sees RX.
+        let pending_timer_fired = run_pending_neigh_timer(
+            &mut pending_neigh_timer,
+            &mut bindings,
+            &binding_lookup,
+            mirror_targets.as_ref(),
+            forwarding.as_ref(),
+            &dynamic_neighbors,
+            neighbor_resolver.as_ref(),
+            loop_now_ns,
+            event_stream.as_ref(),
+            &recent_exceptions,
         );
         // #7201: a command backlog IS work. `apply_worker_commands` drains at
         // most `WORKER_COMMAND_DRAIN_BUDGET` per pass so the AF_XDP rings get
@@ -1594,7 +1621,7 @@ pub(crate) fn worker_loop(
         // behind a 1 ms `poll(2)`, so the budget would trade a bounded 3.85 ms
         // stall for ~16 ms of drain. Seeded here rather than OR-ed after the
         // sweep so there is one assignment to reason about.
-        let mut did_work = commands_backlogged || !session_import_repairs.is_empty();
+        let mut did_work = commands_backlogged || !session_import_repairs.is_empty() || pending_timer_fired;
         let mut dbg_poll = DebugPollCounters::default();
         // #1620: read the cold-path sample mask from forwarding state once
         // per poll cycle (rather than per-binding) — it's a daemon-wide
@@ -1637,6 +1664,7 @@ pub(crate) fn worker_loop(
                 ha_startup_grace_until_secs,
                 &forwarding,
                 ha_runtime.as_ref(),
+                &ha_state,
                 &dynamic_neighbors,
                 &pptp_control,
                 neighbor_resolver.as_ref(),

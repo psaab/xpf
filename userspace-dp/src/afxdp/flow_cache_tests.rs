@@ -124,12 +124,15 @@ fn make_entry(
         stamp,
         policy_deny: None,
         deny_expires_at_secs: 0,
+        cluster_terminal_source_ifindex: 0,
+        cluster_terminal_stamp_owner_rg: 0,
         observed_bytes: 0,
         last_used_epoch: 0,
         neighbor_mac_epoch: 0,
         // #5147: default to no dynamic-neighbor dependency; tests that
         // exercise MAC-change eviction set `neighbor_shard` explicitly.
         neighbor_shard: NEIGHBOR_SHARD_NONE,
+        fabric_established: false,
     }
 }
 
@@ -841,6 +844,91 @@ fn from_deny_decision_retains_policy_replay_and_expiry_state() {
     assert_eq!(entry.deny_expires_at_secs, 42);
     assert_eq!(entry.neighbor_shard, NEIGHBOR_SHARD_NONE);
 }
+
+/// #16269 (option c, seed time): a DiscardRoute deny seed carrying the
+/// FIB cluster-terminal provenance stamp (`source_ifindex > 0`, demoted
+/// ClusterTerminalHAInactive) must preserve that provenance INTO the
+/// cached entry and refuse the 1s deny TTL, so the hit-path takeover
+/// gate judges the entry against CURRENT ownership instead of losing
+/// it to deny-expiry/re-seed churn. An operator discard
+/// (`source_ifindex == 0`) keeps the caller's TTL and zero provenance
+/// bit-identically (fail-closed: never rescued).
+/// RED-on-revert: without the seed-time preservation the stamped cell
+/// gets `deny_expires_at_secs == 101` and zero provenance fields.
+#[test]
+fn deny_seed_preserves_cluster_terminal_provenance_16269() {
+    let rg_epochs = default_rg_epochs();
+    let (flow, meta, validation, mut decision, forwarding, ha_state) =
+        make_v4_round_trip_inputs();
+    decision.resolution.disposition = ForwardingDisposition::DiscardRoute;
+    // Egress ifindex 6 is RG1 in the fixture; the FIB provenance stamp
+    // names the would-be egress the terminal zeroed.
+    decision.resolution.source_ifindex = 6;
+    decision.resolution.egress_ifindex = 0;
+    decision.resolution.next_hop = None;
+    decision.resolution.neighbor_mac = None;
+    let entry = FlowCacheEntry::from_deny_decision(
+        &flow,
+        meta,
+        validation,
+        decision,
+        0,
+        TEST_TRUST_ZONE_ID,
+        TEST_UNTRUST_ZONE_ID,
+        0,
+        None,
+        None,
+        None,
+        crate::filter::CachedFilterCounters::default(),
+        101,
+        &forwarding,
+        &ha_state,
+        &rg_epochs,
+    )
+    .expect("cluster-terminal DiscardRoute should seed a deny entry");
+    assert_eq!(entry.cluster_terminal_source_ifindex, 6);
+    // Stamp owner at seed: owner_rg_for_resolution keys on egress (0 for
+    // the demoted row) -> 0, exactly the live fw1 stamp_owner_rg=0 shape.
+    assert_eq!(entry.cluster_terminal_stamp_owner_rg, 0);
+    assert_eq!(
+        entry.deny_expires_at_secs,
+        CLUSTER_TERMINAL_DENY_EXPIRES_AT_SECS,
+        "cluster-terminal deny must not race the 1s deny TTL at takeover"
+    );
+    // The preserved provenance survives in the cached decision itself.
+    assert_eq!(entry.decision.resolution.source_ifindex, 6);
+
+    // Operator control: no stamp -> caller TTL, zero provenance.
+    let (flow, meta, validation, mut decision, forwarding, ha_state) =
+        make_v4_round_trip_inputs();
+    decision.resolution.disposition = ForwardingDisposition::DiscardRoute;
+    decision.resolution.source_ifindex = 0;
+    decision.resolution.egress_ifindex = 0;
+    decision.resolution.next_hop = None;
+    decision.resolution.neighbor_mac = None;
+    let entry = FlowCacheEntry::from_deny_decision(
+        &flow,
+        meta,
+        validation,
+        decision,
+        0,
+        TEST_TRUST_ZONE_ID,
+        TEST_UNTRUST_ZONE_ID,
+        0,
+        None,
+        None,
+        None,
+        crate::filter::CachedFilterCounters::default(),
+        101,
+        &forwarding,
+        &ha_state,
+        &rg_epochs,
+    )
+    .expect("operator DiscardRoute should seed a deny entry");
+    assert_eq!(entry.cluster_terminal_source_ifindex, 0);
+    assert_eq!(entry.cluster_terminal_stamp_owner_rg, 0);
+    assert_eq!(entry.deny_expires_at_secs, 101);
+}
 // ----------------------------------------------------------------
 // (g) ForwardCandidate is cacheable
 // ----------------------------------------------------------------
@@ -931,6 +1019,7 @@ fn from_forward_decision_round_trip() {
         snapshot_installed: true,
         config_generation: 10,
         fib_generation: 3,
+        neighbor_generation: 0,
     };
     let decision = SessionDecision {
         resolution: ForwardingResolution {
@@ -1055,6 +1144,89 @@ fn from_forward_decision_round_trip() {
     assert!(!entry.metadata.fabric_ingress);
 }
 
+/// #16217 (FZDiag24, arm 2): a transient `MissingNeighbor` decision
+/// must never seed the flow cache — driven through the production
+/// seed constructor `from_forward_decision`, not just the
+/// `is_cacheable` predicate. A MissingNeighbor entry seeded during
+/// the post-failover burst would be peeked by every silent
+/// retransmit and never evict (no live neighbor binding to go stale
+/// against), blackholing the flow on the neighbor-less shape.
+/// FAIL-ON-REVERT: drop the MissingNeighbor guard / cacheability
+/// exclusion and this constructor returns Some.
+#[test]
+fn missing_neighbor_never_seeds_flow_cache_16217() {
+    let rg_epochs = default_rg_epochs();
+    let key = make_key();
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    let meta = UserspaceDpMeta {
+        protocol: PROTO_TCP,
+        addr_family: libc::AF_INET as u8,
+        ingress_ifindex: 7,
+        tcp_flags: 0x10,
+        config_generation: 10,
+        fib_generation: 3,
+        ..Default::default()
+    };
+    let validation = ValidationState {
+        snapshot_installed: true,
+        config_generation: 10,
+        fib_generation: 3,
+        neighbor_generation: 0,
+    };
+    let mut forwarding = ForwardingState::default();
+    forwarding.egress.insert(
+        6,
+        EgressInterface {
+            bind_ifindex: 6,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x00, 0x01, 0x01],
+            zone_id: TEST_TRUST_ZONE_ID,
+            redundancy_group: 1,
+            primary_v4: Some(Ipv4Addr::new(10, 0, 1, 1)),
+            primary_v6: None,
+        },
+    );
+    let ha = BTreeMap::from([(
+        1,
+        HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: 95,
+            lease: HAForwardingLease::ActiveUntil(100),
+        },
+    )]);
+    let build = |disposition| {
+        FlowCacheEntry::from_forward_decision(
+            &flow,
+            meta,
+            validation,
+            make_decision(disposition),
+            1,
+            Some(3),
+            Some(7),
+            None,
+            crate::filter::CachedFilterCounters::default(),
+            &forwarding,
+            &ha,
+            false,
+            &rg_epochs,
+            0,
+        )
+    };
+    assert!(
+        build(ForwardingDisposition::MissingNeighbor).is_none(),
+        "MissingNeighbor must never seed the flow cache"
+    );
+    assert!(
+        build(ForwardingDisposition::ForwardCandidate).is_some(),
+        "control: ForwardCandidate with the same tuple still seeds"
+    );
+}
+
 // ----------------------------------------------------------------
 // (h-family) #963 PR-A: from_forward_decision refuses to *cache*
 // descriptors whose decision.nat carries IPs of a different family
@@ -1104,6 +1276,7 @@ fn make_v4_round_trip_inputs() -> (
         snapshot_installed: true,
         config_generation: 10,
         fib_generation: 3,
+        neighbor_generation: 0,
     };
     let decision = SessionDecision {
         resolution: ForwardingResolution {
@@ -1587,6 +1760,7 @@ fn make_v6_round_trip_inputs() -> (
         snapshot_installed: true,
         config_generation: 10,
         fib_generation: 3,
+        neighbor_generation: 0,
     };
     let decision = SessionDecision {
         resolution: ForwardingResolution {
@@ -1882,6 +2056,7 @@ fn from_forward_decision_returns_none_for_non_cacheable() {
         snapshot_installed: true,
         config_generation: 1,
         fib_generation: 1,
+        neighbor_generation: 0,
     };
     // NoRoute is not cacheable.
     let decision = make_decision(ForwardingDisposition::NoRoute);
@@ -1921,6 +2096,7 @@ fn fabric_redirect_cache_entry_uses_flow_owner_rg_for_epoch_invalidation() {
         snapshot_installed: true,
         config_generation: 1,
         fib_generation: 1,
+        neighbor_generation: 0,
     };
     let decision = SessionDecision {
         resolution: ForwardingResolution {
@@ -3752,6 +3928,7 @@ fn expired_scheduler_lease_evicts_scheduled_deny_cache_entries() {
                 &policy,
                 scheduler_expired,
                 &std::collections::BTreeMap::new(),
+                &ForwardingState::default(),
             )
             .is_none(),
         "a cache hit admitted by a scheduled rule must miss after lease expiry"
@@ -3767,6 +3944,7 @@ fn expired_scheduler_lease_evicts_scheduled_deny_cache_entries() {
                 &policy,
                 scheduler_expired,
                 &std::collections::BTreeMap::new(),
+                &ForwardingState::default(),
             )
             .is_some(),
         "expiry must not evict a flow not admitted by a scheduler-bound rule"
@@ -3879,7 +4057,8 @@ fn scheduler_lease_recovery_evicts_fail_closed_unscheduled_deny() {
                 64,
                 &policy,
                 true,
-                &std::collections::BTreeMap::new()
+                &std::collections::BTreeMap::new(),
+                &ForwardingState::default(),
             )
             .is_none()
     );
@@ -3895,7 +4074,8 @@ fn scheduler_lease_recovery_evicts_fail_closed_unscheduled_deny() {
                 64,
                 &policy,
                 true,
-                &std::collections::BTreeMap::new()
+                &std::collections::BTreeMap::new(),
+                &ForwardingState::default(),
             )
             .is_some(),
         "the fail-closed deny must hit while the lease is expired"
@@ -3930,7 +4110,8 @@ fn scheduler_lease_recovery_evicts_fail_closed_unscheduled_deny() {
                 64,
                 &policy,
                 false,
-                &std::collections::BTreeMap::new()
+                &std::collections::BTreeMap::new(),
+                &ForwardingState::default(),
             )
             .is_none(),
         "lease recovery must evict the fail-closed deny so the recovered scheduled permit can win (#13639)"

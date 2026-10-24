@@ -286,6 +286,7 @@ fn shared_refs_conntrack_v4_reaches_purge_16185() {
             leak_incarnation: 0,
             tcp_flags: 0x10,
             generation: 0,
+            fwd_packets: 0,
         },
     );
     let peer_queue = Arc::new(Mutex::new(VecDeque::new()));
@@ -328,6 +329,7 @@ fn shared_refs_conntrack_v4_reaches_purge_16185() {
             origin: SessionOrigin::SyncImport,
             shared_identity: Some((1, 0)),
         }),
+        fabric_adopted: false,
     };
     let mut evicted_keys: Vec<SessionKey> = Vec::new();
     maybe_promote_synced_session_with_conntrack(
@@ -489,6 +491,7 @@ fn shared_refs_conntrack_v4_reaches_deferred_promotion_16185() {
         }),
         deferred_shared_materialization: None,
         deferred_synced_purge: None,
+        fabric_adopted: false,
     };
     let mut evicted_keys: Vec<SessionKey> = Vec::new();
     maybe_promote_synced_session_with_conntrack(

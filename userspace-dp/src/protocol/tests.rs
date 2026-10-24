@@ -1303,6 +1303,7 @@ fn worker_runtime_status_session_gc_counters_roundtrip_13281() {
         session_gc_healed_on_promote: 7,
         session_gc_aged_owner_rg_zero_active_node: 8,
         session_gc_kept_alive_by_companion: 9,
+        session_gc_expired: 10,
         ..WorkerRuntimeStatus::default()
     };
     let value: serde_json::Value = serde_json::to_value(&status).expect("serialize status");
@@ -1316,6 +1317,7 @@ fn worker_runtime_status_session_gc_counters_roundtrip_13281() {
         "session_gc_healed_on_promote",
         "session_gc_aged_owner_rg_zero_active_node",
         "session_gc_kept_alive_by_companion",
+        "session_gc_expired",
     ] {
         assert!(value.get(key).is_some(), "missing session GC key {key}");
     }
@@ -1329,6 +1331,7 @@ fn worker_runtime_status_session_gc_counters_roundtrip_13281() {
     assert_eq!(decoded.session_gc_healed_on_promote, 7);
     assert_eq!(decoded.session_gc_aged_owner_rg_zero_active_node, 8);
     assert_eq!(decoded.session_gc_kept_alive_by_companion, 9);
+    assert_eq!(decoded.session_gc_expired, 10);
 }
 
 #[test]
@@ -4869,6 +4872,26 @@ fn process_status_policy_revoked_sessions_total_roundtrip_10021() {
     let legacy: ProcessStatus =
         serde_json::from_value(value).expect("a status without the key must decode");
     assert_eq!(legacy.policy_revoked_sessions_total, 0);
+}
+
+// #16215: `snat_revoked_sessions_total` follows the same additive wire
+// doctrine as its #10021 policy sibling.
+#[test]
+fn process_status_snat_revoked_sessions_total_roundtrip_16215() {
+    let mut status = ProcessStatus::default();
+    status.snat_revoked_sessions_total = 4;
+    let mut value = serde_json::to_value(&status).expect("serialize ProcessStatus to Value");
+    assert_eq!(value["snat_revoked_sessions_total"], 4);
+    let back: ProcessStatus =
+        serde_json::from_value(value.clone()).expect("deserialize ProcessStatus");
+    assert_eq!(back.snat_revoked_sessions_total, 4);
+    value
+        .as_object_mut()
+        .expect("status serializes to an object")
+        .remove("snat_revoked_sessions_total");
+    let legacy: ProcessStatus =
+        serde_json::from_value(value).expect("a status without the key must decode");
+    assert_eq!(legacy.snat_revoked_sessions_total, 0);
 }
 #[test]
 fn process_status_s5_reinject_absent_vs_zero_and_written_not_delivered_10478() {

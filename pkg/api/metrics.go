@@ -622,6 +622,7 @@ type xpfCollector struct {
 	userspaceSessionGCAgedOwnerRGZeroActiveNode *prometheus.Desc
 	userspaceNATReverseAmbiguous                *prometheus.Desc
 	userspaceSessionGCKeptAliveByCompanion      *prometheus.Desc
+	userspaceSessionGCExpired                   *prometheus.Desc
 	userspaceNATParseErrorsTotal                *prometheus.Desc
 	// #8447: source-NAT rule-match outcome quartet.
 	userspaceSourceNATMatchConsulted            *prometheus.Desc
@@ -636,6 +637,10 @@ type xpfCollector struct {
 	// #10021: cumulative established-session revocations by live zone policy.
 	// This is a session-count signal, not a packet-drop component.
 	userspacePolicyRevokedSessions *prometheus.Desc
+	// #16215: cumulative established-session revocations by stale
+	// source-NAT revalidation. A session-count signal, not a packet-drop
+	// component.
+	userspaceSnatRevokedSessions *prometheus.Desc
 	// #11503: unzoned transit denials kept separate by ingress/egress cause.
 	userspaceUnzonedIngressDenied *prometheus.Desc
 	userspaceUnzonedEgressDenied  *prometheus.Desc
@@ -906,8 +911,9 @@ type xpfCollector struct {
 	// fairness-eval to compute Cstruct + observed_CoV per
 	// docs/fairness-regimes.md). Refreshed at the helper's ~65ms
 	// debug-state tick.
-	bindingActiveFlowCount   *prometheus.Desc
-	bindingFlowCacheCapacity *prometheus.Desc
+	bindingActiveFlowCount       *prometheus.Desc
+	bindingFlowCacheCapacity     *prometheus.Desc
+	bindingFlowCacheEvictionsArm *prometheus.Desc
 	// #13299: UMEM capacity and frame inventories are distinct from
 	// in-flight utilization; fill-ring inventory is intentionally idle.
 	bindingUMEMTotalFrames         *prometheus.Desc
@@ -1458,6 +1464,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceSessionGCHealedOnPromote
 	ch <- c.userspaceSessionGCAgedOwnerRGZeroActiveNode
 	ch <- c.userspaceSessionGCKeptAliveByCompanion
+	ch <- c.userspaceSessionGCExpired
 	ch <- c.userspaceNATParseErrorsTotal
 	ch <- c.userspaceSourceNATMatchConsulted
 	ch <- c.userspaceSourceNATMatchMatched
@@ -1467,6 +1474,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceNatReverseKeyCollisionsDistinctSrc
 	ch <- c.userspaceSessionPublishErrors
 	ch <- c.userspacePolicyRevokedSessions
+	ch <- c.userspaceSnatRevokedSessions
 	ch <- c.userspaceUnzonedIngressDenied
 	ch <- c.userspaceUnzonedEgressDenied
 	ch <- c.userspaceDnatPublishErrors
@@ -1643,6 +1651,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.workerColdPathLayoutUnknownTotal
 	ch <- c.bindingActiveFlowCount
 	ch <- c.bindingFlowCacheCapacity
+	ch <- c.bindingFlowCacheEvictionsArm
 	ch <- c.bindingUMEMTotalFrames
 	ch <- c.bindingUMEMInflightFrames
 	ch <- c.bindingPendingFillFrames

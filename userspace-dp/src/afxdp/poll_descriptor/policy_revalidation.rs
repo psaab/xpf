@@ -1296,6 +1296,117 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     if scope_dependent && identity_absent && forward_metadata.nat_scope_ifindex.is_none() {
         return None;
     }
+    // #16109: a peer-synced row whose STORED resolution is terminal
+    // (egress 0, DiscardRoute / ClusterTerminalHAInactive) carries no
+    // local route verdict to judge its translation against: on the
+    // standby that terminal outcome encodes "the owner RG is not
+    // forwarding here", and on the new owner it persists until the
+    // row is refreshed or re-resolved (the refresh and the hit
+    // re-resolution both consult the live FIB and egress owner, so
+    // forwarding itself is never authorized by this decline). Judging
+    // the stored line can only answer `forwarding.egress.get(&0)`
+    // miss = invalid = revoke-and-delete both halves, the shared maps
+    // and the NAT reservation at the flow's first packet — the
+    // permanent blackhole. Decline instead: a genuinely withdrawn
+    // SNAT rule still revokes, because a judged row with a REAL
+    // egress (live or re-resolved) runs the full geometry check
+    // below, and a terminal row whose rule was withdrawn revokes on
+    // the first hit after it gains a real resolution. The row's NAT
+    // provenance stamp is deliberately left stale so that later hit
+    // re-derives once a real resolution exists. Locally-authored rows
+    // never carry this shape from admission (a local terminal outcome
+    // is not installed as an SNAT session), so the decline is scoped
+    // to the peer-synced family.
+    if forward_origin.is_peer_synced()
+        && forward_decision.resolution.egress_ifindex <= 0
+        && matches!(
+            forward_decision.resolution.disposition,
+            ForwardingDisposition::DiscardRoute | ForwardingDisposition::ClusterTerminalHAInactive
+        )
+    {
+        return None;
+    }
+    // #16215 (third shape): a peer-synced row whose STORED resolution is
+    // FabricRedirect names the fabric pseudo-egress (the fabric parent
+    // ifindex, e.g. 4 for fab0@ge-0-0-0) as its egress. That ifindex has
+    // no EgressInterface row, zone pair, or SNAT geometry, so judging it
+    // below can only answer `forwarding.egress.get(&fabric)` miss =
+    // invalid = revoke-and-delete both halves — exactly the egress-miss
+    // revocation proven live on fw0 (egress 4, dest_valid=true, dynamic
+    // provenance Some(false)). The fabric leg's NAT validity is judged
+    // on the egress owner when the packet arrives there; here the row
+    // carries no local egress verdict to judge against, so DECLINE like
+    // the terminal decline above. This covers rows demoted/retagged to
+    // SyncImport by DemoteOwnerRGS as well as true peer imports, and it
+    // applies regardless of failover timing (the live revocations fired
+    // in the pre-failover demote/republish window). A genuinely
+    // withdrawn SNAT rule still revokes once the row gains a real
+    // egress resolution (live or re-resolved) and runs the full
+    // geometry check below; locally-authored rows are judged as before.
+    if forward_origin.is_peer_synced()
+        && matches!(
+            forward_decision.resolution.disposition,
+            ForwardingDisposition::FabricRedirect
+        )
+    {
+        return None;
+    }
+    // #16215: judge the packet's re-resolved decision, not a stored
+    // terminal one — on EVERY node, not only the activating one. A
+    // peer-synced row can still carry its standby-side terminal
+    // resolution on the hitting worker (a peer worker whose
+    // RefreshOwnerRGS has not landed, a row materialized after the
+    // refresh, or — the fw0 shape — a locally-authored row demoted to
+    // SyncImport by DemoteOwnerRGS whose demote re-resolution demoted
+    // the cluster-terminal FIB row to plain DiscardRoute): stored
+    // egress 0 with DiscardRoute / ClusterTerminalHAInactive names no
+    // egress interface, so the stored line below can only answer
+    // `forwarding.egress.get(&0)` miss = invalid = revoke-and-delete —
+    // a live session deleted at its first packet after an RG move.
+    // Substituting the RESOLUTION (egress identity only; the NAT
+    // decision, metadata and key are untouched) makes the validator
+    // judge exactly the decision this packet is being forwarded with.
+    // FORWARD hits only: on a reverse hit the packet's decision is the
+    // REPLY's egress (the LAN side), which must never stand in for the
+    // forward row's WAN egress — judging the forward SNAT against the
+    // LAN egress reads the wrong zone pair and revokes valid
+    // translations. Reverse hits keep the stored forward decision.
+    // A genuinely withdrawn rule still revokes: the zone pair is read
+    // off the live egress, and the translation geometry must match a
+    // live rule. Scoped to peer-synced rows with a locally-forwarding
+    // re-resolution; every other row judges its stored decision
+    // exactly as before. Copy-on-write: the caller owns the hit
+    // decision by value, so no other row is mutated (the stored row
+    // is rewritten by RefreshOwnerRGS, or re-resolved again on the
+    // next stale hit — never per-packet on the fast path).
+    //
+    // The terminal-stored decline above runs first, so this
+    // substitution is unreachable while the stored row is terminal:
+    // the decline is what keeps a terminal row whose rule was
+    // withdrawn alive until it gains a real resolution, and judging
+    // the packet's terminal copy of that same row would revoke it
+    // here on the egress-0 miss. The substitution therefore covers
+    // the non-terminal stored shapes (a real egress whose stored
+    // geometry no longer matches the packet's re-resolved egress);
+    // revocation stays a FRESH decision's verdict in both arms.
+    let forward_decision = if !metadata.is_reverse
+        && forward_origin.is_peer_synced()
+        && decision.resolution.egress_ifindex > 0
+        && matches!(
+            decision.resolution.disposition,
+            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+        )
+        && !matches!(
+            forward_decision.resolution.disposition,
+            ForwardingDisposition::DiscardRoute | ForwardingDisposition::ClusterTerminalHAInactive
+        )
+    {
+        let mut judged = forward_decision;
+        judged.resolution = decision.resolution;
+        judged
+    } else {
+        forward_decision
+    };
     // #15934: selector priority follows HIT DIRECTION (see
     // forward_selector_for_hit), not session-branch shape: a reverse hit
     // that reaches this arm because its forward companion IS materialized

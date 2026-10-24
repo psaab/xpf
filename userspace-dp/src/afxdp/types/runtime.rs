@@ -497,6 +497,11 @@ pub(in crate::afxdp) struct ValidationState {
     pub(in crate::afxdp) snapshot_installed: bool,
     pub(in crate::afxdp) config_generation: u64,
     pub(in crate::afxdp) fib_generation: u32,
+    /// #16109: helper-local neighbor-set generation (see
+    /// `ForwardingGenerationStamp::neighbor_generation`). Published
+    /// with the validation pair so the poll loop stamps sessions
+    /// against the neighbor set in force; never reported to Go.
+    pub(in crate::afxdp) neighbor_generation: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -1059,6 +1064,13 @@ pub(in crate::afxdp) struct DebugPollCounters {
     ///
     /// Counted once per revoked session, not per dropped packet.
     pub(in crate::afxdp) policy_revoked_sessions: u64,
+    /// #16215: established sessions revoked because the stored source-NAT
+    /// translation is no longer expressible by the live NAT configuration
+    /// (the StaleSourceNat sibling of `policy_revoked_sessions`). Before
+    /// this counter the reason was counted nowhere operator-visible, so a
+    /// first-hit revalidation blackhole after an RG move was invisible.
+    /// Counted once per revoked session, not per dropped packet.
+    pub(in crate::afxdp) snat_revoked_sessions: u64,
     /// #9519: packets DROPPED because they hit an established session from a
     /// zone other than the one that admitted it, and their own zone's policy
     /// does not permit them. Per packet, not per session: nothing is revoked,
@@ -1133,12 +1145,23 @@ pub(in crate::afxdp) struct DebugPollCounters {
 ///
 /// Constructed once per RX-batch call at the
 /// `poll_binding_process_descriptor` call site. `'a` is covariant.
+/// #16217: empty authoritative RG set for test WorkerContexts that
+/// never exercise the adoption gate (fail-closed: no RG is active).
+pub(in crate::afxdp) static EMPTY_FWD_ACTIVE_RGS_16217: std::sync::LazyLock<
+    std::collections::BTreeSet<i32>,
+> = std::sync::LazyLock::new(std::collections::BTreeSet::new);
+
 pub(in crate::afxdp) struct WorkerContext<'a> {
     pub(in crate::afxdp) ident: &'a BindingIdentity,
     pub(in crate::afxdp) binding_lookup: &'a WorkerBindingLookup,
     pub(in crate::afxdp) mirror_targets: &'a MirrorTargetMap,
     pub(in crate::afxdp) forwarding: &'a ForwardingState,
     pub(in crate::afxdp) ha_state: &'a BTreeMap<i32, HAGroupRuntime>,
+    /// #16217 (ownership lag): authoritative RG forwarding-active set
+    /// freshly loaded from the coordinator `rg_runtime` ArcSwap by
+    /// the worker loop for this batch; the adoption gate reads THIS,
+    /// not the cached `ha_state` snapshot above.
+    pub(in crate::afxdp) forwarding_active_rgs: &'a std::collections::BTreeSet<i32>,
     pub(in crate::afxdp) dynamic_neighbors: &'a Arc<super::sharded_neighbor::ShardedNeighborMap>,
     /// #7699: the PPTP control-segment inbox the data path copies a TCP/1723
     /// segment into.

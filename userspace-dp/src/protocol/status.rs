@@ -333,6 +333,11 @@ pub(crate) struct ProcessStatus {
     /// `Packets dropped` component. Additive/defaulted for older helpers.
     #[serde(rename = "policy_revoked_sessions_total", default)]
     pub policy_revoked_sessions_total: u64,
+    /// #16215: cluster-wide cumulative established-session revocations by
+    /// stale source-NAT revalidation. Counts revoked SESSIONS, not dropped
+    /// packets. Additive/defaulted for older helpers.
+    #[serde(rename = "snat_revoked_sessions_total", default)]
+    pub snat_revoked_sessions_total: u64,
     /// HARDENING (#15742 follow-up): cumulative snapshot applies REFUSED
     /// because summary.policy_count disagreed with the policies the
     /// snapshot carried (policy_count>0 with empty policies is the

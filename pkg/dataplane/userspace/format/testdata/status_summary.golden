@@ -63,6 +63,7 @@ Userspace dataplane helper:
   Flow cache hits:           40
   Flow cache misses:         10
   Flow cache evictions:      1
+  Flow cache evictions by arm: gen=0 rg_epoch=0 lease=0 deny_expiry=0 scheduler=0 phase_flush=0 collision=0 neighbor_mac=0 decision_invalid=0 deny_superseded=0 session_dead=0 enforce_changed=0 owner_active_redirect=0 fabric_local_wins=0 fabric_ingress_local_wins=0 fabric_redirect_on_fabric=0 fabric_local_same_owner=0 fabric_ingress_discard_now_local=0 forward_candidate_egress_departed=0
   Session hits:              50
   Session misses:            12
   Session creates:           8

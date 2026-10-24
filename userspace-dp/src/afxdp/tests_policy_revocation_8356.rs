@@ -729,22 +729,17 @@ fn drive_shared_hit_10582_t1_t2(
     let shared_sessions = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
     shared_sessions.lock().expect("shared sessions").insert(
         key.clone(),
-        SyncedSessionEntry {
-            key: key.clone(),
-            decision: decision(WAN_IFINDEX),
-            metadata: metadata(false),
-            leak_incarnation: 0,
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            tcp_flags: TCP_ACK,
-            generation: 0,
-            session_id: 0,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-            pptp_call_ids: 0,
-            rev_packets: 0,
-            source_nat_static: None,
-        },
+        SyncedSessionEntry { key: key.clone(),
+        decision: decision(WAN_IFINDEX),
+        metadata: metadata(false),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_ACK,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        source_nat_static: None, },
     );
     let frame = build_txn_tcp_syn_frame_v4(
         SRC,
@@ -2706,6 +2701,7 @@ fn descriptor_path_stale_dnat_hit_restamps_conntrack_app_id_12191() {
             snapshot_installed: true,
             config_generation: 8,
             fib_generation: 9,
+            neighbor_generation: 0,
         },
         crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
         -1,
@@ -9497,6 +9493,7 @@ fn txn_run_descriptor_at_generation_11600(
         snapshot_installed: true,
         config_generation,
         fib_generation,
+        neighbor_generation: 0,
     };
     let mut meta = txn_meta_v4(LAN_IFINDEX as u32, tcp_flags, frame.len() as u16);
     meta.config_generation = config_generation;
@@ -10068,6 +10065,7 @@ fn fib_only_cross_zone_route_move_rejudges_existing_session_12074() {
         snapshot_installed: true,
         config_generation: 7,
         fib_generation: 9,
+        neighbor_generation: 0,
     };
     let (batch1, dbg1) = txn_run_descriptor_with_validation(
         &mut binding,
@@ -10116,6 +10114,7 @@ fn fib_only_cross_zone_route_move_rejudges_existing_session_12074() {
         snapshot_installed: true,
         config_generation: 7,
         fib_generation: 10,
+        neighbor_generation: 0,
     };
     let (batch3, dbg3) = txn_run_descriptor_with_validation(
         &mut binding,
@@ -10170,6 +10169,7 @@ fn fib_only_foreign_stale_hit_keeps_owner_policy_stamp_12265() {
         snapshot_installed: true,
         config_generation: 7,
         fib_generation: 9,
+        neighbor_generation: 0,
     };
     for flags in [TCP_SYN, TCP_ACK] {
         let frame = build_txn_tcp_syn_frame_v4(
@@ -10201,6 +10201,7 @@ fn fib_only_foreign_stale_hit_keeps_owner_policy_stamp_12265() {
         snapshot_installed: true,
         config_generation: 7,
         fib_generation: 10,
+        neighbor_generation: 0,
     };
 
     // FOREIGN: the same forward tuple arrives in dmz after the FIB move.
@@ -10336,6 +10337,7 @@ fn fib_only_same_zone_route_move_keeps_forwarding_and_nat_12074() {
         snapshot_installed: true,
         config_generation: 7,
         fib_generation: 9,
+        neighbor_generation: 0,
     };
     let (batch1, dbg1) = txn_run_descriptor_with_validation(
         &mut binding,
@@ -10389,6 +10391,7 @@ fn fib_only_same_zone_route_move_keeps_forwarding_and_nat_12074() {
         snapshot_installed: true,
         config_generation: 7,
         fib_generation: 10,
+        neighbor_generation: 0,
     };
     let (batch3, dbg3) = txn_run_descriptor_with_validation(
         &mut binding,
@@ -10501,6 +10504,7 @@ fn fib_only_reply_route_move_12074(same_zone: bool, warm_reply: bool) {
         snapshot_installed: true,
         config_generation: 7,
         fib_generation: 9,
+        neighbor_generation: 0,
     };
     let mut sessions = SessionTable::new();
     sessions.set_timeouts(forwarding_initial.session_timeouts);
@@ -10584,6 +10588,7 @@ fn fib_only_reply_route_move_12074(same_zone: bool, warm_reply: bool) {
         snapshot_installed: true,
         config_generation: 7,
         fib_generation: 10,
+        neighbor_generation: 0,
     };
     let (batch, dbg) = txn_run_descriptor_with_validation(
         &mut reverse_binding,
@@ -10751,6 +10756,7 @@ fn fib_only_reply_nonforwarding_route_12074(
         snapshot_installed: true,
         config_generation,
         fib_generation,
+        neighbor_generation: 0,
     };
     let mut sessions = SessionTable::new();
     sessions.set_timeouts(forwarding_initial.session_timeouts);

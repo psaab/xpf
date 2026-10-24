@@ -230,6 +230,7 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 	c.userspaceSessionGCHealedOnPromote = prometheus.NewDesc("xpf_userspace_session_gc_healed_on_promote_total", "Peer-synced sessions self-healed after local RG promotion.", nil, nil)
 	c.userspaceSessionGCAgedOwnerRGZeroActiveNode = prometheus.NewDesc("xpf_userspace_session_gc_aged_owner_rg_zero_active_node_total", "Owner-RG-zero sessions aged on a node forwarding another RG.", nil, nil)
 	c.userspaceSessionGCKeptAliveByCompanion = prometheus.NewDesc("xpf_userspace_session_gc_kept_alive_by_companion_total", "Idle-crossed session entries retained by their active companion.", nil, nil)
+	c.userspaceSessionGCExpired = prometheus.NewDesc("xpf_userspace_session_gc_expired_total", "Session entries removed by the timer wheel on normal expiry.", nil, nil)
 	c.userspacePptpUnassociatedPackets = prometheus.NewDesc(
 		"xpf_userspace_pptp_unassociated_packets_total",
 		"Cumulative GREv1 packets without a PPTP association; they remain "+
@@ -381,6 +382,13 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 		"xpf_userspace_policy_revoked_sessions_total",
 		"Cumulative established sessions revoked because the live zone policy "+
 			"denied them. This counts sessions, not dropped packets (#10021).",
+		nil, nil,
+	)
+	c.userspaceSnatRevokedSessions = prometheus.NewDesc(
+		"xpf_userspace_snat_revoked_sessions_total",
+		"Cumulative established sessions revoked because the stored "+
+			"source-NAT translation was no longer valid. This counts "+
+			"sessions, not dropped packets (#16215).",
 		nil, nil,
 	)
 	c.userspaceUnzonedIngressDenied = prometheus.NewDesc(
