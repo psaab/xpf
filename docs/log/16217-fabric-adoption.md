@@ -1651,3 +1651,38 @@ head.** Restore after each run: clean master `2c8575b70e`, helper
 `2f2f5cbf…b04` both, RG0/1/2 node0, target OK, P4 14.6/14.5
 Gbit/s, VERIFY_ZERO 0. (Pre-rebase head 4a8abf0a40 also passed
 twice: run1/run2 in the FZFixWire34 section above.)
+
+### Final-head confirmation (69cf1a2e05) — NOT clean, reported as-is
+
+The second master rebase (bbd1c94293, incl. the #16209
+types/forwarding split + #16444 pkt_len fixture rework + #16110
+session provenance) required one extra commit (69cf1a2e05,
+duplicate ZoneHostInbound deletion, zero logic) on top of the
+twice-proven ae0fbee76c fold bundle. Unit counts identical
+(16217 61, policy_revalidation 116). The confirmation aged cells
+on the FINAL head, however, did NOT reproduce the run3/run4
+clean result:
+
+Provenance: `make deb DEB_VERSION=99.16217.48` deb sha256
+`c398877dd356710b11a9ac4c9f987614317f0ad41a73fb53e677124d86b37145`,
+helper sha256
+`f61bf04195f1365174f15e622d6f34a5b049b02266b1a0164c012f81a48a2598`
+hash-proved both nodes before traffic; RG1 node0->node1 proven
+both views each run; evidence `/var/worktrees/FZFixWire34/run{5,6}/`:
+
+| Run | Per-stream zeros | SUM zeros | snat_revoked | Verdict |
+|---|---|---|---|---|
+| run5 (final head) | stream 57402: 7 @31-40s | 0 | 0 both | FAIL (strict) |
+| run6 (final head) | 453xx streams: 5 @32-35s | 0 | 0 both | FAIL (strict) |
+
+Distinguishing facts: every zero is FO+1s..FO+10s and every stream
+RECOVERS (no permanent stall; SUM sender 1.37/1.95 Gbit/s with all
+streams completing 85s) — the transient-takeover-dip shape, not
+the FZCellsStrict permanent-death shape, and snat_revoked stayed 0
+(the Wire34 guard's target defect does not recur). The
+ae0fbee76c cells (run3/run4, identical fold code, pre-split master)
+were fully clean twice. Whether the dip is master-delta behavior
+(#16444/#16110 era) or run variance is NOT established here; the
+final head is therefore NOT claimed as twice-proven. Restore
+after each run verified clean (helper 2f2f5cbf…b04 both, RG0/1/2
+node0, P4 13.7/17.4 Gbit/s, VERIFY_ZERO 0).
