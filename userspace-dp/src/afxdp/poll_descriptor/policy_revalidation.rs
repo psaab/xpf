@@ -1463,14 +1463,19 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     // judged forward row lacks forward VLAN/dynamic-SNAT provenance
     // (companion-less fabric/synced reverse rows synthesize that
     // absence; it is structural, not staleness evidence). Decline:
-    // keep session, drop packet. The escape is an actual NAT-binding
+    // keep session and serve this packet by the session (the caller
+    // proceeds past revalidation; only a PolicyRevocation drops).
+    // The escape is an actual NAT-binding
     // change: the judged row was revalidated under an OLDER config
     // generation and the live config epoch has advanced past it
     // (`source_nat_revalidated.config_generation` lags the live
     // `forwarding_revalidation_gen.config_generation`) — a withdrawn
     // or re-bound translation under the new epoch still revokes here.
-    // A forward hit (companion present, provenance recorded) is
-    // judged normally and never takes this decline.
+    // Scope note (GLM Final5, no overclaim): this decline is only
+    // reachable on a REVERSE hit whose judged forward metadata
+    // carries no forward VLAN (`forward_ingress_vlan_id` None). A
+    // reverse hit WITH recorded forward VLAN provenance, and every
+    // forward hit, are judged normally and never take this decline.
     if metadata.is_reverse
         && forward_metadata.forward_ingress_vlan_id.is_none()
         && sessions.forward_established_with_traffic(&forward_key)
@@ -1483,7 +1488,7 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
         // exactly the imported rows it exists for. An unjudged row
         // has never been validated under ANY local epoch, so there
         // is no stale binding to revoke against: decline (keep
-        // session, drop packet) until a local judgment stamps an
+        // session, serve packet) until a local judgment stamps an
         // epoch. Only a row judged under an epoch the live config
         // has ADVANCED PAST (binding actually changed) revokes.
         let live_epoch = sessions.forwarding_revalidation_config_generation();

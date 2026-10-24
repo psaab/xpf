@@ -8071,3 +8071,93 @@ fn declined_reverse_hit_never_produces_teardown_key_16217() {
     );
     assert_eq!(sessions.len(), 1, "no local row may be torn down");
 }
+
+/// #16217 (Final5, Codex): production-chain packet outcome for a
+/// DECLINED reverse hit. Drives the exact production sequence the
+/// poll caller (`poll_descriptor/mod.rs` session-hit block) runs:
+/// 1. `source_nat_revocation_on_session_hit_with_ingress` on the
+///    companion-present established FIB-invalid fixture returns
+///    None (decline — see
+///    `companion_present_reverse_hit_declines_when_invalid_current_epoch_16217`);
+/// 2. decline (`None`) means the caller never builds a
+///    `PolicyRevocation`, never calls
+///    `delete_terminal_filtered_session`, and proceeds to forward
+///    THIS packet through the ordinary session-hit serve — packet
+///    outcome is "forwarded, session kept", NOT dropped. (Corrected
+///    semantics: an SNAT-revalidation DECLINE differs from a
+///    PolicyRevocation: decline = no opinion, packet served by the
+///    session; revoke = teardown + drop. The revoked packet is the
+///    dropped one; a declined packet must be served.)
+/// 3. the canonical-less sessionless revocation shape, by
+///    contrast, yields `Some(revocation{canonical_key: None})`:
+///    the caller skips teardown (session kept) and recycles the
+///    descriptor + continues — packet outcome "dropped, session
+///    kept".
+/// Both outcomes are asserted from the return values the caller
+/// branches on, against the live session table (kept in both).
+#[test]
+fn declined_reverse_hit_packet_outcomes_16217() {
+    // Decline arm: companion-present, established, FIB-invalid.
+    let case = reverse_snat_case_13652();
+    let mut bad_decision = case.2;
+    bad_decision.resolution.egress_ifindex = 999;
+    bad_decision.resolution.tx_ifindex = 999;
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.install_with_protocol_with_origin(
+        case.0.clone(),
+        bad_decision,
+        case.3.clone(),
+        case.6,
+        1_000_000,
+        case.0.protocol,
+        0x10,
+    ));
+    assert!(sessions.install_with_protocol_with_origin(
+        case.1.clone(),
+        case.4,
+        case.5.clone(),
+        SessionOrigin::ReverseFlow,
+        1_000_000,
+        case.1.protocol,
+        0x10,
+    ));
+    sessions.account_packet(&case.0, 100, 0x10, 0);
+    sessions.account_packet(&case.1, 100, 0x10, 0);
+    sessions.mark_source_nat_revalidated(&case.0, Some(false));
+    let outcome = reverse_snat_hit_13652(&imported_snat_forwarding(false), &mut sessions, &case);
+    assert!(
+        outcome.is_none(),
+        "decline: no revocation object => caller serves the packet (no teardown, no drop)"
+    );
+    assert!(
+        sessions.entry_with_origin(&case.0).is_some()
+            && sessions.entry_with_origin(&case.1).is_some(),
+        "decline: both halves kept for the serve"
+    );
+    // Sessionless arm: ONLY the reverse row installed locally
+    // (forward companion absent — the companion-less shape): a
+    // withdrawn rule produces the canonical-less revocation; the
+    // caller skips teardown (nothing claimed) and recycles the
+    // descriptor — packet dropped, reverse row kept.
+    let mut no_rules = imported_snat_forwarding(false);
+    no_rules.source_nat_rules = crate::nat::parse_source_nat_rules(&[]);
+    let mut sessions2 = SessionTable::new();
+    sessions2.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions2.install_with_protocol_with_origin(
+        case.1.clone(),
+        case.4,
+        case.5.clone(),
+        SessionOrigin::ReverseFlow,
+        1_000_000,
+        case.1.protocol,
+        0x10,
+    ));
+    let revocation = reverse_snat_hit_13652(&no_rules, &mut sessions2, &case)
+        .expect("withdrawn rule must produce the sessionless revocation");
+    assert!(
+        revocation.canonical_key.is_none(),
+        "sessionless: caller skips teardown (kept) and drops only this packet"
+    );
+    assert!(sessions2.entry_with_origin(&case.1).is_some(), "sessionless: local reverse row kept");
+}

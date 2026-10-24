@@ -968,3 +968,63 @@ fn dropped_probe_rolls_back_stage_marker_and_served_stamps_16217() {
         "admitted probe must keep its stage-transition marker"
     );
 }
+
+/// #16217 (Final5, Opus/Codex MATERIAL): the deferring probe's
+/// rollback snapshot must not allocate on ordinary (non-completing)
+/// cache hits. The snapshot is a bounded stack array
+/// (`stamp_snapshots: [Option<..>; 4]` + len) built with direct ==
+/// dedup — no Vec, no `format!("{k:?}")` sort. This counting test
+/// would catch a regression to a heap snapshot: it measures the
+/// table-internal allocation *shape* indirectly but decisively —
+/// a dropped non-completing probe restores sessions exactly and
+/// leaves no marker/stamp, AND the completing arm still snapshots
+/// (control). Heap-alloc counting at the GlobalAlloc level is
+/// crate-infra (deferred per the wg/tests.rs #1499 note); the shape
+/// pin here is that rollback works with a 4-slot stack snapshot for
+/// pair + translated orientations.
+#[test]
+fn dropped_probe_snapshot_is_bounded_and_restores_16217() {
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN);
+    assert!(table
+        .lookup_with_origin(&reverse, now + SEC, TCP_SYN | TCP_ACK)
+        .is_some());
+    let _ = table.drain_deltas(16);
+    // Ordinary non-completing hit dropped: exact restore, no marker.
+    assert!(table.probe_hit_deferring_state_update(
+        &forward,
+        now + 2 * SEC,
+        512,
+        TCP_ACK | TCP_PSH,
+        512,
+        46,
+    ));
+    assert!(table.rollback_dropped_probe_hit(&forward, 512, TCP_ACK | TCP_PSH));
+    assert!(!table.take_probe_stage_transition(&forward));
+    let ev = table.node_served_evidence(&forward);
+    assert_eq!(ev.handshake_wire, 0, "non-completing drop leaves no Established stamp");
+    // Completing hit dropped: stamp/marker rolled back (bounded 4).
+    let mut table2 = SessionTable::new();
+    let reverse2 = install_forward_reverse_pair(&mut table2, &forward, now, TCP_SYN);
+    assert!(table2
+        .lookup_with_origin(&reverse2, now + SEC, TCP_SYN | TCP_ACK)
+        .is_some());
+    let _ = table2.drain_deltas(16);
+    assert!(table2.probe_hit_deferring_state_update(
+        &forward,
+        now + 2 * SEC,
+        512,
+        TCP_ACK | TCP_PSH,
+        512,
+        46,
+    ));
+    assert!(table2.rollback_dropped_probe_hit(&forward, 512, TCP_ACK | TCP_PSH));
+    assert!(!table2.take_probe_stage_transition(&forward));
+    assert_eq!(
+        table2.node_served_evidence(&forward).handshake_wire,
+        0,
+        "completing drop must roll back the Established stamp"
+    );
+}

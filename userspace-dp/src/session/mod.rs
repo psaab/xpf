@@ -1821,11 +1821,14 @@ struct ProbeUndo {
     accounting: Option<(SessionKey, ProbeHalfUndo)>,
     shed_forward_key: SessionKey,
     shed_was_present: bool,
-    /// #16217 (GLM F1): pre-probe `node_served_stamps` snapshots for
-    /// every stamp key the completing hit may write, so a dropped
-    /// probe restores them exactly and removes the stage-transition
-    /// marker instead of leaving Established evidence behind.
-    stamp_snapshots: Vec<(SessionKey, Option<(u8, u64)>)>,
+    /// #16217 (GLM F1, Final5): pre-probe `node_served_stamps`
+    /// snapshots for every stamp key the completing hit may write,
+    /// so a dropped probe restores them exactly and removes the
+    /// stage-transition marker instead of leaving Established
+    /// evidence behind. Bounded fixed array (at most 4 distinct
+    /// orientations), no heap allocation on the probe path.
+    stamp_snapshots: [Option<(SessionKey, Option<(u8, u64)>)>; 4],
+    stamp_snapshot_len: usize,
 }
 
 pub(crate) struct SessionTable {
@@ -4161,7 +4164,10 @@ impl SessionTable {
         // completing ACK still advanced node-level evidence.
         self.pending_probe_stage_transitions
             .retain(|k| k != &undo.canonical_key);
-        for (stamp_key, prior) in &undo.stamp_snapshots {
+        for slot in undo.stamp_snapshots.iter().take(undo.stamp_snapshot_len) {
+            let Some((stamp_key, prior)) = slot else {
+                continue;
+            };
             match prior {
                 Some(v) => {
                     self.node_served_stamps.insert(stamp_key.clone(), *v);
@@ -4269,27 +4275,36 @@ impl SessionTable {
                 };
                 let shed_was_present =
                     self.pressure_shed_unreplied.contains_key(&shed_forward_key);
-                // #16217 (GLM F1): snapshot every node-served stamp
-                // this probe may write (forward orientations of the
-                // matched + companion keys) BEFORE any mutation.
-                let stamp_snapshots: Vec<(SessionKey, Option<(u8, u64)>)> = {
-                    let mut keys: Vec<SessionKey> = vec![
-                        matched_key.clone(),
-                        reverse_session_key(&matched_key, nat),
+                // #16217 (GLM F1, Final5): snapshot every node-served
+                // stamp this probe may write (forward orientations of
+                // the matched + companion keys) BEFORE any mutation.
+                // Bounded stack array, direct == dedup, no heap
+                // allocation and no format/sort on this path.
+                let mut stamp_snapshots: [Option<(SessionKey, Option<(u8, u64)>)>; 4] =
+                    [None, None, None, None];
+                let mut stamp_snapshot_len = 0usize;
+                {
+                    let candidates = [
+                        Some(matched_key.clone()),
+                        Some(reverse_session_key(&matched_key, nat)),
+                        (companion_key != matched_key).then(|| companion_key.clone()),
+                        (companion_key != matched_key)
+                            .then(|| reverse_session_key(&companion_key, nat)),
                     ];
-                    if companion_key != matched_key {
-                        keys.push(companion_key.clone());
-                        keys.push(reverse_session_key(&companion_key, nat));
+                    for cand in candidates.into_iter().flatten() {
+                        if stamp_snapshots[..stamp_snapshot_len]
+                            .iter()
+                            .any(|slot| slot.as_ref().is_some_and(|(k, _)| *k == cand))
+                        {
+                            continue;
+                        }
+                        if stamp_snapshot_len < stamp_snapshots.len() {
+                            let v = self.node_served_stamps.get(&cand).copied();
+                            stamp_snapshots[stamp_snapshot_len] = Some((cand, v));
+                            stamp_snapshot_len += 1;
+                        }
                     }
-                    keys.sort_by_key(|k| format!("{k:?}"));
-                    keys.dedup();
-                    keys.into_iter()
-                        .map(|k| {
-                            let v = self.node_served_stamps.get(&k).copied();
-                            (k, v)
-                        })
-                        .collect()
-                };
+                }
                 probe_undo = Some(ProbeUndo {
                     canonical_key: matched_key.clone(),
                     matched: (matched_key, matched_snap),
@@ -4298,6 +4313,7 @@ impl SessionTable {
                     shed_forward_key,
                     shed_was_present,
                     stamp_snapshots,
+                    stamp_snapshot_len,
                 });
             }
         }

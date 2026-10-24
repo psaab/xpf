@@ -194,11 +194,6 @@ pub(in crate::afxdp) struct ForwardingState {
         FastMap<(u8, u32), Vec<(Box<str>, u32, i32)>>,
     pub(in crate::afxdp) connected_owner_index_v6:
         FastMap<(u8, u128), Vec<(Box<str>, u32, i32)>>,
-    /// #16217: table names that own at least one indexed row; the
-    /// probe uses it to decide whether a named scope has rows of its
-    /// own or only sees the (default-keyed) empty-table rows.
-    pub(in crate::afxdp) connected_owner_tables_v4: FastSet<String>,
-    pub(in crate::afxdp) connected_owner_tables_v6: FastSet<String>,
     /// #16217 (GLM F1): row counts the index was built from
     /// (FIB rows + ledger prefixes, both families). A post-build
     /// mutation of the connected vecs/ledger (unit fixtures) makes
@@ -823,8 +818,6 @@ impl ForwardingState {
     pub(in crate::afxdp) fn rebuild_connected_owner_index(&mut self) {
         self.connected_owner_index_v4.clear();
         self.connected_owner_index_v6.clear();
-        self.connected_owner_tables_v4.clear();
-        self.connected_owner_tables_v6.clear();
         self.connected_owner_index_rows = (0, 0);
         // #16217 (Codex #2/#3/#4/#6 + GLM F1): the ledger scope keys
         // must mirror `interface_in_table_scope` EXACTLY. The legacy
@@ -841,24 +834,6 @@ impl ForwardingState {
         // ledger rows (filed under `<R>.inet.0`) and (b) wrongly
         // surface default-instance rows under a named scope. Both
         // diverged from the legacy scan.
-        let mut tables4: Vec<&str> = vec!["inet.0"];
-        for row in &self.connected_v4 {
-            if !row.table.is_empty() && !tables4.contains(&row.table.as_str()) {
-                tables4.push(row.table.as_str());
-            }
-        }
-        let mut tables6: Vec<&str> = vec!["inet6.0"];
-        for row in &self.connected_v6 {
-            if !row.table.is_empty() && !tables6.contains(&row.table.as_str()) {
-                tables6.push(row.table.as_str());
-            }
-        }
-        for t in &tables4 {
-            self.connected_owner_tables_v4.insert(t.to_string());
-        }
-        for t in &tables6 {
-            self.connected_owner_tables_v6.insert(t.to_string());
-        }
         // Empty-table rows are visible in EVERY scope (legacy:
         // row.table empty matches any want). They are filed under
         // the sentinel key "" and the probe considers want-key and
@@ -939,7 +914,6 @@ impl ForwardingState {
                     if t.ends_with("inet6.0") {
                         continue;
                     }
-                    self.connected_owner_tables_v4.insert(t.clone());
                     let slot = self
                         .connected_owner_index_v4
                         .entry((len, net))
@@ -966,7 +940,6 @@ impl ForwardingState {
                 let len = prefix.prefix_len();
                 let net = u128::from(prefix.addr());
                 for t in &scoped {
-                    self.connected_owner_tables_v6.insert(t.clone());
                     let slot = self
                         .connected_owner_index_v6
                         .entry((len, net))
