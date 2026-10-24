@@ -109,22 +109,16 @@ func (d *postPhase2CompletingDP) DeleteStaleVlanIface(map[uint32]bool) {
 }
 
 func TestCompileConfigNATPhaseFailureReturnsResult_15943(t *testing.T) {
+	// #16422 supersedes the missing-pool arm of this cell: the
+	// dangling SNAT pool now warn-and-skips on BOTH passes, so
+	// compileNAT no longer fails on it. The partial-result contract
+	// for a genuine post-Phase-2 failure stays pinned by
+	// TestCompileConfigReturnsPartialResultAfterPhase2_15943 (Phase 3).
 	cfg := failLaterNATPhaseConfig()
 	result := newValidationResult()
 	assignZoneIDs(result, cfg)
 	assignScreenIDs(result, cfg)
-	// compileNAT is Phase 6; drive it as CompileConfig would (real pass).
-	err := compileNAT(&recordingDP{}, cfg, result)
-	if err == nil {
-		t.Fatal("expected the missing SNAT pool to fail compileNAT")
+	if err := compileNAT(&recordingDP{}, cfg, result); err != nil {
+		t.Fatalf("missing SNAT pool must warn-and-skip (#16422), got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "no-such-pool-4960") {
-		t.Fatalf("compileNAT failed for the wrong reason: %v", err)
-	}
-	// The contract is at the CompileConfig wrapper: a NAT error wrapped as
-	// "compile nat: ..." must accompany a non-nil result. Assert the wrapper
-	// shape by re-running through CompileConfig with the pre-pass satisfied
-	// is impossible without host access (compileZones), so this cell pins the
-	// phase error itself and TestCompileConfigReturnsPartialResultAfterPhase2_15943
-	// pins the wrapper's non-nil return on the adjacent Phase 3.
 }

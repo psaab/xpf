@@ -40,6 +40,19 @@ xpf (0.0.0) unstable; urgency=medium
     peer emitting gen-0 batches from 17+ origins wrote a generation
     state file the loader rejects on every restart. Gen-0 first
     contact keeps its no-clear-barrier semantics within the cap.
+  * Dataplane: warn-and-skip the six tolerated NAT/policy shapes on
+    the production real pass as well as the #4960 validation pre-pass
+    (#16422). A leniently loaded or HA-synced config carrying a
+    dangling SNAT/DNAT pool, a network-prefix DNAT pool, a
+    mixed-family static NAT rule, a bad NAT64 prefix or unusable
+    NAT64 source pool, or a policy naming an undefined zone no
+    longer aborts the apply after Phase 2 has mutated the host and
+    publishes no snapshot; the offending rule/rule-set/zone-pair is
+    skipped fail-closed exactly as the userspace snapshot builders
+    already disarm it, and strict commit rejection in pkg/config is
+    unchanged. compileNPTv6 now only examines IsNPTv6 rules, so a
+    plain static NAT rule is no longer rejected by the NPTv6 prefix
+    grammar.
   * FRR: restore per-qualified-next-hop metrics for routes redistributed
     into RIP (#12531). RIP now receives its QNH metric through
     ripd-native offset-lists in the router rip stanza (one

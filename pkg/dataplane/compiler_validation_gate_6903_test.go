@@ -266,6 +266,13 @@ func TestValidationPassRecordCensus6903(t *testing.T) {
 	// Pinned membership, produced by censusCfg6903 above. Recorded rather than
 	// derived so a record DISAPPEARING is a failure and not a silently smaller
 	// expected set.
+	//
+	// #16422: "invalid pool address" is no longer in the want set — no
+	// production site emits it at this head (the SNAT pool-parse warn was
+	// removed with the #6420 dead-write deletion; the census fixture's
+	// p2 pool now compiles via the unusable-pool marker instead). The
+	// entry was already unreachable on clean master, where this census
+	// failed earlier at the fixture-compile step.
 	want := []string{
 		"DNAT destination-address-name not found in address-book",
 		"DNAT rule has no match destination-address",
@@ -281,7 +288,6 @@ func TestValidationPassRecordCensus6903(t *testing.T) {
 		"interface not found, skipping",
 		"invalid DNAT match address",
 		"invalid DNAT pool address",
-		"invalid pool address",
 		"invalid static NAT match address",
 		"invalid static NAT then address",
 		"source NAT rule compiled",
