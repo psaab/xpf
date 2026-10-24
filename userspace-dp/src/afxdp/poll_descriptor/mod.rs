@@ -120,6 +120,68 @@ use super::poll_stages::{
 use super::*;
 use crate::policy::evaluate_policy_result_with_icmp_at;
 
+/// #16055: the routing domain the PPTP data-channel resolve must consult.
+///
+/// The association table is domain-keyed (`PptpCall::routing_domain`), and
+/// associations are installed in the domain of the control flow that taught
+/// them — which stage 9b stamps from the SAME claimed identity the flow is
+/// subsequently keyed by (`ingress_zone_override.or(ambiguous_zone)`). The
+/// resolve must therefore derive its domain from that claimed identity,
+/// not from the bare fabric-link ingress: on a fabric arrival the two can
+/// differ (the fabric link itself is in no routing instance, and an
+/// ambiguous claimed zone resolves to its own per-zone quarantine band),
+/// so resolving with the ingress-only domain looked the association up in
+/// the wrong domain — it missed (or, worse, refreshed) a different
+/// tenant's association and the flow was then re-keyed by stage 9b into
+/// the claimed domain carrying no (or the wrong) discriminator.
+///
+/// Two fail-closed cases, both mirroring existing arms in the loop:
+/// - `absent_fabric_ingress_suspect`: an RI node, unstamped fabric
+///   arrival, no opt-in — domain 0 exactly as the pre-fix arm did (the
+///   suspect arm below re-keys to a uniquely matched established
+///   session's domain or drops; the resolve must not refresh any other
+///   domain's association meanwhile).
+/// - `packet_fabric_ingress` with NO claimed zone (unencoded fabric
+///   frame, no stamp at all): the peer encoded no original-ingress
+///   identity, so there is no claimed domain to resolve in — domain 0,
+///   never the fabric link's own ifindex-derived domain.
+///
+/// Non-fabric arrivals keep the physical ingress derivation unchanged.
+pub(super) fn pptp_resolve_routing_domain(
+    forwarding: &ForwardingState,
+    ingress_ifindex: i32,
+    ingress_vlan_id: u16,
+    packet_fabric_ingress: bool,
+    ingress_zone_override: Option<u16>,
+    ambiguous_zone: Option<u16>,
+    absent_fabric_ingress_suspect: bool,
+) -> u32 {
+    if absent_fabric_ingress_suspect {
+        return 0;
+    }
+    if packet_fabric_ingress {
+        // Only a claimed (validated or ambiguous) zone names a domain.
+        // `ingress_routing_domain(.., None)` on a fabric arrival would
+        // fall through to the fabric link's logical ifindex, which is
+        // not the flow's ingress identity — fail closed to 0 instead.
+        return match ingress_zone_override.or(ambiguous_zone) {
+            Some(zone) => crate::afxdp::forwarding::ingress_routing_domain(
+                forwarding,
+                ingress_ifindex,
+                ingress_vlan_id,
+                Some(zone),
+            ),
+            None => 0,
+        };
+    }
+    crate::afxdp::forwarding::ingress_routing_domain(
+        forwarding,
+        ingress_ifindex,
+        ingress_vlan_id,
+        None,
+    )
+}
+
 /// #11053: close the PPTP control channel locally, purge buffered Reply
 /// segments, and queue a channel-scoped forget for every worker. Full queues
 /// are recorded for retry by the periodic control-inbox drain.
@@ -1498,20 +1560,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // keyed GRE only, and coupling PPTP to it left the default
                 // PPTP ALG inert.
                 if flow.is_none() && worker_ctx.forwarding.pptp_enabled() {
-                    let routing_domain = if absent_fabric_ingress_suspect {
-                        0
-                    } else {
-                        crate::afxdp::forwarding::ingress_routing_domain(
-                            worker_ctx.forwarding,
-                            meta.ingress_ifindex as i32,
-                            meta.ingress_vlan_id,
-                            if packet_fabric_ingress {
-                                ingress_zone_override
-                            } else {
-                                None
-                            },
-                        )
-                    };
+                    // #16055: resolve in the SAME domain stage 9b will
+                    // re-key this flow to (the claimed fabric zone's
+                    // domain, ambiguous included), not the bare
+                    // fabric-link ingress domain. See
+                    // `pptp_resolve_routing_domain`.
+                    let routing_domain = pptp_resolve_routing_domain(
+                        worker_ctx.forwarding,
+                        meta.ingress_ifindex as i32,
+                        meta.ingress_vlan_id,
+                        packet_fabric_ingress,
+                        ingress_zone_override,
+                        ambiguous_zone,
+                        absent_fabric_ingress_suspect,
+                    );
                     flow = crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain(
                         packet_frame,
                         meta,
@@ -13373,6 +13435,10 @@ pub(super) fn meter_miss_local_input_policers(
 #[cfg(test)]
 #[path = "miss_local_policer_15949_tests.rs"]
 mod miss_local_policer_15949_tests;
+
+#[cfg(test)]
+#[path = "pptp_domain_16055_tests.rs"]
+mod pptp_domain_16055_tests;
 
 #[cfg(test)]
 mod pptp_control_teardown_tests_11053 {
