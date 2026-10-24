@@ -1,4 +1,17 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Test: fix WAN/LAN VIP drift in the loss cluster envs (#16468).
+    loss-userspace-cluster.env pinned WAN_VIP4=172.16.50.6 while its
+    CLUSTER_CONF (docs/ha-cluster-userspace.conf) configures
+    reth0.50=172.16.50.8, so test-private-rg's WAN VIP cells failed by
+    construction; loss-cluster.env pinned no VIPs, so cluster-env.sh
+    defaults (.6, 10.0.60.1, cf01::1) applied against
+    ha-cluster-loss.conf (.7, 10.0.89.1, df01::1). Both envs now pin
+    the configured addresses (.8 / .7 and the LAN VIPs). The #8341
+    pnat-mint diagnostic no longer defaults its pool to WAN_VIP4; it
+    discovers the committed proxy-ARPed pool like
+    persistent-nat-failover.sh resolve_pool (#9729). A hermetic
+    configstore cell compiles every cluster env's CLUSTER_CONF and
+    asserts WAN_VIP4/LAN_VIP4/LAN_VIP6 are configured addresses.
   * Config: warn on unknown `system`, `snmp` and class-of-service
     keywords (#16462). `syslog hots`/`hosts`, `ntp servr`,
     `name-sever`, `snmp comunity`, a bad syslog facility
