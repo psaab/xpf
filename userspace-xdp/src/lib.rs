@@ -1862,12 +1862,23 @@ fn is_degraded_local_or_control(
     ) {
         return false;
     }
-    if wg_fragment_stays_on_helper(
-        parsed.protocol,
-        parsed.wire_protocol,
-        parsed.is_fragment,
-        (ctrl.flags & USERSPACE_CTRL_FLAG_WG_RX) != 0,
-    ) {
+    // #16438: only a WG TAIL is excluded here. A head keeps UDP (17/17)
+    // and carries a port, so it is not provably WG: an IKE/NAT-T/DNS
+    // head to a local (or interface-NAT) address must reach the
+    // local/control arms below, exactly as the healthy path allows
+    // (which gates its WG-fragment redirect on PROTO_FRAGMENT_NO_L4
+    // at the wg_fragment binding above). Tails (255/17) have no port
+    // and follow their head: a WG tail drops in degraded mode, and a
+    // non-WG tail to a local address was never kernel-reassemblable
+    // as a lone fragment either — the head decides the datagram.
+    if parsed.protocol == PROTO_FRAGMENT_NO_L4
+        && wg_fragment_stays_on_helper(
+            parsed.protocol,
+            parsed.wire_protocol,
+            parsed.is_fragment,
+            (ctrl.flags & USERSPACE_CTRL_FLAG_WG_RX) != 0,
+        )
+    {
         return false;
     }
     // #16038: never kernel-PASS an unresolved ext chain on the degraded path.
