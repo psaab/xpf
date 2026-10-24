@@ -410,6 +410,10 @@ type SessionEntry struct {
 	// (#3419 M6). HAActive defaults true on a standalone firewall.
 	SessionID uint64 `json:"session_id,omitempty"`
 	HAActive  bool   `json:"ha_active"`
+	// Origin is the row's stored provenance (#16110): "local" or
+	// "cluster-synced". Empty only for a peer view served by a
+	// pre-#16110 node.
+	Origin string `json:"origin,omitempty"`
 }
 
 // SessionListResponse holds paginated session results.

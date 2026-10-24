@@ -251,7 +251,22 @@ pub(super) fn build_conntrack_value_v4(
         Some(IpAddr::V4(ip)) => u32::from_ne_bytes(ip.octets()),
         _ => 0,
     };
-    let nat_src_port = decision.nat.rewrite_src_port.unwrap_or(0).to_be();
+    // #16110: a SNAT decision with an address but no translated port is
+    // `port no-translation` (or a port-less protocol): the wire keeps the
+    // packet's own source port (checksum.rs `unwrap_or(key.src_port)`).
+    // Stamping 0 here made `show security flow session` render `/0` for a
+    // live owner row while the standby's synced row carried the real port.
+    // The stored port must be the effective translated port, never a
+    // synthesized 0. DNAT has no symmetric preserve rule for the
+    // destination port, so its absent port stays 0.
+    let nat_src_port = match decision.nat.rewrite_src {
+        Some(_) => decision
+            .nat
+            .rewrite_src_port
+            .unwrap_or(key.src_port)
+            .to_be(),
+        None => decision.nat.rewrite_src_port.unwrap_or(0).to_be(),
+    };
     let nat_dst_port = decision.nat.rewrite_dst_port.unwrap_or(0).to_be();
 
     Some(BpfSessionValueV4 {
@@ -498,7 +513,16 @@ pub(super) fn build_conntrack_value_v6(
         Some(IpAddr::V6(ip)) => ip.octets(),
         _ => [0; 16],
     };
-    let nat_src_port = decision.nat.rewrite_src_port.unwrap_or(0).to_be();
+    // #16110: see build_conntrack_value_v4 — preserve the source port when
+    // SNAT rewrites the address but carries no translated port.
+    let nat_src_port = match decision.nat.rewrite_src {
+        Some(_) => decision
+            .nat
+            .rewrite_src_port
+            .unwrap_or(key.src_port)
+            .to_be(),
+        None => decision.nat.rewrite_src_port.unwrap_or(0).to_be(),
+    };
     let nat_dst_port = decision.nat.rewrite_dst_port.unwrap_or(0).to_be();
 
     Some(BpfSessionValueV6 {

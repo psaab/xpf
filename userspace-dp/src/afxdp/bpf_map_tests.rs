@@ -895,6 +895,89 @@ fn publish_conntrack_records_origin_bit_10227() {
     }
 }
 
+// #16110: an address-only SNAT decision (`port no-translation` / port-less
+// protocol) carries `rewrite_src: Some` with `rewrite_src_port: None`; the
+// wire keeps the packet's own source port. The conntrack mirror must store
+// that effective port, not 0 — 0 made the owner row render `/0` while the
+// standby's synced row (which goes through the Go sync builder, not this
+// mirror) carried the real port. FAIL-ON-REVERT: restoring
+// `unwrap_or(0)` turns the SNAT assertions RED.
+#[test]
+fn build_conntrack_value_preserves_source_port_on_address_only_snat_16110() {
+    let key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        src_port: 57566,
+        dst_port: 5211,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let mut decision = local_delivery_decision(0);
+    decision.nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: None,
+        ..NatDecision::default()
+    };
+    let metadata = synced_forward_metadata();
+    let value = publish_conntrack::build_conntrack_value_v4(
+        &key, decision, &metadata, 0, 1, 2, 100, 0, 0, 0, 0,
+    )
+    .expect("a v4 session must map to a v4 conntrack value");
+    assert_eq!(
+        u16::from_be(value.nat_src_port),
+        57566,
+        "address-only SNAT must store the preserved source port, not 0 (#16110)"
+    );
+    // An explicit PAT port is stored as-is.
+    decision.nat.rewrite_src_port = Some(40000);
+    let value = publish_conntrack::build_conntrack_value_v4(
+        &key, decision, &metadata, 0, 1, 2, 100, 0, 0, 0, 0,
+    )
+    .expect("a v4 session must map to a v4 conntrack value");
+    assert_eq!(u16::from_be(value.nat_src_port), 40000);
+    // No SNAT at all: no translated port is invented.
+    decision.nat = NatDecision::default();
+    let value = publish_conntrack::build_conntrack_value_v4(
+        &key, decision, &metadata, 0, 1, 2, 100, 0, 0, 0, 0,
+    )
+    .expect("a v4 session must map to a v4 conntrack value");
+    assert_eq!(value.nat_src_port, 0);
+}
+
+#[test]
+fn build_conntrack_value_preserves_source_port_on_address_only_snat_v6_16110() {
+    let key = SessionKey {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: 6,
+        src_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x102)),
+        dst_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0x559, 0x8585, 0x80, 0, 0, 0, 0x200)),
+        src_port: 57566,
+        dst_port: 5211,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let mut decision = local_delivery_decision(0);
+    decision.nat = NatDecision {
+        rewrite_src: Some(IpAddr::V6(Ipv6Addr::new(
+            0x2001, 0x559, 0x8585, 0x80, 0, 0, 0, 8,
+        ))),
+        rewrite_src_port: None,
+        ..NatDecision::default()
+    };
+    let metadata = synced_forward_metadata();
+    let value = publish_conntrack::build_conntrack_value_v6(
+        &key, decision, &metadata, 0, 1, 2, 100, 0, 0, 0, 0,
+    )
+    .expect("a v6 session must map to a v6 conntrack value");
+    assert_eq!(
+        u16::from_be(value.nat_src_port),
+        57566,
+        "v6 address-only SNAT must store the preserved source port, not 0 (#16110)"
+    );
+}
+
 #[test]
 fn cluster_synced_origin_flip_preserves_v4_v6_flags_10227() {
     let preserved = SESS_FLAG_SNAT | SESS_FLAG_DNAT | (1u16 << 8) | (1u16 << 15);

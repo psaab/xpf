@@ -2066,6 +2066,7 @@ func sessionEntryV4(key dataplane.SessionKey, val dataplane.SessionValue, now ui
 		TimeoutSeconds:   val.Timeout,
 		SessionId:        val.SessionID,
 		HaActive:         haActive,
+		Origin:           sessionOriginLabel(val.Flags),
 	}
 	if val.Created > 0 && now > val.Created {
 		se.AgeSeconds = int64(now - val.Created)
@@ -2075,14 +2076,16 @@ func sessionEntryV4(key dataplane.SessionKey, val dataplane.SessionValue, now ui
 	}
 	var natParts []string
 	if val.Flags&dataplane.SessFlagSNAT != 0 {
-		natParts = append(natParts, fmt.Sprintf("SNAT %s:%d", uint32ToIP(val.NATSrcIP), ntohs(val.NATSrcPort)))
+		port := effectiveNATSrcPort(val.Flags, ntohs(val.NATSrcPort), ntohs(key.SrcPort))
+		natParts = append(natParts, fmt.Sprintf("SNAT %s:%d", uint32ToIP(val.NATSrcIP), port))
 		se.NatSrcAddr = uint32ToIP(val.NATSrcIP).String()
-		se.NatSrcPort = uint32(ntohs(val.NATSrcPort))
+		se.NatSrcPort = uint32(port)
 	}
 	if val.Flags&dataplane.SessFlagDNAT != 0 {
-		natParts = append(natParts, fmt.Sprintf("DNAT %s:%d", uint32ToIP(val.NATDstIP), ntohs(val.NATDstPort)))
+		port := effectiveNATDstPort(val.Flags, ntohs(val.NATDstPort), ntohs(key.DstPort))
+		natParts = append(natParts, fmt.Sprintf("DNAT %s:%d", uint32ToIP(val.NATDstIP), port))
 		se.NatDstAddr = uint32ToIP(val.NATDstIP).String()
-		se.NatDstPort = uint32(ntohs(val.NATDstPort))
+		se.NatDstPort = uint32(port)
 	}
 	se.Nat = strings.Join(natParts, "; ")
 	return se
@@ -2120,6 +2123,7 @@ func sessionEntryV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, no
 		TimeoutSeconds:   val.Timeout,
 		SessionId:        val.SessionID,
 		HaActive:         haActive,
+		Origin:           sessionOriginLabel(val.Flags),
 	}
 	if val.Created > 0 && now > val.Created {
 		se.AgeSeconds = int64(now - val.Created)
@@ -2129,14 +2133,16 @@ func sessionEntryV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, no
 	}
 	var natParts []string
 	if val.Flags&dataplane.SessFlagSNAT != 0 {
-		natParts = append(natParts, fmt.Sprintf("SNAT [%s]:%d", net.IP(val.NATSrcIP[:]).String(), ntohs(val.NATSrcPort)))
+		port := effectiveNATSrcPort(val.Flags, ntohs(val.NATSrcPort), ntohs(key.SrcPort))
+		natParts = append(natParts, fmt.Sprintf("SNAT [%s]:%d", net.IP(val.NATSrcIP[:]).String(), port))
 		se.NatSrcAddr = net.IP(val.NATSrcIP[:]).String()
-		se.NatSrcPort = uint32(ntohs(val.NATSrcPort))
+		se.NatSrcPort = uint32(port)
 	}
 	if val.Flags&dataplane.SessFlagDNAT != 0 {
-		natParts = append(natParts, fmt.Sprintf("DNAT [%s]:%d", net.IP(val.NATDstIP[:]).String(), ntohs(val.NATDstPort)))
+		port := effectiveNATDstPort(val.Flags, ntohs(val.NATDstPort), ntohs(key.DstPort))
+		natParts = append(natParts, fmt.Sprintf("DNAT [%s]:%d", net.IP(val.NATDstIP[:]).String(), port))
 		se.NatDstAddr = net.IP(val.NATDstIP[:]).String()
-		se.NatDstPort = uint32(ntohs(val.NATDstPort))
+		se.NatDstPort = uint32(port)
 	}
 	se.Nat = strings.Join(natParts, "; ")
 	return se

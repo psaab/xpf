@@ -592,6 +592,10 @@ message SessionEntry {
   string nat_dst_addr = 27;       // DNAT translated destination address
   uint32 nat_dst_port = 28;       // DNAT translated destination port
   bool ha_active = 29;            // true if session is on HA primary node
+  // #16110: stored provenance of the row on the serving node:
+  // "local" or "cluster-synced". Empty from a pre-#16110
+  // peer (mixed-version window); the CLI then renders "unknown".
+  string origin = 30;
 }
 
 message GetSessionSummaryRequest {
