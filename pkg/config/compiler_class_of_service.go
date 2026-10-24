@@ -206,7 +206,13 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 	if cos.TrafficControlProfiles == nil {
 		cos.TrafficControlProfiles = make(map[string]*CoSTrafficControlProfile)
 	}
-	if fcNode := node.FindChild("forwarding-classes"); fcNode != nil {
+	// #16424: iterate EVERY forwarding-classes container under this root,
+	// not just the first. A second container (hierarchical / load override)
+	// was silently dropped while `show` still listed it. The bijection
+	// indexes are seeded once from earlier roots and shared across all
+	// containers below, so cross-container conflicts reject exactly as
+	// cross-root conflicts do and flat-set union semantics hold.
+	for _, fcNode := range node.FindChildren("forwarding-classes") {
 		// Enforce the FC ↔ queue bijection. Junos semantics give
 		// each queue ID one forwarding class, and each FC one
 		// queue — schedulers attach to an FC, so two FCs on one
@@ -337,7 +343,10 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 		}
 	}
 
-	if classifiersNode := node.FindChild("classifiers"); classifiersNode != nil {
+	// #16424: iterate EVERY classifiers container under this root (see
+	// forwarding-classes above). Find-or-create inside merges same-named
+	// instances across containers; different names stay distinct.
+	for _, classifiersNode := range node.FindChildren("classifiers") {
 		// #15006 (A09-03) find-or-create — see the schedulers loop below for
 		// the shared rule. A fresh classifier per instance overwrote the
 		// same-named earlier hierarchical block (second class-of-service
@@ -505,7 +514,9 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 		}
 	}
 
-	if rewriteRulesNode := node.FindChild("rewrite-rules"); rewriteRulesNode != nil {
+	// #16424: iterate EVERY rewrite-rules container under this root (see
+	// forwarding-classes above).
+	for _, rewriteRulesNode := range node.FindChildren("rewrite-rules") {
 		// #4316 (fable-167 F-3b): inet-precedence and exp rewrite-rules are
 		// accepted but inert. Keep their configured names for the advisory and
 		// name-only show surface, but compile their inner entries into Go-only
@@ -1162,7 +1173,10 @@ func parseCoSInterfaceUnitBody(node *Node, unit *CoSInterfaceUnit) {
 	if tcpNode := node.FindChild("output-traffic-control-profile"); tcpNode != nil {
 		unit.OutputTrafficControlProfile = nodeVal(tcpNode)
 	}
-	if classifiersNode := node.FindChild("classifiers"); classifiersNode != nil {
+	// #16424: iterate EVERY classifiers container under this unit/interface
+	// node, not just the first; later containers assign their bindings in
+	// author order (last-write-wins per knob, as a merged container does).
+	for _, classifiersNode := range node.FindChildren("classifiers") {
 		// issue 8939: the flat-set spelling nests the bindings into a chain, so
 		// FindChild sees only the first. Flatten before reading.
 		classifiersNode = flattenChainedNode(classifiersNode, cosBindingSchema8939("classifiers"))
@@ -1181,7 +1195,8 @@ func parseCoSInterfaceUnitBody(node *Node, unit *CoSInterfaceUnit) {
 			unit.INetPrecedenceClassifier = nodeVal(precNode)
 		}
 	}
-	if rewriteRulesNode := node.FindChild("rewrite-rules"); rewriteRulesNode != nil {
+	// #16424: iterate EVERY rewrite-rules container (see classifiers above).
+	for _, rewriteRulesNode := range node.FindChildren("rewrite-rules") {
 		rewriteRulesNode = flattenChainedNode(rewriteRulesNode, cosBindingSchema8939("rewrite-rules"))
 		if dscpNode := rewriteRulesNode.FindChild("dscp"); dscpNode != nil {
 			unit.DSCPRewriteRule = nodeVal(dscpNode)
