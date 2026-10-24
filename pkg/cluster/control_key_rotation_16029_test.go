@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +31,14 @@ func pinRotationClock16029(t *testing.T, now *time.Time) {
 
 func rotationManager16029(t *testing.T) *Manager {
 	t.Helper()
+	// UpdateConfig persists/deletes the fabric-auth-grace anchor and
+	// clears peer-epoch state on key transitions (group_state.go); a
+	// keyed commit would otherwise touch the real /var/lib/xpf files.
+	// Redirect both durable paths into a per-test temp dir.
+	restoreGrace := SetFabricAuthGraceStatePathForTesting(filepath.Join(t.TempDir(), "fabric-auth-grace"))
+	t.Cleanup(restoreGrace)
+	restoreEpoch := SetPeerEpochStatePathForTesting(filepath.Join(t.TempDir(), "ha-peer-epoch"))
+	t.Cleanup(restoreEpoch)
 	return NewManager(0, 42)
 }
 
@@ -181,10 +190,16 @@ func TestStaleRotationAlarmsByName16029(t *testing.T) {
 			t.Fatalf("stale line rendered a key: %q", line)
 		}
 	}
-	// The alarm must reach the operator surface, not just the helper.
-	if stats := m.FormatControlPlaneStatistics(); !strings.Contains(stats, "ALARM") ||
+	// The alarm must reach the operator surfaces, not just the helper:
+	// `show chassis cluster statistics` (FormatStatistics, the CLI and
+	// gRPC aggregate-statistics command) AND the control-plane surface.
+	if stats := m.FormatStatistics(); !strings.Contains(stats, "ALARM") ||
 		!strings.Contains(stats, "Key rotation:") {
 		t.Fatalf("stale alarm must reach show chassis cluster statistics:\n%s", stats)
+	}
+	if stats := m.FormatControlPlaneStatistics(); !strings.Contains(stats, "ALARM") ||
+		!strings.Contains(stats, "Key rotation:") {
+		t.Fatalf("stale alarm must reach show chassis cluster control-plane statistics:\n%s", stats)
 	}
 
 	// Finalizing clears the alarm with the window.
@@ -192,7 +207,10 @@ func TestStaleRotationAlarmsByName16029(t *testing.T) {
 	if _, stale := m.ControlLinkRotationStale(); stale {
 		t.Fatal("finalized window must not be stale")
 	}
+	if stats := m.FormatStatistics(); strings.Contains(stats, "Key rotation:") {
+		t.Fatalf("finalized window must render no rotation line on statistics:\n%s", stats)
+	}
 	if stats := m.FormatControlPlaneStatistics(); strings.Contains(stats, "Key rotation:") {
-		t.Fatalf("finalized window must render no rotation line:\n%s", stats)
+		t.Fatalf("finalized window must render no rotation line on control-plane statistics:\n%s", stats)
 	}
 }

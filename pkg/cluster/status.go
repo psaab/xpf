@@ -817,6 +817,14 @@ func (m *Manager) FormatStatistics() string {
 	fmt.Fprintf(&b, "    Epoch out-of-band rejected: %d\n", hbStats.EpochOutOfBandRejected)
 	fmt.Fprintf(&b, "    Epoch raises declined:      %d%s\n",
 		hbStats.EpochRaiseDeclinedAheadOfClock, epochRaiseDeclineNote(hbStats))
+	// #16029: `show chassis cluster statistics` is this surface — the
+	// rotation age/ALARM line must render here as well as on the
+	// control-plane surface (FormatControlPlaneStatistics), or the
+	// forgotten-rotation alarm never reaches the operator command that
+	// the README/changelog name. Only while a window is open.
+	if line := m.controlLinkRotationStatus(); line != "" {
+		fmt.Fprintf(&b, "    Key rotation:               %s\n", line)
+	}
 	fmt.Fprintln(&b)
 
 	// Services synchronized table.
