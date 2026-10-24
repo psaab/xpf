@@ -9,13 +9,16 @@
 # malicious medium wedging mount), after which systemd kills the unit
 # and the boot proceeds to the factory bootstrap (fxp0 DHCP).
 #
-# Before=ssh.service: the sealed image ships without ssh host keys; the
-# loader regenerates them so sshd starts with per-instance keys.
+# ssh host-key regeneration is NOT this unit's job (#16445): it lives
+# in xpf-ssh-hostkeys.service, gated on key absence, because a factory
+# reset's pending marker deliberately occupies this unit's stamp path
+# and would otherwise leave a failed/interrupted reset with no
+# regenerator before ssh.service.
 [Unit]
 Description=xpf day-0 config drive loader
 Documentation=https://github.com/psaab/xpf/blob/master/docs/install-images.md
 After=local-fs.target
-Before=xpfd.service ssh.service
+Before=xpfd.service
 ConditionPathExists=!/etc/xpf/.day0-config-applied
 
 [Service]

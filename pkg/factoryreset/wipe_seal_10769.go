@@ -130,8 +130,10 @@ func wipeImageSealResidue() error {
 	fail(wipeEraseDBusMachineID(wipeDBusMachineIDPath))
 
 	// The image seals every ssh_host_* private/public/certificate file. The
-	// first-boot xpf-day0-config unit runs ssh-keygen -A before ssh.service, so
-	// deleting these here regenerates a fresh device identity on reboot.
+	// dedicated xpf-ssh-hostkeys unit runs ssh-keygen -A before ssh.service
+	// whenever the keys are absent (#16445), so deleting these here
+	// regenerates a fresh device identity on reboot — including after an
+	// interrupted reset, whose pending marker still gates the day-0 loader.
 	fail(wipeEraseSSHHostKeys())
 
 	// The sysprep ssh-userdir and bash-history operations apply to root here.
@@ -903,8 +905,8 @@ func wipeEraseIPsecState() error {
 // needs no fixture because there is no regeneration input left to vary.
 // networkd then reads the installed id at its post-reboot startup; the
 // reboot gate holds N+1 until that reboot. The ssh host keys do not
-// depend on first-boot detection: xpf-day0-config regenerates on key
-// absence, gate-stamped. Format per machine-id(5): 32 lowercase hex +
+// depend on first-boot detection: xpf-ssh-hostkeys regenerates on key
+// absence alone (#16445). Format per machine-id(5): 32 lowercase hex +
 // newline, world-readable.
 func wipeRotateMachineID(path string) error {
 	info, err := os.Lstat(path)

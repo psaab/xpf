@@ -91,7 +91,6 @@ scenario_main_empty_dir_probes() (
 	REJECT_MARKER="$XPF_DIR/.day0-config-rejected"
 	XPFD="$XPF_DIR/xpfd"; make_stub_xpfd "$XPFD"
 	mkdir -p "$XPF_DIR/.configdb"          # empty dir as xpfd leaves it
-	regen_ssh_host_keys() { :; }           # no ssh-keygen
 	probe_devices() { :; }                 # no media -> empty
 	out=$(main 2>&1)
 	echo "$out" | grep -q "already configured" && \
@@ -111,7 +110,6 @@ scenario_main_active_json_skips() (
 	XPFD="$XPF_DIR/xpfd"; make_stub_xpfd "$XPFD"
 	mkdir -p "$XPF_DIR/.configdb"
 	: >"$XPF_DIR/.configdb/active.json"
-	regen_ssh_host_keys() { :; }
 	probe_devices() { fail "E: main probed media despite a committed active.json"; }
 	out=$(main 2>&1)
 	echo "$out" | grep -q "already configured" || \
@@ -129,7 +127,6 @@ scenario_main_stamp_skips() (
 	XPFD="$XPF_DIR/xpfd"; make_stub_xpfd "$XPFD"
 	ATTEMPTS="$XPF_DIR/attempts"
 	: >"$STAMP"
-	regen_ssh_host_keys() { :; }
 	probe_devices() { printf 'probe\n' >>"$ATTEMPTS"; printf '/dev/mock\n'; }
 	try_device() { printf 'try\n' >>"$ATTEMPTS"; return 0; }
 	out=$(main 2>&1)
@@ -149,7 +146,6 @@ scenario_main_preseed_skips() (
 	XPFD="$XPF_DIR/xpfd"; make_stub_xpfd "$XPFD"
 	ATTEMPTS="$XPF_DIR/attempts"
 	printf 'operator config\n' >"$XPF_DIR/xpf.conf"
-	regen_ssh_host_keys() { :; }
 	probe_devices() { printf 'probe\n' >>"$ATTEMPTS"; printf '/dev/mock\n'; }
 	try_device() { printf 'drive config\n' >"$XPF_DIR/xpf.conf"; printf 'try\n' >>"$ATTEMPTS"; return 0; }
 	out=$(main 2>&1)

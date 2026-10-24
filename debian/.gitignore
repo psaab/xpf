@@ -9,6 +9,7 @@
 # staged unit copies (generated in override_dh_auto_build from sources)
 /xpf.xpfd.service
 /xpf.xpf-day0-config.service
+/xpf.xpf-ssh-hostkeys.service
 /xpf.xpf-transit-closed.service
 /xpf.xpf-input-closed.service
 /xpf.xpf-uefi-slots.service

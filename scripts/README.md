@@ -77,7 +77,7 @@ take minutes.
 
 | Dir | What | Entry points |
 |---|---|---|
-| `image/` | Appliance image bake + day-0 | `bake.py` (bake), `validate.py` (boot matrix, own entry point, excluded from `run-selftests.sh`), `validate-build-metadata.py` (Makefile guard), `xpf-day0-config`, `xpf-grow-root`, `xpf-uefi-slots`, `xpf-kernel-promote`, `incus-agent-setup`, `make_config_drive.py`, `seed_layout_10771.py`, `bridge_floor_10171.py`, `build_provenance.py`, units `xpf-day0-config.service`, `xpf-grow-root.service`, `xpf-input-closed.service`, `xpf-kernel-promote.service`, `xpf-kernel-promote-failed.service`, `xpf-transit-closed.service`, `xpf-uefi-slots.service`, `incus-agent.service`, rules `99-incus-agent.rules`, `grub.d/09_xpf`; shipped shell here is syntax-linted by `run-selftests.sh` §1 |
+| `image/` | Appliance image bake + day-0 | `bake.py` (bake), `validate.py` (boot matrix, own entry point, excluded from `run-selftests.sh`), `validate-build-metadata.py` (Makefile guard), `xpf-day0-config`, `xpf-grow-root`, `xpf-uefi-slots`, `xpf-kernel-promote`, `incus-agent-setup`, `make_config_drive.py`, `seed_layout_10771.py`, `bridge_floor_10171.py`, `build_provenance.py`, units `xpf-day0-config.service`, `xpf-ssh-hostkeys.service`, `xpf-grow-root.service`, `xpf-input-closed.service`, `xpf-kernel-promote.service`, `xpf-kernel-promote-failed.service`, `xpf-transit-closed.service`, `xpf-uefi-slots.service`, `incus-agent.service`, rules `99-incus-agent.rules`, `grub.d/09_xpf`; shipped shell here is syntax-linted by `run-selftests.sh` §1 |
 | `dist/` | Signed distribution | See `dist/README.md`: `sign.py`, `publish.py`, `build-apt-repo.sh`, `install.sh`, `image_inventory.py`, `retain_shim_verdict.py`, `selftest.sh`, `xpf-archive-keyring.asc.placeholder`, `xpf-image.pub.placeholder` |
 | `deploy/` | `xpf-deploy.py` + its tests | `xpf-deploy.py`; tests globbed by `run-selftests.sh` §3 (listed by filename below) |
 | `docs/` | Doc gates | `check-upgrade-docs.sh` (`make docs-check`), `check-no-ci-claims.sh`, `check-upgrade-docs-selftest.sh`, `check-no-ci-claims-selftest.sh` |
@@ -92,7 +92,7 @@ take minutes.
   `test_selftest_lint_coverage_6499.py`,
   `test_selftest_main_guard_9669.py`, `test_skill_file_push_lint.py`,
   plus the suffix-convention `userspace_ha_validation_matrix_test.py`.
-- `image/` (35 `test_*.py`): `test_bake_base_pin.py`,
+- `image/` (38 `test_*.py`): `test_bake_base_pin.py`,
   `test_bake_bridge_floor_10171.py`, `test_bake_dirty_detection_12158.py`,
   `test_bake_freeze_9921.py`, `test_bake_gate_boundary_12209.py`,
   `test_bake_hugepages_16243.py`, `test_bake_kernel_hold_enumeration.py`,
@@ -105,11 +105,12 @@ take minutes.
   `test_day0_probe_order_6502.py`, `test_day0_safe_read_9921.py`,
   `test_kernel_promote_explicit_path.py`, `test_make_config_drive_mode.py`,
   `test_seed_layout_10771.py`, `test_slot_refresh_15089.py`,
+  `test_ssh_hostkeys_regen_16445.py`, `test_systemd_unit_canary_16198.py`,
   `test_uefi_slots_6499.py`, `test_validate_ab_slots_6494.py`,
   `test_validate_ab_substrate_6498.py`, `test_validate_day0_perms_6503.py`,
   `test_validate_freeze_9921.py`, `test_validate_gate_reactions_10770.py`,
   `test_validate_guest_absent_7424.py`, `test_validate_image_seal_6547.py`,
-  `test_validate_ownership.py`, `test_validate_scenarios.py`,
+  `test_validate_ownership.py`, `test_validate_runner_seam_16196.py`, `test_validate_scenarios.py`,
   `test_validate_secureboot_6497.py`, `test_validate_skip_ledger_7347.py`.
 - `dist/` (21 `test_*.py`): `test_build_apt_repo_binding_12144.py`,
   `test_build_apt_repo_inputs_9921.py`,

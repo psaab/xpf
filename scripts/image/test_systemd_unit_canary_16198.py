@@ -62,6 +62,7 @@ BAKE = HERE / "bake.py"
 DEB_STAGED = {
     "xpfd.service": "test/incus/xpfd.service",
     "xpf-day0-config.service": "scripts/image/xpf-day0-config.service",
+    "xpf-ssh-hostkeys.service": "scripts/image/xpf-ssh-hostkeys.service",
     "xpf-transit-closed.service": "scripts/image/xpf-transit-closed.service",
     "xpf-input-closed.service": "scripts/image/xpf-input-closed.service",
     "xpf-uefi-slots.service": "scripts/image/xpf-uefi-slots.service",
@@ -78,6 +79,7 @@ BAKE_COPY_IN = {
     "incus-agent.service",
     "xpf-transit-closed.service",
     "xpf-input-closed.service",
+    "xpf-ssh-hostkeys.service",
     "xpf-uefi-slots.service",
     "xpf-kernel-promote.service",
     "xpf-kernel-promote-failed.service",
