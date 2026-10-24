@@ -297,3 +297,30 @@ func TestGroupsExpandedInheritance15994(t *testing.T) {
 		t.Fatalf("allowed expanded path refused: %v", err)
 	}
 }
+
+// #16428: the read gate shares ExpandedMutationLines, so a whole-config
+// read of a ${node} cluster tree by a restricted class must adjudicate
+// the node views instead of refusing with "group expansion cannot be
+// resolved". Allowed node content admits; a denied leaf in either node
+// group refuses.
+func TestGroupsReadNodeVarWhole16428(t *testing.T) {
+	allowed := parseHierText(t, `groups { node0 { system { host-name fw0; } } node1 { system { host-name fw1; } } } apply-groups "${node}"; system { host-name top16428; }`)
+	cfgSec := cfgOp15994(t, "", "^security", "", "")
+	if err := AuthorizeConfigShowWholeAtTree(cfgSec, "limited", "", allowed); err != nil {
+		t.Fatalf("whole read of allowed ${node} cluster refused: %v (#16428)", err)
+	}
+	for name, text := range map[string]string{
+		"node0-denied": `groups { node0 { security { zones { security-zone trust { description EVIL16428; } } } } node1 { system { host-name fw1; } } } apply-groups "${node}";`,
+		"node1-denied": `groups { node0 { system { host-name fw0; } } node1 { security { zones { security-zone trust { description EVIL16428; } } } } } apply-groups "${node}";`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			tree := parseHierText(t, text)
+			if err := authorizeConfigReadExpanded15994(cfgSec, "limited", tree); err == nil {
+				t.Fatal("denied leaf via node group admitted on read (#16428)")
+			}
+			if err := AuthorizeConfigShowWholeAtTree(cfgSec, "limited", "", tree); err == nil {
+				t.Fatal("whole read with denied node-group leaf ALLOWED (#16428)")
+			}
+		})
+	}
+}

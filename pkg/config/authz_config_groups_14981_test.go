@@ -187,3 +187,104 @@ func TestGroupNodeVarExpansionDenied14981(t *testing.T) {
 		t.Fatal("denied leaf behind apply-groups ${node} was ALLOWED (#14981)")
 	}
 }
+
+// #16428: the plain (no-vars) view of any `apply-groups "${node}"` tree
+// errors by construction, so TestGroupNodeVarExpansionDenied14981 above
+// passed for the wrong reason (the unresolvable-view refusal) whenever
+// the cluster idiom was present. The allowed control proves the gate now
+// adjudicates the node views: an unrelated effective path is permitted,
+// and ExpandedMutationLines itself returns the node-expanded lines.
+func TestGroupNodeVarAllowedControl16428(t *testing.T) {
+	cfg := cfg9892(t)
+	text := `groups { node0 { system { host-name fw0; } } node1 { system { host-name fw1; } } } apply-groups "${node}";`
+	tree := parseHierText(t, text)
+	lines, err := ExpandedMutationLines(tree)
+	if err != nil {
+		t.Fatalf("ExpandedMutationLines on ${node} cluster tree: %v (#16428)", err)
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "host-name fw0") || !strings.Contains(joined, "host-name fw1") {
+		t.Fatalf("node views do not materialize both node groups: %v (#16428)", lines)
+	}
+	if err := AuthorizeExpandedTree(cfg, "limited", tree); err != nil {
+		t.Fatalf("allowed ${node} inheritance refused: %v (#16428)", err)
+	}
+}
+
+// #16428: a denied leaf delivered via a node group must still be refused
+// — now via the node views, not the plain-view error. Both node groups
+// denied in turn, so the refusal cannot come from a single view.
+func TestGroupNodeVarDeniedViaNodeViews16428(t *testing.T) {
+	cfg := cfg9892(t)
+	for name, text := range map[string]string{
+		"node0-denied": `groups { node0 { system { root-authentication { plain-text-password hunter2; } } } node1 { system { host-name fw1; } } } apply-groups "${node}";`,
+		"node1-denied": `groups { node0 { system { host-name fw0; } } node1 { system { root-authentication { plain-text-password hunter2; } } } } apply-groups "${node}";`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			tree := parseHierText(t, text)
+			lines, err := ExpandedMutationLines(tree)
+			if err != nil {
+				t.Fatalf("ExpandedMutationLines: %v (#16428)", err)
+			}
+			if !strings.Contains(strings.Join(lines, "\n"), "root-authentication") {
+				t.Fatalf("fixture does not expand to the denied leaf: %v (#16428)", lines)
+			}
+			if err := AuthorizeExpandedTree(cfg, "limited", tree); err == nil {
+				t.Fatal("denied leaf behind apply-groups ${node} was ALLOWED (#16428)")
+			}
+		})
+	}
+}
+
+// #16428 acceptance at the commit layer: a restricted class committing a
+// candidate whose only difference from the active ${node} cluster tree
+// is an unrelated allowed leaf must be permitted, while a candidate that
+// adds a denied leaf via a node group must still be refused.
+func TestRestrictedCommitOnNodeGroupCluster16428(t *testing.T) {
+	cfg := cfg9892(t)
+	active := parseHierText(t, `groups { node0 { system { host-name fw0; } } node1 { system { host-name fw1; } } } apply-groups "${node}"; system { host-name base16428; }`)
+	unrelated := parseHierText(t, `groups { node0 { system { host-name fw0; } } node1 { system { host-name fw1; } } } apply-groups "${node}"; system { host-name base16428; services { ssh; } }`)
+	if err := AuthorizeExpandedCandidate(cfg, "limited", unrelated, active); err != nil {
+		t.Fatalf("unrelated commit on ${node} cluster refused: %v (#16428)", err)
+	}
+	denied := parseHierText(t, `groups { node0 { system { root-authentication { plain-text-password hunter2; } } } node1 { system { host-name fw1; } } } apply-groups "${node}"; system { host-name base16428; }`)
+	if err := AuthorizeExpandedCandidate(cfg, "limited", denied, active); err == nil {
+		t.Fatal("denied leaf via node group allowed at commit (#16428)")
+	}
+}
+
+// #16428 fail-closed census: a plain-view failure that is NOT the
+// ${node} trigger must stay fatal even when node views exist. An
+// undefined group alongside a resolvable ${node} idiom, and an undefined
+// node group, both refuse — never adjudicated as zero mutations.
+func TestNodeVarMixedUndefinedStillFailsClosed16428(t *testing.T) {
+	cfg := cfg9892(t)
+	for name, text := range map[string]string{
+		"undefined-alongside-node": `groups { node0 { system { host-name fw0; } } } apply-groups [ MISSING16428 "${node}" ];`,
+		"undefined-node-group":     `groups { node0 { system { host-name fw0; } } } apply-groups "${node}";`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			tree := parseHierText(t, text)
+			lines, err := ExpandedMutationLines(tree)
+			if name == "undefined-node-group" {
+				// Only node1 is undefined: node0 resolves, the config is
+				// valid on node0, and the node1 view contributes nothing
+				// (existing non-fatal node-view semantics). The lines
+				// must be the node0 view, not an error and not empty.
+				if err != nil {
+					t.Fatalf("node0-only ${node} tree errored: %v (#16428)", err)
+				}
+				if !strings.Contains(strings.Join(lines, "\n"), "host-name fw0") {
+					t.Fatalf("node0 view does not materialize: %v (#16428)", lines)
+				}
+				if err := AuthorizeExpandedTree(cfg, "limited", tree); err != nil {
+					t.Fatalf("node0-only ${node} tree refused: %v (#16428)", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("ExpandedMutationLines allowed unresolvable tree (lines=%v) (#16428)", lines)
+			}
+		})
+	}
+}
