@@ -68,7 +68,12 @@ package config
 // those nodes as UnknownLeaves, allowing the strict screen gate to reject
 // malformed configuration rather than silently dropping the entire body.
 func screenPackedBody(node *Node, schema *schemaNode) *Node {
-	expanded := packedBody(node, schema)
+	// #16148: the modelled branch is the default BodyView (packedBodyChildren's
+	// shared expansion). Only the declined branch — a tail the shared walk
+	// will not guess at — falls through to screenFamilyBody, whose
+	// unknown-token backstop keeps every token visible so compileScreen
+	// records it on UnknownLeaves and the #3318 gate rejects it.
+	expanded := bodyViewOf(node, schema).Node()
 	if expanded != node || node == nil || schema == nil {
 		return expanded
 	}
@@ -81,6 +86,22 @@ func screenPackedBody(node *Node, schema *schemaNode) *Node {
 		return expanded
 	}
 	return screenFamilyBody(node, schema)
+}
+
+// screenBodyExpansion is the screen family's BodyView expansion (#16148):
+// screenFamilyBody's sibling-preserving walk. screenFamilyBody returns a
+// clone with Keys truncated to the family identity, so this adapter
+// rebuilds that identity node from its children; callers that need the
+// identity node itself keep using screenPackedBody.
+func screenBodyExpansion(node *Node, schema *schemaNode) []*Node {
+	return screenFamilyBody(node, schema).Children
+}
+
+// screenBodyView returns the BodyView for a screen node under schema: the
+// screen expansion (shared walk via screenPackedBody's first branch is
+// the caller's concern; here the family's own order is explicit).
+func screenBodyView(node *Node, schema *schemaNode) bodyView {
+	return bodyViewOf(node, schema).withExpansion(screenBodyExpansion)
 }
 
 // screenNormalizeFamilies returns body with every FAMILY child's packed tail
@@ -97,7 +118,7 @@ func screenNormalizeFamilies(body *Node, idsSchema *schemaNode) *Node {
 	for _, fam := range body.Children {
 		norm := fam
 		if fam != nil && len(fam.Keys) > 0 {
-			norm = screenFamilyBody(fam, resolveSchemaChild(idsSchema, fam.Keys[0]))
+			norm = screenBodyNode(fam, resolveSchemaChild(idsSchema, fam.Keys[0]))
 		}
 		if norm != fam {
 			changed = true
@@ -109,6 +130,28 @@ func screenNormalizeFamilies(body *Node, idsSchema *schemaNode) *Node {
 	}
 	clone := *body
 	clone.Children = out
+	return &clone
+}
+
+// screenBodyNode returns the family node with its packed tail expanded:
+// the authored node on the plain branch, otherwise a clone with Keys
+// truncated to the family identity and the expanded children. It is
+// screenFamilyBody reached through the screen BodyView (#16148); the
+// identity truncation is why this returns a node rather than using
+// view.Node() directly (the view only replaces Children).
+func screenBodyNode(node *Node, schema *schemaNode) *Node {
+	if node == nil || schema == nil || len(node.Keys) == 0 {
+		return node
+	}
+	consumed, _ := consumeNodeKeys(node.Keys, schema)
+	if consumed >= len(node.Keys) {
+		return node
+	}
+	children := screenBodyView(node, schema).Children()
+	clone := *node
+	clone.Keys = append([]string(nil), node.Keys[:consumed]...)
+	clone.Children = children
+	clone.IsLeaf = false
 	return &clone
 }
 
@@ -155,11 +198,44 @@ func screenFamilyBody(node *Node, schema *schemaNode) *Node {
 	// children, not multi:). It must keep the flat-set CHAIN shape so
 	// the unknown-leaf gate records `icmp ping-death fragment` and
 	// strict compile rejects it; expanding it as siblings would accept
-	// a shape the flat path refuses. Detect the bracket on the tail's
-	// first token and keep the original single-chain walk for it.
+	// a shape the flat path refuses. The chain walk is inlined below
+	// (#16148 deleted the separate screenFamilyBodyChain expander: it
+	// was this same single-cursor chain, kept as a second function).
 	bracketed := consumed < len(node.Keys) && node.KeyBracketed(consumed)
 	if bracketed {
-		return screenFamilyBodyChain(node, schema, consumed, cur)
+		var head, last *Node
+		curB := cur
+		tailB := tail
+		for len(tailB) > 0 {
+			n := 1
+			var refined *schemaNode
+			if curB != nil {
+				if childSchema := resolveSchemaChild(curB, tailB[0]); childSchema != nil {
+					if c, r := consumeNodeKeys(tailB, childSchema); c > 0 && c <= len(tailB) {
+						n, refined = c, r
+					}
+				}
+			}
+			next := &Node{Keys: append([]string(nil), tailB[:n]...), IsLeaf: true}
+			if last == nil {
+				head = next
+			} else {
+				last.Children = []*Node{next}
+				last.IsLeaf = false
+			}
+			last = next
+			tailB = tailB[n:]
+			curB = refined
+		}
+		if len(node.Children) > 0 && last != nil {
+			last.Children = append(last.Children, node.Children...)
+			last.IsLeaf = false
+		}
+		clone := *node
+		clone.Keys = append([]string(nil), node.Keys[:consumed]...)
+		clone.Children = []*Node{head}
+		clone.IsLeaf = false
+		return &clone
 	}
 
 	type openLevel struct {
@@ -253,47 +329,6 @@ func screenFamilyBody(node *Node, schema *schemaNode) *Node {
 	clone := *node
 	clone.Keys = append([]string(nil), node.Keys[:consumed]...)
 	clone.Children = roots
-	clone.IsLeaf = false
-	return &clone
-}
-
-// screenFamilyBodyChain is the original #9421 single-chain expansion,
-// retained for BRACKETED tails only (see screenFamilyBody): a bracketed
-// list is not a modelled screen spelling, and the chain shape is what
-// makes the flat-set unknown-leaf record (`icmp ping-death fragment`)
-// — and therefore the strict rejection — reachable. Unbracketed packed
-// runs take the sibling-preserving walk above (#15944 H13-03).
-func screenFamilyBodyChain(node *Node, schema *schemaNode, consumed int, cur *schemaNode) *Node {
-	tail := node.Keys[consumed:]
-	var head, last *Node
-	for len(tail) > 0 {
-		n := 1
-		var refined *schemaNode
-		if cur != nil {
-			if childSchema := resolveSchemaChild(cur, tail[0]); childSchema != nil {
-				if c, r := consumeNodeKeys(tail, childSchema); c > 0 && c <= len(tail) {
-					n, refined = c, r
-				}
-			}
-		}
-		next := &Node{Keys: append([]string(nil), tail[:n]...), IsLeaf: true}
-		if last == nil {
-			head = next
-		} else {
-			last.Children = []*Node{next}
-			last.IsLeaf = false
-		}
-		last = next
-		tail = tail[n:]
-		cur = refined
-	}
-	if len(node.Children) > 0 && last != nil {
-		last.Children = append(last.Children, node.Children...)
-		last.IsLeaf = false
-	}
-	clone := *node
-	clone.Keys = append([]string(nil), node.Keys[:consumed]...)
-	clone.Children = []*Node{head}
 	clone.IsLeaf = false
 	return &clone
 }
