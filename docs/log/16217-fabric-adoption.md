@@ -1277,3 +1277,48 @@ Post-FO throughput ~1.3-2.6 Gbps through failback in the passing runs
 (dip at FO+1/2 s only). Cluster restored after each run: clean master
 `2c8575b70e`, helper `2f2f5cbf...b04` both nodes (hash-proved),
 RG0/1/2 node0 primary, target OK, P4 verification 8.6-14.1 Gbit/s.
+
+## FZFixWire29 folds + master rebase (this head)
+
+Fold hardening on top of Wire28 (B1/B2/B3/B5/B6/N1, per the fold
+review): FIB connected-win tied to the covering prefix in the
+connected ledger; O(1) full-SessionKey-scoped shared evidence
+lookups (no bare-tuple cross-VRF leak); cache-hit shared restamps
+only behind the stage-transition gate; adopted marks revalidated
+against the fresh RG forwarding-active set on both hit arms; the
+shared-wire adoption arm passes through the ownership gate. The
+committed changelog blank-line parse defect (l28) is fixed. The
+branch is rebased onto master `06d2535f37`; the rebase's semantic
+merge keeps one `rev_packets` field (both #16217 and master #16019
+consumers), restores master's `shared_session_replied`, and adds
+`link_authenticated: false` (#16023) to the fold fixtures.
+
+Unit (rebased head): `cargo test 16217` 45/45, `16223` 33/33,
+`policy_revalidation` 112/112, `16270` 4/4, `16019` 9/9;
+`session::` 527 passed with 2 failures verified identical on clean
+master (`tcp_seq_15753`, `session_decision_typed_snat_layout_11064`);
+`flow_cache_hit` 78 passed + 2 and `forwarding::` 401 passed + 1,
+each verified identical on clean master
+(`live_flow_cache_callsite_selected_admitted_clone_reaches_target_6304`,
+`gre_decap_flow_cache_hit_ttl_expiry_reads_inner_ttl_5615`,
+`matched_family_pairs_are_still_admitted_7520`).
+
+Live aged table (all-node0, P4 70 s, RG1 fw0->fw1 at 30 s age +
+failback; deb `99.16217.57` sha256 `f4daa513...0480`, helper
+`af086553...a52` hash-proved `/proc/<pid>/exe` BOTH nodes before
+traffic; evidence `/var/worktrees/fzwire29/cell{1,2}/`; COMPLETE
+logs: 72 SUM intervals, sender+receiver totals, no iperf errors):
+
+| Arm | Build | SUM zero intervals | Per-stream zeros | Verdict |
+|---|---|---|---|---|
+| Clean master (FZDiag8) | 2c8575b70e | 130 | — | FAIL |
+| Wire28 (pre-fold) runs 3+4 | 99.16217.56.dirty | 0 / 0 | 0 / 0 | PASS |
+| **This head run 1 (cell1)** | **99.16217.57** | **0** | **0** | **PASS** |
+| **This head run 2 (cell2)** | **99.16217.57** | **0** | **0** | **PASS — ZERO TWICE** |
+
+Run totals: run 1 SUM 70.6 GBytes / 8.66 Gbit/s sender+receiver;
+run 2 SUM 86.2 GBytes / 10.6 Gbit/s sender+receiver.
+`snat_revoked` 0 on both nodes at every sample in both runs.
+Cluster restored after each run: clean master `2c8575b70e`, helper
+`2f2f5cbf...b04` both nodes (hash-proved), RG0/1/2 node0 primary,
+target OK, P4 verification 13.9 Gbit/s.
