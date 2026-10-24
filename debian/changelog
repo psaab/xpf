@@ -1,4 +1,14 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Config: warn on unknown `system`, `snmp` and class-of-service
+    keywords (#16462). `syslog hots`/`hosts`, `ntp servr`,
+    `name-sever`, `snmp comunity`, a bad syslog facility
+    (`bogusfac`/`kernl`) or a misspelt CoS `shaping-rate` previously
+    committed with zero warnings and configured nothing — no syslog
+    collector, no NTP source, no resolver, no SNMP community, no
+    shaper. The #10707 open-world advisory now names the token on
+    strict commit and tolerant load/peer-sync (warn-only, #1960);
+    valid controls and declared-but-inert #9414 knobs stay free of
+    the unknown-keyword warning.
   * Image/packaging: stop reserving the large-ring hugepage pool by
     default (#16455). etc/sysctl.d/99-xpf-hugepages.conf shipped
     vm.nr_hugepages = 1440 (2.8 GiB) verbatim through the bake and the

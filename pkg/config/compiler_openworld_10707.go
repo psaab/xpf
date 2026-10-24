@@ -53,11 +53,185 @@ func routingKnobWarning11314(path []string, keyword string) string {
 	return ""
 }
 
+// snmpKnownTopLevel16462 reports whether keyword is a top-level `snmp`
+// statement xpf knows about: declared in schemaSNMP, or a declared-but-
+// inert knob named by its own #9414 advisory in snmpInertKnobWarnings
+// (view, trap-options, health-monitor, rmon, engine-id, name, arp,
+// filter-duplicates, nonvolatile, proxy, interface, filter-interfaces,
+// routing-instance-access), or a top-level scalar compileSNMP reads
+// without a schema child (location, contact, description). Known knobs are
+// never reported as unknown by the #16462 walk; their own advisories
+// already name them.
+func snmpKnownTopLevel16462(keyword string) bool {
+	if _, ok := schemaSNMP.children[keyword]; ok {
+		return true
+	}
+	switch keyword {
+	case "location", "contact", "description", "view", "trap-options", "health-monitor", "rmon", "engine-id",
+		"name", "arp", "filter-duplicates", "nonvolatile", "proxy",
+		"interface", "filter-interfaces", "routing-instance-access":
+		return true
+	}
+	return false
+}
+
+// isSystemSNMPOwned16462 reports whether the (path, keyword) child is
+// owned by a scoped gate other than this warn-only advisory, so the
+// #16462 system/snmp walk must not descend or double-report:
+//
+//   - `system root-authentication`, `system login class` and
+//     `system login user ... authentication` are closedWorld in the
+//     schema (strict reject). (`system services ssh` is also
+//     closedWorld, but the walk still descends it so the tolerant
+//     path names an unknown child such as `root-logi`.)
+//   - `snmp community ...`, `snmp trap-group ...` bodies and
+//     `snmp v3 ...` are owned by the #15124/#2990/#9414 gates.
+//   - opaque leaves (`system processes`, `system services dns
+//     dns-proxy ... forwarders/view` values, `snmp client-list`
+//     prefixes) carry values, not keywords.
+func isSystemSNMPOwned16462(path []string, keyword string) bool {
+	if len(path) == 0 {
+		return false
+	}
+	switch path[0] {
+	case "system":
+		if len(path) == 1 && (keyword == "root-authentication") {
+			return true
+		}
+		if len(path) >= 2 && path[1] == "login" && (keyword == "class") {
+			return true
+		}
+		if len(path) >= 4 && path[1] == "login" && path[2] == "user" && keyword == "authentication" {
+			return true
+		}
+		if len(path) >= 2 && path[1] == "processes" {
+			return true
+		}
+		if len(path) >= 4 && path[1] == "services" && path[2] == "dns" && path[3] == "dns-proxy" &&
+			(keyword == "forwarders" || keyword == "view") {
+			return true
+		}
+	case "snmp":
+		if len(path) == 1 && (keyword == "community" || keyword == "trap-group" || keyword == "v3" || keyword == "client-list") {
+			return true
+		}
+	}
+	return false
+}
+
+// syslogFacilityKnown16462 reports whether tok is a syslog facility the
+// runtime can actually map: the Junos facility vocabulary advertised at
+// commit (junosSyslogFacilityNames, `any` included as the wildcard), the
+// BSD/rsyslog spellings ParseFacility maps (kern, auth, syslog,
+// local0-local7), or `*` / a comma list of those. pkg/config cannot import
+// pkg/logging (logging imports config), so the BSD set is spelled here and
+// pinned against ParseFacilityChecked by the #16462 tests in pkg/logging.
+func syslogFacilityKnown16462(tok string) bool {
+	if tok == "" {
+		return false
+	}
+	for _, atom := range strings.Split(tok, ",") {
+		if atom == "*" {
+			continue
+		}
+		if !syslogFacilityAtomKnown16462(atom) {
+			return false
+		}
+	}
+	return true
+}
+
+func syslogFacilityAtomKnown16462(atom string) bool {
+	switch atom {
+	case "kern", "auth", "syslog",
+		"local0", "local1", "local2", "local3",
+		"local4", "local5", "local6", "local7":
+		return true
+	}
+	for _, n := range junosSyslogFacilityNames {
+		if atom == n {
+			return true
+		}
+	}
+	return false
+}
+
+// warnBadSyslogFacilities16462 warns on facility tokens under a system
+// syslog destination (host/file/user/console, braced or packed) that are
+// not in the Junos/BSD facility vocabulary. The schema wildcard accepts
+// any identifier-shaped facility (#6844), so `bogusfac`, `kernl` or `ntp`
+// committed clean and compiled to a selector no record matches (or, for
+// host destinations, a local0 substitution). Severity is already
+// enum-gated on the strict path; this is the warn-only facility half on
+// both paths. Named destination modifiers resolve through the schema's
+// exact children before the wildcard, so they never reach here.
+func warnBadSyslogFacilities16462(tree *ConfigTree, warn func([]string, string)) {
+	if tree == nil {
+		return
+	}
+	for _, top := range tree.Children {
+		if top == nil || top.Name() != "system" {
+			continue
+		}
+		for _, sysNode := range []*Node{top} {
+			for _, sl := range packedBodyChildren(sysNode, schemaSystem) {
+				if sl.Name() != "syslog" {
+					continue
+				}
+				for _, dest := range packedBodyChildren(sl, schemaSystem.children["syslog"]) {
+					kind := dest.Name()
+					if kind != "host" && kind != "file" && kind != "user" && kind != "console" {
+						continue
+					}
+					path := []string{"system", "syslog", kind}
+					if len(dest.Keys) > 1 {
+						path = append(path, dest.Keys[1])
+					}
+					destSchema := resolveSchemaChild(schemaSystem.children["syslog"], kind)
+					// Braced / flat-set children: each child whose head
+					// is not a declared destination modifier is a
+					// <facility> <severity> pair.
+					for _, child := range packedBodyChildren(dest, destSchema) {
+						if child == nil || len(child.Keys) == 0 {
+							continue
+						}
+						if _, ok := destSchema.children[child.Keys[0]]; ok {
+							continue
+						}
+						if !syslogFacilityKnown16462(child.Keys[0]) {
+							warn(path, child.Keys[0])
+						}
+					}
+					// Packed tail on the destination line itself
+					// (`host 10.0.0.1 bogusfac info;` brace-elided):
+					// tokens past keyword+name that are not declared
+					// modifiers are facility heads (each followed by
+					// its severity, which is not judged here).
+					i := 2
+					if kind == "console" {
+						i = 1
+					}
+					for ; i+1 < len(dest.Keys); i += 2 {
+						tok := dest.Keys[i]
+						if _, ok := destSchema.children[tok]; ok {
+							break
+						}
+						if !syslogFacilityKnown16462(tok) {
+							warn(path, tok)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 // warnUnknownRoutingLeaves10707 reports unmodeled child keywords in the
-// protocols, policy-options, and routing-options grammars. Those schemas stay
-// open-world because several have valid but not-yet-modeled Junos children;
-// warning preserves those configurations while making possible silent drops
-// visible on both strict commit and tolerant load/sync paths.
+// protocols, policy-options, routing-options, interfaces, system, snmp and
+// class-of-service grammars. Those schemas stay open-world because several
+// have valid but not-yet-modeled Junos children; warning preserves those
+// configurations while making possible silent drops visible on both strict
+// commit and tolerant load/sync paths (#10707, extended #16462).
 func warnUnknownRoutingLeaves10707(tree *ConfigTree) []string {
 	if tree == nil {
 		return nil
@@ -108,6 +282,23 @@ func warnUnknownRoutingLeaves10707(tree *ConfigTree) []string {
 			// #12656); the generic advisory must not double-report them.
 			if len(path) > 0 && path[0] == "interfaces" &&
 				(keyword == "filter" || keyword == "simple-filter") {
+				continue
+			}
+			// #16462: subtrees owned by a scoped strict gate (strict
+			// reject / lenient warn) must not be double-reported by
+			// this warn-only advisory.
+			if isSystemSNMPOwned16462(path, keyword) {
+				continue
+			}
+			// Syslog destination bodies are facility pairs, not
+			// keyword statements: the wildcard facility head is
+			// judged by warnBadSyslogFacilities16462, and named
+			// modifiers are declared children.
+			if len(path) >= 3 && path[0] == "system" && path[1] == "syslog" &&
+				(path[2] == "host" || path[2] == "file" || path[2] == "user" || path[2] == "console") {
+				continue
+			}
+			if len(path) > 0 && path[0] == "snmp" && snmpKnownTopLevel16462(keyword) {
 				continue
 			}
 			// BGP SAFI diagnostics belong to the compiler gate, not this
@@ -269,6 +460,47 @@ func warnUnknownRoutingLeaves10707(tree *ConfigTree) []string {
 			// grammars above: the schema stays open-world, but the
 			// silent drop becomes visible.
 			walkChildren(node.Children, schemaInterfaces, []string{"interfaces"})
+		case "system":
+			// #16462: extend the #10707 advisory to `system`. Unknown
+			// keywords (syslog hots/hosts, ntp servr, name-sever,
+			// host-nam) previously committed with zero warnings and
+			// compiled to nothing — no syslog host, no NTP server, no
+			// resolver. Warn-only, like interfaces: the schema stays
+			// open-world. Owned subtrees (see isSystemSNMPOwned16462)
+			// and syslog facility bodies are not double-reported.
+			walkChildren(node.Children, schemaSystem, []string{"system"})
+			if len(node.Keys) > 1 {
+				if tok := firstUnknownPackedKeyword15778(node, schemaSystem, 1); tok != "" && !isSystemSNMPOwned16462([]string{"system"}, tok) {
+					warn([]string{"system"}, tok)
+				}
+			}
+			warnBadSyslogFacilities16462(tree, warn)
+		case "snmp":
+			// #16462: extend the #10707 advisory to top-level `snmp`.
+			// `comunity` previously committed clean and created no
+			// community. Declared-but-inert knobs named by
+			// snmpInertKnobWarnings (#9414) and the top-level scalars
+			// compileSNMP reads (location/contact/description) are
+			// known, never unknown; the community/trap-group/v3
+			// bodies are owned by their scoped gates and are not
+			// descended into here.
+			walkChildren(node.Children, schemaSNMP, []string{"snmp"})
+			if len(node.Keys) > 1 {
+				if tok := firstUnknownPackedKeyword15778(node, schemaSNMP, 1); tok != "" && !snmpKnownTopLevel16462(tok) {
+					warn([]string{"snmp"}, tok)
+				}
+			}
+		case "class-of-service":
+			// #16462 (R3-VA85-S1 leg): `class-of-service interfaces
+			// <if> unit <n>` was open-world — a misspelt shaping-rate
+			// (or `interfacs` at the root) beside a correct sibling
+			// committed clean and compiled to no shaper. Warn-only.
+			walkChildren(node.Children, schemaClassOfService, []string{"class-of-service"})
+			if len(node.Keys) > 1 {
+				if tok := firstUnknownPackedKeyword15778(node, schemaClassOfService, 1); tok != "" {
+					warn([]string{"class-of-service"}, tok)
+				}
+			}
 		}
 	}
 	return warnings

@@ -7593,6 +7593,21 @@ The #12517 then-tail gate does not treat it as a tail; it rejects only tokens
 beyond a recognized action's operands and unknown words in the packed compact
 and term-line spellings, which have no statement boundary of their own.
 
+**Open-world `system`, `snmp` and class-of-service roots now report unknown
+children too (#16462).** The same warn-only #10707 advisory covers `system`
+(including `syslog`/`ntp` children), top-level `snmp`, and
+`class-of-service interfaces <if> unit <n>`: a typo such as `syslog hots`,
+`ntp servr`, `name-sever`, `snmp comunity` or `shaping-rat` names the token
+in `Config.Warnings` on strict commit and on tolerant load/peer-sync, and
+still commits (#1960). Subtrees owned by a scoped strict gate (closedWorld
+bodies, the SNMP community/trap-group/v3 gates) and opaque value bodies are
+not double-reported, and declared-but-inert SNMP knobs keep only their
+#9414 advisory. Syslog facility heads under a destination are validated
+against the Junos facility vocabulary plus the BSD spellings the runtime
+maps (`kern`, `auth`, `syslog`, `local0`-`local7`, `*`, comma lists); an
+unknown facility warns by name instead of compiling to a selector no
+record matches.
+
 PR-A landed the mechanism DORMANT (no production subtree set `closedWorld`,
 zero false-reject risk). It is white-box tested with a SYNTHETIC subtree
 (`schema_walk_internal_test.go`, `TestClosedWorld_*`): an unmodeled keyword
