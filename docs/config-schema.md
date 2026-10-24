@@ -1726,6 +1726,28 @@ configuration must compile to the same typed filter set. It asserts the
 hierarchical arm is non-empty FIRST, because "both spellings mint zero" would
 satisfy a count-based check.
 
+### Firewall root / family / filter levels — unknown children are gated (#16450)
+
+Above the #10294 term gate, the levels `firewall`, `firewall family <af>`
+and `firewall family <af> filter <name>` were open-world: a misspelt
+keyword on one line (`trem` for `term`, `fitler` for `filter`, `fam` for
+`family`, or any other unknown child such as `xpfbogus`) committed clean
+with zero warnings and the line was dropped. An `accept` term whose
+`source-address` line carried the typo compiled with no source
+constraint — an accept from every source — while `show configuration`
+still rendered the dropped line. The scoped pre-walk gate
+`validateFirewallLevelChildrenAST16450` (in `runPreWalkGates`, beside
+#9017) judges exactly those three levels against the schema-declared
+children (`family`/`filter`/`policer`/`three-color-policer` at the root,
+`filter` under a family member, `interface-specific`/`term` under a
+filter), reading the permitted sets from the schema. It is deliberately
+NOT `closedWorld`, which inherits and would close the term grammar
+(#9017). Apply statements (#7029) are never judged. Strict commit
+rejects the first offender naming it; tolerant load/peer-sync warns once
+per distinct finding and keeps the pre-existing compiled shape (#1960).
+Coverage: `pkg/config/firewall_filter_family_levels_16450_test.go`
+(flat + hierarchical, inet/inet6/any, implicit-inet, group-inherited).
+
 ## Strict commit-time validators → `pkg/config/compiler_validate_strict_*.go`
 
 The typed per-leaf `SchemaValidate` walk (4) cannot express cross-field or
