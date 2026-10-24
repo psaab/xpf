@@ -6025,6 +6025,7 @@ fn cross_worker_reply_evidence_retains_victim_16019() {
         tcp_handshake_state: 0,
         pptp_call_ids: 0,
         rev_packets,
+        fwd_packets: 0,
     };
     crate::afxdp::shared_ops::publish_shared_session(
         &shared_sessions,

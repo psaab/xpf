@@ -6459,6 +6459,7 @@ fn lookup_fence_departed_candidate_reaches_hit_stage_16217() {
         peer_mac: [0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
         local_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
         up: true,
+        link_authenticated: false,
     });
     let mut ha_state = BTreeMap::new();
     ha_state.insert(
@@ -6694,6 +6695,7 @@ fn adopted_mark_revalidates_ownership_each_hit_16217() {
         peer_mac: [0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
         local_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
         up: true,
+        link_authenticated: false,
     });
     let converted = crate::afxdp::session_glue::redirect_session_via_fabric_if_needed_at(
         &fixture.forwarding,

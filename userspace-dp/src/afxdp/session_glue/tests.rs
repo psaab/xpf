@@ -1879,6 +1879,7 @@ fn ambiguous_local_reverse_lookup_blocks_shared_fallback_16014() {
         tcp_handshake_state: 0,
         pptp_call_ids: 0,
         rev_packets: 0,
+        fwd_packets: 0,
         source_nat_static: None,
     };
     publish_shared_session(
