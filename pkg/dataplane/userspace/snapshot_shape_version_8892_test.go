@@ -236,7 +236,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "cf98a6a5f065a05ef721a71ed53f0b040a4e5043a8e67ec8ddc067f446fcfdb9"
+	snapshotShapeGolden8892 = "b7f65ae8cf099c30084ae0bf0415bbabbee09da345a2dd2300901511b443ae7f"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -608,7 +608,18 @@ const (
 	// now count the built sections and the helper refuses a mismatch;
 	// no new wire field, so the golden below is unchanged in shape but
 	// the version pin moves with ProtocolVersion.
-	snapshotShapeVersion8892 = 68
+	// v70 STANDS (#16077): Config.UnimplementedAAALeaves is compile-time
+	// only (`json:"-"`, the LenientNATUndefinedScopeRuleSets precedent).
+	// ConfigSnapshot embeds Config, so this reflection walk sees the
+	// field, but it is absent from ConfigSnapshot JSON and Rust keeps
+	// `config` as an opaque serde_json::Value with no consumer for it.
+	// No helper of any vintage can observe the change, so ProtocolVersion
+	// stays and only this golden moves. The pre-change master digest was
+	// already drifted (base 29de2603… at ProtocolVersion 70 while this
+	// pin still said 68/cf98a6a5…); this entry folds that pre-existing
+	// drift together with the one new walked field into the v70 golden,
+	// it does not blame the drift on #16077.
+	snapshotShapeVersion8892 = 70
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

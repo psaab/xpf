@@ -159,6 +159,26 @@ func systemAAARefusals15711(systemNode *Node) []string {
 	return leaves
 }
 
+// UnimplementedAAAWarnings returns one persistent alarm line per retained
+// leaf on cfg.UnimplementedAAALeaves (#16077). It re-derives the operator
+// signal from the retained marker rather than cfg.Warnings, so alarm
+// surfaces that recompute from the active compiled config (show system
+// alarms, show security alarms) see the local-only posture for as long
+// as the config carries it — across daemon restarts, until the stanza is
+// removed and the tree recompiles. Returns nil for a strict-compiled or
+// clean config.
+func UnimplementedAAAWarnings(cfg *Config) []string {
+	if cfg == nil || len(cfg.UnimplementedAAALeaves) == 0 {
+		return nil
+	}
+	warnings := make([]string, 0, len(cfg.UnimplementedAAALeaves))
+	for _, leaf := range cfg.UnimplementedAAALeaves {
+		warnings = append(warnings, systemAAARefusal10831(leaf)+
+			" (unsupported AAA admitted on the tolerant path; local-only authentication is in effect until the stanza is removed)")
+	}
+	return warnings
+}
+
 func systemAAAWarningsOrError10831(systemNode *Node, lenient bool) ([]string, error) {
 	leaves := systemAAARefusals15711(systemNode)
 	if len(leaves) == 0 {
@@ -204,6 +224,13 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 	}
 	if cfg != nil {
 		cfg.Warnings = append(cfg.Warnings, aaaWarnings...)
+		if opts.lenientSystemAAA10831 {
+			// #16077: retain the leaf identities so alarm surfaces can
+			// recompute the warning from the active config after the
+			// transient Warnings slice has done its boot-time job.
+			cfg.UnimplementedAAALeaves = append(cfg.UnimplementedAAALeaves,
+				systemAAARefusals15711(node)...)
+		}
 	}
 
 	dpType, err := compileSystemDataplaneType(node)

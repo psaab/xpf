@@ -38,6 +38,14 @@ xpf (0.0.0) unstable; urgency=medium
     stored and no engine consumes them; previously they displayed as
     ordinary configuration, so an operator could believe identity-based
     policy was enforced.
+  * Alarms: an unsupported AAA stanza (radius-server, tacplus-server,
+    authentication-order, accounting) admitted by the tolerant load /
+    peer-sync path now stays visible in `show system alarms` and
+    `show security alarms` until the stanza is removed (#16077).
+    Previously the local-only-authentication warning existed only as a
+    boot-time log line, so a legacy persisted or peer-synced AAA tree
+    ran local-only auth with no persistent signal after boot. Strict
+    commit still rejects the stanza outright.
   * Login: the in-process console shell now re-resolves its user's
     `system login` class when the stanza changes, instead of keeping
     the assignment resolved once at daemon start (#16071). A console
