@@ -24,19 +24,19 @@ fn pptp_data_seq_verdict_in_out_unknown_16037() {
     let mut table = SessionTable::new();
     let t0 = 10_000_000_000u64;
     let _rev = install_forward_reverse_pair(&mut table, &forward, t0, TCP_SYN);
-    // No seq noted yet: the first payload-carrying segment is the
-    // stream start (SYNs carry no data) and stays teachable; the
-    // synced-unknown shape is pinned at the poll gate below, and a
-    // no-payload segment teaches nothing.
+    // No seq noted yet (HA-synced import shape, tcp_seq_seen=false):
+    // Unknown, and the caller must learn nothing — even though the
+    // segment carries payload. Sequence state can only bind a
+    // segment once the stream has been tracked here.
     assert_eq!(
         table.tcp_data_seq_verdict(&forward, 1001, 10),
-        SeqVerdict::Valid,
-        "first payload segment is the stream start"
+        SeqVerdict::Unknown,
+        "synced unknown-seq must not teach"
     );
     assert_eq!(
         table.tcp_data_seq_verdict(&forward, 1001, 0),
         SeqVerdict::Unknown,
-        "no-payload segment has nothing to teach"
+        "no state and no payload must not teach"
     );
     table.note_tcp_seq(&forward, 1000, 0, 4096, 0, TCP_SYN, 0);
     // SYN advanced rcv_nxt to 1001; receiver window 4096.
@@ -71,6 +71,37 @@ fn pptp_data_seq_verdict_in_out_unknown_16037() {
     assert_eq!(
         table.tcp_data_seq_verdict(&forward, 5000, 200),
         SeqVerdict::Invalid
+    );
+}
+
+/// #16037 production-site guard: the poll descriptor must snapshot the
+/// teach verdict BEFORE it notes this segment, and the capture arm
+/// must consume that snapshot. A verdict taken after
+/// `note_tcp_seq_scaled` for the same segment would validate an
+/// out-of-window payload against its own mutated `rcv_nxt` — the
+/// fold defect this guards. This reads the production source because
+/// the descriptor loop needs a live UMEM/binding to drive (the same
+/// reason #6664/#13079 use source guards).
+#[test]
+fn pptp_teach_verdict_is_snapshotted_before_the_note_16037() {
+    let poll = include_str!("../afxdp/poll_descriptor/mod.rs");
+    let snapshot_at = poll
+        .find("pending_pptp_data_seq_verdict = Some(sessions.tcp_data_seq_verdict(")
+        .expect("poll must snapshot the teach verdict pre-note");
+    let note_at = poll
+        .find("sessions.note_tcp_seq_scaled(")
+        .expect("poll must note seq at the Owner site");
+    assert!(
+        snapshot_at < note_at,
+        "teach verdict must be computed before this segment is noted"
+    );
+    // The capture arm must not re-derive the verdict post-note.
+    let capture_at = poll
+        .find("capture_pptp_control_segment_at_epoch(")
+        .expect("capture site");
+    assert!(
+        !poll[capture_at.saturating_sub(800)..capture_at].contains("tcp_data_seq_verdict("),
+        "capture arm must not recompute the verdict after the note"
     );
 }
 

@@ -426,12 +426,15 @@ sync.
       stream: a tuple-valid but out-of-window Outgoing-Call-Reply
       could teach attacker-chosen call IDs. The non-closing capture
       arm now requires `SessionTable::tcp_data_seq_verdict` to return
-      `Valid`: the segment lies inside the receiver window tracked
-      via `note_tcp_seq`, or it is the first payload segment on the
-      session (which starts the tracked stream — SYNs carry no data,
-      so legit control flows are unaffected). `Invalid` learns
-      nothing while the packet itself still forwards.
-      `tcp_no_sequence_check` opts out,
+      `Valid`, judged against the PRE-NOTE sequence state (the
+      verdict is snapshotted beside the read-only closing verdict,
+      before the deferred `note_tcp_seq` advances `rcv_nxt` with
+      this very segment — a post-note verdict would validate the
+      payload against its own mutated state). `Invalid` and
+      `Unknown` (HA-synced or otherwise untracked sessions) learn
+      nothing while the packet itself still forwards; once a real
+      handshake segment has been noted, later control segments are
+      fully window-checked. `tcp_no_sequence_check` opts out,
       mirroring the closing-segment gate. A close still tears down
       learned calls regardless of the verdict.
     - **Why capture is post-admission.** A pre-policy segment, including a

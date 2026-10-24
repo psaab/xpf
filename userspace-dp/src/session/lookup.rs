@@ -195,41 +195,31 @@ impl SessionTable {
     }
 
     /// #16037: validate a data (non-closing) segment's seq for PPTP
-    /// control teaching. The segment occupies [seq, seq+payload_len).
-    /// With tracked state it is teachable when it lies inside the
-    /// receiver's window: its start is at most `receiver_wnd` behind
-    /// `tcp_rcv_nxt` (retransmissions included), or it starts inside
-    /// the window ahead of `tcp_rcv_nxt` and ends by
-    /// `rcv_nxt + receiver_wnd`. `tcp_rcv_nxt` on the `key` entry is
-    /// the receiver's next-expected seq as advanced by accepted
-    /// prior segments in this direction; the window comes from the
-    /// companion entry — the same pairing
-    /// `tcp_closing_seq_verdict` uses.
+    /// control teaching against PRE-NOTE sequence state. The segment
+    /// occupies [seq, seq+payload_len). It is teachable when it lies
+    /// inside the receiver's window: its start is at most
+    /// `receiver_wnd` behind `tcp_rcv_nxt` (retransmissions
+    /// included), or it starts inside the window ahead of
+    /// `tcp_rcv_nxt` and ends by `rcv_nxt + receiver_wnd`.
+    /// `tcp_rcv_nxt` on the `key` entry is the receiver's
+    /// next-expected seq as advanced by accepted PRIOR segments in
+    /// this direction; the window comes from the companion entry —
+    /// the same pairing `tcp_closing_seq_verdict` uses.
     ///
-    /// When the entry exists but has no seq state, a payload-carrying
-    /// segment is the first non-closing segment on the session (the
-    /// handshake's SYNs carry no data, so nothing could have been
-    /// noted yet; a HA-synced session is the same shape). It returns
-    /// `Valid`: sequence validation can only bind a segment once the
-    /// stream is tracked, and the caller notes this segment, so
-    /// every later segment is fully window-checked. This mirrors
-    /// `tcp_seq_valid`'s no-state pass. A no-payload segment returns
-    /// `Unknown` (nothing to teach); a missing entry is `Unknown`.
-    pub fn tcp_data_seq_verdict(
-        &self,
-        key: &SessionKey,
-        seq: u32,
-        payload_len: u32,
-    ) -> SeqVerdict {
+    /// `Unknown` when the entry is missing or has no sequence state
+    /// yet; callers must learn nothing. That covers the HA-synced
+    /// shape (`tcp_seq_seen=false` on import) and a session whose
+    /// handshake SYNs were not observed here: the first payload
+    /// segment cannot be bound to a tracked stream, so it teaches
+    /// nothing either. Once any accepted segment has been noted,
+    /// every later segment is fully window-checked against the
+    /// pre-note state.
+    pub fn tcp_data_seq_verdict(&self, key: &SessionKey, seq: u32, payload_len: u32) -> SeqVerdict {
         let Some(entry) = self.entry_by_key(key) else {
             return SeqVerdict::Unknown;
         };
         if !entry.tcp_seq_seen {
-            return if payload_len > 0 {
-                SeqVerdict::Valid
-            } else {
-                SeqVerdict::Unknown
-            };
+            return SeqVerdict::Unknown;
         }
         let nat = entry.decision.nat;
         let companion_key = reverse_session_key(key, nat);
