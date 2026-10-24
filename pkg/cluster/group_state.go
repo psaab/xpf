@@ -366,6 +366,15 @@ func (m *Manager) GroupStates() []RedundancyGroupState {
 // ascending order. RG0 is reserved for control-plane ownership and is omitted.
 func (m *Manager) DataGroupIDs() []int {
 	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.dataGroupIDsLocked()
+}
+
+// dataGroupIDsLocked is DataGroupIDs for callers already holding m.mu
+// (read or write). #16475: Go's sync.RWMutex prohibits recursive read
+// locking — a writer queued between the outer and inner RLock wedges
+// the mutex for good — so no m.mu holder may call DataGroupIDs.
+func (m *Manager) dataGroupIDsLocked() []int {
 	ids := make([]int, 0, len(m.groups))
 	for rgID := range m.groups {
 		if rgID == 0 {
@@ -373,7 +382,6 @@ func (m *Manager) DataGroupIDs() []int {
 		}
 		ids = append(ids, rgID)
 	}
-	m.mu.RUnlock()
 	sort.Ints(ids)
 	return ids
 }
@@ -510,7 +518,7 @@ func (m *Manager) PeerPrimaryRGs() (rgs []int, peerAlive bool) {
 	if !m.peerAlive {
 		return nil, false
 	}
-	for _, rgID := range m.DataGroupIDs() {
+	for _, rgID := range m.dataGroupIDsLocked() {
 		if pg, ok := m.peerGroups[rgID]; ok && pg.State == StatePrimary {
 			rgs = append(rgs, rgID)
 		}
