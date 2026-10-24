@@ -48,6 +48,28 @@ fn active_ha() -> std::collections::BTreeMap<i32, HAGroupRuntime> {
     ha
 }
 
+
+/// #16217 (Opus final4): the gate-proved recovery fixtures thread
+/// through the pure adopted-resolution cells. Egress 12 in
+/// `test_forwarding_state_with_fabric` carries RG1, so `proved_rg=1`
+/// with the default-table decision is the owner proof the poll gate
+/// would have produced; `recovery_wrong_rg` proves a different RG.
+fn recovery_fixture() -> AdoptedRecovery {
+    AdoptedRecovery {
+        decision: test_decision(),
+        flow_key: test_key(),
+        proved_rg: 1,
+    }
+}
+
+fn recovery_wrong_rg() -> AdoptedRecovery {
+    AdoptedRecovery {
+        decision: test_decision(),
+        flow_key: test_key(),
+        proved_rg: 2,
+    }
+}
+
 fn inactive_ha_runtime(watchdog_timestamp: u64) -> HAGroupRuntime {
     HAGroupRuntime {
         active: false,
@@ -790,6 +812,7 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
         0,
         None,
         false,
+        None,
     )
     .expect("resolved");
 
@@ -4413,7 +4436,7 @@ fn adopted_forward_candidate_bypasses_ha_inactive_terminal_16217() {
     let dyn_empty = Arc::new(ShardedNeighborMap::new());
     let target = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
     assert_eq!(
-        fabric_adopted_resolution(&forwarding, &active_ha(), 1, candidate, demoted, &dyn_empty, target),
+        fabric_adopted_resolution(&forwarding, &active_ha(), 1, candidate, demoted, &dyn_empty, target, Some(&recovery_fixture())),
         candidate,
         "adopted: HAInactive-demoted ForwardCandidate is restored"
     );
@@ -4422,7 +4445,7 @@ fn adopted_forward_candidate_bypasses_ha_inactive_terminal_16217() {
         ..demoted
     };
     assert_eq!(
-        fabric_adopted_resolution(&forwarding, &active_ha(), 1, candidate, cluster_demoted, &dyn_empty, target),
+        fabric_adopted_resolution(&forwarding, &active_ha(), 1, candidate, cluster_demoted, &dyn_empty, target, Some(&recovery_fixture())),
         candidate,
         "adopted: ClusterTerminalHAInactive-demoted ForwardCandidate is restored"
     );
@@ -4438,13 +4461,13 @@ fn adopted_forward_candidate_bypasses_ha_inactive_terminal_16217() {
         ..candidate
     };
     assert_eq!(
-        fabric_adopted_resolution(&forwarding, &active_ha(), 1, missing, demoted, &dyn_empty, target),
+        fabric_adopted_resolution(&forwarding, &active_ha(), 1, missing, demoted, &dyn_empty, target, Some(&recovery_fixture())),
         demoted,
         "adopted: still-missing neighbor with no FIB cover keeps the HA terminal"
     );
     // An active enforced outcome is kept verbatim.
     assert_eq!(
-        fabric_adopted_resolution(&forwarding, &active_ha(), 1, candidate, candidate, &dyn_empty, target),
+        fabric_adopted_resolution(&forwarding, &active_ha(), 1, candidate, candidate, &dyn_empty, target, Some(&recovery_fixture())),
         candidate,
         "adopted: surviving ForwardCandidate is untouched"
     );
@@ -4459,7 +4482,7 @@ fn adopted_forward_candidate_bypasses_ha_inactive_terminal_16217() {
         ..unowned
     };
     assert_eq!(
-        fabric_adopted_resolution(&forwarding, &active_ha(), 1, unowned, unowned_demoted, &dyn_empty, target),
+        fabric_adopted_resolution(&forwarding, &active_ha(), 1, unowned, unowned_demoted, &dyn_empty, target, Some(&recovery_fixture())),
         unowned_demoted,
         "adopted: unknown-egress-RG demotion stays fail-closed"
     );
@@ -4573,6 +4596,11 @@ fn adopted_forward_candidate_bypasses_ha_inactive_terminal_16217() {
             0,
             None,
             adopted,
+            adopted.then(|| AdoptedRecovery {
+                decision: test_decision(),
+                flow_key: test_key(),
+                proved_rg: 1,
+            }),
         )
         .expect("wire session should resolve")
     };
@@ -4653,7 +4681,7 @@ fn adopted_missing_neighbor_recomputes_forward_candidate_16217() {
     // (The connected-but-unresolved retryable shape is pinned by
     // `adopted_cluster_terminal_recomputes_from_fib_16217`.)
     assert_eq!(
-        fabric_adopted_resolution(&forwarding, &active_ha(), 1, missing, demoted, &dyn_empty, target),
+        fabric_adopted_resolution(&forwarding, &active_ha(), 1, missing, demoted, &dyn_empty, target, Some(&recovery_fixture())),
         demoted,
         "adopted: still-missing neighbor with no FIB cover keeps the HA terminal (fail-closed)"
     );
@@ -4680,6 +4708,7 @@ fn adopted_missing_neighbor_recomputes_forward_candidate_16217() {
         demoted,
         &dyn_empty,
         target,
+        Some(&recovery_fixture()),
     );
     assert_eq!(
         restored.disposition,
@@ -4702,7 +4731,7 @@ fn adopted_missing_neighbor_recomputes_forward_candidate_16217() {
         ..unowned_missing
     };
     assert_eq!(
-        fabric_adopted_resolution(&forwarding_live, &active_ha(), 1, unowned_missing, unowned_demoted, &dyn_empty, target),
+        fabric_adopted_resolution(&forwarding_live, &active_ha(), 1, unowned_missing, unowned_demoted, &dyn_empty, target, Some(&recovery_fixture())),
         unowned_demoted,
         "adopted: unknown-egress MissingNeighbor stays fail-closed"
     );
@@ -4720,7 +4749,7 @@ fn adopted_missing_neighbor_recomputes_forward_candidate_16217() {
         ..cluster_missing
     };
     assert_eq!(
-        fabric_adopted_resolution(&forwarding_live, &active_ha(), 1, cluster_missing, cluster_demoted, &dyn_empty, target),
+        fabric_adopted_resolution(&forwarding_live, &active_ha(), 1, cluster_missing, cluster_demoted, &dyn_empty, target, Some(&recovery_fixture())),
         cluster_demoted,
         "adopted: ClusterTerminal MissingNeighbor (egress 0) stays fail-closed"
     );
@@ -4832,6 +4861,11 @@ fn adopted_missing_neighbor_recomputes_forward_candidate_16217() {
             0,
             None,
             adopted,
+            adopted.then(|| AdoptedRecovery {
+                decision: test_decision(),
+                flow_key: test_key(),
+                proved_rg: 1,
+            }),
         )
         .expect("wire session should resolve")
     };
@@ -4908,6 +4942,7 @@ fn adopted_cluster_terminal_recomputes_from_fib_16217() {
             terminal,
             &dyn_empty,
             target,
+            Some(&recovery_fixture()),
         ),
         terminal,
         "adopted: ClusterTerminal with no FIB cover keeps the terminal (fail-closed)"
@@ -4932,6 +4967,7 @@ fn adopted_cluster_terminal_recomputes_from_fib_16217() {
         terminal,
         &dyn_empty,
         target,
+        Some(&recovery_fixture()),
     );
     assert_eq!(
         unresolved.disposition,
@@ -4955,6 +4991,7 @@ fn adopted_cluster_terminal_recomputes_from_fib_16217() {
         terminal,
         &dyn_empty,
         target,
+        Some(&recovery_fixture()),
     );
     assert_eq!(
         restored.disposition,
@@ -5073,6 +5110,11 @@ fn adopted_cluster_terminal_recomputes_from_fib_16217() {
             0,
             None,
             adopted,
+            adopted.then(|| AdoptedRecovery {
+                decision: test_decision(),
+                flow_key: test_key(),
+                proved_rg: 1,
+            }),
         )
         .expect("wire session should resolve")
         .decision
@@ -5165,6 +5207,7 @@ fn adopted_restore_reads_node_neighbor_map_only_16217() {
         demoted,
         &dyn_node,
         target,
+        Some(&recovery_fixture()),
     );
     assert_eq!(
         restored.disposition,
@@ -5175,7 +5218,7 @@ fn adopted_restore_reads_node_neighbor_map_only_16217() {
     assert_eq!(restored.egress_ifindex, 12);
 
     // (2) Direct helper pin: the recompute itself reads the node map.
-    let recomputed = adopted_resolution_from_node_neighbor_map(&forwarding, &dyn_node, target);
+    let recomputed = adopted_resolution_from_node_neighbor_map(&forwarding, &dyn_node, target, &recovery_fixture()).expect("default-table recompute");
     assert_eq!(
         recomputed.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -5195,6 +5238,7 @@ fn adopted_restore_reads_node_neighbor_map_only_16217() {
         demoted,
         &dyn_empty,
         target,
+        Some(&recovery_fixture()),
     );
     assert_eq!(
         empty_out.disposition,
@@ -5203,7 +5247,7 @@ fn adopted_restore_reads_node_neighbor_map_only_16217() {
     );
     assert_eq!(empty_out.neighbor_mac, None);
     let recomputed_empty =
-        adopted_resolution_from_node_neighbor_map(&forwarding, &dyn_empty, target);
+        adopted_resolution_from_node_neighbor_map(&forwarding, &dyn_empty, target, &recovery_fixture()).expect("default-table recompute");
     assert_eq!(
         recomputed_empty.disposition,
         ForwardingDisposition::MissingNeighbor,
@@ -5314,6 +5358,7 @@ fn adopted_cluster_terminal_live_fib_shape_16217() {
             terminal,
             &dyn_map,
             target,
+        Some(&recovery_fixture()),
         );
         assert_eq!(
             restored.disposition,
@@ -5336,6 +5381,7 @@ fn adopted_cluster_terminal_live_fib_shape_16217() {
             terminal,
             &dyn_map,
             target,
+        Some(&recovery_fixture()),
         );
         assert_eq!(
             retryable.disposition,
@@ -5435,6 +5481,11 @@ fn adopted_cluster_terminal_live_fib_shape_16217() {
             0,
             None,
             adopted,
+            adopted.then(|| AdoptedRecovery {
+                decision: test_decision(),
+                flow_key: test_key(),
+                proved_rg: 1,
+            }),
         )
         .expect("wire session should resolve")
         .decision
@@ -15296,6 +15347,7 @@ fn local_hit_purge_removes_shared_and_replicates_14666() {
         0,
         None,
         false,
+        None,
     );
     let mut resolved = resolved_opt.expect("transient local hit must resolve");
     assert!(
@@ -15429,6 +15481,7 @@ fn local_hit_purge_preserves_replacement_shared_entry_14666() {
         0,
         None,
         false,
+        None,
     )
     .expect("hit resolves");
     let shared = SharedSessionRefs {
@@ -24865,4 +24918,158 @@ fn connected_owner_index_matches_legacy_scan_16217() {
     assert_eq!(legacy[3], 1, "empty-table /16 row is visible in a named scope");
     assert_eq!(legacy[4], 2, "ledger fallback names RG2 when no FIB row matches");
     assert_eq!(legacy[5], 0, "unmatched target stays unknown (0)");
+}
+
+/// #16217 (Opus final4 fold): the adopted recovery must re-resolve in
+/// the session's VALIDATED install table and restore ONLY a candidate
+/// whose egress RG equals the gate-proved RG. Fixture: target
+/// 172.16.80.200 connected in MAIN via egress 12 (RG1) and in tenant
+/// "blue" via egress 8 (RG2); the session decision carries blue's
+/// install_table_domain/check. Gate proves RG2 (tenant owner).
+/// FAIL-ON-REVERT: MAIN-table recovery restores the RG1 candidate
+/// under a RG2 proof (wrong table + wrong RG); dropping the RG check
+/// restores it too.
+#[test]
+fn adopted_recovery_uses_install_table_and_proved_rg_16217() {
+    let target = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+    let mac = [0x10, 0x66, 0x6a, 0x8b, 0x91, 0xa4];
+    let (domain, check) = crate::session::install_table_identity("blue");
+    let mut forwarding = test_forwarding_state_with_fabric();
+    for (ifindex, rg, table) in [(12, 1, "inet.0"), (8, 2, "blue.inet.0")] {
+        forwarding.connected_v4.push(ConnectedRouteV4 {
+            prefix: PrefixV4::from_net(
+                Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap(),
+            ),
+            host: Ipv4Addr::new(172, 16, 80, 0),
+            ifindex,
+            tunnel_endpoint_id: 0,
+            table: table.to_string(),
+        });
+        forwarding.egress.insert(
+            ifindex,
+            EgressInterface {
+                bind_ifindex: ifindex,
+                vlan_id: 0,
+                mtu: 1500,
+                src_mac: [0x02, 0xbf, 0x72, 0x00, 0x01, 0x01],
+                zone_id: 2,
+                redundancy_group: rg,
+                primary_v4: None,
+                primary_v6: None,
+            },
+        );
+        forwarding
+            .neighbors
+            .insert((ifindex, target), NeighborEntry { mac });
+    }
+    forwarding.install_tables.insert(
+        domain,
+        crate::afxdp::InstallTables {
+            v4: Some("blue.inet.0".to_string()),
+            v6: None,
+            h2: check,
+        },
+    );
+    let tenant_decision = SessionDecision {
+        resolution: test_resolution(),
+        nat: NatDecision::default(),
+        install_table_domain: domain,
+        install_table_check: check,
+    };
+    let recovery = AdoptedRecovery {
+        decision: tenant_decision,
+        flow_key: test_key(),
+        proved_rg: 2,
+    };
+    let dyn_empty = Arc::new(ShardedNeighborMap::new());
+    let terminal = ForwardingResolution {
+        disposition: ForwardingDisposition::ClusterTerminalHAInactive,
+        egress_ifindex: 0,
+        tx_ifindex: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        ..test_resolution()
+    };
+    // Tenant proof: recovery re-resolves in blue and restores the
+    // RG2 candidate on egress 8 (never MAIN's egress 12 / RG1).
+    let restored = fabric_adopted_resolution(
+        &forwarding,
+        &active_ha(),
+        1,
+        terminal,
+        terminal,
+        &dyn_empty,
+        target,
+        Some(&recovery),
+    );
+    assert_eq!(
+        restored.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "adopted recovery in the tenant table must restore"
+    );
+    assert_eq!(restored.egress_ifindex, 8, "tenant-table egress, not MAIN");
+    assert_eq!(restored.neighbor_mac, Some(mac));
+    // Wrong-RG proof: the same tenant recovery under a RG1 proof
+    // must refuse (tenant candidate is RG2, MAIN candidate would be
+    // RG1 but recovery never looks in MAIN).
+    let wrong = AdoptedRecovery {
+        decision: tenant_decision,
+        flow_key: test_key(),
+        proved_rg: 1,
+    };
+    assert_eq!(
+        fabric_adopted_resolution(
+            &forwarding,
+            &active_ha(),
+            1,
+            terminal,
+            terminal,
+            &dyn_empty,
+            target,
+            Some(&wrong),
+        ),
+        terminal,
+        "recovery under a mismatched proved RG must keep the terminal"
+    );
+    // No proof at all: non-adopted shape keeps the terminal.
+    assert_eq!(
+        fabric_adopted_resolution(
+            &forwarding,
+            &active_ha(),
+            1,
+            terminal,
+            terminal,
+            &dyn_empty,
+            target,
+            None,
+        ),
+        terminal,
+        "recovery without gate proof must keep the terminal"
+    );
+    // Looked-up candidate under the wrong RG: a MAIN egress-12
+    // candidate demoted to HAInactive must NOT restore under the
+    // tenant RG2 proof.
+    let main_candidate = ForwardingResolution {
+        egress_ifindex: 12,
+        neighbor_mac: Some(mac),
+        ..test_resolution()
+    };
+    let main_demoted = ForwardingResolution {
+        disposition: ForwardingDisposition::HAInactive,
+        ..main_candidate
+    };
+    assert_eq!(
+        fabric_adopted_resolution(
+            &forwarding,
+            &active_ha(),
+            1,
+            main_candidate,
+            main_demoted,
+            &dyn_empty,
+            target,
+            Some(&recovery),
+        ),
+        main_demoted,
+        "candidate whose egress RG != proved RG must not restore"
+    );
 }

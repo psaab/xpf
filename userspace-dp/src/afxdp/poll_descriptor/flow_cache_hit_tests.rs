@@ -6391,6 +6391,11 @@ fn adopted_flow_survives_subsequent_packet_revalidation_16217() {
             0,
             None,
             adopted,
+            adopted.then(|| crate::afxdp::session_glue::AdoptedRecovery {
+                decision: synced_decision,
+                flow_key: wire_key.clone(),
+                proved_rg: 1,
+            }),
         )
         .expect("wire session should resolve")
     };

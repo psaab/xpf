@@ -2829,6 +2829,37 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 worker_ctx.dynamic_neighbors,
                             ))
                 });
+                // #16217 (Opus final4): the gate-proved recovery
+                // context for this packet, built from the same gate
+                // the arms above consult. `Some` only when the gate
+                // qualifies the tuple (Established + this node owns
+                // the candidate's install-table egress RG in the
+                // fresh set); the adopted resolve's recovery then
+                // re-resolves in that install table and restores
+                // only candidates under the proved RG. The local-mark
+                // arm carries no gate candidate, so it passes `None`
+                // and its resolve keeps the terminal on any recovery
+                // shape (the mark's own fresh-set revalidation above
+                // is its ownership proof, unchanged).
+                let session_hit_adopted_recovery = if session_hit_fabric_adopted {
+                    flow.as_ref().and_then(|flow| {
+                        crate::afxdp::shared_ops::fabric_adoption_recovery_for_wire(
+                            worker_ctx.forwarding,
+                            worker_ctx.ha_state,
+                            worker_ctx.forwarding_active_rgs,
+                            now_secs,
+                            sessions,
+                            worker_ctx.shared_sessions,
+                            worker_ctx.shared_forward_wire_sessions,
+                            &worker_ctx.shared_owner_rg_indexes,
+                            &flow.forward_key,
+                            now_ns,
+                            worker_ctx.dynamic_neighbors,
+                        )
+                    })
+                } else {
+                    None
+                };
                 let mut decision = if let Some(flow) = flow.as_ref() {
                     if !owner_syn_reuse
                         && let Some(mut resolved) =
@@ -2862,6 +2893,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // #16042: parsed ack for the promote gate.
                                 pending_tcp_seq_note.map(|(_, ack, _, _)| ack),
                                 session_hit_fabric_adopted,
+                                session_hit_adopted_recovery,
                             )
                     {
                         // #10597 G5: a queued WireGuard record may only enter
@@ -4432,6 +4464,32 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // ownership before restoring any candidate.
                         // Non-adopted resolves keep the fail-closed
                         // terminal bit-identically.
+                        // #16217 (Opus final4): the gate-proved
+                        // recovery for the adoption resolve below —
+                        // same gate, same packet: the candidate's
+                        // decision (install table + NAT) and the
+                        // egress RG this node proved it owns. The
+                        // recovery restores only candidates under
+                        // that RG, re-resolved in that table.
+                        let adopted_recovery = if fabric_link_ingress
+                            && !crate::tcp_flags::has_syn(meta.tcp_flags)
+                        {
+                            crate::afxdp::shared_ops::fabric_adoption_recovery_for_wire(
+                                worker_ctx.forwarding,
+                                worker_ctx.ha_state,
+                                worker_ctx.forwarding_active_rgs,
+                                now_secs,
+                                sessions,
+                                worker_ctx.shared_sessions,
+                                worker_ctx.shared_forward_wire_sessions,
+                                &worker_ctx.shared_owner_rg_indexes,
+                                &flow.forward_key,
+                                now_ns,
+                                worker_ctx.dynamic_neighbors,
+                            )
+                        } else {
+                            None
+                        };
                         let adopted = if fabric_link_ingress
                             && !crate::tcp_flags::has_syn(meta.tcp_flags)
                             && crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
@@ -4483,6 +4541,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // the receiving worker's HA-activity
                                     // enforcement.
                                     true,
+                                    adopted_recovery,
                                 )
                             .filter(|resolved| {
                                 matches!(

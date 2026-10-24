@@ -390,6 +390,77 @@ pub(in crate::afxdp) fn fabric_adoption_gate_for_wire(
     true
 }
 
+/// #16217 (Opus final4 fold): the gate-proved recovery context for
+/// `wire_key`, or `None` when the gate declines. Built from the SAME
+/// candidate + install-table resolution + fresh-set membership test
+/// as `fabric_adoption_gate_for_wire` (single source: the gate is
+/// this function plus a tunnel-outer-RG arm the recovery does not
+/// re-judge — a tunneled candidate's outer RG stays the gate's
+/// answer, and the recovery verifies only the inner egress RG).
+/// Poll callsites pass the result into the adopted resolve so the
+/// recovery re-resolves in the session's validated install table
+/// and restores only candidates whose egress RG == the proved RG.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn fabric_adoption_recovery_for_wire(
+    forwarding: &crate::afxdp::ForwardingState,
+    ha_state: &std::collections::BTreeMap<i32, crate::afxdp::HAGroupRuntime>,
+    forwarding_active_rgs: &std::collections::BTreeSet<i32>,
+    now_secs: u64,
+    sessions: &crate::session::SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    wire_key: &SessionKey,
+    now_ns: u64,
+    dynamic_neighbors: &Arc<crate::afxdp::ShardedNeighborMap>,
+) -> Option<crate::afxdp::session_glue::AdoptedRecovery> {
+    let candidate = adoption_candidate_for_wire(
+        sessions,
+        shared_sessions,
+        shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
+        wire_key,
+        now_ns,
+    )?;
+    if ha_state.is_empty() {
+        return None;
+    }
+    let flow = crate::afxdp::SessionFlow {
+        src_ip: candidate.key.src_ip,
+        dst_ip: candidate.key.dst_ip,
+        forward_key: candidate.key.clone(),
+    };
+    let resolution = crate::afxdp::session_glue::lookup_forwarding_resolution_for_session(
+        forwarding,
+        dynamic_neighbors,
+        &flow,
+        candidate.decision,
+    )
+    .resolution;
+    let egress_rg = crate::afxdp::forwarding::owner_rg_for_resolution(forwarding, resolution);
+    let egress_rg = if egress_rg <= 0
+        && resolution.disposition
+            == crate::afxdp::ForwardingDisposition::ClusterTerminalHAInactive
+        && resolution.egress_ifindex <= 0
+    {
+        crate::afxdp::forwarding::owner_rg_for_resolution(
+            forwarding,
+            candidate.decision.resolution,
+        )
+    } else {
+        egress_rg
+    };
+    if egress_rg <= 0 || !forwarding_active_rgs.contains(&egress_rg) {
+        return None;
+    }
+    let _ = now_secs;
+    Some(crate::afxdp::session_glue::AdoptedRecovery {
+        decision: candidate.decision,
+        flow_key: candidate.key.clone(),
+        proved_rg: egress_rg,
+    })
+}
+
 /// The Established candidate behind `wire_key`: shared Established /
 /// scoped-evidence row (its stored key IS the canonical key), else a
 /// local Established serving row reified from its stored decision.
