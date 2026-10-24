@@ -143,9 +143,12 @@ func TestKernelPromoteRevertCapExceededRunningCandidateDefersPrune14165(t *testi
 	}
 }
 
-// --- Fake-system: an unreadable running kernel on a revert path must defer
-// the prune (cannot prove we are off the candidate — fail closed). BootEntries
-// failure enters revert without any prior RunningKernel read. ---
+// --- Fake-system: an unreadable running kernel must defer the prune (cannot
+// prove we are off the candidate — fail closed). Since #16441 the BootEntries
+// failure discriminates on RunningKernel first, so this shape is now the
+// #4872-A indeterminate path: no revert (hence no prune at all) and the
+// journal is preserved for the next boot. The prune deferral itself inside
+// restoreKnownGood is exercised by the revert paths above. ---
 func TestKernelPromoteRevertRunningUnreadableDefersPrune14165(t *testing.T) {
 	f := newFakeKernelSystem()
 	r := newKernelRunner(t, f)
@@ -155,14 +158,19 @@ func TestKernelPromoteRevertRunningUnreadableDefersPrune14165(t *testing.T) {
 	f.entriesErr = fmt.Errorf("efibootmgr timed out")
 	f.runningErr = fmt.Errorf("uname -r failure")
 
-	if _, err := r.Promote(); !errorsIsReverted(err) {
-		t.Fatalf("expected a controlled revert, got %v", err)
+	_, err := r.Promote()
+	if err == nil {
+		t.Fatal("#16441: indeterminate boot state must surface an error")
+	}
+	if errorsIsReverted(err) {
+		t.Fatalf("#16441: indeterminate must NOT be a revert (exit-3 reboot-loop risk), got %v", err)
 	}
 	if contains(f.calls, "prune:"+SlotB) {
 		t.Fatal("#14165: pruned while the running kernel was unreadable (cannot prove off candidate)")
 	}
-	if f.selectors[SlotB] != "6.18.5-10-generic" {
-		t.Fatalf("inactive selector = %q, want known-good restored", f.selectors[SlotB])
+	j, _ := r.loadKernelJournal()
+	if j.State != KernelStateArmed {
+		t.Fatalf("#16441: journal not preserved on indeterminate state (state=%s)", j.State)
 	}
 }
 

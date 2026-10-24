@@ -425,10 +425,12 @@ func TestKernelPromoteRevertOnBeaconFail(t *testing.T) {
 }
 
 // TestKernelPromoteCountsNVRAMReadTimeoutAsRevert10761 pins the caller side of
-// the bounded efibootmgr command: a timed-out first BootEntries read must enter
-// revert(), persist the attempt before cleanup, and request the controlled
-// exit-3 reboot rather than surfacing an infra error for systemd's uncounted
-// OnFailure reboot.
+// the bounded efibootmgr command: a timed-out first BootEntries read while the
+// CANDIDATE is the running kernel must enter revert(), persist the attempt
+// before cleanup, and request the controlled exit-3 reboot rather than
+// surfacing an infra error for systemd's uncounted OnFailure reboot. (The
+// known-good-running sibling now takes the no-reboot discarded path instead
+// — #16441; see kernel_promote_bootentries_16441_test.go.)
 func TestKernelPromoteCountsNVRAMReadTimeoutAsRevert10761(t *testing.T) {
 	f := newFakeKernelSystem()
 	r := newKernelRunner(t, f)
@@ -442,6 +444,9 @@ func TestKernelPromoteCountsNVRAMReadTimeoutAsRevert10761(t *testing.T) {
 		}
 	}
 
+	// The candidate kernel is running, so revert (not known-good discard) is
+	// the correct outcome even though its boot entry cannot be read.
+	f.running = "6.18.5-12-generic"
 	f.entriesErr = fmt.Errorf("efibootmgr timed out: context deadline exceeded")
 
 	_, err := r.Promote()
@@ -455,8 +460,14 @@ func TestKernelPromoteCountsNVRAMReadTimeoutAsRevert10761(t *testing.T) {
 	if f.lastRoll.Outcome != RollOutcomeReverted {
 		t.Fatalf("last-roll outcome = %q, want %q", f.lastRoll.Outcome, RollOutcomeReverted)
 	}
-	if !contains(f.calls, "prune:"+SlotB) {
-		t.Fatal("timed-out NVRAM read did not enter revert cleanup")
+	// #14165: the candidate is the RUNNING kernel here, so the destructive
+	// prune is deferred (selector + BootOrder restore only); the boot-entry
+	// read inside restoreKnownGood fails the same way, so no prune call.
+	if contains(f.calls, "prune:"+SlotB) {
+		t.Fatal("timed-out NVRAM read pruned the running candidate")
+	}
+	if !contains(f.calls, "restore-selector:"+SlotB) {
+		t.Fatal("timed-out NVRAM read did not enter revert cleanup (selector restore)")
 	}
 	j, err := r.loadKernelJournal()
 	if err != nil {

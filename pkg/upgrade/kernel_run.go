@@ -633,11 +633,19 @@ func (r *KernelRunner) Promote() (KernelRollOutcome, error) {
 	// Gate 1: did the firmware actually boot the candidate slot?
 	entries, err := sys.BootEntries()
 	if err != nil {
-		return KernelRollOutcome{}, r.revert(j, fmt.Errorf("read boot entries: %w", err))
+		// Without the slot map we cannot read BootCurrent's candidate id, but a
+		// BootEntries failure (e.g. an efibootmgr/NVRAM timeout) does NOT prove
+		// we booted the candidate: a firmware-fallback boot is already on
+		// known-good, and reverting there requests a redundant reboot + records
+		// a false "reverted" (#16441). Apply the same RunningKernel
+		// discrimination as the BootCurrent-unreadable path below (#4872 A).
+		return r.resolveUnreadableBootSlot(j, "", fmt.Errorf("read boot entries: %w", err))
 	}
 	candID, ok := entries[j.InactiveSlot]
 	if !ok {
-		return KernelRollOutcome{}, r.revert(j, fmt.Errorf("candidate slot %s vanished from NVRAM", j.InactiveSlot))
+		// Same discrimination as above: the candidate slot vanishing from
+		// NVRAM does not prove the candidate booted (#16441).
+		return r.resolveUnreadableBootSlot(j, "", fmt.Errorf("candidate slot %s vanished from NVRAM", j.InactiveSlot))
 	}
 	cur, err := sys.BootCurrent()
 	if err != nil {
@@ -648,32 +656,7 @@ func (r *KernelRunner) Promote() (KernelRollOutcome, error) {
 		// NOT mean we are off the candidate — if BootNext actually booted it, we
 		// would be deleting the running kernel's own modules/boot files (#4872 A).
 		// Fail CLOSED on the destructive prune: check RunningKernel first.
-		running, rkErr := sys.RunningKernel()
-		switch {
-		case rkErr != nil:
-			// Neither the booted slot NOR the running kernel is knowable. We
-			// cannot prove we are off the candidate, so we must NOT prune, and we
-			// must NOT reboot (a read-only-root reboot loop is the other hazard).
-			// Preserve the journal + candidate untouched and surface the error;
-			// the next boot re-runs this gate, and any reboot meanwhile lands on
-			// the known-good BootOrder front (BootNext already consumed).
-			return KernelRollOutcome{}, r.recoverIndeterminate(j, fmt.Errorf(
-				"read BootCurrent: %v; running kernel also unreadable: %w", err, rkErr))
-		case running == j.CandidateVersion:
-			// We ARE running the candidate despite the BootCurrent read error.
-			// Do NOT prune the kernel we are running — run the verification gate
-			// so a healthy candidate can still promote and an unhealthy one takes
-			// the controlled (bounded) revert path, never the silent-delete path.
-			r.logf("kernel-upgrade: BootCurrent unreadable (%v) but running kernel IS "+
-				"candidate %s; running verification gate (NOT pruning)", err, running)
-			return r.verifyAndPromote(j, candID, running)
-		default:
-			// Positive evidence we booted a non-candidate (known-good) kernel:
-			// pruning the un-promoted candidate slot is safe.
-			return r.cleanupAlreadyOnKnownGood(j, fmt.Errorf(
-				"read BootCurrent: %v; running kernel %s != candidate %s — on known-good",
-				err, running, j.CandidateVersion))
-		}
+		return r.resolveUnreadableBootSlot(j, candID, fmt.Errorf("read BootCurrent: %w", err))
 	}
 	if cur != candID {
 		// Firmware ignored BootNext / fell back — this boot is ALREADY on a
@@ -695,6 +678,45 @@ func (r *KernelRunner) Promote() (KernelRollOutcome, error) {
 		return KernelRollOutcome{}, r.revert(j, fmt.Errorf("running kernel %s != candidate %s", running, j.CandidateVersion))
 	}
 	return r.verifyAndPromote(j, candID, running)
+}
+
+// resolveUnreadableBootSlot discriminates the Gate-1 cases where the booted
+// slot cannot be established (#4872 A, #16441): BootEntries unreadable, the
+// candidate slot missing from NVRAM, or BootCurrent unreadable. candID is the
+// resolved candidate Boot#### id, or "" when BootEntries itself failed (no id
+// is knowable). RunningKernel is the only remaining evidence:
+//
+//   - unreadable: neither the booted slot NOR the running kernel is knowable;
+//     preserve journal + candidate, no prune, no reboot (recoverIndeterminate).
+//   - candidate, with a known candID: we ARE running the candidate, so run
+//     the verification gate (healthy promotes, unhealthy takes the controlled
+//     revert) — never the silent-delete prune.
+//   - candidate, with candID == "": the candidate is running but cannot be
+//     promoted (verifyAndPromote needs the Boot#### id for the durable
+//     BootOrder reorder), so take the controlled revert. restoreKnownGood
+//     re-reads BootEntries (warning-only on failure) and defers the prune
+//     there because the candidate is the running kernel (#14165).
+//   - otherwise: positive evidence of a non-candidate (known-good) kernel, so
+//     the no-reboot cleanupAlreadyOnKnownGood prune is safe and records
+//     "discarded" rather than a false "reverted".
+func (r *KernelRunner) resolveUnreadableBootSlot(j *KernelJournal, candID string, cause error) (KernelRollOutcome, error) {
+	running, rkErr := r.cfg.Sys.RunningKernel()
+	switch {
+	case rkErr != nil:
+		return KernelRollOutcome{}, r.recoverIndeterminate(j, fmt.Errorf(
+			"%v; running kernel also unreadable: %w", cause, rkErr))
+	case running == j.CandidateVersion && candID != "":
+		r.logf("kernel-upgrade: booted slot unreadable (%v) but running kernel IS "+
+			"candidate %s; running verification gate (NOT pruning)", cause, running)
+		return r.verifyAndPromote(j, candID, running)
+	case running == j.CandidateVersion:
+		return KernelRollOutcome{}, r.revert(j, fmt.Errorf(
+			"%v; running kernel IS candidate %s but its boot entry is unreadable, cannot promote", cause, running))
+	default:
+		return r.cleanupAlreadyOnKnownGood(j, fmt.Errorf(
+			"%v; running kernel %s != candidate %s — on known-good",
+			cause, running, j.CandidateVersion))
+	}
 }
 
 // verifyAndPromote runs the post-Gate-2 verification (verify-dataplane +
