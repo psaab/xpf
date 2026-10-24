@@ -171,7 +171,7 @@ func configMutationLineFor(fullMethod string, req any) (string, bool) {
 			// instead of falling through to the "set " prepend below.
 			if verb, isMutation := config.ConfigMutationVerb(input); isMutation &&
 				(verb == "copy" || verb == "rename" || verb == "insert" ||
-					verb == "deactivate" || verb == "activate") {
+					verb == "delete" || verb == "deactivate" || verb == "activate") {
 				return input, true
 			}
 			if line := strings.TrimSpace(input); line != "" {

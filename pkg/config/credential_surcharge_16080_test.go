@@ -184,3 +184,70 @@ func TestCredentialAdvisoryNamesFence16080(t *testing.T) {
 		}
 	}
 }
+
+// Fold (2): ancestor / subtree mutations. The typed endpoint is an
+// ancestor of a credential fence (or the destination half of a
+// copy/rename), so the direct prefix check misses it while the
+// executor rewrites the whole subtree beneath it.
+func TestCredentialSurchargeAncestorMutations16080(t *testing.T) {
+	cfg := cfg16080(t, "limited", "configure view")
+	denied := []string{
+		"delete system",
+		"delete system services",
+		"delete system services web-management",
+		"deactivate system",
+		"deactivate system login",
+		"rename system to system2",
+		"rename system login to login2",
+		"delete system services rest",
+		// Destination leg: a bare identity under a credential parent
+		// resolves into the fenced subtree. (A full-path rename INTO
+		// `system` itself is refused by the executor's collision guard,
+		// so it carries no sound ancestor-destination cell.)
+		"copy system login user operator to user eve",
+	}
+	for _, line := range denied {
+		if err := AuthorizeConfigMutation(cfg, "limited", nil, line); err == nil {
+			t.Errorf("%q ALLOWED; an ancestor mutation rewrites the credential subtree beneath it (#16080 fold 2)", line)
+		}
+	}
+	// Controls: ancestors of non-credential trees, and siblings that
+	// share only a string prefix, stay allowed.
+	allowed := []string{
+		"delete interfaces",
+		"delete security",
+		"rename interfaces to interfaces2",
+		"set system services web-management https system-generated-certificate",
+	}
+	for _, line := range allowed {
+		if err := AuthorizeConfigMutation(cfg, "limited", nil, line); err != nil {
+			t.Errorf("%q refused, want allowed (not a credential ancestor): %v", line, err)
+		}
+	}
+	// PermAll keeps ancestor mutations.
+	allCfg := cfg16080(t, "full", "all")
+	if err := AuthorizeConfigMutation(allCfg, "full", nil, "delete system"); err != nil {
+		t.Errorf("PermAll delete system refused: %v", err)
+	}
+}
+
+// Fold (3): AuthorizeExpandedCandidate for a surcharged-only class is
+// scoped to credential-touching diffs. An unrelated group edit whose
+// expanded lines touch no credential fence must commit; the same
+// shape carrying a credential leaf must not.
+func TestCredentialExpandedCandidateScopedToCredentialDiffs16080(t *testing.T) {
+	cfg := cfg16080(t, "limited", "configure view")
+	active := parseHierText(t, "system { host-name base-16080; }")
+	unrelated := parseHierText(t, "groups { G { interfaces { ge-0/0/0 { description uplink-16080; } } } } apply-groups G; system { host-name base-16080; }")
+	if err := AuthorizeExpandedCandidate(cfg, "limited", unrelated, active); err != nil {
+		t.Fatalf("unrelated group-expanded candidate refused for surcharged class (fold 3 over-denial): %v", err)
+	}
+	credential := parseHierText(t, "groups { G { system { root-authentication { plain-text-password hunter2-16080; } } } } apply-groups G; system { host-name base-16080; }")
+	if err := AuthorizeExpandedCandidate(cfg, "limited", credential, active); err == nil {
+		t.Fatal("credential group-expanded candidate ALLOWED for surcharged class (#16080)")
+	}
+	// AuthorizeExpandedTree (no active diff) keeps the same scoping.
+	if err := AuthorizeExpandedTree(cfg, "limited", unrelated); err != nil {
+		t.Fatalf("unrelated expanded tree refused for surcharged class (fold 3): %v", err)
+	}
+}

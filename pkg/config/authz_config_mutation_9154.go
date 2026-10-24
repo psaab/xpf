@@ -114,6 +114,48 @@ func credentialConfigPathsHit16080(paths []string) string {
 	return ""
 }
 
+// CredentialPathTouches16080 reports whether mutating `path` can reach a
+// credential stanza: the path is at/below a fence prefix, OR it is a
+// proper ANCESTOR of one (`system`, `system services`,
+// `system services web-management`, `system services rest`). An ancestor
+// mutation — `delete system`, `deactivate system login`,
+// `rename system to …`, `copy … to system` — rewrites or removes the
+// credential subtree beneath it even though the typed path itself never
+// names the fence. The direct-path check alone missed that leg
+// (#16080 fold). Exported for candidate-diff scoping in
+// authorizeExpandedTree14981.
+func CredentialPathTouches16080(path string) bool {
+	if credentialConfigPathHit16080(path) != "" {
+		return true
+	}
+	fields := strings.Fields(path)
+	for _, prefix := range credentialConfigPrefixes16080 {
+		if len(fields) >= len(prefix) {
+			continue
+		}
+		match := true
+		for i, tok := range fields {
+			if prefix[i] != tok {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+func credentialConfigPathsTouch16080(paths []string) bool {
+	for _, p := range paths {
+		if CredentialPathTouches16080(p) {
+			return true
+		}
+	}
+	return false
+}
+
 // CredentialSurchargeCheck16080 reports whether class is priced out of
 // credential mutations by #16080: a non-empty class that does not hold
 // PermAll. Whole-candidate operations (load override/rescue, rollback
@@ -545,11 +587,24 @@ func authorizeConfigMutationDepth9939(cfg *Config, class string, editPath []stri
 	// Only PermAll may mutate a credential path; the resolved path's
 	// fence prefix is safe to name (it is a fixed stanza name, never
 	// operator secret data).
+	//
+	// Fold (2): the check is SUBTREE-aware. `delete system`,
+	// `deactivate system login`, `rename system to …` and
+	// `copy … to system` carry an endpoint that is an ANCESTOR of a
+	// fence (or the destination half of one); mutating that endpoint
+	// rewrites/removes the credential subtree beneath it, so it is
+	// fenced even though the typed path never names the fence.
 	if hit := credentialConfigPathsHit16080(paths); hit != "" &&
 		!ClassHasPermission(cfg, class, PermAll) {
 		return fmt.Errorf("permission denied: login class %q denies %s under %q (%s)",
 			class, parts[0], configAuditRoot(paths[0]),
 			"credential path "+hit+" requires the super-user permission (all), not merely configure (#16080)")
+	}
+	if credentialConfigPathsTouch16080(paths) &&
+		!ClassHasPermission(cfg, class, PermAll) {
+		return fmt.Errorf("permission denied: login class %q denies %s under %q (%s)",
+			class, parts[0], configAuditRoot(paths[0]),
+			"mutation of a credential ancestor can rewrite login/root/api credentials and requires the super-user permission (all), not merely configure (#16080)")
 	}
 	if !ok {
 		// #16080: still adjudicate an embedded change-configuration

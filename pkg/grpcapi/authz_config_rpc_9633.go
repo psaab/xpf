@@ -73,8 +73,19 @@ func (s *Server) authorizeRPCLoadAndRollback(cfg *config.Config, class, fullMeth
 	if err != nil {
 		return fmt.Errorf("permission denied: login class %q has an invalid configuration regex: %w", class, err)
 	}
+	// #16080 fold (1): a no-regex configure class bypassed the
+	// credential surcharge here — `if !restricted { return nil }`
+	// returned before AuthorizeConfigLoad/Rollback (which enforce the
+	// fence) were ever called. Route surcharged classes through the
+	// shared decision too.
 	if !restricted {
-		return nil
+		fenced, ferr := config.CredentialSurchargeCheck16080(cfg, class)
+		if ferr != nil {
+			return ferr
+		}
+		if !fenced {
+			return nil
+		}
 	}
 	switch method {
 	case "Load":

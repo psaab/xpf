@@ -70,10 +70,16 @@ func TestConfigurationDenyIsEnforcedOverRPC9154(t *testing.T) {
 		}
 	})
 
-	t.Run("a class with no configuration regexes is untouched", func(t *testing.T) {
+	t.Run("a class with no configuration regexes is untouched except credentials", func(t *testing.T) {
 		cfg := cfgCfg9154(t, "", "")
-		if err := decideConfig9154(t, cfg, "Set", &pb.SetRequest{Input: line}); err != nil {
-			t.Errorf("a class with no regexes was denied: %v", err)
+		// #16080: the credential line IS denied now (the class `ops`
+		// here has no MappedPermissions, hence no PermAll); a
+		// non-credential line stays untouched.
+		if err := decideConfig9154(t, cfg, "Set", &pb.SetRequest{Input: line}); err == nil {
+			t.Error("a no-regex class set a credential path over gRPC; #16080 fence must deny it")
+		}
+		if err := decideConfig9154(t, cfg, "Set", &pb.SetRequest{Input: "set system host-name fw1"}); err != nil {
+			t.Errorf("a class with no regexes was denied a non-credential set: %v", err)
 		}
 	})
 

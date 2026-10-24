@@ -152,10 +152,15 @@ func decodeRESTConfigBody(r *http.Request, dst any) error {
 }
 
 // restConfigClassRestricted avoids decoding a body when the caller's class has
-// no configuration regex gate at all. The handler remains the sole decoder for
-// unrestricted classes (including the built-in `super-user` class), preserving
-// its own 400 response for malformed input; restricted classes must pass the
-// exact gate/handler decode below.
+// no configuration gate at all. It now reports BOTH gates: the
+// *-configuration regex restriction AND the #16080 credential surcharge
+// (a non-empty class without PermAll). Previously a no-regex configure
+// class short-circuited here (`if !restricted { return nil }`) before
+// AuthorizeConfigMutation was ever called, so the shared credential
+// fence never ran on this surface — the REST fast path bypassed the
+// surcharge (#16080 fold (1)). The handler remains the sole decoder
+// for truly unrestricted classes (empty class, PermAll / super-user),
+// preserving its own 400 response for malformed input.
 func restConfigClassRestricted(cfg *config.Config, class string) (bool, error) {
 	_, restricted, err := config.ConfigurationLoginRegexesFor(cfg, class)
 	if err != nil {
@@ -163,7 +168,14 @@ func restConfigClassRestricted(cfg *config.Config, class string) (bool, error) {
 			"permission denied: login class %q has an invalid configuration regex: %w",
 			class, err)
 	}
-	return restricted, nil
+	if restricted {
+		return true, nil
+	}
+	fenced, err := config.CredentialSurchargeCheck16080(cfg, class)
+	if err != nil {
+		return false, err
+	}
+	return fenced, nil
 }
 
 // authorizeRESTConfigLoad adjudicates the content-gated routes (#9892).
