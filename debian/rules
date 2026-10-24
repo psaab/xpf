@@ -123,21 +123,21 @@ override_dh_auto_install:
 	install -d debian/xpf/etc/needrestart/conf.d
 	install -m 0644 debian/xpf.needrestart \
 	                debian/xpf/etc/needrestart/conf.d/xpf.conf
-	@# #16243: ship the UMEM hugepage reservation so a foreign-host /
-	@# manual .deb install gets the same knob the baked image carries
-	@# (scripts/image/bake.py writes the identical repo file). It goes
-	@# under /usr/lib/sysctl.d, NOT /etc: a conffile under /etc prompts
-	@# under unattended dpkg on first adoption by a host that already
-	@# hand-installed the file (review 16260). /usr/lib/sysctl.d is
-	@# package-owned (non-conffile, like the keyring below), upgrades
-	@# never prompt, and an operator's /etc/sysctl.d/99-xpf-hugepages.conf
-	@# -- the path every xpf doc names -- still wins: sysctl.d precedence
-	@# is /etc > /run > /usr/lib for equal basenames. The value takes
-	@# effect at the next boot or `sysctl --system`; sizing formula is in
-	@# the file header and docs/deploy-quickstart.md.
-	install -d debian/xpf/usr/lib/sysctl.d
-	install -m 0644 etc/sysctl.d/99-xpf-hugepages.conf \
-	                debian/xpf/usr/lib/sysctl.d/99-xpf-hugepages.conf
+	@# #16455: the .deb installs NO hugepage sysctl. #16243 shipped
+	@# etc/sysctl.d/99-xpf-hugepages.conf under /usr/lib/sysctl.d so a
+	@# foreign-host / manual install got the same knob as the baked
+	@# image -- but systemd's /usr/lib/sysctl.d file trigger applies a
+	@# payload dropped there at package-install time (systemd.postinst
+	@# restarts systemd-sysctl.service), not at "next boot" as previously
+	@# claimed, so `apt install xpf` reserved the (then 1440-page,
+	@# 2.8 GiB) pool on a foreign, never-committed host the moment apt
+	@# finished. That is exactly the unowned-host kernel-posture change
+	@# #10733 forbids. The pool is an appliance-image property now: the
+	@# bake writes the default-ring pool (or the --hugepages rig pool)
+	@# to /etc/sysctl.d/ in the image, and a foreign-host operator who
+	@# wants a pool copies etc/sysctl.d/99-xpf-hugepages.conf from the
+	@# repo to /etc/sysctl.d/ by hand and runs `sysctl --system`.
+	@# scripts/image/test_bake_hugepages_16243.py pins the absence.
 	@# Ship the apt archive keyring in the package payload (#1924 NIT-2) so
 	@# existing hosts get a ROTATED key via `apt upgrade` even though they
 	@# never re-run install.sh. Install under /usr/share/keyrings (NOT

@@ -251,6 +251,7 @@ class MainValidationGateTests(unittest.TestCase):
                 skip_build=True,
                 skip_validate=False,
                 keep_work=False,
+                hugepages=None,
             )
             subprocess_calls = []
             sign_calls = []
@@ -354,6 +355,7 @@ class MainValidationGateTests(unittest.TestCase):
                 skip_build=True,
                 skip_validate=True,
                 keep_work=False,
+                hugepages=None,
             )
             subprocess_calls = []
 

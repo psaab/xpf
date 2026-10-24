@@ -290,7 +290,7 @@ class BuildProvenanceTests(unittest.TestCase):
 
     def test_main_rejects_explicit_clean_version_before_building_dirty_source(self):
         args = SimpleNamespace(
-            version="0.0.1+gabcdef012345", skip_build=False)
+            version="0.0.1+gabcdef012345", skip_build=False, hugepages=None)
         with (
             mock.patch.object(
                 bake.argparse.ArgumentParser, "parse_args", return_value=args),
