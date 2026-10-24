@@ -395,7 +395,7 @@ func (c *CLI) handleCommit(args []string) error {
 	// commit below: CommitWithDescription (#3861) applies the new candidate
 	// AND clears the confirm timer, so the edits are committed rather than
 	// silently dropped (the pre-#4000 intercept confirmed-and-discarded).
-	if c.store.IsConfirmPending() && !c.store.IsDirty() {
+	if c.store.ConfirmOnly() {
 		if err := c.store.ConfirmCommitAs(c.cliConfigSessionID()); err != nil {
 			return fmt.Errorf("confirm commit: %w", err)
 		}

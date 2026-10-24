@@ -8,6 +8,18 @@ xpf (0.0.0) unstable; urgency=medium
     the policy resolver shares the single strict resolver with the
     filter/DNAT paths.
 
+  * Config: the three config-commit surfaces now share exactly three
+    config-lifecycle helpers in pkg/configstore (#16156):
+    `Store.ConfirmOnly()` (the confirm-pending && candidate-unchanged
+    predicate, read under one store lock hold instead of two separate
+    flag reads), `ClassifyCommitError` (the structural (compiled, err)
+    commit-error classification shared by the REST and gRPC commit
+    handlers), and `WarningsOf` (nil-safe defensive-copy extraction of
+    `cfg.Warnings`). There is no configops.Service and no
+    authority-minting CommitGate: REST/gRPC still mint holder-epoch
+    authority before the confirm gate and the local CLI still commits
+    authority-free, so operator-visible behaviour is unchanged.
+
   * Config: the interface resolvers (`ResolveReth`, `ResolveFab`,
     `DHCPLeaseKey`) now share one extracted first-dot parser,
     `SplitIfaceRef`, which returns the suffix RAW and uninterpreted

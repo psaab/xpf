@@ -43,12 +43,15 @@ func journalPrincipalForContext(_ *Server, ctx context.Context, sessionID string
 }
 
 // commitApplyStatus maps a non-nil commit-callback error (commitFn /
-// commitConfirmedFn) to the right gRPC status code (#5742). The daemon commit
-// path (commitAndApply / commitConfirmedAndApply → applyAndSyncCommitted)
-// already encodes the error CLASS in whether it returns the committed config
-// alongside the error, so no error-text matching or new cross-package sentinel
-// is needed — classify structurally on (compiled, err):
-//
+// commitConfirmedFn) to the right gRPC status code (#5742). The
+// structural (compiled, err) classification is shared with REST via
+// configstore.ClassifyCommitError (#16156); this function only maps
+// the shared class onto gRPC codes. The daemon commit path
+// (commitAndApply / commitConfirmedAndApply → applyAndSyncCommitted)
+// already encodes the error CLASS in whether it returns the committed
+// config alongside the error, so no error-text matching or new
+// cross-package sentinel is needed — classify structurally on
+// (compiled, err):
 //   - context.Canceled / context.DeadlineExceeded (checked FIRST so a wrapped
 //     context error can never be mis-mapped even if a caller also returns a
 //     non-nil config): the commit was aborted by a daemon stop or a busy
@@ -73,12 +76,12 @@ func journalPrincipalForContext(_ *Server, ctx context.Context, sessionID string
 // Only the machine-readable code moves; the human-readable "%v" error text is
 // byte-identical to the pre-#5742 mapping. Callers MUST pass a non-nil err.
 func commitApplyStatus(compiled *config.Config, err error) error {
-	switch {
-	case errors.Is(err, context.Canceled):
+	switch configstore.ClassifyCommitError(compiled, err) {
+	case configstore.CommitErrCanceled:
 		return status.Errorf(codes.Canceled, "commit busy: %v", err)
-	case errors.Is(err, context.DeadlineExceeded):
+	case configstore.CommitErrDeadlineExceeded:
 		return status.Errorf(codes.DeadlineExceeded, "commit busy: %v", err)
-	case compiled != nil:
+	case configstore.CommitErrCommittedTail:
 		return status.Errorf(codes.Unavailable, "%v", err)
 	default:
 		return status.Errorf(codes.InvalidArgument, "%v", err)
@@ -311,7 +314,7 @@ func (s *Server) Commit(ctx context.Context, req *pb.CommitRequest) (*pb.CommitR
 	// edits fall through to the normal commit below, where the daemon commitFn
 	// (CommitWithDescription, #3861) applies them AND clears the timer, so the
 	// edits are committed rather than silently dropped.
-	if s.store.IsConfirmPending() && !s.store.IsDirty() {
+	if s.store.ConfirmOnly() {
 		if err := s.store.ConfirmCommitAs(sessionID); err != nil {
 			return nil, status.Errorf(codes.Internal, "%v", err)
 		}
@@ -331,7 +334,7 @@ func (s *Server) Commit(ctx context.Context, req *pb.CommitRequest) (*pb.CommitR
 		// transient/retryable (Unavailable), NOT a config reject (InvalidArgument).
 		return nil, commitApplyStatus(compiled, err)
 	}
-	return &pb.CommitResponse{Summary: summary, Warnings: configWarnings(compiled)}, nil
+	return &pb.CommitResponse{Summary: summary, Warnings: configstore.WarningsOf(compiled)}, nil
 }
 
 func (s *Server) CommitCheck(ctx context.Context, _ *pb.CommitCheckRequest) (*pb.CommitCheckResponse, error) {
@@ -348,7 +351,7 @@ func (s *Server) CommitCheck(ctx context.Context, _ *pb.CommitCheckRequest) (*pb
 	if err != nil {
 		return nil, configMutationStatus(err)
 	}
-	return &pb.CommitCheckResponse{Warnings: configWarnings(compiled)}, nil
+	return &pb.CommitCheckResponse{Warnings: configstore.WarningsOf(compiled)}, nil
 }
 
 func (s *Server) CommitConfirmed(ctx context.Context, req *pb.CommitConfirmedRequest) (*pb.CommitConfirmedResponse, error) {
@@ -380,7 +383,7 @@ func (s *Server) CommitConfirmed(ctx context.Context, req *pb.CommitConfirmedReq
 		// committed config (Unavailable/retryable) vs a nil-config config reject.
 		return nil, commitApplyStatus(compiled, err)
 	}
-	return &pb.CommitConfirmedResponse{Warnings: configWarnings(compiled)}, nil
+	return &pb.CommitConfirmedResponse{Warnings: configstore.WarningsOf(compiled)}, nil
 }
 
 func (s *Server) ConfirmCommit(ctx context.Context, _ *pb.ConfirmCommitRequest) (*pb.ConfirmCommitResponse, error) {
@@ -408,12 +411,6 @@ func (s *Server) Rollback(ctx context.Context, req *pb.RollbackRequest) (*pb.Rol
 		return nil, configMutationStatus(err)
 	}
 	return &pb.RollbackResponse{}, nil
-}
-func configWarnings(cfg *config.Config) []string {
-	if cfg == nil || len(cfg.Warnings) == 0 {
-		return nil
-	}
-	return append([]string(nil), cfg.Warnings...)
 }
 
 func (s *Server) ShowConfig(ctx context.Context, req *pb.ShowConfigRequest) (*pb.ShowConfigResponse, error) {

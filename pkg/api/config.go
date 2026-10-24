@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -467,7 +466,7 @@ func (s *Server) configCommitHandler(w http.ResponseWriter, r *http.Request) {
 	// edits fall through to the normal commit below, where commitFn applies
 	// them AND clears the timer (#3861), so they are committed rather than
 	// silently dropped.
-	if s.store.IsConfirmPending() && !s.store.IsDirty() {
+	if s.store.ConfirmOnly() {
 		if err := s.store.ConfirmCommitAs(sessionID); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1062,8 +1061,9 @@ type commitCommittedResponse struct {
 }
 
 // writeCommitError maps a non-nil commit-callback error (commitFn /
-// commitConfirmedFn) to the REST response, classifying structurally on
-// (compiled, err) exactly like grpcapi.commitApplyStatus (#5742):
+// commitConfirmedFn) to the REST response. The structural classification
+// is shared with gRPC via configstore.ClassifyCommitError (#16156,
+// #5742):
 //
 //   - context.Canceled / DeadlineExceeded (checked FIRST): 503
 //     "commit busy: ..." — unchanged from the pre-#15281 mapping.
@@ -1073,17 +1073,15 @@ type commitCommittedResponse struct {
 //   - compiled == nil (default): a real config reject. 400 — unchanged,
 //     fail-safe: an unclassifiable error is never told "committed".
 func writeCommitError(w http.ResponseWriter, compiled *config.Config, err error) {
-	switch {
-	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+	switch configstore.ClassifyCommitError(compiled, err) {
+	case configstore.CommitErrCanceled, configstore.CommitErrDeadlineExceeded:
 		writeError(w, http.StatusServiceUnavailable, "commit busy: "+err.Error())
-	case compiled != nil:
+	case configstore.CommitErrCommittedTail:
 		resp := commitCommittedResponse{
 			Status:    "committed_with_error",
 			Committed: true,
 			Error:     err.Error(),
-		}
-		if len(compiled.Warnings) > 0 {
-			resp.Warnings = append([]string(nil), compiled.Warnings...)
+			Warnings:  configstore.WarningsOf(compiled),
 		}
 		writeJSON(w, http.StatusServiceUnavailable, Response{Success: false, Data: resp, Error: err.Error()})
 	default:
@@ -1097,9 +1095,5 @@ type configCommitResponse struct {
 }
 
 func commitResponseFromConfig(cfg *config.Config) configCommitResponse {
-	resp := configCommitResponse{Status: "ok"}
-	if cfg != nil && len(cfg.Warnings) > 0 {
-		resp.Warnings = append([]string(nil), cfg.Warnings...)
-	}
-	return resp
+	return configCommitResponse{Status: "ok", Warnings: configstore.WarningsOf(cfg)}
 }

@@ -180,6 +180,20 @@ inline archive-site-password warning in #651).
   `MarkAppliedDigest`. (See
   `store.go` for the full surface — there's no shorthand
   `Candidate()` or `History()`; use the `Show*` / `List*` forms.)
+- Shared config-lifecycle helpers (#16156, `commit_helpers_16156.go`) —
+  the ONLY cross-surface commit helpers, deliberately not a service:
+  `Store.ConfirmOnly()` (the pure confirm-only predicate —
+  confirm-pending && candidate unchanged — read under one lock hold so
+  a concurrent edit cannot route a dirty candidate into the
+  confirm-only branch and drop it, #4000), `ClassifyCommitError`
+  (the structural (compiled, err) commit-error class shared by the
+  REST and gRPC commit handlers, #5742/#15281; each surface maps the
+  class onto its own wire codes), and `WarningsOf` (nil-safe
+  defensive-copy extraction of `cfg.Warnings`). None of them mints a
+  commit authority: REST/gRPC mint holder-epoch authority via
+  `AuthorizeCommitAs` before the confirm gate, while the local CLI
+  commits authority-free, so there is no three-surface
+  `CommitGate(store, session) -> authority` and no `configops.Service`.
 - `MarkActiveApplied` / `MarkAppliedDigest` / `ActiveApplied` / `ActiveDigest` —
   the #4957 applied-config marker (+ the #6296 capture/replay pair).
   `SyncApply` (and `Commit`/`Load`) promote `s.active` BEFORE the daemon runs
