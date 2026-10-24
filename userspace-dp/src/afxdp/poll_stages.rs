@@ -1198,6 +1198,18 @@ pub(super) fn stage_screen_check_with_ambiguous(
             // screens is dropped on the flow path, so drop it here too rather
             // than admit an unparseable fragment unscreened.
             Err(err) => {
+                // #16051 fold: preserve the fail-closed parse semantics
+                // (#2146: Err => DROP), attributed to the actual screened
+                // zone. Raw-present keeps the raw zone; claimed-only
+                // attributes to the claimed zone — never sentinel 0, never
+                // a fail-open Pass (a malformed-options SYN|FIN with
+                // complete headers must not evade the claimed screen).
+                let Some((err_zone_id, err_zone_name)) =
+                    raw_profile_zone.or(claimed_zone)
+                else {
+                    return StageOutcome::Continue(ScreenCheckOutcome::Pass);
+                };
+                let _ = err_zone_name;
                 let reason = err.screen_reason();
                 emit_screen_drop_event(
                     worker_ctx.event_stream,
@@ -1207,13 +1219,13 @@ pub(super) fn stage_screen_check_with_ambiguous(
                     // protocol=0 / pkt_len=0 / 0.0.0.0.
                     &screen_parse_error_info_flowless(&meta, screen_src, screen_dst),
                     meta,
-                    zone_id,
+                    err_zone_id,
                     reason,
                     event_now_ns_from_secs(now_secs),
                 );
                 counters.record_screen_drop(
                     reason,
-                    zone_id,
+                    err_zone_id,
                     &worker_ctx.forwarding.flood_counter_slot_map,
                 );
                 return StageOutcome::RecycleAndContinue;
@@ -1339,19 +1351,26 @@ pub(super) fn stage_screen_check_with_ambiguous(
         // rather than admit it — a SYN-bearing frame with a truncated
         // FRAGMENT header must not bypass `syn-frag`.
         Err(err) => {
+            // #16051 fold: preserve fail-closed parse semantics (#2146),
+            // attributed to the actual screened zone (raw if present, else
+            // claimed) — never sentinel 0, never a fail-open Pass.
+            let Some((err_zone_id, _err_zone_name)) = raw_profile_zone.or(claimed_zone)
+            else {
+                return StageOutcome::Continue(ScreenCheckOutcome::Pass);
+            };
             let reason = err.screen_reason();
             let drop_info = screen_parse_error_info(&meta, flow);
             emit_screen_drop_event(
                 worker_ctx.event_stream,
                 &drop_info,
                 meta,
-                zone_id,
+                err_zone_id,
                 reason,
                 event_now_ns_from_secs(now_secs),
             );
             counters.record_screen_drop(
                 reason,
-                zone_id,
+                err_zone_id,
                 &worker_ctx.forwarding.flood_counter_slot_map,
             );
             return StageOutcome::RecycleAndContinue;
@@ -1385,10 +1404,11 @@ pub(super) fn stage_screen_check_with_ambiguous(
         );
     }
     // #16051: consult the claimed zone's stateless union BEFORE acting
-    // on the raw zone's verdict. A claimed Drop recycles regardless of
-    // the raw verdict (Pass, Bypass, or even Challenge — no SYN-ACK may
-    // be minted for a packet the claimed profile drops); a raw Drop
-    // keeps precedence for attribution when both trip.
+    // on the raw zone's verdict. Disposition is per-role: an enforcing
+    // claimed Drop recycles regardless of the raw verdict (Pass, Bypass,
+    // Challenge, or an audit-only raw Drop), while an audit-only claimed
+    // trip alarms and falls through. A raw enforcing Drop keeps its own
+    // attribution when the claimed role does not independently recycle.
     let claimed_drop = claimed_zone.and_then(|(_, claimed_name)| {
         screen.stateless_screen_drop_for_zones(
             std::iter::once(claimed_name),
@@ -1397,41 +1417,44 @@ pub(super) fn stage_screen_check_with_ambiguous(
         )
     });
     if let Some(reason) = claimed_drop {
-        if !matches!(verdict, ScreenVerdict::Drop(_)) {
-            let (claimed_id, claimed_name) =
-                claimed_zone.expect("claimed drop requires claimed zone");
-            if screen.alarm_without_drop(claimed_name) {
-                emit_screen_alarm_event(
-                    worker_ctx.event_stream,
-                    &screen_pkt,
-                    meta,
-                    claimed_id,
-                    reason,
-                    event_now_ns_from_secs(now_secs),
-                );
-                screen.record_alarm_without_drop();
-                crate::afxdp::flood_counters::record_zone_flood_alarm(
-                    &worker_ctx.forwarding.flood_counter_slot_map,
-                    claimed_id,
-                    reason,
-                );
-                // Audit mode: fall through to the raw verdict below.
-            } else {
-                emit_screen_drop_event(
-                    worker_ctx.event_stream,
-                    &screen_pkt,
-                    meta,
-                    claimed_id,
-                    reason,
-                    event_now_ns_from_secs(now_secs),
-                );
-                counters.record_screen_drop(
-                    reason,
-                    claimed_id,
-                    &worker_ctx.forwarding.flood_counter_slot_map,
-                );
-                return StageOutcome::RecycleAndContinue;
-            }
+        let (claimed_id, claimed_name) =
+            claimed_zone.expect("claimed drop requires claimed zone");
+        // #16051 fold: disposition is per-role. A raw audit-only Drop does
+        // not suppress an enforcing claimed veto; claimed is evaluated on
+        // its own alarm flag first, and only an enforcing claimed Drop
+        // recycles. When claimed is also audit-only, both alarms fire and
+        // the raw verdict falls through unchanged.
+        if screen.alarm_without_drop(claimed_name) {
+            emit_screen_alarm_event(
+                worker_ctx.event_stream,
+                &screen_pkt,
+                meta,
+                claimed_id,
+                reason,
+                event_now_ns_from_secs(now_secs),
+            );
+            screen.record_alarm_without_drop();
+            crate::afxdp::flood_counters::record_zone_flood_alarm(
+                &worker_ctx.forwarding.flood_counter_slot_map,
+                claimed_id,
+                reason,
+            );
+            // Audit mode: fall through to the raw verdict below.
+        } else {
+            emit_screen_drop_event(
+                worker_ctx.event_stream,
+                &screen_pkt,
+                meta,
+                claimed_id,
+                reason,
+                event_now_ns_from_secs(now_secs),
+            );
+            counters.record_screen_drop(
+                reason,
+                claimed_id,
+                &worker_ctx.forwarding.flood_counter_slot_map,
+            );
+            return StageOutcome::RecycleAndContinue;
         }
     }
     match verdict {
