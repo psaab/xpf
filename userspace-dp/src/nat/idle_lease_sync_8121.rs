@@ -721,4 +721,16 @@ impl PortAllocator {
         self.lock_live()
             .import_idle_pat_address_only_contended(protocol, translated, remote)
     }
+
+    /// #16488: peer ANY-remote contention query for round-robin NAT64
+    /// imports. A NAT64 BIB is AnyRemoteHost, so a peer/interface live
+    /// owner at the same translated base contends regardless of remote.
+    pub(crate) fn peer_import_idle_any_contended(
+        &self,
+        protocol: u8,
+        translated: TranslatedTuple,
+    ) -> bool {
+        self.lock_live()
+            .import_idle_pat_address_only_contended(protocol, translated, None)
+    }
 }

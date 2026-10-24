@@ -149,7 +149,7 @@ impl PoolAddressOwners {
     /// The parser stores each pool address only once (#10700). Skipping this
     /// allocator instance is still required because rules sharing one pool
     /// intentionally share one occupancy domain.
-    fn peer_holds(&self, own: &PortAllocator, addr: IpAddr, port: u16) -> bool {
+    pub(crate) fn peer_holds(&self, own: &PortAllocator, addr: IpAddr, port: u16) -> bool {
         let owners = match addr {
             IpAddr::V4(v4) => self.v4.get(&v4),
             IpAddr::V6(v6) => self.v6.get(&v6),
@@ -840,6 +840,49 @@ pub(crate) fn sync_interface_overlap_peers(
 /// Remote-agnostic like `peer_holds` (see `peer_owns_wire_identity`): a
 /// refusal can decline a mint toward a remote no static flow serves, which
 /// costs one refused flow and never publishes a duplicate.
+/// #16488: does a peer allocator (via `overlap_owners`) or the interface
+/// registry already own the translated base for an ANY-remote idle import?
+pub(crate) fn nat64_peer_or_interface_owns_idle_import(
+    prefix: &crate::nat64::Nat64Prefix,
+    protocol: u8,
+    translated_ip: IpAddr,
+    translated_port: u16,
+) -> bool {
+    let translated = TranslatedTuple { ip: translated_ip, port: translated_port };
+    if let Some(owners) = prefix.overlap_owners.as_deref() {
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+        if owners.peer_holds(&prefix.port_allocator, translated_ip, translated_port) {
+            return true;
+        }
+        let owners_list = match translated_ip {
+            IpAddr::V4(v4) => owners.v4.get(&v4),
+            IpAddr::V6(v6) => owners.v6.get(&v6),
+        };
+        if owners_list.into_iter().flatten().any(|owner| {
+            !owner.allocator.same_allocator(&prefix.port_allocator)
+                && owner.allocator.peer_import_idle_any_contended(protocol, translated)
+        }) {
+            return true;
+        }
+    }
+    if let Some(ia) = prefix.iface_allocs.as_deref() {
+        if let Some(a) = ia.allocator_if_present(translated_ip) {
+            if a.peer_import_idle_any_contended(protocol, translated) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// #16488: rollback twin after the allocator has claimed the tuple.
+pub(crate) fn nat64_rollback_idle_import(
+    prefix: &crate::nat64::Nat64Prefix,
+    rec: &crate::nat::idle_lease_sync_8121::IdleLeaseRecord,
+) -> bool {
+    prefix.port_allocator.rollback_idle_lease_import(rec)
+}
+
 pub(crate) fn static_owns_wire_identity(
     statics: Option<&crate::nat::StaticExternalIdentities>,
     ip: IpAddr,

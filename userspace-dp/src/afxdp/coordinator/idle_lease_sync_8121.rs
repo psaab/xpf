@@ -104,18 +104,31 @@ impl Coordinator {
             }
         }
         for (idx, prefix) in self.forwarding.nat64.prefixes.iter().enumerate() {
-            let Some(params) = prefix.deterministic_v6 else {
-                continue;
-            };
-            let pool_name = format!("nat64-deterministic-{idx}");
-            for mut lease in prefix.port_allocator.export_idle_leases(now_ns) {
-                lease.deterministic = true;
-                lease.deterministic_identity =
-                    Some(crate::nat::DeterministicPortedIdentity::V6(params));
-                out.push(PoolIdleLease {
-                    pool_name: pool_name.clone(),
-                    lease,
-                });
+            match prefix.deterministic_v6 {
+                Some(params) => {
+                    let pool_name = format!("nat64-deterministic-{idx}");
+                    for mut lease in prefix.port_allocator.export_idle_leases(now_ns) {
+                        lease.deterministic = true;
+                        lease.deterministic_identity =
+                            Some(crate::nat::DeterministicPortedIdentity::V6(params));
+                        out.push(PoolIdleLease {
+                            pool_name: pool_name.clone(),
+                            lease,
+                        });
+                    }
+                }
+                None => {
+                    // #16488: round-robin NAT64 mints persistent
+                    // AnyRemoteHost BIB leases (#13946); they belong in
+                    // the idle export under their own pool name.
+                    let pool_name = format!("nat64-{idx}");
+                    for lease in prefix.port_allocator.export_idle_leases(now_ns) {
+                        out.push(PoolIdleLease {
+                            pool_name: pool_name.clone(),
+                            lease,
+                        });
+                    }
+                }
             }
         }
         out
@@ -143,18 +156,29 @@ impl Coordinator {
             }
         }
         for (idx, prefix) in self.forwarding.nat64.prefixes.iter().enumerate() {
-            let Some(params) = prefix.deterministic_v6 else {
-                continue;
-            };
-            let pool_name = format!("nat64-deterministic-{idx}");
-            for mut lease in prefix.port_allocator.export_display_leases(now_ns) {
-                lease.deterministic = true;
-                lease.deterministic_identity =
-                    Some(crate::nat::DeterministicPortedIdentity::V6(params));
-                out.push(PoolDisplayLease {
-                    pool_name: pool_name.clone(),
-                    lease,
-                });
+            match prefix.deterministic_v6 {
+                Some(params) => {
+                    let pool_name = format!("nat64-deterministic-{idx}");
+                    for mut lease in prefix.port_allocator.export_display_leases(now_ns) {
+                        lease.deterministic = true;
+                        lease.deterministic_identity =
+                            Some(crate::nat::DeterministicPortedIdentity::V6(params));
+                        out.push(PoolDisplayLease {
+                            pool_name: pool_name.clone(),
+                            lease,
+                        });
+                    }
+                }
+                None => {
+                    // #16488: round-robin BIB leases must appear in SHOW.
+                    let pool_name = format!("nat64-{idx}");
+                    for lease in prefix.port_allocator.export_display_leases(now_ns) {
+                        out.push(PoolDisplayLease {
+                            pool_name: pool_name.clone(),
+                            lease,
+                        });
+                    }
+                }
             }
         }
         out
@@ -179,9 +203,8 @@ impl Coordinator {
             cleared += rule.pool_allocator.clear_persistent_leases(now_ns);
         }
         for prefix in &self.forwarding.nat64.prefixes {
-            if prefix.deterministic_v6.is_none() {
-                continue;
-            }
+            // #16488: round-robin prefixes hold persistent BIB leases too;
+            // clear must revoke (and fence) them, not skip the allocator.
             cleared += prefix.port_allocator.clear_persistent_leases(now_ns);
         }
         cleared
@@ -265,6 +288,148 @@ impl Coordinator {
                         now_ns,
                     )
                 };
+                match outcome {
+                    IdleLeaseImport::Installed => counts.installed += 1,
+                    IdleLeaseImport::SkippedClearFenced => counts.skipped_clear_fenced += 1,
+                    IdleLeaseImport::SkippedExisting => counts.skipped_existing += 1,
+                    IdleLeaseImport::SkippedExpired => counts.skipped_expired += 1,
+                    IdleLeaseImport::SkippedUnknownAddress => counts.skipped_unknown_address += 1,
+                    IdleLeaseImport::SkippedPortBusy => counts.skipped_port_busy += 1,
+                    IdleLeaseImport::SkippedIdentityBusy => counts.skipped_identity_busy += 1,
+                    IdleLeaseImport::SkippedCapacity => counts.skipped_capacity += 1,
+                }
+                continue;
+            }
+            if let Some(prefix_idx) = rec
+                .pool_name
+                .strip_prefix("nat64-")
+                .filter(|rest| !rest.starts_with("deterministic-"))
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                // #16488: round-robin NAT64 BIB import. Validate the
+                // tuple against the LIVE prefix (pool membership, the
+                // allocator's port range) and refuse identities a
+                // peer/static/interface owner already holds, then
+                // install through the allocator so the clear fence
+                // applies exactly as for deterministic/SNAT leases.
+                let Some(prefix) = self.forwarding.nat64.prefixes.get(prefix_idx) else {
+                    counts.skipped_unknown_pool += 1;
+                    continue;
+                };
+                if prefix.deterministic_v6.is_some() {
+                    counts.skipped_unknown_pool += 1;
+                    continue;
+                }
+                if rec.lease.deterministic || rec.lease.deterministic_identity.is_some() {
+                    counts.skipped_identity_busy += 1;
+                    continue;
+                }
+                // A round-robin BIB is AnyRemoteHost by construction
+                // (#13946); a record that does not claim the wildcard
+                // is not a NAT64 BIB export.
+                if !rec.lease.permit_any_remote {
+                    counts.skipped_identity_busy += 1;
+                    continue;
+                }
+                let (IpAddr::V6(_src), IpAddr::V4(translated)) =
+                    (rec.lease.src_ip, rec.lease.translated_ip)
+                else {
+                    counts.skipped_identity_busy += 1;
+                    continue;
+                };
+                let addr_index = prefix.pool_v4.iter().position(|a| *a == translated);
+                let Some(idx) = addr_index else {
+                    counts.skipped_unknown_address += 1;
+                    continue;
+                };
+                if rec.lease.translated_port < prefix.port_allocator.port_low
+                    || rec.lease.translated_port > prefix.port_allocator.port_high
+                {
+                    counts.skipped_identity_busy += 1;
+                    continue;
+                }
+                if crate::nat::static_owns_wire_identity(
+                    prefix.static_externals.as_deref(),
+                    IpAddr::V4(translated),
+                    rec.lease.translated_port,
+                ) {
+                    counts.skipped_identity_busy += 1;
+                    continue;
+                }
+                // Pre-claim peer/interface fast path (advisory; the
+                // post-claim recheck below closes the race).
+                if crate::nat::nat64_peer_or_interface_owns_idle_import(
+                    prefix,
+                    rec.lease.protocol,
+                    IpAddr::V4(translated),
+                    rec.lease.translated_port,
+                ) {
+                    counts.skipped_identity_busy += 1;
+                    continue;
+                }
+                if let Some(ia) = prefix.iface_allocs.as_deref() {
+                    if crate::nat::iface_peer_idle_any_contended(
+                        ia,
+                        rec.lease.protocol,
+                        crate::nat::TranslatedTuple {
+                            ip: IpAddr::V4(translated),
+                            port: rec.lease.translated_port,
+                        },
+                    ) {
+                        counts.skipped_identity_busy += 1;
+                        continue;
+                    }
+                }
+                let outcome = if generation_validated {
+                    prefix
+                        .port_allocator
+                        .import_idle_lease_at_after_generation_permit_any(
+                            &rec.lease,
+                            addr_index,
+                            300_000_000_000,
+                            now_ns,
+                        )
+                } else {
+                    prefix.port_allocator.import_idle_lease_at(
+                        &rec.lease,
+                        addr_index,
+                        300_000_000_000,
+                        now_ns,
+                    )
+                };
+                // Post-claim recheck: a racing peer/static/interface
+                // mint may have published the same wire identity while
+                // we claimed ours. Roll our claim back rather than
+                // publish a duplicate (the SNAT path's posture).
+                if matches!(outcome, IdleLeaseImport::Installed) {
+                    let peer_now = crate::nat::nat64_peer_or_interface_owns_idle_import(
+                        prefix,
+                        rec.lease.protocol,
+                        IpAddr::V4(translated),
+                        rec.lease.translated_port,
+                    );
+                    let static_now = crate::nat::static_owns_wire_identity(
+                        prefix.static_externals.as_deref(),
+                        IpAddr::V4(translated),
+                        rec.lease.translated_port,
+                    );
+                    let iface_now = prefix.iface_allocs.as_deref().is_some_and(|ia| {
+                        crate::nat::iface_peer_idle_any_contended(
+                            ia,
+                            rec.lease.protocol,
+                            crate::nat::TranslatedTuple {
+                                ip: IpAddr::V4(translated),
+                                port: rec.lease.translated_port,
+                            },
+                        )
+                    });
+                    if (peer_now || static_now || iface_now)
+                        && crate::nat::nat64_rollback_idle_import(prefix, &rec.lease)
+                    {
+                        counts.skipped_identity_busy += 1;
+                        continue;
+                    }
+                }
                 match outcome {
                     IdleLeaseImport::Installed => counts.installed += 1,
                     IdleLeaseImport::SkippedClearFenced => counts.skipped_clear_fenced += 1,

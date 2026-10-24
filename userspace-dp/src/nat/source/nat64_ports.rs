@@ -285,6 +285,20 @@ pub(crate) fn nat64_refuse_if_interface_owns(
     Err(SourceNatFailureReason::PoolPeerAddressOverlap)
 }
 
+/// #16488: does the interface registry hold a live PAT/address-only owner
+/// at this translated base (any remote)? Interface allocators claim no
+/// bitmap bit, so this is the base-index query only.
+pub(crate) fn iface_peer_idle_any_contended(
+    iface_allocs: &InterfaceNatAllocators,
+    protocol: u8,
+    translated: TranslatedTuple,
+) -> bool {
+    match iface_allocs.allocator_if_present(translated.ip) {
+        Some(a) => a.peer_import_idle_any_contended(protocol, translated),
+        None => false,
+    }
+}
+
 pub(crate) fn direct_iface_owns(
     iface_allocs: &InterfaceNatAllocators,
     flow: SourceNatFlowKey,
