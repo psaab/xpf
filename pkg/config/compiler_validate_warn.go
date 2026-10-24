@@ -1204,6 +1204,67 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 				f.Name, knobs, f.Name, f.Name))
 		}
 	}
+	// #16075: the `interactive-commands` syslog facility is accepted and
+	// rendered (it maps to local7 in pkg/logging), but no code emits a
+	// per-command record to it: there is no slog or syslog producer in CLI
+	// dispatch. Junos uses this facility for the interactive-command audit
+	// trail, so an operator who configures `interactive-commands` on any
+	// syslog destination (host, file, or user) gets an empty file/collector
+	// bucket and false assurance that CLI activity is audited. The commit
+	// journal already records destructive verbs with principal (see
+	// pkg/configstore), but non-destructive verbs (clear/test/show) are not
+	// journalled there either.
+	//
+	// WARN, never reject: this stanza commits today, and a hard reject
+	// would fail the tolerant load / peer-sync path on a config an operator
+	// already has (the #1960 brick-on-upgrade shape), matching the #7146
+	// archive advisory above.
+	//
+	// Report each distinct destination once, in deterministic order, so a
+	// config naming the facility on several destinations warns once per
+	// destination rather than once per selector.
+	if cfg.System.Syslog != nil {
+		var dests []string
+		for _, h := range cfg.System.Syslog.Hosts {
+			if h == nil {
+				continue
+			}
+			for _, sel := range h.Facilities {
+				if sel.Facility == "interactive-commands" {
+					dests = append(dests, fmt.Sprintf("host %s", h.Address))
+					break
+				}
+			}
+		}
+		for _, f := range cfg.System.Syslog.Files {
+			if f == nil {
+				continue
+			}
+			for _, sel := range f.Selectors {
+				if sel.Facility == "interactive-commands" {
+					dests = append(dests, fmt.Sprintf("file %s", f.Name))
+					break
+				}
+			}
+		}
+		for _, u := range cfg.System.Syslog.Users {
+			if u == nil {
+				continue
+			}
+			for _, sel := range u.Selectors {
+				if sel.Facility == "interactive-commands" {
+					dests = append(dests, fmt.Sprintf("user %s", u.User))
+					break
+				}
+			}
+		}
+		sort.Strings(dests)
+		for _, d := range dests {
+			warnings = append(warnings, fmt.Sprintf(
+				"system syslog %s interactive-commands: accepted but NOT implemented — xpf emits no per-command record to the interactive-commands facility (local7), so this destination will receive no CLI audit records. Interactive CLI activity is not audited to syslog; the commit journal records commits and destructive actions with principal, but non-destructive verbs are not journalled. Do not rely on this facility for command auditing (#16075)", d))
+		}
+	}
+
 
 	if cfg.System.Services != nil && cfg.System.Services.DNSProxyConfigured {
 		warnings = append(warnings, "system services dns dns-proxy configured but DNS proxy/forwarder runtime is not implemented")
