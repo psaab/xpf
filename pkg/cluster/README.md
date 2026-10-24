@@ -4911,8 +4911,11 @@ it.
   semantically rejected frames (unknown types, truncated records, stale
   full-sets, impossible clock readings) stayed "healthy" forever and its
   failover trigger never armed. Now `handleMessage` and every receive
-  handler report acceptance — applied, queued, or matched to a live
-  waiter/incarnation — and liveness refreshes only on acceptance; the
+  handler report acceptance as the DOWNSTREAM result — an install or
+  delete refused by its generation/config guard or the dataplane, an
+  ack matching no live waiter, a duplicate barrier ack, and a DHCP
+  chunk whose assembly is inconsistent all count as REJECTED even
+  though they decoded — and liveness refreshes only on acceptance; the
   retired persistent-NAT types 38/39 are the deliberate exception (an old
   peer sending only those is alive; the frames are ignored by migration
   design). `syncPayloadCap` (`sync_payload_caps_16041.go`) gives every
@@ -4922,7 +4925,11 @@ it.
   statistics when nonzero) and drop the connection, refining the global
   `maxSyncPayload` posture per type. Unknown types keep only the global
   cap so a newer peer's additive type stays forward-compatible — ignored,
-  and never liveness. Cells: `sync_liveness_caps_16041_test.go`
-  (receiveLoop-level rejected/accepted liveness, stale full-set,
+  and never liveness. The read deadline is absolute per connection
+  epoch (armed once, re-armed only by a heartbeat-timeout probe or an
+  accepted frame), so rejected traffic cannot postpone the teardown.
+  Cells: `sync_liveness_caps_16041_test.go`
+  (receiveLoop-level rejected/accepted liveness incl. downstream
+  refusals, stale full-set, absolute-deadline junk-stream teardown,
   header-only cap refusal, cap-table census over all 44 dispatched
   labels).

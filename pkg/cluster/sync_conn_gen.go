@@ -1917,9 +1917,9 @@ func logInstallOutcome[K comparable](s *SessionSync, af string, err error, isRev
 	return false
 }
 
-func (s *SessionSync) deleteClusterSyncedV4(key dataplane.SessionKey, deleteGen uint64, forwardOnly bool) {
+func (s *SessionSync) deleteClusterSyncedV4(key dataplane.SessionKey, deleteGen uint64, forwardOnly bool) bool {
 	if s.sessions == nil {
-		return
+		return false
 	}
 	// #9715: the guard and the dataplane delete are one apply across receive
 	// loops, so a newer install cannot land between them; see applyMu.
@@ -1929,7 +1929,7 @@ func (s *SessionSync) deleteClusterSyncedV4(key dataplane.SessionKey, deleteGen 
 		s.stats.DeletesStaleIgnored.Add(1)
 		slog.Debug("cluster sync: ignored stale-generation v4 delete (replacement session survives)",
 			"delete_gen", deleteGen)
-		return
+		return false
 	}
 	// #9752 round 3: the incarnation is being deleted; forget its received
 	// identity (after the guard — a stale delete must not evict the live
@@ -1942,14 +1942,16 @@ func (s *SessionSync) deleteClusterSyncedV4(key dataplane.SessionKey, deleteGen 
 	if err := s.sessions.DeleteWithCompanionsV4(key, dataplane.DeleteReasonClusterStale, forwardOnly); err != nil {
 		s.stats.Errors.Add(1)
 		slog.Warn("cluster sync: failed to delete v4 session", "err", err)
+		return false
 	} else {
 		s.noteBulkInstallOutcomeV4(key, false)
 	}
+	return true
 }
 
-func (s *SessionSync) deleteClusterSyncedV6(key dataplane.SessionKeyV6, deleteGen uint64, forwardOnly bool) {
+func (s *SessionSync) deleteClusterSyncedV6(key dataplane.SessionKeyV6, deleteGen uint64, forwardOnly bool) bool {
 	if s.sessions == nil {
-		return
+		return false
 	}
 	// #9715: see the v4 twin and applyMu.
 	s.applyMu.Lock()
@@ -1958,7 +1960,7 @@ func (s *SessionSync) deleteClusterSyncedV6(key dataplane.SessionKeyV6, deleteGe
 		s.stats.DeletesStaleIgnored.Add(1)
 		slog.Debug("cluster sync: ignored stale-generation v6 delete (replacement session survives)",
 			"delete_gen", deleteGen)
-		return
+		return false
 	}
 	// #9752 round 3: v6 twin of the received-identity eviction above.
 	s.recvGenMu.Lock()
@@ -1969,14 +1971,16 @@ func (s *SessionSync) deleteClusterSyncedV6(key dataplane.SessionKeyV6, deleteGe
 	if err := s.sessions.DeleteWithCompanionsV6(key, dataplane.DeleteReasonClusterStale, forwardOnly); err != nil {
 		s.stats.Errors.Add(1)
 		slog.Warn("cluster sync: failed to delete v6 session", "err", err)
+		return false
 	} else {
 		s.noteBulkInstallOutcomeV6(key, false)
 	}
+	return true
 }
 
-func (s *SessionSync) deleteClusterSyncedScopedV4(domain uint32, key dataplane.SessionKey, deleteGen uint64, expectedID uint64) {
+func (s *SessionSync) deleteClusterSyncedScopedV4(domain uint32, key dataplane.SessionKey, deleteGen uint64, expectedID uint64) bool {
 	if s.sessions == nil {
-		return
+		return false
 	}
 	// #9715: guard + delete are one apply; see the bare twin.
 	s.applyMu.Lock()
@@ -1985,7 +1989,7 @@ func (s *SessionSync) deleteClusterSyncedScopedV4(domain uint32, key dataplane.S
 		s.stats.DeletesStaleIgnored.Add(1)
 		slog.Debug("cluster sync: ignored stale-generation scoped v4 delete",
 			"domain", domain, "delete_gen", deleteGen)
-		return
+		return false
 	}
 	// #14358: forget the received identity, as the bare twin does.
 	s.recvGenMu.Lock()
@@ -1995,14 +1999,16 @@ func (s *SessionSync) deleteClusterSyncedScopedV4(domain uint32, key dataplane.S
 	if err := s.sessions.DeleteClusterScopedV4(key, domain, expectedID); err != nil {
 		s.stats.Errors.Add(1)
 		slog.Warn("cluster sync: failed to delete scoped v4 session", "err", err)
+		return false
 	} else {
 		s.noteBulkInstallOutcomeV4(key, false)
 	}
+	return true
 }
 
-func (s *SessionSync) deleteClusterSyncedScopedV6(domain uint32, key dataplane.SessionKeyV6, deleteGen uint64, expectedID uint64) {
+func (s *SessionSync) deleteClusterSyncedScopedV6(domain uint32, key dataplane.SessionKeyV6, deleteGen uint64, expectedID uint64) bool {
 	if s.sessions == nil {
-		return
+		return false
 	}
 	s.applyMu.Lock()
 	defer s.applyMu.Unlock()
@@ -2010,7 +2016,7 @@ func (s *SessionSync) deleteClusterSyncedScopedV6(domain uint32, key dataplane.S
 		s.stats.DeletesStaleIgnored.Add(1)
 		slog.Debug("cluster sync: ignored stale-generation scoped v6 delete",
 			"domain", domain, "delete_gen", deleteGen)
-		return
+		return false
 	}
 	s.recvGenMu.Lock()
 	delete(s.installTableRecvV6, key)
@@ -2019,7 +2025,9 @@ func (s *SessionSync) deleteClusterSyncedScopedV6(domain uint32, key dataplane.S
 	if err := s.sessions.DeleteClusterScopedV6(key, domain, expectedID); err != nil {
 		s.stats.Errors.Add(1)
 		slog.Warn("cluster sync: failed to delete scoped v6 session", "err", err)
+		return false
 	} else {
 		s.noteBulkInstallOutcomeV6(key, false)
 	}
+	return true
 }

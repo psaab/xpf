@@ -119,7 +119,7 @@ func TestDHCPChunkCompletionAllocationBounded16036(t *testing.T) {
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
-	complete, closed := st.addChunk(key, 0, 1, 1<<20, one)
+	complete, closed, _ := st.addChunk(key, 0, 1, 1<<20, one)
 	runtime.ReadMemStats(&after)
 
 	if closed || complete != nil {

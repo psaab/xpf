@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/psaab/xpf/pkg/dhcpserver"
 )
 
@@ -30,13 +31,18 @@ type recvHarness16041 struct {
 
 func newRecvHarness16041(t *testing.T, ss *SessionSync) *recvHarness16041 {
 	t.Helper()
+	return newRecvHarnessDeadline16041(t, ss, 5*time.Second)
+}
+
+// newRecvHarnessDeadline16041 is newRecvHarness16041 with a caller-chosen
+// read deadline (the deadline tests need a short absolute window).
+func newRecvHarnessDeadline16041(t *testing.T, ss *SessionSync, deadline time.Duration) *recvHarness16041 {
+	t.Helper()
 	if ss == nil {
 		ss = NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
 	}
 	local, peer := net.Pipe()
-	// Long read deadline: no heartbeat probes interfere with the frames
-	// under test; staleness is injected via lastPeerRxMono directly.
-	ss.readDeadline = 5 * time.Second
+	ss.readDeadline = deadline
 	ss.installConn(0, local)
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &recvHarness16041{ss: ss, peer: peer, cancel: cancel, done: make(chan struct{})}
@@ -361,4 +367,313 @@ func mustCap(t *testing.T, msgType uint8) int {
 		t.Fatalf("type %d has no cap", msgType)
 	}
 	return c
+}
+
+// ===== #16041 fold: acceptance must reflect the DOWNSTREAM result =====
+
+func failoverAckPayload16041(rgID int, status uint8, reqID uint64) []byte {
+	p := make([]byte, 10)
+	p[0] = byte(rgID)
+	p[1] = status
+	binary.LittleEndian.PutUint64(p[2:10], reqID)
+	return p
+}
+
+func chunkFrame16041(t *testing.T, body []byte, generation uint64, index, total, totalLeases uint32, incarnation, seq uint64) []byte {
+	t.Helper()
+	return appendFullSetSeq(encodeDHCPLeaseChunkPayload(body, generation, index, total, totalLeases), incarnation, seq)
+}
+
+// TestDownstreamRejectedFramesDoNotRefreshLiveness16041 pins the fold:
+// frames that decode cleanly but are rejected DOWNSTREAM (stale install,
+// unmatched acks, duplicate barrier ack, inconsistent chunk assembly,
+// queue-full config) must report rejection from handleMessage and must
+// not refresh liveness through the real receiveLoop, while their matched
+// counterparts stay accepted (controls, so a reject-everything handler
+// cannot pass).
+func TestDownstreamRejectedFramesDoNotRefreshLiveness16041(t *testing.T) {
+	t.Run("stale install rejected, landed install accepted", func(t *testing.T) {
+		dp := &mockSweepDP{v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{}}
+		ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", dp)
+		key, val := key9508(), val9508()
+		val.Generation = 9
+		if !ss.handleMessage(nil, syncMsgSessionV4, encodeSessionV4Payload(key, val)) {
+			t.Fatal("CONTROL: generation-9 install must land and be accepted")
+		}
+		val.Generation = 1
+		if ss.handleMessage(nil, syncMsgSessionV4, encodeSessionV4Payload(key, val)) {
+			t.Fatal("stale-generation install decoded cleanly but was refused downstream; must be rejected")
+		}
+		if got := ss.stats.InstallsStaleIgnored.Load(); got != 1 {
+			t.Fatalf("FIXTURE: InstallsStaleIgnored=%d, want 1 (the stale refusal must be the downstream path)", got)
+		}
+		bare := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+		val.Generation = 9
+		if bare.handleMessage(nil, syncMsgSessionV4, encodeSessionV4Payload(key, val)) {
+			t.Fatal("install with no session store cannot land; must be rejected")
+		}
+	})
+
+	t.Run("unmatched acks rejected, matched acks accepted", func(t *testing.T) {
+		ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+		if ss.handleMessage(nil, syncMsgFailoverAck, failoverAckPayload16041(3, failoverAckApplied, 99)) {
+			t.Fatal("failover ack matching no waiter must be rejected")
+		}
+		ch := make(chan failoverAck, 1)
+		ss.failoverWaiters[3] = failoverWaiter{reqID: 99, ch: ch}
+		if !ss.handleMessage(nil, syncMsgFailoverAck, failoverAckPayload16041(3, failoverAckApplied, 99)) {
+			t.Fatal("CONTROL: failover ack matching its waiter must be accepted")
+		}
+		select {
+		case <-ch:
+		default:
+			t.Fatal("CONTROL: matched failover ack must still be delivered to the waiter")
+		}
+		ss.failoverWaiters[3] = failoverWaiter{reqID: 100, ch: ch}
+		if ss.handleMessage(nil, syncMsgFailoverAck, failoverAckPayload16041(3, failoverAckApplied, 99)) {
+			t.Fatal("failover ack with a foreign reqID must be rejected")
+		}
+		rgIDs := []int{1, 2}
+		key := failoverBatchKey(rgIDs)
+		batchAck := encodeFailoverBatchAckPayload(rgIDs, failoverAckApplied, 7, "")
+		if ss.handleMessage(nil, syncMsgFailoverBatchAck, batchAck) {
+			t.Fatal("batch ack matching no waiter must be rejected")
+		}
+		bch := make(chan failoverAck, 1)
+		ss.failoverBatchWaiters[key] = failoverWaiter{reqID: 7, ch: bch, rgIDs: rgIDs}
+		if !ss.handleMessage(nil, syncMsgFailoverBatchAck, batchAck) {
+			t.Fatal("CONTROL: batch ack matching its waiter must be accepted")
+		}
+		fack, _ := decodeFenceAckPayload(encodeFenceAckPayload(5, FenceResult{}))
+		fpayload := encodeFenceAckPayload(5, FenceResult{})
+		if ss.handleMessage(nil, syncMsgFenceAck, fpayload) {
+			t.Fatal("fence ack matching no waiter must be rejected")
+		}
+		fch := make(chan FenceAck, 1)
+		ss.fenceAckWaiters = map[uint64]fenceAckWaiter{fack.Seq: {ch: fch}}
+		if !ss.handleMessage(nil, syncMsgFenceAck, fpayload) {
+			t.Fatal("CONTROL: fence ack matching its waiter must be accepted")
+		}
+		var ack [24]byte
+		binary.LittleEndian.PutUint64(ack[:], 7)
+		if ss.handleMessage(nil, syncMsgBarrierAck, ack[:]) {
+			t.Fatal("barrier ack matching no waiter must be rejected")
+		}
+		// The unmatched ack above already advanced the cumulative seq;
+		// use a newer seq for the matched control.
+		binary.LittleEndian.PutUint64(ack[:], 8)
+		bch2 := make(chan struct{})
+		ss.barrierWaiters = map[uint64]*barrierWaiter{8: {ch: bch2}}
+		if !ss.handleMessage(nil, syncMsgBarrierAck, ack[:]) {
+			t.Fatal("CONTROL: barrier ack matching its waiter must be accepted")
+		}
+		if ss.handleMessage(nil, syncMsgBarrierAck, ack[:]) {
+			t.Fatal("duplicate barrier ack (already covered, no waiter) must be rejected")
+		}
+		var gen8 [8]byte
+		binary.LittleEndian.PutUint64(gen8[:], 5)
+		if ss.handleMessage(nil, syncMsgConfigApplyAck, gen8[:]) {
+			t.Fatal("config ack for an unsent generation must be rejected")
+		}
+		ss.lastSentConfigGen.Store(5)
+		if !ss.handleMessage(nil, syncMsgConfigApplyAck, gen8[:]) {
+			t.Fatal("CONTROL: config ack for the last-sent generation must be accepted")
+		}
+		var gen0 [8]byte
+		if ss.handleMessage(nil, syncMsgConfigApplyAck, gen0[:]) {
+			t.Fatal("config ack for generation 0 must be rejected")
+		}
+	})
+
+	t.Run("inconsistent chunk assembly rejected, consistent accepted", func(t *testing.T) {
+		ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+		one := encodeDHCPLeasePayload([]dhcpserver.SyncLease{dhcpChunkLease15160(7)})
+		if !ss.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, chunkFrame16041(t, one, 5, 0, 2, 1, 77, 1)) {
+			t.Fatal("CONTROL: first consistent chunk must be recorded (accepted)")
+		}
+		bad := chunkFrame16041(t, one, 5, 1, 3, 1, 77, 2)
+		if ss.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, bad) {
+			t.Fatal("chunk disagreeing with the assembly on total must be rejected")
+		}
+		if n := len(ss.dhcpChunkState4.pending); n != 0 {
+			t.Fatalf("inconsistent generation left %d pending assemblies, want 0", n)
+		}
+		if !ss.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, chunkFrame16041(t, one, 6, 0, 2, 1, 77, 3)) {
+			t.Fatal("CONTROL: first chunk of the over-total fixture must be recorded")
+		}
+		if ss.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, chunkFrame16041(t, one, 6, 1, 2, 1, 77, 4)) {
+			t.Fatal("chunk pushing the assembly past totalLeases must be rejected")
+		}
+		ss2 := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+		two := encodeDHCPLeasePayload([]dhcpserver.SyncLease{dhcpChunkLease15160(7), dhcpChunkLease15160(8)})
+		if !ss2.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, chunkFrame16041(t, one, 5, 0, 2, 2, 77, 1)) {
+			t.Fatal("CONTROL: chunk 0 of a consistent pair must be accepted")
+		}
+		if !ss2.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, chunkFrame16041(t, one, 5, 1, 2, 2, 77, 2)) {
+			t.Fatal("CONTROL: completing chunk must be accepted")
+		}
+		if got := len(ss2.PeerDHCPLeases4()); got != 2 {
+			t.Fatalf("CONTROL: consistent pair must commit 2 leases (one per chunk body decoded), held %d from %v", got, two)
+		}
+	})
+
+	t.Run("queue-full config rejected, queued config accepted", func(t *testing.T) {
+		ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+		ss.configApplyCh = make(chan configApplyItem, 1)
+		ss.configApplyCh <- configApplyItem{gen: 1}
+		if ss.handleMessage(nil, syncMsgConfig, encodeConfigPayload("queued-behind", 9)) {
+			t.Fatal("queue-full config was dropped downstream; must be rejected")
+		}
+		if got := ss.stats.ConfigsQueueFullDropped.Load(); got != 1 {
+			t.Fatalf("FIXTURE: ConfigsQueueFullDropped=%d, want 1", got)
+		}
+		ss2 := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+		if !ss2.handleMessage(nil, syncMsgConfig, encodeConfigPayload("fits", 9)) {
+			t.Fatal("CONTROL: config with queue room must be accepted")
+		}
+	})
+
+	t.Run("downstream rejections do not refresh over receiveLoop", func(t *testing.T) {
+		dp := &mockSweepDP{v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{}}
+		ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", dp)
+		key, val := key9508(), val9508()
+		val.Generation = 9
+		if !ss.handleMessage(nil, syncMsgSessionV4, encodeSessionV4Payload(key, val)) {
+			t.Fatal("FIXTURE: landing install must be accepted")
+		}
+		h := newRecvHarness16041(t, ss)
+		h.ss.peerHeartbeatAckEver.Store(true)
+		staleVal := val
+		staleVal.Generation = 1
+		frames := []struct {
+			name    string
+			msgType uint8
+			payload []byte
+		}{
+			{"stale install", syncMsgSessionV4, encodeSessionV4Payload(key, staleVal)},
+			{"unmatched failover ack", syncMsgFailoverAck, failoverAckPayload16041(3, failoverAckApplied, 4242)},
+			{"unmatched fence ack", syncMsgFenceAck, encodeFenceAckPayload(4242, FenceResult{})},
+		}
+		for _, f := range frames {
+			staleLastRx16041(h.ss)
+			writeFrame16041(t, h.peer, f.msgType, f.payload)
+			requireStale16041(t, h.ss, f.name)
+			if h.ss.PeerHealthy() {
+				t.Fatalf("%s: downstream-rejected frame left PeerHealthy true", f.name)
+			}
+		}
+	})
+}
+
+// TestRejectedTrafficDoesNotRestartReadDeadline16041 pins the absolute
+// read deadline: a stream of well-framed but rejected frames arriving
+// faster than the deadline must NOT postpone the heartbeat timeout —
+// the loop must still probe, count the miss, and (on the second miss)
+// tear the connection down. Accepted traffic (the peer answering the
+// probe) is the control: it keeps the connection alive.
+func TestRejectedTrafficDoesNotRestartReadDeadline16041(t *testing.T) {
+	const window = 60 * time.Millisecond
+
+	t.Run("junk stream still times out and disconnects", func(t *testing.T) {
+		ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+		h := newRecvHarnessDeadline16041(t, ss, window)
+		h.ss.peerHeartbeatAckEver.Store(true)
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			buf := make([]byte, 256)
+			_ = h.peer.SetReadDeadline(time.Now().Add(3 * time.Second))
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_, _ = h.peer.Read(buf)
+			}
+		}()
+		go func() {
+			tick := time.NewTicker(window / 6)
+			defer tick.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-tick.C:
+					_ = h.peer.SetWriteDeadline(time.Now().Add(time.Second))
+					if err := writeMsg(h.peer, 200, []byte{0x01}); err != nil {
+						return
+					}
+				}
+			}
+		}()
+		select {
+		case <-h.done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("rejected junk stream restarted the read deadline: no heartbeat teardown after 2s of junk inside a 60ms window")
+		}
+		if h.ss.IsConnected() {
+			t.Fatal("connection still marked connected after the missed-heartbeat teardown")
+		}
+	})
+
+	t.Run("control answering peer stays alive", func(t *testing.T) {
+		ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+		h := newRecvHarnessDeadline16041(t, ss, window)
+		// Peer goroutine parses production frames and answers probes.
+		peerDone := make(chan struct{})
+		go func() {
+			defer close(peerDone)
+			hdr := make([]byte, syncHeaderSize)
+			for {
+				_ = h.peer.SetReadDeadline(time.Now().Add(3 * time.Second))
+				if _, err := readFull16041(h.peer, hdr); err != nil {
+					return
+				}
+				n := int(binary.LittleEndian.Uint32(hdr[8:12]))
+				if n > 0 {
+					if _, err := readFull16041(h.peer, make([]byte, n)); err != nil {
+						return
+					}
+				}
+				if hdr[4] != syncMsgHeartbeat {
+					continue
+				}
+				_ = h.peer.SetWriteDeadline(time.Now().Add(time.Second))
+				if err := writeMsg(h.peer, syncMsgHeartbeatAck, nil); err != nil {
+					return
+				}
+			}
+		}()
+		defer func() { _ = h.peer.Close(); <-peerDone }()
+		deadline := time.After(2 * time.Second)
+		for !h.ss.peerHeartbeatAckEver.Load() {
+			select {
+			case <-deadline:
+				t.Fatal("CONTROL: peer acks never latched the heartbeat-ack capability")
+			case <-time.After(time.Millisecond):
+			}
+		}
+		time.Sleep(4 * window)
+		select {
+		case <-h.done:
+			t.Fatal("CONTROL: answering peer was torn down despite accepted acks")
+		default:
+		}
+		if !h.ss.IsConnected() {
+			t.Fatal("CONTROL: answering peer disconnected")
+		}
+	})
+}
+
+func readFull16041(c net.Conn, buf []byte) (int, error) {
+	n := 0
+	for n < len(buf) {
+		m, err := c.Read(buf[n:])
+		n += m
+		if err != nil {
+			return n, err
+		}
+	}
+	return n, nil
 }

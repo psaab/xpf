@@ -49,13 +49,26 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 	hdrBuf := make([]byte, syncHeaderSize)
 	readDeadline := s.readDeadlineDuration()
 	missedHeartbeats := 0
+	// #16041 fold: the read deadline is ABSOLUTE per connection epoch,
+	// not restarted per frame. It is armed once here, re-armed only when
+	// a heartbeat timeout is handled below, and cleared-recomputed only
+	// on semantic acceptance (handleMessage == true) — never on a
+	// rejected frame. Before this, every well-framed rejected frame
+	// restarted the full window, so a peer streaming junk at any rate
+	// below one frame per window never produced a single timeout, the
+	// missed-heartbeat teardown never ran, and the peer's heartbeat
+	// probes were never even sent. With an absolute deadline the junk
+	// stream hits the timeout on the original schedule, the teardown
+	// counts it, and only an accepted frame (typically the peer's
+	// HeartbeatAck answering our probe) earns the next window.
+	nextReadDeadline := time.Now().Add(readDeadline)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		conn.SetReadDeadline(time.Now().Add(readDeadline))
+		conn.SetReadDeadline(nextReadDeadline)
 		if _, err := io.ReadFull(conn, hdrBuf); err != nil {
 			if ctx.Err() != nil {
 				return
@@ -74,6 +87,10 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 				if err != nil {
 					return
 				}
+				// The probe earns the peer one fresh absolute window to
+				// answer in; without this the already-expired deadline
+				// would spin-timeout without ever reading the ack.
+				nextReadDeadline = time.Now().Add(readDeadline)
 				continue
 			}
 			slog.Debug("cluster sync: read header error", "err", err)
@@ -132,11 +149,13 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 		}
 		// #16041: liveness refreshes ONLY on semantic accept. A
 		// well-framed but rejected frame (unknown type, malformed,
-		// stale, superseded) must not reset the missed-heartbeat count
-		// or the last-receive stamp, or a faulty keyed peer sending
-		// junk forever would mask its own failover trigger.
+		// stale, superseded, downstream-refused) must not reset the
+		// missed-heartbeat count, the last-receive stamp, or the
+		// absolute read deadline, or a faulty keyed peer sending junk
+		// forever would mask its own failover trigger.
 		if s.handleMessage(conn, hdr.Type, payload) {
 			s.notePeerLiveness(&missedHeartbeats)
+			nextReadDeadline = time.Now().Add(readDeadline)
 		}
 	}
 }
@@ -338,6 +357,11 @@ func (s *SessionSync) handleConfigPayload(conn net.Conn, payload []byte, clearte
 	// enqueue is non-blocking so a slow apply never stalls session sync /
 	// heartbeats on this connection.
 	if s.configApplyCh != nil {
+		// #16041 fold: a queue-full config was dropped, not queued — the
+		// downstream result is rejection, so it must not refresh liveness
+		// even though the payload decoded and the high-water was raised
+		// (the config-stale gate above is deliberately unchanged).
+		queued := true
 		select {
 		case s.configApplyCh <- item:
 		default:
@@ -388,7 +412,9 @@ func (s *SessionSync) handleConfigPayload(conn net.Conn, payload []byte, clearte
 				"queue_len", len(s.configApplyCh), "queue_cap", cap(s.configApplyCh))
 			s.noteConfigApplyFailure(errConfigApplyQueueFull)
 			s.sendConfigApplyNack(gen)
+			queued = false
 		}
+		return queued
 	}
 	return true
 }

@@ -34,8 +34,7 @@ func (s *SessionSync) handleFailoverAck(conn net.Conn, payload []byte) bool {
 	reqID := binary.LittleEndian.Uint64(payload[2:10])
 	detail := string(payload[10:])
 	slog.Info("cluster sync: failover ack received", "rg", rgID, "req_id", reqID, "status", status, "detail", detail)
-	s.completeFailoverWait(rgID, reqID, failoverAck{status: status, detail: detail})
-	return true
+	return s.completeFailoverWait(rgID, reqID, failoverAck{status: status, detail: detail})
 }
 
 func (s *SessionSync) handleFailoverCommitFrame(conn net.Conn, payload []byte) bool {
@@ -60,8 +59,7 @@ func (s *SessionSync) handleFailoverCommitAck(conn net.Conn, payload []byte) boo
 	reqID := binary.LittleEndian.Uint64(payload[2:10])
 	detail := string(payload[10:])
 	slog.Info("cluster sync: failover commit ack received", "rg", rgID, "req_id", reqID, "status", status, "detail", detail)
-	s.completeFailoverCommitWait(rgID, reqID, failoverAck{status: status, detail: detail})
-	return true
+	return s.completeFailoverCommitWait(rgID, reqID, failoverAck{status: status, detail: detail})
 }
 
 func (s *SessionSync) handleFailoverBatchFrame(conn net.Conn, payload []byte) bool {
@@ -82,8 +80,7 @@ func (s *SessionSync) handleFailoverBatchAck(conn net.Conn, payload []byte) bool
 		return false
 	}
 	slog.Info("cluster sync: batch failover ack received", "rgs", rgIDs, "req_id", reqID, "status", status, "detail", detail)
-	s.completeFailoverBatchWait(failoverBatchKey(rgIDs), reqID, failoverAck{status: status, detail: detail})
-	return true
+	return s.completeFailoverBatchWait(failoverBatchKey(rgIDs), reqID, failoverAck{status: status, detail: detail})
 }
 
 func (s *SessionSync) handleFailoverBatchCommitFrame(conn net.Conn, payload []byte) bool {
@@ -104,8 +101,7 @@ func (s *SessionSync) handleFailoverBatchCommitAck(conn net.Conn, payload []byte
 		return false
 	}
 	slog.Info("cluster sync: batch failover commit ack received", "rgs", rgIDs, "req_id", reqID, "status", status, "detail", detail)
-	s.completeFailoverBatchCommitWait(failoverBatchKey(rgIDs), reqID, failoverAck{status: status, detail: detail})
-	return true
+	return s.completeFailoverBatchCommitWait(failoverBatchKey(rgIDs), reqID, failoverAck{status: status, detail: detail})
 }
 
 func (s *SessionSync) handleFailoverAbortFrame(conn net.Conn, payload []byte) bool {
@@ -166,9 +162,7 @@ func (s *SessionSync) handleFenceAck(conn net.Conn, payload []byte) bool {
 		slog.Warn("cluster sync: fence ack message too short", "len", len(payload))
 		return false
 	}
-	matched := fenceAckWaiterPresent(s, ack.Seq)
-	s.completeFenceAckWait(ack)
-	return matched
+	return s.completeFenceAckWait(ack)
 }
 
 func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) bool {
@@ -367,13 +361,23 @@ func (s *SessionSync) handleBarrierAck(conn net.Conn, payload []byte) bool {
 		peerSessionsInstalled = binary.LittleEndian.Uint64(payload[16:24])
 	}
 	slog.Info("cluster sync: barrier ack received", "seq", seq, "sessions_sent", stats.SessionsSent, "sessions_received", stats.SessionsReceived, "sessions_installed", stats.SessionsInstalled, "peer_sessions_received", peerSessionsReceived, "peer_sessions_installed", peerSessionsInstalled, "queue_len", len(s.sendCh), "queue_cap", cap(s.sendCh))
+	advanced := false
 	for {
 		current := s.barrierAckSeq.Load()
-		if seq <= current || s.barrierAckSeq.CompareAndSwap(current, seq) {
+		if seq <= current {
+			break
+		}
+		if s.barrierAckSeq.CompareAndSwap(current, seq) {
+			advanced = true
 			break
 		}
 	}
+	matched := s.completeBarrierWait(seq)
+	// Unchanged legacy semantics: every well-formed barrier ack stamps
+	// the last-ack time (status observability only, not liveness).
 	s.stats.LastFenceAckAt.Store(time.Now().UnixNano())
-	s.completeBarrierWait(seq)
-	return true
+	// #16041 fold: a duplicate/stale barrier ack (seq already covered)
+	// that matches no live waiter is downstream-rejected — it applied
+	// nothing new, so it must not refresh liveness either.
+	return matched && advanced
 }

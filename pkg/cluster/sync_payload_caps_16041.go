@@ -20,11 +20,15 @@ import "log/slog"
 //
 //  1. handleMessage now reports whether the frame was semantically accepted,
 //     and receiveLoop refreshes liveness only on acceptance. "Accepted" means
-//     the handler consumed the frame as a valid instance of its type: it
-//     passed the handler's length/semantic gates and was applied, queued, or
-//     matched a live waiter/incarnation. Frames dropped as malformed, stale,
-//     out-of-order, superseded-connection, undecryptable or otherwise
-//     rejected do NOT refresh. Deliberate exception: retired
+//     the DOWNSTREAM result, not merely a clean decode: a session install
+//     rejected as stale-generation/stale-config/helper-refused, a delete
+//     refused by its generation guard or failing in the dataplane, an ack
+//     (failover/commit/batch/fence/barrier/bulk/config) matching no live
+//     waiter, a duplicate barrier ack, a stale or undecryptable config, and
+//     a DHCP chunk whose assembly is inconsistent (mismatched totals,
+//     duplicate index, over/under-total) are all REJECTED even though they
+//     decoded. Frames applied, queued, recorded into a chunk assembly, or
+//     matched to a waiter are accepted. Deliberate exception: retired
 //     persistent-NAT types 38/39 count as accepted — an old peer sending only
 //     those is alive and speaking a known type; its frames are ignored by
 //     migration design, not rejected as junk.
@@ -152,15 +156,4 @@ func (s *SessionSync) refuseOversizeFrame(msgType uint8, length uint32, cap int)
 	s.stats.Errors.Add(1)
 	slog.Warn("cluster sync: per-type payload cap exceeded, dropping connection (#16041)",
 		"type", msgType, "len", length, "cap", cap)
-}
-
-// fenceAckWaiterPresent reports whether a fence ack's seq has a live
-// waiter (#16041 liveness: an unmatched ack is well-formed but
-// semantically rejected). Call it BEFORE completeFenceAckWait consumes
-// the waiter; it takes the same lock the completion takes.
-func fenceAckWaiterPresent(s *SessionSync, seq uint64) bool {
-	s.fenceAckMu.Lock()
-	defer s.fenceAckMu.Unlock()
-	_, ok := s.fenceAckWaiters[seq]
-	return ok
 }

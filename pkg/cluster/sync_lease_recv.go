@@ -412,7 +412,16 @@ func (s *SessionSync) handleDHCPLeaseChunk(conn net.Conn, msgType uint8, payload
 		return false
 	}
 	key := dhcpChunkGeneration{incarnation: incarnation, generation: generation}
-	complete, closed := state.addChunk(key, index, total, totalLeases, leases)
+	complete, closed, accepted := state.addChunk(key, index, total, totalLeases, leases)
+	if !accepted {
+		// #16041 fold: an inconsistent assembly (mismatched totals,
+		// duplicate index, over-total, under-total at completion)
+		// invalidates the generation downstream of seq admission —
+		// semantically rejected, so it must not refresh liveness.
+		s.recvSeqMu.Unlock()
+		s.dhcpApplyMu.Unlock()
+		return false
+	}
 	if !closed {
 		s.recvSeqMu.Unlock()
 		s.dhcpApplyMu.Unlock()
