@@ -251,6 +251,30 @@ pub(in crate::afxdp) fn fabric_adoption_established_for_wire(
 /// an unknown egress RG (0), a standalone node, or a departed
 /// peer-owned egress RG all decline adoption; the packet then takes
 /// the ordinary miss path exactly as before.
+/// #16217 (Codex N1 final + N1b): ownership on the EXACT post-NAT
+/// per-flow installed-table resolution. The pre-fold gate resolved
+/// `wire_key.dst_ip` — the PRE-DNAT destination — destination-only
+/// in MAIN, so a tenant flow whose MAIN egress RG is peer-owned but
+/// whose tenant-table egress RG is locally owned (or vice versa)
+/// was judged on the wrong RG, and a DNAT'd flow was judged on the
+/// VIP instead of the real server. Now the candidate's OWN stored
+/// decision supplies `nat.rewrite_dst` (post-NAT target),
+/// `install_table_domain`/`install_table_check` (validated via
+/// `resolve_install_table_for_session`; Unresolvable fails closed),
+/// and the per-flow ECMP hash (canonical key), resolved through
+/// `lookup_forwarding_resolution_for_session` — the same resolver
+/// the re-resolve uses, tunnel arms included. The tunnel outer RG
+/// mirrors `enforce_ha_resolution` (ha.rs): GRE/ip6gre via
+/// `tunnel_outer_egress_rgs`; WireGuard per-peer via
+/// `wireguard_peer_outer_egress_rgs[(endpoint, next_hop)]` with the
+/// transport-table FIB fallback for runtime-learned peers (the
+/// pre-fold gate read only `tunnel_outer_egress_rgs`, which excludes
+/// WG endpoints, and treated absent as success). Absent outer RG,
+/// unknown egress RG (0), non-owner, standalone, or no Established
+/// evidence all fail closed. `forwarding_active_rgs` is the fresh
+/// authoritative set (see the lag note above); `ha_state` is kept
+/// only for the standalone empty-map shape and the WG outer fallback
+/// is resolved statelessly like ha.rs.
 pub(in crate::afxdp) fn fabric_adoption_gate_for_wire(
     forwarding: &crate::afxdp::ForwardingState,
     ha_state: &std::collections::BTreeMap<i32, crate::afxdp::HAGroupRuntime>,
@@ -262,41 +286,123 @@ pub(in crate::afxdp) fn fabric_adoption_gate_for_wire(
     shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     wire_key: &SessionKey,
     now_ns: u64,
+    dynamic_neighbors: &Arc<crate::afxdp::ShardedNeighborMap>,
 ) -> bool {
-    if !fabric_adoption_established_for_wire(
+    let Some(candidate) = adoption_candidate_for_wire(
         sessions,
         shared_sessions,
         shared_forward_wire_sessions,
         shared_owner_rg_indexes,
         wire_key,
         now_ns,
-    ) {
+    ) else {
         return false;
-    }
+    };
     if ha_state.is_empty() {
         return false;
     }
-    let resolution = crate::afxdp::forwarding::lookup_forwarding_resolution(forwarding, wire_key.dst_ip).resolution;
-    // Tunnel resolutions name the endpoint RG via
-    // `owner_rg_for_resolution`; enforcement ADDITIONALLY gates the
-    // outer egress RG (#13980), so a tunnel candidate is owned only
-    // when BOTH RGs are forwarding-active locally. Plain resolutions
-    // gate on the egress RG alone.
+    let flow = crate::afxdp::SessionFlow {
+        src_ip: candidate.key.src_ip,
+        dst_ip: candidate.key.dst_ip,
+        forward_key: candidate.key.clone(),
+    };
+    let resolution = crate::afxdp::session_glue::lookup_forwarding_resolution_for_session(
+        forwarding,
+        dynamic_neighbors,
+        &flow,
+        candidate.decision,
+    )
+    .resolution;
     let egress_rg = crate::afxdp::forwarding::owner_rg_for_resolution(forwarding, resolution);
     if egress_rg <= 0 || !forwarding_active_rgs.contains(&egress_rg) {
         return false;
     }
     if resolution.tunnel_endpoint_id != 0 {
-        let outer_rg = forwarding
-            .tunnel_outer_egress_rgs
-            .get(&resolution.tunnel_endpoint_id)
-            .copied();
+        let Some(endpoint) = forwarding.tunnel_endpoints.get(&resolution.tunnel_endpoint_id)
+        else {
+            return false;
+        };
+        // Mirror ha.rs: WG selects its outer destination per peer.
+        let outer_rg = if endpoint.mode == "wireguard" {
+            let Some(next_hop) = resolution.next_hop else {
+                return false;
+            };
+            match forwarding
+                .wireguard_peer_outer_egress_rgs
+                .get(&(resolution.tunnel_endpoint_id, next_hop))
+                .copied()
+            {
+                Some(rg) if rg >= 0 => Some(rg),
+                Some(_) => None,
+                None => {
+                    let outer_egress = crate::afxdp::forwarding::lookup_forwarding_resolution_inner(
+                        forwarding,
+                        None,
+                        next_hop,
+                        Some(&endpoint.transport_table),
+                    )
+                    .resolution
+                    .egress_ifindex;
+                    forwarding
+                        .egress
+                        .get(&outer_egress)
+                        .map(|e| e.redundancy_group.max(0))
+                }
+            }
+        } else {
+            forwarding
+                .tunnel_outer_egress_rgs
+                .get(&resolution.tunnel_endpoint_id)
+                .copied()
+        };
         return match outer_rg {
             Some(rg) if rg > 0 => forwarding_active_rgs.contains(&rg),
-            _ => true,
+            Some(_) => true,
+            None => false,
         };
     }
     true
+}
+
+/// The Established candidate behind `wire_key`: shared Established /
+/// scoped-evidence row (its stored key IS the canonical key), else a
+/// local Established serving row reified from its stored decision.
+/// `None` fails closed (no evidence, ambiguity, idle-crossed).
+fn adoption_candidate_for_wire(
+    sessions: &crate::session::SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    wire_key: &SessionKey,
+    now_ns: u64,
+) -> Option<SyncedSessionEntry> {
+    if let Some(entry) = lookup_shared_established_for_wire(
+        shared_sessions,
+        shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
+        wire_key,
+    ) {
+        return Some(entry);
+    }
+    let canonical = sessions.local_established_for_wire_at(wire_key, now_ns)?;
+    let (decision, metadata, origin) = sessions.entry_with_origin(&canonical)?;
+    Some(SyncedSessionEntry {
+        key: canonical.clone(),
+        decision,
+        metadata,
+        source_nat_static: None,
+        leak_incarnation: 0,
+        origin,
+        protocol: canonical.protocol,
+        tcp_flags: 0,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: crate::session::TcpHandshakeState::Established.to_wire(),
+        rev_packets: 0,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
+    })
 }
 /// #16217: INPUT evidence for the ct-slice collector and the export
 /// stamp — reverse service observed for the canonical key anywhere
