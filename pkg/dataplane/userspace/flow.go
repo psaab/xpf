@@ -73,6 +73,33 @@ func coerceWireSessionTimeout(field string, v int) int {
 	return v
 }
 
+// maxTCPMaximumWindow is the schema ceiling for
+// `security flow tcp-session maximum-window` (pkg/config schema
+// ValidateInteger(1024, 1048576), #15753). It is also the Rust wire bound
+// buildFlowSnapshot enforces for TCPMaximumWindow.
+const maxTCPMaximumWindow = 1048576
+
+// coerceWireTCPMaximumWindow clamps an int destined for the Rust u32
+// `tcp_maximum_window` field. The field was added after #1977 (#15753) and
+// shipped without a wire coercion, so a value above u32::MAX arriving via a
+// tolerant path (Store.Load of a hand-edited DB, SyncApply from a peer with
+// a wider range) made serde reject the whole snapshot (#16482). Values up
+// to the schema ceiling pass unchanged (65536 included); larger values cap
+// to the schema ceiling rather than merely to u32::MAX - a peer value such
+// as 2^31 is already outside the operator range this node enforces, and
+// capping to the ceiling preserves the invariant that any value reaching
+// the helper is also strict-commit-legal here. Non-positive values are
+// handled by the caller's `> 0` guard (0 = Rust default 65535) and pass
+// through unchanged.
+func coerceWireTCPMaximumWindow(field string, v int) int {
+	if v > maxTCPMaximumWindow {
+		slog.Warn("userspace: out-of-range u32 wire tcp maximum window capped to schema ceiling (#16482)",
+			"field", field, "value", v, "cap", maxTCPMaximumWindow)
+		return maxTCPMaximumWindow
+	}
+	return v
+}
+
 func buildFlowSnapshot(cfg *config.Config) FlowSnapshot {
 	snap := FlowSnapshot{
 		AllowDNSReply:                    cfg.Security.Flow.AllowDNSReply,
@@ -120,7 +147,7 @@ func buildFlowSnapshot(cfg *config.Config) FlowSnapshot {
 		snap.TCPNoSequenceCheck = ts.NoSequenceCheck
 		snap.TCPRstSequenceCheck = ts.RstSequenceCheck
 		if ts.MaximumWindow > 0 {
-			snap.TCPMaximumWindow = ts.MaximumWindow
+			snap.TCPMaximumWindow = coerceWireTCPMaximumWindow("tcp_maximum_window", ts.MaximumWindow)
 		}
 		// time-wait-state session-timeout overrides time-wait-timeout.
 		if ts.TimeWaitStateSessionTimeout > 0 {

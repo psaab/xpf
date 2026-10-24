@@ -14,9 +14,11 @@ package userspace
 // reject what Layer A accepts", NOT "leaves accepted values unchanged" —
 // sampling 0 is the documented exception.
 //
-// Scope: ONLY the wire-reaching fields (the 11 fields / Layer-A coercions).
-// version-ipfix timeouts do NOT reach Layer A (buildFlowExportSnapshot reads
-// fm.Version9 only), so they are EXCLUDED — their typing is UX parity only.
+// Scope: ONLY the wire-reaching fields (the 11 fields / Layer-A coercions),
+// plus tcp_maximum_window (#16482: wire-reaching since #15753, coerced in
+// buildFlowSnapshot to the schema ceiling 1048576). version-ipfix timeouts
+// do NOT reach Layer A (buildFlowExportSnapshot reads fm.Version9 only),
+// so they are EXCLUDED - their typing is UX parity only.
 
 import (
 	"math"
@@ -100,6 +102,33 @@ func numwidthFields() []layerBField {
 			validate:       intValidator(0, math.MaxUint32), // Q3 = [0, u32max]
 			coerce:         coerceSamplingRate,
 			zeroIsSentinel: true,
+		},
+		{
+			// #16482: Layer B is ValidateInteger(1024, 1048576) (strict
+			// commit); Layer A caps >1048576 to 1048576. The schema floor
+			// 1024 is stricter than Layer A, which leaves 1..1023 unchanged
+			// (wire-safe; 0 = Rust default), so model the floor band as the
+			// -2 sentinel exactly like tcp_mss_u16 / collector-port (Layer
+			// A itself is unchanged for those values).
+			name:     "tcp_maximum_window_u32",
+			validate: intValidator(1024, maxTCPMaximumWindow),
+			coerce: func(v int) int {
+				if v >= 1024 && v <= maxTCPMaximumWindow {
+					return v
+				}
+				if v > maxTCPMaximumWindow {
+					return coerceWireTCPMaximumWindow("t", v)
+				}
+				if v <= 0 {
+					// 0 is the absent sentinel (buildFlowSnapshot guard
+					// omits it); negatives likewise never reach the wire.
+					// The invariant judges only values Layer A emits, so
+					// model a never-emitted value as the -2 sentinel (the
+					// collector-port skipped-server model), not unchanged.
+					return -2
+				}
+				return -2
+			},
 		},
 	}
 }
