@@ -1576,6 +1576,22 @@ func CompleteFromTree(tree map[string]*Node, words []string, partial string, cfg
 // order); the pre-merge name-only walker appended examples before the
 // placeholder and dropped the description.
 func CompleteFromTreeWithDesc(tree map[string]*Node, words []string, partial string, cfg *config.Config) []Candidate {
+	return completeFromTreeWithDesc(tree, words, partial, cfg, false, false)
+}
+
+// completeFromTreeWithDesc is CompleteFromTreeWithDesc with
+// LookupDesc-only modes (#16151). When rejectRepeatedOptions is
+// set a repeated option keyword (#15719) ends the walk instead of
+// resuming among the options: LookupDesc describes a typed line
+// rather than offering the in-progress next word, while completion
+// must offer a repeated option's values mid-typing
+// (TestCompleteTypedAndDynamicValuesAfterOptionLeaves15720). When
+// describeDynamicSlot is set, the walk answers {partial,
+// "(configured)"} when it ends at a dynamic node's value slot,
+// without enumerating provider values: LookupDesc has no config
+// to enumerate with and historically answered "(configured)" for
+// any name there.
+func completeFromTreeWithDesc(tree map[string]*Node, words []string, partial string, cfg *config.Config, rejectRepeatedOptions, describeDynamicSlot bool) []Candidate {
 	current := tree
 	var currentNode *Node
 	parentTyped := false
@@ -1589,6 +1605,12 @@ func CompleteFromTreeWithDesc(tree map[string]*Node, words []string, partial str
 	inOptionsSubtree := false
 	subtreeConsumed := false
 	optionsValueFilled := false
+	// #16151: seenOptions mirrors Canonicalize #15719 (by node
+	// identity, so abbreviated and full spellings collide) and is
+	// consulted only when rejectRepeatedOptions is set.
+	seenOptions := map[*Node]bool{}
+	var optionsNode *Node
+	optionSubtreeSeen := false
 	// #5196 (A3-b1-F4): canonicalize accepted keyword prefixes so
 	// ContextDynamicFn providers see exact keywords. Mirrors CompleteFromTree.
 	canonWords := append([]string(nil), words...)
@@ -1668,16 +1690,43 @@ func CompleteFromTreeWithDesc(tree map[string]*Node, words []string, partial str
 		}
 		// Record the canonical keyword for the resolved word (#5196).
 		canonWords[wi] = canonName
+		// #16151: repeated-option gate (LookupDesc only; see the
+		// wrapper). Mirrors Canonicalize #15719: an option keyword
+		// resolved at the Options root (the Options node itself, a
+		// completed option resuming via the option map, or a
+		// multi-token subtree root) may appear once; a subtree
+		// child (bytes under sort-by) completes its option and is
+		// not itself an option resolution.
+		if rejectRepeatedOptions && optionsNode != nil {
+			wasSubtreeChild := optionSubtreeSeen
+			atRoot := node == optionsNode || (options != nil && maps.Equal(current, options))
+			if atRoot {
+				if seenOptions[node] {
+					return nil
+				}
+				seenOptions[node] = true
+				optionSubtreeSeen = len(node.Children) > 0 && node != optionsNode
+			} else if wasSubtreeChild {
+				optionSubtreeSeen = false
+			}
+		}
 		currentNode = node
 		parentTyped = node.IsTypedLeaf()
 		dynamicFilled = false
 		if node.Options && node.Children != nil {
 			options = node.Children
+			if rejectRepeatedOptions {
+				optionsNode = node
+				seenOptions = map[*Node]bool{node: true}
+			}
 		}
 		if node.Children == nil {
 			if options != nil && maps.Equal(current, options) {
 				if wi == len(words)-1 {
 					if node.HasDynamic() {
+						if describeDynamicSlot && partial != "" {
+							return []Candidate{{Name: partial, Desc: "(configured)"}}
+						}
 						// #5196 (A3-b1-F3): run the provider on nil cfg too.
 						// #5196 (A3-b1-F4): pass canonical keywords.
 						var candidates []Candidate
@@ -1738,6 +1787,9 @@ func CompleteFromTreeWithDesc(tree map[string]*Node, words []string, partial str
 				continue
 			}
 			if node.HasDynamic() {
+				if describeDynamicSlot && partial != "" {
+					return []Candidate{{Name: partial, Desc: "(configured)"}}
+				}
 				// #5196 (A3-b1-F3): run the provider on nil cfg too.
 				// #5196 (A3-b1-F4): pass canonical keywords.
 				var candidates []Candidate
@@ -1787,6 +1839,9 @@ func CompleteFromTreeWithDesc(tree map[string]*Node, words []string, partial str
 	if atOptionsLeaf && currentNode != nil {
 		// Words ended while an option leaf's value slot was pending.
 		if currentNode.HasDynamic() {
+			if describeDynamicSlot && partial != "" {
+				return []Candidate{{Name: partial, Desc: "(configured)"}}
+			}
 			var candidates []Candidate
 			for _, name := range currentNode.DynamicValues(cfg, canonWords) {
 				if strings.HasPrefix(name, partial) {
@@ -1799,6 +1854,20 @@ func CompleteFromTreeWithDesc(tree map[string]*Node, words []string, partial str
 			return typedLeafCandidates(currentNode, partial)
 		}
 	}
+	// #16151: in describe mode, ending at a dynamic node's own
+	// value slot (last word is that node, e.g. session `zone`)
+	// describes any name as "(configured)" without enumerating.
+	if describeDynamicSlot && len(words) > 0 && currentNode != nil && currentNode.HasDynamic() && !dynamicFilled && partial != "" {
+		// Only when the walk actually ends at that node: current
+		// is its (possibly nil) child level and no value was
+		// consumed. Child keywords are also in `current`, so a
+		// name matching a child keyword is described by the
+		// normal candidates below, not here; LookupDesc checks
+		// those first via its normal-mode call.
+		if _, isChild := current[partial]; !isChild {
+			return []Candidate{{Name: partial, Desc: "(configured)"}}
+		}
+	}
 	var candidates []Candidate
 	for name, node := range current {
 		if strings.HasPrefix(name, partial) {
@@ -1808,7 +1877,7 @@ func CompleteFromTreeWithDesc(tree map[string]*Node, words []string, partial str
 	if parentTyped && currentNode != nil {
 		candidates = append(candidates, typedLeafCandidates(currentNode, partial)...)
 	}
-	if !dynamicConsumed && currentNode != nil && currentNode.HasDynamic() && !(options != nil && maps.Equal(current, options)) {
+	if !dynamicConsumed && currentNode != nil && currentNode.HasDynamic() && !(options != nil && maps.Equal(current, options)) && !describeDynamicSlot {
 		// #5196 (A3-b1-F3): nil-config-aware providers must still run.
 		// #5196 (A3-b1-F4): pass canonical keywords, not raw abbreviations.
 		for _, name := range currentNode.DynamicValues(cfg, canonWords) {
@@ -1898,137 +1967,29 @@ func LookupDesc(words []string, name string, configMode bool) string {
 		tree = OperationalTree
 	}
 
-	// Walk operational tree
-	current := tree
-	var currentNode *Node
-	parentTyped := false
-	// A dynamic node consumes at most one unmatched value (#11835).
-	dynamicFilled := false
-	// options mirrors Canonicalize (#9505/#15720); see CompleteFromTree.
-	// nil stays distinguishable from a declared empty map.
-	var options map[string]*Node
-	atOptionsLeaf := false
-	inOptionsSubtree := false
-	optionsValueFilled := false
-	for wi, w := range words {
-		if atOptionsLeaf {
-			// Previous word was a childless option leaf; this word is
-			// its value. Consume one word, then resume among the options
-			// (#15720).
-			atOptionsLeaf = false
-			parentTyped = false
-			dynamicFilled = false
-			optionsValueFilled = true
-			continue
+	// #16151: LookupDesc is the description projection of the
+	// single completion walk, not a third walker. Delegating to
+	// completeFromTreeWithDesc (with the repeated-option gate, so
+	// a repeated option a typed line may not contain describes
+	// nothing, mirroring Canonicalize #15719) makes the three
+	// surfaces agree by construction: a name is described exactly
+	// when the walk offers it with that description. Dynamic value
+	// candidates carry "(configured)", which reproduces LookupDesc's
+	// historical answer for a consumed dynamic option.
+	for _, c := range completeFromTreeWithDesc(tree, words, name, nil, true, false) {
+		if c.Name == name {
+			return c.Desc
 		}
-		_, node, _, ok := resolveTreeWord(current, w)
-		if !ok && options != nil && !parentTyped && !optionsValueFilled && !(currentNode != nil && currentNode.HasDynamic() && !dynamicFilled) {
-			// The previous option is complete: this word may be the
-			// next option (#15720, mirroring Canonicalize #9505).
-			if _, node2, _, ok2 := resolveTreeWord(options, w); ok2 {
-				node, ok = node2, true
-				current = options
-			}
-		}
-		if !ok {
-			if optionsValueFilled {
-				// #15720: a dynamic/typed option's value was just
-				// consumed and this word is neither an option nor a
-				// value for anything: Canonicalize refuses it, so
-				// completion offers nothing.
-				return ""
-			}
-			if parentTyped {
-				// A typed leaf consumes exactly one value before the walk
-				// resumes among its parent's sibling options.
-				if options != nil && maps.Equal(current, options) {
-					optionsValueFilled = true
-				}
-				parentTyped = false
-				continue
-			}
-			// A dynamic value consumes one word, then the walk must resume in
-			// the node's children (or refuse an unmatched word).
-			if currentNode != nil && currentNode.HasDynamic() && !dynamicFilled {
-				dynamicFilled = true
-				if options != nil {
-					optionsValueFilled = true
-				}
-				continue
-			}
-			// Placeholder node consumes any value.
-			if ph := findPlaceholder(current); ph != nil {
-				if ph.Children != nil {
-					currentNode = ph
-					current = ph.Children
-					dynamicFilled = false
-				}
-				continue
-			}
-			return ""
-		}
-		currentNode = node
-		parentTyped = node.IsTypedLeaf()
-		dynamicFilled = false
-		optionsValueFilled = false
-		if node.Options && node.Children != nil {
-			options = node.Children
-		}
-		if node.Children == nil {
-			if options != nil && maps.Equal(current, options) {
-				if wi == len(words)-1 {
-					// LookupDesc has no config to enumerate dynamic
-					// values with, so a consumed option at the end of
-					// the words can only describe `name` if it IS one
-					// of that option's values (#15720). A flag leaf
-					// (nat) has no value slot: `name` is described
-					// among the options by the lookup below.
-					if node.HasDynamic() && name != "" {
-						return "(configured)"
-					}
-					if node.HasDynamic() || parentTyped {
-						return ""
-					}
-					current = options
-					break
-				}
-				if node.HasDynamic() || parentTyped {
-					// Value pending: resume among the options after
-					// the next word is consumed as this option's value.
-					atOptionsLeaf = true
-					current = options
-					continue
-				}
-				// Flag leaf: resume among the options.
-				current = options
-				continue
-			}
-			if parentTyped {
-				continue
-			}
-			if options != nil && maps.Equal(current, options) {
-				// #15720: flag leaf (nat) at the end of the words —
-				// `name` is described among the options below.
-				current = options
-				break
-			}
-			if options != nil && inOptionsSubtree {
-				// #15720: a leaf of a subtree under the Options node
-				// (sort-by bytes): the subtree option is complete, so
-				// resume among the options; `name` is described there
-				// below. Gated on inOptionsSubtree so an unrelated word
-				// after any other leaf stays undescribed.
-				current = options
-				inOptionsSubtree = false
-				continue
-			}
-			return ""
-		}
-		inOptionsSubtree = options != nil && maps.Equal(current, options) && !node.Options
-		current = node.Children
 	}
-	if node, ok := current[name]; ok {
-		return node.Desc
+	// A configured value absent from the nil-config enumeration
+	// yields no candidate above; historically LookupDesc answered
+	// "(configured)" for ANY name at a consumed dynamic slot.
+	// The describe-mode walk answers exactly that, without
+	// enumerating provider values.
+	for _, c := range completeFromTreeWithDesc(tree, words, name, nil, true, true) {
+		if c.Name == name {
+			return c.Desc
+		}
 	}
 	return ""
 }

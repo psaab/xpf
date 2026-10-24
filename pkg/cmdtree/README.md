@@ -315,6 +315,34 @@ queue <name>`, `show security zones trust detail`), and a placeholder
 with children keeps its lawful child spellings (`show route
 10.0.0.0/8 exact`, `... flows limit 10` / `flows all`).
 
+## Completion and Canonicalize agree per keyword, and stay separate (#16151)
+
+The twin completion walkers were merged in #16138: `CompleteFromTree`
+is the name-only projection of the single `CompleteFromTreeWithDesc`
+walk, so names/order/descriptions cannot drift between the two
+surfaces. Merging `Canonicalize` into that walk (a `walkPolicy`
+`AllowProviders` bool) was REJECTED and must not reappear:
+`Canonicalize` is the fail-closed authorization input and stays
+separate code that cannot name a provider (see canonicalize.go's
+header). The substitute is an agreement test at the
+`resolveTreeWord` level — the one prefix rule both sides already
+share: `TestCompletionCanonicalizeKeywordAgreement16151` enumerates
+every non-placeholder keyword path of `OperationalTree` and asserts
+completion offers it (full spelling and unique abbreviation),
+`CompleteFromTreeWithDesc`/`LookupDesc` carry its description, and
+`Canonicalize` accepts it as itself. "Accepts" is keyword-level, not
+line-level: a keyword opening a value slot is offered lawfully while
+a line ending at it stays refused (#14687/#15719), so acceptance
+allows filling that slot (or supplying an ancestor's dynamic value,
+e.g. `show security policies from-zone <z> to-zone <z> hit-count`).
+`TestCanonicalizeInvokesNoProvider16151` (counting providers, with a
+completion positive control) and
+`TestCanonicalizeProviderFreeScope16151` (AST census, `HasDynamic`
+positive control) pin that no provider is reachable from
+`Canonicalize`; a seeded `ModifierOnly` divergence
+(`TestCompletionCanonicalizeAgreementSeededDivergence16151`) proves
+the agreement check can go red.
+
 ## Typed leaves
 
 A `Node` with `ValueType != ValueAny` is a typed leaf: it expects exactly
