@@ -1035,8 +1035,9 @@ here; both are tracked on #6751.
 |----------|--------|-------------------|
 | TCP      | 300s   | 30s               |
 | UDP      | 60s    | —                 |
-| ICMP     | 15s    | —                 |
-| Other    | 30s    | —                 |
+| ICMP     | 60s    | —                 |
+| OSPF     | 60s    | —                 |
+| Other    | 1800s  | —                 |
 
 #### NAT (`nat.rs`)
 

@@ -11,6 +11,15 @@ xpf (0.0.0) unstable; urgency=medium
     `xpf_config_journal_legacy_scrub_degraded` gauge, emitted even
     when the dataplane is not loaded, clearing after a successful
     scrub retry.
+  * Userspace DP: default other-protocol sessions to 1800 s and OSPF
+    to 60 s (#16486). GRE/ESP/AH/SCTP/6in4 and every other protocol
+    without a TCP/UDP/ICMP arm idled out after 30 s, so on one-way
+    policies the first remote packet after a lull was policy-denied
+    (e.g. inbound ESP on an idle IPsec passthrough tunnel). The Junos
+    protocol table gives "Other" 30 minutes and OSPF 1 minute; the
+    single session-timeout resolver and the show-path now use those
+    values, while a promoted session's application
+    inactivity-timeout still wins.
   * Userspace DP: count a Stage-11 IPsec pre-claim PBR drop exactly once
     (#16480). The #14314 pre-claim probe resolved the input-filter PBR
     override uncounted and recycled on `RouteOverride::Drop`, but that

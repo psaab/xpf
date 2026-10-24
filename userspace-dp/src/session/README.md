@@ -63,6 +63,8 @@ structure.)
 | TCP abort (RST) | 2 s | none — #3046, an xpf control |
 | UDP   | 60 s | `security flow udp-session session-timeout` |
 | ICMP  | 60 s | `security flow icmp-session session-timeout` |
+| OSPF  | 60 s (#16486, Junos protocol table) | none — protocol default |
+| Other IP protocols (GRE/ESP/AH/SCTP/6in4/…) | 1800 s (#16486, Junos "Other" protocol default) | none — per-application `inactivity-timeout` still wins after reply promotion |
 
 ### CLOSING vs TIME_WAIT (#7342)
 
