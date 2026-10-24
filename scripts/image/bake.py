@@ -452,6 +452,7 @@ SYSPREP_PURGE_PATHS = (
     "/etc/xpf/.root-grown",
     "/var/lib/xpf/snmp-engine-id",
     "/var/lib/xpf/snmp-engineboots",
+    "/var/lib/xpf/uefi-bootorder-front",
     "/var/lib/systemd/random-seed",
     "/var/lib/apt/lists/*",
 )

@@ -188,7 +188,10 @@ class SealBakeAgreementTests(unittest.TestCase):
         them ships a committed config inside the golden image."""
         for p in ("/etc/xpf/.configdb", "/etc/xpf/xpf.conf",
                   "/etc/xpf/.day0-config-applied",
-                  "/etc/xpf/.day0-config-rejected", "/etc/xpf/.root-grown"):
+                  "/etc/xpf/.day0-config-rejected", "/etc/xpf/.root-grown",
+                  # #16449: a shipped recorded front would make every
+                  # clone trust a front it never wrote.
+                  "/var/lib/xpf/uefi-bootorder-front"):
             self.assertIn(p, bake.SYSPREP_PURGE_PATHS)
 
 

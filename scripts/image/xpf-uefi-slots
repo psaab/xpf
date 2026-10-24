@@ -23,7 +23,11 @@
 #
 # It seeds xpf-A first only when neither slot is yet in BootOrder (fresh box).
 # Once either slot is present, it preserves the current front — including an
-# operator-selected non-xpf entry — instead of mistaking it for a fresh box.
+# operator-selected non-xpf entry — instead of mistaking it for a fresh box,
+# UNLESS the front is the distributor (ubuntu/shim) entry and the recorded
+# front says xpf last wrote a slot front: that is a bootloader postinst's
+# NVRAM rewrite (#16449), not an operator choice, so the recorded slot front
+# is re-asserted. See the recorded-front block below.
 
 set -u
 
@@ -108,6 +112,58 @@ ESP_DEV_ROOT="${XPF_UEFI_SLOTS_DEV_ROOT:-/dev}"
 # from these: it is a firmware path interpreted by the firmware, not a mount.
 EFIVARS_DIR="${XPF_UEFI_SLOTS_EFIVARS:-/sys/firmware/efi/efivars}"
 ESP_ROOT="${XPF_UEFI_SLOTS_ESP:-/boot/efi}"
+# Recorded BootOrder front (#16449). On every run that itself writes or
+# confirms the BootOrder front, the script records WHICH front it left,
+# under /var/lib/xpf (created by the .deb, shipped in the baked image) —
+# never on the ESP, whose EFI/ubuntu tree is the distributor's. Format:
+#   front=<Boot#### id or empty>
+#   slot=<xpf-A|xpf-B|empty>   (set iff front is an xpf slot this run knows)
+#   order=<full BootOrder at record time>
+# Missing/unreadable/garbled file = no recorded front: the operator-choice
+# preservation below then applies exactly as before (never a takeover on
+# missing state). Overridable for the self-test only.
+STATE_DIR="${XPF_UEFI_SLOTS_STATE_DIR:-/var/lib/xpf}"
+STATE_FILE="${XPF_UEFI_SLOTS_STATE:-$STATE_DIR/uefi-bootorder-front}"
+
+# is_distributor_entry <Boot#### id> : true iff that entry's loader is the
+# distributor shim path \EFI\ubuntu\shimx64.efi (case-insensitive, matching
+# efibootmgr's rendering). This is the entry grub-efi-amd64-signed /
+# shim-signed (re)creates and prepends via grub-install with NVRAM writes.
+is_distributor_entry() {
+    _line=$(efibootmgr | grep -E "^Boot$1\*?[[:space:]]" 2>/dev/null | head -1)
+    [ -n "$_line" ] || return 1
+    echo "$_line" | grep -qiE 'EFI[\\/]ubuntu[\\/]shimx64\.efi'
+}
+
+# record_front <front-id> <slot-label-or-empty> <order>
+# Best-effort durable write (temp + rename + dir sync). A failure only
+# loses the #16449 recovery for one cycle; registration itself must not
+# fail the boot over state bookkeeping.
+record_front() {
+    _rf_front="$1"; _rf_slot="$2"; _rf_order="$3"
+    [ -n "$_rf_front" ] || return 0
+    mkdir -p "$STATE_DIR" 2>/dev/null || { log "WARNING: cannot create $STATE_DIR; recorded front not saved"; return 0; }
+    _rf_tmp="${STATE_FILE}.tmp-$$"
+    if { printf 'front=%s\nslot=%s\norder=%s\n' "$_rf_front" "$_rf_slot" "$_rf_order" > "$_rf_tmp" && sync -f "$_rf_tmp" 2>/dev/null; }; then
+        mv -f "$_rf_tmp" "$STATE_FILE" 2>/dev/null || { rm -f "$_rf_tmp"; log "WARNING: cannot install recorded front $STATE_FILE"; return 0; }
+        sync -f "$STATE_DIR" 2>/dev/null || true
+    else
+        rm -f "$_rf_tmp" 2>/dev/null || true
+        log "WARNING: cannot write recorded front $STATE_FILE"
+    fi
+    return 0
+}
+
+# read_recorded_front : sets REC_FRONT / REC_SLOT, or empties.
+read_recorded_front() {
+    REC_FRONT=""; REC_SLOT=""
+    [ -f "$STATE_FILE" ] || return 0
+    REC_FRONT=$(sed -nE 's/^front=([0-9A-Fa-f]{4})$/\1/p' "$STATE_FILE" 2>/dev/null | head -1)
+    REC_SLOT=$(sed -nE 's/^slot=(xpf-A|xpf-B)$/\1/p' "$STATE_FILE" 2>/dev/null | head -1)
+    # A recorded slot implies a recorded slot front; inconsistency = garbled.
+    [ -n "$REC_SLOT" ] && [ -z "$REC_FRONT" ] && REC_SLOT=""
+    return 0
+}
 
 # --sync-only: refresh the slot loaders from EFI/ubuntu and exit. Used
 # by the dpkg file trigger (debian/xpf.triggers -> xpf.postinst
@@ -265,11 +321,89 @@ elif [ -n "$LED_SLOT" ]; then
         [ -n "$REST" ] && NEW="$NEW,$REST"
         if [ "$NEW" != "$ORDER" ]; then
             log "preserving promoted slot $LED_SLOT as default: $NEW (was: $ORDER)"
-            efibootmgr --quiet --bootorder "$NEW" 2>/dev/null \
-                || log "WARNING: failed to re-assert promoted default (non-fatal)"
+            if efibootmgr --quiet --bootorder "$NEW" 2>/dev/null; then
+                ORDER="$NEW"
+            else
+                log "WARNING: failed to re-assert promoted default (non-fatal)"
+            fi
         else
             log "promoted slot $LED_SLOT already leads BootOrder; preserving"
         fi
+        record_front "$LEAD_ID" "$LED_SLOT" "$ORDER"
+    fi
+elif [ -n "$PRE_HAS_XPF" ] && [ -n "$PRE_FRONT" ] && \
+        is_distributor_entry "$PRE_FRONT"; then
+    # (#16449) PRE_FRONT is the distributor (ubuntu/shim) entry while an
+    # xpf slot is still in BootOrder. Two writers can put it there:
+    #   (a) grub-efi-amd64-signed / shim-signed postinst: grub-install
+    #       with NVRAM writes (grub2/update_nvram=true) (re)creates the
+    #       Ubuntu entry and prepends it — routine -security traffic;
+    #   (b) an operator who deliberately ran `efibootmgr --bootorder`
+    #       to lead with the stock Ubuntu entry.
+    # They are distinguishable ONLY by the recorded front: if xpf last
+    # recorded a SLOT front and the current front is now the distributor
+    # entry, case (a) rewrote it after xpf's last write, so re-assert
+    # the recorded slot (falling back to whichever slot leads the rest
+    # of the current order, then A). If there is no recorded slot front
+    # — fresh state, an operator front recorded earlier, or the
+    # distributor entry recorded as the front — this is (b) or unknown:
+    # preserve the front exactly as the operator-choice arm below does.
+    # NEVER take over on missing state (no fail-open of the gate).
+    read_recorded_front
+    TAKEOVER_ID=""
+    TAKEOVER_SLOT=""
+    if [ -n "$REC_SLOT" ]; then
+        TAKEOVER_SLOT="$REC_SLOT"
+        TAKEOVER_ID=$(slot_id "$REC_SLOT")
+        [ -n "$TAKEOVER_ID" ] || TAKEOVER_ID="$REC_FRONT"
+        # The recorded id must still BE that slot (an entry can be
+        # deleted and its id reused by firmware); otherwise resolve
+        # the slot label fresh and trust only that.
+        case "$TAKEOVER_ID" in
+            "$A_ID"|"$B_ID") ;;
+            *) TAKEOVER_ID="" ;;
+        esac
+        if [ -z "$TAKEOVER_ID" ]; then
+            case "$REC_SLOT" in
+                xpf-A) TAKEOVER_ID="$A_ID" ;;
+                xpf-B) TAKEOVER_ID="$B_ID" ;;
+            esac
+        fi
+    fi
+    if [ -n "$TAKEOVER_ID" ]; then
+        REST=$(echo "$ORDER" | tr ',' '\n' | grep -vxF "$TAKEOVER_ID" | paste -sd, -)
+        NEW="$TAKEOVER_ID"
+        [ -n "$REST" ] && NEW="$NEW,$REST"
+        if [ "$NEW" != "$ORDER" ]; then
+            log "distributor entry $PRE_FRONT leads BootOrder but recorded front was slot $TAKEOVER_SLOT ($TAKEOVER_ID) — bootloader postinst rewrote NVRAM (#16449); re-asserting recorded slot front: $NEW (was: $ORDER)"
+            if efibootmgr --quiet --bootorder "$NEW" 2>/dev/null; then
+                ORDER="$NEW"
+            else
+                log "WARNING: failed to re-assert recorded slot front (non-fatal)"
+            fi
+        else
+            log "recorded slot $TAKEOVER_SLOT already leads BootOrder; preserving"
+        fi
+        record_front "$TAKEOVER_ID" "$TAKEOVER_SLOT" "$ORDER"
+    else
+        # No recorded slot front: preserve the distributor front as an
+        # operator choice (or unknown), and record THAT so a later
+        # deliberate operator front stays preserved while a later xpf
+        # slot promotion is what arms the #16449 recovery.
+        REST=$(echo "$ORDER" | tr ',' '\n' | grep -vxF "$PRE_FRONT" | paste -sd, -)
+        NEW="$PRE_FRONT"
+        [ -n "$REST" ] && NEW="$NEW,$REST"
+        if [ "$NEW" != "$ORDER" ]; then
+            log "preserving distributor BootOrder front $PRE_FRONT (no recorded slot front): $NEW (was: $ORDER)"
+            if efibootmgr --quiet --bootorder "$NEW" 2>/dev/null; then
+                ORDER="$NEW"
+            else
+                log "WARNING: failed to re-assert distributor default (non-fatal)"
+            fi
+        else
+            log "distributor entry $PRE_FRONT leads BootOrder with no recorded slot front; preserving as operator choice"
+        fi
+        record_front "$PRE_FRONT" "" "$ORDER"
     fi
 elif [ -n "$PRE_HAS_XPF" ]; then
     # A non-xpf entry was already the default while an xpf slot remained
@@ -280,11 +414,15 @@ elif [ -n "$PRE_HAS_XPF" ]; then
     [ -n "$REST" ] && NEW="$NEW,$REST"
     if [ "$NEW" != "$ORDER" ]; then
         log "preserving non-xpf BootOrder front $PRE_FRONT: $NEW (was: $ORDER)"
-        efibootmgr --quiet --bootorder "$NEW" 2>/dev/null \
-            || log "WARNING: failed to re-assert non-xpf default (non-fatal)"
+        if efibootmgr --quiet --bootorder "$NEW" 2>/dev/null; then
+            ORDER="$NEW"
+        else
+            log "WARNING: failed to re-assert non-xpf default (non-fatal)"
+        fi
     else
         log "non-xpf entry $PRE_FRONT already leads BootOrder; preserving"
     fi
+    record_front "$PRE_FRONT" "" "$ORDER"
 elif [ -n "$A_ID" ]; then
     # Neither xpf slot was present in the pre-run BootOrder (fresh box) —
     # deterministic seed: xpf-A first, xpf-B second, then other entries.
@@ -294,8 +432,12 @@ elif [ -n "$A_ID" ]; then
     [ -n "$B_ID" ] && NEW="$NEW,$B_ID"
     [ -n "$REST" ] && NEW="$NEW,$REST"
     log "seeding BootOrder: $NEW (was: $ORDER)"
-    efibootmgr --quiet --bootorder "$NEW" 2>/dev/null \
-        || log "WARNING: failed to seed BootOrder (non-fatal)"
+    if efibootmgr --quiet --bootorder "$NEW" 2>/dev/null; then
+        ORDER="$NEW"
+    else
+        log "WARNING: failed to seed BootOrder (non-fatal)"
+    fi
+    record_front "$A_ID" "xpf-A" "$ORDER"
 else
     log "no xpf-A slot id; leaving BootOrder unchanged"
 fi
