@@ -74,13 +74,6 @@ import (
 //
 // Cumulative and process-lifetime; a restart resets them, the ordinary
 // Prometheus counter contract, handled by rate() at query time.
-func (c *xpfCollector) describeDataplaneSilentSkips(ch chan<- *prometheus.Desc) {
-	ch <- c.napiProbeTargetSkipsTotal
-	ch <- c.bindingWedgeGiveupsTotal
-	ch <- c.learnedRouteCapHitsTotal
-	ch <- c.learnedRouteCapGroupShedsTotal
-	ch <- c.learnedRouteCapGroupShedsByFamilyTotal
-}
 
 func (c *xpfCollector) emitDataplaneSilentSkips(ch chan<- prometheus.Metric) {
 	c.emitConstMetric(ch, c.napiProbeTargetSkipsTotal,

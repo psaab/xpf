@@ -20,12 +20,6 @@ func (c *xpfCollector) initSNMPServeBudgetDescriptors() {
 	)
 }
 
-func (c *xpfCollector) describeSNMPServeBudget(ch chan<- *prometheus.Desc) {
-	ch <- c.snmpRequestsShedTotal
-	ch <- c.snmpSourceBucketEvictionsTotal
-	ch <- c.snmpTrackedSources
-}
-
 func (c *xpfCollector) emitSNMPServeBudget(ch chan<- prometheus.Metric) {
 	if c.srv == nil || c.srv.snmpServeBudgetStatsFn == nil {
 		return

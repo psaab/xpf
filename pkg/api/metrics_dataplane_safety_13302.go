@@ -16,16 +16,6 @@ func (c *xpfCollector) initDataplaneSafetyDescriptors() {
 	})
 }
 
-func (c *xpfCollector) describeDataplaneSafety(ch chan<- *prometheus.Desc) {
-	c.initDataplaneSafetyDescriptors()
-	ch <- c.dataplaneObsoleteRegistryAccesses
-	ch <- c.dataplaneXDPDetachDebtInterfaces
-	ch <- c.dataplaneHostDivergenceMutations
-	ch <- c.dataplaneArmUncoveredSurfaces
-	ch <- c.dataplaneArmTotalSurfaces
-	ch <- c.dataplaneXDPAttachModeSurfaces
-}
-
 func (c *xpfCollector) emitDataplaneSafety(ch chan<- prometheus.Metric) {
 	c.initDataplaneSafetyDescriptors()
 	m, ok := dataplane.Unwrap(c.srv.dp).(interface {

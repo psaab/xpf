@@ -14,11 +14,6 @@ import (
 // the admission refusals (#8312): a scrape during dataplane degradation —
 // exactly when an operator would look — must still carry them.
 
-func (c *xpfCollector) describeRESTConnBound(ch chan<- *prometheus.Desc) {
-	ch <- c.restConnRefusalsTotal
-	ch <- c.restConnActive
-}
-
 func (c *xpfCollector) emitRESTConnBound(ch chan<- prometheus.Metric) {
 	var refusals uint64
 	var active int64
