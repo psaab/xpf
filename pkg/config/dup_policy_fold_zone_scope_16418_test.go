@@ -17,9 +17,10 @@ import (
 //     unscoped statement denied from other zones is no longer denied.
 //
 // Controls (stay unpoisoned): permit pair differing only in from-zone
-// (one dimension), a permit pair whose wider zone scope contains the
-// other's differing only in source, and deny pairs whose merged scope
-// contains every restrictive statement's scope.
+// (one dimension), and deny pairs whose merged scope contains every
+// restrictive statement's scope. (A wider-zone permit differing also in
+// source is NOT a control: #16419 shows that trade mints (zone,source)
+// tuples neither statement permitted, so it is a defect row there.)
 
 func globalPolicies16418(cfg *Config) []*Policy { return cfg.Security.GlobalPolicies }
 
@@ -102,9 +103,9 @@ func TestFoldGlobalZoneControlsStayUnpoisoned16418(t *testing.T) {
 		{"permit pair differing only in to-zone", globalText9571(
 			`policy p1 { match { to-zone trust; source-address 10.0.1.0/25; destination-address any; application any; } then { permit; } } ` +
 				`policy p1 { match { to-zone untrust; source-address 10.0.1.0/25; destination-address any; application any; } then { permit; } }`)},
-		{"wider zone permit differs only in source", globalText9571(
+		{"wider zone permit, same source (one differing dimension)", globalText9571(
 			`policy p1 { match { from-zone [ trust untrust ]; source-address 10.0.1.0/25; destination-address any; application any; } then { permit; } } ` +
-				`policy p1 { match { from-zone trust; source-address 10.0.2.0/25; destination-address any; application any; } then { permit; } }`)},
+				`policy p1 { match { from-zone trust; source-address 10.0.1.0/25; destination-address any; application any; } then { permit; } }`)},
 		{"identical scoped deny pair", globalText9571(
 			`policy p1 { match { from-zone trust; source-address 10.0.1.0/25; destination-address any; application any; } then { deny; } } ` +
 				`policy p1 { match { from-zone trust; source-address 10.0.1.0/25; destination-address any; application any; } then { deny; } }`)},
