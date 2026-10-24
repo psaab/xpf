@@ -1879,3 +1879,34 @@ imported rows now carrying their traffic evidence into the
 guard. Restore after each run: clean master `2c8575b70e`,
 helper `2f2f5cbf…b04` both, RG1 node0, target OK, VERIFY_ZERO 0
 (run16 verify P4 16.1 Gbit/s).
+
+### Rebased onto a473a0de83 — strict TWICE clean (final)
+
+Rebase of the 66-commit branch onto origin/master `a473a0de83`
+(#16454-#16472 era): only `debian/changelog` conflicted (twice,
+both times the additive top-of-file block; resolved @both —
+master entries plus the #16217 entries, newest fix entry on
+top). No code conflicts: session/mod.rs kept both the #16435
+L3-bucket and the probe snapshot, the #16209 forwarding split
+and the #16460 wire (term_ordinal) merged clean. Rebased head
+`eee77e0145` (fix `f406f9f17e`).
+
+Unit on the rebased head: `cargo test 16217` 64 passed;
+`policy_revalidation` 118 passed.
+
+Live aged (deb `99.16217.53` sha256
+`1caad37be80925dfa2d7e39f3db108a793f40102261ea69ec478c66f7b49b969`,
+helper sha256
+`c95d6d253ba5b0c6576503cf3ba137ce2ee8feca2a3dbfdfee9962d93ceed3e3`
+hash-proved `/proc/<pid>/exe` both nodes before traffic; RG1
+node0->node1 proven both views each run; evidence
+`/var/worktrees/FZFixWire34/run{17,18}/`):
+
+| Run | Per-stream zeros | SUM zeros | snat_revoked | Verdict |
+|---|---|---|---|---|
+| run17 | 0 | 0 | 0 both, all samples | PASS |
+| run18 | 0 | 0 | 0 both, all samples | PASS |
+
+**Acceptance met TWICE on the rebased final head.** Restore
+after each run: clean master `2c8575b70e`, helper
+`2f2f5cbf…b04` both, RG1 node0, target OK, VERIFY_ZERO 0.
