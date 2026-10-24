@@ -1,5 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Login: the tolerant-load shadowed-class neutralisation (#14387) now
+    also covers `system services web-management api-auth` users, named
+    keys, and the api-auth default class (#16074). A custom class
+    shadowing a built-in (e.g. `class super-user { permissions view; }`)
+    is inert at runtime, so an api-auth credential naming the shadowed
+    class kept the built-in's permissions on tolerant load / peer sync;
+    it is now neutralised to `unauthorized` with a warning, exactly like
+    `system login user` assignments. Strict commit still rejects the
+    shadowing definition.
+
   * Login: argument-scoped allow/deny-commands regexes now fire on the
     gRPC and REST surfaces (#16067). Both gates rebuild the full
     canonicalised command from the decoded request (ShowText topic

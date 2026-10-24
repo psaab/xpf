@@ -438,9 +438,14 @@ described below:
   path it still boots with a warning, but since #14387 every user assigned
   the shadowed name is **neutralised to `unauthorized`** (no permissions) for
   that load, and the per-class advisory no longer reports the shadowed
-  mapping as applied. Assign a distinct class name, or assign the built-in
-  directly if its semantics are what was intended. A user assigned a
-  built-in with **no** shadowing definition is unaffected.
+  mapping as applied. Since #16074 the same neutralisation covers
+  `system services web-management api-auth` users and named keys that name
+  the shadowed class (explicitly or by inheriting the api-auth default),
+  and the api-auth default class itself — legacy `api-key` tokens inherit
+  that default, so they are neutralised through it. Assign a distinct
+  class name, or assign the built-in directly if its semantics are what
+  was intended. A user assigned a built-in with **no** shadowing
+  definition is unaffected.
 
 ### The four regex sub-statements are ENFORCED (#7172)
 

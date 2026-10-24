@@ -650,6 +650,8 @@ func validateLoginClassShadowsBuiltinAST(tree *ConfigTree, lenient bool) ([]stri
 // neutraliseShadowedLoginAssignments14387 rewrites, on the tolerant load /
 // peer-sync path only, every compiled user whose class names a built-in that
 // is ALSO shadowed by a custom class definition in cfg (#14387 / DR6-H3).
+// Since #16074 it also rewrites every api-auth credential class (and the
+// api-auth default class) naming such a built-in.
 //
 // The shadowing definition is inert (ResolveClassPermissions consults the
 // built-in table first), so keeping the assignment would hand the user the
@@ -658,18 +660,24 @@ func validateLoginClassShadowsBuiltinAST(tree *ConfigTree, lenient bool) ([]stri
 // built-in whose permission set is empty) makes every consumer agree:
 // LoginUserClass, pkg/cli ResolveLoginClass (via the compiled user record),
 // pkg/authz, the daemon login-shell selection and the sudoers reconciliation
-// all read User.Class. The custom definition itself is left authored so show
-// config still displays what was written, and users assigned a built-in with
-// NO shadowing definition are untouched (their built-in grant is legitimate).
+// all read User.Class. For api-auth the daemon wires APIAuthUser.Class /
+// APIAuthKey.Class (falling back to APIAuthConfig.DefaultClass) into the
+// REST auth middleware, which resolves the class through the same
+// built-in-first table, so those fields must be rewritten too. Legacy
+// `api-key` tokens carry no class of their own and inherit DefaultClass at
+// daemon wiring time, so neutralising DefaultClass is what neutralises
+// them. The custom definition itself is left authored so show config still
+// displays what was written, and users assigned a built-in with NO
+// shadowing definition are untouched (their built-in grant is legitimate).
 //
 // "unauthorized" is itself a built-in, but it can never be a shadowing target
 // that widens anyone: its permission set is empty, so even a (separately
 // gated) `class unauthorized { permissions all; }` definition still resolves
 // through the built-in empty set. Rewriting to it therefore cannot recurse.
 //
-// Returns one warning per neutralised user. Must only be called when the
-// shadow gate ran leniently; strict compiles never reach a compiled cfg with
-// a shadowing definition.
+// Returns one warning per neutralised user / credential / default. Must
+// only be called when the shadow gate ran leniently; strict compiles never
+// reach a compiled cfg with a shadowing definition.
 func neutraliseShadowedLoginAssignments14387(cfg *Config) []string {
 	if cfg == nil || cfg.System.Login == nil || len(cfg.System.Login.Classes) == 0 {
 		return nil
@@ -699,6 +707,65 @@ func neutraliseShadowedLoginAssignments14387(cfg *Config) []string {
 				"class or assign the built-in directly (#14387)",
 			u.Name, u.Class, u.Class, u.Class))
 		u.Class = "unauthorized"
+	}
+	if cfg.System.Services == nil || cfg.System.Services.WebManagement == nil ||
+		cfg.System.Services.WebManagement.APIAuth == nil {
+		return warnings
+	}
+	auth := cfg.System.Services.WebManagement.APIAuth
+	// Capture the authored default before rewriting it: a credential with
+	// an empty class inherits this value at daemon wiring time.
+	defaultClass := auth.DefaultClass
+	defaultShadowed := shadowed[defaultClass]
+	if defaultShadowed {
+		warnings = append(warnings, fmt.Sprintf(
+			"system services web-management api-auth: default class %q is shadowed by a custom "+
+				"`system login class %s` definition that is INERT at runtime (the built-in %q "+
+				"always wins), so the authored narrowing was never applied; the default was "+
+				"neutralised to \"unauthorized\" (no permissions) on this tolerant load — "+
+				"rename the custom class or assign the built-in directly (#16074)",
+			defaultClass, defaultClass, defaultClass))
+		auth.DefaultClass = "unauthorized"
+	}
+	for _, u := range auth.Users {
+		if u == nil {
+			continue
+		}
+		class := u.Class
+		if class == "" {
+			class = defaultClass
+		}
+		if !shadowed[class] {
+			continue
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"system services web-management api-auth user %s: class %q is shadowed by a custom "+
+				"`system login class %s` definition that is INERT at runtime (the built-in %q "+
+				"always wins), so the authored narrowing was never applied; the assignment was "+
+				"neutralised to \"unauthorized\" (no permissions) on this tolerant load — "+
+				"rename the custom class or assign the built-in directly (#16074)",
+			u.Username, class, class, class))
+		u.Class = "unauthorized"
+	}
+	for _, k := range auth.Keys {
+		if k == nil {
+			continue
+		}
+		class := k.Class
+		if class == "" {
+			class = defaultClass
+		}
+		if !shadowed[class] {
+			continue
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"system services web-management api-auth key %s: class %q is shadowed by a custom "+
+				"`system login class %s` definition that is INERT at runtime (the built-in %q "+
+				"always wins), so the authored narrowing was never applied; the assignment was "+
+				"neutralised to \"unauthorized\" (no permissions) on this tolerant load — "+
+				"rename the custom class or assign the built-in directly (#16074)",
+			k.Name, class, class, class))
+		k.Class = "unauthorized"
 	}
 	return warnings
 }
