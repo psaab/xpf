@@ -1719,3 +1719,38 @@ was intermittency/master-delta, and two further strict cells on
 the final head are clean). Restore after each run: clean master
 `2c8575b70e`, helper `2f2f5cbf…b04` both, RG0/1/2 node0, target
 OK, P4 14.5/13.9 Gbit/s, VERIFY_ZERO 0.
+
+### Final-decision head (b65e581839) — strict TWICE clean
+
+Test-only + comment fold (`29e0cbea22`): :1221-1230 caller
+contract wording fixed to name
+`declined_reverse_hit_packet_outcomes_16217`;
+`dropped_probe_snapshot_is_bounded_and_restores_16217` gained a
+SYN-ACK-first NAT'd arm producing FOUR distinct snapshot
+candidates with pre-seeded stamps (0,7)/(0,9) — the completing
+reverse probe overwrites the companion-wire stamp (wire
+0 -> Established) and rollback restores (0,9) exactly.
+Mutation-verified: snap_len cap-1 turns the arm RED, restored
+4-slot GREEN (with the production candidate order the written
+key sits at slot 1 for a reverse probe, so cap-1 is the
+discriminating capacity mutation — stated in the test, not
+overclaimed as cap-2). Rebased onto master `03908573b9`
+(changelog-only conflict; entries restored in b65e581839).
+
+Live aged table (head b65e581839, `make deb
+DEB_VERSION=99.16217.50` deb sha256
+`71d5be3c07d1633209bdd09e4fbc73fc09cb4cdc9935edb880371016770c21d0`,
+helper sha256
+`c88af2553e7d2e7a2b0249aaffa7d1bbc38cfdf6ed976d5a80538abb909ceff7`
+hash-proved both nodes before traffic; RG1 node0->node1 proven
+both views each run; evidence `/var/worktrees/FZFixWire34/run{9,10}/`):
+
+| Run | Per-stream zeros | SUM zeros | snat_revoked | Verdict |
+|---|---|---|---|---|
+| run9 | 0 | 0 | 0 both, all samples | PASS |
+| run10 | 0 | 0 | 0 both, all samples | PASS |
+
+**Acceptance (ZERO per-stream zeros) met TWICE on the final
+head.** Restore after each run: clean master `2c8575b70e`,
+helper `2f2f5cbf…b04` both, RG0/1/2 node0, target OK, P4
+13.7/14.1 Gbit/s, VERIFY_ZERO 0.
