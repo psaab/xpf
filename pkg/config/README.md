@@ -191,7 +191,11 @@ distinction).
   that validator. Lives here (not cmdtree) so `setSchema` can carry typed-leaf
   metadata directly; `pkg/cmdtree` re-exports it via aliases. See
   `docs/config-schema.md`.
-- `SchemaValidate(tree, cfg)` + the generic walker — `schema_walk.go`.
+- `SchemaValidate(tree)` + the generic walker — the `schema_walk_*`
+  family (#16152): `schema_walk_entry.go` (entry point), `schema_walk.go`
+  (the walk), `schema_walk_leaf.go` (typed-leaf validators),
+  `schema_walk_refs.go` (cross-reference collection), and
+  `schema_walk_errors.go` (error types/constructors and secret-scrubbing).
   The #1319 commit-check gate. Descends `setSchema` against the AST (the
   SAME tree the live config-mode `set ... ?` completer walks via
   `CompleteSetPathWithValues`) and invokes each typed leaf's validator on
