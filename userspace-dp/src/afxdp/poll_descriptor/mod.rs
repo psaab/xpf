@@ -4575,6 +4575,16 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     Some((decision, counter))
                                 }
                                 crate::nat::DnatLookup::Poisoned => {
+                                    // #16483: mirror the #15534 flowless
+                                    // contract — the poisoned rule's hit
+                                    // counter is counted here because no
+                                    // session is ever installed for this
+                                    // dropped packet (the healthy
+                                    // `pre_routing_dnat_counter` is only
+                                    // charged at a committed install).
+                                    if let Some(c) = &counter {
+                                        c.add(meta.pkt_len as u64);
+                                    }
                                     dnat_poisoned = true;
                                     None
                                 }
@@ -13500,6 +13510,10 @@ mod miss_local_policer_15949_tests;
 #[cfg(test)]
 #[path = "pptp_domain_16055_tests.rs"]
 mod pptp_domain_16055_tests;
+
+#[cfg(test)]
+#[path = "poisoned_dnat_counter_16483_tests.rs"]
+mod poisoned_dnat_counter_16483_tests;
 
 #[cfg(test)]
 mod pptp_control_teardown_tests_11053 {
