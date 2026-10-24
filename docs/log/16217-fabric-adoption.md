@@ -1754,3 +1754,39 @@ both views each run; evidence `/var/worktrees/FZFixWire34/run{9,10}/`):
 head.** Restore after each run: clean master `2c8575b70e`,
 helper `2f2f5cbf…b04` both, RG0/1/2 node0, target OK, P4
 13.7/14.1 Gbit/s, VERIFY_ZERO 0.
+
+### FINAL merge head (7f89003126) — aged results, reported in full
+
+Prose correction (`8425ea3e28`): snapshot candidates are four
+SLOTS naming THREE distinct keys (candidate[2] dedups:
+companion == reverse(matched)); capacity 4 is headroom; cap-2
+claim removed. Rebased onto master `3e68377349` (changelog-only;
+session/mod.rs preserved both #16435 L3-bucket and the probe
+snapshot, forwarding split preserved). `cargo test 16217` 63,
+`policy_revalidation` 117.
+
+Live aged (`make deb 99.16217.51` deb `8f719b44…ffa5`, helper
+`c88af255…eff7` hash-proved both nodes; RG1 proven each run):
+
+| Run | Per-stream zeros | snat_revoked fw0 | Verdict |
+|---|---|---|---|
+| run11 | stream 40384: 53 (FO+1s, permanent) | 0 -> 1 at FO+1 | FAIL |
+| run12 | 0 | 0 | PASS |
+| run13 | 0 | 0 -> 3 at FO+1 | PASS (revocations hit non-data tuples) |
+| run14 | 0 | 0 | PASS |
+
+run11 is a REAL recurrence of the FZDiag37-class signature on
+this head (one stream permanently dead, exactly one
+StaleSourceNat revocation at FO+1, tuple 40384 gone post-run) —
+it must not be averaged away. The revocation counter also fires
+in the clean run13 (3 at FO+1, non-data tuples), so revocation
+per se is not the death sentence; run11's revoked tuple was a
+data tuple whose post-FO path did not recover. 2 of 4 strict
+cells clean on the merge head, consecutive run12+run14 NOT
+adjacent (run13 between, itself clean on zeros). This head is
+therefore NOT twice-clean-adjacent; the prior heads
+(26532d3728, 3b7f66ebe4) were twice-clean. The residual is
+intermittent at roughly the rate the whole campaign has chased;
+no new mechanism is named by these cells beyond the FO+1s
+revocation correlation in run11. Reported for the merge
+decision; not claimed as twice-proven.
