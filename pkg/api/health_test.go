@@ -369,6 +369,48 @@ func TestHealthHandler_ReportsJournalPermsDegraded(t *testing.T) {
 	}
 }
 
+// TestHealthHandler_ReportsJournalLegacyScrubDegraded pins #16490: while
+// the configstore reports a degraded legacy-payload scrub, /health
+// surfaces the journal_legacy_scrub_degraded field as true — but stays
+// 200/ok, because appends continue and the journal is intact (a
+// confidentiality exposure on history, not a forwarding or durability
+// outage). It also tracks the wired fn: a successful retry that clears
+// the scrub must read false, not latch forever.
+func TestHealthHandler_ReportsJournalLegacyScrubDegraded(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		degraded bool
+	}{
+		{"degraded", true},
+		{"healthy after successful retry", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Server{
+				journalLegacyScrubDegradedFn: func() bool { return tc.degraded },
+			}
+
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", "/health", nil)
+			s.healthHandler(rr, req)
+
+			if rr.Code != 200 {
+				t.Errorf("status = %d, want 200 (journal-legacy-scrub degradation is non-fatal)", rr.Code)
+			}
+			var resp Response
+			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			data, ok := resp.Data.(map[string]any)
+			if !ok {
+				t.Fatalf("data = %T, want map", resp.Data)
+			}
+			if degraded, _ := data["journal_legacy_scrub_degraded"].(bool); degraded != tc.degraded {
+				t.Errorf("journal_legacy_scrub_degraded = %v, want %v", degraded, tc.degraded)
+			}
+		})
+	}
+}
+
 // TestHealthHandler_ReportsBootstrapImportFailed pins #4184 (H-11): a failed
 // day-0 / bootstrap config import is surfaced on /health via
 // bootstrap_import_status + bootstrap_import_failed + the error detail — so

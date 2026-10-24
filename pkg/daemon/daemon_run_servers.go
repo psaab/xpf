@@ -968,6 +968,14 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 		// this flags a confidentiality exposure on history, so it does
 		// not 503.
 		JournalPermsDegradedFn: d.store.JournalPermsDegraded,
+		// #16490: surface journal legacy-payload scrub state so
+		// /health reports it (non-fatal) and
+		// xpf_config_journal_legacy_scrub_degraded reads 1 while a
+		// pre-#1896 segment could not be rewritten or purged and may
+		// still carry cleartext api-auth credentials. Appends
+		// continue; this flags a confidentiality exposure on history,
+		// so it does not 503.
+		JournalLegacyScrubDegradedFn: d.store.JournalLegacyScrubDegraded,
 		// #2050: surface dynamic-address feed staleness so the
 		// xpf_feed_seconds_since_last_success / xpf_feed_stale gauges
 		// read live status. A frozen enforced address set (retain-forever

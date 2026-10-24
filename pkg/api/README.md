@@ -55,6 +55,13 @@ liveness/readiness. Prometheus metrics endpoint. SSE event streams.
   tightened to owner-only 0600); likewise non-fatal
   (`journal_perms_degraded` field plus the
   `xpf_config_journal_perms_degraded` gauge), since appends continue.
+  `JournalLegacyScrubDegradedFn` (#16490, same injection pattern) reports
+  whether the legacy-payload scrub is degraded (a pre-#1896 segment
+  could not be rewritten or purged and may still carry cleartext
+  api-auth credentials); likewise non-fatal
+  (`journal_legacy_scrub_degraded` field plus the
+  `xpf_config_journal_legacy_scrub_degraded` gauge), since appends
+  continue.
   `ConfigApplyDebtFn` (#9811, same injection pattern) reports whether the
   dataplane is known to be enforcing something OTHER than the active
   configuration, and DOES downgrade `/health` to 503. The distinction from

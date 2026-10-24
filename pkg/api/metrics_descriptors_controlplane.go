@@ -491,6 +491,16 @@ func (c *xpfCollector) initControlPlaneDescriptors() {
 			"aid, not a forwarding outage.",
 		nil, nil,
 	)
+	c.journalLegacyScrubDegraded = prometheus.NewDesc(
+		"xpf_config_journal_legacy_scrub_degraded",
+		"1 while journal legacy-payload scrub is degraded: a "+
+			"pre-#1896 segment could not be rewritten or purged and "+
+			"may still carry cleartext api-auth credentials (#16490); "+
+			"0 when the scrub is clean. Appends continue — a "+
+			"confidentiality exposure on history, not a forwarding "+
+			"outage.",
+		nil, nil,
+	)
 	c.userspacePolicyContentRejected = prometheus.NewDesc(
 		"xpf_userspace_policy_content_rejected",
 		"1 while the most recently built userspace snapshot carries "+

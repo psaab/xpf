@@ -133,6 +133,15 @@ func (s *Server) healthHandler(w http.ResponseWriter, _ *http.Request) {
 	if s.journalPermsDegradedFn != nil {
 		payload["journal_perms_degraded"] = s.journalPermsDegradedFn()
 	}
+	// #16490: journal legacy-payload scrub degradation is likewise a
+	// non-fatal field. Appends continue and the journal is intact; only
+	// the removal of cleartext api-auth credentials from a pre-#1896
+	// segment failed, so like journal_perms_degraded this does NOT force
+	// a 503. The xpf_config_journal_legacy_scrub_degraded gauge is the
+	// alerting hook.
+	if s.journalLegacyScrubDegradedFn != nil {
+		payload["journal_legacy_scrub_degraded"] = s.journalLegacyScrubDegradedFn()
+	}
 	// #9811: the node is enforcing a configuration it does not report. A
 	// commit-confirmed auto-rollback promotes the store FIRST and then applies;
 	// when that apply fails, every other surface in this payload — and `show
