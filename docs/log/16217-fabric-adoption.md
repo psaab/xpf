@@ -1686,3 +1686,36 @@ were fully clean twice. Whether the dip is master-delta behavior
 final head is therefore NOT claimed as twice-proven. Restore
 after each run verified clean (helper 2f2f5cbf…b04 both, RG0/1/2
 node0, P4 13.7/17.4 Gbit/s, VERIFY_ZERO 0).
+
+### Final5 head (ea0365ded2) — strict TWICE clean
+
+Final5 folds: bounded probe-rollback snapshot (fixed 4-slot stack
+array, no Vec/format/sort on the probe path;
+`dropped_probe_snapshot_is_bounded_and_restores_16217`),
+production-chain packet-outcome test
+(`declined_reverse_hit_packet_outcomes_16217`: SNAT decline =
+packet served + session kept; canonical-less sessionless
+revocation = packet dropped + row kept; guard comments corrected
+to that semantics), write-only `connected_owner_tables_*`
+deleted, judged-arm comment scope-corrected.
+
+Live aged table (head ea0365ded2, `make deb
+DEB_VERSION=99.16217.49` deb sha256
+`f150b961db73e2a33d602168510cd002f0575511f9c9e00879ec321a5ed0df83`,
+helper sha256
+`58fb37d41cea74f7930557a700f96c144c3d72443c00e2aee5d018d117cc7f77`
+hash-proved both nodes before traffic; RG1 node0->node1 proven
+both views each run; evidence `/var/worktrees/FZFixWire34/run{7,8}/`):
+
+| Run | Per-stream zeros | SUM zeros | snat_revoked | Verdict |
+|---|---|---|---|---|
+| run7 | 0 | 0 | 0 both, all samples | PASS |
+| run8 | 0 | 0 | 0 both, all samples | PASS |
+
+**Acceptance (ZERO per-stream zeros) met TWICE on the FINAL
+head.** The run5/run6 transient dip on 69cf1a2e05 did not recur
+(GLM's empty-diff point stands: the folds were identical; the dip
+was intermittency/master-delta, and two further strict cells on
+the final head are clean). Restore after each run: clean master
+`2c8575b70e`, helper `2f2f5cbf…b04` both, RG0/1/2 node0, target
+OK, P4 14.5/13.9 Gbit/s, VERIFY_ZERO 0.
