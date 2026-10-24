@@ -103,18 +103,24 @@ DMZ_ADDR="${DMZ_ADDR:-172.16.50.$((_xpf_iperf_host + 1))}"
 DMZ_TARGET_V6="${DMZ_TARGET_V6:-2001:559:8585:50::$((_xpf_iperf_host + 1))}"
 DMZ_TARGET_PF="${DMZ_TARGET_PF:-${SRIOV_PARENT:-mlx0}}"
 DMZ_TARGET_VLAN="${DMZ_TARGET_VLAN:-50}"
+# Instance names (#16328): the VLAN-80 target is provisioned per cluster
+# (loss xpf-mouse-target, tcp xpf-tcp-target, udp xpf-udp-target — the
+# tcp/udp env files declare MOUSE_TARGET_NAME); the VLAN-50 DMZ prober
+# keeps one name on every remote (xpf-zone-matrix-dmz, created by
+# wire-zone-matrix via mouse-target-setup.sh). Refs are remote-qualified
+# through _xpf_cluster_ref; explicit caller overrides win.
+DMZ_TARGET_NAME="${DMZ_TARGET_NAME:-xpf-zone-matrix-dmz}"
+DMZ_TARGET_REF="${DMZ_TARGET_REF:-$(_xpf_cluster_ref "$DMZ_TARGET_NAME")}"
 MOUSE_TARGET_NAME="${MOUSE_TARGET_NAME:-xpf-mouse-target}"
 MOUSE_TARGET_REF="${MOUSE_TARGET_REF:-$(_xpf_cluster_ref "$MOUSE_TARGET_NAME")}"
-MOUSE_TARGET_V4="${MOUSE_TARGET_V4:-${IPERF_TARGET4%.*}.$((_xpf_iperf_host + 1))}"
-MOUSE_TARGET_V6="${MOUSE_TARGET_V6:-2001:559:8585:80::$((_xpf_iperf_host + 1))}"
-MOUSE_TARGET_PF="${MOUSE_TARGET_PF:-${SRIOV_PARENT:-mlx0}}"
 unset _xpf_iperf_host
 
-export PROJECT_ROOT BPFRX_CLUSTER_ENV CLUSTER_CONF
+export PROJECT_ROOT BPFRX_CLUSTER_ENV CLUSTER_CONF INCUS_REMOTE
 export FW0 FW1 CLUSTER_LAN_HOST
 export FW0_NAME FW1_NAME CLUSTER_LAN_HOST_NAME
 export LAN_HOST_IP LAN_VIP4 LAN_VIP6 WAN_GW4 WAN_VIP4
 export IPERF_TARGET4 IPERF_TARGET6
 export WAN_PREFIX4 DMZ_PREFIX4 LAN_PREFIX4 DMZ_ADDR DMZ_TARGET_V6
-export DMZ_TARGET_PF DMZ_TARGET_VLAN MOUSE_TARGET_NAME MOUSE_TARGET_REF
+export DMZ_TARGET_PF DMZ_TARGET_VLAN DMZ_TARGET_NAME DMZ_TARGET_REF
+export MOUSE_TARGET_NAME MOUSE_TARGET_REF
 export MOUSE_TARGET_V4 MOUSE_TARGET_V6 MOUSE_TARGET_PF DMZ_GW4 WAN_GW80_4

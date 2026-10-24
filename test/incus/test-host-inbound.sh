@@ -15,8 +15,8 @@
 # Env:
 #   HI_PROBE_TIMEOUT=3          seconds a TCP cell waits before scoring TIMEOUT
 #   HI_SETTLE=8                 seconds to let VRRP settle after a manual failover
-#   CLUSTER_WAN_VLAN50_HOST=... WAN-side prober (default xpf-zone-matrix-dmz)
-#   CLUSTER_WAN_VLAN80_HOST=... WAN-side prober (default xpf-mouse-target)
+#   CLUSTER_WAN_VLAN50_HOST=... WAN-side prober (default $DMZ_TARGET_REF)
+#   CLUSTER_WAN_VLAN80_HOST=... WAN-side prober (default $MOUSE_TARGET_REF)
 
 set -euo pipefail
 
@@ -48,7 +48,7 @@ xpf_enter_destructive_cluster_cell "test-host-inbound $*" "$0" "$@"
 #
 #   VLAN            — tagged sub-unit addresses (reth0.50 / reth0.80) are
 #                     tested from their corresponding WAN-side endpoints
-#                     (xpf-zone-matrix-dmz / xpf-mouse-target), so packets
+#                     ($DMZ_TARGET_NAME / $MOUSE_TARGET_NAME), so packets
 #                     actually enter on the WAN zone. LAN addresses are
 #                     tested from CLUSTER_LAN_HOST and must admit ssh; WAN
 #                     addresses must deny it. Telnet is denied everywhere,
@@ -89,8 +89,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/cluster-env.sh"
 # shellcheck source=test/incus/host-inbound-lib.sh
 source "${SCRIPT_DIR}/host-inbound-lib.sh"
-CLUSTER_WAN_VLAN50_HOST="$(_xpf_cluster_ref "${CLUSTER_WAN_VLAN50_HOST:-xpf-zone-matrix-dmz}")"
-CLUSTER_WAN_VLAN80_HOST="$(_xpf_cluster_ref "${CLUSTER_WAN_VLAN80_HOST:-xpf-mouse-target}")"
+CLUSTER_WAN_VLAN50_HOST="$(_xpf_cluster_ref "${CLUSTER_WAN_VLAN50_HOST:-${DMZ_TARGET_NAME}}")"
+CLUSTER_WAN_VLAN80_HOST="$(_xpf_cluster_ref "${CLUSTER_WAN_VLAN80_HOST:-${MOUSE_TARGET_NAME}}")"
 
 WITH_FAILOVER=0
 for arg in "$@"; do
