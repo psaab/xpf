@@ -1,18 +1,32 @@
-# xpf (#15089, A57-01) — refresh the A/B ESP slot loaders whenever
-# Ubuntu's signed bootloader files change on disk.
+# xpf (#15089, A57-01; #16452, R3-A57-02) — refresh the A/B ESP slot
+# loaders whenever Ubuntu's signed bootloader files change on disk.
 #
 # The bake copies shim/grub/mm from /boot/efi/EFI/ubuntu into
 # /boot/efi/EFI/xpf-A and /boot/efi/EFI/xpf-B exactly once, and BootOrder
 # boots the xpf slots — so a shim-signed / grub-efi-amd64-signed update
-# (which installs only to EFI/ubuntu) would otherwise leave the booted
-# Secure-Boot chain on the bake-time loader forever. These file
-# triggers make dpkg invoke `xpf.postinst triggered` after any package
-# unpacks a changed loader file; the postinst runs
-# `xpf-uefi-slots --sync-only`, which atomically re-copies the loaders
-# into both slots. interest-noawait: the refresh is not crucial enough
+# would otherwise leave the booted Secure-Boot chain on the bake-time
+# loader until the next boot's sync.
+#
+# Trigger on what dpkg actually unpacks. The signed providers ship only
+# /usr/lib payloads — shim-signed (via shim-unsigned /
+# shim-helpers-amd64-signed) unpacks /usr/lib/shim/{shim,mm,fb}x64.efi{,.signed}
+# and grub-efi-amd64-signed unpacks
+# /usr/lib/grub/x86_64-efi-signed/*.efi.signed — and their postinsts run
+# grub-install, which copies the loaders into /boot/efi/EFI/ubuntu
+# outside dpkg's file tracking. The previous interests on
+# /boot/efi/EFI/ubuntu/{shim,grub,mm}x64.efi therefore never fired:
+# no package owns those ESP paths (`dpkg -S` finds no match), so
+# `xpf.postinst triggered` never ran on a bootloader update.
+#
+# Directory interests cover every file the providers unpack under
+# those trees (present and future loader names, .signed and unsigned).
+# dpkg processes file triggers after the triggering package is
+# configured, i.e. after its postinst has already re-run grub-install
+# and refreshed EFI/ubuntu, so `xpf.postinst triggered` ->
+# `xpf-uefi-slots --sync-only` copies the NEW loaders into both slots
+# with no reboot. interest-noawait: the refresh is not crucial enough
 # to hold the triggering package in triggers-awaited, and the boot-time
 # sync in xpf-uefi-slots.service is the backstop if a trigger run is
 # ever missed.
-interest-noawait /boot/efi/EFI/ubuntu/shimx64.efi
-interest-noawait /boot/efi/EFI/ubuntu/grubx64.efi
-interest-noawait /boot/efi/EFI/ubuntu/mmx64.efi
+interest-noawait /usr/lib/shim
+interest-noawait /usr/lib/grub/x86_64-efi-signed

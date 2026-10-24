@@ -11,15 +11,25 @@ Fix shape asserted here (RED on master, GREEN after):
   - `xpf-uefi-slots` re-syncs EFI/ubuntu -> both slots atomically on every
     boot (before NVRAM registration), with env-overridable roots so the
     sync is exercisable hermetically by the real /bin/sh script.
-  - `debian/xpf.triggers` registers a dpkg file trigger on the
-    EFI/ubuntu loader files so a bootloader update invokes
-    `postinst triggered` -> the same refresh without a reboot.
+  - `debian/xpf.triggers` registers dpkg file triggers on the loader
+    payloads dpkg actually unpacks (/usr/lib/shim,
+    /usr/lib/grub/x86_64-efi-signed — #16452) so a bootloader update
+    invokes `postinst triggered` -> the same refresh without a reboot.
+    The ESP paths under /boot/efi/EFI/ubuntu are written by grub-install
+    outside dpkg and can never fire a file trigger.
   - `debian/xpf.postinst` handles `triggered` (runs the helper when it is
     installed, exits 0 without it) and keeps `configure` succeeding.
   - `scripts/image/validate.py` hash-compares each slot loader against
     EFI/ubuntu (`HASH` probe lines + `_ab_slot_loader_hash_verdict`), so a
     stale or divergent slot fails the Tier-1 gate instead of passing on
     presence alone.
+  - A real-dpkg cell (#16452) builds probe .debs carrying the REAL
+    debian/xpf.triggers + the REAL postinst `triggered` arm and a fake
+    shim/grub provider, installs/upgrades them with the system dpkg in
+    a chrootless sandbox, and asserts "Processing triggers for xpf…"
+    plus a byte-equal slot copy with no reboot. On the pre-#16452
+    ESP-path interests the provider unpack never fires the trigger and
+    the cell is RED.
 
 Controls: matching hashes pass, an absent EFI/ubuntu source does not
 fail the hash verdict (the presence verdict owns that diagnosis), the
@@ -262,19 +272,57 @@ class BootSyncTests(unittest.TestCase):
             self.assertTrue((self.esp / "EFI" / slot / "xpf.selector").is_file())
 
 
+def _dpkg_sandbox_runnable():
+    """True when a chrootless dpkg install can run on this host.
+
+    The real-dpkg cell needs dpkg + dpkg-deb and the
+    --force-not-root / --force-script-chrootless path (dpkg >= 1.20).
+    Probed once; the cell skips (never passes vacuously) without them.
+    """
+    if not (shutil.which("dpkg") and shutil.which("dpkg-deb")):
+        return False
+    try:
+        out = subprocess.run(["dpkg", "--force-help"], capture_output=True,
+                             text=True, check=False).stdout
+    except OSError:
+        return False
+    return "not-root" in out and "script-chrootless" in out
+
+
+_HAVE_REAL_DPKG = _dpkg_sandbox_runnable()
+
+
 class DpkgTriggerWiringTests(unittest.TestCase):
-    def test_triggers_file_interests_the_efi_ubuntu_loaders(self):
+    def test_triggers_file_interests_the_unpacked_loader_payloads(self):
+        # #16452 (R3-A57-02): the signed providers unpack only /usr/lib
+        # payloads; the ESP copies are written by grub-install from
+        # their postinsts, outside dpkg. Interests on the ESP paths can
+        # never fire. Assert the interests cover what dpkg unpacks and
+        # carry no dead ESP interest. The real-dpkg cell below proves
+        # the behaviour; this cell pins the declared shape.
         self.assertTrue(TRIGGERS.is_file(),
                         "debian/xpf.triggers missing — no dpkg trigger "
                         "refreshes the A/B slots on a bootloader update")
-        text = TRIGGERS.read_text()
-        for path in ("/boot/efi/EFI/ubuntu/shimx64.efi",
-                     "/boot/efi/EFI/ubuntu/grubx64.efi"):
-            self.assertIn(f"interest-noawait {path}", text,
-                          f"no file trigger on {path}: a shim/grub update "
-                          "would never invoke the slot refresh")
-        # mm is trigger-relevant too when present.
-        self.assertIn("interest-noawait /boot/efi/EFI/ubuntu/mmx64.efi", text)
+        interests = []
+        for line in TRIGGERS.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            self.assertGreaterEqual(len(parts), 2, line)
+            interests.append((parts[0], parts[1]))
+        self.assertEqual(
+            sorted(interests),
+            sorted([("interest-noawait", "/usr/lib/shim"),
+                    ("interest-noawait",
+                     "/usr/lib/grub/x86_64-efi-signed")]),
+            "trigger interests must be exactly the /usr/lib payload "
+            "trees the signed shim/grub packages unpack (#16452)")
+        for _kind, path in interests:
+            self.assertFalse(
+                path.startswith("/boot/efi"),
+                f"dead ESP interest {path}: no package unpacks there, "
+                "grub-install writes it outside dpkg (#16452)")
 
     def test_postinst_triggered_runs_refresh_and_exits_zero(self):
         env = dict(os.environ)
@@ -313,6 +361,214 @@ class DpkgTriggerWiringTests(unittest.TestCase):
             ["sh", str(POSTINST), "triggered"],
             env=env, capture_output=True, text=True, check=False)
         self.assertEqual(res.returncode, 0, res.stderr)
+
+
+@unittest.skipUnless(_HAVE_REAL_DPKG,
+                     "real dpkg sandbox unavailable (need dpkg + dpkg-deb "
+                     "with --force-not-root/--force-script-chrootless)")
+class RealDpkgTriggerTests(unittest.TestCase):
+    """#16452: drive the REAL dpkg trigger machinery end to end.
+
+    Builds probe packages in a temp dir:
+      - `xpf` carrying the REAL debian/xpf.triggers and a postinst whose
+        `triggered` arm is extracted verbatim from the REAL
+        debian/xpf.postinst (helper path rewritten to a sandbox copy of
+        the REAL xpf-uefi-slots, ESP via XPF_UEFI_SLOTS_ESP);
+      - `shimprobe` v1/v2 unpacking /usr/lib/shim/shimx64.efi.signed,
+        whose postinst mimics the real providers: on configure it
+        copies the unpacked payload into EFI/ubuntu (what grub-install
+        does outside dpkg);
+      - `grubprobe` v1/v2 doing the same for
+        /usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed -> grubx64.efi.
+    Installing the provider v1, then upgrading to v2 with the system
+    dpkg (chrootless sandbox: private --root/--admindir, no host dpkg
+    state touched), must print "Processing triggers for xpf", run
+    `postinst triggered`, and leave both slot copies byte-equal to the
+    new loader — the #16452 VM WITNESS, with no reboot. On the
+    pre-#16452 ESP-path interests the provider unpack touches no
+    interested path, no trigger fires, and this cell is RED.
+    """
+
+    def _build_deb(self, build_root, name, version, files, postinst):
+        pkg = build_root / f"{name}-{version}"
+        (pkg / "DEBIAN").mkdir(parents=True)
+        (pkg / "DEBIAN" / "control").write_text(
+            f"Package: {name}\nVersion: {version}\n"
+            "Architecture: amd64\nMaintainer: xpf test <test@example>\n"
+            f"Description: {name} probe for test_slot_refresh_15089\n")
+        if postinst is not None:
+            p = pkg / "DEBIAN" / "postinst"
+            p.write_text(postinst)
+            p.chmod(0o755)
+        for rel, data in files.items():
+            dest = pkg / rel.lstrip("/")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+        deb = build_root / f"{name}_{version}_amd64.deb"
+        res = subprocess.run(["dpkg-deb", "--build", str(pkg), str(deb)],
+                             capture_output=True, text=True, check=False)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return deb
+
+    def _triggered_postinst(self, helper):
+        """Extract the real `triggered)` arm, wrapped in a minimal case.
+
+        The arm text is taken verbatim from debian/xpf.postinst (only
+        the absolute helper path is rewritten to the sandbox copy, the
+        same sed technique as test/debian/postinst-test.sh), so a
+        broken or removed helper invocation in the real arm reds here.
+        """
+        text = POSTINST.read_text()
+        self.assertIn("triggered)", text)
+        arm = text.split("triggered)", 1)[1].split(";;", 1)[0]
+        self.assertIn("/usr/local/sbin/xpf-uefi-slots", arm)
+        arm = arm.replace("/usr/local/sbin/xpf-uefi-slots", str(helper))
+        return ("#!/bin/sh\nset -e\ncase \"$1\" in\n"
+                f"  triggered){arm};;\n"
+                "  configure) ;;\n"
+                "  abort-upgrade|abort-remove|abort-deconfigure) ;;\n"
+                "  *) echo \"postinst called with unknown argument "
+                "\\`$1'\" >&2; exit 1 ;;\n"
+                "esac\nexit 0\n")
+
+    def _provider_postinst(self, payload, esp_loader):
+        # Mimic shim-signed/grub-efi-amd64-signed: configure re-copies
+        # the /usr/lib payload into EFI/ubuntu (grub-install's job).
+        # $DPKG_ROOT is set by dpkg for maintainer scripts; in the
+        # chrootless sandbox the payload lands under $DPKG_ROOT while
+        # the ESP is the test's own tree (env survives chrootless runs).
+        return ("#!/bin/sh\nset -e\n"
+                "case \"$1\" in\n"
+                "  configure)\n"
+                f"    cp \"$DPKG_ROOT{payload}\" "
+                f"\"$XPF_UEFI_SLOTS_ESP/EFI/ubuntu/{esp_loader}\"\n"
+                "    ;;\n"
+                "esac\nexit 0\n")
+
+    def test_real_dpkg_provider_upgrade_fires_trigger_and_refreshes(self):
+        tmp = Path(tempfile.mkdtemp(prefix="xpf-real-dpkg-trigger."))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        root = tmp / "root"
+        (root / "var" / "lib" / "dpkg").mkdir(parents=True)
+        esp = tmp / "esp"
+        for slot in ("xpf-A", "xpf-B"):
+            d = esp / "EFI" / slot
+            d.mkdir(parents=True)
+            (d / "shimx64.efi").write_bytes(b"shim-v1")
+            (d / "grubx64.efi").write_bytes(b"grub-v1")
+            (d / "xpf.selector").write_text(
+                'set xpf_slot_kernel="vmlinuz-1"\n')
+        (esp / "EFI" / "ubuntu").mkdir(parents=True)
+        (esp / "EFI" / "ubuntu" / "shimx64.efi").write_bytes(b"shim-v1")
+        (esp / "EFI" / "ubuntu" / "grubx64.efi").write_bytes(b"grub-v1")
+
+        # Sandbox copy of the REAL helper (ESP via the documented env
+        # override the hermetic BootSyncTests already use).
+        helper = root / "usr" / "local" / "sbin" / "xpf-uefi-slots"
+        helper.parent.mkdir(parents=True)
+        helper.write_bytes(HELPER.read_bytes())
+        helper.chmod(0o755)
+
+        build = tmp / "build"
+        build.mkdir()
+        xpf_pkg = build / "xpf-1.0"
+        xpf_deb = self._build_deb(
+            build, "xpf", "1.0", {},
+            self._triggered_postinst(helper))
+        # The REAL triggers file ships in the probe .deb exactly as
+        # dh_installdeb would install debian/xpf.triggers.
+        (xpf_pkg / "DEBIAN" / "triggers").write_bytes(
+            TRIGGERS.read_bytes())
+        res = subprocess.run(
+            ["dpkg-deb", "--build", str(xpf_pkg), str(xpf_deb)],
+            capture_output=True, text=True, check=False)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+        shim_v1 = self._build_deb(
+            build, "shimprobe", "1.0",
+            {"/usr/lib/shim/shimx64.efi.signed": b"shim-v1"},
+            self._provider_postinst("/usr/lib/shim/shimx64.efi.signed",
+                                    "shimx64.efi"))
+        shim_v2 = self._build_deb(
+            build, "shimprobe", "2.0",
+            {"/usr/lib/shim/shimx64.efi.signed": b"shim-v2"},
+            self._provider_postinst("/usr/lib/shim/shimx64.efi.signed",
+                                    "shimx64.efi"))
+        grub_v1 = self._build_deb(
+            build, "grubprobe", "1.0",
+            {"/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed":
+             b"grub-v1"},
+            self._provider_postinst(
+                "/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed",
+                "grubx64.efi"))
+        grub_v2 = self._build_deb(
+            build, "grubprobe", "2.0",
+            {"/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed":
+             b"grub-v2"},
+            self._provider_postinst(
+                "/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed",
+                "grubx64.efi"))
+
+        env = dict(os.environ)
+        env["XPF_UEFI_SLOTS_ESP"] = str(esp)
+        # dpkg refuses to run without ldconfig + start-stop-daemon in
+        # PATH even chrootless, and it disregards the inherited PATH's
+        # non-standard entries — prepend the standard sbin dirs. A host
+        # dpkg guarantees both binaries exist there.
+        env["PATH"] = ("/usr/local/sbin:/usr/local/bin:/usr/sbin:"
+                       "/usr/bin:/sbin:/bin:" + env.get("PATH", ""))
+        admindir = root / "var" / "lib" / "dpkg"
+
+        def dpkg_install(*debs):
+            cmd = ["dpkg", f"--admindir={admindir}", f"--root={root}",
+                   "--force-depends", "--force-not-root",
+                   "--force-script-chrootless", "--log=/dev/null",
+                   "--install"] + [str(d) for d in debs]
+            return subprocess.run(cmd, env=env, capture_output=True,
+                                  text=True, check=False)
+
+        res = dpkg_install(xpf_deb)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        res = dpkg_install(shim_v1, grub_v1)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        # Baseline: slots still on v1 (the v1 installs start in sync).
+        for slot in ("xpf-A", "xpf-B"):
+            self.assertEqual(
+                (esp / "EFI" / slot / "shimx64.efi").read_bytes(),
+                b"shim-v1")
+
+        # The witness upgrade: provider v2 unpack + configure must fire
+        # the xpf file trigger and refresh both slots with no reboot.
+        res = dpkg_install(shim_v2, grub_v2)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("Processing triggers for xpf", res.stdout,
+                      "dpkg never processed the xpf trigger on the "
+                      "provider upgrade — the slot refresh did not run "
+                      "(#16452):\n" + res.stdout + res.stderr)
+        # The provider postinsts refreshed EFI/ubuntu (grub-install's
+        # role) ...
+        self.assertEqual(
+            (esp / "EFI" / "ubuntu" / "shimx64.efi").read_bytes(),
+            b"shim-v2")
+        self.assertEqual(
+            (esp / "EFI" / "ubuntu" / "grubx64.efi").read_bytes(),
+            b"grub-v2")
+        # ... and the triggered refresh copied the NEW loaders into
+        # both slots, byte-equal, in the same dpkg transaction.
+        for slot in ("xpf-A", "xpf-B"):
+            self.assertEqual(
+                (esp / "EFI" / slot / "shimx64.efi").read_bytes(),
+                b"shim-v2",
+                f"{slot} still boots the stale shim after the dpkg "
+                "trigger (#16452)")
+            self.assertEqual(
+                (esp / "EFI" / slot / "grubx64.efi").read_bytes(),
+                b"grub-v2",
+                f"{slot} still boots the stale grub after the dpkg "
+                "trigger (#16452)")
+            self.assertEqual(
+                (esp / "EFI" / slot / "xpf.selector").read_text(),
+                'set xpf_slot_kernel="vmlinuz-1"\n')
 
 
 class ValidateWiringTests(unittest.TestCase):

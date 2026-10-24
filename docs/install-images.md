@@ -672,12 +672,17 @@ are refreshed, never left at the bake-time version:
   atomic rename, so a power cut cannot leave a truncated loader at the
   booted path) before it verifies/registers the slots.
 - **Immediately on a bootloader package update**, the dpkg file
-  triggers in `debian/xpf.triggers` (interest on the three
-  `EFI/ubuntu` loader files) invoke `xpf.postinst triggered`, which
-  runs the same refresh via `xpf-uefi-slots --sync-only` — no reboot
-  needed. The trigger is `interest-noawait` and best-effort: it never
-  blocks the bootloader package's configure, and the boot-time sync is
-  the backstop.
+  triggers in `debian/xpf.triggers` invoke `xpf.postinst triggered`,
+  which runs the same refresh via `xpf-uefi-slots --sync-only` — no
+  reboot needed. The interests are on the payload trees dpkg actually
+  unpacks (`/usr/lib/shim`, `/usr/lib/grub/x86_64-efi-signed`), not on
+  the ESP copies: `grub-install` writes `/boot/efi/EFI/ubuntu` from
+  the provider's postinst, outside dpkg, so an ESP-path interest could
+  never fire (#16452). Triggers run after the provider is configured,
+  i.e. after `EFI/ubuntu` already holds the new loaders. The trigger
+  is `interest-noawait` and best-effort: it never blocks the
+  bootloader package's configure, and the boot-time sync is the
+  backstop.
 - **At image-validation time**, `scripts/image/validate.py` hashes
   every slot loader against `EFI/ubuntu` and fails the Tier-1 gate on
   any mismatch, so a stale slot cannot ship green on presence alone.

@@ -1,4 +1,13 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Packaging: point the #15089 dpkg file triggers at the loader
+    payloads dpkg actually unpacks (/usr/lib/shim,
+    /usr/lib/grub/x86_64-efi-signed) instead of the ESP copies under
+    /boot/efi/EFI/ubuntu, which grub-install writes outside dpkg and
+    could never fire a trigger (#16452). A shim/grub update now runs
+    `xpf.postinst triggered` -> `xpf-uefi-slots --sync-only` after the
+    provider is configured, so both A/B slots hold the new loader
+    without a reboot; the real-dpkg regression cell in
+    test_slot_refresh_15089.py proves the trigger fires.
   * Refactoraudit: close the #15255 unregistered-test census blind spot
     (#16442). The census keyed test-module-ness on basename alone, so
     the 13 `tests.rs` files and every inline `#[cfg(test)] mod` were
