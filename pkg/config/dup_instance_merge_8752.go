@@ -65,6 +65,17 @@ import "strings"
 // Folds whose merged semantics ARE the union of the statements — a permit
 // pair differing in at most one dimension, a deny pair with identical
 // excluded sets, a pair sharing one scheduler — stay unpoisoned (#8752).
+//
+// #16418 (R3-F03-03): THE ZONE SCOPE OF A GLOBAL POLICY IS THE SAME KIND OF
+// DIMENSION. `match from-zone`/`to-zone` (PolicyMatch.FromZones/ToZones) are
+// match predicates where empty or `any` means all zones, so two PERMITs
+// differing in from-zone AND in source fold into from-zone-union ×
+// source-union and permit (zone, source) pairs no statement permitted; and a
+// scoped DENY folded with an unscoped DENY keeps only the scoped zone set
+// (the union fold drops the empty/universal scope), so the surviving deny
+// no longer covers traffic the unscoped statement denied. Both now poison
+// exactly like the #14968 legs. Zone-pair policies compile no zone scope, so
+// this changes nothing for them.
 
 // WHY MERGE RATHER THAN REPLACE, and it is not a preference. Flat `set` already
 // MERGES — pinned by TestFlatSetMergesWhereHierarchicalDuplicates — so the two
@@ -595,6 +606,18 @@ func statementPermits9571(name string, n *Node, isGlobal bool) bool {
 //     scheduler set differ from a restrictive source's (the deny no longer
 //     covers exactly what that statement denied, or only inside a window
 //     that statement never named).
+//
+// #16418 (R3-F03-03): the zone scope of a GLOBAL policy is two more match
+// dimensions of the same kind. FromZones/ToZones are match predicates
+// (empty or `any` = all zones), so a permit pair differing in from-zone
+// AND in source folds into from-zone-union x source-union and permits
+// (zone, source) pairs no statement permitted; and a restrictive
+// statement whose zone scope is not a subset of the merged scope (which
+// the union fold can only narrow when one statement is unscoped and
+// another is scoped) leaves the surviving deny covering less than that
+// statement denied. Zone-pair policies have no compiled zone scope (their
+// zones come from the stanza), so counting these dimensions is a no-op
+// for them.
 func foldChangesPolicySemantics14968(sources []*Policy, merged *Policy) bool {
 	if len(sources) < 2 || merged == nil {
 		return false
@@ -641,6 +664,10 @@ func foldChangesPolicySemantics14968(sources []*Policy, merged *Policy) bool {
 			!sameStringSet14968(s.Match.DestinationAddresses, merged.Match.DestinationAddresses) {
 			return true
 		}
+		if !zoneScopeSubset16418(s.Match.FromZones, merged.Match.FromZones) ||
+			!zoneScopeSubset16418(s.Match.ToZones, merged.Match.ToZones) {
+			return true
+		}
 		if len(s.schedulerNames) == 0 && len(merged.schedulerNames) > 0 {
 			return true
 		}
@@ -652,12 +679,13 @@ func foldChangesPolicySemantics14968(sources []*Policy, merged *Policy) bool {
 }
 
 // matchDimensionsDiffer14968 counts the match dimensions (source,
-// destination, application) in which neither statement's compiled value
-// set contains the other's. A dimension in which one statement's set is a
-// subset of the other's (including an explicit `any`, which covers every
-// value) cannot contribute a new combination: the merged union there is
-// the wider statement's set, so every merged tuple was already permitted
-// by that wider statement in that dimension.
+// destination, application, from-zone scope, to-zone scope) in which
+// neither statement's compiled value set contains the other's. A dimension
+// in which one statement's set is a subset of the other's (including an
+// explicit `any`, which covers every value) cannot contribute a new
+// combination: the merged union there is the wider statement's set, so
+// every merged tuple was already permitted by that wider statement in
+// that dimension.
 func matchDimensionsDiffer14968(a, b *Policy) int {
 	n := 0
 	if !valueSetSubset14968(a.Match.SourceAddresses, b.Match.SourceAddresses) &&
@@ -672,7 +700,42 @@ func matchDimensionsDiffer14968(a, b *Policy) int {
 		!valueSetSubset14968(b.Match.Applications, a.Match.Applications) {
 		n++
 	}
+	if !zoneScopeSubset16418(a.Match.FromZones, b.Match.FromZones) &&
+		!zoneScopeSubset16418(b.Match.FromZones, a.Match.FromZones) {
+		n++
+	}
+	if !zoneScopeSubset16418(a.Match.ToZones, b.Match.ToZones) &&
+		!zoneScopeSubset16418(b.Match.ToZones, a.Match.ToZones) {
+		n++
+	}
 	return n
+}
+
+// zoneScopeSubset16418 reports whether zone scope a is a subset of zone
+// scope b, treating an empty slice or a set containing `any` as the
+// universal scope (IsWildcardZoneSet). Unlike address/application value
+// sets, an empty zone scope is universal, not empty, so
+// valueSetSubset14968 (where the empty set is a subset of everything)
+// would invert the scoped/unscoped comparison: a scoped set must NOT be
+// reported as containing the unscoped one, or the cross-zone permit
+// widening and the scoped+unscoped deny narrowing both fold unpoisoned.
+func zoneScopeSubset16418(a, b []string) bool {
+	if IsWildcardZoneSet(b) {
+		return true
+	}
+	if IsWildcardZoneSet(a) {
+		return false
+	}
+	bSet := make(map[string]struct{}, len(b))
+	for _, v := range b {
+		bSet[v] = struct{}{}
+	}
+	for _, v := range a {
+		if _, ok := bSet[v]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // valueSetSubset14968 reports whether every value in a is in b, treating
@@ -735,7 +798,8 @@ func markFoldWidenedPolicies9571(cfg *Config, widened []foldWidenedPolicy9571) {
 func foldSemanticWarning14968(w foldWidenedPolicy9571) string {
 	return "duplicate policy name in `" + w.String() + "` — merging the repeated statements " +
 		"would change what the merged policy's action applies to (a cross-product of the " +
-		"statements' match dimensions, an excluded-address set another statement authored, " +
+		"statements' match dimensions — including a global policy's from-zone/to-zone scope — " +
+		"an excluded-address set another statement authored, " +
 		"or a scheduler-name another statement authored), so the policy is refused instead: " +
 		"the dataplane rejects the whole policy snapshot (previous-good retained; fresh-boot " +
 		"default-deny) rather than enforce gating no statement authored. Rename one of the " +
