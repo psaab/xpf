@@ -84,6 +84,8 @@ def summarize(path, args):
         "tail_peak_ratio": 0.0,
         "zero_intervals_total": 0,
         "stream_zero_intervals_total": 0,
+        "stream_zero_intervals_outside_events_total": 0,
+        "zero_streams_outside_events_total": 0,
         "zero_streams_total": 0,
         "zero_intervals_after_peak": 0,
         "stalled_intervals_after_peak": 0,
@@ -144,13 +146,39 @@ def summarize(path, args):
         normalized_intervals = [
             (event.get("data") or {}) for event in payload["data"] if event.get("event") == "interval"
         ]
+    exclude_windows = [
+        (float(event_sec), float(event_sec) + args.event_window_sec)
+        for event_sec in args.event_sec
+    ]
+
+    def fully_excluded(start, end_s):
+        # Only a full-length interval lying wholly inside one event window
+        # is excluded. Partial/straddling intervals stay counted: the
+        # calibration issue requires "count only full intervals" outside
+        # [T, T+3], so an interval that is not fully inside the window is
+        # not fully explained by the transition.
+        if end_s - start < args.min_full_interval_sec - 1e-9:
+            return False
+        return any(start >= lo - 1e-9 and end_s <= hi + 1e-9 for lo, hi in exclude_windows)
+
     stream_zero_total = 0
+    stream_zero_outside_total = 0
     zero_stream_ids = set()
+    zero_stream_ids_outside = set()
     for interval in normalized_intervals:
-        for stream in interval.get("streams", []):
+        streams = interval.get("streams", [])
+        # Interval bounds from the interval sum when present, else the
+        # first/last stream bounds (mirrors interval_bps).
+        _, interval_start, interval_end = interval_bps(interval)
+        excluded = fully_excluded(interval_start, interval_end)
+        for stream in streams:
             if float(stream.get("bits_per_second") or 0.0) <= args.zero_gbps * 1e9:
+                stream_id = str(stream.get("socket") or stream.get("id") or "?")
                 stream_zero_total += 1
-                zero_stream_ids.add(str(stream.get("socket") or stream.get("id") or "?"))
+                zero_stream_ids.add(stream_id)
+                if not excluded:
+                    stream_zero_outside_total += 1
+                    zero_stream_ids_outside.add(stream_id)
     for bps, start, end_s in intervals:
         observed_end = max(observed_end, end_s)
         duration = end_s - start
@@ -163,6 +191,8 @@ def summarize(path, args):
         )
     summary["observed_end_sec"] = observed_end
     summary["stream_zero_intervals_total"] = stream_zero_total
+    summary["stream_zero_intervals_outside_events_total"] = stream_zero_outside_total
+    summary["zero_streams_outside_events_total"] = len(zero_stream_ids_outside)
     summary["zero_streams_total"] = len(zero_stream_ids)
     summary["zero_intervals_total"] = (
         sum(1 for value in full_intervals if value <= args.zero_gbps) + stream_zero_total
@@ -223,6 +253,21 @@ def main():
     parser.add_argument("--min-tail-ratio", type=float, default=0.35)
     parser.add_argument("--zero-gbps", type=float, default=0.05)
     parser.add_argument("--stall-gbps", type=float, default=0.25)
+    parser.add_argument(
+        "--event-sec",
+        type=float,
+        action="append",
+        default=[],
+        help="transition instant (seconds from iperf start); may repeat. "
+        "Full per-stream intervals wholly inside [T, T+--event-window-sec] "
+        "are excluded from stream_zero_intervals_outside_events_total.",
+    )
+    parser.add_argument(
+        "--event-window-sec",
+        type=float,
+        default=3.0,
+        help="width of each transition exclusion window (default 3s; #12618)",
+    )
     args = parser.parse_args()
 
     summary = summarize(Path(args.json_path), args)

@@ -54,7 +54,9 @@ ha_smoke_iperf_verdicts() {
 	fi
 
 	metrics_error=""
-	if ! python3 "$producer" "$local_log" >"$metrics_file" 2>"${work_dir}/producer.err"; then
+	if ! python3 "$producer" "$local_log" \
+		--event-sec "${events[0]}" --event-sec "${events[1]}" \
+		--event-window-sec 3 >"$metrics_file" 2>"${work_dir}/producer.err"; then
 		metrics_error=$(tail -n 1 "${work_dir}/producer.err")
 		[[ -n "$metrics_error" ]] || metrics_error="JSON metrics producer failed"
 	fi
@@ -66,14 +68,14 @@ ha_smoke_iperf_verdicts() {
 			"json-stream avg_gbps from iperf3 metrics; ${full_interval_count} full intervals")
 		printf '%s\n' "$verdict"
 		stream_zero_budget="${HA_SMOKE_MAX_STREAM_ZERO_INTERVALS:-0}"
-		if ha_counter_at_most_verdict "$stream_zero_intervals_total" "$stream_zero_budget" \
-			"whole-run per-stream zero intervals" 2>"$gate_error"; then
-			printf 'PASS iperf3 whole-run per-stream zero intervals (%s, limit %s; %s affected stream(s))\n' \
-				"$stream_zero_intervals_total" "$stream_zero_budget" "$zero_streams_total"
+		if ha_counter_at_most_verdict "$stream_zero_intervals_outside_events_total" "$stream_zero_budget" \
+			"whole-run per-stream zero intervals outside [T, T+3] windows (HA_SMOKE_MAX_STREAM_ZERO_INTERVALS)" 2>"$gate_error"; then
+			printf 'PASS iperf3 whole-run per-stream zero intervals outside transition windows (%s, limit %s via HA_SMOKE_MAX_STREAM_ZERO_INTERVALS; %s affected stream(s); %s total)\n' \
+				"$stream_zero_intervals_outside_events_total" "$stream_zero_budget" "$zero_streams_outside_events_total" "$stream_zero_intervals_total"
 		else
 			reason=$(tail -n 1 "$gate_error")
-			printf 'FAIL iperf3 whole-run per-stream zero intervals (%s, limit %s; %s affected stream(s)): %s\n' \
-				"$stream_zero_intervals_total" "$stream_zero_budget" "$zero_streams_total" "$reason"
+			printf 'FAIL iperf3 whole-run per-stream zero intervals (%s, limit %s via HA_SMOKE_MAX_STREAM_ZERO_INTERVALS; %s affected stream(s); %s total): %s\n' \
+				"$stream_zero_intervals_outside_events_total" "$stream_zero_budget" "$zero_streams_outside_events_total" "$stream_zero_intervals_total" "$reason"
 		fi
 		if [[ "$completed" == true ]]; then
 			printf 'PASS iperf3 completed successfully\n'
