@@ -39,6 +39,19 @@ func (c *ctl) handleShowServices(args []string) error {
 				"(expected `status`)", rest[0])
 		}
 		return c.showCommand("show services application-identification status")
+	case "user-identification":
+		// #16078: only `user-identification status` is valid.
+		rest := args[1:]
+		if len(rest) == 0 {
+			printRemoteTreeHelp("show services user-identification:",
+				"show", "services", "user-identification")
+			return nil
+		}
+		if rest[0] != "status" {
+			return fmt.Errorf("unknown user-identification target: %s "+
+				"(expected `status`)", rest[0])
+		}
+		return c.showCommand("show services user-identification status")
 	case "dynamic-dns":
 		// #2691 P2: Surface A (router/interface-address) DDNS status.
 		if len(args) >= 2 && args[1] == "detail" {

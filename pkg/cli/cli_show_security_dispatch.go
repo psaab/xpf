@@ -783,6 +783,14 @@ func (c *CLI) handleShowSecurity(args []string) error {
 		// Accept optional "status" subcommand
 		return c.showALG()
 
+	case "user-identification":
+		// #16078: `show security user-identification status` shares the
+		// services renderer; only `status` is valid.
+		if len(args) >= 2 && args[1] != "status" {
+			return fmt.Errorf("unknown user-identification target: %s (expected `status`)", args[1])
+		}
+		return c.showUserIdentificationStatus()
+
 	case "dynamic-address":
 		return c.showDynamicAddress()
 

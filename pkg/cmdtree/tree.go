@@ -720,6 +720,9 @@ var OperationalTree = map[string]*Node{
 			"alg": {Desc: "Show ALG status", Children: map[string]*Node{
 				"status": {Desc: "Show ALG status details"},
 			}},
+			"user-identification": {Desc: "Show user-identification status (accepted-only; inert)", Children: map[string]*Node{
+				"status": {Desc: "Show user-identification inert status"},
+			}},
 			"dynamic-address": {Desc: "Show dynamic address feeds"},
 			"flow": {Desc: "Show security flow information", Children: map[string]*Node{
 				// #9505: parseSessionFilterMode loops over every argument, so these are
@@ -856,6 +859,9 @@ var OperationalTree = map[string]*Node{
 			}},
 			"application-identification": {Desc: "Show application-identification (AppID) status", Children: map[string]*Node{
 				"status": {Desc: "Show AppID engine status and supported contract"},
+			}},
+			"user-identification": {Desc: "Show user-identification status (accepted-only; inert)", Children: map[string]*Node{
+				"status": {Desc: "Show user-identification inert status"},
 			}},
 			"dynamic-dns": {Desc: "Show Surface A (router/interface-address) dynamic-DNS status (#2691)", Children: map[string]*Node{
 				"detail": {Desc: "Show per-scope published Surface A DDNS records"},

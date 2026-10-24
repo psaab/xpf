@@ -331,6 +331,12 @@ func (s *Server) showText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 		// `application-identification status` (per Copilot review).
 		s.showApplicationIdentificationStatus(cfg, &buf)
 
+	case "user-identification-status", "security-user-identification-status":
+		// #16078: `show services user-identification status` and
+		// `show security user-identification status` share one renderer;
+		// both name the configured stanzas INERT.
+		s.showUserIdentificationStatus(cfg, &buf)
+
 	case "version":
 		// #1043 Phase 7: case body extracted to server_show_system.go
 		s.showVersion(&buf)

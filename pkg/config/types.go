@@ -647,6 +647,15 @@ type Config struct {
 	// (#15278 D02-02), as "kind\x00name" keys (kind: source/destination/static).
 	// Compile-time only; never serialized.
 	LenientNATUndefinedScopeRuleSets map[string]bool `json:"-"`
+	// userIdentificationStanzas records the user-identification sub-stanzas
+	// (active-directory-access / identity-management /
+	// local-authentication-table / device-information /
+	// authentication-source) configured under either spelling, deduplicated
+	// in first-seen order (#16078). The stanza is accepted-only (#10947):
+	// no engine consumes it, so every recorded name is inert and its stored
+	// credentials are unused. Compile-time only; never serialized — the
+	// authored stanza remains in the raw AST for display/persistence.
+	userIdentificationStanzas []string `json:"-"`
 }
 
 // LenientNATTerminalActionRule identifies one NAT rule admitted by the tolerant

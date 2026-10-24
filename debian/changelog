@@ -30,6 +30,14 @@ xpf (0.0.0) unstable; urgency=medium
     path. Only a super-user (all) class may rewrite login/root/api
     credentials, and the commit advisory for a configure-without-
     super-user class now names that fence.
+  * User-identification: `show services user-identification status` and
+    `show security user-identification status` (CLI, remote CLI, gRPC and
+    REST) now mark every configured user-identification stanza INERT
+    (accepted-only; no runtime effect) via one shared renderer (#16078).
+    The stanzas commit with only a warning while their credentials are
+    stored and no engine consumes them; previously they displayed as
+    ordinary configuration, so an operator could believe identity-based
+    policy was enforced.
   * Login: the in-process console shell now re-resolves its user's
     `system login` class when the stanza changes, instead of keeping
     the assignment resolved once at daemon start (#16071). A console
