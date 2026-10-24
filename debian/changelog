@@ -11,6 +11,17 @@ xpf (0.0.0) unstable; urgency=medium
     evaluation once with a reject sink plus the #11061 count before
     recycling; `Table`/`None` stay uncounted so steered/claimed packets
     still count exactly once.
+  * NAT64: select the previous prefix by rule identity on reload
+    (#16484). The #6765 retained-address reseed, the deterministic
+    probe, and allocator reuse keyed on the first previous prefix
+    with equal /96 bytes, so since #15678 a pool edit on any scoped
+    same-/96 rule-set after the first reseeded from a sibling's
+    allocator (carrying nothing, or suppressed by a deterministic
+    first rule) and the fresh allocator reissued live tuples to
+    other clients of that rule-set. Reload lookups now match on
+    the rule-set name, falling back to prefix bytes plus the
+    normalized zone/routing-instance/source scope for nameless
+    legacy states.
   * Config: declare `family inet6 dhcpv6` in the schema (#16476). The
     bare shorthand was consumed by the compiler (unit.DHCPv6) and the
     daemon started an AFInet6 DHCPv6 client for it, but setSchema

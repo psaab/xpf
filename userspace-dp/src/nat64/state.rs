@@ -49,6 +49,12 @@ fn nat64_pool_index(pool: &[Ipv4Addr]) -> Arc<FxHashMap<Ipv4Addr, usize>> {
 /// NAT64 prefix configuration — one per `security nat nat64` rule.
 #[derive(Debug)]
 pub(crate) struct Nat64Prefix {
+    /// #16484: the snapshot rule-set name. The live reload lookups
+    /// (allocator reuse, deterministic probe, #6765 reseed) key on
+    /// this identity so several scoped rule-sets sharing one /96
+    /// never select a sibling's allocator. Empty only for prefixes
+    /// built outside the snapshot loop (test constructors).
+    pub(crate) name: String,
     /// First 96 bits of the NAT64 prefix (e.g. 64:ff9b::).
     pub(crate) prefix_bytes: [u8; 12],
     /// #15678: optional ingress scoping. Empty = unscoped on that axis.
@@ -165,6 +171,7 @@ impl Nat64Prefix {
         port_allocator: PortAllocator,
     ) -> Self {
         Self {
+            name: String::new(),
             prefix_bytes,
             from_zone: String::new(),
             from_zones: Vec::new(),
@@ -191,6 +198,7 @@ impl Nat64Prefix {
 impl Clone for Nat64Prefix {
     fn clone(&self) -> Self {
         Self {
+            name: self.name.clone(),
             prefix_bytes: self.prefix_bytes,
             from_zone: self.from_zone.clone(),
             from_zones: self.from_zones.clone(),
@@ -483,13 +491,112 @@ pub(crate) fn nat64_prefix_charge_for_range(
 /// `deterministic_v6: None` below); including the derived `DeterministicV6`
 /// (which folds in pool length via `host_count`) makes any geometry change
 /// a reuse miss while a true no-op re-apply still hits.
-/// #15178 helper: was the previous prefix for `prefix_bytes` deterministic?
-/// Used to gate the #6765 reseed: deterministic on either side of a
+/// #15178 helper: was THIS rule's previous prefix deterministic? Used to
+/// gate the #6765 reseed: deterministic on either side of a
 /// geometry/mode change starts fresh (see the build loop).
-pub(super) fn prev_prefix_is_deterministic(previous: Option<&Nat64State>, prefix_bytes: &[u8; 12]) -> bool {
+///
+/// #16484: the previous prefix is selected by rule identity, not by
+/// /96 bytes alone. `scope` is the NEW snapshot's normalized scope
+/// (see `nat64_snapshot_scope`). Several scoped rule-sets may share
+/// one /96 (#15678); taking the FIRST byte-equal sibling selected
+/// the wrong allocator: a deterministic first rule suppressed the
+/// reseed for a round-robin second rule, and a round-robin first
+/// rule let a deterministic second rule reseed.
+pub(super) fn prev_prefix_is_deterministic(
+    previous: Option<&Nat64State>,
+    name: &str,
+    prefix_bytes: &[u8; 12],
+    scope: &Nat64ScopeKey,
+) -> bool {
     previous
-        .and_then(|prev| prev.prefixes.iter().find(|p| &p.prefix_bytes == prefix_bytes))
+        .and_then(|prev| prev.find_previous_prefix(name, prefix_bytes, scope))
         .is_some_and(|p| p.deterministic_v6.is_some())
+}
+
+/// #16484: the normalized ingress scope of a snapshot / prefix: the
+/// zone and routing-instance UNIONS (plural wire fields, singular
+/// folded in), so a pre-#15932/#16049 singular-only spelling and the
+/// plural spelling of the same scope compare equal. Source-address
+/// constraints are part of the identity too: two same-/96 rule-sets
+/// admitted from the same zone/RI but disjoint source prefixes are
+/// distinct rules for ownership purposes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Nat64ScopeKey {
+    from_zones: Vec<String>,
+    from_routing_instances: Vec<String>,
+    source_prefixes: Vec<PrefixV6>,
+    source_constrained: bool,
+}
+
+impl Nat64ScopeKey {
+    fn of_prefix(prefix: &Nat64Prefix) -> Self {
+        // The prefix already stores normalized unions (build loop
+        // folds the singular into the plural), so read them back.
+        Self {
+            from_zones: prefix.from_zones.clone(),
+            from_routing_instances: prefix.from_routing_instances.clone(),
+            source_prefixes: prefix.source_prefixes.clone(),
+            source_constrained: prefix.source_constrained,
+        }
+    }
+}
+
+/// #16484: normalize a snapshot's scope exactly as the build loop
+/// installs it on the prefix: plural unions with the singular folded
+/// in, and source prefixes parsed with the same wildcard
+/// normalisation (#15930). An unparseable source entry is dropped
+/// here exactly as there; the installed prefix carries the same
+/// result, so the keys stay comparable.
+pub(super) fn nat64_snapshot_scope(snap: &NAT64RuleSnapshot) -> Nat64ScopeKey {
+    let from_zones = if snap.from_zones.is_empty() {
+        if snap.from_zone.is_empty() {
+            Vec::new()
+        } else {
+            vec![snap.from_zone.clone()]
+        }
+    } else {
+        snap.from_zones.clone()
+    };
+    let from_routing_instances = if snap.from_routing_instances.is_empty() {
+        if snap.from_routing_instance.is_empty() {
+            Vec::new()
+        } else {
+            vec![snap.from_routing_instance.clone()]
+        }
+    } else {
+        snap.from_routing_instances.clone()
+    };
+    // Mirror the build loop's source normalisation verbatim in
+    // effect: `any` spellings clear the constraint, parseable nets
+    // are kept, unparseable entries are dropped.
+    let mut source_constrained = snap.source_constrained || !snap.source_addresses.is_empty();
+    let mut source_prefixes: Vec<PrefixV6> = Vec::new();
+    for a in &snap.source_addresses {
+        let parsed = if a == "any" || a == "any6" || a == "any-ipv6" {
+            source_constrained = false;
+            None
+        } else if let Ok(net) = a.parse::<ipnet::Ipv6Net>() {
+            Some(PrefixV6::from_net(net))
+        } else if let Ok(addr) = a.parse::<Ipv6Addr>() {
+            Some(PrefixV6::from_net(
+                ipnet::Ipv6Net::new(addr, 128).expect("host net"),
+            ))
+        } else {
+            None
+        };
+        if let Some(p) = parsed {
+            source_prefixes.push(p);
+        }
+    }
+    if !source_constrained {
+        source_prefixes.clear();
+    }
+    Nat64ScopeKey {
+        from_zones,
+        from_routing_instances,
+        source_prefixes,
+        source_constrained,
+    }
 }
 
 pub(super) fn nat64_rule_identity(
@@ -680,8 +787,13 @@ impl Nat64State {
             for snap in snaps {
                 if let Some((pb, pool, det)) = nat64_rule_identity(snap) {
                     let (lo, hi) = nat64_effective_port_range(snap);
-                    if prev.reuse_allocator(&pb, &pool, det, (lo, hi)).is_some() {
-                        used = used.saturating_with(nat64_prefix_charge_for_range(pool.len(), lo, hi));
+                    let scope = nat64_snapshot_scope(snap);
+                    if prev
+                        .reuse_allocator(&snap.name, &pb, &pool, det, (lo, hi), &scope)
+                        .is_some()
+                    {
+                        used =
+                            used.saturating_with(nat64_prefix_charge_for_range(pool.len(), lo, hi));
                     }
                 }
             }
@@ -892,8 +1004,18 @@ impl Nat64State {
             // #15283: reuse additionally requires the same port range.
             let new_deterministic_v6 = build_deterministic_v6(snap, pool_v4.len());
             let (eff_low, eff_high) = nat64_effective_port_range(snap);
+            // #16484: this rule's identity for every previous-state
+            // lookup below (reuse, deterministic probe, reseed).
+            let scope_key = nat64_snapshot_scope(snap);
             let reused = previous.and_then(|prev| {
-                prev.reuse_allocator(&prefix_bytes, &pool_v4, new_deterministic_v6, (eff_low, eff_high))
+                prev.reuse_allocator(
+                    &snap.name,
+                    &prefix_bytes,
+                    &pool_v4,
+                    new_deterministic_v6,
+                    (eff_low, eff_high),
+                    &scope_key,
+                )
             });
             let mut over_budget = false;
             if reused.is_none() {
@@ -951,13 +1073,15 @@ impl Nat64State {
                     // lease this issue retires. Deterministic on either
                     // side of the change therefore starts fresh; the
                     // session-hit revalidation tears the old session down.
-                    let deterministic_change = prev_prefix_is_deterministic(previous, &prefix_bytes)
-                        || new_deterministic_v6.is_some();
+                    let deterministic_change = prev_prefix_is_deterministic(
+                        previous,
+                        &snap.name,
+                        &prefix_bytes,
+                        &scope_key,
+                    ) || new_deterministic_v6.is_some();
                     if !deterministic_change
                         && let Some(prev_prefix) = previous.and_then(|prev| {
-                            prev.prefixes
-                                .iter()
-                                .find(|p| p.prefix_bytes == prefix_bytes)
+                            prev.find_previous_prefix(&snap.name, &prefix_bytes, &scope_key)
                         })
                     {
                         let map = crate::nat::retained_pool_index_map_v4(
@@ -1044,56 +1168,18 @@ impl Nat64State {
             // wildcard matches any source instead of nothing. An IPv4-only
             // wildcard can never match an IPv6 source and stays a
             // never-match entry.
-            let mut source_constrained =
-                snap.source_constrained || !snap.source_addresses.is_empty();
-            let mut source_prefixes: Vec<PrefixV6> = Vec::new();
-            for a in &snap.source_addresses {
-                let parsed = if a == "any" || a == "any6" || a == "any-ipv6" {
-                    source_constrained = false;
-                    None
-                } else if let Ok(net) = a.parse::<ipnet::Ipv6Net>() {
-                    Some(PrefixV6::from_net(net))
-                } else if let Ok(addr) = a.parse::<Ipv6Addr>() {
-                    Some(PrefixV6::from_net(
-                        ipnet::Ipv6Net::new(addr, 128).expect("host net"),
-                    ))
-                } else {
-                    None
-                };
-                if let Some(p) = parsed {
-                    source_prefixes.push(p);
-                }
-            }
-            if !source_constrained {
-                source_prefixes.clear();
-            }
+            // #16484: installed scope is the normalized key computed
+            // above, so a later reload compares like with like.
+            let source_constrained = scope_key.source_constrained;
+            let source_prefixes = scope_key.source_prefixes.clone();
             let pool_index_v4 = nat64_pool_index(&pool_v4);
             prefixes.push(Nat64Prefix {
+                name: snap.name.clone(),
                 prefix_bytes,
                 from_zone: snap.from_zone.clone(),
-                // #15932: union — prefer the plural list; fall back to
-                // the singular for pre-#15932 snapshots.
-                from_zones: if snap.from_zones.is_empty() {
-                    if snap.from_zone.is_empty() {
-                        Vec::new()
-                    } else {
-                        vec![snap.from_zone.clone()]
-                    }
-                } else {
-                    snap.from_zones.clone()
-                },
+                from_zones: scope_key.from_zones.clone(),
                 from_routing_instance: snap.from_routing_instance.clone(),
-                // #16049: union — prefer the plural list; fall back to
-                // the singular for pre-#16049 snapshots.
-                from_routing_instances: if snap.from_routing_instances.is_empty() {
-                    if snap.from_routing_instance.is_empty() {
-                        Vec::new()
-                    } else {
-                        vec![snap.from_routing_instance.clone()]
-                    }
-                } else {
-                    snap.from_routing_instances.clone()
-                },
+                from_routing_instances: scope_key.from_routing_instances.clone(),
                 source_prefixes,
                 source_constrained,
                 pool_v4,
@@ -1166,18 +1252,62 @@ impl Nat64State {
     /// would mint outside the new window. A changed range falls through to
     /// a fresh allocator, whose #6765 retained-address reseed drops
     /// out-of-range reservations.
+    ///
+    /// #16484: the previous prefix is selected by RULE IDENTITY
+    /// (`find_previous_prefix`: name, else bytes + normalized scope),
+    /// never by /96 bytes alone. Several scoped rule-sets may share
+    /// one /96 with disjoint pools (#15678); a bytes-only first match
+    /// could charge/reuse a sibling's allocator for this rule.
+    fn find_previous_prefix(
+        &self,
+        name: &str,
+        prefix_bytes: &[u8; 12],
+        scope: &Nat64ScopeKey,
+    ) -> Option<&Nat64Prefix> {
+        // A known name is authoritative when either side carries one:
+        // rule-set names are unique in a committed config, and a
+        // renamed rule must not steal the old name's live ownership
+        // (nor keep its own under the new spelling).
+        if !name.is_empty() || self.prefixes.iter().any(|p| !p.name.is_empty()) {
+            if let Some(found) = self
+                .prefixes
+                .iter()
+                .find(|p| p.name == name && &p.prefix_bytes == prefix_bytes)
+            {
+                return Some(found);
+            }
+            if !name.is_empty() {
+                return None;
+            }
+        }
+        // Legacy path: no names on either side. Bytes + normalized
+        // scope; an ambiguous legacy match (several byte+scope-equal
+        // prefixes with different names would have returned above)
+        // refuses to guess.
+        let mut found: Option<&Nat64Prefix> = None;
+        for p in &self.prefixes {
+            if &p.prefix_bytes == prefix_bytes && Nat64ScopeKey::of_prefix(p) == *scope {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(p);
+            }
+        }
+        found
+    }
+
     fn reuse_allocator(
         &self,
+        name: &str,
         prefix_bytes: &[u8; 12],
         pool_v4: &[Ipv4Addr],
         deterministic_v6: Option<DeterministicV6>,
         range: (u16, u16),
+        scope: &Nat64ScopeKey,
     ) -> Option<PortAllocator> {
-        self.prefixes
-            .iter()
-            .find(|p| {
-                p.prefix_bytes == *prefix_bytes
-                    && p.pool_v4.as_slice() == pool_v4
+        self.find_previous_prefix(name, prefix_bytes, scope)
+            .filter(|p| {
+                p.pool_v4.as_slice() == pool_v4
                     && p.deterministic_v6 == deterministic_v6
                     && p.port_allocator.port_low == range.0
                     && p.port_allocator.port_high == range.1

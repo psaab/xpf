@@ -9744,6 +9744,247 @@ fn nat64_scoped_revalidation_honours_pool_port_range_15932() {
     );
 }
 
+// ===========================================================================
+// #16484: scoped same-/96 rule-sets must reseed/reuse from THEIR OWN
+// previous allocator. Pre-fix, the fresh-allocator reseed and
+// `prev_prefix_is_deterministic` took the FIRST previous prefix with
+// equal /96 bytes, so a pool edit on any rule-set after the first
+// carried nothing (or was suppressed by a deterministic first rule)
+// and the fresh allocator reissued a live tuple to another client.
+// FAIL-ON-REVERT: restoring the bytes-only first match makes the
+// second-rule cells below reissue F1 and the deterministic-first
+// cell carry nothing.
+// ===========================================================================
+
+fn tenant_snap_16484(name: &str, zone: &str, pool: &[&str]) -> NAT64RuleSnapshot {
+    NAT64RuleSnapshot {
+        name: name.to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: pool.iter().map(|s| s.to_string()).collect(),
+        from_zone: zone.to_string(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn nat64_16484_scoped_second_rule_pool_edit_reseeds_own_tenant() {
+    let a = tenant_snap_16484("tenant-a", "trust-a", &["198.51.100.1"]);
+    let b = tenant_snap_16484("tenant-b", "trust-b", &["203.0.113.1"]);
+    let state1 = Nat64State::from_snapshots(&[a.clone(), b.clone()]);
+    assert_eq!(state1.prefixes.len(), 2);
+    // Client c1 in trust-b (prefix index 1) mints F1.
+    let dst_v4 = Ipv4Addr::new(8, 8, 8, 8);
+    let c1: Ipv6Addr = "2001:db8:b::1".parse().unwrap();
+    let c2: Ipv6Addr = "2001:db8:b::2".parse().unwrap();
+    let f1 = state1
+        .allocate_source(1, crate::ip_proto::PROTO_TCP, c1, dst_v4, 5000, 443, 1)
+        .expect("mint F1 on tenant-b");
+    assert_eq!(f1.0, Ipv4Addr::new(203, 0, 113, 1));
+    // Pool edit on tenant-b only: append 203.0.113.2. Reuse misses, so
+    // the fresh allocator must reseed from tenant-b's OWN allocator.
+    let b2 = tenant_snap_16484("tenant-b", "trust-b", &["203.0.113.1", "203.0.113.2"]);
+    let state2 = Nat64State::from_snapshots_with_previous(&[a, b2], Some(&state1), 2, 2);
+    // F1's tuple is still held on the rebuilt tenant-b allocator:
+    // its occupancy bit is set, so no new client can be handed it.
+    // (The rebuilt allocator has no flow-key record for c1 — sessions
+    // live outside it — so the held check is the occupancy bit, the
+    // same token `reseed_retained_from` sets.)
+    assert!(
+        state2.prefixes[1]
+            .port_allocator
+            .debug_is_port_occupied(0, f1.1),
+        "#16484: tenant-b's live tuple {:?} must be reseeded-held after its pool edit",
+        f1
+    );
+    assert_eq!(
+        state2.prefixes[1].port_allocator.live_flow_count(),
+        1,
+        "#16484: exactly tenant-b's one live flow must be carried"
+    );
+    let f2 = state2
+        .allocate_source(1, crate::ip_proto::PROTO_TCP, c2, dst_v4, 5000, 443, 3)
+        .expect("mint F2 after tenant-b pool edit");
+    assert_ne!(
+        f2, f1,
+        "#16484: a different tenant-b client must not be reissued live tuple F1"
+    );
+}
+
+#[test]
+fn nat64_16484_scoped_first_rule_pool_edit_still_reseeds() {
+    // Control: editing the FIRST rule-set reseeded even pre-fix; it
+    // must stay green (guards against an identity key that breaks
+    // the previously-working arm).
+    let a = tenant_snap_16484("tenant-a", "trust-a", &["198.51.100.1"]);
+    let b = tenant_snap_16484("tenant-b", "trust-b", &["203.0.113.1"]);
+    let state1 = Nat64State::from_snapshots(&[a.clone(), b]);
+    let dst_v4 = Ipv4Addr::new(8, 8, 8, 8);
+    let c1: Ipv6Addr = "2001:db8:a::1".parse().unwrap();
+    let c2: Ipv6Addr = "2001:db8:a::2".parse().unwrap();
+    let f1 = state1
+        .allocate_source(0, crate::ip_proto::PROTO_TCP, c1, dst_v4, 5000, 443, 1)
+        .expect("mint F1 on tenant-a");
+    let a2 = tenant_snap_16484("tenant-a", "trust-a", &["198.51.100.1", "198.51.100.2"]);
+    let state2 = Nat64State::from_snapshots_with_previous(
+        &[
+            a2,
+            tenant_snap_16484("tenant-b", "trust-b", &["203.0.113.1"]),
+        ],
+        Some(&state1),
+        2,
+        2,
+    );
+    assert!(
+        state2.prefixes[0]
+            .port_allocator
+            .debug_is_port_occupied(0, f1.1),
+        "#16484 control: first rule's live tuple {:?} must be reseeded-held",
+        f1
+    );
+    let f2 = state2
+        .allocate_source(0, crate::ip_proto::PROTO_TCP, c2, dst_v4, 5000, 443, 3)
+        .expect("mint F2 after tenant-a pool edit");
+    assert_ne!(f2, f1, "#16484 control: first rule must not reissue F1");
+}
+
+#[test]
+fn nat64_16484_det_first_does_not_suppress_rr_second_reseed() {
+    // tenant-a deterministic (first), tenant-b round-robin (second).
+    // Pre-fix the deterministic probe found tenant-a and suppressed
+    // tenant-b's reseed outright.
+    let mut a = tenant_snap_16484("tenant-a", "trust-a", &["198.51.100.1"]);
+    a.deterministic_block_size = 32;
+    a.deterministic_blocks_per_ip = 2016;
+    a.deterministic_host_prefix_len = 32;
+    a.deterministic_host_base_v6 = "2001:db8::".to_string();
+    let b = tenant_snap_16484("tenant-b", "trust-b", &["203.0.113.1"]);
+    let state1 = Nat64State::from_snapshots(&[a.clone(), b.clone()]);
+    assert!(
+        state1.prefixes[0].deterministic_v6.is_some(),
+        "tenant-a must be deterministic"
+    );
+    assert!(
+        state1.prefixes[1].deterministic_v6.is_none(),
+        "tenant-b must be round-robin"
+    );
+    let dst_v4 = Ipv4Addr::new(8, 8, 8, 8);
+    let c1: Ipv6Addr = "2001:db8:b::1".parse().unwrap();
+    let c2: Ipv6Addr = "2001:db8:b::2".parse().unwrap();
+    let f1 = state1
+        .allocate_source(1, crate::ip_proto::PROTO_TCP, c1, dst_v4, 5000, 443, 1)
+        .expect("mint F1 on tenant-b");
+    let b2 = tenant_snap_16484("tenant-b", "trust-b", &["203.0.113.1", "203.0.113.2"]);
+    let state2 = Nat64State::from_snapshots_with_previous(&[a, b2], Some(&state1), 2, 2);
+    assert!(
+        state2.prefixes[1]
+            .port_allocator
+            .debug_is_port_occupied(0, f1.1),
+        "#16484: deterministic tenant-a must not suppress tenant-b's reseed; \
+         live tuple {:?} must be held",
+        f1
+    );
+    assert_eq!(
+        state2.prefixes[1].port_allocator.live_flow_count(),
+        1,
+        "#16484: tenant-b's one live flow must be carried"
+    );
+    let f2 = state2
+        .allocate_source(1, crate::ip_proto::PROTO_TCP, c2, dst_v4, 5000, 443, 3)
+        .expect("mint F2 after tenant-b pool edit");
+    assert_ne!(f2, f1, "#16484: tenant-b must not reissue F1");
+}
+
+#[test]
+fn nat64_16484_rr_first_does_not_reseed_det_second() {
+    // Mirror arm: round-robin first, deterministic second whose pool
+    // grows. The NEW side is deterministic, so no reseed may happen
+    // for tenant-b (#15178) — and crucially the probe must not read
+    // tenant-a's round-robin-ness to allow one. Observable: tenant-b's
+    // fresh deterministic allocator starts with no carried flows and
+    // mints in the new geometry.
+    let a = tenant_snap_16484("tenant-a", "trust-a", &["198.51.100.1"]);
+    let mut b = tenant_snap_16484("tenant-b", "trust-b", &["203.0.113.1"]);
+    b.deterministic_block_size = 32;
+    b.deterministic_blocks_per_ip = 2016;
+    b.deterministic_host_prefix_len = 32;
+    b.deterministic_host_base_v6 = "2001:db8::".to_string();
+    let state1 = Nat64State::from_snapshots(&[a.clone(), b.clone()]);
+    assert!(state1.prefixes[1].deterministic_v6.is_some());
+    let dst_v4 = Ipv4Addr::new(8, 8, 8, 8);
+    let sub: Ipv6Addr = "2001:db8:0:5::".parse().unwrap();
+    let _ = state1
+        .allocate_source(1, crate::ip_proto::PROTO_TCP, sub, dst_v4, 40001, 443, 1)
+        .expect("mint on deterministic tenant-b");
+    let mut b2 = tenant_snap_16484("tenant-b", "trust-b", &["203.0.113.1", "203.0.113.2"]);
+    b2.deterministic_block_size = 32;
+    b2.deterministic_blocks_per_ip = 2016;
+    b2.deterministic_host_prefix_len = 32;
+    b2.deterministic_host_base_v6 = "2001:db8::".to_string();
+    let state2 = Nat64State::from_snapshots_with_previous(&[a, b2], Some(&state1), 2, 2);
+    assert_eq!(
+        state2.prefixes[1].port_allocator.live_flow_count(),
+        0,
+        "#16484/#15178: deterministic tenant-b must start fresh, not reseed via tenant-a"
+    );
+}
+
+#[test]
+fn nat64_16484_same_name_noop_reload_reuses_each_tenant() {
+    // No-op reload of both tenants: each must reuse its OWN
+    // allocator (identity, not first-bytes match).
+    let a = tenant_snap_16484("tenant-a", "trust-a", &["198.51.100.1"]);
+    let b = tenant_snap_16484("tenant-b", "trust-b", &["203.0.113.1"]);
+    let state1 = Nat64State::from_snapshots(&[a.clone(), b.clone()]);
+    let state2 = Nat64State::from_snapshots_with_previous(&[a, b], Some(&state1), 2, 2);
+    for i in 0..2 {
+        assert!(
+            state2.prefixes[i]
+                .port_allocator
+                .same_allocator(&state1.prefixes[i].port_allocator),
+            "#16484: prefix {i} must reuse its own allocator on a no-op reload"
+        );
+    }
+    assert!(
+        !state2.prefixes[0]
+            .port_allocator
+            .same_allocator(&state1.prefixes[1].port_allocator),
+        "#16484: tenants must not share an allocator"
+    );
+}
+
+#[test]
+fn nat64_16484_legacy_nameless_scoped_rules_reseed_by_scope() {
+    // Legacy shape: empty names on both sides (hand-built / older
+    // snapshots). Bytes+normalized-scope must still select tenant-b.
+    let mut a = tenant_snap_16484("", "trust-a", &["198.51.100.1"]);
+    let mut b = tenant_snap_16484("", "trust-b", &["203.0.113.1"]);
+    let state1 = Nat64State::from_snapshots(&[a.clone(), b.clone()]);
+    let dst_v4 = Ipv4Addr::new(8, 8, 8, 8);
+    let c1: Ipv6Addr = "2001:db8:b::1".parse().unwrap();
+    let c2: Ipv6Addr = "2001:db8:b::2".parse().unwrap();
+    let f1 = state1
+        .allocate_source(1, crate::ip_proto::PROTO_TCP, c1, dst_v4, 5000, 443, 1)
+        .expect("mint F1 on nameless tenant-b");
+    b.pool_addresses = vec!["203.0.113.1".to_string(), "203.0.113.2".to_string()];
+    a.name = String::new();
+    let state2 = Nat64State::from_snapshots_with_previous(&[a, b], Some(&state1), 2, 2);
+    assert!(
+        state2.prefixes[1]
+            .port_allocator
+            .debug_is_port_occupied(0, f1.1),
+        "#16484 legacy: scope must select tenant-b's allocator when names are empty; \
+         live tuple {:?} must be held",
+        f1
+    );
+    let f2 = state2
+        .allocate_source(1, crate::ip_proto::PROTO_TCP, c2, dst_v4, 5000, 443, 3)
+        .expect("mint F2 after nameless tenant-b pool edit");
+    assert_ne!(
+        f2, f1,
+        "#16484 legacy: nameless tenant-b must not reissue F1"
+    );
+}
+
 // #15956: direct `_into` poison corpus. Every frame builder (forward,
 // reverse, both non-first directions, both ICMP-error directions) is fed
 // a 0xEE-poisoned destination and must produce byte-identical output to
