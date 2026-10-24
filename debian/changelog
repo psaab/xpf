@@ -34,6 +34,18 @@ xpf (0.0.0) unstable; urgency=medium
     `nat64-{idx}` records validate pool membership, the allocator's
     live port range, and peer/static/interface ownership with the
     clear fence before installing.
+  * Userspace DP: seed the CLOSING counter baseline at the closing
+    transition (#16489). The #14937 expiry retention compared the
+    forward packet total against a `closing_counters_seen` field
+    initialised to zero, so pre-FIN traffic and the FIN packet itself
+    read as post-close activity on the first expiry check and every
+    silent half-closed pair was retained one extra close window
+    (~60 s by default, a full extra service timeout under
+    apply-to-half-closed session-ageout). The baseline is now seeded
+    when a pair first becomes CLOSING (session-hit, deferred-owner,
+    and HA-promote stamps) and from the carried wire total for a
+    synced import that arrives CLOSING; genuine post-close traffic
+    still retains, and TIME_WAIT/RST keep their fixed fuse.
   * Userspace DP: count a Stage-11 IPsec pre-claim PBR drop exactly once
     (#16480). The #14314 pre-claim probe resolved the input-filter PBR
     override uncounted and recycled on `RouteOverride::Drop`, but that

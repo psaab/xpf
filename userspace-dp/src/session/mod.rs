@@ -1418,11 +1418,15 @@ struct SessionEntry {
     ///     the already-reserved [56:64]/[64:72]/[112:120]/[120:128] wire
     ///     slots (previously hard-zeroed with `(#2501)` markers).
     counters: SessionCounters,
-    /// #14937: packet total (`fwd+rev`) observed by the last expiry
-    /// pass that retained this CLOSING entry on counter evidence.
-    /// Change — not level — is the activity signal: a quiet flow's
-    /// historic volume must not retain it forever. Forward entry only
-    /// (counters fold there); 0 until first retention check.
+    /// #14937/#16489: packet-total (`fwd+rev`) baseline for the CLOSING
+    /// counter-retention check. Seeded with the forward total at the
+    /// pair's first transition into CLOSING (local close stamps, the
+    /// HA-promote stamp, and — for an import that arrives CLOSING —
+    /// the carried wire total), then advanced by each expiry pass that
+    /// retains on counter evidence. Change since the baseline — not
+    /// historic level — is the activity signal: a quiet flow's
+    /// pre-close volume must not retain it. Forward entry only
+    /// (counters fold there); 0 for a not-yet-closing entry.
     closing_counters_seen: u64,
     /// #2749: the IP ToS byte observed on the FORWARD direction of this
     /// session (DSCP in the high 6 bits, ECN cleared — the shim meta carries
@@ -4860,6 +4864,17 @@ impl SessionTable {
                     // Forward packet → forward entry. Bump `fwd` in place and
                     // stamp the forward-direction ToS + OR the TCP flags.
                     record.entry.counters.account(false, len);
+                    // #16489: the closing packet itself is accounted
+                    // AFTER the lookup that seeded the baseline, so fold
+                    // it into the baseline — it must not read as
+                    // post-close activity on the first expiry check.
+                    if record.entry.closing && is_closing(tcp_flags) {
+                        record.entry.closing_counters_seen = record
+                            .entry
+                            .counters
+                            .fwd_packets
+                            .saturating_add(record.entry.counters.rev_packets);
+                    }
                     record.entry.observed_tos = dscp << 2;
                     record.entry.observed_tcp_flags |= tcp_flags;
                     // #16223: an admitted forward hit on a promoted pair
@@ -4885,6 +4900,14 @@ impl SessionTable {
         let mut stamped: Option<(SessionKey, u8, u64)> = None;
         if let Some(entry) = self.entry_by_key_mut(&fwd_key) {
             entry.counters.account(true, len);
+            // #16489: closing packet accounted after its lookup — fold
+            // into the baseline (see the forward arm).
+            if entry.closing && is_closing(tcp_flags) {
+                entry.closing_counters_seen = entry
+                    .counters
+                    .fwd_packets
+                    .saturating_add(entry.counters.rev_packets);
+            }
             entry.observed_tcp_flags |= tcp_flags;
             let wire = entry.tcp_handshake_state_wire(fwd_key.protocol);
             stamped = Some((fwd_key.clone(), wire, entry.counters.rev_packets));
@@ -5698,6 +5721,9 @@ impl SessionTable {
         let live_policy_gen = self.policy_revalidation_gen;
         let reverse_syn_ack;
         let handshake_completed;
+        // #16489: set inside the borrow block when this update is the
+        // pair's first transition into CLOSING.
+        let mut update_became_closing = false;
         // #15947 (H29-04): pre-mutation wire state for the HA Update.
         let close_class_before = self
             .entries
@@ -5762,7 +5788,13 @@ impl SessionTable {
             // the HA shared-promote path must NOT revert it to the 300s
             // established window. A plain assignment here let that happen,
             // leaving a FIN'd session lingering 10× too long (#3489).
+            // #16489: capture the pre-stamp closing state so the caller
+            // can seed the counter baseline only on the transition into
+            // CLOSING (mirrors the `was_closing` snapshot the lookup path
+            // uses before `stamp_tcp_close`).
+            let was_closing_update = record.entry.closing;
             record.entry.closing |= matches!(protocol, PROTO_TCP) && is_closing(tcp_flags);
+            update_became_closing = !was_closing_update && record.entry.closing;
             // #7342: sticky like `closing`/`reset`. The peer bit is not
             // knowable here — this path promotes a peer-synced entry from one
             // node's view, and the FIN-direction pair is node-local derived
@@ -5854,6 +5886,12 @@ impl SessionTable {
             // epoch; the HOLD branch never writes seen_rg_epoch).
             record.entry.first_held_ns = 0;
             record.entry.seen_rg_epoch = 0;
+        }
+        // #16489: this update first moved the pair into CLOSING — seed
+        // the counter baseline at the pre-close total so the FIN packet
+        // and all earlier traffic do not read as post-close activity.
+        if update_became_closing {
+            self.seed_closing_counters_baseline(key, decision.nat);
         }
         if reverse_syn_ack || handshake_completed {
             self.propagate_tcp_state_to_companion(

@@ -1011,7 +1011,7 @@ impl SessionTable {
         // #9412: the matched entry's close class BEFORE this packet (wire form),
         // captured inside the borrow below so a TRANSITION can be announced to
         // the peer once the borrow has ended.
-        let (result, actual_key, propagate, close_class_before, handshake_state_before, progress_key) = {
+        let (result, actual_key, propagate, close_class_before, handshake_state_before, progress_key, became_closing) = {
             let Some(record) = self.entries.get_mut(handle as usize) else {
                 return SessionExpiryProbe::Absent;
             };
@@ -1197,6 +1197,8 @@ impl SessionTable {
                 established: promote_from_reverse || promote_from_asymmetric_ack,
                 handshake_completed,
             };
+            // #16489: first transition into CLOSING on this hit.
+            let became_closing = !was_closing && entry.closing;
             let progress_key = progress_evidence.then(|| record.key.clone());
             (
                 (
@@ -1228,8 +1230,15 @@ impl SessionTable {
                 close_class_before,
                 handshake_state_before,
                 progress_key,
+                became_closing,
             )
         }; // <-- &mut self.entries borrow ends here
+        // #16489: seed the counter baseline on the pair's first
+        // transition into CLOSING, before any post-close packet is
+        // accounted, so historic volume cannot manufacture freshness.
+        if became_closing {
+            self.seed_closing_counters_baseline(&actual_key, propagate.nat);
+        }
         // #4109: mirror the close (F17) / handshake promotion (F16) onto the
         // forward↔reverse companion now that the matched entry's &mut borrow has
         // ended (touching the companion needs a fresh &mut self probe). Resolved
@@ -1418,7 +1427,7 @@ impl SessionTable {
             None => return,
         };
         let timeouts = self.timeouts;
-        let (actual_key, propagate, close_class_before, handshake_state_before) = {
+        let (actual_key, propagate, close_class_before, handshake_state_before, became_closing) = {
             let record = match self.entries.get_mut(handle as usize) {
                 Some(record) => record,
                 None => return,
@@ -1432,6 +1441,7 @@ impl SessionTable {
             let entry = &mut record.entry;
             let close_class_before = entry.tcp_close_class_wire();
             let handshake_state_before = entry.tcp_handshake_state_wire(key.protocol);
+            let was_closing = entry.closing;
             if !Self::stamp_tcp_close(entry, key, tcp_flags) {
                 return;
             }
@@ -1449,8 +1459,13 @@ impl SessionTable {
                 },
                 close_class_before,
                 handshake_state_before,
+                !was_closing,
             )
         };
+        // #16489: first transition into CLOSING via the deferred path.
+        if became_closing {
+            self.seed_closing_counters_baseline(&actual_key, propagate.nat);
+        }
         self.propagate_tcp_state_to_companion(&actual_key, now_ns, propagate);
         self.emit_session_state_update(&actual_key, close_class_before, handshake_state_before);
         self.push_to_wheel(&actual_key, now_ns);

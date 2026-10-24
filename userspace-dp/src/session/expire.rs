@@ -363,9 +363,9 @@ impl SessionTable {
                     // aged-owner reaps do not consult it.
                     // #14937 belt-and-braces: a CLOSING (single-FIN,
                     // non-RST) entry whose canonical forward counters
-                    // advanced since the last check must not be reaped
-                    // as idle even if every hit path missed payload
-                    // progress (unstamped offset, shared-scope
+                    // advanced since the closing baseline (#16489) must
+                    // not be reaped as idle even if every hit path missed
+                    // payload progress (unstamped offset, shared-scope
                     // materialize, deferred replay). See
                     // `closing_counters_keep_alive` for the
                     // change-detection bound; TIME_WAIT/RST keep
@@ -580,14 +580,21 @@ impl SessionTable {
     }
 
     /// #14937: keep a CLOSING entry alive when its forward counters
-    /// ADVANCED since the last expiry check. `account_packet` folds
-    /// both directions onto the canonical FORWARD entry, so resolve
+    /// ADVANCED since the pair first became CLOSING (or since the
+    /// last retention check — see `closing_counters_seen`). `account_packet`
+    /// folds both directions onto the canonical FORWARD entry, so resolve
     /// that entry (self if forward, companion if reverse) and compare
-    /// its packet total against `closing_counters_seen`. Change — not
-    /// historic level — is the signal: counters advancing within the
-    /// last GC interval prove activity at most one interval old, so
-    /// re-stamping this half to `now_ns` is bounded by that interval,
-    /// and a quiet flow (static counters) reaps on the next pass.
+    /// its packet total against `closing_counters_seen`.
+    /// Change — not historic level — is the signal: counters advancing
+    /// after the CLOSING baseline prove activity after the close
+    /// began, so re-stamping this half to `now_ns` is bounded by that
+    /// proof, and a quiet flow (static counters since CLOSING) reaps
+    /// on its first crossed expiry pass. The baseline is seeded at the
+    /// closing transition (`seed_closing_counters_baseline`, #16489):
+    /// without it the zero initial value made the pre-FIN / FIN packet
+    /// totals themselves read as "advanced" on the first check,
+    /// manufacturing freshness for a silent pair and granting one
+    /// extra close window.
     /// TIME_WAIT/RST never reach here (gated by the caller).
     fn closing_counters_keep_alive(
         &mut self,
@@ -638,6 +645,41 @@ impl SessionTable {
         em.last_seen_ns = now_ns;
         self.rebucket_alive_entry(key, now_ns);
         true
+    }
+
+    /// #16489: seed `closing_counters_seen` on the canonical forward
+    /// entry with the packet total current when the pair FIRST becomes
+    /// CLOSING. `matched_key` is the entry the closing packet resolved
+    /// (either half); the forward entry is resolved exactly as in
+    /// `closing_counters_keep_alive`. Callers invoke this only on the
+    /// transition into CLOSING (the first close stamp, from any stamping
+    /// path), never on a re-stamp of an already-closing pair — a later
+    /// call would erase genuine post-FIN advances the next expiry check
+    /// must still see. A missing forward entry (single-half flow) is a
+    /// no-op: that half's own expiry check resolves the same missing
+    /// forward and returns false.
+    pub(in crate::session) fn seed_closing_counters_baseline(
+        &mut self,
+        matched_key: &SessionKey,
+        matched_nat: NatDecision,
+    ) {
+        let companion_key = reverse_session_key(matched_key, matched_nat);
+        let forward_key = {
+            let Some(this) = self.entry_by_key(matched_key) else {
+                return;
+            };
+            if this.metadata.is_reverse {
+                companion_key
+            } else {
+                matched_key.clone()
+            }
+        };
+        if let Some(forward) = self.entry_by_key_mut(&forward_key) {
+            forward.closing_counters_seen = forward
+                .counters
+                .fwd_packets
+                .saturating_add(forward.counters.rev_packets);
+        }
     }
 
     /// #4380: keep an idle-crossed entry alive if its forward↔reverse

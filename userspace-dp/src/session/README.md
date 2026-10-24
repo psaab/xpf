@@ -339,8 +339,9 @@ call the inner/`_and_payload` form with an explicit honest 0; and
 (d) adds expiry belt-and-braces (`closing_counters_keep_alive`): a
 CLOSING (single-FIN, non-RST) entry whose canonical forward counters
 (`account_packet` folds both directions there) ADVANCED since the
-last expiry check is retained even if every hit missed payload
-progress (change, not historic volume, is the signal).
+closing baseline (#16489: seeded at the first transition into
+CLOSING) is retained even if every hit missed payload
+progress (change since the close began, not historic volume, is the signal).
 TIME_WAIT and RST keep their fixed fuse under all of (a)–(d). The
 session-level `lookup`/`touch_if_stale` payload-less forms remain
 only for non-poll callers (embedded-ICMP quotes carry no TCP payload
@@ -601,7 +602,13 @@ cannot keep an entry alive, but an active non-FINed companion can retain
 its FINed peer. Since #14937 the expiry pass additionally retains a
 CLOSING entry on advancing forward counters
 (`closing_counters_keep_alive`) as belt-and-braces against any hit path
-that still misses payload progress.
+that still misses payload progress. Since #16489 the advance is
+measured from a baseline seeded at the pair's first transition into
+CLOSING (`seed_closing_counters_baseline`: local close stamps, the
+HA-promote stamp, and the carried wire total for an import that
+arrives CLOSING) — pre-close volume and the FIN packet itself no
+longer read as post-close activity, so a silent half-closed pair
+reaps after one close window instead of two.
 
 This replaced the pre-#2220 binding-GLOBAL modulo-64 counter
 (`flow_cache_session_touch`), which incremented across ALL flows on the
