@@ -593,7 +593,7 @@ func expandFilterTerm(term *config.FirewallFilterTerm, family uint8, riTableIDs 
 	// Forwarding-class + loss-priority → DSCP rewrite.
 	// Only applies if no explicit dscp rewrite was set.
 	if term.ForwardingClass != "" && base.DSCPRewrite == 0xFF {
-		if val, ok := forwardingClassToDSCP(term.ForwardingClass, term.LossPriority); ok {
+		if val, ok := forwardingClassToDSCP(term.ForwardingClass, string(term.LossPriority)); ok {
 			base.DSCPRewrite = val
 		}
 	}

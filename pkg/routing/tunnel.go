@@ -225,7 +225,7 @@ func (t *tunnelManager) Apply(tunnels []*config.TunnelConfig) error {
 	for _, tc := range tunnels {
 		// WireGuard TUNs stay untracked/persistent (#1432 S2a, AGY
 		// Hazard B) and are excluded from the removal diff.
-		if tc.Mode == "wireguard" {
+		if tc.Mode == config.TunnelModeWireGuard {
 			wgDesired[tc.Name] = true
 		} else {
 			desired[tc.Name] = true
@@ -438,7 +438,7 @@ func (t *tunnelManager) Apply(tunnels []*config.TunnelConfig) error {
 		// delete-and-recreate on reload — that would flap wgN and destroy
 		// its addresses + FRR routes every commit. applyWireguardTunLocked
 		// reuses an existing wgN in place.
-		if tc.Mode == "wireguard" {
+		if tc.Mode == config.TunnelModeWireGuard {
 			if err := t.applyWireguardTunLocked(tc); err != nil {
 				slog.Warn("failed to apply wireguard tunnel",
 					"name", tc.Name, "err", err)
@@ -716,15 +716,15 @@ func (t *tunnelManager) reconcileAnchorMTULocked(tc *config.TunnelConfig, link n
 // kernel tunnel needs the `ip link set ... type ip6gre encaplimit none`
 // exec: IPv6 family with a GRE-kind mode ("gre", explicit "ip6gre", or
 // the "" default which Gretun also renders as ip6gre) (#15765).
-func needsIP6GREEncapLimitNone(mode string, isIPv6 bool) bool {
-	return isIPv6 && (mode == "gre" || mode == "ip6gre" || mode == "")
+func needsIP6GREEncapLimitNone(mode config.TunnelMode, isIPv6 bool) bool {
+	return isIPv6 && (mode == config.TunnelModeGRE || mode == config.TunnelModeIP6GRE || mode == config.TunnelModeUnset)
 }
 
 // buildKernelTunnelLink constructs the desired netlink link for the
 // legacy (non-anchor) kernel tunnel branch.
 func buildKernelTunnelLink(tc *config.TunnelConfig, localIP, remoteIP net.IP, ttl uint8, isIPv6 bool) netlink.Link {
 	switch tc.Mode {
-	case "ipip":
+	case config.TunnelModeIPIP:
 		if isIPv6 {
 			// IPIP over IPv6: use ip6tnl with IPPROTO_IPIP
 			return &netlink.Ip6tnl{

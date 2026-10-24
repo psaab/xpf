@@ -455,7 +455,7 @@ func TestEveryTaggedReferenceShapePlansByTheTwoExceptionsOnly_9761(t *testing.T)
 							label := fmt.Sprintf("%s%s (unit %d, vlan %d, mtu %d, %s, %s, %s, tunnel %q)", name, nv.suffix, nv.unit, nv.vlan, nv.mtu, fabric.label, tagging, u.label, mode)
 							unit := u.unit(nv.unit, nv.vlan)
 							if mode != "" {
-								unit.Tunnel = &config.TunnelConfig{Name: fmt.Sprintf("tun%d-9761", nv.unit), Mode: mode, Source: "192.0.2.1", Destination: "192.0.2.2"}
+								unit.Tunnel = &config.TunnelConfig{Name: fmt.Sprintf("tun%d-9761", nv.unit), Mode: config.TunnelMode(mode), Source: "192.0.2.1", Destination: "192.0.2.2"}
 							}
 							ifCfg := &config.InterfaceConfig{
 								Name: name, MTU: nv.mtu, VlanTagging: !flex, FlexibleVlanTagging: flex,

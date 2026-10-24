@@ -102,7 +102,7 @@ func validateTunnelOuterFamilyStrict(cfg *Config, lenient bool) ([]string, error
 // mismatch). It rejects ONLY a pair where both endpoints parse to
 // concrete IPs of DIFFERENT families.
 func validateOneTunnelOuterFamily(tc *TunnelConfig) error {
-	if tc == nil || tc.Mode == "wireguard" {
+	if tc == nil || tc.Mode == TunnelModeWireGuard {
 		return nil
 	}
 	if tc.Source == "" || tc.Destination == "" {

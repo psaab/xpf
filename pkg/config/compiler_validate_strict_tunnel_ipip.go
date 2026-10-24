@@ -50,7 +50,7 @@ type ipipTunnelSite struct {
 func effectiveIpipTunnelSites(cfg *Config) []ipipTunnelSite {
 	var sites []ipipTunnelSite
 	for _, ep := range EmitTunnelEndpointNames(cfg) {
-		if ep.Tunnel != nil && ep.Tunnel.Mode == "ipip" {
+		if ep.Tunnel != nil && ep.Tunnel.Mode == TunnelModeIPIP {
 			sites = append(sites, ipipTunnelSite{label: fmt.Sprintf("%q", ep.Name)})
 		}
 	}
@@ -399,7 +399,7 @@ func ipipAnchorOnlyWarnings(cfg *Config) []string {
 		if iface == nil {
 			continue
 		}
-		if t := iface.Tunnel; t != nil && t.Mode == "ipip" && !emitted[t] && !live[t.Name] &&
+		if t := iface.Tunnel; t != nil && t.Mode == TunnelModeIPIP && !emitted[t] && !live[t.Name] &&
 			// The interface-level anchor screen in collectAppliedTunnels. A
 			// record that fails it creates nothing, so there is nothing to warn
 			// about.
@@ -439,12 +439,12 @@ func ipipAnchorOnlyWarnings(cfg *Config) []string {
 			// fixture and its own mutation; see the block above
 			// `ipipAnchorOnlyWarnings` and
 			// TestIpipAnchorEmittedClauseIsPointerKeyedNotNameKeyed_6861.
-			if unit.Tunnel.Mode != "ipip" || live[unit.Tunnel.Name] {
+			if unit.Tunnel.Mode != TunnelModeIPIP || live[unit.Tunnel.Name] {
 				continue
 			}
 			out = append(out, ipipAnchorOnlyText(
 				fmt.Sprintf("interfaces %q unit %d", name, u), unit.Tunnel, true,
-				iface.Tunnel != nil && iface.Tunnel.Mode == "wireguard"))
+				iface.Tunnel != nil && iface.Tunnel.Mode == TunnelModeWireGuard))
 		}
 	}
 	return out

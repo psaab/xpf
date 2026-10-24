@@ -583,7 +583,7 @@ func buildCoSQueueViews(cfg *config.Config, view cosInterfaceView) []cosQueueVie
 						qv.bufferBytes = cosPercentBufferBytes(cosUnitBurstPoolBytes(view.cosUnit), sched.BufferSizePercent)
 					}
 					if sched.Priority != "" {
-						qv.priority = sched.Priority
+						qv.priority = string(sched.Priority)
 					}
 				}
 				queueViews[class.Queue] = qv

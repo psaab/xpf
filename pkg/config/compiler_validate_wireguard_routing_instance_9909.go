@@ -66,7 +66,7 @@ func validateWireguardRoutingInstance9909(cfg *Config, lenient bool) ([]string, 
 			return
 		}
 		device := tc.Name
-		if parent != nil && parent.Mode == "wireguard" && parent.Name != "" {
+		if parent != nil && parent.Mode == TunnelModeWireGuard && parent.Name != "" {
 			device = parent.Name
 		}
 		if device == "" {
@@ -92,7 +92,7 @@ func validateWireguardRoutingInstance9909(cfg *Config, lenient bool) ([]string, 
 			continue
 		}
 
-		if tc := ifc.Tunnel; tc != nil && tc.Mode == "wireguard" {
+		if tc := ifc.Tunnel; tc != nil && tc.Mode == TunnelModeWireGuard {
 			scopes := scopesFor(tc)
 			recordDeviceScopes(ifName, -1, nil, tc, scopes)
 			if len(scopes) == 1 && !wireguardOuterVRFSupported9909(cfg, scopes[0]) {
@@ -109,7 +109,7 @@ func validateWireguardRoutingInstance9909(cfg *Config, lenient bool) ([]string, 
 		sort.Ints(unitNums)
 		for _, n := range unitNums {
 			unit := ifc.Units[n]
-			if unit == nil || unit.Tunnel == nil || unit.Tunnel.Mode != "wireguard" {
+			if unit == nil || unit.Tunnel == nil || unit.Tunnel.Mode != TunnelModeWireGuard {
 				continue
 			}
 			scopes := scopesFor(unit.Tunnel)
@@ -345,13 +345,13 @@ func quarantineWireguardRoutingInstanceRecords9909(cfg *Config, violations []wir
 		if ifc == nil {
 			continue
 		}
-		if ifc.Tunnel != nil && ifc.Tunnel.Mode == "wireguard" {
+		if ifc.Tunnel != nil && ifc.Tunnel.Mode == TunnelModeWireGuard {
 			if _, ok := affected[ifc.Tunnel.Name]; ok {
 				ifc.Tunnel = nil
 			}
 		}
 		for _, unit := range ifc.Units {
-			if unit == nil || unit.Tunnel == nil || unit.Tunnel.Mode != "wireguard" {
+			if unit == nil || unit.Tunnel == nil || unit.Tunnel.Mode != TunnelModeWireGuard {
 				continue
 			}
 			if _, ok := affected[unit.Tunnel.Name]; ok {

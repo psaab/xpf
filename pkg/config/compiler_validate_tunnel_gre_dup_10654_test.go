@@ -14,7 +14,7 @@ func hasGreDupOuter(err error) bool {
 // greDupTunnel returns an interface-level GRE tunnel with the given outer
 // pair and key for the #10654 gate cells.
 func greDupTunnel(mode, src, dst string, key uint32) *TunnelConfig {
-	return &TunnelConfig{Mode: mode, Source: src, Destination: dst, Key: key}
+	return &TunnelConfig{Mode: TunnelMode(mode), Source: src, Destination: dst, Key: key}
 }
 
 // TestGreDuplicateOuterGate10654 exercises the #10654 cross-tunnel

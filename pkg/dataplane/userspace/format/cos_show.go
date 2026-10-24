@@ -202,7 +202,7 @@ func FormatCoSClassifiers(cfg *config.Config, nameFilter, typeFilter string) str
 						value: uint16(dscp),
 						bits:  6,
 						fc:    e.ForwardingClass,
-						lp:    lossPriorityOrDefault(e.LossPriority),
+						lp:    lossPriorityOrDefault(string(e.LossPriority)),
 					})
 				}
 			}
@@ -222,7 +222,7 @@ func FormatCoSClassifiers(cfg *config.Config, nameFilter, typeFilter string) str
 						value: uint16(cp),
 						bits:  3,
 						fc:    e.ForwardingClass,
-						lp:    lossPriorityOrDefault(e.LossPriority),
+						lp:    lossPriorityOrDefault(string(e.LossPriority)),
 					})
 				}
 			}
@@ -277,7 +277,7 @@ func FormatCoSClassifiers(cfg *config.Config, nameFilter, typeFilter string) str
 							value: uint16(cp),
 							bits:  3,
 							fc:    e.ForwardingClass,
-							lp:    lossPriorityOrDefault(e.LossPriority),
+							lp:    lossPriorityOrDefault(string(e.LossPriority)),
 						})
 					}
 				}
@@ -648,7 +648,7 @@ func FormatCoSRewriteRules(cfg *config.Config, nameFilter, typeFilter string) st
 					continue
 				}
 				blk.rows = append(blk.rows, cpRow{
-					fc: e.ForwardingClass, lp: lossPriorityOrDefault(e.LossPriority),
+					fc: e.ForwardingClass, lp: lossPriorityOrDefault(string(e.LossPriority)),
 					value: uint16(e.DSCPValue), bits: 6,
 				})
 			}
@@ -666,7 +666,7 @@ func FormatCoSRewriteRules(cfg *config.Config, nameFilter, typeFilter string) st
 					continue
 				}
 				blk.rows = append(blk.rows, cpRow{
-					fc: e.ForwardingClass, lp: lossPriorityOrDefault(e.LossPriority),
+					fc: e.ForwardingClass, lp: lossPriorityOrDefault(string(e.LossPriority)),
 					value: uint16(e.PCPValue), bits: 3,
 				})
 			}
@@ -807,7 +807,7 @@ func FormatCoSSchedulerMaps(cfg *config.Config, nameFilter string) string {
 				schedName = emptyDash(entry.Scheduler)
 				if sched := cos.Schedulers[entry.Scheduler]; sched != nil {
 					if sched.Priority != "" {
-						priority = sched.Priority
+						priority = string(sched.Priority)
 					}
 					rate = formatSchedulerTransmitRate(sched)
 					buffer = formatSchedulerBuffer(sched)

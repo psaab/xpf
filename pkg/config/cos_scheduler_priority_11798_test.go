@@ -73,12 +73,12 @@ func TestCoSSchedulerPriorityStrictGate11798(t *testing.T) {
 		t.Fatalf("strict gate must reject the first unknown priority in stable scheduler order, got %v", err)
 	}
 	for _, priority := range []string{"", "low", "medium-low", "medium-high", "high", "strict-high"} {
-		if !CoSSchedulerPriorityValid(priority) {
+		if !CoSSchedulerPriorityValid(SchedulerPriority(priority)) {
 			t.Errorf("CoSSchedulerPriorityValid(%q) = false", priority)
 		}
 	}
 	for _, priority := range []string{"medium", "ultra-high"} {
-		if CoSSchedulerPriorityValid(priority) {
+		if CoSSchedulerPriorityValid(SchedulerPriority(priority)) {
 			t.Errorf("CoSSchedulerPriorityValid(%q) = true", priority)
 		}
 	}
@@ -203,7 +203,7 @@ func TestCoSSchedulerPriorityRanksMatchSchemaAndRust11799(t *testing.T) {
 	sort.Strings(rustPriorities)
 	goPriorities := make([]string, 0, len(cosSchedulerPriorityValues))
 	for priority := range cosSchedulerPriorityValues {
-		goPriorities = append(goPriorities, priority)
+		goPriorities = append(goPriorities, string(priority))
 	}
 	sort.Strings(goPriorities)
 	if strings.Join(rustPriorities, ",") != strings.Join(goPriorities, ",") {

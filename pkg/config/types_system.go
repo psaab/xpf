@@ -1716,7 +1716,7 @@ type FirewallFilterTerm struct {
 	Syslog          bool
 	Count           string           // counter name
 	ForwardingClass string           // forwarding-class name
-	LossPriority    string           // loss-priority (low, medium-low, medium-high, high)
+	LossPriority    LossPriority     // loss-priority (low, medium-low, medium-high, high)
 	DSCPRewrite     string           // then dscp <value> — rewrite DSCP/traffic-class
 	Policer         string           // then policer <name> — reference to policer definition
 	FlexMatch       *FlexMatchConfig // flexible-match-range configuration

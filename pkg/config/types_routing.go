@@ -836,19 +836,45 @@ type BGPNeighbor struct {
 	PrefixLimitIdleForeverInet6 bool
 }
 
+// TunnelMode is a tunnel encapsulation mode (#16141). It is a
+// string-underlying type so the JSON token is unchanged; only the
+// Go type moves. The empty value is the unset default (GRE at the
+// kernel/userspace renderers). TunnelModeNames in
+// schema_validators.go is the schema-accepted subset
+// {gre, ip6gre, wireguard}; TunnelModeIPIP is deliberately absent
+// from it (the dataplane does not carry ipip, #4785/#6924) but the
+// const exists because compiled/applied records and the kernel
+// branch still name it. The TunnelConfig struct split was rejected:
+// TunnelConfig is an applied record built by the daemon, not only
+// operator input.
+type TunnelMode string
+
+const (
+	// TunnelModeUnset is the zero value: no mode authored (GRE default).
+	TunnelModeUnset TunnelMode = ""
+	// TunnelModeGRE is `gre` encapsulation.
+	TunnelModeGRE TunnelMode = "gre"
+	// TunnelModeIPIP is `ipip` encapsulation (schema-rejected, #4785).
+	TunnelModeIPIP TunnelMode = "ipip"
+	// TunnelModeIP6GRE is `ip6gre` encapsulation.
+	TunnelModeIP6GRE TunnelMode = "ip6gre"
+	// TunnelModeWireGuard is `wireguard` encapsulation.
+	TunnelModeWireGuard TunnelMode = "wireguard"
+)
+
 // TunnelConfig defines a GRE, IPIP, or other tunnel interface.
 type TunnelConfig struct {
-	Name            string   // Linux interface name (e.g. "gr-0-0-0", "ip-0-0-0")
-	Mode            string   // "gre" or "ipip"
-	Source          string   // local tunnel endpoint IP
-	Destination     string   // remote tunnel endpoint IP
-	Key             uint32   // GRE key 0..4294967295; 0 = unkeyed (K bit absent for native decap, #9899)
-	TTL             int      // tunnel TTL 1..255, 0 = omitted = default 64 (explicit 0 rejects, #9899)
-	Addresses       []string // IPs to assign to tunnel interface (CIDR)
-	RoutingInstance string   // destination routing-instance (VRF)
-	Keepalive       int      // keepalive interval in seconds (0 = disabled)
-	KeepaliveRetry  int      // number of missed keepalives before declaring down (0 = default 3)
-	AnchorOnly      bool     // create a dummy anchor instead of a kernel tunnel device
+	Name            string     // Linux interface name (e.g. "gr-0-0-0", "ip-0-0-0")
+	Mode            TunnelMode // gre, ipip, ip6gre, or wireguard ("" = unset/GRE default)
+	Source          string     // local tunnel endpoint IP
+	Destination     string     // remote tunnel endpoint IP
+	Key             uint32     // GRE key 0..4294967295; 0 = unkeyed (K bit absent for native decap, #9899)
+	TTL             int        // tunnel TTL 1..255, 0 = omitted = default 64 (explicit 0 rejects, #9899)
+	Addresses       []string   // IPs to assign to tunnel interface (CIDR)
+	RoutingInstance string     // destination routing-instance (VRF)
+	Keepalive       int        // keepalive interval in seconds (0 = disabled)
+	KeepaliveRetry  int        // number of missed keepalives before declaring down (0 = default 3)
+	AnchorOnly      bool       // create a dummy anchor instead of a kernel tunnel device
 
 	// MTU is the config-desired link MTU for the tunnel device (#1884):
 	// the owning interface's `mtu` statement (unit-level overrides

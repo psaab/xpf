@@ -17,7 +17,7 @@ func (c *Config) wireGuardListeners() []wireGuardListenerRef {
 	}
 	var out []wireGuardListenerRef
 	add := func(name string, tunnel *TunnelConfig) {
-		if tunnel != nil && tunnel.Mode == "wireguard" && tunnel.WgListenPort != 0 {
+		if tunnel != nil && tunnel.Mode == TunnelModeWireGuard && tunnel.WgListenPort != 0 {
 			out = append(out, wireGuardListenerRef{name: name, tunnel: tunnel})
 		}
 	}
@@ -146,7 +146,7 @@ func (c *Config) WireGuardListenPorts() []uint16 {
 	}
 	seen := map[uint16]bool{}
 	add := func(tc *TunnelConfig) {
-		if tc == nil || tc.Mode != "wireguard" || tc.WgListenPort == 0 {
+		if tc == nil || tc.Mode != TunnelModeWireGuard || tc.WgListenPort == 0 {
 			return
 		}
 		seen[tc.WgListenPort] = true

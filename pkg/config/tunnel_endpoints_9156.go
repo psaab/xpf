@@ -40,7 +40,7 @@ func TunnelHasUsableEndpoints(t *TunnelConfig) bool {
 	if t == nil {
 		return false
 	}
-	if t.Mode == "wireguard" {
+	if t.Mode == TunnelModeWireGuard {
 		return true
 	}
 	return t.Source != "" && t.Destination != ""

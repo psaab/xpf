@@ -23,7 +23,7 @@ type greOuterKey struct {
 // String normalization; ok is false for other modes and for an unparseable
 // endpoint, which never reaches the decap index.
 func greOuterKeyForTunnel(tc *TunnelConfig) (greOuterKey, bool) {
-	if tc == nil || (tc.Mode != "gre" && tc.Mode != "ip6gre") {
+	if tc == nil || (tc.Mode != TunnelModeGRE && tc.Mode != TunnelModeIP6GRE) {
 		return greOuterKey{}, false
 	}
 	src := net.ParseIP(tc.Source)

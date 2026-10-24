@@ -109,7 +109,7 @@ func EmitTunnelEndpointNames(cfg *Config) []TunnelEndpointName {
 				unitNums = append(unitNums, unitNum)
 			}
 			sort.Ints(unitNums)
-			if iface.Tunnel.Mode == "wireguard" {
+			if iface.Tunnel.Mode == TunnelModeWireGuard {
 				// Interface-level WireGuard is ONE persistent TUN; the
 				// builder emits exactly one endpoint keyed by the lowest
 				// configured unit ref (#1910). Mirror that here.

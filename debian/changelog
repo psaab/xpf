@@ -1,5 +1,11 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Config: CoS loss-priority, scheduler priority, and tunnel mode
+    are now typed string values with named constants (#16141). The
+    wire tokens and empty-string defaults are unchanged; only the Go
+    types moved, so a mistyped priority or mode is a compile error
+    instead of a token that travels to the dataplane.
+
   * Config: `services security-intelligence`, `services
     advanced-anti-malware`, `services ssl initiation`/`termination`
     profiles, and `services application-identification` children now

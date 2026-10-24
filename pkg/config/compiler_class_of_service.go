@@ -380,7 +380,7 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 					}
 					classifier.Entries = append(classifier.Entries, &CoSDSCPClassifierEntry{
 						ForwardingClass: className,
-						LossPriority:    lossPriority,
+						LossPriority:    LossPriority(lossPriority),
 						DSCPValues:      codePoints,
 					})
 				}
@@ -427,7 +427,7 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 					}
 					classifier.Entries = append(classifier.Entries, &CoSIEEE8021ClassifierEntry{
 						ForwardingClass: className,
-						LossPriority:    lossPriority,
+						LossPriority:    LossPriority(lossPriority),
 						CodePoints:      codePoints,
 					})
 				}
@@ -485,7 +485,7 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 					}
 					classifier.Entries = append(classifier.Entries, &CoSINetPrecedenceClassifierEntry{
 						ForwardingClass: className,
-						LossPriority:    lossPriority,
+						LossPriority:    LossPriority(lossPriority),
 						Precedences:     codePoints,
 					})
 				}
@@ -552,7 +552,7 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 					}
 					rewriteRule.Entries = append(rewriteRule.Entries, &CoSInertRewriteRuleEntry{
 						ForwardingClass: className,
-						LossPriority:    lossPriority,
+						LossPriority:    LossPriority(lossPriority),
 						CodePoint:       codePoint,
 					})
 				}
@@ -602,7 +602,7 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 					}
 					rewriteRule.Entries = append(rewriteRule.Entries, &CoSInertRewriteRuleEntry{
 						ForwardingClass: className,
-						LossPriority:    lossPriority,
+						LossPriority:    LossPriority(lossPriority),
 						CodePoint:       codePoint,
 					})
 				}
@@ -649,7 +649,7 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 					}
 					rewriteRule.Entries = append(rewriteRule.Entries, &CoSDSCPRewriteRuleEntry{
 						ForwardingClass: className,
-						LossPriority:    lossPriority,
+						LossPriority:    LossPriority(lossPriority),
 						DSCPValue:       codePoint,
 					})
 				}
@@ -700,7 +700,7 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 					}
 					rewriteRule.Entries = append(rewriteRule.Entries, &CoSIEEE8021RewriteRuleEntry{
 						ForwardingClass: className,
-						LossPriority:    lossPriority,
+						LossPriority:    LossPriority(lossPriority),
 						PCPValue:        codePoint,
 					})
 				}
@@ -744,7 +744,7 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 				}
 				sched.TransmitRateExact = sched.TransmitRateExact || exact
 			case "priority":
-				sched.Priority = nodeVal(child)
+				sched.Priority = SchedulerPriority(nodeVal(child))
 			case "buffer-size":
 				// #4228 Gap 2 follow-up: `buffer-size temporal <us>` groups the
 				// keyword + value onto the tail (gatherLeafTailTokens flattens the

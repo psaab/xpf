@@ -650,4 +650,4 @@ func ValidateLoginUsername(raw string) error {
 // continuing to exist, not on the validation being absent. That distinction is
 // pinned by TestLoadDowngradesUnknownTopLevelStanza8882 rather than by this
 // comment.
-var TunnelModeNames = []string{"gre", "ip6gre", "wireguard"}
+var TunnelModeNames = []string{string(TunnelModeGRE), string(TunnelModeIP6GRE), string(TunnelModeWireGuard)}

@@ -199,23 +199,19 @@ func validateClassOfServiceSchedulerMapRefsStrict(cos *ClassOfServiceConfig) err
 // cosSchedulerPriorityValues is the complete Junos scheduler-priority set
 // accepted by the Rust CoS queue builder. Keep this aligned with the schema's
 // `priority` enum and `cos_priority_rank` in userspace-dp.
-var cosSchedulerPriorityValues = map[string]struct{}{
-	"low":         {},
-	"medium-low":  {},
-	"medium-high": {},
-	"high":        {},
-	"strict-high": {},
+var cosSchedulerPriorityValues = map[SchedulerPriority]struct{}{
+	SchedulerPriorityLow:        {},
+	SchedulerPriorityMediumLow:  {},
+	SchedulerPriorityMediumHigh: {},
+	SchedulerPriorityHigh:       {},
+	SchedulerPriorityStrictHigh: {},
 }
 
 // CoSSchedulerPriorityValid reports whether priority is a known Junos
 // scheduler priority or the legitimate empty/unset value. The userspace
 // snapshot emitter uses this as a final boundary check.
-func CoSSchedulerPriorityValid(priority string) bool {
-	if priority == "" {
-		return true
-	}
-	_, ok := cosSchedulerPriorityValues[priority]
-	return ok
+func CoSSchedulerPriorityValid(priority SchedulerPriority) bool {
+	return priority.Valid()
 }
 
 // validateClassOfServiceSchedulerPriorityStrict rejects a non-empty priority
@@ -272,7 +268,7 @@ func sanitizeClassOfServiceSchedulerPriorities(cos *ClassOfServiceConfig) []stri
 		warnings = append(warnings, fmt.Sprintf(
 			"class-of-service scheduler %q priority %q (downgraded to warning on tolerant path; cleared to unset low default, issue #11798)",
 			displayName, sched.Priority))
-		sched.Priority = ""
+		sched.Priority = SchedulerPriorityUnset
 	}
 	return warnings
 }
@@ -280,11 +276,11 @@ func sanitizeClassOfServiceSchedulerPriorities(cos *ClassOfServiceConfig) []stri
 // cosLossPriorityValues is the set of loss-priority values Junos accepts on a
 // class-of-service DSCP / 802.1p classifier or DSCP rewrite-rule. It mirrors
 // cos_loss_priority_index in userspace-dp forwarding_build/cos.rs.
-var cosLossPriorityValues = map[string]struct{}{
-	"low":         {},
-	"medium-low":  {},
-	"medium-high": {},
-	"high":        {},
+var cosLossPriorityValues = map[LossPriority]struct{}{
+	LossPriorityLow:        {},
+	LossPriorityMediumLow:  {},
+	LossPriorityMediumHigh: {},
+	LossPriorityHigh:       {},
 }
 
 // validateClassOfServiceLossPriorityStrict hard-rejects a class-of-service
@@ -493,7 +489,7 @@ func validateClassOfServiceLossPriorityStrict(cos *ClassOfServiceConfig) error {
 	if cos == nil {
 		return nil
 	}
-	checkEntry := func(kind, ruleName, className, lossPriority string) error {
+	checkEntry := func(kind, ruleName, className string, lossPriority LossPriority) error {
 		if lossPriority == "" {
 			return nil
 		}

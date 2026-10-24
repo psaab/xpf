@@ -2295,7 +2295,7 @@ func applyTunnelHostInbound(dp DataPlane, cfg *config.Config, result *CompileRes
 				continue
 			}
 			var flag uint32
-			if tun.Mode == "gre" || tun.Mode == "ip6gre" || tun.Mode == "" {
+			if tun.Mode == config.TunnelModeGRE || tun.Mode == config.TunnelModeIP6GRE || tun.Mode == config.TunnelModeUnset {
 				flag = HostInboundGRE
 			}
 			if flag == 0 {

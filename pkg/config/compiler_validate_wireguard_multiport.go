@@ -58,7 +58,7 @@ func SteeredWireGuardListenPorts(cfg *Config) []uint16 {
 	var out []uint16
 	seen := map[uint16]bool{}
 	for _, ep := range EmitTunnelEndpointNames(cfg) {
-		if ep.Tunnel == nil || ep.Tunnel.Mode != "wireguard" || ep.Tunnel.WgListenPort == 0 {
+		if ep.Tunnel == nil || ep.Tunnel.Mode != TunnelModeWireGuard || ep.Tunnel.WgListenPort == 0 {
 			continue
 		}
 		if p := ep.Tunnel.WgListenPort; !seen[p] {
@@ -153,7 +153,7 @@ func validateWireguardSteeredPortSet(cfg *Config) []string {
 	}
 	owners := make(map[uint16][]string)
 	for _, ep := range EmitTunnelEndpointNames(cfg) {
-		if ep.Tunnel == nil || ep.Tunnel.Mode != "wireguard" || ep.Tunnel.WgListenPort == 0 {
+		if ep.Tunnel == nil || ep.Tunnel.Mode != TunnelModeWireGuard || ep.Tunnel.WgListenPort == 0 {
 			continue
 		}
 		owners[ep.Tunnel.WgListenPort] = append(owners[ep.Tunnel.WgListenPort], ep.Name)
