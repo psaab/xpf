@@ -177,3 +177,107 @@ func TestPersistentNatBatchPeerLimitEnforced14963(t *testing.T) {
 	case <-time.After(25 * time.Millisecond):
 	}
 }
+
+// #16417: the gen-0 first-contact arm persisted a new RemoteGenerations key
+// without the peer cap (the cap was guarded by batch.Generation > 0), so 17+
+// distinct gen-0 origins wrote a state file the loader rejects on every
+// restart. Fail-on-revert: restore the `batch.Generation > 0` condition and
+// the 17th gen-0 origin is accepted (20/20 accepted pre-fix); the restarted
+// manager then fails to load ("exceeds peer limit") and Export errors.
+func TestPersistentNatBatchGen0PeerLimitEnforced16417(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nat-generation.json")
+	m, helper := persistentNatGenerationManager11486(t, path)
+
+	// A fresh state file starts with PendingLocalClear set, so the first
+	// import completes exactly one local clear barrier; after that, gen-0
+	// first contact itself issues no helper request (no clear barrier, no
+	// protocol-gated lease import for an empty batch). Fill the peer table
+	// to the cap with distinct origins at generation 0.
+	for i := range maxPersistentNatGenerationPeers11486 {
+		origin := fmt.Sprintf("%032x", i+1)
+		batch := PersistentNatLeaseBatch{OriginID: origin, Generation: 0}
+		if err := m.ImportPersistentNatLeaseBatch(batch); err != nil {
+			t.Fatalf("import gen-0 peer %d: %v", i, err)
+		}
+		if i == 0 {
+			if got := (<-helper.requests).Type; got != "clear_persistent_nat_leases" {
+				t.Fatalf("first import helper request = %q, want one-time local clear barrier", got)
+			}
+		}
+	}
+	select {
+	case req := <-helper.requests:
+		t.Fatalf("gen-0 first contact reached helper as %q, want no further barrier", req.Type)
+	case <-time.After(25 * time.Millisecond):
+	}
+	m.mu.Lock()
+	gotOrigins := len(m.persistentNatLeaseGeneration.RemoteGenerations)
+	m.mu.Unlock()
+	if gotOrigins != maxPersistentNatGenerationPeers11486 {
+		t.Fatalf("remote origins = %d, want cap %d", gotOrigins, maxPersistentNatGenerationPeers11486)
+	}
+
+	// The next distinct gen-0 origin must be refused with an error and must
+	// NOT reach the helper, be persisted, or consume a peer slot.
+	over := PersistentNatLeaseBatch{
+		OriginID:   fmt.Sprintf("%032x", maxPersistentNatGenerationPeers11486+1),
+		Generation: 0,
+	}
+	if err := m.ImportPersistentNatLeaseBatch(over); err == nil {
+		t.Fatal("gen-0 batch from peer beyond the cap was accepted")
+	}
+	select {
+	case req := <-helper.requests:
+		t.Fatalf("over-cap gen-0 batch reached helper as %q", req.Type)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	// The state file still loads after restart (pre-fix it held 17+ gen-0
+	// peers and the loader rejected it on every restart). Prove the load
+	// directly under the restarted manager's lock — the loader is the
+	// function the peer limit bricks — then a KNOWN gen-0 peer's empty
+	// generation-1 advance is still admitted through the clear barrier,
+	// and the over-cap origin stays refused.
+	restarted, restartHelper := persistentNatGenerationManager11486(t, path)
+	restarted.mu.Lock()
+	loadErr := restarted.loadPersistentNatLeaseGenerationLocked()
+	loadedOrigins := len(restarted.persistentNatLeaseGeneration.RemoteGenerations)
+	restarted.mu.Unlock()
+	if loadErr != nil {
+		t.Fatalf("restart load with capped gen-0 peers: %v", loadErr)
+	}
+	if loadedOrigins != maxPersistentNatGenerationPeers11486 {
+		t.Fatalf("restart loaded origins = %d, want cap %d", loadedOrigins, maxPersistentNatGenerationPeers11486)
+	}
+	known := PersistentNatLeaseBatch{
+		OriginID:   fmt.Sprintf("%032x", maxPersistentNatGenerationPeers11486),
+		Generation: 1,
+	}
+	if err := restarted.ImportPersistentNatLeaseBatch(known); err != nil {
+		t.Fatalf("known gen-0 peer generation-1 import at cap after restart: %v", err)
+	}
+	if got := (<-restartHelper.requests).Type; got != "clear_persistent_nat_leases" {
+		t.Fatalf("known peer helper request = %q, want clear_persistent_nat_leases", got)
+	}
+	if got := len(restartHelper.requests); got != 0 {
+		t.Fatalf("empty known-peer advance issued %d extra helper requests", got)
+	}
+	restarted.mu.Lock()
+	knownGen := restarted.persistentNatLeaseGeneration.RemoteGenerations[known.OriginID]
+	restartOrigins := len(restarted.persistentNatLeaseGeneration.RemoteGenerations)
+	restarted.mu.Unlock()
+	if knownGen != 1 || restartOrigins != maxPersistentNatGenerationPeers11486 {
+		t.Fatalf("after known advance: generation=%d origins=%d, want 1/%d",
+			knownGen, restartOrigins, maxPersistentNatGenerationPeers11486)
+	}
+
+	// Control: the over-cap gen-0 origin is still refused after restart.
+	if err := restarted.ImportPersistentNatLeaseBatch(over); err == nil {
+		t.Fatal("gen-0 batch from peer beyond the cap was accepted after restart")
+	}
+	select {
+	case req := <-restartHelper.requests:
+		t.Fatalf("over-cap gen-0 batch after restart reached helper as %q", req.Type)
+	case <-time.After(25 * time.Millisecond):
+	}
+}

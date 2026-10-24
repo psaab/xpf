@@ -297,16 +297,18 @@ func (m *Manager) ImportPersistentNatLeaseBatch(batch PersistentNatLeaseBatch) e
 				"issue", "#14963")
 			return fmt.Errorf("persistent-NAT lease batch generation %d jumps implausibly from observed %d", batch.Generation, generation)
 		}
-	} else if !known && batch.Generation > 0 && len(state.RemoteGenerations) >= maxPersistentNatGenerationPeers11486 {
-		// #14963: mirror the #11486 peer-count cap that the forwarded-clear
-		// path applies. Without it, batch imports grew RemoteGenerations
-		// without bound, and a state file already holding more than
-		// maxPersistentNatGenerationPeers11486 peers then failed the loader
-		// peer-limit check on every restart, bricking persistent-NAT lease
-		// export/import. Generation-0 first contact is the carve-out below:
-		// it records a 0 watermark without a clear barrier, and genuine
-		// 2-node HA re-advertises at its durable (>=1) generation within one
-		// 30s tick.
+	} else if !known && len(state.RemoteGenerations) >= maxPersistentNatGenerationPeers11486 {
+		// #14963/#16417: mirror the #11486 peer-count cap that the
+		// forwarded-clear path applies. Without it, batch imports grew
+		// RemoteGenerations without bound, and a state file already holding
+		// more than maxPersistentNatGenerationPeers11486 peers then failed
+		// the loader peer-limit check on every restart, bricking
+		// persistent-NAT lease export/import. The cap applies to every
+		// unseen origin, generation 0 included: the gen-0 arm below still
+		// persists a new RemoteGenerations key, so exempting it let 17+
+		// gen-0 origins write a state file the loader rejects on restart.
+		// Gen-0 first contact keeps its no-clear-barrier semantics for
+		// origins within the cap; it is not uncapped.
 		return errors.New("persistent-NAT lease generation peer limit reached")
 	}
 	if !known && batch.Generation == 0 {

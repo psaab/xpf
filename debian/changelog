@@ -33,6 +33,13 @@ xpf (0.0.0) unstable; urgency=medium
 
 xpf (0.0.0) unstable; urgency=medium
 
+  * NAT: apply the persistent-NAT lease-batch peer cap (16 distinct
+    origins) to generation-0 first contact as well (#16417). The
+    #14963 cap was guarded by Generation > 0, but the gen-0 arm still
+    persisted a new RemoteGenerations key, so a misbehaving HA sync
+    peer emitting gen-0 batches from 17+ origins wrote a generation
+    state file the loader rejects on every restart. Gen-0 first
+    contact keeps its no-clear-barrier semantics within the cap.
   * FRR: restore per-qualified-next-hop metrics for routes redistributed
     into RIP (#12531). RIP now receives its QNH metric through
     ripd-native offset-lists in the router rip stanza (one
