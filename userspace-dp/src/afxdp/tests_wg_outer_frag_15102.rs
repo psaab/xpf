@@ -256,6 +256,16 @@ fn wg_outer_fragment_v4_reassembles_and_decaps_exactly_once_15102() {
     assert_eq!(pool.buffered_len(), 0);
 }
 
+/// #16438: the degraded-path WG exclusion is tail-only. The raw
+/// predicate still answers the healthy-path question (including the
+/// head row), but `is_degraded_local_or_control` applies the
+/// executed `wg_degraded_fragment_excluded` helper, which gates on
+/// `PROTO_FRAGMENT_NO_L4` mirroring the healthy `wg_fragment`
+/// binding. A degraded fragmented UDP head to a local address with
+/// WG_RX armed is therefore local/control (kernel pass), while the
+/// WG tail stays excluded. The test runs the real helper by source
+/// path, so deleting the tail gate in the helper flips rows red.
+
 #[test]
 fn wg_fragment_shim_truth_table_15102() {
     use shim_gre_classify::wg_fragment_stays_on_helper;
@@ -267,7 +277,7 @@ fn wg_fragment_shim_truth_table_15102() {
             true,
             true,
             true,
-            "first fragment (UDP head) stays on helper",
+            "first fragment (UDP head) stays on helper on the healthy path",
         ),
         (
             255,
@@ -313,6 +323,58 @@ fn wg_fragment_shim_truth_table_15102() {
             "{why}"
         );
     }
+    // #16438 degraded composition: head is NOT excluded (so the
+    // local/control arms decide it); tail IS excluded.
+    let degraded_cases = [
+        (
+            17u8,
+            17u8,
+            true,
+            true,
+            false,
+            "degraded: fragmented UDP head (IKE/NAT-T/DNS or WG) is not excluded; local arms decide",
+        ),
+        (
+            255,
+            17,
+            true,
+            true,
+            true,
+            "degraded: WG tail (255/UDP) remains excluded and drops with its head",
+        ),
+        (
+            17,
+            17,
+            false,
+            true,
+            false,
+            "degraded: whole UDP is not excluded",
+        ),
+        (
+            255,
+            17,
+            true,
+            false,
+            false,
+            "degraded: no WG configured, tail is not excluded by the WG arm",
+        ),
+        (
+            255,
+            47,
+            true,
+            true,
+            false,
+            "degraded: GRE tail is not excluded by the WG arm",
+        ),
+    ];
+    for (p, w, frag, armed, want, why) in degraded_cases {
+        assert_eq!(
+            shim_gre_classify::wg_degraded_fragment_excluded(p, w, frag, armed),
+            want,
+            "{why}"
+        );
+    }
+    assert_eq!(shim_gre_classify::IP_PROTO_NO_L4, 255);
 }
 
 fn outer_frame_v6_15102(record: &[u8], dst_port: u16) -> Vec<u8> {

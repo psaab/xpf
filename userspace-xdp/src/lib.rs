@@ -168,7 +168,7 @@ use gre_classify::{
     InnerSessionAction, OuterDestinationLocal, USERSPACE_SESSION_ACTION_PASS_TO_KERNEL,
     degraded_general_local_pass_applies, gre_inner_fragment_or_length_rejected,
     native_gre_fragment_stays_on_helper, native_gre_inner_pass_steers_to_kernel_typed,
-    wg_fragment_stays_on_helper,
+    wg_degraded_fragment_excluded, wg_fragment_stays_on_helper,
 };
 use ipv4_key::ipv4_map_key;
 use ipv4_len_gate::{ipv4_declared_len_covers_header, ipv4_declared_read_end};
@@ -1862,7 +1862,17 @@ fn is_degraded_local_or_control(
     ) {
         return false;
     }
-    if wg_fragment_stays_on_helper(
+    // #16438: only a WG TAIL is excluded here (the executed
+    // `wg_degraded_fragment_excluded` helper). A head keeps UDP
+    // (17/17) and carries a port, so it is not provably WG: an
+    // IKE/NAT-T/DNS head to a local (or interface-NAT) address must
+    // reach the local/control arms below, exactly as the healthy
+    // path's PROTO_FRAGMENT_NO_L4-gated wg_fragment binding allows.
+    // Tails (255/17) have no port and follow their head: a WG tail
+    // drops in degraded mode, and a non-WG tail to a local address
+    // was never kernel-reassemblable as a lone fragment either —
+    // the head decides the datagram.
+    if wg_degraded_fragment_excluded(
         parsed.protocol,
         parsed.wire_protocol,
         parsed.is_fragment,

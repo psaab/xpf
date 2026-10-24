@@ -172,6 +172,31 @@ pub fn wg_fragment_stays_on_helper(
         && ((protocol == 17 && wire_protocol == 17) || (protocol == 255 && wire_protocol == 17))
 }
 
+/// The #7494 no-L4 sentinel, mirrored for the same host-compilation
+/// reason as in `tunnel_frag.rs` (255 = IANA Reserved).
+pub const IP_PROTO_NO_L4: u8 = 255;
+
+/// #16438: must this fragment be excluded from the degraded
+/// local/control pass as a WireGuard tail? Only the tail row of
+/// [`wg_fragment_stays_on_helper`] (protocol `PROTO_FRAGMENT_NO_L4`
+/// = 255, wire UDP): the tail has no port/type and follows its head,
+/// dropping in degraded mode. A head keeps UDP (17/17) with ports and
+/// is not provably WG — an IKE/NAT-T/DNS head to a local address must
+/// reach the degraded local/control arms, so heads are never
+/// excluded here. The healthy path already gates its WG-fragment
+/// redirect the same way (`parsed.protocol == PROTO_FRAGMENT_NO_L4`).
+/// Host-executed by the userspace-dp test.
+#[inline(always)]
+pub fn wg_degraded_fragment_excluded(
+    protocol: u8,
+    wire_protocol: u8,
+    is_fragment: bool,
+    wg_rx_armed: bool,
+) -> bool {
+    protocol == IP_PROTO_NO_L4
+        && wg_fragment_stays_on_helper(protocol, wire_protocol, is_fragment, wg_rx_armed)
+}
+
 /// #14954: may the native-GRE inner classifier build a session key from
 /// this inner packet, or must it miss (return 0, stay in userspace)?
 ///
