@@ -87,6 +87,19 @@ xpf (0.0.0) unstable; urgency=medium
     are preserved exactly, which is the per-family falsifying
     experiment the campaign's stop-rule requires.
 
+  * Config: the three strict consumed/identity token walks
+    (ResolveConsumedSetPathTokens, editIdentityStarts,
+    editIdentityConsumed) now share one token-walk kernel,
+    walkStrictConsumedTokens (#16149), replacing three independently
+    re-derived exact/unique-prefix/wildcard/compound-key walks. The
+    only deliberate divergence is strictness (requireUniquePrefix:
+    ResolveConsumed rejects ambiguous/unknown consumed tokens, the
+    edit-identity walk merely stops segmentation), pinned by a
+    published divergence table and an agreement test with seeded
+    mutants. ResolveConsumed now also prefix-expands a compoundKey
+    sub-token (previously appended verbatim). CompleteSetPathWithValues
+    (partial completion) is deliberately untouched pending its
+    divergence census.
   * Dataplane: the three string protocol carriers (filter, policy
     application, DNAT) now have per-carrier validation cells proving
     atomic `__unsupported__` poison preservation, both mixed-version
