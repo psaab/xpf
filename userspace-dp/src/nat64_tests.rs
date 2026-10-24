@@ -9319,6 +9319,137 @@ fn nat64_15178_tuple_matches_new_geometry_only() {
         "#15178: a destination matching no live prefix must fail closed"
     );
 }
+
+// ===========================================================================
+// #16481: a deterministic pool LENGTH change (append/shrink) builds a fresh
+// allocator (host_count changed) but must carry the retained subscribers'
+// live tuples whose (pool index, block) did not move. Pre-fix the #6765
+// reseed was skipped for deterministic prefixes, so the fresh allocator
+// re-minted F1's port for F2 to the same remote.
+// ===========================================================================
+
+fn det_nat64_snap_pool_16481(pool: &[&str]) -> NAT64RuleSnapshot {
+    NAT64RuleSnapshot {
+        name: "napt64-16481".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: pool.iter().map(|s| s.to_string()).collect(),
+        deterministic_block_size: 32,
+        deterministic_blocks_per_ip: 2016,
+        deterministic_host_prefix_len: 32,
+        deterministic_host_base_v6: "2001:db8::".to_string(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn r3n05_det_pool_append_reissues_live_tuple() {
+    // Pool [A] -> [A, B]: subscriber word 5 stays on A index 0, block 5.
+    let state1 = Nat64State::from_snapshots(&[det_nat64_snap_pool_16481(&["198.51.100.1"])]);
+    let sub: Ipv6Addr = "2001:db8:0:5::".parse().unwrap();
+    let dst = Ipv4Addr::new(8, 8, 8, 8);
+    let f1 = state1
+        .allocate_source(0, PROTO_TCP, sub, dst, 40001, 443, 1_000_000_000)
+        .expect("F1");
+    assert_eq!(
+        f1,
+        (Ipv4Addr::new(198, 51, 100, 1), 1184),
+        "F1 is block-5 low"
+    );
+    let state2 = Nat64State::from_snapshots_with_previous(
+        &[det_nat64_snap_pool_16481(&["198.51.100.1", "198.51.100.2"])],
+        Some(&state1),
+        2,
+        2_000_000_000,
+    );
+    assert_eq!(
+        state2.prefixes[0].port_allocator.live_flow_count(),
+        1,
+        "#16481: retained deterministic flow must be carried into the fresh allocator"
+    );
+    let dst_v6: Ipv6Addr = "64:ff9b::808:808".parse().unwrap();
+    assert!(
+        state2.nat64_source_translation_still_valid(sub, dst_v6, f1.0, Some(f1.1)),
+        "#16481: retained tuple must still validate after append"
+    );
+    let f2 = state2
+        .allocate_source(0, PROTO_TCP, sub, dst, 40002, 443, 2_000_000_000)
+        .expect("F2");
+    assert_ne!(
+        f2, f1,
+        "#16481: F2 must not collide with live F1 after pool append"
+    );
+    assert_eq!(f2.0, f1.0);
+    assert!(
+        (1184..=1215).contains(&f2.1),
+        "#16481: F2 port {} must stay in subscriber block",
+        f2.1
+    );
+    // EIM: same socket to a NEW remote joins the carried BIB (same tuple).
+    let f3 = state2
+        .allocate_source(
+            0,
+            PROTO_TCP,
+            sub,
+            Ipv4Addr::new(9, 9, 9, 9),
+            40001,
+            443,
+            2_000_000_000,
+        )
+        .expect("F3 EIM join");
+    assert_eq!(f3, f1, "#16481: same-socket new-remote must join carried BIB");
+}
+
+#[test]
+fn vn05_det_pool_shrink_reissues_live_tuple_and_tears_down_removed() {
+    // Pool [A, B] -> [A]: sub0 (word 5, on A) retained; the subscriber on
+    // B (index 1) is removed.
+    let state1 = Nat64State::from_snapshots(&[det_nat64_snap_pool_16481(&[
+        "198.51.100.1",
+        "198.51.100.2",
+    ])]);
+    let dst = Ipv4Addr::new(8, 8, 8, 8);
+    let sub0: Ipv6Addr = "2001:db8:0:5::".parse().unwrap();
+    let f1 = state1
+        .allocate_source(0, PROTO_TCP, sub0, dst, 40001, 443, 1_000_000_000)
+        .expect("sub0 F1");
+    // blocks_per_ip 2016: word 2016 + 5 = 2021 (0x7e5) -> ip_idx 1, block 5.
+    let sub_b: Ipv6Addr = "2001:db8:0:7e5::".parse().unwrap();
+    let g1 = state1
+        .allocate_source(0, PROTO_TCP, sub_b, dst, 40001, 443, 1_000_000_000)
+        .expect("subB F1");
+    assert_eq!(
+        g1.0,
+        Ipv4Addr::new(198, 51, 100, 2),
+        "subB must be on pool B"
+    );
+    let state2 = Nat64State::from_snapshots_with_previous(
+        &[det_nat64_snap_pool_16481(&["198.51.100.1"])],
+        Some(&state1),
+        2,
+        2_000_000_000,
+    );
+    assert_eq!(
+        state2.prefixes[0].port_allocator.live_flow_count(),
+        1,
+        "#16481: only the retained subscriber's flow is carried on shrink"
+    );
+    let dst_v6: Ipv6Addr = "64:ff9b::808:808".parse().unwrap();
+    assert!(
+        state2.nat64_source_translation_still_valid(sub0, dst_v6, f1.0, Some(f1.1)),
+        "#16481: retained subscriber still validates after shrink"
+    );
+    assert!(
+        !state2.nat64_source_translation_still_valid(sub_b, dst_v6, g1.0, Some(g1.1)),
+        "#16481: removed-address subscriber must fail validation (torn down)"
+    );
+    let f2 = state2
+        .allocate_source(0, PROTO_TCP, sub0, dst, 40002, 443, 2_000_000_000)
+        .expect("sub0 F2");
+    assert_ne!(
+        f2, f1,
+        "#16481: F2 must not collide with live F1 after pool shrink"
+    );
+}
 // #15283 (V52-S1): a NAT64 rule whose source pool carries `port range
 // 2000 to 3000` must translate ONLY within 2000..=3000. Before the fix the
 // snapshot carried no range and the allocator used the fixed
@@ -9897,11 +10028,16 @@ fn nat64_16484_det_first_does_not_suppress_rr_second_reseed() {
 #[test]
 fn nat64_16484_rr_first_does_not_reseed_det_second() {
     // Mirror arm: round-robin first, deterministic second whose pool
-    // grows. The NEW side is deterministic, so no reseed may happen
-    // for tenant-b (#15178) — and crucially the probe must not read
-    // tenant-a's round-robin-ness to allow one. Observable: tenant-b's
-    // fresh deterministic allocator starts with no carried flows and
-    // mints in the new geometry.
+    // grows. #16484's intent: the probe must not read tenant-a's
+    // round-robin-ness — tenant-b is selected by its OWN identity.
+    // #16481 supersedes the original "deterministic starts fresh"
+    // expectation for this det->det pool-LENGTH change: a retained
+    // subscriber's (pool index, block) does not move, so its live
+    // tuple still validates under the new params and MUST be carried
+    // (r3n05_det_pool_append_reissues_live_tuple); starting fresh
+    // re-mints its port. What remains pinned here is the scoped
+    // selection: exactly tenant-b's one flow is carried, from
+    // tenant-b's own allocator — never tenant-a's.
     let a = tenant_snap_16484("tenant-a", "trust-a", &["198.51.100.1"]);
     let mut b = tenant_snap_16484("tenant-b", "trust-b", &["203.0.113.1"]);
     b.deterministic_block_size = 32;
@@ -9912,7 +10048,7 @@ fn nat64_16484_rr_first_does_not_reseed_det_second() {
     assert!(state1.prefixes[1].deterministic_v6.is_some());
     let dst_v4 = Ipv4Addr::new(8, 8, 8, 8);
     let sub: Ipv6Addr = "2001:db8:0:5::".parse().unwrap();
-    let _ = state1
+    let f1 = state1
         .allocate_source(1, crate::ip_proto::PROTO_TCP, sub, dst_v4, 40001, 443, 1)
         .expect("mint on deterministic tenant-b");
     let mut b2 = tenant_snap_16484("tenant-b", "trust-b", &["203.0.113.1", "203.0.113.2"]);
@@ -9923,8 +10059,17 @@ fn nat64_16484_rr_first_does_not_reseed_det_second() {
     let state2 = Nat64State::from_snapshots_with_previous(&[a, b2], Some(&state1), 2, 2);
     assert_eq!(
         state2.prefixes[1].port_allocator.live_flow_count(),
-        0,
-        "#16484/#15178: deterministic tenant-b must start fresh, not reseed via tenant-a"
+        1,
+        "#16481: deterministic tenant-b's retained flow must be carried on pool \
+         append (selected by tenant-b's own identity, #16484)"
+    );
+    // The carried flow is tenant-b's F1, and a new flow must not reissue it.
+    let f2 = state2
+        .allocate_source(1, crate::ip_proto::PROTO_TCP, sub, dst_v4, 40002, 443, 3)
+        .expect("mint F2 after tenant-b pool append");
+    assert_ne!(
+        f2, f1,
+        "#16481: tenant-b must not reissue its carried live tuple"
     );
 }
 

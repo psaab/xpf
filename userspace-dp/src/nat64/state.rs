@@ -491,27 +491,7 @@ pub(crate) fn nat64_prefix_charge_for_range(
 /// `deterministic_v6: None` below); including the derived `DeterministicV6`
 /// (which folds in pool length via `host_count`) makes any geometry change
 /// a reuse miss while a true no-op re-apply still hits.
-/// #15178 helper: was THIS rule's previous prefix deterministic? Used to
-/// gate the #6765 reseed: deterministic on either side of a
-/// geometry/mode change starts fresh (see the build loop).
-///
-/// #16484: the previous prefix is selected by rule identity, not by
-/// /96 bytes alone. `scope` is the NEW snapshot's normalized scope
-/// (see `nat64_snapshot_scope`). Several scoped rule-sets may share
-/// one /96 (#15678); taking the FIRST byte-equal sibling selected
-/// the wrong allocator: a deterministic first rule suppressed the
-/// reseed for a round-robin second rule, and a round-robin first
-/// rule let a deterministic second rule reseed.
-pub(super) fn prev_prefix_is_deterministic(
-    previous: Option<&Nat64State>,
-    name: &str,
-    prefix_bytes: &[u8; 12],
-    scope: &Nat64ScopeKey,
-) -> bool {
-    previous
-        .and_then(|prev| prev.find_previous_prefix(name, prefix_bytes, scope))
-        .is_some_and(|p| p.deterministic_v6.is_some())
-}
+
 
 /// #16484: the normalized ingress scope of a snapshot / prefix: the
 /// zone and routing-instance UNIONS (plural wire fields, singular
@@ -1065,35 +1045,65 @@ impl Nat64State {
                     // nothing, which is the reset
                     // `nat64_4518_pool_change_resets_allocator` pins.
                     // #15178: a deterministic geometry/mode change must NOT
-                    // reseed either. `reseed_retained_from` carries live
-                    // flows lease-less (deterministic leases are excluded
-                    // there) and a later same-socket flow would re-mint a
-                    // BIB under the new identity while the carried flow
-                    // still forwards on the old tuple — the exact stale
-                    // lease this issue retires. Deterministic on either
-                    // side of the change therefore starts fresh; the
-                    // session-hit revalidation tears the old session down.
-                    let deterministic_change = prev_prefix_is_deterministic(
-                        previous,
-                        &snap.name,
-                        &prefix_bytes,
-                        &scope_key,
-                    ) || new_deterministic_v6.is_some();
-                    if !deterministic_change
-                        && let Some(prev_prefix) = previous.and_then(|prev| {
-                            prev.find_previous_prefix(&snap.name, &prefix_bytes, &scope_key)
-                        })
-                    {
+                    // reseed through the generic path either.
+                    // `reseed_retained_from` carries live flows lease-less
+                    // (deterministic leases are excluded there) and a later
+                    // same-socket flow would re-mint a BIB under the new
+                    // identity while the carried flow still forwards on
+                    // the old tuple — the exact stale lease that issue
+                    // retires.
+                    //
+                    // #16481: #15178's premise — revalidation tears every
+                    // deterministic session down — fails for a pool-LENGTH
+                    // change: a retained subscriber's (pool index, block)
+                    // does not move, so its tuple still validates under
+                    // the NEW params and revalidation KEEPS the session
+                    // while the fresh allocator re-mints its port. Carry
+                    // exactly those still-valid deterministic flows (and
+                    // their BIB leases, rebuilt with the NEW identity)
+                    // via `reseed_retained_deterministic_v6_from`; tuples
+                    // that no longer validate are left for revalidation.
+                    // Either side round-robin keeps the #6765 generic
+                    // carry below.
+                    //
+                    // #16484: the previous prefix is selected by rule
+                    // identity (`find_previous_prefix`), never /96 bytes
+                    // alone, so a same-/96 sibling's allocator is never
+                    // carried into this rule.
+                    let prev_prefix = previous.and_then(|prev| {
+                        prev.find_previous_prefix(&snap.name, &prefix_bytes, &scope_key)
+                    });
+                    if let Some(prev_prefix) = prev_prefix {
                         let map = crate::nat::retained_pool_index_map_v4(
                             &prev_prefix.pool_v4,
                             &pool_v4,
                         );
                         if !map.is_empty() {
-                            let outcome = fresh.reseed_retained_from(
-                                &prev_prefix.port_allocator,
-                                &map,
-                                now_ns,
-                            );
+                            // Mode flips keep #15178's fresh start: a
+                            // carried round-robin bit would be re-minted
+                            // as a BIB by a later deterministic flow (and
+                            // vice versa), so only same-mode transitions
+                            // carry — det->det via the #16481 deterministic
+                            // carry, RR->RR via the #6765 generic carry.
+                            let outcome = match (
+                                prev_prefix.deterministic_v6,
+                                new_deterministic_v6,
+                            ) {
+                                (Some(_), Some(new_params)) => fresh
+                                    .reseed_retained_deterministic_v6_from(
+                                        &prev_prefix.port_allocator,
+                                        &map,
+                                        &pool_v4,
+                                        new_params,
+                                        now_ns,
+                                    ),
+                                (None, None) => fresh.reseed_retained_from(
+                                    &prev_prefix.port_allocator,
+                                    &map,
+                                    now_ns,
+                                ),
+                                _ => crate::nat::ReseedOutcome::default(),
+                            };
                             // #7560 residual: the third reseed call site. The
                             // counters are in the allocator so they are
                             // populated here, but the note was wired only at
