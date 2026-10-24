@@ -52,7 +52,7 @@ const (
 	// categorical, and must lead with the TARGETED recovery (unlink the one
 	// named pin, docs/operations/userspace-shim-pin-recovery.md) rather than
 	// `xpfd cleanup`, which additionally GCs every other pinned dataplane map
-	// and clears the FRR managed routes (cmd/xpfd/main.go). Getting this wrong
+	// and clears the FRR managed routes (cmd/xpfd/cleanup.go). Getting this wrong
 	// is worse than an inaccurate comment: it is what an operator follows
 	// mid-upgrade with the dataplane down, and the r5 form pointed at a
 	// destructive action, understated what it destroys, and did so in a mode

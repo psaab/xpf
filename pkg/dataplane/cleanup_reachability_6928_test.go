@@ -328,12 +328,12 @@ func TestCleanupProductionCallersMatchRemediation_6928(t *testing.T) {
 	if len(got) == 0 {
 		t.Fatalf("found ZERO production callers of Cleanup() under %s; the walk is "+
 			"broken, not the code — Cleanup() is called at least from "+
-			"cmd/xpfd/main.go", root)
+			"cmd/xpfd/cleanup.go", root)
 	}
 
 	want := []string{
 		// the `xpfd cleanup` subcommand
-		"cmd/xpfd/main.go:main (call)",
+		"cmd/xpfd/cleanup.go:var cleanupDataplane (value)",
 		// the non-hitless shutdown path. #6743 moved this edge behind the
 		// `teardownCleanupFn` test seam, so what the source now holds is a
 		// function VALUE that Manager.Teardown invokes indirectly. That the

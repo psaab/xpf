@@ -148,7 +148,7 @@ type SessionValue struct {
 	// again; a NON-hitless HA shutdown calls Manager.Teardown, which unpins
 	// everything, so there a restart is enough. dataplane.Cleanup() therefore
 	// has TWO production reference sites — the `xpfd cleanup` subcommand
-	// (cmd/xpfd/main.go, a direct call) and `var teardownCleanupFn = Cleanup`
+	// (cmd/xpfd/cleanup.go, via the cleanupDataplane seam) and `var teardownCleanupFn = Cleanup`
 	// (loader.go), the #6743 test seam Manager.Teardown invokes — not one.
 	// Teardown's reach became INDIRECT in #6743; it did not go away.
 	// TestCleanupProductionCallersMatchRemediation_6928 binds that reference
@@ -628,7 +628,7 @@ type SessionValueV6 struct {
 	// again; a NON-hitless HA shutdown calls Manager.Teardown, which unpins
 	// everything, so there a restart is enough. dataplane.Cleanup() therefore
 	// has TWO production reference sites — the `xpfd cleanup` subcommand
-	// (cmd/xpfd/main.go, a direct call) and `var teardownCleanupFn = Cleanup`
+	// (cmd/xpfd/cleanup.go, via the cleanupDataplane seam) and `var teardownCleanupFn = Cleanup`
 	// (loader.go), the #6743 test seam Manager.Teardown invokes — not one.
 	// Teardown's reach became INDIRECT in #6743; it did not go away.
 	// TestCleanupProductionCallersMatchRemediation_6928 binds that reference
