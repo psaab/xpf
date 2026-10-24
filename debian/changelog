@@ -37,6 +37,21 @@ xpf (0.0.0) unstable; urgency=medium
     pinned by a source-scan test now documents every SessionSync mutex and
     nesting edge. Zero-value SessionSync literals stay usable; no wire or
     behavior change.
+  * Build: add a decoupled advisory tooling CI leg (#16197).
+    `make tooling-check` (`scripts/ci_tooling_check.sh`, `test.yml`
+    job `tooling`) runs pinned shellcheck v0.11.0 over an explicit
+    bounded file list and the hermetic Python subset under `scripts/`
+    directly, publishing one `TOOLING_LEG` ran/skipped/failed line
+    per leg (also to $GITHUB_STEP_SUMMARY). `ran==0`, a missing
+    covered file, a zero-test Python file, or any skip deviating
+    from the explicit `expected_skipped=0` policy is red, so an
+    empty or all-skip leg never paints green. Advisory per
+    `docs/ci-gate-contract.md` -- not a merge gate without a
+    recorded baseline-green period. `scripts/ci-tooling-check-
+    selftest.sh` (in `make selftest`) proves the seeded-failure,
+    `ran==0` and unexpected-skip reds hermetically. Also add the
+    missing SC1007 shellcheck disables to the #16195 proto scripts
+    so the covered baseline is shellcheck-clean.
 
 xpf (0.0.0) unstable; urgency=medium
   * Userspace-DP: an HA watchdog set containing an activation-pending

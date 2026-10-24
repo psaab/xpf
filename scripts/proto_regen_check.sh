@@ -18,6 +18,7 @@
 # hermetic self-test; CI installs fresh).
 set -eu
 
+# shellcheck disable=SC1007  # `CDPATH= cd` clears CDPATH for this command only
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 

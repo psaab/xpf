@@ -128,6 +128,15 @@ proto-check:
 proto-regen-check:
 	sh scripts/proto_regen_check.sh
 
+# #16197: decoupled ADVISORY tooling leg (pinned shellcheck +
+# hermetic scripts/ Python subset, published ran/skipped
+# denominators, ran==0 red). Advisory per docs/ci-gate-contract.md:
+# never a local prerequisite and not a merge gate without the
+# recorded baseline-green period.
+.PHONY: tooling-check
+tooling-check:
+	sh scripts/ci_tooling_check.sh
+
 install: build build-ctl
 	install -m 0755 $(BINARY) $(PREFIX)/sbin/$(BINARY)
 	install -m 0755 cli $(PREFIX)/bin/cli
