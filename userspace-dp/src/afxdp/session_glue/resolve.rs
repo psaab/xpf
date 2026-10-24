@@ -1,5 +1,53 @@
 use super::*;
 
+/// #16217 (FZDiag35): the stamp-free reverse conversion test,
+/// extracted verbatim from the session-hit slow path so the
+/// stamp=2 unit cell judges the production predicate, not a copy.
+/// Returns the zone-encoded FabricRedirect to adopt when ALL of:
+/// the hit is a reverse hit, the packet did not arrive on the
+/// fabric link (anti-loop), the current disposition is a local
+/// ForwardCandidate, and the reply destination's connected owner
+/// RG is KNOWN (>0) and NOT forwarding-active locally. Soundness
+/// (no false-convert shape): a destination whose connected owner
+/// is locally active is the ordinary locally-served reply and
+/// keeps its candidate; an unknown owner (no connected prefix —
+/// gateway/default-routed) is not peer-ownership and never
+/// converts. The session's stored owner stamp is deliberately NOT
+/// consulted: pre-fix rows carry the reply-egress row's RG there.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn reverse_hit_departed_destination_redirect(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    fabric_link_ingress: bool,
+    is_reverse: bool,
+    resolution_target: IpAddr,
+    table: Option<&str>,
+    egress_zone: u16,
+    disposition: ForwardingDisposition,
+) -> Option<ForwardingResolution> {
+    if !is_reverse
+        || fabric_link_ingress
+        || disposition != ForwardingDisposition::ForwardCandidate
+    {
+        return None;
+    }
+    let dest_rg = super::connected_owner_rg_for_target_in_table(
+        forwarding,
+        resolution_target,
+        table,
+    );
+    let destination_local = dest_rg > 0
+        && ha_state
+            .get(&dest_rg)
+            .is_some_and(|group| group.is_forwarding_active(now_secs));
+    if dest_rg > 0 && !destination_local {
+        super::forwarding::resolve_zone_encoded_fabric_redirect_by_id(forwarding, egress_zone)
+    } else {
+        None
+    }
+}
+
 pub(super) fn materialize_shared_session_hit(sessions: &mut SessionTable,
 resolved: &mut ResolvedSessionLookup,
 forwarding: &ForwardingState,
@@ -579,54 +627,54 @@ fabric_adopted: bool,) -> Option<ResolvedFlowSessionDecision> {
                 resolved.metadata.ingress_zone,
             );
         }
-        // #16217 (FZDiag34 reverse leg): a REVERSE hit whose stored
-        // decision still egresses LOCALLY (ForwardCandidate) while the
-        // flow's owner RG has departed this node must cross the fabric
-        // to the new owner — it must NOT be re-served/re-seeded from
-        // the departed member. Live fw0 (trace cellX): reverse hits
+        // #16217 (FZDiag34 reverse leg; FZDiag35 conversion):
+        // a REVERSE hit whose stored decision still egresses LOCALLY
+        // (ForwardCandidate) while the reply destination's connected
+        // owner has departed this node must cross the fabric to the
+        // new owner — it must NOT be re-served/re-seeded from the
+        // departed member. Live fw0 (trace cellX): reverse hits
         // re-resolve from the stored reverse decision egress=5
-        // (ge-0-0-1, RG1's member; the member's egress row carries the
-        // surviving RG2, so neither HA enforcement nor the egress-row
-        // departed arms can see RG1's departure) and TX every WAN
-        // reply into the dead member; the cache arm evicts once and
-        // the slow path re-seeds the same candidate forever. The
-        // ownership proof is the session's stored owner stamp
-        // (`metadata.owner_rg_id`, set at synthesis from the reply
-        // resolution — 1 for these rows) PLUS the connected
-        // destination owner for the reply target: when the owner
-        // stamp names a departed RG and the destination is not
-        // locally served (connected owner unknown or also departed),
-        // convert to the zone-encoded FabricRedirect for the stored
-        // egress (client LAN) zone — the Wire30B shape. Anti-loop: a
-        // fabric-link arrival never re-redirects. Locally-active
-        // owner / destination, unknown owner stamp, and non-reverse
-        // hits are bit-identical.
-        if resolved.metadata.is_reverse
-            && !fabric_link_ingress
-            && decision.resolution.disposition == ForwardingDisposition::ForwardCandidate
-            && resolved.metadata.owner_rg_id > 0
-            && !ha_state
-                .get(&resolved.metadata.owner_rg_id)
-                .is_some_and(|group| group.is_forwarding_active(now_secs))
-        {
-            let dest_rg = super::connected_owner_rg_for_target_in_table(
-                forwarding,
-                resolution_target,
-                install_table_name_for_session(forwarding, decision, resolution_target),
-            );
-            let destination_local = dest_rg > 0
-                && ha_state
-                    .get(&dest_rg)
-                    .is_some_and(|group| group.is_forwarding_active(now_secs));
-            if !destination_local
-                && let Some(redirect) =
-                    super::forwarding::resolve_zone_encoded_fabric_redirect_by_id(
-                        forwarding,
-                        resolved.metadata.egress_zone,
-                    )
-            {
-                decision.resolution = redirect;
-            }
+        // (ge-0-0-1, RG1's member; the member's egress row carries
+        // the surviving RG2, so neither HA enforcement nor the
+        // egress-row departed arms can see RG1's departure) and TX
+        // every WAN reply into the dead member; the cache arm evicts
+        // once and the slow path re-seeds the same candidate
+        // forever.
+        //
+        // FZDiag35: the conversion no longer gates on the session's
+        // stored owner stamp at all. That stamp was derived from the
+        // reply-egress row at synthesis (RG2, surviving) for the
+        // stamp=2 half of live rows, so the old metadata gate could
+        // never convert them — the gate is dropped and the test is
+        // purely destination-based: `dest_rg`, the connected owner
+        // of the reply destination (the client LAN prefix's owner
+        // RG, RG1 at seed), must be KNOWN (>0) and NOT
+        // forwarding-active locally. Soundness: this is a reverse
+        // hit on a local ForwardCandidate, so the reply would TX
+        // toward `resolution_target` (the client); if that
+        // destination's connected owner is a departed RG, local TX
+        // is by definition into the departed member — the fabric
+        // redirect to the new owner is the only correct serve.
+        // There is NO false-convert shape: a destination whose
+        // connected owner is locally active (the ordinary
+        // locally-served reply) keeps `destination_local` and is
+        // served bit-identically; an unknown owner (dest_rg==0,
+        // e.g. a gateway/default-routed destination with no
+        // connected prefix) is not peer-ownership and never
+        // converts. Anti-loop: a fabric-link arrival never
+        // re-redirects. Non-reverse hits are bit-identical.
+        if let Some(redirect) = reverse_hit_departed_destination_redirect(
+            forwarding,
+            ha_state,
+            now_secs,
+            fabric_link_ingress,
+            resolved.metadata.is_reverse,
+            resolution_target,
+            install_table_name_for_session(forwarding, decision, resolution_target),
+            resolved.metadata.egress_zone,
+            decision.resolution.disposition,
+        ) {
+            decision.resolution = redirect;
         }
         // #9752: a terminal outcome arms this worker's purge walk (D8).
         if decision.resolution.disposition == ForwardingDisposition::TableUnavailable {

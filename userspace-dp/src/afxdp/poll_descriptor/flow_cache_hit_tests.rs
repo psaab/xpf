@@ -6020,25 +6020,34 @@ fn forward_candidate_egress_departed_falls_through_16270() {
         "locally-active control must not move the supersession arm"
     );
 }
-/// #16217 (FZDiag34 reverse shape): a REVERSE-direction cached entry is
-/// keyed by the reply tuple (server -> translated client). Live fw0
-/// (trace cell-rev5, helper db7101f4): the reverse entry reads
-/// `ForwardCandidate egress=5 tx=5 stamp_owner=2 owner_rg_live=2` —
-/// egress 5 is ge-0-0-1, fw0's RG1 LAN member, and the entry's
-/// LOGICAL attribution is RG2, which stays active on fw0 (RG0/RG2
-/// never fail over), so the logical departed arm
-/// (`forward_candidate_egress_departed`, keyed on `egress_ifindex`)
-/// never fires: after RG1 fails over to fw1 every WAN reply is TX'd
-/// out the departed member and the client's ACKs stop (55 SUM zeros).
-/// The physical-TX departed arm must supersede the reverse entry
-/// (PostHitForwardCandidateEgressDeparted -> FallThrough -> slow-path
-/// re-resolve -> HA demotion + fabric conversion to fw1).
-/// Fixture: egress row (logical) = RG2 active; tx member row = RG2
-/// (its egress-row RG also survives — the live shape); the OWNER
-/// stamp is RG1. Departed arm: owner RG1 inactive. Control: owner
+/// #16217 (FZDiag34 reverse shape; FZDiag35 stamp=2 shape): a
+/// REVERSE-direction cached entry is keyed by the reply tuple
+/// (server -> translated client). Live fw0 (trace cellF, head
+/// c4d4c5cd48): the reverse entry reads `ForwardCandidate egress=5
+/// tx=5 local_rg=2` — egress 5 is ge-0-0-1, fw0's RG1 LAN member —
+/// and its owner stamps SPLIT: rows whose seed recorded the
+/// forward flow's LAN-member RG read stamp=1, rows whose seed
+/// recorded the reply-egress (RETH) row's RG read stamp=2
+/// (aggregate 6,374 vs 5,777 at d28). RG2 stays active on fw0
+/// (RG0/RG2 never fail over), so for every stamp=2 row NEITHER the
+/// logical departed arm (`forward_candidate_egress_departed`, keyed
+/// on `egress_ifindex`) NOR the c4d4 owner arm (keyed on the stamp)
+/// can fire: after RG1 fails over to fw1 those WAN replies are TX'd
+/// out the departed member and the client's ACKs stop (55 SUM
+/// zeros, twice on loss). The departed supersession must fire for
+/// the stamp=2 shape exactly as for stamp=1 — the stamp now
+/// records the forward flow's owner at seed
+/// (`build_reverse_session_from_forward_match` +
+/// `from_forward_decision` caller preference), so this fixture
+/// hard-stamps 2 on BOTH stamp fields (the pre-fix live value) and
+/// asserts the same FallThrough + arm ownership; the stamp=1 shape
+/// remains covered by the sibling forward test above.
+/// Fixture: egress row (logical) = RG2 active; tx member row = RG1
+/// departed (its egress-row RG also names the departed owner — the
+/// physical member IS RG1's). Departed arm: RG1 inactive. Control:
 /// RG1 locally active -> served.
-/// RED-on-revert: drop the tx arm and the reverse hit is Consumed
-/// from the departed member.
+/// RED-on-revert: drop the owner arm and the reverse hit is
+/// Consumed from the departed member.
 #[test]
 fn reverse_forward_candidate_egress_departed_falls_through_16217() {
     const TX_MEMBER_IFINDEX: i32 = 21;
@@ -6056,15 +6065,19 @@ fn reverse_forward_candidate_egress_departed_falls_through_16217() {
             discriminator: Default::default(),
             routing_domain: 0,
         };
-        // Live shape: logical egress attributes to RG2 (the surviving
-        // RETH RG, set on EGRESS_IFINDEX below); the physical TX
-        // member is the departed RG1 interface.
+        // Live stamp=2 shape (FZDiag35): the seed recorded the
+        // reply-egress (RETH) row's RG2 on BOTH stamp fields; the
+        // physical TX member is still the departed RG1 interface.
+        // Post-fix seeds stamp the forward owner (1) here — see the
+        // doc comment above — but a row already carrying 2 (the
+        // upgrade-era live shape) must still be superseded once its
+        // LAN owner departs, which is what this fixture pins.
         entry.decision.resolution.tx_ifindex = TX_MEMBER_IFINDEX;
         entry.descriptor.egress_ifindex = EGRESS_IFINDEX;
         entry.descriptor.tx_ifindex = TX_MEMBER_IFINDEX;
         entry.metadata.is_reverse = true;
-        entry.metadata.owner_rg_id = 1;
-        entry.stamp.owner_rg_id = 1;
+        entry.metadata.owner_rg_id = 2;
+        entry.stamp.owner_rg_id = 2;
         entry.stamp.owner_rg_lease_until = 0;
         entry
     }
@@ -6111,6 +6124,23 @@ fn reverse_forward_candidate_egress_departed_falls_through_16217() {
             .get_mut(&EGRESS_IFINDEX)
             .expect("zone-accounting fixture seeds the egress")
             .redundancy_group = 2;
+        // Reply destination's connected owner (FZDiag35): the
+        // reverse key's dst is the SNAT address 172.16.50.8; file
+        // its /24 under the TX member (RG1) so
+        // `connected_owner_rg_for_target` names the departed LAN
+        // owner for the hit's target — the field the new
+        // destination-owner arm judges for stamp=2 rows.
+        fixture.forwarding.connected_v4.push(
+            crate::afxdp::ConnectedRouteV4 {
+                prefix: crate::prefix::PrefixV4::from_net(
+                    "172.16.50.0/24".parse().expect("reply prefix"),
+                ),
+                host: std::net::Ipv4Addr::new(172, 16, 50, 0),
+                ifindex: TX_MEMBER_IFINDEX,
+                tunnel_endpoint_id: 0,
+                table: "inet.0".to_string(),
+            },
+        );
         // Physical TX member row: RG1 (departed after failover).
         fixture.forwarding.egress.insert(
             TX_MEMBER_IFINDEX,

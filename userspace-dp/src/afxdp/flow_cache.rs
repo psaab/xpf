@@ -631,6 +631,24 @@ impl FlowCacheEntry {
         // fabric parent ifindex. During split-RG operation a live flow can
         // temporarily resolve to FabricRedirect, but failback must still evict
         // that cached redirect as soon as the owning RG flips locally.
+        //
+        // #16217 (FZDiag35): the explicit caller stamp is preferred
+        // over the egress-row derivation. For a session-hit seed the
+        // caller passes the resolved session's stored owner — for a
+        // reverse row that is now the FORWARD flow's LAN-member RG
+        // at seed time (see `build_reverse_session_from_forward_match`),
+        // not the reply-egress row's RG. The old fallback read
+        // `owner_rg_for_resolution(decision)` (the RETH row's RG2),
+        // which stays active on both nodes, so stamp=2 reverse
+        // entries were judged locally owned forever and the
+        // departed-owner supersession arm never fired for them.
+        // `from_forward_decision` cannot see the forward session
+        // itself (it only receives the already-resolved reverse
+        // decision + the caller's owner), so the preference is
+        // exactly this: an explicit positive caller stamp wins; the
+        // egress-row derivation remains only for callers with no
+        // session owner to offer (new-flow seeds, whose forward
+        // owner IS the egress owner).
         let owner_rg_id = if flow_owner_rg_id > 0 {
             flow_owner_rg_id
         } else {

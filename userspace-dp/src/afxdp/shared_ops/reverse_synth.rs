@@ -60,6 +60,28 @@ pub(in crate::afxdp) fn build_reverse_session_from_forward_match(
 /// native-RI derivation (#10312).
 
 #[allow(clippy::too_many_arguments)]
+/// #16217 (FZDiag35): distinguishes the two synthesis callers.
+/// The LIVE reverse install (`install_reverse_session_from_forward_match`,
+/// worker poll path) builds its forward match from a locally-observed
+/// session lookup: the match's stored owner is this node's seed-time
+/// LAN-member RG — the stamp the failover arms must judge — and the
+/// match carries the forward session's real id in `aux.session_id`
+/// (the lookup aux of a live local row). The SYNCED synthesis
+/// (`synthesized_synced_reverse_entry*`, coordinator prewarm /
+/// import repair) constructs its `ForwardSessionMatch` synthetically
+/// from a peer-imported `SyncedSessionEntry` with
+/// `SessionLookupAux::default()` (session_id 0): there is no local
+/// forward observation, and the companion's owner is the
+/// reply-egress owner THIS node derives from its own FIB (the
+/// #7209/#12086 filing + empty-table-NoRoute semantics the
+/// ha_tests cells pin: with no forwarding state the companion must
+/// carry owner 0, not the peer-supplied forward owner).
+/// FAIL-CLOSED DIRECTION: a live match whose aux id was somehow
+/// zeroed falls back to the reply-resolution derivation — the
+/// pre-fix behavior — never to a peer-supplied stamp.
+fn forward_match_is_synced_reverse_synthesis(forward_match: &ForwardSessionMatch) -> bool {
+    forward_match.aux.session_id == 0
+}
 pub(in crate::afxdp) fn build_reverse_session_from_forward_match_in_table(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -121,12 +143,34 @@ pub(in crate::afxdp) fn build_reverse_session_from_forward_match_in_table(
         ingress_vlan_id: 0,
         forward_ingress_vlan_id: (forward_match.metadata.ingress_ifindex != 0)
             .then_some(forward_match.metadata.ingress_vlan_id),
+        // #16217 (FZDiag35): stamp the FORWARD flow's owner, not the
+        // reply-egress row's RG. The old derivation
+        // (`owner_rg_for_resolution(reply resolution)`) read the RETH
+        // row's RG2 for split-RG rows (LAN owner RG1, WAN/reth RG2
+        // stays active on both nodes), so a reverse row whose LAN
+        // owner departed kept a stamp naming a surviving RG and every
+        // departed-owner supersession/conversion arm judged it
+        // locally owned forever (live fw0 stamp=2 reverse rows TX'd
+        // WAN replies out the departed member after RG1 failover).
+        // The forward match's stored owner is the seed-time owner of
+        // the client-side (LAN-member) RG — the field every
+        // failover arm must judge. The retained wording below is the
+        // stale pre-fix rationale kept for archaeology: owner used to
+        // be derived from the reply resolution so failback
+        // repointing followed the current client-side egress owner;
+        // the activation refresh (`collect_refresh_owner_rgs_items`)
+        // still re-derives that, so the seed-time stamp here is the
+        // failover-correct one.
         // Reverse companions are owned by the RG that currently owns the
         // client-side egress resolution, not necessarily the RG that owned the
         // original forward session. This matters during failback when a second
         // RG comes up later and stale reverse entries must be repointed away
         // from prior FabricRedirect results.
-        owner_rg_id: owner_rg_for_resolution(forwarding, resolution),
+        owner_rg_id: if forward_match_is_synced_reverse_synthesis(&forward_match) {
+            owner_rg_for_resolution(forwarding, resolution)
+        } else {
+            forward_match.metadata.owner_rg_id
+        },
         fabric_ingress: forward_match.metadata.fabric_ingress,
         is_reverse: true,
         // #4565: inherit the forward session's NAT64 reverse info (original v6

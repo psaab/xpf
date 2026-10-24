@@ -5784,6 +5784,131 @@ fn adopted_reverse_reply_converts_to_fabric_redirect_16217() {
     assert_eq!(local.decision.resolution.egress_ifindex, 6);
 }
 
+/// #16217 (FZDiag35): the reverse companion's owner stamp is the
+/// FORWARD flow's LAN-member RG at seed time, NOT the reply-egress
+/// (RETH) row's RG. Split-RG fixture: forward owner RG1 (WAN egress
+/// 12), reply destination 10.0.61.102 on the connected LAN /24
+/// (egress 6, RG2 in this fixture — the RETH-row analogue that stays
+/// active on both nodes live). Pre-fix synthesis derived the stamp
+/// from the reply resolution and read 2; the departed-owner arms
+/// then judged the row locally owned forever.
+/// FAIL-ON-REVERT: restore the reply-resolution derivation and the
+/// stamp reads 2.
+#[test]
+fn reverse_synth_stamps_forward_owner_not_reply_egress_16217() {
+    let forwarding = test_forwarding_state_split_rgs();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut ha_state = BTreeMap::new();
+    ha_state.insert(1, active_ha_runtime(1));
+    ha_state.insert(2, active_ha_runtime(1));
+    let forward_match = ForwardSessionMatch {
+        key: test_key(),
+        decision: SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                ..test_resolution()
+            },
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                rewrite_src_port: Some(test_key().src_port),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        // Forward flow's stored owner: RG1 (its LAN-member RG at seed).
+        metadata: SessionMetadata { owner_rg_id: 1, ..test_metadata() },
+        forwarding_generation: ForwardingGenerationStamp::default(),
+        // Live local forward row: nonzero session id (the discriminator
+        // the builder uses to select the forward-owner stamp).
+        aux: SessionLookupAux { session_id: 4242, ..SessionLookupAux::default() },
+    };
+    let reverse = build_reverse_session_from_forward_match(
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        forward_match,
+        1,
+        0,
+    );
+    assert!(reverse.metadata.is_reverse);
+    assert_eq!(
+        reverse.metadata.owner_rg_id, 1,
+        "#16217 FZDiag35: reverse stamp must be the forward flow's owner (RG1), not the reply-egress row's RG (RG2)"
+    );
+}
+
+/// #16217 (FZDiag35): the slow-path reverse conversion judges the
+/// reply DESTINATION's connected owner directly — no stored-owner
+/// metadata gate. A reverse hit stored with the pre-fix stamp=2
+/// (reply-egress RG, surviving) whose destination owner (RG1, the
+/// LAN prefix owner in this fixture's RG assignment inverted
+/// below) has departed converts to FabricRedirect; destinations
+/// whose connected owner is locally active, or unknown, keep the
+/// local candidate bit-identically.
+/// FAIL-ON-REVERT: restore the metadata gate and the stamp=2 arm
+/// keeps ForwardCandidate.
+#[test]
+fn reverse_conversion_judges_destination_owner_not_stamp_16217() {
+    // LAN egress 6 carries RG2 in the split fixture; move it to RG1
+    // so the reply destination's connected owner IS the departed RG
+    // (the live RG1-LAN shape), while the WAN/reply-egress rows keep
+    // RG2 (surviving) — the stamp=2 provenance.
+    let mut forwarding = test_forwarding_state_split_rgs();
+    forwarding.egress.get_mut(&6).expect("LAN egress row").redundancy_group = 1;
+    let dest_rg = crate::afxdp::connected_owner_rg_for_target_in_table(
+        &forwarding,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        None,
+    );
+    assert_eq!(dest_rg, 1, "fixture: reply destination's connected owner must be RG1");
+    let convert = |ha_state: &BTreeMap<i32, HAGroupRuntime>| {
+        crate::afxdp::session_glue::reverse_hit_departed_destination_redirect(
+            &forwarding,
+            ha_state,
+            1,
+            false,
+            true,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+            None,
+            TEST_LAN_ZONE_ID,
+            ForwardingDisposition::ForwardCandidate,
+        )
+    };
+    // Departed destination owner (RG1 inactive, RG2 active): convert.
+    let mut ha_departed = BTreeMap::new();
+    ha_departed.insert(1, inactive_ha_runtime(1));
+    ha_departed.insert(2, active_ha_runtime(1));
+    assert_eq!(
+        convert(&ha_departed).map(|redirect| redirect.disposition),
+        Some(ForwardingDisposition::FabricRedirect),
+        "#16217 FZDiag35: reverse hit to a departed destination owner must convert (stamp-free)"
+    );
+    // Locally-active destination owner: never convert.
+    let mut ha_local = BTreeMap::new();
+    ha_local.insert(1, active_ha_runtime(1));
+    ha_local.insert(2, active_ha_runtime(1));
+    assert_eq!(convert(&ha_local), None, "locally-owned destination must keep the local candidate");
+    // Fabric-link arrival: anti-loop, never convert.
+    assert_eq!(
+        crate::afxdp::session_glue::reverse_hit_departed_destination_redirect(
+            &forwarding,
+            &ha_departed,
+            1,
+            true,
+            true,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+            None,
+            TEST_LAN_ZONE_ID,
+            ForwardingDisposition::ForwardCandidate,
+        ),
+        None,
+        "fabric-link arrival must never re-redirect"
+    );
+}
+
 
 
 #[test]

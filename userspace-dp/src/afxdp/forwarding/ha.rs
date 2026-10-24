@@ -540,6 +540,34 @@ fn cached_flow_decision_invalid_reason_inner(
     if forward_candidate_owner_departed(ha_state, now_secs, cached_owner_rg_id, resolution) {
         return Some(CachedDecisionInvalid::ForwardCandidateEgressDeparted);
     }
+    // #16217 (FZDiag35): destination-owner twin for ALREADY-SEEDED
+    // stamp=2 rows. The owner arm above judges the seed stamp; rows
+    // seeded before the forward-owner stamp fix (or by any path
+    // that recorded the reply-egress row's RG) carry a surviving RG
+    // there while their reply destination's connected owner (the
+    // client LAN prefix's RG) has departed. The validator already
+    // receives the hit's `target_ip` (the NAT-translated reply
+    // destination), so judge it directly: a ForwardCandidate whose
+    // destination's connected owner is KNOWN (>0) and NOT
+    // forwarding-active locally is served by a departed owner and
+    // supersedes to the same arm, so the slow path re-resolves and
+    // the stamp-free conversion (resolve.rs) redirects it.
+    // Soundness: this is the identical test the slow-path
+    // conversion applies, run one stage earlier; a locally-active
+    // destination owner (ordinary locally-served reply) and an
+    // unknown owner (gateway/default-routed, dest_rg==0) never
+    // fire. Live fw0 stamp=2 rows (aggregate 5,777 at d28) are
+    // exactly this shape.
+    if forward_candidate_destination_owner_departed(
+        forwarding,
+        ha_state,
+        now_secs,
+        target_ip,
+        install_table,
+        resolution,
+    ) {
+        return Some(CachedDecisionInvalid::ForwardCandidateEgressDeparted);
+    }
     if enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, resolution) != resolution {
         return Some(CachedDecisionInvalid::EnforceChanged);
     }
@@ -771,6 +799,40 @@ pub(in crate::afxdp) fn forward_candidate_owner_departed(
         && cached_owner_rg_id > 0
         && !ha_state
             .get(&cached_owner_rg_id)
+            .is_some_and(|group| group.is_forwarding_active(now_secs))
+}
+
+/// #16217 (FZDiag35): destination-owner twin of
+/// `forward_candidate_owner_departed` for rows whose seed stamp
+/// names a surviving RG (the pre-fix stamp=2 shape). Judges the
+/// reply destination's CONNECTED owner (`dest_rg` for `target_ip`
+/// in the session's installing table) instead of any stored stamp:
+/// known (>0) and not forwarding-active locally means the cached
+/// local serve TXs toward a departed owner. Guard: ForwardCandidate
+/// only, clustered map non-empty, destination owner known and
+/// inactive; locally-active, unknown (0 — gateway/default-routed),
+/// and standalone shapes never fire. This is the same test the
+/// slow-path conversion applies (resolve.rs), so cache and
+/// slow path can never disagree about a reverse row's departure.
+pub(in crate::afxdp) fn forward_candidate_destination_owner_departed(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    target_ip: IpAddr,
+    install_table: Option<&str>,
+    resolution: ForwardingResolution,
+) -> bool {
+    if resolution.disposition != ForwardingDisposition::ForwardCandidate || ha_state.is_empty() {
+        return false;
+    }
+    let dest_rg = crate::afxdp::session_glue::connected_owner_rg_for_target_in_table(
+        forwarding,
+        target_ip,
+        install_table,
+    );
+    dest_rg > 0
+        && !ha_state
+            .get(&dest_rg)
             .is_some_and(|group| group.is_forwarding_active(now_secs))
 }
 

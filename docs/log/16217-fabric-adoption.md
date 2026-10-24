@@ -1383,3 +1383,52 @@ burst), NOT gate arithmetic and NOT the gate's fresh-set input.
 Cluster restored after each run: clean master `2c8575b70e`,
 helper `2f2f5cbf...b04` both nodes (hash-proved), RG0/1/2 node0
 primary, target OK, P4 verification 14.1-18.6 Gbit/s.
+
+## FZDiag35 stamp=2 reverse owner fix (FZFixWire33, this head+fix)
+
+Mechanism (FZDiag35, head c4d4c5cd48): reverse rows' owner fields
+derive from the reply-egress row (RG2, always active) — the correct
+owner is the forward flow's LAN-member RG (RG1) at seed. Fix:
+(1) `build_reverse_session_from_forward_match_in_table`
+(reverse_synth.rs) stamps `metadata.owner_rg_id` from the FORWARD
+match's stored owner for live installs (nonzero `aux.session_id`;
+the synced prewarm/import synthesis, which constructs its match
+with a default aux, keeps the reply-resolution derivation the
+#7209/#12086 filing semantics pin). (2) The session-hit reverse
+conversion (resolve.rs, extracted as
+`reverse_hit_departed_destination_redirect`) drops the metadata
+gate entirely and judges `dest_rg` (connected owner of the reply
+destination) directly: known + not forwarding-active converts,
+unknown (0) or locally-active never converts — no false-convert
+shape. (3) The flow-cache validator (ha.rs) gains the same
+destination-owner test as a supersession arm for already-seeded
+stamp=2 rows (the test's target is the NAT-translated reply
+destination); `from_forward_decision` documents the caller-stamp
+preference (the session owner — now the forward owner for reverse
+rows — wins over the egress-row derivation).
+
+Tests: `reverse_synth_stamps_forward_owner_not_reply_egress_16217`,
+`reverse_conversion_judges_destination_owner_not_stamp_16217`
+(both FAIL-ON-REVERT verified), cache test updated to the stamp=2
+shape (FAIL-ON-REVERT on the new arm verified). `cargo test 16217`
+51/51, `16270`+`16223` 37/37, `policy_revalidation` 112/112,
+`session::` 527 passed with the 2 pre-existing failures identical
+on base.
+
+Live aged table (all-node0, P4 85 s, RG1 fw0->fw1 at 30 s age,
+helper d91f3469 hash-proved /proc/<pid>/exe both nodes before
+traffic, evidence `/var/worktrees/FZFixWire33/cell1/`):
+
+| Arm | Build | SUM zero intervals | Verdict |
+|---|---|---|---|
+| PR head c4d4c5cd48 (cellF) | 99.16217.42.dirty | 55 | FAIL |
+| This fix, run 1 | 99.16217.43.dirty (repacked, helper d91f3469) | **0** | PASS |
+| This fix, run 2 | 99.16217.43.dirty (repacked, helper d91f3469) | **0** | PASS |
+
+Acceptance met TWICE on loss. Note: the deb was manually repacked
+around the fresh release helper (the `make deb` inner build
+installs from the shared cargo target, which cargo judged fresh);
+the helper bytes are hash-proved above. Cluster restored after
+each run: clean master 2c8575b70e, helper 2f2f5cbf...b04 both
+nodes (hash-proved), RG0/1/2 node0 primary, target OK, P4
+verification 11.0 Gbit/s, VERIFY_ZERO 0.
