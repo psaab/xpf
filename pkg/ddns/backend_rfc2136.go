@@ -233,12 +233,68 @@ func canonicalTSIGAlgorithm(algo string) (string, error) {
 		"hmac-sha1, hmac-sha224, hmac-sha256, hmac-sha384, hmac-sha512)", algo)
 }
 
+// updateServerHasUserinfo reports whether s carries URL userinfo — an
+// '@' in the authority (the whole value here: an update-server is a bare
+// host[:port], so any '@' is userinfo). RFC 2136 has no credential slot:
+// TSIG is the authentication mechanism, so userinfo can never work. It
+// must be REJECTED, not redacted-and-dialed: dialing the redacted form
+// would silently target a different string than the operator wrote, and
+// keeping the raw form leaks the credential into every dial error,
+// LastError and journald line that embeds the server (#16440, residual
+// of #15174). The LAST '@' bounds the host, matching RedactURL; an '@'
+// with an empty user or host part is still userinfo-shaped and refused.
+func updateServerHasUserinfo(s string) bool {
+	return strings.Contains(s, "@")
+}
+
+// redactedUpdateServer renders an update-server for errors/logs through
+// config.RedactURL (#16440). Host:port has no scheme, so RedactURL's
+// authority scan covers the whole value: "user:s3cr3t@host:53" renders
+// "<redacted>@host:53" and a clean "host:53" renders unchanged. Used for
+// values that reach an error/log site WITHOUT passing the constructor
+// gate (directly-built updaters, querySOA) as defence in depth.
+func redactedUpdateServer(server string) string {
+	return config.RedactURL(server)
+}
+
+// scrubServerError returns err with any verbatim occurrence of the raw
+// server string replaced by its RedactURL render. Dial errors from
+// miekg/dns / net embed the dial address ("dial udp: lookup
+// user:s3cr3t@host:53: ..."), so formatting %s of the server is not the
+// only leak: the wrapped transport error itself must be scrubbed before
+// it reaches LastError or journald (#16440). A clean server is absent
+// from most errors (or present harmlessly), so the replace is a no-op
+// for working configs. Returns nil for nil.
+func (u *rfc2136Updater) scrubServerError(err error) error {
+	if err == nil || u.server == "" {
+		return err
+	}
+	redacted := redactedUpdateServer(u.server)
+	if redacted == u.server {
+		return err
+	}
+	msg := strings.ReplaceAll(err.Error(), u.server, redacted)
+	if msg == err.Error() {
+		return err
+	}
+	return errors.New(msg)
+}
+
 // normalizeUpdateServer turns a host or host:port into a host:port. A bare
 // host gets the default DNS port 53.
 func normalizeUpdateServer(s string) (string, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return "", errors.New("ddns: update-server is empty")
+	}
+	if updateServerHasUserinfo(s) {
+		// #16440: never dial, log or status-render a credential. The
+		// error names only the REDACTED form so the rejection itself
+		// cannot leak into a commit warning / journald.
+		return "", fmt.Errorf("ddns: update-server %q carries URL userinfo; "+
+			"RFC 2136 update-server is a bare host[:port] with no credential "+
+			"slot — remove the userinfo (use tsig-key/tsig-secret for "+
+			"authentication)", config.RedactURL(s))
 	}
 	if _, _, err := net.SplitHostPort(s); err == nil {
 		return s, nil
@@ -579,11 +635,11 @@ func (u *rfc2136Updater) querySOA(ctx context.Context, m *dns.Msg) (*dns.Msg, er
 			defer cancel()
 		}
 		resp, _, err := c.ExchangeContext(ctx, m, u.server)
-		return resp, err
+		return resp, u.scrubServerError(err)
 	}
 	// Test/recorder seams implement ExchangeContext for any message; try it.
 	resp, _, err := u.client.ExchangeContext(ctx, m, u.server)
-	return resp, err
+	return resp, u.scrubServerError(err)
 }
 
 // longestZoneSuffix returns the longest configured zone that is a suffix of
@@ -1513,7 +1569,7 @@ func (u *rfc2136Updater) warnUnsignedOnce() {
 		"server wrote nothing (silent blackhole) and a spoofed REFUSED "+
 		"suppresses a legitimate publish. Configure tsig-key/tsig-secret to "+
 		"authenticate updates.",
-		"server", u.server)
+		"server", redactedUpdateServer(u.server))
 }
 
 // validateTSIGResponse enforces the #14603 contract: when TSIG is
@@ -1537,15 +1593,15 @@ func (u *rfc2136Updater) validateTSIGResponse(resp *dns.Msg, proto string) error
 	}
 	if t == nil {
 		return fmt.Errorf("ddns: unsigned response to TSIG-signed update from %s%s: "+
-			"refusing to trust its rcode", u.server, suffix)
+			"refusing to trust its rcode", redactedUpdateServer(u.server), suffix)
 	}
 	if !strings.EqualFold(dns.CanonicalName(t.Hdr.Name), dns.CanonicalName(u.tsigKeyName)) {
 		return fmt.Errorf("ddns: TSIG response from %s%s signed with unexpected key %q (want %q): "+
-			"refusing to trust its rcode", u.server, suffix, t.Hdr.Name, u.tsigKeyName)
+			"refusing to trust its rcode", redactedUpdateServer(u.server), suffix, t.Hdr.Name, u.tsigKeyName)
 	}
 	if !strings.EqualFold(dns.CanonicalName(t.Algorithm), dns.CanonicalName(u.tsigAlgo)) {
 		return fmt.Errorf("ddns: TSIG response from %s%s uses unexpected algorithm %q (want %q): "+
-			"refusing to trust its rcode", u.server, suffix, t.Algorithm, u.tsigAlgo)
+			"refusing to trust its rcode", redactedUpdateServer(u.server), suffix, t.Algorithm, u.tsigAlgo)
 	}
 	return nil
 }
@@ -1567,7 +1623,7 @@ func (u *rfc2136Updater) exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, er
 		// UPDATE is sent (exchange only carries RFC 2136 UPDATEs; the
 		// SOA zone-discovery query in querySOA is a separate path), so
 		// no durable ownership is recorded on a forgeable verdict.
-		return nil, fmt.Errorf("ddns: require-tsig is set but no tsig-key is configured for %s; refusing unsigned update", u.server)
+		return nil, fmt.Errorf("ddns: require-tsig is set but no tsig-key is configured for %s; refusing unsigned update", redactedUpdateServer(u.server))
 	} else {
 		// #4483: no TSIG key configured. The UPDATE is sent unsigned and the
 		// publish/ownership verdict below keys on an UNAUTHENTICATED, forgeable
@@ -1583,7 +1639,7 @@ func (u *rfc2136Updater) exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, er
 	}
 	resp, _, err := u.client.ExchangeContext(ctx, m, u.server)
 	if err != nil {
-		return nil, err
+		return nil, u.scrubServerError(err)
 	}
 	if resp == nil {
 		return nil, errors.New("ddns: nil response from update server")
@@ -1613,7 +1669,7 @@ func (u *rfc2136Updater) exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, er
 			}
 			resp, _, err = tcpClient.ExchangeContext(ctx, m, u.server)
 			if err != nil {
-				return nil, err
+				return nil, u.scrubServerError(err)
 			}
 			if resp == nil {
 				return nil, errors.New("ddns: nil response from update server (tcp)")

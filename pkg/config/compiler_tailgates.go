@@ -518,5 +518,18 @@ func runTailGates(cfg *Config, opts compileOpts) error {
 		}
 	}
 
+	// #16440: rfc2136 update-server userinfo gate — after require-tsig so
+	// established diagnostics keep priority. Strict rejects a credential
+	// in a host[:port] field that can never use it; lenient warns
+	// (no-brick) and the runtime constructor refuses to dial it.
+	if err := validateDDNSUpdateServerUserinfo(cfg); err != nil {
+		if opts.lenientDDNSUpdateServerUserinfo {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("ddns update-server userinfo (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	return nil
 }

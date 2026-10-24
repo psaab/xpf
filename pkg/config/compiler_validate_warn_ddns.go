@@ -95,7 +95,7 @@ func ddnsBackendWarningsForPolicy(d *DHCPDynamicDNSConfig, label string) []strin
 		} else if !ddnsUpdateServerParseable(d.UpdateServer) {
 			warnings = append(warnings, fmt.Sprintf("%s "+
 				"update-server %q is not a valid host or host:port; the backend "+
-				"will fail to send updates", label, d.UpdateServer))
+				"will fail to send updates", label, RedactURL(d.UpdateServer)))
 		}
 		// #4483: an update-server with NO tsig-key sends unsigned UPDATEs and
 		// trusts an UNAUTHENTICATED, forgeable response rcode — a spoofed
@@ -149,11 +149,84 @@ func ddnsBackendWarningsForPolicy(d *DHCPDynamicDNSConfig, label string) []strin
 	return warnings
 }
 
+// ddnsUpdateServerHasUserinfo reports whether an rfc2136 update-server
+// carries URL userinfo. An update-server is a bare host[:port] (no scheme,
+// path or query), so any '@' is userinfo. RFC 2136 has no credential slot
+// (TSIG authenticates), so such a value can never work — and pre-#16440 it
+// re-disclosed the credential into LastError and journald on every failed
+// cycle. Mirrors pkg/ddns.updateServerHasUserinfo (config cannot import
+// pkg/ddns); the two must agree on '@' so a value the commit gate accepts
+// is never rejected by the backend and vice versa.
+func ddnsUpdateServerHasUserinfo(s string) bool {
+	return strings.Contains(strings.TrimSpace(s), "@")
+}
+
+// validateDDNSUpdateServerUserinfo (#16440) is the strict gate: an rfc2136
+// update-server carrying userinfo is hard-rejected at strict commit on
+// every surface (DHCP v4/v6 + Surface A providers, enabled or not — a
+// disabled family still withdraws persisted records through this server).
+// The tolerant path downgrades to a warning (no-brick, #1960); the runtime
+// constructor (pkg/ddns.normalizeUpdateServer) independently refuses, so a
+// tolerated value publishes nothing and never dials the credential. The
+// error names only the RedactURL render so the rejection itself cannot
+// leak the credential into a commit error or journald.
+func validateDDNSUpdateServerUserinfo(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	check := func(d *DHCPDynamicDNSConfig, label string) error {
+		if d == nil {
+			return nil
+		}
+		backend := d.Backend
+		if backend == "" {
+			backend = "rfc2136"
+		}
+		if backend != "rfc2136" || !ddnsUpdateServerHasUserinfo(d.UpdateServer) {
+			return nil
+		}
+		return fmt.Errorf("%s update-server %q carries URL userinfo; "+
+			"RFC 2136 update-server is a bare host[:port] with no credential "+
+			"slot — remove the userinfo (use tsig-key/tsig-secret for "+
+			"authentication)", label, RedactURL(d.UpdateServer))
+	}
+	if err := check(cfg.System.DHCPServer.DynamicDNS, "dhcp dynamic-dns"); err != nil {
+		return err
+	}
+	if err := check(cfg.System.DHCPServer.DynamicDNSv6, "dhcpv6 dynamic-dns"); err != nil {
+		return err
+	}
+	if cfg.System.Services != nil && cfg.System.Services.DynamicDNS != nil {
+		for name, p := range cfg.System.Services.DynamicDNS.Providers {
+			if p == nil {
+				continue
+			}
+			backend := p.Backend
+			if backend == "" {
+				backend = "rfc2136"
+			}
+			if backend != "rfc2136" || !ddnsUpdateServerHasUserinfo(p.UpdateServer) {
+				continue
+			}
+			return fmt.Errorf("system services dynamic-dns provider %q "+
+				"update-server %q carries URL userinfo; RFC 2136 "+
+				"update-server is a bare host[:port] with no credential "+
+				"slot — remove the userinfo (use tsig-key/tsig-secret for "+
+				"authentication)", name, RedactURL(p.UpdateServer))
+		}
+	}
+	return nil
+}
+
 // ddnsUpdateServerParseable reports whether an update-server string is a
 // usable host or host:port (mirrors the backend's normalizeUpdateServer).
 func ddnsUpdateServerParseable(s string) bool {
 	s = strings.TrimSpace(s)
 	if s == "" {
+		return false
+	}
+	// #16440: userinfo is never a usable host[:port].
+	if ddnsUpdateServerHasUserinfo(s) {
 		return false
 	}
 	if _, _, err := net.SplitHostPort(s); err == nil {
@@ -407,7 +480,7 @@ func validateDDNSRequireTSIG(cfg *Config) error {
 				"records would be kept forever"
 		}
 		return fmt.Errorf("%s require-tsig is set but update-server %q has no tsig-key; %s — "+
-			"set tsig-key/tsig-secret or remove require-tsig", label, d.UpdateServer, verb)
+			"set tsig-key/tsig-secret or remove require-tsig", label, RedactURL(d.UpdateServer), verb)
 	}
 	if err := checkDHCP(cfg.System.DHCPServer.DynamicDNS, "dhcp dynamic-dns"); err != nil {
 		return err
@@ -433,7 +506,7 @@ func validateDDNSRequireTSIG(cfg *Config) error {
 			return fmt.Errorf("system services dynamic-dns provider %q require-tsig is set but "+
 				"update-server %q has no tsig-key; refusing to trust an unsigned, forgeable "+
 				"rcode from a non-loopback server — set tsig-key/tsig-secret or remove "+
-				"require-tsig", name, p.UpdateServer)
+				"require-tsig", name, RedactURL(p.UpdateServer))
 		}
 	}
 	return nil
@@ -470,7 +543,7 @@ func validateSurfaceADDNSWarnings(cfg *Config) []string {
 					"publish nothing until an update-server is set", name))
 			} else if !ddnsUpdateServerParseable(p.UpdateServer) {
 				warnings = append(warnings, fmt.Sprintf("system services dynamic-dns "+
-					"provider %q update-server %q is not a valid host or host:port", name, p.UpdateServer))
+					"provider %q update-server %q is not a valid host or host:port", name, RedactURL(p.UpdateServer)))
 			}
 			// #4483: an update-server with NO tsig-key sends unsigned UPDATEs
 			// and trusts an unauthenticated, forgeable response rcode (spoofed

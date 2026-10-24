@@ -2766,6 +2766,13 @@ type compileOpts struct {
 	// Tolerant load/peer-sync must still boot a require-tsig config that
 	// lacks a key (no-brick); strict commit/commit-check hard-rejects.
 	lenientDDNSRequireTSIG bool
+	// lenientDDNSUpdateServerUserinfo (#16440) downgrades the rfc2136
+	// update-server userinfo gate (validateDDNSUpdateServerUserinfo) from
+	// a hard compile error to a warning. Tolerant load/peer-sync must still
+	// boot a persisted userinfo config (no-brick); the runtime backend
+	// constructor independently refuses it, so nothing is dialed or
+	// published. Strict commit/commit-check hard-rejects.
+	lenientDDNSUpdateServerUserinfo bool
 	// lenientSecureTunnelBindIface (#2933) downgrades the secure-tunnel
 	// bind-interface alias-collision gate (validateSecureTunnelBindInterfaceAST)
 	// from a hard compile error to a cfg.Warnings entry. Two VPNs that bind two
@@ -3881,6 +3888,7 @@ func lenientCompileOpts() compileOpts {
 		lenientReservedZoneNames:                 true,
 		lenientBackupRouterDst:                   true,
 		lenientDDNSRequireTSIG:                   true,
+		lenientDDNSUpdateServerUserinfo:          true,
 		lenientSecureTunnelBindIface:             true,
 		lenientPolicyMatchLeaves:                 true,
 		lenientPolicyThenPermit:                  true,
