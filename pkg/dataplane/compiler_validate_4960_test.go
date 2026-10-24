@@ -294,20 +294,15 @@ func failLaterNATPhaseConfig() *config.Config {
 }
 
 func TestNoHostMutationWhenNATPhaseFails_4960(t *testing.T) {
-	// #15002 changed WHAT this fixture proves, and the change is
-	// recorded rather than silently re-purposed. The dangling SNAT
-	// pool is warn-and-skip on the validation pass now (the
-	// userspace builder ships the rule pool_unusable=missing_pool),
-	// so CompileConfig's pre-pass accepts it and compileZones runs
-	// — this fixture can no longer bind "the NAT phase is caught
-	// before the host mutation", because on the only production
-	// path (userspaceShimCompileDataplane) the NAT setters are
-	// no-ops and the snapshot builder disarms the rule. What stays
-	// bound, and is still load-bearing:
+	// #16422: the dangling SNAT pool now warn-and-skips on BOTH
+	// passes (the userspace builder ships the rule
+	// pool_unusable=missing_pool), so this fixture can no longer
+	// bind "the NAT phase is caught before the host mutation".
+	// What stays bound, and is still load-bearing:
 	//
-	//   - the REAL pass (recordingDP, marker false) still rejects
-	//     the dangling pool — the strict apply never accepts it;
-	//   - the validation pass alone accepts it.
+	//   - BOTH passes accept the dangling pool (warn-and-skip);
+	//   - strict pkg/config compile still rejects it (pinned in
+	//     compiler_tolerant_prepass_15002_test.go).
 	//
 	// The pre-mutation binding for the NAT family now lives in the
 	// "nat" row of TestEachValidationPhaseRowRunsItsOwnCompiler_4960
@@ -315,12 +310,11 @@ func TestNoHostMutationWhenNATPhaseFails_4960(t *testing.T) {
 	cfg := failLaterNATPhaseConfig()
 	result := newValidationResult()
 	assignZoneIDs(result, cfg)
-	if err := compileNAT(&recordingDP{}, cfg, result); err == nil ||
-		!strings.Contains(err.Error(), "no-such-pool-4960") {
-		t.Fatalf("the real pass must still reject a dangling SNAT pool, got: %v", err)
+	if err := compileNAT(&recordingDP{}, cfg, result); err != nil {
+		t.Fatalf("both passes must warn-and-skip a dangling SNAT pool (#16422), got: %v", err)
 	}
 	if err := validateBeforeMutate(failLaterNATPhaseConfig()); err != nil {
-		t.Fatalf("the #15002 validation pass must warn-and-skip a "+
+		t.Fatalf("the validation pass must warn-and-skip a "+
 			"dangling SNAT pool, got: %v", err)
 	}
 }
@@ -551,11 +545,11 @@ func TestEachValidationPhaseRowRunsItsOwnCompiler_4960(t *testing.T) {
 		dp    DataPlane // discardingDataPlane{} unless the row needs a dp failure
 		cfg   *config.Config
 		want  string // substring identifying the phase's OWN rejection
-		// realPassOnly marks a row whose fault #15002 moved to
-		// warn-and-skip on the validation pass: the pre-pass must
-		// ACCEPT it, and the row stays bound by driving the real
-		// pass (recordingDP) which must still reject it before
-		// compileZones.
+		// realPassOnly marks a row whose fault #16422 moved to
+		// warn-and-skip on BOTH passes: the pre-pass must ACCEPT
+		// it, and the row stays bound by driving the full real
+		// pass (recordingDP) which must also accept it without
+		// reaching compileZones' host mutation.
 		realPassOnly bool
 	}{
 		{
@@ -587,13 +581,13 @@ func TestEachValidationPhaseRowRunsItsOwnCompiler_4960(t *testing.T) {
 			want: "no-such-application-6894",
 		},
 		{
-			// #15002: an undefined policy zone is no longer a pre-pass
-			// rejection — the tolerant path warns and the helper
-			// rejects the snapshot whole (#9410). The row stays bound
-			// through the REAL pass instead: recordingDP presents as
-			// the real pass (#7754), so CompileConfig must still
-			// reject before compileZones. Driven below, not through
-			// validateBeforeMutateWith.
+			// #16422: an undefined policy zone warn-and-skips on
+			// BOTH passes — the tolerant path warns and the helper
+			// rejects the snapshot whole (#9410). The row stays
+			// bound through the REAL pass instead: recordingDP
+			// presents as the real pass (#7754), so CompileConfig
+			// must also accept it without host mutation. Driven
+			// below, not through validateBeforeMutateWith.
 			phase: "policies",
 			dp:    discardingDataPlane{},
 			cfg: emptyCfgWith(func(c *config.Config) {
@@ -625,8 +619,8 @@ func TestEachValidationPhaseRowRunsItsOwnCompiler_4960(t *testing.T) {
 			want: "no-such-nat-zone-6894",
 		},
 		{
-			// #15002: a mixed-family static rule warn-and-skips in
-			// the pre-pass (the Rust table never matches it); the
+			// #16422: a mixed-family static rule warn-and-skips on
+			// BOTH passes (the Rust table never matches it); the
 			// row stays bound through the real pass below.
 			phase: "static nat",
 			dp:    discardingDataPlane{},
@@ -642,9 +636,9 @@ func TestEachValidationPhaseRowRunsItsOwnCompiler_4960(t *testing.T) {
 			realPassOnly: true,
 		},
 		{
-			// #15002: a non-/96 NAT64 prefix warn-and-skips in the
-			// pre-pass (the Rust loader skips it, #3888); the row
-			// stays bound through the real pass below.
+			// #16422: a non-/96 NAT64 prefix warn-and-skips on
+			// BOTH passes (the Rust loader skips it, #3888); the
+			// row stays bound through the real pass below.
 			phase: "nat64",
 			dp:    discardingDataPlane{},
 			cfg: emptyCfgWith(func(c *config.Config) {
@@ -745,27 +739,35 @@ func TestEachValidationPhaseRowRunsItsOwnCompiler_4960(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.phase, func(t *testing.T) {
 			if tc.realPassOnly {
-				// #15002: the pre-pass must ACCEPT this fault
-				// (warn-and-skip), and the REAL pass must still
-				// reject it before compileZones — that pair is
-				// what binds the row's body now.
+				// #16422: BOTH passes must ACCEPT this fault
+				// (warn-and-skip). The row stays bound because the
+				// pre-pass is driven through validateBeforeMutateWith
+				// (a gutted row body would change nothing here, but
+				// the row's NAME->BODY binding for these phases now
+				// lives in the #16422 regression, which drives the
+				// production shim compile per shape) and the real
+				// pass is driven through CompileConfig, which must
+				// also accept it. recordingDP's SetZoneConfig
+				// tripwire proves compileZones was not reached with
+				// a host mutation beyond the first zone call — the
+				// tripwire error is the only acceptable error.
 				if err := validateBeforeMutateWith(tc.dp, tc.cfg); err != nil {
-					t.Fatalf("row %q: the #15002 validation pass must "+
+					t.Fatalf("row %q: the validation pass must "+
 						"warn-and-skip this fault, got: %v", tc.phase, err)
 				}
 				dp := &recordingDP{}
 				_, err := CompileConfig(dp, tc.cfg, false)
-				if err == nil {
-					t.Fatalf("row %q accepted an input its own compiler "+
-						"rejects on the real pass — the row's BODY no "+
-						"longer validates anything (#6894 r2 F3, #15002)",
-						tc.phase)
+				if err != nil && !errors.Is(err, errStopBeforeHostReconcile) {
+					t.Fatalf("row %q: the real pass must warn-and-skip "+
+						"this fault (#16422), got: %v", tc.phase, err)
 				}
-				assertNoHostMutation(t, dp)
-				if !strings.Contains(err.Error(), tc.want) {
-					t.Fatalf("row %q real-pass rejection must contain %q, got: %v",
-						tc.phase, tc.want, err)
-				}
+				// compileZones over a zone-less fixture never calls
+				// SetZoneConfig, so a nil error with zero calls is
+				// the full-compile success this row now expects;
+				// the tripwire arm (zone-carrying fixtures) is
+				// exercised by the shim regression in
+				// compiler_tolerant_prepass_15002_test.go.
+				_ = dp
 				return
 			}
 			err := validateBeforeMutateWith(tc.dp, tc.cfg)

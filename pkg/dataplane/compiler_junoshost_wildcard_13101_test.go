@@ -76,14 +76,21 @@ func TestCompilePoliciesJunosHostAndWildcardZones13101(t *testing.T) {
 }
 
 func TestCompilePoliciesUnknownZoneStillRejected13101(t *testing.T) {
-	if _, _, err := mk13101(t, "trust", "no-such-zone"); err == nil {
-		t.Fatal("unknown to-zone must still fail closed")
-	}
-	if _, _, err := mk13101(t, "no-such-zone", "untrust"); err == nil {
-		t.Fatal("unknown from-zone must still fail closed")
-	}
-	if _, _, err := mk13101(t, "junos-host", "untrust"); err == nil {
-		t.Fatal("unsupported host-originated from-zone must still fail closed")
+	// #16422: an unknown zone-pair now warn-and-skips on both passes
+	// (the helper rejects such a snapshot whole, #9410) instead of
+	// hard-rejecting the compile; no zone-pair or rule may be written.
+	for _, tc := range []struct{ from, to string }{
+		{"trust", "no-such-zone"},
+		{"no-such-zone", "untrust"},
+		{"junos-host", "untrust"},
+	} {
+		dp, _, err := mk13101(t, tc.from, tc.to)
+		if err != nil {
+			t.Fatalf("unknown zone %s->%s must warn-and-skip (#16422), got: %v", tc.from, tc.to, err)
+		}
+		if len(dp.pairs) != 0 || len(dp.rules) != 0 {
+			t.Fatalf("unknown zone %s->%s wrote pairs=%v rules=%v, want none", tc.from, tc.to, dp.pairs, dp.rules)
+		}
 	}
 }
 

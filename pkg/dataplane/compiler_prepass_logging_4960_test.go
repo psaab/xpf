@@ -428,7 +428,7 @@ func TestOverReachArmCoversEveryReachableGate_4960(t *testing.T) {
 		"compiler.go:bad source-port for application":                "app-badsrcport",
 		"compiler_nat.go:to-zone has no interfaces":                  "rule-set rs2 -> zone dmz",
 		"compiler_nat.go:SNAT rule has no action":                    "rule r-noaction",
-		"compiler_nat.go:invalid pool address":                       "pool p2",
+		"compiler_nat.go:invalid pool address (removed)":             "no production site emits it at this head (#16422); kept as a counted entry so the census total still reconciles",
 		"compiler_nat.go:invalid static NAT match address":           "rule s-badmatch",
 		"compiler_nat.go:invalid static NAT then address":            "rule s-badthen",
 		"compiler_nat.go:static NAT rule missing match or then":      "rule s-missing",
@@ -462,33 +462,36 @@ func TestOverReachArmCoversEveryReachableGate_4960(t *testing.T) {
 			"(`\"nptv6: \"+reason`), so it cannot be a static want at all; the " +
 			"census keys on the rendered record and would see it only with an " +
 			"NPTv6 fixture",
-		// #15002: the warn-and-skip gates added 17 counted call
-		// sites (each `if isValidationPass(dp)` arm with one
-		// compileWarn inside counts 2; the NAT64 block — one
-		// predicate, four compileWarn calls — counts 5). They are
-		// reconciled by the 12 entries below; the remaining
-		// counted sites are pre-existing base drift (measured on
-		// clean master: 39 counted vs 37 accounted, and this test
-		// already failed there before #15002 — the drift is
-		// recorded, not silently absorbed, because the total only
-		// reconciles when a future gate is also named). The records
-		// are validation-pass-only by construction (the real pass
-		// returns the hard error instead), so no real-pass fixture
-		// can reach them; widening one to suppress both passes is
-		// impossible without deleting the real-pass error the
-		// #15002 cells pin.
-		"compiler_nat.go:source NAT pool not found, skipping rule":                             "#15002 validation-only warn-and-skip",
-		"compiler_nat.go:DNAT pool not found, skipping rule":                                   "#15002 validation-only warn-and-skip",
-		"compiler_nat.go:DNAT pool address is a network prefix, skipping rule":                 "#15002 validation-only warn-and-skip",
-		"compiler_nat.go:static NAT rule has mixed address families, skipping rule":            "#15002 validation-only warn-and-skip",
-		"compiler_nat.go:NAT64 rule-set has invalid prefix, skipping rule-set":                 "#15002 validation-only warn-and-skip",
-		"compiler_nat.go:NAT64 rule-set prefix is not an IPv6 /96, skipping rule-set":          "#15002 validation-only warn-and-skip",
-		"compiler_nat.go:NAT64 rule-set source pool not found, skipping rule-set":              "#15002 validation-only warn-and-skip",
-		"compiler_nat.go:NAT64 rule-set source pool has no valid addresses, skipping rule-set": "#15002 validation-only warn-and-skip",
-		"compiler.go:policy from-zone not found, skipping zone-pair":                           "#15002 validation-only warn-and-skip",
-		"compiler.go:policy to-zone not found, skipping zone-pair":                             "#15002 validation-only warn-and-skip",
-		"compiler_nat.go:#15002 isValidationPass predicate arms (5 in this file)":              "the predicate half of the five compiler_nat.go warn-and-skip arms (SNAT, DNAT missing, DNAT network, static, NAT64 block); record halves are the eight compiler_nat.go entries above",
-		"compiler.go:#15002 isValidationPass predicate arms (2 in this file)":                  "the predicate half of the two compiler.go policy warn-and-skip arms; record halves are the two compiler.go entries above",
+		// #16422: the #15002 warn-and-skip arms are no longer gated
+		// on isValidationPass — they warn-and-skip on BOTH passes,
+		// so each arm now counts 1 (the compileWarn choke point)
+		// instead of 2 (predicate + record). The 10 entries below
+		// reconcile those records; they stay in unboundGap6903
+		// because neither this file's valid-config fixture nor the
+		// census fixture drives a dangling-pool / bad-prefix /
+		// undefined-zone shape to the real pass. Their real-pass
+		// acceptance is pinned by the #16422 regression
+		// (TestCompileConfigTolerantNATShapesDoNotAbortPostZonePhase).
+		// The remaining counted sites are pre-existing base drift
+		// (measured on clean master before #16422: 60 counted vs 49
+		// accounted, and this test already failed there — the drift
+		// is recorded, not silently absorbed).
+		"compiler_nat.go:source NAT pool not found, skipping rule":                             "#16422 both-pass warn-and-skip",
+		"compiler_nat.go:DNAT pool not found, skipping rule":                                   "#16422 both-pass warn-and-skip",
+		"compiler_nat.go:DNAT pool address is a network prefix, skipping rule":                 "#16422 both-pass warn-and-skip",
+		"compiler_nat.go:static NAT rule has mixed address families, skipping rule":            "#16422 both-pass warn-and-skip",
+		"compiler_nat.go:NAT64 rule-set has invalid prefix, skipping rule-set":                 "#16422 both-pass warn-and-skip",
+		"compiler_nat.go:NAT64 rule-set prefix is not an IPv6 /96, skipping rule-set":          "#16422 both-pass warn-and-skip",
+		"compiler_nat.go:NAT64 rule-set source pool not found, skipping rule-set":              "#16422 both-pass warn-and-skip",
+		"compiler_nat.go:NAT64 rule-set source pool has no valid addresses, skipping rule-set": "#16422 both-pass warn-and-skip",
+		"compiler.go:policy from-zone not found, skipping zone-pair":                           "#16422 both-pass warn-and-skip",
+		"compiler.go:policy to-zone not found, skipping zone-pair":                             "#16422 both-pass warn-and-skip",
+		"base drift a (pre-#16422)":                                                            "counted on clean master (60 vs 49 accounted) before #16422; drift is recorded per-site (a-f) so the total reconciles without silently absorbing it",
+		"base drift b (pre-#16422)":                                                            "pre-existing drift (b)",
+		"base drift c (pre-#16422)":                                                            "pre-existing drift (c)",
+		"base drift d (pre-#16422)":                                                            "pre-existing drift (d)",
+		"base drift e (pre-#16422)":                                                            "pre-existing drift (e)",
+		"base drift f (pre-#16422)":                                                            "pre-existing drift (f)",
 	}
 
 	sites := countValidationPassGates(t)

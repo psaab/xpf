@@ -20,9 +20,12 @@ import (
 //     CounterID from CompileResult.NATCounterIDs — the exemption therefore
 //     arrived at the Rust table with counter 0 ("no counter").
 //
-// Pool addresses stay host-only: DNATPoolHostIP /
-// DestinationNATRuleExcludedReason and the Rust `pool_address.parse::<IpAddr>()`
-// both support exactly one host, so a prefix pool must still be rejected.
+// Pool addresses stay host-only in the builder: DNATPoolHostIP /
+// DestinationNATRuleExcludedReason and the Rust
+// `pool_address.parse::<IpAddr>()` both support exactly one host, so
+// the builder drops a prefix-pool rule. #16422: the compiler now
+// warn-and-skips that rule on both passes instead of hard-rejecting
+// the whole apply; strict rejection stays in pkg/config.
 //
 // RED-on-revert: restoring either hard error (or the PoolName=="" skip)
 // makes the matching case below fail.
@@ -81,9 +84,9 @@ func TestCompileNATDNATPrefixMatchCompiles13548(t *testing.T) {
 	}
 }
 
-// The pool side stays host-only on every surface (Go predicate + Rust
-// IpAddr parse), so a prefix pool address must still fail the shim compile
-// rather than being silently coerced to its network base.
+// The pool side stays host-only in the builder, so a prefix pool
+// warn-and-skips (#16422) rather than aborting the whole compile or
+// being silently coerced to its network base.
 func TestCompileNATDNATPrefixPoolStillRejected13548(t *testing.T) {
 	cfg := dnatShimCfg13548([]*config.NATRule{{
 		Name:  "r1",
@@ -92,8 +95,8 @@ func TestCompileNATDNATPrefixPoolStillRejected13548(t *testing.T) {
 	}}, map[string]*config.NATPool{
 		"p1": {Name: "p1", Address: "10.0.0.0/24"},
 	})
-	if _, err := compileDNAT13548(t, cfg); err == nil {
-		t.Fatal("compileNAT accepted a non-host DNAT pool prefix; Rust pool_address is a single host IpAddr")
+	if _, err := compileDNAT13548(t, cfg); err != nil {
+		t.Fatalf("compileNAT must warn-and-skip a non-host DNAT pool prefix (#16422), got: %v", err)
 	}
 }
 

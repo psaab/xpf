@@ -39,8 +39,9 @@ func TestCompileNAT64SingularPoolAddressAndPersistentNAT14679(t *testing.T) {
 	}
 }
 
-// Poisoned NAT64-only pool: any unusable member must fail validate (not silently skip),
-// and must register nothing.
+// Poisoned NAT64-only pool: any unusable member must warn-and-skip the
+// rule-set (#16422: both passes; the helper skips the whole rule) and
+// register nothing. Strict rejection stays in pkg/config.
 func TestCompileNAT64PoisonedPoolRejected14679(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -72,11 +73,11 @@ func TestCompileNAT64PoisonedPoolRejected14679(t *testing.T) {
 				t.Fatalf("compileNAT: %v", err)
 			}
 			err := compileNAT64(dp, cfg, result)
-			if err == nil {
-				t.Fatalf("compileNAT64 accepted poisoned NAT64 pool %v; want hard error (helper skips whole rule)", tc.addrs)
+			if err != nil {
+				t.Fatalf("compileNAT64 must warn-and-skip poisoned NAT64 pool %v (#16422), got: %v", tc.addrs, err)
 			}
-			if !strings.Contains(err.Error(), "no valid addresses") {
-				t.Fatalf("error = %v, want no-valid-addresses rejection", err)
+			if _, ok := result.PoolIDs["p1"]; ok {
+				t.Fatalf("poisoned pool p1 must not receive a pool ID, got %v", result.PoolIDs)
 			}
 			// Nothing registered for the poisoned pool.
 			for _, a := range []string{"203.0.113.7", "203.0.113.0"} {

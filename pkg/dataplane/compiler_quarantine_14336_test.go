@@ -132,14 +132,20 @@ func TestCompilePolicies_SkipsQuarantinedZoneStanzas(t *testing.T) {
 	if len(dp2.sets) != 2 {
 		t.Fatalf("reserved sentinel sets=%d want 2 pairs=%v", len(dp2.sets), dp2.pairs)
 	}
-	// Fail-closed: unknown zone still rejected.
+	// #16422: an unknown zone now warn-and-skips (the helper rejects
+	// such a snapshot whole, #9410) instead of failing the compile;
+	// nothing may be written for the stanza.
 	cfg3 := &config.Config{}
 	cfg3.Security.Zones = map[string]*config.ZoneConfig{"trust": {Name: "trust"}, "untrust": {Name: "untrust"}}
 	cfg3.Security.Policies = []*config.ZonePairPolicies{{FromZone: "trust", ToZone: "nope", Policies: []*config.Policy{mkPol("x")}}}
 	res3 := &CompileResult{ZoneIDs: make(map[string]uint16), AddrIDs: make(map[string]uint32), AppIDs: make(map[string]config.AssignedAppID)}
 	assignZoneIDs(res3, cfg3)
-	if err := compilePolicies(&quarantinePolicyDP14336{}, cfg3, res3); err == nil {
-		t.Fatal("unknown zone must still fail closed")
+	dp3 := &quarantinePolicyDP14336{}
+	if err := compilePolicies(dp3, cfg3, res3); err != nil {
+		t.Fatalf("unknown zone must warn-and-skip (#16422), got: %v", err)
+	}
+	if len(dp3.sets) != 0 || len(dp3.rules) != 0 {
+		t.Fatalf("unknown-zone stanza wrote sets=%v rules=%v, want none", dp3.sets, dp3.rules)
 	}
 	// Fail-closed: non-quarantined >256 still rejected.
 	cfg4 := &config.Config{}

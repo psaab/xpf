@@ -557,21 +557,17 @@ func compileNATWithStaging(dp DataPlane, cfg *config.Config, result *CompileResu
 				// Pool mode: look up named pool
 				pool, ok := natCfg.SourcePools[rule.Then.PoolName]
 				if !ok {
-					// #15002 (A08-03): the tolerant load / peer-sync path
-					// downgrades the missing-pool gate (#5626) to a
-					// warning, and the userspace builder ships this rule
-					// with pool_unusable=missing_pool — fail-closed, the
-					// rule translates nothing. Warn-and-skip the rule on
-					// the validation pass so one dangling reference does
-					// not abort the whole apply before any host mutation;
-					// the real pass keeps the hard rejection.
-					if isValidationPass(dp) {
-						compileWarn(dp, "source NAT pool not found, skipping rule",
-							"pool", rule.Then.PoolName, "rule", rule.Name, "rule-set", rs.Name)
-						continue
-					}
-					return fmt.Errorf("source NAT pool %q not found (rule %q)",
-						rule.Then.PoolName, rule.Name)
+					// #16422: warn-and-skip on BOTH passes. The tolerant
+					// load / peer-sync path downgrades the missing-pool
+					// gate (#5626) to a warning, and the userspace builder
+					// ships this rule with pool_unusable=missing_pool —
+					// fail-closed, the rule translates nothing. A hard
+					// rejection here would abort the real apply after
+					// Phase 2 has mutated the host and publish no
+					// snapshot; strict rejection stays in pkg/config.
+					compileWarn(dp, "source NAT pool not found, skipping rule",
+						"pool", rule.Then.PoolName, "rule", rule.Name, "rule-set", rs.Name)
+					continue
 				}
 
 				// Check if pool was already compiled — skip the reparse.
@@ -686,19 +682,12 @@ func compileNATWithStaging(dp DataPlane, cfg *config.Config, result *CompileResu
 
 				pool, ok := natCfg.Destination.Pools[rule.Then.PoolName]
 				if !ok {
-					// #15002 (A08-03): the tolerant path downgrades the
-					// missing-pool gate (#5626) to a warning, and the
-					// userspace builder drops this rule
+					// #16422: warn-and-skip on BOTH passes (see SNAT).
+					// The userspace builder drops this rule
 					// (DestinationNATRuleExcludedReason) — fail-closed.
-					// Warn-and-skip on the validation pass; the real pass
-					// keeps the hard rejection.
-					if isValidationPass(dp) {
-						compileWarn(dp, "DNAT pool not found, skipping rule",
-							"pool", rule.Then.PoolName, "rule", rule.Name, "rule-set", rs.Name)
-						continue
-					}
-					return fmt.Errorf("DNAT pool %q not found (rule %q)",
-						rule.Then.PoolName, rule.Name)
+					compileWarn(dp, "DNAT pool not found, skipping rule",
+						"pool", rule.Then.PoolName, "rule", rule.Name, "rule-set", rs.Name)
+					continue
 				}
 
 				// Validate source-address-name if present (config compatibility)
@@ -743,20 +732,12 @@ func compileNATWithStaging(dp DataPlane, cfg *config.Config, result *CompileResu
 					// DNAT requires exact host address — reject non-host CIDRs.
 					ones, bits := poolNet.Mask.Size()
 					if (bits == 32 && ones != 32) || (bits == 128 && ones != 128) {
-						// #15002 (A08-03): the tolerant path downgrades
-						// the non-host DNAT pool gate (#3450) to a
-						// warning, and the userspace builder drops
-						// this rule (DestinationNATRuleExcludedReason)
-						// — fail-closed. Warn-and-skip on the
-						// validation pass; the real pass keeps the
-						// hard rejection.
-						if isValidationPass(dp) {
-							compileWarn(dp, "DNAT pool address is a network prefix, skipping rule",
-								"pool", pool.Name, "addr", pool.Address, "rule", rule.Name, "rule-set", rs.Name)
-							continue
-						}
-						return fmt.Errorf("DNAT pool %q address %q is a network prefix, not a host address (use /%d for DNAT)",
-							pool.Name, pool.Address, bits)
+						// #16422: warn-and-skip on BOTH passes. The
+						// userspace builder drops this rule
+						// (DestinationNATRuleExcludedReason) — fail-closed.
+						compileWarn(dp, "DNAT pool address is a network prefix, skipping rule",
+							"pool", pool.Name, "addr", pool.Address, "rule", rule.Name, "rule-set", rs.Name)
+						continue
 					}
 				}
 
@@ -895,21 +876,15 @@ func compileStaticNAT(dp DataPlane, cfg *config.Config, result *CompileResult) e
 			extIsV4 := extIP.To4() != nil
 			intIsV4 := intIP.To4() != nil
 			if extIsV4 != intIsV4 {
-				// #15002 (A08-03): the tolerant path downgrades the
-				// mixed-family gate (#13922) to a warning. Unlike the
-				// block-pair case the Rust table drops per-rule, a
-				// host mixed pair is installed keyed by family on each
-				// side and simply never matches — fail-closed. Warn-
-				// and-skip on the validation pass (no counter ID, so
-				// `show` does not claim hits for an inert rule); the
-				// real pass keeps the hard rejection.
-				if isValidationPass(dp) {
-					compileWarn(dp, "static NAT rule has mixed address families, skipping rule",
-						"rule", rule.Name, "rule-set", rs.Name, "match", rule.Match, "then", rule.Then)
-					continue
-				}
-				return fmt.Errorf("static NAT rule %q has mixed address families (match=%s, then=%s)",
-					rule.Name, rule.Match, rule.Then)
+				// #16422: warn-and-skip on BOTH passes (no counter ID,
+				// so `show` does not claim hits for an inert rule).
+				// The tolerant path downgrades the mixed-family gate
+				// (#13922) to a warning; the snapshot builder ships
+				// the pair keyed by family on each side and it simply
+				// never matches — fail-closed.
+				compileWarn(dp, "static NAT rule has mixed address families, skipping rule",
+					"rule", rule.Name, "rule-set", rs.Name, "match", rule.Match, "then", rule.Then)
+				continue
 			}
 
 			// Assign the per-rule translation hit counter ID (#2218) so the
@@ -960,7 +935,7 @@ func compileNPTv6(dp DataPlane, cfg *config.Config) error {
 		// must keep warn-and-skip (never hard-error) disposition here.
 		dropped16008 := cfg.LenientNATUndefinedZoneRuleSets[config.NATRuleSetRef{Kind: "static", Name: rs.Name}]
 		for _, rule := range rs.Rules {
-			if rule == nil {
+			if rule == nil || !rule.IsNPTv6 {
 				continue
 			}
 
@@ -1191,54 +1166,41 @@ func compileNAT64WithStaging(dp DataPlane, cfg *config.Config, result *CompileRe
 			continue
 		}
 
-		// #15002 (A08-03): on the validation pass, every fault below that
-		// the tolerant config path downgrades to a warning (the NAT64
-		// prefix gate #3886/#8667, a dangling or unusable source pool)
-		// warns-and-skips this rule-set instead of aborting the whole
-		// apply: the userspace builder emits the rule-set (prefix through
+		// #16422: on BOTH passes, every fault below that the tolerant
+		// config path downgrades to a warning (the NAT64 prefix gate
+		// #3886/#8667, a dangling or unusable source pool) warns-and-
+		// skips this rule-set instead of aborting the whole apply:
+		// the userspace builder emits the rule-set (prefix through
 		// the #8667 normaliser) and the Rust loader skips an
 		// unparseable/non-/96 prefix or installs no allocator for a
-		// missing/unusable pool, scoped to this rule-set (#3888). The
-		// real pass keeps each hard rejection below verbatim.
-		if isValidationPass(dp) {
-			norm := config.NormaliseNAT64PrefixForSnapshot(rs.Prefix)
-			normIP, normNet, nerr := net.ParseCIDR(norm)
-			if nerr != nil {
-				compileWarn(dp, "NAT64 rule-set has invalid prefix, skipping rule-set",
-					"rule-set", rs.Name, "prefix", rs.Prefix, "err", nerr)
+		// missing/unusable pool, scoped to this rule-set (#3888).
+		// The normalised prefix is parsed (not rs.Prefix verbatim)
+		// so a spelling the helper accepts via the normaliser is
+		// not warn-skipped here.
+		norm := config.NormaliseNAT64PrefixForSnapshot(rs.Prefix)
+		normIP, normNet, nerr := net.ParseCIDR(norm)
+		if nerr != nil {
+			compileWarn(dp, "NAT64 rule-set has invalid prefix, skipping rule-set",
+				"rule-set", rs.Name, "prefix", rs.Prefix, "err", nerr)
+			continue
+		}
+		if ones, _ := normNet.Mask.Size(); ones != 96 || normIP.To16() == nil {
+			compileWarn(dp, "NAT64 rule-set prefix is not an IPv6 /96, skipping rule-set",
+				"rule-set", rs.Name, "prefix", rs.Prefix)
+			continue
+		}
+		if _, pooled := result.PoolIDs[rs.SourcePool]; !pooled {
+			pool, poolExists := cfg.Security.NAT.SourcePools[rs.SourcePool]
+			if !poolExists || pool == nil {
+				compileWarn(dp, "NAT64 rule-set source pool not found, skipping rule-set",
+					"rule-set", rs.Name, "pool", rs.SourcePool)
 				continue
 			}
-			if ones, _ := normNet.Mask.Size(); ones != 96 || normIP.To16() == nil {
-				compileWarn(dp, "NAT64 rule-set prefix is not an IPv6 /96, skipping rule-set",
-					"rule-set", rs.Name, "prefix", rs.Prefix)
+			if _, usable := config.NAT64PoolHostAddresses(pool); !usable {
+				compileWarn(dp, "NAT64 rule-set source pool has no valid addresses, skipping rule-set",
+					"rule-set", rs.Name, "pool", pool.Name)
 				continue
 			}
-			if _, pooled := result.PoolIDs[rs.SourcePool]; !pooled {
-				pool, poolExists := cfg.Security.NAT.SourcePools[rs.SourcePool]
-				if !poolExists || pool == nil {
-					compileWarn(dp, "NAT64 rule-set source pool not found, skipping rule-set",
-						"rule-set", rs.Name, "pool", rs.SourcePool)
-					continue
-				}
-				if _, usable := config.NAT64PoolHostAddresses(pool); !usable {
-					compileWarn(dp, "NAT64 rule-set source pool has no valid addresses, skipping rule-set",
-						"rule-set", rs.Name, "pool", pool.Name)
-					continue
-				}
-			}
-		}
-
-		// Parse the /96 prefix (e.g. "64:ff9b::/96")
-		ip, ipNet, err := net.ParseCIDR(rs.Prefix)
-		if err != nil {
-			return fmt.Errorf("NAT64 rule-set %q: invalid prefix %q: %w", rs.Name, rs.Prefix, err)
-		}
-		ones, _ := ipNet.Mask.Size()
-		if ones != 96 {
-			return fmt.Errorf("NAT64 rule-set %q: prefix must be /96, got /%d", rs.Name, ones)
-		}
-		if ip.To16() == nil {
-			return fmt.Errorf("NAT64 rule-set %q: prefix is not IPv6", rs.Name)
 		}
 
 		// Look up the source pool ID. If the pool was defined in source NAT
@@ -1263,11 +1225,7 @@ func compileNAT64WithStaging(dp DataPlane, cfg *config.Config, result *CompileRe
 			// parse_pool_v4, all-or-nothing). Members are singular Address
 			// plus Addresses; any non-host/IPv6/unparseable member poisons
 			// the whole pool, so it has no valid NAT64 addresses.
-			hosts, usable := config.NAT64PoolHostAddresses(pool)
-			if !usable {
-				return fmt.Errorf("NAT64 rule-set %q: source pool %q has no valid addresses",
-					rs.Name, pool.Name)
-			}
+			hosts, _ := config.NAT64PoolHostAddresses(pool)
 			// Assign next pool ID (after those used by SNAT).
 			newID := result.NextPoolID
 			result.NextPoolID = nextSourceNATPoolID(result.NextPoolID, pool.Name)
@@ -1280,7 +1238,6 @@ func compileNAT64WithStaging(dp DataPlane, cfg *config.Config, result *CompileRe
 			compileInfo(dp, "auto-assigned NAT64 source pool",
 				"pool", pool.Name, "pool_id", newID, "v4_ips", len(hosts), "v6_ips", 0)
 		}
-
 		compileInfo(dp, "compiled NAT64 prefix",
 			"rule-set", rs.Name, "prefix", rs.Prefix,
 			"pool", rs.SourcePool, "pool_id", poolID)
