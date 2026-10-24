@@ -34,7 +34,7 @@ Requirements: make/go/cargo, libguestfs-tools, qemu-utils, curl; incus for
 the validation gate. /dev/kvm makes libguestfs fast.
 
 Usage:
-  bake.py [--version V] [--out DIR] [--skip-build] [--skip-validate] [--keep-work]
+  bake.py [--version V] [--out DIR] [--skip-build] [--skip-validate] [--keep-work] [--hugepages N]
 """
 
 import argparse
@@ -114,29 +114,57 @@ SYSCTL_CONF = (
     "net.netfilter.nf_conntrack_tcp_loose=0\n"
 )
 #
-# #16243: hugepage reservation for AF_XDP UMEM at ring-entries 16384.
+# #16243 / #16455: hugepage reservation for AF_XDP UMEM.
 # UMEM tries MAP_HUGETLB first and falls back to 4 KiB pages + an advisory
-# THP hint when the pool is short -- the plan measured
+# THP hint when the pool is short. #16243 measured
 # `Hugepage-backed bindings: 0/30` on a ring-16384 rig whose only defect
-# was that NO provisioning path installed etc/sysctl.d/99-xpf-hugepages.conf:
-# the file existed in the repo but neither the bake, the .deb, nor any
-# deploy tool copied it to /etc/sysctl.d. Ship it in the image so the knob
-# is live by default. Sizing (80 x SUM min(rx_queues,16) = 1440 for the
-# reference 18-binding topology) is documented in the conf itself and in
-# docs/deploy-quickstart.md / docs/userspace-dataplane-architecture.md;
-# resizing for a larger topology stays an operator edit of that one file.
-# Hugepages are withheld from ordinary allocation, so do not raise this
-# blindly on small appliances -- see the conf header.
+# was that NO provisioning path installed etc/sysctl.d/99-xpf-hugepages.conf,
+# so the bake ships it in the image. #16455 then showed the shipped
+# 1440-page (2.8 GiB) large-ring pool was itself the defect: it is applied
+# at boot on every baked image regardless of the committed ring-entries,
+# OOM-killing the 2 GiB Tier-1 validation VM and leaving ~620 MiB free on
+# the documented 4 GiB appliance before any service starts. The repo conf
+# now ships the DEFAULT-ring pool only (90 = 5 pages x 18 reference
+# bindings at ring-entries 1024; see the conf header), and a rig image
+# that commits ring-entries >= 16384 sizes its pool explicitly with
+# `--hugepages N` (1440 for the reference 18-binding topology). The .deb
+# installs NO sysctl.d file at all (#16455): /usr/lib/sysctl.d is applied
+# by systemd's file trigger at package-install time, so a package payload
+# there rewrites a foreign host's pool the moment apt finishes (#10733).
+# Sizing formulas are documented in the conf itself and in
+# docs/deploy-quickstart.md / docs/userspace-dataplane-architecture.md.
 HUGEPAGES_CONF_PATH = os.path.join(ROOT, "etc", "sysctl.d", "99-xpf-hugepages.conf")
+#
+# The shipped default pool and the large-ring floor, in 2 MiB pages.
+# DEFAULT_HUGEPAGES is what etc/sysctl.d/99-xpf-hugepages.conf must carry
+# verbatim: 5 pages per binding (ring-entries 1024 UMEM rounded up to
+# whole hugepages; 6 on virtio_net) x the 18-binding reference topology.
+# HUGEPAGES_REFERENCE_LARGE_RING is the --hugepages value the reference
+# topology needs at ring-entries 16384 (80 pages x 18 bindings); it is a
+# documented floor for rig bakes, never a shipped default.
+DEFAULT_HUGEPAGES = 90
+HUGEPAGES_REFERENCE_LARGE_RING = 1440
 
-def hugepages_conf(conf_text=None) -> str:
-    """Return the shipped UMEM hugepage reservation, verbatim.
+def hugepages_conf(conf_text=None, pages=None) -> str:
+    """Return the UMEM hugepage reservation the bake will write.
 
-    Single source of truth is etc/sysctl.d/99-xpf-hugepages.conf in the
-    repo (also the file an operator installs on a foreign host). Reading
-    it here -- rather than duplicating the value -- keeps the bake, the
-    on-box file, and the 80-pages-per-binding formula pinned by
-    userspace-dp's umem_sizing_contract_tests from drifting apart.
+    With no override, return etc/sysctl.d/99-xpf-hugepages.conf verbatim
+    after validating that its effective pool is EXACTLY the shipped
+    default (DEFAULT_HUGEPAGES, the ring-entries 1024 pool). Reading the
+    repo file -- rather than duplicating the value -- keeps the bake,
+    the on-box file, and the per-binding formula pinned by
+    userspace-dp's umem_sizing_contract_tests from drifting apart; the
+    exact-equality gate is what stops the large-ring pool (1440) from
+    ever shipping as the default again (#16455).
+
+    `pages` is the explicit rig-bake override (--hugepages N): the
+    caller has already refused N below the default pool, and this
+    function additionally refuses N below
+    HUGEPAGES_REFERENCE_LARGE_RING when it yields the text (a rig that
+    commits ring-entries 16384 needs 80 pages per binding; see
+    effective_hugepages()). The override is rendered by substituting
+    ONLY the effective vm.nr_hugepages value in the validated repo
+    text, so comments and grammar are identical on every path.
 
     Fail-closed (review 16260): model the file the way its boot consumer
     (systemd-sysctl) does, not as a substring. Lines are processed in
@@ -173,10 +201,8 @@ def hugepages_conf(conf_text=None) -> str:
     underscore- and Unicode-digit-friendly) vouch for bytes the kernel
     interprets differently.
 
-    The bake dies unless the surviving entry for `vm.nr_hugepages` is an
-    integer >= 1440 (80 pages x 18 bindings, the reference ring-entries
-    16384 topology). A glob pattern (`*`/`?`/`[`) in any key is refused
-    outright: systemd expands globs against live /proc at boot, which a
+    A glob pattern (`*`/`?`/`[`) in any key is refused outright:
+    systemd expands globs against live /proc at boot, which a
     build-time check cannot evaluate, so it must never ship silently in
     the one file this guard claims to validate.
     """
@@ -320,13 +346,170 @@ def hugepages_conf(conf_text=None) -> str:
             "hugepage knob (#16243)")
     raw_value = entries["vm/nr_hugepages"]
     effective = kernel_ulong(raw_value)
-    if effective < 1440:
-        die(f"{HUGEPAGES_CONF_PATH} effectively reserves "
-            f"vm.nr_hugepages={effective}, below the 1440 pages "
-            "(80 x 18 bindings) the reference ring-entries 16384 "
-            "topology needs; refusing to bake an under-provisioned "
-            "image (#16243)")
-    return conf_text
+    if pages is None:
+        # Default bake (#16455): the shipped pool must be EXACTLY the
+        # default-ring pool. Equality, not a floor: a floor at 1440 is
+        # precisely the regression being fixed, and any value above 90
+        # withholds memory the default config cannot use.
+        if effective != DEFAULT_HUGEPAGES:
+            die(f"{HUGEPAGES_CONF_PATH} effectively reserves "
+                f"vm.nr_hugepages={effective}, but the shipped default "
+                f"must be exactly {DEFAULT_HUGEPAGES} pages (5 x 18 "
+                "bindings at the default ring-entries 1024, #16455); "
+                "refusing to bake a default image whose pool is not "
+                "sized for the default config. Size a large-ring rig "
+                "image with --hugepages N instead of raising the "
+                "shipped default")
+        return conf_text
+    if pages < HUGEPAGES_REFERENCE_LARGE_RING:
+        die(f"--hugepages {pages} is below "
+            f"{HUGEPAGES_REFERENCE_LARGE_RING} pages (80 x 18 bindings), "
+            "the reference ring-entries 16384 topology's pool; a "
+            "large-ring rig baked with a short pool boots with "
+            "Hugepage-backed bindings below N/N (#16243/#16455). Pass "
+            "at least that value, sized as 80 x SUM min(rx_queues,16) "
+            "over every binding candidate for a larger topology")
+    # Render the override by rewriting ONLY the value bytes of the
+    # effective (last surviving) vm.nr_hugepages assignment. Earlier
+    # assignments for the key are dead at boot (later line wins), so a
+    # regex over the whole text could rewrite a shadowed line and leave
+    # the effective one short; locate the line through the same parse.
+    rendered = _render_hugepages_override(conf_text, pages)
+    # The rendered text must itself pass the effective-value parse at
+    # the requested pool: re-running the guard on it (without recursing
+    # into the override branch) proves the substitution landed on the
+    # line systemd-sysctl will honour.
+    if _effective_hugepages(rendered) != pages:
+        die(f"internal error: --hugepages {pages} override did not "
+            "produce that effective pool; refusing to bake (#16455)")
+    return rendered
+
+
+def _hugepages_effective_span(conf_text):
+    """(effective_pages, (start, end)) for vm.nr_hugepages in conf_text.
+
+    Re-runs hugepages_conf()'s consumer model (systemd-sysctl key
+    normalization, later line wins, kernel base-0 integers) and returns
+    the effective value plus the character span of its value token in
+    the ORIGINAL text, so a caller can rewrite exactly the bytes the
+    boot consumer will read. Deliberately total over already-validated
+    text (callers validate through hugepages_conf() first); returns
+    (None, None) when there is no effective assignment.
+    """
+    # Localized re-implementation of the normalization used above; kept
+    # next to hugepages_conf so the two are reviewed together. The bake
+    # tests pin that this span tracks the effective line, not the first.
+    def normalize(key: str) -> str:
+        k = key.strip(" \t\n\r")
+        first = next((i for i, c in enumerate(k) if c in "/."), None)
+        if first is not None and k[first] == ".":
+            k = k.translate(str.maketrans({".": "/", "/": "."}))
+        absolute = k.startswith("/")
+        parts = []
+        for seg in k.split("/"):
+            if seg in ("", "."):
+                continue
+            if seg == ".." and absolute and not parts:
+                continue
+            parts.append(seg)
+        return "/".join(parts)
+
+    def kernel_ulong_soft(text: str):
+        if not text or text[0] == "-" or len(text) > 20:
+            return None
+        if text[:2] in ("0x", "0X"):
+            digits, alphabet, base = text[2:], "0123456789abcdefABCDEF", 16
+        elif len(text) > 1 and text[0] == "0":
+            digits, alphabet, base = text[1:], "01234567", 8
+        else:
+            digits, alphabet, base = text, "0123456789", 10
+        if not digits or any(c not in alphabet for c in digits):
+            return None
+        parsed = int(digits, base)
+        return parsed if parsed < 2**64 else None
+
+    entries = {}
+    offset = 0
+    for chunk in re.split(r"(\r\n|\r|\n)", conf_text):
+        if chunk in ("\r\n", "\r", "\n"):
+            offset += len(chunk)
+            continue
+        line, line_off = chunk, offset
+        offset += len(chunk)
+        stripped = line.strip(" \t\n\r")
+        if not stripped or stripped.startswith("#") or stripped.startswith(";"):
+            continue
+        ignore_failure = stripped.startswith("-")
+        body = stripped[1:] if ignore_failure else stripped
+        key, sep, value = body.partition("=")
+        if normalize(key) != "vm/nr_hugepages":
+            continue
+        if sep:
+            v = value.strip(" \t\n\r")
+            lead = len(value) - len(value.lstrip(" \t\n\r"))
+            eq = line.index("=")
+            start = line_off + eq + 1 + lead
+            entries["vm/nr_hugepages"] = (kernel_ulong_soft(v),
+                                          (start, start + len(v)))
+        elif ignore_failure:
+            entries["vm/nr_hugepages"] = (None, None)
+    return entries.get("vm/nr_hugepages", (None, None))
+
+
+def _effective_hugepages(conf_text) -> int:
+    """Effective vm.nr_hugepages in already-validated conf text."""
+    effective, _span = _hugepages_effective_span(conf_text)
+    if effective is None:
+        die(f"{HUGEPAGES_CONF_PATH} has no effective vm.nr_hugepages "
+            "assignment; refusing to bake (#16455)")
+    return effective
+
+
+def effective_hugepages(conf_text=None) -> int:
+    """Effective vm.nr_hugepages in the given (or repo) conf text.
+
+    Reads the surviving value through the consumer-model span parse
+    WITHOUT re-imposing the shipped-default equality gate: callers
+    (validate tooling, tests) use this to learn what a conf -- repo,
+    rendered override, or hypothetical regression text -- actually
+    reserves. hugepages_conf() remains the fail-closed gate for what
+    the bake may ship.
+    """
+    if conf_text is None:
+        with open(HUGEPAGES_CONF_PATH, encoding="ascii",
+                  errors="strict", newline="") as f:
+            conf_text = f.read()
+    return _effective_hugepages(conf_text)
+
+
+def _render_hugepages_override(conf_text, pages: int) -> str:
+    _effective, span = _hugepages_effective_span(conf_text)
+    if span is None:
+        die(f"{HUGEPAGES_CONF_PATH} has no effective vm.nr_hugepages "
+            "assignment to override; refusing to bake (#16455)")
+    start, end = span
+    return conf_text[:start] + str(pages) + conf_text[end:]
+
+
+def parse_hugepages_arg(text: str) -> int:
+    """Parse the --hugepages CLI value: a plain decimal page count.
+
+    Refuses anything that is not ASCII decimal digits (no sign, no
+    base prefix, no whitespace tricks the kernel grammar would read
+    differently) and any value below the shipped default pool: an
+    override exists to SIZE UP for large rings, never to shrink the
+    default-ring pool out from under a default-config image.
+    """
+    if not text or any(c not in "0123456789" for c in text):
+        die(f"--hugepages {text!r} is not a plain decimal page count; "
+            "refusing to bake (#16455)")
+    pages = int(text)
+    if pages < DEFAULT_HUGEPAGES:
+        die(f"--hugepages {pages} is below the shipped default pool "
+            f"({DEFAULT_HUGEPAGES} pages at ring-entries 1024); the "
+            "override sizes a large-ring rig UP, it never shrinks the "
+            "default pool (#16455)")
+    return pages
 
 
 # apt-get update exits 0 even when an index fetch fails; --error-on=any
@@ -847,7 +1030,7 @@ def fetch_base(cache_dir, work_dir):
     return rel, base_url, img, cached, actual, pinned
 
 
-def virt_customize(work_qcow, xpf_deb):
+def virt_customize(work_qcow, xpf_deb, hugepages=None):
     pkgs = " ".join(RUNTIME_PACKAGES)
     deb_name = os.path.basename(xpf_deb)
     argv = [
@@ -866,7 +1049,7 @@ def virt_customize(work_qcow, xpf_deb):
         "--copy-in", f"{HERE}/99-incus-agent.rules:/usr/lib/udev/rules.d",
         "--run-command", "chmod 0755 /usr/lib/systemd/incus-agent-setup",
         "--write", f"/etc/sysctl.d/99-xpf.conf:{SYSCTL_CONF}",
-        "--write", f"/etc/sysctl.d/99-xpf-hugepages.conf:{hugepages_conf()}",
+        "--write", f"/etc/sysctl.d/99-xpf-hugepages.conf:{hugepages_conf(pages=hugepages)}",
         "--run-command", "mkdir -p /etc/xpf && chmod 0750 /etc/xpf",
         # #7114: the appliance-image marker. xpfd's #1922 bootstrap lifeline
         # refuses to rename or bring up ANY NIC when it cannot identify a
@@ -1458,7 +1641,17 @@ def main():
     p.add_argument("--skip-build", action="store_true")
     p.add_argument("--skip-validate", action="store_true")
     p.add_argument("--keep-work", action="store_true")
+    p.add_argument("--hugepages", metavar="N", default=None,
+                   help="2 MiB hugepages to reserve in the image's "
+                        "/etc/sysctl.d/99-xpf-hugepages.conf (rig images "
+                        "committing ring-entries >= 16384; default: the "
+                        "shipped ring-entries 1024 pool from "
+                        "etc/sysctl.d/99-xpf-hugepages.conf)")
     a = p.parse_args()
+    # Validate the rig override before any build work: a bad pool must
+    # fail in seconds, not after the .deb build (#16455).
+    hugepages = (parse_hugepages_arg(a.hugepages)
+                 if a.hugepages is not None else None)
     # Package identity comes from the selected package; source_dirty binds the
     # current checkout inputs that this bake (including --skip-build) copies.
     source_version = deb_version_for_head(ROOT)
@@ -1583,7 +1776,7 @@ def main():
 
         # 4. customize
         info("customizing image offline (packages, kernel >= 6.18, xpf install)...")
-        virt_customize(work_qcow, xpf_deb)
+        virt_customize(work_qcow, xpf_deb, hugepages=hugepages)
 
         # 4b. read the #6500 inventory back OUT of the image, offline.
         # virt-cat, not a boot: the whole point is that the record is

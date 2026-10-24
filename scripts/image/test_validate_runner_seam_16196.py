@@ -446,7 +446,7 @@ class SubprocessReachMapTests(unittest.TestCase):
                          ["guest", "guest_absent", "guest_sh", "incus"],
                          f"bare module-helper calls inside Harness: {bare_helpers}")
         expected = {"run": 1, "_run": 5, "_popen": 1, "_incus": 20,
-                    "guest": 38, "guest_sh": 30, "guest_absent": 4}
+                    "guest": 39, "guest_sh": 30, "guest_absent": 4}
         for name, want in expected.items():
             self.assertEqual(counts.get(name), want,
                              f"Harness dispatch via self.{name}: "

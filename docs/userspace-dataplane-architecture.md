@@ -3172,7 +3172,8 @@ stopped.
   in TLB-miss latency. With 2 MB hugepages the same UMEM needs ~480 TLB entries,
   fitting comfortably in the iTLB/dTLB.
 
-  **Reserve via `/etc/sysctl.d/99-xpf-hugepages.conf`:**
+  **Reserve via `/etc/sysctl.d/99-xpf-hugepages.conf`.** At this ring size
+  the pool is:
   ```
   vm.nr_hugepages = 1440
   ```
@@ -3187,24 +3188,43 @@ stopped.
   = 18 bindings); it replaces a previous `600`, which was derived from one NIC's
   6 bindings and covered only 7 of those 18.
 
-  **The appliance image ships the reservation (#16243).** `scripts/image/bake.py`
-  writes `/etc/sysctl.d/99-xpf-hugepages.conf` verbatim from the repo file
-  (`hugepages_conf()`, which models systemd-sysctl's effective-value
-  semantics for the file — normalized-key table with the exact
-  first-separator rule — and refuses to bake below 1440; pinned by
-  `scripts/image/test_bake_hugepages_16243.py`), and `debian/rules` installs the
-  same file into the `.deb` under `/usr/lib/sysctl.d/` (package-owned rather
-  than an `/etc` conffile, so unattended adoption never prompts; an operator's
-  `/etc/sysctl.d` copy still wins by sysctl.d precedence). Before #16243 NO
-  provisioning path installed it — the file existed in the repo only — so a
-  ring-16384 rig booted with `HugePages_Total=0` and reported
-  `Hugepage-backed bindings: 0/30` despite the bind code being correct.
-  The shipped pool (1440) is the reference-topology size above; a topology with
-  more bindings (30 needs 2400) still needs the operator to raise the `/etc`
-  file, because a pool is withheld from ordinary memory for the whole boot and
-  the appliance's RAM and binding count are not known at bake time. At the
-  default `ring-entries` most of the pool stays unallocated (small UMEMs still
-  try `MAP_HUGETLB` first, so a few pages are used).
+  **What ships by default is NOT this pool (#16243/#16455).** #16243 first
+  shipped the reservation on every provisioning path — `scripts/image/bake.py`
+  wrote the file verbatim into the image and `debian/rules` installed it in
+  the `.deb` under `/usr/lib/sysctl.d/` — because before it a ring-16384 rig
+  booted with `HugePages_Total=0` and reported `Hugepage-backed bindings: 0/30`
+  despite the bind code being correct. #16455 then showed that shipping the
+  1440-page (2.8 GiB) large-ring pool as the universal default was itself a
+  defect: systemd-sysctl applies it at boot on every baked image regardless
+  of the committed `ring-entries` (the default 1024 needs 5 pages per
+  binding), OOM-killing the 2 GiB Tier-1 validation VM and leaving ~620 MiB
+  on the documented 4 GiB appliance; and the `.deb`'s `/usr/lib/sysctl.d`
+  payload is applied by systemd's file trigger at package-install time, so
+  `apt install` rewrote a foreign host's pool immediately, not "next boot".
+  The current contract:
+
+  - the repo file and every default bake ship `vm.nr_hugepages = 90`
+    (5 pages × 18 bindings at ring-entries 1024, 180 MiB).
+    `hugepages_conf()` in bake.py — which models systemd-sysctl's
+    effective-value semantics for the file (normalized-key table with the
+    exact first-separator rule, kernel base-0 values) — refuses to bake
+    any other shipped default; pinned by
+    `scripts/image/test_bake_hugepages_16243.py`.
+  - a rig image that commits ring-entries 16384 is baked with
+    `bake.py --hugepages 1440` (or the sized value; the bake refuses an
+    override below the 1440-page reference large-ring pool), and a running
+    appliance is resized by editing `/etc/sysctl.d/99-xpf-hugepages.conf`.
+  - the `.deb` installs no sysctl.d file at all (#10733): installing the
+    package on an unmarked host leaves `/proc/sys/vm/nr_hugepages`
+    unchanged. A foreign-host operator who wants a pool copies the repo
+    file to `/etc/sysctl.d/` by hand.
+  - `validate.py` scenario A asserts the booted gate VM shows
+    `HugePages_Total <= 90` with at least 1 GiB `MemAvailable`, so a
+    large-ring pool shipping as the default again fails the Tier-1 gate.
+
+  At the default `ring-entries` small UMEMs still try `MAP_HUGETLB` first,
+  so the 90-page pool is mostly consumed by the reference topology's
+  bindings and stays free (as `HugePages_Free`) on smaller ones.
 
   Apply with `sysctl --system` (or reboot). Verify with `grep HugePages_ /proc/meminfo`.
   If the pool cannot back a UMEM, `MAP_HUGETLB` fails and the daemon falls back to

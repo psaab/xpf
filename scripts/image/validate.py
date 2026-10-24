@@ -658,6 +658,85 @@ def _kernel_hold_verdict(installed, held):
                   f"({', '.join(inst)})")
 
 
+# ── default-pool memory floor (#16455) ───────────────────────────────
+# The Tier-1 gate boots the baked image in a 2 GiB VM (launch()). Before
+# #16455 the image carried vm.nr_hugepages = 1440 (2.8 GiB) in
+# /etc/sysctl.d, applied by systemd-sysctl at boot: the guest booted
+# into OOM kills, so the gate either failed or ran unrepresentatively,
+# and a 4 GiB appliance kept only ~620 MiB for everything else. The
+# shipped pool is now the default-ring pool (bake.DEFAULT_HUGEPAGES,
+# 90 pages = 180 MiB). This verdict is the other half of that fix: the
+# guest must show HugePages_Total at most what ring-entries 1024 needs
+# (the acceptance bound) AND at least 1 GiB of MemAvailable in the
+# 2 GiB gate VM before the scenario claims a usable appliance. Both
+# readings come from ONE /proc/meminfo read; a missing or unparseable
+# field is a FAIL, never a pass -- a gate that cannot observe the
+# property it exists to assert has not asserted it.
+MEMINFO_PROBE = "cat /proc/meminfo"
+#: MemAvailable floor for the 2 GiB Tier-1 VM, in KiB (1 GiB).
+MEM_AVAILABLE_FLOOR_KIB = 1024 * 1024
+
+
+def _meminfo_kib(meminfo_text, field):
+    """One `Field:  N kB` value from /proc/meminfo text, or None."""
+    m = re.search(rf"^{re.escape(field)}:\s+(\d+)\s*kB\s*$",
+                  meminfo_text or "", re.MULTILINE)
+    return int(m.group(1)) if m else None
+
+
+def _meminfo_pages(meminfo_text, field):
+    """One bare-count field (HugePages_*) from /proc/meminfo, or None."""
+    m = re.search(rf"^{re.escape(field)}:\s+(\d+)\s*$",
+                  meminfo_text or "", re.MULTILINE)
+    return int(m.group(1)) if m else None
+
+
+def _memory_floor_verdict(meminfo_text, max_hugepages,
+                          floor_kib=MEM_AVAILABLE_FLOOR_KIB):
+    """Pure verdict over the guest's /proc/meminfo: is the default-ring
+    pool the only hugepage reservation, and is memory still usable?
+    Returns (ok, reason).
+
+    `max_hugepages` is bake.DEFAULT_HUGEPAGES -- what ring-entries 1024
+    needs on the reference topology. HugePages_Total above it means a
+    large-ring (or larger) pool shipped as the default again (#16455);
+    MemAvailable below `floor_kib` in the 2 GiB gate VM means the boot
+    is already memory-starved before any scenario workload runs.
+    Unreadable fields FAIL: the pre-#16455 image is exactly the case
+    where this probe matters, and it must not pass unobserved.
+    """
+    total = _meminfo_pages(meminfo_text, "HugePages_Total")
+    if total is None:
+        return False, ("could not observe HugePages_Total in the guest "
+                       "/proc/meminfo -- the hugepage pool the image "
+                       "reserved is unobserved, which is not the same "
+                       "as small (#16455)")
+    if total > max_hugepages:
+        return False, (f"HugePages_Total={total} exceeds the "
+                       f"default-ring pool of {max_hugepages} pages "
+                       f"({max_hugepages * 2} MiB) -- a large-ring pool "
+                       "shipped as the default again; at 2 MiB/page this "
+                       "pool alone withholds "
+                       f"{total * 2} MiB from ordinary allocation "
+                       "(#16455: the 1440-page default OOM-killed the "
+                       "2 GiB gate VM)")
+    avail = _meminfo_kib(meminfo_text, "MemAvailable")
+    if avail is None:
+        return False, ("could not observe MemAvailable in the guest "
+                       "/proc/meminfo -- post-boot memory headroom is "
+                       "unobserved, which is not the same as sufficient "
+                       "(#16455)")
+    if avail < floor_kib:
+        return False, (f"MemAvailable={avail} KiB "
+                       f"({avail // 1024} MiB) is below the "
+                       f"{floor_kib // 1024} MiB floor in the 2 GiB "
+                       "Tier-1 VM -- the baked image boots memory-"
+                       "starved before any xpf service starts (#16455)")
+    return True, (f"HugePages_Total={total} (<= {max_hugepages} "
+                  f"default-ring pages), MemAvailable={avail} KiB "
+                  f"(>= {floor_kib} KiB floor)")
+
+
 def _oneshot_clean_verdict(name, exec_main_status, active_state, result):
     """Pure verdict over `systemctl show` fields for a first-boot oneshot:
     did it RUN and exit 0? Returns (ok, reason).
@@ -1381,6 +1460,7 @@ class Harness:
         if not self.guest_sh(a, 'grep -qw init_on_alloc=0 /proc/cmdline'):
             fail("init_on_alloc=0 missing from the booted kernel cmdline")
         self.assert_kernel_hold(a)
+        self.assert_memory_floor(a)
         self.assert_secure_boot(a)
         info("in-guest verify-dataplane (the bake gate, image kernel)...")
         if self.guest(a, "nice", "-n", "19", "/usr/local/sbin/xpfd", "verify-dataplane",
@@ -1455,6 +1535,29 @@ class Harness:
         if not ok:
             fail("#1930 INC-0 kernel hold assertion FAILED: " + reason)
         info(f"kernel hold: {reason}")
+
+    def assert_memory_floor(self, inst):
+        """Assert the booted image's memory posture (#16455).
+
+        Scenario A's VM is 2 GiB (launch()). The pre-#16455 image
+        reserved 1440 hugepages (2.8 GiB) at boot via
+        /etc/sysctl.d/99-xpf-hugepages.conf and OOM-killed in this
+        gate; the fixed image reserves only the default-ring pool.
+        The bound is the literal 90-page default-ring pool (5 pages x
+        18 reference bindings at ring-entries 1024) -- deliberately
+        NOT imported from bake.py: validate.py never imports the bake,
+        and a literal here means raising the shipped default in
+        bake.py/conf without raising this gate fails the Tier-1 boot
+        instead of silently following the regression. Keep in sync
+        with bake.DEFAULT_HUGEPAGES and the repo conf; the hermetic
+        test (test_validate_memory_floor_16455.py) pins both sides.
+        """
+        meminfo = self.guest(inst, "sh", "-c", MEMINFO_PROBE,
+                             check=False, capture=True).stdout
+        ok, reason = _memory_floor_verdict(meminfo, 90)
+        if not ok:
+            fail("default-pool memory floor assertion FAILED: " + reason)
+        info(f"memory floor: {reason}")
 
     def assert_day0_conf_perms(self, inst):
         """Assert the installed day-0 config's credential posture (#6503).

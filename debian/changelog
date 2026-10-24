@@ -1,4 +1,23 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Image/packaging: stop reserving the large-ring hugepage pool by
+    default (#16455). etc/sysctl.d/99-xpf-hugepages.conf shipped
+    vm.nr_hugepages = 1440 (2.8 GiB) verbatim through the bake and the
+    .deb's /usr/lib/sysctl.d, although the default ring-entries 1024
+    needs 5 pages per binding: the 2 GiB Tier-1 validation VM booted
+    into OOM kills, a 4 GiB appliance kept ~620 MiB before any service
+    started, and systemd's sysctl.d file trigger applied the .deb
+    payload at package-install time on foreign hosts. The shipped
+    default is now 90 pages (5 x 18 reference bindings at ring 1024);
+    bake.py refuses any other shipped default, sizes rig images
+    explicitly with --hugepages N (refusing below the 1440-page
+    reference large-ring pool), and renders the override onto the
+    effective (last-surviving) assignment only. debian/rules installs
+    no sysctl.d payload, so apt install on an unmarked host leaves
+    /proc/sys/vm/nr_hugepages unchanged. validate.py scenario A
+    asserts HugePages_Total <= 90 and MemAvailable >= 1 GiB in the
+    2 GiB gate VM. Pinned by test_bake_hugepages_16243.py (incl. the
+    review-16260 consumer-model spellings re-based on 90) and
+    test_validate_memory_floor_16455.py.
   * Packaging: point the #15089 dpkg file triggers at the loader
     payloads dpkg actually unpacks (/usr/lib/shim,
     /usr/lib/grub/x86_64-efi-signed) instead of the ESP copies under

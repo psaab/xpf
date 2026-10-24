@@ -206,33 +206,36 @@ shim). The NIC the VM sees decides the rest:
 virtio for mgmt and anything under a few Gb/s; mlx5 VFs or PF
 passthrough for line-rate ports.
 
-## UMEM hugepages (required for `ring-entries 16384`)
+## UMEM hugepages (default pool shipped; large rings size their own)
 
-At the default `ring-entries 1024` a binding's UMEM is ~10 MiB and no
-hugepage pool is needed. If you raise `set system dataplane ring-entries`
-to 16384 (the ≥20 Gbps setting), each bound queue's UMEM is 160 MiB and
-must be backed by explicit 2 MiB hugepages: without a pool the helper
-falls back to 4 KiB pages plus an advisory THP hint, throughput drops
+At the default `ring-entries 1024` a binding's UMEM is ~10 MiB
+(12 MiB on virtio_net), which rounds to 5 explicit 2 MiB hugepages
+per binding (6 on virtio_net). The baked image ships exactly that
+default-ring pool: `vm.nr_hugepages = 90` (5 × the 18-binding
+reference topology = 180 MiB) in `/etc/sysctl.d/99-xpf-hugepages.conf`.
+No larger pool is needed — or withheld — at the default config.
+
+If you raise `set system dataplane ring-entries` to 16384 (the
+≥20 Gbps setting), each bound queue's UMEM is 160 MiB and must be
+backed by explicit 2 MiB hugepages: without a pool the helper falls
+back to 4 KiB pages plus an advisory THP hint, throughput drops
 (measured 22.1 → 20.4 Gbps), and status reports
 `Hugepage-backed bindings: 0/N` with a growing `UMEM fallback bytes`.
-
-The knob is `vm.nr_hugepages` in `99-xpf-hugepages.conf`. Where the
-shipped default lives depends on the install path (#16243): the baked
-image writes it to `/etc/sysctl.d/`; the `.deb` installs it under
-`/usr/lib/sysctl.d/` (package-owned, so unattended upgrades never hit a
-dpkg conffile prompt adopting it). Both are sized for the reference
-topology. **To resize, always edit `/etc/sysctl.d/99-xpf-hugepages.conf`**
-— sysctl.d precedence (`/etc` > `/run` > `/usr/lib` for equal basenames)
-makes your copy win over either shipped default, and package upgrades
-will never touch it. Size from the **total** binding count, not one NIC:
+Size the pool from the **total** binding count, not one NIC:
 
 ```
 pages = 80 × Σ over every binding candidate of min(rx_queues, 16)
 ```
 
-(binding candidates include the fabric IPVLAN parent). The shipped
-`1440` covers 3 candidates × 6 queues = 18 bindings; a 30-binding box
-needs 2400. For a bigger topology, write that file, then apply and restart:
+(binding candidates include the fabric IPVLAN parent). The reference
+topology (3 candidates × 6 queues = 18 bindings) needs `1440`; a
+30-binding box needs 2400. Provision it one of two ways:
+
+- **Rig image**: bake with `scripts/image/bake.py --hugepages 1440`
+  (or your sized value). The bake refuses an override below the
+  reference large-ring pool, so a short pool cannot bake silently.
+- **Running appliance**: edit `/etc/sysctl.d/99-xpf-hugepages.conf`,
+  then apply and restart:
 
 ```bash
 sysctl --system          # or reboot
@@ -241,10 +244,20 @@ grep HugePages_ /proc/meminfo   # HugePages_Total must cover the sum
 cli -c "show dataplane status"  # Hugepage-backed bindings: N/N
 ```
 
+The `.deb` installs **no** hugepage sysctl (#16455): a
+`/usr/lib/sysctl.d` payload is applied by systemd's file trigger at
+package-install time, so `apt install xpf` on a foreign host must
+leave `/proc/sys/vm/nr_hugepages` unchanged (#10733). On a
+foreign-host / manual install that wants a pool, copy
+`etc/sysctl.d/99-xpf-hugepages.conf` from the repo to
+`/etc/sysctl.d/` yourself (resized if you run large rings).
+
 Hugepages are withheld from ordinary memory for the life of the boot —
-do not over-reserve on small appliances (1440 pages = 2.8 GiB). UMEM does
-not appear in RSS; read `Private_Hugetlb` in `/proc/<xpfd-pid>/smaps_rollup`.
-Full rationale: `docs/userspace-dataplane-architecture.md` ("Hugepages").
+do not over-reserve on small appliances (1440 pages = 2.8 GiB; that was
+the pre-#16455 shipped default, and it OOM-killed 2 GiB guests). UMEM
+does not appear in RSS; read `Private_Hugetlb` in
+`/proc/<xpfd-pid>/smaps_rollup`. Full rationale:
+`docs/userspace-dataplane-architecture.md` ("Hugepages").
 
 
 ## Fleet pattern (many sites, few humans)
