@@ -137,6 +137,70 @@ func v6TeardownBuildExtension(msg *dhcpv6.Message) {
 	msg.AddOption(pd)
 }
 
+// v6TeardownBuildReplaceNAOnly is the #16423 defect shape: the Reply
+// carries no teardown element at all — it simply omits the held IA_NA
+// address and offers a different live one (plus a live IA_PD echo of
+// nothing held, to prove the IA_NA leg alone decides).
+func v6TeardownBuildReplaceNAOnly(msg *dhcpv6.Message) {
+	hw := net.HardwareAddr{0x02, 0, 0, 0, 0, 1}
+	ia := &dhcpv6.OptIANA{IaId: v6IANAIAID(hw)}
+	ia.Options.Add(&dhcpv6.OptIAAddress{
+		IPv6Addr: net.ParseIP("2606:4700::bad"), PreferredLifetime: time.Hour, ValidLifetime: time.Hour,
+	})
+	msg.AddOption(ia)
+	pd := &dhcpv6.OptIAPD{IaId: v6IAPDIAID}
+	pd.Options.Add(&dhcpv6.OptIAPrefix{
+		PreferredLifetime: time.Hour, ValidLifetime: time.Hour,
+		Prefix: &net.IPNet{IP: net.ParseIP("2606:4700:1000::"), Mask: net.CIDRMask(48, 128)},
+	})
+	msg.AddOption(pd)
+}
+
+// v6TeardownBuildReplacePDOnly offers only a foreign live prefix and
+// omits every held prefix, while keeping the held IA_NA address.
+func v6TeardownBuildReplacePDOnly(msg *dhcpv6.Message) {
+	hw := net.HardwareAddr{0x02, 0, 0, 0, 0, 1}
+	msg.AddOption(v6TeardownHeldNA(v6IANAIAID(hw), time.Hour))
+	pd := &dhcpv6.OptIAPD{IaId: v6IAPDIAID}
+	pd.Options.Add(&dhcpv6.OptIAPrefix{
+		PreferredLifetime: time.Hour, ValidLifetime: time.Hour,
+		Prefix: &net.IPNet{IP: net.ParseIP("2606:4700:9999::"), Mask: net.CIDRMask(48, 128)},
+	})
+	msg.AddOption(pd)
+}
+
+// v6TeardownBuildExtensionPlusNewAddr keeps the held address and adds
+// a second live one — a genuine RFC 8415 §18.2.10.1 addition.
+func v6TeardownBuildExtensionPlusNewAddr(msg *dhcpv6.Message) {
+	hw := net.HardwareAddr{0x02, 0, 0, 0, 0, 1}
+	ia := &dhcpv6.OptIANA{IaId: v6IANAIAID(hw)}
+	ia.Options.Add(&dhcpv6.OptIAAddress{
+		IPv6Addr: net.ParseIP("2606:4700::50"), PreferredLifetime: time.Hour, ValidLifetime: time.Hour,
+	})
+	ia.Options.Add(&dhcpv6.OptIAAddress{
+		IPv6Addr: net.ParseIP("2606:4700::51"), PreferredLifetime: time.Hour, ValidLifetime: time.Hour,
+	})
+	msg.AddOption(ia)
+	pd := &dhcpv6.OptIAPD{IaId: v6IAPDIAID}
+	pd.Options.Add(&dhcpv6.OptIAPrefix{
+		PreferredLifetime: time.Hour, ValidLifetime: time.Hour,
+		Prefix: &net.IPNet{IP: net.ParseIP("2606:4700:1000::"), Mask: net.CIDRMask(48, 128)},
+	})
+	msg.AddOption(pd)
+}
+
+// v6TeardownBuildSilentNA carries a live IA_PD only and omits the IA_NA
+// entirely — silence, which #15071 carry-forward handles by keeping the
+// held address; it must not be counted as teardown.
+func v6TeardownBuildSilentNA(msg *dhcpv6.Message) {
+	pd := &dhcpv6.OptIAPD{IaId: v6IAPDIAID}
+	pd.Options.Add(&dhcpv6.OptIAPrefix{
+		PreferredLifetime: time.Hour, ValidLifetime: time.Hour,
+		Prefix: &net.IPNet{IP: net.ParseIP("2606:4700:1000::"), Mask: net.CIDRMask(48, 128)},
+	})
+	msg.AddOption(pd)
+}
+
 // TestV6RebindNonGrantingTeardownRejected14997 is the D40-03 regression:
 // every destructive Reply class from a non-granting REBIND responder is
 // rejected at the matcher, so the run loop never sees it and the held
@@ -248,6 +312,88 @@ func TestV6RebindPartnerExtensionStillAccepted14997(t *testing.T) {
 		}
 		if got := mgr.RenewalBindingStats().DHCPv6TeardownRejects; got != 0 {
 			t.Errorf("teardown rejects = %d, want 0 (identity gate fires first)", got)
+		}
+	})
+}
+
+// TestV6RebindNonGrantingReplacementRejected16423 is the R3-F04-05
+// regression: a non-granting REBIND Reply that carries no teardown
+// element but replaces a held binding element by omission must be
+// rejected at the matcher (counted as a teardown reject), because the
+// single-address commit path would otherwise remove the held WAN
+// address in one packet. Fail-on-revert: dropping the #16423
+// replacement arms in v6ReplyTearsDownHeldBinding turns these cells
+// GREEN again (matcher accepts, parse selects 2606:4700::bad).
+func TestV6RebindNonGrantingReplacementRejected16423(t *testing.T) {
+	prev, pds := v6TeardownPrev()
+	req := v6TeardownRequest(t, prev, pds, true)
+
+	replacements := map[string]func(*dhcpv6.Message){
+		"replace IA_NA only (held omitted, foreign live offered)": v6TeardownBuildReplaceNAOnly,
+		"replace IA_PD only (held omitted, foreign live offered)": v6TeardownBuildReplacePDOnly,
+	}
+	for name, build := range replacements {
+		t.Run(name, func(t *testing.T) {
+			mgr := &Manager{}
+			reply := v6TeardownReply(t, req.TransactionID, v6TeardownAttackerDUID, build)
+			if v6RenewMatcher(mgr, req, prev, true)(reply) {
+				t.Errorf("REBIND %s from non-granting server accepted; omission-plus-replacement must not swap the held binding", name)
+			}
+			if got := mgr.RenewalBindingStats().DHCPv6TeardownRejects; got != 1 {
+				t.Errorf("teardown rejects = %d, want 1 (replacement counts as teardown)", got)
+			}
+			if got := mgr.RenewalBindingStats().DHCPv6ServerIdentityRejects; got != 0 {
+				t.Errorf("server-identity rejects = %d, want 0 (content gate, not identity gate)", got)
+			}
+			if !v6ReplyTearsDownHeldBinding(req, reply) {
+				t.Errorf("v6ReplyTearsDownHeldBinding = false, want true for %s", name)
+			}
+		})
+	}
+
+	// The granting server may still replace the address (a genuine
+	// server-directed move is re-acquisition-equivalent, #1777).
+	t.Run("granting replacement on REBIND still accepted", func(t *testing.T) {
+		reply := v6TeardownReply(t, req.TransactionID, v6TeardownGrantDUID, v6TeardownBuildReplaceNAOnly)
+		if !v6RenewMatcher(&Manager{}, req, prev, true)(reply) {
+			t.Fatal("granting-server REBIND replacement rejected; only non-granting replacement is gated")
+		}
+	})
+
+	// A partner that keeps the held address and merely adds a new one
+	// is a pure extension (§18.2.10.1 "add any new leases").
+	t.Run("partner held-plus-new extension still accepted", func(t *testing.T) {
+		mgr := &Manager{}
+		reply := v6TeardownReply(t, req.TransactionID, v6TeardownPartnerDUID, v6TeardownBuildExtensionPlusNewAddr)
+		if !v6RenewMatcher(mgr, req, prev, true)(reply) {
+			t.Fatal("partner REBIND held-plus-new extension rejected; additions must keep working")
+		}
+		if got := mgr.RenewalBindingStats().DHCPv6TeardownRejects; got != 0 {
+			t.Errorf("teardown rejects = %d, want 0 for held-plus-new extension", got)
+		}
+		hw := net.HardwareAddr{0x02, 0, 0, 0, 0, 1}
+		naID := v6IANAIAID(hw)
+		res, err := (&Manager{}).parseV6ReplyChecked(context.Background(), "wan0", reply,
+			&DHCPv6Options{IATypes: []string{"ia-na", "ia-pd"}}, &naID, &v6IAPDIAID)
+		if err != nil {
+			t.Fatalf("parse held-plus-new extension: %v", err)
+		}
+		if res.lease.Address != prev.Address {
+			t.Errorf("extended address = %s, want held %s (held wins selection)", res.lease.Address, prev.Address)
+		}
+	})
+
+	// Silence on IA_NA (live IA_PD only) is not a replacement: the
+	// #15071 carry-forward keeps the held address, so the matcher must
+	// not count it as teardown.
+	t.Run("partner silent IA_NA still accepted", func(t *testing.T) {
+		mgr := &Manager{}
+		reply := v6TeardownReply(t, req.TransactionID, v6TeardownPartnerDUID, v6TeardownBuildSilentNA)
+		if !v6RenewMatcher(mgr, req, prev, true)(reply) {
+			t.Fatal("partner REBIND with silent IA_NA rejected; omission without replacement is silence, not teardown")
+		}
+		if got := mgr.RenewalBindingStats().DHCPv6TeardownRejects; got != 0 {
+			t.Errorf("teardown rejects = %d, want 0 for silent IA_NA", got)
 		}
 	})
 }
