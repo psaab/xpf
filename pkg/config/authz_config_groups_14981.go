@@ -110,7 +110,11 @@ func treeHasGroupStanzas14981(t *ConfigTree) bool {
 // once groups are expanded (both ${node} views for cluster configs), or an
 // error when expansion fails. Callers adjudicating for authorization MUST
 // refuse on that error: adjudicating an unexpandable tree as zero mutations
-// is a fail-open.
+// is a fail-open. The one non-fatal plain-view failure is the ${node}
+// trigger (#16428): `apply-groups "${node}"` always errors without vars
+// by construction, while the node0/node1 views resolve it — see
+// isNodeVarPlainFailure16428. Any other plain-view failure (undefined
+// group, cycle, budget) stays fatal.
 //
 // The tree is cloned (with inactive subtrees stripped, mirroring the
 // compiler) before expansion, so the caller's tree is never mutated.
@@ -120,26 +124,74 @@ func ExpandedMutationLines(t *ConfigTree) ([]string, error) {
 	}
 	var lines []string
 	seen := make(map[string]bool)
-	for _, vars := range []map[string]string{nil, {"node": "node0"}, {"node": "node1"}} {
-		clone := t.cloneForExpansion()
-		normalizeCompactStanzas(clone)
-		var err error
-		if vars == nil {
-			err = clone.ExpandGroups()
-		} else {
-			err = clone.ExpandGroupsWithVars(vars)
+	// Collect the node views first so a plain-view failure can be
+	// classified with them in hand (#16428). Each view uses a fresh
+	// clone, so a failed plain expansion never poisons the node views.
+	nodeLines, anyNodeOK := expandedNodeViewLines16428(t)
+	plainClone := t.cloneForExpansion()
+	normalizeCompactStanzas(plainClone)
+	if err := plainClone.ExpandGroups(); err != nil {
+		// #16428: the plain view fails only because "${node}" has no
+		// no-vars resolution — the canonical cluster idiom. That is not
+		// a failure of the authored inheritance: the node0/node1 views
+		// resolve it and adjudicate every effective path (the generic
+		// compile reaches the same conclusion via the #15031 node0
+		// fallback). Any other plain-view failure (undefined group,
+		// cycle, budget) stays fatal: the authored inheritance itself
+		// cannot be resolved.
+		if isNodeVarPlainFailure16428(t, err) && anyNodeOK {
+			return nodeLines, nil
 		}
-		if err != nil {
-			// A ${node} view that references an undefined node group errors
-			// exactly as the node-aware compile does; that view contributes
-			// nothing on this node, but the other views still adjudicate.
-			// Only a failure on the plain (no-vars) view is fatal: it means
-			// the authored inheritance itself cannot be resolved.
-			if vars == nil {
-				return nil, err
-			}
+		return nil, err
+	}
+	for _, line := range strings.Split(plainClone.FormatSet(), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || seen[line] {
 			continue
 		}
+		seen[line] = true
+		lines = append(lines, line)
+	}
+	for _, line := range nodeLines {
+		if seen[line] {
+			continue
+		}
+		seen[line] = true
+		lines = append(lines, line)
+	}
+	return lines, nil
+}
+
+// isNodeVarPlainFailure16428 reports whether err is the plain-view
+// `undefined group "${node}"` failure — the only plain-view error
+// the ${node} idiom produces by construction. It mirrors the trigger
+// ExpandGroupsNodeFallback15031 probes for (#15031), plus the
+// has-${node} guard that helper applies: without a ${node} apply-groups
+// reference, a look-alike error must stay fatal (fail closed).
+func isNodeVarPlainFailure16428(t *ConfigTree, err error) bool {
+	if err == nil || !strings.Contains(err.Error(), `undefined group "${node}"`) {
+		return false
+	}
+	if t == nil {
+		return false
+	}
+	return treeHasNodeVarApplyGroups15031(t.Children)
+}
+
+// expandedNodeViewLines16428 renders the node0/node1 views of t. A
+// node view that references an undefined node group errors exactly as
+// the node-aware compile does; that view contributes nothing on this
+// node, but the other view still adjudicates. anyOK reports whether
+// at least one node view expanded cleanly.
+func expandedNodeViewLines16428(t *ConfigTree) (lines []string, anyOK bool) {
+	seen := make(map[string]bool)
+	for _, vars := range []map[string]string{{"node": "node0"}, {"node": "node1"}} {
+		clone := t.cloneForExpansion()
+		normalizeCompactStanzas(clone)
+		if err := clone.ExpandGroupsWithVars(vars); err != nil {
+			continue
+		}
+		anyOK = true
 		for _, line := range strings.Split(clone.FormatSet(), "\n") {
 			line = strings.TrimSpace(line)
 			if line == "" || seen[line] {
@@ -149,7 +201,7 @@ func ExpandedMutationLines(t *ConfigTree) ([]string, error) {
 			lines = append(lines, line)
 		}
 	}
-	return lines, nil
+	return lines, anyOK
 }
 
 // denyConfigurationMatches14981 reports whether the class's deny pattern
