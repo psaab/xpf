@@ -436,6 +436,13 @@ func performWipeWithLogInventory(configDir, configBase, archiveDir string, inv Z
 	if err := ipsec.CheckConnStateEmpty(wipeIPsecStatePath); err != nil {
 		return fmt.Errorf("%w: %w", errWipeIPsecOwnership, err)
 	}
+	// #16443: a busy provisioned account must refuse BEFORE beginZeroize
+	// writes the pending marker, so a refused zeroize leaves every surface
+	// (including the day-0 loader gate) exactly as it was. performWipe
+	// re-checks immediately before its destructive legs.
+	if err := checkProvisionedAccountsIdle(); err != nil {
+		return err
+	}
 	record, err := beginZeroize(configDir, configBase, archiveDir, inv)
 	if err != nil {
 		return err

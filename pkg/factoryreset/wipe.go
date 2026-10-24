@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -398,6 +399,35 @@ var (
 	wipeLockRootPassword = func() ([]byte, error) {
 		return combinedOutputTimeoutUnlimited(context.Background(), "passwd", "-l", "root")
 	}
+	// wipeKillAccountProcesses terminates every process owned by uid so a
+	// busy xpf-provisioned account can be userdel'd (#16443). Production
+	// runs `pkill -KILL -u <uid>`: SIGKILL so a session cannot linger and
+	// keep userdel at exit 8, and -u (real+effective UID) so sshd's
+	// privilege-separated session processes are matched. pkill exits 1
+	// when nothing matches — the desired end state, not an error — so the
+	// seam keeps that exit status for the caller to classify; any other
+	// nonzero (invalid uid, pkill unavailable) is a genuine failure.
+	// MUST never be invoked for UID 0 (root is revoked in place, #5520).
+	wipeKillAccountProcesses = func(uid int) ([]byte, error) {
+		return combinedOutputTimeoutUnlimited(context.Background(), "pkill", "-KILL", "-u", strconv.Itoa(uid))
+	}
+	// wipeAccountHasLiveProcesses reports whether any process is owned by
+	// uid. Production runs `pgrep -u <uid>`: exit 0 = a process matched,
+	// exit 1 = none matched. The seam returns matched directly so tests
+	// can model a busy/idle account without live processes. A pgrep
+	// failure (exit >1, e.g. binary missing) is an error: the busy state
+	// is UNKNOWN, never assumed idle.
+	wipeAccountHasLiveProcesses = func(uid int) (bool, error) {
+		out, err := combinedOutputTimeoutUnlimited(context.Background(), "pgrep", "-u", strconv.Itoa(uid))
+		if err == nil {
+			return true, nil
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, fmt.Errorf("pgrep -u %d: %w (output: %s)", uid, err, strings.TrimSpace(string(out)))
+	}
 )
 
 // wipeProvisionedPasswordsDir, wipeProvisionedKeysDir and
@@ -660,6 +690,17 @@ func wipeLoginAccounts() error {
 		attestHardlinkPath(path, &hardlinks, fail)
 	}
 
+	// (A0) #16443 in-wipe busy closure: re-check every userdel-bound
+	// account for live processes NOW (a session may have started since
+	// checkProvisionedAccountsIdle, or performWipe was reached without
+	// the wrapper preflight) and terminate + re-verify any that are busy
+	// BEFORE the destructive sweep below. Accounts still busy are
+	// recorded in retained so the teardown loop skips their userdel.
+	retained := make(map[string]struct{})
+	if regEntries, rerr := os.ReadDir(wipeProvisionedUsersDir); rerr == nil {
+		terminateBusyProvisionedAccounts(regEntries, fail, retained)
+	}
+
 	// (A) Sweep the xpf sudoers namespace. Removing every xpf-<user> drop-in
 	// guarantees no passwordless-root grant survives, independent of the marker
 	// registry. Operator drop-ins without the prefix are never touched.
@@ -678,12 +719,13 @@ func wipeLoginAccounts() error {
 	}
 
 	// (B) Tear down each xpf-provisioned OS user, gated on the UID-keyed marker.
-	// retained collects the names whose account-registry teardown was KEPT for a
-	// fail-closed retry (userdel failed, ownership unresolved, out-of-band
-	// recreate); the resource-root sweep (C) leaves those names' password/key
-	// markers in place too, so an account's three markers stay together for the
-	// retry. Every other resource marker is erased. #5841.
-	retained := make(map[string]struct{})
+	// retained (populated by A0 and the loop) collects the names whose
+	// account-registry teardown was KEPT for a fail-closed retry (userdel
+	// failed, ownership unresolved, out-of-band recreate, still busy
+	// after termination); the resource-root sweep (C) leaves those names'
+	// password/key markers in place too, so an account's three markers
+	// stay together for the retry. Every other resource marker is
+	// erased. #5841.
 	entries, err := os.ReadDir(wipeProvisionedUsersDir)
 	if err != nil {
 		// Absent dir = xpf never provisioned an ACCOUNT-registry entry; a real
@@ -727,6 +769,154 @@ func wipeLoginAccounts() error {
 	return firstErr
 }
 
+// checkProvisionedAccountsIdle is the #16443 preflight: BEFORE any
+// destructive zeroize leg (and before beginZeroize writes the pending
+// marker in the shared wrapper), prove that every xpf-provisioned
+// account whose teardown will fire `userdel -r` can actually be deleted
+// — i.e. no process still runs under its UID. `userdel` refuses a busy
+// account with exit 8, and the operator's own SSH/CLI session runs
+// under exactly such an account, so without this check the wipe
+// destroyed host keys, login keys, sudoers, networkd and the config DB
+// and only THEN discovered the account leg could never succeed from
+// that session; every retry from it failed identically, leaving a
+// half-wiped box recoverable only from the console.
+//
+// Only accounts that would reach userdel are checked: a marker whose
+// recorded UID still equals the live passwd UID. Root is skipped (it
+// is revoked in place, never userdel'd, #5520); a genuinely absent
+// account needs no userdel; a UID-mismatch recreate belongs to someone
+// else and is never touched. Ownership UNCERTAINTY (unreadable passwd,
+// malformed UID, unreadable marker) is an ERROR here too, for the same
+// #5496 reason as in the teardown: the wipe must not start when its
+// login leg's outcome is unknown. A busy account is an ERROR naming
+// the account: the wipe refuses before any surface is touched, so the
+// operator can end that account's sessions (or run the zeroize from
+// the console / a root session) and retry against an intact box.
+// Ordering is deterministic (marker enumeration is sorted by filename
+// via os.ReadDir) so the named account is stable.
+func checkProvisionedAccountsIdle() error {
+	entries, err := os.ReadDir(wipeProvisionedUsersDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil // xpf never provisioned an account; nothing to userdel
+		}
+		return fmt.Errorf("zeroize: read provisioned-users registry: %w", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if name == "root" {
+			continue
+		}
+		markerFile := filepath.Join(wipeProvisionedUsersDir, name)
+		recordedUID, markerErr := readProvisionedMarkerUID(markerFile)
+		curUID, curFound, lookupErr := wipeLookupUIDErr(name)
+		switch {
+		case lookupErr != nil:
+			return fmt.Errorf("zeroize: cannot resolve login account %q UID from passwd before wipe: %w", name, lookupErr)
+		case markerErr != nil:
+			return fmt.Errorf("zeroize: cannot read provenance marker for login account %q before wipe: %w", name, markerErr)
+		case !curFound:
+			continue // genuinely absent; no userdel will fire
+		case curUID != recordedUID:
+			continue // out-of-band recreate; never touched by the teardown
+		}
+		busy, err := wipeAccountHasLiveProcesses(curUID)
+		if err != nil {
+			return fmt.Errorf("zeroize: cannot determine whether login account %q (uid %d) has live processes before wipe: %w", name, curUID, err)
+		}
+		if busy {
+			return fmt.Errorf("zeroize: login account %q (uid %d) has live processes; end its sessions (or run zeroize from the console) and retry — no state was erased", name, curUID)
+		}
+	}
+	return nil
+}
+
+// terminateAndVerifyBusyAccounts is the #16443 second line of defence,
+// run inside wipeLoginAccounts AFTER checkProvisionedAccountsIdle has
+// passed but BEFORE the sudoers sweep / authorized_keys removal /
+// userdel of the account loop. It closes the check-to-use window: a
+// session can start (or the preflight's pgrep can miss a transient
+// process) between the preflight and the teardown. For each account
+// that will reach userdel and NOW has live processes, it terminates
+// those processes (scoped to the marker UID) and re-verifies the UID
+// is idle. An account still busy after termination is reported and its
+// marker retained by the caller's fail path; userdel is never fired at
+// a UID proven busy. The daemon's own UID is never terminated: the
+// gRPC/console callers run under the daemon (root) or a provisioned
+// account, and killing the daemon's UID would kill the wipe itself —
+// a busy account sharing the daemon UID is reported instead. (In
+// production the daemon runs as root and root is already skipped.)
+func terminateBusyProvisionedAccounts(entries []os.DirEntry, fail func(error), retained map[string]struct{}) {
+	selfUID := os.Getuid()
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if name == "root" {
+			continue
+		}
+		markerFile := filepath.Join(wipeProvisionedUsersDir, name)
+		recordedUID, markerErr := readProvisionedMarkerUID(markerFile)
+		curUID, curFound, lookupErr := wipeLookupUIDErr(name)
+		if lookupErr != nil || markerErr != nil || !curFound || curUID != recordedUID {
+			// Ownership uncertainty / absent / mismatch: the account loop
+			// fail-closes these itself; no termination on unknown identity.
+			continue
+		}
+		busy, err := wipeAccountHasLiveProcesses(curUID)
+		if err != nil {
+			slog.Error("zeroize: cannot determine live processes before account teardown; retaining marker, reset incomplete",
+				"user", name, "uid", curUID, "err", err)
+			fail(err)
+			retained[name] = struct{}{}
+			continue
+		}
+		if !busy {
+			continue
+		}
+		if curUID == selfUID {
+			err := fmt.Errorf("zeroize: login account %q (uid %d) has live processes in the wiping process's own UID; refusing to terminate them", name, curUID)
+			slog.Error("zeroize: busy provisioned account shares the wipe UID; retaining marker, reset incomplete",
+				"user", name, "uid", curUID)
+			fail(err)
+			retained[name] = struct{}{}
+			continue
+		}
+		out, kerr := wipeKillAccountProcesses(curUID)
+		if kerr != nil {
+			// pkill exit 1 = nothing matched (already idle); any other
+			// failure means termination did not provably happen.
+			var exitErr *exec.ExitError
+			if !(errors.As(kerr, &exitErr) && exitErr.ExitCode() == 1) {
+				slog.Error("zeroize: failed to terminate live processes of provisioned account; retaining marker, reset incomplete",
+					"user", name, "uid", curUID, "err", kerr, "output", strings.TrimSpace(string(out)))
+				fail(fmt.Errorf("zeroize: terminate processes of login account %q (uid %d): %w", name, curUID, kerr))
+				retained[name] = struct{}{}
+				continue
+			}
+		}
+		stillBusy, verr := wipeAccountHasLiveProcesses(curUID)
+		if verr != nil {
+			slog.Error("zeroize: cannot verify termination of provisioned account processes; retaining marker, reset incomplete",
+				"user", name, "uid", curUID, "err", verr)
+			fail(verr)
+			retained[name] = struct{}{}
+			continue
+		}
+		if stillBusy {
+			err := fmt.Errorf("zeroize: login account %q (uid %d) still has live processes after termination; userdel would fail", name, curUID)
+			slog.Error("zeroize: provisioned account still busy after termination; retaining marker, reset incomplete",
+				"user", name, "uid", curUID)
+			fail(err)
+			retained[name] = struct{}{}
+		}
+	}
+}
+
 // wipeTearDownProvisionedUsers runs the per-account registry teardown for
 // each marker in the account-registry directory (#4598). It is split out of
 // wipeLoginAccounts so the account loop and the #5841 resource-root sweep
@@ -740,6 +930,13 @@ func wipeTearDownProvisionedUsers(entries []os.DirEntry, retained map[string]str
 			continue
 		}
 		name := e.Name() // marker filename == account name (Base'd on write)
+		if _, busy := retained[name]; busy {
+			// #16443: proven busy (or unkillable) by terminateBusyProvisionedAccounts;
+			// its error is already surfaced and its registry + resource markers
+			// must stay together for a retry. Do not remove its keys, sudo is
+			// already swept namespace-wide, and NEVER fire userdel at a busy UID.
+			continue
+		}
 		markerFile := filepath.Join(wipeProvisionedUsersDir, name)
 
 		if name == "root" {
@@ -1374,6 +1571,14 @@ func wipeRenderedNetworkd() error {
 }
 
 var performWipe = func(configDir, configBase, archiveDir string) error {
+	// #16443: refuse before ANY destructive leg when an xpf-provisioned
+	// account that userdel must delete still has live processes (the
+	// operator's own SSH/CLI session is the deterministic case). Without
+	// this, the seal/login/networkd/config legs erased host keys, login
+	// keys, sudoers and the config DB and only then hit userdel exit 8.
+	if err := checkProvisionedAccountsIdle(); err != nil {
+		return err
+	}
 	// DDNS ownership and IPsec teardown debt are durable external-delete
 	// authorities. Refuse the on-disk wipe unless manager withdrawal has emptied
 	// both stores; otherwise the credentials needed for cleanup would be erased.

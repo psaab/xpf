@@ -121,8 +121,9 @@ var declaredUnsanitizedForks = []forkExemption{
 	// ---- destructive admin actions, output only in errors ----
 	{"../grpcapi", "server_diag_system_action.go", "SystemAction",
 		"ip neigh flush; output only in an error string. Tracked separately"},
-	{"../grpcapi", "server_diag_zeroize.go", "<package-scope>",
-		"zeroize userdel / passwd -l root. Tracked separately"},
+	{"../factoryreset", "exec.go", "combinedOutputTimeoutUnlimited", "exec helper"},
+	{"../factoryreset", "wipe.go", "<package-scope>",
+		"zeroize userdel / passwd -l root / pkill / pgrep; output only in errors. Tracked separately"},
 }
 
 var forkCallees = map[string]bool{
@@ -147,7 +148,7 @@ func TestEveryCommandOutputDisplaySiteIsSanitizedOrDeclared6584(t *testing.T) {
 	var undeclared []string
 	scanned := 0
 
-	for _, dir := range []string{"../cli", "../grpcapi", "../ipsec"} {
+	for _, dir := range []string{"../cli", "../grpcapi", "../ipsec", "../factoryreset"} {
 		ents, err := os.ReadDir(dir)
 		if err != nil {
 			t.Fatalf("read %s: %v", dir, err)

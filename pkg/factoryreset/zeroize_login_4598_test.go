@@ -24,17 +24,23 @@ func setZeroizeLoginPaths(t *testing.T, provDir, sudoersDir, homeBase, passwdPat
 	t.Helper()
 	origProv, origSudoers, origHome, origPasswd, origUserdel :=
 		wipeProvisionedUsersDir, wipeSudoersDir, wipeHomeBase, wipePasswdPath, wipeUserdel
+	origBusy, origKill := wipeAccountHasLiveProcesses, wipeKillAccountProcesses
 	t.Cleanup(func() {
 		wipeProvisionedUsersDir = origProv
 		wipeSudoersDir = origSudoers
 		wipeHomeBase = origHome
 		wipePasswdPath = origPasswd
 		wipeUserdel = origUserdel
+		wipeAccountHasLiveProcesses = origBusy
+		wipeKillAccountProcesses = origKill
 	})
 	wipeProvisionedUsersDir = provDir
 	wipeSudoersDir = sudoersDir
 	wipeHomeBase = homeBase
 	wipePasswdPath = passwdPath
+	// #16443: login-teardown cells model idle accounts unless they say so.
+	wipeAccountHasLiveProcesses = func(int) (bool, error) { return false, nil }
+	wipeKillAccountProcesses = func(int) ([]byte, error) { return nil, nil }
 	var deleted []string
 	wipeUserdel = func(name string) ([]byte, error) {
 		deleted = append(deleted, name)
