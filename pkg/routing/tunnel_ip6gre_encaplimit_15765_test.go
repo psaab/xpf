@@ -25,7 +25,7 @@ func TestNeedsIP6GREEncapLimitNone15765(t *testing.T) {
 		{"wireguard", true, false},
 	}
 	for _, tc := range cases {
-		if got := needsIP6GREEncapLimitNone(tc.mode, tc.isIPv6); got != tc.want {
+		if got := needsIP6GREEncapLimitNone(config.TunnelMode(tc.mode), tc.isIPv6); got != tc.want {
 			t.Errorf("needsIP6GREEncapLimitNone(%q,%v)=%v want %v", tc.mode, tc.isIPv6, got, tc.want)
 		}
 	}

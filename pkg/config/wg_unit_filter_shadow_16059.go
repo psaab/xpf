@@ -49,7 +49,7 @@ func appendWgUnitFilterShadowAdvisory16059Locked(cfg *Config, opts compileOpts) 
 	}
 	for _, base := range bases {
 		ifc := cfg.Interfaces.Interfaces[base]
-		if ifc == nil || ifc.Tunnel == nil || ifc.Tunnel.Mode != "wireguard" {
+		if ifc == nil || ifc.Tunnel == nil || ifc.Tunnel.Mode != TunnelModeWireGuard {
 			continue
 		}
 		if len(ifc.Units) < 2 {

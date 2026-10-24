@@ -1572,10 +1572,10 @@ func cloneInterfaceSnapshots(rows []InterfaceSnapshot) []InterfaceSnapshot {
 // (a unit with its own stanza is its own definition).
 func tunnelModeOf(ifaceTunnel, unitTunnel *config.TunnelConfig) string {
 	if unitTunnel != nil && unitTunnel.Mode != "" {
-		return unitTunnel.Mode
+		return string(unitTunnel.Mode)
 	}
 	if ifaceTunnel != nil {
-		return ifaceTunnel.Mode
+		return string(ifaceTunnel.Mode)
 	}
 	return ""
 }

@@ -46,7 +46,7 @@ func hostInboundWireGuardZonePorts(cfg *config.Config, views []dpuserspace.ZoneH
 		byZone[zone][port] = true
 	}
 	addTunnel := func(tc *config.TunnelConfig) {
-		if tc == nil || tc.Mode != "wireguard" || tc.WgListenPort == 0 {
+		if tc == nil || tc.Mode != config.TunnelModeWireGuard || tc.WgListenPort == 0 {
 			return
 		}
 		source, err := netip.ParseAddr(tc.Source)

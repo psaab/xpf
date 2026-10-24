@@ -89,7 +89,7 @@ func applyTunnelBracedScalars14440(tc *TunnelConfig, tunnelNode *Node) {
 			}
 		case "mode":
 			if v := nodeVal(rawProp); v != "" {
-				tc.Mode = v
+				tc.Mode = TunnelMode(v)
 			}
 		case "keepalive":
 			if v := nodeVal(rawProp); v != "" {

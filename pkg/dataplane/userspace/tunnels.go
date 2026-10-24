@@ -100,7 +100,7 @@ func buildTunnelEndpointSnapshots(cfg *config.Config, interfaces []InterfaceSnap
 		// (config.EmitTunnelEndpointNames), so addEndpoint trusts the
 		// emitter's filtering; the redundant guard is retained as a
 		// defense-in-depth no-op against future call paths.
-		isWireguard := tunnel.Mode == "wireguard"
+		isWireguard := tunnel.Mode == config.TunnelModeWireGuard
 		if !isWireguard && (tunnel.Source == "" || tunnel.Destination == "") {
 			return
 		}
@@ -192,7 +192,7 @@ func buildTunnelEndpointSnapshots(cfg *config.Config, interfaces []InterfaceSnap
 		// only the duplicate check is skipped, mirroring the commit
 		// gate's byObject dedupe. Without this the multi-unit logical
 		// model would log a false ERROR on every snapshot build.
-		if tunnel.Mode == "gre" || tunnel.Mode == "ip6gre" {
+		if tunnel.Mode == config.TunnelModeGRE || tunnel.Mode == config.TunnelModeIP6GRE {
 			if _, inherited := seenGreTunnelObject[tunnel]; !inherited {
 				seenGreTunnelObject[tunnel] = struct{}{}
 				if src, dst := net.ParseIP(tunnel.Source), net.ParseIP(tunnel.Destination); src != nil && dst != nil {
@@ -208,21 +208,21 @@ func buildTunnelEndpointSnapshots(cfg *config.Config, interfaces []InterfaceSnap
 			}
 		}
 		snap := TunnelEndpointSnapshot{
-			ID:              id,
-			Interface:       ifName,
-			LinuxName:       iface.LinuxName,
-			Ifindex:         iface.Ifindex,
-			Zone:            iface.Zone,
-			RedundancyGroup: redundancyGroup,
-			MTU:             iface.MTU,
-			Mode:            tunnel.Mode,
-			OuterFamily:     outerFamily,
-			Source:          tunnel.Source,
-			Destination:     tunnel.Destination,
-			Key:             tunnel.Key,
-			TTL:             ttl,
-			TransportTable:  transportTable,
-			LinkUp:          iface.LinkUp,
+			ID:                   id,
+			Interface:            ifName,
+			LinuxName:            iface.LinuxName,
+			Ifindex:              iface.Ifindex,
+			Zone:                 iface.Zone,
+			RedundancyGroup:      redundancyGroup,
+			MTU:                  iface.MTU,
+			Mode:                 string(tunnel.Mode),
+			OuterFamily:          outerFamily,
+			Source:               tunnel.Source,
+			Destination:          tunnel.Destination,
+			Key:                  tunnel.Key,
+			TTL:                  ttl,
+			TransportTable:       transportTable,
+			LinkUp:               iface.LinkUp,
 			ClearDontFragmentBit: tunnel.ClearDontFragmentBit,
 		}
 		if isWireguard {

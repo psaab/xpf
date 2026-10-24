@@ -787,7 +787,7 @@ func (c *Config) TunnelNameMap() map[string]string {
 			continue
 		}
 		ifaceTunnel := ifc.Tunnel != nil &&
-			(ifc.Tunnel.Source != "" || ifc.Tunnel.Mode == "wireguard")
+			(ifc.Tunnel.Source != "" || ifc.Tunnel.Mode == TunnelModeWireGuard)
 		baseName := LinuxIfName(ifName)
 		for unitNum, unit := range ifc.Units {
 			ref := ifName + "." + strconv.Itoa(unitNum)

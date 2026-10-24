@@ -375,9 +375,9 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 		skipIface9899 := false
 		if len(tunnelNodes) > 0 {
 			// Default mode based on interface name prefix: ip-X/X/X → ipip, gr-X/X/X → gre
-			defaultMode := "gre"
+			defaultMode := TunnelModeGRE
 			if strings.HasPrefix(ifName, "ip-") {
-				defaultMode = "ipip"
+				defaultMode = TunnelModeIPIP
 			}
 			tc := &TunnelConfig{
 				Name: LinuxIfName(ifName),
@@ -402,7 +402,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 						}
 					case "mode":
 						if v := nodeVal(prop); v != "" {
-							tc.Mode = v
+							tc.Mode = TunnelMode(v)
 						}
 					case "key":
 						raw := nodeVal(prop)
@@ -546,9 +546,9 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 			// #14450: merge EVERY unit `tunnel` sibling (see interface site).
 			unitTunnelNodes := unitNode.FindChildren("tunnel")
 			if len(unitTunnelNodes) > 0 {
-				defaultMode := "gre"
+				defaultMode := TunnelModeGRE
 				if strings.HasPrefix(ifName, "ip-") {
-					defaultMode = "ipip"
+					defaultMode = TunnelModeIPIP
 				}
 				// Per-unit tunnel: each unit with its own tunnel config gets
 				// a separate Linux interface. Unit 0 uses the base name,
@@ -603,7 +603,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 							}
 						case "mode":
 							if v := nodeVal(prop); v != "" {
-								tc.Mode = v
+								tc.Mode = TunnelMode(v)
 							}
 						case "key":
 							v := nodeVal(prop)

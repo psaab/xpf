@@ -619,6 +619,21 @@ const (
 	// pin still said 68/cf98a6a5…); this entry folds that pre-existing
 	// drift together with the one new walked field into the v70 golden,
 	// it does not blame the drift on #16077.
+	// v70 STANDS (#16141): CoS LossPriority fields (six CoS entries plus
+	// FirewallFilterTerm), CoSScheduler.Priority (SchedulerPriority),
+	// and TunnelConfig.Mode (TunnelMode) were retyped from string to
+	// string-underlying types with consts. Measured: the post-change
+	// digest and golden are IDENTICAL to pre-change (the snapshot
+	// boundary converts with string(...) into the unchanged string
+	// snapshot fields, and Config-embedded CoS/tunnel structs sit at
+	// or below the depth the walk names with the same type spelling
+	// only where it already did — verified by the shape test passing
+	// unmodified). The serialized JSON is byte-identical: the typed
+	// values marshal as the same "low"/"high"/"gre"/"" tokens
+	// (pinned by TestCoSTunnelTypedMarshalDiff16141), and Rust models
+	// config as opaque serde_json::Value. No helper of any vintage
+	// can observe the retype, so no golden regen and no
+	// ProtocolVersion bump.
 	snapshotShapeVersion8892 = 70
 )
 

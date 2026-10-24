@@ -37,7 +37,7 @@ func TestCompileFilterThenBlockFormAndMissingValueParity13213(t *testing.T) {
 		}},
 		{"count", "count { c1; } accept;", func(tm *FirewallFilterTerm) (string, bool) { return tm.Count, tm.Count == "c1" }},
 		{"forwarding-class", "forwarding-class { af11; } accept;", func(tm *FirewallFilterTerm) (string, bool) { return tm.ForwardingClass, tm.ForwardingClass == "af11" }},
-		{"loss-priority", "loss-priority { high; } accept;", func(tm *FirewallFilterTerm) (string, bool) { return tm.LossPriority, tm.LossPriority == "high" }},
+		{"loss-priority", "loss-priority { high; } accept;", func(tm *FirewallFilterTerm) (string, bool) { return string(tm.LossPriority), tm.LossPriority == "high" }},
 		{"dscp", "dscp { ef; } accept;", func(tm *FirewallFilterTerm) (string, bool) { return tm.DSCPRewrite, tm.DSCPRewrite == "ef" }},
 		{"traffic-class", "traffic-class { ef; } accept;", func(tm *FirewallFilterTerm) (string, bool) { return tm.DSCPRewrite, tm.DSCPRewrite == "ef" }},
 		{"routing-instance", "routing-instance { ri1; } accept;", func(tm *FirewallFilterTerm) (string, bool) { return tm.RoutingInstance, tm.RoutingInstance == "ri1" }},

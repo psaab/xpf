@@ -60,7 +60,7 @@ func appendGreUnitFilterShadowAdvisoryLocked(cfg *Config, opts compileOpts) {
 		if ifc == nil || ifc.Tunnel == nil {
 			continue
 		}
-		if ifc.Tunnel.Mode != "gre" && ifc.Tunnel.Mode != "ip6gre" {
+		if ifc.Tunnel.Mode != TunnelModeGRE && ifc.Tunnel.Mode != TunnelModeIP6GRE {
 			continue
 		}
 		if len(ifc.Units) < 2 {

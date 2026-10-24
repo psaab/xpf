@@ -46,7 +46,7 @@ package config
 // untouched: each of its units emits its own endpoint through the per-unit
 // branch, so each genuinely needs its own device.
 func unitSharesInterfaceWireguardDevice(ifc *InterfaceConfig, unitTunnelNode *Node) bool {
-	if ifc == nil || ifc.Tunnel == nil || ifc.Tunnel.Mode != "wireguard" {
+	if ifc == nil || ifc.Tunnel == nil || ifc.Tunnel.Mode != TunnelModeWireGuard {
 		return false
 	}
 	// Read the unit's authored mode directly. The unit's TunnelConfig does not

@@ -90,7 +90,7 @@ func validateWireguardPeersStrict(cfg *Config, lenient bool) ([]string, error) {
 		if ifc == nil {
 			continue
 		}
-		if ifc.Tunnel != nil && ifc.Tunnel.Mode == "wireguard" {
+		if ifc.Tunnel != nil && ifc.Tunnel.Mode == TunnelModeWireGuard {
 			label := tunnelLabel(ifName, -1, ifc.Tunnel)
 			if err := emit(label, validateOneWireguardTunnel(ifc.Tunnel)); err != nil {
 				return warnings, err
@@ -103,7 +103,7 @@ func validateWireguardPeersStrict(cfg *Config, lenient bool) ([]string, error) {
 		sort.Ints(unitNums)
 		for _, n := range unitNums {
 			unit := ifc.Units[n]
-			if unit == nil || unit.Tunnel == nil || unit.Tunnel.Mode != "wireguard" {
+			if unit == nil || unit.Tunnel == nil || unit.Tunnel.Mode != TunnelModeWireGuard {
 				continue
 			}
 			label := tunnelLabel(ifName, n, unit.Tunnel)
@@ -118,7 +118,7 @@ func validateWireguardPeersStrict(cfg *Config, lenient bool) ([]string, error) {
 		// and every unit's peers merged into it. Validate that merged view
 		// before mergeWireguardUnitPeers can first-wins deduplicate a peer
 		// authored by two different units.
-		if ifc.Tunnel != nil && ifc.Tunnel.Mode == "wireguard" {
+		if ifc.Tunnel != nil && ifc.Tunnel.Mode == TunnelModeWireGuard {
 			if err := emit(ifName, validateMergedWireguardUnitPeers(ifName, ifc, unitNums)); err != nil {
 				return warnings, err
 			}
@@ -139,7 +139,7 @@ func validateWireguardPeersStrict(cfg *Config, lenient bool) ([]string, error) {
 // so its peers do not enter mergeWireguardUnitPeers and retain the existing
 // single-tunnel behavior.
 func validateMergedWireguardUnitPeers(ifName string, ifc *InterfaceConfig, unitNums []int) error {
-	if ifc == nil || ifc.Tunnel == nil || ifc.Tunnel.Mode != "wireguard" {
+	if ifc == nil || ifc.Tunnel == nil || ifc.Tunnel.Mode != TunnelModeWireGuard {
 		return nil
 	}
 	if len(unitNums) == 0 {
@@ -245,7 +245,7 @@ func validateMergedWireguardUnitPeers(ifName string, ifc *InterfaceConfig, unitN
 // interface-level stanza is the canonical per-unit spelling, it emits its own
 // endpoint through the per-unit branch, and it is untouched here.
 func unitWireguardIdentityOverride(ifc *InterfaceConfig, unitTunnel *TunnelConfig) error {
-	if ifc == nil || ifc.Tunnel == nil || ifc.Tunnel.Mode != "wireguard" || unitTunnel == nil {
+	if ifc == nil || ifc.Tunnel == nil || ifc.Tunnel.Mode != TunnelModeWireGuard || unitTunnel == nil {
 		return nil
 	}
 	if unitTunnel.WgListenPort != ifc.Tunnel.WgListenPort {

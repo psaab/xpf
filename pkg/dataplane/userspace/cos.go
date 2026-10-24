@@ -69,7 +69,7 @@ func buildClassOfServiceSnapshot(cfg *config.Config) *ClassOfServiceSnapshot {
 				}
 				classifierSnap.Entries = append(classifierSnap.Entries, CoSDSCPClassifierEntrySnapshot{
 					ForwardingClass: entry.ForwardingClass,
-					LossPriority:    entry.LossPriority,
+					LossPriority:    string(entry.LossPriority),
 					DSCPValues:      append([]uint8(nil), entry.DSCPValues...),
 				})
 			}
@@ -104,7 +104,7 @@ func buildClassOfServiceSnapshot(cfg *config.Config) *ClassOfServiceSnapshot {
 				}
 				classifierSnap.Entries = append(classifierSnap.Entries, CoSIEEE8021ClassifierEntrySnapshot{
 					ForwardingClass: entry.ForwardingClass,
-					LossPriority:    entry.LossPriority,
+					LossPriority:    string(entry.LossPriority),
 					CodePoints:      append([]uint8(nil), entry.CodePoints...),
 				})
 			}
@@ -145,7 +145,7 @@ func buildClassOfServiceSnapshot(cfg *config.Config) *ClassOfServiceSnapshot {
 				}
 				classifierSnap.Entries = append(classifierSnap.Entries, CoSINetPrecedenceClassifierEntrySnapshot{
 					ForwardingClass: entry.ForwardingClass,
-					LossPriority:    entry.LossPriority,
+					LossPriority:    string(entry.LossPriority),
 					Precedences:     append([]uint8(nil), entry.Precedences...),
 				})
 			}
@@ -184,7 +184,7 @@ func buildClassOfServiceSnapshot(cfg *config.Config) *ClassOfServiceSnapshot {
 				}
 				rewriteSnap.Entries = append(rewriteSnap.Entries, CoSDSCPRewriteRuleEntrySnapshot{
 					ForwardingClass: entry.ForwardingClass,
-					LossPriority:    entry.LossPriority,
+					LossPriority:    string(entry.LossPriority),
 					DSCPValue:       entry.DSCPValue,
 				})
 			}
@@ -215,7 +215,7 @@ func buildClassOfServiceSnapshot(cfg *config.Config) *ClassOfServiceSnapshot {
 					"priority", priority,
 					"issue", "#11798",
 				)
-				priority = ""
+				priority = config.SchedulerPriorityUnset
 			}
 			snap.Schedulers = append(snap.Schedulers, CoSSchedulerSnapshot{
 				Name:                sched.Name,
@@ -229,7 +229,7 @@ func buildClassOfServiceSnapshot(cfg *config.Config) *ClassOfServiceSnapshot {
 				// property of the (scheduler, interface) pair.
 				TransmitRateRemainder: sched.TransmitRateRemainder,
 				TransmitRateExact:     sched.TransmitRateExact,
-				Priority:              priority,
+				Priority:              string(priority),
 				BufferSizeBytes:       sched.BufferSizeBytes,
 				BufferSizePercent:     sched.BufferSizePercent,
 				BufferSizeTemporalUS:  sched.BufferSizeTemporalUS,

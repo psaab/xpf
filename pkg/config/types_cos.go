@@ -94,10 +94,75 @@ type CoSDSCPClassifier struct {
 	Entries []*CoSDSCPClassifierEntry
 }
 
+// LossPriority is a Junos class-of-service loss priority (#16141).
+// It is a string-underlying type so the JSON token is unchanged
+// ("low"/"medium-low"/"medium-high"/"high"/""); only the Go type
+// moves. The empty value is the unset default. A uint8 enum was
+// rejected: it would serialize numbers unless a custom marshaller
+// reintroduced the #11798 marshal-slip class.
+type LossPriority string
+
+const (
+	// LossPriorityUnset is the zero value: no loss priority authored.
+	LossPriorityUnset LossPriority = ""
+	// LossPriorityLow is the `low` loss priority.
+	LossPriorityLow LossPriority = "low"
+	// LossPriorityMediumLow is the `medium-low` loss priority.
+	LossPriorityMediumLow LossPriority = "medium-low"
+	// LossPriorityMediumHigh is the `medium-high` loss priority.
+	LossPriorityMediumHigh LossPriority = "medium-high"
+	// LossPriorityHigh is the `high` loss priority.
+	LossPriorityHigh LossPriority = "high"
+)
+
+// Valid reports whether p is a known loss priority or the legitimate
+// empty/unset value. It is the single CoS loss-priority predicate;
+// strict commit rejects !Valid, tolerant paths keep the token.
+func (p LossPriority) Valid() bool {
+	switch p {
+	case LossPriorityUnset, LossPriorityLow, LossPriorityMediumLow,
+		LossPriorityMediumHigh, LossPriorityHigh:
+		return true
+	}
+	return false
+}
+
+// SchedulerPriority is a Junos class-of-service scheduler priority
+// (#16141). String-underlying for the same reason as LossPriority;
+// the empty value renders as the legacy low default in Rust.
+type SchedulerPriority string
+
+const (
+	// SchedulerPriorityUnset is the zero value (low at render).
+	SchedulerPriorityUnset SchedulerPriority = ""
+	// SchedulerPriorityLow is the `low` scheduler priority.
+	SchedulerPriorityLow SchedulerPriority = "low"
+	// SchedulerPriorityMediumLow is the `medium-low` priority.
+	SchedulerPriorityMediumLow SchedulerPriority = "medium-low"
+	// SchedulerPriorityMediumHigh is the `medium-high` priority.
+	SchedulerPriorityMediumHigh SchedulerPriority = "medium-high"
+	// SchedulerPriorityHigh is the `high` scheduler priority.
+	SchedulerPriorityHigh SchedulerPriority = "high"
+	// SchedulerPriorityStrictHigh is the `strict-high` priority.
+	SchedulerPriorityStrictHigh SchedulerPriority = "strict-high"
+)
+
+// Valid reports whether p is a known scheduler priority or the
+// legitimate empty/unset value.
+func (p SchedulerPriority) Valid() bool {
+	switch p {
+	case SchedulerPriorityUnset, SchedulerPriorityLow,
+		SchedulerPriorityMediumLow, SchedulerPriorityMediumHigh,
+		SchedulerPriorityHigh, SchedulerPriorityStrictHigh:
+		return true
+	}
+	return false
+}
+
 // CoSDSCPClassifierEntry assigns one or more DSCP values to a forwarding class.
 type CoSDSCPClassifierEntry struct {
 	ForwardingClass string
-	LossPriority    string
+	LossPriority    LossPriority
 	DSCPValues      []uint8
 }
 
@@ -119,7 +184,7 @@ type CoSINetPrecedenceClassifier struct {
 // points (0..7) to a forwarding class.
 type CoSINetPrecedenceClassifierEntry struct {
 	ForwardingClass string
-	LossPriority    string
+	LossPriority    LossPriority
 	Precedences     []uint8
 }
 
@@ -132,7 +197,7 @@ type CoSIEEE8021Classifier struct {
 // CoSIEEE8021ClassifierEntry assigns one or more PCP values to a forwarding class.
 type CoSIEEE8021ClassifierEntry struct {
 	ForwardingClass string
-	LossPriority    string
+	LossPriority    LossPriority
 	CodePoints      []uint8
 }
 
@@ -145,7 +210,7 @@ type CoSDSCPRewriteRule struct {
 // CoSDSCPRewriteRuleEntry assigns a DSCP rewrite code point to a forwarding class.
 type CoSDSCPRewriteRuleEntry struct {
 	ForwardingClass string
-	LossPriority    string
+	LossPriority    LossPriority
 	DSCPValue       uint8
 }
 
@@ -160,7 +225,7 @@ type CoSIEEE8021RewriteRule struct {
 // to a forwarding class.
 type CoSIEEE8021RewriteRuleEntry struct {
 	ForwardingClass string
-	LossPriority    string
+	LossPriority    LossPriority
 	PCPValue        uint8
 }
 
@@ -170,7 +235,7 @@ type CoSIEEE8021RewriteRuleEntry struct {
 // advisory and name-only show output.
 type CoSInertRewriteRuleEntry struct {
 	ForwardingClass string
-	LossPriority    string
+	LossPriority    LossPriority
 	CodePoint       uint8
 }
 
@@ -219,7 +284,7 @@ type CoSScheduler struct {
 	// sibling set. Recorded because the two are easy to assume share an
 	// implementation and they do not.
 	TransmitRateRemainder bool
-	Priority              string
+	Priority              SchedulerPriority
 	// BufferSizeBytes preserves the legacy explicit byte-size path.
 	BufferSizeBytes uint64
 	// BufferSizePercent is the Junos percent form. A value > 0 means

@@ -1188,7 +1188,7 @@ func projectTerm15997(t *FirewallFilterTerm) effectiveTermProjection15997 {
 		UnknownActions: t.UnknownActions, RejectMessageType: t.RejectMessageType,
 		NextTerm: t.NextTerm, RoutingInstance: t.RoutingInstance,
 		Log: t.Log, Syslog: t.Syslog, Count: t.Count, ForwardingClass: t.ForwardingClass,
-		LossPriority: t.LossPriority, DSCPRewrite: t.DSCPRewrite, Policer: t.Policer,
+		LossPriority: string(t.LossPriority), DSCPRewrite: t.DSCPRewrite, Policer: t.Policer,
 		FlexMatch: flex, HasFlexMatch: hasFlex, UnknownFlexMatch: t.UnknownFlexMatch, FlexMatchRangeNames: t.FlexMatchRangeNames,
 		UnknownFrom: t.UnknownFrom, ValuelessFrom: t.ValuelessFrom, CrossFamilyMatchSpellings: t.CrossFamilyMatchSpellings,
 		UncoveredFamilyExcept16001: t.UncoveredFamilyExcept16001,
@@ -2907,7 +2907,7 @@ func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 				}
 			case "loss-priority":
 				if v := arg(); v != "" {
-					term.LossPriority = v
+					term.LossPriority = LossPriority(v)
 				} else {
 					term.UnknownActions = append(term.UnknownActions, "loss-priority (missing value)")
 				}
@@ -3038,7 +3038,7 @@ func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 			}
 		case "loss-priority":
 			if value := nodeVal(child); value != "" {
-				term.LossPriority = value
+				term.LossPriority = LossPriority(value)
 			} else {
 				term.UnknownActions = append(term.UnknownActions, "loss-priority (missing value)")
 			}
