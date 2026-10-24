@@ -1576,3 +1576,78 @@ does not recur. SUM sender 3.93 / 4.97 Gbit/s (pre-FO no zeros).
 Restore after each run: clean master `2c8575b70e`, helper
 `2f2f5cbf…b04` both nodes (hash-proved), RG0/1/2 node0 primary,
 target OK, P4 verification 16.2 / 13.5 Gbit/s, VERIFY_ZERO 0.
+
+## Final folds (rebased head ae0fbee76c)
+
+Rebased onto master d6e41024d3 (conflicts resolved: debian/changelog
+kept master's, metrics.go Describe driven by the #16202 descriptor
+table with the SNAT-revoked field registered in
+collectorDescUserspaceSession, poll_descriptor/mod.rs + resolve.rs
+merged the master #16042 ack threading with the adopted
+fabric_adopted/adopted_recovery threading, session/mod.rs kept both
+test-mod declarations and both probe_hit locals).
+
+Fold bundle (ae0fbee76c):
+- Opus final4 (93a75bcb06): adopted recovery re-resolves in the
+  session's validated install table
+  (`lookup_forwarding_resolution_with_dynamic_for_flow_in_table`)
+  and restores only candidates whose egress RG ==
+  `AdoptedRecovery.proved_rg` (gate candidate decision + proved RG
+  threaded from both poll callsites via
+  `fabric_adoption_recovery_for_wire`). Test:
+  `adopted_recovery_uses_install_table_and_proved_rg_16217`.
+- Codex #2/#3/#4/#6 + GLM F1: connected-owner index rebuilt as
+  (len,net) -> scoped entries with sequence tie-breaks: empty-table
+  rows under a sentinel visible in every scope, named ledger rows
+  under exact `<R>.inet.*` keys only, ledger consulted only when no
+  FIB row matches at any length, borrowed-&str probes (zero
+  allocation), index-currency row-count fallback to the exact
+  legacy scan. Tests: `connected_owner_index_named_ri_ledger_equivalence_16217`,
+  `connected_owner_static_route_does_not_claim_16217` (+ existing
+  `connected_owner_index_matches_legacy_scan_16217`,
+  `split_rg_connected_owner_scoped_by_ri_15958b`). Deferred probe
+  rollback: ProbeUndo snapshots node_served_stamps;
+  `rollback_dropped_probe_hit` removes the stage-transition marker
+  and restores stamps (`dropped_probe_rolls_back_stage_marker_and_served_stamps_16217`).
+- GLM F2: both dead NoLocalEntry SNAT guards DELETED (they probed
+  `forward_query`, which never has a local row in that arm);
+  imported unjudged rows (`source_nat_revalidated: None`) now
+  decline instead of falling through `unwrap_or(0)`. Decisive
+  mutation-verified cell:
+  `companion_present_reverse_hit_declines_when_invalid_current_epoch_16217`
+  (FIB-only invalidity + current epoch + established row survives;
+  guard-neuter `if false` verified red 2026-10-24, restore green).
+  Production-chain contract:
+  `declined_reverse_hit_never_produces_teardown_key_16217` (decline
+  / canonical-less revocation => caller keeps session, recycles
+  descriptor, drops packet). The earlier false RED-on-revert claim
+  in `established_reverse_hit_never_stale_snat_revoked_16217` was
+  corrected: that cell pins the companion-present survive, not the
+  deleted dead guard.
+- Changelog entries added for Wire33/Wire34/index/discriminator.
+
+Unit: `cargo test 16217` 61 passed; `policy_revalidation` 116
+passed; session:: 549 passed with 4 failures verified identical in
+kind on the stashed pre-fold tree (handshake_ack_16042 x3 from the
+master #16042 fold, session_decision_typed_snat_layout_11064
+pre-existing).
+
+Live aged table (rebased head ae0fbee76c, `make deb
+DEB_VERSION=99.16217.47` deb sha256
+`7de68a0fa655e1f12e70341cde0782031e9ec41ffb935673cdefedf8dc98d29d`,
+helper sha256
+`3f992be78874bfb932c518d96a78be91782cf6317db4570154d60823c6bcabd7`
+hash-proved `/proc/<pid>/exe` both nodes before traffic; RG1
+node0->node1 proven both views each run; evidence
+`/var/worktrees/FZFixWire34/run{3,4}/`):
+
+| Run | Per-stream zeros | SUM zeros | snat_revoked | Verdict |
+|---|---|---|---|---|
+| run3 (rebased run 1) | 0 | 0 | 0 both, all samples | PASS |
+| run4 (rebased run 2) | 0 | 0 | 0 both, all samples | PASS |
+
+**Acceptance (ZERO per-stream zeros) met TWICE on the rebased
+head.** Restore after each run: clean master `2c8575b70e`, helper
+`2f2f5cbf…b04` both, RG0/1/2 node0, target OK, P4 14.6/14.5
+Gbit/s, VERIFY_ZERO 0. (Pre-rebase head 4a8abf0a40 also passed
+twice: run1/run2 in the FZFixWire34 section above.)
