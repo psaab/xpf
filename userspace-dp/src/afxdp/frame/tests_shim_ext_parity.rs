@@ -518,14 +518,11 @@ enum Verdict {
     NoL4,
     /// Still on an extension header at the iteration bound.
     ///
-    /// This names the SHIM's observable state, not a shim behaviour: the shim's
-    /// walk does not fail closed on exhaustion, it returns the last declared
-    /// extension-header protocol and `parse_l4`'s catch-all
-    /// (`userspace-xdp/src/lib.rs`) then yields ports 0/0 so the session key
-    /// misses and the packet is redirected. `walk_ipv6_ext_chain` returns
-    /// `OverLimit` for the same chain. The two are folded to one label so the
-    /// chain-length boundary is comparable; the fold is a renaming of two
-    /// observed outputs, not a claim about what either does next.
+    /// Userspace's `walk_ipv6_ext_chain` returns `OverLimit` for such a chain.
+    /// The shim side no longer folds to this label: since #16038
+    /// `shim_verdict` maps `walk.exhausted` to `FailClosed`, matching
+    /// `parse_ipv6` returning `None` (XDP_DROP). The label is retained for the
+    /// userspace side and for the floor-2 boundary assertions below.
     OverLimit,
     /// Truncated / declared length overran the packet / offset overflow.
     FailClosed,
@@ -566,10 +563,15 @@ fn shim_verdict(buf: &[u8], l3: usize) -> Verdict {
         // NonFirstFragment verdict, NOT against the terminal L4 at the
         // payload offset the raw walk reports.
         Some(w) if w.non_first_fragment => Verdict::NoL4,
+        // #16038: `parse_ipv6` now returns None on `walk.exhausted`, which the
+        // caller turns into XDP_DROP — the same FailClosed fold userspace's
+        // OverLimit verdict receives on its side of the corpus. Folding via
+        // the walk's own `exhausted` bit (not re-derived from `eh_class`)
+        // means a walk that stops reporting exhaustion reds here.
+        Some(w) if w.exhausted => Verdict::FailClosed,
         Some(w) => match shim_walk::eh_class(w.protocol) {
             shim_walk::EH_CLASS_NONEXT => Verdict::NoL4,
             shim_walk::EH_CLASS_TERMINAL => Verdict::L4(w.offset as usize, w.protocol),
-            // Loop exhausted while still on an extension header.
             _ => Verdict::OverLimit,
         },
     }
@@ -588,7 +590,10 @@ fn userspace_verdict(buf: &[u8], l3: usize) -> Verdict {
     match walk_ipv6_ext_chain(buf, l3).outcome {
         ExtChainOutcome::L4(off, proto) => Verdict::L4(off, proto),
         ExtChainOutcome::NoNextHeader => Verdict::NoL4,
-        ExtChainOutcome::OverLimit => Verdict::OverLimit,
+        // #16038: both walkers now fail closed on exhaustion (shim:
+        // `parse_ipv6` -> None -> DROP; userspace: OverLimit -> drop gate),
+        // so the corpus compares them under one fail-closed label.
+        ExtChainOutcome::OverLimit => Verdict::FailClosed,
         ExtChainOutcome::Truncated => Verdict::FailClosed,
         // #14116: stopped at a readable non-first Fragment header. The
         // shim's raw walk stops at the same header and reports the
@@ -647,12 +652,13 @@ const MAX_DRIFT_REPORTED: usize = 20;
 //      production treat every IPv6 packet as TCP at the initial offset while
 //      every test in this file stayed green, because the direct call below is
 //      unchanged by it.
-//   3. `parse_l4` consumes the walk's `(offset, protocol)`, and its catch-all
-//      arm — yielding ports 0/0 for a protocol it does not parse — is what the
-//      `Verdict::OverLimit` fold rests on: the shim's walk does not fail closed
-//      on exhaustion, it returns the last extension-header protocol and
-//      `parse_l4` turns that into a session-key miss. The fold is a claim about
-//      `parse_l4`'s behaviour, made from its source.
+//   3. `parse_ipv6` consumes the walk: since #16038 it returns `None` when
+//      `walk.exhausted` is set, before `parse_l4` or any PASS arm runs. The
+//      walk's `exhausted` bit is executed here (`shim_verdict` folds it to
+//      `FailClosed`); that `parse_ipv6` honours it is read off `lib.rs` and
+//      believed in THIS file, and executed end-to-end (real object, local/
+//      multicast destinations, DROP not PASS) by the Go shim-run cells in
+//      `pkg/dataplane/userspace/ext_chain_exhaustion_16038_test.go`.
 //   4. The manifest-to-OBJECT relationship. `read_shim_facts` parses
 //      `userspace_xdp_manifest.json`; it never touches
 //      `userspace_xdp_bpfel.o`. That the JSON describes the committed object is
@@ -1555,11 +1561,16 @@ fn parity_corpus() -> Vec<(String, Vec<u8>)> {
          extension headers, so the corpus does not straddle the boundary it claims to"
     );
     assert_eq!(
-        userspace_verdict(&over, 0),
-        Verdict::OverLimit,
+        walk_ipv6_ext_chain(&over, 0).outcome,
+        ExtChainOutcome::OverLimit,
         "#4555 corpus floor 2: this crate no longer refuses a chain of {} minimum-size extension \
          headers; the over-limit side of the boundary is not in the corpus",
         at_max_hdrs + 1,
+    );
+    assert_eq!(
+        userspace_verdict(&over, 0),
+        Verdict::FailClosed,
+        "#16038 corpus floor 2: the over-limit chain must fold to FailClosed on the userspace side"
     );
 
     // 3. EVERY NEXT-HEADER VALUE IS PRESENTED AS A WALKED FIRST HEADER.
@@ -3057,5 +3068,99 @@ fn shim_fragment_sentinel_is_not_a_traversable_next_header() {
         "253/254 are no longer traversable; the collision hazard this cell \
          guards has changed shape and the sentinel's justification needs \
          re-reading"
+    );
+}
+
+/// #16038: the walk must REPORT exhaustion, for every traversable type.
+///
+/// An over-limit chain (`MAX_EXT_HDRS + 1` headers) must come back with
+/// `exhausted == true` and a still-traversable residual protocol; the longest
+/// resolvable chain (`MAX_EXT_HDRS` headers) must come back with
+/// `exhausted == false` and the TCP terminal. This is the bit `parse_ipv6`
+/// drops on, and the bit `shim_verdict` folds to `FailClosed` — a walk that
+/// stopped setting it (or set it on resolved chains) reds here and in the
+/// corpus. Fails on revert of the `exhausted` computation with
+/// "must report exhausted".
+#[test]
+fn exhausted_walk_reports_exhaustion_for_every_traversable_type_16038() {
+    for proto in shim_traversable_protocols() {
+        let over = ext_chain_frame(proto, shim_walk::MAX_EXT_HDRS + 1);
+        let w = raw_shim_walk(&over, 14)
+            .expect("#16038: the shim walk must not refuse an over-limit chain outright");
+        assert!(
+            w.exhausted,
+            "#16038: proto={proto}: an over-limit chain of {} headers must report exhausted; \
+             got protocol={} offset={}",
+            shim_walk::MAX_EXT_HDRS + 1,
+            w.protocol,
+            w.offset
+        );
+        assert_ne!(
+            shim_walk::eh_class(w.protocol),
+            EH_CLASS_TERMINAL,
+            "#16038: proto={proto}: an exhausted walk must still hold a traversable protocol"
+        );
+        assert_eq!(
+            shim_verdict(&over, 14),
+            Verdict::FailClosed,
+            "#16038: proto={proto}: an exhausted walk must fold to FailClosed (parse_ipv6 DROP)"
+        );
+
+        let at = ext_chain_frame(proto, shim_walk::MAX_EXT_HDRS);
+        let w = raw_shim_walk(&at, 14).expect("#16038: at-limit chain must walk");
+        assert!(
+            !w.exhausted,
+            "#16038: proto={proto}: a resolvable chain of {} headers must NOT report exhausted",
+            shim_walk::MAX_EXT_HDRS
+        );
+        assert_eq!(w.protocol, TCP, "#16038: proto={proto}: at-limit must resolve TCP");
+        assert_eq!(shim_verdict(&at, 14), Verdict::L4(w.offset as usize, TCP));
+    }
+    // Controls that must never read as exhausted: no chain, No-Next-Header,
+    // and an ESP terminal behind one extension header.
+    let plain = ext_chain_frame(TCP, 0);
+    assert!(!raw_shim_walk(&plain, 14).unwrap().exhausted);
+    let mut none = ext_chain_frame(TCP, 0);
+    none[14 + 6] = 59;
+    let w = raw_shim_walk(&none, 14).unwrap();
+    assert!(!w.exhausted && w.protocol == 59, "#16038: NoNext must not be exhausted: {w:?}", w = (w.protocol, w.exhausted));
+    let mut esp = ext_chain_frame(DEST, 1);
+    // Rewrite the single DestOpt header to declare ESP, then an ESP byte.
+    esp[14 + 40] = 50;
+    let w = raw_shim_walk(&esp, 14).unwrap();
+    assert!(!w.exhausted && w.protocol == 50, "#16038: ESP terminal must not be exhausted");
+    // #16038 vs #13959/#14116 (master): the non-first-fragment EARLY STOP is a
+    // resolved verdict, not iteration exhaustion. A Fragment header with a
+    // non-zero offset whose declared next-header is traversable (DestOpt)
+    // breaks out of the walk with `protocol == DEST`; it must report
+    // `non_first_fragment && !exhausted` and fold to NoL4 (sentinel), never
+    // FailClosed. Folding it into `exhausted` would drop fragments at parse
+    // instead of redirecting them to userspace.
+    let mut frag = ext_chain_frame(FRAG, 1);
+    // Fragment header at 54: [next=DEST, reserved, off=0x0008 (non-first), id].
+    frag[54] = DEST;
+    frag[56] = 0x00;
+    frag[57] = 0x08;
+    let w = raw_shim_walk(&frag, 14).unwrap();
+    assert!(
+        w.non_first_fragment && !w.exhausted && w.protocol == DEST,
+        "#16038: non-first fragment early stop must be non_first && !exhausted with residual DEST; got non_first={} exhausted={} proto={}",
+        w.non_first_fragment, w.exhausted, w.protocol
+    );
+    assert_eq!(
+        shim_verdict(&frag, 14),
+        Verdict::NoL4,
+        "#16038: non-first fragment must fold to NoL4 (sentinel), not FailClosed"
+    );
+    // Same shape but FIRST fragment (offset 0, M set): walk continues past it
+    // to TCP and is not exhausted either.
+    let mut first = ext_chain_frame(FRAG, 1);
+    first[56] = 0x00;
+    first[57] = 0x01; // offset 0, M=1
+    let w = raw_shim_walk(&first, 14).unwrap();
+    assert!(
+        !w.non_first_fragment && !w.exhausted && w.protocol == TCP,
+        "#16038: first fragment must resolve TCP without exhaustion; got non_first={} exhausted={} proto={}",
+        w.non_first_fragment, w.exhausted, w.protocol
     );
 }

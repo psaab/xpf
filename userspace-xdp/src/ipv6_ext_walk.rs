@@ -35,9 +35,10 @@ use core::mem;
 /// This is an ITERATION count, not a header count, and it differs by one from
 /// userspace-dp's `MAX_IPV6_EXT_HEADERS` on purpose. This loop spends one
 /// iteration per extension header and exits by EXHAUSTION carrying whatever
-/// next-header value the last one declared — there is no post-loop over-limit
-/// check, `protocol` flows straight into `parse_l4` — so a chain of up to
-/// `MAX_EXT_HDRS` extension headers still resolves its L4.
+/// next-header value the last one declared — so a chain of up to
+/// `MAX_EXT_HDRS` extension headers still resolves its L4, and a longer chain
+/// is reported through `ExtWalk::exhausted` (#16038) rather than being
+/// mistaken for a resolved terminal.
 /// `walk_ipv6_ext_chain` needs one FURTHER iteration to RETURN its terminal and
 /// folds exhaustion into the fail-closed `OverLimit` verdict, so it resolves up
 /// to `MAX_IPV6_EXT_HEADERS - 1`. The parity condition is therefore
@@ -215,6 +216,13 @@ pub struct ExtWalk {
     /// header later in the chain must not erase an earlier non-atomic
     /// sighting.
     pub fragment_seen: bool,
+    /// #16038: true iff the loop spent all `MAX_EXT_HDRS` iterations and the
+    /// resulting `protocol` is still a traversable extension-header type —
+    /// i.e. the chain was NOT resolved to a terminal. Distinct from the
+    /// #13959 non-first-fragment early stop (`non_first_fragment`), which is
+    /// a resolved verdict and never sets this. Callers MUST fail closed on
+    /// it; see `parse_ipv6`.
+    pub exhausted: bool,
 }
 
 /// Walk the extension-header chain from `first_protocol` at `offset`.
@@ -224,22 +232,31 @@ pub struct ExtWalk {
 /// the fail-closed outcomes, which propagate through `?` in `parse_ipv6` to
 /// `XDP_DROP`.
 ///
-/// Exhausting the loop is NOT an error here: it returns the last declared
-/// next-header value, which will be an extension-header type. `parse_l4`'s
-/// catch-all then yields ports 0/0 and the packet is redirected to userspace —
-/// the fail-closed path for an over-limit chain.
+/// Exhausting the loop is reported as `ExtWalk::exhausted`, NOT folded into
+/// `protocol` alone (#16038). Previously exhaustion returned the last declared
+/// next-header value (an extension-header type) with no marker, `parse_l4`'s
+/// catch-all yielded ports 0/0, and the local-destination / degraded arms in
+/// `lib.rs` could then kernel-PASS the packet unscreened — the walk's safety
+/// rested entirely on the cross-crate invariant that no session writer mints
+/// `(AF_INET6, <traversable>, src, dst, 0, 0)` (#6923). That invariant still
+/// protects the session-hit fast path, but it never covered the destination-
+/// qualified PASS arms, which do not consult the session map for that tuple.
+/// `parse_ipv6` now returns `None` on `exhausted`, so every caller fails
+/// closed (healthy: `XDP_DROP`; degraded: transit drop) regardless of what
+/// any map writer does.
 ///
-/// #6923: that refusal rests on the session-key lookup MISSING, and the miss is
-/// a property of the session MAP, which userspace writes — not of anything this
-/// file can see. It holds only because BOTH writers refuse to mint
+/// #6923 (historical, now defence in depth): before #16038 the refusal above
+/// rested on the session-key lookup MISSING, a property of the session MAP
+/// which userspace writes — not of anything this file can see. It held only
+/// because BOTH writers refuse to mint
 /// `(AF_INET6, <a next-header this walk traverses>, src, dst, 0, 0)`:
 /// `metadata_tuple_complete` declines the tuple on the packet path, and
 /// `build_synced_session_key` rejects it on the HA import path (both in
-/// userspace-dp). Before #6923 the first of those accepted it, an
-/// `application any` permit matched a flow with no ports to fail on, and the
-/// installed key was published — so the next packet of the same chain HIT and
-/// took the fast path. Do not restate this refusal as unconditional without
-/// checking those two, and do not add a third writer without extending them.
+/// userspace-dp). That invariant is retained (it still prevents an installed
+/// `(traversable, 0, 0)` key from ever being probed), but after #16038 the
+/// shim no longer depends on it: `exhausted` makes `parse_ipv6` fail closed
+/// before any session or local-destination arm runs. Do not add a third
+/// session writer without extending the #6923 refusals.
 ///
 /// Each arm's shape matters. The host-side parity corpus exercises them with
 /// MINIMAL-length buffers as well as padded ones — a padded buffer cannot
@@ -328,10 +345,24 @@ pub fn walk_ipv6_ext_headers(
             _ => break,
         }
     }
+    // #16038: exhausted iff the loop consumed every iteration and we are
+    // still sitting on a header the walk would traverse
+    // (GENERIC/AUTH/FRAGMENT). Two non-exhaustion exits must not be folded
+    // into this: (a) TERMINAL/NONEXT breaks — a resolved verdict; and
+    // (b) master's #13959/#14645 non-first-fragment early `break` above,
+    // which leaves `protocol == frag[0]` — possibly a traversable value
+    // (e.g. DestOpt) — but is a RESOLVED fragment verdict the caller turns
+    // into `PROTO_FRAGMENT_NO_L4`, not an iteration-limit exhaustion.
+    // `non_first_fragment` is exactly that early stop's marker, so it
+    // excludes the packet here; conflating the two would drop every
+    // non-first fragment at parse instead of redirecting it unscreened-free
+    // to userspace, and would misreport the parity corpus.
+    let exhausted = !non_first_fragment && eh_class(protocol) != EH_CLASS_TERMINAL && eh_class(protocol) != EH_CLASS_NONEXT;
     Some(ExtWalk {
         offset,
         protocol,
         non_first_fragment,
         fragment_seen,
+        exhausted,
     })
 }

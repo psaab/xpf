@@ -1841,7 +1841,7 @@ represents: terminal offset, terminal protocol, no-next-header,
 fail-closed — and, since #6704, the NON-FIRST-FRAGMENT sighting.
 
 `walk_ipv6_ext_headers` returns `ExtWalk { offset, protocol,
-non_first_fragment }`. The third field is set when ANY Fragment header the
+non_first_fragment, fragment_seen, exhausted }`. The third field is set when ANY Fragment header the
 walk stepped over carried non-zero offset bits (`& 0xFFF8`, RFC 8200
 §4.5), which is field-for-field the semantics of
 `ExtChainWalk::non_first_fragment_offset_seen` on this side — so the
@@ -1851,6 +1851,17 @@ move that field in both walkers together. Before #6704 the shim returned a
 bare `(offset, protocol)` and the fragment dimension could not be compared
 from the test side at all; an earlier attempt to compare it hand-wrote a
 second walk loop in the test and asserted `X == X`.
+
+Since #16038 the last field reports walk exhaustion: true iff the loop
+spent all `MAX_EXT_HDRS` iterations and still holds a traversable
+extension-header type. It is distinct from the #13959 non-first-fragment
+early stop (`non_first_fragment`), which is a resolved verdict and never
+sets it. `parse_ipv6` returns `None` on exhaustion, so an over-limit
+chain to a local or multicast destination drops in the shim
+(`XDP_DROP` via the parse-fail / ctrl-disabled transit-drop arms) instead of
+reaching a destination-qualified kernel PASS unscreened. The corpus folds
+both walkers' exhaustion to `FailClosed`, and
+`ext_chain_exhaustion_16038_test.go` executes the retained object end to end.
 
 **The divergence itself is still OPEN, and the sighting is not yet
 consumed.** `parse_ipv6` / `parse_ipv4` still pass the bytes at the

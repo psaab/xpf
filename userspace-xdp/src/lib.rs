@@ -1928,6 +1928,13 @@ fn is_degraded_local_or_control(
     ) {
         return false;
     }
+    // #16038: never kernel-PASS an unresolved ext chain on the degraded path.
+    // `parse_ipv6` drops these before a ParsedPacket exists, so this is
+    // defence in depth; it must precede `should_fallback_early`, whose
+    // multicast arm would otherwise pass the packet.
+    if parsed.unresolved_ipv6_ext_chain {
+        return false;
+    }
     if should_fallback_early(parsed, ingress_domain) {
         return true;
     }
@@ -2174,6 +2181,12 @@ struct ParsedPacket {
     // header; false for a whole datagram. Read by the native-GRE and
     // WireGuard fragment dispositions.
     is_fragment: bool,
+    // #16038: true iff `parse_ipv6`'s walk exhausted on a still-traversable
+    // next-header. `parse_ipv6` returns `None` in that case today, so this is
+    // always false in production; it exists so `should_fallback_early` and
+    // `is_degraded_local_or_control` fail closed even if a future producer
+    // constructs such a packet instead of dropping it.
+    unresolved_ipv6_ext_chain: bool,
     vlan_id: u16,
     vlan_pcp: u8,
     vlan_present: bool,
@@ -2373,6 +2386,7 @@ fn parse_ipv4(
         udp_wg_transport_data,
         is_fragment: (frag_field & 0x2000) != 0 || non_first_fragment,
         tcp_flags_unknown: tcp_flags_unknown,
+        unresolved_ipv6_ext_chain: false,
         addr_family: AF_INET,
         protocol,
         wire_protocol: iph[9],
@@ -2411,6 +2425,20 @@ fn parse_ipv6(
     // why — and driven on real buffers), so its advance arithmetic and bounds
     // revalidation are observed rather than asserted about the source text.
     let walk = ipv6_ext_walk::walk_ipv6_ext_headers(data, data_end, l3_offset, protocol, offset)?;
+    // #16038: fail closed on walk exhaustion. An exhausted walk is still
+    // holding a traversable extension-header type as `protocol` with no
+    // resolved L4; feeding it to `parse_l4`'s catch-all (ports 0/0) and then
+    // to the destination-qualified kernel-PASS arms (early-filter multicast/
+    // link-local, degraded local/control, session-miss local-destination,
+    // and the ctrl-disabled twin) would hand an unscreened packet to the
+    // kernel. Returning `None` here lands on the same drop every truncated
+    // header already takes: healthy -> PARSE_FAIL transit drop, degraded ->
+    // transit drop (never `is_degraded_local_or_control`, which is only
+    // consulted with a parsed packet). Resolved chains — including
+    // No-Next-Header and ESP terminals — are unaffected.
+    if walk.exhausted {
+        return None;
+    }
     let wire_protocol = walk.protocol;
     // #13959: a non-first fragment's bytes after the Fragment header are
     // payload, not the extension header named by its Next Header. The walker
@@ -2493,6 +2521,7 @@ fn parse_ipv6(
         is_fragment: walk.fragment_seen,
         tcp_flags_unknown: false,
         payload_offset,
+        unresolved_ipv6_ext_chain: false,
         addr_family: AF_INET6,
         protocol,
         wire_protocol,
@@ -2540,6 +2569,15 @@ fn wg_steer_to_kernel(ctrl: &UserspaceCtrl, pkt: &ParsedPacket, ingress_ifindex:
 }
 
 fn should_fallback_early(pkt: &ParsedPacket, ingress_domain: u32) -> bool {
+    // #16038: an unresolved IPv6 extension chain must never pass early — its
+    // `protocol` is still a traversable ext-header type with ports 0/0, and a
+    // multicast/link-local destination would otherwise kernel-PASS it before
+    // any local-destination or session check. `parse_ipv6` already drops
+    // exhausted chains, so this arm is defence in depth for any future
+    // ParsedPacket producer; it must stay first.
+    if pkt.unresolved_ipv6_ext_chain {
+        return false;
+    }
     // #304: ESP and non-native GRE are no longer diverted to the kernel
     // ahead of this function; they are classified here like any other
     // protocol and reach the kernel only through the destination-qualified
