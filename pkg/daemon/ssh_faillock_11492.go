@@ -63,14 +63,19 @@ var (
 // host-PAM integration is limited to non-appliance installs. A custom PAM
 // stack is left untouched for its administrator to configure explicitly.
 func applySSHPAMFaillock() error {
-	_, err := applySSHPAMFaillockChanged()
+	_, _, err := applySSHPAMFaillockChanged()
 	return err
 }
 
 // applySSHPAMFaillockChanged is applySSHPAMFaillock reporting whether it
-// changed common-auth, so applySSHConfig can strip exactly the rules this
-// apply installed when a later step rolls back (#14973).
-func applySSHPAMFaillockChanged() (bool, error) {
+// changed common-auth and, when it did, the exact pre-apply bytes, so
+// applySSHConfig can restore precisely those bytes when a later step
+// rolls back (#14973, #16421). Restoring the prior bytes — rather than
+// stripping every managed block — matters on the upgrade transition:
+// a legacy-to-current rewrite changed the bytes but the lockout already
+// existed, so a strip would leave the host with less lockout than
+// before the apply.
+func applySSHPAMFaillockChanged() (bool, []byte, error) {
 	return setSSHPAMFaillock(true)
 }
 
@@ -215,63 +220,87 @@ func hasActivePAMFaillock(lines []string) bool {
 }
 
 // setSSHPAMFaillock installs (enable=true) or removes (enable=false) the
-// managed faillock rules, mirroring applySSHPAMFaillock's guards. It reports
-// whether common-auth was changed so a rollback knows the strip took effect.
-// Appliance hosts and unsupported stacks report (false, nil) on removal —
-// nothing xpf-managed can be present there — and removal still runs for a
+// managed faillock rules, mirroring applySSHPAMFaillock's guards. It
+// reports whether common-auth was changed and, when it was, the exact
+// pre-change bytes so a rollback can restore them. Appliance hosts and
+// unsupported stacks report (false, nil, nil) on removal — nothing
+// xpf-managed can be present there — and removal still runs for a
 // render error's managed blocks via the enable=false render path below.
-func setSSHPAMFaillock(enable bool) (bool, error) {
+func setSSHPAMFaillock(enable bool) (bool, []byte, error) {
 	if _, err := os.Stat(applianceMarkerFile); err == nil {
-		return false, nil
+		return false, nil, nil
 	} else if !os.IsNotExist(err) {
-		return false, fmt.Errorf("check appliance marker before PAM update: %w", err)
+		return false, nil, fmt.Errorf("check appliance marker before PAM update: %w", err)
 	}
 	if enable && !sshdPAMModuleAvailable() {
-		return false, fmt.Errorf("%w: pam_faillock.so is not installed", errSSHPAMFaillockUnsupported)
+		return false, nil, fmt.Errorf("%w: pam_faillock.so is not installed", errSSHPAMFaillockUnsupported)
 	}
 	current, err := sshdPAMReadFile(sshdPAMCommonAuthPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			if !enable {
-				return false, nil
+				return false, nil, nil
 			}
-			return false, fmt.Errorf("%w: %s is absent", errSSHPAMFaillockUnsupported, sshdPAMCommonAuthPath)
+			return false, nil, fmt.Errorf("%w: %s is absent", errSSHPAMFaillockUnsupported, sshdPAMCommonAuthPath)
 		}
-		return false, fmt.Errorf("read PAM common-auth stack: %w", err)
+		return false, nil, fmt.Errorf("read PAM common-auth stack: %w", err)
 	}
 	if !enable && !strings.Contains(string(current), pamFaillockPreBegin) && !strings.Contains(string(current), pamFaillockPostBegin) {
-		return false, nil
+		return false, nil, nil
 	}
 	updated, changed, err := renderSSHPAMFaillock(current, enable)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if !changed {
-		return false, nil
+		return false, nil, nil
 	}
 	info, err := os.Lstat(sshdPAMCommonAuthPath)
 	if err != nil {
-		return false, fmt.Errorf("stat PAM common-auth stack: %w", err)
+		return false, nil, fmt.Errorf("stat PAM common-auth stack: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		return false, fmt.Errorf("%w: %s is not a regular file", errSSHPAMFaillockUnsupported, sshdPAMCommonAuthPath)
+		return false, nil, fmt.Errorf("%w: %s is not a regular file", errSSHPAMFaillockUnsupported, sshdPAMCommonAuthPath)
 	}
 	if err := sshdPAMWriteFile(sshdPAMCommonAuthPath, updated, info.Mode().Perm()); err != nil {
-		return false, fmt.Errorf("write PAM common-auth stack: %w", err)
+		return false, nil, fmt.Errorf("write PAM common-auth stack: %w", err)
 	}
-	return true, nil
+	return true, current, nil
 }
 
-// stripSSHPAMFaillockOnRollback removes the managed faillock rules a failed
-// applySSHConfig installed (#14973). It is best-effort: failures are logged
-// and joined into the apply error by the caller, never masking the original
-// failure. It only strips when this apply actually changed common-auth, so a
-// pre-existing admin faillock is never removed by an unrelated rollback.
-func stripSSHPAMFaillockOnRollback(installed bool) error {
+// restoreSSHPAMFaillockOnRollback undoes a failed applySSHConfig's
+// common-auth change (#14973, #16421). When the apply captured the
+// pre-apply bytes they are restored verbatim — the same posture as
+// revertDropIn for the sshd drop-in — so a host whose legacy managed
+// rules were merely upgraded keeps its pre-existing lockout. With no
+// captured bytes (nil) it falls back to stripping the managed rules
+// this apply installed, which is exactly restore-to-stock when the
+// apply started from stock. It is best-effort: failures are logged
+// and joined into the apply error by the caller, never masking the
+// original failure. It only acts when this apply actually changed
+// common-auth, so a pre-existing admin faillock is never removed by
+// an unrelated rollback.
+func restoreSSHPAMFaillockOnRollback(installed bool, prior []byte) error {
 	if !installed {
 		return nil
 	}
-	changed, err := setSSHPAMFaillock(false)
+	if prior != nil {
+		info, err := os.Lstat(sshdPAMCommonAuthPath)
+		if err != nil {
+			slog.Warn("failed to stat PAM common-auth stack on SSH apply rollback", "err", err)
+			return fmt.Errorf("stat PAM common-auth stack on rollback: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("restore PAM common-auth stack on rollback: %w: %s is not a regular file", errSSHPAMFaillockUnsupported, sshdPAMCommonAuthPath)
+		}
+		if err := sshdPAMWriteFile(sshdPAMCommonAuthPath, prior, info.Mode().Perm()); err != nil {
+			slog.Warn("failed to restore prior PAM faillock rules on SSH apply rollback", "err", err)
+			return fmt.Errorf("restore prior PAM faillock on rollback: %w", err)
+		}
+		slog.Info("restored prior PAM faillock rules on SSH apply rollback")
+		return nil
+	}
+	changed, _, err := setSSHPAMFaillock(false)
 	if err != nil {
 		slog.Warn("failed to strip managed PAM faillock rules on SSH apply rollback", "err", err)
 		return fmt.Errorf("strip managed PAM faillock on rollback: %w", err)
