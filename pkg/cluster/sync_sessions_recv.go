@@ -28,11 +28,7 @@ func (s *SessionSync) handleSessionV4(conn net.Conn, payload []byte) bool {
 		return false
 	}
 	if val.IsReverse == 0 {
-		s.bulkMu.Lock()
-		if s.bulkInProgress {
-			s.bulkRecvV4[key] = struct{}{}
-		}
-		s.bulkMu.Unlock()
+		s.admitBulkRecvV4(key)
 	}
 	offset := s.clockOffsetFor(conn)
 	// #9915 F-118: count only installs that both saturate AND land:
@@ -75,11 +71,7 @@ func (s *SessionSync) handleSessionV6(conn net.Conn, payload []byte) bool {
 		return false
 	}
 	if val.IsReverse == 0 {
-		s.bulkMu.Lock()
-		if s.bulkInProgress {
-			s.bulkRecvV6[key] = struct{}{}
-		}
-		s.bulkMu.Unlock()
+		s.admitBulkRecvV6(key)
 	}
 	offset := s.clockOffsetFor(conn)
 	// #9915 F-118: see the v4 twin — count only landed saturations.

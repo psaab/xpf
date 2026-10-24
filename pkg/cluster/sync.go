@@ -373,6 +373,24 @@ type SyncStats struct {
 	// incarnation (#9716). They are matched on epoch and connection alone, and
 	// counted so a half-upgraded pair is visible rather than silent.
 	BulkEndsEpochOnlyMatched atomic.Uint64
+	// BulkRecvCapped (#16039) counts distinct session records refused
+	// admission to the bulk receive accumulators because the window
+	// already held bulkRecvCap() live keys across both families, plus
+	// distinct keys dropped on an already-invalid window. The cap is on
+	// live occupancy: a delete during the window frees its key's slot,
+	// so delete+reinstall churn does not consume it. A nonzero value
+	// means the peer's bulk window exceeded the table capacity this
+	// node is provisioned for: the window is aborted rather than
+	// reconciled.
+	BulkRecvCapped atomic.Uint64
+	// BulkRecvAborted (#16039) counts accepted bulk windows aborted by
+	// the receiver: accumulator overflow past the table cap, deadline
+	// expiry observed on receive, or a BulkEnd arriving after the
+	// window deadline. An aborted window never reconciles, never acks,
+	// and never releases the failover hold; it latches bulkIncomplete
+	// readiness debt until a later bulk reconciles successfully. At
+	// most one abort is counted per window.
+	BulkRecvAborted atomic.Uint64
 	// ConfigsApplyFailed counts config-sync messages that were admitted by the
 	// #3931 ordering guard but whose apply did NOT take effect on this node —
 	// a compile/promote failure (a mixed-build ISSU syntax error, a store
@@ -650,6 +668,8 @@ type SyncStatsSnapshot struct {
 	RebaseSaturations              uint64 // #9915 F-118
 	BulkEndsForeignConnDropped     uint64 // #9716
 	BulkEndsEpochOnlyMatched       uint64 // #9716
+	BulkRecvCapped                 uint64 // #16039
+	BulkRecvAborted                uint64 // #16039
 	// PeerBootIncarnation renders the boot id of the peer incarnation that
 	// most recently primed, or "none". It travels in the snapshot rather than
 	// through a new Manager accessor because the Manager holds only the
@@ -721,10 +741,14 @@ type SyncStatsSnapshot struct {
 // promoting it fail-opens after a tightening commit and false-denies after a
 // loosening commit.
 type TransferReadinessSnapshot struct {
-	Connected             bool
-	PendingBulkAckEpoch   uint64
-	PendingBulkAckAge     time.Duration
-	BulkAckRetryOwed      bool
+	Connected           bool
+	PendingBulkAckEpoch uint64
+	PendingBulkAckAge   time.Duration
+	BulkAckRetryOwed    bool
+	// BulkIncomplete is #16039 readiness debt: a bulk window aborted
+	// by the cap or deadline. It keeps ReadyForManualFailover false
+	// until a later bulk reconciles successfully.
+	BulkIncomplete        bool
 	BulkReceiveInProgress bool
 	BulkReceiveEpoch      uint64
 	BulkReceiveSessions   int
@@ -751,7 +775,7 @@ func (s TransferReadinessSnapshot) ConfigStale() bool {
 // availability-vs-security tradeoff and is NOT gated here.
 func (s TransferReadinessSnapshot) ReadyForManualFailover() bool {
 	return s.PendingBulkAckEpoch == 0 && !s.BulkAckRetryOwed &&
-		!s.BulkReceiveInProgress && !s.ConfigStale()
+		!s.BulkReceiveInProgress && !s.BulkIncomplete && !s.ConfigStale()
 }
 
 // Reason explains the current transfer-readiness blocker, if any.
@@ -767,6 +791,8 @@ func (s TransferReadinessSnapshot) Reason() string {
 		return "outbound authoritative bulk retry is owed"
 	case s.BulkReceiveInProgress:
 		return fmt.Sprintf("local bulk receive still in progress epoch=%d sessions=%d", s.BulkReceiveEpoch, s.BulkReceiveSessions)
+	case s.BulkIncomplete:
+		return fmt.Sprintf("local bulk receive aborted epoch=%d; awaiting successful bulk reconcile", s.BulkReceiveEpoch)
 	case s.ConfigStale():
 		return fmt.Sprintf("standby config stale: applied gen=%d behind peer committed gen=%d", s.AppliedConfigGen, s.PeerConfigGen)
 	default:
@@ -1528,6 +1554,25 @@ type SessionSync struct {
 	bulkRecvConn net.Conn
 	bulkRecvV4   map[dataplane.SessionKey]struct{}
 	bulkRecvV6   map[dataplane.SessionKeyV6]struct{}
+	// bulkRecvStartedAt is the wall-clock open time of the accepted bulk
+	// window (#16039), guarded by bulkMu. A BulkEnd arriving after
+	// bulkRecvWindowTimeout aborts the window instead of reconciling
+	// it: a legitimately full table cannot be held open past the
+	// sender's retry cadence.
+	bulkRecvStartedAt time.Time
+	// bulkIncomplete is readiness debt (#16039 fold): set when a window is
+	// aborted (cap or deadline), cleared only by a successful reconcile.
+	// While set, TransferReadiness keeps reporting the bulk as in
+	// progress even though the window itself is closed. Guarded by bulkMu.
+	bulkIncomplete bool
+	// bulkRecvInvalid marks the accepted window aborted by the cap or
+	// deadline (#16039). Invalid windows never reconcile, ack, or
+	// release the hold; they absorb further keys without storing them
+	// until their BulkEnd or the next fresh BulkStart retires them.
+	bulkRecvInvalid bool
+	// testBulkRecvNow overrides the wall clock read for the window
+	// deadline. Test-only; production never sets it.
+	testBulkRecvNow func() time.Time
 	// bulkInstallFailedV4/V6 retain only transient helper-install failures for
 	// the active authoritative bulk. They are separate from the received-key
 	// set because a failed transport write must not make that snapshot complete;
@@ -2421,6 +2466,8 @@ func (s *SessionSync) Stats() SyncStatsSnapshot {
 		ClockSyncsRefused:              s.stats.ClockSyncsRefused.Load(),
 		BulkEndsForeignConnDropped:     s.stats.BulkEndsForeignConnDropped.Load(),
 		BulkEndsEpochOnlyMatched:       s.stats.BulkEndsEpochOnlyMatched.Load(),
+		BulkRecvCapped:                 s.stats.BulkRecvCapped.Load(),
+		BulkRecvAborted:                s.stats.BulkRecvAborted.Load(),
 		ConfigsApplyFailed:             s.stats.ConfigsApplyFailed.Load(),
 		ImportsRefusedByHelper:         s.stats.ImportsRefusedByHelper.Load(),
 		ImportsRejectedByHelper:        s.stats.ImportsRejectedByHelper.Load(),
@@ -2673,7 +2720,7 @@ func (s *SessionSync) snapshotZoneOwnership() *zoneOwnershipSnapshot {
 
 func (s *SessionSync) reconcileStaleSessions(bulkSerial uint64) (bool, uint64, bool) {
 	s.bulkMu.Lock()
-	if !s.bulkInProgress || s.bulkRecvSerial != bulkSerial {
+	if !s.bulkInProgress || s.bulkRecvSerial != bulkSerial || s.bulkRecvInvalid {
 		s.bulkMu.Unlock()
 		return false, 0, false
 	}
@@ -2687,6 +2734,9 @@ func (s *SessionSync) reconcileStaleSessions(bulkSerial uint64) (bool, uint64, b
 	s.inventoryActiveGeneration = 0
 	s.bulkRecvV4 = nil
 	s.bulkRecvV6 = nil
+	s.bulkRecvStartedAt = time.Time{}
+	s.bulkRecvInvalid = false
+	s.bulkIncomplete = false
 	s.bulkInstallFailedV4 = nil
 	s.bulkInstallFailedV6 = nil
 	s.bulkZoneSnapshot = nil

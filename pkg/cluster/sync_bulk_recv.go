@@ -117,7 +117,40 @@ func (s *SessionSync) handleBulkEnd(conn net.Conn, payload []byte) bool {
 	}
 	bulkSerial := s.bulkRecvSerial
 	failedV4, failedV6 := len(s.bulkInstallFailedV4), len(s.bulkInstallFailedV6)
+	// #16039: an invalid window (accumulator overflow) or a window held
+	// open past its deadline is aborted here, never reconciled. The
+	// window closes, but bulkIncomplete keeps the readiness debt until
+	// a later bulk reconciles successfully.
+	invalid := s.bulkRecvInvalid
+	late := !s.bulkRecvStartedAt.IsZero() &&
+		s.bulkRecvNow().Sub(s.bulkRecvStartedAt) > bulkRecvWindowTimeout
+	if late && !invalid {
+		s.bulkRecvInvalid = true
+		invalid = true
+		s.stats.BulkRecvAborted.Add(1)
+	}
+	if invalid || late {
+		s.bulkInProgress = false
+		s.bulkIncomplete = true
+		s.inventoryActive = false
+		s.inventoryActiveGeneration = 0
+		s.bulkRecvV4 = nil
+		s.bulkRecvV6 = nil
+		s.bulkInstallFailedV4 = nil
+		s.bulkInstallFailedV6 = nil
+		s.bulkZoneSnapshot = nil
+		s.bulkRecvStartedAt = time.Time{}
+		s.bulkRecvInvalid = false
+	}
 	s.bulkMu.Unlock()
+	if invalid || late {
+		slog.Warn("cluster sync: bulk receive window aborted; withholding BulkAck and failover release",
+			"epoch", epoch, "late", late,
+			"aborted_total", s.stats.BulkRecvAborted.Load(),
+			"capped_total", s.stats.BulkRecvCapped.Load(),
+			"local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
+		return false
+	}
 	if failedV4+failedV6 > 0 {
 		// Do not reconcile this incomplete authoritative snapshot: absent
 		// rows would be deleted. Keeping the receive window open also keeps

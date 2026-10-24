@@ -8,6 +8,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/psaab/xpf/pkg/dataplane"
 )
 
 // malformedRecordWarnDetector bounds the "dropping malformed session record"
@@ -74,6 +76,12 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 				return
 			}
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				// #16039 fold 2: the read-timeout tick is the timer for a
+				// silent peer, which by definition sends no next frame for
+				// the on-receive check to run on. Expire the bulk window
+				// here (before the heartbeat-ack teardown, so the tick
+				// that closes the connection still expires exactly once).
+				s.expireBulkWindowIfStale()
 				if s.peerHeartbeatAckEver.Load() {
 					missedHeartbeats++
 				}
@@ -191,6 +199,12 @@ func (s *SessionSync) bulkReceiveProgress(typ string, conn net.Conn) {
 // receiveLoop refreshes peer liveness only on true. See
 // sync_payload_caps_16041.go for the acceptance contract.
 func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte) bool {
+	// #16039 fold: the window deadline is enforced on receive, not only
+	// at BulkEnd — any inbound frame after the deadline expires the open
+	// window. Fold 2 adds the timer arm: receiveLoop calls the same
+	// expiry on every read-timeout tick, so a silent peer (no next
+	// frame) still loses its window.
+	s.expireBulkWindowIfStale()
 	switch msgType {
 	case syncMsgSessionV4:
 		return s.handleSessionV4(conn, payload)
@@ -417,4 +431,163 @@ func (s *SessionSync) handleConfigPayload(conn net.Conn, payload []byte, clearte
 		return queued
 	}
 	return true
+}
+
+// bulkRecvWindowTimeout bounds one accepted bulk receive window (#16039).
+// A legitimate full-table bulk is re-driven by the sender after
+// BulkAckPendingRetryAfter (35s) when its ack is withheld, and the daemon
+// retry can take up to ~150s; an hour is two orders of magnitude beyond
+// that cadence, so only a peer holding the window open trips it. The
+// deadline is enforced on receive (expireBulkWindowIfStale, called at
+// the top of handleMessage) and again at BulkEnd: expiry closes the
+// window, frees its maps, and latches bulkIncomplete readiness debt
+// until a later bulk reconciles successfully.
+const bulkRecvWindowTimeout = time.Hour
+
+// bulkRecvNow returns the bulk window clock (test-overridable).
+func (s *SessionSync) bulkRecvNow() time.Time {
+	if s != nil && s.testBulkRecvNow != nil {
+		return s.testBulkRecvNow()
+	}
+	return time.Now()
+}
+
+// bulkRecvCap is the ceiling for the combined distinct keys in one bulk
+// receive window (#16039): the forward-session table capacity. Forward
+// keys are half of conntrack.MaxSessions, which counts forward+reverse
+// entries; the wired helper capacity (SetGenGuardSessionCap) replaces
+// the ceiling when known, exactly as maxCap clamps the gen-guard caps.
+// A zero result (only reachable via a zero genGuardMapCeilingOverride
+// with an empty wired report, which maxCap never returns) admits nothing.
+func (s *SessionSync) bulkRecvCap() int {
+	if s == nil {
+		return 0
+	}
+	return s.maxCap()
+}
+
+// expireBulkWindowIfStale aborts an open bulk window whose deadline has
+// passed (#16039 fold). It has two callers, and both are load-bearing:
+// the top of every handleMessage (a peer that never sends BulkEnd loses
+// its window on its next frame), and receiveLoop's read-timeout branch
+// (fold 2: a peer that goes fully silent sends no next frame, so the
+// read-deadline tick — every readDeadlineDuration, 10s by default — is
+// the timer that fires the expiry). Aborting closes the window and
+// frees the accumulators, but latches bulkIncomplete so
+// TransferReadiness keeps blocking manual failover until a later bulk
+// reconciles. Exactly one abort is counted per window (guarded by
+// bulkRecvInvalid under bulkMu); concurrent callers on the two fabric
+// loops and the timeout tick serialize on bulkMu.
+func (s *SessionSync) expireBulkWindowIfStale() {
+	if s == nil {
+		return
+	}
+	s.bulkMu.Lock()
+	if !s.bulkInProgress || s.bulkRecvInvalid || s.bulkRecvStartedAt.IsZero() ||
+		s.bulkRecvNow().Sub(s.bulkRecvStartedAt) <= bulkRecvWindowTimeout {
+		s.bulkMu.Unlock()
+		return
+	}
+	epoch := s.bulkRecvEpoch
+	s.bulkRecvInvalid = true
+	s.stats.BulkRecvAborted.Add(1)
+	s.bulkInProgress = false
+	s.bulkIncomplete = true
+	s.inventoryActive = false
+	s.inventoryActiveGeneration = 0
+	s.bulkRecvV4 = nil
+	s.bulkRecvV6 = nil
+	s.bulkInstallFailedV4 = nil
+	s.bulkInstallFailedV6 = nil
+	s.bulkZoneSnapshot = nil
+	s.bulkRecvStartedAt = time.Time{}
+	s.bulkRecvInvalid = false
+	s.bulkMu.Unlock()
+	slog.Warn("cluster sync: bulk receive window expired past deadline; window aborted, awaiting successful bulk reconcile",
+		"epoch", epoch, "aborted_total", s.stats.BulkRecvAborted.Load())
+}
+
+// removeBulkRecvV4 frees key's slot in the receive window on a successful
+// delete (#16039 fold): the cap is on live occupancy, so a deleted key
+// no longer counts against it and a replacement install may take its
+// place. No-op outside a window or for a key the window never held.
+func (s *SessionSync) removeBulkRecvV4(key dataplane.SessionKey) {
+	s.bulkMu.Lock()
+	if s.bulkInProgress && s.bulkRecvV4 != nil {
+		delete(s.bulkRecvV4, key)
+	}
+	s.bulkMu.Unlock()
+}
+
+// removeBulkRecvV6 is the IPv6 twin of removeBulkRecvV4.
+func (s *SessionSync) removeBulkRecvV6(key dataplane.SessionKeyV6) {
+	s.bulkMu.Lock()
+	if s.bulkInProgress && s.bulkRecvV6 != nil {
+		delete(s.bulkRecvV6, key)
+	}
+	s.bulkMu.Unlock()
+}
+
+// admitBulkRecvV4 records key in the active bulk window unless the window
+// is invalid or full (#16039). Admission precedes the install verdict
+// because a key whose helper install fails transiently must still count
+// as received (its retry marker lives in bulkInstallFailedV4); the cap is
+// what keeps that pre-verdict accumulation bounded. A distinct key past
+// the cap invalidates the window exactly once; further distinct keys are
+// counted and dropped without storing. Duplicate keys are free.
+func (s *SessionSync) admitBulkRecvV4(key dataplane.SessionKey) {
+	s.bulkMu.Lock()
+	defer s.bulkMu.Unlock()
+	if !s.bulkInProgress {
+		return
+	}
+	if s.bulkRecvInvalid {
+		s.stats.BulkRecvCapped.Add(1)
+		return
+	}
+	if _, ok := s.bulkRecvV4[key]; ok {
+		return
+	}
+	if len(s.bulkRecvV4)+len(s.bulkRecvV6) >= s.bulkRecvCap() {
+		s.bulkRecvInvalid = true
+		s.stats.BulkRecvCapped.Add(1)
+		s.stats.BulkRecvAborted.Add(1)
+		slog.Warn("cluster sync: bulk receive window exceeds table capacity; window aborted",
+			"cap", s.bulkRecvCap(), "recv_v4", len(s.bulkRecvV4), "recv_v6", len(s.bulkRecvV6),
+			"epoch", s.bulkRecvEpoch)
+		return
+	}
+	if s.bulkRecvV4 == nil {
+		s.bulkRecvV4 = make(map[dataplane.SessionKey]struct{})
+	}
+	s.bulkRecvV4[key] = struct{}{}
+}
+
+// admitBulkRecvV6 is the IPv6 twin of admitBulkRecvV4.
+func (s *SessionSync) admitBulkRecvV6(key dataplane.SessionKeyV6) {
+	s.bulkMu.Lock()
+	defer s.bulkMu.Unlock()
+	if !s.bulkInProgress {
+		return
+	}
+	if s.bulkRecvInvalid {
+		s.stats.BulkRecvCapped.Add(1)
+		return
+	}
+	if _, ok := s.bulkRecvV6[key]; ok {
+		return
+	}
+	if len(s.bulkRecvV4)+len(s.bulkRecvV6) >= s.bulkRecvCap() {
+		s.bulkRecvInvalid = true
+		s.stats.BulkRecvCapped.Add(1)
+		s.stats.BulkRecvAborted.Add(1)
+		slog.Warn("cluster sync: bulk receive window exceeds table capacity; window aborted",
+			"cap", s.bulkRecvCap(), "recv_v4", len(s.bulkRecvV4), "recv_v6", len(s.bulkRecvV6),
+			"epoch", s.bulkRecvEpoch)
+		return
+	}
+	if s.bulkRecvV6 == nil {
+		s.bulkRecvV6 = make(map[dataplane.SessionKeyV6]struct{})
+	}
+	s.bulkRecvV6[key] = struct{}{}
 }
