@@ -45,7 +45,7 @@ func TestVerifyFabricStreamArgsToken11082(t *testing.T) {
 
 // TestMonitorInterfaceArgsBinding11082 drives the handler: a token minted
 // for THESE args passes auth; the same token against different args is
-// Unauthenticated; no token takes the counted legacy fallback.
+// Unauthenticated; no args token is Unauthenticated (#16031 sunset).
 func TestMonitorInterfaceArgsBinding11082(t *testing.T) {
 	const method = "/xpf.v1.BpfrxService/MonitorInterface"
 	run := func(req *pb.MonitorInterfaceRequest, tok string) error {
@@ -87,14 +87,9 @@ func TestMonitorInterfaceArgsBinding11082(t *testing.T) {
 	if err := run(reqB, mintStreamArgsToken11082(t, method, reqA)); err == nil || status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("replayed token with different args must be Unauthenticated, got: %v", err)
 	}
-
-	// Legacy: no args token passes the handler (method token checked by the
-	// interceptor, not here) and counts the fallback.
-	before := FabricStreamArgsUnboundTotal()
-	if err := run(reqA, ""); err != nil && status.Code(err) == codes.Unauthenticated {
-		t.Fatalf("legacy method-only stream must not be rejected by the handler: %v", err)
-	}
-	if got := FabricStreamArgsUnboundTotal(); got != before+1 {
-		t.Fatalf("fallback counter = %d, want %d", got, before+1)
+	// Legacy (#16031): no args token is rejected by the handler — the
+	// counted method-only fallback is removed.
+	if err := run(reqA, ""); err == nil || status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("legacy method-only stream must be Unauthenticated after the #16031 sunset, got: %v", err)
 	}
 }

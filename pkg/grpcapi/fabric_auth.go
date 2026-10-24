@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
-	"sync/atomic"
 	"time"
 
 	"github.com/psaab/xpf/pkg/denyaudit"
@@ -278,16 +277,135 @@ func fabricAuthTokenFromMetadata(ctx context.Context) (token string, present boo
 	return vals[0], true
 }
 
-// fabricStreamArgsUnboundTotal counts MonitorInterface streams accepted on
-// the legacy method-only token because the peer sent no args-bound token
-// (#11082). Monotonic; surfaced as xpf_fabric_stream_args_unbound_total.
-// Phase 2 removes the fallback once all peers bind arguments.
-var fabricStreamArgsUnboundTotal atomic.Uint64
+// fabricStreamReauthInterval is how often an open fabric stream re-verifies
+// its credentials against the CURRENT accepted-key set (#16031). A var, not
+// a const, ONLY so a test can shorten it; production never writes it. Five
+// seconds mirrors the primary listener's #9051 stream re-auth tick: removing
+// the PSK entirely ends a fabric stream within one tick, while a rotation
+// (old key still accepted, #6630) never interrupts it.
+var fabricStreamReauthInterval = 5 * time.Second
 
-// FabricStreamArgsUnboundTotal reports legacy method-only stream accepts
-// for the Prometheus collector.
-func FabricStreamArgsUnboundTotal() uint64 {
-	return fabricStreamArgsUnboundTotal.Load()
+// fabricStreamMintWindowKey carries the token window a fabric stream's
+// connection token was minted in, captured at stream open (#16031 fold).
+// The token itself is immutable metadata for the life of the stream and
+// its window is only ~30s, so a recheck that re-verified CURRENT-window
+// validity would kill every healthy stream within 30–90s even with an
+// unchanged PSK. What continuous re-auth must ask instead is the
+// key-epoch question: does a CURRENTLY accepted key still verify this
+// token at its MINT window — i.e. is the minting key still in the
+// accepted set (any window)?
+type fabricStreamMintWindowKey struct{}
+
+func withFabricStreamMintWindow(ctx context.Context, window int64) context.Context {
+	return context.WithValue(ctx, fabricStreamMintWindowKey{}, window)
+}
+
+func fabricStreamMintWindow(ctx context.Context) (int64, bool) {
+	w, ok := ctx.Value(fabricStreamMintWindowKey{}).(int64)
+	return w, ok
+}
+
+// captureFabricStreamMintWindow finds the window the stream's connection
+// token was minted in by testing the windows the open-time verifier
+// accepts (current ±1) against every accepted key. ok is false for a
+// tokenless stream (rollout grace) or when no accepted key verifies the
+// token at any of those windows — neither has a mint window to carry.
+func captureFabricStreamMintWindow(keys [][]byte, token, method string) (int64, bool) {
+	got, err := hex.DecodeString(token)
+	if err != nil || len(got) != sha256.Size {
+		return 0, false
+	}
+	now := fabricAuthWindow(time.Now())
+	for _, w := range []int64{now, now - 1, now + 1} {
+		for _, k := range keys {
+			if hmac.Equal(got, computeFabricAuthTokenForDigest(k, w, method, fabricAuthEmptyRequestDigest[:])) {
+				return w, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// fabricStreamRecheck re-authenticates an open fabric stream (#16031):
+// the minting key of the stream's connection token must still be in the
+// live accepted-key set. With the mint window captured at open, that is
+// an exact recomputation per accepted key — window expiry of the
+// immutable token is irrelevant, so an unchanged PSK (or a rotation
+// still accepting the minting key, #6630) never interrupts the stream,
+// while key removal (empty accepted set) or full revocation (minting
+// key no longer accepted) fails within one tick. The args-bound token
+// was minted by the same key at the same instant and verified against
+// the request at open, so its epoch stands or falls with this check.
+// Tokenless streams (rollout grace) and streams whose mint window could
+// not be captured fall back to the full open-time decision, whose
+// tokenless arms are not window-based. The returned error is
+// Unauthenticated so the client learns it was decommissioned, not
+// merely disconnected.
+func (s *Server) fabricStreamRecheck(ctx context.Context, method string) error {
+	token, present := fabricAuthTokenFromMetadata(ctx)
+	window, captured := fabricStreamMintWindow(ctx)
+	if present && captured {
+		got, err := hex.DecodeString(token)
+		if err != nil || len(got) != sha256.Size {
+			return status.Error(codes.Unauthenticated, "fabric RPC authentication failed: stream token is malformed")
+		}
+		for _, k := range s.fabricAcceptedKeys() {
+			if hmac.Equal(got, computeFabricAuthTokenForDigest(k, window, method, fabricAuthEmptyRequestDigest[:])) {
+				return nil
+			}
+		}
+		return status.Error(codes.Unauthenticated, "fabric RPC authentication failed: stream signing key is no longer accepted")
+	}
+	return s.checkFabricAuth(ctx, method)
+}
+
+// reauthFabricStream runs handler with a context cancelled as soon as
+// fabricStreamRecheck fails (#16031), mirroring authorizeStreamContinuously
+// (#9051) on the primary listener. The fabric interceptor chain has no
+// #9051 counterpart: a key REMOVAL mid-stream otherwise leaves a fabric
+// stream (counters/statistics) running until the client disconnects or
+// xpfd restarts. ss already carries the #13050 fabric marker; this wrapper
+// only re-parents its context so the watcher can cancel it. When
+// revocation and a handler error are co-present the revocation wins,
+// because the watcher records it before cancelling (#9903 F-128 ordering,
+// same as the primary).
+func (s *Server) reauthFabricStream(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	ctx, cancel := context.WithCancel(ss.Context())
+	defer cancel()
+
+	revoked := make(chan error, 1)
+	done := make(chan struct{})
+	defer close(done)
+
+	interval := fabricStreamReauthInterval
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := s.fabricStreamRecheck(ss.Context(), info.FullMethod); err != nil {
+					slog.Warn("fabric stream terminated: the peer credential is no longer accepted (#16031)",
+						"method", info.FullMethod, "reason", err.Error())
+					revoked <- err
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	herr := handler(srv, fabricAuthServerStream{ServerStream: ss, ctx: ctx})
+	select {
+	case err := <-revoked:
+		return err
+	default:
+	}
+	return herr
 }
 
 // fabricAuthArgsTokenFromMetadata extracts the args-bound stream token, if
@@ -626,15 +744,30 @@ func (s *Server) fabricAuthStreamInterceptor(srv interface{}, ss grpc.ServerStre
 	if err := s.checkFabricAuth(ss.Context(), info.FullMethod); err != nil {
 		return err
 	}
+	ctx := withFabricAuthStreamContext(ss.Context())
+	// #16031 fold: capture the connection token's mint window while it is
+	// still inside the open-time accept band, so the continuous recheck
+	// can test accepted-key-set membership at that window instead of
+	// re-verifying current-window validity (which the immutable stream
+	// token loses within 30–90s even under an unchanged PSK).
+	if token, present := fabricAuthTokenFromMetadata(ctx); present {
+		if w, ok := captureFabricStreamMintWindow(s.fabricAcceptedKeys(), token, info.FullMethod); ok {
+			ctx = withFabricStreamMintWindow(ctx, w)
+		}
+	}
 	// #13050: stamp the fabric-listener marker into the context the handler
 	// (and every later interceptor deriving from it, e.g. the #5883
 	// peer-marker promotion) observes, so stream handlers that ALSO serve
 	// the loopback listener can tell a PSK-authenticated peer stream from a
 	// local one.
-	return handler(srv, fabricAuthServerStream{
+	//
+	// #16031: then run the handler under continuous re-auth — the fabric
+	// chain's counterpart to the primary listener's #9051 re-authorization.
+	// Key removal mid-stream ends the stream within one tick.
+	return s.reauthFabricStream(srv, fabricAuthServerStream{
 		ServerStream: ss,
-		ctx:          withFabricAuthStreamContext(ss.Context()),
-	})
+		ctx:          ctx,
+	}, info, handler)
 }
 
 // fabricAuthStreamContextKey marks a stream context as bound to the FABRIC

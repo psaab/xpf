@@ -12,15 +12,15 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// #13050: Server.MonitorInterface is served by BOTH listeners. The fabric one
-// authenticates streams with the control-link PSK; the loopback one serves the
-// local CLI, which sends no token at all. Before the split, every tokenless
-// LOCAL stream incremented xpf_fabric_stream_args_unbound_total, so the
-// #11524 Phase-2 predicate (counter at zero across a full upgrade cycle)
-// could never be observed on a box that merely ran `monitor interface`
-// locally. These cells pin the two contexts SEPARATELY, as the #11524 review
-// required: fabric keeps strict args-token refusal plus the counted legacy
-// fallback; local keeps working and never moves the counter.
+// #13050 (+ #16031): Server.MonitorInterface is served by BOTH listeners.
+// The fabric one authenticates streams with the control-link PSK; the
+// loopback one serves the local CLI, which sends no token at all. Before
+// the #13050 split, every tokenless LOCAL stream incremented
+// xpf_fabric_stream_args_unbound_total, so the #11524 Phase-2 predicate
+// (counter at zero across a full upgrade cycle) could never be observed
+// on a box that merely ran `monitor interface` locally. These cells pin
+// the two contexts SEPARATELY: fabric requires an args-bound token
+// (#16031 removed the counted legacy fallback); local keeps working.
 
 // monitorInterfaceStreamAdapter13050 adapts an interceptor-wrapped
 // grpc.ServerStream to the generated server-streaming interface the handler
@@ -81,31 +81,29 @@ func runMonitorStream13050(t *testing.T, req *pb.MonitorInterfaceRequest, argsTo
 	}
 }
 
-// TestMonitorInterfaceUnboundCounterFabricOnly13050 is the #13050 defect
-// cell: a tokenless LOCAL stream must keep working and must NOT move the
-// fabric migration counter, while a tokenless FABRIC (legacy-peer) stream
-// keeps counting the fallback (#11524 Phase 2 still ships it).
+// TestMonitorInterfaceLegacyFabricRejected13050 is the #13050/#16031
+// defect cell: a tokenless LOCAL stream must keep working, while a
+// tokenless FABRIC (legacy-peer) stream is rejected Unauthenticated —
+// the counted method-only fallback is removed (#16031).
 //
-// FAIL-ON-REVERT: restoring the listener-blind counter makes the local cell
-// fire (counter moved); removing the fallback branch makes the fabric cell
-// fire (legacy stream rejected).
-func TestMonitorInterfaceUnboundCounterFabricOnly13050(t *testing.T) {
+// FAIL-ON-REVERT: restoring the fallback branch makes the fabric cell
+// fire (legacy stream accepted); judging local streams by fabric token
+// semantics makes the local cell fire.
+func TestMonitorInterfaceLegacyFabricRejected13050(t *testing.T) {
 	req := &pb.MonitorInterfaceRequest{InterfaceName: "lo"}
 
-	before := FabricStreamArgsUnboundTotal()
 	if err := runMonitorStream13050(t, req, "", false); err != nil {
 		t.Fatalf("tokenless LOCAL monitor stream broke: %v", err)
 	}
-	if got := FabricStreamArgsUnboundTotal(); got != before {
-		t.Fatalf("local loopback stream moved xpf_fabric_stream_args_unbound_total: %d -> %d "+
-			"(the #11524 Phase-2 zero predicate can never hold while local CLI traffic counts)", before, got)
+
+	if err := runMonitorStream13050(t, req, "", true); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("legacy method-only FABRIC stream must be Unauthenticated after the #16031 sunset, got: %v", err)
 	}
 
-	if err := runMonitorStream13050(t, req, "", true); err != nil && status.Code(err) == codes.Unauthenticated {
-		t.Fatalf("legacy method-only FABRIC stream must not be rejected by the handler: %v", err)
-	}
-	if got := FabricStreamArgsUnboundTotal(); got != before+1 {
-		t.Fatalf("fabric legacy stream counter = %d, want %d (fallback must stay counted until Phase 2)", got, before+1)
+	// A fabric stream WITH a matching args-bound token still works.
+	argsTok := mintStreamArgsToken11082(t, pb.BpfrxService_MonitorInterface_FullMethodName, req)
+	if err := runMonitorStream13050(t, req, argsTok, true); err != nil {
+		t.Fatalf("args-bound FABRIC monitor stream broke: %v", err)
 	}
 }
 
@@ -117,31 +115,23 @@ func TestMonitorInterfaceUnboundCounterFabricOnly13050(t *testing.T) {
 // monitoring on a keyless standalone node.
 func TestMonitorInterfaceLocalArgsHeaderIgnored13050(t *testing.T) {
 	req := &pb.MonitorInterfaceRequest{InterfaceName: "lo"}
-	before := FabricStreamArgsUnboundTotal()
 	if err := runMonitorStream13050(t, req, "not-a-real-token", false); err != nil {
 		t.Fatalf("local stream with a stray fabric-args header broke: %v", err)
-	}
-	if got := FabricStreamArgsUnboundTotal(); got != before {
-		t.Fatalf("local stream with stray args header moved the fabric counter: %d -> %d", before, got)
 	}
 }
 
 // TestMonitorInterfaceFabricArgsReplayStillRefused13050 re-pins the #11082
 // replay refusal THROUGH the production fabric chain after the #13050 split:
 // the fabric cell must not have been weakened while carving out the local
-// one, and a refused replay must not count as an unbound fallback either.
+// one.
 func TestMonitorInterfaceFabricArgsReplayStillRefused13050(t *testing.T) {
 	const method = pb.BpfrxService_MonitorInterface_FullMethodName
 	reqA := &pb.MonitorInterfaceRequest{InterfaceName: "ge-0/0/0"}
 	reqB := &pb.MonitorInterfaceRequest{InterfaceName: "ge-0/0/1"}
-	before := FabricStreamArgsUnboundTotal()
 	err := runMonitorStream13050(t, reqB, mintStreamArgsToken11082(t, method, reqA), true)
 	if status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("fabric stream replaying ge-0/0/0's token for ge-0/0/1 must stay Unauthenticated "+
 			"after the #13050 split, got: %v", err)
-	}
-	if got := FabricStreamArgsUnboundTotal(); got != before {
-		t.Fatalf("refused replay moved the unbound counter: %d -> %d (only accepted legacy streams count)", before, got)
 	}
 }
 

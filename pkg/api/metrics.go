@@ -116,9 +116,8 @@ type xpfCollector struct {
 	// here and emitted from metrics_admission_refusals_8312.go; the value comes
 	// from the diagcmd limiters themselves, so there is no counter state on the
 	// collector to keep in step.
-	admissionRefusalsTotal       *prometheus.Desc
-	authzDenialsTotal            *prometheus.Desc
-	fabricStreamArgsUnboundTotal *prometheus.Desc
+	admissionRefusalsTotal *prometheus.Desc
+	authzDenialsTotal      *prometheus.Desc
 	// #16081: REST connection-count bound refusals + current occupancy.
 	// Declared here, emitted from metrics_rest_conn_16081.go; the values
 	// live on the Server's gate, so there is no counter state on the
@@ -1201,7 +1200,6 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	c.describeAdmissionRefusals(ch)
 	c.describeRESTConnBound(ch)
 	c.describeAuthzDenials(ch)
-	c.describeFabricStreamArgsUnbound(ch)
 	c.describeDataplaneSilentSkips(ch)
 	c.describeLearnedRouteImportCapped(ch)
 	ch <- c.degradedPathTotal
@@ -1833,7 +1831,6 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	defer c.emitAdmissionRefusals(ch)
 	defer c.emitRESTConnBound(ch)
 	defer c.emitAuthzDenials(ch)
-	defer c.emitFabricStreamArgsUnbound(ch)
 	// #9019: also before the dataplane gate -- these report a dataplane that
 	// came up incompletely, so gating them on a healthy dataplane would hide
 	// them in precisely the case they exist for.

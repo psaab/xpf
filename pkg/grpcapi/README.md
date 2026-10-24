@@ -89,6 +89,20 @@ apply (with a warning) — the residual is a wiped `/var/lib/xpf`.
 recovery, and clearing the key deletes the record so reinstalling the same key
 is a fresh first keying.
 
+**Fabric stream args-binding and continuous re-auth (#16031, #11524 Phase 2).**
+Fabric `MonitorInterface` streams must carry the #11082 args-bound token
+matching the request; the legacy method-only fallback (previously counted by
+`xpf_fabric_stream_args_unbound_total`, now deleted with the counter) is
+rejected `Unauthenticated`. Local loopback streams are unaffected (server-side
+fabric-context marker, #13050). Open fabric streams re-verify every 5s
+(`fabricStreamReauthInterval`, mirroring #9051 on the primary listener) that
+the stream token's minting key is still in the live accepted-key set: the
+interceptor captures the token's mint window at open and the recheck
+recomputes at that window, so the immutable token's own 30s window expiry
+never kills a healthy stream, while removing the PSK ends a stream within
+one tick and a rotation still accepting the old key (#6630) does not.
+Proxied streams die with the origin's primary re-auth, as before.
+
 **Forwarded failover proxy budget (#15081).** `proxyPeerSystemAction` keeps
 the historical 5s deadline for ordinary forwarded actions, but a forwarded
 node-targeted cluster failover (`cluster-failover:<rg>:node<n>` /
