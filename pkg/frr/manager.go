@@ -899,6 +899,12 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 
 	// 11. Per-VRF dynamic protocols
 	for i, inst := range fc.Instances {
+		// #16204: forwarding-only belt — a forwarding instance
+		// (VRFName=="" && TableID>0) has no VRF device, so its
+		// protocols must never render as unscoped/global stanzas.
+		if inst.VRFName == "" && inst.TableID > 0 {
+			continue
+		}
 		if inst.OSPF != nil || inst.OSPFv3 != nil || inst.BGP != nil || inst.RIP != nil || inst.ISIS != nil {
 			var instanceMetrics *qnhMetricScope11447
 			if qnhMetrics != nil && i < len(qnhMetrics.instances) {
