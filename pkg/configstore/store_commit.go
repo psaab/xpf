@@ -95,14 +95,75 @@ func runCommitConfirmedCrashHook(stage commitConfirmedCrashStage) {
 // the tail scanner.
 const maxCommitDescriptionBytes = 4 << 10
 
-// CommitCheck validates the candidate configuration without applying it.
-func (s *Store) CommitCheck() (*config.Config, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+// ErrCommitCheckBusy is returned by CommitCheckAs when a compile is already
+// in flight (#16070). Callers map it to their surface's overload signal:
+// HTTP 429 (REST) / codes.ResourceExhausted (gRPC).
+var ErrCommitCheckBusy = errors.New("commit check already in progress; retry shortly")
 
+// CommitCheck validates the candidate configuration without applying it.
+// It is the internal/system form: no holder check (sessionID "" bypass,
+// matching ensureHolderLocked) but still admission-bounded, so internal
+// callers (in-process CLI, event engine) cannot drive unbounded compiles
+// either.
+func (s *Store) CommitCheck() (*config.Config, error) {
+	return s.CommitCheckAs("")
+}
+
+// CommitCheckAs is CommitCheck scoped to a config-lock holder session
+// (#16070): a non-holder session must not obtain compile diagnostics about
+// another session's staged candidate, nor trigger a full compile of it at
+// will. sessionID == "" bypasses ownership (internal/system caller, e.g.
+// the in-process CLI or the event engine, which holds the lock itself via
+// EnterConfigure()). The holder check runs under s.mu before any compile,
+// so a rejected caller pays no compile cost and learns nothing about the
+// candidate. Admission is a single-slot fail-fast semaphore: a second
+// concurrent check — even from the holder — returns ErrCommitCheckBusy
+// rather than queueing another full compile.
+func (s *Store) CommitCheckAs(sessionID string) (*config.Config, error) {
+	s.mu.RLock()
+	if err := s.ensureHolderLocked(sessionID); err != nil {
+		s.mu.RUnlock()
+		return nil, err
+	}
 	if s.candidate == nil {
+		s.mu.RUnlock()
 		return nil, fmt.Errorf("not in configuration mode")
 	}
+	// Take the single compile slot while still holding the read lock, so
+	// the holder verdict and the admission verdict describe the same
+	// moment. The compile itself runs under the read lock as before
+	// (compileTree only reads the candidate tree), preserving the
+	// existing concurrency with readers; the slot bounds how many such
+	// compiles run at once. New() pre-creates the semaphore; the nil
+	// branch below only covers zero-value Stores in tests and upgrades
+	// to the write lock to initialize it race-free.
+	if s.commitCheckSem == nil {
+		s.mu.RUnlock()
+		s.mu.Lock()
+		if s.commitCheckSem == nil {
+			s.commitCheckSem = make(chan struct{}, 1)
+		}
+		s.mu.Unlock()
+		s.mu.RLock()
+		// Re-verify after re-acquiring: the holder or candidate may have
+		// changed while the lock was dropped.
+		if err := s.ensureHolderLocked(sessionID); err != nil {
+			s.mu.RUnlock()
+			return nil, err
+		}
+		if s.candidate == nil {
+			s.mu.RUnlock()
+			return nil, fmt.Errorf("not in configuration mode")
+		}
+	}
+	select {
+	case s.commitCheckSem <- struct{}{}:
+	default:
+		s.mu.RUnlock()
+		return nil, ErrCommitCheckBusy
+	}
+	defer func() { <-s.commitCheckSem }()
+	defer s.mu.RUnlock()
 
 	compiled, err := s.compileTree(s.candidate)
 	if err != nil {

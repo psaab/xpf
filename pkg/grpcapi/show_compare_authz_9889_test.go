@@ -438,7 +438,7 @@ func candidateReadingStoreMethods9889(t *testing.T) map[string]bool {
 		"ShowCandidateRedacted",
 		"ShowCompareRedacted",
 		"ShowCompareRollbackRedacted",
-		"CommitCheck",
+		"CommitCheckAs",
 		"CompileCandidate",
 	} {
 		if !out[want] {

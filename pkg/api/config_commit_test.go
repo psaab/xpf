@@ -43,6 +43,11 @@ func TestConfigCommitCheckHandlerRejectsRetiredEBPF(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/v1/config/commit-check", nil)
+	// #16070: commit-check now requires the holder's session header. The
+	// fixture's candidate is held by the internal EnterConfigure() (no
+	// recorded holder), so any well-formed session is admitted by
+	// ensureHolderLocked's no-holder bypass and still reaches the compile.
+	withRESTConfigSession(req, testRESTConfigSessionID)
 	s.configCommitCheckHandler(rr, req)
 
 	body := rr.Body.String()

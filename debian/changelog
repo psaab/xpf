@@ -7,6 +7,11 @@ xpf (0.0.0) unstable; urgency=medium
     their next command without a daemon restart; a first `system
     login` stanza appearing likewise takes effect, and removing the
     stanza returns the shell to the unset legacy no-RBAC mode.
+  * Gate commit-check on the config-lock holder on both the gRPC and REST
+    surfaces: a non-holder no longer receives compile diagnostics about
+    another session's staged candidate, and concurrent commit-checks are
+    bounded to a single full compile (busy callers get a retryable
+    ResourceExhausted / 429 instead of queueing compiles) (#16070).
   * Login: the tolerant-load shadowed-class neutralisation (#14387) now
     also covers `system services web-management api-auth` users, named
     keys, and the api-auth default class (#16074). A custom class
