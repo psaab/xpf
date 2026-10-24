@@ -5377,8 +5377,8 @@ fn parse_protocol(protocol: &str) -> Option<u8> {
     // "" (None — a protocol-less term drops and fails the snapshot closed,
     // exactly as the explicit "" arm did), resolves every Junos alias the
     // Go SSOT (appid.ProtocolNumber) resolves, and accepts ONLY canonical
-    // ASCII-decimal numerics: the previous `parse::<u8>()` fallback also
-    // accepted "+6", " 6" and "6 ", which ProtocolNumber rejects — a
+    // raw ASCII-decimal numerics: the previous `parse::<u8>()` fallback
+    // also accepted "+6", " 6" and "6 ", which ProtocolNumber rejects — a
     // corrupt/non-Go snapshot carrying such a token therefore decoded to a
     // real protocol here while the Go mirror reported it unrepresentable.
     // "0" still resolves to Some(0) (HOPOPT, distinct from unknown).

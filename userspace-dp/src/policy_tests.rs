@@ -1811,6 +1811,8 @@ fn carrier_16134_parse_protocol_alias_and_canonical_cells() {
     // a real protocol here (the pre-fix `parse::<u8>()` fallback accepted
     // "+6"). Reverting parse_protocol to that fallback flips this RED.
     assert_eq!(parse_protocol("+6"), None);
+    assert_eq!(parse_protocol(" 6"), None);
+    assert_eq!(parse_protocol("6 "), None);
     assert_eq!(parse_protocol("006"), Some(PROTO_TCP));
 }
 

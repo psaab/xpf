@@ -250,6 +250,12 @@ fn proto_number_resolver_matches_known_tokens() {
 fn carrier_16134_proto_number_canonical_numeric_cells() {
     use crate::ip_proto::proto_number;
     assert_eq!(proto_number("+6"), None);
+    // Padded numerics are rejected on the RAW token (the Go SSOT's
+    // ParseCanonicalUint never sees the trimmed copy), while padded NAMED
+    // tokens still resolve through the trim+lowercase switch above.
+    assert_eq!(proto_number(" 6"), None);
+    assert_eq!(proto_number("6 "), None);
+    assert_eq!(proto_number(" GRE "), Some(PROTO_GRE));
     assert_eq!(proto_number("006"), Some(PROTO_TCP));
     assert_eq!(proto_number("bogus"), None);
     assert_eq!(proto_number(""), None);
@@ -290,9 +296,12 @@ fn proto_number_resolves_full_gate_acceptance_set() {
 }
 
 /// #2396 (Copilot fold, item 1): the resolver normalizes (trim + lower-case)
-/// so a mixed-case or whitespace-padded protocol token from the verbatim
-/// parser path resolves to the SAME number as the canonical lower-case token —
-/// rather than failing and being silently dropped while the Go side accepts it.
+/// NAMED tokens so a mixed-case or whitespace-padded name from the verbatim
+/// parser path resolves to the SAME number as the canonical lower-case token.
+/// #16134 narrows the numeric arm: padded numerics (" 47 ") are rejected on
+/// the RAW token, mirroring the Go SSOT (ParseCanonicalUint never sees the
+/// trimmed copy) — the pre-#16134 assertion that " 47 " resolved is removed
+/// for exactly that reason.
 #[test]
 fn proto_number_normalizes_case_and_whitespace() {
     use crate::ip_proto::proto_number;
@@ -301,7 +310,7 @@ fn proto_number_normalizes_case_and_whitespace() {
     assert_eq!(proto_number("Icmp"), Some(PROTO_ICMP));
     assert_eq!(proto_number("  TCP"), Some(PROTO_TCP));
     assert_eq!(proto_number("ICMP6"), Some(PROTO_ICMPV6));
-    assert_eq!(proto_number(" 47 "), Some(PROTO_GRE));
+    assert_eq!(proto_number(" 47 "), None);
 }
 
 /// #2396 (Copilot fold, item 2): a DNAT rule with `protocol "0"` (HOPOPT) is a

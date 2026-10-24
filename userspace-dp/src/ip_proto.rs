@@ -111,17 +111,18 @@ pub(crate) fn proto_number(name: &str) -> Option<u8> {
         "esp" => Some(PROTO_ESP),
         "sctp" => Some(PROTO_SCTP),
         "vrrp" => Some(PROTO_VRRP),
-        // #16134: canonical ASCII-decimal only, mirroring the Go SSOT's
-        // ParseCanonicalUint discipline (#9899). The bare `parse::<u8>()`
-        // also accepted "+6" (and, after the trim above, padded spellings
-        // the strict Go resolver rejects): on the filter/DNAT carriers
-        // such a token resolved here while the Go commit gate and mirror
-        // called it unrepresentable — commit/apply drift on a security
-        // leaf. Named tokens above already consumed every alias, so a
-        // digit-only check is the whole numeric contract. "0" (HOPOPT)
-        // stays Some(0), distinct from an unknown token's None.
-        other if !other.is_empty() && other.bytes().all(|b| b.is_ascii_digit()) => {
-            other.parse::<u8>().ok()
+        // #16134: canonical ASCII-decimal only, and on the RAW token —
+        // mirroring the Go SSOT exactly: appid.ProtocolNumber trims and
+        // lower-cases for its NAMED switch arms (above), but its numeric
+        // fallback runs ParseCanonicalUint on the untrimmed token, so
+        // " 6" / "6 " are unrepresentable while " GRE " still resolves.
+        // Checking the trimmed copy here (or bare `parse::<u8>()`, which
+        // also accepts "+6") accepted padded/signed numerics the Go
+        // commit gate and mirror reject — commit/apply drift on a
+        // security leaf. "0" (HOPOPT) stays Some(0), distinct from an
+        // unknown token's None.
+        _ if !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit()) => {
+            name.parse::<u8>().ok()
         }
         _ => None,
     }
