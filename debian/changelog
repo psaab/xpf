@@ -1,4 +1,14 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Userspace helper: ignore SIGHUP in xpf-userspace-dp (#16431).
+    #15084 made xpfd ignore SIGHUP, but the Rust helper kept the
+    default disposition (xpfd's signal.Notify capture resets to
+    SIG_DFL across exec), so `systemctl kill -s HUP xpfd` still
+    killed the forwarding helper and transit failed closed until
+    the supervised respawn. The helper now installs SIG_IGN for
+    SIGHUP at the top of run(), before workers spawn; SIGINT and
+    the shutdown verb keep their graceful-stop semantics. Pinned
+    by userspace-dp/tests/sighup_16431.rs (real binary survives a
+    real SIGHUP and keeps answering ping).
   * Dataplane: a port-mirroring input in Linux spelling (`ge-0-0-1`) on
     a port with an untagged unit 0 no longer installs as a unit-0
     VID-0-only row (#16429). The untagged unit-0 row shares the base

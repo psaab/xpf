@@ -36,6 +36,17 @@ this surface over a Unix socket using a newline-delimited text protocol.
     non-socket logs a warning and does not fail shutdown. (`symlink_metadata`
     does not follow symlinks, so a symlink reports as a symlink, not a
     socket, and is left in place.)
+  - **SIGHUP is ignored (#16431).** `run()` installs `SIG_IGN` for
+    SIGHUP via `ignore_sighup()` as its very first action, before any
+    worker or socket thread spawns. #15084 made xpfd ignore HUP, but
+    the Go `signal.Notify` capture is a caught disposition that
+    resets to SIG_DFL across `exec`, so the helper still died on
+    `systemctl kill -s HUP xpfd` (delivered to every unit process)
+    and transit failed closed until the supervisor respawn. SIG_IGN
+    discards HUP in the kernel; SIGINT (ctrlc handler) and the
+    `shutdown` verb keep their graceful-stop semantics, and a bare
+    SIGTERM keeps its pre-existing by-signal disposition. Pinned by
+    `tests/sighup_16431.rs` (real binary, real HUP, ping before/after).
 - `state.rs` — `ServerState`: coordinator handle, latest config
   snapshot, session-table handle, policy state.
 - `handlers/` — request dispatch (`handlers/mod.rs` is the

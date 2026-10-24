@@ -259,7 +259,55 @@ pub(crate) fn peer_uid_refusal(
     Ok(())
 }
 
+/// #16431: install SIG_IGN for SIGHUP, before any worker or socket
+/// thread spawns.
+///
+/// #15084 made xpfd ignore SIGHUP (see `ignoreSIGHUP` in
+/// `pkg/daemon/daemon_run.go`): a HUP has no reload semantics, so xpfd
+/// logs it and keeps forwarding. But forwarding in userspace mode is
+/// performed by THIS helper, and the Go capture does not carry over:
+/// xpfd uses `signal.Notify` (a caught disposition), and a caught
+/// disposition resets to SIG_DFL across `exec`, so the helper started
+/// life with the default SIGHUP action - terminate. `systemctl kill
+/// -s HUP xpfd` sends HUP to every process in the unit, so the helper
+/// died, the Go supervisor disarmed the shim (transit fail-closed),
+/// and forwarding stayed down until the backoff respawn rebuilt the
+/// per-worker state.
+///
+/// SIG_IGN (not a log-and-ignore handler, and not ctrlc's
+/// `termination` feature) is the fix: with SIG_IGN the signal is
+/// discarded by the kernel, no thread is woken, and `running` is
+/// untouched. Enabling ctrlc's `termination` feature would instead
+/// route SIGHUP into the same `running = false` handler as SIGINT /
+/// SIGTERM - a graceful helper exit, which is still the outage.
+/// Other signals are unchanged: SIGINT still requests a graceful
+/// shutdown via the ctrlc handler installed later in `run`, and a
+/// bare SIGTERM keeps its pre-existing by-signal disposition (the
+/// Go stop path sends the `shutdown` verb first in any case).
+///
+/// Installed at the very top of `run`, before the sysctl writes,
+/// socket binds and every thread spawn, so there is no startup window
+/// in which a HUP can kill the helper.
+pub(crate) fn ignore_sighup() -> Result<(), String> {
+    // SAFETY: `libc::SIG_IGN` is a valid `sighandler_t` sentinel;
+    // `signal(2)` with it installs the ignore disposition for SIGHUP
+    // and has no other preconditions.
+    let prev = unsafe { libc::signal(libc::SIGHUP, libc::SIG_IGN) };
+    if prev == libc::SIG_ERR {
+        return Err(format!(
+            "ignore SIGHUP: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn run() -> Result<(), String> {
+    // #16431: ignore SIGHUP first - before workers spawn (see
+    // `ignore_sighup`). xpfd already ignores HUP (#15084); the helper
+    // must too, or `systemctl kill -s HUP xpfd` still drops transit.
+    ignore_sighup()?;
+    eprintln!("xpf-userspace-dp: SIGHUP ignored (no reload-on-HUP; use commit via xpfd)");
     // Increase socket buffer ceilings — needed for AF_XDP copy mode to avoid
     // drops when the kernel backlog is large. Raise-only: never lower a value
     // the Go control plane (64 MiB) or an operator already set higher (#2970).
