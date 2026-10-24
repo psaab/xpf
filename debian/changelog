@@ -1,5 +1,19 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Login: argument-scoped allow/deny-commands regexes now fire on the
+    gRPC and REST surfaces (#16067). Both gates rebuild the full
+    canonicalised command from the decoded request (ShowText topic
+    parameters, Ping/Traceroute targets, session and match-policies
+    selectors, ShowText filters) and judge it with the argument-free
+    charge, so `^show route table secret-vrf`, `^ping 10\.99\.` and
+    `^show log .*` deny remotely exactly as on the box; a request whose
+    arguments cannot be reconstructed denies for a restricted class.
+    REST show-text topics now resolve through the same longest-prefix
+    rule as gRPC. The commit-time unenforceability advisory and the
+    once-per-class runtime warning now consider argument-bearing
+    spellings via per-surface registered argument samples, so an
+    argument-scoped restriction that fires remotely is no longer
+    reported as on-box-only.
   * NAT: pre-routing NAT no longer translates under the fabric
     fallback identity for ambiguous (unpromoted) fabric arrivals
     (#16045). Static/pool DNAT, persistent-NAT, NPTv6 and NAT64 were

@@ -894,13 +894,21 @@ absent and the same config denies everything instead.
   config-mode method, a routing-status RPC with no `cmdtree` command, an unknown
   `ShowText` topic, or a prefix-form `SystemAction` verb.
 
-#### Dispatch surfaces do not match the same string
+#### Dispatch surfaces match the same string (#16067)
 
 The on-box gate matches the full canonicalized line, **argument values and the
-output pipe included**. The gRPC gate matches the canonical command **path**,
-because the remote `cli` parses the line client-side and only a typed RPC
-crosses the wire — `ping 10.0.0.1` arrives as `Ping{Host:"10.0.0.1"}`. REST
-matches the argument-free canonical command assigned to each route.
+output pipe included**. Since #16067 the gRPC and REST gates match that same
+line, reconstructed server-side from the decoded request: the remote `cli`
+parses the line client-side and only a typed RPC crosses the wire —
+`ping 10.0.0.1` arrives as `Ping{Target:"10.0.0.1"}` and
+`show route table secret-vrf` as `ShowText{Topic:"route-table:secret-vrf"}` —
+so each surface rebuilds the operator's line from the topic parameters, the
+typed request fields, or the route's query/body selectors, canonicalises it
+against the operational tree, and judges it together with the argument-free
+charge. A request whose arguments cannot be reconstructed (a malformed
+packed topic, an unnameable selector) is denied for a restricted class
+rather than judged on its path alone. The output pipe has no remote
+counterpart and remains on-box only.
 
 The canonicalized line holds only words the command tree models. Every value
 slot takes exactly one value, so a word appended after a value
@@ -933,17 +941,18 @@ carries the full spelling matches only there (`^show log 100$` beside
 `^show log$`), so the documented exception still runs, piped or not.
 
 So a deny written against a **path** (`request system reboot`) is enforced on
-both server surfaces that map the command. A deny written against **argument
-text** (`show route table secret-vrf`) is enforced on the box but may not match
-the argument-free canonical command evaluated by gRPC or REST. At commit, the
-advisory names registered surfaces on which the whole pattern cannot fire; this
-includes REST since #11678, so the gap is visible rather than inferred.
+both server surfaces that map the command, and a deny written against
+**argument text** (`show route table secret-vrf`, `^ping 10\.99\.`,
+`^show log .*`) is enforced on all three surfaces since #16067. At commit,
+the advisory names registered surfaces on which the whole pattern cannot
+fire in any spelling the surface can produce (argument-free or
+argument-bearing); this includes REST since #11678.
 
 The same holds for each alternative of a combined pattern (#9340). Take
-`^(show route table secret-vrf|request system reboot)$`. The reboot alternative
-is enforceable on both server surfaces, while the argument-text alternative
-applies only on the box; the commit advisory names the surfaces where that
-alternative cannot fire. Before #9340 the enforceable half silenced the warning
+`^(show route table secret-vrf|request system reboot)$`: both alternatives
+are now enforceable on the server surfaces, so no partial advisory fires;
+an alternative naming no producible command (in any spelling) is still
+named per surface. Before #9340 the enforceable half silenced the warning
 for the whole pattern. The alternatives come from the parsed pattern:
 alternations and optional groups, however they are spelled or anchored. So the
 report does not depend on how the rule was written. A pattern with more than 64
@@ -952,8 +961,8 @@ alternatives is not split and keeps the whole-pattern answer.
 "Can fire" means the deny pattern is what refuses a command. A class with an
 `allow-commands` pattern also refuses every command outside its allow list.
 Before #9340, those refusals counted as the deny firing, so allow `^show` with
-deny `^show route table secret-vrf` reported nothing, although that deny decides
-nothing on either the gRPC or REST surface.
+deny `^show route table secret-vrf` reported nothing, although that deny decided
+nothing on either the gRPC or REST surface at the time.
 
 #### The `*-regexps` family is NOT implemented (#7971)
 
