@@ -5331,7 +5331,7 @@ fn n6474_meta(
         l3_offset: 14,
         l4_offset: l4,
         payload_offset: payload,
-        pkt_len: (frame_len - 14) as u16,
+        pkt_len: frame_len as u16,
         addr_family,
         protocol,
         tcp_flags: 0,

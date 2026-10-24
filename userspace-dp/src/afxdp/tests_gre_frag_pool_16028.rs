@@ -59,7 +59,6 @@ fn split_v4_outer_16028(frame: &[u8], split_payload: usize) -> (Vec<u8>, Vec<u8>
 
 fn frag_meta_16028(frame: &[u8], first: bool) -> UserspaceDpMeta {
     let mut meta = gre_to_self_outer_meta(0, frame.len());
-    meta.pkt_len = frame.len() as u16 - 14;
     if !first {
         meta.protocol = crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
         meta.flow_src_port = 0;
@@ -615,8 +614,7 @@ fn gre_head_key_beyond_declared_length_not_read_16028() {
     shrunk[14 + 11] = 0;
     let sum = checksum16(&shrunk[14..14 + 20]);
     shrunk[14 + 10..14 + 12].copy_from_slice(&sum.to_be_bytes());
-    let mut meta = frag_meta_16028(&shrunk, true);
-    meta.pkt_len = shrunk.len() as u16 - 14;
+    let meta = frag_meta_16028(&shrunk, true);
     let mut pool = GreReassembler::new();
     let before = forwarding.gre_decap_counters.reassembled_decap_refusals();
     match stage_gre_16028(&shrunk, meta, &forwarding, &mut pool, 60_000_000_000) {

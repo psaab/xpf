@@ -200,7 +200,7 @@ fn build_forwarded_frame_from_frame_encapsulates_native_gre() {
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
-        pkt_len: (inner.len() - 14) as u16,
+        pkt_len: inner.len() as u16,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_ICMP,
         flow_src_addr: {
@@ -292,7 +292,7 @@ fn native_gre_ipv4_outer_copies_or_clears_inner_df() {
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
-        pkt_len: (inner.len() - 14) as u16,
+        pkt_len: inner.len() as u16,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_ICMP,
         flow_src_addr: {
@@ -1097,7 +1097,7 @@ fn build_forwarded_frame_from_frame_encapsulates_native_gre_after_ipv4_snat() {
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
-        pkt_len: (inner.len() - 14) as u16,
+        pkt_len: inner.len() as u16,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_ICMP,
         flow_src_addr: {
