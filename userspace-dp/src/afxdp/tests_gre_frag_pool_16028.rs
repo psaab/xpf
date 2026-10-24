@@ -767,3 +767,96 @@ fn tail_drop_counted_and_split_header_supported_16028() {
         _ => panic!("fold(4): split-header head+tail must decap"),
     }
 }
+
+// ---------------------------------------------------------------------
+// Fold2: a K-PRESENT head whose Key bytes lie beyond this fragment
+// must be rejected with NO state even when the matching endpoint is
+// UNKEYED. Pre-fold2 the probe admitted such a head against an
+// unkeyed candidate, but `match_tunnel_endpoint` can never accept a
+// K-present datagram for a key-0 endpoint (key 0 matches only
+// K-clear) — so the entry was guaranteed-dead state held for the
+// full timeout inside the source's sub-quota, and the tail would
+// complete into a certain decap refusal. RED pre-fold2: buffered
+// (pool len 1). The K-CLEAR split control (C+S header, in the test
+// above) must keep reassembling — this test pins only the K-present
+// split against the SAME unkeyed endpoint fixture.
+// ---------------------------------------------------------------------
+#[test]
+fn split_key_head_against_unkeyed_endpoint_creates_no_state_16028() {
+    let _lock = gre_outer_frag_counter_test_lock();
+    // UNKEYED endpoint (gre_to_self_snapshot default, key 0).
+    let forwarding = build_forwarding_state(&gre_to_self_snapshot());
+    let inner = build_gre_inner_icmp_packet_v4();
+    let whole = build_gre_to_self_outer_frame_v4(0, &inner);
+    let gre_start = 14 + 20;
+    // C|K|S header (16B): flags 0xB000, checksum slot, Key, Sequence.
+    let mut hdr = Vec::new();
+    hdr.extend_from_slice(&0xB000u16.to_be_bytes());
+    hdr.extend_from_slice(&0x0800u16.to_be_bytes());
+    hdr.extend_from_slice(&[0, 0, 0, 0]);
+    hdr.extend_from_slice(&0x1111_2222u32.to_be_bytes());
+    hdr.extend_from_slice(&7u32.to_be_bytes());
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&whole[..14]);
+    let total = (20 + hdr.len() + inner.len()) as u16;
+    frame.extend_from_slice(&[0x45, 0x00]);
+    frame.extend_from_slice(&total.to_be_bytes());
+    frame.extend_from_slice(&whole[14 + 4..14 + 20]);
+    frame[14 + 10] = 0;
+    frame[14 + 11] = 0;
+    let ip_sum = checksum16(&frame[14..14 + 20]);
+    frame[14 + 10..14 + 12].copy_from_slice(&ip_sum.to_be_bytes());
+    frame.extend_from_slice(&hdr);
+    frame.extend_from_slice(&inner);
+    frame[gre_start + 4] = 0;
+    frame[gre_start + 5] = 0;
+    let csum = checksum16(&frame[gre_start..]);
+    frame[gre_start + 4..gre_start + 6].copy_from_slice(&csum.to_be_bytes());
+    // Split at 8: head holds base+checksum only; Key is in the tail.
+    let (shead, stail) = split_v4_outer_16028(&frame, 8);
+    let mut pool = GreReassembler::new();
+    let now = 80_000_000_000u64;
+    let before = forwarding.gre_decap_counters.reassembled_decap_refusals();
+    match stage_gre_16028(
+        &shead,
+        frag_meta_16028(&shead, true),
+        &forwarding,
+        &mut pool,
+        now,
+    ) {
+        GreDecapStage::Buffered => {}
+        GreDecapStage::Decapped(..) => panic!("fold2: split-Key head must not decap"),
+        GreDecapStage::NotGre(_) => {
+            panic!("fold2: split-Key head to our endpoint must be consumed, not forwarded")
+        }
+        GreDecapStage::FilterDropped => panic!("fold2: split-Key head must not filter-drop"),
+    }
+    assert_eq!(
+        pool.buffered_len(),
+        0,
+        "fold2: K-present split head against unkeyed endpoint must create NO state (matcher can never accept K-present for key 0)"
+    );
+    assert_eq!(
+        forwarding.gre_decap_counters.reassembled_decap_refusals(),
+        before + 1,
+        "fold2: split-Key refusal counted exactly once at the head"
+    );
+    // Tail afterwards: consult-only, still no state, no completion.
+    match stage_gre_16028(
+        &stail,
+        frag_meta_16028(&stail, false),
+        &forwarding,
+        &mut pool,
+        now + 1,
+    ) {
+        GreDecapStage::Buffered => {}
+        GreDecapStage::Decapped(..) => panic!("fold2: tail of refused head must not decap"),
+        GreDecapStage::NotGre(_) => panic!("fold2: tail must be consumed"),
+        GreDecapStage::FilterDropped => panic!("fold2: tail must not filter-drop"),
+    }
+    assert_eq!(
+        pool.buffered_len(),
+        0,
+        "fold2: tail creates no state either"
+    );
+}
