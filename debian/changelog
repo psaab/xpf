@@ -52,6 +52,18 @@ xpf (0.0.0) unstable; urgency=medium
     schema position. The guard comment that claimed no pair named
     a pre-empted container is corrected; no admission changed.
 
+  * Split pkg/config/schema_walk.go (2,369 lines) mechanically into
+    the schema_walk_* family: schema_walk_entry.go (SchemaValidate*
+    entry point and the exit secret-scrub), schema_walk_refs.go
+    (walkContext and collectSchemaRefs), schema_walk_leaf.go (the
+    typed-leaf validators), and schema_walk_errors.go (the typed /
+    unknown-stanza error types, every error constructor, and the
+    #16066 secret-scrubbing choke point), leaving the walk itself
+    (walkSchemaChildren/walkSchemaNode/walkInstanceChildren) in
+    schema_walk.go. Same package, no statement, signature or
+    behaviour change and no test file modified; imports pruned per
+    file (#16152). The deferred PR2 nodeKind classifier is not added.
+
   * Dataplane: the three string protocol carriers (filter, policy
     application, DNAT) now have per-carrier validation cells proving
     atomic `__unsupported__` poison preservation, both mixed-version
