@@ -610,6 +610,11 @@ func TestLoadPurgesOnlyOwnedRecognizedLegacyAPIAuthArchives10825(t *testing.T) {
 		t.Fatal(err)
 	}
 	const legacyName = "config-20240101-000000.000000000.conf"
+	// #16487: seconds-only legacy name written by 2026-02-14..06-28 builds.
+	// It carries the same cleartext api-auth material and must be purged
+	// with the nanosecond legacy shape, not silently skipped.
+	const secondsOnlyName = "config-20260501-101500.conf"
+	const secondsOnlyHashedName = "config-20260501-101600.conf"
 	const invalidTagName = "config-20240101-000001.000000001.00000000000000000002.conf"
 	const validName = "config-20240101-000002.000000002.00000000000000000003.conf"
 	const malformedName = "config-20240101-000003.000000003.00000000000000000004.conf"
@@ -641,6 +646,23 @@ func TestLoadPurgesOnlyOwnedRecognizedLegacyAPIAuthArchives10825(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// #16487: seconds-only snapshots predate #4056, so they are seeded
+	// 0644 — the mode the affected boxes actually carry. The cleartext
+	// one must be purged; the already-hashed one must survive with its
+	// content intact but tightened to 0600 by the Load sweep.
+	if err := os.WriteFile(filepath.Join(ownedArchiveDir, secondsOnlyName), []byte(legacyAPIAuthConfig10826), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ownedArchiveDir, secondsOnlyHashedName), validBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Windows/umask guard: force the exact pre-#4056 mode where the
+	// filesystem may have masked the WriteFile perm.
+	for _, name := range []string{secondsOnlyName, secondsOnlyHashedName} {
+		if err := os.Chmod(filepath.Join(ownedArchiveDir, name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	target := filepath.Join(root, "archive-link-target.conf")
 	if err := os.WriteFile(target, []byte(legacyAPIAuthConfig10826), 0o600); err != nil {
 		t.Fatal(err)
@@ -657,15 +679,24 @@ func TestLoadPurgesOnlyOwnedRecognizedLegacyAPIAuthArchives10825(t *testing.T) {
 	if err := store.Load(); err != nil {
 		t.Fatalf("Load with local archive cleanup: %v", err)
 	}
-	for _, name := range []string{legacyName, invalidTagName} {
+	for _, name := range []string{legacyName, invalidTagName, secondsOnlyName} {
 		if _, err := os.Stat(filepath.Join(ownedArchiveDir, name)); !os.IsNotExist(err) {
 			t.Fatalf("legacy/malformed owned snapshot %s was not purged: %v", name, err)
 		}
 	}
+	// #16487: the already-hashed seconds-only survivor keeps its bytes
+	// (asserted below) but must be tightened from its pre-#4056 0644
+	// to 0600 by the Load sweep.
+	if fi, err := os.Stat(filepath.Join(ownedArchiveDir, secondsOnlyHashedName)); err != nil {
+		t.Fatalf("hashed seconds-only snapshot must survive: %v", err)
+	} else if got := fi.Mode().Perm(); got != 0o600 {
+		t.Fatalf("hashed seconds-only snapshot mode = %04o, want 0600 after Load tightening (#16487)", got)
+	}
 	for name, want := range map[string][]byte{
-		validName:     validBytes,
-		malformedName: []byte("{not valid configuration\n"),
-		"notes.conf":  []byte(legacyAPIAuthConfig10826),
+		validName:             validBytes,
+		secondsOnlyHashedName: validBytes,
+		malformedName:         []byte("{not valid configuration\n"),
+		"notes.conf":          []byte(legacyAPIAuthConfig10826),
 	} {
 		got, err := os.ReadFile(filepath.Join(ownedArchiveDir, name))
 		if err != nil || string(got) != string(want) {

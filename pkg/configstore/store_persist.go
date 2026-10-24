@@ -685,6 +685,18 @@ func purgeAPIAuthArchives(dir string) {
 				"path", path, "issue", "#10825")
 			continue
 		}
+		// #16487: pre-#4056 archives were written 0644. A recognized
+		// snapshot that survives the purge (already-hashed or malformed)
+		// still carries the full config text, so tighten it to 0600
+		// tighten-only, mirroring the journal repair. The chmod runs
+		// before the api-auth classification so a malformed snapshot is
+		// tightened too; failure is warned and retried on a later Load.
+		if fileInfo.Mode().Perm()&^0o600 != 0 {
+			if err := os.Chmod(path, 0o600); err != nil {
+				slog.Warn("cannot tighten xpf archive snapshot permissions; cleanup will retry on a later Load",
+					"path", path, "err", err, "issue", "#16487")
+			}
+		}
 		data, err := ReadBoundedFile(path, MaxConfigSize)
 		if err != nil {
 			if !os.IsNotExist(err) {
@@ -722,20 +734,37 @@ func purgeAPIAuthArchives(dir string) {
 	}
 }
 
-// isXPFConfigArchiveSnapshot recognizes both the current sequenced filename
-// and the legacy pre-sequence timestamp filename; foreign config-*.conf names
-// are left untouched.
+// isXPFConfigArchiveSnapshot recognizes the current sequenced filename,
+// the legacy pre-sequence nanosecond timestamp filename, and the
+// seconds-only timestamp filename written by 2026-02-14..06-28 builds
+// (#16487); foreign config-*.conf names are left untouched.
 func isXPFConfigArchiveSnapshot(name string) bool {
 	if !strings.HasPrefix(name, "config-") || !strings.HasSuffix(name, ".conf") {
 		return false
 	}
 	core := strings.TrimSuffix(name, ".conf")
 	stampAndSequence := core[len("config-"):]
-	if _, err := time.Parse("20060102-150405.000000000", stampAndSequence); err == nil {
-		return true
+	// Seconds-only legacy (#16487): config-YYYYMMDD-HHMMSS.conf, no dot.
+	// time.Parse is exact here: the layout has no fractional field, so
+	// any trailing ".N" suffix fails the parse instead of matching.
+	if !strings.ContainsRune(stampAndSequence, '.') {
+		_, err := time.Parse("20060102-150405", stampAndSequence)
+		return err == nil
 	}
+	// Legacy pre-sequence nanosecond stamp. The length guard matters:
+	// time.Parse accepts a variable-length fraction for a trailing
+	// fractional layout, so config-<stamp>.1.conf would otherwise be
+	// mis-recognized; a real nanosecond stamp is exactly 9 digits.
+	if len(stampAndSequence) == len("20060102-150405.000000000") {
+		_, err := time.Parse("20060102-150405.000000000", stampAndSequence)
+		return err == nil
+	}
+	// Current sequenced: config-<stamp>.<20-digit seq>.conf.
 	sequenceDot := strings.LastIndexByte(stampAndSequence, '.')
 	if sequenceDot < 0 || len(stampAndSequence[sequenceDot+1:]) != 20 {
+		return false
+	}
+	if len(stampAndSequence[:sequenceDot]) != len("20060102-150405.000000000") {
 		return false
 	}
 	if _, err := time.Parse("20060102-150405.000000000", stampAndSequence[:sequenceDot]); err != nil {
