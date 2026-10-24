@@ -49,6 +49,13 @@ xpf (0.0.0) unstable; urgency=medium
     new owner of the same port. Large pools are unchanged (their
     FIFO-after-fresh-range reuse already spaces reissue beyond the
     delay), and no protocol is exempted at the allocator layer.
+    Fold: repeat frees refresh the token's stamp to the latest free,
+    the keyed probe runs under the recycle mutex so a concurrent free
+    cannot race its quarantine snapshot, persistent-clear and
+    short-timeout GC frees are stamped like flow frees, specific-port
+    reserves honour the delay (a synced flow re-joining its own
+    untombstoned lease on the same port is exempt), and collision
+    requeues restore the dedup bit so no duplicate token can form.
   * Cluster: an open control-key rotation now ages visibly and alarms
     when forgotten (#16029). UpdateConfig stamps when the current
     additional-authentication-key window opened (keyed on the additional

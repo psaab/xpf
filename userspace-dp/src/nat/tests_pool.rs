@@ -3659,13 +3659,30 @@ fn pool_snat_pressure_gc_reclaims_expired_lease_for_selected_address() {
     }
     assert_persistent_expiry_indexes_consistent(&rules[0]);
 
-    let decision = expect_snat_decision(tuple_snat_lookup_from_src(
+    // #16035 fold: the pressure GC triggered by this claim frees the
+    // expired leases' ports stamped at the claim instant, so those
+    // ports are quarantined for 60s and the first attempt is refused;
+    // the GC itself has still run (asserted below), and a retry after
+    // the reuse delay succeeds on a reclaimed port.
+    let first = tuple_snat_lookup_from_src(
         &rules,
         &src_addr_1,
         12000,
         "1.1.1.1",
         53,
         5_000_000_000,
+    );
+    assert!(
+        matches!(first, SourceNatLookup::Unavailable(_)),
+        "#16035: GC-freed ports are quarantined, first attempt must be refused, got {first:?}"
+    );
+    let decision = expect_snat_decision(tuple_snat_lookup_from_src(
+        &rules,
+        &src_addr_1,
+        12000,
+        "1.1.1.1",
+        53,
+        200_000_000_000,
     ));
 
     assert_eq!(decision.rewrite_src, Some("203.0.113.11".parse().unwrap()));

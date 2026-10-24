@@ -2676,10 +2676,13 @@ impl PortAllocator {
             (count, freed)
         };
         for (addr_index, port) in freed {
-            // #16035: unstamped — the lease retained this port for its
-            // whole idle life before the clear, which is itself the
-            // reuse delay; stamping would double-quarantine it.
-            self.free_translated_port(addr_index, port);
+            // #16035 fold: stamped at the clear time. The previous
+            // unstamped shape bypassed the delay entirely for leases
+            // cleared while still young (a clear 1s after mint would
+            // free the port for instant reuse); the lease's idle
+            // retention is operator/config dependent, not a guaranteed
+            // quarantine, so the stamped delay is the only bound.
+            self.free_translated_port_at(addr_index, port, now_ns);
         }
         count
     }
@@ -5933,6 +5936,21 @@ impl PortAllocator {
         // A synced live flow may join a still-draining shell to retain its
         // active wire tuple. If clear removed the lease, reserve this session
         // without persistence instead of recreating the cleared pin.
+        // #16035 fold: capture whether the caller's own lease owns the
+        // candidate tuple BEFORE the reclaim and liveness filter below
+        // can remove/drop it (an expired own lease is reclaimed and
+        // filtered out, but re-joining it on the same port is still
+        // not a new owner).
+        let caller_lease_owns_tuple = persistent.is_some_and(|(key, _)| {
+            // A lease that survives a persistent CLEAR (tombstoned in
+            // `revoked_persistent`) is not exempt: its replacement was
+            // minted locally after the clear, and a stale pre-clear
+            // synced session re-joining it is exactly #10784.
+            !live.revoked_persistent.contains_key(&key)
+                && live.persistent_by_source.get(&key).is_some_and(|lease| {
+                    lease.translated == translated && lease.addr_index == addr_index
+                })
+        });
         if let Some((key, _)) = persistent {
             if !live.persistent_nat_import_is_clear_fenced(&key, now_ns) {
                 self.reclaim_expired_idle_lease_locked(&mut live, key, now_ns);
@@ -5991,6 +6009,21 @@ impl PortAllocator {
                 && incumbent.persistent_key.is_none()
                 && !incumbent.address_only
         });
+        // #16035 fold: a specific-port reserve CASes the named port
+        // directly, bypassing both claim paths' quarantine. Refuse
+        // while that port's recycle token is still inside its reuse
+        // delay (small ranges only; `port_quarantined` is false on
+        // large ranges and for unqueued ports) — UNLESS the caller's
+        // own persistent lease already owns that exact tuple: a synced
+        // flow re-joining its source's lease on the same port is not a
+        // new owner, so the misdelivery the delay guards against
+        // cannot occur.
+        let own_lease_owns = caller_lease_owns_tuple;
+        if !own_lease_owns
+            && self.shared.occupancy[addr_index].port_quarantined(translated.port, now_ns)
+        {
+            return false;
+        }
         if !incumbent_owns_candidate_bit
             && self.shared.occupancy[addr_index]
                 .offset_of(translated.port)
@@ -7710,9 +7743,9 @@ impl PortAllocator {
                 // below and BEFORE the loop re-acquires it for the next chunk.
             };
             for &(addr_index, port) in &freed {
-                // #16035: unstamped, same lease-retention argument as
+                // #16035 fold: stamped, same short-timeout argument as
                 // `gc_expired_locked`.
-                self.free_translated_port(addr_index, port);
+                self.free_translated_port_at(addr_index, port, now_ns);
             }
             reclaimed += collected;
             if collected < chunk {
@@ -7743,12 +7776,15 @@ impl PortAllocator {
         let mut freed: Vec<(usize, u16)> = Vec::new();
         let reclaimed = self.collect_expired_global_locked(live, now_ns, budget, &mut freed);
         for (addr_index, port) in freed {
-            // #16035: unstamped — an expired lease already retained
-            // its port for the full inactivity timeout, which is the
-            // reuse delay; the GC free must not re-quarantine it or
-            // the pressure claim that triggered GC could never use
-            // the port it just reclaimed.
-            self.free_translated_port(addr_index, port);
+            // #16035 fold: stamped at GC time (see
+            // `clear_persistent_leases`): a short-timeout lease (the
+            // 1s schema floor) has not held its port anywhere near the
+            // reuse delay when GC reclaims it, so the unstamped shape
+            // bypassed the quarantine. The pressure claim that
+            // triggered this GC may therefore have to wait out the
+            // delay on this port; other ports/addresses still serve
+            // it, and on large pools nothing changes.
+            self.free_translated_port_at(addr_index, port, now_ns);
         }
         reclaimed
     }
@@ -7766,9 +7802,9 @@ impl PortAllocator {
         let reclaimed =
             self.collect_expired_for_addr_locked(live, addr_index, now_ns, budget, &mut freed);
         for (addr_index, port) in freed {
-            // #16035: unstamped, same lease-retention argument as
+            // #16035 fold: stamped, same short-timeout argument as
             // `gc_expired_locked`.
-            self.free_translated_port(addr_index, port);
+            self.free_translated_port_at(addr_index, port, now_ns);
         }
         reclaimed
     }

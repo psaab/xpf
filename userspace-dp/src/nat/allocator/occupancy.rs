@@ -206,6 +206,17 @@ impl RecycleRing {
     ) -> bool {
         if let Some(offset) = offset {
             if self.is_queued(offset) {
+                // #16035 fold: a repeat free of an already-queued port
+                // (its bit was re-claimed out-of-band via
+                // `claim_in_block`/`reserve` while the old token sat
+                // queued, then freed again) must move the token's
+                // quarantine stamp to the LATEST free — keeping the
+                // obsolete first-free stamp would let the port be
+                // reused a full delay before the second free's window
+                // ends. No second token is queued (dedup contract).
+                if let Some(token) = self.queue.iter_mut().find(|t| t.0 == port) {
+                    token.1 = token.1.max(freed_at_ns);
+                }
                 return false;
             }
             self.mark(offset);
@@ -235,12 +246,20 @@ impl RecycleRing {
     }
 
     /// Re-queue a token that was just popped by the claim walk
-    /// (collision retain, exclusion, or #16035 quarantine). The pop did
-    /// NOT unmark the offset (retain paths `continue` before
-    /// `unmark`), so the dedup bit is still set: push the token
-    /// directly instead of going through `push_at`, whose dedup check
-    /// would drop it as an already-queued duplicate and lose the port.
-    pub(in crate::nat::allocator) fn requeue(&mut self, port: u16, freed_at_ns: u64) {
+    /// (collision retain, exclusion, or #16035 quarantine). The pop
+    /// unmarked the offset only on the collision path (where
+    /// `claim_offset` then failed); the retain paths `continue`d
+    /// before `unmark`, so the dedup bit may or may not still be set.
+    /// `mark` is idempotent, so re-mark unconditionally: a requeue
+    /// that left the bit unset would let a later `free_recycle_at`
+    /// push a duplicate token for the same port (#16035 fold).
+    pub(in crate::nat::allocator) fn requeue(
+        &mut self,
+        port: u16,
+        offset: u32,
+        freed_at_ns: u64,
+    ) {
+        self.mark(offset);
         self.queue.push_back((port, freed_at_ns));
     }
 }
@@ -485,37 +504,40 @@ impl AddressOccupancy {
         // #16035: on a small range the keyed probe must not hand a
         // just-freed port straight back out — its bit is clear, so the
         // probe would claim it without ever consulting the ring. Read
-        // the ring's free times under its mutex and treat still-
-        // quarantined offsets as excluded for this claim. Large ranges
-        // skip the lock entirely (no quarantine there). The snapshot
-        // can go stale mid-probe (a port freed after it is claimable
-        // slightly early); that race is bounded by the probe duration
-        // and is the same shape as the recycled phase's own race with
-        // a concurrent free, which the exhausted-address test already
-        // accepts as exact-enough.
-        let quarantined: Vec<u64> = if self.range <= SMALL_POOL_QUARANTINE_MAX_RANGE {
-            let recycle = self.recycle.lock().unwrap_or_else(|e| e.into_inner());
-            let mut words = vec![0u64; (self.range as usize).div_ceil(64)];
-            for &(port, freed_at_ns) in &recycle.queue {
-                if RecycleRing::quarantined(self.range, freed_at_ns, now_ns) {
-                    if let Some(off) = self.offset_of(port) {
-                        words[(off / 64) as usize] |= 1u64 << (off % 64);
-                    }
-                }
-            }
-            words
+        // the ring's free times and treat still-quarantined offsets as
+        // excluded for this claim. Large ranges never quarantine, so
+        // they skip the lock entirely.
+        //
+        // #16035 fold: the probe runs UNDER the recycle mutex (held in
+        // `small_recycle` for the whole claim), so a concurrent free
+        // cannot race the snapshot: a free either lands before the
+        // guard was taken (its token and stamp are read here) or after
+        // the probe finished (its bit was still set throughout, so
+        // the probe could not claim that offset anyway). The previous
+        // snapshot-then-drop shape let a free that landed mid-probe
+        // be claimed at age ~0. Ranges <=256 bound the probe at 256
+        // CAS attempts, so the innermost mutex is held only briefly;
+        // lock order is unchanged (recycle stays innermost).
+        let mut small_recycle = if self.range <= SMALL_POOL_QUARANTINE_MAX_RANGE {
+            Some(self.recycle.lock().unwrap_or_else(|e| e.into_inner()))
         } else {
-            Vec::new()
+            None
         };
-        let is_quarantined = |offset: u32| -> bool {
-            quarantined
-                .get((offset / 64) as usize)
-                .is_some_and(|w| w & (1u64 << (offset % 64)) != 0)
+        let is_quarantined = |recycle: &RecycleRing, offset: u32| -> bool {
+            recycle.queue.iter().any(|&(port, freed_at_ns)| {
+                self.offset_of(port) == Some(offset)
+                    && RecycleRing::quarantined(self.range, freed_at_ns, now_ns)
+            })
         };
         for i in 0..self.range {
             let offset = start.wrapping_add(i) % self.range;
-            if excluded(offset) || is_quarantined(offset) {
+            if excluded(offset) {
                 continue;
+            }
+            if let Some(recycle) = small_recycle.as_deref() {
+                if is_quarantined(recycle, offset) {
+                    continue;
+                }
             }
             if self.claim_offset(offset) {
                 return self.port_of(offset);
@@ -525,14 +547,19 @@ impl AddressOccupancy {
             }
         }
         // All offsets occupied/excluded at probe time. A concurrent free
-        // may have queued a ring token meanwhile; only a non-excluded
-        // token can satisfy this claim in the recycled phase below.
+        // may have queued a ring token meanwhile (or, on a small range,
+        // is already queued in the guard held above); only a
+        // non-excluded token can satisfy this claim in the recycled
+        // phase below.
 
         // Recycled phase: FIFO drain (oldest-freed first). A popped port whose
         // bit is already set collided with an out-of-band occupant and is
         // RETAINED (re-queued at the back), never discarded (062-10). The
         // retain buffer allocates lazily only on an actual collision.
-        let mut recycle = self.recycle.lock().unwrap_or_else(|e| e.into_inner());
+        let mut recycle = match small_recycle {
+            Some(guard) => guard,
+            None => self.recycle.lock().unwrap_or_else(|e| e.into_inner()),
+        };
 
         // #7174 (M13): an address with EVERY port occupied cannot yield a claim,
         // so do not walk the FIFO to discover that.
@@ -641,8 +668,7 @@ impl AddressOccupancy {
         // that never happened.
         self.recycle_scan_pops.fetch_add(pops, Ordering::Relaxed);
         for (port, offset, freed_at_ns) in retained {
-            let _ = offset;
-            recycle.requeue(port, freed_at_ns);
+            recycle.requeue(port, offset, freed_at_ns);
         }
         claimed
     }
@@ -683,8 +709,7 @@ impl AddressOccupancy {
         }
         self.recycle_scan_pops.fetch_add(pops, Ordering::Relaxed);
         for (port, offset, freed_at_ns) in retained {
-            let _ = offset;
-            recycle.requeue(port, freed_at_ns);
+            recycle.requeue(port, offset, freed_at_ns);
         }
         claimed
     }
@@ -834,5 +859,23 @@ impl AddressOccupancy {
             .iter()
             .map(|w| w.load(Ordering::Relaxed).count_ones() as usize)
             .sum()
+    }
+
+    /// #16035 fold: is `port`'s queued token still quarantined at
+    /// `now_ns`? Used by the specific-port reserve path, which CASes a
+    /// named port directly and would otherwise bypass the delay the
+    /// claim paths enforce. No token (never freed / already claimed)
+    /// is not quarantined.
+    pub(in crate::nat::allocator) fn port_quarantined(&self, port: u16, now_ns: u64) -> bool {
+        if self.range > SMALL_POOL_QUARANTINE_MAX_RANGE {
+            return false;
+        }
+        let recycle = self.recycle.lock().unwrap_or_else(|e| e.into_inner());
+        recycle
+            .queue
+            .iter()
+            .any(|&(p, freed_at_ns)| {
+                p == port && RecycleRing::quarantined(self.range, freed_at_ns, now_ns)
+            })
     }
 }

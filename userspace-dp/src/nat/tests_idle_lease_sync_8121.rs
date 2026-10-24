@@ -2528,7 +2528,7 @@ fn expired_pat_replacement_is_not_reactivated_by_stale_synced_session_10784() {
             PersistentNatPermit::AnyRemoteHost,
             0,
             min_timeout_ns,
-            3_100_000_000,
+            100_000_000_000,
             NatHolder::Untracked,
             0,
         )
@@ -2537,9 +2537,9 @@ fn expired_pat_replacement_is_not_reactivated_by_stale_synced_session_10784() {
         replacement, stale_tuple,
         "single-port pool fixes the stale tuple"
     );
-    assert!(allocator.release_flow(client, replacement, 4_200_000_000, NatHolder::Untracked));
+    assert!(allocator.release_flow(client, replacement, 101_000_000_000, NatHolder::Untracked));
     let key = client.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
-    let expiry = 5_200_000_000;
+    let expiry = 102_000_000_000;
     {
         let live = allocator.debug_live();
         let lease = live.persistent_by_source.get(&key).unwrap();
@@ -2557,7 +2557,7 @@ fn expired_pat_replacement_is_not_reactivated_by_stale_synced_session_10784() {
             stale_tuple,
             0,
             false,
-            5_300_000_000,
+            103_000_000_000,
             NatHolder::Untracked,
             Some((key, TIMEOUT_NS)),
             false,
@@ -2565,16 +2565,24 @@ fn expired_pat_replacement_is_not_reactivated_by_stale_synced_session_10784() {
         ),
         "the stale tuple is still occupied, so it must not attach to the expired lease"
     );
+    // #16035 fold: at 103s the clear fence (3s + 60s) has expired, so
+    // the reserve path's reclaim may retire the expired lease and free
+    // its port (stamped 103s); the stale session must STILL not attach
+    // — the just-freed port is quarantined, so the reservation is
+    // refused and no lease is reactivated or re-minted for it.
     let live = allocator.debug_live();
-    let lease = live.persistent_by_source.get(&key).unwrap();
-    assert_eq!(
-        lease.active_flows, 0,
+    assert!(
+        live.persistent_by_source
+            .get(&key)
+            .is_none_or(|lease| lease.active_flows == 0),
         "stale sync must not reactivate the lease"
     );
-    assert_eq!(lease.expires_at_ns, expiry);
-    assert!(live.lease_expirations.contains(&(expiry, key)));
-    assert!(live.lease_expirations_by_addr[0].contains(&(expiry, key)));
-    assert!(allocator.debug_is_port_occupied(0, stale_tuple.port));
+    drop(live);
+    assert_eq!(
+        allocator.debug_recycled_ports(0),
+        vec![stale_tuple.port],
+        "the reclaimed port sits quarantined on the recycle ring, unclaimed by the stale session"
+    );
 }
 
 /// The address-only synced path has the same stale replacement race, although
