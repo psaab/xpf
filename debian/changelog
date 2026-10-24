@@ -4,6 +4,14 @@ xpf (0.0.0) unstable; urgency=medium
     exceeds the walk limit, instead of passing an unresolved protocol with
     zero ports to the kernel for local, multicast, or link-local
     destinations. Resolvable chains are unaffected (#16038).
+  * PPTP ALG: the GRE data-channel resolve now looks associations up
+    in the routing domain of the claimed fabric identity the flow is
+    re-keyed to (validated or ambiguous zone), not the fabric link's
+    own ingress domain (#16055). On an ambiguous fabric arrival the
+    same call ID in another tenant's domain is no longer claimed or
+    idle-refreshed, and a fabric arrival carrying no claimed zone
+    resolves in domain 0 (fail closed) rather than the fabric link's
+    domain.
   * PPTP ALG: control-segment teaching now requires an in-window TCP
     data sequence, judged against the pre-note tracked state
     (#16037). An admitted but out-of-window Outgoing-Call-Reply no
