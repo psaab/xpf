@@ -284,7 +284,11 @@ the userspace dataplane admission boundary is in
   state is churn-free (#5271).
   A target may carry `interface <unit>` and `secondary-ip-address <addr>`
   (#15038): the primary probes from the unit's RETH VIP, the secondary
-  from the secondary address it actually holds. A probe that cannot be
+  from the secondary address it actually holds. On a dual-stack unit the
+  primary uses the first VIP/unit address of the target's own family
+  (#16425 — authoring order no longer decides), and strict commit
+  rejects a bound target whose unit has no address of that family, or a
+  non-IPv4 target/`secondary-ip-address` under `family inet`. A probe that cannot be
   sent from this node's source (bind or send failure on a non-primary) is
   not a measurement — it installs no debt and leaves dampening untouched,
   so the survivor stays promotable instead of being pinned at weight 0

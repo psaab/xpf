@@ -2,7 +2,9 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -677,10 +679,103 @@ func validateChassisClusterStrict(cfg *Config) error {
 						MinInterfaceMonitorWeight, MaxInterfaceMonitorWeight,
 						MinInterfaceMonitorWeight, MaxInterfaceMonitorWeight)
 				}
+				// #16425 (R3-F05-03): ip-monitoring compiles ONLY under
+				// `family inet`, so the target and its secondary source must
+				// be IPv4 literals. Before this gate an IPv6 literal under
+				// `family inet` committed clean; the primary then bound a
+				// udp6 probe to the unit's first (IPv4) VIP and the probe
+				// never completed — the same silent inert sensor the
+				// authoring-order case produced.
+				if ip := net.ParseIP(tgt.Address); ip == nil || ip.To4() == nil {
+					return fmt.Errorf("chassis cluster: redundancy-group %d ip-monitoring "+
+						"family inet target %q is not an IPv4 address (ip-monitoring "+
+						"compiles only under `family inet`, so the probe uses the udp4 "+
+						"socket; an IPv6 literal here can never complete and the target "+
+						"would never demote the group) — set an IPv4 target address",
+						rg.ID, tgt.Address)
+				}
+				if tgt.SecondaryIPAddress != "" {
+					if sip := net.ParseIP(tgt.SecondaryIPAddress); sip == nil || sip.To4() == nil {
+						return fmt.Errorf("chassis cluster: redundancy-group %d ip-monitoring "+
+							"family inet %s secondary-ip-address %q is not an IPv4 address "+
+							"(the non-primary probes the IPv4 target from this source; the "+
+							"udp4 socket cannot bind it, so the probe would never complete) — "+
+							"set an IPv4 secondary-ip-address",
+							rg.ID, tgt.Address, tgt.SecondaryIPAddress)
+					}
+				}
+				// #16425: a bound target's unit must carry an address of the
+				// target's (IPv4) family, else the primary has no
+				// family-matching source to probe from. Only judged when the
+				// unit resolves: an unresolved or unit-only-IPv6 binding is
+				// judged here only when its addresses are known-empty of
+				// IPv4; an interface/unit named nowhere stays other gates'
+				// concern, exactly as interfaceMonitorNameAttributable proves
+				// existence rather than addresses.
+				if tgt.Interface != "" {
+					if addrs, ok := ipMonitorTargetUnitAddresses(cfg, tgt.Interface); ok {
+						hasV4 := false
+						for _, a := range addrs {
+							if pip := net.ParseIP(strings.TrimSuffix(a, stripCIDRSuffix(a))); pip != nil && pip.To4() != nil {
+								hasV4 = true
+								break
+							}
+						}
+						if !hasV4 {
+							return fmt.Errorf("chassis cluster: redundancy-group %d ip-monitoring "+
+								"family inet %s interface %s: the bound unit has no IPv4 address "+
+								"(the primary probes from the unit's address of the target's family; "+
+								"with none, the probe can never be sent from this unit and the target "+
+								"would never demote the group) — add a `family inet` address to %s "+
+								"or remove the interface binding",
+								rg.ID, tgt.Address, tgt.Interface, tgt.Interface)
+						}
+					}
+				}
 			}
 		}
 	}
 	return nil
+}
+
+// ipMonitorTargetUnitAddresses resolves a Junos unit ref ("reth0.0",
+// "ge-0/0/0.1") to the configured addresses of that unit, mirroring the
+// cluster monitor's resolveProbeInterface split (last dot, numeric
+// suffix; a non-numeric suffix means unit 0). The second result is
+// false when the interface or unit is not declared, in which case the
+// #16425 family gate abstains — existence of the binding target is
+// other gates' concern, and a unit declared with no `family inet`
+// address (ok with an empty/IPv6-only list) is exactly the inert-sensor
+// shape this gate rejects.
+func ipMonitorTargetUnitAddresses(cfg *Config, ref string) ([]string, bool) {
+	if cfg == nil {
+		return nil, false
+	}
+	base, unit := ref, 0
+	if i := strings.LastIndex(ref, "."); i >= 0 {
+		if n, err := strconv.Atoi(ref[i+1:]); err == nil {
+			base, unit = ref[:i], n
+		}
+	}
+	ifc := cfg.Interfaces.Interfaces[base]
+	if ifc == nil {
+		return nil, false
+	}
+	u := ifc.Units[unit]
+	if u == nil {
+		return nil, false
+	}
+	return u.Addresses, true
+}
+
+// stripCIDRSuffix returns the "/mask" suffix of a CIDR string, or ""
+// for a bare address — the strings.TrimSuffix companion the #16425
+// family gate uses to parse a unit address.
+func stripCIDRSuffix(s string) string {
+	if i := strings.Index(s, "/"); i >= 0 {
+		return s[i:]
+	}
+	return ""
 }
 
 // validateHeartbeatTimeoutProduct rejects a heartbeat interval/threshold pair
