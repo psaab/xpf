@@ -181,14 +181,18 @@ func TestOptionsHonouredByCompletionWalkers15720(t *testing.T) {
 		t.Fatalf("positive control failed: HasDynamic reads found in %v", sortedFuncs(control))
 	}
 	sites := fieldReadSitesByFunc(t, "Options")
-	// #16138: the twin walkers were merged — CompleteFromTree is now a
-	// name-only projection over the single CompleteFromTreeWithDesc
-	// walk, so Options is read in the surviving walk (and LookupDesc),
-	// and CompleteFromTree must delegate to it rather than re-walking.
-	for _, fn := range []string{"CompleteFromTreeWithDesc", "LookupDesc"} {
+	// #16138/#16151: the twin walkers were merged and LookupDesc is
+	// now the description projection of the same single walk, so
+	// Options is read in the surviving internal walk
+	// (completeFromTreeWithDesc), reached from both surfaces, and
+	// CompleteFromTree must delegate rather than re-walking.
+	for _, fn := range []string{"completeFromTreeWithDesc"} {
 		if sites[fn] == 0 {
 			t.Errorf("Options is not read in %s(); option-map leaves end that walk (sites %v)", fn, sites)
 		}
+	}
+	if sites["CompleteFromTreeWithDesc"] != 0 || sites["LookupDesc"] != 0 {
+		t.Errorf("Options is read directly in a wrapper (sites %v); wrappers must delegate to completeFromTreeWithDesc (#16151)", sites)
 	}
 	if sites["CompleteFromTree"] != 0 {
 		t.Errorf("CompleteFromTree reads Options directly (sites %v); it must remain the projection over CompleteFromTreeWithDesc (#16138)", sites)
@@ -238,8 +242,11 @@ func completeFromTreeDelegates(t *testing.T) bool {
 }
 
 // A second Options command (monitor security packet-drop) exercises the
-// same resume through a different option map, and repeating an option
-// after its value stays completable, mirroring Canonicalize.
+// same resume through a different option map. Repeating an option
+// after its value stays completable on the OFFERING surface while
+// the operator types it, but Canonicalize refuses the repeated
+// line (#15719/#16151): completion offers the in-progress word,
+// Canonicalize judges the finished line.
 func TestCompleteRepeatedAndOtherOptionMaps15720(t *testing.T) {
 	cfg := zoneCfg15720()
 	if got := sortedStrings15720(CompleteFromTree(OperationalTree,
@@ -261,16 +268,27 @@ func TestCompleteRepeatedAndOtherOptionMaps15720(t *testing.T) {
 	if got := LookupDesc([]string{"monitor", "security", "packet-drop", "from-zone", "trust"}, "interface", false); got != "Ingress interface to match" {
 		t.Errorf("LookupDesc(after packet-drop from-zone value, interface) = %q", got)
 	}
-	for _, words := range [][]string{
-		{"show", "security", "flow", "session", "zone", "trust", "zone", "untrust"},
-		{"show", "security", "flow", "session", "sort-by", "bytes", "sort-by", "packets"},
-		{"show", "security", "flow", "session", "zone", "trust", "brief"},
+	for _, tc := range []struct {
+		words []string
+		canon CanonicalizeResult
+	}{
+		{[]string{"show", "security", "flow", "session", "zone", "trust", "zone", "untrust"}, CanonicalUnknown},
+		{[]string{"show", "security", "flow", "session", "sort-by", "bytes", "sort-by", "packets"}, CanonicalUnknown},
+		{[]string{"show", "security", "flow", "session", "zone", "trust", "brief"}, CanonicalOK},
 	} {
+		words := tc.words
 		if got := CompleteFromTree(OperationalTree, words, "", cfg); len(got) == 0 {
 			t.Errorf("CompleteFromTree(%v) = %v, want session options", words, got)
 		}
-		if _, res := Canonicalize(OperationalTree, words); res != CanonicalOK {
-			t.Errorf("Canonicalize(%v) = %v; the completion expectation above is unanchored", words, res)
+		if _, res := Canonicalize(OperationalTree, words); res != tc.canon {
+			t.Errorf("Canonicalize(%v) = %v, want %v; repeated options are refused on the finished line (#15719) while completion offers the in-progress word", words, res, tc.canon)
+		}
+		// LookupDesc describes a finished line, so after a repeated
+		// option it must describe nothing (#16151 gate).
+		if tc.canon != CanonicalOK {
+			if got := LookupDesc(words, "zone", false); got != "" {
+				t.Errorf("LookupDesc(%v, zone) = %q, want none after a repeated option", words, got)
+			}
 		}
 	}
 	// A stray word after a typed option's value is refused too.

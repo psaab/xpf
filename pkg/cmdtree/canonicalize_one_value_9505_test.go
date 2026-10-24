@@ -130,10 +130,14 @@ func TestOperationalTreeOptionListsAndExtraWords9505(t *testing.T) {
 // scope rule as AcceptsArgs (#8304). #15720 deliberately widened that
 // scope: the completion walkers and LookupDesc now honour it too, because
 // an option-map command's typed/dynamic/flag leaves otherwise ended those
-// walks and tab completion / `?` help omitted every remaining option. The
-// scope is now exactly these four walkers, pinned positively by
-// TestOptionsHonouredByCompletionWalkers15720; this guard keeps any FIFTH
-// reader out — a new reader must be a deliberate scope change, not drift.
+// walks and tab completion / `?` help omitted every remaining option.
+// #16151 collapsed the three completion surfaces into the single
+// internal walk completeFromTreeWithDesc (CompleteFromTree and
+// CompleteFromTreeWithDesc are projections, LookupDesc delegates),
+// so the scope is now Canonicalize plus that one walk, pinned
+// positively by TestOptionsHonouredByCompletionWalkers15720; this
+// guard keeps any other reader out — a new reader must be a
+// deliberate scope change, not drift.
 func TestOptionsScopeIsPinned9505(t *testing.T) {
 	if control := fieldReadSitesByFunc(t, "HasDynamic"); len(control) < 2 {
 		t.Fatalf("positive control failed: HasDynamic reads found in %v", sortedFuncs(control))
@@ -144,9 +148,9 @@ func TestOptionsScopeIsPinned9505(t *testing.T) {
 	}
 	for _, fn := range sortedFuncs(sites) {
 		switch fn {
-		case "Canonicalize", "CompleteFromTree", "CompleteFromTreeWithDesc", "LookupDesc":
+		case "Canonicalize", "completeFromTreeWithDesc":
 		default:
-			t.Errorf("Options is read in %s(); its scope is Canonicalize plus the three completion walkers (#9505/#15720, sites %v)", fn, sites)
+			t.Errorf("Options is read in %s(); its scope is Canonicalize plus the single completion walk (#9505/#15720/#16151, sites %v)", fn, sites)
 		}
 	}
 }

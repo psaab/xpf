@@ -30,6 +30,17 @@ xpf (0.0.0) unstable; urgency=medium
     so the commit-time gate and the runtime applier cannot disagree on
     what resolves or fits. The unverified third resolver in
     pkg/routing/routes.go is unchanged.
+  * Cmdtree: `LookupDesc` is now the description projection of the
+    single completion walk instead of a third hand-rolled walker
+    (#16151), and a per-keyword agreement test pins that every
+    keyword completion offers is a keyword `Canonicalize` accepts
+    (full spelling and unique abbreviation, descriptions agreeing),
+    with counting-provider and AST pins that no provider is
+    reachable from `Canonicalize`. The rejected step-3 merge of
+    `Canonicalize` into a provider-capable walk stays rejected.
+    Repeated option keywords now describe nothing in `?` help,
+    mirroring the canonicalizer's refusal of the finished line;
+    the offering surface is unchanged.
 
   * Dataplane: the three string protocol carriers (filter, policy
     application, DNAT) now have per-carrier validation cells proving
