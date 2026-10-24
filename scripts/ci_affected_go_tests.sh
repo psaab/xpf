@@ -159,17 +159,33 @@ if missing_census:
     )
     sys.exit(1)
 seeds.update(census_packages)
-# Reads-source-of edges (#15241 A58-01): a test that opens another
+# Reads-source-of edges (#15241 A58-01, #16461): a test that opens another
 # package Go source by relative path (pkg/denyaudit reading
 # ../grpcapi/authz.go) has no import edge to that package -- denyaudit is
 # imported BY grpcapi, not the reverse -- so the reverse-import closure
 # below can never select it for a change to the file it reads. Derive
 # the missing edges from the test sources themselves: every relative
 # path literal in a *_test.go that resolves to a file inside another Go
-# package makes the test package a reader of that package.
+# package makes the test package a reader of that package. Relative
+# literals of ANY depth count (../../cmd/cli/clear.go from pkg/grpcapi);
+# only a resolved path outside the repo is rejected (#16461).
+# Repo-root-anchored reads (#16461): a test that derives the repo root
+# (filepath.Dir(filepath.Dir(wd)) or filepath.Abs("../..")) and then
+# reads root-anchored literals ("pkg/api", "pkg/grpcapi",
+# filepath.Join(root, "pkg/api/api.go")) has no ".." literal naming the
+# scanned package at all -- the pkg/diagcmd session-walk canary (#7294)
+# scans exactly those two packages, so a change to either must select
+# pkg/diagcmd. Root-anchored literals are therefore honoured ONLY in a
+# test file that itself declares such a root derivation, and only when
+# the anchored path exists in the tree, so prose mentioning pkg/... in
+# an ordinary test cannot manufacture an edge.
 reads_source_of = {}
 _join_call = re.compile(r"filepath\.Join\(([^)]*)\)")
 _quoted = re.compile(r"\"((?:[^\"\\]|\\.)*)\"")
+_declares_root = re.compile(
+    r"filepath\.Dir\s*\(\s*filepath\.Dir\s*\(|filepath\.Abs\s*\(\s*\"\.\./\.\.\""
+)
+repo_root = os.path.realpath(".")
 for import_path, package in packages.items():
     import_dir = os.path.realpath(package["Dir"])
     for field in ("TestGoFiles", "XTestGoFiles"):
@@ -184,28 +200,48 @@ for import_path, package in packages.items():
             for qm in _quoted.finditer(text):
                 raw = qm.group(1)
                 if raw == ".." or raw.startswith("../"):
-                    targets.add(raw)
+                    targets.add(os.path.normpath(os.path.join(import_dir, raw)))
             for m in _join_call.finditer(text):
                 parts = _quoted.findall(m.group(1))
-                if parts and (parts[0] == ".." or parts[0].startswith("../")):
-                    targets.add("/".join(parts))
-            repo_root = os.path.realpath(".")
-            for raw in targets:
-                if raw in (".", "..") or ".." in raw.split("/")[1:]:
+                if not parts:
                     continue
-                if not raw.startswith("../"):
+                first = parts[0]
+                if first in ("..", ".") or first.startswith("../"):
+                    targets.add(os.path.normpath(os.path.join(import_dir, *parts)))
+                elif first in ("pkg", "cmd") or first.startswith(("pkg/", "cmd/")):
+                    targets.add(os.path.normpath(os.path.join(repo_root, *parts)))
+            if _declares_root.search(text):
+                anchored = set()
+                for qm in _quoted.finditer(text):
+                    raw = qm.group(1)
+                    if raw.startswith(("pkg/", "cmd/")):
+                        anchored.add(raw)
+                for m in _join_call.finditer(text):
+                    parts = _quoted.findall(m.group(1))
+                    if parts and (
+                        parts[0] in ("pkg", "cmd")
+                        or parts[0].startswith(("pkg/", "cmd/"))
+                    ):
+                        anchored.add("/".join(parts))
+                for raw in anchored:
+                    resolved = os.path.normpath(os.path.join(repo_root, raw))
+                    if os.path.exists(resolved):
+                        targets.add(resolved)
+            for resolved in targets:
+                # Keep a resolved-path-inside-repo check: a literal that
+                # climbs out of the tree names no in-repo package.
+                if resolved == repo_root:
                     continue
-                resolved = os.path.normpath(os.path.join(import_dir, raw))
-                if os.path.isdir(resolved):
-                    owner = directories.get(os.path.realpath(resolved))
-                    if owner is not None and owner != import_path:
-                        reads_source_of.setdefault(owner, set()).add(import_path)
+                try:
+                    if os.path.commonpath([repo_root, resolved]) != repo_root:
+                        continue
+                except ValueError:
                     continue
-                # A file read: the owning package is the nearest mapped
-                # ancestor directory, exactly as for changed paths.
-                directory = os.path.dirname(resolved)
+                # The owning package is the nearest mapped ancestor
+                # directory, exactly as for changed paths (the target
+                # may be a package directory itself).
+                probe = resolved if os.path.isdir(resolved) else os.path.dirname(resolved)
                 owner = None
-                probe = directory
                 while True:
                     owner = directories.get(os.path.realpath(probe))
                     if owner is not None or probe == repo_root or os.path.dirname(probe) == probe:

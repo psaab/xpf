@@ -95,7 +95,9 @@ func TestCollectFilterCountersExpandsPortsAndPrefixLists(t *testing.T) {
 		"set firewall family inet filter fin term t1 from source-prefix-list pl1",
 		"set firewall family inet filter fin term t1 from destination-port 80",
 		"set firewall family inet filter fin term t1 from destination-port 443",
+		"set firewall family inet filter fin term t1 then count c1",
 		"set firewall family inet filter fin term t1 then accept",
+		"set firewall family inet filter fin term t2 then count c2",
 		"set firewall family inet filter fin term t2 then accept",
 	})
 	c := newCollector(&Server{store: store})
@@ -140,6 +142,7 @@ func (d *filterUserspaceDP) Status() (dpuserspace.ProcessStatus, error) {
 func TestCollectFilterCountersMergesUserspaceCounters(t *testing.T) {
 	store := newFilterStore(t, []string{
 		"set firewall family inet filter fin term t1 from protocol tcp",
+		"set firewall family inet filter fin term t1 then count c1",
 		"set firewall family inet filter fin term t1 then accept",
 	})
 	c := newCollector(&Server{store: store})
@@ -193,6 +196,7 @@ func (d *filterUserspaceMapErrDP) Status() (dpuserspace.ProcessStatus, error) {
 func TestCollectFilterCountersMergesUserspaceCountersWhenMapConfigUnavailable(t *testing.T) {
 	store := newFilterStore(t, []string{
 		"set firewall family inet filter fin term t1 from protocol tcp",
+		"set firewall family inet filter fin term t1 then count c1",
 		"set firewall family inet filter fin term t1 then accept",
 	})
 	c := newCollector(&Server{store: store})

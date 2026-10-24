@@ -911,7 +911,9 @@ func (c *xpfCollector) collectFilterCounters(ch chan<- prometheus.Metric, dp api
 	// yields an empty term index from BuildFirewallFilterTermCounterIndex, so the
 	// userspace merge is a no-op and the map path is unaffected, exactly as the
 	// prior per-collector fetch behaved on a missing/failed status.
-	userspaceCounters := dpuserspace.BuildFirewallFilterTermCounterIndex(userspaceStatus)
+	// #16464: fold suppressed-member clone rows into their source.
+	userspaceCounters := dpuserspace.BuildFirewallFilterTermCounterIndexForConfig(userspaceStatus, cfg)
+	cloneFold16464 := dpuserspace.BuildCloneCounterFold16464(cfg)
 
 	// The retired-eBPF/map counter path is gated on a compile result carrying
 	// filter IDs; it may be absent (a pure userspace dataplane) without
@@ -964,6 +966,24 @@ func (c *xpfCollector) collectFilterCounters(ch chan<- prometheus.Metric, dp api
 				}
 			}
 
+			// #16464: clone eBPF spans folded per-term below.
+			cloneRuleStart16464 := make(map[string]uint32)
+			cloneHas16464 := make(map[string]bool)
+			if cr != nil && cr.FilterIDs != nil {
+				for cloneName, source := range cloneFold16464[family] {
+					if source != name {
+						continue
+					}
+					if fid, ok := cr.FilterIDs[family+":"+cloneName]; ok {
+						if fcfg, err := dp.ReadFilterConfig(fid); err == nil {
+							cloneRuleStart16464[cloneName] = fcfg.RuleStart
+							cloneHas16464[cloneName] = true
+						} else {
+							c.counterReadErrors.Add(1)
+						}
+					}
+				}
+			}
 			aggs := make(map[string]*filterTermAgg15192)
 			var termOrder []string
 			for _, term := range filter.Terms {
@@ -998,6 +1018,35 @@ func (c *xpfCollector) collectFilterCounters(ch chan<- prometheus.Metric, dp api
 					// Advance the offset regardless so later terms stay aligned.
 					ruleOffset += numRules
 				}
+				// #16464: fold clone eBPF slots (same term name).
+				cloneMapFailed16464 := false
+				for cloneName := range cloneHas16464 {
+					cloneFilter := filters[cloneName]
+					if cloneFilter == nil {
+						continue
+					}
+					cloneOffset := cloneRuleStart16464[cloneName]
+					matched := false
+					for _, ct := range cloneFilter.Terms {
+						if ct == nil || ct.Name == "" {
+							continue
+						}
+						cn := config.FilterTermExpansionCount(ct, cfg.PolicyOptions.PrefixLists)
+						if ct.Name == term.Name && !matched {
+							for i := uint32(0); i < cn; i++ {
+								if ctrs, err := dp.ReadFilterCounters(cloneOffset + i); err == nil {
+									agg.totalPkts += ctrs.Packets
+								} else {
+									c.counterReadErrors.Add(1)
+									cloneMapFailed16464 = true
+								}
+							}
+							matched = true
+						}
+						cloneOffset += cn
+					}
+				}
+				mapFailed = mapFailed || cloneMapFailed16464
 
 				userspaceCounter, userspaceOk := userspaceCounters[dpuserspace.FirewallFilterTermCounterKey{
 					Family: family, FilterName: name, TermName: term.Name,
@@ -1017,7 +1066,10 @@ func (c *xpfCollector) collectFilterCounters(ch chan<- prometheus.Metric, dp api
 				if mapFailed && !userspaceOk {
 					continue
 				}
-				if hasMap || userspaceOk {
+				// #16454 + #16464: a term without `then count` is not
+				// instrumented; never emit a series for it. Clone map slots
+				// only make a counted term emit when they exist.
+				if term.Count != "" && (hasMap || len(cloneHas16464) > 0 || userspaceOk) {
 					agg.emit = true
 				}
 			}

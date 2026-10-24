@@ -21,6 +21,7 @@ func newEffectiveFirewallServer(t *testing.T) *Server {
 	}
 	for _, cmd := range []string{
 		"firewall family inet filter f1 term t1 from destination-port 80",
+		"firewall family inet filter f1 term t1 then count c1",
 		"firewall family inet filter f1 term t1 then accept",
 	} {
 		if err := store.SetFromInput(cmd); err != nil {

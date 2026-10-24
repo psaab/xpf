@@ -147,6 +147,50 @@ contains "$sel" "github.com/psaab/xpf/cmd/shimverify" \
 contains "$sel" "github.com/psaab/xpf/cmd/shim-manifest" \
   "rename: destination cmd/shim-manifest selected"
 git -C "$tmp/clone" reset --quiet --hard HEAD^
+# 4d. (#16461) A change to a Go file another package's test reads by a
+#     multi-level relative path selects the reading package. pkg/grpcapi's
+#     clear-grammar parity canary (clear_counters_scope_9074_test.go)
+#     reads ../../cmd/cli/clear.go; the pre-#16461 extractor discarded
+#     any literal with ".." after its first segment, so a cmd/cli change
+#     selected only cmd/cli itself. The ../cli/cli_clear.go literal in
+#     the same test is the single-level control already covered by 4b.
+#     Appending a comment keeps the tree compiling; selection, not the
+#     test run, is the property under test.
+printf '\n// selftest multi-level source-read mutant (#16461)\n' >> "$tmp/clone/cmd/cli/clear.go"
+git -C "$tmp/clone" add cmd/cli/clear.go
+git -C "$tmp/clone" commit --quiet -m "selftest: multi-level source-read mutant"
+out=$(cd "$tmp/clone" && bash "$selector" --list HEAD^ HEAD 2>&1); rc=$?
+[ "$rc" -eq 0 ] && ok "multilevel-read: selector exits 0" || bad "multilevel-read: rc=$rc out=$out"
+sel=${out#Affected Go packages: }
+contains "$sel" "github.com/psaab/xpf/cmd/cli" \
+  "multilevel-read: owning cmd/cli selected"
+contains "$sel" "github.com/psaab/xpf/pkg/grpcapi" \
+  "multilevel-read: pkg/grpcapi selected via ../../ reads-source-of edge (#16461)"
+git -C "$tmp/clone" reset --quiet --hard HEAD^
+
+# 4e. (#16461) A change to a package another package's test scans via
+#     repo-root-anchored literals selects the scanning package.
+#     pkg/diagcmd's session-walk canary (#7294,
+#     session_walk_registration_7294_test.go) derives the repo root
+#     with filepath.Dir(filepath.Dir(wd)) and scans the root-anchored
+#     scopedPackages {"pkg/api", "pkg/grpcapi"} via
+#     filepath.Join(root, pkg); no ".." literal names those packages,
+#     so the pre-#16461 extractor derived no edge and a pkg/grpcapi (or
+#     pkg/api) change never selected pkg/diagcmd -- even though
+#     pkg/diagcmd imports pkg/grpcapi's subject, the edge the closure
+#     needs points reader-wards. Acceptance names pkg/grpcapi/runtime.go;
+#     pkg/api is asserted too because both are in scopedPackages.
+for tgt in pkg/grpcapi/runtime.go pkg/api/authz.go; do
+  printf '\n// selftest root-anchored source-read mutant (#16461)\n' >> "$tmp/clone/$tgt"
+  git -C "$tmp/clone" add "$tgt"
+  git -C "$tmp/clone" commit --quiet -m "selftest: root-anchored source-read mutant"
+  out=$(cd "$tmp/clone" && bash "$selector" --list HEAD^ HEAD 2>&1); rc=$?
+  [ "$rc" -eq 0 ] && ok "root-anchored ($tgt): selector exits 0" || bad "root-anchored ($tgt): rc=$rc out=$out"
+  sel=${out#Affected Go packages: }
+  contains "$sel" "github.com/psaab/xpf/pkg/diagcmd" \
+    "root-anchored ($tgt): pkg/diagcmd selected via repo-root-anchored edge (#16461)"
+  git -C "$tmp/clone" reset --quiet --hard HEAD^
+done
 
 # ── 5. census_packages matches the live census packages ──
 # The selector's census list must equal the pkg/ packages that declare

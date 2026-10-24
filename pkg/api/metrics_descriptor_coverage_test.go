@@ -147,10 +147,13 @@ func newDescriptorCoverageStore(t *testing.T) *configstore.Store {
 		"set security policies global policy g1 match application any",
 		"set security policies global policy g1 then permit",
 		"set security policies global policy g1 then count",
-		// inet + inet6 firewall filters (one term each).
+		// inet + inet6 firewall filters (one counted term each; #16454:
+		// uncounted terms emit no xpf_filter_hits_total series).
 		"set firewall family inet filter fin term t1 from protocol tcp",
+		"set firewall family inet filter fin term t1 then count c1",
 		"set firewall family inet filter fin term t1 then accept",
 		"set firewall family inet6 filter fin6 term t1 from next-header tcp",
+		"set firewall family inet6 filter fin6 term t1 then count c1",
 		"set firewall family inet6 filter fin6 term t1 then accept",
 		// Source NAT pool with addresses so SourcePools is populated.
 		"set security nat source pool p1 address 203.0.113.0/24",

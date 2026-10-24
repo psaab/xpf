@@ -469,10 +469,10 @@ in git history; `git log -- bpf/xdp/ bpf/tc/` walks the deleted source.
 ### Chassis Cluster (HA)
 - **Unplanned peer loss — default private-RG election (#12173)**: the compiler
   default uses control-link private-RG election and suppresses RETH VRRP
-  (`pkg/config/compiler_system.go:3132-3137`; `pkg/vrrp/README.md:950-964`).
+  (`compileChassis` in `pkg/config/compiler_chassis.go` — `NoRethVRRP`, `PrivateRGElection` default; `pkg/vrrp/README.md:950-964`).
   The heartbeat staleness threshold is interval × threshold — 100ms × 5 = 500ms
   at runtime defaults or 200ms × 5 ≈ 1s in the deployed lab config
-  (`pkg/cluster/heartbeat.go:61-65,1916-1960`;
+  (`DefaultHeartbeatInterval`/`DefaultHeartbeatThreshold` and `heartbeatReceiver.checkTimeout` in `pkg/cluster/heartbeat.go`;
   `docs/ha-cluster-userspace.conf:71-72`). This is not necessarily the
   peer-loss declaration time: while session sync stays connected and inbound
   peer traffic is no more than 2s old, `shouldSuppressPeerHeartbeatTimeout`
@@ -495,7 +495,7 @@ in git history; `git log -- bpf/xdp/ bpf/tc/` walks the deleted source.
   unless `no-reth-vrrp` is also set): RETH VRRP advertisements default to 30ms
   only in this mode, configurable via
   `set chassis cluster reth-advertise-interval <ms>`
-  (`pkg/config/compiler_system.go:3119-3122`; `pkg/vrrp/vrrp.go:153-166`).
+  (`reth-advertise-interval` in `compileChassis`, `pkg/config/compiler_chassis.go`; `pkg/vrrp/vrrp.go:153-166`).
   With a 30ms learned/current advertisement, the master-down timer is
   3×advertisement + priority skew (>90ms and <120ms for priorities 1–255);
   this is a timer value, not measured end-to-end failover latency
@@ -518,7 +518,7 @@ in git history; `git log -- bpf/xdp/ bpf/tc/` walks the deleted source.
   guard. This is not an end-to-end restoration bound
   (`pkg/cluster/manager.go:1026-1077`;
   `pkg/daemon/daemon_run_shutdown.go:418-428`;
-  `pkg/cluster/heartbeat.go:61-65,1916-1960`;
+  `DefaultHeartbeatInterval`/`DefaultHeartbeatThreshold` and `heartbeatReceiver.checkTimeout` in `pkg/cluster/heartbeat.go`;
   `pkg/daemon/daemon_ha_sync.go:170-206`)
 - **VRRP advertisement**: VRRP-backed RETH instances (legacy `no-private-rg-election`, unless `no-reth-vrrp` is set) default to 30ms; `AdvertiseInterval` is milliseconds internally, centiseconds on wire per RFC 5798
 - **Async GARP**: `becomeMaster()` runs GARP in a goroutine — first pair <1ms, remaining at 50ms intervals in background. Critical path: addVIPs → sendAdvert → emitEvent (sync), then go sendGARP(false) (async). `sendGARP` has two suppression gates: a per-epoch dedup (`garpEpoch`/`lastGARPEpoch`) and a 500ms time dampener (`lastGARPTime`/`garpDampened`). `sendGARP(force)` — `force=true` bypasses ONLY the time dampener (keeps the epoch dedup); the routine `becomeMaster`/periodic path passes `force=false` so storm-control survives (#2081)
@@ -541,7 +541,7 @@ in git history; `git log -- bpf/xdp/ bpf/tc/` walks the deleted source.
   `set chassis cluster heartbeat-threshold <n>`; timeout is subject to
   startup/restart grace and the sync-recency guard above. The bind retry loop
   also handles simultaneous boot
-  (`pkg/cluster/heartbeat.go:61-98,1916-1960`;
+  (`DefaultHeartbeatInterval`/`DefaultHeartbeatThreshold` and `heartbeatReceiver.checkTimeout` in `pkg/cluster/heartbeat.go`;
   `pkg/daemon/daemon_ha_sync.go:1514-1570`;
   `pkg/daemon/daemon_ha_sync.go:170-206`;
   `docs/ha-cluster-userspace.conf:71-72`)
@@ -577,7 +577,7 @@ in git history; `git log -- bpf/xdp/ bpf/tc/` walks the deleted source.
   sync (1s sweep + ring buffer + GC delete callbacks), config sync (RG0
   primary → secondary, `${node}` variable quoting, authority enforced on
   reconnect #78), IPsec SA sync, fabric cross-chassis forwarding, and ISSU
-  (`pkg/config/compiler_system.go:3132-3137`;
+  (`compileChassis` in `pkg/config/compiler_chassis.go` — `PrivateRGElection` default;
   `pkg/vrrp/vrrp.go:153-166`).
 - **DHCP**: Relay (Option 82), server (Kea integration with lease display)
 - **CLI**: Junos-style prefix matching, "Possible completions:" headers, zone/interface descriptions, session idle time, session brief tabular view, flow statistics, policy descriptions, config validation warnings

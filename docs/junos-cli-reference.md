@@ -2210,7 +2210,11 @@ chain enforces the lo0 filter for all host-stack traffic (including fxp0
 management traffic), while the helper per-term counts cover only AF_XDP
 host-bound packets, so neither number is the lo0 total. `clear firewall
 all` resets both the helper/dataplane counters and the kernel lo0 named
-counters (#16457).
+counters (#16457). Only `then count` terms are instrumented (#16454): the
+helper publishes no counter row for an uncounted term, and the CLI / gRPC /
+Prometheus (`xpf_filter_hits_total`) surfaces render no numeric hit count
+for one, so a counted-but-idle `Hit count: 0` is distinguishable from
+not-counted.
 
 The EFFECTIVE view (`… effective`, #4422) rebuilds and prints the
 `FirewallFilterSnapshot` the userspace dataplane actually receives — the exact
@@ -2290,6 +2294,17 @@ by (family, filter, term name). When the active config is not the applied one
 they print the same `WARNING: dataplane is NOT enforcing the active
 configuration.` heading with a note that hit counters belong to the previous
 generation still being enforced and do NOT count the terms shown (#16451).
+
+On a leniently loaded (boot / peer-sync) config where a filter with a
+`then routing-instance` term is attached as input on a routing-instance
+member interface, the member attachment is rebound to a hidden synthesized
+clone (`__xpf_11589_suppressed_N`, #11589) whose steering term is stripped.
+Hit counters the dataplane publishes under the clone name — helper per-term
+counters, policer counters, and eBPF map slots — are folded into the
+authored filter's same-named terms on the RAW views and in the Prometheus
+`xpf_filter_hits_total` series (#16464), so the displayed/ exported totals
+cover both the member and non-member attachments; the clone itself never
+appears as a filter or series.
 
 This applies to the local CLI (`pkg/cli`) and, since #16451, to the remote
 CLI's gRPC `ShowText` path: the effective topics print the NOT-enforcing /
