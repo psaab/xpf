@@ -183,6 +183,10 @@ func writeConfigMutationError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
+	if errors.Is(err, configstore.ErrCommitCheckBusy) {
+		writeError(w, http.StatusTooManyRequests, err.Error())
+		return
+	}
 	writeError(w, http.StatusBadRequest, err.Error())
 }
 
@@ -484,10 +488,23 @@ func (s *Server) configCommitHandler(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, commitResponseFromConfig(compiled))
 }
 
-func (s *Server) configCommitCheckHandler(w http.ResponseWriter, _ *http.Request) {
-	compiled, err := s.store.CommitCheck()
+func (s *Server) configCommitCheckHandler(w http.ResponseWriter, r *http.Request) {
+	sessionID, ok := s.restConfigSessionID(w, r)
+	if !ok {
+		return
+	}
+	// #16070: only the config-lock holder may check the shared candidate.
+	// The previous handler ignored the request entirely, so any PermConfig
+	// non-holder could obtain compile diagnostics about another session's
+	// staged candidate and trigger repeatable full compiles at will.
+	// CommitCheckAs enforces the holder under the store lock (409 for a
+	// non-holder via writeConfigMutationError) and bounds concurrent
+	// compiles to a single slot (429 when busy). The mandatory session
+	// header also closes the sessionID=="" internal bypass: a missing or
+	// malformed token fails closed above, before the store is called.
+	compiled, err := s.store.CommitCheckAs(sessionID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeConfigMutationError(w, err)
 		return
 	}
 	writeOK(w, commitResponseFromConfig(compiled))

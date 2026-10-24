@@ -644,7 +644,15 @@ yielded.
 Candidate compilation/pre-flight and candidate promotion are two separately
 locked store operations. `CompileCandidate`/`CommitCheck` take only
 `s.mu.RLock`; `CommitWithDescription`/`CommitConfirmed` separately take
-`s.mu.Lock` and recompile the *then-current* `s.candidate`. The daemon's
+`s.mu.Lock` and recompile the *then-current* `s.candidate`. Since #16070,
+`CommitCheck` is the internal form of `CommitCheckAs(sessionID)`: the
+session-scoped form verifies the config-lock holder under the read lock
+(a non-holder gets `ErrConfigLockedByOther` before any compile, so no
+candidate diagnostics leak) and every form takes the single-slot
+`commitCheckSem` admission semaphore, failing fast with
+`ErrCommitCheckBusy` instead of queueing a second full compile. The
+gRPC and REST commit-check handlers pass their holder session id; the
+in-process CLI and the event engine use the internal form. The daemon's
 commit path uses that gap to run an EXTERNAL pre-flight the store cannot do
 itself — the #1956 device-map management-lockout gate, which resolves the
 proposed config against LIVE hardware while the operator is still connected.

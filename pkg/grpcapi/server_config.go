@@ -22,6 +22,9 @@ func configMutationStatus(err error) error {
 	if errors.Is(err, configstore.ErrConfigLockedByOther) {
 		return status.Errorf(codes.PermissionDenied, "%v", err)
 	}
+	if errors.Is(err, configstore.ErrCommitCheckBusy) {
+		return status.Errorf(codes.ResourceExhausted, "%v", err)
+	}
 	if errors.Is(err, configstore.ErrRescueNotFound) {
 		return status.Errorf(codes.FailedPrecondition, "%v", err)
 	}
@@ -331,10 +334,19 @@ func (s *Server) Commit(ctx context.Context, req *pb.CommitRequest) (*pb.CommitR
 	return &pb.CommitResponse{Summary: summary, Warnings: configWarnings(compiled)}, nil
 }
 
-func (s *Server) CommitCheck(_ context.Context, _ *pb.CommitCheckRequest) (*pb.CommitCheckResponse, error) {
-	compiled, err := s.store.CommitCheck()
+func (s *Server) CommitCheck(ctx context.Context, _ *pb.CommitCheckRequest) (*pb.CommitCheckResponse, error) {
+	// #16070: only the config-lock holder may check the shared candidate.
+	// A non-holder must not obtain compile diagnostics about another
+	// session's staged candidate, nor trigger a full compile of it at
+	// will. CommitCheckAs enforces the holder under the store lock and
+	// bounds concurrent compiles to a single slot; over-cap checks fail
+	// fast with ErrCommitCheckBusy (ResourceExhausted). connSessionID
+	// yields the holder's connection-scoped id (or the peer fallback on a
+	// direct in-process call); ensureHolderLocked governs the no-holder
+	// case exactly as it does for the sibling mutators.
+	compiled, err := s.store.CommitCheckAs(connSessionID(ctx))
 	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+		return nil, configMutationStatus(err)
 	}
 	return &pb.CommitCheckResponse{Warnings: configWarnings(compiled)}, nil
 }

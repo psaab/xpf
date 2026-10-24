@@ -424,6 +424,16 @@ type Store struct {
 	// released-and-retaken one. Only a counter keyed to acquisition can.
 	holderEpoch uint64
 
+	// commitCheckSem bounds concurrent full compiles driven by
+	// CommitCheckAs (#16070). CommitCheck runs a full strict compile of the
+	// shared candidate; without a bound a holder could queue unbounded
+	// compiles and starve the control plane. Only one compile runs at a
+	// time; excess checks fail fast with ErrCommitCheckBusy. It is a
+	// counting semaphore independent of s.mu so the holder check and the
+	// compile itself stay decoupled. Lazily initialized under s.mu (see
+	// commitCheckSlotLocked) so a zero-value Store does not panic.
+	commitCheckSem chan struct{}
+
 	// Cluster read-only mode: secondary nodes reject config mutations
 	clusterReadOnly bool
 
@@ -642,6 +652,7 @@ func New(filePath string) (*Store, error) {
 		journal:                journal.New(journalPath),
 		nodeID:                 -1,
 		persistMarkerCommitted: true,
+		commitCheckSem:         make(chan struct{}, 1),
 	}, nil
 }
 
