@@ -157,8 +157,13 @@ impl PortAllocator {
     }
 }
 use occupancy::{
-    AddressOccupancy, RecycleRing, occupancy_next_probe, pat_keyed_offset, pat_mix, pat_secret,
+    AddressOccupancy, PAT_PORT_QUARANTINE_NS, RecycleRing, SMALL_POOL_QUARANTINE_MAX_RANGE,
+    occupancy_next_probe, pat_keyed_offset, pat_mix, pat_secret,
 };
+#[cfg(test)]
+pub(super) const PAT_PORT_QUARANTINE_NS_FOR_TEST: u64 = PAT_PORT_QUARANTINE_NS;
+#[cfg(test)]
+pub(super) const SMALL_POOL_QUARANTINE_MAX_RANGE_FOR_TEST: u32 = SMALL_POOL_QUARANTINE_MAX_RANGE;
 #[cfg(test)]
 pub(super) use occupancy::{
     pat_keyed_offset as pat_keyed_offset_for_test, pat_mix as pat_mix_for_test,
@@ -2671,7 +2676,13 @@ impl PortAllocator {
             (count, freed)
         };
         for (addr_index, port) in freed {
-            self.free_translated_port(addr_index, port);
+            // #16035 fold: stamped at the clear time. The previous
+            // unstamped shape bypassed the delay entirely for leases
+            // cleared while still young (a clear 1s after mint would
+            // free the port for instant reuse); the lease's idle
+            // retention is operator/config dependent, not a guaranteed
+            // quarantine, so the stamped delay is the only bound.
+            self.free_translated_port_at(addr_index, port, now_ns);
         }
         count
     }
@@ -2920,7 +2931,7 @@ impl PortAllocator {
                 .unwrap_or_else(|e| e.into_inner())
                 .queue
                 .iter()
-                .copied()
+                .map(|&(port, _)| port)
                 .collect(),
             None => Vec::new(),
         }
@@ -2950,6 +2961,16 @@ impl PortAllocator {
     pub(super) fn debug_free_recycle(&self, addr_index: usize, port: u16) -> bool {
         match self.shared.occupancy.get(addr_index) {
             Some(occ) => occ.free_recycle(port),
+            None => false,
+        }
+    }
+
+    /// Test-only: free `port` at monotonic `now_ns` (#16035), so a
+    /// fixture can stamp a token's quarantine clock.
+    #[cfg(test)]
+    pub(super) fn debug_free_recycle_at(&self, addr_index: usize, port: u16, now_ns: u64) -> bool {
+        match self.shared.occupancy.get(addr_index) {
+            Some(occ) => occ.free_recycle_at(port, now_ns),
             None => false,
         }
     }
@@ -3006,6 +3027,19 @@ impl PortAllocator {
     #[cfg(test)]
     pub(super) fn debug_claim_recycled_only(&self, addr_index: usize) -> Option<u16> {
         self.shared.occupancy.get(addr_index)?.claim_recycled_only()
+    }
+
+    /// Test-only: recycled phase at monotonic `now_ns` (#16035).
+    #[cfg(test)]
+    pub(super) fn debug_claim_recycled_only_at(
+        &self,
+        addr_index: usize,
+        now_ns: u64,
+    ) -> Option<u16> {
+        self.shared
+            .occupancy
+            .get(addr_index)?
+            .claim_recycled_only_at(now_ns)
     }
 
     /// Test-only: drive the #4676 chunked opportunistic GC directly (the same
@@ -3218,10 +3252,23 @@ impl PortAllocator {
     /// token per offset (#7174), and a PAT claim that later pops the
     /// token finds the bit via the normal claim path.
     fn free_translated_port(&self, addr_index: usize, port: u16) -> bool {
+        self.free_translated_port_at(addr_index, port, 0)
+    }
+
+    /// [`Self::free_translated_port`] stamping the recycle token at
+    /// monotonic `now_ns` (#16035). Paths that carry a real clock
+    /// (flow release, allocation give-backs, expiry GC) pass it so a
+    /// small pool's minimum reuse delay is measured from the actual
+    /// free. Clock-less internal frees stamp 0, which the quarantine
+    /// treats as unstamped (no delay) — every production flow free
+    /// (release / rollback / give-back / expiry GC) carries a clock,
+    /// so the unstamped path is only internal bookkeeping frees whose
+    /// port was never exposed to a remote endpoint.
+    fn free_translated_port_at(&self, addr_index: usize, port: u16, now_ns: u64) -> bool {
         let Some(occ) = self.shared.occupancy.get(addr_index) else {
             return false;
         };
-        occ.free_recycle(port)
+        occ.free_recycle_at(port, now_ns)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3455,11 +3502,14 @@ impl PortAllocator {
                         }
                         is_excluded || rejected_ports.contains(&port)
                     };
-                    let claim = occ
-                        .claim_filtered(Self::pat_key(&flow) ^ occupancy_next_probe(attempt), &ex);
+                    let claim = occ.claim_filtered_at(
+                        Self::pat_key(&flow) ^ occupancy_next_probe(attempt),
+                        &ex,
+                        now_ns,
+                    );
                     let Some(port) = claim else {
                         for rejected_port in rejected_ports.drain(..) {
-                            self.free_translated_port(abs, rejected_port);
+                            self.free_translated_port_at(abs, rejected_port, now_ns);
                         }
                         break;
                     };
@@ -3509,9 +3559,9 @@ impl PortAllocator {
                         let existing = slot.translated;
                         self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
                         drop(__shard);
-                        self.free_translated_port(abs, port);
+                        self.free_translated_port_at(abs, port, now_ns);
                         for rejected_port in rejected_ports.drain(..) {
-                            self.free_translated_port(abs, rejected_port);
+                            self.free_translated_port_at(abs, rejected_port, now_ns);
                         }
                         return Ok(existing);
                     }
@@ -3534,9 +3584,9 @@ impl PortAllocator {
                         Ok(live) => live.address_only_owns_wire_identity(&flow, translated),
                         Err(_) => {
                             drop(__shard);
-                            self.free_translated_port(abs, port);
+                            self.free_translated_port_at(abs, port, now_ns);
                             for rejected_port in rejected_ports.drain(..) {
-                                self.free_translated_port(abs, rejected_port);
+                                self.free_translated_port_at(abs, rejected_port, now_ns);
                             }
                             break 'addresses;
                         }
@@ -3577,9 +3627,9 @@ impl PortAllocator {
                     ) {
                         self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
                         drop(__shard);
-                        self.free_translated_port(abs, port);
+                        self.free_translated_port_at(abs, port, now_ns);
                         for rejected_port in rejected_ports.drain(..) {
-                            self.free_translated_port(abs, rejected_port);
+                            self.free_translated_port_at(abs, rejected_port, now_ns);
                         }
                         return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
                     }
@@ -3597,7 +3647,7 @@ impl PortAllocator {
                         .allocations_total
                         .fetch_add(1, Ordering::Relaxed);
                     for rejected_port in rejected_ports.drain(..) {
-                        self.free_translated_port(abs, rejected_port);
+                        self.free_translated_port_at(abs, rejected_port, now_ns);
                     }
                     return Ok(translated);
                 }
@@ -3799,8 +3849,11 @@ impl PortAllocator {
                     }
                     is_excluded || rejected_ports.contains(&port)
                 };
-                let mut port = self.shared.occupancy[abs]
-                    .claim_filtered(Self::pat_key(&flow) ^ occupancy_next_probe(attempt), &ex);
+                let mut port = self.shared.occupancy[abs].claim_filtered_at(
+                    Self::pat_key(&flow) ^ occupancy_next_probe(attempt),
+                    &ex,
+                    now_ns,
+                );
                 if port.is_none() {
                     // Pressure handling is budgeted, not strict O(1). A
                     // non-address-persistent full family can visit each
@@ -3808,15 +3861,16 @@ impl PortAllocator {
                     // PRESSURE_GC_BUDGET expiry checks for that selected
                     // address before declaring exhaustion.
                     self.gc_expired_for_addr_locked(&mut live, abs, now_ns, PRESSURE_GC_BUDGET);
-                    port = self.shared.occupancy[abs].claim_filtered(
+                    port = self.shared.occupancy[abs].claim_filtered_at(
                         Self::pat_key(&flow) ^ occupancy_next_probe(claim_attempt),
                         &ex,
+                        now_ns,
                     );
                     claim_attempt += 1;
                 }
                 let Some(port) = port else {
                     for rejected_port in rejected_ports.drain(..) {
-                        self.free_translated_port(abs, rejected_port);
+                        self.free_translated_port_at(abs, rejected_port, now_ns);
                     }
                     break;
                 };
@@ -3896,7 +3950,7 @@ impl PortAllocator {
                     .allocations_total
                     .fetch_add(1, Ordering::Relaxed);
                 for rejected_port in rejected_ports.drain(..) {
-                    self.free_translated_port(abs, rejected_port);
+                    self.free_translated_port_at(abs, rejected_port, now_ns);
                 }
                 return Ok(translated);
             }
@@ -3955,7 +4009,7 @@ impl PortAllocator {
                 );
                 live.remove_persistent_lease(&key);
                 if !lease.address_only {
-                    self.free_translated_port(lease.addr_index, lease.translated.port);
+                    self.free_translated_port_at(lease.addr_index, lease.translated.port, now_ns);
                 }
                 return LeaseReuse::NoLease;
             }
@@ -4104,7 +4158,7 @@ impl PortAllocator {
         {
             Self::remove_lease_expiration_locked(live, addr_index, expires_at_ns, key);
             if !address_only {
-                self.free_translated_port(addr_index, translated.port);
+                self.free_translated_port_at(addr_index, translated.port, now_ns);
             }
             live.remove_persistent_lease(&key);
         }
@@ -4145,7 +4199,7 @@ impl PortAllocator {
         Self::remove_lease_expiration_locked(live, lease.addr_index, lease.expires_at_ns, key);
         live.remove_persistent_lease(&key);
         if !lease.address_only {
-            self.free_translated_port(lease.addr_index, lease.translated.port);
+            self.free_translated_port_at(lease.addr_index, lease.translated.port, now_ns);
         }
         true
     }
@@ -4239,8 +4293,9 @@ impl PortAllocator {
         live: &mut CapturedLiveGuard<'_>,
         flow: &SourceNatFlowKey,
         existing: LiveAllocation,
+        now_ns: u64,
     ) {
-        self.unlink_live_allocation_locked(&mut live.live, &mut live.shard, flow, existing);
+        self.unlink_live_allocation_locked(&mut live.live, &mut live.shard, flow, existing, now_ns);
     }
 
     fn unlink_live_allocation_locked(
@@ -4249,6 +4304,7 @@ impl PortAllocator {
         shard: &mut flows::LiveFlowShard,
         flow: &SourceNatFlowKey,
         existing: LiveAllocation,
+        now_ns: u64,
     ) {
         self.shared.flows.remove_in_shard(shard, flow);
         // #6041: the address-only reverse-identity token (#5269) is orthogonal
@@ -4273,7 +4329,7 @@ impl PortAllocator {
             live.remove_pat_owner(flow, existing.translated);
         }
         if existing.persistent_key.is_none() && !existing.address_only {
-            self.free_translated_port(existing.addr_index, existing.translated.port);
+            self.free_translated_port_at(existing.addr_index, existing.translated.port, now_ns);
         }
     }
 
@@ -4388,7 +4444,7 @@ impl PortAllocator {
             if Self::drop_holder_locked(&self.shared.flows, &mut __shard, &flow, existing, holder) {
                 return false;
             }
-            self.unlink_live_allocation_locked(&mut live, &mut __shard, &flow, existing);
+            self.unlink_live_allocation_locked(&mut live, &mut __shard, &flow, existing, now_ns);
             live.gc_counter = live.gc_counter.wrapping_add(1);
             let run_gc = live.gc_counter % GC_PERIOD == 0;
             drop(__shard);
@@ -4401,7 +4457,7 @@ impl PortAllocator {
         if Self::drop_holder_locked(&self.shared.flows, &mut __shard, &flow, existing, holder) {
             return false;
         }
-        self.unlink_live_allocation_locked(&mut live, &mut __shard, &flow, existing);
+        self.unlink_live_allocation_locked(&mut live, &mut __shard, &flow, existing, now_ns);
         // Q2 ownership transfers only on the ordinary final-holder release.
         // Keep this out of the shared completion helper: stale-tuple eviction
         // and worker retirement also use that helper but are not local proof.
@@ -4524,7 +4580,7 @@ impl PortAllocator {
             // Last holder retired: the same unlink + lease completion
             // `release_flow` performs, so the two cannot drift.
             let mut __shard = self.shared.flows.get_mut_shard(&flow);
-            self.unlink_live_allocation_locked(&mut live, &mut __shard, &flow, existing);
+            self.unlink_live_allocation_locked(&mut live, &mut __shard, &flow, existing, now_ns);
             drop(__shard);
             Self::complete_persistent_lease_locked(&mut live, existing, now_ns);
             freed += 1;
@@ -4552,7 +4608,7 @@ impl PortAllocator {
         }
         // #6528: the shared mode-correct unlink. Rollback keeps its OWN lease
         // arm below — it undoes an activation rather than completing a flow.
-        self.unlink_live_allocation_locked(&mut live, &mut __shard, &flow, existing);
+        self.unlink_live_allocation_locked(&mut live, &mut __shard, &flow, existing, now_ns);
         drop(__shard);
         if let Some(key) = existing.persistent_key {
             let mut remove_lease = false;
@@ -4597,7 +4653,7 @@ impl PortAllocator {
                 // PAT lease frees its port when the fresh-activation rollback
                 // removes it.
                 if !existing.address_only {
-                    self.free_translated_port(existing.addr_index, translated.port);
+                    self.free_translated_port_at(existing.addr_index, translated.port, now_ns);
                 }
             }
             if let Some((addr_index, expires_at_ns)) = insert_expiry {
@@ -5011,7 +5067,11 @@ impl PortAllocator {
                     );
                     live.remove_persistent_lease(&bib_key);
                     if !expired.address_only {
-                        self.free_translated_port(expired.addr_index, expired.translated.port);
+                        self.free_translated_port_at(
+                            expired.addr_index,
+                            expired.translated.port,
+                            now_ns,
+                        );
                     }
                     drop(live);
                     probe_start = Some(port_start as u16);
@@ -5156,7 +5216,11 @@ impl PortAllocator {
                 );
                 live.remove_persistent_lease(&bib_key);
                 if !expired.address_only {
-                    self.free_translated_port(expired.addr_index, expired.translated.port);
+                    self.free_translated_port_at(
+                        expired.addr_index,
+                        expired.translated.port,
+                        now_ns,
+                    );
                 }
             }
             if let Some(lease) = live.persistent_by_source.get(&bib_key).copied() {
@@ -5175,7 +5239,7 @@ impl PortAllocator {
                 {
                     if !self.shared.flows.admit_one(self.shared.max_tracked_flows) {
                         drop(live);
-                        self.free_translated_port(ip_idx, port);
+                        self.free_translated_port_at(ip_idx, port, now_ns);
                         return Err(SourceNatFailureReason::AllocatorExhausted);
                     }
                     let was_idle = lease.active_flows == 0 && lease.inbound_flows == 0;
@@ -5226,7 +5290,7 @@ impl PortAllocator {
                     live.record_pat_owner(&flow, lease.translated);
                     self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
                     drop(live);
-                    self.free_translated_port(ip_idx, port);
+                    self.free_translated_port_at(ip_idx, port, now_ns);
                     return Ok(lease.translated);
                 }
                 drop(live);
@@ -5872,6 +5936,21 @@ impl PortAllocator {
         // A synced live flow may join a still-draining shell to retain its
         // active wire tuple. If clear removed the lease, reserve this session
         // without persistence instead of recreating the cleared pin.
+        // #16035 fold: capture whether the caller's own lease owns the
+        // candidate tuple BEFORE the reclaim and liveness filter below
+        // can remove/drop it (an expired own lease is reclaimed and
+        // filtered out, but re-joining it on the same port is still
+        // not a new owner).
+        let caller_lease_owns_tuple = persistent.is_some_and(|(key, _)| {
+            // A lease that survives a persistent CLEAR (tombstoned in
+            // `revoked_persistent`) is not exempt: its replacement was
+            // minted locally after the clear, and a stale pre-clear
+            // synced session re-joining it is exactly #10784.
+            !live.revoked_persistent.contains_key(&key)
+                && live.persistent_by_source.get(&key).is_some_and(|lease| {
+                    lease.translated == translated && lease.addr_index == addr_index
+                })
+        });
         if let Some((key, _)) = persistent {
             if !live.persistent_nat_import_is_clear_fenced(&key, now_ns) {
                 self.reclaim_expired_idle_lease_locked(&mut live, key, now_ns);
@@ -5930,6 +6009,21 @@ impl PortAllocator {
                 && incumbent.persistent_key.is_none()
                 && !incumbent.address_only
         });
+        // #16035 fold: a specific-port reserve CASes the named port
+        // directly, bypassing both claim paths' quarantine. Refuse
+        // while that port's recycle token is still inside its reuse
+        // delay (small ranges only; `port_quarantined` is false on
+        // large ranges and for unqueued ports) — UNLESS the caller's
+        // own persistent lease already owns that exact tuple: a synced
+        // flow re-joining its source's lease on the same port is not a
+        // new owner, so the misdelivery the delay guards against
+        // cannot occur.
+        let own_lease_owns = caller_lease_owns_tuple;
+        if !own_lease_owns
+            && self.shared.occupancy[addr_index].port_quarantined(translated.port, now_ns)
+        {
+            return false;
+        }
         if !incumbent_owns_candidate_bit
             && self.shared.occupancy[addr_index]
                 .offset_of(translated.port)
@@ -5945,7 +6039,7 @@ impl PortAllocator {
         if let Some(existing) = existing {
             // #6528: mode-correct release only after the new tuple has passed
             // admission; a refusal above leaves the incumbent untouched.
-            self.unlink_live_allocation_captured(&mut live, &flow, existing);
+            self.unlink_live_allocation_captured(&mut live, &flow, existing, now_ns);
             Self::complete_persistent_lease_locked(&mut live, existing, now_ns);
         }
         // A synced persistent flow joins its existing source lease when present.
@@ -6354,7 +6448,7 @@ impl PortAllocator {
         if let Some(existing) = existing {
             // #13691: retain the incumbent until collision, capacity, and lease
             // admission have all succeeded.
-            self.unlink_live_allocation_captured(&mut live, &flow, existing);
+            self.unlink_live_allocation_captured(&mut live, &flow, existing, now_ns);
             Self::complete_persistent_lease_locked(&mut live, existing, now_ns);
         }
         // Fold 2: claim the tracked slot atomically BEFORE the
@@ -6722,7 +6816,7 @@ impl PortAllocator {
             {
                 return InterfaceDomainReserve::IdentityConflict;
             }
-            self.unlink_live_allocation_captured(&mut live, &flow, existing);
+            self.unlink_live_allocation_captured(&mut live, &flow, existing, now_ns);
             Self::complete_persistent_lease_locked(&mut live, existing, now_ns);
         } else if live
             .address_only_owners
@@ -7219,7 +7313,7 @@ impl PortAllocator {
             // Every lease reaching here is idle by the arms above, so no live
             // flow is forwarding on the port being freed.
             if !address_only {
-                self.free_translated_port(addr_index, translated.port);
+                self.free_translated_port_at(addr_index, translated.port, now_ns);
             }
             live.remove_persistent_lease(&key);
         }
@@ -7649,7 +7743,9 @@ impl PortAllocator {
                 // below and BEFORE the loop re-acquires it for the next chunk.
             };
             for &(addr_index, port) in &freed {
-                self.free_translated_port(addr_index, port);
+                // #16035 fold: stamped, same short-timeout argument as
+                // `gc_expired_locked`.
+                self.free_translated_port_at(addr_index, port, now_ns);
             }
             reclaimed += collected;
             if collected < chunk {
@@ -7680,7 +7776,15 @@ impl PortAllocator {
         let mut freed: Vec<(usize, u16)> = Vec::new();
         let reclaimed = self.collect_expired_global_locked(live, now_ns, budget, &mut freed);
         for (addr_index, port) in freed {
-            self.free_translated_port(addr_index, port);
+            // #16035 fold: stamped at GC time (see
+            // `clear_persistent_leases`): a short-timeout lease (the
+            // 1s schema floor) has not held its port anywhere near the
+            // reuse delay when GC reclaims it, so the unstamped shape
+            // bypassed the quarantine. The pressure claim that
+            // triggered this GC may therefore have to wait out the
+            // delay on this port; other ports/addresses still serve
+            // it, and on large pools nothing changes.
+            self.free_translated_port_at(addr_index, port, now_ns);
         }
         reclaimed
     }
@@ -7698,7 +7802,9 @@ impl PortAllocator {
         let reclaimed =
             self.collect_expired_for_addr_locked(live, addr_index, now_ns, budget, &mut freed);
         for (addr_index, port) in freed {
-            self.free_translated_port(addr_index, port);
+            // #16035 fold: stamped, same short-timeout argument as
+            // `gc_expired_locked`.
+            self.free_translated_port_at(addr_index, port, now_ns);
         }
         reclaimed
     }

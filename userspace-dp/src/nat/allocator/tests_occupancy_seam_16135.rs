@@ -75,3 +75,62 @@ fn occupancy_seam_port_of_rejects_out_of_range_16135() {
     assert_eq!(occ.offset_of(1023), None);
     assert_eq!(occ.offset_of(1028), None);
 }
+
+const T0: u64 = 1_000_000_000_000;
+const QUARANTINE_NS: u64 = 60_000_000_000;
+
+/// #16035 fold (a): a repeat free of an already-queued port must move
+/// its stamp to the LATEST free. Shape: claim both ports, free one
+/// at T0 (token queued), re-claim its bit out-of-band via
+/// `claim_in_block` (which ignores the ring), free it again at
+/// T0+50s. Without the stamp update the token keeps T0 and becomes
+/// claimable at T0+60s — 50 s before the second free's window ends.
+/// With it, the ring yields nothing until T0+110s.
+#[test]
+fn repeat_free_refreshes_quarantine_stamp_16035() {
+    let occ = AddressOccupancy::new(1024, 2);
+    let p1 = occ.claim_seeded(1, 0xA5A5).expect("fresh 1");
+    let _p2 = occ.claim_seeded(2, 0xA5A5).expect("fresh 2");
+    assert!(occ.free_recycle_at(p1, T0));
+    // Out-of-band reclaim of the same bit, then a second free.
+    assert_eq!(occ.claim_in_block(p1, p1), Some(p1));
+    assert!(occ.free_recycle_at(p1, T0 + 50_000_000_000));
+    // Exactly one token, still quarantined at the FIRST stamp's expiry.
+    assert_eq!(occ.claim_recycled_only_at(T0 + QUARANTINE_NS), None);
+    assert_eq!(occ.claim_recycled_only_at(T0 + 110_000_000_000 - 1), None);
+    assert_eq!(
+        occ.claim_recycled_only_at(T0 + 110_000_000_000),
+        Some(p1),
+        "claimable only when the SECOND free's delay elapses"
+    );
+}
+
+/// #16035 fold (d): a collision-retained token (popped, bit occupied
+/// out-of-band, re-queued) must keep its dedup bit, so a later free
+/// of the occupying bit updates the SAME token instead of pushing a
+/// duplicate. Pre-fix requeue left the bit unset after the collision
+/// pop unmarked it, and the ring ended with two tokens for one port.
+#[test]
+fn collision_requeue_keeps_dedup_bit_16035() {
+    let occ = AddressOccupancy::new(1024, 2);
+    let p1 = occ.claim_seeded(1, 0xA5A5).expect("fresh 1");
+    let _p2 = occ.claim_seeded(2, 0xA5A5).expect("fresh 2");
+    assert!(occ.free_recycle_at(p1, T0));
+    // Out-of-band owner takes the bit while the token is queued.
+    assert_eq!(occ.claim_in_block(p1, p1), Some(p1));
+    // Ring walk at post-quarantine time: pops the token, CAS fails
+    // (occupied), retains it.
+    assert_eq!(occ.claim_recycled_only_at(T0 + QUARANTINE_NS), None);
+    // The out-of-band owner frees: exactly one token must exist.
+    assert!(occ.free_recycle_at(p1, T0 + QUARANTINE_NS));
+    assert_eq!(
+        occ.claim_recycled_only_at(T0 + 2 * QUARANTINE_NS),
+        Some(p1),
+        "the single retained token claims the port"
+    );
+    assert_eq!(
+        occ.claim_recycled_only_at(T0 + 2 * QUARANTINE_NS),
+        None,
+        "no duplicate token may remain for the same port"
+    );
+}

@@ -350,7 +350,7 @@ fn cross_shard_cap_is_exact_15956() {
         )
         .expect("idempotent re-allocate returns existing");
     assert!(alloc.release_flow(pool_flow(40000), t, 4_000, crate::nat::NatHolder::Untracked));
-    allocate(&alloc, &addrs, 40010, 5_000);
+    allocate(&alloc, &addrs, 40010, 100_000_000_000);
     assert_eq!(alloc.live_flow_count(), 4);
 }
 

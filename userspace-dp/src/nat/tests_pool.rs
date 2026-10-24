@@ -3011,7 +3011,7 @@ fn pool_snat_release_after_failed_session_install_frees_tuple() {
         2,
     );
 
-    let second = expect_snat_decision(tuple_snat_lookup(&rules, 10001, "1.1.1.1", 53, 3));
+    let second = expect_snat_decision(tuple_snat_lookup(&rules, 10001, "1.1.1.1", 53, 100_000_000_000));
     assert_eq!(second.rewrite_src, first.rewrite_src);
     assert_eq!(second.rewrite_src_port, first.rewrite_src_port);
 }
@@ -3036,7 +3036,7 @@ fn pool_snat_persistent_rollback_removes_fresh_lease() {
     assert_eq!(status[0].persistent_leases, 0);
     assert_persistent_expiry_indexes_consistent(&rules[0]);
 
-    let second = expect_snat_decision(tuple_snat_lookup(&rules, 10001, "1.1.1.1", 53, 3));
+    let second = expect_snat_decision(tuple_snat_lookup(&rules, 10001, "1.1.1.1", 53, 100_000_000_000));
     assert_eq!(second.rewrite_src, first.rewrite_src);
     assert_eq!(second.rewrite_src_port, first.rewrite_src_port);
 }
@@ -3659,13 +3659,30 @@ fn pool_snat_pressure_gc_reclaims_expired_lease_for_selected_address() {
     }
     assert_persistent_expiry_indexes_consistent(&rules[0]);
 
-    let decision = expect_snat_decision(tuple_snat_lookup_from_src(
+    // #16035 fold: the pressure GC triggered by this claim frees the
+    // expired leases' ports stamped at the claim instant, so those
+    // ports are quarantined for 60s and the first attempt is refused;
+    // the GC itself has still run (asserted below), and a retry after
+    // the reuse delay succeeds on a reclaimed port.
+    let first = tuple_snat_lookup_from_src(
         &rules,
         &src_addr_1,
         12000,
         "1.1.1.1",
         53,
         5_000_000_000,
+    );
+    assert!(
+        matches!(first, SourceNatLookup::Unavailable(_)),
+        "#16035: GC-freed ports are quarantined, first attempt must be refused, got {first:?}"
+    );
+    let decision = expect_snat_decision(tuple_snat_lookup_from_src(
+        &rules,
+        &src_addr_1,
+        12000,
+        "1.1.1.1",
+        53,
+        200_000_000_000,
     ));
 
     assert_eq!(decision.rewrite_src, Some("203.0.113.11".parse().unwrap()));
@@ -4682,7 +4699,7 @@ fn pool_snat_recycle_order_is_fifo_not_lifo() {
                 PersistentNatPermit::TargetHostPort,
                 0,
                 0,
-                1_000,
+                100_000_000_000,
                 NatHolder::Untracked,
                 0,
             )
@@ -4935,7 +4952,7 @@ fn synced_session_reserves_nat_pool_port_4388() {
             PersistentNatPermit::TargetHostPort,
             0,
             0,
-            3_000,
+            100_000_000_000,
             NatHolder::Untracked,
             0,
         )
@@ -7128,9 +7145,9 @@ fn pool_snat_lockfree_concurrent_fill_is_exact_and_collision_free() {
     use std::thread;
 
     let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
-    // 1 address, 64 ports => capacity 64, max_tracked_flows 64.
-    let alloc = PortAllocator::new(1, 30000, 30063);
-    let capacity = 64usize;
+    // 1 address, 512 ports (> #16035 small-pool threshold, so no reuse quarantine distorts the exact-fill shape) => capacity 512.
+    let alloc = PortAllocator::new(1, 30000, 30511);
+    let capacity = 512usize;
     let m = 8usize;
     let attempts_per_thread = 200usize; // 1600 attempts >> 64 capacity
 
@@ -7193,7 +7210,7 @@ fn pool_snat_lockfree_concurrent_fill_is_exact_and_collision_free() {
     for (ip, port) in &all {
         assert_eq!(*ip, IpAddr::V4(pool_ip));
         assert!(
-            (30000..=30063).contains(port),
+            (30000..=30511).contains(port),
             "port {port} out of pool range"
         );
     }
@@ -7223,9 +7240,9 @@ fn pool_snat_lockfree_concurrent_churn_no_double_alloc_no_leak() {
     use std::thread;
 
     let pool_ip: Ipv4Addr = "203.0.113.2".parse().unwrap();
-    // 2 addresses x 32 ports = 64 capacity; <= 8 concurrent outstanding, so the
+    // 2 addresses x 512 ports (> #16035 small-pool threshold per address, so churn reuse is not quarantined) = 1024 capacity; <= 8 concurrent outstanding, so the
     // fresh range is spent almost immediately and reuse hammers the recycle ring.
-    let alloc = PortAllocator::new(2, 20000, 20031);
+    let alloc = PortAllocator::new(2, 20000, 20511);
     let addrs2 = [pool_ip, "203.0.113.3".parse().unwrap()];
     let m = 8usize;
     let iters = 6000usize;
@@ -7332,7 +7349,7 @@ fn pool_snat_release_frees_bit_and_port_is_reusable() {
             PersistentNatPermit::TargetHostPort,
             0,
             0,
-            1_000,
+            100_000_000_000,
             NatHolder::Untracked,
             0,
         )

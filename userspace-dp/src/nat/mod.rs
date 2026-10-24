@@ -235,6 +235,10 @@ mod tests_synced_persistent_zones_15676;
 #[cfg(test)]
 #[path = "tests_16011.rs"]
 mod tests_16011;
+// #16035: freed PAT ports on small pools sit out a minimum reuse delay.
+#[cfg(test)]
+#[path = "tests_16035.rs"]
+mod tests_16035;
 // #9874: authored-but-empty source-NAT match poison (fail-closed drop).
 #[cfg(test)]
 #[path = "tests_empty_match_poison_9874.rs"]
