@@ -11,7 +11,7 @@ import (
 // handleMessage (#16168). BulkStart is extracted last, in
 // sync_bulkstart_recv.go, preserving its ORDER MATTERS sequence.
 // Dispatch, counters, and lock choreography are unchanged.
-func (s *SessionSync) handleBulkRequest(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleBulkRequest(conn net.Conn, payload []byte) bool {
 	// Request-triggered sends use the same authoritative source selection
 	// as cold-prime bulks. Coalesce concurrent requests before they reach
 	// bulkSendMu, without blocking this receive loop.
@@ -26,9 +26,10 @@ func (s *SessionSync) handleBulkRequest(conn net.Conn, payload []byte) {
 			}
 		}()
 	}
+	return true
 }
 
-func (s *SessionSync) handleBulkEnd(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleBulkEnd(conn net.Conn, payload []byte) bool {
 	var epoch uint64
 	if len(payload) >= 8 {
 		epoch = binary.LittleEndian.Uint64(payload[:8])
@@ -53,7 +54,7 @@ func (s *SessionSync) handleBulkEnd(conn net.Conn, payload []byte) {
 		// legitimate bulk still completes.
 		s.bulkMu.Unlock()
 		slog.Debug("cluster sync: ignoring BulkEnd with no bulk transfer in progress", "got", epoch)
-		return
+		return false
 	}
 	if s.bulkRecvEpoch != epoch {
 		// #5718 (codex-182 C-HA C01b): snapshot the mutex-protected
@@ -65,7 +66,7 @@ func (s *SessionSync) handleBulkEnd(conn net.Conn, payload []byte) {
 		want := s.bulkRecvEpoch
 		s.bulkMu.Unlock()
 		slog.Warn("cluster sync: ignoring BulkEnd with mismatched epoch", "expected", want, "got", epoch)
-		return
+		return false
 	}
 	// #9174 V013: the epoch alone does not identify a bulk. The peer's send
 	// counter restarts at zero when it reboots, so an end marker buffered on
@@ -89,7 +90,7 @@ func (s *SessionSync) handleBulkEnd(conn net.Conn, payload []byte) {
 			"epoch", epoch, "end_incarnation", endInc.String(),
 			"bulk_started_by", started.String(),
 			"local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
-		return
+		return false
 	}
 	// #9716: the incarnation check above fails open whenever either side is
 	// un-incarnated: a peer on an older build, or a bulk primed without one.
@@ -107,7 +108,7 @@ func (s *SessionSync) handleBulkEnd(conn net.Conn, payload []byte) {
 		slog.Warn("cluster sync: ignoring BulkEnd on a connection other than the one that started the bulk",
 			"epoch", epoch, "end_incarnation", endInc.String(),
 			"local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
-		return
+		return false
 	}
 	// #9716: a completion the incarnation check could not judge is matched on
 	// epoch and connection alone. Count it, so a half-upgraded pair is visible.
@@ -125,13 +126,13 @@ func (s *SessionSync) handleBulkEnd(conn net.Conn, payload []byte) {
 		// sets and retain their intentional-ACK behavior.
 		slog.Warn("cluster sync: bulk contains transient helper install failures; withholding BulkAck and failover release",
 			"epoch", epoch, "failed_v4", failedV4, "failed_v6", failedV6)
-		return
+		return false
 	}
 	reconciled, inventoryGen, inventoryRequested := s.reconcileStaleSessions(bulkSerial)
 	if !reconciled {
 		slog.Warn("cluster sync: bulk reconcile did not complete; withholding BulkAck and failover release",
 			"epoch", epoch)
-		return
+		return false
 	}
 	s.stats.BulkSyncEndTime.Store(time.Now().UnixNano())
 	slog.Info("cluster sync: bulk transfer complete", "epoch", epoch, "sessions", s.stats.BulkSyncSessions.Load(), "local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
@@ -154,12 +155,13 @@ func (s *SessionSync) handleBulkEnd(conn net.Conn, payload []byte) {
 			go cb(inventoryGen)
 		}
 	}
+	return true
 }
 
-func (s *SessionSync) handleBulkAck(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleBulkAck(conn net.Conn, payload []byte) bool {
 	if len(payload) < 8 {
 		slog.Warn("cluster sync: bulk ack message too short")
-		return
+		return false
 	}
 	epoch := binary.LittleEndian.Uint64(payload[:8])
 	stats := s.Stats()
@@ -192,7 +194,7 @@ func (s *SessionSync) handleBulkAck(conn net.Conn, payload []byte) {
 		// a legacy peer's legitimate ack of our outbound bulk still
 		// completes.
 		slog.Debug("cluster sync: ignoring BulkAck with no pending outbound bulk", "got", epoch, "pending", pending)
-		return
+		return false
 	}
 	owed := s.pendingBulkOwed.Load() // #9626: the debt this bulk was sent to pay
 	s.clearPendingBulkAck()
@@ -212,4 +214,5 @@ func (s *SessionSync) handleBulkAck(conn net.Conn, payload []byte) {
 	if s.OnBulkSyncAckReceived != nil {
 		go s.OnBulkSyncAckReceived()
 	}
+	return true
 }

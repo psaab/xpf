@@ -477,18 +477,19 @@ type fenceAckWaiter struct {
 // carrying the seq at all: without it a LATE ack from a previous fence would
 // satisfy the next fence's gate instantly, and the gate would report a
 // confirmation the peer never gave for the fence in question.
-func (s *SessionSync) completeFenceAckWait(ack FenceAck) {
+func (s *SessionSync) completeFenceAckWait(ack FenceAck) bool {
 	s.fenceAckMu.Lock()
 	defer s.fenceAckMu.Unlock()
 	waiter := s.fenceAckWaiters[ack.Seq]
 	if waiter.ch == nil {
 		slog.Debug("cluster sync: dropping fence ack with no waiter", "seq", ack.Seq)
-		return
+		return false
 	}
 	delete(s.fenceAckWaiters, ack.Seq)
 	// The waiter is buffered (cap 1), so delivery cannot block while the
 	// lock establishes the completion-vs-timeout linearization point.
 	waiter.ch <- ack
+	return true
 }
 
 // abortFenceAckWaiters releases every pending fence-ack waiter on disconnect.

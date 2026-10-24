@@ -152,7 +152,7 @@ func TestPeerCapabilitiesPayloadIsLengthGated6650(t *testing.T) {
 	// follows it there at the same strength — the guard and the store
 	// must both be present in the delegate body.
 	src := readClusterSource(t, "sync_failover_recv.go")
-	if !sourceContainsFlat(src, "func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) {") {
+	if !sourceContainsFlat(src, "func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) bool {") {
 		t.Error("handlePeerCapabilities is missing from sync_failover_recv.go — " +
 			"the syncMsgPeerCapabilities arm no longer delegates to it")
 	}

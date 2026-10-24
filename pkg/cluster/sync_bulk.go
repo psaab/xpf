@@ -896,14 +896,16 @@ type barrierWaiter struct {
 	fenced bool
 }
 
-func (s *SessionSync) completeBarrierWait(seq uint64) {
+func (s *SessionSync) completeBarrierWait(seq uint64) bool {
 	s.barrierWaitMu.Lock()
 	waiter := s.barrierWaiters[seq]
 	delete(s.barrierWaiters, seq)
 	s.barrierWaitMu.Unlock()
-	if waiter != nil {
-		close(waiter.ch)
+	if waiter == nil {
+		return false
 	}
+	close(waiter.ch)
+	return true
 }
 
 func (s *SessionSync) sendBulkAck(conn net.Conn, epoch uint64) {

@@ -121,19 +121,22 @@ func (s *SessionSync) getActiveConn() net.Conn {
 // one, the exact defect C01a exists to prevent, one level up. Comparing the
 // slot's stamp to peerIncarnation binds the ack to the incarnation that owns
 // the connection rather than to slot membership.
-func (s *SessionSync) noteHeartbeatAck(conn net.Conn) {
+func (s *SessionSync) noteHeartbeatAck(conn net.Conn) bool {
+	// #16041: reports whether the ack was accepted for the current
+	// incarnation, so handleHeartbeatAck can report semantic acceptance.
 	if conn == nil {
-		return
+		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.connIsCurrentIncarnationLocked(conn) {
-		return
+		return false
 	}
 	if hook := noteHeartbeatAckMidpointHook.Load(); hook != nil {
 		(*hook)()
 	}
 	s.peerHeartbeatAckEver.Store(true)
+	return true
 }
 
 // noteHeartbeatAckMidpointHook is a test seam invoked between the incarnation

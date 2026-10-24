@@ -590,7 +590,7 @@ func (s *SessionSync) sendFailoverResult(conn net.Conn, msgType uint8, rgID int,
 	}
 	slog.Info("cluster sync: failover result sent", "msg_type", msgType, "rg", rgID, "req_id", reqID, "status", status, "detail", detail)
 }
-func (s *SessionSync) completeFailoverWait(rgID int, reqID uint64, ack failoverAck) {
+func (s *SessionSync) completeFailoverWait(rgID int, reqID uint64, ack failoverAck) bool {
 	s.failoverWaitMu.Lock()
 	waiter := s.failoverWaiters[rgID]
 	if waiter.reqID == reqID {
@@ -598,14 +598,15 @@ func (s *SessionSync) completeFailoverWait(rgID int, reqID uint64, ack failoverA
 	}
 	s.failoverWaitMu.Unlock()
 	if waiter.ch == nil || waiter.reqID != reqID {
-		return
+		return false
 	}
 	select {
 	case waiter.ch <- ack:
 	default:
 	}
+	return true
 }
-func (s *SessionSync) completeFailoverBatchWait(key string, reqID uint64, ack failoverAck) {
+func (s *SessionSync) completeFailoverBatchWait(key string, reqID uint64, ack failoverAck) bool {
 	s.failoverWaitMu.Lock()
 	waiter, ok := s.failoverBatchWaiters[key]
 	if ok && waiter.reqID == reqID {
@@ -613,12 +614,13 @@ func (s *SessionSync) completeFailoverBatchWait(key string, reqID uint64, ack fa
 	}
 	s.failoverWaitMu.Unlock()
 	if !ok || waiter.ch == nil || waiter.reqID != reqID {
-		return
+		return false
 	}
 	select {
 	case waiter.ch <- ack:
 	default:
 	}
+	return true
 }
 func (s *SessionSync) sendFailoverBatchResult(conn net.Conn, msgType uint8, rgIDs []int, reqID uint64, status uint8, detail string) {
 	if err := validateFailoverBatchRGCount(rgIDs); err != nil {
@@ -653,7 +655,7 @@ func (s *SessionSync) sendFailoverBatchResult(conn net.Conn, msgType uint8, rgID
 		return
 	}
 }
-func (s *SessionSync) completeFailoverCommitWait(rgID int, reqID uint64, ack failoverAck) {
+func (s *SessionSync) completeFailoverCommitWait(rgID int, reqID uint64, ack failoverAck) bool {
 	s.failoverWaitMu.Lock()
 	waiter := s.failoverCommitWaiters[rgID]
 	if waiter.reqID == reqID {
@@ -661,14 +663,15 @@ func (s *SessionSync) completeFailoverCommitWait(rgID int, reqID uint64, ack fai
 	}
 	s.failoverWaitMu.Unlock()
 	if waiter.ch == nil || waiter.reqID != reqID {
-		return
+		return false
 	}
 	select {
 	case waiter.ch <- ack:
 	default:
 	}
+	return true
 }
-func (s *SessionSync) completeFailoverBatchCommitWait(key string, reqID uint64, ack failoverAck) {
+func (s *SessionSync) completeFailoverBatchCommitWait(key string, reqID uint64, ack failoverAck) bool {
 	s.failoverWaitMu.Lock()
 	waiter, ok := s.failoverBatchCommitWaiters[key]
 	if ok && waiter.reqID == reqID {
@@ -676,10 +679,11 @@ func (s *SessionSync) completeFailoverBatchCommitWait(key string, reqID uint64, 
 	}
 	s.failoverWaitMu.Unlock()
 	if !ok || waiter.ch == nil || waiter.reqID != reqID {
-		return
+		return false
 	}
 	select {
 	case waiter.ch <- ack:
 	default:
 	}
+	return true
 }

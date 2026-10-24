@@ -182,7 +182,7 @@ func encodeDHCPLeaseChunkFrames(leases []dhcpserver.SyncLease) (bodies [][]byte,
 // assemble. The received>totalLeases refusal sits BEFORE the completion
 // allocation so an over-total stream is dropped without ever sizing a
 // slice from the announced total (#16036). Caller holds dhcpApplyMu.
-func (st *dhcpChunkState) addChunk(key dhcpChunkGeneration, index, total, totalLeases uint32, leases []dhcpserver.SyncLease) (complete []dhcpserver.SyncLease, closed bool) {
+func (st *dhcpChunkState) addChunk(key dhcpChunkGeneration, index, total, totalLeases uint32, leases []dhcpserver.SyncLease) (complete []dhcpserver.SyncLease, closed bool, accepted bool) {
 	if st.pending == nil {
 		st.pending = make(map[dhcpChunkGeneration]*dhcpChunkAssembly)
 	}
@@ -202,11 +202,11 @@ func (st *dhcpChunkState) addChunk(key dhcpChunkGeneration, index, total, totalL
 	}
 	if a.total != total || a.totalLeases != totalLeases {
 		delete(st.pending, key)
-		return nil, false
+		return nil, false, false
 	}
 	if _, dup := a.parts[index]; dup {
 		delete(st.pending, key)
-		return nil, false
+		return nil, false, false
 	}
 	a.parts[index] = leases
 	a.have++
@@ -215,10 +215,10 @@ func (st *dhcpChunkState) addChunk(key dhcpChunkGeneration, index, total, totalL
 		// More leases arrived than the generation announced: refuse
 		// before any completion work (#16036).
 		delete(st.pending, key)
-		return nil, false
+		return nil, false, false
 	}
 	if a.have < int(a.total) {
-		return nil, false
+		return nil, false, true
 	}
 	// Complete: size the concatenation by a.received — the lease count
 	// the parts have already proven — never by the announced
@@ -229,15 +229,15 @@ func (st *dhcpChunkState) addChunk(key dhcpChunkGeneration, index, total, totalL
 		part, ok := a.parts[i]
 		if !ok {
 			delete(st.pending, key)
-			return nil, false
+			return nil, false, false
 		}
 		complete = append(complete, part...)
 	}
 	delete(st.pending, key)
 	if uint32(len(complete)) != a.totalLeases {
-		return nil, false
+		return nil, false, false
 	}
-	return complete, true
+	return complete, true, true
 }
 
 // discard removes any pending assembly (a newer committed set supersedes

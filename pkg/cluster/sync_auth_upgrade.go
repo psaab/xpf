@@ -522,22 +522,22 @@ func (s *SessionSync) emitUpgradeHelloLocked(ac *authConn, fabricIdx int, key []
 // one the peer never answered and never will.
 //
 // Runs on the receiveLoop goroutine that owns conn.
-func (s *SessionSync) handleAuthUpgradeRequest(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleAuthUpgradeRequest(conn net.Conn, payload []byte) bool {
 	ac, ok := conn.(*authConn)
 	if !ok {
-		return
+		return false
 	}
 	if len(payload) < 1 || payload[0] != syncAuthUpgradeVersion {
 		slog.Warn("cluster sync: malformed or unsupported auth-upgrade request; leaving the "+
 			"connection as it is (#6628)", "len", len(payload))
-		return
+		return false
 	}
 	key := s.authKey()
 	if len(key) == 0 {
 		// Not keyed here yet — the rolling-upgrade case. Silence is the right
 		// answer: the peer keeps its connection, unauthenticated, exactly as
 		// today, and a later commit on this node starts our own Hello.
-		return
+		return true
 	}
 	initiator, err := s.upgradeRoleIsInitiator()
 	if err != nil {
@@ -548,7 +548,7 @@ func (s *SessionSync) handleAuthUpgradeRequest(conn net.Conn, payload []byte) {
 		// tear down working sync for a healable misconfiguration; fix the
 		// identity and the next commit retries and heals. Never escalate.
 		slog.Warn("cluster sync: cannot resolve local identity for an auth-upgrade request; leaving the connection as it is (#6628/#7163/#9915)", "err", err)
-		return
+		return false
 	}
 	if !initiator {
 		// A Request from a peer that should itself be answering ours. Role is
@@ -556,16 +556,16 @@ func (s *SessionSync) handleAuthUpgradeRequest(conn net.Conn, payload []byte) {
 		// injection, never a state we should accommodate.
 		slog.Warn("cluster sync: ignoring an auth-upgrade request that arrived at the " +
 			"responder-role node (#6628/#7163)")
-		return
+		return false
 	}
 	fabricIdx, ok := s.fabricIndexOf(conn)
 	if !ok {
-		return
+		return false
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	if bytes.Equal(ac.authPSK, key) {
-		return
+		return true
 	}
 	// A Request is the only thing that may disturb an outstanding round, and
 	// even then it RE-SENDS rather than replaces whenever it can.
@@ -589,12 +589,13 @@ func (s *SessionSync) handleAuthUpgradeRequest(conn net.Conn, payload []byte) {
 			slog.Warn("cluster sync: could not re-send the auth-upgrade hello the peer "+
 				"asked for; the connection stays as it is (#6628)", "err", err)
 		}
-		return
+		return true
 	}
 	if err := s.emitUpgradeHelloLocked(ac, fabricIdx, key); err != nil {
 		slog.Warn("cluster sync: could not answer the peer's auth-upgrade request; the "+
 			"connection stays as it is (#6628)", "err", err)
 	}
+	return true
 }
 
 // handleAuthUpgradeHello reads the initiator's Noise msg1, answers with msg2,
@@ -610,15 +611,15 @@ func (s *SessionSync) handleAuthUpgradeRequest(conn net.Conn, payload []byte) {
 // unsealed frames until it has sent one.
 //
 // Runs on the receiveLoop goroutine that owns conn.
-func (s *SessionSync) handleAuthUpgradeHello(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleAuthUpgradeHello(conn net.Conn, payload []byte) bool {
 	ac, ok := conn.(*authConn)
 	if !ok {
-		return
+		return false
 	}
 	if len(payload) < 2 || payload[0] != syncAuthUpgradeVersion {
 		slog.Warn("cluster sync: malformed or unsupported auth-upgrade hello; leaving the "+
 			"connection as it is (#6628)", "len", len(payload))
-		return
+		return false
 	}
 	// #14703: verify against the accepted ring, not the signing key alone.
 	// The initiator seals its Hello under ITS signing key; during #6630
@@ -626,24 +627,24 @@ func (s *SessionSync) handleAuthUpgradeHello(conn net.Conn, payload []byte) {
 	accepted := s.authAcceptedKeys()
 	if len(accepted) == 0 {
 		// Not keyed here yet — the rolling-upgrade case. Silence, as above.
-		return
+		return true
 	}
 	initiator, err := s.upgradeRoleIsInitiator()
 	if err != nil {
 		slog.Warn("cluster sync: cannot resolve the in-place upgrade role; leaving the "+
 			"connection as it is (#6628/#7163)", "err", err)
-		return
+		return false
 	}
 	if initiator {
 		// A Hello from the peer while WE are the initiator by node id. Only one
 		// side may drive, and a peer cannot promote itself by sending a msg1.
 		slog.Warn("cluster sync: ignoring an auth-upgrade hello that arrived at the " +
 			"initiator-role node; role comes from node id, not from the wire (#7163)")
-		return
+		return false
 	}
 	fabricIdx, ok := s.fabricIndexOf(conn)
 	if !ok {
-		return
+		return false
 	}
 
 	// writeMu is held across the WHOLE responder step, the Noise arithmetic
@@ -668,7 +669,7 @@ func (s *SessionSync) handleAuthUpgradeHello(conn net.Conn, payload []byte) {
 			"initiator's confirm — the round already in flight is what verifies it, and "+
 			"replacing it would strand a msg2 this node has committed to (#6628/#7163)",
 			"remote", connRemoteAddrString(conn))
-		return
+		return false
 	}
 
 	// Nothing else touches ac until one candidate has succeeded: a msg1 that
@@ -685,7 +686,7 @@ func (s *SessionSync) handleAuthUpgradeHello(conn net.Conn, payload []byte) {
 		if err != nil {
 			slog.Warn("cluster sync: auth-upgrade responder setup failed; the connection stays "+
 				"as it is (#6628)", "err", err)
-			return
+			return false
 		}
 		if _, _, _, err := candHS.ReadMessage(nil, payload[1:]); err != nil {
 			continue
@@ -704,7 +705,7 @@ func (s *SessionSync) handleAuthUpgradeHello(conn net.Conn, payload []byte) {
 			"different control-link key, or disagrees about cluster/node identity; the "+
 			"connection stays in its current posture (#6628/#7163/#14703)",
 			"remote", connRemoteAddrString(conn))
-		return
+		return false
 	}
 	// The verified Noise msg1 proves that the peer holds an accepted PSK,
 	// independently of whether the remainder of this connection upgrade
@@ -715,7 +716,7 @@ func (s *SessionSync) handleAuthUpgradeHello(conn net.Conn, payload []byte) {
 	if err != nil || csI2R == nil || csR2I == nil {
 		slog.Warn("cluster sync: auth-upgrade responder could not complete the handshake; "+
 			"the connection stays as it is (#6628)", "err", err)
-		return
+		return false
 	}
 	keys := syncNoiseSplitKeys(false, csI2R, csR2I)
 	binding := append([]byte(nil), hs.ChannelBinding()...)
@@ -731,7 +732,7 @@ func (s *SessionSync) handleAuthUpgradeHello(conn net.Conn, payload []byte) {
 		// that could desync a survivor.
 		slog.Warn("cluster sync: auth-upgrade proof send failed; the connection stays as it "+
 			"is (#6628)", "err", err)
-		return
+		return false
 	}
 	st := &authUpgradeState{
 		initiator: false,
@@ -748,6 +749,7 @@ func (s *SessionSync) handleAuthUpgradeHello(conn net.Conn, payload []byte) {
 	st.writeDone = true
 	slog.Info("cluster sync: in-place auth upgrade — outbound frames are now authenticated (#6628)",
 		"role", "responder", "remote", connRemoteAddrString(conn))
+	return true
 }
 
 // handleAuthUpgradeProof reads the responder's Noise msg2 at the initiator,
@@ -755,15 +757,15 @@ func (s *SessionSync) handleAuthUpgradeHello(conn net.Conn, payload []byte) {
 // responder's read boundary.
 //
 // Runs on the receiveLoop goroutine that owns conn.
-func (s *SessionSync) handleAuthUpgradeProof(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleAuthUpgradeProof(conn net.Conn, payload []byte) bool {
 	ac, ok := conn.(*authConn)
 	if !ok {
-		return
+		return false
 	}
 	if len(payload) < 2 || payload[0] != syncAuthUpgradeVersion {
 		slog.Warn("cluster sync: malformed or unsupported auth-upgrade proof; leaving the "+
 			"connection as it is (#6628)", "len", len(payload))
-		return
+		return false
 	}
 	// Resolved before the lock: fabricIndexOf takes s.mu, and s.mu is never
 	// acquired under writeMu anywhere in this package.
@@ -784,7 +786,7 @@ func (s *SessionSync) handleAuthUpgradeProof(conn net.Conn, payload []byte) {
 	if st == nil || !st.initiator || st.hs == nil {
 		slog.Warn("cluster sync: auth-upgrade proof with no matching outstanding exchange; " +
 			"ignoring rather than deriving a key from state we did not establish (#6628)")
-		return
+		return false
 	}
 	csI2R, csR2I, err := readUpgradeMsg2(st.hs, payload[1:])
 	if err != nil {
@@ -794,7 +796,7 @@ func (s *SessionSync) handleAuthUpgradeProof(conn net.Conn, payload []byte) {
 		slog.Warn("cluster sync: auth-upgrade proof did not authenticate; the connection "+
 			"stays in its current posture (#6628/#7163)",
 			"err", err, "remote", connRemoteAddrString(conn))
-		return
+		return false
 	}
 	// The verified Noise msg2 proves that the peer holds the shared PSK.
 	s.recordAuthenticatedPeer()
@@ -827,7 +829,7 @@ func (s *SessionSync) handleAuthUpgradeProof(conn net.Conn, payload []byte) {
 		// write, so reverting would desync the direction that IS working.
 		slog.Warn("cluster sync: auth-upgrade confirm send failed; the outbound direction "+
 			"stays un-upgraded (#6628)", "err", err)
-		return
+		return true
 	}
 	// The write direction switches HERE, after the frame that is the
 	// responder's read boundary.
@@ -857,6 +859,7 @@ func (s *SessionSync) handleAuthUpgradeProof(conn net.Conn, payload []byte) {
 				"previous key until the next commit (#6628)", "err", err)
 		}
 	}
+	return true
 }
 
 // handleAuthUpgradeConfirm completes the exchange at the RESPONDER: the
@@ -869,15 +872,15 @@ func (s *SessionSync) handleAuthUpgradeProof(conn net.Conn, payload []byte) {
 // connection.
 //
 // Runs on the receiveLoop goroutine that owns conn.
-func (s *SessionSync) handleAuthUpgradeConfirm(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleAuthUpgradeConfirm(conn net.Conn, payload []byte) bool {
 	ac, ok := conn.(*authConn)
 	if !ok {
-		return
+		return false
 	}
 	if len(payload) < 1+syncAuthUpgradeConfirmLen || payload[0] != syncAuthUpgradeVersion {
 		slog.Warn("cluster sync: malformed or unsupported auth-upgrade confirm; leaving the "+
 			"connection as it is (#6628)", "len", len(payload))
-		return
+		return false
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -889,17 +892,17 @@ func (s *SessionSync) handleAuthUpgradeConfirm(conn net.Conn, payload []byte) {
 	// round.
 	st := ac.upgrade
 	if st == nil || st.initiator || !st.haveKeys {
-		return
+		return false
 	}
 	if st.readDone {
-		return
+		return true
 	}
 	// st.keys.readKey is the initiator→responder key on this side.
 	want := upgradeConfirmMAC(st.keys.readKey, st.binding)
 	if !hmac.Equal(payload[1:1+syncAuthUpgradeConfirmLen], want) {
 		slog.Warn("cluster sync: auth-upgrade confirm did not verify; the inbound direction "+
 			"stays un-upgraded (#6628/#7163)", "remote", connRemoteAddrString(conn))
-		return
+		return false
 	}
 	ac.readKey = st.keys.readKey
 	st.readDone = true
@@ -920,6 +923,7 @@ func (s *SessionSync) handleAuthUpgradeConfirm(conn net.Conn, payload []byte) {
 				"this exchange was in flight (#6628)", "err", err)
 		}
 	}
+	return true
 }
 
 // readUpgradeMsg2 reads the responder's msg2 into the initiator's handshake and

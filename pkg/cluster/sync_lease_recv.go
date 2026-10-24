@@ -13,7 +13,7 @@ import (
 // multi-label arms keep their msgType parameter so the verbatim
 // discriminator checks inside the bodies are unchanged. Dispatch,
 // counters, sequence guards, and lock choreography are unchanged.
-func (s *SessionSync) handleIPsecSA(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleIPsecSA(conn net.Conn, payload []byte) bool {
 	s.stats.IPsecSAReceived.Add(1)
 	// #5706: split off the (incarnation, seq) ordering trailer. Check
 	// against the last-applied pair before decoding, but do not advance
@@ -29,7 +29,7 @@ func (s *SessionSync) handleIPsecSA(conn net.Conn, payload []byte) {
 		s.stats.IPsecSAStaleIgnored.Add(1)
 		slog.Warn("cluster sync: dropping out-of-order IPsec SA set (stale sequence) — standby retains newer set",
 			"incarnation", incarnation, "seq", seq)
-		return
+		return false
 	}
 	// #5706 review fold: strip the '\n' delimiter a new sender inserts
 	// between the SA name list and the trailer so a new->new roundtrip
@@ -44,7 +44,7 @@ func (s *SessionSync) handleIPsecSA(conn net.Conn, payload []byte) {
 		// consume the sequence number.
 		slog.Warn("cluster sync: refusing a malformed IPsec SA full set",
 			"payload_bytes", len(payload), "incarnation", incarnation, "seq", seq)
-		return
+		return false
 	}
 	// Serialize high-water advance, held-set replacement, and callback so
 	// concurrent fabric receivers cannot commit/callback out of order.
@@ -63,29 +63,32 @@ func (s *SessionSync) handleIPsecSA(conn net.Conn, payload []byte) {
 		s.stats.IPsecSAStaleIgnored.Add(1)
 		slog.Warn("cluster sync: dropping out-of-order IPsec SA set (stale sequence) — standby retains newer set",
 			"incarnation", incarnation, "seq", seq)
-		return
+		return false
 	}
 	slog.Debug("cluster sync: received IPsec SA list", "count", len(names), "incarnation", incarnation, "seq", seq)
 	if s.OnIPsecSAReceived != nil {
 		s.OnIPsecSAReceived(names)
 	}
 	s.ipsecApplyMu.Unlock()
+	return true
 }
 
-func (s *SessionSync) handlePersistentNatLease(conn net.Conn, payload []byte) {
+func (s *SessionSync) handlePersistentNatLease(conn net.Conn, payload []byte) bool {
 	// #10018 migration fence: type 38 is the pre-scope format.
 	slog.Warn("cluster sync: ignoring legacy unscoped persistent-NAT lease set",
 		"bytes", len(payload))
+	return true
 }
 
-func (s *SessionSync) handlePersistentNatLeaseScoped(conn net.Conn, payload []byte) {
+func (s *SessionSync) handlePersistentNatLeaseScoped(conn net.Conn, payload []byte) bool {
 	// Type 39 predates durable clear generations. Admitting it would
 	// bypass the receiver's permanent replay floor.
 	slog.Warn("cluster sync: ignoring persistent-NAT lease set without clear generation",
 		"bytes", len(payload))
+	return true
 }
 
-func (s *SessionSync) handlePersistentNatLeaseGeneration(conn net.Conn, msgType uint8, payload []byte) {
+func (s *SessionSync) handlePersistentNatLeaseGeneration(conn net.Conn, msgType uint8, payload []byte) bool {
 	// #11486: generation-bearing idle-lease batch. Sequence ordering handles
 	// transport reordering within one peer incarnation; the daemon persists
 	// origin generation independently across reconnects and process restarts.
@@ -97,7 +100,7 @@ func (s *SessionSync) handlePersistentNatLeaseGeneration(conn net.Conn, msgType 
 	if !admit {
 		slog.Warn("cluster sync: dropping out-of-order persistent-NAT generation batch",
 			"incarnation", incarnation, "seq", seq)
-		return
+		return false
 	}
 	var batch userspace.PersistentNatLeaseBatch
 	var ok bool
@@ -110,7 +113,7 @@ func (s *SessionSync) handlePersistentNatLeaseGeneration(conn net.Conn, msgType 
 		s.stats.MalformedRecordsDropped.Add(1)
 		slog.Warn("cluster sync: dropping malformed persistent-NAT generation batch",
 			"incarnation", incarnation, "seq", seq, "bytes", len(base))
-		return
+		return false
 	}
 	s.persistentNatLeaseApplyMu.Lock()
 	s.recvSeqMu.Lock()
@@ -121,7 +124,7 @@ func (s *SessionSync) handlePersistentNatLeaseGeneration(conn net.Conn, msgType 
 		s.persistentNatLeaseApplyMu.Unlock()
 		slog.Warn("cluster sync: dropping out-of-order persistent-NAT generation batch",
 			"incarnation", incarnation, "seq", seq)
-		return
+		return false
 	}
 	slog.Debug("cluster sync: received persistent-NAT generation batch",
 		"count", len(batch.Leases), "generation", batch.Generation,
@@ -130,9 +133,10 @@ func (s *SessionSync) handlePersistentNatLeaseGeneration(conn net.Conn, msgType 
 		s.OnPersistentNatLeasesReceived(batch)
 	}
 	s.persistentNatLeaseApplyMu.Unlock()
+	return true
 }
 
-func (s *SessionSync) handleDHCPLeaseV4(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleDHCPLeaseV4(conn net.Conn, payload []byte) bool {
 	s.stats.DHCPLeasesReceived.Add(1)
 	base, incarnation, seq := stripFullSetSeq(payload)
 	// #9915 F-117 review: do the cheap sequence admission BEFORE
@@ -145,13 +149,13 @@ func (s *SessionSync) handleDHCPLeaseV4(conn net.Conn, payload []byte) {
 		s.stats.DHCPLeasesStaleIgnored.Add(1)
 		slog.Warn("cluster sync: dropping out-of-order DHCP v4 lease set (stale sequence) — standby retains newer set",
 			"incarnation", incarnation, "seq", seq)
-		return
+		return false
 	}
 	leasePayload, snapshot, metadataPresent, metadataValid := stripDHCPLeaseSnapshotMeta(base)
 	if !metadataValid || (metadataPresent && !validDHCPLeaseSnapshotFamily(snapshot, 4)) {
 		s.stats.MalformedRecordsDropped.Add(1)
 		slog.Warn("cluster sync: dropping malformed DHCP v4 lease authority snapshot")
-		return
+		return false
 	}
 	leases, ok := decodeDHCPLeasePayload(leasePayload)
 	if !ok {
@@ -161,7 +165,7 @@ func (s *SessionSync) handleDHCPLeaseV4(conn net.Conn, payload []byte) {
 		s.stats.MalformedRecordsDropped.Add(1)
 		slog.Warn("cluster sync: dropping malformed DHCP v4 lease set — standby retains previous set",
 			"incarnation", incarnation, "seq", seq, "bytes", len(leasePayload))
-		return
+		return false
 	}
 	// Every decoded set is identity-filtered, legacy or sequenced alike:
 	// the filter judges records, not senders. Legacy (untrailered) only
@@ -186,7 +190,7 @@ func (s *SessionSync) handleDHCPLeaseV4(conn net.Conn, payload []byte) {
 		// mark does not advance (see above).
 		slog.Warn("cluster sync: DHCP v4 lease set filtered to empty — standby retains previous set",
 			"incarnation", incarnation, "seq", seq)
-		return
+		return false
 	}
 	// Atomic commit (#9915 F-117 review): the high-water advance, the
 	// held-set replacement, and the callback are serialized by
@@ -224,16 +228,17 @@ func (s *SessionSync) handleDHCPLeaseV4(conn net.Conn, payload []byte) {
 		s.stats.DHCPLeasesStaleIgnored.Add(1)
 		slog.Warn("cluster sync: dropping out-of-order DHCP v4 lease set (stale sequence) — standby retains newer set",
 			"incarnation", incarnation, "seq", seq)
-		return
+		return false
 	}
 	slog.Debug("cluster sync: received DHCP v4 lease set", "count", len(leases), "incarnation", incarnation, "seq", seq)
 	if s.OnDHCPLeasesReceived != nil {
 		s.OnDHCPLeasesReceived(4, leases)
 	}
 	s.dhcpApplyMu.Unlock()
+	return true
 }
 
-func (s *SessionSync) handleDHCPLeaseV6(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleDHCPLeaseV6(conn net.Conn, payload []byte) bool {
 	s.stats.DHCPLeasesReceived.Add(1)
 	base, incarnation, seq := stripFullSetSeq(payload)
 	// #9915 F-117 review: do the cheap sequence admission BEFORE
@@ -246,13 +251,13 @@ func (s *SessionSync) handleDHCPLeaseV6(conn net.Conn, payload []byte) {
 		s.stats.DHCPLeasesStaleIgnored.Add(1)
 		slog.Warn("cluster sync: dropping out-of-order DHCP v6 lease set (stale sequence) — standby retains newer set",
 			"incarnation", incarnation, "seq", seq)
-		return
+		return false
 	}
 	leasePayload, snapshot, metadataPresent, metadataValid := stripDHCPLeaseSnapshotMeta(base)
 	if !metadataValid || (metadataPresent && !validDHCPLeaseSnapshotFamily(snapshot, 6)) {
 		s.stats.MalformedRecordsDropped.Add(1)
 		slog.Warn("cluster sync: dropping malformed DHCP v6 lease authority snapshot")
-		return
+		return false
 	}
 	leases, ok := decodeDHCPLeasePayload(leasePayload)
 	if !ok {
@@ -260,7 +265,7 @@ func (s *SessionSync) handleDHCPLeaseV6(conn net.Conn, payload []byte) {
 		s.stats.MalformedRecordsDropped.Add(1)
 		slog.Warn("cluster sync: dropping malformed DHCP v6 lease set — standby retains previous set",
 			"incarnation", incarnation, "seq", seq, "bytes", len(leasePayload))
-		return
+		return false
 	}
 	// Every decoded set is filtered: see the v4 twin.
 	origCount := len(leases)
@@ -281,7 +286,7 @@ func (s *SessionSync) handleDHCPLeaseV6(conn net.Conn, payload []byte) {
 		// #9915 F-117: see the v4 twin — retain, no advance.
 		slog.Warn("cluster sync: DHCP v6 lease set filtered to empty — standby retains previous set",
 			"incarnation", incarnation, "seq", seq)
-		return
+		return false
 	}
 	// Atomic commit: see the v4 twin (dhcpApplyMu spans commit+callback;
 	// recvSeqMu only mark+store; the callback must not reenter DHCP
@@ -305,16 +310,17 @@ func (s *SessionSync) handleDHCPLeaseV6(conn net.Conn, payload []byte) {
 		s.stats.DHCPLeasesStaleIgnored.Add(1)
 		slog.Warn("cluster sync: dropping out-of-order DHCP v6 lease set (stale sequence) — standby retains newer set",
 			"incarnation", incarnation, "seq", seq)
-		return
+		return false
 	}
 	slog.Debug("cluster sync: received DHCP v6 lease set", "count", len(leases), "incarnation", incarnation, "seq", seq)
 	if s.OnDHCPLeasesReceived != nil {
 		s.OnDHCPLeasesReceived(6, leases)
 	}
 	s.dhcpApplyMu.Unlock()
+	return true
 }
 
-func (s *SessionSync) handleDHCPLeaseChunk(conn net.Conn, msgType uint8, payload []byte) {
+func (s *SessionSync) handleDHCPLeaseChunk(conn net.Conn, msgType uint8, payload []byte) bool {
 	// #15160: one chunk of an over-cap DHCP full-set. Chunks are
 	// admitted in per-frame seq order, assembled by
 	// (incarnation, generation), and committed atomically only
@@ -338,7 +344,7 @@ func (s *SessionSync) handleDHCPLeaseChunk(conn net.Conn, msgType uint8, payload
 		s.stats.DHCPLeasesStaleIgnored.Add(1)
 		slog.Warn("cluster sync: dropping out-of-order DHCP lease chunk (stale sequence)",
 			"family", family, "incarnation", incarnation, "seq", seq)
-		return
+		return false
 	}
 	// The #10170 authority trailer rides the last chunk only; strip
 	// it (from the reassembled base tail) before header parsing is
@@ -350,7 +356,7 @@ func (s *SessionSync) handleDHCPLeaseChunk(conn net.Conn, msgType uint8, payload
 		s.stats.MalformedRecordsDropped.Add(1)
 		slog.Warn("cluster sync: dropping malformed DHCP lease chunk header",
 			"family", family, "incarnation", incarnation, "seq", seq, "bytes", len(base))
-		return
+		return false
 	}
 	var snapshot dhcpserver.LeaseSyncSnapshot
 	isLast := index == total-1
@@ -360,7 +366,7 @@ func (s *SessionSync) handleDHCPLeaseChunk(conn net.Conn, msgType uint8, payload
 		if !metadataValid || (metadataPresent && !validDHCPLeaseSnapshotFamily(snapshot, family)) {
 			s.stats.MalformedRecordsDropped.Add(1)
 			slog.Warn("cluster sync: dropping malformed DHCP lease chunk authority snapshot", "family", family)
-			return
+			return false
 		}
 	}
 	leases, decoded := decodeDHCPLeasePayload(chunkBody)
@@ -368,7 +374,7 @@ func (s *SessionSync) handleDHCPLeaseChunk(conn net.Conn, msgType uint8, payload
 		s.stats.MalformedRecordsDropped.Add(1)
 		slog.Warn("cluster sync: dropping malformed DHCP lease chunk — prior set retained",
 			"family", family, "generation", generation, "index", index)
-		return
+		return false
 	}
 	origCount := len(leases)
 	var semanticallyDropped int
@@ -387,7 +393,7 @@ func (s *SessionSync) handleDHCPLeaseChunk(conn net.Conn, msgType uint8, payload
 		// at encode time, so this is a corrupt/forged stream).
 		slog.Warn("cluster sync: DHCP lease chunk filtered to empty — generation refused, prior set retained",
 			"family", family, "generation", generation, "index", index)
-		return
+		return false
 	}
 	// Advance the per-frame high-water for every admitted chunk
 	// (monotone stream), then assemble; commit only on completion.
@@ -403,14 +409,23 @@ func (s *SessionSync) handleDHCPLeaseChunk(conn net.Conn, msgType uint8, payload
 		s.stats.DHCPLeasesStaleIgnored.Add(1)
 		slog.Warn("cluster sync: dropping out-of-order DHCP lease chunk (stale sequence) — prior set retained",
 			"family", family, "incarnation", incarnation, "seq", seq)
-		return
+		return false
 	}
 	key := dhcpChunkGeneration{incarnation: incarnation, generation: generation}
-	complete, closed := state.addChunk(key, index, total, totalLeases, leases)
+	complete, closed, accepted := state.addChunk(key, index, total, totalLeases, leases)
+	if !accepted {
+		// #16041 fold: an inconsistent assembly (mismatched totals,
+		// duplicate index, over-total, under-total at completion)
+		// invalidates the generation downstream of seq admission —
+		// semantically rejected, so it must not refresh liveness.
+		s.recvSeqMu.Unlock()
+		s.dhcpApplyMu.Unlock()
+		return false
+	}
 	if !closed {
 		s.recvSeqMu.Unlock()
 		s.dhcpApplyMu.Unlock()
-		return
+		return true
 	}
 	snapshot.Leases = complete
 	snapshot.Received = true
@@ -422,4 +437,5 @@ func (s *SessionSync) handleDHCPLeaseChunk(conn net.Conn, msgType uint8, payload
 		s.OnDHCPLeasesReceived(family, complete)
 	}
 	s.dhcpApplyMu.Unlock()
+	return true
 }

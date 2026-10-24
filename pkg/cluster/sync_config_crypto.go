@@ -349,22 +349,22 @@ func (s *SessionSync) sendConfigKeyExchange(conn net.Conn) {
 // on-path attacker who can inject one frame) roll the key of a live connection
 // at will, and there is no legitimate reason to: the keypair is per
 // connection, and a reconnect installs a fresh one.
-func (s *SessionSync) handleConfigKeyExchange(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleConfigKeyExchange(conn net.Conn, payload []byte) bool {
 	if len(payload) < 1+syncConfigECDHPubSize {
 		slog.Warn("cluster sync: config-sync key exchange too short", "len", len(payload))
-		return
+		return false
 	}
 	if payload[0] != syncConfigCryptoVersion {
 		slog.Warn("cluster sync: unsupported config-sync key-exchange version; config payloads "+
 			"from this node will be sent in CLEARTEXT (#6629)", "version", payload[0])
-		return
+		return false
 	}
 	peerPub := payload[1 : 1+syncConfigECDHPubSize]
 	s.mu.Lock()
 	c := s.configCryptoForConnLocked(conn)
 	if c == nil || c.key != nil {
 		s.mu.Unlock()
-		return
+		return true
 	}
 	err := c.deriveConfigKey(peerPub)
 	ready := c.ready
@@ -373,11 +373,12 @@ func (s *SessionSync) handleConfigKeyExchange(conn net.Conn, payload []byte) {
 	if err != nil || !derived {
 		slog.Warn("cluster sync: config-sync key exchange failed; config payloads on this "+
 			"connection will be sent in CLEARTEXT (#6629)", "err", err)
-		return
+		return false
 	}
 	close(ready)
 	slog.Info("cluster sync: config-sync payload encryption negotiated on this connection (#6629)",
 		"remote", connRemoteAddrString(conn))
+	return true
 }
 
 // configKeyFromHandshake derives the config-payload AEAD key from this

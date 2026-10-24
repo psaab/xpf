@@ -502,6 +502,13 @@ type SyncStats struct {
 	FenceAcksReceived atomic.Uint64
 	FenceAcksTimedOut atomic.Uint64
 	Errors            atomic.Uint64
+	// OversizeFramesRefused counts frames refused by the #16041 per-type
+	// payload cap (syncPayloadCap): a header declaring more payload than
+	// its type's encoder can ever emit. The connection is dropped, as with
+	// the global maxSyncPayload refusal it refines. A nonzero value means
+	// a non-conforming or faulty keyed peer; conforming senders chunk
+	// full-set types below the global cap and never approach these.
+	OversizeFramesRefused atomic.Uint64
 	// PreKeyAuthEvictions counts keyed-node session-sync connections closed
 	// after they failed to authenticate within the #10717 upgrade grace.
 	PreKeyAuthEvictions atomic.Uint64
@@ -689,6 +696,7 @@ type SyncStatsSnapshot struct {
 	GenCapShrunk                         uint64 // #9915 F-044 review
 	AuthUpgradeIdentityErrors            uint64 // #9915 F-043 review
 	PreAuthRejected                      uint64
+	OversizeFramesRefused                uint64 // #16041 per-type payload cap refusals
 	Connected                            bool
 	ActiveFabric                         int
 	BulkSyncStartTime                    int64
@@ -2436,7 +2444,7 @@ func (s *SessionSync) Stats() SyncStatsSnapshot {
 		InstallsStaleIgnored:                 s.stats.InstallsStaleIgnored.Load(),
 		SessionsStaleConfigIgnored:           s.stats.SessionsStaleConfigIgnored.Load(),
 		GenMapOverflow:                       s.stats.GenMapOverflow.Load(), GenTombstonesEvicted: s.stats.GenTombstonesEvicted.Load(),
-		PreAuthRejected: s.stats.PreAuthRejected.Load(), Connected: s.stats.Connected.Load(),
+		PreAuthRejected: s.stats.PreAuthRejected.Load(), OversizeFramesRefused: s.stats.OversizeFramesRefused.Load(), Connected: s.stats.Connected.Load(),
 		ActiveFabric:      activeFabric,
 		BulkSyncStartTime: s.stats.BulkSyncStartTime.Load(), BulkSyncEndTime: s.stats.BulkSyncEndTime.Load(),
 		BulkSyncSessions:   s.stats.BulkSyncSessions.Load(),
