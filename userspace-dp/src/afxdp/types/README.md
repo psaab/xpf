@@ -20,7 +20,15 @@ globs.
 |------|---------|
 | `mod.rs` | Re-export hub for the per-area type files below. |
 | `cos.rs` | CoS shaper / queue / flow-fair / runtime types (`CoSInterfaceRuntime`, `CoSQueueRuntime`, `CoSPendingTxItem`, `FlowFairState`, `WorkerCoSQueueFastPath`, etc.). Issue 68.1 split. |
-| `forwarding.rs` | Routing / forwarding types (`ForwardingResolution`, `ForwardingDisposition`, `NeighborEntry`, etc.). Issue 68.2 split. Three forwarding types had wider-than-`pub(super)` visibility in the original `mod.rs` and stay re-exported at their original surface. (`PacketDisposition` is in `mod.rs`; `ValidationState` is in `runtime.rs`.) |
+| `forwarding/mod.rs` | Routing / forwarding types hub (#16209 file-only split of the former `forwarding.rs`). Re-exports sibling files below via `pub(in crate::afxdp) use <sibling>::*;` plus preserved wider surfaces (`pub use fib::NeighborEntry`, `pub(crate) use disposition::{ForwardingDisposition, ForwardingResolution}`, mirrored by `types/mod.rs`). Three forwarding types had wider-than-`pub(super)` visibility in the original `mod.rs` and stay re-exported at their original surface. (`PacketDisposition` is in `mod.rs`; `ValidationState` is in `runtime.rs`.) |
+| `forwarding/state.rs` | `ForwardingState` (128-field definition, intact) + impl + paired-insert tests, `SynCookieMasterKey`, `InstallTables`, `FabricNatScopeIdentity`. |
+| `forwarding/fib.rs` | Route / connected / leak / ECMP next-hop types, `MirrorRuntimeConfig`, `NeighborEntry`. |
+| `forwarding/local.rs` | `EgressInterface`. |
+| `forwarding/tunnels.rs` | `TunnelEndpoint`, `WgRuntimePeer`. |
+| `forwarding/zones.rs` | `ZoneHostInbound`, `is_host_inbound_multicast_group`. |
+| `forwarding/fabric.rs` | `FabricLink`, `FabricSkipReason`, `FabricLinkSkip`. |
+| `forwarding/disposition.rs` | `ForwardingDisposition`, `RouteIdentity`, `ForwardingLookupResult`, `ForwardingResolution`. |
+| `forwarding/binding.rs` | `BindingIdentity`, `WorkerBindingLookup`. |
 | `runtime.rs` | Per-worker runtime atomics and shared status types. |
 | `shared_cos_lease/mod.rs` | Shared per-CoS lease + V_min coordination types (#1035 P4): `SharedCoSQueueLease`, `SharedCoSRootLease`, `SharedCoSQueueVtimeFloor`, `SharedCoSExactBacklog`, `PaddedVtimeSlot`, `NOT_PARTICIPATING` sentinel. `SharedCoSExactBacklog` carries queued-byte telemetry, serviceable-byte telemetry, an exact-demand queue mask, and the shared residual-surplus token bucket used to keep best-effort/non-exact surplus inside the root rate left after exact guarantees. |
 | `shared_cos_lease/rotate_epoch_v8.rs` | `SharedCoSQueueLease::maybe_rotate_epoch_v8` — per-tick seqlock rotation state machine (#1229 Phase 6 v8 + #1231 v5 + #1290 v2). Extracted in #1329 as pure code motion. |

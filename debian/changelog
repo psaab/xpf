@@ -1,4 +1,13 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Userspace-dp: split afxdp/types/forwarding.rs (2,297 lines) into
+    forwarding/{mod,state,fib,local,tunnels,zones,fabric,disposition,
+    binding}.rs (#16209). File-only: definitions move behind the existing
+    `pub(in crate::afxdp) use forwarding::*` glob; zero access-site,
+    layout, or behaviour change, and no visibility widening (each sibling
+    shifts `use super::*` to `use super::super::*`, one in-body super path
+    gains a level). ForwardingState's 128-field definition stays intact in
+    state.rs — this does not discharge the accepted-debt obligation to
+    split that definition itself.
   * Lab: make the WAN target 172.16.80.200 declarative (#16213). It was
     a hand `ip addr add` alias on xpf-mouse-target beside the pinned
     .201 — any recreate/reboot silently dropped it while harnesses kept
