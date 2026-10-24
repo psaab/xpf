@@ -33,12 +33,15 @@ var activeTraffic trafficHarness
 
 // requireNetNS runs the current test in an isolated user/network namespace.
 // Tests in the child are root in that namespace, so nftables and netlink can
-// be used without host privileges. The parent only reports the child result.
-func requireNetNS(t *testing.T) {
+// be used without host privileges. It returns true in the netns child, where
+// the caller must run the test body, and false in the parent, where the
+// caller must return at once: the parent only reports the child result, and
+// returning normally (not t.Skip) makes a passing child report PASS.
+func requireNetNS(t *testing.T) bool {
 	t.Helper()
 	if os.Getenv("XPF_NFQUEUE_IN_NETNS") != "" {
 		bringLoopbackUp(t)
-		return
+		return true
 	}
 	self, err := os.Executable()
 	if err != nil {
@@ -52,7 +55,10 @@ func requireNetNS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("netns re-exec failed: %v", err)
 	}
-	t.Skip("netns child completed")
+	// Success: report PASS, not Skip. A skip is indistinguishable from a
+	// pass in every summary line (engineering-style "Time in tests (#8218)"
+	// clause 2), so a green netns child must end by the caller returning.
+	return false
 }
 
 func bringLoopbackUp(t *testing.T) {

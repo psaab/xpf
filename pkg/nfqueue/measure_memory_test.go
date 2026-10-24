@@ -29,7 +29,9 @@ type memorySnapshot struct {
 // expose a per-NFQUEUE slab/socket attribution API. The real-box gate must
 // retain that residual rather than treating RSS alone as kernel accounting.
 func TestMeasureMemory9506(t *testing.T) {
-	requireNetNS(t)
+	if !requireNetNS(t) {
+		return
+	}
 	q, err := Open(65)
 	if err != nil {
 		t.Fatalf("M2 Open: %v", err)
