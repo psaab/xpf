@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -171,6 +172,24 @@ func (s *Store) CommitCheckAs(sessionID string) (*config.Config, error) {
 	}
 
 	return compiled, nil
+}
+
+// HoldCommitCheckSlotForTest occupies the single CommitCheck compile slot
+// until the returned release is called, simulating an in-flight full
+// compile. Test-only (#16070): it lets pkg/eventengine's tests drive a real
+// ErrCommitCheckBusy out of CommitCheckAs without a compile hook. The
+// release is idempotent. Never called by production code.
+func HoldCommitCheckSlotForTest(s *Store) (release func()) {
+	if s.commitCheckSem == nil {
+		s.mu.Lock()
+		if s.commitCheckSem == nil {
+			s.commitCheckSem = make(chan struct{}, 1)
+		}
+		s.mu.Unlock()
+	}
+	s.commitCheckSem <- struct{}{}
+	var once sync.Once
+	return func() { once.Do(func() { <-s.commitCheckSem }) }
 }
 
 // Commit validates, compiles, and applies the candidate configuration.

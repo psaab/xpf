@@ -420,7 +420,11 @@ cannot occur.
   window via the `afterDrainFn` seam) — both fail-on-revert if `enqueueMu` is
   removed (a survivor is dropped).
 - A non-lock error (bad apply / CommitCheck reject) is a permanent failure: no
-  retry, bumps `xpf_event_actions_rejected_total`.
+  retry, bumps `xpf_event_actions_rejected_total`. The one transient
+  CommitCheck error is not in this class: `ErrCommitCheckBusy` (#16070 — an
+  operator's commit-check holds the single compile slot) retries on the
+  held-lock backoff schedule and drops (counted `DroppedLockHeld`) only
+  past the retry deadline.
 
 ## HA event-remediation publication (#10874)
 

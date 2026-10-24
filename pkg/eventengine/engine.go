@@ -105,8 +105,10 @@ const (
 const policyCooldown = 30 * time.Second
 
 // Backoff schedule for a held config lock (#2157). The worker retries an
-// action whose EnterConfigure fails with ErrConfigLocked until the deadline,
-// then drops it (counted). A non-lock error is permanent (no retry).
+// action whose EnterConfigure fails with ErrConfigLocked — or whose
+// CommitCheck fails transiently with ErrCommitCheckBusy (#16070) — until
+// the deadline, then drops it (counted). A non-lock, non-busy error is
+// permanent (no retry).
 const (
 	lockRetryInitial  = 200 * time.Millisecond
 	lockRetryMax      = 5 * time.Second
@@ -1262,7 +1264,13 @@ func (e *Engine) runAction(a plannedAction) {
 			e.dropGlobalBudget(a)
 			return
 		}
-		if errors.Is(err, configstore.ErrConfigLocked) {
+		if errors.Is(err, configstore.ErrConfigLocked) || errors.Is(err, configstore.ErrCommitCheckBusy) {
+			// #16070: a transient CommitCheck-busy refusal (an operator's
+			// commit-check holds the single compile slot) is the same class
+			// as a held config lock: the batch is valid but cannot be
+			// validated right now. Retrying with the same bounded backoff
+			// lets a valid remediation commit once the slot frees, instead
+			// of discarding it as a permanent CommitCheck reject.
 			if e.now().After(deadline) {
 				e.counters.droppedLockHeld.Add(1)
 				e.releaseEdgeLatch(a.policyName, a.event, a.semRev)
@@ -1312,7 +1320,8 @@ func (e *Engine) runAction(a plannedAction) {
 // applyOnce is the transactional batch (#2139): enter configure (the candidate
 // IS the rollback), apply every planned op, validate the WHOLE candidate with
 // CommitCheck, then commit. ANY failure discards the candidate (ExitConfigure)
-// — never a half-applied config. Returns ErrConfigLocked for bounded retry and
+// — never a half-applied config. Returns ErrConfigLocked (and, wrapped by
+// errBatch, ErrCommitCheckBusy — #16070) for bounded retry, and
 // ErrClusterReadOnly for HA deferral until the publication gate reopens.
 // commitContext returns the engine-lifetime context threaded into the
 // remediation commit (#2868). An Engine built via New always has lifeCtx set;
