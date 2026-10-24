@@ -2547,3 +2547,16 @@ xpf (0.0.0) unstable; urgency=medium
     session, and host-bound hits stay with the arrival zone's
     host-inbound gate. Snapshot protocol v70 fences a v69 helper that
     would ignore the knob and fail open.
+  * Image/day-0: decouple ssh host-key regeneration from the day-0 loader
+    (#16445). A new xpf-ssh-hostkeys.service, staged by both the .deb
+    (debian/rules) and the bake, runs `ssh-keygen -A` Before=ssh.service
+    gated only on host-key absence, so the boot after a failed or
+    interrupted zeroize -- whose pending marker occupies the day-0 stamp
+    path and skips the loader, while the rotated machine-id defeats
+    Ubuntu's first-boot sshd-keygen -- regenerates the erased host keys
+    and sshd starts instead of leaving the box console-only. The day-0
+    loader keeps its stamp gate (still skipped under the pending
+    marker) and no longer runs ssh-keygen. Pinned by
+    scripts/image/test_ssh_hostkeys_regen_16445.py (real unit conditions
+    evaluated in the failed-reset state, real ssh-keygen -A, sshd -t)
+    and the updated test_day0_machine_id_independence_10769.py.

@@ -1,0 +1,34 @@
+# xpf ssh host-key regeneration (#16445).
+# Host-key regeneration is decoupled from the day-0 loader on purpose.
+# The sealed image ships without ssh host keys, and a factory reset
+# (zeroize) erases them early while its pending marker deliberately
+# reuses the day-0 stamp path -- so xpf-day0-config.service is
+# condition-skipped on exactly the boot that follows an interrupted or
+# failed reset, and gating key regeneration on that loader (its old
+# job) stranded sshd: no regenerator ran, `sshd -t` failed, and the box
+# was console-only. Ubuntu's sshd-keygen.service cannot rescue this
+# either: the reset rotates /etc/machine-id to a fresh real value, so
+# its ConditionFirstBoot=yes is false.
+#
+# This unit's gate is keyed on the identity itself, not on reset or
+# day-0 intent: whenever the host keys are absent it runs
+# `ssh-keygen -A` (which itself only creates missing key types, so a
+# partial key set is completed, never rotated), ordered Before=
+# ssh.service so sshd starts with per-instance keys. When any host key
+# exists the condition skips the unit and existing keys are untouched.
+# The day-0 loader's own gate is unchanged: with the pending marker
+# present the loader is still skipped.
+[Unit]
+Description=xpf ssh host-key regeneration
+Documentation=https://github.com/psaab/xpf/blob/master/docs/install-images.md
+After=local-fs.target
+Before=ssh.service
+ConditionPathExists=!/etc/ssh/ssh_host_ed25519_key
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/ssh-keygen -A
+
+[Install]
+WantedBy=multi-user.target

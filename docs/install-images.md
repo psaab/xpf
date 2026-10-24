@@ -377,7 +377,11 @@ each VM its own copy-on-write overlay. Put the verified image there with
 | Day-0 applied once | Applied at most once: stamped after success; never clobbers an existing config (a COMMITTED `.configdb/active.json` or a preseeded `xpf.conf`). A REJECTED medium does not stamp — fix the config and reboot to retry while the system is still factory-default |
 
 Day-0 loader specifics (`scripts/image/xpf-day0-config`, oneshot unit
-`Before=xpfd.service`):
+`Before=xpfd.service`). SSH host-key regeneration is separate:
+`xpf-ssh-hostkeys.service` runs `ssh-keygen -A` `Before=ssh.service`
+whenever no host key exists (#16445) — including the boot after a
+failed or interrupted factory reset, whose pending marker occupies the
+day-0 stamp path and therefore still skips the loader below:
 
 - Probes volumes labeled `xpf-config` (any filesystem) **first**, then
   OpenStack/Cloud-Init config drives labeled `config-2` or `cidata`

@@ -390,7 +390,6 @@ REJECT_MARKER="$XPF_DIR/.day0-config-rejected"
 MNT="$XPF_DIR/mnt"
 STAMP="$XPF_DIR/.day0-config-applied"
 XPFD=/bin/true
-regen_ssh_host_keys() { :; }
 probe_devices() { printf 'fake-device\n'; echo DAY0_PROBED >&2; }
 try_device() { return 1; }
 main

@@ -143,7 +143,6 @@ class _Base(unittest.TestCase):
                   f'REJECT_MARKER="$XPF_DIR/.day0-config-rejected"\n'
                   f'MNT="{self.mnt}"\n'
                   f'XPFD="{self.xpfd}"\n'
-                  'regen_ssh_host_keys() { :; }\n'
                   + body)
         return subprocess.run(["bash", "-c", script], env=self._env(),
                               capture_output=True, text=True)

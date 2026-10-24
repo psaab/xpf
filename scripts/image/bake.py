@@ -1041,6 +1041,12 @@ def virt_customize(work_qcow, xpf_deb):
         # before networkd, and RequiredBy keeps address setup blocked on failure.
         "--copy-in", f"{HERE}/xpf-input-closed.service:/usr/lib/systemd/system",
         "--run-command", "systemctl enable xpf-input-closed.service",
+        # #16445: re-stage the decoupled ssh host-key regenerator after apt
+        # installs the .deb (same explicit-image discipline as the fences
+        # above). Its key-absence gate regenerates keys erased by an
+        # interrupted zeroize even though the day-0 loader stays skipped.
+        "--copy-in", f"{HERE}/xpf-ssh-hostkeys.service:/usr/lib/systemd/system",
+        "--run-command", "systemctl enable xpf-ssh-hostkeys.service",
         "--copy-in", f"{HERE}/xpf-uefi-slots:/usr/local/sbin",
         "--copy-in", f"{HERE}/xpf-uefi-slots.service:/usr/lib/systemd/system",
         "--run-command", "chmod 0755 /usr/local/sbin/xpf-uefi-slots",
