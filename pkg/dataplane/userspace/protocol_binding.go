@@ -128,6 +128,9 @@ type BindingStatus struct {
 	FlowCacheHits               uint64 `json:"flow_cache_hits,omitempty"`
 	FlowCacheMisses             uint64 `json:"flow_cache_misses,omitempty"`
 	FlowCacheEvictions          uint64 `json:"flow_cache_evictions,omitempty"`
+	// #16220: per-arm breakdown of FlowCacheEvictions, indexed by the
+	// Rust FlowCacheEvictionArm ordinal (see flowCacheEvictionArmLabels).
+	FlowCacheEvictionsByArm []uint64 `json:"flow_cache_evictions_by_arm,omitempty"`
 	// #918: collision-driven subset of flow_cache_evictions (full-set
 	// LRU displacement vs stale-on-lookup eviction). Acceptance gate
 	// watches collision_evictions / hits under load.

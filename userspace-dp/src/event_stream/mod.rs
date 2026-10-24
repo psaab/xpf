@@ -728,6 +728,8 @@ impl EventStreamWorkerHandle {
                 delta.tcp_handshake_state,
                 delta.source_nat_static,
                 delta.pptp_call_ids,
+                delta.counters.fwd_packets,
+                delta.counters.rev_packets,
             ),
             // #9412: a close-state update rides the OPEN record layout on its own
             // message type (3), which the Go decoder already reads as an upsert.
@@ -743,6 +745,8 @@ impl EventStreamWorkerHandle {
                 delta.tcp_handshake_state,
                 delta.source_nat_static,
                 delta.pptp_call_ids,
+                delta.counters.fwd_packets,
+                delta.counters.rev_packets,
             ),
             SessionDeltaKind::Close => EventFrame::encode_session_close_with_ingress(
                 seq,

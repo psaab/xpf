@@ -15,6 +15,20 @@ const FLOW_CACHE_SETS: usize = FLOW_CACHE_SIZE / FLOW_CACHE_WAYS;
 const FLOW_CACHE_SET_MASK: usize = FLOW_CACHE_SETS - 1;
 /// Denial entries expire quickly even when config/FIB generations remain stable.
 pub(super) const DENY_CACHE_TTL_SECS: u64 = 1;
+/// #16269: cluster-terminal-derived DiscardRoute entries (demoted
+/// `ClusterTerminalHAInactive`, carrying the FIB `source_ifindex`
+/// provenance stamp) NEVER expire on the deny TTL: they are revalidated
+/// per-hit by `discard_route_cluster_terminal_now_local` /
+/// `discard_route_is_cluster_terminal_peer_owned`, and the generation /
+/// RG-epoch / lease fences still bound them. The 1s deny TTL exists to
+/// stop a stale OPERATOR/policy verdict surviving a policy change; a
+/// cluster-terminal row is an ownership statement whose truth flips
+/// exactly at RG takeover, which can be arbitrarily later than any TTL
+/// (aged flows blackholed at failover+1s while the entry was re-seeded
+/// every ~1s by retransmits that themselves died on the cached drop).
+/// Refusing the TTL keeps the entry alive until the hit path can judge
+/// it against the CURRENT owner state instead of racing re-seed churn.
+pub(super) const CLUSTER_TERMINAL_DENY_EXPIRES_AT_SECS: u64 = u64::MAX;
 pub(super) const ACTIVE_WINDOW_EPOCHS: u16 = 10;
 pub(super) const FLOW_WORKER_MAP_MAX_PER_BINDING: usize = 256;
 const _: () = assert!(FLOW_CACHE_SETS.is_power_of_two());
@@ -286,6 +300,13 @@ pub(super) struct FlowCacheEntry {
     /// Zero for forwarding entries; terminal drops expire at the monotonic
     /// second passed to lookup, in addition to generation fences.
     pub(super) deny_expires_at_secs: u64,
+    /// #16269: cluster-terminal provenance captured at deny-seed time:
+    /// the FIB `source_ifindex` provenance on the seeded decision and
+    /// the flow-cache stamp owner RG at the same instant. The hit-path
+    /// rescue gates judge the cached decision; these keep the seed fact
+    /// auditable (unit + live DISC evidence compare seed vs hit).
+    pub(super) cluster_terminal_source_ifindex: i32,
+    pub(super) cluster_terminal_stamp_owner_rg: i32,
     pub(super) metadata: SessionMetadata,
     /// Validation stamp captured at insert time. Stale entries are treated as
     /// misses without requiring per-entry scans at RG transition.
@@ -330,6 +351,24 @@ pub(super) struct FlowCacheEntry {
     /// (no resolved next-hop, e.g. a fabric/local disposition); such a flow
     /// is never neighbor-stale.
     pub(super) neighbor_shard: u16,
+    /// #16217 (fabric adoption): this entry's session was proven
+    /// fabric-established (adopted) — the adoption gate
+    /// (`fabric_adoption_established_for_wire`) proved, for this exact wire
+    /// tuple, an Established session with this node as RG owner
+    /// post-takeover. Stamped at seed time from the adoption outcome
+    /// (`stage_flow_cache_seed(fabric_established = true)`) and RE-VALIDATED
+    /// on every cache hit by the hit stage against CURRENT RG ownership
+    /// (`revalidate_fabric_established`): the proof is stale the moment the
+    /// egress RG leaves this node again, so on failback the entry converts
+    /// again instead of serving the adopted ForwardCandidate locally
+    /// forever. While the proof holds, cache-hit revalidation must not evict
+    /// the entry on the `EnforceChanged` arm and the lookup fences must not
+    /// preempt it: the receiving worker's HA snapshot may still read the
+    /// egress RG inactive (the exact stale-snapshot shape the adoption
+    /// resolve bypasses), so evicting only re-runs the same demotion on the
+    /// session-hit path. Never set by an ordinary slow-path resolve —
+    /// non-adopted flows stay fail-closed.
+    pub(super) fabric_established: bool,
 }
 
 /// #5147: sentinel `neighbor_shard` for a cached flow with no resolved
@@ -480,6 +519,20 @@ impl FlowCacheEntry {
         // blackhole on a VRRP gateway MAC failover.
         neighbor_mac_epoch: u32,
     ) -> Option<Self> {
+        // #16217 (FZDiag24, arm 2): a `MissingNeighbor` decision must
+        // NEVER seed the flow cache. `is_cacheable` already excludes
+        // it, so this arm is unreachable today; the explicit guard
+        // keeps the invariant local to the seed constructor: a
+        // transient MissingNeighbor seeded during the post-failover
+        // burst (neighbor not yet resolved on the new owner) would
+        // otherwise be peeked by every silent retransmit and never
+        // evict, because a neighbor-less descriptor carries no live
+        // neighbor binding to go stale against. Fail closed: no seed,
+        // the packet takes the slow-path MissingNeighbor arm and
+        // re-resolves once the neighbor lands.
+        if decision.resolution.disposition == ForwardingDisposition::MissingNeighbor {
+            return None;
+        }
         if !Self::should_cache(meta, decision)
             || !matches!(
                 decision.resolution.disposition,
@@ -578,6 +631,24 @@ impl FlowCacheEntry {
         // fabric parent ifindex. During split-RG operation a live flow can
         // temporarily resolve to FabricRedirect, but failback must still evict
         // that cached redirect as soon as the owning RG flips locally.
+        //
+        // #16217 (FZDiag35): the explicit caller stamp is preferred
+        // over the egress-row derivation. For a session-hit seed the
+        // caller passes the resolved session's stored owner — for a
+        // reverse row that is now the FORWARD flow's LAN-member RG
+        // at seed time (see `build_reverse_session_from_forward_match`),
+        // not the reply-egress row's RG. The old fallback read
+        // `owner_rg_for_resolution(decision)` (the RETH row's RG2),
+        // which stays active on both nodes, so stamp=2 reverse
+        // entries were judged locally owned forever and the
+        // departed-owner supersession arm never fired for them.
+        // `from_forward_decision` cannot see the forward session
+        // itself (it only receives the already-resolved reverse
+        // decision + the caller's owner), so the preference is
+        // exactly this: an explicit positive caller stamp wins; the
+        // egress-row derivation remains only for callers with no
+        // session owner to offer (new-flow seeds, whose forward
+        // owner IS the egress owner).
         let owner_rg_id = if flow_owner_rg_id > 0 {
             flow_owner_rg_id
         } else {
@@ -689,6 +760,8 @@ impl FlowCacheEntry {
             decision,
             policy_deny: None,
             deny_expires_at_secs: 0,
+            cluster_terminal_source_ifindex: 0,
+            cluster_terminal_stamp_owner_rg: 0,
             metadata: SessionMetadata {
                 ingress_zone: ingress_zone.unwrap_or(0),
                 egress_zone: 0,
@@ -747,6 +820,7 @@ impl FlowCacheEntry {
             // and re-resolved to the current neighbor state.
             neighbor_mac_epoch,
             neighbor_shard,
+            fabric_established: false,
         })
     }
     #[allow(clippy::too_many_arguments)]
@@ -800,11 +874,28 @@ impl FlowCacheEntry {
         ) {
             return None;
         }
-
         let owner_rg_id = if flow_owner_rg_id > 0 {
             flow_owner_rg_id
         } else {
             owner_rg_for_resolution(forwarding, decision.resolution)
+        };
+        // #16269 (option c, seed time): a DiscardRoute carrying the FIB
+        // `source_ifindex` provenance stamp is cluster-terminal-derived
+        // (demoted ClusterTerminalHAInactive; operator discards never
+        // carry the stamp). Preserve that provenance INTO the cached
+        // entry and refuse the 1s deny TTL for it: the hit path judges
+        // the cached decision against CURRENT ownership, and a deny-TTL
+        // expiry/re-seed race at takeover must not strand the entry
+        // before that judgment can run. Generation/RG-epoch/lease
+        // fences still bound the entry. Operator discards
+        // (source_ifindex == 0) and PolicyDenied keep the caller's TTL
+        // bit-identically.
+        let cluster_terminal_provenance = disposition == ForwardingDisposition::DiscardRoute
+            && decision.resolution.source_ifindex > 0;
+        let deny_expires_at_secs = if cluster_terminal_provenance {
+            CLUSTER_TERMINAL_DENY_EXPIRES_AT_SECS
+        } else {
+            deny_expires_at_secs
         };
         Some(Self {
             key: flow.forward_key.clone(),
@@ -851,14 +942,30 @@ impl FlowCacheEntry {
             ),
             policy_deny,
             deny_expires_at_secs,
+            cluster_terminal_source_ifindex: if cluster_terminal_provenance {
+                decision.resolution.source_ifindex
+            } else {
+                0
+            },
+            cluster_terminal_stamp_owner_rg: if cluster_terminal_provenance {
+                owner_rg_id
+            } else {
+                0
+            },
             observed_bytes: u64::from(meta.pkt_len),
             last_used_epoch: 0,
             neighbor_mac_epoch: 0,
             neighbor_shard: NEIGHBOR_SHARD_NONE,
+            fabric_established: false,
         })
     }
 }
 
+/// #16220: every distinct reason a flow-cache entry is dropped. The
+/// aggregate `evictions` counter alone could not attribute the
+/// 0-hit/6.9M-eviction regression on PR #16217; each arm is counted
+/// separately and exported per binding.
+///
 /// Per-worker flow cache. 4-way set-associative with LRU eviction
 /// within each set (#918). Layout: `FLOW_CACHE_SETS = 1024` sets,
 /// each holding `FLOW_CACHE_WAYS = 4` ways. The `entries` vec
@@ -866,6 +973,96 @@ impl FlowCacheEntry {
 /// `[s * WAYS, s * WAYS + WAYS)`. Per set, `lru[s]` is a
 /// permutation of `[0, 1, 2, 3]` where index 0 is MRU and
 /// index 3 is LRU.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FlowCacheEvictionArm {
+    LookupGeneration = 0,
+    LookupRgEpoch = 1,
+    LookupLease = 2,
+    LookupDenyExpiry = 3,
+    LookupScheduler = 4,
+    SchedulerPhaseFlush = 5,
+    Collision = 6,
+    PostHitNeighborMac = 7,
+    PostHitDecisionInvalid = 8,
+    PostHitDenySuperseded = 9,
+    PostHitSessionDead = 10,
+    /// #16220 sub-arms of PostHitDecisionInvalid: which check inside
+    /// `cached_flow_decision_valid` (or its fabric-redirect guard)
+    /// rejected the cached decision. Kept separate so the live readout
+    /// names the exact sub-check without another instrumented build.
+    PostHitEnforceChanged = 11,
+    PostHitOwnerActiveRedirect = 12,
+    PostHitFabricLocalWins = 13,
+    PostHitFabricIngressLocalWins = 14,
+    PostHitFabricRedirectOnFabricIngress = 15,
+    PostHitFabricLocalWinsSameOwner = 16,
+    /// #16269: fabric-ingress cached DiscardRoute with certain
+    /// cluster-terminal origin whose would-be egress RG is now
+    /// locally active — stale at takeover, evicted for re-resolve.
+    PostHitFabricIngressDiscardNowLocal = 17,
+    /// #16270 (cache supersession): cached ForwardCandidate whose
+    /// egress RG is known but no longer forwarding-active locally —
+    /// stale after its RG left the node, evicted for re-resolve
+    /// (slow path fabric-redirects it to the new owner).
+    PostHitForwardCandidateEgressDeparted = 18,
+}
+
+pub(super) const FLOW_CACHE_EVICTION_ARM_COUNT: usize = 19;
+
+impl FlowCacheEvictionArm {
+    pub(super) const ALL: [Self; FLOW_CACHE_EVICTION_ARM_COUNT] = [
+        Self::LookupGeneration,
+        Self::LookupRgEpoch,
+        Self::LookupLease,
+        Self::LookupDenyExpiry,
+        Self::LookupScheduler,
+        Self::SchedulerPhaseFlush,
+        Self::Collision,
+        Self::PostHitNeighborMac,
+        Self::PostHitDecisionInvalid,
+        Self::PostHitDenySuperseded,
+        Self::PostHitSessionDead,
+        Self::PostHitEnforceChanged,
+        Self::PostHitOwnerActiveRedirect,
+        Self::PostHitFabricLocalWins,
+        Self::PostHitFabricIngressLocalWins,
+        Self::PostHitFabricRedirectOnFabricIngress,
+        Self::PostHitFabricLocalWinsSameOwner,
+        Self::PostHitFabricIngressDiscardNowLocal,
+        Self::PostHitForwardCandidateEgressDeparted,
+    ];
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::LookupGeneration => "lookup_generation",
+            Self::LookupRgEpoch => "lookup_rg_epoch",
+            Self::LookupLease => "lookup_lease",
+            Self::LookupDenyExpiry => "lookup_deny_expiry",
+            Self::LookupScheduler => "lookup_scheduler",
+            Self::SchedulerPhaseFlush => "scheduler_phase_flush",
+            Self::Collision => "collision",
+            Self::PostHitNeighborMac => "post_hit_neighbor_mac",
+            Self::PostHitDecisionInvalid => "post_hit_decision_invalid",
+            Self::PostHitDenySuperseded => "post_hit_deny_superseded",
+            Self::PostHitSessionDead => "post_hit_session_dead",
+            Self::PostHitEnforceChanged => "post_hit_enforce_changed",
+            Self::PostHitOwnerActiveRedirect => "post_hit_owner_active_redirect",
+            Self::PostHitFabricLocalWins => "post_hit_fabric_local_wins",
+            Self::PostHitFabricIngressLocalWins => "post_hit_fabric_ingress_local_wins",
+            Self::PostHitFabricRedirectOnFabricIngress => {
+                "post_hit_fabric_redirect_on_fabric_ingress"
+            }
+            Self::PostHitFabricLocalWinsSameOwner => "post_hit_fabric_local_wins_same_owner",
+            Self::PostHitFabricIngressDiscardNowLocal => {
+                "post_hit_fabric_ingress_discard_now_local"
+            }
+            Self::PostHitForwardCandidateEgressDeparted => {
+                "post_hit_forward_candidate_egress_departed"
+            }
+        }
+    }
+}
+
 pub(super) struct FlowCache {
     /// Physical ifindex of the binding that owns this per-binding cache.
     ///
@@ -882,6 +1079,9 @@ pub(super) struct FlowCache {
     pub(super) hits: u64,
     pub(super) misses: u64,
     pub(super) evictions: u64,
+    /// #16220: per-arm breakdown of `evictions` so a retention failure is
+    /// attributable without perf. Index by `FlowCacheEvictionArm as usize`.
+    pub(super) evictions_by_arm: [u64; FLOW_CACHE_EVICTION_ARM_COUNT],
     /// Collision evictions = inserts that displaced a different-key entry
     /// (i.e. the set was full and we kicked out the LRU way). Tracked
     /// separately from `evictions` (which also counts stale-on-lookup
@@ -913,10 +1113,22 @@ impl FlowCache {
             hits: 0,
             misses: 0,
             evictions: 0,
+            evictions_by_arm: [0; FLOW_CACHE_EVICTION_ARM_COUNT],
             collision_evictions: 0,
             current_epoch: 1,
             scheduler_expired: false,
         }
+    }
+
+    #[inline]
+    pub(super) fn note_eviction(&mut self, arm: FlowCacheEvictionArm) {
+        self.evictions += 1;
+        self.evictions_by_arm[arm as usize] += 1;
+    }
+
+    #[inline]
+    pub(super) fn evictions_for(&self, arm: FlowCacheEvictionArm) -> u64 {
+        self.evictions_by_arm[arm as usize]
     }
 
     /// #1219: advance the per-binding active-flow epoch counter.
@@ -1160,7 +1372,7 @@ impl FlowCache {
         // / pre-HA entries keep their pre-#14943 behaviour). Cells that
         // exercise the current-lease gate call `lookup_with_ha_state`.
         let empty_ha = BTreeMap::new();
-        self.lookup_with_observed_bytes(key, lookup, now_secs, rg_epochs, 0, None, false, &empty_ha)
+        self.lookup_with_observed_bytes(key, lookup, now_secs, rg_epochs, 0, None, false, &empty_ha, None)
     }
 
     #[cfg(test)]
@@ -1173,7 +1385,7 @@ impl FlowCache {
         rg_epochs: &[AtomicU32; MAX_RG_EPOCHS],
         ha_state: &BTreeMap<i32, HAGroupRuntime>,
     ) -> Option<&FlowCacheEntry> {
-        self.lookup_with_observed_bytes(key, lookup, now_secs, rg_epochs, 0, None, false, ha_state)
+        self.lookup_with_observed_bytes(key, lookup, now_secs, rg_epochs, 0, None, false, ha_state, None)
     }
 
     #[inline]
@@ -1195,6 +1407,7 @@ impl FlowCache {
             None,
             false,
             ha_state,
+            None,
         )
     }
 
@@ -1230,6 +1443,7 @@ impl FlowCache {
         policy: &crate::policy::PolicyState,
         scheduler_expired: bool,
         ha_state: &BTreeMap<i32, HAGroupRuntime>,
+        forwarding: &ForwardingState,
     ) -> Option<&FlowCacheEntry> {
         if scheduler_expired != self.scheduler_expired {
             let phase_can_change_verdict = if scheduler_expired {
@@ -1246,6 +1460,7 @@ impl FlowCache {
                 policy.has_scheduled_permit() || policy.has_scheduled_deny_or_reject()
             };
             if phase_can_change_verdict {
+                let mut evicted_in_flush = 0u64;
                 for entry in &mut self.entries {
                     let invalid = if scheduler_expired {
                         // Expiry can invalidate an old-phase forward verdict
@@ -1261,9 +1476,12 @@ impl FlowCache {
                         })
                     };
                     if invalid && entry.take().is_some() {
-                        self.evictions += 1;
+                        evicted_in_flush += 1;
                     }
                 }
+                self.evictions += evicted_in_flush;
+                self.evictions_by_arm[FlowCacheEvictionArm::SchedulerPhaseFlush as usize] +=
+                    evicted_in_flush;
             }
             self.scheduler_expired = scheduler_expired;
         }
@@ -1276,6 +1494,7 @@ impl FlowCache {
             Some(policy),
             scheduler_expired,
             ha_state,
+            Some(forwarding),
         )
     }
 
@@ -1290,6 +1509,7 @@ impl FlowCache {
         policy: Option<&crate::policy::PolicyState>,
         scheduler_expired: bool,
         ha_state: &BTreeMap<i32, HAGroupRuntime>,
+        forwarding: Option<&ForwardingState>,
     ) -> Option<&FlowCacheEntry> {
         let ingress_ifindex = if self.binding_ifindex != 0 {
             self.binding_ifindex
@@ -1322,7 +1542,7 @@ impl FlowCache {
                     || entry.stamp.fib_generation != lookup.fib_generation
                 {
                     self.entries[entry_idx] = None;
-                    self.evictions += 1;
+                    self.note_eviction(FlowCacheEvictionArm::LookupGeneration);
                     self.demote_lru(set, way as u8);
                     self.misses += 1;
                     return None;
@@ -1333,9 +1553,69 @@ impl FlowCache {
                 // of never. Mirrors the worker session-expiry gate.
                 let owner = entry.stamp.owner_rg_id;
                 let current_epoch = rg_epochs[rg_epoch_index(owner)].load(Ordering::Relaxed);
-                if current_epoch != entry.stamp.owner_rg_epoch {
+                // #16217 (fence preemption): a cached `ForwardCandidate`
+                // whose egress RG has DEPARTED this node must NOT be
+                // fenced away here. The lookup fences (rg_epoch / lease)
+                // fire at the failover for exactly these entries, but a
+                // fence carries no decision: the slow path then
+                // re-serves / re-seeds the same candidate locally and
+                // the flow blackholes on a non-owner WAN egress (fw0
+                // post-FO: lookup_rg_epoch/lease evictions,
+                // enforce_changed=0, zero redirect arms). Admit such an
+                // entry to the hit stage, whose decision revalidation
+                // (`cached_flow_decision_invalid_reason_for_flow`) owns
+                // the `ForwardCandidateEgressDeparted` arm and falls
+                // through to the slow-path re-resolve that HA-demotes
+                // and fabric-redirects to the new owner.
+                //
+                // Departure is judged with the SAME egress-RG
+                // predicate the hit stage uses —
+                // `forward_candidate_egress_departed`, i.e.
+                // `owner_rg_for_resolution` on the entry's cached
+                // resolution (tunnel-aware egress attribution), NOT
+                // the stamp-owner RG: the stamp names the seed-time
+                // flow owner, which can differ from the egress RG
+                // (the live fw0 entries carried stamp_owner_rg=0
+                // while egress RG1 had departed, so a stamp-owner
+                // fence never admitted them). When no live FIB is
+                // available (test seams passing `forwarding: None`)
+                // the predicate cannot be evaluated and the fences
+                // keep their pre-existing behaviour. A locally-active
+                // egress never qualifies, an unknown egress (rg 0)
+                // never qualifies, and a standalone node (empty map)
+                // never qualifies. A marked (adopted) entry is
+                // unaffected — its exemption below still wins. Deny
+                // entries carry no ForwardCandidate and are never
+                // admitted.
+                let fence_departed_candidate = forwarding.is_some_and(|fwd| {
+                    crate::afxdp::forwarding::forward_candidate_egress_departed(
+                        fwd,
+                        ha_state,
+                        now_secs,
+                        entry.decision.resolution,
+                    )
+                });
+                // the RG-epoch/lease lookup fences: the adoption gate already
+                // proved this node owns the egress RG, and the epoch bump +
+                // lease drop AT the failover are exactly the fences that
+                // evicted adopted entries before the hit path could serve
+                // them (fw0 post-FO stats: lookup_rg_epoch/lease evictions,
+                // enforce_changed=0). Other fences (generation, deny expiry,
+                // scheduler) still apply.
+                if entry.fabric_established {
+                    // skip epoch + lease fences for adopted entries
+                } else if fence_departed_candidate {
+                    // #16217 (Wire18): admit a departed-egress candidate to
+                    // the hit stage — its decision revalidation owns the
+                    // supersession and the FabricRedirect re-resolve. The
+                    // entry is NOT evicted here and the packet is counted
+                    // as a candidate hit below; the hit stage reclassifies
+                    // it to the PostHit supersession arm when it falls
+                    // through (and serves it only if the egress RG is in
+                    // fact locally active after all).
+                } else if current_epoch != entry.stamp.owner_rg_epoch {
                     self.entries[entry_idx] = None;
-                    self.evictions += 1;
+                    self.note_eviction(FlowCacheEvictionArm::LookupRgEpoch);
                     self.demote_lru(set, way as u8);
                     self.misses += 1;
                     return None;
@@ -1357,19 +1637,21 @@ impl FlowCache {
                 // `cached_flow_decision_valid` re-checks HA against the
                 // same live map on the production path.
                 let current_lease = FlowCacheStamp::current_lease_until(owner, ha_state);
-                if entry.stamp.owner_rg_lease_until != 0
+                if !entry.fabric_established
+                    && !fence_departed_candidate
+                    && entry.stamp.owner_rg_lease_until != 0
                     && !ha_state.is_empty()
                     && (current_lease == 0 || now_secs > current_lease)
                 {
                     self.entries[entry_idx] = None;
-                    self.evictions += 1;
+                    self.note_eviction(FlowCacheEvictionArm::LookupLease);
                     self.demote_lru(set, way as u8);
                     self.misses += 1;
                     return None;
                 }
                 if entry.deny_expires_at_secs != 0 && now_secs >= entry.deny_expires_at_secs {
                     self.entries[entry_idx] = None;
-                    self.evictions += 1;
+                    self.note_eviction(FlowCacheEvictionArm::LookupDenyExpiry);
                     self.demote_lru(set, way as u8);
                     self.misses += 1;
                     return None;
@@ -1380,7 +1662,7 @@ impl FlowCache {
                     })
                 {
                     self.entries[entry_idx] = None;
-                    self.evictions += 1;
+                    self.note_eviction(FlowCacheEvictionArm::LookupScheduler);
                     self.demote_lru(set, way as u8);
                     self.misses += 1;
                     return None;
@@ -1412,6 +1694,41 @@ impl FlowCache {
             }
         }
         self.misses += 1;
+        None
+    }
+
+    /// #16217 (Wire18, B2): side-effect-free read of the entry the hit
+    /// stage would consult, for the fabric-established revalidation the
+    /// hit stage runs BEFORE the mutating lookup. No tallies, no LRU or
+    /// lease re-stamp, no eviction: the caller only needs the cached
+    /// decision (egress RG) and the adoption mark so it can re-derive
+    /// whether the adoption proof still holds under CURRENT RG ownership
+    /// (`revalidate_fabric_established`). Identity matches the lookup's:
+    /// same key, same physical ingress (binding-substituted), same
+    /// logical (VLAN) ingress. Generation/fence validity is deliberately
+    /// NOT judged here — a fenced entry simply yields no revalidated
+    /// mark, which is fail-closed for the exemption.
+    pub(super) fn peek_entry(
+        &self,
+        key: &crate::session::SessionKey,
+        lookup: FlowCacheLookup,
+    ) -> Option<&FlowCacheEntry> {
+        let ingress_ifindex = if self.binding_ifindex != 0 {
+            self.binding_ifindex
+        } else {
+            lookup.ingress_ifindex
+        };
+        let set = Self::set_index(key, ingress_ifindex);
+        let base = set * FLOW_CACHE_WAYS;
+        for way in 0..FLOW_CACHE_WAYS {
+            if let Some(entry) = &self.entries[base + way]
+                && entry.key == *key
+                && entry.ingress_ifindex == ingress_ifindex
+                && entry.logical_ingress_ifindex == lookup.logical_ingress_ifindex
+            {
+                return Some(entry);
+            }
+        }
         None
     }
 
@@ -1467,7 +1784,7 @@ impl FlowCache {
         let lru_way = self.lru[set][FLOW_CACHE_WAYS - 1];
         let entry_idx = base + (lru_way as usize);
         self.entries[entry_idx] = Some(entry);
-        self.evictions += 1;
+        self.note_eviction(FlowCacheEvictionArm::Collision);
         self.collision_evictions += 1;
         self.promote_lru(set, lru_way);
     }
@@ -1512,9 +1829,14 @@ impl FlowCache {
     /// steady-state hit path, so the fast path is untouched.
     #[inline]
     pub(super) fn reclassify_hit_as_miss(&mut self) {
+        self.reclassify_hit_as_miss_arm(FlowCacheEvictionArm::PostHitDecisionInvalid);
+    }
+
+    #[inline]
+    pub(super) fn reclassify_hit_as_miss_arm(&mut self, arm: FlowCacheEvictionArm) {
         self.hits = self.hits.saturating_sub(1);
         self.misses += 1;
-        self.evictions += 1;
+        self.note_eviction(arm);
     }
 
     pub(super) fn invalidate_slot(

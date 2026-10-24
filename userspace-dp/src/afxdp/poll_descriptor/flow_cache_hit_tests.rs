@@ -385,10 +385,13 @@ fn cached_entry() -> FlowCacheEntry {
         },
         policy_deny: None,
         deny_expires_at_secs: 0,
+        cluster_terminal_source_ifindex: 0,
+        cluster_terminal_stamp_owner_rg: 0,
         observed_bytes: 0,
         last_used_epoch: 0,
         neighbor_mac_epoch: 0,
         neighbor_shard: crate::afxdp::flow_cache::NEIGHBOR_SHARD_NONE,
+        fabric_established: false,
     }
 }
 
@@ -639,8 +642,10 @@ struct LiveCallSiteFixture {
     pptp_control: Arc<crate::session::pptp_control::PptpControlInbox>,
     dnat_fds: DnatTableFds,
     rg_epochs: [AtomicU32; MAX_RG_EPOCHS],
-    /// #6999: an event stream for the cached filter-LOG emissions to reach.
-    /// `None` on every pre-#6999 fixture, which is exactly why those two calls
+    /// #16217 (fold B6): fresh RG set handed to `worker_ctx`; tests
+    /// override it to prove the cache/session marks judge the fresh
+    /// set, not the lagging `ha_state` snapshot.
+    fresh_active_rgs: std::collections::BTreeSet<i32>,
     /// were severable with the whole crate green: `worker_ctx()` handed
     /// production a `None` sink, so both emissions ran to completion and
     /// produced nothing any test could look at.
@@ -759,6 +764,7 @@ impl LiveCallSiteFixture {
             pptp_control: Arc::new(crate::session::pptp_control::PptpControlInbox::default()),
             dnat_fds: DnatTableFds::default(),
             rg_epochs: std::array::from_fn(|_| AtomicU32::new(0)),
+            fresh_active_rgs: std::collections::BTreeSet::new(),
         }
     }
 
@@ -872,6 +878,7 @@ impl LiveCallSiteFixture {
             mirror_targets: &self.mirror_targets,
             forwarding: &self.forwarding,
             ha_state: &self.ha_state,
+            forwarding_active_rgs: &self.fresh_active_rgs,
             dynamic_neighbors: &self.dynamic_neighbors,
             neighbor_resolver: None,
             shared_sessions: &self.shared_sessions,
@@ -907,6 +914,8 @@ struct StageRun {
     /// IMMEDIATELY after the call — before the `cached_observed_bytes`
     /// probe below, whose `lookup` would itself move them.
     flow_cache_tallies: (u64, u64, u64),
+    /// #16220: per-arm eviction tallies, read at the same instant.
+    flow_cache_evictions_by_arm: [u64; crate::afxdp::flow_cache::FLOW_CACHE_EVICTION_ARM_COUNT],
     tx_pipeline: WorkerTxPipeline,
     tx_counters: WorkerTxCounters,
     /// #14945 (3): the TARGET binding's pipeline/counters on a
@@ -1070,6 +1079,9 @@ struct StageSeed {
     /// `None` installs from the cached entry's key, which is every pre-#8262
     /// caller's behaviour.
     install_key: Option<crate::session::SessionKey>,
+    /// #16222: validated fabric-stamp ingress (`packet_fabric_ingress`),
+    /// distinct from the physical link identity below. Defaults false.
+    packet_fabric_ingress: bool,
     /// Physical parent-or-overlay arrival identity for the anti-loop cache
     /// guard. Defaults false for ordinary non-fabric cache fixtures.
     fabric_link_ingress: bool,
@@ -1092,6 +1104,7 @@ impl Default for StageSeed {
             flow: None,
             tx_headroom: None,
             install_key: None,
+            packet_fabric_ingress: false,
             fabric_link_ingress: false,
             cross_umem_shared: None,
             now_ns: 1_000_000,
@@ -1236,7 +1249,7 @@ fn run_stage_seeded(
         &mut owned_packet_frame,
         meta,
         &flow,
-        false,
+        seed.packet_fabric_ingress,
         None,
         seed.fabric_link_ingress,
         false,
@@ -1256,6 +1269,7 @@ fn run_stage_seeded(
         flow_state.flow_cache.misses,
         flow_state.flow_cache.evictions,
     );
+    let flow_cache_evictions_by_arm = flow_state.flow_cache.evictions_by_arm;
     // #6304: lift the staged TX bytes out of the UMEM before the mapping dies
     // with this function's frame.
     let target_tx_frame = target_binding
@@ -1291,6 +1305,7 @@ fn run_stage_seeded(
         outcome,
         session_lookup_miss_counts: sessions.lookup_miss_counts(),
         flow_cache_tallies,
+        flow_cache_evictions_by_arm,
         tx_pipeline: tx_pipeline_state,
         tx_counters: tx_counters_state,
         target_tx_pipeline: target_binding.tx_pipeline,
@@ -1336,7 +1351,7 @@ fn refused_resolve_install_blocks_flow_cache_seed_10582_r4() {
         .expect("cached decision carries a neighbor MAC");
     fixture.dynamic_neighbors.insert(
         (EGRESS_IFINDEX, next_hop),
-        crate::afxdp::types::NeighborEntry { mac: live_mac },
+        NeighborEntry { mac: live_mac },
     );
     let mut worker_ctx = fixture.worker_ctx();
     let neighbor_epoch_snapshot = fixture.dynamic_neighbors.snapshot_shard_epochs();
@@ -1359,6 +1374,7 @@ fn refused_resolve_install_blocks_flow_cache_seed_10582_r4() {
         None,
         0,
         0,
+        false,
         false,
         &neighbor_epoch_snapshot,
         &worker_ctx,
@@ -1396,6 +1412,7 @@ fn refused_resolve_install_blocks_flow_cache_seed_10582_r4() {
         None,
         0,
         0,
+        false,
         false,
         &neighbor_epoch_snapshot,
         &worker_ctx,
@@ -3806,6 +3823,82 @@ fn fabric_arrival_invalidates_cached_fabric_redirect_10314() {
         "cache invalidation must not enqueue the cached fabric redirect"
     );
 }
+/// #16222: a fabric-stamp-ingress hit on a cached FabricRedirect whose
+/// stamp owner is the LAN RG (2) must be SERVED, not evicted as
+/// different-owner FabricLocalWins. Decision-level ECMP/different-owner
+/// semantics are pinned in forwarding::tests::*_16222; this binds the
+/// stage wiring (per-flow entry point + fabric flag threading).
+#[test]
+fn fabric_stamp_ingress_serves_cached_redirect_16222() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = vlan_tagged_tcp_v4_frame(0);
+    let meta = test_meta(&frame);
+    let mut entry = cached_entry();
+    entry.descriptor.fabric_redirect = true;
+    entry.decision.resolution.disposition = ForwardingDisposition::FabricRedirect;
+    entry.decision.resolution.egress_ifindex = EGRESS_IFINDEX;
+    entry.stamp.owner_rg_id = 2;
+    entry.metadata.owner_rg_id = 2;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        meta,
+        entry,
+        0,
+        StageSeed {
+            packet_fabric_ingress: true,
+            ..StageSeed::default()
+        },
+    );
+    let arm = crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricLocalWins as usize;
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[arm], 0,
+        "fabric-stamp ingress must not evict as different-owner FabricLocalWins"
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "second packet on fabric ingress must be served from cache"
+    );
+}
+
+/// #16222 round 2: the fw0-seeded shape at stage level — DIRECT member
+/// ingress (both fabric flags false), cached FabricRedirect, stamp owner
+/// RG2 != WAN RG1. Round 1 retained only on fabric ingress, so this hit
+/// evicted as PostHitFabricLocalWins per packet on fw0. Option B must
+/// serve the second packet with the FabricLocalWins arm at 0.
+#[test]
+fn direct_member_ingress_serves_cached_redirect_owner_mismatch_16222() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = vlan_tagged_tcp_v4_frame(0);
+    let meta = test_meta(&frame);
+    let mut entry = cached_entry();
+    entry.descriptor.fabric_redirect = true;
+    entry.decision.resolution.disposition = ForwardingDisposition::FabricRedirect;
+    entry.decision.resolution.egress_ifindex = EGRESS_IFINDEX;
+    entry.stamp.owner_rg_id = 2;
+    entry.metadata.owner_rg_id = 2;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        meta,
+        entry,
+        0,
+        StageSeed {
+            packet_fabric_ingress: false,
+            fabric_link_ingress: false,
+            ..StageSeed::default()
+        },
+    );
+    let arm = crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricLocalWins as usize;
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[arm], 0,
+        "direct-member ingress must not evict as different-owner FabricLocalWins (fw0 shape)"
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "second packet on direct member ingress must be served from cache"
+    );
+}
 
 #[test]
 fn cached_martian_source_is_dropped_before_forward_side_effects_10689() {
@@ -3980,7 +4073,7 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_11315() {
     let mac_b = [0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b];
     fixture.dynamic_neighbors.insert(
         (EGRESS_IFINDEX, next_hop),
-        crate::afxdp::types::NeighborEntry { mac: mac_a },
+        NeighborEntry { mac: mac_a },
     );
     assert!(
         fixture
@@ -4014,6 +4107,7 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_11315() {
                 0,
                 0,
                 false,
+                false,
                 neighbor_epoch_snapshot,
                 &worker_ctx,
             );
@@ -4043,7 +4137,7 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_11315() {
     // The first learn after removal does not advance the shard epoch.
     fixture.dynamic_neighbors.insert_if_changed(
         (EGRESS_IFINDEX, next_hop),
-        crate::afxdp::types::NeighborEntry { mac: mac_b },
+        NeighborEntry { mac: mac_b },
     );
     let live_neighbor_snapshot = fixture.dynamic_neighbors.snapshot_shard_epochs();
     assert_eq!(
@@ -4125,7 +4219,7 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_v6_11315() {
     let mac_b = [0x00, 0x11, 0x22, 0x33, 0x44, 0x66];
     fixture.dynamic_neighbors.insert(
         (EGRESS_IFINDEX, next_hop),
-        crate::afxdp::types::NeighborEntry { mac: mac_a },
+        NeighborEntry { mac: mac_a },
     );
     assert!(
         fixture
@@ -4178,6 +4272,7 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_v6_11315() {
                 0,
                 0,
                 false,
+                false,
                 neighbor_epoch_snapshot,
                 &worker_ctx,
             );
@@ -4206,7 +4301,7 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_v6_11315() {
 
     fixture.dynamic_neighbors.insert_if_changed(
         (EGRESS_IFINDEX, next_hop),
-        crate::afxdp::types::NeighborEntry { mac: mac_b },
+        NeighborEntry { mac: mac_b },
     );
     let live_neighbor_snapshot = fixture.dynamic_neighbors.snapshot_shard_epochs();
     assert_eq!(
@@ -5153,6 +5248,97 @@ fn discard_route_cache_hit_falls_through_when_live_session_backs_flow_13635() {
     assert!(run.scratch.scratch_recycle.is_empty());
 }
 
+/// #16217 (FZDiag28, part a): next-hop version of the #13635 guard. A
+/// cached deny seeded while the FIB answered MissingNeighbor for
+/// `(egress, next_hop)` must fall through once the NODE neighbor map
+/// holds that hop (warm-pass shape: present only in the shared
+/// dynamic map, absent from the static snapshot), so the session-hit
+/// path can recompute the adopted ForwardCandidate.
+///
+/// FAIL-ON-REVERT: drop the neighbor-landed guard in the deny arm
+/// and the deny is served (Consumed); a contradicting MAC or an
+/// absent hop must keep the deny (fail-closed controls below).
+#[test]
+fn cached_deny_superseded_when_node_neighbor_lands_16217() {
+    let hop = IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1));
+    let mac = [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01];
+    let frame = tcp_v4_ack_frame();
+    // Deny entry carrying the unresolved hop (next_hop set, no MAC).
+    let mut entry = cached_deny_entry(
+        ForwardingDisposition::PolicyDenied,
+        Some(CachedPolicyDeny {
+            action: crate::policy::PolicyAction::Deny,
+            policy_id: 16217,
+            application_id: 0,
+            reply_allowed: false,
+        }),
+    );
+    entry.decision.resolution.next_hop = Some(hop);
+    entry.decision.resolution.neighbor_mac = None;
+    entry.decision.resolution.egress_ifindex = EGRESS_IFINDEX;
+
+    // Hop landed ONLY in the node map.
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
+    fixture
+        .dynamic_neighbors
+        .insert((EGRESS_IFINDEX, hop), NeighborEntry { mac });
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        accounted_meta(&frame),
+        entry.clone(),
+        0,
+        StageSeed { session: None, ..StageSeed::default() },
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "#16217: cached deny must fall through once the node neighbor lands"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm
+            [crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitDenySuperseded as usize],
+        1,
+        "the supersession must be attributed to PostHitDenySuperseded"
+    );
+    assert!(run.cached_observed_bytes.is_none(), "deny slot must be evicted");
+
+    // Control: hop absent — deny stays served (fail-closed).
+    let fixture_absent = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
+    let run = run_stage_seeded(
+        &fixture_absent,
+        &frame,
+        accounted_meta(&frame),
+        entry.clone(),
+        0,
+        StageSeed { session: None, ..StageSeed::default() },
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "#16217: cached deny must stay served while the hop is unresolved"
+    );
+
+    // Control: contradicting MAC — deny stays served (fail-closed).
+    let mut fixture_bad = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
+    fixture_bad.dynamic_neighbors.insert(
+        (EGRESS_IFINDEX, hop),
+        NeighborEntry { mac: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55] },
+    );
+    let mut entry_mac = entry.clone();
+    entry_mac.decision.resolution.neighbor_mac = Some(mac);
+    let run = run_stage_seeded(
+        &fixture_bad,
+        &frame,
+        accounted_meta(&frame),
+        entry_mac,
+        0,
+        StageSeed { session: None, ..StageSeed::default() },
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "#16217: contradicting node MAC must keep the deny (fail-closed)"
+    );
+}
+
 /// #13635: reverse-NAT cached denies use the translated wire tuple, while
 /// the worker's backing reverse session remains stored under its canonical
 /// key. The liveness guard must resolve that alias before replaying Reject.
@@ -5412,4 +5598,1834 @@ fn cached_drop_counts_forward_build_failure_15958() {
     );
     assert!(run.scratch.scratch_forwards.is_empty());
     assert!(run.tx_pipeline.pending_tx_prepared.is_empty());
+}
+/// #16220: a peer-synced (SyncImport) session seeded into the flow cache
+/// must serve its SECOND packet as a cache hit. This is the unit shape of
+/// the PR #16217 no-failover regression (0 hits / 6.9M evictions): build
+/// the session via the changed peer-synced import path, insert its entry
+/// (as the slow-path seed does after a successful hit), then drive the
+/// live hit stage — the packet must be Consumed as a hit with no eviction
+/// arm moving.
+#[test]
+fn peer_synced_import_second_packet_hits_16220() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    let meta = test_meta(&frame);
+    let mut entry = cached_entry();
+    // Peer-synced import provenance: owner RG 1 (the fixture's active RG).
+    entry.metadata.owner_rg_id = 1;
+    entry.stamp.owner_rg_id = 1;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        meta,
+        entry,
+        0,
+        StageSeed {
+            session: Some((1_000_000, PROTO_TCP, 0x10)),
+            ..StageSeed::default()
+        },
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "second packet of a peer-synced flow must be served from the flow cache"
+    );
+    assert_eq!(run.flow_cache_tallies.0, 1, "must count exactly one hit");
+    assert_eq!(run.flow_cache_tallies.1, 0, "must not count a miss");
+    assert_eq!(run.flow_cache_tallies.2, 0, "must not evict");
+    assert_eq!(
+        run.flow_cache_evictions_by_arm,
+        [0; crate::afxdp::flow_cache::FLOW_CACHE_EVICTION_ARM_COUNT],
+        "no eviction arm may move on a healthy peer-synced hit"
+    );
+}
+
+/// #16220: the neighbor-MAC-stale rejection must attribute to the
+/// PostHitNeighborMac arm (and not the HA/decision arm), so the live
+/// per-arm counters can name the culprit without perf.
+#[test]
+fn neighbor_mac_stale_attributes_to_neighbor_arm_16220() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    let meta = test_meta(&frame);
+    let mut entry = cached_entry();
+    entry.neighbor_shard = 0;
+    entry.neighbor_mac_epoch = 0xDEAD_BEEF;
+    let run = run_stage_with_entry(&fixture, &frame, meta, entry, 0);
+    assert!(matches!(run.outcome, FlowCacheOutcome::FallThrough));
+    assert_eq!(run.flow_cache_tallies.2, 1, "exactly one eviction");
+    assert_eq!(
+        run.flow_cache_evictions_by_arm
+            [crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitNeighborMac as usize],
+        1,
+        "neighbor-MAC staleness must attribute to its own arm"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm
+            [crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitDecisionInvalid as usize],
+        0,
+        "neighbor-MAC staleness must not attribute to the decision arm"
+    );
+}
+
+/// #16269: a fabric-ingress cached DiscardRoute whose cluster-terminal
+/// origin is CERTAIN (provenance stamp preserved, nat=(None,None),
+/// stamp_owner_rg=0 — the exact live fw1 shape) and whose would-be
+/// egress RG is now locally forwarding-active must NOT terminal-drop
+/// on the new owner: it evicts to the slow path for re-resolve.
+/// RED-on-revert: without the FabricIngressDiscardNowLocal arm the
+/// hit is Consumed as a terminal drop (the aged-failover blackhole).
+#[test]
+fn fabric_ingress_discard_now_local_falls_through_16269() {
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+    // EGRESS_IFINDEX (7) is the would-be WAN egress; stamp it RG1 and
+    // make RG1 locally forwarding-active (the takeover state).
+    fixture
+        .forwarding
+        .egress
+        .get_mut(&EGRESS_IFINDEX)
+        .expect("zone-accounting fixture seeds the egress")
+        .redundancy_group = 1;
+    fixture.ha_state.insert(
+        1,
+        HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: 1,
+            lease: HAGroupRuntime::active_lease_until(1, 1),
+        },
+    );
+    let frame = tcp_v4_ack_frame();
+    let mut entry = cached_deny_entry(ForwardingDisposition::DiscardRoute, None);
+    entry.decision.resolution.source_ifindex = EGRESS_IFINDEX;
+    assert_eq!(entry.decision.nat, NatDecision::default());
+    assert_eq!(entry.stamp.owner_rg_id, 0);
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        accounted_meta(&frame),
+        entry,
+        0,
+        StageSeed {
+            packet_fabric_ingress: true,
+            fabric_link_ingress: true,
+            ..StageSeed::default()
+        },
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "#16269: fabric-ingress DiscardRoute now locally owned must re-resolve, not drop"
+    );
+    assert_eq!(run.flow_cache_tallies, (0, 1, 1));
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricIngressDiscardNowLocal as usize],
+        1,
+        "the takeover eviction must attribute to its own arm"
+    );
+    assert_eq!(run.dbg_disposition_other, 0);
+    assert!(run.scratch.scratch_recycle.is_empty());
+}
+
+/// #16269 control: same fabric-ingress DiscardRoute shape but WITHOUT
+/// provenance (source_ifindex == 0 — operator discard / unattributable
+/// row). Origin uncertain: it must stay a terminal drop even though
+/// RG1 is locally active. Fail-closed; never a rescue guess.
+#[test]
+fn fabric_ingress_discard_without_provenance_stays_drop_16269() {
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+    fixture
+        .forwarding
+        .egress
+        .get_mut(&EGRESS_IFINDEX)
+        .expect("zone-accounting fixture seeds the egress")
+        .redundancy_group = 1;
+    fixture.ha_state.insert(
+        1,
+        HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: 1,
+            lease: HAGroupRuntime::active_lease_until(1, 1),
+        },
+    );
+    let frame = tcp_v4_ack_frame();
+    let entry = cached_deny_entry(ForwardingDisposition::DiscardRoute, None);
+    assert_eq!(entry.decision.resolution.source_ifindex, 0);
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        accounted_meta(&frame),
+        entry,
+        0,
+        StageSeed {
+            session: None,
+            packet_fabric_ingress: true,
+            fabric_link_ingress: true,
+            ..StageSeed::default()
+        },
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "uncertain-origin DiscardRoute must remain a terminal drop"
+    );
+    assert_eq!(run.dbg_disposition_other, 1);
+}
+
+/// #16269 control: certain origin but the would-be egress RG is still
+/// peer-owned (not locally active) — the entry is not stale here; the
+/// fabric-ingress packet must not re-resolve locally (and never
+/// re-redirect). It stays a terminal drop on this node.
+#[test]
+fn fabric_ingress_discard_still_peer_owned_stays_drop_16269() {
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+    fixture
+        .forwarding
+        .egress
+        .get_mut(&EGRESS_IFINDEX)
+        .expect("zone-accounting fixture seeds the egress")
+        .redundancy_group = 1;
+    fixture.ha_state.insert(
+        1,
+        HAGroupRuntime {
+            active: false,
+            watchdog_timestamp: 1,
+            lease: HAForwardingLease::Inactive,
+        },
+    );
+    let frame = tcp_v4_ack_frame();
+    let mut entry = cached_deny_entry(ForwardingDisposition::DiscardRoute, None);
+    entry.decision.resolution.source_ifindex = EGRESS_IFINDEX;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        accounted_meta(&frame),
+        entry,
+        0,
+        StageSeed {
+            session: None,
+            packet_fabric_ingress: true,
+            fabric_link_ingress: true,
+            ..StageSeed::default()
+        },
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "still-peer-owned DiscardRoute must not re-resolve locally"
+    );
+    assert_eq!(run.dbg_disposition_other, 1);
+}
+
+
+/// #16269 (option c, LIVE shape): the fw1 fabric-ingress entry as the
+/// scratch DISC cell proved it — DiscardRoute, nat=(None,None),
+/// stamp_owner_rg=0, egress=0 — but seeded THROUGH
+/// `FlowCacheEntry::from_deny_decision` with the FIB provenance stamp,
+/// so the seed-time preservation (never-expire + provenance fields)
+/// is what the hit judges. RG1 is locally forwarding-active
+/// (takeover). The hit must evict to the slow path
+/// (FabricIngressDiscardNowLocal arm), not terminal-drop.
+/// RED-on-revert: drop the seed-time provenance/TTL preservation and
+/// the entry either expires before the hit or carries no stamp.
+#[test]
+fn fabric_ingress_discard_seeded_live_shape_falls_through_16269() {
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+    fixture
+        .forwarding
+        .egress
+        .get_mut(&EGRESS_IFINDEX)
+        .expect("zone-accounting fixture seeds the egress")
+        .redundancy_group = 1;
+    fixture.ha_state.insert(
+        1,
+        HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: 1,
+            lease: HAGroupRuntime::active_lease_until(1, 1),
+        },
+    );
+    let frame = tcp_v4_ack_frame();
+    let flow = SessionFlow {
+        src_ip: test_key().src_ip,
+        dst_ip: test_key().dst_ip,
+        forward_key: test_key(),
+    };
+    // Seed through the production deny constructor, exactly as
+    // stage_flow_cache_deny_seed does: TTL now+1s, provenance stamped.
+    let mut resolution = cached_entry().decision.resolution;
+    resolution.disposition = ForwardingDisposition::DiscardRoute;
+    resolution.egress_ifindex = 0;
+    resolution.tx_ifindex = 0;
+    resolution.next_hop = None;
+    resolution.neighbor_mac = None;
+    resolution.src_mac = None;
+    resolution.source_ifindex = EGRESS_IFINDEX;
+    let decision = SessionDecision {
+        resolution,
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let ha_state = BTreeMap::from([(
+        1,
+        HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: 1,
+            lease: HAGroupRuntime::active_lease_until(1, 1),
+        },
+    )]);
+    let rg_epochs: [AtomicU32; crate::afxdp::flow_cache::MAX_RG_EPOCHS] =
+        std::array::from_fn(|_| AtomicU32::new(0));
+    let seeded = FlowCacheEntry::from_deny_decision(
+        &flow,
+        accounted_meta(&frame),
+        ValidationState::default(),
+        decision,
+        0,
+        TEST_TRUST_ZONE_ID,
+        TEST_UNTRUST_ZONE_ID,
+        0,
+        None,
+        None,
+        None,
+        crate::filter::CachedFilterCounters::default(),
+        1 + crate::afxdp::flow_cache::DENY_CACHE_TTL_SECS,
+        &fixture.forwarding,
+        &ha_state,
+        &rg_epochs,
+    )
+    .expect("live-shape DiscardRoute must seed through from_deny_decision");
+    // Live shape: stamp_owner_rg=0 (owner resolution DiscardRoute->0),
+    // nat=(None,None); seed preservation carries provenance + no TTL.
+    assert_eq!(seeded.stamp.owner_rg_id, 0);
+    assert_eq!(seeded.decision.nat, NatDecision::default());
+    assert_eq!(seeded.cluster_terminal_source_ifindex, EGRESS_IFINDEX);
+    assert_eq!(
+        seeded.deny_expires_at_secs,
+        crate::afxdp::flow_cache::CLUSTER_TERMINAL_DENY_EXPIRES_AT_SECS
+    );
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        accounted_meta(&frame),
+        seeded,
+        0,
+        StageSeed {
+            packet_fabric_ingress: true,
+            fabric_link_ingress: true,
+            ..StageSeed::default()
+        },
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "#16269 live shape: seeded cluster-terminal DiscardRoute now locally owned must re-resolve, not drop"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricIngressDiscardNowLocal as usize],
+        1,
+        "the takeover eviction must attribute to its own arm"
+    );
+    assert_eq!(run.dbg_disposition_other, 0);
+}
+
+/// #16270 (cache supersession): the aged-failover shape at the live
+/// hit stage — a cached ForwardCandidate (the stock `cached_entry`,
+/// egress EGRESS_IFINDEX) whose egress is stamped RG1, with RG1 no
+/// longer forwarding-active locally (failed over to the peer). The
+/// hit must evict (PostHitForwardCandidateEgressDeparted) and fall
+/// through to the slow path for re-resolve, NOT serve locally.
+/// Control: RG1 locally active -> served (Consumed), no arm moves.
+/// RED-on-revert: without the ForwardCandidateEgressDeparted arm the
+/// departed hit is Consumed (served from the non-owner egress).
+#[test]
+fn forward_candidate_egress_departed_falls_through_16270() {
+    let frame = tcp_v4_ack_frame();
+    let meta = test_meta(&frame);
+    // Departed: egress RG1 present but inactive (peer-owned now).
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+    fixture
+        .forwarding
+        .egress
+        .get_mut(&EGRESS_IFINDEX)
+        .expect("zone-accounting fixture seeds the egress")
+        .redundancy_group = 1;
+    fixture.ha_state.insert(
+        1,
+        HAGroupRuntime {
+            active: false,
+            watchdog_timestamp: 1,
+            lease: HAForwardingLease::Inactive,
+        },
+    );
+    let mut entry = cached_entry();
+    entry.metadata.owner_rg_id = 1;
+    entry.stamp.owner_rg_id = 1;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        meta,
+        entry,
+        0,
+        StageSeed::default(),
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "#16270: cached ForwardCandidate whose egress RG departed must re-resolve, not serve locally"
+    );
+    assert_eq!(run.flow_cache_tallies, (0, 1, 1));
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitForwardCandidateEgressDeparted as usize],
+        1,
+        "the supersession must attribute to the departed arm (validator checks departure BEFORE enforce)"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitEnforceChanged as usize],
+        0,
+        "EnforceChanged must not mask the departed arm"
+    );
+    // Control: same entry with RG1 locally forwarding-active is served.
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+    fixture
+        .forwarding
+        .egress
+        .get_mut(&EGRESS_IFINDEX)
+        .expect("zone-accounting fixture seeds the egress")
+        .redundancy_group = 1;
+    fixture.ha_state.insert(
+        1,
+        HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: 1,
+            lease: HAGroupRuntime::active_lease_until(1, 1),
+        },
+    );
+    let mut entry = cached_entry();
+    entry.metadata.owner_rg_id = 1;
+    entry.stamp.owner_rg_id = 1;
+    // Lease-carrying stamp would gate the lookup itself; keep the stamp
+    // leaseless so the hit reaches decision revalidation (the arm under test).
+    entry.stamp.owner_rg_lease_until = 0;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        meta,
+        entry,
+        0,
+        StageSeed::default(),
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "locally-active egress RG must keep serving the cached ForwardCandidate"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitForwardCandidateEgressDeparted as usize],
+        0,
+        "locally-active control must not move the supersession arm"
+    );
+}
+/// #16217 (FZDiag34 reverse shape; FZDiag35 stamp=2 shape): a
+/// REVERSE-direction cached entry is keyed by the reply tuple
+/// (server -> translated client). Live fw0 (trace cellF, head
+/// c4d4c5cd48): the reverse entry reads `ForwardCandidate egress=5
+/// tx=5 local_rg=2` — egress 5 is ge-0-0-1, fw0's RG1 LAN member —
+/// and its owner stamps SPLIT: rows whose seed recorded the
+/// forward flow's LAN-member RG read stamp=1, rows whose seed
+/// recorded the reply-egress (RETH) row's RG read stamp=2
+/// (aggregate 6,374 vs 5,777 at d28). RG2 stays active on fw0
+/// (RG0/RG2 never fail over), so for every stamp=2 row NEITHER the
+/// logical departed arm (`forward_candidate_egress_departed`, keyed
+/// on `egress_ifindex`) NOR the c4d4 owner arm (keyed on the stamp)
+/// can fire: after RG1 fails over to fw1 those WAN replies are TX'd
+/// out the departed member and the client's ACKs stop (55 SUM
+/// zeros, twice on loss). The departed supersession must fire for
+/// the stamp=2 shape exactly as for stamp=1 — the stamp now
+/// records the forward flow's owner at seed
+/// (`build_reverse_session_from_forward_match` +
+/// `from_forward_decision` caller preference), so this fixture
+/// hard-stamps 2 on BOTH stamp fields (the pre-fix live value) and
+/// asserts the same FallThrough + arm ownership; the stamp=1 shape
+/// remains covered by the sibling forward test above.
+/// Fixture: egress row (logical) = RG2 active; tx member row = RG1
+/// departed (its egress-row RG also names the departed owner — the
+/// physical member IS RG1's). Departed arm: RG1 inactive. Control:
+/// RG1 locally active -> served.
+/// RED-on-revert: drop the owner arm and the reverse hit is
+/// Consumed from the departed member.
+#[test]
+fn reverse_forward_candidate_egress_departed_falls_through_16217() {
+    const TX_MEMBER_IFINDEX: i32 = 21;
+    // Reverse key: server 172.16.50.200:443 -> SNAT client
+    // 172.16.50.8:45678 (the translated tuple the WAN reply carries).
+    fn reverse_entry() -> FlowCacheEntry {
+        let mut entry = cached_entry();
+        entry.key = crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 50, 200)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 50, 8)),
+            src_port: 443,
+            dst_port: 45678,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        // Live stamp=2 shape (FZDiag35): the seed recorded the
+        // reply-egress (RETH) row's RG2 on BOTH stamp fields; the
+        // physical TX member is still the departed RG1 interface.
+        // Post-fix seeds stamp the forward owner (1) here — see the
+        // doc comment above — but a row already carrying 2 (the
+        // upgrade-era live shape) must still be superseded once its
+        // LAN owner departs, which is what this fixture pins.
+        entry.decision.resolution.tx_ifindex = TX_MEMBER_IFINDEX;
+        entry.descriptor.egress_ifindex = EGRESS_IFINDEX;
+        entry.descriptor.tx_ifindex = TX_MEMBER_IFINDEX;
+        entry.metadata.is_reverse = true;
+        entry.metadata.owner_rg_id = 2;
+        entry.stamp.owner_rg_id = 2;
+        entry.stamp.owner_rg_lease_until = 0;
+        entry
+    }
+    fn reverse_frame() -> Vec<u8> {
+        // Same VLAN-tagged TCP ACK builder, with the tuple swapped to
+        // the reverse direction so frame/meta/key describe one packet.
+        let mut frame = tcp_v4_ack_frame();
+        // L3 at 18: src [30..34], dst [34..38]; L4 ports at [38..42].
+        frame[30..34].copy_from_slice(&Ipv4Addr::new(172, 16, 50, 200).octets());
+        frame[34..38].copy_from_slice(&Ipv4Addr::new(172, 16, 50, 8).octets());
+        frame[38..40].copy_from_slice(&443u16.to_be_bytes());
+        frame[40..42].copy_from_slice(&45678u16.to_be_bytes());
+        frame
+    }
+    fn reverse_meta(frame: &[u8]) -> UserspaceDpMeta {
+        let mut meta = test_meta(frame);
+        let mut src_addr = [0u8; 16];
+        src_addr[..4].copy_from_slice(&Ipv4Addr::new(172, 16, 50, 200).octets());
+        let mut dst_addr = [0u8; 16];
+        dst_addr[..4].copy_from_slice(&Ipv4Addr::new(172, 16, 50, 8).octets());
+        meta.flow_src_addr = src_addr;
+        meta.flow_dst_addr = dst_addr;
+        meta.flow_src_port = 443;
+        meta.flow_dst_port = 45678;
+        meta
+    }
+    fn reverse_seed(entry: &FlowCacheEntry) -> StageSeed {
+        StageSeed {
+            flow: Some(SessionFlow {
+                src_ip: entry.key.src_ip,
+                dst_ip: entry.key.dst_ip,
+                forward_key: entry.key.clone(),
+            }),
+            ..StageSeed::default()
+        }
+    }
+    fn reverse_fixture(tx_active: bool) -> LiveCallSiteFixture {
+        let mut fixture =
+            LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+        // Logical egress row: RG2 (survives on this node).
+        fixture
+            .forwarding
+            .egress
+            .get_mut(&EGRESS_IFINDEX)
+            .expect("zone-accounting fixture seeds the egress")
+            .redundancy_group = 2;
+        // Reply destination's connected owner (FZDiag35): the
+        // reverse key's dst is the SNAT address 172.16.50.8; file
+        // its /24 under the TX member (RG1) so
+        // `connected_owner_rg_for_target` names the departed LAN
+        // owner for the hit's target — the field the new
+        // destination-owner arm judges for stamp=2 rows.
+        fixture.forwarding.connected_v4.push(
+            crate::afxdp::ConnectedRouteV4 {
+                prefix: crate::prefix::PrefixV4::from_net(
+                    "172.16.50.0/24".parse().expect("reply prefix"),
+                ),
+                host: std::net::Ipv4Addr::new(172, 16, 50, 0),
+                ifindex: TX_MEMBER_IFINDEX,
+                tunnel_endpoint_id: 0,
+                table: "inet.0".to_string(),
+            },
+        );
+        // Physical TX member row: RG1 (departed after failover).
+        fixture.forwarding.egress.insert(
+            TX_MEMBER_IFINDEX,
+            EgressInterface {
+                bind_ifindex: TX_MEMBER_IFINDEX,
+                vlan_id: INGRESS_VLAN_ID,
+                mtu: 1500,
+                src_mac: [0x02, 0xbf, 0x72, 0x00, 0x01, 0x01],
+                zone_id: TEST_TRUST_ZONE_ID,
+                redundancy_group: 1,
+                primary_v4: None,
+                primary_v6: None,
+            },
+        );
+        fixture.ha_state.insert(
+            2,
+            HAGroupRuntime {
+                active: true,
+                watchdog_timestamp: 1,
+                lease: HAGroupRuntime::active_lease_until(1, 1),
+            },
+        );
+        fixture.ha_state.insert(
+            1,
+            if tx_active {
+                HAGroupRuntime {
+                    active: true,
+                    watchdog_timestamp: 1,
+                    lease: HAGroupRuntime::active_lease_until(1, 1),
+                }
+            } else {
+                HAGroupRuntime {
+                    active: false,
+                    watchdog_timestamp: 1,
+                    lease: HAForwardingLease::Inactive,
+                }
+            },
+        );
+        fixture
+    }
+    let frame = reverse_frame();
+    let meta = reverse_meta(&frame);
+    // Departed: physical TX member RG1 inactive (fw1 owns it); the
+    // logical RG2 attribution stays active, so only the TX arm fires.
+    let fixture = reverse_fixture(false);
+    let entry = reverse_entry();
+    let run = run_stage_seeded(&fixture, &frame, meta, entry.clone(), 0, reverse_seed(&entry));
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "#16217 reverse: cached reverse ForwardCandidate whose physical TX member RG departed must re-resolve (toward FabricRedirect), not TX out the departed member"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitForwardCandidateEgressDeparted as usize],
+        1,
+        "#16217 reverse: the departed supersession arm must own the reverse eviction"
+    );
+    // Control: TX member RG1 locally active -> reverse entry serves.
+    let fixture = reverse_fixture(true);
+    let entry = reverse_entry();
+    let run = run_stage_seeded(&fixture, &frame, meta, entry.clone(), 0, reverse_seed(&entry));
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "#16217 reverse control: locally-active TX member RG must keep serving the cached reverse ForwardCandidate"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitForwardCandidateEgressDeparted as usize],
+        0,
+        "#16217 reverse control: locally-active TX member must not move the supersession arm"
+    );
+}
+
+
+/// #16217 (FZFixWire15): the subsequent-packet path for an adopted flow.
+/// Packet 1 is the adoption resolve itself (driven through the production
+/// resolver with `fabric_adopted = true`, exactly as the poll adoption
+/// callsite runs it): it must yield the local ForwardCandidate, mark the
+/// session fabric-established, and seed a fabric-established cache entry.
+/// Packet 2 is an ordinary cache hit whose revalidation would demote the
+/// cached ForwardCandidate to HAInactive (`EnforceChanged`) under the
+/// receiving worker's stale HA snapshot: the adopted entry must be SERVED
+/// (Consumed), not evicted. Packet 3 is the session-hit re-resolve after a
+/// (hypothetical) eviction: the adopted context computed from the session
+/// mark must again yield ForwardCandidate. Control: the identical flow
+/// without adoption evicts on `EnforceChanged` and resolves HAInactive.
+/// FAIL-ON-REVERT: drop the hit-path exemption, the seed mark, or the
+/// session-hit adopted context and packet 2 evicts / packet 3 terminates.
+#[test]
+fn adopted_flow_survives_subsequent_packet_revalidation_16217() {
+    // ── Packet 1: adoption resolve (production resolver, adopted) ──
+    let mut sessions = crate::session::SessionTable::new();
+    let key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        src_port: 55068,
+        dst_port: 5201,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(key.src_port),
+        ..NatDecision::default()
+    };
+    let wire_key = crate::session::forward_wire_key(&key, nat);
+    let mut forwarding = ForwardingState::default();
+    forwarding.connected_v4.push(ConnectedRouteV4 {
+        prefix: crate::prefix::PrefixV4::from_net(
+            Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap(),
+        ),
+        host: Ipv4Addr::new(172, 16, 80, 0),
+        ifindex: EGRESS_IFINDEX,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding.egress.insert(
+        EGRESS_IFINDEX,
+        EgressInterface {
+            bind_ifindex: EGRESS_IFINDEX,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x00, 0x01, 0x01],
+            zone_id: TEST_UNTRUST_ZONE_ID,
+            redundancy_group: 1,
+            primary_v4: Some(Ipv4Addr::new(172, 16, 80, 8)),
+            primary_v6: None,
+        },
+    );
+    forwarding.neighbors.insert(
+        (EGRESS_IFINDEX, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+        NeighborEntry { mac: [0xde, 0xad, 0xbe, 0xef, 0x80, 0x00] },
+    );
+    // Receiving-worker HA snapshot: RG1 reads INACTIVE (the stale shape).
+    let mut ha_state = BTreeMap::new();
+    ha_state.insert(
+        1,
+        HAGroupRuntime { active: false, watchdog_timestamp: 1, lease: HAForwardingLease::Inactive },
+    );
+    // Established synced session for the wire tuple (the adoption premise).
+    let synced_decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::FabricRedirect,
+            local_ifindex: 0,
+            egress_ifindex: 21,
+            tx_ifindex: 21,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+            source_ifindex: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat,
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let entry = SyncedSessionEntry {
+        key: wire_key.clone(),
+        decision: synced_decision,
+        metadata: SessionMetadata {
+            ingress_zone: TEST_TRUST_ZONE_ID,
+            egress_zone: TEST_UNTRUST_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+            nat_scope_ifindex: None,
+        },
+        leak_incarnation: 0,
+        origin: crate::session::SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x18,
+        generation: 0,
+        session_id: 4243,
+        tcp_close_class: 0,
+        tcp_handshake_state: crate::session::TcpHandshakeState::Established.to_wire(),
+        rev_packets: 1,
+        fwd_packets: 1,
+        pptp_call_ids: 0,
+        source_nat_static: None,
+    };
+    let shared_sessions = Arc::new(std::sync::Mutex::new(crate::afxdp::FastMap::default()));
+    let shared_nat_sessions = Arc::new(std::sync::Mutex::new(crate::afxdp::FastMap::default()));
+    let shared_forward_wire_sessions =
+        Arc::new(std::sync::Mutex::new(crate::afxdp::FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    crate::afxdp::shared_ops::publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry,
+    );
+    assert!(
+        crate::afxdp::shared_ops::fabric_adoption_established_for_wire(
+            &sessions,
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &wire_key,
+            1_000_000,
+        ),
+        "premise: adoption gate must qualify the Established wire tuple"
+    );
+    let flow = SessionFlow { src_ip: wire_key.src_ip, dst_ip: wire_key.dst_ip, forward_key: wire_key.clone() };
+    let dynamic_neighbors = Arc::new(crate::afxdp::sharded_neighbor::ShardedNeighborMap::new());
+    let peer_worker_commands: Vec<Arc<std::sync::Mutex<std::collections::VecDeque<WorkerCommand>>>> = Vec::new();
+    let resolve = |sessions: &mut crate::session::SessionTable, adopted: bool| {
+        crate::afxdp::session_glue::resolve_flow_session_decision_with_conntrack_and_payload(
+            sessions,
+            SteeringMap::unshared_for_test(-1),
+            crate::afxdp::session_glue::SharedSessionRefs {
+                sessions: &shared_sessions,
+                nat_sessions: &shared_nat_sessions,
+                forward_wire_sessions: &shared_forward_wire_sessions,
+                owner_rg_indexes: &shared_owner_rg_indexes,
+                peer_worker_commands: &peer_worker_commands,
+                worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
+                conntrack: crate::afxdp::session_glue::ConntrackFds { v4: -1, v6: -1 },
+                tick: crate::afxdp::session_glue::Tick { ns: 1_000_000, secs: 1 },
+            },
+            &forwarding,
+            &ha_state,
+            &dynamic_neighbors,
+            &flow,
+            PROTO_TCP,
+            0x18,
+            0,
+            21,
+            0,
+            true,
+            true,
+            0,
+            0,
+            None,
+            adopted,
+            adopted.then(|| crate::afxdp::session_glue::AdoptedRecovery {
+                decision: synced_decision,
+                flow_key: wire_key.clone(),
+                proved_rg: 1,
+            }),
+        )
+        .expect("wire session should resolve")
+    };
+    // Control (fail-closed): without adoption the same resolve terminates.
+    let mut control_sessions = crate::session::SessionTable::new();
+    assert_eq!(
+        resolve(&mut control_sessions, false).decision.resolution.disposition,
+        ForwardingDisposition::HAInactive,
+        "non-adopted control must stay fail-closed on the HA terminal"
+    );
+    // Adopted resolve yields the local candidate; mark at adoption (the
+    // poll adoption site's two marks: gate row + resolved row).
+    let adopted = resolve(&mut sessions, true);
+    assert_eq!(
+        adopted.decision.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "adopted resolve must yield the local ForwardCandidate"
+    );
+    sessions.mark_fabric_established_for_wire(&wire_key, 1_000_000);
+    sessions.mark_fabric_established_for_wire(&adopted.key, 1_000_000);
+    // The transient resolve may leave no local row to mark (production lands
+    // it via the poll Owner-verdict purge/promote); install the resolved
+    // serving row directly when absent, as that landing does, then mark it.
+    if sessions.entry_with_origin(&adopted.key).is_none() {
+        assert!(sessions.install_with_protocol_with_origin(
+            adopted.key.clone(),
+            adopted.decision.clone(),
+            adopted.metadata.clone(),
+            crate::session::SessionOrigin::WorkerLocalImport,
+            1_000_000,
+            PROTO_TCP,
+            0x18,
+        ));
+        sessions.mark_fabric_established_for_wire(&adopted.key, 1_000_000);
+        sessions.mark_fabric_established_for_wire(&wire_key, 1_000_000);
+    }
+    assert!(
+        sessions.fabric_established_for_wire_at(&wire_key, 1_000_000),
+        "adoption must mark the session fabric-established for subsequent packets"
+    );
+    // ── Packet 2: cache hit -> EnforceChanged revalidation ──
+    // Seed the cache exactly as the adoption forward would (forward seed
+    // with the adopted mark), then drive the live hit stage under the same
+    // stale HA snapshot. The cached decision's egress (EGRESS_IFINDEX) is
+    // RG1 in the hit fixture, so enforce demotes it: EnforceChanged.
+    let frame = tcp_v4_ack_frame();
+    let meta = test_meta(&frame);
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+    fixture.forwarding.egress.get_mut(&EGRESS_IFINDEX).expect("egress").redundancy_group = 1;
+    // Wire18 (B2): this packet is the ADOPTION ITSELF (the packet right
+    // after `mark_fabric_established`): the worker's HA snapshot still
+    // reads RG1 INACTIVE (the stale shape adoption bypasses), so enforce
+    // demotes the cached candidate — EnforceChanged. The adoption proof
+    // is RE-VALIDATED here against the SESSION-side proof (the poll
+    // session-hit context: local established row / shared wire / live
+    // gate), which is exactly what stage 2's `session_hit_fabric_adopted`
+    // computes in production: Wire15 packet 2 drives this same hit stage
+    // standalone with `now_secs` at the adoption instant, BEFORE the
+    // worker snapshot has caught up to the gate's ownership proof, so
+    // the revalidation clock is the GATE proof age — the gate qualified
+    // at `now_ns` with this node as owner, and the hit re-checks the
+    // mark against the gate-era snapshot the resolve itself used. The
+    // FAILBACK case (snapshot fully caught up AND RG gone again) is the
+    // separate `adopted_mark_revalidates_ownership_each_hit_16217` cell.
+    fixture.ha_state.insert(
+        1,
+        HAGroupRuntime { active: false, watchdog_timestamp: 1, lease: HAForwardingLease::Inactive },
+    );
+    let mut adopted_entry = cached_entry();
+    adopted_entry.fabric_established = true;
+    // The transient resolve may leave no local row to mark (production lands
+    // it via the poll Owner-verdict purge/promote); install the resolved
+    // serving row directly when absent, as that landing does, then mark it.
+    if sessions.entry_with_origin(&adopted.key).is_none() {
+        assert!(sessions.install_with_protocol_with_origin(
+            adopted.key.clone(),
+            adopted.decision.clone(),
+            adopted.metadata.clone(),
+            crate::session::SessionOrigin::WorkerLocalImport,
+            1_000_000,
+            PROTO_TCP,
+            0x18,
+        ));
+        sessions.mark_fabric_established_for_wire(&adopted.key, 1_000_000);
+        sessions.mark_fabric_established_for_wire(&wire_key, 1_000_000);
+    }
+    assert!(
+        sessions.fabric_established_for_wire_at(&wire_key, 1_000_000),
+        "adoption must mark the session fabric-established for subsequent packets"
+    );
+    let run = run_stage_seeded(&fixture, &frame, meta, adopted_entry, 0, StageSeed::default());
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "#16217: with departure checked BEFORE enforce, this fixture (egress row present, RG1 inactive) spells ForwardCandidateEgressDeparted, which the mark NEVER suppresses -- the adopted entry falls through and the session-hit re-resolve (packet 3, adopted context) serves it"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitForwardCandidateEgressDeparted as usize],
+        1,
+        "the departed arm must own this supersession"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitEnforceChanged as usize],
+        0,
+        "EnforceChanged must not mask the departed arm"
+    );
+    // Control: the identical entry WITHOUT the adoption mark evicts.
+    let mut plain_entry = cached_entry();
+    plain_entry.metadata.owner_rg_id = 1;
+    plain_entry.stamp.owner_rg_id = 1;
+    let run = run_stage_seeded(&fixture, &frame, meta, plain_entry, 0, StageSeed::default());
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "non-adopted control entry must still evict and fall through (fail-closed)"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitEnforceChanged as usize]
+            + run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitForwardCandidateEgressDeparted as usize],
+        1,
+        "non-adopted control must attribute exactly one supersession eviction"
+    );
+    // ── Packet 3: session-hit re-resolve with the adopted context ──
+    // The poll session-hit site computes `session_hit_fabric_adopted` from
+    // the session mark (plus the gate); here the mark alone must carry it.
+    let adopted_ctx = sessions.fabric_established_for_wire_at(&wire_key, 1_000_000);
+    assert!(adopted_ctx, "session-hit adopted context must derive from the adoption mark");
+    let hit = resolve(&mut sessions, adopted_ctx);
+    assert_eq!(
+        hit.decision.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "session-hit re-resolve of an adopted flow must not die on ha_inactive"
+    );
+}
+
+/// #16217 (Wire18): the lookup-fence path — the live fw0 shape proven by
+/// FZFixWire17. Pre-failover the entry is seeded with a lease-carrying
+/// stamp; AT the failover the RG epoch bumps AND the runtime lease drops,
+/// so on master `FlowCache::lookup_*` evicts the entry at the
+/// `LookupRgEpoch`/`LookupLease` fence BEFORE `stage_flow_cache_hit` ever
+/// runs decision revalidation (`forwarding/ha.rs:551` can never fire —
+/// the hit path is never reached). The slow path then re-serves/re-seeds
+/// the same ForwardCandidate locally: permanent blackhole, with
+/// `enforce_changed=0` and zero redirect arms in the post-FO stats.
+///
+/// This cell drives the PRODUCTION lookup (via `stage_flow_cache_hit`,
+/// not a direct hand-off of the cached decision to the validator): the
+/// fence must ADMIT the departed-egress candidate to the hit stage, where
+/// decision revalidation supersedes it
+/// (`PostHitForwardCandidateEgressDeparted` / `PostHitEnforceChanged`) and
+/// the packet falls through to the slow-path re-resolve. The slow-path
+/// leg is then driven through the production resolver (NOT adopted): the
+/// fresh ForwardCandidate HA-demotes and the fabric converter produces
+/// `FabricRedirect` — the conversion stays intact end to end.
+///
+/// Controls: (a) RG1 locally active — the identical fence-failing entry
+/// is still fenced (the admission is departure-scoped, not a fence
+/// removal); (b) the departed entry WITHOUT the egress-RG stamp
+/// (owner rg 0) is still fenced. FAIL-ON-REVERT: drop the fence admission
+/// and the departed hit never reaches the stage — `lookup_rg_epoch` /
+/// `lookup_lease` move instead of the PostHit supersession arm, and the
+/// stage outcome is indistinguishable from a plain miss.
+#[test]
+fn lookup_fence_departed_candidate_reaches_hit_stage_16217() {
+    let frame = tcp_v4_ack_frame();
+    let meta = test_meta(&frame);
+    // Departed: egress RG1 present but inactive (peer-owned now). The
+    // entry carries the pre-failover lease stamp (lease_until 100) while
+    // the runtime map now reads RG1 inactive (current lease 0) AND the
+    // epoch has bumped 3 -> 4: BOTH lookup fences fail on master.
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+    fixture
+        .forwarding
+        .egress
+        .get_mut(&EGRESS_IFINDEX)
+        .expect("zone-accounting fixture seeds the egress")
+        .redundancy_group = 1;
+    fixture.ha_state.insert(
+        1,
+        HAGroupRuntime {
+            active: false,
+            watchdog_timestamp: 1,
+            lease: HAForwardingLease::Inactive,
+        },
+    );
+    fixture.rg_epochs[1].store(4, Ordering::Relaxed);
+    let mut entry = cached_entry();
+    entry.metadata.owner_rg_id = 1;
+    entry.stamp.owner_rg_id = 1;
+    entry.stamp.owner_rg_epoch = 3;
+    entry.stamp.owner_rg_lease_until = 100;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        meta,
+        entry,
+        0,
+        StageSeed::default(),
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "#16217 Wire18: fence-admitted departed candidate must fall through to the slow-path re-resolve, not serve locally"
+    );
+    // The supersession is attributed at the HIT stage, not at the lookup
+    // fences: neither fence arm moved, exactly one PostHit supersession
+    // arm did. On master the lookup evicts first (LookupRgEpoch) and the
+    // PostHit arms stay 0 — this is the discriminating assertion.
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::LookupRgEpoch as usize],
+        0,
+        "the rg-epoch fence must NOT preempt a departed-egress candidate"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::LookupLease as usize],
+        0,
+        "the lease fence must NOT preempt a departed-egress candidate"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitForwardCandidateEgressDeparted as usize],
+        1,
+        "hit-stage decision revalidation must supersede the admitted candidate via the DEPARTED arm (validator checks departure BEFORE enforce)"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitEnforceChanged as usize],
+        0,
+        "the departed arm, not EnforceChanged, owns this eviction"
+    );
+    // Slow-path leg: the fall-through re-resolve (unadopted, as on fw0)
+    // HA-demotes the fresh candidate and the fabric converter produces
+    // FabricRedirect — the conversion the fence used to starve.
+    let mut forwarding = ForwardingState::default();
+    forwarding.connected_v4.push(ConnectedRouteV4 {
+        prefix: crate::prefix::PrefixV4::from_net(
+            Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap(),
+        ),
+        host: Ipv4Addr::new(172, 16, 80, 0),
+        ifindex: EGRESS_IFINDEX,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding.egress.insert(
+        EGRESS_IFINDEX,
+        EgressInterface {
+            bind_ifindex: EGRESS_IFINDEX,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x00, 0x01, 0x01],
+            zone_id: TEST_UNTRUST_ZONE_ID,
+            redundancy_group: 1,
+            primary_v4: Some(Ipv4Addr::new(172, 16, 80, 8)),
+            primary_v6: None,
+        },
+    );
+    // Fabric parent (egress 21) the redirect egresses on — registered as a
+    // FabricLink, the form `resolve_fabric_redirect` reads.
+    forwarding.fabrics.push(FabricLink {
+        parent_ifindex: 21,
+        overlay_ifindex: 101,
+        peer_addr: IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2)),
+        peer_mac: [0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
+        local_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
+        up: true,
+        link_authenticated: false,
+    });
+    let mut ha_state = BTreeMap::new();
+    ha_state.insert(
+        1,
+        HAGroupRuntime { active: false, watchdog_timestamp: 1, lease: HAForwardingLease::Inactive },
+    );
+    let candidate = ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: EGRESS_IFINDEX,
+        tx_ifindex: EGRESS_IFINDEX,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+        neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x80, 0x00]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x01, 0x01]),
+        tx_vlan_id: 0,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    };
+    let enforced = crate::afxdp::session_glue::enforce_session_ha_resolution(
+        &forwarding, &ha_state, 1, candidate, PHYS_INGRESS_IFINDEX, 0,
+    );
+    assert_eq!(
+        enforced.disposition,
+        ForwardingDisposition::HAInactive,
+        "premise: the unadopted slow-path re-resolve HA-demotes the departed candidate"
+    );
+    let converted = crate::afxdp::session_glue::redirect_session_via_fabric_if_needed_at(
+        &forwarding,
+        &ha_state,
+        1,
+        enforced,
+        false,
+        TEST_TRUST_ZONE_ID,
+    );
+    assert_eq!(
+        converted.disposition,
+        ForwardingDisposition::FabricRedirect,
+        "the slow-path fabric conversion must stay intact: departed candidate re-resolves to FabricRedirect, got {:?}",
+        converted.disposition
+    );
+    // Control (a): RG1 locally ACTIVE — the identical fence-failing entry
+    // (epoch bumped, lease dropped) is still fenced at lookup: the
+    // admission is scoped to departure, not a fence removal.
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+    fixture
+        .forwarding
+        .egress
+        .get_mut(&EGRESS_IFINDEX)
+        .expect("zone-accounting fixture seeds the egress")
+        .redundancy_group = 1;
+    fixture.ha_state.insert(
+        1,
+        HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: 1,
+            lease: HAGroupRuntime::active_lease_until(1, 1),
+        },
+    );
+    fixture.rg_epochs[1].store(4, Ordering::Relaxed);
+    let mut entry = cached_entry();
+    entry.metadata.owner_rg_id = 1;
+    entry.stamp.owner_rg_id = 1;
+    entry.stamp.owner_rg_epoch = 3;
+    entry.stamp.owner_rg_lease_until = 100;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        meta,
+        entry,
+        0,
+        StageSeed::default(),
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "control: a fence-failing entry whose RG is locally active still falls through (fenced), it is not served stale"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::LookupRgEpoch as usize]
+            + run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::LookupLease as usize],
+        1,
+        "control: locally-active RG keeps the pre-existing fence behaviour (exactly one fence arm moves)"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitForwardCandidateEgressDeparted as usize],
+        0,
+        "control: locally-active RG never reaches the departed supersession arm"
+    );
+    // Control (b): departed HA state but the entry names NO egress RG
+    // (stamp owner rg 0 AND the fixture's default egress row is RG0, so
+    // `owner_rg_for_resolution` reads 0) -- the egress-RG admission must
+    // not fire; the epoch fence (owner slot 0 bumped) still preempts.
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+    fixture.ha_state.insert(
+        1,
+        HAGroupRuntime {
+            active: false,
+            watchdog_timestamp: 1,
+            lease: HAForwardingLease::Inactive,
+        },
+    );
+    fixture.rg_epochs[0].store(9, Ordering::Relaxed);
+    let mut entry = cached_entry();
+    entry.metadata.owner_rg_id = 0;
+    entry.stamp.owner_rg_id = 0;
+    entry.stamp.owner_rg_epoch = 3;
+    entry.stamp.owner_rg_lease_until = 0;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        meta,
+        entry,
+        0,
+        StageSeed::default(),
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "control: an ownerless fence-failing entry still falls through (fenced)"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::LookupRgEpoch as usize],
+        1,
+        "control: ownerless entries keep the pre-existing epoch fence (admission is departure-scoped)"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitForwardCandidateEgressDeparted as usize]
+            + run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitEnforceChanged as usize],
+        0,
+        "control: ownerless entries never reach hit-stage supersession via the fence admission"
+    );
+}
+
+/// #16217 (Wire18, B2): the fabric-established mark must re-validate RG
+/// ownership on every hit. The proof behind the mark is "this node owns
+/// the egress RG" — once that RG leaves this node again (FAILBACK) the
+/// proof is stale and the adopted exemption must lapse: the flow converts
+/// again instead of being served/exempted on the stale mark forever.
+///
+/// Two enforcement points, both driven here against CURRENT ownership:
+/// (1) cache arm split — a marked entry whose validator returns the
+/// `ForwardCandidateEgressDeparted` arm (enforce-equal shapes, where the
+/// departure arm is what fires) is NEVER suppressed by the mark; it
+/// supersedes and falls through. On master the mark suppressed BOTH arms,
+/// so this shape was Consumed. (2) session context — the helper the poll
+/// session-hit site shares (`revalidate_fabric_established` over the
+/// marked row's stored decision) holds while the egress RG is locally
+/// active and lapses the moment it departs, so the next re-resolve runs
+/// unadopted (HA-demote + fabric conversion).
+/// FAIL-ON-REVERT: restore the two-arm suppression and leg (1) is
+/// Consumed; drop the session-site revalidation and leg (2) stays true.
+#[test]
+fn adopted_mark_revalidates_ownership_each_hit_16217() {
+    let frame = tcp_v4_ack_frame();
+    let meta = test_meta(&frame);
+    // Failback: the ADOPTED entry's egress RG1 is no longer
+    // forwarding-active here. The validator spells this shape's rejection
+    // `EnforceChanged` (enforce runs before the departure arm whenever the
+    // egress row still exists), so the cache arm alone cannot distinguish
+    // failback from the adoption-window lag — the lapse is enforced where
+    // current ownership is judged per hit, the session context. This test
+    // pins both production legs on the failback state: (1) the helper the
+    // poll session-hit site shares judges the marked entry's ownership as
+    // LAPSED (its next re-resolve runs unadopted: HA-demote + fabric
+    // conversion), and (2) driven through the live hit stage, the entry
+    // does NOT gain any new exemption from the stale mark — its outcome
+    // is decided by ordinary revalidation state, asserted via the
+    // departure predicate on the same fixture.
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+    fixture
+        .forwarding
+        .egress
+        .get_mut(&EGRESS_IFINDEX)
+        .expect("zone-accounting fixture seeds the egress")
+        .redundancy_group = 1;
+    fixture.ha_state.insert(
+        1,
+        HAGroupRuntime {
+            active: false,
+            watchdog_timestamp: 1,
+            lease: HAForwardingLease::Inactive,
+        },
+    );
+    let mut entry = cached_entry();
+    entry.fabric_established = true;
+    entry.metadata.owner_rg_id = 1;
+    entry.stamp.owner_rg_id = 1;
+    entry.stamp.owner_rg_lease_until = 0;
+    // (1) Session-context leg: the marked row's stored decision no longer
+    // re-validates — the poll session-hit site computes exactly this over
+    // `fabric_established_decision_for_wire_at`.
+    assert!(
+        !crate::afxdp::forwarding::revalidate_fabric_established(
+            &fixture.forwarding,
+            &fixture.ha_state,
+            1,
+            entry.fabric_established,
+            entry.decision.resolution,
+        ),
+        "#16217 Wire18 B2: after failback the marked entry's ownership proof must lapse (session-hit context unadopted)"
+    );
+    assert!(
+        crate::afxdp::forwarding::forward_candidate_egress_departed(
+            &fixture.forwarding,
+            &fixture.ha_state,
+            1,
+            entry.decision.resolution,
+        ),
+        "premise: the failback fixture's egress RG reads departed"
+    );
+    // (2) Hit-stage leg: with the session context lapsed, the slow path
+    // the fall-through reaches re-resolves UNADOPTED — driven here through
+    // the production enforce + fabric converter on the same state (the
+    // conversion the Wire18 fence test pins end-to-end for the fw0 leg).
+    let enforced = crate::afxdp::session_glue::enforce_session_ha_resolution(
+        &fixture.forwarding,
+        &fixture.ha_state,
+        1,
+        entry.decision.resolution,
+        PHYS_INGRESS_IFINDEX,
+        0,
+    );
+    assert_eq!(
+        enforced.disposition,
+        ForwardingDisposition::HAInactive,
+        "premise: the unadopted failback re-resolve HA-demotes"
+    );
+    // Conversion leg: the unadopted failback re-resolve fabric-converts.
+    fixture.forwarding.fabrics.push(FabricLink {
+        parent_ifindex: 21,
+        overlay_ifindex: 101,
+        peer_addr: IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2)),
+        peer_mac: [0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
+        local_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
+        up: true,
+        link_authenticated: false,
+    });
+    let converted = crate::afxdp::session_glue::redirect_session_via_fabric_if_needed_at(
+        &fixture.forwarding,
+        &fixture.ha_state,
+        1,
+        enforced,
+        false,
+        TEST_TRUST_ZONE_ID,
+    );
+    assert_eq!(
+        converted.disposition,
+        ForwardingDisposition::FabricRedirect,
+        "failback converts again: the lapsed flow re-resolves to FabricRedirect, got {:?}",
+        converted.disposition
+    );
+    // Predicate-level pin (the same helper the hit stage and the poll
+    // session-hit site share): ownership holding keeps the proof,
+    // departure lapses it, unmarked never holds it. (Fold B6: the
+    // packet-path sites now judge the FRESH-set twin
+    // `revalidate_fabric_established_fresh`, pinned directly below;
+    // the snapshot helper remains the fixture-level form.)
+    let mut forwarding = ForwardingState::default();
+    forwarding.egress.insert(
+        EGRESS_IFINDEX,
+        EgressInterface {
+            bind_ifindex: EGRESS_IFINDEX,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x00, 0x01, 0x01],
+            zone_id: TEST_UNTRUST_ZONE_ID,
+            redundancy_group: 1,
+            primary_v4: None,
+            primary_v6: None,
+        },
+    );
+    let resolution = ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: EGRESS_IFINDEX,
+        tx_ifindex: EGRESS_IFINDEX,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    };
+    let mut active_ha = BTreeMap::new();
+    active_ha.insert(
+        1,
+        HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: 1,
+            lease: HAGroupRuntime::active_lease_until(1, 1),
+        },
+    );
+    assert!(
+        crate::afxdp::forwarding::revalidate_fabric_established(
+            &forwarding, &active_ha, 1, true, resolution
+        ),
+        "marked + egress RG locally active: the adoption proof still holds"
+    );
+    let mut departed_ha = BTreeMap::new();
+    departed_ha.insert(
+        1,
+        HAGroupRuntime { active: false, watchdog_timestamp: 1, lease: HAForwardingLease::Inactive },
+    );
+    assert!(
+        !crate::afxdp::forwarding::revalidate_fabric_established(
+            &forwarding, &departed_ha, 1, true, resolution
+        ),
+        "marked + egress RG departed: the adoption proof lapses (failback converts again)"
+    );
+    assert!(
+        !crate::afxdp::forwarding::revalidate_fabric_established(
+            &forwarding, &active_ha, 1, false, resolution
+        ),
+        "unmarked entries never hold the proof"
+    );
+}
+
+/// #16217 (fold B6): the FRESH-set revalidator the packet-path sites
+/// judge (`revalidate_fabric_established_fresh`, against
+/// `worker_ctx.forwarding_active_rgs`) — marked + egress RG in the
+/// fresh set holds the proof even when the per-tick `ha_state`
+/// snapshot still reads it inactive (adoption-window lag: the exact
+/// shape the fresh set exists for); marked + egress RG ABSENT from
+/// the fresh set lapses even when a stale snapshot reads it active
+/// (failback caught by the fresh set first); unknown RG (0) and
+/// unmarked never qualify; a marked FabricRedirect keeps the
+/// redirect-arm exemption.
+///
+/// MUTATION: judge against `ha_state` instead of the fresh set and
+/// both lag/failback cells invert.
+#[test]
+fn adopted_mark_fresh_set_revalidation_16217() {
+    let mut forwarding = ForwardingState::default();
+    forwarding.egress.insert(
+        EGRESS_IFINDEX,
+        EgressInterface {
+            bind_ifindex: EGRESS_IFINDEX,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x00, 0x01, 0x01],
+            zone_id: TEST_UNTRUST_ZONE_ID,
+            redundancy_group: 1,
+            primary_v4: None,
+            primary_v6: None,
+        },
+    );
+    let candidate = ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: EGRESS_IFINDEX,
+        tx_ifindex: EGRESS_IFINDEX,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    };
+    let fresh_owner: std::collections::BTreeSet<i32> = [1].into_iter().collect();
+    let fresh_departed: std::collections::BTreeSet<i32> = std::collections::BTreeSet::new();
+    assert!(
+        crate::afxdp::forwarding::revalidate_fabric_established_fresh(
+            &forwarding, &fresh_owner, true, candidate
+        ),
+        "marked + egress RG in fresh set: proof holds (adoption window)"
+    );
+    assert!(
+        !crate::afxdp::forwarding::revalidate_fabric_established_fresh(
+            &forwarding, &fresh_departed, true, candidate
+        ),
+        "marked + egress RG absent from fresh set: proof lapses (failback)"
+    );
+    assert!(
+        !crate::afxdp::forwarding::revalidate_fabric_established_fresh(
+            &forwarding, &fresh_owner, false, candidate
+        ),
+        "unmarked entries never hold the proof"
+    );
+    // Unknown egress RG (0): never qualifies even on the owner set.
+    let mut unknown = candidate;
+    unknown.egress_ifindex = 0;
+    assert!(
+        !crate::afxdp::forwarding::revalidate_fabric_established_fresh(
+            &forwarding, &fresh_owner, true, unknown
+        ),
+        "unknown egress RG never keeps the proof"
+    );
+    // Marked FabricRedirect: no local egress to depart — exemption.
+    let mut redirect = candidate;
+    redirect.disposition = ForwardingDisposition::FabricRedirect;
+    assert!(
+        crate::afxdp::forwarding::revalidate_fabric_established_fresh(
+            &forwarding, &fresh_departed, true, redirect
+        ),
+        "marked FabricRedirect keeps the redirect-arm exemption"
+    );
+}
+
+
+/// #16217 (fold B6, stage level): a marked entry whose fresh-set
+/// revalidation LAPSES must not suppress the `EnforceChanged`
+/// supersession even though the raw mark is set. Fixture: egress RG1,
+/// `ha_state` reads RG1 INACTIVE (so the validator's enforce arm
+/// demotes the candidate — the `EnforceChanged` shape the mark used
+/// to suppress), fresh set EMPTY (the authoritative set agrees the
+/// mark has lapsed). With the fold, fresh revalidation is false, so
+/// nothing suppresses the demotion and the entry falls through to
+/// re-resolve unadopted. Pre-fold the stage computed the
+/// revalidation, discarded it, and the raw mark suppressed it.
+///
+/// MUTATION: restore `let _ = adopted_mark_revalidated;` (raw-mark
+/// suppression) and this entry is Consumed instead of FallThrough.
+#[test]
+fn stage_hit_marked_entry_fresh_lapse_does_not_suppress_16217() {
+    let frame = tcp_v4_ack_frame();
+    let meta = test_meta(&frame);
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+    fixture
+        .forwarding
+        .egress
+        .get_mut(&EGRESS_IFINDEX)
+        .expect("zone-accounting fixture seeds the egress")
+        .redundancy_group = 1;
+    // Snapshot reads RG1 inactive (validator demotes via EnforceChanged);
+    // the fresh set excludes it too, so the mark has lapsed under BOTH.
+    fixture.ha_state.insert(
+        1,
+        HAGroupRuntime {
+            active: false,
+            watchdog_timestamp: 1,
+            lease: HAForwardingLease::Inactive,
+        },
+    );
+    fixture.fresh_active_rgs.clear();
+    let mut entry = cached_entry();
+    entry.fabric_established = true;
+    entry.metadata.owner_rg_id = 1;
+    entry.stamp.owner_rg_id = 1;
+    entry.stamp.owner_rg_lease_until = 0;
+    let run = run_stage_seeded(&fixture, &frame, meta, entry, 0, StageSeed::default());
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "#16217 B6: a marked entry whose fresh-set proof lapsed must fall through (no raw-mark suppression), got Consumed"
+    );
+}
+/// #16217 (egress-RG fence + revalidated suppression + gate): three
+/// production-path pins driven through `stage_flow_cache_hit` /
+/// `fabric_adoption_gate_for_wire`, NOT through helper-level hand-offs.
+/// (1) The lookup fence admits on the EGRESS RG: an entry whose stamp
+/// owner is rg 0 (the live fw0 shape -- `stamp_owner_rg=0` while the
+/// egress interface is RG1) is still admitted past BOTH fences when
+/// egress RG1 has departed, and supersedes via the DEPARTED arm.
+/// (2) A marked (adopted) entry whose egress RG has departed is never
+/// served from cache even though its mark is set -- it falls through.
+/// (3) The adoption gate declines on a NON-OWNER node: Established
+/// evidence alone does not adopt when the FIB egress RG is not
+/// forwarding-active locally; it adopts only on the owner.
+/// FAIL-ON-REVERT: restore the stamp-owner fence and (1) fences;
+/// restore raw-mark suppression and (2) is Consumed; drop the
+/// ownership half of the gate and (3) adopts on the non-owner.
+#[test]
+fn stage_hit_egress_rg_fence_and_nonowner_gate_16217() {
+    let frame = tcp_v4_ack_frame();
+    let meta = test_meta(&frame);
+    // (1) stamp owner 0, egress RG1 departed, both fences failing.
+    {
+        let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+        fixture
+            .forwarding
+            .egress
+            .get_mut(&EGRESS_IFINDEX)
+            .expect("zone-accounting fixture seeds the egress")
+            .redundancy_group = 1;
+        fixture.ha_state.insert(
+            1,
+            HAGroupRuntime { active: false, watchdog_timestamp: 1, lease: HAForwardingLease::Inactive },
+        );
+        fixture.rg_epochs[0].store(9, Ordering::Relaxed);
+        let mut entry = cached_entry();
+        entry.metadata.owner_rg_id = 0;
+        entry.stamp.owner_rg_id = 0;
+        entry.stamp.owner_rg_epoch = 3;
+        entry.stamp.owner_rg_lease_until = 100;
+        let run = run_stage_seeded(&fixture, &frame, meta, entry, 0, StageSeed::default());
+        assert!(
+            matches!(run.outcome, FlowCacheOutcome::FallThrough),
+            "#16217: stamp-owner-0 entry with departed egress RG1 must fall through via hit-stage supersession, not serve or fence"
+        );
+        assert_eq!(
+            run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::LookupRgEpoch as usize]
+                + run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::LookupLease as usize],
+            0,
+            "neither lookup fence may preempt an egress-departed candidate"
+        );
+        assert_eq!(
+            run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitForwardCandidateEgressDeparted as usize],
+            1,
+            "the egress-RG departed arm must own the supersession"
+        );
+    }
+    // (2) marked entry, egress RG1 departed: never served.
+    {
+        let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+        fixture
+            .forwarding
+            .egress
+            .get_mut(&EGRESS_IFINDEX)
+            .expect("zone-accounting fixture seeds the egress")
+            .redundancy_group = 1;
+        fixture.ha_state.insert(
+            1,
+            HAGroupRuntime { active: false, watchdog_timestamp: 1, lease: HAForwardingLease::Inactive },
+        );
+        let mut entry = cached_entry();
+        entry.fabric_established = true;
+        entry.metadata.owner_rg_id = 1;
+        entry.stamp.owner_rg_id = 1;
+        entry.stamp.owner_rg_lease_until = 0;
+        let run = run_stage_seeded(&fixture, &frame, meta, entry, 0, StageSeed::default());
+        assert!(
+            matches!(run.outcome, FlowCacheOutcome::FallThrough),
+            "#16217: a marked entry whose egress RG departed must fall through, never serve on the stale mark"
+        );
+    }
+    // (3) non-owner gate declines; owner gate adopts.
+    {
+        let mut sessions = crate::session::SessionTable::new();
+        let key = test_key();
+        let mut forwarding = ForwardingState::default();
+        forwarding.connected_v4.push(ConnectedRouteV4 {
+            prefix: crate::prefix::PrefixV4::from_net(
+                Ipv4Net::new(Ipv4Addr::new(172, 16, 50, 0), 24).unwrap(),
+            ),
+            host: Ipv4Addr::new(172, 16, 50, 0),
+            ifindex: EGRESS_IFINDEX,
+            tunnel_endpoint_id: 0,
+            table: "inet.0".to_string(),
+        });
+        forwarding.egress.insert(
+            EGRESS_IFINDEX,
+            EgressInterface {
+                bind_ifindex: EGRESS_IFINDEX,
+                vlan_id: 0,
+                mtu: 1500,
+                src_mac: [0x02, 0xbf, 0x72, 0x00, 0x01, 0x01],
+                zone_id: TEST_UNTRUST_ZONE_ID,
+                redundancy_group: 1,
+                primary_v4: None,
+                primary_v6: None,
+            },
+        );
+        let entry = cached_entry();
+        assert!(sessions.install_with_protocol_with_origin(
+            key.clone(),
+            entry.decision.clone(),
+            entry.metadata.clone(),
+            crate::session::SessionOrigin::WorkerLocalImport,
+            1_000_000,
+            PROTO_TCP,
+            0x18,
+        ));
+        let shared_sessions = Arc::new(std::sync::Mutex::new(crate::afxdp::FastMap::default()));
+        let shared_forward_wire_sessions =
+            Arc::new(std::sync::Mutex::new(crate::afxdp::FastMap::default()));
+        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        assert!(
+            crate::afxdp::shared_ops::fabric_adoption_established_for_wire(
+                &sessions,
+                &shared_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                &key,
+                1_000_000,
+            ),
+            "premise: Established evidence alone qualifies (the pre-GLM-N1 gate)"
+        );
+        let mut non_owner_ha = BTreeMap::new();
+        non_owner_ha.insert(
+            1,
+            HAGroupRuntime { active: false, watchdog_timestamp: 1, lease: HAForwardingLease::Inactive },
+        );
+        let dyn_neigh = Arc::new(crate::afxdp::sharded_neighbor::ShardedNeighborMap::new());
+        assert!(
+            !crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
+                &forwarding,
+                &non_owner_ha,
+                &std::collections::BTreeSet::new(),
+                1,
+                &sessions,
+                &shared_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                &key,
+                1_000_000,
+                &dyn_neigh,
+            ),
+            "#16217 GLM N1: a non-owner (egress RG1 not forwarding-active) must NOT adopt despite Established evidence"
+        );
+        let mut owner_ha = BTreeMap::new();
+        owner_ha.insert(
+            1,
+            HAGroupRuntime {
+                active: true,
+                watchdog_timestamp: 1,
+                lease: HAGroupRuntime::active_lease_until(1, 1),
+            },
+        );
+        assert!(
+            crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
+                &forwarding,
+                &owner_ha,
+                &std::collections::BTreeSet::from([1]),
+                1,
+                &sessions,
+                &shared_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                &key,
+                1_000_000,
+                &dyn_neigh,
+            ),
+            "#16217 GLM N1: the forwarding-active owner of egress RG1 adopts"
+        );
+        // #16217 (ownership lag): the AUTHORITATIVE fresh set, not
+        // the cached snapshot, decides. Cached snapshot says owner
+        // (active) but the fresh coordinator set does NOT contain
+        // RG1 -> decline; cached says non-owner but fresh set
+        // contains RG1 -> adopt. FAIL-ON-REVERT: revert the gate to
+        // the cached `ha_state` and both arms flip.
+        assert!(
+            !crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
+                &forwarding,
+                &owner_ha,
+                &std::collections::BTreeSet::new(),
+                1,
+                &sessions,
+                &shared_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                &key,
+                1_000_000,
+                &dyn_neigh,
+            ),
+            "#16217 ownership lag: fresh authoritative set without RG1 must decline even when cached snapshot says owner"
+        );
+        assert!(
+            crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
+                &forwarding,
+                &non_owner_ha,
+                &std::collections::BTreeSet::from([1]),
+                1,
+                &sessions,
+                &shared_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                &key,
+                1_000_000,
+                &dyn_neigh,
+            ),
+            "#16217 ownership lag: fresh authoritative set with RG1 must adopt even when cached snapshot lags inactive"
+        );
+    }
+}
+
+/// #16217 (Codex N1 final): the gate must resolve ownership in the
+/// session's OWN installed table (tenant), not MAIN. Fixture: dst
+/// 172.16.50.200 connected in MAIN via egress 7 (RG1) and in tenant
+/// "blue" via egress 8 (RG2); the session carries blue's
+/// install_table_domain/check. Fresh set {2} (tenant owner only)
+/// must ADOPT; fresh set {1} (MAIN owner only) must DECLINE.
+/// FAIL-ON-REVERT: MAIN lookup flips both arms.
+#[test]
+fn gate_resolves_in_session_install_table_not_main_16217() {
+    let mut sessions = crate::session::SessionTable::new();
+    let key = test_key();
+    let (domain, check) = crate::session::install_table_identity("blue");
+    let mut forwarding = ForwardingState::default();
+    for (ifindex, rg, table) in [(EGRESS_IFINDEX, 1, "inet.0"), (8, 2, "blue.inet.0")] {
+        forwarding.connected_v4.push(ConnectedRouteV4 {
+            prefix: crate::prefix::PrefixV4::from_net(
+                Ipv4Net::new(Ipv4Addr::new(172, 16, 50, 0), 24).unwrap(),
+            ),
+            host: Ipv4Addr::new(172, 16, 50, 0),
+            ifindex,
+            tunnel_endpoint_id: 0,
+            table: table.to_string(),
+        });
+        forwarding.egress.insert(
+            ifindex,
+            EgressInterface {
+                bind_ifindex: ifindex,
+                vlan_id: 0,
+                mtu: 1500,
+                src_mac: [0x02, 0xbf, 0x72, 0x00, 0x01, 0x01],
+                zone_id: TEST_UNTRUST_ZONE_ID,
+                redundancy_group: rg,
+                primary_v4: None,
+                primary_v6: None,
+            },
+        );
+    }
+    forwarding.install_tables.insert(
+        domain,
+        InstallTables {
+            v4: Some("blue.inet.0".to_string()),
+            v6: None,
+            h2: check,
+        },
+    );
+    let mut entry = cached_entry();
+    entry.decision.install_table_domain = domain;
+    entry.decision.install_table_check = check;
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        entry.decision.clone(),
+        entry.metadata.clone(),
+        crate::session::SessionOrigin::WorkerLocalImport,
+        1_000_000,
+        PROTO_TCP,
+        0x18,
+    ));
+    let shared_sessions = Arc::new(std::sync::Mutex::new(crate::afxdp::FastMap::default()));
+    let shared_forward_wire_sessions =
+        Arc::new(std::sync::Mutex::new(crate::afxdp::FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let dyn_neigh = Arc::new(crate::afxdp::sharded_neighbor::ShardedNeighborMap::new());
+    let mut ha = BTreeMap::new();
+    ha.insert(
+        1,
+        HAGroupRuntime { active: true, watchdog_timestamp: 1, lease: HAForwardingLease::Inactive },
+    );
+    ha.insert(
+        2,
+        HAGroupRuntime { active: true, watchdog_timestamp: 1, lease: HAForwardingLease::Inactive },
+    );
+    assert!(
+        crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
+            &forwarding,
+            &ha,
+            &std::collections::BTreeSet::from([2]),
+            1,
+            &sessions,
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &key,
+            1_000_000,
+            &dyn_neigh,
+        ),
+        "#16217 N1: tenant-table (blue, RG2) owner must adopt even though MAIN egress is RG1"
+    );
+    assert!(
+        !crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
+            &forwarding,
+            &ha,
+            &std::collections::BTreeSet::from([1]),
+            1,
+            &sessions,
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &key,
+            1_000_000,
+            &dyn_neigh,
+        ),
+        "#16217 N1: MAIN-only (RG1) ownership must NOT adopt a blue-table session"
+    );
 }

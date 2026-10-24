@@ -55,6 +55,7 @@ fn expire_as_standby(table: &mut SessionTable, now_ns: u64) -> Vec<ExpiredSessio
         epoch_of: &epoch,
         ceiling_mult: STALE_SYNCED_CEILING_MULT,
         ceiling_abs_ns: STALE_SYNCED_CEILING_ABS_NS,
+    node_served: &|_| NodeServedEvidence::default(),
     };
     table.last_gc_ns = 0;
     table.expire_stale_entries_ha(now_ns, Some(&ha))
@@ -90,16 +91,28 @@ fn synced_opening_uses_opening_window_and_reaps_lost_close_at_deadline_10888() {
     );
 
 
-    // Let the expiry wheel reach its first scan tick after the deadline. A
-    // suppressed primary Close cannot turn the opening timeout into a second
-    // lifetime based on the app timeout or standby stale ceiling.
+    // #16218: at the first due scan the opening row is HELD, not instantly
+    // reaped: an RG promotion can land on a still-opening copy and the
+    // instant reap deleted live failover flows within seconds. The hold
+    // arms first_held_ns at that scan.
     let opening_deadline = installed_at + OPENING_SECS * SEC;
     let first_due_sweep = opening_deadline + WHEEL_TICK_NS_FOR_TEST + 1;
     let expired = expire_as_standby(&mut table, first_due_sweep);
     assert!(
-        expired.iter().any(|entry| entry.key == key),
-        "#10888: a lost-Close opening must reap at its first due wheel scan"
+        expired.is_empty(),
+        "#16218: a lost-Close opening must be held at its first due scan, not instantly reaped"
     );
+    assert_eq!(table.last_pop_stats().held_standby, 1);
+    assert_eq!(table.last_pop_stats().reaped_stale_synced, 0);
+    // The bounded ceiling still reaps it: first_held + 3x the OPENING
+    // window (never the 86400s app timeout). Sweep past that bound.
+    let ceiling_sweep = first_due_sweep + 3 * OPENING_SECS * SEC + WHEEL_TICK_NS_FOR_TEST + 1;
+    let expired = expire_as_standby(&mut table, ceiling_sweep);
+    assert!(
+        expired.iter().any(|entry| entry.key == key),
+        "#10888/#16218: a lost-Close opening must reap once held past 3x its opening window"
+    );
+    assert_eq!(table.last_pop_stats().reaped_stale_synced, 1);
 }
 
 #[test]

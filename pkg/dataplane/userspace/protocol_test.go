@@ -2142,6 +2142,7 @@ func TestWorkerRuntimeStatusSessionGCCountersRoundTrip13281(t *testing.T) {
 		SessionGCHealedOnPromote:           7,
 		SessionGCAgedOwnerRGZeroActiveNode: 8,
 		SessionGCKeptAliveByCompanion:      9,
+		SessionGCExpired:                   10,
 	}
 	raw, err := json.Marshal(in)
 	if err != nil {
@@ -2155,7 +2156,7 @@ func TestWorkerRuntimeStatusSessionGCCountersRoundTrip13281(t *testing.T) {
 		"session_gc_scanned", "session_gc_dropped_gone", "session_gc_dropped_stale",
 		"session_gc_re_bucketed", "session_gc_held_standby", "session_gc_reaped_stale_synced",
 		"session_gc_healed_on_promote", "session_gc_aged_owner_rg_zero_active_node",
-		"session_gc_kept_alive_by_companion",
+		"session_gc_kept_alive_by_companion", "session_gc_expired",
 	}
 	for _, key := range keys {
 		if _, ok := obj[key]; !ok {
@@ -2170,7 +2171,7 @@ func TestWorkerRuntimeStatusSessionGCCountersRoundTrip13281(t *testing.T) {
 		back.SessionGCDroppedStale != 3 || back.SessionGCReBucketed != 4 ||
 		back.SessionGCHeldStandby != 5 || back.SessionGCReapedStaleSynced != 6 ||
 		back.SessionGCHealedOnPromote != 7 || back.SessionGCAgedOwnerRGZeroActiveNode != 8 ||
-		back.SessionGCKeptAliveByCompanion != 9 {
+		back.SessionGCKeptAliveByCompanion != 9 || back.SessionGCExpired != 10 {
 		t.Fatalf("round-trip session GC counters = %+v", back)
 	}
 	var legacy WorkerRuntimeStatus

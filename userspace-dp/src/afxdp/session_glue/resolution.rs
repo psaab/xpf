@@ -501,9 +501,37 @@ pub(in crate::afxdp) fn connected_owner_rg_for_target_in_table(
     target: IpAddr,
     table: Option<&str>,
 ) -> i32 {
-    // Source 1: connected_* rows (the FIB's own connected route
-    // structs: prefix + ifindex) — longest prefix wins.
+    // #16217: indexed fast path. When the forwarding state carries
+    // the build-time connected-owner index, probe it (longest
+    // prefix down). `Hit` is authoritative; on `Hit`/`Miss` the
+    // answer below comes only from the interface-NAT/local tail
+    // (Source 2), never from re-scanning the connected rows.
+    // Note: `Hit(0)` — a matched prefix whose interface carries no
+    // RG — is the legacy scan's FINAL answer for that target: the
+    // scan populates `best`, returns its rg, and never reaches
+    // Source 2 either. Preserve that: only `Miss` falls through.
+    let indexed = forwarding.connected_owner_index_lookup(target, table);
+    if let Some(crate::afxdp::ConnectedOwnerIndex::Hit(rg)) = indexed {
+        return rg;
+    }
+    // A Miss is authoritative only when the index was built from
+    // the CURRENT row sets. Production builds the index once per
+    // forwarding-state build (after the connected vecs are final),
+    // so it is; unit fixtures that push connected/ledger rows AFTER
+    // `build_forwarding_state` would otherwise read a stale Miss
+    // and skip rows the legacy scan sees. Detect that cheaply: the
+    // index records how many FIB+ledger rows it was built from
+    // (`connected_owner_index_rows`); a mismatch falls back to the
+    // exact legacy scan below.
+    let index_miss = matches!(
+        indexed,
+        Some(crate::afxdp::ConnectedOwnerIndex::Miss)
+    ) && forwarding.connected_owner_index_current();
+    // Source 1 (legacy scan): connected_* rows (the FIB's own
+    // connected route structs: prefix + ifindex) — longest prefix
+    // wins. Skipped entirely when the index already answered Miss.
     let mut best: Option<(u8, i32)> = None;
+    if !index_miss {
     match target {
         IpAddr::V4(ip) => {
             for row in &forwarding.connected_v4 {
@@ -573,6 +601,7 @@ pub(in crate::afxdp) fn connected_owner_rg_for_target_in_table(
                 }
             }
         }
+    }
     }
     if let Some((_, rg)) = best {
         return rg;

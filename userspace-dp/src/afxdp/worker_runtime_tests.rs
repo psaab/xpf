@@ -39,6 +39,7 @@ fn snapshot_roundtrip() {
         session_gc_healed_on_promote: 7,
         session_gc_aged_owner_rg_zero_active_node: 8,
         session_gc_kept_alive_by_companion: 9,
+        session_gc_expired: 10,
         nat_reverse_key_collisions: 4242,
         nat_reverse_key_collisions_distinct_src: 0,
         session_create_drops: 31,
@@ -106,6 +107,7 @@ fn snapshot_roundtrip() {
         s.session_gc_kept_alive_by_companion,
         c.session_gc_kept_alive_by_companion
     );
+    assert_eq!(s.session_gc_expired, c.session_gc_expired);
     // #1760: the displacement counter survives publish -> snapshot.
     assert_eq!(s.nat_reverse_key_collisions, c.nat_reverse_key_collisions);
     // #1861: the install-refusal trio survives publish -> snapshot.

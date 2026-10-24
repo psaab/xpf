@@ -729,6 +729,7 @@ impl SessionTable {
                             .copied()
                             .unwrap_or(0),
                     },
+                    synced_synthesis: false,
                 },
                 entry.origin,
             );
@@ -748,6 +749,64 @@ impl SessionTable {
         } else {
             SessionExpiryProbe::Absent
         }
+    }
+
+    /// #16217 (local adoption evidence): does this worker's table hold a
+    /// local SERVING row for the canonical key behind `wire_key` that is
+    /// fully Established? Serving origins are exactly the local serving
+    /// set the evidence collectors use: `WorkerLocalImport` and
+    /// `SharedPromote` (plus other locally-authored origins such as
+    /// ForwardFlow). NOTE: `WorkerLocalImport::is_peer_synced()` is true
+    /// (it participates in peer-synced control gates), so the serving
+    /// test must NOT be `!is_peer_synced()` — that would exclude the very
+    /// fw1 rows this arm exists for. The peer-synced REPLICAS that must
+    /// never qualify are `SyncImport`/`SharedMaterialize` (imports of
+    /// the peer's authoritative row). Pending (`handshake_pending`,
+    /// incl. syn_ack_first) and closing rows fail closed. The canonical
+    /// key is derived two ways, mirroring the resolver's own probes:
+    /// (1) forward-wire alias — `find_forward_wire_match_with_origin_at`
+    /// validates `forward_wire_key(canonical, nat) == wire_key` and
+    /// fails closed on ambiguity; (2) direct probe of `wire_key` itself
+    /// (the no-NAT / wire-keyed local row). Read-only and expiry-aware:
+    /// an idle-crossed row never adopts. Returns the canonical key so
+    /// the caller can re-resolve through the ordinary session-hit path.
+    pub(crate) fn local_established_for_wire_at(
+        &self,
+        wire_key: &SessionKey,
+        now_ns: u64,
+    ) -> Option<SessionKey> {
+        // (1) Forward-wire alias: canonical (pre-NAT) row whose wire
+        // form is this packet's tuple. Ambiguity fails closed inside
+        // `find_forward_wire_match_with_origin_at`.
+        if let Some((matched, origin)) =
+            self.find_forward_wire_match_with_origin_at(wire_key, now_ns)
+            && !matches!(origin, SessionOrigin::SyncImport | SessionOrigin::SharedMaterialize)
+            && !matched.metadata.is_reverse
+        {
+            if let Some(entry) = self.entry_by_key(&matched.key)
+                && !entry.metadata.is_reverse
+                && !entry.closing
+                && entry.established
+                && !entry.handshake_pending
+            {
+                return Some(matched.key);
+            }
+        }
+        // (2) Direct probe: local row stored under the wire key itself
+        // (no-NAT, or a wire-keyed serving row). The alias arm of
+        // `probe_record_with_origin` returns reverse records, rejected
+        // by the non-reverse checks.
+        if let Some(record) = self.probe_record_with_origin(wire_key)
+            && now_ns.saturating_sub(record.entry.last_seen_ns) <= record.entry.expires_after_ns
+            && !matches!(record.entry.origin, SessionOrigin::SyncImport | SessionOrigin::SharedMaterialize)
+            && !record.entry.metadata.is_reverse
+            && !record.entry.closing
+            && record.entry.established
+            && !record.entry.handshake_pending
+        {
+            return Some(record.key.clone());
+        }
+        None
     }
 
     pub fn lookup_with_origin(
@@ -909,7 +968,7 @@ impl SessionTable {
         // #9412: the matched entry's close class BEFORE this packet (wire form),
         // captured inside the borrow below so a TRANSITION can be announced to
         // the peer once the borrow has ended.
-        let (result, actual_key, propagate, close_class_before, handshake_state_before) = {
+        let (result, actual_key, propagate, close_class_before, handshake_state_before, progress_key) = {
             let Some(record) = self.entries.get_mut(handle as usize) else {
                 return SessionExpiryProbe::Absent;
             };
@@ -1037,6 +1096,19 @@ impl SessionTable {
                     || close_progress
                     || payload_progress
                     || (!do_close && !deferred_close_segment && !entry.reset && !entry.fin_own));
+            // #16223: split-path rows can stay Opening/pending on the
+            // serving worker while the SYN-ACK / completing ACK were
+            // consumed on the fabric peer or a sibling worker. Payload
+            // (or a SYN-ACK) on a non-established/pending row is
+            // handshake-progress evidence — defer the verdict to the
+            // companion-aware check after the borrow, exactly as the
+            // cache-hit paths do. Never for a closing entry (#14630).
+            let progress_evidence = !defer_all
+                && !entry.closing
+                && is_tcp
+                && !is_closing(tcp_flags)
+                && (!entry.established || entry.handshake_pending)
+                && crate::tcp_flags::has_payload_progress(tcp_flags, payload_len);
             if refresh {
                 entry.last_seen_ns = now_ns;
                 entry.expires_after_ns = if is_tcp && entry.closing {
@@ -1082,6 +1154,7 @@ impl SessionTable {
                 established: promote_from_reverse || promote_from_asymmetric_ack,
                 handshake_completed,
             };
+            let progress_key = progress_evidence.then(|| record.key.clone());
             (
                 (
                     SessionLookup {
@@ -1111,6 +1184,7 @@ impl SessionTable {
                 propagate,
                 close_class_before,
                 handshake_state_before,
+                progress_key,
             )
         }; // <-- &mut self.entries borrow ends here
         // #4109: mirror the close (F17) / handshake promotion (F16) onto the
@@ -1122,8 +1196,102 @@ impl SessionTable {
         let state_transition = !defer_all
             && (propagate.close || propagate.established || propagate.handshake_completed);
         if state_transition {
+            // Only a COMPLETED handshake stamps node proof; a mere
+            // promotion (SYN-ACK seen, still pending) is the #6752
+            // half-open shape and must stamp nothing.
+            let stamp_proof = if propagate.handshake_completed {
+                let fwd_key = if self
+                    .entry_by_key(&actual_key)
+                    .is_some_and(|e| e.metadata.is_reverse)
+                {
+                    reverse_session_key(&actual_key, propagate.nat)
+                } else {
+                    actual_key.clone()
+                };
+                let rev = self
+                    .entry_by_key(&fwd_key)
+                    .map(|fwd| fwd.counters.rev_packets)
+                    .unwrap_or(0);
+                Some((fwd_key, rev.max(1)))
+            } else {
+                None
+            };
             self.propagate_tcp_state_to_companion(&actual_key, now_ns, propagate);
             self.emit_session_state_update(&actual_key, close_class_before, handshake_state_before);
+            // #16223: a serving completion/promotion here is the
+            // node-level proof sibling replicas key on — stamp it so
+            // replica tables on other workers (and this table's GC)
+            // complete/retain instead of reaping at 20 s.
+            if let Some((fwd_key, rev)) = stamp_proof {
+                self.note_node_served_handshake(
+                    &fwd_key,
+                    TcpHandshakeState::Established.to_wire(),
+                    rev,
+                );
+            }
+        }
+        // #16223: companion-aware completion when this hit carried
+        // progress evidence but the classic arms did not fire (the
+        // completing segment was consumed on another worker/node).
+        // Skipped when a classic transition already ran: the helper's
+        // guards refuse an already-established pair anyway, and the
+        // classic HA Update above already announced the transition.
+        if !state_transition {
+            if let Some(progress_key) = &progress_key {
+                if let Some((matched_key, nat)) =
+                    self.cache_hit_handshake_progress(progress_key)
+                {
+                    if let Some(entry) = self.entry_by_key_mut(&matched_key) {
+                        entry.established = true;
+                        entry.handshake_pending = false;
+                        entry.syn_ack_first = false;
+                        entry.last_seen_ns = now_ns;
+                        entry.expires_after_ns = session_timeout_ns(
+                            matched_key.protocol,
+                            tcp_flags,
+                            true,
+                            &timeouts,
+                            entry.metadata.inactivity_timeout_ns,
+                            opening_override_ns,
+                        );
+                    }
+                    self.propagate_tcp_state_to_companion(
+                        &matched_key,
+                        now_ns,
+                        TcpStatePropagation {
+                            nat,
+                            close: false,
+                            reset: false,
+                            fin: false,
+                            established: false,
+                            handshake_completed: true,
+                        },
+                    );
+                    self.emit_session_state_update(
+                        &matched_key,
+                        close_class_before,
+                        handshake_state_before,
+                    );
+                    self.push_to_wheel(&matched_key, now_ns);
+                    let fwd_key2 = if self
+                        .entry_by_key(&matched_key)
+                        .is_some_and(|e| e.metadata.is_reverse)
+                    {
+                        reverse_session_key(&matched_key, nat)
+                    } else {
+                        matched_key.clone()
+                    };
+                    let rev2 = self
+                        .entry_by_key(&fwd_key2)
+                        .map(|fwd| fwd.counters.rev_packets)
+                        .unwrap_or(0);
+                    self.note_node_served_handshake(
+                        &fwd_key2,
+                        TcpHandshakeState::Established.to_wire(),
+                        rev2.max(1),
+                    );
+                }
+            }
         }
         // Push the canonical key (NOT the alias lookup `key`) into
         // the wheel. push_to_wheel re-reads the record to compute
@@ -1410,6 +1578,7 @@ impl SessionTable {
             metadata: record.entry.metadata.clone(),
             forwarding_generation: record.entry.forwarding_generation,
             aux: SessionLookupAux::default(),
+            synced_synthesis: false,
         })
     }
 
@@ -1526,6 +1695,7 @@ impl SessionTable {
                 metadata: entry.metadata.clone(),
                 forwarding_generation: entry.forwarding_generation,
                 aux: SessionLookupAux::default(),
+                synced_synthesis: false,
             };
             if let Some(prev) = &first {
                 // #16014 (extends #14374): any second passing candidate with
@@ -1617,6 +1787,7 @@ impl SessionTable {
                 metadata: record.entry.metadata.clone(),
                 forwarding_generation: record.entry.forwarding_generation,
                 aux: SessionLookupAux::default(),
+                synced_synthesis: false,
             })
         } else {
             ForwardNatQuoteLookup::NoMatch
@@ -1663,6 +1834,7 @@ impl SessionTable {
             metadata: record.entry.metadata.clone(),
             forwarding_generation: record.entry.forwarding_generation,
             aux: SessionLookupAux::default(),
+            synced_synthesis: false,
         })
     }
 
@@ -1736,6 +1908,7 @@ impl SessionTable {
                 metadata: entry.metadata.clone(),
                 forwarding_generation: entry.forwarding_generation,
                 aux: SessionLookupAux::default(),
+                synced_synthesis: false,
             };
             if let Some(prev) = &first {
                 // #16014 (extends #14374): any second passing candidate with
@@ -1895,6 +2068,7 @@ impl SessionTable {
                             .copied()
                             .unwrap_or(0),
                     },
+                    synced_synthesis: false,
                 },
                 entry.origin,
             );
@@ -1983,6 +2157,168 @@ impl SessionTable {
         }
         Some(entry.metadata.ingress_zone == arrival_zone)
     }
+    /// #16217 (fabric adoption): is the row behind `wire_key` marked
+    /// fabric-established (adopted via the fabric path)? The canonical key is
+    /// derived exactly as the adoption gate derives it — forward-wire alias
+    /// (ambiguity fails closed) or a direct probe of the wire key — and only
+    /// a marked, non-reverse, non-closing, Established, pending-cleared,
+    /// non-idle-crossed row qualifies. Anything else is `false`, so
+    /// non-adopted flows keep the fail-closed HA terminal bit-identically.
+    /// NOTE (Wire18): the raw mark alone no longer exempts anything — the
+    /// poll session-hit site reads the marked row's decision via
+    /// `fabric_established_decision_for_wire_at` and re-validates its egress
+    /// RG against CURRENT ownership on every hit.
+    pub(crate) fn fabric_established_for_wire_at(&self, wire_key: &SessionKey, now_ns: u64) -> bool {
+        if let Some((matched, _origin)) =
+            self.find_forward_wire_match_with_origin_at(wire_key, now_ns)
+            && let Some(entry) = self.entry_by_key(&matched.key)
+            && entry.fabric_established
+            && !entry.metadata.is_reverse
+            && !entry.closing
+            && entry.established
+            && !entry.handshake_pending
+        {
+            return true;
+        }
+        if let Some(record) = self.probe_record_with_origin(wire_key)
+            && now_ns.saturating_sub(record.entry.last_seen_ns) <= record.entry.expires_after_ns
+            && record.entry.fabric_established
+            && !record.entry.metadata.is_reverse
+            && !record.entry.closing
+            && record.entry.established
+            && !record.entry.handshake_pending
+        {
+            return true;
+        }
+        false
+    }
+
+    /// #16217 (Wire18, B2): the stored decision behind the marked row for
+    /// `wire_key`, when the row still qualifies as adopted (same qualifying
+    /// shape as `fabric_established_for_wire_at`: marked, non-reverse,
+    /// non-closing, Established, pending-cleared, non-idle-crossed, alias
+    /// ambiguity fails closed). The poll session-hit site re-validates this
+    /// decision's egress RG against CURRENT ownership on every hit: the
+    /// adoption proof is stale once that RG leaves this node again, so the
+    /// session-hit adopted context must lapse with it (failback converts
+    /// again) instead of exempting the re-resolve forever. `None` when no
+    /// marked qualifying row exists.
+    pub(crate) fn fabric_established_decision_for_wire_at(
+        &self,
+        wire_key: &SessionKey,
+        now_ns: u64,
+    ) -> Option<crate::session::SessionDecision> {
+        if let Some((matched, _origin)) =
+            self.find_forward_wire_match_with_origin_at(wire_key, now_ns)
+            && let Some(entry) = self.entry_by_key(&matched.key)
+            && entry.fabric_established
+            && !entry.metadata.is_reverse
+            && !entry.closing
+            && entry.established
+            && !entry.handshake_pending
+        {
+            return Some(entry.decision);
+        }
+        if let Some(record) = self.probe_record_with_origin(wire_key)
+            && now_ns.saturating_sub(record.entry.last_seen_ns) <= record.entry.expires_after_ns
+            && record.entry.fabric_established
+            && !record.entry.metadata.is_reverse
+            && !record.entry.closing
+            && record.entry.established
+            && !record.entry.handshake_pending
+        {
+            return Some(record.entry.decision);
+        }
+        None
+    }
+
+    /// #16217 (fabric adoption): mark the row(s) behind `wire_key` as
+    /// fabric-established. Called ONLY from the poll adoption site after the
+    /// gate proved the tuple Established (and, at the poll site, this
+    /// node as forwarding-active owner of the egress RG) and the
+    /// adopted resolve yielded a local `ForwardCandidate`. Marks the local
+    /// serving row the gate qualified (canonical key via the wire alias, or
+    /// the wire-keyed row itself); a no-op when no such row exists yet — the
+    /// resolve that follows materializes it and the adoption site marks again
+    /// on the resolved key.
+    pub(crate) fn mark_fabric_established_for_wire(&mut self, wire_key: &SessionKey, now_ns: u64) {
+        if let Some(canonical) = self.local_established_for_wire_at(wire_key, now_ns)
+            && let Some(entry) = self.entry_by_key_mut(&canonical)
+        {
+            entry.fabric_established = true;
+        }
+        if let Some(record_key) = self.probe_record_with_origin(wire_key).map(|r| r.key.clone())
+            && let Some(entry) = self.entry_by_key_mut(&record_key)
+            && !entry.metadata.is_reverse
+        {
+            entry.fabric_established = true;
+        }
+    }
+
+    /// #16217 (serving context): does a SHARED synced row for `wire_key`
+    /// (either map, canonical/reverse/wire orientation) carry the Established
+    /// handshake wire? This is the post-failover serving proof for a flow the
+    /// peer established and this node now owns: the session-hit re-resolve of
+    /// such a tuple runs with the adopted exemption even when no local row
+    /// was marked (the local row may live on another worker). Scope-exact:
+    /// full `SessionKey` equality (incl. routing domain) against the row's
+    /// key, its reverse companion, or its NAT'd wire key — never `bare_tuple`.
+    pub(crate) fn shared_established_for_wire_at(
+        &self,
+        shared_sessions: &std::sync::Arc<std::sync::Mutex<rustc_hash::FxHashMap<SessionKey, crate::afxdp::SyncedSessionEntry>>>,
+        shared_forward_wire_sessions: &std::sync::Arc<std::sync::Mutex<rustc_hash::FxHashMap<SessionKey, crate::afxdp::SyncedSessionEntry>>>,
+        wire_key: &SessionKey,
+    ) -> bool {
+        // #16217 (fold B5): O(1) keyed gets only. A qualifying row is
+        // stored under `wire_key` itself, or under the canonical key
+        // whose forward-wire alias IS `wire_key`, or under the reverse
+        // companion whose wire form is `wire_key`. The pre-fold
+        // full-map scan derived companions from EVERY row's NAT to
+        // find those three shapes; keyed probing inverts it: a row
+        // under `wire_key` discloses its canonical key (`entry.key`,
+        // retained on alias slots) and its NAT, from which the
+        // canonical/reverse rows are fetched directly. FastMap
+        // iteration order never decides the answer.
+        let established = crate::session::TcpHandshakeState::Established.to_wire();
+        for map in [shared_sessions, shared_forward_wire_sessions] {
+            let Ok(guard) = map.lock() else { continue };
+            // Direct: a row stored under the wire tuple itself.
+            let direct = guard.get(wire_key);
+            if let Some(entry) = direct
+                && entry.tcp_handshake_state == established
+            {
+                return true;
+            }
+            // Alias: the row under the wire tuple retains the canonical
+            // key on `entry.key`; its canonical and reverse-companion
+            // rows may carry the Established wire.
+            let Some(probe) = direct else { continue };
+            let canonical = probe.key.clone();
+            let nat = probe.decision.nat;
+            if let Some(entry) = guard.get(&canonical)
+                && entry.tcp_handshake_state == established
+            {
+                return true;
+            }
+            let reverse_key = crate::session::reverse_session_key(&canonical, nat);
+            if let Some(entry) = guard.get(&reverse_key)
+                && entry.tcp_handshake_state == established
+            {
+                return true;
+            }
+            // A reverse row stored under `wire_key` itself is the
+            // `direct` row above; nothing else can qualify.
+        }
+        false
+    }
+
+    /// #16217: test-only read of the fabric-established mark.
+    #[cfg(test)]
+    pub(crate) fn fabric_established_for_test(&self, key: &SessionKey) -> bool {
+        self.entry_by_key(key)
+            .map(|entry| entry.fabric_established)
+            .unwrap_or(false)
+    }
 
     pub fn entry_with_origin(
         &self,
@@ -2041,6 +2377,175 @@ impl SessionTable {
         })
     }
 
+    /// #16223: collect this table's completed forward pairs for the
+    /// periodic shared-wire maintenance: canonical forward keys whose
+    /// entry is fully established (pending cleared, not closing) with
+    /// at least one admitted reverse packet. The caller drives a
+    /// full-table walk per maintenance slice (budget `usize::MAX`)
+    /// and threads the returned cursor (always 0 on completion).
+    /// Serving state only — replica rows in this table are
+    /// reported too when they themselves completed, which is correct:
+    /// their completion is equally node-level proof.
+    pub(crate) fn established_forward_slice(
+        &self,
+        cursor: usize,
+        budget: usize,
+        out: &mut Vec<(SessionKey, crate::nat::NatDecision)>,
+    ) -> usize {
+        let cap = self.slot_high_watermark.min(self.entries.capacity());
+        if cap == 0 || budget == 0 {
+            return 0;
+        }
+        let start = if cursor >= cap { 0 } else { cursor };
+        let end = start.saturating_add(budget).min(cap);
+        for idx in start..end {
+            if let Some(record) = self.entries.get(idx) {
+                let entry = &record.entry;
+                if !entry.metadata.is_reverse
+                    && entry.established
+                    && !entry.handshake_pending
+                    && !entry.closing
+                    && entry.counters.rev_packets > 0
+                {
+                    out.push((record.key.clone(), entry.decision.nat));
+                }
+            }
+        }
+        if end >= cap { 0 } else { end }
+    }
+    /// #16217: like `established_forward_slice`, but assembling
+    /// completion evidence NODE-WIDE for split-path rows no single
+    /// worker table can satisfy alone. A forward entry whose origin
+    /// is a local serving row — locally-authored origins,
+    /// `SharedPromote`, or `WorkerLocalImport` (a replica of a
+    /// session authored by THIS node's other worker, i.e. a local
+    /// serving row, not a peer replica) — is collected when it is
+    /// already locally Established, or when the aggregated evidence
+    /// proves the tuple completed: (a) any worker's local row
+    /// Established (`served_and_completed` via the shared-map
+    /// aggregator), (b) reverse traffic observed for the canonical
+    /// key in the shared synced/replica maps (`rev_packets>0`
+    /// across the forward/reverse counters of both maps), or (c)
+    /// the #16223 `cache_hit_handshake_progress` completion stamp.
+    /// No chicken-and-egg: inputs are counters/completion observed
+    /// anywhere node-local; a shared row's Established wire is
+    /// OUTPUT only (the restamp this feeds), never an input here.
+    /// One bounded walk per slice.
+    ///
+    /// #16217 (backup arm): a HA-peer replica row (`SyncImport` /
+    /// `SharedMaterialize`) is ALSO collected — into the SHARED
+    /// canonical+alias promotion only; its LOCAL stage never moves
+    /// from its own flags — when the evidence arm proves completion
+    /// (`rev_packets>0` via the shared-map counters the counter
+    /// carriage now stamps at import, or a local reverse-served
+    /// sibling). Pre-fix the serving-origin gate dropped every peer
+    /// replica, so on the BACKUP node — whose canonical rows are
+    /// `SyncImport` imports carrying the imported `rev>0` counters
+    /// and whose serving sibling is only a `WorkerLocalImport`
+    /// reverse row in a sibling worker table — nothing qualified:
+    /// the shared maps read Opening/Pending the whole pre-failover
+    /// age and aged flows blackholed from FO+1s. The promotion
+    /// target is unchanged (the ct-slice restamps shared canonical
+    /// + forward-wire alias only); the local pending row stays
+    /// pending until it itself serves/completes or the
+    /// post-failover gate adopts from the now-Established wire.
+    /// #16217 (fw1 rev=0 leg): every non-reverse, non-closing forward
+    /// pair this table holds, regardless of origin or stage. The
+    /// ct-slice stamps each such pair's OWN live counters (folded by
+    /// `account_packet` where packets land, incl. onto `SyncImport`
+    /// replicas that serve reverse traffic on the backup) onto its
+    /// shared rows BEFORE the evidence read, so `rev_packets` on the
+    /// shared row tracks this node's actual service instead of the
+    /// import-time zero. Bounded by table size, one walk per slice.
+    pub(crate) fn ct_slice_forward_pairs(
+        &self,
+    ) -> Vec<(SessionKey, crate::nat::NatDecision)> {
+        let mut out = Vec::new();
+        let cap = self.slot_high_watermark.min(self.entries.capacity());
+        for idx in 0..cap {
+            if let Some(record) = self.entries.get(idx) {
+                if !record.entry.metadata.is_reverse && !record.entry.closing {
+                    out.push((record.key.clone(), record.entry.decision.nat));
+                }
+            }
+        }
+        out
+    }
+    pub(crate) fn node_served_forward_slice(
+        &self,
+        cursor: usize,
+        budget: usize,
+        shared_evidence: &dyn Fn(&SessionKey) -> NodeServedEvidence,
+        out: &mut Vec<(SessionKey, crate::nat::NatDecision)>,
+    ) -> usize {
+        let cap = self.slot_high_watermark.min(self.entries.capacity());
+        if cap == 0 || budget == 0 {
+            return 0;
+        }
+        let start = if cursor >= cap { 0 } else { cursor };
+        let end = start.saturating_add(budget).min(cap);
+        for idx in start..end {
+            if let Some(record) = self.entries.get(idx) {
+                let entry = &record.entry;
+                if entry.metadata.is_reverse || entry.closing {
+                    continue;
+                }
+                // Serving rows: locally-authored origins,
+                // `SharedPromote`, or `WorkerLocalImport` (this
+                // node's own session replicated across its workers —
+                // a local serving row, not a peer replica). A serving
+                // row's Established status is node-local proof on
+                // the BACKUP node too — excluding it left fw1's
+                // heavy canonical rows unpublished (#16217 Wire8).
+                // A pure HA-peer replica's own flags are NOT
+                // node-level proof (its completion is announced via
+                // the HA Update carve-out instead); it qualifies
+                // only through the evidence arm below.
+                let serving_origin = !entry.origin.is_peer_synced()
+                    || entry.origin == SessionOrigin::SharedPromote
+                    || entry.origin == SessionOrigin::WorkerLocalImport;
+                if serving_origin && entry.established && !entry.handshake_pending {
+                    // Already locally complete: the strict slice
+                    // covers it when it also served reverse traffic;
+                    // include it here too so the shared wire advances
+                    // even before the first reverse packet is folded.
+                    // Peer replicas never take this arm: their own
+                    // flags are not node-level proof (their
+                    // completion is announced via the HA Update
+                    // carve-out instead).
+                    out.push((record.key.clone(), entry.decision.nat));
+                    continue;
+                }
+                // Evidence arm (serving rows AND peer replicas):
+                // the aggregated node-wide evidence — (b) reverse
+                // traffic observed for the canonical key in the
+                // shared synced/replica maps (`rev_packets>0` on
+                // the wire counters the #16217 counter carriage now
+                // stamps at import, surfaced via
+                // `shared_completion_evidence`), a local
+                // reverse-served sibling in THIS table, or
+                // (a)/(c) — proves the tuple completed, so the
+                // SHARED canonical + alias advance to Established
+                // even though this row's local stage stays pending.
+                // For a pure HA-peer replica (`SyncImport` /
+                // `SharedMaterialize`) this is the ONLY qualifying
+                // arm: its own flags never publish, and it requires
+                // actual counted reverse service (fail-closed: a
+                // zero-count import never publishes). Promotion
+                // target is the shared canonical+alias stage only;
+                // the local row's stage is unchanged.
+                let mut evidence = self.node_served_evidence(&record.key);
+                let shared = shared_evidence(&record.key);
+                evidence.rev_packets_any =
+                    evidence.rev_packets_any.max(evidence.rev_packets).max(shared.rev_packets_any);
+                evidence.served_completed = evidence.served_completed || shared.served_completed;
+                if evidence.served_and_completed() {
+                    out.push((record.key.clone(), entry.decision.nat));
+                }
+            }
+        }
+        if end >= cap { 0 } else { end }
+    }
     /// #5152: test-only read of an entry's `first_held_ns` — the standby
     /// bounded-leak HOLD clock (§6.4). Lets the session_glue activation-scan
     /// test assert the clock is PRESERVED for a session that re-resolves to

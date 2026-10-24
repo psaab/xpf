@@ -1,10 +1,80 @@
 use super::*;
 
+/// #16217 (FZDiag35): the stamp-free reverse conversion test,
+/// extracted verbatim from the session-hit slow path so the
+/// stamp=2 unit cell judges the production predicate, not a copy.
+/// Returns the zone-encoded FabricRedirect to adopt when ALL of:
+/// the hit is a reverse hit, the packet did not arrive on the
+/// fabric link (anti-loop), the current disposition is a local
+/// ForwardCandidate, and the reply destination's connected owner
+/// RG is KNOWN (>0) and NOT forwarding-active locally. Soundness
+/// (no false-convert shape): a destination whose connected owner
+/// is locally active is the ordinary locally-served reply and
+/// keeps its candidate; an unknown owner (no connected prefix —
+/// gateway/default-routed) is not peer-ownership and never
+/// converts. The session's stored owner stamp is deliberately NOT
+/// consulted: pre-fix rows carry the reply-egress row's RG there.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn reverse_hit_departed_destination_redirect(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    fabric_link_ingress: bool,
+    is_reverse: bool,
+    resolution_target: IpAddr,
+    table: Option<&str>,
+    egress_zone: u16,
+    disposition: ForwardingDisposition,
+) -> Option<ForwardingResolution> {
+    if !is_reverse
+        || fabric_link_ingress
+        || disposition != ForwardingDisposition::ForwardCandidate
+    {
+        return None;
+    }
+    let dest_rg = super::connected_owner_rg_for_target_in_table(
+        forwarding,
+        resolution_target,
+        table,
+    );
+    let destination_local = dest_rg > 0
+        && ha_state
+            .get(&dest_rg)
+            .is_some_and(|group| group.is_forwarding_active(now_secs));
+    if dest_rg > 0 && !destination_local {
+        super::forwarding::resolve_zone_encoded_fabric_redirect_by_id(forwarding, egress_zone)
+    } else {
+        None
+    }
+}
+
 pub(super) fn materialize_shared_session_hit(sessions: &mut SessionTable,
 resolved: &mut ResolvedSessionLookup,
 forwarding: &ForwardingState,
 now_ns: u64,
-tcp_flags: u8,) -> (SessionLookup, bool) { if let Some(shared) = resolved.shared_entry.take() {
+tcp_flags: u8,) -> (SessionLookup, bool) {
+    materialize_shared_session_hit_adopted(sessions, resolved, forwarding, now_ns, tcp_flags, false)
+}
+
+/// #16217 (FZDiag30): adopted variant. `fabric_adopted` is true only
+/// when the poll fabric-adoption gate has already proven this tuple
+/// belongs to an Established session and this node is the RG owner
+/// post-takeover. A synced replica materialized for such a flow may
+/// replace a non-peer-synced local incumbent (`allow_replace_local`):
+/// the incumbent is the stale pre-failover row (e.g. a
+/// MissingNeighborSeed / locally seeded row) that the adoption
+/// resolve supersedes, and refusing to clobber it left
+/// `install_failed=true` on every adopted hit, so the flow-cache seed
+/// gate (`flow_cache_seed.rs`) never installed an entry and every
+/// packet re-took the slow path. Non-adopted materializations keep
+/// `allow_replace_local=false` bit-identically (the #10582 clobber
+/// guard).
+pub(super) fn materialize_shared_session_hit_adopted(sessions: &mut SessionTable,
+resolved: &mut ResolvedSessionLookup,
+forwarding: &ForwardingState,
+now_ns: u64,
+tcp_flags: u8,
+fabric_adopted: bool,) -> (SessionLookup, bool) { if let Some(shared) = resolved.shared_entry.take() {
     // #10612 (N2): fence stale-zone shared hits at materialize ingress.
     // A shared-transient stale row (import fail-open linger racing
     // validation) must materialize as a MISS, not install into the
@@ -50,9 +120,14 @@ tcp_flags: u8,) -> (SessionLookup, bool) { if let Some(shared) = resolved.shared
             // worker that happens to see its next packet.
             tcp_close_class: replica.tcp_close_class,
             tcp_handshake_state: replica.tcp_handshake_state,
+            // #16217 (run11): a materialized shared hit inherits the
+            // shared row's carried service counts, exactly as it
+            // inherits the id and close class above.
+            fwd_packets: replica.fwd_packets,
+            rev_packets: replica.rev_packets,
             source_nat_static: replica.source_nat_static,
         },
-        false,
+        fabric_adopted,
     );
     // A refused shared repair must not mutate the incumbent local row's
     // leak provenance. The stamp is evidence for the materialized replica
@@ -117,6 +192,8 @@ verdict: SessionHitVerdict,) -> Option<ResolvedFlowSessionDecision> {
         ha_startup_grace_until_secs,
         worker_id,
         None,
+        None,
+        false,
         None,
     )?;
     let mut purged_keys = Vec::new();
@@ -189,11 +266,26 @@ pub(in crate::afxdp) fn resolve_flow_session_decision_with_conntrack_and_payload
     ha_startup_grace_until_secs: u64,
     worker_id: u32,
     prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,
+    // #16217: set ONLY by the poll fabric-adoption callsite, where the
+    // gate (`fabric_adoption_gate_for_wire`) has already proven
+    // this packet's tuple belongs to an Established session and this
+    // node is the RG owner post-takeover. When set, the HA-enforced
+    // resolution below bypasses the ha_inactive terminal for the
+    // adopted flow (see `fabric_adopted_resolution`); every other
+    // caller passes false and keeps the fail-closed enforcement.
+    fabric_adopted: bool,
+    // #16217 (Opus final4): the gate-proved recovery context. The
+    // poll callsites build it from the SAME gate call that set
+    // `fabric_adopted` (gate candidate decision + proved egress RG);
+    // `None` whenever the gate did not qualify the tuple, in which
+    // case the adopted recovery refuses every restore.
+    adopted_recovery: Option<AdoptedRecovery>,
 ) -> Option<ResolvedFlowSessionDecision> {
     resolve_flow_session_decision_with_conntrack_and_payload_and_ack(
         sessions, session_map, shared, forwarding, ha_state, dynamic_neighbors, flow, protocol,
         tcp_flags, payload_len, ingress_ifindex, ingress_vlan_id, fabric_ingress, fabric_link_ingress,
         ha_startup_grace_until_secs, worker_id, prevalidated_forward_nat_match, None,
+        fabric_adopted, adopted_recovery,
     )
 }
 
@@ -218,12 +310,15 @@ pub(in crate::afxdp) fn resolve_flow_session_decision_with_conntrack_and_payload
     worker_id: u32,
     prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,
     ack: Option<u32>,
+    fabric_adopted: bool,
+    adopted_recovery: Option<AdoptedRecovery>,
 ) -> Option<ResolvedFlowSessionDecision> {
     resolve_flow_session_decision_with_conntrack_inner(
         sessions, session_map, shared, forwarding, ha_state,
         dynamic_neighbors, flow, protocol, tcp_flags, payload_len,
         ingress_ifindex, ingress_vlan_id, fabric_ingress, fabric_link_ingress,
         ha_startup_grace_until_secs, worker_id, prevalidated_forward_nat_match, ack,
+        fabric_adopted, adopted_recovery,
     )
 }
 
@@ -247,8 +342,14 @@ pub(in crate::afxdp::session_glue) fn apply_deferred_shared_materialization(
         return;
     };
     let mut hit = ResolvedSessionLookup::shared(entry);
-    let (_, install_failed) =
-        materialize_shared_session_hit(sessions, &mut hit, forwarding, now_ns, tcp_flags);
+    let (_, install_failed) = materialize_shared_session_hit_adopted(
+        sessions,
+        &mut hit,
+        forwarding,
+        now_ns,
+        tcp_flags,
+        resolved.fabric_adopted,
+    );
     resolved.install_failed = install_failed;
     if resolved.session_id == 0 && !install_failed {
         resolved.session_id = sessions.session_id_for(&resolved.key);
@@ -277,7 +378,9 @@ fabric_link_ingress: bool,
 ha_startup_grace_until_secs: u64,
 worker_id: u32,
 prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,
-ack: Option<u32>,) -> Option<ResolvedFlowSessionDecision> {
+ack: Option<u32>,
+fabric_adopted: bool,
+adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecision> {
     if !crate::session::PMechSessionDirectory::global()
         .probe_packet_key(&flow.forward_key)
         .is_fallthrough()
@@ -476,6 +579,13 @@ ack: Option<u32>,) -> Option<ResolvedFlowSessionDecision> {
             ingress_ifindex,
             ha_startup_grace_until_secs,
         );
+        // #16217: a fabric-adopted ForwardCandidate must not die on
+        // the ha_inactive terminal (see `fabric_adopted_resolution`).
+        let enforced_resolution = if fabric_adopted {
+            fabric_adopted_resolution(forwarding, ha_state, now_secs, looked_up_resolution, enforced_resolution, dynamic_neighbors, resolution_target, adopted_recovery.as_ref())
+        } else {
+            enforced_resolution
+        };
         // #15958b: a stored FabricRedirect companion must not be
         // re-resolved onto a gateway/default route. On the punt origin
         // the connected LAN prefix is HA-suppressed, so the FIB lookup
@@ -522,12 +632,63 @@ ack: Option<u32>,) -> Option<ResolvedFlowSessionDecision> {
                 )
             };
         } else {
-            decision.resolution = redirect_session_via_fabric_if_needed(
+            decision.resolution = redirect_session_via_fabric_if_needed_at(
                 forwarding,
+                ha_state,
+                now_secs,
                 enforced_resolution,
                 fabric_link_ingress,
                 resolved.metadata.ingress_zone,
             );
+        }
+        // #16217 (FZDiag34 reverse leg; FZDiag35 conversion):
+        // a REVERSE hit whose stored decision still egresses LOCALLY
+        // (ForwardCandidate) while the reply destination's connected
+        // owner has departed this node must cross the fabric to the
+        // new owner — it must NOT be re-served/re-seeded from the
+        // departed member. Live fw0 (trace cellX): reverse hits
+        // re-resolve from the stored reverse decision egress=5
+        // (ge-0-0-1, RG1's member; the member's egress row carries
+        // the surviving RG2, so neither HA enforcement nor the
+        // egress-row departed arms can see RG1's departure) and TX
+        // every WAN reply into the dead member; the cache arm evicts
+        // once and the slow path re-seeds the same candidate
+        // forever.
+        //
+        // FZDiag35: the conversion no longer gates on the session's
+        // stored owner stamp at all. That stamp was derived from the
+        // reply-egress row at synthesis (RG2, surviving) for the
+        // stamp=2 half of live rows, so the old metadata gate could
+        // never convert them — the gate is dropped and the test is
+        // purely destination-based: `dest_rg`, the connected owner
+        // of the reply destination (the client LAN prefix's owner
+        // RG, RG1 at seed), must be KNOWN (>0) and NOT
+        // forwarding-active locally. Soundness: this is a reverse
+        // hit on a local ForwardCandidate, so the reply would TX
+        // toward `resolution_target` (the client); if that
+        // destination's connected owner is a departed RG, local TX
+        // is by definition into the departed member — the fabric
+        // redirect to the new owner is the only correct serve.
+        // There is NO false-convert shape: a destination whose
+        // connected owner is locally active (the ordinary
+        // locally-served reply) keeps `destination_local` and is
+        // served bit-identically; an unknown owner (dest_rg==0,
+        // e.g. a gateway/default-routed destination with no
+        // connected prefix) is not peer-ownership and never
+        // converts. Anti-loop: a fabric-link arrival never
+        // re-redirects. Non-reverse hits are bit-identical.
+        if let Some(redirect) = reverse_hit_departed_destination_redirect(
+            forwarding,
+            ha_state,
+            now_secs,
+            fabric_link_ingress,
+            resolved.metadata.is_reverse,
+            resolution_target,
+            install_table_name_for_session(forwarding, decision, resolution_target),
+            resolved.metadata.egress_zone,
+            decision.resolution.disposition,
+        ) {
+            decision.resolution = redirect;
         }
         // #9752: a terminal outcome arms this worker's purge walk (D8).
         if decision.resolution.disposition == ForwardingDisposition::TableUnavailable {
@@ -605,6 +766,7 @@ ack: Option<u32>,) -> Option<ResolvedFlowSessionDecision> {
             deferred_synced_promotion,
             deferred_shared_materialization,
             deferred_synced_purge,
+            fabric_adopted,
         });
     }
     // #11061: a synthetic/quarantined reply domain cannot be reinterpreted
@@ -741,6 +903,12 @@ ack: Option<u32>,) -> Option<ResolvedFlowSessionDecision> {
         ingress_ifindex,
         ha_startup_grace_until_secs,
     );
+    // #16217: same adopted-ForwardCandidate exemption as the hit arm.
+    let enforced_resolution = if fabric_adopted {
+        fabric_adopted_resolution(forwarding, ha_state, now_secs, looked_up_resolution, enforced_resolution, dynamic_neighbors, resolution_target, adopted_recovery.as_ref())
+    } else {
+        enforced_resolution
+    };
     // #15958b: same retained-redirect guard as the hit arm above.
     if resolved.decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
         let rev_table = install_table_name_for_session(forwarding, resolved.decision, resolution_target_for_session(flow, resolved.decision));
@@ -770,8 +938,10 @@ ack: Option<u32>,) -> Option<ResolvedFlowSessionDecision> {
             )
         };
     } else {
-        decision.resolution = redirect_session_via_fabric_if_needed(
+        decision.resolution = redirect_session_via_fabric_if_needed_at(
             forwarding,
+            ha_state,
+            now_secs,
             enforced_resolution,
             fabric_link_ingress,
             resolved.metadata.ingress_zone,
@@ -809,6 +979,7 @@ ack: Option<u32>,) -> Option<ResolvedFlowSessionDecision> {
         deferred_shared_materialization: None,
         deferred_forwarding_revalidation: None,
         deferred_synced_purge: None,
+        fabric_adopted: false,
     })
 }
 
@@ -816,10 +987,38 @@ pub(in crate::afxdp) fn redirect_session_via_fabric_if_needed(forwarding: &Forwa
 resolution: ForwardingResolution,
 fabric_ingress: bool,
 ingress_zone: u16,) -> ForwardingResolution {
-    if !matches!(
+    redirect_session_via_fabric_if_needed_at(
+        forwarding,
+        &BTreeMap::new(),
+        0,
+        resolution,
+        fabric_ingress,
+        ingress_zone,
+    )
+}
+
+/// #16216: as `redirect_session_via_fabric_if_needed`, plus the rescue
+/// of a DiscardRoute that carries cluster-terminal provenance. The HA
+/// demotion preserves the FIB's `source_ifindex` stamp; when that
+/// would-be egress's RG is peer-owned at conversion time, the packet
+/// belongs to the peer — redirect it across the fabric so the new
+/// owner creates (or hits) the authoritative session there, instead
+/// of dropping on the split node forever. Operator discards carry no
+/// stamp and never rescue; a fabric-ingress packet never re-redirects.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn redirect_session_via_fabric_if_needed_at(forwarding: &ForwardingState,
+ha_state: &BTreeMap<i32, HAGroupRuntime>,
+now_secs: u64,
+resolution: ForwardingResolution,
+fabric_ingress: bool,
+ingress_zone: u16,) -> ForwardingResolution {
+    let rescuable = matches!(
         resolution.disposition,
         ForwardingDisposition::HAInactive | ForwardingDisposition::ClusterTerminalHAInactive
-    ) {
+    ) || crate::afxdp::forwarding::discard_route_is_cluster_terminal_peer_owned(
+        forwarding, ha_state, now_secs, &resolution,
+    );
+    if !rescuable {
         return resolution;
     }
     if fabric_ingress {
@@ -828,6 +1027,416 @@ ingress_zone: u16,) -> ForwardingResolution {
     resolve_fabric_redirect_for_ingress_zone(forwarding, Some(ingress_zone))
         .unwrap_or(resolution)
 }
+/// #16217: reclassify the HA-enforcement outcome for a FABRIC-ADOPTED
+/// flow. The poll fabric-adoption gate
+/// (`fabric_adoption_established_for_wire`) has already proven, for
+/// this exact NAT'd wire tuple, that the session is Established and
+/// that this node is the RG owner post-takeover; the adoption decision
+/// IS the HA-activity proof for this packet. A ForwardCandidate the
+/// ordinary slow path produced (the pre-failover serving shape) must
+/// therefore not be terminated as `HAInactive` /
+/// `ClusterTerminalHAInactive` by the poll_descriptor HA-activity
+/// enforcement on the receiving worker — that terminal is the last
+/// resolution the adopted tuples died on live (`ha_inactive
+/// ingress-ifindex=4 egress-ifindex=14` on fw1 while RG1 read active).
+/// Only the adopted resolution converts: a ForwardCandidate that HA
+/// enforcement demoted is restored verbatim, and any other enforced
+/// outcome (a genuine ForwardCandidate, LocalDelivery, ...) is kept
+/// as enforced.
+///
+/// #16217 (FZDiag24): the second adoptable shape is a looked-up
+/// `MissingNeighbor` whose egress RG is known. At the takeover
+/// instant the new owner's FIB already nominates the WAN egress
+/// (egress 14, next-hop 172.16.80.200) but the neighbor is not yet
+/// resolved, so the FIB answers `MissingNeighbor` with
+/// `neighbor_mac == None`; HA enforcement then strips it at
+/// `forwarding/ha.rs` (`!is_forwarding_active -> HAInactive`, which
+/// keeps `..resolution` and therefore the neighbor-less shape). The
+/// pre-fix helper required `looked_up == ForwardCandidate`, so this
+/// demoted `MissingNeighbor` was kept as `HAInactive` forever and
+/// every post-FO transient reply hit the session-HIT with
+/// `session_hit_fabric_adopted=true` yet still dropped (FZDiag24:
+/// 3,308 `MissingNeighbor -> HAInactive` + 2,688
+/// `ClusterTerminalHAInactive` resolutions, zero misses). For an
+/// adopted flow the neighbor must be RECOMPUTED from the live FIB
+/// instead of trusting the stripped shape: a fresh FIB lookup for
+/// the packet destination that yields a `ForwardCandidate` (neighbor
+/// now resolved, egress RG known) restores that candidate verbatim.
+/// If the fresh lookup still answers `MissingNeighbor` with a
+/// known egress RG, the adopted hit returns that retryable shape
+/// instead of the terminal (FZDiag27): adoption proved
+/// establishment and (via the gate) ownership, and the missing
+/// piece is only the neighbor, so the poll path drops this packet
+/// without terminalizing the flow, drives the neighbor probe, and
+/// the next retransmit re-enters this restore once the neighbor
+/// lands. Any other recomputed disposition keeps the HA terminal.
+/// The recompute is gated on the looked-up egress RG being known
+/// (>0): an unknown egress (rg 0) never restores.
+///
+/// Non-adopted flows never reach this helper (`fabric_adopted ==
+/// false` at every other callsite), so the fail-closed terminal
+/// stands for them bit-identically. HAInactive with unknown ownership
+/// (egress RG 0: resolution never named an owner) stays terminal even
+/// for adopted flows -- adoption proved session establishment, not
+/// route ownership. Positive non-ownership is enforced at the
+/// adoption gate and on every subsequent hit, not by re-imposing the
+/// lagging snapshot's terminal here. The `dynamic_neighbors` /
+/// `target` arguments are used ONLY by the MissingNeighbor and
+/// ClusterTerminal recomputes; the ForwardCandidate arm ignores
+/// them.
+///
+/// #16217 (FZDiag27): the third adoptable shape is a looked-up
+/// `ClusterTerminalHAInactive` ITSELF. The stored `SyncImport` row
+/// carries the cluster terminal (exported while neither node owned
+/// the egress RG), so the synced-session lookup returns the stored
+/// terminal verbatim: egress 0, no next-hop, and
+/// `owner_rg_for_resolution` reads 0 off it — neither arm above
+/// could ever fire and the fallthrough kept the terminal on every
+/// adopted hit (live: hundreds of hits with
+/// `stored == looked == enforced == ClusterTerminalHAInactive`).
+/// The egress RG is therefore recovered from the FIB, not from the
+/// terminal, with the same recompute as the MissingNeighbor arm.
+/// A recomputed `ForwardCandidate` with a resolved neighbor MAC
+/// and a known egress RG restores; a recomputed `MissingNeighbor`
+/// (egress known, neighbor not yet landed) is returned AS
+/// `MissingNeighbor` — retryable, never re-terminalized — so the
+/// poll path drops this packet without terminalizing the flow and
+/// the next retransmit re-enters this restore; any other
+/// recomputed disposition keeps the HA terminal fail-closed.
+///
+/// #16217 (FZDiag28): recompute an adopted resolution against the
+/// NODE neighbor map -- the dynamic map the warm pass at RG
+/// activation (`Coordinator::queue_warm_pass` over the shared
+/// synced rows) and the kernel monitor populate for every worker,
+/// not the per-worker/per-binding pending_neigh representative frame
+/// `retry_pending_neigh` parks. The FIB recompute already consults
+/// this map via `lookup_forwarding_resolution_with_dynamic`; this
+/// helper names the adoption-side contract and unit-pins it: a hop
+/// present ONLY in the node map (never in any worker's
+/// `forwarding.neighbors` snapshot, never parked) still restores
+/// the adopted flow to the ForwardCandidate carrying that MAC.
+///
+/// #16217 (FZDiag29): live, `fabric_adopted_resolution` still did not
+/// restore SyncImport rows whose stored disposition is
+/// `ClusterTerminalHAInactive`. Trace (Wire26, FZ28 FILE sink):
+/// `stored=looked=enforced=ClusterTerminalHAInactive, looked_egress=0`
+/// for 128/146 adopted hits. That is EXPECTED to reach the
+/// ClusterTerminal arm below — so the arm's recompute itself must be
+/// answering a terminal. It does: the destination (172.16.80.200) is
+/// ON-LINK via the connected /24 on the WAN RETH, but post-failover
+/// that connected prefix is HA-suppressed on the previous BACKUP
+/// (its RG was peer-owned until the failover), so `connected_v4`
+/// holds no covering row; LPM falls to the pref-200 cluster Null0
+/// default and the recompute returns `ClusterTerminalHAInactive`
+/// again. Every unit fixture for this arm inserted the connected
+/// /24 directly into `connected_v4`, so the recompute always found
+/// ForwardCandidate/MissingNeighbor and the arm looked correct —
+/// the live FIB shape (cluster-terminal row present, connected row
+/// suppressed, egress RG recovered only from
+/// `connected_*_by_ifindex` / the terminal's `source_ifindex` stamp)
+/// was never exercised.
+///
+/// The fix uses the RESOLUTION TARGET (`dst`, the post-NAT
+/// destination named by `resolution_target_for_session`), never
+/// `looked_up.egress_ifindex` (0 on the terminal, so any egress-gated
+/// recovery reads 0 and dead-ends): when the plain FIB recompute of
+/// `dst` is itself a cluster terminal, recover the would-be egress
+/// from the terminal stamp (`source_ifindex`, the
+/// `select_source_ifindex_*` attribution the FIB stamped before
+/// zeroing the egress — which already consults
+/// `connected_*_by_ifindex`, so it works exactly when the transit
+/// connected row is suppressed) and, failing that, from the
+/// connected LPM over `connected_*_by_ifindex` for `dst`. If that
+/// egress is known (owner RG > 0) and a neighbor for `(egress, dst)`
+/// is resolved in the static snapshot or the node map, restore a
+/// ForwardCandidate on that egress carrying the MAC; if the egress
+/// is known but the neighbor is unresolved, return the retryable
+/// MissingNeighbor on that egress; otherwise keep the terminal.
+/// #16217 (Opus final4 fold): the gate-proved context the adopted
+/// recovery is judged against. The poll callsites build it ONLY when
+/// `fabric_adoption_gate_for_wire` qualified the tuple: the gate
+/// resolved the candidate's OWN stored decision in the session's
+/// validated install table and proved this node forwarding-active
+/// owner of the resulting egress RG (fresh authoritative set). The
+/// recovery below may therefore restore a candidate ONLY when the
+/// candidate's egress RG equals `proved_rg` — adoption proved
+/// establishment AND ownership of that one RG, never of whatever
+/// egress a MAIN-table re-resolution happens to name. `None` (every
+/// non-adopted caller) keeps the terminal bit-identically.
+#[derive(Clone)]
+pub(in crate::afxdp) struct AdoptedRecovery {
+    /// The session decision the gate proved ownership from: its
+    /// `install_table_domain`/`install_table_check` name the validated
+    /// install table every recovery re-resolution must run in (never
+    /// MAIN for a tenant session), and its NAT names the post-NAT
+    /// target.
+    pub(in crate::afxdp) decision: SessionDecision,
+    /// The per-flow ECMP hash key (canonical forward key), so the
+    /// recovery spread matches the session re-resolve.
+    pub(in crate::afxdp) flow_key: crate::session::SessionKey,
+    /// Egress RG the gate proved this node owns (forwarding-active,
+    /// fresh authoritative set). A recovered candidate whose egress
+    /// RG differs (or is unknown, 0) is refused.
+    pub(in crate::afxdp) proved_rg: i32,
+}
+
+/// #16217 (Opus final4 fold): re-resolve the adopted target in the
+/// session's VALIDATED install table — the same table the gate
+/// judged ownership in — never MAIN. `Unresolvable` (stale domain /
+/// owner mismatch / absent family) yields no resolution: the
+/// recovery cannot name an egress in a table it cannot validate, so
+/// the terminal stands. ECMP spread uses the canonical flow key,
+/// exactly as `lookup_forwarding_resolution_for_session_with_cache`.
+fn adopted_resolution_in_install_table(
+    forwarding: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    recovery: &AdoptedRecovery,
+    target: IpAddr,
+) -> Option<ForwardingResolution> {
+    match super::resolve_install_table_for_session(forwarding, recovery.decision, target) {
+        super::InstallTable::Unresolvable => None,
+        super::InstallTable::Table(table) => Some(
+            super::forwarding::lookup_forwarding_resolution_with_dynamic_for_flow_in_table(
+                forwarding,
+                dynamic_neighbors,
+                target,
+                &recovery.flow_key,
+                table,
+            )
+            .resolution,
+        ),
+        super::InstallTable::Default => Some(
+            super::forwarding::lookup_forwarding_resolution_with_dynamic_for_flow(
+                forwarding,
+                dynamic_neighbors,
+                target,
+                &recovery.flow_key,
+            )
+            .resolution,
+        ),
+    }
+}
+
+/// #16217 (Opus final4 fold): may the recovery restore/return
+/// `resolution`? Only a named egress whose RG is EXACTLY the
+/// gate-proved RG. A candidate egressing under any other RG (a
+/// MAIN-table tenant leak, a gateway route into another RG, an
+/// unknown egress) is not what adoption proved and is refused.
+fn adopted_recovery_egress_matches_proof(
+    forwarding: &ForwardingState,
+    recovery: &AdoptedRecovery,
+    resolution: ForwardingResolution,
+) -> bool {
+    recovery.proved_rg > 0
+        && super::forwarding::owner_rg_for_resolution(forwarding, resolution) == recovery.proved_rg
+}
+
+pub(in crate::afxdp) fn adopted_cluster_terminal_target_resolution(
+    forwarding: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    target: IpAddr,
+    terminal: ForwardingResolution,
+    recovery: &AdoptedRecovery,
+) -> Option<ForwardingResolution> {
+    // Egress recovery, in attribution order: the FIB's own stamp on
+    // the terminal, then the connected LPM for the target IN THE
+    // SESSION'S INSTALL TABLE (which consults
+    // `connected_*_by_ifindex` — the suppressed-row ledger).
+    let table =
+        super::install_table_name_for_session(forwarding, recovery.decision, target);
+    let mut egress_ifindex = terminal.source_ifindex;
+    if egress_ifindex <= 0 {
+        egress_ifindex =
+            super::connected_ifindex_for_target_in_table(forwarding, target, table);
+    }
+    if egress_ifindex <= 0 {
+        return None;
+    }
+    let probe = ForwardingResolution {
+        disposition: ForwardingDisposition::MissingNeighbor,
+        egress_ifindex,
+        tx_ifindex: egress_ifindex,
+        next_hop: Some(target),
+        neighbor_mac: None,
+        source_ifindex: 0,
+        ..terminal
+    };
+    // Opus final4: the recovered egress must be the gate-proved RG's
+    // egress — a connected row in another table/RG never restores.
+    if !adopted_recovery_egress_matches_proof(forwarding, recovery, probe) {
+        return None;
+    }
+    let neighbor = super::forwarding::lookup_neighbor_entry(
+        forwarding,
+        Some(dynamic_neighbors),
+        egress_ifindex,
+        target,
+    );
+    match neighbor {
+        Some(entry) => {
+            let mut restored = probe;
+            restored.disposition = ForwardingDisposition::ForwardCandidate;
+            restored.neighbor_mac = Some(entry.mac);
+            super::populate_egress_resolution(forwarding, egress_ifindex, &mut restored);
+            Some(restored)
+        }
+        None => Some(probe),
+    }
+}
+
+pub(in crate::afxdp) fn adopted_resolution_from_node_neighbor_map(
+    forwarding: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    target: IpAddr,
+    recovery: &AdoptedRecovery,
+) -> Option<ForwardingResolution> {
+    adopted_resolution_in_install_table(forwarding, dynamic_neighbors, recovery, target)
+}
+
+pub(in crate::afxdp) fn fabric_adopted_resolution(
+    forwarding: &ForwardingState,
+    _ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    _now_secs: u64,
+    looked_up: ForwardingResolution,
+    enforced: ForwardingResolution,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    target: IpAddr,
+    recovery: Option<&AdoptedRecovery>,
+) -> ForwardingResolution {
+    if !matches!(
+        enforced.disposition,
+        ForwardingDisposition::HAInactive | ForwardingDisposition::ClusterTerminalHAInactive
+    ) {
+        return enforced;
+    }
+    // Opus final4: without the gate-proved context there is no
+    // adoption proof to restore against — every non-adopted caller
+    // keeps the terminal bit-identically.
+    let Some(recovery) = recovery else {
+        return enforced;
+    };
+    if looked_up.disposition == ForwardingDisposition::ForwardCandidate {
+        // Restore the candidate only when its egress RG is EXACTLY
+        // the gate-proved RG: adoption proved establishment and
+        // ownership of that RG (fresh authoritative set), not of any
+        // egress the looked-up resolution happens to name. Unknown
+        // (0) or mismatched egress RG keeps the terminal.
+        if !adopted_recovery_egress_matches_proof(forwarding, recovery, looked_up) {
+            return enforced;
+        }
+        if looked_up.neighbor_mac.is_some() {
+            return looked_up;
+        }
+        // The looked-up candidate lost its neighbor MAC (the parked
+        // representative resolved first on another worker/binding).
+        // Re-resolve IN THE SESSION'S INSTALL TABLE and consult the
+        // node neighbor map: a hop the warm pass landed there
+        // restores the candidate with that MAC — only under the
+        // gate-proved RG.
+        let Some(recomputed) =
+            adopted_resolution_from_node_neighbor_map(forwarding, dynamic_neighbors, target, recovery)
+        else {
+            return looked_up;
+        };
+        if recomputed.disposition == ForwardingDisposition::ForwardCandidate
+            && recomputed.neighbor_mac.is_some()
+            && adopted_recovery_egress_matches_proof(forwarding, recovery, recomputed)
+        {
+            return recomputed;
+        }
+        return looked_up;
+    }
+    if looked_up.disposition == ForwardingDisposition::MissingNeighbor {
+        // FZDiag24 arm: HA enforcement stripped the (already
+        // neighbor-less) MissingNeighbor to HAInactive. Recompute
+        // the neighbor/egress from the FIB IN THE SESSION'S INSTALL
+        // TABLE: a fresh ForwardCandidate (neighbor resolved since
+        // the look-up) replaces the terminal; a still-missing
+        // neighbor under the gate-proved RG is returned AS
+        // MissingNeighbor (retryable, FZDiag27) so the poll path
+        // drops this packet without terminalizing the flow.
+        // Anything else (no install-table cover, unknown/mismatched
+        // egress RG) keeps the terminal fail-closed.
+        if !adopted_recovery_egress_matches_proof(forwarding, recovery, looked_up) {
+            return enforced;
+        }
+        let Some(recomputed) =
+            adopted_resolution_from_node_neighbor_map(forwarding, dynamic_neighbors, target, recovery)
+        else {
+            return enforced;
+        };
+        if recomputed.disposition == ForwardingDisposition::ForwardCandidate
+            && recomputed.neighbor_mac.is_some()
+            && adopted_recovery_egress_matches_proof(forwarding, recovery, recomputed)
+        {
+            return recomputed;
+        }
+        if recomputed.disposition == ForwardingDisposition::MissingNeighbor
+            && adopted_recovery_egress_matches_proof(forwarding, recovery, recomputed)
+        {
+            return recomputed;
+        }
+        return enforced;
+    }
+    if looked_up.disposition == ForwardingDisposition::ClusterTerminalHAInactive {
+        // FZDiag27 arm: the looked-up shape IS the terminal (stored
+        // on the SyncImport row), so it names no egress RG and the
+        // arms above can never fire. Recover the egress from the
+        // live FIB IN THE SESSION'S INSTALL TABLE with the same
+        // recompute the MissingNeighbor arm uses, then judge the
+        // recomputed shape against the gate-proved RG: a resolved
+        // ForwardCandidate (neighbor MAC present, egress RG ==
+        // proved) restores; a still-missing neighbor under the
+        // proved RG is returned AS MissingNeighbor (retryable);
+        // anything else keeps the terminal fail-closed.
+        let Some(recomputed) =
+            adopted_resolution_from_node_neighbor_map(forwarding, dynamic_neighbors, target, recovery)
+        else {
+            return enforced;
+        };
+        if recomputed.disposition == ForwardingDisposition::ForwardCandidate
+            && recomputed.neighbor_mac.is_some()
+            && adopted_recovery_egress_matches_proof(forwarding, recovery, recomputed)
+        {
+            return recomputed;
+        }
+        if recomputed.disposition == ForwardingDisposition::MissingNeighbor
+            && adopted_recovery_egress_matches_proof(forwarding, recovery, recomputed)
+        {
+            return recomputed;
+        }
+        // FZDiag29: the install-table recompute itself answered the
+        // cluster terminal (the connected prefix covering the target
+        // is HA-suppressed in `connected_v4` post-failover, so LPM
+        // falls to the pref-200 cluster Null0). Recover the would-be
+        // egress from the RESOLUTION TARGET (`target` = dst), not
+        // from `looked_up` (egress 0): the terminal's `source_ifindex`
+        // stamp / the connected LPM over `connected_*_by_ifindex` IN
+        // THE INSTALL TABLE name it, and only an egress under the
+        // gate-proved RG restores.
+        if recomputed.disposition == ForwardingDisposition::ClusterTerminalHAInactive {
+            // Prefer the fresh recompute's stamp; fall back to the
+            // looked-up terminal's (identical FIB, either names it).
+            let stamped = if recomputed.source_ifindex > 0 {
+                recomputed
+            } else {
+                looked_up
+            };
+            if let Some(recovered) = adopted_cluster_terminal_target_resolution(
+                forwarding,
+                dynamic_neighbors,
+                target,
+                stamped,
+                recovery,
+            ) {
+                return recovered;
+            }
+        }
+        return enforced;
+    }
+    enforced
+}
+
 
 pub(in crate::afxdp) fn enforce_session_ha_resolution(forwarding: &ForwardingState,
 ha_state: &BTreeMap<i32, HAGroupRuntime>,

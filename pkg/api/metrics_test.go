@@ -1252,6 +1252,13 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			nil,
 			nil,
 		),
+		// #16215: stale source-NAT revocations, the StaleSourceNat sibling.
+		userspaceSnatRevokedSessions: prometheus.NewDesc(
+			"xpf_userspace_snat_revoked_sessions_total",
+			"snat revoked sessions",
+			nil,
+			nil,
+		),
 		userspaceUnzonedIngressDenied: prometheus.NewDesc(
 			"xpf_userspace_unzoned_ingress_denied_total",
 			"unzoned ingress denials",
@@ -1705,6 +1712,8 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		// #10021: revoked-sessions total emitted unconditionally. Distinct
 		// from every sibling so a crossed wire fails the assertion below.
 		PolicyRevokedSessionsTotal: 18,
+		// #16215: SNAT-revoked-sessions total emitted unconditionally.
+		SnatRevokedSessionsTotal: 29,
 		// #11503: separate ingress and egress causes have distinct values.
 		UnzonedIngressDeniedTotal: 31,
 		UnzonedEgressDeniedTotal:  47,
@@ -1978,13 +1987,14 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// counter, for 109. #15150 adds the verdict-queue-contended counter,
 	// for 110. (The base census already drifted by +2 on origin/master:
 	// want 109, got 111 there.) #15249 adds the GRE transport-egress
-	// refusal counter, for 113.
+	// refusal counter, for 113. #16215 adds the SNAT-revoked-sessions
+	// counter, for 114.
 	// RE-ANCHORED, not relaxed: this count is a deliberate gate — it catches a
 	// series that is emitted but never asserted, which is how a collector grows
 	// an unverified metric. All new series ARE asserted below, so the original
 	// claim still holds and the number moves with the population.
-	if len(got) != 113 {
-		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 113 metrics, got %d", len(got))
+	if len(got) != 114 {
+		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 114 metrics, got %d", len(got))
 	}
 
 	// #8447: DISTINCT values, so a collector that emitted one of the quartet
@@ -2032,6 +2042,8 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	assertCounterClose(t, got, c.userspaceSessionPublishErrors, nil, 6)
 	// #10021: revoked-sessions total emitted unconditionally.
 	assertCounterClose(t, got, c.userspacePolicyRevokedSessions, nil, 18)
+	// #16215: SNAT-revoked-sessions total emitted unconditionally.
+	assertCounterClose(t, got, c.userspaceSnatRevokedSessions, nil, 29)
 	// #11503: distinct cause series preserve their own status values.
 	assertCounterClose(t, got, c.userspaceUnzonedIngressDenied, nil, 31)
 	assertCounterClose(t, got, c.userspaceUnzonedEgressDenied, nil, 47)

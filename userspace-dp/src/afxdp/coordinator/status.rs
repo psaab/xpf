@@ -180,6 +180,16 @@ impl super::Coordinator {
             .sum()
     }
 
+    /// #16215: sum stale source-NAT revocations across every binding.
+    /// Surfaced as `xpf_userspace_snat_revoked_sessions_total`.
+    pub fn snat_revoked_sessions_total(&self) -> u64 {
+        self.workers
+            .live
+            .values()
+            .map(|live| live.snat_revoked_sessions.load(Ordering::Relaxed))
+            .sum()
+    }
+
     /// #1782: sum of per-binding `pending_neigh_duplicate_drops` across
     /// every `BindingLiveState`. Counts ONLY the H5 sibling drops where
     /// the `(egress_ifindex, next_hop)` key was already pending — not
@@ -1869,6 +1879,7 @@ impl super::Coordinator {
                     session_gc_aged_owner_rg_zero_active_node: s
                         .session_gc_aged_owner_rg_zero_active_node,
                     session_gc_kept_alive_by_companion: s.session_gc_kept_alive_by_companion,
+                    session_gc_expired: s.session_gc_expired,
                     nat_reverse_key_collisions: s.nat_reverse_key_collisions,
                     nat_reverse_key_collisions_distinct_src: s
                         .nat_reverse_key_collisions_distinct_src,

@@ -170,22 +170,17 @@ fn probe_publish(
     decision: SessionDecision,
     metadata: SessionMetadata,
 ) {
-    let entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata,
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: libc::IPPROTO_TCP as u8,
-        tcp_flags: TCP_ACK,
-        generation: 0,
-        session_id: PROBE_SESSION_ID,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata,
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: libc::IPPROTO_TCP as u8,
+    tcp_flags: TCP_ACK,
+    generation: 0,
+    session_id: PROBE_SESSION_ID,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     publish_shared_session(&maps.0, &maps.1, &maps.2, &maps.3, &entry);
 }
 

@@ -54,6 +54,11 @@ pub(super) fn stage_flow_cache_seed(
     // before any fabric redirect replaced the resolution.
     admission_egress_zone: u16,
     apply_nat_on_fabric: bool,
+    // #16217: true when this seed comes from the fabric-adoption resolve
+    // (or an adopted session-hit re-resolve): the cached entry carries
+    // `fabric_established` so hit-path revalidation does not evict it on
+    // the `EnforceChanged` arm. Ordinary resolves pass false.
+    fabric_established: bool,
     neighbor_epoch_snapshot: &ShardEpochSnapshot,
     worker_ctx: &WorkerContext,
 ) {
@@ -241,6 +246,9 @@ pub(super) fn stage_flow_cache_seed(
                     );
             }
         }
+        // #16217: carry the adoption mark onto the cached entry (see
+        // `FlowCacheEntry::fabric_established`).
+        entry.fabric_established = fabric_established;
         flow_cache.insert(entry);
     }
     }

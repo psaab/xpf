@@ -369,6 +369,8 @@ func populatedCoverageStatus() dpuserspace.ProcessStatus {
 		SessionPublishErrorsTotal: 5,
 		// #10021: policy-revoked-sessions total (always emits).
 		PolicyRevokedSessionsTotal: 13,
+		// #16215: SNAT-revoked-sessions total (always emits).
+		SnatRevokedSessionsTotal: 17,
 		// #11503: direction-specific unzoned-policy denials.
 		UnzonedIngressDeniedTotal: 19,
 		UnzonedEgressDeniedTotal:  23,
@@ -648,6 +650,7 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		"xpf_userspace_dynamic_neighbor_present",                           // #1782 cold-start H2 dump
 		"xpf_userspace_session_publish_errors_total",                       // #1789 publish failures
 		"xpf_userspace_policy_revoked_sessions_total",                      // #10021 policy-revoked sessions
+		"xpf_userspace_snat_revoked_sessions_total",                        // #16215 SNAT-revoked sessions
 		"xpf_userspace_pptp_unassociated_packets_total",                    // #13282 flowless GREv1 packets
 		"xpf_userspace_pptp_expired_idle_total",                            // #13282 association expiry
 		"xpf_userspace_pptp_handle_collisions_total",                       // #13282 fail-closed collisions

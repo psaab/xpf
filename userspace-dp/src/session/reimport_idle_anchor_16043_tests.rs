@@ -53,12 +53,14 @@ fn anchor(table: &SessionTable, key: &SessionKey) -> u64 {
 fn expire_as_standby(table: &mut SessionTable, now_ns: u64) -> Vec<ExpiredSession> {
     let forwards = |_rg: i32| false;
     let epoch = |_rg: i32| 0;
+    let no_served = |_key: &SessionKey| NodeServedEvidence::default();
     let ha = ExpireHaContext {
         node_active: true,
         forwards_rg: &forwards,
         epoch_of: &epoch,
         ceiling_mult: STALE_SYNCED_CEILING_MULT,
         ceiling_abs_ns: STALE_SYNCED_CEILING_ABS_NS,
+        node_served: &no_served,
     };
     table.last_gc_ns = 0;
     table.expire_stale_entries_ha(now_ns, Some(&ha))

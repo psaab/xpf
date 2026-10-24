@@ -479,6 +479,16 @@ impl SessionMetadata {
 pub(crate) struct ForwardingGenerationStamp {
     pub(crate) config_generation: u64,
     pub(crate) fib_generation: u32,
+    /// #16109: helper-LOCAL neighbor-set generation. Deliberately NOT
+    /// the FIB generation: that counter is owned by the Go manager
+    /// (absolute values, rollback-fenced), so locally advancing it
+    /// desyncs the shim/userspace_ctrl stamp from helper validation
+    /// and every packet reads generation-mismatched. This component
+    /// lives only inside the helper: it advances exactly when the
+    /// effective neighbor set changes, making MissingNeighbor-era
+    /// resolutions stale so hits re-resolve, and never crosses a
+    /// process boundary.
+    pub(crate) neighbor_generation: u64,
     /// Peer-imported/shared lookups carry no local forwarding provenance.
     pub(crate) valid: bool,
 }
@@ -513,6 +523,19 @@ pub(crate) struct ForwardSessionMatch {
     pub(crate) metadata: SessionMetadata,
     pub(crate) forwarding_generation: ForwardingGenerationStamp,
     pub(crate) aux: SessionLookupAux,
+    /// #16217: explicit provenance for reverse synthesis. `true` ONLY
+    /// when this match was constructed synthetically from a synced
+    /// (`SyncedSessionEntry`) forward row by
+    /// `synthesized_synced_reverse_entry_in_table` — there is no local
+    /// forward observation, so the reverse companion's owner must be
+    /// derived from this node's own reply resolution. Every locally
+    /// observed forward lookup (worker table or shared map) carries
+    /// `false`, so the companion stamps the forward row's stored
+    /// owner. Never inferred from `aux.session_id`: local table
+    /// matches are built with a default aux (id 0) by several lookup
+    /// helpers, while shared-map matches carry the peer's nonzero id
+    /// — keying on the id inverted the two populations.
+    pub(crate) synced_synthesis: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

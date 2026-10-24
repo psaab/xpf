@@ -1147,6 +1147,15 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                     {
                         return None;
                     }
+                    // FZDiag37/#16217 (GLM F2): NO established-guard
+                    // here by design: this is the NoLocalEntry arm —
+                    // `forward_query` has NO local forward row
+                    // (`source_nat_revalidation_target` just answered
+                    // NoLocalEntry, and `entry_by_key(forward_query)`
+                    // is therefore None), so a guard probing it would
+                    // be dead code. An established session whose
+                    // forward row IS local takes the companion-present
+                    // path below, where the guard actually fires.
                     let Some(forward_ingress_vlan_id) = metadata.forward_ingress_vlan_id else {
                         return Some(PolicyRevocation {
                             canonical_key: None,
@@ -1209,6 +1218,16 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                         forward_selector_for_hit(true, packet_icmp, stored_forward_icmp),
                         ignore_selector,
                     );
+                    // FZDiag37/#16217 (GLM F2): no established-guard
+                    // in this arm either — NoLocalEntry means there
+                    // is no local forward row to be established, so
+                    // the fail-closed verdict stands exactly as
+                    // before. Caller contract for the canonical-less
+                    // revocation: the session is kept (nothing local
+                    // is claimed for teardown) and this packet is
+                    // dropped (the caller recycles the descriptor
+                    // and never forwards it; pinned by
+                    // `declined_reverse_hit_packet_outcomes_16217`).
                     return (!valid).then_some(PolicyRevocation {
                         canonical_key: None,
                         decision: forward_decision,
@@ -1296,6 +1315,117 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     if scope_dependent && identity_absent && forward_metadata.nat_scope_ifindex.is_none() {
         return None;
     }
+    // #16109: a peer-synced row whose STORED resolution is terminal
+    // (egress 0, DiscardRoute / ClusterTerminalHAInactive) carries no
+    // local route verdict to judge its translation against: on the
+    // standby that terminal outcome encodes "the owner RG is not
+    // forwarding here", and on the new owner it persists until the
+    // row is refreshed or re-resolved (the refresh and the hit
+    // re-resolution both consult the live FIB and egress owner, so
+    // forwarding itself is never authorized by this decline). Judging
+    // the stored line can only answer `forwarding.egress.get(&0)`
+    // miss = invalid = revoke-and-delete both halves, the shared maps
+    // and the NAT reservation at the flow's first packet — the
+    // permanent blackhole. Decline instead: a genuinely withdrawn
+    // SNAT rule still revokes, because a judged row with a REAL
+    // egress (live or re-resolved) runs the full geometry check
+    // below, and a terminal row whose rule was withdrawn revokes on
+    // the first hit after it gains a real resolution. The row's NAT
+    // provenance stamp is deliberately left stale so that later hit
+    // re-derives once a real resolution exists. Locally-authored rows
+    // never carry this shape from admission (a local terminal outcome
+    // is not installed as an SNAT session), so the decline is scoped
+    // to the peer-synced family.
+    if forward_origin.is_peer_synced()
+        && forward_decision.resolution.egress_ifindex <= 0
+        && matches!(
+            forward_decision.resolution.disposition,
+            ForwardingDisposition::DiscardRoute | ForwardingDisposition::ClusterTerminalHAInactive
+        )
+    {
+        return None;
+    }
+    // #16215 (third shape): a peer-synced row whose STORED resolution is
+    // FabricRedirect names the fabric pseudo-egress (the fabric parent
+    // ifindex, e.g. 4 for fab0@ge-0-0-0) as its egress. That ifindex has
+    // no EgressInterface row, zone pair, or SNAT geometry, so judging it
+    // below can only answer `forwarding.egress.get(&fabric)` miss =
+    // invalid = revoke-and-delete both halves — exactly the egress-miss
+    // revocation proven live on fw0 (egress 4, dest_valid=true, dynamic
+    // provenance Some(false)). The fabric leg's NAT validity is judged
+    // on the egress owner when the packet arrives there; here the row
+    // carries no local egress verdict to judge against, so DECLINE like
+    // the terminal decline above. This covers rows demoted/retagged to
+    // SyncImport by DemoteOwnerRGS as well as true peer imports, and it
+    // applies regardless of failover timing (the live revocations fired
+    // in the pre-failover demote/republish window). A genuinely
+    // withdrawn SNAT rule still revokes once the row gains a real
+    // egress resolution (live or re-resolved) and runs the full
+    // geometry check below; locally-authored rows are judged as before.
+    if forward_origin.is_peer_synced()
+        && matches!(
+            forward_decision.resolution.disposition,
+            ForwardingDisposition::FabricRedirect
+        )
+    {
+        return None;
+    }
+    // #16215: judge the packet's re-resolved decision, not a stored
+    // terminal one — on EVERY node, not only the activating one. A
+    // peer-synced row can still carry its standby-side terminal
+    // resolution on the hitting worker (a peer worker whose
+    // RefreshOwnerRGS has not landed, a row materialized after the
+    // refresh, or — the fw0 shape — a locally-authored row demoted to
+    // SyncImport by DemoteOwnerRGS whose demote re-resolution demoted
+    // the cluster-terminal FIB row to plain DiscardRoute): stored
+    // egress 0 with DiscardRoute / ClusterTerminalHAInactive names no
+    // egress interface, so the stored line below can only answer
+    // `forwarding.egress.get(&0)` miss = invalid = revoke-and-delete —
+    // a live session deleted at its first packet after an RG move.
+    // Substituting the RESOLUTION (egress identity only; the NAT
+    // decision, metadata and key are untouched) makes the validator
+    // judge exactly the decision this packet is being forwarded with.
+    // FORWARD hits only: on a reverse hit the packet's decision is the
+    // REPLY's egress (the LAN side), which must never stand in for the
+    // forward row's WAN egress — judging the forward SNAT against the
+    // LAN egress reads the wrong zone pair and revokes valid
+    // translations. Reverse hits keep the stored forward decision.
+    // A genuinely withdrawn rule still revokes: the zone pair is read
+    // off the live egress, and the translation geometry must match a
+    // live rule. Scoped to peer-synced rows with a locally-forwarding
+    // re-resolution; every other row judges its stored decision
+    // exactly as before. Copy-on-write: the caller owns the hit
+    // decision by value, so no other row is mutated (the stored row
+    // is rewritten by RefreshOwnerRGS, or re-resolved again on the
+    // next stale hit — never per-packet on the fast path).
+    //
+    // The terminal-stored decline above runs first, so this
+    // substitution is unreachable while the stored row is terminal:
+    // the decline is what keeps a terminal row whose rule was
+    // withdrawn alive until it gains a real resolution, and judging
+    // the packet's terminal copy of that same row would revoke it
+    // here on the egress-0 miss. The substitution therefore covers
+    // the non-terminal stored shapes (a real egress whose stored
+    // geometry no longer matches the packet's re-resolved egress);
+    // revocation stays a FRESH decision's verdict in both arms.
+    let forward_decision = if !metadata.is_reverse
+        && forward_origin.is_peer_synced()
+        && decision.resolution.egress_ifindex > 0
+        && matches!(
+            decision.resolution.disposition,
+            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+        )
+        && !matches!(
+            forward_decision.resolution.disposition,
+            ForwardingDisposition::DiscardRoute | ForwardingDisposition::ClusterTerminalHAInactive
+        )
+    {
+        let mut judged = forward_decision;
+        judged.resolution = decision.resolution;
+        judged
+    } else {
+        forward_decision
+    };
     // #15934: selector priority follows HIT DIRECTION (see
     // forward_selector_for_hit), not session-branch shape: a reverse hit
     // that reaches this arm because its forward companion IS materialized
@@ -1328,6 +1458,45 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
             sessions.mark_source_nat_revalidated(canonical_key, static_nat);
         }
         return None;
+    }
+    // FZDiag37/#16217: an established, traffic-carrying session is
+    // NEVER StaleSourceNat-revoked on a reverse/fabric hit whose
+    // judged forward row lacks forward VLAN/dynamic-SNAT provenance
+    // (companion-less fabric/synced reverse rows synthesize that
+    // absence; it is structural, not staleness evidence). Decline:
+    // keep session and serve this packet by the session (the caller
+    // proceeds past revalidation; only a PolicyRevocation drops).
+    // The escape is an actual NAT-binding
+    // change: the judged row was revalidated under an OLDER config
+    // generation and the live config epoch has advanced past it
+    // (`source_nat_revalidated.config_generation` lags the live
+    // `forwarding_revalidation_gen.config_generation`) — a withdrawn
+    // or re-bound translation under the new epoch still revokes here.
+    // Scope note (GLM Final5, no overclaim): this decline is only
+    // reachable on a REVERSE hit whose judged forward metadata
+    // carries no forward VLAN (`forward_ingress_vlan_id` None). A
+    // reverse hit WITH recorded forward VLAN provenance, and every
+    // forward hit, are judged normally and never take this decline.
+    if metadata.is_reverse
+        && forward_metadata.forward_ingress_vlan_id.is_none()
+        && sessions.forward_established_with_traffic(&forward_key)
+    {
+        // GLM F2 epoch hole, closed by construction: a PEER-IMPORTED
+        // row carries `source_nat_revalidated: None` at import
+        // (`upsert_synced_with_origin`), so it has NO judged epoch.
+        // Mapping that to 0 made `judged(0) >= live` false whenever a
+        // live epoch existed, silently disabling the decline for
+        // exactly the imported rows it exists for. An unjudged row
+        // has never been validated under ANY local epoch, so there
+        // is no stale binding to revoke against: decline (keep
+        // session, serve packet) until a local judgment stamps an
+        // epoch. Only a row judged under an epoch the live config
+        // has ADVANCED PAST (binding actually changed) revokes.
+        let live_epoch = sessions.forwarding_revalidation_config_generation();
+        let judged_epoch = sessions.source_nat_revalidated_config_generation(&forward_key);
+        if live_epoch == 0 || judged_epoch.is_none_or(|judged| judged >= live_epoch) {
+            return None;
+        }
     }
     Some(PolicyRevocation {
         canonical_key,

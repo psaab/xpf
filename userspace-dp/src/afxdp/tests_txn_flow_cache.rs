@@ -479,22 +479,17 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
             .expect("shared sessions")
             .insert(
                 key.clone(),
-                SyncedSessionEntry {
-                    key: key.clone(),
-                    decision: stored_decision,
-                    metadata: metadata(false),
-                    source_nat_static: None,
-                    leak_incarnation: 0,
-                    origin: SessionOrigin::ForwardFlow,
-                    protocol: PROTO_TCP,
-                    tcp_flags: TCP_FLAG_SYN,
-                    generation: 0,
-                    session_id: victim_id,
-                    tcp_close_class: 0,
-                    tcp_handshake_state: 1,
-                    pptp_call_ids: 0,
-                rev_packets: 0,
-                },
+                SyncedSessionEntry { key: key.clone(),
+                decision: stored_decision,
+                metadata: metadata(false),
+                source_nat_static: None,
+                leak_incarnation: 0,
+                origin: SessionOrigin::ForwardFlow,
+                protocol: PROTO_TCP,
+                tcp_flags: TCP_FLAG_SYN,
+                generation: 0,
+                session_id: victim_id,
+                tcp_close_class: 0, tcp_handshake_state: 1, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, },
             );
     }
     assert_eq!(sessions.len(), 9);
@@ -837,22 +832,17 @@ fn txn_missing_neighbor_pressure_shed_gate_failure_retries_nat64_cleanup_13764()
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     shared_sessions.lock().expect("shared sessions").insert(
         victim_key.clone(),
-        SyncedSessionEntry {
-            key: victim_key.clone(),
-            decision: victim_entry.decision,
-            metadata: victim_entry.metadata,
-            source_nat_static: None,
-            leak_incarnation: 0,
-            origin: crate::session::SessionOrigin::ForwardFlow,
-            protocol: PROTO_TCP,
-            tcp_flags: TCP_FLAG_SYN,
-            generation: 0,
-            session_id: sessions.session_id_for(&victim_key),
-            tcp_close_class: 0,
-            tcp_handshake_state: 1,
-            pptp_call_ids: 0,
-        rev_packets: 0,
-        },
+        SyncedSessionEntry { key: victim_key.clone(),
+        decision: victim_entry.decision,
+        metadata: victim_entry.metadata,
+        source_nat_static: None,
+        leak_incarnation: 0,
+        origin: crate::session::SessionOrigin::ForwardFlow,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_SYN,
+        generation: 0,
+        session_id: sessions.session_id_for(&victim_key),
+        tcp_close_class: 0, tcp_handshake_state: 1, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, },
     );
     let held_lease = crate::afxdp::bpf_map::global_tuple_gate()
         .acquire_lease([victim_key.clone()])
@@ -1039,22 +1029,17 @@ fn txn_pressure_shed_nat_pool_hold_behavior(gate_blocks_cleanup: bool) {
         .expect("shared sessions")
         .insert(
             victim_key.clone(),
-            SyncedSessionEntry {
-                key: victim_key.clone(),
-                decision: victim_entry.decision,
-                metadata: victim_entry.metadata,
-                source_nat_static: None,
-                leak_incarnation: 0,
-                origin: crate::session::SessionOrigin::ForwardFlow,
-                protocol: PROTO_TCP,
-                tcp_flags: TCP_FLAG_SYN,
-                generation: 0,
-                session_id: sessions.session_id_for(&victim_key),
-                tcp_close_class: 0,
-                tcp_handshake_state: 1,
-                pptp_call_ids: 0,
-            rev_packets: 0,
-            },
+            SyncedSessionEntry { key: victim_key.clone(),
+            decision: victim_entry.decision,
+            metadata: victim_entry.metadata,
+            source_nat_static: None,
+            leak_incarnation: 0,
+            origin: crate::session::SessionOrigin::ForwardFlow,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_FLAG_SYN,
+            generation: 0,
+            session_id: sessions.session_id_for(&victim_key),
+            tcp_close_class: 0, tcp_handshake_state: 1, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, },
         );
     let _held_lease = if gate_blocks_cleanup {
         Some(
@@ -5645,11 +5630,13 @@ fn route_overlay_fib_bump_reseeds_packet_egress_11599() {
         snapshot_installed: true,
         config_generation: 7,
         fib_generation: 9,
+        neighbor_generation: 0,
     };
     let v2 = ValidationState {
         snapshot_installed: true,
         config_generation: 7,
         fib_generation: 10,
+        neighbor_generation: 0,
     };
 
     let run_packet = |binding: &mut BindingWorker,
@@ -6038,6 +6025,7 @@ fn cross_worker_reply_evidence_retains_victim_16019() {
         tcp_handshake_state: 0,
         pptp_call_ids: 0,
         rev_packets,
+        fwd_packets: 0,
     };
     crate::afxdp::shared_ops::publish_shared_session(
         &shared_sessions,

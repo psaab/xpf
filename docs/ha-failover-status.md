@@ -368,7 +368,13 @@ later):
    next-hop=172.16.80.200` — neighbor resolved, sessions
    Established, but the fabric packets are HA-gated/discarded
    instead of adopted/served on the receiving worker. **This leg
-   is unnamed in code and unfixed. Do not merge #16217 as the
+   FZFixWire22 stamped backup-served counters (ct-slice stamps
+   every forward pair, any origin/stage) and made the adoption
+   gate read the fresh coordinator RG-active set, yet the live
+   aged cell (99.16217.43.dirty, cell52) still fails with 29 SUM
+   zero intervals, fw1 rows still `Timeout: 20` at d28 and last
+   resolution still `ha_inactive` -- so this leg is STILL open
+   and unnamed beyond those two arms. Do not merge #16217 as the
    aged-failover cure until a cell shows zero zeros with this leg
    closed.**
 

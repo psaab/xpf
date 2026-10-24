@@ -470,6 +470,12 @@ pub(in crate::afxdp) fn session_delta_info(
         source_nat_provenance: crate::session::source_nat_provenance_to_wire(
             delta.source_nat_static,
         ),
+        // #16217: live per-direction packet counters off the delta
+        // (snapshotted at production from the serving entry / shared
+        // row), at parity with the Go consumer's expectation that an
+        // Open/Update delta states the service observed so far.
+        fwd_packets: delta.counters.fwd_packets,
+        rev_packets: delta.counters.rev_packets,
     }
 }
 

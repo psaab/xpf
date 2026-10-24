@@ -195,6 +195,42 @@ pub(super) fn stage_flow_cache_hit(
         false
     };
 
+    // #16217 (fold B6): on EVERY hit a marked (adopted) entry's
+    // ownership is re-derived BEFORE the mutating lookup
+    // (side-effect-free peek: no tallies/LRU/lease re-stamp) via
+    // `revalidate_fabric_established_fresh` — judged against the
+    // AUTHORITATIVE fresh RG set (`forwarding_active_rgs`, loaded
+    // from the coordinator ArcSwap for THIS packet), the same
+    // ownership evidence the adoption gate proves. The result DRIVES
+    // the `EnforceChanged` suppression below (a lapsed mark
+    // suppresses nothing). Pre-fold the fresh revalidation was
+    // computed against the lagging `ha_state` snapshot and then
+    // DISCARDED (`let _ = adopted_mark_revalidated;`), so the raw
+    // mark alone suppressed the demotion even after failback. The
+    // mark NEVER suppresses `ForwardCandidateEgressDeparted`
+    // (checked BEFORE enforce in the validator), so a departed
+    // egress supersedes despite a live mark and re-resolves toward
+    // FabricRedirect. Unmarked entries compute `false` and are
+    // bit-identical.
+    let (adopted_mark, adopted_mark_revalidated) = {
+        let peek_lookup = FlowCacheLookup::for_packet(meta, validation, worker_ctx.forwarding);
+        match flow_state
+            .flow_cache
+            .peek_entry(&flow.forward_key, peek_lookup)
+        {
+            Some(peeked) if peeked.fabric_established => (
+                true,
+                crate::afxdp::forwarding::revalidate_fabric_established_fresh(
+                    worker_ctx.forwarding,
+                    worker_ctx.forwarding_active_rgs,
+                    peeked.fabric_established,
+                    peeked.decision.resolution,
+                ),
+            ),
+            _ => (false, false),
+        }
+    };
+
     if let Some(cached) = flow_state.flow_cache.lookup_counted_with_scheduler_expiry(
         &flow.forward_key,
         // #5139: resolve the LOGICAL (VLAN-selecting) ingress ifindex into the
@@ -212,6 +248,7 @@ pub(super) fn stage_flow_cache_hit(
         // #14943: validate/re-stamp the entry against the CURRENT runtime
         // lease from this batch's live HA snapshot, not the insert stamp.
         worker_ctx.ha_state,
+        worker_ctx.forwarding,
     ) {
         // #3048/#5147: an ARP/NDP MAC replacement or neighbor deletion may
         // invalidate this descriptor's next-hop mapping (gateway VRRP
@@ -223,17 +260,41 @@ pub(super) fn stage_flow_cache_hit(
         // relaxed atomic load + compare. A mismatch means the cached dst_mac
         // or neighbor liveness may be stale;
         let neighbor_mac_stale = cached.neighbor_mac_epoch_stale(worker_ctx.dynamic_neighbors);
-        // evict and re-resolve on the slow path.
-        if neighbor_mac_stale
+        // #16220: sub-attribute the decision revalidation so the live
+        // readout names the exact rejecting check.
+        // #16217: an entry seeded by the fabric-adoption resolve carries
+        // `fabric_established` — the adoption gate already proved this exact
+        // tuple Established with this node as RG owner. The `EnforceChanged`
+        // arm must not evict it: the receiving worker's HA snapshot may still
+        // read the egress RG inactive (the stale-snapshot shape the adoption
+        // resolve itself bypasses), and evicting only re-runs that demotion
+        // on the session-hit path. Only `EnforceChanged` is suppressed; the
+        // neighbor-MAC, generation, lease, and remaining decision arms still
+        // revalidate the entry every hit. Non-adopted entries are untouched.
+        //
+        // #16217: the suppression reads the REVALIDATED mark
+        // (peeked above) and covers ONLY the adoption-window
+        // `EnforceChanged` demotion while this node still owns the
+        // egress RG. Once the egress RG has departed in the live
+        // snapshot (`forward_candidate_egress_departed`, checked
+        // BEFORE enforce in the validator), ordinary revalidation
+        // owns the entry: it supersedes and re-resolves toward
+        // FabricRedirect -- failback converts again.
+        let invalid_reason = if neighbor_mac_stale
             || (fabric_link_ingress
                 && cached.decision.resolution.disposition == ForwardingDisposition::FabricRedirect)
-            || !cached_flow_decision_valid(
+        {
+            None
+        } else {
+            let reason = crate::afxdp::forwarding::cached_flow_decision_invalid_reason_for_flow(
                 worker_ctx.forwarding,
                 worker_ctx.ha_state,
                 worker_ctx.dynamic_neighbors,
                 now_secs,
                 cached.stamp.owner_rg_id,
                 packet_fabric_ingress,
+                fabric_link_ingress,
+                Some(&flow.forward_key),
                 resolution_target_for_session(flow, cached.decision),
                 install_table_name_for_session(
                     worker_ctx.forwarding,
@@ -241,8 +302,115 @@ pub(super) fn stage_flow_cache_hit(
                     resolution_target_for_session(flow, cached.decision),
                 ),
                 cached.decision.resolution,
-            )
+            );
+            // #16217 (fold B6): the mark suppresses ONLY the
+            // `EnforceChanged` demotion, and ONLY while the FRESH
+            // revalidation (peeked above, judged against
+            // `forwarding_active_rgs`) still proves this node owns
+            // the egress RG. Departure is checked BEFORE enforce in
+            // the validator, so a departed egress returns
+            // `ForwardCandidateEgressDeparted` here and is never
+            // matched — a marked entry with a departed egress evicts
+            // despite its mark and re-resolves toward FabricRedirect.
+            // Pre-fold the revalidation result was discarded here
+            // (`let _ = adopted_mark_revalidated;`) and the raw mark
+            // alone suppressed the demotion.
+            if adopted_mark_revalidated
+                && matches!(
+                    reason,
+                    Some(crate::afxdp::forwarding::CachedDecisionInvalid::EnforceChanged)
+                )
+            {
+                None
+            } else {
+                reason
+            }
+        };
+        // #16222 DISC (scratch observability, debug-log builds only):
+        // per-tuple dump for starved-tuple diagnosis — seeded decision
+        // kind, stamp owner RG, stored resolution, cache outcome per
+        // packet. Tuple-gated on the live split-RG shape
+        // (10.0.61.102 -> 172.16.80.200:5211) so the log stays bounded
+        // to the starved streams; compiled out in non-debug builds.
+        #[cfg(feature = "debug-log")]
         {
+            let k = &flow.forward_key;
+            let is_starved_tuple = k.src_ip == std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 61, 102))
+                && k.dst_ip == std::net::IpAddr::V4(std::net::Ipv4Addr::new(172, 16, 80, 200))
+                && k.dst_port == 5211;
+            if is_starved_tuple {
+                debug_log!(
+                    "DISC16222 tuple={}:{}->{}:{} proto={} ingress_if={} packet_fabric_ingress={} fabric_link_ingress={} seeded_kind={:?} stamp_owner_rg={} stored_resolution={:?} egress_if={} local_owner_rg={} invalid_reason={:?} outcome={}",
+                    k.src_ip,
+                    k.src_port,
+                    k.dst_ip,
+                    k.dst_port,
+                    k.protocol,
+                    meta.ingress_ifindex,
+                    packet_fabric_ingress,
+                    fabric_link_ingress,
+                    cached.decision.resolution.disposition,
+                    cached.stamp.owner_rg_id,
+                    cached.decision.resolution.disposition,
+                    cached.decision.resolution.egress_ifindex,
+                    crate::afxdp::forwarding::owner_rg_for_resolution(
+                        worker_ctx.forwarding,
+                        cached.decision.resolution
+                    ),
+                    invalid_reason,
+                    if neighbor_mac_stale
+                        || (fabric_link_ingress
+                            && cached.decision.resolution.disposition
+                                == ForwardingDisposition::FabricRedirect)
+                        || invalid_reason.is_some()
+                    {
+                        "evict"
+                    } else {
+                        "serve"
+                    },
+                );
+            }
+        }
+        // evict and re-resolve on the slow path.
+        if neighbor_mac_stale
+            || (fabric_link_ingress
+                && cached.decision.resolution.disposition == ForwardingDisposition::FabricRedirect)
+            || invalid_reason.is_some()
+        {
+            // #16220: attribute the arm — neighbor-MAC staleness vs the
+            // HA/fabric decision revalidation sub-check.
+            let arm = if neighbor_mac_stale {
+                crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitNeighborMac
+            } else if fabric_link_ingress
+                && cached.decision.resolution.disposition == ForwardingDisposition::FabricRedirect
+            {
+                crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricRedirectOnFabricIngress
+            } else {
+                match invalid_reason {
+                    Some(crate::afxdp::forwarding::CachedDecisionInvalid::EnforceChanged) => {
+                        crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitEnforceChanged
+                    }
+                    Some(crate::afxdp::forwarding::CachedDecisionInvalid::OwnerActiveRedirect) => {
+                        crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitOwnerActiveRedirect
+                    }
+                    Some(crate::afxdp::forwarding::CachedDecisionInvalid::FabricLocalWins) => {
+                        crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricLocalWins
+                    }
+                    Some(
+                        crate::afxdp::forwarding::CachedDecisionInvalid::FabricLocalWinsSameOwner,
+                    ) => crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricLocalWinsSameOwner,
+                    Some(crate::afxdp::forwarding::CachedDecisionInvalid::FabricIngressLocalWins) => {
+                        crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricIngressLocalWins
+                    }
+                    Some(
+                        crate::afxdp::forwarding::CachedDecisionInvalid::FabricIngressDiscardNowLocal,
+                    ) => crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricIngressDiscardNowLocal,
+                    Some(
+                        crate::afxdp::forwarding::CachedDecisionInvalid::ForwardCandidateEgressDeparted,
+                    ) => crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitForwardCandidateEgressDeparted,
+                    None => crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitDecisionInvalid,
+                }
+            };
             flow_state
                 .flow_cache
                 .invalidate_slot(&flow.forward_key, meta.ingress_ifindex as i32);
@@ -254,7 +422,7 @@ pub(super) fn stage_flow_cache_hit(
             // published `flow_cache_hits` counts packets the cache actually
             // served, and a neighbor-MAC / HA churn event shows up as the
             // hit-rate drop it is instead of hiding inside the hit count.
-            flow_state.flow_cache.reclassify_hit_as_miss();
+            flow_state.flow_cache.reclassify_hit_as_miss_arm(arm);
             // Fall through to slow path for full HA resolution / re-resolve
             // the current neighbor MAC (#3048) / fabric redirect.
             return FlowCacheOutcome::FallThrough;
@@ -272,11 +440,51 @@ pub(super) fn stage_flow_cache_hit(
             // Use alias-aware session resolution: reverse NAT companions can
             // be found by their translated wire tuple rather than their
             // canonical table key.
+            // #16217 (FZDiag28): next-hop version of the #13635 guard.
+            // A cached deny for this tuple was seeded while the FIB
+            // answered MissingNeighbor for `(egress_ifindex, next_hop)`;
+            // once the node neighbor map holds that hop (the warm pass at
+            // RG activation populates the node-wide dynamic map, and the
+            // FIB recompute reads that same map), the deny is
+            // stale-by-evidence: drop it and let the session-hit path
+            // recompute the adopted ForwardCandidate. No live neighbor
+            // entry, or a MAC contradicting the cached resolution, keeps
+            // the deny (fail-closed).
+            if let Some(next_hop) = cached_decision.resolution.next_hop {
+                let neigh_if = super::super::forwarding::outer_neighbor_ifindex(
+                    worker_ctx.forwarding,
+                    Some(worker_ctx.dynamic_neighbors),
+                    &cached_decision.resolution,
+                );
+                let neighbor_landed = super::super::forwarding::lookup_neighbor_entry(
+                    worker_ctx.forwarding,
+                    Some(worker_ctx.dynamic_neighbors),
+                    neigh_if,
+                    next_hop,
+                )
+                .is_some_and(|live| {
+                    cached_decision
+                        .resolution
+                        .neighbor_mac
+                        .is_none_or(|cached_mac| cached_mac == live.mac)
+                });
+                if neighbor_landed {
+                    flow_state
+                        .flow_cache
+                        .invalidate_slot(&flow.forward_key, meta.ingress_ifindex as i32);
+                    flow_state.flow_cache.reclassify_hit_as_miss_arm(
+                        crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitDenySuperseded,
+                    );
+                    return FlowCacheOutcome::FallThrough;
+                }
+            }
             if sessions.has_session_hit_at(&flow.forward_key, now_ns) {
                 flow_state
                     .flow_cache
                     .invalidate_slot(&flow.forward_key, meta.ingress_ifindex as i32);
-                flow_state.flow_cache.reclassify_hit_as_miss();
+                flow_state.flow_cache.reclassify_hit_as_miss_arm(
+                    crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitDenySuperseded,
+                );
                 return FlowCacheOutcome::FallThrough;
             }
             if cached_decision.resolution.disposition == ForwardingDisposition::PolicyDenied
@@ -288,7 +496,9 @@ pub(super) fn stage_flow_cache_hit(
                 flow_state
                     .flow_cache
                     .invalidate_slot(&flow.forward_key, meta.ingress_ifindex as i32);
-                flow_state.flow_cache.reclassify_hit_as_miss();
+                flow_state.flow_cache.reclassify_hit_as_miss_arm(
+                    crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitDenySuperseded,
+                );
                 return FlowCacheOutcome::FallThrough;
             }
             cached_descriptor.input_filter_counters.for_each(|counter| {
@@ -466,7 +676,9 @@ pub(super) fn stage_flow_cache_hit(
             flow_state
                 .flow_cache
                 .invalidate_slot(&flow.forward_key, meta.ingress_ifindex as i32);
-            flow_state.flow_cache.reclassify_hit_as_miss();
+            flow_state.flow_cache.reclassify_hit_as_miss_arm(
+                crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitSessionDead,
+            );
             return FlowCacheOutcome::FallThrough;
         }
         // #3779: TTL/hop-limit check BEFORE any egress side effect. The slow
@@ -650,6 +862,62 @@ pub(super) fn stage_flow_cache_hit(
         // The packet survived the cached output-filter/policer verdicts;
         // only now may a completing ACK's HA transition be published.
         sessions.emit_probe_hit_state_update(&flow.forward_key);
+        // #16217 (GLM B1, completed): ALL cache-hit shared restamps run
+        // ONLY behind the handshake stage transition into Established
+        // (`take_probe_stage_transition`, consumed exactly once on the
+        // completing packet) — never per-packet on steady-state hits.
+        // Pre-fold the packet-count restamps were gated but the
+        // Established canonical + forward-wire alias restamps below
+        // ran on EVERY established cache hit (an
+        // `handshake_state_wire_for == Established` read), taking the
+        // shared-map locks per packet. The ct-slice (10 s cadence) is
+        // the backstop for completions that never take a completing
+        // cache hit.
+        if sessions.take_probe_stage_transition(&flow.forward_key) {
+            // #16217: snapshot the serving pair's ACTUAL forward +
+            // reverse packet counts onto the shared rows — the
+            // adoption gate's completed-handshake evidence for a
+            // HandshakePending canonical row. Only admitted traffic
+            // raises these counts; synthesized companions carry 0.
+            crate::afxdp::shared_ops::restamp_shared_packet_counts(
+                worker_ctx.shared_sessions,
+                worker_ctx.shared_forward_wire_sessions,
+                &flow.forward_key,
+                cached_decision.nat,
+                sessions.fwd_packets_for(&flow.forward_key),
+                sessions.rev_packets_for(&flow.forward_key),
+            );
+            // Legacy reverse-count snapshot (same transition bound).
+            let rev = sessions.rev_packets_for(&flow.forward_key);
+            if rev > 0 {
+                crate::afxdp::shared_ops::restamp_shared_rev_packets(
+                    worker_ctx.shared_sessions,
+                    &flow.forward_key,
+                    cached_decision.nat,
+                    rev,
+                );
+            }
+            // #16223: restamp the shared synced entries so sibling
+            // replica tables and the peer's expiry probe consult
+            // node-level proof instead of the replica's own stale
+            // Opening/syn_ack_first flags.
+            crate::afxdp::shared_ops::restamp_shared_handshake_established(
+                worker_ctx.shared_sessions,
+                &flow.forward_key,
+                cached_decision.nat,
+            );
+            // #16217 (wire-cadence residual): the ct-slice restamp only
+            // runs on the 10 s conntrack-refresh cadence, so advance
+            // the forward-wire KEY ALIAS slot on the completing packet
+            // too — same bounded work — so the fabric-ingress adoption
+            // gate sees Established under the NAT'd tuple without
+            // waiting for the ct-slice backstop.
+            crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
+                worker_ctx.shared_sessions,
+                worker_ctx.shared_forward_wire_sessions,
+                &[(flow.forward_key.clone(), cached_decision.nat)],
+            );
+        }
         // #3778/#11430/#11679: BA queue and LP inputs are packet-dependent,
         // but a filter-pinned queue must not be reclassified. The separate
         // `cos_lp_reclassify` arm refreshes only that pinned queue's rewrite.

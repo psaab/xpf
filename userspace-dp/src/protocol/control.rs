@@ -1479,6 +1479,20 @@ pub(crate) struct SessionSyncRequest {
     /// variant for the stated tuple/domain rather than under-matching `None`.
     #[serde(rename = "purge_tunnel_variants", default)]
     pub purge_tunnel_variants: bool,
+    /// #16217: live per-direction packet counters the sending node
+    /// snapshotted from its serving entry. Stamped onto the imported
+    /// `SyncedSessionEntry` (monotonic merge at publish preserves the
+    /// max), so the scoped completion-evidence gate on this node sees
+    /// actual service. `serde(default)` => 0 on an old peer that omits
+    /// the fields, which is no evidence — fail-closed, bit-identical
+    /// to pre-#16217 behavior (rolling-upgrade safe).
+    ///
+    /// The renames MUST match the Go struct tags
+    /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionSyncRequest`).
+    #[serde(rename = "fwd_packets", default)]
+    pub fwd_packets: u64,
+    #[serde(rename = "rev_packets", default)]
+    pub rev_packets: u64,
 }
 /// #10512: policy invalidation discovery request. `mode=prepublish` has no
 /// creation-time cutoff; `mode=legacy` applies `before_secs` against the

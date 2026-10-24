@@ -60,6 +60,38 @@ pub(in crate::afxdp) fn build_reverse_session_from_forward_match(
 /// native-RI derivation (#10312).
 
 #[allow(clippy::too_many_arguments)]
+/// #16217 (FZDiag35): distinguishes the two synthesis callers.
+/// The LIVE reverse install (`install_reverse_session_from_forward_match`,
+/// worker poll path) builds its forward match from a locally-observed
+/// session lookup: the match's stored owner is this node's seed-time
+/// LAN-member RG — the stamp the failover arms must judge. The SYNCED
+/// synthesis (`synthesized_synced_reverse_entry*`, coordinator prewarm /
+/// import repair) constructs its `ForwardSessionMatch` synthetically
+/// from a peer-imported `SyncedSessionEntry`: there is no local forward
+/// observation, and the companion's owner is the reply-egress owner
+/// THIS node derives from its own FIB (the #7209/#12086 filing +
+/// empty-table-NoRoute semantics the ha_tests cells pin: with no
+/// forwarding state the companion must carry owner 0, not the
+/// peer-supplied forward owner).
+///
+/// EXPLICIT FLAG, never inferred from `aux.session_id`: the first
+/// implementation keyed this off `aux.session_id == 0`, which inverted
+/// both populations — local table matches are built with a default
+/// aux (id 0) by the NAT lookup helpers in `session/lookup.rs`, so
+/// live hits fell back to the reply-resolution derivation (stamp=2,
+/// the bug this leg exists to fix); shared-map matches carry the
+/// peer's nonzero session id, so they were stamped with the PEER's
+/// forward owner instead of this node's own derivation. The flag is
+/// set at exactly one construction site
+/// (`synthesized_synced_reverse_entry_in_table`); every lookup-built
+/// match carries `false`.
+/// FAIL-CLOSED DIRECTION: a match whose provenance was somehow lost
+/// defaults to `false` at struct construction only via an explicit
+/// literal — there is no `Default` for `ForwardSessionMatch`, so a
+/// new construction site must state its provenance to compile.
+fn forward_match_is_synced_reverse_synthesis(forward_match: &ForwardSessionMatch) -> bool {
+    forward_match.synced_synthesis
+}
 pub(in crate::afxdp) fn build_reverse_session_from_forward_match_in_table(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -69,9 +101,10 @@ pub(in crate::afxdp) fn build_reverse_session_from_forward_match_in_table(
     ha_startup_grace_until_secs: u64,
     table: Option<&str>,
 ) -> SessionLookup {
-    let requires_fabric_return = forward_match.metadata.fabric_ingress
-        || forward_match.decision.resolution.disposition == ForwardingDisposition::FabricRedirect;
-    let resolution = reverse_resolution_for_session_in_table(
+    let forward_is_fabric_redirect =
+        forward_match.decision.resolution.disposition == ForwardingDisposition::FabricRedirect;
+    let requires_fabric_return = forward_match.metadata.fabric_ingress || forward_is_fabric_redirect;
+    let resolution = reverse_resolution_for_session_in_table_gated(
         forwarding,
         ha_state,
         dynamic_neighbors,
@@ -82,6 +115,7 @@ pub(in crate::afxdp) fn build_reverse_session_from_forward_match_in_table(
         forward_match.decision.resolution.tunnel_endpoint_id != 0
             && now_secs <= ha_startup_grace_until_secs,
         table,
+        forward_is_fabric_redirect,
     );
     let metadata = SessionMetadata {
         // #7169: this zone pair comes from the STORED forward session, i.e.
@@ -119,12 +153,34 @@ pub(in crate::afxdp) fn build_reverse_session_from_forward_match_in_table(
         ingress_vlan_id: 0,
         forward_ingress_vlan_id: (forward_match.metadata.ingress_ifindex != 0)
             .then_some(forward_match.metadata.ingress_vlan_id),
+        // #16217 (FZDiag35): stamp the FORWARD flow's owner, not the
+        // reply-egress row's RG. The old derivation
+        // (`owner_rg_for_resolution(reply resolution)`) read the RETH
+        // row's RG2 for split-RG rows (LAN owner RG1, WAN/reth RG2
+        // stays active on both nodes), so a reverse row whose LAN
+        // owner departed kept a stamp naming a surviving RG and every
+        // departed-owner supersession/conversion arm judged it
+        // locally owned forever (live fw0 stamp=2 reverse rows TX'd
+        // WAN replies out the departed member after RG1 failover).
+        // The forward match's stored owner is the seed-time owner of
+        // the client-side (LAN-member) RG — the field every
+        // failover arm must judge. The retained wording below is the
+        // stale pre-fix rationale kept for archaeology: owner used to
+        // be derived from the reply resolution so failback
+        // repointing followed the current client-side egress owner;
+        // the activation refresh (`collect_refresh_owner_rgs_items`)
+        // still re-derives that, so the seed-time stamp here is the
+        // failover-correct one.
         // Reverse companions are owned by the RG that currently owns the
         // client-side egress resolution, not necessarily the RG that owned the
         // original forward session. This matters during failback when a second
         // RG comes up later and stale reverse entries must be repointed away
         // from prior FabricRedirect results.
-        owner_rg_id: owner_rg_for_resolution(forwarding, resolution),
+        owner_rg_id: if forward_match_is_synced_reverse_synthesis(&forward_match) {
+            owner_rg_for_resolution(forwarding, resolution)
+        } else {
+            forward_match.metadata.owner_rg_id
+        },
         fabric_ingress: forward_match.metadata.fabric_ingress,
         is_reverse: true,
         // #4565: inherit the forward session's NAT64 reverse info (original v6
@@ -260,40 +316,36 @@ pub(in crate::afxdp) fn synthesized_synced_reverse_entry_in_table(
             metadata: entry.metadata.clone(),
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux::default(),
+            synced_synthesis: true,
         },
         now_secs,
         0,
         table,
     );
     let metadata = reverse.metadata;
-    Some(SyncedSessionEntry {
-        key: reverse_key,
-        decision: reverse.decision,
-        metadata,
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: entry.protocol,
-        tcp_flags: entry.tcp_flags,
-        // #2170: the reverse companion inherits the forward entry's install
-        // generation so a delete refusal is consistent across both halves.
-        generation: entry.generation,
-        // #14667: derive ONE companion identity from the forward's stable
-        // id so every worker adopts the same id verbatim. Publishing 0
-        // made each sibling mint a worker-local id, and the
-        // identity-captured DeletePolicyBatch companion check then
-        // missed on W-1 workers. A forward with no stable id (0)
-        // derives 0 and keeps the legacy per-worker fallback.
-        session_id: crate::session::synthesized_companion_session_id(entry.session_id),
-        // #9412: the reverse half carries the SAME close class as the forward
-        // import. With 0, every close-state Update (and the takeover prewarm)
-        // re-installed the reverse copy on the established window, and
-        // `companion_keeps_alive` then held the closing forward alive with it.
-        tcp_close_class: entry.tcp_close_class,
-        tcp_handshake_state: entry.tcp_handshake_state,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: entry.source_nat_static,
-    })
+    Some(SyncedSessionEntry { key: reverse_key,
+    decision: reverse.decision,
+    metadata,
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: entry.protocol,
+    tcp_flags: entry.tcp_flags,
+    // #2170: the reverse companion inherits the forward entry's install
+    // generation so a delete refusal is consistent across both halves.
+    generation: entry.generation,
+    // #14667: derive ONE companion identity from the forward's stable
+    // id so every worker adopts the same id verbatim. Publishing 0
+    // made each sibling mint a worker-local id, and the
+    // identity-captured DeletePolicyBatch companion check then
+    // missed on W-1 workers. A forward with no stable id (0)
+    // derives 0 and keeps the legacy per-worker fallback.
+    session_id: crate::session::synthesized_companion_session_id(entry.session_id),
+    // #9412: the reverse half carries the SAME close class as the forward
+    // import. With 0, every close-state Update (and the takeover prewarm)
+    // re-installed the reverse copy on the established window, and
+    // `companion_keeps_alive` then held the closing forward alive with it.
+    tcp_close_class: entry.tcp_close_class, tcp_handshake_state: entry.tcp_handshake_state, rev_packets: entry.rev_packets, fwd_packets: entry.fwd_packets, pptp_call_ids: 0,
+    source_nat_static: entry.source_nat_static, })
 }
 
 /// #10312: the reverse resolution plus the native installing-table identity
@@ -448,6 +500,40 @@ pub(in crate::afxdp) fn reverse_resolution_for_session_in_table(
     allow_unseeded_tunnel_local: bool,
     table: Option<&str>,
 ) -> ForwardingResolution {
+    reverse_resolution_for_session_in_table_gated(
+        forwarding,
+        ha_state,
+        dynamic_neighbors,
+        target_ip,
+        ingress_zone,
+        fabric_ingress,
+        now_secs,
+        allow_unseeded_tunnel_local,
+        table,
+        false,
+    )
+}
+
+/// #16217 (FZDiag33 death point B): `forward_is_fabric_redirect`
+/// marks a forward match whose stored decision is a FabricRedirect
+/// (the client side is fabric-served by the peer). Only for such
+/// matches may the non-fabric-ingress arm below convert a
+/// peer-owned-LAN reply resolution to FabricRedirect; ordinary
+/// reverse synthesis (new-flow install, TUN builders) passes false
+/// and stays bit-identical.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn reverse_resolution_for_session_in_table_gated(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    target_ip: IpAddr,
+    ingress_zone: u16,
+    fabric_ingress: bool,
+    now_secs: u64,
+    allow_unseeded_tunnel_local: bool,
+    table: Option<&str>,
+    forward_is_fabric_redirect: bool,
+) -> ForwardingResolution {
     let resolved = super::interface_nat_local_resolution(forwarding, target_ip, table)
         .unwrap_or_else(|| {
             super::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
@@ -505,6 +591,36 @@ pub(in crate::afxdp) fn reverse_resolution_for_session_in_table(
                 return redirected;
             }
         }
+    }
+    // #16217 (FZDiag33 death point B): the adopted-flow twin of the
+    // arm above. Post-takeover on the new owner the forward flow was
+    // FABRIC-ADOPTED (this node now owns the WAN egress RG), so its
+    // server replies arrive on the WAN and must cross the fabric BACK
+    // to the LAN owner (the old owner, which still owns the client
+    // LAN RG). The reply target (the client) resolves locally to a
+    // ForwardCandidate on the LAN egress, but that egress belongs to
+    // the peer-owned LAN RG: HA enforcement below demotes it to
+    // `HAInactive`, and the session-hit path's converters are
+    // anti-loop gated on fabric ingress — the reply packet arrived
+    // on the WAN, not the fabric — so nothing ever converts the
+    // terminal to `FabricRedirect` and the ACK dies on this node
+    // (live: reverse hits counted, zero fabric TX). The forward
+    // match's FabricRedirect shape is the proof the client side is
+    // fabric-served: when the forward decision is a FabricRedirect
+    // AND the connected destination RG for the reply target is
+    // known and NOT forwarding-active locally, convert the reply
+    // resolution to the fabric redirect for the ingress (LAN) zone
+    // instead of keeping the HA terminal. Unknown destination owner
+    // (dest_rg == 0) is not peer-ownership and never converts;
+    // locally-owned destinations keep the ordinary enforced path.
+    if !fabric_ingress
+        && forward_is_fabric_redirect
+        && dest_rg > 0
+        && !destination_owner_active
+        && let Some(redirect) =
+            super::forwarding::resolve_zone_encoded_fabric_redirect_by_id(forwarding, ingress_zone)
+    {
+        return redirect;
     }
     if fabric_ingress
         && owner_rg_id > 0
@@ -597,29 +713,22 @@ pub(in crate::afxdp) fn install_reverse_session_from_forward_match(
         {
             SESSION_PUBLISH_ERRORS_SHARED.fetch_add(1, Ordering::Relaxed);
         }
-        let reverse_entry = SyncedSessionEntry {
-            key: reverse_key.clone(),
-            decision: reverse.decision,
-            metadata: reverse.metadata.clone(),
-            leak_incarnation: reverse_leak_incarnation,
-            origin: SessionOrigin::ReverseFlow,
-            protocol,
-            tcp_flags,
-            // Local reverse-flow learning: no peer install generation (#2170).
-            generation: 0,
-            // #14667: publish the id this worker just minted for the
-            // companion, not 0. With 0 every sibling minted its own
-            // worker-namespaced id and the identity-captured
-            // DeletePolicyBatch companion check missed on W-1 workers.
-            session_id: sessions.session_id_for(reverse_key),
-            tcp_close_class: 0,
-            tcp_handshake_state: sessions.handshake_state_wire_for(reverse_key),
-            pptp_call_ids: 0,
-            // #16019 fold 3: reverse row carries the FORWARD entry's rev
-            // counter (reverse packets fold onto the forward entry).
-            rev_packets: sessions.rev_packets_wire_for(&forward_key_for_rev),
-            source_nat_static: reverse.aux.source_nat_static,
-        };
+        let reverse_entry = SyncedSessionEntry { key: reverse_key.clone(),
+        decision: reverse.decision,
+        metadata: reverse.metadata.clone(),
+        leak_incarnation: reverse_leak_incarnation,
+        origin: SessionOrigin::ReverseFlow,
+        protocol,
+        tcp_flags,
+        // Local reverse-flow learning: no peer install generation (#2170).
+        generation: 0,
+        // #14667: publish the id this worker just minted for the
+        // companion, not 0. With 0 every sibling minted its own
+        // worker-namespaced id and the identity-captured
+        // DeletePolicyBatch companion check missed on W-1 workers.
+        session_id: sessions.session_id_for(reverse_key),
+        tcp_close_class: 0, tcp_handshake_state: sessions.handshake_state_wire_for(reverse_key), rev_packets: sessions.rev_packets_for(&crate::session::reverse_session_key(reverse_key, reverse.decision.nat)), fwd_packets: sessions.fwd_packets_for(&crate::session::reverse_session_key(reverse_key, reverse.decision.nat)), pptp_call_ids: 0,
+        source_nat_static: reverse.aux.source_nat_static, };
         publish_shared_session(
             shared_sessions,
             shared_nat_sessions,

@@ -23,6 +23,7 @@
 
 use super::entry::{SessionDecision, SessionMetadata, SessionOrigin};
 use super::key::SessionKey;
+use super::TcpHandshakeState;
 
 /// Owned identity + payload + timing for a fresh session insert or a
 /// peer-synced upsert (where the caller has just constructed the
@@ -55,6 +56,19 @@ pub(crate) struct SessionInstall {
     /// #10888: owning-node TCP handshake state (`0` = legacy/established).
     /// Only `upsert_synced_with_origin` consults it.
     pub(crate) tcp_handshake_state: u8,
+    /// #16217 (run11): the serving node's admitted per-direction packet
+    /// counts carried on the HA wire / shared row (`SyncedSessionEntry`
+    /// `fwd_packets`/`rev_packets`). Seeded onto the imported entry's
+    /// counters (packet counts only; bytes unknown stay 0) so
+    /// `forward_established_with_traffic` sees the peer's actual service
+    /// instead of the zero a fresh import used to start with. Without
+    /// this, a peer-imported established row was indistinguishable from
+    /// a never-served row until a local packet folded onto it, and the
+    /// Wire34 established guard declined to protect it. Only
+    /// `upsert_synced_with_origin` consults them; 0/0 (legacy peer,
+    /// local replica) seeds zero exactly as before.
+    pub(crate) fwd_packets: u64,
+    pub(crate) rev_packets: u64,
 }
 
 /// In-place update or promotion of an existing session. Carries a
@@ -133,6 +147,107 @@ pub(crate) struct ExpireHaContext<'a> {
     /// long-timeout (`MaxDurationSeconds`) config so a leaked entry
     /// cannot be pinned for the full configured timeout.
     pub(crate) ceiling_abs_ns: u64,
+    /// #16223: node-level served-handshake evidence for an idle-crossed
+    /// tuple, consulted BEFORE the local `syn_ack_first` /
+    /// `handshake_pending` refusals in the opening-retention arm.
+    /// Production wires this to the shared synced map + serving
+    /// counters (see `NodeServedEvidence`); tests drive it directly.
+    pub(crate) node_served: &'a dyn Fn(&SessionKey) -> NodeServedEvidence,
+}
+/// #16223: node-level served-handshake evidence for one tuple — the
+/// promoted serving companion's handshake wire state plus its admitted
+/// reverse-packet count, consulted BEFORE the local `syn_ack_first` /
+/// `handshake_pending` refusals. Production supplies the wire state
+/// from the node's shared synced map (`SyncedSessionEntry`
+/// `tcp_handshake_state`, restamped to Established on completion) and
+/// the counter from the serving worker's per-table stamp
+/// (`SessionTable::note_node_served_handshake`). A default/zero value
+/// means no node-level proof, and the classic local gates then apply
+/// unchanged.
+/// #16217 (ct-slice HA emit): per-forward-key rate-limit state for the
+/// ct-slice stage/count Update vehicle. The restamp on fw0 advances
+/// its shared rows to wire=4 with `rev>0` counters, but that evidence
+/// lives only in fw0's node-local shared maps — no HA delta carries
+/// it (emission is transition-only and fw0's split forward half never
+/// locally transitions). The ct-slice therefore queues one Update per
+/// stage transition per node for each collected forward key: the
+/// FIRST emit for a key at wire=4 (`Established`) and, when the row
+/// is not yet at wire=4, the first emit once its counts first show
+/// `rev>0`. Steady-state slices for an already-emitted key stay
+/// silent (no periodic spam); a key that regresses below the emitted
+/// stage (new incarnation / re-pend) re-arms. Bounded by the session
+/// table's forward-row count; entries die with their session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CtSliceEmitMark {
+    /// Highest handshake wire this key has emitted an Update for
+    /// (0 = never; 4 = Established emitted).
+    pub(crate) stage_wire: u8,
+    /// Whether an Update carrying `rev>0` has been emitted for this
+    /// key since it was last armed.
+    pub(crate) rev_emitted: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct NodeServedEvidence {
+    /// Handshake wire state for the tuple (0 = absent/legacy,
+    /// 4 = Established; see `TcpHandshakeState::to_wire`).
+    pub(crate) handshake_wire: u8,
+    /// Admitted reverse-direction packets the serving pair has
+    /// forwarded on this node for the tuple, when the serving table
+    /// is readable (same worker). 0 cross-worker.
+    pub(crate) rev_packets: u64,
+    /// Node-wide reverse service observed for the tuple: any worker
+    /// on this node forwarded reverse-direction packets for the
+    /// canonical key. Carried separately from `rev_packets` (whose
+    /// consumers mean "the readable serving pair was promoted AND
+    /// served"); this is observed completion input only.
+    pub(crate) rev_packets_any: u64,
+    /// This node's workers observably completed the handshake for
+    /// the tuple: both directions were forwarded somewhere node-wide
+    /// (or a #16223 served cache-hit advanced it), so the pair is
+    /// Established as an OUTPUT even if no single worker table holds
+    /// an Established row. Input evidence only — never set from a
+    /// shared row's Established wire.
+    pub(crate) served_completed: bool,
+    /// The Established wire came from the node's SHARED synced map:
+    /// a serving worker published/restamped it only after its own
+    /// pair completed the handshake. Trusted as completion proof on
+    /// its own (installs publish Opening/Pending wires; the shared
+    /// wire never reads Established for an unanswered SYN).
+    pub(crate) shared_established: bool,
+}
+
+impl NodeServedEvidence {
+    /// The serving pair on this node has promoted AND genuinely served
+    /// the tuple, so a local replica/opening row may complete or be
+    /// retained regardless of its own local flags. Locally-derived
+    /// evidence additionally requires nonzero admitted reverse
+    /// counters (folded only on admitted hits, never on dropped
+    /// probes — a promoted-but-never-answered pair on ONE table
+    /// cannot launder a half-open flow); shared-map evidence is
+    /// trusted directly because the publisher completed the pair
+    /// before the wire could read Established.
+    #[inline]
+    pub(crate) fn promoted_and_served(self) -> bool {
+        self.shared_established
+            || (self.handshake_wire == TcpHandshakeState::Established.to_wire()
+                && self.rev_packets > 0)
+    }
+
+    /// OUTPUT-ONLY test for collectors (ct-slice restamp): this node
+    /// knows the tuple completed — (a) any local row Established,
+    /// (b) reverse service observed anywhere node-wide, or (c) a
+    /// #16223 `cache_hit_handshake_progress` completion. Inputs are
+    /// counters/completion observed anywhere node-local; a shared
+    /// row's Established wire is deliberately NOT an input here
+    /// (pass shared Established as OUTPUT only, via
+    /// `promoted_and_served` where imports are the consumer).
+    #[inline]
+    pub(crate) fn served_and_completed(self) -> bool {
+        self.promoted_and_served()
+            || self.served_completed
+            || self.rev_packets_any > 0
+    }
 }
 
 impl ExpireHaContext<'_> {

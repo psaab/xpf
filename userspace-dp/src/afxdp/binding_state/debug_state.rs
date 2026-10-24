@@ -209,6 +209,14 @@ fn publish_binding_debug_state(binding: &mut BindingWorker) {
             .fetch_add(binding.flow.flow_cache.evictions, Ordering::Relaxed);
         binding.flow.flow_cache.evictions = 0;
     }
+    // #16220: fold the per-arm breakdown alongside the aggregate so the
+    // operator surface can name the eviction arm.
+    for (arm, slot) in binding.flow.flow_cache.evictions_by_arm.iter_mut().enumerate() {
+        if *slot != 0 {
+            binding.live.flow_cache_evictions_by_arm[arm].fetch_add(*slot, Ordering::Relaxed);
+            *slot = 0;
+        }
+    }
     // #918: surface collision-driven evictions distinctly from
     // stale-on-lookup evictions so the post-merge acceptance gate
     // (`collision_evictions / hits < 1 %` under 100E100M load) is

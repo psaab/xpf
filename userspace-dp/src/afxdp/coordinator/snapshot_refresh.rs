@@ -391,21 +391,65 @@ impl super::Coordinator {
         // helper pre-first-arm), where boot-time synced sessions must
         // not be purged as "new appearances" against a default state.
         let prior_snapshot_installed = self.validation.snapshot_installed;
+        // #16109: if THIS apply changes the effective neighbor set,
+        // the helper-LOCAL neighbor generation must move even when
+        // the snapshot's own fib_generation does not: at RG activation
+        // the Go route-overlay snapshot re-samples kernel neighbors
+        // while NUD entries are in flux, the helper's neighbor table
+        // collapses (e.g. 33 -> 1), and sessions re-resolve to
+        // MissingNeighbor. When the neighbor set later returns (again
+        // via apply_snapshot, fib_generation unchanged), nothing
+        // invalidates the latched resolutions and the flows blackhole
+        // permanently. Advancing the neighbor component makes stamped
+        // resolutions stale so hits re-resolve against the neighbor
+        // set in force. The FIB generation itself is Go-owned
+        // (absolute, rollback-fenced, mirrored into the shim stamp):
+        // it is carried verbatim, never locally advanced.
+        let neighbor_advanced = {
+            // Effective neighbor set = static table UNION the manager
+            // keys in the dynamic map. The refresh path rebuilds the
+            // static table from the snapshot alone (manager rows
+            // rotate into the dynamic map above), so comparing
+            // static-vs-static reads empty->set on EVERY apply.
+            // Diff the unions: identical re-applies must not move.
+            let effective = |forwarding: &ForwardingState,
+                             dynamic: &crate::afxdp::ShardedNeighborMap|
+             -> Vec<(i32, IpAddr, [u8; 6])> {
+                let mut set: Vec<(i32, IpAddr, [u8; 6])> = forwarding
+                    .neighbors
+                    .iter()
+                    .map(|((ifindex, ip), entry)| (*ifindex, *ip, entry.mac))
+                    .collect();
+                if let Ok(keys) = self.neighbors.manager_keys.lock() {
+                    for key in keys.iter() {
+                        if let Some(entry) = dynamic.get(key) {
+                            set.push((key.0, key.1, entry.mac));
+                        }
+                    }
+                }
+                set.sort_unstable();
+                set.dedup();
+                set
+            };
+            effective(&self.forwarding, &self.neighbors.dynamic)
+                != effective(&new_forwarding, &self.neighbors.dynamic)
+        };
         self.validation = ValidationState {
             snapshot_installed: true,
             config_generation: snapshot.generation,
             fib_generation: snapshot.fib_generation,
+            neighbor_generation: if neighbor_advanced {
+                self.validation.neighbor_generation.saturating_add(1)
+            } else {
+                self.validation.neighbor_generation
+            },
         };
         // #1866 D3: WG endpoint-set transition log at the Rust apply
         // boundary. Rare (only when the set actually changes); pairs
         // with the Go publish-boundary log to pin which layer dropped
         // or retained an endpoint in one journal capture.
         log_wg_endpoint_set_transition("snapshot-refresh", &self.forwarding, &new_forwarding);
-        log_ambiguous_fabric_zone_transition(
-            "snapshot-refresh",
-            &self.forwarding,
-            &new_forwarding,
-        );
+        log_ambiguous_fabric_zone_transition("snapshot-refresh", &self.forwarding, &new_forwarding);
         // #1873 R-D: compute the remap purge set BEFORE the swap, and
         // PURGE before any store (Codex code-review r1). The worker
         // loop reads the forwarding Arc, drains commands, THEN runs the

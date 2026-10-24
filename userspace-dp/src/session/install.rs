@@ -729,6 +729,7 @@ impl SessionTable {
                 tcp_window_scale: None,
                 tcp_syn_seen: false,
                 tcp_ws_negotiated: false,
+                fabric_established: false,
                 last_icmp_error_tat: 0,
             },
         };
@@ -838,6 +839,8 @@ impl SessionTable {
                 // #9412: nor a close class; the real HA path threads it the same way.
                 tcp_close_class: 0,
                 tcp_handshake_state: 0,
+                fwd_packets: 0,
+                rev_packets: 0,
                 source_nat_static: None,
             },
             allow_replace_local,
@@ -898,6 +901,8 @@ impl SessionTable {
             session_id: wire_session_id,
             tcp_close_class: wire_close_class,
             tcp_handshake_state: wire_handshake_state,
+            fwd_packets: wire_fwd_packets,
+            rev_packets: wire_rev_packets,
         } = req;
         let session_limit_zone = metadata.ingress_zone;
         // #9412: the close class the owning node stated. `None` (0, or a class
@@ -1133,7 +1138,18 @@ impl SessionTable {
                 seen_rg_epoch: 0,
                 first_held_ns: preserved_first_held_ns,
                 // #2501: a fresh entry has forwarded no packets yet.
-                counters: SessionCounters::default(),
+                // #16217 (run11): EXCEPT the packet counts the serving
+                // node carried on the wire / shared row — seed them so
+                // the established-with-traffic guard (and every other
+                // counter reader) sees the peer's actual service from
+                // the first local hit, not only after a local packet
+                // happens to fold onto this row. Bytes are not carried,
+                // so they stay 0; packet counts alone drive the guard.
+                counters: SessionCounters {
+                    fwd_packets: wire_fwd_packets,
+                    rev_packets: wire_rev_packets,
+                    ..SessionCounters::default()
+                },
                 closing_counters_seen: 0,
                 // #2749: a re-imported synced entry observes its own ToS / TCP
                 // flags once local traffic forwards through it (the peer's
@@ -1152,6 +1168,7 @@ impl SessionTable {
                 tcp_window_scale: None,
                 tcp_syn_seen: false,
                 tcp_ws_negotiated: false,
+                fabric_established: false,
                 // #9901 (F-077): a re-imported copy starts with a FULL error
                 last_icmp_error_tat: 0,
             },
@@ -1228,12 +1245,35 @@ impl SessionTable {
             .unwrap_or(0);
         let source_nat_static = self.source_nat_static_for(&key);
         let pptp_call_ids = self.pptp_call_ids_wire_for(&key);
+        // #16217 (export stamp): when node-wide completion evidence
+        // holds for this tuple (serving rows / node-served stamps in
+        // THIS table — the shared-map half is merged by callers that
+        // hold those locks), the exported Open must read Established
+        // even if this table's own row is still Opening/Pending: the
+        // receiving peer's adoption gate only adopts Established
+        // wires, and a split pair's completion may have been observed
+        // on a sibling worker. Without evidence the live wire is
+        // exported unchanged (fail-closed).
+        let tcp_handshake_state = if self.completion_evidence_for(&key) {
+            crate::session::TcpHandshakeState::Established.to_wire()
+        } else {
+            self.handshake_state_wire_for(&key)
+        };
+        // #16217: snapshot the LIVE counters before `key` moves into
+        // the delta, so the peer's scoped completion-evidence gate
+        // sees actual service; the old default-zero stamp made every
+        // re-export read as no evidence. Absent entry stays zero.
+        let live_counters = self
+            .entry_by_key(&key)
+            .map(|entry| entry.counters)
+            .unwrap_or_default();
         Some(SessionDelta {
             provenance,
             tcp_close_class: self.close_class_wire_for(&key),
-            tcp_handshake_state: self.handshake_state_wire_for(&key),
+            tcp_handshake_state,
             pptp_call_ids,
             purge_retirement: false,
+
             kind: SessionDeltaKind::Open,
             key,
             decision,
@@ -1245,8 +1285,7 @@ impl SessionTable {
             // SESSION_CREATE frame reports no duration, so 0/unknown is fine.
             created_ns: 0,
             last_seen_ns: 0,
-            // #2501: an open carries no volume yet.
-            counters: SessionCounters::default(),
+            counters: live_counters,
             // #2749: explicit Open-delta emit, no entry in hand.
             observed_tos: 0,
             observed_tcp_flags: 0,
@@ -1264,6 +1303,41 @@ impl SessionTable {
             is_admission: false,
             source_nat_static,
         })
+    }
+    /// #16217 (export stamp): `open_export_delta_with_provenance`
+    /// with the shared-map half of the completion evidence merged in.
+    /// The caller holds (or held) the shared maps and gathered
+    /// `shared_completion_evidence` for `key`; when the merged
+    /// evidence holds, the Open delta's `tcp_handshake_state` is
+    /// Established. Fail-closed: zero shared evidence and no local
+    /// completion leaves the live wire untouched. The shared evidence
+    /// alone never stamps — it must survive the same
+    /// `served_and_completed` test as the table half (actual reverse
+    /// packet count > 0, never synthesized-companion existence).
+    pub(crate) fn open_export_delta_with_shared_evidence(
+        &self,
+        key: SessionKey,
+        decision: SessionDecision,
+        metadata: SessionMetadata,
+        origin: SessionOrigin,
+        fabric_redirect_sync: bool,
+        provenance: ExportProvenance,
+        shared: NodeServedEvidence,
+    ) -> Option<SessionDelta> {
+        let completed = self.completion_evidence_with_shared(&key, shared);
+        let mut delta = self.open_export_delta_with_provenance(
+            key,
+            decision,
+            metadata,
+            origin,
+            fabric_redirect_sync,
+            provenance,
+        )?;
+        if completed {
+            delta.tcp_handshake_state =
+                crate::session::TcpHandshakeState::Established.to_wire();
+        }
+        Some(delta)
     }
 
     pub fn emit_open_delta_with_origin(

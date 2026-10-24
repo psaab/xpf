@@ -51,9 +51,9 @@ mod tx_inbox;
 // `profile::Owner|Peer` precedent and to avoid E0364 (documented in
 // `userspace-dp/src/afxdp/tx/mod.rs:38`).
 pub(in crate::afxdp) use debug_state::{
+    DEBUG_STATE_PUBLISH_MASK, IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS,
     advance_debug_state_publish_counter, flush_v_min_scratches_into, idle_debug_state_publish_due,
-    update_binding_debug_state, update_binding_idle_debug_state, DEBUG_STATE_PUBLISH_MASK,
-    IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS,
+    update_binding_debug_state, update_binding_idle_debug_state,
 };
 pub(in crate::afxdp) use latency::{
     bucket_index_for_ns, tx_batch_bucket, DRAIN_HIST_BUCKETS, TX_BATCH_BUCKETS,
@@ -66,7 +66,7 @@ pub(in crate::afxdp) use latency::{
 #[cfg(test)]
 pub(in crate::afxdp) use latency::REDIRECT_SAMPLE_MASK;
 pub(in crate::afxdp) use profile::{OwnerProfileOwnerWrites, OwnerProfilePeerWrites};
-pub(in crate::afxdp) use tx_inbox::{PendingTxAdmission, PENDING_TX_INBOX_HARD_CAP};
+pub(in crate::afxdp) use tx_inbox::{PENDING_TX_INBOX_HARD_CAP, PendingTxAdmission};
 // #6304: the admission-attempt test instrument. Same `cfg(test)` treatment as
 // `REDIRECT_SAMPLE_MASK` above — it has no production consumer, so gating the
 // re-export keeps production builds warning-free. Consumed by
@@ -181,6 +181,11 @@ pub(in crate::afxdp) struct BindingLiveState {
     pub(super) flow_cache_hits: AtomicU64,
     pub(super) flow_cache_misses: AtomicU64,
     pub(super) flow_cache_evictions: AtomicU64,
+    /// #16220: per-arm breakdown of `flow_cache_evictions`, indexed by
+    /// `FlowCacheEvictionArm as usize`. Folded from the worker-owned
+    /// cache at the debug tick, like the aggregate above.
+    pub(super) flow_cache_evictions_by_arm:
+        [AtomicU64; super::flow_cache::FLOW_CACHE_EVICTION_ARM_COUNT],
     /// #918: subset of `flow_cache_evictions` driven by full-set LRU
     /// displacement (i.e. an insert kicked out a different-key entry
     /// from the LRU way). Surfaces hot-set thrash distinctly from
@@ -264,6 +269,12 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// the coordinator sums it into `ProcessStatus` for the Go Prometheus
     /// surface. Counted once per revoked session, not per dropped packet.
     pub(super) policy_revoked_sessions: AtomicU64,
+    /// #16215: established sessions revoked by stale source-NAT
+    /// revalidation. The release-visible counterpart of
+    /// `DebugPollCounters::snat_revoked_sessions`; the coordinator sums
+    /// it into `ProcessStatus` for the Go Prometheus surface. Counted
+    /// once per revoked session, not per dropped packet.
+    pub(super) snat_revoked_sessions: AtomicU64,
     /// #3326: host-bound (LocalDelivery) packets dropped by the zone
     /// host-inbound admission gate (`host_inbound_admits` => false). These
     /// denies bypass the `policy_denied_packets` disposition path, so before
@@ -1072,9 +1083,12 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // sentinels; offsets advance by 48 bytes, size unchanged.
 // #16242 adds the batch histograms to the owner profile before both
 // sentinels; offsets advance by 192 bytes, size grows by 192 bytes.
-const _: [(); 2880] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2736] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2865] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+// Composed sentinel (master histograms + this branch's per-arm
+// eviction counters and snat_revoked counter, all before both
+// sentinels): compiler-verified values.
+const _: [(); 3072] = [(); std::mem::size_of::<BindingLiveState>()];
+const _: [(); 2896] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 3025] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {
@@ -1129,6 +1143,7 @@ impl BindingLiveState {
             flow_cache_hits: AtomicU64::new(0),
             flow_cache_misses: AtomicU64::new(0),
             flow_cache_evictions: AtomicU64::new(0),
+            flow_cache_evictions_by_arm: std::array::from_fn(|_| AtomicU64::new(0)),
             flow_cache_collision_evictions: AtomicU64::new(0),
             active_flow_count: AtomicU32::new(0),
             flow_cache_capacity: AtomicU32::new(super::flow_cache::flow_cache_capacity() as u32),
@@ -1147,6 +1162,7 @@ impl BindingLiveState {
             session_delta_drained: AtomicU64::new(0),
             policy_denied_packets: AtomicU64::new(0),
             policy_revoked_sessions: AtomicU64::new(0),
+            snat_revoked_sessions: AtomicU64::new(0),
             host_inbound_denied_packets: AtomicU64::new(0),
             screen_drops: AtomicU64::new(0),
             // #3343: one atomic per published screen-reason drop ordinal.

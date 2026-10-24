@@ -1032,6 +1032,45 @@ impl Coordinator {
             })
             .collect();
         let neighbors = accepted.as_slice();
+        let prior_manager_keys: Vec<(i32, IpAddr)> = self
+            .neighbors
+            .manager_keys
+            .lock()
+            .map(|manager_keys| manager_keys.iter().copied().collect())
+            .unwrap_or_default();
+        // for the change test at publish time. Captured BEFORE the
+        // mutations below (manager_keys still names the old set here):
+        // an additive push leaves `old ∪ accepted`, a replace leaves
+        // exactly `accepted` (plus any dynamic rows the monitor owns —
+        // those are not this push's doing and never count as change).
+        let manager_set_changed = {
+            let mut after: Vec<(i32, IpAddr, [u8; 6])> = neighbors
+                .iter()
+                .map(|(ifindex, ip, entry)| (*ifindex, *ip, entry.mac))
+                .collect();
+            if !replace {
+                for key in &prior_manager_keys {
+                    if let Some(entry) = self.forwarding.neighbors.get(key).copied() {
+                        after.push((key.0, key.1, entry.mac));
+                    }
+                }
+            }
+            after.sort_unstable();
+            after.dedup();
+            let mut before: Vec<(i32, IpAddr, [u8; 6])> = prior_manager_keys
+                .iter()
+                .filter_map(|key| {
+                    self.forwarding
+                        .neighbors
+                        .get(key)
+                        .copied()
+                        .map(|entry| (key.0, key.1, entry.mac))
+                })
+                .collect();
+            before.sort_unstable();
+            before.dedup();
+            before != after
+        };
 
         let old_manager_keys = if replace {
             self.neighbors
@@ -1071,6 +1110,28 @@ impl Coordinator {
             self.forwarding.neighbors.insert((*ifindex, *ip), *entry);
         }
         if replace || !neighbors.is_empty() {
+            // #16109: a changed neighbor set is forwarding input. A
+            // session resolution stamped MissingNeighbor (or
+            // ForwardCandidate against a MAC that has since moved)
+            // stays latched until some generation moves: at RG
+            // activation the helper snapshot can lose the kernel
+            // neighbors (sampled while NUD entries were in flux),
+            // every established hit then re-resolves to MissingNeighbor
+            // and drops, and when the neighbor lands (~10s later, via
+            // this very push) nothing re-resolves the latched rows —
+            // the permanent blackhole. Advance the helper-LOCAL
+            // neighbor generation alongside the publish so stamped
+            // resolutions go stale and hits re-resolve against the
+            // neighbor set actually in force. Deliberately NOT the FIB
+            // generation: that counter is owned by the Go manager
+            // (absolute values, rollback-fenced, mirrored into the
+            // shim/userspace_ctrl stamp), so locally advancing it
+            // desyncs the shim stamp from helper validation and every
+            // packet reads generation-mismatched. The neighbor
+            // component never crosses a process boundary. Only an
+            // EFFECTIVE change advances: the pre/post sets are
+            // compared so a same-content re-push (the #5864 clear /
+            // dedup re-send shapes) does not churn stamps for nothing.
             // Clone the full ForwardingState to publish neighbor changes.
             // This copies routes/policies too, but update_neighbors fires
             // infrequently (only when kernel ARP/NDP changes, gated by
@@ -1080,6 +1141,10 @@ impl Coordinator {
             // #6592: published through the one choke point, so the neighbor
             // update carries the CURRENT validation rather than leaving a
             // second, independently-ordered store to get right.
+            if manager_set_changed {
+                self.validation.neighbor_generation =
+                    self.validation.neighbor_generation.saturating_add(1);
+            }
             self.publish_runtime_view();
         }
         self.neighbors.generation.fetch_add(1, Ordering::Relaxed);
@@ -1727,6 +1792,74 @@ impl Coordinator {
         // (AGY r7 #3 — FabricLink.parent_ifindex is the egress ifindex).
         for fabric in &snapshot.fabrics {
             enqueue(fabric.parent_ifindex, fabric.peer_addr);
+        }
+        // #16217 seed completion: DIRECT on-link destinations of the
+        // shared (synced/promoted) sessions this node holds. A connected
+        // route carries no explicit next-hop (`next_hop == None`), so the
+        // route walk above never enqueues the destination itself — yet on
+        // takeover the adopted forward resolution lands on the DIRECT
+        // server next-hop (e.g. 172.16.80.200 on the connected /24), the
+        // helper's dynamic neighbor map on the new owner may hold no entry
+        // for it (it never served the flow pre-failover; the kernel entry
+        // aged to FAILED while standby), and the MissingNeighborSeed's
+        // single representative packet then times out unresolved: the seed
+        // never forwards and every later fabric packet for the adopted
+        // tuple is discarded after the first. Warming the exact shared-row
+        // destinations (not whole prefixes — the row set is bounded by the
+        // session table) re-drives ARP/ND for precisely the hops the
+        // adopted seeds need, through the same per-RG gate, dedup, and
+        // already-resolved skip as the route hops. On RG activation
+        // `on_rg_promote_active` clears the per-key rate-limit and forces
+        // this pass, so the re-drive fires at the takeover instant rather
+        // than waiting for the next snapshot; steady-state snapshot passes
+        // re-warm any destination whose entry later expires.
+        {
+            let shared = lock_shared_recover(&self.sessions.synced);
+            for entry in shared.values() {
+                if entry.metadata.is_reverse || entry.decision.resolution.tunnel_endpoint_id != 0 {
+                    continue;
+                }
+                let target = entry
+                    .decision
+                    .nat
+                    .rewrite_dst
+                    .unwrap_or(entry.key.dst_ip);
+                // Only a destination the FIB serves DIRECTLY (covered by
+                // a connected prefix on its egress) is its own next-hop;
+                // gateway-routed destinations are covered by the route
+                // walk above and must not be probed on-link.
+                let direct = match target {
+                    IpAddr::V4(ip) => snapshot
+                        .connected_v4
+                        .iter()
+                        .any(|row| row.tunnel_endpoint_id == 0 && row.prefix.contains(ip)),
+                    IpAddr::V6(ip) => snapshot
+                        .connected_v6
+                        .iter()
+                        .any(|row| row.tunnel_endpoint_id == 0 && row.prefix.contains(ip)),
+                };
+                if !direct {
+                    continue;
+                }
+                let egress_ifindex = match entry.decision.resolution.egress_ifindex {
+                    egress if egress > 0 => egress,
+                    _ => match target {
+                        IpAddr::V4(ip) => snapshot
+                            .connected_v4
+                            .iter()
+                            .find(|row| row.tunnel_endpoint_id == 0 && row.prefix.contains(ip))
+                            .map(|row| row.ifindex)
+                            .unwrap_or(0),
+                        IpAddr::V6(ip) => snapshot
+                            .connected_v6
+                            .iter()
+                            .find(|row| row.tunnel_endpoint_id == 0 && row.prefix.contains(ip))
+                            .map(|row| row.ifindex)
+                            .unwrap_or(0),
+                    },
+                };
+                enqueue(egress_ifindex, target);
+            }
         }
     }
 

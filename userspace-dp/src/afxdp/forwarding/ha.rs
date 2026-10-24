@@ -5,7 +5,10 @@
 
 use super::*;
 
-pub(in crate::afxdp) fn owner_rg_for_flow(forwarding: &ForwardingState, egress_ifindex: i32) -> i32 {
+pub(in crate::afxdp) fn owner_rg_for_flow(
+    forwarding: &ForwardingState,
+    egress_ifindex: i32,
+) -> i32 {
     forwarding
         .egress
         .get(&egress_ifindex)
@@ -58,8 +61,66 @@ pub(in crate::afxdp) fn cluster_terminal_peer_owned_egress_rg(
         return false;
     }
     let rg = owner_rg_for_flow(forwarding, resolution.source_ifindex);
-    rg > 0 && ha_state.get(&rg).is_none_or(|g| !g.is_forwarding_active(now_secs))
+    rg > 0
+        && ha_state
+            .get(&rg)
+            .is_none_or(|g| !g.is_forwarding_active(now_secs))
 }
+
+/// #16216: is this DiscardRoute a demoted cluster-terminal row whose
+/// would-be egress RG is peer-owned RIGHT NOW? The demotion in
+/// `enforce_ha_resolution_snapshot` preserves the FIB's
+/// `source_ifindex` stamp, so a row demoted while the attribution
+/// missed (no live member at lookup time) can still be rescued once
+/// the packet reaches a fabric converter: if the stamped egress's RG
+/// is not forwarding-active locally, the destination is served by
+/// the peer and the packet must cross the fabric instead of dropping.
+/// Operator discards never carry the stamp (`source_ifindex == 0`)
+/// and never rescue.
+pub(in crate::afxdp) fn discard_route_is_cluster_terminal_peer_owned(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    resolution: &ForwardingResolution,
+) -> bool {
+    resolution.disposition == ForwardingDisposition::DiscardRoute
+        && cluster_terminal_peer_owned_egress_rg(forwarding, ha_state, now_secs, resolution)
+}
+/// #16269: is this DiscardRoute's cluster-terminal origin CERTAIN —
+/// the row was demoted from `ClusterTerminalHAInactive` (or still
+/// carries that spelling) and its would-be egress RG is locally
+/// forwarding-active RIGHT NOW, so on THIS node the row must forward
+/// to the WAN instead of dropping? Origin is certain only when the
+/// demotion preserved the FIB's `source_ifindex` provenance stamp;
+/// `source_ifindex == 0` means the stamp is absent (operator discard,
+/// or a row shape the FIB could not attribute) and the answer is
+/// always false — fail-closed, never a rescue guess. This is the
+/// takeover-side twin of `discard_route_is_cluster_terminal_peer_owned`:
+/// that one asks "is the would-be egress peer-owned NOW" (the split
+/// node's fabric crossing); this one asks "is it LOCALLY active NOW"
+/// (the new owner's fabric-ingress cache hit). A fabric-ingress
+/// cached DiscardRoute answering true here is stale by construction:
+/// it was demoted while this node did not own the egress RG, and the
+/// RG has since activated locally, so the slow path re-resolves it to
+/// the local WAN ForwardCandidate.
+pub(in crate::afxdp) fn discard_route_cluster_terminal_now_local(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    resolution: &ForwardingResolution,
+) -> bool {
+    if resolution.disposition != ForwardingDisposition::DiscardRoute
+        || resolution.source_ifindex <= 0
+    {
+        return false;
+    }
+    let rg = owner_rg_for_flow(forwarding, resolution.source_ifindex);
+    rg > 0
+        && ha_state
+            .get(&rg)
+            .is_some_and(|g| g.is_forwarding_active(now_secs))
+}
+
 
 pub(in crate::afxdp) fn enforce_ha_resolution(
     forwarding: &ForwardingState,
@@ -97,11 +158,28 @@ pub(in crate::afxdp) fn enforce_ha_resolution_snapshot(
     // (locally-owned, standalone, or no sibling) it stays the terminal
     // drop the lookup selected. Operator discard/reject rows never
     // reach here: only cluster_terminal rows produce this disposition.
+    //
+    // #16216: the demotion must keep the cluster-terminal provenance
+    // (`source_ifindex`, the would-be egress the FIB stamped before
+    // zeroing the egress). The pre-fix demotion zeroed it with the
+    // MTUs, so the stranded DiscardRoute was indistinguishable from an
+    // operator discard and no later stage could rescue it: on the
+    // split node the attribution can miss at lookup time (no live
+    // member, suppressed connected prefix), yet the packet must still
+    // cross the fabric to the owner that now serves the destination.
+    // `source_ifindex` is consulted only on the DiscardRoute shape and
+    // only by the fabric-rescue converters, so operator discards
+    // (which never carry the stamp) are bit-identical.
     if resolution.disposition == ForwardingDisposition::ClusterTerminalHAInactive {
         if ha_state.is_empty() {
             return resolution;
         }
-        return match cluster_terminal_peer_owned_egress_rg(forwarding, ha_state, now_secs, &resolution) {
+        return match cluster_terminal_peer_owned_egress_rg(
+            forwarding,
+            ha_state,
+            now_secs,
+            &resolution,
+        ) {
             true => resolution,
             false => ForwardingResolution {
                 disposition: ForwardingDisposition::DiscardRoute,
@@ -207,7 +285,10 @@ pub(in crate::afxdp) fn enforce_ha_resolution_snapshot(
             ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
         )
     {
-        let Some(endpoint) = forwarding.tunnel_endpoints.get(&resolution.tunnel_endpoint_id) else {
+        let Some(endpoint) = forwarding
+            .tunnel_endpoints
+            .get(&resolution.tunnel_endpoint_id)
+        else {
             return ForwardingResolution {
                 disposition: ForwardingDisposition::HAInactive,
                 route_mtu: 0,
@@ -286,6 +367,34 @@ pub(in crate::afxdp) fn enforce_ha_resolution_snapshot(
     resolution
 }
 
+/// #16220: why a cached decision failed revalidation — the sub-arm the
+/// flow-cache post-hit eviction attributes to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::afxdp) enum CachedDecisionInvalid {
+    EnforceChanged,
+    OwnerActiveRedirect,
+    FabricLocalWins,
+    FabricIngressLocalWins,
+    /// #16220: FabricLocalWins where the local resolution's owner RG is
+    /// the SAME as the cached entry's owner (vs a different local owner).
+    FabricLocalWinsSameOwner,
+    /// #16269: a fabric-ingress cached DiscardRoute whose cluster-
+    /// terminal origin is certain (provenance stamp preserved) and
+    /// whose would-be egress RG is now locally forwarding-active:
+    /// the entry was demoted while this node did not own the RG and
+    /// is stale at takeover. The slow path re-resolves it locally.
+    FabricIngressDiscardNowLocal,
+    /// #16270 (cache supersession): a cached ForwardCandidate whose
+    /// egress RG is known (>0) but is NOT forwarding-active locally
+    /// right now — the RG left this node (failover) or was never
+    /// active here, so serving the stored decision transmits on a
+    /// non-owner WAN egress forever. The slow path re-resolves it
+    /// (HA enforcement demotes it and the fabric converter redirects
+    /// it to the new owner). Guard: only when the egress RG is known
+    /// and not active; a locally-active egress (and an unknown /
+    /// standalone egress) is never invalidated by this arm.
+    ForwardCandidateEgressDeparted,
+}
 
 pub(in crate::afxdp) fn cached_flow_decision_valid(
     forwarding: &ForwardingState,
@@ -300,44 +409,231 @@ pub(in crate::afxdp) fn cached_flow_decision_valid(
     install_table: Option<&str>,
     resolution: ForwardingResolution,
 ) -> bool {
+    cached_flow_decision_invalid_reason(
+        forwarding,
+        ha_state,
+        dynamic_neighbors,
+        now_secs,
+        cached_owner_rg_id,
+        fabric_ingress,
+        target_ip,
+        install_table,
+        resolution,
+    )
+    .is_none()
+}
+
+/// #16222: per-flow twin of `cached_flow_decision_invalid_reason` — the
+/// production hit path judges the cached redirect against the SAME
+/// resolution the session path produces for this flow (per-flow ECMP
+/// hash over the 5-tuple; `target_ip` is already the NAT-translated
+/// target). `fabric_link_ingress` is the physical parent/overlay arrival
+/// identity, OR-ed into the ingress flag for the retention decision:
+/// the session path retains the redirect on fabric-link ingress
+/// (resolve.rs), so revalidation must not supersede it there either.
+/// The destination-only entry point remains for flow-less fixtures only.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn cached_flow_decision_invalid_reason_for_flow(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    now_secs: u64,
+    cached_owner_rg_id: i32,
+    fabric_ingress: bool,
+    fabric_link_ingress: bool,
+    flow_key: Option<&crate::session::SessionKey>,
+    target_ip: IpAddr,
+    install_table: Option<&str>,
+    resolution: ForwardingResolution,
+) -> Option<CachedDecisionInvalid> {
+    cached_flow_decision_invalid_reason_inner(
+        forwarding,
+        ha_state,
+        dynamic_neighbors,
+        now_secs,
+        cached_owner_rg_id,
+        fabric_ingress || fabric_link_ingress,
+        flow_key,
+        target_ip,
+        install_table,
+        resolution,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn cached_flow_decision_invalid_reason(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    now_secs: u64,
+    cached_owner_rg_id: i32,
+    fabric_ingress: bool,
+    target_ip: IpAddr,
+    install_table: Option<&str>,
+    resolution: ForwardingResolution,
+) -> Option<CachedDecisionInvalid> {
+    cached_flow_decision_invalid_reason_inner(
+        forwarding,
+        ha_state,
+        dynamic_neighbors,
+        now_secs,
+        cached_owner_rg_id,
+        fabric_ingress,
+        None,
+        target_ip,
+        install_table,
+        resolution,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cached_flow_decision_invalid_reason_inner(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    now_secs: u64,
+    cached_owner_rg_id: i32,
+    fabric_ingress: bool,
+    flow_key: Option<&crate::session::SessionKey>,
+    target_ip: IpAddr,
+    install_table: Option<&str>,
+    resolution: ForwardingResolution,
+) -> Option<CachedDecisionInvalid> {
+    // #16217: a cached ForwardCandidate whose egress RG has departed
+    // this node is superseded BEFORE enforce demotion is judged.
+    // Enforce re-derives HAInactive for exactly these entries whenever
+    // the egress row still exists, so judging enforce first masks the
+    // departure arm (live fw0 post-FO: enforce_changed=5,
+    // forward_candidate_egress_departed=0) and mis-attributes the
+    // eviction. Departure is the ownership fact; enforce is its
+    // downstream spelling. The guard is unchanged: only a KNOWN
+    // egress RG (>0, tunnel-aware) that is absent/inactive on a
+    // clustered node qualifies; locally-active, unknown (rg 0), and
+    // standalone (empty map) shapes never fire and stay bit-identical.
+    // ForwardCandidate is the only cacheable locally-egressing
+    // disposition, so no other disposition needs this arm. Evict so
+    // the slow path re-resolves: HA enforcement demotes the fresh
+    // resolution and the fabric converter redirects it to the new
+    // owner.
+    if forward_candidate_egress_departed(forwarding, ha_state, now_secs, resolution) {
+        return Some(CachedDecisionInvalid::ForwardCandidateEgressDeparted);
+    }
+    // #16217 (FZDiag34 reverse shape): the departed supersession above
+    // binds the FIRST hit, but the slow path then re-resolves from the
+    // session's STORED reverse decision (egress=tx=5, ge-0-0-1, on
+    // fw0) and RE-SEEDS the same departed member: live fw0 (trace
+    // cellU, helper d40a04d6) reverse entries read
+    // `ForwardCandidate egress=5 tx=5 egr_rg=2 tx_rg=2` — the physical
+    // member's egress row carries RG2, which stays active on fw0
+    // (only RG1 fails over), so NEITHER the logical arm above NOR an
+    // egress-row arm can ever fire, and every WAN reply is TX'd out
+    // the departed member forever (one departed eviction total, then
+    // re-seeded serve). The member's departure is an OWNERSHIP fact,
+    // not an egress-row attribute: the flow's owner RG
+    // (`cached_owner_rg_id`, the stamp the seed recorded — 1 for these
+    // reverse entries, the LAN RG that moved to fw1) is no longer
+    // forwarding-active here. Supersede on that ground so the
+    // re-resolve runs the fabric conversion toward the new owner.
+    // Guard: known owner RG (>0), clustered map non-empty, owner not
+    // forwarding-active; locally-active / unknown / standalone shapes
+    // never fire.
+    if forward_candidate_owner_departed(ha_state, now_secs, cached_owner_rg_id, resolution) {
+        return Some(CachedDecisionInvalid::ForwardCandidateEgressDeparted);
+    }
+    // #16217 (FZDiag35): destination-owner twin for ALREADY-SEEDED
+    // stamp=2 rows. The owner arm above judges the seed stamp; rows
+    // seeded before the forward-owner stamp fix (or by any path
+    // that recorded the reply-egress row's RG) carry a surviving RG
+    // there while their reply destination's connected owner (the
+    // client LAN prefix's RG) has departed. The validator already
+    // receives the hit's `target_ip` (the NAT-translated reply
+    // destination), so judge it directly: a ForwardCandidate whose
+    // destination's connected owner is KNOWN (>0) and NOT
+    // forwarding-active locally is served by a departed owner and
+    // supersedes to the same arm, so the slow path re-resolves and
+    // the stamp-free conversion (resolve.rs) redirects it.
+    // Soundness: this is the identical test the slow-path
+    // conversion applies, run one stage earlier; a locally-active
+    // destination owner (ordinary locally-served reply) and an
+    // unknown owner (gateway/default-routed, dest_rg==0) never
+    // fire. Live fw0 stamp=2 rows (aggregate 5,777 at d28) are
+    // exactly this shape.
+    if forward_candidate_destination_owner_departed(
+        forwarding,
+        ha_state,
+        now_secs,
+        target_ip,
+        install_table,
+        resolution,
+    ) {
+        return Some(CachedDecisionInvalid::ForwardCandidateEgressDeparted);
+    }
     if enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, resolution) != resolution {
-        return false;
+        return Some(CachedDecisionInvalid::EnforceChanged);
+    }
+    // #16269: a fabric-ingress cached DiscardRoute whose cluster-
+    // terminal origin is certain and whose would-be egress RG is now
+    // locally active is stale at takeover: it was demoted while this
+    // node did not own the RG. Evict so the slow path re-resolves it
+    // to the local WAN ForwardCandidate instead of terminal-dropping
+    // every fabric-redirected retransmit on the new owner. Uncertain
+    // origin (no provenance stamp) never reaches here — fail-closed.
+    if fabric_ingress
+        && discard_route_cluster_terminal_now_local(forwarding, ha_state, now_secs, &resolution)
+    {
+        return Some(CachedDecisionInvalid::FabricIngressDiscardNowLocal);
     }
     // RG-stamped redirect hits are the common split-RG cache case. Once the
     // cached owner RG becomes locally active again, invalidate immediately and
     // let the slow path recompute the current local/fabric decision instead of
     // taking a neighbor-map lock on every cache hit.
     if cached_owner_rg_id > 0
+        && fabric_ingress
         && ha_state
             .get(&cached_owner_rg_id)
             .is_some_and(|group| group.is_forwarding_active(now_secs))
-        && (resolution.disposition == ForwardingDisposition::FabricRedirect || fabric_ingress)
+        && resolution.disposition == ForwardingDisposition::FabricRedirect
     {
-        return false;
+        return Some(CachedDecisionInvalid::OwnerActiveRedirect);
     }
     if resolution.disposition == ForwardingDisposition::FabricRedirect {
-        let local_resolution = enforce_ha_resolution_snapshot(
-            forwarding,
-            ha_state,
-            now_secs,
-            match install_table {
-                // #9752: same table rule as `prefer_local` (non-flow lookup:
-                // existing per-destination hash semantics preserved).
-                Some(table) => {
-                    super::lookup_forwarding_resolution_in_table_with_dynamic(
-                        forwarding,
-                        dynamic_neighbors,
-                        target_ip,
-                        Some(table),
-                    )
-                    .resolution
-                }
-                None => {
-                    lookup_forwarding_resolution_with_dynamic(forwarding, dynamic_neighbors, target_ip)
-                        .resolution
-                }
-            },
-        );
+        // #16222: judge the cached redirect against the SAME resolution
+        // the session path produces for this flow. With a flow key the
+        // local candidate uses the per-flow ECMP hash
+        // (`lookup_..._for_flow*`, fib.rs #2734); without one it falls
+        // back to the destination-only hash (flow-less fixtures only).
+        // `target_ip` is already the NAT-translated target
+        // (`resolution_target_for_session` at the caller).
+        let local_lookup = match (install_table, flow_key) {
+            (Some(table), Some(key)) => {
+                super::lookup_forwarding_resolution_with_dynamic_for_flow_in_table(
+                    forwarding,
+                    dynamic_neighbors,
+                    target_ip,
+                    key,
+                    table,
+                )
+            }
+            (Some(table), None) => super::lookup_forwarding_resolution_in_table_with_dynamic(
+                forwarding,
+                dynamic_neighbors,
+                target_ip,
+                Some(table),
+            ),
+            (None, Some(key)) => super::lookup_forwarding_resolution_with_dynamic_for_flow(
+                forwarding,
+                dynamic_neighbors,
+                target_ip,
+                key,
+            ),
+            (None, None) => lookup_forwarding_resolution_with_dynamic(
+                forwarding,
+                dynamic_neighbors,
+                target_ip,
+            ),
+        };
+        let local_resolution =
+            enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, local_lookup.resolution);
         let local_owner_rg = owner_rg_for_resolution(forwarding, local_resolution);
         let local_egress_is_fabric = local_resolution.egress_ifindex > 0
             && ingress_is_fabric(forwarding, local_resolution.egress_ifindex);
@@ -347,24 +643,289 @@ pub(in crate::afxdp) fn cached_flow_decision_valid(
         ) && local_owner_rg > 0
             && !local_egress_is_fabric
         {
-            return false;
+            // #16222 option B (round 2): judge the cached redirect
+            // against its OWN stored resolution context — i.e. against
+            // the resolution the SESSION path produces for this flow —
+            // not against the mere owner inequality. `local_resolution`
+            // above IS that per-flow resolution (per-flow ECMP hash over
+            // the 5-tuple, NAT-translated target, HA-enforced).
+            //
+            // A different-owner local candidate supersedes ONLY if it
+            // serves the flow locally: the per-flow session resolution
+            // for this flow must BE that candidate, i.e. resolving the
+            // flow fresh yields a ForwardCandidate/MissingNeighbor that
+            // egresses locally (non-fabric egress, owner RG
+            // forwarding-active here) INSTEAD of the redirect. That is
+            // exactly the condition under which the session path would
+            // not have seeded (or would no longer seed) a FabricRedirect
+            // for this flow. When the fresh per-flow resolution differs
+            // in egress/disposition from what the redirect serves, the
+            // candidate is not this flow's serving resolution — the
+            // redirect stands.
+            //
+            // This holds regardless of the arrival spelling: on fw0 the
+            // evicting entries are locally-seeded FabricRedirect stamps
+            // (owner != WAN RG1) served on LAN/WAN members, so
+            // `packet_fabric_ingress == fabric_link_ingress == false`
+            // and the round-1 fabric-ingress retention never engaged.
+            // The direct-ingress same-owner retention (#16220) is
+            // preserved below; a same-owner candidate whose owner is now
+            // locally active is the failback case and still supersedes
+            // (FabricLocalWinsSameOwner / OwnerActiveRedirect on fabric
+            // ingress).
+            //
+            // Concretely, `serves_flow_locally` requires the per-flow
+            // candidate to be the flow's serving resolution: since
+            // `local_resolution` is by construction the per-flow
+            // resolution for this flow, the serving test reduces to
+            // whether a fresh resolution of THIS flow would egress
+            // locally under a locally-active owner — which the
+            // HA-enforced candidate already guarantees (a peer-owned
+            // candidate demotes to HAInactive in
+            // `enforce_ha_resolution_snapshot` and never reaches this
+            // arm as ForwardCandidate). So a different-owner candidate
+            // reaching this arm DOES serve locally *as a route*, and
+            // owner inequality alone must not be the eviction trigger:
+            // the trigger is whether superseding changes the flow's
+            // serving egress. The cached redirect's serving egress is
+            // the fabric parent; the candidate's is its local egress.
+            // They differ, so the candidate would change where this
+            // flow leaves — but only the SESSION path may make that
+            // call, and it retains the redirect for this flow's stored
+            // context. Hence: a different-owner candidate supersedes
+            // only when it serves the flow locally AND the session path
+            // would produce it for this flow — which, for a flow whose
+            // cached decision is FabricRedirect, it does not (the
+            // session path's fabric converters retain the redirect on
+            // this stored context). Direct-ingress different-owner
+            // eviction is therefore retired for cached redirects whose
+            // stored resolution is FabricRedirect; failback remains
+            // governed by the same-owner and owner-active arms.
+            if local_owner_rg != cached_owner_rg_id && !fabric_ingress {
+                // Option B: direct-ingress different-owner candidate
+                // does not supersede a cached FabricRedirect judged
+                // against its stored resolution context.
+            } else if local_owner_rg == cached_owner_rg_id && !fabric_ingress {
+                // #16220: on direct ingress, a same-owner local candidate
+                // does not supersede the cached redirect.
+                return None;
+            } else if fabric_ingress && local_owner_rg != cached_owner_rg_id {
+                // Round-1 retention kept for genuine fabric ingress:
+                // the stamp names the ingress/LAN leg, the candidate
+                // the WAN egress leg; not alternatives for this packet.
+            } else {
+                return Some(if local_owner_rg == cached_owner_rg_id {
+                    CachedDecisionInvalid::FabricLocalWinsSameOwner
+                } else {
+                    CachedDecisionInvalid::FabricLocalWins
+                });
+            }
         }
     }
+    // #16222: the prefer-local probe below is the generic fabric-ingress
+    // supersession for non-redirect resolutions. For a FabricRedirect it
+    // would re-derive the same local candidate the block above already
+    // judged and evict as FabricIngressLocalWins even when that block
+    // deliberately retained the redirect (different-owner fabric
+    // ingress). The redirect arm is fully decided above; skip the probe
+    // for it so the retention is not undone under a second arm name.
     if fabric_ingress
-        && prefer_local_forward_candidate_for_fabric_ingress(
+        && resolution.disposition != ForwardingDisposition::FabricRedirect
+        && prefer_local_forward_candidate_for_fabric_ingress_for_flow(
             forwarding,
             ha_state,
             dynamic_neighbors,
             now_secs,
             true,
+            flow_key,
             target_ip,
             install_table,
             resolution,
         ) != resolution
     {
+        return Some(CachedDecisionInvalid::FabricIngressLocalWins);
+    }
+    None
+}
+/// #16217: the single egress-RG departure predicate behind the
+/// `ForwardCandidateEgressDeparted` supersession arm AND the flow-cache
+/// lookup-fence admission -- a cached `ForwardCandidate` whose egress RG is
+/// known (>0, tunnel-aware via `owner_rg_for_resolution`) and is not
+/// forwarding-active locally right now (absent or inactive), on a clustered
+/// node (non-empty HA map). A locally-active egress never qualifies, an
+/// unknown egress (rg 0) never qualifies, and a standalone node (empty map)
+/// never qualifies, so all three stay bit-identical. Both the lookup fence
+/// and the hit-stage revalidation evaluate it against the live FIB egress
+/// attribution (`owner_rg_for_resolution` on the cached resolution), NOT
+/// the stamp-owner RG -- both must agree that departure, not the fence,
+/// owns the eviction.
+pub(in crate::afxdp) fn forward_candidate_egress_departed(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    resolution: ForwardingResolution,
+) -> bool {
+    resolution.disposition == ForwardingDisposition::ForwardCandidate
+        && !ha_state.is_empty()
+        && {
+            let egress_rg = owner_rg_for_resolution(forwarding, resolution);
+            egress_rg > 0
+                && !ha_state
+                    .get(&egress_rg)
+                    .is_some_and(|group| group.is_forwarding_active(now_secs))
+        }
+}
+
+/// #16217 (FZDiag34 reverse shape): owner-RG twin of
+/// `forward_candidate_egress_departed`. A cached `ForwardCandidate`
+/// whose seed-time owner RG (`cached_owner_rg_id` — the flow's owner
+/// recorded by the seed stamp, NOT the egress-row attribution) is
+/// known (>0) and no longer forwarding-active locally is served by a
+/// departed owner: the slow path must re-resolve it so HA demotion
+/// and the fabric converters can redirect it to the new owner. This
+/// is the only arm that can see a reverse entry whose physical member
+/// egress row names a surviving RG (live: egress=tx=5, egr_rg=2,
+/// owner stamp 1 departed). Guard: ForwardCandidate only, clustered
+/// map non-empty, owner known and inactive; locally-active, unknown
+/// (0), and standalone shapes never fire.
+pub(in crate::afxdp) fn forward_candidate_owner_departed(
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    cached_owner_rg_id: i32,
+    resolution: ForwardingResolution,
+) -> bool {
+    resolution.disposition == ForwardingDisposition::ForwardCandidate
+        && !ha_state.is_empty()
+        && cached_owner_rg_id > 0
+        && !ha_state
+            .get(&cached_owner_rg_id)
+            .is_some_and(|group| group.is_forwarding_active(now_secs))
+}
+
+/// #16217 (FZDiag35): destination-owner twin of
+/// `forward_candidate_owner_departed` for rows whose seed stamp
+/// names a surviving RG (the pre-fix stamp=2 shape). Judges the
+/// reply destination's CONNECTED owner (`dest_rg` for `target_ip`
+/// in the session's installing table) instead of any stored stamp:
+/// known (>0) and not forwarding-active locally means the cached
+/// local serve TXs toward a departed owner. Guard: ForwardCandidate
+/// only, clustered map non-empty, destination owner known and
+/// inactive; locally-active, unknown (0 — gateway/default-routed),
+/// and standalone shapes never fire. This is the same test the
+/// slow-path conversion applies (resolve.rs), so cache and
+/// slow path can never disagree about a reverse row's departure.
+pub(in crate::afxdp) fn forward_candidate_destination_owner_departed(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    target_ip: IpAddr,
+    install_table: Option<&str>,
+    resolution: ForwardingResolution,
+) -> bool {
+    if resolution.disposition != ForwardingDisposition::ForwardCandidate || ha_state.is_empty() {
         return false;
     }
-    true
+    let dest_rg = crate::afxdp::session_glue::connected_owner_rg_for_target_in_table(
+        forwarding,
+        target_ip,
+        install_table,
+    );
+    dest_rg > 0
+        && !ha_state
+            .get(&dest_rg)
+            .is_some_and(|group| group.is_forwarding_active(now_secs))
+}
+
+/// #16217 (Wire18, B2): re-validate a fabric-established (adopted) mark
+/// against the RG ownership in the HA snapshot the caller judges with.
+/// The mark was stamped when the adoption gate proved (for the exact
+/// tuple) that this node owns the egress RG post-takeover; that proof is
+/// what the exemption stands on, so the exemption may only be honoured
+/// while the judged snapshot still shows this node owning that RG.
+///
+/// Temporal contract: the adopting worker's snapshot LAGS the gate --
+/// at the adoption instant it still reads the egress RG inactive (that
+/// lag is exactly why the adoption resolve needed `fabric_adopted =
+/// true`), so a bare `revalidate(...) == false` in that instant does
+/// NOT by itself lapse the adoption: the gate's proof, not the
+/// lagging snapshot's, is the ownership evidence for the adoption
+/// window. The lapse is enforced on the DEPARTURE side, judged on
+/// the same live snapshot the hit revalidation uses:
+///   * hit stage -- the mark suppresses only the lagging-snapshot
+///     `EnforceChanged` demotion; the departure arm is checked
+///     BEFORE enforce, so once departure holds (snapshot caught up
+///     to a failback, or the egress row vanished) the departed arm
+///     supersedes the entry whatever the validator would otherwise
+///     spell it and the flow re-resolves toward FabricRedirect.
+///   * session-hit site -- the marked-row context qualifies only on
+///     fabric-link ingress (the adoption site's own arrival
+///     identity); positive non-ownership is enforced at the gate
+///     and at the cache hit above, and once the flow re-resolves
+///     after failback under a caught-up snapshot it runs unadopted
+///     (HA-demote + fabric conversion).
+/// Invariant: stale-window demotion -> exemption; genuine departure
+/// -> conversion. There is no post-window snapshot in which a
+/// departed egress keeps the exemption.
+///
+/// Returns `true` (proof holds) for a marked entry whose egress RG is
+/// forwarding-active in the judged snapshot, and for a marked
+/// `FabricRedirect` (no local egress RG to depart — the redirect arms
+/// judge it). Returns `false` for unmarked entries, for a marked
+/// candidate whose egress RG is departed in the judged snapshot, and
+/// for an unknown egress RG (0 — adoption proved ownership of a NAMED
+/// RG; an entry that no longer names one cannot keep the proof).
+/// NOTE (fold B6): the packet-path callers (poll session-hit marked
+/// arm, flow-cache hit arm) judge via
+/// `revalidate_fabric_established_fresh` against the authoritative
+/// fresh RG set; this snapshot form remains for unit fixtures and
+/// non-packet judges.
+pub(in crate::afxdp) fn revalidate_fabric_established(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    fabric_established: bool,
+    resolution: ForwardingResolution,
+) -> bool {
+    if !fabric_established {
+        return false;
+    }
+    if resolution.disposition == ForwardingDisposition::FabricRedirect {
+        return true;
+    }
+    let egress_rg = owner_rg_for_resolution(forwarding, resolution);
+    egress_rg > 0
+        && ha_state
+            .get(&egress_rg)
+            .is_some_and(|group| group.is_forwarding_active(now_secs))
+}
+
+/// #16217 (fold B6): fresh-set twin of `revalidate_fabric_established`.
+/// The adoption gate proves ownership against the AUTHORITATIVE
+/// `forwarding_active_rgs` set freshly loaded from the coordinator
+/// `rg_runtime` ArcSwap for THIS packet (worker loop construction),
+/// NOT the worker's cached per-tick `ha_state` snapshot, which lags
+/// RG activation by up to a tick. A mark judged only against that
+/// lagging snapshot can be honoured on a node whose fresh set already
+/// excludes the egress RG (or refused on the true owner). The marked
+/// session-hit arm and the flow-cache hit arm therefore judge the
+/// mark against the fresh set: `true` only for a marked entry naming
+/// a known egress RG (>0) present in the fresh set; `FabricRedirect`
+/// keeps the redirect-arm exemption (no local egress to depart);
+/// unknown RG (0) and unmarked entries never qualify.
+pub(in crate::afxdp) fn revalidate_fabric_established_fresh(
+    forwarding: &ForwardingState,
+    forwarding_active_rgs: &std::collections::BTreeSet<i32>,
+    fabric_established: bool,
+    resolution: ForwardingResolution,
+) -> bool {
+    if !fabric_established {
+        return false;
+    }
+    if resolution.disposition == ForwardingDisposition::FabricRedirect {
+        return true;
+    }
+    let egress_rg = owner_rg_for_resolution(forwarding, resolution);
+    egress_rg > 0 && forwarding_active_rgs.contains(&egress_rg)
 }
 
 pub(in crate::afxdp) fn finalize_new_flow_ha_resolution(

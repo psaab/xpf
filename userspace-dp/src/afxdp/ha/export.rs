@@ -258,7 +258,45 @@ impl crate::afxdp::Coordinator {
         // pkg/daemon/daemon_ha_sync.go falls back to the authoritative
         // BulkSync -- so the defect was the nondeterministic refusal itself.
         let sessions = lock_shared_recover(&self.sessions.synced);
+        // #16217 (export stamp): the forward-wire alias map is the
+        // second half of the shared evidence. Lock order is
+        // `shared_sessions` THEN `shared_forward_wire_sessions` (the
+        // single node-wide order); both guards are held for the whole
+        // snapshot so each delta's stamp reads one consistent pair.
+        let wire_sessions = lock_shared_recover(&self.sessions.forward_wire);
 
+        // #16217 (export stamp; folds B2+B5): per-tuple completion
+        // evidence over BOTH shared maps (canonical lock order above).
+        // Computed once per exported tuple from the guards already
+        // held — an actual reverse packet count > 0 on a
+        // reverse/forward row for the tuple (fail-closed: a
+        // synthesized companion with `rev_packets = 0` never stamps).
+        // A row's own Established wire is NOT evidence here (it is
+        // this stamp's output). Scope: full `SessionKey` keyed gets
+        // (canonical / reverse companion / forward-wire alias / NAT'd
+        // reverse companion, derived from the exported row's OWN NAT
+        // via this closure's key+nat) — the pre-fold bare-tuple scan
+        // leaked identical 5-tuples from another routing domain into
+        // this tuple's stamp, and cost O(table) per exported row.
+        let evidence_for = |key: &crate::session::SessionKey,
+                            nat: crate::nat::NatDecision|
+         -> crate::session::NodeServedEvidence {
+            let reverse_key = crate::session::reverse_session_key(key, nat);
+            let wire_key = crate::session::forward_wire_key(key, nat);
+            let rev_wire_key = crate::session::forward_wire_key(&reverse_key, nat);
+            let mut ev = crate::session::NodeServedEvidence::default();
+            for map in [&*sessions, &*wire_sessions] {
+                for k in [key, &reverse_key, &wire_key, &rev_wire_key] {
+                    if let Some(e) = map.get(k)
+                        && e.rev_packets > 0
+                        && (e.metadata.is_reverse || *k == *key || *k == wire_key)
+                    {
+                        ev.rev_packets_any = ev.rev_packets_any.max(e.rev_packets);
+                    }
+                }
+            }
+            ev
+        };
         let ha_state = self.ha.rg_runtime.load();
         let mut deltas = Vec::new();
         for entry in sessions.values() {
@@ -332,9 +370,16 @@ impl crate::afxdp::Coordinator {
                 // no duration, so 0/unknown is correct here.
                 created_ns: 0,
                 last_seen_ns: 0,
-                // #2501: HA bulk-export Open delta; no volume yet (and the
-                // synced entry carries no per-direction counters).
-                counters: crate::session::SessionCounters::default(),
+                // #16217: carry the shared row's snapshotted live
+                // counts (monotonic at publish/restamp) so the peer's
+                // scoped evidence gate sees actual service; a row that
+                // never served stays zero (no evidence, fail-closed).
+                counters: crate::session::SessionCounters {
+                    fwd_packets: entry.fwd_packets,
+                    fwd_bytes: 0,
+                    rev_packets: entry.rev_packets,
+                    rev_bytes: 0,
+                },
                 // #2749: HA bulk-export Open delta; no observed ToS / TCP
                 // flags (and not routed through the RT_FLOW close exporter).
                 observed_tos: 0,
@@ -349,11 +394,19 @@ impl crate::afxdp::Coordinator {
                 bulk_resync: false,
                 is_admission: false,
                 tcp_close_class: entry.tcp_close_class,
-                tcp_handshake_state: entry.tcp_handshake_state,
+                // #16217 (export stamp): Established when node-wide
+                // completion evidence holds for this tuple over the
+                // shared maps; otherwise the row's own wire.
+                tcp_handshake_state: if evidence_for(&entry.key, entry.decision.nat).served_and_completed() {
+                    crate::session::TcpHandshakeState::Established.to_wire()
+                } else {
+                    entry.tcp_handshake_state
+                },
                 pptp_call_ids: entry.pptp_call_ids,
                 purge_retirement: false,
             });
         }
+        drop(wire_sessions);
         drop(sessions);
 
         Ok(AllSessionsExport {

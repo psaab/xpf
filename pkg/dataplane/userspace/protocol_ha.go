@@ -253,6 +253,12 @@ type SessionSyncRequest struct {
 	// TCPHandshakeState (#10888): helper TCP handshake phase, independent from
 	// TCP close state. 0 is legacy/absent and preserves established imports.
 	TCPHandshakeState uint8 `json:"tcp_handshake_state,omitempty"`
+	// FwdPackets/RevPackets (#16217): live per-direction counters
+	// forwarded from SessionValue{,V6} so the peer helper stamps
+	// them onto its imported SyncedSessionEntry. Additive/omitempty:
+	// an old helper decodes 0 via serde(default) = no evidence.
+	FwdPackets uint64 `json:"fwd_packets,omitempty"`
+	RevPackets uint64 `json:"rev_packets,omitempty"`
 	// PeerDelete (#9714) marks a delete sent on behalf of the PEER (the
 	// cluster-stale apply and the #6368 install rollback). The helper refuses such a
 	// delete for a key it holds as a LOCAL session whose owner redundancy group is
@@ -474,6 +480,13 @@ type SessionDeltaInfo struct {
 	// TCPHandshakeState (#10888): independent handshake phase; 0 is legacy/
 	// absent and preserves established imports.
 	TCPHandshakeState uint8 `json:"tcp_handshake_state,omitempty"`
+	// FwdPackets/RevPackets (#16217) are the serving node's live
+	// per-direction packet counters at delta production, carried on
+	// both delta transports (binary trailing u64s + JSON keys). They
+	// feed the peer's scoped completion-evidence gate. Additive:
+	// 0 from an old helper = no evidence (fail-closed).
+	FwdPackets uint64 `json:"fwd_packets,omitempty"`
+	RevPackets uint64 `json:"rev_packets,omitempty"`
 	// PurgeRetirement (#9752): this Close retires exactly its key — the
 	// sender already decided the pair (fenced removal, linked or deliberately
 	// preserved companion, conditional worker delete). Every downstream

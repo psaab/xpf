@@ -42,6 +42,34 @@ fn active_ha_runtime(now_secs: u64) -> HAGroupRuntime {
     }
 }
 
+fn active_ha() -> std::collections::BTreeMap<i32, HAGroupRuntime> {
+    let mut ha = std::collections::BTreeMap::new();
+    ha.insert(1, active_ha_runtime(1));
+    ha
+}
+
+
+/// #16217 (Opus final4): the gate-proved recovery fixtures thread
+/// through the pure adopted-resolution cells. Egress 12 in
+/// `test_forwarding_state_with_fabric` carries RG1, so `proved_rg=1`
+/// with the default-table decision is the owner proof the poll gate
+/// would have produced; `recovery_wrong_rg` proves a different RG.
+fn recovery_fixture() -> AdoptedRecovery {
+    AdoptedRecovery {
+        decision: test_decision(),
+        flow_key: test_key(),
+        proved_rg: 1,
+    }
+}
+
+fn recovery_wrong_rg() -> AdoptedRecovery {
+    AdoptedRecovery {
+        decision: test_decision(),
+        flow_key: test_key(),
+        proved_rg: 2,
+    }
+}
+
 fn inactive_ha_runtime(watchdog_timestamp: u64) -> HAGroupRuntime {
     HAGroupRuntime {
         active: false,
@@ -466,6 +494,8 @@ fn promote_republishes_the_live_close_class_9412() {
                 session_id: 0,
                 tcp_close_class: class,
                 tcp_handshake_state: 0,
+                fwd_packets: 0,
+                rev_packets: 0,
                 source_nat_static: None,
             },
             false,
@@ -551,6 +581,8 @@ fn promote_republishes_the_session_id_for_replicas_to_adopt_9582() {
             session_id: PEER_ID,
             tcp_close_class: 0,
             tcp_handshake_state: 0,
+            fwd_packets: 0,
+            rev_packets: 0,
             source_nat_static: None,
         },
         false,
@@ -715,37 +747,32 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
     let mut ha_state = BTreeMap::new();
     ha_state.insert(1, active_ha_runtime(1));
 
-    let shared_entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision: SessionDecision {
-            resolution: resolve_fabric_redirect(&forwarding).expect("fabric redirect"),
-            nat: NatDecision {
-                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-                rewrite_src_port: Some(key.src_port),
-                ..NatDecision::default()
-            },
-            install_table_domain: 0,
-            install_table_check: 0,
+    let shared_entry = SyncedSessionEntry { key: key.clone(),
+    decision: SessionDecision {
+        resolution: resolve_fabric_redirect(&forwarding).expect("fabric redirect"),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
         },
-        metadata: SessionMetadata { ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        fabric_ingress: false,
-        owner_rg_id: 0,
-        nat_scope_ifindex: None, ..test_metadata() },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x18,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+        install_table_domain: 0,
+        install_table_check: 0,
+    },
+    metadata: SessionMetadata { ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    fabric_ingress: false,
+    owner_rg_id: 0,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x18,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     publish_shared_session(
         &shared_sessions,
         &shared_nat_sessions,
@@ -787,6 +814,8 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
         true,
         0,
         0,
+        None,
+        false,
         None,
     )
     .expect("resolved");
@@ -897,35 +926,30 @@ fn quarantined_reply_domain_not_synthesized_from_main_forward_11061() {
         let mut ha_state = BTreeMap::new();
         ha_state.insert(1, active_ha_runtime(1));
 
-        let shared_entry = SyncedSessionEntry {
-            key: key.clone(),
-            decision: SessionDecision {
-                resolution: resolve_fabric_redirect(&forwarding).expect("fabric redirect"),
-                nat: NatDecision {
-                    rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-                    rewrite_src_port: Some(key.src_port),
-                    ..NatDecision::default()
-                },
-                install_table_domain: 0,
-                install_table_check: 0,
+        let shared_entry = SyncedSessionEntry { key: key.clone(),
+        decision: SessionDecision {
+            resolution: resolve_fabric_redirect(&forwarding).expect("fabric redirect"),
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                rewrite_src_port: Some(key.src_port),
+                ..NatDecision::default()
             },
-            metadata: SessionMetadata { ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            forward_ingress_vlan_id: None,
-            fabric_ingress: true,
-            nat_scope_ifindex: None, ..test_metadata() },
-            leak_incarnation: 0,
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            tcp_flags: 0x18,
-            generation: 0,
-            session_id: 0,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-            pptp_call_ids: 0,
-            rev_packets: 0,
-            source_nat_static: None,
-        };
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: SessionMetadata { ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        fabric_ingress: true,
+        nat_scope_ifindex: None, ..test_metadata() },
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x18,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        source_nat_static: None, };
         publish_shared_session(
             &shared_sessions,
             &shared_nat_sessions,
@@ -1010,22 +1034,17 @@ fn stale_local_nat_match_does_not_resurrect_shared_alias_9991() {
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
         &shared_owner_rg_indexes,
-        &SyncedSessionEntry {
-            key: forward_key.clone(),
-            decision,
-            metadata,
-            leak_incarnation: 0,
-            origin: SessionOrigin::ForwardFlow,
-            protocol: PROTO_TCP,
-            tcp_flags: 0,
-            generation: 0,
-            session_id: 0,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-            pptp_call_ids: 0,
-            rev_packets: 0,
-            source_nat_static: None,
-        },
+        &SyncedSessionEntry { key: forward_key.clone(),
+        decision,
+        metadata,
+        leak_incarnation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        protocol: PROTO_TCP,
+        tcp_flags: 0,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        source_nat_static: None, },
     );
     assert!(
         !shared_nat_sessions
@@ -1163,24 +1182,19 @@ fn cached_session_resolution_skips_fabric_redirect() {
 fn lookup_session_across_scopes_returns_shared_entry() {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision: test_decision(),
-        metadata: SessionMetadata { forward_ingress_vlan_id: None,
-        nat_scope_ifindex: None, ..test_metadata() },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: key.clone(),
+    decision: test_decision(),
+    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     shared_sessions
@@ -1312,22 +1326,17 @@ fn syn_on_closing_tuple_preserves_shared_close_before_authority_10886() {
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     shared_sessions.lock().expect("shared lock").insert(
         forward.clone(),
-        SyncedSessionEntry {
-            key: forward.clone(),
-            decision: test_decision(),
-            metadata: test_metadata(),
-            leak_incarnation: 0,
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            tcp_flags: 0,
-            generation: 0,
-            session_id: 0,
-            tcp_close_class: 1,
-            tcp_handshake_state: 0,
-            pptp_call_ids: 0,
-            rev_packets: 0,
-            source_nat_static: None,
-        },
+        SyncedSessionEntry { key: forward.clone(),
+        decision: test_decision(),
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 1, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        source_nat_static: None, },
     );
     let first = lookup_session_across_scopes_for_test(
         &mut sessions,
@@ -1620,24 +1629,19 @@ fn lookup_session_across_scopes_returns_shared_forward_wire_entry() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata: SessionMetadata { forward_ingress_vlan_id: None,
-        nat_scope_ifindex: None, ..test_metadata() },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let translated_key = forward_wire_key(&key, decision.nat);
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -1741,24 +1745,19 @@ fn lookup_session_across_scopes_prefers_shared_entry_over_fabric_wire_placeholde
         PROTO_TCP,
         0,
     ));
-    let shared_entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata: SessionMetadata { forward_ingress_vlan_id: None,
-        nat_scope_ifindex: None, ..test_metadata() },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let shared_entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -1815,23 +1814,18 @@ fn lookup_forward_nat_across_scopes_returns_shared_nat_entry() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_ICMPV6,
-        tcp_flags: 0,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_ICMPV6,
+    tcp_flags: 0,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let reply_key = reverse_session_key(&key, decision.nat);
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -1912,6 +1906,7 @@ fn ambiguous_local_reverse_lookup_blocks_shared_fallback_16014() {
         tcp_handshake_state: 0,
         pptp_call_ids: 0,
         rev_packets: 0,
+        fwd_packets: 0,
         source_nat_static: None,
     };
     publish_shared_session(
@@ -2064,22 +2059,17 @@ fn zone_matching_shared_reverse_reply_uses_forward_egress_domain_11298() {
     forward.routing_domain = DOMAIN_A;
     let decision = test_decision();
     let metadata = test_metadata();
-    let entry = SyncedSessionEntry {
-        key: forward.clone(),
-        decision,
-        metadata,
-        leak_incarnation: 0,
-        origin: SessionOrigin::ForwardFlow,
-        protocol: PROTO_TCP,
-        tcp_flags: TCP_FLAG_ACK,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: forward.clone(),
+    decision,
+    metadata,
+    leak_incarnation: 0,
+    origin: SessionOrigin::ForwardFlow,
+    protocol: PROTO_TCP,
+    tcp_flags: TCP_FLAG_ACK,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -2133,22 +2123,17 @@ fn zone_matching_shared_reverse_reply_uses_forward_egress_domain_11298() {
     forward_zero.routing_domain = 0;
     let mut default_egress_decision = decision;
     default_egress_decision.resolution.egress_ifindex += 1;
-    let zero_entry = SyncedSessionEntry {
-        key: forward_zero.clone(),
-        decision: default_egress_decision,
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::ForwardFlow,
-        protocol: PROTO_TCP,
-        tcp_flags: TCP_FLAG_ACK,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let zero_entry = SyncedSessionEntry { key: forward_zero.clone(),
+    decision: default_egress_decision,
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::ForwardFlow,
+    protocol: PROTO_TCP,
+    tcp_flags: TCP_FLAG_ACK,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let shared_zero = Arc::new(Mutex::new(FastMap::default()));
     let shared_sessions_zero = Arc::new(Mutex::new(FastMap::default()));
     let shared_wire_zero = Arc::new(Mutex::new(FastMap::default()));
@@ -2246,22 +2231,17 @@ fn embedded_quote_reverse_lookup_allows_off_path_domain_11298() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let owner_indexes = SharedSessionOwnerRgIndexes::default();
-    let entry = SyncedSessionEntry {
-        key: forward.clone(),
-        decision,
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::ForwardFlow,
-        protocol: PROTO_TCP,
-        tcp_flags: TCP_FLAG_ACK,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: forward.clone(),
+    decision,
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::ForwardFlow,
+    protocol: PROTO_TCP,
+    tcp_flags: TCP_FLAG_ACK,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     publish_shared_session(
         &shared_sessions,
         &shared_nat_sessions,
@@ -2334,22 +2314,17 @@ fn embedded_quote_reverse_lookup_rejects_cross_domain_collision_11298() {
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let owner_indexes = SharedSessionOwnerRgIndexes::default();
     for forward in [&forward_a, &forward_b] {
-        let entry = SyncedSessionEntry {
-            key: forward.clone(),
-            decision,
-            metadata: test_metadata(),
-            leak_incarnation: 0,
-            origin: SessionOrigin::ForwardFlow,
-            protocol: PROTO_TCP,
-            tcp_flags: TCP_FLAG_ACK,
-            generation: 0,
-            session_id: 0,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-            pptp_call_ids: 0,
-            rev_packets: 0,
-            source_nat_static: None,
-        };
+        let entry = SyncedSessionEntry { key: forward.clone(),
+        decision,
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        source_nat_static: None, };
         publish_shared_session(
             &shared_sessions,
             &shared_nat_sessions,
@@ -2385,22 +2360,17 @@ fn embedded_quote_reverse_lookup_rejects_cross_domain_collision_11298() {
     let mixed_shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let mixed_shared_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let mixed_owner_indexes = SharedSessionOwnerRgIndexes::default();
-    let mixed_entry = SyncedSessionEntry {
-        key: forward_a.clone(),
-        decision,
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::ForwardFlow,
-        protocol: PROTO_TCP,
-        tcp_flags: TCP_FLAG_ACK,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let mixed_entry = SyncedSessionEntry { key: forward_a.clone(),
+    decision,
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::ForwardFlow,
+    protocol: PROTO_TCP,
+    tcp_flags: TCP_FLAG_ACK,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     publish_shared_session(
         &mixed_shared_sessions,
         &mixed_shared_nat_sessions,
@@ -2472,24 +2442,19 @@ fn lookup_forward_nat_across_scopes_prefers_shared_entry_over_fabric_wire_placeh
         PROTO_TCP,
         0,
     ));
-    let shared_entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata: SessionMetadata { forward_ingress_vlan_id: None,
-        nat_scope_ifindex: None, ..test_metadata() },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let shared_entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let reply_key = reverse_session_key(&key, decision.nat);
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -2585,24 +2550,19 @@ fn lookup_forward_nat_across_scopes_returns_shared_canonical_reverse_entry() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata: SessionMetadata { forward_ingress_vlan_id: None,
-        nat_scope_ifindex: None, ..test_metadata() },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let canonical_reply = reverse_canonical_key(&key, decision.nat);
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -2651,22 +2611,17 @@ fn lookup_forward_nat_across_scopes_returns_nonzero_domain_canonical_reverse_ent
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let mut canonical_reply = reverse_canonical_key(&key, decision.nat);
     canonical_reply.routing_domain = DOMAIN_A;
     let mut forwarding = ForwardingState::default();
@@ -2720,27 +2675,22 @@ fn shared_nat_nonzero_canonical_alias_refuses_other_wire_owner() {
         rewrite_src_port: Some(key_a.src_port),
         ..NatDecision::default()
     };
-    let entry = |key, nat| SyncedSessionEntry {
-        key,
-        decision: SessionDecision {
-            resolution: test_resolution(),
-            nat,
-            install_table_domain: 0,
-            install_table_check: 0,
-        },
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::ForwardFlow,
-        protocol: PROTO_TCP,
-        tcp_flags: TCP_FLAG_ACK,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = |key, nat| SyncedSessionEntry { key,
+    decision: SessionDecision {
+        resolution: test_resolution(),
+        nat,
+        install_table_domain: 0,
+        install_table_check: 0,
+    },
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::ForwardFlow,
+    protocol: PROTO_TCP,
+    tcp_flags: TCP_FLAG_ACK,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let entry_a = entry(key_a.clone(), nat_a);
     let entry_b = entry(key_b, nat_b);
     let mut canonical_reply = reverse_canonical_key(&key_a, nat_a);
@@ -2807,22 +2757,17 @@ fn shared_nat_fallback_does_not_borrow_main_for_quarantined_domain_11061() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let canonical_reply = reverse_canonical_key(&key, decision.nat);
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -2871,23 +2816,18 @@ fn publish_and_remove_shared_session_tracks_forward_wire_alias() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let translated_key = forward_wire_key(&key, decision.nat);
 
     publish_shared_session(
@@ -2931,39 +2871,34 @@ fn publish_and_remove_shared_session_tracks_forward_wire_alias() {
 // The wire lookup must fail closed while W is ambiguous, and must resolve
 // again to the survivor once the displacing owner is removed.
 fn wire_ambiguity_entry(vip: Ipv4Addr, backend: Ipv4Addr) -> SyncedSessionEntry {
-    SyncedSessionEntry {
-        key: SessionKey {
-            addr_family: libc::AF_INET as u8,
-            protocol: PROTO_TCP,
-            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 50)),
-            dst_ip: IpAddr::V4(vip),
-            src_port: 40_100,
-            dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 3,
-        },
-        decision: SessionDecision {
-            resolution: test_resolution(),
-            nat: NatDecision {
-                rewrite_dst: Some(IpAddr::V4(backend)),
-                ..NatDecision::default()
-            },
-            install_table_domain: 0,
-            install_table_check: 0,
-        },
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
+    SyncedSessionEntry { key: SessionKey {
+        addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
-        tcp_flags: 0x02,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    }
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 50)),
+        dst_ip: IpAddr::V4(vip),
+        src_port: 40_100,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 3,
+    },
+    decision: SessionDecision {
+        resolution: test_resolution(),
+        nat: NatDecision {
+            rewrite_dst: Some(IpAddr::V4(backend)),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    },
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x02,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, }
 }
 
 #[test]
@@ -3116,22 +3051,17 @@ fn remove_shared_session_if_resolves_wire_survivor_from_owner_index_15106() {
             install_table_domain: 0,
             install_table_check: 0,
         };
-        let entry = SyncedSessionEntry {
-            key,
-            decision,
-            metadata: test_metadata(),
-            leak_incarnation: 0,
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            tcp_flags: 0,
-            generation: 0,
-            session_id: 0,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-            pptp_call_ids: 0,
-            rev_packets: 0,
-            source_nat_static: None,
-        };
+        let entry = SyncedSessionEntry { key,
+        decision,
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        source_nat_static: None, };
         publish_shared_session(
             &shared_sessions,
             &shared_nat_sessions,
@@ -3320,22 +3250,17 @@ fn remove_shared_session_if_nat_removal_cost_15106() {
                 &shared_nat_sessions,
                 &shared_forward_wire_sessions,
                 &shared_owner_rg_indexes,
-                &SyncedSessionEntry {
-                    key,
-                    decision,
-                    metadata: test_metadata(),
-                    leak_incarnation: 0,
-                    origin: SessionOrigin::SyncImport,
-                    protocol: PROTO_TCP,
-                    tcp_flags: 0,
-                    generation: 0,
-                    session_id: 0,
-                    tcp_close_class: 0,
-                    tcp_handshake_state: 0,
-                    pptp_call_ids: 0,
-                    rev_packets: 0,
-                    source_nat_static: None,
-                },
+                &SyncedSessionEntry { key,
+                decision,
+                metadata: test_metadata(),
+                leak_incarnation: 0,
+                origin: SessionOrigin::SyncImport,
+                protocol: PROTO_TCP,
+                tcp_flags: 0,
+                generation: 0,
+                session_id: 0,
+                tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+                source_nat_static: None, },
             );
         }
         let mut samples: Vec<u128> = Vec::new();
@@ -3393,23 +3318,18 @@ fn publish_and_remove_shared_session_tracks_canonical_reverse_alias() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let canonical_reply = reverse_canonical_key(&key, decision.nat);
 
     publish_shared_session(
@@ -3496,22 +3416,17 @@ fn assert_shared_nat_mixed_zero_reverse_matches_worker_local_11361(
         key
     );
 
-    let entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::ForwardFlow,
-        protocol: PROTO_TCP,
-        tcp_flags: TCP_FLAG_ACK,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::ForwardFlow,
+    protocol: PROTO_TCP,
+    tcp_flags: TCP_FLAG_ACK,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -3563,27 +3478,22 @@ fn shared_nat_mixed_zero_refuses_ambiguous_tenant_alias_11361() {
     key_b.routing_domain = DOMAIN_B;
     key_b.src_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 103));
 
-    let entry = |key: SessionKey| SyncedSessionEntry {
-        key,
-        decision: SessionDecision {
-            resolution: test_resolution(),
-            nat,
-            install_table_domain: 0,
-            install_table_check: 0,
-        },
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::ForwardFlow,
-        protocol: PROTO_TCP,
-        tcp_flags: TCP_FLAG_ACK,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = |key: SessionKey| SyncedSessionEntry { key,
+    decision: SessionDecision {
+        resolution: test_resolution(),
+        nat,
+        install_table_domain: 0,
+        install_table_check: 0,
+    },
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::ForwardFlow,
+    protocol: PROTO_TCP,
+    tcp_flags: TCP_FLAG_ACK,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let entry_a = entry(key_a.clone());
     let entry_b = entry(key_b.clone());
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -3661,27 +3571,22 @@ fn shared_nat_exact_hit_refuses_ambiguous_same_domain_owner_14384() {
     key2.routing_domain = DOMAIN_D;
     key2.dst_ip = IpAddr::V4(Ipv4Addr::new(172, 16, 84, 2));
 
-    let entry = |key: SessionKey| SyncedSessionEntry {
-        key,
-        decision: SessionDecision {
-            resolution: test_resolution(),
-            nat,
-            install_table_domain: 0,
-            install_table_check: 0,
-        },
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::ForwardFlow,
-        protocol: PROTO_TCP,
-        tcp_flags: TCP_FLAG_ACK,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = |key: SessionKey| SyncedSessionEntry { key,
+    decision: SessionDecision {
+        resolution: test_resolution(),
+        nat,
+        install_table_domain: 0,
+        install_table_check: 0,
+    },
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::ForwardFlow,
+    protocol: PROTO_TCP,
+    tcp_flags: TCP_FLAG_ACK,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
 
     let mut forwarding = ForwardingState::default();
     forwarding.has_routing_domains = true;
@@ -3774,23 +3679,18 @@ fn publish_and_remove_shared_session_tracks_owner_rg_indexes() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let forward_wire = forward_wire_key(&key, decision.nat);
     let reverse_wire = reverse_session_key(&key, decision.nat);
     let reverse_canonical = reverse_canonical_key(&key, decision.nat);
@@ -3873,23 +3773,18 @@ fn publish_shared_session_reindexes_owner_rg_on_replace() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
-    let mut entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let mut entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
 
     publish_shared_session(
         &shared_sessions,
@@ -3932,23 +3827,18 @@ fn publish_shared_session_heals_missing_owner_rg_index_on_same_owner_update() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
-    let entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
 
     publish_shared_session(
         &shared_sessions,
@@ -3997,24 +3887,19 @@ fn resolve_flow_session_decision_uses_canonical_key_for_translated_forward_hit()
         install_table_check: 0,
     };
     let translated_key = forward_wire_key(&key, decision.nat);
-    let entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata: SessionMetadata { forward_ingress_vlan_id: None,
-        nat_scope_ifindex: None, ..test_metadata() },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -4090,24 +3975,19 @@ fn resolve_flow_session_decision_promotes_translated_shared_hit_on_active_fabric
         install_table_check: 0,
     };
     let translated_key = forward_wire_key(&key, decision.nat);
-    let entry = SyncedSessionEntry {
-        key: translated_key.clone(),
-        decision,
-        metadata: SessionMetadata { forward_ingress_vlan_id: None,
-        nat_scope_ifindex: None, ..test_metadata() },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x18,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: translated_key.clone(),
+    decision,
+    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x18,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let mut forwarding = test_forwarding_state_with_fabric();
     forwarding.connected_v4.push(ConnectedRouteV4 {
         prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
@@ -4143,8 +4023,7 @@ fn resolve_flow_session_decision_promotes_translated_shared_hit_on_active_fabric
         dst_ip: translated_key.dst_ip,
         forward_key: translated_key.clone(),
     };
-    let resolved = resolve_flow_session_decision(
-        &mut sessions,
+    let resolved = resolve_flow_session_decision(&mut sessions,
         SteeringMap::unshared_for_test(-1),
         SharedSessionRefs {
             sessions: &shared_sessions,
@@ -4168,8 +4047,7 @@ fn resolve_flow_session_decision_promotes_translated_shared_hit_on_active_fabric
         true,
         0,
         0,
-        crate::afxdp::session_glue::SessionHitVerdict::Owner,
-    )
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,)
     .expect("translated shared hit should resolve");
 
     assert_eq!(
@@ -4191,6 +4069,1962 @@ fn resolve_flow_session_decision_promotes_translated_shared_hit_on_active_fabric
             .is_some()
     );
 }
+
+/// Fabric-ingress adoption (#16217): the NAT'd wire tuple of an
+/// ESTABLISHED synced session must be found by
+/// `lookup_shared_established_for_wire` and resolved to a local
+/// ForwardCandidate (worker row installed); without an established
+/// synced entry the lookup declines (the packet still discards), and
+/// a HandshakePending row never qualifies WITHOUT completed-handshake
+/// evidence (packet counts — see the scoped-evidence test in
+/// `shared_ops::store`), and qualifies with it.
+#[test]
+fn fabric_ingress_adopts_established_synced_wire_session_16217() {
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    let decision = SessionDecision {
+        resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
+            .expect("fabric redirect"),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let translated_key = forward_wire_key(&key, decision.nat);
+    let established = crate::session::TcpHandshakeState::Established.to_wire();
+    let entry = SyncedSessionEntry { key: translated_key.clone(),
+    decision,
+    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x18,
+    generation: 0,
+    session_id: 4242,
+    tcp_close_class: 0, tcp_handshake_state: established, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
+    let mut forwarding = test_forwarding_state_with_fabric();
+    forwarding.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        host: Ipv4Addr::new(172, 16, 80, 0),
+        ifindex: 12,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding.neighbors.insert(
+        (12, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+        NeighborEntry {
+            mac: [0xde, 0xad, 0xbe, 0xef, 0x80, 0x00],
+        },
+    );
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    // Without any synced entry the adoption lookup declines.
+    assert!(
+        crate::afxdp::shared_ops::lookup_shared_established_for_wire(
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &translated_key,
+        )
+        .is_none(),
+        "no synced session -> no adoption (packet still discards)"
+    );
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry,
+    );
+    let found = crate::afxdp::shared_ops::lookup_shared_established_for_wire(
+        &shared_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &translated_key,
+    )
+    .expect("established synced wire session must be adoptable");
+    assert_eq!(found.session_id, 4242);
+    // A non-established (still handshaking) row must not adopt.
+    let mut pending = entry.clone();
+    pending.key = {
+        let mut k = translated_key.clone();
+        k.src_port = 59999;
+        k
+    };
+    pending.tcp_handshake_state =
+        crate::session::TcpHandshakeState::HandshakePending.to_wire();
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &pending,
+    );
+    assert!(
+        crate::afxdp::shared_ops::lookup_shared_established_for_wire(
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &pending.key,
+        )
+        .is_none(),
+        "pending handshake without completion evidence must not adopt"
+    );
+    // #16217 (DECISION arm): the same pending row WITH
+    // completed-handshake evidence (fwd + rev counts > 0 on the
+    // canonical tuple) qualifies as Established-for-adoption.
+    crate::afxdp::shared_ops::restamp_shared_packet_counts(
+        &shared_sessions,
+        &shared_forward_wire_sessions,
+        &pending.key,
+        pending.decision.nat,
+        6,
+        3,
+    );
+    assert!(
+        crate::afxdp::shared_ops::lookup_shared_established_for_wire(
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &pending.key,
+        )
+        .is_some(),
+        "pending handshake with fwd+rev evidence must adopt"
+    );
+    // The adopted entry resolves to a local WAN ForwardCandidate and
+    // installs the worker row (the poll-path adoption outcome).
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let peer_worker_commands = Vec::new();
+    let mut ha_state = BTreeMap::new();
+    ha_state.insert(1, active_ha_runtime(1));
+    let flow = SessionFlow {
+        src_ip: translated_key.src_ip,
+        dst_ip: translated_key.dst_ip,
+        forward_key: translated_key.clone(),
+    };
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        SharedSessionRefs {
+            sessions: &shared_sessions,
+            nat_sessions: &shared_nat_sessions,
+            forward_wire_sessions: &shared_forward_wire_sessions,
+            owner_rg_indexes: &shared_owner_rg_indexes,
+            peer_worker_commands: &peer_worker_commands,
+            worker_commands_by_id: empty_worker_commands_by_id(),
+            conntrack: ConntrackFds { v4: -1, v6: -1 },
+            tick: Tick { ns: 1_000_000, secs: 1 },
+        },
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &flow,
+        PROTO_TCP,
+        0x18,
+        21,
+        0,
+        true,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
+    .expect("adopted wire session should resolve");
+    assert_eq!(
+        resolved.decision.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate
+    );
+    assert_eq!(resolved.decision.resolution.egress_ifindex, 12);
+    assert!(
+        sessions.lookup(&translated_key, 1_000_000, 0x18).is_some(),
+        "adoption must install the worker row"
+    );
+}
+
+/// #16217 (FZDiag16): the fabric-adoption gate must ALSO adopt when the
+/// shared maps hold only w=2 (HandshakePending) SyncImport replicas —
+/// the heavy split shape — but THIS worker's local table holds a
+/// non-reverse serving row (WorkerLocalImport/SharedPromote) for the
+/// canonical key that is Established. Declines when the local row is
+/// pending, reverse-only, peer-synced, or closing.
+///
+/// FAIL-ON-REVERT: drop the local arm of
+/// `fabric_adoption_established_for_wire` and the Established-local
+/// assertions below go false (shared w=2 alone never qualifies).
+#[test]
+fn fabric_gate_adopts_on_local_established_when_shared_pending_16217() {
+    let key = test_key();
+    let decision = SessionDecision {
+        resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
+            .expect("fabric redirect"),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let translated_key = forward_wire_key(&key, decision.nat);
+    let pending_wire = crate::session::TcpHandshakeState::HandshakePending.to_wire();
+    let now = 1_000_000u64;
+    // Shared maps: ONLY a w=2 forward SyncImport replica (the fw0-import
+    // shape) — the pre-existing shared gate must decline on it alone.
+    let shared_entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x18,
+    generation: 0,
+    session_id: 7777,
+    tcp_close_class: 0, tcp_handshake_state: pending_wire, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &shared_entry,
+    );
+    assert!(
+        crate::afxdp::shared_ops::lookup_shared_established_for_wire(
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &translated_key,
+        )
+        .is_none(),
+        "premise: shared w=2 alone must not adopt"
+    );
+    let gate = |sessions: &SessionTable| {
+        crate::afxdp::shared_ops::fabric_adoption_established_for_wire(
+            sessions,
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &translated_key,
+            now,
+        )
+    };
+    // Empty local table: declines.
+    assert!(!gate(&SessionTable::new()), "no local row -> no adoption");
+    // Local serving row Established (WorkerLocalImport, midstream ACK
+    // install = established, not pending): adopts despite shared w=2,
+    // and derives the canonical key from the wire key.
+    for origin in [SessionOrigin::WorkerLocalImport, SessionOrigin::SharedPromote] {
+        let mut sessions = SessionTable::new();
+        assert!(sessions.install_with_protocol_with_origin(
+            key.clone(),
+            decision.clone(),
+            test_metadata(),
+            origin,
+            now,
+            PROTO_TCP,
+            0x18,
+        ));
+        assert_eq!(
+            sessions.handshake_state_wire_for(&key),
+            crate::session::TcpHandshakeState::Established.to_wire(),
+            "premise: local {origin:?} row must read Established"
+        );
+        assert_eq!(
+            sessions.local_established_for_wire_at(&translated_key, now),
+            Some(key.clone()),
+            "canonical key must derive from the wire key ({origin:?})"
+        );
+        assert!(gate(&sessions), "local Established {origin:?} must adopt");
+    }
+    // Local row pending (SYN install = Opening): declines.
+    {
+        let mut sessions = SessionTable::new();
+        assert!(sessions.install_with_protocol_with_origin(
+            key.clone(),
+            decision.clone(),
+            test_metadata(),
+            SessionOrigin::WorkerLocalImport,
+            now,
+            PROTO_TCP,
+            0x02,
+        ));
+        assert!(!gate(&sessions), "local pending/Opening row must not adopt");
+    }
+    // Local row peer-synced Established (SyncImport import): declines —
+    // a replica's flags are not serving evidence.
+    {
+        let mut sessions = SessionTable::new();
+        assert!(sessions.upsert_synced_with_origin(
+            crate::session::SessionInstall {
+                key: key.clone(),
+                decision: decision.clone(),
+                metadata: test_metadata(),
+                origin: SessionOrigin::SyncImport,
+                now_ns: now,
+                protocol: PROTO_TCP,
+                tcp_flags: 0x18,
+                session_id: 7777,
+                tcp_close_class: 0,
+                tcp_handshake_state: crate::session::TcpHandshakeState::Established.to_wire(),
+                fwd_packets: 0,
+                rev_packets: 0,
+                source_nat_static: None,
+            },
+            false,
+        ));
+        assert_eq!(
+            sessions.handshake_state_wire_for(&key),
+            crate::session::TcpHandshakeState::Established.to_wire(),
+            "premise: peer-synced row reads Established on the wire"
+        );
+        assert!(!gate(&sessions), "peer-synced local row must not adopt");
+    }
+    // Reverse-only local row Established: declines.
+    {
+        let mut sessions = SessionTable::new();
+        let mut rev_meta = test_metadata();
+        rev_meta.is_reverse = true;
+        let rev_key = crate::session::reverse_session_key(&key, decision.nat);
+        assert!(sessions.install_with_protocol_with_origin(
+            rev_key,
+            decision.clone(),
+            rev_meta,
+            SessionOrigin::WorkerLocalImport,
+            now,
+            PROTO_TCP,
+            0x18,
+        ));
+        assert!(!gate(&sessions), "reverse-only local row must not adopt");
+    }
+}
+/// #16217: the adopted ForwardCandidate must not be terminated as
+/// ha_inactive by the receiving worker's HA-activity enforcement.
+/// Live shape (cell40/41): fw1's last resolution for the heavy wire
+/// tuples read `ha_inactive ingress-ifindex=4 egress-ifindex=14
+/// next-hop=172.16.80.200` while fw1's own HA groups already read
+/// `rg1 active=true` — the adoption gate had proven Established +
+/// this node is the RG owner post-takeover, yet the resolution the
+/// adoption re-resolve produced (a local WAN ForwardCandidate,
+/// egress 14 in the unit fixture's ifindex-12 spelling) was demoted
+/// and the poll filter (`ForwardCandidate` only) discarded it, so
+/// every adopted tuple dropped forever. The adopted resolution must
+/// bypass the terminal; the SAME resolution without adoption stays
+/// fail-closed.
+///
+/// FAIL-ON-REVERT: drop the `fabric_adopted_resolution` conversion
+/// (or the `true` at the poll adoption callsite) and the adopted leg
+/// resolves HAInactive instead of ForwardCandidate.
+#[test]
+fn adopted_forward_candidate_bypasses_ha_inactive_terminal_16217() {
+    // (a) Pure reclassification, all sub-arms.
+    let forwarding = test_forwarding_state_with_fabric();
+    let candidate = ForwardingResolution {
+        egress_ifindex: 12,
+        ..test_resolution()
+    };
+    let demoted = ForwardingResolution {
+        disposition: ForwardingDisposition::HAInactive,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+        ..candidate
+    };
+    let dyn_empty = Arc::new(ShardedNeighborMap::new());
+    let target = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+    assert_eq!(
+        fabric_adopted_resolution(&forwarding, &active_ha(), 1, candidate, demoted, &dyn_empty, target, Some(&recovery_fixture())),
+        candidate,
+        "adopted: HAInactive-demoted ForwardCandidate is restored"
+    );
+    let cluster_demoted = ForwardingResolution {
+        disposition: ForwardingDisposition::ClusterTerminalHAInactive,
+        ..demoted
+    };
+    assert_eq!(
+        fabric_adopted_resolution(&forwarding, &active_ha(), 1, candidate, cluster_demoted, &dyn_empty, target, Some(&recovery_fixture())),
+        candidate,
+        "adopted: ClusterTerminalHAInactive-demoted ForwardCandidate is restored"
+    );
+    // A MissingNeighbor lookup with no FIB cover for the target
+    // stays terminal even when adopted (the recompute cannot
+    // produce a candidate). The connected-but-unresolved retryable
+    // shape and the resolved recompute are pinned by
+    // `adopted_missing_neighbor_recomputes_forward_candidate_16217`
+    // and `adopted_cluster_terminal_recomputes_from_fib_16217`.
+    let missing = ForwardingResolution {
+        disposition: ForwardingDisposition::MissingNeighbor,
+        neighbor_mac: None,
+        ..candidate
+    };
+    assert_eq!(
+        fabric_adopted_resolution(&forwarding, &active_ha(), 1, missing, demoted, &dyn_empty, target, Some(&recovery_fixture())),
+        demoted,
+        "adopted: still-missing neighbor with no FIB cover keeps the HA terminal"
+    );
+    // An active enforced outcome is kept verbatim.
+    assert_eq!(
+        fabric_adopted_resolution(&forwarding, &active_ha(), 1, candidate, candidate, &dyn_empty, target, Some(&recovery_fixture())),
+        candidate,
+        "adopted: surviving ForwardCandidate is untouched"
+    );
+    // Unknown owner (egress names no EgressInterface row) stays
+    // terminal: adoption proved the session, not route ownership.
+    let unowned = ForwardingResolution {
+        egress_ifindex: 999,
+        ..candidate
+    };
+    let unowned_demoted = ForwardingResolution {
+        disposition: ForwardingDisposition::HAInactive,
+        ..unowned
+    };
+    assert_eq!(
+        fabric_adopted_resolution(&forwarding, &active_ha(), 1, unowned, unowned_demoted, &dyn_empty, target, Some(&recovery_fixture())),
+        unowned_demoted,
+        "adopted: unknown-egress-RG demotion stays fail-closed"
+    );
+
+    // (b) End-to-end through the production resolver: an Established
+    // synced wire session whose local WAN egress RG reads INACTIVE
+    // in this worker's HA snapshot (the receiving-worker enforcement
+    // shape). Without adoption the resolve is HAInactive (the live
+    // drop); with adoption it is the local ForwardCandidate.
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    let decision = SessionDecision {
+        resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
+            .expect("fabric redirect"),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let translated_key = forward_wire_key(&key, decision.nat);
+    let established = crate::session::TcpHandshakeState::Established.to_wire();
+    let entry = SyncedSessionEntry { key: translated_key.clone(),
+    decision,
+    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x18,
+    generation: 0,
+    session_id: 4243,
+    tcp_close_class: 0, tcp_handshake_state: established, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
+    let mut forwarding = test_forwarding_state_with_fabric();
+    forwarding.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        host: Ipv4Addr::new(172, 16, 80, 0),
+        ifindex: 12,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding.neighbors.insert(
+        (12, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+        NeighborEntry {
+            mac: [0xde, 0xad, 0xbe, 0xef, 0x80, 0x00],
+        },
+    );
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry,
+    );
+    // Premise: the adoption gate qualifies this tuple.
+    assert!(
+        crate::afxdp::shared_ops::fabric_adoption_established_for_wire(
+            &sessions,
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &translated_key,
+            1_000_000,
+        ),
+        "premise: gate must qualify the Established wire tuple"
+    );
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let peer_worker_commands = Vec::new();
+    // Receiving-worker HA snapshot: RG1 reads INACTIVE here even
+    // though the adoption gate proved this node is the owner.
+    let mut ha_state = BTreeMap::new();
+    ha_state.insert(1, inactive_ha_runtime(1));
+    let flow = SessionFlow {
+        src_ip: translated_key.src_ip,
+        dst_ip: translated_key.dst_ip,
+        forward_key: translated_key.clone(),
+    };
+    let resolve_as = |sessions: &mut SessionTable, adopted: bool| {
+        resolve_flow_session_decision_with_conntrack_and_payload(
+            sessions,
+            SteeringMap::unshared_for_test(-1),
+            SharedSessionRefs {
+                sessions: &shared_sessions,
+                nat_sessions: &shared_nat_sessions,
+                forward_wire_sessions: &shared_forward_wire_sessions,
+                owner_rg_indexes: &shared_owner_rg_indexes,
+                peer_worker_commands: &peer_worker_commands,
+                worker_commands_by_id: empty_worker_commands_by_id(),
+                conntrack: ConntrackFds { v4: -1, v6: -1 },
+                tick: Tick { ns: 1_000_000, secs: 1 },
+            },
+            &forwarding,
+            &ha_state,
+            &dynamic_neighbors,
+            &flow,
+            PROTO_TCP,
+            0x18,
+            0,
+            21,
+            0,
+            true,
+            true,
+            0,
+            0,
+            None,
+            adopted,
+            adopted.then(|| AdoptedRecovery {
+                decision: test_decision(),
+                flow_key: test_key(),
+                proved_rg: 1,
+            }),
+        )
+        .expect("wire session should resolve")
+    };
+    // Fail-closed control: the identical resolve WITHOUT adoption
+    // terminates HAInactive -- the live drop being fixed; it must
+    // remain the outcome for every non-adopted flow.
+    let mut control_sessions = SessionTable::new();
+    assert_eq!(
+        resolve_as(&mut control_sessions, false)
+            .decision
+            .resolution
+            .disposition,
+        ForwardingDisposition::HAInactive,
+        "non-adopted resolve must stay fail-closed on the HA terminal"
+    );
+    // Adopted: the ForwardCandidate survives enforcement, exactly
+    // the outcome the poll adoption filter admits.
+    let adopted = resolve_as(&mut sessions, true);
+    assert_eq!(
+        adopted.decision.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "adopted ForwardCandidate must bypass the ha_inactive terminal"
+    );
+    assert_eq!(adopted.decision.resolution.egress_ifindex, 12);
+    // With RG1 reading inactive the synced hit stays transient
+    // (`keep_transient`): the worker row lands via the poll loop's
+    // Owner-verdict purge/promote after this resolve in production.
+    // The resolve contract under test here is the disposition the
+    // adoption filter admits.
+    assert!(adopted.deferred_synced_purge.is_some());
+}
+/// #16217 (FZDiag24): the post-failover transient shape through the
+/// production session-HIT resolver. At the takeover instant the new
+/// owner's FIB nominates the WAN egress but the neighbor is not yet
+/// resolved, so the session-hit look-up answers `MissingNeighbor`
+/// (egress 12, next-hop 172.16.80.200, `neighbor_mac == None`) and HA
+/// enforcement strips it to `HAInactive` at `forwarding/ha.rs:268`.
+/// Pre-fix `fabric_adopted_resolution` required
+/// `looked_up == ForwardCandidate`, so an adopted hit
+/// (`fabric_adopted = true`, armed by the shared-Established arm while
+/// the gate snapshot still reads the egress RG inactive) kept the
+/// terminal and every transient reply dropped (live: 3,308
+/// `MissingNeighbor -> HAInactive` resolutions, zero misses). The
+/// adopted restore must now RECOMPUTE the neighbor from the FIB: once
+/// the neighbor has landed, the same hit yields the local
+/// `ForwardCandidate` with the resolved MAC.
+///
+/// FAIL-ON-REVERT: restore the ForwardCandidate-only gate in
+/// `fabric_adopted_resolution` and the adopted leg resolves
+/// `HAInactive` instead of `ForwardCandidate`; drop the recompute
+/// and the resolved leg cannot restore; terminalize the
+/// still-missing sub-arm and the connected-but-unresolved leg
+/// keeps `HAInactive` instead of the retryable `MissingNeighbor`.
+#[test]
+fn adopted_missing_neighbor_recomputes_forward_candidate_16217() {
+    // (a) Pure reclassification, MissingNeighbor arms.
+    let forwarding = test_forwarding_state_with_fabric();
+    let dyn_empty = Arc::new(ShardedNeighborMap::new());
+    let target = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+    let candidate = ForwardingResolution {
+        egress_ifindex: 12,
+        ..test_resolution()
+    };
+    let missing = ForwardingResolution {
+        disposition: ForwardingDisposition::MissingNeighbor,
+        neighbor_mac: None,
+        ..candidate
+    };
+    let demoted = ForwardingResolution {
+        disposition: ForwardingDisposition::HAInactive,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+        ..missing
+    };
+    // Neighbor still unresolved in the live FIB (no connected route /
+    // neighbor row for the target in this fixture): the recompute
+    // cannot produce a candidate, so the terminal stands fail-closed.
+    // (The connected-but-unresolved retryable shape is pinned by
+    // `adopted_cluster_terminal_recomputes_from_fib_16217`.)
+    assert_eq!(
+        fabric_adopted_resolution(&forwarding, &active_ha(), 1, missing, demoted, &dyn_empty, target, Some(&recovery_fixture())),
+        demoted,
+        "adopted: still-missing neighbor with no FIB cover keeps the HA terminal (fail-closed)"
+    );
+    // Neighbor resolved: with the connected /24 + neighbor row the
+    // FIB recompute yields the ForwardCandidate and the terminal is
+    // restored to it (with the resolved MAC, not the stripped shape).
+    let mut forwarding_live = test_forwarding_state_with_fabric();
+    forwarding_live.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        host: Ipv4Addr::new(172, 16, 80, 0),
+        ifindex: 12,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding_live.neighbors.insert(
+        (12, target),
+        NeighborEntry { mac: [0xde, 0xad, 0xbe, 0xef, 0x80, 0x00] },
+    );
+    let restored = fabric_adopted_resolution(
+        &forwarding_live,
+        &active_ha(),
+        1,
+        missing,
+        demoted,
+        &dyn_empty,
+        target,
+        Some(&recovery_fixture()),
+    );
+    assert_eq!(
+        restored.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "adopted: recomputed ForwardCandidate replaces the HA terminal"
+    );
+    assert_eq!(restored.egress_ifindex, 12);
+    assert_eq!(
+        restored.neighbor_mac,
+        Some([0xde, 0xad, 0xbe, 0xef, 0x80, 0x00]),
+        "adopted: restored candidate carries the FIB-resolved neighbor MAC"
+    );
+    // Unknown egress (rg 0): never restores, even with a live FIB.
+    let unowned_missing = ForwardingResolution {
+        egress_ifindex: 999,
+        ..missing
+    };
+    let unowned_demoted = ForwardingResolution {
+        disposition: ForwardingDisposition::HAInactive,
+        ..unowned_missing
+    };
+    assert_eq!(
+        fabric_adopted_resolution(&forwarding_live, &active_ha(), 1, unowned_missing, unowned_demoted, &dyn_empty, target, Some(&recovery_fixture())),
+        unowned_demoted,
+        "adopted: unknown-egress MissingNeighbor stays fail-closed"
+    );
+    // ClusterTerminal shape (egress zeroed before enforcement): the
+    // looked-up egress RG is unknown, so it never restores either.
+    let cluster_missing = ForwardingResolution {
+        disposition: ForwardingDisposition::MissingNeighbor,
+        egress_ifindex: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        ..candidate
+    };
+    let cluster_demoted = ForwardingResolution {
+        disposition: ForwardingDisposition::ClusterTerminalHAInactive,
+        ..cluster_missing
+    };
+    assert_eq!(
+        fabric_adopted_resolution(&forwarding_live, &active_ha(), 1, cluster_missing, cluster_demoted, &dyn_empty, target, Some(&recovery_fixture())),
+        cluster_demoted,
+        "adopted: ClusterTerminal MissingNeighbor (egress 0) stays fail-closed"
+    );
+
+    // (b) End-to-end through the production session-HIT resolver
+    // (`resolve_flow_session_decision_with_conntrack_and_payload`,
+    // fabric_adopted = true exactly as the poll session-hit site runs
+    // it when `session_hit_fabric_adopted` holds): an Established
+    // synced wire session whose FIB answer is MissingNeighbor under
+    // an INACTIVE RG snapshot. Without adoption the hit terminates
+    // HAInactive; with adoption and the neighbor present in the FIB
+    // it yields the local ForwardCandidate.
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    let decision = SessionDecision {
+        resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
+            .expect("fabric redirect"),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let translated_key = forward_wire_key(&key, decision.nat);
+    let established = crate::session::TcpHandshakeState::Established.to_wire();
+    let entry = SyncedSessionEntry { key: translated_key.clone(),
+    decision,
+    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x18,
+    generation: 0,
+    session_id: 4244,
+    tcp_close_class: 0, tcp_handshake_state: established, rev_packets: 1u64, fwd_packets: 1, pptp_call_ids: 0,
+    source_nat_static: None, };
+    let mut forwarding = test_forwarding_state_with_fabric();
+    forwarding.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        host: Ipv4Addr::new(172, 16, 80, 0),
+        ifindex: 12,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding.neighbors.insert(
+        (12, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+        NeighborEntry { mac: [0xde, 0xad, 0xbe, 0xef, 0x80, 0x00] },
+    );
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry,
+    );
+    assert!(
+        crate::afxdp::shared_ops::fabric_adoption_established_for_wire(
+            &sessions,
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &translated_key,
+            1_000_000,
+        ),
+        "premise: gate must qualify the Established wire tuple"
+    );
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let peer_worker_commands = Vec::new();
+    let mut ha_state = BTreeMap::new();
+    ha_state.insert(1, inactive_ha_runtime(1));
+    let flow = SessionFlow {
+        src_ip: translated_key.src_ip,
+        dst_ip: translated_key.dst_ip,
+        forward_key: translated_key.clone(),
+    };
+    let resolve_as = |sessions: &mut SessionTable, adopted: bool| {
+        resolve_flow_session_decision_with_conntrack_and_payload(
+            sessions,
+            SteeringMap::unshared_for_test(-1),
+            SharedSessionRefs {
+                sessions: &shared_sessions,
+                nat_sessions: &shared_nat_sessions,
+                forward_wire_sessions: &shared_forward_wire_sessions,
+                owner_rg_indexes: &shared_owner_rg_indexes,
+                peer_worker_commands: &peer_worker_commands,
+                worker_commands_by_id: empty_worker_commands_by_id(),
+                conntrack: ConntrackFds { v4: -1, v6: -1 },
+                tick: Tick { ns: 1_000_000, secs: 1 },
+            },
+            &forwarding,
+            &ha_state,
+            &dynamic_neighbors,
+            &flow,
+            PROTO_TCP,
+            0x18,
+            0,
+            21,
+            0,
+            true,
+            true,
+            0,
+            0,
+            None,
+            adopted,
+            adopted.then(|| AdoptedRecovery {
+                decision: test_decision(),
+                flow_key: test_key(),
+                proved_rg: 1,
+            }),
+        )
+        .expect("wire session should resolve")
+    };
+    // Fail-closed control: identical hit WITHOUT adoption terminates.
+    let mut control_sessions = SessionTable::new();
+    assert_eq!(
+        resolve_as(&mut control_sessions, false)
+            .decision
+            .resolution
+            .disposition,
+        ForwardingDisposition::HAInactive,
+        "non-adopted MissingNeighbor hit must stay fail-closed on the HA terminal"
+    );
+    // Adopted hit: the neighbor is recomputed from the FIB and the
+    // flow forwards on the local candidate instead of dropping.
+    let adopted = resolve_as(&mut sessions, true);
+    assert_eq!(
+        adopted.decision.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "adopted MissingNeighbor hit must recompute to the local ForwardCandidate"
+    );
+    assert_eq!(adopted.decision.resolution.egress_ifindex, 12);
+    assert_eq!(
+        adopted.decision.resolution.neighbor_mac,
+        Some([0xde, 0xad, 0xbe, 0xef, 0x80, 0x00]),
+        "adopted hit must carry the FIB-resolved neighbor MAC"
+    );
+}
+
+/// #16217 (FZDiag27): the stored-terminal shape through the
+/// production session-HIT resolver. The `SyncImport` row the peer
+/// exported carries `ClusterTerminalHAInactive` itself (egress 0,
+/// no next-hop), so the synced-session lookup returns the terminal
+/// verbatim and `owner_rg_for_resolution` reads 0 off it — pre-fix
+/// `fabric_adopted_resolution` fell through and kept the terminal
+/// on every adopted hit (live: hundreds of hits with
+/// `stored == looked == enforced == ClusterTerminalHAInactive`,
+/// zero misses). The adopted restore must now recover the egress
+/// from the live FIB: with the connected /24 published and the
+/// neighbor resolved, the same hit yields the local
+/// `ForwardCandidate` with the FIB MAC. Two fail-closed shapes pin
+/// the retryable leg: with the neighbor NOT yet resolved the
+/// recompute answers `MissingNeighbor` and the adopted hit returns
+/// that (drop-without-terminal — the next retransmit re-enters the
+/// restore), and with NOTHING covering the target the recompute
+/// cannot produce a candidate and the terminal stands.
+///
+/// FAIL-ON-REVERT: drop the ClusterTerminal arm in
+/// `fabric_adopted_resolution` and every adopted leg below resolves
+/// `ClusterTerminalHAInactive`; terminalize the MissingNeighbor
+/// sub-arm and the unresolved leg keeps `HAInactive`.
+#[test]
+fn adopted_cluster_terminal_recomputes_from_fib_16217() {
+    // (a) Pure reclassification, ClusterTerminal arms.
+    let dyn_empty = Arc::new(ShardedNeighborMap::new());
+    let target = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+    let terminal = ForwardingResolution {
+        disposition: ForwardingDisposition::ClusterTerminalHAInactive,
+        egress_ifindex: 0,
+        tx_ifindex: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        ..test_resolution()
+    };
+    // No connected route / neighbor for the target in this fixture:
+    // the FIB recompute cannot produce a candidate, so the terminal
+    // stands fail-closed.
+    assert_eq!(
+        fabric_adopted_resolution(
+            &test_forwarding_state_with_fabric(),
+            &active_ha(),
+            1,
+            terminal,
+            terminal,
+            &dyn_empty,
+            target,
+            Some(&recovery_fixture()),
+        ),
+        terminal,
+        "adopted: ClusterTerminal with no FIB cover keeps the terminal (fail-closed)"
+    );
+    // Connected /24 present, neighbor NOT yet resolved: the
+    // recompute answers MissingNeighbor with a known egress RG, so
+    // the adopted hit returns the retryable shape, never the
+    // terminal.
+    let mut forwarding_unresolved = test_forwarding_state_with_fabric();
+    forwarding_unresolved.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        host: Ipv4Addr::new(172, 16, 80, 0),
+        ifindex: 12,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    let unresolved = fabric_adopted_resolution(
+        &forwarding_unresolved,
+        &active_ha(),
+        1,
+        terminal,
+        terminal,
+        &dyn_empty,
+        target,
+        Some(&recovery_fixture()),
+    );
+    assert_eq!(
+        unresolved.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "adopted: unresolved ClusterTerminal recompute stays retryable MissingNeighbor"
+    );
+    assert_eq!(unresolved.egress_ifindex, 12);
+    assert_eq!(unresolved.neighbor_mac, None);
+    // Neighbor resolved: the recompute yields the ForwardCandidate
+    // and the terminal is restored to it (with the FIB MAC).
+    let mut forwarding_live = forwarding_unresolved.clone();
+    forwarding_live.neighbors.insert(
+        (12, target),
+        NeighborEntry { mac: [0xde, 0xad, 0xbe, 0xef, 0x80, 0x00] },
+    );
+    let restored = fabric_adopted_resolution(
+        &forwarding_live,
+        &active_ha(),
+        1,
+        terminal,
+        terminal,
+        &dyn_empty,
+        target,
+        Some(&recovery_fixture()),
+    );
+    assert_eq!(
+        restored.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "adopted: resolved ClusterTerminal recompute restores the ForwardCandidate"
+    );
+    assert_eq!(restored.egress_ifindex, 12);
+    assert_eq!(
+        restored.neighbor_mac,
+        Some([0xde, 0xad, 0xbe, 0xef, 0x80, 0x00]),
+        "adopted: restored candidate carries the FIB-resolved neighbor MAC"
+    );
+
+    // (b) End-to-end through the production session-HIT resolver:
+    // an Established synced wire session whose STORED resolution is
+    // the cluster terminal itself, under an INACTIVE RG snapshot
+    // (the gate snapshot lag). Without adoption the hit terminates
+    // `ClusterTerminalHAInactive`; with adoption and the FIB
+    // published + neighbor resolved it yields the local
+    // ForwardCandidate; with the neighbor unresolved it yields the
+    // retryable MissingNeighbor.
+    let run_hit = |neighbor_resolved: bool, adopted: bool| {
+        let mut sessions = SessionTable::new();
+        let key = test_key();
+        let stored = ForwardingResolution {
+            disposition: ForwardingDisposition::ClusterTerminalHAInactive,
+            egress_ifindex: 0,
+            tx_ifindex: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            ..test_resolution()
+        };
+        let decision = SessionDecision {
+            resolution: stored,
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                rewrite_src_port: Some(key.src_port),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
+        let translated_key = forward_wire_key(&key, decision.nat);
+        let established = crate::session::TcpHandshakeState::Established.to_wire();
+        let entry = SyncedSessionEntry { key: translated_key.clone(),
+        decision,
+        metadata: SessionMetadata { forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None, ..test_metadata() },
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x18,
+        generation: 0,
+        session_id: 4245,
+        tcp_close_class: 0, tcp_handshake_state: established, rev_packets: 1u64, fwd_packets: 1, pptp_call_ids: 0,
+        source_nat_static: None, };
+        let mut forwarding = test_forwarding_state_with_fabric();
+        forwarding.connected_v4.push(ConnectedRouteV4 {
+            prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+            host: Ipv4Addr::new(172, 16, 80, 0),
+            ifindex: 12,
+            tunnel_endpoint_id: 0,
+            table: "inet.0".to_string(),
+        });
+        if neighbor_resolved {
+            forwarding.neighbors.insert(
+                (12, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+                NeighborEntry { mac: [0xde, 0xad, 0xbe, 0xef, 0x80, 0x00] },
+            );
+        }
+        let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        publish_shared_session(
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &entry,
+        );
+        let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+        let peer_worker_commands = Vec::new();
+        let mut ha_state = BTreeMap::new();
+        ha_state.insert(1, inactive_ha_runtime(1));
+        let flow = SessionFlow {
+            src_ip: translated_key.src_ip,
+            dst_ip: translated_key.dst_ip,
+            forward_key: translated_key.clone(),
+        };
+        resolve_flow_session_decision_with_conntrack_and_payload(
+            &mut sessions,
+            SteeringMap::unshared_for_test(-1),
+            SharedSessionRefs {
+                sessions: &shared_sessions,
+                nat_sessions: &shared_nat_sessions,
+                forward_wire_sessions: &shared_forward_wire_sessions,
+                owner_rg_indexes: &shared_owner_rg_indexes,
+                peer_worker_commands: &peer_worker_commands,
+                worker_commands_by_id: empty_worker_commands_by_id(),
+                conntrack: ConntrackFds { v4: -1, v6: -1 },
+                tick: Tick { ns: 1_000_000, secs: 1 },
+            },
+            &forwarding,
+            &ha_state,
+            &dynamic_neighbors,
+            &flow,
+            PROTO_TCP,
+            0x18,
+            0,
+            21,
+            0,
+            true,
+            true,
+            0,
+            0,
+            None,
+            adopted,
+            adopted.then(|| AdoptedRecovery {
+                decision: test_decision(),
+                flow_key: test_key(),
+                proved_rg: 1,
+            }),
+        )
+        .expect("wire session should resolve")
+        .decision
+        .resolution
+    };
+    // Fail-closed control: identical hit WITHOUT adoption terminates
+    // (HA enforcement demotes the stored terminal to the drop the
+    // non-adopted path has always produced).
+    assert_eq!(
+        run_hit(true, false).disposition,
+        ForwardingDisposition::HAInactive,
+        "non-adopted stored-terminal hit must stay fail-closed on the terminal"
+    );
+    // Adopted, neighbor resolved: restore to the local candidate.
+    let adopted = run_hit(true, true);
+    assert_eq!(
+        adopted.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "adopted stored-terminal hit must recompute to the local ForwardCandidate"
+    );
+    assert_eq!(adopted.egress_ifindex, 12);
+    assert_eq!(
+        adopted.neighbor_mac,
+        Some([0xde, 0xad, 0xbe, 0xef, 0x80, 0x00]),
+        "adopted hit must carry the FIB-resolved neighbor MAC"
+    );
+    // Adopted, neighbor unresolved: retryable MissingNeighbor, so
+    // the poll path drops this packet without terminalizing the
+    // flow and the next retransmit re-enters the restore.
+    let retryable = run_hit(false, true);
+    assert_eq!(
+        retryable.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "adopted stored-terminal hit with unresolved neighbor must stay retryable"
+    );
+    assert_eq!(retryable.egress_ifindex, 12);
+}
+
+/// #16217 (FZDiag28, part a): the adopted recompute must consult the
+/// NODE neighbor map, not only the static FIB neighbor snapshot. In
+/// the live shape the hop (172.16.80.200 on egress 12) exists ONLY in
+/// the shared `ShardedNeighborMap` the warm pass / kernel monitor
+/// populate — `forwarding.neighbors` never carries it — yet the
+/// adopted hit must restore the ForwardCandidate carrying that MAC.
+///
+/// FAIL-ON-REVERT: revert the recompute to the static snapshot only
+/// (or drop `adopted_resolution_from_node_neighbor_map`) and both
+/// adopted legs below stay `MissingNeighbor`/`HAInactive`; a
+/// contradicting node-map MAC must keep the deny-side fail-closed
+/// shape (no restore).
+#[test]
+fn adopted_restore_reads_node_neighbor_map_only_16217() {
+    let target = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+    let mac = [0xde, 0xad, 0xbe, 0xef, 0x80, 0x00];
+    // Connected /24 on egress 12, NO static neighbor row for the hop.
+    let mut forwarding = test_forwarding_state_with_fabric();
+    forwarding.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        host: Ipv4Addr::new(172, 16, 80, 0),
+        ifindex: 12,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    assert!(
+        !forwarding.neighbors.contains_key(&(12, target)),
+        "premise: hop must be absent from the static snapshot"
+    );
+    // Hop present ONLY in the node map.
+    let dyn_node = Arc::new(ShardedNeighborMap::new());
+    dyn_node.insert((12, target), NeighborEntry { mac });
+    assert!(dyn_node.get(&(12, target)).is_some());
+
+    // (1) Node-map-only hop restores an adopted MissingNeighbor.
+    let missing = ForwardingResolution {
+        disposition: ForwardingDisposition::MissingNeighbor,
+        egress_ifindex: 12,
+        next_hop: Some(target),
+        neighbor_mac: None,
+        ..test_resolution()
+    };
+    let demoted = ForwardingResolution {
+        disposition: ForwardingDisposition::HAInactive,
+        ..missing
+    };
+    let restored = fabric_adopted_resolution(
+        &forwarding,
+        &active_ha(),
+        1,
+        missing,
+        demoted,
+        &dyn_node,
+        target,
+        Some(&recovery_fixture()),
+    );
+    assert_eq!(
+        restored.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "adopted: node-map-only hop must restore the ForwardCandidate"
+    );
+    assert_eq!(restored.neighbor_mac, Some(mac));
+    assert_eq!(restored.egress_ifindex, 12);
+
+    // (2) Direct helper pin: the recompute itself reads the node map.
+    let recomputed = adopted_resolution_from_node_neighbor_map(&forwarding, &dyn_node, target, &recovery_fixture()).expect("default-table recompute");
+    assert_eq!(
+        recomputed.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "node-map recompute must yield the ForwardCandidate"
+    );
+    assert_eq!(recomputed.neighbor_mac, Some(mac));
+
+    // (3) Fail-closed control: empty node map — the recompute cannot
+    // produce a candidate, so the adopted hit returns the retryable
+    // MissingNeighbor (never a ForwardCandidate).
+    let dyn_empty = Arc::new(ShardedNeighborMap::new());
+    let empty_out = fabric_adopted_resolution(
+        &forwarding,
+        &active_ha(),
+        1,
+        missing,
+        demoted,
+        &dyn_empty,
+        target,
+        Some(&recovery_fixture()),
+    );
+    assert_eq!(
+        empty_out.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "adopted: empty node map stays retryable MissingNeighbor, never ForwardCandidate"
+    );
+    assert_eq!(empty_out.neighbor_mac, None);
+    let recomputed_empty =
+        adopted_resolution_from_node_neighbor_map(&forwarding, &dyn_empty, target, &recovery_fixture()).expect("default-table recompute");
+    assert_eq!(
+        recomputed_empty.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "empty node map recompute stays retryable MissingNeighbor"
+    );
+    assert_eq!(recomputed_empty.neighbor_mac, None);
+}
+
+/// #16217 (FZDiag29): the LIVE FIB shape the Wire25 unit fixture
+/// missed. Post-failover on the new owner the target (172.16.80.200)
+/// is on-link via the connected /24 on egress 12, but that connected
+/// prefix is HA-suppressed in `connected_v4` (it was peer-owned until
+/// the failover): it survives ONLY in `connected_v4_by_ifindex`, and
+/// `connected_v4` holds NO covering row. LPM for the target therefore
+/// falls to the pref-200 cluster Null0 default, so the plain FIB
+/// recompute of the target answers `ClusterTerminalHAInactive`
+/// (with `source_ifindex` stamped 12 by
+/// `select_source_ifindex_v4`, which consults the by-ifindex ledger).
+/// The stored `SyncImport` row carries exactly that terminal
+/// (`egress_ifindex 0`, no next-hop). Pre-fix the ClusterTerminal arm
+/// recomputed, got the terminal again, and kept it on every adopted
+/// hit (live: 128/146 hits `stored=looked=enforced=ClusterTerminal`).
+///
+/// FAIL-ON-REVERT: drop the FZDiag29 target recovery in the
+/// ClusterTerminal arm and every adopted leg below resolves
+/// `ClusterTerminalHAInactive` again.
+#[test]
+fn adopted_cluster_terminal_live_fib_shape_16217() {
+    let target = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+    let mac = [0x10, 0x66, 0x6a, 0x8b, 0x91, 0xa4];
+    // Live FIB: NO connected_v4 row covering the target (suppressed);
+    // the /24 survives only in connected_v4_by_ifindex[12]; a
+    // pref-200 cluster-terminal default is the only route row.
+    let live_fib = |neighbor_in_node_map: bool| {
+        let mut forwarding = test_forwarding_state_with_fabric();
+        assert!(
+            !forwarding
+                .connected_v4
+                .iter()
+                .any(|row| row.prefix.contains(Ipv4Addr::new(172, 16, 80, 200))),
+            "premise: no transit connected row may cover the target"
+        );
+        forwarding.connected_v4_by_ifindex.insert(
+            12,
+            vec![PrefixV4::from_net(
+                Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap(),
+            )],
+        );
+        forwarding.routes_v4.insert(
+            "inet.0".to_string(),
+            vec![RouteEntryV4 {
+                prefix: PrefixV4::from_net(
+                    Ipv4Net::new(Ipv4Addr::new(0, 0, 0, 0), 0).unwrap(),
+                ),
+                next_hops: vec![],
+                discard: true,
+                reject: false,
+                cluster_terminal: true,
+                next_table: String::new(),
+                preference: 200,
+                mtu: 0,
+                rule_priority: 0,
+            }],
+        );
+        let dyn_map = Arc::new(ShardedNeighborMap::new());
+        if neighbor_in_node_map {
+            dyn_map.insert((12, target), NeighborEntry { mac });
+        }
+        (forwarding, dyn_map)
+    };
+    // Premise: the plain FIB recompute of the target IS the terminal
+    // in this shape (this is what defeated the Wire25 arm live).
+    {
+        let (forwarding, dyn_map) = live_fib(true);
+        let raw = crate::afxdp::forwarding::lookup_forwarding_resolution_with_dynamic(
+            &forwarding,
+            &dyn_map,
+            target,
+        )
+        .resolution;
+        assert_eq!(
+            raw.disposition,
+            ForwardingDisposition::ClusterTerminalHAInactive,
+            "premise: live-shape FIB recompute must answer the cluster terminal, got {:?}",
+            raw.disposition
+        );
+        assert_eq!(raw.egress_ifindex, 0);
+    }
+    // Stored terminal exactly as the SyncImport row carries it.
+    let terminal = ForwardingResolution {
+        disposition: ForwardingDisposition::ClusterTerminalHAInactive,
+        egress_ifindex: 0,
+        tx_ifindex: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        ..test_resolution()
+    };
+    // (a) Neighbor in the NODE map only: adopted hit restores the
+    // ForwardCandidate on egress 12 (recovered from dst via the
+    // terminal stamp / by-ifindex LPM, never from looked_up.egress).
+    {
+        let (forwarding, dyn_map) = live_fib(true);
+        let restored = fabric_adopted_resolution(
+            &forwarding,
+            &active_ha(),
+            1,
+            terminal,
+            terminal,
+            &dyn_map,
+            target,
+        Some(&recovery_fixture()),
+        );
+        assert_eq!(
+            restored.disposition,
+            ForwardingDisposition::ForwardCandidate,
+            "adopted: live-shape stored terminal must restore from the dst"
+        );
+        assert_eq!(restored.egress_ifindex, 12);
+        assert_eq!(restored.neighbor_mac, Some(mac));
+        assert_eq!(restored.next_hop, Some(target));
+    }
+    // (b) Neighbor nowhere: adopted hit stays retryable
+    // MissingNeighbor on the recovered egress (never terminal).
+    {
+        let (forwarding, dyn_map) = live_fib(false);
+        let retryable = fabric_adopted_resolution(
+            &forwarding,
+            &active_ha(),
+            1,
+            terminal,
+            terminal,
+            &dyn_map,
+            target,
+        Some(&recovery_fixture()),
+        );
+        assert_eq!(
+            retryable.disposition,
+            ForwardingDisposition::MissingNeighbor,
+            "adopted: unresolved live-shape terminal must stay retryable"
+        );
+        assert_eq!(retryable.egress_ifindex, 12);
+        assert_eq!(retryable.neighbor_mac, None);
+    }
+    // (c) End-to-end through the production session-HIT resolver:
+    // an Established SyncImport row (exactly that origin) whose
+    // STORED resolution is the live-shape terminal, hit with
+    // fabric_adopted=true as the poll session-hit site runs it.
+    let run_hit = |neighbor_in_node_map: bool, adopted: bool| {
+        let (mut forwarding, dynamic_neighbors) = live_fib(neighbor_in_node_map);
+        // The resolver's synced lookup recomputes via the FIB; keep
+        // the static snapshot empty so only the node map can resolve.
+        forwarding.neighbors.remove(&(12, target));
+        let mut sessions = SessionTable::new();
+        let key = test_key();
+        let stored = ForwardingResolution {
+            disposition: ForwardingDisposition::ClusterTerminalHAInactive,
+            egress_ifindex: 0,
+            tx_ifindex: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            ..test_resolution()
+        };
+        let decision = SessionDecision {
+            resolution: stored,
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                rewrite_src_port: Some(key.src_port),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
+        let translated_key = forward_wire_key(&key, decision.nat);
+        let established = crate::session::TcpHandshakeState::Established.to_wire();
+        let entry = SyncedSessionEntry { key: translated_key.clone(),
+        decision,
+        metadata: SessionMetadata { forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None, ..test_metadata() },
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x18,
+        generation: 0,
+        session_id: 4246,
+        tcp_close_class: 0, tcp_handshake_state: established, rev_packets: 1u64, fwd_packets: 1, pptp_call_ids: 0,
+        source_nat_static: None, };
+        let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        publish_shared_session(
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &entry,
+        );
+        let peer_worker_commands = Vec::new();
+        let mut ha_state = BTreeMap::new();
+        ha_state.insert(1, inactive_ha_runtime(1));
+        let flow = SessionFlow {
+            src_ip: translated_key.src_ip,
+            dst_ip: translated_key.dst_ip,
+            forward_key: translated_key.clone(),
+        };
+        resolve_flow_session_decision_with_conntrack_and_payload(
+            &mut sessions,
+            SteeringMap::unshared_for_test(-1),
+            SharedSessionRefs {
+                sessions: &shared_sessions,
+                nat_sessions: &shared_nat_sessions,
+                forward_wire_sessions: &shared_forward_wire_sessions,
+                owner_rg_indexes: &shared_owner_rg_indexes,
+                peer_worker_commands: &peer_worker_commands,
+                worker_commands_by_id: empty_worker_commands_by_id(),
+                conntrack: ConntrackFds { v4: -1, v6: -1 },
+                tick: Tick { ns: 1_000_000, secs: 1 },
+            },
+            &forwarding,
+            &ha_state,
+            &dynamic_neighbors,
+            &flow,
+            PROTO_TCP,
+            0x18,
+            0,
+            21,
+            0,
+            true,
+            true,
+            0,
+            0,
+            None,
+            adopted,
+            adopted.then(|| AdoptedRecovery {
+                decision: test_decision(),
+                flow_key: test_key(),
+                proved_rg: 1,
+            }),
+        )
+        .expect("wire session should resolve")
+        .decision
+        .resolution
+    };
+    // Non-adopted control stays on the terminal (fail-closed): HA
+    // enforcement keeps the cluster terminal itself in this FIB
+    // (a peer-owned demotion spells HAInactive in other snapshots;
+    // either way it never becomes a ForwardCandidate).
+    assert!(
+        matches!(
+            run_hit(true, false).disposition,
+            ForwardingDisposition::ClusterTerminalHAInactive
+                | ForwardingDisposition::HAInactive
+        ),
+        "non-adopted live-shape hit must stay fail-closed"
+    );
+    // Adopted + node-map neighbor: ForwardCandidate egress 12 + MAC.
+    let adopted = run_hit(true, true);
+    assert_eq!(
+        adopted.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "adopted live-shape SyncImport terminal must recompute to the local ForwardCandidate"
+    );
+    assert_eq!(adopted.egress_ifindex, 12);
+    assert_eq!(adopted.neighbor_mac, Some(mac));
+    // Adopted + unresolved: retryable MissingNeighbor.
+    let retryable = run_hit(false, true);
+    assert_eq!(
+        retryable.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "adopted live-shape hit with unresolved neighbor must stay retryable"
+    );
+    assert_eq!(retryable.egress_ifindex, 12);
+}
+
+/// #16217 (FZDiag33 death point A): the adoption gate's
+/// re-resolution dies on the STANDBY FIB shape. Post-failover the
+/// connected /24 covering the target (172.16.80.200) is
+/// HA-suppressed in `connected_v4` — it survives only in
+/// `connected_v4_by_ifindex[12]` — so
+/// `lookup_forwarding_resolution_for_session` falls to the pref-200
+/// cluster Null0 and answers `ClusterTerminalHAInactive` egress 0.
+/// The candidate's OWN stored decision is a ForwardCandidate egress
+/// 12 (RG1, now forwarding-active locally): the gate must fall back
+/// to that stored egress RG (the stored decision is the ownership
+/// proof) instead of declining on egress_rg 0. NO `connected_v4`
+/// cover is inserted — that absence IS the live shape the Wire27
+/// fixtures missed.
+///
+/// FAIL-ON-REVERT: drop the stored fallback and the owner arm
+/// declines; drop the ClusterTerminal/egress-0 guard and the
+/// stored-terminal control adopts on a terminal it must decline.
+#[test]
+fn gate_falls_back_to_stored_forward_candidate_on_standby_fib_16217() {
+    let target = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+    let mac = [0x10, 0x66, 0x6a, 0x8b, 0x91, 0xa4];
+    let key = test_key();
+    let nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(key.src_port),
+        ..NatDecision::default()
+    };
+    let wire_key = forward_wire_key(&key, nat);
+    // Standby FIB: no connected_v4 cover for the target; /24 only in
+    // connected_v4_by_ifindex[12]; pref-200 cluster Null0 default.
+    let standby_fib = |stored: ForwardingResolution| {
+        let mut forwarding = test_forwarding_state_with_fabric();
+        assert!(
+            !forwarding
+                .connected_v4
+                .iter()
+                .any(|row| row.prefix.contains(Ipv4Addr::new(172, 16, 80, 200))),
+            "premise: no connected_v4 cover for the target (standby shape)"
+        );
+        forwarding.connected_v4_by_ifindex.insert(
+            12,
+            vec![PrefixV4::from_net(
+                Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap(),
+            )],
+        );
+        forwarding.routes_v4.insert(
+            "inet.0".to_string(),
+            vec![RouteEntryV4 {
+                prefix: PrefixV4::from_net(
+                    Ipv4Net::new(Ipv4Addr::new(0, 0, 0, 0), 0).unwrap(),
+                ),
+                next_hops: vec![],
+                discard: true,
+                reject: false,
+                cluster_terminal: true,
+                next_table: String::new(),
+                preference: 200,
+                mtu: 0,
+                rule_priority: 0,
+            }],
+        );
+        // Premise: plain re-resolution IS the cluster terminal.
+        let dyn_map = Arc::new(ShardedNeighborMap::new());
+        let raw = crate::afxdp::forwarding::lookup_forwarding_resolution_with_dynamic(
+            &forwarding,
+            &dyn_map,
+            target,
+        )
+        .resolution;
+        assert_eq!(
+            raw.disposition,
+            ForwardingDisposition::ClusterTerminalHAInactive,
+            "premise: standby re-resolution must answer the cluster terminal"
+        );
+        assert_eq!(raw.egress_ifindex, 0);
+        let decision = SessionDecision {
+            resolution: stored,
+            nat,
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
+        let established = crate::session::TcpHandshakeState::Established.to_wire();
+        let entry = SyncedSessionEntry { key: wire_key.clone(),
+        decision,
+        metadata: SessionMetadata { forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None, ..test_metadata() },
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x18,
+        generation: 0,
+        session_id: 4330,
+        tcp_close_class: 0, tcp_handshake_state: established, rev_packets: 7u64, fwd_packets: 9, pptp_call_ids: 0,
+        source_nat_static: None, };
+        let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        publish_shared_session(
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &entry,
+        );
+        (forwarding, dyn_map, shared_sessions, shared_nat_sessions, shared_forward_wire_sessions, shared_owner_rg_indexes)
+    };
+    let gate = |forwarding: &ForwardingState,
+                dyn_map: &Arc<ShardedNeighborMap>,
+                shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+                shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+                shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+                active: &std::collections::BTreeSet<i32>| {
+        let sessions = SessionTable::new();
+        let mut ha = BTreeMap::new();
+        ha.insert(1, active_ha_runtime(1));
+        crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
+            forwarding,
+            &ha,
+            active,
+            1,
+            &sessions,
+            shared_sessions,
+            shared_forward_wire_sessions,
+            shared_owner_rg_indexes,
+            &wire_key,
+            1_000_000,
+            dyn_map,
+        )
+    };
+    // Stored ForwardCandidate egress 12 (RG1): owner adopts via the
+    // stored fallback even though re-resolution is the terminal.
+    let stored_candidate = ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        egress_ifindex: 12,
+        tx_ifindex: 12,
+        next_hop: Some(target),
+        neighbor_mac: Some(mac),
+        ..test_resolution()
+    };
+    {
+        let (forwarding, dyn_map, ss, _sn, sfw, idx) = standby_fib(stored_candidate);
+        assert!(
+            gate(&forwarding, &dyn_map, &ss, &sfw, &idx, &std::collections::BTreeSet::from([1])),
+            "#16217 FZDiag33-A: owner must adopt via stored ForwardCandidate egress RG when re-resolution is ClusterTerminal egress 0"
+        );
+        assert!(
+            !gate(&forwarding, &dyn_map, &ss, &sfw, &idx, &std::collections::BTreeSet::new()),
+            "#16217 FZDiag33-A: non-owner (fresh set without RG1) must still decline via the stored fallback"
+        );
+    }
+    // Stored decision is itself the terminal (egress 0): no stored
+    // egress RG to fall back to — decline even for the owner.
+    let stored_terminal = ForwardingResolution {
+        disposition: ForwardingDisposition::ClusterTerminalHAInactive,
+        egress_ifindex: 0,
+        tx_ifindex: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        ..test_resolution()
+    };
+    {
+        let (forwarding, dyn_map, ss, _sn, sfw, idx) = standby_fib(stored_terminal);
+        assert!(
+            !gate(&forwarding, &dyn_map, &ss, &sfw, &idx, &std::collections::BTreeSet::from([1])),
+            "#16217 FZDiag33-A: stored terminal (egress 0) names no egress RG and must decline"
+        );
+    }
+}
+
+/// #16217 (FZDiag33 death point B): the reverse FabricRedirect
+/// conversion for adopted flows. Post-takeover the new owner serves
+/// the forward flow (its stored decision on the peer is a
+/// FabricRedirect — the client LAN is fabric-served), so server
+/// replies arriving on the WAN must cross the fabric BACK to the
+/// LAN owner. The reply target (10.0.61.102, on the connected LAN
+/// /24 egress 6 / RG2) is peer-owned on this node (RG1 active, RG2
+/// inactive): HA enforcement demotes the local candidate to
+/// HAInactive and, the reply having arrived on the WAN (not the
+/// fabric), no anti-loop-gated converter rescues it — the ACK dies.
+/// `build_reverse_session_from_forward_match` must convert the
+/// reverse resolution to FabricRedirect for exactly that shape.
+///
+/// FAIL-ON-REVERT: drop the gated arm and the adopted arm keeps
+/// HAInactive; drop the forward-shape gate and the non-redirect
+/// control converts too.
+#[test]
+fn adopted_reverse_reply_converts_to_fabric_redirect_16217() {
+    let forwarding = test_forwarding_state_split_rgs();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    // RG1 (WAN egress 12) active locally; RG2 (LAN egress 6) peer-owned.
+    let mut ha_state = BTreeMap::new();
+    ha_state.insert(1, active_ha_runtime(1));
+    ha_state.insert(2, inactive_ha_runtime(1));
+    let forward_match = |disposition: ForwardingDisposition| ForwardSessionMatch {
+        key: test_key(),
+        decision: SessionDecision {
+            resolution: ForwardingResolution {
+                disposition,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                ..test_resolution()
+            },
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                rewrite_src_port: Some(test_key().src_port),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: test_metadata(),
+        forwarding_generation: ForwardingGenerationStamp::default(),
+        aux: SessionLookupAux::default(),
+        synced_synthesis: false,
+    };
+    // Adopted shape: forward stored as FabricRedirect, LAN RG
+    // peer-owned -> reply converts to FabricRedirect.
+    let adopted = build_reverse_session_from_forward_match(
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        forward_match(ForwardingDisposition::FabricRedirect),
+        1,
+        0,
+    );
+    assert_eq!(
+        adopted.decision.resolution.disposition,
+        ForwardingDisposition::FabricRedirect,
+        "#16217 FZDiag33-B: adopted reply to a peer-owned LAN must convert to FabricRedirect, got {:?}",
+        adopted.decision.resolution.disposition
+    );
+    // Control: forward NOT a FabricRedirect — the gated arm must
+    // NOT fire, so the reply keeps whatever the ordinary path
+    // produces. (On this fixture the pre-existing
+    // requires_fabric_return fabric-ingress arm also converts this
+    // shape, which is exactly why the adopted conversion needs its
+    // own gate: assert the gated helper directly below.)
+    let control = build_reverse_session_from_forward_match(
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        forward_match(ForwardingDisposition::ForwardCandidate),
+        1,
+        0,
+    );
+    assert_eq!(
+        control.decision.resolution.disposition,
+        ForwardingDisposition::FabricRedirect,
+        "#16217 FZDiag33-B: pre-existing fabric-return arm still converts the non-adopted shape (unchanged), got {:?}",
+        control.decision.resolution.disposition
+    );
+    // The gated helper directly: without the FabricRedirect proof
+    // (forward_is_fabric_redirect=false) and without fabric ingress,
+    // a peer-owned-LAN reply keeps the HA terminal; with the proof
+    // it converts. FAIL-ON-REVERT for the adopted arm lives here.
+    let gated_off = crate::afxdp::shared_ops::reverse_resolution_for_session_in_table_gated(
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        TEST_LAN_ZONE_ID,
+        false,
+        1,
+        false,
+        None,
+        false,
+    );
+    assert_eq!(
+        gated_off.disposition,
+        ForwardingDisposition::HAInactive,
+        "#16217 FZDiag33-B: gated helper without the proof must keep HAInactive, got {:?}",
+        gated_off.disposition
+    );
+    let gated_on = crate::afxdp::shared_ops::reverse_resolution_for_session_in_table_gated(
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        TEST_LAN_ZONE_ID,
+        false,
+        1,
+        false,
+        None,
+        true,
+    );
+    assert_eq!(
+        gated_on.disposition,
+        ForwardingDisposition::FabricRedirect,
+        "#16217 FZDiag33-B: gated helper with the proof must convert to FabricRedirect, got {:?}",
+        gated_on.disposition
+    );
+    // Control: LAN RG locally active (this node owns the client
+    // side too) -> reply forwards locally, never redirected.
+    let mut ha_both = BTreeMap::new();
+    ha_both.insert(1, active_ha_runtime(1));
+    ha_both.insert(2, active_ha_runtime(1));
+    let local = build_reverse_session_from_forward_match(
+        &forwarding,
+        &ha_both,
+        &dynamic_neighbors,
+        forward_match(ForwardingDisposition::FabricRedirect),
+        1,
+        0,
+    );
+    assert_eq!(
+        local.decision.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "#16217 FZDiag33-B: locally-owned LAN reply must forward locally, got {:?}",
+        local.decision.resolution.disposition
+    );
+    assert_eq!(local.decision.resolution.egress_ifindex, 6);
+}
+
+/// #16217 (FZDiag35): the reverse companion's owner stamp is the
+/// FORWARD flow's LAN-member RG at seed time, NOT the reply-egress
+/// (RETH) row's RG. Split-RG fixture: forward owner RG1 (WAN egress
+/// 12), reply destination 10.0.61.102 on the connected LAN /24
+/// (egress 6, RG2 in this fixture — the RETH-row analogue that stays
+/// active on both nodes live). Pre-fix synthesis derived the stamp
+/// from the reply resolution and read 2; the departed-owner arms
+/// then judged the row locally owned forever.
+/// FAIL-ON-REVERT: restore the reply-resolution derivation and the
+/// stamp reads 2.
+#[test]
+fn reverse_synth_stamps_forward_owner_not_reply_egress_16217() {
+    let forwarding = test_forwarding_state_split_rgs();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut ha_state = BTreeMap::new();
+    ha_state.insert(1, active_ha_runtime(1));
+    ha_state.insert(2, active_ha_runtime(1));
+    let forward_match = ForwardSessionMatch {
+        key: test_key(),
+        decision: SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                ..test_resolution()
+            },
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                rewrite_src_port: Some(test_key().src_port),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        // Forward flow's stored owner: RG1 (its LAN-member RG at seed).
+        metadata: SessionMetadata { owner_rg_id: 1, ..test_metadata() },
+        forwarding_generation: ForwardingGenerationStamp::default(),
+        // Live local forward row: explicit local provenance (the flag
+        // the builder uses to select the forward-owner stamp). Its aux
+        // session id is deliberately ZERO below — a local table match
+        // built by the NAT lookup helpers carries a default aux, and
+        // the pre-flag discriminator keyed on that id inverted it.
+        aux: SessionLookupAux::default(),
+        synced_synthesis: false,
+    };
+    let reverse = build_reverse_session_from_forward_match(
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        forward_match,
+        1,
+        0,
+    );
+    assert!(reverse.metadata.is_reverse);
+    assert_eq!(
+        reverse.metadata.owner_rg_id, 1,
+        "#16217 FZDiag35: reverse stamp must be the forward flow's owner (RG1), not the reply-egress row's RG (RG2)"
+    );
+}
+
+/// #16217: the synced-synthesis twin of the stamp cell above. A
+/// match flagged `synced_synthesis` (the peer-import prewarm shape:
+/// forward owner supplied by the PEER, here RG1, with a NONZERO peer
+/// session id in aux) must keep the reply-resolution derivation
+/// (RG2, this node's own FIB answer), never the peer-supplied stamp.
+/// Together with the cell above (local flag + ZERO aux id stamps the
+/// forward owner RG1), this pins the explicit-flag discriminator in
+/// both directions: keying on `aux.session_id` inverts both —
+/// FAIL-ON-REVERT for that discriminator.
+#[test]
+fn reverse_synth_synced_match_keeps_reply_derivation_16217() {
+    let forwarding = test_forwarding_state_split_rgs();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut ha_state = BTreeMap::new();
+    ha_state.insert(1, active_ha_runtime(1));
+    ha_state.insert(2, active_ha_runtime(1));
+    let forward_match = ForwardSessionMatch {
+        key: test_key(),
+        decision: SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                ..test_resolution()
+            },
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                rewrite_src_port: Some(test_key().src_port),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: SessionMetadata { owner_rg_id: 1, ..test_metadata() },
+        forwarding_generation: ForwardingGenerationStamp::default(),
+        aux: SessionLookupAux { session_id: 4242, ..SessionLookupAux::default() },
+        synced_synthesis: true,
+    };
+    let reverse = build_reverse_session_from_forward_match(
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        forward_match,
+        1,
+        0,
+    );
+    assert!(reverse.metadata.is_reverse);
+    assert_eq!(
+        reverse.metadata.owner_rg_id, 2,
+        "#16217: synced synthesis must keep the reply-resolution derivation (RG2), not the peer-supplied forward owner (RG1)"
+    );
+}
+
+/// #16217 (FZDiag35): the slow-path reverse conversion judges the
+/// reply DESTINATION's connected owner directly — no stored-owner
+/// metadata gate. A reverse hit stored with the pre-fix stamp=2
+/// (reply-egress RG, surviving) whose destination owner (RG1, the
+/// LAN prefix owner in this fixture's RG assignment inverted
+/// below) has departed converts to FabricRedirect; destinations
+/// whose connected owner is locally active, or unknown, keep the
+/// local candidate bit-identically.
+/// FAIL-ON-REVERT: restore the metadata gate and the stamp=2 arm
+/// keeps ForwardCandidate.
+#[test]
+fn reverse_conversion_judges_destination_owner_not_stamp_16217() {
+    // LAN egress 6 carries RG2 in the split fixture; move it to RG1
+    // so the reply destination's connected owner IS the departed RG
+    // (the live RG1-LAN shape), while the WAN/reply-egress rows keep
+    // RG2 (surviving) — the stamp=2 provenance.
+    let mut forwarding = test_forwarding_state_split_rgs();
+    forwarding.egress.get_mut(&6).expect("LAN egress row").redundancy_group = 1;
+    let dest_rg = crate::afxdp::connected_owner_rg_for_target_in_table(
+        &forwarding,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        None,
+    );
+    assert_eq!(dest_rg, 1, "fixture: reply destination's connected owner must be RG1");
+    let convert = |ha_state: &BTreeMap<i32, HAGroupRuntime>| {
+        crate::afxdp::session_glue::reverse_hit_departed_destination_redirect(
+            &forwarding,
+            ha_state,
+            1,
+            false,
+            true,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+            None,
+            TEST_LAN_ZONE_ID,
+            ForwardingDisposition::ForwardCandidate,
+        )
+    };
+    // Departed destination owner (RG1 inactive, RG2 active): convert.
+    let mut ha_departed = BTreeMap::new();
+    ha_departed.insert(1, inactive_ha_runtime(1));
+    ha_departed.insert(2, active_ha_runtime(1));
+    assert_eq!(
+        convert(&ha_departed).map(|redirect| redirect.disposition),
+        Some(ForwardingDisposition::FabricRedirect),
+        "#16217 FZDiag35: reverse hit to a departed destination owner must convert (stamp-free)"
+    );
+    // Locally-active destination owner: never convert.
+    let mut ha_local = BTreeMap::new();
+    ha_local.insert(1, active_ha_runtime(1));
+    ha_local.insert(2, active_ha_runtime(1));
+    assert_eq!(convert(&ha_local), None, "locally-owned destination must keep the local candidate");
+    // Fabric-link arrival: anti-loop, never convert.
+    assert_eq!(
+        crate::afxdp::session_glue::reverse_hit_departed_destination_redirect(
+            &forwarding,
+            &ha_departed,
+            1,
+            true,
+            true,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+            None,
+            TEST_LAN_ZONE_ID,
+            ForwardingDisposition::ForwardCandidate,
+        ),
+        None,
+        "fabric-link arrival must never re-redirect"
+    );
+}
+
+
 
 #[test]
 fn resolve_flow_session_decision_promotes_local_synced_translated_hit_on_active_fabric_ingress() {
@@ -4306,24 +6140,19 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
         install_table_check: 0,
     };
     let translated_key = forward_wire_key(&key, decision.nat);
-    let entry = SyncedSessionEntry {
-        key: translated_key.clone(),
-        decision,
-        metadata: SessionMetadata { forward_ingress_vlan_id: None,
-        nat_scope_ifindex: None, ..test_metadata() },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x18,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: translated_key.clone(),
+    decision,
+    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x18,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let mut forwarding = test_forwarding_state_with_fabric();
     forwarding.connected_v4.push(ConnectedRouteV4 {
         prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
@@ -4425,24 +6254,19 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
         install_table_check: 0,
     };
     let translated_key = forward_wire_key(&key, decision.nat);
-    let entry = SyncedSessionEntry {
-        key: translated_key.clone(),
-        decision,
-        metadata: SessionMetadata { forward_ingress_vlan_id: None,
-        nat_scope_ifindex: None, ..test_metadata() },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x18,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: translated_key.clone(),
+    decision,
+    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x18,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let mut forwarding = test_forwarding_state_with_fabric();
     forwarding.policy = crate::afxdp::forwarding_build::build_forwarding_state(
         &crate::afxdp::test_fixtures::policy_deny_snapshot(),
@@ -4673,23 +6497,18 @@ fn apply_worker_commands_replaces_stale_local_session_for_inactive_owner_rg() {
     commands
         .lock()
         .expect("commands lock")
-        .push_back(WorkerCommand::UpsertSynced(SyncedSessionEntry {
-            key: key.clone(),
-            decision: synced_decision,
-            metadata: synced_metadata.clone(),
-            leak_incarnation: 0,
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            tcp_flags: 0x10,
-            // #2170 test fixture: no peer install generation.
-            generation: 0,
-            session_id: 0,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-            pptp_call_ids: 0,
-            rev_packets: 0,
-            source_nat_static: None,
-        }));
+        .push_back(WorkerCommand::UpsertSynced(SyncedSessionEntry { key: key.clone(),
+        decision: synced_decision,
+        metadata: synced_metadata.clone(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        // #2170 test fixture: no peer install generation.
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        source_nat_static: None, }));
     let mut ha_state = BTreeMap::new();
     ha_state.insert(1, inactive_ha_runtime(0));
     let forwarding = test_forwarding_state();
@@ -4749,24 +6568,19 @@ fn apply_worker_commands_preserves_local_session_for_active_owner_rg() {
     commands
         .lock()
         .expect("commands lock")
-        .push_back(WorkerCommand::UpsertSynced(SyncedSessionEntry {
-            key: key.clone(),
-            decision: synced_decision,
-            metadata: SessionMetadata { forward_ingress_vlan_id: None,
-            nat_scope_ifindex: None, ..test_metadata() },
-            leak_incarnation: 0,
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            tcp_flags: 0x10,
-            // #2170 test fixture: no peer install generation.
-            generation: 0,
-            session_id: 0,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-            pptp_call_ids: 0,
-            rev_packets: 0,
-            source_nat_static: None,
-        }));
+        .push_back(WorkerCommand::UpsertSynced(SyncedSessionEntry { key: key.clone(),
+        decision: synced_decision,
+        metadata: SessionMetadata { forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None, ..test_metadata() },
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        // #2170 test fixture: no peer install generation.
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        source_nat_static: None, }));
     let mut ha_state = BTreeMap::new();
     ha_state.insert(1, active_ha_runtime(monotonic_nanos() / 1_000_000_000));
     let forwarding = test_forwarding_state();
@@ -4948,6 +6762,8 @@ fn apply_worker_commands_still_deletes_peer_synced_session_9048() {
             session_id: 0,
             tcp_close_class: 0,
             tcp_handshake_state: 0,
+            fwd_packets: 0,
+            rev_packets: 0,
         },
         /* allow_replace_local = */ true,
     ));
@@ -5087,6 +6903,8 @@ fn apply_worker_commands_demotes_worker_replica_before_refresh_10366() {
             session_id: 0,
             tcp_close_class: 0,
             tcp_handshake_state: 0,
+            fwd_packets: 0,
+            rev_packets: 0,
         },
         false,
     ));
@@ -5263,11 +7081,14 @@ fn epoch_based_flow_cache_invalidation_for_demoted_owner_rg() {
         },
         policy_deny: None,
         deny_expires_at_secs: 0,
+        cluster_terminal_source_ifindex: 0,
+        cluster_terminal_stamp_owner_rg: 0,
         observed_bytes: 0,
         last_used_epoch: 0,
         neighbor_mac_epoch: 0,
         // #5147: no dynamic-neighbor dependency in this test entry.
         neighbor_shard: crate::afxdp::flow_cache::NEIGHBOR_SHARD_NONE,
+        fabric_established: false,
     });
 
     // Before epoch bump, lookup should hit.
@@ -5356,11 +7177,14 @@ fn epoch_based_flow_cache_unrelated_rg_not_invalidated() {
         },
         policy_deny: None,
         deny_expires_at_secs: 0,
+        cluster_terminal_source_ifindex: 0,
+        cluster_terminal_stamp_owner_rg: 0,
         observed_bytes: 0,
         last_used_epoch: 0,
         neighbor_mac_epoch: 0,
         // #5147: no dynamic-neighbor dependency in this test entry.
         neighbor_shard: crate::afxdp::flow_cache::NEIGHBOR_SHARD_NONE,
+        fabric_established: false,
     });
 
     // Bump epoch for RG 2 (unrelated).
@@ -6169,44 +7993,34 @@ fn demote_shared_owner_rgs_preserves_reverse_entries_and_marks_all_synced() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
-    let forward = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
-    let reverse = SyncedSessionEntry {
-        key: reverse_session_key(&forward.key, forward.decision.nat),
-        decision: test_decision(),
-        metadata: SessionMetadata { ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        is_reverse: true,
-        nat_scope_ifindex: None, ..test_metadata() },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let forward = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
+    let reverse = SyncedSessionEntry { key: reverse_session_key(&forward.key, forward.decision.nat),
+    decision: test_decision(),
+    metadata: SessionMetadata { ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    is_reverse: true,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     publish_shared_session(
         &shared_sessions,
         &shared_nat_sessions,
@@ -6266,22 +8080,17 @@ fn demote_shared_owner_rgs_preserves_tun_origin_10402() {
         rewrite_src_port: Some(40_001),
         ..NatDecision::default()
     };
-    let entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::TunOrigin,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::TunOrigin,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     publish_shared_session(
         &shared_sessions,
         &shared_nat_sessions,
@@ -6349,22 +8158,17 @@ fn demote_shared_owner_rgs_preserves_transient_seed_aliases_10402() {
         rewrite_src_port: Some(40_001),
         ..NatDecision::default()
     };
-    let seed = SyncedSessionEntry {
-        key: seed_key.clone(),
-        decision: seed_decision,
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::MissingNeighborSeed,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let seed = SyncedSessionEntry { key: seed_key.clone(),
+    decision: seed_decision,
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::MissingNeighborSeed,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let mut control_key = test_key();
     control_key.src_port = 40_002;
     let mut control_decision = test_decision();
@@ -6373,22 +8177,17 @@ fn demote_shared_owner_rgs_preserves_transient_seed_aliases_10402() {
         rewrite_src_port: Some(40_002),
         ..NatDecision::default()
     };
-    let control = SyncedSessionEntry {
-        key: control_key.clone(),
-        decision: control_decision,
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::ForwardFlow,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let control = SyncedSessionEntry { key: control_key.clone(),
+    decision: control_decision,
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::ForwardFlow,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     for entry in [&seed, &control] {
         publish_shared_session(
             &shared_sessions,
@@ -6481,22 +8280,17 @@ fn demote_reactivate_preserves_tun_origin_across_shared_aliases_10405() {
         rewrite_src_port: Some(44_101),
         ..NatDecision::default()
     };
-    let tun = SyncedSessionEntry {
-        key: tun_key.clone(),
-        decision: tun_decision,
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::TunOrigin,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let tun = SyncedSessionEntry { key: tun_key.clone(),
+    decision: tun_decision,
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::TunOrigin,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let mut control_key = test_key();
     control_key.src_port = 44_102;
     let mut control_decision = test_decision();
@@ -6505,22 +8299,17 @@ fn demote_reactivate_preserves_tun_origin_across_shared_aliases_10405() {
         rewrite_src_port: Some(44_102),
         ..NatDecision::default()
     };
-    let control = SyncedSessionEntry {
-        key: control_key.clone(),
-        decision: control_decision,
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::ForwardFlow,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let control = SyncedSessionEntry { key: control_key.clone(),
+    decision: control_decision,
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::ForwardFlow,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     for entry in [&tun, &control] {
         publish_shared_session(
             &shared_sessions,
@@ -6671,27 +8460,22 @@ fn demoted_shared_local_forward_session_enters_reverse_prewarm_index() {
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     let forwarding = test_forwarding_state_split_rgs();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
-    let mut entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata: SessionMetadata { ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        fabric_ingress: true,
-        nat_scope_ifindex: None, ..test_metadata() },
-        leak_incarnation: 0,
-        origin: SessionOrigin::ForwardFlow,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let mut entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata: SessionMetadata { ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    fabric_ingress: true,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::ForwardFlow,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     entry.metadata.owner_rg_id = 1;
 
     publish_shared_session(
@@ -6731,27 +8515,22 @@ fn prewarm_reverse_synced_sessions_after_demotion_recomputes_split_owner_reverse
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let mut ha_state = BTreeMap::new();
     ha_state.insert(2, active_ha_runtime(1));
-    let mut entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata: SessionMetadata { ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        fabric_ingress: true,
-        nat_scope_ifindex: None, ..test_metadata() },
-        leak_incarnation: 0,
-        origin: SessionOrigin::ForwardFlow,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let mut entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata: SessionMetadata { ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    fabric_ingress: true,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::ForwardFlow,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     entry.metadata.owner_rg_id = 1;
 
     publish_shared_session(
@@ -7529,23 +9308,18 @@ fn synthesized_synced_reverse_entry_preserves_fabric_ingress_and_reverse_flag() 
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let mut metadata = test_metadata();
     metadata.fabric_ingress = true;
-    let entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata,
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata,
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
 
     let reverse = synthesized_synced_reverse_entry(
         &forwarding,
@@ -7597,22 +9371,17 @@ fn synthesized_synced_reverse_entry_carries_no_ingress_identity_7917() {
     let mut metadata = test_metadata();
     metadata.ingress_ifindex = 4242;
     metadata.ingress_vlan_id = 80;
-    let entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata,
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata,
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
 
     let reverse = synthesized_synced_reverse_entry(
         &forwarding,
@@ -7668,44 +9437,39 @@ fn synthesized_synced_reverse_entry_inherits_nat64_reverse_4565() {
 
     // NAT64 forward flow keyed on the original IPv6 5-tuple; the decision
     // rewrites to an IPv4 pool source + IPv4 destination (nat64 = true).
-    let entry = SyncedSessionEntry {
-        key: SessionKey {
-            addr_family: libc::AF_INET6 as u8,
-            protocol: PROTO_TCP,
-            src_ip: IpAddr::V6(orig_src_v6),
-            dst_ip: IpAddr::V6(orig_dst_v6),
-            src_port: 5001,
-            dst_port: 80,
-            discriminator: Default::default(),
-            routing_domain: 0,
-        },
-        decision: SessionDecision {
-            resolution: test_resolution(),
-            nat: NatDecision {
-                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5))),
-                rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))),
-                rewrite_src_port: Some(40000),
-                rewrite_dst_port: None,
-                source_nat_icmp: None,
-                nat64: true,
-                nptv6: false,
-            },
-            install_table_domain: 0,
-            install_table_check: 0,
-        },
-        metadata,
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
+    let entry = SyncedSessionEntry { key: SessionKey {
+        addr_family: libc::AF_INET6 as u8,
         protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+        src_ip: IpAddr::V6(orig_src_v6),
+        dst_ip: IpAddr::V6(orig_dst_v6),
+        src_port: 5001,
+        dst_port: 80,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    },
+    decision: SessionDecision {
+        resolution: test_resolution(),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5))),
+            rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))),
+            rewrite_src_port: Some(40000),
+            rewrite_dst_port: None,
+            source_nat_icmp: None,
+            nat64: true,
+            nptv6: false,
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    },
+    metadata,
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
 
     let reverse = synthesized_synced_reverse_entry(
         &forwarding,
@@ -7760,22 +9524,17 @@ fn reverse_companion_inherits_forward_inactivity_timeout_5153() {
     let mut metadata = test_metadata();
     metadata.inactivity_timeout_ns = Some(APP_TIMEOUT_NS);
 
-    let entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata,
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata,
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
 
     let reverse = synthesized_synced_reverse_entry(
         &forwarding,
@@ -7808,22 +9567,17 @@ fn reverse_companion_inherits_forward_close_class_9412() {
     let forwarding = test_forwarding_state();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     for class in [0u8, 1, 2, 3] {
-        let entry = SyncedSessionEntry {
-            key: test_key(),
-            decision: test_decision(),
-            metadata: test_metadata(),
-            leak_incarnation: 0,
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            tcp_flags: 0x10,
-            generation: 0,
-            session_id: 0,
-            tcp_close_class: class,
-            tcp_handshake_state: 0,
-            pptp_call_ids: 0,
-            rev_packets: 0,
-            source_nat_static: None,
-        };
+        let entry = SyncedSessionEntry { key: test_key(),
+        decision: test_decision(),
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: class, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        source_nat_static: None, };
         let reverse = synthesized_synced_reverse_entry(
             &forwarding,
             &BTreeMap::new(),
@@ -7867,6 +9621,7 @@ fn build_reverse_session_carries_inactivity_timeout_5153() {
             metadata,
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux::default(),
+            synced_synthesis: false,
         },
         1,
         0,
@@ -7889,6 +9644,7 @@ fn build_reverse_session_carries_inactivity_timeout_5153() {
             metadata: test_metadata(),
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux::default(),
+            synced_synthesis: false,
         },
         1,
         0,
@@ -7906,23 +9662,18 @@ fn synthesized_synced_reverse_entry_tracks_local_client_when_owner_rg_active() {
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let mut metadata = test_metadata();
     metadata.fabric_ingress = true;
-    let entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata,
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata,
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let mut ha_state = BTreeMap::new();
     ha_state.insert(1, active_ha_runtime(1));
 
@@ -7945,23 +9696,18 @@ fn synthesized_synced_reverse_entry_uses_fabric_redirect_when_client_rg_inactive
     metadata.ingress_zone = TEST_LAN_ZONE_ID;
     metadata.egress_zone = TEST_WAN_ZONE_ID;
     metadata.fabric_ingress = false;
-    let entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata,
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata,
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let mut ha_state = BTreeMap::new();
     ha_state.insert(1, active_ha_runtime(1));
     ha_state.insert(2, inactive_ha_runtime(1));
@@ -8179,6 +9925,7 @@ fn reverse_session_from_tunnel_forward_bypasses_unseeded_ha_during_startup_grace
             nat_scope_ifindex: None },
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux::default(),
+            synced_synthesis: false,
         },
         100,
         110,
@@ -8202,27 +9949,22 @@ fn prewarm_reverse_synced_sessions_for_owner_rgs_adds_reverse_companion() {
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let mut ha_state = BTreeMap::new();
     ha_state.insert(1, active_ha_runtime(1));
-    let entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata: SessionMetadata { ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        fabric_ingress: true,
-        nat_scope_ifindex: None, ..test_metadata() },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata: SessionMetadata { ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    fabric_ingress: true,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     publish_shared_session(
         &shared_sessions,
         &shared_nat_sessions,
@@ -8282,23 +10024,18 @@ fn prewarm_reverse_synced_sessions_for_owner_rgs_restores_shared_promote_forward
     metadata.egress_zone = 2;
     metadata.fabric_ingress = false;
     metadata.owner_rg_id = 1;
-    let entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata,
-        leak_incarnation: 0,
-        origin: SessionOrigin::SharedPromote,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata,
+    leak_incarnation: 0,
+    origin: SessionOrigin::SharedPromote,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     publish_shared_session(
         &shared_sessions,
         &shared_nat_sessions,
@@ -8363,27 +10100,22 @@ fn prewarm_reverse_synced_sessions_recomputes_when_reverse_owner_rg_activates() 
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let mut ha_state = BTreeMap::new();
     ha_state.insert(2, active_ha_runtime(1));
-    let mut entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata: SessionMetadata { ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        fabric_ingress: true,
-        nat_scope_ifindex: None, ..test_metadata() },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let mut entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata: SessionMetadata { ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    fabric_ingress: true,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     entry.metadata.owner_rg_id = 1;
     publish_shared_session(
         &shared_sessions,
@@ -8435,27 +10167,22 @@ fn reverse_prewarm_index_tracks_split_reverse_owner_rg_candidate() {
     let forwarding = test_forwarding_state_split_rgs();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
-    let mut entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata: SessionMetadata { ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        fabric_ingress: true,
-        nat_scope_ifindex: None, ..test_metadata() },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let mut entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata: SessionMetadata { ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    fabric_ingress: true,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     entry.metadata.owner_rg_id = 1;
 
     refresh_reverse_prewarm_owner_rg_indexes(
@@ -8536,6 +10263,7 @@ fn reverse_session_from_split_owner_fabric_redirect_uses_fabric_return_when_clie
             nat_scope_ifindex: None },
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux::default(),
+            synced_synthesis: false,
         },
         1,
         0,
@@ -8560,27 +10288,22 @@ fn republish_bpf_session_entries_covers_all_sessions_in_owner_rg_index() {
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
 
-    let entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata: SessionMetadata { ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 1,
-        nat_scope_ifindex: None, ..test_metadata() },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata: SessionMetadata { ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 1,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     // Publish to shared table + sessions index (but NOT reverse_prewarm).
     publish_shared_session(
         &shared_sessions,
@@ -8679,23 +10402,18 @@ fn synced_session_hit_recomputes_local_resolution_after_failover() {
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
         &shared_owner_rg_indexes,
-        &SyncedSessionEntry {
-            key: key.clone(),
-            decision: stale_fabric_decision,
-            metadata: test_metadata(),
-            leak_incarnation: 0,
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            tcp_flags: 0x10,
-            // #2170 test fixture: no peer install generation.
-            generation: 0,
-            session_id: 0,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-            pptp_call_ids: 0,
-            rev_packets: 0,
-            source_nat_static: None,
-        },
+        &SyncedSessionEntry { key: key.clone(),
+        decision: stale_fabric_decision,
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        // #2170 test fixture: no peer install generation.
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        source_nat_static: None, },
     );
     let peer_worker_commands = Vec::new();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
@@ -8814,23 +10532,18 @@ fn reverse_materialized_shared_hit_adopts_replica_session_id_6313() {
             &shared_nat_sessions,
             &shared_forward_wire_sessions,
             &shared_owner_rg_indexes,
-            &SyncedSessionEntry {
-                key,
-                decision: test_decision(),
-                metadata: reverse_metadata.clone(),
-                leak_incarnation: 0,
-                origin: SessionOrigin::SyncImport,
-                protocol: PROTO_TCP,
-                tcp_flags: TCP_FLAG_ACK,
-                // #2170 test fixture: no peer install generation.
-                generation: 0,
-                session_id,
-                tcp_close_class: 0,
-                tcp_handshake_state: 0,
-                pptp_call_ids: 0,
-                rev_packets: 0,
-                source_nat_static: None,
-            },
+            &SyncedSessionEntry { key,
+            decision: test_decision(),
+            metadata: reverse_metadata.clone(),
+            leak_incarnation: 0,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_FLAG_ACK,
+            // #2170 test fixture: no peer install generation.
+            generation: 0,
+            session_id,
+            tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            source_nat_static: None, },
         );
     }
 
@@ -8972,26 +10685,21 @@ fn apply_worker_commands_dispatch_order_pin_with_demote_dedup() {
     ));
 
     // Synced entry for the UpsertSynced step.
-    let synced_entry = SyncedSessionEntry {
-        key: SessionKey {
-            src_port: 44444,
-            ..test_key()
-        },
-        decision: test_decision(),
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let synced_entry = SyncedSessionEntry { key: SessionKey {
+        src_port: 44444,
+        ..test_key()
+    },
+    decision: test_decision(),
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
 
     // Build a minimal TxRequest for the EnqueueShapedLocal step.
     let shaped_req = TxRequest {
@@ -9241,23 +10949,18 @@ fn poison_command_queue(queue: &Arc<Mutex<VecDeque<WorkerCommand>>>) {
 }
 
 fn test_synced_entry() -> SyncedSessionEntry {
-    SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: TCP_FLAG_ACK,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    }
+    SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: TCP_FLAG_ACK,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, }
 }
 
 #[test]
@@ -9374,41 +11077,36 @@ fn replicate_session_delete_delivers_to_poisoned_queue() {
 fn w3_forward_entry(src_host: u8, src_port: u16, snat_ip: Ipv4Addr) -> SyncedSessionEntry {
     // Interface-mode SNAT shape: rewrite_src set, NO source-port rewrite —
     // the portless mode that makes the reverse key collide (#1760 §2.7).
-    SyncedSessionEntry {
-        key: SessionKey {
-            addr_family: libc::AF_INET as u8,
-            protocol: PROTO_TCP,
-            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, src_host)),
-            dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
-            src_port,
-            dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
-        },
-        decision: SessionDecision {
-            resolution: test_resolution(),
-            nat: NatDecision {
-                rewrite_src: Some(IpAddr::V4(snat_ip)),
-                rewrite_src_port: None,
-                ..NatDecision::default()
-            },
-            install_table_domain: 0,
-            install_table_check: 0,
-        },
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::ForwardFlow,
+    SyncedSessionEntry { key: SessionKey {
+        addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
-        tcp_flags: 0x02,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    }
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, src_host)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        src_port,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    },
+    decision: SessionDecision {
+        resolution: test_resolution(),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(snat_ip)),
+            rewrite_src_port: None,
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    },
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::ForwardFlow,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x02,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, }
 }
 
 #[test]
@@ -9565,40 +11263,35 @@ fn shared_nat_displacement_counter_counts_collisions_not_republishes() {
     // swallow it (their NatDecisions differ).
     let backend = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 90));
     let client = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 120));
-    let dnat = SyncedSessionEntry {
-        key: SessionKey {
-            addr_family: libc::AF_INET as u8,
-            protocol: PROTO_TCP,
-            src_ip: client,
-            dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 91)), // VIP
-            src_port: 40_003,
-            dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
-        },
-        decision: SessionDecision {
-            resolution: test_resolution(),
-            nat: NatDecision {
-                rewrite_dst: Some(backend),
-                ..NatDecision::default()
-            },
-            install_table_domain: 0,
-            install_table_check: 0,
-        },
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::ForwardFlow,
+    let dnat = SyncedSessionEntry { key: SessionKey {
+        addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
-        tcp_flags: 0x02,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+        src_ip: client,
+        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 91)), // VIP
+        src_port: 40_003,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    },
+    decision: SessionDecision {
+        resolution: test_resolution(),
+        nat: NatDecision {
+            rewrite_dst: Some(backend),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    },
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::ForwardFlow,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x02,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let mut direct = dnat.clone();
     direct.key.dst_ip = backend;
     direct.decision.nat = NatDecision::default();
@@ -9750,22 +11443,17 @@ fn capped_shared_hit_fixture_10582(
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
         &shared_owner_rg_indexes,
-        &SyncedSessionEntry {
-            key: key.clone(),
-            decision: test_decision(),
-            metadata: test_metadata(),
-            leak_incarnation: 0,
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            tcp_flags: TCP_FLAG_ACK,
-            generation: 0,
-            session_id: 0,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-            pptp_call_ids: 0,
-            rev_packets: 0,
-            source_nat_static: None,
-        },
+        &SyncedSessionEntry { key: key.clone(),
+        decision: test_decision(),
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        source_nat_static: None, },
     );
     let resolved = resolve_flow_session_decision(
         &mut sessions,
@@ -9919,22 +11607,17 @@ fn shared_hit_local_clobber_sets_install_failed_10582() {
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux::default(),
         },
-        shared_entry: Some(SyncedSessionEntry {
-            key: key.clone(),
-            decision: test_decision(),
-            metadata: test_metadata(),
-            leak_incarnation: 99,
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            tcp_flags: TCP_FLAG_ACK,
-            generation: 0,
-            session_id: 0,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-            pptp_call_ids: 0,
-            rev_packets: 0,
-            source_nat_static: None,
-        }),
+        shared_entry: Some(SyncedSessionEntry { key: key.clone(),
+        decision: test_decision(),
+        metadata: test_metadata(),
+        leak_incarnation: 99,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        source_nat_static: None, }),
         origin: SessionOrigin::SyncImport,
         authority_deferred: false,
     };
@@ -9955,6 +11638,104 @@ fn shared_hit_local_clobber_sets_install_failed_10582() {
         incumbent_incarnation,
         "a refused clobber must not rewrite the incumbent leak provenance"
     );
+}
+
+/// #16217 (FZDiag30): an ADOPTED materialization replaces a
+/// non-peer-synced local incumbent at the replica key. Live, fw1's
+/// adopted hits read `install_failed=true` on every retransmit
+/// (2,231/2,237) because `upsert_synced_with_origin` refused to
+/// clobber the incumbent, so the flow-cache seed gate never
+/// installed an entry and every packet re-took the slow path.
+/// The non-adopted control keeps the #10582 refusal.
+///
+/// FAIL-ON-REVERT: pass `false` in place of `fabric_adopted` to
+/// `materialize_shared_session_hit_adopted` and the adopted leg
+/// returns `install_failed=true` with the incumbent intact.
+#[test]
+fn adopted_materialize_replaces_local_incumbent_16217() {
+    let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(
+        &crate::afxdp::test_fixtures::policy_deny_snapshot(),
+    );
+    let key = test_key();
+    let build_hit = || ResolvedSessionLookup {
+        key: ResolvedSessionKey::Canonical(key.clone()),
+        lookup: SessionLookup {
+            decision: test_decision(),
+            metadata: test_metadata(),
+            forwarding_generation: ForwardingGenerationStamp::default(),
+            aux: SessionLookupAux::default(),
+        },
+        shared_entry: Some(SyncedSessionEntry { key: key.clone(),
+        decision: test_decision(),
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 0,
+        session_id: 777,
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        source_nat_static: None, }),
+        origin: SessionOrigin::SyncImport,
+        authority_deferred: false,
+    };
+    // Adopted: the synced replica replaces the local ForwardFlow row.
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        1_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let mut hit = build_hit();
+    let (_, install_failed) = super::materialize_shared_session_hit_adopted(
+        &mut sessions,
+        &mut hit,
+        &forwarding,
+        2_000_000,
+        TCP_FLAG_ACK,
+        true,
+    );
+    assert!(
+        !install_failed,
+        "adopted materialization must replace the local incumbent"
+    );
+    assert_eq!(sessions.len(), 1);
+    let (_, _, origin) = sessions
+        .entry_with_origin(&key)
+        .expect("adopted replica must be installed");
+    assert_eq!(
+        origin,
+        SessionOrigin::SharedMaterialize,
+        "the installed row is the materialized synced replica"
+    );
+    assert_eq!(sessions.session_id_for(&key), 777);
+    // Non-adopted control: the incumbent survives, install_failed set.
+    let mut control = SessionTable::new();
+    assert!(control.install_with_protocol(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        1_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let mut hit = build_hit();
+    let (_, install_failed) = super::materialize_shared_session_hit_adopted(
+        &mut control,
+        &mut hit,
+        &forwarding,
+        2_000_000,
+        TCP_FLAG_ACK,
+        false,
+    );
+    assert!(install_failed, "non-adopted clobber must stay refused");
+    let (_, _, origin) = control
+        .entry_with_origin(&key)
+        .expect("incumbent must survive");
+    assert_eq!(origin, SessionOrigin::ForwardFlow);
 }
 
 /// Build a fabric-wire shared hit whose canonical replica collides with a
@@ -10067,22 +11848,17 @@ fn resolve_shared_hit_clobber_fixture_with_paths(
         .expect("shared forward-wire lock")
         .insert(
             wire_key.clone(),
-            SyncedSessionEntry {
-                key: key.clone(),
-                decision: shared_decision,
-                metadata: test_metadata(),
-                leak_incarnation: 99,
-                origin: shared_origin,
-                protocol: PROTO_TCP,
-                tcp_flags: TCP_FLAG_ACK,
-                generation: 0,
-                session_id: 0,
-                tcp_close_class: 0,
-                tcp_handshake_state: 0,
-                pptp_call_ids: 0,
-                rev_packets: 0,
-                source_nat_static: None,
-            },
+            SyncedSessionEntry { key: key.clone(),
+            decision: shared_decision,
+            metadata: test_metadata(),
+            leak_incarnation: 99,
+            origin: shared_origin,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_FLAG_ACK,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            source_nat_static: None, },
         );
     // #14383: record this fixture's wire ownership (the publish path's
     // observe step) so the fail-closed wire lookup can prove it unique.
@@ -10328,22 +12104,17 @@ fn resolve_shared_hit_no_incumbent_fixture_10613()
         .expect("shared forward-wire lock")
         .insert(
             wire_key.clone(),
-            SyncedSessionEntry {
-                key: key.clone(),
-                decision: shared_decision,
-                metadata: test_metadata(),
-                leak_incarnation: 99,
-                origin: SessionOrigin::SyncImport,
-                protocol: PROTO_TCP,
-                tcp_flags: TCP_FLAG_ACK,
-                generation: 0,
-                session_id: 0,
-                tcp_close_class: 0,
-                tcp_handshake_state: 0,
-                pptp_call_ids: 0,
-                rev_packets: 0,
-                source_nat_static: None,
-            },
+            SyncedSessionEntry { key: key.clone(),
+            decision: shared_decision,
+            metadata: test_metadata(),
+            leak_incarnation: 99,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_FLAG_ACK,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            source_nat_static: None, },
         );
     // #14383: record this fixture's wire ownership (the publish path's
     // observe step) so the fail-closed wire lookup can prove it unique.
@@ -10493,22 +12264,17 @@ fn shared_hit_materialization_marks_stale_before_policy_revalidation_10582_t5() 
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux::default(),
         },
-        shared_entry: Some(SyncedSessionEntry {
-            key: key.clone(),
-            decision: test_decision(),
-            metadata: test_metadata(),
-            leak_incarnation: 0,
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            tcp_flags: TCP_FLAG_ACK,
-            generation: 0,
-            session_id: 0,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-            pptp_call_ids: 0,
-            rev_packets: 0,
-            source_nat_static: None,
-        }),
+        shared_entry: Some(SyncedSessionEntry { key: key.clone(),
+        decision: test_decision(),
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        source_nat_static: None, }),
         origin: SessionOrigin::SyncImport,
         authority_deferred: false,
     };
@@ -10543,23 +12309,18 @@ fn shared_hit_materialization_marks_stale_before_policy_revalidation_10582_t5() 
 fn local_tunnel_pair() -> (SyncedSessionEntry, SyncedSessionEntry) {
     let forwarding = test_forwarding_state();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
-    let forward = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: TCP_FLAG_ACK,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let forward = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: TCP_FLAG_ACK,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let reverse = synthesized_synced_reverse_entry(
         &forwarding,
         &BTreeMap::new(),
@@ -10815,22 +12576,17 @@ fn flush_session_deltas_without_binding_reaches_global_consumers() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
-    let shared_entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata: metadata.clone(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::ForwardFlow,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let shared_entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: metadata.clone(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::ForwardFlow,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     publish_shared_session(
         &shared_sessions,
         &shared_nat_sessions,
@@ -11010,22 +12766,17 @@ fn over_capacity_expiry_close_overflow_reaches_all_consumers_10309() {
             &shared_nat_sessions,
             &shared_forward_wire_sessions,
             &shared_owner_rg_indexes,
-            &SyncedSessionEntry {
-                key: delta.key.clone(),
-                decision: delta.decision,
-                metadata: delta.metadata.clone(),
-                leak_incarnation: 0,
-                origin: delta.origin,
-                protocol: delta.key.protocol,
-                tcp_flags: delta.observed_tcp_flags,
-                generation: 0,
-                session_id: delta.session_id,
-                tcp_close_class: delta.tcp_close_class,
-                tcp_handshake_state: 0,
-                pptp_call_ids: 0,
-                rev_packets: 0,
-                source_nat_static: None,
-            },
+            &SyncedSessionEntry { key: delta.key.clone(),
+            decision: delta.decision,
+            metadata: delta.metadata.clone(),
+            leak_incarnation: 0,
+            origin: delta.origin,
+            protocol: delta.key.protocol,
+            tcp_flags: delta.observed_tcp_flags,
+            generation: 0,
+            session_id: delta.session_id,
+            tcp_close_class: delta.tcp_close_class, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            source_nat_static: None, },
         );
     }
     assert_eq!(
@@ -13419,22 +15170,17 @@ fn purge_translated_synced_hit_full_teardown_13674() {
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
         &shared_owner_rg_indexes,
-        &SyncedSessionEntry {
-            key: wire_key.clone(),
-            decision,
-            metadata: metadata.clone(),
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            session_id: 1,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-            pptp_call_ids: 0,
-            rev_packets: 0,
-            source_nat_static: None,
-            leak_incarnation: 0,
-            tcp_flags: TCP_FLAG_ACK,
-            generation: 0,
-        },
+        &SyncedSessionEntry { key: wire_key.clone(),
+        decision,
+        metadata: metadata.clone(),
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        session_id: 1,
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        source_nat_static: None,
+        leak_incarnation: 0,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 0, },
     );
     let peer_queue = Arc::new(Mutex::new(VecDeque::new()));
     let peer_worker_commands = vec![peer_queue.clone()];
@@ -13471,6 +15217,7 @@ fn purge_translated_synced_hit_full_teardown_13674() {
             origin: SessionOrigin::SyncImport,
             shared_identity: Some((1, 0)),
         }),
+        fabric_adopted: false,
     };
     maybe_promote_synced_session_with_conntrack(
         &mut sessions,
@@ -13538,22 +15285,17 @@ fn local_hit_purge_removes_shared_and_replicates_14666() {
     let metadata = test_metadata();
     let mut sessions = SessionTable::new();
     // Materialize as UpsertSynced does (peer-synced local row, session_id 42).
-    let entry = SyncedSessionEntry {
-        key: wire_key.clone(),
-        decision,
-        metadata: metadata.clone(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: TCP_FLAG_ACK,
-        generation: 7,
-        session_id: 42,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: wire_key.clone(),
+    decision,
+    metadata: metadata.clone(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: TCP_FLAG_ACK,
+    generation: 7,
+    session_id: 42,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     assert!(
         sessions.upsert_synced_with_origin(entry.clone().into_session_install(1_000_000), false)
     );
@@ -13613,6 +15355,8 @@ fn local_hit_purge_removes_shared_and_replicates_14666() {
         false,
         0,
         0,
+        None,
+        false,
         None,
     );
     let mut resolved = resolved_opt.expect("transient local hit must resolve");
@@ -13677,22 +15421,17 @@ fn local_hit_purge_preserves_replacement_shared_entry_14666() {
     };
     let metadata = test_metadata();
     let mut sessions = SessionTable::new();
-    let entry = SyncedSessionEntry {
-        key: wire_key.clone(),
-        decision,
-        metadata: metadata.clone(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: TCP_FLAG_ACK,
-        generation: 7,
-        session_id: 42,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: wire_key.clone(),
+    decision,
+    metadata: metadata.clone(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: TCP_FLAG_ACK,
+    generation: 7,
+    session_id: 42,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     assert!(
         sessions.upsert_synced_with_origin(entry.clone().into_session_install(1_000_000), false)
     );
@@ -13750,6 +15489,8 @@ fn local_hit_purge_preserves_replacement_shared_entry_14666() {
         false,
         0,
         0,
+        None,
+        false,
         None,
     )
     .expect("hit resolves");
@@ -14210,6 +15951,7 @@ fn arm_standby_hold_clock_5152(table: &mut SessionTable, now_ns: u64) {
         epoch_of: &epoch,
         ceiling_mult: crate::session::STALE_SYNCED_CEILING_MULT,
         ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
+    node_served: &|_| crate::session::NodeServedEvidence::default(),
     };
     let expired = table.expire_stale_entries_ha(now_ns, Some(&ctx));
     assert!(expired.is_empty(), "arming HOLD pass must hold, not reap");
@@ -14480,28 +16222,23 @@ fn handle_upsert_synced_resolves_active_zone_pair_for_snat_reserve_6211() {
         rewrite_src_port: Some(20000),
         ..NatDecision::default()
     };
-    let entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        // ingress_zone 1 = "lan", egress_zone 2 = "wan" — the ACTIVE's pair,
-        // as carried by SessionSyncRequest's ingress_zone_id/egress_zone_id.
-        metadata: SessionMetadata { forward_ingress_vlan_id: None,
-        ingress_zone: 1,
-        egress_zone: 2,
-        is_reverse: false,
-        nat_scope_ifindex: None, ..test_metadata() },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    // ingress_zone 1 = "lan", egress_zone 2 = "wan" — the ACTIVE's pair,
+    // as carried by SessionSyncRequest's ingress_zone_id/egress_zone_id.
+    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    ingress_zone: 1,
+    egress_zone: 2,
+    is_reverse: false,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
 
     let mut sessions = SessionTable::new();
     let ha_state: BTreeMap<i32, HAGroupRuntime> = BTreeMap::new();
@@ -14602,26 +16339,21 @@ fn delete_synced_frees_both_allocators_end_to_end_6211() {
         rewrite_src_port: Some(20000),
         ..NatDecision::default()
     };
-    let make_entry = || SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata: SessionMetadata { forward_ingress_vlan_id: None,
-        ingress_zone: 1,
-        egress_zone: 2,
-        is_reverse: false,
-        nat_scope_ifindex: None, ..test_metadata() },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let make_entry = || SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    ingress_zone: 1,
+    egress_zone: 2,
+    is_reverse: false,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
 
     let mut sessions = SessionTable::new();
     let ha_state: BTreeMap<i32, HAGroupRuntime> = BTreeMap::new();
@@ -14724,22 +16456,17 @@ fn nat_reverse_fixture_7169() -> (
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let reply_key = reverse_session_key(&key, decision.nat);
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared = Arc::new(Mutex::new(FastMap::default()));
@@ -15242,26 +16969,21 @@ fn f3_key_6979() -> crate::session::SessionKey {
 fn f3_entry_6979(nat: NatDecision) -> SyncedSessionEntry {
     let mut decision = test_decision();
     decision.nat = nat;
-    SyncedSessionEntry {
-        key: f3_key_6979(),
-        decision,
-        metadata: SessionMetadata { forward_ingress_vlan_id: None,
-        ingress_zone: 1,
-        egress_zone: 2,
-        is_reverse: false,
-        nat_scope_ifindex: None, ..test_metadata() },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    }
+    SyncedSessionEntry { key: f3_key_6979(),
+    decision,
+    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    ingress_zone: 1,
+    egress_zone: 2,
+    is_reverse: false,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, }
 }
 
 fn f3_nat_on_port_6979(port: u16) -> NatDecision {
@@ -16574,22 +18296,17 @@ fn install8586(sessions: &mut SessionTable, key: &SessionKey, origin: SessionOri
 fn publish8586(shared: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>, key: &SessionKey) {
     shared.lock().expect("shared sessions").insert(
         key.clone(),
-        SyncedSessionEntry {
-            key: key.clone(),
-            decision: test_decision(),
-            metadata: test_metadata(),
-            leak_incarnation: 0,
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            tcp_flags: 0x10,
-            generation: 0,
-            session_id: 0,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-            pptp_call_ids: 0,
-            rev_packets: 0,
-            source_nat_static: None,
-        },
+        SyncedSessionEntry { key: key.clone(),
+        decision: test_decision(),
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        source_nat_static: None, },
     );
 }
 
@@ -16740,22 +18457,17 @@ fn only_a_refused_delete_moves_the_worker_epoch_8586() {
         let mut pending = worker_queue::lock_recover(&peers[0]);
         let queued = worker_queue::push_bounded(
             &mut pending,
-            WorkerCommand::UpsertSynced(SyncedSessionEntry {
-                key: key8586(4001),
-                decision: test_decision(),
-                metadata: test_metadata(),
-                leak_incarnation: 0,
-                origin: SessionOrigin::SyncImport,
-                protocol: PROTO_TCP,
-                tcp_flags: 0x10,
-                generation: 0,
-                session_id: 0,
-                tcp_close_class: 0,
-                tcp_handshake_state: 0,
-                pptp_call_ids: 0,
-                rev_packets: 0,
-                source_nat_static: None,
-            }),
+            WorkerCommand::UpsertSynced(SyncedSessionEntry { key: key8586(4001),
+            decision: test_decision(),
+            metadata: test_metadata(),
+            leak_incarnation: 0,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: 0x10,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            source_nat_static: None, }),
         );
         assert!(
             !queued,
@@ -18243,6 +19955,7 @@ fn reverse_companion_stamps_zero_install_table_9752() {
             metadata: forward_metadata,
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux::default(),
+            synced_synthesis: false,
         },
         1_000_000_000,
         0,
@@ -18781,6 +20494,7 @@ fn synthesized_reverse_companion_converges_session_id_across_workers_14667() {
             metadata: test_metadata(),
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux::default(),
+            synced_synthesis: false,
         };
         let (_lookup, installed) = install_reverse_session_from_forward_match(
             &mut worker0,
@@ -18904,22 +20618,17 @@ fn synthesized_reverse_companion_converges_session_id_across_workers_14667() {
         let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
         // A peer forward import carrying the originating node's stable id.
         let forward_id: u64 = (7u64 << 48) | 0x14667;
-        let forward_entry = SyncedSessionEntry {
-            key: test_key(),
-            decision: test_decision(),
-            metadata: test_metadata(),
-            leak_incarnation: 0,
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            tcp_flags: TCP_FLAG_ACK,
-            generation: 0,
-            session_id: forward_id,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-            pptp_call_ids: 0,
-            rev_packets: 0,
-            source_nat_static: None,
-        };
+        let forward_entry = SyncedSessionEntry { key: test_key(),
+        decision: test_decision(),
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 0,
+        session_id: forward_id,
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        source_nat_static: None, };
         let reverse = synthesized_synced_reverse_entry(
             &forwarding,
             &BTreeMap::new(),
@@ -20040,44 +21749,34 @@ fn prewarm_skips_stale_zone_entries_10612() {
     stale_metadata.ingress_zone = 9;
     stale_metadata.egress_zone = 10;
     stale_metadata.owner_rg_id = 1;
-    let stale = SyncedSessionEntry {
-        key: stale_key.clone(),
-        decision: test_decision(),
-        metadata: stale_metadata,
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let stale = SyncedSessionEntry { key: stale_key.clone(),
+    decision: test_decision(),
+    metadata: stale_metadata,
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     let mut live_key = test_key();
     live_key.src_port = 46_002;
     let mut live_metadata = test_metadata();
     live_metadata.ingress_zone = 1;
     live_metadata.egress_zone = 2;
     live_metadata.owner_rg_id = 1;
-    let live = SyncedSessionEntry {
-        key: live_key.clone(),
-        decision: test_decision(),
-        metadata: live_metadata,
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let live = SyncedSessionEntry { key: live_key.clone(),
+    decision: test_decision(),
+    metadata: live_metadata,
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     for entry in [&stale, &live] {
         publish_shared_session(
             &shared_sessions,
@@ -20158,6 +21857,8 @@ fn promote_skips_republish_for_stale_zone_rows_10612() {
             session_id: 0,
             tcp_close_class: 0,
             tcp_handshake_state: 0,
+            fwd_packets: 0,
+            rev_packets: 0,
         },
         false,
     ));
@@ -20231,22 +21932,17 @@ fn republish_bpf_skips_stale_zone_rows_10612() {
     stale_metadata.ingress_zone = 9;
     stale_metadata.egress_zone = 10;
     stale_metadata.owner_rg_id = 1;
-    let stale = SyncedSessionEntry {
-        key: stale_key.clone(),
-        decision: test_decision(),
-        metadata: stale_metadata,
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let stale = SyncedSessionEntry { key: stale_key.clone(),
+    decision: test_decision(),
+    metadata: stale_metadata,
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
     publish_shared_session(
         &shared_sessions,
         &shared_nat_sessions,
@@ -20296,22 +21992,17 @@ fn materialize_stale_zone_shared_hit_returns_miss_10612() {
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux::default(),
         },
-        shared_entry: Some(SyncedSessionEntry {
-            key: key.clone(),
-            decision: test_decision(),
-            metadata: stale_metadata,
-            leak_incarnation: 0,
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            tcp_flags: TCP_FLAG_ACK,
-            generation: 0,
-            session_id: 0,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-            pptp_call_ids: 0,
-            rev_packets: 0,
-            source_nat_static: None,
-        }),
+        shared_entry: Some(SyncedSessionEntry { key: key.clone(),
+        decision: test_decision(),
+        metadata: stale_metadata,
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        source_nat_static: None, }),
         origin: SessionOrigin::SyncImport,
         authority_deferred: false,
     };
@@ -20853,6 +22544,7 @@ fn established_session_re_resolves_after_fib_generation_changes_11373() {
         ForwardingGenerationStamp {
             config_generation: 1,
             fib_generation: 2,
+            neighbor_generation: 0,
             valid: true,
         },
         "and stamp it with the live generation"
@@ -22764,7 +24456,7 @@ fn prewarm_sharedpromote_nat_reservation_survives_15966r() {
     let wire_key = forward_wire_key(&orig_key, nat);
     let decision = SessionDecision { resolution: test_local_delivery_decision().resolution, nat, install_table_domain: 0, install_table_check: 0 };
     let metadata = test_metadata();
-    let mk = |origin: SessionOrigin| SyncedSessionEntry { key: wire_key.clone(), decision, metadata: metadata.clone(), leak_incarnation: 0, origin, protocol: PROTO_TCP, tcp_flags: 0x10, generation: 0, session_id: 4242, tcp_close_class: 0, tcp_handshake_state: 0, pptp_call_ids: 0, rev_packets: 0, source_nat_static: None };
+    let mk = |origin: SessionOrigin| SyncedSessionEntry { key: wire_key.clone(), decision, metadata: metadata.clone(), leak_incarnation: 0, origin, protocol: PROTO_TCP, tcp_flags: 0x10, generation: 0, session_id: 4242, tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, source_nat_static: None };
     let mut sessions = SessionTable::new();
     let ha_state = BTreeMap::new();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
@@ -23167,4 +24859,352 @@ fn rst_teardown_reverse_only_survivor_15947() {
         .filter(|d| d.kind == SessionDeltaKind::Close)
         .collect();
     assert_eq!(closes.len(), 0, "reverse-only teardown emits no synthetic Close");
+}
+
+/// #16217: the build-time connected-owner index must answer
+/// identically to the legacy linear scan for every target/table —
+/// including longest-prefix wins, equal-length LAST-row wins,
+/// empty-table rows visible in every scope, the by-ifindex ledger
+/// fallback consulted only when no FIB row matches, and Source-2
+/// (interface-NAT) fallthrough on a true miss.
+#[test]
+fn connected_owner_index_matches_legacy_scan_16217() {
+    let mut forwarding = test_forwarding_state_split_rgs();
+    forwarding.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(
+            ipnet::Ipv4Net::new(Ipv4Addr::new(10, 0, 61, 128), 25).unwrap(),
+        ),
+        host: Ipv4Addr::new(10, 0, 61, 128),
+        ifindex: 12,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(
+            ipnet::Ipv4Net::new(Ipv4Addr::new(10, 0, 0, 0), 16).unwrap(),
+        ),
+        host: Ipv4Addr::new(10, 0, 0, 0),
+        ifindex: 12,
+        tunnel_endpoint_id: 0,
+        table: String::new(),
+    });
+    forwarding
+        .connected_v4_by_ifindex
+        .entry(6)
+        .or_default()
+        .push(PrefixV4::from_net(
+            ipnet::Ipv4Net::new(Ipv4Addr::new(192, 168, 7, 0), 24).unwrap(),
+        ));
+    let targets: Vec<(IpAddr, Option<&str>)> = vec![
+        (IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)), None),
+        (IpAddr::V4(Ipv4Addr::new(10, 0, 61, 200)), None),
+        (IpAddr::V4(Ipv4Addr::new(10, 0, 99, 5)), None),
+        (IpAddr::V4(Ipv4Addr::new(10, 0, 99, 5)), Some("tenant-a.inet.0")),
+        (IpAddr::V4(Ipv4Addr::new(192, 168, 7, 9)), None),
+        (IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), None),
+        (IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)), Some("inet.0")),
+    ];
+    let legacy: Vec<i32> = targets
+        .iter()
+        .map(|(t, tab)| {
+            crate::afxdp::connected_owner_rg_for_target_in_table(&forwarding, *t, *tab)
+        })
+        .collect();
+    forwarding.rebuild_connected_owner_index();
+    assert!(
+        !forwarding.connected_owner_index_v4.is_empty(),
+        "#16217: index must be built"
+    );
+    let indexed: Vec<i32> = targets
+        .iter()
+        .map(|(t, tab)| {
+            crate::afxdp::connected_owner_rg_for_target_in_table(&forwarding, *t, *tab)
+        })
+        .collect();
+    assert_eq!(
+        indexed, legacy,
+        "#16217: indexed owner answers must equal the legacy scan for every target/table"
+    );
+    assert_eq!(legacy[0], 2, "fixture /24 owner is RG2");
+    assert_eq!(legacy[1], 1, "longer /25 on RG1 wins over /24");
+    assert_eq!(legacy[3], 1, "empty-table /16 row is visible in a named scope");
+    assert_eq!(legacy[4], 2, "ledger fallback names RG2 when no FIB row matches");
+    assert_eq!(legacy[5], 0, "unmatched target stays unknown (0)");
+}
+
+/// #16217 (Opus final4 fold): the adopted recovery must re-resolve in
+/// the session's VALIDATED install table and restore ONLY a candidate
+/// whose egress RG equals the gate-proved RG. Fixture: target
+/// 172.16.80.200 connected in MAIN via egress 12 (RG1) and in tenant
+/// "blue" via egress 8 (RG2); the session decision carries blue's
+/// install_table_domain/check. Gate proves RG2 (tenant owner).
+/// FAIL-ON-REVERT: MAIN-table recovery restores the RG1 candidate
+/// under a RG2 proof (wrong table + wrong RG); dropping the RG check
+/// restores it too.
+#[test]
+fn adopted_recovery_uses_install_table_and_proved_rg_16217() {
+    let target = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+    let mac = [0x10, 0x66, 0x6a, 0x8b, 0x91, 0xa4];
+    let (domain, check) = crate::session::install_table_identity("blue");
+    let mut forwarding = test_forwarding_state_with_fabric();
+    for (ifindex, rg, table) in [(12, 1, "inet.0"), (8, 2, "blue.inet.0")] {
+        forwarding.connected_v4.push(ConnectedRouteV4 {
+            prefix: PrefixV4::from_net(
+                Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap(),
+            ),
+            host: Ipv4Addr::new(172, 16, 80, 0),
+            ifindex,
+            tunnel_endpoint_id: 0,
+            table: table.to_string(),
+        });
+        forwarding.egress.insert(
+            ifindex,
+            EgressInterface {
+                bind_ifindex: ifindex,
+                vlan_id: 0,
+                mtu: 1500,
+                src_mac: [0x02, 0xbf, 0x72, 0x00, 0x01, 0x01],
+                zone_id: 2,
+                redundancy_group: rg,
+                primary_v4: None,
+                primary_v6: None,
+            },
+        );
+        forwarding
+            .neighbors
+            .insert((ifindex, target), NeighborEntry { mac });
+    }
+    forwarding.install_tables.insert(
+        domain,
+        crate::afxdp::InstallTables {
+            v4: Some("blue.inet.0".to_string()),
+            v6: None,
+            h2: check,
+        },
+    );
+    let tenant_decision = SessionDecision {
+        resolution: test_resolution(),
+        nat: NatDecision::default(),
+        install_table_domain: domain,
+        install_table_check: check,
+    };
+    let recovery = AdoptedRecovery {
+        decision: tenant_decision,
+        flow_key: test_key(),
+        proved_rg: 2,
+    };
+    let dyn_empty = Arc::new(ShardedNeighborMap::new());
+    let terminal = ForwardingResolution {
+        disposition: ForwardingDisposition::ClusterTerminalHAInactive,
+        egress_ifindex: 0,
+        tx_ifindex: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        ..test_resolution()
+    };
+    // Tenant proof: recovery re-resolves in blue and restores the
+    // RG2 candidate on egress 8 (never MAIN's egress 12 / RG1).
+    let restored = fabric_adopted_resolution(
+        &forwarding,
+        &active_ha(),
+        1,
+        terminal,
+        terminal,
+        &dyn_empty,
+        target,
+        Some(&recovery),
+    );
+    assert_eq!(
+        restored.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "adopted recovery in the tenant table must restore"
+    );
+    assert_eq!(restored.egress_ifindex, 8, "tenant-table egress, not MAIN");
+    assert_eq!(restored.neighbor_mac, Some(mac));
+    // Wrong-RG proof: the same tenant recovery under a RG1 proof
+    // must refuse (tenant candidate is RG2, MAIN candidate would be
+    // RG1 but recovery never looks in MAIN).
+    let wrong = AdoptedRecovery {
+        decision: tenant_decision,
+        flow_key: test_key(),
+        proved_rg: 1,
+    };
+    assert_eq!(
+        fabric_adopted_resolution(
+            &forwarding,
+            &active_ha(),
+            1,
+            terminal,
+            terminal,
+            &dyn_empty,
+            target,
+            Some(&wrong),
+        ),
+        terminal,
+        "recovery under a mismatched proved RG must keep the terminal"
+    );
+    // No proof at all: non-adopted shape keeps the terminal.
+    assert_eq!(
+        fabric_adopted_resolution(
+            &forwarding,
+            &active_ha(),
+            1,
+            terminal,
+            terminal,
+            &dyn_empty,
+            target,
+            None,
+        ),
+        terminal,
+        "recovery without gate proof must keep the terminal"
+    );
+    // Looked-up candidate under the wrong RG: a MAIN egress-12
+    // candidate demoted to HAInactive must NOT restore under the
+    // tenant RG2 proof.
+    let main_candidate = ForwardingResolution {
+        egress_ifindex: 12,
+        neighbor_mac: Some(mac),
+        ..test_resolution()
+    };
+    let main_demoted = ForwardingResolution {
+        disposition: ForwardingDisposition::HAInactive,
+        ..main_candidate
+    };
+    assert_eq!(
+        fabric_adopted_resolution(
+            &forwarding,
+            &active_ha(),
+            1,
+            main_candidate,
+            main_demoted,
+            &dyn_empty,
+            target,
+            Some(&recovery),
+        ),
+        main_demoted,
+        "candidate whose egress RG != proved RG must not restore"
+    );
+}
+
+/// #16217 (Codex #2/#3/#4/#6 + GLM F1): named-RI ledger-only rows,
+/// default-vs-named probe isolation, and overlapping FIB/ledger
+/// precedence must match the legacy scan EXACTLY. The legacy answers
+/// are captured BEFORE `rebuild_connected_owner_index` (index empty
+/// => legacy scan), then compared after the build.
+/// FAIL-ON-REVERT: file named ledger rows under the default key (or
+/// remap a named probe to the default key) and the tenant/default
+/// arms flip.
+#[test]
+fn connected_owner_index_named_ri_ledger_equivalence_16217() {
+    let mut forwarding = test_forwarding_state_split_rgs();
+    // Default-instance ledger row on ifindex 6 (instance "") and a
+    // NAMED-instance ledger row: register ifindex 12 under instance
+    // "tenant-a" so its ledger prefix files under tenant-a.inet.0.
+    forwarding
+        .ifindex_to_routing_instance
+        .insert(12, "tenant-a".to_string());
+    forwarding
+        .connected_v4_by_ifindex
+        .entry(6)
+        .or_default()
+        .push(PrefixV4::from_net(
+            ipnet::Ipv4Net::new(Ipv4Addr::new(192, 168, 7, 0), 24).unwrap(),
+        ));
+    forwarding
+        .connected_v4_by_ifindex
+        .entry(12)
+        .or_default()
+        .push(PrefixV4::from_net(
+            ipnet::Ipv4Net::new(Ipv4Addr::new(198, 51, 100, 0), 24).unwrap(),
+        ));
+    // Overlapping FIB vs ledger: a FIB /8 (ifindex 12) vs ledger /24
+    // (ifindex 6) covering the same target — legacy consults the
+    // ledger ONLY when no FIB row matches at any length, so the FIB
+    // /8 owner wins despite the longer ledger prefix.
+    forwarding.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(
+            ipnet::Ipv4Net::new(Ipv4Addr::new(203, 0, 0, 0), 8).unwrap(),
+        ),
+        host: Ipv4Addr::new(203, 0, 0, 0),
+        ifindex: 12,
+        tunnel_endpoint_id: 0,
+        table: String::new(),
+    });
+    forwarding
+        .connected_v4_by_ifindex
+        .entry(6)
+        .or_default()
+        .push(PrefixV4::from_net(
+            ipnet::Ipv4Net::new(Ipv4Addr::new(203, 0, 113, 0), 24).unwrap(),
+        ));
+    let targets: Vec<(IpAddr, Option<&str>)> = vec![
+        // named-RI ledger-only: visible ONLY under tenant-a.inet.0
+        (IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), Some("tenant-a.inet.0")),
+        (IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), None),
+        (IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), Some("inet.0")),
+        // default ledger-only: visible under default, NOT named
+        (IpAddr::V4(Ipv4Addr::new(192, 168, 7, 9)), None),
+        (IpAddr::V4(Ipv4Addr::new(192, 168, 7, 9)), Some("tenant-a.inet.0")),
+        // overlapping FIB /8 vs ledger /24
+        (IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), None),
+    ];
+    let legacy: Vec<i32> = targets
+        .iter()
+        .map(|(t, tab)| {
+            crate::afxdp::connected_owner_rg_for_target_in_table(&forwarding, *t, *tab)
+        })
+        .collect();
+    forwarding.rebuild_connected_owner_index();
+    let indexed: Vec<i32> = targets
+        .iter()
+        .map(|(t, tab)| {
+            crate::afxdp::connected_owner_rg_for_target_in_table(&forwarding, *t, *tab)
+        })
+        .collect();
+    assert_eq!(
+        indexed, legacy,
+        "#16217 GLM F1: indexed named-RI/default/overlap answers must equal the legacy scan"
+    );
+    // Pin the semantics (ifindex 6 = RG2 split, ifindex 12 = RG1):
+    assert_eq!(legacy[0], 1, "tenant ledger row names its RG under its own table");
+    assert_eq!(legacy[1], 0, "tenant ledger row invisible under default probe");
+    assert_eq!(legacy[2], 0, "tenant ledger row invisible under inet.0 probe");
+    assert_eq!(legacy[3], 2, "default ledger row names RG2 under default probe");
+    assert_eq!(legacy[4], 0, "default ledger row invisible under named probe");
+    assert_eq!(legacy[5], 1, "FIB /8 owner beats longer ledger /24 (ledger only on FIB miss)");
+}
+
+/// #16217 (GLM F1): FIB-vs-route precedence — a STATIC (non-connected)
+/// route must NOT claim connected ownership: the connected-owner
+/// answer for a target covered only by a static route is the
+/// connected prefix's owner (or 0 when no connected prefix matches),
+/// never the static route's egress RG. Equivalence indexed vs scan.
+#[test]
+fn connected_owner_static_route_does_not_claim_16217() {
+    let mut forwarding = test_forwarding_state_split_rgs();
+    // Static route to 203.0.113.0/24 via egress 12 (RG1); NO
+    // connected row covers it. Connected owner must stay 0 in both
+    // scan and index (routes_v4 are not connected ownership).
+    forwarding.routes_v4.insert(
+        "inet.0".to_string(),
+        vec![crate::afxdp::RouteEntryV4 {
+            prefix: PrefixV4::from_net(
+                ipnet::Ipv4Net::new(Ipv4Addr::new(203, 0, 113, 0), 24).unwrap(),
+            ),
+            next_hops: vec![],
+            discard: false,
+            reject: false,
+            cluster_terminal: false,
+            next_table: String::new(),
+            preference: 10,
+            mtu: 1500,
+            rule_priority: 0,
+        }],
+    );
+    let target = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+    let legacy = crate::afxdp::connected_owner_rg_for_target_in_table(&forwarding, target, None);
+    forwarding.rebuild_connected_owner_index();
+    let indexed = crate::afxdp::connected_owner_rg_for_target_in_table(&forwarding, target, None);
+    assert_eq!(legacy, 0, "static route alone claims no connected owner");
+    assert_eq!(indexed, legacy, "index must equal scan for static-route-only target");
 }

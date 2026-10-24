@@ -95,12 +95,20 @@ pub(super) fn run_session_housekeeping(
         // self-heal on the node-level rg_epochs[0] edge rather than never.
         rg_epochs_for_gate[crate::afxdp::flow_cache::rg_epoch_index(rg)].load(Ordering::Relaxed)
     };
+    // #16223: node-level served evidence for the expiry retention arm:
+    // the shared synced map's Established wire for the tuple (the
+    // counter half is merged from this table's own serving stamps
+    // inside the expire pass).
+    let node_served = |key: &crate::session::SessionKey| {
+        crate::afxdp::shared_ops::shared_node_served_evidence(shared_sessions, key)
+    };
     let ha_ctx = crate::session::ExpireHaContext {
         node_active,
         forwards_rg: &forwards_rg,
         epoch_of: &epoch_of,
         ceiling_mult: crate::session::STALE_SYNCED_CEILING_MULT,
         ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
+        node_served: &node_served,
     };
     let mut deferred_delta_cleanup = false;
     // #13075: the loop-local `drain_and_flush_all!` macro, as a nested fn
@@ -199,6 +207,7 @@ pub(super) fn run_session_housekeeping(
         conntrack_v6_fd,
         loop_now_ns,
         worker_id,
+        shared_sessions,
     );
     sessions.defer_conntrack_deletes(deferred_conntrack_deletes);
     if local_expired > 0 {
