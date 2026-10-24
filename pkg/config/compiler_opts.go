@@ -622,6 +622,21 @@ type compileOpts struct {
 	// flagged. Same doctrine as lenientChassisMonitorWeight.
 	lenientChassisRGStatementArity bool
 
+	// lenientChassisClusterUnknown16456 (#16456) downgrades the unknown
+	// `chassis cluster` / `redundancy-group` statement gate
+	// (validateChassisClusterUnknownAST16456) from a hard compile error
+	// to a cfg.Warnings entry on the tolerant load / peer-sync paths. A
+	// misspelt `interface-monitor`, `preempt`, `ip-monitoring`,
+	// `redundancy-group` or cluster-level keyword compiled to nothing
+	// with byte-identical warnings, so the RG never failed over on the
+	// link or target loss the operator configured. Commit / commit-check
+	// stay strict so a new operator edit is rejected; an
+	// already-persisted or peer-synced config an older binary accepted
+	// must still BOOT (warn) per the #1960 doctrine — the dropped
+	// statement stays dropped, now flagged. Same doctrine as
+	// lenientChassisRGStatementArity.
+	lenientChassisClusterUnknown16456 bool
+
 	// lenientLoginPackedStatements (#6662) downgrades the `system login`
 	// packed-body gate (validateLoginPackedStatementsAST) from a hard compile
 	// error to a cfg.Warnings entry on the tolerant load / peer-sync paths.
@@ -3705,6 +3720,7 @@ func lenientCompileOpts() compileOpts {
 		lenientRethRedundancyGroup:               true,
 		lenientChassisMonitorWeight:              true,
 		lenientChassisRGStatementArity:           true,
+		lenientChassisClusterUnknown16456:        true,
 		lenientLoginPackedStatements:             true,
 		lenientLoginClassShadowsBuiltin:          true,
 		lenientLoginClassRegex15712:              true,
