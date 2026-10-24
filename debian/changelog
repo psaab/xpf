@@ -1,4 +1,19 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Test: move standalone and legacy-local lab NAT pools off shared-
+    segment addresses owned by other stacks (#16473). On the shared
+    172.16.50.0/24 segment the standalone VM's NAT64 pool sat on
+    172.16.50.11 (the udp cluster's WAN RETH) and its SNAT pool /
+    proxy-ARP on 172.16.50.6 (the legacy local cluster's WAN RETH);
+    co-running stacks would ARP-fight and mis-deliver NAT replies.
+    The standalone pools move to .14/.15 (both proxy-ARPed, so the
+    NAT64 pool gains the ARP answerer it never had), the legacy
+    local fw0 view's SNAT pool moves off .7 (the loss legacy RETH)
+    to .12 with its NAT64 pool .9 proxy-ARPed, the standalone and
+    legacy-local stacks join the docs/incus-tcp-udp-plan.md §3.3
+    registry, and a hermetic configstore census compiles every
+    deployed config on the shared v4/v6 segments and fails on any
+    cross-stack address claim other than the documented
+    172.16.80.7 leg.
   * Authz: judge the base spelling of selector-bearing commands on the
     remote gates (#16472). The gRPC/REST ShowText regex gates matched
     only the registry's selector spelling (`show firewall filter`,
