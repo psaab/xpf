@@ -54,23 +54,28 @@
 #
 # Fresh installs: this unit is enabled --no-start (upgrades must never inject
 # a DROP chain into a live armed daemon). The postinst starts it live on
-# first install when no xpfd owns enforcement; if that fails (or on manual
-# installs), reboot — or run `systemctl enable --now xpf-input-closed`
-# BEFORE the network comes up — or host input stays unenforced until reboot.
+# first install when no xpfd owns enforcement ON AN OWNED HOST (#16458: the
+# postinst GUARD arm skips `enable --now` when neither /etc/xpf/appliance
+# nor /etc/xpf/.configdb exists); if that fails (or on manual installs),
+# reboot — or run `systemctl enable --now xpf-input-closed` BEFORE the
+# network comes up — or host input stays unenforced until reboot.
 #
-# Bootstrap boots swap this table for a lifeline-admitting variant (same
-# table, leading iifname admit): NON-lifeline data and link-local ingress
-# stay DROP-closed, but whole lifeline NICs — including their link-local
-# addresses — are open. Membership is em0/fab0/fab1/fxp0/vrf-mgmt by NAME
-# assumption plus the persisted lifeline record. The internal
-# `system management-interface` field can narrow fxp0 when populated, but its
-# config-mode grammar is deferred, so an operator cannot use it to repurpose
-# fxp0 through the CLI. A default-route fallback NIC is admitted whole ONLY
-# with zero verified identity (no record or populated leaf); otherwise an
-# unlisted detected NIC is data until proven management and stays closed. A
-# static-default-via-data boot therefore opens that NIC for the bootstrap
-# window — inherent without config. The first commit converges to configured
-# policy.
+# Owned bootstrap boots swap this table for a lifeline-admitting variant
+# (same table, leading iifname admit): NON-lifeline data and link-local
+# ingress stay DROP-closed, but whole lifeline NICs — including their
+# link-local addresses — are open. Membership is em0/fab0/fab1/fxp0/vrf-mgmt
+# by NAME assumption plus the persisted lifeline record. The internal
+# `system management-interface` field can narrow fxp0 when populated, but
+# its config-mode grammar is deferred, so an operator cannot use it to
+# repurpose fxp0 through the CLI. A default-route fallback NIC is admitted
+# whole ONLY with zero verified identity (no record or populated leaf);
+# otherwise an unlisted detected NIC is data until proven management and
+# stays closed. A static-default-via-data boot therefore opens that NIC
+# for the bootstrap window — inherent without config. The first commit
+# converges to configured policy. On an UNOWNED host (#16458: no appliance
+# marker and a never-committed store) xpfd removes this barrier at bring-up
+# instead of swapping in the lifeline variant, so the foreign host retains
+# its own input posture.
 [Unit]
 Description=xpf early host-input barrier (fail-closed before networkd)
 DefaultDependencies=no

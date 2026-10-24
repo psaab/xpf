@@ -704,6 +704,7 @@ func TestEarlyInputBootstrapGuard10751(t *testing.T) {
 
 	t.Run("fail-closed fences install before the guard swap", func(t *testing.T) {
 		d, fake := failClosedBootFixture(t)
+		withApplianceMarker10733(t, true)
 		var events []string
 		fake.coldBootFence = func(xnft.FenceSpec) error { events = append(events, "host-fence"); return nil }
 		fake.lo0ColdBootFence = func(xnft.FenceSpec) error { events = append(events, "lo0-fence"); return nil }
@@ -729,6 +730,7 @@ func TestEarlyInputBootstrapGuard10751(t *testing.T) {
 
 	t.Run("failed fence installation still swaps the guard", func(t *testing.T) {
 		d, fake := failClosedBootFixture(t)
+		withApplianceMarker10733(t, true)
 		fake.coldBootFence = func(xnft.FenceSpec) error { return errors.New("host fence failed") }
 		fake.lo0ColdBootFence = func(xnft.FenceSpec) error { return errors.New("lo0 fence failed") }
 		d.bootstrapMode.Store(true)
@@ -753,6 +755,7 @@ func TestEarlyInputBootstrapGuard10751(t *testing.T) {
 
 	t.Run("data link-local ingress stays guarded in bootstrap", func(t *testing.T) {
 		withFailClosedBootLifelineFile(t)
+		withApplianceMarker10733(t, true)
 		withFailClosedBootDetect(t, func() (string, bool, error) { return "fxp0", true, nil })
 		withFailClosedBootLinkList(t, func() ([]netlink.Link, error) {
 			return []netlink.Link{failClosedBootTestLink("fxp0", false), failClosedBootTestLink("ge-0-0-0", false)}, nil
@@ -769,7 +772,7 @@ func TestEarlyInputBootstrapGuard10751(t *testing.T) {
 		d.bootstrapMode.Store(true)
 		// The fail-closed fences exclude link-locals by design (#10732); the
 		// lifeline guard's DROP policy is what covers them — so bootstrap
-		// must install the guard (not lift the table) on this box.
+		// must install the guard (not lift the table) on this owned box.
 		d.installBootstrapInputProtection(true)
 		removes, installs := 0, 0
 		for _, call := range fake.earlyInputBarrierCalls {

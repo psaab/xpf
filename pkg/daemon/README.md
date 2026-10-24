@@ -2403,6 +2403,27 @@ never lock an operator out of a remote box it manages.
     never creates or chmods `.configdb` (unlike `New`/`NewDB`). If xpfd
     never starts, the barrier stays: fail-closed on an owned box, and
     the stated residual on a foreign host with the daemon disabled.
+  - **Input-barrier release on unowned hosts (#16458).** The pre-networkd
+    unit `xpf-input-closed.service` installs the inet input DROP before
+    networkd on every boot and `debian/xpf.postinst` used to enable it
+    --now on fresh install. On a foreign, never-committed host xpfd's
+    bootstrap lifeline guard admits only em0/fab0/fab1/fxp0 plus the
+    default-route NIC, so host services on every other NIC (sshd on a
+    second NIC, libvirt dnsmasq on virbr0, BGP/OSPF adjacencies, wg0/
+    tailscale0) stopped accepting new connections persistently across
+    reboots. During bring-up `installBootstrapInputProtection`
+    (`daemon_failclosed_boot.go`) consults the same ownership probe
+    (`ownsInputBarrier16458`/`InputGateOwnedOnDisk`): an unowned
+    bootstrap host gets `RemoveEarlyInputBarrier` instead of the
+    lifeline-guard swap, and an owned host keeps the guard exactly as
+    before. The #10732/#1960 fail-closed fences run first and still
+    install host-input fences from live addresses; only the barrier
+    leaf is released. `debian/xpf.postinst` no longer runs `enable --now`
+    on a host with neither `/etc/xpf/appliance` nor `/etc/xpf/.configdb`
+    (its `GUARD` arm). Regression: `pkg/daemon/input_barrier_foreign_16458_test.go`.
+    If xpfd never starts on a foreign host the boot barrier stays until
+    package removal (`postrm` already removes it) — the owned-box
+    fail-closed direction.
   - **Removal-time restore (#14620).** When ownership first latches, the
     daemon durably records it (with the host's pre-xpf sysctl values) in
     `/var/lib/xpf/transit-gate-owned` (`recordTransitGateOwnership`).

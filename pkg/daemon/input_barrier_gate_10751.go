@@ -207,8 +207,22 @@ func (d *Daemon) ensureEarlyInputBootstrapGuard() {
 // the lifeline-admitting guard. A first-confirm rollback returns a daemon to
 // bootstrap after the ordinary first apply removed this guard; nft teardown
 // must not leave the bootstrap daemon without it.
+//
+// #16458: on a host xpf does not own the release in
+// installBootstrapInputProtection runs at manager init; by the time a
+// rollback could rearm, the host has committed (exitBootstrapMode already
+// flipped bootstrap off, so rearmEarlyInputBootstrapGuard is only reached
+// from a bootstrap rollback where the store has committed once: an owned
+// host by definition). The ownership probe therefore still reads owned
+// there, and the release must not be re-fenced by the guard. The check is
+// kept for the unowned corner the same way ensureEarlyInputBootstrapGuard
+// is gated at its call site.
 func (d *Daemon) rearmEarlyInputBootstrapGuard() error {
 	d.earlyInputHandoffDone.Store(false)
+	if !d.ownsInputBarrier16458() {
+		d.removeUnownedBootInputBarrier16458()
+		return nil
+	}
 	d.ensureEarlyInputBootstrapGuard()
 	if d.EarlyInputGuardSwapFailed() {
 		return errors.New("bootstrap lifeline input guard could not be installed")

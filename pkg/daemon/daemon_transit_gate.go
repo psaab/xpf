@@ -310,6 +310,80 @@ func (d *Daemon) removeUnownedBootTransitBarrier15147() {
 	slog.Info("removed boot transit barrier on unowned host; existing kernel forwarding posture preserved")
 }
 
+// InputGateOwnedOnDisk reports, READ-ONLY, whether durable on-disk state
+// proves xpf owns this host's input posture (#16458): the appliance marker
+// file, or a committed/history-bearing config DB under the store's
+// .configdb directory. Unlike TransitGateOwnedOnDisk (a transit-posture
+// probe over a raw config path), this probe is store-based because the
+// bootstrap input path already holds the loaded store. It never creates,
+// chmods, or sweeps the .configdb directory. Absent state reads unowned;
+// a present-but-unreadable marker or an unreadable committed bit reads
+// owned (fail-closed), mirroring TransitGateOwnedOnDisk.
+func InputGateOwnedOnDisk(d *Daemon) bool {
+	if d == nil {
+		return false
+	}
+	if _, err := os.Stat(applianceMarkerFile); err == nil {
+		return true
+	}
+	if d.store == nil {
+		return false
+	}
+	configFile := d.store.ConfigPath()
+	if configFile == "" {
+		return false
+	}
+	return configstore.TransitGateOwnedOnDisk(configFile)
+}
+
+// ownsInputBarrier16458 reports whether xpf owns the early-input barrier on
+// this host (#16458), reusing the #10733 transit-ownership predicate
+// (shouldManageTransitGate latch) plus the read-only on-disk probe. An
+// owned host must keep the #10751 fail-closed bootstrap posture: the boot
+// barrier and its lifeline-admitting variant belong to the appliance/
+// committed box, not to external state to release.
+func (d *Daemon) ownsInputBarrier16458() bool {
+	if d == nil {
+		return false
+	}
+	if d.shouldManageTransitGate() {
+		return true
+	}
+	if d.store != nil && d.store.FirstCommitTeardownOwed() {
+		return true
+	}
+	return InputGateOwnedOnDisk(d)
+}
+
+// removeUnownedBootInputBarrier16458 releases the boot-installed early
+// input barrier on a host xpf does not own (#16458), the input twin of
+// removeUnownedBootTransitBarrier15147. The pre-networkd unit
+// (xpf-input-closed.service) installs the inet input DROP before networkd
+// on every boot and debian/xpf.postinst enables it --now on fresh install;
+// on a foreign, never-committed host the daemon's bootstrap lifeline guard
+// admits only em0/fab0/fab1/fxp0 plus the default-route NIC, dropping new
+// inbound connections to host services on every other NIC, bridge and VPN
+// interface persistently across reboots. Nothing else releases the input
+// barrier on an unowned host, so during bring-up it is removed instead of
+// swapped for the lifeline guard when the host reads unowned. An owned
+// host (appliance marker, a committed store, or durable ownership on disk)
+// keeps the existing fail-closed posture. Any removal failure is logged,
+// never fatal: the daemon brings up management regardless (#1960
+// no-brick); the release is attempted once per bootstrap entry and never
+// falls back to installing the guard.
+func (d *Daemon) removeUnownedBootInputBarrier16458() bool {
+	if d == nil || d.ownsInputBarrier16458() || nftInstaller == nil {
+		return false
+	}
+	if err := nftInstaller.RemoveEarlyInputBarrier(); err != nil {
+		slog.Warn("failed to remove unowned boot input barrier; foreign-host services on non-lifeline NICs stay fenced until the barrier is removed",
+			"err", err)
+		return false
+	}
+	slog.Info("removed boot input barrier on unowned host; existing host input posture preserved")
+	return true
+}
+
 // writeTransitForwardSysctls drives both transit knobs to on/off.
 //
 // BestEffortKernelKnob per docs/engineering-style.md "Persistence classes":
