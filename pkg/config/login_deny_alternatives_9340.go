@@ -77,15 +77,16 @@ func UnenforceableDenyAlternatives(rules CompiledLoginRegexes) []DenyAlternative
 		if wholeDead[s.name] {
 			continue
 		}
-		cmds := s.commands()
-		if len(cmds) == 0 {
+		if len(s.commands()) == 0 {
 			continue
 		}
+		cmds, samples := s.candidateSet()
 		var dead []string
 		for _, alt := range alts {
 			branch := alternativeRules9340(rules, alt)
 			fires := false
-			for _, cmd := range cmds {
+			cands := append(append([]string(nil), cmds...), patternCandidateCommands(altDisplaySource(alt), cmds, samples)...)
+			for _, cmd := range cands {
 				if denyPatternDecides(branch, cmd) {
 					fires = true
 					break
@@ -111,6 +112,11 @@ func alternativeRules9340(rules CompiledLoginRegexes, alt denyAlternative9340) C
 	rules.deny = alt.re
 	return rules
 }
+
+// altDisplaySource is the source text a candidate is derived from for
+// one alternative: its display rendering, which preserves the literal
+// words while dropping the parser's flag wrapper.
+func altDisplaySource(alt denyAlternative9340) string { return alt.display }
 
 // denyPatternAlternatives9340 splits src into alternatives whose union matches
 // exactly what src matches (see the file comment). ok=false when src does not

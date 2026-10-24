@@ -60,7 +60,7 @@ import (
 // deferral would go build an AST walk for a correspondence that is already
 // one table both binaries read.
 //
-// ── ARGUMENT-FREE ENTRIES, AND THE GAP THAT CREATES ──────────────────────
+// ── ARGUMENT-FREE ENTRIES, AND THE RECONSTRUCTION THAT COMPLETES THEM ───
 //
 // Every value is the canonical command with NO operator arguments. Where
 // several spellings reach one topic and differ only by arguments, the entry is
@@ -70,35 +70,29 @@ import (
 // `test-policy:from=...`), the entry is the command PREFIX that precedes the
 // parameter.
 //
-// NAMED GAP, not a silent one. pkg/cli's cut-3 gate matches a deny regex
-// against the FULL canonicalized line including its arguments and its output
-// pipe (evaluateCommandRegex). These strings have neither. So a regex written
-// against ARGUMENT text — `deny-commands "show route table secret-vrf"` — matches
-// on the box and does NOT match the remote RPC, which under the
-// allow-over-deny model of #7172 is an under-deny, i.e. fail-OPEN for that
-// class of regex. A regex written against the command PATH — the shape the
-// feature is for, and the shape Junos' own examples use — matches identically
-// on both surfaces because matching is partial rather than anchored.
+// These entries are the CHARGE, not the whole matched string. Since #16067
+// the gate (authz_command_args_16067.go) rebuilds the full canonicalised
+// line from the decoded request — topic parameters, typed RPC fields,
+// ShowText filter — and matches the pattern against that line AND this
+// argument-free charge, so a regex written against ARGUMENT text
+// (`deny-commands "show route table secret-vrf"`, `^ping 10\.99\.`,
+// `^show log .*`) fires remotely exactly as it does on the box, and a
+// regex written against the command PATH matches identically because
+// matching is partial rather than anchored. The reconstruction mirrors
+// each handler's own decoder; a packing the handler would reject yields
+// no command and denies for a restricted class.
 //
-// #9022 CLOSED THE ANCHORED DIRECTION, which this paragraph had correctly
-// scoped itself away from. An ANCHORED path regex used to disagree between the
-// surfaces, and in the dangerous direction: `^show log$` denied here (these
-// strings carry no arguments) and ALLOWED on the box the moment any argument
-// was appended, so an operator who verified the rule over the remote CLI got
-// the wrong answer about the console. pkg/cli now matches against the
-// argument-free command prefix as well as the full line, so both surfaces
-// agree for an anchored rule too. TestAnchoredDenyAgreesAcrossSurfaces9022
-// asserts the AGREEMENT rather than each side separately. The ARGUMENT-text
-// gap described above is unchanged and still open.
-//
-// Closing it needs a per-topic decoder turning `route-table:secret-vrf` back
-// into `show route table secret-vrf`, i.e. 129 bespoke inverse functions, each
-// one a new place the remote string can disagree with the on-box string. That
-// is a worse trade than the gap, and it is recorded here rather than
-// rediscovered.
-//
-// These tables are INERT: nothing reads them until 5b wires them into
-// authorizeRPC.
+// #9022 CLOSED THE ANCHORED DIRECTION. An ANCHORED path regex used to
+// disagree between the surfaces, and in the dangerous direction:
+// `^show log$` denied here (these strings carry no arguments) and
+// ALLOWED on the box the moment any argument was appended, so an
+// operator who verified the rule over the remote CLI got the wrong
+// answer about the console. pkg/cli matches against the argument-free
+// command prefix as well as the full line, and this gate does the same
+// via EvaluateForms, so both surfaces agree for an anchored rule too.
+// TestAnchoredDenyAgreesAcrossSurfaces9022 asserts the AGREEMENT rather
+// than each side separately; TestArgumentScopedDenyFiresOnGRPC16067
+// asserts the argument-text agreement.
 
 // showTextTopicCommand maps a ShowText topic to the canonical operational
 // command that emits it.

@@ -29,6 +29,10 @@ func compileRESTDenyConfig11678(t *testing.T, pattern string) *config.Config {
 	return cfg
 }
 
+// #16067: argument-scoped patterns are now ENFORCED on REST (the gate
+// reconstructs `show route table secret-vrf` from ?topic=), so the
+// commit advisory must stop naming them. A pattern naming no command
+// in any spelling keeps its advisory.
 func TestRESTArgumentScopedDenyHasCommitAdvisory_11678(t *testing.T) {
 	const restSurface = "the REST surface"
 	for _, tc := range []struct {
@@ -37,8 +41,13 @@ func TestRESTArgumentScopedDenyHasCommitAdvisory_11678(t *testing.T) {
 		wantAdvisory bool
 	}{
 		{
-			name:         "argument-scoped deny is named as unenforced on REST",
+			name:         "argument-scoped deny is now enforced on REST and stays quiet",
 			pattern:      `^show route table secret-vrf$`,
+			wantAdvisory: false,
+		},
+		{
+			name:         "deny naming no command is named as unenforced on REST",
+			pattern:      `^zzz-not-a-command$`,
 			wantAdvisory: true,
 		},
 		{
@@ -57,7 +66,7 @@ func TestRESTArgumentScopedDenyHasCommitAdvisory_11678(t *testing.T) {
 			}
 			if tc.wantAdvisory {
 				if len(restAdvisories) != 1 {
-					t.Fatalf("argument-scoped deny needs exactly one advisory naming REST; got %q", cfg.Warnings)
+					t.Fatalf("unenforceable deny needs exactly one advisory naming REST; got %q", cfg.Warnings)
 				}
 				for _, want := range []string{"deny-commands", tc.pattern, "on-box CLI"} {
 					if !strings.Contains(restAdvisories[0], want) {

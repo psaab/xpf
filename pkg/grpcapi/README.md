@@ -451,14 +451,17 @@ the topic and agrees with it by construction. The only sound source is
 nested switches); making that mapping declarative is #8058. Until then, a
 reviewer checking these tables is the check.
 
-**Named gap: the entries are ARGUMENT-FREE.** `pkg/cli`'s gate matches a
-deny regex against the full canonicalized line *including* arguments and the
-output pipe. These strings have neither — a parameter-packed topic
-(`route-table:<name>`) maps to the command prefix that precedes the
-parameter (`show route table`). So a regex written against argument text
-matches on the box and not on the RPC; a regex written against the command
-path — the shape Junos' own examples use — matches identically on both,
-because matching is partial rather than anchored.
+**The entries are ARGUMENT-FREE charges, completed by reconstruction
+(#16067).** `pkg/cli`'s gate matches a deny regex against the full
+canonicalized line *including* arguments. These strings are the
+argument-free charge — a parameter-packed topic (`route-table:<name>`)
+maps to the command prefix that precedes the parameter (`show route
+table`) — and since #16067 the gate rebuilds the full line from the
+decoded request (`authz_command_args_16067.go`) and matches against
+both spellings. So a regex written against argument text
+(`show route table secret-vrf`, `^ping 10\.99\.`) and a regex written
+against the command path are both enforced identically on both
+surfaces.
 
 **Prefix-form `SystemAction` verbs have no entry and cannot get one.** The
 handler's default branch parses `cluster-failover*` and the `userspace-*`
@@ -491,23 +494,25 @@ regexes** — a class with none pays nothing:
 | regexes do not compile | validated at commit, so this config arrived by a path that did not validate |
 | no canonical command (config-mode method, a method named absent, an unknown topic, a prefix-form verb, an unreadable request) | not knowing which command we hold, we cannot know a deny regex fails to match it |
 
-**The two surfaces do NOT match the same string, and a populated table is not
-evidence that they do.** `pkg/cli` matches the full canonicalized line,
-argument values and output pipe included. This gate matches the command
-**path**, because the remote CLI parses the line client-side — `ping
-10.0.0.1` arrives as `Ping{Host:"10.0.0.1"}`. So:
+**The surfaces match the same string.** `pkg/cli` matches the full
+canonicalized line, argument values and output pipe included. This gate
+matches the full line reconstructed from the decoded request, plus the
+argument-free charge as an alternative form — the remote CLI parses the
+line client-side, so `ping 10.0.0.1` arrives as
+`Ping{Target:"10.0.0.1"}` and is rebuilt server-side. So:
 
 - a deny written against a **path** (`request system reboot`, the shape
   Junos' own examples use) is enforced identically on both, since matching is
   partial rather than anchored;
-- a deny written against **argument text** (`show route table secret-vrf`) is
-  enforced on the box and **not** here — an under-deny, i.e. fail-open for
-  that class of pattern. `TestArgumentLevelDenyIsOnBoxOnly7172` asserts the
-  difference in one place rather than leaving it in prose.
+- a deny written against **argument text** (`show route table secret-vrf`)
+  is likewise enforced on both since #16067.
+  `TestArgumentScopedDenyFiresOnGRPC16067` asserts the agreement across
+  the reconstructed shapes rather than leaving it in prose.
 
 The operator is told which of their patterns this affects.
 `unenforceableDenyPatterns` asks whether a pattern matches **any** command
-this listener can produce; one that matches none can never fire here, and is
+this listener can produce, in its argument-free or reconstructed
+argument-bearing spellings; one that matches none can never fire here, and is
 logged once per class. That check deliberately does **not** inspect the
 pattern: `regexp.LiteralPrefix` returns `""` for `^show route table
 secret-vrf`, so a literal-prefix heuristic would cover the unanchored

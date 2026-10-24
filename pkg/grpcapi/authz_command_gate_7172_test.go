@@ -68,21 +68,18 @@ func TestPathLevelDenyIsEnforced7172(t *testing.T) {
 	}
 }
 
-// THE ASYMMETRY, ASSERTED RATHER THAN DESCRIBED.
+// THE ASYMMETRY, CLOSED BY #16067.
 //
-// This is the cell the issue comment demands: 5b must not read a populated
-// table as meaning the two surfaces match the same thing. They do not, and the
-// difference is stated here in one place so it is a fact the suite carries
-// rather than folklore in a comment.
+// Before #16067 this cell asserted the gap: the same compiled rules
+// denied the full canonicalised line on the box and ALLOWED the command
+// path here, because the gate matched only the argument-free path.
+// #16067 builds the matched command from the topic plus its
+// canonicalised request arguments (authz_command_args_16067.go), so an
+// argument-scoped deny now fires on this surface exactly as it does on
+// the box, and this cell asserts the agreement instead.
 //
-// The SAME compiled rules object denies the full canonicalized line (what
-// pkg/cli's cut-3 gate matches, via this same Evaluate call) and ALLOWS the
-// command path (what this surface can produce), because the remote CLI parses
-// the line client-side and the argument never crosses the wire.
-//
-// RED on change: make the tables carry arguments, or make this gate deny an
-// argument-bearing request, and this cell must be rewritten deliberately rather
-// than the asymmetry quietly moving.
+// RED on change: revert the gate to matching only rpcCanonicalCommand's
+// argument-free string and every denied row below goes green-lit again.
 func TestArgumentLevelDenyIsOnBoxOnly7172(t *testing.T) {
 	const pattern = "show route table secret-vrf"
 	cfg := gateCfg7172(t, pattern, true)
@@ -96,13 +93,18 @@ func TestArgumentLevelDenyIsOnBoxOnly7172(t *testing.T) {
 		t.Fatal("precondition: the on-box surface must DENY the full line, or this cell " +
 			"is comparing two allows and proves nothing")
 	}
-	// THIS surface matches the path, which the pattern does not match.
+	// THIS surface now reconstructs that same line from the packed topic
+	// and denies it too (#16067).
 	if err := gateDecide7172(t, cfg, "ShowText",
-		&pb.ShowTextRequest{Topic: "route-table:secret-vrf"}); err != nil {
-		t.Errorf("the gRPC surface matches the command PATH (`show route table`), which this "+
-			"argument-level pattern does not match — so it is enforced on the box and NOT "+
-			"here. That is #7172's named, accepted gap; if this now denies, the gap was "+
-			"closed and this cell must be rewritten, not deleted. got: %v", err)
+		&pb.ShowTextRequest{Topic: "route-table:secret-vrf"}); err == nil {
+		t.Error("the gRPC surface must DENY ShowText{route-table:secret-vrf} under an " +
+			"argument-scoped deny; #16067 closed the on-box-only gap. If this now " +
+			"allows, the argument reconstruction was reverted.")
+	}
+	// And it stays narrow: a different table is not named by the pattern.
+	if err := gateDecide7172(t, cfg, "ShowText",
+		&pb.ShowTextRequest{Topic: "route-table:public-vrf"}); err != nil {
+		t.Errorf("a narrow argument deny must stay narrow; route-table:public-vrf was denied: %v", err)
 	}
 }
 
@@ -116,13 +118,35 @@ func TestArgumentLevelDenyIsOnBoxOnly7172(t *testing.T) {
 // Juniper's guidance tells operators to use for anything complex. A guard that
 // covers one spelling of the same intent reads as coverage and is not.
 //
+// #16067: `show route table secret-vrf` is no longer the example of an
+// unenforceable spelling — the gate now reconstructs it, so the
+// advisory correctly stops naming it (TestArgumentLevelDenyIsOnBoxOnly7172
+// above). The patterns below name no command in any spelling this
+// surface can produce, argument-bearing or not.
+//
 // FIRES IF: the check is rewritten to inspect the pattern instead of matching
 // it against the command set.
 func TestUnenforceableDenyDetectionIsSpellingIndependent7172(t *testing.T) {
 	for _, pattern := range []string{
-		"show route table secret-vrf",  // unanchored
-		"^show route table secret-vrf", // anchored — LiteralPrefix returns "" here
-		".*secret-vrf",                 // no literal prefix at all
+		"show route table secret-vrf",  // unanchored — NOW enforceable (#16067)
+		"^show route table secret-vrf", // anchored — NOW enforceable (#16067)
+		".*secret-vrf",                 // no literal prefix at all — NOW enforceable
+		"qqq-not-a-command",            // a lone word can be a ping target — enforceable
+		".*qqq-nope",                   // likewise fires on `ping qqq-nope`
+	} {
+		rules, ok, err := config.OperationalLoginRegexesFor(gateCfg7172(t, pattern, true), "ops")
+		if err != nil || !ok {
+			t.Fatalf("%q: precondition failed (ok=%v err=%v)", pattern, ok, err)
+		}
+		if got := unenforceableDenyPatterns(rules); len(got) != 0 {
+			t.Errorf("%q is enforceable on this surface since #16067 (the gate reconstructs "+
+				"argument-bearing commands such as `show route table secret-vrf` and "+
+				"`ping <target>`), so it must NOT be reported as on-box-only; got %v", pattern, got)
+		}
+	}
+	for _, pattern := range []string{
+		"^qqq-not-a-command$", // anchored to a string no command spells
+		"^show qqq-zzz$",      // a command path that does not exist
 	} {
 		rules, ok, err := config.OperationalLoginRegexesFor(gateCfg7172(t, pattern, true), "ops")
 		if err != nil || !ok {

@@ -83,18 +83,25 @@ func RegisterCommandSurface(name string, commands func() []string) {
 // alternative answers it for the rest. UnenforceableDenyAlternatives
 // (login_deny_alternatives_9340.go) asks it per alternative, on exactly the
 // surfaces this function does not report.
+//
+// #16067: the set is extended with the surface's argument SAMPLES and
+// literal candidates derived from the pattern, because the remote
+// gates now reconstruct argument-bearing commands; an argument-scoped
+// pattern that fires there must not be reported on-box-only. See
+// login_command_surface_args_16067.go.
 func UnenforceableDenySurfaces(rules CompiledLoginRegexes) []string {
-	if _, ok := rules.DenySource(); !ok {
+	src, ok := rules.DenySource()
+	if !ok {
 		return nil
 	}
 	var out []string
 	for _, s := range registeredCommandSurfaces {
-		cmds := s.commands()
-		if len(cmds) == 0 {
+		cmds, samples := s.candidateSet()
+		if len(s.commands()) == 0 {
 			continue
 		}
 		matched := false
-		for _, cmd := range cmds {
+		for _, cmd := range append(cmds, patternCandidateCommands(src, cmds, samples)...) {
 			if denyPatternDecides(rules, cmd) {
 				matched = true
 				break
@@ -116,17 +123,18 @@ func UnenforceableDenySurfaces(rules CompiledLoginRegexes) []string {
 // cannot permit it either. Before this, both unenforceable-pattern advisories
 // returned early unless the class had a DENY source, so this case was silent.
 func UnenforceableAllowSurfaces(rules CompiledLoginRegexes) []string {
-	if _, ok := rules.AllowSource(); !ok {
+	src, ok := rules.AllowSource()
+	if !ok {
 		return nil
 	}
 	var out []string
 	for _, s := range registeredCommandSurfaces {
-		cmds := s.commands()
-		if len(cmds) == 0 {
+		cmds, samples := s.candidateSet()
+		if len(s.commands()) == 0 {
 			continue
 		}
 		permitted := false
-		for _, cmd := range cmds {
+		for _, cmd := range append(cmds, patternCandidateCommands(src, cmds, samples)...) {
 			if d := rules.Evaluate(cmd); d.Allowed && d.DecidedBy == LoginRegexAllow {
 				permitted = true
 				break

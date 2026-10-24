@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/psaab/xpf/pkg/authz"
@@ -214,8 +215,11 @@ var restNoCommandExempt14146 = map[string]bool{
 }
 
 // #11678: the commit-time deny advisory also needs the command set that the
-// REST route table can evaluate. REST's mappings are argument-free, so an
-// argument-scoped deny may be valid on the box yet never fire on this surface.
+// REST route table can evaluate. The route mappings are argument-free
+// charges; since #16067 the gate reconstructs the argument-bearing command
+// per request (authz_command_args_16067.go) and this surface registers
+// argument samples for the advisory, so an argument-scoped deny that fires
+// here is no longer reported on-box-only.
 const restSurfaceName9952 = "the REST surface"
 
 var allRESTCanonicalCommands9952 = sync.OnceValue(func() []string {
@@ -246,6 +250,28 @@ var allRESTCanonicalCommands9952 = sync.OnceValue(func() []string {
 func init() {
 	config.RegisterCommandSurface(restSurfaceName9952, allRESTCanonicalCommands9952)
 }
+
+// restShowTextPrefixRules9952 is the prefix-keyed topic → command rule
+// set for REST show-text, derived from the same registry the gRPC gate
+// reads so a packed topic prices identically on both surfaces (#16067).
+var restShowTextPrefixRules9952 = func() []struct {
+	prefix  string
+	command string
+} {
+	var out []struct {
+		prefix  string
+		command string
+	}
+	for k, cmd := range cmdtree.ShowTextTopicCommands() {
+		if strings.HasSuffix(k, ":") {
+			out = append(out, struct {
+				prefix  string
+				command string
+			}{k, cmd})
+		}
+	}
+	return out
+}()
 
 // restSystemInfoCommands14146 maps the REST system/info `type` selector to the
 // canonical command gRPC charges for the same GetSystemInfo type
@@ -301,8 +327,25 @@ func restRequestCommand9952(route string, r *http.Request, actionVerb string) (s
 	switch route {
 	case "GET /api/v1/show-text":
 		topic := r.URL.Query().Get("topic")
-		cmd, ok := cmdtree.ShowTextTopicCommands()[topic]
-		return cmd, ok
+		if cmd, ok := cmdtree.ShowTextTopicCommands()[topic]; ok {
+			return cmd, true
+		}
+		// #16067: packed-parameter topics resolve through the same
+		// longest-prefix rule the gRPC gate prices them by
+		// (showTextTopicCanonicalCommand); a plain map index made every
+		// packed topic unresolvable and denied it for restricted
+		// classes even when no deny named it.
+		best, cmd := "", ""
+		for _, rule := range restShowTextPrefixRules9952 {
+			if strings.HasPrefix(topic, rule.prefix) && len(rule.prefix) > len(best) {
+				best = rule.prefix
+				cmd = rule.command
+			}
+		}
+		if best != "" {
+			return cmd, true
+		}
+		return "", false
 	case "POST /api/v1/system/action":
 		cmd, ok := authz.SystemActionVerbCommand[actionVerb]
 		return cmd, ok
@@ -382,7 +425,7 @@ func (s *Server) authorizeRESTCommand(r *http.Request, cfg *config.Config, p aut
 				"request has no canonical command to evaluate, so the restriction cannot be "+
 				"applied to it", class)
 		}
-		return evaluateCommand9952(rules, class, cmd)
+		return evaluateRESTForms9952(rules, class, cmd, route, r, cfg)
 	}
 
 	cmd, mapped := restRouteCommand[route]
@@ -390,7 +433,24 @@ func (s *Server) authorizeRESTCommand(r *http.Request, cfg *config.Config, p aut
 		return fmt.Errorf("permission denied: login class %q restricts commands and this route "+
 			"has no canonical command to evaluate, so the restriction cannot be applied to it", class)
 	}
-	return evaluateCommand9952(rules, class, cmd)
+	return evaluateRESTForms9952(rules, class, cmd, route, r, cfg)
+}
+
+// evaluateRESTForms9952 judges the argument-bearing forms of a REST
+// command (#16067) with EvaluateForms unanimity, so an argument-scoped
+// deny fires here as it does on the box while the argument-free charge
+// remains a form for anchored path rules.
+func evaluateRESTForms9952(rules config.CompiledLoginRegexes, class, cmd, route string, r *http.Request, cfg *config.Config) error {
+	forms, named := restArgumentForms(cfg, route, r, cmd)
+	if !named {
+		return fmt.Errorf("permission denied: login class %q restricts commands and this "+
+			"request's arguments cannot be named as a command, so the restriction cannot be "+
+			"applied to it", class)
+	}
+	if decision := rules.EvaluateForms(forms[0], forms[0], forms[1:]...); !decision.Allowed {
+		return fmt.Errorf("permission denied: login class %q denies %q (%s)", class, cmd, decision.Reason)
+	}
+	return nil
 }
 
 // restActionVerb9952 reads the SystemAction verb out of the already-buffered

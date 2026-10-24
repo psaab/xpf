@@ -21,22 +21,17 @@ import (
 // narrow within that, so a caller reaching here without the coarse gate has
 // skipped a check rather than replaced one.
 //
-// ── WHAT THIS SURFACE CAN AND CANNOT MATCH ───────────────────────────────
-//
-// READ THIS BEFORE ASSUMING THE TWO SURFACES AGREE. They do not, the
-// difference is structural rather than a bug to be fixed later, and a populated
-// table is NOT evidence that they match the same thing.
+// ── WHAT THIS SURFACE MATCHES ───────────────────────────────────────────
 //
 // pkg/cli's cut-3 gate matches a deny regex against the FULL canonicalized
-// line, including argument VALUES and the output pipe. This gate matches the
-// canonical command PATH, because that is all the server has: the remote `cli`
-// parses the line client-side and sends a typed RPC, so `ping 10.0.0.1` arrives
-// as Ping{Host:"10.0.0.1"} and `show route table secret-vrf` as
-// ShowText{Topic:"route-table:secret-vrf"}. The tables hold argument-free paths
-// (`ping`, `show route table`) for the reason authz_command_table_topics.go
-// gives: the alternative is 129 bespoke inverse decoders, each a new place the
-// remote string can disagree with the on-box one, and a decoder that disagreed
-// with the client's encoder would itself be the bypass.
+// line, including argument VALUES and the output pipe. Since #16067 this
+// gate matches that same full line, reconstructed server-side from the
+// decoded request (authz_command_args_16067.go): `ping 10.0.0.1` arrives
+// as Ping{Target:"10.0.0.1"} and `show route table secret-vrf` as
+// ShowText{Topic:"route-table:secret-vrf"}, and both rebuild the line the
+// operator typed. The argument-free path stays an additional form, so an
+// anchored path deny (`^show route table$`) still fires with arguments
+// present, exactly as the on-box gate's prefix form does (#9022).
 //
 // So, precisely:
 //
@@ -44,15 +39,17 @@ import (
 //     reboot"`, the shape Junos' own examples use — is enforced IDENTICALLY on
 //     both surfaces, because matching is partial rather than anchored.
 //   - a deny written against ARGUMENT text — `deny-commands "show route table
-//     secret-vrf"` — is enforced on the box and NOT here. Under #7172's
-//     allow-over-deny model that is an under-deny, i.e. fail-OPEN for that
-//     class of pattern.
+//     secret-vrf"`, `^ping 10\.99\.`, `^show log .*` — is likewise enforced
+//     on both surfaces (#16067). A request whose arguments cannot be
+//     reconstructed (a malformed packed topic, an unnameable selector)
+//     denies for a restricted class rather than being judged on its
+//     argument-free path alone.
 //
-// The second bullet is not left for an operator to discover. unenforceableDenyPatterns
-// below MEASURES, per pattern, whether it can ever fire on this surface, and
-// the answer is logged for the class. That check is exact and
-// spelling-independent — it asks whether the pattern matches any command this
-// surface can produce — which matters because the obvious implementation does
+// unenforceableDenyPatterns below MEASURES, per pattern, whether it can
+// ever fire on this surface, and the answer is logged for the class. That
+// check is exact and spelling-independent — it asks whether the pattern
+// matches any command this surface can produce, argument-free or
+// argument-bearing — which matters because the obvious implementation does
 // not have that property: regexp.LiteralPrefix returns "" for `^show route
 // table secret-vrf`, so a literal-prefix heuristic would silently cover the
 // unanchored spelling and miss the ANCHORED one, which is the spelling
@@ -135,7 +132,20 @@ func (s *Server) authorizeRPCCommand(cfg *config.Config, class, fullMethod strin
 			"login class %q restricts commands and this RPC has no canonical command to "+
 				"evaluate, so the restriction cannot be applied to it", class)
 	}
-	if decision := rules.Evaluate(cmd); !decision.Allowed {
+	// #16067: judge the argument-bearing forms too, so an
+	// argument-scoped pattern (`^show route table secret-vrf`,
+	// `^ping 10\.99\.`) fires here as it does on the box. The forms
+	// are alternative spellings of the one command; EvaluateForms
+	// unanimity lets a deny that wins on any spelling veto it, while
+	// the argument-free charge stays a form so anchored path rules
+	// keep firing. An unreconstructable argument string denies.
+	forms, named := rpcArgumentForms(cfg, fullMethod, req, cmd)
+	if !named {
+		return fmt.Errorf(
+			"login class %q restricts commands and this RPC's arguments cannot be "+
+				"named as a command, so the restriction cannot be applied to it", class)
+	}
+	if decision := rules.EvaluateForms(forms[0], forms[0], forms[1:]...); !decision.Allowed {
 		return fmt.Errorf("login class %q denies %q (%s)", class, cmd, decision.Reason)
 	}
 	return nil
@@ -587,9 +597,8 @@ func (s *Server) warnUnenforceableDenyPatternsOnce(class string, rules config.Co
 			"and restricts the on-box CLI only (#7172)",
 			"class", class,
 			"pattern", strings.Join(pats, ", "),
-			"reason", "it matches no command this listener can produce: the remote CLI parses "+
-				"the line client-side, so this gate matches the canonical command PATH and "+
-				"never argument values")
+			"reason", "it matches no command this listener can produce, in its "+
+				"argument-free or reconstructed argument-bearing spellings (#16067)")
 		return
 	}
 	if alts := unenforceableDenyAlternatives(rules); len(alts) > 0 {
@@ -598,8 +607,7 @@ func (s *Server) warnUnenforceableDenyPatternsOnce(class string, rules config.Co
 			"class", class,
 			"pattern", denySrc,
 			"alternatives", strings.Join(alts, ", "),
-			"reason", "those alternatives match no command this listener can produce: the remote CLI "+
-				"parses the line client-side, so this gate matches the canonical command PATH and "+
-				"never argument values")
+			"reason", "those alternatives match no command this listener can produce, in its "+
+				"argument-free or reconstructed argument-bearing spellings (#16067)")
 	}
 }
