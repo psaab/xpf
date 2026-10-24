@@ -28,6 +28,7 @@ func RedirectWipePathsForTesting(root string) (restore func()) {
 	oldBPF, oldND, oldVer := wipeBPFPinDir, wipeNetworkdDir, wipeVersionsDir
 	oldLock := wipeAcquireUpgradeLock
 	oldProv, oldSudoers, oldHome, oldPasswd, oldUserdel := wipeProvisionedUsersDir, wipeSudoersDir, wipeHomeBase, wipePasswdPath, wipeUserdel
+	oldBusy, oldKill := wipeAccountHasLiveProcesses, wipeKillAccountProcesses
 	oldRootSSH, oldLockRoot := wipeRootSSHDir, wipeLockRootPassword
 	oldVarLog, oldSecurityDir, oldFlowDir, oldRsyslogDir := wipeVarLogDir, wipeSecurityLogDir, wipeFlowTraceDir, wipeRsyslogConfDir
 	oldPendingPath := configstore.FactoryResetPendingPath
@@ -104,6 +105,8 @@ func RedirectWipePathsForTesting(root string) (restore func()) {
 	wipePasswdPath = filepath.Join(login, "passwd")
 	wipeCLIHistoryHomesOverride = []string{filepath.Join(root, "home-op")}
 	wipeUserdel = func(string) ([]byte, error) { return nil, nil }
+	wipeAccountHasLiveProcesses = func(int) (bool, error) { return false, nil }
+	wipeKillAccountProcesses = func(int) ([]byte, error) { return nil, nil }
 	wipeRootSSHDir = filepath.Join(login, "root-ssh")
 	wipeLockRootPassword = func() ([]byte, error) { return nil, nil }
 	wipeVarLogDir = filepath.Join(root, "var", "log")
@@ -128,6 +131,7 @@ func RedirectWipePathsForTesting(root string) (restore func()) {
 		wipeBPFPinDir, wipeNetworkdDir, wipeVersionsDir = oldBPF, oldND, oldVer
 		wipeAcquireUpgradeLock = oldLock
 		wipeProvisionedUsersDir, wipeSudoersDir, wipeHomeBase, wipePasswdPath, wipeUserdel = oldProv, oldSudoers, oldHome, oldPasswd, oldUserdel
+		wipeAccountHasLiveProcesses, wipeKillAccountProcesses = oldBusy, oldKill
 		wipeRootSSHDir, wipeLockRootPassword = oldRootSSH, oldLockRoot
 		wipeVarLogDir, wipeSecurityLogDir, wipeFlowTraceDir, wipeRsyslogConfDir = oldVarLog, oldSecurityDir, oldFlowDir, oldRsyslogDir
 		configstore.FactoryResetPendingPath = oldPendingPath

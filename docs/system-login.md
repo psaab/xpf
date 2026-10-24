@@ -1409,6 +1409,20 @@ too (`zeroizeLoginAccounts`, same error-surfacing discipline):
   if `userdel` fails; on a `userdel` failure the marker is **retained** so a
   retried `zeroize` re-attempts, and the failure is surfaced (the device is not
   reported safe to re-tenant while a live account remains).
+- **Busy accounts refuse the wipe before anything is erased (#16443).**
+  `userdel` refuses an account with live processes (exit 8), and the
+  operator's own SSH/CLI session runs under a provisioned account — so
+  before the pending marker is written and before any destructive leg,
+  `zeroize` checks every account it would `userdel` for live processes
+  (`pgrep -u <uid>`). A busy account **refuses the whole zeroize, naming
+  the account**, with every surface intact: end that account's sessions
+  (or run the zeroize from the console / a root session) and retry. An
+  account that becomes busy after that preflight is terminated scoped
+  to its marker UID (`pkill -KILL -u <uid>`) and re-verified idle inside
+  the login leg before `userdel` fires; one still busy is never
+  `userdel`'d and keeps its markers for a retry. A probe failure is
+  treated as unknown, never as idle. Root is never in scope (revoked in
+  place, below).
 - **All three marker roots are erased (#5841).** The account loop above
   enumerates only `provisioned-users`, but the #5841 split records
   password/key ownership in two **sibling** roots
