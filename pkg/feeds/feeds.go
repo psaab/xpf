@@ -138,7 +138,10 @@ type Manager struct {
 // have no Prefixes; they restore the count epoch only and the content epoch
 // re-bootstraps on the first install (the pre-existing bootstrap audit
 // path). Records written before #15075 carry Prefixes without EpochHash;
-// they restore the epoch only when the set's digest equals Hash.
+// they restore any canonical set within the cap (#14994/#16427): their
+// Prefixes field was the epoch set, and Hash names the possibly-rotated
+// high-water set, so requiring digest == Hash would drop exactly the
+// rotated epochs the epoch exists to anchor.
 type ShrinkHighWater struct {
 	Name     string   `json:"name"`
 	Count    int      `json:"count"`
@@ -148,8 +151,9 @@ type ShrinkHighWater struct {
 	// content set is validated against its own digest on restore, not
 	// against Hash (the count high-water hash, which an ordinary
 	// non-rebasing rotation advances past the epoch set). Empty on records
-	// written before #15075; those restore Prefixes only when the set's
-	// digest equals Hash (the pre-rotation shape, where epoch == high-water).
+	// written before #15075; those restore any canonical Prefixes set
+	// within the cap (#14994/#16427), since no epoch digest was persisted
+	// to validate against and Hash may already have rotated past the epoch.
 	EpochHash string `json:"epoch_hash,omitempty"`
 }
 
@@ -323,32 +327,33 @@ func (m *Manager) RestoreShrinkHighWater(records []ShrinkHighWater) {
 		copy(hash[:], raw)
 		hist := feedShrinkHistory{highWaterCount: record.Count, highWaterHash: hash}
 		// #14395 epoch content, #15075 restore key: accept only a canonical
-		// set, bounded by the feed entry cap, whose digest matches the
-		// persisted EpochHash — the epoch set's OWN digest, persisted
+		// set, bounded by the feed entry cap. When EpochHash is present,
+		// the set must match it — the epoch set's OWN digest, persisted
 		// separately from Hash. Hash is the count high-water hash (the
 		// largest installed set), which an ordinary non-rebasing rotation
 		// advances past the epoch set, so keying the epoch restore on Hash
 		// silently dropped every such epoch and left churn unanchored
 		// across the restart. Records written before #15075 have no
-		// EpochHash: accept their set only when its digest equals Hash
-		// (the shape where epoch == high-water, before any rotation
-		// diverged them). A corrupt (non-canonical) set or a set whose
-		// digest matches neither is dropped fail-closed: the count epoch
-		// still restores and the content epoch then re-bootstraps under
-		// the #14994 remembered-baseline guard.
+		// EpochHash: keep the #14994 acceptance — any canonical set within
+		// the cap (#16427). Their Prefixes field was the epoch set and no
+		// epoch digest was persisted to validate against (there is no MAC
+		// either way), so requiring digest == Hash adds no integrity and
+		// drops exactly the rotated epochs. A corrupt (non-canonical) set,
+		// or a set whose digest mismatches a present EpochHash, is dropped
+		// fail-closed: the count epoch still restores and the content epoch
+		// then re-bootstraps under the #14994 remembered-baseline guard.
 		if len(record.Prefixes) > 0 && len(record.Prefixes) <= maxFeedPrefixes {
 			canon := canonicalize(append([]string(nil), record.Prefixes...))
 			if len(canon) == len(record.Prefixes) {
 				digest := hashPrefixes(canon)
-				accept := false
+				accept := true
 				if record.EpochHash != "" {
+					accept = false
 					if raw, err := hex.DecodeString(record.EpochHash); err == nil && len(raw) == 32 {
 						var want [32]byte
 						copy(want[:], raw)
 						accept = digest == want
 					}
-				} else {
-					accept = digest == hash
 				}
 				if accept {
 					hist.epochPrefixes = canon

@@ -67,17 +67,20 @@ the epoch set's own digest (`epoch_hash`, #15075) in
 `/var/lib/xpf/feed-shrink-history.json`. A cold boot restores that epoch before
 starting producers, so its first fetch is guarded against it (above), and the
 restored epoch set anchors subsequent content-churn refusals. On restore the
-epoch set is validated against its persisted `epoch_hash`, never against the
-count high-water hash: an ordinary non-rebasing rotation advances the
-high-water hash past the epoch set, so keying the epoch restore on the
-high-water hash dropped every such epoch across the restart and left churn
-unanchored (the first post-restart fetch then rebased it unchecked). A set
-whose digest matches neither its `epoch_hash` nor (for records written before
-`epoch_hash` existed, where epoch == high-water) the count hash is dropped
-fail-closed; the count epoch still restores. Records written before the epoch
-set was persisted restore the count epoch only; the content epoch then
-re-bootstraps on the first install, still guarded by the restored count
-high-water.
+epoch set is validated against its persisted `epoch_hash` when one is present,
+never against the count high-water hash: an ordinary non-rebasing rotation
+advances the high-water hash past the epoch set, so keying the epoch restore
+on the high-water hash dropped every such epoch across the restart and left
+churn unanchored (the first post-restart fetch then rebased it unchecked).
+Records written before `epoch_hash` existed carry no epoch digest to validate
+against, so any canonical set within the cap restores as the epoch (#14994,
+#16427) — their `prefixes` field was the epoch set, and requiring its digest
+to equal the possibly-rotated count hash would drop exactly the rotated
+epochs. A set whose digest mismatches a present `epoch_hash` (or a
+non-canonical set) is dropped fail-closed; the count epoch still restores.
+Records written before the epoch set was persisted restore the count epoch
+only; the content epoch then re-bootstraps on the first install, still guarded
+by the restored count high-water.
 Factory reset erases this file and any crash-leaked `.<base>.tmp-*` snapshots
 after fencing and draining the daemon's in-flight persistence callback, so a
 re-tenanted device does not inherit a prior tenant's same-named feed baseline.
@@ -201,12 +204,14 @@ compared with the remembered baseline and refused when they trip it, instead
 of installing with only an audit warning; the restored epoch set is accepted
 with its own digest even when a later rotation advanced the count high-water
 hash past it. The #15075 (A50-01) persistence key is guarded the same way: the
-epoch set's digest is persisted separately as `epoch_hash` and the restore
-validates the set against it, so a restart after an ordinary non-rebasing
-install keeps the full epoch (a restart bootstrapping a disjoint set against
-the restored epoch is refused pending the exact-candidate acknowledgement,
-never rebased unchecked). The daemon persists that per-feed count, hash,
-epoch set, and epoch hash across process restarts. Keep the source feed's own
+epoch set's digest is persisted separately as `epoch_hash` and, when present,
+the restore validates the set against it, so a restart after an ordinary
+non-rebasing install keeps the full epoch (a restart bootstrapping a disjoint
+set against the restored epoch is refused pending the exact-candidate
+acknowledgement, never rebased unchecked). Pre-`epoch_hash` records restore
+any canonical epoch set within the cap (#16427), so a legacy epoch whose
+high-water had already rotated still anchors the first post-upgrade fetch.
+The daemon persists that per-feed count, hash, epoch set, and epoch hash across process restarts. Keep the source feed's own
 integrity/monitoring controls in place.
 
 ## Day-2 reconcile (#5036)
