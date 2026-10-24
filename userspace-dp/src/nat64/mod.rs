@@ -222,7 +222,7 @@ use std::sync::atomic::AtomicU32;
 // pre-split file byte-for-byte after un-applying them):
 //   state.rs:    NAT64_PORT_LOW, NAT64_PORT_HIGH, parse_pool_v4,
 //                nat64_rule_identity, build_deterministic_v6,
-//                prev_prefix_is_deterministic,
+//                (prev_prefix_is_deterministic removed by #16481),
 //                Nat64State::embedded_v4_is_non_global (associated fn)
 //                private -> pub(super)
 //   reserve.rs:  release_nat64_allocation_with_mode

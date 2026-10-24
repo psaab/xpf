@@ -681,6 +681,16 @@ pub(crate) struct ReseedOutcome {
     /// with the retained-address population above would make an unavoidable
     /// drop look like the policy surprise, and hide the real number inside it.
     pub(crate) dropped_persistent_on_removed: usize,
+    /// #16481: deterministic leases whose tuple still satisfies the NEW
+    /// deterministic geometry and whose port bit was re-reserved in the
+    /// fresh allocator with the NEW `DeterministicPortedIdentity`. Only
+    /// populated by `reseed_retained_deterministic_v6_from`.
+    pub(crate) reseeded_deterministic: usize,
+    /// #16481: deterministic leases considered for the carry whose tuple
+    /// does NOT satisfy the NEW geometry (block moved, address removed,
+    /// mode/geometry changed). Their sessions are left for session-hit
+    /// revalidation to tear down; counted so the drop is not silent.
+    pub(crate) skipped_deterministic_invalid: usize,
 }
 
 impl ReseedOutcome {
@@ -732,8 +742,16 @@ impl ReseedOutcome {
             // that is the whole point of being forced to name them.
             dropped_persistent_on_retained: _,
             dropped_persistent_on_removed: _,
+            // #16481: carried deterministic leases are the expected case
+            // (like `reseeded`); invalid ones are lost state the operator
+            // should see, like the other skipped populations.
+            reseeded_deterministic: _,
+            skipped_deterministic_invalid,
         } = *self;
-        skipped_out_of_range > 0 || skipped_address_only > 0 || refused > 0
+        skipped_out_of_range > 0
+            || skipped_address_only > 0
+            || refused > 0
+            || skipped_deterministic_invalid > 0
     }
 }
 
@@ -5523,6 +5541,174 @@ impl PortAllocator {
     ///
     /// Runs at config-apply only. It does not touch `claim()` and adds no
     /// per-packet work.
+    /// #16481: carry DETERMINISTIC (NAPT64 mode-2) live ownership across a
+    /// pool-length change into a FRESH allocator.
+    ///
+    /// `reseed_retained_from` deliberately excludes deterministic leases
+    /// (their BIB identity is not reconstructible from a flow record
+    /// alone), and #15178 skipped the reseed entirely for deterministic
+    /// prefixes on the premise that revalidation tears every old session
+    /// down. That premise fails when the pool only grows/shrinks: a
+    /// retained subscriber's (pool index, block) does not move, so
+    /// `deterministic_v6_tuple_matches` still validates its tuple under
+    /// the NEW params, revalidation keeps the session, and the fresh
+    /// allocator re-mints its lowest block port — the port the surviving
+    /// session still holds.
+    ///
+    /// This carry is the deterministic twin: for each live flow in `prev`
+    /// whose translated address is retained (`index_map`) and whose tuple
+    /// still satisfies `deterministic_v6_tuple_matches` under the NEW
+    /// `new_params`/`new_pool_v4`, re-reserve the port bit in `self` and
+    /// join/rebuild its BIB lease with the NEW identity
+    /// `DeterministicPortedIdentity::V6(new_params)`. Flows whose tuple
+    /// no longer validates (block moved, address removed, geometry
+    /// changed) are NOT carried — revalidation tears those sessions down
+    /// (#15178) — and are counted in `skipped_deterministic_invalid` /
+    /// `dropped_persistent_on_*` so the drop is not silent.
+    ///
+    /// Unlike the generic carry, sibling flows sharing one BIB key join
+    /// ONE lease here (each flow still reserves its own `live_by_flow`
+    /// record; `reserve_flow_maybe_persistent_with_identity` joins the
+    /// lease on the second sibling instead of refusing on the bit).
+    /// Idle BIB leases (no live flow) are not carried: they hold no
+    /// session, and a later same-socket flow re-derives the identical
+    /// tuple deterministically from the new geometry.
+    ///
+    /// Runs at config-apply only; no per-packet work.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn reseed_retained_deterministic_v6_from(
+        &self,
+        prev: &PortAllocator,
+        index_map: &FxHashMap<usize, usize>,
+        new_pool_v4: &[Ipv4Addr],
+        new_params: DeterministicV6,
+        now_ns: u64,
+    ) -> ReseedOutcome {
+        let mut out = ReseedOutcome::default();
+        if index_map.is_empty() {
+            return out;
+        }
+        self.carry_persistent_nat_clear_fences_from(prev, now_ns);
+        // Snapshot prev live flows + leases, then release prev's lock
+        // before touching this allocator's (never hold both).
+        let (carried, prev_leases) = {
+            let prev_live = prev.lock_live();
+            let carried: Vec<_> = prev.shared.flows.entries();
+            let prev_leases = prev_live.persistent_by_source.clone();
+            (carried, prev_leases)
+        };
+        let mut lease_counted: std::collections::HashSet<PersistentSourceKey> =
+            std::collections::HashSet::new();
+        for (flow, alloc) in carried {
+            if alloc.address_only || !alloc.deterministic {
+                continue;
+            }
+            let Some(bib_key) = alloc.persistent_key else {
+                continue;
+            };
+            // Only count each BIB lease's validity once; sibling flows
+            // sharing the key are carried flow-by-flow below.
+            let first_for_lease = lease_counted.insert(bib_key);
+            let IpAddr::V6(src_v6) = flow.src_ip else {
+                if first_for_lease {
+                    out.skipped_deterministic_invalid += 1;
+                    if index_map.contains_key(&alloc.addr_index) {
+                        out.dropped_persistent_on_retained += 1;
+                    } else {
+                        out.dropped_persistent_on_removed += 1;
+                    }
+                }
+                continue;
+            };
+            let IpAddr::V4(translated_v4) = alloc.translated.ip else {
+                if first_for_lease {
+                    out.skipped_deterministic_invalid += 1;
+                    if index_map.contains_key(&alloc.addr_index) {
+                        out.dropped_persistent_on_retained += 1;
+                    } else {
+                        out.dropped_persistent_on_removed += 1;
+                    }
+                }
+                continue;
+            };
+            let Some(&new_index) = index_map.get(&alloc.addr_index) else {
+                if first_for_lease {
+                    out.skipped_deterministic_invalid += 1;
+                    out.dropped_persistent_on_removed += 1;
+                }
+                continue;
+            };
+            if !self.deterministic_v6_tuple_matches(
+                new_params,
+                src_v6,
+                new_pool_v4,
+                new_index,
+                translated_v4,
+                alloc.translated.port,
+            ) {
+                if first_for_lease {
+                    out.skipped_deterministic_invalid += 1;
+                    out.dropped_persistent_on_retained += 1;
+                }
+                continue;
+            }
+            // Preserve the lease timeout when the old lease is visible;
+            // fall back to the deterministic BIB timeout (mirrors the
+            // local mint in allocate_deterministic_v6_at).
+            let timeout_ns = prev_leases
+                .get(&bib_key)
+                .map(|lease| lease.timeout_ns)
+                .unwrap_or(DETERMINISTIC_NAT64_BIB_TIMEOUT_NS);
+            let mut previous_snapshot = None;
+            let mut reserved = false;
+            if alloc.holders == 0 {
+                reserved = self.reserve_flow_maybe_persistent_with_identity(
+                    flow,
+                    alloc.translated,
+                    new_index,
+                    true,
+                    Some(super::idle_lease_sync_8121::DeterministicPortedIdentity::V6(new_params)),
+                    now_ns,
+                    NatHolder::Untracked,
+                    Some((bib_key, timeout_ns)),
+                    false,
+                    &mut previous_snapshot,
+                );
+            } else {
+                for worker in 0..MAX_NAT_HOLDER_WORKERS {
+                    if alloc.holders & (1u128 << worker) == 0 {
+                        continue;
+                    }
+                    reserved |= self.reserve_flow_maybe_persistent_with_identity(
+                        flow,
+                        alloc.translated,
+                        new_index,
+                        true,
+                        Some(
+                            super::idle_lease_sync_8121::DeterministicPortedIdentity::V6(
+                                new_params,
+                            ),
+                        ),
+                        now_ns,
+                        NatHolder::Worker(worker),
+                        Some((bib_key, timeout_ns)),
+                        false,
+                        &mut previous_snapshot,
+                    );
+                }
+            }
+            if reserved {
+                out.reseeded += 1;
+                if first_for_lease {
+                    out.reseeded_deterministic += 1;
+                }
+            } else {
+                out.refused += 1;
+            }
+        }
+        out
+    }
+
     pub(crate) fn reseed_retained_from(
         &self,
         prev: &PortAllocator,
