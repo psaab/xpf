@@ -104,8 +104,8 @@ func TestRoutingRuleWindowsStrictGate_5854(t *testing.T) {
 	})
 
 	t.Run("rib-group at limit passes", func(t *testing.T) {
-		if err := validateRoutingRuleWindowsStrict(mkLeakingInstance(maxRibGroupLeakRules, "inet")); err != nil {
-			t.Fatalf("%d leaked prefixes must pass, got %v", maxRibGroupLeakRules, err)
+		if err := validateRoutingRuleWindowsStrict(mkLeakingInstance(MaxRibGroupLeakRules, "inet")); err != nil {
+			t.Fatalf("%d leaked prefixes must pass, got %v", MaxRibGroupLeakRules, err)
 		}
 	})
 
@@ -160,7 +160,7 @@ func nextTableOverLimitSets() []string {
 // whose interface-routes rib-group imports the main table and whose member
 // unit carries 1001 connected prefixes (one over the 1000-rule admission cap).
 func ribGroupOverLimitSets() []string {
-	return ribGroupPrefixSets(maxRibGroupLeakRules+1, "inet.0")
+	return ribGroupPrefixSets(MaxRibGroupLeakRules+1, "inet.0")
 }
 
 func ribGroupPrefixSets(prefixCount int, importRib string) []string {

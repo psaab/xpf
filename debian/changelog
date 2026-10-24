@@ -14,6 +14,12 @@ xpf (0.0.0) unstable; urgency=medium
     another dynamic protocol previously rendered a second, unscoped
     `router bgp` stanza joining the global AS. Normal VRF instances
     and the legacy empty-VRF/no-table shape are unaffected.
+  * Routing: the rib-name matcher and rib-group leak cap are now defined
+    once in pkg/config (`RibInstanceFromName`, `MaxRibGroupLeakRules`,
+    #16203). pkg/routing imports both instead of keeping verbatim copies,
+    so the commit-time gate and the runtime applier cannot disagree on
+    what resolves or fits. The unverified third resolver in
+    pkg/routing/routes.go is unchanged.
 
   * Dataplane: the three string protocol carriers (filter, policy
     application, DNAT) now have per-carrier validation cells proving

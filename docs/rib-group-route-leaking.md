@@ -67,7 +67,7 @@ an in-place upgrade is converging.
 - Source: `pkg/routing/rules.go` — `ribGroupManager.Apply` +
   `ribGroupLeaksIntoMain`; shared base `ribGroupLeakRulePriority = 30000`,
   priority range size `config.RouteLeakRulePriorityWindow = 1000`, and
-  independent admission cap `maxRibGroupLeakRules = 1000`. See also
+  independent admission cap `config.MaxRibGroupLeakRules = 1000`. See also
   [`pkg/routing/README.md`](../pkg/routing/README.md#ip-rule-priorities).
 - Connected-prefix derivation: `config.RibGroupConnectedPrefixes`
   (`pkg/config/compiler_routing.go`), which walks each instance's member
@@ -286,7 +286,7 @@ The applier assigns next-table and interface-routes rib-group leaks
 prefix-derived priorities in the shared `[30000, 31000)` range, while
 independent admission caps limit installed rules: 100 next-table entries
 (`pkg/routing/rules.go`, one per default-instance ingress interface) and
-`maxRibGroupLeakRules` (1000 connected-prefix rules). These caps are not
+`config.MaxRibGroupLeakRules` (1000 connected-prefix rules). These caps are not
 priority slots or separate per-kind priority bands. A config that exceeds a
 cap used to commit green with only a **warning**
 (`validateRoutingRuleWindowWarnings`); the reconciler then silently stopped at
@@ -348,9 +348,11 @@ The shared priority base and range size are defined in `pkg/config`
 managers, strict config validation, and userspace FIB use the same formula.
 `NextTableRuleWindow` is the separate 100-entry next-table admission cap
 (including per-ingress expansion); the rib-group admission cap remains 1000.
-`maxRibGroupLeakRules` is duplicated in `pkg/config` validation and
-`pkg/routing/rules.go` because the packages cannot import each other, and must
-stay in sync. Neither cap determines prefix priorities.
+The rib-group admission cap `config.MaxRibGroupLeakRules` and the exact-suffix
+rib-name matcher `config.RibInstanceFromName` are defined once in `pkg/config`
+(`rib_instance.go`); `pkg/routing` imports them, so the commit-time gate and the
+runtime applier cannot disagree (#16203). Neither cap determines prefix
+priorities.
 
 ### Ingress scope on the next-table leak rules (#9420)
 

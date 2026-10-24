@@ -414,7 +414,7 @@ func validateUnhandledRibWarnings(cfg *Config) []string {
 			case r.Name == "inet.0" || r.Name == "inet6.0":
 				supportedTable = true
 			default:
-				targetInstance, supportedTable = ribInstanceFromName(r.Name)
+				targetInstance, supportedTable = RibInstanceFromName(r.Name)
 			}
 			if supportedTable && targetInstance != instanceName {
 				targetScope := "the main routing table"

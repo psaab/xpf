@@ -5,28 +5,20 @@ import (
 	"strings"
 )
 
-// maxNextTableRules and maxRibGroupLeakRules mirror the admission caps in
-// pkg/routing/rules.go. Both rule kinds use the same destination-leak priority
-// range, whose priorities are assigned by descending prefix length; these
-// limits instead bound how many rules each manager installs:
+// maxNextTableRules is the local alias for the shared next-table admission
+// cap. Both rule kinds use the same destination-leak priority range, whose
+// priorities are assigned by descending prefix length; these limits instead
+// bound how many rules each manager installs:
 //
 //   - next-table: NextTableRuleWindow entries. Each leak costs one rule per
 //     default-instance ingress interface (#9420), so the eligible route count
 //     is floor(window/N), with N from the shared resolver (#9810).
-//   - rib-group:  maxRibGroupLeakRules connected-prefix rules per family.
+//   - rib-group:  MaxRibGroupLeakRules connected-prefix rules per family
+//     (defined in rib_instance.go, shared with pkg/routing — #16203).
 //
 // The shared [NextTableRulePriorityBase, +RouteLeakRulePriorityWindow) range
 // is wide enough for IPv6 prefixes and is independent of either admission cap.
-//
-// pkg/config CANNOT import pkg/routing — pkg/routing already imports pkg/config,
-// so the reverse edge would be an import cycle. maxRibGroupLeakRules is
-// therefore duplicated here and MUST stay in lockstep with pkg/routing/rules.go:
-// if that cap changes there, change it here too or the commit-time gate and
-// runtime applier disagree on what fits.
-const (
-	maxNextTableRules    = NextTableRuleWindow
-	maxRibGroupLeakRules = 1000
-)
+const maxNextTableRules = NextTableRuleWindow
 
 // nextTableRouteCount counts the static routes (global inet + inet6) that carry
 // a next-table VRF-leak target. Since #9420 the applier
@@ -81,7 +73,7 @@ func ribGroupImportsMain(groupName string, groups map[string]*RibGroup, tableIDs
 		if ribName == mainRIBName {
 			return true
 		}
-		instance, ok := ribInstanceFromName(ribName)
+		instance, ok := RibInstanceFromName(ribName)
 		if !ok {
 			continue
 		}
@@ -160,9 +152,8 @@ func ribGroupLeakPrefixCount(cfg *Config) (inet, inet6 int) {
 // inert. Next-table is reported before rib-group; an overflowing IPv4 family
 // is reported before IPv6 so the first-reported cap error is deterministic.
 //
-// The cap sizes come from maxNextTableRules / maxRibGroupLeakRules, which are
-// kept in lockstep with pkg/routing/rules.go (pkg/config cannot import
-// pkg/routing — see the const block above).
+// The cap sizes come from the shared maxNextTableRules / MaxRibGroupLeakRules
+// constants in this package (pkg/routing imports them — #16203).
 func validateRoutingRuleWindowsStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -208,13 +199,13 @@ func validateRoutingRuleWindowsStrict(cfg *Config) error {
 		{name: "inet", count: inetCount},
 		{name: "inet6", count: inet6Count},
 	} {
-		if family.count > maxRibGroupLeakRules {
+		if family.count > MaxRibGroupLeakRules {
 			return fmt.Errorf(
 				"routing-options: interface-routes rib-group would leak %d connected prefixes "+
 					"in family %s as kernel ip rules, but only %d per family can be programmed; "+
 					"prefixes beyond the limit would be dropped at apply time. Reduce the %s "+
 					"rib-group-leaked interface prefixes to at most %d.",
-				family.count, family.name, maxRibGroupLeakRules, family.name, maxRibGroupLeakRules)
+				family.count, family.name, MaxRibGroupLeakRules, family.name, MaxRibGroupLeakRules)
 		}
 	}
 	return nil
