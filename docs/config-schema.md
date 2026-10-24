@@ -14967,7 +14967,8 @@ the value sits in a single typed slot:
     `rst-invalidate-session` drives immediate RST teardown (opt-in;
     default off per the HA stray-RST rationale in tx_cancel.rs), and
     sequence tracking validates closing seq by default — RST requires
-    exact `seq == rcv_nxt` (#16040), FIN validates against the receive
+    an exact match against the endpoint's tracked receive-next
+    (ACK-derived, #16040), FIN validates against the receive
     window (`rst-sequence-check`/`maximum-window` configure it,
     `no-sequence-check` disables validation). New leaves
     `rst-sequence-check`, `maximum-window <bytes>`, and

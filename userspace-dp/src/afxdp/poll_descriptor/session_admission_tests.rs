@@ -535,11 +535,17 @@ mod tcp_syn_check_tests {
         table.note_tcp_seq(&key, 1000, 0, 4096, 0, TCP_SYN, 0);
         // data seq 1001 len 100 -> nxt 1101
         table.note_tcp_seq(&key, 1001, 0, 4096, 100, TCP_ACK, 0);
-        assert_eq!(table.tcp_closing_seq_verdict(&key, 1050, TCP_RST), SeqVerdict::Invalid, "in-window RST seq must be invalid (#16040)");
-        assert_eq!(table.tcp_closing_seq_verdict(&key, 1101, TCP_RST), SeqVerdict::Valid, "exact RST seq must be valid (#16040)");
+        // #16040 fold: no companion ACK observed yet, so the RST
+        // verdict is Unknown (admitted), not exact-vs-send-end.
+        assert_eq!(table.tcp_closing_seq_verdict(&key, 1101, TCP_RST), SeqVerdict::Unknown, "no endpoint ACK observed yet (#16040 fold)");
+        // Single-entry table: no companion ACK is observable here, so
+        // RST stays Unknown; paired-table endpoint-exact coverage
+        // lives in session::tcp_seq_15753_tests
+        // (rst_requires_exact_seq_16040,
+        // rst_exact_uses_endpoint_rcv_nxt_not_send_end_16040).
+        assert_eq!(table.tcp_closing_seq_verdict(&key, 1050, TCP_RST), SeqVerdict::Unknown, "RST stays Unknown until endpoint ACK observed");
         assert_eq!(table.tcp_closing_seq_verdict(&key, 1050, TCP_FIN), SeqVerdict::Valid, "in-window FIN seq retained valid");
-        assert_eq!(table.tcp_closing_seq_verdict(&key, 0, TCP_RST), SeqVerdict::Invalid, "blind seq=0 RST must be invalid");
-        assert_eq!(table.tcp_closing_seq_verdict(&key, 99999, TCP_RST), SeqVerdict::Invalid);
+        assert_eq!(table.tcp_closing_seq_verdict(&key, 99999, TCP_FIN), SeqVerdict::Invalid);
     }
 
     #[test]
