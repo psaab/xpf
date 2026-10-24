@@ -297,6 +297,15 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 					"output": {desc: "Output filter", args: 1, scalar: true, blockValue: true, placeholder: "<filter-name>", children: nil},
 				}},
 				"dynamic-dns": interfaceDynamicDNSSchema(),
+				// #16476: Junos shorthand `family inet6 { dhcpv6; }` — a
+				// bare flag the compiler consumes (compiler_interfaces.go
+				// sets unit.DHCPv6) and the daemon turns into an AFInet6
+				// client spec. It carries no options (those live under
+				// dhcpv6-client); declaring it here makes the #10707
+				// open-world walker, completion and `?` help agree with
+				// the compiler instead of advising operators to remove
+				// a working DHCPv6 client.
+				"dhcpv6": {desc: "DHCPv6 client (shorthand; use dhcpv6-client for client options)", children: nil},
 				"dhcpv6-client": {desc: "DHCPv6 client", children: map[string]*schemaNode{
 					// #15693 (V37-03): typed closed sets. Pre-fix these were
 					// untyped args:1 leaves, so `client-type bogus` committed

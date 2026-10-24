@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -93,6 +94,52 @@ func TestBuildDHCPClientSpecsDefaults(t *testing.T) {
 	}
 	if specs[0].V6 != nil {
 		t.Errorf("V6 opts = %+v, want nil for bare dhcpv6", specs[0].V6)
+	}
+}
+
+// #16476: the consumed axis of the three-arm probe at the daemon
+// consumer. Compiling `family inet6 { dhcpv6; }` must yield exactly one
+// AFInet6 spec with no #10707 advisory; `dhcpv6-client` the same;
+// `dhcpv6x` no spec and the advisory retained.
+func TestDHCPv6ShorthandConsumedNotAdvised16476(t *testing.T) {
+	cases := []struct {
+		leaf        string
+		wantSpecs   int
+		wantAdvised bool
+	}{
+		{"dhcpv6", 1, false},
+		{"dhcpv6-client", 1, false},
+		{"dhcpv6x", 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.leaf, func(t *testing.T) {
+			tree, perrs := config.NewParser("interfaces { ge-0/0/0 { unit 0 { family inet6 { " + tc.leaf + "; } } } }").Parse()
+			if len(perrs) > 0 {
+				t.Fatalf("parse: %v", perrs)
+			}
+			cfg, err := config.CompileConfig(tree)
+			if err != nil {
+				t.Fatalf("CompileConfig: %v", err)
+			}
+			var v6 int
+			for _, s := range buildDHCPClientSpecs(cfg) {
+				if s.Family == dhcp.AFInet6 {
+					v6++
+				}
+			}
+			if v6 != tc.wantSpecs {
+				t.Fatalf("leaf=%s AFInet6 specs=%d, want %d (all=%+v)", tc.leaf, v6, tc.wantSpecs, buildDHCPClientSpecs(cfg))
+			}
+			advised := false
+			for _, w := range cfg.Warnings {
+				if strings.Contains(w, "#10707") && strings.Contains(w, `"`+tc.leaf+`"`) {
+					advised = true
+				}
+			}
+			if advised != tc.wantAdvised {
+				t.Fatalf("leaf=%s advisory=%v, want %v; warnings=%v", tc.leaf, advised, tc.wantAdvised, cfg.Warnings)
+			}
+		})
 	}
 }
 
