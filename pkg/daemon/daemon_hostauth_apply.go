@@ -1009,9 +1009,9 @@ func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
 	// enforce — a PermitRootLogin revocation must land even when the
 	// PAM leg cannot. The failure is logged so the missing lockout (or
 	// the tuned block) stays operator-visible, faillockInstalled stays
-	// false (nothing was changed, so the #14973 rollback strip is a
+	// false (nothing was changed, so the rollback restore is a
 	// no-op), and the apply continues to the drop-in.
-	faillockInstalled, err := applySSHPAMFaillockChanged()
+	faillockInstalled, faillockPrior, err := applySSHPAMFaillockChanged()
 	if err != nil {
 		if errors.Is(err, errSSHPAMFaillockUnsupported) {
 			slog.Warn("SSH cross-connection password lockout not applied; host PAM stack is not the supported Debian baseline",
@@ -1021,20 +1021,25 @@ func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
 				"err", err)
 		}
 	}
-	// #14973: if this apply changed common-auth (installed or upgraded the
-	// managed faillock rules) and the apply as a whole fails, strip those
-	// rules again so a failed apply leaves no lockout policy behind — the
-	// same posture as revertDropIn for the sshd drop-in. Keyed on the final
-	// named result so every failure site is covered without per-site
-	// wiring: direct returns (content-build, legacy/remove errors) set
-	// retErr before returning, and the validate/reload paths join into
-	// retErr via fail(). A nested recovery apply (live-config repair) is a
-	// separate invocation with its own faillockInstalled, so it never
-	// strips on behalf of an outer failure, and stripping is a no-op when
-	// this apply changed nothing (pre-existing admin faillock survives).
+	// #14973, #16421: if this apply changed common-auth (freshly
+	// installed or upgraded the managed faillock rules) and the apply
+	// as a whole fails, restore the exact pre-apply common-auth bytes
+	// — the same posture as revertDropIn for the sshd drop-in. A fresh
+	// install restores the stock stack; an upgrade of the pre-#14973
+	// legacy rules restores those legacy rules, so a failed first
+	// post-upgrade apply never leaves the host with less lockout than
+	// before the apply. Keyed on the final named result so every
+	// failure site is covered without per-site wiring: direct returns
+	// (content-build, legacy/remove errors) set retErr before
+	// returning, and the validate/reload paths join into retErr via
+	// fail(). A nested recovery apply (live-config repair) is a
+	// separate invocation with its own faillock capture, so it never
+	// restores on behalf of an outer failure, and restoring is a
+	// no-op when this apply changed nothing (pre-existing admin
+	// faillock survives).
 	defer func() {
 		if retErr != nil {
-			if serr := stripSSHPAMFaillockOnRollback(faillockInstalled); serr != nil {
+			if serr := restoreSSHPAMFaillockOnRollback(faillockInstalled, faillockPrior); serr != nil {
 				retErr = errors.Join(retErr, serr)
 			}
 		}
