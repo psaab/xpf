@@ -51,10 +51,13 @@ import (
 //     anyway.
 //   - Local key + valid token: accept, and record that the peer holds the key.
 //   - Local key + present-but-invalid token: reject (Unauthenticated).
-//   - Local key + no token + enforcement NOT armed: accept read-only fabric
-//     RPCs only during a five-minute rollout grace starting at the FIRST
-//     keying of the current accepted-key set; after expiry, reject them.
-//     #15262: that first-keyed instant is persisted in node state
+//   - Local key + no token + enforcement NOT armed: accept only the
+//     non-sensitive read-only fabric RPCs (GetStatus, GetSessionSummary,
+//     GetZonePairSummary, MonitorInterface, fabric-safe ShowText) during a
+//     five-minute rollout grace starting at the FIRST keying of the current
+//     accepted-key set; after expiry, reject them. GetSessions is excluded
+//     even during grace (#16033 — full session table). #15262: that
+//     first-keyed instant is persisted in node state
 //     (cluster/fabric_auth_grace.go) and restored on restart under an
 //     unchanged key set, so an xpfd restart does NOT re-open the grace;
 //     only a changed key set (a genuinely new key) re-anchors it.
@@ -67,13 +70,14 @@ import (
 // off the fabric token would be LAZY: nothing periodically dials the fabric
 // listener, so after a keyed node restarts there is a window — until the peer
 // next proxies an on-demand RPC (operator show/clear/failover) — where the
-// fabric would grace-accept tokenless read-only calls from any on-segment host.
+// fabric would grace-accept tokenless non-sensitive read-only calls from any
+// on-segment host (GetSessions is never grace-eligible, #16033).
 // Heartbeats flow continuously at ~200ms, so arming off the
 // heartbeat closes that window to ~one interval. The rolling-upgrade grace is
-// preserved for read-only RPCs: a not-yet-keyed peer is not signing heartbeats
-// either, so neither source arms during the transition. Independently, an
-// unkeyed listener remains GetStatus-only and never opens that grace for other
-// RPCs.
+// preserved for the grace-eligible RPCs: a not-yet-keyed peer is not signing
+// heartbeats either, so neither source arms during the transition.
+// Independently, an unkeyed listener remains GetStatus-only and never opens
+// that grace for other RPCs.
 //
 // Residual 1 (same-args replay): the token is HMAC(PSK, domain ||
 // method-length || method || request-digest || window), where window =
@@ -319,10 +323,19 @@ func verifyFabricStreamArgsToken(keys [][]byte, token, method string, req interf
 // fabric RPCs. The default is deliberately false so a newly admitted method
 // cannot inherit tokenless grace accidentally. All accepted SystemAction
 // verbs and ClearSessions mutate cluster state and are excluded.
+//
+// #16033: GetSessions is deliberately NOT in this set. It returns the full
+// session table (complete 5-tuples, NAT bindings and counters), unlike the
+// summaries and MonitorInterface which expose only counts/statistics. In a
+// peer-down / replacement / rollout window the grace lasts up to five
+// minutes per anchor event, so admitting GetSessions would expose the full
+// table to any on-segment host with no token at all. A not-yet-keyed peer
+// that needs session data must wait until it can present a valid token;
+// GetStatus/GetSessionSummary/GetZonePairSummary/MonitorInterface and the
+// fabric-safe ShowText topic remain grace-eligible for rollout liveness.
 func fabricAuthGraceAllowed(method string, req interface{}) bool {
 	switch method {
 	case pb.BpfrxService_GetStatus_FullMethodName,
-		pb.BpfrxService_GetSessions_FullMethodName,
 		pb.BpfrxService_GetSessionSummary_FullMethodName,
 		pb.BpfrxService_GetZonePairSummary_FullMethodName,
 		pb.BpfrxService_MonitorInterface_FullMethodName:

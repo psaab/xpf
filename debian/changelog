@@ -11,6 +11,17 @@ xpf (0.0.0) unstable; urgency=medium
     live-only "non-v6 means IPv4" fallback. Golden short / legacy-144 /
     extended / IPv6 frames pin live-vs-decoded parity. Fanout is
     unchanged (parser-only unification).
+  * Fabric: GetSessions is no longer admitted tokenless during the
+    rollout grace (#16033). A keyed node whose peer has never
+    authenticated previously grace-admitted GetSessions for up to five
+    minutes per anchor event, exposing the full session table (complete
+    5-tuples, NAT bindings and counters) to any on-segment host with no
+    token in peer-down, replacement and rollout windows. GetSessions now
+    requires a valid fabric token at all times; GetStatus,
+    GetSessionSummary, GetZonePairSummary, MonitorInterface and the
+    fabric-safe ShowText topic (counts/statistics only) remain
+    grace-eligible, and a keyed peer's valid-token GetSessions proxy is
+    unchanged.
 
 xpf (0.0.0) unstable; urgency=medium
 

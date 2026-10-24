@@ -18,10 +18,10 @@ import (
 const fabricAuth11676RolloutGrace = 5 * time.Minute
 
 func fabricAuth11676ReadOnlyCall(s *Server) (*unaryCallProbe, error) {
-	method := pb.BpfrxService_GetSessions_FullMethodName
+	method := pb.BpfrxService_GetSessionSummary_FullMethodName
 	info := &grpc.UnaryServerInfo{FullMethod: method}
 	probe := &unaryCallProbe{}
-	_, err := s.fabricAuthUnaryInterceptor(context.Background(), &pb.GetSessionsRequest{}, info,
+	_, err := s.fabricAuthUnaryInterceptor(context.Background(), &pb.GetSessionSummaryRequest{}, info,
 		func(ctx context.Context, req interface{}) (interface{}, error) {
 			return s.fabricAllowlistUnaryInterceptor(ctx, req, info, probe.handler)
 		})
