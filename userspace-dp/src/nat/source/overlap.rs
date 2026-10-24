@@ -851,6 +851,15 @@ pub(crate) fn static_owns_wire_identity(
     }
 }
 
+/// #16034 fold: build the per-build memoized interface static view from
+/// the installed identities in one pass (see `InterfaceStaticView`), so
+/// the interface mint path never rescans the whole static table.
+pub(crate) fn build_interface_static_view(
+    statics: &crate::nat::StaticExternalIdentities,
+) -> crate::nat::InterfaceStaticView {
+    statics.interface_view()
+}
+
 /// #16015: does an installed NPTv6 external prefix own `ip` (at any
 /// port — NPTv6 preserves the source port statelessly, so prefix
 /// membership IS ownership)? Zone-aware when `zone` is Some (the
@@ -931,14 +940,23 @@ pub(crate) fn wire_static_overlap_peers(
         return;
     }
     let shared = Arc::new(statics);
+    // #16034 fold (1): resolve the interface view ONCE for this build.
+    // The view is an address index over the whole table (host externals
+    // by address, blocks as prefixes), so any runtime-resolved egress is
+    // answered without rescanning the table at mint time.
+    let iface_view = build_interface_static_view(&shared);
+    let iface_shared = if iface_view.is_empty() {
+        None
+    } else {
+        Some(Arc::new(iface_view))
+    };
     for rule in rules.iter_mut() {
         if rule.interface_mode {
             // #16034: an interface-only config has no pool rule to carry
             // the view, and the interface mint resolves its egress address
-            // only at runtime — so the interface rule itself must hold it
-            // unconditionally (mirrors the #16015 NPTv6 wiring). The mint
-            // check is port-exact via `owns`.
-            rule.static_externals = Some(Arc::clone(&shared));
+            // only at runtime — so the interface rule itself must hold the
+            // memoized view. Sibling rules carry the same Arc.
+            rule.iface_static_externals = iface_shared.clone();
             continue;
         }
         if !rule.pool_mode {
@@ -952,6 +970,9 @@ pub(crate) fn wire_static_overlap_peers(
             .any(|ip| shared.covers_address(ip));
         if touched {
             rule.static_externals = Some(Arc::clone(&shared));
+            // Pool rules can be siblings of an interface rule at mint
+            // time; give touched pool rules the same memoized view.
+            rule.iface_static_externals = iface_shared.clone();
         }
     }
     for prefix in prefixes.iter_mut() {

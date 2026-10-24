@@ -15,9 +15,9 @@
 // Controls pin that statics on other addresses, and port-mapped statics
 // at other ports, still mint (PAT arm PATs around a mapped port).
 
+use super::ForwardingState;
 use super::forwarding_build::build_forwarding_state;
 use super::test_fixtures::nat_snapshot;
-use super::ForwardingState;
 use crate::nat::{NatHolder, SourceNatFailureReason, SourceNatLookup};
 use crate::protocol::{ConfigSnapshot, SourceNATRuleSnapshot, StaticNATRuleSnapshot};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -106,8 +106,8 @@ fn iface_mint_on_whole_address_static_external_is_refused_16034() {
         "fixture: interface-only rule"
     );
     assert!(
-        state.source_nat_rules[0].static_externals.is_some(),
-        "fixture: interface-only rule must carry the static view itself"
+        state.source_nat_rules[0].iface_static_externals.is_some(),
+        "fixture: interface-only rule must carry the memoized static view itself"
     );
     let mint = iface_mint(&state, EGRESS, 6, SRC_PORT);
     assert_eq!(
@@ -119,6 +119,38 @@ fn iface_mint_on_whole_address_static_external_is_refused_16034() {
         snat_reason(&mint),
         Some(SourceNatFailureReason::InterfaceIdentityExhausted),
         "the refusal must carry the interface-exhausted reason"
+    );
+}
+
+#[test]
+fn iface_whole_address_static_refuses_before_allocator_entry_16034() {
+    // Fold (2): the whole-address pre-check must refuse BEFORE the
+    // interface allocator is entered — no allocator may even be retained
+    // for the egress, let alone walk its port range.
+    let mut snapshot = iface_snapshot();
+    snapshot.static_nat_rules = vec![static_rule(EGRESS, 0, 0)];
+    let state = build_forwarding_state(&snapshot);
+    let egress_ip: IpAddr = EGRESS.parse().expect("egress");
+    assert!(
+        state
+            .iface_nat_allocators
+            .allocator_if_present(egress_ip)
+            .is_none(),
+        "fixture: no allocator retained before the mint"
+    );
+    let mint = iface_mint(&state, EGRESS, 6, SRC_PORT);
+    assert_eq!(
+        snat_reason(&mint),
+        Some(SourceNatFailureReason::InterfaceIdentityExhausted)
+    );
+    // The pre-check runs BEFORE `allocator_for`, so it must not even
+    // retain an allocator for the refused egress.
+    assert!(
+        state
+            .iface_nat_allocators
+            .allocator_if_present(egress_ip)
+            .is_none(),
+        "fail-fast refusal must not retain an interface allocator (no allocator entry/walk)"
     );
 }
 
@@ -237,7 +269,7 @@ fn iface_mint_outside_static_external_still_mints_16034() {
 fn iface_mint_no_static_still_mints_16034() {
     let snapshot = iface_snapshot();
     let state = build_forwarding_state(&snapshot);
-    assert!(state.source_nat_rules[0].static_externals.is_none());
+    assert!(state.source_nat_rules[0].iface_static_externals.is_none());
     let mint = iface_mint(&state, EGRESS, 6, SRC_PORT);
     assert_eq!(
         snat_identity(&mint),
@@ -389,5 +421,32 @@ fn ha_genuine_static_import_still_succeeds_16034() {
     assert!(
         ok,
         "control: genuine static import must keep no-reservation success"
+    );
+}
+
+#[test]
+fn iface_static_view_is_memoized_per_build_16034() {
+    // Fold (1): the view is resolved once at wiring time — it carries the
+    // covering ports for the egress candidate only, keyed by address, so
+    // the mint path never rescans the whole static table. A table with an
+    // unrelated static must not widen the view.
+    let mut snapshot = iface_snapshot();
+    snapshot.static_nat_rules = vec![static_rule(EGRESS, 0, 0), static_rule(OTHER, 20000, 8443)];
+    let state = build_forwarding_state(&snapshot);
+    let view = state.source_nat_rules[0]
+        .iface_static_externals
+        .as_deref()
+        .expect("memoized view");
+    assert_eq!(
+        view.entry_count(),
+        2,
+        "view records the build-time table size"
+    );
+    assert!(view.owns_all_ports(EGRESS.parse().expect("egress")));
+    assert!(view.owns(EGRESS.parse().expect("egress"), 1));
+    assert!(view.covers_address(EGRESS.parse().expect("egress")));
+    assert!(
+        !view.covers_address("198.51.100.9".parse::<IpAddr>().expect("unrelated")),
+        "uncovered addresses stay out of the memoized view"
     );
 }

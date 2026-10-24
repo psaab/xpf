@@ -437,11 +437,11 @@ fn reserve_synced_source_nat_allocation_with_holder(
         && domains.source_nat_static == Some(false)
         && rules.iter().any(|r| r.interface_mode)
         && rules.iter().any(|r| {
-            static_owns_wire_identity(
-                r.static_externals.as_deref(),
-                rewrite_src,
-                nat.rewrite_src_port.unwrap_or(key.src_port),
-            )
+            r.iface_static_externals
+                .as_deref()
+                .is_some_and(|v| {
+                    v.owns(rewrite_src, nat.rewrite_src_port.unwrap_or(key.src_port))
+                })
         })
     {
         return false;
@@ -751,11 +751,9 @@ fn reserve_synced_interface_identity(
     // The port check is exact (port-mapped statics own only their
     // fixed port, whole-address statics every port).
     if rules.iter().any(|r| {
-        static_owns_wire_identity(
-            r.static_externals.as_deref(),
-            rewrite_src,
-            translated_port,
-        )
+        r.iface_static_externals
+            .as_deref()
+            .is_some_and(|v| v.owns(rewrite_src, translated_port))
     }) {
         crate::nat::INTERFACE_SNAT_SYNC_IDENTITY_CONFLICT_DROPS.fetch_add(1, Ordering::Relaxed);
         return false;
