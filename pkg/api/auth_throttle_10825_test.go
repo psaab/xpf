@@ -632,16 +632,15 @@ func TestRESTAuthGlobalBasicAccountBudgetAcrossSources11492(t *testing.T) {
 		}
 	}
 
+	// #16068: a global-only lockout must not refuse the correct password
+	// from a new source; a bounded probe verifies and clears-then-admits.
 	r := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
 	r.RemoteAddr = "203.0.113.9:43000"
 	r.SetBasicAuth("operator", "correct-password")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
-	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("correct password from a new source returned %d, want 429 while the claimed Basic account is globally locked", w.Code)
-	}
-	if w.Header().Get("Retry-After") == "" {
-		t.Fatal("global account lockout omitted Retry-After")
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("correct password from a new source returned %d, want 204 (global lockout cleared by successful probe)", w.Code)
 	}
 
 	r = httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
@@ -651,6 +650,82 @@ func TestRESTAuthGlobalBasicAccountBudgetAcrossSources11492(t *testing.T) {
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("global lockout for operator blocked another Basic account: status %d, want 204", w.Code)
+	}
+}
+
+// TestRESTAuthGlobalBasicProbeWrongPasswordKeepsLockout16068 pins the probe
+// failure arm: a wrong-password probe from a new source pays the verify and
+// is refused, but never extends the global lockout deadline.
+func TestRESTAuthGlobalBasicProbeWrongPasswordKeepsLockout16068(t *testing.T) {
+	tracker := newAuthFailureTracker(nil)
+	source := "203.0.113.9"
+	account := authThrottleBasicAccountPrefix + "operator"
+	for range authThrottleGlobalBasicFailures {
+		tracker.recordFailure(source, account)
+	}
+	before, waitBefore := tracker.locked(source, account)
+	if !before {
+		t.Fatal("global bucket not locked after spray")
+	}
+	reservation, retry := tracker.reserve("198.51.100.77", account, false)
+	if retry != 0 {
+		t.Fatalf("wrong-password probe refused with retry-after %v, want admission as probe", retry)
+	}
+	if reservation.probeGlobal == nil {
+		t.Fatal("admitted request during global lockout not marked as probe")
+	}
+	tracker.complete(&reservation, false, "", false)
+	after, waitAfter := tracker.locked(source, account)
+	if !after {
+		t.Fatal("wrong-password probe cleared the global lockout")
+	}
+	if waitAfter > waitBefore {
+		t.Fatalf("wrong-password probe extended lockout: before %v after %v", waitBefore, waitAfter)
+	}
+}
+
+// TestRESTAuthGlobalBasicProbeCapAndPairLockout16068 pins the two refusal
+// arms: only one concurrent probe runs per locked username, and a request
+// whose own pair bucket is also locked is refused before verification even
+// with the correct password (proved with a checker that must never run).
+func TestRESTAuthGlobalBasicProbeCapAndPairLockout16068(t *testing.T) {
+	tracker := newAuthFailureTracker(nil)
+	victim := "198.51.100.1"
+	account := authThrottleBasicAccountPrefix + "operator"
+	// Lock the global bucket via spray from distinct sources, then lock one
+	// pair bucket directly so that source's correct password cannot probe.
+	for i := range authThrottleGlobalBasicFailures {
+		tracker.recordFailure(fmt.Sprintf("198.51.100.%d", i+10), account)
+	}
+	for range authThrottleAccountFailures {
+		tracker.recordFailure(victim, account)
+	}
+	ran := 0
+	check := func(AuthConfig, bool, *http.Request) (bool, string, bool) {
+		ran++
+		return true, account, false
+	}
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
+	r.RemoteAddr = victim + ":43000"
+	r.SetBasicAuth("operator", "correct-password")
+	if _, retry := throttledAuthCheckWithCheck(tracker, AuthConfig{}, true, r, check); retry == 0 {
+		t.Fatal("pair-locked source admitted as probe, want refusal")
+	}
+	if ran != 0 {
+		t.Fatalf("verifier ran %d times for pair-locked probe, want 0", ran)
+	}
+
+	// Concurrency cap: hold one probe in flight, the next is refused.
+	first, retry := tracker.reserve("203.0.113.1", account, false)
+	if retry != 0 || first.probeGlobal == nil {
+		t.Fatalf("first probe = (retry %v, probe %v), want admitted probe", retry, first.probeGlobal != nil)
+	}
+	if _, retry := tracker.reserve("203.0.113.2", account, false); retry != time.Second {
+		t.Fatalf("second concurrent probe retry = %v, want %v", retry, time.Second)
+	}
+	tracker.complete(&first, true, account, false)
+	if locked, _ := tracker.locked("203.0.113.1", account); locked {
+		t.Fatal("successful probe did not clear the global bucket")
 	}
 }
 
