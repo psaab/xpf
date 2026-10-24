@@ -9,6 +9,16 @@ xpf (0.0.0) unstable; urgency=medium
     whole-file, 103 inline-region) — with detector rows for each new
     shape. The session/tests.rs acceptance mutant now reds; the
     baseline stays green.
+  * Userspace-dp: replace the dead #812 "Rc not Arc" cell with a real
+    !Send/!Sync proof (#16447). The old cell coerced three WorkerUmem
+    methods to fn pointers whose signatures never mention Rc and made
+    no assertion, so an Rc->Arc migration of WorkerUmem.inner compiled
+    and passed while its comment claimed a runtime two-clone assertion
+    that did not exist. The replacement pins WorkerUmem as neither
+    Send nor Sync with module-level ambiguous-trait compile-time
+    proofs (making WorkerUmem Send or Sync fails to compile the test
+    binary) and actually asserts clone allocation-sharing via the
+    hermetic new_for_test constructor. Test only; WorkerUmem stays Rc.
   * Userspace-dp: anchor the #15244 post-create-bind tripwire per arm
     (#16437). The fill-prime and non-zerocopy arms of try_open_bind must
     each carry `return Err(post_create_bind_error(...))` inside their

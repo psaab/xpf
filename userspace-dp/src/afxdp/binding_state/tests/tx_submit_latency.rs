@@ -407,46 +407,72 @@ fn tx_latency_hist_cross_thread_snapshot_skew_within_bound() {
     );
 }
 
+// #16447: compile-time proof that `WorkerUmem` is neither `Send` nor
+// `Sync`. Two blanket impls apply to a `Send` (resp. `Sync`) type and
+// only one to a non-`Send` (resp. non-`Sync`) type, so each inference
+// below resolves ONLY while `WorkerUmem` stays non-`Send`/non-`Sync`;
+// making it `Send` or `Sync` makes the call ambiguous and this test
+// binary stops compiling. A compile error is the only possible red
+// for a compile-time property (same shape as the `CounterExempt`
+// proof in `counter_test_lock.rs`; no `static_assertions` dependency
+// exists in this crate). These are module-level `const`s, so the
+// proof is checked whenever the test binary compiles, not only when
+// the cell below runs.
+const _: fn() = || {
+    trait AmbiguousIfSend<A> {
+        fn proof() {}
+    }
+    impl<T: ?Sized> AmbiguousIfSend<()> for T {}
+    impl<T: ?Sized + Send> AmbiguousIfSend<u8> for T {}
+    let _ = <WorkerUmem as AmbiguousIfSend<_>>::proof;
+};
+
+const _: fn() = || {
+    trait AmbiguousIfSync<A> {
+        fn proof() {}
+    }
+    impl<T: ?Sized> AmbiguousIfSync<()> for T {}
+    impl<T: ?Sized + Sync> AmbiguousIfSync<u8> for T {}
+    let _ = <WorkerUmem as AmbiguousIfSync<_>>::proof;
+};
+
 #[test]
-fn tx_submit_ns_sidecar_single_writer_ownership_is_rc_not_arc() {
-    // #812 plan §6.1 test #6 (per §3.3 single-writer
-    // invariant). `WorkerUmem` is `Rc<WorkerUmemInner>` at
-    // umem/mod.rs — NOT `Arc` — enforcing single-owner
-    // semantics on the sidecar's backing UMEM. A future
-    // refactor that quietly upgrades the field to `Arc` to
-    // share bindings across threads would silently break the
-    // no-atomic assumption on `tx_submit_ns: Box<[u64]>`.
+fn tx_submit_ns_sidecar_single_writer_worker_umem_is_not_send_nor_sync_16447() {
+    // #812 plan §6.1 test #6 (per §3.3 single-writer invariant),
+    // corrected by #16447. The pre-#16447 cell coerced
+    // `shares_allocation_with`, `allocation_ptr` and
+    // `as_raw_umem_ptr` to fn pointers and claimed those probes
+    // "mechanically require the Rc-shape API" and that "at runtime
+    // we assert that two `Clone`s of the same WorkerUmem share
+    // allocation". Both claims were false: none of the three
+    // signatures mentions `Rc`, so an `Rc` -> `Arc` migration of
+    // `WorkerUmem.inner` (umem/mod.rs) compiled and passed
+    // unchanged, and the body contained no assertion at all.
     //
-    // We cannot run a full `WorkerUmem::new` here because
-    // UMEM allocation requires CAP_NET_ADMIN for the XDP
-    // socket — it fails in the standard unit-test
-    // environment. Instead we pin the type identity at
-    // compile time via two complementary fn-pointer probes
-    // that mechanically require the Rc-shape API:
+    // What actually confines `WorkerUmem` to one thread today is
+    // not the `Rc` spelling: `WorkerUmemInner` holds
+    // `RefCell<Umem>` (`!Sync`), so even an `Arc<WorkerUmemInner>`
+    // would remain `!Send`/`!Sync`. The `tx_submit_ns: Box<[u64]>`
+    // sidecar likewise is a field of the TX pipeline, written only
+    // through `&mut` ownership, not through `WorkerUmem`. So this
+    // cell no longer claims to pin `Rc` vs `Arc`; it pins the
+    // load-bearing consequence — `WorkerUmem` must stay
+    // `!Send`/`!Sync` — via the module-level ambiguous-trait proofs
+    // above. A change that made `WorkerUmem` cross threads (e.g.
+    // `Arc` plus a `Mutex`/`RwLock` in place of the `RefCell`, or
+    // an `unsafe impl Send`) fails to compile this test binary.
     //
-    // 1. `shares_allocation_with`: body uses `Rc::ptr_eq`.
-    //    An Arc migration would need `Arc::ptr_eq` and the
-    //    method's source line breaks before this test even
-    //    gets a chance to run.
-    // 2. `allocation_ptr`: body uses `Rc::as_ptr`. Same
-    //    shape.
-    //
-    // And at runtime we assert that two `Clone`s of the
-    // same WorkerUmem share allocation, which exercises
-    // `Rc::ptr_eq` on a live pair. We build the pair
-    // without hitting the kernel by wrapping a direct
-    // `WorkerUmemInner` with a 1-byte MmapArea and a stub
-    // Umem — bypassing the `new` path that requires root.
-    //
-    // If the single-writer invariant ever needs re-
-    // establishment with a shared-ownership backing (Arc),
-    // the refactor will cascade through both the fn-pointer
-    // lines here AND the `tx_submit_ns: Box<[u64]>` field
-    // itself (which is sound only under single-owner
-    // access) — a loud failure, not silent drift.
-    let _: fn(&WorkerUmem, &WorkerUmem) -> bool = WorkerUmem::shares_allocation_with;
-    let _: fn(&WorkerUmem) -> *const WorkerUmemInner = WorkerUmem::allocation_ptr;
-    let _: fn(&WorkerUmem) -> *mut crate::xsk_ffi::XskUmemOpaque = WorkerUmem::as_raw_umem_ptr;
+    // Runtime half (the assertion the old comment claimed but
+    // never made): two `Clone`s of one `WorkerUmem` share the
+    // allocation, and an independently built `WorkerUmem` does
+    // not. `new_for_test` is hermetic (null libxdp handle, no
+    // kernel socket), so no CAP_NET_ADMIN is needed.
+    let umem = WorkerUmem::new_for_test(4).expect("group umem");
+    let clone = umem.clone();
+    assert!(clone.shares_allocation_with(&umem));
+    assert_eq!(clone.allocation_ptr(), umem.allocation_ptr());
+    let other = WorkerUmem::new_for_test(4).expect("private umem");
+    assert!(!other.shares_allocation_with(&umem));
 }
 
 #[test]
