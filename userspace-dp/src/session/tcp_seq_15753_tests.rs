@@ -19,6 +19,93 @@ fn in_window_rst_valid_blind_rst_invalid_15753() {
 }
 
 #[test]
+fn pptp_data_seq_verdict_in_out_unknown_16037() {
+    let forward = key_v4();
+    let mut table = SessionTable::new();
+    let t0 = 10_000_000_000u64;
+    let _rev = install_forward_reverse_pair(&mut table, &forward, t0, TCP_SYN);
+    // No seq noted yet (HA-synced import shape, tcp_seq_seen=false):
+    // Unknown, and the caller must learn nothing — even though the
+    // segment carries payload. Sequence state can only bind a
+    // segment once the stream has been tracked here.
+    assert_eq!(
+        table.tcp_data_seq_verdict(&forward, 1001, 10),
+        SeqVerdict::Unknown,
+        "synced unknown-seq must not teach"
+    );
+    assert_eq!(
+        table.tcp_data_seq_verdict(&forward, 1001, 0),
+        SeqVerdict::Unknown,
+        "no state and no payload must not teach"
+    );
+    table.note_tcp_seq(&forward, 1000, 0, 4096, 0, TCP_SYN, 0);
+    // SYN advanced rcv_nxt to 1001; receiver window 4096.
+    assert_eq!(
+        table.tcp_data_seq_verdict(&forward, 1001, 100),
+        SeqVerdict::Valid,
+        "in-window OCR segment must teach"
+    );
+    assert_eq!(
+        table.tcp_data_seq_verdict(&forward, 50_000, 100),
+        SeqVerdict::Invalid,
+        "out-of-window OCR must not teach"
+    );
+    assert_eq!(
+        table.tcp_data_seq_verdict(&forward, 1001u32.wrapping_sub(5000), 100),
+        SeqVerdict::Invalid,
+        "far-behind segment must not teach"
+    );
+    // Advance with a legitimate 100-byte segment: rcv_nxt 1101.
+    table.note_tcp_seq(&forward, 1001, 0, 4096, 100, TCP_ACK, 0);
+    assert_eq!(
+        table.tcp_data_seq_verdict(&forward, 1001, 100),
+        SeqVerdict::Valid,
+        "retransmission inside receiver window stays teachable"
+    );
+    assert_eq!(
+        table.tcp_data_seq_verdict(&forward, 1101, 32),
+        SeqVerdict::Valid,
+        "next in-window segment stays teachable"
+    );
+    // A long segment spilling past the window end is not teachable as a whole.
+    assert_eq!(
+        table.tcp_data_seq_verdict(&forward, 5000, 200),
+        SeqVerdict::Invalid
+    );
+}
+
+/// #16037 production-site guard: the poll descriptor must snapshot the
+/// teach verdict BEFORE it notes this segment, and the capture arm
+/// must consume that snapshot. A verdict taken after
+/// `note_tcp_seq_scaled` for the same segment would validate an
+/// out-of-window payload against its own mutated `rcv_nxt` — the
+/// fold defect this guards. This reads the production source because
+/// the descriptor loop needs a live UMEM/binding to drive (the same
+/// reason #6664/#13079 use source guards).
+#[test]
+fn pptp_teach_verdict_is_snapshotted_before_the_note_16037() {
+    let poll = include_str!("../afxdp/poll_descriptor/mod.rs");
+    let snapshot_at = poll
+        .find("pending_pptp_data_seq_verdict = Some(sessions.tcp_data_seq_verdict(")
+        .expect("poll must snapshot the teach verdict pre-note");
+    let note_at = poll
+        .find("sessions.note_tcp_seq_scaled(")
+        .expect("poll must note seq at the Owner site");
+    assert!(
+        snapshot_at < note_at,
+        "teach verdict must be computed before this segment is noted"
+    );
+    // The capture arm must not re-derive the verdict post-note.
+    let capture_at = poll
+        .find("capture_pptp_control_segment_at_epoch(")
+        .expect("capture site");
+    assert!(
+        !poll[capture_at.saturating_sub(800)..capture_at].contains("tcp_data_seq_verdict("),
+        "capture arm must not recompute the verdict after the note"
+    );
+}
+
+#[test]
 fn scaled_window_and_receiver_window_verdict_15947() {
     // #15947 (H29-02 arms 1-2): SYN WSOPT scale 7 + window 8192 (scaled
     // 1,048,576) under maximum-window 256K, then a legitimate FIN beyond

@@ -2478,6 +2478,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // at the authority-confirmed site. Closing verdicts stay
                 // here (read-only — they mutate nothing).
                 let mut pending_tcp_seq_note: Option<(u32, u32, u16, Option<u8>)> = None;
+                // #16037: PPTP teach verdict against PRE-NOTE sequence
+                // state. Computed here, next to the read-only closing
+                // verdict, because the deferred note at the Owner site
+                // below advances tcp_rcv_nxt with THIS segment — a
+                // verdict taken after the note would validate an
+                // out-of-window payload against its own mutated state.
+                let mut pending_pptp_data_seq_verdict: Option<crate::session::SeqVerdict> = None;
                 if meta.protocol == crate::ip_proto::PROTO_TCP {
                     if let (Some(fl), Some((seq, ack, win, scale))) = (
                         flow.as_ref(),
@@ -2494,6 +2501,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             }
                         }
                         pending_tcp_seq_note = Some((seq, ack, win, scale));
+                        if !crate::tcp_flags::is_closing(meta.tcp_flags)
+                            && crate::afxdp::poll_stages::is_pptp_control_flow(fl)
+                        {
+                            pending_pptp_data_seq_verdict = Some(sessions.tcp_data_seq_verdict(
+                                &fl.forward_key,
+                                seq,
+                                tcp_payload_len(packet_frame, meta),
+                            ));
+                        }
                     }
                 }
                 // ── End flow cache fast path ─────────────────────────
@@ -10457,7 +10473,16 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     &flow.forward_key,
                                     now_ns,
                                 );
-                            } else {
+                            } else if worker_ctx.forwarding.tcp_no_sequence_check
+                                || pending_pptp_data_seq_verdict
+                                    == Some(crate::session::SeqVerdict::Valid)
+                            {
+                                // #16037: teach only from an in-window
+                                // data segment, judged against the
+                                // PRE-NOTE snapshot taken before this
+                                // segment was noted. Invalid and Unknown
+                                // (HA-synced, no seq state) learn
+                                // nothing; the packet still forwards.
                                 crate::afxdp::poll_stages::capture_pptp_control_segment_at_epoch(
                                     packet_frame,
                                     flow,

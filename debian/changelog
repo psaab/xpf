@@ -1,5 +1,11 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * PPTP ALG: control-segment teaching now requires an in-window TCP
+    data sequence, judged against the pre-note tracked state
+    (#16037). An admitted but out-of-window Outgoing-Call-Reply no
+    longer installs attacker-chosen call IDs, and a synced session
+    with no sequence state learns nothing. `no-sequence-check`
+    opts out, as for closing segments.
   * Cluster: an open control-key rotation now ages visibly and alarms
     when forgotten (#16029). UpdateConfig stamps when the current
     additional-authentication-key window opened (keyed on the additional

@@ -6846,7 +6846,13 @@ fn run_pptp_control_reply_policy_case(policy_denied: bool) {
             "an admitted Reply is not a deny event"
         );
     }
-    let expected_learned = if policy_denied { 0 } else { 1 };
+    // #16037: policy_denied keeps 0. The admitted case also learns 0
+    // from THIS packet: it is the session's first segment (SYN|PSH on
+    // a miss), so no pre-note sequence state exists and the teach
+    // verdict is Unknown — fail-closed, the synced shape. A later
+    // in-window segment (after the handshake is noted) teaches; that
+    // leg is pinned by tcp_data_seq_verdict's in-window cells.
+    let expected_learned = 0;
     assert_eq!(
         __pptp_control_7699.pending_len(),
         expected_learned,
@@ -6865,13 +6871,10 @@ fn run_pptp_control_reply_policy_case(policy_denied: bool) {
     let pac: std::net::IpAddr = "10.0.61.102".parse().unwrap();
     let pns: std::net::IpAddr = "172.16.80.200".parse().unwrap();
     let call_handle = sessions.pptp().resolve(pns, 0x5678);
-    if policy_denied {
-        assert_eq!(sessions.pptp().resolve(pac, 0x1234), None);
-        assert_eq!(call_handle, None);
-    } else {
-        let handle = call_handle.expect("an admitted Outgoing-Call-Reply learns its call");
-        assert_eq!(sessions.pptp().resolve(pac, 0x1234), Some(handle));
-    }
+    // Both cases learn nothing from this first segment (#16037):
+    // denied by policy, or admitted but sequence-unknown.
+    assert_eq!(sessions.pptp().resolve(pac, 0x1234), None);
+    assert_eq!(call_handle, None);
 
     let mut gre = vec![0u8; 20];
     gre[0] = 0x45;
@@ -6899,20 +6902,10 @@ fn run_pptp_control_reply_policy_case(policy_denied: bool) {
         &mut sessions,
         123_000_000_000,
     );
-    if policy_denied {
-        assert!(
-            gre_flow.is_none(),
-            "GRE must remain unassociated after the denied control segment"
-        );
-    } else {
-        assert_eq!(
-            gre_flow
-                .expect("GRE after the admitted Reply must resolve")
-                .forward_key
-                .discriminator,
-            crate::session::TunnelDiscriminator::Pptp(call_handle.expect("learned call"))
-        );
-    }
+    assert!(
+        gre_flow.is_none(),
+        "GRE must remain unassociated after a segment that taught nothing"
+    );
 }
 
 /// #3021 LITERAL fail-on-revert. Drives the real
