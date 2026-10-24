@@ -217,6 +217,8 @@ scripts/miri-leg.sh
 scripts/debug-leg-census-selftest.sh
 test/incus/miri-census-selftest.sh
 scripts/close_keyword_lint_ci.sh
+scripts/proto_regen_check.sh
+scripts/proto-regen-check-selftest.sh
 scripts/git-hooks/commit-msg
 scripts/git-hooks/install.sh
 test/incus/ha-smoke-iperf-lib.sh
@@ -341,6 +343,9 @@ run_shell scripts/scratch-pinning-selftest.sh
 # synthetic clone; the docs/log leg distinguishes the never-read
 # allowlist from the all-seed fallback.
 run_bash scripts/ci_affected_go_tests_selftest.sh
+# #16195: prove the CI regen-diff leg goes red on a .proto edited
+# without regeneration. Hermetic fixture; SKIPs without pinned tools.
+run_shell scripts/proto-regen-check-selftest.sh
 # #9783: the upgrade-docs canary (make docs-check). Hermetic fixture trees via
 # DOCS_CHECK_ROOT; the row that matters is the positive control -- the phantom
 # symbol in a LIVE doc must still fail once the history archives are excluded.

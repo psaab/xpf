@@ -112,6 +112,22 @@ proto:
 		--go-grpc_out=pkg/grpcapi/xpfv1 --go-grpc_opt=paths=source_relative \
 		proto/xpf/v1/xpf.proto
 
+# #16195: hermetic generated-header check. Compares the protoc /
+# protoc-gen-go / protoc-gen-go-grpc stamps in the checked-in headers
+# against the constants in proto/README.md and the protobuf version in
+# go.mod. File reads only -- no network, no protoc, no toolchain fetch.
+.PHONY: proto-check
+proto-check:
+	python3 scripts/proto_header_check.py
+
+# #16195: CI-only regen-diff. Regenerates with the pinned protoc/plugins
+# recorded in proto/README.md and fails on any diff, catching a .proto
+# edited without regeneration (invisible to proto-check). Needs the
+# pinned toolchain/network; CI only, never a local prerequisite.
+.PHONY: proto-regen-check
+proto-regen-check:
+	sh scripts/proto_regen_check.sh
+
 install: build build-ctl
 	install -m 0755 $(BINARY) $(PREFIX)/sbin/$(BINARY)
 	install -m 0755 cli $(PREFIX)/bin/cli
