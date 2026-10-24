@@ -12,7 +12,9 @@ import (
 // (u16/u32/u64); an out-of-range value would abort the whole apply_snapshot
 // serde decode and silently disable the dataplane. The build-boundary guard in
 // buildFlowSnapshot/buildFlowExportSnapshot must coerce every such field into
-// its Rust wire range. These tests pin that for all 11 fields.
+// its Rust wire range. These tests pin that for all 11 fields, plus
+// tcp_maximum_window (#16482: added after #1977 by #15753, shipped without
+// a coercion).
 
 func assertInRange(t *testing.T, name string, v int, max int64) {
 	t.Helper()
@@ -25,12 +27,12 @@ func TestBuildFlowSnapshotCoercesOutOfRange_1977(t *testing.T) {
 	cfg := &config.Config{}
 	// #2486: TCPMSSAllTCP replaces TCPMSSIPsecVPN on the wire (ipsec-vpn is
 	// rejected at commit and never serialized). Coerce-test all-tcp here.
-	cfg.Security.Flow.TCPMSSAllTCP = 70000               // > u16 max
-	cfg.Security.Flow.TCPMSSGreIn = -5                   // < 0
-	cfg.Security.Flow.TCPMSSGreOut = math.MaxUint16 + 1  // > u16 max
-	cfg.Security.Flow.UDPSessionTimeout = -1             // < 0
-	cfg.Security.Flow.ICMPSessionTimeout = math.MaxInt64 // > MaxDurationSeconds
-	cfg.Security.Flow.TCPSession = &config.TCPSessionConfig{EstablishedTimeout: -7}
+	cfg.Security.Flow.TCPMSSAllTCP = 70000                                                                     // > u16 max
+	cfg.Security.Flow.TCPMSSGreIn = -5                                                                         // < 0
+	cfg.Security.Flow.TCPMSSGreOut = math.MaxUint16 + 1                                                        // > u16 max
+	cfg.Security.Flow.UDPSessionTimeout = -1                                                                   // < 0
+	cfg.Security.Flow.ICMPSessionTimeout = math.MaxInt64                                                       // > MaxDurationSeconds
+	cfg.Security.Flow.TCPSession = &config.TCPSessionConfig{EstablishedTimeout: -7, MaximumWindow: 5000000000} // > u32 max (#16482)
 
 	snap := buildFlowSnapshot(cfg)
 	assertInRange(t, "TCPMSSAllTCP", snap.TCPMSSAllTCP, math.MaxUint16)
@@ -39,6 +41,10 @@ func TestBuildFlowSnapshotCoercesOutOfRange_1977(t *testing.T) {
 	assertInRange(t, "UDPSessionTimeout", snap.UDPSessionTimeout, config.MaxDurationSeconds)
 	assertInRange(t, "ICMPSessionTimeout", snap.ICMPSessionTimeout, config.MaxDurationSeconds)
 	assertInRange(t, "TCPSessionTimeout", snap.TCPSessionTimeout, config.MaxDurationSeconds)
+	assertInRange(t, "TCPMaximumWindow", snap.TCPMaximumWindow, maxTCPMaximumWindow)
+	if snap.TCPMaximumWindow != maxTCPMaximumWindow {
+		t.Fatalf("out-of-u32 TCPMaximumWindow not capped to schema ceiling %d: %d (#16482)", maxTCPMaximumWindow, snap.TCPMaximumWindow)
+	}
 	// Specific coercions: out-of-range MSS -> 0; huge timeout -> MaxDurationSeconds.
 	if snap.TCPMSSAllTCP != 0 || snap.TCPMSSGreIn != 0 || snap.TCPMSSGreOut != 0 {
 		t.Fatalf("out-of-range MSS not coerced to 0: %+v", snap)
@@ -54,10 +60,20 @@ func TestBuildFlowSnapshotCoercesOutOfRange_1977(t *testing.T) {
 	cfg2 := &config.Config{}
 	cfg2.Security.Flow.TCPMSSGreIn = 1400
 	cfg2.Security.Flow.UDPSessionTimeout = 90
-	cfg2.Security.Flow.TCPSession = &config.TCPSessionConfig{EstablishedTimeout: 1800}
+	cfg2.Security.Flow.TCPSession = &config.TCPSessionConfig{EstablishedTimeout: 1800, MaximumWindow: 65536}
 	snap2 := buildFlowSnapshot(cfg2)
-	if snap2.TCPMSSGreIn != 1400 || snap2.UDPSessionTimeout != 90 || snap2.TCPSessionTimeout != 1800 {
+	if snap2.TCPMSSGreIn != 1400 || snap2.UDPSessionTimeout != 90 || snap2.TCPSessionTimeout != 1800 || snap2.TCPMaximumWindow != 65536 {
 		t.Fatalf("in-range values altered: %+v", snap2)
+	}
+	// #16482: helper-level pin for the window cap: over-ceiling values cap
+	// to the schema ceiling; in-range and non-positive pass unchanged.
+	for _, tc := range []struct{ in, want int }{
+		{5000000000, maxTCPMaximumWindow}, {1048577, maxTCPMaximumWindow},
+		{maxTCPMaximumWindow, maxTCPMaximumWindow}, {65536, 65536}, {1024, 1024}, {0, 0}, {-1, -1},
+	} {
+		if got := coerceWireTCPMaximumWindow("tcp_maximum_window", tc.in); got != tc.want {
+			t.Fatalf("coerceWireTCPMaximumWindow(%d) = %d, want %d", tc.in, got, tc.want)
+		}
 	}
 }
 
