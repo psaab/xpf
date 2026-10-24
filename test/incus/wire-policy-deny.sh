@@ -18,8 +18,8 @@
 #
 # Live topology (loss userspace cluster): prober = CLUSTER_LAN_HOST, sink +
 # capture point = the VLAN-80 mouse target (incus-managed, tcpdump on the
-# receiving interface is true peer-side wire truth). The external iperf
-# target has no management path and is never used here.
+# receiving interface is true peer-side wire truth). The .200 primary is
+# an alias of that same host (#16213) and is never used here.
 
 set -uo pipefail
 

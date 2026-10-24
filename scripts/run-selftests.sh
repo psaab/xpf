@@ -476,6 +476,8 @@ run_bash test/incus/failover-clock-selftest.sh
 run_bash test/incus/screen-probe-selftest.sh
 run_bash test/incus/v6-na-recovery-12495-selftest.sh
 run_bash test/incus/target-services-selftest.sh
+# #16213: the mouse target's systemd address unit (declarative .200 alias).
+run_bash test/incus/mouse-target-setup-selftest.sh
 run_bash test/incus/with-cluster-selftest.sh
 # #11873: keep failover failure-journal evidence inside the test window.
 run_bash test/incus/failover-journal-selftest.sh

@@ -906,6 +906,7 @@ test-cluster-lock-lib:
 # `incus` is stubbed, no cluster.
 test-target-services-lib:
 	bash ./test/incus/target-services-selftest.sh
+	bash ./test/incus/mouse-target-setup-selftest.sh
 
 # Self-test the #6440 CoS-apply CLI-transcript gate. `apply-cos-config.sh`
 # drives the Junos CLI by piping a heredoc into it; that form is a REPL that

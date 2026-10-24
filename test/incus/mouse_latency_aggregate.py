@@ -357,10 +357,12 @@ def decide(
     # reports INSUFFICIENT-DATA, which is also right — there is nothing to
     # attribute yet.
     #
-    # The check passes the moment the two targets differ, so standing up a
-    # second host on VLAN 80 and pointing ELEPHANT_TARGET_V4 at it turns the
-    # gate back on with no further change. See target-services.sh for why
-    # there is no second host today.
+    # The check passes the moment the two targets differ, so pointing
+    # ELEPHANT_TARGET_V4 at a different VLAN-80 address turns the gate
+    # back on with no further change. The second host exists (#8259);
+    # on loss the .200 primary is an alias of it (#16213), so the two
+    # knobs must name different addresses (.200 vs .201) — see
+    # target-services.sh.
     loaded_pair = (gate_loaded.get("mouse_target"), gate_loaded.get("elephant_target"))
     idle_pair = (gate_idle.get("mouse_target"), gate_idle.get("elephant_target"))
     for cell_name, (mouse, elephant) in (("loaded", loaded_pair), ("idle", idle_pair)):

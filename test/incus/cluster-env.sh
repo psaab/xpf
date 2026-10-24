@@ -113,6 +113,13 @@ DMZ_TARGET_NAME="${DMZ_TARGET_NAME:-xpf-zone-matrix-dmz}"
 DMZ_TARGET_REF="${DMZ_TARGET_REF:-$(_xpf_cluster_ref "$DMZ_TARGET_NAME")}"
 MOUSE_TARGET_NAME="${MOUSE_TARGET_NAME:-xpf-mouse-target}"
 MOUSE_TARGET_REF="${MOUSE_TARGET_REF:-$(_xpf_cluster_ref "$MOUSE_TARGET_NAME")}"
+# #16213: the primary elephant target's v4 is a declarative alias of the
+# VLAN-80 mouse host (mouse-target-setup.sh pins it in mouse-addr.service
+# beside the mouse address; it used to be a hand `ip addr add` that a
+# recreate/reboot silently dropped). It is the cluster's iperf target —
+# loss .200, tcp .210, udp .211 (== each env's MOUSE_TARGET_V4 there, so
+# no second address is emitted) — derived, never a second literal.
+TARGET_ALIAS_V4="${TARGET_ALIAS_V4:-$IPERF_TARGET4}"
 unset _xpf_iperf_host
 
 export PROJECT_ROOT BPFRX_CLUSTER_ENV CLUSTER_CONF INCUS_REMOTE
@@ -124,3 +131,4 @@ export WAN_PREFIX4 DMZ_PREFIX4 LAN_PREFIX4 DMZ_ADDR DMZ_TARGET_V6
 export DMZ_TARGET_PF DMZ_TARGET_VLAN DMZ_TARGET_NAME DMZ_TARGET_REF
 export MOUSE_TARGET_NAME MOUSE_TARGET_REF
 export MOUSE_TARGET_V4 MOUSE_TARGET_V6 MOUSE_TARGET_PF DMZ_GW4 WAN_GW80_4
+export TARGET_ALIAS_V4

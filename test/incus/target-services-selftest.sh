@@ -223,6 +223,76 @@ if [[ "$got" != "explicit-probe-host" ]]; then
 else
     pass "explicit PROBE_FROM override is honoured"
 fi
+# --- summary ------------------------------------------------------------
+
+# --- 5. the #16213 alias premise -------------------------------------------
+#
+# The stub above answers `incus list` with nothing, so the pre-#16213
+# subject — which believed 172.16.80.200 was external hardware with no
+# handle — would print that false premise forever. These cells pin the
+# corrected one: when the target IS the declarative alias, `status`
+# names the mouse host as its owner and `up` delegates to
+# mouse-target-setup.sh (the systemd pin) instead of detached spawns.
+# A subject that still calls .200 "external lab hardware", or that
+# starts `iperf3 -s -D` / socat orphans on an instance-managed target,
+# fails here. Hermetic: incus stays stubbed; mouse-target-setup.sh is
+# replaced by a recorder on PATH-adjacent staging.
+ALIAS_TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP" "$ALIAS_TMP"' EXIT
+cat > "${ALIAS_TMP}/incus" <<'STUB2'
+#!/usr/bin/env bash
+case "$1" in
+  list)
+    # The mouse host holds .201; the .200 alias is not listed separately.
+    echo "xpf-mouse-target,172.16.80.201"
+    exit 0 ;;
+  exec)
+    [[ -n "${STUB_EXEC_LOG:-}" ]] && echo "$*" >> "$STUB_EXEC_LOG"
+    for a in "$@"; do shift; [[ "$a" == "--" ]] && break; done
+    case "${1:-}" in
+      ping) exit 0 ;;
+      bash)
+        script="${3:-}"
+        for p in $(grep -oE '\b[0-9]{4}\b' <<< "$script" | sort -u); do
+          if [[ " ${OPEN_PORTS:-} " == *" $p "* ]]; then echo "$p open"; else echo "$p closed"; fi
+        done ;;
+    esac
+    exit 0 ;;
+esac
+exit 0
+STUB2
+chmod +x "${ALIAS_TMP}/incus"
+# Recorder standing in for the sibling mouse-target-setup.sh: `up` must
+# delegate to it (with the alias env), never spawn detached listeners.
+cp "$SUBJECT" "${ALIAS_TMP}/target-services.sh"
+cat > "${ALIAS_TMP}/mouse-target-setup.sh" <<'REC'
+#!/usr/bin/env bash
+echo "mouse-setup:$* TARGET_ALIAS_V4=${TARGET_ALIAS_V4:-} MOUSE_TARGET_V4=${MOUSE_TARGET_V4:-}" >> "${STUB_SETUP_LOG:-/dev/null}"
+REC
+chmod +x "${ALIAS_TMP}/mouse-target-setup.sh"
+SETUP_LOG="${ALIAS_TMP}/setup-log"; : > "$SETUP_LOG"
+alias_env() {
+    env PATH="${ALIAS_TMP}:${PATH}" OPEN_PORTS="$ALL" \
+        STUB_SETUP_LOG="$SETUP_LOG" \
+        TARGET_V4=172.16.80.200 TARGET_ALIAS_V4=172.16.80.200 \
+        MOUSE_TARGET_V4=172.16.80.201 INCUS_REMOTE=loss \
+        bash "${ALIAS_TMP}/target-services.sh" "$@"
+}
+out="$(alias_env status 2>&1)"
+grep -q "xpf-mouse-target" <<< "$out" \
+    || fail "#16213: status does not name the mouse host as the .200 alias owner:
+$out"
+grep -qi "external lab hardware" <<< "$out" \
+    && fail "#16213: status still calls the instance-held .200 external hardware:
+$out"
+grep -q "172.16.80.200" <<< "$out" >/dev/null \
+    && pass "#16213 alias owner is named in status"
+: > "$SETUP_LOG"
+alias_env up > /dev/null 2>&1
+grep -q "mouse-setup:up TARGET_ALIAS_V4=172.16.80.200 MOUSE_TARGET_V4=172.16.80.201" "$SETUP_LOG" \
+    || fail "#16213: up did not delegate to mouse-target-setup.sh (systemd pin); setup log:
+$(cat "$SETUP_LOG")"
+[[ -s "$SETUP_LOG" ]] && pass "#16213 up delegates to the systemd-pinned mouse setup"
 
 # --- summary ------------------------------------------------------------
 if [[ $fails -eq 0 ]]; then

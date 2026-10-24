@@ -50,8 +50,10 @@ TARGET_V4="172.16.80.200"
 # Splitting them here is what makes that check meaningful rather than
 # permanently true: stand up a second host on VLAN 80, set
 # ELEPHANT_TARGET_V4 to it, and the gate starts producing attributable numbers
-# with no further change. See target-services.sh on why there is no second host
-# today (the current one is external lab hardware with no management path).
+# with no further change. The second host exists (#8259,
+# mouse-target-setup.sh); on loss the .200 primary is a declarative alias
+# of that same host (#16213), so attributability still needs the two
+# knobs pointed at DIFFERENT addresses (.200 vs .201).
 MOUSE_TARGET_V4="${MOUSE_TARGET_V4:-$TARGET_V4}"
 ELEPHANT_TARGET_V4="${ELEPHANT_TARGET_V4:-$TARGET_V4}"
 # Env-var overridable so test-mouse-latency-same-class.sh can run a
