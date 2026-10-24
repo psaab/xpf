@@ -1,5 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Config: `services security-intelligence`, `services
+    advanced-anti-malware`, `services ssl initiation`/`termination`
+    profiles, and `services application-identification` children now
+    commit with a child-named accepted-only warning (#16079). xpf has
+    no security-intelligence, anti-malware/ETI, or L7 AppID engine
+    behind these stanzas, so they previously committed silently inert
+    (only a generic no-L7 warning fired); each configured profile or
+    child is now named in the warning, matching the SSL-proxy sibling
+    (#10984). The stanzas remain loadable and preserved for display.
+
   * Login: the in-process console shell now re-resolves its user's
     `system login` class when the stanza changes, instead of keeping
     the assignment resolved once at daemon start (#16071). A console

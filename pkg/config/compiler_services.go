@@ -1244,12 +1244,142 @@ func servicesAcceptedOnlyWarnings(node *Node) []string {
 	var warnings []string
 	warnings = append(warnings, userIdentificationWarnings("services", node)...)
 	seenSSLProxyProfiles := make(map[string]struct{})
+	seenNamed := make(map[string]struct{})
 	for _, child := range node.Children {
 		if child.Name() == "ssl" {
 			warnings = append(warnings, servicesSSLProxyWarnings(child, seenSSLProxyProfiles)...)
 		}
+		for _, w := range servicesNamedAcceptedOnlyWarnings(child) {
+			if _, ok := seenNamed[w]; ok {
+				continue
+			}
+			seenNamed[w] = struct{}{}
+			warnings = append(warnings, w)
+		}
 	}
 	return warnings
+}
+
+// servicesNamedAcceptedOnlyWarnings returns one child-named accepted-only
+// warning per configured UTM/AppID/ETI child under a single direct child of
+// `services` (#16079 UTM-01 + SEC2-01). The open-world services schema
+// (schemaServices) accepts these Junos stanzas, but xpf has no
+// security-intelligence, advanced-anti-malware/ETI, or L7 AppID engine
+// behind them: security-intelligence/anti-malware profiles and SSL
+// initiation/termination profiles are never consumed, and the
+// application-identification children named in
+// docs/services-application-identification.md ("accepted with NO runtime
+// effect") are dropped by compileServices, which reads only the stanza's
+// presence. Naming each child — profile name where the grammar carries
+// one — keeps an operator from believing UTM/AppID protection is active,
+// matching the SSL-proxy sibling (#10984). Unknown
+// application-identification children are not named: a warning must not
+// fabricate a Junos grammar xpf has not verified.
+func servicesNamedAcceptedOnlyWarnings(child *Node) []string {
+	switch child.Name() {
+	case "security-intelligence", "advanced-anti-malware":
+		family := child.Name()
+		var warnings []string
+		seen := make(map[string]struct{})
+		emit := func(w string) {
+			if _, ok := seen[w]; !ok {
+				seen[w] = struct{}{}
+				warnings = append(warnings, w)
+			}
+		}
+		// Bare stanza (presence only, no child named): `set services
+		// security-intelligence` / an empty hierarchical block.
+		if len(child.Keys) <= 1 && len(child.Children) == 0 {
+			emit(fmt.Sprintf(
+				"services %s configured but accepted-only — xpf does not implement %s, so this stanza has no runtime effect (#16079)",
+				family, family))
+			return warnings
+		}
+		// Flat-set spelling packs the whole path onto Keys:
+		// [security-intelligence profile <name> ...]. Name the profile, or
+		// the first sub-stanza when no profile is present.
+		if len(child.Keys) > 1 {
+			if child.Keys[1] == "profile" && len(child.Keys) > 2 {
+				emit(fmt.Sprintf(
+					"services %s profile %q configured but accepted-only — xpf does not implement %s, so this profile has no runtime effect (#16079)",
+					family, child.Keys[2], family))
+			} else {
+				emit(fmt.Sprintf(
+					"services %s %s configured but accepted-only — xpf does not implement %s, so this stanza has no runtime effect (#16079)",
+					family, child.Keys[1], family))
+			}
+			return warnings
+		}
+		// Hierarchical spelling: name each profile, else each child stanza.
+		for _, sub := range child.Children {
+			if sub.Name() == "profile" && len(sub.Keys) > 1 {
+				emit(fmt.Sprintf(
+					"services %s profile %q configured but accepted-only — xpf does not implement %s, so this profile has no runtime effect (#16079)",
+					family, sub.Keys[1], family))
+			} else {
+				emit(fmt.Sprintf(
+					"services %s %s configured but accepted-only — xpf does not implement %s, so this stanza has no runtime effect (#16079)",
+					family, sub.Name(), family))
+			}
+		}
+		return warnings
+	case "application-identification":
+		// Children accepted with no runtime effect today (parse-only), per
+		// docs/services-application-identification.md.
+		var warnings []string
+		seen := make(map[string]struct{})
+		emit := func(name string) {
+			if _, ok := seen[name]; ok {
+				return
+			}
+			seen[name] = struct{}{}
+			warnings = append(warnings, fmt.Sprintf(
+				"services application-identification %s configured but accepted-only — xpf AppID is port+protocol catalog matching only with no L7 DPI / signature engine, so this child has no runtime effect (#16079)",
+				name))
+		}
+		if len(child.Keys) > 1 {
+			emit(child.Keys[1])
+		}
+		for _, sub := range child.Children {
+			emit(sub.Name())
+		}
+		return warnings
+	case "ssl":
+		// ETI rider: `ssl initiation` / `ssl termination` profiles beside
+		// the `ssl proxy` profiles #10984 already names. A bare `ssl`
+		// stanza, `ssl proxy` without `profile`, and unknown ssl children
+		// stay silent rather than fabricating a warning.
+		var warnings []string
+		seen := make(map[string]struct{})
+		var visit func(current *Node, path []string)
+		visit = func(current *Node, path []string) {
+			if current == nil {
+				return
+			}
+			path = append(path, current.Keys...)
+			for i := 0; i+3 < len(path); i++ {
+				if path[i] != "ssl" ||
+					(path[i+1] != "initiation" && path[i+1] != "termination") ||
+					path[i+2] != "profile" {
+					continue
+				}
+				key := path[i+1] + "\x00" + path[i+3]
+				if _, ok := seen[key]; ok {
+					continue
+				}
+				seen[key] = struct{}{}
+				warnings = append(warnings, fmt.Sprintf(
+					"services ssl %s profile %q configured but accepted-only — xpf does not implement SSL %s processing, so this profile has no runtime effect (#16079)",
+					path[i+1], path[i+3], path[i+1]))
+			}
+			for _, c := range current.Children {
+				visit(c, path)
+			}
+		}
+		visit(child, nil)
+		return warnings
+	}
+	return nil
 }
 
 // servicesSSLProxyWarnings reports named SSL proxy profiles that remain in
