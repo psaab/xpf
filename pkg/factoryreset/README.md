@@ -41,5 +41,14 @@ gRPC package; clean cutover, no aliases kept in `pkg/grpcapi`.
   gRPC-side sequencing and `pkg/cli` for the console twin.
 - The wipe is hermetic under test only via the path seams above; every
   leg's default target is a real host path.
+- The #10769 image-seal legs (`wipeImageSealResidue`) erase host-owned
+  state (root `.ssh`, `/var/log`, `/tmp`, machine-id, hostname, …) ONLY
+  on an appliance host — the bake-written `/etc/xpf/appliance` marker
+  (`wipeIsApplianceHost`, #16448). A foreign-host `.deb` install keeps
+  host-owned files; only xpf-owned state (and xpf-owned
+  `/etc/resolv.conf`) is erased there, and root revocation falls back to
+  the marker-aware `wipeRootLoginAccount`. `RedirectWipePathsForTesting`
+  plants the marker by default so hermetic fixtures assert the appliance
+  contract; foreign-host cells remove it.
 
 Performance: operator-triggered maintenance path, no hot-path impact.
