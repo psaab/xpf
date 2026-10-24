@@ -6020,6 +6020,168 @@ fn forward_candidate_egress_departed_falls_through_16270() {
         "locally-active control must not move the supersession arm"
     );
 }
+/// #16217 (FZDiag34 reverse shape): a REVERSE-direction cached entry is
+/// keyed by the reply tuple (server -> translated client). Live fw0
+/// (trace cell-rev5, helper db7101f4): the reverse entry reads
+/// `ForwardCandidate egress=5 tx=5 stamp_owner=2 owner_rg_live=2` —
+/// egress 5 is ge-0-0-1, fw0's RG1 LAN member, and the entry's
+/// LOGICAL attribution is RG2, which stays active on fw0 (RG0/RG2
+/// never fail over), so the logical departed arm
+/// (`forward_candidate_egress_departed`, keyed on `egress_ifindex`)
+/// never fires: after RG1 fails over to fw1 every WAN reply is TX'd
+/// out the departed member and the client's ACKs stop (55 SUM zeros).
+/// The physical-TX departed arm must supersede the reverse entry
+/// (PostHitForwardCandidateEgressDeparted -> FallThrough -> slow-path
+/// re-resolve -> HA demotion + fabric conversion to fw1).
+/// Fixture: egress row (logical) = RG2 active; tx member row = RG2
+/// (its egress-row RG also survives — the live shape); the OWNER
+/// stamp is RG1. Departed arm: owner RG1 inactive. Control: owner
+/// RG1 locally active -> served.
+/// RED-on-revert: drop the tx arm and the reverse hit is Consumed
+/// from the departed member.
+#[test]
+fn reverse_forward_candidate_egress_departed_falls_through_16217() {
+    const TX_MEMBER_IFINDEX: i32 = 21;
+    // Reverse key: server 172.16.50.200:443 -> SNAT client
+    // 172.16.50.8:45678 (the translated tuple the WAN reply carries).
+    fn reverse_entry() -> FlowCacheEntry {
+        let mut entry = cached_entry();
+        entry.key = crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 50, 200)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 50, 8)),
+            src_port: 443,
+            dst_port: 45678,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        // Live shape: logical egress attributes to RG2 (the surviving
+        // RETH RG, set on EGRESS_IFINDEX below); the physical TX
+        // member is the departed RG1 interface.
+        entry.decision.resolution.tx_ifindex = TX_MEMBER_IFINDEX;
+        entry.descriptor.egress_ifindex = EGRESS_IFINDEX;
+        entry.descriptor.tx_ifindex = TX_MEMBER_IFINDEX;
+        entry.metadata.is_reverse = true;
+        entry.metadata.owner_rg_id = 1;
+        entry.stamp.owner_rg_id = 1;
+        entry.stamp.owner_rg_lease_until = 0;
+        entry
+    }
+    fn reverse_frame() -> Vec<u8> {
+        // Same VLAN-tagged TCP ACK builder, with the tuple swapped to
+        // the reverse direction so frame/meta/key describe one packet.
+        let mut frame = tcp_v4_ack_frame();
+        // L3 at 18: src [30..34], dst [34..38]; L4 ports at [38..42].
+        frame[30..34].copy_from_slice(&Ipv4Addr::new(172, 16, 50, 200).octets());
+        frame[34..38].copy_from_slice(&Ipv4Addr::new(172, 16, 50, 8).octets());
+        frame[38..40].copy_from_slice(&443u16.to_be_bytes());
+        frame[40..42].copy_from_slice(&45678u16.to_be_bytes());
+        frame
+    }
+    fn reverse_meta(frame: &[u8]) -> UserspaceDpMeta {
+        let mut meta = test_meta(frame);
+        let mut src_addr = [0u8; 16];
+        src_addr[..4].copy_from_slice(&Ipv4Addr::new(172, 16, 50, 200).octets());
+        let mut dst_addr = [0u8; 16];
+        dst_addr[..4].copy_from_slice(&Ipv4Addr::new(172, 16, 50, 8).octets());
+        meta.flow_src_addr = src_addr;
+        meta.flow_dst_addr = dst_addr;
+        meta.flow_src_port = 443;
+        meta.flow_dst_port = 45678;
+        meta
+    }
+    fn reverse_seed(entry: &FlowCacheEntry) -> StageSeed {
+        StageSeed {
+            flow: Some(SessionFlow {
+                src_ip: entry.key.src_ip,
+                dst_ip: entry.key.dst_ip,
+                forward_key: entry.key.clone(),
+            }),
+            ..StageSeed::default()
+        }
+    }
+    fn reverse_fixture(tx_active: bool) -> LiveCallSiteFixture {
+        let mut fixture =
+            LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+        // Logical egress row: RG2 (survives on this node).
+        fixture
+            .forwarding
+            .egress
+            .get_mut(&EGRESS_IFINDEX)
+            .expect("zone-accounting fixture seeds the egress")
+            .redundancy_group = 2;
+        // Physical TX member row: RG1 (departed after failover).
+        fixture.forwarding.egress.insert(
+            TX_MEMBER_IFINDEX,
+            EgressInterface {
+                bind_ifindex: TX_MEMBER_IFINDEX,
+                vlan_id: INGRESS_VLAN_ID,
+                mtu: 1500,
+                src_mac: [0x02, 0xbf, 0x72, 0x00, 0x01, 0x01],
+                zone_id: TEST_TRUST_ZONE_ID,
+                redundancy_group: 1,
+                primary_v4: None,
+                primary_v6: None,
+            },
+        );
+        fixture.ha_state.insert(
+            2,
+            HAGroupRuntime {
+                active: true,
+                watchdog_timestamp: 1,
+                lease: HAGroupRuntime::active_lease_until(1, 1),
+            },
+        );
+        fixture.ha_state.insert(
+            1,
+            if tx_active {
+                HAGroupRuntime {
+                    active: true,
+                    watchdog_timestamp: 1,
+                    lease: HAGroupRuntime::active_lease_until(1, 1),
+                }
+            } else {
+                HAGroupRuntime {
+                    active: false,
+                    watchdog_timestamp: 1,
+                    lease: HAForwardingLease::Inactive,
+                }
+            },
+        );
+        fixture
+    }
+    let frame = reverse_frame();
+    let meta = reverse_meta(&frame);
+    // Departed: physical TX member RG1 inactive (fw1 owns it); the
+    // logical RG2 attribution stays active, so only the TX arm fires.
+    let fixture = reverse_fixture(false);
+    let entry = reverse_entry();
+    let run = run_stage_seeded(&fixture, &frame, meta, entry.clone(), 0, reverse_seed(&entry));
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "#16217 reverse: cached reverse ForwardCandidate whose physical TX member RG departed must re-resolve (toward FabricRedirect), not TX out the departed member"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitForwardCandidateEgressDeparted as usize],
+        1,
+        "#16217 reverse: the departed supersession arm must own the reverse eviction"
+    );
+    // Control: TX member RG1 locally active -> reverse entry serves.
+    let fixture = reverse_fixture(true);
+    let entry = reverse_entry();
+    let run = run_stage_seeded(&fixture, &frame, meta, entry.clone(), 0, reverse_seed(&entry));
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "#16217 reverse control: locally-active TX member RG must keep serving the cached reverse ForwardCandidate"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitForwardCandidateEgressDeparted as usize],
+        0,
+        "#16217 reverse control: locally-active TX member must not move the supersession arm"
+    );
+}
+
 
 /// #16217 (FZFixWire15): the subsequent-packet path for an adopted flow.
 /// Packet 1 is the adoption resolve itself (driven through the production

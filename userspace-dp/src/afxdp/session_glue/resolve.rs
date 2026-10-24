@@ -546,6 +546,55 @@ fabric_adopted: bool,) -> Option<ResolvedFlowSessionDecision> {
                 resolved.metadata.ingress_zone,
             );
         }
+        // #16217 (FZDiag34 reverse leg): a REVERSE hit whose stored
+        // decision still egresses LOCALLY (ForwardCandidate) while the
+        // flow's owner RG has departed this node must cross the fabric
+        // to the new owner — it must NOT be re-served/re-seeded from
+        // the departed member. Live fw0 (trace cellX): reverse hits
+        // re-resolve from the stored reverse decision egress=5
+        // (ge-0-0-1, RG1's member; the member's egress row carries the
+        // surviving RG2, so neither HA enforcement nor the egress-row
+        // departed arms can see RG1's departure) and TX every WAN
+        // reply into the dead member; the cache arm evicts once and
+        // the slow path re-seeds the same candidate forever. The
+        // ownership proof is the session's stored owner stamp
+        // (`metadata.owner_rg_id`, set at synthesis from the reply
+        // resolution — 1 for these rows) PLUS the connected
+        // destination owner for the reply target: when the owner
+        // stamp names a departed RG and the destination is not
+        // locally served (connected owner unknown or also departed),
+        // convert to the zone-encoded FabricRedirect for the stored
+        // egress (client LAN) zone — the Wire30B shape. Anti-loop: a
+        // fabric-link arrival never re-redirects. Locally-active
+        // owner / destination, unknown owner stamp, and non-reverse
+        // hits are bit-identical.
+        if resolved.metadata.is_reverse
+            && !fabric_link_ingress
+            && decision.resolution.disposition == ForwardingDisposition::ForwardCandidate
+            && resolved.metadata.owner_rg_id > 0
+            && !ha_state
+                .get(&resolved.metadata.owner_rg_id)
+                .is_some_and(|group| group.is_forwarding_active(now_secs))
+        {
+            let dest_rg = super::connected_owner_rg_for_target_in_table(
+                forwarding,
+                resolution_target,
+                install_table_name_for_session(forwarding, decision, resolution_target),
+            );
+            let destination_local = dest_rg > 0
+                && ha_state
+                    .get(&dest_rg)
+                    .is_some_and(|group| group.is_forwarding_active(now_secs));
+            if !destination_local
+                && let Some(redirect) =
+                    super::forwarding::resolve_zone_encoded_fabric_redirect_by_id(
+                        forwarding,
+                        resolved.metadata.egress_zone,
+                    )
+            {
+                decision.resolution = redirect;
+            }
+        }
         // #9752: a terminal outcome arms this worker's purge walk (D8).
         if decision.resolution.disposition == ForwardingDisposition::TableUnavailable {
             flag_install_table_purge(worker_id);

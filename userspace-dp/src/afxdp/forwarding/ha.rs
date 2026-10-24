@@ -518,6 +518,28 @@ fn cached_flow_decision_invalid_reason_inner(
     if forward_candidate_egress_departed(forwarding, ha_state, now_secs, resolution) {
         return Some(CachedDecisionInvalid::ForwardCandidateEgressDeparted);
     }
+    // #16217 (FZDiag34 reverse shape): the departed supersession above
+    // binds the FIRST hit, but the slow path then re-resolves from the
+    // session's STORED reverse decision (egress=tx=5, ge-0-0-1, on
+    // fw0) and RE-SEEDS the same departed member: live fw0 (trace
+    // cellU, helper d40a04d6) reverse entries read
+    // `ForwardCandidate egress=5 tx=5 egr_rg=2 tx_rg=2` — the physical
+    // member's egress row carries RG2, which stays active on fw0
+    // (only RG1 fails over), so NEITHER the logical arm above NOR an
+    // egress-row arm can ever fire, and every WAN reply is TX'd out
+    // the departed member forever (one departed eviction total, then
+    // re-seeded serve). The member's departure is an OWNERSHIP fact,
+    // not an egress-row attribute: the flow's owner RG
+    // (`cached_owner_rg_id`, the stamp the seed recorded — 1 for these
+    // reverse entries, the LAN RG that moved to fw1) is no longer
+    // forwarding-active here. Supersede on that ground so the
+    // re-resolve runs the fabric conversion toward the new owner.
+    // Guard: known owner RG (>0), clustered map non-empty, owner not
+    // forwarding-active; locally-active / unknown / standalone shapes
+    // never fire.
+    if forward_candidate_owner_departed(ha_state, now_secs, cached_owner_rg_id, resolution) {
+        return Some(CachedDecisionInvalid::ForwardCandidateEgressDeparted);
+    }
     if enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, resolution) != resolution {
         return Some(CachedDecisionInvalid::EnforceChanged);
     }
@@ -724,6 +746,32 @@ pub(in crate::afxdp) fn forward_candidate_egress_departed(
                     .get(&egress_rg)
                     .is_some_and(|group| group.is_forwarding_active(now_secs))
         }
+}
+
+/// #16217 (FZDiag34 reverse shape): owner-RG twin of
+/// `forward_candidate_egress_departed`. A cached `ForwardCandidate`
+/// whose seed-time owner RG (`cached_owner_rg_id` — the flow's owner
+/// recorded by the seed stamp, NOT the egress-row attribution) is
+/// known (>0) and no longer forwarding-active locally is served by a
+/// departed owner: the slow path must re-resolve it so HA demotion
+/// and the fabric converters can redirect it to the new owner. This
+/// is the only arm that can see a reverse entry whose physical member
+/// egress row names a surviving RG (live: egress=tx=5, egr_rg=2,
+/// owner stamp 1 departed). Guard: ForwardCandidate only, clustered
+/// map non-empty, owner known and inactive; locally-active, unknown
+/// (0), and standalone shapes never fire.
+pub(in crate::afxdp) fn forward_candidate_owner_departed(
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    cached_owner_rg_id: i32,
+    resolution: ForwardingResolution,
+) -> bool {
+    resolution.disposition == ForwardingDisposition::ForwardCandidate
+        && !ha_state.is_empty()
+        && cached_owner_rg_id > 0
+        && !ha_state
+            .get(&cached_owner_rg_id)
+            .is_some_and(|group| group.is_forwarding_active(now_secs))
 }
 
 /// #16217 (Wire18, B2): re-validate a fabric-established (adopted) mark
