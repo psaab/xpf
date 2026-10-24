@@ -110,6 +110,8 @@ impl SyncedSessionEntry {
             session_id: self.session_id,
             tcp_close_class: self.tcp_close_class,
             tcp_handshake_state: self.tcp_handshake_state,
+            fwd_packets: self.fwd_packets,
+            rev_packets: self.rev_packets,
         }
     }
 }

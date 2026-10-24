@@ -1790,3 +1790,65 @@ intermittent at roughly the rate the whole campaign has chased;
 no new mechanism is named by these cells beyond the FO+1s
 revocation correlation in run11. Reported for the merge
 decision; not claimed as twice-proven.
+
+### run11 recurrence root-caused (DiagRun11) — carried counters dropped at import
+
+run11 (merge head 7f89003126, deb 99.16217.51) failed strict:
+stream 40384 (session id 21, locally minted on fw0 worker 0)
+permanently dead from FO+1, `snat_revoked` fw0 0 -> 1 at FO+1,
+tuple gone on BOTH nodes at fo1 while its three sibling data
+tuples survived. run13 revoked 3 at FO+1 with zero stream loss —
+the revocations are routine FO churn; run11's was fatal because
+it hit a live data tuple whose post-revocation path never
+recovered.
+
+Root cause (which arm / which state): the COMPANION-PRESENT main
+arm of `source_nat_revocation_on_session_hit_with_ingress`
+(policy_revalidation.rs), reached on a reverse/fabric hit on fw0
+after the FO snapshot re-apply (fw0 snapshot generation 11 -> 17,
+FIB 3 -> 4 between d28 and fo1). The Wire34 established guard at
+the bottom of that arm requires
+`forward_established_with_traffic(forward_key)` on the JUDGED
+forward row in the hitting worker's local table. That row was a
+peer-imported / shared-materialized copy: `build_synced_session_entry`
+carries the serving node's live counters on the wire
+(`fwd_packets`/`rev_packets`, Go forwards them), and
+`SyncedSessionEntry` holds them — but `into_session_install`
+DROPPED both fields and `upsert_synced_with_origin` seeded
+`SessionCounters::default()`. The imported row was therefore
+established yet traffic-less (fwd+rev = 0) until a local packet
+happened to fold onto it in that worker. `established` survived
+(the wire handshake state), `judged_epoch` was None (import) —
+both guard conjuncts the GLM F2 fix addressed — but the TRAFFIC
+conjunct silently failed for exactly the imported population.
+Sibling tuples survived because a local packet folded first
+(race); 40384's first stale reverse hit arrived before any local
+fold, the FIB-invalid-under-new-snapshot verdict stood, and the
+pair was revoked and deleted at FO+1. The `account_packet` call
+in the existing GLM F2 test masked this: it folded local traffic
+onto the imported row before the hit, a step production imports
+never take.
+
+Fix: thread the carried counts through the import path.
+`SessionInstall` gains `fwd_packets`/`rev_packets`;
+`SyncedSessionEntry::into_session_install` moves them;
+`upsert_synced_with_origin` seeds `SessionCounters { fwd_packets,
+rev_packets, .. }` (bytes not carried, stay 0);
+`materialize_shared_session_hit` inherits them from the shared
+row like the id/close class. Zero counts (legacy peer, local
+replica) seed zero exactly as before — no manufactured evidence.
+
+Regression test (production path, mutation-verified):
+`imported_carried_counters_established_reverse_hit_declines_16217`
+— builds the row only via `build_synced_session_entry` (wire
+fwd=720449/rev=61823) -> `into_session_install` ->
+`upsert_synced_with_origin`, NO local `account_packet`, then the
+FIB-invalid reverse hit declines and the row survives; the
+zero-counter control still fail-closes. Mutation-verified
+2026-10-24: zeroing the seed in `upsert_synced_with_origin`
+turns the cell RED, restoring turns it GREEN.
+
+Unit: `cargo test 16217` 64 passed (was 63, +1 new);
+`policy_revalidation` 118 passed; `session::` 552 passed with
+the same 4 pre-existing failures as the pre-fold tree
+(handshake_ack_16042 x3, session_decision_typed_snat_layout_11064).

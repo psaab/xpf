@@ -56,6 +56,19 @@ pub(crate) struct SessionInstall {
     /// #10888: owning-node TCP handshake state (`0` = legacy/established).
     /// Only `upsert_synced_with_origin` consults it.
     pub(crate) tcp_handshake_state: u8,
+    /// #16217 (run11): the serving node's admitted per-direction packet
+    /// counts carried on the HA wire / shared row (`SyncedSessionEntry`
+    /// `fwd_packets`/`rev_packets`). Seeded onto the imported entry's
+    /// counters (packet counts only; bytes unknown stay 0) so
+    /// `forward_established_with_traffic` sees the peer's actual service
+    /// instead of the zero a fresh import used to start with. Without
+    /// this, a peer-imported established row was indistinguishable from
+    /// a never-served row until a local packet folded onto it, and the
+    /// Wire34 established guard declined to protect it. Only
+    /// `upsert_synced_with_origin` consults them; 0/0 (legacy peer,
+    /// local replica) seeds zero exactly as before.
+    pub(crate) fwd_packets: u64,
+    pub(crate) rev_packets: u64,
 }
 
 /// In-place update or promotion of an existing session. Carries a

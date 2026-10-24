@@ -839,6 +839,8 @@ impl SessionTable {
                 // #9412: nor a close class; the real HA path threads it the same way.
                 tcp_close_class: 0,
                 tcp_handshake_state: 0,
+                fwd_packets: 0,
+                rev_packets: 0,
                 source_nat_static: None,
             },
             allow_replace_local,
@@ -899,6 +901,8 @@ impl SessionTable {
             session_id: wire_session_id,
             tcp_close_class: wire_close_class,
             tcp_handshake_state: wire_handshake_state,
+            fwd_packets: wire_fwd_packets,
+            rev_packets: wire_rev_packets,
         } = req;
         let session_limit_zone = metadata.ingress_zone;
         // #9412: the close class the owning node stated. `None` (0, or a class
@@ -1134,7 +1138,18 @@ impl SessionTable {
                 seen_rg_epoch: 0,
                 first_held_ns: preserved_first_held_ns,
                 // #2501: a fresh entry has forwarded no packets yet.
-                counters: SessionCounters::default(),
+                // #16217 (run11): EXCEPT the packet counts the serving
+                // node carried on the wire / shared row — seed them so
+                // the established-with-traffic guard (and every other
+                // counter reader) sees the peer's actual service from
+                // the first local hit, not only after a local packet
+                // happens to fold onto this row. Bytes are not carried,
+                // so they stay 0; packet counts alone drive the guard.
+                counters: SessionCounters {
+                    fwd_packets: wire_fwd_packets,
+                    rev_packets: wire_rev_packets,
+                    ..SessionCounters::default()
+                },
                 closing_counters_seen: 0,
                 // #2749: a re-imported synced entry observes its own ToS / TCP
                 // flags once local traffic forwards through it (the peer's

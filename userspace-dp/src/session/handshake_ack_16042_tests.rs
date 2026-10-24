@@ -357,6 +357,8 @@ fn ha_import_unknown_evidence_fails_open_16042() {
                 session_id: 42,
                 tcp_close_class: 0,
                 tcp_handshake_state: TcpHandshakeState::HandshakePending.to_wire(),
+                fwd_packets: 0,
+                rev_packets: 0,
             },
             false,
         ));

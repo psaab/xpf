@@ -11848,6 +11848,8 @@ fn late_reconciler_maps_shared_promote_for_worker_reserve_9718() {
             session_id: LIVE_SESSION_ID,
             tcp_close_class: LIVE_CLOSE_CLASS,
             tcp_handshake_state: 0,
+            fwd_packets: 0,
+            rev_packets: 0,
             source_nat_static: None,
         },
         false,

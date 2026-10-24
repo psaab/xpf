@@ -3113,6 +3113,8 @@ fn a_sibling_workers_replica_carries_zero_counters_for_a_live_session_7919() {
                 session_id: replicated.session_id,
                 tcp_close_class: 0,
                 tcp_handshake_state: 0,
+                fwd_packets: 0,
+                rev_packets: 0,
                 source_nat_static: None,
             },
             false,

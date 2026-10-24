@@ -8031,6 +8031,108 @@ fn companion_present_reverse_hit_declines_when_invalid_current_epoch_16217() {
     assert!(sessions.entry_with_origin(&case.0).is_some());
 }
 
+/// #16217 (run11): the production import shape behind the run11
+/// recurrence. The serving node had aged the flow for 28s, so the HA
+/// wire / shared row carries real counters (`fwd_packets`/
+/// `rev_packets` > 0 on the `SyncedSessionEntry`), but
+/// `into_session_install` used to DROP them and
+/// `upsert_synced_with_origin` seeded `SessionCounters::default()`:
+/// the imported forward row on the peer was established yet
+/// traffic-less in its local table. In run11 exactly one data tuple
+/// (stream 40384) was StaleSourceNat-revoked on fw0 at FO+1
+/// (`snat_revoked` 0 -> 1, session gone at fo1, 53 permanent
+/// per-stream zeros) while its sibling tuples survived — the race
+/// is whether any local packet folded onto the row before the first
+/// stale reverse hit judged it. This cell installs the forward row
+/// ONLY through the production import path
+/// (`build_synced_session_entry` -> `into_session_install` ->
+/// `upsert_synced_with_origin`) with carried counters and NO local
+/// `account_packet`, then drives the same FIB-invalid reverse hit
+/// as the companion-present cell: the guard must decline and the
+/// row must survive. Mutation: drop the counter seed in
+/// `upsert_synced_with_origin` (or the fields in
+/// `into_session_install`) and this cell goes red — the imported
+/// row reads traffic-less, the guard does not fire, and the hit
+/// revokes.
+#[test]
+fn imported_carried_counters_established_reverse_hit_declines_16217() {
+    let case = reverse_snat_case_13652();
+    let zones = rustc_hash::FxHashMap::from_iter([("lan".to_string(), 1), ("wan".to_string(), 2)]);
+    let mut req = imported_snat_request(1, true);
+    req.fwd_packets = 720_449;
+    req.rev_packets = 61_823;
+    let synced = crate::server::helpers::build_synced_session_entry(&req, &zones, 0)
+        .expect("dynamic SNAT session imports from HA wire");
+    assert_eq!(synced.fwd_packets, 720_449, "fixture: wire fwd count carried");
+    assert_eq!(synced.rev_packets, 61_823, "fixture: wire rev count carried");
+    let mut bad = synced;
+    bad.decision.resolution.egress_ifindex = 999;
+    bad.decision.resolution.tx_ifindex = 999;
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.upsert_synced_with_origin(bad.into_session_install(1), false));
+    assert!(sessions.install_with_protocol_with_origin(
+        case.1.clone(),
+        case.4,
+        case.5.clone(),
+        SessionOrigin::ReverseFlow,
+        1_000_000,
+        case.1.protocol,
+        0x10,
+    ));
+    // No local account_packet: the ONLY traffic evidence is the
+    // carried import counters.
+    assert_eq!(
+        sessions.source_nat_revalidated_config_generation(&case.0),
+        None,
+        "imported row must have no judged epoch"
+    );
+    assert!(
+        sessions.forward_established_with_traffic(&case.0),
+        "carried counters must make the imported row established-with-traffic without any local packet"
+    );
+    assert!(
+        reverse_snat_hit_13652(&imported_snat_forwarding(false), &mut sessions, &case).is_none(),
+        "imported established row with carried counters must decline on FIB-only invalidity (run11)"
+    );
+    assert!(
+        sessions.entry_with_origin(&case.0).is_some(),
+        "declined imported forward row must survive"
+    );
+    // Control: the same import with zero carried counters (legacy
+    // peer / never-served row) keeps the fail-closed revocation —
+    // the seed must not manufacture traffic evidence from nothing.
+    let synced_zero = crate::server::helpers::build_synced_session_entry(
+        &imported_snat_request(1, true),
+        &zones,
+        0,
+    )
+    .expect("dynamic SNAT session imports from HA wire");
+    let mut bad_zero = synced_zero;
+    bad_zero.decision.resolution.egress_ifindex = 999;
+    bad_zero.decision.resolution.tx_ifindex = 999;
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.upsert_synced_with_origin(bad_zero.into_session_install(1), false));
+    assert!(sessions.install_with_protocol_with_origin(
+        case.1.clone(),
+        case.4,
+        case.5.clone(),
+        SessionOrigin::ReverseFlow,
+        1_000_000,
+        case.1.protocol,
+        0x10,
+    ));
+    assert!(
+        !sessions.forward_established_with_traffic(&case.0),
+        "zero carried counters must stay traffic-less"
+    );
+    assert!(
+        reverse_snat_hit_13652(&imported_snat_forwarding(false), &mut sessions, &case).is_some(),
+        "traffic-less imported row must still fail closed on invalidity (control)"
+    );
+}
+
 /// #16217 (GLM F1/F2): production-chain contract for a DECLINE /
 /// canonical-less revocation outcome. The poll caller
 /// (`poll_descriptor/mod.rs`, session-hit revocation block) treats

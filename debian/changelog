@@ -140,6 +140,16 @@ xpf (0.0.0) unstable; urgency=medium
     never failed over on the configured link/target loss. The scoped
     pre-walk gate names the typo on strict commit and warns on tolerant
     load/peer-sync (#1960); shipped cluster configs still commit.
+  * Userspace-DP: peer-imported sessions now seed their local
+    traffic counters from the counts the serving node carried on
+    the HA wire / shared row (#16217, run11). into_session_install
+    dropped fwd_packets/rev_packets and upsert_synced_with_origin
+    seeded zero counters, so an imported established row read as
+    never-served until a local packet folded onto it — the Wire34
+    established guard then declined to protect exactly the imported
+    population, and one aged data tuple (run11 stream 40384) was
+    StaleSourceNat-revoked at FO+1. Zero carried counts seed zero
+    as before.
   * Userspace-DP: adopted fabric-ingress recovery now re-resolves in
     the session's validated install table and restores only a
     candidate whose egress RG equals the gate-proved RG (#16217,
