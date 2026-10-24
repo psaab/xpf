@@ -77,15 +77,6 @@ func (c *xpfCollector) initGlobalDescriptors() {
 			"including at zero (#9042).",
 		[]string{"surface"}, nil,
 	)
-	c.fabricStreamArgsUnboundTotal = prometheus.NewDesc(
-		"xpf_fabric_stream_args_unbound_total",
-		"Total FABRIC MonitorInterface streams accepted on the legacy "+
-			"method-only token because the peer sent no args-bound token "+
-			"(#11082). Local loopback monitor streams never count (#13050). "+
-			"Migration signal: stays zero once all peers bind arguments, "+
-			"then the fallback is removed (Phase 2).",
-		nil, nil,
-	)
 	c.napiProbeTargetSkipsTotal = prometheus.NewDesc(
 		"xpf_napi_probe_target_skips_total",
 		"Total NAPI-bootstrap interface probes skipped because no probe "+

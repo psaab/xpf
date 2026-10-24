@@ -22,6 +22,15 @@ xpf (0.0.0) unstable; urgency=medium
     fabric-safe ShowText topic (counts/statistics only) remain
     grace-eligible, and a keyed peer's valid-token GetSessions proxy is
     unchanged.
+  * Fabric: legacy method-only MonitorInterface streams are now rejected
+    and open fabric streams re-authenticate continuously (#16031).
+    Fabric streams must carry the args-bound token matching the request
+    (missing/mismatched is Unauthenticated); the counted fallback and
+    xpf_fabric_stream_args_unbound_total are removed. Local loopback
+    monitor streams are unaffected. Open fabric streams re-verify the
+    connection token against the live accepted-key set every 5s, so
+    removing the cluster PSK ends a stream within one tick, while a
+    rotation still accepting the old key does not.
 
 xpf (0.0.0) unstable; urgency=medium
 

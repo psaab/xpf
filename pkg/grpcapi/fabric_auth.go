@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
-	"sync/atomic"
 	"time"
 
 	"github.com/psaab/xpf/pkg/denyaudit"
@@ -278,16 +277,77 @@ func fabricAuthTokenFromMetadata(ctx context.Context) (token string, present boo
 	return vals[0], true
 }
 
-// fabricStreamArgsUnboundTotal counts MonitorInterface streams accepted on
-// the legacy method-only token because the peer sent no args-bound token
-// (#11082). Monotonic; surfaced as xpf_fabric_stream_args_unbound_total.
-// Phase 2 removes the fallback once all peers bind arguments.
-var fabricStreamArgsUnboundTotal atomic.Uint64
+// fabricStreamReauthInterval is how often an open fabric stream re-verifies
+// its credentials against the CURRENT accepted-key set (#16031). A var, not
+// a const, ONLY so a test can shorten it; production never writes it. Five
+// seconds mirrors the primary listener's #9051 stream re-auth tick: removing
+// the PSK entirely ends a fabric stream within one tick, while a rotation
+// (old key still accepted, #6630) never interrupts it.
+var fabricStreamReauthInterval = 5 * time.Second
 
-// FabricStreamArgsUnboundTotal reports legacy method-only stream accepts
-// for the Prometheus collector.
-func FabricStreamArgsUnboundTotal() uint64 {
-	return fabricStreamArgsUnboundTotal.Load()
+// fabricStreamRecheck re-authenticates an open fabric stream (#16031): the
+// method-only connection token must still verify against the live accepted
+// keys. It re-reads the inbound metadata, which gRPC retains for the life
+// of the stream, so no new credential plumbing is needed; the peer does
+// not mint fresh tokens mid-stream, so verification is the SAME token under
+// the CURRENT key epoch. The args-bound token was minted by the same key
+// at the same instant and verified against the request at open, so its
+// epoch membership stands or falls with the connection token's — key
+// removal (empty accepted set) or full revocation (minting key no longer
+// accepted) fails here, while a rotation that still accepts the old key
+// (#6630) does not. The returned error is Unauthenticated so the client
+// learns it was decommissioned, not merely disconnected.
+func (s *Server) fabricStreamRecheck(ctx context.Context, method string) error {
+	return s.checkFabricAuth(ctx, method)
+}
+
+// reauthFabricStream runs handler with a context cancelled as soon as
+// fabricStreamRecheck fails (#16031), mirroring authorizeStreamContinuously
+// (#9051) on the primary listener. The fabric interceptor chain has no
+// #9051 counterpart: a key REMOVAL mid-stream otherwise leaves a fabric
+// stream (counters/statistics) running until the client disconnects or
+// xpfd restarts. ss already carries the #13050 fabric marker; this wrapper
+// only re-parents its context so the watcher can cancel it. When
+// revocation and a handler error are co-present the revocation wins,
+// because the watcher records it before cancelling (#9903 F-128 ordering,
+// same as the primary).
+func (s *Server) reauthFabricStream(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	ctx, cancel := context.WithCancel(ss.Context())
+	defer cancel()
+
+	revoked := make(chan error, 1)
+	done := make(chan struct{})
+	defer close(done)
+
+	interval := fabricStreamReauthInterval
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := s.fabricStreamRecheck(ss.Context(), info.FullMethod); err != nil {
+					slog.Warn("fabric stream terminated: the peer credential is no longer accepted (#16031)",
+						"method", info.FullMethod, "reason", err.Error())
+					revoked <- err
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	herr := handler(srv, fabricAuthServerStream{ServerStream: ss, ctx: ctx})
+	select {
+	case err := <-revoked:
+		return err
+	default:
+	}
+	return herr
 }
 
 // fabricAuthArgsTokenFromMetadata extracts the args-bound stream token, if
@@ -631,10 +691,14 @@ func (s *Server) fabricAuthStreamInterceptor(srv interface{}, ss grpc.ServerStre
 	// peer-marker promotion) observes, so stream handlers that ALSO serve
 	// the loopback listener can tell a PSK-authenticated peer stream from a
 	// local one.
-	return handler(srv, fabricAuthServerStream{
+	//
+	// #16031: then run the handler under continuous re-auth — the fabric
+	// chain's counterpart to the primary listener's #9051 re-authorization.
+	// Key removal mid-stream ends the stream within one tick.
+	return s.reauthFabricStream(srv, fabricAuthServerStream{
 		ServerStream: ss,
 		ctx:          withFabricAuthStreamContext(ss.Context()),
-	})
+	}, info, handler)
 }
 
 // fabricAuthStreamContextKey marks a stream context as bound to the FABRIC

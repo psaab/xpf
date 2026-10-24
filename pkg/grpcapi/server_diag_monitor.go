@@ -801,34 +801,31 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 		return status.Error(codes.Unavailable, "no active configuration")
 	}
 
-	// #11082: the interceptor verified the method-only token (connection
-	// gate). Re-verify against THESE arguments: a token captured from one
-	// stream must not authorize a different interface_name/summary_mode.
+	// #16031 (+ #11524 Phase 2, operator-authorized delete-on-current-
+	// evidence): the interceptor verified the method-only token (connection
+	// gate). FABRIC streams must ALSO carry an args-bound token matching
+	// THESE arguments: a token captured from one stream must not authorize
+	// a different interface_name/summary_mode, and a legacy method-only
+	// stream is rejected outright — the counted fallback is removed.
+	// Current peers always mint the args-bound token (proxyMonitorInterface);
+	// only pre-#11082 peers in a rolling-upgrade window used the fallback,
+	// and the #11524 record shows both live peers already args-binding
+	// with the counter at zero.
 	//
 	// #13050: FABRIC streams only. This handler is shared by the loopback
-	// management listener, whose local CLI callers send no token at all, so
-	// counting them here held xpf_fabric_stream_args_unbound_total (the
-	// #11524 Phase-2 zero-across-a-cycle predicate) permanently above zero
-	// on local traffic alone. The marker is stamped server-side by the
-	// fabric stream interceptor — never read from client metadata — so a
-	// local stream skips both the verification and the fallback counter and
-	// keeps working; loopback callers authenticate by peer credentials
-	// (#5278), not the fabric PSK. The method-only fallback itself stays
-	// until #11524 Phase 2 (cycle attestation).
+	// management listener, whose local CLI callers send no token at all.
+	// The marker is stamped server-side by the fabric stream interceptor —
+	// never read from client metadata — so a local stream skips the
+	// verification entirely and keeps working; loopback callers authenticate
+	// by peer credentials (#5278), not the fabric PSK.
 	if fabricAuthStreamContext(stream.Context()) {
-		if tok, present := fabricAuthArgsTokenFromMetadata(stream.Context()); present {
-			if !verifyFabricStreamArgsToken(s.fabricAcceptedKeys(), tok, pb.BpfrxService_MonitorInterface_FullMethodName, req) {
-				if emit, suppressed := denyaudit.Note(denyaudit.SurfaceFabricAuth, "stream args-bound token mismatch"); emit {
-					slog.Warn("fabric MonitorInterface rejected call: arguments do not match the stream token",
-						"suppressed_since_last", suppressed)
-				}
-				return status.Error(codes.Unauthenticated, "fabric RPC authentication failed: stream arguments do not match the token")
+		tok, present := fabricAuthArgsTokenFromMetadata(stream.Context())
+		if !present || !verifyFabricStreamArgsToken(s.fabricAcceptedKeys(), tok, pb.BpfrxService_MonitorInterface_FullMethodName, req) {
+			if emit, suppressed := denyaudit.Note(denyaudit.SurfaceFabricAuth, "stream args-bound token missing or mismatch"); emit {
+				slog.Warn("fabric MonitorInterface rejected call: stream is not bound to these arguments",
+					"suppressed_since_last", suppressed)
 			}
-		} else {
-			// Legacy peer (predates args-bound stream tokens): the method
-			// token already passed the interceptor. Count the fallback so
-			// the migration is observable; Phase 2 removes it.
-			fabricStreamArgsUnboundTotal.Add(1)
+			return status.Error(codes.Unauthenticated, "fabric RPC authentication failed: stream arguments do not match the token")
 		}
 	}
 
