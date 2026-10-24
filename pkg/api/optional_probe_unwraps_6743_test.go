@@ -12,10 +12,10 @@ import (
 //
 // WHAT WAS UNBOUND, measured at b9be179a6 with `go vet` rc 0 before each cell:
 //
-//   - `dpProbe()` (api.go): `return dataplane.Unwrap(s.dp)` -> `return s.dp`
+//   - `dpProbe()` (api.go): `return mgmtview.Probe(s.dp)` -> `return s.dp`
 //     left pkg/api AND pkg/daemon green.
 //   - `fetchUserspaceStatus` (metrics_userspace.go):
-//     `dataplane.Unwrap(dp).(interface{ Status() ... })` -> `any(dp).(...)`
+//     `mgmtview.Probe(dp).(interface{ Status() ... })` -> `any(dp).(...)`
 //     left both green.
 //
 // There IS a canary at pkg/daemon/daemon_dp_probe_canary_test.go, but it binds
@@ -51,7 +51,7 @@ func (b *apiStatusBackend6743) Status() (dpuserspace.ProcessStatus, error) {
 // TestRESTDpProbeResolvesThroughTheIndirection_6743 is the fail-on-revert guard
 // for the Unwrap in (*Server).dpProbe.
 //
-// RED-on-revert: `return dataplane.Unwrap(s.dp)` -> `return s.dp` in
+// RED-on-revert: `return mgmtview.Probe(s.dp)` -> `return s.dp` in
 // pkg/api/api.go.
 func TestRESTDpProbeResolvesThroughTheIndirection_6743(t *testing.T) {
 	backend := &apiStatusBackend6743{pid: 6743}
@@ -80,7 +80,7 @@ func TestRESTDpProbeResolvesThroughTheIndirection_6743(t *testing.T) {
 // for the direct unwrap in the metrics path, which is a SEPARATE production
 // site: it does its own assertion rather than going through dpProbe().
 //
-// RED-on-revert: `dataplane.Unwrap(dp).(interface{ Status() ... })` ->
+// RED-on-revert: `mgmtview.Probe(dp).(interface{ Status() ... })` ->
 // `any(dp).(interface{ Status() ... })` in pkg/api/metrics_userspace.go.
 func TestFetchUserspaceStatusResolvesThroughTheIndirection_6743(t *testing.T) {
 	backend := &apiStatusBackend6743{pid: 6743}

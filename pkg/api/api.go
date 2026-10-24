@@ -11,6 +11,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/dataplane/mgmtview"
 )
 
 // apiRuntimeDataPlane is the API server's legacy-compatible runtime surface.
@@ -278,16 +279,14 @@ func allInterfaceNames(cfg *config.Config) map[string]bool {
 }
 
 // dpProbe returns the value that OPTIONAL-capability assertions must be
-// made against. See pkg/grpcapi/runtime.go's dpProbe for the full #2114 /
-// #6743-F1 rationale: the daemon publishes a live indirection whose method
-// set is exactly apiRuntimeDataPlane, so probing it directly erases every
-// optional capability (Status(), AppliedNATView, the session cursor) and
-// blanks the NAT-pool and userspace Prometheus families on a healthy
-// deployment. Unwrap is the identity for a plain backend and nil once the
-// daemon has disowned one.
+// made against. It is the shared mgmtview.Probe: exactly one
+// dataplane.Unwrap per call, resolved fresh against the backend
+// published at this instant, never cached across backend replacement
+// (#2114/#6743-F1; see mgmtview.Probe for the full rationale). The nil
+// receiver answers nil so a probe after teardown fails closed.
 func (s *Server) dpProbe() any {
 	if s == nil {
 		return nil
 	}
-	return dataplane.Unwrap(s.dp)
+	return mgmtview.Probe(s.dp)
 }

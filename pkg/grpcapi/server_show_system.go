@@ -31,7 +31,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/clockskew"
 	"github.com/psaab/xpf/pkg/config"
-	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/dataplane/mgmtview"
 	dpformat "github.com/psaab/xpf/pkg/dataplane/userspace/format"
 	"github.com/psaab/xpf/pkg/sysservices"
 	"golang.org/x/sys/unix"
@@ -590,7 +590,7 @@ func (s *Server) showBuffersContext(ctx context.Context, cfg *config.Config, buf
 	// The map-stats arm and the userspace arm use the same already-resolved
 	// backend for the context-aware count, so neither takes another cell load.
 	// TestShowBuffersTakesOneCellLoad pins the one-load property.
-	if backend := dataplane.Unwrap(s.dp); backend != nil {
+	if backend := mgmtview.Probe(s.dp); backend != nil {
 		// #5782: this render ends with a full v4+v6 SessionCount() table walk
 		// (same per-bucket BPF-map lock contention as the session read-scans).
 		// Gate the whole render through the shared diagcmd.SessionWalkLimiter and
@@ -676,7 +676,7 @@ func (s *Server) showBuffersDetailContext(ctx context.Context, cfg *config.Confi
 	// map-stats fallback AND the session-count tail, so the whole render
 	// describes one instant instead of several separate cell loads. The
 	// The session-count tail uses the same already-resolved backend.
-	if backend := dataplane.Unwrap(s.dp); backend != nil {
+	if backend := mgmtview.Probe(s.dp); backend != nil {
 		// #5782: same full-table SessionCount() walk gate as showBuffers.
 		release, err := sessionWalkLimiter.Acquire()
 		if err != nil {

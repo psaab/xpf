@@ -11,7 +11,7 @@ import (
 // through dataplane.Unwrap, and nothing bound that.
 //
 // WHAT WAS UNBOUND, measured at 710a87569: severing the unwrap in
-// (*Server).dpProbe — `return dataplane.Unwrap(s.dp)` -> `return s.dp`
+// (*Server).dpProbe — `return mgmtview.Probe(s.dp)` -> `return s.dp`
 // (runtime.go) — left BUILD_RC=0 and FULL_RC=0 across the COMPLETE set of
 // in-tree importers of this package (`./pkg/grpcapi/ ./pkg/cli/
 // ./pkg/daemon/ ./pkg/api/ ./pkg/upgrade/ ./cmd/cli/`, enumerated with
@@ -88,7 +88,7 @@ func (b *grpcOptionalBackend6743) IterateSessionsV6From(
 // TestGRPCDpProbeResolvesThroughTheIndirection_6743 is the fail-on-revert
 // guard for the Unwrap in (*Server).dpProbe.
 //
-// RED-on-revert: `return dataplane.Unwrap(s.dp)` -> `return s.dp` in
+// RED-on-revert: `return mgmtview.Probe(s.dp)` -> `return s.dp` in
 // pkg/grpcapi/runtime.go.
 func TestGRPCDpProbeResolvesThroughTheIndirection_6743(t *testing.T) {
 	backend := &grpcOptionalBackend6743{pid: 6743}

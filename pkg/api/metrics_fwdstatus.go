@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/dataplane/mgmtview"
 	"github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/fwdstatus"
 )
@@ -56,7 +56,7 @@ func (c *xpfCollector) collectFwdStatus(
 	if dp != nil && dp.IsLoaded() {
 		base := forwardingMetricsDP{dp: dp}
 		buildDP = base
-		if _, ok := dataplane.Unwrap(dp).(interface {
+		if _, ok := mgmtview.Probe(dp).(interface {
 			Status() (userspace.ProcessStatus, error)
 		}); ok {
 			// Supply the same status already fetched for all userspace

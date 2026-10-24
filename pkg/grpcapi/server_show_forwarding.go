@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
-	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/dataplane/mgmtview"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	dpformat "github.com/psaab/xpf/pkg/dataplane/userspace/format"
 	"github.com/psaab/xpf/pkg/fwdstatus"
@@ -110,7 +110,7 @@ func (s *Server) forwardingStatusDataplane() fwdstatus.DataPlaneAccessor {
 	// ONE resolution feeds both decisions, as in showBuffers (r7): a
 	// setDataplane(nil) landing between a publication check and a separate
 	// dpProbe() re-creates the confusion the check exists to prevent.
-	backend := dataplane.Unwrap(s.dp)
+	backend := mgmtview.Probe(s.dp)
 	if backend == nil {
 		return nil
 	}

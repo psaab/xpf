@@ -5,19 +5,20 @@ import (
 	"errors"
 
 	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/dataplane/mgmtview"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
 // backendSessionCountContext counts forward-only sessions and discards partial
-// totals if the request is cancelled between either address-family pass.
+// totals if the request is cancelled between either address-family pass. The
+// SessionCountContext shape itself is the shared mgmtview helper; the
+// sampled-cancellation walk below is the gRPC-specific fallback for
+// backends without it.
 func backendSessionCountContext(ctx context.Context, backend any) (v4, v6 int, err error) {
-	counter, ok := backend.(interface {
-		SessionCountContext(context.Context) (int, int, error)
-	})
-	if ok {
-		return counter.SessionCountContext(ctx)
+	if v4, v6, err, ok := mgmtview.SessionCountContext(ctx, backend); ok {
+		return v4, v6, err
 	}
 	dp, ok := backend.(interface {
 		IterateSessions(func(dataplane.SessionKey, dataplane.SessionValue) bool) error
@@ -166,36 +167,24 @@ type userspaceControlProvider interface {
 }
 
 // dpProbe returns the value that OPTIONAL-capability assertions must be
-// made against.
-//
-// #2114/#6743-F1: the daemon hands Server.dp a live indirection
-// (pkg/daemon's liveDataPlane) whose method set is exactly the MANDATORY
-// grpcRuntime surface above. Asserting an optional capability directly on
-// that value — the session cursor, Status(), AppliedNATView, the
-// userspace controls, the policy-scheduler state — fails for a perfectly
-// HEALTHY backend that implements it, silently degrading session paging to
-// the O(N^2) fallback and blanking whole answer families. dataplane.Unwrap
-// resolves to the backend published AT THIS INSTANT; it returns nil once
-// the daemon has disowned the backend, so the probe still fails closed
-// after a setDataplane(nil). For a plain backend — every test, every
-// non-daemon embedder — it is the identity.
+// made against. It is the shared mgmtview.Probe: exactly one
+// dataplane.Unwrap per call, resolved fresh against the backend
+// published at this instant, never cached across backend replacement
+// (#2114/#6743-F1; see mgmtview.Probe for the full rationale). The nil
+// receiver answers nil so a probe after teardown fails closed.
 func (s *Server) dpProbe() any {
 	if s == nil {
 		return nil
 	}
-	return dataplane.Unwrap(s.dp)
+	return mgmtview.Probe(s.dp)
 }
 
 // backendMapStats reads map statistics off an ALREADY-RESOLVED backend
-// (#6743 r7-F3). The buffers renders use one dataplane.Unwrap so map
-// statistics and the context-aware session count describe the same backend
-// publication. Session totals are walked through backendSessionCountContext,
-// which stops on request cancellation and discards partial results.
-
+// (#6743 r7-F3) via the shared mgmtview.MapStats. The buffers renders
+// use one dataplane.Unwrap so map statistics and the context-aware
+// session count describe the same backend publication. Session totals
+// are walked through backendSessionCountContext, which stops on
+// request cancellation and discards partial results.
 func backendMapStats(backend any) []dataplane.MapStats {
-	m, ok := backend.(interface{ GetMapStats() []dataplane.MapStats })
-	if !ok {
-		return nil
-	}
-	return m.GetMapStats()
+	return mgmtview.MapStats(backend)
 }

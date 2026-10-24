@@ -3,6 +3,7 @@ package api
 import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/dataplane/mgmtview"
 )
 
 func (c *xpfCollector) initDataplaneSafetyDescriptors() {
@@ -18,7 +19,7 @@ func (c *xpfCollector) initDataplaneSafetyDescriptors() {
 
 func (c *xpfCollector) emitDataplaneSafety(ch chan<- prometheus.Metric) {
 	c.initDataplaneSafetyDescriptors()
-	m, ok := dataplane.Unwrap(c.deps.dp).(interface {
+	m, ok := mgmtview.Probe(c.deps.dp).(interface {
 		ObsoleteRegistryAccesses() uint64
 		DetachDebt() []int
 		HostDivergence() []string

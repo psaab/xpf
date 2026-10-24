@@ -51,6 +51,16 @@ xpf (0.0.0) unstable; urgency=medium
     each observed firing through the production fold at a real
     schema position. The guard comment that claimed no pair named
     a pre-empted container is corrected; no admission changed.
+  * Dataplane: the management surfaces (REST, CLI, gRPC) now share
+    the optional-capability helpers in `pkg/dataplane/mgmtview`
+    (`Probe`/`Unwrap`, `MapStats`, `SessionCount`,
+    `SessionCountContext`) instead of triplicated `dpProbe` and
+    per-surface `backendMapStats`/`backendSessionCount` copies
+    (#16155). No combined `Full` interface is introduced: the three
+    mandatory surfaces stay separate, and optional caps are still
+    resolved fresh from the backend published at each answer —
+    exactly one publication per answer, never cached across backend
+    replacement — so operator output is unchanged.
 
   * Split pkg/config/schema_walk.go (2,369 lines) mechanically into
     the schema_walk_* family: schema_walk_entry.go (SchemaValidate*
