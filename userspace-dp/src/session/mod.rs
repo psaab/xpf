@@ -1349,7 +1349,9 @@ struct SessionEntry {
     /// cannot reset the leak clock. Cleared (→0) ONLY when the entry
     /// genuinely leaves the held world: real-traffic refresh
     /// (`update_session`), promotion refresh
-    /// (`refresh_for_ha_transition`), or re-import (`upsert_synced`).
+    /// (`refresh_for_ha_transition`), or re-import (`upsert_synced`) —
+    /// except an anchor-preserved same-id re-import (#16043), which is a
+    /// pure snapshot resend and carries the clock over.
     first_held_ns: u64,
     /// #2501: per-session forward/reverse byte and packet counters,
     /// accumulated on the AF_XDP forwarding hot path. Forward = the
@@ -6214,6 +6216,11 @@ mod close_state_sync_9412_acceptance_tests;
 #[cfg(test)]
 #[path = "opening_state_sync_10888_tests.rs"]
 mod opening_state_sync_10888_tests;
+// #16043: a same-id HA re-import must not refresh the idle anchor for
+// non-TCP sessions or legacy (handshake-state-less) TCP imports.
+#[cfg(test)]
+#[path = "reimport_idle_anchor_16043_tests.rs"]
+mod reimport_idle_anchor_16043_tests;
 // #9582: a close seen only by a worker replica of a local session is announced, with
 // the installer's id. Written before the fix.
 #[cfg(test)]
