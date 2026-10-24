@@ -802,10 +802,8 @@ func (c *CLI) showNATDestination(cfg *config.Config, args []string) error {
 			match := natshow.RuleMatchDestination(rule)
 			// Preserve an authored wildcard; RuleMatchDestination also returns
 			// this value when the rule has no destination-address constraint.
-			if rule.Match.DestinationAddress != "" ||
-				len(rule.Match.DestinationAddresses) > 0 ||
-				rule.Match.DestinationAddressName != "" ||
-				len(rule.Match.DestinationAddressNames) > 0 {
+			if len(rule.Match.DestinationAddressList()) > 0 ||
+				len(rule.Match.DestinationAddressNameList()) > 0 {
 				fmt.Printf("    Match destination-address: %s\n", match)
 			}
 			// #15269 C09-01: enforced source match (0.0.0.0/0 when unscoped).

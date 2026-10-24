@@ -38,25 +38,12 @@ import "strings"
 // spell, because the two renderers use the same literal for a different reason
 // (there is no v6 wildcard here) and folding it in would hide which one is
 // being printed.
-func natMatchAddresses(cidr string, cidrs []string, name string, names []string) string {
+func natMatchAddresses(cidrs []string, names []string) string {
 	var out []string
-
-	switch {
-	case len(cidrs) > 0:
-		out = append(out, cidrs...)
-	case cidr != "":
-		out = append(out, cidr)
-	}
-
+	out = append(out, cidrs...)
 	// Address-book names are rendered alongside the CIDRs rather than in place
 	// of them: Junos permits a rule to carry both, and dropping either half
 	// would reintroduce this defect for the mixed case.
-	switch {
-	case len(names) > 0:
-		out = append(out, names...)
-	case name != "":
-		out = append(out, name)
-	}
-
+	out = append(out, names...)
 	return strings.Join(out, " ")
 }

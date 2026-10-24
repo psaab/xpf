@@ -88,8 +88,7 @@ func RuleMatchSource(rule *config.NATRule) string {
 		return "0.0.0.0/0"
 	}
 	if m := natMatchAddresses(
-		rule.Match.SourceAddress, rule.Match.SourceAddresses,
-		rule.Match.SourceAddressName, rule.Match.SourceAddressNames,
+		rule.Match.SourceAddressList(), rule.Match.SourceAddressNameList(),
 	); m != "" {
 		return m
 	}
@@ -102,8 +101,7 @@ func RuleMatchDestination(rule *config.NATRule) string {
 		return "0.0.0.0/0"
 	}
 	if m := natMatchAddresses(
-		rule.Match.DestinationAddress, rule.Match.DestinationAddresses,
-		rule.Match.DestinationAddressName, rule.Match.DestinationAddressNames,
+		rule.Match.DestinationAddressList(), rule.Match.DestinationAddressNameList(),
 	); m != "" {
 		return m
 	}

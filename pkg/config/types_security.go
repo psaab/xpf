@@ -1382,6 +1382,30 @@ func (m NATMatch) DestinationAddressNameList() []string {
 	return natMatchValues(m.DestinationAddressNames, m.DestinationAddressName)
 }
 
+// SourceAddressList returns every `match source-address` CIDR (#3431).
+func (m NATMatch) SourceAddressList() []string {
+	return natMatchValues(m.SourceAddresses, m.SourceAddress)
+}
+
+// DestinationAddressList returns every `match destination-address` CIDR
+// (#3431).
+func (m NATMatch) DestinationAddressList() []string {
+	return natMatchValues(m.DestinationAddresses, m.DestinationAddress)
+}
+
+// DestinationPortList returns every `match destination-port` value,
+// falling back to the scalar when the plural slice is empty. An empty
+// result means "criterion absent".
+func (m NATMatch) DestinationPortList() []int {
+	if len(m.DestinationPorts) > 0 {
+		return m.DestinationPorts
+	}
+	if m.DestinationPort != 0 {
+		return []int{m.DestinationPort}
+	}
+	return nil
+}
+
 // NATThen defines the NAT translation action.
 type NATThen struct {
 	Type      NATType

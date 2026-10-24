@@ -41,10 +41,7 @@ func RuleMatchDestPorts(rule *config.NATRule) []int {
 	if rule == nil {
 		return nil
 	}
-	ports := rule.Match.DestinationPorts
-	if len(ports) == 0 && rule.Match.DestinationPort != 0 {
-		ports = []int{rule.Match.DestinationPort}
-	}
+	ports := rule.Match.DestinationPortList()
 	seen := make(map[int]struct{}, len(ports))
 	out := make([]int, 0, len(ports))
 	for _, p := range ports {

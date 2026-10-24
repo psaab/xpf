@@ -52,6 +52,20 @@ func resolveSNATMatchAddr(dp DataPlane, cidr string, result *CompileResult) (uin
 	return addrID, nil
 }
 
+// snatMatchOperands adapts a NATMatch *List() accessor result for the
+// SNAT Cartesian compile loops. An absent axis is a wildcard: the loops
+// must still run once with the empty operand (resolveSNATMatchAddr maps
+// "" to ID 0 = any), as the pre-#16143 `[]string{scalar}` fallback did
+// even when the scalar was empty. The accessors return nil for an absent
+// criterion (other consumers test len==0 for "unconstrained"), so that
+// singleton-empty semantics lives here, not in the accessors.
+func snatMatchOperands(addrs []string) []string {
+	if len(addrs) == 0 {
+		return []string{""}
+	}
+	return addrs
+}
+
 // NAT counter-key type prefixes (#2218). The per-rule NAT translation hit
 // counter map is keyed by "natType/rulesetName/ruleName". The type prefix is
 // required because the same (rule-set, rule) name pair can be reused across
@@ -415,16 +429,10 @@ func compileNATWithStaging(dp DataPlane, cfg *config.Config, result *CompileResu
 			// source-nat off: exemption rule (no pool allocation)
 			if rule.Then.Off {
 				// Resolve source addresses (supports bracket lists)
-				srcAddrs := rule.Match.SourceAddresses
-				if len(srcAddrs) == 0 {
-					srcAddrs = []string{rule.Match.SourceAddress}
-				}
+				srcAddrs := snatMatchOperands(rule.Match.SourceAddressList())
 
 				// Resolve destination addresses (supports bracket lists)
-				dstAddrs := rule.Match.DestinationAddresses
-				if len(dstAddrs) == 0 {
-					dstAddrs = []string{rule.Match.DestinationAddress}
-				}
+				dstAddrs := snatMatchOperands(rule.Match.DestinationAddressList())
 
 				for _, srcAddr := range srcAddrs {
 					srcAddrID, err := resolveSNATMatchAddr(dp, srcAddr, result)
@@ -615,14 +623,8 @@ func compileNATWithStaging(dp DataPlane, cfg *config.Config, result *CompileResu
 
 			// Resolve SNAT match addresses (supports bracket lists). Each
 			// distinct CIDR gets an implicit address-book ID in result.AddrIDs.
-			srcAddrs := rule.Match.SourceAddresses
-			if len(srcAddrs) == 0 {
-				srcAddrs = []string{rule.Match.SourceAddress}
-			}
-			dstAddrs := rule.Match.DestinationAddresses
-			if len(dstAddrs) == 0 {
-				dstAddrs = []string{rule.Match.DestinationAddress}
-			}
+			srcAddrs := snatMatchOperands(rule.Match.SourceAddressList())
+			dstAddrs := snatMatchOperands(rule.Match.DestinationAddressList())
 
 			for _, srcAddr := range srcAddrs {
 				srcAddrID, err := resolveSNATMatchAddr(dp, srcAddr, result)
@@ -700,40 +702,35 @@ func compileNATWithStaging(dp DataPlane, cfg *config.Config, result *CompileResu
 				}
 
 				// Validate source-address-name if present (config compatibility)
-				if rule.Match.SourceAddressName != "" {
-					if _, ok := result.AddrIDs[rule.Match.SourceAddressName]; !ok {
+				for _, name := range rule.Match.SourceAddressNameList() {
+					if _, ok := result.AddrIDs[name]; !ok {
 						compileWarn(dp, "DNAT source-address-name not found in address-book",
-							"rule", rule.Name, "name", rule.Match.SourceAddressName)
+							"rule", rule.Name, "name", name)
 					}
 				}
 
 				// #3229: validate destination-address-name (config compat)
-				if rule.Match.DestinationAddressName != "" {
-					if _, ok := result.AddrIDs[rule.Match.DestinationAddressName]; !ok {
+				for _, name := range rule.Match.DestinationAddressNameList() {
+					if _, ok := result.AddrIDs[name]; !ok {
 						compileWarn(dp, "DNAT destination-address-name not found in address-book",
-							"rule", rule.Name, "name", rule.Match.DestinationAddressName)
+							"rule", rule.Name, "name", name)
 					}
 				}
 
-				// Parse match destination address
-				if rule.Match.DestinationAddress == "" {
+				// Parse match destination address. Diagnostics only (#16143):
+				// the userspace snapshot carries the full destination list;
+				// this pass validates/warns/logs one entry per plural value
+				// so a bracket-list rule's later values are not invisible.
+				// A scalar-only (older-peer) match still yields one entry.
+				destAddrs := rule.Match.DestinationAddressList()
+				if len(destAddrs) == 0 {
 					compileWarn(dp, "DNAT rule has no match destination-address",
 						"rule", rule.Name)
 					continue
 				}
 
-				matchIP, _, err := net.ParseCIDR(rule.Match.DestinationAddress)
-				if err != nil {
-					// Try as plain IP
-					matchIP = net.ParseIP(rule.Match.DestinationAddress)
-					if matchIP == nil {
-						compileWarn(dp, "invalid DNAT match address",
-							"addr", rule.Match.DestinationAddress)
-						continue
-					}
-				}
-
-				// Parse pool address
+				// Pool validation is destination-independent; parse it once
+				// before the per-destination diagnostic loop below.
 				poolIP, poolNet, err := net.ParseCIDR(pool.Address)
 				if err != nil {
 					poolIP = net.ParseIP(pool.Address)
@@ -763,38 +760,54 @@ func compileNATWithStaging(dp DataPlane, cfg *config.Config, result *CompileResu
 					}
 				}
 
-				// Resolve the application match so an unresolvable application
-				// or application-set still warns. The protocol/port expansion
-				// this used to drive existed only to key dnat_table entries;
-				// the userspace snapshot carries the rule's own match instead.
-				if rule.Match.Application != "" {
-					userApps := cfg.Applications.Applications
-					if _, found := config.ResolveApplication(rule.Match.Application, userApps); !found {
-						if _, isSet := cfg.Applications.ApplicationSets[rule.Match.Application]; isSet {
-							// Expand application-set to individual terms
-							expanded, eerr := config.ExpandApplicationSet(rule.Match.Application, &cfg.Applications)
-							if eerr != nil {
-								compileWarn(dp, "DNAT expand application-set failed",
-									"rule", rule.Name, "application", rule.Match.Application, "err", eerr)
-							} else {
-								for _, termName := range expanded {
-									if _, ok := config.ResolveApplication(termName, userApps); !ok {
-										compileWarn(dp, "DNAT application-set term not found",
-											"rule", rule.Name, "term", termName)
-									}
-								}
-							}
-						} else {
-							compileWarn(dp, "DNAT application not found, ignoring",
-								"rule", rule.Name, "application", rule.Match.Application)
+				for _, destAddr := range destAddrs {
+					matchIP, _, err := net.ParseCIDR(destAddr)
+					if err != nil {
+						// Try as plain IP
+						matchIP = net.ParseIP(destAddr)
+						if matchIP == nil {
+							compileWarn(dp, "invalid DNAT match address",
+								"addr", destAddr)
+							continue
 						}
 					}
-				}
 
-				compileInfo(dp, "destination NAT rule compiled",
-					"rule-set", rs.Name, "rule", rule.Name,
-					"match_ip", matchIP,
-					"pool", pool.Name, "pool_ip", poolIP)
+					// Resolve the application match so an unresolvable
+					// application or application-set still warns. The
+					// protocol/port expansion this used to drive existed
+					// only to key dnat_table entries; the userspace
+					// snapshot carries the rule's own match instead.
+					// #16143: iterate every plural value so a bracket-list
+					// rule's later applications are not invisible.
+					for _, appName := range rule.Match.ApplicationList() {
+						userApps := cfg.Applications.Applications
+						if _, found := config.ResolveApplication(appName, userApps); !found {
+							if _, isSet := cfg.Applications.ApplicationSets[appName]; isSet {
+								// Expand application-set to individual terms
+								expanded, eerr := config.ExpandApplicationSet(appName, &cfg.Applications)
+								if eerr != nil {
+									compileWarn(dp, "DNAT expand application-set failed",
+										"rule", rule.Name, "application", appName, "err", eerr)
+								} else {
+									for _, termName := range expanded {
+										if _, ok := config.ResolveApplication(termName, userApps); !ok {
+											compileWarn(dp, "DNAT application-set term not found",
+												"rule", rule.Name, "term", termName)
+										}
+									}
+								}
+							} else {
+								compileWarn(dp, "DNAT application not found, ignoring",
+									"rule", rule.Name, "application", appName)
+							}
+						}
+					}
+
+					compileInfo(dp, "destination NAT rule compiled",
+						"rule-set", rs.Name, "rule", rule.Name,
+						"match_ip", matchIP,
+						"pool", pool.Name, "pool_ip", poolIP)
+				}
 			}
 		}
 	}

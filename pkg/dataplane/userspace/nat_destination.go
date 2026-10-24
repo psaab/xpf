@@ -156,10 +156,7 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 			// collapsed the rule to its first destination and silently dropped
 			// translation for B and C. Mirror the source-address idiom: prefer
 			// the bracket-list form, fall back to the singular match value.
-			destAddrs := append([]string(nil), rule.Match.DestinationAddresses...)
-			if len(destAddrs) == 0 && rule.Match.DestinationAddress != "" {
-				destAddrs = append(destAddrs, rule.Match.DestinationAddress)
-			}
+			destAddrs := append([]string(nil), rule.Match.DestinationAddressList()...)
 			// #3229: `match destination-address-name <book-entry>` selects the
 			// translated destination by an address-book reference instead of a
 			// literal prefix. It was parsed into DestinationAddressName but never
@@ -199,10 +196,7 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 			// internal service to every source in the from-zone (fail-open).
 			// Mirror the SNAT builder: prefer the bracket-list form, fall back
 			// to the singular match value. An empty result = match any source.
-			sourceAddrs := append([]string(nil), rule.Match.SourceAddresses...)
-			if len(sourceAddrs) == 0 && rule.Match.SourceAddress != "" {
-				sourceAddrs = append(sourceAddrs, rule.Match.SourceAddress)
-			}
+			sourceAddrs := append([]string(nil), rule.Match.SourceAddressList()...)
 			// #2416: `match source-address-name <book-entry>` scopes the DNAT
 			// the same way a literal `match source-address` does, but as an
 			// address-book reference. It was parsed into SourceAddressName yet
@@ -460,8 +454,8 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 					for _, proto := range protos {
 						appTerms = append(appTerms, appTerm{
 							proto:           proto,
-							dstRanges:       coalescePortRanges(rule.Match.DestinationPorts),
-							dstPortsPresent: len(rule.Match.DestinationPorts) > 0,
+							dstRanges:       coalescePortRanges(rule.Match.DestinationPortList()),
+							dstPortsPresent: len(rule.Match.DestinationPortList()) > 0,
 						})
 					}
 				}
@@ -486,10 +480,7 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 			// explicit rule match. A configured-but-unrepresentable value fails
 			// CLOSED below (the rule is omitted), exactly like the no-application
 			// path and the source-NAT builder — it never widens to [0,0].
-			ruleDstPorts := rule.Match.DestinationPorts
-			if len(ruleDstPorts) == 0 && rule.Match.DestinationPort != 0 {
-				ruleDstPorts = []int{rule.Match.DestinationPort}
-			}
+			ruleDstPorts := rule.Match.DestinationPortList()
 			ruleDstPortConfigured := len(ruleDstPorts) > 0 || len(rule.Match.InvalidDestinationPorts) > 0
 			if isOff && ruleDstPortConfigured && len(coalescePortRanges(ruleDstPorts)) == 0 {
 				// #12631: a broken explicit port constraint must not narrow an

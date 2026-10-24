@@ -83,10 +83,7 @@ func buildSourceNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map[stri
 					"ruleset", rs.Name, "rule", rule.Name)
 			}
 			lenientMatchDropped := rule.LenientMatchDropped
-			sourceAddrs := append([]string(nil), rule.Match.SourceAddresses...)
-			if len(sourceAddrs) == 0 && rule.Match.SourceAddress != "" {
-				sourceAddrs = append(sourceAddrs, rule.Match.SourceAddress)
-			}
+			sourceAddrs := append([]string(nil), rule.Match.SourceAddressList()...)
 			// #2416/#3431: resolve every source-address-name for SNAT. A
 			// poisoned closure clears this side and sets the existing
 			// LenientMatchDropped marker so the rule drops instead of matching a
@@ -99,10 +96,7 @@ func buildSourceNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map[stri
 				sourceAddrs = nil
 				lenientMatchDropped = true
 			}
-			destAddrs := append([]string(nil), rule.Match.DestinationAddresses...)
-			if len(destAddrs) == 0 && rule.Match.DestinationAddress != "" {
-				destAddrs = append(destAddrs, rule.Match.DestinationAddress)
-			}
+			destAddrs := append([]string(nil), rule.Match.DestinationAddressList()...)
 			// #3229/#3431: resolve every destination-address-name. Like a
 			// poisoned source side, a poisoned destination side clears its
 			// addresses and marks the whole SNAT rule fail-closed.
@@ -258,7 +252,7 @@ func buildSourceNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map[stri
 			// member). The Rust matcher enforces these before translating AND
 			// before applying a `then source-nat off` exemption, so a
 			// port/app-scoped rule no longer silently widens to every port.
-			matchDestPorts := sourceNATDestPortRanges(rule.Match.DestinationPorts, rule.Match.InvalidDestinationPorts)
+			matchDestPorts := sourceNATDestPortRanges(rule.Match.DestinationPortList(), rule.Match.InvalidDestinationPorts)
 			matchApps := buildSourceNATAppTerms(cfg, rule.Match.ApplicationList())
 			if rule.Then.Off {
 				// #12631: malformed off-exemption constraints must over-exempt,

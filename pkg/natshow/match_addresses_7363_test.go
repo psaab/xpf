@@ -145,24 +145,24 @@ func TestUnscopedRuleStillRendersAny7363(t *testing.T) {
 }
 
 // The helper itself, at the boundaries the renderers cannot easily reach.
+// Inputs are the accessor outputs (#16143): plural superseding singular is
+// the accessors' job, so the helper only joins the two lists.
 func TestNatMatchAddressesPluralSupersedesSingular7363(t *testing.T) {
 	cases := []struct {
-		name           string
-		cidr, bookName string
-		cidrs, names   []string
-		want           string
+		name         string
+		cidrs, names []string
+		want         string
 	}{
 		{name: "empty", want: ""},
-		{name: "singular cidr only", cidr: "10.0.0.0/8", want: "10.0.0.0/8"},
-		{name: "plural supersedes singular", cidr: "10.0.0.0/8",
-			cidrs: []string{"10.0.0.0/8", "10.1.0.0/16"}, want: "10.0.0.0/8 10.1.0.0/16"},
-		{name: "singular name only", bookName: "N", want: "N"},
-		{name: "plural names supersede", bookName: "N", names: []string{"N", "M"}, want: "N M"},
-		{name: "cidr and name together", cidr: "10.0.0.0/8", bookName: "N", want: "10.0.0.0/8 N"},
+		{name: "singular cidr only", cidrs: []string{"10.0.0.0/8"}, want: "10.0.0.0/8"},
+		{name: "plural", cidrs: []string{"10.0.0.0/8", "10.1.0.0/16"}, want: "10.0.0.0/8 10.1.0.0/16"},
+		{name: "singular name only", names: []string{"N"}, want: "N"},
+		{name: "plural names", names: []string{"N", "M"}, want: "N M"},
+		{name: "cidr and name together", cidrs: []string{"10.0.0.0/8"}, names: []string{"N"}, want: "10.0.0.0/8 N"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := natMatchAddresses(tc.cidr, tc.cidrs, tc.bookName, tc.names)
+			got := natMatchAddresses(tc.cidrs, tc.names)
 			if got != tc.want {
 				t.Errorf("natMatchAddresses = %q, want %q", got, tc.want)
 			}

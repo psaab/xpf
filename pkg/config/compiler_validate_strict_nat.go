@@ -522,12 +522,9 @@ func validateDestinationNATAddressesStrict(cfg *Config) error {
 			if rule == nil {
 				continue
 			}
-			// Mirror the builder's destination-address gathering: prefer the
-			// bracket-list form, fall back to the singular match value.
-			destAddrs := append([]string(nil), rule.Match.DestinationAddresses...)
-			if len(destAddrs) == 0 && rule.Match.DestinationAddress != "" {
-				destAddrs = append(destAddrs, rule.Match.DestinationAddress)
-			}
+			// Mirror the builder's destination-address gathering (#16143
+			// accessor).
+			destAddrs := append([]string(nil), rule.Match.DestinationAddressList()...)
 			if len(destAddrs) == 0 {
 				// No destination match at all — out of scope.
 				continue
@@ -737,7 +734,7 @@ func validateNATMatchDestinationPortStrict(cfg *Config) error {
 				if rule == nil {
 					continue
 				}
-				for _, p := range rule.Match.DestinationPorts {
+				for _, p := range rule.Match.DestinationPortList() {
 					if p < 1 || p > 65535 {
 						return fmt.Errorf(
 							"%s-nat rule-set %q rule %q: match destination-port %d is out "+
