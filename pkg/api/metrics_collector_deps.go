@@ -62,6 +62,7 @@ type collectorDeps struct {
 	archiveFailureCountFn                func() uint64
 	earlyInputGuardSwapFailedFn          func() bool
 	journalPermsDegradedFn               func() bool
+	journalLegacyScrubDegradedFn         func() bool
 	frrReloadDegradedFn                  func() bool
 	natLenientTerminalActionRulesFn      func() []string
 	frrQuarantinedRouteMapsFn            func() []string
@@ -145,6 +146,7 @@ func collectorDepsFromServer(srv *Server) collectorDeps {
 		archiveFailureCountFn:                srv.archiveFailureCountFn,
 		earlyInputGuardSwapFailedFn:          srv.earlyInputGuardSwapFailedFn,
 		journalPermsDegradedFn:               srv.journalPermsDegradedFn,
+		journalLegacyScrubDegradedFn:         srv.journalLegacyScrubDegradedFn,
 		frrReloadDegradedFn:                  srv.frrReloadDegradedFn,
 		natLenientTerminalActionRulesFn:      srv.natLenientTerminalActionRulesFn,
 		frrQuarantinedRouteMapsFn:            srv.frrQuarantinedRouteMapsFn,

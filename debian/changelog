@@ -1,4 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
+  * API/daemon: surface journal legacy-scrub degradation on /health
+    and Prometheus (#16490). The #15143 `JournalLegacyScrubDegraded`
+    flag latched when a pre-#1896 journal segment could not be
+    rewritten or purged (cleartext api-auth credentials may survive),
+    but unlike its `JournalPermsDegraded` twin it had no consumer
+    outside configstore. The daemon now wires
+    `JournalLegacyScrubDegradedFn` beside `JournalPermsDegradedFn`:
+    a non-fatal `journal_legacy_scrub_degraded` /health field (stays
+    200, appends continue) plus the
+    `xpf_config_journal_legacy_scrub_degraded` gauge, emitted even
+    when the dataplane is not loaded, clearing after a successful
+    scrub retry.
   * Userspace DP: count a Stage-11 IPsec pre-claim PBR drop exactly once
     (#16480). The #14314 pre-claim probe resolved the input-filter PBR
     override uncounted and recycled on `RouteOverride::Drop`, but that

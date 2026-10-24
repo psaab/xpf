@@ -1987,6 +1987,10 @@ owned by the `journal/` subpackage.
   refusal. Clean v2 segments are never rewritten. Failures latch
   `LegacyScrubDegraded` (poll via `Store.JournalLegacyScrubDegraded`)
   and retry on next use; appends/reads/Load continue while degraded.
+  Since #16490 the daemon wires that poll to /health
+  (`journal_legacy_scrub_degraded`, non-fatal) and the
+  `xpf_config_journal_legacy_scrub_degraded` gauge, beside the
+  `JournalPermsDegraded` twin.
   An earlier revision of this section said legacy segments rotate
   "intact … no migration pass" — that was the #15143 defect.
 - **Rotation namespace changes are synced even on append failure (#10723 F6).**

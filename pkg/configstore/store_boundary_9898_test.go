@@ -14,6 +14,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore/journal"
+	"github.com/psaab/xpf/pkg/fsatomic"
 )
 
 var errInjected9898 = errors.New("injected 9898 failure")
@@ -845,5 +846,59 @@ func TestJournalPermsDegradedEndToEnd_9898(t *testing.T) {
 	}
 	if s.JournalPermsDegraded() {
 		t.Fatalf("repaired journal still reads degraded through the Store getter; want clear")
+	}
+}
+
+// TestJournalLegacyScrubDegradedEndToEnd_16490 drives the full
+// failure→visible→repair→clear cycle through the production Store
+// getter — the exact function the daemon wires to /health
+// (journal_legacy_scrub_degraded) and the
+// xpf_config_journal_legacy_scrub_degraded gauge (#16490). The scrub
+// rewrite is failed by injecting a rename failure via the fsatomic
+// test seam, so the rewrite never lands and the cleartext canary
+// stays on disk while degraded; restoring the seam lets the next use
+// retry the scrub, purge the canary, and clear the flag.
+func TestJournalLegacyScrubDegradedEndToEnd_16490(t *testing.T) {
+	dir := t.TempDir()
+	journalPath := filepath.Join(dir, ".config.journal")
+	ts := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).Format(time.RFC3339Nano)
+	legacy := `{"timestamp":"` + ts + `","action":"commit","detail":"legacy commit","before":null,"after":{"System":{"Services":{"WebManagement":{"APIAuth":{"Users":[{"Username":"api-admin","Password":"correct-horse-battery"}]}}}}}}` + "\n"
+	if err := os.WriteFile(journalPath, []byte(legacy), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := newTestStore(t)
+	s.journal = journal.New(journalPath)
+	if s.JournalLegacyScrubDegraded() {
+		t.Fatalf("fresh journal reads legacy-scrub degraded before first use; want clean")
+	}
+
+	restore := fsatomic.SetRenameFileForTesting(func(string, string) error {
+		return errInjected9898
+	})
+	s.journal.ScrubLegacyPayloads()
+	if !s.JournalLegacyScrubDegraded() {
+		t.Fatalf("failed scrub reads clean through the Store getter; want visible degradation")
+	}
+	raw, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "correct-horse-battery") {
+		t.Fatalf("premise broken: failed scrub should leave the cleartext canary on disk, got:\n%s", raw)
+	}
+
+	// Heal: the next use retries the scrub and clears the flag.
+	restore()
+	s.journal.ScrubLegacyPayloads()
+	if s.JournalLegacyScrubDegraded() {
+		t.Fatalf("successful retry still reads legacy-scrub degraded through the Store getter; want clear")
+	}
+	raw, err = os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "correct-horse-battery") {
+		t.Fatalf("journal still contains cleartext canary after successful retry:\n%s", raw)
 	}
 }

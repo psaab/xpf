@@ -417,6 +417,13 @@ type xpfCollector struct {
 	// observability signal, not a forwarding/durability emergency.
 	journalPermsDegraded *prometheus.Desc
 
+	// #16490: 0/1 gauge — 1 while the legacy-payload scrub is degraded
+	// (a pre-#1896 segment could not be rewritten or purged and may
+	// still carry cleartext api-auth credentials). Appends continue,
+	// so like journalPermsDegraded this is an observability signal,
+	// not a forwarding/durability emergency.
+	journalLegacyScrubDegraded *prometheus.Desc
+
 	// #3261: 0/1 gauge — 1 while the most recently built userspace snapshot
 	// carries unrepresentable policy content that the helper integrity
 	// preflight rejects (previous-good retained / fresh-boot default-deny —
@@ -1286,6 +1293,18 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 			v = 1
 		}
 		c.emitConstMetric(ch, c.journalPermsDegraded,
+			prometheus.GaugeValue, v)
+	}
+
+	// #16490: journal legacy-scrub health is likewise a control-plane
+	// signal — emit it before the dataplane gate so the degraded state
+	// stays visible even when the dataplane is not loaded.
+	if c.deps.journalLegacyScrubDegradedFn != nil {
+		v := 0.0
+		if c.deps.journalLegacyScrubDegradedFn() {
+			v = 1
+		}
+		c.emitConstMetric(ch, c.journalLegacyScrubDegraded,
 			prometheus.GaugeValue, v)
 	}
 

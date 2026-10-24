@@ -340,6 +340,7 @@ var collectorDescControlPlane = []int{
 	xpfCollectorDescFieldIndex("archiveFailures"),
 	xpfCollectorDescFieldIndex("earlyInputGuardSwapFailed"),
 	xpfCollectorDescFieldIndex("journalPermsDegraded"),
+	xpfCollectorDescFieldIndex("journalLegacyScrubDegraded"),
 	xpfCollectorDescFieldIndex("userspacePolicyContentRejected"),
 	xpfCollectorDescFieldIndex("userspaceZoneIDCollision"),
 	xpfCollectorDescFieldIndex("userspaceSnapshotPolicyMismatch"),
