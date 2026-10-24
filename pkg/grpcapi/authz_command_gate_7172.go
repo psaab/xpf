@@ -205,6 +205,15 @@ const (
 // anchored ancestor deny is re-checked via the typed-prefix walk below
 // for the deny side only. Fail closed: an unreadable request denies
 // for a restricted class.
+//
+// The judged forms are the canonical spelling (canonicalOperationalWords,
+// #16073): the raw typed line must not be judged, or a unique abbreviation
+// (`sh conf`, `sh sec pol`) steps around an anchored deny/allow written
+// against the canonical command — the same string the data-source twin
+// (operationalAllowed) already judges. Config-mode `set …`/`run …` lines
+// are not operational commands and keep their raw form: `set` is not in
+// the operational tree, and `run`'s embedded line is canonicalised after
+// the `run` word is stripped.
 func authorizeCompleteRPCCommand(class string, rules config.CompiledLoginRegexes, req any) error {
 	cr, isComplete := req.(*pb.CompleteRequest)
 	if !isComplete || cr == nil {
@@ -240,6 +249,21 @@ func authorizeCompleteRPCCommand(class string, rules config.CompiledLoginRegexes
 // `show configuration …`. Config-mode `run <line>` embeds a full
 // operational command, so the embedded line is the full form there.
 // Text after a `|` is pipe-filter text, not command text, and is dropped.
+//
+// For operational lines (everything except a config-mode non-`run`
+// line) the returned forms are canonicalised with
+// canonicalOperationalWords (#16073), so admission judges the same
+// spelling as the data-source gate. The final word is the word being
+// completed and may be a partial fragment (`sh ver` completing
+// `version`, or a value such as a zone name), so canonicalising the
+// whole line verbatim would leave keyword abbreviations after an
+// unknown value unexpanded; the keyword prefix before it is therefore
+// canonicalised as well and rejoined. Ambiguous or unresolvable
+// abbreviations are left raw by canonicalOperationalWords — that is
+// fail-safe here, not fail-open: the raw form cannot match an anchored
+// canonical deny, but a restricted class's allowlist also cannot be
+// affirmatively matched by it, and the handler's data-source gate
+// applies the same canonicalisation before any live value is read.
 func completeLineForms(req *pb.CompleteRequest) (full string, prefixes []string, isShowConfig bool) {
 	text := req.GetLine()
 	if req.GetPos() >= 0 && int(req.GetPos()) < len(text) {
@@ -249,18 +273,63 @@ func completeLineForms(req *pb.CompleteRequest) (full string, prefixes []string,
 		text = text[:idx]
 	}
 	words := strings.Fields(text)
+	configLine := false
 	if req.GetConfigMode() && len(words) >= 2 && words[0] == "run" {
 		words = words[1:]
+	} else if req.GetConfigMode() {
+		configLine = true
 	}
 	if len(words) == 0 {
 		return "", nil, false
+	}
+	_, isShowConfig = resolveShowConfigurationWords(words)
+	if !configLine {
+		words = canonicalCompleteWords(words)
+		if _, ok := resolveShowConfigurationWords(words); ok {
+			isShowConfig = true
+		}
 	}
 	full = strings.Join(words, " ")
 	for i := 1; i < len(words); i++ {
 		prefixes = append(prefixes, strings.Join(words[:i], " "))
 	}
-	_, isShowConfig = resolveShowConfigurationWords(words)
 	return full, prefixes, isShowConfig
+}
+
+// canonicalCompleteWords canonicalises a typed operational line for
+// admission judging (#16073). The whole line is canonicalised first;
+// when its trailing word is still being completed (a partial keyword
+// fragment such as `ver`, or a value the walker cannot expand past),
+// the line minus that word is canonicalised too and the trailing word
+// re-attached, so `sh ver` is judged with a `show` prefix and
+// `sh sec pol` as `show security policies`.
+func canonicalCompleteWords(words []string) []string {
+	canon := canonicalOperationalWords(words)
+	if len(words) < 2 {
+		return canon
+	}
+	// Whole-line canonicalisation expanded the trailing word: keep it.
+	if len(canon) == len(words) && canon[len(canon)-1] != words[len(words)-1] {
+		return canon
+	}
+	head := canonicalOperationalWords(words[:len(words)-1])
+	if len(head) == 0 {
+		return canon
+	}
+	// Head expanded nothing beyond the raw head: keep whole-line form.
+	headExpanded := head[0] != words[0]
+	if !headExpanded && len(head) > 1 {
+		for i := 1; i < len(head); i++ {
+			if head[i] != words[i] {
+				headExpanded = true
+				break
+			}
+		}
+	}
+	if !headExpanded {
+		return canon
+	}
+	return append(append([]string(nil), head...), words[len(words)-1])
 }
 
 // isTierDeny reports whether a decision was denied by a deny regex
