@@ -14,6 +14,47 @@ func LinuxIfName(name string) string {
 	return strings.ReplaceAll(name, "/", "-")
 }
 
+// SplitIfaceRef splits an interface reference at the FIRST dot into
+// (name, suffix, hasSuffix), returning the suffix RAW and uninterpreted
+// (#16144). It is the single first-dot split shared by the resolvers in
+// this file whose callers treat the suffix as an opaque suffix to copy,
+// discard, or look up structurally — never as a parsed integer unit:
+//
+//   - ResolveReth / ResolveFab copy the raw suffix verbatim onto the
+//     resolved name (arbitrary text, incl. non-decimal or multi-dot
+//     suffixes such as "reth0.50.60" → member + ".50.60"), so a
+//     (name, unit int, hasUnit) parser would normalize or refuse refs
+//     they currently carry.
+//   - DHCPLeaseKey discards the suffix entirely (its unit/VLAN identity
+//     comes from the separately supplied unitNum argument).
+//
+// Suffix-semantics table (per-caller adoption, #16144 decisive check):
+//
+//	caller              suffix semantic
+//	ResolveReth         raw copy onto resolved member
+//	ResolveFab          raw copy onto LocalFabricMember
+//	DHCPLeaseKey        discard (unitNum arg supplies identity)
+//	resolveKernelIfName declared-name-wins (exact stanza match first,
+//	                    see resolveKernelIfNameWith) then
+//	                    SplitInterfaceUnitRef long-declared-prefix —
+//	                    NOT this first-dot split, and NOT adopted here:
+//	                    its base must outrank a parse (#8994/#9821), so
+//	                    it must not downgrade to SplitIfaceRef.
+//	flowexport.parseIfaceRef
+//	                    parses the FINAL-dot suffix as a strict decimal
+//	                    unit (rejects "1abc2", "-1", leading sign/space)
+//	                    and has no *Config — a DIFFERENT grammar (cfg-free,
+//	                    last-dot, int-typed); NOT adopted: folding it into
+//	                    SplitIfaceRef would either lose its strictness or
+//	                    force an int parse onto raw-copy callers.
+//
+// A bare ref (no dot) returns (ref, "", false); a trailing dot returns
+// (base, "", true), exactly as strings.Cut does. Newtypes are deferred
+// by #16144; this plain triple is the agreed equivalent.
+func SplitIfaceRef(ref string) (name string, suffix string, hasSuffix bool) {
+	return strings.Cut(ref, ".")
+}
+
 // RethIndex returns the numeric index of a canonical RETH interface name.
 // The supported range follows the chassis cluster reth-count bound.
 func RethIndex(name string) (int, bool) {
@@ -241,10 +282,10 @@ func (c *Config) RethToPhysical() map[string]string {
 // Returns input unchanged if not a RETH name.
 func (c *Config) ResolveReth(ref string) string {
 	rethMap := c.RethToPhysical()
-	parts := strings.SplitN(ref, ".", 2)
-	if phys, ok := rethMap[parts[0]]; ok {
-		if len(parts) == 2 {
-			return phys + "." + parts[1]
+	base, suffix, hasSuffix := SplitIfaceRef(ref)
+	if phys, ok := rethMap[base]; ok {
+		if hasSuffix {
+			return phys + "." + suffix
 		}
 		return phys
 	}
@@ -255,8 +296,7 @@ func (c *Config) ResolveReth(ref string) string {
 // interface using LocalFabricMember. Returns input unchanged if not a fab name
 // or the interface has no LocalFabricMember set.
 func (c *Config) ResolveFab(ref string) string {
-	parts := strings.SplitN(ref, ".", 2)
-	base := parts[0]
+	base, suffix, hasSuffix := SplitIfaceRef(ref)
 	if c.Interfaces.Interfaces == nil {
 		return ref
 	}
@@ -265,8 +305,8 @@ func (c *Config) ResolveFab(ref string) string {
 		return ref
 	}
 	resolved := ifc.LocalFabricMember
-	if len(parts) == 2 {
-		return resolved + "." + parts[1]
+	if hasSuffix {
+		return resolved + "." + suffix
 	}
 	return resolved
 }
@@ -511,7 +551,9 @@ func (c *Config) resolveKernelIfNameWith(ref string, tunMap map[string]string) s
 //
 // Returns ("", false) when the unit doesn't exist in cfg.
 func (c *Config) DHCPLeaseKey(configRef string, unitNum int) (string, bool) {
-	configRef = strings.SplitN(configRef, ".", 2)[0]
+	// #16144: suffix is DISCARDED here — the unit/VLAN identity comes from
+	// the separately supplied unitNum argument, not from parsing ref.
+	configRef, _, _ = SplitIfaceRef(configRef)
 	if c.Interfaces.Interfaces == nil {
 		return "", false
 	}
