@@ -9,6 +9,14 @@ xpf (0.0.0) unstable; urgency=medium
     (only a generic no-L7 warning fired); each configured profile or
     child is now named in the warning, matching the SSL-proxy sibling
     (#10984). The stanzas remain loadable and preserved for display.
+  * Login: `system login user root authentication …` now warns at
+    commit instead of compiling silently while inert (#16076). The
+    daemon never applies root credentials from a `login user` stanza;
+    root's password and SSH keys come only from
+    `system root-authentication`, which the warning names. The
+    misleading docs claim that `user root authentication ssh-…`
+    gives root a key is corrected. `user root class` remains honoured
+    and does not warn.
 
   * Login: the in-process console shell now re-resolves its user's
     `system login` class when the stanza changes, instead of keeping

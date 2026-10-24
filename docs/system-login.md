@@ -28,6 +28,24 @@ The password directive takes a **pre-computed crypt(3) hash**, never
 plaintext — exactly like `root-authentication encrypted-password`. xpf
 does not hash plaintext for you.
 
+## Root credentials: use `system root-authentication`, not `user root`
+
+```
+set system root-authentication encrypted-password "<crypt-hash>"
+set system root-authentication ssh-ed25519 "<key>"
+```
+
+`system login user root authentication …` is **ignored** (#16076). The
+daemon never creates or modifies the `root` account from a `login user`
+stanza (and never grants it sudo from one either); root's password and
+SSH keys are applied only from `system root-authentication`. A commit
+carrying an `authentication` child under `user root` therefore warns,
+naming `system root-authentication` as the credential stanza — do not
+rely on the `user root` spelling to lock or key root. The `class` (and
+`uid`) leaves on `user root` are separate: an explicit
+`system login user root class <c>` **is** honoured for the CLI class
+decision (see the table below).
+
 ## Login class (RBAC) and commit-time validation (#2008 H6)
 
 ```
@@ -154,9 +172,12 @@ account that is in fact present.
 same shape is.** The two are different questions. For a non-root account
 `system login` is the authority on what it may do, and saying nothing is not
 permission. For uid 0 it is neither an instruction nor enforceable:
-`set system login user root authentication ssh-ed25519 "…"` is an ordinary way
-to give root a key and expresses no intent to restrict anything, so denying on
-it would demote the **console** shell to `unauthorized` — a lockout of the
+`set system login user root authentication ssh-ed25519 "…"` does **not**
+give root a key: the daemon never applies `login user root` credentials
+(see below), and root's keys come only from
+`system root-authentication`. Writing the key under `user root` therefore
+expresses no intent to restrict anything — and installs nothing — so
+denying on it would demote the **console** shell to `unauthorized` — a lockout of the
 lifeline caused by a purely additive config. And uid 0 owns the config database,
 the daemon process and the on-disk secrets, so a CLI denial is advisory
 regardless. An **explicit** class on `user root` is a different matter and is

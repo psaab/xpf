@@ -644,6 +644,25 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 				if authoredAuth {
 					user.EncryptedPassword = NewSecret("")
 				}
+				// #16076: `system login user root authentication …` is inert.
+				// The daemon never creates/modifies root via `login user`
+				// (applySystemLogin and the sudoers sweep both skip root);
+				// root's password and SSH keys come only from
+				// `system root-authentication` (applyRootAuth). Without this
+				// warning the stanza compiles silently and an operator can
+				// believe root is key/password-locked when it is not. The
+				// `class`/`uid` leaves on `user root` are NOT inert (class is
+				// honoured for the CLI class decision), so only an authored
+				// `authentication` child triggers this. Emit on both strict
+				// and tolerant paths: cfg.Warnings surfaces at commit-check
+				// and on load, so the false assurance is removed everywhere.
+				if user.Name == "root" && authoredAuth && cfg != nil {
+					cfg.Warnings = append(cfg.Warnings,
+						"system login user root authentication is ignored: "+
+							"root credentials are not applied from `system login user root`; "+
+							"use `system root-authentication` (encrypted-password / ssh-*) "+
+							"to set root's password and SSH keys (#16076)")
+				}
 				for _, prop := range userProps {
 					switch prop.Name() {
 					case "uid":
