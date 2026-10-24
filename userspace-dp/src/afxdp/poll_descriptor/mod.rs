@@ -9046,6 +9046,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             now_ns,
                             now_secs,
                             ingress_zone_override,
+                            ambiguous_zone,
                         ) {
                             EmbeddedIcmpReversal::Queued {
                                 related_admit,
@@ -9071,6 +9072,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 frame,
                                                 meta,
                                                 ingress_zone_override,
+                                                ambiguous_zone,
                                                 forward.decision.resolution,
                                                 worker_ctx,
                                                 now_ns,
@@ -9175,6 +9177,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             now_ns,
                             now_secs,
                             ingress_zone_override,
+                            ambiguous_zone,
                         ) {
                             EmbeddedIcmpReversal::Queued {
                                 related_admit,
@@ -9203,6 +9206,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 frame,
                                                 meta,
                                                 ingress_zone_override,
+                                                ambiguous_zone,
                                                 forward.decision.resolution,
                                                 worker_ctx,
                                                 now_ns,

@@ -50,6 +50,7 @@ pub(super) fn try_translate_nat64_icmp_error(
     now_ns: u64,
     now_secs: u64,
     ingress_zone_override: Option<u16>,
+    ambiguous_zone: Option<u16>,
 ) -> EmbeddedIcmpReversal {
     let nat64_match = match try_nat64_icmp_error_match_from_frame(
         packet_frame,
@@ -117,7 +118,11 @@ pub(super) fn try_translate_nat64_icmp_error(
             src_v6_octets[12..].copy_from_slice(&router_v4.octets());
             let src_v6 = Ipv6Addr::from(src_v6_octets);
 
-            let arrival_zone = actual_embedded_icmp_ingress_zone(
+            // #16053: finalize on the raw arrival zone, then promote the
+            // withheld ambiguous claim only on the finalized resolution's
+            // owner-RG proof (never before owner proof, never for the
+            // FabricRedirect stamp).
+            let raw_arrival_zone = actual_embedded_icmp_ingress_zone(
                 worker_ctx.forwarding,
                 meta,
                 ingress_zone_override,
@@ -128,7 +133,21 @@ pub(super) fn try_translate_nat64_icmp_error(
                 now_secs,
                 meta.ingress_ifindex as i32,
                 resolution,
-                arrival_zone,
+                raw_arrival_zone,
+            );
+            let effective_ingress_zone_override = ingress_zone_override.or_else(|| {
+                super::promote_ambiguous_fabric_zone(
+                    worker_ctx.forwarding,
+                    worker_ctx.ha_state,
+                    now_secs,
+                    ambiguous_zone,
+                    icmp_resolution,
+                )
+            });
+            let arrival_zone = actual_embedded_icmp_ingress_zone(
+                worker_ctx.forwarding,
+                meta,
+                effective_ingress_zone_override,
             );
             // The frame build needs the FINAL resolution's L2 addresses. A
             // FabricRedirect source MAC carries the actual ingress zone for
@@ -223,7 +242,9 @@ pub(super) fn try_translate_nat64_icmp_error(
                 sessions.refund_icmp_error_not_delivered(&budget_key, now_ns);
                 return EmbeddedIcmpReversal::Dropped;
             };
-            let arrival_zone = actual_embedded_icmp_ingress_zone(
+            // #16053: as the V4ToV6 arm — raw-zone finalize, then
+            // owner-RG-gated promotion of the withheld ambiguous claim.
+            let raw_arrival_zone = actual_embedded_icmp_ingress_zone(
                 worker_ctx.forwarding,
                 meta,
                 ingress_zone_override,
@@ -234,7 +255,21 @@ pub(super) fn try_translate_nat64_icmp_error(
                 now_secs,
                 meta.ingress_ifindex as i32,
                 resolution,
-                arrival_zone,
+                raw_arrival_zone,
+            );
+            let effective_ingress_zone_override = ingress_zone_override.or_else(|| {
+                super::promote_ambiguous_fabric_zone(
+                    worker_ctx.forwarding,
+                    worker_ctx.ha_state,
+                    now_secs,
+                    ambiguous_zone,
+                    icmp_resolution,
+                )
+            });
+            let arrival_zone = actual_embedded_icmp_ingress_zone(
+                worker_ctx.forwarding,
+                meta,
+                effective_ingress_zone_override,
             );
             let (Some(dst_mac), Some(src_mac)) =
                 (icmp_resolution.neighbor_mac, icmp_resolution.src_mac)

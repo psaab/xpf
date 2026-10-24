@@ -74,6 +74,12 @@ pub(in crate::afxdp) enum EmbeddedIcmpReversal {
 /// on the flowless poll path. Returns [`EmbeddedIcmpReversal`] telling the
 /// caller how the descriptor was consumed. Invoked for every classified ICMP
 /// error; only a live-session match can produce a reversal.
+/// #16053: `ambiguous_zone` is the withheld claimed zone of a #15916
+/// ambiguous fabric stamp. It is promoted to an arrival-zone override
+/// ONLY after the quoted session's finalized resolution proves local
+/// owner-RG ownership (the same V2 predicate as
+/// `promote_ambiguous_fabric_zone`); an unowned claim leaves the raw
+/// fabric arrival zone in force, so it can never manufacture RELATED.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
     desc: XdpDesc,
@@ -95,6 +101,7 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
     now_ns: u64,
     now_secs: u64,
     ingress_zone_override: Option<u16>,
+    ambiguous_zone: Option<u16>,
 ) -> EmbeddedIcmpReversal {
     #[cfg(feature = "debug-log")]
     let icmpv6_trace = meta.protocol == PROTO_ICMPV6
@@ -163,6 +170,9 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
         meta,
         ingress_zone_override,
     );
+    // Fabric finalization must NOT consult the withheld claimed zone: a
+    // non-owner FabricRedirect is adjudicated on the peer, and passing the
+    // claim here would stamp it into the redirect before owner proof.
     let icmp_resolution = finalize_embedded_icmp_resolution_parts(
         worker_ctx.forwarding,
         worker_ctx.ha_state,
@@ -170,6 +180,25 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
         meta.ingress_ifindex as i32,
         icmp_match.resolution,
         arrival_zone,
+    );
+    // #16053: promote the withheld ambiguous claim ONLY on this packet's
+    // finalized-resolution owner-RG proof, then re-derive the arrival zone
+    // from the promoted override. A proved peer punt already arrives as
+    // `ingress_zone_override`, so this or-else never re-gates it; an
+    // unowned claim yields None and the raw fabric arrival zone stands.
+    let effective_ingress_zone_override = ingress_zone_override.or_else(|| {
+        super::promote_ambiguous_fabric_zone(
+            worker_ctx.forwarding,
+            worker_ctx.ha_state,
+            now_secs,
+            ambiguous_zone,
+            icmp_resolution,
+        )
+    });
+    let arrival_zone = actual_embedded_icmp_ingress_zone(
+        worker_ctx.forwarding,
+        meta,
+        effective_ingress_zone_override,
     );
     // #10666: a NAT'd PMTUD error (v4 Frag-Needed / v6 Packet-Too-Big)
     // quoting a live session rides the RELATED bypass iff it arrives from
@@ -484,6 +513,7 @@ pub(in crate::afxdp) fn enforce_queued_embedded_icmp_policy(
     queued_frame: &[u8],
     ingress_meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
+    ambiguous_zone: Option<u16>,
     resolution: ForwardingResolution,
     worker_ctx: &WorkerContext,
     now_ns: u64,
@@ -538,11 +568,21 @@ pub(in crate::afxdp) fn enforce_queued_embedded_icmp_policy(
         ingress_meta.ingress_vlan_id,
     )
     .unwrap_or(ingress_meta.ingress_ifindex as i32);
+    // #16053: the same owner-RG promotion as the match arm — the packet's
+    // own (queued) resolution is the proof, never the claimed zone alone.
     let gated_zone_override = super::gate_fabric_zone_override_on_owner_rg(
         worker_ctx.forwarding,
         worker_ctx.ha_state,
         now_secs,
-        ingress_zone_override,
+        ingress_zone_override.or_else(|| {
+            super::promote_ambiguous_fabric_zone(
+                worker_ctx.forwarding,
+                worker_ctx.ha_state,
+                now_secs,
+                ambiguous_zone,
+                resolution,
+            )
+        }),
         resolution,
     );
     let (from_zone_id, to_zone_id) = super::zone_pair_ids_for_flow_with_override(
