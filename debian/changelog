@@ -1,5 +1,30 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Adopted materialization replaces local incumbent (#16217,
+    FZDiag30): fw1 session install refused to clobber a
+    non-peer-synced existing entry on every adopted hit
+    (session/install.rs upsert_synced_with_origin
+    allow_replace_local=false), so install_failed stayed true, the
+    flow-cache seed gate never installed an entry, and every packet
+    re-took the slow session-hit path (2,231/2,237 SEED lines
+    install_failed=true in the FZDiag30 trace; 28 SUM zero
+    intervals). Adopted flows — fabric_adopted proof (Established +
+    post-takeover RG ownership from the poll adoption gate) — may
+    now replace the local incumbent in
+    materialize_shared_session_hit_adopted; non-adopted
+    materializations keep the #10582 clobber refusal
+    bit-identically. A pre-adoption cached PolicyDenied for the NAT
+    tuple is superseded by the adopted seed once the adopted
+    session-hit backs the flow (existing #13635/#16217 deny
+    supersession now fires because the adopted row actually
+    installs). Live aged P4 (99.16217.56.dirty, helper dcb4fe7d...
+    hash-proved both nodes): runs 3+4 ZERO SUM zero intervals
+    consecutively (run 1: 1 zero interval at FO+2 s, run 2 aborted
+    on a rolling-upgrade deploy hiccup before traffic).
+
+ -- xpf maintainers <noreply@anthropic.com>  Fri, 23 Oct 2026 00:00:00 +0000
+
+
   * Node-neighbor adopted restore + timer pending retry + stored-
     terminal target recovery (#16217): adopted recomputes now
     consult the node neighbor map (the shared dynamic map the

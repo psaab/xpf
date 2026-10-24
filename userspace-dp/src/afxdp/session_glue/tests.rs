@@ -11078,6 +11078,104 @@ fn shared_hit_local_clobber_sets_install_failed_10582() {
     );
 }
 
+/// #16217 (FZDiag30): an ADOPTED materialization replaces a
+/// non-peer-synced local incumbent at the replica key. Live, fw1's
+/// adopted hits read `install_failed=true` on every retransmit
+/// (2,231/2,237) because `upsert_synced_with_origin` refused to
+/// clobber the incumbent, so the flow-cache seed gate never
+/// installed an entry and every packet re-took the slow path.
+/// The non-adopted control keeps the #10582 refusal.
+///
+/// FAIL-ON-REVERT: pass `false` in place of `fabric_adopted` to
+/// `materialize_shared_session_hit_adopted` and the adopted leg
+/// returns `install_failed=true` with the incumbent intact.
+#[test]
+fn adopted_materialize_replaces_local_incumbent_16217() {
+    let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(
+        &crate::afxdp::test_fixtures::policy_deny_snapshot(),
+    );
+    let key = test_key();
+    let build_hit = || ResolvedSessionLookup {
+        key: ResolvedSessionKey::Canonical(key.clone()),
+        lookup: SessionLookup {
+            decision: test_decision(),
+            metadata: test_metadata(),
+            forwarding_generation: ForwardingGenerationStamp::default(),
+            aux: SessionLookupAux::default(),
+        },
+        shared_entry: Some(SyncedSessionEntry { key: key.clone(),
+        decision: test_decision(),
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 0,
+        session_id: 777,
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        source_nat_static: None, }),
+        origin: SessionOrigin::SyncImport,
+        authority_deferred: false,
+    };
+    // Adopted: the synced replica replaces the local ForwardFlow row.
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        1_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let mut hit = build_hit();
+    let (_, install_failed) = super::materialize_shared_session_hit_adopted(
+        &mut sessions,
+        &mut hit,
+        &forwarding,
+        2_000_000,
+        TCP_FLAG_ACK,
+        true,
+    );
+    assert!(
+        !install_failed,
+        "adopted materialization must replace the local incumbent"
+    );
+    assert_eq!(sessions.len(), 1);
+    let (_, _, origin) = sessions
+        .entry_with_origin(&key)
+        .expect("adopted replica must be installed");
+    assert_eq!(
+        origin,
+        SessionOrigin::SharedMaterialize,
+        "the installed row is the materialized synced replica"
+    );
+    assert_eq!(sessions.session_id_for(&key), 777);
+    // Non-adopted control: the incumbent survives, install_failed set.
+    let mut control = SessionTable::new();
+    assert!(control.install_with_protocol(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        1_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let mut hit = build_hit();
+    let (_, install_failed) = super::materialize_shared_session_hit_adopted(
+        &mut control,
+        &mut hit,
+        &forwarding,
+        2_000_000,
+        TCP_FLAG_ACK,
+        false,
+    );
+    assert!(install_failed, "non-adopted clobber must stay refused");
+    let (_, _, origin) = control
+        .entry_with_origin(&key)
+        .expect("incumbent must survive");
+    assert_eq!(origin, SessionOrigin::ForwardFlow);
+}
+
 /// Build a fabric-wire shared hit whose canonical replica collides with a
 /// distinct incumbent row. The origin is parameterized so the safe path and
 /// #10613 repro use the same divergent-key fixture.
@@ -14557,6 +14655,7 @@ fn purge_translated_synced_hit_full_teardown_13674() {
             origin: SessionOrigin::SyncImport,
             shared_identity: Some((1, 0)),
         }),
+        fabric_adopted: false,
     };
     maybe_promote_synced_session_with_conntrack(
         &mut sessions,

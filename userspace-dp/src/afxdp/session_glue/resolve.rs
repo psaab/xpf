@@ -4,7 +4,29 @@ pub(super) fn materialize_shared_session_hit(sessions: &mut SessionTable,
 resolved: &mut ResolvedSessionLookup,
 forwarding: &ForwardingState,
 now_ns: u64,
-tcp_flags: u8,) -> (SessionLookup, bool) { if let Some(shared) = resolved.shared_entry.take() {
+tcp_flags: u8,) -> (SessionLookup, bool) {
+    materialize_shared_session_hit_adopted(sessions, resolved, forwarding, now_ns, tcp_flags, false)
+}
+
+/// #16217 (FZDiag30): adopted variant. `fabric_adopted` is true only
+/// when the poll fabric-adoption gate has already proven this tuple
+/// belongs to an Established session and this node is the RG owner
+/// post-takeover. A synced replica materialized for such a flow may
+/// replace a non-peer-synced local incumbent (`allow_replace_local`):
+/// the incumbent is the stale pre-failover row (e.g. a
+/// MissingNeighborSeed / locally seeded row) that the adoption
+/// resolve supersedes, and refusing to clobber it left
+/// `install_failed=true` on every adopted hit, so the flow-cache seed
+/// gate (`flow_cache_seed.rs`) never installed an entry and every
+/// packet re-took the slow path. Non-adopted materializations keep
+/// `allow_replace_local=false` bit-identically (the #10582 clobber
+/// guard).
+pub(super) fn materialize_shared_session_hit_adopted(sessions: &mut SessionTable,
+resolved: &mut ResolvedSessionLookup,
+forwarding: &ForwardingState,
+now_ns: u64,
+tcp_flags: u8,
+fabric_adopted: bool,) -> (SessionLookup, bool) { if let Some(shared) = resolved.shared_entry.take() {
     // #10612 (N2): fence stale-zone shared hits at materialize ingress.
     // A shared-transient stale row (import fail-open linger racing
     // validation) must materialize as a MISS, not install into the
@@ -52,7 +74,7 @@ tcp_flags: u8,) -> (SessionLookup, bool) { if let Some(shared) = resolved.shared
             tcp_handshake_state: replica.tcp_handshake_state,
             source_nat_static: replica.source_nat_static,
         },
-        false,
+        fabric_adopted,
     );
     // A refused shared repair must not mutate the incumbent local row's
     // leak provenance. The stamp is evidence for the materialized replica
@@ -227,8 +249,14 @@ pub(in crate::afxdp::session_glue) fn apply_deferred_shared_materialization(
         return;
     };
     let mut hit = ResolvedSessionLookup::shared(entry);
-    let (_, install_failed) =
-        materialize_shared_session_hit(sessions, &mut hit, forwarding, now_ns, tcp_flags);
+    let (_, install_failed) = materialize_shared_session_hit_adopted(
+        sessions,
+        &mut hit,
+        forwarding,
+        now_ns,
+        tcp_flags,
+        resolved.fabric_adopted,
+    );
     resolved.install_failed = install_failed;
     if resolved.session_id == 0 && !install_failed {
         resolved.session_id = sessions.session_id_for(&resolved.key);
@@ -593,6 +621,7 @@ fabric_adopted: bool,) -> Option<ResolvedFlowSessionDecision> {
             deferred_synced_promotion,
             deferred_shared_materialization,
             deferred_synced_purge,
+            fabric_adopted,
         });
     }
     // #11061: a synthetic/quarantined reply domain cannot be reinterpreted
@@ -805,6 +834,7 @@ fabric_adopted: bool,) -> Option<ResolvedFlowSessionDecision> {
         deferred_shared_materialization: None,
         deferred_forwarding_revalidation: None,
         deferred_synced_purge: None,
+        fabric_adopted: false,
     })
 }
 
