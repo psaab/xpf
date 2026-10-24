@@ -1,4 +1,12 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Userspace-dp: anchor the #15244 post-create-bind tripwire per arm
+    (#16437). The fill-prime and non-zerocopy arms of try_open_bind must
+    each carry `return Err(post_create_bind_error(...))` inside their
+    own windows in try_open_bind's comment-stripped body; the previous
+    file-wide count floor was met by the tag definition, the `is_`
+    predicate and the ladder gate alone, so un-tagging either inline
+    arm kept the tripwire green. Mutants un-tagging or comment-rescuing
+    either arm now red the tripwire; the baseline stays green.
   * Userspace helper: ignore SIGHUP in xpf-userspace-dp (#16431).
     #15084 made xpfd ignore SIGHUP, but the Rust helper kept the
     default disposition (xpfd's signal.Notify capture resets to
