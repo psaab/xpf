@@ -555,7 +555,9 @@ pub(super) fn build_binding_summary(bindings: &[BindingWorker], dbg: &mut DbgCou
 /// `filter_revoked_sessions` has been folded since #7212, but the policy
 /// revocation counter was omitted, so the per-second `DBG` report never
 /// showed it. RED-on-revert: dropping the field or the `accumulate` line
-/// fails to compile (surface absent) or asserts here.
+/// fails to compile (surface absent) or asserts here. Enforced by
+/// `make test-rust` Leg 3 (#16439), the only leg that builds with
+/// `--features debug-log`.
 #[cfg(test)]
 mod policy_revoked_sessions_fold_tests {
     use super::*;

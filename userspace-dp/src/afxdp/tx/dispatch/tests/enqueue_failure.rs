@@ -515,9 +515,10 @@ fn enqueue_failure_conserves_free_frames_across_many_forwards() {
 // single-recycle assertions are gated on that feature; the non-debug-log build
 // exercises the normal direct-TX forward (offset consumed by the TX pipeline).
 //
-// RED-on-revert (run with `--features debug-log`): reinstating the duplicate
-// `push_front` makes the popped offset appear twice in `free_tx_frames` and the
-// pool length grow by one — both assertions below fail.
+// RED-on-revert: reinstating the duplicate `push_front` makes the popped
+// offset appear twice in `free_tx_frames` and the pool length grow by one —
+// both assertions below fail. Enforced by `make test-rust` Leg 3 (#16439),
+// the only leg that builds with `--features debug-log`.
 #[test]
 fn direct_tx_tuple_mismatch_recycles_frame_exactly_once() {
     let _guard = ForceFaultGuard;
