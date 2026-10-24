@@ -2166,8 +2166,12 @@ owned by the `journal/` subpackage.
   `SetArchiveConfig` seeds the per-process counter from the highest seq on
   disk so it stays globally monotonic across restarts (#5523 C179-060).
   Retention counts only current or legacy XPF snapshot names accepted by
-  `isXPFConfigArchiveSnapshot`; unrelated `config-*.conf` files in a shared
-  directory are left untouched (#11804).
+  `isXPFConfigArchiveSnapshot` — the sequenced shape, the pre-sequence
+  nanosecond shape, and the seconds-only `config-YYYYMMDD-HHMMSS.conf`
+  shape written by 2026-02-14..06-28 builds (#16487); unrelated
+  `config-*.conf` files in a shared directory are left untouched
+  (#11804). The Load-time api-auth purge tightens any recognized
+  snapshot it preserves from a pre-#4056 0644 to 0600 (#16487).
   The SYNCHRONOUS mirror `ArchiveConfig` writes to a dir passed as a
   PARAMETER (decoupled from the active `archiveDir`), so the shared counter —
   seeded from whatever dir `SetArchiveConfig` last activated — can sit BELOW
