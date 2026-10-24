@@ -615,8 +615,24 @@ func InvalidCreatedNanos() uint64 {
 	return invalidCreatedNanos.Load()
 }
 
-func (er *EventReader) logEvent(data []byte) {
-	var evt rawEvent
+// parseRawEvent is the single wire parser shared by the live logEvent path
+// and DecodeRawEventRecord (#16127). It decodes the fixed 144-byte RT_FLOW
+// frame by explicit offset (port byte order stays explicit) into evt, which
+// the caller must have zeroed. Callers guarantee len(data) >=
+// rawEventWireSize (Run, ProcessRawEvent and DecodeRawEventRecord all gate
+// on it), so every fixed offset below is in bounds; the additive extended
+// slots stay length-gated at their read sites.
+//
+// Unknown-address-family policy (#16127): REJECT. Only addrFamilyInet (2)
+// and addrFamilyInet6 (10) — the only families either producer emits — are
+// accepted. Any other family byte returns false, so the live path drops the
+// frame exactly as DecodeRawEventRecord rejects it, instead of the former
+// live-only fallback that rendered a non-v6 frame as IPv4. Pin:
+// TestRawEventFamilyPolicy16127.
+//
+// The parse itself allocates nothing: evt is filled in place and the
+// address strings are formatted by formatRawEventAddrs, also shared.
+func parseRawEvent(data []byte, evt *rawEvent) bool {
 	evt.Timestamp = binary.LittleEndian.Uint64(data[0:8])
 	copy(evt.SrcIP[:], data[8:24])
 	copy(evt.DstIP[:], data[24:40])
@@ -629,34 +645,56 @@ func (er *EventReader) logEvent(data []byte) {
 	evt.Protocol = data[53]
 	evt.Action = data[54]
 	evt.AddrFamily = data[55]
+	if evt.AddrFamily != addrFamilyInet && evt.AddrFamily != addrFamilyInet6 {
+		return false
+	}
+	evt.SessionPackets = binary.LittleEndian.Uint64(data[56:64])
+	evt.SessionBytes = binary.LittleEndian.Uint64(data[64:72])
+	copy(evt.NATSrcIP[:], data[72:88])
+	copy(evt.NATDstIP[:], data[88:104])
+	evt.NATSrcPort = binary.BigEndian.Uint16(data[104:106])
+	evt.NATDstPort = binary.BigEndian.Uint16(data[106:108])
+	evt.Created = binary.LittleEndian.Uint32(data[108:112])
+	evt.RevPackets = binary.LittleEndian.Uint64(data[112:120])
+	evt.RevBytes = binary.LittleEndian.Uint64(data[120:128])
+	evt.IngressIfindex = binary.LittleEndian.Uint32(data[128:132])
+	evt.AppID = config.AssignedAppID(binary.LittleEndian.Uint16(data[132:134]))
+	evt.CloseReason = data[134]
+	evt.LogSyslog = data[rawEventLogSyslogOffset]
+	evt.PolicyIDClose = binary.LittleEndian.Uint32(data[rawEventPolicyCloseOffset : rawEventPolicyCloseOffset+4])
+	return true
+}
+
+// formatRawEventAddrs renders the source/destination and NAT address:port
+// strings for a parsed event. Shared by logEvent and DecodeRawEventRecord
+// so the two paths can never diverge on family rendering (#16127);
+// parseRawEvent has already rejected any family other than Inet/Inet6.
+func formatRawEventAddrs(evt *rawEvent) (srcStr, dstStr, natSrcStr, natDstStr string) {
+	if evt.AddrFamily == addrFamilyInet6 {
+		srcStr = fmt.Sprintf("[%s]:%d", net.IP(evt.SrcIP[:]), evt.SrcPort)
+		dstStr = fmt.Sprintf("[%s]:%d", net.IP(evt.DstIP[:]), evt.DstPort)
+		natSrcStr = formatNATAddr12890(evt.NATSrcIP, true, evt.NATSrcPort)
+		natDstStr = formatNATAddr12890(evt.NATDstIP, true, evt.NATDstPort)
+		return srcStr, dstStr, natSrcStr, natDstStr
+	}
+	srcStr = fmt.Sprintf("%s:%d", net.IP(evt.SrcIP[:4]), evt.SrcPort)
+	dstStr = fmt.Sprintf("%s:%d", net.IP(evt.DstIP[:4]), evt.DstPort)
+	natSrcStr = formatNATAddr12890(evt.NATSrcIP, false, evt.NATSrcPort)
+	natDstStr = formatNATAddr12890(evt.NATDstIP, false, evt.NATDstPort)
+	return srcStr, dstStr, natSrcStr, natDstStr
+}
+
+func (er *EventReader) logEvent(data []byte) {
+	var evt rawEvent
+	if !parseRawEvent(data, &evt) {
+		// #16127: unknown address family — drop, matching
+		// DecodeRawEventRecord (see parseRawEvent).
+		return
+	}
 	policyGeneration, policyNameStamped := policyNameConfigGeneration(data)
 	policyDenyStamped := evt.EventType == eventTypePolicyDeny && policyNameStamped
 
-	// Parse NAT fields (offsets 72..112) if data is long enough
-	if len(data) >= 112 {
-		copy(evt.NATSrcIP[:], data[72:88])
-		copy(evt.NATDstIP[:], data[88:104])
-		evt.NATSrcPort = binary.BigEndian.Uint16(data[104:106])
-		evt.NATDstPort = binary.BigEndian.Uint16(data[106:108])
-		evt.Created = binary.LittleEndian.Uint32(data[108:112])
-	}
-
-	var srcStr, dstStr, natSrcStr, natDstStr string
-	if evt.AddrFamily == addrFamilyInet6 {
-		srcIP := net.IP(evt.SrcIP[:])
-		dstIP := net.IP(evt.DstIP[:])
-		srcStr = fmt.Sprintf("[%s]:%d", srcIP, evt.SrcPort)
-		dstStr = fmt.Sprintf("[%s]:%d", dstIP, evt.DstPort)
-		natSrcStr = formatNATAddr12890(evt.NATSrcIP, true, evt.NATSrcPort)
-		natDstStr = formatNATAddr12890(evt.NATDstIP, true, evt.NATDstPort)
-	} else {
-		srcIP := net.IP(evt.SrcIP[:4])
-		dstIP := net.IP(evt.DstIP[:4])
-		srcStr = fmt.Sprintf("%s:%d", srcIP, evt.SrcPort)
-		dstStr = fmt.Sprintf("%s:%d", dstIP, evt.DstPort)
-		natSrcStr = formatNATAddr12890(evt.NATSrcIP, false, evt.NATSrcPort)
-		natDstStr = formatNATAddr12890(evt.NATDstIP, false, evt.NATDstPort)
-	}
+	srcStr, dstStr, natSrcStr, natDstStr := formatRawEventAddrs(&evt)
 
 	eventName := eventTypeName(evt.EventType)
 	// #7531: empty for a lifecycle event, whose action byte is intentionally 0.
@@ -683,29 +721,25 @@ func (er *EventReader) logEvent(data []byte) {
 		InZoneName:  er.resolveZoneName(evt.IngressZone),
 		OutZoneName: er.resolveZoneName(evt.EgressZone),
 	}
+	// #16127 parity: the decoder surfaces the [108:112] created stamp on
+	// every frame, so the live record carries it too (previously close-only).
+	rec.Created = evt.Created
 
 	if evt.EventType == eventTypeSessionClose {
-		rec.SessionPkts = binary.LittleEndian.Uint64(data[56:64])
-		rec.SessionBytes = binary.LittleEndian.Uint64(data[64:72])
-		// #2465: surface the absolute session-creation Unix seconds for the
-		// flow exporters (a real StartTime instead of the packet-count guess).
-		rec.Created = evt.Created
+		rec.SessionPkts = evt.SessionPackets
+		rec.SessionBytes = evt.SessionBytes
 		// #2853: the [44:48] policy_id slot is repurposed on a SESSION_CLOSE
 		// frame to carry the creation instant's sub-second nanosecond
 		// remainder. Reinterpret it as CreatedNanos so the flow exporters keep
 		// millisecond StartTime resolution.
 		rec.CreatedNanos = ClampCreatedNanos(evt.PolicyID)
-		// #3056: the admitting policy ID rides the trailing [136:140] slot on a
-		// SESSION_CLOSE (because #2853 took [44:48]). Resolve PolicyID from there
+		// #3056: the admitting policy ID rides the trailing [136:140] slot on
+		// a SESSION_CLOSE (because #2853 took [44:48]). Read evt.PolicyIDClose
 		// so the RT_FLOW_SESSION_CLOSE record and the NetFlow/IPFIX close
-		// exporters name the admitting policy instead of policy 0. A short
-		// (legacy 136-byte) frame leaves it 0. The policy-name resolution below
-		// reads rec.PolicyID, so it follows this value.
-		rec.PolicyID = 0
+		// exporters name the admitting policy instead of policy 0. The
+		// policy-name resolution below reads rec.PolicyID.
+		rec.PolicyID = evt.PolicyIDClose
 		evt.PolicyID = 0
-		if len(data) >= rawEventWireSize {
-			rec.PolicyID = binary.LittleEndian.Uint32(data[rawEventPolicyCloseOffset : rawEventPolicyCloseOffset+4])
-		}
 		// Compute elapsed time from session creation
 		if evt.Created > 0 {
 			nowSec := uint32(evt.Timestamp / 1000000000)
@@ -717,7 +751,7 @@ func (er *EventReader) logEvent(data []byte) {
 	if evt.EventType == eventTypeScreenDrop {
 		rec.ScreenCheck = screenFlagName(evt.PolicyID)
 	}
-	if evt.EventType != eventTypeSessionClose && len(data) >= rawEventWireSize {
+	if evt.EventType != eventTypeSessionClose {
 		if policyDenyStamped {
 			rec.RuleID = evt.PolicyID
 		} else {
@@ -725,30 +759,24 @@ func (er *EventReader) logEvent(data []byte) {
 			rec.TermID = binary.LittleEndian.Uint32(data[60:64])
 		}
 		rec.OwnerRGID = int16(binary.LittleEndian.Uint16(data[64:66]))
-		if evt.EventType == eventTypeFilterLog && data[134] != 0 {
-			rec.Reason = filterLogSourceName(data[134])
-		} else if data[134] != closeReasonNone {
-			rec.Reason = closeReasonName(data[134])
+		if evt.EventType == eventTypeFilterLog && evt.CloseReason != 0 {
+			rec.Reason = filterLogSourceName(evt.CloseReason)
+		} else if evt.CloseReason != closeReasonNone {
+			rec.Reason = closeReasonName(evt.CloseReason)
 		}
 	}
 
-	// Parse extended fields (offset 112+)
-	var closeReasonCode uint8
-	if len(data) >= rawEventWireSize {
-		rec.RevSessionPkts = binary.LittleEndian.Uint64(data[112:120])
-		rec.RevSessionBytes = binary.LittleEndian.Uint64(data[120:128])
-		ifindex := binary.LittleEndian.Uint32(data[128:132])
-		appID := config.AssignedAppID(binary.LittleEndian.Uint16(data[132:134]))
-		closeReasonCode = data[134]
-
-		rec.IngressIface = er.resolveIfName(ifindex)
-		// #2749: retain the raw numeric ifindex so the flow exporters can
-		// populate ingressInterface (NetFlow IE 10 / IPFIX ingressInterface),
-		// which is an SNMP ifIndex value, not the resolved name.
-		rec.IngressIfindex = ifindex
-		rec.AppName = er.resolveAppName(appID)
-		rec.CloseReason = closeReasonName(closeReasonCode)
-	}
+	// Extended fields (offset 112+), already parsed into evt.
+	closeReasonCode := evt.CloseReason
+	rec.RevSessionPkts = evt.RevPackets
+	rec.RevSessionBytes = evt.RevBytes
+	rec.IngressIface = er.resolveIfName(evt.IngressIfindex)
+	// #2749: retain the raw numeric ifindex so the flow exporters can
+	// populate ingressInterface (NetFlow IE 10 / IPFIX ingressInterface),
+	// which is an SNMP ifIndex value, not the resolved name.
+	rec.IngressIfindex = evt.IngressIfindex
+	rec.AppName = er.resolveAppName(evt.AppID)
+	rec.CloseReason = closeReasonName(closeReasonCode)
 
 	// #2749/#16303: the class-of-service / interface-attribution block
 	// rides the additive [144:152] slots. Read it on session frames that
@@ -1071,51 +1099,14 @@ func DecodeRawEventRecord(data []byte) (EventRecord, bool) {
 	}
 
 	var evt rawEvent
-	evt.Timestamp = binary.LittleEndian.Uint64(data[0:8])
-	copy(evt.SrcIP[:], data[8:24])
-	copy(evt.DstIP[:], data[24:40])
-	evt.SrcPort = binary.BigEndian.Uint16(data[40:42])
-	evt.DstPort = binary.BigEndian.Uint16(data[42:44])
-	evt.PolicyID = binary.LittleEndian.Uint32(data[44:48])
-	evt.IngressZone = binary.LittleEndian.Uint16(data[48:50])
-	evt.EgressZone = binary.LittleEndian.Uint16(data[50:52])
-	evt.EventType = data[52]
-	evt.Protocol = data[53]
-	evt.Action = data[54]
-	evt.AddrFamily = data[55]
-	evt.SessionPackets = binary.LittleEndian.Uint64(data[56:64])
-	evt.SessionBytes = binary.LittleEndian.Uint64(data[64:72])
-	copy(evt.NATSrcIP[:], data[72:88])
-	copy(evt.NATDstIP[:], data[88:104])
-	evt.NATSrcPort = binary.BigEndian.Uint16(data[104:106])
-	evt.NATDstPort = binary.BigEndian.Uint16(data[106:108])
-	evt.Created = binary.LittleEndian.Uint32(data[108:112])
-	evt.RevPackets = binary.LittleEndian.Uint64(data[112:120])
-	evt.RevBytes = binary.LittleEndian.Uint64(data[120:128])
-	evt.IngressIfindex = binary.LittleEndian.Uint32(data[128:132])
-	evt.AppID = config.AssignedAppID(binary.LittleEndian.Uint16(data[132:134]))
-	evt.CloseReason = data[134]
-	_, policyDenyStamped := policyDenyConfigGeneration(data)
-
-	var srcStr, dstStr, natSrcStr, natDstStr string
-	switch evt.AddrFamily {
-	case addrFamilyInet6:
-		srcIP := net.IP(evt.SrcIP[:])
-		dstIP := net.IP(evt.DstIP[:])
-		srcStr = fmt.Sprintf("[%s]:%d", srcIP, evt.SrcPort)
-		dstStr = fmt.Sprintf("[%s]:%d", dstIP, evt.DstPort)
-		natSrcStr = formatNATAddr12890(evt.NATSrcIP, true, evt.NATSrcPort)
-		natDstStr = formatNATAddr12890(evt.NATDstIP, true, evt.NATDstPort)
-	case addrFamilyInet:
-		srcIP := net.IP(evt.SrcIP[:4])
-		dstIP := net.IP(evt.DstIP[:4])
-		srcStr = fmt.Sprintf("%s:%d", srcIP, evt.SrcPort)
-		dstStr = fmt.Sprintf("%s:%d", dstIP, evt.DstPort)
-		natSrcStr = formatNATAddr12890(evt.NATSrcIP, false, evt.NATSrcPort)
-		natDstStr = formatNATAddr12890(evt.NATDstIP, false, evt.NATDstPort)
-	default:
+	if !parseRawEvent(data, &evt) {
+		// #16127: unknown address family rejected (see parseRawEvent);
+		// the live logEvent path drops the same frames.
 		return EventRecord{}, false
 	}
+	_, policyDenyStamped := policyDenyConfigGeneration(data)
+
+	srcStr, dstStr, natSrcStr, natDstStr := formatRawEventAddrs(&evt)
 
 	rec := EventRecord{
 		Time:        eventTimeFromWire(evt.Timestamp),
@@ -1148,13 +1139,11 @@ func DecodeRawEventRecord(data []byte) (EventRecord, bool) {
 		// Reinterpret it as CreatedNanos so the flow exporters keep millisecond
 		// StartTime resolution.
 		rec.CreatedNanos = ClampCreatedNanos(evt.PolicyID)
-		// #3056: the admitting policy ID rides the trailing [136:140] slot on a
-		// SESSION_CLOSE (because #2853 took [44:48]). Resolve PolicyID from there
+		// #3056: the admitting policy ID rides the trailing [136:140] slot on
+		// a SESSION_CLOSE (because #2853 took [44:48]). Read evt.PolicyIDClose
 		// so the NetFlow/IPFIX close exporters and any consumer of this decoded
-		// record name the admitting policy instead of policy 0. A short (legacy
-		// 136-byte) frame already returned false above (len < rawEventWireSize).
-		rec.PolicyID = binary.LittleEndian.Uint32(
-			data[rawEventPolicyCloseOffset : rawEventPolicyCloseOffset+4])
+		// record name the admitting policy instead of policy 0.
+		rec.PolicyID = evt.PolicyIDClose
 		// #2749: the class-of-service / interface-attribution block rides the
 		// additive [144:152] slots, present only on the extended close frame.
 		if len(data) >= rawEventExtSize {
