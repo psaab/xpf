@@ -467,6 +467,21 @@ func noteBulkInstallOutcomeCore[K comparable](s *SessionSync, m *map[K]struct{},
 		delete(*m, key)
 		return
 	}
+	// #16039: the failure-marker sets share the receive window's cap.
+	// A marker past the combined cap invalidates the window instead of
+	// growing without bound on an all-failing peer.
+	if s.bulkRecvInvalid {
+		return
+	}
+	if _, ok := (*m)[key]; ok {
+		return
+	}
+	if len(s.bulkInstallFailedV4)+len(s.bulkInstallFailedV6) >= s.bulkRecvCap() {
+		s.bulkRecvInvalid = true
+		s.stats.BulkRecvCapped.Add(1)
+		s.stats.BulkRecvAborted.Add(1)
+		return
+	}
 	if *m == nil {
 		*m = make(map[K]struct{})
 	}
@@ -1945,6 +1960,7 @@ func (s *SessionSync) deleteClusterSyncedV4(key dataplane.SessionKey, deleteGen 
 		return false
 	} else {
 		s.noteBulkInstallOutcomeV4(key, false)
+		s.removeBulkRecvV4(key)
 	}
 	return true
 }
@@ -1974,6 +1990,7 @@ func (s *SessionSync) deleteClusterSyncedV6(key dataplane.SessionKeyV6, deleteGe
 		return false
 	} else {
 		s.noteBulkInstallOutcomeV6(key, false)
+		s.removeBulkRecvV6(key)
 	}
 	return true
 }
@@ -2002,6 +2019,7 @@ func (s *SessionSync) deleteClusterSyncedScopedV4(domain uint32, key dataplane.S
 		return false
 	} else {
 		s.noteBulkInstallOutcomeV4(key, false)
+		s.removeBulkRecvV4(key)
 	}
 	return true
 }
@@ -2028,6 +2046,7 @@ func (s *SessionSync) deleteClusterSyncedScopedV6(domain uint32, key dataplane.S
 		return false
 	} else {
 		s.noteBulkInstallOutcomeV6(key, false)
+		s.removeBulkRecvV6(key)
 	}
 	return true
 }

@@ -22,6 +22,17 @@ xpf (0.0.0) unstable; urgency=medium
     idle-refreshed, and a fabric arrival carrying no claimed zone
     resolves in domain 0 (fail closed) rather than the fabric link's
     domain.
+  * Cap the cluster bulk-sync receive window at the forward-session table
+    capacity and expire a window held open past an hour. The cap is on
+    live occupancy (a delete inside the window frees its slot), the
+    deadline is enforced on receive, on the receive-loop read-timeout
+    tick (so a silent peer still expires), and at BulkEnd, and an
+    aborted window latches bulk-incomplete readiness debt until a later
+    bulk reconciles instead of clearing the failover blocker. Distinct
+    keys past the cap are counted and dropped without storing; the
+    transient-failure marker sets share the cap. New counters
+    BulkRecvCapped and BulkRecvAborted render in cluster status when
+    nonzero (#16039).
   * PPTP ALG: control-segment teaching now requires an in-window TCP
     data sequence, judged against the pre-note tracked state
     (#16037). An admitted but out-of-window Outgoing-Call-Reply no

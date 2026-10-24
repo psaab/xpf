@@ -4769,6 +4769,37 @@ it.
     a definitive helper outcome, or a successfully applied delete clears only
     that key's failure marker; failed deletes retain it, and a new accepted
     bulk resets the per-family sets.
+  - The receive accumulators and the failure-marker sets are bounded
+    (#16039). Admission to `bulkRecvV4/V6` precedes the install verdict
+    (a transiently failed key must still count as received), so the cap
+    is what bounds that pre-verdict growth: the combined live keys in
+    one window may not exceed `bulkRecvCap()` — the forward-session
+    table capacity (`maxCap()`: the wired helper capacity, else the
+    200k default, ceiling `conntrack.MaxSessions/2`). The cap is on
+    live occupancy, not cumulative distinct keys: a successful delete
+    during the window frees its key's slot
+    (`removeBulkRecvV4/V6` from the delete paths), so delete+reinstall
+    churn never consumes it. The first distinct key past the cap, or a
+    window still open more than `bulkRecvWindowTimeout` (1h) after the
+    accepted `BulkStart`, aborts the window. The deadline is enforced
+    on receive (`expireBulkWindowIfStale` at the top of
+    `handleMessage`) and on the timer arm (fold 2: `receiveLoop`'s
+    read-timeout tick calls the same expiry, so a fully silent peer
+    loses its window with no inbound traffic at all), as well as at
+    `BulkEnd`, so a peer that never sends `BulkEnd` still loses its
+    window. An
+    aborted window never reconciles, acks, or releases the failover
+    hold; further keys are counted (`BulkRecvCapped`) and dropped
+    without storing, and the sender's bounded re-drive re-primes a
+    legitimate bulk. The abort latches `bulkIncomplete` readiness
+    debt: `TransferReadiness` keeps reporting the bulk as blocking
+    (`BulkIncomplete`, reason "local bulk receive aborted …") until a
+    later bulk reconciles successfully, so closing the window cannot
+    clear the manual-failover blocker. A full disconnect also clears
+    the debt with the rest of the bulk state. The failure-marker maps
+    share the same combined cap. `BulkRecvAborted` counts aborted
+    windows (at most one per window); both counters render in cluster
+    status when nonzero. Cells: `sync_bulk_recv_cap_16039_test.go`.
   - The sender re-drives an aged unacknowledged forced-resync or authoritative
     bulk after `BulkAckPendingRetryAfter` (35s). Retry-source/write failures
     keep an outbound retry-readiness debt until a replacement bulk is pending

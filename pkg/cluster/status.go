@@ -723,6 +723,15 @@ func (m *Manager) FormatInformation() string {
 		if syncStats.OversizeFramesRefused > 0 {
 			fmt.Fprintf(&b, "  Oversize frames refused (per-type cap): %d\n", syncStats.OversizeFramesRefused)
 		}
+		// #16039: bulk receive windows refused past the table cap or the
+		// window deadline. The window was aborted; a legitimate peer
+		// re-primes on its bounded re-drive.
+		if syncStats.BulkRecvCapped > 0 {
+			fmt.Fprintf(&b, "  Bulk receive keys capped: %d\n", syncStats.BulkRecvCapped)
+		}
+		if syncStats.BulkRecvAborted > 0 {
+			fmt.Fprintf(&b, "  Bulk receive windows aborted: %d\n", syncStats.BulkRecvAborted)
+		}
 	} else {
 		fmt.Fprintln(&b, "  Not configured")
 	}

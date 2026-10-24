@@ -835,7 +835,11 @@ func (s *SessionSync) TransferReadiness() TransferReadinessSnapshot {
 		snap.PendingBulkAckAge = age
 	}
 	s.bulkMu.Lock()
-	snap.BulkReceiveInProgress = s.bulkInProgress
+	// #16039 fold: an aborted window leaves bulkIncomplete debt; report
+	// it as an in-progress bulk until a later bulk reconciles, so the
+	// abort cannot clear the manual-failover blocker.
+	snap.BulkReceiveInProgress = s.bulkInProgress || s.bulkIncomplete
+	snap.BulkIncomplete = s.bulkIncomplete
 	snap.BulkReceiveEpoch = s.bulkRecvEpoch
 	snap.BulkReceiveSessions = len(s.bulkRecvV4) + len(s.bulkRecvV6)
 	s.bulkMu.Unlock()

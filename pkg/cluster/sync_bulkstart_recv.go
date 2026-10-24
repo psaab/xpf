@@ -105,6 +105,8 @@ func (s *SessionSync) handleBulkStart(conn net.Conn, payload []byte) bool {
 	// #9716: and WHICH CONNECTION carried it. Its BulkEnd is accepted only
 	// there; see the BulkEnd arm.
 	s.bulkRecvConn = conn
+	s.bulkRecvStartedAt = s.bulkRecvNow()
+	s.bulkRecvInvalid = false
 	s.bulkRecvV4 = make(map[dataplane.SessionKey]struct{})
 	s.bulkRecvV6 = make(map[dataplane.SessionKeyV6]struct{})
 	s.bulkInstallFailedV4 = make(map[dataplane.SessionKey]struct{})
