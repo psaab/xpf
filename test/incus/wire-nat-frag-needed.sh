@@ -187,9 +187,18 @@ PREV_FWD=""
 BASE_NAT=""
 BASE_RT=""
 CATCHALL_FORM=""
-CCAP_PID=""; TCAP_PID=""
 CLIENT_CAP="/tmp/xpf-wire-nfn-client.cap"
 TARGET_CAP="/tmp/xpf-wire-nfn-target.cap"
+# #16329: two detached captures (target + client hosts). The gate
+# switches WIRE_CAPTURE_EXEC/PULL + remote base per capture.
+wire_nfn_exec_target() { $SG "incus exec ${UNTRUST_REF} -- $(printf '%q ' "$@")" ; }
+wire_nfn_pull_target() { $SG "incus file pull ${UNTRUST_REF}$1 $2" ; }
+wire_nfn_exec_client() { $SG "incus exec ${CLIENT_REF} -- $(printf '%q ' "$@")" ; }
+wire_nfn_pull_client() { $SG "incus file pull ${CLIENT_REF}$1 $2" ; }
+NFN_TARGET_BASE="/tmp/xpf-wire-nfn-target-cap"
+NFN_CLIENT_BASE="/tmp/xpf-wire-nfn-client-cap"
+wire_nfn_use_target() { WIRE_CAPTURE_EXEC=wire_nfn_exec_target; WIRE_CAPTURE_PULL=wire_nfn_pull_target; wire_capture_set_remote_base "$NFN_TARGET_BASE"; }
+wire_nfn_use_client() { WIRE_CAPTURE_EXEC=wire_nfn_exec_client; WIRE_CAPTURE_PULL=wire_nfn_pull_client; wire_capture_set_remote_base "$NFN_CLIENT_BASE"; }
 RESTORE_OK=1
 
 # cli_config <name> <printf-format block> — commit and require success.
@@ -238,16 +247,11 @@ teardown_target() {
 
 cleanup() {
     trap '' EXIT INT TERM
-    for pid in "${CCAP_PID}" "${TCAP_PID}"; do
-        [[ -n "$pid" ]] && kill "$pid" >/dev/null 2>&1 || true
-    done
-    $SG "incus exec ${UNTRUST_REF} -- pkill -f '[t]cpdump.*icmp and host ${EGRESS_ADDR}'" >/dev/null 2>&1 || true
-    $SG "incus exec ${CLIENT_REF} -- pkill -f '[t]cpdump.*icmp and src host ${TARGET_IP}'" >/dev/null 2>&1 || true
+    # #16329: verified teardown of BOTH captures; survivor => failed.
+    wire_nfn_use_target; wire_capture_stop "$TARGET_CAP" || RESTORE_OK=0
+    wire_nfn_use_client; wire_capture_stop "$CLIENT_CAP" || RESTORE_OK=0
     teardown_target
     restore_config
-    [[ -n "$CCAP_PID" ]] && wait "$CCAP_PID" >/dev/null 2>&1 || true
-    [[ -n "$TCAP_PID" ]] && wait "$TCAP_PID" >/dev/null 2>&1 || true
-    CCAP_PID=""; TCAP_PID=""
 }
 WIRE_GATE_CLEANUP_FN=cleanup
 WIRE_GATE_RESTORE_OK_REF=RESTORE_OK
@@ -311,10 +315,12 @@ sleep 3
 
 # ── captures + probes ────────────────────────────────────────────────
 rm -f "$CLIENT_CAP" "$TARGET_CAP"
-$SG "incus exec ${UNTRUST_REF} -- timeout ${STEP_TIMEOUT} tcpdump -i ${TARGET_IFACE} -nn -tt -vv -s 0 icmp and host ${EGRESS_ADDR}" >"$TARGET_CAP" 2>&1 &
-TCAP_PID=$!
-$SG "incus exec ${CLIENT_REF} -- timeout ${STEP_TIMEOUT} tcpdump -i ${CLIENT_IFACE} -nn -tt -vv -s 0 icmp and src host ${TARGET_IP}" >"$CLIENT_CAP" 2>&1 &
-CCAP_PID=$!
+wire_nfn_use_target
+wire_capture_preclean "$TARGET_CAP" || fail_void harness-void
+wire_capture_start "$TARGET_CAP" "$STEP_TIMEOUT" ${TARGET_IFACE} "icmp and host ${EGRESS_ADDR}" || fail_void harness-void
+wire_nfn_use_client
+wire_capture_preclean "$CLIENT_CAP" || fail_void harness-void
+wire_capture_start "$CLIENT_CAP" "$STEP_TIMEOUT" ${CLIENT_IFACE} "icmp and src host ${TARGET_IP}" || fail_void harness-void
 sleep 2
 
 # Control: normal-size echo through the SAME non-zone rule-set; its reply
@@ -324,12 +330,11 @@ CTRL_OUT="$($SG "incus exec ${CLIENT_REF} -- ping -c 2 -W 2 ${TARGET_IP}" 2>&1 |
 PROBE_OUT="$($SG "incus exec ${CLIENT_REF} -- ping -c 3 -W 2 -M do -s ${PROBE_PAYLOAD} ${LAB_DST}" 2>&1 || true)"
 sleep 2
 
-$SG "incus exec ${UNTRUST_REF} -- pkill -f '[t]cpdump.*icmp and host ${EGRESS_ADDR}'" >/dev/null 2>&1 || true
-$SG "incus exec ${CLIENT_REF} -- pkill -f '[t]cpdump.*icmp and src host ${TARGET_IP}'" >/dev/null 2>&1 || true
-kill "$TCAP_PID" "$CCAP_PID" >/dev/null 2>&1 || true
-wait "$TCAP_PID" >/dev/null 2>&1 || true
-wait "$CCAP_PID" >/dev/null 2>&1 || true
-TCAP_PID=""; CCAP_PID=""
+# Verified stops BEFORE counting (#16329): unverified window = VOID.
+wire_nfn_use_target; wire_capture_stop "$TARGET_CAP" || fail_void harness-void
+wire_capture_fetch "$TARGET_CAP" || fail_void harness-void
+wire_nfn_use_client; wire_capture_stop "$CLIENT_CAP" || fail_void harness-void
+wire_capture_fetch "$CLIENT_CAP" || fail_void harness-void
 
 # ── metrics ──────────────────────────────────────────────────────────
 count() { grep -cE "$1" "$2" 2>/dev/null || true; }

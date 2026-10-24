@@ -323,6 +323,268 @@ wire_parse_transcript() {
 	done
 	return 0
 }
+# ── Capture lifecycle (#16329) ───────────────────────────────────────
+#
+# A capture MUST NOT be a backgrounded `incus exec ... timeout N tcpdump`
+# whose only stop is killing the local exec client. Proven live
+# (#16329): killing that client does not propagate into the container —
+# the in-container `timeout` is orphaned to PID 1 and tcpdump outlives
+# even it (reparented, privilege-dropped, then unkillable from a later
+# exec session), and a SIGKILLed harness leaves the capture running for
+# the container's lifetime. The bound therefore lives inside the
+# container and inside the capture's own process tree, never in the
+# local client's lifetime:
+#
+#   * start runs ONE foreground exec that detaches, in-container:
+#     `nohup tcpdump -w <pcap> <filter> & echo $! >pidfile` plus a
+#     detached watchdog `( sleep <lifetime>; kill -TERM <pid> ) &`.
+#     The starter exec returns immediately; no session stays attached
+#     and none needs to for the bound to hold. TERM (not INT) is the
+#     stop signal throughout: a process backgrounded by a
+#     non-interactive shell starts with SIGINT IGNORED (POSIX), and
+#     that disposition is inherited across exec — a detached tcpdump
+#     would silently swallow every kill -INT. SIGTERM is not
+#     force-ignored, and tcpdump's TERM handler flushes/closes the
+#     savefile exactly as INT does.
+#   * Why not tcpdump rotation as the timer? `-G N -W 1 -w` does NOT
+#     self-terminate (tcpdump 4.99.6, observed >9 s at -G 3 with and
+#     without traffic: no strftime spec in the filename means each
+#     rotation overwrites the same file and capture continues). And
+#     coreutils `timeout N tcpdump` is the exact wrapper proven to
+#     orphan. The detached in-container watchdog is the bound: it
+#     shares no session with the harness, so harness SIGTERM/SIGKILL
+#     cannot take it down, and it SIGINTs tcpdump (graceful: savefile
+#     flushed/closed) <lifetime> after start regardless.
+#   * The capture is a pcap savefile (`-w`), pulled back with a bounded
+#     `incus file pull` and rendered locally with `tcpdump -r`, keeping
+#     every text reduction (wire_count_*) byte-identical.
+#   * stop signals the recorded pid from a fresh exec (`kill -TERM`),
+#     bounded-waits, then VERIFIES via pgrep on the unique remote
+#     savefile path that no matching tcpdump remains. A survivor or an
+#     unverifiable check is rc 1 loud (stderr names the pid) — never a
+#     discarded `pkill ... || true`. Callers MUST demote to VOID on
+#     rc 1 instead of counting an unverified capture window. If the
+#     harness dies before stop, the watchdog still bounds the capture
+#     to <lifetime> and the pidfile remains for the next gate's
+#     pre-flight sweep (wire_capture_preclean).
+#
+# Interface: WIRE_CAPTURE_EXEC names a FUNCTION (defined by the gate)
+# taking the remote command's words: `wire_capture_exec "$@"` must run
+# one incus exec and return its rc/output. A function — not a
+# word-split string — because every gate's prefix is
+# `sg incus-admin -c "incus exec REF -- ..."`, whose quoting cannot
+# survive word splitting. The shim MUST quote each word for that inner
+# shell (`printf '%q '`), or multi-word remote commands (every
+# `sh -c '...'`) are flattened and mangled — the gates' shims below
+# this comment in each script do exactly that. WIRE_CAPTURE_PULL
+# likewise names a function taking <remote-path> <local-path>
+# performing `incus file pull`.
+# The filter is passed as ONE argument (the gate's complete pcap
+# filter expression, parentheses and all): it is embedded in the
+# remote command inside single quotes, so a filter must never contain
+# a single quote (all gate filters are built from validated
+# ports/addresses/keywords only).
+
+# wire_capture_remote_pid <pidfile> — print recorded pid or nothing.
+wire_capture_remote_pid() {
+	local pid
+	pid="$("$WIRE_CAPTURE_EXEC" cat "$1" 2>/dev/null | tr -d '[:space:]' || true)"
+	[[ "$pid" =~ ^[0-9]+$ ]] || pid=""
+	printf '%s' "$pid"
+}
+
+# wire_capture_start <local-text-log> <lifetime-secs> <iface> <filter>
+# Detaches tcpdump in-container. Remote savefile is <log>.remote.pcap,
+# pidfile <log>.remote.pid, banner log <log>.remote.log (paths are the
+# local log path reused as the remote path template; gates pass a
+# /tmp/... remote template via WIRE_CAPTURE_REMOTE_BASE when the local
+# log lives elsewhere — see wire_capture_set_remote_base).
+WIRE_CAPTURE_REMOTE_BASE=""
+wire_capture_set_remote_base() { WIRE_CAPTURE_REMOTE_BASE="$1"; }
+wire_capture_remote_base() {
+	if [[ -n "$WIRE_CAPTURE_REMOTE_BASE" ]]; then
+		printf '%s' "$WIRE_CAPTURE_REMOTE_BASE"
+	else
+		printf '%s' "$1"
+	fi
+}
+wire_capture_start() {
+	local local_log="$1" lifetime="$2" iface="$3" filter="$4"
+	local base remote pidfile logfile
+	base="$(wire_capture_remote_base "$local_log")"
+	remote="${base}.remote.pcap"; pidfile="${base}.remote.pid"; logfile="${base}.remote.log"
+	[[ "$lifetime" =~ ^[0-9]+$ ]] && ((10#$lifetime > 0)) || {
+		echo "wire-capture: invalid capture lifetime '$lifetime'" >&2; return 1; }
+	[[ "$filter" != *"'"* ]] || {
+		echo "wire-capture: filter must not contain a single quote" >&2; return 1; }
+	if ! "$WIRE_CAPTURE_EXEC" sh -c "rm -f '$remote' '$pidfile' '$logfile'; nohup tcpdump -i '$iface' -n -w '$remote' '$filter' >'$logfile' 2>&1 </dev/null & echo \$! >'$pidfile'; ( sleep $lifetime; kill -TERM \$(cat '$pidfile' 2>/dev/null) 2>/dev/null ) </dev/null >/dev/null 2>&1 & sleep 1; pid=\$(cat '$pidfile' 2>/dev/null || true); [ -n \"\$pid\" ] && kill -0 \"\$pid\" 2>/dev/null" >/dev/null 2>&1; then
+		echo "wire-capture: failed to start detached tcpdump (filter: $filter)" >&2
+		return 1
+	fi
+	[[ -n "$(wire_capture_remote_pid "$pidfile")" ]] || {
+		echo "wire-capture: no capture pid recorded ($pidfile)" >&2; return 1; }
+	return 0
+}
+
+# wire_capture_preclean <local-text-log> — pre-flight sweep: if a prior
+# killed run left this gate's capture behind (pidfile present), stop
+# and verify it before starting a new one. rc 1 loud when a leftover
+# survives: the caller must VOID, never capture over a stale BPF filter.
+wire_capture_preclean() {
+	local base pidfile
+	base="$(wire_capture_remote_base "$1")"
+	pidfile="${base}.remote.pid"
+	[[ -n "$(wire_capture_remote_pid "$pidfile")" ]] || return 0
+	wire_capture_stop "$1"
+}
+
+# wire_capture_ready <local-text-log> — rc 0 iff banner in remote log.
+wire_capture_ready() {
+	local base
+	base="$(wire_capture_remote_base "$1")"
+	"$WIRE_CAPTURE_EXEC" grep -q 'listening on ' "${base}.remote.log" >/dev/null 2>&1
+}
+
+# wire_capture_fetch <local-text-log> — pull + render remote pcap to the
+# local text log the reductions consume. WIRE_CAPTURE_PULL must expand
+# to a command taking <remote-path> <local-path> (file pull). Default
+# assumes WIRE_CAPTURE_EXEC's incus remote: gates override it.
+wire_capture_fetch() {
+	local local_log="$1" base remote tmp_pcap
+	base="$(wire_capture_remote_base "$local_log")"
+	remote="${base}.remote.pcap"; tmp_pcap="${local_log}.pulled.pcap"
+	if [[ -z "${WIRE_CAPTURE_PULL:-}" ]] || ! "$WIRE_CAPTURE_PULL" "$remote" "$tmp_pcap" >/dev/null 2>&1; then
+		echo "wire-capture: failed to pull $remote" >&2; return 1
+	fi
+	if ! tcpdump -nn -tt -vv -s 0 -r "$tmp_pcap" >"$local_log" 2>/dev/null; then
+		echo "wire-capture: failed to render pulled capture $tmp_pcap" >&2
+		rm -f "$tmp_pcap"; return 1
+	fi
+	rm -f "$tmp_pcap"
+	return 0
+}
+
+# wire_capture_stop <local-text-log> — stop + VERIFY. rc 0 only when the
+# recorded pid is dead AND pgrep finds no tcpdump for this savefile.
+wire_capture_stop() {
+	local local_log="$1" base remote pidfile pid survivors i
+	base="$(wire_capture_remote_base "$local_log")"
+	remote="${base}.remote.pcap"; pidfile="${base}.remote.pid"
+	pid="$(wire_capture_remote_pid "$pidfile")"
+	if [[ -n "$pid" ]]; then
+		"$WIRE_CAPTURE_EXEC" sh -c "kill -TERM $pid" >/dev/null 2>&1 || true
+		for ((i = 0; i < 40; i++)); do
+			"$WIRE_CAPTURE_EXEC" sh -c "kill -0 $pid 2>/dev/null" >/dev/null 2>&1 || break
+			sleep 0.25
+		done
+		if "$WIRE_CAPTURE_EXEC" sh -c "kill -0 $pid 2>/dev/null" >/dev/null 2>&1; then
+			echo "wire-capture: tcpdump pid $pid survived kill -TERM (capture NOT stopped)" >&2
+			return 1
+		fi
+	fi
+	if ! "$WIRE_CAPTURE_EXEC" sh -c 'command -v pgrep >/dev/null 2>&1' >/dev/null 2>&1; then
+		echo "wire-capture: cannot verify capture stop (pgrep unavailable)" >&2
+		return 1
+	fi
+	survivors="$("$WIRE_CAPTURE_EXEC" pgrep -af "tcpdump.*${remote}" 2>/dev/null | awk '$2=="tcpdump" || $2 ~ /\/tcpdump$/ {print}' || true)"
+	if [[ -n "$survivors" ]]; then
+		echo "wire-capture: surviving tcpdump after stop: $survivors" >&2
+		return 1
+	fi
+	"$WIRE_CAPTURE_EXEC" rm -f "$pidfile" >/dev/null 2>&1 || true
+	return 0
+}
+
+# wire_capture_stub_selftest — hermetic stop-path proof (#16329):
+# drive the REAL helpers against a stub `incus` on PATH whose exec
+# actually spawns the detached capture in a fake container fs. The
+# starter exec returns before the capture ends (the old gates' local
+# `kill $CAP_PID` therefore has nothing to kill); the recorded-pid
+# stop must still end it, a TERM-ignoring capture must produce a LOUD
+# rc 1 (never silent success), and with NO stop at all the detached
+# watchdog lifetime must end it (harness-SIGKILL case).
+wire_capture_stub_selftest() {
+	local dir ok=0
+	dir="$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-capstub.XXXXXX")" || return 1
+	mkdir -p "$dir/bin" "$dir/remote"
+	cat >"$dir/bin/incus" <<'STUB'
+#!/usr/bin/env bash
+# Stub incus: `exec REF -- CMD...` runs CMD with cwd=$STUB_REMOTE (the
+# fake container fs); `file pull REF<path> <local>` copies from there.
+set -u
+case "${1:-}" in
+exec)
+	shift 2  # drop REF and --
+	[[ "${1:-}" == "--" ]] && shift
+	cd "$STUB_REMOTE" || exit 97
+	exec "$@"
+	;;
+file)
+	# file pull REF/path local
+	src="${2#*:}"; dst="$3"
+	cp "$STUB_REMOTE$src" "$dst"
+	;;
+*) echo "stub incus: bad verb $1" >&2; exit 96 ;;
+esac
+STUB
+	cat >"$dir/bin/tcpdump" <<'STUB'
+#!/usr/bin/env bash
+# Stub tcpdump: parses -w file (banner + fake frame), runs until TERM
+# unless STUB_IGNORE_TERM=1. Lifetime is NOT tcpdump's: the detached
+# watchdog in wire_capture_start owns it, as in production.
+set -u
+out=""
+while (($#)); do
+	case "$1" in
+	-w) out="$2"; shift 2 ;;
+	-i) shift 2 ;;
+	*) shift ;;
+	esac
+done
+[[ "${STUB_IGNORE_TERM:-0}" == 1 ]] && trap '' TERM
+trap 'exit 0' INT
+printf 'tcpdump: listening on any, link-type LINUX_SLL (Linux cooked v1), snapshot length 262144 bytes\n' >&2
+: >"$out"
+printf 'frame\n' >>"$out"
+while :; do sleep 0.2; done
+STUB
+	chmod +x "$dir/bin/incus" "$dir/bin/tcpdump"
+	export STUB_REMOTE="$dir/remote"
+	local save_PATH="$PATH" save_EXEC="${WIRE_CAPTURE_EXEC:-}" save_PULL="${WIRE_CAPTURE_PULL:-}" save_BASE="$WIRE_CAPTURE_REMOTE_BASE"
+	stub_gate_exec() { PATH="$dir/bin:$save_PATH" incus exec stubref -- "$@"; }
+	stub_gate_pull() { PATH="$dir/bin:$save_PATH" incus file pull "stubref$1" "$2"; }
+	WIRE_CAPTURE_EXEC=stub_gate_exec
+	WIRE_CAPTURE_PULL=stub_gate_pull
+	wire_capture_set_remote_base "$dir/remote/cap"
+	local log="$dir/cap.txt" spid=""
+	# 1) start + ready; stop via the recorded pid ends it.
+	STUB_IGNORE_TERM=0 PATH="$dir/bin:$save_PATH" wire_capture_start "$log" 30 any "udp and dst port 54901" || ok=1
+	wire_capture_ready "$log" || ok=1
+	spid="$(wire_capture_remote_pid "$dir/remote/cap.remote.pid")"
+	[[ "$spid" =~ ^[0-9]+$ ]] || ok=1
+	wire_capture_stop "$log" || ok=1
+	if [[ -n "$spid" ]] && kill -0 "$spid" 2>/dev/null; then ok=1; fi
+	# 2) TERM-ignoring capture: stop must FAIL LOUD, not silently pass.
+	STUB_IGNORE_TERM=1 PATH="$dir/bin:$save_PATH" wire_capture_start "$log" 30 any "udp and dst port 54901" || ok=1
+	spid="$(wire_capture_remote_pid "$dir/remote/cap.remote.pid")"
+	if wire_capture_stop "$log" 2>"$dir/stop.err"; then ok=1; fi
+	grep -q 'survived\|surviving' "$dir/stop.err" || ok=1
+	[[ -n "$spid" ]] && kill -9 "$spid" 2>/dev/null || true
+	# 3) No stop at all (harness SIGKILLed): watchdog lifetime ends it.
+	STUB_IGNORE_TERM=0 PATH="$dir/bin:$save_PATH" wire_capture_start "$log" 2 any "udp and dst port 54901" || ok=1
+	spid="$(wire_capture_remote_pid "$dir/remote/cap.remote.pid")"
+	local waited=0
+	while [[ -n "$spid" ]] && kill -0 "$spid" 2>/dev/null && ((waited < 20)); do
+		sleep 0.5; waited=$((waited + 1))
+	done
+	if [[ -n "$spid" ]] && kill -0 "$spid" 2>/dev/null; then ok=1; fi
+	WIRE_CAPTURE_EXEC="$save_EXEC"; WIRE_CAPTURE_PULL="$save_PULL"
+	wire_capture_set_remote_base "$save_BASE"
+	unset STUB_REMOTE
+	rm -rf "$dir"
+	return "$ok"
+}
+
 #
 # ── Capture reduction (#11056) ────────────────────────────────────────
 #

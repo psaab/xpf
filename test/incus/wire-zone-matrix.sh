@@ -47,18 +47,47 @@ matrix_keys=(
     permit:dmz-'>'trust permit:untrust-'>'dmz permit:dmz-'>'untrust
 )
 
+# Detached capture (#16329, wire-gate-lib.sh): one foreground exec
+# detaches tcpdump + watchdog in-container; stop is the recorded pid
+# plus a pgrep verification on the unique savefile. CAP_REMOTE_BASE is
+# per-destination so the three hosts never share a pidfile.
+CAP_REMOTE_BASE=""
+CAP_DST=""
+wire_zone_capture_exec() { $SG "incus exec ${INCUS_REMOTE}:${CAP_DST} -- $(printf '%q ' "$@")" ; }
+wire_zone_capture_pull() { $SG "incus file pull ${INCUS_REMOTE}:${CAP_DST}$1 $2" ; }
 capture_start() {
     local dst="$1" dst_addr="$2" port_filter="$3"
     CAPLOG="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-zone-cap.XXXXXX")"
-    $SG "incus exec ${INCUS_REMOTE}:${dst} -- timeout ${STEP_TIMEOUT} tcpdump -i eth0 -nn -tt -vv -s 0 udp and dst host ${dst_addr} and '(' ${port_filter} ')'" >"$CAPLOG" 2>&1 &
-    CAP_PID=$!
+    CAP_DST="$dst"
+    CAP_REMOTE_BASE="/tmp/xpf-wire-zone-cap-${dst}"
+    WIRE_CAPTURE_EXEC=wire_zone_capture_exec
+    WIRE_CAPTURE_PULL=wire_zone_capture_pull
+    wire_capture_set_remote_base "$CAP_REMOTE_BASE"
+    # A leftover from a killed prior cell must be gone (verified)
+    # before this window opens; a survivor fails the cell loudly via
+    # the empty capture it leaves (counts stay zero -> VOID/FAIL by
+    # the verdict core, never a silent PASS).
+    if ! wire_capture_preclean "$CAPLOG"; then
+        echo "wire-zone-matrix: prior capture on $dst still running; cell window unverified" >&2
+    fi
+    if ! wire_capture_start "$CAPLOG" "$STEP_TIMEOUT" eth0 "udp and dst host ${dst_addr} and ( ${port_filter} )"; then
+        echo "wire-zone-matrix: capture failed to start on $dst; cell window unverified" >&2
+        : >"$CAPLOG"
+    fi
     sleep 2
 }
 capture_stop() {
     local dst="$1"
-    $SG "incus exec ${INCUS_REMOTE}:${dst} -- pkill -f '[t]cpdump.*${PROBE_PORT}'" >/dev/null 2>&1 || true
-    kill "$CAP_PID" >/dev/null 2>&1 || true
-    wait "$CAP_PID" >/dev/null 2>&1 || true
+    CAP_DST="$dst"
+    WIRE_CAPTURE_EXEC=wire_zone_capture_exec
+    # Verified stop: rc 1 leaves the local CAPLOG unpulled (empty), so
+    # the cell counts zero and the verdict demotes — never counted.
+    if wire_capture_stop "$CAPLOG"; then
+        wire_capture_fetch "$CAPLOG" || true
+    else
+        echo "wire-zone-matrix: capture on $dst could not be stopped/verified; cell window unverified" >&2
+        : >"$CAPLOG"
+    fi
     CAP_PID=""
 }
 count_any_len() {
@@ -176,39 +205,40 @@ if [[ "$MODE" == selftest ]]; then
     # output. Scenarios cover healthy, leaking, misattributed, and blind
     # deny cells without an Incus dependency.
     matrix_fake_sg() {
-        local cmd="$1" port size n window rest count
-        local -a legs=()
-        if [[ "$cmd" == *tcpdump* ]]; then
+        local cmd="$1"
+        # Capture lifecycle verbs (#16329) succeed trivially in the
+        # hermetic cell; the tcpdump payload is injected by the stubbed
+        # wire_capture_fetch below.
+        case "$cmd" in
+        *'sh\ -c'*|*'sh -c'*|*'sh -c '*)
+            # Start and TERM contain kill -0 text too (the start
+            # command ends with a liveness probe; TERM's own command
+            # is `kill -TERM <pid>`): test liveness ONLY for the pure
+            # `kill -0 <pid>` probe (no -TERM / nohup payload).
+            if [[ "$cmd" == *nohup*tcpdump* ]]; then
+                printf x >>"$MATRIX_STUB_WINDOWS_FILE"
+                printf '%s\n' "$cmd" >"$MATRIX_STUB_FILTER_FILE"
+            elif [[ "$cmd" == *'kill\ -0'* && "$cmd" != *TERM* && "$cmd" != *nohup* ]]; then
+                return 1
+            fi
+            return 0 ;;
+        *'cat '*'.remote.pid'*)
+            printf '4242\n'
+            return 0 ;;
+        *pgrep*|*'rm\ -f'*|*'listening\ on'*|*'kill\ -TERM'*|*'kill -TERM '*)
+            return 0 ;;
+        esac
+        if [[ "$cmd" == *nohup*tcpdump* ]]; then
             printf x >>"$MATRIX_STUB_WINDOWS_FILE"
-            window=$(wc -c <"$MATRIX_STUB_WINDOWS_FILE")
             printf '%s\n' "$cmd" >"$MATRIX_STUB_FILTER_FILE"
-            case "$MATRIX_STUB_CAPTURE" in
-            healthy) port="${CONTROL_PORTS[2]}" ;;
-            blind)
-                ((window == 1)) && return 0
-                port="${CONTROL_PORTS[2]}"
-                ;;
-            swap)
-                if [[ "$cmd" == *"dst port ${CONTROL_PORTS[3]}"* ]] || ((window > 1)); then
-                    port="${CONTROL_PORTS[3]}"
-                else
-                    return 0
-                fi
-                ;;
-            leak) port="${CONTROL_PORTS[2]}" ;;
-            esac
-            for size in 64 1400; do
-                for ((n = 0; n < 1100; n++)); do
-                    printf '00:00:00.000000 IP 10.0.0.1.40000 > 10.0.0.2.%s: UDP, length %s\n' "$port" "$size"
-                    if [[ "$MATRIX_STUB_CAPTURE" == leak &&
-                        "$cmd" == *"dst port ${PROBE_PORT}"* ]]; then
-                        printf '00:00:00.000000 IP 10.0.0.1.40000 > 10.0.0.2.%s: UDP, length %s\n' "$PROBE_PORT" "$size"
-                    fi
-                done
-            done
+            return 0
+        fi
+        if [[ "$cmd" == *pgrep* ]]; then
             return 0
         fi
         if [[ "$cmd" == *python3* ]]; then
+            local port rest count
+            local -a legs=()
             rest="$cmd"
             while [[ "$rest" =~ --leg[[:space:]]([0-9]+):([0-9]+) ]]; do
                 port="${BASH_REMATCH[1]}"; count="${BASH_REMATCH[2]}"
@@ -222,12 +252,40 @@ if [[ "$MODE" == selftest ]]; then
         fi
         return 0
     }
-    # capture_start's sleep waits for the fake tcpdump process to finish
-    # writing the capture, avoiding timing-dependent tests; later sleeps are
-    # skipped because capture_stop clears CAP_PID.
-    sleep() {
-        [[ -n "${CAP_PID:-}" ]] && wait "$CAP_PID" >/dev/null 2>&1 || true
+    # Stubbed fetch: render the scenario's frames into the local CAPLOG
+    # exactly where the real pull+render would put them.
+    matrix_stub_fetch() {
+        local port size n window
+        window=$(wc -c <"$MATRIX_STUB_WINDOWS_FILE")
+        case "$MATRIX_STUB_CAPTURE" in
+        healthy) port="${CONTROL_PORTS[2]}" ;;
+        blind)
+            ((window == 1)) && return 0
+            port="${CONTROL_PORTS[2]}"
+            ;;
+        swap)
+            if [[ "$(tr -d '\\' <"$MATRIX_STUB_FILTER_FILE")" == *"dst port ${CONTROL_PORTS[3]}"* ]] || ((window > 1)); then
+                port="${CONTROL_PORTS[3]}"
+            else
+                return 0
+            fi
+            ;;
+        leak) port="${CONTROL_PORTS[2]}" ;;
+        esac
+        : >"$1"
+        for size in 64 1400; do
+            for ((n = 0; n < 1100; n++)); do
+                printf '00:00:00.000000 IP 10.0.0.1.40000 > 10.0.0.2.%s: UDP, length %s\n' "$port" "$size" >>"$1"
+                if [[ "$MATRIX_STUB_CAPTURE" == leak &&
+                    "$(tr -d '\\' <"$MATRIX_STUB_FILTER_FILE")" == *"dst port ${PROBE_PORT}"* ]]; then
+                    printf '00:00:00.000000 IP 10.0.0.1.40000 > 10.0.0.2.%s: UDP, length %s\n' "$PROBE_PORT" "$size" >>"$1"
+                fi
+            done
+        done
+        return 0
     }
+    wire_capture_fetch() { matrix_stub_fetch "$1"; }
+    sleep() { :; }
     matrix_measure_case() {
         local scenario="$1" out rc ok=1 offset=20 port filter stub_window stub_legs stub_order
         MATRIX_STUB_CAPTURE="$scenario"
@@ -240,7 +298,7 @@ if [[ "$MODE" == selftest ]]; then
         stub_window="$(wc -c <"$MATRIX_STUB_WINDOWS_FILE")"
         stub_legs=0
         while IFS= read -r port; do stub_legs="$port"; done <"$MATRIX_STUB_LEGS_FILE"
-        filter="$(cat "$MATRIX_STUB_FILTER_FILE")"
+        filter="$(tr -d '\\' <"$MATRIX_STUB_FILTER_FILE")"
         stub_order="$(<"$MATRIX_STUB_LEG_ORDER_FILE")"
         ((stub_window == 1 && stub_legs == 7)) || ok=0
         [[ "$stub_order" == "${CONTROL_PORTS[2]}=2200,${PROBE_PORT}=2200,"* ]] || ok=0
@@ -592,7 +650,13 @@ restore_config() {
     RESTORE_NEEDED=0
 }
 cleanup() {
-    [[ -n "$CAP_PID" ]] && kill "$CAP_PID" >/dev/null 2>&1 || true
+    # #16329: verified capture teardown on whichever host the last
+    # window used; a survivor marks the restore failed (finalizer
+    # demotes to VOID) instead of the old local-kill + discarded pkill.
+    if [[ -n "$CAPLOG" && -n "$CAP_DST" ]]; then
+        WIRE_CAPTURE_EXEC=wire_zone_capture_exec
+        wire_capture_stop "$CAPLOG" || RESTORE_OK=0
+    fi
     $SG "incus exec ${INCUS_REMOTE}:${TRUST_HOST} -- pkill -f '[w]ire_probe_burst'" >/dev/null 2>&1 || true
     $SG "incus exec ${INCUS_REMOTE}:${UNTRUST_HOST} -- pkill -f '[w]ire_probe_burst'" >/dev/null 2>&1 || true
     $SG "incus exec ${INCUS_REMOTE}:${DMZ_HOST} -- pkill -f '[w]ire_probe_burst'" >/dev/null 2>&1 || true

@@ -125,7 +125,13 @@ REMOTE_PROBE="/tmp/xpf-wire_probe_burst.py"
 PROBER_SRC="${SCRIPT_DIR}/wire_probe_burst.py"
 SG="sg incus-admin -c"
 UNTRUST_REF="${INCUS_REMOTE}:${UNTRUST_HOST}"
-CAP_PID=""; CAPLOG=""; RESTORE_NEEDED=0; RESTORE_OK=1
+CAPLOG=""; RESTORE_NEEDED=0; RESTORE_OK=1
+# #16329: detached capture (wire-gate-lib.sh) on the untrust prober.
+wire_hostinbound_capture_exec() { $SG "incus exec ${UNTRUST_REF} -- $(printf '%q ' "$@")" ; }
+wire_hostinbound_capture_pull() { $SG "incus file pull ${UNTRUST_REF}$1 $2" ; }
+WIRE_CAPTURE_EXEC=wire_hostinbound_capture_exec
+WIRE_CAPTURE_PULL=wire_hostinbound_capture_pull
+CAPTURE_REMOTE_BASE="/tmp/xpf-wire-hostinbound-cap"
 
 run_cli() { $SG "incus exec ${NODE} -- bash -lc 'cli'"; }
 cli_show() { printf '%s\nexit\n' "$1" | run_cli; }
@@ -148,7 +154,11 @@ restore_config() {
     RESTORE_NEEDED=0
 }
 cleanup() {
-    [[ -n "$CAP_PID" ]] && kill "$CAP_PID" >/dev/null 2>&1 || true
+    # #16329: verified capture teardown; survivor => restore failed.
+    if [[ -n "$CAPLOG" ]]; then
+        wire_capture_set_remote_base "$CAPTURE_REMOTE_BASE"
+        wire_capture_stop "$CAPLOG" || RESTORE_OK=0
+    fi
     $SG "incus exec ${UNTRUST_REF} -- pkill -f '[w]ire_probe_burst'" >/dev/null 2>&1 || true
     for fw in "$FW_A" "$FW_B"; do
         $SG "incus exec ${fw} -- pkill -f '[w]ire_tcp_accept.py'" >/dev/null 2>&1 || true
@@ -194,15 +204,15 @@ if [[ -n "$BROKEN_FIXTURE" ]]; then
 fi
 
 CAPLOG="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-hostinbound-cap.XXXXXX")"
-$SG "incus exec ${UNTRUST_REF} -- timeout ${STEP_TIMEOUT} tcpdump -i eth0 -nn -tt -vv -s 0 host ${DUT_ADDR} and '(' tcp port ${PROBE_PORT_A} or tcp port ${PROBE_PORT_B} or tcp port ${CONTROL_PORT} ')'" >"$CAPLOG" 2>&1 &
-CAP_PID=$!
+wire_capture_set_remote_base "$CAPTURE_REMOTE_BASE"
+wire_capture_preclean "$CAPLOG" || fail_void harness-void
+wire_capture_start "$CAPLOG" "$STEP_TIMEOUT" eth0 "host ${DUT_ADDR} and ( tcp port ${PROBE_PORT_A} or tcp port ${PROBE_PORT_B} or tcp port ${CONTROL_PORT} )" || fail_void harness-void
 sleep 2
 SENT="$($SG "incus exec ${UNTRUST_REF} -- timeout ${STEP_TIMEOUT} python3 ${REMOTE_PROBE} --dst ${DUT_ADDR} --tcp-timeout ${TCP_TIMEOUT} --tcp-leg ${PROBE_PORT_A}:${BURST} --tcp-leg ${PROBE_PORT_B}:${BURST} --tcp-leg ${CONTROL_PORT}:${CONTROL_BURST}" 2>&1 || true)"
 sleep 2
-$SG "incus exec ${UNTRUST_REF} -- pkill -f '[t]cpdump.*${PROBE_PORT_A}'" >/dev/null 2>&1 || true
-kill "$CAP_PID" >/dev/null 2>&1 || true
-wait "$CAP_PID" >/dev/null 2>&1 || true
-CAP_PID=""
+# Verified stop BEFORE counting (#16329): unverified window = VOID.
+wire_capture_stop "$CAPLOG" || fail_void harness-void
+wire_capture_fetch "$CAPLOG" || fail_void harness-void
 legpart="${SENT##*$'\n'}"; legpart="${legpart#SENT tcplegs=}"
 extract_leg() {
     local p="$1" item; IFS=',' read -ra legs <<<"$legpart"

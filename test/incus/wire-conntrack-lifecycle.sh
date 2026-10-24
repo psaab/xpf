@@ -233,7 +233,13 @@ REMOTE_HOLD="/tmp/xpf-wire_tcp_hold.py"
 REMOTE_PROBE="/tmp/xpf-wire_probe_burst.py"
 REMOTE_RAW="/tmp/xpf-wire_raw_tcp_burst.py"
 SG="sg incus-admin -c"
-CAP_PID=""; CAPLOG=""; RESTORE_NEEDED=0; RESTORE_OK=1
+CAPLOG=""; RESTORE_NEEDED=0; RESTORE_OK=1
+# #16329: detached capture (wire-gate-lib.sh) on the sink.
+wire_conntrack_capture_exec() { $SG "incus exec ${SINK_REF} -- $(printf '%q ' "$@")" ; }
+wire_conntrack_capture_pull() { $SG "incus file pull ${SINK_REF}$1 $2" ; }
+WIRE_CAPTURE_EXEC=wire_conntrack_capture_exec
+WIRE_CAPTURE_PULL=wire_conntrack_capture_pull
+CAPTURE_REMOTE_BASE="/tmp/xpf-wire-conntrack-cap"
 CREATE_LOG="/tmp/xpf-wire-create.log"
 CREATE_PID_FILE="/tmp/xpf-wire-create.pid"
 RESERVE_LOG="/tmp/xpf-wire-reserve.log"
@@ -293,7 +299,11 @@ restore_config() {
     RESTORE_NEEDED=0
 }
 cleanup() {
-    [[ -n "$CAP_PID" ]] && kill "$CAP_PID" >/dev/null 2>&1 || true
+    # #16329: verified capture teardown; survivor => restore failed.
+    if [[ -n "$CAPLOG" ]]; then
+        wire_capture_set_remote_base "$CAPTURE_REMOTE_BASE"
+        wire_capture_stop "$CAPLOG" || RESTORE_OK=0
+    fi
     for host in "$LAN_REF" "$SINK_REF"; do
         $SG "incus exec ${host} -- pkill -f '[w]ire_tcp_hold.py'" >/dev/null 2>&1 || true
         $SG "incus exec ${host} -- pkill -f '[w]ire_probe_burst'" >/dev/null 2>&1 || true
@@ -420,17 +430,18 @@ done
 ((RESERVED)) || fail_void harness-void
 
 CAPLOG="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-conntrack-cap.XXXXXX")"
-$SG "incus exec ${SINK_REF} -- timeout ${STEP_TIMEOUT} tcpdump -i eth0 -nn -tt -vv -s 0 'tcp and dst host ${SINK_ADDR} and dst port ${LIFECYCLE_PORT}'" >"$CAPLOG" 2>&1 &
-CAP_PID=$!
+wire_capture_set_remote_base "$CAPTURE_REMOTE_BASE"
+wire_capture_preclean "$CAPLOG" || fail_void harness-void
+wire_capture_start "$CAPLOG" "$STEP_TIMEOUT" eth0 "tcp and dst host ${SINK_ADDR} and dst port ${LIFECYCLE_PORT}" || fail_void harness-void
 sleep 2
 EXP_RAW="$($SG "incus exec ${LAN_REF} -- timeout ${STEP_TIMEOUT} python3 ${REMOTE_RAW} --src ${LAN_ADDR} --dst ${SINK_ADDR} --sport ${LIFECYCLE_SRC_PORT} --dport ${LIFECYCLE_PORT} --count ${EXPIRED_BURST} --payload-size 64 --rate 2000" 2>&1 || true)"
 FRESH_RAW="$($SG "incus exec ${LAN_REF} -- timeout ${STEP_TIMEOUT} python3 ${REMOTE_RAW} --src ${LAN_ADDR} --dst ${SINK_ADDR} --sport ${FRESH_SOURCE_PORT} --dport ${LIFECYCLE_PORT} --count ${FRESH_BURST} --payload-size 64 --rate 2000" 2>&1 || true)"
 $SG "incus exec ${LAN_REF} -- sh -c 'pid=\$(cat ${RESERVE_PID_FILE} 2>/dev/null) && kill -0 \"\$pid\" 2>/dev/null'" >/dev/null 2>&1 || fail_void harness-void
 SENT="$($SG "incus exec ${LAN_REF} -- timeout ${STEP_TIMEOUT} python3 ${REMOTE_PROBE} --dst ${SINK_ADDR} --tcp-timeout 0.2 --tcp-leg ${LIFECYCLE_PORT}:${CONTROL_BURST}" 2>&1 || true)"
 sleep 8
-$SG "incus exec ${SINK_REF} -- pkill -f '[t]cpdump.*${LIFECYCLE_PORT}'" >/dev/null 2>&1 || true
-kill "$CAP_PID" >/dev/null 2>&1 || true; wait "$CAP_PID" >/dev/null 2>&1 || true; CAP_PID=""
-legpart="${SENT##*SENT tcplegs=}"; extract_leg() { local p="$1" item; IFS=',' read -ra legs <<<"$legpart"; for item in "${legs[@]}"; do [[ "${item%%=*}" == "$p" ]] && { printf '%s' "${item#*=}"; return; }; done; printf '0'; }
+# Verified stop BEFORE counting (#16329): unverified window = VOID.
+wire_capture_stop "$CAPLOG" || fail_void harness-void
+wire_capture_fetch "$CAPLOG" || fail_void harness-void
 SYN_OFFER="$(extract_leg "$LIFECYCLE_PORT")"
 EXP_OFFER="${EXP_RAW##*SENT raw=}"; FRESH_OFFER="${FRESH_RAW##*SENT raw=}"
 for v in EXP_OFFER FRESH_OFFER SYN_OFFER; do [[ "${!v}" =~ ^[0-9]+$ ]] || printf -v "$v" '0'; done

@@ -429,10 +429,31 @@ STEP_TIMEOUT="${STEP_TIMEOUT:-120}"
 REMOTE_PROBE="/tmp/xpf-wire-routing-probe-10136-${BASHPID}"
 SG="sg incus-admin -c"
 
-CAP_PID=""
 CAPLOG=""
 CAPLOG2=""
 CAPLOG3=""
+CAP_ACTIVE=""
+# #16329: detached captures (wire-gate-lib.sh) on the target. One
+# remote base per phase so the three windows never share a pidfile.
+wire_routing_capture_exec() { $SG "incus exec ${TARGET} -- $(printf '%q ' "$@")" ; }
+wire_routing_capture_pull() { $SG "incus file pull ${TARGET}$1 $2" ; }
+WIRE_CAPTURE_EXEC=wire_routing_capture_exec
+WIRE_CAPTURE_PULL=wire_routing_capture_pull
+routing_capture_start() { # <log> <base> <filter>
+    local log="$1" base="$2" filter="$3"
+    wire_capture_set_remote_base "$base"
+    wire_capture_preclean "$log" || return 1
+    wire_capture_start "$log" "$STEP_TIMEOUT" eth0 "$filter" || return 1
+    CAP_ACTIVE="$log"
+    sleep 2
+    wire_capture_ready "$log"
+}
+routing_capture_stop() { # <log> — verified stop + fetch; rc1 = unverified
+    wire_capture_stop "$1" || return 1
+    wire_capture_fetch "$1" || return 1
+    [[ "$CAP_ACTIVE" == "$1" ]] && CAP_ACTIVE=""
+    return 0
+}
 RI_OWNED=0
 FILTER_OWNED=0
 ALLOW_OWNED=0
@@ -655,10 +676,10 @@ void_now() {
 cleanup() {
     local saved_rc=$?
     trap '' EXIT INT TERM
-    if [[ -n "$CAP_PID" ]]; then
-        kill "$CAP_PID" >/dev/null 2>&1 || true
-        wait "$CAP_PID" >/dev/null 2>&1 || true
-        CAP_PID=""
+    # #16329: verified teardown of any live window; survivor => failed.
+    if [[ -n "$CAP_ACTIVE" ]]; then
+        wire_capture_stop "$CAP_ACTIVE" || RESTORE_OK=0
+        CAP_ACTIVE=""
     fi
     if ((ALLOW_OWNED)); then
         cli_commit_probe_allow delete || RESTORE_OK=0
@@ -812,10 +833,7 @@ $SG "incus file push --mode 0755 ${SCRIPT_DIR}/wire_routing_probe.py ${LAN_REF}$
 
 # ── Phase 1: exact control, then post-commit near-miss and empty-RI probe ─
 CAPLOG="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-routing-cap.XXXXXX")" || void_now harness-void
-$SG "incus exec ${TARGET} -- timeout ${STEP_TIMEOUT} tcpdump -i eth0 -nn -vv -A -s 0 'udp and dst host ${DEST_IP} and (dst port ${PORT} or dst port ${NEAR_MISS_PORT})'" >"$CAPLOG" 2>&1 &
-CAP_PID=$!
-sleep 2
-kill -0 "$CAP_PID" >/dev/null 2>&1 || void_now no-prober
+routing_capture_start "$CAPLOG" "/tmp/xpf-wire-routing-cap1" "udp and dst host ${DEST_IP} and ( dst port ${PORT} or dst port ${NEAR_MISS_PORT} )" || void_now no-prober
 MAIN_ROUTE_ARGS="ip -4 route get ${DEST_IP} from ${LAN_ADDR} iif ${LAN_DEV} ipproto udp sport ${PORT} dport ${PORT}"
 MAIN_LOOKUP="$(remote "${MAIN_ROUTE_ARGS} 2>&1 || true")"
 [[ "$MAIN_LOOKUP" == *"${EGRESS_DEV}"* ]] || void_now env-void
@@ -867,12 +885,8 @@ SENT_INTERLEAVED="$($SG "incus exec ${LAN_REF} -- ${REMOTE_PROBE} \
     --interleave-control-count ${CONTROL_BURST} \
     --interleave-control-tag N --rate ${RATE}" 2>&1 || true)"
 sleep 3
-if ! kill -0 "$CAP_PID" >/dev/null 2>&1; then
-    void_now no-prober
-fi
-kill "$CAP_PID" >/dev/null 2>&1 || true
-wait "$CAP_PID" >/dev/null 2>&1 || true
-CAP_PID=""
+# Verified stop BEFORE counting (#16329): unverified window = VOID.
+routing_capture_stop "$CAPLOG" || void_now harness-void
 if ((ALLOW_OWNED)); then
     cli_commit_probe_allow delete || void_now harness-void
     ALLOW_OWNED=0
@@ -893,10 +907,7 @@ wait_ri_route present || void_now harness-void
 printf '%s\n' "$(remote "ip -4 route show table ${VRF_TABLE}" 2>/dev/null || true)" \
     >"$ARCHIVE_DIR/populated-route.set"
 CAPLOG2="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-routing-cap2.XXXXXX")" || void_now harness-void
-$SG "incus exec ${TARGET} -- timeout ${STEP_TIMEOUT} tcpdump -i eth0 -nn -vv -A -s 0 'dst host ${DEST_IP} and (proto 47 or (udp and dst port ${NEAR_MISS_PORT}))'" >"$CAPLOG2" 2>&1 &
-CAP_PID=$!
-sleep 2
-kill -0 "$CAP_PID" >/dev/null 2>&1 || void_now no-prober
+routing_capture_start "$CAPLOG2" "/tmp/xpf-wire-routing-cap2" "dst host ${DEST_IP} and ( proto 47 or ( udp and dst port ${NEAR_MISS_PORT} ) )" || void_now no-prober
 SENT_POPULATED="$($SG "incus exec ${LAN_REF} -- ${REMOTE_PROBE} \
     --src ${LAN_ADDR} --source-port ${POP_SPORT} --dst ${DEST_IP} \
     --port ${PORT} --count ${PROBE_BURST} --tag R --interleave \
@@ -904,12 +915,7 @@ SENT_POPULATED="$($SG "incus exec ${LAN_REF} -- ${REMOTE_PROBE} \
     --interleave-control-count ${CONTROL_BURST} \
     --interleave-control-tag B --rate ${RATE}" 2>&1 || true)"
 sleep 3
-if ! kill -0 "$CAP_PID" >/dev/null 2>&1; then
-    void_now no-prober
-fi
-kill "$CAP_PID" >/dev/null 2>&1 || true
-wait "$CAP_PID" >/dev/null 2>&1 || true
-CAP_PID=""
+routing_capture_stop "$CAPLOG2" || void_now harness-void
 
 # Route-removed discrimination: delete ONLY the /32 so the GRE member stays
 # owned and committed while the steered lookup must miss again.
@@ -918,10 +924,7 @@ POP_ROUTE_OWNED=0
 wait_ri_route absent || void_now harness-void
 clear_steered_sessions removed || void_now harness-void
 CAPLOG3="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-routing-cap3.XXXXXX")" || void_now harness-void
-$SG "incus exec ${TARGET} -- timeout ${STEP_TIMEOUT} tcpdump -i eth0 -nn -vv -A -s 0 'dst host ${DEST_IP} and (proto 47 or (udp and (dst port ${PORT} or dst port ${NEAR_MISS_PORT})))'" >"$CAPLOG3" 2>&1 &
-CAP_PID=$!
-sleep 2
-kill -0 "$CAP_PID" >/dev/null 2>&1 || void_now no-prober
+routing_capture_start "$CAPLOG3" "/tmp/xpf-wire-routing-cap3" "dst host ${DEST_IP} and ( proto 47 or ( udp and ( dst port ${PORT} or dst port ${NEAR_MISS_PORT} ) ) )" || void_now no-prober
 SENT_REMOVED="$($SG "incus exec ${LAN_REF} -- ${REMOTE_PROBE} \
     --src ${LAN_ADDR} --source-port ${REM_SPORT} --dst ${DEST_IP} \
     --port ${PORT} --count ${PROBE_BURST} --tag D --interleave \
@@ -929,12 +932,7 @@ SENT_REMOVED="$($SG "incus exec ${LAN_REF} -- ${REMOTE_PROBE} \
     --interleave-control-count ${CONTROL_BURST} \
     --interleave-control-tag E --rate ${RATE}" 2>&1 || true)"
 sleep 3
-if ! kill -0 "$CAP_PID" >/dev/null 2>&1; then
-    void_now no-prober
-fi
-kill "$CAP_PID" >/dev/null 2>&1 || true
-wait "$CAP_PID" >/dev/null 2>&1 || true
-CAP_PID=""
+routing_capture_stop "$CAPLOG3" || void_now harness-void
 extract_sent() {
     local tag="$1" text="$2" value
     value=$(sed -n "s/.*SENT tag=${tag} count=\([0-9][0-9]*\).*/\1/p" <<<"$text" | tail -1)
