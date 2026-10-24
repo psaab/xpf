@@ -85,6 +85,11 @@ type DHCPv6Options struct {
 	PDSubLen   int      // sub-prefix length for deriving /64s (0 = not set)
 	ReqOptions []string // additional options to request: "dns-server", "domain-name"
 	RAIface    string   // interface to update with RA prefix from delegated prefix
+	// PinnedPrefixes are this client's scoped IA_PD exception pins
+	// (#12533), masked IPv6 prefixes from
+	// `prefix-delegating pinned-prefix`. Only delegations covered by a
+	// pin bypass the #10856 class/overlap refusals, and only here.
+	PinnedPrefixes []string
 }
 
 // DelegatedPrefix holds a prefix received via DHCPv6 Prefix Delegation.
@@ -96,6 +101,33 @@ type DelegatedPrefix struct {
 	PreferredLifetime time.Duration
 	ValidLifetime     time.Duration
 	Obtained          time.Time
+	// Pinned records that this delegation was accepted ONLY because an
+	// operator pin on its client covers it (#12533). Separate from any
+	// other provenance: it travels through reconcile into RA emission
+	// so the sink can re-check the same scoped exception instead of
+	// re-refusing (or blanket-allowing) the prefix.
+	Pinned bool
+}
+
+// ParsePinnedPrefixes12533 parses masked IPv6 pin strings into prefixes,
+// dropping unparseable/non-IPv6 entries. Shared by the decoder and the
+// daemon's RA stamping so both enforce identical pin sets.
+func ParsePinnedPrefixes12533(in []string) []netip.Prefix {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]netip.Prefix, 0, len(in))
+	for _, raw := range in {
+		p, err := netip.ParsePrefix(raw)
+		if err != nil || !p.IsValid() || !p.Addr().Is6() || p.Addr().Is4In6() {
+			continue
+		}
+		out = append(out, p.Masked())
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // infiniteLifetime is the RFC 8415 0xFFFFFFFF-second sentinel as decoded
@@ -400,6 +432,19 @@ func (m *Manager) SetDHCPv6Options(ifaceName string, opts *DHCPv6Options) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.v6opts[ifaceName] = opts
+}
+
+// PinnedPrefixesForRA returns the parsed pin set of the DHCPv6 client
+// on ifaceName (#12533), for the daemon to stamp onto the RA config of
+// that client's RA target. Nil when the client has no pins.
+func (m *Manager) PinnedPrefixesForRA(ifaceName string) []netip.Prefix {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	opts := m.v6opts[ifaceName]
+	if opts == nil {
+		return nil
+	}
+	return ParsePinnedPrefixes12533(opts.PinnedPrefixes)
 }
 
 // DelegatedPrefixes returns a snapshot of all live delegated prefixes.

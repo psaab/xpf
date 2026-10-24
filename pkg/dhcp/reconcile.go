@@ -38,10 +38,14 @@ func fingerprintV6(duidType string, o *DHCPv6Options) string {
 	if o == nil {
 		return "v6|duid=" + duidType
 	}
-	return fmt.Sprintf("v6|duid=%s|sl=%t|ia=%s|pl=%d|sub=%d|req=%s|ra=%s",
+	// #12533: pins are part of config identity — adding/removing a pin
+	// restarts the client so the next exchange re-decodes delegations
+	// against the new pin set instead of silently retaining a now-
+	// unpinned (or newly pinned) delegation until expiry.
+	return fmt.Sprintf("v6|duid=%s|sl=%t|ia=%s|pl=%d|sub=%d|req=%s|ra=%s|pin=%s",
 		duidType, o.Stateless, strings.Join(o.IATypes, ","),
 		o.PDPrefLen, o.PDSubLen, strings.Join(o.ReqOptions, ","),
-		o.RAIface)
+		o.RAIface, strings.Join(o.PinnedPrefixes, ","))
 }
 
 // configFingerprintLocked computes the config-identity fingerprint for

@@ -2,12 +2,45 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/rendersafe"
 )
+
+// normalizePinnedPrefixes12533 canonicalizes operator-pinned IA_PD
+// exception prefixes (#12533): parse each as an IPv6 prefix, mask host
+// bits, drop unparseable/non-IPv6 entries (SchemaValidate's
+// ValidateIPv6CIDR already rejects those at commit; this is the tolerant
+// compile path), sort, and dedupe so ConfigFingerprint and the DHCP
+// fingerprint are order-insensitive.
+func normalizePinnedPrefixes12533(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]netip.Prefix, 0, len(in))
+	for _, raw := range in {
+		p, err := netip.ParsePrefix(strings.TrimSpace(raw))
+		if err != nil || !p.IsValid() || !p.Addr().Is6() || p.Addr().Is4In6() {
+			continue
+		}
+		out = append(out, p.Masked())
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
+	res := make([]string, 0, len(out))
+	for i, p := range out {
+		if i > 0 && p == out[i-1] {
+			continue
+		}
+		res = append(res, p.String())
+	}
+	return res
+}
 
 // vrrpGroupPropertyKeywords are the property keywords recognized inside
 // a vrrp-group block. Used to delimit multi-value runs (virtual-address)
@@ -1028,6 +1061,11 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 												}
 											}
 										}
+										for _, ppNode := range pdNode.FindChildren("pinned-prefix") {
+											for _, v := range firewallMatchValues(ppNode) {
+												dc.PinnedPrefixes = append(dc.PinnedPrefixes, v)
+											}
+										}
 									case "req-option":
 										// #15693: multi leaf — accumulate every
 										// value across Keys[1:] and child nodes
@@ -1047,6 +1085,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 										}
 									}
 								}
+								dc.PinnedPrefixes = normalizePinnedPrefixes12533(dc.PinnedPrefixes)
 								unit.DHCPv6Client = dc
 							}
 						}

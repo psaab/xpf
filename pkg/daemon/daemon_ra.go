@@ -21,12 +21,32 @@ var timeNowForRA = time.Now
 // buildRAConfigs merges static RA configs from the Junos config with
 // PD-derived prefixes from DHCPv6 prefix delegation.
 func (d *Daemon) buildRAConfigs(cfg *config.Config) []*config.RAInterfaceConfig {
+	// #12533: per-RA-interface pin sets, unioned from every DHCPv6
+	// client that targets the interface. Keyed by resolved kernel name
+	// like raByIface below so the stamp lands on the merged config.
+	pinsByRA := make(map[string][]string)
+	if d.dhcp != nil {
+		seenSrc := make(map[string]bool)
+		for _, mapping := range d.dhcp.DelegatedPrefixesForRA() {
+			if seenSrc[mapping.Interface] {
+				continue
+			}
+			seenSrc[mapping.Interface] = true
+			pins := d.dhcp.PinnedPrefixesForRA(mapping.Interface)
+			if len(pins) == 0 {
+				continue
+			}
+			key := cfg.ResolveKernelIfName(mapping.RAIface)
+			for _, p := range pins {
+				pinsByRA[key] = append(pinsByRA[key], p.String())
+			}
+		}
+		for k := range pinsByRA {
+			sort.Strings(pinsByRA[k])
+		}
+	}
 	// #10856: every RA carries the box-wide configured-prefix set so the
-	// sender can refuse a DELEGATED PIO that overlaps configured interface,
-	// RA, or NAT64 space — including a delegation acquired before the
-	// overlapping configuration appeared. Computed from static config only;
-	// the PD-derived prefixes merged below are deliberately absent, or each
-	// delegation would overlap itself.
+	// sender can refuse a DELEGATED PIO that overlaps configured space.
 	protectedPD := config.ConfiguredIPv6Prefixes(cfg)
 	protectedPDStrings := make([]string, 0, len(protectedPD))
 	for _, p := range protectedPD {
@@ -74,6 +94,8 @@ func (d *Daemon) buildRAConfigs(cfg *config.Config) []*config.RAInterfaceConfig 
 				// #6587: mark the provenance so pkg/ra can apply a floor to a
 				// DELEGATED prefix without breaking an operator-authored ::/0.
 				Delegated: true,
+				// #12533: separate pin provenance, from the decoder.
+				Pinned: mapping.Pinned,
 			}
 			// #15057: carry the ABSOLUTE expiry (Obtained+granted) rather
 			// than a decayed remaining value. The desired set then stays
@@ -138,6 +160,11 @@ func (d *Daemon) buildRAConfigs(cfg *config.Config) []*config.RAInterfaceConfig 
 		// #10856: same slice for every interface — the protected set is
 		// box-wide, and the sender treats it as read-only.
 		ra.ProtectedPrefixes = protectedPDStrings
+		// #12533: pin set for this RA interface only (union of its PD
+		// clients' pins), resolved by kernel name.
+		if pins, ok := pinsByRA[cfg.ResolveKernelIfName(ra.Interface)]; ok {
+			ra.PinnedPrefixes = append([]string(nil), pins...)
+		}
 		ifc, ll := resolveRASourceLinkLocal(cfg, ra.Interface)
 		if ifc == nil {
 			continue

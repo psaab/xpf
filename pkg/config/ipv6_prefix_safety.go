@@ -32,11 +32,12 @@ var delegatedIPv6BlockedPrefixes = [...]struct {
 // on-link + autonomous to the LAN and none of those classes is routable
 // delegation space.
 //
-// ULA delegations and intentional overlaps with configured space ARE legitimate
-// in some deployments, but no operator pin/allowlist mechanism exists yet, so
-// this refuses them rather than fail open. #12533 tracks the pin design that
-// will scope the exceptions. The caller owns logging and per-IAPREFIX salvage
-// policy.
+// ULA delegations and intentional overlaps with configured space ARE
+// legitimate in some deployments. #12533 adds the scoped exception:
+// only a delegation covered by an explicit per-client pin
+// (PinnedDelegatedPrefixesCover) bypasses this refusal; everything
+// unpinned is refused rather than failing open. The caller owns
+// logging and per-IAPREFIX salvage policy.
 func DelegatedIPv6PrefixRefusalReason(prefix netip.Prefix) string {
 	if !prefix.IsValid() || !prefix.Addr().Is6() {
 		return "not an IPv6 prefix"
@@ -56,6 +57,32 @@ func DelegatedIPv6PrefixRefusalReason(prefix netip.Prefix) string {
 	}
 	return ""
 
+}
+
+// PinnedDelegatedPrefixCovers reports whether pin authorizes delegated
+// under the #12533 exact/covering rule: the pin must be a valid masked
+// IPv6 prefix, delegated must be valid IPv6, and delegated must be
+// contained by (or equal to) the pin. A pin narrower than the delegation
+// never authorizes the wider delegation, and a disjoint pin authorizes
+// nothing. Host bits on either side are masked away first.
+func PinnedDelegatedPrefixCovers(pin, delegated netip.Prefix) bool {
+	if !pin.IsValid() || !delegated.IsValid() || !pin.Addr().Is6() || !delegated.Addr().Is6() ||
+		pin.Addr().Is4In6() || delegated.Addr().Is4In6() {
+		return false
+	}
+	pin, delegated = pin.Masked(), delegated.Masked()
+	return pin.Bits() <= delegated.Bits() && pin.Contains(delegated.Addr())
+}
+
+// PinnedDelegatedPrefixesCover reports whether any pin in pins covers
+// delegated under PinnedDelegatedPrefixCovers.
+func PinnedDelegatedPrefixesCover(pins []netip.Prefix, delegated netip.Prefix) bool {
+	for _, pin := range pins {
+		if PinnedDelegatedPrefixCovers(pin, delegated) {
+			return true
+		}
+	}
+	return false
 }
 
 // IPv6PrefixesOverlap reports whether two valid IPv6 prefixes contain any

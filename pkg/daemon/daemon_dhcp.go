@@ -56,12 +56,13 @@ func buildDHCPClientSpecs(cfg *config.Config) []dhcp.ClientSpec {
 						spec.DUIDType = unit.DHCPv6Client.DUIDType
 					}
 					spec.V6 = &dhcp.DHCPv6Options{
-						Stateless:  unit.DHCPv6Client.ClientType == "stateless",
-						IATypes:    unit.DHCPv6Client.ClientIATypes,
-						PDPrefLen:  unit.DHCPv6Client.PrefixDelegatingPrefixLen,
-						PDSubLen:   unit.DHCPv6Client.PrefixDelegatingSubPrefLen,
-						ReqOptions: unit.DHCPv6Client.ReqOptions,
-						RAIface:    unit.DHCPv6Client.UpdateRAInterface,
+						Stateless:      unit.DHCPv6Client.ClientType == "stateless",
+						IATypes:        unit.DHCPv6Client.ClientIATypes,
+						PDPrefLen:      unit.DHCPv6Client.PrefixDelegatingPrefixLen,
+						PDSubLen:       unit.DHCPv6Client.PrefixDelegatingSubPrefLen,
+						ReqOptions:     unit.DHCPv6Client.ReqOptions,
+						RAIface:        unit.DHCPv6Client.UpdateRAInterface,
+						PinnedPrefixes: append([]string(nil), unit.DHCPv6Client.PinnedPrefixes...),
 					}
 				}
 				specs = append(specs, spec)

@@ -144,11 +144,13 @@ func sameLeaseRoutes(a, b []LeaseRoute) bool {
 }
 
 // delegatedPrefixesChanged reports whether the delegated-prefix set
-// differs in prefix value or lifetimes. Obtained is excluded (refreshed
-// on every reply). Lifetimes are included so a server that decays
-// remaining lifetimes still propagates them to the RA sender — for the
-// common fixed-lifetime server they are stable across renewals and do
-// not fire. The compare is order-sensitive: servers return IA_PD
+// differs in prefix value, lifetimes, or pin provenance (#12533: a
+// pin added/removed without a prefix change must still propagate to
+// the RA sender). Obtained is excluded (refreshed on every reply).
+// Lifetimes are included so a server that decays remaining lifetimes
+// still propagates them to the RA sender — for the common
+// fixed-lifetime server they are stable across renewals and do not
+// fire. The compare is order-sensitive: servers return IA_PD
 // prefixes in stable order, and a spurious fire on reorder is harmless
 // (Reconcile keys on config identity, never lease state).
 func delegatedPrefixesChanged(prev, next []DelegatedPrefix) bool {
@@ -158,7 +160,8 @@ func delegatedPrefixesChanged(prev, next []DelegatedPrefix) bool {
 	for i := range next {
 		if prev[i].Prefix != next[i].Prefix ||
 			prev[i].PreferredLifetime != next[i].PreferredLifetime ||
-			prev[i].ValidLifetime != next[i].ValidLifetime {
+			prev[i].ValidLifetime != next[i].ValidLifetime ||
+			prev[i].Pinned != next[i].Pinned {
 			return true
 		}
 	}
