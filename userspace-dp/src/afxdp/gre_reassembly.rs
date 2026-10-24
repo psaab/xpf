@@ -19,6 +19,19 @@
 //! 10-second incomplete lifetime. Every refusal is fail-closed and counted
 //! in [`GRE_OUTER_FRAG_DROPS`]; a completed datagram is returned exactly
 //! once as a synthetic unfragmented frame for the ordinary decap path.
+//!
+//! #16028: state CREATION is head-only and per-source sub-quota'd.
+//! `OfferAdmission::Head` (GRE: caller proved the outer tuple names a
+//! configured endpoint via the full `match_tunnel_endpoint` — transport
+//! domain, GRE key, resolved transport egress, ingress host-inbound —
+//! or WG: caller proved head listener/zone/ownership admission) is the
+//! only mode that may create an entry; a tail consults the pool and
+//! buffers only against a head-created entry, so a tail flood creates
+//! no state. Heads from one outer source may hold at most
+//! [`MAX_GRE_FRAG_DATAGRAMS_PER_SRC`] entries, so one (even configured,
+//! even correctly-keyed) peer's head-spoof flood cannot occupy the
+//! whole shared pool and starve the other protocol or other peers;
+//! entries contributed by a second source are never evicted by it.
 
 use super::frame::IPV6_GENERIC_EXT_HEADERS;
 use super::types::UserspaceDpMeta;
@@ -29,6 +42,22 @@ pub(super) const MAX_GRE_FRAG_DATAGRAMS: usize = 64;
 pub(super) const MAX_GRE_FRAG_BYTES: usize = 64 * 1024;
 pub(super) const MAX_GRE_FRAGS_PER_DATAGRAM: usize = 32;
 pub(super) const GRE_FRAG_TIMEOUT_NS: u64 = 10_000_000_000;
+/// #16028: per-outer-source sub-quota of the shared 64-entry pool.
+/// One source may hold at most half the pool, so a second source
+/// (the other tunnel protocol's peer, or another peer) always has
+/// the other half available. No eviction: an over-quota head is a
+/// counted drop, never a reason to evict another source's entry.
+pub(super) const MAX_GRE_FRAG_DATAGRAMS_PER_SRC: usize = MAX_GRE_FRAG_DATAGRAMS / 2;
+
+/// #16028: whether an offered fragment may CREATE a new pool entry.
+/// `Head` = caller-admitted head (offset 0, endpoint/listener gates
+/// already passed); `Tail` = consult-only — may buffer against a
+/// head-created entry, may never create one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum OfferAdmission {
+    Head,
+    Tail,
+}
 
 /// #14645/#15102: outer-fragmented tunnel datagrams dropped by the bounded
 /// reassembly pool (overlap, oversize, capacity, timeout, or malformed).
@@ -405,13 +434,16 @@ impl GreReassembler {
     /// Offer one fragment. Returns the completed unfragmented frame+meta
     /// exactly once when the final gap fills; otherwise `None` (buffered
     /// or counted-drop). The caller owns disposition of the returned frame.
+    /// #16028: `admission` gates state CREATION (see [`OfferAdmission`]);
+    /// a `Tail` offer against an existing entry still buffers/completes.
     pub(super) fn offer(
         &mut self,
         frame: &[u8],
         meta: UserspaceDpMeta,
         now_ns: u64,
+        admission: OfferAdmission,
     ) -> Option<(Vec<u8>, UserspaceDpMeta)> {
-        self.offer_inner(frame, meta, now_ns, None)
+        self.offer_inner(frame, meta, now_ns, None, admission)
     }
 
     /// #15102: offer with an explicit upper-layer protocol the caller has
@@ -423,8 +455,9 @@ impl GreReassembler {
         meta: UserspaceDpMeta,
         now_ns: u64,
         upper_protocol: u8,
+        admission: OfferAdmission,
     ) -> Option<(Vec<u8>, UserspaceDpMeta)> {
-        self.offer_inner(frame, meta, now_ns, Some(upper_protocol))
+        self.offer_inner(frame, meta, now_ns, Some(upper_protocol), admission)
     }
 
     fn offer_inner(
@@ -433,12 +466,27 @@ impl GreReassembler {
         meta: UserspaceDpMeta,
         now_ns: u64,
         expected_upper: Option<u8>,
+        admission: OfferAdmission,
     ) -> Option<(Vec<u8>, UserspaceDpMeta)> {
         self.expire(now_ns);
         let Some(info) = parse_fragment_with_protocol(frame, meta, expected_upper) else {
             counted_drop();
             return None;
         };
+        // #16028: admission must agree with the fragment's own offset.
+        // A Head offer of a tail, or a Tail offer of a head, is a
+        // caller bug / spoof shape — count and refuse, never create.
+        match admission {
+            OfferAdmission::Head if info.offset != 0 => {
+                counted_drop();
+                return None;
+            }
+            OfferAdmission::Tail if info.offset == 0 => {
+                counted_drop();
+                return None;
+            }
+            _ => {}
+        }
         let payload = frame.get(info.payload_start..info.payload_end)?;
         // Non-final fragments must carry a multiple of 8 payload bytes
         // (RFC 791 / RFC 8200); the final fragment establishes the total.
@@ -453,9 +501,29 @@ impl GreReassembler {
                 return None;
             }
         };
-        if !self.entries.contains_key(&info.key) && self.entries.len() >= MAX_GRE_FRAG_DATAGRAMS {
-            counted_drop();
-            return None;
+        let is_new = !self.entries.contains_key(&info.key);
+        if is_new {
+            // #16028: tails consult only — no head-created entry, no state.
+            if admission == OfferAdmission::Tail {
+                return None;
+            }
+            if self.entries.len() >= MAX_GRE_FRAG_DATAGRAMS {
+                counted_drop();
+                return None;
+            }
+            // #16028: per-source sub-quota. One outer source (across
+            // protocols/ingresses — the strictly stronger bound) may
+            // hold at most half the shared pool; an over-quota head
+            // is a counted drop and never evicts another source.
+            let src_entries = self
+                .entries
+                .keys()
+                .filter(|k| k.family == info.key.family && k.src == info.key.src)
+                .count();
+            if src_entries >= MAX_GRE_FRAG_DATAGRAMS_PER_SRC {
+                counted_drop();
+                return None;
+            }
         }
         let key = info.key.clone();
         let entry = self

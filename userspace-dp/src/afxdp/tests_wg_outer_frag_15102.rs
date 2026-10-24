@@ -4,7 +4,7 @@
 use super::tests_support::*;
 use super::*;
 use crate::afxdp::forwarding_build::build_forwarding_state;
-use crate::afxdp::gre_reassembly::{GreReassembler, gre_outer_frag_counter_test_lock};
+use crate::afxdp::gre_reassembly::{GreReassembler, OfferAdmission, gre_outer_frag_counter_test_lock};
 use crate::afxdp::poll_stages::{WgDecapStage, stage_wg_decap};
 use crate::afxdp::test_fixtures::wg_outer_mtu_snapshot;
 use crate::afxdp::wg::tests::established_pair;
@@ -403,11 +403,11 @@ fn wg_outer_fragment_v6_reassembles_at_pool_level_15102() {
     let mut pool = GreReassembler::new();
     let now = 4_000_000_000u64;
     assert!(
-        pool.offer_for_protocol(&head, frag_meta_v6_wg(&head, true), now, PROTO_UDP)
+        pool.offer_for_protocol(&head, frag_meta_v6_wg(&head, true), now, PROTO_UDP, OfferAdmission::Head)
             .is_none()
     );
     let (frame, meta) = pool
-        .offer_for_protocol(&tail, frag_meta_v6_wg(&tail, false), now + 1, PROTO_UDP)
+        .offer_for_protocol(&tail, frag_meta_v6_wg(&tail, false), now + 1, PROTO_UDP, OfferAdmission::Tail)
         .expect("v6 WG head+tail must complete reassembly");
     assert_eq!(meta.protocol, PROTO_UDP);
     assert_eq!(meta.flow_dst_port, WG_PORT_15102);

@@ -46,6 +46,19 @@ xpf (0.0.0) unstable; urgency=medium
     alone never kills a healthy stream): removing the cluster PSK ends
     a stream within one tick, while a rotation still accepting the old
     key does not.
+  * userspace-dp: GRE/WG shared outer-fragment pool can no longer be
+    starved by tail fragments or one peer source (#16028). Pool state
+    creation is now head-only: a GRE head creates an entry only after
+    the full tunnel-endpoint matcher (GRE key, transport domain,
+    resolved transport egress, ingress host-inbound/zone admission)
+    passes, a WG head only after its listener/zone/ownership gates,
+    and tails consult the pool without ever creating state. One outer
+    source may hold at most half the 64-entry shared pool (no eviction
+    of other sources), so a spoofed-peer tail/head flood cannot starve
+    WireGuard or other GRE peers. Trade-off: a tail arriving before
+    its head is now dropped instead of buffered (pre-head tail
+    buffering was the starvation vector); correctly ordered fragmented
+    tunnel traffic is unaffected.
 
 xpf (0.0.0) unstable; urgency=medium
 

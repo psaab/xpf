@@ -819,6 +819,9 @@ mod tests_gre_reserved0_13662;
 #[path = "tests_gre_transit_frag_15095.rs"]
 mod tests_gre_transit_frag_15095;
 #[cfg(test)]
+#[path = "tests_gre_frag_pool_16028.rs"]
+mod tests_gre_frag_pool_16028;
+#[cfg(test)]
 #[path = "tests_gre_version_6842.rs"]
 mod tests_gre_version_6842;
 #[cfg(test)]

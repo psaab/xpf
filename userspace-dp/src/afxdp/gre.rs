@@ -335,6 +335,15 @@ pub(in crate::afxdp) struct GreDecapCounters {
 }
 
 impl GreDecapCounters {
+    /// #16028: a scratch clone sharing NO counter cells (fresh Arcs
+    /// via `Default`). Head-admission probes run the full matcher
+    /// against this throwaway store so a refused head charges no
+    /// production counter; only the stage's single refusal count
+    /// (and the pool's drop count) is charged, exactly once.
+    pub(in crate::afxdp) fn scratch(&self) -> Self {
+        Self::default()
+    }
+
     /// Account one version refusal. The only mutator for this counter.
     pub(in crate::afxdp) fn note_unsupported_version_refusal(&self) {
         self.unsupported_version_refusals
@@ -383,7 +392,7 @@ impl GreDecapCounters {
     }
 }
 
-/// #15095: is this frame addressed to a configured native-GRE endpoint?
+/// #15095/#16028: is this frame addressed to a configured native-GRE endpoint? (Index-presence probe; pool CREATION uses `outer_head_admits_gre_endpoint`.)
 ///
 /// The reassembly pool must only buffer fragments whose outer datagram
 /// is destined for decap here. The index key is built exactly as the
@@ -412,6 +421,63 @@ pub(in crate::afxdp) fn outer_frame_targets_gre_endpoint(
     forwarding
         .gre_decap_index
         .contains_key(&(meta.addr_family as i32, outer_dst, outer_src))
+}
+
+/// #16028: full endpoint admission of a GRE HEAD fragment (offset 0).
+/// Runs the complete `match_tunnel_endpoint` chain — GRE key read
+/// from the head, transport domain, resolved transport egress,
+/// ingress host-inbound — so pool state is created only for a head
+/// that the reassembled datagram's own decap would admit. A tail
+/// carries no GRE header/key, so tails never reach here: they
+/// consult the pool for a head-created entry instead. HEAD only:
+/// callers must gate on offset 0. Runs with `counted=false`: the
+/// matcher charges nothing on a probe (its transport-egress refusal
+/// counter belongs to completed-datagram decap, and charging it per
+/// head would multiply it and double-count successful datagrams);
+/// the stage charges its single refusal count + pool drop instead.
+pub(in crate::afxdp) fn outer_head_admits_gre_endpoint(
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    forwarding: &ForwardingState,
+) -> bool {
+    if meta.protocol != PROTO_GRE {
+        return false;
+    }
+    let Some((outer_src, outer_dst)) = parse_outer_addresses(frame, meta) else {
+        return false;
+    };
+    let gre_offset = meta.l4_offset as usize;
+    let Some(base) = frame
+        .get(gre_offset..gre_offset.saturating_add(4))
+        .and_then(|b| <[u8; 4]>::try_from(b).ok())
+    else {
+        return false;
+    };
+    let flags_version = u16::from_be_bytes([base[0], base[1]]);
+    if (flags_version & GRE_VERSION_MASK) != 0
+        || (flags_version & GRE_UNSUPPORTED_LEGACY_FLAGS) != 0
+        || (flags_version & GRE_FLAG_ROUTING) != 0
+    {
+        return false;
+    }
+    let key_present = (flags_version & GRE_FLAG_KEY) != 0;
+    let mut off = gre_offset + 4;
+    if (flags_version & GRE_FLAG_CHECKSUM) != 0 {
+        off += 4;
+    }
+    let key = if key_present {
+        let Some(kb) = frame
+            .get(off..off.saturating_add(4))
+            .and_then(|b| <[u8; 4]>::try_from(b).ok())
+        else {
+            return false;
+        };
+        u32::from_be_bytes(kb)
+    } else {
+        0
+    };
+    match_tunnel_endpoint_counted(forwarding, outer_src, outer_dst, key, key_present, meta, false)
+        .is_some()
 }
 
 /// Cold-path bookkeeping for the version refusal above.
@@ -900,11 +966,27 @@ fn gre_transport_egress_matches(
     ingress_logical_ifindex: i32,
     ingress_zone_id: u16,
 ) -> bool {
+    gre_transport_egress_matches_counted(
+        forwarding,
+        endpoint,
+        ingress_logical_ifindex,
+        ingress_zone_id,
+        &forwarding.gre_decap_counters,
+    )
+}
+
+/// #16028: counter-redirected twin — identical predicate; charges go
+/// to `counters` instead of the production store.
+fn gre_transport_egress_matches_counted(
+    forwarding: &ForwardingState,
+    endpoint: &TunnelEndpoint,
+    ingress_logical_ifindex: i32,
+    ingress_zone_id: u16,
+    counters: &GreDecapCounters,
+) -> bool {
     let egress_ifindexes = gre_transport_egress_ifindexes(forwarding, endpoint);
     if egress_ifindexes.is_empty() {
-        forwarding
-            .gre_decap_counters
-            .note_transport_egress_refusal();
+        counters.note_transport_egress_refusal();
         return false;
     }
     let matched = egress_ifindexes.iter().any(|&egress_ifindex| {
@@ -915,9 +997,7 @@ fn gre_transport_egress_matches(
         egress_zone_id != 0 && egress_zone_id == ingress_zone_id
     });
     if !matched {
-        forwarding
-            .gre_decap_counters
-            .note_transport_egress_refusal();
+        counters.note_transport_egress_refusal();
     }
     matched
 }
@@ -1159,6 +1239,30 @@ fn match_tunnel_endpoint<'a>(
     key_present: bool,
     meta: UserspaceDpMeta,
 ) -> Option<&'a TunnelEndpoint> {
+    match_tunnel_endpoint_counted(forwarding, outer_src, outer_dst, key, key_present, meta, true)
+}
+
+/// #16028: `counted=false` runs the identical predicate with every
+/// counter charge redirected to a scratch store (see
+/// [`outer_head_admits_gre_endpoint`]); `counted=true` is the
+/// production decap path, byte-identical to the pre-#16028 matcher.
+#[allow(clippy::too_many_arguments)]
+fn match_tunnel_endpoint_counted<'a>(
+    forwarding: &'a ForwardingState,
+    outer_src: IpAddr,
+    outer_dst: IpAddr,
+    key: u32,
+    key_present: bool,
+    meta: UserspaceDpMeta,
+    counted: bool,
+) -> Option<&'a TunnelEndpoint> {
+    let scratch;
+    let counters: &GreDecapCounters = if counted {
+        &forwarding.gre_decap_counters
+    } else {
+        scratch = forwarding.gre_decap_counters.scratch();
+        &scratch
+    };
     let outer_family = meta.addr_family as i32;
     let ingress_logical_ifindex = gre_ingress_logical_ifindex(forwarding, meta);
     let ingress_zone_id = forwarding
@@ -1193,11 +1297,12 @@ fn match_tunnel_endpoint<'a>(
             key_present && endpoint.key == key
         };
         if key_ok {
-            if !gre_transport_egress_matches(
+            if !gre_transport_egress_matches_counted(
                 forwarding,
                 endpoint,
                 ingress_logical_ifindex,
                 ingress_zone_id,
+                counters,
             ) {
                 continue;
             }
