@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
@@ -360,6 +361,12 @@ type Server struct {
 	// runs two supervisors (fab0 + fab1) against one Server.
 	fabricListenerMu sync.Mutex
 	fabricListenerUp map[string]bool
+	// fabricConnGate bounds concurrent fabric-listener connections at
+	// Accept time (#16478, fabric_conn_bound_16478.go). An atomic pointer
+	// because bare &Server{} test fixtures never install one (nil =
+	// unwrapped) while NewServer always does; reads happen on the accept
+	// path, which must not take fabricListenerMu.
+	fabricConnGate atomic.Pointer[fabricConnGate]
 	// monitorStatus coalesces the userspace-dataplane Status() control-socket
 	// query for the MonitorInterface streaming path (#5707). Every open stream
 	// polls once per second and summary mode reads every configured interface
@@ -410,7 +417,7 @@ func (s *Server) userspaceDataplaneControl() (userspaceControlProvider, error) {
 // caller's class does not hold. Cross-node access still uses the separately
 // authenticated fabric listener (RunFabricListener), not this one.
 func NewServer(addr string, cfg Config) *Server {
-	return &Server{
+	s := &Server{
 		store:                       cfg.Store,
 		dp:                          cfg.DP,
 		eventBuf:                    cfg.EventBuf,
@@ -457,6 +464,13 @@ func NewServer(addr string, cfg Config) *Server {
 		d11ArmFn:                    cfg.D11ArmFn,
 		d11LedgerFn:                 cfg.D11LedgerFn,
 	}
+	// #16478: bound pre-auth fabric connections. Installed here (not
+	// lazily) so every NewServer-built server wraps its fabric listeners;
+	// bare &Server{} fixtures keep a nil gate and unwrapped listeners.
+	// The peer classifier reads fabricPeerAddrFn live per Accept, so a
+	// comms rebind is honoured without rebuilding the gate.
+	s.fabricConnGate.Store(newFabricConnGate(fabricMaxConnsTotal, fabricPeerReserve, s.isFabricPeerRemote))
+	return s
 }
 
 // grpcListenState tracks the primary gRPC listener lifecycle for the
@@ -1078,7 +1092,10 @@ func (s *Server) runFabricListener(ctx context.Context, addr string, vrfDeviceFn
 			return lc.Listen(ctx, "tcp", addr)
 		},
 		serve: func(ctx context.Context, lis net.Listener) error {
-			return s.serveUntilDone(ctx, s.buildFabricServer(), lis)
+			// #16478: gate admission at Accept time, before grpc.Server
+			// spawns per-connection goroutines/buffers. Nil gate (bare
+			// &Server{} fixtures) passes through unwrapped.
+			return s.serveUntilDone(ctx, s.buildFabricServer(), s.fabricBoundListener(lis))
 		},
 	})
 }
@@ -1091,6 +1108,20 @@ func (s *Server) buildFabricServer() *grpc.Server {
 		grpc.MaxRecvMsgSize(maxRecvMsgSize),
 		grpc.MaxSendMsgSize(maxSendMsgSize),
 		grpc.MaxConcurrentStreams(maxConcurrentStreams), // #6552
+		// #16478: lifetime bounds complementing the Accept gate. Idle
+		// (no outstanding RPC) connections — the preface-only flood shape —
+		// are GOAWAY-drained after fabricMaxConnectionIdle; every
+		// connection is drained after fabricMaxConnectionAge (+grace) even
+		// if it ACKs keepalive pings. Neither fires while a stream is
+		// outstanding, so long MonitorInterface streams are not severed;
+		// at MaxConnectionAge an in-flight stream gets the grace window
+		// and the peer proxy re-dials per operation.
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			MaxConnectionIdle:     fabricMaxConnectionIdle,
+			MaxConnectionAge:      fabricMaxConnectionAge,
+			MaxConnectionAgeGrace: fabricMaxConnectionAgeGrace,
+		}),
+		grpc.ConnectionTimeout(fabricConnectionTimeout),
 		// #5883: peerMarker runs LAST in the chain on purpose —
 		// ChainUnaryInterceptor invokes in order, so #4107 auth and the #4122
 		// allowlist have both already accepted the call before the hop markers

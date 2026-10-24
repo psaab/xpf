@@ -633,6 +633,15 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 			}
 			return agent.ServeBudgetStats()
 		},
+		// #16478: fabric gRPC connection-bound telemetry. d.grpcSrv is
+		// assigned after startHTTPServer runs (startGRPCServer is the next
+		// phase-5 step), so read it live per scrape; nil reports zeros.
+		FabricConnStatsFn: func() (uint64, int64) {
+			if d.grpcSrv == nil {
+				return 0, 0
+			}
+			return d.grpcSrv.FabricConnStats()
+		},
 		// #5054: HTTP/REST commits sync to the peer on the SAME
 		// RG0-ownership policy as gRPC/local-shell. Peer convergence
 		// is transport-independent (decided in commitAndApplyOperator),

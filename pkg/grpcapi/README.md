@@ -103,6 +103,30 @@ never kills a healthy stream, while removing the PSK ends a stream within
 one tick and a rotation still accepting the old key (#6630) does not.
 Proxied streams die with the origin's primary re-auth, as before.
 
+**Fabric pre-auth connection bound (#16478).** Per-RPC auth cannot bound
+connection admission: a host without the PSK that completes the HTTP/2
+handshake and sends no RPC held ~73 KiB heap, 3 goroutines and an FD per
+connection, unbounded (the gRPC sibling of the session-sync flood #5303).
+The fabric listener is now wrapped in a Server-wide Accept gate
+(`fabric_conn_bound_16478.go`): at most 32 concurrent connections across
+both fabric listeners, of which the last 4 are reserved for the configured
+peer fabric IP (`fabricPeerAddrFn`, matched on IP, read live per Accept).
+Excess connections close immediately before grpc.Server spawns anything,
+are counted (`Server.FabricConnRefusals()`, exported as
+`xpf_fabric_conn_refusals_total` / `xpf_fabric_conn_active` via the
+daemon-wired `api.Config.FabricConnStatsFn` hook) and rate-logged ~1/sec;
+a refusal surfaces as a temporary Accept error so the serve loop retries
+instead of exiting. Slots release exactly once on first Close and are held
+for the connection's whole life. `buildFabricServer` additionally sets
+`KeepaliveParams{MaxConnectionIdle: 5m, MaxConnectionAge: 1h (+30s grace)}`
+and `ConnectionTimeout(30s)`: idle preface-only connections are
+GOAWAY-drained in minutes instead of grpc-go's 2h ping cycle, and even a
+ping-ACKing holder is rotated hourly — neither fires under an outstanding
+stream, so long `MonitorInterface` streams are not severed (at
+MaxConnectionAge an in-flight stream gets the grace window; the peer proxy
+re-dials per operation). Bare `&Server{}` fixtures have a nil gate and keep
+unwrapped listeners, mirroring the REST gate (#16081).
+
 **Forwarded failover proxy budget (#15081, #16432).** `proxyPeerSystemAction` keeps
 the historical 5s deadline for ordinary forwarded actions, but a forwarded
 node-targeted cluster failover (`cluster-failover:<rg>:node<n>` /

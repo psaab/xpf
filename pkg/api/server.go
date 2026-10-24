@@ -546,6 +546,12 @@ type Config struct {
 	// eviction, and tracked-source counts for the xpf_snmp_* telemetry.
 	// Optional; nil omits these metrics when SNMP is not wired.
 	SNMPServeBudgetStatsFn func() (shed, evictions, trackedSources uint64)
+	// FabricConnStatsFn returns the fabric gRPC listener's #16478
+	// connection-bound refusals and current occupancy for the
+	// xpf_fabric_conn_* telemetry. The daemon owns the grpcapi.Server; the
+	// API reads it through this function so the api package does not import
+	// grpcapi. Optional; if nil, the family reports zeros (always emitted).
+	FabricConnStatsFn func() (refusals uint64, active int64)
 	// DDNSStatsFn surfaces the DHCP dynamic-DNS counter snapshot for the
 	// xpf_dhcp_ddns_* metric family (#1387 inc-2). The daemon owns the
 	// always-on DDNS manager; the API reads it through this function so the
@@ -797,6 +803,7 @@ type Server struct {
 	feedsFn                              func() map[string]feeds.FeedInfo
 	syslogDropsFn                        func() []logging.SyslogDropStat
 	snmpServeBudgetStatsFn               func() (shed, evictions, trackedSources uint64)
+	fabricConnStatsFn                    func() (uint64, int64)
 	ddnsStatsFn                          func() *dhcpserver.DDNSStats
 	surfaceAStatsFn                      func() *ddns.SurfaceAStats
 	flowCollectorHealthFn                func() []flowexport.ExporterCollectorHealth
@@ -934,6 +941,7 @@ func NewServer(cfg Config) *Server {
 		feedsFn:                              cfg.FeedsFn,
 		syslogDropsFn:                        cfg.SyslogDropsFn,
 		snmpServeBudgetStatsFn:               cfg.SNMPServeBudgetStatsFn,
+		fabricConnStatsFn:                    cfg.FabricConnStatsFn,
 		ddnsStatsFn:                          cfg.DDNSStatsFn,
 		surfaceAStatsFn:                      cfg.SurfaceAStatsFn,
 		flowCollectorHealthFn:                cfg.FlowCollectorHealthFn,
