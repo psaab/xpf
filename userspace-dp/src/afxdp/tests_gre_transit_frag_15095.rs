@@ -185,15 +185,22 @@ fn gre_to_self_fragments_still_reassemble_and_decap_15095() {
     let (head, tail) = split_v4_outer_15095(&whole, 16);
     let mut pool = GreReassembler::new();
     let now = 5_000_000_000u64;
+    // #16028: tail-first is consult-only (consumed, no state); the
+    // control completion is head-then-tail.
     match stage_15095(&tail, frag_meta_15095(&tail, false), &forwarding, &mut pool, now) {
         GreDecapStage::Buffered => {}
         GreDecapStage::NotGre(_) => {
-            panic!("#15095 control: to-self tail must buffer, not fall through")
+            panic!("#15095 control: to-self tail must be consumed, not fall through")
         }
         GreDecapStage::Decapped(..) => panic!("control: tail alone must not decap"),
         GreDecapStage::FilterDropped => panic!("control: tail must not filter-drop"),
     }
+    assert_eq!(pool.buffered_len(), 0, "#16028 control: pre-head tail creates no state");
     match stage_15095(&head, frag_meta_15095(&head, true), &forwarding, &mut pool, now + 1) {
+        GreDecapStage::Buffered => {}
+        _ => panic!("#16028 control: to-self head must buffer"),
+    }
+    match stage_15095(&tail, frag_meta_15095(&tail, false), &forwarding, &mut pool, now + 2) {
         GreDecapStage::Decapped(m, frame) => {
             assert_eq!(
                 &frame[m.l3_offset as usize..],
@@ -244,20 +251,21 @@ fn non_peer_head_flood_cannot_block_peer_reassembly_15095() {
         }
     }
     // The peer's fragmented datagram still reassembles and decaps: the
-    // flood never touched the pool.
+    // flood never touched the pool. #16028: head-then-tail order (a
+    // pre-head tail consults only and is dropped, never buffered).
     match stage_15095(
-        &peer_tail,
-        frag_meta_15095(&peer_tail, false),
+        &peer_head,
+        frag_meta_15095(&peer_head, true),
         &forwarding,
         &mut pool,
         now + 100,
     ) {
         GreDecapStage::Buffered => {}
-        _ => panic!("#15095: peer tail must buffer after the transit flood"),
+        _ => panic!("#15095/#16028: peer head must buffer after the transit flood"),
     }
     match stage_15095(
-        &peer_head,
-        frag_meta_15095(&peer_head, true),
+        &peer_tail,
+        frag_meta_15095(&peer_tail, false),
         &forwarding,
         &mut pool,
         now + 101,
@@ -274,10 +282,13 @@ fn non_peer_head_flood_cannot_block_peer_reassembly_15095() {
 #[test]
 fn reassembled_but_decap_refused_is_counted_15095() {
     let _lock = gre_outer_frag_counter_test_lock();
-    // The outer pair IS indexed, so fragments buffer; the GRE header
-    // carries a Key the unkeyed endpoint (key 0) refuses, so the
-    // completed datagram's decap misses at the key check while the
-    // outer tuple still matches. That is the counted refusal.
+    // The outer pair IS indexed; the GRE header carries a Key the
+    // unkeyed endpoint (key 0) refuses. #16028: the head is refused
+    // at pool CREATION by the full matcher (counted once, no state);
+    // the tail consults only and creates nothing. Pre-#16028 both
+    // fragments buffered and the refusal was counted only after the
+    // completed datagram failed decap — same count, strictly later,
+    // with attacker state held in between.
     let forwarding = build_forwarding_state(&gre_to_self_snapshot());
     let inner = build_gre_inner_icmp_packet_v4();
     let whole = build_gre_to_self_outer_frame_v4(0, &inner);
@@ -302,19 +313,21 @@ fn reassembled_but_decap_refused_is_counted_15095() {
     let before = forwarding.gre_decap_counters.reassembled_decap_refusals();
     match stage_15095(&ktail, frag_meta_15095(&ktail, false), &forwarding, &mut pool, now) {
         GreDecapStage::Buffered => {}
-        _ => panic!("#15095: keyed to-self tail must buffer (outer tuple is indexed)"),
+        _ => panic!("#16028: keyed to-self tail must be consumed (outer tuple is indexed)"),
     }
+    assert_eq!(pool.buffered_len(), 0, "#16028: tail alone creates no state");
     match stage_15095(&khead, frag_meta_15095(&khead, true), &forwarding, &mut pool, now + 1) {
         GreDecapStage::Buffered => {}
         GreDecapStage::Decapped(..) => {
             panic!("#15095: keyed frame against an unkeyed endpoint must not decap")
         }
-        GreDecapStage::NotGre(_) => panic!("#15095: completed datagram must not fall through"),
+        GreDecapStage::NotGre(_) => panic!("#15095: refused head must not fall through"),
         GreDecapStage::FilterDropped => panic!("#15095: key mismatch must not filter-drop"),
     }
+    assert_eq!(pool.buffered_len(), 0, "#16028: wrong-key head creates no state");
     assert_eq!(
         forwarding.gre_decap_counters.reassembled_decap_refusals(),
         before + 1,
-        "#15095: a reassembled-but-decap-refused datagram must be counted exactly once"
+        "#15095/#16028: a decap-refused datagram must be counted exactly once (now at head admission)"
     );
 }

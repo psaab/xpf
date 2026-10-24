@@ -334,7 +334,28 @@ pub(in crate::afxdp) struct GreDecapCounters {
     transport_egress_refusals: std::sync::Arc<AtomicU64>,
 }
 
+std::thread_local! {
+    /// #16028 fold: ONE scratch store per worker thread, reused by
+    /// every head-admission probe. The previous shape allocated four
+    /// fresh `Arc<AtomicU64>` cells (via `Default`) on EVERY probe —
+    /// a per-packet allocation on the fragmented-head path. Charges
+    /// into this store are never read back, so reuse across probes
+    /// (and across matcher calls on one thread) is invisible; only
+    /// the Relaxed increments themselves remain, which is the cost
+    /// the counted twin exists to redirect.
+    static GRE_PROBE_SCRATCH: GreDecapCounters = GreDecapCounters::default();
+}
+
 impl GreDecapCounters {
+    /// #16028: the shared per-thread scratch store (see
+    /// `GRE_PROBE_SCRATCH`). Head-admission probes run the full
+    /// matcher against this throwaway store so a refused head charges
+    /// no production counter; only the stage's single refusal count
+    /// (and the pool's drop count) is charged, exactly once.
+    pub(in crate::afxdp) fn with_scratch<R>(f: impl FnOnce(&GreDecapCounters) -> R) -> R {
+        GRE_PROBE_SCRATCH.with(|scratch| f(scratch))
+    }
+
     /// Account one version refusal. The only mutator for this counter.
     pub(in crate::afxdp) fn note_unsupported_version_refusal(&self) {
         self.unsupported_version_refusals
@@ -383,7 +404,7 @@ impl GreDecapCounters {
     }
 }
 
-/// #15095: is this frame addressed to a configured native-GRE endpoint?
+/// #15095/#16028: is this frame addressed to a configured native-GRE endpoint? (Index-presence probe; pool CREATION uses `outer_head_admits_gre_endpoint`.)
 ///
 /// The reassembly pool must only buffer fragments whose outer datagram
 /// is destined for decap here. The index key is built exactly as the
@@ -412,6 +433,118 @@ pub(in crate::afxdp) fn outer_frame_targets_gre_endpoint(
     forwarding
         .gre_decap_index
         .contains_key(&(meta.addr_family as i32, outer_dst, outer_src))
+}
+
+/// #16028: full endpoint admission of a GRE HEAD fragment (offset 0).
+/// Fold (4)+fold2 restriction: a K-PRESENT GRE header split across
+/// the first fragments (Key bytes not in this fragment within the
+/// declared datagram) is REFUSED here — the Key cannot be verified
+/// at the head, and NO endpoint can accept an unverified K-present
+/// head at creation: a keyed endpoint stores a nonzero Key the head
+/// cannot prove, and an UNKEYED endpoint by definition refuses
+/// K-present (`match_tunnel_endpoint`: key 0 matches only K-clear),
+/// so the reassembled datagram would certainly fail decap. The
+/// whole fragmented datagram whose first fragment is too small to
+/// carry its Key is therefore not reassembled. K-CLEAR split headers
+/// (e.g. Checksum+Sequence, no Key field at all) are supported: the
+/// full matcher runs on the head and decap re-verifies.
+/// Runs the complete `match_tunnel_endpoint` chain — GRE key read
+/// from the head, transport domain, resolved transport egress,
+/// ingress host-inbound — so pool state is created only for a head
+/// that the reassembled datagram's own decap would admit. A tail
+/// carries no GRE header/key, so tails never reach here: they
+/// consult the pool for a head-created entry instead. HEAD only:
+/// callers must gate on offset 0. Runs with `counted=false`: the
+/// matcher charges nothing on a probe (its transport-egress refusal
+/// counter belongs to completed-datagram decap, and charging it per
+/// head would multiply it and double-count successful datagrams);
+/// the stage charges its single refusal count + pool drop instead.
+pub(in crate::afxdp) fn outer_head_admits_gre_endpoint(
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    forwarding: &ForwardingState,
+) -> bool {
+    if meta.protocol != PROTO_GRE {
+        return false;
+    }
+    let Some((outer_src, outer_dst)) = parse_outer_addresses(frame, meta) else {
+        return false;
+    };
+    // #16028 fold (1): EVERY read below is bounded by the DECLARED
+    // outer datagram end (`outer_datagram_end`, the #6748 SSOT) —
+    // never merely by capture length. The pre-fold probe read the
+    // base word and Key bytes through `frame.get(..)`, so a head
+    // fragment whose declared length ended inside the GRE options
+    // had its Key read from trailing bytes beyond the datagram
+    // (Ethernet pad / next frame slack) — the exact class #6748
+    // closed in decap. Now: no declared end, no admission.
+    let Some(datagram_end) = outer_datagram_end(frame, meta) else {
+        return false;
+    };
+    let gre_offset = meta.l4_offset as usize;
+    let Some(base) = frame
+        .get(gre_offset..gre_offset.saturating_add(4))
+        .filter(|b| gre_offset + 4 <= datagram_end)
+        .and_then(|b| <[u8; 4]>::try_from(b).ok())
+    else {
+        return false;
+    };
+    let flags_version = u16::from_be_bytes([base[0], base[1]]);
+    if (flags_version & GRE_VERSION_MASK) != 0
+        || (flags_version & GRE_UNSUPPORTED_LEGACY_FLAGS) != 0
+        || (flags_version & GRE_FLAG_ROUTING) != 0
+    {
+        return false;
+    }
+    let key_present = (flags_version & GRE_FLAG_KEY) != 0;
+    let mut off = gre_offset + 4;
+    if (flags_version & GRE_FLAG_CHECKSUM) != 0 {
+        off += 4;
+    }
+    // #16028 fold (4)+fold2: the GRE header itself (base + Checksum
+    // + Key + Sequence options) may be SPLIT across the first
+    // fragments — a legal RFC 791 fragmentation at any 8-byte
+    // boundary (header is 4..16 bytes; first-fragment payload is a
+    // multiple of 8, so the split bites exactly for
+    // Checksum+Key+Sequence at an 8-byte first fragment). When this
+    // fragment covers the Key within the declared datagram, the Key
+    // is read below and matched exactly. When it does not, the Key
+    // is UNVERIFIABLE at the head and the head is refused: no
+    // endpoint can accept it at creation (keyed: stored Key unproven;
+    // unkeyed: refuses K-present by construction), so buffering it
+    // would hold sub-quota state for a datagram whose decap is
+    // certain to refuse — fold2 removes exactly that dead state.
+    // K-clear headers never reach this branch and match normally.
+    // Bytes of THIS fragment available within its declared length:
+    // the smaller of capture and declared end. NOTE: for a fragment
+    // the declared end is the FRAGMENT's end, not the reassembled
+    // datagram's — a GRE header extending past it is the split-header
+    // case below, not malformation.
+    let present_end = datagram_end.min(frame.len());
+    if key_present && off + 4 > present_end {
+        // Fold2: K-present but Key unverifiable in this fragment —
+        // reject with NO pool state. The pre-fold2 shape admitted
+        // against an unkeyed candidate, which `match_tunnel_endpoint`
+        // can never accept for a K-present datagram (key 0 requires
+        // K-clear), so every such entry was dead state held for the
+        // full timeout inside the attacker's sub-quota.
+        return false;
+    }
+    let key = if key_present {
+        // Bounded by present_end (declared end ∩ capture), fold (1).
+        let Some(kb) = frame
+            .get(off..off + 4)
+            .filter(|_| off + 4 <= present_end)
+            .and_then(|b| <[u8; 4]>::try_from(b).ok())
+        else {
+            return false;
+        };
+        u32::from_be_bytes(kb)
+    } else {
+        0
+    };
+    match_tunnel_endpoint_counted(forwarding, outer_src, outer_dst, key, key_present, meta, false)
+        .is_some()
 }
 
 /// Cold-path bookkeeping for the version refusal above.
@@ -900,11 +1033,27 @@ fn gre_transport_egress_matches(
     ingress_logical_ifindex: i32,
     ingress_zone_id: u16,
 ) -> bool {
+    gre_transport_egress_matches_counted(
+        forwarding,
+        endpoint,
+        ingress_logical_ifindex,
+        ingress_zone_id,
+        &forwarding.gre_decap_counters,
+    )
+}
+
+/// #16028: counter-redirected twin — identical predicate; charges go
+/// to `counters` instead of the production store.
+fn gre_transport_egress_matches_counted(
+    forwarding: &ForwardingState,
+    endpoint: &TunnelEndpoint,
+    ingress_logical_ifindex: i32,
+    ingress_zone_id: u16,
+    counters: &GreDecapCounters,
+) -> bool {
     let egress_ifindexes = gre_transport_egress_ifindexes(forwarding, endpoint);
     if egress_ifindexes.is_empty() {
-        forwarding
-            .gre_decap_counters
-            .note_transport_egress_refusal();
+        counters.note_transport_egress_refusal();
         return false;
     }
     let matched = egress_ifindexes.iter().any(|&egress_ifindex| {
@@ -915,9 +1064,7 @@ fn gre_transport_egress_matches(
         egress_zone_id != 0 && egress_zone_id == ingress_zone_id
     });
     if !matched {
-        forwarding
-            .gre_decap_counters
-            .note_transport_egress_refusal();
+        counters.note_transport_egress_refusal();
     }
     matched
 }
@@ -1159,6 +1306,50 @@ fn match_tunnel_endpoint<'a>(
     key_present: bool,
     meta: UserspaceDpMeta,
 ) -> Option<&'a TunnelEndpoint> {
+    match_tunnel_endpoint_counted(forwarding, outer_src, outer_dst, key, key_present, meta, true)
+}
+
+/// #16028: `counted=false` runs the identical predicate with every
+/// counter charge redirected to a scratch store (see
+/// [`outer_head_admits_gre_endpoint`]); `counted=true` is the
+/// production decap path, byte-identical to the pre-#16028 matcher.
+#[allow(clippy::too_many_arguments)]
+fn match_tunnel_endpoint_counted<'a>(
+    forwarding: &'a ForwardingState,
+    outer_src: IpAddr,
+    outer_dst: IpAddr,
+    key: u32,
+    key_present: bool,
+    meta: UserspaceDpMeta,
+    counted: bool,
+) -> Option<&'a TunnelEndpoint> {
+    // #16028 fold: counted=false charges the shared thread-local
+    // scratch; counted=true is the production store.
+    if !counted {
+        return GreDecapCounters::with_scratch(|scratch| {
+            match_tunnel_endpoint_inner(forwarding, outer_src, outer_dst, key, key_present, meta, scratch)
+        });
+    }
+    match_tunnel_endpoint_inner(
+        forwarding,
+        outer_src,
+        outer_dst,
+        key,
+        key_present,
+        meta,
+        &forwarding.gre_decap_counters,
+    )
+}
+
+fn match_tunnel_endpoint_inner<'a>(
+    forwarding: &'a ForwardingState,
+    outer_src: IpAddr,
+    outer_dst: IpAddr,
+    key: u32,
+    key_present: bool,
+    meta: UserspaceDpMeta,
+    counters: &GreDecapCounters,
+) -> Option<&'a TunnelEndpoint> {
     let outer_family = meta.addr_family as i32;
     let ingress_logical_ifindex = gre_ingress_logical_ifindex(forwarding, meta);
     let ingress_zone_id = forwarding
@@ -1193,11 +1384,12 @@ fn match_tunnel_endpoint<'a>(
             key_present && endpoint.key == key
         };
         if key_ok {
-            if !gre_transport_egress_matches(
+            if !gre_transport_egress_matches_counted(
                 forwarding,
                 endpoint,
                 ingress_logical_ifindex,
                 ingress_zone_id,
+                counters,
             ) {
                 continue;
             }

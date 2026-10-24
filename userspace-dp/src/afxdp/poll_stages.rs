@@ -426,12 +426,36 @@ pub(super) fn stage_native_gre_decap(
     // datagram was never forwarded and no operator surface showed the loss.
     // Returning NotGre here lets transit fragments take the ordinary
     // flowless / fragment-association path like any other proto-47 transit.
+    // #16028: pool-state CREATION is head-only and fully admitted. A head
+    // creates state only when `outer_head_admits_gre_endpoint` passes the
+    // complete matcher (key, transport domain, transport egress, ingress
+    // host-inbound) AND the pool's per-source sub-quota has room; a tail
+    // consults the pool only (never creates). The index probe remains the
+    // tail discriminator so a transit tail still falls through.
     if crate::afxdp::gre_reassembly::frame_is_fragment(raw_frame, meta)
         && crate::afxdp::frame::flowless_effective_protocol(raw_frame, meta)
             == crate::ip_proto::PROTO_GRE
         && crate::afxdp::gre::outer_frame_targets_gre_endpoint(raw_frame, meta, forwarding)
     {
-        return match reassembler.offer(raw_frame, meta, now_ns) {
+        let is_head = crate::afxdp::gre_reassembly::frame_is_first_fragment(raw_frame, meta);
+        if is_head
+            && !crate::afxdp::gre::outer_head_admits_gre_endpoint(raw_frame, meta, forwarding)
+        {
+            // Spoofed/wrong-key/wrong-domain/wrong-ingress head: no pool
+            // state, and not transit either — the tuple names our endpoint,
+            // so consume-and-count like a decap refusal instead of
+            // forwarding a fragment of a datagram addressed to us.
+            forwarding
+                .gre_decap_counters
+                .note_reassembled_decap_refusal();
+            return GreDecapStage::Buffered;
+        }
+        let admission = if is_head {
+            crate::afxdp::gre_reassembly::OfferAdmission::Head
+        } else {
+            crate::afxdp::gre_reassembly::OfferAdmission::Tail
+        };
+        return match reassembler.offer(raw_frame, meta, now_ns, admission) {
             Some((frame, rmeta)) => {
                 let mut filtered = false;
                 let pkt = crate::afxdp::gre::try_native_gre_decap_from_frame_with_input_filter(
@@ -518,6 +542,9 @@ pub(super) fn stage_wg_decap(
     // #15102: an outer-fragmented WG datagram must be reassembled before
     // decap. Heads keep protocol UDP; tails carry the 255 sentinel with
     // UDP recoverable from the Fragment header / IP Protocol byte.
+    // #16028: heads create pool state (listener/zone/ownership admission
+    // in `is_wg_fragment_candidate` + per-source sub-quota in the pool);
+    // tails consult only via the buffered-head check.
     if crate::afxdp::gre_reassembly::frame_is_fragment_for_protocol(
         raw_frame,
         meta,
@@ -526,11 +553,19 @@ pub(super) fn stage_wg_decap(
         let has_head = reassembler.has_admitted_head(raw_frame, meta, crate::ip_proto::PROTO_UDP);
         if crate::afxdp::wg::decap::is_wg_fragment_candidate(raw_frame, meta, forwarding, has_head)
         {
+            let admission = if crate::afxdp::gre_reassembly::frame_is_first_fragment(
+                raw_frame, meta,
+            ) {
+                crate::afxdp::gre_reassembly::OfferAdmission::Head
+            } else {
+                crate::afxdp::gre_reassembly::OfferAdmission::Tail
+            };
             return match reassembler.offer_for_protocol(
                 raw_frame,
                 meta,
                 now_ns,
                 crate::ip_proto::PROTO_UDP,
+                admission,
             ) {
                 Some((frame, rmeta)) => {
                     let mut filtered = false;

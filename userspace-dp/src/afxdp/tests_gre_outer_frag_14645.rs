@@ -5,7 +5,7 @@ use super::tests_support::*;
 use super::*;
 use crate::afxdp::forwarding_build::build_forwarding_state;
 use crate::afxdp::gre::try_native_gre_decap_from_frame;
-use crate::afxdp::gre_reassembly::{GreReassembler, gre_outer_frag_counter_test_lock};
+use crate::afxdp::gre_reassembly::{GreReassembler, OfferAdmission, gre_outer_frag_counter_test_lock};
 
 #[path = "../../../userspace-xdp/src/gre_classify.rs"]
 mod shim_gre_classify;
@@ -74,15 +74,18 @@ fn native_gre_outer_fragment_v4_reassembles_and_decaps_14645() {
     );
     let mut pool = GreReassembler::new();
     let now = 1_000_000_000u64;
-    assert!(pool.offer(&tail, frag_meta(&tail, false), now).is_none(), "tail first buffers");
+    // #16028: a Tail offer consults only — pre-head tail is dropped,
+    // not buffered. Completion now requires head-then-tail order.
+    assert!(pool.offer(&tail, frag_meta(&tail, false), now, OfferAdmission::Tail).is_none(), "tail first consults only, creates nothing (#16028)");
+    assert!(pool.offer(&head, frag_meta(&head, true), now + 1, OfferAdmission::Head).is_none(), "head buffers (#16028)");
     let (frame, meta) = pool
-        .offer(&head, frag_meta(&head, true), now + 1)
-        .expect("head+tail must complete reassembly");
+        .offer(&tail, frag_meta(&tail, false), now + 2, OfferAdmission::Tail)
+        .expect("head+tail must complete reassembly (#16028)");
     let decap = try_native_gre_decap_from_frame(&frame, meta, &forwarding)
         .expect("reassembled datagram must decap");
     assert_eq!(&decap.frame[decap.meta.l3_offset as usize..], &inner[..], "decapped inner must be byte-identical");
     // Exactly once: replaying tail does not complete again.
-    assert!(pool.offer(&tail, frag_meta(&tail, false), now + 2).is_none());
+    assert!(pool.offer(&tail, frag_meta(&tail, false), now + 3, OfferAdmission::Tail).is_none());
 }
 
 fn build_v6_outer_fragmented(inner: &[u8]) -> (Vec<u8>, Vec<u8>) {
@@ -140,9 +143,9 @@ fn native_gre_outer_fragment_v6_reassembles_and_decaps_14645() {
     assert!(try_native_gre_decap_from_frame(&head, frag_meta_v6(&head, true), &forwarding).is_none());
     let mut pool = GreReassembler::new();
     let now = 2_000_000_000u64;
-    assert!(pool.offer(&head, frag_meta_v6(&head, true), now).is_none());
+    assert!(pool.offer(&head, frag_meta_v6(&head, true), now, OfferAdmission::Head).is_none());
     let (frame, meta) = pool
-        .offer(&tail, frag_meta_v6(&tail, false), now + 1)
+        .offer(&tail, frag_meta_v6(&tail, false), now + 1, OfferAdmission::Tail)
         .expect("v6 head+tail must complete");
     let decap = try_native_gre_decap_from_frame(&frame, meta, &forwarding)
         .expect("reassembled v6 datagram must decap");
@@ -202,9 +205,9 @@ fn native_gre_outer_fragment_v6_behind_ext253_reassembles_16032() {
         tm.payload_offset = tm.l4_offset;
         let mut pool = GreReassembler::new();
         let now = 3_000_000_000u64 + ext as u64;
-        assert!(pool.offer(&head, hm, now).is_none(), "ext {ext}: head buffers");
+        assert!(pool.offer(&head, hm, now, OfferAdmission::Head).is_none(), "ext {ext}: head buffers");
         let (frame, meta) = pool
-            .offer(&tail, tm, now + 1)
+            .offer(&tail, tm, now + 1, OfferAdmission::Tail)
             .unwrap_or_else(|| panic!("ext {ext}: head+tail behind ext must complete reassembly (#16032)"));
         let decap = try_native_gre_decap_from_frame(&frame, meta, &forwarding)
             .unwrap_or_else(|| panic!("ext {ext}: reassembled datagram must decap (#16032)"));
@@ -253,8 +256,8 @@ fn native_gre_outer_fragment_overlap_is_counted_drop_14645() {
     let (head, _tail) = split_v4_outer(&whole, 16);
     let mut pool = GreReassembler::new();
     let before = crate::afxdp::gre_reassembly::GRE_OUTER_FRAG_DROPS.load(std::sync::atomic::Ordering::Relaxed);
-    assert!(pool.offer(&head, frag_meta(&head, true), 100).is_none());
-    assert!(pool.offer(&head, frag_meta(&head, true), 101).is_none(), "overlap/retransmit refused");
+    assert!(pool.offer(&head, frag_meta(&head, true), 100, OfferAdmission::Head).is_none());
+    assert!(pool.offer(&head, frag_meta(&head, true), 101, OfferAdmission::Head).is_none(), "overlap/retransmit refused");
     assert_eq!(
         crate::afxdp::gre_reassembly::GRE_OUTER_FRAG_DROPS.load(std::sync::atomic::Ordering::Relaxed),
         before + 1
