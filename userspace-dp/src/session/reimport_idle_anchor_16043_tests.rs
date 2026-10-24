@@ -124,11 +124,62 @@ fn same_id_udp_reimport_preserves_idle_anchor_and_expires_on_it_16043() {
     );
 }
 
-/// The legacy-handshake arm: a TCP import with no handshake-state field
-/// (wire state 0, legacy peer) previously fell outside the TCP-only fence
-/// whenever the stored entry was not in the exact preserved state, and in
-/// particular non-TCP-style re-imports refreshed the anchor. Same-id
-/// legacy re-imports must preserve it; a changed id anchors fresh.
+/// The HOLD arm of #16043: same-id re-imports that CONTINUE after the
+/// standby HOLD clock has armed must not restart the stale-synced
+/// ceiling. Before the fold, the replacement entry cleared
+/// `first_held_ns`, so each re-import during HOLD re-armed the ceiling
+/// and a lost-delete entry could be pinned indefinitely even with its
+/// idle anchor preserved.
+#[test]
+fn continuing_same_id_reimports_during_hold_do_not_restart_ceiling_16043() {
+    let mut table = SessionTable::new();
+    let installed_at = 10 * SEC;
+    let udp = crate::ip_proto::PROTO_UDP;
+    let key = import(&mut table, &request(udp, 77), installed_at);
+    let udp_window = table.timeouts.udp_ns;
+
+    // First due sweep on the non-forwarding standby: HELD, clock armed.
+    let hold_at = installed_at + udp_window + WHEEL_TICK_NS_FOR_TEST + 1;
+    let held = expire_as_standby(&mut table, hold_at);
+    assert!(!held.iter().any(|entry| entry.key == key), "FIXTURE: first sweep must HOLD");
+    assert_eq!(
+        table.first_held_ns_for(&key),
+        Some(hold_at),
+        "FIXTURE: HOLD arms first_held_ns at the first due sweep"
+    );
+
+    // Continuing same-id re-imports during HOLD preserve BOTH clocks.
+    let ceiling = STALE_SYNCED_CEILING_MULT * udp_window;
+    let mut t = hold_at;
+    for step in 1..=3u64 {
+        t = hold_at + step * (ceiling / 2);
+        import(&mut table, &request(udp, 77), t);
+        assert_eq!(anchor(&table, &key), installed_at, "#16043: re-import during HOLD must preserve the idle anchor");
+        assert_eq!(
+            table.first_held_ns_for(&key),
+            Some(hold_at),
+            "#16043: re-import during HOLD must not restart the stale ceiling (step {step})"
+        );
+    }
+
+    // Past the ceiling measured from the ORIGINAL hold instant — despite
+    // re-imports landing after it — the entry is reaped.
+    let reap_at = t + WHEEL_TICK_NS_FOR_TEST + 1;
+    assert!(reap_at > hold_at + ceiling, "FIXTURE: reap sweep must be past the original ceiling");
+    let expired = expire_as_standby(&mut table, reap_at);
+    assert!(
+        expired.iter().any(|entry| entry.key == key),
+        "#16043: continuing same-id re-imports during HOLD must not defer the stale-ceiling reap"
+    );
+}
+
+/// Compatibility coverage (not newly-fixed behavior): for TCP the
+/// preserved-anchor predicate is algebraically unchanged from #10888 —
+/// a legacy (handshake-state-0) import and its stored entry both decode
+/// through the legacy-established view — so a same-id legacy re-import
+/// already preserved the anchor at base. This cell pins that the
+/// generalized #16043 fence did not regress it; a changed id anchors
+/// fresh.
 #[test]
 fn same_id_legacy_tcp_reimport_preserves_idle_anchor_16043() {
     let mut table = SessionTable::new();

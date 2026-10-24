@@ -1349,7 +1349,9 @@ struct SessionEntry {
     /// cannot reset the leak clock. Cleared (→0) ONLY when the entry
     /// genuinely leaves the held world: real-traffic refresh
     /// (`update_session`), promotion refresh
-    /// (`refresh_for_ha_transition`), or re-import (`upsert_synced`).
+    /// (`refresh_for_ha_transition`), or re-import (`upsert_synced`) —
+    /// except an anchor-preserved same-id re-import (#16043), which is a
+    /// pure snapshot resend and carries the clock over.
     first_held_ns: u64,
     /// #2501: per-session forward/reverse byte and packet counters,
     /// accumulated on the AF_XDP forwarding hot path. Forward = the
