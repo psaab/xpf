@@ -1852,3 +1852,30 @@ Unit: `cargo test 16217` 64 passed (was 63, +1 new);
 `policy_revalidation` 118 passed; `session::` 552 passed with
 the same 4 pre-existing failures as the pre-fold tree
 (handshake_ack_16042 x3, session_decision_typed_snat_layout_11064).
+
+Live aged on the fix (head 904aa97434, `make deb
+DEB_VERSION=99.16217.52` deb sha256
+`4f27280e6d73f6b51eb9081ab301d7c838f72f1465b54e04b10947dd01b0ad8e`,
+helper sha256
+`31acbbd800928daa17e8dafc3f3763d73509aaae9ee4cfa8e5f956e7f482d118`
+hash-proved `/proc/<pid>/exe` both nodes before traffic; RG1
+node0->node1 proven both views each run; evidence
+`/var/worktrees/FZFixWire34/run{15,15b,16}/`; run15's restore was
+interrupted by the driver timeout after its traffic verdict and
+run15b re-ran the full cell including restore):
+
+| Run | Per-stream zeros | SUM zeros | snat_revoked | Verdict |
+|---|---|---|---|---|
+| run15 | 0 | 0 | 0 both, all samples | PASS |
+| run15b | 0 | 0 | 0 both, all samples | PASS |
+| run16 | 0 | 0 | 0 both, all samples | PASS |
+
+**Acceptance (ZERO per-stream zeros, snat_revoked 0) met on
+three consecutive strict cells (run15b + run16 adjacent and
+clean, run15 also clean).** Notably snat_revoked stayed 0 at
+FO+1 in all three — the run11/run13 FO+1 revocation churn on
+data-adjacent tuples no longer fires, consistent with the
+imported rows now carrying their traffic evidence into the
+guard. Restore after each run: clean master `2c8575b70e`,
+helper `2f2f5cbf…b04` both, RG1 node0, target OK, VERIFY_ZERO 0
+(run16 verify P4 16.1 Gbit/s).
