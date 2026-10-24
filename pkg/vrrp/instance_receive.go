@@ -322,13 +322,16 @@ func (vi *vrrpInstance) receiverIPv6() {
 // #15049: a frame whose 802.1Q tag the kernel stripped into skb metadata is
 // indistinguishable in-data from a native untagged frame. The socket asks
 // for PACKET_AUXDATA (openAfPacketReceiver); when auxdata reports
-// TP_STATUS_VLAN_VALID and this instance is bound to a non-VLAN (parent)
-// netdev, the frame belongs to a tagged sibling election and is dropped
-// before either parser runs. A VLAN child (bound to the .N sub-interface)
-// is exempt: the tag is its own, and on its tap the tag is normally still
-// in-data anyway. This mirrors the #2886 arrival-ifindex fail-open rule:
-// no auxdata / no VLAN_VALID means "not proven tagged", so native delivery
-// is never regressed on a kernel that omits the cmsg.
+// TP_STATUS_VLAN_VALID with a non-zero VID and this instance is bound to a
+// non-VLAN (parent) netdev, the frame belongs to a tagged sibling election
+// and is dropped before either parser runs. VID 0 is native in Linux
+// (only a non-zero VID marks a frame for a VLAN sub-interface), so a
+// priority-tagged VID-0 frame (PCP bits set, VID 0, #16426) is kept. A
+// VLAN child (bound to the .N sub-interface) is exempt: the tag is its
+// own, and on its tap the tag is normally still in-data anyway. This
+// mirrors the #2886 arrival-ifindex fail-open rule: no auxdata / no
+// VLAN_VALID / VID 0 means "not proven tagged-sibling", so native
+// delivery is never regressed on a kernel that omits the cmsg.
 func (vi *vrrpInstance) receiverAfPacket() {
 	buf := make([]byte, 1500)
 	oob := make([]byte, unix.CmsgSpace(int(unsafe.Sizeof(unix.TpacketAuxdata{}))))
@@ -367,9 +370,11 @@ func (vi *vrrpInstance) receiverAfPacket() {
 		// Drop a stripped-tag frame on a non-VLAN netdev (#15049). The
 		// in-data ethertype below reads untagged for such a frame, so this
 		// out-of-band check is the only place the sibling election can be
-		// kept out of the native instance's state machine.
+		// kept out of the native instance's state machine. Only a
+		// non-zero VID proves a tagged sibling: VID 0 is priority-tagged
+		// native traffic (#16426), so mask off the PCP/DEI bits.
 		if !boundToVLAN {
-			if _, tagged := afPacketAuxdataVLANTag(oob, oobn); tagged {
+			if tci, tagged := afPacketAuxdataVLANTag(oob, oobn); tagged && tci&0x0fff != 0 {
 				continue
 			}
 		}

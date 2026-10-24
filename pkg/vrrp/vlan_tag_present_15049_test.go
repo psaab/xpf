@@ -37,19 +37,24 @@ import (
 // VLAN-child control pin the neighbouring legitimate behaviour.
 
 // vlanDelivery is one synthetic AF_PACKET delivery: a wire frame plus the
-// VLAN TCI the kernel stripped into the skb (0 == untagged / no auxdata tag).
+// out-of-band auxdata the kernel delivered with it. hasAuxdata distinguishes
+// "no PACKET_AUXDATA / VLAN_VALID clear" (native untagged frame) from
+// "PACKET_AUXDATA with TP_STATUS_VLAN_VALID and this TCI" — the latter must
+// be expressible even when the TCI is 0 or carries only PCP bits (VID 0,
+// #16426), so vlanTCI==0 alone cannot encode "no auxdata".
 type vlanDelivery struct {
-	frame   []byte
-	vlanTCI uint16
+	frame      []byte
+	vlanTCI    uint16
+	hasAuxdata bool
 }
 
-// auxdataOOB builds a PACKET_AUXDATA control message carrying vlanTCI, or
-// nil for an untagged frame. The layout mirrors what the kernel delivers
-// for SOL_PACKET/PACKET_AUXDATA: a cmsghdr followed by TpacketAuxdata.
+// auxdataOOB builds a PACKET_AUXDATA control message carrying vlanTCI with
+// TP_STATUS_VLAN_VALID set, for any TCI including 0 (VID 0 with VLAN_VALID,
+// #16426). The layout mirrors what the kernel delivers for
+// SOL_PACKET/PACKET_AUXDATA: a cmsghdr followed by TpacketAuxdata. Callers
+// modelling a native untagged frame deliver no cmsg at all (see
+// runVLANReplay), not a zero-TCI cmsg.
 func auxdataOOB(vlanTCI uint16) []byte {
-	if vlanTCI == 0 {
-		return nil
-	}
 	aux := unix.TpacketAuxdata{
 		Status:    unix.TP_STATUS_VLAN_VALID,
 		Vlan_tci:  vlanTCI,
@@ -93,7 +98,10 @@ func runVLANReplay(t *testing.T, ifaceName string, deliveries []vlanDelivery) []
 		d := deliveries[idx]
 		idx++
 		n := copy(p, d.frame)
-		oobn := copy(oob, auxdataOOB(d.vlanTCI))
+		oobn := 0
+		if d.hasAuxdata {
+			oobn = copy(oob, auxdataOOB(d.vlanTCI))
+		}
 		return n, oobn, 0, &unix.SockaddrLinklayer{Pkttype: unix.PACKET_HOST}, nil
 	}
 
@@ -147,9 +155,9 @@ func TestReceiverAfPacketParentDropsStrippedVLANAdvert_15049(t *testing.T) {
 	// suffix, exactly the vlan-tagging parent case.
 	got := runVLANReplay(t, "ge-0-0-0", []vlanDelivery{
 		// Stripped VLAN-100 advert: in-data untagged, auxdata vlan_tci=100.
-		{untaggedAdvert(t, vlanPeer, vrid, 200), 100},
+		{frame: untaggedAdvert(t, vlanPeer, vrid, 200), vlanTCI: 100, hasAuxdata: true},
 		// Untagged native control: must still be enqueued.
-		{untaggedAdvert(t, nativePeer, vrid, 100), 0},
+		{frame: untaggedAdvert(t, nativePeer, vrid, 100)},
 	})
 
 	if len(got) != 1 || got[0] != nativePeer.String() {
@@ -168,7 +176,7 @@ func TestReceiverAfPacketVLANChildKeepsOwnVLAN_15049(t *testing.T) {
 	// single-tagged in-data and MUST still be enqueued. Dropping tagged
 	// frames on the child would deafen it.
 	got := runVLANReplay(t, "ge-0-0-0.100", []vlanDelivery{
-		{taggedAdvert(t, vlanPeer, vrid, 200, 100), 100},
+		{frame: taggedAdvert(t, vlanPeer, vrid, 200, 100), vlanTCI: 100, hasAuxdata: true},
 	})
 
 	if len(got) != 1 || got[0] != vlanPeer.String() {
@@ -177,13 +185,53 @@ func TestReceiverAfPacketVLANChildKeepsOwnVLAN_15049(t *testing.T) {
 	}
 }
 
+// TestReceiverAfPacketParentKeepsVID0PriorityTaggedAdvert_16426 pins
+// #16426: Linux treats VID 0 as native — only a non-zero VID marks a
+// frame as belonging to a VLAN sub-interface. A peer advert priority-
+// tagged on the wire (VID 0, PCP 6 => TCI 0xC000) is stripped into
+// auxdata with TP_STATUS_VLAN_VALID set, exactly like a VLAN-100 advert,
+// but it belongs to the native election and MUST be enqueued on the
+// parent. Dropping it deafens the backup: its master-down timer expires
+// and both nodes hold the VIP (dual MASTER).
+func TestReceiverAfPacketParentKeepsVID0PriorityTaggedAdvert_16426(t *testing.T) {
+	const vrid = 42
+	prioPeer := net.IPv4(10, 0, 61, 2)
+	zeroPeer := net.IPv4(10, 0, 61, 4)
+	vlanPeer := net.IPv4(10, 0, 61, 3)
+
+	got := runVLANReplay(t, "ge-0-0-0", []vlanDelivery{
+		// Priority-tagged VID 0, PCP 6 (TCI 0xC000), VLAN_VALID set:
+		// native advert, must be enqueued.
+		{frame: untaggedAdvert(t, prioPeer, vrid, 200), vlanTCI: 0xC000, hasAuxdata: true},
+		// VID 0 with TCI exactly 0 but VLAN_VALID set: also native.
+		{frame: untaggedAdvert(t, zeroPeer, vrid, 200), vlanTCI: 0, hasAuxdata: true},
+		// Reference: stripped VLAN-100 advert must still drop (#15049).
+		{frame: untaggedAdvert(t, vlanPeer, vrid, 200), vlanTCI: 100, hasAuxdata: true},
+	})
+
+	want := []string{prioPeer.String(), zeroPeer.String()}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("parent received %v; want exactly the VID-0 adverts %v — "+
+			"a priority-tagged (VID 0) frame is native and must be enqueued, "+
+			"while the stripped VLAN-100 advert must still drop (#16426/#15049)",
+			got, want)
+	}
+}
+
 // TestAfPacketAuxdataVLANTag pins the cmsg parser the loop gates on:
-// TP_STATUS_VLAN_VALID reports the stripped TCI; absent/invalid auxdata
-// reports no tag (fail open for the native path, exactly like the #2886
-// arrival-ifindex helper).
+// TP_STATUS_VLAN_VALID reports the stripped TCI (including a VID-0
+// priority-tag TCI, #16426 — the parser must surface it so the loop can
+// mask the VID itself); absent/invalid auxdata reports no tag (fail open
+// for the native path, exactly like the #2886 arrival-ifindex helper).
 func TestAfPacketAuxdataVLANTag_15049(t *testing.T) {
 	if tci, ok := afPacketAuxdataVLANTag(auxdataOOB(100), len(auxdataOOB(100))); !ok || tci != 100 {
 		t.Fatalf("vlan 100 auxdata: got (%d,%v), want (100,true)", tci, ok)
+	}
+	if tci, ok := afPacketAuxdataVLANTag(auxdataOOB(0xC000), len(auxdataOOB(0xC000))); !ok || tci != 0xC000 {
+		t.Fatalf("VID-0 priority-tag auxdata: got (0x%x,%v), want (0xc000,true)", tci, ok)
+	}
+	if tci, ok := afPacketAuxdataVLANTag(auxdataOOB(0), len(auxdataOOB(0))); !ok || tci != 0 {
+		t.Fatalf("VID-0 zero-TCI auxdata: got (0x%x,%v), want (0,true)", tci, ok)
 	}
 	if _, ok := afPacketAuxdataVLANTag(nil, 0); ok {
 		t.Fatal("no auxdata must report no VLAN tag")

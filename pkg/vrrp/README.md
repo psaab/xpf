@@ -1322,10 +1322,11 @@ ethertype (#5088):
   before the parent's `ETH_P_ALL` tap, so the frame reads untagged in
   data and — before this fix — a same-VRID sibling election drove the
   native instance (native MASTER demoted / master-down timer perpetually
-  reset, native VIP ownerless). The socket now requests
   `PACKET_AUXDATA` (`openAfPacketReceiver`) and `receiverAfPacket` reads
-  it via `recvmsg` (`afPacketAuxdataVLANTag`): `TP_STATUS_VLAN_VALID` on
-  a non-VLAN netdev drops the frame before either parser runs. A VLAN
+  it via `recvmsg` (`afPacketAuxdataVLANTag`): `TP_STATUS_VLAN_VALID`
+  with a non-zero VID (`tci & 0x0fff != 0`) on a non-VLAN netdev drops
+  the frame before either parser runs. VID 0 is native in Linux, so a
+  priority-tagged VID-0 frame (PCP set, VID 0) is kept (#16426). A VLAN
   child is exempt (the tag is its own; its tap normally still carries it
   in-data), and missing/invalid auxdata fails open exactly like the
   #2886 arrival-ifindex helper — no cmsg means "not proven tagged", so
@@ -1337,8 +1338,9 @@ ethertype (#5088):
   #5088 tests rely on. The userspace auxdata check is the per-instance
   half of the issue's stated `PACKET_AUXDATA and TP_STATUS_VLAN_VALID`
   option and is exercised end-to-end through the `afPacketRecvmsg` seam
-  (`vlan_tag_present_15049_test.go`: parent drops vlan_tci=100, untagged
-  control kept, child keeps its own VLAN).
+  (`vlan_tag_present_15049_test.go`: parent drops vlan_tci=100, parent
+  keeps VID-0 priority-tagged adverts, untagged control kept, child
+  keeps its own VLAN).
 
 `parseAfPacketIPv6` performs a **bounded** IPv6 ext-header walk
 (`walkIPv6ExtHeaders`) to locate the real proto-112 payload offset
