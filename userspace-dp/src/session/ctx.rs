@@ -80,7 +80,8 @@ pub(crate) struct SessionUpdate<'a> {
     /// caller parsed a frame. `None` = unparsed (pre-#16042 flags-only
     /// behaviour, bounded by the opening window). Most callers have no
     /// frame and pass `None`; the session-hit promote path passes the
-    /// ack it parsed so a wrong-ack segment cannot promote/complete.
+    /// ack it parsed so a wrong-ack segment cannot promote/complete. The expected ack
+    /// is the companion SYN ack end (ISN + 1 + SYN payload).
     pub(crate) ack: Option<u32>,
 }
 

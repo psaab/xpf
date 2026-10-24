@@ -6315,7 +6315,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     sessions.seed_tcp_window_scale(&flow.forward_key, scale);
                                     // #16042: seed the trigger ISN so the first
                                     // handshake segment can be ack-validated.
-                                    sessions.seed_tcp_isn(&flow.forward_key, seq, meta.tcp_flags);
+                                    sessions.seed_tcp_isn(&flow.forward_key, seq, tcp_payload_len(packet_frame, meta), meta.tcp_flags);
                                 }
                                 // #15111: host-local inbound session anchors the lease hold.
                                 if acquire_persistent_inbound_hold(
@@ -7572,7 +7572,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             scale,
                                         );
                                         // #16042: seed the trigger ISN (see local-miss site).
-                                        sessions.seed_tcp_isn(&flow.forward_key, seq, meta.tcp_flags);
+                                        sessions.seed_tcp_isn(&flow.forward_key, seq, tcp_payload_len(packet_frame, meta), meta.tcp_flags);
                                     }
                                     if forward_installed {
                                         if let Some(incarnation) = leak_incarnation {
@@ -8393,7 +8393,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             {
                                                 sessions.seed_tcp_window_scale(&flow.forward_key, scale);
                                                 // #16042: seed the trigger ISN.
-                                                sessions.seed_tcp_isn(&flow.forward_key, seq, meta.tcp_flags);
+                                                sessions.seed_tcp_isn(&flow.forward_key, seq, tcp_payload_len(packet_frame, meta), meta.tcp_flags);
                                             }
                                             if acquire_persistent_inbound_hold(
                                                 worker_ctx.forwarding,
@@ -8534,7 +8534,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             {
                                                 sessions.seed_tcp_window_scale(&flow.forward_key, scale);
                                                 // #16042: seed the trigger ISN.
-                                                sessions.seed_tcp_isn(&flow.forward_key, seq, meta.tcp_flags);
+                                                sessions.seed_tcp_isn(&flow.forward_key, seq, tcp_payload_len(packet_frame, meta), meta.tcp_flags);
                                             }
                                             // #15111: punt seed anchors the inbound hold.
                                             if acquire_persistent_inbound_hold(
@@ -12711,7 +12711,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             scale,
                                         );
                                         // #16042: seed the trigger ISN.
-                                        sessions.seed_tcp_isn(&flow.forward_key, seq, meta.tcp_flags);
+                                        sessions.seed_tcp_isn(&flow.forward_key, seq, tcp_payload_len(packet_frame, meta), meta.tcp_flags);
                                     }
                                     // Permit held in seed_install_permit_14661
                                     // until after the shared/BPF publish below.

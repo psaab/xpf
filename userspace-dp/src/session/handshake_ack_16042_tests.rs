@@ -159,7 +159,7 @@ fn syn_ack_first_bad_ack_does_not_complete_16042() {
     // key here mirrors install_forward_reverse_pair with SYN|ACK flags).
     let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN | TCP_ACK);
     // Seed both halves with the SYN-ACK ISN, as the poll install does.
-    table.seed_tcp_isn(&forward, SERVER_ISN, TCP_SYN | TCP_ACK);
+    table.seed_tcp_isn(&forward, SERVER_ISN, 0, TCP_SYN | TCP_ACK);
     for key in [&forward, &reverse] {
         let e = table.entry_by_key(key).unwrap();
         assert!(!e.established && e.handshake_pending && e.syn_ack_first, "premise SYN-ACK-first pending");
@@ -299,7 +299,7 @@ fn nat_alias_companion_ack_validated_16042() {
     assert!(table.install_with_protocol(reverse.clone(), rev_decision, rev_meta, now, PROTO_TCP, TCP_SYN));
     let _ = table.drain_deltas(16);
     // Seed + note through the alias keys exactly as the poll path does.
-    table.seed_tcp_isn(&forward, CLIENT_ISN, TCP_SYN);
+    table.seed_tcp_isn(&forward, CLIENT_ISN, 0, TCP_SYN);
     table.note_tcp_seq(&forward, CLIENT_ISN, 0, 4096, 0, TCP_SYN, 0);
     assert_eq!(
         table.handshake_expected_ack(&reverse),
@@ -333,7 +333,7 @@ fn nat_alias_companion_ack_validated_16042() {
 
 #[test]
 fn ha_import_unknown_evidence_fails_open_16042() {
-    // An HA import carries no ISN (tcp_peer_isn = None on both halves).
+    // An HA import carries no ISN (tcp_peer_ack_end = None on both halves).
     // Its first completing segment — here with ANY ack, because no
     // expectation exists — must still complete (fail-open), never get
     // stuck pending because evidence is unknown.
@@ -393,4 +393,88 @@ fn bad_ack_deferred_owner_replay_does_not_complete_16042() {
     table.apply_deferred_owner_hit_with_ack(&forward, now + 3 * SEC, TCP_ACK, 0, Some(SERVER_ISN + 1));
     assert_established(&table, &forward, "forward");
     assert_established(&table, &reverse, "reverse");
+}
+
+// ------------------------------------------------ fold: SYN payload (TFO)
+
+#[test]
+fn syn_with_payload_requires_payload_ack_end_16042() {
+    // Client SYN carries 100 bytes of payload: it consumes seq
+    // 1000 (SYN) + 100..1100, so a valid SYN-ACK must ack 1101, not 1001.
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN);
+    table.seed_tcp_isn(&forward, CLIENT_ISN, 100, TCP_SYN);
+    table.note_tcp_seq(&forward, CLIENT_ISN, 0, 4096, 100, TCP_SYN, 0);
+    assert_eq!(table.handshake_expected_ack(&reverse), Some(CLIENT_ISN + 101));
+    // SYN-ACK acking ISN+1 only (ignoring the SYN payload) must not promote.
+    // Production order: lookup first, then note for Owner-admitted only —
+    // here the lookup refuses, so no note follows.
+    assert!(table
+        .lookup_with_origin_with_ack(&reverse, now + SEC, TCP_SYN | TCP_ACK, 0, Some(CLIENT_ISN + 1))
+        .is_some());
+    assert!(!table.entry_by_key(&reverse).unwrap().established, "#16042 fold: SYN-payload SYN-ACK acking ISN+1 promoted");
+    // Acking the full SYN end (ISN+1+payload) promotes.
+    table.note_tcp_seq(&reverse, SERVER_ISN, CLIENT_ISN + 101, 4096, 0, TCP_SYN | TCP_ACK, 0);
+    assert!(table
+        .lookup_with_origin_with_ack(&reverse, now + 2 * SEC, TCP_SYN | TCP_ACK, 0, Some(CLIENT_ISN + 101))
+        .is_some());
+    assert!(table.entry_by_key(&reverse).unwrap().established);
+    // Completing ACK must ack the server SYN end (5001, no payload).
+    assert!(table
+        .lookup_with_origin_with_ack(&forward, now + 3 * SEC, TCP_ACK, 0, Some(SERVER_ISN + 1))
+        .is_some());
+    assert_established(&table, &forward, "forward");
+}
+
+// --------------------------------------- fold: rejected SYN-ACK no launder
+
+#[test]
+fn rejected_syn_ack_does_not_overwrite_isn_evidence_16042() {
+    // A bad-ack SYN-ACK (attacker seq 9999) is refused by the lookup gate;
+    // production then never notes it. Even if a note were attempted with
+    // the rejected segment, the gate ordering is the contract pinned here:
+    // after refusal the expected completing ack is still the legitimate
+    // server ISN end, and the attacker's segment cannot complete.
+    let (mut table, forward, reverse, now) = syn_pair();
+    // Refused SYN-ACK: wrong ack, attacker-chosen seq — lookup only, no note.
+    assert!(table
+        .lookup_with_origin_with_ack(&reverse, now + SEC, TCP_SYN | TCP_ACK, 0, Some(4242))
+        .is_some());
+    assert!(!table.entry_by_key(&reverse).unwrap().established);
+    // Legitimate SYN-ACK promotes with the correct ack.
+    syn_ack_via_lookup(&mut table, &reverse, now + 2 * SEC, CLIENT_ISN + 1);
+    assert!(table.entry_by_key(&reverse).unwrap().established);
+    // Completing ACK acking the ATTACKER's seq+1 must not complete.
+    assert!(table
+        .lookup_with_origin_with_ack(&forward, now + 3 * SEC, TCP_ACK, 0, Some(10000))
+        .is_some());
+    assert_opening(&table, &forward, "forward");
+    // The legitimate server end completes.
+    assert!(table
+        .lookup_with_origin_with_ack(&forward, now + 4 * SEC, TCP_ACK, 0, Some(SERVER_ISN + 1))
+        .is_some());
+    assert_established(&table, &forward, "forward");
+}
+
+// --------------------------------------- fold: pending-only companion probe
+
+#[test]
+fn established_pair_skips_companion_resolution_16042() {
+    // Once completed (not pending), `handshake_expected_ack` must return
+    // None WITHOUT resolving the companion — the hot path pays no probe.
+    // Observable contract: even with companion evidence present, an
+    // established entry reports no expectation, and cache hits still work.
+    let (mut table, forward, reverse, now) = syn_pair();
+    syn_ack_via_lookup(&mut table, &reverse, now + SEC, CLIENT_ISN + 1);
+    assert!(table
+        .lookup_with_origin_with_ack(&forward, now + 2 * SEC, TCP_ACK, 0, Some(SERVER_ISN + 1))
+        .is_some());
+    assert_established(&table, &forward, "forward");
+    assert_eq!(table.handshake_expected_ack(&forward), None, "#16042 fold: established must skip companion resolution");
+    assert_eq!(table.handshake_expected_ack(&reverse), None);
+    // Cache-hit path still serves the established flow with any ack.
+    assert!(table.probe_hit_with_ack(&forward, now + 3 * SEC, 64, TCP_ACK, 0, 0, Some(777)));
+    assert!(table.touch_if_stale_with_ack(&forward, now + 4 * SEC, TCP_ACK, 0, Some(888)));
 }

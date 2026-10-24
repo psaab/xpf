@@ -263,14 +263,18 @@ Steady state costs one `handshake_pending` bool check per cache hit.
 completion gate above — the `lookup.rs` SYN-ACK and completing-ACK arms,
 the cached-hit `probe_hit` and keepalive arms, and the `update_session` /
 promote twin — additionally requires, when both are known, that the
-segment's ack equal the COMPANION direction's ISN + 1 (wrapping; a SYN
-consumes one sequence number). Each direction's ISN (`tcp_peer_isn`) is
-learned from its SYN/SYN-ACK (`note_tcp_seq`) or seeded at install
-(`seed_tcp_isn`, both halves, companion resolved through
-`reverse_session_key` so NAT alias pairs validate the same way). A
-wrong-ack SYN-ACK never promotes and a wrong-ack completing segment
-never clears `handshake_pending`: the pair stays on the opening window.
-Unknown evidence fails OPEN, never closed: when the companion ISN was
+segment's ack equal the COMPANION direction's SYN ack END (wrapping):
+ISN + 1 + SYN payload, because a SYN consumes itself and any payload it
+carries (TFO-style SYN data must be acked too). Each direction's ack end
+(`tcp_peer_ack_end`) is learned from its SYN/SYN-ACK (`note_tcp_seq`,
+Owner-admitted segments only — a gate-rejected SYN-ACK is never noted,
+so it cannot launder the evidence) or seeded at install (`seed_tcp_isn`,
+both halves, companion resolved through `reverse_session_key` so NAT
+alias pairs validate the same way). A wrong-ack SYN-ACK never promotes
+and a wrong-ack completing segment never clears `handshake_pending`:
+the pair stays on the opening window. Companion resolution runs ONLY
+for `handshake_pending` pairs — established hot-path hits skip it.
+Unknown evidence fails OPEN, never closed: when the companion end was
 never observed (mid-stream pickup, HA import — imports carry no ISN) or
 the caller parsed no ack, the gate is flags-only exactly as before, so
 a failover import's first completing segment still completes; the

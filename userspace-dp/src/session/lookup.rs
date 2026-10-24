@@ -68,7 +68,7 @@ pub(crate) struct SessionQuery<'a> {
     /// caller parsed a frame. `None` (the constructors below) means the
     /// caller has no parsed ack; session-table unit callers that drive a
     /// handshake gate set it explicitly. A segment whose ack is known but
-    /// does not equal the companion ISN + 1 must not promote/complete.
+    /// does not equal the companion SYN ack end must not promote/complete.
     pub(crate) ack: Option<u32>,
 }
 
@@ -208,43 +208,54 @@ impl SessionTable {
             }
         }
     }
-    /// #16042: seed the trigger packet's ISN (`seq` of a SYN or SYN-ACK)
+    /// #16042 fold: seed the trigger packet's ack END (SYN seq + payload)
     /// onto BOTH halves at install. The poll install path installs before
     /// any hit can `note_tcp_seq`, so without this seed the first
     /// handshake segment (the SYN-ACK reply, or the completing ACK of a
     /// SYN-ACK-first pickup) would have no expected ack to validate
-    /// against. For a SYN-ACK install the SYN-ACK's seq IS the peer ISN
-    /// both halves must ack. For a bare SYN both copies start at the
-    /// client ISN: the reverse half's copy is what a reverse SYN-ACK's
-    /// ack is validated against, and it is overwritten by the real
-    /// SYN-ACK seq when that segment is noted. No-op for non-SYN packets.
+    /// against. A SYN consumes itself + its payload (RFC 9293 TFO-style
+    /// SYN data), so the peer must ack `seq + 1 + payload_len`. For a
+    /// SYN-ACK install that end IS the peer ack end both halves must
+    /// ack. For a bare SYN both copies start at the client end: the
+    /// reverse half's copy is what a reverse SYN-ACK's ack is validated
+    /// against, and it is overwritten by the real SYN-ACK end when that
+    /// segment is noted. No-op for non-SYN packets.
     /// NAT: the companion is resolved through `reverse_session_key`, so
     /// translated (SNAT/DNAT/NAT64) pairs seed the alias companion too.
-    pub fn seed_tcp_isn(&mut self, key: &SessionKey, seq: u32, tcp_flags: u8) {
+    pub fn seed_tcp_isn(&mut self, key: &SessionKey, seq: u32, payload_len: u32, tcp_flags: u8) {
         if !crate::tcp_flags::has_syn(tcp_flags) {
             return;
         }
+        let end = seq.wrapping_add(1).wrapping_add(payload_len);
         let Some(record) = self.revalidation_record(key) else { return };
         let nat = record.entry.decision.nat;
         let canonical = record.key.clone();
         if let Some(entry) = self.entry_by_key_mut(&canonical) {
-            entry.tcp_peer_isn = Some(seq);
+            entry.tcp_peer_ack_end = Some(end);
         }
         let companion_key = reverse_session_key(&canonical, nat);
         if companion_key != canonical
             && let Some(entry) = self.entry_by_key_mut(&companion_key)
         {
-            entry.tcp_peer_isn = Some(seq);
+            entry.tcp_peer_ack_end = Some(end);
         }
     }
-    /// #16042: the ack a handshake segment arriving on `key` must carry:
-    /// the companion direction's ISN + 1 (a SYN consumes one sequence
-    /// number, wrapping). `None` when the matched entry or its companion
-    /// is unknown, or the companion ISN was never observed/seeded —
-    /// mid-stream pickups and HA imports — in which case the gate fails
-    /// open (flags-only) and the pair stays bounded by the opening window.
+    /// #16042 fold: the ack a handshake segment arriving on `key` must
+    /// carry: the companion direction's SYN ack end (ISN + 1 + payload).
+    /// Callers resolve this ONLY for handshake-INCOMPLETE pairs
+    /// (`!established || handshake_pending`: OPENING needs it for the
+    /// SYN-ACK promotion, pending needs it for completion) — established
+    /// flows return `None` here WITHOUT the companion probe, so the
+    /// steady-state hot path pays no companion resolution. `None` also
+    /// when the matched entry or its companion is unknown, or the
+    /// companion end was never observed/seeded — mid-stream pickups
+    /// and HA imports — in which case the gate fails open (flags-only)
+    /// and the pair stays bounded by the opening window.
     pub(crate) fn handshake_expected_ack(&self, key: &SessionKey) -> Option<u32> {
         let record = self.revalidation_record(key)?;
+        if record.entry.established && !record.entry.handshake_pending {
+            return None;
+        }
         let companion_key = reverse_session_key(&record.key, record.entry.decision.nat);
         if companion_key == record.key {
             return None;
@@ -252,8 +263,7 @@ impl SessionTable {
         // Non-counting resolver: a companion probe must never perturb
         // the #7919 lookup-miss counters on an ordinary hit.
         self.revalidation_record(&companion_key)
-            .and_then(|companion| companion.entry.tcp_peer_isn)
-            .map(|isn| isn.wrapping_add(1))
+            .and_then(|companion| companion.entry.tcp_peer_ack_end)
     }
     /// #16042: a SYN-ACK or completing-ACK segment promotes/completes
     /// only when its parsed ack equals the known expectation. Unknown
@@ -887,8 +897,10 @@ impl SessionTable {
             .get(handle as usize)
             .map(|r| r.entry.metadata.ingress_zone)
             .and_then(|zone| self.opening_override_for(zone));
-        // #16042: expected ack for this hit, resolved from the canonical
-        // record (alias hits share the pair's companion ISN).
+        // #16042 fold: expected ack resolved ONLY for pending pairs —
+        // `handshake_expected_ack` returns None without the companion
+        // probe when the matched entry is not `handshake_pending`, so
+        // established hot-path hits pay no companion resolution.
         let expected_ack = self.handshake_expected_ack(key);
         // Scope the &mut self.entries borrow so it ends BEFORE we
         // touch self.wheel via push_to_wheel. Without this scoping
@@ -936,7 +948,7 @@ impl SessionTable {
             // #10889: a non-TCP entry with an application override promotes
             // only on the first packet observed on its reverse half.
             // #16042: a TCP SYN-ACK / completing-ACK segment whose parsed
-            // ack does not equal the companion ISN + 1 must not promote or
+            // ack does not equal the companion SYN ack end must not promote or
             // complete. Unknown expectation/ack fails open (bounded by the
             // opening window). Computed before the borrow from the
             // canonical record so NAT alias hits validate the same pair.

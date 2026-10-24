@@ -801,9 +801,13 @@ impl SessionEntry {
                 self.tcp_window_scale = Some(scale.min(14));
             }
             self.tcp_syn_seen = true;
-            // #16042: remember this direction's ISN so a later segment on
-            // the companion can be ack-validated (ack == isn + 1).
-            self.tcp_peer_isn = Some(seq);
+            // #16042 fold: remember this direction's SYN ack END (seq + 1
+            // + payload; a SYN consumes itself and any SYN payload) so a
+            // later segment on the companion can be ack-validated. Written
+            // unconditionally: the caller (poll note site) notes only
+            // Owner-admitted segments, and a rejected (bad-ack) SYN-ACK
+            // never reaches this note, so it cannot launder ISN evidence.
+            self.tcp_peer_ack_end = Some(seq.wrapping_add(1).wrapping_add(payload_len));
         }
         // RFC 7323: scaling applies only after WSOPT is seen on SYNs in
         // BOTH directions. tcp_ws_negotiated is set by the table when it
@@ -1437,19 +1441,20 @@ struct SessionEntry {
     tcp_peer_rcv_nxt_seen: bool,
     tcp_rcv_wnd: u32,
     tcp_seq_seen: bool,
-    /// #16042: initial sequence number observed on THIS entry's direction
-    /// (the SYN or SYN-ACK seq), or `None` when no SYN was observed/seeded
-    /// for this direction (mid-stream pickup, HA import, or install before
-    /// the poll seed). Handshake promotion/completion validates a
+    /// #16042 fold: ack END of THIS direction's SYN (seq + 1 + payload —
+    /// a SYN consumes itself and any payload it carries), or `None` when
+    /// no SYN was observed/seeded for this direction (mid-stream pickup,
+    /// HA import). Handshake promotion/completion validates a
     /// SYN-ACK/completing segment's ack against the COMPANION entry's
-    /// `tcp_peer_isn + 1` (wrapping). When the companion ISN is known and
-    /// the segment ack was parsed, a mismatch MUST NOT promote/complete.
-    /// When either is unknown the gate fails open — the pair stays on the
-    /// opening window, so the abuse window is bounded. Node-local, no
-    /// wire: a peer re-derives its own from SYNs it observes; an HA import
-    /// therefore starts with unknown evidence and its first completing
-    /// segment is flags-only (fail-open), never fail-closed.
-    tcp_peer_isn: Option<u32>,
+    /// `tcp_peer_ack_end` exactly (wrapping). When the companion end is
+    /// known and the segment ack was parsed, a mismatch MUST NOT
+    /// promote/complete. When either is unknown the gate fails open —
+    /// the pair stays on the opening window, so the abuse window is
+    /// bounded. Node-local, no wire: a peer re-derives its own from the
+    /// SYNs it observes; an HA import therefore starts with unknown
+    /// evidence and its first completing segment is flags-only
+    /// (fail-open), never fail-closed.
+    tcp_peer_ack_end: Option<u32>,
     /// #15947 (H29-02): RFC 7323 window-scale shift learned from this
     /// direction's SYN (WSOPT kind 3), or None until a SYN carrying the
     /// option is noted. Node-local, no wire — a peer re-derives its own
@@ -3961,7 +3966,8 @@ impl SessionTable {
         ack: Option<u32>,
     ) -> bool {
         let mut completing: Option<(SessionKey, crate::nat::NatDecision)> = None;
-        // #16042: expected ack resolved before the mutable borrow.
+        // #16042 fold: expected ack only for pending pairs — the helper
+        // returns None without the companion probe otherwise.
         let expected_ack = self.handshake_expected_ack(key);
         // #15947 (H29-04): wire state BEFORE the completion below, so the
         // HA Update emission can tell whether the handshake actually
@@ -4260,6 +4266,7 @@ impl SessionTable {
         // #15947 (H29-04): pre-completion wire state for the HA Update.
         let mut handshake_state_before = 0u8;
         let mut close_class_before = 0u8;
+        // #16042 fold: pending-only companion resolution (see helper).
         let expected_ack = self.handshake_expected_ack(key);
         let canonical_refresh_key = match self.record_by_key(key) {
             Some(record) => {
@@ -4793,7 +4800,8 @@ impl SessionTable {
             .get(handle as usize)
             .map(|record| record.entry.tcp_handshake_state_wire(protocol))
             .unwrap_or(0);
-        // #16042: expected ack from the companion ISN, before mutation.
+        // #16042 fold: expected ack only for pending pairs (see
+        // `handshake_expected_ack`); established refreshes skip the probe.
         let ack_valid = Self::handshake_ack_valid(self.handshake_expected_ack(key), ack);
         {
             let record = self
