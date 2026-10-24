@@ -21,10 +21,10 @@ func (c *xpfCollector) initSNMPServeBudgetDescriptors() {
 }
 
 func (c *xpfCollector) emitSNMPServeBudget(ch chan<- prometheus.Metric) {
-	if c.srv == nil || c.srv.snmpServeBudgetStatsFn == nil {
+	if c.deps.snmpServeBudgetStatsFn == nil {
 		return
 	}
-	shed, evictions, tracked := c.srv.snmpServeBudgetStatsFn()
+	shed, evictions, tracked := c.deps.snmpServeBudgetStatsFn()
 	c.emitConstMetric(ch, c.snmpRequestsShedTotal, prometheus.CounterValue, float64(shed))
 	c.emitConstMetric(ch, c.snmpSourceBucketEvictionsTotal, prometheus.CounterValue, float64(evictions))
 	c.emitConstMetric(ch, c.snmpTrackedSources, prometheus.GaugeValue, float64(tracked))

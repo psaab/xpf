@@ -43,7 +43,7 @@ func TestCollectFwdStatusUsesSharedUserspaceSnapshot13299(t *testing.T) {
 			DebugPendingFillFrames: 80, TxRingCapacity: 100,
 		}},
 	}}
-	c := &xpfCollector{srv: &Server{dp: dp, fwdSampler: sampler, startTime: now}}
+	c := &xpfCollector{deps: collectorDeps{dp: dp, fwdSampler: sampler, startTime: now}}
 	c.initFwdStatusDescriptors()
 	c.initBindingDescriptors()
 
@@ -87,7 +87,7 @@ func TestCollectFwdStatusExportsSamplerErrors13299(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	proc.Start(ctx)
-	c := &xpfCollector{srv: &Server{fwdSampler: proc}}
+	c := &xpfCollector{deps: collectorDeps{fwdSampler: proc}}
 	c.initFwdStatusDescriptors()
 	ch := make(chan prometheus.Metric, 32)
 	c.collectFwdStatus(ch, nil, nil)

@@ -533,7 +533,7 @@ func TestEmitWorkerColdPath_V3_OverflowNoSamples(t *testing.T) {
 // be declared in Describe(), or promhttp logs a Gather error on every
 // scrape and a HTTPErrorOnError registry returns 500. This test builds
 // the REAL collector (newCollector(nil) — Describe and emitWorkerColdPath
-// don't touch srv), captures the Describe() desc set, then drives
+// don't touch deps), captures the Describe() desc set, then drives
 // emitWorkerColdPath over a fully-populated v3 worker and asserts every
 // emitted Desc is declared. It FAILS if any cold-path desc (v1, scalar,
 // or v3) is emitted but undeclared — the registration-contract bug.

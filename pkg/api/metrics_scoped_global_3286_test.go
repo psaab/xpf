@@ -76,7 +76,7 @@ func TestCollectPolicyCountersScopedGlobalLabels(t *testing.T) {
 	openID := globalCounterPolicyID(t, store, "open-global")
 	// #7016: see TestCollectPolicyCountersNilSlotsNoPanic -- initialize the
 	// real descriptor set, then override the asserted one.
-	c := &xpfCollector{srv: &Server{store: store}}
+	c := &xpfCollector{deps: collectorDeps{store: store}}
 	c.initPolicyDescriptors()
 	c.policyHitsTotal = prometheus.NewDesc(
 		"xpf_policy_hits_total",

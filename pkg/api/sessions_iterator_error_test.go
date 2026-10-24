@@ -87,7 +87,7 @@ func TestRESTSessionViewsFailOnIteratorError(t *testing.T) {
 func newSessionGaugeCollector() *xpfCollector {
 	gc := conntrack.NewGC(nil, time.Minute)
 	return &xpfCollector{
-		srv:                 &Server{gc: gc},
+		deps:                collectorDeps{gc: gc},
 		sessionsActive:      prometheus.NewDesc("xpf_sessions_active", "test", nil, nil),
 		sessionsEstablished: prometheus.NewDesc("xpf_sessions_established", "test", nil, nil),
 		sessionsIPv4:        prometheus.NewDesc("xpf_sessions_ipv4", "test", nil, nil),

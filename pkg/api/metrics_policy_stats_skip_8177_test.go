@@ -24,7 +24,7 @@ import (
 // sample.
 func TestPolicyCountersSkipRatherThanEmitZeroWhenStatsDisabled_8177(t *testing.T) {
 	store := newStatsFlagRESTStore(t, false) // knob OFF, one count-less rule
-	c := &xpfCollector{srv: &Server{store: store}}
+	c := &xpfCollector{deps: collectorDeps{store: store}}
 	c.initPolicyDescriptors()
 
 	dp := &schedulerCounterAPIDP{
@@ -70,7 +70,7 @@ func TestPolicyCountersSkipRatherThanEmitZeroWhenStatsDisabled_8177(t *testing.T
 // broken descriptors, a nil dataplane, an early return — would pass.
 func TestPolicyCountersDoEmitWhenStatsEnabled_8177(t *testing.T) {
 	store := newStatsFlagRESTStore(t, true)
-	c := &xpfCollector{srv: &Server{store: store}}
+	c := &xpfCollector{deps: collectorDeps{store: store}}
 	c.initPolicyDescriptors()
 
 	dp := &schedulerCounterAPIDP{

@@ -190,9 +190,9 @@ func TestMetricsScrapeInvalidUTF8RuleName15086(t *testing.T) {
 	}
 }
 
-// The recover leg, exercised directly: a collector with a nil srv but
+// The recover leg, exercised directly: a collector with unusable deps but
 // real descriptors panics deterministically inside collectContext (the
-// pre-gate emit path dereferences c.srv.*Fn). Through the lane that must
+// pre-gate emit path dereferences c.deps.*Fn). Through the lane that must
 // become a failed/empty scrape — Gather returns, the panic is counted,
 // and the lane goes back to the pool so the NEXT scrape is admitted
 // instead of 503ing forever. (A bare &xpfCollector{} cannot be used:
@@ -200,7 +200,7 @@ func TestMetricsScrapeInvalidUTF8RuleName15086(t *testing.T) {
 // panics at construction, before any scrape.)
 func TestMetricsLaneCollectRecoversPanic15086(t *testing.T) {
 	bad := newCollector(&Server{})
-	bad.srv = nil // collectContext panics on the first c.srv.*Fn deref
+	bad.deps.configPersistDegradedFn = func() bool { panic("16157 test: forced collector panic") } // collectContext panics on the first c.deps.*Fn deref
 	handler := newMetricsHandler(bad, 5*time.Second)
 	ts := httptest.NewServer(handler)
 	defer ts.Close()

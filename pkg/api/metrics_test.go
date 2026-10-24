@@ -706,7 +706,7 @@ func TestCollectPolicyCountersExposesSparseAndGlobalPolicyIDs(t *testing.T) {
 	globalID := globalCounterPolicyID(t, store, "global-scheduled")
 	// #7016: see TestCollectPolicyCountersNilSlotsNoPanic -- initialize the
 	// real descriptor set, then override the asserted one.
-	c := &xpfCollector{srv: &Server{store: store}}
+	c := &xpfCollector{deps: collectorDeps{store: store}}
 	c.initPolicyDescriptors()
 	c.policyHitsTotal = prometheus.NewDesc(
 		"xpf_policy_hits_total",
@@ -762,7 +762,7 @@ func TestCollectPolicyCountersGatedOnPolicyStats(t *testing.T) {
 	scheduledID := scheduledCounterPolicyID(t, store)
 	// #7016: see TestCollectPolicyCountersNilSlotsNoPanic -- initialize the
 	// real descriptor set, then override the asserted one.
-	c := &xpfCollector{srv: &Server{store: store}}
+	c := &xpfCollector{deps: collectorDeps{store: store}}
 	c.initPolicyDescriptors()
 	c.policyHitsTotal = prometheus.NewDesc(
 		"xpf_policy_hits_total",

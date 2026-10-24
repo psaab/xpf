@@ -19,8 +19,8 @@ import (
 
 // xpfCollector implements prometheus.Collector, reading BPF maps on each scrape.
 type xpfCollector struct {
-	srv *Server
-	mu  sync.Mutex
+	deps collectorDeps
+	mu   sync.Mutex
 
 	// #4162: short-TTL, singleflight-coalesced cache for the seven scalar
 	// session-aggregate gauges (active/established/ipv4/ipv6/snat/dnat +
@@ -1218,9 +1218,9 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// #1799: config-persist health is a control-plane signal — emit it
 	// BEFORE the dataplane gate below so the degraded state stays
 	// visible even when the dataplane is not loaded.
-	if c.srv.configPersistDegradedFn != nil {
+	if c.deps.configPersistDegradedFn != nil {
 		v := 0.0
-		if c.srv.configPersistDegradedFn() {
+		if c.deps.configPersistDegradedFn() {
 			v = 1
 		}
 		c.emitConstMetric(ch, c.configPersistDegraded,
@@ -1230,9 +1230,9 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// #3441: rollback-history persistence is likewise a control-plane
 	// signal — emit it before the dataplane gate so the degraded state
 	// stays visible even when the dataplane is not loaded.
-	if c.srv.rollbackHistoryDegradedFn != nil {
+	if c.deps.rollbackHistoryDegradedFn != nil {
 		v := 0.0
-		if c.srv.rollbackHistoryDegradedFn() {
+		if c.deps.rollbackHistoryDegradedFn() {
 			v = 1
 		}
 		c.emitConstMetric(ch, c.rollbackHistoryDegraded,
@@ -1241,23 +1241,23 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 
 	// #11805: local archive health remains visible even when the dataplane
 	// is not loaded; the counter counts each failed scan/write/rotation attempt.
-	if c.srv.archiveDegradedFn != nil {
+	if c.deps.archiveDegradedFn != nil {
 		v := 0.0
-		if c.srv.archiveDegradedFn() {
+		if c.deps.archiveDegradedFn() {
 			v = 1
 		}
 		c.emitConstMetric(ch, c.archiveDegraded, prometheus.GaugeValue, v)
 	}
-	if c.srv.archiveFailureCountFn != nil {
+	if c.deps.archiveFailureCountFn != nil {
 		c.emitConstMetric(ch, c.archiveFailures,
-			prometheus.CounterValue, float64(c.srv.archiveFailureCountFn()))
+			prometheus.CounterValue, float64(c.deps.archiveFailureCountFn()))
 	}
 
 	// #10751: bootstrap lifeline-guard swap failure. Control-plane health:
 	// stays visible even when the dataplane is not loaded.
-	if c.srv.earlyInputGuardSwapFailedFn != nil {
+	if c.deps.earlyInputGuardSwapFailedFn != nil {
 		v := 0.0
-		if c.srv.earlyInputGuardSwapFailedFn() {
+		if c.deps.earlyInputGuardSwapFailedFn() {
 			v = 1
 		}
 		c.emitConstMetric(ch, c.earlyInputGuardSwapFailed,
@@ -1267,9 +1267,9 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// #9898 F-113: journal permission-repair health is likewise a
 	// control-plane signal — emit it before the dataplane gate so the
 	// degraded state stays visible even when the dataplane is not loaded.
-	if c.srv.journalPermsDegradedFn != nil {
+	if c.deps.journalPermsDegradedFn != nil {
 		v := 0.0
-		if c.srv.journalPermsDegradedFn() {
+		if c.deps.journalPermsDegradedFn() {
 			v = 1
 		}
 		c.emitConstMetric(ch, c.journalPermsDegraded,
@@ -1280,9 +1280,9 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// (the daemon applies FRR even in config-only mode) — emit it
 	// BEFORE the dataplane gate so it never disappears exactly when
 	// the fallback path is active.
-	if c.srv.frrReloadDegradedFn != nil {
+	if c.deps.frrReloadDegradedFn != nil {
 		v := 0.0
-		if c.srv.frrReloadDegradedFn() {
+		if c.deps.frrReloadDegradedFn() {
 			v = 1
 		}
 		c.emitConstMetric(ch, c.frrReloadDegraded,
@@ -1295,33 +1295,33 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// "none admitted" from "the exporter stopped reporting this series". ABSENT
 	// when unwired: a hardcoded 0 from a process that never consulted the
 	// active config is a false all-clear.
-	if c.srv.natLenientTerminalActionRulesFn != nil {
+	if c.deps.natLenientTerminalActionRulesFn != nil {
 		c.emitConstMetric(ch, c.natRulesLenientTerminalAction,
-			prometheus.GaugeValue, float64(len(c.srv.natLenientTerminalActionRulesFn())))
+			prometheus.GaugeValue, float64(len(c.deps.natLenientTerminalActionRulesFn())))
 	}
 
 	// #6807: quarantined route-maps. Reported UNCONDITIONALLY when the hook
 	// is wired — a 0 must be published on a healthy box, or an alert on
 	// `> 0` can never distinguish "no quarantine" from "the exporter stopped
 	// reporting this series".
-	if c.srv.frrQuarantinedRouteMapsFn != nil {
+	if c.deps.frrQuarantinedRouteMapsFn != nil {
 		c.emitConstMetric(ch, c.frrRouteMapsQuarantined,
-			prometheus.GaugeValue, float64(len(c.srv.frrQuarantinedRouteMapsFn())))
+			prometheus.GaugeValue, float64(len(c.deps.frrQuarantinedRouteMapsFn())))
 	}
 	// #8363: same publish-an-explicit-0 discipline. A narrowed chain is not a
 	// withdrawal, so it gets its own series rather than inflating the
 	// quarantine gauge, whose documented meaning is that routes are being
 	// DENIED.
-	if c.srv.frrNarrowedPolicyChainsFn != nil {
+	if c.deps.frrNarrowedPolicyChainsFn != nil {
 		c.emitConstMetric(ch, c.frrPolicyChainsNarrowed,
-			prometheus.GaugeValue, float64(len(c.srv.frrNarrowedPolicyChainsFn())))
+			prometheus.GaugeValue, float64(len(c.deps.frrNarrowedPolicyChainsFn())))
 	}
-	if c.srv.frrNarrowedPolicyChainsDenySafeFn != nil {
+	if c.deps.frrNarrowedPolicyChainsDenySafeFn != nil {
 		c.emitConstMetric(ch, c.frrPolicyChainsNarrowedDenySafe,
-			prometheus.GaugeValue, float64(len(c.srv.frrNarrowedPolicyChainsDenySafeFn())))
+			prometheus.GaugeValue, float64(len(c.deps.frrNarrowedPolicyChainsDenySafeFn())))
 	}
-	if c.srv.frrNarrowedPolicyChainShapesFn != nil {
-		shapes := c.srv.frrNarrowedPolicyChainShapesFn()
+	if c.deps.frrNarrowedPolicyChainShapesFn != nil {
+		shapes := c.deps.frrNarrowedPolicyChainShapesFn()
 		for _, shape := range []string{"empty", "fall-through", "match-all", "quarantined", "terminating-default", "unknown"} {
 			c.emitConstMetric(ch, c.frrPolicyChainsNarrowedShape,
 				prometheus.GaugeValue, float64(shapes[shape]), shape)
@@ -1333,9 +1333,9 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// emit it BEFORE the dataplane gate so a stale-local_addrs tunnel that
 	// cannot re-establish stays visible even when the dataplane is not
 	// loaded.
-	if c.srv.ipsecRebindPendingFn != nil {
+	if c.deps.ipsecRebindPendingFn != nil {
 		v := 0.0
-		if c.srv.ipsecRebindPendingFn() {
+		if c.deps.ipsecRebindPendingFn() {
 			v = 1
 		}
 		c.emitConstMetric(ch, c.ipsecRebindPending,
@@ -1344,9 +1344,9 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 
 	// #11530: emit the retry-debt signal before the dataplane gate; a helper
 	// publish may have succeeded even though its FIB invalidation is still owed.
-	if c.srv.interfaceLinkSnapshotPendingFn != nil {
+	if c.deps.interfaceLinkSnapshotPendingFn != nil {
 		v := 0.0
-		if c.srv.interfaceLinkSnapshotPendingFn() {
+		if c.deps.interfaceLinkSnapshotPendingFn() {
 			v = 1
 		}
 		c.emitConstMetric(ch, c.interfaceLinkSnapshotPending,
@@ -1358,34 +1358,34 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// even in config-only mode) — emit it BEFORE the dataplane gate so a
 	// now-denied host service that is still reachable over an established
 	// kernel connection stays visible even when the dataplane is not loaded.
-	if c.srv.hostInboundConntrackRevocationOwedFn != nil {
+	if c.deps.hostInboundConntrackRevocationOwedFn != nil {
 		v := 0.0
-		if c.srv.hostInboundConntrackRevocationOwedFn() {
+		if c.deps.hostInboundConntrackRevocationOwedFn() {
 			v = 1
 		}
 		c.emitConstMetric(ch, c.hostInboundConntrackRevocationPending,
 			prometheus.GaugeValue, v)
 	}
-	if c.srv.hostInboundConntrackFlushFailuresFn != nil {
+	if c.deps.hostInboundConntrackFlushFailuresFn != nil {
 		c.emitConstMetric(ch, c.hostInboundConntrackRevocationFailures,
 			prometheus.CounterValue,
-			float64(c.srv.hostInboundConntrackFlushFailuresFn()))
+			float64(c.deps.hostInboundConntrackFlushFailuresFn()))
 	}
-	if c.srv.hostInboundTCPlooseDisabledFn != nil {
+	if c.deps.hostInboundTCPlooseDisabledFn != nil {
 		v := 0.0
-		if c.srv.hostInboundTCPlooseDisabledFn() {
+		if c.deps.hostInboundTCPlooseDisabledFn() {
 			v = 1
 		}
 		c.emitConstMetric(ch, c.hostInboundTCPlooseDisabled,
 			prometheus.GaugeValue, v)
 	}
-	if c.srv.hostInboundTCPloosePostureFailuresFn != nil {
+	if c.deps.hostInboundTCPloosePostureFailuresFn != nil {
 		c.emitConstMetric(ch, c.hostInboundTCPloosePostureFailures,
 			prometheus.CounterValue,
-			float64(c.srv.hostInboundTCPloosePostureFailuresFn()))
+			float64(c.deps.hostInboundTCPloosePostureFailuresFn()))
 	}
-	if c.srv.snmpTrapStatsFn != nil {
-		enqueued, sent, dropped := c.srv.snmpTrapStatsFn()
+	if c.deps.snmpTrapStatsFn != nil {
+		enqueued, sent, dropped := c.deps.snmpTrapStatsFn()
 		c.emitConstMetric(ch, c.snmpTrapsEnqueued, prometheus.CounterValue, float64(enqueued))
 		c.emitConstMetric(ch, c.snmpTrapsSent, prometheus.CounterValue, float64(sent))
 		c.emitConstMetric(ch, c.snmpTrapsDropped, prometheus.CounterValue, float64(dropped))
@@ -1397,8 +1397,8 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// dataplane never loaded is exactly the node whose stale logging pipeline
 	// most needs to be visible. Keys are sorted so the sample order is stable
 	// across scrapes (Go map iteration is not).
-	if c.srv.managedServiceReloadOwedFn != nil {
-		owed := c.srv.managedServiceReloadOwedFn()
+	if c.deps.managedServiceReloadOwedFn != nil {
+		owed := c.deps.managedServiceReloadOwedFn()
 		for _, svc := range sortedKeys6800(owed) {
 			v := 0.0
 			if owed[svc] {
@@ -1408,8 +1408,8 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 				prometheus.GaugeValue, v, svc)
 		}
 	}
-	if c.srv.managedServiceReloadFailuresFn != nil {
-		failures := c.srv.managedServiceReloadFailuresFn()
+	if c.deps.managedServiceReloadFailuresFn != nil {
+		failures := c.deps.managedServiceReloadFailuresFn()
 		for _, svc := range sortedKeys6800(failures) {
 			c.emitConstMetric(ch, c.managedServiceReloadFailures,
 				prometheus.CounterValue, float64(failures[svc]), svc)
@@ -1419,8 +1419,8 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// #11806: remote archive debt and transfer failures are reported before
 	// the dataplane gate; a current-config DR copy is owed independently of
 	// dataplane readiness.
-	if c.srv.remoteArchiveStatusFn != nil {
-		pending, failures := c.srv.remoteArchiveStatusFn()
+	if c.deps.remoteArchiveStatusFn != nil {
+		pending, failures := c.deps.remoteArchiveStatusFn()
 		c.emitConstMetric(ch, c.remoteArchivePendingSites,
 			prometheus.GaugeValue, float64(pending))
 		c.emitConstMetric(ch, c.remoteArchiveFailures,
@@ -1435,10 +1435,10 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 		fn   func() bool
 		desc *prometheus.Desc
 	}{
-		{c.srv.raDeadSenderPendingFn, c.raDeadSenderPending},
-		{c.srv.proxyARPUnresolvedFn, c.proxyARPUnresolved},
-		{c.srv.fabricOverlayMissingFn, c.fabricOverlayMissing},
-		{c.srv.managementListenerDownFn, c.managementListenerDown},
+		{c.deps.raDeadSenderPendingFn, c.raDeadSenderPending},
+		{c.deps.proxyARPUnresolvedFn, c.proxyARPUnresolved},
+		{c.deps.fabricOverlayMissingFn, c.fabricOverlayMissing},
+		{c.deps.managementListenerDownFn, c.managementListenerDown},
 	} {
 		if s.fn == nil {
 			continue
@@ -1454,8 +1454,8 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// sysservices.Listeners snapshot `show system services` renders, so the
 	// metric and the CLI can never disagree about a listener's state — the
 	// failure one surface over that #8183 was about.
-	if c.srv.managementListenersFn != nil {
-		ls := c.srv.managementListenersFn()
+	if c.deps.managementListenersFn != nil {
+		ls := c.deps.managementListenersFn()
 		for _, row := range ls.SurfaceRows() {
 			// Every state gets a series, not just the current one. A state set
 			// that emitted only the active state would make an alert on
@@ -1493,21 +1493,21 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// policy scheduler runs even in config-only mode) — emit it BEFORE
 	// the dataplane gate so stale enforcement past a schedule window
 	// stays visible even when the dataplane is not loaded.
-	if c.srv.schedulerRepublishFailedFn != nil {
+	if c.deps.schedulerRepublishFailedFn != nil {
 		v := 0.0
-		if c.srv.schedulerRepublishFailedFn() {
+		if c.deps.schedulerRepublishFailedFn() {
 			v = 1
 		}
 		c.emitConstMetric(ch, c.schedulerRepublishFailed,
 			prometheus.GaugeValue, v)
 	}
-	if c.srv.schedulerRepublishStaleSecondsFn != nil {
+	if c.deps.schedulerRepublishStaleSecondsFn != nil {
 		c.emitConstMetric(ch, c.schedulerRepublishStale,
-			prometheus.GaugeValue, c.srv.schedulerRepublishStaleSecondsFn())
+			prometheus.GaugeValue, c.deps.schedulerRepublishStaleSecondsFn())
 	}
-	if c.srv.schedulerRepublishFailClosedFn != nil {
+	if c.deps.schedulerRepublishFailClosedFn != nil {
 		v := 0.0
-		if c.srv.schedulerRepublishFailClosedFn() {
+		if c.deps.schedulerRepublishFailClosedFn() {
 			v = 1
 		}
 		// Preserve the old series as a deprecated alias for existing alerts.
@@ -1521,9 +1521,9 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// feed manager runs even in config-only mode) — emit it BEFORE the
 	// dataplane gate so a frozen enforced address set stays visible when the
 	// dataplane is not loaded.
-	if c.srv.feedsFn != nil {
+	if c.deps.feedsFn != nil {
 		now := time.Now()
-		for name, info := range c.srv.feedsFn() {
+		for name, info := range c.deps.feedsFn() {
 			secs := -1.0
 			if !info.LastSuccess.IsZero() {
 				secs = now.Sub(info.LastSuccess).Seconds()
@@ -1680,9 +1680,9 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// scrape is reflected in THIS scrape's xpf_counter_read_errors_total rather
 	// than lagging one behind. Moving the collector earlier preserves that: it
 	// is still upstream of the deferred emit.
-	c.collectZoneCounters(ch, c.srv.dp)
+	c.collectZoneCounters(ch, c.deps.dp)
 
-	dp := c.srv.dp
+	dp := c.deps.dp
 	var userspaceStatus *dpuserspace.ProcessStatus
 	if dp != nil && dp.IsLoaded() {
 		// One fetched snapshot is shared with the forwarding summary and all
@@ -1702,7 +1702,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// added: its absence reads as "nothing to report".
 	//
 	// Verified dataplane-independent before hoisting -- none of the four
-	// references `c.srv.dp`, `IsLoaded` or the dataplane package (they live in
+	// references `c.deps.dp`, `IsLoaded` or the dataplane package (they live in
 	// metrics_system.go and read the config store, the DHCP client and the DDNS
 	// state). That check is what makes this a hoist rather than a behaviour
 	// change: on a LOADED dataplane the emitted set is byte-identical, just
@@ -1751,7 +1751,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	c.emitZoneCounterOverflow(ch, userspaceStatus)
 	// #13293: userspace screen flood counters and flood-slot overflow share
 	// the already-fetched helper status snapshot.
-	c.emitZoneFloodCounters(ch, userspaceStatus, c.srv.store.ActiveConfig())
+	c.emitZoneFloodCounters(ch, userspaceStatus, c.deps.activeConfig())
 	// #9040: the degraded-path drop reasons, same status pointer and the same
 	// emitted-only-if-read contract.
 	c.emitDegradedPathCounters(ch, userspaceStatus)
@@ -1815,11 +1815,11 @@ func sortedKeys6800[V any](m map[string]V) []string {
 // and NO SOURCE emits nothing at all — because a daemon with no dataplane
 // accessor knows "unknown", not "never crashed".
 func (c *xpfCollector) collectHelperCrashEpisodes(ch chan<- prometheus.Metric) {
-	if c.srv == nil || c.srv.helperCrashEpisodesFn == nil {
+	if c.deps.helperCrashEpisodesFn == nil {
 		return
 	}
 	c.emitConstMetric(ch, c.helperCrashEpisodesTotal,
-		prometheus.CounterValue, float64(c.srv.helperCrashEpisodesFn()))
+		prometheus.CounterValue, float64(c.deps.helperCrashEpisodesFn()))
 }
 
 // collectForwardingSupported emits #8447's xpf_dataplane_forwarding_supported.
@@ -1831,11 +1831,11 @@ func (c *xpfCollector) collectHelperCrashEpisodes(ch chan<- prometheus.Metric) {
 // turning "we cannot see" into "everything is fine", which is the exact reading
 // #8447 is about.
 func (c *xpfCollector) collectForwardingSupported(ch chan<- prometheus.Metric) {
-	if c.srv == nil || c.srv.forwardingSupportedFn == nil {
+	if c.deps.forwardingSupportedFn == nil {
 		return
 	}
 	v := 0.0
-	if c.srv.forwardingSupportedFn() {
+	if c.deps.forwardingSupportedFn() {
 		v = 1
 	}
 	c.emitConstMetric(ch, c.forwardingSupported, prometheus.GaugeValue, v)

@@ -67,7 +67,7 @@ func TestAuthzDenialsEmittedForEverySurface9042(t *testing.T) {
 // this issue exists to end — and nothing about either file looks wrong.
 //
 // Asserted on the source rather than by calling Collect: Collect dereferences
-// c.srv and panics on the nil-server collector these metric tests use. The
+// c.deps hooks and panics on the zero-deps collector these metric tests use. The
 // production scrape path now enters through collectContext so the HTTP request
 // context can reach long session-table walks; that method is shared by Collect
 // and the request-bound metrics adapter.

@@ -9,7 +9,7 @@ package api
 // allocate its descriptors until first use is requested — the Once
 // still defers the NewDesc calls to Describe/Collect time.
 func newCollector(srv *Server) *xpfCollector {
-	c := &xpfCollector{srv: srv}
+	c := &xpfCollector{deps: collectorDepsFromServer(srv)}
 	for _, fam := range collectorDescFamilies {
 		fam.init(c)
 	}
