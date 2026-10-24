@@ -208,7 +208,7 @@ the userspace dataplane admission boundary is in
 ## High availability
 
 - **Chassis cluster**: compiler default is private-RG election over the control
-  link; RETH VRRP is suppressed (`pkg/config/compiler_system.go:3132-3137`;
+  link; RETH VRRP is suppressed (`compileChassis` in `pkg/config/compiler_chassis.go` — `PrivateRGElection` default;
   `pkg/vrrp/vrrp.go:153-156`). Heartbeat staleness is interval × threshold,
   configured with `set chassis cluster heartbeat-interval <ms>` and
   `set chassis cluster heartbeat-threshold <n>`: 100ms × 5 = 500ms at runtime
@@ -220,7 +220,7 @@ the userspace dataplane admission boundary is in
   phase-dependent; a process crash that closes sync or already-idle sync
   falls through at the raw threshold, subject to startup/restart grace. These
   are detection estimates, not end-to-end traffic-restoration SLAs
-  (`pkg/cluster/heartbeat.go:61-98,1916-1960`;
+  (`DefaultHeartbeatInterval`/`DefaultHeartbeatThreshold` and `heartbeatReceiver.checkTimeout` in `pkg/cluster/heartbeat.go`;
   `pkg/cluster/heartbeat_manager.go:790-832`;
   `pkg/daemon/daemon_ha_sync.go:170-206`;
   `docs/ha-cluster-userspace.conf:71-72`).
@@ -326,7 +326,7 @@ the userspace dataplane admission boundary is in
 - **Bondless RETH**: RETH uses physical-member mapping rather than Linux
   bonding. In legacy VRRP-backed mode, VRRP runs on those physical members;
   private-RG election is the compiler default and suppresses RETH VRRP
-  (`pkg/vrrp/vrrp.go:153-166`; `pkg/config/compiler_system.go:3132-3137`).
+  (`pkg/vrrp/vrrp.go:153-166`; `compileChassis` in `pkg/config/compiler_chassis.go`).
   The virtual MAC is per-node, per-RETH
   (`02:bf:72:CC:RR:(2*reth-index+node-id)`).
 - **VRRP L2 identity is a deliberate deviation from RFC 5798 (#5091).** The RFC
@@ -406,7 +406,7 @@ the userspace dataplane admission boundary is in
   the sync-recency guard can extend that gap. No end-to-end restoration bound
   is asserted (`pkg/daemon/daemon_run_shutdown.go:418-428`;
   `pkg/cluster/manager.go:1026-1077`;
-  `pkg/cluster/heartbeat.go:61-65,1916-1960`;
+  `DefaultHeartbeatInterval`/`DefaultHeartbeatThreshold` and `heartbeatReceiver.checkTimeout` in `pkg/cluster/heartbeat.go`;
   `pkg/daemon/daemon_ha_sync.go:170-206`).
 - **ISSU**: in-service software upgrade with rolling deploy.
 - **RA lifecycle**: goodbye RAs (lifetime=0) on failover/startup to
