@@ -268,11 +268,11 @@ func TestPeerDHCPLeasesAged(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	// Received 100s ago.
 	recvAt := now.Add(-100 * time.Second)
-	s.peerDHCPLeases4 = []dhcpserver.SyncLease{
+	s.peerSnaps.peerDHCPLeases4 = []dhcpserver.SyncLease{
 		{Family: 4, Address: "10.0.0.5", Remaining: 600}, // -> 500 after aging
 		{Family: 4, Address: "10.0.0.6", Remaining: 60},  // -> dropped (60-100<=0)
 	}
-	s.peerDHCPLeases4RecvAt = recvAt
+	s.peerSnaps.peerDHCPLeases4RecvAt = recvAt
 
 	got := s.peerDHCPLeaseSnapshotAged(4, now).Leases
 	if len(got) != 1 {
@@ -285,9 +285,9 @@ func TestPeerDHCPLeasesAged(t *testing.T) {
 		t.Errorf("aged Remaining = %d, want 500 (600 - 100s residence)", got[0].Remaining)
 	}
 	// The held set itself must be untouched (aging works on copies).
-	s.peerDHCPLeasesMu.Lock()
-	held := s.peerDHCPLeases4[0].Remaining
-	s.peerDHCPLeasesMu.Unlock()
+	s.peerSnaps.peerDHCPLeasesMu.Lock()
+	held := s.peerSnaps.peerDHCPLeases4[0].Remaining
+	s.peerSnaps.peerDHCPLeasesMu.Unlock()
 	if held != 600 {
 		t.Errorf("aging mutated the held set: Remaining = %d, want 600", held)
 	}
@@ -447,11 +447,11 @@ func TestPeerDHCPLeasesAged_PreferredRemaining(t *testing.T) {
 	s := &SessionSync{}
 	now := time.Unix(1_700_000_000, 0)
 	recvAt := now.Add(-100 * time.Second) // 100s residence
-	s.peerDHCPLeases6 = []dhcpserver.SyncLease{
+	s.peerSnaps.peerDHCPLeases6 = []dhcpserver.SyncLease{
 		{Family: 6, Address: "2001:db8::a", Remaining: 600, PreferredRemaining: 600}, // healthy
 		{Family: 6, Address: "2001:db8::b", Remaining: 600, PreferredRemaining: 0},   // deprecated
 	}
-	s.peerDHCPLeases6RecvAt = recvAt
+	s.peerSnaps.peerDHCPLeases6RecvAt = recvAt
 
 	got := s.peerDHCPLeaseSnapshotAged(6, now).Leases
 	if len(got) != 2 {

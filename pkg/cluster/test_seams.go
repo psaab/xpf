@@ -29,9 +29,9 @@ import (
 // unit test of the filter function alone leaves them unguarded, which is
 // exactly how the defect survived: the filter was never the broken part.
 func (s *SessionSync) SetPeerIPsecSAsForTesting(names []string) {
-	s.peerIPsecSAsMu.Lock()
-	defer s.peerIPsecSAsMu.Unlock()
-	s.peerIPsecSAs = append([]string(nil), names...)
+	s.peerSnaps.peerIPsecSAsMu.Lock()
+	defer s.peerSnaps.peerIPsecSAsMu.Unlock()
+	s.peerSnaps.peerIPsecSAs = append([]string(nil), names...)
 }
 
 // SetConnectedForTesting sets the connected flag every queue producer checks,
@@ -83,12 +83,12 @@ func (s *SessionSync) SetPeerSnapshotProtocolVersionForTesting(v uint16) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.peerSnapshotProtocolWriteMu.Lock()
-	if s.peerSnapshotProtocol.Load() != uint32(v) {
-		s.peerSnapshotProtocolGeneration++
+	s.peerSnaps.peerSnapshotProtocolWriteMu.Lock()
+	if s.peerSnaps.peerSnapshotProtocol.Load() != uint32(v) {
+		s.peerSnaps.peerSnapshotProtocolGeneration++
 	}
-	s.peerSnapshotProtocol.Store(uint32(v))
-	s.peerSnapshotProtocolWriteMu.Unlock()
+	s.peerSnaps.peerSnapshotProtocol.Store(uint32(v))
+	s.peerSnaps.peerSnapshotProtocolWriteMu.Unlock()
 }
 
 // PrimePeerSnapshotIncarnationForTesting installs a production authConn,
@@ -192,9 +192,9 @@ func (s *SessionSync) TakeQueuedMessageTypeForTesting(wait time.Duration) (typ s
 // for key. It is used by daemon-level admission cells to prove that the
 // daemon reached QueueSessionV4; a zero result means no install was stamped.
 func (s *SessionSync) SentInstallGenerationV4ForTesting(key dataplane.SessionKey) uint64 {
-	s.genSentMu.Lock()
-	defer s.genSentMu.Unlock()
-	return s.genSentV4[key]
+	s.genState.genSentMu.Lock()
+	defer s.genState.genSentMu.Unlock()
+	return s.genState.genSentV4[key]
 }
 
 // DeleteJournalGenerationV4ForTesting returns the newest journaled v4 delete
@@ -266,7 +266,7 @@ func queuedMessageTypeForTesting(msg []byte) string {
 // the scoped bit iff capable. Lets daemon HA cells drive the
 // scoped/bare close routing (#10512 P1).
 func (s *SessionSync) SetScopedPolicyDeleteCapableForTesting(capable bool) {
-	s.peerSnapshotProtocol.Store(1)
+	s.peerSnaps.peerSnapshotProtocol.Store(1)
 	flags := uint32(capFlagFenceAck | capFlagPeerDeleteOwnership |
 		capFlagPurgeRetirementForwardOnly | capFlagInstallTableIdentity)
 	if capable {

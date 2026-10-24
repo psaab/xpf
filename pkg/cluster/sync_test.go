@@ -2575,9 +2575,9 @@ func TestDeleteJournalConnectedFlushViaSweep(t *testing.T) {
 	// Install once so the matching delete draws a real (non-zero,
 	// strictly-greater) generation (#2170/#2221). Drain the install frame.
 	ss.QueueSessionV4(key, dataplane.SessionValue{State: 1})
-	ss.genSentMu.Lock()
-	installGen := ss.genSentV4[key]
-	ss.genSentMu.Unlock()
+	ss.genState.genSentMu.Lock()
+	installGen := ss.genState.genSentV4[key]
+	ss.genState.genSentMu.Unlock()
 	if installGen == 0 {
 		t.Fatal("expected a non-zero install generation to be stamped")
 	}

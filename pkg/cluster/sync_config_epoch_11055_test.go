@@ -7,7 +7,7 @@ import (
 )
 
 func setConfigEpochPeerTagCapability11055(s *SessionSync, capable bool) {
-	s.peerSnapshotProtocol.Store(1)
+	s.peerSnaps.peerSnapshotProtocol.Store(1)
 	var flags uint32
 	if capable {
 		flags = uint32(capFlagConfigEpochReverseTag)

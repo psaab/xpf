@@ -11,6 +11,15 @@ xpf (0.0.0) unstable; urgency=medium
     make_config_drive and sign, and the `os.execvp` re-exec, are named
     unreached in the new seam test's reach map, which an AST census
     re-derives so the enumeration cannot drift silently.
+  * Cluster: extract the generation-guard and peer-snapshot domains of
+    SessionSync into value sub-structs (sessionGenState / peerSnapshotState,
+    #16159). Storage only — every method keeps its name and signature, the
+    #9915 genGuard* cap counters keep their names, and a lock-order graph
+    pinned by a source-scan test now documents every SessionSync mutex and
+    nesting edge. Zero-value SessionSync literals stay usable; no wire or
+    behavior change.
+
+xpf (0.0.0) unstable; urgency=medium
   * Userspace-DP: an HA watchdog set containing an activation-pending
     RG (stored inactive, incoming active) now routes the whole set to
     the locked path instead of storing it from the session fast path

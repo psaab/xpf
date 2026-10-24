@@ -346,7 +346,7 @@ func (s *SessionSync) suppressForwardOnlyDeleteForIncapablePeer(source string) b
 			"deliberately preserved. That peer will retain sessions this node has retired until they "+
 			"idle out. Completing the upgrade on both nodes restores delete sync.",
 			"source", source,
-			"peer_snapshot_protocol", s.peerSnapshotProtocol.Load(),
+			"peer_snapshot_protocol", s.peerSnaps.peerSnapshotProtocol.Load(),
 			"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
 	}
 	return true
@@ -384,7 +384,7 @@ func (s *SessionSync) suppressScopedDeleteForIncapablePeer(source string) bool {
 				"tenant's session. That peer will retain sessions this node has revoked until they "+
 				"idle out. Completing the upgrade on both nodes restores delete sync.",
 				"source", source,
-				"peer_snapshot_protocol", s.peerSnapshotProtocol.Load(),
+				"peer_snapshot_protocol", s.peerSnaps.peerSnapshotProtocol.Load(),
 				"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
 		}
 		return true
@@ -458,7 +458,7 @@ func (s *SessionSync) suppressStampedInstallForIncapablePeer(domain, check uint3
 			"stamp-less and wrong-table after failover. That peer will miss these sessions until a miss "+
 			"re-establishes them or the upgrade completes on both nodes.",
 			"source", source,
-			"peer_snapshot_protocol", s.peerSnapshotProtocol.Load(),
+			"peer_snapshot_protocol", s.peerSnaps.peerSnapshotProtocol.Load(),
 			"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
 	}
 	return true
@@ -521,7 +521,7 @@ func suppressUnannouncedForPBRActivePeer(s *SessionSync, announced bool, source 
 			"at cap), so the peer would install possibly-PBR sessions stamp-less. They flow once "+
 			"announced, or on upgrade.",
 			"source", source,
-			"peer_snapshot_protocol", s.peerSnapshotProtocol.Load(),
+			"peer_snapshot_protocol", s.peerSnaps.peerSnapshotProtocol.Load(),
 			"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
 	}
 	return true
@@ -568,7 +568,7 @@ func (s *SessionSync) suppressDeleteForIncapablePeer(source string) bool {
 			"forwarding. That peer will retain sessions this node has closed until they idle out. "+
 			"Completing the upgrade on both nodes restores delete sync.",
 			"source", source,
-			"peer_snapshot_protocol", s.peerSnapshotProtocol.Load(),
+			"peer_snapshot_protocol", s.peerSnaps.peerSnapshotProtocol.Load(),
 			"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
 	}
 	return true

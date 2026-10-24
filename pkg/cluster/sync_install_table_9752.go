@@ -160,16 +160,16 @@ func lookupRecvInstallTableLocked[K comparable](m map[K]recvInstallTable, key K,
 // store-walk bulk capture this BEFORE stamping: stamping records, which
 // would destroy the miss signal the unannounced fence judges.
 func (s *SessionSync) installTableAnnouncedV4(key dataplane.SessionKey) bool {
-	s.genSentMu.Lock()
-	defer s.genSentMu.Unlock()
-	_, ok := s.installTableSentV4[key]
+	s.genState.genSentMu.Lock()
+	defer s.genState.genSentMu.Unlock()
+	_, ok := s.genState.installTableSentV4[key]
 	return ok
 }
 
 // installTableAnnouncedV6 is the IPv6 twin.
 func (s *SessionSync) installTableAnnouncedV6(key dataplane.SessionKeyV6) bool {
-	s.genSentMu.Lock()
-	defer s.genSentMu.Unlock()
-	_, ok := s.installTableSentV6[key]
+	s.genState.genSentMu.Lock()
+	defer s.genState.genSentMu.Unlock()
+	_, ok := s.genState.installTableSentV6[key]
 	return ok
 }

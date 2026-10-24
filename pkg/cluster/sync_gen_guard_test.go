@@ -588,14 +588,14 @@ func synthKeyV4(i int) dataplane.SessionKey {
 // fillRecvGenV4ToCount inserts distinct synthetic keys into recvGenV4 (directly,
 // under lock) until it holds exactly `count` entries, never touching liveKey.
 func fillRecvGenV4ToCount(ss *SessionSync, liveKey dataplane.SessionKey, count int) {
-	ss.recvGenMu.Lock()
-	defer ss.recvGenMu.Unlock()
-	for i := 0; len(ss.recvGenV4) < count; i++ {
+	ss.genState.recvGenMu.Lock()
+	defer ss.genState.recvGenMu.Unlock()
+	for i := 0; len(ss.genState.recvGenV4) < count; i++ {
 		k := synthKeyV4(i)
 		if k == liveKey {
 			continue
 		}
-		ss.recvGenV4[k] = uint64(i + 1)
+		ss.genState.recvGenV4[k] = uint64(i + 1)
 	}
 }
 
@@ -628,9 +628,9 @@ func TestGenMapOverflowKeepsLiveKeyV4(t *testing.T) {
 	// symbol) and fill to it; the overflow episode then grows once instead of
 	// skipping — either way the live key must survive it.
 	const wantCap = 1000
-	ss.recvGenGuardCap = wantCap
+	ss.genState.recvGenGuardCap = wantCap
 	fillRecvGenV4ToCount(ss, key, wantCap)
-	if got := len(ss.recvGenV4); got != wantCap {
+	if got := len(ss.genState.recvGenV4); got != wantCap {
 		t.Fatalf("recvGenV4 pre-condition: %d entries, want %d", got, wantCap)
 	}
 
@@ -641,9 +641,9 @@ func TestGenMapOverflowKeepsLiveKeyV4(t *testing.T) {
 	installWithGenV4(ss, newKey, 3)
 
 	// The live key's stored generation must still be 2 after the overflow.
-	ss.recvGenMu.Lock()
-	stored, ok := ss.recvGenV4[key]
-	ss.recvGenMu.Unlock()
+	ss.genState.recvGenMu.Lock()
+	stored, ok := ss.genState.recvGenV4[key]
+	ss.genState.recvGenMu.Unlock()
 	if !ok || stored != 2 {
 		t.Fatalf("live key stored generation lost across overflow: ok=%v stored=%d (want 2) — F1 overflow-clear regression", ok, stored)
 	}
@@ -672,8 +672,8 @@ func TestRecordInstalledGenSkipsNewKeyOnFull(t *testing.T) {
 	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
 	live := gen2170KeyV4()
 	const wantCap = 8
-	ss.recvGenGuardCap = wantCap
-	ss.genGuardMapCeilingOverride = wantCap
+	ss.genState.recvGenGuardCap = wantCap
+	ss.genState.genGuardMapCeilingOverride = wantCap
 
 	// Record the live key first (it exists), then fill to cap around it.
 	ss.recordInstalledGenV4(live, 2)
@@ -682,11 +682,11 @@ func TestRecordInstalledGenSkipsNewKeyOnFull(t *testing.T) {
 	// A NEW key at cap is skipped — map stays at cap, counter increments.
 	newKey := dataplane.SessionKey{Protocol: 6, SrcPort: 0xBEEF, DstPort: 0xCAFE}
 	ss.recordInstalledGenV4(newKey, 99)
-	ss.recvGenMu.Lock()
-	_, newStored := ss.recvGenV4[newKey]
-	sz := len(ss.recvGenV4)
-	liveStored := ss.recvGenV4[live]
-	ss.recvGenMu.Unlock()
+	ss.genState.recvGenMu.Lock()
+	_, newStored := ss.genState.recvGenV4[newKey]
+	sz := len(ss.genState.recvGenV4)
+	liveStored := ss.genState.recvGenV4[live]
+	ss.genState.recvGenMu.Unlock()
 	if newStored {
 		t.Fatal("a new key was recorded while the map was at cap (should skip-record)")
 	}
@@ -699,9 +699,9 @@ func TestRecordInstalledGenSkipsNewKeyOnFull(t *testing.T) {
 
 	// An EXISTING key is still updated in place even at cap (never dropped).
 	ss.recordInstalledGenV4(live, 7)
-	ss.recvGenMu.Lock()
-	liveStored2 := ss.recvGenV4[live]
-	ss.recvGenMu.Unlock()
+	ss.genState.recvGenMu.Lock()
+	liveStored2 := ss.genState.recvGenV4[live]
+	ss.genState.recvGenMu.Unlock()
 	if liveStored != 2 {
 		t.Fatalf("existing live key stored gen = %d before update, want 2", liveStored)
 	}
@@ -761,9 +761,9 @@ func TestPeerRebootBulkRePrimeAcceptedAfterReset(t *testing.T) {
 
 	// The stored generation is now the re-primed gen=5; a peer delete at gen=5
 	// (its own current generation) applies normally.
-	ss.recvGenMu.Lock()
-	stored := ss.recvGenV4[key]
-	ss.recvGenMu.Unlock()
+	ss.genState.recvGenMu.Lock()
+	stored := ss.genState.recvGenV4[key]
+	ss.genState.recvGenMu.Unlock()
 	if stored != 5 {
 		t.Fatalf("stored generation after re-prime = %d, want 5", stored)
 	}
@@ -811,12 +811,12 @@ func TestGenGuardConcurrentMaps(t *testing.T) {
 	// delete, so genSentV4 must be fully drained. The receiver map records the
 	// delete generation as a tombstone (#2221) rather than evicting, so it
 	// retains exactly one entry per distinct key (bounded by genGuardMapCap).
-	ss.genSentMu.Lock()
-	sentRemaining := len(ss.genSentV4)
-	ss.genSentMu.Unlock()
-	ss.recvGenMu.Lock()
-	recvRemaining := len(ss.recvGenV4)
-	ss.recvGenMu.Unlock()
+	ss.genState.genSentMu.Lock()
+	sentRemaining := len(ss.genState.genSentV4)
+	ss.genState.genSentMu.Unlock()
+	ss.genState.recvGenMu.Lock()
+	recvRemaining := len(ss.genState.recvGenV4)
+	ss.genState.recvGenMu.Unlock()
 	if sentRemaining != 0 {
 		t.Fatalf("genSentV4 not drained: %d entries remain", sentRemaining)
 	}

@@ -86,12 +86,12 @@ func TestBareDeleteCostFlatWithHeldScopedEntries15039(t *testing.T) {
 		t.Fatalf("receiver bare delete = %v at %d held scoped entries, want < %v (full-map scan?)", per, fill, budget)
 	}
 
-	sender.genSentMu.Lock()
-	assertScopedIndexConsistent(t, "genSentScopedV4", sender.genSentScopedV4, &sender.genSentScopedByTupleV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key })
-	sender.genSentMu.Unlock()
-	recv.recvGenMu.Lock()
-	assertScopedIndexConsistent(t, "recvGenScopedV4", recv.recvGenScopedV4, &recv.recvGenScopedByTupleV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key })
-	recv.recvGenMu.Unlock()
+	sender.genState.genSentMu.Lock()
+	assertScopedIndexConsistent(t, "genSentScopedV4", sender.genState.genSentScopedV4, &sender.genState.genSentScopedByTupleV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key })
+	sender.genState.genSentMu.Unlock()
+	recv.genState.recvGenMu.Lock()
+	assertScopedIndexConsistent(t, "recvGenScopedV4", recv.genState.recvGenScopedV4, &recv.genState.recvGenScopedByTupleV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key })
+	recv.genState.recvGenMu.Unlock()
 }
 
 // The index must track every scoped lifecycle: installs in several
@@ -101,18 +101,18 @@ func TestBareDeleteCostFlatWithHeldScopedEntries15039(t *testing.T) {
 func TestScopedTupleIndexTracksLifecycle15039(t *testing.T) {
 	// Receiver cap eviction: the evicted oldest tombstone leaves the index.
 	s := &SessionSync{}
-	s.recvGenGuardCap = 2
-	s.genGuardMapCeilingOverride = 2
+	s.genState.recvGenGuardCap = 2
+	s.genState.genGuardMapCeilingOverride = 2
 	k1, k2, k3 := scopedGenKeyV4(5011), scopedGenKeyV4(5012), scopedGenKeyV4(5013)
 	s.deleteGenGuardScopedV4(7, k1, 10)
 	s.deleteGenGuardScopedV4(7, k2, 20)
 	s.deleteGenGuardScopedV4(7, k3, 30)
-	s.recvGenMu.Lock()
-	assertScopedIndexConsistent(t, "recvGenScopedV4", s.recvGenScopedV4, &s.recvGenScopedByTupleV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key })
-	if _, ok := s.recvGenScopedByTupleV4.byTuple[k1]; ok {
+	s.genState.recvGenMu.Lock()
+	assertScopedIndexConsistent(t, "recvGenScopedV4", s.genState.recvGenScopedV4, &s.genState.recvGenScopedByTupleV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key })
+	if _, ok := s.genState.recvGenScopedByTupleV4.byTuple[k1]; ok {
 		t.Fatal("cap-evicted tombstone must leave the tuple index")
 	}
-	s.recvGenMu.Unlock()
+	s.genState.recvGenMu.Unlock()
 
 	// Reclaim keeps tombstones (and their index entries); a namespace
 	// reset drops both. Multi-domain entries for one tuple stay grouped.
@@ -124,18 +124,18 @@ func TestScopedTupleIndexTracksLifecycle15039(t *testing.T) {
 		t.Fatal("FIXTURE: bare delete must apply")
 	}
 	r.reclaimRecvLiveGen()
-	r.recvGenMu.Lock()
-	assertScopedIndexConsistent(t, "recvGenScopedV4", r.recvGenScopedV4, &r.recvGenScopedByTupleV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key })
-	if got := len(r.recvGenScopedByTupleV4.byTuple[key]); got != 2 {
+	r.genState.recvGenMu.Lock()
+	assertScopedIndexConsistent(t, "recvGenScopedV4", r.genState.recvGenScopedV4, &r.genState.recvGenScopedByTupleV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key })
+	if got := len(r.genState.recvGenScopedByTupleV4.byTuple[key]); got != 2 {
 		t.Fatalf("reclaim must retain both scoped tombstones in the index, got %d", got)
 	}
-	r.recvGenMu.Unlock()
+	r.genState.recvGenMu.Unlock()
 	r.resetRecvGen()
-	r.recvGenMu.Lock()
-	if len(r.recvGenScopedByTupleV4.byTuple) != 0 {
+	r.genState.recvGenMu.Lock()
+	if len(r.genState.recvGenScopedByTupleV4.byTuple) != 0 {
 		t.Fatal("namespace reset must clear the tuple index")
 	}
-	r.recvGenMu.Unlock()
+	r.genState.recvGenMu.Unlock()
 
 	// Gen-0 bare delete evicts the tuple's scoped entries and index set.
 	g := &SessionSync{}
@@ -144,12 +144,12 @@ func TestScopedTupleIndexTracksLifecycle15039(t *testing.T) {
 	if !g.deleteGenGuardV4(key, 0) {
 		t.Fatal("FIXTURE: gen-0 bare delete must apply")
 	}
-	g.recvGenMu.Lock()
-	assertScopedIndexConsistent(t, "recvGenScopedV4", g.recvGenScopedV4, &g.recvGenScopedByTupleV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key })
-	if len(g.recvGenScopedByTupleV4.byTuple) != 0 {
+	g.genState.recvGenMu.Lock()
+	assertScopedIndexConsistent(t, "recvGenScopedV4", g.genState.recvGenScopedV4, &g.genState.recvGenScopedByTupleV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key })
+	if len(g.genState.recvGenScopedByTupleV4.byTuple) != 0 {
 		t.Fatal("gen-0 bare delete must prune the tuple index")
 	}
-	g.recvGenMu.Unlock()
+	g.genState.recvGenMu.Unlock()
 
 	// Sender: bare close reclaims only its tuple across domains; scoped
 	// take evicts exactly its (domain, tuple); v6 twins likewise.
@@ -163,36 +163,36 @@ func TestScopedTupleIndexTracksLifecycle15039(t *testing.T) {
 		snd.stampInstallGenV4(tc.k, &val)
 	}
 	_ = snd.takeDeleteGenV4(key)
-	snd.genSentMu.Lock()
-	assertScopedIndexConsistent(t, "genSentScopedV4", snd.genSentScopedV4, &snd.genSentScopedByTupleV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key })
-	if _, ok := snd.genSentScopedByTupleV4.byTuple[key]; ok {
+	snd.genState.genSentMu.Lock()
+	assertScopedIndexConsistent(t, "genSentScopedV4", snd.genState.genSentScopedV4, &snd.genState.genSentScopedByTupleV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key })
+	if _, ok := snd.genState.genSentScopedByTupleV4.byTuple[key]; ok {
 		t.Fatal("bare close must prune its tuple from the sender index")
 	}
-	snd.genSentMu.Unlock()
+	snd.genState.genSentMu.Unlock()
 	if got := snd.takeDeleteGenScopedV4(7, other); got == 0 {
 		t.Fatal("scoped take for the surviving tuple must draw fresh")
 	}
-	snd.genSentMu.Lock()
-	assertScopedIndexConsistent(t, "genSentScopedV4", snd.genSentScopedV4, &snd.genSentScopedByTupleV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key })
-	snd.genSentMu.Unlock()
+	snd.genState.genSentMu.Lock()
+	assertScopedIndexConsistent(t, "genSentScopedV4", snd.genState.genSentScopedV4, &snd.genState.genSentScopedByTupleV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key })
+	snd.genState.genSentMu.Unlock()
 
 	snd6 := &SessionSync{}
 	key6 := scopedGenKeyV6(5040)
 	val6 := dataplane.SessionValueV6{RoutingDomain: 7}
 	snd6.stampInstallGenV6(key6, &val6)
 	_ = snd6.takeDeleteGenV6(key6)
-	snd6.genSentMu.Lock()
-	assertScopedIndexConsistent(t, "genSentScopedV6", snd6.genSentScopedV6, &snd6.genSentScopedByTupleV6, func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key })
-	snd6.genSentMu.Unlock()
+	snd6.genState.genSentMu.Lock()
+	assertScopedIndexConsistent(t, "genSentScopedV6", snd6.genState.genSentScopedV6, &snd6.genState.genSentScopedByTupleV6, func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key })
+	snd6.genState.genSentMu.Unlock()
 
 	r6 := &SessionSync{}
 	r6.recordInstalledGenScopedV6(7, key6, 100)
 	if !r6.deleteGenGuardV6(key6, 150) {
 		t.Fatal("FIXTURE: v6 bare delete must apply")
 	}
-	r6.recvGenMu.Lock()
-	assertScopedIndexConsistent(t, "recvGenScopedV6", r6.recvGenScopedV6, &r6.recvGenScopedByTupleV6, func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key })
-	r6.recvGenMu.Unlock()
+	r6.genState.recvGenMu.Lock()
+	assertScopedIndexConsistent(t, "recvGenScopedV6", r6.genState.recvGenScopedV6, &r6.genState.recvGenScopedByTupleV6, func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key })
+	r6.genState.recvGenMu.Unlock()
 }
 
 // Benchmark companion to the flat-cost test: per-op cost at increasing

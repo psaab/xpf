@@ -62,7 +62,7 @@ func newBulkRecvFixture16039(t *testing.T, capOverride int, dp *mockSweepDP) (*S
 	ss.IsPrimaryForRGFn = func(rgID int) bool { return rgID == 1 }
 	ss.SetZoneOwnership(ZoneRGMap{}, nil, nil)
 	if capOverride > 0 {
-		ss.genGuardMapCeilingOverride = capOverride
+		ss.genState.genGuardMapCeilingOverride = capOverride
 	}
 	local, peer := net.Pipe()
 	t.Cleanup(func() { local.Close(); peer.Close() })

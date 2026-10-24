@@ -19,9 +19,9 @@ func TestQueueSessionWhileDisconnectedStamps9631(t *testing.T) {
 	}
 	key := dataplane.SessionKey{SrcIP: [4]byte{10, 0, 1, 102}, DstIP: [4]byte{172, 16, 80, 200}, Protocol: 6, SrcPort: 12345, DstPort: 443}
 	ss.QueueSessionV4(key, dataplane.SessionValue{})
-	ss.genSentMu.Lock()
-	stamp := ss.genSentV4[key]
-	ss.genSentMu.Unlock()
+	ss.genState.genSentMu.Lock()
+	stamp := ss.genState.genSentV4[key]
+	ss.genState.genSentMu.Unlock()
 	if stamp == 0 {
 		t.Fatal("QueueSessionV4 while disconnected must stamp a nonzero install generation (the stamp precedes the send no-op)")
 	}

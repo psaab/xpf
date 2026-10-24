@@ -175,7 +175,7 @@ func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) bool
 		return false
 	}
 	peerProto := binary.LittleEndian.Uint16(payload[:2])
-	oldProto := s.peerSnapshotProtocol.Load()
+	oldProto := s.peerSnaps.peerSnapshotProtocol.Load()
 	// #7147: capability flags ride in the trailing byte under the same
 	// discipline — a 2-byte frame is a pre-#7147 peer, and 0 flags is the
 	// correct reading of it (advertises no capabilities).
@@ -233,12 +233,12 @@ func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) bool
 		ac.peerCapabilityFlags = peerFlags
 		ac.peerSessionSyncWire = peerWire
 	}
-	s.peerSnapshotProtocolWriteMu.Lock()
-	if s.peerSnapshotProtocol.Load() != uint32(peerProto) {
-		s.peerSnapshotProtocolGeneration++
+	s.peerSnaps.peerSnapshotProtocolWriteMu.Lock()
+	if s.peerSnaps.peerSnapshotProtocol.Load() != uint32(peerProto) {
+		s.peerSnaps.peerSnapshotProtocolGeneration++
 	}
-	s.peerSnapshotProtocol.Store(uint32(peerProto))
-	s.peerSnapshotProtocolWriteMu.Unlock()
+	s.peerSnaps.peerSnapshotProtocol.Store(uint32(peerProto))
+	s.peerSnaps.peerSnapshotProtocolWriteMu.Unlock()
 	s.peerCapabilityFlags.Store(uint32(peerFlags))
 	s.peerSessionSyncWire.Store(uint32(peerWire))
 	s.mu.Unlock()

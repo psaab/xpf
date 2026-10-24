@@ -317,9 +317,9 @@ func TestRecvMemoNamespaceResetDiscards14157(t *testing.T) {
 		t.Fatal("FIXTURE: stamped install did not land")
 	}
 	ss.resetRecvGen()
-	ss.recvGenMu.Lock()
-	_, kept := ss.installTableRecvV4[fwd]
-	ss.recvGenMu.Unlock()
+	ss.genState.recvGenMu.Lock()
+	_, kept := ss.genState.installTableRecvV4[fwd]
+	ss.genState.recvGenMu.Unlock()
 	if kept {
 		t.Fatal("#14157: namespace reset left the dead incarnation's received installing-table record in place")
 	}
@@ -351,9 +351,9 @@ func TestRecvMemoNamespaceResetDiscardsV614157(t *testing.T) {
 		t.Fatal("FIXTURE: stamped v6 install did not land")
 	}
 	ss.resetRecvGen()
-	ss.recvGenMu.Lock()
-	_, kept := ss.installTableRecvV6[fwd]
-	ss.recvGenMu.Unlock()
+	ss.genState.recvGenMu.Lock()
+	_, kept := ss.genState.installTableRecvV6[fwd]
+	ss.genState.recvGenMu.Unlock()
 	if kept {
 		t.Fatal("#14157: namespace reset left the dead incarnation's received v6 installing-table record in place")
 	}

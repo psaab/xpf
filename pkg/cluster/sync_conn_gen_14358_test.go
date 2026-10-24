@@ -13,19 +13,19 @@ import (
 func TestNormalCloseReclaimsScopedGen14358(t *testing.T) {
 	const wantCap = 8
 	sender := &SessionSync{}
-	sender.sentGenGuardCap = wantCap
-	sender.genGuardMapCeilingOverride = wantCap
+	sender.genState.sentGenGuardCap = wantCap
+	sender.genState.genGuardMapCeilingOverride = wantCap
 	for i := uint16(0); i < 2*uint16(wantCap); i++ {
 		key := scopedGenKeyV4(8000 + i)
 		val := dataplane.SessionValue{RoutingDomain: 7}
 		sender.stampInstallGenV4(key, &val)
 		_ = sender.takeDeleteGenV4(key)
 	}
-	sender.genSentMu.Lock()
-	sentScoped := len(sender.genSentScopedV4)
-	sentBare := len(sender.genSentV4)
-	overflowScoped := sender.genSentOverflowScopedV4
-	sender.genSentMu.Unlock()
+	sender.genState.genSentMu.Lock()
+	sentScoped := len(sender.genState.genSentScopedV4)
+	sentBare := len(sender.genState.genSentV4)
+	overflowScoped := sender.genState.genSentOverflowScopedV4
+	sender.genState.genSentMu.Unlock()
 	if sentScoped != 0 {
 		t.Fatalf("genSentScopedV4 holds %d live entries after normal closes, want 0", sentScoped)
 	}
@@ -37,24 +37,24 @@ func TestNormalCloseReclaimsScopedGen14358(t *testing.T) {
 	}
 	// V6 twin (sender).
 	sender6 := &SessionSync{}
-	sender6.sentGenGuardCap = wantCap
-	sender6.genGuardMapCeilingOverride = wantCap
+	sender6.genState.sentGenGuardCap = wantCap
+	sender6.genState.genGuardMapCeilingOverride = wantCap
 	for i := uint16(0); i < 2*uint16(wantCap); i++ {
 		key := scopedGenKeyV6(8000 + i)
 		val := dataplane.SessionValueV6{RoutingDomain: 7}
 		sender6.stampInstallGenV6(key, &val)
 		_ = sender6.takeDeleteGenV6(key)
 	}
-	sender6.genSentMu.Lock()
-	sentScoped6 := len(sender6.genSentScopedV6)
-	sender6.genSentMu.Unlock()
+	sender6.genState.genSentMu.Lock()
+	sentScoped6 := len(sender6.genState.genSentScopedV6)
+	sender6.genState.genSentMu.Unlock()
 	if sentScoped6 != 0 {
 		t.Fatalf("genSentScopedV6 holds %d live entries after normal closes, want 0", sentScoped6)
 	}
 	dp := &mockSweepDP{v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{}, v6sessions: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{}}
 	recv := NewSessionSync(":0", "10.0.0.2:4785", dp)
-	recv.recvGenGuardCap = wantCap
-	recv.genGuardMapCeilingOverride = wantCap
+	recv.genState.recvGenGuardCap = wantCap
+	recv.genState.genGuardMapCeilingOverride = wantCap
 	for i := uint16(0); i < 2*uint16(wantCap); i++ {
 		key := scopedGenKeyV4(9000 + i)
 		val := dataplane.SessionValue{RoutingDomain: 7, Generation: uint64(100 + i)}
@@ -63,17 +63,17 @@ func TestNormalCloseReclaimsScopedGen14358(t *testing.T) {
 		}
 		recv.deleteClusterSyncedV4(key, uint64(200+i), false)
 	}
-	recv.recvGenMu.Lock()
+	recv.genState.recvGenMu.Lock()
 	liveScoped := 0
-	for skey, gen := range recv.recvGenScopedV4 {
-		if recv.recvTombScopedV4.elems[skey] == nil {
+	for skey, gen := range recv.genState.recvGenScopedV4 {
+		if recv.genState.recvTombScopedV4.elems[skey] == nil {
 			_ = gen
 			liveScoped++
 		}
 	}
-	totalScoped := len(recv.recvGenScopedV4)
-	tombScoped := recv.recvTombScopedV4.size()
-	recv.recvGenMu.Unlock()
+	totalScoped := len(recv.genState.recvGenScopedV4)
+	tombScoped := recv.genState.recvTombScopedV4.size()
+	recv.genState.recvGenMu.Unlock()
 	if liveScoped != 0 {
 		t.Fatalf("recvGenScopedV4 holds %d live entries after normal deletes, want 0 (total=%d tombs=%d)", liveScoped, totalScoped, tombScoped)
 	}
@@ -96,11 +96,11 @@ func TestScopedDeleteCrossTombstonesBare14358(t *testing.T) {
 		t.Fatal("install must land")
 	}
 	s.deleteClusterSyncedScopedV4(7, key, 150, 42)
-	s.recvGenMu.Lock()
-	bareGen, bareOK := s.recvGenV4[key]
-	bareTomb := s.recvTombV4.elems[key] != nil
-	_, installMemo := s.installTableRecvV4[key]
-	s.recvGenMu.Unlock()
+	s.genState.recvGenMu.Lock()
+	bareGen, bareOK := s.genState.recvGenV4[key]
+	bareTomb := s.genState.recvTombV4.elems[key] != nil
+	_, installMemo := s.genState.installTableRecvV4[key]
+	s.genState.recvGenMu.Unlock()
 	if !bareOK || bareGen != 150 || !bareTomb {
 		t.Fatalf("scoped delete must bare-tombstone at 150, got gen=%d ok=%v tomb=%v", bareGen, bareOK, bareTomb)
 	}
@@ -129,8 +129,8 @@ func TestScopedDeleteCrossTombstonesBare14358(t *testing.T) {
 	s2 := &SessionSync{}
 	s2.sessions = &scopedRecorderStore10512{}
 	const cap2 = 2
-	s2.recvGenGuardCap = cap2
-	s2.genGuardMapCeilingOverride = cap2
+	s2.genState.recvGenGuardCap = cap2
+	s2.genState.genGuardMapCeilingOverride = cap2
 	key2 := scopedGenKeyV4(9200)
 	if !s2.installClusterSyncedV4(key2, dataplane.SessionValue{RoutingDomain: 7, Generation: 100}) {
 		t.Fatal("cap install must land")
@@ -141,10 +141,10 @@ func TestScopedDeleteCrossTombstonesBare14358(t *testing.T) {
 		s2.deleteGenGuardScopedV4(7, scopedGenKeyV4(9300+i), uint64(300+i))
 		s2.deleteGenGuardV4(scopedGenKeyV4(9300+i), uint64(300+i))
 	}
-	s2.recvGenMu.Lock()
-	_, scopedTombKept2 := s2.recvTombScopedV4.elems[scopedDeleteKeyV4{Domain: 7, Key: key2}]
-	_, bareTombKept2 := s2.recvTombV4.elems[key2]
-	s2.recvGenMu.Unlock()
+	s2.genState.recvGenMu.Lock()
+	_, scopedTombKept2 := s2.genState.recvTombScopedV4.elems[scopedDeleteKeyV4{Domain: 7, Key: key2}]
+	_, bareTombKept2 := s2.genState.recvTombV4.elems[key2]
+	s2.genState.recvGenMu.Unlock()
 	if scopedTombKept2 || bareTombKept2 {
 		t.Fatalf("FIXTURE: both tombstones should have been evicted at cap (scoped=%v bare=%v)", scopedTombKept2, bareTombKept2)
 	}
@@ -161,10 +161,10 @@ func TestScopedDeleteCrossTombstonesBare14358(t *testing.T) {
 		t.Fatal("install must land")
 	}
 	s3.deleteClusterSyncedV4(key3, 150, false)
-	s3.recvGenMu.Lock()
-	scopedGen, scopedOK := s3.recvGenScopedV4[scopedDeleteKeyV4{Domain: 7, Key: key3}]
-	scopedTomb := s3.recvTombScopedV4.elems[scopedDeleteKeyV4{Domain: 7, Key: key3}] != nil
-	s3.recvGenMu.Unlock()
+	s3.genState.recvGenMu.Lock()
+	scopedGen, scopedOK := s3.genState.recvGenScopedV4[scopedDeleteKeyV4{Domain: 7, Key: key3}]
+	scopedTomb := s3.genState.recvTombScopedV4.elems[scopedDeleteKeyV4{Domain: 7, Key: key3}] != nil
+	s3.genState.recvGenMu.Unlock()
 	if !scopedOK || scopedGen != 150 || !scopedTomb {
 		t.Fatalf("bare delete must scoped-tombstone at 150, got gen=%d ok=%v tomb=%v", scopedGen, scopedOK, scopedTomb)
 	}
@@ -194,9 +194,9 @@ func TestScopedDeleteCrossTombstonesBare14358(t *testing.T) {
 		t.Fatal("v6 install must land")
 	}
 	s6b.deleteClusterSyncedV6(key6, 150, false)
-	s6b.recvGenMu.Lock()
-	sg6, ok6 := s6b.recvGenScopedV6[scopedDeleteKeyV6{Domain: 7, Key: key6}]
-	s6b.recvGenMu.Unlock()
+	s6b.genState.recvGenMu.Lock()
+	sg6, ok6 := s6b.genState.recvGenScopedV6[scopedDeleteKeyV6{Domain: 7, Key: key6}]
+	s6b.genState.recvGenMu.Unlock()
 	if !ok6 || sg6 != 150 {
 		t.Fatalf("v6 bare delete must scoped-tombstone at 150, got %d ok=%v", sg6, ok6)
 	}
