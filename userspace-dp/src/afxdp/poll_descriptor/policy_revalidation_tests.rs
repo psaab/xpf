@@ -7777,9 +7777,14 @@ fn peer_synced_fabric_redirect_snat_declines_16215() {
 /// fail-closed revocation, and a genuinely withdrawn rule under a
 /// NEW config epoch still revokes through the reverse hit.
 ///
-/// RED-on-revert: removing the established-guard at the missing-VLAN
-/// arm revokes the first cell (canonical-less StaleSourceNat); the
-/// row would be torn down at failover by its first post-FO reply.
+/// GLM F2 correction: this first cell does NOT pin the (now
+/// deleted) NoLocalEntry missing-VLAN guard — that guard was dead
+/// (`forward_query` never has a local row in that arm). What this
+/// cell pins is the companion-PRESENT decline (`forward_key` row
+/// survives) judged through the main arm; the decisive
+/// mutation-verified decline cell is
+/// `companion_present_reverse_hit_declines_when_invalid_current_epoch_16217`
+/// below. Companion-less shapes keep failing closed (controls).
 #[test]
 fn established_reverse_hit_never_stale_snat_revoked_16217() {
     let case = reverse_snat_case_13652();
@@ -7913,4 +7918,156 @@ fn established_reverse_hit_revokes_on_config_epoch_change_16217() {
         revocation.reason,
         PolicyRevocationReason::StaleSourceNat
     ));
+}
+
+/// #16217 (GLM F2): the DECISIVE companion-present decline.
+/// Forward + reverse rows BOTH installed locally, forward row
+/// established with traffic, judged epoch CURRENT
+/// (judged_epoch >= live_epoch), and the live verdict INVALID —
+/// realized as a FIB-only invalidity: the stored decision egresses
+/// an interface whose row was removed from the FIB egress map (the
+/// validator's first check, `forwarding.egress.get(&egress)` miss,
+/// with NO config rule change at all). The guard must DECLINE
+/// (None) and the forward row must SURVIVE. Mutation-verified 2026-10-24:
+/// neutering the main-arm guard condition to `false` turns this
+/// cell red (and restoring it turns it green again).
+/// And the imported-unjudged variant: a peer-imported row
+/// (`source_nat_revalidated: None` at import) with the same
+/// FIB-invalid stored egress must ALSO decline — the GLM F2
+/// `unwrap_or(0)` hole made `judged(0) >= live` false and revoked
+/// exactly these rows.
+#[test]
+fn companion_present_reverse_hit_declines_when_invalid_current_epoch_16217() {
+    let case = reverse_snat_case_13652();
+    // FIB-only invalidity: egress 999 is absent from the egress map.
+    let mut bad_decision = case.2;
+    bad_decision.resolution.egress_ifindex = 999;
+    bad_decision.resolution.tx_ifindex = 999;
+    let build = |judge: bool| {
+        let mut sessions = SessionTable::new();
+        sessions.set_forwarding_revalidation_gen(1, 1);
+        assert!(sessions.install_with_protocol_with_origin(
+            case.0.clone(),
+            bad_decision,
+            case.3.clone(),
+            case.6,
+            1_000_000,
+            case.0.protocol,
+            0x10,
+        ));
+        assert!(sessions.install_with_protocol_with_origin(
+            case.1.clone(),
+            case.4,
+            case.5.clone(),
+            SessionOrigin::ReverseFlow,
+            1_000_000,
+            case.1.protocol,
+            0x10,
+        ));
+        sessions.account_packet(&case.0, 100, 0x10, 0);
+        sessions.account_packet(&case.1, 100, 0x10, 0);
+        assert!(
+            sessions.forward_established_with_traffic(&case.0),
+            "fixture: companion-present forward row must be established with traffic"
+        );
+        if judge {
+            // Judged valid under epoch 1, live epoch still 1:
+            // judged_epoch(1) >= live(1) => decline on invalid.
+            sessions.mark_source_nat_revalidated(&case.0, Some(false));
+        }
+        sessions
+    };
+    // (a) judged-current + FIB-invalid => decline, row survives.
+    let mut sessions = build(true);
+    assert!(
+        reverse_snat_hit_13652(&imported_snat_forwarding(false), &mut sessions, &case).is_none(),
+        "companion-present established hit with current epoch must decline on FIB-only invalidity (GLM F2)"
+    );
+    assert!(
+        sessions.entry_with_origin(&case.0).is_some(),
+        "declined forward row must survive"
+    );
+    // (b) imported-unjudged (no judged epoch) + FIB-invalid => decline.
+    // (`build(false)` installs locally and stamps the current gen, so
+    // the unjudged shape is built via `upsert_synced` below, which
+    // stamps `source_nat_revalidated: None` at import.)
+    let zones = rustc_hash::FxHashMap::from_iter([("lan".to_string(), 1), ("wan".to_string(), 2)]);
+    let synced = crate::server::helpers::build_synced_session_entry(
+        &imported_snat_request(1, true),
+        &zones,
+        0,
+    )
+    .expect("dynamic SNAT session imports from HA wire");
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    let mut synced_bad = synced.clone();
+    synced_bad.decision.resolution.egress_ifindex = 999;
+    synced_bad.decision.resolution.tx_ifindex = 999;
+    assert!(sessions.upsert_synced_with_origin(synced_bad.into_session_install(1), false));
+    assert!(sessions.install_with_protocol_with_origin(
+        case.1.clone(),
+        case.4,
+        case.5.clone(),
+        SessionOrigin::ReverseFlow,
+        1_000_000,
+        case.1.protocol,
+        0x10,
+    ));
+    sessions.account_packet(&case.0, 100, 0x10, 0);
+    sessions.account_packet(&case.1, 100, 0x10, 0);
+    assert_eq!(
+        sessions.source_nat_revalidated_config_generation(&case.0),
+        None,
+        "imported row must have no judged epoch (GLM F2 hole fixture)"
+    );
+    assert!(
+        sessions.forward_established_with_traffic(&case.0),
+        "imported row must be established with traffic"
+    );
+    assert!(
+        reverse_snat_hit_13652(&imported_snat_forwarding(false), &mut sessions, &case).is_none(),
+        "imported unjudged established row must decline on FIB-only invalidity (GLM F2)"
+    );
+    assert!(sessions.entry_with_origin(&case.0).is_some());
+}
+
+/// #16217 (GLM F1/F2): production-chain contract for a DECLINE /
+/// canonical-less revocation outcome. The poll caller
+/// (`poll_descriptor/mod.rs`, session-hit revocation block) treats
+/// `Some(PolicyRevocation { canonical_key: None, .. })` as:
+/// skip `delete_terminal_filtered_session` (session KEPT), then
+/// recycle the descriptor (`scratch_recycle.push` + `continue`) —
+/// the packet is DROPPED, never forwarded. This test pins the
+/// revalidation-side half of that contract for every decline/
+/// sessionless shape above: outcome is None (pure decline) or a
+/// canonical-less revocation, the forward row (when present)
+/// survives, and no canonical teardown key is ever produced for a
+/// companion-less hit. The drop half is structural in the caller
+/// (single `continue` after recycle, no TX enqueue on that path)
+/// and is reviewed, not re-implemented, here.
+#[test]
+fn declined_reverse_hit_never_produces_teardown_key_16217() {
+    let case = reverse_snat_case_13652();
+    // Companion-less transient hit with withdrawn rules: sessionless
+    // revocation, canonical None, nothing torn down.
+    let mut no_rules = imported_snat_forwarding(false);
+    no_rules.source_nat_rules = crate::nat::parse_source_nat_rules(&[]);
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.install_with_protocol_with_origin(
+        case.1.clone(),
+        case.4,
+        case.5.clone(),
+        SessionOrigin::ReverseFlow,
+        1_000_000,
+        case.1.protocol,
+        0x10,
+    ));
+    let revocation = reverse_snat_hit_13652(&no_rules, &mut sessions, &case)
+        .expect("companion-less stale hit must produce the sessionless revocation");
+    assert!(
+        revocation.canonical_key.is_none(),
+        "sessionless revocation must never carry a teardown key (caller keeps session, drops packet)"
+    );
+    assert_eq!(sessions.len(), 1, "no local row may be torn down");
 }

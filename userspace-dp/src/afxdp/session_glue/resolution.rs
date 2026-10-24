@@ -514,10 +514,19 @@ pub(in crate::afxdp) fn connected_owner_rg_for_target_in_table(
     if let Some(crate::afxdp::ConnectedOwnerIndex::Hit(rg)) = indexed {
         return rg;
     }
+    // A Miss is authoritative only when the index was built from
+    // the CURRENT row sets. Production builds the index once per
+    // forwarding-state build (after the connected vecs are final),
+    // so it is; unit fixtures that push connected/ledger rows AFTER
+    // `build_forwarding_state` would otherwise read a stale Miss
+    // and skip rows the legacy scan sees. Detect that cheaply: the
+    // index records how many FIB+ledger rows it was built from
+    // (`connected_owner_index_rows`); a mismatch falls back to the
+    // exact legacy scan below.
     let index_miss = matches!(
         indexed,
         Some(crate::afxdp::ConnectedOwnerIndex::Miss)
-    );
+    ) && forwarding.connected_owner_index_current();
     // Source 1 (legacy scan): connected_* rows (the FIB's own
     // connected route structs: prefix + ifindex) — longest prefix
     // wins. Skipped entirely when the index already answered Miss.

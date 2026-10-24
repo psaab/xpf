@@ -25073,3 +25073,126 @@ fn adopted_recovery_uses_install_table_and_proved_rg_16217() {
         "candidate whose egress RG != proved RG must not restore"
     );
 }
+
+/// #16217 (Codex #2/#3/#4/#6 + GLM F1): named-RI ledger-only rows,
+/// default-vs-named probe isolation, and overlapping FIB/ledger
+/// precedence must match the legacy scan EXACTLY. The legacy answers
+/// are captured BEFORE `rebuild_connected_owner_index` (index empty
+/// => legacy scan), then compared after the build.
+/// FAIL-ON-REVERT: file named ledger rows under the default key (or
+/// remap a named probe to the default key) and the tenant/default
+/// arms flip.
+#[test]
+fn connected_owner_index_named_ri_ledger_equivalence_16217() {
+    let mut forwarding = test_forwarding_state_split_rgs();
+    // Default-instance ledger row on ifindex 6 (instance "") and a
+    // NAMED-instance ledger row: register ifindex 12 under instance
+    // "tenant-a" so its ledger prefix files under tenant-a.inet.0.
+    forwarding
+        .ifindex_to_routing_instance
+        .insert(12, "tenant-a".to_string());
+    forwarding
+        .connected_v4_by_ifindex
+        .entry(6)
+        .or_default()
+        .push(PrefixV4::from_net(
+            ipnet::Ipv4Net::new(Ipv4Addr::new(192, 168, 7, 0), 24).unwrap(),
+        ));
+    forwarding
+        .connected_v4_by_ifindex
+        .entry(12)
+        .or_default()
+        .push(PrefixV4::from_net(
+            ipnet::Ipv4Net::new(Ipv4Addr::new(198, 51, 100, 0), 24).unwrap(),
+        ));
+    // Overlapping FIB vs ledger: a FIB /8 (ifindex 12) vs ledger /24
+    // (ifindex 6) covering the same target — legacy consults the
+    // ledger ONLY when no FIB row matches at any length, so the FIB
+    // /8 owner wins despite the longer ledger prefix.
+    forwarding.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(
+            ipnet::Ipv4Net::new(Ipv4Addr::new(203, 0, 0, 0), 8).unwrap(),
+        ),
+        host: Ipv4Addr::new(203, 0, 0, 0),
+        ifindex: 12,
+        tunnel_endpoint_id: 0,
+        table: String::new(),
+    });
+    forwarding
+        .connected_v4_by_ifindex
+        .entry(6)
+        .or_default()
+        .push(PrefixV4::from_net(
+            ipnet::Ipv4Net::new(Ipv4Addr::new(203, 0, 113, 0), 24).unwrap(),
+        ));
+    let targets: Vec<(IpAddr, Option<&str>)> = vec![
+        // named-RI ledger-only: visible ONLY under tenant-a.inet.0
+        (IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), Some("tenant-a.inet.0")),
+        (IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), None),
+        (IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), Some("inet.0")),
+        // default ledger-only: visible under default, NOT named
+        (IpAddr::V4(Ipv4Addr::new(192, 168, 7, 9)), None),
+        (IpAddr::V4(Ipv4Addr::new(192, 168, 7, 9)), Some("tenant-a.inet.0")),
+        // overlapping FIB /8 vs ledger /24
+        (IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), None),
+    ];
+    let legacy: Vec<i32> = targets
+        .iter()
+        .map(|(t, tab)| {
+            crate::afxdp::connected_owner_rg_for_target_in_table(&forwarding, *t, *tab)
+        })
+        .collect();
+    forwarding.rebuild_connected_owner_index();
+    let indexed: Vec<i32> = targets
+        .iter()
+        .map(|(t, tab)| {
+            crate::afxdp::connected_owner_rg_for_target_in_table(&forwarding, *t, *tab)
+        })
+        .collect();
+    assert_eq!(
+        indexed, legacy,
+        "#16217 GLM F1: indexed named-RI/default/overlap answers must equal the legacy scan"
+    );
+    // Pin the semantics (ifindex 6 = RG2 split, ifindex 12 = RG1):
+    assert_eq!(legacy[0], 1, "tenant ledger row names its RG under its own table");
+    assert_eq!(legacy[1], 0, "tenant ledger row invisible under default probe");
+    assert_eq!(legacy[2], 0, "tenant ledger row invisible under inet.0 probe");
+    assert_eq!(legacy[3], 2, "default ledger row names RG2 under default probe");
+    assert_eq!(legacy[4], 0, "default ledger row invisible under named probe");
+    assert_eq!(legacy[5], 1, "FIB /8 owner beats longer ledger /24 (ledger only on FIB miss)");
+}
+
+/// #16217 (GLM F1): FIB-vs-route precedence — a STATIC (non-connected)
+/// route must NOT claim connected ownership: the connected-owner
+/// answer for a target covered only by a static route is the
+/// connected prefix's owner (or 0 when no connected prefix matches),
+/// never the static route's egress RG. Equivalence indexed vs scan.
+#[test]
+fn connected_owner_static_route_does_not_claim_16217() {
+    let mut forwarding = test_forwarding_state_split_rgs();
+    // Static route to 203.0.113.0/24 via egress 12 (RG1); NO
+    // connected row covers it. Connected owner must stay 0 in both
+    // scan and index (routes_v4 are not connected ownership).
+    forwarding.routes_v4.insert(
+        "inet.0".to_string(),
+        vec![crate::afxdp::RouteEntryV4 {
+            prefix: PrefixV4::from_net(
+                ipnet::Ipv4Net::new(Ipv4Addr::new(203, 0, 113, 0), 24).unwrap(),
+            ),
+            next_hops: vec![],
+            discard: false,
+            reject: false,
+            cluster_terminal: false,
+            next_table: String::new(),
+            preference: 10,
+            mtu: 1500,
+            rule_priority: 0,
+        }],
+    );
+    let target = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+    let legacy = crate::afxdp::connected_owner_rg_for_target_in_table(&forwarding, target, None);
+    forwarding.rebuild_connected_owner_index();
+    let indexed = crate::afxdp::connected_owner_rg_for_target_in_table(&forwarding, target, None);
+    assert_eq!(legacy, 0, "static route alone claims no connected owner");
+    assert_eq!(indexed, legacy, "index must equal scan for static-route-only target");
+}

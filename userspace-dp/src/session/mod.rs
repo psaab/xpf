@@ -1821,6 +1821,11 @@ struct ProbeUndo {
     accounting: Option<(SessionKey, ProbeHalfUndo)>,
     shed_forward_key: SessionKey,
     shed_was_present: bool,
+    /// #16217 (GLM F1): pre-probe `node_served_stamps` snapshots for
+    /// every stamp key the completing hit may write, so a dropped
+    /// probe restores them exactly and removes the stage-transition
+    /// marker instead of leaving Established evidence behind.
+    stamp_snapshots: Vec<(SessionKey, Option<(u8, u64)>)>,
 }
 
 pub(crate) struct SessionTable {
@@ -4147,6 +4152,25 @@ impl SessionTable {
         } else {
             self.pressure_shed_unreplied.remove(&undo.shed_forward_key);
         }
+        // #16217 (GLM F1): a dropped probe must leave NO Established
+        // evidence behind. Remove the stage-transition marker the
+        // completing hit recorded (consumed only on admission via
+        // `take_probe_stage_transition`) and restore the exact
+        // pre-probe node-served stamps (removing ones the probe
+        // created). Pre-fix both survived the rollback, so a dropped
+        // completing ACK still advanced node-level evidence.
+        self.pending_probe_stage_transitions
+            .retain(|k| k != &undo.canonical_key);
+        for (stamp_key, prior) in &undo.stamp_snapshots {
+            match prior {
+                Some(v) => {
+                    self.node_served_stamps.insert(stamp_key.clone(), *v);
+                }
+                None => {
+                    self.node_served_stamps.remove(stamp_key);
+                }
+            }
+        }
         had_deferred
     }
 
@@ -4245,6 +4269,27 @@ impl SessionTable {
                 };
                 let shed_was_present =
                     self.pressure_shed_unreplied.contains_key(&shed_forward_key);
+                // #16217 (GLM F1): snapshot every node-served stamp
+                // this probe may write (forward orientations of the
+                // matched + companion keys) BEFORE any mutation.
+                let stamp_snapshots: Vec<(SessionKey, Option<(u8, u64)>)> = {
+                    let mut keys: Vec<SessionKey> = vec![
+                        matched_key.clone(),
+                        reverse_session_key(&matched_key, nat),
+                    ];
+                    if companion_key != matched_key {
+                        keys.push(companion_key.clone());
+                        keys.push(reverse_session_key(&companion_key, nat));
+                    }
+                    keys.sort_by_key(|k| format!("{k:?}"));
+                    keys.dedup();
+                    keys.into_iter()
+                        .map(|k| {
+                            let v = self.node_served_stamps.get(&k).copied();
+                            (k, v)
+                        })
+                        .collect()
+                };
                 probe_undo = Some(ProbeUndo {
                     canonical_key: matched_key.clone(),
                     matched: (matched_key, matched_snap),
@@ -4252,6 +4297,7 @@ impl SessionTable {
                     accounting,
                     shed_forward_key,
                     shed_was_present,
+                    stamp_snapshots,
                 });
             }
         }

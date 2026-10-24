@@ -191,14 +191,20 @@ pub(in crate::afxdp) struct ForwardingState {
     /// legacy scan — same answer, old cost. Values are the owning
     /// interface's RG resolved at build (`owner_rg_for_flow`).
     pub(in crate::afxdp) connected_owner_index_v4:
-        FastMap<(String, u8, u32), i32>,
+        FastMap<(u8, u32), Vec<(Box<str>, u32, i32)>>,
     pub(in crate::afxdp) connected_owner_index_v6:
-        FastMap<(String, u8, u128), i32>,
+        FastMap<(u8, u128), Vec<(Box<str>, u32, i32)>>,
     /// #16217: table names that own at least one indexed row; the
     /// probe uses it to decide whether a named scope has rows of its
     /// own or only sees the (default-keyed) empty-table rows.
     pub(in crate::afxdp) connected_owner_tables_v4: FastSet<String>,
     pub(in crate::afxdp) connected_owner_tables_v6: FastSet<String>,
+    /// #16217 (GLM F1): row counts the index was built from
+    /// (FIB rows + ledger prefixes, both families). A post-build
+    /// mutation of the connected vecs/ledger (unit fixtures) makes
+    /// the counts disagree and the owner probe falls back to the
+    /// exact legacy scan instead of trusting a stale Miss.
+    pub(in crate::afxdp) connected_owner_index_rows: (usize, usize),
     /// #10689: build-time index of IPv4 connected-prefix directed broadcasts,
     /// keyed by routing domain so overlapping prefixes do not poison other
     /// routing instances.
@@ -819,8 +825,22 @@ impl ForwardingState {
         self.connected_owner_index_v6.clear();
         self.connected_owner_tables_v4.clear();
         self.connected_owner_tables_v6.clear();
-        // Distinct table keys: family defaults + every named table
-        // present in either row set (empty-table rows apply to all).
+        self.connected_owner_index_rows = (0, 0);
+        // #16217 (Codex #2/#3/#4/#6 + GLM F1): the ledger scope keys
+        // must mirror `interface_in_table_scope` EXACTLY. The legacy
+        // scan, for probe table `want`, includes a ledger row iff:
+        // want=None -> instance empty; want set -> instance empty
+        // only for inet.0/inet6.0, else want == `<instance>.inet.0`
+        // or `<instance>.inet6.0`. So a NAMED instance's ledger rows
+        // are visible ONLY under its own `<R>.inet.*` keys — never
+        // under the family defaults, and a default-instance row is
+        // visible under the defaults ONLY (plus, for empty-instance,
+        // no named key). The probe must therefore use the ORIGINAL
+        // want verbatim (no remap to the default key): remapping a
+        // named want to "inet.0" would (a) hide that instance's own
+        // ledger rows (filed under `<R>.inet.0`) and (b) wrongly
+        // surface default-instance rows under a named scope. Both
+        // diverged from the legacy scan.
         let mut tables4: Vec<&str> = vec!["inet.0"];
         for row in &self.connected_v4 {
             if !row.table.is_empty() && !tables4.contains(&row.table.as_str()) {
@@ -839,43 +859,61 @@ impl ForwardingState {
         for t in &tables6 {
             self.connected_owner_tables_v6.insert(t.to_string());
         }
+        // Empty-table rows are visible in EVERY scope (legacy:
+        // row.table empty matches any want). They are filed under
+        // the sentinel key "" and the probe considers want-key and
+        // sentinel entries together, newest (highest seq) winning
+        // at equal length — the legacy `len >= best_len` LAST-row
+        // tie-break across the whole row vec.
+        let mut seq4: u32 = 0;
         for row in &self.connected_v4 {
             let rg = crate::afxdp::forwarding::owner_rg_for_flow(self, row.ifindex);
             let len = row.prefix.prefix_len();
             let net = u32::from(row.prefix.addr());
-            if row.table.is_empty() {
-                for t in &tables4 {
-                    self.connected_owner_index_v4
-                        .insert((t.to_string(), len, net), rg);
-                }
-                // Scoped probes accept ANY table name, not just the
-                // ones present in this row set: a named instance with
-                // no FIB connected rows of its own still sees the
-                // empty-table rows. Probe-side, a want absent from the
-                // key set falls back to the default-table keys (see
-                // `connected_owner_index_lookup`), which hold them.
+            let key: &str = if row.table.is_empty() {
+                ""
             } else {
-                self.connected_owner_index_v4
-                    .insert((row.table.clone(), len, net), rg);
+                row.table.as_str()
+            };
+            let slot = self
+                .connected_owner_index_v4
+                .entry((len, net))
+                .or_default();
+            if let Some(existing) = slot.iter_mut().find(|(k, _, _)| &**k == key) {
+                existing.1 = seq4;
+                existing.2 = rg;
+            } else {
+                slot.push((key.into(), seq4, rg));
             }
+            seq4 += 1;
         }
+        let mut seq6: u32 = 0;
         for row in &self.connected_v6 {
             let rg = crate::afxdp::forwarding::owner_rg_for_flow(self, row.ifindex);
             let len = row.prefix.prefix_len();
             let net = u128::from(row.prefix.addr());
-            if row.table.is_empty() {
-                for t in &tables6 {
-                    self.connected_owner_index_v6
-                        .insert((t.to_string(), len, net), rg);
-                }
+            let key: &str = if row.table.is_empty() {
+                ""
             } else {
-                self.connected_owner_index_v6
-                    .insert((row.table.clone(), len, net), rg);
+                row.table.as_str()
+            };
+            let slot = self
+                .connected_owner_index_v6
+                .entry((len, net))
+                .or_default();
+            if let Some(existing) = slot.iter_mut().find(|(k, _, _)| &**k == key) {
+                existing.1 = seq6;
+                existing.2 = rg;
+            } else {
+                slot.push((key.into(), seq6, rg));
             }
+            seq6 += 1;
         }
-        // Ledger fallback rows: only fill keys no FIB row claimed
-        // (precedence 2 above). Scope per `interface_in_table_scope`:
-        // empty instance -> default tables; named R -> <R>.inet*.
+        // Ledger fallback rows: only fill keys no FIB row claimed.
+        // Scope per `interface_in_table_scope` (see above): empty
+        // instance -> family defaults ONLY; named R -> `<R>.inet.*`
+        // ONLY (v4 and v6 keys both, mirroring the predicate, which
+        // accepts either family suffix for a named instance).
         for (ifindex, prefixes) in &self.connected_v4_by_ifindex {
             let rg = crate::afxdp::forwarding::owner_rg_for_flow(self, *ifindex);
             let instance = self
@@ -884,17 +922,31 @@ impl ForwardingState {
                 .map(String::as_str)
                 .unwrap_or("");
             let scoped: Vec<String> = if instance.is_empty() {
-                vec!["inet.0".to_string()]
+                vec!["inet.0".to_string(), "inet6.0".to_string()]
             } else {
-                vec![format!("{instance}.inet.0")]
+                vec![format!("{instance}.inet.0"), format!("{instance}.inet6.0")]
             };
             for prefix in prefixes {
                 let len = prefix.prefix_len();
                 let net = u32::from(prefix.addr());
                 for t in &scoped {
-                    self.connected_owner_index_v4
-                        .entry((t.clone(), len, net))
-                        .or_insert(rg);
+                    // v4 ledger rows answer v4 probes; the inet6.0
+                    // key in `scoped` is for the predicate's family
+                    // symmetry on v6 rows below — a v4 prefix under
+                    // an inet6.0 key is never probed (family-split
+                    // indexes), so inserting it is inert. Keep only
+                    // the family-correct key to avoid dead rows.
+                    if t.ends_with("inet6.0") {
+                        continue;
+                    }
+                    self.connected_owner_tables_v4.insert(t.clone());
+                    let slot = self
+                        .connected_owner_index_v4
+                        .entry((len, net))
+                        .or_default();
+                    if !slot.iter().any(|(k, _, _)| &**k == t.as_str()) {
+                        slot.push((t.clone().into_boxed_str(), u32::MAX, rg));
+                    }
                 }
             }
         }
@@ -914,19 +966,57 @@ impl ForwardingState {
                 let len = prefix.prefix_len();
                 let net = u128::from(prefix.addr());
                 for t in &scoped {
-                    self.connected_owner_index_v6
-                        .entry((t.clone(), len, net))
-                        .or_insert(rg);
+                    self.connected_owner_tables_v6.insert(t.clone());
+                    let slot = self
+                        .connected_owner_index_v6
+                        .entry((len, net))
+                        .or_default();
+                    if !slot.iter().any(|(k, _, _)| &**k == t.as_str()) {
+                        slot.push((t.clone().into_boxed_str(), u32::MAX, rg));
+                    }
                 }
             }
         }
+        self.connected_owner_index_rows = (
+            self.connected_v4.len() + self.connected_v6.len(),
+            self.connected_v4_by_ifindex
+                .values()
+                .map(|v| v.len())
+                .sum::<usize>()
+                + self
+                    .connected_v6_by_ifindex
+                    .values()
+                    .map(|v| v.len())
+                    .sum::<usize>(),
+        );
+    }
+
+    /// #16217 (GLM F1): was the index built from the current row
+    /// sets? Counts FIB rows + ledger prefixes at build vs now.
+    pub(in crate::afxdp) fn connected_owner_index_current(&self) -> bool {
+        let fib = self.connected_v4.len() + self.connected_v6.len();
+        let ledger: usize = self
+            .connected_v4_by_ifindex
+            .values()
+            .map(|v| v.len())
+            .sum::<usize>()
+            + self
+                .connected_v6_by_ifindex
+                .values()
+                .map(|v| v.len())
+                .sum::<usize>();
+        self.connected_owner_index_rows == (fib, ledger)
     }
 
     /// #16217: longest-prefix owner probe over the build-time index.
     /// Returns `None` when the index is empty (state never built it —
     /// unit fixtures), so the caller falls back to the legacy scan.
     /// Otherwise `Hit(rg)`/`Miss` exactly mirror the legacy scan's
-    /// FIB+ledger outcome for (target, table).
+    /// FIB+ledger outcome for (target, table). The probe uses the
+    /// ORIGINAL want table verbatim (GLM F1: no remap to the default
+    /// key — a named scope must not see default-instance ledger rows,
+    /// and must see its own). Hot path: borrowed `&str` keys, no
+    /// allocation per probe (Codex #6).
     pub(in crate::afxdp) fn connected_owner_index_lookup(
         &self,
         target: IpAddr,
@@ -937,15 +1027,7 @@ impl ForwardingState {
                 if self.connected_owner_index_v4.is_empty() {
                     return None;
                 }
-                let want = table.unwrap_or("inet.0");
-                // A table with no indexed rows of its own sees only
-                // the empty-table rows, which were stored under the
-                // family default key.
-                let want = if self.connected_owner_tables_v4.contains(want) {
-                    want
-                } else {
-                    "inet.0"
-                };
+                let want: &str = table.unwrap_or("inet.0");
                 let addr = u32::from(ip);
                 for len in (0..=32u8).rev() {
                     let net = if len == 0 {
@@ -953,8 +1035,44 @@ impl ForwardingState {
                     } else {
                         addr & (u32::MAX << (32 - len))
                     };
-                    if let Some(rg) =
-                        self.connected_owner_index_v4.get(&(want.to_string(), len, net))
+                    if let Some(rg) = self
+                        .connected_owner_index_v4
+                        .get(&(len, net))
+                        .and_then(|slot| {
+                            slot.iter()
+                                .filter(|(k, seq, _)| {
+                                    *seq != u32::MAX && (&**k == want || k.is_empty())
+                                })
+                                .max_by_key(|(_, seq, _)| *seq)
+                        })
+                        .map(|(_, _, rg)| rg)
+                    {
+                        return Some(ConnectedOwnerIndex::Hit(*rg));
+                    }
+                }
+                // Ledger pass (legacy Source 1 fallback): only
+                // reached when no FIB row matched at ANY length for
+                // this want — the legacy scan consults the ledger
+                // only when its FIB scan found nothing. Ledger rows
+                // are filed under their exact scope keys (named
+                // instance `<R>.inet.0`, defaults for empty instance)
+                // with seq u32::MAX; longest prefix wins, and the
+                // ledger's own `len >= best_len` tie keeps the last
+                // inserted at equal length (single entry per key by
+                // construction, `or_insert`-style fill at build).
+                for len in (0..=32u8).rev() {
+                    let net = if len == 0 {
+                        0
+                    } else {
+                        addr & (u32::MAX << (32 - len))
+                    };
+                    if let Some(rg) = self
+                        .connected_owner_index_v4
+                        .get(&(len, net))
+                        .and_then(|slot| {
+                            slot.iter().find(|(k, seq, _)| *seq == u32::MAX && &**k == want)
+                        })
+                        .map(|(_, _, rg)| rg)
                     {
                         return Some(ConnectedOwnerIndex::Hit(*rg));
                     }
@@ -965,12 +1083,7 @@ impl ForwardingState {
                 if self.connected_owner_index_v6.is_empty() {
                     return None;
                 }
-                let want = table.unwrap_or("inet6.0");
-                let want = if self.connected_owner_tables_v6.contains(want) {
-                    want
-                } else {
-                    "inet6.0"
-                };
+                let want: &str = table.unwrap_or("inet6.0");
                 let addr = u128::from(ip);
                 for len in (0..=128u8).rev() {
                     let net = if len == 0 {
@@ -978,8 +1091,34 @@ impl ForwardingState {
                     } else {
                         addr & (u128::MAX << (128 - len))
                     };
-                    if let Some(rg) =
-                        self.connected_owner_index_v6.get(&(want.to_string(), len, net))
+                    if let Some(rg) = self
+                        .connected_owner_index_v6
+                        .get(&(len, net))
+                        .and_then(|slot| {
+                            slot.iter()
+                                .filter(|(k, seq, _)| {
+                                    *seq != u32::MAX && (&**k == want || k.is_empty())
+                                })
+                                .max_by_key(|(_, seq, _)| *seq)
+                        })
+                        .map(|(_, _, rg)| rg)
+                    {
+                        return Some(ConnectedOwnerIndex::Hit(*rg));
+                    }
+                }
+                for len in (0..=128u8).rev() {
+                    let net = if len == 0 {
+                        0
+                    } else {
+                        addr & (u128::MAX << (128 - len))
+                    };
+                    if let Some(rg) = self
+                        .connected_owner_index_v6
+                        .get(&(len, net))
+                        .and_then(|slot| {
+                            slot.iter().find(|(k, seq, _)| *seq == u32::MAX && &**k == want)
+                        })
+                        .map(|(_, _, rg)| rg)
                     {
                         return Some(ConnectedOwnerIndex::Hit(*rg));
                     }

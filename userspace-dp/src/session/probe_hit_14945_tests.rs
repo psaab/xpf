@@ -907,3 +907,64 @@ fn probe_hit_reverse_alias_folds_like_unfused_14945() {
         "translated reverse packet must fold onto the forward entry"
     );
 }
+
+/// #16217 (GLM F1): a dropped deferring probe must leave NO
+/// Established evidence behind: the stage-transition marker is
+/// removed and the pre-probe node-served stamps are restored
+/// exactly (a stamp the probe created is removed, a prior stamp is
+/// kept). FAIL-ON-REVERT: drop either rollback arm and the marker /
+/// stamp survives the drop.
+#[test]
+fn dropped_probe_rolls_back_stage_marker_and_served_stamps_16217() {
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN);
+    assert!(table
+        .lookup_with_origin(&reverse, now + SEC, TCP_SYN | TCP_ACK)
+        .is_some());
+    let _ = table.drain_deltas(16);
+    // Pre-probe: no node-served stamp for this forward key.
+    let before = table.node_served_evidence(&forward);
+    assert!(!table.take_probe_stage_transition(&forward));
+    assert!(table.probe_hit_deferring_state_update(
+        &forward,
+        now + 2 * SEC,
+        512,
+        TCP_ACK | TCP_PSH,
+        512,
+        46,
+    ));
+    // The completing probe recorded the transition + stamp.
+    assert!(table.rollback_dropped_probe_hit(&forward, 512, TCP_ACK | TCP_PSH));
+    assert!(
+        !table.take_probe_stage_transition(&forward),
+        "dropped probe must remove the stage-transition marker"
+    );
+    let after = table.node_served_evidence(&forward);
+    assert_eq!(
+        (after.handshake_wire, after.rev_packets),
+        (before.handshake_wire, before.rev_packets),
+        "dropped probe must restore pre-probe node-served evidence"
+    );
+    // Control: an ADMITTED probe keeps its marker (consumed once).
+    let mut table2 = SessionTable::new();
+    let reverse2 = install_forward_reverse_pair(&mut table2, &forward, now, TCP_SYN);
+    assert!(table2
+        .lookup_with_origin(&reverse2, now + SEC, TCP_SYN | TCP_ACK)
+        .is_some());
+    let _ = table2.drain_deltas(16);
+    assert!(table2.probe_hit_deferring_state_update(
+        &forward,
+        now + 2 * SEC,
+        512,
+        TCP_ACK | TCP_PSH,
+        512,
+        46,
+    ));
+    table2.emit_probe_hit_state_update(&forward);
+    assert!(
+        table2.take_probe_stage_transition(&forward),
+        "admitted probe must keep its stage-transition marker"
+    );
+}

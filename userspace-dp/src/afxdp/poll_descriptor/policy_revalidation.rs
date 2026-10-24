@@ -1147,22 +1147,15 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                     {
                         return None;
                     }
-                    // FZDiag37/#16217: an ESTABLISHED, traffic-carrying
-                    // session must NEVER be StaleSourceNat-revoked on a
-                    // reverse/fabric hit: a companion-less reverse row
-                    // (HA-synced / fabric-synthesized) carries no forward
-                    // VLAN/dynamic-SNAT provenance by construction, so
-                    // the missing-VLAN verdict below is structural
-                    // absence, not staleness evidence. `forward_query`
-                    // IS the canonical forward key here (the reverse
-                    // target lookup just resolved it Stale), so its
-                    // local forward row's state is the judged session's
-                    // state. Decline = keep session, drop packet
-                    // (canonical None). Withdrawal under a NEW config
-                    // epoch still revokes via the judged arm below.
-                    if sessions.forward_established_with_traffic(&forward_query) {
-                        return None;
-                    }
+                    // FZDiag37/#16217 (GLM F2): NO established-guard
+                    // here by design: this is the NoLocalEntry arm —
+                    // `forward_query` has NO local forward row
+                    // (`source_nat_revalidation_target` just answered
+                    // NoLocalEntry, and `entry_by_key(forward_query)`
+                    // is therefore None), so a guard probing it would
+                    // be dead code. An established session whose
+                    // forward row IS local takes the companion-present
+                    // path below, where the guard actually fires.
                     let Some(forward_ingress_vlan_id) = metadata.forward_ingress_vlan_id else {
                         return Some(PolicyRevocation {
                             canonical_key: None,
@@ -1225,20 +1218,16 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                         forward_selector_for_hit(true, packet_icmp, stored_forward_icmp),
                         ignore_selector,
                     );
-                    // FZDiag37/#16217: same established-guard as the
-                    // missing-VLAN arm above — the reconstructed
-                    // forward decision's invalid verdict here can rest
-                    // on provenance the companion-less reverse row
-                    // never carried (VLAN/scope/geometry off a
-                    // synthesized tuple). An established,
-                    // traffic-carrying session declines (drop packet,
-                    // keep session); withdrawal under a new config
-                    // epoch still revokes on the judged-with-companion
-                    // path below, and a non-established row keeps this
-                    // fail-closed verdict.
-                    return (!valid
-                        && !sessions.forward_established_with_traffic(&forward_query))
-                    .then_some(PolicyRevocation {
+                    // FZDiag37/#16217 (GLM F2): no established-guard
+                    // in this arm either — NoLocalEntry means there
+                    // is no local forward row to be established, so
+                    // the fail-closed verdict stands exactly as
+                    // before. Caller contract for the canonical-less
+                    // revocation: keep session (nothing local to
+                    // tear down), DROP this packet (the caller
+                    // recycles the descriptor and never forwards it;
+                    // pinned by the production-chain test).
+                    return (!valid).then_some(PolicyRevocation {
                         canonical_key: None,
                         decision: forward_decision,
                         metadata: forward_metadata,
@@ -1486,11 +1475,20 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
         && forward_metadata.forward_ingress_vlan_id.is_none()
         && sessions.forward_established_with_traffic(&forward_key)
     {
-        let judged_epoch = sessions
-            .source_nat_revalidated_config_generation(&forward_key)
-            .unwrap_or(0);
+        // GLM F2 epoch hole, closed by construction: a PEER-IMPORTED
+        // row carries `source_nat_revalidated: None` at import
+        // (`upsert_synced_with_origin`), so it has NO judged epoch.
+        // Mapping that to 0 made `judged(0) >= live` false whenever a
+        // live epoch existed, silently disabling the decline for
+        // exactly the imported rows it exists for. An unjudged row
+        // has never been validated under ANY local epoch, so there
+        // is no stale binding to revoke against: decline (keep
+        // session, drop packet) until a local judgment stamps an
+        // epoch. Only a row judged under an epoch the live config
+        // has ADVANCED PAST (binding actually changed) revokes.
         let live_epoch = sessions.forwarding_revalidation_config_generation();
-        if live_epoch == 0 || judged_epoch >= live_epoch {
+        let judged_epoch = sessions.source_nat_revalidated_config_generation(&forward_key);
+        if live_epoch == 0 || judged_epoch.is_none_or(|judged| judged >= live_epoch) {
             return None;
         }
     }

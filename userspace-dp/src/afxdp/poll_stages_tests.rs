@@ -7207,6 +7207,7 @@ fn screen_test_ctx<'a>(
         dnat_fds,
         rg_epochs,
         cold_path_sample_mask: 0xff,
+        forwarding_active_rgs: &*EMPTY_FWD_ACTIVE_RGS_16217,
     }
 }
 
