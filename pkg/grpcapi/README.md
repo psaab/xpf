@@ -529,10 +529,10 @@ crosses four hops, and each one can drop it silently:
 |---|---|---|---|
 | 1 | produce | `cfg.Warnings` in the compiler | each advisory's own cell |
 | 2 | seam | `commitWithGenBinding` returns the compiled config | `pkg/daemon/commit_seam_advisory_8484_test.go` |
-| 3 | transport | `configWarnings()` -> `CommitResponse.warnings` | `commit_advisory_warnings_6515_test.go`, `commit_advisory_transport_8484_test.go` |
+| 3 | transport | `configstore.WarningsOf()` -> `CommitResponse.warnings` | `commit_advisory_warnings_6515_test.go`, `commit_advisory_transport_8484_test.go` |
 | 4 | render | `printRemoteConfigWarnings` in the remote CLI; `printConfigWarnings` in the local CLI | `cmd/cli/remote_commit_advisory_render_8484_test.go` |
 
-**The delivery mechanism is generic and must stay that way.** `configWarnings`
+**The delivery mechanism is generic and must stay that way.** `WarningsOf`
 projects `cfg.Warnings` wholesale, so a NEW advisory needs no delivery wiring
 at all — #8189's login-class advisory reached the remote CLI with zero
 transport work. If an advisory ever needs its own plumbing, the next one will
@@ -592,8 +592,10 @@ contract.
   `Commit()` and the dataplane apply. This is the same primitive `pkg/cli`
   uses; concurrent operator commits serialize via that semaphore (#846).
 - **Commit error-code contract (#5742).** `Commit` / `CommitConfirmed`
-  classify the callback error structurally via `commitApplyStatus`, keying
-  off whether the daemon returned the committed config alongside it:
+  classify the callback error structurally via `commitApplyStatus`,
+  which maps the shared `configstore.ClassifyCommitError` class
+  (#16156; the same classifier the REST twin uses) onto gRPC codes,
+  keying off whether the daemon returned the committed config alongside it:
   a **non-fatal tail-reconcile / ordinary dataplane-apply** error (networkd
   write, Kea restart, IPsec reload, interface reconcile, non-abort apply —
   the daemon commits+arms the config and returns it *with* the error) →
