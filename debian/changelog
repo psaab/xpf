@@ -8,6 +8,12 @@ xpf (0.0.0) unstable; urgency=medium
     pass. Naming, goto targets, sequence numbering and emitted FRR
     output are byte-for-byte unchanged (hash unification of generated
     names remains rejected — those names are a stability contract).
+  * FRR: the per-instance protocol renderer now skips forwarding
+    instances (`VRFName=="" && TableID>0`) as a defensive backstop
+    (#16204). Such an instance has no VRF device, so carrying BGP or
+    another dynamic protocol previously rendered a second, unscoped
+    `router bgp` stanza joining the global AS. Normal VRF instances
+    and the legacy empty-VRF/no-table shape are unaffected.
 
   * Dataplane: the three string protocol carriers (filter, policy
     application, DNAT) now have per-carrier validation cells proving

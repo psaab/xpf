@@ -191,9 +191,11 @@ per-instance protocols in general.
 The composition is now rejected at strict commit
 (`config.validateForwardingInstanceProtocolsStrict`), and `assembleFRRConfig`
 NILs a forwarding instance's protocol pointers before they reach this package.
-The renderer is deliberately left alone: nothing here can distinguish "the
-master table" from "a forwarding instance's table" through one empty string,
-and the fix belongs where the discriminator still exists.
+As a renderer-level backstop (#16204), `buildManagedSection` also skips the
+per-instance protocol block when `VRFName=="" && TableID>0` — the discriminator
+that distinguishes a forwarding instance from the legacy master-table shape
+(`VRFName=="" && TableID==0`, which still renders). No new scope type is
+introduced.
 
 ### Protocol interface operands are RESOLVED, not copied (#9405)
 
