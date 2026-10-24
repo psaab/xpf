@@ -17,9 +17,9 @@ import (
 func (c *xpfCollector) emitRESTConnBound(ch chan<- prometheus.Metric) {
 	var refusals uint64
 	var active int64
-	if c != nil && c.srv != nil {
-		refusals = c.srv.RestConnRefusals()
-		active = c.srv.RestConnActive()
+	if c != nil && c.deps.restConnRefusals != nil && c.deps.restConnActive != nil {
+		refusals = c.deps.restConnRefusals()
+		active = c.deps.restConnActive()
 	}
 	c.emitConstMetric(ch, c.restConnRefusalsTotal,
 		prometheus.CounterValue, float64(refusals))

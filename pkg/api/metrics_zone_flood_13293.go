@@ -23,10 +23,10 @@ func (c *xpfCollector) emitZoneFloodCounters(ch chan<- prometheus.Metric, status
 	}
 	c.emitConstMetric(ch, c.floodCounterOverflowActive, prometheus.GaugeValue, v)
 
-	if c.srv == nil || c.srv.dp == nil {
+	if c.deps.dp == nil {
 		return
 	}
-	cr := dataplane.LastApplyResultOf(c.srv.dp)
+	cr := dataplane.LastApplyResultOf(c.deps.dp)
 	if cr == nil {
 		return
 	}

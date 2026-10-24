@@ -51,10 +51,10 @@ func (c *xpfCollector) initFlowExportBuildDescriptors() {
 // Control-plane: the flow exporters are built whether or not the dataplane
 // loaded, so the caller emits this BEFORE the dataplane gate.
 func (c *xpfCollector) collectFlowExportBuildState(ch chan<- prometheus.Metric) {
-	if c.srv == nil || c.srv.flowExportBuildStateFn == nil {
+	if c.deps.flowExportBuildStateFn == nil {
 		return
 	}
-	for _, st := range c.srv.flowExportBuildStateFn() {
+	for _, st := range c.deps.flowExportBuildStateFn() {
 		c.emitConstMetric(ch, c.flowExportConfiguredGroups,
 			prometheus.GaugeValue, float64(st.ConfiguredGroups), st.Family)
 		failed := 0.0

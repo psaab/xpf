@@ -29,10 +29,10 @@ func (c *xpfCollector) initSyslogDropDescriptors() {
 // most needs, and gating this behind the dataplane would hide a dead collector
 // on it.
 func (c *xpfCollector) collectSyslogDrops(ch chan<- prometheus.Metric) {
-	if c.srv == nil || c.srv.syslogDropsFn == nil {
+	if c.deps.syslogDropsFn == nil {
 		return
 	}
-	for _, st := range c.srv.syslogDropsFn() {
+	for _, st := range c.deps.syslogDropsFn() {
 		// All three reasons are emitted for every collector, including at
 		// zero. A counter that appears only once it becomes non-zero cannot
 		// be alerted on with `increase()` — the series has no prior sample to

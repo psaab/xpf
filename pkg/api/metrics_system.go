@@ -13,10 +13,10 @@ import (
 )
 
 func (c *xpfCollector) collectDHCPMetrics(ch chan<- prometheus.Metric) {
-	if c.srv.dhcp == nil {
+	if c.deps.dhcp == nil {
 		return
 	}
-	leases := c.srv.dhcp.Leases()
+	leases := c.deps.dhcp.Leases()
 	var inet, inet6 int
 	for _, l := range leases {
 		if l.Family == 6 {
@@ -37,10 +37,10 @@ func (c *xpfCollector) collectDHCPMetrics(ch chan<- prometheus.Metric) {
 // cardinality is CLOSED: result in {ok,fail}; reason in
 // {no-name,no-backend,conflict,ptr-notauth}.
 func (c *xpfCollector) collectDDNSMetrics(ch chan<- prometheus.Metric) {
-	if c.srv.ddnsStatsFn == nil {
+	if c.deps.ddnsStatsFn == nil {
 		return
 	}
-	st := c.srv.ddnsStatsFn()
+	st := c.deps.ddnsStatsFn()
 	if st == nil {
 		return
 	}
@@ -97,10 +97,10 @@ func (c *xpfCollector) collectDDNSMetrics(ch chan<- prometheus.Metric) {
 // (NoDataplane). Label cardinality is CLOSED: result in {ok,fail}; reason in
 // {unchanged,backoff,no-backend}.
 func (c *xpfCollector) collectSurfaceADDNSMetrics(ch chan<- prometheus.Metric) {
-	if c.srv.surfaceAStatsFn == nil {
+	if c.deps.surfaceAStatsFn == nil {
 		return
 	}
-	st := c.srv.surfaceAStatsFn()
+	st := c.deps.surfaceAStatsFn()
 	if st == nil {
 		return
 	}
@@ -152,8 +152,8 @@ func (c *xpfCollector) collectSurfaceADDNSMetrics(ch chan<- prometheus.Metric) {
 // rows collide on an identical labelset, and Prometheus either rejects the
 // duplicate series (scrape error) or silently collapses the failing group.
 func (c *xpfCollector) collectFlowExportMetrics(ch chan<- prometheus.Metric) {
-	if c.srv.flowCollectorHealthFn != nil {
-		for _, h := range c.srv.flowCollectorHealthFn() {
+	if c.deps.flowCollectorHealthFn != nil {
+		for _, h := range c.deps.flowCollectorHealthFn() {
 			c.emitConstMetric(ch, c.flowExportCollectorWriteAttemptsTotal,
 				prometheus.CounterValue, float64(h.WriteAttempts), h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
 			c.emitConstMetric(ch, c.flowExportCollectorWriteFailuresTotal,
@@ -202,10 +202,10 @@ func (c *xpfCollector) collectRouteMaskCacheMetrics(ch chan<- prometheus.Metric)
 // pressure; exported flow and data-packet counters count successful writes
 // and exclude template refreshes (#13304).
 func (c *xpfCollector) collectFlowExportBatchMetrics(ch chan<- prometheus.Metric) {
-	if c.srv.flowExportBatchStatsFn == nil {
+	if c.deps.flowExportBatchStatsFn == nil {
 		return
 	}
-	for _, s := range c.srv.flowExportBatchStatsFn() {
+	for _, s := range c.deps.flowExportBatchStatsFn() {
 		c.emitConstMetric(ch, c.flowExportBatchDepth,
 			prometheus.GaugeValue, float64(s.Depth), s.Protocol, s.Instance, s.Template, s.Family)
 		c.emitConstMetric(ch, c.flowExportBatchMaxDepth,
@@ -226,10 +226,10 @@ func (c *xpfCollector) collectFlowExportBatchMetrics(ch chan<- prometheus.Metric
 }
 
 func (c *xpfCollector) collectFlowExportSamplingMetrics(ch chan<- prometheus.Metric) {
-	if c.srv.flowExportSamplingStatsFn == nil {
+	if c.deps.flowExportSamplingStatsFn == nil {
 		return
 	}
-	for _, s := range c.srv.flowExportSamplingStatsFn() {
+	for _, s := range c.deps.flowExportSamplingStatsFn() {
 		c.emitConstMetric(ch, c.flowExportSamplingEvaluatedTotal,
 			prometheus.CounterValue, float64(s.Evaluated), s.Protocol, s.Instance)
 		c.emitConstMetric(ch, c.flowExportSamplingSelectedTotal,
@@ -242,25 +242,25 @@ func (c *xpfCollector) collectFlowExportSamplingMetrics(ch chan<- prometheus.Met
 func (c *xpfCollector) collectSystemMetrics(ch chan<- prometheus.Metric) {
 	// Daemon uptime
 	c.emitConstMetric(ch, c.daemonUptime, prometheus.GaugeValue,
-		time.Since(c.srv.startTime).Seconds())
+		time.Since(c.deps.startTime).Seconds())
 
 	// #1780: per-phase age of the Go periodic neighbor-maintenance loop.
 	// A monotonically climbing age for any phase is the watchdog signal
 	// that the phase's guarded goroutine is wedged on a stuck
 	// netlink/probe syscall (the idle/overnight cold-connect hang).
-	if c.srv.neighborPhaseAgeFn != nil {
-		for phase, age := range c.srv.neighborPhaseAgeFn() {
+	if c.deps.neighborPhaseAgeFn != nil {
+		for phase, age := range c.deps.neighborPhaseAgeFn() {
 			c.emitConstMetric(ch, c.neighborPeriodicAge,
 				prometheus.GaugeValue, age, phase)
 		}
 	}
 
 	// #1827: services ip-monitoring policy state.
-	if c.srv.ipmonStatusFn != nil {
+	if c.deps.ipmonStatusFn != nil {
 		routesApplied := 0
 		routesDesired := 0
 		unresolved := 0
-		for _, ps := range c.srv.ipmonStatusFn() {
+		for _, ps := range c.deps.ipmonStatusFn() {
 			failed := 0.0
 			if ps.Failed {
 				failed = 1.0
@@ -295,23 +295,23 @@ func (c *xpfCollector) collectSystemMetrics(ch chan<- prometheus.Metric) {
 	// #7437: the route-listener pair. Emitted independently so a nil fn on
 	// one does not suppress the other -- they are read together and a missing
 	// half is worse than an absent pair.
-	if c.srv.routeListenerMarksFn != nil {
+	if c.deps.routeListenerMarksFn != nil {
 		c.emitConstMetric(ch, c.routeListenerMarks,
-			prometheus.CounterValue, float64(c.srv.routeListenerMarksFn()))
+			prometheus.CounterValue, float64(c.deps.routeListenerMarksFn()))
 	}
-	if c.srv.routeListenerRepublishesFn != nil {
+	if c.deps.routeListenerRepublishesFn != nil {
 		c.emitConstMetric(ch, c.routeListenerRepublishes,
-			prometheus.CounterValue, float64(c.srv.routeListenerRepublishesFn()))
+			prometheus.CounterValue, float64(c.deps.routeListenerRepublishesFn()))
 	}
-	if c.srv.ipmonActuationFailuresFn != nil {
+	if c.deps.ipmonActuationFailuresFn != nil {
 		c.emitConstMetric(ch, c.ipmonActuationFailures,
-			prometheus.CounterValue, float64(c.srv.ipmonActuationFailuresFn()))
+			prometheus.CounterValue, float64(c.deps.ipmonActuationFailuresFn()))
 	}
 
 	// #2157: event-options remediation action observability. Makes the
 	// previously-silent loss (drop on held config lock) visible.
-	if c.srv.eventActionStatsFn != nil {
-		st := c.srv.eventActionStatsFn()
+	if c.deps.eventActionStatsFn != nil {
+		st := c.deps.eventActionStatsFn()
 		c.emitConstMetric(ch, c.eventActionsCommitted,
 			prometheus.CounterValue, float64(st.Committed))
 		c.emitConstMetric(ch, c.eventActionsCommittedWithDebt,
@@ -350,21 +350,21 @@ func (c *xpfCollector) collectSystemMetrics(ch chan<- prometheus.Metric) {
 	// stream sheds records non-blocking when a subscriber's channel is full;
 	// this counter makes that otherwise-silent loss visible so a gapped
 	// forensic stream is not mistaken for a complete one.
-	if c.srv.eventBuf != nil {
+	if c.deps.eventBuf != nil {
 		c.emitConstMetric(ch, c.eventStreamSubscriberDropped,
-			prometheus.CounterValue, float64(c.srv.eventBuf.DroppedTotal()))
+			prometheus.CounterValue, float64(c.deps.eventBuf.DroppedTotal()))
 		c.emitConstMetric(ch, c.eventStreamSubscriberRefusals,
-			prometheus.CounterValue, float64(c.srv.eventBuf.SubscriberRefusals()))
+			prometheus.CounterValue, float64(c.deps.eventBuf.SubscriberRefusals()))
 		c.emitConstMetric(ch, c.eventStreamRingEvicted,
-			prometheus.CounterValue, float64(c.srv.eventBuf.EvictedTotal()))
+			prometheus.CounterValue, float64(c.deps.eventBuf.EvictedTotal()))
 	}
 
 	// #1895: currently-failed RPM probe-pin installs. Nonzero means
 	// next-hop-pinned tests are holding state (their uplinks are not
 	// being health-checked) until a pin retry succeeds.
-	if c.srv.rpmPinFailedFn != nil {
+	if c.deps.rpmPinFailedFn != nil {
 		c.emitConstMetric(ch, c.rpmPinInstallFailures,
-			prometheus.GaugeValue, c.srv.rpmPinFailedFn())
+			prometheus.GaugeValue, c.deps.rpmPinFailedFn())
 	}
 
 	// Daemon RSS from /proc/self/statm (field 1 = RSS in pages)

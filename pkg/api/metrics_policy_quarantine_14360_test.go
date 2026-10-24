@@ -103,7 +103,7 @@ func TestCollectPolicyCountersQuarantine14360(t *testing.T) {
 		},
 	}
 
-	c := &xpfCollector{srv: &Server{store: store}}
+	c := &xpfCollector{deps: collectorDeps{store: store}}
 	c.initPolicyDescriptors()
 	c.policyHitsTotal = prometheus.NewDesc(
 		"xpf_policy_hits_total", "policy hits",

@@ -143,7 +143,7 @@ func TestCollectPolicyCountersNilSlotsNoPanic(t *testing.T) {
 	// the one desc this test asserts custom labels on. A bare literal listing
 	// only policyHitsTotal nil-panics the moment the collector gains another
 	// always-emitted family.
-	c := &xpfCollector{srv: &Server{store: store}}
+	c := &xpfCollector{deps: collectorDeps{store: store}}
 	c.initPolicyDescriptors()
 	c.policyHitsTotal = prometheus.NewDesc(
 		"xpf_policy_hits_total", "policy hits",

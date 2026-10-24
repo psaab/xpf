@@ -54,10 +54,10 @@ func (c *xpfCollector) emitFairnessRSSGauges(ch chan<- prometheus.Metric, status
 }
 
 func (c *xpfCollector) configuredFairnessRSSExpectations() []dpuserspace.FairnessRSSExpectation {
-	if c == nil || c.srv == nil || c.srv.store == nil {
+	if c == nil {
 		return nil
 	}
-	return dpuserspace.FairnessRSSExpectationsFromConfig(c.srv.store.ActiveConfig())
+	return dpuserspace.FairnessRSSExpectationsFromConfig(c.deps.activeConfig())
 }
 
 func (c *xpfCollector) emitFairnessRSSExpectationGauges(

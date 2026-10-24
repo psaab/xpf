@@ -39,10 +39,10 @@ type sessionGaugeSnapshot struct {
 }
 
 func (c *xpfCollector) collectConntrackGCMetrics(ch chan<- prometheus.Metric) {
-	if c.srv == nil || c.srv.gc == nil {
+	if c.deps.gc == nil {
 		return
 	}
-	stats := c.srv.gc.Stats()
+	stats := c.deps.gc.Stats()
 	c.emitConstMetric(ch, c.gcSweepDuration, prometheus.GaugeValue,
 		stats.LastSweepDuration.Seconds())
 	lastSweepTimestamp := 0.0
@@ -66,7 +66,7 @@ func (c *xpfCollector) collectConntrackGCMetrics(ch chan<- prometheus.Metric) {
 	c.emitConstMetric(ch, c.gcErrorsTotal, prometheus.CounterValue,
 		float64(stats.SessionCountSyncErrorsTotal), "session_count_sync")
 	active := 0.0
-	if c.srv.gc.IsAggressiveAging() {
+	if c.deps.gc.IsAggressiveAging() {
 		active = 1
 	}
 	c.emitConstMetric(ch, c.gcAggressiveAging, prometheus.GaugeValue, active)

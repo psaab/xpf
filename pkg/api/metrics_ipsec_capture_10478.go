@@ -12,10 +12,10 @@ import (
 // an independent witness downstream of the Rust TUN write exists; Written is
 // not a delivery witness (#10478).
 func (c *xpfCollector) collectIpsecCaptureWitness(ch chan<- prometheus.Metric) {
-	if c == nil || c.srv == nil || c.srv.ipsecCaptureWitnessFn == nil {
+	if c.deps.ipsecCaptureWitnessFn == nil {
 		return
 	}
-	w := c.srv.ipsecCaptureWitnessFn()
+	w := c.deps.ipsecCaptureWitnessFn()
 	if !w.Available {
 		return
 	}

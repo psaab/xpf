@@ -18,7 +18,7 @@ func (c *xpfCollector) initDataplaneSafetyDescriptors() {
 
 func (c *xpfCollector) emitDataplaneSafety(ch chan<- prometheus.Metric) {
 	c.initDataplaneSafetyDescriptors()
-	m, ok := dataplane.Unwrap(c.srv.dp).(interface {
+	m, ok := dataplane.Unwrap(c.deps.dp).(interface {
 		ObsoleteRegistryAccesses() uint64
 		DetachDebt() []int
 		HostDivergence() []string

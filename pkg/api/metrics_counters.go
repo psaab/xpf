@@ -174,10 +174,7 @@ func (c *xpfCollector) collectHostInboundICMPNDAccepts(ch chan<- prometheus.Metr
 // structural comparison and band occupancy use one readback of both families.
 // All config-derived gauges are emitted unconditionally, including zeros.
 func (c *xpfCollector) collectPBRStatus(ch chan<- prometheus.Metric) {
-	var cfg *config.Config
-	if c.srv != nil && c.srv.store != nil {
-		cfg = c.srv.store.ActiveConfig()
-	}
+	cfg := c.deps.activeConfig()
 	desiredRules, degraded := routing.PBRBuildRulesAndStats(cfg)
 	desired := len(desiredRules)
 	// #7422 row 12: _installed and _desired are aliases emitted from this
@@ -238,10 +235,7 @@ func (c *xpfCollector) collectPBRStatus(ch chan<- prometheus.Metric) {
 // Config-derived (no dataplane dependency), so Collect calls this BEFORE the
 // dataplane gate.
 func (c *xpfCollector) collectScreenUnresolvedProfileZones(ch chan<- prometheus.Metric) {
-	if c.srv == nil || c.srv.store == nil {
-		return
-	}
-	cfg := c.srv.store.ActiveConfig()
+	cfg := c.deps.activeConfig()
 	if cfg == nil {
 		return
 	}
@@ -272,10 +266,7 @@ func (c *xpfCollector) collectScreenUnresolvedProfileZones(ch chan<- prometheus.
 // Config-derived (no dataplane dependency), so Collect calls this BEFORE the
 // dataplane gate.
 func (c *xpfCollector) collectScreenInertProfileZones(ch chan<- prometheus.Metric) {
-	if c.srv == nil || c.srv.store == nil {
-		return
-	}
-	cfg := c.srv.store.ActiveConfig()
+	cfg := c.deps.activeConfig()
 	if cfg == nil {
 		return
 	}
@@ -303,10 +294,7 @@ func (c *xpfCollector) collectScreenInertProfileZones(ch chan<- prometheus.Metri
 // an existing one is the natural place to put it, and it transfers the doc
 // comment silently — no build, vet, or test can see it.
 func (c *xpfCollector) collectHostInboundAddresslessZones(ch chan<- prometheus.Metric) {
-	if c.srv == nil || c.srv.store == nil {
-		return
-	}
-	cfg := c.srv.store.ActiveConfig()
+	cfg := c.deps.activeConfig()
 	if cfg == nil {
 		return
 	}
@@ -329,10 +317,7 @@ func (c *xpfCollector) collectHostInboundAddresslessZones(ch chan<- prometheus.M
 // dpuserspace.AddresslessEnforcingInterfaces, the same builder the daemon logs
 // from, so the metric and the log agree.
 func (c *xpfCollector) collectHostInboundAddresslessInterfaces(ch chan<- prometheus.Metric) {
-	if c.srv == nil || c.srv.store == nil {
-		return
-	}
-	cfg := c.srv.store.ActiveConfig()
+	cfg := c.deps.activeConfig()
 	if cfg == nil {
 		return
 	}
@@ -358,10 +343,7 @@ func (c *xpfCollector) collectHostInboundAddresslessInterfaces(ch chan<- prometh
 // SSOT is dpuserspace.AmbiguousHostInboundAddresses, the same builder the daemon
 // logs from, so the metric and the log agree.
 func (c *xpfCollector) collectHostInboundAmbiguousAddresses(ch chan<- prometheus.Metric) {
-	if c.srv == nil || c.srv.store == nil {
-		return
-	}
-	cfg := c.srv.store.ActiveConfig()
+	cfg := c.deps.activeConfig()
 	if cfg == nil {
 		return
 	}
@@ -384,10 +366,7 @@ func (c *xpfCollector) collectHostInboundAmbiguousAddresses(ch chan<- prometheus
 // commit gate runs — so the metric and the commit advisory can never describe
 // different detections.
 func (c *xpfCollector) collectVRFOverlapPBRAdmitted(ch chan<- prometheus.Metric) {
-	if c.srv == nil || c.srv.store == nil {
-		return
-	}
-	cfg := c.srv.store.ActiveConfig()
+	cfg := c.deps.activeConfig()
 	if cfg == nil {
 		return
 	}
@@ -417,10 +396,7 @@ func (c *xpfCollector) collectVRFOverlapPBRAdmitted(ch chan<- prometheus.Metric)
 // tolerant-load #11060 quarantine. The metadata is captured at compile time so
 // sanitizing RoutingInstances does not erase the incident from monitoring.
 func (c *xpfCollector) collectRIMemberDeviceConflicts(ch chan<- prometheus.Metric) {
-	if c.srv == nil || c.srv.store == nil {
-		return
-	}
-	cfg := c.srv.store.ActiveConfig()
+	cfg := c.deps.activeConfig()
 	if cfg == nil {
 		return
 	}
@@ -516,7 +492,7 @@ func (c *xpfCollector) emitInterfaceCounterReadErrors(ch chan<- prometheus.Metri
 }
 
 func (c *xpfCollector) collectInterfaceCounters(ch chan<- prometheus.Metric, dp apiRuntimeDataPlane) {
-	cfg := c.srv.store.ActiveConfig()
+	cfg := c.deps.activeConfig()
 	if cfg == nil {
 		return
 	}
@@ -624,29 +600,26 @@ func (c *xpfCollector) collectZoneCounters(ch chan<- prometheus.Metric, dp apiRu
 
 	// #6843 R1: this runs ABOVE the dataplane-loaded gate. The guard below is
 	// belt-and-braces, NOT a nil-safety requirement: Collect() already
-	// dereferences c.srv unconditionally (metrics.go, c.srv.configPersistDegradedFn)
-	// long before either position, so a nil c.srv panics regardless and the
+	// dereferences c.deps unconditionally (metrics.go, c.deps.configPersistDegradedFn)
+	// long before either position, so a nil deps hook panics regardless and the
 	// below-gate position never actually ruled anything out. What the guard does
 	// buy is the direct-call test path, where a collector method is invoked
 	// without going through Collect().
 	//
 	// Counted, not pattern-matched -- and the count is TEN pre-gate collectors,
 	// which partition into three sets, not two:
-	//   - touch c.srv/c.srv.store AND guard: collectPBRStatus,
+	//   - touch c.deps config AND guard: collectPBRStatus,
 	//     collectHostInboundAddresslessZones, collectHostInboundAddresslessInterfaces,
 	//     collectHostInboundAmbiguousAddresses, collectVRFOverlapPBRAdmitted (#7991).
 	//   - touch NEITHER field, so need no guard: collectLo0Counters and the
 	//     collectHostInbound{KernelDenies,JunosHostDenies,ICMPNDAccepts} readers.
-	//   - touches c.srv and does NOT guard: collectFlowExportMetrics
-	//     (metrics_system.go, c.srv.flowCollectorHealthFn). It is safe for the
+	//   - touches c.deps and does NOT guard: collectFlowExportMetrics
+	//     (metrics_system.go, c.deps.flowCollectorHealthFn). It is safe for the
 	//     reason above, not because it was overlooked.
 	// That third set is why "the collectHostInbound* family" would have been a
 	// pattern-match rather than a check: an earlier revision of this comment
 	// enumerated eight of the nine and its two-way split read as exhaustive.
-	var cfg *config.Config
-	if c.srv != nil && c.srv.store != nil {
-		cfg = c.srv.store.ActiveConfig()
-	}
+	cfg := c.deps.activeConfig()
 	if cfg == nil {
 		return
 	}
@@ -738,7 +711,7 @@ func (c *xpfCollector) collectPolicyCounters(ch chan<- prometheus.Metric, dp api
 			prometheus.GaugeValue, float64(unpublished))
 	}()
 
-	cfg := c.srv.store.ActiveConfig()
+	cfg := c.deps.activeConfig()
 	if cfg == nil {
 		return
 	}
@@ -915,7 +888,7 @@ func (c *xpfCollector) collectPolicyCounters(ch chan<- prometheus.Metric, dp api
 }
 
 func (c *xpfCollector) collectFilterCounters(ch chan<- prometheus.Metric, dp apiRuntimeDataPlane, userspaceStatus *dpuserspace.ProcessStatus) {
-	cfg := c.srv.store.ActiveConfig()
+	cfg := c.deps.activeConfig()
 	if cfg == nil {
 		return
 	}

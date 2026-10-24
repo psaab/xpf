@@ -12,7 +12,7 @@ import (
 )
 
 func (c *xpfCollector) collectNATPoolMetrics(ch chan<- prometheus.Metric, dp apiRuntimeDataPlane, userspaceStatus *dpuserspace.ProcessStatus) {
-	cfg := c.srv.store.ActiveConfig()
+	cfg := c.deps.activeConfig()
 	if cfg == nil {
 		return
 	}

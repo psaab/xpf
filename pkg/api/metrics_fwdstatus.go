@@ -49,7 +49,7 @@ func (c *xpfCollector) collectFwdStatus(
 	dp apiRuntimeDataPlane,
 	userspaceStatus *userspace.ProcessStatus,
 ) {
-	if c.srv == nil || c.srv.fwdSampler == nil {
+	if c.deps.fwdSampler == nil {
 		return
 	}
 	var buildDP fwdstatus.DataPlaneAccessor
@@ -64,8 +64,8 @@ func (c *xpfCollector) collectFwdStatus(
 			buildDP = forwardingMetricsUserspaceDP{forwardingMetricsDP: base, status: userspaceStatus}
 		}
 	}
-	snap := c.srv.fwdSampler.Snapshot()
-	fs, err := fwdstatus.Build(buildDP, fwdstatus.OSProcReader{}, c.srv.startTime, snap)
+	snap := c.deps.fwdSampler.Snapshot()
+	fs, err := fwdstatus.Build(buildDP, fwdstatus.OSProcReader{}, c.deps.startTime, snap)
 	if err != nil {
 		return
 	}
