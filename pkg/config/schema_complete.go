@@ -93,6 +93,151 @@ func appendTypedKeyCompletions(results []SchemaCompletion, node *schemaNode) []S
 	return results
 }
 
+// strictConsumedStep is one identity consumed by walkStrictConsumedTokens:
+// the schema node it resolved to, its resolved keyword (unique-prefix
+// expanded; verbatim for a wildcard fallback), and the token range
+// [start, end) it spans — keyword + args plus a compoundKey sub-token.
+// A truncated final step records end == len(tokens) (its identity counts
+// even though the arg span runs past the input).
+type strictConsumedStep struct {
+	node       *schemaNode
+	keyword    string
+	subKeyword string // resolved compoundKey sub-token ("" when none)
+	start      int
+	end        int
+}
+
+// strictWalkRules carries ResolveConsumed's strictness over the shared
+// kernel (#16149): the strict walks intentionally agree on descent
+// mechanics (keyword lookup, wildcard fallback, arg span, compoundKey
+// descent, multi re-offer) and intentionally diverge on exactly one
+// strictness knob — see TestStrictWalkDivergence16149.
+type strictWalkRules struct {
+	// requireUniquePrefix fails the walk immediately when a keyword or
+	// compoundKey sub-token resolves by neither exactly one prefix
+	// match nor the level's wildcard fallback. ResolveConsumed sets
+	// this (ambiguous/unknown consumed tokens cannot be expanded);
+	// the edit-identity walk leaves it false (such a token merely
+	// stops segmentation). Note the fallback ordering: at a wildcard
+	// level even this strictest caller accepts the verbatim token
+	// without prefix checks — the mutant-defended legacy behavior
+	// TestStrictWalkAgreement16149 pins.
+	requireUniquePrefix bool
+}
+
+// strictWalkOutcome reports how walkStrictConsumedTokens terminated.
+type strictWalkOutcome int
+
+const (
+	// strictWalkComplete: every token was consumed by some step.
+	strictWalkComplete strictWalkOutcome = iota
+	// strictWalkStopped: a token resolved to no child (or, when
+	// requireUniquePrefix, not uniquely); tokens from that point on
+	// were not consumed. With requireUniquePrefix ok is false.
+	strictWalkStopped
+	// strictWalkTruncated: the final step's span ran past the input;
+	// the step is recorded with end clamped to len(tokens).
+	strictWalkTruncated
+)
+
+// walkStrictConsumedTokens is the shared strict consumed/identity token
+// walk (#16149 W2.3 R2): it segments tokens against setSchema exactly
+// the way ResolveConsumedSetPathTokens and the edit-identity walk do —
+// exact/unique-prefix keyword lookup, wildcard fallback, 1+args span,
+// compoundKey sub-token descent (itself unique-prefix resolved), and
+// multi-with-no-children staying at the current level.
+//
+// Returns: steps (one per consumed identity, start/end spanning the raw
+// token indices it consumed), outcome, and ok. ok is false only under
+// requireUniquePrefix, when a strict failure was hit; otherwise the
+// caller interprets outcome itself.
+//
+// CompleteSetPathWithValues is deliberately NOT built on this kernel:
+// it handles partial terminal keywords and early value suggestions
+// (non-strict), so it stays separate until a divergence census
+// characterizes its strict prefix cleanly (#16149 narrowed form).
+func walkStrictConsumedTokens(tokens []string, rules strictWalkRules) (steps []strictConsumedStep, outcome strictWalkOutcome, ok bool) {
+	schema := setSchema
+	i := 0
+	for i < len(tokens) {
+		if schema == nil {
+			return steps, strictWalkStopped, true
+		}
+		keyword := tokens[i]
+		resolvedKeyword := keyword
+		var child *schemaNode
+		if schema.children != nil {
+			if s, ok := schema.children[keyword]; ok {
+				child = s
+			} else {
+				var matches []string
+				for name := range schema.children {
+					if strings.HasPrefix(name, keyword) {
+						matches = append(matches, name)
+					}
+				}
+				if len(matches) == 1 {
+					resolvedKeyword = matches[0]
+					child = schema.children[resolvedKeyword]
+				}
+			}
+		}
+		if child == nil && schema.wildcard != nil {
+			child = schema.wildcard
+		}
+		if child == nil {
+			if rules.requireUniquePrefix {
+				return nil, strictWalkStopped, false
+			}
+			return steps, strictWalkStopped, true
+		}
+		start := i
+		i += 1 + child.args
+
+		// Compound key: consume child token as part of the key,
+		// unique-prefix resolving the sub-token just like a keyword.
+		resolvedSub := ""
+		if child.compoundKey && i < len(tokens) {
+			subKeyword := tokens[i]
+			if sub, ok := child.children[subKeyword]; ok {
+				resolvedSub = subKeyword
+				i++
+				child = sub
+			} else {
+				var matches []string
+				for name := range child.children {
+					if strings.HasPrefix(name, subKeyword) {
+						matches = append(matches, name)
+					}
+				}
+				if len(matches) == 1 {
+					resolvedSub = matches[0]
+					i++
+					child = child.children[matches[0]]
+				} else if rules.requireUniquePrefix {
+					return nil, strictWalkStopped, false
+				}
+			}
+		}
+
+		truncated := i > len(tokens)
+		end := i
+		if truncated {
+			end = len(tokens)
+		}
+		steps = append(steps, strictConsumedStep{node: child, keyword: resolvedKeyword, subKeyword: resolvedSub, start: start, end: end})
+		if truncated {
+			return steps, strictWalkTruncated, true
+		}
+
+		if child.multi && child.children == nil {
+			continue
+		}
+		schema = child
+	}
+	return steps, strictWalkComplete, true
+}
+
 // CompleteSetPathWithValues is like CompleteSetPath but uses a ValueProvider
 // to suggest dynamic values at positions where schema expects a name argument.
 // Returns SchemaCompletion pairs with names and descriptions.
@@ -274,85 +419,31 @@ func CompleteSetPathWithValues(tokens []string, provider ValueProvider) []Schema
 // token list that is already known to contain only consumed words, not the
 // current partial token being completed.
 func ResolveConsumedSetPathTokens(tokens []string) ([]string, bool) {
-	schema := setSchema
-	i := 0
-	var resolved []string
-
-	for i < len(tokens) {
-		if schema == nil {
-			return nil, false
-		}
-
-		keyword := tokens[i]
-		resolvedKeyword := keyword
-		var childSchema *schemaNode
-		if schema.children != nil {
-			if s, ok := schema.children[keyword]; ok {
-				childSchema = s
-			} else {
-				var matches []string
-				for name := range schema.children {
-					if strings.HasPrefix(name, keyword) {
-						matches = append(matches, name)
-					}
-				}
-				if len(matches) != 1 {
-					return nil, false
-				}
-				resolvedKeyword = matches[0]
-				childSchema = schema.children[resolvedKeyword]
-			}
-		}
-		if childSchema == nil && schema.wildcard != nil {
-			childSchema = schema.wildcard
-		}
-		if childSchema == nil {
-			return nil, false
-		}
-
-		resolved = append(resolved, resolvedKeyword)
-		nodeKeyCount := 1 + childSchema.args
-		end := i + nodeKeyCount
-		if end > len(tokens) {
-			return resolved, true
-		}
-		if end-i > 1 {
-			resolved = append(resolved, tokens[i+1:end]...)
-		}
-		i += nodeKeyCount
-
-		if childSchema.compoundKey && i < len(tokens) {
-			subKeyword := tokens[i]
-			if sub, ok := childSchema.children[subKeyword]; ok {
-				resolved = append(resolved, subKeyword)
-				i++
-				childSchema = sub
-			} else {
-				var matches []string
-				for name := range childSchema.children {
-					if strings.HasPrefix(name, subKeyword) {
-						matches = append(matches, name)
-					}
-				}
-				if len(matches) != 1 {
-					return nil, false
-				}
-				resolved = append(resolved, matches[0])
-				i++
-				childSchema = childSchema.children[matches[0]]
-			}
-		}
-
-		if childSchema.multi && childSchema.children == nil {
-			continue
-		}
-		schema = childSchema
+	steps, _, ok := walkStrictConsumedTokens(tokens, strictWalkRules{requireUniquePrefix: true})
+	if !ok {
+		return nil, false
 	}
-
+	var resolved []string
+	for _, step := range steps {
+		resolved = append(resolved, step.keyword)
+		// span = keyword + args + optional compoundKey sub-token.
+		// Args are verbatim; a compound sub-token is prefix-expanded.
+		// node is the POST-compound node, so the sub-token position
+		// is derived from the span (last token of the step), not
+		// from node.args.
+		if step.subKeyword != "" {
+			subAt := step.end - 1
+			if subAt > step.start+1 {
+				resolved = append(resolved, tokens[step.start+1:subAt]...)
+			}
+			resolved = append(resolved, step.subKeyword)
+		} else if step.end-step.start > 1 {
+			resolved = append(resolved, tokens[step.start+1:step.end]...)
+		}
+	}
 	return resolved, true
 }
 
-// PopEditPathIdentity removes the last schema identity (one node:
 // keyword + its args, plus a compoundKey sub-token) from editPath,
 // so `up` from `[edit security zones security-zone trust]` lands at
 // `[edit security zones]` (#15237 A53-02). A flat per-token pop
@@ -418,128 +509,29 @@ func PopEditPathAfterTruncate(editPath []string, keepCount int) []string {
 }
 
 // editIdentityConsumed returns how many leading tokens of editPath
-// the identity walk consumed (len(editPath) when fully segmented).
+// the identity walk consumed (len(editPath) when fully segmented, or
+// when a truncated final identity's span runs past the input).
 func editIdentityConsumed(editPath []string) int {
-	schema := setSchema
-	i := 0
-	for i < len(editPath) {
-		if schema == nil {
-			break
-		}
-		keyword := editPath[i]
-		var child *schemaNode
-		if schema.children != nil {
-			if s, ok := schema.children[keyword]; ok {
-				child = s
-			} else {
-				var matches []string
-				for name := range schema.children {
-					if strings.HasPrefix(name, keyword) {
-						matches = append(matches, name)
-					}
-				}
-				if len(matches) == 1 {
-					child = schema.children[matches[0]]
-				}
-			}
-		}
-		if child == nil && schema.wildcard != nil {
-			child = schema.wildcard
-		}
-		if child == nil {
-			break
-		}
-		i += 1 + child.args
-		if i > len(editPath) {
-			i = len(editPath)
-		}
-		if child.compoundKey && i < len(editPath) {
-			if sub, ok := child.children[editPath[i]]; ok {
-				i++
-				child = sub
-			} else {
-				var matches []string
-				for name := range child.children {
-					if strings.HasPrefix(name, editPath[i]) {
-						matches = append(matches, name)
-					}
-				}
-				if len(matches) == 1 {
-					i++
-					child = child.children[matches[0]]
-				}
-			}
-		}
-		if child.multi && child.children == nil {
-			continue
-		}
-		schema = child
+	steps, _, _ := walkStrictConsumedTokens(editPath, strictWalkRules{})
+	if len(steps) == 0 {
+		return 0
 	}
-	if i > len(editPath) {
-		return len(editPath)
-	}
-	return i
+	return steps[len(steps)-1].end
 }
 
 // editIdentityStarts returns the token index at which each schema
 // identity (node) in editPath begins, walking setSchema exactly as
-// ResolveConsumedSetPathTokens does (args + compoundKey). A truncated
-// final identity still counts (its start is recorded). An unknown
-// token stops the walk; tokens past it form no further identities.
+// ResolveConsumedSetPathTokens does (args + compoundKey) but tolerantly:
+// it shares the strict token-walk kernel (#16149) without
+// requireUniquePrefix, so an ambiguous or unknown token stops
+// segmentation instead of failing. A truncated final identity still
+// counts (its start is recorded). An unknown token stops the walk;
+// tokens past it form no further identities.
 func editIdentityStarts(editPath []string) []int {
-	schema := setSchema
-	i := 0
+	steps, _, _ := walkStrictConsumedTokens(editPath, strictWalkRules{})
 	var starts []int
-	for i < len(editPath) {
-		if schema == nil {
-			break
-		}
-		keyword := editPath[i]
-		var child *schemaNode
-		if schema.children != nil {
-			if s, ok := schema.children[keyword]; ok {
-				child = s
-			} else {
-				var matches []string
-				for name := range schema.children {
-					if strings.HasPrefix(name, keyword) {
-						matches = append(matches, name)
-					}
-				}
-				if len(matches) == 1 {
-					child = schema.children[matches[0]]
-				}
-			}
-		}
-		if child == nil && schema.wildcard != nil {
-			child = schema.wildcard
-		}
-		if child == nil {
-			break
-		}
-		starts = append(starts, i)
-		i += 1 + child.args
-		if child.compoundKey && i < len(editPath) {
-			if sub, ok := child.children[editPath[i]]; ok {
-				i++
-				child = sub
-			} else {
-				var matches []string
-				for name := range child.children {
-					if strings.HasPrefix(name, editPath[i]) {
-						matches = append(matches, name)
-					}
-				}
-				if len(matches) == 1 {
-					i++
-					child = child.children[matches[0]]
-				}
-			}
-		}
-		if child.multi && child.children == nil {
-			continue
-		}
-		schema = child
+	for _, step := range steps {
+		starts = append(starts, step.start)
 	}
 	return starts
 }
