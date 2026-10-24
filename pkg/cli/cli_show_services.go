@@ -59,6 +59,20 @@ func (c *CLI) handleShowServices(args []string) error {
 				"(expected `status`)", rest[0])
 		}
 		return c.showApplicationIdentificationStatus()
+	case "user-identification":
+		// #16078: only `user-identification status` is valid; reject
+		// anything else so typos surface instead of being swallowed.
+		rest := args[1:]
+		if len(rest) == 0 {
+			cmdtree.PrintTreeHelp("show services user-identification:",
+				operationalTree, "show", "services", "user-identification")
+			return nil
+		}
+		if rest[0] != "status" {
+			return fmt.Errorf("unknown user-identification target: %s "+
+				"(expected `status`)", rest[0])
+		}
+		return c.showUserIdentificationStatus()
 	case "dynamic-dns":
 		// #2691 P2: Surface A (router/interface-address) DDNS status.
 		detail := len(args) >= 2 && args[1] == "detail"
@@ -144,6 +158,16 @@ func (c *CLI) showApplicationIdentificationStatus() error {
 	cfg := c.store.ActiveConfig()
 	var buf strings.Builder
 	appid.RenderStatus(&buf, cfg)
+	fmt.Print(buf.String())
+	return nil
+}
+
+// showUserIdentificationStatus delegates to the shared renderer in
+// pkg/config (#16078) so local CLI, gRPC and REST stay byte-identical.
+func (c *CLI) showUserIdentificationStatus() error {
+	cfg := c.store.ActiveConfig()
+	var buf strings.Builder
+	config.RenderUserIdentificationStatus(&buf, cfg)
 	fmt.Print(buf.String())
 	return nil
 }

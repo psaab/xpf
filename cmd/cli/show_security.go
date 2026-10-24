@@ -202,6 +202,13 @@ func (c *ctl) handleShowSecurity(args []string) error {
 		return c.showCommand("show security alarms")
 	case "alg":
 		return c.showCommand("show security alg")
+	case "user-identification":
+		// #16078: share the services renderer via its own topic so the
+		// security spelling is priced as `show security user-identification status`.
+		if len(args) >= 2 && args[1] != "status" {
+			return fmt.Errorf("unknown user-identification target: %s (expected `status`)", args[1])
+		}
+		return c.showCommand("show security user-identification status")
 	case "dynamic-address":
 		return c.showCommand("show security dynamic-address")
 	case "address-book":

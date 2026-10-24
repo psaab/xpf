@@ -32,6 +32,7 @@ func compileSections(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	for _, node := range tree.Children {
 		switch node.Name() {
 		case "security":
+			cfg.recordUserIdentification(node)
 			cfg.Warnings = append(cfg.Warnings, userIdentificationWarnings("security", node)...)
 			if err := compileSecurity(node, &cfg.Security); err != nil {
 				return fmt.Errorf("security: %w", err)
@@ -65,6 +66,7 @@ func compileSections(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 				return fmt.Errorf("class-of-service: %w", err)
 			}
 		case "services":
+			cfg.recordUserIdentification(node)
 			if err := compileServices(node, &cfg.Services, &cfg.Warnings); err != nil {
 				return fmt.Errorf("services: %w", err)
 			}

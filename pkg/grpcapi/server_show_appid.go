@@ -18,3 +18,10 @@ import (
 func (s *Server) showApplicationIdentificationStatus(cfg *config.Config, buf *strings.Builder) {
 	appid.RenderStatus(buf, cfg)
 }
+
+// showUserIdentificationStatus delegates to the shared renderer in
+// pkg/config so the local CLI, gRPC and REST surfaces stay byte-identical
+// on the #16078 inert marker.
+func (s *Server) showUserIdentificationStatus(cfg *config.Config, buf *strings.Builder) {
+	config.RenderUserIdentificationStatus(buf, cfg)
+}

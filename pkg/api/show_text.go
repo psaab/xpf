@@ -239,6 +239,11 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+	case "user-identification-status", "security-user-identification-status":
+		// #16078: shared renderer in pkg/config; names configured
+		// user-identification stanzas INERT.
+		config.RenderUserIdentificationStatus(&buf, cfg)
+
 	case "dynamic-address":
 		// #15725: mirror the gRPC showDynamicAddress renderer
 		// (pkg/grpcapi/server_show_security_text.go): hold-interval default
