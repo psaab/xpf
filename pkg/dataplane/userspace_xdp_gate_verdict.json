@@ -1,18 +1,18 @@
 {
   "schema_version": 2,
-  "verified_at": "2026-10-24T04:35:39.153591322Z",
-  "object_sha256": "55d62cd1b0551d34f98fc49343958e4633fa705b3f67b113473ec13d27765e4e",
-  "build_digest": "014307c7bd0bae2b7aed91ff0bbe1e91616a4d7a2018e15c18c9098c3936be3e",
+  "verified_at": "2026-10-24T16:15:26.98606908Z",
+  "object_sha256": "b95934e59351e89133cde3c994c858a6836fda8c40b8d1e3e238c9065d1f44d7",
+  "build_digest": "47e613864902d8c486d62cddc53791e604d3f963b89d74972edbbc6ef4d4f1dd",
   "verdict": "PASS",
   "override_consumed": false,
-  "reason": "measured headroom 35.73% meets the 15.0% floor",
+  "reason": "measured headroom 36.37% meets the 15.0% floor",
   "stats": {
     "measured": true,
-    "processed_insns": 642718,
+    "processed_insns": 636303,
     "insn_limit": 1000000,
-    "headroom_pct": 35.7282,
+    "headroom_pct": 36.3697,
     "floor_pct": 15,
-    "slack_to_floor_insns": 207282
+    "slack_to_floor_insns": 213697
   },
   "provenance": {
     "toolchain": "nightly-2026-05-23",
