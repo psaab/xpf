@@ -1,4 +1,12 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Config: declare `family inet6 dhcpv6` in the schema (#16476). The
+    bare shorthand was consumed by the compiler (unit.DHCPv6) and the
+    daemon started an AFInet6 DHCPv6 client for it, but setSchema
+    declared only `dhcpv6-client`, so the #10707 open-world advisory
+    falsely warned that `dhcpv6` "may be silently ignored" on every
+    commit and `set ... family inet6 dhcpv6` had no completion or `?`
+    help. The bare flag is now a declared leaf beside `dhcpv6-client`;
+    `dhcpv6x` still draws the advisory and compiles to no client.
   * Test: move standalone and legacy-local lab NAT pools off shared-
     segment addresses owned by other stacks (#16473). On the shared
     172.16.50.0/24 segment the standalone VM's NAT64 pool sat on
