@@ -52,25 +52,32 @@ func TestBareDestinationCopyRenameAuthzAndRenameLineage(t *testing.T) {
 		t.Fatalf("expected bare policy copy to be denied at resolved zone-pair destination")
 	}
 
-	// Controls that must stay ALLOWED (unaffected legs):
-	// bare copy/rename to a non-denied sibling identity.
+	// Controls that must stay ALLOWED (unaffected legs). #16080 note:
+	// the login-shaped cells below are now denied by the credential
+	// fence regardless of the anchored regex, so the bare-destination
+	// ALLOWED control uses a non-credential path; the login cells are
+	// asserted denied (by either mechanism).
 	if err := AuthorizeConfigMutation(denyRoot, "limited", nil,
-		"copy system login user operator to user alice"); err != nil {
-		t.Fatalf("bare copy to user alice should be allowed, got %v", err)
+		"copy security zones security-zone operator to security-zone alice"); err != nil {
+		t.Fatalf("bare copy to a non-denied sibling should be allowed, got %v", err)
+	}
+	if err := AuthorizeConfigMutation(denyRoot, "limited", nil,
+		"copy system login user operator to user alice"); err == nil {
+		t.Fatal("bare copy to user alice ALLOWED; #16080 fences every system login mutation for a non-PermAll class")
 	}
 	if err := AuthorizeConfigMutation(denyRoot, "limited", []string{"system"},
-		"rename login user operator to user alice"); err != nil {
-		t.Fatalf("bare rename to user alice under [edit system] should be allowed, got %v", err)
+		"rename login user operator to user alice"); err == nil {
+		t.Fatal("bare rename to user alice ALLOWED; #16080 fences every system login mutation for a non-PermAll class")
 	}
 	// Full (non-bare) destination: already denied pre-fix, still denied.
 	if err := AuthorizeConfigMutation(denyRoot, "limited", nil,
 		"copy system login user operator to system login user root"); err == nil {
 		t.Fatalf("full-destination copy to user root should be denied (control)")
 	}
-	// Full destination to a non-denied path stays allowed.
+	// Full destination to a non-denied non-credential path stays allowed.
 	if err := AuthorizeConfigMutation(denyRoot, "limited", nil,
-		"copy system login user operator to system login user alice"); err != nil {
-		t.Fatalf("full-destination copy to user alice should be allowed, got %v", err)
+		"copy security zones security-zone operator to security zones security-zone alice"); err != nil {
+		t.Fatalf("full-destination copy to security-zone alice should be allowed, got %v", err)
 	}
 
 	// Anchored ALLOW leg (false-deny direction): a class allow-listed

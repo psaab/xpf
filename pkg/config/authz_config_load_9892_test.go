@@ -131,17 +131,25 @@ func TestLoadRescueIsRefusedForARestrictedClass9892(t *testing.T) {
 }
 
 // NARROWNESS CONTROL. Over-refusing locks an UNRESTRICTED class out of a verb
-// it legitimately holds, which is its own outage.
+// it legitimately holds, which is its own outage. #16080 narrows this:
+// a class with no regexes but without PermAll is now fenced out of
+// whole-candidate credential replacement (override/rescue/rollback),
+// so those stay available only to PermAll and to the empty class.
 func TestOverrideAndRollbackStayAvailableToAnUnrestrictedClass9892(t *testing.T) {
 	cfg := cfg9892(t)
-	if err := AuthorizeConfigLoad(cfg, "unrestricted-class-with-no-regexes", "override", "x"); err != nil {
-		t.Errorf("load override was refused for a class with NO configuration regexes: %v", err)
+	// #16080: no-regex class without PermAll — whole-candidate ops refused.
+	if err := AuthorizeConfigLoad(cfg, "unrestricted-class-with-no-regexes", "override", "x"); err == nil {
+		t.Error("load override ALLOWED for a no-PermAll class; it can replace credential stanzas (#16080)")
 	}
-	if err := AuthorizeConfigLoad(cfg, "unrestricted-class-with-no-regexes", "rescue", ""); err != nil {
-		t.Errorf("load rescue was refused for a class with NO configuration regexes: %v", err)
+	if err := AuthorizeConfigRollback(cfg, "unrestricted-class-with-no-regexes", 3); err == nil {
+		t.Error("rollback 3 ALLOWED for a no-PermAll class; it can restore credential stanzas (#16080)")
 	}
-	if err := AuthorizeConfigRollback(cfg, "unrestricted-class-with-no-regexes", 3); err != nil {
-		t.Errorf("rollback 3 was refused for a class with NO configuration regexes: %v", err)
+	// PermAll (built-in super-user) keeps them.
+	if err := AuthorizeConfigLoad(cfg, "super-user", "override", "x"); err != nil {
+		t.Errorf("load override was refused for super-user: %v", err)
+	}
+	if err := AuthorizeConfigRollback(cfg, "super-user", 3); err != nil {
+		t.Errorf("rollback 3 was refused for super-user: %v", err)
 	}
 	// And an empty class (no login model at all) must not be gated either.
 	if err := AuthorizeConfigLoad(cfg, "", "override", "x"); err != nil {

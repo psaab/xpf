@@ -288,6 +288,16 @@ func AuthorizeConfigLoad(cfg *Config, class, mode, content string) error {
 	if err != nil {
 		return fmt.Errorf("permission denied: login class %q has an invalid configuration regex: %w", class, err)
 	}
+	// #16080: a PermConfig class with no regexes is fenced out of
+	// credential paths; per-line adjudication below enforces that, and
+	// override/rescue (which replace the whole candidate, credential
+	// stanzas included) are refused for it exactly as for a
+	// regex-restricted class.
+	fenced16080, ferr := CredentialSurchargeCheck16080(cfg, class)
+	if ferr != nil {
+		return ferr
+	}
+	restricted = restricted || fenced16080
 	if !restricted {
 		return nil
 	}
@@ -340,6 +350,13 @@ func AuthorizeConfigRollback(cfg *Config, class string, n int) error {
 	if err != nil {
 		return fmt.Errorf("permission denied: login class %q has an invalid configuration regex: %w", class, err)
 	}
+	// #16080: rollback n>0 can restore an older credential stanza; a
+	// PermConfig class without PermAll is refused like a restricted one.
+	fenced16080, ferr := CredentialSurchargeCheck16080(cfg, class)
+	if ferr != nil {
+		return ferr
+	}
+	restricted = restricted || fenced16080
 	if !restricted {
 		return nil
 	}
@@ -367,6 +384,14 @@ func PreflightConfigLoad(cfg *Config, class, mode string) error {
 	if err != nil {
 		return fmt.Errorf("permission denied: login class %q has an invalid configuration regex: %w", class, err)
 	}
+	// #16080: override/rescue by a PermConfig class without PermAll
+	// replaces credential stanzas too; refuse it at preflight, before
+	// the privileged content read, exactly as for a restricted class.
+	fenced16080, ferr := CredentialSurchargeCheck16080(cfg, class)
+	if ferr != nil {
+		return ferr
+	}
+	restricted = restricted || fenced16080
 	if !restricted {
 		return nil
 	}

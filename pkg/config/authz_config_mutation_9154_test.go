@@ -64,11 +64,14 @@ func TestAuthorizeConfigMutation9154(t *testing.T) {
 		{"edit is not gated", "", "system root-authentication", nil, "edit system root-authentication", false},
 		{"top is not gated", "", "system", nil, "top", false},
 
-		// A class with NO configuration regexes is unrestricted, so an
-		// unrestricted operator's typo still gets its ordinary error rather than
-		// a permission denial.
+		// A class with NO configuration regexes is unrestricted EXCEPT
+		// for credential paths, which #16080 prices above PermConfig
+		// even without any regex fencing (see
+		// credential_surcharge_16080_test.go).
 		{"no regexes configured", "", "", nil,
-			"set system root-authentication plain-text-password hunter2", false},
+			"set system host-name fw1", false},
+		{"no regexes credential fenced 16080", "", "", nil,
+			"set system root-authentication plain-text-password hunter2", true},
 
 		// Every mutating verb is gated, not just `set`.
 		{"delete is gated", "", "system root-authentication", nil,

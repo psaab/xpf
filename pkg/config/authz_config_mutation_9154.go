@@ -52,6 +52,87 @@ var configMutationVerbs = map[string]bool{
 	"annotate":   true,
 }
 
+// credentialConfigPrefixes16080 are the configuration path PREFIXES whose
+// mutation rewrites a login, root, or API credential (#16080). A class
+// holding PermConfig without PermAll may not mutate at or below any of
+// them — not even when it authored no *-configuration regexes, and not
+// even when its regexes would allow the path. Only PermAll (the built-in
+// super-user, or a custom class whose authored tokens include all /
+// super-user, which mapJunosPermissions folds to PermAll) may do so; the
+// empty (no-RBAC) class bypass retains its existing meaning because
+// authorizeConfigMutationDepth9939 returns before this check for
+// class == "".
+//
+// Matching is on lexed PATH TOKENS so a user or stanza merely NAMED like
+// a credential container cannot widen or narrow the fence: `system login
+// user root-authentication ...` is the `root-authentication` login USER,
+// still below `system login` and therefore still fenced; `system services
+// web-management api-authentication ...` is not the api-auth stanza.
+//
+// Both api-auth spellings are fenced: the current
+// `system services web-management api-auth` and the legacy
+// `system services rest api-auth` shape the redaction census still carries.
+var credentialConfigPrefixes16080 = [][]string{
+	{"system", "login"},
+	{"system", "root-authentication"},
+	{"system", "services", "web-management", "api-auth"},
+	{"system", "services", "rest", "api-auth"},
+}
+
+// credentialConfigPathHit16080 reports the fence prefix the (space-joined,
+// lexed) mutation path falls at or below, or "" when it is outside every
+// credential fence. Token-boundary matching, never substring.
+func credentialConfigPathHit16080(path string) string {
+	fields := strings.Fields(path)
+	for _, prefix := range credentialConfigPrefixes16080 {
+		if len(fields) < len(prefix) {
+			continue
+		}
+		match := true
+		for i, tok := range prefix {
+			if fields[i] != tok {
+				match = false
+				break
+			}
+		}
+		if match {
+			return strings.Join(prefix, " ")
+		}
+	}
+	return ""
+}
+
+// credentialConfigPathsHit16080 returns the first credential fence any of
+// paths falls at or below — copy/rename adjudicate two endpoints, and a
+// credential hit on EITHER must refuse the whole command (#16080).
+func credentialConfigPathsHit16080(paths []string) string {
+	for _, p := range paths {
+		if hit := credentialConfigPathHit16080(p); hit != "" {
+			return hit
+		}
+	}
+	return ""
+}
+
+// CredentialSurchargeCheck16080 reports whether class is priced out of
+// credential mutations by #16080: a non-empty class that does not hold
+// PermAll. Whole-candidate operations (load override/rescue, rollback
+// n>0, expanded-tree commit adjudication) cannot enumerate per-path
+// credential writes, so their existing restricted-class refusals consult
+// this instead of only ConfigurationLoginRegexesFor: a PermConfig class
+// with no regexes is `restricted` for credential purposes even though it
+// is unrestricted in the regex sense. The empty class is the legacy
+// no-RBAC bypass and stays exempt, as in AuthorizeConfigMutation.
+func CredentialSurchargeCheck16080(cfg *Config, class string) (fenced bool, err error) {
+	if class == "" {
+		return false, nil
+	}
+	if _, _, err := ConfigurationLoginRegexesFor(cfg, class); err != nil {
+		return false, fmt.Errorf("permission denied: login class %q has an invalid configuration regex: %w", class, err)
+	}
+	return !ClassHasPermission(cfg, class, PermAll), nil
+}
+
 // configMutationPath returns the configuration path a verb will act on,
 // resolved against the current edit path, and whether this verb is gated here.
 //
@@ -456,8 +537,26 @@ func authorizeConfigMutationDepth9939(cfg *Config, class string, editPath []stri
 			"permission denied: login class %q has an invalid configuration regex: %w",
 			class, err)
 	}
+	// #16080 (MGMT-01): credential paths are priced above PermConfig.
+	// This runs BEFORE the no-regexes return below: a configure class
+	// that authored no *-configuration regexes (rules not ok) is exactly
+	// the limited class the issue names, and the old `if !ok { return
+	// nil }` let it rewrite root / login / api credentials silently.
+	// Only PermAll may mutate a credential path; the resolved path's
+	// fence prefix is safe to name (it is a fixed stanza name, never
+	// operator secret data).
+	if hit := credentialConfigPathsHit16080(paths); hit != "" &&
+		!ClassHasPermission(cfg, class, PermAll) {
+		return fmt.Errorf("permission denied: login class %q denies %s under %q (%s)",
+			class, parts[0], configAuditRoot(paths[0]),
+			"credential path "+hit+" requires the super-user permission (all), not merely configure (#16080)")
+	}
 	if !ok {
-		return nil
+		// #16080: still adjudicate an embedded change-configuration
+		// payload below — the fence applies to the payload's targets
+		// even for a class with no *-configuration regexes, which the
+		// old early return skipped entirely.
+		return authorizeEmbeddedChangeConfig9939(cfg, class, editPath, parts, quoted, depth)
 	}
 	// #15167 (V47-S1, shared with B23-01): the line did not lex cleanly end
 	// to end — a Unicode space or other non-ASCII byte, an unterminated

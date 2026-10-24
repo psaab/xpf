@@ -1982,6 +1982,23 @@ func loginClassAdvisoryWarnings(cfg *Config) []string {
 		}
 		msg := fmt.Sprintf("system login class %q: recognized (custom RBAC); Junos permissions [%s] mapped to xpf coarse permissions {%s}",
 			lc.Name, strings.Join(lc.Permissions, " "), mappedStr)
+		// #16080 (MGMT-01): a class holding configure without all /
+		// super-user (PermAll) is fenced out of credential paths at
+		// mutation time on every surface. Name that plainly at commit:
+		// the old advisory said only that configure maps coarsely, never
+		// that credential rewrite was (or now is not) within its reach.
+		holdsConfig, holdsAll := false, false
+		for _, p := range lc.MappedPermissions {
+			if p == PermConfig {
+				holdsConfig = true
+			}
+			if p == PermAll {
+				holdsAll = true
+			}
+		}
+		if holdsConfig && !holdsAll {
+			msg += "; this class holds configure without super-user (all), so it cannot rewrite login/root/api credentials: mutations under system login, system root-authentication, and system services web-management api-auth are denied and require a super-user (all) class (#16080)"
+		}
 		if len(folded) > 0 {
 			sort.Strings(folded)
 			msg += fmt.Sprintf("; fine-grained permissions [%s] folded to view-only (xpf has no finer bucket)", strings.Join(folded, " "))

@@ -206,7 +206,16 @@ func authorizeExpandedTree14981(cfg *Config, class string, tree, active *ConfigT
 	if err != nil {
 		return fmt.Errorf("permission denied: login class %q has an invalid configuration regex: %w", class, err)
 	}
-	if !restricted {
+	// #16080: a PermConfig class with no regexes is still fenced out of
+	// credential paths, and the expanded lines below run through
+	// AuthorizeConfigMutation, which now enforces that fence per line —
+	// so the expansion must run for a surcharged class too, not only a
+	// regex-restricted one.
+	fenced16080, ferr := CredentialSurchargeCheck16080(cfg, class)
+	if ferr != nil {
+		return ferr
+	}
+	if !restricted && !fenced16080 {
 		return nil
 	}
 	lines, err := ExpandedMutationLines(tree)
