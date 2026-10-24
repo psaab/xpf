@@ -21,8 +21,18 @@ import (
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/firewallshow"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
+	xnft "github.com/psaab/xpf/pkg/nftables"
 	"github.com/psaab/xpf/pkg/policymatch"
 )
+
+// readLo0CountersGRPC is the kernel lo0 counter source for the RAW show
+// views, a package var so tests can inject a fixture without netlink
+// (#16457), mirroring pkg/api's readLo0Counters seam.
+var readLo0CountersGRPC = xnft.ReadLo0Counters
+
+// resetLo0CountersGRPC is the `clear firewall all` kernel lo0 reset seam
+// (#16457).
+var resetLo0CountersGRPC = xnft.ResetLo0Counters
 
 // writeThreeColorPolicerStatus renders the per-color (green/yellow/red)
 // conform/exceed and treatment-drop counters for a `then policer <name>` term,
@@ -111,6 +121,15 @@ func (s *Server) showFirewall(cfg *config.Config, buf *strings.Builder) {
 	// #3408: surface a filter counter read failure as a warning AFTER all
 	// filters rather than printing clean-zero / omitted hit counts.
 	var readErr error
+	// #16457: kernel lo0 counters for lo0-referenced filters.
+	var lo0Err error
+	lo0For := func(family, name string) []xnft.Lo0Count {
+		counts, err := firewallshow.Lo0CountersForFilter(cfg, family, name, readLo0CountersGRPC)
+		if err != nil && lo0Err == nil {
+			lo0Err = err
+		}
+		return counts
+	}
 	printFilters := func(family string, filters map[string]*config.FirewallFilter) {
 		// #15173: same sorted / nil-safe / suppressed-clone-hidden name
 		// set as CLI and REST (shared firewallshow.SortedFilterNames).
@@ -171,6 +190,7 @@ func (s *Server) showFirewall(cfg *config.Config, buf *strings.Builder) {
 					}
 				}
 			}
+			firewallshow.WriteLo0KernelCounters(buf, filter, lo0For(family, name))
 			buf.WriteString("\n")
 		}
 	}
@@ -178,6 +198,9 @@ func (s *Server) showFirewall(cfg *config.Config, buf *strings.Builder) {
 	printFilters("inet6", cfg.Firewall.FiltersInet6)
 	if readErr != nil {
 		fmt.Fprintf(buf, "warning: filter counter read failed (hit counts may be incomplete): %v\n", readErr)
+	}
+	if lo0Err != nil {
+		fmt.Fprintf(buf, "warning: kernel lo0 counter read failed (lo0 kernel counts may be incomplete): %v\n", lo0Err)
 	}
 }
 
@@ -616,9 +639,15 @@ func (s *Server) showFirewallFilter(req *pb.ShowTextRequest, cfg *config.Config,
 					}
 				}
 			}
+			// #16457: kernel lo0 chain counts beside the helper counts.
+			lo0Counts, lo0Err := firewallshow.Lo0CountersForFilter(cfg, family, filterName, readLo0CountersGRPC)
+			firewallshow.WriteLo0KernelCounters(buf, filter, lo0Counts)
 			buf.WriteString("\n")
 			if readErr != nil {
 				fmt.Fprintf(buf, "warning: filter counter read failed (hit counts may be incomplete): %v\n", readErr)
+			}
+			if lo0Err != nil {
+				fmt.Fprintf(buf, "warning: kernel lo0 counter read failed (lo0 kernel counts may be incomplete): %v\n", lo0Err)
 			}
 		}
 	}

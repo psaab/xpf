@@ -498,10 +498,16 @@ Per-policy counters: `then count <name>` on the steering term is
 counted on the PBR fast path and exported as
 `xpf_filter_hits_total{filter,family,term}` — the steering-volume
 counter per FBF policy. (A `then count` on a filter attached to the
-**lo0 loopback** input hook is instead enforced by the kernel nft
-`inet xpf_lo0` chain, not the fast path, and is exported separately as
-`xpf_lo0_counter_hits_total{counter}`, #4422 — see
+**lo0 loopback** input hook is enforced BOTH by the kernel nft
+`inet xpf_lo0` chain (all host-stack traffic, including fxp0 management
+traffic) and by the userspace helper for AF_XDP host-bound packets. The
+kernel counts are exported separately as
+`xpf_lo0_counter_hits_total{counter}` (#4422) and are also rendered,
+labelled by count name, beside the helper per-term counts in the RAW
+`show firewall` / `show firewall filter <name>` views (#16457); the two
+are distinct counts, not a merged total — see
 `docs/feature-coverage.md` Observability.)
+
 
 ### FBF is decided on the first packet, then re-validated on established hits
 

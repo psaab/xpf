@@ -693,6 +693,11 @@ func (c *CLI) handleClearFirewall(args []string) error {
 	if err := c.dp.ClearFilterCounters(); err != nil {
 		return fmt.Errorf("clear filter counters: %w", err)
 	}
+	// #16457: also reset the kernel lo0 named counters; previously they
+	// reset only on table rebuild, so this clear left them running.
+	if err := resetLo0CountersCLI(); err != nil {
+		return fmt.Errorf("clear lo0 filter counters: %w", err)
+	}
 	fmt.Println("Firewall filter counters cleared")
 	return nil
 }
