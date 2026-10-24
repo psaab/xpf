@@ -267,21 +267,40 @@ func TestSyncAuthDisabledNoHandshake(t *testing.T) {
 	_ = cb
 }
 
+// splitSealedFrame16434 splits a sealed frame the way receiveLoop does:
+// the 12-byte header (whose byte 4 carries the message type), the payload
+// the header length declares, and the trailing sequence+HMAC.
+func splitSealedFrame16434(t *testing.T, sealed []byte) (header, payload, trailer []byte) {
+	t.Helper()
+	if len(sealed) < syncHeaderSize+syncAuthFrameTrailerSize {
+		t.Fatalf("sealed frame too short: %d bytes", len(sealed))
+	}
+	header = sealed[:syncHeaderSize]
+	length := binary.LittleEndian.Uint32(header[8:12])
+	if syncHeaderSize+int(length)+syncAuthFrameTrailerSize != len(sealed) {
+		t.Fatalf("sealed frame length mismatch: header declares %d payload bytes, frame is %d bytes", length, len(sealed))
+	}
+	payload = sealed[syncHeaderSize : syncHeaderSize+int(length)]
+	trailer = sealed[syncHeaderSize+int(length):]
+	return header, payload, trailer
+}
+
 // TestSyncFrameSealVerifyRoundTripAndReplay unit-tests the per-frame seal /
 // verify path: sequential frames verify and advance the watermark; a replayed
-// (regressed sequence) frame, a tampered payload, and a wrong-key MAC are all
-// rejected. RED on revert: sealFrame/verifyFrame do not exist.
+// frame — strictly older AND an exact replay of the latest (seq ==
+// watermark) — a tampered payload, a tampered header/type byte, and a
+// wrong-key MAC are all rejected. RED on revert: sealFrame/verifyFrame do
+// not exist. #16434: the exact-replay and header cells pin the two
+// boundaries the strictly-older replay and payload-only tamper used to
+// leave unguarded (MUT-R `seq <= recvSeq` -> `seq < recvSeq` and MUT-H
+// dropping the 12-byte header from both MACs each passed the whole suite).
 func TestSyncFrameSealVerifyRoundTripAndReplay(t *testing.T) {
 	key := []byte("per-connection-frame-key-abc")
 	send := &authConn{readKey: key, writeKey: key}
 	recv := &authConn{readKey: key, writeKey: key}
 
 	split := func(sealed []byte) (header, payload, trailer []byte) {
-		header = sealed[:syncHeaderSize]
-		length := binary.LittleEndian.Uint32(header[8:12])
-		payload = sealed[syncHeaderSize : syncHeaderSize+int(length)]
-		trailer = sealed[syncHeaderSize+int(length):]
-		return
+		return splitSealedFrame16434(t, sealed)
 	}
 
 	frame1 := encodeRawMessage(syncMsgSessionV4, []byte("one"))
@@ -307,6 +326,15 @@ func TestSyncFrameSealVerifyRoundTripAndReplay(t *testing.T) {
 		t.Fatalf("replayed frame must be rejected as replay, got %v", err)
 	}
 
+	// #16434 exact replay: re-presenting the LATEST frame (seq 2 ==
+	// watermark 2, MAC still valid) must also be rejected as replay. The
+	// strictly-older replay above cannot distinguish `seq <= recvSeq`
+	// from `seq < recvSeq`; this cell can. An on-path party could
+	// otherwise re-inject the latest authenticated frame indefinitely.
+	if err := recv.verifyFrame(h2, p2, tr2); err != errSyncFrameReplay {
+		t.Fatalf("exact replay of the latest frame (seq == watermark) must be rejected as replay, got %v", err)
+	}
+
 	// Tampered payload must fail the HMAC on a fresh receiver.
 	recv2 := &authConn{readKey: key, writeKey: key}
 	tampered := append([]byte(nil), p2...)
@@ -319,6 +347,134 @@ func TestSyncFrameSealVerifyRoundTripAndReplay(t *testing.T) {
 	recv3 := &authConn{readKey: []byte("wrong-key"), writeKey: []byte("wrong-key")}
 	if err := recv3.verifyFrame(h1, p1, tr1); err != errSyncFrameAuth {
 		t.Fatalf("wrong-key frame must fail HMAC, got %v", err)
+	}
+
+	// #16434 header tamper: the 12-byte header is MAC'd (sealFrame MACs
+	// frame||seq, frame = header||payload), so rewriting any header byte
+	// must fail the HMAC on a fresh receiver. Byte 4 is the message type
+	// handleMessage dispatches on, and the link is MAC'd, not encrypted:
+	// an on-path rewrite of the type byte (install -> delete) must not
+	// verify. Fresh receivers throughout so the replay watermark cannot
+	// mask a MAC failure.
+	t.Run("header_tamper", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			off  int
+			xor  byte
+		}{
+			{"type byte install->delete", 4, syncMsgSessionV4 ^ syncMsgDeleteV4},
+			{"magic byte", 0, 0xFF},
+			{"length byte", 11, 0xFF},
+		} {
+			hdr := append([]byte(nil), h1...)
+			before := hdr[tc.off]
+			hdr[tc.off] ^= tc.xor
+			if hdr[tc.off] == before {
+				t.Fatalf("%s: fixture did not mutate header byte %d", tc.name, tc.off)
+			}
+			fresh := &authConn{readKey: key, writeKey: key}
+			if err := fresh.verifyFrame(hdr, p1, tr1); err != errSyncFrameAuth {
+				t.Fatalf("%s: header-tampered frame must fail HMAC, got %v", tc.name, err)
+			}
+		}
+		// Explicit install->delete swap, the consequence the issue names:
+		// a sealed SessionV4 frame with its type byte rewritten to
+		// DeleteV4 must not verify.
+		hdr := append([]byte(nil), h1...)
+		if hdr[4] != syncMsgSessionV4 {
+			t.Fatalf("fixture: frame1 type = %d, want SessionV4 (%d)", hdr[4], syncMsgSessionV4)
+		}
+		hdr[4] = syncMsgDeleteV4
+		fresh := &authConn{readKey: key, writeKey: key}
+		if err := fresh.verifyFrame(hdr, p1, tr1); err != errSyncFrameAuth {
+			t.Fatalf("SessionV4 frame with type rewritten to DeleteV4 must fail HMAC, got %v", err)
+		}
+		// Control: the untampered frame verifies on a fresh receiver, so
+		// the rejections above are the tamper, not fixture breakage.
+		ctrl := &authConn{readKey: key, writeKey: key}
+		if err := ctrl.verifyFrame(h1, p1, tr1); err != nil {
+			t.Fatalf("control: untampered frame1 must verify on a fresh receiver: %v", err)
+		}
+	})
+}
+
+// TestSyncFrameExactReplayLatest16434 pins the replay boundary at equality:
+// after frame1 and frame2 verify in order, re-presenting frame2 — the
+// latest frame, seq == watermark, MAC still valid — must be rejected as
+// replay. #16434 MUT-R: weakening verifyFrame's `seq <= a.recvSeq` to
+// `seq < a.recvSeq` accepts this cell (err == nil) while the strictly-older
+// replay in TestSyncFrameSealVerifyRoundTripAndReplay stays red, so this
+// named cell is what turns MUT-R red.
+func TestSyncFrameExactReplayLatest16434(t *testing.T) {
+	key := []byte("per-connection-frame-key-abc")
+	send := &authConn{readKey: key, writeKey: key}
+	recv := &authConn{readKey: key, writeKey: key}
+
+	frame1 := encodeRawMessage(syncMsgSessionV4, []byte("one"))
+	frame2 := encodeRawMessage(syncMsgSessionV6, []byte("two"))
+	h1, p1, tr1 := splitSealedFrame16434(t, send.sealFrame(frame1))
+	h2, p2, tr2 := splitSealedFrame16434(t, send.sealFrame(frame2))
+
+	if err := recv.verifyFrame(h1, p1, tr1); err != nil {
+		t.Fatalf("control: frame1 must verify: %v", err)
+	}
+	if err := recv.verifyFrame(h2, p2, tr2); err != nil {
+		t.Fatalf("control: frame2 must verify: %v", err)
+	}
+	if !recv.recvSeen || recv.recvSeq != 2 {
+		t.Fatalf("fixture: watermark = (seen=%v, seq=%d), want (true, 2)", recv.recvSeen, recv.recvSeq)
+	}
+	// Exact replay of the latest frame: seq 2 == watermark 2.
+	if err := recv.verifyFrame(h2, p2, tr2); err != errSyncFrameReplay {
+		t.Fatalf("exact replay of the latest frame (seq == watermark) accepted: err=%v, want %v", err, errSyncFrameReplay)
+	}
+	// The rejection must not have moved the watermark.
+	if recv.recvSeq != 2 {
+		t.Fatalf("watermark moved on rejected exact replay: seq = %d, want 2", recv.recvSeq)
+	}
+}
+
+// TestSyncFrameHeaderTamper16434 pins header coverage in the frame MAC:
+// sealFrame MACs header||payload||seq, and byte 4 of the 12-byte header is
+// the message type handleMessage dispatches on. Rewriting it on a sealed
+// SessionV4 frame to DeleteV4 (install -> delete) must fail the HMAC, as
+// must rewriting any other header byte. #16434 MUT-H: dropping the header
+// from both seal and verify MACs lets the type-swapped frame verify
+// (err == nil) while the payload-tamper cell stays red, so this named cell
+// is what turns MUT-H red. Fresh receivers throughout so the replay
+// watermark cannot mask a MAC failure.
+func TestSyncFrameHeaderTamper16434(t *testing.T) {
+	key := []byte("per-connection-frame-key-abc")
+	send := &authConn{readKey: key, writeKey: key}
+
+	frame := encodeRawMessage(syncMsgSessionV4, []byte("one"))
+	h, p, tr := splitSealedFrame16434(t, send.sealFrame(frame))
+	if h[4] != syncMsgSessionV4 {
+		t.Fatalf("fixture: sealed frame type = %d, want SessionV4 (%d)", h[4], syncMsgSessionV4)
+	}
+	// Control: the untampered frame verifies on a fresh receiver.
+	ctrl := &authConn{readKey: key, writeKey: key}
+	if err := ctrl.verifyFrame(h, p, tr); err != nil {
+		t.Fatalf("control: untampered frame must verify on a fresh receiver: %v", err)
+	}
+	// SessionV4 -> DeleteV4 type swap.
+	swapped := append([]byte(nil), h...)
+	swapped[4] = syncMsgDeleteV4
+	fresh := &authConn{readKey: key, writeKey: key}
+	if err := fresh.verifyFrame(swapped, p, tr); err != errSyncFrameAuth {
+		t.Fatalf("frame with rewritten message type verified: err=%v, want %v", err, errSyncFrameAuth)
+	}
+	// Every other header byte is MAC'd too.
+	for off := range syncHeaderSize {
+		if off == 4 {
+			continue // covered by the explicit swap above
+		}
+		hdr := append([]byte(nil), h...)
+		hdr[off] ^= 0xFF
+		r := &authConn{readKey: key, writeKey: key}
+		if err := r.verifyFrame(hdr, p, tr); err != errSyncFrameAuth {
+			t.Fatalf("header byte %d tamper must fail HMAC, got %v", off, err)
+		}
 	}
 }
 
