@@ -55,14 +55,16 @@ pub(crate) struct SyncedSessionEntry {
     /// #10888: the owning node's TCP handshake state (`0` = legacy/established).
     /// `upsert_synced_with_origin` applies it independently of close class.
     pub(crate) tcp_handshake_state: u8,
-    /// #16217 (export stamp): actual reverse-direction packets the
-    /// serving node has forwarded for this tuple, snapshotted onto the
-    /// shared row at publish/restamp time. Synced rows otherwise carry
-    /// no counters, so this is the only node-wide reverse-service
-    /// evidence `shared_completion_evidence` may read. A synthesized
-    /// reverse companion is published with 0 here; only admitted
-    /// reverse traffic (forward entry's `counters.rev_packets`) ever
-    /// raises it. Never set from a handshake wire.
+    /// #16217 (export stamp) + #16019 fold 2: actual reverse-direction
+    /// packets the serving node has forwarded for this tuple,
+    /// snapshotted onto the shared row at publish/restamp time from
+    /// the live forward entry's admitted `counters.rev_packets`
+    /// (`rev_packets_wire_for`). Synced rows otherwise carry no
+    /// counters, so this is the only node-wide reverse-service
+    /// evidence `shared_completion_evidence` and the pressure-shed
+    /// shared fence (`shared_session_replied`) may read. A synthesized
+    /// reverse companion is published with 0 here; mere existence
+    /// proves nothing. Never set from a handshake wire.
     pub(crate) rev_packets: u64,
     /// #16217 (adoption evidence): actual forward-direction packets
     /// the serving node has admitted for this tuple, snapshotted
@@ -83,12 +85,6 @@ pub(crate) struct SyncedSessionEntry {
     /// this entry's pair is only read when re-exporting a peer-originated
     /// session this node adopted.
     pub(crate) pptp_call_ids: u64,
-    /// #16019 fold 2: reverse-direction packet count from the live
-    /// entry at publish/materialize time (0 for hand-built/imported
-    /// rows that carry no counters). The pressure-shed shared fence
-    /// requires `rev_packets > 0` as reply proof — reverse-row
-    /// existence alone is published at install and proves nothing.
-    pub(crate) rev_packets: u64,
 }
 
 impl SyncedSessionEntry {
