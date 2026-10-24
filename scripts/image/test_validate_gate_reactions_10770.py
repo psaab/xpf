@@ -119,8 +119,8 @@ class GateReactionTests(unittest.TestCase):
         output = io.StringIO()
         with mock.patch.object(self.harness, "_wait"), \
                 mock.patch.object(self.harness, "_show_unit", side_effect=show_unit), \
-                mock.patch.object(validate, "guest", side_effect=guest), \
-                mock.patch.object(validate, "guest_sh", side_effect=guest_sh), \
+                mock.patch.object(self.harness, "guest", side_effect=guest), \
+                mock.patch.object(self.harness, "guest_sh", side_effect=guest_sh), \
                 contextlib.redirect_stdout(output):
             self.harness.assert_ab_kernel_channel("guest")
         return output.getvalue()
@@ -138,7 +138,7 @@ class GateReactionTests(unittest.TestCase):
             output = io.StringIO()
             with mock.patch.object(self.harness, "freeze_artifacts"), \
                     mock.patch.object(validate.shutil, "which", return_value="/usr/bin/tool"), \
-                    mock.patch.object(validate.subprocess, "run", side_effect=fake_run), \
+                    mock.patch.object(self.harness, "_run", side_effect=fake_run), \
                     contextlib.redirect_stdout(output):
                 self.harness.assert_image_sealed()
             return output.getvalue()
@@ -150,7 +150,7 @@ class GateReactionTests(unittest.TestCase):
     def test_day0_permission_failure_fails_and_root_mode_600_passes(self):
         def run_assertion(stat):
             output = io.StringIO()
-            with mock.patch.object(validate, "guest", return_value=_result(stat)), \
+            with mock.patch.object(self.harness, "guest", return_value=_result(stat)), \
                     contextlib.redirect_stdout(output):
                 self.harness.assert_day0_conf_perms("guest")
             return output.getvalue()
@@ -173,7 +173,7 @@ class GateReactionTests(unittest.TestCase):
                 raise AssertionError(f"unexpected guest probe: {script!r}")
 
             output = io.StringIO()
-            with mock.patch.object(validate, "guest", side_effect=guest), \
+            with mock.patch.object(self.harness, "guest", side_effect=guest), \
                     contextlib.redirect_stdout(output):
                 self.harness.assert_secure_boot("guest")
             return output.getvalue()
@@ -194,7 +194,7 @@ class GateReactionTests(unittest.TestCase):
                 return _result(output)
 
             output = io.StringIO()
-            with mock.patch.object(validate, "guest", side_effect=guest), \
+            with mock.patch.object(self.harness, "guest", side_effect=guest), \
                     contextlib.redirect_stdout(output):
                 self.harness.assert_kernel_hold("guest")
             return output.getvalue()

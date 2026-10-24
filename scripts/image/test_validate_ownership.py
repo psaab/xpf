@@ -87,7 +87,7 @@ class OwnedDeleteTests(unittest.TestCase):
     def test_deletes_instance_tagged_with_this_run(self):
         h = _harness()
         rec = _IncusRecorder(owner_tag=h.run_id + "\n", get_rc=0)
-        with mock.patch.object(validate, "incus", rec):
+        with mock.patch.object(h, "_incus", rec):
             h._owned_delete("xpf-image-x")
         self.assertEqual(rec.deletes(), [("delete", "-f", "xpf-image-x")],
                          "an instance carrying THIS run's tag must be deleted")
@@ -95,7 +95,7 @@ class OwnedDeleteTests(unittest.TestCase):
     def test_refuses_foreign_tagged_instance(self):
         h = _harness()
         rec = _IncusRecorder(owner_tag="some-other-run\n", get_rc=0)
-        with mock.patch.object(validate, "incus", rec):
+        with mock.patch.object(h, "_incus", rec):
             h._owned_delete("xpf-image-a")   # the OLD constant name
         self.assertEqual(rec.deletes(), [],
                          "an un-owned instance must NOT be force-deleted (#4905-D)")
@@ -103,14 +103,14 @@ class OwnedDeleteTests(unittest.TestCase):
     def test_refuses_untagged_instance(self):
         h = _harness()
         rec = _IncusRecorder(owner_tag="", get_rc=0)  # tag present but empty
-        with mock.patch.object(validate, "incus", rec):
+        with mock.patch.object(h, "_incus", rec):
             h._owned_delete("bystander-vm")
         self.assertEqual(rec.deletes(), [])
 
     def test_missing_instance_is_a_noop(self):
         h = _harness()
         rec = _IncusRecorder(owner_tag="", get_rc=1)  # `config get` fails => absent
-        with mock.patch.object(validate, "incus", rec):
+        with mock.patch.object(h, "_incus", rec):
             h._owned_delete("does-not-exist")
         self.assertEqual(rec.deletes(), [])
 
@@ -120,7 +120,7 @@ class LaunchTagTests(unittest.TestCase):
         h = _harness()
         rec = _IncusRecorder(owner_tag="", get_rc=1)  # pre-delete finds nothing
         name = h.iname("a")
-        with mock.patch.object(validate, "incus", rec):
+        with mock.patch.object(h, "_incus", rec):
             with mock.patch.object(h, "wait_agent", return_value=None):
                 h.launch(name)
         inits = rec.inits()
@@ -138,8 +138,8 @@ class CleanupTests(unittest.TestCase):
         h.instances = []
         h.created_net = False
         rec = _IncusRecorder()
-        with mock.patch.object(validate, "incus", rec):
-            with mock.patch.object(validate.subprocess, "run",
+        with mock.patch.object(h, "_incus", rec):
+            with mock.patch.object(h, "_run",
                                    return_value=types.SimpleNamespace(returncode=0)):
                 h.cleanup()
         self.assertIn(("image", "delete", h.alias), rec.image_deletes())
@@ -152,8 +152,8 @@ class CleanupTests(unittest.TestCase):
         h.instances = []
         h.created_net = False
         rec = _IncusRecorder()
-        with mock.patch.object(validate, "incus", rec):
-            with mock.patch.object(validate.subprocess, "run",
+        with mock.patch.object(h, "_incus", rec):
+            with mock.patch.object(h, "_run",
                                    return_value=types.SimpleNamespace(returncode=0)):
                 h.cleanup()
         self.assertEqual(rec.image_deletes(), [],
@@ -190,8 +190,8 @@ class CleanupWorkDirTests(unittest.TestCase):
             runs.append(tuple(cmd))
             return types.SimpleNamespace(returncode=0)
 
-        with mock.patch.object(validate, "incus", _IncusRecorder()):
-            with mock.patch.object(validate.subprocess, "run", _run):
+        with mock.patch.object(h, "_incus", _IncusRecorder()):
+            with mock.patch.object(h, "_run", _run):
                 h.cleanup()
         return h, runs
 

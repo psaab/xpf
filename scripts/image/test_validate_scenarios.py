@@ -109,12 +109,16 @@ class OvmfDiscoveryTests(unittest.TestCase):
 
 class ScenarioDPartitionCountTests(unittest.TestCase):
     def test_root_partition_count_counts_only_partition_rows_on_parent_disk(self):
-        with patch.object(validate, "guest", side_effect=[
+        # #16196: _root_partition_count dispatches through the instance
+        # seam, so the fake binds to a stub instance, not the module.
+        stub = SimpleNamespace(runner=None)
+        stub.guest = validate.Harness.guest
+        with patch.object(stub, "guest", side_effect=[
                 SimpleNamespace(stdout="/dev/sdap2\n"),
                 SimpleNamespace(stdout="sdap\n"),
                 SimpleNamespace(stdout="disk\npart\npart\n"),
         ]) as run:
-            count = validate.Harness._root_partition_count(object(), "instance")
+            count = validate.Harness._root_partition_count(stub, "instance")
         self.assertEqual(count, 2)
         self.assertEqual(run.call_args_list[1].args,
                          ("instance", "lsblk", "-no", "PKNAME", "/dev/sdap2"))
