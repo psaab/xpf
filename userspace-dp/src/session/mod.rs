@@ -6214,6 +6214,11 @@ mod close_state_sync_9412_acceptance_tests;
 #[cfg(test)]
 #[path = "opening_state_sync_10888_tests.rs"]
 mod opening_state_sync_10888_tests;
+// #16043: a same-id HA re-import must not refresh the idle anchor for
+// non-TCP sessions or legacy (handshake-state-less) TCP imports.
+#[cfg(test)]
+#[path = "reimport_idle_anchor_16043_tests.rs"]
+mod reimport_idle_anchor_16043_tests;
 // #9582: a close seen only by a worker replica of a local session is announced, with
 // the installer's id. Written before the fix.
 #[cfg(test)]

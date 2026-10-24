@@ -930,16 +930,27 @@ impl SessionTable {
         // Sync sweeps re-send snapshots, not activity. Preserve the inactivity
         // anchor only while the same TCP incarnation remains in the same
         // handshake and close state; transitions start a fresh window.
-        let preserved_last_seen_ns = if wire_session_id != 0 && matches!(protocol, PROTO_TCP) {
+        // #16043: the same-id fence also covers non-TCP sessions and legacy
+        // TCP imports that carry no handshake state. Without it, every
+        // same-id re-import of a UDP/ICMP/other session — and every legacy
+        // (handshake-state-0) TCP re-import, whose previous entry decodes
+        // through the same legacy-established view — re-stamped
+        // `last_seen_ns` to the import instant, so a periodic re-import
+        // cadence could defer idle expiry indefinitely. A zero wire id
+        // (legacy peer / local replica) has no identity to match and keeps
+        // the fresh-anchor behavior; a changed id is a new incarnation and
+        // also anchors fresh.
+        let preserved_last_seen_ns = if wire_session_id != 0 {
             self.entry_by_key(&key).and_then(|existing| {
-                (existing.session_id == wire_session_id
-                    && existing.tcp_handshake_state_wire(protocol)
+                let same_id = existing.session_id == wire_session_id;
+                let same_tcp_state = !matches!(protocol, PROTO_TCP)
+                    || (existing.tcp_handshake_state_wire(protocol)
                         == wire_handshake
                             .unwrap_or(TcpHandshakeState::Established)
                             .to_wire()
-                    && existing.tcp_close_class_wire()
-                        == wire_close.map(TcpCloseClass::to_wire).unwrap_or(0))
-                .then_some(existing.last_seen_ns)
+                        && existing.tcp_close_class_wire()
+                            == wire_close.map(TcpCloseClass::to_wire).unwrap_or(0));
+                (same_id && same_tcp_state).then_some(existing.last_seen_ns)
             })
         } else {
             None
