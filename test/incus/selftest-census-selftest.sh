@@ -35,7 +35,7 @@ stamp_clean() {
 	local fix="$1"
 	mkdir -p "$fix/test/incus" "$fix/test/xsk-repro" "$fix/test/routing" \
 		"$fix/test/mutation" "$fix/test/daemon" "$fix/scripts/docs" "$fix/scripts/image" \
-		"$fix/scripts/dist" "$fix/scripts/deploy" "$fix/test/image" \
+		"$fix/scripts/dist" "$fix/scripts/deploy" "$fix/scripts/lib" "$fix/test/image" \
 		"$fix/test/debian"
 	echo '#!/bin/sh' >"$fix/test/incus/a-selftest.sh"
 	echo '#!/bin/sh' >"$fix/test/xsk-repro/selftest-a.sh"
@@ -61,6 +61,7 @@ stamp_clean() {
 		printf 'x = 1\nif __name__ == "__main__":\n    pass\n' >"$fix/scripts/$d/test_a.py"
 	done
 	printf 'x = 1\nif __name__ == "__main__":\n    pass\n' >"$fix/scripts/test_a.py"
+	printf 'x = 1\nif __name__ == "__main__":\n    pass\n' >"$fix/scripts/lib/test_a.py"
 	printf 'x = 1\nif __name__ == "__main__":\n    pass\n' >"$fix/scripts/foo_test.py"
 	cat >"$fix/runner.sh" <<'RUNNER'
 # ── 4. shell self-tests ──

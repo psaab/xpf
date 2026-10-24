@@ -95,7 +95,7 @@ note_fail() { echo "  FAIL: $*" >&2; FAIL=$((FAIL + 1)); }
 note_pass() { echo "  PASS: $*"; }
 
 SELFTEST_GLOBS="test/incus/*-selftest.sh test/xsk-repro/selftest*.sh test/routing/selftest*.sh test/mutation/selftest*.sh test/daemon/selftest*.sh scripts/*selftest*.sh scripts/docs/*selftest*.sh test/image/*-test.sh test/debian/*-test.sh"
-PY_GLOBS="scripts/image/test_*.py scripts/dist/test_*.py scripts/deploy/test_*.py scripts/test_*.py scripts/*_test.py"
+PY_GLOBS="scripts/image/test_*.py scripts/dist/test_*.py scripts/deploy/test_*.py scripts/test_*.py scripts/*_test.py scripts/lib/test_*.py"
 ODD_SET="scripts/dist/selftest.sh scripts/image/test-grow-root.sh test/incus/wire-policy-deny.sh test/incus/wire-appmatch-twins.sh test/incus/wire-zone-matrix.sh test/incus/wire-hostinbound-deny.sh test/incus/wire-conntrack-lifecycle.sh test/incus/wire-routing-separation.sh test/incus/wire-nat-frag-needed.sh test/incus/t12-g2-9506.sh"
 POSITIVE_CONTROL="test/incus/harness-result-selftest.sh"
 
@@ -234,7 +234,7 @@ else
 fi
 
 # ── 3. the __main__ guard over §3 python ──
-echo "selftest census: __main__ guard over 5 python globs"
+echo "selftest census: __main__ guard over 6 python globs"
 py_n=0
 py_missing=""
 set -f

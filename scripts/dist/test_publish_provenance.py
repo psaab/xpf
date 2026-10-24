@@ -16,20 +16,20 @@ if minisign is absent) and drive publish.gate_provenance directly. On revert
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 _DIST = Path(__file__).resolve().parent
-_SPEC = importlib.util.spec_from_file_location("publish", _DIST / "publish.py")
-publish = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(publish)
+publish = load_subject("publish", _DIST / "publish.py")
 
 # sign.py sits beside publish.py; publish already puts _DIST on sys.path.
 import image_inventory  # noqa: E402  (#6500 sidecar name)

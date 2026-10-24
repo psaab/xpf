@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import os
 import shutil
 import subprocess
@@ -18,6 +17,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
 _DIST = _ROOT / "scripts" / "dist"
@@ -27,17 +29,9 @@ sys.path.insert(0, str(_IMAGE))
 
 import sign  # noqa: E402
 
-_SPEC = importlib.util.spec_from_file_location(
-    "xpf_deploy", _HERE / "xpf-deploy.py")
-deploy = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(deploy)
+deploy = load_subject("xpf_deploy", _HERE / "xpf-deploy.py")
 
-_BAKE_SPEC = importlib.util.spec_from_file_location(
-    "bake", _ROOT / "scripts" / "image" / "bake.py")
-bake = importlib.util.module_from_spec(_BAKE_SPEC)
-assert _BAKE_SPEC.loader is not None
-_BAKE_SPEC.loader.exec_module(bake)
+bake = load_subject("bake", _ROOT / "scripts" / "image" / "bake.py")
 
 
 class FetchURLPolicyTests(unittest.TestCase):

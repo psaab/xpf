@@ -25,18 +25,17 @@ and the foreign-tag deletion is no longer refused — the assertions flip.
 
 from __future__ import annotations
 
-import importlib.util
 import shutil
+import sys
 import types
 import unittest
 from pathlib import Path
 from unittest import mock
 
-_SPEC = importlib.util.spec_from_file_location(
-    "validate", Path(__file__).with_name("validate.py"))
-validate = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(validate)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
+validate = load_subject("validate", Path(__file__).with_name("validate.py"))
 
 
 class _IncusRecorder:

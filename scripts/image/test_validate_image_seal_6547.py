@@ -35,25 +35,20 @@ from the bake and this file goes RED, without needing a VM or a real image.
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 _HERE = Path(__file__).resolve().parent
 
 
-def _load(name):
-    spec = importlib.util.spec_from_file_location(name, _HERE / f"{name}.py")
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
-    return mod
 
-
-validate = _load("validate")
-bake = _load("bake")
+validate = load_subject("validate", _HERE / "validate.py")
+bake = load_subject("bake", _HERE / "bake.py")
 
 
 def sealed_inventory():

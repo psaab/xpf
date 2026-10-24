@@ -29,20 +29,19 @@ test_enumerates_kernel_packages fails with the FATAL guard message.
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-_SPEC = importlib.util.spec_from_file_location(
-    "xpf_bake_hold", Path(__file__).with_name("bake.py"))
-bake = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(bake)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
+bake = load_subject("xpf_bake_hold", Path(__file__).with_name("bake.py"))
 
 # The kernel package set a stubbed guest reports as INSTALLED.
 _INSTALLED = [

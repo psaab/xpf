@@ -36,7 +36,16 @@ xpf (0.0.0) unstable; urgency=medium
     fails `up` when the iperf3/python3/tcpdump install fails.
     cluster-env-selftest asserts the real per-cluster names.
 
-xpf (0.0.0) unstable; urgency=medium
+  * Build: script tests now load their subjects through one test-only
+    helper, `load_subject` in scripts/lib (#16194, Stage A). The
+    repeated `spec_from_file_location` scaffolding is gone from all
+    83 script and test/incus test files; the helper registers the
+    module in `sys.modules` before executing it (preserving the
+    dataclass and identity semantics the hand-registered tests relied
+    on), removes that registration and restores any prior entry when
+    execution fails, and raises on a missing file. Production CLI
+    files keep their hyphenated names and invocation paths; no
+    packages, shims, or Stage-B layout change.
   * API: metrics descriptor init and Describe are now driven by one
     per-family descriptor table (#16202). The ~36 init calls in
     newCollector, the 630-line Describe enumeration, and the seven

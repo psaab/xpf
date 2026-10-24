@@ -11,22 +11,22 @@ Deploy names the system URI, where the disks live.
 from __future__ import annotations
 
 import contextlib
-import importlib.util
 import io
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
-_SPEC = importlib.util.spec_from_file_location("xpf_deploy_9669", _HERE / "xpf-deploy.py")
-xd = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(xd)
+xd = load_subject("xpf_deploy_9669", _HERE / "xpf-deploy.py")
 
 PRESENT, ABSENT, UNKNOWN = xd.DOMAIN_PRESENT, xd.DOMAIN_ABSENT, xd.DOMAIN_UNKNOWN
 SYS, SES = xd.LIBVIRT_SYSTEM_URI, xd.LIBVIRT_SESSION_URI

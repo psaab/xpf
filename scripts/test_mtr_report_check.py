@@ -12,17 +12,15 @@ the classifier's target behavior, not that shell-level repro.
 
 from __future__ import annotations
 
-import importlib.util
+import sys
 import textwrap
 import unittest
 from pathlib import Path
 
-_SPEC = importlib.util.spec_from_file_location(
-    "mtr_report_check", Path(__file__).with_name("mtr_report_check.py")
-)
-mtr = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(mtr)
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
+mtr = load_subject("mtr_report_check", Path(__file__).with_name("mtr_report_check.py"))
 
 
 def report(*lines: str) -> str:

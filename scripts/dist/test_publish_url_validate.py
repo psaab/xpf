@@ -25,17 +25,17 @@ injected payload into the installer.
 
 from __future__ import annotations
 
-import importlib.util
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 _DIST = Path(__file__).resolve().parent
-_SPEC = importlib.util.spec_from_file_location("publish", _DIST / "publish.py")
-publish = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(publish)
+publish = load_subject("publish", _DIST / "publish.py")
 
 # A syntactically valid, non-placeholder ASCII-armored key block so
 # stamp_installer's _read_real_archive_key() accepts it (its bytes are not a

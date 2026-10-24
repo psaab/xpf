@@ -3,17 +3,16 @@
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 _LINT = Path(__file__).resolve().parent / "skill_file_push_lint.py"
-_SPEC = importlib.util.spec_from_file_location("skill_file_push_lint", _LINT)
-_MOD = importlib.util.module_from_spec(_SPEC)
-sys.modules[_SPEC.name] = _MOD
-_SPEC.loader.exec_module(_MOD)
+_MOD = load_subject("skill_file_push_lint", _LINT)
 findings = _MOD.findings
 
 

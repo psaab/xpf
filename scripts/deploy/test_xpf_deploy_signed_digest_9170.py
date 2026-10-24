@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
-import importlib.util
 import io
 import os
 import re
@@ -30,15 +29,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
 sys.path.insert(0, str(_ROOT / "scripts" / "dist"))
 
-_SPEC = importlib.util.spec_from_file_location(
-    "xpf_deploy_9170", _HERE / "xpf-deploy.py")
-deploy = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(deploy)
+deploy = load_subject("xpf_deploy_9170", _HERE / "xpf-deploy.py")
 
 import sign  # noqa: E402
 

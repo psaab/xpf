@@ -18,19 +18,17 @@ enforcement / return True unconditionally) the mismatch + unpinned tests go RED.
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-_SPEC = importlib.util.spec_from_file_location(
-    "bake", Path(__file__).with_name("bake.py")
-)
-bake = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(bake)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
+bake = load_subject("bake", Path(__file__).with_name("bake.py"))
 
 # A distinct, syntactically-valid digest that is NOT any real pin.
 FAKE = "a" * 64

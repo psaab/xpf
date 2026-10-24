@@ -14,7 +14,6 @@ only that the table matters as a unit, not which cue is load-bearing.
 
 from __future__ import annotations
 
-import importlib.util
 import io
 import os
 import subprocess
@@ -23,14 +22,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 LINT = ROOT / "scripts" / "close_keyword_lint.py"
-_spec = importlib.util.spec_from_file_location("close_keyword_lint", LINT)
-ckl = importlib.util.module_from_spec(_spec)
-# dataclasses resolves string annotations through sys.modules, so the module
-# must be registered before it executes.
-sys.modules[_spec.name] = ckl
-_spec.loader.exec_module(ckl)
+ckl = load_subject("close_keyword_lint", LINT)
 
 
 def pair_refs(text):

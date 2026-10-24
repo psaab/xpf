@@ -17,30 +17,26 @@ or breaking the node-id drive all flip an assertion here.
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
 # validate.py's own top-level imports (make_config_drive, sign) resolve via the
 # sys.path inserts it performs at import time.
-_SPEC = importlib.util.spec_from_file_location("validate", _HERE / "validate.py")
-validate = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(validate)
+validate = load_subject("validate", _HERE / "validate.py")
 
-_SPEC_MCD = importlib.util.spec_from_file_location(
-    "make_config_drive", _HERE / "make_config_drive.py")
-make_config_drive = importlib.util.module_from_spec(_SPEC_MCD)
-assert _SPEC_MCD.loader is not None
-_SPEC_MCD.loader.exec_module(make_config_drive)
+make_config_drive = load_subject("make_config_drive", _HERE / "make_config_drive.py")
 
 
 # ── _qemu_img_verdict: qcow2 libvirt-bootability (scenario q config leg) ───

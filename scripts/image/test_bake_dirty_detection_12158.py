@@ -18,22 +18,22 @@ cell embeds `-dirty` and the bind cells accept mismatched markers.
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
-_SPEC = importlib.util.spec_from_file_location("xpf_bake_12158", _HERE / "bake.py")
-bake = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(bake)
+bake = load_subject("xpf_bake_12158", _HERE / "bake.py")
 
 # Stand-in for dpkg-buildpackage: it runs where the real one does (the source
 # root, after the recipe's changelog rewrite), dry-runs debian/rules' build

@@ -10,7 +10,6 @@ Run:
 """
 from __future__ import annotations
 
-import importlib.util
 import io
 import json
 import sys
@@ -19,22 +18,16 @@ import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 
 _HERE = Path(__file__).resolve().parent
 _MOD_PATH = _HERE / "step1-rate-spread-analysis.py"
 
 
-def _load():
-    spec = importlib.util.spec_from_file_location(
-        "step1_rate_spread_analysis", str(_MOD_PATH)
-    )
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
-
-RS = _load()
+RS = load_subject("step1_rate_spread_analysis", str(_MOD_PATH))
 
 
 def _iperf3_json(rates: list) -> dict:

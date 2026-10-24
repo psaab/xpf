@@ -9,29 +9,22 @@ Run:
 """
 from __future__ import annotations
 
-import importlib.util
 import subprocess
 import sys
 import types
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 
 _HERE = Path(__file__).resolve().parent
 _MOD_PATH = _HERE / "step1-rss-multinomial.py"
 
 
-def _load():
-    spec = importlib.util.spec_from_file_location(
-        "step1_rss_multinomial", str(_MOD_PATH)
-    )
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
-
-M = _load()
+M = load_subject("step1_rss_multinomial", str(_MOD_PATH))
 
 
 class SimulateStreamingTests(unittest.TestCase):

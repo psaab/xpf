@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import math
 import os
@@ -17,24 +16,16 @@ import time
 import unittest
 from unittest import mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 
 MODULE_PATH = Path(__file__).with_name("fairness_multi_sample.py")
 EQUAL_FLOW_CAPTURE_PATH = Path(__file__).with_name("fairness_equal_flow_capture.py")
 HARNESS_PATH = Path(__file__).with_name("fairness-harness.sh")
 CLASS_SWEEP_PATH = Path(__file__).with_name("fairness-cos-class-sweep.sh")
-SPEC = importlib.util.spec_from_file_location("fairness_multi_sample", MODULE_PATH)
-assert SPEC is not None
-fairness_multi_sample = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-SPEC.loader.exec_module(fairness_multi_sample)
-EQUAL_FLOW_SPEC = importlib.util.spec_from_file_location(
-    "fairness_equal_flow_capture",
-    EQUAL_FLOW_CAPTURE_PATH,
-)
-assert EQUAL_FLOW_SPEC is not None
-fairness_equal_flow_capture = importlib.util.module_from_spec(EQUAL_FLOW_SPEC)
-assert EQUAL_FLOW_SPEC.loader is not None
-EQUAL_FLOW_SPEC.loader.exec_module(fairness_equal_flow_capture)
+fairness_multi_sample = load_subject("fairness_multi_sample", MODULE_PATH)
+fairness_equal_flow_capture = load_subject("fairness_equal_flow_capture", EQUAL_FLOW_CAPTURE_PATH)
 
 
 class FairnessMultiSampleTest(unittest.TestCase):

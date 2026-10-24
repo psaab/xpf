@@ -36,13 +36,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "dist"))
 
-import importlib.util
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from load_subject import load_subject  # noqa: E402
 
-_spec = importlib.util.spec_from_file_location(
+xpf_deploy = load_subject(
     "xpf_deploy_8597",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "xpf-deploy.py"))
-xpf_deploy = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(xpf_deploy)
 
 
 class DependentOverlaysFailsClosed8597(unittest.TestCase):

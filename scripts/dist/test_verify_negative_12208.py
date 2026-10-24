@@ -11,7 +11,6 @@ fixture. No live apt, keyring, or source-list mutation is possible.
 from __future__ import annotations
 
 import contextlib
-import importlib.util
 import io
 import os
 import shutil
@@ -21,15 +20,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from load_subject import load_subject  # noqa: E402
+
 _DIST = Path(__file__).resolve().parent
 sys.path.insert(0, str(_DIST))
 import sign  # noqa: E402
 
-_PUBLISH_SPEC = importlib.util.spec_from_file_location(
-    "publish_12208", _DIST / "publish.py")
-publish = importlib.util.module_from_spec(_PUBLISH_SPEC)
-assert _PUBLISH_SPEC.loader is not None
-_PUBLISH_SPEC.loader.exec_module(publish)
+publish = load_subject("publish_12208", _DIST / "publish.py")
 
 _HAVE_MINISIGN = shutil.which("minisign") is not None
 _INSTALL_SH = _DIST / "install.sh"
