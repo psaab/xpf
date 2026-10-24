@@ -111,10 +111,11 @@ use super::poll_stages::{
     FabricIngressOutcome, IpsecPassthroughOutcome, ScreenCheckOutcome, StageOutcome,
     SynCookieAckOutcome, ike_host_inbound_gate_context,
     ike_host_inbound_gate_context_with_ambiguous, reinject_ipsec_passthrough,
-    screen_zone_with_state, stage_classify_fabric_ingress, stage_ipsec_passthrough_check,
+    screen_zone_roles, stage_classify_fabric_ingress, stage_ipsec_passthrough_check,
     stage_ipsec_passthrough_check_with_scope,
     stage_link_layer_classify, stage_native_gre_decap, stage_parse_flow_and_learn,
-    stage_screen_check, stage_screen_syn_cookie_ack_on_session_miss, stage_wg_decap,
+    stage_screen_check_with_ambiguous, stage_screen_syn_cookie_ack_on_session_miss_with_ambiguous,
+    stage_wg_decap,
 };
 use super::*;
 use crate::policy::evaluate_policy_result_with_icmp_at;
@@ -1608,25 +1609,36 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // elicit, and the packet reaches its ordinary counted filter
                 // enforcement below either way, so a profile resolved for a
                 // different zone must not buy this zone a filter re-walk.
-                let input_filter_denied_before_screens =
-                    screen_zone_with_state(worker_ctx, meta, ingress_zone_override, screen)
-                        .is_some()
-                        && input_filter_would_deny_before_screen(
-                            worker_ctx.forwarding,
-                            packet_frame,
-                            flow.as_ref(),
-                            meta,
-                        );
+                // #16051: an ambiguous arrival has TWO candidate zones (raw
+                // ingress + withheld claimed); the walk runs if either does.
+                let screen_roles = screen_zone_roles(
+                    worker_ctx,
+                    meta,
+                    ingress_zone_override,
+                    ambiguous_zone,
+                    screen,
+                );
+                let input_filter_denied_before_screens = (screen_roles
+                    .raw_zone
+                    .is_some_and(|(_, name)| screen.zone_has_screen_state(name))
+                    || screen_roles.claimed_zone.is_some())
+                    && input_filter_would_deny_before_screen(
+                        worker_ctx.forwarding,
+                        packet_frame,
+                        flow.as_ref(),
+                        meta,
+                    );
                 // #946 Phase 1 stage 10: screen / IDS slow-path.
                 // Filter-denied packets continue to their ordinary filter
                 // enforcement site below without mutating screens or producing
                 // a challenge. Caller still owns the recycle push.
                 if !input_filter_denied_before_screens {
-                    match stage_screen_check(
+                    match stage_screen_check_with_ambiguous(
                         flow.as_ref(),
                         packet_frame,
                         meta,
                         ingress_zone_override,
+                        ambiguous_zone,
                         now_ns,
                         now_secs,
                         screen,
@@ -4194,11 +4206,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         telemetry.counters.session_misses += 1;
                         telemetry.dbg.session_miss += 1;
                         if !input_filter_denied_before_screens {
-                            match stage_screen_syn_cookie_ack_on_session_miss(
+                            match stage_screen_syn_cookie_ack_on_session_miss_with_ambiguous(
                                 Some(flow),
                                 packet_frame,
                                 meta,
                                 ingress_zone_override,
+                                ambiguous_zone,
                                 now_ns,
                                 now_secs,
                                 screen,

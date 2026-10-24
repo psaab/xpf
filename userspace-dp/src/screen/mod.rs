@@ -177,6 +177,7 @@
 //! the recoverable challenge response.
 
 use rustc_hash::FxHashMap;
+use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod extract;
@@ -863,6 +864,50 @@ impl ScreenState {
     /// flood Drop and defeat fabric cross-chassis forwarding
     /// (`docs/fabric-cross-chassis-fwd.md`). The caller passes
     /// `skip_rate_flood = (meta.meta_flags & FABRIC_INGRESS_FLAG) != 0`.
+    ///
+    /// #16051 (RN-04): stateless-only union over additional candidate
+    /// zones (the withheld claimed zone of an ambiguous fabric
+    /// arrival). Returns the first candidate's stateless drop reason,
+    /// or `None`. Pure: reads only the candidate profiles (a referenced
+    /// but unresolved profile contributes its #7168 conservative
+    /// default, matching `missing_profile_verdict`'s stateless subset),
+    /// charges NO flood/cookie/scan state, mints NO challenge, and
+    /// grants NO bypass — the claimed zone may only veto, never admit.
+    /// `addrs_known` gates LAND exactly as on the flowless path.
+    pub fn stateless_screen_drop_for_zones<'a>(
+        &self,
+        zones: impl IntoIterator<Item = &'a str>,
+        pkt: &ScreenPacketInfo,
+        addrs_known: bool,
+    ) -> Option<&'static str> {
+        for zone in zones {
+            let profile = match self.zones.get(zone) {
+                Some(zstate) => Cow::Borrowed(&zstate.profile),
+                None => {
+                    if self.missing_profile_refs.contains_key(zone)
+                        || self.inert_profile_refs.contains_key(zone)
+                    {
+                        Cow::Owned(ScreenProfile::conservative_default())
+                    } else {
+                        continue;
+                    }
+                }
+            };
+            if addrs_known {
+                if let Some(reason) = stateless::check_land(&profile, pkt) {
+                    return Some(reason);
+                }
+            }
+            if let Some(reason) = stateless::check_tcp_flag_screens(&profile, pkt) {
+                return Some(reason);
+            }
+            if let Some(reason) = stateless::check_fragment_and_route(&profile, pkt) {
+                return Some(reason);
+            }
+        }
+        None
+    }
+
     pub fn check_packet_with_zone_id_opts(
         &mut self,
         zone: &str,

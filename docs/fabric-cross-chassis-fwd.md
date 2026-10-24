@@ -1035,6 +1035,51 @@ forgery residual described below still applies.
   fabric interface's own zone governs policy, screens, and
   host-inbound) — never below it.
 
+### Screens and SYN-cookie on ambiguous arrivals (#16051, RN-04)
+
+Stage 10 (screens + SYN-cookie) runs BEFORE any forwarding resolution
+exists, so the owner-RG promotion above cannot adjudicate its zone —
+yet resolving the profile from the raw fabric ingress alone skipped
+the claimed zone's profile entirely: a co-moved flow whose claimed
+zone carried a screen the fabric zone lacks was admitted unscreened
+and only then promoted. The stage now judges the packet under a
+UNION of the two candidate profiles (`screen_zone_roles` →
+`ScreenState::stateless_screen_drop_for_zones`):
+
+- The RAW ingress zone is always the positional first role — even when
+  it has no screen state — and keeps its full profile: flood/cookie state,
+  counters, and challenges are charged exactly as for a local arrival
+  (plus the #4155 fabric rate-skip). This is also the zone that
+  validates a returning cookie ACK — the peer that minted the cookie
+  screened under it.
+- The withheld CLAIMED zone contributes ONLY a stateless veto
+  (LAND, TCP-flag, fragment, and source-route screens — the
+  side-effect-free set, with the #7168 conservative default for a
+  referenced-but-unresolved claimed profile). A claimed stateless
+  Drop recycles the packet at stage 10 (or vetoes a Validated cookie
+  ACK on the session-miss arm); a claimed `alarm-without-drop`
+  profile makes the veto log-only. The claimed zone charges no flood
+  sketch, mints no SYN-cookie challenge, and grants no
+  validated-client bypass — it can only subtract, never admit — so
+  no claimed-zone state is created before owner proof and no
+  premature SYN-ACK is possible (the #15947 deferred-challenge final
+  admission still governs any reply).
+
+Residual (bounded): rate-based screens (SYN/ICMP/UDP flood) of the
+claimed zone do not fire pre-promotion; they fire on the true ingress
+node for a legitimate punt (#4155) and, for a forged clone, the
+packet is still adjudicated as a local ingress in the claimed zone
+once promoted (the accepted residual below). A stateless forger
+therefore gains nothing: any packet the claimed profile would drop
+statelessly is dropped, and everything else receives exactly the
+promoted adjudication.
+
+RED-on-revert coverage: `afxdp/tests_fabric_zone_stamp.rs`
+(`ambiguous_claimed_zone_screen_drop_applies_16051` — claimed `lan`
+syn-fin drop applies, no session/forward/SYN-ACK; control
+`ambiguous_clean_syn_still_admitted_16051` — clean SYN still promoted
+and admitted).
+
 ### Residual (accepted, documented)
 
 On a SHARED fabric segment, an attacker can clone the exact stamp
