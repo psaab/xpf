@@ -7766,3 +7766,151 @@ fn peer_synced_fabric_redirect_snat_declines_16215() {
         "a withdrawn SNAT rule on a real-egress row must still revoke (#16215)"
     );
 }
+
+/// FZDiag37/#16217: an established, traffic-carrying session must
+/// NEVER be StaleSourceNat-revoked on a reverse hit whose forward
+/// companion is not materialized locally (companion-less
+/// fabric/synced reverse row): the row carries no forward VLAN
+/// provenance by construction, so the missing-VLAN verdict is
+/// structural absence, not staleness evidence — decline (keep
+/// session, drop packet). The non-established twin keeps the
+/// fail-closed revocation, and a genuinely withdrawn rule under a
+/// NEW config epoch still revokes through the reverse hit.
+///
+/// RED-on-revert: removing the established-guard at the missing-VLAN
+/// arm revokes the first cell (canonical-less StaleSourceNat); the
+/// row would be torn down at failover by its first post-FO reply.
+#[test]
+fn established_reverse_hit_never_stale_snat_revoked_16217() {
+    let case = reverse_snat_case_13652();
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    // Forward row only (companion-less reverse hit): the imported row
+    // imports Established (wire 0) and carries admitted traffic.
+    assert!(sessions.install_with_protocol_with_origin(
+        case.0.clone(),
+        case.2,
+        case.3.clone(),
+        case.6,
+        1_000_000,
+        case.0.protocol,
+        0x10,
+    ));
+    sessions.account_packet(&case.0, 100, 0x10, 0);
+    sessions.account_packet(&case.1, 100, 0x10, 0);
+    assert!(
+        sessions.forward_established_with_traffic(&case.0),
+        "fixture: forward row must be established with traffic"
+    );
+    sessions.mark_source_nat_revalidated(&case.0, Some(false));
+    sessions.set_forwarding_revalidation_gen(2, 2);
+    // Reverse hit with NO forward_ingress_vlan_id on the reverse row
+    // (the companion-less fabric/synced shape): the missing-VLAN arm
+    // would revoke; the established-guard must decline instead.
+    let revocation = reverse_snat_hit_13652(&imported_snat_forwarding(false), &mut sessions, &case);
+    assert!(
+        revocation.is_none(),
+        "an established session must decline, not revoke, on a companion-less reverse hit (FZDiag37)"
+    );
+    assert!(
+        sessions.entry_with_origin(&case.0).is_some(),
+        "the established forward row must survive its reverse hit"
+    );
+
+    // Control: the provenance-UNKNOWN shape (the #15958 legacy-peer
+    // row: provenance None, nat_scope None, fabric, no forward VLAN)
+    // keeps the fail-closed missing-VLAN revocation even when
+    // established with traffic — unknown/legacy provenance carries no
+    // positive dynamic-SNAT proof, so the #13910/#13771 fail-close
+    // stands. (A Some(false) control would decline pre-guard via the
+    // #15958 fabric arm and prove nothing about the guard.)
+    let forwarding = reverse_snat_forwarding_13771(false);
+    let mut unknown = reverse_snat_case_from_production_13771(&forwarding);
+    unknown.5.forward_ingress_vlan_id = None;
+    unknown.5.fabric_ingress = true;
+    unknown.5.nat_scope_ifindex = None;
+    unknown.7 = None;
+    let mut sessions = SessionTable::new();
+    // Companion-less: install ONLY the synthesized reverse row (the
+    // forward half lives on another worker/node — the split shape).
+    // The established forward state that must NOT rescue this
+    // provenance-unknown row is counter traffic on the reverse row
+    // itself is absent too: no forward row exists to be established.
+    // The reverse companion row the hit lands on (companion-less =
+    // no FORWARD row beside it on THIS worker — the production shape
+    // installs only the synthesized reverse row here).
+    assert!(sessions.install_with_protocol_with_origin(
+        unknown.1.clone(),
+        unknown.4,
+        unknown.5.clone(),
+        SessionOrigin::ReverseFlow,
+        1_000_000,
+        unknown.1.protocol,
+        0x10,
+    ));
+    // No forward row locally: the guard cannot fire (nothing
+    // established to protect), so the fail-close must stand.
+    assert!(
+        !sessions.forward_established_with_traffic(&unknown.0),
+        "fixture: companion-less table holds no established forward row"
+    );
+    let revocation = reverse_snat_hit_fabric_15958(&forwarding, &mut sessions, &unknown)
+        .expect("unknown-provenance fabric row must fail closed, not decline (FZDiag37 control)");
+    assert!(revocation.canonical_key.is_none());
+    assert!(matches!(
+        revocation.reason,
+        PolicyRevocationReason::StaleSourceNat
+    ));
+}
+
+/// FZDiag37/#16217: the epoch escape — an established session whose
+/// NAT binding ACTUALLY changed (rule withdrawn under a new config
+/// generation) still revokes on a reverse hit; the guard declines
+/// only while the judged epoch is current. And a declined-shape row
+/// (provenance-less reverse row with a RECORDED forward VLAN) still
+/// survives, exactly as the declined shapes did before.
+#[test]
+fn established_reverse_hit_revokes_on_config_epoch_change_16217() {
+    let case = reverse_snat_case_13652();
+    let mut no_rules = imported_snat_forwarding(false);
+    no_rules.source_nat_rules = crate::nat::parse_source_nat_rules(&[]);
+    // Installed pair, established with traffic, judged at gen 1.
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.install_with_protocol_with_origin(
+        case.0.clone(),
+        case.2,
+        case.3.clone(),
+        case.6,
+        1_000_000,
+        case.0.protocol,
+        0x10,
+    ));
+    assert!(sessions.install_with_protocol_with_origin(
+        case.1.clone(),
+        case.4,
+        case.5.clone(),
+        SessionOrigin::ReverseFlow,
+        1_000_000,
+        case.1.protocol,
+        0x10,
+    ));
+    sessions.account_packet(&case.0, 100, 0x10, 0);
+    sessions.account_packet(&case.1, 100, 0x10, 0);
+    sessions.mark_source_nat_revalidated(&case.0, Some(false));
+    // Same-epoch control: unchanged rule survives (judged valid).
+    assert!(
+        reverse_snat_hit_13652(&imported_snat_forwarding(false), &mut sessions, &case).is_none(),
+        "an unchanged SNAT rule must survive the reverse hit"
+    );
+    // New config epoch + withdrawn rule: the established session's
+    // binding actually changed, so the reverse hit revokes.
+    sessions.set_forwarding_revalidation_gen(2, 2);
+    let revocation = reverse_snat_hit_13652(&no_rules, &mut sessions, &case)
+        .expect("a withdrawn SNAT rule under a new config epoch must revoke (#16217 epoch escape)");
+    assert_eq!(revocation.canonical_key.as_ref(), Some(&case.0));
+    assert!(matches!(
+        revocation.reason,
+        PolicyRevocationReason::StaleSourceNat
+    ));
+}

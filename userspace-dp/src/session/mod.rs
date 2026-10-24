@@ -3160,6 +3160,47 @@ impl SessionTable {
             }
         }
     }
+    /// FZDiag37/#16217: is the forward row at `key` an established,
+    /// traffic-carrying session? `established && !handshake_pending &&
+    /// !closing` (handshake complete — the same triple the fabric
+    /// adoption gate and `local_established_for_wire_at` require) plus
+    /// admitted traffic in either direction (`fwd_packets +
+    /// rev_packets > 0` on the forward entry, where reverse packets
+    /// fold). A missing row, a still-opening pair, a closing pair, or a
+    /// completed-but-never-served row answers false.
+    pub(crate) fn forward_established_with_traffic(&self, key: &SessionKey) -> bool {
+        self.entry_by_key(key).is_some_and(|entry| {
+            entry.established
+                && !entry.handshake_pending
+                && !entry.closing
+                && entry.counters.fwd_packets + entry.counters.rev_packets > 0
+        })
+    }
+
+    /// FZDiag37/#16217: the live config generation this worker
+    /// revalidates against ("NAT binding actually changed" epoch). An
+    /// HA ownership/failover transition does not advance it; only a
+    /// config/FIB commit does. 0 when no valid stamp exists (fail
+    /// closed: no epoch to compare, so no established-guard).
+    pub(crate) fn forwarding_revalidation_config_generation(&self) -> u64 {
+        if self.forwarding_revalidation_gen.valid {
+            self.forwarding_revalidation_gen.config_generation
+        } else {
+            0
+        }
+    }
+    /// FZDiag37/#16217: the config generation under which the forward
+    /// row at `key` last had its source-NAT translation judged valid
+    /// (`source_nat_revalidated.config_generation`), or None when it
+    /// was never judged (peer-originated / unvalidated state).
+    pub(crate) fn source_nat_revalidated_config_generation(
+        &self,
+        key: &SessionKey,
+    ) -> Option<u64> {
+        self.entry_by_key(key)
+            .and_then(|entry| entry.source_nat_revalidated)
+            .map(|stamp| stamp.config_generation)
+    }
     /// Return the ordinary source-NAT origin recorded on this session.
     pub(crate) fn source_nat_static_for(&self, key: &SessionKey) -> Option<bool> {
         self.entry_by_key(key)
