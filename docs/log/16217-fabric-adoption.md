@@ -1322,3 +1322,64 @@ run 2 SUM 86.2 GBytes / 10.6 Gbit/s sender+receiver.
 Cluster restored after each run: clean master `2c8575b70e`, helper
 `2f2f5cbf...b04` both nodes (hash-proved), RG0/1/2 node0 primary,
 target OK, P4 verification 13.9 Gbit/s.
+
+## Wire30 A+B + Wire31 lease publication (this head)
+
+Wire30 (committed `4dd3eed372` on `be259c5596`): (A) the adoption
+gate falls back to the candidate's stored ForwardCandidate egress
+RG when the standby-FIB re-resolution is `ClusterTerminalHAInactive`
+egress 0 (connected /24 HA-suppressed in `connected_v4`, surviving
+only in `connected_*_by_ifindex`); (B) reverse synthesis converts
+adopted flows' WAN replies to FabricRedirect when the forward
+match is FabricRedirect and the reply LAN destination RG is known
+and not forwarding-active locally. Unit: `cargo test 16217` 48/48
+(new `gate_falls_back_to_stored_forward_candidate_on_standby_fib_16217`,
+`adopted_reverse_reply_converts_to_fabric_redirect_16217`).
+
+Wire31 instrument first (D31 scratch probe at the gate, stripped
+after): at the failover instant the heavy tuple's gate reads
+`rg1_cached=(active=false wd=438 lease=Inactive fwd_active=false)
+fresh={}` — 346/352 heavy-tuple lines at d28 on fw1 — while the
+status view already reads `rg1 active=true watchdog=438` (later
+samples `ActiveUntil(519)` on some workers). Lease mechanism:
+`is_forwarding_active = active && lease.active(now)`,
+`ActiveUntil(max(watchdog, receipt) + 10s)`
+(`HA_WATCHDOG_STALE_AFTER_SECS`), minted only by
+`Coordinator::update_ha_state` and by the session fast path
+`try_refresh_ha_leases` for matching sets. Per-worker visibility
+is racy: the cached `ha_state` (per-tick `ha_state.load()` at
+`loop_body/mod.rs:1305`) and the fresh set (per-poll load in
+`poll_binding`) are two independent ArcSwap loads, so a worker can
+read the old map in one and the new in the other.
+
+Lease fix (committed `6ea62ce0a4`, #16382):
+`try_refresh_ha_leases` no longer stores a mixed set containing an
+activation-pending RG (stored inactive / incoming active); the
+whole set returns NeedsLock so the locked path publishes the
+activation with epoch bumps, RefreshOwnerRGS, prewarm and neighbor
+warm. New `mixed_set_activation_pending_needs_lock_16382`
+(FAIL-ON-REVERT) + `mixed_set_no_activation_still_served_16382`
+control; `cargo test 16382` 2/2, `9629` 29/29, `16217` 48/48.
+
+Live aged table (all-node0, P4 70 s, RG1 fw0->fw1 at 30 s age +
+failback, CLI-verified node0->node1->node0, complete 72-interval
+logs; evidence `/var/worktrees/fzwire31/{diag1,diag2,cell1}/`):
+
+| Arm | Build | SUM zero intervals | Verdict |
+|---|---|---|---|
+| Wire30 A+B + D30 probe | 99.16217 dirty | 39 (from FO+1 s) | FAIL |
+| Wire31 D31 instrument (A+B only) | 0.0.23463+g4dd3eed dirty | 39 | FAIL |
+| Wire31 lease fix (no probe) | 0.0.23464+g6ea62ce | 39 | FAIL |
+| Wire31 lease fix + D31 probe | 0.0.23464+g6ea62ce dirty | 39 | FAIL |
+
+Acceptance (ZERO zeros TWICE) NOT met. The lease fix is
+unit-proven and removes the fast-path laundering, but the live
+gate still sees a stale RG1 triple on the heavy worker at the FO
+instant (diag2 d28: 177 stale vs 27 active lines, concentrated on
+the heavy port) — the remaining leg is the per-worker snapshot
+visibility race at the failover instant (cached vs fresh load
+skew and/or the locked transition landing after the retransmit
+burst), NOT gate arithmetic and NOT the gate's fresh-set input.
+Cluster restored after each run: clean master `2c8575b70e`,
+helper `2f2f5cbf...b04` both nodes (hash-proved), RG0/1/2 node0
+primary, target OK, P4 verification 14.1-18.6 Gbit/s.

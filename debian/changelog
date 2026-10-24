@@ -1,5 +1,26 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Adoption on the stored egress and fabric return for adopted
+    replies (#16217, Wire30 A+B), and activation-pending HA sets
+    routed to the locked path (#16382, Wire31): the adoption
+    gate falls back to the candidate's stored ForwardCandidate
+    egress RG when the standby-FIB re-resolution is the
+    egress-0 cluster terminal, and reverse synthesis converts
+    adopted flows' WAN replies to FabricRedirect when the LAN
+    destination RG is peer-owned. The session-socket lease
+    refresh no longer stores a mixed set containing an
+    activation-pending RG (which laundered the activation past
+    the locked transition); such sets return NeedsLock so
+    update_ha_state publishes the activation with its side
+    effects. Live aged acceptance still fails (see
+    docs/log/16217-fabric-adoption.md Wire31 section) — the
+    residual gate visibility race is not yet closed.
+
+ -- xpf maintainers <noreply@anthropic.com>  Fri, 23 Oct 2026 00:00:00 +0000
+
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Adoption-gate ownership on the exact session resolution
     (#16217, Codex N1 final + N1b): the fabric-adoption gate no
     longer resolves the pre-DNAT wire destination destination-only
