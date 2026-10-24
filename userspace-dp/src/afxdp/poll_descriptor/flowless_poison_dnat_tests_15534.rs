@@ -118,6 +118,7 @@ fn flowless_poisoned_address_only_dnat_drops_15534() {
         None,
         None,
         None,
+        false,
     );
     assert!(
         matches!(pre, FlowlessPreRoutingNat::Poisoned { .. }),
@@ -142,6 +143,7 @@ fn flowless_poisoned_address_only_dnat_drops_15534() {
         None,
         None,
         None,
+        false,
     );
     assert!(
         resolved.is_none(),
@@ -165,6 +167,7 @@ fn flowless_poisoned_port_scoped_dnat_drops_15534() {
         None,
         None,
         None,
+        false,
     );
     assert!(
         matches!(pre, FlowlessPreRoutingNat::Poisoned { .. }),
@@ -188,6 +191,7 @@ fn flowless_poisoned_port_scoped_dnat_drops_15534() {
         None,
         None,
         None,
+        false,
     );
     assert!(resolved.is_none(), "port-scoped poison must be terminal");
 }
@@ -206,6 +210,7 @@ fn flowless_poisoned_fragment_unknown_proto_drops_15534() {
         None,
         None,
         None,
+        false,
     );
     assert!(
         matches!(pre, FlowlessPreRoutingNat::Poisoned { .. }),
@@ -229,6 +234,7 @@ fn flowless_healthy_dnat_controls_15534() {
         None,
         None,
         None,
+        false,
     );
     assert!(
         matches!(pre, FlowlessPreRoutingNat::Translated { .. }),
@@ -253,6 +259,7 @@ fn flowless_healthy_dnat_controls_15534() {
         None,
         None,
         None,
+        false,
     );
     assert!(
         matches!(pre, FlowlessPreRoutingNat::None),
@@ -269,9 +276,76 @@ fn flowless_healthy_dnat_controls_15534() {
         None,
         None,
         None,
+        false,
     );
     assert!(
         matches!(pre, FlowlessPreRoutingNat::None),
         "no DNAT rule must not drop, got non-None"
+    );
+}
+
+#[test]
+fn native_flowless_scoped_static_nat_not_misclassified_ambiguous_16045() {
+    // Fold regression: native flowless callers pass
+    // (override=None, scope=None), exactly as an ambiguous fabric
+    // arrival does at the old inference site. Only the explicit
+    // fabric-arrival flag may enable ambiguous provenance.
+    let mut fw = ForwardingState::default();
+    fw.static_nat = crate::nat::StaticNatTable::from_snapshots(
+        &[crate::StaticNATRuleSnapshot {
+            name: "native-scoped".to_string(),
+            from_zone: "trust".to_string(),
+            external_ip: EXT4.to_string(),
+            internal_ip: "192.168.1.10".to_string(),
+            ..Default::default()
+        }],
+        &crate::nat::NatCounterStore::default(),
+    );
+    fw.ifindex_to_zone_id.insert(6, 1);
+    fw.zone_id_to_name.insert(1, "trust".to_string());
+    fw.zone_name_to_id.insert("trust".to_string(), 1);
+
+    let meta = v4_meta(crate::ip_proto::PROTO_GRE);
+    let frame = gre_frame();
+    let native = flowless_pre_routing_destination_nat(
+        &fw,
+        &v4_flow(EXT4, crate::ip_proto::PROTO_GRE),
+        meta,
+        flowless_nat_wire_info(&frame, meta),
+        None,
+        None,
+        None,
+        false,
+    );
+    assert!(
+        matches!(native, FlowlessPreRoutingNat::Translated { .. }),
+        "native (None, None) flowless input must retain scoped static NAT, got {}",
+        match &native {
+            FlowlessPreRoutingNat::None => "None",
+            FlowlessPreRoutingNat::Translated { .. } => "Translated",
+            FlowlessPreRoutingNat::Untranslatable => "Untranslatable",
+            FlowlessPreRoutingNat::Poisoned { .. } => "Poisoned",
+        }
+    );
+
+    let ambiguous = flowless_pre_routing_destination_nat(
+        &fw,
+        &v4_flow(EXT4, crate::ip_proto::PROTO_GRE),
+        meta,
+        flowless_nat_wire_info(&frame, meta),
+        None,
+        None,
+        None,
+        true,
+    );
+    assert!(
+        matches!(ambiguous, FlowlessPreRoutingNat::None),
+        "explicit ambiguous fabric provenance must suppress the scoped static winner, got {}",
+        match &ambiguous {
+            FlowlessPreRoutingNat::None => "None",
+            FlowlessPreRoutingNat::Translated { .. } => "Translated",
+            FlowlessPreRoutingNat::Untranslatable => "Untranslatable",
+            FlowlessPreRoutingNat::Poisoned { .. } => "Poisoned",
+        }
     );
 }

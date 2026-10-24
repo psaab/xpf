@@ -128,7 +128,11 @@ fn static_scope_ok(
 /// match under one identity is valid provenance under any other; a
 /// constrained rule's match is keyed to the selecting identity.
 #[inline]
-fn static_scope_constrained(from_zone: &str, from_interface: &str, from_routing_instance: &str) -> bool {
+fn static_scope_constrained(
+    from_zone: &str,
+    from_interface: &str,
+    from_routing_instance: &str,
+) -> bool {
     !(from_zone.is_empty() && from_interface.is_empty() && from_routing_instance.is_empty())
 }
 
@@ -738,7 +742,6 @@ impl StaticNatTable {
         })
     }
 
-
     pub(crate) fn from_snapshots(
         snaps: &[StaticNATRuleSnapshot],
         nat_counters: &NatCounterStore,
@@ -1089,18 +1092,14 @@ impl StaticNatTable {
     }
 
     /// #16045: like [`match_dnat_with_counter_scoped`], but for an
-    /// ambiguous-provenance scope: whenever ANY scope-constrained entry
-    /// or block is ELIGIBLE under the caller's (withheld-provenance)
-    /// identity for this destination — whether or not it would win the
-    /// pick — return `None` (no translation). A constrained rule's
-    /// match is keyed to the identity that selected it, and the later
-    /// policy may promote a different (claimed) zone, so letting even
-    /// an unscoped winner proceed while a constrained sibling claimed
-    /// the same tuple would key the flow to an unadjudicated identity.
-    /// Fail closed on the claim itself; unscoped-only matches translate
-    /// exactly as the ordinary lookup. Mirrors the eligibility gates
-    /// (`static_scope_ok` + `source_ok`) of the ordinary matcher,
-    /// including its block scan and external-prefix containment.
+    /// ambiguous-provenance scope. Winner selection runs FIRST, using
+    /// exactly the ordinary matcher's precedence (port-specific host
+    /// entries before whole-address entries; interface > zone >
+    /// routing-instance > unscoped within a key; then scoped blocks).
+    /// Only the selected winner is suppressed when that winner itself
+    /// is scope-constrained. A losing constrained sibling therefore
+    /// cannot suppress an unscoped winner, while a constrained winner
+    /// is not replaced by a broader fallback after suppression.
     pub(crate) fn match_dnat_ambiguous_provenance_scoped(
         &self,
         dst_ip: IpAddr,
@@ -1110,12 +1109,8 @@ impl StaticNatTable {
         ingress_ifname: &str,
         ingress_routing_instance: &str,
     ) -> Option<(NatDecision, Option<Arc<NatRuleCounter>>)> {
-        let entry_claims = |entry: &StaticNatEntry| {
-            static_scope_constrained(
-                &entry.from_zone,
-                &entry.from_interface,
-                &entry.from_routing_instance,
-            ) && static_scope_ok(
+        let zone_ok = |entry: &&StaticNatEntry| {
+            static_scope_ok(
                 &entry.from_zone,
                 &entry.from_interface,
                 &entry.from_routing_instance,
@@ -1124,40 +1119,76 @@ impl StaticNatTable {
                 ingress_routing_instance,
             ) && source_ok(&entry.source, src_ip)
         };
-        let claimed = self
-            .dnat
-            .get(&(dst_ip, Some(dst_port)))
-            .is_some_and(|entries| entries.iter().any(|e| entry_claims(e)))
-            || self
-                .dnat
-                .get(&(dst_ip, None))
-                .is_some_and(|entries| entries.iter().any(|e| entry_claims(e)))
-            || self.blocks.iter().any(|blk| {
-                static_scope_constrained(
-                    &blk.from_zone,
-                    &blk.from_interface,
-                    &blk.from_routing_instance,
-                ) && static_scope_ok(
-                    &blk.from_zone,
-                    &blk.from_interface,
-                    &blk.from_routing_instance,
-                    ingress_zone,
-                    ingress_ifname,
-                    ingress_routing_instance,
-                ) && source_ok(&blk.source, src_ip)
-                    && blk.external.contains(dst_ip)
-            });
-        if claimed {
-            return None;
+        if let Some(entry) = pick_scoped(self.dnat.get(&(dst_ip, Some(dst_port))), &zone_ok)
+            .or_else(|| pick_scoped(self.dnat.get(&(dst_ip, None)), &zone_ok))
+        {
+            if static_scope_constrained(
+                &entry.from_zone,
+                &entry.from_interface,
+                &entry.from_routing_instance,
+            ) {
+                return None;
+            }
+            return Some((
+                NatDecision {
+                    rewrite_src: None,
+                    rewrite_dst: Some(entry.internal_ip),
+                    rewrite_dst_port: entry.mapped_port,
+                    ..NatDecision::default()
+                },
+                entry.hit_counter.clone(),
+            ));
         }
-        self.match_dnat_with_counter_scoped(
-            dst_ip,
-            dst_port,
-            src_ip,
-            ingress_zone,
-            ingress_ifname,
-            ingress_routing_instance,
-        )
+
+        // Blocks are considered only after host entries miss, as in the
+        // ordinary matcher. Select the winning block before deciding
+        // whether its scope suppresses the translation.
+        let mut best: Option<(&StaticNatBlock, IpAddr)> = None;
+        let mut best_tier = u8::MAX;
+        let mut best_prefix_len = 0;
+        for blk in &self.blocks {
+            if static_scope_ok(
+                &blk.from_zone,
+                &blk.from_interface,
+                &blk.from_routing_instance,
+                ingress_zone,
+                ingress_ifname,
+                ingress_routing_instance,
+            ) && source_ok(&blk.source, src_ip)
+                && blk.external.contains(dst_ip)
+                && let Some(translated) = remap_addr(dst_ip, &blk.external, &blk.internal)
+            {
+                let tier = static_scope_tier(
+                    &blk.from_zone,
+                    &blk.from_interface,
+                    &blk.from_routing_instance,
+                );
+                let prefix_len = blk.external.len;
+                if tier < best_tier || (tier == best_tier && prefix_len > best_prefix_len) {
+                    best = Some((blk, translated));
+                    best_tier = tier;
+                    best_prefix_len = prefix_len;
+                }
+            }
+        }
+        if let Some((blk, translated)) = best {
+            if static_scope_constrained(
+                &blk.from_zone,
+                &blk.from_interface,
+                &blk.from_routing_instance,
+            ) {
+                return None;
+            }
+            return Some((
+                NatDecision {
+                    rewrite_src: None,
+                    rewrite_dst: Some(translated),
+                    ..NatDecision::default()
+                },
+                blk.hit_counter.clone(),
+            ));
+        }
+        None
     }
 
     /// Match outbound: if src_ip is an internal IP, return SNAT decision.

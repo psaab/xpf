@@ -9366,6 +9366,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 ingress_zone_override,
                                 ingress_nat_scope_ifindex,
                                 route_table_override.as_deref(),
+                                ambiguous_zone.is_some(),
                             ) else {
                                 if crate::afxdp::frame::frame_is_non_first_fragment(
                                     packet_frame,
