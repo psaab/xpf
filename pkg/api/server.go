@@ -727,6 +727,14 @@ type Server struct {
 	// authz.PeerCouldBeLocalNow (#5561).
 	peerLocalityFn func(client, server net.Addr) bool
 	store          *configstore.Store
+	// restSessions binds each live REST config-session token to the binding
+	// key of the principal that minted it and the store holder epoch of that
+	// mint (#16069). Guarded by restSessionsMu; enter/exit hold that mutex
+	// across the store holder transition so bind/unbind are generation-checked
+	// against the same lock. Lazily allocated so &Server{store: ...} test
+	// fixtures need no setup.
+	restSessionsMu sync.Mutex
+	restSessions   map[string]restSessionBinding
 	dp             apiRuntimeDataPlane
 	fwdSampler     *fwdstatus.Sampler
 	eventBuf       *logging.EventBuffer
