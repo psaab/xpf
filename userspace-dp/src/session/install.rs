@@ -721,6 +721,8 @@ impl SessionTable {
                 // of the entry.
                 session_id,
                 tcp_rcv_nxt: 0,
+                tcp_peer_rcv_nxt: 0,
+                tcp_peer_rcv_nxt_seen: false,
                 tcp_rcv_wnd: 0,
                 tcp_seq_seen: false,
                 tcp_window_scale: None,
@@ -1141,6 +1143,8 @@ impl SessionTable {
                 // #4915: fresh node-local id allocated above.
                 session_id,
                 tcp_rcv_nxt: 0,
+                tcp_peer_rcv_nxt: 0,
+                tcp_peer_rcv_nxt_seen: false,
                 tcp_rcv_wnd: 0,
                 tcp_seq_seen: false,
                 tcp_window_scale: None,

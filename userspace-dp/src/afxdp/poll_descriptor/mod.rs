@@ -2567,7 +2567,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         if crate::tcp_flags::is_closing(meta.tcp_flags)
                             && !worker_ctx.forwarding.tcp_no_sequence_check
                         {
-                            if sessions.tcp_closing_seq_verdict(&fl.forward_key, seq)
+                            if sessions.tcp_closing_seq_verdict(&fl.forward_key, seq, meta.tcp_flags)
                                 == crate::session::SeqVerdict::Invalid
                             {
                                 binding.scratch.scratch_recycle.push(desc.addr);

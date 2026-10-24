@@ -1418,10 +1418,20 @@ struct SessionEntry {
     last_icmp_error_tat: u64,
     /// #15753: per-direction TCP sequence tracking for RST/FIN validation.
     /// This entry's own send next-seq / ack (peer window edge) and whether
-    /// any seq was observed. Node-local, no wire. `rcv_nxt` is peer's next
-    /// expected seq as learned from this direction's packets (seq+payload);
-    /// `rcv_wnd` is this direction's advertised window capped by maximum-window.
+    /// any seq was observed. Node-local, no wire. `rcv_nxt` is this
+    /// direction's send-end (seq+payload high-water as sent); `rcv_wnd` is
+    /// this direction's advertised window capped by maximum-window.
     tcp_rcv_nxt: u32,
+    /// #16040 fold: the ENDPOINT's receive-next for this direction, as
+    /// acknowledged by the companion direction's ACK field (SYN-ACK ack =
+    /// ISN+1, later ACKs acknowledge delivered data). Distinct from the
+    /// observed send-end above: segments sent but lost downstream are in
+    /// the send-end but not yet in the endpoint's rcv_nxt, and a
+    /// legitimate RST from the sender carries the endpoint's rcv_nxt.
+    /// 0 / `peer_rcv_nxt_seen == false` until an ACK-bearing companion
+    /// segment is observed. Node-local, no wire.
+    tcp_peer_rcv_nxt: u32,
+    tcp_peer_rcv_nxt_seen: bool,
     tcp_rcv_wnd: u32,
     tcp_seq_seen: bool,
     /// #15947 (H29-02): RFC 7323 window-scale shift learned from this

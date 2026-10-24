@@ -14966,8 +14966,10 @@ the value sits in a single typed slot:
     knobs: `no-syn-check-in-tunnel` admits tunnel-decapped mid-stream TCP,
     `rst-invalidate-session` drives immediate RST teardown (opt-in;
     default off per the HA stray-RST rationale in tx_cancel.rs), and
-    sequence tracking validates RST/FIN seq by default
-    (`rst-sequence-check`/`maximum-window` configure it,
+    sequence tracking validates closing seq by default — RST requires
+    an exact match against the endpoint's tracked receive-next
+    (ACK-derived, #16040), FIN validates against the receive
+    window (`rst-sequence-check`/`maximum-window` configure it,
     `no-sequence-check` disables validation). New leaves
     `rst-sequence-check`, `maximum-window <bytes>`, and
     `time-wait-state { session-timeout; session-ageout;

@@ -1,21 +1,33 @@
 use super::tests::{install_forward_reverse_pair, key_v4};
 use super::*;
-use crate::tcp_flags::{TCP_ACK, TCP_RST, TCP_SYN};
+use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_RST, TCP_SYN};
 
 #[test]
 fn in_window_rst_valid_blind_rst_invalid_15753() {
     let forward = key_v4();
     let mut table = SessionTable::new();
     let t0 = 10_000_000_000u64;
-    let _rev = install_forward_reverse_pair(&mut table, &forward, t0, TCP_SYN);
+    let reverse = install_forward_reverse_pair(&mut table, &forward, t0, TCP_SYN);
     table.note_tcp_seq(&forward, 1000, 0, 4096, 0, TCP_SYN, 0);
     table.note_tcp_seq(&forward, 1001, 0, 4096, 100, TCP_ACK, 0);
-    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1050), SeqVerdict::Valid);
-    assert_eq!(table.tcp_closing_seq_verdict(&forward, 0), SeqVerdict::Invalid, "blind seq=0 must not close");
+    // #16040: send-end rcv_nxt is 1101 after 100 payload bytes, but the
+    // endpoint rcv_nxt is only what the reverse direction ACKed. Until
+    // the SYN-ACK/companion ACK is noted the RST verdict is Unknown.
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1101, TCP_RST), SeqVerdict::Unknown, "no endpoint ACK observed yet");
+    // Reverse SYN-ACK (seq 5000, ack 1001) + full ACK of the 100 bytes.
+    table.note_tcp_seq(&reverse, 5000, 1001, 4096, 0, TCP_SYN | TCP_ACK, 0);
+    table.note_tcp_seq(&reverse, 5001, 1101, 4096, 0, TCP_ACK, 0);
+    assert_eq!(table.entry_by_key(&forward).unwrap().tcp_peer_rcv_nxt, 1101);
+    // In-window FIN stays valid; exact endpoint RST is the only RST
+    // that may close.
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1050, TCP_FIN), SeqVerdict::Valid);
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1050, TCP_RST), SeqVerdict::Invalid, "in-window non-exact RST must not close");
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1101, TCP_RST), SeqVerdict::Valid, "exact RST must close");
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 0, TCP_RST), SeqVerdict::Invalid, "blind seq=0 must not close");
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 0, TCP_FIN), SeqVerdict::Valid, "FIN seq=0 inside advertised window is accepted (window check, #15753)");
     // Entry must not be closing from verdict alone (poll drops invalid).
     let e = table.entry_by_key(&forward).unwrap();
     assert!(!e.closing);
-    let _ = TCP_RST;
 }
 
 #[test]
@@ -132,21 +144,21 @@ fn scaled_window_and_receiver_window_verdict_15947() {
     // sender entry's own window and returned Valid here.
     let behind_100k = 1101u32.wrapping_sub(100_000);
     assert_eq!(
-        table.tcp_closing_seq_verdict(&forward, behind_100k),
+        table.tcp_closing_seq_verdict(&forward, behind_100k, TCP_FIN),
         SeqVerdict::Invalid,
         "receiver window (unscaled SYN-ACK field) governs, not the sender's scaled window"
     );
-    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1050), SeqVerdict::Valid);
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1050, TCP_FIN), SeqVerdict::Valid);
     // Grow the receiver window with a non-SYN segment at scale: window
     // 8192 << 7 capped at the 64K default (max_window=0).
     table.note_tcp_seq_scaled(&reverse, 5001, 1101, 8192, None, 0, TCP_ACK, 0);
     assert_eq!(
-        table.tcp_closing_seq_verdict(&forward, 1101u32.wrapping_sub(50_000)),
+        table.tcp_closing_seq_verdict(&forward, 1101u32.wrapping_sub(50_000), TCP_FIN),
         SeqVerdict::Valid,
         "scaled receiver window (64K cap) admits 50k-behind closing seq"
     );
     assert_eq!(
-        table.tcp_closing_seq_verdict(&forward, behind_100k),
+        table.tcp_closing_seq_verdict(&forward, behind_100k, TCP_FIN),
         SeqVerdict::Invalid,
         "100k behind exceeds the 64K-capped receiver window"
     );
@@ -155,7 +167,7 @@ fn scaled_window_and_receiver_window_verdict_15947() {
     // must be Invalid even though the sender's own window is 256K.
     table.note_tcp_seq_scaled(&reverse, 5001, 1101, 10, None, 0, TCP_ACK, 0);
     assert_eq!(
-        table.tcp_closing_seq_verdict(&forward, 1101u32.wrapping_sub(5000)),
+        table.tcp_closing_seq_verdict(&forward, 1101u32.wrapping_sub(5000), TCP_FIN),
         SeqVerdict::Invalid,
         "verdict must use the receiver (companion) window, not the sender's own"
     );
@@ -215,4 +227,67 @@ fn unilateral_wsopt_not_applied_15947() {
     };
     assert_eq!(build(false), 8192, "unilateral WSOPT must not scale");
     assert_eq!(build(true), 256 * 1024, "bilateral WSOPT scales to cap");
+}
+
+#[test]
+fn rst_requires_exact_seq_16040() {
+    // #16040 (S2-03 leg2 + fold): the exact RST target is the
+    // ENDPOINT's rcv_nxt as ACKed by the companion direction, not the
+    // firewall-observed send-end. Here the client sends SYN(1000) +
+    // 100 bytes (send-end 1101) and the server ACKs all of it, so
+    // endpoint rcv_nxt == 1101 and only seq==1101 may close.
+    let forward = key_v4();
+    let mut table = SessionTable::new();
+    let t0 = 10_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, t0, TCP_SYN);
+    table.note_tcp_seq(&forward, 1000, 0, 4096, 0, TCP_SYN, 0);
+    table.note_tcp_seq(&forward, 1001, 0, 4096, 100, TCP_ACK, 0);
+    table.note_tcp_seq(&reverse, 5000, 1001, 4096, 0, TCP_SYN | TCP_ACK, 0);
+    table.note_tcp_seq(&reverse, 5001, 1101, 4096, 0, TCP_ACK, 0);
+    assert_eq!(table.entry_by_key(&forward).unwrap().tcp_rcv_nxt, 1101);
+    assert_eq!(table.entry_by_key(&forward).unwrap().tcp_peer_rcv_nxt, 1101);
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1100, TCP_RST), SeqVerdict::Invalid, "one-behind RST must not close");
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1050, TCP_RST), SeqVerdict::Invalid, "in-window RST must not close");
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1102, TCP_RST), SeqVerdict::Invalid, "one-ahead RST must not close");
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1050, TCP_RST | TCP_FIN), SeqVerdict::Invalid, "RST|FIN is driven by the RST bit");
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1101, TCP_RST), SeqVerdict::Valid, "exact RST must close");
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1101, TCP_RST | TCP_ACK), SeqVerdict::Valid);
+    // FIN behaviour per fix spec: in-window retained, exact also valid.
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1050, TCP_FIN), SeqVerdict::Valid, "in-window FIN retained");
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1101, TCP_FIN), SeqVerdict::Valid);
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1102, TCP_FIN), SeqVerdict::Invalid, "FIN ahead of the advertised window rejected");
+}
+
+#[test]
+fn rst_exact_uses_endpoint_rcv_nxt_not_send_end_16040() {
+    // #16040 fold (production-path regression): downstream loss.
+    // The client sends 100 bytes (firewall send-end 1101) but only
+    // the first 50 are delivered/ACKed (endpoint rcv_nxt 1051); the
+    // rest are lost downstream of the firewall. A legitimate RST at
+    // the endpoint's rcv_nxt (1051) must close; an RST at the
+    // firewall's send-end (1101) — which the endpoint never received
+    // up to — must NOT. Exact-vs-send-end got both backwards.
+    let forward = key_v4();
+    let mut table = SessionTable::new();
+    let t0 = 10_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, t0, TCP_SYN);
+    table.note_tcp_seq(&forward, 1000, 0, 4096, 0, TCP_SYN, 0);
+    table.note_tcp_seq(&forward, 1001, 0, 4096, 100, TCP_ACK, 0);
+    table.note_tcp_seq(&reverse, 5000, 1001, 4096, 0, TCP_SYN | TCP_ACK, 0);
+    // Only 50 of the 100 bytes ACKed (cumulative ACK 1051).
+    table.note_tcp_seq(&reverse, 5001, 1051, 4096, 0, TCP_ACK, 0);
+    let fwd = table.entry_by_key(&forward).unwrap();
+    assert_eq!(fwd.tcp_rcv_nxt, 1101, "send-end counts downstream-lost bytes");
+    assert_eq!(fwd.tcp_peer_rcv_nxt, 1051, "endpoint rcv_nxt counts delivered bytes only");
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1051, TCP_RST), SeqVerdict::Valid, "ACK-derived RST (downstream-loss recovery) must close");
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1101, TCP_RST), SeqVerdict::Invalid, "send-end RST the endpoint never reached must not close");
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1050, TCP_RST), SeqVerdict::Invalid);
+    // Retransmission later delivers the rest; the endpoint ACK
+    // advances and the new exact target moves with it (high-water:
+    // a duplicate old ACK must not rewind it).
+    table.note_tcp_seq(&reverse, 5001, 1051, 4096, 0, TCP_ACK, 0);
+    table.note_tcp_seq(&reverse, 5001, 1101, 4096, 0, TCP_ACK, 0);
+    assert_eq!(table.entry_by_key(&forward).unwrap().tcp_peer_rcv_nxt, 1101);
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1101, TCP_RST), SeqVerdict::Valid);
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1051, TCP_RST), SeqVerdict::Invalid, "stale endpoint position no longer exact");
 }

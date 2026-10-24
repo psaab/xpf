@@ -125,6 +125,29 @@ impl SessionTable {
         if let Some(entry) = self.entry_by_key_mut(key) {
             entry.note_tcp_seq_scaled(seq, ack, window, window_scale, payload_len, tcp_flags, max_window);
         }
+        // #16040 fold: this packet's ACK field acknowledges bytes the
+        // COMPANION direction sent and the endpoint behind `key`
+        // delivered — i.e. the endpoint's receive-next for the companion
+        // direction. Record it (high-water, serial arithmetic) on the
+        // companion entry so the RST verdict for companion-direction
+        // segments compares against delivered state, not the
+        // firewall-observed send-end (which also counts bytes lost
+        // downstream of the firewall). SYN-ACK gives ISN+1 here; a bare
+        // SYN carries no meaningful ACK and is excluded.
+        if crate::tcp_flags::has_ack(tcp_flags) {
+            let nat = self.entry_by_key(key).map(|e| e.decision.nat);
+            if let Some(nat) = nat {
+                let companion_key = reverse_session_key(key, nat);
+                if let Some(companion) = self.entry_by_key_mut(&companion_key) {
+                    if !companion.tcp_peer_rcv_nxt_seen
+                        || tcp_seq_after(ack, companion.tcp_peer_rcv_nxt)
+                    {
+                        companion.tcp_peer_rcv_nxt = ack;
+                        companion.tcp_peer_rcv_nxt_seen = true;
+                    }
+                }
+            }
+        }
     }
     /// Seed only the RFC 7323 scale from an admitted initial SYN.
     ///
@@ -165,14 +188,48 @@ impl SessionTable {
     /// The receiver for a packet on `key` is the companion entry: its
     /// `tcp_rcv_wnd` is the window the receiver advertised (for traffic
     /// toward the sender), and the sender entry's `tcp_rcv_nxt` is the
-    /// next seq the receiver expects. A closing seq is valid when it
-    /// lies in [rcv_nxt - receiver_wnd, rcv_nxt] (the already-sent range
-    /// the receiver will accept, RFC 5961) or equals rcv_nxt exactly.
-    /// Unknown when either half has no sequence state yet.
-    pub fn tcp_closing_seq_verdict(&self, key: &SessionKey, seq: u32) -> SeqVerdict {
+    /// next seq the receiver expects.
+    ///
+    /// #16040 (S2-03 leg2): an RST segment requires exact seq against
+    /// the endpoint's receive-next (RFC 9293 §3.5.3 / RFC 5961 §3.2: a
+    /// non-matching RST is answered with a challenge ACK, never a
+    /// close). The pre-fix in-window arm let any of ~window blind
+    /// guesses stamp teardown. Fold: the exact target is the tracked
+    /// endpoint rcv_nxt (`tcp_peer_rcv_nxt`, from the companion
+    /// direction's ACK field), NOT this entry's observed send-end
+    /// (`tcp_rcv_nxt`, which counts downstream-lost bytes). FIN
+    /// deliberately keeps in-window validity against the send-end:
+    /// a FIN consumes one sequence number at the stream position
+    /// the sender transmitted, so [rcv_nxt - receiver_wnd, rcv_nxt]
+    /// validity is retained for FIN. RST|FIN is driven by the RST
+    /// bit (exact required). Unknown when no sequence state is
+    /// tracked, and for RST also until an endpoint ACK is observed.
+    pub fn tcp_closing_seq_verdict(&self, key: &SessionKey, seq: u32, tcp_flags: u8) -> SeqVerdict {
         let Some(entry) = self.entry_by_key(key) else { return SeqVerdict::Unknown };
         if !entry.tcp_seq_seen {
             return SeqVerdict::Unknown;
+        }
+        if crate::tcp_flags::has_rst(tcp_flags) {
+            // #16040 fold (Opus): compare against the endpoint's
+            // tracked receive-next, not the observed send-end
+            // (`tcp_rcv_nxt`). Segments the firewall forwarded but
+            // that were lost downstream advanced the send-end, while
+            // the endpoint's rcv_nxt — and therefore the seq of a
+            // legitimate RST it later answers/aborts with — stayed
+            // behind; exact-vs-send-end dropped that RST and stranded
+            // downstream-loss recovery. The endpoint rcv_nxt is what
+            // `note_tcp_seq_scaled` records from the companion
+            // direction's ACK field (`tcp_peer_rcv_nxt`). Until any
+            // ACK has been observed there is no delivered-state
+            // evidence: Unknown (admitted), never a send-end guess.
+            if !entry.tcp_peer_rcv_nxt_seen {
+                return SeqVerdict::Unknown;
+            }
+            return if seq == entry.tcp_peer_rcv_nxt {
+                SeqVerdict::Valid
+            } else {
+                SeqVerdict::Invalid
+            };
         }
         let nat = entry.decision.nat;
         let companion_key = reverse_session_key(key, nat);
