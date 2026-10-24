@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"net"
+	"net/netip"
 	"time"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
@@ -76,6 +77,17 @@ func v4RenewMatcher(m *Manager, req *dhcpv4.DHCPv4, prev *Lease, rebind bool) nc
 // server must not replace the binding mid-renewal); teardown content is
 // therefore accepted only from the granting server. A non-nil manager
 // records server-identity and teardown rejections.
+//
+// #16423 (R3-F04-05): the teardown predicate alone still let a
+// non-granting REBIND responder replace the held binding by omission:
+// a Reply whose requested IA_NA carries only a different live IAADDR
+// (and no zero-lifetime element) passed as a "pure extension", and the
+// single-address lease model then swapped to it — commitLease removed
+// the held WAN address in one packet. RFC 8415 §18.2.10.1 requires the
+// client to leave unchanged any lease recorded in the IA but not
+// included in the server's IA, and to add only new leases; omission
+// plus a different live element is therefore not an extension, so the
+// same content gate rejects it (counted as a teardown reject).
 func v6RenewMatcher(m *Manager, req *dhcpv6.Message, prev *Lease, rebind bool) nclient6.Matcher {
 	var expectedServer dhcpv6.DUID
 	if prev != nil {
@@ -114,12 +126,25 @@ func v6RenewMatcher(m *Manager, req *dhcpv6.Message, prev *Lease, rebind bool) n
 // content the renew/rebind path turns into lease or delegation
 // teardown: a non-Success status at message or requested-IA level, an
 // IAADDR for a requested IA_NA with valid-lifetime 0 (the held address
-// when it is the only address, RFC 8415 §18.2.10.1), or an IAPREFIX for
-// a requested IA_PD with valid-lifetime 0 (§12.1 withdrawal). Pure
-// extensions — every requested IA successful and every carried binding
-// element live — report false, so the #14600 failover partner path is
-// unaffected. Status/IAID discipline mirrors v6ReplyMatches and the
-// parse layer (#10858): only IAs the request actually asked for count.
+// when it is the only address, RFC 8415 §18.2.10.1), an IAPREFIX for a
+// requested IA_PD with valid-lifetime 0 (§12.1 withdrawal), or — #16423
+// — a requested IA that omits a held binding element while offering a
+// different live one in its place. Pure extensions — every requested IA
+// successful, every held element still present and live, and any
+// additional element merely added — report false, so the #14600
+// failover partner path is unaffected. Status/IAID discipline mirrors
+// v6ReplyMatches and the parse layer (#10858): only IAs the request
+// actually asked for count.
+//
+// Held-element comparison is keyed on the REQUEST echo (which
+// buildV6RenewMessage derives from prev/prevPDs), because the REBIND
+// gate already runs before parse. When the request echoes a held
+// IAADDR/IAPREFIX, a matched Reply IA is a replacement — and hence
+// teardown — when no live element equals the held one. An omitted IA,
+// or a matched IA carrying no live replacement element, stays silence
+// (#1844 retain-on-silence / #15071 carry-forward), not teardown: the
+// renew path already keeps the held binding in that shape, so only
+// omission-plus-replacement is refused.
 func v6ReplyTearsDownHeldBinding(req, resp *dhcpv6.Message) bool {
 	if req == nil || resp == nil {
 		return false
@@ -128,6 +153,7 @@ func v6ReplyTearsDownHeldBinding(req, resp *dhcpv6.Message) bool {
 		return true
 	}
 	for _, want := range req.Options.IANA() {
+		heldAddrs := v6HeldIANAAddrs(want)
 		for _, got := range resp.Options.IANA() {
 			if got.IaId != want.IaId {
 				continue
@@ -135,14 +161,27 @@ func v6ReplyTearsDownHeldBinding(req, resp *dhcpv6.Message) bool {
 			if !v6StatusOK(got.Options.Status()) {
 				return true
 			}
+			hasLive := false
 			for _, addr := range got.Options.Addresses() {
 				if addr != nil && addr.ValidLifetime == 0 {
 					return true
 				}
+				if addr != nil && addr.ValidLifetime > 0 {
+					hasLive = true
+				}
+			}
+			// Replacement: the Reply offers a live address for this IA
+			// but none of them is a held address the client asked to
+			// renew. RFC 8415 §18.2.10.1 leaves an omitted held lease
+			// unchanged; xpf's single-address lease would instead swap
+			// to the offered one and remove the held address.
+			if hasLive && len(heldAddrs) > 0 && !v6ReplyKeepsHeldAddr(got, heldAddrs) {
+				return true
 			}
 		}
 	}
 	for _, want := range req.Options.IAPD() {
+		heldPrefixes := v6HeldIAPDPrefixes(want)
 		for _, got := range resp.Options.IAPD() {
 			if got.IaId != want.IaId {
 				continue
@@ -150,10 +189,124 @@ func v6ReplyTearsDownHeldBinding(req, resp *dhcpv6.Message) bool {
 			if !v6StatusOK(got.Options.Status()) {
 				return true
 			}
+			hasLive := false
 			for _, prefix := range got.Options.Prefixes() {
 				if prefix != nil && prefix.ValidLifetime == 0 {
 					return true
 				}
+				if prefix != nil && prefix.ValidLifetime > 0 {
+					hasLive = true
+				}
+			}
+			// IA_PD omission alone never tears down (reconcile retains
+			// co-held prefixes, #4874 B), and a Reply may legitimately
+			// renew a subset while adding another. A replacement matters
+			// only when the Reply abandons EVERY held prefix in this IA
+			// while offering a live one: that shape cannot occur from a
+			// partner that holds the binding (it would echo at least one
+			// held prefix), and admitting it would hand the delegation
+			// set to a non-granting server. Subset renewals that keep at
+			// least one held prefix still pass.
+			if hasLive && len(heldPrefixes) > 0 && !v6ReplyKeepsAnyHeldPrefix(got, heldPrefixes) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// v6HeldIANAAddrs returns the live addresses the RENEW/REBIND request
+// echoes for one IA_NA — the held binding elements a Reply must keep to
+// count as an extension (#16423). Zero-lifetime echoes carry no held
+// element to protect.
+func v6HeldIANAAddrs(ia *dhcpv6.OptIANA) []netip.Addr {
+	if ia == nil {
+		return nil
+	}
+	var held []netip.Addr
+	for _, addr := range ia.Options.Addresses() {
+		if addr == nil || addr.ValidLifetime == 0 || addr.IPv6Addr == nil {
+			continue
+		}
+		if a, ok := netip.AddrFromSlice(addr.IPv6Addr); ok {
+			held = append(held, a)
+		}
+	}
+	return held
+}
+
+// v6ReplyKeepsHeldAddr reports whether a Reply IA_NA still carries at
+// least one held address with a live valid-lifetime (#16423).
+func v6ReplyKeepsHeldAddr(ia *dhcpv6.OptIANA, held []netip.Addr) bool {
+	if ia == nil {
+		return false
+	}
+	for _, addr := range ia.Options.Addresses() {
+		if addr == nil || addr.ValidLifetime == 0 || addr.IPv6Addr == nil {
+			continue
+		}
+		a, ok := netip.AddrFromSlice(addr.IPv6Addr)
+		if !ok {
+			continue
+		}
+		for _, h := range held {
+			if a == h {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// v6HeldIAPDPrefixes returns the live prefixes the RENEW/REBIND request
+// echoes for one IA_PD (#16423). Hint-only echoes (prefix address
+// unspecified, as buildV6RenewMessage sends when no delegation is held)
+// carry no held element to protect.
+func v6HeldIAPDPrefixes(ia *dhcpv6.OptIAPD) []netip.Prefix {
+	if ia == nil {
+		return nil
+	}
+	var held []netip.Prefix
+	for _, prefix := range ia.Options.Prefixes() {
+		if prefix == nil || prefix.ValidLifetime == 0 || prefix.Prefix == nil {
+			continue
+		}
+		ones, bits := prefix.Prefix.Mask.Size()
+		if bits != 128 || ones == 0 {
+			continue
+		}
+		ip, ok := netip.AddrFromSlice(prefix.Prefix.IP)
+		if !ok || ip.IsUnspecified() {
+			continue
+		}
+		held = append(held, netip.PrefixFrom(ip, ones).Masked())
+	}
+	return held
+}
+
+// v6ReplyKeepsAnyHeldPrefix reports whether a Reply IA_PD still carries
+// at least one held prefix with a live valid-lifetime (#16423). Prefix
+// identity is the masked prefix, matching reconcileDelegatedPDs.
+func v6ReplyKeepsAnyHeldPrefix(ia *dhcpv6.OptIAPD, held []netip.Prefix) bool {
+	if ia == nil {
+		return false
+	}
+	for _, prefix := range ia.Options.Prefixes() {
+		if prefix == nil || prefix.ValidLifetime == 0 || prefix.Prefix == nil {
+			continue
+		}
+		ones, bits := prefix.Prefix.Mask.Size()
+		if bits != 128 || ones == 0 {
+			continue
+		}
+		ip, ok := netip.AddrFromSlice(prefix.Prefix.IP)
+		if !ok {
+			continue
+		}
+		candidate := netip.PrefixFrom(ip, ones).Masked()
+		for _, h := range held {
+			if candidate == h {
+				return true
 			}
 		}
 	}

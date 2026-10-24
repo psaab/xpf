@@ -242,6 +242,16 @@ the debounced `onAddressChange` callback when content changed.
   DHCPv4 needs no twin: a partner NAK revoking the lease in REBINDING
   is the #14600-documented RFC 2131 §4.3.2 behaviour, and v4 has no
   delegated-prefix set to tear down.
+- **REBIND replacement-by-omission is also teardown (#16423)**: a
+  non-granting REBIND Reply that carries no teardown element but omits
+  a held IA_NA address (or every held IA_PD prefix) while offering a
+  different live one is rejected through the same gate and counter.
+  RFC 8415 §18.2.10.1 leaves an omitted held lease unchanged and adds
+  only new leases; xpf's single-address lease would otherwise swap to
+  the offered address and `commitLease` would remove the held WAN
+  address in one packet. A Reply that keeps the held element and merely
+  adds another, or that is silent on an IA (handled by the #15071
+  carry-forward / #1844 retain-on-silence), remains an extension.
 - **Missing IA_PD is re-requested on RENEW/REBIND (#15069, A39-01)**: when
   `ia-pd` is configured but no delegation is currently held — the initial
   acquisition answered `NoPrefixAvail`, a renewal refused or withdrew it,

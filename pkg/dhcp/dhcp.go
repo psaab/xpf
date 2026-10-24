@@ -346,7 +346,8 @@ type Manager struct {
 // their server identity was missing or, in RENEWING/RENEW, did not match
 // the committed lease binding, plus DHCPv6 REBIND Replies rejected
 // because a non-granting server sent lease/delegation teardown content
-// (#14997). REBINDING replies from any server that merely extend the
+// (#14997) or replaced a held binding element by omission (#16423).
+// REBINDING replies from any server that merely extend the
 // binding are accepted (#14600) and do not increment these counters.
 type RenewalBindingStats struct {
 	DHCPv4ServerIdentityRejects uint64
