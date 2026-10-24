@@ -7,7 +7,8 @@ import (
 )
 
 // compiler_interfaces_qinq.go carries the #5879 canonical per-physical-
-// interface QinQ (stacked-VLAN) honesty gate (#14683: two-level unit form).
+// interface QinQ (stacked-VLAN) honesty gate (#14683: two-level unit form;
+// #16433: `vlan-tags` closed world).
 //
 // Background (#2354): the AF_XDP shim's parse_l2 unwinds exactly ONE VLAN
 // tag, so xpf cannot represent a double-tagged (802.1ad S-tag + 802.1Q
@@ -59,6 +60,20 @@ import (
 // still boots. Because rejection is a compile error, the candidate is never
 // promoted — no partial outer/inner state survives a reject.
 //
+// #16433: the `vlan-tags` statement's world is closed. Junos spells the
+// second tag not only `inner <vid>` but also `inner-list <vids>` and
+// `inner-range <lo>-<hi>` (and `inner-vlan-id-range`), none of which the
+// exact-token `inner` predicate saw, and arbitrary trailing tokens
+// (`outer 100 bogus 7`) were ignored by both this gate and the #15035
+// reader, so the statement compiled as a plain single-tag VID. Now a
+// `vlan-tags` node contributes to inner on any `inner`/`inner-*` token,
+// to outer only on the exact `outer <vid>` form (see vlanTagsIsOuterOnly),
+// and to invalid otherwise; validateQinQVLANStackAST rejects inner with
+// the #5879 text and invalid with a #16433 text, and the #15035 reader
+// refuses any node that is not outer-only. Lenient keeps the #1960
+// warn-and-compile contract (a node carrying a closed-world defect is
+// skipped by the reader, so its outer value never silently applies).
+//
 // It runs PRE-expansion (like validateZoneIDCollisionAST) because it must
 // expand the candidate once per node ITSELF; wiring it among the
 // pre-expansion gates in BOTH compile entrypoints makes the verdict
@@ -70,10 +85,12 @@ import (
 // unit: the rendered outer- and inner-tag statements contributing to it,
 // gathered across every spelling. An empty inner slice means a supported
 // single-tag (or untagged) unit; a non-empty inner slice is unsupported
-// stacked-VLAN.
+// stacked-VLAN. invalid holds a `vlan-tags` statement that is neither the
+// supported `outer <vid>` form nor an inner spelling (#16433).
 type qinqUnitStack struct {
-	outer []string // vlan-id / vlan-tags outer statements
-	inner []string // inner-vlan-id / vlan-tags inner statements
+	outer   []string // vlan-id / vlan-tags outer statements
+	inner   []string // inner-vlan-id / vlan-tags inner statements
+	invalid []string // #16433: malformed `vlan-tags` statements
 }
 
 // qinqFinding records one (interface, unit) whose canonical stack carries
@@ -88,17 +105,25 @@ type qinqFinding struct {
 // interface, unit, and the contributing inner (and any outer) statements so
 // a stack split across two statements or spellings is fully attributable.
 func (f qinqFinding) message() string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "interfaces %s unit %s: unsupported QinQ / stacked-VLAN stack — inner (second) tag `%s`",
-		f.iface, f.unit, strings.Join(f.stack.inner, "`, `"))
-	if len(f.stack.outer) > 0 {
-		fmt.Fprintf(&b, " over outer tag `%s`", strings.Join(f.stack.outer, "`, `"))
+	// #16433 precedence: an inner spelling is the QinQ defect even when
+	// the same statement also carries a malformed token.
+	if len(f.stack.inner) > 0 {
+		var b strings.Builder
+		fmt.Fprintf(&b, "interfaces %s unit %s: unsupported QinQ / stacked-VLAN stack — inner (second) tag `%s`",
+			f.iface, f.unit, strings.Join(f.stack.inner, "`, `"))
+		if len(f.stack.outer) > 0 {
+			fmt.Fprintf(&b, " over outer tag `%s`", strings.Join(f.stack.outer, "`, `"))
+		}
+		b.WriteString(" is not enforced by the AF_XDP dataplane (parse_l2 unwinds a single " +
+			"VLAN tag; a double-tagged 802.1ad S-tag + 802.1Q C-tag frame falls to the kernel " +
+			"forwarding path and is never firewalled). Single 802.1Q tagging via `vlan-id` is " +
+			"supported — remove the inner tag (#2354, #5879)")
+		return b.String()
 	}
-	b.WriteString(" is not enforced by the AF_XDP dataplane (parse_l2 unwinds a single " +
-		"VLAN tag; a double-tagged 802.1ad S-tag + 802.1Q C-tag frame falls to the kernel " +
-		"forwarding path and is never firewalled). Single 802.1Q tagging via `vlan-id` is " +
-		"supported — remove the inner tag (#2354, #5879)")
-	return b.String()
+	return fmt.Sprintf("interfaces %s unit %s: unsupported `vlan-tags` statement `%s` — "+
+		"only `vlan-tags outer <vid>` (a single 802.1Q tag) is supported; remove the extra token(s) "+
+		"or configure `vlan-id <vid>` instead (#16433)",
+		f.iface, f.unit, strings.Join(f.stack.invalid, "`, `"))
 }
 
 // vlanTagsHasToken reports whether a `vlan-tags` node carries the given
@@ -120,13 +145,70 @@ func vlanTagsHasToken(n *Node, token string) bool {
 	return false
 }
 
+// vlanTagsIsInner reports whether a `vlan-tags` node spells an inner
+// (second) tag in either AST shape: the `inner` keyword or any Junos
+// `inner-*` spelling (#16433: `inner-list`, `inner-range`,
+// `inner-vlan-id-range`). Packed Keys and hierarchical child heads are
+// both consulted, so a TPID-qualified hierarchical `inner 0x8100.200`
+// child (Keys=[inner 0x8100.200]) still matches.
+func vlanTagsIsInner(n *Node) bool {
+	if vlanTagsHasToken(n, "inner") {
+		return true
+	}
+	for _, k := range n.Keys[1:] {
+		if strings.HasPrefix(k, "inner-") {
+			return true
+		}
+	}
+	for _, c := range n.Children {
+		if len(c.Keys) > 0 && strings.HasPrefix(c.Keys[0], "inner-") {
+			return true
+		}
+	}
+	return false
+}
+
+// vlanTagsIsOuterOnly reports whether a `vlan-tags` node is exactly the
+// supported single-tag form (#16433 closed world): `outer <one value>`
+// and nothing else, in any AST shape — packed Keys
+// (`vlan-tags outer 100`), hierarchical children
+// (`vlan-tags { outer 100; }`), or the one-deeper form
+// (`vlan-tags { outer { 100; } }`). Numeric validity of the value is
+// NOT judged here; the #15035 reader owns that (TPID prefix uses its
+// own message). Bare `vlan-tags`, multiple children, extra tokens or
+// children, and any non-`outer` child are not outer-only.
+func vlanTagsIsOuterOnly(n *Node) bool {
+	if len(n.Keys) >= 2 {
+		// Packed flat / one-line shape. Inner spellings are handled by
+		// the caller before this predicate; any remaining non-`outer`
+		// form (no outer, or trailing tokens) is malformed.
+		return len(n.Keys) == 3 && n.Keys[1] == "outer" && len(n.Children) == 0
+	}
+	if len(n.Children) != 1 {
+		return false
+	}
+	c := n.Children[0]
+	if len(c.Keys) == 0 || c.Keys[0] != "outer" {
+		return false
+	}
+	if len(c.Keys) > 1 {
+		return len(c.Keys) == 2 && len(c.Children) == 0
+	}
+	// `outer { 100; }`: exactly one grandchild carrying exactly one token.
+	if len(c.Children) != 1 {
+		return false
+	}
+	g := c.Children[0]
+	return len(g.Keys) == 1 && len(g.Children) == 0
+}
+
 // renderVLANStmt renders a VLAN-tag statement back to readable text for the
 // reject / warn message, folding any nested children (the hierarchical
 // vlan-tags shape) onto one line.
 func renderVLANStmt(n *Node) string {
 	s := strings.Join(n.Keys, " ")
 	for _, c := range n.Children {
-		s += " " + strings.Join(c.Keys, " ")
+		s += " " + renderVLANStmt(c)
 	}
 	return s
 }
@@ -134,10 +216,11 @@ func renderVLANStmt(n *Node) string {
 // unitVLANStack derives the canonical outer/inner tag stack of a logical-
 // unit node, unioning the `vlan-id`/`inner-vlan-id` spelling and the
 // `vlan-tags outer/inner` spelling (combined or split across statements).
-// A `vlan-tags` node counts as inner if it carries an `inner` keyword
-// (regardless of whether the same node also carries `outer`, i.e. the
-// combined `vlan-tags outer X inner Y` form is inner-bearing); otherwise an
-// `outer`-only `vlan-tags` is a single S-tag and contributes to outer.
+// A `vlan-tags` node counts as inner if it carries an `inner`/`inner-*`
+// keyword (regardless of whether the same node also carries `outer`, i.e.
+// the combined `vlan-tags outer X inner Y` form is inner-bearing); an
+// exact `outer <vid>` `vlan-tags` is a single S-tag and contributes to
+// outer; any other `vlan-tags` shape contributes to invalid (#16433).
 //
 // #14683: the scan is recursive. The flat `unit 0 point-to-point
 // inner-vlan-id 200` form nests the inner leaf under the point-to-point
@@ -166,10 +249,17 @@ func unitVLANStack(unit *Node) qinqUnitStack {
 				}
 			case "vlan-tags":
 				switch {
-				case vlanTagsHasToken(c, "inner"):
+				case vlanTagsIsInner(c):
 					st.inner = append(st.inner, renderVLANStmt(c))
-				case vlanTagsHasToken(c, "outer"):
+				case vlanTagsIsOuterOnly(c):
 					st.outer = append(st.outer, renderVLANStmt(c))
+				default:
+					// #16433: neither the supported outer-only form
+					// nor an inner spelling — a token xpf does not
+					// implement (or no token at all). Record it so
+					// the gate rejects instead of silently
+					// compiling the statement as a single tag.
+					st.invalid = append(st.invalid, renderVLANStmt(c))
 				}
 			}
 			walk(c, childInVLANMap)
@@ -181,8 +271,9 @@ func unitVLANStack(unit *Node) qinqUnitStack {
 
 // collectQinQFromInterfacesNode records every (interface, unit) under one
 // "interfaces" hierarchy node whose canonical VLAN stack carries an
-// unsupported inner tag into out, keyed by interface+unit so a finding
-// present in more than one node view is reported once.
+// unsupported inner tag — or a malformed `vlan-tags` statement (#16433) —
+// into out, keyed by interface+unit so a finding present in more than one
+// node view is reported once.
 func collectQinQFromInterfacesNode(ifacesNode *Node, out map[string]qinqFinding) {
 	if ifacesNode == nil {
 		return
@@ -214,7 +305,7 @@ func collectQinQFromInterfacesNode(ifacesNode *Node, out map[string]qinqFinding)
 				unit = unitBody
 			}
 			st := unitVLANStack(unit)
-			if len(st.inner) == 0 {
+			if len(st.inner) == 0 && len(st.invalid) == 0 {
 				continue // supported single-tag / untagged unit
 			}
 			key := ifName + "\x00" + unitInst.name
@@ -225,6 +316,7 @@ func collectQinQFromInterfacesNode(ifacesNode *Node, out map[string]qinqFinding)
 			}
 			finding.stack.outer = append(finding.stack.outer, st.outer...)
 			finding.stack.inner = append(finding.stack.inner, st.inner...)
+			finding.stack.invalid = append(finding.stack.invalid, st.invalid...)
 			out[key] = finding
 		}
 	}
@@ -268,12 +360,14 @@ func collectQinQFindingsForNode(tree *ConfigTree, nodeID int, out map[string]qin
 }
 
 // validateQinQVLANStackAST is the #5879 canonical per-physical-interface
-// QinQ honesty gate. It builds the effective VLAN stack for EVERY cluster
+// QinQ honesty gate, extended by #16433 to the closed `vlan-tags` world.
+// It builds the effective VLAN stack for EVERY cluster
 // node (node0 AND node1 `${node}`/apply-groups expansions) and rejects any
 // unit whose aggregate stack carries an inner / second tag — regardless of
 // whether the inner tag was spelled `inner-vlan-id` or `vlan-tags inner`,
 // combined onto one statement or split across several, or contributed by a
-// peer-only group only the STANDBY node renders.
+// peer-only group only the STANDBY node renders — and (#16433) any unit
+// whose `vlan-tags` statement is not exactly `outer <vid>`.
 //
 // Only the two per-node EFFECTIVE views are unioned (node0 + node1
 // expansion) — deliberately NOT the pre-expansion all-groups "View 1" the
