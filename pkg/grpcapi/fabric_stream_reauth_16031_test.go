@@ -136,10 +136,24 @@ func TestFabricStreamSurvivesRotationToAcceptedKey16031(t *testing.T) {
 
 func TestFabricStreamRecheckUnit16031(t *testing.T) {
 	const method = pb.BpfrxService_MonitorInterface_FullMethodName
+	key := []byte(fabricTestKey)
+	// Mint in a window far outside the current ±1 accept band: the token
+	// is expired as a CURRENT-window credential, which is exactly the
+	// state every healthy long-lived stream reaches within 30–90s.
+	oldWindow := fabricAuthWindow(time.Now()) - 10
+	tok := fabricAuthTokenHexForDigest(key, time.Unix(oldWindow*fabricAuthWindowSeconds, 0), method, fabricAuthEmptyRequestDigest[:])
+	ctx := withFabricStreamMintWindow(
+		metadata.NewIncomingContext(context.Background(), metadata.Pairs(fabricAuthMetadataKey, tok)),
+		oldWindow)
+
 	s := keyedServer(fabricTestKey)
-	ctx := fabricStreamCtx16031([]byte(fabricTestKey), method)
 	if err := s.fabricStreamRecheck(ctx, method); err != nil {
-		t.Fatalf("valid open stream must recheck clean: %v", err)
+		t.Fatalf("expired-window token under an unchanged PSK must recheck clean (key-set membership, not current-window validity): %v", err)
+	}
+	if err := s.fabricStreamRecheck(
+		metadata.NewIncomingContext(context.Background(), metadata.Pairs(fabricAuthMetadataKey, tok)), method,
+	); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("without a captured mint window the expired token must fail the open-time check, got %v", err)
 	}
 	removed := keyedServer("")
 	if err := removed.fabricStreamRecheck(ctx, method); status.Code(err) != codes.Unauthenticated {
@@ -148,5 +162,71 @@ func TestFabricStreamRecheckUnit16031(t *testing.T) {
 	stranger := keyedServer("some-other-key-entirely")
 	if err := stranger.fabricStreamRecheck(ctx, method); status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("recheck under a stranger key must be Unauthenticated, got %v", err)
+	}
+	// The capture helper finds the mint window inside the open-time band
+	// and refuses tokens no accepted key verifies.
+	liveTok := fabricAuthTokenHex(key, time.Now(), method)
+	w, ok := captureFabricStreamMintWindow([][]byte{key}, liveTok, method)
+	if !ok || w != fabricAuthWindow(time.Now()) {
+		t.Fatalf("captureFabricStreamMintWindow = (%d, %v), want (%d, true)", w, ok, fabricAuthWindow(time.Now()))
+	}
+	if _, ok := captureFabricStreamMintWindow([][]byte{[]byte("some-other-key-entirely")}, liveTok, method); ok {
+		t.Fatal("capture must fail when no accepted key verifies the token")
+	}
+	if _, ok := captureFabricStreamMintWindow([][]byte{key}, tok, method); ok {
+		t.Fatal("capture must fail for a token minted outside the open-time band")
+	}
+}
+
+// TestFabricStreamSurvivesTokenWindowExpiry16031 is the fold's defect
+// cell end-to-end: a stream whose token window has left the accept band
+// must NOT be terminated while the PSK is unchanged. A token minted ten
+// windows ago would be refused at open by the production interceptor,
+// so this drives the real reauthFabricStream watcher from the
+// interceptor's post-open state (fabric marker + captured mint window,
+// token already outside the band).
+//
+// FAIL-ON-REVERT: a recheck that re-verifies current-window validity
+// terminates this stream on the first tick.
+func TestFabricStreamSurvivesTokenWindowExpiry16031(t *testing.T) {
+	shortenFabricStreamReauth16031(t)
+	const method = pb.BpfrxService_MonitorInterface_FullMethodName
+	key := []byte(fabricTestKey)
+	oldWindow := fabricAuthWindow(time.Now()) - 10
+	tok := fabricAuthTokenHexForDigest(key, time.Unix(oldWindow*fabricAuthWindowSeconds, 0), method, fabricAuthEmptyRequestDigest[:])
+	ctx, cancel := context.WithCancel(withFabricStreamMintWindow(
+		withFabricAuthStreamContext(metadata.NewIncomingContext(context.Background(), metadata.Pairs(fabricAuthMetadataKey, tok))),
+		oldWindow))
+	defer cancel()
+
+	s := keyedServer(fabricTestKey)
+	entered := make(chan struct{})
+	handler := func(_ interface{}, ss grpc.ServerStream) error {
+		close(entered)
+		<-ss.Context().Done()
+		return nil
+	}
+	errc := make(chan error, 1)
+	go func() {
+		errc <- s.reauthFabricStream(nil, fakeServerStream{ctx: ctx},
+			&grpc.StreamServerInfo{FullMethod: method}, handler)
+	}()
+	select {
+	case <-entered:
+	case err := <-errc:
+		t.Fatalf("stream refused: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler never ran")
+	}
+	select {
+	case err := <-errc:
+		t.Fatalf("stream with expired token window terminated under an unchanged PSK: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case <-errc:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream did not end on client cancel")
 	}
 }
