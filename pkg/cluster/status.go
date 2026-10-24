@@ -975,24 +975,57 @@ func (m *Manager) controlLinkAuthStatus() string {
 // usually means the peer is down, and telling an operator "not safe to
 // finalize" when the real answer is "your peer is not talking to you" sends
 // them to the wrong problem.
+//
+// #16029: every open window also renders its age, and a window open longer
+// than controlLinkRotationStaleAfter (7 days) carries an ALARM naming the
+// window by its accepted key IDs — the retired key is still accepted, so a
+// forgotten finalize leaves it valid indefinitely. The alarm is appended
+// to whichever peer-state clause applies: age and peer-moved are
+// independent facts, and an old window whose peer HAS moved is the most
+// actionable case of all (safe to finalize, and overdue). Age renders in
+// whole days (hours under a day) so the line stays stable across shows;
+// the alarm threshold is evaluated on the exact duration, not the
+// rounded render. The stamp is in-memory: after a daemon restart it
+// re-anchors at the first apply that sees the window, so a stale alarm
+// can be up to one restart late, never early.
 func (m *Manager) controlLinkRotationStatus() string {
 	signing, additional := m.ControlLinkKeyIDs()
 	if additional == "" {
 		return ""
 	}
 	peer := m.PeerControlKeyID()
+	age, _ := m.controlLinkRotationAge()
+	ageClause := fmt.Sprintf("; open for %s", formatRotationAge(age))
+	if _, stale := m.ControlLinkRotationStale(); stale {
+		ageClause += fmt.Sprintf(" — ALARM: rotation open over %s, the retired key (also accepting %s) "+
+			"is still accepted; finalize with `delete chassis cluster additional-authentication-key` "+
+			"once the peer has moved, or re-stage the rotation if it was abandoned",
+			formatRotationAge(controlLinkRotationStaleAfter), additional)
+	}
 	switch {
 	case peer == "":
 		return fmt.Sprintf("in progress (signing %s, also accepting %s); peer key UNKNOWN — "+
-			"no authenticated peer frame seen, do NOT finalize", signing, additional)
+			"no authenticated peer frame seen, do NOT finalize%s", signing, additional, ageClause)
 	case peer == signing:
 		return fmt.Sprintf("in progress (signing %s, also accepting %s); peer is signing %s — "+
-			"safe to finalize: `delete chassis cluster additional-authentication-key`",
-			signing, additional, peer)
+			"safe to finalize: `delete chassis cluster additional-authentication-key`%s",
+			signing, additional, peer, ageClause)
 	default:
 		return fmt.Sprintf("in progress (signing %s, also accepting %s); peer is still signing "+
-			"%s — do NOT finalize, the peer has not moved yet", signing, additional, peer)
+			"%s — do NOT finalize, the peer has not moved yet%s", signing, additional, peer, ageClause)
 	}
+}
+
+// formatRotationAge renders a rotation-window age compactly for the status
+// line: whole days at a day or more ("9d"), whole hours below that ("3h"),
+// and "0h" for a window that has just opened. Sub-hour precision would
+// churn the line on every show without telling the operator anything the
+// 7-day alarm threshold needs.
+func formatRotationAge(age time.Duration) string {
+	if age >= 24*time.Hour {
+		return fmt.Sprintf("%dd", int(age/(24*time.Hour)))
+	}
+	return fmt.Sprintf("%dh", int(age/time.Hour))
 }
 
 // FormatDataPlaneStatistics returns data-plane (session sync) statistics.

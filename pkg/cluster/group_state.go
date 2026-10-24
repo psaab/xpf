@@ -186,6 +186,23 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 	} else {
 		m.controlAuthKeyAlt = nil
 	}
+	// #16029: anchor/refresh the rotation-open stamp. Keyed on the
+	// additional key alone (its set-digest component), not on presence
+	// alone or on the whole accepted set: re-applying the identical
+	// additional key (a routine commit, a daemon restart's first apply)
+	// must not move the stamp, or any commit could launder the age of a
+	// forgotten rotation; swapping the additional key is a NEW rotation
+	// and re-anchors; clearing it (finalize) closes the window and clears
+	// the stamp. The signing key is deliberately excluded — rotation
+	// steps 3-4 swap it under an unchanged additional key, and that is
+	// the same window, not a new one.
+	if len(m.controlAuthKeyAlt) == 0 {
+		m.controlLinkRotationOpenedAt = time.Time{}
+		m.controlLinkRotationAltDigest = ""
+	} else if altDigest := controlAuthKeySetDigest(nil, m.controlAuthKeyAlt); altDigest != m.controlLinkRotationAltDigest {
+		m.controlLinkRotationOpenedAt = controlLinkRotationNow()
+		m.controlLinkRotationAltDigest = altDigest
+	}
 
 	// #15262: anchor the fabric rollout grace at the FIRST keying of the
 	// current accepted-key set, persisted in node state, not at this

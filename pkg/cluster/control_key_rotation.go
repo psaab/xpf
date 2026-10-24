@@ -32,6 +32,16 @@ package cluster
 // never lost. Step 5 is the explicit FINALIZE: it is an operator commit, not a
 // timer, so the overlap ends when the operator says so and is never permanent.
 //
+// #16029: "never permanent" relied on the operator remembering step 5. A
+// forgotten finalize left the retired key accepted indefinitely — no
+// expiry, no age, no alarm. The window now records when it opened
+// (Manager.controlLinkRotationOpenedAt, stamped in UpdateConfig when the
+// additional key's identity changes) and the status line renders its age;
+// past controlLinkRotationStaleAfter (7 days) the line carries an ALARM
+// naming the window by key ID. It still never auto-finalizes: retiring a
+// key the peer still signs with reopens the dual-master window, so the
+// remedy stays an operator commit — now a prompted one.
+//
 // WHY AN OVERLAP AND NOT A COORDINATED CUTOVER. The two nodes have no channel
 // to agree a cutover instant on that does not itself depend on the key being
 // rotated. Once the PSK becomes provisioning-time node-local state — the
@@ -57,6 +67,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"time"
 )
 
 // controlLinkKeyIDTag domain-separates the key-id derivation from every other
@@ -91,6 +102,76 @@ func controlLinkKeyID(key []byte) string {
 	mac := hmac.New(sha256.New, key)
 	mac.Write(controlLinkKeyIDTag)
 	return hex.EncodeToString(mac.Sum(nil))[:controlLinkKeyIDLen]
+}
+
+// controlLinkRotationStaleAfter is the #16029 age at which an open rotation
+// window stops reading as routine and starts reading as forgotten. The
+// normal procedure (README "Procedure — rotate A to B") is five commits
+// usually separated by minutes; even a cautious maintenance that stages one
+// node per day finishes inside a week. Seven days is therefore well past
+// any legitimate in-flight rotation, while still naming the exposure —
+// the retired key remains accepted — long before it becomes permanent.
+// It alarms only; it NEVER retires the additional key itself, because
+// finalizing while the peer still signs the old key reopens the
+// dual-master window (see ControlLinkRotationSafeToFinalize).
+const controlLinkRotationStaleAfter = 7 * 24 * time.Hour
+
+// controlLinkRotationNow is the wall clock rotation-open stamps and age
+// comparisons read. A var so tests can pin an instant across applies
+// without sleeping, mirroring fabricAuthGraceNow; production never
+// replaces it.
+var controlLinkRotationNow = func() time.Time { return time.Now() }
+
+// controlLinkRotationAge reports how long the current additional-key
+// window has been open and whether one is open at all. A closed window,
+// or a future-dated open stamp (wall clock stepped backwards), reports
+// not-open/zero rather than a negative age: the alarm must never fire on
+// clock noise, and a backwards step must not suppress it forever — the
+// age simply restarts from zero at the stepped clock.
+func (m *Manager) controlLinkRotationAge() (time.Duration, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.controlLinkRotationAgeLocked()
+}
+
+// controlLinkRotationAgeLocked is controlLinkRotationAge for callers
+// already holding m.mu (read or write).
+func (m *Manager) controlLinkRotationAgeLocked() (time.Duration, bool) {
+	if len(m.controlAuthKeyAlt) == 0 || m.controlLinkRotationOpenedAt.IsZero() {
+		return 0, false
+	}
+	if age := controlLinkRotationNow().Sub(m.controlLinkRotationOpenedAt); age > 0 {
+		return age, true
+	}
+	return 0, true
+}
+
+// ControlLinkRotationOpenSince returns the wall-clock instant the current
+// additional-key window opened, or the zero Time when no window is open.
+// Zero also after a daemon restart until the first config apply re-anchors
+// it (the anchor is in-memory; see Manager.controlLinkRotationOpenedAt).
+func (m *Manager) ControlLinkRotationOpenSince() time.Time {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if len(m.controlAuthKeyAlt) == 0 {
+		return time.Time{}
+	}
+	return m.controlLinkRotationOpenedAt
+}
+
+// ControlLinkRotationStale reports the #16029 forgotten-rotation alarm
+// state: a rotation window is open and has been open longer than
+// controlLinkRotationStaleAfter, so the retired key has remained accepted
+// far past any legitimate in-flight rotation. The returned duration is
+// the window's current age (0 when not stale). Naming the window is the
+// status line's job (controlLinkRotationStatus); this predicate is the
+// machine-readable half for tests and other renderers.
+func (m *Manager) ControlLinkRotationStale() (time.Duration, bool) {
+	age, open := m.controlLinkRotationAge()
+	if !open || age <= controlLinkRotationStaleAfter {
+		return 0, false
+	}
+	return age, true
 }
 
 // notePeerControlKeyID records the id of the accepted key that last verified a
