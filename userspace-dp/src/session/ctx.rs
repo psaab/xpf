@@ -76,6 +76,12 @@ pub(crate) struct SessionUpdate<'a> {
     pub(crate) now_ns: u64,
     pub(crate) protocol: u8,
     pub(crate) tcp_flags: u8,
+    /// #16042: parsed TCP ack of the segment driving this update, when the
+    /// caller parsed a frame. `None` = unparsed (pre-#16042 flags-only
+    /// behaviour, bounded by the opening window). Most callers have no
+    /// frame and pass `None`; the session-hit promote path passes the
+    /// ack it parsed so a wrong-ack segment cannot promote/complete.
+    pub(crate) ack: Option<u32>,
 }
 
 /// #2120: per-call HA context handed to the expire pass so the

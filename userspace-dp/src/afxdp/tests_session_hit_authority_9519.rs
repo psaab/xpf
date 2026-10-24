@@ -229,6 +229,12 @@ fn tcp(
         other => panic!("9519 fixture has no destination MAC for ingress ifindex {other}"),
     };
     let mut frame = build_txn_tcp_syn_frame_v4(src, dst, sport, dport, flags, dst_mac);
+    // #16042: the shared builder hardcodes ack=0/seq=1. An ACK-bearing
+    // segment in this fixture acks the peer's SYN (seq 1), so its ack
+    // must be 2 or the handshake ack gate correctly refuses promotion.
+    if flags & TCP_ACK != 0 {
+        frame[42..46].copy_from_slice(&2u32.to_be_bytes());
+    }
     let mut meta = txn_meta_v4(arrival as u32, flags, frame.len() as u16);
     tag_wan_ingress_vlan(arrival, &mut frame, &mut meta);
     (frame, meta)

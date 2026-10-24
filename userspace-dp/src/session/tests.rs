@@ -2119,7 +2119,8 @@ fn tcp_rst_uses_short_timeout_not_fin_timeout() {
         now_ns: now + 3_000_000,
         protocol: PROTO_TCP,
         tcp_flags: TCP_FIN,
-    };
+            ack: None,
+};
     assert!(table.update_session(fin_req, false));
     let after_update = table
         .entry_by_key(&key)
@@ -2176,7 +2177,8 @@ fn closing_flag_is_sticky_across_nonclosing_update() {
         now_ns: now + 1_000_000,
         protocol: PROTO_TCP,
         tcp_flags: TCP_FIN | TCP_ACK,
-    };
+            ack: None,
+};
     assert!(table.update_session(fin_req, false));
     let after_fin = table.entry_by_key(&key).expect("entry after FIN");
     assert!(after_fin.closing, "FIN must mark the session closing");
@@ -2201,7 +2203,8 @@ fn closing_flag_is_sticky_across_nonclosing_update() {
         now_ns: now + 2_000_000,
         protocol: PROTO_TCP,
         tcp_flags: TCP_ACK,
-    };
+            ack: None,
+};
     assert!(table.update_session(ack_req, false));
     let after_ack = table.entry_by_key(&key).expect("entry after stray ACK");
     assert!(
@@ -2250,7 +2253,8 @@ fn closing_flag_is_sticky_on_ha_promote() {
         now_ns: now + 1_000_000,
         protocol: PROTO_TCP,
         tcp_flags: TCP_ACK,
-    };
+            ack: None,
+};
     assert!(table.update_session(promote_req, true));
     let after = table.entry_by_key(&key).expect("entry after HA promote");
     assert!(
@@ -2299,7 +2303,8 @@ fn update_session_mirrors_handshake_transitions_13678() {
             now_ns: now + 1_000_000,
             protocol: PROTO_TCP,
             tcp_flags: TCP_SYN | TCP_ACK,
-        },
+                    ack: None,
+},
         false
     ));
     let after_synack = table.entry_by_key(&key).expect("entry after SYN-ACK");
@@ -2323,7 +2328,8 @@ fn update_session_mirrors_handshake_transitions_13678() {
             now_ns: now + 2_000_000,
             protocol: PROTO_TCP,
             tcp_flags: TCP_ACK,
-        },
+                    ack: None,
+},
         false
     ));
     let after_ack = table.entry_by_key(&key).expect("entry after ACK");
@@ -2378,7 +2384,8 @@ fn promote_synced_clears_syn_ack_first_pending_13678() {
         now_ns: now + 1_000_000,
         protocol: PROTO_TCP,
         tcp_flags: TCP_ACK,
-    }));
+            ack: None,
+}));
     let after = table.entry_by_key(&key).expect("entry after promote");
     assert!(
         !after.handshake_pending,
@@ -2416,7 +2423,8 @@ fn reverse_ack_completion_removes_pressure_shed_entry_13678() {
             now_ns: now + 1_000_000,
             protocol: PROTO_TCP,
             tcp_flags: TCP_ACK,
-        },
+                    ack: None,
+},
         false
     ));
 
@@ -2456,7 +2464,8 @@ fn update_session_retransmitted_synack_keeps_syn_ack_first_13678() {
             now_ns: now + 1_000_000,
             protocol: PROTO_TCP,
             tcp_flags: TCP_SYN | TCP_ACK,
-        },
+                    ack: None,
+},
         false
     ));
     let after = table.entry_by_key(&key).expect("entry after retransmit");
@@ -2497,7 +2506,8 @@ fn update_session_reverse_synack_does_not_repend_established_13677() {
             now_ns: now + 1_000_000,
             protocol: PROTO_TCP,
             tcp_flags: TCP_SYN | TCP_ACK,
-        },
+                    ack: None,
+},
         false
     ));
     let after = table.entry_by_key(&key).expect("entry after stale SYN-ACK");
@@ -2536,7 +2546,8 @@ fn update_session_completion_requires_valid_ack_13676() {
                 now_ns: now + 1_000_000,
                 protocol: PROTO_TCP,
                 tcp_flags: TCP_SYN | TCP_ACK,
-            },
+                            ack: None,
+},
             false
         ));
         let _ = table.update_session(
@@ -2548,7 +2559,8 @@ fn update_session_completion_requires_valid_ack_13676() {
                 now_ns: now + 2_000_000,
                 protocol: PROTO_TCP,
                 tcp_flags: bad_flags,
-            },
+                            ack: None,
+},
             false,
         );
         assert!(
@@ -2583,7 +2595,8 @@ fn update_session_completion_requires_valid_ack_13676() {
                 now_ns: now + 1_000_000,
                 protocol: PROTO_TCP,
                 tcp_flags: bad_flags,
-            },
+                            ack: None,
+},
             false
         ));
         let entry = table.entry_by_key(&key).expect("SYN-ACK-first session");
@@ -3287,7 +3300,8 @@ fn promote_synced_forward_session_emits_open_delta() {
         now_ns: now + 1_000_000,
         protocol: PROTO_TCP,
         tcp_flags: 0x10,
-    }));
+            ack: None,
+}));
     let hit = table.lookup(&key, now + 2_000_000, 0x10);
     assert_eq!(
         hit,
@@ -3334,7 +3348,8 @@ fn promote_synced_reverse_session_stays_quiet() {
         now_ns: now + 1_000_000,
         protocol: PROTO_TCP,
         tcp_flags: 0x10,
-    }));
+            ack: None,
+}));
     let hit = table.lookup(&key, now + 2_000_000, 0x10);
     assert_eq!(
         hit,
@@ -5405,6 +5420,7 @@ fn reference_update_session(
         now_ns,
         protocol,
         tcp_flags,
+        ack: _ack,
     } = req;
     let Some(mut entry) = table.remove_entry(key, RemovalKind::Replace) else {
         return false;
@@ -5445,12 +5461,22 @@ fn reference_update_session(
     // asymmetric reverse-ACK completion gate.
     // #14630: mirror update_session — a closing entry never promotes or
     // completes, so the parity sweep stays faithful to the RST-then-ACK gate.
+    // #16042: mirror the ack gate (reference receives the same req ack;
+    // its companion ISN lives on the entry's pair in `table` — but the
+    // reference removed the entry first, so resolve from the table's
+    // remaining companion exactly as update_session does pre-mutation).
+    let ack_valid = {
+        let expected = table.handshake_expected_ack(key);
+        SessionTable::handshake_ack_valid(expected, _ack)
+    };
     let reverse_syn_ack = !entry.closing
+        && ack_valid
         && matches!(protocol, PROTO_TCP)
         && is_syn_ack(tcp_flags)
         && metadata.is_reverse
         && (!entry.established || entry.handshake_pending);
     let handshake_completed = !entry.closing
+        && ack_valid
         && if entry.syn_ack_first {
             matches!(protocol, PROTO_TCP)
                 && entry.handshake_pending
@@ -5668,7 +5694,8 @@ fn inplace_local_refresh_matches_reference() {
         now_ns: now,
         protocol: PROTO_TCP,
         tcp_flags: 0,
-    };
+            ack: None,
+};
     assert!(ip.update_session(req(2_000), false));
     assert!(reference_update_session(&mut rf, req(2_000), false));
     assert_tables_equiv(&mut ip, &mut rf, &[key.clone()], &[], &[1, 2]);
@@ -5692,7 +5719,8 @@ fn inplace_peer_to_local_promote_matches_reference() {
         now_ns: 2_000,
         protocol: PROTO_TCP,
         tcp_flags: 0,
-    };
+            ack: None,
+};
     let r1 = ip.update_session(req.clone(), false);
     let r2 = reference_update_session(&mut rf, req, false);
     assert_eq!(r1, r2);
@@ -5718,7 +5746,8 @@ fn inplace_peer_to_peer_reject_matches_reference() {
         now_ns: 2_000,
         protocol: PROTO_TCP,
         tcp_flags: 0,
-    };
+            ack: None,
+};
     assert!(!ip.update_session(req.clone(), false));
     assert!(!reference_update_session(&mut rf, req, false));
     assert_tables_equiv(&mut ip, &mut rf, &[key.clone()], &[], &[1, 2]);
@@ -5742,7 +5771,8 @@ fn inplace_local_from_peer_reject_matches_reference() {
         now_ns: 2_000,
         protocol: PROTO_TCP,
         tcp_flags: 0,
-    };
+            ack: None,
+};
     assert!(!ip.update_session(req.clone(), false));
     assert!(!reference_update_session(&mut rf, req, false));
     assert_tables_equiv(&mut ip, &mut rf, &[key.clone()], &[], &[1, 2]);
@@ -5767,7 +5797,8 @@ fn inplace_ha_activation_matches_reference() {
         now_ns: 3_000,
         protocol: PROTO_TCP,
         tcp_flags: 0,
-    };
+            ack: None,
+};
     assert!(ip.update_session(req.clone(), true));
     assert!(reference_update_session(&mut rf, req, true));
     assert_tables_equiv(&mut ip, &mut rf, &[key.clone()], &[], &[1, 2]);
@@ -5794,7 +5825,8 @@ fn inplace_nat_reindex_matches_reference() {
         now_ns: 2_000,
         protocol: PROTO_TCP,
         tcp_flags: 0,
-    };
+            ack: None,
+};
     assert!(ip.update_session(req.clone(), false));
     assert!(reference_update_session(&mut rf, req, false));
     assert_tables_equiv(
@@ -5824,7 +5856,8 @@ fn inplace_owner_rg_transitions_match_reference() {
             now_ns: 2_000,
             protocol: PROTO_TCP,
             tcp_flags: 0,
-        };
+                    ack: None,
+};
         assert!(ip.update_session(req.clone(), false));
         assert!(reference_update_session(&mut rf, req, false));
         assert_tables_equiv(&mut ip, &mut rf, &[key.clone()], &[], &[0, 1, 2]);
@@ -5862,7 +5895,8 @@ fn inplace_reject_reasserts_displaced_collision_like_reference() {
         now_ns: 2_000,
         protocol: PROTO_TCP,
         tcp_flags: 0,
-    };
+            ack: None,
+};
     assert!(!ip.update_session(req.clone(), false));
     assert!(!reference_update_session(&mut rf, req, false));
     // Both must have re-won the displaced slot back to the real session.
@@ -5893,7 +5927,8 @@ fn inplace_accept_reasserts_displaced_collision_like_reference() {
         now_ns: 2_000,
         protocol: PROTO_TCP,
         tcp_flags: 0,
-    };
+            ack: None,
+};
     assert!(ip.update_session(req.clone(), false));
     assert!(reference_update_session(&mut rf, req, false));
     assert_tables_equiv(&mut ip, &mut rf, &[key.clone()], &[collide], &[1, 2]);
@@ -5956,7 +5991,8 @@ fn inplace_stale_handle_returns_false_no_panic() {
         now_ns: 2_000,
         protocol: PROTO_TCP,
         tcp_flags: 0,
-    };
+            ack: None,
+};
     // Release contract: must not panic and must not mutate the unrelated
     // `other` session occupying the reused slot.
     let before = t.entry_by_key(&other).map(|e| e.last_seen_ns);
@@ -5981,7 +6017,8 @@ fn inplace_stale_handle_asserts_in_debug() {
         now_ns: 2_000,
         protocol: PROTO_TCP,
         tcp_flags: 0,
-    };
+            ack: None,
+};
     let _ = t.update_session(req, false);
 }
 
@@ -6052,7 +6089,8 @@ fn inplace_randomized_sequence_matches_reference() {
             now_ns: now,
             protocol: k.protocol,
             tcp_flags,
-        };
+                ack: None,
+};
         let r1 = ip.update_session(req.clone(), ha);
         let r2 = reference_update_session(&mut rf, req, ha);
         assert_eq!(r1, r2, "accept/reject diverged at step {step}");
@@ -6153,7 +6191,8 @@ fn inplace_vacant_handle_returns_false_no_panic() {
         now_ns: 2_000,
         protocol: PROTO_TCP,
         tcp_flags: 0,
-    };
+            ack: None,
+};
     assert!(!t.update_session(req, false));
     // refresh_for_ha_transition shares the same guard.
     assert!(!t.refresh_for_ha_transition(&key, decision(), metadata(), 2_000));
@@ -6172,7 +6211,8 @@ fn inplace_vacant_handle_asserts_in_debug() {
         now_ns: 2_000,
         protocol: PROTO_TCP,
         tcp_flags: 0,
-    };
+            ack: None,
+};
     let _ = t.update_session(req, false);
 }
 
@@ -6205,7 +6245,8 @@ fn inplace_fin_rst_closing_matches_reference() {
             now_ns: 2_000,
             protocol: PROTO_TCP,
             tcp_flags: flags,
-        };
+                    ack: None,
+};
         assert!(ip.update_session(req.clone(), false));
         assert!(reference_update_session(&mut rf, req, false));
         assert!(
@@ -6301,7 +6342,8 @@ fn nat_reverse_key_collision_counter_increments_on_displacement() {
         now_ns: refresh_ns,
         protocol: PROTO_TCP,
         tcp_flags: 0x10,
-    };
+            ack: None,
+};
     assert!(table.update_session(req, false));
     assert_eq!(
         table.nat_reverse_key_collisions(),
@@ -8066,7 +8108,8 @@ fn session_limit_count_moves_with_ingress_zone_updates_10985() {
             now_ns: now + 1_000_000,
             protocol: PROTO_TCP,
             tcp_flags: 0x10,
-        },
+                    ack: None,
+},
         false,
     ));
     assert_eq!(table.session_limit_src_count(TEST_TRUST_ZONE_ID, src), 0);
@@ -8555,7 +8598,8 @@ fn session_limit_ha_import_promote_demote_count() {
         now_ns: now + 1_000_000,
         protocol: PROTO_TCP,
         tcp_flags: 0x10,
-    }));
+            ack: None,
+}));
     assert_eq!(
         table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
         1,
@@ -8633,7 +8677,8 @@ fn session_limit_worker_replica_excluded_then_promote_backcounts_10310() {
         now_ns: now + 1_000_000,
         protocol: PROTO_TCP,
         tcp_flags: 0x10,
-    }));
+            ack: None,
+}));
     assert_eq!(
         table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
         1,
@@ -8991,7 +9036,8 @@ fn session_limit_counts_match_live_counted_entries_invariant() {
         now_ns: now + 1_000_000,
         protocol: PROTO_TCP,
         tcp_flags: 0x10,
-    }));
+            ack: None,
+}));
     // refresh that preserves origin/direction (must not change counts).
     let refresh_target = counted_keys[2].clone();
     assert!(table.refresh_for_ha_transition(
@@ -11501,7 +11547,8 @@ fn install_epoch_survives_update_session_9856() {
             now_ns: 2_000,
             protocol: PROTO_TCP,
             tcp_flags: 0,
-        },
+                    ack: None,
+},
         false
     ));
     let after = table
@@ -11566,7 +11613,8 @@ fn refreshed_pre_kick_session_satisfies_kick_epoch_9856() {
             now_ns: 2_000,
             protocol: PROTO_TCP,
             tcp_flags: 0,
-        },
+                    ack: None,
+},
         false
     ));
     let after = table
@@ -12516,15 +12564,15 @@ fn session_wrapper_query_equivalence_16129() {
     let key = key_v4();
     assert_eq!(
         SessionQuery::new(&key, 10, TCP_FIN, 7),
-        SessionQuery { key: &key, now_ns: 10, tcp_flags: TCP_FIN, defer: Defer::None, payload_len: 7 }
+        SessionQuery { key: &key, now_ns: 10, tcp_flags: TCP_FIN, defer: Defer::None, payload_len: 7, ack: None }
     );
     assert_eq!(
         SessionQuery::deferring_close(&key, 10, TCP_FIN),
-        SessionQuery { key: &key, now_ns: 10, tcp_flags: TCP_FIN, defer: Defer::Close, payload_len: 0 }
+        SessionQuery { key: &key, now_ns: 10, tcp_flags: TCP_FIN, defer: Defer::Close, payload_len: 0, ack: None }
     );
     assert_eq!(
         SessionQuery::deferring_authority(&key, 10, TCP_FIN, 7),
-        SessionQuery { key: &key, now_ns: 10, tcp_flags: TCP_FIN, defer: Defer::All, payload_len: 7 }
+        SessionQuery { key: &key, now_ns: 10, tcp_flags: TCP_FIN, defer: Defer::All, payload_len: 7, ack: None }
     );
 
     let now = 1_000_000_000u64;
@@ -12538,7 +12586,7 @@ fn session_wrapper_query_equivalence_16129() {
 
         let mut via_query = SessionTable::new();
         assert!(via_query.install_with_protocol(key.clone(), decision(), metadata(), now, PROTO_TCP, 0x10));
-        let q = SessionQuery { key: &key, now_ns: now + 1_000_000, tcp_flags: TCP_FIN, defer: Defer::None, payload_len: 0 };
+        let q = SessionQuery { key: &key, now_ns: now + 1_000_000, tcp_flags: TCP_FIN, defer: Defer::None, payload_len: 0, ack: None };
         let hit_q = match via_query.lookup_with_origin_query(&q) {
             SessionExpiryProbe::Live(hit) => Some(hit),
             SessionExpiryProbe::IdleCrossed | SessionExpiryProbe::Absent => None,
@@ -12559,7 +12607,7 @@ fn session_wrapper_query_equivalence_16129() {
 
         let mut via_query = SessionTable::new();
         assert!(via_query.install_with_protocol(key.clone(), decision(), metadata(), now, PROTO_TCP, 0x10));
-        let q = SessionQuery { key: &key, now_ns: now + 1_000_000, tcp_flags: TCP_FIN, defer: Defer::Close, payload_len: 0 };
+        let q = SessionQuery { key: &key, now_ns: now + 1_000_000, tcp_flags: TCP_FIN, defer: Defer::Close, payload_len: 0, ack: None };
         let hit_q = via_query.lookup_with_origin_query(&q);
         let closed_q = via_query.entry_by_key(&key).expect("entry").closing;
         assert_eq!(hit_w, hit_q, "deferring-close wrapper != hand-built query (result)");
@@ -12575,7 +12623,7 @@ fn session_wrapper_query_equivalence_16129() {
 
         let mut via_query = SessionTable::new();
         assert!(via_query.install_with_protocol(key.clone(), decision(), metadata(), now, PROTO_TCP, 0x10));
-        let q = SessionQuery { key: &key, now_ns: now + 5_000_000, tcp_flags: 0x10, defer: Defer::All, payload_len: 0 };
+        let q = SessionQuery { key: &key, now_ns: now + 5_000_000, tcp_flags: 0x10, defer: Defer::All, payload_len: 0, ack: None };
         let hit_q = via_query.lookup_with_origin_query(&q);
         let seen_q = via_query.entry_by_key(&key).expect("entry").last_seen_ns;
         assert_eq!(hit_w, hit_q, "deferring-authority wrapper != hand-built query (result)");

@@ -86,6 +86,18 @@ xpf (0.0.0) unstable; urgency=medium
     published a duplicate wire tuple. A port-mapped static is PAT'd
     around and refused only on its exact port; genuine static imports
     keep their no-reservation success. The NPTv6 leg was #16015.
+  * Sessions: handshake promotion/completion now validates the TCP ack
+    number (#16042). A SYN-ACK or completing ACK whose ack does not equal
+    the companion direction's SYN ack end (ISN + 1 + SYN payload,
+    wrapping) no longer promotes a session off the opening window at any
+    gate — lookup, flow-cache hit, keepalive, or HA update/promote. Each
+    direction's ack end is learned from its SYN/SYN-ACK (Owner-admitted
+    notes only, so a rejected SYN-ACK cannot launder evidence) or seeded
+    at install (both halves, through the NAT reverse key, so translated
+    pairs validate identically). Companion resolution runs only for
+    handshake-pending pairs. Unknown evidence (mid-stream pickup, HA
+    import, unparsed ack) fails open on the opening window, so a
+    failover import's first completing segment still completes.
   * Cluster: an open control-key rotation now ages visibly and alarms
     when forgotten (#16029). UpdateConfig stamps when the current
     additional-authentication-key window opened (keyed on the additional

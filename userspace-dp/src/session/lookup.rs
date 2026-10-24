@@ -64,6 +64,12 @@ pub(crate) struct SessionQuery<'a> {
     pub(crate) tcp_flags: u8,
     pub(crate) defer: Defer,
     pub(crate) payload_len: u32,
+    /// #16042: TCP ack number of the segment driving this lookup, when the
+    /// caller parsed a frame. `None` (the constructors below) means the
+    /// caller has no parsed ack; session-table unit callers that drive a
+    /// handshake gate set it explicitly. A segment whose ack is known but
+    /// does not equal the companion ISN + 1 must not promote/complete.
+    pub(crate) ack: Option<u32>,
 }
 
 impl<'a> SessionQuery<'a> {
@@ -75,7 +81,14 @@ impl<'a> SessionQuery<'a> {
             tcp_flags,
             defer: Defer::None,
             payload_len,
+            ack: None,
         }
+    }
+
+    /// #16042: ordinary lookup carrying the parsed segment ack so the
+    /// SYN-ACK / completing-ACK gates can validate it.
+    pub(crate) fn with_ack(key: &'a SessionKey, now_ns: u64, tcp_flags: u8, payload_len: u32, ack: Option<u32>) -> Self {
+        Self { ack, ..Self::new(key, now_ns, tcp_flags, payload_len) }
     }
 
     /// Close-deferring lookup — the
@@ -87,7 +100,21 @@ impl<'a> SessionQuery<'a> {
             tcp_flags,
             defer: Defer::Close,
             payload_len: 0,
+            ack: None,
         }
+    }
+
+    /// #16042: authority-deferring lookup carrying the parsed segment ack.
+    /// The probe itself mutates nothing (`Defer::All`); the ack rides along
+    /// so the Owner replay can validate the completing segment.
+    pub(crate) fn deferring_authority_with_ack(
+        key: &'a SessionKey,
+        now_ns: u64,
+        tcp_flags: u8,
+        payload_len: u32,
+        ack: Option<u32>,
+    ) -> Self {
+        Self { ack, ..Self::deferring_authority(key, now_ns, tcp_flags, payload_len) }
     }
 
     /// Authority-deferring lookup — the
@@ -104,6 +131,7 @@ impl<'a> SessionQuery<'a> {
             tcp_flags,
             defer: Defer::All,
             payload_len,
+            ack: None,
         }
     }
 }
@@ -178,6 +206,63 @@ impl SessionTable {
                     entry.tcp_ws_negotiated = true;
                 }
             }
+        }
+    }
+    /// #16042: seed the trigger packet's ISN (`seq` of a SYN or SYN-ACK)
+    /// onto BOTH halves at install. The poll install path installs before
+    /// any hit can `note_tcp_seq`, so without this seed the first
+    /// handshake segment (the SYN-ACK reply, or the completing ACK of a
+    /// SYN-ACK-first pickup) would have no expected ack to validate
+    /// against. For a SYN-ACK install the SYN-ACK's seq IS the peer ISN
+    /// both halves must ack. For a bare SYN both copies start at the
+    /// client ISN: the reverse half's copy is what a reverse SYN-ACK's
+    /// ack is validated against, and it is overwritten by the real
+    /// SYN-ACK seq when that segment is noted. No-op for non-SYN packets.
+    /// NAT: the companion is resolved through `reverse_session_key`, so
+    /// translated (SNAT/DNAT/NAT64) pairs seed the alias companion too.
+    pub fn seed_tcp_isn(&mut self, key: &SessionKey, seq: u32, tcp_flags: u8) {
+        if !crate::tcp_flags::has_syn(tcp_flags) {
+            return;
+        }
+        let Some(record) = self.revalidation_record(key) else { return };
+        let nat = record.entry.decision.nat;
+        let canonical = record.key.clone();
+        if let Some(entry) = self.entry_by_key_mut(&canonical) {
+            entry.tcp_peer_isn = Some(seq);
+        }
+        let companion_key = reverse_session_key(&canonical, nat);
+        if companion_key != canonical
+            && let Some(entry) = self.entry_by_key_mut(&companion_key)
+        {
+            entry.tcp_peer_isn = Some(seq);
+        }
+    }
+    /// #16042: the ack a handshake segment arriving on `key` must carry:
+    /// the companion direction's ISN + 1 (a SYN consumes one sequence
+    /// number, wrapping). `None` when the matched entry or its companion
+    /// is unknown, or the companion ISN was never observed/seeded —
+    /// mid-stream pickups and HA imports — in which case the gate fails
+    /// open (flags-only) and the pair stays bounded by the opening window.
+    pub(crate) fn handshake_expected_ack(&self, key: &SessionKey) -> Option<u32> {
+        let record = self.revalidation_record(key)?;
+        let companion_key = reverse_session_key(&record.key, record.entry.decision.nat);
+        if companion_key == record.key {
+            return None;
+        }
+        // Non-counting resolver: a companion probe must never perturb
+        // the #7919 lookup-miss counters on an ordinary hit.
+        self.revalidation_record(&companion_key)
+            .and_then(|companion| companion.entry.tcp_peer_isn)
+            .map(|isn| isn.wrapping_add(1))
+    }
+    /// #16042: a SYN-ACK or completing-ACK segment promotes/completes
+    /// only when its parsed ack equals the known expectation. Unknown
+    /// expectation or unparsed ack fails open (see above).
+    #[inline]
+    pub(crate) fn handshake_ack_valid(expected: Option<u32>, ack: Option<u32>) -> bool {
+        match (expected, ack) {
+            (Some(expected), Some(ack)) => ack == expected,
+            _ => true,
         }
     }
     /// Validate RST/FIN seq against the RECEIVER's advertised window.
@@ -664,6 +749,22 @@ impl SessionTable {
         self.lookup_with_origin_with_payload(key, now_ns, tcp_flags, 0)
     }
 
+    /// #16042: [`Self::lookup_with_origin_with_payload`] carrying the
+    /// parsed segment ack so the SYN-ACK / completing-ACK gates validate it.
+    pub fn lookup_with_origin_with_ack(
+        &mut self,
+        key: &SessionKey,
+        now_ns: u64,
+        tcp_flags: u8,
+        payload_len: u32,
+        ack: Option<u32>,
+    ) -> Option<(SessionLookup, SessionOrigin)> {
+        match self.lookup_with_origin_query(&SessionQuery::with_ack(key, now_ns, tcp_flags, payload_len, ack)) {
+            SessionExpiryProbe::Live(hit) => Some(hit),
+            SessionExpiryProbe::IdleCrossed | SessionExpiryProbe::Absent => None,
+        }
+    }
+
     /// #14935: [`Self::lookup_with_origin`] with TCP payload progress.
     pub fn lookup_with_origin_with_payload(
         &mut self,
@@ -731,6 +832,20 @@ impl SessionTable {
         ))
     }
 
+    /// #16042: deferring-authority lookup carrying the parsed segment ack.
+    pub fn lookup_with_origin_deferring_authority_with_ack(
+        &mut self,
+        key: &SessionKey,
+        now_ns: u64,
+        tcp_flags: u8,
+        payload_len: u32,
+        ack: Option<u32>,
+    ) -> SessionExpiryProbe<(SessionLookup, SessionOrigin)> {
+        self.lookup_with_origin_query(&SessionQuery::deferring_authority_with_ack(
+            key, now_ns, tcp_flags, payload_len, ack,
+        ))
+    }
+
     /// #16129: execute one [`SessionQuery`].
     pub(crate) fn lookup_with_origin_query(
         &mut self,
@@ -772,6 +887,9 @@ impl SessionTable {
             .get(handle as usize)
             .map(|r| r.entry.metadata.ingress_zone)
             .and_then(|zone| self.opening_override_for(zone));
+        // #16042: expected ack for this hit, resolved from the canonical
+        // record (alias hits share the pair's companion ISN).
+        let expected_ack = self.handshake_expected_ack(key);
         // Scope the &mut self.entries borrow so it ends BEFORE we
         // touch self.wheel via push_to_wheel. Without this scoping
         // the &mut record would conflict with the second &mut self
@@ -817,8 +935,15 @@ impl SessionTable {
             // A bare reverse ACK cannot bypass the normal opening reap.
             // #10889: a non-TCP entry with an application override promotes
             // only on the first packet observed on its reverse half.
+            // #16042: a TCP SYN-ACK / completing-ACK segment whose parsed
+            // ack does not equal the companion ISN + 1 must not promote or
+            // complete. Unknown expectation/ack fails open (bounded by the
+            // opening window). Computed before the borrow from the
+            // canonical record so NAT alias hits validate the same pair.
+            let ack_valid = Self::handshake_ack_valid(expected_ack, query.ack);
             let promote_from_reverse = !defer_all
                 && !entry.closing
+                && ack_valid
                 && if is_tcp {
                     is_syn_ack(tcp_flags)
                         && entry.metadata.is_reverse
@@ -838,6 +963,7 @@ impl SessionTable {
             }
             let promote_from_asymmetric_ack = !defer_all
                 && !entry.closing
+                && ack_valid
                 && is_tcp
                 && entry.syn_ack_first
                 && entry.handshake_pending
@@ -859,6 +985,7 @@ impl SessionTable {
             // later segment promotes a closing entry to a longer window.
             let handshake_completed = !defer_all
                 && !entry.closing
+                && ack_valid
                 && if entry.syn_ack_first {
                     promote_from_asymmetric_ack
                 } else {
@@ -1038,7 +1165,19 @@ impl SessionTable {
         tcp_flags: u8,
         payload_len: u32,
     ) {
-        let _ = self.lookup_with_origin_with_payload(key, now_ns, tcp_flags, payload_len);
+        self.apply_deferred_owner_hit_with_ack(key, now_ns, tcp_flags, payload_len, None);
+    }
+
+    /// #16042: Owner replay carrying the parsed segment ack.
+    pub fn apply_deferred_owner_hit_with_ack(
+        &mut self,
+        key: &SessionKey,
+        now_ns: u64,
+        tcp_flags: u8,
+        payload_len: u32,
+        ack: Option<u32>,
+    ) {
+        let _ = self.lookup_with_origin_with_ack(key, now_ns, tcp_flags, payload_len, ack);
     }
 
     /// #10636: apply a close the deferring lookup skipped, after the #9519

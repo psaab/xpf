@@ -259,6 +259,23 @@ the synced-replica shape completes here too because a materialized
 HandshakePending import is a local entry whose hits are cache hits.
 Steady state costs one `handshake_pending` bool check per cache hit.
 
+**Handshake segments must ack the peer ISN (#16042).** Every promotion /
+completion gate above — the `lookup.rs` SYN-ACK and completing-ACK arms,
+the cached-hit `probe_hit` and keepalive arms, and the `update_session` /
+promote twin — additionally requires, when both are known, that the
+segment's ack equal the COMPANION direction's ISN + 1 (wrapping; a SYN
+consumes one sequence number). Each direction's ISN (`tcp_peer_isn`) is
+learned from its SYN/SYN-ACK (`note_tcp_seq`) or seeded at install
+(`seed_tcp_isn`, both halves, companion resolved through
+`reverse_session_key` so NAT alias pairs validate the same way). A
+wrong-ack SYN-ACK never promotes and a wrong-ack completing segment
+never clears `handshake_pending`: the pair stays on the opening window.
+Unknown evidence fails OPEN, never closed: when the companion ISN was
+never observed (mid-stream pickup, HA import — imports carry no ISN) or
+the caller parsed no ack, the gate is flags-only exactly as before, so
+a failover import's first completing segment still completes; the
+opening window bounds that residual.
+
 **A closing entry never completes the handshake (#14630).** `stamp_tcp_close`
 stamps `closing`/`reset` but deliberately leaves `handshake_pending` set, so
 the completion predicates must consult entry state, not packet flags alone:

@@ -525,7 +525,8 @@ fn a1_promotion_resets_fresh_provenance_10507() {
         now_ns: 123_000_000_000,
         protocol: PROTO_TCP,
         tcp_flags: 0,
-    }));
+            ack: None,
+}));
     assert_eq!(
         table.policy_revalidation_kind(&k),
         PolicyRevalidationKind::Unvalidated,
@@ -569,7 +570,8 @@ fn a1_promotion_preserves_stale_provenance_10507() {
         now_ns: 123_000_000_000,
         protocol: PROTO_TCP,
         tcp_flags: 0,
-    }));
+            ack: None,
+}));
     assert_eq!(
         table.policy_revalidation_kind(&k),
         PolicyRevalidationKind::RecordedEgress,

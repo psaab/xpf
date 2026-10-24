@@ -22427,7 +22427,8 @@ fn resync_and_promote_do_not_reemit_session_create_15126() {
             now_ns: 2_000_000,
             protocol: PROTO_TCP,
             tcp_flags: 0x10,
-        },
+                    ack: None,
+},
         false,
     ));
     let promote_deltas = promoted.drain_deltas(16);
