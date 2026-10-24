@@ -128,7 +128,7 @@ SRIOV_PARENT="mlx0"  SRIOV_LAN_PARENT="mlx1"  VF_LAN_VLAN=3667
 NET_MGMT="incusbr0"  NET_HEARTBEAT="bpu-hb0"  NET_FABRIC="bpu-fab0"  NET_CLAN=""   # "" = SR-IOV LAN, no bridge
 CLUSTER_CONF="docs/ha-cluster-userspace.conf"
 LAN_ADDR="10.0.61.102/24"  LAN_GW/LAN_VIP4="10.0.61.1"  LAN_VIP6="2001:559:8585:ef00::1"
-WAN_GW4="172.16.50.1"  WAN_VIP4="172.16.50.6"   # stale vs conf (.8) — §6-R4
+WAN_GW4="172.16.50.1"  WAN_VIP4="172.16.50.8"   # fixed #16468: was .6, stale vs conf (.8)
 IPERF_TARGET4="172.16.80.200"  IPERF_TARGET6="2001:559:8585:80::200"
 MOUSE_TARGET_V4="172.16.80.201"  MOUSE_TARGET_V6="2001:559:8585:80::201"
 ```
@@ -1367,7 +1367,8 @@ address — same expectation.
   `docs/ha-cluster-userspace.conf` and review the diff hunks only; the
   addressing lines are the whole delta (plus §2.5 removals).
 - **R4 — Stale precedents in the source material.** `loss-userspace-cluster.env`
-  `WAN_VIP4=172.16.50.6` vs conf `172.16.50.8`; profile name
+  `WAN_VIP4=172.16.50.6` vs conf `172.16.50.8` (fixed #16468: env now .8, hermetic
+  cell `TestClusterEnvVIPsMatchClusterConf16468` guards every cluster env); profile name
   `xpf-cluster-userspace` (env) vs `bpfrx-cluster-userspace` (live);
   `IMAGE_VM` Ubuntu-26.04 (script) vs Debian-trixie (live guests);
   profile 4 CPU/4 GiB (script) vs 6 CPU/8 GiB+hugepages (live). Each is a

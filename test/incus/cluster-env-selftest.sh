@@ -99,7 +99,7 @@ eq "loss INCUS_REMOTE"    "$(resolve INCUS_REMOTE)"    "loss"
 eq "loss DMZ_TARGET_PF"   "$(resolve DMZ_TARGET_PF)"   "mlx0"
 eq "loss DMZ_GW4"         "$(resolve DMZ_GW4)"         "172.16.50.8"
 eq "loss WAN_GW80_4"      "$(resolve WAN_GW80_4)"      "172.16.80.8"
-eq "loss WAN_VIP4 (not the gateway)" "$(resolve WAN_VIP4)" "172.16.50.6"
+eq "loss WAN_VIP4" "$(resolve WAN_VIP4)" "172.16.50.8"
 eq "loss DMZ_TARGET_VLAN" "$(resolve DMZ_TARGET_VLAN)" "50"
 # #16213: the declarative primary alias derives from the cluster's iperf
 # target — loss .200 (alias of the .201 mouse host); tcp/udp equal their

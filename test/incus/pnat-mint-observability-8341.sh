@@ -46,7 +46,15 @@ source "${SCRIPT_DIR}/cos-apply-lib.sh"
 LAN_CLIENT="${LAN_CLIENT:-$CLUSTER_LAN_HOST}"
 TARGET="${TARGET:-$IPERF_TARGET4}"
 POOL_NAME="${POOL_NAME:-pnat8341}"
-POOL_ADDR="${POOL_ADDR:-$WAN_VIP4}"
+# #16468: the pool is DISCOVERED, not assumed from WAN_VIP4. WAN_VIP4 is the
+# reth0.50 VIP, but this probe's TARGET sits behind reth0.80, so a SYN
+# translated to the WAN VIP was never answered -- the #9729 confound
+# persistent-nat-failover.sh resolve_pool already fixed for its sibling.
+# By default reuse the committed source pool proxy-ARPed on the unit
+# carrying TARGET; setting POOL_ADDR selects a dedicated POOL_NAME instead.
+POOL_MODE="reuse"
+if [ -n "${POOL_ADDR:-}" ]; then POOL_MODE="dedicated"; fi
+POOL_ADDR="${POOL_ADDR:-}"
 POOL_LOW="${POOL_LOW:-51200}"
 POOL_HIGH="${POOL_HIGH:-51299}"
 PNAT_TIMEOUT="${PNAT_TIMEOUT:-300}"
@@ -64,6 +72,47 @@ POLL_SECS="${POLL_SECS:-40}"
 
 info() { echo "==> $*"; }
 fw_cli() { incus exec "$1" -- /usr/local/sbin/cli -c "$2" 2>/dev/null; }
+die() { echo "FATAL: $*" >&2; exit 2; }
+
+# reachable_source_pool / resolve_pool mirror persistent-nat-failover.sh
+# (#9729/#16468): print "<pool> <address>" for the first committed source
+# pool whose /32 is proxy-ARPed on an interface unit whose subnet contains
+# $TARGET; resolve_pool settles POOL_NAME/POOL_ADDR before any commit.
+reachable_source_pool() {
+	fw_cli "$1" "show configuration | display set" | TARGET="$TARGET" python3 -c '
+import ipaddress, os, re, sys
+target = ipaddress.ip_address(os.environ["TARGET"])
+lines = sys.stdin.read().splitlines()
+nets = {}
+for l in lines:
+    m = re.match(r"set interfaces (\S+) unit (\d+) family inet address (\S+)", l)
+    if m:
+        nets.setdefault(m.group(1) + "." + m.group(2), []).append(ipaddress.ip_interface(m.group(3)).network)
+arped = set()
+for l in lines:
+    m = re.match(r"set security nat proxy-arp interface (\S+) address (\S+)", l)
+    if m and any(target in n for n in nets.get(m.group(1), [])):
+        arped.add(m.group(2).split("/")[0])
+for l in lines:
+    m = re.match(r"set security nat source pool (\S+) address (\S+)/32$", l)
+    if m and m.group(2) in arped:
+        print(m.group(1), m.group(2))
+        break
+'
+}
+
+resolve_pool() {
+	if [ "$POOL_MODE" = "dedicated" ]; then
+		info "pool: dedicated ${POOL_NAME} at ${POOL_ADDR}/32, ports ${POOL_LOW}-${POOL_HIGH} (POOL_ADDR set)"
+		return
+	fi
+	local found
+	found="$(reachable_source_pool "$PRIMARY" || true)"
+	[ -n "$found" ] || die "no committed source pool is proxy-ARPed on the interface carrying $TARGET, so no pool address is known to route back; set POOL_ADDR to one that does"
+	POOL_NAME="${found%% *}"
+	POOL_ADDR="${found##* }"
+	info "pool: reusing ${POOL_NAME} at ${POOL_ADDR}/32 (proxy-ARPed on the unit carrying $TARGET); persistent-nat is added for this run only"
+}
 
 primary_node() {
 	local status secondary
@@ -75,6 +124,12 @@ PRIMARY="$(primary_node)"
 
 restore_config() {
 	info "Restoring interface SNAT on both nodes"
+	# A reused pool is the cluster's own and must survive; only the
+	# persistent-nat this run added is removed. A dedicated pool is deleted.
+	local restore_pool_line="delete security nat source pool ${POOL_NAME}"
+	if [ "$POOL_MODE" = "reuse" ]; then
+		restore_pool_line="delete security nat source pool ${POOL_NAME} persistent-nat"
+	fi
 	local node
 	for node in "$FW0" "$FW1"; do
 		incus exec "$node" -- /usr/local/sbin/cli >/dev/null 2>&1 <<EOF || true
@@ -82,7 +137,7 @@ configure
 rollback 0
 delete security nat source rule-set ${SNAT_RULESET} rule ${SNAT_RULE} then source-nat pool
 set security nat source rule-set ${SNAT_RULESET} rule ${SNAT_RULE} then source-nat interface
-delete security nat source pool ${POOL_NAME}
+${restore_pool_line}
 commit
 exit
 quit
@@ -92,13 +147,20 @@ EOF
 trap restore_config EXIT
 
 info "#8341 mint-observability probe on $PRIMARY (client $LAN_CLIENT -> $TARGET:$PROBE_PORT)"
+resolve_pool
+# A reused pool keeps its committed address/ports; only a dedicated pool is
+# created here (same shape as persistent-nat-failover.sh pnat_config_session).
+POOL_CREATE=""
+if [ "$POOL_MODE" = "dedicated" ]; then
+	POOL_CREATE="delete security nat source pool ${POOL_NAME}
+set security nat source pool ${POOL_NAME} address ${POOL_ADDR}/32
+set security nat source pool ${POOL_NAME} port range low ${POOL_LOW} high ${POOL_HIGH}
+"
+fi
 incus exec "$PRIMARY" -- /usr/local/sbin/cli >/tmp/pnat8341-apply.out 2>&1 <<EOF || true
 configure
 rollback 0
-delete security nat source pool ${POOL_NAME}
-set security nat source pool ${POOL_NAME} address ${POOL_ADDR}/32
-set security nat source pool ${POOL_NAME} port range low ${POOL_LOW} high ${POOL_HIGH}
-set security nat source pool ${POOL_NAME} persistent-nat permit any-remote-host
+${POOL_CREATE}set security nat source pool ${POOL_NAME} persistent-nat permit any-remote-host
 set security nat source pool ${POOL_NAME} persistent-nat inactivity-timeout ${PNAT_TIMEOUT}
 delete security nat source rule-set ${SNAT_RULESET} rule ${SNAT_RULE} then source-nat interface
 set security nat source rule-set ${SNAT_RULESET} rule ${SNAT_RULE} then source-nat pool ${POOL_NAME}
@@ -115,7 +177,7 @@ if ! cos_require_markers "pool apply on $PRIMARY" /tmp/pnat8341-apply.out "$COS_
 	sed -n '1,40p' /tmp/pnat8341-apply.out >&2
 	exit 2
 fi
-info "pool ${POOL_NAME} (${POOL_ADDR}:${POOL_LOW}-${POOL_HIGH}) committed"
+info "pool ${POOL_NAME} (${POOL_ADDR}) committed"
 
 SRC_IP="$(incus exec "$LAN_CLIENT" -- bash -lc "ip -4 -o addr show scope global | awk 'NR==1{split(\$4,a,\"/\"); print a[1]}'")"
 info "client source IP: $SRC_IP"

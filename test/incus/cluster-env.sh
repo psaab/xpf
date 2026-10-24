@@ -87,8 +87,7 @@ IPERF_TARGET6="${IPERF_TARGET6:-2001:559:8585:100::200}"
 # VLAN-80 (untrust/mouse) endpoint and the VLAN-50 (DMZ) endpoint sit on
 # separate /24s, so each needs the firewall address on ITS OWN subnet as
 # next hop: DMZ_GW4 on VLAN 50, WAN_GW80_4 on VLAN 80. WAN_VIP4 is NOT
-# usable for either: on loss it is 172.16.50.6 (a VIP, not the .8 reth
-# gateway the gate historically used), and a VLAN-50 address is not
+# usable for either: a VLAN-50 address is not
 # on-link for a VLAN-80 host (ip(8) refuses it). Cluster envs set both
 # explicitly from their firewall config (loss .8/.8, tcp .10/.10,
 # udp .11/.11); the defaults here keep loss/legacy byte-identical.
