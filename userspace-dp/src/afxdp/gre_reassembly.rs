@@ -504,7 +504,11 @@ impl GreReassembler {
         let is_new = !self.entries.contains_key(&info.key);
         if is_new {
             // #16028: tails consult only — no head-created entry, no state.
+            // Fold (3): the drop is COUNTED (pre-fold it returned
+            // silently, so a tail flood was invisible in
+            // GRE_OUTER_FRAG_DROPS while the stage consumed the packet).
             if admission == OfferAdmission::Tail {
+                counted_drop();
                 return None;
             }
             if self.entries.len() >= MAX_GRE_FRAG_DATAGRAMS {

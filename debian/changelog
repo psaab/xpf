@@ -58,7 +58,14 @@ xpf (0.0.0) unstable; urgency=medium
     WireGuard or other GRE peers. Trade-off: a tail arriving before
     its head is now dropped instead of buffered (pre-head tail
     buffering was the starvation vector); correctly ordered fragmented
-    tunnel traffic is unaffected.
+    tunnel traffic is unaffected. Fold: head-admission Key reads are
+    bounded by the declared outer length (never trailing capture);
+    probe counter charges reuse a per-thread scratch store (no
+    per-head allocation); consult-only tail drops are counted in the
+    pool drop counter. Accepted restriction, tested: a KEYED GRE
+    header split across the first fragments (Key bytes beyond the
+    head fragment) is refused at the head — the Key cannot be
+    verified there; unkeyed split headers reassemble normally.
 
 xpf (0.0.0) unstable; urgency=medium
 

@@ -576,3 +576,194 @@ fn pool_per_source_quota_and_tail_consult_16028() {
         "#16028: second source must not be starved by first source's quota fill"
     );
 }
+
+// ---------------------------------------------------------------------
+// Fold (1): a head whose DECLARED length ends inside the GRE Key
+// must not have its Key read from trailing capture bytes. Fixture:
+// keyed endpoint (0x11112222); frame declares a short total length
+// but carries trailing bytes past it that spell the CORRECT key —
+// pre-fold the probe read them (frame-bounded) and admitted; now
+// the declared bound refuses. Also pins the stage refusal count.
+// ---------------------------------------------------------------------
+#[test]
+fn gre_head_key_beyond_declared_length_not_read_16028() {
+    let _lock = gre_outer_frag_counter_test_lock();
+    let mut snapshot = gre_to_self_snapshot();
+    snapshot.tunnel_endpoints[0].key = 0x1111_2222;
+    let forwarding = build_forwarding_state(&snapshot);
+    let inner = build_gre_inner_icmp_packet_v4();
+    let whole = build_gre_to_self_outer_frame_v4(0, &inner);
+    let mut keyed = whole.clone();
+    keyed[14 + 20] = 0x20;
+    keyed[14 + 21] = 0x00;
+    let mut with_key = keyed[..14 + 20 + 4].to_vec();
+    with_key.extend_from_slice(&0x1111_2222u32.to_be_bytes());
+    with_key.extend_from_slice(&keyed[14 + 20 + 4..]);
+    let total = (20 + 4 + 4 + inner.len()) as u16;
+    with_key[14 + 2..14 + 4].copy_from_slice(&total.to_be_bytes());
+    with_key[14 + 10] = 0;
+    with_key[14 + 11] = 0;
+    let sum = checksum16(&with_key[14..14 + 20]);
+    with_key[14 + 10..14 + 12].copy_from_slice(&sum.to_be_bytes());
+    let (khead, _ktail) = split_v4_outer_16028(&with_key, 16);
+    // Shrink declared IP total to 24 (IP hdr + GRE base only): the
+    // declared fragment ends before the Key bytes, which remain in
+    // trailing capture and must never be read (fold 1).
+    let mut shrunk = khead.clone();
+    shrunk[14 + 2..14 + 4].copy_from_slice(&24u16.to_be_bytes());
+    shrunk[14 + 10] = 0;
+    shrunk[14 + 11] = 0;
+    let sum = checksum16(&shrunk[14..14 + 20]);
+    shrunk[14 + 10..14 + 12].copy_from_slice(&sum.to_be_bytes());
+    let mut meta = frag_meta_16028(&shrunk, true);
+    meta.pkt_len = shrunk.len() as u16 - 14;
+    let mut pool = GreReassembler::new();
+    let before = forwarding.gre_decap_counters.reassembled_decap_refusals();
+    match stage_gre_16028(&shrunk, meta, &forwarding, &mut pool, 60_000_000_000) {
+        GreDecapStage::Buffered => {}
+        GreDecapStage::Decapped(..) => {
+            panic!("fold(1): key beyond declared length must not admit/decap")
+        }
+        GreDecapStage::NotGre(_) => panic!("fold(1): to-self head must be consumed, not forwarded"),
+        GreDecapStage::FilterDropped => panic!("fold(1): must not filter-drop"),
+    }
+    assert_eq!(
+        pool.buffered_len(),
+        0,
+        "fold(1): no state from beyond-declared Key read"
+    );
+    assert_eq!(
+        forwarding.gre_decap_counters.reassembled_decap_refusals(),
+        before + 1,
+        "fold(1): refusal counted once"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Fold (3): consult-only Tail offers bump GRE_OUTER_FRAG_DROPS.
+// Fold (4): GRE header split across first fragments. KEYED split
+// (Checksum+Key+Sequence, split at 8: head holds only base+checksum)
+// is refused without state — documented restriction, Key is
+// unverifiable at the head and a keyed endpoint must not guess.
+// UNKEYED split (Checksum+Sequence) defers with no Key to verify
+// and reassembles+decaps byte-identical.
+// ---------------------------------------------------------------------
+#[test]
+fn tail_drop_counted_and_split_header_supported_16028() {
+    let _lock = gre_outer_frag_counter_test_lock();
+    let inner = build_gre_inner_icmp_packet_v4();
+    let whole = build_gre_to_self_outer_frame_v4(0, &inner);
+    let (_head, tail) = split_v4_outer_16028(&whole, 16);
+    let mut pool = GreReassembler::new();
+    let drops_before = crate::afxdp::gre_reassembly::GRE_OUTER_FRAG_DROPS
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        pool.offer(
+            &tail,
+            frag_meta_16028(&tail, false),
+            70_000_000_000,
+            OfferAdmission::Tail
+        )
+        .is_none()
+    );
+    assert_eq!(
+        crate::afxdp::gre_reassembly::GRE_OUTER_FRAG_DROPS
+            .load(std::sync::atomic::Ordering::Relaxed),
+        drops_before + 1,
+        "fold(3): consult-only tail drop must be counted"
+    );
+
+    // Fold (4) restriction: keyed C+K+S header split at 8 bytes.
+    let mut snapshot = gre_to_self_snapshot();
+    snapshot.tunnel_endpoints[0].key = 0x1111_2222;
+    let forwarding = build_forwarding_state(&snapshot);
+    let gre_start = 14 + 20;
+    let build_gre = |flags: u16, key: Option<u32>, seq: bool| -> Vec<u8> {
+        let mut hdr = Vec::new();
+        hdr.extend_from_slice(&flags.to_be_bytes());
+        hdr.extend_from_slice(&0x0800u16.to_be_bytes());
+        hdr.extend_from_slice(&[0, 0, 0, 0]);
+        if let Some(k) = key {
+            hdr.extend_from_slice(&k.to_be_bytes());
+        }
+        if seq {
+            hdr.extend_from_slice(&7u32.to_be_bytes());
+        }
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&whole[..14]);
+        let total = (20 + hdr.len() + inner.len()) as u16;
+        frame.extend_from_slice(&[0x45, 0x00]);
+        frame.extend_from_slice(&total.to_be_bytes());
+        frame.extend_from_slice(&whole[14 + 4..14 + 20]);
+        frame[14 + 10] = 0;
+        frame[14 + 11] = 0;
+        let ip_sum = checksum16(&frame[14..14 + 20]);
+        frame[14 + 10..14 + 12].copy_from_slice(&ip_sum.to_be_bytes());
+        frame.extend_from_slice(&hdr);
+        frame.extend_from_slice(&inner);
+        frame[gre_start + 4] = 0;
+        frame[gre_start + 5] = 0;
+        let csum = checksum16(&frame[gre_start..]);
+        frame[gre_start + 4..gre_start + 6].copy_from_slice(&csum.to_be_bytes());
+        frame
+    };
+    // C(0x8000)|K(0x2000)|S(0x1000) = 0xB000, 16-byte header, split at 8.
+    let keyed_frame = build_gre(0xB000, Some(0x1111_2222), true);
+    let (shead, _stail) = split_v4_outer_16028(&keyed_frame, 8);
+    let mut pool2 = GreReassembler::new();
+    let now = 71_000_000_000u64;
+    match stage_gre_16028(
+        &shead,
+        frag_meta_16028(&shead, true),
+        &forwarding,
+        &mut pool2,
+        now,
+    ) {
+        GreDecapStage::Buffered => {}
+        GreDecapStage::Decapped(..) => panic!("fold(4): keyed split head must not decap"),
+        GreDecapStage::NotGre(_) => panic!("fold(4): keyed split head must be consumed"),
+        GreDecapStage::FilterDropped => panic!("fold(4): keyed split head must not filter-drop"),
+    }
+    assert_eq!(
+        pool2.buffered_len(),
+        0,
+        "fold(4) restriction: keyed split-header head creates no state (Key unverifiable at head)"
+    );
+
+    // Fold (4) supported: unkeyed C|S (0x9000), 12-byte header, split at 8.
+    let forwarding_u = build_forwarding_state(&gre_to_self_snapshot());
+    let unkeyed_frame = build_gre(0x9000, None, true);
+    let (uhead, utail) = split_v4_outer_16028(&unkeyed_frame, 8);
+    let mut pool3 = GreReassembler::new();
+    match stage_gre_16028(
+        &uhead,
+        frag_meta_16028(&uhead, true),
+        &forwarding_u,
+        &mut pool3,
+        now,
+    ) {
+        GreDecapStage::Buffered => {}
+        _ => panic!("fold(4): unkeyed split-header head must buffer"),
+    }
+    assert_eq!(
+        pool3.buffered_len(),
+        1,
+        "fold(4): unkeyed split-header head creates state"
+    );
+    match stage_gre_16028(
+        &utail,
+        frag_meta_16028(&utail, false),
+        &forwarding_u,
+        &mut pool3,
+        now + 1,
+    ) {
+        GreDecapStage::Decapped(m, f) => {
+            assert_eq!(
+                &f[m.l3_offset as usize..],
+                &inner[..],
+                "fold(4): split-header datagram decaps byte-identical"
+            );
+        }
+        _ => panic!("fold(4): split-header head+tail must decap"),
+    }
+}
