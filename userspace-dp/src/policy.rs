@@ -5372,24 +5372,17 @@ fn parse_applications(terms: &[PolicyApplicationSnapshot]) -> ParsedApplications
 /// protocol numerically (e.g. `protocol 132`) still parses. Numbers MUST match
 /// `crate::ip_proto` / the centralized Go `appid.ProtocolNumber` table.
 fn parse_protocol(protocol: &str) -> Option<u8> {
-    match protocol {
-        "" => None,
-        "tcp" => Some(PROTO_TCP),
-        "udp" => Some(PROTO_UDP),
-        "icmp" => Some(PROTO_ICMP),
-        "icmp6" | "icmpv6" | "icmp-v6" => Some(PROTO_ICMPV6),
-        "gre" => Some(PROTO_GRE),
-        "89" | "ospf" => Some(PROTO_OSPF),
-        "4" | "ipip" => Some(PROTO_IPIP),
-        "esp" => Some(PROTO_ESP),
-        "ah" => Some(PROTO_AH),
-        "sctp" => Some(PROTO_SCTP),
-        "vrrp" => Some(PROTO_VRRP),
-        "igmp" => Some(PROTO_IGMP),
-        "pim" => Some(PROTO_PIM),
-        "egp" => Some(PROTO_EGP),
-        _ => protocol.parse::<u8>().ok(),
-    }
+    // #16134: delegate to the strict SSOT resolver so the policy carrier
+    // cannot drift from the filter/DNAT carriers. proto_number rejects
+    // "" (None — a protocol-less term drops and fails the snapshot closed,
+    // exactly as the explicit "" arm did), resolves every Junos alias the
+    // Go SSOT (appid.ProtocolNumber) resolves, and accepts ONLY canonical
+    // raw ASCII-decimal numerics: the previous `parse::<u8>()` fallback
+    // also accepted "+6", " 6" and "6 ", which ProtocolNumber rejects — a
+    // corrupt/non-Go snapshot carrying such a token therefore decoded to a
+    // real protocol here while the Go mirror reported it unrepresentable.
+    // "0" still resolves to Some(0) (HOPOPT, distinct from unknown).
+    crate::ip_proto::proto_number(protocol)
 }
 
 fn parse_port_spec(spec: &str) -> Option<Vec<PortRange>> {

@@ -1,4 +1,12 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Dataplane: the three string protocol carriers (filter, policy
+    application, DNAT) now have per-carrier validation cells proving
+    atomic `__unsupported__` poison preservation, both mixed-version
+    refusal orders, and protocol-0 (HOPOPT) semantics before any future
+    u8 retype (#16134). The Rust protocol resolvers also reject
+    non-canonical numerics such as `+6` that the Go SSOT refuses, and
+    the policy resolver shares the single strict resolver with the
+    filter/DNAT paths.
 
   * Config: the interface resolvers (`ResolveReth`, `ResolveFab`,
     `DHCPLeaseKey`) now share one extracted first-dot parser,

@@ -8014,6 +8014,26 @@ fn protocol_2505_normalization_uppercase_and_whitespace() {
 }
 
 #[test]
+fn carrier_16134_protocol_zero_is_exact_hopopt_not_wildcard() {
+    // #16134 (c): "0" is a real exact protocol (HOPOPT) — the term enables
+    // its protocol match and discards protocol-0 traffic only; it must not
+    // collapse to the empty-list unconstrained shape.
+    assert_scoped_to("0", 0);
+    // Non-canonical numerics the Go SSOT rejects ("+6") fail the whole
+    // snapshot closed, never decode to TCP. Reverting proto_number's
+    // digit-only guard to `parse::<u8>()` flips this RED.
+    let err = filter_for_protocol("+6")
+        .expect_err("a non-canonical numeric protocol must fail the build closed");
+    assert!(
+        matches!(
+            err,
+            SnapshotIntegrityError::UnrepresentableFilterProtocol { .. }
+        ),
+        "expected UnrepresentableFilterProtocol, got {err:?}"
+    );
+}
+
+#[test]
 fn protocol_2505_junos_aliases_resolve() {
     // Gate<->dataplane parity: filterProtocolResolvable accepts these junos-*
     // aliases and they reach the snapshot VERBATIM (compileFilterFrom does no
