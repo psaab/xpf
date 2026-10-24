@@ -897,7 +897,7 @@ fn c4_assumed_delay_purge_bounds_total_drops_10591() {
 }
 
 #[test]
-fn c5_last_seen_and_policy_id_persist_until_commit_sweep_10591() {
+fn c5_dropped_foreign_hits_do_not_refresh_until_commit_sweep_10591() {
     let install = matrix_forwarding(true, false, false);
     let live = matrix_forwarding(false, false, false);
     let mut sessions = SessionTable::new();
@@ -920,9 +920,11 @@ fn c5_last_seen_and_policy_id_persist_until_commit_sweep_10591() {
             "C5 Drop control at tick {tick}"
         );
         let after = matrix_forward_observation(&sessions);
-        assert!(
-            after.0 < before.0,
-            "C5 last_seen must refresh at tick {tick}"
+        assert_eq!(
+            after.0, before.0,
+            "C5 dropped foreign hit must not refresh last_seen at tick {tick} \
+             (#9519/#13938: a dropped foreign packet keeps nothing alive; the \
+             pre-#13938 lookup refreshed before authority, ZP-11/#16044)"
         );
         if let Some(id) = policy_id {
             assert_eq!(after.1, id, "C5 policy id changed at tick {tick}");
@@ -930,9 +932,10 @@ fn c5_last_seen_and_policy_id_persist_until_commit_sweep_10591() {
             policy_id = Some(after.1);
         }
         if let Some(idle) = previous_idle {
-            assert!(
-                after.0 < idle,
-                "C5 idle must strictly decrease at tick {tick}"
+            assert_eq!(
+                after.0, idle,
+                "C5 idle must be unchanged by a dropped foreign hit at tick {tick} \
+                 (#13938 no-refresh contract)"
             );
         }
         previous_idle = Some(after.0);
