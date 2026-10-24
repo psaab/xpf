@@ -217,7 +217,12 @@ type syslogUserCoalesce15708 struct {
 	seen map[SyslogFacility]struct{}
 }
 
-func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts) error {
+// heldAAA, when non-nil, receives this root's tolerated AAA leaves
+// instead of cfg.UnimplementedAAALeaves: compileSections merges the
+// per-root slices once, deduped across duplicate `system` roots, only
+// after the whole dispatch succeeds (#16077 fold). Nil (direct callers)
+// keeps the single-root publish-in-place behaviour.
+func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts, heldAAA ...*[]string) error {
 	aaaWarnings, aaaErr := systemAAAWarningsOrError10831(node, opts.lenientSystemAAA10831)
 	if aaaErr != nil {
 		return aaaErr
@@ -228,8 +233,12 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 			// #16077: retain the leaf identities so alarm surfaces can
 			// recompute the warning from the active config after the
 			// transient Warnings slice has done its boot-time job.
-			cfg.UnimplementedAAALeaves = append(cfg.UnimplementedAAALeaves,
-				systemAAARefusals15711(node)...)
+			leaves := systemAAARefusals15711(node)
+			if len(heldAAA) > 0 && heldAAA[0] != nil {
+				*heldAAA[0] = append(*heldAAA[0], leaves...)
+			} else {
+				cfg.UnimplementedAAALeaves = append(cfg.UnimplementedAAALeaves, leaves...)
+			}
 		}
 	}
 

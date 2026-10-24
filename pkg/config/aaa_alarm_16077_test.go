@@ -80,3 +80,30 @@ func TestUnimplementedAAALeavesMultipleAndDeduped16077(t *testing.T) {
 		t.Fatalf("alarms = %v, want 3 lines", got)
 	}
 }
+
+// #16077 fold: duplicate `system` roots merge in author order, and each
+// root's compileSystem used to append its leaves straight to the marker,
+// so the same leaf authored under two roots produced duplicate alarms.
+// compileSections now stages per-root leaves and merges them deduped.
+func TestUnimplementedAAALeavesDedupedAcrossDuplicateSystemRoots16077(t *testing.T) {
+	tree, errs := NewParser("system {\n    radius-server 192.0.2.10 {\n        secret x;\n    }\n}\nsystem {\n    tacplus-server 192.0.2.20 {\n        secret y;\n    }\n    radius-server 192.0.2.11 {\n        secret z;\n    }\n}\n").Parse()
+	if len(errs) != 0 {
+		t.Fatalf("NewParser: %v", errs)
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient compile of duplicate system roots: %v", err)
+	}
+	want := []string{"radius-server", "tacplus-server"}
+	if len(cfg.UnimplementedAAALeaves) != len(want) {
+		t.Fatalf("UnimplementedAAALeaves = %v, want %v (deduped across roots)", cfg.UnimplementedAAALeaves, want)
+	}
+	for i, leaf := range want {
+		if cfg.UnimplementedAAALeaves[i] != leaf {
+			t.Fatalf("UnimplementedAAALeaves = %v, want %v in author order", cfg.UnimplementedAAALeaves, want)
+		}
+	}
+	if got := UnimplementedAAAWarnings(cfg); len(got) != len(want) {
+		t.Fatalf("alarms = %v, want %d lines, no duplicates", got, len(want))
+	}
+}
