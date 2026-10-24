@@ -1148,6 +1148,7 @@ func (c *CLI) handleShowSystem(args []string) error {
 			warnings = config.ValidateConfig(cfg)
 			warnings = append(warnings, config.ToleratedTypedLeafWarnings(cfg)...)
 			warnings = append(warnings, config.ToleratedUnknownTopLevelStanzaWarnings(cfg)...)
+			warnings = append(warnings, config.UnimplementedAAAWarnings(cfg)...)
 		}
 		// #10025: daemon-resident pre-break fabric-auth clock alarms remain
 		// visible while a bootstrap or rollback has temporarily removed the

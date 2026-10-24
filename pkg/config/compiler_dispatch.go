@@ -29,6 +29,12 @@ import "fmt"
 // inactive-pruned and cfg must already carry its initialized maps. It is
 // covered by the reusable golden-output gate in compile_golden_4406_test.go.
 func compileSections(tree *ConfigTree, cfg *Config, opts compileOpts) error {
+	// #16077 fold: configs may carry duplicate `system` roots (merged in
+	// author order, above). Each root's compileSystem stages its AAA
+	// leaves into heldAAA; they are merged into cfg.UnimplementedAAALeaves
+	// once, deduped across roots, only after the whole dispatch succeeds
+	// — a failed compile publishes no marker.
+	var heldAAA []string
 	for _, node := range tree.Children {
 		switch node.Name() {
 		case "security":
@@ -75,7 +81,7 @@ func compileSections(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 				return fmt.Errorf("forwarding-options: %w", err)
 			}
 		case "system":
-			if err := compileSystem(node, &cfg.System, cfg, opts); err != nil {
+			if err := compileSystem(node, &cfg.System, cfg, opts, &heldAAA); err != nil {
 				return fmt.Errorf("system: %w", err)
 			}
 		case "schedulers":
@@ -110,6 +116,21 @@ func compileSections(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 				cfg.Warnings = append(cfg.Warnings, ToleratedUnknownTopLevelStanzaWarning(err))
 			}
 		}
+	}
+	// #16077 fold: publish the cross-root AAA marker once, deduped in
+	// author order, now that every section compiled. heldAAA is empty
+	// on the strict path (compileSystem errors before staging) and for
+	// configs with no tolerated AAA leaves.
+	seen := make(map[string]struct{}, len(cfg.UnimplementedAAALeaves)+len(heldAAA))
+	for _, leaf := range cfg.UnimplementedAAALeaves {
+		seen[leaf] = struct{}{}
+	}
+	for _, leaf := range heldAAA {
+		if _, dup := seen[leaf]; dup {
+			continue
+		}
+		seen[leaf] = struct{}{}
+		cfg.UnimplementedAAALeaves = append(cfg.UnimplementedAAALeaves, leaf)
 	}
 	return nil
 }

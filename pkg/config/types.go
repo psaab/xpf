@@ -656,6 +656,28 @@ type Config struct {
 	// credentials are unused. Compile-time only; never serialized — the
 	// authored stanza remains in the raw AST for display/persistence.
 	userIdentificationStanzas []string `json:"-"`
+	// UnimplementedAAALeaves records every unimplemented Junos AAA leaf
+	// (#10831: radius-server, tacplus-server, authentication-order,
+	// accounting) the TOLERANT path admitted despite the strict path
+	// refusing it (#16077). Populated only on that path — the strict path
+	// returns the refusal instead, so a non-empty slice means exactly
+	// "this config names AAA xpf does not implement, and authentication
+	// is local-only despite the authored stanza".
+	//
+	// It exists because the lenient warning alone has nowhere persistent
+	// to go: cfg.Warnings reaches an operator through the commit response
+	// and one boot-time slog.Warn loop (pkg/daemon/daemon_apply.go), and
+	// a tolerant LOAD (boot, peer-sync, rollback) has no commit response.
+	// `show system alarms` / `show security alarms` recompute from the
+	// compiled config, which has dropped the AAA tree, so without this
+	// record the local-only posture was invisible after boot.
+	//
+	// Rebuilt per compile by construction: every compile produces a fresh
+	// *Config, so removing the stanza clears it without a separate clear
+	// path. Leaf names only — never values — so no AAA secret can reach
+	// an alarm surface through it. Compile-time only; never serialized
+	// (`json:"-"`, the LenientNATUndefinedScopeRuleSets precedent).
+	UnimplementedAAALeaves []string `json:"-"`
 }
 
 // LenientNATTerminalActionRule identifies one NAT rule admitted by the tolerant
