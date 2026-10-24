@@ -29,7 +29,7 @@ const localConfigSessionID = "local-cli"
 // flips it. Routing on that flag alone let a read-only console user ride
 // another holder's session into full PermConfig mutation.
 func (c *CLI) configModeEntryAllowed() bool {
-	return c.configOwned || c.userClass == ""
+	return c.configOwned || c.UserClass() == ""
 }
 
 // checkConfigModePerm enforces the coarse PermConfig price of entering
@@ -39,7 +39,7 @@ func (c *CLI) configModeEntryAllowed() bool {
 // Read-only affordances (show, ?, help, exit, quit) stay available so a
 // view class caught in a globally-held config mode is not trapped.
 func (c *CLI) checkConfigModePerm(line string) error {
-	if c.userClass == "" {
+	if c.UserClass() == "" {
 		return nil
 	}
 	verb := ""
@@ -54,6 +54,12 @@ func (c *CLI) checkConfigModePerm(line string) error {
 }
 
 func (c *CLI) dispatch(line string) error {
+	// #16071: re-resolve the console login class from the active
+	// config before pricing this command, so a committed change to
+	// the user's `system login` assignment (or a first login stanza)
+	// takes effect on the next command without a daemon restart.
+	// No-op when no daemon refresher is wired.
+	c.refreshUserClass()
 	// #15995 fold: priced render snapshots live for exactly one
 	// dispatch. Clear at entry and on return so a later direct
 	// handler call never renders a previous command's snapshot.
@@ -554,7 +560,7 @@ func (c *CLI) dispatchConfig(line string) error {
 		// themselves (a quoted value with interior whitespace) so
 		// the store lexer recovers them as single tokens.
 		joined := config.JoinConfigPathTokens(fullPath)
-		plant := config.EventPlantClassForMutation(c.userClass)
+		plant := config.EventPlantClassForMutation(c.UserClass())
 		switch parts[0] {
 		case "set":
 			return c.store.SetFromInputAsPlantClass(sessionID, plant, joined)
@@ -599,10 +605,10 @@ func (c *CLI) dispatchConfig(line string) error {
 		if c.store != nil {
 			rbCfg = c.store.ActiveConfig()
 		}
-		if err := config.AuthorizeConfigRollback(rbCfg, c.userClass, n); err != nil {
+		if err := config.AuthorizeConfigRollback(rbCfg, c.UserClass(), n); err != nil {
 			return err
 		}
-		if err := c.store.RollbackAsPlantClass(sessionID, config.EventPlantClassForMutation(c.userClass), n); err != nil {
+		if err := c.store.RollbackAsPlantClass(sessionID, config.EventPlantClassForMutation(c.UserClass()), n); err != nil {
 			return err
 		}
 		fmt.Println("configuration rolled back")
@@ -623,7 +629,7 @@ func (c *CLI) dispatchConfig(line string) error {
 		// FIRST '"', so `annotate system "interfaces" "pwned"` was gated as
 		// `system interfaces` but executed on `system` — a denied stanza
 		// annotated despite deny-configuration. Every sibling mutation arm
-		// and the gRPC arm pass EventPlantClassForMutation(c.userClass);
+		// and the gRPC arm pass EventPlantClassForMutation(c.UserClass());
 		// this arm dropped it via store.Annotate (empty plant class).
 		relPath, comment, ok := config.ParseAnnotateCommand(line)
 		if !ok || len(relPath) == 0 {
@@ -631,7 +637,7 @@ func (c *CLI) dispatchConfig(line string) error {
 			return nil
 		}
 		pathParts := append(config.NormalizeEditPathTokens(c.store.GetEditPath()), relPath...)
-		if err := c.store.AnnotateAsPlantClass(sessionID, config.EventPlantClassForMutation(c.userClass), pathParts, comment); err != nil {
+		if err := c.store.AnnotateAsPlantClass(sessionID, config.EventPlantClassForMutation(c.UserClass()), pathParts, comment); err != nil {
 			return err
 		}
 		fmt.Println("annotation set")

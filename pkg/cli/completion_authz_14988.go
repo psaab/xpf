@@ -49,7 +49,11 @@ type completionAuthz struct {
 }
 
 func (c *CLI) completionAuthz() completionAuthz {
-	if c == nil || c.userClass == "" {
+	if c != nil {
+		// #16071: completions price the CURRENT class, not a stale one.
+		c.refreshUserClass()
+	}
+	if c == nil || c.UserClass() == "" {
 		return completionAuthz{unrestricted: true}
 	}
 	a := completionAuthz{identified: true}
@@ -63,12 +67,12 @@ func (c *CLI) completionAuthz() completionAuthz {
 		a.opErr = true
 		return a
 	}
-	if rules, ok, err := config.ConfigurationLoginRegexesFor(a.cfg, c.userClass); err != nil {
+	if rules, ok, err := config.ConfigurationLoginRegexesFor(a.cfg, c.UserClass()); err != nil {
 		a.confErr = true
 	} else {
 		a.confRules, a.confRestricted = rules, ok
 	}
-	if rules, ok, err := config.OperationalLoginRegexesFor(a.cfg, c.userClass); err != nil {
+	if rules, ok, err := config.OperationalLoginRegexesFor(a.cfg, c.UserClass()); err != nil {
 		a.opErr = true
 	} else {
 		a.opRules, a.opRestricted = rules, ok

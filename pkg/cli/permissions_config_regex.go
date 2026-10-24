@@ -57,7 +57,7 @@ func (c *CLI) checkConfigRegex(line string) error {
 	if c.store != nil {
 		editPath = c.store.GetEditPath()
 	}
-	return checkConfigRegexWith(cfg, c.userClass, editPath, line)
+	return checkConfigRegexWith(cfg, c.UserClass(), editPath, line)
 }
 
 // checkConfigRegexWith is the store-free whole decision.
@@ -101,11 +101,11 @@ func checkConfigRegexWith(cfg *config.Config, class string, editPath []string, l
 // groups/apply-groups lines, whose literal spelling is never the effective
 // path. Without a store there is no candidate to expand.
 func (c *CLI) checkExpandedConfigRegex14981() error {
-	if c.store == nil || c.userClass == "" {
+	if c.store == nil || c.UserClass() == "" {
 		return nil
 	}
 	cfg := c.store.ActiveConfig()
-	return config.AuthorizeExpandedCandidate(cfg, c.userClass, c.store.CandidateTree(), c.store.ActiveTree())
+	return config.AuthorizeExpandedCandidate(cfg, c.UserClass(), c.store.CandidateTree(), c.store.ActiveTree())
 }
 
 // checkConfigRegexGroups14981 runs the expanded adjudication when a
@@ -140,7 +140,7 @@ func (c *CLI) checkConfigRegexGroups14981(line string) error {
 		return nil
 	}
 	cfg := c.store.ActiveConfig()
-	return config.AuthorizeExpandedTree(cfg, c.userClass, tree)
+	return config.AuthorizeExpandedTree(cfg, c.UserClass(), tree)
 }
 
 func lineTouchesGroupsCLI14981(c *CLI, line string) bool {

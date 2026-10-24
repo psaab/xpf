@@ -32,7 +32,8 @@ import (
 // gave build rc 0, vet rc 0 and every canary plus the whole pkg/cli and
 // pkg/daemon suites green (#6706 review r7 F3, reproduced firsthand).
 var allowedSetUserClassCallers = map[string]string{
-	"daemon::applyCLILoginClass": "the single #6701 resolution site (cli.ResolveLoginClass + osident.Current)",
+	"daemon::applyCLILoginClass":    "the single #6701 resolution site (cli.ResolveLoginClass + osident.Current)",
+	"daemon::consoleClassRefresher": "the #16071 re-resolution callback: delegates resolution to applyCLILoginClass, and clears to unset only when `system login` is absent",
 }
 
 // classFieldName is the private CLI field that HOLDS the RBAC class.
@@ -75,7 +76,7 @@ var allowedClassFieldWriters = map[string]string{
 // detector is working, which is the point of stating the requirement separately
 // from the map.
 var (
-	requiredSetUserClassCallers = []string{"daemon::applyCLILoginClass"}
+	requiredSetUserClassCallers = []string{"daemon::applyCLILoginClass", "daemon::consoleClassRefresher"}
 	requiredClassFieldWriters   = []string{"cli::CLI.SetUserClass"}
 )
 
@@ -758,6 +759,14 @@ func analyzeClassWrites(fset *token.FileSet, f *ast.File, pkgRel string) map[str
 		if !cw.writes {
 			continue
 		}
+		// #16071: the refresher delegates to applyCLILoginClass and
+		// only clears (empty class) on the no-login arm — accept it
+		// as resolver-bound rather than requiring an inline
+		// ResolveLoginClass call it must not duplicate.
+		if delegatedClassClear16071(fn) {
+			cw.resolves = true
+			cw.bound = true
+		}
 		if fset != nil {
 			cw.pos = fset.Position(fn.Pos()).String()
 		}
@@ -882,6 +891,41 @@ func analyzeFuncClassWrite(fn *ast.FuncDecl) classWrite {
 	})
 	cw.bound = allBound
 	return cw
+}
+
+// delegatedClassClear16071 reports whether fn is the #16071 refresher
+// shape: it delegates resolution to applyCLILoginClass and its only
+// direct SetUserClass writes an empty class on the no-login arm.
+// That write is a TRANSITION to the documented legacy unset mode, not
+// an independently derived class, so the shared-resolver canary
+// accepts it alongside the applyCLILoginClass delegation. Any non-
+// empty literal, or a SetUserClass call not on that arm, fails this.
+func delegatedClassClear16071(fn *ast.FuncDecl) bool {
+	delegates, clearsOnly := false, true
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "applyCLILoginClass" {
+			delegates = true
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "SetUserClass" {
+			return true
+		}
+		if len(call.Args) != 1 {
+			clearsOnly = false
+			return true
+		}
+		lit, ok := call.Args[0].(*ast.BasicLit)
+		if !ok || lit.Value != `""` {
+			clearsOnly = false
+		}
+		return true
+	})
+	return delegates && clearsOnly
 }
 
 // isResolveLoginClassCall matches both `cli.ResolveLoginClass(...)` and the

@@ -1010,6 +1010,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		// super-user holds PermAll) and showConfigRedacted is false for both,
 		// so secrets render in cleartext either way (permissions.go).
 		applyCLILoginClass(shell, d.store.ActiveConfig(), osident.Current())
+		// #16071: keep the assignment fresh — re-resolve when the
+		// active config's `system login` projection changes, so a
+		// revoked or re-classed console user loses (or gains) the
+		// class on their next command, not at the next restart.
+		shell.SetRefreshUserClassFn(consoleClassRefresher(shell, d.store.ActiveConfig, osident.Current()))
 
 		// Run CLI in a goroutine so we can still handle signals
 		errCh := make(chan error, 1)
