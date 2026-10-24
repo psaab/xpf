@@ -101,6 +101,12 @@ eq "loss DMZ_GW4"         "$(resolve DMZ_GW4)"         "172.16.50.8"
 eq "loss WAN_GW80_4"      "$(resolve WAN_GW80_4)"      "172.16.80.8"
 eq "loss WAN_VIP4 (not the gateway)" "$(resolve WAN_VIP4)" "172.16.50.6"
 eq "loss DMZ_TARGET_VLAN" "$(resolve DMZ_TARGET_VLAN)" "50"
+# #16213: the declarative primary alias derives from the cluster's iperf
+# target — loss .200 (alias of the .201 mouse host); tcp/udp equal their
+# pinned mouse address, so no second address is ever emitted there.
+eq "loss TARGET_ALIAS_V4" "$(resolve TARGET_ALIAS_V4)" "172.16.80.200"
+eq "tcp TARGET_ALIAS_V4"  "$(resolve TARGET_ALIAS_V4 BPFRX_CLUSTER_ENV=test/incus/tcp-userspace-cluster.env)" "172.16.80.210"
+eq "udp TARGET_ALIAS_V4"  "$(resolve TARGET_ALIAS_V4 BPFRX_CLUSTER_ENV=test/incus/udp-userspace-cluster.env)" "172.16.80.211"
 # Legacy (no remote): names stay bare, refs unqualified (#16328).
 eq "legacy MOUSE_TARGET_REF" "$(resolve MOUSE_TARGET_REF BPFRX_CLUSTER_ENV=)" "xpf-mouse-target"
 eq "legacy DMZ_TARGET_REF"   "$(resolve DMZ_TARGET_REF BPFRX_CLUSTER_ENV=)"   "xpf-zone-matrix-dmz"

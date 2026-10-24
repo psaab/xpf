@@ -26,21 +26,38 @@
 # `test/incus/mouse-target-setup.sh` provisions `xpf-mouse-target` at
 # 172.16.80.201: an SR-IOV VF tagged into VLAN 80, running this same grid
 # (iperf3 5200-5211, echo 6200-6211, plus port 7). It exists so a
-# mouse-latency verdict can be ATTRIBUTED — mice on one host, elephants on the
-# other — which #8467's void check has been waiting for. Everything below
-# about the ORIGINAL target at 172.16.80.200 remains true of that host; it is
-# still external, still unmanageable from here, and is still what
-# IPERF_TARGET4 points at.
+# mouse-latency verdict can be ATTRIBUTED — mice on one host, elephants on
+# the other — which #8467's void check has been waiting for.
+#
+# #16213 UPDATE — THE FIRST TARGET IS THE SAME HOST. On the standing loss
+# cluster, 172.16.80.200 (what IPERF_TARGET4 and $TARGET_V4 point at) is
+# NOT external hardware: it is a second address on xpf-mouse-target
+# itself. It arrived by hand (`ip addr add`, undocumented), so any
+# recreate or reboot silently dropped it (observed UP->gone) while every
+# harness kept measuring `.200`. TARGET_ALIAS_V4 names it (cluster-env.sh
+# derives it from IPERF_TARGET4; loss .200, tcp .210, udp .211) and
+# mouse-target-setup.sh pins it declaratively in mouse-addr.service
+# beside the mouse address — on the tcp/udp wire targets the alias IS
+# the pinned address, so nothing extra is emitted there. The v6 ::200
+# address IS external: it DAD-failed as a duplicate when tried on the
+# container, so dual-stack smokes reach v4 on this host and v6 on that
+# hardware — two different hosts. That split is a fact to design around
+# (a v6 failure is not a v4 failure), not a premise to keep stating
+# wrongly for both families.
 #
 # WHY `up` CAN FAIL WITH A DESCRIPTION RATHER THAN A FIX. The target is
-# addressed by IP, and on the standing loss cluster it is external lab
-# hardware: it answers ICMP on ge-0-0-2.80 but is not an incus instance in any
-# project, and it does not accept ssh. There is no handle to run a command on
-# it from here. `up` provisions the case where the target IS reachable as an
-# incus instance (which is how a fresh environment should be built) and
-# otherwise prints exactly what is missing and where it must be started. That
-# is the honest boundary: this script cannot invent a management path that
-# does not exist, but it CAN stop every harness from rediscovering the fact.
+# addressed by IP. When the IP is held by an incus instance (the loss
+# case today: xpf-mouse-target holds both .200 and .201), `up` delegates
+# to mouse-target-setup.sh, which pins every service under systemd
+# (mouse-iperf3@<port>, mouse-echo) so a listener survives reboot and a
+# failed unit is VISIBLE in `systemctl` instead of serving by accident
+# behind an orphan process (the pre-#16213 mouse-iperf3@5201 state:
+# unit failed "address in use", port held by a detached spawn). When no
+# instance holds the IP there is no handle to run a command on it from
+# here, and `up` prints exactly what is missing and where it must be
+# started. That is the honest boundary: this script cannot invent a
+# management path that does not exist, but it CAN stop every harness
+# from rediscovering the fact.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,6 +65,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -f "${SCRIPT_DIR}/cluster-env.sh" ]] && source "${SCRIPT_DIR}/cluster-env.sh" 2>/dev/null || true
 
 TARGET_V4="${TARGET_V4:-${IPERF_TARGET4:-172.16.80.200}}"
+# #16213: the primary target's address as a declarative alias of the
+# mouse host. cluster-env.sh derives it from IPERF_TARGET4 (loss .200);
+# the literal keeps a bare invocation consistent with TARGET_V4 above.
+# When TARGET_V4 == TARGET_ALIAS_V4, the alias's owner is the instance
+# holding MOUSE_TARGET_V4 (the mouse host), and `up`/`status` say so.
+TARGET_ALIAS_V4="${TARGET_ALIAS_V4:-172.16.80.200}"
+MOUSE_TARGET_V4="${MOUSE_TARGET_V4:-172.16.80.201}"
 # The probe runs from the container the harnesses actually SEND from, not
 # from the workstation and not from a firewall node.
 #
@@ -130,6 +154,18 @@ target_instance() {
         | awk -v ip="$TARGET_V4" -F, '$0 ~ ip {print $1; exit}'
 }
 
+# alias_owner echoes the incus instance name holding MOUSE_TARGET_V4 when
+# TARGET_V4 is the declarative alias (TARGET_ALIAS_V4, #16213), or
+# nothing. On loss the primary .200 is a second address on the mouse
+# host (.201): when `incus list` does not surface .200 (an alias is not
+# always listed), the owner is still that host, and naming it is what
+# lets `up` delegate instead of declaring the target unmanageable.
+alias_owner() {
+    [[ "$TARGET_V4" == "$TARGET_ALIAS_V4" && "$TARGET_V4" != "$MOUSE_TARGET_V4" ]] || return 0
+    incus_run list "${INCUS_REMOTE}:" --all-projects --format csv -c n4 2>/dev/null \
+        | awk -v ip="$MOUSE_TARGET_V4" -F, '$0 ~ ip {print $1; exit}'
+}
+
 cmd_status() {
     echo "target:     ${TARGET_V4}"
     echo "probed from: ${INCUS_REMOTE}:${PROBE_FROM}"
@@ -143,6 +179,10 @@ cmd_status() {
     local inst; inst="$(target_instance)"
     if [[ -n "$inst" ]]; then
         echo "instance:   ${INCUS_REMOTE}:${inst}"
+    elif [[ -n "$(alias_owner)" ]]; then
+        echo "instance:   ${INCUS_REMOTE}:$(alias_owner) (holds ${TARGET_V4} as the"
+        echo "            #16213 alias beside ${MOUSE_TARGET_V4}; pinned by"
+        echo "            mouse-addr.service — run './test/incus/mouse-target-setup.sh up')"
     else
         echo "instance:   (none) — the target is not an incus instance in any"
         echo "            project on ${INCUS_REMOTE}:, so there is no handle to"
@@ -175,11 +215,16 @@ cmd_status() {
         echo "the standing smoke stays green while every per-class harness is"
         echo "unrunnable. That asymmetry is why this went unnoticed (#8040)."
         echo
-        echo "To bring them up on the target host:"
-        echo "  for p in ${IPERF_PORTS[*]}; do iperf3 -s -p \$p -D; done"
-        echo "  for p in ${ECHO_PORTS[*]}; do"
-        echo "    socat -d TCP-LISTEN:\$p,reuseaddr,fork EXEC:/bin/cat &"
-        echo "  done"
+        if [[ "$TARGET_V4" == "$TARGET_ALIAS_V4" || "$TARGET_V4" == "$MOUSE_TARGET_V4" ]]; then
+            echo "To bring them up: ./test/incus/target-services.sh up"
+            echo "(delegates to mouse-target-setup.sh — systemd-pinned, #16213)"
+        else
+            echo "To bring them up on the target host:"
+            echo "  for p in ${IPERF_PORTS[*]}; do iperf3 -s -p \$p -D; done"
+            echo "  for p in ${ECHO_PORTS[*]}; do"
+            echo "    socat -d TCP-LISTEN:\$p,reuseaddr,fork EXEC:/bin/cat &"
+            echo "  done"
+        fi
     fi
     return "$down"
 }
@@ -216,12 +261,29 @@ cmd_check() {
 }
 
 cmd_up() {
-    local inst; inst="$(target_instance)"
+    # #16213: when the target IP is the declarative alias of the mouse
+    # host (or the mouse host itself), the owner is mouse-target-setup.sh:
+    # it pins the address AND every listener under systemd, so no
+    # detached spawn can hold a port behind a failed unit (the
+    # mouse-iperf3@5201 "address in use" orphan). Resolve through the
+    # alias when the primary IP itself is not listed.
+    local owner="" inst; inst="$(target_instance)"
+    if [[ -n "$inst" ]]; then
+        owner="$inst"
+    elif [[ -n "$(alias_owner)" ]]; then
+        owner="$(alias_owner)"
+    fi
+    if [[ -n "$owner" && ( "$TARGET_V4" == "$TARGET_ALIAS_V4" || "$TARGET_V4" == "$MOUSE_TARGET_V4" ) ]]; then
+        echo "starting target services on ${INCUS_REMOTE}:${owner} via mouse-target-setup.sh (systemd-pinned)..."
+        TARGET_ALIAS_V4="$TARGET_ALIAS_V4" MOUSE_TARGET_V4="$MOUSE_TARGET_V4" \
+            "${SCRIPT_DIR}/mouse-target-setup.sh" up || return 1
+        cmd_check
+        return
+    fi
     if [[ -z "$inst" ]]; then
         echo "cannot start services: ${TARGET_V4} is not an incus instance on" >&2
         echo "${INCUS_REMOTE}: in any project, so there is no handle to run a" >&2
-        echo "command on it. On the standing loss cluster the VLAN-80 target is" >&2
-        echo "external lab hardware — it answers ICMP but accepts no ssh." >&2
+        echo "command on it from here." >&2
         echo >&2
         echo "Run './test/incus/target-services.sh status' for the grid and the" >&2
         echo "commands to run ON that host (#8040)." >&2
@@ -242,10 +304,25 @@ cmd_up() {
 }
 
 cmd_down() {
+    # #16213: on the systemd-pinned mouse host, stop the UNITS (and kill
+    # any detached orphan still holding a port, the pre-#16213 spawn this
+    # replaces) so a later `up` starts from a clean socket table and a
+    # unit failure is visible instead of masked by the orphan.
     local inst; inst="$(target_instance)"
+    if [[ -z "$inst" && -n "$(alias_owner)" ]]; then
+        inst="$(alias_owner)"
+    fi
     if [[ -z "$inst" ]]; then
         echo "no incus handle for ${TARGET_V4}; nothing to stop from here" >&2
         return 2
+    fi
+    if [[ "$TARGET_V4" == "$TARGET_ALIAS_V4" || "$TARGET_V4" == "$MOUSE_TARGET_V4" ]]; then
+        incus_run exec "${INCUS_REMOTE}:${inst}" -- bash -c "
+            systemctl stop 'mouse-iperf3@*' mouse-echo 2>/dev/null || true
+            pkill -f 'iperf3 -s -p 52' || true
+            pkill -f 'TCP-LISTEN:62'   || true"
+        echo "stopped target services (systemd units + orphans) on ${INCUS_REMOTE}:${inst}"
+        return 0
     fi
     incus_run exec "${INCUS_REMOTE}:${inst}" -- bash -c "
         pkill -f 'iperf3 -s -p 52' || true

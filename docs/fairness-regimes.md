@@ -381,12 +381,14 @@ never sends to it, but the report on failure is always the full grid.
 iperf3 port, not the per-class grid, so the standing smoke stays green at
 18+ Gb/s while every harness here is unrunnable. The green everyone watches
 does not cover the dependency everything else needs. On the standing loss
-cluster the target is external lab hardware: it answers ICMP on
-`ge-0-0-2.80` but is not an incus instance in any project and accepts no ssh,
-so `target-services.sh up` can only provision a target it has a handle for and
-otherwise prints exactly what must be started and where. That boundary is the
-honest one — the tooling cannot invent a management path that does not exist,
-but no harness should ever rediscover the fact again.
+cluster the v4 target (172.16.80.200) is a declarative alias of the
+incus-managed `xpf-mouse-target` host (#16213: pinned by
+`mouse-addr.service`, previously a hand `ip addr add` a reboot dropped),
+so `target-services.sh up` delegates to `mouse-target-setup.sh` and every
+listener is systemd-pinned; only the v6 ::200 remains external hardware.
+For a target no instance holds, `up` prints exactly what must be started
+and where — the tooling cannot invent a management path that does not
+exist, but no harness should ever rediscover the fact again.
 
 ## Acceptance gates
 
@@ -470,10 +472,10 @@ A measurement run **PASSES** iff ALL of:
    2 (undetermined), never 0.
 
    **The second target now exists, so that void is clearable.** #8259's
-   blocker was not the check but the lab: the standing target is external
-   hardware with no management path, and the firewall's WAN neighbour table
-   held exactly two entries — the target and the upstream router — so there
-   was nowhere to move a flow to. `test/incus/mouse-target-setup.sh`
+   blocker was not the check but the lab: at the time there was nowhere
+   to move a flow to (the standing target was then believed external;
+   #16213 found the v4 .200 on the incus-managed host itself — only the
+   v6 ::200 is external). `test/incus/mouse-target-setup.sh`
    provisions `xpf-mouse-target` at `172.16.80.201`, an incus container with
    an SR-IOV VF tagged into VLAN 80, running the same service grid
    (`target-services.sh`'s contract: iperf3 5200-5211, echo 6200-6211, plus
@@ -516,11 +518,10 @@ A measurement run **PASSES** iff ALL of:
    `MOUSE_TARGET_V4` and `ELEPHANT_TARGET_V4` are separate knobs that default
    to the same address, so the check passes the moment a second host exists:
    point `ELEPHANT_TARGET_V4` at it and the gate resumes producing
-   attributable numbers with no further change. There is no second host on
-   VLAN 80 today, and the current target is external lab hardware with no
-   management path — `test/incus/target-services.sh` records that it "is not
-   an incus instance in any project, and it does not accept ssh", which is
-   also why the target cannot simply be sampled instead. Artifacts predating
+   attributable numbers with no further change. The second host exists
+   (#8259); on loss the .200 primary is a declarative alias of that same
+   host (#16213), so the knobs must be pointed at different addresses
+   (.200 vs .201) for the verdict to attribute. Artifacts predating
    the split declare no targets and are never voided on their absence: the
    void fires on positive evidence that the two are equal.
 

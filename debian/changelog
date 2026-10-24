@@ -1,4 +1,23 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Lab: make the WAN target 172.16.80.200 declarative (#16213). It was
+    a hand `ip addr add` alias on xpf-mouse-target beside the pinned
+    .201 — any recreate/reboot silently dropped it while harnesses kept
+    measuring .200. TARGET_ALIAS_V4 (derived by cluster-env.sh from
+    IPERF_TARGET4: loss .200, tcp .210, udp .211) is now pinned by
+    mouse-addr.service in mouse-target-setup.sh when it differs on
+    VLAN 80 (never duplicated when it equals the pinned address, never
+    claimed by the VLAN-50 DMZ prober, never the external v6 ::200 which
+    DAD-failed as a duplicate). target-services.sh corrects its stale
+    "external unmanaged hardware" premise: status names the mouse host
+    as the alias owner, `up` delegates to mouse-target-setup.sh so every
+    listener is systemd-pinned (mouse-iperf3@<port>/mouse-echo) instead
+    of a detached spawn holding 5201 behind a failed unit, and `down`
+    stops units plus orphans. New hermetic mouse-target-setup-selftest
+    (wired into run-selftests and test-target-services-lib) pins the
+    unit payload; target-services-selftest and cluster-env-selftest
+    assert the alias owner/delegation and derivation. Live acceptance
+    (reboot the target, .200/.201 + 5200-5211 survive under systemd
+    only) remains operator-gated on the loss cluster.
   * Build: inject a command-runner seam into the image validation
     harness (#16196). `Harness` now takes optional `runner`/`popen`
     callables (default: the current subprocess path, stored unresolved
