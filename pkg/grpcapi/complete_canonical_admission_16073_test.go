@@ -163,6 +163,14 @@ func TestCompleteCanonicalAdmission16073(t *testing.T) {
 	runLine := "run sh conf sec "
 	wantDenied16073(t, "limited-op Complete{ConfigMode:true, "+runLine+"}",
 		admit(uidLimitedOp16073, runLine, true))
+	// Fold: abbreviated config-mode `run` — the handler resolves `ru`
+	// against ConfigTopLevel as `run`, so admission must strip it too
+	// or the raw `ru …` line is judged and the deny never fires.
+	for _, line := range []string{"ru sh conf ", "ru sh conf sec ", "ru show configuration "} {
+		wantDenied16073(t, "limited-op Complete{ConfigMode:true, "+line+"}",
+			admit(uidLimitedOp16073, line, true))
+	}
+
 	// Controls: the same class keeps non-denied completion, canonical
 	// and abbreviated.
 	wantAdmitted16073(t, "limited-op Complete{show interfaces }",
@@ -236,8 +244,17 @@ func TestCompleteLineFormsCanonical16073(t *testing.T) {
 		{"sh ver", false, "show version", false},
 		{"show version ", false, "show version", false},
 		{"sh sec zones security-zone trust ", false, "show security zones security-zone trust", false},
+		// Fold (1): strict Canonicalize succeeds and must not be
+		// discarded — the head alone ends at the required `family`
+		// value, so a head-based fallback leaves `fam` unexpanded.
+		{"sh fire fil sec fam inet", false, "show firewall filter sec family inet", false},
+		{"show firewall filter secret family inet ", false, "show firewall filter secret family inet", false},
 		{"set security zones security-zone ", true, "set security zones security-zone", false},
 		{"run sh conf ", true, "show configuration", true},
+		// Fold (2): abbreviated config-mode `run`.
+		{"ru sh conf ", true, "show configuration", true},
+		{"ru sh conf sec ", true, "show configuration security", true},
+		{"ru sh ver", true, "show version", false},
 		{"show configuration security ", false, "show configuration security", true},
 	}
 	for _, tc := range cases {
