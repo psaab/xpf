@@ -10,6 +10,18 @@ xpf (0.0.0) unstable; urgency=medium
     userspace-dp/src/FEATURES.md now names the nat64/ directory instead
     of the deleted flat nat64.rs. A new docsref gate resolves .go line
     citations in those two docs so the rot cannot silently return.
+  * Test: restore the orphaned NAT64 attribution dispatcher cells
+    (#16465). Commit d0d23b2f06 (#15638) removed `mod
+    nat64_attribution_6922;` from `tx/dispatch/tests/mod.rs` without
+    comment, so its five cells — including the only dispatcher-level
+    #8890 NAT64-through-tunnel gate — were no longer compiled and
+    `make test`'s rust-source/debug-leg censuses were red (cargo's
+    --all-targets cannot see a missing `mod`). The declaration is
+    restored; the #16187 unsafe ratchet's `afxdp/tx/dispatch/tests`
+    ceiling is tightened 6 -> 0 in the same change (the file is now
+    classified test-only), and CI's census job now runs the
+    rust-source census so a deleted test `mod` line fails a
+    merge-visible check.
   * Image/packaging: stop reserving the large-ring hugepage pool by
     default (#16455). etc/sysctl.d/99-xpf-hugepages.conf shipped
     vm.nr_hugepages = 1440 (2.8 GiB) verbatim through the bake and the
