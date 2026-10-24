@@ -64,14 +64,34 @@ pub(crate) enum DnatLookup {
 /// off` rule the Junos "stop evaluation" semantic: it short-circuits the
 /// broader tiers and the caller then maps `Exempt` to no-DNAT.
 enum DnatOutcome {
-    /// A translate rule matched — apply the pool translation (and its counter).
-    Translate(DnatValue, Option<Arc<NatRuleCounter>>),
+    /// A translate rule matched — apply the pool translation (and its
+    /// counter), plus its #16045 scope tier (see
+    /// [`DnatOutcome::is_scope_constrained`]).
+    Translate {
+        value: DnatValue,
+        counter: Option<Arc<NatRuleCounter>>,
+        constrained: bool,
+    },
     /// A `then destination-nat off` exemption matched — no translation, and the
     /// remaining tiers are short-circuited (they are never probed because this
     /// is a non-`None` `.or_else` result).
     Exempt,
     /// #14947: a poisoned rule matched — drop (see `DnatLookup::Poisoned`).
     Poisoned(Option<Arc<NatRuleCounter>>),
+}
+
+impl DnatOutcome {
+    /// #16045: the matched translate rule is scoped on an ingress axis
+    /// (zone / interface / routing-instance). Poisoned claims are
+    /// always scope-sensitive (they drop), so they report constrained.
+    /// Exempt carries no translation, so it reports unconstrained.
+    fn is_scope_constrained(&self) -> bool {
+        match self {
+            DnatOutcome::Translate { constrained, .. } => *constrained,
+            DnatOutcome::Poisoned(_) => true,
+            DnatOutcome::Exempt => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -247,13 +267,28 @@ impl DnatEntry {
 
     /// #3844/#14947: map a matched entry to its lookup outcome. Poison wins
     /// over `off`: a poisoned exemption drops instead of exempting.
+    /// #16045: is this entry's `from` scope constrained on ANY ingress
+    /// axis (zone / interface / routing-instance)? An unscoped entry
+    /// fires under every ingress identity, so a match under one
+    /// identity is valid provenance under any other; a constrained
+    /// entry's match is keyed to the identity that selected it.
+    fn scope_constrained(&self) -> bool {
+        !self.from_zone.is_empty()
+            || !self.from_interface.is_empty()
+            || !self.from_routing_instance.is_empty()
+    }
+
     fn to_outcome(&self) -> DnatOutcome {
         if self.lenient_match_dropped {
             DnatOutcome::Poisoned(self.hit_counter.clone())
         } else if self.off {
             DnatOutcome::Exempt
         } else {
-            DnatOutcome::Translate(self.value, self.hit_counter.clone())
+            DnatOutcome::Translate {
+                value: self.value,
+                counter: self.hit_counter.clone(),
+                constrained: self.scope_constrained(),
+            }
         }
     }
 }
@@ -633,7 +668,7 @@ impl DnatTable {
                     packet_icmp,
                 )
             });
-        matches!(outcome, Some(DnatOutcome::Translate(..)))
+        matches!(outcome, Some(DnatOutcome::Translate { .. }))
     }
 
     /// Whether a non-TCP/UDP DNAT candidate would rewrite a destination port
@@ -1228,7 +1263,11 @@ impl DnatTable {
         // "matched rule wins, stop evaluation" semantic: a later/broader DNAT
         // rule cannot re-translate the exempted flow.
         let (value, hit_counter) = match outcome {
-            Some(DnatOutcome::Translate(v, c)) => (v, c),
+            Some(DnatOutcome::Translate {
+                value,
+                counter,
+                ..
+            }) => (value, counter),
             Some(DnatOutcome::Exempt) | Some(DnatOutcome::Poisoned(_)) | None => return None,
         };
         // #4074: gate the destination-port translation on the protocol actually
@@ -1343,7 +1382,7 @@ impl DnatTable {
                         continue;
                     }
                     match entry.to_outcome() {
-                        DnatOutcome::Translate(..) => {
+                        DnatOutcome::Translate { .. } => {
                             if reproduces(entry) {
                                 reproduces_any = true;
                             }
@@ -1401,7 +1440,7 @@ impl DnatTable {
             // GLM7: mirror the exact leg — a non-Translate WINNER
             // claims the group outright; later Translate slots at
             // the same (tier, length) do not co-win past it.
-            if !matches!(winner.entry.to_outcome(), DnatOutcome::Translate(..)) {
+            if !matches!(winner.entry.to_outcome(), DnatOutcome::Translate { .. }) {
                 return Some(false);
             }
             let winner_tier = winner.entry.scope_tier();
@@ -1422,7 +1461,7 @@ impl DnatTable {
                     continue;
                 }
                 match slot.entry.to_outcome() {
-                    DnatOutcome::Translate(..) => {
+                    DnatOutcome::Translate { .. } => {
                         let rewrite_dst_port = if protocol_has_l4_ports
                             && slot.entry.value.new_dst_port != 0
                             && slot.entry.value.new_dst_port != dst_port
@@ -1551,7 +1590,86 @@ impl DnatTable {
             ingress_routing_instance,
             packet_icmp,
         ) {
-            Some(DnatOutcome::Translate(value, counter)) => {
+            Some(DnatOutcome::Translate {
+                value,
+                counter,
+                ..
+            }) => {
+                let rewrite_dst_port = if crate::ip_proto::has_l4_ports(protocol)
+                    && value.new_dst_port != 0
+                    && value.new_dst_port != dst_port
+                {
+                    Some(value.new_dst_port)
+                } else {
+                    None
+                };
+                (
+                    DnatLookup::Matched(NatDecision {
+                        rewrite_src: None,
+                        rewrite_dst: Some(value.new_dst_ip),
+                        rewrite_src_port: None,
+                        rewrite_dst_port,
+                        source_nat_icmp: None,
+                        nat64: false,
+                        nptv6: false,
+                    }),
+                    counter,
+                )
+            }
+            Some(DnatOutcome::Poisoned(counter)) => (DnatLookup::Poisoned, counter),
+            Some(DnatOutcome::Exempt) | None => (DnatLookup::NoMatch, None),
+        }
+    }
+
+    /// #16045: like [`lookup_result_with_counter_scoped`], but for an
+    /// ambiguous-provenance scope: whenever the deciding outcome is a
+    /// SCOPE-CONSTRAINED translate or poison match under the caller's
+    /// (withheld-provenance) identity, the result is `Poisoned` —
+    /// fail closed, because the later policy may promote a different
+    /// zone and a translation keyed to this identity would escape its
+    /// adjudication. An UNSCOPED translate keeps its ordinary
+    /// `Matched` result (it fires under every identity); a healthy
+    /// `off` exemption carries no translation and keeps `NoMatch`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn lookup_result_ambiguous_provenance_scoped(
+        &self,
+        protocol: u8,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        src_port: u16,
+        dst_port: u16,
+        ingress_zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+        packet_icmp: Option<(u8, u8)>,
+    ) -> (DnatLookup, Option<Arc<NatRuleCounter>>) {
+        let outcome = self.outcome_with_counter_scoped(
+            protocol,
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            ingress_zone,
+            ingress_ifname,
+            ingress_routing_instance,
+            packet_icmp,
+        );
+        if let Some(outcome) = &outcome {
+            if outcome.is_scope_constrained() {
+                let counter = match outcome {
+                    DnatOutcome::Translate { counter, .. } => counter.clone(),
+                    DnatOutcome::Poisoned(counter) => counter.clone(),
+                    DnatOutcome::Exempt => None,
+                };
+                return (DnatLookup::Poisoned, counter);
+            }
+        }
+        match outcome {
+            Some(DnatOutcome::Translate {
+                value,
+                counter,
+                ..
+            }) => {
                 let rewrite_dst_port = if crate::ip_proto::has_l4_ports(protocol)
                     && value.new_dst_port != 0
                     && value.new_dst_port != dst_port
@@ -1627,7 +1745,7 @@ impl DnatTable {
             packet_icmp,
         ) {
             Some(DnatOutcome::Poisoned(counter)) => return (true, counter),
-            Some(DnatOutcome::Translate(..)) | Some(DnatOutcome::Exempt) => {
+            Some(DnatOutcome::Translate { .. }) | Some(DnatOutcome::Exempt) => {
                 return (false, None)
             }
             None => {}

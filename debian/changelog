@@ -1,5 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * NAT: pre-routing NAT no longer translates under the fabric
+    fallback identity for ambiguous (unpromoted) fabric arrivals
+    (#16045). Static/pool DNAT, persistent-NAT, NPTv6 and NAT64 were
+    judged under the local fabric/logical zone while the later policy
+    promoted the claimed zone, so a fabric-scoped rule fired for a
+    zone pair that never selected it. Scoped matchers now fail closed
+    under ambiguous provenance (pool DNAT poison-drop, static/NPTv6/
+    NAT64 withheld, persistent reader skipped); unscoped rules and
+    native owner-scope ingress are unchanged, and the claimed zone is
+    never granted before owner-RG proof.
   * Drop IPv6 packets in the AF_XDP shim when their extension-header chain
     exceeds the walk limit, instead of passing an unresolved protocol with
     zero ports to the kernel for local, multicast, or link-local

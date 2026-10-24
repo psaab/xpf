@@ -123,6 +123,15 @@ fn static_scope_ok(
         && (from_routing_instance.is_empty() || from_routing_instance == routing_instance)
 }
 
+/// #16045: is a static rule's `from` scope constrained on ANY ingress
+/// axis? An unscoped rule fires under every ingress identity, so a
+/// match under one identity is valid provenance under any other; a
+/// constrained rule's match is keyed to the selecting identity.
+#[inline]
+fn static_scope_constrained(from_zone: &str, from_interface: &str, from_routing_instance: &str) -> bool {
+    !(from_zone.is_empty() && from_interface.is_empty() && from_routing_instance.is_empty())
+}
+
 #[inline]
 fn static_scope_tier(from_zone: &str, from_interface: &str, from_routing_instance: &str) -> u8 {
     super::nat_scope_tier(from_interface, from_zone, from_routing_instance)
@@ -1077,6 +1086,78 @@ impl StaticNatTable {
             ));
         }
         None
+    }
+
+    /// #16045: like [`match_dnat_with_counter_scoped`], but for an
+    /// ambiguous-provenance scope: whenever ANY scope-constrained entry
+    /// or block is ELIGIBLE under the caller's (withheld-provenance)
+    /// identity for this destination — whether or not it would win the
+    /// pick — return `None` (no translation). A constrained rule's
+    /// match is keyed to the identity that selected it, and the later
+    /// policy may promote a different (claimed) zone, so letting even
+    /// an unscoped winner proceed while a constrained sibling claimed
+    /// the same tuple would key the flow to an unadjudicated identity.
+    /// Fail closed on the claim itself; unscoped-only matches translate
+    /// exactly as the ordinary lookup. Mirrors the eligibility gates
+    /// (`static_scope_ok` + `source_ok`) of the ordinary matcher,
+    /// including its block scan and external-prefix containment.
+    pub(crate) fn match_dnat_ambiguous_provenance_scoped(
+        &self,
+        dst_ip: IpAddr,
+        dst_port: u16,
+        src_ip: Option<IpAddr>,
+        ingress_zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+    ) -> Option<(NatDecision, Option<Arc<NatRuleCounter>>)> {
+        let entry_claims = |entry: &StaticNatEntry| {
+            static_scope_constrained(
+                &entry.from_zone,
+                &entry.from_interface,
+                &entry.from_routing_instance,
+            ) && static_scope_ok(
+                &entry.from_zone,
+                &entry.from_interface,
+                &entry.from_routing_instance,
+                ingress_zone,
+                ingress_ifname,
+                ingress_routing_instance,
+            ) && source_ok(&entry.source, src_ip)
+        };
+        let claimed = self
+            .dnat
+            .get(&(dst_ip, Some(dst_port)))
+            .is_some_and(|entries| entries.iter().any(|e| entry_claims(e)))
+            || self
+                .dnat
+                .get(&(dst_ip, None))
+                .is_some_and(|entries| entries.iter().any(|e| entry_claims(e)))
+            || self.blocks.iter().any(|blk| {
+                static_scope_constrained(
+                    &blk.from_zone,
+                    &blk.from_interface,
+                    &blk.from_routing_instance,
+                ) && static_scope_ok(
+                    &blk.from_zone,
+                    &blk.from_interface,
+                    &blk.from_routing_instance,
+                    ingress_zone,
+                    ingress_ifname,
+                    ingress_routing_instance,
+                ) && source_ok(&blk.source, src_ip)
+                    && blk.external.contains(dst_ip)
+            });
+        if claimed {
+            return None;
+        }
+        self.match_dnat_with_counter_scoped(
+            dst_ip,
+            dst_port,
+            src_ip,
+            ingress_zone,
+            ingress_ifname,
+            ingress_routing_instance,
+        )
     }
 
     /// Match outbound: if src_ip is an internal IP, return SNAT decision.

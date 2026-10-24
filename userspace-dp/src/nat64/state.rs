@@ -275,6 +275,18 @@ pub(crate) struct Nat64ReverseInfo {
 /// unallocatable case (drop + counter) while still routing genuinely
 /// non-matching IPv6 normally. Consistent with the project's fail-closed
 /// family (#2124/#2142/#2173/#2175).
+impl Nat64Prefix {
+    /// #16045: is this prefix constrained on an ingress-scope axis
+    /// (zone / routing-instance, singular or union form)? Source-address
+    /// constraints are tuple selectors, not ingress-identity scope.
+    fn ingress_scope_constrained(&self) -> bool {
+        !self.from_zone.is_empty()
+            || !self.from_zones.is_empty()
+            || !self.from_routing_instance.is_empty()
+            || !self.from_routing_instances.is_empty()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Nat64Match {
     /// The destination does not match any configured NAT64 prefix — continue
@@ -1508,6 +1520,38 @@ impl Nat64State {
                     _ => Nat64Match::MatchUnavailable,
                 }
             }
+        }
+    }
+
+    /// #16045: like [`classify_ipv6_packet_scoped`], but for an
+    /// ambiguous-provenance scope: the Pref64 source-eligibility gate
+    /// is unchanged (identity-independent), then whenever the matched
+    /// prefix is constrained on an ingress-scope axis (zone /
+    /// routing-instance) under the caller's withheld-provenance
+    /// identity, return `MatchUnavailable` (fail closed) instead of
+    /// `MatchReady` — a translation keyed to that identity would
+    /// escape the zone the later policy adjudicates. Unscoped matches
+    /// classify exactly as the ordinary form.
+    pub(crate) fn classify_ipv6_packet_ambiguous_provenance_scoped(
+        &self,
+        src: Ipv6Addr,
+        dst: Ipv6Addr,
+        from_zone: &str,
+        routing_instance: &str,
+    ) -> Nat64Match {
+        match self.classify_ipv6_packet_scoped(src, dst, from_zone, routing_instance) {
+            ready @ Nat64Match::MatchReady { prefix_idx, .. } => {
+                let constrained = self
+                    .prefixes
+                    .get(prefix_idx)
+                    .is_some_and(|prefix| prefix.ingress_scope_constrained());
+                if constrained {
+                    Nat64Match::MatchUnavailable
+                } else {
+                    ready
+                }
+            }
+            other => other,
         }
     }
 

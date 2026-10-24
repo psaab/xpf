@@ -554,6 +554,31 @@ impl Nptv6State {
         Nptv6Translation::NoMatch
     }
 
+    /// #16045: like [`translate_inbound_result`], but for an
+    /// ambiguous-provenance scope: whenever a ZONE-CONSTRAINED rule is
+    /// eligible under the caller's (withheld-provenance) ingress zone
+    /// for this destination, return `Untranslatable` (fail closed) —
+    /// a translation keyed to that identity would escape the zone the
+    /// later policy adjudicates. Unscoped-only matches translate
+    /// exactly as the ordinary lookup. Mutates `dst` only on
+    /// `Translated`, exactly like the ordinary form.
+    pub(crate) fn translate_inbound_ambiguous_provenance_result(
+        &self,
+        dst: &mut Ipv6Addr,
+        ingress_zone: &str,
+    ) -> Nptv6Translation {
+        let words = ipv6_to_words(dst);
+        let claimed = self.inbound.iter().any(|rule| {
+            !rule.from_zone.is_empty()
+                && rule.zone_matches(ingress_zone)
+                && prefix_matches(&words, &rule.external_prefix, rule.prefix_words)
+        });
+        if claimed {
+            return Nptv6Translation::Untranslatable;
+        }
+        self.translate_inbound_result(dst, ingress_zone)
+    }
+
     /// Translate an outbound packet's source address.
     ///
     /// This compatibility wrapper preserves the historical boolean API.
