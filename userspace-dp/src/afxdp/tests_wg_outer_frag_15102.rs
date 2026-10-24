@@ -258,22 +258,13 @@ fn wg_outer_fragment_v4_reassembles_and_decaps_exactly_once_15102() {
 
 /// #16438: the degraded-path WG exclusion is tail-only. The raw
 /// predicate still answers the healthy-path question (including the
-/// head row), but `is_degraded_local_or_control` must apply it only
-/// to tails (`PROTO_FRAGMENT_NO_L4`), mirroring the healthy
-/// `wg_fragment` gate. This composition mirrors that call site: a
-/// degraded fragmented UDP head to a local address with WG_RX armed
-/// is local/control (kernel pass), while the WG tail stays excluded.
-fn degraded_wg_excluded_16438(
-    protocol: u8,
-    wire_protocol: u8,
-    is_fragment: bool,
-    wg_rx_armed: bool,
-) -> bool {
-    use shim_gre_classify::wg_fragment_stays_on_helper;
-    const PROTO_FRAGMENT_NO_L4: u8 = 255;
-    protocol == PROTO_FRAGMENT_NO_L4
-        && wg_fragment_stays_on_helper(protocol, wire_protocol, is_fragment, wg_rx_armed)
-}
+/// head row), but `is_degraded_local_or_control` applies the
+/// executed `wg_degraded_fragment_excluded` helper, which gates on
+/// `PROTO_FRAGMENT_NO_L4` mirroring the healthy `wg_fragment`
+/// binding. A degraded fragmented UDP head to a local address with
+/// WG_RX armed is therefore local/control (kernel pass), while the
+/// WG tail stays excluded. The test runs the real helper by source
+/// path, so deleting the tail gate in the helper flips rows red.
 
 #[test]
 fn wg_fragment_shim_truth_table_15102() {
@@ -378,11 +369,12 @@ fn wg_fragment_shim_truth_table_15102() {
     ];
     for (p, w, frag, armed, want, why) in degraded_cases {
         assert_eq!(
-            degraded_wg_excluded_16438(p, w, frag, armed),
+            shim_gre_classify::wg_degraded_fragment_excluded(p, w, frag, armed),
             want,
             "{why}"
         );
     }
+    assert_eq!(shim_gre_classify::IP_PROTO_NO_L4, 255);
 }
 
 fn outer_frame_v6_15102(record: &[u8], dst_port: u16) -> Vec<u8> {
