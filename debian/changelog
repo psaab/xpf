@@ -32,6 +32,16 @@ xpf (0.0.0) unstable; urgency=medium
     deliberately broken tagged file still invokes `go test ./...`
     and exits nonzero, and no leg is weakened or skipped.
 
+  * Test: stop test-failover's pool phase measuring the loss cluster's
+    pool on tcp/udp (#16471). The #8280 phase hardcoded POOL_SRC
+    10.0.61.240 / POOL_NAT_ADDR 172.16.80.7 and the tcp/udp envs did not
+    override them, so those runs bound a source their `rule pool-snat`
+    (10.0.62.240/28, 10.0.63.240/28) never matches and reported the
+    zeroes as #8280/#8297/#8314 defects while never exercising the real
+    pools (.12/.13). Both values are now derived from CLUSTER_CONF's
+    pool rule, the three cluster envs state them explicitly, and any
+    disagreement VOIDs the phase instead of failing; the #8280 hermetic
+    cells now cover all three shipped HA configs.
   * Config: warn on unknown `system`, `snmp` and class-of-service
     keywords (#16462). `syslog hots`/`hosts`, `ntp servr`,
     `name-sever`, `snmp comunity`, a bad syslog facility
