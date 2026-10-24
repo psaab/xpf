@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1068,6 +1069,79 @@ func (p *ipsecCaptureQueuePlan) finalize(generation uint64) {
 	p.Quarantine.CandidateIfindices = candidates
 }
 
+// tunnelRef normalises a bind-interface to the unit ref the RI-member
+// resolver keys on: a dotted bind already IS the ref; a bare bind names
+// unit 0.
+func tunnelRef(bind string) string {
+	if _, _, found := strings.Cut(bind, "."); found {
+		return bind
+	}
+	return bind + ".0"
+}
+
+// resolveIpsecTunnelMaster returns the VRF master name the divert must
+// match for one tunnel, and ok=false when capture must fail closed.
+//
+// The configured routing-instance member is authoritative for intent: a
+// tunnel listed in exactly one non-forwarding instance must render that
+// instance's VRF device even if the live link has not been enslaved yet
+// (#16420 — the stage previously sampled the pre-bind master and installed
+// an iifname-only rule that never matches enslaved traffic). When the live
+// link IS enslaved, its master must agree with the configured VRF; a
+// mismatch, an unresolvable master, an ambiguous (multi-instance) member,
+// or a management-class membership fails closed. A tunnel with no
+// configured member uses the live master exactly as #14974 did.
+func resolveIpsecTunnelMaster(cfg *config.Config, ref, ifname string, link netlink.Link) (string, bool) {
+	configured, configuredOK := configuredTunnelVRFMaster(cfg, ref)
+	live := ""
+	if link != nil && link.Attrs() != nil && link.Attrs().MasterIndex > 0 {
+		masterLink, err := ipsecFenceLinkByIndex(link.Attrs().MasterIndex)
+		if err != nil || masterLink == nil || masterLink.Attrs() == nil || masterLink.Attrs().Name == "" {
+			return "", false
+		}
+		live = masterLink.Attrs().Name
+	}
+	if !configuredOK {
+		return "", false
+	}
+	if configured != "" {
+		if live != "" && live != configured {
+			return "", false
+		}
+		return configured, true
+	}
+	return live, true
+}
+
+// configuredTunnelVRFMaster returns the VRF device name for the single
+// non-forwarding routing-instance that lists ref as a member, "" when no
+// instance does, and ok=false when membership is ambiguous or reserved.
+func configuredTunnelVRFMaster(cfg *config.Config, ref string) (string, bool) {
+	if cfg == nil {
+		return "", true
+	}
+	tunMap := cfg.TunnelNameMap()
+	found := ""
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil || ri.InstanceType == "forwarding" || config.IsReservedRoutingInstanceName(ri.Name) {
+			continue
+		}
+		for _, key := range config.RoutingInstanceMemberDeviceKeysForInstance(cfg, tunMap, ri) {
+			if key.LinuxName == ref {
+				if config.IsManagementIfName(key.LinuxName) {
+					return "", false
+				}
+				dev := "vrf-" + ri.Name
+				if found != "" && found != dev {
+					return "", false
+				}
+				found = dev
+			}
+		}
+	}
+	return found, true
+}
+
 func buildIpsecCaptureQueuePlan(cfg *config.Config, generation uint64) (ipsecCaptureQueuePlan, error) {
 	var plan ipsecCaptureQueuePlan
 	if cfg == nil || generation == 0 {
@@ -1103,17 +1177,10 @@ func buildIpsecCaptureQueuePlan(cfg *config.Config, generation uint64) (ipsecCap
 			continue
 		}
 		ifindex := uint32(link.Attrs().Index)
-		// #14974: a VRF-enslaved xfrmi presents its master as iifname; resolve
-		// it now (fail closed to quarantine when unresolvable) so the divert
-		// rule can match iifname=master + sdifname=tunnel.
-		master := ""
-		if link.Attrs().MasterIndex > 0 {
-			masterLink, merr := ipsecFenceLinkByIndex(link.Attrs().MasterIndex)
-			if merr != nil || masterLink == nil || masterLink.Attrs() == nil || masterLink.Attrs().Name == "" {
-				plan.addQuarantine(xnft.IpsecQuarantineReasonLinkLookup)
-				continue
-			}
-			master = masterLink.Attrs().Name
+		master, masterOK := resolveIpsecTunnelMaster(cfg, tunnelRef(vpn.BindInterface), ifname, link)
+		if !masterOK {
+			plan.addQuarantine(xnft.IpsecQuarantineReasonLinkLookup)
+			continue
 		}
 		valid = append(valid, validTunnel{name: name, bind: vpn.BindInterface, ifID: ifID, ifindex: ifindex, master: master})
 		plan.Quarantine.CandidateIfindices = append(plan.Quarantine.CandidateIfindices, ifindex)
@@ -1224,6 +1291,11 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 		return old, old, err
 	}
 	keys := plan.Keys
+	// #16420: ipsecQueueKey.Master is the divert render input, so a key set
+	// whose Master differs from the installed runtime's is a NEW generation
+	// even when every other field matches — sameKeys must not suppress it.
+	// (sameKeys already compares Master via ipsecQueueKey equality; this
+	// comment pins that Master is load-bearing for the no-op gate.)
 	if !plan.Quarantine.QuarantineAll && old != nil && old.sameKeys(keys) && !old.spec.QuarantineAll {
 		// Queue provenance deliberately excludes zone. A zone-only rezone
 		// nevertheless changes the authority paired with those queues, so

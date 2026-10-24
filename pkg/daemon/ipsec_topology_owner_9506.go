@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/vishvananda/netlink"
 )
 
@@ -162,7 +163,10 @@ func (d *Daemon) pollIpsecTopology() {
 	if err != nil {
 		ready = ipsecReadyUnknown
 	} else {
-		tuples, ready = classifyIpsecTopologyLinks(links, ready)
+		d.ipsecCaptureMu.Lock()
+		installed := d.ipsecCapture
+		d.ipsecCaptureMu.Unlock()
+		tuples, ready = classifyIpsecTopologyLinksWithInstalled(links, ready, installed)
 	}
 	current := d.ipsecS4.watch.Load()
 	dirty := d.ipsecTopologyDirty.Load()
@@ -179,6 +183,55 @@ func (d *Daemon) pollIpsecTopology() {
 	if d.ipsecS4.publishWatchSnapshot(snapshot) {
 		d.ipsecTopologyDirty.Store(false)
 	}
+}
+
+// classifyIpsecTopologyLinksWithInstalled is classifyIpsecTopologyLinks
+// plus the #16420 installed-divert comparison: when an installed divert
+// runtime is supplied, a VRF-enslaved xfrmi whose live master differs from
+// the divert's Master for that tunnel (including an iifname-only divert
+// with Master=="") is UNSAFE, so the permit cannot OPEN on a stale divert
+// that will never match enslaved traffic. A nil installed runtime keeps
+// the legacy behaviour (no comparison possible).
+func classifyIpsecTopologyLinksWithInstalled(links []netlink.Link, ready ipsecReadyResult, installed *ipsecCaptureRuntime) ([]ipsecTopologyTuple, ipsecReadyResult) {
+	tuples, ready := classifyIpsecTopologyLinks(links, ready)
+	if installed == nil {
+		return tuples, ready
+	}
+	for _, tuple := range tuples {
+		if tuple.Kind != "xfrmi" || tuple.MasterIndex == 0 {
+			continue
+		}
+		masterLink, err := ipsecFenceLinkByIndex(tuple.MasterIndex)
+		if err != nil || masterLink == nil || masterLink.Attrs() == nil || masterLink.Attrs().Name == "" {
+			continue // classify already marked this UNKNOWN
+		}
+		liveMaster := masterLink.Attrs().Name
+		installedMaster, found := installedMasterForTunnel(installed, tuple.Name)
+		if !found {
+			continue
+		}
+		if installedMaster != liveMaster {
+			ready = ipsecReadyUnsafe
+		}
+	}
+	return tuples, ready
+}
+
+// installedMasterForTunnel returns the Master carried by the installed
+// divert for the tunnel whose xfrmi device is tunnelName. STN is the
+// authored bind ref (st0.0 or st0); the census Name is the device name,
+// which XFRMIfNameAndID derives from the bind.
+func installedMasterForTunnel(rt *ipsecCaptureRuntime, tunnelName string) (string, bool) {
+	if rt == nil {
+		return "", false
+	}
+	for _, h := range rt.handles {
+		dev, _ := config.XFRMIfNameAndID(h.Key.STN)
+		if dev == tunnelName {
+			return h.Key.Master, true
+		}
+	}
+	return "", false
 }
 
 func classifyIpsecTopologyLinks(links []netlink.Link, ready ipsecReadyResult) ([]ipsecTopologyTuple, ipsecReadyResult) {

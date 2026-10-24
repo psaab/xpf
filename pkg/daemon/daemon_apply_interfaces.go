@@ -466,6 +466,18 @@ func (d *Daemon) applyInterfaceReconcile(cfg *config.Config) error {
 		errs = append(errs, fmt.Errorf("apply xfrmi interfaces: %w", err))
 	}
 
+	// #16420: bind freshly created xfrmi (and any tunnel created above) into
+	// their routing-instance VRF NOW, before stageIpsecCapture samples the
+	// live MasterIndex for the NFQUEUE divert. Step 0a ran before ApplyXfrmi
+	// created these devices and the #6805 late pass inside
+	// applyDataplaneAndHACore runs AFTER the stage, so without this pass a
+	// first deploy / every reboot stages an iifname-only divert for a tunnel
+	// that is enslaved by commit time and never matches. Reuses the ONE
+	// bindRoutingInstanceMembers implementation so this pass cannot drift
+	// from 0a/late; BindInterfaceToVRF is idempotent, so re-driving
+	// already-bound members issues no second master change.
+	d.bindRoutingInstanceMembers(cfg)
+
 	// 1.7. Create bond (LAG) interfaces for fabric-options member-interfaces.
 	// Always call ApplyBonds (even with empty list) so stale bonds from
 	// previous configs get cleaned up via ClearBonds().
