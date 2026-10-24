@@ -449,11 +449,138 @@ func renderQNHMetricSetOverlay11447(scope *qnhMetricScope11447, routeMap string)
 	return b.String()
 }
 
+// ripQNHMetricMax12531 is the RIP infinity metric: routes at 16 are
+// unreachable. QNH metrics above it clamp to 16 so the advertised
+// metric stays meaningful instead of wrapping or being rejected.
+const ripQNHMetricMax12531 = 16
+
+// ripQNHMetricACLName12531 derives the standard access-list name that
+// selects exactly one QNH destination for a RIP offset-list. The name
+// is hashed from scope+destination so distinct destinations never
+// share a list (FRR merges same-named access-lists).
+func ripQNHMetricACLName12531(scopeKey, destination string) string {
+	sum := sha256.Sum256([]byte("ripacl\x00" + scopeKey + "\x00" + destination))
+	return "xpf-qnh-rip-" + hex.EncodeToString(sum[:])[:16]
+}
+
+// ripQNHMetricOffset12531 maps a configured QNH metric to the RIP
+// offset-list value: ripd adds the offset to the base redistribution
+// metric (1), so offset = metric-1, clamped to [0,15]. Metric 0 has no
+// RIP representation and reports ok=false.
+func ripQNHMetricOffset12531(metric int) (int, bool) {
+	if metric < 1 {
+		return 0, false
+	}
+	if metric > ripQNHMetricMax12531 {
+		metric = ripQNHMetricMax12531
+	}
+	return metric - 1, true
+}
+
+// ripQNHMetricRoutes12531 returns the scope routes that can carry a RIP
+// metric: IPv4, with a representable metric. Next-hop/interface
+// discriminators cannot be expressed in an offset-list ACL, so the
+// offset keys only on destination; when two QNH entries share a
+// destination with different metrics the lowest metric wins (the most
+// preferred backup), matching buildQNHMetricScope's sort order.
+func ripQNHMetricRoutes12531(scope *qnhMetricScope11447) []qnhMetricRoute11447 {
+	if scope == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var out []qnhMetricRoute11447
+	for _, route := range scope.routes {
+		if route.ipv6 {
+			continue
+		}
+		if _, ok := ripQNHMetricOffset12531(route.metric); !ok {
+			continue
+		}
+		if seen[route.destination] {
+			continue
+		}
+		seen[route.destination] = true
+		out = append(out, route)
+	}
+	return out
+}
+
+// renderRIPQNHMetricACLs12531 renders the per-destination access-lists
+// referenced by RIP offset-lists, but only for scopes whose RIP stanza
+// will actually emit the offset (bare static export). Without that
+// gate a policy-exported or non-RIP config would carry orphan ACLs.
+// fc supplies the RIP configs; s supplies the scopes (global plus one
+// per instance, in order).
+func (s *qnhMetricSet11447) renderRIPQNHMetricACLs12531(fc *FullConfig) string {
+	if s == nil || fc == nil {
+		return ""
+	}
+	var b strings.Builder
+	emit := func(scope *qnhMetricScope11447, rip *config.RIPConfig) {
+		if scope == nil || !ripExportsStaticBare12531(rip, fc.PolicyOptions) {
+			return
+		}
+		for _, route := range ripQNHMetricRoutes12531(scope) {
+			name := ripQNHMetricACLName12531(scope.key, route.destination)
+			fmt.Fprintf(&b, "access-list %s seq 5 permit %s\n", name, sanitizeFRRValue(route.destination))
+			fmt.Fprintf(&b, "access-list %s seq 10 deny any\n", name)
+		}
+	}
+	emit(s.global, fc.RIP)
+	for i, inst := range fc.Instances {
+		if i < len(s.instances) {
+			emit(s.instances[i], inst.RIP)
+		}
+	}
+	if b.Len() > 0 {
+		b.WriteString("!\n")
+	}
+	return b.String()
+}
+
+// ripExportsStaticBare12531 reports whether a RIP config redistributes
+// static routes via the bare protocol token (not an authored policy).
+// Only that shape receives QNH offsets: a policy export keeps the
+// authored policy's metric semantics.
+func ripExportsStaticBare12531(rip *config.RIPConfig, po *config.PolicyOptionsConfig) bool {
+	if rip == nil {
+		return false
+	}
+	for _, export := range rip.Redistribute {
+		if isDefinedPolicyStatement(export, po) {
+			continue
+		}
+		if normalizedRedistProtocol(export) == "static" {
+			return true
+		}
+	}
+	return false
+}
+
+// renderRIPQNHMetricOffsets12531 renders offset-list lines for one RIP
+// stanza. The lines have no interface operand, so the offset applies
+// on every RIP interface; the ACL confines it to the QNH destination.
+// Returns "" when the stanza does not bare-export static or no route
+// carries a representable RIP metric.
+func renderRIPQNHMetricOffsets12531(scope *qnhMetricScope11447, rip *config.RIPConfig, po *config.PolicyOptionsConfig) string {
+	if scope == nil || !ripExportsStaticBare12531(rip, po) {
+		return ""
+	}
+	var b strings.Builder
+	for _, route := range ripQNHMetricRoutes12531(scope) {
+		offset, _ := ripQNHMetricOffset12531(route.metric)
+		name := ripQNHMetricACLName12531(scope.key, route.destination)
+		fmt.Fprintf(&b, " offset-list %s out %d\n", name, offset)
+	}
+	return b.String()
+}
+
 // qnhMetricDaemonOverlays11447 emits metric actions only for OSPF, whose
 // daemon-scoped loader applies them without broadcasting to other daemons.
-// FRR 10.7 cannot safely confine a RIP metric overlay: daemon-scoped loads
-// silently no-op, while integrated loads broadcast the action to daemons that
-// discard the required match clauses. RIP therefore keeps the default metric.
+// RIP receives no route-map overlay (#12531): ripd ignores route-map
+// set metric for redistributed statics and no scoped load confines it;
+// RIP QNH metrics are delivered by offset-lists in the router rip
+// stanza instead (renderRIPQNHMetricOffsets12531).
 func (m *Manager) qnhMetricDaemonOverlays11447(fc *FullConfig, set *qnhMetricSet11447) map[string]string {
 	if fc == nil || set == nil {
 		return nil
@@ -469,8 +596,9 @@ func (m *Manager) qnhMetricDaemonOverlays11447(fc *FullConfig, set *qnhMetricSet
 				continue
 			}
 			if daemon == "ripd" {
-				slog.Warn("QNH metric is not applied to RIP on FRR 10.7; RIP receives its default metric (see #12071)",
-					"issue", "#12071", "scope", scope.key, "redistribution", export)
+				// #12531: RIP QNH metrics ride offset-lists in the
+				// integrated stanza, not a daemon overlay. Nothing to
+				// warn about: the metric is applied.
 				return
 			}
 			targets[daemon][entry.routeMap] = scope

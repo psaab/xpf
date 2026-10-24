@@ -805,10 +805,10 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 		// lead with the cluster tag deny, and the bare-redistribute
 		// guard map is defined.
 		if fc.ClusterMode {
-			b.WriteString(m.generatePolicyOptionsForSectionCluster15158(policyOptions, bgpAcceptDefault, qnhMetrics, redistReferencedNodes14380(fc), bgpCarvedExport15157))
+			b.WriteString(m.generatePolicyOptionsForSectionCluster15158(policyOptions, bgpAcceptDefault, qnhMetrics, redistReferencedNodes14380(fc), bgpCarvedExport15157, fc))
 			b.WriteString(renderClusterNull0DenyRouteMap15158(fc))
 		} else {
-			b.WriteString(m.generatePolicyOptionsForSection15157(policyOptions, bgpAcceptDefault, qnhMetrics, redistReferencedNodes14380(fc), bgpCarvedExport15157))
+			b.WriteString(m.generatePolicyOptionsForSection15157(policyOptions, bgpAcceptDefault, qnhMetrics, redistReferencedNodes14380(fc), bgpCarvedExport15157, fc))
 		}
 		if fc.PolicyOptions != nil {
 			// Composed BGP policy-chain route-maps: an ordered `import`/`export
@@ -1225,8 +1225,8 @@ func (m *Manager) reconcileQNHMetricOverlaysLocked(ctx context.Context) error {
 
 // applyQNHMetricOverlaysLocked restores QNH set actions only to ospfd, whose
 // daemon-scoped loader confines the action to the daemon with both match
-// discriminators. RIP stays metric-free because FRR 10.7 only offers an
-// integrated load there, which broadcasts unsafe copies to other daemons.
+// discriminators. RIP needs no overlay (#12531): its QNH metric rides
+// ripd-native offset-lists in the integrated router rip stanza.
 // Overlays are memory-only; a restart loads the metric-free config until Apply.
 func (m *Manager) applyQNHMetricOverlaysLocked(ctx context.Context) error {
 	daemons := make([]string, 0, len(m.qnhMetricOverlays))

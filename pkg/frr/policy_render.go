@@ -474,16 +474,16 @@ func (m *Manager) generatePolicyOptionsWithQNH11447(po *config.PolicyOptionsConf
 // #15157 carved-export set: policy names whose standalone map is a
 // single-policy BGP export in an originating instance and whose
 // no-default tail must carve to permit-BGP-only.
-func (m *Manager) generatePolicyOptionsForSection15157(po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricSet11447, referencedNodes map[string][][2]string, carvedExport map[string]bool) string {
-	return m.generatePolicyOptionsWithRefNodes15158(po, bgpAcceptDefault, qnhMetrics, referencedNodes, carvedExport, false)
+func (m *Manager) generatePolicyOptionsForSection15157(po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricSet11447, referencedNodes map[string][][2]string, carvedExport map[string]bool, fc ...*FullConfig) string {
+	return m.generatePolicyOptionsWithRefNodes15158(po, bgpAcceptDefault, qnhMetrics, referencedNodes, carvedExport, false, fc...)
 }
 
 // generatePolicyOptionsForSectionCluster15158 is the cluster-mode section
 // variant (#15158): carved-export handling is unchanged, and generated
 // static redistribute maps plus QNH metric maps lead with the cluster
 // tag deny.
-func (m *Manager) generatePolicyOptionsForSectionCluster15158(po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricSet11447, referencedNodes map[string][][2]string, carvedExport map[string]bool) string {
-	return m.generatePolicyOptionsWithRefNodes15158(po, bgpAcceptDefault, qnhMetrics, referencedNodes, carvedExport, true)
+func (m *Manager) generatePolicyOptionsForSectionCluster15158(po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricSet11447, referencedNodes map[string][][2]string, carvedExport map[string]bool, fc ...*FullConfig) string {
+	return m.generatePolicyOptionsWithRefNodes15158(po, bgpAcceptDefault, qnhMetrics, referencedNodes, carvedExport, true, fc...)
 }
 
 // generatePolicyOptionsWithRefNodes14380 keeps the #15157 signature for
@@ -494,9 +494,12 @@ func (m *Manager) generatePolicyOptionsWithRefNodes14380(po *config.PolicyOption
 	return m.generatePolicyOptionsWithRefNodes15158(po, bgpAcceptDefault, qnhMetrics, referencedNodes, carvedExport, false)
 }
 
-func (m *Manager) generatePolicyOptionsWithRefNodes15158(po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricSet11447, referencedNodes map[string][][2]string, carvedExport map[string]bool, clusterMode bool) string {
+func (m *Manager) generatePolicyOptionsWithRefNodes15158(po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricSet11447, referencedNodes map[string][][2]string, carvedExport map[string]bool, clusterMode bool, fc ...*FullConfig) string {
 	var b strings.Builder
 	b.WriteString(qnhMetrics.renderPrefixLists())
+	if len(fc) > 0 && fc[0] != nil {
+		b.WriteString(qnhMetrics.renderRIPQNHMetricACLs12531(fc[0]))
+	}
 
 	// Generate FRR prefix-lists from Junos prefix-lists
 	names := make([]string, 0, len(po.PrefixLists))

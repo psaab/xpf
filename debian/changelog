@@ -1,4 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
+  * FRR: restore per-qualified-next-hop metrics for routes redistributed
+    into RIP (#12531). RIP now receives its QNH metric through
+    ripd-native offset-lists in the router rip stanza (one
+    offset-list per QNH destination, offset = metric-1 clamped so the
+    advertised metric never exceeds 16, with a generated access-list
+    permitting exactly that destination) instead of the default metric.
+    This supersedes the #12071 RIP limitation: FRR 10.7.1 daemon-scoped
+    ripd loads silently apply nothing, integrated route-map loads
+    broadcast the metric to other daemons, and ripd ignores route-map
+    set metric for redistributed statics even when present — all
+    live-verified, with the RIPv2 wire now carrying the configured
+    metric (e.g. 10) while OSPF behavior is unchanged.
   * Userspace-dp: split afxdp/types/forwarding.rs (2,297 lines) into
     forwarding/{mod,state,fib,local,tunnels,zones,fabric,disposition,
     binding}.rs (#16209). File-only: definitions move behind the existing

@@ -95,6 +95,16 @@ func (m *Manager) renderRIP16125(b *strings.Builder, rip *config.RIPConfig, vrfS
 				fmt.Fprintf(b, " passive-interface %s\n", iface)
 			}
 			b.WriteString(m.resolveRedistributeChainCluster15158(rip.Redistribute, policyOptions, "rip", clusterMode, qnhMetricScopeForDaemon11447(qnhMetrics, "rip")))
+			// #12531: restore per-QNH RIP metrics with ripd-native
+			// offset-lists. ripd ignores route-map set metric for
+			// redistributed statics (live FRR 10.7.1: map readback had
+			// metric 7, RIP database and RIPv2 wire stayed at 1), and
+			// no daemon-scoped load confines a route-map action to
+			// ripd. The offset-list lives only in this router rip
+			// stanza, matches the QNH destination via its generated
+			// access-list, and adds metric-1 so the advertised metric
+			// equals the configured QNH metric (clamped to 16).
+			b.WriteString(renderRIPQNHMetricOffsets12531(qnhMetrics, rip, policyOptions))
 			b.WriteString("exit\n!\n")
 			// RIP per-interface authentication
 			if rip.AuthKey.Reveal() != "" {
