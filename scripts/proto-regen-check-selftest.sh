@@ -16,6 +16,7 @@ command -v protoc-gen-go >/dev/null 2>&1 || { echo "SKIP: protoc-gen-go not inst
 command -v protoc-gen-go-grpc >/dev/null 2>&1 || { echo "SKIP: protoc-gen-go-grpc not installed"; exit 77; }
 [ "$(protoc-gen-go-grpc --version)" = "protoc-gen-go-grpc 1.6.1" ] || { echo "SKIP: protoc-gen-go-grpc is $(protoc-gen-go-grpc --version)"; exit 77; }
 
+# shellcheck disable=SC1007  # `CDPATH= cd` clears CDPATH for this command only
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cp "$ROOT/scripts/proto_regen_check.sh" "$SCRATCH/fixture/scripts/"
 cat > "$SCRATCH/fixture/proto/xpf/v1/xpf.proto" <<'EOF'

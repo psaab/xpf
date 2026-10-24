@@ -55,6 +55,25 @@ jobs:
       - name: Pinned proto regen check
         run: make proto-regen-check
 
+  # Advisory tooling leg (#16197): pinned shellcheck + the hermetic
+  # Python subset under scripts/, run directly (NOT
+  # scripts/run-selftests.sh whole). Publishes one TOOLING_LEG
+  # ran/skipped/failed line per leg; ran==0 or any skip deviating
+  # from expected_skipped=0 is red. Advisory per
+  # docs/ci-gate-contract.md -- do not require this status context
+  # in branch rulesets without the recorded baseline-green period.
+  tooling:
+    name: Advisory tooling (shellcheck + Python subset)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Advisory tooling check (pinned shellcheck, hermetic Python)
+        run: make tooling-check
+
   go:
     name: Go build and affected tests
     runs-on: ubuntu-latest

@@ -6,12 +6,14 @@
 > Rust-test-only regression in policy/NAT/HA packet behavior could pass
 > the ordinary green gate unobserved, with no contract saying so.
 
-`.github/workflows/test.yml` (`CI tests`) runs on every PR. Its three
-status contexts—`CI tests / Harness census and self-test`, `CI tests / Go
-build and affected tests`, and `CI tests / Rust workspace compile
-check`—do not block merges until required in master branch rulesets. This
-contract lists every job command in that workflow and the issue-relevant
-manual policy/NAT/HA dataplane gates it does not run, plus where results
+`.github/workflows/test.yml` (`CI tests`) runs on every PR. Its status
+contexts—`CI tests / Harness census and self-test`, `CI tests / Go
+build and affected tests`, `CI tests / Rust workspace compile
+check`, `CI tests / Proto header and regen check`, and the advisory
+`CI tests / Advisory tooling (shellcheck + Python subset)`—do not block
+merges until required in master branch rulesets. This contract lists
+every job command in that workflow and the issue-relevant manual
+policy/NAT/HA dataplane gates it does not run, plus where results
 are recorded.
 
 ## What ordinary green CI runs
@@ -21,6 +23,36 @@ are recorded.
 | Harness census and self-test | `sh scripts/harness-census.sh`, then `bash ./test/incus/harness-census-selftest.sh` (runnable-harness reachability census and mutation self-test; examines no packets) | `test.yml` job `census` |
 | Go build and affected tests | `go build ./...`, then `bash scripts/ci_affected_go_tests.sh "$BASE_SHA" "$HEAD_SHA"` (changed packages + reverse dependents; a changed path owned by no Go package and not on the selector's never-read allowlist seeds every package, the tree-census packages `pkg/docsref`, `pkg/durationaudit`, `pkg/memlockcensus`, `pkg/refactoraudit`, `pkg/showaudit` always run -- #14647; tests that read another package's Go source by relative path are selected via reads-source-of edges derived from the path literals, and renames are diffed with `--no-renames` so the source package is selected too -- #15241 A58-01/A58-03) | `test.yml` job `go` (`Go build and affected tests`) |
 | Rust workspace compile check | `cargo check --manifest-path userspace-dp/Cargo.toml --workspace --all-targets` | `test.yml` job `rust`, step `Check Rust workspace and all targets` |
+| Proto header and regen check | `make proto-check`, then `make proto-regen-check` (pinned protoc regen-diff; #16195) | `test.yml` job `proto` |
+
+### Advisory tooling leg (#16197) — not a merge gate
+
+`test.yml` job `tooling` (`Advisory tooling (shellcheck + Python
+subset)`, `make tooling-check` → `sh scripts/ci_tooling_check.sh`) is
+**advisory**: it reports on PRs but MUST NOT be required in master
+branch rulesets until a baseline-green period on master is recorded
+here. It is decoupled from the proto leg and from
+`scripts/run-selftests.sh` whole (that runner is non-hermetic); it
+runs only the bounded subset below, directly:
+
+| Leg | Coverage | Denominator line |
+|---|---|---|
+| shellcheck | pinned shellcheck v0.11.0 (`-S warning`) over the explicit `SHELLCHECK_FILES` list in `scripts/ci_tooling_check.sh` | `TOOLING_LEG shellcheck ran=<n> skipped=<n> failed=<n> expected_skipped=0 status=<PASS\|FAIL>` |
+| python | `scripts/test_*.py`, `scripts/*_test.py`, `scripts/lib/test_*.py` run directly with `python3` (unittest `Ran`/`skipped=` counts) | `TOOLING_LEG python ran=<n> skipped=<n> failed=<n> files=<n> expected_skipped=0 status=<PASS\|FAIL>` |
+
+The `TOOLING_LEG` lines are the published denominators (also appended
+to `$GITHUB_STEP_SUMMARY`). **`ran==0` is red** for either leg, a
+covered file that disappears is red, and a Python file that runs
+zero tests is red — an empty or all-skip leg never paints green.
+**Expected-SKIP policy: `expected_skipped=0` for both legs.** No
+file in either subset is expected to skip; any skipped Python test
+deviates from the expectation and is red. Raising an expectation
+requires editing `EXPECTED_*_SKIPPED` in
+`scripts/ci_tooling_check.sh` and this section in the same change,
+with a reason. `scripts/ci-tooling-check-selftest.sh` (registered in
+`make selftest`) proves the leg reds on seeded Python/shell
+failures, on per-file and whole-leg `ran==0`, and on an unexpected
+skip, and greens on the pinned baseline.
 
 That is the whole `CI tests` workflow gate. The selector's fallback and
 census behaviour (#14647) means a non-Go change no longer examines zero

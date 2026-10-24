@@ -219,6 +219,8 @@ test/incus/miri-census-selftest.sh
 scripts/close_keyword_lint_ci.sh
 scripts/proto_regen_check.sh
 scripts/proto-regen-check-selftest.sh
+scripts/ci_tooling_check.sh
+scripts/ci-tooling-check-selftest.sh
 scripts/git-hooks/commit-msg
 scripts/git-hooks/install.sh
 test/incus/ha-smoke-iperf-lib.sh
@@ -346,6 +348,10 @@ run_bash scripts/ci_affected_go_tests_selftest.sh
 # #16195: prove the CI regen-diff leg goes red on a .proto edited
 # without regeneration. Hermetic fixture; SKIPs without pinned tools.
 run_shell scripts/proto-regen-check-selftest.sh
+# #16197: prove the advisory tooling leg reds on seeded Python/shell
+# failures, ran==0 and unexpected skips, and greens on the pinned
+# baseline. Hermetic fixture; SKIPs without pinned shellcheck.
+run_shell scripts/ci-tooling-check-selftest.sh
 # #9783: the upgrade-docs canary (make docs-check). Hermetic fixture trees via
 # DOCS_CHECK_ROOT; the row that matters is the positive control -- the phantom
 # symbol in a LIVE doc must still fail once the history archives are excluded.
