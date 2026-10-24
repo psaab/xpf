@@ -274,7 +274,7 @@ func refusedGenCLIDP() *effectiveGenCLIDP {
 			Capabilities:           dpuserspace.UserspaceCapabilities{ForwardingSupported: true},
 			LastSnapshotGeneration: 7,
 			FilterTermCounters: []dpuserspace.FirewallFilterTermCounterStatus{
-				{Family: "inet", FilterName: "demo", TermName: "t2", Packets: 500, Bytes: 5000},
+				{Family: "inet", FilterName: "demo", TermName: "t1", Packets: 500, Bytes: 5000},
 			},
 		},
 	}
@@ -359,7 +359,8 @@ func TestShowFirewallRawStaleCounters16451(t *testing.T) {
 				t.Fatalf("output = %q, want previous-generation counter note", out)
 			}
 			// The misleading pairing is still visible but now warned: the
-			// previous generation's 500 hits appear under term t2.
+			// previous generation's 500 hits appear under term t1 (t2 is
+			// uncounted, so #16454 renders no Hit count for it).
 			if !strings.Contains(out, "Hit count: 500 packets") {
 				t.Fatalf("output = %q, want previous-generation counter still shown under warning", out)
 			}

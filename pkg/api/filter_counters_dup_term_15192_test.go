@@ -47,6 +47,7 @@ func (d *dupTermDP15192) Status() (dpuserspace.ProcessStatus, error) {
 func dupTermCollector15192(t *testing.T) (*xpfCollector, *dupTermDP15192) {
 	t.Helper()
 	store := newFilterStore(t, []string{
+		"set firewall family inet filter F term T then count cT",
 		"set firewall family inet filter F term T then accept",
 	})
 	cfg := store.ActiveConfig()
@@ -58,7 +59,7 @@ func dupTermCollector15192(t *testing.T) (*xpfCollector, *dupTermDP15192) {
 		t.Fatalf("fixture: want one term T, got %+v", f)
 	}
 	// The duplicate shape a lenient load preserves: a second same-named term.
-	f.Terms = append(f.Terms, &config.FirewallFilterTerm{Name: "T", Action: config.FilterActionDiscard})
+	f.Terms = append(f.Terms, &config.FirewallFilterTerm{Name: "T", Count: "cT", Action: config.FilterActionDiscard})
 	c := newCollector(&Server{store: store})
 	dp := &dupTermDP15192{
 		Manager: dataplane.New(),

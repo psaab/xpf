@@ -932,3 +932,78 @@ fn refresh_status_projects_delegated_slow_path_status_10069() {
     );
     assert_eq!(json["slow_path_delegated"]["queued_packets"], 11);
 }
+
+/// #16454: `filter_term_counters()` must publish only `then count` terms.
+/// The uncounted `block` term below matches/discards traffic but its
+/// counter is never recorded (every record site is `has_count`-gated), so
+/// publishing it rendered a permanent authoritative 0. The counted term
+/// publishes even when idle (packets == 0 is a real measurement).
+///
+/// FAIL-ON-REVERT: dropping the `has_count` skip in
+/// `filter_term_counters()` re-publishes `block` and this fails.
+#[test]
+fn filter_term_counters_publishes_only_counted_terms_16454() {
+    let state = crate::filter::parse_filter_state(
+        &[crate::FirewallFilterSnapshot {
+            name: "edge".into(),
+            family: "inet".into(),
+            terms: vec![
+                crate::FirewallTermSnapshot {
+                    name: "block".into(),
+                    action: "discard".into(),
+                    destination_ports: vec!["22".into()],
+                    ..Default::default()
+                },
+                crate::FirewallTermSnapshot {
+                    name: "counted-idle".into(),
+                    action: "accept".into(),
+                    count: "hits".into(),
+                    ..Default::default()
+                },
+                crate::FirewallTermSnapshot {
+                    name: "counted-hit".into(),
+                    action: "accept".into(),
+                    count: "hits2".into(),
+                    ..Default::default()
+                },
+            ],
+        }],
+        &[],
+        &[],
+        "",
+        "",
+    )
+    .expect("filter state compiles");
+    // Seed the counted-hit term's counter as recorded traffic would.
+    if let Some(filter) = state.filters.get("inet:edge") {
+        let hit = filter
+            .terms
+            .iter()
+            .find(|t| t.name == "counted-hit")
+            .expect("counted-hit term");
+        for _ in 0..3 {
+            crate::filter::record_filter_counter(&hit.counter, 100);
+        }
+        crate::filter::flush_recorded_filter_counters();
+    }
+    let mut coordinator = Coordinator::new();
+    coordinator.forwarding.filter_state = state;
+
+    let rows = coordinator.filter_term_counters();
+    let names: Vec<&str> = rows.iter().map(|r| r.term_name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["counted-idle", "counted-hit"],
+        "only `then count` terms may be published (#16454); got {rows:?}"
+    );
+    assert_eq!(
+        (rows[0].packets, rows[0].bytes),
+        (0, 0),
+        "counted-but-idle term must still publish a real 0 (#16454)"
+    );
+    assert_eq!(
+        (rows[1].packets, rows[1].bytes),
+        (3, 300),
+        "counted term must publish its recorded hits (#16454)"
+    );
+}

@@ -178,7 +178,10 @@ func (s *Server) showFirewall(cfg *config.Config, buf *strings.Builder) {
 					totalPkts += userspaceCounter.Packets
 					totalBytes += userspaceCounter.Bytes
 				}
-				if hasCounters || userspaceOk {
+				// #16454: a term without `then count` is not instrumented;
+				// never render a numeric Hit count for it. Counted terms
+				// keep rendering, including an idle 0.
+				if term.Count != "" && (hasCounters || userspaceOk) {
 					fmt.Fprintf(buf, "    Hit count: %d packets, %d bytes\n", totalPkts, totalBytes)
 				}
 				if term.Policer != "" {
@@ -627,7 +630,9 @@ func (s *Server) showFirewallFilter(req *pb.ShowTextRequest, cfg *config.Config,
 					totalPkts += userspaceCounter.Packets
 					totalBytes += userspaceCounter.Bytes
 				}
-				if hasCounters || userspaceOk {
+				// #16454: see showFirewall — uncounted terms render no
+				// numeric Hit count.
+				if term.Count != "" && (hasCounters || userspaceOk) {
 					fmt.Fprintf(buf, "    Hit count: %d packets, %d bytes\n", totalPkts, totalBytes)
 				}
 				if term.Policer != "" {
