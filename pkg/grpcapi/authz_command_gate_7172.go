@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/config"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
@@ -205,6 +206,15 @@ const (
 // anchored ancestor deny is re-checked via the typed-prefix walk below
 // for the deny side only. Fail closed: an unreadable request denies
 // for a restricted class.
+//
+// The judged forms are the canonical spelling (canonicalOperationalWords,
+// #16073): the raw typed line must not be judged, or a unique abbreviation
+// (`sh conf`, `sh sec pol`) steps around an anchored deny/allow written
+// against the canonical command — the same string the data-source twin
+// (operationalAllowed) already judges. Config-mode `set …`/`run …` lines
+// are not operational commands and keep their raw form: `set` is not in
+// the operational tree, and `run`'s embedded line is canonicalised after
+// the `run` word is stripped.
 func authorizeCompleteRPCCommand(class string, rules config.CompiledLoginRegexes, req any) error {
 	cr, isComplete := req.(*pb.CompleteRequest)
 	if !isComplete || cr == nil {
@@ -240,6 +250,16 @@ func authorizeCompleteRPCCommand(class string, rules config.CompiledLoginRegexes
 // `show configuration …`. Config-mode `run <line>` embeds a full
 // operational command, so the embedded line is the full form there.
 // Text after a `|` is pipe-filter text, not command text, and is dropped.
+//
+// For operational lines (everything except a config-mode non-`run`
+// line) the returned forms are canonicalised (canonicalCompleteWords,
+// #16073), so admission judges the same spelling as the data-source
+// gate. Ambiguous or unresolvable abbreviations are left raw by the
+// lenient expansion — that is fail-safe here, not fail-open: the raw
+// form cannot match an anchored canonical deny, but a restricted
+// class's allowlist also cannot be affirmatively matched by it, and
+// the handler's data-source gate applies the same canonicalisation
+// before any live value is read.
 func completeLineForms(req *pb.CompleteRequest) (full string, prefixes []string, isShowConfig bool) {
 	text := req.GetLine()
 	if req.GetPos() >= 0 && int(req.GetPos()) < len(text) {
@@ -249,18 +269,60 @@ func completeLineForms(req *pb.CompleteRequest) (full string, prefixes []string,
 		text = text[:idx]
 	}
 	words := strings.Fields(text)
-	if req.GetConfigMode() && len(words) >= 2 && words[0] == "run" {
-		words = words[1:]
+	configLine := false
+	if req.GetConfigMode() {
+		// Config-mode `run <line>` embeds a full operational command.
+		// The handler resolves the top word against ConfigTopLevel with
+		// ResolveUniquePrefix (completeConfigPairsAuth), so an
+		// abbreviated `ru`/`r` is dispatched as `run` there; admission
+		// must strip the same word or it judges the raw `ru …` line and
+		// anchored operational denies never fire (#16073 fold).
+		if resolved, ok := cmdtree.ResolveUniquePrefix(cmdtree.KeysFromTree(cmdtree.ConfigTopLevel), firstWord(words)); ok && resolved == "run" && len(words) >= 2 {
+			words = words[1:]
+		} else {
+			configLine = true
+		}
 	}
 	if len(words) == 0 {
 		return "", nil, false
+	}
+	_, isShowConfig = resolveShowConfigurationWords(words)
+	if !configLine {
+		words = canonicalCompleteWords(words)
+		if _, ok := resolveShowConfigurationWords(words); ok {
+			isShowConfig = true
+		}
 	}
 	full = strings.Join(words, " ")
 	for i := 1; i < len(words); i++ {
 		prefixes = append(prefixes, strings.Join(words[:i], " "))
 	}
-	_, isShowConfig = resolveShowConfigurationWords(words)
 	return full, prefixes, isShowConfig
+}
+
+func firstWord(words []string) string {
+	if len(words) == 0 {
+		return ""
+	}
+	return words[0]
+}
+
+// canonicalCompleteWords canonicalises a typed operational line for
+// admission judging (#16073). A successful strict Canonicalize is
+// authoritative and is never discarded: its result already expands
+// every keyword — including a trailing keyword that fills a value
+// slot opened by the head (`… family inet`, where the head alone
+// ends at the required `family` value and strict-canonicalising it
+// fails). Only when strict canonicalisation fails (the trailing
+// word is still being completed, is a free-form value, or is
+// ambiguous/unresolvable) does the lenient twin
+// canonicalOperationalWords expansion apply, exactly as the
+// data-source gate judges it.
+func canonicalCompleteWords(words []string) []string {
+	if canon, res := cmdtree.Canonicalize(cmdtree.OperationalTree, words); res == cmdtree.CanonicalOK {
+		return canon
+	}
+	return canonicalOperationalWords(words)
 }
 
 // isTierDeny reports whether a decision was denied by a deny regex

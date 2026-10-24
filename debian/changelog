@@ -23,6 +23,13 @@ xpf (0.0.0) unstable; urgency=medium
     cannot have its binding erased by a stale exit. The owner's own
     workflow and store-entered (CLI/gRPC/internal) sessions are
     unchanged.
+  * Login: gRPC Complete admission now canonicalises abbreviated
+    operational words before judging allow/deny-commands (#16073), so
+    `sh conf` / `sh sec pol` / `sh ver` are priced as `show
+    configuration` / `show security policies` / `show version` exactly
+    as the completion data-source gate already did; anchored denies
+    fire on abbreviations and allowlisted abbreviations stay admitted.
+    Config-mode `set …` lines keep their raw form.
   * Login: argument-scoped allow/deny-commands regexes now fire on the
     gRPC and REST surfaces (#16067). Both gates rebuild the full
     canonicalised command from the decoded request (ShowText topic
