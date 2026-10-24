@@ -28,7 +28,11 @@ FAIL=0
 ok() { echo "PASS: $1"; PASS=$((PASS + 1)); }
 bad() { echo "FAIL: $1"; FAIL=$((FAIL + 1)); }
 
-WORK=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-ignored-census.XXXXXX")
+# #16477: create the pinned parent on clean runners; fail loudly on mktemp failure.
+if [[ -z "${TMPDIR:-}" ]]; then mkdir -p /var/worktrees/.cache/tmpdir; fi
+WORK=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-ignored-census.XXXXXX") \
+	|| { echo "FATAL: cannot create work dir under ${TMPDIR:-/var/worktrees/.cache/tmpdir}" >&2; exit 2; }
+[[ -n "$WORK" && -d "$WORK" ]] || { echo "FATAL: work dir not created: '$WORK'" >&2; exit 2; }
 trap 'rm -rf "$WORK"' EXIT
 
 # fixture <name> <rust-source-body> — a tree with one crate dir and one .rs file

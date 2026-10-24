@@ -98,7 +98,11 @@ else
 	bad "DHCP selftest guard changed: guards=$dhcp_guard_count env_refs=$dhcp_selftest_refs probe='$dhcp_source_probe'"
 fi
 
-WORK=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-harness-result-selftest.XXXXXX")
+# #16477: create the pinned parent on clean runners; fail loudly on mktemp failure.
+if [[ -z "${TMPDIR:-}" ]]; then mkdir -p /var/worktrees/.cache/tmpdir; fi
+WORK=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-harness-result-selftest.XXXXXX") \
+	|| { echo "FATAL: cannot create work dir under ${TMPDIR:-/var/worktrees/.cache/tmpdir}" >&2; exit 2; }
+[[ -n "$WORK" && -d "$WORK" ]] || { echo "FATAL: work dir not created: '$WORK'" >&2; exit 2; }
 trap 'rm -rf "$WORK"' EXIT
 LOG="$WORK/gate.log"
 LEDGER="$WORK/ledger.d"

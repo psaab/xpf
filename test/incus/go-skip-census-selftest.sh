@@ -27,7 +27,12 @@ if ! command -v python3 >/dev/null 2>&1; then
 	echo "SKIP: python3 not installed — cannot run the census self-test"
 	exit 77
 fi
-WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
+# #16477: TMPDIR is the caller's (CI: $RUNNER_TEMP via Makefile ?= is
+# uncreatable there, so the workflow now exports a runner-local TMPDIR);
+# fail loudly instead of running fixtures at "/<name>".
+WORK=$(mktemp -d) || { echo "FATAL: mktemp -d failed (TMPDIR=${TMPDIR:-unset})" >&2; exit 2; }
+[ -n "$WORK" ] && [ -d "$WORK" ] || { echo "FATAL: work dir not created: '$WORK'" >&2; exit 2; }
+trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/pkg/alpha" "$WORK/pkg/beta"
 
 cat > "$WORK/pkg/alpha/a_test.go" <<'GO'

@@ -7,7 +7,7 @@
 set -u
 SCRATCH=${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-proto-regen-selftest.$$
 trap 'rm -rf "$SCRATCH"' EXIT INT TERM
-mkdir -p "$SCRATCH/fixture/scripts" "$SCRATCH/fixture/proto/xpf/v1" "$SCRATCH/fixture/pkg/grpcapi/xpfv1"
+mkdir -p "$SCRATCH/fixture/scripts" "$SCRATCH/fixture/proto/xpf/v1" "$SCRATCH/fixture/pkg/grpcapi/xpfv1" || { echo "FATAL: cannot create scratch dir $SCRATCH (TMPDIR=${TMPDIR:-/var/worktrees/.cache/tmpdir})" >&2; exit 2; }
 
 command -v protoc >/dev/null 2>&1 || { echo "SKIP: protoc not installed"; exit 77; }
 [ "$(protoc --version)" = "libprotoc 3.21.12" ] || { echo "SKIP: protoc is $(protoc --version), want libprotoc 3.21.12"; exit 77; }

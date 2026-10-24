@@ -46,7 +46,15 @@ bad() { echo "  FAIL — $*" >&2; FAIL=$((FAIL + 1)); }
 
 [[ -f "$CENSUS" ]] || { echo "FATAL: census not found at $CENSUS" >&2; exit 1; }
 
-WORK="$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/harness-census-selftest.XXXXXX")"
+# #16477: the pinned parent does not exist on a clean CI runner (TMPDIR
+# unset, no /var/worktrees) — create it, and fail loudly instead of
+# running every fixture at "/<name>" and reporting 24 bogus failures.
+# A caller-supplied TMPDIR stays the caller's responsibility.
+if [[ -z "${TMPDIR:-}" ]]; then mkdir -p /var/worktrees/.cache/tmpdir; fi
+WORK="$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/harness-census-selftest.XXXXXX")" \
+	|| { echo "FATAL: cannot create work dir under ${TMPDIR:-/var/worktrees/.cache/tmpdir}" >&2; exit 2; }
+[[ -n "$WORK" && -d "$WORK" ]] \
+	|| { echo "FATAL: work dir not created: '$WORK'" >&2; exit 2; }
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
 
@@ -528,6 +536,13 @@ EXPECTED_CENSUS_JOB="$(cat <<'EXPECTED_CENSUS_JOB_EOF'
     name: Harness census and self-test
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # #16477: the repo pins scratch to /var/worktrees/.cache/tmpdir
+    # (Makefile ?=, #14833), which does not exist on a clean runner and
+    # cannot be created there; the census self-test now creates its own
+    # parent, and a runner-local TMPDIR keeps every other temp consumer
+    # (python tempfile, bare mktemp) off the pinned root too.
+    env:
+      TMPDIR: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
       - name: Census runnable-harness reachability

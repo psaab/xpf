@@ -25,6 +25,13 @@ jobs:
     name: Harness census and self-test
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # #16477: the repo pins scratch to /var/worktrees/.cache/tmpdir
+    # (Makefile ?=, #14833), which does not exist on a clean runner and
+    # cannot be created there; the census self-test now creates its own
+    # parent, and a runner-local TMPDIR keeps every other temp consumer
+    # (python tempfile, bare mktemp) off the pinned root too.
+    env:
+      TMPDIR: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
       - name: Census runnable-harness reachability
@@ -55,6 +62,11 @@ jobs:
     name: Proto header and regen check
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # #16477: Makefile ?= would pin TMPDIR to the uncreatable
+    # /var/worktrees/.cache/tmpdir; proto_regen_check.sh's scratch and
+    # the Go toolchain need a runner-local temp root instead.
+    env:
+      TMPDIR: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -85,6 +97,11 @@ jobs:
     name: Advisory tooling (shellcheck + Python subset)
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # #16477: same pinned-TMPDIR trap as the census/proto jobs -- the
+    # Python subset's tempfile and the scripts it drives must not
+    # default to /var/worktrees/.cache/tmpdir on a clean runner.
+    env:
+      TMPDIR: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -97,6 +114,13 @@ jobs:
     name: Go build and affected tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # #16477: GOTMPDIR/GOCACHE stay on the Makefile pins only where a
+    # caller pre-creates them; on a clean runner the Go toolchain must
+    # use runner-local temp/cache roots, not /var/worktrees/.cache.
+    env:
+      TMPDIR: ${{ runner.temp }}
+      GOTMPDIR: ${{ runner.temp }}/go-tmp
+      GOCACHE: ${{ runner.temp }}/go-build
     steps:
       - uses: actions/checkout@v4
         with:
@@ -129,6 +153,11 @@ jobs:
     container:
       image: debian:forky
     timeout-minutes: 20
+    # #16477: cargo's target dir and temp root must be runner-local on a
+    # clean runner; the Makefile /var/worktrees pins cannot be created.
+    env:
+      TMPDIR: ${{ runner.temp }}
+      CARGO_TARGET_DIR: ${{ runner.temp }}/cargo
     steps:
       # Install first: the forky image ships no git, and checkout@v4 falls
       # back to a metadata-less archive when git is missing.

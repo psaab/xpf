@@ -36,7 +36,10 @@ SH_BIN=$(command -v sh)
 	exit 1
 }
 
-WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
+# #16477: fail loudly if mktemp cannot create the work dir.
+WORK=$(mktemp -d) || { echo "FATAL: mktemp -d failed (TMPDIR=${TMPDIR:-unset})" >&2; exit 2; }
+[ -n "$WORK" ] && [ -d "$WORK" ] || { echo "FATAL: work dir not created: '$WORK'" >&2; exit 2; }
+trap 'rm -rf "$WORK"' EXIT
 
 # ── stub go: emulates `go vet -tags <tag> ./<pkgdir>` ──
 # Exits 1 when any file under the package dir carries STUB_VET_FAIL, else 0,

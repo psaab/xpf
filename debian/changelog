@@ -23,6 +23,21 @@ xpf (0.0.0) unstable; urgency=medium
     cells now declare MEASUREMENT:. The CI census job also runs
     the go-skip and ignored-cell censuses and their self-tests, so
     a new undeclared skip or ignore reds a merge-visible job.
+  * Test/CI: stop the harness census self-test assuming the pinned
+    scratch parent exists (#16477). It ran
+    `mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/..."` with no
+    mkdir -p and no status check, so on a clean GitHub runner the
+    work dir stayed empty, every fixture landed at /<name>, and the
+    census job reported passed=6 failed=24 on every PR since #14837.
+    The self-test (and the sibling unchecked templated-mktemp
+    self-tests CI can reach) now creates the pinned parent when
+    TMPDIR is unset and exits 2 loudly if mktemp fails; every CI job
+    exports a runner-local TMPDIR (plus runner-local GOTMPDIR/GOCACHE
+    and CARGO_TARGET_DIR) so the Makefile /var/worktrees pins yield
+    on runners that cannot create them. The census job's byte-exact
+    allowlist in the self-test is updated to match the workflow
+    (including the previously drifted #16465 rust-census steps), and
+    scripts/scratch-pinning-selftest.sh now guards the pattern.
   * Authz: judge the base spelling of selector-bearing commands on the
     remote gates (#16472). The gRPC/REST ShowText regex gates matched
     only the registry's selector spelling (`show firewall filter`,
