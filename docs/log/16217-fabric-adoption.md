@@ -1148,3 +1148,85 @@ fabric-delivery leg.
 Cluster restored after each run: clean master `2c8575b70e`,
 helper `2f2f5cbf...b04` both nodes (hash-proved), RG0/1/2 node0
 primary, target OK, P4 verification 14.0 / 14.7 Gbit/s.
+
+## Stored-terminal target recovery (FZFixWire27, per FZDiag29)
+
+Condition found (FZDiag29, Wire26 head `b7c5e07e05` + FZ28 trace,
+helper `3172e2fc...`, aged P4 60 s FO at 30 s: 25 SUM zeros):
+128/146 adopted hits on fw1 read
+`stored=looked=enforced=ClusterTerminalHAInactive, looked_egress=0`
+(origin SyncImport) — the Wire25 ClusterTerminal arm WAS reached,
+but its FIB recompute answered the terminal again. Why: the target
+172.16.80.200 is on-link via the connected /24 on egress 12, but
+post-failover that prefix is HA-suppressed in `connected_v4` (it was
+peer-owned until the failover) and survives only in
+`connected_v4_by_ifindex`; LPM falls to the pref-200 cluster Null0
+default and the recompute returns `ClusterTerminalHAInactive`.
+Wire25's fixtures inserted the connected /24 directly into
+`connected_v4`, so the recompute always found
+ForwardCandidate/MissingNeighbor — test-only-green for the live
+shape. Wire26 (node-neighbor recompute + timer retry) was already
+correct for the neighbor leg (no MissingNeighbor FINALs in the
+FZDiag29 run) but cannot help a recompute that never names an
+egress.
+
+Fix: in the ClusterTerminal arm of `fabric_adopted_resolution`,
+when the recompute is itself a cluster terminal, recover from the
+RESOLUTION TARGET (`target` = dst from
+`resolution_target_for_session`), never `looked_up.egress_ifindex`
+(0): new `adopted_cluster_terminal_target_resolution` takes the
+egress from the terminal's `source_ifindex` stamp
+(`select_source_ifindex_*`, which consults `connected_*_by_ifindex`)
+or, failing that, the connected LPM over `connected_*_by_ifindex`
+for dst; owner RG > 0 required; a neighbor resolved for
+(egress, dst) in the static snapshot or node map restores a
+ForwardCandidate carrying the MAC, an unresolved one returns the
+retryable MissingNeighbor on that egress; otherwise the terminal
+stands. Non-adopted flows never reach the helper (bit-identical).
+
+Test: new `adopted_cluster_terminal_live_fib_shape_16217` — the
+exact live FIB (cluster-terminal pref-200 default, NO `connected_v4`
+cover, /24 only in `connected_v4_by_ifindex[12]`, neighbor only in
+the node map), SyncImport row with stored
+`ClusterTerminalHAInactive` exactly, through the production
+session-hit resolver with `fabric_adopted=true`: non-adopted control
+stays terminal, adopted+resolved restores ForwardCandidate egress
+12 + MAC, adopted+unresolved stays retryable MissingNeighbor.
+Premise asserted: the plain FIB recompute of dst IS the terminal in
+this shape. FAIL-ON-REVERT verified by mutation (disabling the
+recovery arm turns the adopted legs terminal again). `cargo test
+16217` 40/40 (incl. Wire26 cells); adopted_* session_glue cells green.
+
+Live aged table (all-node0, P4 60 s, RG1 fw0->fw1 at 30 s age +
+failback, deb `xpf_0.0.23428+gb7c5e07e056a.dirty` sha256
+`db5e8f1a...7735`, helper `672e3895...7163` hash-proved
+`/proc/<pid>/exe` BOTH nodes before traffic; evidence
+`/var/worktrees/cell60/`, `/var/worktrees/cell61/`):
+
+| Arm | Build | SUM zero intervals | Verdict |
+|---|---|---|---|
+| Clean master (FZDiag8) | 2c8575b70e | 130 | FAIL |
+| #16215 third shape | ca91c55e5a / 99.16215.1 | 25 (all from FO+1 s) | FAIL |
+| Wire25 run 1+2 | 99.16217.50.dirty | 29 / 29 (all from FO+1 s) | FAIL |
+| Wire26 (FZDiag29) | 99.16217.54.fz29 | 25 (all from FO+1 s) | FAIL |
+| **This fix run 1 (cell60)** | **0.0.23428+gb7c5e07e056a.dirty** | **0** | **PASS** |
+| **This fix run 2 (cell61)** | **0.0.23428+gb7c5e07e056a.dirty** | **28 (all from FO+1 s)** | **FAIL — acceptance (ZERO TWICE) NOT met** |
+
+Run 1 is the first zero-zero aged cell in this campaign: pre-FO
+~10 Gbps no zeros, post-FO dip to 1.7-3.1 Gbps at 30-32 s then
+steady ~2.8 Gbps to end (failback at FO+29 s included), zero SUM
+zero intervals and zero per-stream zero intervals. Run 2 on the
+identical deb/helper hashes failed with the classic signature
+(28 zeros from FO+1 s): the stored-terminal leg is therefore
+intermittent live — in run 2 fw1's Backup rows already carried the
+wire-keyed (`172.16.80.8:<sport>`) shapes and fw0 kept serving from
+cache — i.e. the remaining leg is the run-to-run race the earlier
+wires named (fw0-side cache supersession / fabric delivery vs the
+fw1 adoption instant), NOT the stored-terminal restore, which is
+unit-proven on the exact live FIB shape and passed a full aged cell
+once. **Do not merge as the aged-failover cure** until a second
+zero-zero cell lands; this closes the FZDiag29 stored-terminal leg.
+
+Cluster restored after each run: clean master `2c8575b70e`, helper
+`2f2f5cbf...b04` both nodes (hash-proved), RG0/1/2 node0 primary,
+target OK, P4 verification 14.0-18.6 Gbit/s.

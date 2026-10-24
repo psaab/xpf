@@ -963,6 +963,114 @@ ingress_zone: u16,) -> ForwardingResolution {
 /// the next retransmit re-enters this restore; any other
 /// recomputed disposition keeps the HA terminal fail-closed.
 ///
+/// #16217 (FZDiag28): recompute an adopted resolution against the
+/// NODE neighbor map -- the dynamic map the warm pass at RG
+/// activation (`Coordinator::queue_warm_pass` over the shared
+/// synced rows) and the kernel monitor populate for every worker,
+/// not the per-worker/per-binding pending_neigh representative frame
+/// `retry_pending_neigh` parks. The FIB recompute already consults
+/// this map via `lookup_forwarding_resolution_with_dynamic`; this
+/// helper names the adoption-side contract and unit-pins it: a hop
+/// present ONLY in the node map (never in any worker's
+/// `forwarding.neighbors` snapshot, never parked) still restores
+/// the adopted flow to the ForwardCandidate carrying that MAC.
+///
+/// #16217 (FZDiag29): live, `fabric_adopted_resolution` still did not
+/// restore SyncImport rows whose stored disposition is
+/// `ClusterTerminalHAInactive`. Trace (Wire26, FZ28 FILE sink):
+/// `stored=looked=enforced=ClusterTerminalHAInactive, looked_egress=0`
+/// for 128/146 adopted hits. That is EXPECTED to reach the
+/// ClusterTerminal arm below — so the arm's recompute itself must be
+/// answering a terminal. It does: the destination (172.16.80.200) is
+/// ON-LINK via the connected /24 on the WAN RETH, but post-failover
+/// that connected prefix is HA-suppressed on the previous BACKUP
+/// (its RG was peer-owned until the failover), so `connected_v4`
+/// holds no covering row; LPM falls to the pref-200 cluster Null0
+/// default and the recompute returns `ClusterTerminalHAInactive`
+/// again. Every unit fixture for this arm inserted the connected
+/// /24 directly into `connected_v4`, so the recompute always found
+/// ForwardCandidate/MissingNeighbor and the arm looked correct —
+/// the live FIB shape (cluster-terminal row present, connected row
+/// suppressed, egress RG recovered only from
+/// `connected_*_by_ifindex` / the terminal's `source_ifindex` stamp)
+/// was never exercised.
+///
+/// The fix uses the RESOLUTION TARGET (`dst`, the post-NAT
+/// destination named by `resolution_target_for_session`), never
+/// `looked_up.egress_ifindex` (0 on the terminal, so any egress-gated
+/// recovery reads 0 and dead-ends): when the plain FIB recompute of
+/// `dst` is itself a cluster terminal, recover the would-be egress
+/// from the terminal stamp (`source_ifindex`, the
+/// `select_source_ifindex_*` attribution the FIB stamped before
+/// zeroing the egress — which already consults
+/// `connected_*_by_ifindex`, so it works exactly when the transit
+/// connected row is suppressed) and, failing that, from the
+/// connected LPM over `connected_*_by_ifindex` for `dst`. If that
+/// egress is known (owner RG > 0) and a neighbor for `(egress, dst)`
+/// is resolved in the static snapshot or the node map, restore a
+/// ForwardCandidate on that egress carrying the MAC; if the egress
+/// is known but the neighbor is unresolved, return the retryable
+/// MissingNeighbor on that egress; otherwise keep the terminal.
+pub(in crate::afxdp) fn adopted_cluster_terminal_target_resolution(
+    forwarding: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    target: IpAddr,
+    terminal: ForwardingResolution,
+) -> Option<ForwardingResolution> {
+    // Egress recovery, in attribution order: the FIB's own stamp on
+    // the terminal, then the connected LPM for the target (which
+    // consults `connected_*_by_ifindex` — the suppressed-row ledger).
+    let mut egress_ifindex = terminal.source_ifindex;
+    if egress_ifindex <= 0 {
+        egress_ifindex =
+            super::connected_ifindex_for_target_in_table(forwarding, target, None);
+    }
+    if egress_ifindex <= 0 {
+        return None;
+    }
+    let probe = ForwardingResolution {
+        disposition: ForwardingDisposition::MissingNeighbor,
+        egress_ifindex,
+        tx_ifindex: egress_ifindex,
+        next_hop: Some(target),
+        neighbor_mac: None,
+        source_ifindex: 0,
+        ..terminal
+    };
+    if super::forwarding::owner_rg_for_resolution(forwarding, probe) <= 0 {
+        return None;
+    }
+    let neighbor = super::forwarding::lookup_neighbor_entry(
+        forwarding,
+        Some(dynamic_neighbors),
+        egress_ifindex,
+        target,
+    );
+    match neighbor {
+        Some(entry) => {
+            let mut restored = probe;
+            restored.disposition = ForwardingDisposition::ForwardCandidate;
+            restored.neighbor_mac = Some(entry.mac);
+            super::populate_egress_resolution(forwarding, egress_ifindex, &mut restored);
+            Some(restored)
+        }
+        None => Some(probe),
+    }
+}
+
+pub(in crate::afxdp) fn adopted_resolution_from_node_neighbor_map(
+    forwarding: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    target: IpAddr,
+) -> ForwardingResolution {
+    super::forwarding::lookup_forwarding_resolution_with_dynamic(
+        forwarding,
+        dynamic_neighbors,
+        target,
+    )
+    .resolution
+}
+
 pub(in crate::afxdp) fn fabric_adopted_resolution(
     forwarding: &ForwardingState,
     _ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -998,6 +1106,22 @@ pub(in crate::afxdp) fn fabric_adopted_resolution(
         if egress_rg <= 0 {
             return enforced;
         }
+        if looked_up.neighbor_mac.is_some() {
+            return looked_up;
+        }
+        // #16217 (FZDiag28, part a): the looked-up candidate lost its
+        // neighbor MAC (the parked representative resolved first on
+        // another worker/binding). Consult the node neighbor map
+        // before trusting the neighbor-less shape: a hop the warm
+        // pass landed there restores the candidate with that MAC.
+        let recomputed =
+            adopted_resolution_from_node_neighbor_map(forwarding, dynamic_neighbors, target);
+        if recomputed.disposition == ForwardingDisposition::ForwardCandidate
+            && recomputed.neighbor_mac.is_some()
+            && super::forwarding::owner_rg_for_resolution(forwarding, recomputed) > 0
+        {
+            return recomputed;
+        }
         return looked_up;
     }
     if looked_up.disposition == ForwardingDisposition::MissingNeighbor {
@@ -1018,12 +1142,8 @@ pub(in crate::afxdp) fn fabric_adopted_resolution(
         if egress_rg <= 0 {
             return enforced;
         }
-        let recomputed = super::forwarding::lookup_forwarding_resolution_with_dynamic(
-            forwarding,
-            dynamic_neighbors,
-            target,
-        )
-        .resolution;
+        let recomputed =
+            adopted_resolution_from_node_neighbor_map(forwarding, dynamic_neighbors, target);
         if recomputed.disposition == ForwardingDisposition::ForwardCandidate
             && recomputed.neighbor_mac.is_some()
             && super::forwarding::owner_rg_for_resolution(forwarding, recomputed) > 0
@@ -1051,12 +1171,8 @@ pub(in crate::afxdp) fn fabric_adopted_resolution(
         // packet without terminalizing the flow and the next
         // retransmit re-enters here once the neighbor lands);
         // anything else keeps the terminal fail-closed.
-        let recomputed = super::forwarding::lookup_forwarding_resolution_with_dynamic(
-            forwarding,
-            dynamic_neighbors,
-            target,
-        )
-        .resolution;
+        let recomputed =
+            adopted_resolution_from_node_neighbor_map(forwarding, dynamic_neighbors, target);
         if recomputed.disposition == ForwardingDisposition::ForwardCandidate
             && recomputed.neighbor_mac.is_some()
             && super::forwarding::owner_rg_for_resolution(forwarding, recomputed) > 0
@@ -1067,6 +1183,32 @@ pub(in crate::afxdp) fn fabric_adopted_resolution(
             && super::forwarding::owner_rg_for_resolution(forwarding, recomputed) > 0
         {
             return recomputed;
+        }
+        // #16217 (FZDiag29): the recompute itself answered the
+        // cluster terminal (the connected prefix covering the target
+        // is HA-suppressed in `connected_v4` post-failover, so LPM
+        // falls to the pref-200 cluster Null0). Recover the would-be
+        // egress from the RESOLUTION TARGET (`target` = dst), not
+        // from `looked_up` (egress 0): the terminal's `source_ifindex`
+        // stamp / the connected LPM over `connected_*_by_ifindex`
+        // name it, a resolved neighbor for (egress, dst) restores
+        // the ForwardCandidate, an unresolved one stays retryable.
+        if recomputed.disposition == ForwardingDisposition::ClusterTerminalHAInactive {
+            // Prefer the fresh recompute's stamp; fall back to the
+            // looked-up terminal's (identical FIB, either names it).
+            let stamped = if recomputed.source_ifindex > 0 {
+                recomputed
+            } else {
+                looked_up
+            };
+            if let Some(recovered) = adopted_cluster_terminal_target_resolution(
+                forwarding,
+                dynamic_neighbors,
+                target,
+                stamped,
+            ) {
+                return recovered;
+            }
         }
         return enforced;
     }

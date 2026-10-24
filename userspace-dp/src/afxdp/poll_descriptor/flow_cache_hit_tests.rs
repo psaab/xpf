@@ -5245,6 +5245,97 @@ fn discard_route_cache_hit_falls_through_when_live_session_backs_flow_13635() {
     assert!(run.scratch.scratch_recycle.is_empty());
 }
 
+/// #16217 (FZDiag28, part a): next-hop version of the #13635 guard. A
+/// cached deny seeded while the FIB answered MissingNeighbor for
+/// `(egress, next_hop)` must fall through once the NODE neighbor map
+/// holds that hop (warm-pass shape: present only in the shared
+/// dynamic map, absent from the static snapshot), so the session-hit
+/// path can recompute the adopted ForwardCandidate.
+///
+/// FAIL-ON-REVERT: drop the neighbor-landed guard in the deny arm
+/// and the deny is served (Consumed); a contradicting MAC or an
+/// absent hop must keep the deny (fail-closed controls below).
+#[test]
+fn cached_deny_superseded_when_node_neighbor_lands_16217() {
+    let hop = IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1));
+    let mac = [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01];
+    let frame = tcp_v4_ack_frame();
+    // Deny entry carrying the unresolved hop (next_hop set, no MAC).
+    let mut entry = cached_deny_entry(
+        ForwardingDisposition::PolicyDenied,
+        Some(CachedPolicyDeny {
+            action: crate::policy::PolicyAction::Deny,
+            policy_id: 16217,
+            application_id: 0,
+            reply_allowed: false,
+        }),
+    );
+    entry.decision.resolution.next_hop = Some(hop);
+    entry.decision.resolution.neighbor_mac = None;
+    entry.decision.resolution.egress_ifindex = EGRESS_IFINDEX;
+
+    // Hop landed ONLY in the node map.
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
+    fixture
+        .dynamic_neighbors
+        .insert((EGRESS_IFINDEX, hop), NeighborEntry { mac });
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        accounted_meta(&frame),
+        entry.clone(),
+        0,
+        StageSeed { session: None, ..StageSeed::default() },
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "#16217: cached deny must fall through once the node neighbor lands"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm
+            [crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitDenySuperseded as usize],
+        1,
+        "the supersession must be attributed to PostHitDenySuperseded"
+    );
+    assert!(run.cached_observed_bytes.is_none(), "deny slot must be evicted");
+
+    // Control: hop absent — deny stays served (fail-closed).
+    let fixture_absent = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
+    let run = run_stage_seeded(
+        &fixture_absent,
+        &frame,
+        accounted_meta(&frame),
+        entry.clone(),
+        0,
+        StageSeed { session: None, ..StageSeed::default() },
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "#16217: cached deny must stay served while the hop is unresolved"
+    );
+
+    // Control: contradicting MAC — deny stays served (fail-closed).
+    let mut fixture_bad = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
+    fixture_bad.dynamic_neighbors.insert(
+        (EGRESS_IFINDEX, hop),
+        NeighborEntry { mac: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55] },
+    );
+    let mut entry_mac = entry.clone();
+    entry_mac.decision.resolution.neighbor_mac = Some(mac);
+    let run = run_stage_seeded(
+        &fixture_bad,
+        &frame,
+        accounted_meta(&frame),
+        entry_mac,
+        0,
+        StageSeed { session: None, ..StageSeed::default() },
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "#16217: contradicting node MAC must keep the deny (fail-closed)"
+    );
+}
+
 /// #13635: reverse-NAT cached denies use the translated wire tuple, while
 /// the worker's backing reverse session remains stored under its canonical
 /// key. The liveness guard must resolve that alias before replaying Reject.

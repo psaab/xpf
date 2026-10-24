@@ -14,6 +14,122 @@
 
 use super::*;
 
+/// #16217 (FZDiag28, part b): packet-independent pending-neighbor retry.
+///
+/// `retry_pending_neigh` is otherwise reachable only from `poll_binding`:
+/// a binding with a parked representative but no RX waits for the next
+/// packet (up to the client's retransmit backoff) before the sweep can
+/// notice the neighbor landing in the node map. This timer arm runs
+/// the SAME sweep from the worker loop on the ct-slice cadence
+/// (CT_SLICE_INTERVAL_NS, 100 ms), so a hop the warm pass or the kernel
+/// monitor lands in `dynamic_neighbors` dispatches the parked frame
+/// within one cadence even with zero RX on every binding.
+///
+/// Borrow shape: `retry_pending_neigh` takes one binding mutably plus
+/// its siblings as `left`/`right`, so the bindings vec is split per
+/// index exactly as `poll_binding` splits it. A binding with an empty
+/// pending map costs one `is_empty` check (the sweep's own early-out
+/// does the same); the timer gate below keeps that at 10 Hz per
+/// binding, never per-packet.
+pub(super) struct PendingNeighTimer {
+    last_retry_ns: Option<u64>,
+    counters: BatchCounters,
+    dbg: DebugPollCounters,
+    shared_recycles: Vec<(u32, u64)>,
+}
+
+impl PendingNeighTimer {
+    pub(super) fn new() -> Self {
+        Self {
+            last_retry_ns: None,
+            counters: BatchCounters::default(),
+            dbg: DebugPollCounters::default(),
+            shared_recycles: Vec::new(),
+        }
+    }
+
+    /// True when the 100 ms cadence has elapsed since the last retry
+    /// pass. Split out as a pure predicate so the cadence itself is
+    /// unit-pinned without bindings: a pass at +99 ms must not fire,
+    /// a pass at +100 ms must. `None` (never fired) is due only when
+    /// a caller explicitly primes it — the test fixtures prime via
+    /// `prime_for_test`; production primes on the first pass below.
+    pub(super) fn due(&self, now_ns: u64) -> bool {
+        match self.last_retry_ns {
+            Some(last) => now_ns.saturating_sub(last) >= CT_SLICE_INTERVAL_NS,
+            None => false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn prime_for_test(&mut self, now_ns: u64) {
+        self.last_retry_ns = Some(now_ns);
+    }
+}
+
+const CT_SLICE_INTERVAL_NS: u64 = 100_000_000;
+
+/// Drive one timer pending-neighbor retry pass over every binding.
+/// Returns true when the cadence fired (the caller may count it as
+/// work for idle regulation); false when gated off.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_pending_neigh_timer(
+    timer: &mut PendingNeighTimer,
+    bindings: &mut [BindingWorker],
+    binding_lookup: &WorkerBindingLookup,
+    mirror_targets: &MirrorTargetMap,
+    forwarding: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    neighbor_resolver: Option<&Arc<NeighborResolver>>,
+    now_ns: u64,
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
+    recent_exceptions: &Arc<Mutex<ExceptionEventRing>>,
+) -> bool {
+    if timer.last_retry_ns.is_none() {
+        timer.last_retry_ns = Some(now_ns);
+        return false;
+    }
+    if !timer.due(now_ns) {
+        return false;
+    }
+    timer.last_retry_ns = Some(now_ns);
+    if bindings.iter().all(|b| b.pending_neigh.is_empty()) {
+        return true;
+    }
+    for idx in 0..bindings.len() {
+        if bindings[idx].pending_neigh.is_empty() {
+            continue;
+        }
+        // Mint the UMEM handle before the mutable split, exactly as
+        // `poll_binding` does: the handle keeps the area alive while
+        // `binding` is handed out mutably.
+        let area = UmemAreaHandle::from_umem(&bindings[idx].umem);
+        let (left, rest) = bindings.split_at_mut(idx);
+        let Some((binding, right)) = rest.split_first_mut() else {
+            continue;
+        };
+        retry_pending_neigh(
+            binding,
+            left,
+            idx,
+            right,
+            binding_lookup,
+            mirror_targets,
+            forwarding,
+            dynamic_neighbors,
+            neighbor_resolver,
+            now_ns,
+            area.area(),
+            &mut timer.shared_recycles,
+            event_stream,
+            &mut timer.counters,
+            recent_exceptions,
+            &mut timer.dbg,
+        );
+        timer.counters.flush(&binding.live);
+    }
+    true
+}
 #[allow(clippy::too_many_arguments)]
 #[inline(never)]
 pub(super) fn run_ct_slice(
@@ -42,7 +158,6 @@ pub(super) fn run_ct_slice(
     established_cursor: &mut usize,
 ) {
     const CT_REFRESH_WINDOW_NS: u64 = 10_000_000_000;
-    const CT_SLICE_INTERVAL_NS: u64 = 100_000_000;
     const CT_REFRESH_SLICE_BUDGET: usize = 2048;
     // Incrementally refresh last_seen in BPF conntrack entries so Go-side
     // callers of IterateSessions (CLI, gRPC, Prometheus) see accurate
