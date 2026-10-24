@@ -672,8 +672,13 @@ func (mon *Monitor) ipCycleTimeout(numTargets int) time.Duration {
 // target should use on THIS node (#15038):
 //
 //   - No interface configured: ("", "") — the legacy unbound probe.
-//   - This node is primary for the RG: the unit's VIP (the RETH address
-//     the daemon installs only on the primary) on the resolved device.
+//   - This node is primary for the RG: the first unit address (VIP
+//     first, then the configured unit addresses) of the TARGET's address
+//     family (#16425) on the resolved device. Without one, ("", device)
+//     so the probe is device-bound but source-free; strict commit
+//     rejects that shape for a bound target, and a leniently-loaded one
+//     probes source-free (the kernel picks a same-family source) rather
+//     than binding the wrong family's address and never completing.
 //   - Otherwise: secondary-ip-address (an address the secondary actually
 //     holds) on the resolved device; without one, ("", device) so the
 //     probe is device-bound but source-free.
@@ -689,12 +694,12 @@ func (mon *Monitor) probeSourceFor(rg *config.RedundancyGroup, target *config.IP
 	device, unitAddrs := resolveProbeInterface(cfg, target.Interface)
 	if mon.mgr != nil && mon.mgr.IsLocalPrimary(rg.ID) {
 		if cfg != nil {
-			if vips := cfg.RethVIPsForRG(rg.ID)[device]; len(vips) > 0 {
-				return stripCIDR(vips[0]), device
+			if addr := firstAddrOfFamily(cfg.RethVIPsForRG(rg.ID)[device], target.Address); addr != "" {
+				return addr, device
 			}
 		}
-		if len(unitAddrs) > 0 {
-			return stripCIDR(unitAddrs[0]), device
+		if addr := firstAddrOfFamily(unitAddrs, target.Address); addr != "" {
+			return addr, device
 		}
 		return "", device
 	}
@@ -702,6 +707,29 @@ func (mon *Monitor) probeSourceFor(rg *config.RedundancyGroup, target *config.IP
 		return target.SecondaryIPAddress, device
 	}
 	return "", device
+}
+
+// firstAddrOfFamily returns the address part of the first entry of addrs
+// (bare or CIDR spellings) whose address family matches target's, or ""
+// when none does (#16425). A dual-stack unit lists its families in
+// authoring order, so the first entry overall is the probe's family only
+// by accident; binding a udp4 socket to an IPv6 source (or the reverse)
+// fails the dial and the probe never completes. The family rule is the
+// one probeICMP classifies sockets by — net.IP.To4() != nil — so a
+// 4-in-6 literal counts as IPv4 on both sides.
+func firstAddrOfFamily(addrs []string, target string) string {
+	tip := net.ParseIP(target)
+	if tip == nil {
+		return ""
+	}
+	wantV4 := tip.To4() != nil
+	for _, a := range addrs {
+		ip := net.ParseIP(stripCIDR(a))
+		if ip != nil && (ip.To4() != nil) == wantV4 {
+			return stripCIDR(a)
+		}
+	}
+	return ""
 }
 
 func stripCIDR(s string) string {
