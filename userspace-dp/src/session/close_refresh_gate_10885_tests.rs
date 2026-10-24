@@ -695,3 +695,112 @@ fn closing_counters_retention_keeps_active_pair_14937() {
     assert_eq!(expired.len(), 2, "quiet CLOSING pair reaps together");
     let _ = reverse;
 }
+
+/// #16489 mode 0 (control): a CLOSING pair with NO accounted packets
+/// at all reaps at FIN+window+GC. This shape was already correct
+/// pre-fix (total==0 short-circuits the retention) and must stay so.
+#[test]
+fn closing_idle_no_counters_reaps_at_window_16489() {
+    let forward = key_v4();
+    let mut table = SessionTable::new();
+    table.set_timeouts(configured());
+    let t0 = 50_000_000_000u64;
+    let _reverse = install_forward_reverse_pair(&mut table, &forward, t0, TCP_ACK);
+    let fin_ns = t0 + 1_000_000_000;
+    assert!(table.lookup(&forward, fin_ns, TCP_FIN).is_some());
+    let reap_ns = fin_ns + CLOSING_SECS * 1_000_000_000 + SESSION_GC_INTERVAL_NS_FOR_TEST + 1;
+    table.last_gc_ns = reap_ns - SESSION_GC_INTERVAL_NS;
+    let expired = table.expire_stale_entries(reap_ns);
+    assert_eq!(expired.len(), 2, "mode0: silent pair with no counters reaps at FIN+window");
+}
+
+/// #16489 mode 1: pre-FIN data only, then silence. The historic
+/// volume (and the FIN packet itself, accounted after its lookup as
+/// in production) must NOT manufacture freshness: the pair reaps at
+/// FIN+window+GC, not one window later.
+///
+/// RED pre-fix: `closing_counters_seen` starts at 0, so the first
+/// crossed expiry check sees total>baseline and retains once.
+#[test]
+fn closing_idle_pre_fin_data_reaps_at_window_16489() {
+    let forward = key_v4();
+    let mut table = SessionTable::new();
+    table.set_timeouts(configured());
+    let t0 = 60_000_000_000u64;
+    let _reverse = install_forward_reverse_pair(&mut table, &forward, t0, TCP_ACK);
+    // Pre-FIN traffic in both directions.
+    table.account_packet(&forward, 1500, TCP_ACK, 0);
+    table.account_packet(&_reverse, 1500, TCP_ACK, 0);
+    let fin_ns = t0 + 1_000_000_000;
+    assert!(table.lookup(&forward, fin_ns, TCP_FIN).is_some());
+    // The FIN packet itself is accounted after its forwarding pass.
+    table.account_packet(&forward, 60, TCP_FIN, 0);
+    let reap_ns = fin_ns + CLOSING_SECS * 1_000_000_000 + SESSION_GC_INTERVAL_NS_FOR_TEST + 1;
+    table.last_gc_ns = reap_ns - SESSION_GC_INTERVAL_NS;
+    let expired = table.expire_stale_entries(reap_ns);
+    assert_eq!(expired.len(), 2, "mode1: pre-FIN volume must not retain a silent CLOSING pair past one window");
+}
+
+/// #16489 mode 2: only the FIN packet accounted, then silence.
+/// Same expectation as mode 1.
+///
+/// RED pre-fix for the same zero-baseline reason.
+#[test]
+fn closing_idle_fin_only_reaps_at_window_16489() {
+    let forward = key_v4();
+    let mut table = SessionTable::new();
+    table.set_timeouts(configured());
+    let t0 = 70_000_000_000u64;
+    let _reverse = install_forward_reverse_pair(&mut table, &forward, t0, TCP_ACK);
+    let fin_ns = t0 + 1_000_000_000;
+    assert!(table.lookup(&forward, fin_ns, TCP_FIN).is_some());
+    table.account_packet(&forward, 60, TCP_FIN, 0);
+    let reap_ns = fin_ns + CLOSING_SECS * 1_000_000_000 + SESSION_GC_INTERVAL_NS_FOR_TEST + 1;
+    table.last_gc_ns = reap_ns - SESSION_GC_INTERVAL_NS;
+    let expired = table.expire_stale_entries(reap_ns);
+    assert_eq!(expired.len(), 2, "mode2: FIN-only accounting must not retain a silent CLOSING pair past one window");
+}
+
+/// #16489: a synced import that arrives CLOSING with carried counters
+/// baselines at that total, so the peer's pre-close volume does not
+/// grant an extra window after failover; genuine post-import packets
+/// still retain via the #14937 check.
+#[test]
+fn closing_synced_import_baselines_at_carried_total_16489() {
+    use super::ctx::SessionInstall;
+    use super::tests::{decision, metadata};
+    let forward = key_v4();
+    let reverse = reverse_session_key(&forward, NatDecision::default());
+    let mut table = SessionTable::new();
+    table.set_timeouts(configured());
+    let t0 = 80_000_000_000u64;
+    let mk = |key: SessionKey, is_reverse: bool| SessionInstall {
+        key,
+        decision: decision(),
+        metadata: {
+            let mut m = metadata();
+            m.is_reverse = is_reverse;
+            m
+        },
+        source_nat_static: None,
+        origin: SessionOrigin::SyncImport,
+        now_ns: t0,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_ACK,
+        session_id: 0,
+        tcp_close_class: TcpCloseClass::Closing.to_wire(),
+        tcp_handshake_state: 0,
+        fwd_packets: 5,
+        rev_packets: 3,
+    };
+    assert!(table.upsert_synced_with_origin(mk(forward.clone(), false), false));
+    assert!(table.upsert_synced_with_origin(mk(reverse.clone(), true), false));
+    let fwd = table.entry_by_key(&forward).expect("imported forward");
+    assert!(fwd.closing && !fwd.reset, "fixture: imported pair is CLOSING");
+    assert_eq!(fwd.closing_counters_seen, 8, "baseline seeds at the carried total");
+    // Silent: reaps one close window after import.
+    let reap_ns = t0 + CLOSING_SECS * 1_000_000_000 + SESSION_GC_INTERVAL_NS_FOR_TEST + 1;
+    table.last_gc_ns = reap_ns - SESSION_GC_INTERVAL_NS;
+    let expired = table.expire_stale_entries(reap_ns);
+    assert_eq!(expired.len(), 2, "silent imported CLOSING pair reaps at one window");
+}

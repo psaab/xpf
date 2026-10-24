@@ -709,6 +709,13 @@ impl SessionTable {
                 first_held_ns: 0,
                 // #2501: a fresh entry has forwarded no packets yet.
                 counters: SessionCounters::default(),
+                // #16489: an entry installed BY a closing packet is
+                // already CLOSING with zero local counters, so the zero
+                // baseline equals the current total — the FIN packet
+                // itself (accounted, if at all, only after install)
+                // must not read as post-close activity on the first
+                // expiry check. Pairs that become CLOSING later are
+                // seeded at that transition instead.
                 closing_counters_seen: 0,
                 // #2749: seed the cumulative TCP control bits with the trigger
                 // packet's flags (typically the SYN) so even a flow that closes
@@ -1150,7 +1157,18 @@ impl SessionTable {
                     rev_packets: wire_rev_packets,
                     ..SessionCounters::default()
                 },
-                closing_counters_seen: 0,
+                // #16489: a synced import that arrives CLOSING (wire
+                // close class present) baselines at the carried packet
+                // total, exactly as a local closing transition does —
+                // the peer's pre-close volume must not read as local
+                // post-close activity and grant an extra close window.
+                // A non-closing import keeps 0; its later local closing
+                // transition seeds the baseline then.
+                closing_counters_seen: if wire_close.is_some() {
+                    wire_fwd_packets.saturating_add(wire_rev_packets)
+                } else {
+                    0
+                },
                 // #2749: a re-imported synced entry observes its own ToS / TCP
                 // flags once local traffic forwards through it (the peer's
                 // observed values are not carried on the HA session-sync delta).
