@@ -89,6 +89,21 @@ grep -q 'TMPDIR=/var/worktrees/.cache/go-tmp' "$root/Makefile" || { echo "FAIL: 
 grep -q 'TMPDIR:-/var/worktrees/.cache/tmpdir' "$root/scripts/run-selftests.sh" || { echo "FAIL: run-selftests TMPDIR default missing"; fail=1; }
 grep -q 'mkdir -p "$WORK"' "$root/scripts/mutate.sh" || { echo "FAIL: mutate.sh lost mkdir -p \$WORK"; fail=1; }
 grep -q 'MUTATE_WORKDIR:-/var/worktrees/.cache/tmpdir' "$root/scripts/mutate.sh" || { echo "FAIL: mutate WORK not pinned"; fail=1; }
+# #16477: a templated mktemp whose parent may not exist (clean CI runner:
+# no /var/worktrees, TMPDIR unset) must create the pinned parent first or
+# check mktemp's status — an unchecked one leaves WORK empty and every
+# fixture lands at "/<name>", turning the run into bogus failures.
+for f in test/incus/harness-census-selftest.sh \
+  test/incus/harness-ledger-mutation-selftest.sh \
+  test/incus/harness-result-selftest.sh \
+  test/incus/ignored-cell-census-selftest.sh \
+  test/incus/selftest-census-selftest.sh \
+  test/incus/miri-census-selftest.sh \
+  test/incus/private-rg-selftest.sh \
+  test/incus/private-rg-fullcycle-selftest.sh; do
+  grep -q 'mkdir -p /var/worktrees/.cache/tmpdir' "$root/$f" || { echo "FAIL: $f does not create the pinned tmpdir parent (#16477)"; fail=1; }
+  grep -q 'FATAL: cannot create work dir\|FATAL: work dir not created\|cannot create sandbox dir\|cannot create leg cell dir' "$root/$f" || { echo "FAIL: $f does not fail loudly on mktemp failure (#16477)"; fail=1; }
+done
 
 # AF_UNIX sun_path budget: worst memlock guard socket is
 # <GOTMPDIR>/Test<Name><random>/<sock>. Allow root(28)+testdir(60)+sock(20).

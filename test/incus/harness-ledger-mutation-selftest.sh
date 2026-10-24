@@ -55,7 +55,11 @@ if ! command -v python3 >/dev/null 2>&1; then
 	exit 77
 fi
 
-WORK=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-harness-mutation.XXXXXX")
+# #16477: create the pinned parent on clean runners; fail loudly on mktemp failure.
+if [[ -z "${TMPDIR:-}" ]]; then mkdir -p /var/worktrees/.cache/tmpdir; fi
+WORK=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-harness-mutation.XXXXXX") \
+	|| { echo "FATAL: cannot create work dir under ${TMPDIR:-/var/worktrees/.cache/tmpdir}" >&2; exit 2; }
+[[ -n "$WORK" && -d "$WORK" ]] || { echo "FATAL: work dir not created: '$WORK'" >&2; exit 2; }
 trap 'rm -rf "$WORK"' EXIT
 
 # deploy-lib.sh and cluster-env.sh are staged alongside because

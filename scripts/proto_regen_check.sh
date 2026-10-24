@@ -23,6 +23,8 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 
 PROTOC_VERSION=3.21.12
+# #16477: the pinned parent does not exist on a clean CI runner; the
+# mkdir -p below only creates it when the parent chain is creatable.
 SCRATCH=${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-proto-regen.$$
 mkdir -p "$SCRATCH/bin" "$SCRATCH/out"
 trap 'rm -rf "$SCRATCH"' EXIT INT TERM

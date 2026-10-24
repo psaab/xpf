@@ -54,7 +54,9 @@ bad()  { FAILN=$((FAILN + 1)); printf '  FAIL %s\n' "$*" >&2; }
 # other.
 mk_sandbox() {
 	local d
-	d=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/miri-census-cell.XXXXXXXX")
+	# #16477: create the pinned parent on clean runners.
+	if [ -z "${TMPDIR:-}" ]; then mkdir -p /var/worktrees/.cache/tmpdir; fi
+	d=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/miri-census-cell.XXXXXXXX") || { bad "cannot create sandbox dir under ${TMPDIR:-/var/worktrees/.cache/tmpdir}"; exit 1; }
 	mkdir -p "$d/scripts" "$d/userspace-dp/src/afxdp/types" "$d/userspace-dp/src/afxdp/frame"
 	cp "$CENSUS" "$d/scripts/miri-census.sh"
 
@@ -186,7 +188,9 @@ echo "miri leg scoring cells -- the real scripts/miri-leg.sh over a stub cargo:"
 # interesting cases.
 leg_cell() {
 	local name="$1" want_rc="$2" want_msg="$3" log="$4"
-	local d; d=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/miri-leg-cell.XXXXXXXX")
+	# #16477: create the pinned parent on clean runners.
+	if [ -z "${TMPDIR:-}" ]; then mkdir -p /var/worktrees/.cache/tmpdir; fi
+	local d; d=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/miri-leg-cell.XXXXXXXX") || { bad "cannot create leg cell dir under ${TMPDIR:-/var/worktrees/.cache/tmpdir}"; return 1; }
 	mkdir -p "$d/scripts" "$d/userspace-dp" "$d/bin"
 	cp "$LEG" "$d/scripts/miri-leg.sh"
 	printf '%s\n' '# r' 'afxdp::types::cos::  12  reason.' >"$d/userspace-dp/MIRI.registry"
