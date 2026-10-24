@@ -236,16 +236,10 @@ type dnatOffAddressSet struct {
 func dnatOffRuleAddressSet(cfg *Config, rule *NATRule, source bool) dnatOffAddressSet {
 	var values, names []string
 	if source {
-		values = append(values, rule.Match.SourceAddresses...)
-		if len(values) == 0 && rule.Match.SourceAddress != "" {
-			values = append(values, rule.Match.SourceAddress)
-		}
+		values = append(values, rule.Match.SourceAddressList()...)
 		names = rule.Match.SourceAddressNameList()
 	} else {
-		values = append(values, rule.Match.DestinationAddresses...)
-		if len(values) == 0 && rule.Match.DestinationAddress != "" {
-			values = append(values, rule.Match.DestinationAddress)
-		}
+		values = append(values, rule.Match.DestinationAddressList()...)
 		names = rule.Match.DestinationAddressNameList()
 	}
 	set := dnatOffAddressSet{constrained: len(values)+len(names) > 0}
@@ -463,10 +457,7 @@ func dnatOffShadowShape(rule *NATRule) (dnatOffShape, bool) {
 		return s, false
 	}
 	s.ports = ports
-	dests := append([]string(nil), rule.Match.DestinationAddresses...)
-	if len(dests) == 0 && rule.Match.DestinationAddress != "" {
-		dests = append(dests, rule.Match.DestinationAddress)
-	}
+	dests := append([]string(nil), rule.Match.DestinationAddressList()...)
 	if len(dests) == 0 {
 		return s, false
 	}
@@ -477,10 +468,7 @@ func dnatOffShadowShape(rule *NATRule) (dnatOffShape, bool) {
 		}
 		s.dests = append(s.dests, n)
 	}
-	srcs := append([]string(nil), rule.Match.SourceAddresses...)
-	if len(srcs) == 0 && rule.Match.SourceAddress != "" {
-		srcs = append(srcs, rule.Match.SourceAddress)
-	}
+	srcs := append([]string(nil), rule.Match.SourceAddressList()...)
 	for _, src := range srcs {
 		n, ok := dnatOffParseNet(src)
 		if !ok {
@@ -536,10 +524,7 @@ func dnatOffParseNet(raw string) (dnatOffNet, bool) {
 // snapshot for the term — the rule installs nothing).
 func dnatOffCoalescePorts(m NATMatch) (dnatOffPorts, bool) {
 	var p dnatOffPorts
-	ports := append([]int(nil), m.DestinationPorts...)
-	if len(ports) == 0 && m.DestinationPort != 0 {
-		ports = append(ports, m.DestinationPort)
-	}
+	ports := append([]int(nil), m.DestinationPortList()...)
 	if len(ports) == 0 {
 		p.wild = true
 		return p, true

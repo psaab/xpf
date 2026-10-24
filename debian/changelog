@@ -1,5 +1,18 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * NAT: NATMatch consumers now read match criteria through the
+    `*List()` accessors (`SourceAddressList`, `DestinationAddressList`,
+    `DestinationPortList` added beside the existing name/application/
+    protocol lists) instead of the scalar back-compat fields or
+    open-coded plural-with-scalar-fallback copies (#16143). The
+    destination-NAT compile diagnostics in particular previously saw
+    only the first value of a bracket-list rule — a second invalid
+    destination, unknown address-book name, or unknown application
+    warned nowhere — and now validate and log every value. No scalar
+    field or compiler back-fill write is removed: scalar-only matches
+    (e.g. from an older peer) still resolve through the same accessors,
+    and the marshalled config is unchanged.
+
   * Config: `services security-intelligence`, `services
     advanced-anti-malware`, `services ssl initiation`/`termination`
     profiles, and `services application-identification` children now

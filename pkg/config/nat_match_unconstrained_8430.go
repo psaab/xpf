@@ -50,19 +50,19 @@ import "fmt"
 // unconstrained and reject a valid rule.
 func natMatchIsConstrained(m NATMatch) bool {
 	switch {
-	case len(m.SourceAddresses) > 0 || m.SourceAddress != "":
+	case len(m.SourceAddressList()) > 0:
 		return true
-	case len(m.SourceAddressNames) > 0 || m.SourceAddressName != "":
+	case len(m.SourceAddressNameList()) > 0:
 		return true
-	case len(m.DestinationAddresses) > 0 || m.DestinationAddress != "":
+	case len(m.DestinationAddressList()) > 0:
 		return true
-	case len(m.DestinationAddressNames) > 0 || m.DestinationAddressName != "":
+	case len(m.DestinationAddressNameList()) > 0:
 		return true
-	case len(m.DestinationPorts) > 0 || m.DestinationPort != 0:
+	case len(m.DestinationPortList()) > 0:
 		return true
-	case len(m.Protocols) > 0 || m.Protocol != "":
+	case len(m.ProtocolList()) > 0:
 		return true
-	case len(m.Applications) > 0 || m.Application != "":
+	case len(m.ApplicationList()) > 0:
 		return true
 	}
 	// A match that parsed NOTHING valid but recorded invalid tokens is still

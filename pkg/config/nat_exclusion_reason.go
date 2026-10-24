@@ -260,8 +260,8 @@ func unknownNATMatchLeavesReason(leaves []string) string {
 // class is gate-warned, not grown here.
 func dnatRuleHasDestinationKey(rule *NATRule) bool {
 	m := rule.Match
-	return len(m.DestinationAddresses) > 0 || m.DestinationAddress != "" ||
-		len(m.DestinationAddressNames) > 0 || m.DestinationAddressName != ""
+	return len(m.DestinationAddressList()) > 0 ||
+		len(m.DestinationAddressNameList()) > 0
 }
 
 // SourceNATRuleExcludedReason reports why the userspace snapshot builder DROPS

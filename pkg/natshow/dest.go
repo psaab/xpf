@@ -115,8 +115,7 @@ func RenderDestRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config, 
 			// #7363: the FULL match — bracket list and address-book names —
 			// not just the singular back-compat field.
 			dstMatch := natMatchAddresses(
-				rule.Match.DestinationAddress, rule.Match.DestinationAddresses,
-				rule.Match.DestinationAddressName, rule.Match.DestinationAddressNames)
+				rule.Match.DestinationAddressList(), rule.Match.DestinationAddressNameList())
 			if dstMatch == "" {
 				dstMatch = "0.0.0.0/0"
 			}

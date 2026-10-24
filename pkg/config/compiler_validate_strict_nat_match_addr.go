@@ -101,11 +101,11 @@ func validateNATMatchAddressLiteralsStrict(cfg *Config) error {
 				continue
 			}
 			if err := check("source-nat", rs.Name, rule.Name, "source-address",
-				natMatchValues(rule.Match.SourceAddresses, rule.Match.SourceAddress)); err != nil {
+				rule.Match.SourceAddressList()); err != nil {
 				return err
 			}
 			if err := check("source-nat", rs.Name, rule.Name, "destination-address",
-				natMatchValues(rule.Match.DestinationAddresses, rule.Match.DestinationAddress)); err != nil {
+				rule.Match.DestinationAddressList()); err != nil {
 				return err
 			}
 		}
@@ -120,7 +120,7 @@ func validateNATMatchAddressLiteralsStrict(cfg *Config) error {
 				// destination-address on this kind is validateDestination-
 				// NATAddressesStrict's (#3228); only the source side is new.
 				if err := check("destination-nat", rs.Name, rule.Name, "source-address",
-					natMatchValues(rule.Match.SourceAddresses, rule.Match.SourceAddress)); err != nil {
+					rule.Match.SourceAddressList()); err != nil {
 					return err
 				}
 			}

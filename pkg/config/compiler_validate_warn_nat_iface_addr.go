@@ -278,7 +278,7 @@ func validateNATInterfaceAddressCollisionWarnings(cfg *Config) []string {
 				if rule.Then.Off || rule.Then.PoolName == "" {
 					continue // no translation → nothing to be inert
 				}
-				for _, addr := range natMatchValues(rule.Match.DestinationAddresses, rule.Match.DestinationAddress) {
+				for _, addr := range rule.Match.DestinationAddressList() {
 					host, _ := hostLocalAddrFamily(addr)
 					if host == "" {
 						continue
