@@ -841,15 +841,22 @@ step. Both are required — neither sees the other's case:
   folded into a single route-level `Preference`, so every next-hop rendered at
   equal cost and the floating static became equal-cost ECMP that load-balanced
   over the backup. A plain `next-hop [ a b ]` bracket LIST is equal-cost ECMP
-- **IGP export metric (#11447, #12071).** The shared QNH route-map in
+- **IGP export metric (#11447, #12071, #12531).** The shared QNH route-map in
   `frr.conf` has destination + configured-next-hop matches and `on-match
   next`, but no QNH `set metric`. After a successful reload, the manager
   restores the metric only to `ospfd` through a daemon-scoped load and verifies
-  it by readback. FRR 10.7.1's daemon-scoped `ripd` load silently does nothing;
-  the integrated loader broadcasts a RIP metric into other daemons, so no RIP
-  overlay, scrub, or readback is attempted. RIP redistribution therefore gets
-  its default metric, and commit warns when QNH metric configuration would
-  affect RIP; restoring RIP backup-cost export is tracked by #12531. Legacy
+  it by readback. RIP receives its QNH metric through ripd-native
+  `offset-list` lines inside `router rip` (#12531): FRR 10.7.1's daemon-scoped
+  `ripd` load silently does nothing, the integrated loader broadcasts a RIP
+  route-map metric into other daemons, and ripd ignores route-map `set metric`
+  for redistributed statics even when present (live-verified: map readback
+  metric 7, RIP database and RIPv2 wire metric 1). Each bare-static RIP stanza
+  therefore gets one `offset-list <acl> out <metric-1>` per QNH destination
+  (clamped so the wire metric never exceeds 16; metric 0 renders none), with a
+  generated `xpf-qnh-rip-*` access-list permitting exactly that destination.
+  The offset lives only in the RIP stanza, so no non-RIP daemon can apply it;
+  OSPF behavior is unchanged. Policy-exported RIP keeps authored policy metric
+  semantics and gets no offset. Legacy
   metric-bearing sequences are reconciled after a successful load and checked
   across the known daemons, including stale IPv6 sequences. No pre-clear runs
   before a load, since FRR loads are not transactional. Overlays are
@@ -1816,11 +1823,11 @@ step. Both are required — neither sees the other's case:
   broadcast copy is retained. Only then is the exact metric overlay installed
   to `ospfd` with daemon-scoped `vtysh -d` and verified by readback.
   FRR 10.7.1-2 accepts `vtysh -d ripd -f` but applies nothing; using integrated
-  `vtysh -f` for RIP broadcasts the metric action to multiple daemons. RIP
-  therefore receives no QNH metric overlay, scrub, or readback and uses its
-  default redistribution metric. Commit warns when a QNH metric setting would
-  export to RIP; the lost RIP backup-cost behavior is tracked in #12531.
-  No QNH pre-clear runs before a load, but `frr-reload.py` deletes the
+  `vtysh -f` for RIP broadcasts the metric action to multiple daemons, and
+  ripd ignores route-map `set metric` for redistributed statics. RIP therefore
+  receives no QNH route-map overlay; its QNH metric is delivered by
+  `offset-list` lines rendered in the integrated `router rip` stanza (#12531),
+  confined to ripd by construction. No QNH pre-clear runs before a load, but `frr-reload.py` deletes the
   memory-only overlay before it reaches a rejected line, so the reconcile
   also runs on the hard-failure and failed-retry returns (#15183),
   restoring the overlay with readback while the original failure still

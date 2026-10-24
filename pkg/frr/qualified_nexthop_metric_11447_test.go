@@ -3,7 +3,6 @@ package frr
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -394,27 +393,25 @@ func TestQualifiedNextHopMetricGatesIGPsByMatchCapability12071(t *testing.T) {
 }
 
 func TestQNHMetricRIPKeepsDefaultMetricWithWarning11447(t *testing.T) {
-	var logs strings.Builder
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	defer slog.SetDefault(previous)
-
+	// #12531 supersedes the #12071 RIP limitation this test originally
+	// asserted: RIP now receives its QNH metric via a ripd-native
+	// offset-list, so there is no default-metric warning. The test name
+	// is retained for history; the assertions pin the restored behavior.
 	rendered, overlays := qnhMetricRenderAndOverlays11447(t,
 		"set routing-options static route 203.0.113.0/24 qualified-next-hop 192.0.2.10 metric 10",
 		"set protocols ospf export static",
 		"set protocols rip redistribute static",
 	)
 	if len(overlays) != 1 || overlays["ospfd"] == "" {
-		t.Fatalf("RIP must not receive a QNH metric overlay: %v", overlays)
+		t.Fatalf("RIP must not receive a QNH route-map overlay: %v", overlays)
 	}
 	if !strings.Contains(rendered, "router rip\n redistribute static route-map ") ||
 		strings.Contains(rendered, " set metric ") {
 		t.Fatalf("RIP must retain the metric-free route-map attachment:\n%s", rendered)
 	}
-	if !strings.Contains(logs.String(), "issue=#12071") ||
-		!strings.Contains(logs.String(), "redistribution=static") ||
-		!strings.Contains(logs.String(), "RIP receives its default metric") {
-		t.Fatalf("RIP metric limitation warning omitted affected redistribution or default-metric impact: %s", logs.String())
+	if !strings.Contains(rendered, " offset-list xpf-qnh-rip-") ||
+		!strings.Contains(rendered, " out 9\n") {
+		t.Fatalf("RIP must receive QNH metric 10 as offset-list out 9 (#12531):\n%s", rendered)
 	}
 }
 
