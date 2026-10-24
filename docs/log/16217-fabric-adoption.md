@@ -1451,3 +1451,27 @@ the helper bytes are hash-proved above. Cluster restored after
 each run: clean master 2c8575b70e, helper 2f2f5cbf...b04 both
 nodes (hash-proved), RG0/1/2 node0 primary, target OK, P4
 verification 11.0 Gbit/s, VERIFY_ZERO 0.
+
+FZCellsStrict index follow-up: the destination-owner arm
+(`forward_candidate_destination_owner_departed`, ha.rs) called
+`connected_owner_rg_for_target_in_table`, which linearly scanned
+every connected row (plus the by-ifindex ledger) on each flow-cache
+hit that reached it. `ForwardingState` now carries a build-time
+longest-prefix index (`connected_owner_index_v4/v6`, built by
+`rebuild_connected_owner_index` at forwarding-state build): the
+lookup probes (table, len, network) from the longest length down —
+at most 33/129 hash probes with no allocation beyond the key's
+table-name clone already implicit in the map key — and falls back
+to the exact legacy scan when the index is empty (unit fixtures).
+Semantics preserved bit-for-bit and pinned by
+`connected_owner_index_matches_legacy_scan_16217` (legacy answers
+captured with an empty index, then compared after building it):
+longest-prefix wins, equal-length last-row wins, empty-table rows
+visible in every scope (stored under every present table key plus
+the family default for rowless scopes), ledger rows fill only keys
+no FIB row claimed, `Hit(0)` (RG-less interface) stays the final
+answer, and Source-2 interface-NAT fallthrough runs only on a true
+miss. `cargo test 16217` 53/53; `forwarding::tests` 334 passed
+with 1 failure identical on the unmodified head
+(`matched_family_pairs_are_still_admitted_7520`, pre-existing);
+`session::` 527 passed with the same 2 pre-existing failures.

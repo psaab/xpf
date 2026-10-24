@@ -24795,3 +24795,74 @@ fn rst_teardown_reverse_only_survivor_15947() {
         .collect();
     assert_eq!(closes.len(), 0, "reverse-only teardown emits no synthetic Close");
 }
+
+/// #16217: the build-time connected-owner index must answer
+/// identically to the legacy linear scan for every target/table —
+/// including longest-prefix wins, equal-length LAST-row wins,
+/// empty-table rows visible in every scope, the by-ifindex ledger
+/// fallback consulted only when no FIB row matches, and Source-2
+/// (interface-NAT) fallthrough on a true miss.
+#[test]
+fn connected_owner_index_matches_legacy_scan_16217() {
+    let mut forwarding = test_forwarding_state_split_rgs();
+    forwarding.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(
+            ipnet::Ipv4Net::new(Ipv4Addr::new(10, 0, 61, 128), 25).unwrap(),
+        ),
+        host: Ipv4Addr::new(10, 0, 61, 128),
+        ifindex: 12,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(
+            ipnet::Ipv4Net::new(Ipv4Addr::new(10, 0, 0, 0), 16).unwrap(),
+        ),
+        host: Ipv4Addr::new(10, 0, 0, 0),
+        ifindex: 12,
+        tunnel_endpoint_id: 0,
+        table: String::new(),
+    });
+    forwarding
+        .connected_v4_by_ifindex
+        .entry(6)
+        .or_default()
+        .push(PrefixV4::from_net(
+            ipnet::Ipv4Net::new(Ipv4Addr::new(192, 168, 7, 0), 24).unwrap(),
+        ));
+    let targets: Vec<(IpAddr, Option<&str>)> = vec![
+        (IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)), None),
+        (IpAddr::V4(Ipv4Addr::new(10, 0, 61, 200)), None),
+        (IpAddr::V4(Ipv4Addr::new(10, 0, 99, 5)), None),
+        (IpAddr::V4(Ipv4Addr::new(10, 0, 99, 5)), Some("tenant-a.inet.0")),
+        (IpAddr::V4(Ipv4Addr::new(192, 168, 7, 9)), None),
+        (IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), None),
+        (IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)), Some("inet.0")),
+    ];
+    let legacy: Vec<i32> = targets
+        .iter()
+        .map(|(t, tab)| {
+            crate::afxdp::connected_owner_rg_for_target_in_table(&forwarding, *t, *tab)
+        })
+        .collect();
+    forwarding.rebuild_connected_owner_index();
+    assert!(
+        !forwarding.connected_owner_index_v4.is_empty(),
+        "#16217: index must be built"
+    );
+    let indexed: Vec<i32> = targets
+        .iter()
+        .map(|(t, tab)| {
+            crate::afxdp::connected_owner_rg_for_target_in_table(&forwarding, *t, *tab)
+        })
+        .collect();
+    assert_eq!(
+        indexed, legacy,
+        "#16217: indexed owner answers must equal the legacy scan for every target/table"
+    );
+    assert_eq!(legacy[0], 2, "fixture /24 owner is RG2");
+    assert_eq!(legacy[1], 1, "longer /25 on RG1 wins over /24");
+    assert_eq!(legacy[3], 1, "empty-table /16 row is visible in a named scope");
+    assert_eq!(legacy[4], 2, "ledger fallback names RG2 when no FIB row matches");
+    assert_eq!(legacy[5], 0, "unmatched target stays unknown (0)");
+}

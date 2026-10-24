@@ -388,6 +388,10 @@ fn build_forwarding_state_with_policy_state_and_previous(
     if let Some(previous) = previous {
         state.ipsec_sa = previous.ipsec_sa.clone();
     }
+    // that the connected vecs + egress RG rows are final, so the
+    // per-cache-hit destination-owner arm probes it instead of
+    // linearly scanning every connected row.
+    state.rebuild_connected_owner_index();
     attach_zone_counters(&mut state, snapshot, previous);
     Ok(state)
 }
