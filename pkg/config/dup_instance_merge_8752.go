@@ -63,8 +63,10 @@ import "strings"
 // Each still folds into one policy object, but is poisoned exactly like a
 // #9571 widening (LenientContentDropped; the helper refuses the snapshot).
 // Folds whose merged semantics ARE the union of the statements — a permit
-// pair differing in at most one dimension, a deny pair with identical
-// excluded sets, a pair sharing one scheduler — stay unpoisoned (#8752).
+// pair whose domains are equal in all but at most one dimension or where
+// one statement dominates the other in every dimension (#16419), a deny
+// pair with identical excluded sets, a pair sharing one scheduler — stay
+// unpoisoned (#8752).
 //
 // #16418 (R3-F03-03): THE ZONE SCOPE OF A GLOBAL POLICY IS THE SAME KIND OF
 // DIMENSION. `match from-zone`/`to-zone` (PolicyMatch.FromZones/ToZones) are
@@ -76,6 +78,21 @@ import "strings"
 // no longer covers traffic the unscoped statement denied. Both now poison
 // exactly like the #14968 legs. Zone-pair policies compile no zone scope, so
 // this changes nothing for them.
+//
+// #16419 (R3-F03-04): THE PER-DIMENSION CONTAINMENT EXEMPTION IS UNSOUND.
+// #14968 counted a dimension only when NEITHER statement's set contained
+// the other's, claiming a contained dimension "cannot contribute a new
+// combination". Per dimension that is true; for the tuple it is false:
+// `ssh from 10.0.1.0/25` plus `http from any` trades a narrow source for
+// a narrow application, so the fold permits ssh from any — a tuple no
+// statement permitted — while counting zero differing dimensions. The
+// permit leg now compares whole match domains (source/destination/
+// application value+sense, zone scope, scheduler): a pair is an exact
+// union only when the domains are equal in all but at most one dimension
+// or one domain contains the other. A scheduler mismatch or an
+// excluded-sense mismatch between permit statements poisons for the same
+// reason (the merged permit then applies outside a statement's window or
+// inside its carve-out).
 
 // WHY MERGE RATHER THAN REPLACE, and it is not a preference. Flat `set` already
 // MERGES — pinned by TestFlatSetMergesWhereHierarchicalDuplicates — so the two
@@ -599,9 +616,9 @@ func statementPermits9571(name string, n *Node, isGlobal bool) bool {
 // complements, or in time windows no statement authored for that action.
 // Action-only widening (restrictive to permit) is the #9571 leg and is
 // decided by the caller; this covers the folds that survive that check:
-//   - a merged PERMIT whose explicit-permit sources differ in two or more
-//     match dimensions (their dimension-wise union is a strict cross
-//     product of the statements' permitted tuples);
+//   - a merged PERMIT that is not the exact union of its explicit-permit
+//     sources (#16419: domains equal in all but at most one dimension, or
+//     one domain containing the other — see permitPairIsUnion16419);
 //   - a surviving DENY/REJECT whose excluded-address flags/lists or whose
 //     scheduler set differ from a restrictive source's (the deny no longer
 //     covers exactly what that statement denied, or only inside a window
@@ -618,6 +635,12 @@ func statementPermits9571(name string, n *Node, isGlobal bool) bool {
 // statement denied. Zone-pair policies have no compiled zone scope (their
 // zones come from the stanza), so counting these dimensions is a no-op
 // for them.
+//
+// #16419 (R3-F03-04): counting only dimensions where NEITHER set contains
+// the other is unsound — containment in one dimension does not stop that
+// dimension's wider values combining with another dimension's values from
+// the narrower statement. The permit leg therefore tests the whole
+// domain, including the scheduler gate and the excluded-address sense.
 func foldChangesPolicySemantics14968(sources []*Policy, merged *Policy) bool {
 	if len(sources) < 2 || merged == nil {
 		return false
@@ -631,7 +654,7 @@ func foldChangesPolicySemantics14968(sources []*Policy, merged *Policy) bool {
 		}
 		for i := range permits {
 			for _, other := range permits[i+1:] {
-				if matchDimensionsDiffer14968(permits[i], other) >= 2 {
+				if !permitPairIsUnion16419(permits[i], other) {
 					return true
 				}
 			}
@@ -678,37 +701,83 @@ func foldChangesPolicySemantics14968(sources []*Policy, merged *Policy) bool {
 	return false
 }
 
-// matchDimensionsDiffer14968 counts the match dimensions (source,
-// destination, application, from-zone scope, to-zone scope) in which
-// neither statement's compiled value set contains the other's. A dimension
-// in which one statement's set is a subset of the other's (including an
-// explicit `any`, which covers every value) cannot contribute a new
-// combination: the merged union there is the wider statement's set, so
-// every merged tuple was already permitted by that wider statement in
-// that dimension.
-func matchDimensionsDiffer14968(a, b *Policy) int {
-	n := 0
-	if !valueSetSubset14968(a.Match.SourceAddresses, b.Match.SourceAddresses) &&
-		!valueSetSubset14968(b.Match.SourceAddresses, a.Match.SourceAddresses) {
-		n++
+// permitDomain16419 is one explicit-permit statement's whole match
+// domain: the dimensions whose dimension-wise union the fold computes.
+// excluded marks an inverted address sense; its domain is the complement
+// of values, so token containment does not apply and only identical
+// excluded domains can union exactly. A gated domain is active only in
+// its scheduler window.
+type permitDomain16419 struct {
+	src, dst, app   []string
+	srcEx, dstEx    bool
+	fromZones       []string
+	toZones         []string
+	scheduler       string
+	gated, excluded bool
+}
+
+func permitDomainOf16419(p *Policy) permitDomain16419 {
+	d := permitDomain16419{
+		src: p.Match.SourceAddresses, dst: p.Match.DestinationAddresses,
+		app:   p.Match.Applications,
+		srcEx: p.Match.SourceAddressExcluded, dstEx: p.Match.DestinationAddressExcluded,
+		fromZones: p.Match.FromZones, toZones: p.Match.ToZones,
+		scheduler: p.SchedulerName,
 	}
-	if !valueSetSubset14968(a.Match.DestinationAddresses, b.Match.DestinationAddresses) &&
-		!valueSetSubset14968(b.Match.DestinationAddresses, a.Match.DestinationAddresses) {
-		n++
+	d.gated = d.scheduler != ""
+	d.excluded = d.srcEx || d.dstEx
+	return d
+}
+
+// permitPairIsUnion16419 reports whether the dimension-wise union of two
+// permit domains is exactly the union of the domains (#16419). The
+// pre-#16419 predicate counted only dimensions where neither set
+// contained the other and allowed up to one, which is unsound: a
+// contained dimension mints new tuples whenever any other dimension is
+// non-equal (ssh from 10.0.1.0/25 + http from any counted 1, yet the
+// fold permits ssh from any). The sound test is: the domains are equal
+// in all but at most one dimension (nonEqual <= 1, the #14968
+// legitimate case), or one domain contains the other in every
+// dimension (dominance, tracked as aInB/bInA).
+func permitPairIsUnion16419(a, b *Policy) bool {
+	da, db := permitDomainOf16419(a), permitDomainOf16419(b)
+	if da.gated != db.gated || da.scheduler != db.scheduler {
+		return false
 	}
-	if !valueSetSubset14968(a.Match.Applications, b.Match.Applications) &&
-		!valueSetSubset14968(b.Match.Applications, a.Match.Applications) {
-		n++
+	if da.excluded || db.excluded {
+		return permitDomainsEqual16419(da, db)
 	}
-	if !zoneScopeSubset16418(a.Match.FromZones, b.Match.FromZones) &&
-		!zoneScopeSubset16418(b.Match.FromZones, a.Match.FromZones) {
-		n++
+	nonEqual, aInB, bInA := 0, true, true
+	tally := func(aSubB, bSubA bool) {
+		if !aSubB || !bSubA {
+			nonEqual++
+		}
+		aInB = aInB && aSubB
+		bInA = bInA && bSubA
 	}
-	if !zoneScopeSubset16418(a.Match.ToZones, b.Match.ToZones) &&
-		!zoneScopeSubset16418(b.Match.ToZones, a.Match.ToZones) {
-		n++
+	tally(valueSetSubset14968(da.src, db.src), valueSetSubset14968(db.src, da.src))
+	tally(valueSetSubset14968(da.dst, db.dst), valueSetSubset14968(db.dst, da.dst))
+	tally(valueSetSubset14968(da.app, db.app), valueSetSubset14968(db.app, da.app))
+	tally(zoneScopeSubset16418(da.fromZones, db.fromZones), zoneScopeSubset16418(db.fromZones, da.fromZones))
+	tally(zoneScopeSubset16418(da.toZones, db.toZones), zoneScopeSubset16418(db.toZones, da.toZones))
+	return nonEqual <= 1 || aInB || bInA
+}
+
+func permitDomainsEqual16419(a, b permitDomain16419) bool {
+	return a.srcEx == b.srcEx && a.dstEx == b.dstEx &&
+		sameStringSet14968(a.src, b.src) && sameStringSet14968(a.dst, b.dst) &&
+		sameStringSet14968(a.app, b.app) &&
+		zoneScopesEqual16419(a.fromZones, b.fromZones) &&
+		zoneScopesEqual16419(a.toZones, b.toZones)
+}
+
+// zoneScopesEqual16419 compares zone scopes as sets, with the wildcard
+// spellings (empty, or containing `any`) all denoting the universal scope.
+func zoneScopesEqual16419(a, b []string) bool {
+	if IsWildcardZoneSet(a) || IsWildcardZoneSet(b) {
+		return IsWildcardZoneSet(a) && IsWildcardZoneSet(b)
 	}
-	return n
+	return sameStringSet14968(a, b)
 }
 
 // zoneScopeSubset16418 reports whether zone scope a is a subset of zone
