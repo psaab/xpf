@@ -27,6 +27,15 @@ pub(super) struct PreroutingIngressScope<'a> {
     pub ifname: &'a str,
     /// Ingress interface routing-instance (`""` = default VRF).
     pub routing_instance: &'a str,
+    /// #16045: true when this scope was derived for an ambiguous fabric
+    /// arrival (a claimed zone withheld pending the owner-RG gate) and
+    /// the LOCAL fabric/logical identity answered. A scoped rule match
+    /// under that identity is unproven provenance: the later policy may
+    /// promote the claimed zone, so a translation selected here would be
+    /// keyed to a zone the policy never adjudicated. Callers fail closed
+    /// on any scoped match while this holds; unscoped rules (which fire
+    /// under every ingress identity) are unaffected.
+    pub ambiguous_provenance: bool,
 }
 
 /// Resolve the pre-routing NAT scope identity for a received frame.
@@ -54,6 +63,50 @@ pub(super) fn prerouting_ingress_scope(
     ingress_vlan_id: u16,
     zone_override: Option<u16>,
     fabric_ingress_scope_ifindex: Option<i32>,
+) -> PreroutingIngressScope<'_> {
+    prerouting_ingress_scope_provenance(
+        forwarding,
+        physical_ifindex,
+        ingress_vlan_id,
+        zone_override,
+        fabric_ingress_scope_ifindex,
+        false,
+    )
+}
+
+/// #16045: like [`prerouting_ingress_scope`], but for an ambiguous
+/// fabric arrival whose claimed zone (and, for the V2 form, peer
+/// NAT-scope ifindex) is withheld pending the owner-RG gate. The
+/// identity is resolved from the LOCAL fabric/logical ingress exactly
+/// as the unpromoted production scope is, and stamped
+/// `ambiguous_provenance` so callers can fail closed on any scoped
+/// translation it selects. The claimed zone is NEVER substituted
+/// here: granting it before owner proof would violate the #15916
+/// withholding contract.
+#[inline]
+pub(super) fn prerouting_ingress_scope_ambiguous(
+    forwarding: &ForwardingState,
+    physical_ifindex: i32,
+    ingress_vlan_id: u16,
+) -> PreroutingIngressScope<'_> {
+    prerouting_ingress_scope_provenance(
+        forwarding,
+        physical_ifindex,
+        ingress_vlan_id,
+        None,
+        None,
+        true,
+    )
+}
+
+#[inline]
+fn prerouting_ingress_scope_provenance(
+    forwarding: &ForwardingState,
+    physical_ifindex: i32,
+    ingress_vlan_id: u16,
+    zone_override: Option<u16>,
+    fabric_ingress_scope_ifindex: Option<i32>,
+    ambiguous_provenance: bool,
 ) -> PreroutingIngressScope<'_> {
     let logical_ifindex =
         resolve_ingress_logical_ifindex(forwarding, physical_ifindex, ingress_vlan_id)
@@ -104,6 +157,7 @@ pub(super) fn prerouting_ingress_scope(
         zone_name,
         ifname,
         routing_instance,
+        ambiguous_provenance,
     }
 }
 

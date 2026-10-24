@@ -874,4 +874,389 @@ fn fabric_punt_prerouting_scope_keeps_peer_nat_identity_11337() {
         "#11337: the peer's interface-scoped static VIP must match"
     );
 }
+
+/// #16045 (RN-01) decisive regression — the co-moved owner fixture.
+///
+/// Shape: an ambiguous fabric arrival (claimed zone `lan`, RG2, withheld
+/// pending the owner-RG gate) arrives on the fabric parent (ge-0/0/0,
+/// named zone `fabric`). Pre-routing NAT resolves the LOCAL fabric
+/// identity (`fabric` / `ge-0/0/0`), and a `from zone fabric` DNAT —
+/// plus an interface-scoped static sibling and zone-scoped NPTv6 /
+/// NAT64 legs — selects a translation under that identity. The later
+/// session-miss policy PROMOTES `lan` (the packet resolves via the
+/// locally-active WAN RG1) and adjudicates `lan -> wan`, a zone pair
+/// that never selected the translation: pre-fix the flow installed
+/// with `fabric`-zone DNAT applied (zone-keyed escape). Post-fix every
+/// scope-constrained pre-routing matcher fails closed under ambiguous
+/// provenance, so no session installs and nothing forwards.
+///
+/// Controls pin the fix direction (suppress the fabric fallback
+/// identity only; never grant the claimed zone early):
+///  * native (non-fabric) ingress in the named `fabric` zone still
+///    translates and forwards — the owner scope still works;
+///  * a claimed-zone (`lan`) scoped DNAT under the same ambiguous
+///    arrival still does NOT fire (withholding intact: #16045 must not
+///    become a claimed-zone grant);
+///  * an UNSCOPED DNAT under the ambiguous arrival still translates
+///    (identity-independent), and the promoted `lan -> wan` policy
+///    admits it — ambiguous arrivals are not blanket-dropped.
+fn ambiguous_fabric_snapshot_16045(dnat_from_zone: &str) -> crate::ConfigSnapshot {
+    let mut snap = crate::afxdp::test_fixtures::nat_snapshot_with_fabric();
+    // Name the fabric parent's zone `fabric` (a real, matchable scope
+    // distinct from both `lan` and `wan`).
+    snap.zones.push(crate::ZoneSnapshot {
+        name: "fabric".to_string(),
+        id: crate::test_zone_ids::TEST_FABRIC_ZONE_ID,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["any-service".to_string()],
+        ..Default::default()
+    });
+    for iface in &mut snap.interfaces {
+        if iface.ifindex == 21 {
+            iface.zone = "fabric".to_string();
+        }
+        if iface.name == "reth0.80" {
+            iface.redundancy_group = 1;
+        }
+    }
+    // The pool target lives on the connected LAN subnet (reth1.0);
+    // give it a reachable neighbor so a translated flow can resolve
+    // ForwardCandidate and install (the unscoped/native controls).
+    snap.neighbors.push(crate::NeighborSnapshot {
+        interface: "reth1.0".to_string(),
+        ifindex: 24,
+        family: "inet".to_string(),
+        ip: "10.0.61.200".to_string(),
+        mac: "02:aa:bb:cc:dd:60".to_string(),
+        state: "reachable".to_string(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
+    snap.destination_nat_rules
+        .push(crate::DestinationNATRuleSnapshot {
+            name: "scoped-dnat-16045".to_string(),
+            from_zone: dnat_from_zone.to_string(),
+            destination_address: "8.8.8.8".to_string(),
+            destination_port: 443,
+            protocol: "tcp".to_string(),
+            pool_address: "10.0.61.200".to_string(),
+            pool_port: 8443,
+            ..Default::default()
+        });
+    snap
+}
+
+fn ambiguous_lan_stamp_frame_16045() -> Vec<u8> {
+    let mut frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12345,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_FABRIC_MAC,
+    );
+    let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
+    frame
+}
+
+fn both_rgs_active_16045() -> std::collections::BTreeMap<i32, HAGroupRuntime> {
+    let now_secs = crate::afxdp::monotonic_nanos() / 1_000_000_000;
+    let active = |rg: i32| {
+        (
+            rg,
+            HAGroupRuntime {
+                active: true,
+                watchdog_timestamp: now_secs,
+                lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
+            },
+        )
+    };
+    std::collections::BTreeMap::from([active(1), active(2)])
+}
+
+fn has_translated_session_16045(sessions: &SessionTable, target: Ipv4Addr) -> bool {
+    let mut found = false;
+    sessions.iter_with_origin(|_key, decision, _metadata, _origin| {
+        if decision.nat.rewrite_dst == Some(std::net::IpAddr::V4(target)) {
+            found = true;
+        }
+    });
+    found
+}
+
+#[test]
+fn ambiguous_fabric_scoped_dnat_cannot_fire_prematurely_16045() {
+    // RED (pre-fix) / GREEN (post-fix): fabric-scoped DNAT must not
+    // translate the ambiguous arrival; no session, no forward.
+    let forwarding = build_forwarding_state(&ambiguous_fabric_snapshot_16045("fabric"));
+    // Preconditions: stage 9 classifies Ambiguous, and the production
+    // (unpromoted) scope matcher WOULD select the fabric DNAT — the
+    // escape is real, not a fixture miss.
+    let frame = ambiguous_lan_stamp_frame_16045();
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+    let ha_state = both_rgs_active_16045();
+    assert!(
+        matches!(
+            parse_zone_encoded_fabric_ingress_from_frame(&frame, meta, &forwarding, &ha_state, ha_state[&1].watchdog_timestamp),
+            ZoneEncodedFabricStamp::Ambiguous { zone_id: TEST_LAN_ZONE_ID, .. }
+        ),
+        "fixture: the co-moved lan stamp must classify Ambiguous"
+    );
+    let scope = prerouting_ingress_scope(&forwarding, 21, 0, None, None);
+    assert_eq!(scope.zone_name, "fabric", "fixture: local fallback identity is the fabric zone");
+    assert!(
+        forwarding.dnat_table.lookup_with_counter_scoped(
+            crate::ip_proto::PROTO_TCP,
+            "10.0.61.102".parse().unwrap(),
+            "8.8.8.8".parse().unwrap(),
+            12345,
+            443,
+            scope.zone_name,
+            scope.ifname,
+            scope.routing_instance,
+            None,
+        ).is_some(),
+        "fixture: the ordinary matcher WOULD select the fabric-scoped DNAT (the RN-01 escape)"
+    );
+
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 21, 0);
+    binding.interface = std::sync::Arc::<str>::from("ge-0/0/0");
+    let mut sessions = SessionTable::new();
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true,
+    );
+    assert_eq!(dbg.rx, 1, "the ambiguous frame must reach the poll body");
+    assert_eq!(batch.invalid_fabric_stamp_drops, 0, "ambiguous is not invalid");
+    assert!(
+        !has_translated_session_16045(&sessions, Ipv4Addr::new(10, 0, 61, 200)),
+        "#16045: no session may carry the fabric-scoped translation"
+    );
+    assert_eq!(
+        sessions.len(), 0,
+        "#16045: a fabric-scoped DNAT selected under the withheld identity must not install a session"
+    );
+    assert!(
+        binding.scratch.scratch_forwards.is_empty(),
+        "#16045: the prematurely-translated flow must not forward"
+    );
+}
+
+#[test]
+fn ambiguous_claimed_zone_dnat_still_withheld_16045() {
+    // Fix-direction pin: a `lan`-scoped DNAT must NOT fire for the
+    // ambiguous arrival either — the claimed zone is granted only after
+    // owner proof, and pre-routing NAT runs before that proof exists.
+    // (This cell is green pre- and post-fix by design; it fails only if
+    // a fix grants the claimed zone to the pre-routing scope.)
+    let forwarding = build_forwarding_state(&ambiguous_fabric_snapshot_16045("lan"));
+    let frame = ambiguous_lan_stamp_frame_16045();
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+    let ha_state = both_rgs_active_16045();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 21, 0);
+    binding.interface = std::sync::Arc::<str>::from("ge-0/0/0");
+    let mut sessions = SessionTable::new();
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
+    // The promoted `lan -> wan` permit may still admit the UNTRANSLATED
+    // flow; the withholding invariant is that no `lan`-scoped
+    // translation was applied. A session whose forward key carries the
+    // pool target (10.0.61.200:8443) would prove a premature grant.
+    assert!(
+        !has_translated_session_16045(&sessions, Ipv4Addr::new(10, 0, 61, 200)),
+        "#16045: claimed-zone DNAT must stay withheld pre-promotion (translated session installed)"
+    );
+}
+
+#[test]
+fn ambiguous_unscoped_dnat_still_translates_16045() {
+    // Control: an UNSCOPED DNAT fires under every ingress identity, so
+    // ambiguous provenance must not suppress it. The destination
+    // 172.16.80.200 is on the connected WAN subnet, so the translated
+    // flow (dst 10.0.61.200 via the LAN gateway... see fixture routes)
+    // resolves and installs under the promoted `lan -> wan` permit.
+    // The decisive observable is the installed session's translated
+    // destination, which only exists if the unscoped DNAT fired.
+    let mut snap = ambiguous_fabric_snapshot_16045("");
+    // Pool target on the connected LAN subnet so resolution succeeds.
+    for rule in &mut snap.destination_nat_rules {
+        rule.pool_address = "10.0.61.200".to_string();
+    }
+    // Policy matches the POST-translation tuple: dst 10.0.61.200 is in
+    // `lan`, and the promoted from-zone is `lan` -> permit lan->lan.
+    snap.policies.push(crate::PolicyRuleSnapshot {
+        name: "allow-lan-lan-16045".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "lan".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["any".to_string()],
+        action: "permit".to_string(),
+        ..Default::default()
+    });
+    let forwarding = build_forwarding_state(&snap);
+    let frame = ambiguous_lan_stamp_frame_16045();
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+    let ha_state = both_rgs_active_16045();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 21, 0);
+    binding.interface = std::sync::Arc::<str>::from("ge-0/0/0");
+    let mut sessions = SessionTable::new();
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
+    assert!(
+        has_translated_session_16045(&sessions, Ipv4Addr::new(10, 0, 61, 200)),
+        "#16045: unscoped DNAT must still translate under ambiguous provenance (no translated session; sessions={})",
+        sessions.len()
+    );
+}
+
+#[test]
+fn native_fabric_zone_owner_scope_still_works_16045() {
+    // Control ("native owner scope still works"): the SAME fabric-scoped
+    // DNAT, but the frame ingresses NATIVELY on an interface whose zone
+    // IS `fabric` (a directly-connected owner-scope ingress, no stamp):
+    // ordinary local identity, ordinary translation. The decisive
+    // observable is the installed session's translated destination.
+    let mut snap = ambiguous_fabric_snapshot_16045("fabric");
+    // Give the fabric parent a connected address so native ingress on
+    // ifindex 21 is an ordinary local unit, and permit fabric -> wan.
+    snap.policies.push(crate::PolicyRuleSnapshot {
+        name: "allow-fabric-lan".to_string(),
+        from_zone: "fabric".to_string(),
+        to_zone: "lan".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["any".to_string()],
+        action: "permit".to_string(),
+        ..Default::default()
+    });
+    let forwarding = build_forwarding_state(&snap);
+    let frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12345,
+        443,
+        TCP_FLAG_SYN,
+        [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
+    );
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+    let ha_state = both_rgs_active_16045();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 21, 0);
+    binding.interface = std::sync::Arc::<str>::from("ge-0/0/0");
+    let mut sessions = SessionTable::new();
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
+    assert!(
+        has_translated_session_16045(&sessions, Ipv4Addr::new(10, 0, 61, 200)),
+        "#16045 control: native fabric-zone ingress must still match its scoped DNAT (no translated session; sessions={})",
+        sessions.len()
+    );
+}
+
+/// #16045 interface-scoped static sibling: the withheld identity is
+/// the fabric parent's config name (`ge-0/0/0`); a static DNAT scoped
+/// `from interface ge-0/0/0` must not fire for the ambiguous arrival.
+#[test]
+fn ambiguous_interface_scoped_static_dnat_cannot_fire_16045() {
+    let mut snap = ambiguous_fabric_snapshot_16045("fabric");
+    // Remove the pool DNAT so only the static rule can translate.
+    snap.destination_nat_rules.clear();
+    snap.static_nat_rules.push(crate::StaticNATRuleSnapshot {
+        name: "iface-static-16045".to_string(),
+        from_interface: "ge-0/0/0".to_string(),
+        external_ip: "8.8.8.8".to_string(),
+        internal_ip: "10.0.61.200".to_string(),
+        ..Default::default()
+    });
+    let forwarding = build_forwarding_state(&snap);
+    let frame = ambiguous_lan_stamp_frame_16045();
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+    let ha_state = both_rgs_active_16045();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 21, 0);
+    binding.interface = std::sync::Arc::<str>::from("ge-0/0/0");
+    let mut sessions = SessionTable::new();
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
+    assert!(
+        !has_translated_session_16045(&sessions, Ipv4Addr::new(10, 0, 61, 200)),
+        "#16045: interface-scoped static DNAT must not fire under ambiguous provenance (translated session installed)"
+    );
+}
+
+/// #16045 NAT64 leg: a Pref64 rule scoped `from zone fabric` must not
+/// translate the ambiguous arrival; the drop is the existing
+/// MatchUnavailable fail-closed counter, no session.
+#[test]
+fn ambiguous_nat64_scoped_match_fails_closed_16045() {
+    let mut snap = ambiguous_fabric_snapshot_16045("fabric");
+    snap.destination_nat_rules.clear();
+    snap.nat64_rules = vec![crate::protocol::NAT64RuleSnapshot {
+        name: "nat64-16045".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        from_zone: "fabric".to_string(),
+        pool_addresses: vec!["172.16.80.50".to_string()],
+        ..Default::default()
+    }];
+    let forwarding = build_forwarding_state(&snap);
+    let src6: std::net::Ipv6Addr = "2001:559:8585:ef00::102".parse().unwrap();
+    let dst6: std::net::Ipv6Addr = "64:ff9b::808:808".parse().unwrap(); // embeds 8.8.8.8
+    let mut frame = build_txn_tcp_syn_frame_v6(
+        src6,
+        dst6,
+        12345,
+        443,
+        crate::afxdp::tests_support::TEST_FABRIC_MAC,
+    );
+    let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
+    let meta = txn_meta_v6(21, frame.len());
+    let ha_state = both_rgs_active_16045();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 21, 0);
+    binding.interface = std::sync::Arc::<str>::from("ge-0/0/0");
+    let mut sessions = SessionTable::new();
+    let (batch, _dbg) = txn_run_descriptor_checked(
+        &mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true,
+    );
+    assert_eq!(sessions.len(), 0, "#16045: NAT64 scoped to the fabric fallback zone must not translate the ambiguous arrival");
+    assert!(binding.scratch.scratch_forwards.is_empty());
+    assert!(
+        batch.nat64_no_source_pool >= 1,
+        "#16045: the suppressed NAT64 match must surface as the fail-closed MatchUnavailable drop (nat64_no_source_pool={})",
+        batch.nat64_no_source_pool
+    );
+}
+
+/// #16045 NPTv6 leg: an inbound rule scoped `from zone fabric` must not
+/// translate the ambiguous arrival (Untranslatable fail-closed drop).
+#[test]
+fn ambiguous_nptv6_scoped_match_fails_closed_16045() {
+    let mut snap = ambiguous_fabric_snapshot_16045("fabric");
+    snap.destination_nat_rules.clear();
+    snap.nptv6_rules = vec![crate::Nptv6RuleSnapshot {
+        name: "nptv6-16045".to_string(),
+        from_zone: "fabric".to_string(),
+        internal_prefix: "fd35:1940:0027::/48".to_string(),
+        external_prefix: "2602:fd41:0070::/48".to_string(),
+    }];
+    let forwarding = build_forwarding_state(&snap);
+    let src6: std::net::Ipv6Addr = "2001:559:8585:ef00::102".parse().unwrap();
+    let dst6: std::net::Ipv6Addr = "2602:fd41:0070::8".parse().unwrap();
+    let mut frame = build_txn_tcp_syn_frame_v6(
+        src6,
+        dst6,
+        12345,
+        443,
+        crate::afxdp::tests_support::TEST_FABRIC_MAC,
+    );
+    let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
+    let meta = txn_meta_v6(21, frame.len());
+    let ha_state = both_rgs_active_16045();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 21, 0);
+    binding.interface = std::sync::Arc::<str>::from("ge-0/0/0");
+    let mut sessions = SessionTable::new();
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
+    assert_eq!(sessions.len(), 0, "#16045: NPTv6 scoped to the fabric fallback zone must not translate the ambiguous arrival");
+    assert!(binding.scratch.scratch_forwards.is_empty());
+}
 }

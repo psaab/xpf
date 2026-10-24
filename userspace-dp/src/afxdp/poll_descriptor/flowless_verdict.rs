@@ -273,6 +273,7 @@ pub(super) fn flowless_base_resolution(
     ingress_zone_override: Option<u16>,
     fabric_ingress_scope_ifindex: Option<i32>,
     route_override: Option<&str>,
+    ambiguous_fabric_arrival: bool,
 ) -> Option<FlowlessBaseResolution> {
     // #15117: on-link NDP (ICMPv6 133-137, hop 255) to a NAT external must
     // reach the kernel proxy-NDP, not be destination-translated to the
@@ -284,8 +285,7 @@ pub(super) fn flowless_base_resolution(
         if let Some(local) =
             flowless_local_resolution(forwarding, meta, l3_flow.dst_ip, route_override)
         {
-            let resolution =
-                enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, local);
+            let resolution = enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, local);
             return Some(FlowlessBaseResolution {
                 resolution,
                 nat: NatDecision::default(),
@@ -318,6 +318,7 @@ pub(super) fn flowless_base_resolution(
         ingress_zone_override,
         fabric_ingress_scope_ifindex,
         packet_icmp,
+        ambiguous_fabric_arrival,
     ) {
         super::frag_assoc::FlowlessPreRoutingNat::None => (NatDecision::default(), None),
         super::frag_assoc::FlowlessPreRoutingNat::Translated { decision, counter } => {

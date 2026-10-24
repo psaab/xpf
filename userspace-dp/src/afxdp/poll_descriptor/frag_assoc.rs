@@ -6,7 +6,7 @@
 // keeps its deliberate #[cold] #[inline(never)].
 
 use super::nat_exception::source_nat_would_translate_flowless;
-use super::prerouting_scope::prerouting_ingress_scope;
+use super::prerouting_scope::{prerouting_ingress_scope, prerouting_ingress_scope_ambiguous};
 use super::*;
 
 use crate::nat64::Nat64ReverseInfo;
@@ -482,19 +482,18 @@ pub(super) fn flowless_nat_wire_info(frame: &[u8], meta: UserspaceDpMeta) -> Flo
             // #15117: NDP (133-137) with hop limit 255 must not be
             // destination-translated. Hop limit is byte 7 of the IPv6
             // header; the ICMPv6 type is the first byte at the L4 offset.
-            let ndp_type_hop255 = if protocol == Some(crate::ip_proto::PROTO_ICMPV6)
-                && packet.get(7) == Some(&255)
-            {
-                match walk.outcome {
-                    crate::afxdp::frame::ExtChainOutcome::L4(l4_off, _) => frame
-                        .get(l4_off)
-                        .copied()
-                        .filter(|t| (133..=137).contains(t)),
-                    _ => None,
-                }
-            } else {
-                None
-            };
+            let ndp_type_hop255 =
+                if protocol == Some(crate::ip_proto::PROTO_ICMPV6) && packet.get(7) == Some(&255) {
+                    match walk.outcome {
+                        crate::afxdp::frame::ExtChainOutcome::L4(l4_off, _) => frame
+                            .get(l4_off)
+                            .copied()
+                            .filter(|t| (133..=137).contains(t)),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
             FlowlessNatWireInfo {
                 family: meta.addr_family,
                 protocol,
@@ -592,6 +591,7 @@ pub(super) fn flowless_pre_routing_destination_nat(
     ingress_zone_override: Option<u16>,
     fabric_ingress_scope_ifindex: Option<i32>,
     packet_icmp: Option<(u8, u8)>,
+    ambiguous_fabric_arrival: bool,
 ) -> FlowlessPreRoutingNat {
     if forwarding.static_nat.is_empty()
         && forwarding.dnat_table.is_empty()
@@ -600,13 +600,25 @@ pub(super) fn flowless_pre_routing_destination_nat(
         return FlowlessPreRoutingNat::None;
     }
 
-    let scope = prerouting_ingress_scope(
-        forwarding,
-        meta.ingress_ifindex as i32,
-        meta.ingress_vlan_id,
-        ingress_zone_override,
-        fabric_ingress_scope_ifindex,
-    );
+    // #16045 fold: ambiguous provenance is an explicit fabric-arrival
+    // state, never an inference from two absent options. Native
+    // flowless callers also pass (None, None), and they must retain
+    // their local logical identity and scoped NAT behavior.
+    let scope = if ambiguous_fabric_arrival {
+        prerouting_ingress_scope_ambiguous(
+            forwarding,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+        )
+    } else {
+        prerouting_ingress_scope(
+            forwarding,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+            ingress_zone_override,
+            fabric_ingress_scope_ifindex,
+        )
+    };
     let l4_identity_missing = meta.protocol == crate::session::SHIM_PROTO_FRAGMENT_NO_L4
         || crate::ip_proto::has_l4_ports(meta.protocol)
         || matches!(
@@ -639,14 +651,30 @@ pub(super) fn flowless_pre_routing_destination_nat(
     {
         return FlowlessPreRoutingNat::Untranslatable;
     }
-    if let Some((decision, counter)) = forwarding.static_nat.match_dnat_with_counter_scoped(
-        l3_flow.dst_ip,
-        0,
-        Some(l3_flow.src_ip),
-        scope.zone_name,
-        scope.ifname,
-        scope.routing_instance,
-    ) {
+    // #16045: under ambiguous provenance a scope-constrained static
+    // claim withholds translation.
+    let static_match = if scope.ambiguous_provenance {
+        forwarding
+            .static_nat
+            .match_dnat_ambiguous_provenance_scoped(
+                l3_flow.dst_ip,
+                0,
+                Some(l3_flow.src_ip),
+                scope.zone_name,
+                scope.ifname,
+                scope.routing_instance,
+            )
+    } else {
+        forwarding.static_nat.match_dnat_with_counter_scoped(
+            l3_flow.dst_ip,
+            0,
+            Some(l3_flow.src_ip),
+            scope.zone_name,
+            scope.ifname,
+            scope.routing_instance,
+        )
+    };
+    if let Some((decision, counter)) = static_match {
         return flowless_pre_routing_translation(decision, counter, wire);
     }
 
@@ -696,26 +724,57 @@ pub(super) fn flowless_pre_routing_destination_nat(
         {
             return FlowlessPreRoutingNat::Untranslatable;
         }
-        if let Some((decision, counter)) = forwarding.dnat_table.lookup_with_counter_scoped(
-            meta.protocol,
-            l3_flow.src_ip,
-            l3_flow.dst_ip,
-            0,
-            0,
-            scope.zone_name,
-            scope.ifname,
-            scope.routing_instance,
-            packet_icmp,
-        ) {
-            return flowless_pre_routing_translation(decision, counter, wire);
+        // #16045: tri-state form fails closed on constrained matches.
+        let dnat_lookup = if scope.ambiguous_provenance {
+            forwarding
+                .dnat_table
+                .lookup_result_ambiguous_provenance_scoped(
+                    meta.protocol,
+                    l3_flow.src_ip,
+                    l3_flow.dst_ip,
+                    0,
+                    0,
+                    scope.zone_name,
+                    scope.ifname,
+                    scope.routing_instance,
+                    packet_icmp,
+                )
+        } else {
+            forwarding.dnat_table.lookup_result_with_counter_scoped(
+                meta.protocol,
+                l3_flow.src_ip,
+                l3_flow.dst_ip,
+                0,
+                0,
+                scope.zone_name,
+                scope.ifname,
+                scope.routing_instance,
+                packet_icmp,
+            )
+        };
+        match dnat_lookup {
+            (crate::nat::DnatLookup::Matched(decision), counter) => {
+                return flowless_pre_routing_translation(decision, counter, wire);
+            }
+            (crate::nat::DnatLookup::Poisoned, counter) => {
+                return FlowlessPreRoutingNat::Poisoned { counter };
+            }
+            (crate::nat::DnatLookup::NoMatch, _) => {}
         }
     }
 
     if let IpAddr::V6(mut dst_v6) = l3_flow.dst_ip {
-        match forwarding
-            .nptv6
-            .translate_inbound_result(&mut dst_v6, scope.zone_name)
-        {
+        // #16045: ambiguous provenance fails closed on a zone-scoped claim.
+        let nptv6_result = if scope.ambiguous_provenance {
+            forwarding
+                .nptv6
+                .translate_inbound_ambiguous_provenance_result(&mut dst_v6, scope.zone_name)
+        } else {
+            forwarding
+                .nptv6
+                .translate_inbound_result(&mut dst_v6, scope.zone_name)
+        };
+        match nptv6_result {
             crate::nptv6::Nptv6Translation::Translated => {
                 let result = flowless_pre_routing_translation(
                     NatDecision {

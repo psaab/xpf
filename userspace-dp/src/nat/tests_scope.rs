@@ -10,8 +10,8 @@ use super::allocator::{
     ALLOCATION_GC_BUDGET, NS_PER_SEC, PersistentLease, PersistentSourceKey, PoolAddressFamily,
     TranslatedTuple, sticky_pool_index,
 };
-use super::source::{PersistentNatPermit, SOURCE_NAT_PROTO_ANY, SourceNatFlowKey};
 use super::destination::{PROTO_ANY, PROTO_TCP, PROTO_UDP};
+use super::source::{PersistentNatPermit, SOURCE_NAT_PROTO_ANY, SourceNatFlowKey};
 use super::*;
 use crate::ip_proto::{PROTO_ESP, PROTO_GRE, PROTO_ICMP, PROTO_ICMPV6};
 use crate::{
@@ -409,10 +409,7 @@ fn static_nat_dnat_source_address_bracket_list() {
             name: "stat".to_string(),
             external_ip: "203.0.113.10".to_string(),
             internal_ip: "192.168.1.10".to_string(),
-            source_addresses: vec![
-                "198.51.100.0/24".to_string(),
-                "203.0.113.200".to_string(),
-            ],
+            source_addresses: vec!["198.51.100.0/24".to_string(), "203.0.113.200".to_string()],
             ..StaticNATRuleSnapshot::default()
         }],
         &counters,
@@ -748,7 +745,6 @@ fn destination_nat_from_routing_instance_scope_matches_only_named_vrf() {
 // port/protocol. Reverting the l4_matches gate makes the wrong-port / wrong-app
 // lookups translate, turning the NoMatch assertions RED. ===
 
-
 // #9062: two rule-sets scoped to DIFFERENT routing instances that reference the
 // SAME pool shared one flow-identity space and one PortAllocator, so an
 // identical 5-tuple in two VRFs collided.
@@ -780,7 +776,10 @@ fn source_nat_flow_key_separates_routing_domains_9062() {
     // REFERENCE ARM: the SAME domain must still be the same flow, or every
     // repeat packet of one flow mints a new translation and the pool drains.
     let a2 = SourceNatFlowKey { ..a };
-    assert_eq!(a, a2, "the same flow in the same domain must be one identity");
+    assert_eq!(
+        a, a2,
+        "the same flow in the same domain must be one identity"
+    );
 
     // The unscoped default is 0, so a deployment with no routing instances
     // keys exactly as it did before this change.
@@ -1052,7 +1051,9 @@ fn static_nat_context_precedence_all_pairs_both_orders_11351() {
             };
             let snapshots: Vec<_> = ordered
                 .into_iter()
-                .map(|scope| static_scope_precedence_snapshot_11351(scope, "203.0.113.10", scope.translation))
+                .map(|scope| {
+                    static_scope_precedence_snapshot_11351(scope, "203.0.113.10", scope.translation)
+                })
                 .collect();
             let table = StaticNatTable::from_snapshots(&snapshots, &counters);
             let got = table
@@ -1088,11 +1089,7 @@ fn static_nat_block_context_precedence_is_scope_first_11351() {
         let snapshots: Vec<_> = ordered
             .into_iter()
             .map(|scope| {
-                static_scope_precedence_snapshot_11351(
-                    scope,
-                    "198.51.100.0/24",
-                    scope.translation,
-                )
+                static_scope_precedence_snapshot_11351(scope, "198.51.100.0/24", scope.translation)
             })
             .collect();
         let table = StaticNatTable::from_snapshots(&snapshots, &NatCounterStore::default());
@@ -1156,7 +1153,6 @@ fn static_nat_reverse_block_context_precedence_is_interface_first_11351() {
     }
 }
 
-
 #[test]
 fn static_nat_reverse_context_precedence_is_interface_first_11351() {
     for reversed in [false, true] {
@@ -1197,4 +1193,121 @@ fn static_nat_reverse_context_precedence_is_interface_first_11351() {
             "interface-scoped static reverse NAT must beat zone scope (reversed config order: {reversed})"
         );
     }
+}
+
+#[test]
+fn static_nat_ambiguous_suppresses_only_selected_winner_16045() {
+    let counters = NatCounterStore::default();
+    let external: IpAddr = "203.0.113.10".parse().unwrap();
+
+    // Non-winning scoped sibling: at dst_port 0 the port-specific
+    // scoped entry is not in either selected bucket, while the
+    // whole-address unscoped entry is the ordinary winner.
+    let scoped_port = StaticNATRuleSnapshot {
+        name: "scoped-port-not-selected".to_string(),
+        from_zone: "trust".to_string(),
+        match_destination_port: 443,
+        external_ip: "203.0.113.10".to_string(),
+        internal_ip: "192.168.1.10".to_string(),
+        mapped_port: 8443,
+        ..StaticNATRuleSnapshot::default()
+    };
+    let unscoped = StaticNATRuleSnapshot {
+        name: "unscoped-winner".to_string(),
+        external_ip: "203.0.113.10".to_string(),
+        internal_ip: "192.168.1.20".to_string(),
+        ..StaticNATRuleSnapshot::default()
+    };
+    let mixed = StaticNatTable::from_snapshots(&[scoped_port, unscoped.clone()], &counters);
+    assert_eq!(
+        mixed
+            .match_dnat_ambiguous_provenance_scoped(external, 0, None, "trust", "", "")
+            .and_then(|(decision, _)| decision.rewrite_dst),
+        Some("192.168.1.20".parse().unwrap()),
+        "a non-winning scoped entry must not suppress the unscoped winner"
+    );
+
+    // Selected scoped winner: an RI-scoped whole-address entry beats
+    // the unscoped entry under ordinary precedence, so ambiguity
+    // suppresses translation instead of falling through to unscoped.
+    let scoped_ri = StaticNATRuleSnapshot {
+        name: "scoped-ri-winner".to_string(),
+        from_routing_instance: "VR1".to_string(),
+        external_ip: "203.0.113.10".to_string(),
+        internal_ip: "192.168.1.30".to_string(),
+        ..StaticNATRuleSnapshot::default()
+    };
+    let ri_table = StaticNatTable::from_snapshots(&[scoped_ri, unscoped], &counters);
+    assert!(
+        ri_table
+            .match_dnat_ambiguous_provenance_scoped(external, 0, None, "", "", "VR1")
+            .is_none(),
+        "a selected scope-constrained winner must be suppressed, not replaced"
+    );
+}
+
+#[test]
+fn static_nat_ambiguous_block_winner_selection_precedes_suppression_16045() {
+    // Block ranking is tier first, prefix length only within a tier.
+    // A longer unscoped /25 therefore does not outrank a scoped /24;
+    // the scoped block is selected and is then suppressed.
+    let scoped_block = StaticNATRuleSnapshot {
+        name: "scoped-block-winner".to_string(),
+        from_zone: "trust".to_string(),
+        external_ip: "198.51.100.0/24".to_string(),
+        internal_ip: "10.2.0.0/24".to_string(),
+        ..StaticNATRuleSnapshot::default()
+    };
+    let unscoped_block = StaticNATRuleSnapshot {
+        name: "unscoped-block".to_string(),
+        external_ip: "198.51.100.0/25".to_string(),
+        internal_ip: "10.3.0.0/25".to_string(),
+        ..StaticNATRuleSnapshot::default()
+    };
+    let table = StaticNatTable::from_snapshots(
+        &[scoped_block, unscoped_block],
+        &NatCounterStore::default(),
+    );
+    assert!(
+        table
+            .match_dnat_ambiguous_provenance_scoped(
+                "198.51.100.42".parse().unwrap(),
+                0,
+                None,
+                "trust",
+                "",
+                "",
+            )
+            .is_none(),
+        "the ordinarily selected scoped block winner must suppress, not fall through"
+    );
+
+    // Two unscoped blocks isolate length selection: the longer prefix wins.
+    let short = StaticNATRuleSnapshot {
+        name: "unscoped-short".to_string(),
+        external_ip: "198.51.100.0/24".to_string(),
+        internal_ip: "10.4.0.0/24".to_string(),
+        ..StaticNATRuleSnapshot::default()
+    };
+    let long = StaticNATRuleSnapshot {
+        name: "unscoped-long".to_string(),
+        external_ip: "198.51.100.0/25".to_string(),
+        internal_ip: "10.5.0.0/25".to_string(),
+        ..StaticNATRuleSnapshot::default()
+    };
+    let table = StaticNatTable::from_snapshots(&[short, long], &NatCounterStore::default());
+    assert_eq!(
+        table
+            .match_dnat_ambiguous_provenance_scoped(
+                "198.51.100.42".parse().unwrap(),
+                0,
+                None,
+                "",
+                "",
+                "",
+            )
+            .and_then(|(decision, _)| decision.rewrite_dst),
+        Some("10.5.0.42".parse().unwrap()),
+        "unscoped winning block must still translate"
+    );
 }

@@ -816,7 +816,9 @@ fn record_ipsec_sa_miss_sample(
 
 use cookie_reply::{SynCookieReply, enqueue_syn_cookie_reply};
 use nat_exception::{record_source_nat_failure, source_nat_decision_for_flow};
-use prerouting_scope::{PreroutingIngressScope, prerouting_ingress_scope};
+use prerouting_scope::{
+    PreroutingIngressScope, prerouting_ingress_scope, prerouting_ingress_scope_ambiguous,
+};
 use reject_reply::{deny_reply_and_emit, enqueue_filter_reject_reply, enqueue_session_miss_rst};
 use resolver_enqueue::{
     claim_window_attempt, note_kernel_probe, probe_throttled, try_enqueue_resolver,
@@ -4373,18 +4375,33 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // so their behavior is byte-identical. `logical_ifindex`
                         // is threaded into the zone-pair policy below so both
                         // sites share ONE logical-unit ingress identity.
+                        // #16045: ambiguous arrivals reach here with the
+                        // claimed zone/scope withheld. Resolve the same
+                        // local fabric/logical identity, stamped ambiguous,
+                        // so scoped pre-routing matchers fail closed on a
+                        // constrained match. Claimed zone never granted.
+                        let ambiguous_provenance = ambiguous_zone.is_some();
                         let PreroutingIngressScope {
                             logical_ifindex: ingress_logical,
                             zone_name: ingress_zone_name,
                             ifname: ingress_ifname_dnat,
                             routing_instance: ingress_ri_dnat,
-                        } = prerouting_ingress_scope(
-                            worker_ctx.forwarding,
-                            meta.ingress_ifindex as i32,
-                            meta.ingress_vlan_id,
-                            ingress_zone_override,
-                            ingress_nat_scope_ifindex,
-                        );
+                            ambiguous_provenance: scope_ambiguous,
+                        } = if ambiguous_provenance {
+                            prerouting_ingress_scope_ambiguous(
+                                worker_ctx.forwarding,
+                                meta.ingress_ifindex as i32,
+                                meta.ingress_vlan_id,
+                            )
+                        } else {
+                            prerouting_ingress_scope(
+                                worker_ctx.forwarding,
+                                meta.ingress_ifindex as i32,
+                                meta.ingress_vlan_id,
+                                ingress_zone_override,
+                                ingress_nat_scope_ifindex,
+                            )
+                        };
                         // #3437: the DNAT `match application` term may pin a
                         // source-port (H10) and an ICMP type/code (H11). Supply
                         // the flow's source port and the packet's ICMP
@@ -4397,24 +4414,32 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // #15117: suppressed for on-link NDP (see above).
                         let static_dnat_decision = if ndp_hop255 {
                             None
+                        } else if scope_ambiguous {
+                            worker_ctx.forwarding.static_nat.match_dnat_ambiguous_provenance_scoped(
+                                resolution_target,
+                                flow.forward_key.dst_port,
+                                Some(flow.forward_key.src_ip),
+                                ingress_zone_name,
+                                ingress_ifname_dnat,
+                                ingress_ri_dnat,
+                            )
                         } else {
-                            worker_ctx
-                                .forwarding
-                                .static_nat
-                                .match_dnat_with_counter_scoped(
-                                    resolution_target,
-                                    flow.forward_key.dst_port,
-                                    Some(flow.forward_key.src_ip),
-                                    ingress_zone_name,
-                                    ingress_ifname_dnat,
-                                    ingress_ri_dnat,
-                                )
+                            worker_ctx.forwarding.static_nat.match_dnat_with_counter_scoped(
+                                resolution_target,
+                                flow.forward_key.dst_port,
+                                Some(flow.forward_key.src_ip),
+                                ingress_zone_name,
+                                ingress_ifname_dnat,
+                                ingress_ri_dnat,
+                            )
                         };
                         let mut persistent_dnat = None;
                         let mut persistent_lease_hold: Option<crate::nat::PersistentSourceKey> =
                             None;
                         let mut persistent_dnat_denied = false;
-                        if !ndp_hop255 && static_dnat_decision.is_none() {
+                        // #16045: persistent-NAT scope is ingress-keyed;
+                        // under ambiguous provenance the reader is skipped.
+                        if !ndp_hop255 && !scope_ambiguous && static_dnat_decision.is_none() {
                             for rule in &worker_ctx.forwarding.source_nat_rules {
                                 if !rule.persistent_nat || !rule.pool_mode {
                                     continue;
@@ -4513,10 +4538,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             && persistent_dnat.is_none()
                             && !worker_ctx.forwarding.dnat_table.is_empty()
                         {
-                            let (lookup, counter) = worker_ctx
-                                .forwarding
-                                .dnat_table
-                                .lookup_result_with_counter_scoped(
+                            // #16045: tri-state form fails closed on
+                            // scope-constrained matches under ambiguous provenance.
+                            let (lookup, counter) = if scope_ambiguous {
+                                worker_ctx.forwarding.dnat_table.lookup_result_ambiguous_provenance_scoped(
                                     meta.protocol,
                                     flow.forward_key.src_ip,
                                     resolution_target,
@@ -4526,7 +4551,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     ingress_ifname_dnat,
                                     ingress_ri_dnat,
                                     dnat_packet_icmp,
-                                );
+                                )
+                            } else {
+                                worker_ctx.forwarding.dnat_table.lookup_result_with_counter_scoped(
+                                    meta.protocol,
+                                    flow.forward_key.src_ip,
+                                    resolution_target,
+                                    flow.forward_key.src_port,
+                                    flow.forward_key.dst_port,
+                                    ingress_zone_name,
+                                    ingress_ifname_dnat,
+                                    ingress_ri_dnat,
+                                    dnat_packet_icmp,
+                                )
+                            };
                             match lookup {
                                 crate::nat::DnatLookup::Matched(decision) => {
                                     Some((decision, counter))
@@ -4573,11 +4611,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // INGRESS zone so a rule-set scoped `from zone X`
                                 // never translates traffic arriving from another
                                 // zone (security-domain crossing).
-                                match worker_ctx
-                                    .forwarding
-                                    .nptv6
-                                    .translate_inbound_result(&mut dst_v6, ingress_zone_name)
-                                {
+                                // #16045: ambiguous provenance fails closed on a zone-scoped claim.
+                                let nptv6_result = if scope_ambiguous {
+                                    worker_ctx.forwarding.nptv6.translate_inbound_ambiguous_provenance_result(&mut dst_v6, ingress_zone_name)
+                                } else {
+                                    worker_ctx.forwarding.nptv6.translate_inbound_result(&mut dst_v6, ingress_zone_name)
+                                };
+                                match nptv6_result {
                                     crate::nptv6::Nptv6Translation::Translated => {
                                         worker_ctx.forwarding.nptv6.record_translation(true);
                                         Some(dst_v6)
@@ -4639,12 +4679,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // source-address) using the pre-routing
                                         // scope identity resolved above.
                                         IpAddr::V6(src_v6) => {
-                                            worker_ctx.forwarding.nat64.classify_ipv6_packet_scoped(
-                                                src_v6,
-                                                dst_v6,
-                                                ingress_zone_name,
-                                                ingress_ri_dnat,
-                                            )
+                                            // #16045: ambiguous provenance fails closed on constrained matches.
+                                            if scope_ambiguous {
+                                                worker_ctx.forwarding.nat64.classify_ipv6_packet_ambiguous_provenance_scoped(src_v6, dst_v6, ingress_zone_name, ingress_ri_dnat)
+                                            } else {
+                                                worker_ctx.forwarding.nat64.classify_ipv6_packet_scoped(src_v6, dst_v6, ingress_zone_name, ingress_ri_dnat)
+                                            }
                                         }
                                         IpAddr::V4(_) => {
                                             worker_ctx.forwarding.nat64.classify_ipv6_dest(dst_v6)
@@ -9326,6 +9366,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 ingress_zone_override,
                                 ingress_nat_scope_ifindex,
                                 route_table_override.as_deref(),
+                                ambiguous_zone.is_some(),
                             ) else {
                                 if crate::afxdp::frame::frame_is_non_first_fragment(
                                     packet_frame,

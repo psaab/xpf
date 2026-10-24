@@ -7,9 +7,9 @@
 // `flowless_base_resolution`, plus the frame predicate the session-miss
 // arm uses (`is_ndp_hop255_frame`) and the shim predicate pulled in by
 // source (same shape as `tests_shim_degraded_ndp_10863`).
-use crate::afxdp::frame::is_ndp_hop255_frame;
 use super::flowless_verdict::FlowlessBaseResolution;
 use super::*;
+use crate::afxdp::frame::is_ndp_hop255_frame;
 
 #[path = "../../../../userspace-xdp/src/degraded_ndp.rs"]
 mod shim_ndp_15117;
@@ -85,12 +85,7 @@ fn static_nat_forwarding() -> ForwardingState {
     build_forwarding_state(&snap)
 }
 
-fn resolve(
-    fw: &ForwardingState,
-    frame: &[u8],
-    dst: &str,
-    ty: u8,
-) -> FlowlessBaseResolution {
+fn resolve(fw: &ForwardingState, frame: &[u8], dst: &str, ty: u8) -> FlowlessBaseResolution {
     let meta = v6_meta(crate::ip_proto::PROTO_ICMPV6);
     let wire = flowless_nat_wire_info(frame, meta);
     flowless_base_resolution(
@@ -105,6 +100,7 @@ fn resolve(
         None,
         None,
         None,
+        false,
     )
     .expect("flowless destination resolves")
 }
@@ -128,6 +124,7 @@ fn ndp_to_static_nat_external_is_not_translated_15117() {
             None,
             None,
             Some((ty, 0)),
+            false,
         );
         assert!(
             !matches!(pre, FlowlessPreRoutingNat::Translated { .. }),

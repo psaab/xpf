@@ -1001,6 +1001,31 @@ never attached when promotion fails.
 This deterministic ID is a scope selector, not authentication: the shared-L2
 forgery residual described below still applies.
 
+### Pre-routing NAT under an ambiguous stamp (#16045)
+
+Pre-routing NAT (static / pool DNAT, persistent-NAT, NPTv6 inbound,
+NAT64 classification) runs BEFORE the session-miss owner-RG gate, so
+an ambiguous arrival reaches it with the claimed zone (and, for V2,
+the peer NAT-scope ifindex) still withheld. The scope therefore
+resolves from the LOCAL fabric/logical identity — the fabric
+interface's own zone / config name / routing-instance — and is
+stamped `ambiguous_provenance`
+(`prerouting_ingress_scope_ambiguous`). Under that stamp every
+scoped matcher fails closed on a SCOPE-CONSTRAINED match (a rule
+scoped on zone / interface / routing-instance): pool DNAT returns
+its Poisoned drop, static DNAT withholds the translation, NPTv6
+returns Untranslatable, NAT64 returns MatchUnavailable, and the
+persistent-NAT reader is skipped. UNSCOPED rules are unaffected —
+they fire under every ingress identity, so their match is valid
+provenance under any later promotion. The claimed zone is never
+substituted into the pre-routing scope: granting it before owner
+proof would violate the withholding above. The decisive fixture is
+the co-moved owner shape (claimed `lan`, local fallback zone named
+`fabric`): a `from zone fabric` DNAT cannot fire prematurely, a
+native ingress in the `fabric` zone still translates, a `lan`-scoped
+DNAT stays withheld, and an unscoped DNAT still translates
+(`*_16045` in `prerouting_scope_tests.rs`).
+
 
 ### Resulting posture
 

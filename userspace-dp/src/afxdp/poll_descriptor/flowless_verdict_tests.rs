@@ -717,6 +717,7 @@ mod flowless_local_delivery_tests {
             None,
             None,
             Some("vrf-x"),
+            false,
         )
         .expect("ordinary flowless destination resolves");
         assert_eq!(
@@ -778,6 +779,7 @@ mod flowless_local_delivery_tests {
             None,
             None,
             Some("red.inet.0"),
+            false,
         )
         .expect("owner-table destination resolves");
         assert_eq!(
@@ -799,6 +801,7 @@ mod flowless_local_delivery_tests {
             None,
             None,
             Some("inet.0"),
+            false,
         )
         .expect("other-table lookup resolves terminally");
         assert_eq!(
@@ -842,6 +845,7 @@ mod flowless_local_delivery_tests {
             None,
             None,
             None,
+            false,
         )
         .expect("ordinary flowless destination resolves");
         assert_eq!(
@@ -926,6 +930,7 @@ mod flowless_local_delivery_tests {
             None,
             None,
             Some("red.inet.0"),
+            false,
         )
         .expect("flowless destination resolves");
         assert_eq!(
@@ -947,6 +952,7 @@ mod flowless_local_delivery_tests {
             None,
             None,
             Some("red.inet.0"),
+            false,
         )
         .expect("flowless destination resolves");
         assert_eq!(
@@ -969,6 +975,7 @@ mod flowless_local_delivery_tests {
             None,
             None,
             Some("red.inet.0"),
+            false,
         )
         .expect("flowless destination resolves");
         assert_eq!(
