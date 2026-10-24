@@ -85,6 +85,64 @@ fn l3_bucket_handles_stay_hashed_and_counted_15087() {
     assert_eq!(bucket.count_for(PROTO_UDP), 0);
 }
 
+/// #16435: the sparse counts must keep the per-identity index slot small.
+/// The pre-fix `[u32; 256]` array measured `size_of` slot = 1104 B and
+/// ~310 MB extra per worker at the 131072-session cap with distinct
+/// identities. The acceptance bound is ~128 B per `(key, bucket)` slot.
+#[test]
+fn l3_bucket_slot_stays_small_16435() {
+    let slot = std::mem::size_of::<(L3ReverseKey, L3ReverseBucket)>();
+    assert!(
+        slot <= 128,
+        "L3 reverse slot is {slot} B (pre-#16435: 1104 B); sparse protocol counts must keep it <= 128 B"
+    );
+    // Sparse pairs: only protocols with live members are stored, and a
+    // pair is dropped when its count reaches zero so no stale entry
+    // lingers (or gates a later exact probe).
+    let mut bucket = L3ReverseBucket::new(HotPathSeededState::new(16435));
+    assert!(bucket.protocol_counts.is_empty());
+    assert!(bucket.insert(0, PROTO_TCP));
+    assert!(bucket.insert(1, PROTO_TCP));
+    assert!(bucket.insert(2, PROTO_UDP));
+    assert_eq!(bucket.protocol_counts.len(), 2, "two live protocols -> two pairs");
+    assert_eq!(bucket.count_for(PROTO_TCP), 2);
+    assert_eq!(bucket.count_for(PROTO_UDP), 1);
+    assert_eq!(bucket.count_for(PROTO_ICMP), 0);
+    assert!(bucket.remove(2, PROTO_UDP));
+    assert_eq!(bucket.protocol_counts.len(), 1, "zero-count UDP pair must be dropped");
+    assert_eq!(bucket.count_for(PROTO_UDP), 0);
+    assert!(bucket.remove(0, PROTO_TCP));
+    assert!(bucket.remove(1, PROTO_TCP));
+    assert!(bucket.protocol_counts.is_empty(), "empty bucket carries no pairs");
+}
+
+/// #16435: a bucket carrying more protocols than the two inline slots
+/// still counts exactly (spills to heap only past 2 distinct protocols,
+/// which real NAT identities do not exceed in practice).
+#[test]
+fn l3_bucket_sparse_counts_beyond_inline_16435() {
+    let mut bucket = L3ReverseBucket::new(HotPathSeededState::new(16435));
+    let protos = [PROTO_TCP, PROTO_UDP, PROTO_ICMP, 47u8 /* GRE */];
+    for (i, p) in protos.iter().enumerate() {
+        assert!(bucket.insert(i as u32, *p));
+        assert!(bucket.insert(100 + i as u32, *p));
+    }
+    assert_eq!(bucket.protocol_counts.len(), protos.len());
+    for p in protos {
+        assert_eq!(bucket.count_for(p), 2, "protocol {p}");
+    }
+    assert_eq!(bucket.total(), 8);
+    // Remove one protocol entirely; the others must stay exact and the
+    // removed protocol must ungate.
+    assert!(bucket.remove(2, PROTO_ICMP));
+    assert!(bucket.remove(102, PROTO_ICMP));
+    assert_eq!(bucket.count_for(PROTO_ICMP), 0);
+    assert_eq!(bucket.protocol_counts.len(), protos.len() - 1);
+    for p in [PROTO_TCP, PROTO_UDP, 47u8] {
+        assert_eq!(bucket.count_for(p), 2, "protocol {p} after ICMP removal");
+    }
+}
+
 /// Many sessions to ONE server via one SNAT address share one bucket;
 /// deleting one leaves the survivors gated, deleting all ungates.
 #[test]

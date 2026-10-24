@@ -7,6 +7,18 @@ xpf (0.0.0) unstable; urgency=medium
     predicate and the ladder gate alone, so un-tagging either inline
     arm kept the tripwire green. Mutants un-tagging or comment-rescuing
     either arm now red the tripwire; the baseline stays green.
+  * Userspace-dp: make L3 reverse bucket protocol counts sparse (#16435).
+    #15087's L3ReverseBucket embedded a [u32; 256] count array in every
+    NAT (server, translated-address) identity, costing 1104 B per index
+    slot (plus a 1 KiB zero-fill per new identity) versus ~60 B pre-fix —
+    about 310 MB extra per worker at the 131072-session cap with
+    distinct identities. The counts are now a SmallVec<[(u8, u32); 2]>
+    holding one pair per live protocol (zero-count pairs are dropped),
+    so the (key, bucket) slot is back under 128 B with no heap allocation
+    for the common 1-3-protocol bucket. Hashed membership, exact and
+    255-sentinel probe gating, and the bounded verification walk are
+    unchanged; pinned by the new size/sparsity cells in
+    l3_reverse_bucket_15087_tests.rs alongside the existing #15087 cells.
   * Userspace helper: ignore SIGHUP in xpf-userspace-dp (#16431).
     #15084 made xpfd ignore SIGHUP, but the Rust helper kept the
     default disposition (xpfd's signal.Notify capture resets to

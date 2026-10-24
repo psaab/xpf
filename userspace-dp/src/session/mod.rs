@@ -47,9 +47,10 @@ type SeededReverseTranslatedIndex = HashMap<SessionKey, NatIndexBucket, HotPathS
 /// L4 header to key on). A linear `SmallVec` bucket therefore made insert
 /// (`contains`), removal (`retain`), and every live fragment probe O(bucket)
 /// — O(N) per op in the live same-destination session count. This aggregate
-/// keeps the same outer key but stores hashed membership plus per-protocol
-/// live-candidate counts, so insert/remove are O(1) amortized and a probe
-/// decides from counts alone (see `reverse_nat_fragment_requires_translation`).
+/// keeps the same outer key but stores hashed membership plus sparse
+/// per-protocol live-candidate counts, so insert/remove are O(1) amortized
+/// and a probe decides from counts alone (see
+/// `reverse_nat_fragment_requires_translation`).
 type SeededL3ReverseIndex = HashMap<L3ReverseKey, L3ReverseBucket, HotPathSeededState>;
 
 /// #15087: one L3 address identity's forward-session membership.
@@ -57,27 +58,33 @@ type SeededL3ReverseIndex = HashMap<L3ReverseKey, L3ReverseBucket, HotPathSeeded
 /// `handles` is the hashed membership set (seeded with the same keyed
 /// hasher as the outer index: handles are internal slab slots, but the SET
 /// SIZE is attacker-influenced via session count, so placement stays keyed).
-/// `protocol_counts[p]` counts members whose REAL reverse protocol is `p`
-/// (0..=255; 255 is a real IANA-reserved value here, never a stored session
-/// protocol — sessions carry real protocols only, and the shim's 255 probe
-/// sentinel is matched by summing the counts, never by storing 255).
+/// #16435: `protocol_counts` is the SPARSE set of `(protocol, count)` pairs
+/// for protocols with at least one live member — real buckets carry 1-3
+/// protocols, so the two inline slots cover the common case with no heap
+/// allocation and no 1 KiB zero-fill per distinct identity (the pre-#16435
+/// `[u32; 256]` array cost 1104 B per index slot). 255 is a real
+/// IANA-reserved value here, never a stored session protocol — sessions
+/// carry real protocols only, and the shim's 255 probe sentinel is matched
+/// via `total()`, never by storing 255.
 ///
-/// INVARIANT: `protocol_counts` is exactly the multiset of
-/// `l3_reverse_key_for_forward(member).protocol` over `handles`, maintained
-/// at the same insert/remove sites that mutate `handles`. Counts are only
+/// INVARIANT: `protocol_counts` holds exactly one `(p, n)` pair with
+/// `n > 0` for each protocol `p` carried by `n` members of `handles`
+/// (i.e. the multiset of `l3_reverse_key_for_forward(member).protocol`
+/// over `handles`, with zero-count pairs removed), maintained at the
+/// same insert/remove sites that mutate `handles`. Counts are only
 /// as trustworthy as the slab record's CURRENT nat decision; the probe
 /// re-derives each member's decision and cross-checks (see lookup.rs), so
 /// a stale count can at worst cost a bounded scan, never a wrong verdict.
 struct L3ReverseBucket {
     handles: std::collections::HashSet<u32, HotPathSeededState>,
-    protocol_counts: [u32; 256],
+    protocol_counts: SmallVec<[(u8, u32); 2]>,
 }
 
 impl L3ReverseBucket {
     fn new(hasher: HotPathSeededState) -> Self {
         Self {
             handles: std::collections::HashSet::with_hasher(hasher),
-            protocol_counts: [0; 256],
+            protocol_counts: SmallVec::new(),
         }
     }
 
@@ -96,8 +103,15 @@ impl L3ReverseBucket {
         if !self.handles.insert(handle) {
             return false;
         }
-        self.protocol_counts[protocol as usize] =
-            self.protocol_counts[protocol as usize].saturating_add(1);
+        if let Some((_, count)) = self
+            .protocol_counts
+            .iter_mut()
+            .find(|(p, _)| *p == protocol)
+        {
+            *count = count.saturating_add(1);
+        } else {
+            self.protocol_counts.push((protocol, 1));
+        }
         true
     }
 
@@ -107,14 +121,26 @@ impl L3ReverseBucket {
         if !self.handles.remove(&handle) {
             return false;
         }
-        self.protocol_counts[protocol as usize] =
-            self.protocol_counts[protocol as usize].saturating_sub(1);
+        if let Some(pos) = self
+            .protocol_counts
+            .iter()
+            .position(|(p, _)| *p == protocol)
+        {
+            self.protocol_counts[pos].1 = self.protocol_counts[pos].1.saturating_sub(1);
+            if self.protocol_counts[pos].1 == 0 {
+                self.protocol_counts.swap_remove(pos);
+            }
+        }
         true
     }
 
     /// Members carrying real protocol `protocol` (exact probes).
     fn count_for(&self, protocol: u8) -> u32 {
-        self.protocol_counts[protocol as usize]
+        self.protocol_counts
+            .iter()
+            .find(|(p, _)| *p == protocol)
+            .map(|(_, count)| *count)
+            .unwrap_or(0)
     }
 
     /// All members, any real protocol (255-sentinel probes).
