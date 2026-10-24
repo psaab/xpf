@@ -32,6 +32,29 @@ jobs:
       - name: Self-test the census
         run: bash ./test/incus/harness-census-selftest.sh
 
+  proto:
+    name: Proto header and regen check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Hermetic leg (#16195): header stamps == proto/README.md
+      # constants == go.mod. No network/toolchain beyond checkout.
+      - name: Hermetic proto header check
+        run: make proto-check
+      # CI-only regen leg (#16195): pinned protoc (release zip -- it has
+      # no `go install` path) + pinned plugins regenerate the stubs;
+      # any diff is a .proto edited without regeneration. The script
+      # downloads protoc 3.21.12 and `go install`s the pinned plugins.
+      - name: Install unzip for pinned protoc
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends unzip
+      - name: Pinned proto regen check
+        run: make proto-regen-check
+
   go:
     name: Go build and affected tests
     runs-on: ubuntu-latest

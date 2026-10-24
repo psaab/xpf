@@ -11,6 +11,15 @@ xpf (0.0.0) unstable; urgency=medium
     Activations are published only by Coordinator::update_ha_state;
     demotion arms (valid-lease mint, expired never resurrected) and
     steady-state matching sets are unchanged.
+  * Build: add a hermetic proto header check with CI-only regeneration
+    (#16195). `make proto-check` compares the protoc / protoc-gen-go /
+    protoc-gen-go-grpc stamps in the checked-in headers against the
+    pinned constants recorded in proto/README.md and the protobuf
+    version in go.mod (file reads only, no network/protoc); a second,
+    CI-only `make proto-regen-check` regenerates with the pinned
+    protoc 3.21.12 release zip and pinned plugins and fails on any
+    diff, catching a .proto edited without regeneration independently
+    of the header red. Local regeneration behaviour is unchanged.
 
   * API: metrics descriptor init and Describe are now driven by one
     per-family descriptor table (#16202). The ~36 init calls in

@@ -9,6 +9,30 @@ contract between `cmd/xpfd` (server, via `pkg/grpcapi`) and `cmd/cli`
 `xpf/v1/` — versioned namespace. `BpfrxService` is the only service
 today; ~48 RPCs.
 
+## Pinned generator versions
+
+These constants are the recorded source of truth checked by
+`make proto-check` (`scripts/proto_header_check.py`, hermetic: file
+reads only, no network/protoc). `go install` paths pin the plugins;
+`protoc` itself has no `go install` path, so CI fetches its pinned
+release zip — `go.mod` tool directives cannot pin it.
+
+- `protoc` v3.21.12
+- `protoc-gen-go` v1.36.11
+- `protoc-gen-go-grpc` v1.6.1
+
+`protoc-gen-go` must equal `google.golang.org/protobuf` in `go.mod`
+(the module that ships it). `protoc-gen-go-grpc` is released on the
+`google.golang.org/grpc/cmd/protoc-gen-go-grpc` submodule version line
+(currently v1.6.1), not the `google.golang.org/grpc` module version in
+`go.mod` (v1.78.0), so its constant lives only here and in the header.
+Install the pinned plugins with:
+
+```bash
+go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.1
+```
+
 ## Regeneration
 
 ```bash
@@ -16,8 +40,17 @@ PATH=$PATH:$HOME/go/bin make proto
 ```
 
 Regenerates the Go stubs into `pkg/grpcapi/xpfv1/` (`xpf.pb.go`,
-`xpf_grpc.pb.go`). The generator is in PATH after a Go install of
-`protoc-gen-go` and `protoc-gen-go-grpc`.
+`xpf_grpc.pb.go`) with the ambient `protoc`/plugins. Use the pinned
+versions above, or the regen silently re-stamps the headers.
+
+`make proto-check` (hermetic) fails when a header stamp disagrees
+with the constants above or with `go.mod`. That check cannot see a
+`.proto` edited without regeneration (the stamps still match), so CI
+additionally runs `make proto-regen-check`
+(`scripts/proto_regen_check.sh`): it regenerates with the pinned
+`protoc`/plugins above and fails on any diff against the checked-in
+stubs. That leg needs the pinned toolchain/network and is CI-only —
+never a local prerequisite.
 
 ## RPC categories
 
