@@ -40,6 +40,15 @@ xpf (0.0.0) unstable; urgency=medium
     `no-sequence-check` still bypasses the verdict, and entries with
     no tracked sequence/ACK state are still admitted.
 
+  * NAT: freed PAT ports on small source pools (<=256 ports per
+    address) now sit out a 60 s minimum reuse delay before any new
+    flow can claim them (#16035). Previously the occupancy bit cleared
+    and the port recycled FIFO with no quarantine, so on a tiny or
+    high-churn pool a delayed UDP reply reusing the old
+    (translated address, port, remote) tuple could be delivered to a
+    new owner of the same port. Large pools are unchanged (their
+    FIFO-after-fresh-range reuse already spaces reissue beyond the
+    delay), and no protocol is exempted at the allocator layer.
   * Cluster: an open control-key rotation now ages visibly and alarms
     when forgotten (#16029). UpdateConfig stamps when the current
     additional-authentication-key window opened (keyed on the additional

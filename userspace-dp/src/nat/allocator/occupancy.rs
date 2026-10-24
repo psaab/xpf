@@ -85,6 +85,29 @@ pub(in crate::nat) fn pat_keyed_offset(secret: u64, key: u64, range: u32) -> u32
     (pat_mix(secret ^ pat_mix(key ^ 0x1601_1601_1601_1601)) % u64::from(range)) as u32
 }
 
+/// #16035: minimum reuse delay for freed PAT ports on SMALL ranges.
+///
+/// A freed port's bit clears immediately, but on a small range its
+/// recycle token is not claimable until this long after the free. A
+/// delayed UDP reply for the old flow reusing (translated_ip, port,
+/// remote) during the window therefore cannot land on a new owner of
+/// the same port, because no new owner exists yet. TCP needs no such
+/// delay (the endpoint validates ISN/seq), and neither do large pools:
+/// their FIFO is drained only after the whole fresh range is spent, so
+/// oldest-first reuse already exceeds any plausible segment lifetime.
+/// The delay applies ONLY below [`SMALL_POOL_QUARANTINE_MAX_RANGE`],
+/// formalizing for tiny / high-churn pools the de-facto quarantine
+/// large pools already have — not a blanket 2MSL tax on every pool.
+///
+/// 60 s matches the default UDP session timeout: a reply delayed
+/// longer than the session that produced it would be dropped as
+/// sessionless anyway, so quarantining beyond it buys nothing.
+pub(in crate::nat::allocator) const PAT_PORT_QUARANTINE_NS: u64 = 60_000_000_000;
+/// #16035: ranges at or below this size get the quarantine. Above it,
+/// FIFO-after-fresh-range reuse is already slower than the quarantine
+/// at any churn rate the pool can sustain without exhausting.
+pub(in crate::nat::allocator) const SMALL_POOL_QUARANTINE_MAX_RANGE: u32 = 256;
+
 /// #7174 (M13): the FIFO recycle ring plus a per-offset "already queued" bitset,
 /// held together under ONE mutex so a port can hold AT MOST ONE token.
 ///
@@ -102,7 +125,12 @@ pub(in crate::nat) fn pat_keyed_offset(secret: u64, key: u64, range: u32) -> u32
 /// equally good (the FIFO holds ports, not identities).
 #[derive(Debug)]
 pub(in crate::nat::allocator) struct RecycleRing {
-    pub(in crate::nat::allocator) queue: VecDeque<u16>,
+    /// FIFO tokens: `(port, freed_at_ns)`. `freed_at_ns` is the
+    /// caller-supplied monotonic time of the free that queued the
+    /// token (0 for tokens injected without a clock — test seams; the
+    /// collision-retain re-queue preserves the ORIGINAL free time so a
+    /// retained token does not restart its #16035 quarantine).
+    pub(in crate::nat::allocator) queue: VecDeque<(u16, u64)>,
     /// One bit per in-range offset: set iff a token for that offset is in
     /// `queue`. Sized like `AddressOccupancy::words`, but allocated LAZILY on
     /// the first push: a pool may declare up to `MAX_POOL_PREFIX_HOSTS`
@@ -162,16 +190,58 @@ impl RecycleRing {
     /// Queue a token for `port`. `offset` is `offset_of(port)`: `None` means the
     /// port is out of this address's range (a stale token — `claim` drops it on
     /// pop), which is not deduped because it owns no bit. Returns true iff a
-    /// token was actually queued.
+    /// token was actually queued. Stamps `freed_at_ns = 0` (no clock);
+    /// production frees use [`Self::push_at`].
     pub(in crate::nat::allocator) fn push(&mut self, port: u16, offset: Option<u32>) -> bool {
+        self.push_at(port, offset, 0)
+    }
+
+    /// Queue a token for `port` freed at monotonic `freed_at_ns` (#16035).
+    /// Same dedup contract as [`Self::push`].
+    pub(in crate::nat::allocator) fn push_at(
+        &mut self,
+        port: u16,
+        offset: Option<u32>,
+        freed_at_ns: u64,
+    ) -> bool {
         if let Some(offset) = offset {
             if self.is_queued(offset) {
                 return false;
             }
             self.mark(offset);
         }
-        self.queue.push_back(port);
+        self.queue.push_back((port, freed_at_ns));
         true
+    }
+
+    /// #16035: is a token freed at `freed_at_ns` still quarantined at
+    /// `now_ns` for a pool of `range` ports? Only small ranges
+    /// quarantine (see [`PAT_PORT_QUARANTINE_NS`]), and only tokens
+    /// stamped with a real free time (see the `freed_at_ns != 0`
+    /// guard in the body).
+    pub(in crate::nat::allocator) fn quarantined(
+        range: u32,
+        freed_at_ns: u64,
+        now_ns: u64,
+    ) -> bool {
+        // freed_at_ns == 0 is the "no clock" stamp (test seams and
+        // clock-less internal frees via `push`/`free_recycle`): those
+        // tokens carry no quarantine. Production small-pool frees go
+        // through `free_recycle_at` with a real monotonic time (> 0),
+        // so the delay binds exactly where a clock exists.
+        freed_at_ns != 0
+            && range <= SMALL_POOL_QUARANTINE_MAX_RANGE
+            && now_ns.saturating_sub(freed_at_ns) < PAT_PORT_QUARANTINE_NS
+    }
+
+    /// Re-queue a token that was just popped by the claim walk
+    /// (collision retain, exclusion, or #16035 quarantine). The pop did
+    /// NOT unmark the offset (retain paths `continue` before
+    /// `unmark`), so the dedup bit is still set: push the token
+    /// directly instead of going through `push_at`, whose dedup check
+    /// would drop it as an already-queued duplicate and lose the port.
+    pub(in crate::nat::allocator) fn requeue(&mut self, port: u16, freed_at_ns: u64) {
+        self.queue.push_back((port, freed_at_ns));
     }
 }
 
@@ -348,9 +418,13 @@ impl AddressOccupancy {
     /// offset tried at most once) and fail-closed (None only after
     /// every offset was tried or the address is provably full).
     pub(in crate::nat::allocator) fn claim(&self, key: u64) -> Option<u16> {
-        self.claim_filtered(key, &|_| false)
+        self.claim_at(key, 0)
     }
 
+    /// [`Self::claim`] at monotonic `now_ns` (#16035 quarantine clock).
+    pub(in crate::nat::allocator) fn claim_at(&self, key: u64, now_ns: u64) -> Option<u16> {
+        self.claim_filtered_at(key, &|_| false, now_ns)
+    }
     /// Claim with caller exclusions applied DURING the probe.
     ///
     /// FOLD (#16350 fold-3): `excluded` is consulted for every probed
@@ -365,7 +439,17 @@ impl AddressOccupancy {
         key: u64,
         excluded: &dyn Fn(u32) -> bool,
     ) -> Option<u16> {
-        self.claim_seeded_filtered(key, pat_secret(), excluded)
+        self.claim_filtered_at(key, excluded, 0)
+    }
+
+    /// [`Self::claim_filtered`] at monotonic `now_ns` (#16035).
+    pub(in crate::nat::allocator) fn claim_filtered_at(
+        &self,
+        key: u64,
+        excluded: &dyn Fn(u32) -> bool,
+        now_ns: u64,
+    ) -> Option<u16> {
+        self.claim_seeded_filtered_at(key, pat_secret(), excluded, now_ns)
     }
 
     /// Seed-pinned core of [`Self::claim`] for deterministic tests.
@@ -380,6 +464,17 @@ impl AddressOccupancy {
         secret: u64,
         excluded: &dyn Fn(u32) -> bool,
     ) -> Option<u16> {
+        self.claim_seeded_filtered_at(key, secret, excluded, 0)
+    }
+
+    /// Seed-pinned core of [`Self::claim_filtered_at`] for deterministic tests.
+    pub(in crate::nat::allocator) fn claim_seeded_filtered_at(
+        &self,
+        key: u64,
+        secret: u64,
+        excluded: &dyn Fn(u32) -> bool,
+        now_ns: u64,
+    ) -> Option<u16> {
         if self.range == 0 {
             return None;
         }
@@ -387,9 +482,39 @@ impl AddressOccupancy {
             return None;
         }
         let start = pat_keyed_offset(secret, key, self.range);
+        // #16035: on a small range the keyed probe must not hand a
+        // just-freed port straight back out — its bit is clear, so the
+        // probe would claim it without ever consulting the ring. Read
+        // the ring's free times under its mutex and treat still-
+        // quarantined offsets as excluded for this claim. Large ranges
+        // skip the lock entirely (no quarantine there). The snapshot
+        // can go stale mid-probe (a port freed after it is claimable
+        // slightly early); that race is bounded by the probe duration
+        // and is the same shape as the recycled phase's own race with
+        // a concurrent free, which the exhausted-address test already
+        // accepts as exact-enough.
+        let quarantined: Vec<u64> = if self.range <= SMALL_POOL_QUARANTINE_MAX_RANGE {
+            let recycle = self.recycle.lock().unwrap_or_else(|e| e.into_inner());
+            let mut words = vec![0u64; (self.range as usize).div_ceil(64)];
+            for &(port, freed_at_ns) in &recycle.queue {
+                if RecycleRing::quarantined(self.range, freed_at_ns, now_ns) {
+                    if let Some(off) = self.offset_of(port) {
+                        words[(off / 64) as usize] |= 1u64 << (off % 64);
+                    }
+                }
+            }
+            words
+        } else {
+            Vec::new()
+        };
+        let is_quarantined = |offset: u32| -> bool {
+            quarantined
+                .get((offset / 64) as usize)
+                .is_some_and(|w| w & (1u64 << (offset % 64)) != 0)
+        };
         for i in 0..self.range {
             let offset = start.wrapping_add(i) % self.range;
-            if excluded(offset) {
+            if excluded(offset) || is_quarantined(offset) {
                 continue;
             }
             if self.claim_offset(offset) {
@@ -469,7 +594,7 @@ impl AddressOccupancy {
             return None;
         }
 
-        let mut retained: Vec<(u16, u32)> = Vec::new();
+        let mut retained: Vec<(u16, u32, u64)> = Vec::new();
         let mut claimed = None;
         // #9392: one walk, counted once. This is the denominator, and it is
         // incremented AFTER the `occupied >= range` short-circuit above on
@@ -478,19 +603,26 @@ impl AddressOccupancy {
         // ratio exists to expose.
         self.recycle_scan_walks.fetch_add(1, Ordering::Relaxed);
         let mut pops = 0u64;
-        while let Some(port) = recycle.queue.pop_front() {
+        while let Some((port, freed_at_ns)) = recycle.queue.pop_front() {
             pops += 1;
             // FOLD (#16350 fold-3): an excluded recycled port is retained
             // (re-queued), never claimed for this flow.
             if let Some(off) = self.offset_of(port) {
                 if excluded(off) {
-                    retained.push((port, off));
+                    retained.push((port, off, freed_at_ns));
                     continue;
                 }
             }
             // An out-of-range (stale) port yields None and is DROPPED: it owns
             // no bit, so it was never marked and there is nothing to unmark.
             if let Some(offset) = self.offset_of(port) {
+                // #16035: a small-pool token still inside its minimum
+                // reuse delay is retained with its ORIGINAL free time
+                // (re-queued below), never claimed and never dropped.
+                if RecycleRing::quarantined(self.range, freed_at_ns, now_ns) {
+                    retained.push((port, offset, freed_at_ns));
+                    continue;
+                }
                 recycle.unmark(offset);
                 if self.claim_offset(offset) {
                     claimed = Some(port);
@@ -498,7 +630,7 @@ impl AddressOccupancy {
                 }
                 // Occupied: retained so a transient collision cannot shrink the
                 // pool (062-10).
-                retained.push((port, offset));
+                retained.push((port, offset, freed_at_ns));
             }
         }
         // #9392: ONE relaxed RMW for the whole walk rather than one per pop.
@@ -508,8 +640,9 @@ impl AddressOccupancy {
         // found nothing to recycle", which is a different reading from a walk
         // that never happened.
         self.recycle_scan_pops.fetch_add(pops, Ordering::Relaxed);
-        for (port, offset) in retained {
-            recycle.push(port, Some(offset));
+        for (port, offset, freed_at_ns) in retained {
+            let _ = offset;
+            recycle.requeue(port, freed_at_ns);
         }
         claimed
     }
@@ -519,35 +652,54 @@ impl AddressOccupancy {
     /// measure the ring's retain/scan cost drive this phase directly.
     #[cfg(test)]
     pub(in crate::nat::allocator) fn claim_recycled_only(&self) -> Option<u16> {
+        self.claim_recycled_only_at(0)
+    }
+
+    /// Test-only recycled phase at monotonic `now_ns` (#16035).
+    #[cfg(test)]
+    pub(in crate::nat::allocator) fn claim_recycled_only_at(&self, now_ns: u64) -> Option<u16> {
         let mut recycle = self.recycle.lock().unwrap_or_else(|e| e.into_inner());
         if self.occupied.load(Ordering::Relaxed) >= self.range {
             return None;
         }
-        let mut retained: Vec<(u16, u32)> = Vec::new();
+        let mut retained: Vec<(u16, u32, u64)> = Vec::new();
         let mut claimed = None;
         self.recycle_scan_walks.fetch_add(1, Ordering::Relaxed);
         let mut pops = 0u64;
-        while let Some(port) = recycle.queue.pop_front() {
+        while let Some((port, freed_at_ns)) = recycle.queue.pop_front() {
             pops += 1;
             if let Some(offset) = self.offset_of(port) {
+                if RecycleRing::quarantined(self.range, freed_at_ns, now_ns) {
+                    retained.push((port, offset, freed_at_ns));
+                    continue;
+                }
                 recycle.unmark(offset);
                 if self.claim_offset(offset) {
                     claimed = Some(port);
                     break;
                 }
-                retained.push((port, offset));
+                retained.push((port, offset, freed_at_ns));
             }
         }
         self.recycle_scan_pops.fetch_add(pops, Ordering::Relaxed);
-        for (port, offset) in retained {
-            recycle.push(port, Some(offset));
+        for (port, offset, freed_at_ns) in retained {
+            let _ = offset;
+            recycle.requeue(port, freed_at_ns);
         }
         claimed
     }
 
     /// Free `port`, pushing it onto the FIFO recycle ring (push_back) so it is
     /// reused oldest-first (#3011). Returns true iff the bit was set.
+    /// Stamps the token at time 0; production frees use
+    /// [`Self::free_recycle_at`] so #16035 can age the token.
     pub(in crate::nat::allocator) fn free_recycle(&self, port: u16) -> bool {
+        self.free_recycle_at(port, 0)
+    }
+
+    /// Free `port` at monotonic `now_ns`, stamping its recycle token
+    /// with the free time (#16035). Returns true iff the bit was set.
+    pub(in crate::nat::allocator) fn free_recycle_at(&self, port: u16, now_ns: u64) -> bool {
         let Some(offset) = self.offset_of(port) else {
             return false;
         };
@@ -562,7 +714,7 @@ impl AddressOccupancy {
         if !self.free_offset(offset) {
             return false;
         }
-        recycle.push(port, Some(offset));
+        recycle.push_at(port, Some(offset), now_ns);
         true
     }
 
