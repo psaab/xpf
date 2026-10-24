@@ -653,7 +653,9 @@ type compileOpts struct {
 	// NEUTRALISES every user assignment to a shadowed name (rewritten to
 	// "unauthorized" by neutraliseShadowedLoginAssignments14387) instead of
 	// warn-and-keep, so the inert narrowing cannot hand the user the built-in's
-	// permissions. Built-in-first precedence itself is unchanged (inverting it
+	// permissions. Since #16074 the same neutralisation covers api-auth
+	// users / named keys and the api-auth default class. Built-in-first
+	// precedence itself is unchanged (inverting it
 	// would let a custom class ESCALATE a built-in). Same doctrine as
 	// lenientLoginPackedStatements.
 	lenientLoginClassShadowsBuiltin bool
