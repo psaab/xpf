@@ -329,7 +329,18 @@ const TCP_CLOSING_TIMEOUT_NS: u64 = 30_000_000_000;
 const TCP_RST_TIMEOUT_NS: u64 = 2_000_000_000;
 const DEFAULT_UDP_SESSION_TIMEOUT_NS: u64 = 60_000_000_000;
 const DEFAULT_ICMP_SESSION_TIMEOUT_NS: u64 = 60_000_000_000;
-const OTHER_SESSION_TIMEOUT_NS: u64 = 30_000_000_000;
+/// #16486: Junos protocol-based default timeout table (Security 10.2,
+/// "Understanding Policy Application Timeout Configuration and Lookup",
+/// Table 13, minutes): TCP 30, UDP 1, ICMP 1, OSPF 1, Other 30. OSPF (89)
+/// therefore idles out after 60 s, and every other protocol without a
+/// TCP/UDP/ICMP/OSPF arm (GRE 47, ESP 50, AH 51, SCTP 132, 6in4 41, ...)
+/// after 1800 s — the last fallback after a configured application
+/// `inactivity-timeout` and any predefined-application default. The old
+/// 30 s value reaped such sessions 60x early (e.g. inbound ESP on an idle
+/// non-NAT-T IPsec passthrough tunnel was policy-denied until the inside
+/// peer sent again).
+const OTHER_SESSION_TIMEOUT_NS: u64 = 1_800_000_000_000;
+const OSPF_SESSION_TIMEOUT_NS: u64 = 60_000_000_000;
 
 /// #2220: flow-cache keepalive divisor. A cache-served session is
 /// re-stamped once its idle time reaches `expires_after_ns /
@@ -937,7 +948,7 @@ pub(crate) fn tcp_close_window_ns_with_app(
     }
 }
 const MAX_SESSION_DELTAS: usize = 4096;
-use crate::ip_proto::{PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP};
+use crate::ip_proto::{PROTO_ICMP, PROTO_ICMPV6, PROTO_OSPF, PROTO_TCP, PROTO_UDP};
 // #2151: TCP flag bits from the shared crate::tcp_flags SSOT. Re-exported
 // so the conntrack submodules (install, lookup, expire) keep referencing
 // TCP_FIN/TCP_RST via `super::*`. The session-closing test is the shared
@@ -7165,6 +7176,15 @@ fn session_timeout_ns(
                 timeouts.icmp_ns
             }
         }
+        // #16486: OSPF has its own 60 s row in the Junos protocol table,
+        // distinct from the 1800 s "Other" fallback.
+        PROTO_OSPF => {
+            if established {
+                app_override_ns.unwrap_or(OSPF_SESSION_TIMEOUT_NS)
+            } else {
+                OSPF_SESSION_TIMEOUT_NS
+            }
+        }
         _ => {
             if established {
                 app_override_ns.unwrap_or(OTHER_SESSION_TIMEOUT_NS)
@@ -7178,6 +7198,12 @@ fn session_timeout_ns(
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+// #16486: other-protocol (GRE/ESP/AH/SCTP/6in4) sessions default to
+// 1800 s and OSPF to 60 s per the Junos protocol timeout table.
+#[cfg(test)]
+#[path = "other_proto_timeout_16486_tests.rs"]
+mod other_proto_timeout_16486_tests;
 
 // #7342: the CLOSING vs TIME_WAIT close-state split and the three
 // `security flow tcp-session` windows it makes configurable.

@@ -1229,7 +1229,7 @@ fn session_timeout_ns_honors_app_override() {
         OTHER_SESSION_TIMEOUT_NS
     );
     // Promoted other-protocol flows use the per-app override, distinct from
-    // the 30 s fallback (and TCP/UDP/ICMP defaults).
+    // the 1800 s fallback (#16486) (and TCP/UDP/ICMP defaults).
     let other_app = 90_000_000_000u64;
     assert_eq!(
         session_timeout_ns(u8::MAX, 0, false, &to, Some(other_app), None),
