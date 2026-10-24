@@ -66,7 +66,7 @@ fn v6_plain_meta_8670(
         l3_offset: 14,
         l4_offset: 54,
         payload_offset: 54,
-        pkt_len: (frame_len - 14) as u16,
+        pkt_len: frame_len as u16,
         addr_family: libc::AF_INET6 as u8,
         protocol: proto,
         config_generation: 7,

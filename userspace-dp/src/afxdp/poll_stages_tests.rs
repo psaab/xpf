@@ -158,7 +158,7 @@ fn tcp_v4_syn_meta_with_l2(frame: &[u8], vlan: Vlan) -> UserspaceDpMeta {
         l3_offset: l3,
         l4_offset: l3 + 20,
         payload_offset: l3 + 40,
-        pkt_len: frame.len() as u16 - l3,
+        pkt_len: frame.len() as u16,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
         tcp_flags: TCP_FLAG_SYN,

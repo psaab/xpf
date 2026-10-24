@@ -1334,7 +1334,7 @@ fn txn_flow_cache_hit_replays_input_filter_then_count_3777() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let meta0 = txn_meta_v4(24, TCP_FLAG_SYN, (frame0.len() - 14) as u16);
+    let meta0 = txn_meta_v4(24, TCP_FLAG_SYN, frame0.len() as u16);
     txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -1367,7 +1367,7 @@ fn txn_flow_cache_hit_replays_input_filter_then_count_3777() {
         0x10_u8,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let meta1 = txn_meta_v4(24, 0x10_u8, (frame1.len() - 14) as u16);
+    let meta1 = txn_meta_v4(24, 0x10_u8, frame1.len() as u16);
     txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -1400,7 +1400,7 @@ fn txn_flow_cache_hit_replays_input_filter_then_count_3777() {
         0x10_u8,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let meta2 = txn_meta_v4(24, 0x10_u8, (frame2.len() - 14) as u16);
+    let meta2 = txn_meta_v4(24, 0x10_u8, frame2.len() as u16);
     let (_, dbg2) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -1469,7 +1469,7 @@ fn txn_flow_cache_seed_charges_static_input_then_count_10566() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, (syn.len() - 14) as u16);
+    let syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, syn.len() as u16);
     txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -1507,7 +1507,7 @@ fn txn_flow_cache_seed_charges_static_input_then_count_10566() {
         0x10,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let ack_meta = txn_meta_v4(24, 0x10, (ack.len() - 14) as u16);
+    let ack_meta = txn_meta_v4(24, 0x10, ack.len() as u16);
     txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -1614,7 +1614,7 @@ fn txn_flow_cache_per_packet_input_declines_cache_10566() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, (syn.len() - 14) as u16);
+    let syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, syn.len() as u16);
     txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -1645,7 +1645,7 @@ fn txn_flow_cache_per_packet_input_declines_cache_10566() {
         0x10,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let ack_meta = txn_meta_v4(24, 0x10, (ack.len() - 14) as u16);
+    let ack_meta = txn_meta_v4(24, 0x10, ack.len() as u16);
     txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -1737,7 +1737,7 @@ fn txn_flow_cache_udp_miss_seed_suppresses_duplicate_input_count_10566() {
         Ipv4Addr::new(8, 8, 8, 8),
         64,
     );
-    let mut udp_meta = txn_meta_v4(24, 0, (udp.len() - 14) as u16);
+    let mut udp_meta = txn_meta_v4(24, 0, udp.len() as u16);
     udp_meta.protocol = crate::ip_proto::PROTO_UDP;
     udp_meta.tcp_flags = 0;
 
@@ -1870,7 +1870,7 @@ fn txn_flow_cache_seed_charges_folded_input_count_once_10566() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, (syn.len() - 14) as u16);
+    let syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, syn.len() as u16);
     txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -1897,7 +1897,7 @@ fn txn_flow_cache_seed_charges_folded_input_count_once_10566() {
         0x10,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let ack_meta = txn_meta_v4(24, 0x10, (ack.len() - 14) as u16);
+    let ack_meta = txn_meta_v4(24, 0x10, ack.len() as u16);
     let _ = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -2050,7 +2050,7 @@ fn txn_flow_cache_hit_reclassifies_ba_dscp_per_packet_3778() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let mut meta0 = txn_meta_v4(24, TCP_FLAG_SYN, (frame0.len() - 14) as u16);
+    let mut meta0 = txn_meta_v4(24, TCP_FLAG_SYN, frame0.len() as u16);
     meta0.dscp = 0;
     txn_run_descriptor_checked(
         &mut binding,
@@ -2077,7 +2077,7 @@ fn txn_flow_cache_hit_reclassifies_ba_dscp_per_packet_3778() {
         0x10_u8,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let mut meta1 = txn_meta_v4(24, 0x10_u8, (frame1.len() - 14) as u16);
+    let mut meta1 = txn_meta_v4(24, 0x10_u8, frame1.len() as u16);
     meta1.dscp = 0;
     txn_run_descriptor_checked(
         &mut binding,
@@ -2115,7 +2115,7 @@ fn txn_flow_cache_hit_reclassifies_ba_dscp_per_packet_3778() {
         0x10_u8,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let mut meta2 = txn_meta_v4(24, 0x10_u8, (frame2.len() - 14) as u16);
+    let mut meta2 = txn_meta_v4(24, 0x10_u8, frame2.len() as u16);
     meta2.dscp = 46;
     txn_run_descriptor_checked(
         &mut binding,
@@ -2280,7 +2280,7 @@ fn txn_flow_cache_hit_reclassifies_ba_queue_and_lp_rewrite_per_packet_11430() {
             crate::afxdp::tests_support::TEST_LAN_MAC,
         );
         set_ipv4_dscp(&mut syn, seed_dscp);
-        let mut syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, (syn.len() - 14) as u16);
+        let mut syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, syn.len() as u16);
         syn_meta.dscp = seed_dscp;
         txn_run_descriptor_checked(
             &mut binding,
@@ -2301,7 +2301,7 @@ fn txn_flow_cache_hit_reclassifies_ba_queue_and_lp_rewrite_per_packet_11430() {
             crate::afxdp::tests_support::TEST_LAN_MAC,
         );
         set_ipv4_dscp(&mut seed, seed_dscp);
-        let mut seed_meta = txn_meta_v4(24, 0x10_u8, (seed.len() - 14) as u16);
+        let mut seed_meta = txn_meta_v4(24, 0x10_u8, seed.len() as u16);
         seed_meta.dscp = seed_dscp;
         txn_run_descriptor_checked(
             &mut binding,
@@ -2331,7 +2331,7 @@ fn txn_flow_cache_hit_reclassifies_ba_queue_and_lp_rewrite_per_packet_11430() {
                 crate::afxdp::tests_support::TEST_LAN_MAC,
             );
             set_ipv4_dscp(&mut frame, dscp);
-            let mut meta = txn_meta_v4(24, 0x10_u8, (frame.len() - 14) as u16);
+            let mut meta = txn_meta_v4(24, 0x10_u8, frame.len() as u16);
             meta.dscp = dscp;
             txn_run_descriptor_checked(
                 &mut binding,
@@ -2445,7 +2445,7 @@ fn txn_flow_cache_hit_ttl_check_precedes_egress_accounting_3779() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let meta0 = txn_meta_v4(24, TCP_FLAG_SYN, (frame0.len() - 14) as u16);
+    let meta0 = txn_meta_v4(24, TCP_FLAG_SYN, frame0.len() as u16);
     txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -2478,7 +2478,7 @@ fn txn_flow_cache_hit_ttl_check_precedes_egress_accounting_3779() {
         0x10_u8,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let meta1 = txn_meta_v4(24, 0x10_u8, (frame1.len() - 14) as u16);
+    let meta1 = txn_meta_v4(24, 0x10_u8, frame1.len() as u16);
     txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -2519,7 +2519,7 @@ fn txn_flow_cache_hit_ttl_check_precedes_egress_accounting_3779() {
     let ip_sum = checksum16(&frame2[14..34]);
     frame2[24] = (ip_sum >> 8) as u8;
     frame2[25] = ip_sum as u8;
-    let meta2 = txn_meta_v4(24, 0x10_u8, (frame2.len() - 14) as u16);
+    let meta2 = txn_meta_v4(24, 0x10_u8, frame2.len() as u16);
     txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -2857,7 +2857,7 @@ fn txn_flow_cache_hit_ttl_expired_does_not_charge_three_color_policer_4422() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let meta0 = txn_meta_v4(24, TCP_FLAG_SYN, (frame0.len() - 14) as u16);
+    let meta0 = txn_meta_v4(24, TCP_FLAG_SYN, frame0.len() as u16);
     txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -2882,7 +2882,7 @@ fn txn_flow_cache_hit_ttl_expired_does_not_charge_three_color_policer_4422() {
         0x10_u8,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let meta1 = txn_meta_v4(24, 0x10_u8, (frame1.len() - 14) as u16);
+    let meta1 = txn_meta_v4(24, 0x10_u8, frame1.len() as u16);
     txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -2917,7 +2917,7 @@ fn txn_flow_cache_hit_ttl_expired_does_not_charge_three_color_policer_4422() {
     let ip_sum = checksum16(&frame2[14..34]);
     frame2[24] = (ip_sum >> 8) as u8;
     frame2[25] = ip_sum as u8;
-    let meta2 = txn_meta_v4(24, 0x10_u8, (frame2.len() - 14) as u16);
+    let meta2 = txn_meta_v4(24, 0x10_u8, frame2.len() as u16);
     txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -2945,7 +2945,7 @@ fn txn_flow_cache_hit_ttl_expired_does_not_charge_three_color_policer_4422() {
         0x10_u8,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let meta3 = txn_meta_v4(24, 0x10_u8, (frame3.len() - 14) as u16);
+    let meta3 = txn_meta_v4(24, 0x10_u8, frame3.len() as u16);
     txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -3013,7 +3013,7 @@ fn txn_pair_admitted_at_cap_minus_two_refused_at_cap_minus_one() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let meta2 = txn_meta_v4(24, TCP_FLAG_SYN, (frame2.len() - 14) as u16);
+    let meta2 = txn_meta_v4(24, TCP_FLAG_SYN, frame2.len() as u16);
     let (_b2, d2) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -3193,7 +3193,7 @@ fn txn_failed_reply_repair_forwards_uncached_then_self_heals_below_cap() {
         0x10,
         crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let mut meta = txn_meta_v4(12, 0x10, (reply.len() - 14) as u16);
+    let mut meta = txn_meta_v4(12, 0x10, reply.len() as u16);
     meta.ingress_vlan_id = 80;
     let (batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
@@ -3222,7 +3222,7 @@ fn txn_failed_reply_repair_forwards_uncached_then_self_heals_below_cap() {
     // Below cap, the next reply re-fires the repair and installs the
     // reverse session — the self-heal property the cache gate restores.
     sessions.set_max_sessions_for_test(16);
-    let mut meta2 = txn_meta_v4(12, 0x10, (reply.len() - 14) as u16);
+    let mut meta2 = txn_meta_v4(12, 0x10, reply.len() as u16);
     meta2.ingress_vlan_id = 80;
     let (batch2, dbg2) = txn_run_descriptor_checked(
         &mut binding,
@@ -3507,7 +3507,7 @@ fn txn_flow_cache_delneigh_resolves_live_ecmp_alternate_11375() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, (syn.len() - 14) as u16);
+    let syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, syn.len() as u16);
     let (_, syn_dbg) = txn_run_descriptor_with_neighbors(
         &mut binding,
         &mut sessions,
@@ -3532,7 +3532,7 @@ fn txn_flow_cache_delneigh_resolves_live_ecmp_alternate_11375() {
         0x10,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let ack_meta = txn_meta_v4(24, 0x10, (ack.len() - 14) as u16);
+    let ack_meta = txn_meta_v4(24, 0x10, ack.len() as u16);
     let (_, ack_dbg) = txn_run_descriptor_with_neighbors(
         &mut binding,
         &mut sessions,
@@ -3762,7 +3762,7 @@ fn missing_neighbor_recycle_exactly_once_pin() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let meta2 = txn_meta_v4(24, TCP_FLAG_SYN, (frame2.len() - 14) as u16);
+    let meta2 = txn_meta_v4(24, TCP_FLAG_SYN, frame2.len() as u16);
     let (_batch2, dbg2) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -3910,7 +3910,7 @@ fn run_6837_descriptor(
         frame
     };
 
-    let mut meta = txn_meta_v4(24, flags, (frame.len() - 14) as u16);
+    let mut meta = txn_meta_v4(24, flags, frame.len() as u16);
     meta.protocol = protocol;
     meta.tcp_flags = flags;
     // The addresses matter: `metadata_tuple_complete` returns false for an
@@ -3997,7 +3997,7 @@ fn flowless_gre_ipv4_frame(dst: Ipv4Addr) -> (Vec<u8>, UserspaceDpMeta) {
     frame[25] = (ip_sum & 0xff) as u8;
     frame.extend_from_slice(&[0u8; 20]);
 
-    let mut meta = txn_meta_v4(24, 0, (frame.len() - 14) as u16);
+    let mut meta = txn_meta_v4(24, 0, frame.len() as u16);
     meta.protocol = crate::ip_proto::PROTO_GRE;
     meta.flow_src_addr[..4].copy_from_slice(&src.octets());
     meta.flow_dst_addr[..4].copy_from_slice(&dst.octets());
@@ -5382,7 +5382,7 @@ fn scoped_l4_snat_candidate_fences_unknown_protocol_fragment_10679() {
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     frame[23] = crate::ip_proto::PROTO_ESP;
-    let mut meta = txn_meta_v4(24, 0, (frame.len() - 14) as u16);
+    let mut meta = txn_meta_v4(24, 0, frame.len() as u16);
     meta.protocol = u8::MAX;
     meta.l4_offset = 34;
     meta.payload_offset = 34;
@@ -5489,7 +5489,7 @@ fn permitted_flowless_no_route_fragment_uses_fragment_nat_counter_10679() {
     );
     frame[23] = crate::ip_proto::PROTO_ESP;
     frame[30..34].copy_from_slice(&[8, 8, 8, 8]);
-    let mut meta = txn_meta_v4(24, 0, (frame.len() - 14) as u16);
+    let mut meta = txn_meta_v4(24, 0, frame.len() as u16);
     meta.protocol = u8::MAX;
     meta.l4_offset = 34;
     meta.payload_offset = 34;
@@ -5895,7 +5895,7 @@ fn txn_static_input_count_charged_on_non_cacheable_session_hit_13641() {
             flags,
             crate::afxdp::tests_support::TEST_LAN_MAC,
         );
-        let meta = txn_meta_v4(24, flags, (frame.len() - 14) as u16);
+        let meta = txn_meta_v4(24, flags, frame.len() as u16);
         txn_run_descriptor_checked(
             binding, sessions, &forwarding, &ha_state, &frame, meta, true,
         )

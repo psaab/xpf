@@ -225,7 +225,7 @@ mod try_enqueue_resolver_tests {
             l3_offset: 14,
             l4_offset: 54,
             payload_offset: 74,
-            pkt_len: (frame.len() - 14) as u16,
+            pkt_len: frame.len() as u16,
             addr_family: libc::AF_INET6 as u8,
             protocol: PROTO_TCP,
             tcp_flags: TCP_FLAG_SYN,

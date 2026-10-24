@@ -51,7 +51,6 @@ fn split_v4_outer_15095(frame: &[u8], split_payload: usize) -> (Vec<u8>, Vec<u8>
 
 fn frag_meta_15095(frame: &[u8], first: bool) -> UserspaceDpMeta {
     let mut meta = gre_to_self_outer_meta(0, frame.len());
-    meta.pkt_len = frame.len() as u16 - 14;
     if !first {
         meta.protocol = crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
         meta.flow_src_port = 0;

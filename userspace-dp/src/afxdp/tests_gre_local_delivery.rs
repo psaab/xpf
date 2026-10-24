@@ -412,7 +412,7 @@ fn poll_descriptor_junos_host_permit_established_hit_counts_once() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, (syn.len() - 14) as u16);
+    let syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, syn.len() as u16);
     let (_b, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -444,7 +444,7 @@ fn poll_descriptor_junos_host_permit_established_hit_counts_once() {
         0x10_u8,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let ack_meta = txn_meta_v4(24, 0x10_u8, (ack.len() - 14) as u16);
+    let ack_meta = txn_meta_v4(24, 0x10_u8, ack.len() as u16);
     for i in 0..3 {
         let (_b, dbg) = txn_run_descriptor_checked(
             &mut binding,
@@ -556,7 +556,7 @@ fn local_delivery_session_hit_counts_bound_admitting_rule_across_insert_reorder_
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, (syn.len() - 14) as u16);
+    let syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, syn.len() as u16);
     let (_b, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -590,7 +590,7 @@ fn local_delivery_session_hit_counts_bound_admitting_rule_across_insert_reorder_
         0x10_u8,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let ack_meta = txn_meta_v4(24, 0x10_u8, (ack.len() - 14) as u16);
+    let ack_meta = txn_meta_v4(24, 0x10_u8, ack.len() as u16);
     let (_b, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -655,7 +655,7 @@ fn local_delivery_denied_hit_charges_only_denying_rule_15932() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, (syn.len() - 14) as u16);
+    let syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, syn.len() as u16);
     let (_b, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -700,7 +700,7 @@ fn local_delivery_denied_hit_charges_only_denying_rule_15932() {
         0x10_u8,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
-    let ack_meta = txn_meta_v4(24, 0x10_u8, (ack.len() - 14) as u16);
+    let ack_meta = txn_meta_v4(24, 0x10_u8, ack.len() as u16);
     let (_b, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,

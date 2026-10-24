@@ -1,4 +1,20 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Userspace-dp: fix #16444 fixture `pkt_len` drift and harden its guard.
+    The #6883 contract (shim stamps the FULL frame length, #8581) was
+    violated by `resolver_enqueue_tests.rs` (the master-red site), the
+    shared `txn_meta_v6` helper and 50+ sibling fixtures spelling the
+    subtraction as `(frame_len - 14)`, `frame.len() as u16 - 14`, `- l3`,
+    `(inner.len() - 14)` or via `txn_meta_v4(.., (len - 14) as u16)` —
+    all now stamp the full buffer length, so CoS/policer/flow-cache byte
+    paths are exercised at production lengths (byte-counter assertions
+    read `meta.pkt_len`, so they follow automatically). GRE fixture
+    helpers `gre_to_self_outer_meta{,_v6}` were likewise stamping
+    `frame_len - l3`. The guard no longer matches three literals: it
+    flags any comment-stripped `pkt_len` value or `txn_meta_v4` third
+    argument containing a header subtraction, while non-`pkt_len`
+    wire-length invariants (IPv4 total / IPv6 payload length) stay
+    legal; its stale "nothing gates on pkt_len" header is corrected.
+    Red on each reintroduced spelling, green on the fixed tree.
 
   * CLI: show security flow session renders stored session provenance
     (#16110). Each row now carries Origin (local / cluster-synced, from
