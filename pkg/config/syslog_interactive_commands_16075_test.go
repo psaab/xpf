@@ -92,10 +92,51 @@ func TestInteractiveCommandsWarnsOncePerDestination16075(t *testing.T) {
 	}
 }
 
+func TestInteractiveCommandsWarnsOnCommaSeparatedSelector16075(t *testing.T) {
+	// rsyslog's selector grammar accepts a comma-separated facility list,
+	// and the compiler preserves it as one authored selector value such as
+	// auth,interactive-commands. Membership must inspect each list member;
+	// whole-token equality missed this accepted spelling entirely.
+	tests := []struct {
+		name string
+		line string
+		dest string
+	}{
+		{
+			name: "file leading member",
+			line: "set system syslog file audit interactive-commands,daemon info",
+			dest: "file audit",
+		},
+		{
+			name: "host trailing member",
+			line: "set system syslog host 10.0.0.1 auth,interactive-commands info",
+			dest: "host 10.0.0.1",
+		},
+		{
+			name: "user middle member",
+			line: "set system syslog user * auth,interactive-commands,daemon notice",
+			dest: "user *",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := compileSyslogSinks(t, tc.line)
+			got := interactiveWarnings16075(cfg)
+			if len(got) != 1 {
+				t.Fatalf("want exactly 1 #16075 warning for comma-separated selector, got %v (all warnings: %v)", got, ValidateConfig(cfg))
+			}
+			if !strings.Contains(got[0], tc.dest) {
+				t.Errorf("warning %q must name destination %q", got[0], tc.dest)
+			}
+		})
+	}
+}
+
 func TestInteractiveCommandsSilentForOtherFacilities16075(t *testing.T) {
 	cfg := compileSyslogSinks(t,
 		"set system syslog file messages daemon info",
 		"set system syslog file messages change-log any",
+		"set system syslog file messages auth,daemon info",
 		"set system syslog host 10.0.0.1 daemon info",
 		"set system syslog user * auth warning",
 	)

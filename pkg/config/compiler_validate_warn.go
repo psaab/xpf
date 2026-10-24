@@ -1224,13 +1224,25 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 	// config naming the facility on several destinations warns once per
 	// destination rather than once per selector.
 	if cfg.System.Syslog != nil {
+		// Facility selectors may name a comma-separated list
+		// (`auth,interactive-commands` is one selector naming two
+		// facilities), so membership is tested per list member, not by
+		// whole-token equality.
+		hasInteractive := func(facility string) bool {
+			for _, name := range strings.Split(facility, ",") {
+				if strings.TrimSpace(name) == "interactive-commands" {
+					return true
+				}
+			}
+			return false
+		}
 		var dests []string
 		for _, h := range cfg.System.Syslog.Hosts {
 			if h == nil {
 				continue
 			}
 			for _, sel := range h.Facilities {
-				if sel.Facility == "interactive-commands" {
+				if hasInteractive(sel.Facility) {
 					dests = append(dests, fmt.Sprintf("host %s", h.Address))
 					break
 				}
@@ -1241,7 +1253,7 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 				continue
 			}
 			for _, sel := range f.Selectors {
-				if sel.Facility == "interactive-commands" {
+				if hasInteractive(sel.Facility) {
 					dests = append(dests, fmt.Sprintf("file %s", f.Name))
 					break
 				}
@@ -1252,7 +1264,7 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 				continue
 			}
 			for _, sel := range u.Selectors {
-				if sel.Facility == "interactive-commands" {
+				if hasInteractive(sel.Facility) {
 					dests = append(dests, fmt.Sprintf("user %s", u.User))
 					break
 				}
@@ -1264,7 +1276,6 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 				"system syslog %s interactive-commands: accepted but NOT implemented — xpf emits no per-command record to the interactive-commands facility (local7), so this destination will receive no CLI audit records. Interactive CLI activity is not audited to syslog; the commit journal records commits and destructive actions with principal, but non-destructive verbs are not journalled. Do not rely on this facility for command auditing (#16075)", d))
 		}
 	}
-
 
 	if cfg.System.Services != nil && cfg.System.Services.DNSProxyConfigured {
 		warnings = append(warnings, "system services dns dns-proxy configured but DNS proxy/forwarder runtime is not implemented")
