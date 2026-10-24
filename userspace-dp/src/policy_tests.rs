@@ -1797,6 +1797,46 @@ fn go_unsupported_sentinel_fails_closed() {
 }
 
 #[test]
+fn carrier_16134_parse_protocol_alias_and_canonical_cells() {
+    // #16134 (c): the policy carrier resolves every Junos alias the Go SSOT
+    // (appid.ProtocolNumber) resolves, and "0" is HOPOPT — Some(0), distinct
+    // from an unknown token's None (never default 0 for unknown).
+    assert_eq!(parse_protocol("junos-tcp-any"), Some(PROTO_TCP));
+    assert_eq!(parse_protocol("junos-ping"), Some(PROTO_ICMP));
+    assert_eq!(parse_protocol("junos-ospf"), Some(PROTO_OSPF));
+    assert_eq!(parse_protocol("junos-ip-in-ip"), Some(PROTO_IPIP));
+    assert_eq!(parse_protocol("0"), Some(0));
+    assert_eq!(parse_protocol("bogus-proto"), None);
+    // #16134: non-canonical numerics the Go SSOT rejects must not decode to
+    // a real protocol here (the pre-fix `parse::<u8>()` fallback accepted
+    // "+6"). Reverting parse_protocol to that fallback flips this RED.
+    assert_eq!(parse_protocol("+6"), None);
+    assert_eq!(parse_protocol("006"), Some(PROTO_TCP));
+}
+
+#[test]
+fn carrier_16134_noncanonical_numeric_term_rejects_whole_snapshot() {
+    // #16134 (a): a corrupt/non-Go snapshot carrying "+6" must drop the term
+    // and reject the WHOLE snapshot via dropped_any — decoding it to TCP
+    // would let a DENY the Go mirror called unrepresentable silently narrow.
+    let store = PolicyCounterStore::default();
+    let result = parse_policy_state_with_counters(
+        "deny",
+        &[proto_only_app_rule("plus-six", "+6")],
+        &test_zone_name_to_id(),
+        &[],
+        &store,
+    );
+    assert!(
+        matches!(
+            result,
+            Err(SnapshotIntegrityError::UnrepresentableApplicationProtocol { .. })
+        ),
+        "a non-canonical numeric protocol must fail closed, got {result:?}"
+    );
+}
+
+#[test]
 fn unknown_rule_action_rejects_whole_snapshot() {
     // #3365 RED-on-revert: a per-rule action string that is not
     // permit/reject/deny must reject the WHOLE snapshot. Pre-fix `parse_action`

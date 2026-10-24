@@ -243,6 +243,18 @@ fn proto_number_resolver_matches_known_tokens() {
     assert_eq!(proto_number("256"), None);
 }
 
+/// #16134: the DNAT carrier shares the strict resolver — a non-canonical
+/// numeric ("+6") the Go SSOT rejects must not decode to TCP, and an
+/// unknown token stays None (never default 0, which would alias HOPOPT).
+#[test]
+fn carrier_16134_proto_number_canonical_numeric_cells() {
+    use crate::ip_proto::proto_number;
+    assert_eq!(proto_number("+6"), None);
+    assert_eq!(proto_number("006"), Some(PROTO_TCP));
+    assert_eq!(proto_number("bogus"), None);
+    assert_eq!(proto_number(""), None);
+}
+
 /// #2505: the shared resolver must cover the FULL appid.ProtocolNumber
 /// acceptance set — the named protocols and the specific junos-* aliases the
 /// Go filter commit gate (filterProtocolResolvable) accepts. A firewall
