@@ -422,6 +422,30 @@ fn reserve_synced_source_nat_allocation_with_holder(
     {
         return false;
     }
+    // #16034: the static twin of the NPTv6 guard above, for the
+    // interface domain. A dynamic interface-mode rewrite whose
+    // (address, port) a static external owns must refuse BEFORE the
+    // interface-first-match route books it below (it never reaches the
+    // pool scan's per-candidate static checks). Pool-mode rewrites are
+    // left to those per-candidate checks. Port: the import's translated
+    // port, falling back to the preserved source port — the tuple the
+    // interface booking would claim. Only known-dynamic imports
+    // (Some(false)) are refused: genuine static (Some(true)) and
+    // unknown-provenance imports keep the #15191 no-reservation success
+    // below (unknown provenance consults the local static table there).
+    if !nat.nptv6
+        && domains.source_nat_static == Some(false)
+        && rules.iter().any(|r| r.interface_mode)
+        && rules.iter().any(|r| {
+            r.iface_static_externals
+                .as_deref()
+                .is_some_and(|v| {
+                    v.owns(rewrite_src, nat.rewrite_src_port.unwrap_or(key.src_port))
+                })
+        })
+    {
+        return false;
+    }
     // #15191: a static-NAT external or an NPTv6 external owns no
     // allocator on either node, so there is nothing to reserve and
     // nothing to refuse. Booking it into the interface registry (the
@@ -714,6 +738,22 @@ fn reserve_synced_interface_identity(
             rewrite_src,
             None,
         )
+    }) {
+        crate::nat::INTERFACE_SNAT_SYNC_IDENTITY_CONFLICT_DROPS.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    // #16034: the static twin of the NPTv6 check above. An
+    // interface-domain import whose (address, translated port) a static
+    // external owns collides with the static's unconditional publish —
+    // refuse before booking. Genuine static-provenance imports already
+    // took the #15191 no-reservation success in the caller, so they
+    // never reach here; unknown provenance is likewise answered there.
+    // The port check is exact (port-mapped statics own only their
+    // fixed port, whole-address statics every port).
+    if rules.iter().any(|r| {
+        r.iface_static_externals
+            .as_deref()
+            .is_some_and(|v| v.owns(rewrite_src, translated_port))
     }) {
         crate::nat::INTERFACE_SNAT_SYNC_IDENTITY_CONFLICT_DROPS.fetch_add(1, Ordering::Relaxed);
         return false;

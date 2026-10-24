@@ -768,6 +768,9 @@ mod tests_nat64_tunnel;
 #[path = "tests_nptv6_pool_overlap_16015.rs"]
 mod tests_nptv6_pool_overlap_16015;
 #[cfg(test)]
+#[path = "tests_static_iface_overlap_16034.rs"]
+mod tests_static_iface_overlap_16034;
+#[cfg(test)]
 #[path = "tests_routing_domain_7160.rs"]
 mod tests_routing_domain_7160;
 #[cfg(test)]

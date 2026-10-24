@@ -66,6 +66,15 @@ xpf (0.0.0) unstable; urgency=medium
     reserves honour the delay (a synced flow re-joining its own
     untombstoned lease on the same port is exempt), and collision
     requeues restore the dedup bit so no duplicate token can form.
+  * NAT: interface SNAT can no longer mint on a static-NAT external
+    (#16034). Strict commit already rejected the pair; the Rust
+    dataplane now refuses such interface mints (address-only and PAT,
+    including after an attempted PAT) and dynamic HA-synced interface
+    imports with InterfaceIdentityExhausted on tolerated installs
+    (lenient load / peer-sync), where the collision previously
+    published a duplicate wire tuple. A port-mapped static is PAT'd
+    around and refused only on its exact port; genuine static imports
+    keep their no-reservation success. The NPTv6 leg was #16015.
   * Cluster: an open control-key rotation now ages visibly and alarms
     when forgotten (#16029). UpdateConfig stamps when the current
     additional-authentication-key window opened (keyed on the additional

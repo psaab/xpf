@@ -151,6 +151,53 @@ fn pat_identity_excluded(
     peer || iface || static_owns || nptv6_owns
 }
 
+/// #16034: does any static external cover `rewrite_src` at ANY port, for
+/// an interface mint? Consults the per-build memoized
+/// [`crate::nat::InterfaceStaticView`] carried on interface rules (and
+/// touched pool-rule siblings) — the mint path never rescans the whole
+/// static table. Own view first, then the identical shared view on
+/// siblings; the `rules` scan is over view presence, not table entries.
+fn interface_static_view<'a>(
+    rule: &'a SourceNatRule,
+    rules: &'a [SourceNatRule],
+) -> Option<&'a crate::nat::InterfaceStaticView> {
+    rule.iface_static_externals.as_deref().or_else(|| {
+        rules
+            .iter()
+            .find_map(|r| r.iface_static_externals.as_deref())
+    })
+}
+
+fn interface_static_covers(
+    rule: &SourceNatRule,
+    rules: &[SourceNatRule],
+    rewrite_src: IpAddr,
+) -> bool {
+    interface_static_view(rule, rules).is_some_and(|v| v.covers_address(rewrite_src))
+}
+
+/// Whole-address/block exclusion: a static covering `rewrite_src` with no
+/// fixed port owns every port, so no PAT candidate can succeed. Checked
+/// BEFORE entering the interface allocator (fold item 2) so a
+/// whole-address static refuses in O(view) instead of walking the
+/// allocator's whole port range candidate-by-candidate.
+fn interface_static_owns_all_ports(
+    rule: &SourceNatRule,
+    rules: &[SourceNatRule],
+    rewrite_src: IpAddr,
+) -> bool {
+    interface_static_view(rule, rules).is_some_and(|v| v.owns_all_ports(rewrite_src))
+}
+
+fn interface_static_owns_at(
+    rule: &SourceNatRule,
+    rules: &[SourceNatRule],
+    rewrite_src: IpAddr,
+    port: u16,
+) -> bool {
+    interface_static_view(rule, rules).is_some_and(|v| v.owns(rewrite_src, port))
+}
+
 fn reject_peer_owned_address_only_identity(
     rule: &SourceNatRule,
     flow: SourceNatFlowKey,
@@ -626,6 +673,17 @@ fn match_source_nat_result_for_tuple_inner(
                     SourceNatFailureReason::InterfaceOverlapDraining,
                 ));
             }
+            // #16034 fold (2): fail fast on a whole-address/block static
+            // BEFORE entering the interface allocator. It owns every port
+            // on this egress, so the PAT walk below could only exhaust
+            // after probing the allocator's whole candidate range.
+            if interface_static_owns_all_ports(rule, rules, rewrite_src) {
+                crate::nat::INTERFACE_SNAT_IDENTITY_EXHAUSTION.fetch_add(1, Ordering::Relaxed);
+                return SourceNatLookup::Unavailable(SourceNatFailure::for_rule(
+                    rule,
+                    SourceNatFailureReason::InterfaceIdentityExhausted,
+                ));
+            }
             let Some(alloc) = iface_allocs.allocator_for(rewrite_src) else {
                 // The registry cannot create state for this address and
                 // nothing was reclaimable. Fail CLOSED rather than fall back
@@ -675,7 +733,13 @@ fn match_source_nat_result_for_tuple_inner(
                     ip: rewrite_src,
                     port: flow.src_port,
                 };
-                let peer_owned = super::nat64_ports::peer_owns_for_interface(
+                // #16034: address-only interface mint vs static. The
+                // mint cannot move its port, so any static covering this
+                // address (whole-address: every port; port-mapped: its
+                // fixed port, which the preserved source port can equal)
+                // refuses — fail closed like the peer check below.
+                let peer_owned = interface_static_covers(rule, rules, rewrite_src)
+                    || super::nat64_ports::peer_owns_for_interface(
                     rule.iface_overlap_owners.as_deref(),
                     &alloc,
                     flow,
@@ -722,6 +786,14 @@ fn match_source_nat_result_for_tuple_inner(
                 .clone()
                 .or_else(|| rules.iter().find_map(|r| r.overlap_owners.clone()));
             let peer_owns = |port: u16| {
+                // #16034: PAT interface mint vs static — full wire-tuple
+                // check per candidate port. A whole-address static owns
+                // every port (must_pat, and every PAT candidate excluded
+                // ⇒ exhaustion ⇒ refused); a port-mapped static owns
+                // only its fixed port (PAT around it, refuse only if
+                // the allocator lands exactly there — the post-mint
+                // recheck below then refuses).
+                interface_static_owns_at(rule, rules, rewrite_src, port) || {
                 let cand = TranslatedTuple {
                     ip: rewrite_src,
                     port,
@@ -739,6 +811,7 @@ fn match_source_nat_result_for_tuple_inner(
                         cand,
                     )
                 })
+                }
             };
             let must_pat = peer_owns(flow.src_port);
             return match alloc.allocate_interface_identity_excluding(

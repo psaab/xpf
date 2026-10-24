@@ -299,6 +299,12 @@ pub(crate) struct SourceNatRule {
     /// rule's pool — every strict-accepted config — so the mint path pays
     /// one `Option::is_none`. Wired by `wire_static_overlap_peers`.
     pub(crate) static_externals: Option<Arc<crate::nat::StaticExternalIdentities>>,
+    /// #16034 fold: per-build memoized static view for interface mints
+    /// (see `InterfaceStaticView`). Resolved once in
+    /// `wire_static_overlap_peers` as an address index over the static
+    /// table, so the mint path never rescans the whole table. `None`
+    /// when the static table is empty.
+    pub(crate) iface_static_externals: Option<Arc<crate::nat::InterfaceStaticView>>,
     /// #16015: installed NPTv6 zoned external prefixes covering this
     /// rule's v6 pool (see `wire_nptv6_overlap_peers`). NPTv6 publishes
     /// statelessly with the port unchanged, so a mint inside the prefix

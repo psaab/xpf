@@ -389,7 +389,7 @@ pub(crate) use source::{SourceNatMatchSnapshot, process_source_nat_match_counter
 // #6979: reachable from the afxdp coordinator test that binds the retirement
 // wiring; the primitive itself stays covered by nat::tests_pool.
 pub(crate) use allocator::TranslatedTuple;
-pub(crate) use static_nat::{StaticExternalIdentities, StaticNatEntry, StaticNatTable};
+pub(crate) use static_nat::{InterfaceStaticView, StaticExternalIdentities, StaticNatEntry, StaticNatTable};
 pub(crate) use status::source_nat_pool_statuses;
 
 /// NatDecision is the cross-cutting output type for every NAT

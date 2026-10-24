@@ -320,6 +320,10 @@ impl StaticExternalIdentities {
     pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+    /// Number of installed static external identities in this view.
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
 
     /// Would a static publish emit `(ip, port)`? Port-mapped entries collide
     /// only on their fixed external port; whole-address entries collide on
@@ -357,6 +361,103 @@ impl StaticExternalIdentities {
             .contains(ip),
             None => e.external_ip == ip,
         })
+    }
+
+    /// #16034 fold: the external ports (`None` = whole-address, owns every
+    /// port) of every entry covering `ip`, in table order. The interface
+    /// wiring pass resolves this once per egress candidate and stores the
+    /// small result in the per-build memoized view; the mint path then
+    /// never rescans the whole table.
+    pub(crate) fn entries_covering(&self, ip: IpAddr) -> Vec<Option<u16>> {
+        self.entries
+            .iter()
+            .filter(|e| match e.block {
+                Some((len, _)) => NatPrefix {
+                    base: e.external_ip,
+                    len,
+                }
+                .contains(ip),
+                None => e.external_ip == ip,
+            })
+            .map(|e| e.external_port)
+            .collect()
+    }
+
+    /// #16034 fold: build the per-build memoized interface view (see
+    /// `InterfaceStaticView`). One pass over the entries; host externals
+    /// index by address, block externals keep their prefix.
+    pub(crate) fn interface_view(&self) -> InterfaceStaticView {
+        let mut view = InterfaceStaticView {
+            total_entries: self.entries.len(),
+            ..Default::default()
+        };
+        for e in &self.entries {
+            match e.block {
+                Some((len, _)) => view.blocks.push(NatPrefix {
+                    base: e.external_ip,
+                    len,
+                }),
+                None => view
+                    .by_ip
+                    .entry(e.external_ip)
+                    .or_default()
+                    .push(e.external_port),
+            }
+        }
+        view
+    }
+}
+
+/// #16034 fold: per-build memoized static view for interface mints.
+///
+/// Built ONCE per forwarding build from the installed static identities:
+/// host externals are indexed by external address and block externals are
+/// kept as the (small) prefix list, so the interface mint path consults
+/// only this index — it never rescans the whole static table, and a
+/// sibling pool rule no longer re-derives the same answer per mint.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct InterfaceStaticView {
+    /// host external address -> external ports of its static entries
+    /// (`None` value = whole-address static, owns every port).
+    by_ip: std::collections::HashMap<IpAddr, Vec<Option<u16>>>,
+    /// Block externals (prefix base + len); each owns every port on
+    /// every address in its prefix.
+    blocks: Vec<NatPrefix>,
+    /// Total static entries examined at build time (diagnostics/tests).
+    total_entries: usize,
+}
+
+impl InterfaceStaticView {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.by_ip.is_empty() && self.blocks.is_empty()
+    }
+
+    pub(crate) fn entry_count(&self) -> usize {
+        self.total_entries
+    }
+
+    /// Any static (whole-address, block, or port-mapped) covers `ip`.
+    pub(crate) fn covers_address(&self, ip: IpAddr) -> bool {
+        self.by_ip.contains_key(&ip) || self.blocks.iter().any(|b| b.contains(ip))
+    }
+
+    /// A whole-address or block static covers `ip` — it owns EVERY port,
+    /// so no interface mint on this address can ever succeed.
+    pub(crate) fn owns_all_ports(&self, ip: IpAddr) -> bool {
+        self.by_ip
+            .get(&ip)
+            .is_some_and(|ports| ports.iter().any(Option::is_none))
+            || self.blocks.iter().any(|b| b.contains(ip))
+    }
+
+    /// Would a static publish emit `(ip, port)`? Whole-address/block
+    /// entries own every port; port-mapped entries only their fixed port.
+    pub(crate) fn owns(&self, ip: IpAddr, port: u16) -> bool {
+        self.owns_all_ports(ip)
+            || self
+                .by_ip
+                .get(&ip)
+                .is_some_and(|ports| ports.iter().any(|p| *p == Some(port)))
     }
 }
 
