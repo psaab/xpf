@@ -322,65 +322,78 @@ test-shim-run:
 # default, which keeps `make test-go` byte-identical to what it ran before.
 GOTESTJSON ?=
 
+# #16467: every test-go leg runs unconditionally in one recipe and a
+# trailing `exit $$status` replays any failure — the same #10496 aggregate
+# semantics as `test`. Previously each leg was its own recipe line, so a
+# red `go vet` or build-tag census (run before the test legs) aborted the
+# recipe and `go test ./...` never ran: one tagged-file rot removed the
+# whole Go suite's signal instead of reddening one leg beside it. The
+# census now runs last, after the test legs, with its status captured
+# like every other leg — no leg is weakened or skipped, and a failure in
+# any leg still fails test-go.
+# go vet gate, tree-wide (#9590): the tree is vet-clean, so any new
+# diagnostic in any package fails make test-go. It catches the #2224
+# atomic.Uint64-copy class wherever it reappears, not only in
+# pkg/flowexport. An exception must be a named, reasoned carve-out,
+# never a quiet re-narrowing of this scope.
+# #9922 F-159: build-tag census — every *_test.go with a pre-package
+# //go:build constraint gets a `go vet -tags` compile leg, so a tagged
+# file (today: functional1944) cannot rot outside the default gate.
+# No 77-guard needed: `go vet` above already requires go.
+# #8231: GOTESTJSON=<path> truncates the side file ONCE per invocation,
+# before the first test leg (the initializer line below, inside the one
+# recipe). The legs APPEND (test-go has two), so without this a second
+# `make test-go GOTESTJSON=x` would attribute over the union of both
+# runs — a stale name from the previous run reads exactly like a
+# current failure. scripts/mutate.sh truncates per CELL for the same
+# reason. GOTESTJSON additionally APPENDS the `go test -json` event
+# stream to that file, so the mutation driver can attribute a KILLED
+# verdict to a NAME without bypassing this target and losing the vet
+# and -race legs it carries. Unset (the default) execs `go test ./...`
+# unchanged — the shared gate must not acquire a jq dependency or a
+# new failure mode.
+# #6626 + #14649: the tree-reading census packages MUST run uncached.
+#
+# pkg/refactoraudit's hard gate measures the branch's own diff against
+# its merge base by shelling out to scripts/refactoring-audit-touched.sh.
+# pkg/docsref (#6615) and pkg/memlockcensus (#8371) shell out to
+# `git grep` and read only the files it lists. None of those inputs --
+# the working tree, the index, the script, the git grep output -- is a
+# `go test` cache input, so a REAL threshold crossing changes
+# nothing the cache hashes and `./...` above returns "ok (cached)" — the
+# gate passes without running. Reproduced: a new 2004-LOC production file
+# (a genuine [REFACTOR] crossing, exactly the event this gate exists to
+# catch) returned "ok (cached)" and FAILED under -count=1.
+# Reproduced for docsref (#14649) in a linked worktree: a warm cache
+# plus a new dangling citation in a tracked doc returned "ok (cached)"
+# even after `git add`, and FAILED under -count=1. In a primary clone
+# an intervening git op busts the cache by accident (docsref Stats
+# .git, which is a directory there); in a linked worktree .git is a
+# gitdir pointer file ordinary git ops do not rewrite, so masking is
+# reliable in the standard worktree workflow.
+#
+# #6623 widened the window rather than creating it: under the old
+# byte-exact artifact compare the tracked artifact churned constantly and
+# busted the cache by accident, so a stale pass survived one commit instead
+# of many.
+#
+# Scoped to these packages, not the whole suite: measured at ~10.7s uncached
+# against ~0.1s cached, which is noise on a suite that already runs
+# minutes, whereas -count=1 on ./... would forfeit caching everywhere.
+# Deliberately NOT narrowed further with -run: a name predicate silently
+# stops covering the next tree-reading test added here, which is the
+# #6743 r2-N3 lesson recorded in pkg/refactoraudit's own doc.go.
+# Any future package whose tests read the tree outside the compiled
+# sources (git grep, git ls-files, subprocess census) MUST be added
+# to this leg, not given a cached-only gate.
 test-go: test-race-dp
-	# go vet gate, tree-wide (#9590): the tree is vet-clean, so any new
-	# diagnostic in any package fails make test-go. It catches the #2224
-	# atomic.Uint64-copy class wherever it reappears, not only in
-	# pkg/flowexport. An exception must be a named, reasoned carve-out,
-	# never a quiet re-narrowing of this scope.
-	$(GO) vet ./...
-	# #9922 F-159: build-tag census — every *_test.go with a pre-package
-	# //go:build constraint gets a `go vet -tags` compile leg, so a tagged
-	# file (today: functional1944) cannot rot outside the default gate.
-	# No 77-guard needed: `go vet` above already requires go.
-	sh scripts/go-buildtag-census.sh
-	# #8231: truncate the side file ONCE per invocation, before the first leg.
-	# The legs below APPEND (test-go has two), so without this a second
-	# `make test-go GOTESTJSON=x` would attribute over the union of both runs —
-	# a stale name from the previous run reads exactly like a current failure.
-	# scripts/mutate.sh truncates per CELL for the same reason.
-	@[ -z "$(GOTESTJSON)" ] || : > "$(GOTESTJSON)"
-	# #8231: GOTESTJSON=<path> additionally APPENDS the `go test -json` event
-	# stream to that file, so the mutation driver can attribute a KILLED verdict
-	# to a NAME without bypassing this target and losing the vet and -race legs
-	# it carries. Unset (the default) execs `go test ./...` unchanged — the
-	# shared gate must not acquire a jq dependency or a new failure mode.
-	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" ./...
-	# #6626 + #14649: the tree-reading census packages MUST run uncached.
-	#
-	# pkg/refactoraudit's hard gate measures the branch's own diff against
-	# its merge base by shelling out to scripts/refactoring-audit-touched.sh.
-	# pkg/docsref (#6615) and pkg/memlockcensus (#8371) shell out to
-	# `git grep` and read only the files it lists. None of those inputs --
-	# the working tree, the index, the script, the git grep output -- is a
-	# `go test` cache input, so a REAL threshold crossing changes
-	# nothing the cache hashes and `./...` above returns "ok (cached)" — the
-	# gate passes without running. Reproduced: a new 2004-LOC production file
-	# (a genuine [REFACTOR] crossing, exactly the event this gate exists to
-	# catch) returned "ok (cached)" and FAILED under -count=1.
-	# Reproduced for docsref (#14649) in a linked worktree: a warm cache
-	# plus a new dangling citation in a tracked doc returned "ok (cached)"
-	# even after `git add`, and FAILED under -count=1. In a primary clone
-	# an intervening git op busts the cache by accident (docsref Stats
-	# .git, which is a directory there); in a linked worktree .git is a
-	# gitdir pointer file ordinary git ops do not rewrite, so masking is
-	# reliable in the standard worktree workflow.
-	#
-	# #6623 widened the window rather than creating it: under the old
-	# byte-exact artifact compare the tracked artifact churned constantly and
-	# busted the cache by accident, so a stale pass survived one commit instead
-	# of many.
-	#
-	# Scoped to these packages, not the whole suite: measured at ~10.7s uncached
-	# against ~0.1s cached, which is noise on a suite that already runs
-	# minutes, whereas -count=1 on ./... would forfeit caching everywhere.
-	# Deliberately NOT narrowed further with -run: a name predicate silently
-	# stops covering the next tree-reading test added here, which is the
-	# #6743 r2-N3 lesson recorded in pkg/refactoraudit's own doc.go.
-	# Any future package whose tests read the tree outside the compiled
-	# sources (git grep, git ls-files, subprocess census) MUST be added
-	# to this leg, not given a cached-only gate.
-	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" -count=1 ./pkg/refactoraudit/ ./pkg/docsref/ ./pkg/memlockcensus/ ./pkg/dataplane/
+	@status=0; \
+	$(GO) vet ./... || status=$$?; \
+	[ -z "$(GOTESTJSON)" ] || : > "$(GOTESTJSON)"; \
+	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" ./... || status=$$?; \
+	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" -count=1 ./pkg/refactoraudit/ ./pkg/docsref/ ./pkg/memlockcensus/ ./pkg/dataplane/ || status=$$?; \
+	sh scripts/go-buildtag-census.sh || status=$$?; \
+	exit $$status
 
 # #2114 scoped race gate: the dataplane-cell publication races
 # (bootstrap-exit clear vs sampler/watcher/confirm-timer readers) and the

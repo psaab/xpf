@@ -35,7 +35,7 @@ func TestFunctional1944(t *testing.T) {
 	})
 
 	// Build the user struct the daemon would compile from config.
-	user := &config.LoginUser{Name: name, Class: "operator", EncryptedPassword: hash}
+	user := &config.LoginUser{Name: name, Class: "operator", EncryptedPassword: config.NewSecret(hash)}
 
 	// This password-only fixture intentionally uses bash so `su -c true` can
 	// verify PAM without requiring a running CLI daemon. It does not exercise
@@ -75,7 +75,7 @@ func TestFunctional1944(t *testing.T) {
 
 	// (b) Remove the directive → D2 lock (not orphan). The marker UID
 	// matches the current account, so reconcileUserPassword must lock.
-	user.EncryptedPassword = ""
+	user.EncryptedPassword = config.NewSecret("")
 	d.reconcileUserPassword(user)
 	cur, ok = currentShadowHash(name)
 	if !ok {
