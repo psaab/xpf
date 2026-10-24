@@ -1,4 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Docs: fix contradicted HA-timing / day-0 / NAT64 citations (#16466).
+    CLAUDE.md and docs/feature-coverage.md cited
+    compiler_system.go:3132-3137 and heartbeat.go:1916-1960, ranges past
+    both files' ends (the logic is compileChassis in compiler_chassis.go
+    and DefaultHeartbeatInterval/checkTimeout in heartbeat.go); they now
+    cite symbols. README no longer claims the day-0 builder always
+    commit-checks — it does so only when an xpfd binary is found, else
+    it warns and the appliance validates at first boot.
+    userspace-dp/src/FEATURES.md now names the nat64/ directory instead
+    of the deleted flat nat64.rs. A new docsref gate resolves .go line
+    citations in those two docs so the rot cannot silently return.
   * Image/packaging: stop reserving the large-ring hugepage pool by
     default (#16455). etc/sysctl.d/99-xpf-hugepages.conf shipped
     vm.nr_hugepages = 1440 (2.8 GiB) verbatim through the bake and the

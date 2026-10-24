@@ -115,7 +115,9 @@ BIOS). The day-0 config is supplied as a CD-ROM ISO.
 
 ```bash
 # Build the day-0 config drive from your xpf.conf (optional but recommended;
-# the builder runs the real commit-check and refuses an invalid config):
+# when an xpfd binary is found, the builder runs the real commit-check and
+# refuses an invalid config; without xpfd it warns and skips build-host
+# validation — the appliance still validates at first boot):
 python3 scripts/image/make_config_drive.py [-n 0|1] -o day0.iso my-xpf.conf
 
 # Boot directly with libvirt (NIC order = positional interface names):
