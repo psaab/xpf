@@ -1,6 +1,9 @@
 #!/bin/sh
 # selftest-daemon-kernel_15241.sh — run the pkg/daemon host-inbound
-# real-kernel cells (#15241 A58-06: 9637 x2, 11409, 12034, 12229, 12087).
+# real-kernel cells (#15241 A58-06: 9637 x2, 11409, 12034, 12229, 12087)
+# plus the 21 enterPrivateNetns9813 cells (#16470: mgmt-VRF routes, RI VRF
+# membership, DHCP in the mgmt VRF, #9506 fence readback, fabric/RI
+# rebinds, backup-router and static-route kernel cells).
 #
 # Why this leg exists at all: the #9637 ingress, #11409 unzoned-ingress,
 # #9637 reinject-TUN, #12034 shared-VRF, #12229 lifeline deny-all and
@@ -22,8 +25,11 @@
 # forcing covered pkg/routing only).
 #
 # The predicate runs the issue-numbered cells in pkg/daemon. The guard
-# below pins all six kernel cells BY NAME, because a `-run` predicate
+# below pins all 27 kernel cells BY NAME, because a `-run` predicate
 # that rots matches nothing and reports a clean pass over an empty set.
+# The 21 #16470 names are the daemonKernelCells16470 registry in
+# pkg/daemon/daemon_kernel_cells_16470_test.go; its AST census fails if
+# a new enterPrivateNetns9813 caller is not registered and added here.
 #
 # Exit codes follow the selftest contract: 0 = PASS, 77 = SKIP (a tool
 # or capability this host does not have), anything else = FAIL.
@@ -89,15 +95,15 @@ fi
 # -json=false pins text output: the guard below scans anchored `=== RUN`
 # records, and an inherited GOFLAGS=-json would embed them in JSON Output
 # records and false-red every cell as "did not run".
-# XPF_REQUIRE_NETNS=1 turns every tool/netns skip arm in the six kernel
-# cells into a failure (#15241 A58-06); without it an environment that
+# XPF_REQUIRE_NETNS=1 turns every tool/netns skip arm in the 27 kernel
+# cells into a failure (#15241 A58-06, #16470); without it an environment that
 # silently degrades would read green. unshare propagates the environment
 # into the namespace.
-out=$(XPF_REQUIRE_NETNS=1 unshare -rn "$GO" test -json=false -count=1 -v -run 'TestHostInboundIngressZoneVerdictsOnRealKernel9637|TestHostInboundUnzonedIngressVerdictsOnRealKernel11409|TestHostInboundReinjectTunVerdicts9637|TestHostInboundSharedVRFMasterIngressAndFineDeny12034|TestLifelineSharedDenyAllVerdictsOnRealKernel12229|TestRIMemberSecureTunnelUnitBindsToVRF12087' ./pkg/daemon/ 2>&1)
+out=$(XPF_REQUIRE_NETNS=1 unshare -rn "$GO" test -json=false -count=1 -v -run 'TestHostInboundIngressZoneVerdictsOnRealKernel9637|TestHostInboundUnzonedIngressVerdictsOnRealKernel11409|TestHostInboundReinjectTunVerdicts9637|TestHostInboundSharedVRFMasterIngressAndFineDeny12034|TestLifelineSharedDenyAllVerdictsOnRealKernel12229|TestRIMemberSecureTunnelUnitBindsToVRF12087|TestMgmtDNSRulesSteerOnlyDefaultContextHostLookups11385|TestHostInboundDHCPManagementVRFDelivery12127|TestHostInboundDHCPManagementVRFColdBootProductionFence12127|TestHostInboundDHCPManagementVRFGapDelivery12127|TestReassertBindsTheFabricOverlayInTheKernel_9813|TestHostInputFenceLiveReadbackAndRestore9506|TestMgmtVRFReassertRepairsOutOfBandUnbindInKernel11448|TestBackupRouterSteadyStateOnKernel12583|TestBackupRouterFollowsGatewayMoveOnKernel12583|TestBackupRouterUnreachableGatewayFailsClosedOnKernel12583|TestBackupRouterLeavesNonManagementLinkOnKernel12583|TestBackupRouterRemovedOnKernel14972|TestMgmtStaticECMPLifecycleInKernel12539|TestMgmtStaticRouteAliasDeduplicationInstallsInKernel12084|TestMgmtStaticRouteResolvedGatewayAliasesInstallInKernel_12084|TestMgmtStaticRouteTolerantNoInstallActionInstallsGateway_12084|TestBareRIMemberEnslavesItsVLANChildren9754|TestBareCrossSpelledMemberEnslavesVLANChildrenInKernel10174|TestDashMemberEnslavesVLANChildInKernel9815|TestRIMemberIsReBoundInTheKernel_9813|TestRethRIMemberBindsLocalPhysicalInKernel12059' ./pkg/daemon/ 2>&1)
 rc=$?
 
 fail=0
-for cell in TestHostInboundIngressZoneVerdictsOnRealKernel9637 TestHostInboundUnzonedIngressVerdictsOnRealKernel11409 TestHostInboundReinjectTunVerdicts9637 TestHostInboundSharedVRFMasterIngressAndFineDeny12034 TestLifelineSharedDenyAllVerdictsOnRealKernel12229 TestRIMemberSecureTunnelUnitBindsToVRF12087; do
+for cell in TestHostInboundIngressZoneVerdictsOnRealKernel9637 TestHostInboundUnzonedIngressVerdictsOnRealKernel11409 TestHostInboundReinjectTunVerdicts9637 TestHostInboundSharedVRFMasterIngressAndFineDeny12034 TestLifelineSharedDenyAllVerdictsOnRealKernel12229 TestRIMemberSecureTunnelUnitBindsToVRF12087 TestMgmtDNSRulesSteerOnlyDefaultContextHostLookups11385 TestHostInboundDHCPManagementVRFDelivery12127 TestHostInboundDHCPManagementVRFColdBootProductionFence12127 TestHostInboundDHCPManagementVRFGapDelivery12127 TestReassertBindsTheFabricOverlayInTheKernel_9813 TestHostInputFenceLiveReadbackAndRestore9506 TestMgmtVRFReassertRepairsOutOfBandUnbindInKernel11448 TestBackupRouterSteadyStateOnKernel12583 TestBackupRouterFollowsGatewayMoveOnKernel12583 TestBackupRouterUnreachableGatewayFailsClosedOnKernel12583 TestBackupRouterLeavesNonManagementLinkOnKernel12583 TestBackupRouterRemovedOnKernel14972 TestMgmtStaticECMPLifecycleInKernel12539 TestMgmtStaticRouteAliasDeduplicationInstallsInKernel12084 TestMgmtStaticRouteResolvedGatewayAliasesInstallInKernel_12084 TestMgmtStaticRouteTolerantNoInstallActionInstallsGateway_12084 TestBareRIMemberEnslavesItsVLANChildren9754 TestBareCrossSpelledMemberEnslavesVLANChildrenInKernel10174 TestDashMemberEnslavesVLANChildInKernel9815 TestRIMemberIsReBoundInTheKernel_9813 TestRethRIMemberBindsLocalPhysicalInKernel12059; do
 	if ! printf '%s\n' "$out" | grep -q "^=== RUN   $cell\$"; then
 		echo "FAIL: $cell did not run — the -run predicate has rotted"
 		fail=1
@@ -107,6 +113,15 @@ for cell in TestHostInboundIngressZoneVerdictsOnRealKernel9637 TestHostInboundUn
 		fail=1
 	fi
 done
+# Any indented SKIP is a subtest that did not run: two parents above
+# (TestMgmtStaticRouteResolvedGatewayAliasesInstallInKernel_12084,
+# TestBareCrossSpelledMemberEnslavesVLANChildrenInKernel10174) report
+# PASS while every subtest skips, so the top-level check cannot see them
+# (#16470). Under XPF_REQUIRE_NETNS a skipped subtest is a forcing break.
+if printf '%s\n' "$out" | grep -q "^    --- SKIP: "; then
+	echo "FAIL: a daemon kernel subtest SKIPPED under XPF_REQUIRE_NETNS=1 — the forcing broke"
+	fail=1
+fi
 if [ "$rc" -ne 0 ]; then
 	echo "FAIL: go test exited $rc"
 	fail=1
@@ -115,5 +130,5 @@ if [ "$fail" -ne 0 ]; then
 	printf '%s\n' "$out" | sed 's/^/      /'
 	exit 1
 fi
-echo "PASS: all six daemon kernel cells ran and passed"
+echo "PASS: all 27 daemon kernel cells ran and passed"
 exit 0

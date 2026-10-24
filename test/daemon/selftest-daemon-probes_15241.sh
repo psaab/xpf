@@ -12,8 +12,9 @@
 # forcing env set in the caller's environment and unshare absent, the
 # leg fails (77) at its own probe instead of silently passing -- and a
 # forced `go test` with unshare absent fails inside the test. The final
-# cells pin the output flag and exercise the by-name guard with canned
-# output: nothing here builds Go or creates a netns.
+# cells pin the output flag and exercise the by-name guard (including
+# the #16470 subtest-SKIP guard) with canned output: nothing here
+# builds Go or creates a netns.
 #
 # Hermetic and fast: fixture dirs under mktemp, absolute-path symlinks (a
 # `command -v` hit on a shell function is a bare name, and a symlink to a
@@ -193,6 +194,48 @@ cat > "$d/canned.txt" <<'EOF'
 --- PASS: TestLifelineSharedDenyAllVerdictsOnRealKernel12229 (0.01s)
 === RUN   TestRIMemberSecureTunnelUnitBindsToVRF12087
 --- PASS: TestRIMemberSecureTunnelUnitBindsToVRF12087 (0.01s)
+=== RUN   TestMgmtDNSRulesSteerOnlyDefaultContextHostLookups11385
+--- PASS: TestMgmtDNSRulesSteerOnlyDefaultContextHostLookups11385 (0.01s)
+=== RUN   TestHostInboundDHCPManagementVRFDelivery12127
+--- PASS: TestHostInboundDHCPManagementVRFDelivery12127 (0.01s)
+=== RUN   TestHostInboundDHCPManagementVRFColdBootProductionFence12127
+--- PASS: TestHostInboundDHCPManagementVRFColdBootProductionFence12127 (0.01s)
+=== RUN   TestHostInboundDHCPManagementVRFGapDelivery12127
+--- PASS: TestHostInboundDHCPManagementVRFGapDelivery12127 (0.01s)
+=== RUN   TestReassertBindsTheFabricOverlayInTheKernel_9813
+--- PASS: TestReassertBindsTheFabricOverlayInTheKernel_9813 (0.01s)
+=== RUN   TestHostInputFenceLiveReadbackAndRestore9506
+--- PASS: TestHostInputFenceLiveReadbackAndRestore9506 (0.01s)
+=== RUN   TestMgmtVRFReassertRepairsOutOfBandUnbindInKernel11448
+--- PASS: TestMgmtVRFReassertRepairsOutOfBandUnbindInKernel11448 (0.01s)
+=== RUN   TestBackupRouterSteadyStateOnKernel12583
+--- PASS: TestBackupRouterSteadyStateOnKernel12583 (0.01s)
+=== RUN   TestBackupRouterFollowsGatewayMoveOnKernel12583
+--- PASS: TestBackupRouterFollowsGatewayMoveOnKernel12583 (0.01s)
+=== RUN   TestBackupRouterUnreachableGatewayFailsClosedOnKernel12583
+--- PASS: TestBackupRouterUnreachableGatewayFailsClosedOnKernel12583 (0.01s)
+=== RUN   TestBackupRouterLeavesNonManagementLinkOnKernel12583
+--- PASS: TestBackupRouterLeavesNonManagementLinkOnKernel12583 (0.01s)
+=== RUN   TestBackupRouterRemovedOnKernel14972
+--- PASS: TestBackupRouterRemovedOnKernel14972 (0.01s)
+=== RUN   TestMgmtStaticECMPLifecycleInKernel12539
+--- PASS: TestMgmtStaticECMPLifecycleInKernel12539 (0.01s)
+=== RUN   TestMgmtStaticRouteAliasDeduplicationInstallsInKernel12084
+--- PASS: TestMgmtStaticRouteAliasDeduplicationInstallsInKernel12084 (0.01s)
+=== RUN   TestMgmtStaticRouteResolvedGatewayAliasesInstallInKernel_12084
+--- PASS: TestMgmtStaticRouteResolvedGatewayAliasesInstallInKernel_12084 (0.01s)
+=== RUN   TestMgmtStaticRouteTolerantNoInstallActionInstallsGateway_12084
+--- PASS: TestMgmtStaticRouteTolerantNoInstallActionInstallsGateway_12084 (0.01s)
+=== RUN   TestBareRIMemberEnslavesItsVLANChildren9754
+--- PASS: TestBareRIMemberEnslavesItsVLANChildren9754 (0.01s)
+=== RUN   TestBareCrossSpelledMemberEnslavesVLANChildrenInKernel10174
+--- PASS: TestBareCrossSpelledMemberEnslavesVLANChildrenInKernel10174 (0.01s)
+=== RUN   TestDashMemberEnslavesVLANChildInKernel9815
+--- PASS: TestDashMemberEnslavesVLANChildInKernel9815 (0.01s)
+=== RUN   TestRIMemberIsReBoundInTheKernel_9813
+--- PASS: TestRIMemberIsReBoundInTheKernel_9813 (0.01s)
+=== RUN   TestRethRIMemberBindsLocalPhysicalInKernel12059
+--- PASS: TestRethRIMemberBindsLocalPhysicalInKernel12059 (0.01s)
 EOF
 cat > "$d/go" <<'EOF'
 #!/bin/sh
@@ -203,7 +246,7 @@ cat "$CANNED_GO_OUTPUT"
 EOF
 chmod +x "$d/go"
 out=$(CANNED_GO_OUTPUT="$d/canned.txt" GOFLAGS=-json PATH="$d" sh "$LEG" 2>&1); rc=$?
-if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q "all six daemon kernel cells ran and passed"; then
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q "all 27 daemon kernel cells ran and passed"; then
 	ok "-json=false pinned: fake go run passes the by-name guard"
 else
 	bad "-json=false pin: rc=$rc: $out"
@@ -225,16 +268,200 @@ cat > "$d/canned.txt" <<'EOF'
 --- PASS: TestLifelineSharedDenyAllVerdictsOnRealKernel12229 (0.01s)
 === RUN   TestRIMemberSecureTunnelUnitBindsToVRF12087
 --- PASS: TestRIMemberSecureTunnelUnitBindsToVRF12087 (0.01s)
+=== RUN   TestMgmtDNSRulesSteerOnlyDefaultContextHostLookups11385
+--- PASS: TestMgmtDNSRulesSteerOnlyDefaultContextHostLookups11385 (0.01s)
+=== RUN   TestHostInboundDHCPManagementVRFDelivery12127
+--- PASS: TestHostInboundDHCPManagementVRFDelivery12127 (0.01s)
+=== RUN   TestHostInboundDHCPManagementVRFColdBootProductionFence12127
+--- PASS: TestHostInboundDHCPManagementVRFColdBootProductionFence12127 (0.01s)
+=== RUN   TestHostInboundDHCPManagementVRFGapDelivery12127
+--- PASS: TestHostInboundDHCPManagementVRFGapDelivery12127 (0.01s)
+=== RUN   TestReassertBindsTheFabricOverlayInTheKernel_9813
+--- PASS: TestReassertBindsTheFabricOverlayInTheKernel_9813 (0.01s)
+=== RUN   TestHostInputFenceLiveReadbackAndRestore9506
+--- PASS: TestHostInputFenceLiveReadbackAndRestore9506 (0.01s)
+=== RUN   TestMgmtVRFReassertRepairsOutOfBandUnbindInKernel11448
+--- PASS: TestMgmtVRFReassertRepairsOutOfBandUnbindInKernel11448 (0.01s)
+=== RUN   TestBackupRouterSteadyStateOnKernel12583
+--- PASS: TestBackupRouterSteadyStateOnKernel12583 (0.01s)
+=== RUN   TestBackupRouterFollowsGatewayMoveOnKernel12583
+--- PASS: TestBackupRouterFollowsGatewayMoveOnKernel12583 (0.01s)
+=== RUN   TestBackupRouterUnreachableGatewayFailsClosedOnKernel12583
+--- PASS: TestBackupRouterUnreachableGatewayFailsClosedOnKernel12583 (0.01s)
+=== RUN   TestBackupRouterLeavesNonManagementLinkOnKernel12583
+--- PASS: TestBackupRouterLeavesNonManagementLinkOnKernel12583 (0.01s)
+=== RUN   TestBackupRouterRemovedOnKernel14972
+--- PASS: TestBackupRouterRemovedOnKernel14972 (0.01s)
+=== RUN   TestMgmtStaticECMPLifecycleInKernel12539
+--- PASS: TestMgmtStaticECMPLifecycleInKernel12539 (0.01s)
+=== RUN   TestMgmtStaticRouteAliasDeduplicationInstallsInKernel12084
+--- PASS: TestMgmtStaticRouteAliasDeduplicationInstallsInKernel12084 (0.01s)
+=== RUN   TestMgmtStaticRouteResolvedGatewayAliasesInstallInKernel_12084
+--- PASS: TestMgmtStaticRouteResolvedGatewayAliasesInstallInKernel_12084 (0.01s)
+=== RUN   TestMgmtStaticRouteTolerantNoInstallActionInstallsGateway_12084
+--- PASS: TestMgmtStaticRouteTolerantNoInstallActionInstallsGateway_12084 (0.01s)
+=== RUN   TestBareRIMemberEnslavesItsVLANChildren9754
+--- PASS: TestBareRIMemberEnslavesItsVLANChildren9754 (0.01s)
+=== RUN   TestBareCrossSpelledMemberEnslavesVLANChildrenInKernel10174
+--- PASS: TestBareCrossSpelledMemberEnslavesVLANChildrenInKernel10174 (0.01s)
+=== RUN   TestDashMemberEnslavesVLANChildInKernel9815
+--- PASS: TestDashMemberEnslavesVLANChildInKernel9815 (0.01s)
+=== RUN   TestRIMemberIsReBoundInTheKernel_9813
+--- PASS: TestRIMemberIsReBoundInTheKernel_9813 (0.01s)
+=== RUN   TestRethRIMemberBindsLocalPhysicalInKernel12059
+--- PASS: TestRethRIMemberBindsLocalPhysicalInKernel12059 (0.01s)
 EOF
 write_fake_go "$d/go" "$d/canned.txt"
 out=$(PATH="$d" sh "$LEG" 2>&1); rc=$?
-if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q "all six daemon kernel cells ran and passed"; then
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q "all 27 daemon kernel cells ran and passed"; then
 	ok "positive control: good run passes"
 else
 	bad "positive control: rc=$rc: $out"
 fi
 
-# ── 11. guard control: a run where the kernel cells never ran must FAIL ──
+# ── 11. (#16470) a parent PASS over skipped subtests must FAIL ──
+# TestMgmtStaticRouteResolvedGatewayAliasesInstallInKernel_12084 and
+# TestBareCrossSpelledMemberEnslavesVLANChildrenInKernel10174 report
+# PASS while every subtest skips; the canned run below is a complete
+# 27-cell PASS except for one indented SKIP under the first parent.
+d=$(mkfix subskip); rm -f "$d/unshare" "$d/go"
+write_fake_unshare "$d/unshare"
+# Build the canned file from cell 10's shape: reuse a full PASS list
+# plus the skipped subtest. The fake go ignores its arguments.
+cat > "$d/canned.txt" <<'CANNED_EOF'
+=== RUN   TestHostInboundIngressZoneVerdictsOnRealKernel9637
+--- PASS: TestHostInboundIngressZoneVerdictsOnRealKernel9637 (0.01s)
+=== RUN   TestHostInboundUnzonedIngressVerdictsOnRealKernel11409
+--- PASS: TestHostInboundUnzonedIngressVerdictsOnRealKernel11409 (0.01s)
+=== RUN   TestHostInboundReinjectTunVerdicts9637
+--- PASS: TestHostInboundReinjectTunVerdicts9637 (0.01s)
+=== RUN   TestHostInboundSharedVRFMasterIngressAndFineDeny12034
+--- PASS: TestHostInboundSharedVRFMasterIngressAndFineDeny12034 (0.01s)
+=== RUN   TestLifelineSharedDenyAllVerdictsOnRealKernel12229
+--- PASS: TestLifelineSharedDenyAllVerdictsOnRealKernel12229 (0.01s)
+=== RUN   TestRIMemberSecureTunnelUnitBindsToVRF12087
+--- PASS: TestRIMemberSecureTunnelUnitBindsToVRF12087 (0.01s)
+=== RUN   TestMgmtDNSRulesSteerOnlyDefaultContextHostLookups11385
+--- PASS: TestMgmtDNSRulesSteerOnlyDefaultContextHostLookups11385 (0.01s)
+=== RUN   TestHostInboundDHCPManagementVRFDelivery12127
+--- PASS: TestHostInboundDHCPManagementVRFDelivery12127 (0.01s)
+=== RUN   TestHostInboundDHCPManagementVRFColdBootProductionFence12127
+--- PASS: TestHostInboundDHCPManagementVRFColdBootProductionFence12127 (0.01s)
+=== RUN   TestHostInboundDHCPManagementVRFGapDelivery12127
+--- PASS: TestHostInboundDHCPManagementVRFGapDelivery12127 (0.01s)
+=== RUN   TestReassertBindsTheFabricOverlayInTheKernel_9813
+--- PASS: TestReassertBindsTheFabricOverlayInTheKernel_9813 (0.01s)
+=== RUN   TestHostInputFenceLiveReadbackAndRestore9506
+--- PASS: TestHostInputFenceLiveReadbackAndRestore9506 (0.01s)
+=== RUN   TestMgmtVRFReassertRepairsOutOfBandUnbindInKernel11448
+--- PASS: TestMgmtVRFReassertRepairsOutOfBandUnbindInKernel11448 (0.01s)
+=== RUN   TestBackupRouterSteadyStateOnKernel12583
+--- PASS: TestBackupRouterSteadyStateOnKernel12583 (0.01s)
+=== RUN   TestBackupRouterFollowsGatewayMoveOnKernel12583
+--- PASS: TestBackupRouterFollowsGatewayMoveOnKernel12583 (0.01s)
+=== RUN   TestBackupRouterUnreachableGatewayFailsClosedOnKernel12583
+--- PASS: TestBackupRouterUnreachableGatewayFailsClosedOnKernel12583 (0.01s)
+=== RUN   TestBackupRouterLeavesNonManagementLinkOnKernel12583
+--- PASS: TestBackupRouterLeavesNonManagementLinkOnKernel12583 (0.01s)
+=== RUN   TestBackupRouterRemovedOnKernel14972
+--- PASS: TestBackupRouterRemovedOnKernel14972 (0.01s)
+=== RUN   TestMgmtStaticECMPLifecycleInKernel12539
+--- PASS: TestMgmtStaticECMPLifecycleInKernel12539 (0.01s)
+=== RUN   TestMgmtStaticRouteAliasDeduplicationInstallsInKernel12084
+--- PASS: TestMgmtStaticRouteAliasDeduplicationInstallsInKernel12084 (0.01s)
+=== RUN   TestMgmtStaticRouteResolvedGatewayAliasesInstallInKernel_12084
+=== RUN   TestMgmtStaticRouteResolvedGatewayAliasesInstallInKernel_12084/v6-case-variant
+--- PASS: TestMgmtStaticRouteResolvedGatewayAliasesInstallInKernel_12084 (0.01s)
+    --- SKIP: TestMgmtStaticRouteResolvedGatewayAliasesInstallInKernel_12084/v6-case-variant (0.01s)
+=== RUN   TestMgmtStaticRouteTolerantNoInstallActionInstallsGateway_12084
+--- PASS: TestMgmtStaticRouteTolerantNoInstallActionInstallsGateway_12084 (0.01s)
+=== RUN   TestBareRIMemberEnslavesItsVLANChildren9754
+--- PASS: TestBareRIMemberEnslavesItsVLANChildren9754 (0.01s)
+=== RUN   TestBareCrossSpelledMemberEnslavesVLANChildrenInKernel10174
+--- PASS: TestBareCrossSpelledMemberEnslavesVLANChildrenInKernel10174 (0.01s)
+=== RUN   TestDashMemberEnslavesVLANChildInKernel9815
+--- PASS: TestDashMemberEnslavesVLANChildInKernel9815 (0.01s)
+=== RUN   TestRIMemberIsReBoundInTheKernel_9813
+--- PASS: TestRIMemberIsReBoundInTheKernel_9813 (0.01s)
+=== RUN   TestRethRIMemberBindsLocalPhysicalInKernel12059
+--- PASS: TestRethRIMemberBindsLocalPhysicalInKernel12059 (0.01s)
+CANNED_EOF
+write_fake_go "$d/go" "$d/canned.txt"
+out=$(PATH="$d" sh "$LEG" 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && [ "$rc" -ne 77 ] && printf '%s\n' "$out" | grep -q "subtest SKIPPED"; then
+	ok "subtest guard: parent PASS over a skipped subtest fails"
+else
+	bad "subtest guard: rc=$rc: $out"
+fi
+
+# ── 12. (#16470) a skipped #16470 top-level cell must FAIL ──
+d=$(mkfix topskip); rm -f "$d/unshare" "$d/go"
+write_fake_unshare "$d/unshare"
+cat > "$d/canned.txt" <<'CANNED_EOF'
+=== RUN   TestHostInboundIngressZoneVerdictsOnRealKernel9637
+--- PASS: TestHostInboundIngressZoneVerdictsOnRealKernel9637 (0.01s)
+=== RUN   TestHostInboundUnzonedIngressVerdictsOnRealKernel11409
+--- PASS: TestHostInboundUnzonedIngressVerdictsOnRealKernel11409 (0.01s)
+=== RUN   TestHostInboundReinjectTunVerdicts9637
+--- PASS: TestHostInboundReinjectTunVerdicts9637 (0.01s)
+=== RUN   TestHostInboundSharedVRFMasterIngressAndFineDeny12034
+--- PASS: TestHostInboundSharedVRFMasterIngressAndFineDeny12034 (0.01s)
+=== RUN   TestLifelineSharedDenyAllVerdictsOnRealKernel12229
+--- PASS: TestLifelineSharedDenyAllVerdictsOnRealKernel12229 (0.01s)
+=== RUN   TestRIMemberSecureTunnelUnitBindsToVRF12087
+--- PASS: TestRIMemberSecureTunnelUnitBindsToVRF12087 (0.01s)
+=== RUN   TestMgmtDNSRulesSteerOnlyDefaultContextHostLookups11385
+--- PASS: TestMgmtDNSRulesSteerOnlyDefaultContextHostLookups11385 (0.01s)
+=== RUN   TestHostInboundDHCPManagementVRFDelivery12127
+--- PASS: TestHostInboundDHCPManagementVRFDelivery12127 (0.01s)
+=== RUN   TestHostInboundDHCPManagementVRFColdBootProductionFence12127
+--- PASS: TestHostInboundDHCPManagementVRFColdBootProductionFence12127 (0.01s)
+=== RUN   TestHostInboundDHCPManagementVRFGapDelivery12127
+--- PASS: TestHostInboundDHCPManagementVRFGapDelivery12127 (0.01s)
+=== RUN   TestReassertBindsTheFabricOverlayInTheKernel_9813
+--- SKIP: TestReassertBindsTheFabricOverlayInTheKernel_9813 (0.01s)
+=== RUN   TestHostInputFenceLiveReadbackAndRestore9506
+--- PASS: TestHostInputFenceLiveReadbackAndRestore9506 (0.01s)
+=== RUN   TestMgmtVRFReassertRepairsOutOfBandUnbindInKernel11448
+--- PASS: TestMgmtVRFReassertRepairsOutOfBandUnbindInKernel11448 (0.01s)
+=== RUN   TestBackupRouterSteadyStateOnKernel12583
+--- PASS: TestBackupRouterSteadyStateOnKernel12583 (0.01s)
+=== RUN   TestBackupRouterFollowsGatewayMoveOnKernel12583
+--- PASS: TestBackupRouterFollowsGatewayMoveOnKernel12583 (0.01s)
+=== RUN   TestBackupRouterUnreachableGatewayFailsClosedOnKernel12583
+--- PASS: TestBackupRouterUnreachableGatewayFailsClosedOnKernel12583 (0.01s)
+=== RUN   TestBackupRouterLeavesNonManagementLinkOnKernel12583
+--- PASS: TestBackupRouterLeavesNonManagementLinkOnKernel12583 (0.01s)
+=== RUN   TestBackupRouterRemovedOnKernel14972
+--- PASS: TestBackupRouterRemovedOnKernel14972 (0.01s)
+=== RUN   TestMgmtStaticECMPLifecycleInKernel12539
+--- PASS: TestMgmtStaticECMPLifecycleInKernel12539 (0.01s)
+=== RUN   TestMgmtStaticRouteAliasDeduplicationInstallsInKernel12084
+--- PASS: TestMgmtStaticRouteAliasDeduplicationInstallsInKernel12084 (0.01s)
+=== RUN   TestMgmtStaticRouteResolvedGatewayAliasesInstallInKernel_12084
+--- PASS: TestMgmtStaticRouteResolvedGatewayAliasesInstallInKernel_12084 (0.01s)
+=== RUN   TestMgmtStaticRouteTolerantNoInstallActionInstallsGateway_12084
+--- PASS: TestMgmtStaticRouteTolerantNoInstallActionInstallsGateway_12084 (0.01s)
+=== RUN   TestBareRIMemberEnslavesItsVLANChildren9754
+--- PASS: TestBareRIMemberEnslavesItsVLANChildren9754 (0.01s)
+=== RUN   TestBareCrossSpelledMemberEnslavesVLANChildrenInKernel10174
+--- PASS: TestBareCrossSpelledMemberEnslavesVLANChildrenInKernel10174 (0.01s)
+=== RUN   TestDashMemberEnslavesVLANChildInKernel9815
+--- PASS: TestDashMemberEnslavesVLANChildInKernel9815 (0.01s)
+=== RUN   TestRIMemberIsReBoundInTheKernel_9813
+--- PASS: TestRIMemberIsReBoundInTheKernel_9813 (0.01s)
+=== RUN   TestRethRIMemberBindsLocalPhysicalInKernel12059
+--- PASS: TestRethRIMemberBindsLocalPhysicalInKernel12059 (0.01s)
+CANNED_EOF
+write_fake_go "$d/go" "$d/canned.txt"
+out=$(PATH="$d" sh "$LEG" 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && [ "$rc" -ne 77 ] && printf '%s\n' "$out" | grep -q "TestReassertBindsTheFabricOverlayInTheKernel_9813 SKIPPED"; then
+	ok "top-level guard: a skipped #16470 cell fails by name"
+else
+	bad "top-level guard: rc=$rc: $out"
+fi
+
+# ── 13. guard control: a run where the kernel cells never ran must FAIL ──
 d=$(mkfix norun); rm -f "$d/unshare" "$d/go"
 write_fake_unshare "$d/unshare"
 cat > "$d/canned.txt" <<'EOF'

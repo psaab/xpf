@@ -6,6 +6,7 @@ import (
 	"go/parser"
 	"go/token"
 	"net"
+	"os"
 	"runtime"
 	"sync"
 	"testing"
@@ -173,19 +174,26 @@ func TestApplyFabricIPVLANDefersThroughTheBindingCreator_9813(t *testing.T) {
 
 // enterPrivateNetns9813 moves the test goroutine's locked OS thread into a fresh
 // network namespace, and SKIPs when that is denied (it needs CAP_NET_ADMIN; run
-// under `unshare -rn`).
+// under `unshare -rn`). Under XPF_REQUIRE_NETNS the denial is a failure
+// (#16470), matching the tool-absent arms of the #15241 kernel cells.
 func enterPrivateNetns9813(t *testing.T) {
 	t.Helper()
 	runtime.LockOSThread()
 	orig, err := netns.Get()
 	if err != nil {
 		runtime.UnlockOSThread()
+		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+			t.Fatalf("cannot read the current netns (%v) (XPF_REQUIRE_NETNS is set)", err)
+		}
 		t.Skipf("cannot read the current netns (%v)", err)
 	}
 	ns, err := netns.New()
 	if err != nil {
 		orig.Close()
 		runtime.UnlockOSThread()
+		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+			t.Fatalf("cannot create a private netns; needs CAP_NET_ADMIN (run under `unshare -rn`): %v (XPF_REQUIRE_NETNS is set)", err)
+		}
 		t.Skipf("cannot create a private netns; needs CAP_NET_ADMIN (run under `unshare -rn`): %v", err)
 	}
 	t.Cleanup(func() {
@@ -203,6 +211,9 @@ func TestReassertBindsTheFabricOverlayInTheKernel_9813(t *testing.T) {
 	enterPrivateNetns9813(t)
 	parent := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "ge-0-0-0"}}
 	if err := netlink.LinkAdd(parent); err != nil {
+		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+			t.Fatalf("cannot create a dummy parent in this netns: %v (XPF_REQUIRE_NETNS is set)", err)
+		}
 		t.Skipf("cannot create a dummy parent in this netns: %v", err)
 	}
 	if err := netlink.LinkSetUp(parent); err != nil {
@@ -210,6 +221,9 @@ func TestReassertBindsTheFabricOverlayInTheKernel_9813(t *testing.T) {
 	}
 	vrf := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: mgmtVRFDeviceName}, Table: 1000}
 	if err := netlink.LinkAdd(vrf); err != nil {
+		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+			t.Fatalf("cannot create a VRF device in this netns (is the vrf module loaded?): %v (XPF_REQUIRE_NETNS is set)", err)
+		}
 		t.Skipf("cannot create a VRF device in this netns (is the vrf module loaded?): %v", err)
 	}
 	if err := netlink.LinkSetUp(vrf); err != nil {

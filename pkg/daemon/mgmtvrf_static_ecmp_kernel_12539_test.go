@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"net"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -42,6 +43,9 @@ func TestMgmtStaticECMPLifecycleInKernel12539(t *testing.T) {
 	enterPrivateNetns9813(t)
 	fxp0 := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "fxp0"}}
 	if err := netlink.LinkAdd(fxp0); err != nil {
+		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+			t.Fatalf("cannot create dummy fxp0 in private netns: %v (XPF_REQUIRE_NETNS is set)", err)
+		}
 		t.Skipf("cannot create dummy fxp0 in private netns: %v", err)
 	}
 	if err := netlink.LinkSetUp(fxp0); err != nil {
