@@ -1,4 +1,14 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Dataplane: a port-mirroring input in Linux spelling (`ge-0-0-1`) on
+    a port with an untagged unit 0 no longer installs as a unit-0
+    VID-0-only row (#16429). The untagged unit-0 row shares the base
+    netdev name, and its unit scope overwrote the base row's scope
+    under the shared Linux key, so tagged sibling units were silently
+    not mirrored while show reported the instance installed. A base
+    row's LinuxName key now wins over later unit rows on the same
+    netdev; the Linux unit spelling (`ge-0-0-1.0`) still resolves
+    unit-scoped, and the #15113/#15651/#16063 mirror cells stay green.
+
   * Userspace-dp: fix #16444 fixture `pkt_len` drift and harden its guard.
     The #6883 contract (shim stamps the FULL frame length, #8581) was
     violated by `resolver_enqueue_tests.rs` (the master-red site), the

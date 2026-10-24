@@ -88,6 +88,15 @@ func buildMirrorConfigSnapshots(cfg *config.Config, interfaces []InterfaceSnapsh
 		}
 	}
 	scopeByName := make(map[string]mirrorIngressScope, len(interfaces))
+	// #16429: LinuxName keys written by a non-unit (base) row. The base
+	// row precedes its unit rows (interfaces.go), and an untagged unit
+	// 0's LinuxName equals the base netdev name (`ge-0-0-1`), so a unit
+	// row must never overwrite a bare key a base row already wrote —
+	// otherwise the Linux spelling of a bare-physical input
+	// (`ge-0-0-1`) inherits {vlanID:0, unitScoped:true} and tagged
+	// sibling units are silently not mirrored. The #15651 Linux unit
+	// spelling (`ge-0-0-1.0`) is a distinct key and stays unit-scoped.
+	baseLinuxKeyed := make(map[string]bool, len(interfaces))
 	// #16063: a row's LinuxName must not overwrite the scope recorded
 	// under another row's exact Name (wg0.0/wg0.1 both carry LinuxName
 	// wg0, the base row's Name) — otherwise a bare `wg0` input inherits
@@ -114,8 +123,17 @@ func buildMirrorConfigSnapshots(cfg *config.Config, interfaces []InterfaceSnapsh
 			scopeByName[iface.Name] = scope
 			nameKeyed[iface.Name] = true
 			if iface.LinuxName != "" && !nameKeyed[iface.LinuxName] {
-				ifindexByName[iface.LinuxName] = iface.Ifindex
-				scopeByName[iface.LinuxName] = scope
+				// #16429: a base row's LinuxName write wins over later
+				// unit rows sharing that netdev name; the #15651 Linux
+				// unit spelling below is a distinct key and is still
+				// indexed with the unit row's own scope.
+				if !(iface.IsUnit && baseLinuxKeyed[iface.LinuxName]) {
+					ifindexByName[iface.LinuxName] = iface.Ifindex
+					scopeByName[iface.LinuxName] = scope
+					if !iface.IsUnit {
+						baseLinuxKeyed[iface.LinuxName] = true
+					}
+				}
 				// #15651: a unit row's LinuxName is the kernel device
 				// (unit 0 collapses onto the parent; a VLAN unit is
 				// `<parent>.<vid>`), so neither Name nor LinuxName ever
