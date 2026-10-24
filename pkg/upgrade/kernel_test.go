@@ -425,16 +425,22 @@ func TestKernelPromoteRevertOnBeaconFail(t *testing.T) {
 }
 
 // TestKernelPromoteCountsNVRAMReadTimeoutAsRevert10761 pins the caller side of
-// the bounded efibootmgr command: a timed-out first BootEntries read must enter
-// revert(), persist the attempt before cleanup, and request the controlled
-// exit-3 reboot rather than surfacing an infra error for systemd's uncounted
-// OnFailure reboot.
+// the bounded efibootmgr command: a timed-out first BootEntries read while
+// RUNNING the candidate must still enter revert(), persist the attempt before
+// cleanup, and request the controlled exit-3 reboot rather than surfacing an
+// infra error for systemd's uncounted OnFailure reboot. (#16446 narrowed this
+// from "any timeout reverts": a timeout while positively on known-good now
+// takes the no-reboot discarded cleanup — see
+// TestKernelPromoteBootEntriesFailureMatrix16446.)
 func TestKernelPromoteCountsNVRAMReadTimeoutAsRevert10761(t *testing.T) {
 	f := newFakeKernelSystem()
 	r := newKernelRunner(t, f)
 	if err := r.Arm("6.18.5-12-generic"); err != nil {
 		t.Fatalf("Arm: %v", err)
 	}
+	// The candidate DID boot (running == candidate) but the NVRAM read times
+	// out, so its slot cannot be confirmed or promoted: controlled revert.
+	f.running = "6.18.5-12-generic"
 	attemptLogged := false
 	r.cfg.Logf = func(_ string, args ...any) {
 		if len(args) >= 3 && args[1] == 1 && args[2] == maxPromoteAttempts {
@@ -455,8 +461,14 @@ func TestKernelPromoteCountsNVRAMReadTimeoutAsRevert10761(t *testing.T) {
 	if f.lastRoll.Outcome != RollOutcomeReverted {
 		t.Fatalf("last-roll outcome = %q, want %q", f.lastRoll.Outcome, RollOutcomeReverted)
 	}
-	if !contains(f.calls, "prune:"+SlotB) {
-		t.Fatal("timed-out NVRAM read did not enter revert cleanup")
+	// restoreKnownGood ran (inactive selector restored to known-good) but the
+	// destructive prune is DEFERRED while the candidate is the running kernel
+	// (#14165); the exit-3 reboot lands on known-good where a later pass prunes.
+	if !contains(f.calls, "restore-selector:"+SlotB) || f.selectors[SlotB] != "6.18.5-10-generic" {
+		t.Fatal("timed-out NVRAM read on the candidate did not restore the inactive selector")
+	}
+	if contains(f.calls, "prune:"+SlotB) {
+		t.Fatal("#14165: pruned the RUNNING candidate on the timed-out NVRAM revert")
 	}
 	j, err := r.loadKernelJournal()
 	if err != nil {
@@ -860,6 +872,91 @@ func TestKernelPromoteBootCurrentErrRunningKnownGoodCleansUp(t *testing.T) {
 	}
 	if contains(f.calls, "bootorder-front:0004") {
 		t.Fatal("must not promote when not running the candidate")
+	}
+}
+
+// --- #16446: Gate-1 failures (BootEntries error / candidate slot vanished)
+// must apply the #4872-A RunningKernel discrimination instead of blanket
+// revert: positively known-good -> discarded cleanup (exit 0, NO reboot,
+// prune safe); running candidate -> controlled revert (exit 3; prune
+// deferred while it runs); running kernel unreadable -> indeterminate
+// (no reboot, no prune, journal preserved). Table-driven over both Gate-1
+// triggers crossed with all three running-kernel states. On pre-fix master
+// every row reverted, so the known-good and unreadable rows fail there. ---
+func TestKernelPromoteBootEntriesFailureMatrix16446(t *testing.T) {
+	triggers := map[string]func(f *fakeKernelSystem){
+		"entriesErr": func(f *fakeKernelSystem) {
+			f.entriesErr = fmt.Errorf("efibootmgr timed out: context deadline exceeded")
+		},
+		"slotMissing": func(f *fakeKernelSystem) { delete(f.entries, SlotB) },
+	}
+	for triggerName, trigger := range triggers {
+		for _, tc := range []struct {
+			name       string
+			running    string
+			runningErr error
+			want       string // "discarded" | "reverted" | "indeterminate"
+			wantPrune  bool
+		}{
+			{name: "knownGood", running: "6.18.5-10-generic", want: "discarded", wantPrune: true},
+			{name: "candidate", running: "6.18.5-12-generic", want: "reverted", wantPrune: false},
+			{name: "unreadable", runningErr: fmt.Errorf("uname -r failure"), want: "indeterminate", wantPrune: false},
+		} {
+			t.Run(triggerName+"/"+tc.name, func(t *testing.T) {
+				f := newFakeKernelSystem()
+				r := newKernelRunner(t, f)
+				if err := r.Arm("6.18.5-12-generic"); err != nil {
+					t.Fatalf("Arm: %v", err)
+				}
+				trigger(f)
+				f.running = tc.running
+				f.runningErr = tc.runningErr
+				// If the gate wrongly entered verifyAndPromote on the
+				// candidate it would promote; the matrix must not.
+				f.verifyPass = true
+				f.beaconPass = true
+				f.calls = nil
+
+				outcome, err := r.Promote()
+				switch tc.want {
+				case "discarded":
+					if err != nil {
+						t.Fatalf("#16446: known-good Gate-1 failure must clean up with nil error, got %v", err)
+					}
+					if outcome.Outcome != RollOutcomeDiscarded || f.lastRoll.Outcome != RollOutcomeDiscarded {
+						t.Fatalf("#16446: outcome/record = %q/%q, want discarded", outcome.Outcome, f.lastRoll.Outcome)
+					}
+					j, _ := r.loadKernelJournal()
+					if j.State != KernelStateInit {
+						t.Fatalf("#16446: journal not cleared on discarded cleanup (state=%s)", j.State)
+					}
+				case "reverted":
+					if !errorsIsReverted(err) {
+						t.Fatalf("#16446: candidate Gate-1 failure must revert (exit 3), got %v", err)
+					}
+					if f.lastRoll.Outcome != RollOutcomeReverted {
+						t.Fatalf("#16446: last-roll = %q, want reverted", f.lastRoll.Outcome)
+					}
+				case "indeterminate":
+					if err == nil || errorsIsReverted(err) {
+						t.Fatalf("#16446: unreadable running kernel must be a non-revert error, got %v", err)
+					}
+					if outcome.Recorded() || f.lastRollWrites != 0 {
+						t.Fatalf("#16446: indeterminate must record no outcome, got %+v writes=%d", outcome, f.lastRollWrites)
+					}
+					j, _ := r.loadKernelJournal()
+					if j.State != KernelStateArmed {
+						t.Fatalf("#16446: journal not preserved on indeterminate (state=%s)", j.State)
+					}
+				}
+				if got := contains(f.calls, "prune:"+SlotB); got != tc.wantPrune {
+					t.Fatalf("#16446: prune(%s) = %v, want %v (calls=%v)", SlotB, got, tc.wantPrune, f.calls)
+				}
+				if contains(f.calls, "bootorder-front:0004") {
+					t.Fatalf("#16446: promoted with an unconfirmed candidate slot (calls=%v)", f.calls)
+				}
+			})
+		}
 	}
 }
 
