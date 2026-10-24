@@ -1,10 +1,9 @@
 package format
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 
+	"github.com/psaab/xpf/internal/testgolden"
 	userspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
@@ -82,21 +81,5 @@ func TestFormatSystemBuffersGolden(t *testing.T) {
 		PerBinding: []userspace.BindingCountersSnapshot{{WorkerID: 0, QueueID: 0, OutstandingTX: 10}},
 	}, false)
 
-	goldenPath := filepath.Join("testdata", "system_buffers.golden")
-	if *updateGolden {
-		if err := os.MkdirAll("testdata", 0o755); err != nil {
-			t.Fatalf("mkdir testdata: %v", err)
-		}
-		if err := os.WriteFile(goldenPath, []byte(got), 0o644); err != nil {
-			t.Fatalf("write golden: %v", err)
-		}
-		return
-	}
-	want, err := os.ReadFile(goldenPath)
-	if err != nil {
-		t.Fatalf("read golden (run with -update to generate): %v", err)
-	}
-	if got != string(want) {
-		t.Fatalf("FormatSystemBuffers output diverged from golden.\n--- got ---\n%s\n--- want ---\n%s", got, string(want))
-	}
+	testgolden.String(t, "testdata/system_buffers.golden", got)
 }

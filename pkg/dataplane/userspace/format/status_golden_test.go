@@ -1,20 +1,15 @@
 package format
 
 import (
-	"flag"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/psaab/xpf/internal/testgolden"
 	userspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
-
-// updateGolden regenerates the byte-identity golden fixtures instead of
-// comparing against them. Run with `go test ... -update` after a deliberate,
-// reviewed change to the FormatStatusSummary output.
-var updateGolden = flag.Bool("update", false, "regenerate status-summary golden fixtures")
 
 // goldenStatusSummaryFixture builds a ProcessStatus that exercises every
 // conditional section of FormatStatusSummary so the golden pins the full,
@@ -179,24 +174,7 @@ func goldenStatusSummaryFixture() userspace.ProcessStatus {
 }
 
 func TestFormatStatusSummaryGolden(t *testing.T) {
-	got := FormatStatusSummary(goldenStatusSummaryFixture())
-	goldenPath := filepath.Join("testdata", "status_summary.golden")
-	if *updateGolden {
-		if err := os.MkdirAll("testdata", 0o755); err != nil {
-			t.Fatalf("mkdir testdata: %v", err)
-		}
-		if err := os.WriteFile(goldenPath, []byte(got), 0o644); err != nil {
-			t.Fatalf("write golden: %v", err)
-		}
-		return
-	}
-	want, err := os.ReadFile(goldenPath)
-	if err != nil {
-		t.Fatalf("read golden (run with -update to generate): %v", err)
-	}
-	if got != string(want) {
-		t.Fatalf("FormatStatusSummary output diverged from golden.\n--- got ---\n%s\n--- want ---\n%s", got, string(want))
-	}
+	testgolden.String(t, "testdata/status_summary.golden", FormatStatusSummary(goldenStatusSummaryFixture()))
 }
 
 // #10500: removing the diagnostic from the same deterministic fixture must
