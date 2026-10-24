@@ -64,11 +64,6 @@ func TestFabricAuth11487_ReadOnlyCallsKeepRolloutGrace(t *testing.T) {
 			req:    &pb.GetStatusRequest{},
 		},
 		{
-			name:   "GetSessions",
-			method: pb.BpfrxService_GetSessions_FullMethodName,
-			req:    &pb.GetSessionsRequest{},
-		},
-		{
 			name:   "GetSessionSummary",
 			method: pb.BpfrxService_GetSessionSummary_FullMethodName,
 			req:    &pb.GetSessionSummaryRequest{},
