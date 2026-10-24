@@ -1715,6 +1715,14 @@ type compileOpts struct {
 	// child is inert either way: compileDHCPRelay reads only server-group and
 	// group.
 	lenientDHCPRelayChildTokens bool
+	// lenientApplicationsLevelChildren16459 (#16459) downgrades
+	// validateApplicationsLevelChildrenAST16459 from a hard compile error
+	// to a cfg.Warnings entry on the tolerant load / peer-sync paths, so a
+	// persisted or peer-synced config carrying an undeclared `applications`
+	// child (a misspelt `application`/`application-set` keyword) still
+	// BOOTS (#1960). The child is inert either way: compileApplications
+	// reads only `application` and `application-set`.
+	lenientApplicationsLevelChildren16459 bool
 	// lenientRoutingRuleWindows (#5854) downgrades the next-table / rib-group
 	// ip-rule admission-cap gate (validateRoutingRuleWindowsStrict) from a hard
 	// compile error to a cfg.Warnings entry. The runtime applier caps admitted
@@ -3794,6 +3802,7 @@ func lenientCompileOpts() compileOpts {
 		lenientWireguardRoutingInstance:          true,
 		lenientTunnelRITarget12520:               true,
 		lenientDHCPRelayChildTokens:              true,
+		lenientApplicationsLevelChildren16459:    true,
 		lenientDHCPRelayV4Config:                 true,
 		lenientRoutingRuleWindows:                true,
 		lenientPolicyRouteMapSeq:                 true,
