@@ -21,6 +21,13 @@ xpf (0.0.0) unstable; urgency=medium
     OversizeFramesRefused in cluster statistics, and drop the
     connection; unknown types remain globally capped and ignored for
     forward compatibility.
+  * Sessions: an in-window but non-exact RST no longer stamps session
+    teardown (#16040). The closing-segment sequence verdict now
+    requires exact `seq == rcv_nxt` when the RST bit is set (RFC 9293
+    §3.5.3 / RFC 5961 §3.2), closing the ~window-size blind-guess
+    teardown left by #15947 leg1. FIN keeps receive-window validity,
+    `no-sequence-check` still bypasses the verdict, and entries with
+    no tracked sequence state are still admitted.
 
   * Cluster: an open control-key rotation now ages visibly and alarms
     when forgotten (#16029). UpdateConfig stamps when the current

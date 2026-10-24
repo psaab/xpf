@@ -1,6 +1,6 @@
 use super::tests::{install_forward_reverse_pair, key_v4};
 use super::*;
-use crate::tcp_flags::{TCP_ACK, TCP_RST, TCP_SYN};
+use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_RST, TCP_SYN};
 
 #[test]
 fn in_window_rst_valid_blind_rst_invalid_15753() {
@@ -10,12 +10,16 @@ fn in_window_rst_valid_blind_rst_invalid_15753() {
     let _rev = install_forward_reverse_pair(&mut table, &forward, t0, TCP_SYN);
     table.note_tcp_seq(&forward, 1000, 0, 4096, 0, TCP_SYN, 0);
     table.note_tcp_seq(&forward, 1001, 0, 4096, 100, TCP_ACK, 0);
-    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1050), SeqVerdict::Valid);
-    assert_eq!(table.tcp_closing_seq_verdict(&forward, 0), SeqVerdict::Invalid, "blind seq=0 must not close");
+    // #16040: rcv_nxt is 1101 after 100 payload bytes. In-window FIN
+    // stays valid; exact RST is the only RST that may close.
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1050, TCP_FIN), SeqVerdict::Valid);
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1050, TCP_RST), SeqVerdict::Invalid, "in-window non-exact RST must not close");
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1101, TCP_RST), SeqVerdict::Valid, "exact RST must close");
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 0, TCP_RST), SeqVerdict::Invalid, "blind seq=0 must not close");
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 0, TCP_FIN), SeqVerdict::Valid, "FIN seq=0 inside advertised window is accepted (window check, #15753)");
     // Entry must not be closing from verdict alone (poll drops invalid).
     let e = table.entry_by_key(&forward).unwrap();
     assert!(!e.closing);
-    let _ = TCP_RST;
 }
 
 #[test]
@@ -132,21 +136,21 @@ fn scaled_window_and_receiver_window_verdict_15947() {
     // sender entry's own window and returned Valid here.
     let behind_100k = 1101u32.wrapping_sub(100_000);
     assert_eq!(
-        table.tcp_closing_seq_verdict(&forward, behind_100k),
+        table.tcp_closing_seq_verdict(&forward, behind_100k, TCP_FIN),
         SeqVerdict::Invalid,
         "receiver window (unscaled SYN-ACK field) governs, not the sender's scaled window"
     );
-    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1050), SeqVerdict::Valid);
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1050, TCP_FIN), SeqVerdict::Valid);
     // Grow the receiver window with a non-SYN segment at scale: window
     // 8192 << 7 capped at the 64K default (max_window=0).
     table.note_tcp_seq_scaled(&reverse, 5001, 1101, 8192, None, 0, TCP_ACK, 0);
     assert_eq!(
-        table.tcp_closing_seq_verdict(&forward, 1101u32.wrapping_sub(50_000)),
+        table.tcp_closing_seq_verdict(&forward, 1101u32.wrapping_sub(50_000), TCP_FIN),
         SeqVerdict::Valid,
         "scaled receiver window (64K cap) admits 50k-behind closing seq"
     );
     assert_eq!(
-        table.tcp_closing_seq_verdict(&forward, behind_100k),
+        table.tcp_closing_seq_verdict(&forward, behind_100k, TCP_FIN),
         SeqVerdict::Invalid,
         "100k behind exceeds the 64K-capped receiver window"
     );
@@ -155,7 +159,7 @@ fn scaled_window_and_receiver_window_verdict_15947() {
     // must be Invalid even though the sender's own window is 256K.
     table.note_tcp_seq_scaled(&reverse, 5001, 1101, 10, None, 0, TCP_ACK, 0);
     assert_eq!(
-        table.tcp_closing_seq_verdict(&forward, 1101u32.wrapping_sub(5000)),
+        table.tcp_closing_seq_verdict(&forward, 1101u32.wrapping_sub(5000), TCP_FIN),
         SeqVerdict::Invalid,
         "verdict must use the receiver (companion) window, not the sender's own"
     );
@@ -215,4 +219,28 @@ fn unilateral_wsopt_not_applied_15947() {
     };
     assert_eq!(build(false), 8192, "unilateral WSOPT must not scale");
     assert_eq!(build(true), 256 * 1024, "bilateral WSOPT scales to cap");
+}
+
+#[test]
+fn rst_requires_exact_seq_16040() {
+    // #16040 (S2-03 leg2): rcv_nxt=1101 after SYN(1000)+100 payload.
+    // Every non-exact RST — in-window, ahead, blind, RST|FIN — is
+    // Invalid; only seq==rcv_nxt is Valid. FIN keeps in-window validity.
+    let forward = key_v4();
+    let mut table = SessionTable::new();
+    let t0 = 10_000_000_000u64;
+    let _rev = install_forward_reverse_pair(&mut table, &forward, t0, TCP_SYN);
+    table.note_tcp_seq(&forward, 1000, 0, 4096, 0, TCP_SYN, 0);
+    table.note_tcp_seq(&forward, 1001, 0, 4096, 100, TCP_ACK, 0);
+    assert_eq!(table.entry_by_key(&forward).unwrap().tcp_rcv_nxt, 1101);
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1100, TCP_RST), SeqVerdict::Invalid, "one-behind RST must not close");
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1050, TCP_RST), SeqVerdict::Invalid, "in-window RST must not close");
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1102, TCP_RST), SeqVerdict::Invalid, "one-ahead RST must not close");
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1050, TCP_RST | TCP_FIN), SeqVerdict::Invalid, "RST|FIN is driven by the RST bit");
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1101, TCP_RST), SeqVerdict::Valid, "exact RST must close");
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1101, TCP_RST | TCP_ACK), SeqVerdict::Valid);
+    // FIN behaviour per fix spec: in-window retained, exact also valid.
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1050, TCP_FIN), SeqVerdict::Valid, "in-window FIN retained");
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1101, TCP_FIN), SeqVerdict::Valid);
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1102, TCP_FIN), SeqVerdict::Invalid, "FIN ahead of the advertised window rejected");
 }

@@ -165,14 +165,29 @@ impl SessionTable {
     /// The receiver for a packet on `key` is the companion entry: its
     /// `tcp_rcv_wnd` is the window the receiver advertised (for traffic
     /// toward the sender), and the sender entry's `tcp_rcv_nxt` is the
-    /// next seq the receiver expects. A closing seq is valid when it
-    /// lies in [rcv_nxt - receiver_wnd, rcv_nxt] (the already-sent range
-    /// the receiver will accept, RFC 5961) or equals rcv_nxt exactly.
+    /// next seq the receiver expects.
+    ///
+    /// #16040 (S2-03 leg2): an RST segment requires exact
+    /// `seq == rcv_nxt` (RFC 9293 §3.5.3 / RFC 5961 §3.2: a
+    /// non-matching RST is answered with a challenge ACK, never a
+    /// close). The pre-fix in-window arm let any of ~window blind
+    /// guesses stamp teardown. FIN deliberately keeps in-window
+    /// validity: a FIN consumes one sequence number at the stream
+    /// position the receiver already accepted, so
+    /// [rcv_nxt - receiver_wnd, rcv_nxt] validity is retained for FIN.
+    /// RST|FIN is driven by the RST bit (exact required).
     /// Unknown when either half has no sequence state yet.
-    pub fn tcp_closing_seq_verdict(&self, key: &SessionKey, seq: u32) -> SeqVerdict {
+    pub fn tcp_closing_seq_verdict(&self, key: &SessionKey, seq: u32, tcp_flags: u8) -> SeqVerdict {
         let Some(entry) = self.entry_by_key(key) else { return SeqVerdict::Unknown };
         if !entry.tcp_seq_seen {
             return SeqVerdict::Unknown;
+        }
+        if crate::tcp_flags::has_rst(tcp_flags) {
+            return if seq == entry.tcp_rcv_nxt {
+                SeqVerdict::Valid
+            } else {
+                SeqVerdict::Invalid
+            };
         }
         let nat = entry.decision.nat;
         let companion_key = reverse_session_key(key, nat);

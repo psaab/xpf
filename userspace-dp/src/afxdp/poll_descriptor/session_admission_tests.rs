@@ -535,9 +535,11 @@ mod tcp_syn_check_tests {
         table.note_tcp_seq(&key, 1000, 0, 4096, 0, TCP_SYN, 0);
         // data seq 1001 len 100 -> nxt 1101
         table.note_tcp_seq(&key, 1001, 0, 4096, 100, TCP_ACK, 0);
-        assert_eq!(table.tcp_closing_seq_verdict(&key, 1050), SeqVerdict::Valid, "in-window RST seq must be valid");
-        assert_eq!(table.tcp_closing_seq_verdict(&key, 0), SeqVerdict::Invalid, "blind seq=0 RST must be invalid");
-        assert_eq!(table.tcp_closing_seq_verdict(&key, 99999), SeqVerdict::Invalid);
+        assert_eq!(table.tcp_closing_seq_verdict(&key, 1050, TCP_RST), SeqVerdict::Invalid, "in-window RST seq must be invalid (#16040)");
+        assert_eq!(table.tcp_closing_seq_verdict(&key, 1101, TCP_RST), SeqVerdict::Valid, "exact RST seq must be valid (#16040)");
+        assert_eq!(table.tcp_closing_seq_verdict(&key, 1050, TCP_FIN), SeqVerdict::Valid, "in-window FIN seq retained valid");
+        assert_eq!(table.tcp_closing_seq_verdict(&key, 0, TCP_RST), SeqVerdict::Invalid, "blind seq=0 RST must be invalid");
+        assert_eq!(table.tcp_closing_seq_verdict(&key, 99999, TCP_RST), SeqVerdict::Invalid);
     }
 
     #[test]
