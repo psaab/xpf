@@ -173,6 +173,7 @@ fn promote_synced_session_with_conntrack(
     fabric_ingress: bool,
     protocol: u8,
     tcp_flags: u8,
+    ack: Option<u32>,
 ) -> SessionMetadata {
     if !origin.is_promotable_synced()
         || decision.resolution.disposition != ForwardingDisposition::ForwardCandidate
@@ -197,6 +198,7 @@ fn promote_synced_session_with_conntrack(
         now_ns: shared.tick.ns,
         protocol,
         tcp_flags,
+        ack,
     }) {
         // #10612 (M4): fence stale replays at promote-publish ingress. A row
         // that lingered through an unvalidated purge (purge no-op) must not be
@@ -302,6 +304,7 @@ pub(in crate::afxdp) fn maybe_promote_synced_session(
         fabric_ingress,
         protocol,
         tcp_flags,
+        None,
     )
 }
 /// Evaluate the session-hit verdict before applying any deferred synced
@@ -362,6 +365,7 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
         promotion.fabric_ingress,
         promotion.protocol,
         promotion.tcp_flags,
+        promotion.ack,
     );
 }
 

@@ -2743,7 +2743,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 let mut decision = if let Some(flow) = flow.as_ref() {
                     if !owner_syn_reuse
                         && let Some(mut resolved) =
-                            resolve_flow_session_decision_with_conntrack_and_payload(
+                            resolve_flow_session_decision_with_conntrack_and_payload_and_ack(
                                 sessions,
                                 binding.bpf_maps.session_map.handle(),
                                 crate::afxdp::session_glue::SharedSessionRefs {
@@ -2770,6 +2770,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 ha_startup_grace_until_secs,
                                 worker_id,
                                 unique_unstamped_fabric_nat_match.take(),
+                                // #16042: parsed ack for the promote gate.
+                                pending_tcp_seq_note.map(|(_, ack, _, _)| ack),
                             )
                     {
                         // #10597 G5: a queued WireGuard record may only enter
@@ -2957,11 +2959,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // Owner-only: a permitted foreign Forward must not
                         // keep any session-state mutation primitive.
                         if foreign_arrival_zone.is_none() && resolved.authority_deferred {
-                            sessions.apply_deferred_owner_hit_with_payload(
+                            // #16042: the Owner replay validates the parsed ack.
+                            let ack = pending_tcp_seq_note.map(|(_, ack, _, _)| ack);
+                            sessions.apply_deferred_owner_hit_with_ack(
                                 &resolved.key,
                                 now_ns,
                                 meta.tcp_flags,
                                 tcp_payload_len(packet_frame, meta),
+                                ack,
                             );
                         }
                         // The zone the filter and host-inbound consumers below
@@ -6304,10 +6309,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     worker_ctx.forwarding.has_multiple_zones,
                                 )
                             {
-                                if let Some((_, _, _, scale)) =
+                                if let Some((seq, _, _, scale)) =
                                     crate::afxdp::frame::extract_tcp_seq_ack_window_scale(packet_frame)
                                 {
                                     sessions.seed_tcp_window_scale(&flow.forward_key, scale);
+                                    // #16042: seed the trigger ISN so the first
+                                    // handshake segment can be ack-validated.
+                                    sessions.seed_tcp_isn(&flow.forward_key, seq, tcp_payload_len(packet_frame, meta), meta.tcp_flags);
                                 }
                                 // #15111: host-local inbound session anchors the lease hold.
                                 if acquire_persistent_inbound_hold(
@@ -7554,7 +7562,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             .expect("successful forward install has a table entry")
                                     });
                                     if forward_installed
-                                        && let Some((_, _, _, scale)) =
+                                        && let Some((seq, _, _, scale)) =
                                             crate::afxdp::frame::extract_tcp_seq_ack_window_scale(
                                                 packet_frame,
                                             )
@@ -7563,6 +7571,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             &flow.forward_key,
                                             scale,
                                         );
+                                        // #16042: seed the trigger ISN (see local-miss site).
+                                        sessions.seed_tcp_isn(&flow.forward_key, seq, tcp_payload_len(packet_frame, meta), meta.tcp_flags);
                                     }
                                     if forward_installed {
                                         if let Some(incarnation) = leak_incarnation {
@@ -8378,10 +8388,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             worker_ctx.forwarding.has_routing_domains,
                                             worker_ctx.forwarding.has_multiple_zones,
                                         ) {
-                                            if let Some((_, _, _, scale)) =
+                                            if let Some((seq, _, _, scale)) =
                                                 crate::afxdp::frame::extract_tcp_seq_ack_window_scale(packet_frame)
                                             {
                                                 sessions.seed_tcp_window_scale(&flow.forward_key, scale);
+                                                // #16042: seed the trigger ISN.
+                                                sessions.seed_tcp_isn(&flow.forward_key, seq, tcp_payload_len(packet_frame, meta), meta.tcp_flags);
                                             }
                                             if acquire_persistent_inbound_hold(
                                                 worker_ctx.forwarding,
@@ -8517,10 +8529,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             worker_ctx.forwarding.has_routing_domains,
                                             worker_ctx.forwarding.has_multiple_zones,
                                         ) {
-                                            if let Some((_, _, _, scale)) =
+                                            if let Some((seq, _, _, scale)) =
                                                 crate::afxdp::frame::extract_tcp_seq_ack_window_scale(packet_frame)
                                             {
                                                 sessions.seed_tcp_window_scale(&flow.forward_key, scale);
+                                                // #16042: seed the trigger ISN.
+                                                sessions.seed_tcp_isn(&flow.forward_key, seq, tcp_payload_len(packet_frame, meta), meta.tcp_flags);
                                             }
                                             // #15111: punt seed anchors the inbound hold.
                                             if acquire_persistent_inbound_hold(
@@ -12687,7 +12701,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 source_nat_static,
                                             );
                                     if pending_installed
-                                        && let Some((_, _, _, scale)) =
+                                        && let Some((seq, _, _, scale)) =
                                             crate::afxdp::frame::extract_tcp_seq_ack_window_scale(
                                                 packet_frame,
                                             )
@@ -12696,6 +12710,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             &flow.forward_key,
                                             scale,
                                         );
+                                        // #16042: seed the trigger ISN.
+                                        sessions.seed_tcp_isn(&flow.forward_key, seq, tcp_payload_len(packet_frame, meta), meta.tcp_flags);
                                     }
                                     // Permit held in seed_install_permit_14661
                                     // until after the shared/BPF publish below.

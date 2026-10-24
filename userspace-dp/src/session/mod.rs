@@ -801,6 +801,13 @@ impl SessionEntry {
                 self.tcp_window_scale = Some(scale.min(14));
             }
             self.tcp_syn_seen = true;
+            // #16042 fold: remember this direction's SYN ack END (seq + 1
+            // + payload; a SYN consumes itself and any SYN payload) so a
+            // later segment on the companion can be ack-validated. Written
+            // unconditionally: the caller (poll note site) notes only
+            // Owner-admitted segments, and a rejected (bad-ack) SYN-ACK
+            // never reaches this note, so it cannot launder ISN evidence.
+            self.tcp_peer_ack_end = Some(seq.wrapping_add(1).wrapping_add(payload_len));
         }
         // RFC 7323: scaling applies only after WSOPT is seen on SYNs in
         // BOTH directions. tcp_ws_negotiated is set by the table when it
@@ -1434,6 +1441,20 @@ struct SessionEntry {
     tcp_peer_rcv_nxt_seen: bool,
     tcp_rcv_wnd: u32,
     tcp_seq_seen: bool,
+    /// #16042 fold: ack END of THIS direction's SYN (seq + 1 + payload —
+    /// a SYN consumes itself and any payload it carries), or `None` when
+    /// no SYN was observed/seeded for this direction (mid-stream pickup,
+    /// HA import). Handshake promotion/completion validates a
+    /// SYN-ACK/completing segment's ack against the COMPANION entry's
+    /// `tcp_peer_ack_end` exactly (wrapping). When the companion end is
+    /// known and the segment ack was parsed, a mismatch MUST NOT
+    /// promote/complete. When either is unknown the gate fails open —
+    /// the pair stays on the opening window, so the abuse window is
+    /// bounded. Node-local, no wire: a peer re-derives its own from the
+    /// SYNs it observes; an HA import therefore starts with unknown
+    /// evidence and its first completing segment is flags-only
+    /// (fail-open), never fail-closed.
+    tcp_peer_ack_end: Option<u32>,
     /// #15947 (H29-02): RFC 7323 window-scale shift learned from this
     /// direction's SYN (WSOPT kind 3), or None until a SYN carrying the
     /// option is noted. Node-local, no wire — a peer re-derives its own
@@ -3754,7 +3775,21 @@ impl SessionTable {
         payload_len: u32,
         dscp: u8,
     ) -> bool {
-        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, true)
+        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, true, None)
+    }
+
+    /// #16042: [`Self::probe_hit`] carrying the parsed segment ack.
+    pub fn probe_hit_with_ack(
+        &mut self,
+        key: &SessionKey,
+        now_ns: u64,
+        len: u64,
+        tcp_flags: u8,
+        payload_len: u32,
+        dscp: u8,
+        ack: Option<u32>,
+    ) -> bool {
+        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, true, ack)
     }
 
     /// Probe a flow-cache hit while deferring the HA completion delta.
@@ -3775,7 +3810,21 @@ impl SessionTable {
         payload_len: u32,
         dscp: u8,
     ) -> bool {
-        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, false)
+        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, false, None)
+    }
+
+    /// #16042: deferring probe carrying the parsed segment ack.
+    pub fn probe_hit_deferring_state_update_with_ack(
+        &mut self,
+        key: &SessionKey,
+        now_ns: u64,
+        len: u64,
+        tcp_flags: u8,
+        payload_len: u32,
+        dscp: u8,
+        ack: Option<u32>,
+    ) -> bool {
+        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, false, ack)
     }
 
     /// Emit the HA Update withheld by
@@ -3914,8 +3963,12 @@ impl SessionTable {
         payload_len: u32,
         dscp: u8,
         emit_state_update: bool,
+        ack: Option<u32>,
     ) -> bool {
         let mut completing: Option<(SessionKey, crate::nat::NatDecision)> = None;
+        // #16042 fold: expected ack only for pending pairs — the helper
+        // returns None without the companion probe otherwise.
+        let expected_ack = self.handshake_expected_ack(key);
         // #15947 (H29-04): wire state BEFORE the completion below, so the
         // HA Update emission can tell whether the handshake actually
         // transitioned (emit_session_state_update is transition-only).
@@ -3993,7 +4046,10 @@ impl SessionTable {
                 // #14939 handshake completion (mirrors
                 // `touch_if_stale_with_payload`): not a keepalive refresh,
                 // so it applies even inside the throttle window.
+                // #16042: a known-but-wrong ack must not complete here.
+                let ack_valid = Self::handshake_ack_valid(expected_ack, ack);
                 if entry.handshake_pending
+                    && ack_valid
                     && !entry.closing
                     && matches!(key.protocol, PROTO_TCP)
                     && crate::tcp_flags::has_ack(tcp_flags)
@@ -4193,10 +4249,25 @@ impl SessionTable {
         tcp_flags: u8,
         payload_len: u32,
     ) -> bool {
+        self.touch_if_stale_with_ack(key, now_ns, tcp_flags, payload_len, None)
+    }
+
+    /// #16042: keepalive carrying the parsed segment ack.
+    #[inline]
+    pub fn touch_if_stale_with_ack(
+        &mut self,
+        key: &SessionKey,
+        now_ns: u64,
+        tcp_flags: u8,
+        payload_len: u32,
+        ack: Option<u32>,
+    ) -> bool {
         let mut completing: Option<(SessionKey, crate::nat::NatDecision)> = None;
         // #15947 (H29-04): pre-completion wire state for the HA Update.
         let mut handshake_state_before = 0u8;
         let mut close_class_before = 0u8;
+        // #16042 fold: pending-only companion resolution (see helper).
+        let expected_ack = self.handshake_expected_ack(key);
         let canonical_refresh_key = match self.record_by_key(key) {
             Some(record) => {
                 let entry = &record.entry;
@@ -4208,7 +4279,9 @@ impl SessionTable {
                 // refresh — it must apply even inside the throttle
                 // window, or the completing segment is consumed without
                 // promoting and the pair stays on the opening window.
+                // #16042: a known-but-wrong ack must not complete here.
                 if entry.handshake_pending
+                    && Self::handshake_ack_valid(expected_ack, ack)
                     && !entry.closing
                     && matches!(key.protocol, PROTO_TCP)
                     && crate::tcp_flags::has_ack(tcp_flags)
@@ -4622,6 +4695,7 @@ impl SessionTable {
             now_ns,
             protocol,
             tcp_flags,
+            ack,
         } = req;
         // #1752 Path E: in-place refresh. The prior implementation did
         // `remove_entry` + mutate + `restore_entry`, which tore down and rebuilt
@@ -4726,6 +4800,9 @@ impl SessionTable {
             .get(handle as usize)
             .map(|record| record.entry.tcp_handshake_state_wire(protocol))
             .unwrap_or(0);
+        // #16042 fold: expected ack only for pending pairs (see
+        // `handshake_expected_ack`); established refreshes skip the probe.
+        let ack_valid = Self::handshake_ack_valid(self.handshake_expected_ack(key), ack);
         {
             let record = self
                 .entries
@@ -4796,6 +4873,7 @@ impl SessionTable {
             // `!is_closing`, but the entry-state gate covers the crossing
             // bare ACK that follows a RST stamped by an earlier segment).
             reverse_syn_ack = !record.entry.closing
+                && ack_valid
                 && matches!(protocol, PROTO_TCP)
                 && is_syn_ack(tcp_flags)
                 && metadata.is_reverse
@@ -4804,7 +4882,9 @@ impl SessionTable {
             // SYN-ACK-first entry completes only on a reverse non-SYN ACK;
             // a SYN-first entry completes only on a valid forward ACK.
             // Retransmitted SYNs and closing ACKs leave the gate pending.
+            // #16042: a known-but-wrong ack leaves the gate pending too.
             handshake_completed = !record.entry.closing
+                && ack_valid
                 && if record.entry.syn_ack_first {
                 matches!(protocol, PROTO_TCP)
                     && record.entry.handshake_pending
@@ -5194,7 +5274,8 @@ impl SessionTable {
                 now_ns,
                 protocol,
                 tcp_flags,
-            },
+                    ack: None,
+},
             false,
         )
     }
@@ -5224,7 +5305,8 @@ impl SessionTable {
                 now_ns,
                 protocol,
                 tcp_flags,
-            },
+                    ack: None,
+},
             true,
         )
     }
@@ -6318,3 +6400,9 @@ mod l3_reverse_bucket_15087_tests;
 #[cfg(test)]
 #[path = "unreplied_pressure_16019_tests.rs"]
 mod unreplied_pressure_16019_tests;
+
+// #16042: handshake promotion/completion validates ack == companion
+// ISN + 1 at every gate (lookup, cached-hit, keepalive, update paths).
+#[cfg(test)]
+#[path = "handshake_ack_16042_tests.rs"]
+mod handshake_ack_16042_tests;

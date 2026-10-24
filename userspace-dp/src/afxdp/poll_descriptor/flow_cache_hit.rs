@@ -449,13 +449,17 @@ pub(super) fn stage_flow_cache_hit(
         } else {
             // HA completion is published only after output-filter/policer
             // admission below; probe_hit itself would emit it immediately.
-            sessions.probe_hit_deferring_state_update(
+            // #16042: carry the parsed ack so a wrong-ack cached segment
+            // cannot complete the handshake.
+            let ack = crate::afxdp::frame::extract_tcp_seq_ack_window(packet_frame).map(|(_, ack, _)| ack);
+            sessions.probe_hit_deferring_state_update_with_ack(
                 &flow.forward_key,
                 now_ns,
                 meta.pkt_len as u64,
                 meta.tcp_flags,
                 super::tcp_payload_len(packet_frame, meta),
                 meta.dscp,
+                ack,
             )
         };
         if !session_live {

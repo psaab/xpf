@@ -181,7 +181,8 @@ fn update_session_rst_then_ack_does_not_complete_handshake_14630() {
             now_ns: ack_ns,
             protocol: PROTO_TCP,
             tcp_flags: TCP_ACK,
-        },
+                    ack: None,
+},
         false
     ));
     for (label, key) in [("forward", &forward), ("reverse", &reverse)] {

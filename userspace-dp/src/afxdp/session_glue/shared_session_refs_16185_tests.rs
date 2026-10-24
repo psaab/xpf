@@ -486,6 +486,7 @@ fn shared_refs_conntrack_v4_reaches_deferred_promotion_16185() {
             protocol: PROTO_TCP,
             tcp_flags: 0x10,
             now_ns: 2_000_000,
+            ack: None,
         }),
         deferred_shared_materialization: None,
         deferred_synced_purge: None,

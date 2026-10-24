@@ -645,7 +645,8 @@ fn establish_matrix_pair(sessions: &mut SessionTable) {
                 now_ns: T0_NS,
                 protocol: PROTO_TCP,
                 tcp_flags: TCP_SYN | TCP_ACK,
-            },
+                            ack: None,
+},
             false,
         ),
         "matrix reverse SYN-ACK must promote the opening pair to handshake-pending"
@@ -662,7 +663,8 @@ fn establish_matrix_pair(sessions: &mut SessionTable) {
                 now_ns: T0_NS,
                 protocol: PROTO_TCP,
                 tcp_flags: TCP_ACK,
-            },
+                            ack: None,
+},
             false,
         ),
         "matrix final ACK must complete the admitted handshake"

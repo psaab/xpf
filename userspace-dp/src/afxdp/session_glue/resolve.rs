@@ -117,6 +117,7 @@ verdict: SessionHitVerdict,) -> Option<ResolvedFlowSessionDecision> {
         ha_startup_grace_until_secs,
         worker_id,
         None,
+        None,
     )?;
     let mut purged_keys = Vec::new();
     maybe_promote_synced_session_with_conntrack(
@@ -189,11 +190,40 @@ pub(in crate::afxdp) fn resolve_flow_session_decision_with_conntrack_and_payload
     worker_id: u32,
     prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,
 ) -> Option<ResolvedFlowSessionDecision> {
+    resolve_flow_session_decision_with_conntrack_and_payload_and_ack(
+        sessions, session_map, shared, forwarding, ha_state, dynamic_neighbors, flow, protocol,
+        tcp_flags, payload_len, ingress_ifindex, ingress_vlan_id, fabric_ingress, fabric_link_ingress,
+        ha_startup_grace_until_secs, worker_id, prevalidated_forward_nat_match, None,
+    )
+}
+
+/// #16042: production variant carrying the parsed segment ack.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn resolve_flow_session_decision_with_conntrack_and_payload_and_ack(
+    sessions: &mut SessionTable,
+    session_map: SteeringMap<'_>,
+    shared: SharedSessionRefs<'_>,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    flow: &SessionFlow,
+    protocol: u8,
+    tcp_flags: u8,
+    payload_len: u32,
+    ingress_ifindex: i32,
+    ingress_vlan_id: u16,
+    fabric_ingress: bool,
+    fabric_link_ingress: bool,
+    ha_startup_grace_until_secs: u64,
+    worker_id: u32,
+    prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,
+    ack: Option<u32>,
+) -> Option<ResolvedFlowSessionDecision> {
     resolve_flow_session_decision_with_conntrack_inner(
         sessions, session_map, shared, forwarding, ha_state,
         dynamic_neighbors, flow, protocol, tcp_flags, payload_len,
         ingress_ifindex, ingress_vlan_id, fabric_ingress, fabric_link_ingress,
-        ha_startup_grace_until_secs, worker_id, prevalidated_forward_nat_match,
+        ha_startup_grace_until_secs, worker_id, prevalidated_forward_nat_match, ack,
     )
 }
 
@@ -246,7 +276,8 @@ fabric_ingress: bool,
 fabric_link_ingress: bool,
 ha_startup_grace_until_secs: u64,
 worker_id: u32,
-prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) -> Option<ResolvedFlowSessionDecision> {
+prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,
+ack: Option<u32>,) -> Option<ResolvedFlowSessionDecision> {
     if !crate::session::PMechSessionDirectory::global()
         .probe_packet_key(&flow.forward_key)
         .is_fallthrough()
@@ -512,6 +543,7 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
             protocol,
             tcp_flags,
             now_ns,
+            ack,
         });
         let deferred_forwarding_revalidation =
             if forwarding_stale && !keep_transient {

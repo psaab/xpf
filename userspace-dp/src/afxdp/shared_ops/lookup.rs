@@ -542,6 +542,8 @@ pub(in crate::afxdp) struct DeferredSyncedPromotion {
     pub(in crate::afxdp) fabric_ingress: bool,
     pub(in crate::afxdp) protocol: u8,
     pub(in crate::afxdp) tcp_flags: u8,
+    /// #16042: parsed segment ack for the promote gate (`None` = unparsed).
+    pub(in crate::afxdp) ack: Option<u32>,
 }
 
 // Fabric-ingress SNAT-only forward entries are standby-side wire placeholders

@@ -37,7 +37,8 @@ fn peer_synced_pair(close_flags: u8) -> (SessionTable, SessionKey, SessionKey) {
         now_ns: NOW_NS + 1,
         protocol: PROTO_TCP,
         tcp_flags: close_flags,
-    }));
+            ack: None,
+}));
     table.apply_deferred_owner_close(&reverse, NOW_NS + 1, close_flags);
     (table, forward, reverse)
 }
@@ -118,7 +119,8 @@ fn promoted_synced_fin_ack_does_not_complete_pending_handshake_13939() {
         now_ns: NOW_NS + 1,
         protocol: PROTO_TCP,
         tcp_flags: flags,
-    }));
+            ack: None,
+}));
     assert!(
         table
             .entry_by_key(&forward)
