@@ -46,6 +46,18 @@ xpf (0.0.0) unstable; urgency=medium
     execution fails, and raises on a missing file. Production CLI
     files keep their hyphenated names and invocation paths; no
     packages, shims, or Stage-B layout change.
+  * Build: add a systemd-unit canary over the explicit staging lists
+    (#16198). A new python self-test reads debian/rules as joined make
+    lines, bake.py through its AST string constants, and the unit
+    sources as systemd directives, then checks the staged/enabled/
+    cleaned .deb sets and the bake --copy-in/enable sets against a
+    test-data-only manifest. The intentional image/deb divergence is
+    carried by explicit allowlists (image-only xpf-grow-root and
+    incus-agent; deb-only xpfd, via its sed verify-dataplane transform,
+    and xpf-day0-config), every OnFailure=/RequiredBy= target must be
+    staged or an allowlisted external unit, and seeded dropped-unit /
+    dangling-reference counterfactuals prove the comparator reds.
+    No generator: the explicit lists stay the source of truth.
   * API: metrics descriptor init and Describe are now driven by one
     per-family descriptor table (#16202). The ~36 init calls in
     newCollector, the 630-line Describe enumeration, and the seven
