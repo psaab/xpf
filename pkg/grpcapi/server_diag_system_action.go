@@ -77,31 +77,45 @@ func (s *Server) proxyPeerSystemActionWithPersistentNatGeneration(
 // operator the failover failed and invite a retry of an
 // already-completed move. When the error is not a deadline outcome, or
 // the op is not a proxyable failover, it returns (nil, false) and the
-// caller relays the original error unchanged. Otherwise it returns a
-// non-error response carrying the shared byte-identical message. The
-// gRPC dialer, its RPC deadline, and its signed-request metadata stay
-// in this package; only the pure reconciliation is shared.
-func (s *Server) failoverProxyTimeoutOutcome(op clusterfailover.Op, err error) (*pb.SystemActionResponse, bool) {
+// caller relays the original error unchanged. Otherwise it returns the
+// reconciled outcome: (resp, nil) for a committed transfer,
+// (nil, codes.Unknown error carrying the verify text) for an unknown
+// one (#16432) — SystemActionResponse carries only message, so the
+// RPC status is the only machine-readable verdict; an unknown outcome
+// must not share the committed OK status, or a status-checking client
+// may proceed (drain/reboot the old owner) although ownership did not
+// move. The gRPC dialer, its RPC deadline, and its signed-request
+// metadata stay in this package; only the pure reconciliation is
+// shared.
+func (s *Server) failoverProxyTimeoutOutcome(op clusterfailover.Op, err error) (*pb.SystemActionResponse, error, bool) {
 	var view peerclient.Ownership
 	if s.cluster != nil {
 		view = s.cluster
 	}
-	message, ok := peerclient.Reconcile(view, op, err)
-	if !ok {
-		return nil, false
+	message, outcome := peerclient.Reconcile(view, op, err)
+	switch outcome {
+	case peerclient.OutcomeCommitted:
+		return &pb.SystemActionResponse{Message: message}, nil, true
+	case peerclient.OutcomeUnknown:
+		return nil, status.Error(codes.Unknown, message), true
+	default:
+		return nil, nil, false
 	}
-	return &pb.SystemActionResponse{Message: message}, true
 }
 
 // proxyClusterFailover forwards a validated node-targeted failover op
 // to the peer and reconciles a proxy deadline outcome against current
 // ownership (#15081), so the operator never receives a bare
-// DeadlineExceeded for a transfer the peer may have committed.
+// DeadlineExceeded for a transfer the peer may have committed. A
+// committed-after-timeout transfer reports OK; an unknown outcome
+// (ownership did not move, or the peer is unreachable) returns
+// codes.Unknown with the verify text (#16432), so a status-checking
+// client can distinguish the two without parsing the message.
 func (s *Server) proxyClusterFailover(ctx context.Context, req *pb.SystemActionRequest, op clusterfailover.Op) (*pb.SystemActionResponse, error) {
 	resp, err := s.proxyPeerSystemAction(ctx, req)
 	if err != nil {
-		if outcome, ok := s.failoverProxyTimeoutOutcome(op, err); ok {
-			return outcome, nil
+		if outcome, oerr, ok := s.failoverProxyTimeoutOutcome(op, err); ok {
+			return outcome, oerr
 		}
 		if st, ok := status.FromError(err); ok {
 			return nil, st.Err()

@@ -75,47 +75,68 @@ type Ownership interface {
 	DataGroupIDs() []int
 }
 
+// Outcome is the machine-readable verdict of a post-deadline
+// reconciliation (#15081, #16432). It lets a status-checking client
+// distinguish a committed transfer from an unknown one without
+// parsing the human-readable message.
+type Outcome int
+
+const (
+	// OutcomeNone means Reconcile did not reconcile the error: the
+	// caller relays the original error unchanged.
+	OutcomeNone Outcome = iota
+	// OutcomeCommitted means ownership moved as requested (peer
+	// primary for the RG, or for every data RG).
+	OutcomeCommitted
+	// OutcomeUnknown means the proxy leg timed out and ownership did
+	// not move as requested, or the peer is unreachable: the transfer
+	// may still commit later, so the operator must verify ownership
+	// before retrying or proceeding.
+	OutcomeUnknown
+)
+
 // Reconcile reconciles a forwarded failover whose proxy leg hit a
 // deadline against current RG ownership (#15081): the peer may have
 // committed after the proxy gave up, so a bare DeadlineExceeded must
 // never reach the operator for this path.
 //
-// It returns (message, true) for deadline outcomes on targeted
-// failovers, and ("", false) otherwise (the caller relays the
-// original error). view may be nil (standalone / no cluster view), in
-// which case it returns ("", false).
+// It returns (message, OutcomeCommitted) when ownership moved as
+// requested, (message, OutcomeUnknown) when ownership did not move
+// or the peer is unreachable, and ("", OutcomeNone) otherwise (the
+// caller relays the original error). view may be nil (standalone /
+// no cluster view), in which case it returns ("", OutcomeNone).
 //
 //	outcome for a targeted failover after a deadline:
 //	  - ownership moved as requested (peer primary for the RG, or for
-//	    every data RG): report success ("transfer committed");
-//	  - peer reachable but ownership did not move: report outcome
-//	    unknown with the peer's current primary set;
-//	  - peer unreachable / no cluster view: report outcome unknown
-//	    (or ("", false) when there is no view at all, matching the
+//	    every data RG): OutcomeCommitted ("transfer committed");
+//	  - peer reachable but ownership did not move: OutcomeUnknown
+//	    with the peer's current primary set;
+//	  - peer unreachable / no cluster view: OutcomeUnknown
+//	    (or OutcomeNone when there is no view at all, matching the
 //	    CLI's existing nil-cluster gate).
-func Reconcile(view Ownership, op clusterfailover.Op, err error) (string, bool) {
+func Reconcile(view Ownership, op clusterfailover.Op, err error) (string, Outcome) {
 	if err == nil || view == nil {
-		return "", false
+		return "", OutcomeNone
 	}
 	if !IsDeadline(err) {
-		return "", false
+		return "", OutcomeNone
 	}
 	if !op.Targeted() {
-		return "", false
+		return "", OutcomeNone
 	}
 	switch op.Kind {
 	case clusterfailover.KindRGFailoverNode:
 		if view.IsPeerPrimary(op.RG) {
-			return fmt.Sprintf("Manual failover completed for redundancy group %d (transfer committed on node %d; proxy response timed out after the peer committed)", op.RG, op.Node), true
+			return fmt.Sprintf("Manual failover completed for redundancy group %d (transfer committed on node %d; proxy response timed out after the peer committed)", op.RG, op.Node), OutcomeCommitted
 		}
 		if !view.PeerAlive() {
-			return fmt.Sprintf("Cluster failover outcome unknown for redundancy group %d: forwarded request to node %d timed out and the peer is unreachable; verify redundancy group %d ownership before retrying", op.RG, op.Node, op.RG), true
+			return fmt.Sprintf("Cluster failover outcome unknown for redundancy group %d: forwarded request to node %d timed out and the peer is unreachable; verify redundancy group %d ownership before retrying", op.RG, op.Node, op.RG), OutcomeUnknown
 		}
-		return fmt.Sprintf("Cluster failover outcome unknown for redundancy group %d: forwarded request to node %d timed out; redundancy group %d is not primary on node %d — verify ownership before retrying", op.RG, op.Node, op.RG, op.Node), true
+		return fmt.Sprintf("Cluster failover outcome unknown for redundancy group %d: forwarded request to node %d timed out; redundancy group %d is not primary on node %d — verify ownership before retrying", op.RG, op.Node, op.RG, op.Node), OutcomeUnknown
 	case clusterfailover.KindDataFailover:
 		peerRGs, peerAlive := view.PeerPrimaryRGs()
 		if !peerAlive {
-			return fmt.Sprintf("Data failover outcome unknown: forwarded request to node %d timed out and the peer is unreachable; verify redundancy group ownership before retrying", op.Node), true
+			return fmt.Sprintf("Data failover outcome unknown: forwarded request to node %d timed out and the peer is unreachable; verify redundancy group ownership before retrying", op.Node), OutcomeUnknown
 		}
 		// The peer-side handler moves exactly the data RGs not already
 		// primary on the target; "committed" means every data RG is now
@@ -136,10 +157,10 @@ func Reconcile(view Ownership, op clusterfailover.Op, err error) (string, bool) 
 				}
 			}
 			if committed {
-				return fmt.Sprintf("Manual failover completed for data redundancy groups %v (transfer committed on node %d; proxy response timed out after the peer committed)", dataRGs, op.Node), true
+				return fmt.Sprintf("Manual failover completed for data redundancy groups %v (transfer committed on node %d; proxy response timed out after the peer committed)", dataRGs, op.Node), OutcomeCommitted
 			}
 		}
-		return fmt.Sprintf("Data failover outcome unknown: forwarded request to node %d timed out; data redundancy groups now primary on node %d: %v — verify ownership before retrying", op.Node, op.Node, peerRGs), true
+		return fmt.Sprintf("Data failover outcome unknown: forwarded request to node %d timed out; data redundancy groups now primary on node %d: %v — verify ownership before retrying", op.Node, op.Node, peerRGs), OutcomeUnknown
 	}
-	return "", false
+	return "", OutcomeNone
 }

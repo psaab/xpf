@@ -103,7 +103,7 @@ never kills a healthy stream, while removing the PSK ends a stream within
 one tick and a rotation still accepting the old key (#6630) does not.
 Proxied streams die with the origin's primary re-auth, as before.
 
-**Forwarded failover proxy budget (#15081).** `proxyPeerSystemAction` keeps
+**Forwarded failover proxy budget (#15081, #16432).** `proxyPeerSystemAction` keeps
 the historical 5s deadline for ordinary forwarded actions, but a forwarded
 node-targeted cluster failover (`cluster-failover:<rg>:node<n>` /
 `cluster-failover-data:node<n>`) is sized from the cluster budget
@@ -112,12 +112,15 @@ node-targeted cluster failover (`cluster-failover:<rg>:node<n>` /
 `RequestPeerFailover` sequence, whose barrier ACK alone can be delayed 30+s
 by bulk session sync. If the proxy leg still hits a deadline, the outcome
 is reconciled against heartbeat-advertised RG ownership
-(`IsPeerPrimary` / `PeerPrimaryRGs`): committed transfers report success,
-anything else reports "outcome unknown … verify ownership before
-retrying" — never a bare `DeadlineExceeded` after the peer may have
-committed. Since #16154 the sizing and reconciliation live in the
-shared `pkg/peerclient` table (byte-golden there); both frontends keep
-their own dialers, RPC deadlines, and fabric-auth credentials.
+(`IsPeerPrimary` / `PeerPrimaryRGs`): committed transfers report success
+(gRPC OK), anything else reports "outcome unknown … verify ownership before
+retrying" as a distinct non-OK `codes.Unknown` error (#16432) — never a bare
+`DeadlineExceeded` after the peer may have committed, and never OK for a
+transfer that did not move, since `SystemActionResponse` carries only
+`message` and the RPC status is the only machine-readable verdict. Since
+#16154 the sizing and reconciliation live in the shared `pkg/peerclient`
+table (byte-golden there); both frontends keep their own dialers, RPC
+deadlines, and fabric-auth credentials.
 
 ### Peer hop markers are a listener capability, not a header (#5883)
 
