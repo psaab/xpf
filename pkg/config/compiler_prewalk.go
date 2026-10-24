@@ -391,6 +391,22 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, []uncoveredF
 	}
 	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, dhcpRelayChildWarnings...)
 
+	// #16459 unknown child at the `applications` level (applicaiton,
+	// aplication, application-setzq, ...). Same AST-level reason as the
+	// gates above: compileApplications only visits `application` and
+	// `application-set` children, so a typo at that level compiles to
+	// nothing or to a widened application (a port-less TCP application
+	// permits every port) with no trace left in the typed config. Scoped
+	// to the `applications` level — NOT closedWorld on schemaApplications,
+	// which inherits and rejects the flat-set chain and term bodies the
+	// compiler does read. Strict rejects; lenient warns (#1960).
+	appsLevelWarnings16459, err := validateApplicationsLevelChildrenAST16459(
+		tree.Children, opts.lenientApplicationsLevelChildren16459)
+	if err != nil {
+		return nil, nil, err
+	}
+	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, appsLevelWarnings16459...)
+
 	// #14660 event-options closed-world gate. Unknown event names, `then`
 	// actions other than change-configuration, and undeclared
 	// event-options / policy children compile to nothing (compileEventOptions

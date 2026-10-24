@@ -1748,6 +1748,29 @@ per distinct finding and keeps the pre-existing compiled shape (#1960).
 Coverage: `pkg/config/firewall_filter_family_levels_16450_test.go`
 (flat + hierarchical, inet/inet6/any, implicit-inet, group-inherited).
 
+### Applications level — unknown children are gated (#16459)
+
+Above the #9595 application-body gate, the `applications` level itself
+was open-world: a misspelt keyword on one line (`applicaiton`,
+`aplication`, `applicaton` for `application`, or `application-setzq`
+for `application-set`) committed clean with zero warnings and the line
+was dropped. An application whose `destination-port` line carried the
+typo compiled port-less — a permit matching it applied on every TCP
+port — while `show configuration` still rendered the dropped line.
+The scoped pre-walk gate `validateApplicationsLevelChildrenAST16459`
+(in `runPreWalkGates`) judges exactly that level against the
+schema-declared children (`application`, `application-set`), reading
+the permitted set from the schema. It is deliberately NOT
+`closedWorld` on `schemaApplications`, which inherits and was measured
+to reject the flat-set chain (`... protocol tcp destination-port 8443`)
+and hierarchical term bodies (`term t1 { protocol tcp; }`) the
+compiler does read. Apply statements (#7029) are never judged. Strict
+commit rejects the first offender naming it; tolerant load/peer-sync
+warns once per distinct finding and keeps the pre-existing compiled
+shape (#1960). Coverage:
+`pkg/config/applications_level_16459_test.go` (flat + hierarchical,
+packed, group-inherited, controls for term bodies and apply-macro).
+
 ## Strict commit-time validators → `pkg/config/compiler_validate_strict_*.go`
 
 The typed per-leaf `SchemaValidate` walk (4) cannot express cross-field or
