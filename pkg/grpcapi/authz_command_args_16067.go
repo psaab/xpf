@@ -115,14 +115,14 @@ func rpcArgumentForms(cfg *config.Config, fullMethod string, req any, base strin
 		if !ok {
 			return nil, false
 		}
-		if len(forms) == 1 {
+		if forms[0] == "show security flow session" {
 			// Unfiltered: the executed command IS the summary.
-			return []string{base}, true
+			return chargeForms16472(base), true
 		}
 		return forms, true
 	case "GetZonePairSummary":
 		// No selectors (only include_peer); the bare charge executes.
-		return []string{base}, true
+		return chargeForms16472(base), true
 	case "GetEvents":
 		// #16378 fold: GetEvents carries zone/action/protocol filters
 		// charged as `show log`; it fell through to the bare charge.
@@ -143,7 +143,7 @@ func rpcArgumentForms(cfg *config.Config, fullMethod string, req any, base strin
 			return nil, false
 		}
 		if mr.GetInterfaceName() == "" {
-			return []string{base}, true
+			return chargeForms16472(base), true
 		}
 		return canonicalArgumentForms(base+" "+mr.GetInterfaceName(), base)
 	case "MatchPolicies":
@@ -158,7 +158,7 @@ func rpcArgumentForms(cfg *config.Config, fullMethod string, req any, base strin
 			return nil, false
 		}
 		if sd.GetFilter() == "" {
-			return []string{base}, true
+			return chargeForms16472(base), true
 		}
 		// The handler applies the filter as a prefix in terse mode too
 		// (showInterfacesTerse receives filterName and skips
@@ -174,8 +174,9 @@ func rpcArgumentForms(cfg *config.Config, fullMethod string, req any, base strin
 	}
 	// Every other method's typed fields are selectors the on-box command
 	// does not carry as free argument text the operator typed (or the
-	// charge is already argument-complete); the bare charge is the form.
-	return []string{base}, true
+	// charge is already argument-complete); the bare charge is the form,
+	// expanded to its canonical spellings (#16472).
+	return chargeForms16472(base), true
 }
 
 // canonicalArgumentForms validates full against the operational tree: it
@@ -183,15 +184,82 @@ func rpcArgumentForms(cfg *config.Config, fullMethod string, req any, base strin
 // (#8057). The bare charge is always an additional form, mirroring the
 // on-box gate's argument-free prefix form (#9022), so an anchored path
 // deny still fires when arguments are present.
+//
+// #16472: when the full line canonicalises, its CanonicalForms (base,
+// keyword-full and selector spellings) join the form set, so the remote
+// gate judges the same argument-free spellings the console derives
+// from the typed line. The gate additionally applies the console's
+// #14687 distinct-narrower rescue (shared cmdtree helper) on a denial.
 func canonicalArgumentForms(full, base string) ([]string, bool) {
 	canon, res := cmdtree.Canonicalize(cmdtree.OperationalTree, strings.Fields(full))
 	if res != cmdtree.CanonicalOK || strings.Join(canon, " ") != full {
 		return nil, false
 	}
-	if full == base {
-		return []string{base}, true
+	return argumentFormsWithCanonical16472(full, base, canon), true
+}
+
+// argumentFormsWithCanonical16472 assembles the remote form set for one
+// executed command: the full line, the registry charge, and the
+// canonical forms (base / keyword-full / selectors) of both the full
+// line and the charge. Duplicates are dropped, order preserved with
+// the full line first (EvaluateForms' verdicts[0] convention). The
+// allow-bearing #14687 rescue divergence is documented at the gate.
+func argumentFormsWithCanonical16472(full, base string, canon []string) []string {
+	seen := map[string]bool{}
+	var forms []string
+	add := func(f string) {
+		if f != "" && !seen[f] {
+			seen[f] = true
+			forms = append(forms, f)
+		}
 	}
-	return []string{full, base}, true
+	add(full)
+	add(base)
+	if canon != nil {
+		b, f, sels, _ := cmdtree.CanonicalForms(canon)
+		add(b)
+		add(f)
+		for _, s := range sels {
+			add(s)
+		}
+	}
+	// The charge's OWN canonical forms only (#16472 narrowed): a
+	// selector spelling the charge does not itself declare
+	// (`show security policies` under the `... detail` charge,
+	// `show route` under `show route table`) must not become a
+	// remote form, or an anchored deny on it would fire remotely
+	// while the executed console command is allowed. Deriving a
+	// value-bearing full form's forms is likewise excluded: the
+	// full slice's forms already entered via canon above.
+	return forms
+}
+
+// chargeForms16472 expands a bare registry charge into its canonical
+// form set (charge + base/full/selector spellings). Used where the
+// executed command IS the charge (no argument to reconstruct).
+func chargeForms16472(base string) []string {
+	forms := []string{base}
+	if bc, res := cmdtree.Canonicalize(cmdtree.OperationalTree, strings.Fields(base)); res == cmdtree.CanonicalOK {
+		b, f, sels, _ := cmdtree.CanonicalForms(bc)
+		for _, x := range append([]string{b, f}, sels...) {
+			dup := false
+			for _, g := range forms {
+				if g == x {
+					dup = true
+				}
+			}
+			if !dup && x != "" {
+				forms = append(forms, x)
+			}
+		}
+	}
+	return forms
+}
+
+// canonicalFormsOf16472 returns the CanonicalForms of an already
+// canonical token slice, for the gate's #14687 rescue check.
+func canonicalFormsOf16472(canon []string) (base, full string, selectors []string, chain string) {
+	return cmdtree.CanonicalForms(canon)
 }
 
 // eventsArgumentForms rebuilds `show security log …` from a GetEvents
@@ -220,7 +288,7 @@ func eventsArgumentForms(cfg *config.Config, er *pb.GetEventsRequest, base strin
 		full += " action " + v
 	}
 	if full == "show security log" {
-		return []string{base}, true
+		return chargeForms16472(base), true
 	}
 	return canonicalArgumentForms(full, base)
 }
@@ -261,7 +329,7 @@ func clearSessionsArgumentForms(cr *pb.ClearSessionsRequest, base string) ([]str
 		full += " source-nat-pool " + v
 	}
 	if full == base {
-		return []string{base}, true
+		return chargeForms16472(base), true
 	}
 	return canonicalArgumentForms(full, base)
 }
@@ -281,7 +349,7 @@ func showTextArgumentForms(base string, st *pb.ShowTextRequest) ([]string, bool)
 	switch topic {
 	case "interfaces-detail", "interfaces-extensive", "interfaces-queue":
 		if filter == "" {
-			return []string{base}, true
+			return chargeForms16472(base), true
 		}
 		return canonicalArgumentForms(base+" "+filter, base)
 	case "route-instance":
@@ -289,24 +357,62 @@ func showTextArgumentForms(base string, st *pb.ShowTextRequest) ([]string, bool)
 			return nil, false
 		}
 		return canonicalArgumentForms(base+" "+filter, base)
-	case "zones-detail", "policies-detail", "policies-hit-count",
+	case "zones-detail":
+		// #16472: the filter is a bare zone NAME (cmd/cli SplitModifiers
+		// selector), so the executed line is the canonicalisable
+		// `show security zones <zone> detail`; judging it through
+		// CanonicalForms yields the console's exact verdict, including
+		// its #14687 rescue (allowed) — where the free-text spelling
+		// `... detail <zone>` would have fabricated a denied base hit.
+		if filter == "" {
+			return chargeForms16472(base), true
+		}
+		if strings.ContainsAny(filter, " \t") {
+			return nil, false
+		}
+		return canonicalArgumentForms("show security zones "+filter+" detail", base)
+	case "policies-detail", "policies-hit-count",
 		"chassis-cluster-data-plane-flows", "security-log":
 		if filter == "" {
-			return []string{base}, true
+			return chargeForms16472(base), true
 		}
-		// These filters are free operator text the on-box dispatcher
-		// parses positionally (zone names, `from-zone X to-zone Y`
-		// pairs, log selectors). Carrying the text verbatim after the
-		// command path reproduces the string an argument-scoped regex
-		// was written against; the bare form keeps anchored path rules
-		// firing. The text is request data, never a keyword source, so
-		// it is not canonicalised word-by-word.
-		return []string{base + " " + filter, base}, true
+		// #16472: policies-detail / policies-hit-count filters are the
+		// `from-zone X to-zone Y` selector text cmd/cli's
+		// parsePolicyShowQuery admits (server_show_policies_text.go's
+		// parseZoneFilter rejects anything else). Reconstruct the
+		// console's selector-first spelling — `show security policies
+		// from-zone X to-zone Y detail` — and judge it through
+		// canonicalArgumentForms, so the anchored base deny
+		// (`^show security policies$`) that denies the filtered
+		// console line denies here too; a filter the handler would
+		// reject is unnameable and denies for a restricted class.
+		// The remaining topics (flows, security-log) keep the verbatim
+		// free-text spelling: their filters are not zone selectors.
+		if topic == "policies-detail" || topic == "policies-hit-count" {
+			view := "detail"
+			if topic == "policies-hit-count" {
+				view = "hit-count"
+			}
+			return policiesFilterForms16472(base, view, filter)
+		}
+		forms := []string{base + " " + filter}
+		for _, f := range chargeForms16472(base) {
+			dup := false
+			for _, g := range forms {
+				if g == f {
+					dup = true
+				}
+			}
+			if !dup {
+				forms = append(forms, f)
+			}
+		}
+		return forms, true
 	}
 
 	// Topics with no packed parameter: the bare charge is the command.
 	if !strings.Contains(topic, ":") {
-		return []string{base}, true
+		return chargeForms16472(base), true
 	}
 
 	prefix, rest, _ := strings.Cut(topic, ":")
@@ -345,7 +451,7 @@ func showTextArgumentForms(base string, st *pb.ShowTextRequest) ([]string, bool)
 				full += " " + parts[2]
 			}
 		}
-		return []string{full, base}, true
+		return argumentFormsWithCanonical16472(full, base, nil), true
 	case "applications":
 		name := strings.TrimPrefix(topic, "applications:")
 		if name == "" {
@@ -364,7 +470,7 @@ func showTextArgumentForms(base string, st *pb.ShowTextRequest) ([]string, bool)
 			if filter != "" {
 				return canonicalArgumentForms(base+" "+filter, base)
 			}
-			return []string{base}, true
+			return chargeForms16472(base), true
 		}
 		return canonicalArgumentForms(base+" "+name, base)
 	case "cos-classifier", "cos-rewrite-rule":
@@ -377,13 +483,13 @@ func showTextArgumentForms(base string, st *pb.ShowTextRequest) ([]string, bool)
 			full += " type " + typ
 		}
 		if full == base {
-			return []string{base}, true
+			return chargeForms16472(base), true
 		}
 		return canonicalArgumentForms(full, base)
 	case "cos-scheduler-map":
 		name := strings.TrimPrefix(topic, "cos-scheduler-map:")
 		if name == "" {
-			return []string{base}, true
+			return chargeForms16472(base), true
 		}
 		return canonicalArgumentForms(base+" "+name, base)
 	case "screen-ids-option", "screen-ids-option-detail":
@@ -407,7 +513,7 @@ func showTextArgumentForms(base string, st *pb.ShowTextRequest) ([]string, bool)
 	case "firewall-effective":
 		family := strings.TrimPrefix(topic, "firewall-effective:")
 		if family == topic {
-			return []string{base}, true
+			return chargeForms16472(base), true
 		}
 		switch family {
 		case "inet", "inet6":
@@ -423,13 +529,38 @@ func showTextArgumentForms(base string, st *pb.ShowTextRequest) ([]string, bool)
 	case "sessions-top":
 		// Registry keys are `sessions-top:bytes|packets`, charged as
 		// `show security flow session sort-by bytes|packets` already.
-		return []string{base}, true
+		return chargeForms16472(base), true
 	}
 	// A packed topic with no decoder here: its parameter cannot be
 	// reconstructed, so the request is unnameable in full. The bare
 	// charge alone would silently re-open the argument-text gap for
 	// that topic, so a restricted class denies.
 	return nil, false
+}
+
+// policiesFilterForms16472 rebuilds the console spelling of a filtered
+// policies detail/hit-count command from its ShowText Filter
+// (`from-zone X to-zone Y`, either pair optional, in the order cmd/cli
+// joined it). Any other token is a filter the handler rejects
+// (parseZoneFilter), so it is unnameable here.
+func policiesFilterForms16472(base, view, filter string) ([]string, bool) {
+	fields := strings.Fields(filter)
+	full := "show security policies"
+	seen := map[string]bool{}
+	for i := 0; i < len(fields); i++ {
+		kw := fields[i]
+		if kw != "from-zone" && kw != "to-zone" {
+			return nil, false
+		}
+		if seen[kw] || i+1 >= len(fields) {
+			return nil, false
+		}
+		seen[kw] = true
+		full += " " + kw + " " + fields[i+1]
+		i++
+	}
+	full += " " + view
+	return canonicalArgumentForms(full, base)
 }
 
 // firewallFilterForms decodes `firewall-filter:<name>[:<family>]` (and the
@@ -584,7 +715,7 @@ func sessionArgumentForms(cfg *config.Config, gr *pb.GetSessionsRequest, base st
 		full += " source-nat-pool " + v
 	}
 	if full == base {
-		return []string{base}, true
+		return chargeForms16472(base), true
 	}
 	return canonicalArgumentForms(full, base)
 }
@@ -595,7 +726,7 @@ func matchPoliciesArgumentForms(mp *pb.MatchPoliciesRequest, base string) ([]str
 		// cannot be spelled without them, so name only what is present.
 		if mp.GetFromZone() == "" && mp.GetToZone() == "" &&
 			mp.GetSourceIp() == "" && mp.GetDestinationIp() == "" {
-			return []string{base}, true
+			return chargeForms16472(base), true
 		}
 	}
 	full := base
@@ -633,7 +764,7 @@ func matchPoliciesArgumentForms(mp *pb.MatchPoliciesRequest, base string) ([]str
 		full += " ingress-interface " + v
 	}
 	if full == base {
-		return []string{base}, true
+		return chargeForms16472(base), true
 	}
 	return canonicalArgumentForms(full, base)
 }
@@ -657,6 +788,9 @@ func zoneNameForID(cfg *config.Config, id uint32) (string, bool) {
 // placeholders; the advisory derives its witnesses from the operator's
 // own pattern, never from these values.
 var argumentSampleCommands16067 = []string{
+	"show firewall filter f1",
+	"show security screen ids-option prof1",
+	"show security zones trust detail",
 	"ping 192.0.2.1",
 	"ping 192.0.2.1 source 192.0.2.2",
 	"traceroute 192.0.2.1",

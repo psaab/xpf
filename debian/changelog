@@ -1,4 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Authz: judge the base spelling of selector-bearing commands on the
+    remote gates (#16472). The gRPC/REST ShowText regex gates matched
+    only the registry's selector spelling (`show firewall filter`,
+    `show route table`), so an anchored base deny (`^show firewall$`,
+    `^show route$`) that the console enforces through its
+    selector-stripped forms was silently unenforced remotely. The
+    canonical form walk now lives in pkg/cmdtree (shared with the
+    console) and both remote gates judge the executed line's and the
+    bare charge's base/full/selector forms, with the #14687
+    distinct-narrower rescue shared too. REST mirrors gRPC. One
+    fail-closed asymmetry remains: the charge spelling itself is
+    still judged remotely.
   * Test: fix WAN/LAN VIP drift in the loss cluster envs (#16468).
     loss-userspace-cluster.env pinned WAN_VIP4=172.16.50.6 while its
     CLUSTER_CONF (docs/ha-cluster-userspace.conf) configures

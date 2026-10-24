@@ -85,7 +85,7 @@ func sortedFuncs(sites map[string]int) []string {
 	return out
 }
 
-// AcceptsArgs must be read by Canonicalize and by nothing else.
+// AcceptsArgs must be read by Canonicalize and the #16472 form walk, and by nothing else.
 func TestAcceptsArgsIsHonouredOnlyInCanonicalize_8304(t *testing.T) {
 	// POSITIVE CONTROL FIRST. If the detector cannot see a field that IS read
 	// in many places, then a clean AcceptsArgs result proves nothing — it is
@@ -124,8 +124,14 @@ func TestAcceptsArgsIsHonouredOnlyInCanonicalize_8304(t *testing.T) {
 	}
 
 	for _, fn := range sortedFuncs(sites) {
+		// #16472: CanonicalForms / chargeTokens16472 are the shared
+		// form walk (moved from pkg/cli) that ends a command form at
+		// an AcceptsArgs node; they are deliberate second readers.
+		if fn == "CanonicalForms" || fn == "chargeTokens16472" {
+			continue
+		}
 		if fn != "Canonicalize" {
-			t.Errorf("AcceptsArgs is read in %s(), but it is honoured ONLY in Canonicalize.\n"+
+			t.Errorf("AcceptsArgs is read in %s(), but it is honoured ONLY in Canonicalize (plus the #16472 form walk).\n"+
 				"  Read sites found: %v\n"+
 				"  \"offers completions\" and \"accepts an argument\" are different properties; the completion\n"+
 				"  walkers ask the first. If %s() genuinely needs this, that is a design change and the\n"+

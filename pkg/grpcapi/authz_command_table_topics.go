@@ -93,6 +93,23 @@ import (
 // TestAnchoredDenyAgreesAcrossSurfaces9022 asserts the AGREEMENT rather
 // than each side separately; TestArgumentScopedDenyFiresOnGRPC16067
 // asserts the argument-text agreement.
+//
+// #16472 CLOSED THE BASE-SPELLING DIRECTION. The gate used to judge
+// only the registry's selector spelling (`show firewall filter`,
+// `show security screen statistics zone`, `show route table`), so
+// #15942's anchored base deny (`^show firewall$`, `^show route$`)
+// held on the console and not here. The form set now carries the
+// canonical base/full/selector spellings of the executed line and of
+// the bare charge, derived by the shared cmdtree.CanonicalForms /
+// CanonicalFormsForCharge, plus the shared #14687 rescue — see
+// authz_command_args_16067.go. One documented asymmetry remains:
+// the charge itself (`show route table`) is still a judged form, so
+// an anchored rule written against that spelling fires remotely
+// while the console, which never mints it for the value-bearing
+// line, allows; it is the registry's own spelling and the direction
+// is fail-closed. TestRemoteBaseDenyCrossSurface16472 asserts the
+// agreement per registry prefix topic and per Filter-carried
+// selector topic.
 
 // showTextTopicCommand maps a ShowText topic to the canonical operational
 // command that emits it.

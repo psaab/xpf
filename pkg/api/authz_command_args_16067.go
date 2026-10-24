@@ -69,7 +69,7 @@ func restArgumentForms(cfg *config.Config, route string, r *http.Request, cmd st
 		// never performs — e.g. a zone-scoped deny would refuse an
 		// unfiltered summary, and a zone-scoped allow exception would
 		// admit one. The bare summary charge is the only form.
-		return []string{cmd}, true
+		return restChargeForms16472(cmd), true
 	case "GET /api/v1/security/match":
 		return restMatchForms(r, cmd)
 	case "GET /api/v1/interfaces/detail":
@@ -84,9 +84,9 @@ func restArgumentForms(cfg *config.Config, route string, r *http.Request, cmd st
 			// around with ?filter=<name>&terse=1 (#16378 fold).
 			return restCanonicalForms(cmd+" "+name, cmd)
 		}
-		return []string{cmd}, true
+		return restChargeForms16472(cmd), true
 	}
-	return []string{cmd}, true
+	return restChargeForms16472(cmd), true
 }
 
 // decodeBufferedJSON decodes the already-buffered mutation body and
@@ -109,10 +109,53 @@ func restCanonicalForms(full, base string) ([]string, bool) {
 	if res != cmdtree.CanonicalOK || strings.Join(canon, " ") != full {
 		return nil, false
 	}
-	if full == base {
-		return []string{base}, true
+	return restArgumentFormsWithCanonical16472(full, base, canon), true
+}
+
+// restArgumentFormsWithCanonical16472 is the REST twin of the gRPC
+// argumentFormsWithCanonical16472 (#16472): full line, charge, and the
+// canonical base/full/selector spellings of both, so an anchored base
+// deny fires on REST exactly as on the console and gRPC surfaces.
+func restArgumentFormsWithCanonical16472(full, base string, canon []string) []string {
+	seen := map[string]bool{}
+	var forms []string
+	add := func(f string) {
+		if f != "" && !seen[f] {
+			seen[f] = true
+			forms = append(forms, f)
+		}
 	}
-	return []string{full, base}, true
+	add(full)
+	add(base)
+	if canon != nil {
+		b, f, sels, _ := cmdtree.CanonicalForms(canon)
+		add(b)
+		add(f)
+		for _, x := range sels {
+			add(x)
+		}
+	}
+	return forms
+}
+
+// restChargeForms16472 expands a bare REST charge to its canonical spellings.
+func restChargeForms16472(base string) []string {
+	forms := []string{base}
+	if bc, res := cmdtree.Canonicalize(cmdtree.OperationalTree, strings.Fields(base)); res == cmdtree.CanonicalOK {
+		b, f, sels, _ := cmdtree.CanonicalForms(bc)
+		for _, x := range append([]string{b, f}, sels...) {
+			dup := false
+			for _, g := range forms {
+				if g == x {
+					dup = true
+				}
+			}
+			if !dup && x != "" {
+				forms = append(forms, x)
+			}
+		}
+	}
+	return forms
 }
 
 // restShowTextForms mirrors the gRPC ShowText reconstruction for the
@@ -121,7 +164,7 @@ func restShowTextForms(base, topic, filter string) ([]string, bool) {
 	switch topic {
 	case "interfaces-detail", "interfaces-extensive", "interfaces-queue":
 		if filter == "" {
-			return []string{base}, true
+			return restChargeForms16472(base), true
 		}
 		return restCanonicalForms(base+" "+filter, base)
 	case "route-instance":
@@ -129,15 +172,43 @@ func restShowTextForms(base, topic, filter string) ([]string, bool) {
 			return nil, false
 		}
 		return restCanonicalForms(base+" "+filter, base)
-	case "zones-detail", "policies-detail", "policies-hit-count",
+	case "zones-detail":
+		// #16472: bare zone-name filter, as in the gRPC twin.
+		if filter == "" {
+			return restChargeForms16472(base), true
+		}
+		if strings.ContainsAny(filter, " \t") {
+			return nil, false
+		}
+		return restCanonicalForms("show security zones "+filter+" detail", base)
+	case "policies-detail", "policies-hit-count",
 		"chassis-cluster-data-plane-flows", "security-log":
 		if filter == "" {
-			return []string{base}, true
+			return restChargeForms16472(base), true
 		}
-		return []string{base + " " + filter, base}, true
+		if topic == "policies-detail" || topic == "policies-hit-count" {
+			view := "detail"
+			if topic == "policies-hit-count" {
+				view = "hit-count"
+			}
+			return restPoliciesFilterForms16472(base, view, filter)
+		}
+		forms := []string{base + " " + filter}
+		for _, f := range restChargeForms16472(base) {
+			dup := false
+			for _, g := range forms {
+				if g == f {
+					dup = true
+				}
+			}
+			if !dup {
+				forms = append(forms, f)
+			}
+		}
+		return forms, true
 	}
 	if !strings.Contains(topic, ":") {
-		return []string{base}, true
+		return restChargeForms16472(base), true
 	}
 	prefix, _, _ := strings.Cut(topic, ":")
 	switch prefix {
@@ -170,7 +241,7 @@ func restShowTextForms(base, topic, filter string) ([]string, bool) {
 				full += " " + parts[2]
 			}
 		}
-		return []string{full, base}, true
+		return restArgumentFormsWithCanonical16472(full, base, nil), true
 	case "applications":
 		name := strings.TrimPrefix(topic, "applications:")
 		if name == "" {
@@ -189,7 +260,7 @@ func restShowTextForms(base, topic, filter string) ([]string, bool) {
 			if filter != "" {
 				return restCanonicalForms(base+" "+filter, base)
 			}
-			return []string{base}, true
+			return restChargeForms16472(base), true
 		}
 		return restCanonicalForms(base+" "+name, base)
 	case "cos-classifier", "cos-rewrite-rule":
@@ -202,13 +273,13 @@ func restShowTextForms(base, topic, filter string) ([]string, bool) {
 			full += " type " + typ
 		}
 		if full == base {
-			return []string{base}, true
+			return restChargeForms16472(base), true
 		}
 		return restCanonicalForms(full, base)
 	case "cos-scheduler-map":
 		name := strings.TrimPrefix(topic, "cos-scheduler-map:")
 		if name == "" {
-			return []string{base}, true
+			return restChargeForms16472(base), true
 		}
 		return restCanonicalForms(base+" "+name, base)
 	case "screen-ids-option", "screen-ids-option-detail":
@@ -230,7 +301,7 @@ func restShowTextForms(base, topic, filter string) ([]string, bool) {
 	case "firewall-effective":
 		family := strings.TrimPrefix(topic, "firewall-effective:")
 		if family == topic {
-			return []string{base}, true
+			return restChargeForms16472(base), true
 		}
 		if family == "inet" || family == "inet6" {
 			return restCanonicalForms(base+" family "+family, base)
@@ -257,9 +328,31 @@ func restShowTextForms(base, topic, filter string) ([]string, bool) {
 		}
 		return restCanonicalForms(base+" interface "+sel["interface"], base)
 	case "sessions-top":
-		return []string{base}, true
+		return restChargeForms16472(base), true
 	}
 	return nil, false
+}
+
+// restPoliciesFilterForms16472 is the REST twin of
+// policiesFilterForms16472 in pkg/grpcapi (#16472).
+func restPoliciesFilterForms16472(base, view, filter string) ([]string, bool) {
+	fields := strings.Fields(filter)
+	full := "show security policies"
+	seen := map[string]bool{}
+	for i := 0; i < len(fields); i++ {
+		kw := fields[i]
+		if kw != "from-zone" && kw != "to-zone" {
+			return nil, false
+		}
+		if seen[kw] || i+1 >= len(fields) {
+			return nil, false
+		}
+		seen[kw] = true
+		full += " " + kw + " " + fields[i+1]
+		i++
+	}
+	full += " " + view
+	return restCanonicalForms(full, base)
 }
 
 func restFirewallForms(topic, prefix, base string, effective bool) ([]string, bool) {
@@ -400,7 +493,7 @@ func restSessionForms(cfg *config.Config, r *http.Request, base string) ([]strin
 		full += " source-nat-pool " + v
 	}
 	if full == base {
-		return []string{base}, true
+		return restChargeForms16472(base), true
 	}
 	return restCanonicalForms(full, base)
 }
@@ -451,7 +544,7 @@ func restMatchForms(r *http.Request, base string) ([]string, bool) {
 		full += " ingress-interface " + v
 	}
 	if full == base {
-		return []string{base}, true
+		return restChargeForms16472(base), true
 	}
 	return restCanonicalForms(full, base)
 }
@@ -471,6 +564,9 @@ func restZoneNameForID(cfg *config.Config, id uint32) (string, bool) {
 // argument-bearing commands for the commit-time advisory; see the gRPC
 // twin in pkg/grpcapi.
 var argumentSampleCommandsREST16067 = []string{
+	"show firewall filter f1",
+	"show security screen ids-option prof1",
+	"show security zones trust detail",
 	"ping 192.0.2.1",
 	"traceroute 192.0.2.1",
 	"show route table inet.0",

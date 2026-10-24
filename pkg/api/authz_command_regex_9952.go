@@ -448,9 +448,32 @@ func evaluateRESTForms9952(rules config.CompiledLoginRegexes, class, cmd, route 
 			"applied to it", class)
 	}
 	if decision := rules.EvaluateForms(forms[0], forms[0], forms[1:]...); !decision.Allowed {
+		if restDistinctRescue16472(rules, forms) {
+			return nil
+		}
 		return fmt.Errorf("permission denied: login class %q denies %q (%s)", class, cmd, decision.Reason)
 	}
 	return nil
+}
+
+// restDistinctRescue16472 is the REST twin of the gRPC/console #14687
+// distinct-narrower rescue (#16472), via the shared
+// cmdtree.DistinctNarrowerAllowed. pkg/api keeps its own thin wrapper
+// because it must not import pkg/grpcapi.
+func restDistinctRescue16472(rules config.CompiledLoginRegexes, forms []string) bool {
+	if len(forms) == 0 {
+		return false
+	}
+	executed := forms[0]
+	canon, res := cmdtree.Canonicalize(cmdtree.OperationalTree, strings.Fields(executed))
+	if res != cmdtree.CanonicalOK || strings.Join(canon, " ") != executed {
+		return false
+	}
+	baseForm, fullForm, selectorForms, chainForm := cmdtree.CanonicalForms(canon)
+	if chainForm == "" {
+		return false
+	}
+	return cmdtree.DistinctNarrowerAllowed(rules, executed, executed, baseForm, fullForm, selectorForms)
 }
 
 // restActionVerb9952 reads the SystemAction verb out of the already-buffered

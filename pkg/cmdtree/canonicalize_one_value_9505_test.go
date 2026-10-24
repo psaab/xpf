@@ -148,9 +148,13 @@ func TestOptionsScopeIsPinned9505(t *testing.T) {
 	}
 	for _, fn := range sortedFuncs(sites) {
 		switch fn {
-		case "Canonicalize", "completeFromTreeWithDesc":
+		case "Canonicalize", "completeFromTreeWithDesc",
+			// #16472: the shared form walk reads Options to end a
+			// command form at an Options container, as the pkg/cli
+			// walk did before the move.
+			"CanonicalForms", "chargeTokens16472":
 		default:
-			t.Errorf("Options is read in %s(); its scope is Canonicalize plus the single completion walk (#9505/#15720/#16151, sites %v)", fn, sites)
+			t.Errorf("Options is read in %s(); its scope is Canonicalize plus the single completion walk plus the #16472 form walk (#9505/#15720/#16151/#16472, sites %v)", fn, sites)
 		}
 	}
 }

@@ -25,8 +25,12 @@ package cli
 // back through pendingPipeSuffix for reassembly here.
 //
 // The pure decision leaf — evaluateCommandRegex and its helpers
-// (canonicalForms, distinctNarrowerAllowed, splitAtPipe, authorizablePipe)
-// — lives in command_regex_leaf_16158.go (#16158), CLI-local by design:
-// it MUST NOT move into pkg/authz. checkCommandRegex, checkCommandRegexWith
-// and loginRegexesFor live there too; this file remains as the dispatch-side
-// overview so the convergence argument stays beside dispatchOperational.
+// (splitAtPipe, authorizablePipe, and the canonicalForms /
+// distinctNarrowerAllowed forwarders) — lives in
+// command_regex_leaf_16158.go (#16158), CLI-local by design: it MUST
+// NOT move into pkg/authz. The form walk itself moved to
+// pkg/cmdtree (#16472) so the remote gates judge the same spellings;
+// the leaf file keeps the forwarders. checkCommandRegex,
+// checkCommandRegexWith and loginRegexesFor live there too; this file
+// remains as the dispatch-side overview so the convergence argument
+// stays beside dispatchOperational.
