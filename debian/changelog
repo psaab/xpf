@@ -1,5 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Config: the interface resolvers (`ResolveReth`, `ResolveFab`,
+    `DHCPLeaseKey`) now share one extracted first-dot parser,
+    `SplitIfaceRef`, which returns the suffix RAW and uninterpreted
+    (#16144). Suffix-copying callers keep arbitrary suffix text
+    verbatim (including non-decimal and multi-dot forms) and
+    `DHCPLeaseKey` keeps discarding the suffix in favour of its
+    separately supplied unit number; a universal integer-unit parser
+    was rejected as unsound for these callers. Declared dotted
+    interface names (e.g. an authored `gr-0/0/0.0`) continue to
+    resolve through the declared-name-wins resolver arm unchanged.
+
   * Config: `services security-intelligence`, `services
     advanced-anti-malware`, `services ssl initiation`/`termination`
     profiles, and `services application-identification` children now
