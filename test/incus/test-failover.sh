@@ -1263,17 +1263,71 @@ check_v6_transit "at baseline (before any failover)"
 #   lifecycle across a role change, which is the interaction no unit test
 #   reaches.
 #
-# The source address is the lever. 10.0.61.240/28 is matched by the config's
+# The source address is the lever. It is matched by the config's
 # `rule pool-snat` and is assigned to nothing (LAN host is .102, VIP .1, DHCP
 # .100-.199), so adding it here is the ONLY way traffic takes the pool path and
 # every other assertion in this script keeps measuring exactly what it did.
 # POOL_NAT_SMOKE=0 disables this phase entirely, so the CONFIG change can be
 # shown not to shift any existing path: the run must return exactly the same
 # assertion count it did before the pool rule existed.
+#
+# #16471: POOL_SRC / POOL_NAT_ADDR are DERIVED from $CLUSTER_CONF's
+# `rule pool-snat`, never trusted from literals. They used to default to the
+# loss cluster's 10.0.61.240 / 172.16.80.7, and the tcp/udp envs did not
+# override them, so a tcp/udp run bound a source the cluster's pool rule
+# (10.0.62.240/28 resp. 10.0.63.240/28) never matches and then reported the
+# resulting zeroes as #8280/#8297/#8314 product defects while never
+# exercising the clusters' real pools (.12/.13). Derivation follows the
+# persistent-nat-failover.sh resolve_pool precedent: the pool address must
+# be the one the config proxy-ARPs, and the source must be covered by the
+# pool rule's match prefix. Explicit POOL_SRC/POOL_NAT_ADDR (the cluster
+# envs state them) are honoured only when they AGREE with the derivation.
+# Any disagreement — no pool rule, unreadable conf, env/script override
+# pointing at another cluster's pool — VOIDs the pool phase (exit 77 via
+# the summary's VOID precedence) instead of emitting false FAILs.
+# POOL_CONF_SRC / POOL_CONF_ADDR carry the derived values so the hermetic
+# cell in pkg/configstore can pin this exact extraction.
 POOL_NAT_SMOKE="${POOL_NAT_SMOKE:-1}"
-POOL_SRC="${POOL_SRC:-10.0.61.240}"
-POOL_NAT_ADDR="${POOL_NAT_ADDR:-172.16.80.7}"
 POOL_PORT="${POOL_PORT:-5210}"
+POOL_CONF_SRC=""
+POOL_CONF_ADDR=""
+POOL_CONF_COVER=""
+if [[ -n "${CLUSTER_CONF:-}" && -r "$CLUSTER_CONF" ]]; then
+	POOL_CONF_ADDR="$(awk '
+		/rule pool-snat \{/ { inrule=1 }
+		inrule && /source-nat \{ pool / {
+			line=$0; sub(/.*source-nat \{ pool /, "", line); sub(/;.*/, "", line); print line; exit
+		}' "$CLUSTER_CONF")"
+	if [[ -n "$POOL_CONF_ADDR" ]]; then
+		POOL_CONF_ADDR="$(awk -v pool="$POOL_CONF_ADDR" '
+			$1 == "pool" && $2 == pool { inpool=1; next }
+			inpool && $1 == "address" { a=$2; sub(/;.*/, "", a); sub(/\/.*/, "", a); print a; exit }
+			inpool && /^            \}/ { inpool=0 }
+		' "$CLUSTER_CONF")"
+	fi
+	POOL_CONF_COVER="$(awk '
+		/rule pool-snat \{/ { inrule=1 }
+		inrule && /source-address/ {
+			line=$0; sub(/.*source-address /, "", line); sub(/[; }].*/, "", line); print line; exit
+		}' "$CLUSTER_CONF")"
+	POOL_CONF_SRC="${POOL_CONF_COVER%/*}"
+fi
+POOL_VOID_REASON=""
+if [[ "$POOL_NAT_SMOKE" == 1 ]]; then
+	if [[ -z "$POOL_CONF_ADDR" || -z "$POOL_CONF_SRC" ]]; then
+		POOL_VOID_REASON="no pool-mode source-NAT rule (rule pool-snat) found in ${CLUSTER_CONF:-<unset>}, so there is no pool path to measure"
+	elif [[ -n "${POOL_SRC:-}" && "$POOL_SRC" != "$POOL_CONF_SRC" ]]; then
+		POOL_VOID_REASON="POOL_SRC=${POOL_SRC} does not match the pool rule source ${POOL_CONF_SRC} derived from ${CLUSTER_CONF} (cover ${POOL_CONF_COVER})"
+	elif [[ -n "${POOL_NAT_ADDR:-}" && "$POOL_NAT_ADDR" != "$POOL_CONF_ADDR" ]]; then
+		POOL_VOID_REASON="POOL_NAT_ADDR=${POOL_NAT_ADDR} does not match the pool address ${POOL_CONF_ADDR} derived from ${CLUSTER_CONF}"
+	fi
+	if [[ -n "$POOL_VOID_REASON" ]]; then
+		info "#16471/#8280: pool-mode NAT phase VOID: ${POOL_VOID_REASON}"
+		POOL_NAT_SMOKE=0
+	fi
+fi
+POOL_SRC="${POOL_SRC:-$POOL_CONF_SRC}"
+POOL_NAT_ADDR="${POOL_NAT_ADDR:-$POOL_CONF_ADDR}"
 POOL_LAN_IF="${POOL_LAN_IF:-$(incus exec "$CLUSTER_LAN_HOST" -- \
 	bash -c "ip -4 -o route get ${LAN_GW:-10.0.61.1} 2>/dev/null | sed -n 's/.* dev \\([^ ]*\\).*/\\1/p'" 2>/dev/null | tr -d '\r')}"
 
@@ -1472,10 +1526,12 @@ fi
 # ── #8280: the pool allocator actually ran, and the peer imported it ──
 #
 # The discriminator is the TRANSLATED address. An interface-mode session shows
-# reth0.80's own 172.16.80.8 in its `Out:` line; a POOL-mode session shows the
-# pool's 172.16.80.7, which only AddressOccupancy::claim can hand out. Asserting
-# "a session exists" would pass on interface mode and measure nothing.
-if [[ "$POOL_NAT_SMOKE" != 1 ]]; then
+# reth0.80's own address in its `Out:` line; a POOL-mode session shows the
+# pool's $POOL_NAT_ADDR, which only AddressOccupancy::claim can hand out.
+# Asserting "a session exists" would pass on interface mode and measure nothing.
+if [[ -n "$POOL_VOID_REASON" ]]; then
+	void "#8280 pool-mode NAT was NOT MEASURED: ${POOL_VOID_REASON}. This is a VOID for the allocator, not a pass — the rest of this run says nothing about PortAllocator"
+elif [[ "$POOL_NAT_SMOKE" != 1 ]]; then
 	: # phase deliberately disabled; no assertion is owed
 elif [[ -z "$POOL_LAN_IF" ]]; then
 	fail "#8280 pool-mode NAT was NOT MEASURED: the LAN interface on ${CLUSTER_LAN_HOST} could not be resolved, so no traffic took the pool path. This is a VOID for the allocator, not a pass — the rest of this run says nothing about PortAllocator"
@@ -1729,7 +1785,14 @@ fi
 # cycle. This is the state the NEXT run's preflight observes, and it is the one
 # that was leaking: fw1 installs the entry while primary during the crash
 # phase, steps back down at the failback, and used to keep it.
+# #16471: when the pool phase is VOID there is no pool address to own, so
+# this cell must not read the (empty) POOL_NAT_ADDR as a 0/0 owner failure.
+if [[ -n "$POOL_VOID_REASON" ]]; then
+	void "proxy-ARP ownership was NOT MEASURED after the crash failover AND the manual failback: ${POOL_VOID_REASON}"
+	void "#8280 post-failback pool-mode NAT was NOT MEASURED: ${POOL_VOID_REASON}"
+else
 check_proxy_arp_ownership "after the crash failover AND the manual failback"
+fi
 
 # ── #8280: the allocator still works AFTER a full role-change cycle ──
 #
