@@ -90,18 +90,26 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 	// registry lists the four `authentication` leaves; the GATE governs the
 	// whole packed login body. Only the before/after comparison shows the
 	// difference, so the exclusion is by container, not by the registry.
-	// NOTE: this exclusion PRE-EMPTS every pair below. With the rules now
-	// pair-scoped it is no longer load-bearing for the credential heads --
-	// no pair names `authentication` or `user` as its container -- but it is
-	// kept as the explicit record of the #6662 decision, and because it also
-	// guards anything added above it later.
+	// NOTE: this exclusion PRE-EMPTS every pair below. It is kept as the
+	// explicit record of the #6662 decision, and because it also guards
+	// anything added above it later. Two pairs below DO name
+	// `authentication` as their container — `authentication md5` and
+	// `authentication simple-password` in the routing switch — so they
+	// are shadowed by this guard and never fire through this predicate;
+	// the OSPF spellings they name are handled by packedBodyChildren /
+	// the OSPF compiler readers, not by this fold (see #16150 audit,
+	// TestCompactNormalizeShadowedPairs16150). They are retained as
+	// the adjudicated record of that family; removing either needs its
+	// own measurement, not this audit.
 	//
-	// Its cost, stated so it is not rediscovered: a pair naming
-	// `authentication` or `user` as its container would silently never fire.
-	// A rule that cannot match reads like coverage and passes review, which is
-	// the same trap as the wildcard-container site in #8719. If a future family
-	// needs one, delete this and re-derive the exclusion as pairs rather than
-	// adding an unreachable case below.
+	// Its cost, stated so it is not rediscovered: any OTHER pair naming
+	// `authentication` or `user` as its container would silently never
+	// fire. A rule that cannot match reads like coverage and passes
+	// review, which is the same trap as the wildcard-container site in
+	// #8719. If a future family needs one, delete this and re-derive
+	// the exclusion as pairs rather than adding an unreachable case
+	// below. TestCompactNormalizeShadowedPairs16150 pins the exact
+	// shadowed set so a new shadowed pair reds there instead.
 	if containerKeyword == "authentication" || containerKeyword == "user" {
 		return false
 	}

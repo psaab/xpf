@@ -41,6 +41,16 @@ xpf (0.0.0) unstable; urgency=medium
     Repeated option keywords now describe nothing in `?` help,
     mirroring the canonicalizer's refusal of the finished line;
     the offering surface is unchanged.
+  * Config: `compactNormalizeInScope` now has a reachability audit
+    (#16150). All 646 case pairs plus the non-switch
+    `policy proposal-set` admission are classified: exactly two
+    (`authentication md5`, `authentication simple-password`) are
+    shadowed by the `authentication`/`user` pre-emption and can
+    never fire through the predicate — their OSPF spellings are
+    handled by the packed-body readers — and the other 645 are
+    each observed firing through the production fold at a real
+    schema position. The guard comment that claimed no pair named
+    a pre-empted container is corrected; no admission changed.
 
   * Dataplane: the three string protocol carriers (filter, policy
     application, DNAT) now have per-carrier validation cells proving
