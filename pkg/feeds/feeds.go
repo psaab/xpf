@@ -174,7 +174,11 @@ type feedState struct {
 	// snapshot to empty; only an explicit positive value arms the
 	// drop-after-N-seconds opt-in.
 	holdInterval time.Duration
-	shrinkGuard  shrinkGuardThresholds
+	// destinationAllowlist carries this feed's server-configured
+	// `allow-destination` prefixes (#16656), unioned at fetch time with
+	// the manager-level lab allowlist.
+	destinationAllowlist []netip.Prefix
+	shrinkGuard          shrinkGuardThresholds
 	// A feed's cumulative-shrink baseline is the largest installed set in its
 	// current epoch. It decays only when that exact shrink candidate is
 	// acknowledged. Manager history carries it across reconfigurations and is
@@ -510,6 +514,7 @@ func (m *Manager) Apply(ctx context.Context, daCfg *config.DynamicAddressConfig)
 		hold        time.Duration
 		interval    time.Duration
 		server      string
+		allowlist   []netip.Prefix
 		shrinkGuard shrinkGuardThresholds
 	}
 	var plans []feedPlan
@@ -545,6 +550,12 @@ func (m *Manager) Apply(ctx context.Context, daCfg *config.DynamicAddressConfig)
 			}
 			interval := feedIntervalSeconds(fsCfg.UpdateInterval, time.Hour)
 			hold := resolveHoldInterval(fsCfg.HoldInterval)
+			var serverAllowlist []netip.Prefix
+			for _, raw := range fsCfg.AllowedDestinationPrefixes {
+				if p, perr := netip.ParsePrefix(raw); perr == nil {
+					serverAllowlist = append(serverAllowlist, p.Masked())
+				}
+			}
 			shrinkGuard := resolveShrinkGuardThresholds(fsCfg)
 
 			plan := func(name, url string) {
@@ -566,7 +577,7 @@ func (m *Manager) Apply(ctx context.Context, daCfg *config.DynamicAddressConfig)
 				seen[name] = true
 				plans = append(plans, feedPlan{
 					name: name, url: url, hold: hold, interval: interval,
-					server: fsCfg.Name, shrinkGuard: shrinkGuard,
+					server: fsCfg.Name, allowlist: serverAllowlist, shrinkGuard: shrinkGuard,
 				})
 			}
 
@@ -639,12 +650,13 @@ func (m *Manager) Apply(ctx context.Context, daCfg *config.DynamicAddressConfig)
 		}
 		feedCtx, cancel := context.WithCancel(ctx)
 		fs := &feedState{
-			name:         p.name,
-			url:          p.url,
-			holdInterval: p.hold,
-			shrinkGuard:  p.shrinkGuard,
-			cancel:       cancel,
-			done:         make(chan struct{}),
+			name:                 p.name,
+			url:                  p.url,
+			holdInterval:         p.hold,
+			destinationAllowlist: p.allowlist,
+			shrinkGuard:          p.shrinkGuard,
+			cancel:               cancel,
+			done:                 make(chan struct{}),
 		}
 		// Persisted feed (same name survives the reconfigure): inherit the
 		// last-good snapshot so there is no fail-open window (#5282).

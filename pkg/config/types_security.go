@@ -80,15 +80,20 @@ type DynamicAddressConfig struct {
 // FeedServer defines a remote address feed source with optional per-feed paths.
 type FeedServer struct {
 	Name                        string
-	URL                         string      // explicit url (takes precedence)
-	Hostname                    string      // hostname for building URLs with per-feed paths
-	UpdateInterval              int         // seconds (0 = default 3600)
-	HoldInterval                int         // seconds; 0/unset = retain last-good forever on failure, >0 = drop to empty after N seconds (#2050)
-	ShrinkGuardMinOldCount      int         // 0 = default 32; minimum old prefix count before shrink protection applies
-	ShrinkGuardMinRetainPercent int         // 0 = default 50; retained ratio floor, [1,100]
-	ShrinkGuardMinDrop          int         // 0 = default 16; minimum absolute prefix decrease
-	FeedName                    string      // single feed name
-	FeedEntries                 []FeedEntry // named feeds with per-feed paths
+	URL                         string // explicit url (takes precedence)
+	Hostname                    string // hostname for building URLs with per-feed paths
+	UpdateInterval              int    // seconds (0 = default 3600)
+	HoldInterval                int    // seconds; 0/unset = retain last-good forever on failure, >0 = drop to empty after N seconds (#2050)
+	ShrinkGuardMinOldCount      int    // 0 = default 32; minimum old prefix count before shrink protection applies
+	ShrinkGuardMinRetainPercent int    // 0 = default 50; retained ratio floor, [1,100]
+	ShrinkGuardMinDrop          int    // 0 = default 16; minimum absolute prefix decrease
+	FeedName                    string // single feed name
+	// AllowedDestinationPrefixes opts this server's non-public IP-literal
+	// destinations (and resolved answers) into the feed SSRF allowlist
+	// (#16656): the runtime arm installs only when the destination falls
+	// inside one of these prefixes. Empty means default-deny.
+	AllowedDestinationPrefixes []string    // `allow-destination <prefix>` leaves
+	FeedEntries                []FeedEntry // named feeds with per-feed paths
 }
 
 // MarshalJSON redacts the feed URL on every JSON render (#6703). A threat-feed

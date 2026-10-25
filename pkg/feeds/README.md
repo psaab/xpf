@@ -452,6 +452,24 @@ applies a *retain-last-good* policy rather than installing a partial/empty set:
   snapshot) so a leniently-loaded config still boots but its bound
   address-names stay unresolvable and fail closed (#5645). Use `https://`
   (a hostname-only server already resolves to `https://`).
+- **destination policy: public only, by default (#10177/#14177/#16656).**
+  Every resolved destination — an IP-literal host directly, and every DNS
+  answer for a hostname — must be a public global-unicast address outside
+  the special-purpose prefixes (CGNAT 100.64/10, benchmarking 198.18/15,
+  NAT64/6to4/Teredo and the other transition/documentation ranges).
+  Private, loopback, link-local, unspecified and non-global destinations
+  are refused before any byte is sent (`feed destination resolves to a
+  blocked address` in the feed's `LastError`); the whole answer set is
+  refused if any member is blocked. The predicate is shared with the
+  compiler (`config.FeedDestinationBlocked`), and strict commit rejects
+  an IP-literal host it would refuse, naming the destination class
+  (private / loopback / link-local / special-purpose / ...). Hostnames
+  are not commit-gated — their answers are only knowable at fetch time.
+  The explicit override is per-server config:
+  `set security dynamic-address feed-server <s> allow-destination <prefix>`
+  (repeatable) admits destinations inside those prefixes for that server
+  only. The manager-level `SetPrivateFeedAllowlist` remains a lab/test
+  escape hatch with no production caller; it is not a config knob.
 - **content-based change detection, keyed off the last *published* set (#5646).**
   Prefixes are canonicalized (parsed to masked CIDR / `/32` / `/128`), deduped,
   sorted, and SHA-256 hashed. The `onUpdate` recompile callback fires whenever

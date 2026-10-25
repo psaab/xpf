@@ -94,37 +94,11 @@ func checkFeedRedirect(req *http.Request, via []*http.Request) error {
 	return http.ErrUseLastResponse
 }
 
-// blockedFeedDestinationPrefixes contains IPv6 transition / special-purpose
-// address space that is not a public feed destination, plus the IPv4
-// special-purpose ranges stdlib classification still calls global unicast.
-// netip.Addr.IsGlobalUnicast follows package net: NAT64 (64:ff9b::/96),
-// NAT64 local-use (64:ff9b:1::/48), 6to4 (2002::/16), the IETF protocol
-// assignments block (2001::/23, which includes Teredo 2001::/32),
-// discard-only (100::/64), dummy (100:0:0:1::/64), SRv6 SIDs (5f00::/16)
-// and the documentation prefixes below all pass IsGlobalUnicast, so
-// without this list a feed hostname resolving to a translator /
-// transition address — whose embedded IPv4 can name an internal target —
-// would be dialled as if it were a public destination (#14177). The IPv6
-// entries mirror specialPurposeV6 in pkg/ddns/checkip.go; keep in sync.
-// IsUnspecified/IsLoopback/IsLinkLocal/IsMulticast are still handled by
-// the predicates in feedDestinationBlocked.
-var blockedFeedDestinationPrefixes = [...]netip.Prefix{
-	netip.MustParsePrefix("0.0.0.0/8"),
-	netip.MustParsePrefix("100.64.0.0/10"),  // CGNAT; Alibaba metadata is within it.
-	netip.MustParsePrefix("192.0.0.0/24"),   // IETF protocol assignments.
-	netip.MustParsePrefix("198.18.0.0/15"),  // benchmarking/special-purpose.
-	netip.MustParsePrefix("64:ff9b::/96"),   // NAT64 well-known prefix (RFC 6052).
-	netip.MustParsePrefix("64:ff9b:1::/48"), // NAT64 local-use (RFC 8215).
-	netip.MustParsePrefix("100::/64"),       // discard-only (RFC 6666).
-	netip.MustParsePrefix("100:0:0:1::/64"), // dummy IPv6 prefix (RFC 9780).
-	netip.MustParsePrefix("2001::/23"),      // IETF protocol assignments (incl. Teredo 2001::/32).
-	netip.MustParsePrefix("2001:db8::/32"),  // documentation (RFC 3849).
-	netip.MustParsePrefix("2002::/16"),      // 6to4 (RFC 3056, deprecated).
-	netip.MustParsePrefix("3fff::/20"),      // documentation (RFC 9637).
-	netip.MustParsePrefix("5f00::/16"),      // SRv6 SIDs (RFC 9602).
-	netip.MustParsePrefix("fc00::/7"),       // ULA (RFC 4193; also IsPrivate).
-}
-
+// The blocked-destination predicate and its prefix table live in
+// pkg/config (config.FeedDestinationBlocked / config.FeedDestinationClass)
+// so the strict compiler gate shares them without an import cycle
+// (#16656). This package keeps only the allowlist-membership helper's
+// runtime spelling.
 func (m *Manager) privateFeedAllowlistSnapshot() []netip.Prefix {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -132,31 +106,11 @@ func (m *Manager) privateFeedAllowlistSnapshot() []netip.Prefix {
 }
 
 func feedDestinationAllowed(ip netip.Addr, allowlist []netip.Prefix) bool {
-	ip = ip.Unmap()
-	for _, prefix := range allowlist {
-		if prefix.Contains(ip) {
-			return true
-		}
-	}
-	return false
+	return config.FeedDestinationAllowed(ip, allowlist)
 }
 
 func feedDestinationBlocked(ip netip.Addr) bool {
-	ip = ip.Unmap()
-	if !ip.IsValid() ||
-		ip.IsPrivate() ||
-		ip.IsLoopback() ||
-		ip.IsLinkLocalUnicast() ||
-		ip.IsUnspecified() ||
-		!ip.IsGlobalUnicast() {
-		return true
-	}
-	for _, prefix := range blockedFeedDestinationPrefixes {
-		if prefix.Contains(ip) {
-			return true
-		}
-	}
-	return false
+	return config.FeedDestinationBlocked(ip)
 }
 
 func resolveFeedIPs(ctx context.Context, host string) ([]netip.Addr, error) {
@@ -173,8 +127,10 @@ func resolveFeedIPs(ctx context.Context, host string) ([]netip.Addr, error) {
 // resolveAndValidateFeedDestination resolves a feed hostname once and
 // validates every answer before the transport is allowed to dial. Refusing
 // the whole answer set when any member is forbidden prevents a resolver from
-// selecting a private answer after a public answer was observed.
-func (m *Manager) resolveAndValidateFeedDestination(ctx context.Context, host string) ([]netip.Addr, error) {
+// selecting a private answer after a public answer was observed. The
+// effective allowlist is the manager-level lab override unioned with the
+// feed's server-configured `allow-destination` prefixes (#16656).
+func (m *Manager) resolveAndValidateFeedDestination(ctx context.Context, host string, extraAllowlist []netip.Prefix) ([]netip.Addr, error) {
 	if host == "" {
 		return nil, fmt.Errorf("empty feed destination host")
 	}
@@ -198,7 +154,7 @@ func (m *Manager) resolveAndValidateFeedDestination(ctx context.Context, host st
 		return nil, fmt.Errorf("resolve feed destination returned no addresses")
 	}
 
-	allowlist := m.privateFeedAllowlistSnapshot()
+	allowlist := append(m.privateFeedAllowlistSnapshot(), extraAllowlist...)
 	unique := make([]netip.Addr, 0, len(ips))
 	seen := make(map[netip.Addr]struct{}, len(ips))
 	for _, ip := range ips {
@@ -421,7 +377,7 @@ func (m *Manager) readFeed(ctx context.Context, fs *feedState) (fetchResult, err
 	// The pinned client below retains the hostname in req.URL (for Host/TLS SNI)
 	// while dialing only this validated address set, so a DNS answer cannot
 	// change between validation and dial.
-	ips, err := m.resolveAndValidateFeedDestination(fetchCtx, req.URL.Hostname())
+	ips, err := m.resolveAndValidateFeedDestination(fetchCtx, req.URL.Hostname(), fs.destinationAllowlist)
 	if err != nil {
 		return fetchResult{}, fmt.Errorf("feed destination refused: %w", err)
 	}

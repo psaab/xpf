@@ -169,9 +169,10 @@ func feedsConfigHash(da *config.DynamicAddressConfig) [32]byte {
 		if fs == nil {
 			continue
 		}
-		fmt.Fprintf(&b, "S|%s|%s|%s|%d|%d|%s|%d|%d|%d\n",
+		fmt.Fprintf(&b, "S|%s|%s|%s|%d|%d|%s|%d|%d|%d|%s\n",
 			name, fs.URL, fs.Hostname, fs.UpdateInterval, fs.HoldInterval, fs.FeedName,
-			fs.ShrinkGuardMinOldCount, fs.ShrinkGuardMinRetainPercent, fs.ShrinkGuardMinDrop)
+			fs.ShrinkGuardMinOldCount, fs.ShrinkGuardMinRetainPercent, fs.ShrinkGuardMinDrop,
+			strings.Join(fs.AllowedDestinationPrefixes, ","))
 		entries := append([]config.FeedEntry(nil), fs.FeedEntries...)
 		sort.Slice(entries, func(i, j int) bool {
 			if entries[i].Name != entries[j].Name {

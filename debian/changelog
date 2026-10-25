@@ -1,4 +1,17 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Config/feeds: strict commit now rejects a dynamic-address feed-server
+    whose URL/hostname host is a non-public IP literal (private, loopback,
+    link-local, CGNAT, benchmarking, ULA, transition/special-purpose)
+    that the feed SSRF destination policy would refuse at fetch time
+    (#16656). Previously such a server committed clean, never fetched,
+    and — once referenced — froze policy publication at previous-good
+    (fresh boot: default-deny). The destination predicate is now shared
+    in pkg/config (FeedDestinationBlocked) between the compiler gate and
+    the pkg/feeds runtime guard. A new per-server
+    `allow-destination <prefix>` leaf (repeatable) opts that server's
+    covered destinations into the runtime allowlist; without it the
+    fetch stays default-deny. Public hostnames and literals, and the
+    plaintext-http gate, behave as before.
   * Routing/VRF: instance-to-VRF-device mapping is now unconditional
     (#16664). `diagcmd.VRFDeviceName` previously returned a
     `vrf-`-prefixed routing-instance name unchanged (#2143), while the
