@@ -983,23 +983,27 @@ func canonicalizeHTTPTarget(target string) (string, error) {
 		// its error is likewise setup-classified in probeHTTP.
 		canon := "http://" + target
 		if u, err := url.Parse(canon); err == nil && u.Hostname() == "" {
-			return "", fmt.Errorf("%w: http-get target %q has no host", ErrProbeSetup, target)
+			return "", fmt.Errorf("%w: http-get target %q has no host", ErrProbeSetup, config.RedactURL(target))
 		}
 		return canon, nil
 	}
 	u, err := url.Parse(target)
 	if err != nil {
-		return "", fmt.Errorf("%w: invalid http-get target URL %q: %w", ErrProbeSetup, target, err)
+		// #16642: do not wrap url.Parse's *url.Error — it re-embeds the
+		// raw credential-bearing target — and do not quote the raw
+		// target. Render the redacted target plus the inner error class,
+		// as the config gate does (compiler_services.go).
+		return "", fmt.Errorf("%w: invalid http-get target URL %q: %v", ErrProbeSetup, config.RedactURL(target), urlParseErrClass16642(err))
 	}
 	switch u.Scheme {
 	case "http", "https":
 		// supported
 	default:
-		return "", fmt.Errorf("%w: unsupported http-get target scheme %q (want http or https): %q", ErrProbeSetup, u.Scheme, target)
+		return "", fmt.Errorf("%w: unsupported http-get target scheme %q (want http or https): %q", ErrProbeSetup, u.Scheme, config.RedactURL(target))
 	}
 	// C179-042: reject a scheme'd target with no host ("http://").
 	if u.Hostname() == "" {
-		return "", fmt.Errorf("%w: http-get target %q has no host", ErrProbeSetup, target)
+		return "", fmt.Errorf("%w: http-get target %q has no host", ErrProbeSetup, config.RedactURL(target))
 	}
 	return target, nil
 }
@@ -1074,7 +1078,10 @@ func (m *Manager) probeHTTP(ctx context.Context, test *config.RPMTest, opts prob
 	start := time.Now()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return 0, fmt.Errorf("%w: HTTP request error: %w", ErrProbeSetup, err)
+		// #16642: NewRequest's *url.Error re-embeds the full raw target
+		// (userinfo + query). Render the redacted target plus the inner
+		// error class instead of wrapping it.
+		return 0, fmt.Errorf("%w: HTTP request error: %v (target %q)", ErrProbeSetup, urlParseErrClass16642(err), config.RedactURL(url))
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -1086,7 +1093,10 @@ func (m *Manager) probeHTTP(ctx context.Context, test *config.RPMTest, opts prob
 			return 0, se
 		}
 		if isLocalBindSetupError(err) {
-			return 0, fmt.Errorf("%w: HTTP local source bind failed (source-address not assigned locally): %w", ErrProbeSetup, err)
+			// #16642: the wrapped *url.Error quotes the target with only
+			// the password masked (username + query token remain). Scrub
+			// every URL spelling in its text through RedactURL.
+			return 0, fmt.Errorf("%w: HTTP local source bind failed (source-address not assigned locally): %v", ErrProbeSetup, scrubProbeURLError16642(err, url))
 		}
 		return 0, fmt.Errorf("HTTP GET failed: %w", err)
 	}
@@ -1132,6 +1142,63 @@ func (m *Manager) probeHTTP(ctx context.Context, test *config.RPMTest, opts prob
 		return rtt, fmt.Errorf("HTTP response body read failed: %w", drainErr)
 	}
 	return rtt, nil
+}
+
+// urlParseErrClass16642 renders the inner error of a *url.Error (e.g.
+// `invalid character " " in host name`) without the URL the wrapper
+// re-embeds. Non-*url.Error values render verbatim — they carry no URL
+// by construction in the call sites that use this helper.
+func urlParseErrClass16642(err error) string {
+	var ue *url.Error
+	if errors.As(err, &ue) && ue.Err != nil {
+		return ue.Err.Error()
+	}
+	return err.Error()
+}
+
+// scrubProbeURLError16642 returns err's text with every URL spelling
+// redacted through config.RedactURL (#16642, mirroring feeds
+// #9164/#12883). net/http masks only the password in a *url.Error
+// (user:***@host), so the raw target, its password-masked spelling, and
+// any other scheme:// token in the text (e.g. a redirect-changed URL)
+// are each replaced/scrubbed; the surrounding diagnostic (dial addresses,
+// errno text) is preserved.
+func scrubProbeURLError16642(err error, rawURL string) string {
+	text := err.Error()
+	if rawURL != "" {
+		redacted := config.RedactURL(rawURL)
+		text = strings.ReplaceAll(text, rawURL, redacted)
+		if u, perr := url.Parse(rawURL); perr == nil && u.User != nil {
+			if _, hasPw := u.User.Password(); hasPw {
+				masked := *u
+				masked.User = url.UserPassword(u.User.Username(), "***")
+				text = strings.ReplaceAll(text, masked.String(), redacted)
+			}
+		}
+	}
+	return scrubURLsInText16642(text)
+}
+
+// scrubURLsInText16642 redacts every scheme:// token in text (terminated
+// by whitespace or a quote) via config.RedactURL.
+func scrubURLsInText16642(text string) string {
+	var b strings.Builder
+	rest := text
+	for {
+		i := strings.Index(rest, "://")
+		if i < 0 {
+			b.WriteString(rest)
+			return b.String()
+		}
+		start := strings.LastIndexAny(rest[:i], " \t\"'`(<[{") + 1
+		end := i + 3
+		for end < len(rest) && !strings.ContainsRune(" \t\"'`>", rune(rest[end])) {
+			end++
+		}
+		b.WriteString(rest[:start])
+		b.WriteString(config.RedactURL(rest[start:end]))
+		rest = rest[end:]
+	}
 }
 
 // maxProbeBodyBytes9049 bounds how much of a probe response body is drained.
