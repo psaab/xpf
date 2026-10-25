@@ -268,6 +268,114 @@ fn drain_session_deltas_no_overflow_leaves_latch_clear() {
     }
 }
 
+// -------------------------------------------------------------
+// #16630: drain-side overflow arm must be bulk-aware — bulk-export
+// residue is the resync's own output and must not re-arm it.
+// -------------------------------------------------------------
+
+#[test]
+fn drain_bulk_residue_does_not_arm_loss_16630() {
+    // THE DISCRIMINATOR (#16630). 300 bulk-export deltas, drain budget 256:
+    // 44 bulk entries remain undrained. Pre-fix the fair drain's overflow
+    // bit counted ANY residue and the coordinator armed every residual
+    // binding, so the next worker pass re-ran LossResync, refilled the
+    // buffer, and looped forever while owned > 256. Post-fix bulk residue
+    // alone arms nothing.
+    // Fail-on-revert: count bulk residue in the overflow scan (or in the
+    // coordinator arm) and the take_delta_loss assertion reds.
+    let mut coord = Coordinator::new();
+    let live = Arc::new(BindingLiveState::new());
+    for _ in 0..300 {
+        live.push_session_delta_bulk_export(SessionDeltaInfo::default());
+    }
+    // The push leg must not have armed (300 < 4096 cap, #8593).
+    assert!(!live.take_delta_loss(), "bulk pushes that fit must not arm");
+    coord.workers.live.insert(0, live.clone());
+
+    let drained = coord.drain_session_deltas(256);
+    assert_eq!(drained.len(), 256, "drain must return exactly the budget");
+    assert!(
+        live.has_pending_session_deltas(),
+        "44 bulk deltas must remain undrained (the residue under test)"
+    );
+    assert!(
+        !live.take_delta_loss(),
+        "bulk-export residue must NOT arm loss-of-sync (#16630): arming \
+         re-runs the LossResync that produced the residue"
+    );
+}
+
+#[test]
+fn drain_incremental_residue_still_arms_loss_16630() {
+    // Control: the #5290 behaviour the fix must preserve. 300 incremental
+    // deltas, drain 256, 44 incremental remain — that residue MUST arm,
+    // or genuinely-lost fallback deltas are silently stranded.
+    let mut coord = Coordinator::new();
+    let live = Arc::new(BindingLiveState::new());
+    for _ in 0..300 {
+        live.push_session_delta(SessionDeltaInfo::default());
+    }
+    assert!(!live.take_delta_loss(), "incremental pushes that fit must not arm");
+    coord.workers.live.insert(0, live.clone());
+
+    let drained = coord.drain_session_deltas(256);
+    assert_eq!(drained.len(), 256);
+    assert!(
+        live.take_delta_loss(),
+        "incremental residue after a budget overflow must arm (#5290 control)"
+    );
+}
+
+#[test]
+fn drain_mixed_residue_arms_only_incremental_binding_16630() {
+    // Per-binding precision: binding 0 holds only bulk residue, binding 1
+    // holds incremental residue. Only binding 1 arms. A coordinator that
+    // arms every live binding on any overflow would arm binding 0 too and
+    // re-export its whole owned table for no lost delta.
+    let mut coord = Coordinator::new();
+    let bulk_live = Arc::new(BindingLiveState::new());
+    for _ in 0..300 {
+        bulk_live.push_session_delta_bulk_export(SessionDeltaInfo::default());
+    }
+    let incr_live = Arc::new(BindingLiveState::new());
+    for _ in 0..300 {
+        incr_live.push_session_delta(SessionDeltaInfo::default());
+    }
+    assert!(!bulk_live.take_delta_loss());
+    assert!(!incr_live.take_delta_loss());
+    coord.workers.live.insert(0, bulk_live.clone());
+    coord.workers.live.insert(1, incr_live.clone());
+
+    // Fair drain: quantum 128 per binding, 256 total, both keep residue.
+    let drained = coord.drain_session_deltas(256);
+    assert_eq!(drained.len(), 256);
+    assert!(
+        !bulk_live.take_delta_loss(),
+        "bulk-only residue must not arm (#16630)"
+    );
+    assert!(
+        incr_live.take_delta_loss(),
+        "incremental residue must arm (#5290 control)"
+    );
+}
+
+#[test]
+fn drain_bulk_no_residue_does_not_arm_16630() {
+    // No-residue control: 200 bulk deltas fully drained by a 256 budget.
+    // Nothing remains, nothing arms (also true pre-fix — pins that the
+    // discriminator above is about residue, not about bulk pushes).
+    let mut coord = Coordinator::new();
+    let live = Arc::new(BindingLiveState::new());
+    for _ in 0..200 {
+        live.push_session_delta_bulk_export(SessionDeltaInfo::default());
+    }
+    coord.workers.live.insert(0, live.clone());
+    let drained = coord.drain_session_deltas(256);
+    assert_eq!(drained.len(), 200);
+    assert!(!live.has_pending_session_deltas());
+    assert!(!live.take_delta_loss());
+}
+
 // #6101 (item 2): cross-worker exception-ring MERGE + bringup/teardown
 // wiring. `Coordinator::recent_exceptions()` drains the control-thread ring
 // plus EVERY per-worker ring, sorts by monotonic timestamp, and caps at the

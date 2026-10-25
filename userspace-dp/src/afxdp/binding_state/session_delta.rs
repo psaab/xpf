@@ -10,7 +10,7 @@ impl BindingLiveState {
     /// Push an INCREMENTAL session delta into the RPC-fallback buffer. A drop
     /// arms the loss-of-sync latch, which drives the #2442 owner-RG resync.
     pub(in crate::afxdp) fn push_session_delta(&self, delta: SessionDeltaInfo) {
-        self.push_session_delta_inner(delta, true);
+        self.push_session_delta_inner(delta, false);
     }
 
     /// #8593: push a delta that is ITSELF part of a bulk owner-RG export. A
@@ -43,10 +43,10 @@ impl BindingLiveState {
     /// the same conclusion; that form is also the one where a future drain site
     /// passing the wrong flag silently suppresses a real arm.
     pub(in crate::afxdp) fn push_session_delta_bulk_export(&self, delta: SessionDeltaInfo) {
-        self.push_session_delta_inner(delta, false);
+        self.push_session_delta_inner(delta, true);
     }
 
-    fn push_session_delta_inner(&self, delta: SessionDeltaInfo, arm_on_overflow: bool) {
+    fn push_session_delta_inner(&self, delta: SessionDeltaInfo, bulk_export: bool) {
         self.session_delta_generated.fetch_add(1, Ordering::Relaxed);
         match self.pending_session_deltas.lock() {
             Ok(mut pending) => {
@@ -60,12 +60,12 @@ impl BindingLiveState {
                     //
                     // #8593: NOT when the dropped delta is itself part of that
                     // resync's export — see `push_session_delta_bulk_export`.
-                    if arm_on_overflow {
+                    if !bulk_export {
                         self.delta_loss_pending.store(true, Ordering::Relaxed);
                     }
                     return;
                 }
-                pending.push_back(delta);
+                pending.push_back((delta, bulk_export));
                 // #8108: record how FULL the buffer got, not how full it is.
                 //
                 // The acceptance measurement this issue asks for -- "a measured
@@ -108,6 +108,19 @@ impl BindingLiveState {
             .unwrap_or(false)
     }
 
+    /// #16630: true if the RPC-fallback buffer still holds an undrained
+    /// INCREMENTAL delta. Bulk-export entries do not count: they are the
+    /// resync's own output, and arming on their residue re-runs the resync
+    /// that produced them (#8593's drain-side residual). A poisoned lock is
+    /// treated as "not pending" — the poison path already latched
+    /// loss-of-sync unconditionally.
+    pub(in crate::afxdp) fn has_pending_incremental_session_deltas(&self) -> bool {
+        self.pending_session_deltas
+            .lock()
+            .map(|pending| pending.iter().any(|(_, bulk)| !*bulk))
+            .unwrap_or(false)
+    }
+
     /// #5290: arm the per-binding loss-of-sync latch. Called by the control-
     /// thread fair drain when the caller budget overflowed and left this
     /// binding's deltas undrained. Mirror of `SessionTable::set_delta_loss`.
@@ -131,7 +144,7 @@ impl BindingLiveState {
                 let count = drain.min(pending.len());
                 let mut out = Vec::with_capacity(count);
                 for _ in 0..count {
-                    if let Some(delta) = pending.pop_front() {
+                    if let Some((delta, _bulk)) = pending.pop_front() {
                         out.push(delta);
                     }
                 }

@@ -230,6 +230,66 @@ fn a_bulk_export_delta_that_fits_is_stored_like_any_other_8593() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// #16630: the drain-side overflow scan must classify residue by origin.
+// Bulk-export residue is the resync's own output; only incremental residue
+// may arm the drain-side resync.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bulk_only_residue_is_not_incremental_pending_16630() {
+    let b = BindingLiveState::new();
+    for i in 0..300 {
+        b.push_session_delta_bulk_export(delta_8108(i));
+    }
+    let drained = b.drain_session_deltas(256);
+    assert_eq!(drained.len(), 256);
+    assert!(b.has_pending_session_deltas(), "bulk residue remains");
+    assert!(
+        !b.has_pending_incremental_session_deltas(),
+        "bulk-only residue must not read as incremental pending (#16630) — \
+         the drain arm keys on this and would re-run the resync"
+    );
+}
+
+#[test]
+fn incremental_residue_is_incremental_pending_16630() {
+    let b = BindingLiveState::new();
+    for i in 0..300 {
+        b.push_session_delta(delta_8108(i));
+    }
+    let drained = b.drain_session_deltas(256);
+    assert_eq!(drained.len(), 256);
+    assert!(
+        b.has_pending_incremental_session_deltas(),
+        "incremental residue must read as incremental pending (#5290 control)"
+    );
+}
+
+#[test]
+fn mixed_queue_classifies_by_the_incremental_entry_16630() {
+    // One incremental entry buried among bulk entries still counts: the
+    // lost incremental delta is exactly what the resync must recover, and
+    // the bulk neighbours must not mask it.
+    let b = BindingLiveState::new();
+    for i in 0..10 {
+        b.push_session_delta_bulk_export(delta_8108(i));
+    }
+    b.push_session_delta(delta_8108(999));
+    for i in 20..30 {
+        b.push_session_delta_bulk_export(delta_8108(i));
+    }
+    assert!(b.has_pending_incremental_session_deltas());
+    // Drain past the incremental entry: only bulk remains.
+    let drained = b.drain_session_deltas(11);
+    assert_eq!(drained.len(), 11);
+    assert!(b.has_pending_session_deltas());
+    assert!(
+        !b.has_pending_incremental_session_deltas(),
+        "once the incremental entry drains, bulk-only residue remains"
+    );
+}
+
 /// #9856 STEP-0 (M2): the owner-RG export's control response keeps at most 4096
 /// deltas per binding buffer — sessions past the cap are dropped at the push
 /// and the `more` bit cannot see them, so a FullResync can ACK a partial

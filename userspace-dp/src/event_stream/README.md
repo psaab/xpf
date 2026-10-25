@@ -461,8 +461,10 @@ cluster-scoped.
     fallback path uses a fair rotating-cursor drain
     (`session_delta::drain_session_deltas_fair`) so a low-slot worker cannot
     consume the whole caller budget and starve higher slots. On budget overflow
-    (undrained deltas remain) — or a per-binding `pending_session_deltas` buffer
-    overflow that drops a delta — it arms `BindingLiveState::set_delta_loss`,
+    (undrained INCREMENTAL deltas remain, #16630 — bulk-export residue is the
+    resync's own output and does not arm) — or a per-binding
+    `pending_session_deltas` buffer overflow that drops an incremental delta —
+    it arms `BindingLiveState::set_delta_loss`,
     which the worker loop folds into `SessionTable::set_delta_loss` so the same
     `take_delta_loss` owner-RG resync recovers the lost/undrained deltas.
     Debounced by a single `AtomicBool` per binding: one episode → one resync.

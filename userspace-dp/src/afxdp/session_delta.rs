@@ -32,11 +32,14 @@ use crate::session::{SessionSyncAttribution, nat64_snat_v4_string};
 /// - `drained`: the deltas popped (at most `max`), in fair round-robin order.
 /// - `next_cursor`: the binding index to resume from on the next call.
 /// - `overflow`: true when the budget was exhausted AND at least one binding
-///   still holds undrained deltas. The steady-state RPC-fallback caller
-///   (`Coordinator::drain_session_deltas`) uses this to arm loss-of-sync on the
-///   residual bindings so a full owner-RG resync recovers them (never a silent
-///   drop). The bulk owner-RG export caller ignores it — that path IS the
-///   resync, and its completeness is governed by the caller-supplied `max`.
+///   still holds an undrained INCREMENTAL delta (#16630). Bulk-export residue
+///   does not count: those entries are the resync's own output, and arming on
+///   them re-runs the resync that produced them. The steady-state RPC-fallback
+///   caller (`Coordinator::drain_session_deltas`) uses this to arm loss-of-sync
+///   on the residual incremental bindings so a full owner-RG resync recovers
+///   them (never a silent drop). The bulk owner-RG export caller ignores it —
+///   that path IS the resync, and its completeness is governed by the
+///   caller-supplied `max`.
 pub(in crate::afxdp) fn drain_session_deltas_fair(
     bindings: &[&BindingLiveState],
     max: usize,
@@ -100,7 +103,10 @@ pub(in crate::afxdp) fn drain_session_deltas_fair_tracked(
     // Overflow only matters when the budget capped us: if we stopped because a
     // full pass drained nothing, every binding is empty and no delta was left
     // behind. The scan re-locks each buffer (cold control path only).
-    let overflow = budget == 0 && bindings.iter().any(|b| b.has_pending_session_deltas());
+    // #16630: only INCREMENTAL residue counts — bulk-export residue is the
+    // resync's own buffered output and must not re-arm it.
+    let overflow =
+        budget == 0 && bindings.iter().any(|b| b.has_pending_incremental_session_deltas());
     (out, cursor, overflow, contributed)
 }
 
