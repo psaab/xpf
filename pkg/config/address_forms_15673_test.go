@@ -22,7 +22,8 @@ func TestSoleAddressFormsRejectedAtCommit15673(t *testing.T) {
 		name, body, form string
 	}{
 		{"sole future form hier", `address partner-api { future-address-form value; }`, "future-address-form"},
-		{"sole noncontiguous wildcard hier", `address wc { wildcard-address 10.1.2.3/0.255.0.255; }`, "wildcard-address"},
+		{"sole noncontiguous wildcard hier", `address wc { wildcard-address 10.1.2.3/255.255.0.255; }`, "wildcard-address"},
+		{"sole noncontiguous doc-example wildcard hier", `address wc { wildcard-address 192.168.0.11/255.255.0.255; }`, "wildcard-address"},
 	} {
 		t.Run(r.name, func(t *testing.T) {
 			_, err := CompileConfig(soleFormTree(t, r.body))
@@ -131,26 +132,57 @@ func TestRangeAddressExpands15673(t *testing.T) {
 	})
 }
 
-// wildcard-address expands to the wildcard-matched prefix.
+// wildcard-address expands to the wildcard-matched prefix (Junos polarity
+// #16544: mask 1 bits are compared, 0 bits are ignored).
 func TestWildcardAddressExpands15673(t *testing.T) {
-	cfg, err := CompileConfig(soleFormTree(t, `address wc { wildcard-address 10.1.2.3/0.0.0.255; }`))
-	if err != nil {
-		t.Fatalf("wildcard-address must commit: %v", err)
+	for _, tc := range []struct{ spec, want string }{
+		{"10.1.2.3/255.255.255.0", "10.1.2.0/24"},
+		{"10.1.2.3/255.255.255.255", "10.1.2.3/32"},
+		{"10.1.2.3/255.0.0.0", "10.0.0.0/8"},
+		{"192.168.0.11/255.255.0.0", "192.168.0.0/16"},
+		{"10.1.2.3/0.0.0.0", "0.0.0.0/0"},
+		{"2001:db8::1/ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "2001:db8::1/128"},
+		{"2001:db8:1:2::3/ffff:ffff:ffff:ffff:0000:0000:0000:0000", "2001:db8:1:2::/64"},
+	} {
+		cfg, err := CompileConfig(soleFormTree(t, `address wc { wildcard-address `+tc.spec+`; }`))
+		if err != nil {
+			t.Fatalf("wildcard-address %s must commit: %v", tc.spec, err)
+		}
+		a := cfg.Security.AddressBook.Addresses["wc"]
+		if a == nil || !reflect.DeepEqual(a.UsableValues(), []string{tc.want}) {
+			t.Fatalf("wildcard %s must expand to %s, got %+v", tc.spec, tc.want, a)
+		}
 	}
-	a := cfg.Security.AddressBook.Addresses["wc"]
-	if a == nil || !reflect.DeepEqual(a.UsableValues(), []string{"10.1.2.0/24"}) {
-		t.Fatalf("wildcard 10.1.2.3/0.0.0.255 must expand to 10.1.2.0/24, got %+v", a)
-	}
-	// Flat form.
+	// Flat form (Junos polarity).
 	cfg2, err := CompileConfig(buildTree(t, []string{
 		"set security zones security-zone trust",
-		"set security address-book global address wc wildcard-address 10.1.2.3/0.0.0.255",
+		"set security address-book global address wc wildcard-address 10.1.2.3/255.255.255.0",
 	}))
 	if err != nil {
 		t.Fatalf("flat wildcard must commit: %v", err)
 	}
 	if a := cfg2.Security.AddressBook.Addresses["wc"]; a == nil || !reflect.DeepEqual(a.UsableValues(), []string{"10.1.2.0/24"}) {
 		t.Fatalf("flat wildcard wrong: %+v", a)
+	}
+	// Direct expander: Cisco-polarity and non-contiguous Junos masks never
+	// yield the inverted set; the Juniper doc example is non-contiguous and
+	// must be refused (no single CIDR), not silently widened/narrowed.
+	for _, spec := range []string{
+		"10.1.2.3/0.0.0.255",
+		"192.168.0.11/255.255.0.255",
+		"10.1.2.3/255.255.0.255",
+		"2001:db8::1/ffff:ffff:0000:ffff:ffff:ffff:ffff:ffff",
+		"10.1.2.3/255.255.255.0/extra",
+	} {
+		got, err := expandWildcardAddress(spec)
+		if err == nil {
+			t.Errorf("expandWildcardAddress(%q) = %q, want non-contiguous refusal", spec, got)
+		} else if !strings.Contains(err.Error(), "non-contiguous") && !strings.Contains(err.Error(), "invalid") {
+			t.Errorf("expandWildcardAddress(%q) error %q must name non-contiguous/invalid", spec, err)
+		}
+		if got == "10.1.2.0/24" || got == "0.0.0.0/0" {
+			t.Errorf("expandWildcardAddress(%q) yielded forbidden %q", spec, got)
+		}
 	}
 }
 
