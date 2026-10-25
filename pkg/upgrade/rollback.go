@@ -135,11 +135,33 @@ func (r *Runner) rollbackInvocationPlan(target string) (rollbackPlan, *Journal, 
 	return plan, j, nil
 }
 func (r *Runner) validateOperatorRollbackJournal(j *Journal) error {
-	if !j.RollbackDBRestored {
+	if j.RollbackDBRestored {
+		if _, err := os.Stat(r.cfg.ConfigDBDir + ".old"); err != nil {
+			return fmt.Errorf("rollback journal says config DB was restored but %s is missing: %w; refusing to stop the daemon", r.cfg.ConfigDBDir+".old", err)
+		}
 		return nil
 	}
+	// #16529 legacy healing for the operator flavour: a journal whose swap
+	// completed but whose RollbackDBRestored save was lost (crash between
+	// restoreDBSnapshotRetainOld and saveJournal) resumes with
+	// .old present and the live DB byte-identical to the snapshot.
+	// Adopt the bit instead of re-stopping and rotating the already-
+	// restored DB over .old. No signal -> no adoption: the restore runs
+	// exactly as before. CopyTreeChecksum errors are non-fatal here —
+	// unprovable means "not adopted", never a new refusal.
 	if _, err := os.Stat(r.cfg.ConfigDBDir + ".old"); err != nil {
-		return fmt.Errorf("rollback journal says config DB was restored but %s is missing: %w; refusing to stop the daemon", r.cfg.ConfigDBDir+".old", err)
+		return nil
+	}
+	if _, err := os.Stat(r.cfg.ConfigDBDir); err != nil {
+		return nil
+	}
+	liveSum, liveErr := copyTreeChecksum(r.cfg.ConfigDBDir)
+	snapSum, snapErr := copyTreeChecksum(j.DBSnapshotPath)
+	if liveErr == nil && snapErr == nil && liveSum == snapSum {
+		j.RollbackDBRestored = true
+		if err := r.saveJournal(j); err != nil {
+			return fmt.Errorf("journal healed restored config DB: %w", err)
+		}
 	}
 	return nil
 }
@@ -232,15 +254,56 @@ func (r *Runner) validateEnvelopeCompatibility(plan rollbackPlan) error {
 }
 
 func (r *Runner) executeRollback(plan rollbackPlan, j *Journal, opts RollbackOptions) error {
+	// #16529 fast path (mirrors rollback()): a RESUMED operator rollback
+	// whose DB restore already completed may find the destination daemon
+	// still running (executeRollback started it, then the health gate
+	// preserved the journal). If current already names the destination
+	// and it re-proves healthy — or the caller supplies its own
+	// readiness gate (SkipHealthCheck) — complete WITHOUT stopping the
+	// daemon or touching its DB, so commits made since survive.
+	// A fresh RollbackTo journal has RollbackDBRestored=false at entry,
+	// so this is resume-only by construction.
+	if j.RollbackDBRestored {
+		if cur, cerr := r.readCurrentVersion(); cerr == nil && cur == plan.toVersion {
+			if opts.SkipHealthCheck {
+				r.logf("upgrade: rollback: destination daemon %s is already running; completing the resumed rollback without stopping it", plan.toVersion)
+				if err := r.clearJournal(); err != nil {
+					return fmt.Errorf("upgrade --rollback: clear rollback journal: %w", err)
+				}
+				return nil
+			}
+			if herr := r.cfg.Sys.HelperHealthy(plan.toVersion, r.cfg.StartHealthDeadline); herr == nil {
+				r.logf("upgrade: rollback: destination daemon %s is already running and healthy; completing the resumed rollback without stopping it", plan.toVersion)
+				if err := r.clearJournal(); err != nil {
+					return fmt.Errorf("upgrade --rollback: clear rollback journal: %w", err)
+				}
+				return nil
+			} else {
+				r.logf("upgrade: rollback: destination daemon %s did not re-prove healthy (%v); resuming the full rollback", plan.toVersion, herr)
+			}
+		}
+	}
 	if err := r.cfg.Sys.StopUnit(r.cfg.Unit); err != nil {
 		return fmt.Errorf("upgrade --rollback: stop current daemon %s: %w", plan.fromVersion, err)
 	}
 	if !j.RollbackDBRestored {
+		// Persist the restored bit BEFORE the swap (#16529): a crash
+		// inside the swap must resume knowing the restore was already
+		// attempted. A crash between this save and the swap is healed
+		// by validateOperatorRollbackJournal's .old + byte-identity check.
+		j.RollbackDBRestored = true
+		if err := r.saveJournal(j); err != nil {
+			return fmt.Errorf("upgrade --rollback: journal DB-restored intent: %w", err)
+		}
 		if err := r.restoreDBSnapshotRetainOld(plan.snapshotDir); err != nil {
+			// The swap did not complete; clear the bit so a retry
+			// re-runs the restore. Best-effort: the original restore
+			// error is the one that matters.
+			j.RollbackDBRestored = false
+			_ = r.saveJournal(j)
 			return fmt.Errorf("upgrade --rollback: restore config DB snapshot: %w", err)
 		}
 		r.logf("upgrade: rollback restored config DB from %s", plan.snapshotDir)
-		j.RollbackDBRestored = true
 		if err := r.saveJournal(j); err != nil {
 			return fmt.Errorf("upgrade --rollback: journal restored config DB: %w", err)
 		}

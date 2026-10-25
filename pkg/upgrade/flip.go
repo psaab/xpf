@@ -403,17 +403,91 @@ func (r *Runner) rollback(j *Journal) error {
 	// previous version and mark the state ROLLINGBACK; on terminal success
 	// the journal is CLEARED (the failed cut is abandoned — the operator
 	// re-stages to retry).
+	//
+	// #16529 resume healing. This entry may itself be a RESUME of a
+	// rollback whose DB restore already completed: the bit is persisted
+	// BEFORE the swap below and re-persisted after StartUnit (the
+	// preserved-journal arm), so both a crash mid-restore and the #14721
+	// health-gate preservation resume with the bit set. Legacy preserved
+	// journals predate the bit; they are recognised by the swap's own
+	// residue — a surviving <ConfigDBDir>.old, or a live DB byte-identical
+	// to the snapshot (the swap already installed it; any later commit
+	// would have diverged it, so identity proves no commit is at risk).
+	// A resume that proves either signal adopts the bit and skips the
+	// restore; a resume that proves neither re-restores exactly as before.
+	dbAlreadyRestored := j.AutoRollbackDBRestored
+	if !dbAlreadyRestored && j.AdvancedStateFloor && j.DBSnapshotPath != "" {
+		if restored, herr := r.autoRollbackDBAlreadyRestored(j); herr != nil {
+			r.logf("upgrade: rollback: cannot prove a prior DB restore (%v); proceeding with the restore", herr)
+		} else if restored {
+			dbAlreadyRestored = true
+			r.logf("upgrade: rollback: config DB already restored from %s by a prior attempt; adopting the restored bit and skipping the restore so commits made since survive", j.DBSnapshotPath)
+		}
+	}
+	// #16529 resume-current adoption: on a ROLLINGBACK resume (state
+	// already ROLLINGBACK at entry — a first attempt enters at FLIPPED/
+	// STARTED), current==PreviousVersion + AdvancedStateFloor proves the
+	// flip and StartUnit already ran, which is AFTER the restore in this
+	// function's mandatory order. Adopt the bit so the restore is skipped
+	// even though neither residue signal survives: the completed swap
+	// deleted .old, and post-rollback commits diverged the live DB from
+	// the snapshot (so byte-identity correctly does not fire). Without
+	// this, exactly the reported cell — preserved journal + operator
+	// commit — would still re-restore. A first attempt never satisfies
+	// this (current is still the failed target), and a mid-restore crash
+	// has current==Target, so neither can skip a needed restore.
+	if !dbAlreadyRestored && j.State == StateRollingBack && j.AdvancedStateFloor && j.DBSnapshotPath != "" {
+		if cur, cerr := r.readCurrentVersion(); cerr == nil && cur == j.PreviousVersion && cur != "" {
+			dbAlreadyRestored = true
+			r.logf("upgrade: rollback: resumed rollback already flipped to %s; adopting the restored bit and skipping the restore so commits made since survive", j.PreviousVersion)
+		}
+	}
+	if dbAlreadyRestored && !j.AutoRollbackDBRestored {
+		j.AutoRollbackDBRestored = true
+	}
 	j.State = StateRollingBack
 	if err := r.saveJournal(j); err != nil {
 		return fmt.Errorf("rollback: journal rollback intent: %w", err)
+	}
+
+	// #16529 fast path: a resume whose restore already completed may find
+	// the rolled-back daemon STILL RUNNING (the #14721 arm starts it, then
+	// preserves the journal when health did not confirm in time). If it
+	// now proves healthy and current already names PreviousVersion, the
+	// rollback is complete: clear the journal WITHOUT stopping the daemon
+	// or touching its DB, so commits made since the rollback survive.
+	// This is resume-only by construction — a first attempt has the bit
+	// unset at entry, and a mid-restore crash leaves .restore.partial /
+	// an absent live dir, neither of which can pass the health probe.
+	if dbAlreadyRestored {
+		if cur, cerr := r.readCurrentVersion(); cerr == nil && cur == j.PreviousVersion {
+			if herr := r.cfg.Sys.HelperHealthy(j.PreviousVersion, r.cfg.StartHealthDeadline); herr == nil {
+				r.logf("upgrade: rollback: rolled-back daemon %s is already running and healthy; completing the rollback without stopping it", j.PreviousVersion)
+				return r.clearJournal()
+			} else {
+				r.logf("upgrade: rollback: rolled-back daemon %s did not re-prove healthy (%v); resuming the full rollback", j.PreviousVersion, herr)
+			}
+		}
 	}
 
 	// 1. stop the failed new daemon.
 	if err := r.cfg.Sys.StopUnit(r.cfg.Unit); err != nil {
 		return fmt.Errorf("rollback: stop failed new daemon: %w", err)
 	}
-	// 2. restore the DB BEFORE re-flipping the binary.
-	if j.AdvancedStateFloor && j.DBSnapshotPath != "" {
+	// 2. restore the DB BEFORE re-flipping the binary. Skipped when a
+	// prior attempt already installed the snapshot (bit / healed above):
+	// re-restoring would destroy commits made on the running rolled-back
+	// daemon and delete <ConfigDBDir>.old with no copy (#16529).
+	if j.AdvancedStateFloor && j.DBSnapshotPath != "" && !dbAlreadyRestored {
+		// Persist the restored bit and the rollback intent BEFORE the
+		// swap: a crash inside the swap, or the health-gate preservation
+		// below, must resume knowing the restore was already attempted
+		// (the swap is crash-safe; its residue heals a crash before this
+		// save lands).
+		j.AutoRollbackDBRestored = true
+		if err := r.saveJournal(j); err != nil {
+			return fmt.Errorf("rollback: journal DB-restored intent: %w", err)
+		}
 		if err := r.restoreDBSnapshot(j.DBSnapshotPath); err != nil {
 			return fmt.Errorf("rollback: restore config DB snapshot: %w", err)
 		}
@@ -426,6 +500,15 @@ func (r *Runner) rollback(j *Journal) error {
 	// 4. start the old daemon.
 	if err := r.cfg.Sys.StartUnit(r.cfg.Unit); err != nil {
 		return fmt.Errorf("rollback: start previous daemon: %w", err)
+	}
+	// The daemon is now running against the restored DB. Persist that
+	// fact (when a restore happened on any attempt) BEFORE the health
+	// gate, so the journal the gate preserves on failure carries the bit
+	// and a resume takes the fast path / skips the restore (#16529).
+	if j.AutoRollbackDBRestored {
+		if err := r.saveJournal(j); err != nil {
+			return fmt.Errorf("rollback: journal DB-restored after start: %w", err)
+		}
 	}
 	// 5. Confirm the rolled-back daemon's helper is healthy (#14721).
 	//    StartUnit success says nothing about the dataplane helper for a
@@ -443,6 +526,54 @@ func (r *Runner) rollback(j *Journal) error {
 	//    `xpfd upgrade` starts fresh against whatever is now staged (it
 	//    will not resume the failed target).
 	return r.clearJournal()
+}
+
+// autoRollbackDBAlreadyRestored reports whether a prior auto-rollback
+// attempt already installed j's DB snapshot, for a journal that predates
+// the AutoRollbackDBRestored bit (#16529 legacy healing). Two signals,
+// either sufficient:
+//
+//   - <ConfigDBDir>.old exists: the crash-safe swap renames the live dir
+//     to .old BEFORE renaming the staged snapshot into place, and the
+//     non-retained cleanup removes .old only AFTER the swap completes.
+//     A surviving .old therefore proves the swap ran (completed, or
+//     crashed between the renames — in which case the live dir is the
+//     snapshot or absent-with-.restore.partial, never post-rollback
+//     commits, so skipping the re-restore loses nothing).
+//   - the live DB is byte-identical to the snapshot: the swap installed
+//     it and nothing has written since. Any commit made on the running
+//     rolled-back daemon would have diverged the tree, so identity
+//     proves skipping the restore destroys no commit.
+//
+// An error means "cannot prove" — the caller proceeds with the restore,
+// exactly the pre-#16529 behaviour.
+func (r *Runner) autoRollbackDBAlreadyRestored(j *Journal) (bool, error) {
+	if _, err := os.Stat(r.cfg.ConfigDBDir + ".old"); err == nil {
+		return true, nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+	if _, err := os.Stat(r.cfg.ConfigDBDir); err != nil {
+		if os.IsNotExist(err) {
+			// Live dir absent: either the swap crashed mid-rename (the
+			// restore's recovery branch completes it) or there is nothing
+			// to protect. Not proof of a completed restore by itself —
+			// but with no live DB there are no commits to destroy, and
+			// the restore below is still required to install the DB, so
+			// report not-restored and let it run.
+			return false, nil
+		}
+		return false, err
+	}
+	liveSum, err := copyTreeChecksum(r.cfg.ConfigDBDir)
+	if err != nil {
+		return false, err
+	}
+	snapSum, err := copyTreeChecksum(j.DBSnapshotPath)
+	if err != nil {
+		return false, err
+	}
+	return liveSum == snapSum, nil
 }
 
 // recoverFromFlipFailure handles a flip() error. The STOP step already ran,
@@ -541,18 +672,25 @@ func (r *Runner) restoreDBSnapshotWithRetention(snapDir string, retainOld bool) 
 	parent := filepath.Dir(r.cfg.ConfigDBDir)
 	restore := r.cfg.ConfigDBDir + ".restore.partial"
 	old := r.cfg.ConfigDBDir + ".old"
-	// A prior operator rollback may have completed the directory swap and
-	// retained .old, then crashed before FLIP. If the live tree is byte
-	// identical to the requested snapshot, it is already installed: do not
-	// rotate it again or delete the original failed-runtime DB.
-	if retainOld {
-		if _, oldErr := os.Stat(old); oldErr == nil {
-			if _, liveErr := os.Stat(r.cfg.ConfigDBDir); liveErr == nil {
-				liveSum, liveSumErr := copyTreeChecksum(r.cfg.ConfigDBDir)
-				snapSum, snapSumErr := copyTreeChecksum(snapDir)
-				if liveSumErr == nil && snapSumErr == nil && liveSum == snapSum {
-					return nil
-				}
+	// A prior rollback (either flavour) may have completed the directory
+	// swap and retained/cleaned .old, then crashed or been health-preserved
+	// before the flip. If the live tree is byte identical to the requested
+	// snapshot, it is already installed: do not rotate it again.
+	// #16529: this identity guard now applies to BOTH flavours — the auto
+	// path previously deleted .old with no identity check, so a resumed
+	// auto rollback re-restored over commits made on the running
+	// rolled-back daemon. Identity proves no commit is at risk (any
+	// write would have diverged the tree). The .old-existence precondition
+	// is retained: without it, a fresh-cut rollback whose live DB happens
+	// to still equal the snapshot must still run the swap so the
+	// post-snapshot writes of the FAILED daemon are rotated into .old
+	// and removed, not kept as the restored DB's starting state.
+	if _, oldErr := os.Stat(old); oldErr == nil {
+		if _, liveErr := os.Stat(r.cfg.ConfigDBDir); liveErr == nil {
+			liveSum, liveSumErr := copyTreeChecksum(r.cfg.ConfigDBDir)
+			snapSum, snapSumErr := copyTreeChecksum(snapDir)
+			if liveSumErr == nil && snapSumErr == nil && liveSum == snapSum {
+				return nil
 			}
 		}
 	}
