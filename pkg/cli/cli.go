@@ -177,8 +177,15 @@ type CLI struct {
 	// priced path, not a re-read cursor (fold 3 PATH-TOCTOU).
 	renderPath15995        []string
 	renderComparePath15995 []string
-	version                string
-	startTime              time.Time
+	// renderSlotErr16613 is the rollback slot error captured with the
+	// priced snapshots above (#16613): the gates price a nil slot tree
+	// as "renders nothing" (snapshot_render_15995.go contract), so the
+	// slot error travels with the stash and each handler returns it
+	// before rendering — otherwise a missing slot renders as an empty
+	// or "[no changes]" compare for classed console users.
+	renderSlotErr16613 error
+	version            string
+	startTime          time.Time
 
 	vrrpMgr *vrrp.Manager
 
