@@ -1013,10 +1013,26 @@ func unionChildren(nodes []*Node) []*Node {
 }
 
 // AnnotatePath sets the annotation comment on the configuration node named by
-// path. Resolution goes through navigatePath, the same multi-key-aware
-// traversal `show <path>` uses, so a named / multi-key container is consumed
-// as one unit: security-zone <name>, from-zone <z> to-zone <z> policy <p>,
-// interfaces <name> unit <n>, family inet, and friends all resolve.
+// path. Resolution tries an exact-identity walk first (#16523): descend
+// level by level choosing, at each level, a sibling whose keys are a
+// leading segment of the remaining path (matchNodeKeysFull, preferring an
+// exact whole-key-list match over a proper prefix, then the widest
+// consumption). That names a node by its FULL identity — needed for nodes
+// with three or more keys and an odd count, such as the 3-key leaf
+// `address a1 10.0.0.1/32`, whose trailing token is not a keyword/value
+// pair the display walker can consume: FormatSet emits the full identity
+// in its `annotate` line, so replay must resolve the full identity or
+// `load set` / `load merge` of the box's own display-set output aborts.
+//
+// When no exact-identity walk consumes the whole path, resolution falls
+// back to navigatePath, the same multi-key-aware display traversal
+// `show <path>` uses, so prefix addressing keeps working: a named /
+// multi-key container is consumed as one unit (security-zone <name>,
+// from-zone <z> to-zone <z> policy <p>, interfaces <name> unit <n>,
+// family inet), a path may name a wider node by a leading portion of its
+// keys (`system host-name` for the leaf [host-name fw1]), and a bare
+// terminal keyword still fans out to its siblings with the annotation
+// landing on the FIRST (#3980 semantics preserved through the fallback).
 //
 // It replaces the hand-rolled one-token-per-node walk that Store.Annotate
 // carried before #4587, which matched a multi-key node by ANY single key then
@@ -1030,11 +1046,58 @@ func (t *ConfigTree) AnnotatePath(path []string, comment string) error {
 	if len(path) == 0 {
 		return fmt.Errorf("%w: (empty path)", ErrPathNotFound)
 	}
+	if n := resolveExactPath(t.Children, path); n != nil {
+		n.Annotation = comment
+		return nil
+	}
 	matches := navigatePath(t.Children, path)
 	if len(matches) == 0 {
 		return fmt.Errorf("%w: %s", ErrPathNotFound, strings.Join(path, " "))
 	}
 	matches[0].Annotation = comment
+	return nil
+}
+
+// resolveExactPath walks children level by level, at each level choosing
+// the sibling that matchNodeKeysFull matches against the remaining path
+// — preferring an exact whole-key-list match over a proper prefix match
+// (the remaining path is a leading portion of a wider node's keys), then
+// the widest consumption — and returns the node once the WHOLE path is
+// consumed. It returns nil when no such walk consumes the entire path
+// (a terminal proper-prefix match names a wider node's ancestor portion,
+// not the node itself, so it does NOT resolve here; the caller's display
+// fallback owns prefix addressing). Mirrors the best-match selection in
+// findNodeWithParent without its terminal-prefix refusal shaping the
+// descent: prefix matches may be descended THROUGH, only the terminal
+// node must be exact.
+func resolveExactPath(children []*Node, path []string) *Node {
+	pos := 0
+	for pos < len(path) {
+		var best *Node
+		bestConsumed := 0
+		bestExact := false
+		for _, child := range children {
+			consumed := matchNodeKeysFull(child, path, pos)
+			if consumed == 0 {
+				continue
+			}
+			exact := consumed == len(child.Keys)
+			if best == nil || (exact && !bestExact) || (exact == bestExact && consumed > bestConsumed) {
+				best, bestConsumed, bestExact = child, consumed, exact
+			}
+		}
+		if best == nil {
+			return nil
+		}
+		pos += bestConsumed
+		if pos >= len(path) {
+			if !bestExact {
+				return nil
+			}
+			return best
+		}
+		children = best.Children
+	}
 	return nil
 }
 
