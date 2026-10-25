@@ -1117,9 +1117,13 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 								unit.ISOAddresses = append(unit.ISOAddresses, v)
 							}
 							// Bracketed / packed extra NETs on the leaf.
-							for _, v := range addrNode.Keys[2:] {
-								if v != "" {
-									unit.ISOAddresses = append(unit.ISOAddresses, v)
+							// Guard the slice: a valueless `address;`
+							// carries only Keys[0] (#16865 F1).
+							if len(addrNode.Keys) > 2 {
+								for _, v := range addrNode.Keys[2:] {
+									if v != "" {
+										unit.ISOAddresses = append(unit.ISOAddresses, v)
+									}
 								}
 							}
 						}

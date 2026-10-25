@@ -66,6 +66,7 @@ func TestJunos9DaemonCopyPreservesProvenance15990(t *testing.T) {
 		"set protocols rip authentication-type md5",
 		`set protocols rip authentication-key "` + outer + `"`,
 		"set protocols rip neighbor ge-0/0/3",
+		"set protocols isis net 49.0001.0100.0000.0001.00",
 		"set protocols isis authentication-type md5",
 		`set protocols isis authentication-key "` + outer + `"`,
 		"set protocols isis interface ge-0/0/2.0 authentication-type md5",

@@ -172,14 +172,15 @@ protocols { isis { interface ge-0/0/1.0; } }`).Parse()
 	})); err == nil {
 		t.Fatal("malformed ISO NET accepted at strict commit (#16865)")
 	}
-	// Routing-instance IS-IS derives from global lo0 ISO.
+	// Routing-instance IS-IS derives from an ISO NET on its OWN member.
 	cfg, err := CompileConfig(buildTree(t, []string{
-		"set interfaces lo0 unit 0 family iso address " + isisNET16865,
+		"set interfaces ge-0/0/1 unit 0 family iso address " + isisNET16865,
 		"set routing-instances tenant instance-type virtual-router",
+		"set routing-instances tenant interface ge-0/0/1.0",
 		"set routing-instances tenant protocols isis interface ge-0/0/1.0",
 	}))
 	if err != nil {
-		t.Fatalf("RI IS-IS with lo0 ISO rejected: %v", err)
+		t.Fatalf("RI IS-IS with own-member ISO rejected: %v", err)
 	}
 	if len(cfg.RoutingInstances) != 1 || cfg.RoutingInstances[0].ISIS == nil ||
 		cfg.RoutingInstances[0].ISIS.NET != isisNET16865 {
@@ -191,5 +192,94 @@ protocols { isis { interface ge-0/0/1.0; } }`).Parse()
 		"set routing-instances tenant protocols isis interface ge-0/0/1.0",
 	})); err == nil {
 		t.Fatal("RI IS-IS without NET accepted (#16865)")
+	}
+}
+
+// F2: distinct per-scope NETs must not cross-derive or conflict; a
+// default scope must not borrow an RI-owned NET.
+func TestISISNETRoutingInstanceScoped16865(t *testing.T) {
+	const netB = "49.0001.0100.0000.0002.00"
+	cfg, err := CompileConfig(buildTree(t, []string{
+		"set interfaces lo0 unit 0 family iso address " + isisNET16865,
+		"set interfaces ge-0/0/1 unit 0 family inet address 198.51.100.1/24",
+		"set interfaces ge-0/0/2 unit 0 family iso address " + netB,
+		"set protocols isis interface ge-0/0/1.0",
+		"set routing-instances tenant instance-type virtual-router",
+		"set routing-instances tenant interface ge-0/0/2.0",
+		"set routing-instances tenant protocols isis interface ge-0/0/2.0",
+	}))
+	if err != nil {
+		t.Fatalf("distinct per-scope NETs rejected: %v", err)
+	}
+	if cfg.Protocols.ISIS.NET != isisNET16865 {
+		t.Fatalf("default NET = %q, want %s", cfg.Protocols.ISIS.NET, isisNET16865)
+	}
+	if len(cfg.RoutingInstances) != 1 || cfg.RoutingInstances[0].ISIS.NET != netB {
+		t.Fatalf("tenant NET = %+v, want %s", cfg.RoutingInstances, netB)
+	}
+	// Default scope cannot borrow the tenant-owned NET.
+	if _, err := CompileConfig(buildTree(t, []string{
+		"set interfaces ge-0/0/2 unit 0 family iso address " + netB,
+		"set protocols isis interface ge-0/0/1.0",
+		"set routing-instances tenant instance-type virtual-router",
+		"set routing-instances tenant interface ge-0/0/2.0",
+		"set routing-instances tenant protocols isis interface ge-0/0/2.0",
+	})); err == nil {
+		t.Fatal("default IS-IS borrowed an RI-owned NET (#16865 F2)")
+	}
+	// RI scope cannot borrow the default lo0 NET (no member ISO).
+	if _, err := CompileConfig(buildTree(t, []string{
+		"set interfaces lo0 unit 0 family iso address " + isisNET16865,
+		"set routing-instances tenant instance-type virtual-router",
+		"set routing-instances tenant interface ge-0/0/2.0",
+		"set routing-instances tenant protocols isis interface ge-0/0/2.0",
+	})); err == nil {
+		t.Fatal("RI IS-IS borrowed the default lo0 NET without ownership (#16865 F2)")
+	}
+}
+
+// F4: case / dot-grouping equivalents are one identity.
+func TestISISNETCanonicalEquivalence16865(t *testing.T) {
+	cfg, err := CompileConfig(buildTree(t, []string{
+		"set interfaces lo0 unit 0 family iso address 49.0001.ABCD.0000.0001.00",
+		"set protocols isis net 49.0001.abcd.0000.0001.00",
+		"set protocols isis interface ge-0/0/1.0",
+	}))
+	if err != nil {
+		t.Fatalf("case-equivalent NETs falsely conflicted: %v", err)
+	}
+	if cfg.Protocols.ISIS.NET != "49.0001.abcd.0000.0001.00" {
+		t.Fatalf("explicit spelling not preserved: %q", cfg.Protocols.ISIS.NET)
+	}
+	// Grouping-equivalent duplicates (same bytes, different groups):
+	// 49.0001.0100.0000.0001.00 == 4900.0101.0000.0000.0100.
+	cfg2, err := CompileConfig(buildTree(t, []string{
+		"set interfaces lo0 unit 0 family iso address 49.0001.0100.0000.0001.00",
+		"set interfaces ge-0/0/1 unit 0 family iso address 4900.0101.0000.0000.0100",
+		"set protocols isis interface ge-0/0/1.0",
+	}))
+	if err != nil {
+		t.Fatalf("grouping-equivalent NETs falsely conflicted: %v", err)
+	}
+	if cfg2.Protocols.ISIS.NET != "49.0001.0100.0000.0001.00" {
+		t.Fatalf("derived NET = %q, want first-authored spelling", cfg2.Protocols.ISIS.NET)
+	}
+}
+
+// F1: a valueless `address;` must not panic on tolerant ingress.
+func TestISISISOValuelessAddressTolerant16865(t *testing.T) {
+	tree, errs := NewParser(`interfaces { lo0 { unit 0 { family iso { address; } } } }
+protocols { isis { interface ge-0/0/1.0; } }`).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("parse: %v", errs)
+	}
+	// Strict may reject (schema / NET gate); it must not panic.
+	_, _ = CompileConfig(tree)
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("tolerant compile with valueless iso address: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("tolerant compile returned nil config")
 	}
 }

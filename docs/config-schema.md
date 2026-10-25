@@ -2153,14 +2153,17 @@ Junos has no `protocols isis net` statement: the NET is configured as
 `interfaces lo0 unit 0 family iso address <NET>` (preferably on lo0).
 xpf models `family iso address` (validated by `ValidateISISNET`) and
 derives `ISISConfig.NET` from it at compile time when no explicit
-`protocols isis net` was authored — lo0 first, then any other
-interface. An explicit NET always wins, but a disagreeing explicit/ISO
-pair, or two distinct ISO NETs, is rejected at strict commit as an
-ambiguous identity. An enabled IS-IS scope (global or routing-instance)
-with interfaces but no derivable NET is rejected at strict commit; on
-tolerant load it warns and the FRR renderer withholds the whole
-`router isis` stanza rather than activating a NET-less process. A
-NET-less scope with no enabled interfaces stays inert.
+`protocols isis net` was authored — per scope: the default scope uses
+interfaces owned by no routing instance, an instance uses its own
+members, lo0 first in each. NET identity compares canonical bytes, so
+case/dot-grouping spellings of the same NET are one identity. A
+disagreeing explicit/ISO pair, or two distinct in-scope ISO NETs, is
+rejected at strict commit as an ambiguous identity. An enabled IS-IS
+scope (global or routing-instance) with interfaces but no derivable
+NET is rejected at strict commit; on tolerant load it warns and the
+FRR renderer withholds the whole `router isis` stanza rather than
+activating a NET-less process. A NET-less scope with no enabled
+interfaces stays inert.
 
 ### `protocols lldp` TTL bounds (#4596)
 

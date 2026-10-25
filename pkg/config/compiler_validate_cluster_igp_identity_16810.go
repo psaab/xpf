@@ -153,6 +153,47 @@ func nodeGroupHasIGPIdentity16810(group *Node) bool {
 		if child.Name() == "routing-instances" && nodeHasIGPIdentity16810(child) {
 			return true
 		}
+		// #16865 F3: the Junos NET source `interfaces ... family iso
+		// address` is an IS-IS identity too; distinct per-node ISO
+		// NETs must earn the same exemption as `protocols isis net`.
+		if child.Name() == "interfaces" && nodeHasISOAddress16865(child) {
+			return true
+		}
+	}
+	return false
+}
+
+// nodeHasISOAddress16865 reports whether an interfaces subtree
+// carries a `family iso ... address <NET>` in any AST shape
+// (hierarchical child, packed Keys tail, flat-set child).
+func nodeHasISOAddress16865(n *Node) bool {
+	return isoInSubtree16865(n, false)
+}
+
+func isoInSubtree16865(n *Node, underISO bool) bool {
+	if n == nil {
+		return false
+	}
+	nowISO := underISO || n.Name() == "iso"
+	for _, k := range n.Keys {
+		if k == "iso" {
+			nowISO = true
+		}
+	}
+	if nowISO && n.Name() == "address" {
+		return true
+	}
+	if nowISO {
+		for i, k := range n.Keys {
+			if k == "address" && i+1 < len(n.Keys) {
+				return true
+			}
+		}
+	}
+	for _, c := range n.Children {
+		if isoInSubtree16865(c, nowISO) {
+			return true
+		}
 	}
 	return false
 }
