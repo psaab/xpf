@@ -578,6 +578,7 @@ func NewExporter(cfg *ExportConfig) (*Exporter, error) {
 		fieldsV6: buildTemplateFieldsV6(cfg.V9TemplateOpts),
 	}
 	e.MaskResolver = NewRouteMaskResolver(0)
+	e.exporterCore.cfg = cfg
 	e.tracker = NewFlowTracker(cfg.FlowActiveTimeout, cfg.FlowInactiveTimeout)
 	e.recSizeV4 = recordSize(e.fieldsV4)
 	e.recSizeV6 = recordSize(e.fieldsV6)

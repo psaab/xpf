@@ -62,6 +62,17 @@ xpf (0.0.0) unstable; urgency=medium
     rate-limited to about one per second with a new
     PreAuthHandshakeFailed sync-stats counter recording every
     failure. Post-auth connection logging is unchanged.
+  * Flow export: active-timeout interim and inactive-timeout final
+    records now carry the same SrcMask/DstMask and flowDirection as
+    the flow's close record (#16754). Previously tracker-emitted
+    records were verbatim copies of the SESSION_OPEN template, which
+    never resolved route masks or direction, so long flows exported
+    /0 masks and Direction 0 on interims (egress-sampled flows were
+    mislabelled under `export-extension flow-dir`). The shared
+    tracker drain now derives Direction from the exporter's sampling
+    config over the open-time zone/interface snapshot and resolves
+    masks in the ingress VRF, counting unresolved halves like the
+    close path.
   * Config/firewall: the single-rate `firewall policer`
     `burst-size-limit` floor is now the shared one-frame floor of
     1514 bytes (#16714), unified with the three-color leaves

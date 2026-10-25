@@ -1128,6 +1128,13 @@ func (d *Daemon) trackFlowOpen(rec logging.EventRecord) {
 		InIf: rec.IngressIfindex, OutIf: rec.EgressIfindex, TOS: rec.TOS, TCPFlags: rec.TCPControlBits,
 		NATSrcIP: parseHost(rec.NATSrcAddr), NATDstIP: parseHost(rec.NATDstAddr),
 		NATSrcPort: parseSrcPort(rec.NATSrcAddr), NATDstPort: parseSrcPort(rec.NATDstAddr),
+		// #16754: snapshot the open-time attribution for tracker records.
+		// Direction itself is derived per exporter at drain time (each
+		// template group has its own sampling config); the zone/iface
+		// facts are exporter-independent and captured once here. Route
+		// masks are resolved at drain with the ingress VRF (InIf/OutIf).
+		InZone: rec.InZone, OutZone: rec.OutZone,
+		InIface: rec.IngressIface, OutIface: rec.EgressIface,
 	}
 	if tmpl.NATSrcIP == nil {
 		tmpl.NATSrcIP = srcIP

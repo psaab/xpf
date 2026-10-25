@@ -1281,6 +1281,15 @@ type FlowRecord struct {
 	NATDstIP   net.IP
 	NATSrcPort uint16
 	NATDstPort uint16
+	// #16754: open-time attribution snapshot for tracker records. InZone/
+	// OutZone are the sampling zone ids and InIface/OutIface the interface
+	// names the daemon saw at SESSION_OPEN; collectDueExports derives the
+	// record Direction from them (via ExportConfig.FlowDirectionIface)
+	// when the template left Direction unset. Never encoded on the wire.
+	InZone   uint16
+	OutZone  uint16
+	InIface  string
+	OutIface string
 }
 
 // SessionCloseData holds parsed session data for flow export.
@@ -1323,6 +1332,10 @@ type SessionCloseData struct {
 	// always computed but only encoded by a group whose template enabled
 	// `export-extension flow-dir` (IncludeFlowDir).
 	Direction uint8
+	// #16754: zone/interface attribution for tracker-record Direction
+	// derivation at drain time; unused on the close path itself.
+	InZone, OutZone   uint16
+	InIface, OutIface string
 }
 
 // flowStartTime resolves a flow's reported StartTime from its creation stamp.
