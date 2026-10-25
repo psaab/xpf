@@ -29,6 +29,16 @@ xpf (0.0.0) unstable; urgency=medium
     ADMIT_FULL / ADMIT_SHUTDOWN / ADMIT_BAD_LEASE drops and a false
     attestation FAIL); they now take blocking locks with bounded holds,
     so E23 moves only at genuine queue/per-flow capacity.
+  * Userspace DP: make deferred conntrack-delete retries O(1) and
+    poison-recovering (#16491). The housekeeping retry locked the
+    shared-session map with .expect (re-panicking on a poisoned
+    mutex where every other site recovers) and scanned every shared
+    value per retry, up to 64 O(N) scans per pass under the
+    cross-worker mutex. It now uses the maintained bare-tuple index
+    plus an exact-scope lookup under lock_shared_recover, mirroring
+    close_delta_is_stale_incarnation; a shared row in any scope
+    sharing the bare tuple still fences the delete (the kernel
+    conntrack row is bare-tuple keyed).
   * API/daemon: surface journal legacy-scrub degradation on /health
     and Prometheus (#16490). The #15143 `JournalLegacyScrubDegraded`
     flag latched when a pre-#1896 journal segment could not be
