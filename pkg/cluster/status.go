@@ -1034,7 +1034,10 @@ func (m *Manager) controlLinkAuthStatus() string {
 // authenticated peer frame has been seen at all, which during a rotation
 // usually means the peer is down, and telling an operator "not safe to
 // finalize" when the real answer is "your peer is not talking to you" sends
-// them to the wrong problem.
+// them to the wrong problem (#16859: the rendered text must say so, matching
+// README "Knowing when it is safe to finalize" — UNKNOWN is "not the same
+// as 'not safe'"). Finalize stays unsafe in the predicate either way:
+// absence of evidence is not evidence the peer has moved.
 //
 // #16029: every open window also renders its age, and a window open longer
 // than controlLinkRotationStaleAfter (7 days) carries an ALARM naming the
@@ -1065,7 +1068,7 @@ func (m *Manager) controlLinkRotationStatus() string {
 	switch {
 	case peer == "":
 		return fmt.Sprintf("in progress (signing %s, also accepting %s); peer key UNKNOWN — "+
-			"no authenticated peer frame seen, do NOT finalize%s", signing, additional, ageClause)
+			"no authenticated peer frame seen; unknown, not known safe to finalize%s", signing, additional, ageClause)
 	case peer == signing:
 		return fmt.Sprintf("in progress (signing %s, also accepting %s); peer is signing %s — "+
 			"safe to finalize: `delete chassis cluster additional-authentication-key`%s",

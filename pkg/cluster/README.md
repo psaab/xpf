@@ -2976,7 +2976,15 @@ wrong one reopens the dual-master window:
 |---|---|
 | `peer is signing <signing-id> — safe to finalize` | the peer has moved; step 5 is safe |
 | `peer is still signing <other-id> — do NOT finalize` | the peer is still on the retired key |
-| `peer key UNKNOWN — no authenticated peer frame seen` | usually the peer is down; **not** the same as "not safe" |
+| `peer key UNKNOWN — no authenticated peer frame seen; unknown, not known safe to finalize` | usually the peer is down; **not** the same as "not safe" |
+
+The peer-key observation is fed by every authenticated control surface, not
+only the heartbeat (#16859): heartbeat admission, the session-sync connect
+handshake (the ring key the responder matched, or the initiator's signing
+key), and the #6628 in-place upgrade. In fabric-transport mode there is no
+heartbeat, so session sync is what answers the question — a peer that has
+completed an authenticated session-sync handshake with the current key
+renders `safe to finalize` there too.
 
 Every open window also renders its age (`open for 3d`), and a window open
 longer than **7 days** carries an `ALARM` on the same line naming the
