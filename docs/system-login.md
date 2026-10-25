@@ -1851,6 +1851,18 @@ exactly how the gRPC surface stayed in the clear through two hardening passes.
 > (#4060). The community remains fully functional on the wire; only its
 > display is masked.
 
+**SSH root-login display (#16735).** `show system services` (console CLI
+and gRPC renderer) reports the *effective* root-login policy for a
+configured `system services ssh` stanza. With no `root-login` leaf, the
+managed sshd drop-in carries no `PermitRootLogin` line, so the image
+factory posture `PermitRootLogin prohibit-password` applies: root
+password login is refused but root **key** login is accepted. The row
+therefore renders `root-login: deny-password (default)` for an unset
+leaf (not the misleading `deny`), and the authored value otherwise
+(`allow`/`deny`/`deny-password`, mapping to `PermitRootLogin`
+`yes`/`no`/`prohibit-password`). Both surfaces share
+`config.SSHRootLoginDisplayName` so they cannot diverge.
+
 ### Generating a hash
 
 ```

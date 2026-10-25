@@ -269,11 +269,11 @@ func (s *Server) showSystemServices(buf *strings.Builder) {
 	}
 	if cfg.System.Services != nil {
 		if cfg.System.Services.SSH != nil {
-			rootLogin := cfg.System.Services.SSH.RootLogin
-			if rootLogin == "" {
-				rootLogin = "deny"
-			}
-			fmt.Fprintf(buf, "  SSH:            enabled (root-login: %s)\n", rootLogin)
+			// #16735: same effective-policy helper as the local CLI so
+			// the surfaces cannot diverge; unset leaf is the factory
+			// prohibit-password posture, not "deny".
+			fmt.Fprintf(buf, "  SSH:            enabled (root-login: %s)\n",
+				config.SSHRootLoginDisplayName(cfg.System.Services.SSH.RootLogin))
 		}
 		if cfg.System.Services.NetconfSSH {
 			fmt.Fprintln(buf, "  NETCONF SSH:    configured but NOT served (no NETCONF daemon; tcp/830 not served)")
