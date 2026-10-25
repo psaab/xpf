@@ -284,6 +284,30 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 		return nil
 	}
 
+	// #16535: an UNTYPED multi leaf (no validator — e.g. proxy-arp
+	// `address`, whose values are checked by the compiler's own strict
+	// gate) never reaches validateMultiValueLeaf above, so the sixth
+	// spelling `leaf { v1 v2; }` would pass the walk unchecked and the
+	// compiler's Keys[0]-per-child read would silently drop v2. Refuse
+	// a multi-token block child here too: one value per statement.
+	// Typed leaves are handled inside validateMultiValueLeaf; scalar
+	// (non-multi) leaves keep their own arity handling below. The
+	// refusal is structural only — no token is value-validated here,
+	// because this leaf has no validator to validate it with.
+	if childSchema.multi && childSchema.children == nil && exactMatch {
+		for _, c := range node.Children {
+			if c == nil || len(c.Keys) <= 1 {
+				continue
+			}
+			leafPath := append(append([]string(nil), path...), keyword)
+			err := typedLeafErrorf(leafPath, "only one value per statement inside a value block; write %q as separate statements (%s { %s; %s; }) or a bracket list (%s [ %s %s ])", strings.Join(c.Keys, " "), keyword, c.Keys[0], c.Keys[1], keyword, c.Keys[0], c.Keys[1])
+			if vc.recordTypedLeaf(err) {
+				continue
+			}
+			return err
+		}
+	}
+
 	// Fixed-arity scalar value leaf (#3332): a keyword that consumes exactly
 	// `args` value token(s) and models no sub-structure. Reject any token or
 	// AST child beyond that span — in the flat-set grammar a recognized
