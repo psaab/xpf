@@ -8,6 +8,15 @@ xpf (0.0.0) unstable; urgency=medium
     allowed (the refused target is already the persisted committed
     config) and the #6707 gate is skipped in that state (a timeout
     returns to the same safe state). Generic bootstrap is unchanged.
+  * Config/NPTv6: `NPTv6OverlapConflict` now skips non-NPTv6 rules
+    (`!rule.IsNPTv6`), mirroring `compileNPTv6` and
+    `buildNptv6Snapshots` (#16674). Previously every static-NAT rule
+    with a non-empty match/then was treated as NPTv6, so two ordinary
+    IPv6 block static-NAT rules (`then static-nat prefix`, #3031)
+    with a /64 inside a /48 — resolved by longest prefix in the
+    helper's static table — passed strict commit but aborted every
+    later apply in the #4960 pre-pass naming an NPTv6 overlap, even
+    with zero NPTv6 rules. True NPTv6/NPTv6 overlaps still reject.
   * Feeds: a feed restored with a count baseline but no usable content
     epoch now re-establishes the epoch on its first guarded install
     (#16651). Legacy count-only records, records whose epoch digest was

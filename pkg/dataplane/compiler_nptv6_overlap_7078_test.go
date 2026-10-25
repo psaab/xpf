@@ -321,3 +321,85 @@ func TestNPTv6DroppedUndefinedZoneStillCompiles16008(t *testing.T) {
 		}
 	})
 }
+
+// TestBlockStaticNATNestedPrefixesNotNPTv6Overlap_16674: ordinary IPv6
+// block static-NAT rules (`then static-nat prefix`, IsNPTv6=false, #3031)
+// where a /64 sits inside a /48 must NOT be treated as NPTv6 rules by
+// NPTv6OverlapConflict. The helper's NPTv6 snapshot holds only IsNPTv6
+// rules (nat_nptv6.go) and its static table resolves longest-prefix, so
+// this pair installs happily; pre-#16674 the predicate had no IsNPTv6
+// test and rejected every later apply naming "NPTv6 overlap" even with
+// zero NPTv6 rules. RED-on-revert: drop `!rule.IsNPTv6 ||` and both the
+// predicate subtests and the compile-level tripwire test fail.
+func TestBlockStaticNATNestedPrefixesNotNPTv6Overlap_16674(t *testing.T) {
+	set := func(name, zone, match, then string, isNPTv6 bool) *config.StaticNATRuleSet {
+		return &config.StaticNATRuleSet{
+			Name: name, FromZone: zone,
+			Rules: []*config.StaticNATRule{{Name: name + "-r", IsNPTv6: isNPTv6, Match: match, Then: then}},
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		sets []*config.StaticNATRuleSet
+	}{
+		{"block only: /64 inside /48, no NPTv6 at all", []*config.StaticNATRuleSet{
+			set("a", "untrust", "2001:db8:9::/48", "fd00:9::/48", false),
+			set("b", "untrust", "2001:db8:9:1::/64", "fd00:9:1::/64", false),
+		}},
+		{"block /48 plus NPTv6 /64 carve-out", []*config.StaticNATRuleSet{
+			set("a", "untrust", "2001:db8:9::/48", "fd00:9::/48", false),
+			set("b", "untrust", "2001:db8:9:1::/64", "fd00:9:1::/64", true),
+		}},
+		{"NPTv6 /48 plus block /64 carve-out", []*config.StaticNATRuleSet{
+			set("a", "untrust", "2001:db8:9::/48", "fd00:9::/48", true),
+			set("b", "untrust", "2001:db8:9:1::/64", "fd00:9:1::/64", false),
+		}},
+		{"block first, overlapping NPTv6 pair still conflicts via NPTv6 rules only", []*config.StaticNATRuleSet{
+			set("blk", "untrust", "2001:db8:9::/48", "fd00:9::/48", false),
+			set("a", "untrust", "2001:db8:aa::/48", "fd00:aa::/48", true),
+			set("b", "untrust", "2001:db8:aa::/48", "fd00:bb::/48", true),
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Security.NAT.Static = tc.sets
+			got := config.NPTv6OverlapConflict(cfg)
+			wantConflict := tc.name == "block first, overlapping NPTv6 pair still conflicts via NPTv6 rules only"
+			if wantConflict && got == "" {
+				t.Fatalf("want a conflict from the two true NPTv6 rules, got none")
+			}
+			if !wantConflict && got != "" {
+				t.Fatalf("want NO conflict (block static-NAT rules never reach the NPTv6 snapshot), got %q", got)
+			}
+		})
+	}
+}
+
+// TestBlockStaticNATNestedPrefixesStillCompile_16674 is the compile-level
+// twin (acceptance: the defect cell reaches the compileZones tripwire).
+func TestBlockStaticNATNestedPrefixesStillCompile_16674(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sets []*config.StaticNATRuleSet
+	}{
+		{"block only nested", []*config.StaticNATRuleSet{
+			{Name: "rs-block-a", FromZone: "untrust", Rules: []*config.StaticNATRule{{Name: "r-block-a", Match: "2001:db8:9::/48", Then: "fd00:9::/48"}}},
+			{Name: "rs-block-b", FromZone: "untrust", Rules: []*config.StaticNATRule{{Name: "r-block-b", Match: "2001:db8:9:1::/64", Then: "fd00:9:1::/64"}}},
+		}},
+		{"block plus NPTv6 carve-out", []*config.StaticNATRuleSet{
+			{Name: "rs-block-a", FromZone: "untrust", Rules: []*config.StaticNATRule{{Name: "r-block-a", Match: "2001:db8:9::/48", Then: "fd00:9::/48"}}},
+			{Name: "rs-npt-b", FromZone: "untrust", Rules: []*config.StaticNATRule{{Name: "r-npt-b", IsNPTv6: true, Match: "2001:db8:9:1::/64", Then: "fd00:9:1::/64"}}},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dp := &recordingDP{}
+			cfg := failLaterPhaseConfig()
+			cfg.Security.Policies[0].Policies[0].Match.Applications = []string{"any"}
+			cfg.Security.NAT.Static = tc.sets
+			_, err := CompileConfig(dp, cfg, false)
+			if !errors.Is(err, errStopBeforeHostReconcile) {
+				t.Fatalf("nested block static-NAT (with optional NPTv6 carve-out) was rejected by the pre-pass. Block rules go to the static table (longest-prefix, #3031), not the NPTv6 snapshot, so no NPTv6 overlap exists — failing the compile wedges every later apply (#16674).\n  got: %v", err)
+			}
+		})
+	}
+}
