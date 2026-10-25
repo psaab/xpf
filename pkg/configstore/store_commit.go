@@ -1695,10 +1695,26 @@ func (s *Store) CommitDiffSummary() string {
 	return fmt.Sprintf("%d statement(s) changed (%d added, %d removed)", total, added, removed)
 }
 
+// maxExactLCSCells bounds the exact LCS work in sequenceLineDiffCounts.
+// Above this many (old x new) middle-section cells the function falls
+// back to multiset counts so a pathological full rewrite or reorder of
+// a very large config cannot stall a commit for seconds; the fallback
+// preserves added/removed multiplicities but not order sensitivity for
+// that oversized middle section.
+const maxExactLCSCells = 1 << 22
+
 // sequenceLineDiffCounts returns (added, removed) between two ordered line
 // lists via an LCS alignment (#15168). Lines on the LCS are unchanged;
 // every other old line is a removal and every other new line is an addition,
 // so a moved line counts once on each side and duplicates align positionally.
+//
+// #16718: the previous implementation allocated a full (lo+1)x(ln+1) int
+// table — 1.1 GiB at 12k lines — on every CLI/gRPC commit. This version
+// trims the common prefix and suffix (the common case is a small edit to a
+// large config, which then costs almost nothing), computes the exact LCS
+// length of the remaining middle with only two DP rows (O(min) memory), and
+// only for a middle whose cell count exceeds maxExactLCSCells falls back to
+// multiset difference counts (see maxExactLCSCells).
 func sequenceLineDiffCounts(oldLines, newLines []string) (added, removed int) {
 	lo, ln := len(oldLines), len(newLines)
 	if lo == 0 {
@@ -1707,23 +1723,72 @@ func sequenceLineDiffCounts(oldLines, newLines []string) (added, removed int) {
 	if ln == 0 {
 		return 0, lo
 	}
-	dp := make([][]int, lo+1)
-	for i := range dp {
-		dp[i] = make([]int, ln+1)
+	start := 0
+	for start < lo && start < ln && oldLines[start] == newLines[start] {
+		start++
 	}
-	for i := lo - 1; i >= 0; i-- {
-		for j := ln - 1; j >= 0; j-- {
-			if oldLines[i] == newLines[j] {
-				dp[i][j] = dp[i+1][j+1] + 1
-			} else if dp[i+1][j] >= dp[i][j+1] {
-				dp[i][j] = dp[i+1][j]
+	endOld, endNew := lo, ln
+	for endOld > start && endNew > start && oldLines[endOld-1] == newLines[endNew-1] {
+		endOld--
+		endNew--
+	}
+	oldMid := oldLines[start:endOld]
+	newMid := newLines[start:endNew]
+	if len(oldMid) == 0 {
+		return len(newMid), 0
+	}
+	if len(newMid) == 0 {
+		return 0, len(oldMid)
+	}
+	if int64(len(oldMid))*int64(len(newMid)) > maxExactLCSCells {
+		return multisetLineDiffCounts(oldMid, newMid)
+	}
+	lcs := lcsLengthLinear(oldMid, newMid)
+	return len(newMid) - lcs, len(oldMid) - lcs
+}
+
+// lcsLengthLinear returns the LCS length of a and b using two DP rows.
+// The shorter slice is used as the row axis to bound memory.
+func lcsLengthLinear(a, b []string) int {
+	if len(b) > len(a) {
+		a, b = b, a
+	}
+	prev := make([]int, len(b)+1)
+	curr := make([]int, len(b)+1)
+	for i := 1; i <= len(a); i++ {
+		curr[0] = 0
+		ai := a[i-1]
+		for j := 1; j <= len(b); j++ {
+			if ai == b[j-1] {
+				curr[j] = prev[j-1] + 1
+			} else if prev[j] >= curr[j-1] {
+				curr[j] = prev[j]
 			} else {
-				dp[i][j] = dp[i][j+1]
+				curr[j] = curr[j-1]
 			}
 		}
+		prev, curr = curr, prev
 	}
-	lcs := dp[0][0]
-	return ln - lcs, lo - lcs
+	return prev[len(b)]
+}
+
+// multisetLineDiffCounts returns added/removed by line multiplicity:
+// lines present the same number of times on both sides cancel, regardless
+// of position. Used only for oversized middle sections where an exact
+// order-aware LCS would be too slow (see maxExactLCSCells).
+func multisetLineDiffCounts(oldLines, newLines []string) (added, removed int) {
+	counts := make(map[string]int, len(oldLines))
+	for _, line := range oldLines {
+		counts[line]++
+	}
+	matched := 0
+	for _, line := range newLines {
+		if counts[line] > 0 {
+			counts[line]--
+			matched++
+		}
+	}
+	return len(newLines) - matched, len(oldLines) - matched
 }
 
 // rollbackPath returns the file path for rollback slot n (1-based).
