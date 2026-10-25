@@ -1139,7 +1139,7 @@ func TestFormatSet(t *testing.T) {
 func TestRPMConfig(t *testing.T) {
 	input := `routing-instances {
     att-vr {
-        instance-type forwarding;
+        instance-type virtual-router;
     }
 }
 services {

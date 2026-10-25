@@ -379,19 +379,22 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 		}
 	}
 
-	// #2496: RPM test routing-instance cross-reference gate. A test whose
-	// `routing-instance` names a nonexistent instance makes the runtime
+	// #2496/#16629: RPM test routing-instance cross-reference gate. A test
+	// whose `routing-instance` names a nonexistent instance — or a
+	// forwarding instance, which has no VRF device — makes the runtime
 	// bind the probe DATA socket to a synthesized vrf-<name> device
 	// (SO_BINDTODEVICE) that does not exist → ENODEV → the probe never runs
 	// and the test HOLDS its state forever, starving any event-options /
 	// ip-monitoring policy keyed off it of a failover signal. An empty
-	// routing-instance is the default (master) context and is accepted.
-	// Strict on commit / commit-check (hard reject so the typo is
-	// operator-visible); lenient on load / peer-sync (warn — #1960; the
-	// runtime bind returns ENODEV for the same nonexistent instance, so the
-	// leniently-loaded test HOLDS state instead of actuating off a dead
-	// measurement). Mirrors the ip-monitoring preferred-route
-	// routing-instance check in validateIPMonitoringStrict.
+	// routing-instance is the default (master) context and is accepted,
+	// as is a forwarding instance pinned by destination-interface (which
+	// takes precedence over the VRF fallback). Strict on commit /
+	// commit-check (hard reject so the typo is operator-visible); lenient
+	// on load / peer-sync (warn — #1960; the runtime bind returns ENODEV
+	// for the same instance, so the leniently-loaded test HOLDS state
+	// instead of actuating off a dead measurement). Mirrors the
+	// ip-monitoring preferred-route routing-instance check in
+	// validateIPMonitoringStrict.
 	if err := validateRPMRoutingInstanceStrict(cfg); err != nil {
 		if opts.lenientRPMRoutingInstance {
 			cfg.Warnings = append(cfg.Warnings,

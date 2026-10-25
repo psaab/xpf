@@ -2390,18 +2390,19 @@ type compileOpts struct {
 	// leniently-loaded test HOLDS state rather than actuating off a probe
 	// that can never run). Same doctrine as lenientRPMLinkLocalZone.
 	lenientRPMHTTPGetScheme bool
-	// lenientRPMRoutingInstance (#2496) downgrades the RPM test
+	// lenientRPMRoutingInstance (#2496/#16629) downgrades the RPM test
 	// routing-instance cross-reference gate
 	// (validateRPMRoutingInstanceStrict) from a hard compile error to a
 	// cfg.Warnings entry. An RPM test whose `routing-instance` names a
-	// nonexistent instance makes the runtime bind the probe DATA socket to
+	// nonexistent instance — or a forwarding instance, which has no VRF
+	// device — makes the runtime bind the probe DATA socket to
 	// a synthesized vrf-<name> device (SO_BINDTODEVICE) that does not exist
 	// → ENODEV → the probe never sends a packet and the test HOLDS its
 	// state forever (no PASS, no FAIL), starving any event-options /
 	// ip-monitoring policy keyed off it of a failover signal. Strict on
 	// commit / commit-check (hard reject so the typo is operator-visible);
 	// lenient on load / peer-sync (warn — #1960 no-brick; the runtime bind
-	// returns ENODEV for the same nonexistent instance, so the leniently-
+	// returns ENODEV for the same instance, so the leniently-
 	// loaded test HOLDS state rather than actuating off a dead measurement).
 	// Same doctrine as lenientRPMHTTPGetScheme.
 	lenientRPMRoutingInstance bool

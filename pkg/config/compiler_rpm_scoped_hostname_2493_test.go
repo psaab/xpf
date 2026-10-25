@@ -26,7 +26,7 @@ func TestRPMScopedHostnameAccepted(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			lines := []string{
-				"set routing-instances ISP-B instance-type forwarding",
+				"set routing-instances ISP-B instance-type virtual-router",
 				"set services rpm probe P test t probe-type icmp-ping",
 				"set services rpm probe P test t target example.com",
 				tc.scope,
@@ -66,7 +66,7 @@ func TestRPMNextHopHostnameStillRejected(t *testing.T) {
 // gate (and its warning) was removed entirely in #2614.
 func TestRPMScopedHostnameLenientNoWarn(t *testing.T) {
 	lines := []string{
-		"set routing-instances ISP-B instance-type forwarding",
+		"set routing-instances ISP-B instance-type virtual-router",
 		"set services rpm probe P test t probe-type icmp-ping",
 		"set services rpm probe P test t target example.com",
 		"set services rpm probe P test t routing-instance ISP-B",
@@ -87,7 +87,7 @@ func TestRPMScopedHostnameLenientNoWarn(t *testing.T) {
 func TestRPMScopedIPLiteralAccepted(t *testing.T) {
 	t.Run("routing-instance + IP literal accepted", func(t *testing.T) {
 		lines := []string{
-			"set routing-instances ISP-B instance-type forwarding",
+			"set routing-instances ISP-B instance-type virtual-router",
 			"set services rpm probe P test t probe-type icmp-ping",
 			"set services rpm probe P test t target 8.8.8.8",
 			"set services rpm probe P test t routing-instance ISP-B",
