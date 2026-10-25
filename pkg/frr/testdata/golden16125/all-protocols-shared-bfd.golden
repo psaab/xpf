@@ -46,14 +46,8 @@ exit
 !
 bfd
  peer 192.0.2.1
-  detect-multiplier 3
-  receive-interval 300
-  transmit-interval 300
  exit
  profile xpf-300-3
-  detect-multiplier 3
-  receive-interval 300
-  transmit-interval 300
  exit
 exit
 !

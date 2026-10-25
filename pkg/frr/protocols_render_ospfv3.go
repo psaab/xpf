@@ -131,6 +131,14 @@ func (m *Manager) renderOSPFv316125(b *strings.Builder, ospfv3 *config.OSPFv3Con
 				if iface.BFDInterval > 0 || iface.BFDMultiplier > 0 {
 					profile := bfdProfileName(iface.BFDInterval, iface.BFDMultiplier)
 					bfd.addProfile(profile, bfdProfile{iface.BFDInterval, iface.BFDMultiplier})
+					// #16813: ospf6d's write_config always prints the
+					// bare `ipv6 ospf6 bfd` enable line and then the
+					// profile line when a profile is set. Rendering
+					// only the profile line makes every
+					// `frr-reload.py --test` delete the running bare
+					// line — a perpetual diff that can never certify
+					// the #15203 re-check. Emit the pair FRR holds.
+					b.WriteString(" ipv6 ospf6 bfd\n")
 					fmt.Fprintf(b, " ipv6 ospf6 bfd profile %s\n", profile)
 				} else {
 					b.WriteString(" ipv6 ospf6 bfd\n")

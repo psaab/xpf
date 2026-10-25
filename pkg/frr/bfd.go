@@ -75,12 +75,42 @@ func (s *bfdSection) empty() bool {
 	return len(s.profiles) == 0 && len(s.peers) == 0
 }
 
+// bfdDefaultMultiplier16813 / bfdDefaultInterval16813 are FRR bfdd's
+// own defaults (frr-bfdd.yang: detection-multiplier default 3,
+// desired-transmission-interval / required-receive-interval default
+// 300000us). bfdd is northbound/YANG-backed: a leaf set to its YANG
+// default is elided from `show running-config`, so rendering a
+// default-valued line makes every `frr-reload.py --test` list it as
+// an addition — a perpetual diff that can never certify the #15203
+// benign-reload re-check (#16813). Render only non-default values;
+// an all-default profile/peer renders as the bare header, which is
+// exactly what FRR holds. Live-verified on FRR 10.7.1 (see
+// docs/log/16813.md).
+const (
+	bfdDefaultMultiplier16813 = 3
+	bfdDefaultInterval16813   = 300
+)
+
+// renderBFDTimers16813 writes the timer lines of one profile/peer
+// stanza, omitting any line whose value equals the FRR default
+// (#16813). interval drives both receive- and transmit-interval.
+func renderBFDTimers16813(b *strings.Builder, interval, multiplier int) {
+	if multiplier == 0 {
+		multiplier = bfdDefaultMultiplier16813
+	}
+	if interval == 0 {
+		interval = bfdDefaultInterval16813
+	}
+	if multiplier != bfdDefaultMultiplier16813 {
+		fmt.Fprintf(b, "  detect-multiplier %d\n", multiplier)
+	}
+	if interval != bfdDefaultInterval16813 {
+		fmt.Fprintf(b, "  receive-interval %d\n", interval)
+		fmt.Fprintf(b, "  transmit-interval %d\n", interval)
+	}
+}
+
 // render emits a single top-level `bfd` block containing all accumulated
-// peers (in instance order) followed by all profiles (sorted by name for
-// deterministic output). Returns "" when nothing was accumulated. The
-// per-stanza format is byte-identical to the pre-#2550 per-instance
-// emission, so only the block COUNT changes (one global block instead of
-// one per routing instance).
 func (s *bfdSection) render() string {
 	if s.empty() {
 		return ""
@@ -129,17 +159,7 @@ func (s *bfdSection) render() string {
 			suffix += " multihop local-address " + sanitizeFRRValue(p.localAddress)
 		}
 		fmt.Fprintf(&b, " peer %s%s\n", p.address, suffix)
-		multiplier := p.multiplier
-		if multiplier == 0 {
-			multiplier = 3
-		}
-		interval := p.interval
-		if interval == 0 {
-			interval = 300
-		}
-		fmt.Fprintf(&b, "  detect-multiplier %d\n", multiplier)
-		fmt.Fprintf(&b, "  receive-interval %d\n", interval)
-		fmt.Fprintf(&b, "  transmit-interval %d\n", interval)
+		renderBFDTimers16813(&b, p.interval, p.multiplier)
 		b.WriteString(" exit\n")
 	}
 	var profileNames []string
@@ -149,18 +169,8 @@ func (s *bfdSection) render() string {
 	sort.Strings(profileNames)
 	for _, name := range profileNames {
 		p := s.profiles[name]
-		interval := p.interval
-		if interval == 0 {
-			interval = 300
-		}
-		multiplier := p.multiplier
-		if multiplier == 0 {
-			multiplier = 3
-		}
 		fmt.Fprintf(&b, " profile %s\n", name)
-		fmt.Fprintf(&b, "  detect-multiplier %d\n", multiplier)
-		fmt.Fprintf(&b, "  receive-interval %d\n", interval)
-		fmt.Fprintf(&b, "  transmit-interval %d\n", interval)
+		renderBFDTimers16813(&b, p.interval, p.multiplier)
 		b.WriteString(" exit\n")
 	}
 	b.WriteString("exit\n!\n")
