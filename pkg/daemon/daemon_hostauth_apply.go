@@ -828,9 +828,12 @@ func (d *Daemon) reconcileUserPassword(user *config.LoginUser) (err error) {
 			// #6797: the shadow password did NOT change, so withdraw the
 			// ownership this pass claimed for it. A claim an EARLIER apply
 			// legitimately made is preserved — rollback is a no-op for it.
+			// #16830: rollback() is fenced, and a completed-but-superseded
+			// chpasswd (errHostAuthExecCompletedSuperseded16830) may have
+			// landed — either way the marker a newer authority relies on
+			// survives; only a genuine non-stale failure withdraws.
 			pwClaim.rollback()
 			acctClaim.rollback()
-			fail(fmt.Errorf("set password for %s: %w", user.Name, err))
 		} else if actual, ok := currentShadowHash(user.Name); !ok {
 			slog.Error("could not verify user password after chpasswd",
 				"user", user.Name)
@@ -1005,8 +1008,14 @@ func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
 	// no-op when this apply changed nothing (pre-existing admin
 	// faillock survives).
 	defer func() {
-		if retErr != nil {
-			if serr := restoreSSHPAMFaillockOnRollback(faillockInstalled, faillockPrior); serr != nil {
+		// #16830: a superseded owner's whole apply abstains — its deferred
+		// faillock restore must not strip/overwrite the faillock a newer
+		// authority installed. restoreSSHPAMFaillockOnRollback is itself
+		// fenced; this guard keeps the stale error from being joined into
+		// (and misreported as) a rollback failure on an already-stale return.
+		if retErr != nil && !errors.Is(retErr, errHostAuthStaleOwner14969) &&
+			!errors.Is(retErr, errHostAuthExecCompletedSuperseded16830) {
+			if serr := restoreSSHPAMFaillockOnRollback(faillockInstalled, faillockPrior); serr != nil && !errors.Is(serr, errHostAuthStaleOwner14969) {
 				retErr = errors.Join(retErr, serr)
 			}
 		}

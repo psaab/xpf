@@ -8,8 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/psaab/xpf/pkg/fsatomic"
 )
 
 const (
@@ -99,9 +97,14 @@ const (
 )
 
 var (
-	sshdPAMCommonAuthPath  = "/etc/pam.d/common-auth"
-	sshdPAMReadFile        = os.ReadFile
-	sshdPAMWriteFile       = fsatomic.WriteFileAtomic
+	sshdPAMCommonAuthPath = "/etc/pam.d/common-auth"
+	sshdPAMReadFile       = os.ReadFile
+	// #16830: the PAM write is a host-auth mutation seam, so it goes through
+	// the same generation fence as the sshd drop-in (sshdWriteFile =
+	// guardedWriteFileAtomic14969). Previously this raw fsatomic call let a
+	// superseded owner's install/rollback write or strip the faillock rules
+	// a newer authority had just installed.
+	sshdPAMWriteFile       = guardedWriteFileAtomic14969
 	sshdPAMModuleAvailable = func() bool {
 		for _, pattern := range []string{
 			"/lib/security/pam_faillock.so",
@@ -372,7 +375,17 @@ func setSSHPAMFaillock(enable bool) (bool, []byte, error) {
 // original failure. It only acts when this apply actually changed
 // common-auth, so a pre-existing admin faillock is never removed by
 // an unrelated rollback.
+//
+// #16830: the restore is a compensating host mutation, so a superseded
+// owner abstains entirely — restoring its captured pre-apply bytes (or
+// stripping) would overwrite the faillock rules a newer authority just
+// installed. Both write legs go through the fenced sshdPAMWriteFile;
+// this early check additionally keeps the strip leg (setSSHPAMFaillock,
+// which only reaches the write at its end) from acting stale.
 func restoreSSHPAMFaillockOnRollback(installed bool, prior []byte) error {
+	if err := checkHostAuthSeam14969(); err != nil {
+		return err
+	}
 	if !installed {
 		return nil
 	}

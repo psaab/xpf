@@ -3,6 +3,8 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os/exec"
 	"time"
@@ -31,6 +33,17 @@ var runCommandTimeout = func(name string, args ...string) ([]byte, error) {
 	return runCommandStdinTimeout(nil, name, args...)
 }
 
+// errHostAuthExecCompletedSuperseded16830 marks a child that RAN TO
+// COMPLETION (its mutation may have landed) before the calling goroutine
+// was superseded. It deliberately does NOT wrap
+// errHostAuthStaleOwner14969: callers that roll back ownership claims on
+// a plain failure must not withdraw provenance for a mutation that may
+// have succeeded — the newer authority may rely on that marker to revoke
+// the credential (#16830, the chpasswd arm of R3-F11-01). A child killed
+// by the supersession watcher (context cancelled) never completed, so it
+// keeps reporting the plain stale error and rollback remains correct.
+var errHostAuthExecCompletedSuperseded16830 = errors.New("host-auth command completed before this closeout owner was superseded; its result is not rolled back (#16830)")
+
 // runWithHostAuthExec15539 runs body (one external-command spawn) with
 // the #15539 exec-seam fence applied on BOTH sides of the spawn, closing
 // the check-then-exec TOCTOU the entry-only #14969 check left open:
@@ -45,6 +58,17 @@ var runCommandTimeout = func(name string, args ...string) ([]byte, error) {
 //     way reports the stale-owner error, not a plain signal kill.
 //   - AFTER the spawn it re-checks again; output from a command that
 //     raced supersession is never reported as success.
+//
+// #16830 refines the after-spawn arm: if the child completed on its own
+// (ctx not cancelled by the watcher) but the epoch advanced while it
+// ran, its mutation may have landed BEFORE the newer authority's final
+// seam — discarding the result and letting the caller roll back its
+// provenance claims would withdraw the newer authority's marker. The
+// seam therefore returns the child's REAL output/error wrapped with
+// errHostAuthExecCompletedSuperseded16830 (never the stale sentinel), so
+// claim-rollback callers abstain while the supersession stays visible.
+// Only a watcher-killed child (ctx.Err() != nil) reports the plain
+// stale error, because then no mutation completed.
 //
 // Callers on goroutines with no captured generation (the normal tail,
 // every non-host-auth exec user) run body directly under a plain
@@ -86,7 +110,17 @@ func runWithHostAuthExec15539(body func(context.Context) ([]byte, error)) ([]byt
 	}()
 	out, err := body(ctx)
 	if staleErr := checkHostAuthSeam14969(); staleErr != nil {
-		return nil, staleErr
+		if ctx.Err() != nil {
+			// Watcher killed the in-flight child: nothing completed.
+			return nil, staleErr
+		}
+		// Child completed before supersession was observed: surface its
+		// real result, marked completed-but-superseded, so callers do
+		// not roll back provenance for a mutation that may have landed.
+		if err != nil {
+			return out, fmt.Errorf("%w: %w", errHostAuthExecCompletedSuperseded16830, err)
+		}
+		return out, errHostAuthExecCompletedSuperseded16830
 	}
 	return out, err
 }

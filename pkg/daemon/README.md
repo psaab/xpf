@@ -2943,6 +2943,33 @@ never lock an operator out of a remote box it manages.
       are never refused. Pinned by `hostauth_fence_15539_test.go`,
       which supersedes owners blocked INSIDE the seam/write rather
       than only before entry.
+    - **Compensating (rollback) seams are fenced too (#16830,
+      R3-F11-01).** #15539 fenced the direct writes but not the
+      failure compensation that runs when a fenced write refuses: a
+      superseded owner's `ownershipClaim.rollback()` removed the key
+      provenance marker through the raw `removeProvenanceMarker`, so
+      the marker a newer authority had just relied on (claimed
+      pre-existing, key K2 written) was withdrawn, and the next
+      marker-gated empty-key revocation left K2 installed while the
+      commit succeeded; `applySSHConfig`'s deferred PAM restore
+      likewise wrote/stripped common-auth through the raw
+      `sshdPAMWriteFile`, removing the newer authority's faillock
+      until the next apply; and the exec seam discarded a COMPLETED
+      chpasswd's result for the stale sentinel, so
+      `reconcileUserPassword` rolled back password/account markers
+      for a mutation that may have landed. Now `rollback()` routes
+      through `removeProvenanceMarkerFenced14969`, `sshdPAMWriteFile`
+      is `guardedWriteFileAtomic14969` with
+      `restoreSSHPAMFaillockOnRollback` seam-checked (and its
+      deferred caller in `applySSHConfig` skipping stale /
+      completed-superseded triggers), and `runWithHostAuthExec15539`
+      returns a completed child's real output/error marked
+      `errHostAuthExecCompletedSuperseded16830` — never the stale
+      sentinel — while a watcher-killed child still reports stale.
+      Pinned by `hostauth_stale_rollback_16830_test.go` (key-marker
+      end-to-end revocation, direct rollback unit, PAM seam +
+      real-apply restore, completed-exec result; each with its
+      uncaptured control unchanged).
     - **Unreadable ownership inventories now reach this closeout (#6798).**
       The reconcilers above could only report failures they could SEE, and an
       ownership read that failed was invisible to them: `hasProvenanceMarker`
