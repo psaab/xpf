@@ -57,6 +57,17 @@ xpf (0.0.0) unstable; urgency=medium
     always); diagcmd, frr status queries and DDNS resolve through it,
     and an instance named `vrf-mgmt` maps to `vrf-vrf-mgmt`, never the
     management VRF.
+  * Config/load: `ClassifyLoadContent` now routes a body to flat
+    replay only when a flat-verb line appears at brace depth 0
+    (#16698). Previously any uncommented flat-verb line flipped the
+    whole body to flat replay, so the box's own `show configuration`
+    output for a hierarchically authored unquoted event-options
+    change-configuration command — rendered bare as
+    `set system host-name pwned;` inside `commands { ... }` — failed
+    `load override` and `load merge` at line 1. The show-to-load
+    restore round-trip works again for such configs; flat scripts
+    (verb lines at depth 0, including after a quoted brace) are
+    unchanged, and mixed bodies still fail loud in flat replay.
   * Config/chassis-cluster: the four raw-AST commit gates (monitor
     weight #6588, RG/node identity #5694, no-argument RG statement
     arity #6588, gratuitous-arp-count #5695) now resolve the cluster
