@@ -86,7 +86,7 @@ enum EgressZoneClaim {
 /// was left out of every zone, so the ifindex has no zone and no derivation may
 /// give it one.
 /// What the LOGICAL UNIT rows on ONE ifindex say about that ifindex's
-/// EFFECTIVE per-interface host-inbound override (#16057).
+/// EFFECTIVE per-interface host-inbound override (#16057, #16501).
 ///
 /// A flat `ifindex → ZoneHostInbound` map cannot carry two distinct unit
 /// overrides: the AF_XDP ingress descriptor names the netdev, not the unit.
@@ -95,11 +95,24 @@ enum EgressZoneClaim {
 /// refuses to keep any unit override for the ifindex; the caller installs
 /// the empty fail-closed sentinel instead.
 ///
-/// An UNCONFIGURED unit row casts no vote: it would have fallen back to its
-/// zone set per-unit, so it cannot dispute a configured sibling. Different
-/// zones are also not, by themselves, a dispute — Go resolves each unit's
-/// effective set per unit NAME (`#3362`/`#3720`), so same-zone provenance is
-/// not required; only the effective token sets are compared.
+/// On an ifindex carrying a configured override, an UNCONFIGURED unit
+/// row votes with its EFFECTIVE zone signature (#16501) — the set it
+/// would have fallen back to per-unit, canonicalised exactly as for a
+/// configured row. Before #16501 it cast no vote there, so a configured
+/// sibling's override governed the whole shared netdev: the
+/// unconfigured unit's peers gained the sibling's services and lost its
+/// zone services, and authoring an explicit (even empty) override was
+/// safer than authoring none. An unconfigured unit whose zone set
+/// EQUALS the sibling's override still agrees, so that shape keeps the
+/// agreed override; on an ifindex with no configured row it casts no
+/// vote at all, preserving every pre-#16501 unconfigured-only verdict.
+/// Different zones are also not, by themselves, a dispute — Go resolves
+/// each unit's effective set per unit NAME (`#3362`/`#3720`), so
+/// same-zone provenance is not required; only the effective token sets
+/// are compared. This mirrors the Go `claimNetdev` signature
+/// (`pkg/dataplane/userspace/zones_host_inbound.go`), which claims every
+/// unit netdev with its effective (zone-fallback) signature and treats
+/// more than one signature on a netdev as ambiguous.
 /// The `Agreed` payload is the CANONICAL effective-admission signature,
 /// not the raw ordered token vectors: sorted/deduped service and protocol
 /// token sets (the Rust classifier is order- and duplicate-insensitive)
@@ -112,11 +125,11 @@ enum EgressZoneClaim {
 /// order, duplicates, or non-ND exclusion provenance and deny both.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum UnitHostInboundClaim {
-    /// Every configured logical-unit row on the ifindex carried this
-    /// canonical effective-admission signature.
+    /// Every logical-unit row on the ifindex carried this canonical
+    /// effective-admission signature.
     Agreed(std::collections::BTreeSet<String>, std::collections::BTreeSet<String>, bool),
-    /// Configured logical-unit rows on one ifindex carried DIFFERENT
-    /// canonical effective-admission signatures.
+    /// Logical-unit rows on one ifindex carried DIFFERENT canonical
+    /// effective-admission signatures.
     Disagree,
 }
 
@@ -481,11 +494,22 @@ fn unit_host_inbound_vote(
 }
 
 /// ifindex -> [`UnitHostInboundClaim`] for every ifindex carrying at least
-/// one CONFIGURED logical-unit host-inbound override row (#16057).
-/// Computed BEFORE the walk, like [`unit_zone_claims`], so the base row's
-/// write and each unit row's write consult the same precomputed verdict
-/// regardless of snapshot row order.
+/// one CONFIGURED logical-unit host-inbound override row (#16057), plus
+/// the #16501 disputes: an ifindex where a configured row's override
+/// differs from a sibling UNCONFIGURED row's EFFECTIVE zone signature
+/// (the tokens of the zone named on that row, or the empty deny-all
+/// signature when it names no known zone, mirroring the consumer's zone
+/// fallback — a no-stanza zone arrives with empty token sets, #3405).
+/// Unconfigured-only ifindexes stay absent: their zone vote is
+/// uncontested, needs no sentinel, and must not let a base row's
+/// differing override lose to it (pre-#16501 behaviour). An unconfigured
+/// unit whose zone set EQUALS the sibling's override agrees, so that
+/// shape keeps the agreed override. Computed BEFORE the walk, like
+/// [`unit_zone_claims`], so the base row's write and each unit row's
+/// write consult the same precomputed verdict regardless of snapshot
+/// row order.
 fn unit_host_inbound_claims(snapshot: &ConfigSnapshot) -> BTreeMap<i32, UnitHostInboundClaim> {
+    // First pass: the configured rows alone, exactly as #16057.
     let mut out: BTreeMap<i32, UnitHostInboundClaim> = BTreeMap::new();
     for iface in &snapshot.interfaces {
         if iface.ifindex <= 0
@@ -510,14 +534,44 @@ fn unit_host_inbound_claims(snapshot: &ConfigSnapshot) -> BTreeMap<i32, UnitHost
             }
         }
     }
+    // #16501: an unconfigured unit row on an ifindex that already carries
+    // a configured claim votes with its effective zone signature; a
+    // mismatch disputes the ifindex. Rows on unclaimed ifindexes cast
+    // no vote, preserving every pre-#16501 unconfigured-only verdict.
+    for iface in &snapshot.interfaces {
+        if iface.ifindex <= 0
+            || iface.host_inbound_configured
+            || !is_logical_unit_row(&iface.name, iface.is_unit)
+        {
+            continue;
+        }
+        let Some(slot) = out.get_mut(&iface.ifindex) else {
+            continue;
+        };
+        if *slot == UnitHostInboundClaim::Disagree {
+            continue;
+        }
+        let vote = match snapshot.zones.iter().find(|zone| zone.name == iface.zone) {
+            Some(zone) => unit_host_inbound_vote(
+                &zone.host_inbound_system_services,
+                &zone.host_inbound_protocols,
+                &zone.host_inbound_protocols_except,
+            ),
+            None => unit_host_inbound_vote(&[], &[], &[]),
+        };
+        if *slot != vote {
+            *slot = UnitHostInboundClaim::Disagree;
+        }
+    }
     out
 }
 
-/// Whether the configured unit rows on `ifindex` admit the override spelled
-/// by `services`/`protocols`/`protocols_except` as that ifindex's
-/// per-interface host-inbound set (#16057). Mirrors [`unit_rows_admit`]:
-/// `true` when no configured unit row sits on the ifindex, or when every
-/// one carried the same canonical signature; `false` when they disagree
+/// Whether the unit rows on `ifindex` admit the override spelled by
+/// `services`/`protocols`/`protocols_except` as that ifindex's
+/// per-interface host-inbound set (#16057, #16501). Mirrors
+/// [`unit_rows_admit`]: `true` when no unit row sits on the ifindex, or
+/// when every unit row's EFFECTIVE signature (override, or zone set for
+/// an unconfigured row) equals this row's; `false` when they disagree
 /// among themselves (this row's signature is then one of the disputed
 /// sets, or a base row's differing set that must lose to the units).
 fn unit_host_inbound_claims_admit(
@@ -574,8 +628,8 @@ fn unit_host_inbound_ifindexes_precompute(snapshot: &ConfigSnapshot) -> BTreeSet
 }
 
 /// #16130: pure precompute extracted from `populate_interfaces` — the
-/// ifindexes whose configured unit rows DISAGREE on their effective
-/// host-inbound override (#16057), derived from the precomputed claims.
+/// ifindexes whose unit rows DISAGREE on their effective host-inbound
+/// signature (#16057, #16501), derived from the precomputed claims.
 fn disputed_host_inbound_ifindexes_precompute(
     claims: &BTreeMap<i32, UnitHostInboundClaim>,
 ) -> BTreeSet<i32> {
@@ -734,11 +788,12 @@ pub(super) fn populate_interfaces(
     // the base row, so preserve the more-specific unit's set even if snapshot
     // row order changes.
     let unit_host_inbound_ifindexes = unit_host_inbound_ifindexes_precompute(snapshot);
-    // #16057: ifindexes whose CONFIGURED unit rows carry DIFFERENT effective
-    // host-inbound overrides. Precomputed before the walk so the refusal is
-    // row-order independent; the disputed override is refused in the walk
-    // and the empty fail-closed sentinel is installed after it (plus a
-    // warning), mirroring the #10503 contested-zone backstop.
+    // #16057/#16501: ifindexes whose unit rows carry DIFFERENT effective
+    // host-inbound signatures (a configured row's override, or an
+    // unconfigured row's zone set). Precomputed before the walk so the
+    // refusal is row-order independent; the disputed override is refused
+    // in the walk and the empty fail-closed sentinel is installed after
+    // it (plus a warning), mirroring the #10503 contested-zone backstop.
     let unit_host_inbound_claim_map = unit_host_inbound_claims(snapshot);
     let disputed_host_inbound_ifindexes =
         disputed_host_inbound_ifindexes_precompute(&unit_host_inbound_claim_map);
@@ -1115,9 +1170,11 @@ pub(super) fn populate_interfaces(
         }
         // #3362 per-interface host-inbound OVERRIDE. The control plane carries
         // the effective token set resolved for this interface.
-        // #16057: a DISPUTED unit override (configured unit rows on this
-        // ifindex carrying different canonical effective signatures) is
-        // refused for every row, base included — keeping any one would
+        // #16057/#16501: a DISPUTED unit override (unit rows on this
+        // ifindex carrying different canonical effective signatures — a
+        // configured row's override versus a sibling's override or an
+        // unconfigured sibling's zone set) is refused for every row,
+        // base included — keeping any one would
         // hand the sibling's admission to the whole netdev. The empty
         // fail-closed sentinel is installed after the walk. Unit rows
         // whose signatures AGREE keep the #12646 unit-wins behaviour
@@ -1414,9 +1471,11 @@ pub(super) fn populate_interfaces(
         }
     });
 
-    // #16057: disputed unit host-inbound override fail-closed backstop —
-    // SYMMETRY with #10503. Two configured units on one ifindex carried
-    // DIFFERENT effective overrides; the walk refused every one, so without
+    // #16057/#16501: disputed unit host-inbound override fail-closed
+    // backstop — SYMMETRY with #10503. Units on one ifindex carried
+    // DIFFERENT effective signatures (configured overrides, or a
+    // configured override versus an unconfigured unit's zone set); the
+    // walk refused every one, so without
     // this entry the ifindex would fall back to its ZONE set (or, when
     // unzoned, the `None => true` global admit) — either way a sibling's
     // broader admission would govern the whole netdev, the exact leak the
@@ -1433,10 +1492,11 @@ pub(super) fn populate_interfaces(
     for ifindex in &disputed_host_inbound_sentinels {
         eprintln!(
             "xpf-userspace-dp: WARNING host-inbound override contest on shared ifindex {}: \
-             configured logical units on the same netdev carry different effective \
-             host-inbound overrides, so no unit's override is honoured and host-bound \
+             logical units on the same netdev carry different effective \
+             host-inbound signatures (per-unit overrides, or an override versus an \
+             unconfigured unit's zone set), so no unit's override is honoured and host-bound \
              services are DENIED by the per-ifindex empty host-inbound sentinel \
-             (#16057; ICMP error/PMTUD control messages remain admitted, but ND \
+             (#16057/#16501; ICMP error/PMTUD control messages remain admitted, but ND \
              (ICMPv6 types 133-136) is denied with the sentinel, as on the #10503 \
              contested-zone sentinel). The dataplane sees an ifindex, not a unit, \
              so it cannot tell which unit a packet arrived on; give the units the \

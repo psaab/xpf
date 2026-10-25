@@ -4116,15 +4116,17 @@ fn shared_ifindex_disputed_unit_host_inbound_refused_in_both_row_orders_16057() 
     }
 }
 
-// #16057 positive controls: the refusal must fire ONLY on a genuine
-// disagreement between configured unit rows.
+// #16057 positive controls, as narrowed by #16501: the refusal must fire
+// ONLY on a genuine disagreement between unit rows' EFFECTIVE signatures.
 //  (a) units whose effective triples AGREE keep the agreed override;
-//  (b) a single configured unit beside an UNCONFIGURED sibling is not
-//      disputed — the configured unit's override still wins, in both
-//      orders (the unconfigured row casts no vote);
+//  (b) a single configured unit beside an UNCONFIGURED sibling whose zone
+//      set EQUALS the override is not disputed — the agreed set still
+//      wins, in both orders (#16501: the unconfigured row votes with its
+//      zone signature, and here it agrees);
 //  (c) configured units on DISTINCT ifindexes keep their own overrides.
 // Fail-on-revert (over-broad refusal): refusing on any multi-unit ifindex,
-// or counting unconfigured rows as dissenting votes, turns these RED.
+// or counting an agreeing unconfigured row as a dissenting vote, turns
+// these RED.
 #[test]
 fn shared_ifindex_agreed_or_single_unit_host_inbound_still_admitted_16057() {
     use crate::afxdp::forwarding::host_inbound_admits_iface;
@@ -4159,7 +4161,17 @@ fn shared_ifindex_agreed_or_single_unit_host_inbound_still_admitted_16057() {
         "agreed ssh-only override must still deny https (no zone leak)"
     );
 
-    // (b) one configured + one unconfigured unit, both orders.
+    // (b) one configured + one unconfigured unit whose zone set EQUALS the
+    // override, both orders (#16501 agreement control). The zone here
+    // admits ssh only, so the unconfigured unit's effective zone vote
+    // {ssh} agrees with the configured sibling's {ssh} override.
+    let ssh_zone = ZoneSnapshot {
+        name: "wan".into(),
+        id: ZONE_ID,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["ssh".into()],
+        ..Default::default()
+    };
     let plain_unit = InterfaceSnapshot {
         name: "st0.1".into(),
         zone: "wan".into(),
@@ -4178,18 +4190,18 @@ fn shared_ifindex_agreed_or_single_unit_host_inbound_still_admitted_16057() {
         ),
     ] {
         let snapshot = ConfigSnapshot {
-            zones: vec![any_service_zone_10503("wan", ZONE_ID)],
+            zones: vec![ssh_zone.clone()],
             interfaces,
             ..Default::default()
         };
         let state = build_forwarding_state(&snapshot);
         assert!(
             host_inbound_admits_iface(&state, SHARED, ZONE_ID, PROTO_TCP, 22, false, 0),
-            "{label}: single configured unit's ssh override must be admitted"
+            "{label}: agreeing unconfigured unit must keep the ssh admission"
         );
         assert!(
             !host_inbound_admits_iface(&state, SHARED, ZONE_ID, PROTO_TCP, 443, false, 0),
-            "{label}: single configured unit's ssh-only override must deny https"
+            "{label}: agreeing ssh-only set must deny https"
         );
     }
 
@@ -4224,6 +4236,96 @@ fn shared_ifindex_agreed_or_single_unit_host_inbound_still_admitted_16057() {
     assert!(
         !host_inbound_admits_iface(&state, OTHER, ZONE_ID, PROTO_TCP, 22, false, 0),
         "https unit on its own ifindex must deny ssh"
+    );
+}
+
+// #16501: an UNCONFIGURED unit sharing a netdev ifindex with a CONFIGURED
+// sibling must vote with its EFFECTIVE zone signature. Before the fix it
+// cast no vote, so the sibling's ssh-only override governed the whole
+// ifindex: ssh was admitted (the sibling's service, leaked to the
+// unconfigured unit's peers) and https was denied even though the
+// unconfigured unit's zone is any-service (its own zone services lost).
+// The mismatch must now yield Disagree and the empty fail-closed
+// sentinel, in both row orders. Controls: an unconfigured unit ALONE on
+// its ifindex keeps its zone set (no ifindex entry), and the agreeing
+// shape is pinned by case (b) of
+// shared_ifindex_agreed_or_single_unit_host_inbound_still_admitted_16057.
+// Fail-on-revert: restoring the `!host_inbound_configured` skip in
+// unit_host_inbound_claims makes the ssh assertion below RED (ssh is
+// admitted by the inherited override instead of denied by the sentinel).
+#[test]
+fn shared_ifindex_unconfigured_unit_zone_vote_disputes_configured_sibling_16501() {
+    use crate::afxdp::forwarding::host_inbound_admits_iface;
+
+    const SHARED: i32 = 16501;
+    const ALONE: i32 = 16502;
+    const ZONE_ID: u16 = 7;
+    const PROTO_TCP: u8 = 6;
+    let configured = InterfaceSnapshot {
+        name: "st0.1".into(),
+        zone: "wan".into(),
+        ifindex: SHARED,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["ssh".into()],
+        is_unit: Some(true),
+        ..Default::default()
+    };
+    let plain = |name: &str, ifindex: i32| InterfaceSnapshot {
+        name: name.into(),
+        zone: "wan".into(),
+        ifindex,
+        is_unit: Some(true),
+        ..Default::default()
+    };
+    for (label, interfaces) in [
+        (
+            "configured first",
+            vec![configured.clone(), plain("st0.0", SHARED)],
+        ),
+        (
+            "configured last",
+            vec![plain("st0.0", SHARED), configured.clone()],
+        ),
+    ] {
+        let snapshot = ConfigSnapshot {
+            zones: vec![any_service_zone_10503("wan", ZONE_ID)],
+            interfaces,
+            ..Default::default()
+        };
+        let state = build_forwarding_state(&snapshot);
+        assert!(
+            state.ifindex_host_inbound.contains_key(&SHARED),
+            "{label}: disputed ifindex must carry the empty fail-closed sentinel"
+        );
+        assert!(
+            !host_inbound_admits_iface(&state, SHARED, ZONE_ID, PROTO_TCP, 22, false, 0),
+            "{label}: sibling ssh override must NOT be inherited by the shared netdev"
+        );
+        assert!(
+            !host_inbound_admits_iface(&state, SHARED, ZONE_ID, PROTO_TCP, 443, false, 0),
+            "{label}: disputed ifindex must deny https too (sentinel, not zone fallback)"
+        );
+    }
+    // Control: an unconfigured unit alone on its ifindex casts an
+    // uncontested zone vote, installs no ifindex entry, and keeps its
+    // zone (any-service) admission.
+    let snapshot = ConfigSnapshot {
+        zones: vec![any_service_zone_10503("wan", ZONE_ID)],
+        interfaces: vec![plain("st0.0", ALONE)],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    assert!(
+        !state.ifindex_host_inbound.contains_key(&ALONE),
+        "unconfigured unit alone must not install a per-ifindex entry"
+    );
+    assert!(
+        host_inbound_admits_iface(&state, ALONE, ZONE_ID, PROTO_TCP, 22, false, 0),
+        "unconfigured unit alone must keep its zone ssh admission"
+    );
+    assert!(
+        host_inbound_admits_iface(&state, ALONE, ZONE_ID, PROTO_TCP, 443, false, 0),
+        "unconfigured unit alone must keep its zone https admission"
     );
 }
 
