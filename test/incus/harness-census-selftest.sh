@@ -537,14 +537,15 @@ EXPECTED_CENSUS_JOB="$(cat <<'EXPECTED_CENSUS_JOB_EOF'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # #16477: the repo pins scratch to /var/worktrees/.cache/tmpdir
-    # (Makefile ?=, #14833), which does not exist on a clean runner and
-    # cannot be created there; the census self-test now creates its own
-    # parent, and a runner-local TMPDIR keeps every other temp consumer
-    # (python tempfile, bare mktemp) off the pinned root too.
+    # (Makefile ?=, #14833), which does not exist on a clean runner. Use the
+    # runner's writable /tmp root for Python and bare mktemp consumers instead;
+    # the census self-test creates its own fixture subdirectory.
     env:
-      TMPDIR: ${{ runner.temp }}
+      TMPDIR: /tmp
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare temporary directory
+        run: mkdir -p "$TMPDIR"
       - name: Census runnable-harness reachability
         run: sh scripts/harness-census.sh
       - name: Self-test the census
