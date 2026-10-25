@@ -145,18 +145,42 @@ func CompileConfig(tree *ConfigTree) (*Config, error) {
 // the candidate (configstore passes its compiled active config), or nil
 // for a fresh candidate. Only the cluster-auth gate reads it.
 func CompileConfigWithCurrentClusterPrimary(tree *ConfigTree, current *Config) (*Config, error) {
-	opts := compileOpts{}
-	opts.currentClusterPrimary16025 = currentClusterPrimary(current)
+	opts := currentClusterOpts(current)
 	return compileTree(tree, opts, nil)
 }
 
 // CompileConfigForNodeWithCurrentClusterPrimary is the node-aware form.
 func CompileConfigForNodeWithCurrentClusterPrimary(tree *ConfigTree, nodeID int, current *Config) (*Config, error) {
-	opts := compileOpts{}
-	opts.currentClusterPrimary16025 = currentClusterPrimary(current)
+	opts := currentClusterOpts(current)
 	return compileTree(tree, opts, &nodeID)
 }
 
+// currentClusterOpts builds the compileOpts carrying the active config's
+// cluster-key state: the trimmed signing primary for the #16025 fold-2
+// exception and the accepted set {primary, additional} for the #16858
+// transition interlock. Both are derived from the same current config so
+// the two gates can never be fed different views of "active". Keys are
+// held only for equality checks and never logged or rendered.
+func currentClusterOpts(cfg *Config) compileOpts {
+	var opts compileOpts
+	if cfg == nil || cfg.Chassis.Cluster == nil {
+		return opts
+	}
+	k := strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal())
+	opts.currentClusterPrimary16025 = &k
+	accepted := &clusterAcceptedKeys16858{
+		primary:    k,
+		additional: strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal()),
+	}
+	if accepted.primary != "" || accepted.additional != "" {
+		opts.currentClusterAccepted16858 = accepted
+	}
+	return opts
+}
+
+// currentClusterPrimary returns the trimmed active signing primary, or
+// nil when there is no active cluster config. Retained as the test seam
+// for the #16025 fold-2 helper shape.
 func currentClusterPrimary(cfg *Config) *string {
 	if cfg == nil || cfg.Chassis.Cluster == nil {
 		return nil
