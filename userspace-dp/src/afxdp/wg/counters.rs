@@ -193,6 +193,12 @@ pub(crate) struct WgCounters {
     /// thread TUN-read + frame/wg.rs transit). The #1736 v4-mapped
     /// blackhole counter.
     pub(crate) encap_mtu_drops: AtomicU64,
+    /// #16711: validated underlay PTBs accepted into a peer's learned
+    /// outer PMTU (a repeat PTB that only refreshes aging counts too —
+    /// it is still a validated quote). Forged/unmatched quotes never
+    /// reach the bump site, so a nonzero rate with no tunnel change
+    /// flags a forged-PTB attempt or a flapping underlay.
+    pub(crate) pmtu_learned: AtomicU64,
     /// `wg_send_to` failures for encap'd transport datagrams.
     pub(crate) transport_send_errors: AtomicU64,
     /// `tun.write_all` failures delivering decap'd inner packets.

@@ -20,9 +20,9 @@ pub(in crate::afxdp) use generated::generated_reply_session_key;
 // inner MTU from the SAME physical underlay the encap drop guard admits
 // against (the `mod wg` submodule itself is private to `frame`).
 pub(in crate::afxdp) use wg::{
-    wg_endpoint_physical_outer_mtu, wg_endpoint_physical_outer_mtu_with_dynamic,
-    wg_selected_peer_outer, wg_selected_peer_outer_with_dynamic,
-    wg_transit_egress_physical_egress_ifindex_with_dynamic,
+    WgPtbOutcome, consume_wg_outer_ptb, wg_endpoint_physical_outer_mtu,
+    wg_endpoint_physical_outer_mtu_with_dynamic, wg_selected_peer_outer,
+    wg_selected_peer_outer_with_dynamic, wg_transit_egress_physical_egress_ifindex_with_dynamic,
 };
 
 // #6308: the WG transit-egress DISPATCH physical-egress SSOT, re-exported so

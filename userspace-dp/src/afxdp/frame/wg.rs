@@ -321,7 +321,56 @@ fn outer_physical_egress_mtu_with_dynamic(
         .map(|e| e.mtu)
         .filter(|m| *m > 0)
         .unwrap_or(1500);
-    crate::afxdp::forwarding::min_nonzero_mtu(interface_mtu, outer.resolution.route_mtu as usize)
+    let base = crate::afxdp::forwarding::min_nonzero_mtu(interface_mtu, outer.resolution.route_mtu as usize);
+    // #16711: a learned per-peer outer PMTU (validated underlay PTB)
+    // caps the local/route budget. Resolved by peer endpoint address
+    // so every consumer of this SSOT (encap guard via its inline twin,
+    // PTB, segmentation) honours the same learned value.
+    match wg_learned_pmtu_for_endpoint(forwarding, endpoint, outer_dst) {
+        Some(pmtu) => crate::afxdp::forwarding::min_nonzero_mtu(base, pmtu),
+        None => base,
+    }
+}
+
+/// #16711: the fresh learned outer PMTU of the peer whose live
+/// (configured-or-roamed) endpoint is `outer_dst`, in `endpoint`'s
+/// own engine. Endpoint addresses are the underlay identity a PTB
+/// quote names; several peers sharing one endpoint address share
+/// the underlay, so the smallest fresh value wins. `None` when no
+/// peer claims that endpoint or none has fresh state.
+#[inline]
+fn wg_learned_pmtu_for_endpoint(
+    forwarding: &ForwardingState,
+    endpoint: &TunnelEndpoint,
+    outer_dst: IpAddr,
+) -> Option<usize> {
+    let now_ns = monotonic_nanos();
+    let mut best: Option<usize> = None;
+    if let Some(engine) = forwarding.wg_engines.get(&endpoint.id) {
+        for (pubkey, ep) in engine.peer_endpoints() {
+            if ep.map(|e| e.ip()) == Some(outer_dst) {
+                if let Some(p) = engine.peer_pmtu(&pubkey, now_ns) {
+                    best = Some(best.map_or(p, |b: usize| b.min(p)));
+                }
+            }
+        }
+    }
+    best
+}
+
+/// #16711: min of a local/route outer MTU and the selected peer's
+/// fresh learned PMTU (by pubkey — the encap path already holds the
+/// LPM-selected pubkey, so no endpoint scan is needed there).
+#[inline]
+fn cap_outer_mtu_with_peer_pmtu(
+    engine: &crate::afxdp::wg::WgEngine,
+    peer_pubkey: &[u8; 32],
+    outer_mtu: usize,
+) -> usize {
+    match engine.peer_pmtu(peer_pubkey, monotonic_nanos()) {
+        Some(pmtu) => crate::afxdp::forwarding::min_nonzero_mtu(outer_mtu, pmtu),
+        None => outer_mtu,
+    }
 }
 /// The peer-endpoint outer destination whose underlay MTU the PTB must
 /// derive from, for a given inner destination (#2845).
@@ -831,6 +880,10 @@ pub(super) fn wg_encap_frame_with_commit_and_dynamic(
         interface_mtu,
         outer_resolution.resolution.route_mtu as usize,
     );
+    // #16711: cap by the selected peer's learned outer PMTU (validated
+    // underlay PTB). Without this the encap would re-emit an outer the
+    // downstream hop already told us it cannot carry.
+    let outer_mtu = cap_outer_mtu_with_peer_pmtu(engine, &peer_pubkey, outer_mtu);
 
     // #13978: never borrow the session's neighbor for this outer route. The
     // selected peer's underlay resolution is the only valid source of the
@@ -1025,6 +1078,155 @@ pub(super) fn wg_encap_frame_with_commit_and_dynamic(
             outcome,
         },
     ))
+}
+
+/// #16711: outcome of consuming one underlay PTB candidate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::afxdp) enum WgPtbOutcome {
+    /// Quote validated against a live peer; PMTU stored/refreshed.
+    Learned,
+    /// Not a PTB for a live WG outer — caller falls through unchanged.
+    Ignored,
+}
+
+/// #16711: consume an ICMP error addressed to a local WG outer source.
+///
+/// `frame` is the full L2 frame as received; `l3_offset` is where its
+/// outer IP header starts. Accepts exactly:
+///   - ICMPv6 type 2 (Packet Too Big), outer family IPv6, or
+///   - ICMPv4 type 3 code 4 (Fragmentation Needed), outer family IPv4,
+/// whose quote is a live WG outer: quoted protocol UDP, quoted src
+/// port = some WG endpoint's `wg_listen_port` in `forwarding`, and
+/// quoted dst = that endpoint engine's peer live/configured endpoint
+/// (address AND port, canonicalized). The outer destination must be a
+/// local address (`forwarding.local_v4`/`local_v6`) — a PTB for
+/// someone else's outer is transit, not ours to learn from.
+///
+/// On a match the advertised MTU (v6: 32-bit field; v4: low 16 bits
+/// of the unused word, RFC 1191 — a zero v4 field is a pre-RFC-1191
+/// router and is ignored, never guessed) is offered to that peer's
+/// soft state (floored, shrink-only, aged in `wg::pmtu`) and
+/// `pmtu_learned` bumps. Everything else returns `Ignored` with no
+/// state change, so a forged PTB cannot steer the tunnel MTU.
+pub(in crate::afxdp) fn consume_wg_outer_ptb(
+    forwarding: &ForwardingState,
+    frame: &[u8],
+    l3_offset: usize,
+) -> WgPtbOutcome {
+    let Some(ip) = frame.get(l3_offset..) else {
+        return WgPtbOutcome::Ignored;
+    };
+    if ip.is_empty() || forwarding.wg_engines.is_empty() {
+        return WgPtbOutcome::Ignored;
+    }
+    match ip[0] >> 4 {
+        6 => consume_wg_outer_ptb_v6(forwarding, ip),
+        4 => consume_wg_outer_ptb_v4(forwarding, ip),
+        _ => WgPtbOutcome::Ignored,
+    }
+}
+
+fn consume_wg_outer_ptb_v6(forwarding: &ForwardingState, ip: &[u8]) -> WgPtbOutcome {
+    if ip.len() < 48 || ip[6] != 58 {
+        return WgPtbOutcome::Ignored;
+    }
+    let dst = std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&ip[24..40]).unwrap_or([0; 16]));
+    if !forwarding.local_v6.contains(&dst) {
+        return WgPtbOutcome::Ignored;
+    }
+    let icmp = &ip[40..];
+    if icmp.len() < 8 || icmp[0] != 2 || icmp[1] != 0 {
+        return WgPtbOutcome::Ignored;
+    }
+    let advertised = u32::from_be_bytes([icmp[4], icmp[5], icmp[6], icmp[7]]) as usize;
+    let quote = &icmp[8..];
+    // Quoted outer: IPv6 + UDP + 8-byte L4 floor (ports are in the
+    // first 4; the floor mirrors the #9901 adequacy rule).
+    if quote.len() < 48 || quote[0] >> 4 != 6 || quote[6] != 17 {
+        return WgPtbOutcome::Ignored;
+    }
+    let qsrc = std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&quote[8..24]).unwrap_or([0; 16]));
+    if qsrc != dst {
+        // The quote's source must be the outer source the PTB was
+        // addressed to (our egress primary); a mismatched quote did
+        // not come from our datagram.
+        return WgPtbOutcome::Ignored;
+    }
+    let qdst = IpAddr::V6(std::net::Ipv6Addr::from(
+        <[u8; 16]>::try_from(&quote[24..40]).unwrap_or([0; 16]),
+    ));
+    let src_port = u16::from_be_bytes([quote[40], quote[41]]);
+    let dst_port = u16::from_be_bytes([quote[42], quote[43]]);
+    learn_wg_pmtu(forwarding, IpAddr::V6(dst), src_port, qdst, dst_port, advertised, true)
+}
+
+fn consume_wg_outer_ptb_v4(forwarding: &ForwardingState, ip: &[u8]) -> WgPtbOutcome {
+    if ip.len() < 20 || ip[9] != 1 {
+        return WgPtbOutcome::Ignored;
+    }
+    let ihl = ((ip[0] & 0x0f) as usize) * 4;
+    if ihl < 20 || ip.len() < ihl + 8 {
+        return WgPtbOutcome::Ignored;
+    }
+    let dst = std::net::Ipv4Addr::new(ip[16], ip[17], ip[18], ip[19]);
+    if !forwarding.local_v4.contains(&dst) {
+        return WgPtbOutcome::Ignored;
+    }
+    let icmp = &ip[ihl..];
+    if icmp[0] != 3 || icmp[1] != 4 {
+        return WgPtbOutcome::Ignored;
+    }
+    let advertised = u16::from_be_bytes([icmp[6], icmp[7]]) as usize;
+    if advertised == 0 {
+        return WgPtbOutcome::Ignored;
+    }
+    let quote = &icmp[8..];
+    if quote.len() < 28 || quote[0] >> 4 != 4 || quote[9] != 17 {
+        return WgPtbOutcome::Ignored;
+    }
+    let qihl = ((quote[0] & 0x0f) as usize) * 4;
+    if qihl < 20 || quote.len() < qihl + 8 {
+        return WgPtbOutcome::Ignored;
+    }
+    let qsrc = std::net::Ipv4Addr::new(quote[12], quote[13], quote[14], quote[15]);
+    if qsrc != dst {
+        return WgPtbOutcome::Ignored;
+    }
+    let qdst = IpAddr::V4(std::net::Ipv4Addr::new(quote[16], quote[17], quote[18], quote[19]));
+    let l4 = &quote[qihl..];
+    let src_port = u16::from_be_bytes([l4[0], l4[1]]);
+    let dst_port = u16::from_be_bytes([l4[2], l4[3]]);
+    learn_wg_pmtu(forwarding, IpAddr::V4(dst), src_port, qdst, dst_port, advertised, false)
+}
+
+fn learn_wg_pmtu(
+    forwarding: &ForwardingState,
+    _outer_dst_local: IpAddr,
+    src_port: u16,
+    quoted_dst: IpAddr,
+    dst_port: u16,
+    advertised: usize,
+    outer_v6: bool,
+) -> WgPtbOutcome {
+    let now_ns = monotonic_nanos();
+    for (id, endpoint) in &forwarding.tunnel_endpoints {
+        if endpoint.wg_listen_port == 0 || endpoint.wg_listen_port != src_port {
+            continue;
+        }
+        let Some(engine) = forwarding.wg_engines.get(id) else {
+            continue;
+        };
+        for (pubkey, ep) in engine.peer_endpoints() {
+            let Some(ep) = ep else { continue };
+            let canon = crate::afxdp::wg::canonicalize_endpoint(ep);
+            if canon.ip() == quoted_dst && canon.port() == dst_port {
+                engine.note_peer_pmtu(&pubkey, advertised, outer_v6, now_ns);
+                crate::afxdp::wg::counters::WgCounters::bump(&engine.counters().pmtu_learned);
+                return WgPtbOutcome::Learned;
+            }
+        }
+    }
+    WgPtbOutcome::Ignored
 }
 
 /// RFC 768 / RFC 8200 IPv6 UDP checksum over the pseudo-header + UDP

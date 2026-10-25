@@ -115,6 +115,7 @@ pub(crate) mod mss;
 // `crate::afxdp::frame::headers::{write_eth_header_slice,
 // write_ipv4_header, write_udp_header}` directly.
 pub(crate) mod peer;
+pub(crate) mod pmtu;
 pub(crate) mod scratch;
 pub(crate) mod session;
 pub(crate) mod tai64n;
