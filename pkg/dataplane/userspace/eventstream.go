@@ -480,6 +480,25 @@ func (es *EventStream) LastAckedSequence() uint64 {
 	return es.lastAckSeq.Load()
 }
 
+// LastAppliedSequence returns the last sequence whose callback has
+// completed (#16627). It is the applied watermark the connected
+// fallback drain compares drained fallback copies against: a copy
+// whose StreamSeq is at or below it was already delivered by the
+// stream and must be discarded, never re-queued with a fresh
+// generation. It leads LastAckedSequence, which only advances when
+// the periodic ACK flush writes.
+func (es *EventStream) LastAppliedSequence() uint64 {
+	return es.lastAppliedSeq.Load()
+}
+
+// SetLastAppliedSequenceForTesting advances the applied watermark in
+// tests that drive the daemon's delta handlers directly instead of
+// feeding binary frames through a socket. Production code never calls
+// it; the read loop is the only writer of lastAppliedSeq.
+func (es *EventStream) SetLastAppliedSequenceForTesting(seq uint64) {
+	es.lastAppliedSeq.Store(seq)
+}
+
 func (es *EventStream) Status() EventStreamStatus {
 	return EventStreamStatus{
 		FramesRead:                 es.FramesRead.Load(),
