@@ -341,6 +341,9 @@ func applyBGPNeighborProps9192(neighbor *BGPNeighbor, child *Node, ownExport, ow
 			}
 		case "passive":
 			neighbor.Passive = true
+		case "disable":
+			// #16572: neighbor-level shut.
+			neighbor.Disable = true
 		case "authentication-key":
 			neighbor.AuthPassword = NewSecret(nodeVal(prop))
 		case "route-reflector-client":

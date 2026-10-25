@@ -164,31 +164,33 @@ func collectProtocolInterfaceRefs(cfg *Config) []protocolIfaceRef {
 		}
 	}
 	walk := func(scope, instance string, global bool, ospf *OSPFConfig, ospfv3 *OSPFv3Config, rip *RIPConfig, isis *ISISConfig) {
-		if ospf != nil {
+		// #16572: a disabled protocol or interface renders nothing, so
+		// its refs need no resolution advisory.
+		if ospf != nil && !ospf.Disable {
 			for _, area := range ospf.Areas {
 				if area == nil {
 					continue
 				}
 				for _, iface := range area.Interfaces {
-					if iface != nil {
+					if iface != nil && !iface.Disable {
 						add(scope, instance, global, "ospf", iface.Name)
 					}
 				}
 			}
 		}
-		if ospfv3 != nil {
+		if ospfv3 != nil && !ospfv3.Disable {
 			for _, area := range ospfv3.Areas {
 				if area == nil {
 					continue
 				}
 				for _, iface := range area.Interfaces {
-					if iface != nil {
+					if iface != nil && !iface.Disable {
 						add(scope, instance, global, "ospf3", iface.Name)
 					}
 				}
 			}
 		}
-		if rip != nil {
+		if rip != nil && !rip.Disable {
 			for _, ref := range rip.Interfaces {
 				add(scope, instance, global, "rip", ref)
 			}
@@ -196,9 +198,9 @@ func collectProtocolInterfaceRefs(cfg *Config) []protocolIfaceRef {
 				add(scope, instance, global, "rip", ref)
 			}
 		}
-		if isis != nil {
+		if isis != nil && !isis.Disable {
 			for _, iface := range isis.Interfaces {
-				if iface != nil {
+				if iface != nil && !iface.Disable {
 					add(scope, instance, global, "isis", iface.Name)
 				}
 			}

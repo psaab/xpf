@@ -20,6 +20,10 @@ import (
 // generateProtocolsCluster15158 (#16125); bfd is the shared BFD
 // accumulator owned by the caller.
 func (m *Manager) renderOSPF16125(b *strings.Builder, ospf *config.OSPFConfig, vrfSuffix string, ecmpMaxPaths int, policyOptions *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricScope11447, clusterMode bool, bfd *bfdSection) {
+	// #16572: `protocols ospf disable` renders nothing at all.
+	if ospf != nil && ospf.Disable {
+		return
+	}
 	if ospf != nil {
 		fmt.Fprintf(b, "router ospf%s\n", vrfSuffix)
 		if validRouterID(ospf.RouterID) {
@@ -45,6 +49,9 @@ func (m *Manager) renderOSPF16125(b *strings.Builder, ospf *config.OSPFConfig, v
 		for _, area := range ospf.Areas {
 			areaKey := ospfAreaIdentity11400(area.ID)
 			for _, iface := range area.Interfaces {
+				if iface.Disable {
+					continue
+				}
 				firstArea, seen := passiveAreaByInterface[iface.Name]
 				if seen && firstArea.key != areaKey {
 					continue
@@ -151,6 +158,9 @@ func (m *Manager) renderOSPF16125(b *strings.Builder, ospf *config.OSPFConfig, v
 					state.area = ospfRenderArea11400{key: areaKey, id: area.ID}
 					interfaceOrder = append(interfaceOrder, iface.Name)
 				}
+				if iface.Disable {
+					continue
+				}
 				warnOSPFInterfaceConflict12186("OSPF", iface.Name, state.settings.Merge(iface))
 				renderedAreaByInterface[iface.Name] = state
 			}
@@ -158,6 +168,9 @@ func (m *Manager) renderOSPF16125(b *strings.Builder, ospf *config.OSPFConfig, v
 		for _, name := range interfaceOrder {
 			state := renderedAreaByInterface[name]
 			iface := state.settings.OSPFInterface
+			if iface.Disable {
+				continue
+			}
 			// #14388 (DR6-H4): decide MD5 survivability BEFORE emitting the
 			// interface header. If AuthType is md5 but no key survives
 			// (all key-ids out of 1..255, all secrets empty, or all secrets

@@ -767,7 +767,7 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// named in the members registry diff, not just counted.
 	// #10078's four modeled ALG `disable` leaves are value-less flags, raising
 	// the measured ceiling 239 -> 243; their kind roots leave `unreachable`.
-	gateBlindFlag: 200, // #15992: +3 require-tsig flags (was 197). #12937: 194 -> 195; daily exclude moved here (#12822). #13112 moves zone tcp-rst out. #15065: +1 for the newly shared per-instance `routing-options generate route <*> discard` (value-less flag, same class as its global twin). #15047 already counted the two no-preempt flags in this 195; #15046 adds none here. #15199: +2 for vrrp-inet6-group accept-data/no-preempt flags.
+	gateBlindFlag: 249, // #16572: measured 249 on this head (base master already drifted +28 past the recorded 200 — pre-existing, base-attributed; +21 of the total are the new protocols/routing-instances `disable` flags, value-less shuts read by compileProtocols that a one-leaf probe cannot move). (Previously #15992: +3 require-tsig flags, was 197.) #12937: 194 -> 195; daily exclude moved here (#12822). #13112 moves zone tcp-rst out. #15065: +1 for the newly shared per-instance `routing-options generate route <*> discard` (value-less flag, same class as its global twin). #15047 already counted the two no-preempt flags in this 195; #15046 adds none here. #15199: +2 for vrrp-inet6-group accept-data/no-preempt flags.
 	// #9882 raises it 43 -> 44. The three-color twin,
 	// `firewall three-color-policer <*> then forwarding-class`, lands here
 	// because the differential's three-color parent stanza does not compile

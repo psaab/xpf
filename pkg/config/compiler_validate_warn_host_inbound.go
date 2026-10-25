@@ -44,6 +44,10 @@ func hostInboundAdmitsRoutingProtocol(protocols []string, token string) bool {
 // are unicast (no multicast group) and out of scope; PIM is unmanaged today
 // (docs/feature-gaps.md) so it has no managed source to cross-check.
 //
+// #16572: a disabled protocol (whole-protocol `disable`) or a disabled
+// OSPF/OSPFv3 interface is not enabled at all, so it is skipped here
+// exactly as in the FRR renderer — it must not demand admission.
+//
 // #16565: an effectively passive OSPF/OSPFv3 interface sends no hellos and
 // forms no adjacency, so there is no host-bound multicast for the gate to
 // isolate and it needs no host-inbound token. OSPFv2 effective passivity is
@@ -105,7 +109,7 @@ func validateHostInboundManagedRoutingMismatch(cfg *Config) []string {
 	}
 	collect := func(instance string, ospf *OSPFConfig, ospfv3 *OSPFv3Config, rip *RIPConfig) []managedRP {
 		var out []managedRP
-		if ospf != nil {
+		if ospf != nil && !ospf.Disable {
 			active := make(map[string]bool)
 			var order []string
 			note := func(name string, isActive bool) {
@@ -121,7 +125,7 @@ func validateHostInboundManagedRoutingMismatch(cfg *Config) []string {
 					continue
 				}
 				for _, i := range a.Interfaces {
-					if i == nil || i.Name == "" {
+					if i == nil || i.Name == "" || i.Disable {
 						continue
 					}
 					if i.Name == "all" {
@@ -142,7 +146,7 @@ func validateHostInboundManagedRoutingMismatch(cfg *Config) []string {
 				out = append(out, managedRP{"ospf", "ospf", instance, ifs})
 			}
 		}
-		if ospfv3 != nil {
+		if ospfv3 != nil && !ospfv3.Disable {
 			active := make(map[string]bool)
 			var order []string
 			note := func(name string, isActive bool) {
@@ -156,7 +160,7 @@ func validateHostInboundManagedRoutingMismatch(cfg *Config) []string {
 					continue
 				}
 				for _, i := range a.Interfaces {
-					if i == nil || i.Name == "" {
+					if i == nil || i.Name == "" || i.Disable {
 						continue
 					}
 					if i.Name == "all" {
@@ -176,7 +180,7 @@ func validateHostInboundManagedRoutingMismatch(cfg *Config) []string {
 				out = append(out, managedRP{"ospf3", "ospf3", instance, ifs})
 			}
 		}
-		if rip != nil && len(rip.Interfaces) > 0 {
+		if rip != nil && !rip.Disable && len(rip.Interfaces) > 0 {
 			out = append(out, managedRP{"rip", "rip", instance, append([]string(nil), rip.Interfaces...)})
 		}
 		return out

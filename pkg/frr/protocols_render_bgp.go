@@ -22,6 +22,10 @@ import (
 // validNeighbors is the single renderable-neighbor set computed by
 // the caller pre-pass, and bfd is the shared BFD accumulator.
 func (m *Manager) renderBGP16125(b *strings.Builder, bgp *config.BGPConfig, validNeighbors []*config.BGPNeighbor, vrfName, vrfSuffix string, ecmpMaxPaths int, policyOptions *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricScope11447, clusterMode bool, bfd *bfdSection) {
+	// #16572: `protocols bgp disable` renders no `router bgp` at all.
+	if bgp != nil && bgp.Disable {
+		return
+	}
 	if bgp != nil && bgp.LocalAS > 0 {
 		fmt.Fprintf(b, "router bgp %d%s\n", bgp.LocalAS, vrfSuffix)
 		// #14584: FRR bgpd defaults to `bgp ebgp-requires-policy`

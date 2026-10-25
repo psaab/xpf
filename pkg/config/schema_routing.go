@@ -381,11 +381,19 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 			validator:     ValidateOSPFReferenceBandwidth,
 			placeholder:   "<bandwidth>", children: nil},
 		"passive": {desc: "Passive mode", children: nil},
+		// #16572: whole-protocol shut. Modelled (compiler sets
+		// OSPFConfig.Disable; FRR renders no `router ospf`) so the
+		// statement stops drawing the #10707 open-world advisory.
+		"disable": {desc: "Disable OSPF", children: nil},
 		"export":  {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
 		"area": {desc: "OSPF area", args: 1, placeholder: "<area-id>", keyValidator: ValidateOSPFArea, children: map[string]*schemaNode{
 			"interface": {desc: "Interface", args: 1, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", children: map[string]*schemaNode{
 				"passive":    {desc: "Passive interface", children: nil},
 				"no-passive": {desc: "Non-passive interface", children: nil},
+				// #16572: interface-level shut (the `interface all;
+				// interface fxp0.0 disable` idiom). Compiler sets
+				// OSPFInterface.Disable; FRR renders no activation.
+				"disable": {desc: "Disable OSPF on this interface", children: nil},
 				"interface-type": {desc: "Interface type", args: 1, placeholder: "<type>",
 					// #8481: typed. The token is written VERBATIM into the FRR managed
 					// section (`ip ospf network %s`), and one line vtysh rejects fails
@@ -452,9 +460,13 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 	"ospf3": {desc: "OSPFv3 configuration", children: map[string]*schemaNode{
 		"router-id": {desc: "Router ID", args: 1, placeholder: "<address>", children: nil},
 		"export":    {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
+		// #16572: whole-protocol shut (OSPFv3Config.Disable).
+		"disable": {desc: "Disable OSPFv3", children: nil},
 		"area": {desc: "OSPFv3 area", args: 1, placeholder: "<area-id>", keyValidator: ValidateOSPFArea, children: map[string]*schemaNode{
 			"interface": {desc: "Interface", args: 1, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", children: map[string]*schemaNode{
-				"passive":             {desc: "Passive interface", children: nil},
+				"passive": {desc: "Passive interface", children: nil},
+				// #16572: interface-level shut (OSPFv3Interface.Disable).
+				"disable":             {desc: "Disable OSPFv3 on this interface", children: nil},
 				"cost":                {desc: "Interface cost", args: 1, valueType: ValueInteger, placeholder: "<cost>", validator: ValidateInteger(1, 65535), children: nil},
 				"hello-interval":      {desc: "Hello interval (seconds)", args: 1, valueType: ValueInteger, placeholder: "<seconds>", validator: ValidateInteger(1, 65535), children: nil},
 				"dead-interval":       {desc: "Dead interval (seconds)", args: 1, valueType: ValueInteger, placeholder: "<seconds>", validator: ValidateInteger(1, 65535), children: nil},
@@ -486,9 +498,11 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 		}},
 	}},
 	"bgp": {desc: "BGP configuration", children: map[string]*schemaNode{
-		"local-as":         {desc: "Local AS number", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
-		"router-id":        {desc: "Router ID", args: 1, placeholder: "<address>", children: nil},
-		"cluster-id":       {desc: "Cluster ID", args: 1, valueType: ValueIPAddress, valueDesc: "Route-reflector cluster-id (IPv4 dotted-quad, or 32-bit integer 1..4294967295)", valueExamples: []string{"10.0.0.1", "1"}, validator: ValidateBGPClusterID, placeholder: "<id>", children: nil},
+		"local-as":   {desc: "Local AS number", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
+		"router-id":  {desc: "Router ID", args: 1, placeholder: "<address>", children: nil},
+		"cluster-id": {desc: "Cluster ID", args: 1, valueType: ValueIPAddress, valueDesc: "Route-reflector cluster-id (IPv4 dotted-quad, or 32-bit integer 1..4294967295)", valueExamples: []string{"10.0.0.1", "1"}, validator: ValidateBGPClusterID, placeholder: "<id>", children: nil},
+		// #16572: whole-protocol shut (BGPConfig.Disable).
+		"disable":          {desc: "Disable BGP", children: nil},
 		"graceful-restart": {desc: "Graceful restart", children: nil},
 		"log-updown":       {desc: "Log up/down events", children: nil},
 		"multipath": {desc: "Multipath", children: map[string]*schemaNode{
@@ -504,12 +518,15 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 		"export": {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
 		"import": {desc: "Import policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
 		"group": {desc: "BGP group", args: 1, placeholder: "<group-name>", children: map[string]*schemaNode{
-			"type":               {desc: "BGP group type (internal | external)", args: 1, placeholder: "<type>", valueType: ValueEnumOf, valueDesc: "BGP group type (internal | external)", valueExamples: []string{"internal", "external"}, validator: ValidateBGPGroupType, children: nil},
-			"peer-as":            {desc: "Peer AS number", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
-			"local-as":           {desc: "Local AS number for this peering", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
-			"local-address":      {desc: "Local address (BGP update-source)", args: 1, valueType: ValueIPAddress, placeholder: "<address>", validator: ValidateBGPLocalAddress, children: nil},
-			"hold-time":          {desc: "Hold time (seconds)", args: 1, valueType: ValueInteger, placeholder: "<seconds>", validator: ValidateBGPHoldTime, children: nil},
-			"passive":            {desc: "Passive mode (do not initiate connections)", children: nil},
+			"type":          {desc: "BGP group type (internal | external)", args: 1, placeholder: "<type>", valueType: ValueEnumOf, valueDesc: "BGP group type (internal | external)", valueExamples: []string{"internal", "external"}, validator: ValidateBGPGroupType, children: nil},
+			"peer-as":       {desc: "Peer AS number", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
+			"local-as":      {desc: "Local AS number for this peering", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
+			"local-address": {desc: "Local address (BGP update-source)", args: 1, valueType: ValueIPAddress, placeholder: "<address>", validator: ValidateBGPLocalAddress, children: nil},
+			"hold-time":     {desc: "Hold time (seconds)", args: 1, valueType: ValueInteger, placeholder: "<seconds>", validator: ValidateBGPHoldTime, children: nil},
+			"passive":       {desc: "Passive mode (do not initiate connections)", children: nil},
+			// #16572: group-level shut, inherited by its neighbors
+			// (BGPNeighbor.Disable).
+			"disable":            {desc: "Disable this BGP group", children: nil},
 			"description":        {desc: "Description", args: 1, scalar: true, placeholder: "<text>", children: nil},
 			"multihop":           {desc: "Multihop TTL", args: 1, valueType: ValueInteger, placeholder: "<ttl>", validator: ValidateInteger(1, 255), children: nil},
 			"export":             {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
@@ -549,12 +566,14 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 				"multiplier":       {desc: "Multiplier", args: 1, valueType: ValueInteger, placeholder: "<multiplier>", validator: ValidateInteger(2, 255), children: nil},
 			}},
 			"neighbor": {desc: "BGP neighbor", args: 1, placeholder: "<address>", keyValueType: ValueIPAddress, keyValueDesc: "BGP neighbor IP address (bare IPv4/IPv6, no prefix, no zone)", keyValueExamples: []string{"192.0.2.1", "2001:db8::1"}, keyValidator: ValidateBGPNeighborAddress, children: map[string]*schemaNode{
-				"description":            {desc: "Description", args: 1, scalar: true, placeholder: "<text>", children: nil},
-				"peer-as":                {desc: "Peer AS number", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
-				"local-as":               {desc: "Local AS number for this peering", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
-				"local-address":          {desc: "Local address (BGP update-source)", args: 1, valueType: ValueIPAddress, placeholder: "<address>", validator: ValidateBGPLocalAddress, children: nil},
-				"hold-time":              {desc: "Hold time (seconds)", args: 1, valueType: ValueInteger, placeholder: "<seconds>", validator: ValidateBGPHoldTime, children: nil},
-				"passive":                {desc: "Passive mode (do not initiate connections)", children: nil},
+				"description":   {desc: "Description", args: 1, scalar: true, placeholder: "<text>", children: nil},
+				"peer-as":       {desc: "Peer AS number", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
+				"local-as":      {desc: "Local AS number for this peering", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
+				"local-address": {desc: "Local address (BGP update-source)", args: 1, valueType: ValueIPAddress, placeholder: "<address>", validator: ValidateBGPLocalAddress, children: nil},
+				"hold-time":     {desc: "Hold time (seconds)", args: 1, valueType: ValueInteger, placeholder: "<seconds>", validator: ValidateBGPHoldTime, children: nil},
+				"passive":       {desc: "Passive mode (do not initiate connections)", children: nil},
+				// #16572: neighbor-level shut (BGPNeighbor.Disable).
+				"disable":                {desc: "Disable this BGP neighbor", children: nil},
 				"multihop":               {desc: "Multihop TTL", args: 1, valueType: ValueInteger, placeholder: "<ttl>", validator: ValidateInteger(1, 255), children: nil},
 				"export":                 {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
 				"import":                 {desc: "Import policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
@@ -655,6 +674,8 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 		"authentication-type": {desc: "Authentication type", args: 1, placeholder: "<type>",
 			valueType: ValueEnumOf, valueDesc: "authentication type",
 			valueExamples: AuthTypeSpellings(), validator: ValidateAuthType, children: nil},
+		// #16572: whole-protocol shut (RIPConfig.Disable).
+		"disable": {desc: "Disable RIP", children: nil},
 	}},
 	"isis": {desc: "IS-IS configuration", children: map[string]*schemaNode{
 		"net": {desc: "NET address", args: 1, valueType: ValueIdentifier, placeholder: "<net-address>", validator: ValidateISISNET, children: nil},
@@ -670,6 +691,8 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 			valueType: ValueEnumOf, valueDesc: "IS-IS level",
 			valueExamples: ISISLevelSpellings(), validator: ValidateISISLevel, children: nil},
 		"export": {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
+		// #16572: whole-protocol shut (ISISConfig.Disable).
+		"disable": {desc: "Disable IS-IS", children: nil},
 		"interface": {desc: "Interface", args: 1, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", children: map[string]*schemaNode{
 			// #8450: the PER-INTERFACE circuit type. Typed so a value the FRR
 			// renderer cannot express is rejected at commit instead of leaving
@@ -679,6 +702,8 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 				valueType: ValueEnumOf, valueDesc: "IS-IS interface level",
 				valueExamples: ISISCircuitTypeSpellings(), validator: ValidateISISCircuitType, children: nil},
 			"passive": {desc: "Passive interface", children: nil},
+			// #16572: interface-level shut (ISISInterface.Disable).
+			"disable": {desc: "Disable IS-IS on this interface", children: nil},
 			// #11823: FRR defaults to wide metrics; its `isis metric` command
 			// accepts 0..16777215. Type and bound this leaf so parse failures
 			// cannot silently become Metric=0 (unset) and drop the path cost.

@@ -301,10 +301,12 @@ interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group	empt
 interfaces xpfname unit xpfarg family inet6 dad-disable	partial
 interfaces xpfname unit xpfarg family inet6 dhcpv6	partial
 interfaces xpfname unit xpfarg family inet6 mtu	partial
+protocols bgp disable	empty
 protocols bgp graceful-restart	empty
 protocols bgp log-updown	empty
 protocols bgp multipath ibgp	empty
 protocols bgp multipath multiple-as	empty
+routing-instances xpfname protocols bgp disable	empty
 routing-instances xpfname protocols bgp graceful-restart	empty
 routing-instances xpfname protocols bgp log-updown	empty
 routing-instances xpfname protocols bgp multipath ibgp	empty
