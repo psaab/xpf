@@ -1,4 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
+  * NAT: static, destination and source NAT literals in IPv4-mapped
+    (::ffff:a.b.c.d) or IPv4-compatible (::a.b.c.d) form are now
+    rejected at commit (#16875). A mapped/compatible match identity
+    could never match as authored: the helper drops every IPv6
+    frame carrying such an identity at ingress before NAT, and an
+    IPv4 packet keys IPv4 and misses the IPv6-keyed entry; mapped
+    pool identities could be allocated outbound but cannot carry
+    return traffic. The spelling is rejected uniformly (no silent
+    canonicalization to IPv4). Tolerant load / peer-sync warn
+    instead of rejecting, so persisted configs still boot.
+
+xpf (0.0.0) unstable; urgency=medium
   * Userspace helper: findBinary now execs the symlink-resolved helper
     it validated and refuses replaceable path components as root
     (#16846). A planted ./xpf-userspace-dp symlink to a root-owned

@@ -201,7 +201,15 @@ func TestNAT64SourcePoolHostMaskRejectsIPv6(t *testing.T) {
 // accept a /32), but Rust's parse_nat_addr parses it as IpAddr::V6 and demands
 // /128, so a /32 is silently dropped by the dataplane, re-creating the exact
 // "commit passes, dataplane drops" gap #2173 closes. The /32 form must now be
-// REJECTED at commit; the /128 form must compile.
+// REJECTED at commit.
+//
+// #16875 supersedes the /128 half: a mapped /128 host pair used to
+// compile as an IPv6 host mapping, but the helper drops every IPv6
+// frame carrying a mapped identity at ingress before NAT (#10686),
+// so the entry can never match. It is now rejected as mapped/compat
+// by validateNATMappedCompatStrict; the family/host-mask classification
+// itself (mapped == V6, /128 is the host mask) is unchanged and is
+// still pinned by the predicate-unit table below.
 func TestStaticNATHostMaskV4MappedV6RejectsSlash32(t *testing.T) {
 	tree := buildTree(t, staticNATSet("::ffff:203.0.113.5/32", "10.0.0.5/32"))
 	_, err := CompileConfig(tree)
@@ -209,16 +217,25 @@ func TestStaticNATHostMaskV4MappedV6RejectsSlash32(t *testing.T) {
 		t.Fatal("static-NAT v4-mapped-v6 match /32 must be rejected (Rust treats it as IPv6, requires /128)")
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "::ffff:203.0.113.5/32") || !strings.Contains(msg, "host route") {
-		t.Fatalf("error must name the offending v4-mapped-v6 prefix + host-route rule, got: %v", err)
+	// Either gate may win the first-error slot (host-mask runs in the
+	// tail gates, mapped/compat in the NAT registry); both name the
+	// offending prefix. Accept the mapped/compat diagnostic too.
+	if !strings.Contains(msg, "::ffff:203.0.113.5/32") ||
+		!(strings.Contains(msg, "host route") || strings.Contains(msg, "IPv4-mapped")) {
+		t.Fatalf("error must name the offending v4-mapped-v6 prefix + host-route/mapped rule, got: %v", err)
 	}
 }
 
 func TestStaticNATHostMaskV4MappedV6AcceptsSlash128(t *testing.T) {
-	// As an IPv6 literal the host mask is /128 — must compile.
+	// #16875: the mapped /128 pair no longer compiles — it keys V6 but
+	// no mapped-identity frame survives ingress, so it can never match.
 	tree := buildTree(t, staticNATSet("::ffff:203.0.113.5/128", "::ffff:10.0.0.5/128"))
-	if _, err := CompileConfig(tree); err != nil {
-		t.Fatalf("static-NAT v4-mapped-v6 /128 host mask must compile, got: %v", err)
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatal("static-NAT v4-mapped-v6 /128 must be rejected as mapped/compat (#16875)")
+	}
+	if !strings.Contains(err.Error(), "IPv4-mapped or IPv4-compatible") {
+		t.Fatalf("error must name the mapped/compat cause, got: %v", err)
 	}
 }
 
@@ -226,6 +243,10 @@ func TestStaticNATHostMaskV4MappedV6AcceptsSlash128(t *testing.T) {
 // colon-bearing literal, so the v4-mapped-v6 form is dropped regardless of
 // mask. To4() would have wrongly accepted `::ffff:.../32` as an IPv4 pool
 // host; the commit gate must reject BOTH /32 and /128 to match the dataplane.
+// #16875: the mapped/compat gate may win the first-error slot over the
+// host-mask gate for the /128 and bare forms (both reject); the /32
+// form still reports the IPv4-host-route cause. Either diagnostic
+// names the offending address.
 func TestNAT64SourcePoolHostMaskRejectsV4MappedV6(t *testing.T) {
 	for _, a := range []string{"::ffff:203.0.113.5/32", "::ffff:203.0.113.5/128", "::ffff:203.0.113.5"} {
 		tree := buildTree(t, []string{
@@ -237,8 +258,8 @@ func TestNAT64SourcePoolHostMaskRejectsV4MappedV6(t *testing.T) {
 		if err == nil {
 			t.Fatalf("nat64 source-pool v4-mapped-v6 address %q must be rejected (parse_pool_v4 is IPv4-only, rejects colon)", a)
 		}
-		if !strings.Contains(err.Error(), "IPv4 host route") {
-			t.Fatalf("error must say IPv4 host route for %q, got: %v", a, err)
+		if !strings.Contains(err.Error(), "IPv4 host route") && !strings.Contains(err.Error(), "IPv4-mapped") {
+			t.Fatalf("error must say IPv4 host route or mapped/compat for %q, got: %v", a, err)
 		}
 	}
 }
@@ -456,8 +477,14 @@ func TestStaticNATBlockZeroLengthV6Rejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("a ::/0 <-> ::/0 block static-NAT must be rejected (remaps the entire IPv6 family 1:1)")
 	}
-	if !strings.Contains(err.Error(), "zero-length") {
-		t.Fatalf("error must cite the zero-length /0 mapping, got: %v", err)
+	// The ::/0 match is viable (subset-false), but the fd00::/0
+	// TARGET interval intersects dropped-non-exempt space, so the
+	// #16875 intersection verdict can win this first-error slot over
+	// the #5658 zero-length verdict. Either rejection is correct;
+	// the zero-length-specific wording is pinned by the v4 twin
+	// above (no mapped/compat intersection on that path).
+	if !strings.Contains(err.Error(), "zero-length") && !strings.Contains(err.Error(), "IPv4-mapped or IPv4-compatible") {
+		t.Fatalf("error must cite the zero-length /0 mapping or the mapped/compat target intersection, got: %v", err)
 	}
 }
 

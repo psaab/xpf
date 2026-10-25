@@ -65,7 +65,6 @@ func TestSourceNATPoolFamilyAccepted16600(t *testing.T) {
 		{"dual-family pool", "source-address 10.0.0.0/24", []string{"2001:db8::5", "192.0.2.5"}},
 		{"unconstrained rule v6 pool", "", []string{"2001:db8::5"}},
 		{"dual-family match v6 pool", "source-address [ 10.0.0.0/24 2001:db8:1::/64 ]", []string{"2001:db8::5"}},
-		{"v6 rule mapped pool", "source-address 2001:db8:1::/64", []string{"::ffff:192.0.2.1"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := CompileConfig(buildTree(t, snatFamilySet16600(tc.src, tc.pool...))); err != nil {
@@ -73,6 +72,20 @@ func TestSourceNATPoolFamilyAccepted16600(t *testing.T) {
 			}
 		})
 	}
+	// #16875 supersedes the "v6 rule mapped pool" acceptance: a
+	// ::ffff: pool member keys V6 (so the family gate alone passed
+	// it) and CAN be allocated outbound to a native-IPv6 source, but
+	// return traffic to the mapped identity is ingress-dropped, so
+	// it cannot carry bidirectional forwarding. It is rejected as
+	// mapped/compat; the family classification (mapped == v6) is
+	// still pinned by sourceNATRuleSingleFamily16600 below.
+	t.Run("v6 rule mapped pool rejected 16875", func(t *testing.T) {
+		_, err := CompileConfig(buildTree(t, snatFamilySet16600(
+			"source-address 2001:db8:1::/64", "::ffff:192.0.2.1")))
+		if err == nil || !strings.Contains(err.Error(), "IPv4-mapped or IPv4-compatible") {
+			t.Fatalf("mapped SNAT pool member must be rejected as mapped/compat (#16875), got: %v", err)
+		}
+	})
 }
 
 // Wildcard keywords are not valid SNAT `source-address` values on

@@ -61,6 +61,229 @@ func NATAddrFamily(ipPart string) string { return natAddrFamily(ipPart) }
 // CIDR mask before the textual family classification. See natCIDRIPPart.
 func NATCIDRIPPart(cidr string) string { return natCIDRIPPart(cidr) }
 
+// natAddrIsV4MappedOrCompat reports whether raw (a bare IP literal or a
+// CIDR; the mask, if any, is ignored) names an IPv6 address that is
+// IPv4-mapped (::ffff:a.b.c.d) or IPv4-compatible (::a.b.c.d). It
+// mirrors ipv6_addr_is_v4_mapped_or_compat in
+// userspace-dp/src/afxdp/frame/inspect.rs EXACTLY (#10686/#16875):
+// the first 96 bits are all zero (compat) or 80 zero bits + 0xffff
+// (mapped), and :: (unspecified) and ::1 (loopback) are EXCLUDED —
+// both fall inside ::/96 numerically but are legitimate local IPv6
+// identities with their own handling, never a v4 identity smuggled
+// past family-typed policy. The exclusions compare the EXACT IPv6
+// identities (netip.IPv6Unspecified / netip.IPv6Loopback), NOT
+// addr.IsLoopback(): netip's IsLoopback Unmaps first, so it also
+// reports the whole mapped 127/8 (::ffff:127.0.0.0/24) as loopback,
+// while Rust's Ipv6Addr::is_loopback is ::1 only and its ingress
+// predicate drops ::ffff:127.x.x.x as mapped. Parsing goes through
+// netip.ParseAddr, never net.IP.To4 (which folds the mapped form);
+// a zone-bearing or unparseable token is not this predicate's
+// concern and reports false. Octet compares only, no allocation
+// beyond the parse.
+func natAddrIsV4MappedOrCompat(raw string) bool {
+	addr, err := netip.ParseAddr(natCIDRIPPart(raw))
+	if err != nil || !addr.Is6() || addr.Zone() != "" {
+		return false
+	}
+	if addr == netip.IPv6Unspecified() || addr == netip.IPv6Loopback() {
+		return false
+	}
+	o := addr.As16()
+	for i := range 10 {
+		if o[i] != 0 {
+			return false
+		}
+	}
+	// compat: o[10]==o[11]==0; mapped: o[10]==o[11]==0xff.
+	return o[10] == o[11] && (o[10] == 0 || o[10] == 0xff)
+}
+
+// Interval model for prefix slots (gate review on #17697). The Rust
+// ingress predicate drops exactly two IPv6 intervals, minus two
+// exempt points:
+//
+//	D1 compat = [::, ::255.255.255.255]        (::/96)
+//	D2 mapped = [::ffff:0.0.0.0, ::ffff:255.255.255.255] (::ffff:0:0/96)
+//	exempt    = {::, ::1}
+//
+// Every prefix is first MASKED to its interval [base, base+2^(128-bits)-1]
+// (host-bits spellings judge their represented set, never the authored
+// address). Two questions are then pure interval arithmetic:
+//
+//   - MATCH slot (subset): reject iff EVERY address in the interval is
+//     dropped — interval ⊆ (D1 ∪ D2). A straddling/native-spanning
+//     interval passes, because it also matches native traffic.
+//   - ALLOCATION slot (intersection): reject iff the interval
+//     INTERSECTS dropped space minus exempt — it contains some
+//     non-exempt dropped address that could be allocated/translated
+//     onto. An interval of only exempt points ({::, ::1} = ::/127)
+//     passes both questions.
+//
+// Single hosts (bare or /128) reduce to the per-address predicate
+// natAddrIsV4MappedOrCompat for the subset question, and to the same
+// for intersection (a dropped host is a non-exempt member).
+
+// natPrefixInterval returns the masked [lo, hi] interval a bare IP or
+// CIDR represents. ok=false for unparseable/zone/non-IPv6 input.
+func natPrefixInterval(raw string) (lo, hi netip.Addr, ok bool) {
+	ipPart := natCIDRIPPart(raw)
+	addr, err := netip.ParseAddr(ipPart)
+	if err != nil || !addr.Is6() || addr.Zone() != "" {
+		return netip.Addr{}, netip.Addr{}, false
+	}
+	bits := 128
+	if slash := strings.IndexByte(raw, '/'); slash >= 0 {
+		n, err := strconv.Atoi(raw[slash+1:])
+		if err != nil || n < 0 || n > 128 {
+			return netip.Addr{}, netip.Addr{}, false
+		}
+		bits = n
+	}
+	p := netip.PrefixFrom(addr, bits).Masked()
+	lo = p.Addr()
+	hi = lo
+	if bits < 128 {
+		// hi = lo + 2^(128-bits) - 1, byte arithmetic from the tail.
+		b := hi.As16()
+		hostBits := 128 - bits
+		fullBytes := hostBits / 8
+		remBits := hostBits % 8
+		for i := 0; i < fullBytes; i++ {
+			b[15-i] = 0xff
+		}
+		if remBits > 0 {
+			b[15-fullBytes] |= byte(0xff >> (8 - remBits))
+		}
+		hi = netip.AddrFrom16(b)
+	}
+	return lo, hi, true
+}
+
+// natDroppedIntervals are D1 (compat) and D2 (mapped) as [lo, hi].
+func natDroppedIntervals() (d1lo, d1hi, d2lo, d2hi netip.Addr) {
+	d1lo = netip.IPv6Unspecified()
+	d1hi = netip.MustParseAddr("::255.255.255.255")
+	d2lo = netip.MustParseAddr("::ffff:0.0.0.0")
+	d2hi = netip.MustParseAddr("::ffff:255.255.255.255")
+	return
+}
+
+// natIntervalSubsetOfDropped reports whether [lo,hi] ⊆ D1 ∪ D2.
+// D1 and D2 are disjoint with native space between them, so a
+// contiguous interval is a subset iff it fits entirely in one.
+func natIntervalSubsetOfDropped(lo, hi netip.Addr) bool {
+	d1lo, d1hi, d2lo, d2hi := natDroppedIntervals()
+	_ = d1lo
+	_ = d2lo
+	return (lo.Compare(d1hi) <= 0 && hi.Compare(d1hi) <= 0 && lo.Compare(d1lo) >= 0) ||
+		(lo.Compare(d2lo) >= 0 && hi.Compare(d2hi) <= 0)
+}
+
+// natIntervalIntersectsDroppedNonExempt reports whether [lo,hi]
+// contains any dropped address other than the exempt :: and ::1.
+func natIntervalIntersectsDroppedNonExempt(lo, hi netip.Addr) bool {
+	_, d1hi, d2lo, d2hi := natDroppedIntervals()
+	// Intersection with D1: [lo, min(hi,d1hi)] nonempty and not
+	// solely within {::, ::1} — i.e. its top exceeds ::1.
+	if lo.Compare(d1hi) <= 0 {
+		top := hi
+		if top.Compare(d1hi) > 0 {
+			top = d1hi
+		}
+		if top.Compare(netip.IPv6Loopback()) > 0 {
+			return true
+		}
+	}
+	// Intersection with D2 (no exempt points inside mapped space).
+	if lo.Compare(d2hi) <= 0 && hi.Compare(d2lo) >= 0 {
+		return true
+	}
+	return false
+}
+
+// natPrefixContainsV4MappedOrCompat is the ALLOCATION-slot question:
+// does the represented interval intersect dropped-non-exempt space?
+// For SNAT/DNAT pool members and translation prefixes (values
+// expanded into individual identities). NOT for match selectors.
+func natPrefixContainsV4MappedOrCompat(raw string) bool {
+	lo, hi, ok := natPrefixInterval(raw)
+	if !ok {
+		return false
+	}
+	return natIntervalIntersectsDroppedNonExempt(lo, hi)
+}
+
+// natPrefixBroadContainsV4MappedOrCompat is the BIDIRECTIONAL-
+// external intersection question with the broad-external scope
+// (gate5 direction (a) on #17697): identical to the allocation
+// intersection EXCEPT that an external interval spanning at least
+// a /64 (bits <= 64 — the documented subnet-translation widths,
+// NPTv6 /48+/64 and static block pairs) is treated as a partial-
+// viability selector rather than a rooted translation block: it
+// is rejected on intersection only when it is ALSO subset (fully
+// dropped — already covered by the subset question, kept here for
+// a single call), while narrower rooted blocks (/95-/127) reject
+// on any intersection. Rationale: a /64-or-broader external paired
+// with a native internal maps every internal host across the
+// whole external interval including its native population — the
+// translation is partially viable exactly like the broad match
+// selectors this gate deliberately keeps — whereas a narrow
+// rooted block's reverse population lives inside its small
+// interval, so an intersecting narrow block can strand its hosts
+// in dropped space with no native remainder in the block. The
+// broad scope also keeps ::/0 externals from pre-empting the
+// #6659 cardinality first-error for multi-prefix rules.
+func natPrefixBroadContainsV4MappedOrCompat(raw string) bool {
+	lo, hi, ok := natPrefixInterval(raw)
+	if !ok {
+		return false
+	}
+	if !natIntervalIntersectsDroppedNonExempt(lo, hi) {
+		return false
+	}
+	// Determine the prefix width from the interval size: count
+	// trailing 0xff-equivalent host bits via lo/hi comparison —
+	// simpler: recompute bits from the raw spelling.
+	bits := 128
+	if slash := strings.IndexByte(raw, '/'); slash >= 0 {
+		if n, err := strconv.Atoi(raw[slash+1:]); err == nil {
+			bits = n
+		}
+	} else {
+		return true // single dropped host: intersection == subset
+	}
+	if bits <= 64 {
+		// Broad external: reject only when fully dropped (subset).
+		return natIntervalSubsetOfDropped(lo, hi)
+	}
+	return true
+}
+
+// natPrefixIsV4MappedOrCompatOnly is the MATCH-slot question: is
+// every address in the represented interval dropped (subset of
+// D1 ∪ D2), with the exempt-only interval {::, ::1} (::/127)
+// counting as viable (it matches only exempt identities, which are
+// legitimate local selectors, not a compat smuggle)? For match
+// selectors on every NAT kind, address-book values and NAT64
+// source selectors.
+func natPrefixIsV4MappedOrCompatOnly(raw string) bool {
+	lo, hi, ok := natPrefixInterval(raw)
+	if !ok {
+		return false
+	}
+	// Exempt-only interval {::, ::1}: viable by definition.
+	if lo == netip.IPv6Unspecified() && hi == netip.IPv6Loopback() {
+		return false
+	}
+	// A single exempt host is likewise viable (address predicate
+	// already exempts it; subset arithmetic would include it in
+	// D1, so exclude explicitly).
+	if lo == hi && (lo == netip.IPv6Unspecified() || lo == netip.IPv6Loopback()) {
+		return false
+	}
+	return natIntervalSubsetOfDropped(lo, hi)
+}
+
 // isHostMaskAddress reports whether addr is a host route the static-NAT
 // dataplane can install: a bare IP (no mask) or the canonical host mask
 // (/32 for IPv4, /128 for IPv6). It mirrors EXACTLY the Rust host-mask gate

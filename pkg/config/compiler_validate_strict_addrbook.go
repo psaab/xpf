@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"sort"
 	"strings"
 )
@@ -321,13 +322,101 @@ func addressBookNameCollision(scope string, ab *AddressBook) error {
 }
 
 // validateAddressBookMappedPrefixesStrict rejects IPv4-mapped IPv6 address-book
-// values (#10688). Go's net.IP.To4 folds these prefixes into the IPv4 wire
-// array, while the userspace helper parses the colon-bearing token as IPv6 and
-// rejects the whole snapshot's wrong-family prefix. A strict commit must not
-// create that silent whole-snapshot refusal.
+// values (#10688) and mapped/compatible-only values (#16875). Go's net.IP.To4
+// folds mapped prefixes into the IPv4 wire array, while the userspace helper
+// parses the colon-bearing token as IPv6 and rejects the whole snapshot's
+// wrong-family prefix; a compat-only prefix is filed IPv6 on both sides but
+// keys an identity the helper drops at ingress before any NAT/policy match
+// (#10686), so a NAT rule resolving to it via an address-book name could
+// never match — the #16875 smuggle path. A strict commit must not
+// create either silent refusal. The mapped arm keeps FRRAddrIsMapped
+// so padded-mask spellings netip rejects still fire; the
+// mapped/compatible arm judges the entry's merged union with the
+// subset question (natIntervalSubsetOfDropped), excluding only the
+// exact :: and ::1 identities (mapped 127/8 included as dropped).
 func validateAddressBookMappedPrefixesStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
+	}
+	// Every statically enforced value of the entry is inspected:
+	// the plain Value AND the range-address / wildcard-address
+	// expansions in ExpandedPrefixes (exposed via UsableValues).
+	// Reading Value alone let a range/wildcard entry carry a compat
+	// value with Value empty past this backstop into a NAT name
+	// reference (review finding on #17697). DNS-resolved values are
+	// runtime data, not authored literals, and stay out of scope.
+	//
+	// Viability is judged on the entry's MERGED UNION, not per
+	// fragment: a native-spanning range whose CIDR cover starts in
+	// compat space (range ::2 to 2001:db8::9) still matches native
+	// traffic, so rejecting on ANY fragment is a false reject — but
+	// an exempt-only fragment (::1/128) must not excuse compat
+	// siblings either (range ::1 to ::3 is compat-only overall).
+	// Merge all fragment intervals first, then ask the subset
+	// question of the union: viable iff some merged interval is
+	// not subset-of-dropped, where an interval of ONLY exempt
+	// points ({::}, {::1}, {::,::1}) does not by itself prove
+	// viability (gate3 review on #17697). Unparseable values defer
+	// to their own gates (viable here). The mapped wire-family arm
+	// stays per-value.
+	valuesOf := func(address *Address) []string {
+		var vals []string
+		if address.Value != "" {
+			vals = append(vals, address.Value)
+		}
+		vals = append(vals, address.ExpandedPrefixes...)
+		return vals
+	}
+	bookEntryViable := func(vals []string) bool {
+		type interval struct{ lo, hi netip.Addr }
+		var ivs []interval
+		for _, v := range vals {
+			lo, hi, ok := natPrefixInterval(v)
+			if !ok {
+				return true // other gates own unparseable values
+			}
+			ivs = append(ivs, interval{lo, hi})
+		}
+		if len(ivs) == 0 {
+			return true
+		}
+		sort.Slice(ivs, func(i, j int) bool { return ivs[i].lo.Compare(ivs[j].lo) < 0 })
+		merged := []interval{ivs[0]}
+		for _, iv := range ivs[1:] {
+			last := &merged[len(merged)-1]
+			next := last.hi.Next()
+			if iv.lo.Compare(last.hi) <= 0 || (next.IsValid() && iv.lo.Compare(next) <= 0) {
+				if iv.hi.Compare(last.hi) > 0 {
+					last.hi = iv.hi
+				}
+				continue
+			}
+			merged = append(merged, iv)
+		}
+		// Track whether every merged interval is exempt-only or
+		// dropped: a union consisting SOLELY of exempt points is an
+		// accepted native selector (the :: / ::1 controls), not a
+		// never-match — it is viable in the acceptance sense, which
+		// here means "do not reject". A union mixing exempt points
+		// with dropped non-exempt members and nothing native is NOT
+		// viable (gate3 F2).
+		for _, m := range merged {
+			if m.lo.Compare(netip.IPv6Unspecified()) >= 0 && m.hi.Compare(netip.IPv6Loopback()) <= 0 {
+				continue
+			}
+			if !natIntervalSubsetOfDropped(m.lo, m.hi) {
+				return true // genuine native member: viable
+			}
+		}
+		// No native member found. Accept only when the union
+		// contains no dropped NON-EXEMPT address at all (the
+		// exempt-only union); otherwise it is compat/mapped-only.
+		for _, m := range merged {
+			if natIntervalIntersectsDroppedNonExempt(m.lo, m.hi) {
+				return false
+			}
+		}
+		return true
 	}
 	check := func(scope string, book *AddressBook) error {
 		if book == nil {
@@ -343,13 +432,31 @@ func validateAddressBookMappedPrefixesStrict(cfg *Config) error {
 		sort.Strings(names)
 		for _, name := range names {
 			address := book.Addresses[name]
-			if address != nil && FRRAddrIsMapped(address.Value) {
+			if address == nil {
+				continue
+			}
+			vals := valuesOf(address)
+			for _, v := range vals {
+				if FRRAddrIsMapped(v) {
+					return fmt.Errorf(
+						"%s address-book address %q has IPv4-mapped IPv6 prefix %q; "+
+							"the userspace snapshot builder files it in prefixes_v4, "+
+							"but the helper parses it as IPv6 and rejects the entire policy snapshot; "+
+							"use a non-mapped IPv4 or IPv6 prefix (#10688)",
+						scope, name, v)
+				}
+			}
+			// Match-selector (subset) semantics on the union: only
+			// an entry whose every enforced value is subset-of-
+			// dropped can never match. Broad native prefixes
+			// (::/0, ::/1) and native-spanning ranges compile.
+			if len(vals) > 0 && !bookEntryViable(vals) {
 				return fmt.Errorf(
-					"%s address-book address %q has IPv4-mapped IPv6 prefix %q; "+
-						"the userspace snapshot builder files it in prefixes_v4, "+
-						"but the helper parses it as IPv6 and rejects the entire policy snapshot; "+
-						"use a non-mapped IPv4 or IPv6 prefix (#10688)",
-					scope, name, address.Value)
+					"%s address-book address %q has IPv4-mapped or IPv4-compatible IPv6 prefix %q; "+
+						"the helper drops every IPv6 frame carrying such an identity at ingress "+
+						"before NAT/policy matching (#10686), so any rule resolving to it can "+
+						"never match; use a native IPv4 or IPv6 prefix (#16875)",
+					scope, name, vals[0])
 			}
 		}
 		return nil

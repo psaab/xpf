@@ -7,7 +7,7 @@ package config
 //
 // The strict SNAT gates (validateSourceNATPoolStrict,
 // validateSourceNATPoolAddressGrammarStrict, validateSourceNATPoolAddressScopeStrict,
-// validateSourceNATPoolFamilyStrict,
+// validateSourceNATPoolFamilyStrict, validateNATMappedCompatStrict (#16875),
 // validateSourceNATPersistentNoTranslationStrict, validateSourceNATAggregateCardinalityStrict,
 // validateNATPoolReferencesStrict, validateNATSourceAddressNameReferencesStrict)
 // already run inside
@@ -77,6 +77,9 @@ func validateSourceNATStrictView(cfg *Config) error {
 		return err
 	}
 	if err := validateSourceNATPoolFamilyStrict(cfg); err != nil {
+		return err
+	}
+	if err := validateNATMappedCompatStrict(cfg); err != nil {
 		return err
 	}
 	if err := validateSourceNATAggregateCardinalityStrict(cfg); err != nil {
