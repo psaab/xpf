@@ -41,6 +41,19 @@ xpf (0.0.0) unstable; urgency=medium
     v6-only and unscoped-v6 pool cases exercise pool grammar rather
     than the family gate. A narrow IPv4-only source with a v6-only
     pool (and the reverse) is still rejected at strict commit.
+  * PPTP ALG: a first-learn install refused by a permanent alias
+    collision is no longer retained as an unbounded self-retry
+    (#16609). Previously, on a single-worker helper, a PPTP server
+    reusing one call-id alias could grow the retained-install store
+    by up to 64 entries/s for the control channel's lifetime, and
+    every entry was re-installed and re-counted
+    (allocator_collisions +N/s) on the only forwarding worker each
+    second. Refusals are now classified: a self-retry is kept only
+    while a queued/pending CDN or channel forget will retire the
+    colliding association (the transient replacement case), the
+    retry walk probes without counting so a retained refusal is
+    counted once, and the store is hard-capped (256, drop-newest)
+    with an age bound equal to the association idle timeout.
   * DDNS/DHCP: the RFC 4701 device proof marker published under
     skip-existing/strict-fail to let a same-device sibling prove
     co-ownership (#14995) now has an owner and a delete path

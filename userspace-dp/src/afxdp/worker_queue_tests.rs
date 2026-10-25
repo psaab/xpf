@@ -2416,3 +2416,89 @@ fn repair_target_survives_recording_after_its_queue_prefix_drains_11360() {
     complete_session_import_repair(WORKER_ID, &ready[0]);
     assert!(!has_session_import_repair_debt(WORKER_ID));
 }
+
+/// #16609: a hostile PPTP server reusing one call-id alias with 64
+/// distinct peer call-ids on a single worker. The first reply learns;
+/// the other 63 collide. Acceptance: retention stays bounded (hard
+/// cap in general) and the refusal counter stays at 63 across every
+/// later tick — no per-second re-attempt may re-count a retained
+/// refusal. Pre-fix: collisions grew 63,126,189,... per tick.
+#[test]
+fn permanent_collision_self_retry_is_bounded_and_counted_once_16609() {
+    use crate::session::pptp_control::{
+        PendingControlSegment, PptpControlInbox,
+        fixtures_7699::outgoing_call_reply,
+    };
+    let (pac, pns): (std::net::IpAddr, std::net::IpAddr) = (
+        "198.51.100.7".parse().unwrap(),
+        "203.0.113.9".parse().unwrap(),
+    );
+    let queues = queues(1);
+    let inbox = PptpControlInbox::default();
+    let mut sessions = crate::session::SessionTable::new();
+    for i in 0..64u16 {
+        assert!(inbox.push(PendingControlSegment {
+            epoch: 0,
+            src: pac,
+            dst: pns,
+            src_port: 1723,
+            dst_port: 49152,
+            captured_ns: 10 + u64::from(i),
+            payload: outgoing_call_reply(0x1111, 0x2000 + i, 1),
+        }));
+    }
+    let learned = drain_pptp_control_inbox_for_worker(
+        &inbox, &mut sessions, Some(&queues[0]), &[], 1_000_000_000,
+    );
+    assert_eq!(learned, 1, "only the first same-alias reply learns");
+    assert_eq!(sessions.pptp().counters().allocator_collisions, 63);
+    assert!(
+        inbox.pending_call_installs_len()
+            <= crate::session::pptp_control::MAX_PENDING_CALL_INSTALLS,
+        "retention exceeds the hard cap: {}",
+        inbox.pending_call_installs_len()
+    );
+    for tick in 2..=7u64 {
+        drain_pptp_control_inbox_for_worker(
+            &inbox, &mut sessions, Some(&queues[0]), &[], tick * 1_000_000_000,
+        );
+        assert!(
+            inbox.pending_call_installs_len()
+                <= crate::session::pptp_control::MAX_PENDING_CALL_INSTALLS,
+            "tick {tick}: retention exceeds the hard cap"
+        );
+        assert_eq!(
+            sessions.pptp().counters().allocator_collisions, 63,
+            "tick {tick}: a retained retry re-counted a permanent refusal"
+        );
+    }
+}
+
+/// #16609: the retained-retry store is hard-capped before commitment
+/// and a retry past its age bound (association idle timeout) is
+/// pruned at the retry walk instead of cloned out forever.
+#[test]
+fn pending_call_installs_are_capped_and_age_pruned_16609() {
+    use crate::session::pptp::{ControlChannelId, PptpCall};
+    use crate::session::pptp_control::{
+        MAX_PENDING_CALL_INSTALLS, PptpControlInbox,
+    };
+    let (pac, pns): (std::net::IpAddr, std::net::IpAddr) = (
+        "198.51.100.7".parse().unwrap(),
+        "203.0.113.9".parse().unwrap(),
+    );
+    let control = ControlChannelId::new(pac, 1723, pns, 49152);
+    let inbox = PptpControlInbox::default();
+    for i in 0..(MAX_PENDING_CALL_INSTALLS as u16 + 64) {
+        let call = PptpCall::new(pac, 0x4000 + i, pns, 0x5000 + i);
+        inbox.record_call_install(call, control, 10, vec![77]);
+    }
+    assert_eq!(inbox.pending_call_installs_len(), MAX_PENDING_CALL_INSTALLS);
+    assert_eq!(
+        inbox.take_call_install_retries(1_000_000_000).len(),
+        MAX_PENDING_CALL_INSTALLS
+    );
+    let past_ttl = 10 + crate::session::pptp::ASSOCIATION_IDLE_TIMEOUT_NS + 2_000_000_000;
+    assert!(inbox.take_call_install_retries(past_ttl).is_empty());
+    assert_eq!(inbox.pending_call_installs_len(), 0);
+}

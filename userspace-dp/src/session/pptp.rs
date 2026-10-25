@@ -627,6 +627,49 @@ impl PptpAssociations {
         }
     }
 
+    /// #16609: does the record behind `handle` still exist?
+    pub(crate) fn has_handle(&self, handle: u32) -> bool {
+        self.by_handle.contains_key(&handle)
+    }
+
+    /// #16609: the error `install` WOULD return for `call`, without
+    /// counting it. `install`'s refusal is counted exactly once, at
+    /// the attempt; the retry classifier uses this to tell transient
+    /// from permanent without inflating the collision counters on
+    /// every retry tick.
+    pub(crate) fn install_error_for(&self, call: PptpCall) -> Option<PptpInstallError> {
+        let handle = call.handle();
+        match self.by_handle.get(&handle) {
+            Some(existing) if existing.call == call => return None,
+            Some(existing) => {
+                return Some(PptpInstallError::HandleCollision {
+                    existing: existing.call,
+                    handle,
+                });
+            }
+            None => {}
+        }
+        for (allocator, call_id) in [(call.lo, call.lo_call_id), (call.hi, call.hi_call_id)] {
+            if let Some(owner) = self
+                .by_allocator
+                .get(&(call.routing_domain, allocator, call_id))
+                && *owner != handle
+            {
+                return Some(PptpInstallError::AllocatorCollision {
+                    allocator,
+                    call_id,
+                    owner: *owner,
+                });
+            }
+        }
+        None
+    }
+
+    /// #16609: when the association behind `handle` was learned.
+    pub(crate) fn learned_ns_for_handle(&self, handle: u32) -> Option<u64> {
+        self.by_handle.get(&handle).map(|rec| rec.learned_ns)
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.by_handle.len()
     }

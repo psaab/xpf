@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use super::super::types::WorkerCommand;
-use super::super::worker_queue::{lock_recover, push_bounded};
+use super::super::worker_queue::{lock_recover, push_bounded, try_lock_recover};
 
 /// #7699: broadcast a PPTP association install to EVERY worker.
 ///
@@ -55,6 +55,95 @@ pub(in crate::afxdp) fn broadcast_pptp_install(
     (accepted, unsent_queue_ids)
 }
 
+/// #16609: retain a self-retry after a failed DIRECT local install
+/// only while its refusal is transient. Transient iff a queued or
+/// pending forget (per-call CDN / channel close, in the inbox or as
+/// a not-yet-applied worker command) will retire the colliding
+/// association, or the owner was learned strictly before the retry
+/// (a replacement whose freeing CDN is in flight — the
+/// #15251/#12133 shape). When the owner is already gone with no
+/// pending forget, or none of the above holds, the collision is
+/// permanent: drop the retry. The inbox hard cap + TTL
+/// (association idle timeout) bound every retained retry, and the
+/// retry walk probes without counting so a retained refusal is
+/// never re-counted per tick.
+fn install_collision_is_transient(
+    sessions: &crate::session::SessionTable,
+    inbox: &crate::session::pptp_control::PptpControlInbox,
+    retry: &crate::session::pptp_control::PendingCallInstall,
+    self_worker_commands: Option<&Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+) -> bool {
+    use crate::session::pptp::PptpInstallError;
+    let err = match sessions.pptp().install_error_for(retry.call) {
+        Some(e) => e,
+        None => return true,
+    };
+    let owner_still_present = match err {
+        PptpInstallError::AllocatorCollision { owner, .. } => {
+            sessions.pptp().has_handle(owner)
+        }
+        PptpInstallError::HandleCollision { handle, .. } => {
+            sessions.pptp().has_handle(handle)
+        }
+    };
+    if !owner_still_present {
+        return inbox.has_pending_forget_touching(retry);
+    }
+    if inbox.has_pending_forget_touching(retry) {
+        return true;
+    }
+    let owner_alias_pending = match err {
+        PptpInstallError::AllocatorCollision { allocator, call_id, .. } => {
+            inbox.has_pending_forget_for_alias(retry.control, allocator, call_id)
+        }
+        PptpInstallError::HandleCollision { .. } => false,
+    };
+    if owner_alias_pending {
+        return true;
+    }
+    let owner_learned_before_retry = match err {
+        PptpInstallError::AllocatorCollision { owner, .. } => sessions
+            .pptp()
+            .learned_ns_for_handle(owner)
+            .is_some_and(|ns| ns < retry.learned_ns),
+        PptpInstallError::HandleCollision { handle, .. } => sessions
+            .pptp()
+            .learned_ns_for_handle(handle)
+            .is_some_and(|ns| ns < retry.learned_ns),
+    };
+    if owner_learned_before_retry {
+        return true;
+    }
+    let mut queues: Vec<&Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+    if let Some(q) = self_worker_commands {
+        queues.push(q);
+    }
+    queues.extend(peer_worker_commands.iter());
+    // Non-blocking: the retry walk may hold the self queue.
+    queues.iter().any(|q| {
+        let Some(guard) = try_lock_recover(q) else {
+            return false;
+        };
+        guard.iter().any(|cmd| match cmd {
+            WorkerCommand::ForgetPptpCallByControl(d) => {
+                d.control == retry.control
+                    && retry.call.has_alias(d.allocator, d.call_id)
+            }
+            WorkerCommand::ForgetPptpControlChannel { control, .. } => {
+                *control == retry.control
+            }
+            WorkerCommand::ForgetPptpCall(handle) => {
+                match err {
+                    PptpInstallError::AllocatorCollision { owner, .. } => *handle == owner,
+                    PptpInstallError::HandleCollision { handle: h, .. } => *handle == h,
+                }
+            }
+            _ => false,
+        })
+    })
+}
+
 fn retry_pending_pptp_call_installs(
     inbox: &crate::session::pptp_control::PptpControlInbox,
     sessions: &mut crate::session::SessionTable,
@@ -65,32 +154,39 @@ fn retry_pending_pptp_call_installs(
 ) {
     let self_worker_queue_id = self_worker_commands.map(|queue| Arc::as_ptr(queue) as usize);
     for retry in inbox.take_call_install_retries_at(now_ns, current_epoch) {
-        // A worker's peer list excludes itself. If it was the refused
-        // recipient, preserve its queue's FIFO just as for peers: an empty
-        // queue permits a local install; otherwise append behind its backlog.
         if let Some(queue) = self_worker_commands
             && let Some(queue_id) = self_worker_queue_id
             && retry.unsent_queue_ids.contains(&queue_id)
         {
             let mut pending = lock_recover(queue);
             if pending.is_empty() {
-                match sessions
-                    .pptp_mut()
-                    .install(retry.call, retry.control, retry.learned_ns)
-                {
-                    Ok(_) => inbox.mark_call_install_sent(
-                        retry.call,
-                        retry.control,
-                        retry.learned_ns,
-                        queue_id,
-                    ),
-                    Err(e) => {
-                        // The install error does not distinguish a permanent
-                        // handle collision from an alias held until an older
-                        // teardown arrives. Retain the retry for the next
-                        // interval on any error rather than lose a transient
-                        // AllocatorCollision.
-                        debug_log!("PPTP association refused; retaining retry: {:?}", e);
+                // #16609: probe WITHOUT counting; only call the
+                // counting install when the alias has actually freed.
+                if sessions.pptp().install_error_for(retry.call).is_some() {
+                    if install_collision_is_transient(sessions, inbox, &retry, self_worker_commands, peer_worker_commands) {
+                        debug_log!("PPTP association still refused; retaining retry");
+                    } else {
+                        debug_log!("PPTP association permanently refused; dropping retry");
+                        inbox.drop_call_install(retry.call, retry.control, retry.learned_ns);
+                    }
+                } else {
+                    match sessions
+                        .pptp_mut()
+                        .install(retry.call, retry.control, retry.learned_ns)
+                    {
+                        Ok(_) => inbox.mark_call_install_sent(
+                            retry.call,
+                            retry.control,
+                            retry.learned_ns,
+                            queue_id,
+                        ),
+                        Err(e) => {
+                            if install_collision_is_transient(sessions, inbox, &retry, self_worker_commands, peer_worker_commands) {
+                                debug_log!("PPTP association refused; retaining retry: {:?}", e);
+                            } else {
+                                inbox.drop_call_install(retry.call, retry.control, retry.learned_ns);
+                            }
+                        }
                     }
                 }
             } else if push_bounded(
@@ -316,26 +412,38 @@ pub(in crate::afxdp) fn drain_pptp_control_inbox_at_epoch(
                 let (accepted, mut unsent) =
                     broadcast_pptp_install(peer_worker_commands, call, control, seg.captured_ns);
                 if local_install_failed {
-                    if let Some(queue) = self_worker_commands {
-                        let self_queue_id = Arc::as_ptr(queue) as usize;
-                        if !unsent.contains(&self_queue_id) {
-                            unsent.push(self_queue_id);
-                        }
-                    } else {
-                        // No self queue identity to retry against (test-only
-                        // drain without a self queue): record a sentinel that
-                        // no real queue matches so the retry is retained but
-                        // never misdelivered; production always passes Some.
-                        // Use usize::MAX which cannot be an Arc pointer.
-                        if !unsent.contains(&usize::MAX) {
-                            unsent.push(usize::MAX);
+                    // #16609: permanent first-learn refusals are
+                    // broadcast to peers but do NOT retain a
+                    // self-retry; transient ones keep it below.
+                    let probe = crate::session::pptp_control::PendingCallInstall {
+                        call,
+                        control,
+                        learned_ns: seg.captured_ns,
+                        epoch: seg.epoch,
+                        unsent_queue_ids: Vec::new(),
+                    };
+                    let permanent = !install_collision_is_transient(sessions, inbox, &probe, self_worker_commands, peer_worker_commands);
+                    if !permanent {
+                        if let Some(queue) = self_worker_commands {
+                            let self_queue_id = Arc::as_ptr(queue) as usize;
+                            if !unsent.contains(&self_queue_id) {
+                                unsent.push(self_queue_id);
+                            }
+                        } else {
+                            // No self queue identity (test-only drain):
+                            // sentinel no real queue matches.
+                            if !unsent.contains(&usize::MAX) {
+                                unsent.push(usize::MAX);
+                            }
                         }
                     }
                 }
                 if !local_install_failed && accepted == peer_worker_commands.len() {
                     inbox.complete_call_install_broadcast(call, control, seg.captured_ns);
-                } else {
+                } else if !unsent.is_empty() {
                     inbox.record_call_install_at(call, control, seg.captured_ns, seg.epoch, unsent);
+                } else {
+                    inbox.complete_call_install_broadcast(call, control, seg.captured_ns);
                 }
                 if !local_install_failed {
                     learned += 1;

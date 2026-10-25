@@ -72,6 +72,19 @@ pub(crate) struct PendingControlSegment {
 /// arriving after its data takes.
 pub(crate) const PENDING_CONTROL_CAPACITY: usize = 64;
 
+/// #16609: hard cap on retained install retries. Without its own cap
+/// this Vec grew by up to 64/s for a control channel's lifetime
+/// (~230k/hour) on a permanent collision. 256 retains generous
+/// headroom for genuine queue-refusal bursts while bounding
+/// per-tick retry work and memory. Drop-NEWEST on overflow.
+pub(crate) const MAX_PENDING_CALL_INSTALLS: usize = 256;
+
+/// #16609: age bound on a retained install retry, equal to the
+/// association idle timeout: past this age the colliding owner is
+/// definitionally gone (idle-expired or forgotten).
+pub(crate) const CALL_INSTALL_RETRY_TTL_NS: u64 =
+    crate::session::pptp::ASSOCIATION_IDLE_TIMEOUT_NS;
+
 /// How often the inbox is drained.
 ///
 /// Matches `SESSION_GC_INTERVAL_NS`. The drain rides the periodic work the
@@ -162,7 +175,8 @@ struct InboxInner {
     /// Per-call CDN commands refused by full worker queues.
     pending_call_forgets: Vec<PendingCallForget>,
     last_call_forget_retry_ns: u64,
-    /// PPTP installs refused by full worker queues.
+    /// PPTP installs refused by full worker queues or a transient
+    /// local collision (#16609: capped at MAX_PENDING_CALL_INSTALLS).
     pending_call_installs: Vec<PendingCallInstall>,
     last_call_install_retry_ns: u64,
 }
@@ -430,6 +444,12 @@ impl PptpControlInbox {
                 pending.unsent_queue_ids = unsent_queue_ids;
             }
         } else if !unsent_queue_ids.is_empty() {
+            // #16609: enforce the cap BEFORE committing a new entry.
+            // Drop-NEWEST: retained older retries are closer to the
+            // teardown/expiry that can free them.
+            if inner.pending_call_installs.len() >= MAX_PENDING_CALL_INSTALLS {
+                return;
+            }
             inner.pending_call_installs.push(PendingCallInstall {
                 call,
                 control,
@@ -438,6 +458,78 @@ impl PptpControlInbox {
                 unsent_queue_ids,
             });
         }
+    }
+
+    /// #16609: drop the retained install retry for exactly this
+    /// `(call, control, learned_ns)` generation, e.g. when its local
+    /// install refusal proved permanent.
+    pub(crate) fn drop_call_install(
+        &self,
+        call: crate::session::pptp::PptpCall,
+        control: crate::session::pptp::ControlChannelId,
+        learned_ns: u64,
+    ) {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        inner.pending_call_installs.retain(|pending| {
+            pending.call != call
+                || pending.control != control
+                || pending.learned_ns != learned_ns
+        });
+    }
+
+    /// #16609 test seam: how many install retries are retained.
+    #[cfg(test)]
+    pub(crate) fn pending_call_installs_len(&self) -> usize {
+        match self.inner.lock() {
+            Ok(g) => g.pending_call_installs.len(),
+            Err(poisoned) => poisoned.into_inner().pending_call_installs.len(),
+        }
+    }
+
+    /// #16609: is a CDN or channel forget that would retire an alias
+    /// of `retry.call` (or its whole channel) still awaiting delivery?
+    pub(crate) fn has_pending_forget_touching(
+        &self,
+        retry: &PendingCallInstall,
+    ) -> bool {
+        let inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        inner.pending_call_forgets.iter().any(|pending| {
+            pending.disconnect.control == retry.control
+                && retry
+                    .call
+                    .has_alias(pending.disconnect.allocator, pending.disconnect.call_id)
+        }) || inner
+            .pending_forgets
+            .iter()
+            .any(|pending| pending.control == retry.control)
+    }
+
+    /// #16609: is a CDN naming exactly `(allocator, call_id)` on this
+    /// channel (or a channel forget for it) still awaiting delivery?
+    pub(crate) fn has_pending_forget_for_alias(
+        &self,
+        control: crate::session::pptp::ControlChannelId,
+        allocator: std::net::IpAddr,
+        call_id: u16,
+    ) -> bool {
+        let inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        inner.pending_call_forgets.iter().any(|pending| {
+            pending.disconnect.control == control
+                && pending.disconnect.allocator == allocator
+                && pending.disconnect.call_id == call_id
+        }) || inner
+            .pending_forgets
+            .iter()
+            .any(|pending| pending.control == control)
     }
 
     /// Forget install retries superseded by a complete broadcast.
@@ -539,6 +631,12 @@ impl PptpControlInbox {
         }
         inner.last_call_install_retry_ns = now_ns;
         self.last_call_install_retry_atomic.store(now_ns, Ordering::Relaxed);
+        // #16609: prune retries past their age bound while the lock
+        // is held, so an expired retry is neither cloned out nor
+        // re-attempted (and its refusal never re-counted).
+        inner.pending_call_installs.retain(|pending| {
+            now_ns.saturating_sub(pending.learned_ns) <= CALL_INSTALL_RETRY_TTL_NS
+        });
         inner
             .pending_call_installs
             .iter()
