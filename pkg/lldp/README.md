@@ -66,24 +66,45 @@ Standard library + `golang.org/x/sys/unix`, plus `pkg/linuxsock` (raw-socket
 open) and `pkg/config` (the `LinuxIfName` slash->dash helper, see the
 interface-name gotcha below).
 
-## Socket lifecycle (#2035)
+## Socket lifecycle (#2035, #16669)
 
 - Each enabled interface gets one `ifSession` (`lldp.go`) holding a bound
-  RX `AF_PACKET` socket and a reused TX `AF_PACKET` socket. Sessions are
-  created in `Apply()` and tracked on the `Manager`.
-- The RX socket has **no `SO_RCVTIMEO`**: `rxLoop` blocks in `Recvfrom`
-  indefinitely. `Stop()` (which runs on the daemon shutdown critical
-  path, just before VRRP resignation) cancels the context, then
-  `close()`s every session — `shutdown(SHUT_RDWR)` + `close` — which
-  unblocks the parked `Recvfrom` immediately. This removed a 0–2s
-  read-timeout tail from shutdown. Ordering is load-bearing:
-  cancel → close fds → `wg.Wait()` (never wait before closing).
+  RX `AF_PACKET` socket, a reused TX `AF_PACKET` socket, and a wake
+  eventfd. Sessions are created in `Apply()` and tracked on the `Manager`.
+- The RX socket has **no `SO_RCVTIMEO`** and `rxLoop` never parks in a bare
+  `Recvfrom` (#16669): `recv` waits in `ppoll` on `{rxFD, wakeFD}` and only
+  calls `Recvfrom` once the RX fd is readable. `Stop()` (which runs on the
+  daemon shutdown critical path, just before VRRP resignation, and inside
+  every re-`Apply`) cancels the context, then `signalStop()`s every session
+  (one non-blocking 8-byte write to the wake eventfd), then `wg.Wait()`,
+  and only **after** the join `close()`es the sockets. Ordering is
+  load-bearing: signal → wait → close (never close before the wait).
+- The pre-#16669 design cancelled, then `shutdown(SHUT_RDWR)` + `close`d
+  the RX fd *before* waiting, claiming that unblocks a parked `Recvfrom`.
+  On Linux it does not: `shutdown` on a connectionless AF_PACKET socket
+  returns `ENOTCONN`, and `close` does not wake a syscall already parked
+  on the fd — the in-flight `Recvfrom` keeps its reference to the old file
+  description, stays blocked until a frame arrives (forever on a silent
+  link), and the freed fd number can be reused by an unrelated socket that
+  the parked `recvfrom` then reads from. Because `reconcileLLDP` runs
+  inside `applyConfigLocked` with `applySem` held, one silent LLDP link
+  wedged every later commit/rollback/HA apply, and shutdown burned the
+  full `TimeoutStopSec=20` SIGKILL path. #2035's socketpair-based test
+  could not see this: `SOCK_SEQPACKET` is connection-oriented, so
+  `shutdown` genuinely wakes its reader. The regression test is now
+  namespace-gated on real AF_PACKET/veth
+  (`TestStopSilentVsChatty16669`, `stop_wakeup_16669_test.go`): the SILENT
+  arm must return in <1s (it hung pre-fix) and the CHATTY arm is the
+  positive control (peer frame learned, Stop still prompt); a re-Apply on
+  the silent link is exercised too. After every successful `recv`,
+  `rxLoop` re-checks `ctx` before processing, so a frame that raced the
+  wake is neither learned into the dying generation's table nor looped on.
 - `rxLoop` treats `EINTR`/`EAGAIN`/`EWOULDBLOCK` from `Recvfrom` as
   transient and retries immediately — a signal forwarded through the Go
   runtime must not silently terminate neighbor discovery on a long-running
   daemon. On any **other** recv error it distinguishes shutdown from an
   operational fault: if the context is cancelled it is the expected
-  `Stop()` close-to-unblock and the loop returns; otherwise (the context
+  `Stop()` wake (`errRecvStopped`) and the loop returns; otherwise (the context
   is still live, e.g. the interface flapped down — `ENETDOWN`) the loop
   **backs off `rxErrorBackoff` (1s) and retries** rather than exiting.
   Nothing restarts `rxLoop` within a generation — it lives only for the life
@@ -94,7 +115,7 @@ interface-name gotcha below).
   old timeout-poll loop survived flaps by continuing). The
   backoff is interruptible: a concurrent `Stop()` cancels the context and
   the loop returns promptly instead of sleeping out the delay, and the
-  closed fd makes any parked `Recvfrom` return so `Stop()` stays bounded.
+  wake eventfd makes any parked `ppoll` return so `Stop()` stays bounded.
 - **Self-frame filter (`#2992`):** the RX socket is bound to `ETH_P_LLDP`,
   so the kernel loops this host's own transmitted LLDP advertisements back
   to the listener marked `PACKET_OUTGOING`. `recv` returns the
@@ -109,9 +130,11 @@ interface-name gotcha below).
 - The TX socket is opened once per interface in `newIfSession` and reused
   for every periodic advertisement (was previously opened+closed per
   frame).
-- Construction goes through the `newIfSessionFn` seam so `socket_test.go`
-  can inject a `socketpair(2)`-backed session and assert `Stop()` returns
-  promptly with a parked RX goroutine, without `CAP_NET_RAW`.
+- Construction goes through the `newIfSessionFn` seam so tests can inject
+  a session and assert `Stop()` returns promptly with a parked RX
+  goroutine; since #16669 the injected sessions carry a real wake eventfd
+  and drive the same `ppoll` path as production, and the AF_PACKET cell
+  uses real sockets in a private netns instead of a socketpair.
 - **Apply/Stop concurrency (`#5121`):** `Apply` (a config commit) and `Stop`
   (daemon shutdown) are lifecycle transitions that can run concurrently — the
   shutdown path (`pkg/daemon` `runShutdownSequence`) calls `lldpMgr.Stop()`
