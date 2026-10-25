@@ -696,7 +696,8 @@ func deviceMapStrandsManagement(cfg *config.Config, nics []presentNIC, protected
 // would strand management on next boot — converting a latent reboot-time
 // lockout into a commit-time error while the operator is still connected.
 // rollbackTarget is the config that would be restored on a confirmed-commit
-// timeout (the currently-active config); pass nil for a plain commit.
+// timeout (the currently-active config, or on a nested arm the pending
+// window's retained original target, #16668); pass nil for a plain commit.
 func (d *Daemon) deviceMapCommitPreflight(candidate, rollbackTarget *config.Config) error {
 	// Fast path: neither config engages device-map mode — nothing to check.
 	candActive := candidate != nil && candidate.Chassis.DeviceMap.Active()
@@ -741,8 +742,8 @@ func (d *Daemon) deviceMapCommitPreflight(candidate, rollbackTarget *config.Conf
 	// unconditionally (OQ-15.2 — no rollback-time abort, no split-brain).
 	if rollbackTarget != nil {
 		if reason := deviceMapStrandsManagement(rollbackTarget, nics, protectedForConfig(rollbackTarget), lifelineName); reason != "" {
-			return fmt.Errorf("commit confirmed rejected: the rollback target (current active "+
-				"config, restored on timeout) would strand management: %s", reason)
+			return fmt.Errorf("commit confirmed rejected: the rollback target "+
+				"(restored on timeout) would strand management: %s", reason)
 		}
 	}
 	return nil

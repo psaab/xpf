@@ -255,6 +255,17 @@ xpf (0.0.0) unstable; urgency=medium
     was rejected at commit. `multihop no-nexthop-change` is refused
     by name until it can be rendered (FRR `ebgp-multihop` rewrites
     the received next hop; the Junos flag retains it).
+  * Daemon/commit-confirmed: a nested `commit confirmed` (re-issuing it
+    to extend a pending window) now pre-flights the store's retained
+    original rollback target for both the appliability and device-map
+    gates (#16668). Previously both gates read the unconfirmed active
+    config, so extending a window was falsely refused whenever the
+    unconfirmed config was not yet appliable (for example it binds a
+    dynamic-address feed that has not fetched yet), with an error
+    naming a binding the timer would never restore; the true target
+    was also never re-checked at the nested arm. The gates now resolve
+    the target through `Store.RollbackTargetForArm`, and the refusal
+    wording names the rollback target rather than the active config.
   * Feeds: a feed restored with a count baseline but no usable content
     epoch now re-establishes the epoch on its first guarded install
     (#16651). Legacy count-only records, records whose epoch digest was

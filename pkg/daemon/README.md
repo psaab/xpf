@@ -261,6 +261,18 @@ UNCONFIRMED B while the store and the tail subsystems say A, with the rollback
 announced as successful. The recovery mechanism has failed to recover, which is
 the #1960 no-brick concern in its concrete form.
 
+On a **nested** arm (re-issuing `commit confirmed` while a window is already
+pending, e.g. to extend it) the store retains the ORIGINAL rollback target —
+a nested `CommitConfirmed` cancels the timer but keeps `confirmPrevCfg`
+(`store_commit.go`) — so the timer would restore that original config, not
+the unconfirmed active one. Since #16668 both this gate and the device-map
+gate resolve the target through `Store.RollbackTargetForArm` (the retained
+target when a window is pending, the active config otherwise) instead of
+reading `ActiveConfig` unconditionally. Pre-flighting the unconfirmed config
+falsely refused an extension whenever that config was not yet appliable (for
+example it binds a feed that has not fetched yet) and named a binding the
+timer would never restore, and it never re-checked the true target at all.
+
 The rollback-target refusal is deliberately narrow: only `commit confirmed` is
 subject to it. Plain `commit` remains available to make a correction permanent.
 Gating the plain path would remove the only route OFF a poisoned active config.
@@ -271,6 +283,10 @@ compiled config, so there is nothing to validate.
 Regression coverage: `rollback_target_appliable_6707_test.go` (gate behaviour
 plus an AST wiring guard that the call is reached from `commitConfirmedAndApply`
 and absent from the plain-commit entry points),
+`nested_commit_confirmed_target_16668_test.go` (a nested arm over an
+unconfirmed feed-bound config succeeds against the healthy retained target,
+and a nested arm whose retained target is unappliable is refused naming that
+target),
 `peer_snapshot_commit_confirmed_10782_test.go` (incompatible-peer refusal
 before promotion plus capable-peer and disconnected-peer controls),
 `rollback_target_mirror_9588_test.go` (one tolerant-compiled row per refusal

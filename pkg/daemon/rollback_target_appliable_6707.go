@@ -14,8 +14,9 @@ import (
 var errRollbackTargetUnappliable = errors.New("commit confirmed rollback target cannot be applied")
 
 // rollbackTargetAppliablePreflight refuses to ARM a `commit confirmed` whose
-// rollback target — the currently-active config, restored when the confirm
-// timer expires — is one the dataplane is guaranteed to refuse as a WHOLE
+// rollback target — the config restored when the confirm timer expires (the
+// currently-active config, or on a nested arm the pending window's retained
+// original target, #16668) — is one the dataplane is guaranteed to refuse as a WHOLE
 // policy snapshot, and therefore cannot become the running dataplane snapshot.
 //
 // WHY THIS IS A PRE-FLIGHT AND NOT A ROLLBACK-TIME ABORT. The rollback path
@@ -84,11 +85,11 @@ func rollbackTargetAppliablePreflight(rollbackTarget *config.Config, feedOverlay
 		more = fmt.Sprintf(" (and %d more)", len(reasons)-1)
 	}
 	return fmt.Errorf(
-		"%w: the active configuration (which `commit confirmed` would restore when the "+
+		"%w: the rollback target configuration (which `commit confirmed` would restore when the "+
 			"timer expires) is one the dataplane refuses as a WHOLE policy snapshot — %s%s — "+
 			"so the rollback would revert the configuration store without reverting "+
 			"forwarding, leaving the store and the dataplane disagreeing. Use a plain "+
-			"`commit` to make this change permanent, or repair the active configuration "+
+			"`commit` to make this change permanent, or repair the rollback target "+
 			"first (a strict `commit` reports the exact leaf)",
 		errRollbackTargetUnappliable, reasons[0], more)
 }
