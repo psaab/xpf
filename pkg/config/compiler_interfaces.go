@@ -605,11 +605,17 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 				tc := &TunnelConfig{Name: linuxName, Mode: defaultMode}
 				// Inherit from interface-level tunnel if present. Deep-copy
 				// so each per-unit tunnel owns independent backing arrays for
-				// its slice fields (Addresses / WgPeers). A shallow
+				// its slice fields (WgPeers). A shallow
 				// `*tc = *ifc.Tunnel` copies only the slice headers, so
 				// sibling units would alias the parent's backing array and a
 				// per-unit override on one unit would contaminate the others
 				// (#3898 — duplicate IP on two tunnel netdevs).
+				// cloneForUnit does NOT inherit Addresses (#16588):
+				// ifc.Tunnel.Addresses only ever holds addresses collected
+				// from earlier units WITHOUT a per-unit tunnel (appended at
+				// the bottom of this loop), so seeding from it would install
+				// those units' IPs on this unit's netdev too. This unit's own
+				// addresses are appended to unit.Tunnel below.
 				if ifc.Tunnel != nil {
 					tc = ifc.Tunnel.cloneForUnit(linuxName)
 				}

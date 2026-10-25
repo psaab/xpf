@@ -1035,8 +1035,22 @@ func (tc *TunnelConfig) String() string {
 // slice headers (ptr+len+cap), so siblings would alias the parent's
 // backing array and cross-contaminate each other's IPs / peers.
 //
-// Deep-copied fields (audit of TunnelConfig for reference types):
-//   - Addresses      []string
+// Addresses is deliberately NOT copied (#16588). The interface-level
+// tunnel has no address source of its own: its Addresses slice is only
+// ever appended to by the compiler loop (compiler_interfaces.go) with
+// the addresses of units that have NO per-unit tunnel, as those units
+// are processed. A per-unit clone therefore seeded from it would
+// inherit every earlier inheriting unit's addresses, installing the
+// same IP/prefix on several GRE/IPIP netdevs with different remote
+// endpoints depending on authored unit order. A per-unit tunnel's
+// addresses are exactly its own unit's addresses, appended by the
+// compiler after the clone, so the clone starts empty. Inheriting
+// units (unit.Tunnel == nil) still share ifc.Tunnel and its collected
+// addresses unchanged.
+//
+// Deep-copied / cleared fields (audit of TunnelConfig for reference
+// types):
+//   - Addresses      []string — cleared, see above (#16588)
 //   - WgPeers         []WgPeerConfig, and each peer's nested AllowedIPs []string
 //
 // All other fields are value types (strings, ints, uint32, uint16,
@@ -1044,9 +1058,7 @@ func (tc *TunnelConfig) String() string {
 func (tc *TunnelConfig) cloneForUnit(linuxName string) *TunnelConfig {
 	cp := *tc
 	cp.Name = linuxName
-	if tc.Addresses != nil {
-		cp.Addresses = append([]string(nil), tc.Addresses...)
-	}
+	cp.Addresses = nil
 	if tc.WgPeers != nil {
 		cp.WgPeers = make([]WgPeerConfig, len(tc.WgPeers))
 		for i, p := range tc.WgPeers {

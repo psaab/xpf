@@ -25,13 +25,24 @@ func hasStr(ss []string, want string) bool {
 }
 
 // TestPerUnitTunnelAddressesIndependent is the #3898 RED-on-revert gate for
-// the Addresses aliasing. Two per-unit tunnels on gr-0/0/0 each set their own
-// distinct address. Before the fix the per-unit inherit did a shallow
-// `*tc = *ifc.Tunnel`, which copied only the Addresses slice HEADER, so both
-// units aliased the interface-level tunnel's backing array. When each unit
-// then appended its own address into the shared spare capacity, the
-// second-processed unit overwrote the first-processed unit's slot, so unit 1
-// ended up carrying unit 2's address (a DUPLICATE IP on two tunnel netdevs).
+// the Addresses aliasing, extended for #16588. Two per-unit tunnels on
+// gr-0/0/0 each set their own distinct address. Before the #3898 fix the
+// per-unit inherit did a shallow `*tc = *ifc.Tunnel`, which copied only the
+// Addresses slice HEADER, so both units aliased the interface-level tunnel's
+// backing array. When each unit then appended its own address into the shared
+// spare capacity, the second-processed unit overwrote the first-processed
+// unit's slot, so unit 1 ended up carrying unit 2's address (a DUPLICATE IP
+// on two tunnel netdevs).
+//
+// #16588: even with independent backing arrays, cloneForUnit used to COPY
+// ifc.Tunnel.Addresses as the seed. That slice has no interface-level source
+// of its own — it only accumulates, in unit-processing order, the addresses
+// of units WITHOUT a per-unit tunnel. A later per-unit clone therefore
+// inherited every earlier inheriting unit's addresses (here the three seed
+// units 100/101/102, and in TestPerUnitTunnelDoesNotInheritEarlierUnitAddresses
+// unit 0), installing the same IP/prefix on several netdevs. The fix clears
+// Addresses in cloneForUnit; a per-unit tunnel then carries exactly its own
+// unit's addresses, asserted exactly below.
 //
 // The three seed units (100/101/102) exist only to grow the interface-level
 // tunnel's Addresses slice to len 3 / cap 4 (one-at-a-time appends double the
@@ -95,11 +106,84 @@ func TestPerUnitTunnelAddressesIndependent(t *testing.T) {
 		t.Errorf("unit 2 was contaminated with unit 1's address 10.0.1.1/30: got %v", a2)
 	}
 
+	// #16588: neither per-unit tunnel may inherit the seed addresses that
+	// accumulated onto ifc.Tunnel from units 100/101/102 (which have no
+	// per-unit tunnel). Before the fix both clones were seeded with all
+	// three. Exact slice equality pins "exactly its own address".
+	for _, seed := range []string{"10.9.0.1/30", "10.9.1.1/30", "10.9.2.1/30"} {
+		if hasStr(a1, seed) {
+			t.Errorf("unit 1 inherited seed address %s from ifc.Tunnel: got %v", seed, a1)
+		}
+		if hasStr(a2, seed) {
+			t.Errorf("unit 2 inherited seed address %s from ifc.Tunnel: got %v", seed, a2)
+		}
+	}
+	if len(a1) != 1 || a1[0] != "10.0.1.1/30" {
+		t.Errorf("unit 1 addresses = %v, want exactly [10.0.1.1/30]", a1)
+	}
+	if len(a2) != 1 || a2[0] != "10.0.2.1/30" {
+		t.Errorf("unit 2 addresses = %v, want exactly [10.0.2.1/30]", a2)
+	}
+	// The inheriting (no-stanza) units' addresses still belong to the
+	// shared interface-level tunnel device.
+	if got := addrList(ifc.Tunnel); len(got) != 3 {
+		t.Errorf("interface tunnel addresses = %v, want the 3 seed addresses", got)
+	}
+
 	// The two units must not share a backing array at all: mutating one must
 	// not be observable in the other. (Independent from the content check
 	// above; catches a partial fix that clones one field but keeps aliasing.)
 	if len(a1) > 0 && len(a2) > 0 && &a1[0] == &a2[0] {
 		t.Error("unit 1 and unit 2 tunnel Addresses share the same backing array")
+	}
+}
+
+// TestPerUnitTunnelDoesNotInheritEarlierUnitAddresses is the #16588
+// acceptance shape in natural authored order: unit 0 has no per-unit
+// tunnel (its 10.1.0.1/30 lands on ifc.Tunnel, device gr-0-0-0) and units
+// 1 and 2 each have their own tunnel stanza and address. Before the fix,
+// units 1 and 2 cloned ifc.Tunnel AFTER unit 0's address was appended, so
+// gr-0-0-0u1 and gr-0-0-0u2 also carried 10.1.0.1/30. After the fix:
+// u1=[10.2.0.1/30], u2=[10.3.0.1/30], and the interface tunnel keeps only
+// unit 0's address on gr-0-0-0.
+func TestPerUnitTunnelDoesNotInheritEarlierUnitAddresses(t *testing.T) {
+	cmds := []string{
+		"set interfaces gr-0/0/0 tunnel source 192.0.2.1",
+		"set interfaces gr-0/0/0 tunnel destination 192.0.2.2",
+		"set interfaces gr-0/0/0 unit 0 family inet address 10.1.0.1/30",
+		"set interfaces gr-0/0/0 unit 1 tunnel source 198.51.100.1",
+		"set interfaces gr-0/0/0 unit 1 tunnel destination 198.51.100.2",
+		"set interfaces gr-0/0/0 unit 1 family inet address 10.2.0.1/30",
+		"set interfaces gr-0/0/0 unit 2 tunnel source 203.0.113.1",
+		"set interfaces gr-0/0/0 unit 2 tunnel destination 203.0.113.2",
+		"set interfaces gr-0/0/0 unit 2 family inet address 10.3.0.1/30",
+	}
+	cfg, err := CompileConfig(buildTree(t, cmds))
+	if err != nil {
+		t.Fatalf("CompileConfig: %v", err)
+	}
+	ifc := cfg.Interfaces.Interfaces["gr-0/0/0"]
+	if ifc == nil || ifc.Tunnel == nil {
+		t.Fatal("gr-0/0/0 interface tunnel not found")
+	}
+	if got := addrList(ifc.Tunnel); len(got) != 1 || got[0] != "10.1.0.1/30" {
+		t.Errorf("interface tunnel addresses = %v, want exactly [10.1.0.1/30] on gr-0-0-0", got)
+	}
+	u1, u2 := ifc.Units[1], ifc.Units[2]
+	if u1 == nil || u1.Tunnel == nil || u2 == nil || u2.Tunnel == nil {
+		t.Fatal("per-unit tunnels for units 1/2 not found")
+	}
+	if u1.Tunnel.Name != "gr-0-0-0u1" || u2.Tunnel.Name != "gr-0-0-0u2" {
+		t.Errorf("per-unit devices = %q/%q, want gr-0-0-0u1/gr-0-0-0u2", u1.Tunnel.Name, u2.Tunnel.Name)
+	}
+	if u1.Tunnel.Destination != "198.51.100.2" || u2.Tunnel.Destination != "203.0.113.2" {
+		t.Errorf("per-unit destinations = %q/%q, fixture remotes not distinct", u1.Tunnel.Destination, u2.Tunnel.Destination)
+	}
+	if got := addrList(u1.Tunnel); len(got) != 1 || got[0] != "10.2.0.1/30" {
+		t.Errorf("unit 1 addresses = %v, want exactly [10.2.0.1/30] (10.1.0.1/30 must not leak from unit 0)", got)
+	}
+	if got := addrList(u2.Tunnel); len(got) != 1 || got[0] != "10.3.0.1/30" {
+		t.Errorf("unit 2 addresses = %v, want exactly [10.3.0.1/30] (10.1.0.1/30 must not leak from unit 0)", got)
 	}
 }
 
@@ -293,7 +377,9 @@ func TestPerUnitTunnelSingleUnitAndNoOverrideStillInherit(t *testing.T) {
 // directly, including the nested per-peer AllowedIPs slice that the compile
 // paths above do not mutate in place. Mutating the clone's slices (append into
 // spare capacity, in-place element overwrite) must leave the original
-// completely untouched.
+// completely untouched. #16588: the clone's Addresses start EMPTY — the
+// original's accumulated addresses belong to other units and must not be
+// seeded onto this unit's netdev.
 func TestTunnelConfigCloneForUnitDeepCopy(t *testing.T) {
 	orig := &TunnelConfig{
 		Name:        "gr-0-0-0",
@@ -316,14 +402,17 @@ func TestTunnelConfigCloneForUnitDeepCopy(t *testing.T) {
 		t.Errorf("clone mutated original Name: %q", orig.Name)
 	}
 
-	// Mutate the clone's Addresses: append (into spare cap) + in-place set.
+	// #16588: the clone must not inherit the original's Addresses.
+	if len(clone.Addresses) != 0 {
+		t.Errorf("clone inherited Addresses %v, want empty (#16588: per-unit tunnels start with no addresses)", clone.Addresses)
+	}
+	// Mutate the clone's Addresses: appending its own must not leak back.
 	clone.Addresses = append(clone.Addresses, "10.9.9.9/30")
-	clone.Addresses[0] = "255.255.255.255/32"
 	if hasStr(orig.Addresses, "10.9.9.9/30") {
 		t.Errorf("clone Addresses append leaked into original: %v", orig.Addresses)
 	}
-	if orig.Addresses[0] != "10.1.0.1/30" {
-		t.Errorf("clone Addresses in-place write leaked into original: %v", orig.Addresses)
+	if len(orig.Addresses) != 2 || orig.Addresses[0] != "10.1.0.1/30" {
+		t.Errorf("clone Addresses mutation changed original: %v", orig.Addresses)
 	}
 
 	// Mutate the clone's WgPeers and the nested AllowedIPs.
