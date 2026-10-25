@@ -84,7 +84,7 @@ const keaDHCPDisableMaxPeriod = 300
 // self-inflicted outage, so bound the pathological case, not the headroom.
 const maxKeaResponseBytes = 64 << 20
 
-// SyncLease is ONE active DHCP-server lease in the cluster-portable form
+// SyncLease is ONE DHCP-server lease (active or declined) in the cluster-portable form
 // replicated to the peer. It is deliberately a flat, family-tagged record (no
 // pointers, copy-by-value) so it can be encoded on the sync wire and held in
 // the standby's process memory exactly like peerIPsecSAs.
@@ -127,7 +127,7 @@ type SyncLease struct {
 	// pre-#5073 behavior.
 	PreferredRemaining int
 
-	State int // Kea lease state (0=default/active)
+	State int // Kea lease state (0=default/active, 1=declined; 2 never synced)
 }
 
 // LeaseScopeAuthority proves which RG serves a canonical pool subnet in a lease
@@ -200,6 +200,9 @@ const maxSyncLeaseLifetime = 5 * 365 * 24 * 60 * 60 // 5 years, in seconds
 // socket seed, and the memfile pre-seed — so the decode/seed boundary cannot
 // drift. Lifetimes clamp rather than drop: an expired row (Remaining<=0) still
 // reaches the #4871 guards, which own the drop-vs-revive disposition.
+// IsDeclined reports whether the lease is a Kea declined (state=1) row.
+func (l SyncLease) IsDeclined() bool { return l.State == keaStateDeclined }
+
 func SanitizeSyncLeaseForFamily(family int, l SyncLease) (SyncLease, bool) {
 	if l.Family != family {
 		return l, false
@@ -208,6 +211,9 @@ func SanitizeSyncLeaseForFamily(family int, l SyncLease) (SyncLease, bool) {
 		return l, false
 	}
 	if !validSyncLeasePrefixLen(l) {
+		return l, false
+	}
+	if l.State != keaStateDefault && l.State != keaStateDeclined {
 		return l, false
 	}
 	l.Hostname = stripLeaseControlChars(l.Hostname)
@@ -308,6 +314,12 @@ func clampSyncLeaseLifetime(v int) int {
 // the DDNS identity functions but is keyed on the address + identity so two
 // renewals of the same binding compare equal except for Remaining.
 func (l SyncLease) IdentityKey() string {
+	if l.IsDeclined() {
+		if l.Family == 6 {
+			return fmt.Sprintf("6|declined|%s|%s|%d", l.Address, l.LeaseType, l.PrefixLen)
+		}
+		return "4|declined|" + l.Address
+	}
 	if l.Family == 6 {
 		return fmt.Sprintf("6|%s|%s|%d|%s", l.Address, l.DUID, l.IAID, l.LeaseType)
 	}
@@ -572,11 +584,11 @@ func readSyncLeasesViaSocket(ctx context.Context, dial keaSocketDialer, socketPa
 	out := make([]SyncLease, 0, len(args.Leases))
 	for _, kl := range args.Leases {
 		l := keaLeaseToSync(kl, family, now)
-		if l.State != keaStateDefault {
-			continue // only active leases are synced
+		if l.State != keaStateDefault && l.State != keaStateDeclined {
+			continue
 		}
 		if l.Remaining <= 0 {
-			continue // already expired at read time
+			continue
 		}
 		out = append(out, l)
 	}
@@ -641,17 +653,18 @@ func (kl keaLeaseJSON) IAIDVal() uint32 {
 // epoch (Kea writes cltt+valid-lft); Remaining is computed from it on the
 // local clock, same as the socket path.
 func readSyncLeasesViaMemfile(path string, family int, now time.Time) ([]SyncLease, error) {
-	active, err := parseActiveLeases(path, family, now)
+	active, err := parseSyncLeases(path, family, now)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]SyncLease, 0, len(active))
 	for _, a := range active {
 		l := SyncLease{
-			Family:   family,
-			Address:  a.Address,
-			Hostname: a.HostName,
-			State:    keaStateDefault,
+			Family:    family,
+			Address:   a.Address,
+			Hostname:  a.HostName,
+			State:     int(a.State),
+			ValidLife: a.ValidLifetime,
 		}
 		if a.ClientFQDN != "" {
 			l.Hostname = a.ClientFQDN
@@ -954,7 +967,7 @@ func syncLeaseToKea(l SyncLease, now time.Time) keaLeaseJSON {
 		SubnetID:  l.SubnetID,
 		ValidLft:  rem,
 		Expire:    now.Unix() + int64(rem),
-		State:     keaStateDefault,
+		State:     l.State,
 		Hostname:  l.Hostname,
 		FQDNFwd:   l.FQDNFwd,
 		FQDNRev:   l.FQDNRev,
@@ -1095,12 +1108,10 @@ func (m *Manager) PreSeedMemfileMerged4(ctx context.Context, peer []SyncLease, n
 			return m.writeMemfile4ReplacingLFC(
 				m.leaseFile(4), mergeLeasesByIdentity(nil, peer, 4), now)
 		}
-		// #14730: every merged write replaces the current file with an
-		// active-only snapshot, erasing any state=1/2 tombstones it held.
-		// Stale .1/.2/.completed generations still carrying the pre-release
-		// active row would then resurrect the lease in Kea and in
-		// parseActiveLeases. Always remove them; the merged set already
-		// includes every live local lease worth preserving.
+		// #14730/#16856: merged write replaces file with active+declined
+		// snapshot; stale generations could resurrect state=2 rows, so
+		// always remove them. Declined (state=1) rows in the snapshot are
+		// preserved with state=1.
 		return m.writeMemfile4ReplacingLFC(m.leaseFile(4), mergeLeasesByIdentity(local, peer, 4), now)
 	})
 }
@@ -1482,6 +1493,20 @@ func oneOwnerPerAddress9791(rows []SyncLease) []SyncLease {
 			out = append(out, l)
 			continue
 		}
+		if declinedBeatsActive16856(l, out[i]) {
+			out[i] = l
+			continue
+		}
+		if out[i].IsDeclined() && !l.IsDeclined() {
+			// Incumbent declined: only a provably later active grant displaces it.
+			if l.ValidLife > 0 && out[i].ValidLife > 0 && (l.ValidLife-l.Remaining) < (out[i].ValidLife-out[i].Remaining) {
+				out[i] = l
+			}
+			continue
+		}
+		if l.IsDeclined() {
+			continue
+		}
 		if moreRecentGrant9791(l, out[i]) {
 			out[i] = l
 		}
@@ -1489,9 +1514,25 @@ func oneOwnerPerAddress9791(rows []SyncLease) []SyncLease {
 	return out
 }
 
-// leaseAddressKey9791 names the address a lease occupies. A v6 lease type and
-// a delegated prefix length are part of it, so an IA_PD /56 and /60 sharing a
-// base address are different occupancies.
+// declinedBeatsActive16856: a declined occupancy beats an active row for the
+// same address unless the active row is provably a later grant (both carry
+// ValidLife and its grant age is strictly smaller). Without lifetime proof
+// the declined row wins — fail-closed against re-offering a conflicting
+// address (#16856).
+func declinedBeatsActive16856(candidate, incumbent SyncLease) bool {
+	if !candidate.IsDeclined() || incumbent.IsDeclined() {
+		return false
+	}
+	if candidate.ValidLife > 0 && incumbent.ValidLife > 0 {
+		candidateAge := candidate.ValidLife - candidate.Remaining
+		incumbentAge := incumbent.ValidLife - incumbent.Remaining
+		if incumbentAge < candidateAge {
+			return false
+		}
+	}
+	return true
+}
+
 func leaseAddressKey9791(l SyncLease) string {
 	if l.Family == 6 {
 		return fmt.Sprintf("6|%s|%s|%d", l.Address, l.LeaseType, l.PrefixLen)
@@ -1499,10 +1540,6 @@ func leaseAddressKey9791(l SyncLease) string {
 	return "4|" + l.Address
 }
 
-// moreRecentGrant9791 reports whether a was granted more recently than b. The
-// time since grant at read time is ValidLife-Remaining. A row that does not
-// carry its valid lifetime (an older peer) cannot place its grant, so the pair
-// is compared by remaining lifetime instead, and the later expiry wins.
 func moreRecentGrant9791(a, b SyncLease) bool {
 	if a.ValidLife > 0 && b.ValidLife > 0 {
 		return a.ValidLife-a.Remaining < b.ValidLife-b.Remaining
@@ -1548,7 +1585,7 @@ func (m *Manager) writeMemfile4(path string, leases []SyncLease, now time.Time) 
 			csvField(l.Address), csvField(l.HWAddress), csvField(l.ClientID),
 			rem, expire, l.SubnetID,
 			boolCSV(l.FQDNFwd), boolCSV(l.FQDNRev), csvField(l.Hostname),
-			keaStateDefault)
+			l.State)
 	}
 	return m.writeMemfileAtomic(path, b.String())
 }
@@ -1602,7 +1639,7 @@ func (m *Manager) writeMemfile6(path string, leases []SyncLease, now time.Time) 
 			rem, expire, l.SubnetID, prefRem,
 			leaseType, l.IAID, prefixLen,
 			boolCSV(l.FQDNFwd), boolCSV(l.FQDNRev), csvField(l.Hostname),
-			csvField(l.HWAddress), keaStateDefault)
+			csvField(l.HWAddress), l.State)
 	}
 	return m.writeMemfileAtomic(path, b.String())
 }
@@ -1640,10 +1677,10 @@ func (m *Manager) writeMemfileAtomic(path, content string) error {
 	return writeMemfileFile(path, []byte(content), 0640, uid, gid, ok)
 }
 
-// writeMemfile4ReplacingLFC writes an active-only current file and then
+// writeMemfile4ReplacingLFC writes an active+declined current file and then
 // removes prior LFC generations. Every merged/plain pre-seed uses it
-// (#14730): the active-only snapshot erases current-file tombstones, so
-// leaving .1/.2/.completed would resurrect released/declined leases.
+// (#14730/#16856): stale generations would resurrect state=2 rows the
+// snapshot dropped.
 func (m *Manager) writeMemfile4ReplacingLFC(path string, leases []SyncLease, now time.Time) error {
 	if err := m.writeMemfile4(path, leases, now); err != nil {
 		return err

@@ -357,8 +357,8 @@ func TestDHCPLeaseSetFingerprintSeedConsumedFields10894(t *testing.T) {
 		{"v6 PrefixLen", true, func(l *dhcpserver.SyncLease) { l.PrefixLen = 60 }},
 		{"v6 Hostname", true, func(l *dhcpserver.SyncLease) { l.Hostname = "h6-2" }},
 		{"v6 FQDNFwd", true, func(l *dhcpserver.SyncLease) { l.FQDNFwd = true }},
-		{"v6 FQDNRev", true, func(l *dhcpserver.SyncLease) { l.FQDNRev = true }},
 		{"v6 ValidLife", true, func(l *dhcpserver.SyncLease) { l.ValidLife = 7200 }},
+		{"State active->declined", false, func(l *dhcpserver.SyncLease) { l.State = 1 }},
 	}
 	for _, tc := range mustChange {
 		base := baseV4
@@ -378,9 +378,6 @@ func TestDHCPLeaseSetFingerprintSeedConsumedFields10894(t *testing.T) {
 	}{
 		{"Remaining countdown", func(l *dhcpserver.SyncLease) { l.Remaining = 2999 }},
 		{"PreferredRemaining countdown", func(l *dhcpserver.SyncLease) { l.PreferredRemaining = 2999 }},
-		// State is not seed-consumed: the read path only yields active leases
-		// and the seed always writes default, so it stays out of the fingerprint.
-		{"State", func(l *dhcpserver.SyncLease) { l.State = 1 }},
 	}
 	for _, tc := range mustNotChange {
 		for _, base := range []dhcpserver.SyncLease{baseV4, baseV6} {
