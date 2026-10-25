@@ -554,6 +554,14 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 		var bgpAuthKey string
 		for _, child := range bgpChildren {
 			switch child.Name() {
+			case "hold-time":
+				// #16749: hold-time chained under a top-level flag
+				// (log-updown hold-time 9) is hoisted here by
+				// flattenChainedChildren, but BGP top level declares
+				// no hold-time leaf and no reader consumes it. Drop it
+				// explicitly; strict commit rejects the chained
+				// spelling and #10707 warns on the tolerant path.
+				continue
 			case "authentication-key":
 				bgpAuthKey = nodeVal(child)
 			case "disable":

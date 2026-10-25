@@ -375,6 +375,32 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	if childSchema.isScalarValueLeaf() && exactMatch {
 		return validateScalarValueLeaf(node, childSchema, path)
 	}
+	// #16749: a valueless flag (passive, remove-private, log-updown, ...)
+	// inside a BGP container whose compiler expands flat runs carries
+	// chained children the compiler hoists to the parent and applies.
+	// Validate those children at the parent schema — the compiler's own
+	// expanded view — so a chained typed leaf (hold-time 1) is rejected
+	// exactly as its separate-line spelling is. Unresolvable chained
+	// children stay open-world here and are warned by #10707.
+	if isValuelessFlag16749(childSchema) && len(node.Children) > 0 && isBGPFlatRunContainer16749(parent) {
+		flagPath := append(append([]string(nil), path...), keyword)
+		if err := validateChainedUnderFlag16749(node, parent, path, vc, closed); err != nil {
+			wrapped := chainedFlagError16749(flagPath, keyword, err)
+			if vc.recordTypedLeaf(wrapped) {
+				return nil
+			}
+			// In collect mode a wrapped non-typed error is returned by
+			// walkSchemaChildren's recordTypedLeaf handling; preserve
+			// the original typed error when not collected so type
+			// classification upstream is unchanged.
+			if vc.collecting() {
+				return wrapped
+			}
+			return err
+		}
+		return nil
+	}
+
 
 	// Container / named-instance node. Consume this node's identity tokens
 	// (keyword + args + compoundKey), then validate its BLOCK CHILDREN at the
