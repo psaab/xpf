@@ -213,8 +213,13 @@ func TestFirstCommitPromoteRollbackBumpsHolderEpoch15055(t *testing.T) {
 
 // TestNonFirstPromoteRollbackDoesNotBumpHolderEpoch15055 is the
 // neighbouring-behaviour control for the epoch leg: an ordinary
-// (non-first) rollback keeps the holder's authority valid — the epoch
-// advance is scoped to the first-commit candidate reset.
+// (non-first) rollback over a CLEAN candidate keeps the holder's
+// authority valid — the epoch advance is scoped to the first-commit
+// candidate reset. #16719 extends the invalidation to a non-first
+// rollback that DISCARDS a dirty candidate, but via the separate
+// rollbackDiscardGen counter, not holderEpoch: the holder did not
+// change, only its staged edits were discarded. That dirty arm is
+// pinned in commit_rollback_discard_16719_test.go.
 func TestNonFirstPromoteRollbackDoesNotBumpHolderEpoch15055(t *testing.T) {
 	dir := t.TempDir()
 	s, err := configstore.New(filepath.Join(dir, "xpf.conf"))

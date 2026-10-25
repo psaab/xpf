@@ -53,6 +53,25 @@ var ErrCommitCandidateChanged = errors.New(
 	"candidate configuration changed after the commit authorization gate priced it; " +
 		"the commit was not applied (re-issue the commit so the new candidate is adjudicated)")
 
+// ErrCommitConfirmedRolledBack is returned when a commit reaches
+// promotion after a commit-confirmed timeout rollback discarded the
+// dirty candidate the commit was authorized to promote (#16719).
+//
+// It is deliberately NOT ErrConfigHolderTurnover and NOT
+// ErrCandidateGenerationConflict. A generation conflict means
+// "re-examine and retry" — commitWithGenBinding retries it, which
+// would re-snapshot the rollback-reset candidate and promote it,
+// reporting success for a candidate the operator never staged. A
+// holder turnover means the lock changed hands. Neither is true
+// here: the same holder still holds the lock, but the staged edits
+// it authorized were rolled back and discarded. Retrying silently
+// would promote the rollback target; the operator must re-stage the
+// edits and commit again. The daemon's generation-retry loop must
+// therefore never see this wrapped as either of those sentinels.
+var ErrCommitConfirmedRolledBack = errors.New(
+	"commit-confirmed window rolled back; staged edits were discarded — " +
+		"the commit was not applied (re-stage your edits and commit again)")
+
 // commitAuthorityKind distinguishes the three states a CommitAuthority can be
 // in. The zero value is deliberately the INVALID one — see
 // ErrCommitAuthorityMissing.
@@ -116,6 +135,15 @@ type CommitAuthority struct {
 	// session can legitimately re-enter, and a wall-clock stamp cannot tell
 	// a held lock from a re-taken one.
 	epoch uint64
+	// discardGen is the store's rollbackDiscardGen observed when this
+	// authority was minted (#16719). A commit-confirmed rollback that
+	// discarded a dirty candidate advances that counter, so a mint
+	// recorded before the discard differs from the current value and
+	// verifyCommitAuthorityLocked refuses it. Only store-minted
+	// authorities (AuthorizeCommitAs) record it; directly-constructed
+	// InternalCommitter authorities leave it zero and are fenced by
+	// the daemon's PromotionStale check instead.
+	discardGen uint64
 	// gateBound records that the transport interceptor priced the
 	// candidate's group-expanded paths for gateClass (#16611) against
 	// gateCandidateGen / gateActive. verifyCommitAuthorityLocked refuses
@@ -169,6 +197,9 @@ func (a CommitAuthority) JournalPrincipal() string {
 // promotion it guards MUST be atomic, or the turnover simply moves into the gap
 // between them.
 func (s *Store) verifyCommitAuthorityLocked(a CommitAuthority) error {
+	if err := s.verifyRollbackDiscardLocked(a); err != nil {
+		return err
+	}
 	switch a.kind {
 	case authorityInternal:
 		return nil
@@ -196,6 +227,62 @@ func (s *Store) verifyCommitAuthorityLocked(a CommitAuthority) error {
 	default:
 		return ErrCommitAuthorityMissing
 	}
+}
+
+// verifyRollbackDiscardLocked refuses a store-minted authority that
+// predates a commit-confirmed rollback which discarded the dirty
+// candidate that authority was minted to promote (#16719). It runs
+// BEFORE the holder/epoch identity check so the operator sees the
+// true cause — the window rolled back and the staged edits are gone
+// — rather than a misleading holder-turnover refusal. Epoch-bound
+// authorities (holder and unheld-internal) carry the discard
+// generation recorded at mint time; directly-constructed
+// authorityInternal carries none and is covered by the daemon's
+// PromotionStale fence in commitWithGenBinding.
+//
+// The check is an inequality on the dedicated rollbackDiscardGen
+// counter, not a comparison on holderEpoch: in the #16719 shape the
+// holder never turns over, so a pre-discard mint and a post-discard
+// mint by the same holder share a holderEpoch and no ordering on
+// that counter separates them (a strict < misses the stale mint; a
+// <= wedges every later commit by that holder). The dedicated
+// counter separates them exactly — a fresh mint after the discard
+// records the new value and promotes normally.
+func (s *Store) verifyRollbackDiscardLocked(a CommitAuthority) error {
+	switch a.kind {
+	case authorityHolder, authorityInternalEpochBound:
+		if a.discardGen != s.rollbackDiscardGen {
+			return fmt.Errorf("%w (authority minted at rollback-discard generation %d, current %d)",
+				ErrCommitConfirmedRolledBack, a.discardGen, s.rollbackDiscardGen)
+		}
+	}
+	return nil
+}
+
+// RollbackDiscardGen returns the current rollback-discard generation
+// (#16719): a monotonic counter advanced on every commit-confirmed
+// rollback that discarded a dirty candidate. The daemon samples it
+// before waiting on applySem and re-checks it via PromotionStale
+// before binding a candidate generation.
+func (s *Store) RollbackDiscardGen() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.rollbackDiscardGen
+}
+
+// PromotionStale reports whether a daemon commit transaction that
+// sampled discardGen (via RollbackDiscardGen) before acquiring
+// applySem is now stale because a dirty-discarding rollback won the
+// semaphore in between (#16719). The caller holds applySem; the
+// re-check and the subsequent promotion are serialized by it, so a
+// true result means the candidate the commit examined no longer
+// exists and promoting the reset candidate would report success for
+// edits that were discarded. Equal values proceed — including the
+// common no-discard case where both are the same counter value.
+func (s *Store) PromotionStale(discardGen uint64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.rollbackDiscardGen != discardGen
 }
 
 // verifyGateBindingLocked re-adjudicates a gate-bound commit at
@@ -282,6 +369,7 @@ func (s *Store) AuthorizeCommitAs(sessionID, principal string) (CommitAuthority,
 				kind:             authorityInternalEpochBound,
 				journalPrincipal: principal,
 				epoch:            s.holderEpoch,
+				discardGen:       s.rollbackDiscardGen,
 			}, nil
 		}
 		return InternalCommitterAs(principal), nil
@@ -294,6 +382,7 @@ func (s *Store) AuthorizeCommitAs(sessionID, principal string) (CommitAuthority,
 		sessionID:        sessionID,
 		journalPrincipal: principal,
 		epoch:            s.holderEpoch,
+		discardGen:       s.rollbackDiscardGen,
 	}, nil
 }
 

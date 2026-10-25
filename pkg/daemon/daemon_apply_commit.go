@@ -119,11 +119,33 @@ const maxCommitPreflightRetries = 3
 //
 // Caller holds d.applySem. Returns the pre-commit active config (for the #4234
 // deletion-clear diff) and the compiled promoted config.
+// discardGen is the #16719 rollback-discard token sampled by the
+// caller BEFORE it waited on applySem. commitWithGenBinding re-checks
+// it against the store's current token before every promotion attempt:
+// a mismatch proves a commit-confirmed rollback that discarded the
+// dirty candidate won applySem while this commit was parked, so the
+// candidate examined here no longer exists and binding its (reset)
+// generation would promote the rollback target and report success.
+// Sampled out here, not inside, because commitWithGenBinding runs
+// with applySem already held — sampling inside would read the
+// post-rollback value and fence nothing. InternalCommitter
+// authorities carry no mint epoch, so this semaphore-level fence is
+// what covers the shell / event-engine paths; store-minted
+// authorities are additionally refused at promotion by
+// verifyRollbackDiscardLocked.
 func (d *Daemon) commitWithGenBinding(
+	discardGen uint64,
 	preflight func(cand *config.Config) error,
 	commitFn func(expectedGen uint64) (*config.Config, error),
 ) (oldActive, compiled *config.Config, err error) {
 	for attempt := 0; ; attempt++ {
+		// #16719: refuse a commit whose examined candidate was
+		// discarded by a commit-confirmed rollback while it waited
+		// on applySem. Checked before the snapshot so the retry loop
+		// below can never re-bind the reset generation and adopt it.
+		if d.store.PromotionStale(discardGen) {
+			return nil, nil, configstore.ErrCommitConfirmedRolledBack
+		}
 		cand, gen, cerr := d.store.CompileCandidateGen()
 		if cerr == nil {
 			// Run the hardware pre-flight on the exact compiled snapshot,
@@ -231,6 +253,12 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 			"system rolls back automatically unless you confirm it from a still-reachable session)")
 	}
 
+	// #16719: sample the rollback-discard token BEFORE waiting on
+	// applySem. A commit-confirmed rollback that discards the dirty
+	// candidate while this commit is parked must be visible to the
+	// fence inside commitWithGenBinding; sampling after Acquire
+	// would read the post-rollback value and fence nothing.
+	discardGen := d.store.RollbackDiscardGen()
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
 		return nil, err
 	}
@@ -281,6 +309,7 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 	// target, so the pre-flight passes nil.
 	var peerSnapshotAuth *peerSnapshotProtocolAuthorization
 	oldActive, compiled, err := d.commitWithGenBinding(
+		discardGen,
 		func(cand *config.Config) error {
 			// #5840: reject a standalone<->cluster topology change BEFORE store
 			// promotion + any dataplane mutation — the boot-only cluster runtime
@@ -931,6 +960,11 @@ func (d *Daemon) deviceMapPassiveAdmissionAlarm(synced *config.Config) {
 // commitConfirmedAndApply is the commit-confirmed analogue of
 // commitAndApply. Same atomicity guarantees.
 func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configstore.CommitAuthority, minutes int, syncPeer peerSyncPolicy) (*config.Config, error) {
+	// #16719: sample before Acquire, as in commitAndApply — a
+	// dirty-discarding rollback that wins applySem while this
+	// commit-confirmed is parked must refuse it, not let it re-arm
+	// a window over the rollback-reset candidate.
+	discardGen := d.store.RollbackDiscardGen()
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
 		return nil, err
 	}
@@ -963,6 +997,7 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 	// only under d.applySem, held here from pre-flight through the commit.
 	var peerSnapshotAuth *peerSnapshotProtocolAuthorization
 	oldActive, compiled, err := d.commitWithGenBinding(
+		discardGen,
 		func(cand *config.Config) error {
 			// #5840: same standalone<->cluster topology guard as commitAndApply,
 			// keyed on the ACTUAL HA runtime (d.cluster != nil), not the old

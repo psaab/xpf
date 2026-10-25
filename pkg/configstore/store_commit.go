@@ -1399,6 +1399,13 @@ func (s *Store) PromoteRollback(gen uint64) (prevCfg *config.Config, ok bool) {
 		return nil, false
 	}
 
+	// #16719: capture whether this rollback discards a dirty candidate
+	// BEFORE the reset below clears the flag. A commit authorized over
+	// that candidate (AuthorizeCommit before the timeout, parked on
+	// applySem) must not promote the reset candidate and report
+	// success: the staged edits it was authorized for no longer exist.
+	discardedDirty := s.dirty
+
 	s.active = s.confirmPrevTree
 	s.compiled = s.confirmPrevCfg
 	s.publishActiveLocked() // #9905: publish the new active snapshot
@@ -1407,6 +1414,18 @@ func (s *Store) PromoteRollback(gen uint64) (prevCfg *config.Config, ok bool) {
 		s.bumpCandidateGenLocked() // #5848: candidate reset on auto-rollback
 	}
 	s.dirty = false
+	if discardedDirty {
+		// Invalidate every authority minted before this discard by
+		// advancing the dedicated discard counter each such authority
+		// recorded at mint time. This extends the #15055 first-commit
+		// invalidation to the non-first dirty case its predicate
+		// excluded; a clean (non-dirty) rollback discards nothing and
+		// must not invalidate the holder (pinned by the #15055
+		// control). The counter is NOT holderEpoch: the holder did
+		// not change here, so pre- and post-discard mints by the same
+		// holder share a holderEpoch (see rollbackDiscardGen).
+		s.rollbackDiscardGen++
+	}
 	s.noteLocalActivePromotionLocked() // #9530: the timeout revert is a local promotion too
 
 	s.confirmTimer = nil
@@ -1452,8 +1471,12 @@ func (s *Store) PromoteRollback(gen uint64) (prevCfg *config.Config, ok bool) {
 		// before the timeout fired, e.g. while its daemon commit waited
 		// on applySem) fails verification at promotion instead of
 		// promoting the reset candidate under the old holder's authority.
-		// Scoped to the first-commit branch: an ordinary rollback restores
-		// a real prior config and must not invalidate the holder.
+		// Scoped to the first-commit branch: an ordinary rollback over a
+		// CLEAN candidate restores a real prior config and must not
+		// invalidate the holder. #16719: a NON-first rollback that
+		// DISCARDs a dirty candidate is invalidated separately above
+		// via the rollbackDiscardGen counter (not holderEpoch — the
+		// holder did not change, only its staged edits were discarded).
 		s.holderEpoch++
 		// Record the never-committed marker for BOTH the immediate write
 		// and the degraded-retry loop, so a failed-then-healed write still
