@@ -227,18 +227,21 @@ func TestVlanUnitMTUUntaggedSiblingOverride9837(t *testing.T) {
 		), "family mtu 1500 exceeds interface mtu 1400")
 	})
 	t.Run("lowest sibling number wins", func(t *testing.T) {
+		// #16583: the original cell's second untagged sibling (unit
+		// 1, no vlan-id) on a tagging parent is now the #15034
+		// defect and can no longer reach this gate, so the
+		// two-untagged-sibling lowest-wins shape is retired here;
+		// unit 0 at 1300 still pins the effective parent mtu. The
+		// lowest-wins rule itself stays in the validator/planner.
 		assertCommitRejects(t, flatTreeFromSets(t,
 			"set interfaces ge-0-0-2 vlan-tagging",
 			"set interfaces ge-0-0-2 mtu 1400",
 			"set interfaces ge-0-0-2 unit 0 family inet address 10.0.9.1/24",
 			"set interfaces ge-0-0-2 unit 0 family inet mtu 1300",
-			"set interfaces ge-0-0-2 unit 1 family inet address 10.0.9.2/24",
-			"set interfaces ge-0-0-2 unit 1 family inet mtu 1600",
 			"set interfaces ge-0-0-2 unit 50 vlan-id 50",
 			"set interfaces ge-0-0-2 unit 50 family inet address 172.16.50.8/24",
 			"set interfaces ge-0-0-2 unit 50 family inet mtu 1500",
 			"set security zones security-zone trust interfaces ge-0-0-2.0",
-			"set security zones security-zone trust interfaces ge-0-0-2.1",
 			"set security zones security-zone trust interfaces ge-0-0-2.50",
 		), "family mtu 1500 exceeds effective parent mtu 1300 (from untagged unit 0; interface mtu 1400)")
 	})
