@@ -194,3 +194,41 @@ func validateScreenUnknownStrict(cfg *Config) error {
 	}
 	return nil
 }
+
+// validateScreenMissingValueStrict hard-rejects a screen profile carrying
+// a numeric leaf that was authored without its value — #16571.
+//
+// The four screen families are closedWorldOpaque, so the #8597
+// valueless-leaf gate in the schema walk stops at the family boundary
+// and never visits a packed tail. compileScreen's screenNormalizeFamilies
+// then splits the tail into leaves and parseThresh reads "" as "enabled
+// without an explicit threshold", so a valueless sub-threshold committed
+// strict-clean while the braced spelling was rejected by #8597 — the
+// strict verdict depended on spelling. compileScreen now records every
+// authored-but-valueless numeric leaf on ScreenProfile.MissingValue
+// (the flood/scan/sweep `threshold` sub-leaves, the syn-flood
+// alarm/attack/source/destination-threshold and timeout leaves, and the
+// limit-session caps); this gate makes the refusal operator-visible at
+// commit. A bare `flood;`/`port-scan;`/`ip-sweep;` with NO `threshold`
+// keyword authors no numeric leaf and still arms the #3230 Junos
+// default. On the tolerant path the caller downgrades to a warning
+// (#1960 no-brick); the profile keeps the default/disabled value
+// compileScreen produced. The walk is deterministic (profiles sorted
+// by name, MissingValue in config order).
+func validateScreenMissingValueStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	for _, name := range sortedScreenNames(cfg.Security.Screen) {
+		profile := cfg.Security.Screen[name]
+		if profile == nil || len(profile.MissingValue) == 0 {
+			continue
+		}
+		return fmt.Errorf(
+			"security screen ids-option %q: `%s` declares a value and none was given — "+
+				"the compiler drops a valueless statement, so this commits clean and the "+
+				"configuration silently does not carry it (#16571)",
+			name, profile.MissingValue[0])
+	}
+	return nil
+}

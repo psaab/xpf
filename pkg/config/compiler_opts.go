@@ -2604,6 +2604,13 @@ type compileOpts struct {
 	// the dataplane never represented the leaf, so a leniently-loaded profile
 	// runs without it independently. Same doctrine as lenientFilterFromMatch.
 	lenientScreenUnknown bool
+	// lenientScreenMissingValue (#16571) downgrades the missing-value
+	// screen gate (validateScreenMissingValueStrict) to a warning on the
+	// tolerant load / peer-sync paths, mirroring lenientScreenNumeric.
+	// Strict commit rejects a screen numeric leaf authored without its
+	// number; a persisted config an older binary accepted still boots,
+	// keeping the Junos-default / disabled value compileScreen produced.
+	lenientScreenMissingValue bool
 	// lenientUnknownSecurityZoneChild11575 keeps unknown security-zone children
 	// tolerant-loadable while compileZones records a warning. When the
 	// keyword may name an enforcement control, the compiler unbinds the zone
@@ -3929,6 +3936,7 @@ func lenientCompileOpts() compileOpts {
 		lenientScreenProfileRefs:                 true,
 		lenientScreenNumeric:                     true,
 		lenientScreenUnknown:                     true,
+		lenientScreenMissingValue:                true,
 		lenientUnknownSecurityZoneChild11575:     true,
 		lenientUnknownPoliciesChild12217:         true,
 		lenientTrailingTokens:                    true,
