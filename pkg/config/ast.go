@@ -254,7 +254,32 @@ func (n *Node) KeyPath() string {
 // characters that aren't valid bare identifiers (e.g. ${node}), plus
 // non-terminal authored quotes and terminal routing-policy inline keywords
 // whose quotes keep list values distinct from clause boundaries.
+//
+// A LEAF additionally re-emits `[ ... ]` around each maximal run of keys
+// carrying bracket provenance (#16530). The hierarchical text this renders
+// is not display-only: it is the HA config-sync payload (ShowActive ->
+// SyncApply re-parses it), the rollback-slot text, and the archive/rescue
+// text, so dropping the brackets silently dropped the provenance with
+// them. For `policy-options as-path AP1 [0-9]+` the flag derived from
+// that provenance (ASPathDef.RegexUnquotedBracket, #9881) flipped to
+// false on the peer / after a rollback, so the peer strict-accepted and
+// rendered the mangled regex the primary's lenient compile omits. This
+// mirrors what FormatSetForLoadMerge already does for flat replay
+// (#10084); the flat FormatSet renderer keeps its #6668 zero-churn rule
+// and is deliberately NOT changed here. Containers are likewise
+// unchanged: their grouping is carried by the flat renderer, and a
+// container's keys are followed by `{`, not by a value the provenance
+// gates read. A gap-loss mark (#9881: tokenless brackets stripped by the
+// lexer, recorded as a bracket bit on the adjacent token) rides the same
+// bit, so it survives the same way.
 func (n *Node) QuotedKeyPath() string {
+	if n.IsLeaf && len(n.KeysBracketed) == len(n.Keys) {
+		for _, bracketed := range n.KeysBracketed {
+			if bracketed {
+				return n.quotedLeafKeyPath()
+			}
+		}
+	}
 	parts := make([]string, len(n.Keys))
 	for i, k := range n.Keys {
 		if keyNeedsAuthoredQuote(n, i) {
@@ -264,6 +289,59 @@ func (n *Node) QuotedKeyPath() string {
 		parts[i] = quoteKey(k)
 	}
 	return strings.Join(parts, " ")
+}
+
+// quotedLeafKeyPath renders a leaf known to carry bracket provenance,
+// wrapping each maximal bracketed run in `[ ... ]` so a re-parse records
+// the same KeysBracketed mask. Keys outside a run render exactly as
+// QuotedKeyPath renders them.
+func (n *Node) quotedLeafKeyPath() string {
+	parts := make([]string, 0, len(n.Keys)+2)
+	for i := 0; i < len(n.Keys); {
+		if !n.KeyBracketed(i) {
+			if keyNeedsAuthoredQuote(n, i) {
+				parts = append(parts, `"`+keyEscaper.Replace(n.Keys[i])+`"`)
+			} else {
+				parts = append(parts, quoteKey(n.Keys[i]))
+			}
+			i++
+			continue
+		}
+		run := i
+		for run < len(n.Keys) && n.KeyBracketed(run) {
+			run++
+		}
+		parts = append(parts, "[")
+		for j := i; j < run; j++ {
+			parts = append(parts, bracketedLeafKey(n, j))
+		}
+		parts = append(parts, "]")
+		i = run
+	}
+	return strings.Join(parts, " ")
+}
+
+// bracketedLeafKey renders one key inside a re-emitted `[ ... ]` group.
+// An authored-quoted key stays quoted — the quotes are what make a
+// bracketed value faithful text rather than list sugar, and dropping
+// them would flip a quoted control (`[ "65000" ]`, accepted) into the
+// unquoted form the #9881 gate rejects. An unquoted key is emitted
+// verbatim: it was lexed as one bare token, and quoteKey would wrap
+// tokens containing bracket characters (`0-9]+`, a gap-loss survivor)
+// in quotes, which re-parse as quoted and defeat the bracket bit this
+// rendering exists to preserve. A key that cannot appear as one bare
+// token at all (whitespace or a delimiter — only a hand-built node can
+// carry one) falls back to quoteKey so the token itself survives, at
+// the cost of the flag.
+func bracketedLeafKey(n *Node, i int) string {
+	k := n.Keys[i]
+	if n.KeyQuoted(i) {
+		return `"` + keyEscaper.Replace(k) + `"`
+	}
+	if strings.ContainsAny(k, " \t\r\n\";{}") {
+		return quoteKey(k)
+	}
+	return k
 }
 
 // keyNeedsAuthoredQuote reports whether key i must be re-emitted QUOTED to
