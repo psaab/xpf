@@ -14293,6 +14293,136 @@ fn challenge_suppressed_for_opening_retransmit_15947() {
     assert!(binding.tx_pipeline.pending_tx_local.is_empty());
 }
 
+fn g16502_send_syn_ports(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    screen: &mut ScreenState,
+    source: Ipv4Addr,
+    src_port: u16,
+    dst_port: u16,
+) -> BatchCounters {
+    let frame = build_txn_tcp_syn_frame_v4(
+        source,
+        Ipv4Addr::new(198, 51, 100, 20),
+        src_port,
+        dst_port,
+        0x02,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(24, 0x02, frame.len() as u16);
+    let (batch, _) = txn_run_descriptor_with_screen_state(
+        binding,
+        sessions,
+        forwarding,
+        &txn_ha_state(),
+        &frame,
+        meta,
+        screen,
+    );
+    batch
+}
+
+/// #16502 (vb13 arm B + controls): a tolerant-loaded
+/// `routing-instance + discard` term with `destination-port-except 80` must
+/// NOT make the pre-screen walk deny a (0,0) SYN: PBR enforcement fails
+/// port-constrained terms closed on the synthetic tuple, so the packet must
+/// still face screens (challenge on the second SYN). Arms A/C/D pin the
+/// neighbouring behaviours so the fix cannot over- or under-gate.
+#[test]
+fn port_zero_syn_is_screened_despite_except_discard_pbr_term_16502() {
+    let source_a = Ipv4Addr::new(192, 0, 2, 10);
+    let source_b = Ipv4Addr::new(192, 0, 2, 11);
+    let mut term = g9528_term("discard", "scrub");
+    term.destination_ports_except = vec!["80".to_string()];
+    let (forwarding, mut screen) = g11332_runtime(Some(term));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let b1 = g16502_send_syn_ports(&mut binding, &mut sessions, &forwarding, &mut screen, source_a, 0, 0);
+    assert_eq!(b1.syn_cookie_challenges, 0, "arm B: first (0,0) SYN is below threshold");
+    let b2 = g16502_send_syn_ports(&mut binding, &mut sessions, &forwarding, &mut screen, source_b, 0, 0);
+    assert_eq!(b2.syn_cookie_challenges, 1, "arm B: second (0,0) SYN must be screened");
+    assert_eq!(g9528_packets(&forwarding), 0, "arm B: except-80 term must not count (0,0)");
+    let (forwarding, mut screen) = g11332_runtime(None);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let a1 = g16502_send_syn_ports(&mut binding, &mut sessions, &forwarding, &mut screen, source_a, 0, 0);
+    assert_eq!(a1.syn_cookie_challenges, 0);
+    let a2 = g16502_send_syn_ports(&mut binding, &mut sessions, &forwarding, &mut screen, source_b, 0, 0);
+    assert_eq!(a2.syn_cookie_challenges, 1, "arm A: unfiltered (0,0) SYNs are screened");
+    let mut term = g9528_term("discard", "scrub");
+    term.destination_ports_except = vec!["80".to_string()];
+    let (forwarding, mut screen) = g11332_runtime(Some(term));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    for expected in 1..=2u64 {
+        let src = if expected == 1 { source_a } else { source_b };
+        let batch = g16502_send_syn_ports(&mut binding, &mut sessions, &forwarding, &mut screen, src, 49152, 443);
+        assert_eq!(batch.syn_cookie_challenges, 0, "arm C: discarded SYNs never reach screens");
+        assert_eq!(g9528_packets(&forwarding), expected, "arm C: enforcement counts each discard");
+    }
+    let mut term = g9528_term("discard", "scrub");
+    term.destination_ports_except = vec!["80".to_string()];
+    let (forwarding, mut screen) = g11332_runtime(Some(term));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let d1 = g16502_send_syn_ports(&mut binding, &mut sessions, &forwarding, &mut screen, source_a, 49152, 80);
+    assert_eq!(d1.syn_cookie_challenges, 0);
+    let d2 = g16502_send_syn_ports(&mut binding, &mut sessions, &forwarding, &mut screen, source_b, 49153, 80);
+    assert_eq!(d2.syn_cookie_challenges, 1, "arm D: port-80 SYNs miss the term and are screened");
+}
+
+/// #16502 property cell: over (ports x term shape), pre-screen deny implies
+/// enforcement deny, composed as the miss path composes it (routing walk
+/// first; a terminating non-Accept routing term drops, else the non-routing
+/// verdict decides).
+#[test]
+fn prescreen_deny_implies_enforcement_deny_16502() {
+    use std::net::IpAddr;
+    let src = Ipv4Addr::new(192, 0, 2, 10);
+    let dst = Ipv4Addr::new(198, 51, 100, 20);
+    let shapes: &[(&str, &str, &str, &[&str], &[&str], &[&str], &[&str])] = &[
+        ("pbr-discard-except80", "discard", "scrub", &[], &["80"], &[], &[]),
+        ("pbr-reject-except80", "reject", "scrub", &[], &["80"], &[], &[]),
+        ("pbr-discard-dport0", "discard", "scrub", &["0"], &[], &[], &[]),
+        ("pbr-accept-except80", "accept", "scrub", &[], &["80"], &[], &[]),
+        ("plain-discard-except80", "discard", "", &[], &["80"], &[], &[]),
+        ("plain-discard-sport-except", "discard", "", &[], &[], &[], &["1234"]),
+        ("pbr-discard-sport0", "discard", "scrub", &[], &[], &["0"], &[]),
+        ("plain-accept-except80", "accept", "", &[], &["80"], &[], &[]),
+    ];
+    let port_pairs: &[(u16, u16)] = &[(0, 0), (0, 80), (0, 443), (49152, 0), (49152, 80), (49152, 443), (1234, 443)];
+    for (name, action, ri, dports, dexcept, sports, sexcept) in shapes {
+        let mut term = g9528_term(action, ri);
+        term.destination_ports = dports.iter().map(|s| s.to_string()).collect();
+        term.destination_ports_except = dexcept.iter().map(|s| s.to_string()).collect();
+        term.source_ports = sports.iter().map(|s| s.to_string()).collect();
+        term.source_ports_except = sexcept.iter().map(|s| s.to_string()).collect();
+        let (forwarding, _screen) = g11332_runtime(Some(term));
+        for &(sport, dport) in port_pairs {
+            let frame = build_txn_tcp_syn_frame_v4(src, dst, sport, dport, 0x02, crate::afxdp::tests_support::TEST_LAN_MAC);
+            let meta = txn_meta_v4(24, 0x02, frame.len() as u16);
+            let flow = crate::afxdp::frame::parse_session_flow_from_bytes(&frame, meta).expect("SYN frame parses to a flow");
+            assert_eq!((flow.forward_key.src_port, flow.forward_key.dst_port), (sport, dport), "{name}: fixture ports must reach the flow key");
+            let prescreen_deny = super::poll_descriptor::filter::input_filter_would_deny_before_screen(&forwarding, &frame, Some(&flow), meta);
+            let filter = forwarding.filter_state.iface_filter_v4_fast.get(&24).expect("input filter compiled");
+            let extra = crate::filter::mark_ports_unknown_for_zero_flow(crate::afxdp::frame::term_match_extra_from_frame(&frame, meta), sport, dport);
+            let enforcement_deny = match crate::filter::evaluate_filter_ref_routing_instance_uncounted(filter, IpAddr::V4(src), IpAddr::V4(dst), flow.forward_key.protocol, sport, dport, meta.dscp, extra) {
+                Some(pbr) => pbr.action != crate::filter::FilterAction::Accept,
+                None => crate::filter::filter_ref_static_verdict(filter, IpAddr::V4(src), IpAddr::V4(dst), flow.forward_key.protocol, sport, dport, meta.dscp, extra) != crate::filter::FilterAction::Accept,
+            };
+            assert!(!prescreen_deny || enforcement_deny, "{name} ports=({sport},{dport}): pre-screen deny must imply enforcement deny");
+            if (sport, dport) == (0, 0) {
+                assert!(!prescreen_deny, "{name} ports=(0,0): synthetic tuple must not pre-screen deny");
+            }
+        }
+    }
+}
+
 
 #[test]
 fn post_snat_fence_suppresses_cookie_challenge_15947() {

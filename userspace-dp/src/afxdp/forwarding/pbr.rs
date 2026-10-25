@@ -226,18 +226,20 @@ fn ingress_route_table_override_with_mode(
     // `from { tcp-flags ...; } then routing-instance ...` term matches exactly
     // the authored packets. Built AFTER the precheck so a non-route-lookup-
     // affecting filter pays no extra-build.
-    let mut extra = crate::afxdp::frame::term_match_extra_from_frame(frame, meta);
-    // #9894 (GPT-2): a (0,0)-ported flow is an L3-only enforcement context
-    // (ports 0-substituted by construction, #3291) — its "ports" are not on
-    // the wire, so port-constrained terms must fail closed instead of
+    let extra = crate::afxdp::frame::term_match_extra_from_frame(frame, meta);
+    // #9894 (GPT-2) / #16502: a (0,0)-ported flow is an L3-only enforcement
+    // context (ports 0-substituted by construction, #3291) — its "ports" are
+    // not on the wire, so port-constrained terms must fail closed instead of
     // matching the synthetic value (a `destination-port 0` positive term or
     // a negated/except term would otherwise spuriously steer). A real
     // TCP/UDP flow never has both ports zero; the builder cannot know (it
     // never sees the flow), so the bit is set HERE, where the evaluated
-    // tuple is known.
-    if flow.forward_key.src_port == 0 && flow.forward_key.dst_port == 0 {
-        extra.ports_unknown = true;
-    }
+    // tuple is known, via the shared helper every sibling walk also uses.
+    let extra = crate::filter::mark_ports_unknown_for_zero_flow(
+        extra,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+    );
     // #10729 X2-F6: a v6 chain sighting AH steers as proto 51 (identity for
     // flow-backed callers: they never sight AH, since AH packets are flowless).
     let eval_protocol = crate::afxdp::frame::flowless_effective_protocol(frame, meta);
