@@ -130,11 +130,20 @@ func (d *Daemon) onDHCPAddressChange() {
 
 // onDHCPUnchangedLease is the #11497 escape hatch for a content-identical
 // T1/T2 renewal. Healthy renewals stay silent; while a double nft failure is
-// owed, the lease commit re-drives the active config without waiting for the
-// next 30s retry tick.
+// owed, the lease commit nudges the 30s host-inbound gap retry owner to
+// re-drive the active config promptly instead of waiting for its next tick.
+//
+// #16559: this MUST NOT apply inline. It runs on the DHCP client goroutine
+// (commitLease -> notifyLeaseStateChanged), and applyActiveConfig parks
+// uncancellably on applySem (context.Background). If the apply holding
+// applySem reaches reconcileDHCPClients and stops/restarts this client,
+// Reconcile waits on its done channel — which can never close while this
+// goroutine is parked — so applySem never releases and every later commit,
+// rollback, sync and background apply hangs until restart. The non-blocking
+// nudge keeps the client goroutine free; the retry loop owns the apply.
 func (d *Daemon) onDHCPUnchangedLease() {
 	if d.hostInboundGapOwed() {
-		d.applyActiveConfig()
+		d.nudgeHostInboundGapReassert()
 	}
 }
 

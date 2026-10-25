@@ -1,4 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Daemon/DHCP: an unchanged-lease renewal while host-inbound gap
+    debt is owed no longer applies inline on the DHCP client
+    goroutine (#16559). The hook parked uncancellably on applySem;
+    an apply holding it that stopped/restarted that client then
+    waited forever on the client's done channel, wedging every
+    later commit, rollback, sync and background apply until
+    restart. The hook now nudges the 30s gap retry owner over a
+    coalescing wake channel, and the #11497 discharge defer in
+    applyConfigLocked is registered before the test seam so the
+    retry owner's stubbed applies discharge the debt too.
+
   * Config: a bare presence statement inline (`set system services
     ssh`, `set system syslog`) no longer discards a group's whole
     container for the same keyword (#16546). The #4325 cross-shape

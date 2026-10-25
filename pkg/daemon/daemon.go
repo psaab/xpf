@@ -1653,6 +1653,11 @@ type Daemon struct {
 	// protecting table. A scoped retry owner re-drives the active config until
 	// the real host-inbound install converges.
 	hostInboundGapDebt hostInboundGapDebt
+	// hostInboundGapWakeCh wakes hostInboundGapReassertLoop promptly on an
+	// unchanged-lease renewal while gap debt is owed (#16559). Depth 1,
+	// coalescing; see nudgeHostInboundGapReassert for why the send must stay
+	// non-blocking. Nil on a Daemon built without New, which the nudge tolerates.
+	hostInboundGapWakeCh chan struct{}
 	// #9811: the caller-less auto-rollback apply's retry owner. Zero value
 	// owes nothing.
 	configDebt configApplyDebt
@@ -2197,6 +2202,7 @@ func New(opts Options) (*Daemon, error) {
 		dhcpLeaseSync:              dhcpLeaseSyncState{nowCh: make(chan struct{}, 1)},
 		ipsecSANudgeCh:             make(chan struct{}, 1),
 		proxyARPNudgeCh:            make(chan struct{}, 1),
+		hostInboundGapWakeCh:       make(chan struct{}, 1),
 		syncReadyTimeout:           5 * time.Second,
 		linkByNameFn:               netlink.LinkByName,
 		neighListFn:                netlink.NeighList,

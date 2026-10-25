@@ -276,7 +276,8 @@ type Manager struct {
 	v6opts          map[string]*DHCPv6Options    // interface name -> DHCPv6 options
 	onAddressChange func()
 	// onUnchangedLease is the debt-gated escape hatch for a content-identical
-	// successful renewal. Set before Start; copied under mu, invoked outside it.
+	// successful renewal. Set before Start; copied under mu, invoked outside it
+	// but on the committing client goroutine — it must not block (#16559).
 	onUnchangedLease func()
 	// onGatewayChange fires whenever the gateway-relevant lease state
 	// of any interface changes (#1844): a lease committed with a
@@ -424,8 +425,12 @@ func (m *Manager) SetDHCPv4Options(ifaceName string, opts *DHCPv4Options) {
 
 // SetUnchangedLeaseCallback registers the optional hook for a successful lease
 // renewal whose installed content is unchanged. Set it before client goroutines
-// start. The hook runs outside the manager lock so callers may initiate a
-// recompile without reversing the DHCP lock order.
+// start. The hook runs outside the manager lock, but ON the client goroutine
+// that committed the renewal (#16559): it must never block uncancellably
+// (e.g. park on a semaphore an apply holds while that apply stops this
+// client), or Reconcile's wait on this client's done channel deadlocks
+// against it. Hooks should signal an owner goroutine (non-blocking send)
+// rather than applying inline.
 func (m *Manager) SetUnchangedLeaseCallback(fn func()) {
 	m.mu.Lock()
 	m.onUnchangedLease = fn

@@ -4042,6 +4042,10 @@ never lock an operator out of a remote box it manages.
   gap fence alone is sufficient protection and does not create this debt.
   A content-identical DHCP T1/T2 renewal may also re-drive the config while
   this debt is owed, without making healthy renewals trigger recompiles.
+  Since #16559 the renewal hook only nudges that retry loop (non-blocking
+  wake channel); it never applies inline on the DHCP client goroutine,
+  where an uncancellable `applySem` wait would deadlock against an apply
+  that stops/restarts that client.
 
   **Lifeline exclusion — by INTERFACE and by address VALUE (#7284):**
   management/cluster-control interfaces (`fxp0` or explicitly configured

@@ -24,6 +24,15 @@ func (m *Manager) SeedLeaseForTesting(ifaceName string, af AddressFamily, lease 
 	m.leases[clientKey{iface: ifaceName, family: af}] = lease
 }
 
+// CommitLeaseForTesting drives the production commitLease path (store +
+// notifyLeaseStateChanged, including the unchanged-lease hook on the
+// caller's goroutine) without wire traffic, so daemon-package tests can
+// model a client goroutine committing a renewal through the real hook
+// (#16559). Callers must not use this from production code paths.
+func (m *Manager) CommitLeaseForTesting(ifaceName string, af AddressFamily, lease, prev *Lease) error {
+	return m.commitLease(clientKey{iface: ifaceName, family: af}, lease, prev, nil, nil, false)
+}
+
 // SeedDelegatedPrefixesForTesting installs the IA_PD delegations recorded for
 // ifaceName, replacing any already held for it. It lets a caller outside pkg/dhcp
 // (the #9413 REST handler cell) drive DelegatedPrefixes() without real DHCPv6
