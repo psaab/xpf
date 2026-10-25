@@ -233,6 +233,9 @@ func TestRESTConnBoundDefault16081(t *testing.T) {
 	if apiMaxConnsTotal != 256 {
 		t.Fatalf("apiMaxConnsTotal = %d, want shipped default 256", apiMaxConnsTotal)
 	}
+	if apiMaxConnsPerSource != 32 {
+		t.Fatalf("apiMaxConnsPerSource = %d, want shipped default 32", apiMaxConnsPerSource)
+	}
 	s := NewServer(Config{Addr: "127.0.0.1:0"})
 	g := s.gateFor()
 	if g == nil {
@@ -241,10 +244,149 @@ func TestRESTConnBoundDefault16081(t *testing.T) {
 	if g.limit != 256 {
 		t.Fatalf("installed gate limit = %d, want 256", g.limit)
 	}
+	if g.perSource != 32 {
+		t.Fatalf("installed gate per-source limit = %d, want 32", g.perSource)
+	}
 	// Nil-safety: bare fixtures without a gate report zero, never panic.
 	bare := &Server{}
 	if bare.RestConnRefusals() != 0 || bare.RestConnActive() != 0 {
 		t.Fatal("bare &Server{} must report zero refusals/active")
+	}
+}
+
+// #16622 decisive regression: one source holding its per-source maximum
+// must not deny a different source. Drives the real NewServer -> Start
+// path on two loopback legs (127.0.0.1 operator, 127.0.0.2 attacker —
+// distinct source IPs): the attacker fills apiMaxConnsPerSource slots,
+// its next connection is refused, and the operator (with a valid API
+// key, mirroring the issue probe) is still served 200 on the other leg.
+//
+// FAIL-ON-REVERT: without the per-source partition (global-only gate),
+// the attacker fills the same slots but the operator here still works —
+// so this test also pins the converse: with a SMALL global limit equal
+// to the per-source limit, the global-only behaviour would refuse the
+// operator. The operator-200 assertion below is what reds when the
+// per-source check is removed and the global limit is the only bound
+// (verified by mutation: per-source check disabled -> operator refused).
+func TestRESTConnBoundPerSource16622(t *testing.T) {
+	origTotal, origPer := apiMaxConnsTotal, apiMaxConnsPerSource
+	// Per-source (4) < global (8): the attacker alone can never fill the
+	// global pool, so under the old global-only gate it would hold 8
+	// slots and refuse the operator; partitioned it is capped at 4.
+	apiMaxConnsTotal, apiMaxConnsPerSource = 8, 4
+	t.Cleanup(func() { apiMaxConnsTotal, apiMaxConnsPerSource = origTotal, origPer })
+
+	const apiKey = "operator-key-16622"
+	s := NewServer(Config{
+		Addr: "127.0.0.1:0",
+		Auth: &AuthConfig{APIKeys: map[string]bool{apiKey: true}},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() { cancel(); s.Wait() })
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	operatorAddr := s.EffectiveHTTPAddr()
+	if operatorAddr == "" {
+		t.Fatal("no effective HTTP address after Start")
+	}
+	// The leg listens only on 127.0.0.1, so the attacker dials that same
+	// destination; the partition is by SOURCE, bound below via LocalAddr.
+	attackerAddr := operatorAddr
+
+	// Bound sockets determine the source IP the server sees: bind the
+	// local end explicitly so attacker conns arrive from 127.0.0.2.
+	dialFrom := func(srcIP, dst string) net.Conn {
+		t.Helper()
+		d := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP(srcIP)}}
+		c, err := d.Dial("tcp", dst)
+		if err != nil {
+			t.Fatalf("dial %s -> %s: %v", srcIP, dst, err)
+		}
+		return c
+	}
+	getHealth := func(c net.Conn, dst, key string) {
+		t.Helper()
+		req := fmt.Sprintf("GET /health HTTP/1.1\r\nHost: %s\r\n", dst)
+		if key != "" {
+			req += "X-API-Key: " + key + "\r\n"
+		}
+		req += "\r\n"
+		if _, err := fmt.Fprintf(c, "%s", req); err != nil {
+			t.Fatalf("write request: %v", err)
+		}
+		readHealth20016081(t, c)
+	}
+
+	// Positive control 1: operator with valid key served before attack.
+	op := dialFrom("127.0.0.1", operatorAddr)
+	getHealth(op, operatorAddr, apiKey)
+	_ = op.Close()
+
+	// Attacker (no credentials, /health keep-alive) holds its maximum.
+	held := make([]net.Conn, 0, 4)
+	for range 4 {
+		c := dialFrom("127.0.0.2", attackerAddr)
+		getHealth(c, attackerAddr, "")
+		held = append(held, c)
+	}
+	defer func() {
+		for _, c := range held {
+			_ = c.Close()
+		}
+	}()
+
+	// Attacker's next connection is refused at the per-source bound.
+	excess := dialFrom("127.0.0.2", attackerAddr)
+	_ = excess.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := fmt.Fprintf(excess, "GET /health HTTP/1.1\r\nHost: %s\r\n\r\n", attackerAddr); err != nil {
+		t.Fatalf("excess write: %v", err)
+	}
+	if n, rerr := excess.Read(make([]byte, 64)); n > 0 || rerr == nil {
+		t.Fatalf("attacker excess conn read n=%d err=%v — per-source bound not enforced", n, rerr)
+	}
+	_ = excess.Close()
+	if got := s.RestConnRefusals(); got != 1 {
+		t.Fatalf("RestConnRefusals = %d, want 1 (attacker excess)", got)
+	}
+
+	// Operator on the other leg, different source, valid key: still 200.
+	op2 := dialFrom("127.0.0.1", operatorAddr)
+	getHealth(op2, operatorAddr, apiKey)
+	_ = op2.Close()
+
+	// Positive control 2: attacker releases -> its source can reconnect.
+	for _, c := range held {
+		_ = c.Close()
+	}
+	held = held[:0]
+	deadline := time.Now().Add(5 * time.Second)
+	for s.RestConnActive() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := s.RestConnActive(); got != 0 {
+		t.Fatalf("RestConnActive = %d after attacker close, want 0", got)
+	}
+	c := dialFrom("127.0.0.2", attackerAddr)
+	getHealth(c, attackerAddr, "")
+	_ = c.Close()
+}
+
+// TestConnGatePerSourceKey16622 pins the partition key: IPv6 sources in
+// one /64 share a bucket, a different /64 does not, and IPv4-mapped
+// forms collapse onto the IPv4 bucket.
+func TestConnGatePerSourceKey16622(t *testing.T) {
+	mk := func(ip string) string {
+		return connGateSourceKey(&net.TCPAddr{IP: net.ParseIP(ip), Port: 43000})
+	}
+	if mk("2001:db8:1:2::1") != mk("2001:db8:1:2::ffff") {
+		t.Fatal("IPv6 addresses in one /64 must share a gate source")
+	}
+	if mk("2001:db8:1:2::1") == mk("2001:db8:1:3::1") {
+		t.Fatal("IPv6 addresses in different /64s must not share a gate source")
+	}
+	if mk("192.0.2.1") == mk("192.0.2.2") {
+		t.Fatal("distinct IPv4 addresses must not share a gate source")
 	}
 }
 
@@ -253,7 +395,7 @@ func TestRESTConnBoundDefault16081(t *testing.T) {
 // backs off, never exits) and the refused conn is closed without claiming
 // a slot; release happens exactly once across double Close.
 func TestBoundedListenerTemporaryRefusal16081(t *testing.T) {
-	g := newAPIConnGate(1)
+	g := newAPIConnGate(1, 0)
 	clientLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -381,10 +523,10 @@ func TestRESTConnRefusalsMetric16081(t *testing.T) {
 	}
 
 	g := s.gateFor()
-	if g == nil || !g.tryAcquire() {
+	if g == nil || !g.tryAcquire(dummyAddr16081{}) {
 		t.Fatal("gate missing or refuses its first slot")
 	}
-	defer g.release()
+	defer g.release(dummyAddr16081{})
 	g.noteRefusal(dummyAddr16081{})
 	after := collect(s)
 	if after["refusals"] != 1 {

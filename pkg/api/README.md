@@ -1362,7 +1362,7 @@ the drop fails loudly instead of going quietly vacuous.
   Read-only GET handlers do not read a body and are out of scope. Add a new
   mutation handler via `decodeJSONBody`, not a bare `json.NewDecoder(r.Body)`,
   so the cap and 413 are inherited. Pinned by `http_dos_hardening_4150_test.go`.
-  **Connection-count bound (#16081).** The timeouts above bound each
+  **Connection-count bound (#16081, partitioned #16622).** The timeouts above bound each
   connection's lifetime, not their number. Every REST listener (HTTP +
   HTTPS, every leg) now serves behind ONE per-Server gate
   (`apiMaxConnsTotal`, 256) in `conn_bound_16081.go`: at Accept, excess
@@ -1371,7 +1371,10 @@ the drop fails loudly instead of going quietly vacuous.
   logged at most ~1/sec; admitted connections release their slot exactly
   once on Close (hijacked conns via the #7011 drain). Refusal returns a
   temporary accept error so the serve loop retries rather than exits.
-  Pinned by `conn_bound_16081_test.go`.
+  The gate also enforces a per-source sub-limit
+  (`apiMaxConnsPerSource`, 32; IPv6 aggregated by /64) so one
+  unauthenticated source cannot hold all 256 slots and lock every other
+  source out of every leg. Pinned by `conn_bound_16081_test.go`.
 - **Credential verification (#4157/#10826).** `authMiddleware` checks every
   configured API-key verifier with bcrypt and does not stop at the first match;
   duplicate key identities matching one presented secret are denied as
