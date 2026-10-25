@@ -753,6 +753,15 @@ credential-carrying. Credential-named path pairs remain flagged; bare path
 segments and placeholder-only/value-less templates remain unflagged; loopback
 http still works. Fail-on-revert: `ddns_plaintext_15225_test.go` (both packages).
 
+**Percent-escaped literals are literals (#16573).** The detectors' old
+`%`-free test also exempted percent-escaped values (`%2B`/`%2F`/`%3D`):
+only `%h`/`%i`/`%u`/`%p`/`%%` count as specifiers, any other `%x` (and a
+trailing `%`) is transmitted verbatim by `renderGenericURL` and therefore
+literal, as is a percent-escaped keyless query component (`?%2B%2F%3D`).
+Specifier-only (`?host=%h&ip=%i`), terminated-placeholder-only, plain
+keyless-flag (`?flag`) and loopback http templates remain accepted.
+Fail-on-revert: `ddns_plaintext_16573_test.go` (both packages).
+
 **RFC 2136 zone discovery (#15225 A40-05).** The UPDATE zone is no longer
 guessed by stripping one label: `discoverZone` honours explicit
 `forward-zone`/`reverse-zone` leaves (DHCP block + provider catalog) and a
