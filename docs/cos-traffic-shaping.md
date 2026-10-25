@@ -1444,22 +1444,33 @@ Notes for this specific test:
   userspace dataplane keys the egress DSCP rewrite on
   `(forwarding-class, loss-priority)`, so a rule that rewrites
   `<fc> low` and `<fc> high` to different code-points produces the
-  LOW code-point for a low-loss-priority flow and the HIGH code-point
-  for a high-loss-priority flow of that class. A rewrite entry with no
+  LOW code-point for a low-loss-priority packet and the HIGH code-point
+  for a high-loss-priority packet of that class. A rewrite entry with no
   explicit `loss-priority` is a wildcard that applies to every
-  loss-priority (backward-compat). The loss-priority is taken from the
-  egress interface's DSCP / 802.1p classifier assignment for the flow's
-  ingress code-point (Junos default LOW when unclassified); it is
-  resolved once per flow and cached, exactly like the firewall-filter
-  DSCP rewrite. A single, loss-priority-uniform rewrite (or a wildcard)
-  is additionally baked into the per-queue drain fallback; differentiated
-  rules resolve per flow at classification time.
+  loss-priority (backward-compat). For transit traffic the loss-priority
+  is taken from the **ingress** logical unit's BA classifier bindings —
+  on V2 fabric arrivals, the stamped peer unit's bindings — consulting
+  its DSCP, inet-precedence, and 802.1p classifiers in that order, each
+  only when the higher-precedence classifiers leave the packet's
+  ingress code-point unclassified (Junos default LOW when unclassified
+  or no ingress binding applies) (#11430/#11679). The egress
+  interface's classifier tables supply the loss-priority only for
+  locally generated packets, which have no wire ingress. The
+  loss-priority is **not** frozen at the flow's seed packet: on a
+  flow-cache hit the LP rewrite is re-resolved for each packet from
+  that packet's DSCP / 802.1p, and the BA queue is re-resolved too
+  unless a firewall filter pinned it — a filter-pinned queue stays
+  pinned, but its LP rewrite is still re-resolved per packet. A
+  single, loss-priority-uniform rewrite (or a wildcard) is additionally
+  baked into the per-queue drain fallback; differentiated rules resolve
+  per packet at classification time and on cache hits.
 - `loss-priority` on CoS DSCP / 802.1p classifiers now drives the egress
   rewrite-rule selection above, but is still **not** enforced for
   drop-precedence / WRED buffer management (a commit warning names the
-  remaining gap). Note the loss-priority is resolved per flow from the
-  seed packet's ingress code-point; a flow that changes its marking
-  mid-stream keeps the seed loss-priority for its cached rewrite.
+  remaining gap). Note the loss-priority is resolved per packet from
+  that packet's ingress code-point; a flow that changes its marking
+  mid-stream is re-marked from the next packet onward rather than
+  keeping the seed packet's loss-priority for its cached rewrite.
 
 Suggested verification commands:
 
