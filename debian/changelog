@@ -1,4 +1,14 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Config/NAT: a source-NAT rule whose source match is
+    single-family but whose pool has no member of that family
+    (an IPv6-only pool, or an IPv4-mapped `::ffff:` literal, for
+    an IPv4 rule; or the reverse) is now rejected at strict
+    commit (#16600) and warned on tolerant load. Previously it
+    committed clean and every matching flow was refused by the
+    dataplane allocator as WrongAddressFamily and not forwarded,
+    discoverable only through allocation-failure counters — the
+    source-NAT twin of the #13922 destination/static cross-family
+    reject. Unconstrained and dual-family rules still commit.
   * DDNS/DHCP: the RFC 4701 device proof marker published under
     skip-existing/strict-fail to let a same-device sibling prove
     co-ownership (#14995) now has an owner and a delete path

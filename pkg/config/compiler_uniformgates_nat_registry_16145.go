@@ -503,6 +503,35 @@ var natGates = []natGate{
 			return nil
 		},
 	},
+	{
+		name:    "sourceNATPoolFamily",
+		lenient: func(opts compileOpts) bool { return opts.lenientDestNATAddresses },
+		run: func(cfg *Config, lenient bool) error {
+			// #16600 source-NAT pool family gate. A pool-mode rule whose
+			// authored source match is single-family F but whose pool has
+			// zero family-F members committed clean, then every matching
+			// flow was refused WrongAddressFamily by the Rust allocator
+			// (its family list for F is empty) and not forwarded — the
+			// SNAT twin of the #13922 DNAT/static cross-family reject.
+			// Strict on commit / commit-check (hard-reject); lenient on
+			// load / peer-sync (downgrade to a warning so a config
+			// persisted before this gate existed still boots — #1960
+			// no-brick; the dataplane already fails such flows closed).
+			// Shares the lenientDestNATAddresses flag (same NAT
+			// silent-drop doctrine). Runs after the pool address-grammar
+			// gate so a malformed pool member still wins the first-error
+			// slot over the family verdict that skips it.
+			if err := validateSourceNATPoolFamilyStrict(cfg); err != nil {
+				if lenient {
+					warnNATDiagnostic16145(cfg, "sourceNATPoolFamily",
+						fmt.Sprintf("source-nat pool family (downgraded to warning on tolerant path): %v", err))
+				} else {
+					return err
+				}
+			}
+			return nil
+		},
+	},
 
 	// #6041: `persistent-nat` + `port no-translation` on one source-NAT pool is
 	// now SUPPORTED. The userspace dataplane implements an address-only
