@@ -18,6 +18,17 @@ func cloneAuthConfig(a AuthConfig) AuthConfig {
 	}
 }
 
+// TestCredentialMemoReusesOnlySemanticallyCurrentPolicy13241 pins the
+// request-scoped credential memo: it is reused only while the presented
+// headers, the semantic auth policy, and the memo's own time cap are all
+// unchanged. It deliberately does NOT pin production expiry enforcement:
+// the injected resolver below reimplements the expiry check, so this cell
+// stays green even if the production credentialExpiryActive terms are
+// dropped. Runtime expiry through the real auth paths (authMiddleware and
+// principalFrom's default resolver) is pinned by
+// TestAuthMiddlewareCredentialExpiry16729 and
+// TestPrincipalFromDefaultResolverRefusesExpiredCredential16729 (#16729).
+
 func TestCredentialMemoReusesOnlySemanticallyCurrentPolicy13241(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/v1/config/enter", nil)
 	req.Header.Set("Authorization", "Basic YWRtaW46c2VjcmV0")
@@ -78,8 +89,10 @@ func TestCredentialMemoReusesOnlySemanticallyCurrentPolicy13241(t *testing.T) {
 		t.Fatalf("verifier called %d times after semantic policy change, want 3", calls)
 	}
 
-	// An expired timestamp is part of policy equality and must be rechecked
-	// against credential expiry before the request can continue.
+	// An expired timestamp is part of policy equality, so the memo must be
+	// invalidated and the (test-supplied) resolver re-run. This proves memo
+	// invalidation on a policy change only — the resolver's own expiry
+	// reimplementation is what refuses here, not production code (#16729).
 	expired := cloneAuthConfig(changed)
 	expired.UserExpires["admin"] = time.Now().Add(-time.Second)
 	s.auth.Store(&expired)

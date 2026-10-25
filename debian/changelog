@@ -34,6 +34,19 @@ xpf (0.0.0) unstable; urgency=medium
     (full rewritten/reordered block above ~4M cells). A 50k-line config
     with a one-line edit now summarises in well under 10 MiB; order- and
     duplicate-sensitive counts are unchanged for ordinary edits.
+  * API/auth: runtime enforcement of api-auth `expires` between AuthConfig
+    rebuilds is now pinned by discriminating tests (#16729, #10826).
+    Previously the two production `credentialExpiryActive` terms — the
+    Basic check in checkAuthorizationIdentity and the API-key check in
+    matchAPIKeyIdentityWithExpiry — could each be deleted with the whole
+    pkg/api suite staying green, because the only "expired credential"
+    cell (#13241) installed a test resolver that reimplemented the expiry
+    check itself. New tests drive Basic, X-API-Key and Bearer through
+    authMiddleware and the principalFrom credential row through the
+    production default resolver, each with unexpired and no-expiry
+    controls; deleting either production term now turns a named cell red.
+    The #13241 memo cell is documented as covering memo invalidation
+    only. No production behaviour changes.
   * Config: packed hierarchical `security flow tcp-session
     time-wait-state session-timeout N;` / `session-ageout;` (and the
     half-close leaves, including multi-leaf packed runs) now compile
