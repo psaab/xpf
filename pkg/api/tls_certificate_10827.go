@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -156,19 +157,26 @@ func managementTLSCertificateChainValidityError(chain []*x509.Certificate, now t
 }
 
 // managementTLSCertificatePreflightError is the full #15667 preflight:
-// every chain entry inside its validity window, leaf is not a CA and
-// carries ServerAuth (an absent ExtKeyUsage list means any usage and is
+// every chain entry inside its validity window, leaf carries
+// ServerAuth (an absent ExtKeyUsage list means any usage and is
 // accepted, matching x509 semantics), every non-leaf entry is a CA
 // allowed to sign certificates, and every adjacent signature link
 // verifies (chain[i] was signed by chain[i+1]; the final entry, when
 // self-signed, must also verify against itself). Trust to a root is
 // deliberately NOT required: management clients pin/self-sign.
+// A CA leaf is rejected unless it is a single-entry self-signed
+// chain (#16832): the stock OpenSSL 3 `req -x509` output carries
+// critical CA:TRUE and is its own trust anchor, so it is accepted
+// with a logged diagnostic (managementTLSCertificateIsSelfSignedCA-
+// Leaf). A CA:TRUE leaf issued by any other entry (e.g. a
+// mis-installed intermediate) is still rejected.
 func managementTLSCertificatePreflightError(chain []*x509.Certificate, now time.Time) error {
 	if err := managementTLSCertificateChainValidityError(chain, now); err != nil {
 		return err
 	}
 	leaf := chain[0]
-	if leaf.IsCA {
+	selfSignedCALeaf := managementTLSCertificateIsSelfSignedCALeaf(chain)
+	if leaf.IsCA && !selfSignedCALeaf {
 		return fmt.Errorf("leaf certificate is a CA certificate (BasicConstraints CA=true); a CA certificate must not be served as the management TLS leaf")
 	}
 	if len(leaf.ExtKeyUsage) > 0 {
@@ -223,6 +231,33 @@ func managementTLSCertificatePreflightError(chain []*x509.Certificate, now time.
 	}
 	return nil
 }
+
+// managementTLSCertificateIsSelfSignedCALeaf reports whether chain is a
+// single-entry chain whose only entry is a CA leaf that verifiably signs
+// itself (#16832). Self-signed means RawSubject == RawIssuer AND the
+// signature verifies under the leaf's own public key; the signature
+// check uses CheckSignature directly because CheckSignatureFrom also
+// enforces parent constraints and would conflate a corrupt signature
+// with the CA-shape diagnostic. A multi-entry chain, a non-CA leaf, or
+// a leaf whose self-signature does not verify is not self-signed here,
+// so the caller keeps rejecting it as a CA leaf.
+func managementTLSCertificateIsSelfSignedCALeaf(chain []*x509.Certificate) bool {
+	if len(chain) != 1 {
+		return false
+	}
+	leaf := chain[0]
+	if leaf == nil || !leaf.IsCA {
+		return false
+	}
+	if !bytes.Equal(leaf.RawSubject, leaf.RawIssuer) {
+		return false
+	}
+	return leaf.CheckSignature(leaf.SignatureAlgorithm, leaf.RawTBSCertificate, leaf.Signature) == nil
+}
+
+// managementTLSCertificateCALeafDiagnostic is the logged warning emitted
+// when a self-signed CA:TRUE leaf is accepted (#16832).
+const managementTLSCertificateCALeafDiagnostic = "leaf certificate is a self-signed CA certificate (BasicConstraints CA=true); serving it as its own trust anchor (reissue with CA:FALSE to silence this warning)"
 
 // managementTLSSANDiagnostic returns a human-readable SAN summary for
 // logs, or the no-SAN marker when the leaf carries no SANs at all.
@@ -380,6 +415,9 @@ func (s *Server) loadManagementTLSCertificateWithGen(gen func(bindHosts []string
 		if err := managementTLSCertificatePreflightError(state.chain, now); err != nil {
 			s.failManagementTLSCertificate(managementTLSCertificateCustom, bindHost, state.leaf, err, now)
 			return nil, err
+		}
+		if managementTLSCertificateIsSelfSignedCALeaf(state.chain) {
+			slog.Warn(managementTLSCertificateCALeafDiagnostic, "source", managementTLSCertificateCustom, "bind_host", bindHost, "leaf_subject", state.leaf.Subject.String(), "sans", managementTLSSANDiagnostic(state.leaf))
 		}
 		slog.Info("custom management TLS certificate loaded", "source", managementTLSCertificateCustom, "bind_host", bindHost, "leaf_subject", state.leaf.Subject.String(), "sans", managementTLSSANDiagnostic(state.leaf), "chain_length", len(state.chain))
 		return state, nil
@@ -819,6 +857,9 @@ func (s *Server) refreshCustomManagementTLSCertificate(files *managementTLSCerti
 	}
 	s.installManagementTLSCertificate(state)
 	s.publishManagementTLSCertificateToLiveLegs(state)
+	if managementTLSCertificateIsSelfSignedCALeaf(state.chain) {
+		slog.Warn(managementTLSCertificateCALeafDiagnostic, "source", managementTLSCertificateCustom, "bind_host", bindHost, "leaf_subject", state.leaf.Subject.String(), "sans", managementTLSSANDiagnostic(state.leaf))
+	}
 	if current != nil && current.fingerprint != state.fingerprint {
 		slog.Info("custom management TLS certificate rotated", "not_after", state.leaf.NotAfter.UTC().Format(time.RFC3339), "sans", managementTLSSANDiagnostic(state.leaf))
 	}

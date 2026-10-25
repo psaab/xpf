@@ -164,6 +164,8 @@ func TestPreflight15667(t *testing.T) {
 		{"expired intermediate", chainSpec{interNotAfter: now.Add(-time.Hour)}, "intermediate 1 has expired"},
 		{"not-yet intermediate", chainSpec{interNotBefore: now.Add(time.Hour)}, "intermediate 1 is not valid yet"},
 		{"CA leaf", chainSpec{leafIsCA: true}, "leaf certificate is a CA"},
+		// The "CA leaf" cell above is the control: leaf signed by the
+		// intermediate (3-entry chain), so #16832 keeps rejecting it.
 		{"client-auth leaf", chainSpec{leafEKU: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}, "does not allow ServerAuth"},
 		{"non-CA intermediate", chainSpec{interNotCA: true}, "intermediate 1 is not a CA"},
 		{"bad signature link", chainSpec{wrongInterKey: true}, "signature link 0->1"},
