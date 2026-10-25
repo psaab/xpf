@@ -14,10 +14,25 @@
 //! dead branch of `retire_selected_worker_holders` in `status.rs` and this
 //! test fails: the survivor is never the sole route and the reaped requests
 //! never reach the completion core as Denied.
+//!
+//! #16497 (R3-B12-02): retiring the dead worker bumps the GLOBAL worker-set
+//! generation, so descriptors already queued on the SURVIVOR are stamped
+//! with the old generation. The survivor's next `drain_worker` must record
+//! a `d11_stale_generation` Deny for each (tombstone claim wins) and the
+//! worker-loop delivery (modelled here by `take_reaped_terminal_verdicts`
+//! + `complete_ipsec_inner_verdict`, the exact pair the loop runs) must
+//! complete it as Denied. The second cell below pins the `stop_inner`
+//! leg: a full stop must deliver every reaped verdict it records.
+//!
+//! FAIL-ON-REVERT (#16497): drop the `push_reaped_verdict` from the
+//! `drain_worker` stale branch (or the `take_reaped_terminal_verdicts`
+//! delivery from the worker loop / `stop_inner`) and the extended
+//! assertions fail: the survivor's request stays Queued with no terminal,
+//! and the stop cell leaves undelivered verdicts behind.
 
 use super::*;
 use crate::afxdp::ipsec_inner_queue::{
-    IpsecInnerDescriptor, IPSEC_INNER_STN_MAX,
+    IpsecInnerDescriptor, IpsecInnerDoubleBatch, IPSEC_INNER_STN_MAX,
 };
 use crate::slowpath_reinject_9506::{
     CaptureOrigin, ReinjectLease, SubmitFrame, PMECH_DEADLINE_CLOCK_MONOTONIC,
@@ -185,4 +200,123 @@ fn dead_worker_sweep_retires_ipsec_inner_worker_15149() {
         pool.free_count(),
         crate::afxdp::ipsec_inner_queue::IPSEC_INNER_SLAB_CAP - 1
     );
+
+    // #16497 leg 1: the sweep's retire bumped the global generation, so the
+    // survivor's queued descriptor (stamped with the pre-retire generation)
+    // is now stale. Run the survivor's drain exactly as its worker loop
+    // does: the stale descriptor must not be adjudicated (drain takes 0),
+    // but it must record a terminal the loop can deliver on the same pass.
+    let mut batch = IpsecInnerDoubleBatch::new();
+    assert_eq!(
+        transport.drain_worker(1, &mut batch),
+        0,
+        "a stale-generation descriptor must never reach adjudication"
+    );
+    assert!(
+        transport.has_reaped_verdicts(),
+        "the survivor drain must record a stale-generation terminal (#16497)"
+    );
+    // The worker loop's delivery leg (loop_body): take + complete.
+    let mut reaped = Vec::new();
+    assert_eq!(transport.take_reaped_terminal_verdicts(&mut reaped), 1);
+    assert!(!transport.has_reaped_verdicts());
+    for verdict in reaped {
+        assert!(slow.complete_ipsec_inner_verdict(verdict));
+    }
+    let ready = core.drain_ready(16);
+    assert_eq!(
+        ready.len(),
+        1,
+        "the survivor's stale request must now complete, got {ready:?}"
+    );
+    assert_eq!(ready[0].request_id, 151_492);
+    assert_eq!(
+        ready[0].outcome,
+        crate::slowpath_reinject_9506::ReinjectOutcome::Denied,
+        "survivor stale request must complete as Denied, not by ack timeout (#16497)"
+    );
+    // Both slabs are reclaimed and no undelivered terminal remains.
+    assert_eq!(
+        pool.free_count(),
+        crate::afxdp::ipsec_inner_queue::IPSEC_INNER_SLAB_CAP
+    );
+    let mut leftover = Vec::new();
+    assert_eq!(transport.take_reaped_terminal_verdicts(&mut leftover), 0);
+}
+
+/// #16497 leg 2: `stop_inner` retires + joins every worker, which records
+/// a reaped Deny for every queued descriptor. It must deliver them to the
+/// completion core before returning, so a full stop leaves zero
+/// undelivered verdicts and every queued request completes as Denied.
+/// A second stop with nothing queued holds nothing back either (the
+/// pre-fix list grew by the reaped count on every stop).
+#[test]
+fn stop_inner_delivers_reaped_ipsec_inner_verdicts_16497() {
+    let core = crate::slowpath_reinject_9506::ReinjectCore::new_shared();
+    core.publish_epochs(PERMIT_15149, &[(1, QEPOCH_15149), (2, 13)]);
+    let slow = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker_with_core(
+        1500,
+        core.clone(),
+    ));
+    let transport = slow.ipsec_inner_transport();
+    let pool = transport.pool().clone();
+
+    let fake_handle = || WorkerHandle {
+        stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        heartbeat: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        commands: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+        session_export_ack: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cos_status: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
+        runtime_atomics: Arc::new(crate::afxdp::worker_runtime::WorkerRuntimeAtomics::new()),
+        cold_path_atomics: Arc::new(crate::afxdp::cold_path_hist::WorkerColdPathAtomics::new()),
+    };
+
+    let mut coordinator = Coordinator::new();
+    coordinator.slow_path = Some(slow.clone());
+
+    transport.publish_workers([0, 1]);
+    let generation = transport.authority().generation();
+    coordinator
+        .workers
+        .register(0, WorkerRuntimeRecord::for_test(fake_handle()), None);
+    coordinator
+        .workers
+        .register(1, WorkerRuntimeRecord::for_test(fake_handle()), None);
+    for (request_id, flow_tag) in [(164_970u64, 0u64), (164_971, 1)] {
+        assert!(core.admit(&frame_15149(request_id, flow_tag)).admitted);
+        let slab_id = pool.acquire().expect("admission slab");
+        transport
+            .admit_descriptor(desc_15149(request_id, slab_id, flow_tag, generation))
+            .expect("admit routes to a live worker");
+    }
+    coordinator.stop_inner(false);
+    assert!(
+        !transport.has_reaped_verdicts(),
+        "stop_inner must leave zero undelivered reaped verdicts (#16497)"
+    );
+    let mut ready = core.drain_ready(16);
+    ready.sort_by_key(|r| r.request_id);
+    assert_eq!(
+        ready.len(),
+        2,
+        "both queued requests must complete at stop, got {ready:?}"
+    );
+    assert_eq!(ready[0].request_id, 164_970);
+    assert_eq!(ready[1].request_id, 164_971);
+    for completion in &ready {
+        assert_eq!(
+            completion.outcome,
+            crate::slowpath_reinject_9506::ReinjectOutcome::Denied,
+            "stop-reaped request must complete as Denied, not by ack timeout (#16497)"
+        );
+    }
+    assert_eq!(
+        pool.free_count(),
+        crate::afxdp::ipsec_inner_queue::IPSEC_INNER_SLAB_CAP,
+        "stop must reclaim every slab"
+    );
+    // A second stop with nothing queued holds nothing back either.
+    coordinator.stop_inner(false);
+    assert!(!transport.has_reaped_verdicts());
+    assert!(core.drain_ready(16).is_empty());
 }

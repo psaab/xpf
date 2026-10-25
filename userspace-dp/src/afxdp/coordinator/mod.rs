@@ -1291,6 +1291,25 @@ impl Coordinator {
                 let _ = transport.join_worker_after_termination(*worker_id);
             }
         }
+        // #16497: deliver every reaped terminal recorded by the retire+join
+        // above (plus any stale-generation terminals a worker recorded just
+        // before joining) to the Go-facing completion core. Pre-fix these
+        // sat in `reaped_verdicts` undelivered until a later dead-worker
+        // sweep, so every queued D11 request at a full stop completed only
+        // by Go ack timeout and the list grew by the reaped count per stop.
+        // `self.slow_path` is still installed here (it is taken only below),
+        // and its ReinjectCore is the same core the next reconcile reuses,
+        // so the Denied completions stay valid across the stop.
+        if let (Some(transport), Some(slow)) = (
+            ipsec_inner_transport.as_ref(),
+            self.slow_path.as_ref(),
+        ) {
+            let mut verdicts = Vec::new();
+            transport.take_reaped_terminal_verdicts(&mut verdicts);
+            for verdict in verdicts {
+                let _ = slow.complete_ipsec_inner_verdict(verdict);
+            }
+        }
         // Retire holders only after all worker threads are joined. Their final
         // in-flight reservations and steering claims are now visible to sweep.
         self.retire_worker_holders(&holder_snapshots);

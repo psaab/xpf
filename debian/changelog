@@ -1,4 +1,17 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Userspace DP: deliver D11 terminals for stale-generation survivor
+    descriptors and for every stop_inner reap (#16497, #15149 residual).
+    Retiring a dead worker bumps the global worker-set generation, so
+    descriptors queued on surviving workers read stale at their next
+    drain and were dropped with no verdict; stop_inner likewise reaped
+    every queue into an undelivered verdict list. The drain stale branch
+    now records a d11_stale_generation Deny when its tombstone claim
+    wins, the worker loop delivers reaped terminals on the same pass,
+    and stop_inner drains them into the completion core after joining
+    its workers. Affected requests now complete as Denied immediately
+    instead of by the 5 ms Go ack deadline; enforcement is unchanged
+    (fail-closed either way).
+
   * Userspace DP: stop cloning counter/policer handles on live
     TX-selection walks (#16496). `merge_matched_tx_modifiers` pushed
     an `Arc::clone` of every matched term's counter and three-color
