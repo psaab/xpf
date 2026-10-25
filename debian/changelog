@@ -21,6 +21,15 @@ xpf (0.0.0) unstable; urgency=medium
     only), returned peers are filtered to the requested
     instance, and readiness requires peer.Instance ==
     requirement.vrf; the show surfaces still list all VRFs.
+  * API/mgmt-TLS: a single-entry self-signed CA:TRUE custom
+    management certificate now loads with a warning instead of
+    being rejected (#16832). The #15667 preflight rejected every
+    CA leaf, including the stock OpenSSL 3 `req -x509` output
+    (critical CA:TRUE), taking a working custom HTTPS/REST
+    certificate offline after upgrade. The exemption requires
+    RawSubject == RawIssuer and a verified self-signature; a
+    CA:TRUE leaf issued by an intermediate, or with a corrupt
+    self-signature, is still rejected fail-closed.
   * FRR/BFD: BFD profiles and peers now render only non-default
     timer lines, and an OSPFv3 BFD profile renders its bare
     `ipv6 ospf6 bfd` enable line first (#16813). bfdd elides
