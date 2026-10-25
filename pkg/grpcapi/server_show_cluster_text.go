@@ -181,6 +181,11 @@ func (s *Server) showChassisClusterStatistics(buf *strings.Builder) {
 		return
 	}
 	buf.WriteString(s.cluster.FormatStatistics())
+	if s.deltaSchemaWithheldFn != nil {
+		if n := s.deltaSchemaWithheldFn(); n > 0 {
+			fmt.Fprintf(buf, "    Session-delta schema batches withheld: %d\n", n)
+		}
+	}
 }
 
 // showChassisClusterControlPlaneStatistics renders control-plane

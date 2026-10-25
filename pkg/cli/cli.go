@@ -75,8 +75,11 @@ type CLI struct {
 	clockSkewAlarmsFn           func() []clockskew.ActiveAlarm
 	fabricAuthUnarmedAlarmFn    func() string
 	peerSnapshotProtocolAlarmFn func() string
-	feedsFn                     func() map[string]feeds.FeedInfo
-	feedsAckFn                  func(feed string, candidateID uint64, candidateHash, baselineHash string, oldCount, newCount int, actor, reason string) error
+	// deltaSchemaWithheldFn returns the daemon's #7194/#16753 withheld-batch
+	// count for `show chassis cluster statistics`. Nil when unwired.
+	deltaSchemaWithheldFn func() uint64
+	feedsFn               func() map[string]feeds.FeedInfo
+	feedsAckFn            func(feed string, candidateID uint64, candidateHash, baselineHash string, oldCount, newCount int, actor, reason string) error
 	// feedOverlayFn returns the live dynamic-address feed-prefix overlay
 	// (#3105): an address-name -> union-of-live-feed-CIDR-strings map, the same
 	// source the REST/gRPC simulators consume (daemon SnapshotForBindings). The
@@ -343,6 +346,12 @@ func (c *CLI) SetPeerSnapshotProtocolAlarmFn(fn func() string) {
 // alarm into `show system alarms`.
 func (c *CLI) SetFabricAuthUnarmedAlarmFn(fn func() string) {
 	c.fabricAuthUnarmedAlarmFn = fn
+}
+
+// SetDeltaSchemaWithheldFn wires the daemon's #7194 withheld-batch counter
+// into `show chassis cluster statistics` (#16753).
+func (c *CLI) SetDeltaSchemaWithheldFn(fn func() uint64) {
+	c.deltaSchemaWithheldFn = fn
 }
 
 // SetFeedsFn sets a callback for retrieving live dynamic address feed status.

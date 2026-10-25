@@ -15,6 +15,7 @@ import (
 // fail.
 type recordingExporter struct {
 	deltas   []dpuserspace.SessionDeltaInfo
+	status   dpuserspace.ProcessStatus
 	err      error
 	calls    int
 	gotRGIDs []int
@@ -31,7 +32,7 @@ func (r *recordingExporter) ExportOwnerRGSessionsPagedStream(rgIDs []int, sink d
 			return dpuserspace.ProcessStatus{}, 0, err
 		}
 	}
-	return dpuserspace.ProcessStatus{}, len(r.deltas), nil
+	return r.status, len(r.deltas), nil
 }
 
 func snapshot6031Daemon() (*Daemon, *cluster.SessionSync, *config.Config) {

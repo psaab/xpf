@@ -328,7 +328,20 @@ func (c *CLI) showChassisClusterStatistics() error {
 		return nil
 	}
 	fmt.Print(c.cluster.FormatStatistics())
+	c.appendDeltaSchemaWithheld()
 	return nil
+}
+
+// appendDeltaSchemaWithheld surfaces the #7194/#16753 fail-closed gate's
+// withheld-batch counter. Silent when unwired or zero, so a healthy
+// cluster's statistics are unchanged.
+func (c *CLI) appendDeltaSchemaWithheld() {
+	if c.deltaSchemaWithheldFn == nil {
+		return
+	}
+	if n := c.deltaSchemaWithheldFn(); n > 0 {
+		fmt.Printf("    Session-delta schema batches withheld: %d\n", n)
+	}
 }
 
 func (c *CLI) showChassisClusterFabricStatistics() error {
