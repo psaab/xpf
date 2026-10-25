@@ -41,6 +41,7 @@ var clusterCmds8357 = []string{
 	"set chassis cluster authentication-key aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	"set chassis cluster cluster-id 1",
 	"set chassis cluster node 0",
+	"set chassis cluster no-private-rg-election",
 	"set chassis cluster redundancy-group 1 node 0 priority 200",
 	"set chassis cluster redundancy-group 1 node 1 priority 100",
 }

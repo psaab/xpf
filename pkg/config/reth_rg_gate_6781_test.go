@@ -18,6 +18,7 @@ func rethRGGateLines(extra ...string) []string {
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster authentication-key test-cluster-psk-6781",
 		"set chassis cluster reth-count 2",
+		"set chassis cluster no-private-rg-election",
 		// #15199: RG1 must be a configured data group for the
 		// legitimate-reth controls to commit.
 		"set chassis cluster redundancy-group 1 node 0 priority 200",

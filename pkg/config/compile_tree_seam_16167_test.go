@@ -26,6 +26,7 @@ var nodeGroupsFreeFixtures16167 = []struct {
 			"set chassis cluster cluster-id 1",
 			"set chassis cluster authentication-key test-cluster-psk-16167",
 			"set chassis cluster reth-count 2",
+			"set chassis cluster no-private-rg-election",
 			"set chassis cluster redundancy-group 1 node 0 priority 200",
 			"set chassis cluster redundancy-group 1 node 1 priority 100",
 			"set interfaces ge-0/0/0 gigether-options redundant-parent reth0",

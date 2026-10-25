@@ -25,6 +25,7 @@ func TestUnkeyedClusterRejectedOnCommit_6611(t *testing.T) {
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster node 0",
 		"set chassis cluster reth-count 2",
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 	})
 	cfg, err := CompileConfig(tree)
@@ -67,6 +68,7 @@ func TestKeyedClusterCommitsClean_6611(t *testing.T) {
 		"set chassis cluster node 0",
 		"set chassis cluster reth-count 2",
 		"set chassis cluster authentication-key a-real-cluster-psk-6611",
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 	})
 	cfg, err := CompileConfig(tree)
@@ -479,6 +481,7 @@ func TestStrengthWarningNeverRendersTheKey_6611(t *testing.T) {
 			"set chassis cluster node 0",
 			"set chassis cluster reth-count 2",
 			"set chassis cluster authentication-key " + key,
+			"set chassis cluster no-private-rg-election",
 			"set chassis cluster redundancy-group 1 node 0 priority 200",
 		})
 		// #16025: short placeholder keys are strict-rejected, so exercise

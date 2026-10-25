@@ -43,7 +43,7 @@ import (
 // fixtures carry cluster-id + a >=16-char PSK + node 0 so the #6611
 // auth-length gate cannot mask the gate under test.
 func spellingBody16663(body string) map[string]string {
-	full := "cluster-id 1 authentication-key test-cluster-psk-16663-long node 0 " + body
+	full := "cluster-id 1 authentication-key test-cluster-psk-16663-long node 0 no-private-rg-election " + body
 	return clusterSpellings(full)
 }
 

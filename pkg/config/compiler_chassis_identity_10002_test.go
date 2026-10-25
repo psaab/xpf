@@ -31,6 +31,7 @@ import (
 // path — and that the drop is announced rather than silent.
 func TestTolerantPathDropsNonNumericRedundancyGroup_10002(t *testing.T) {
 	cfg, err := CompileConfigLenient(flatTreeFromSets(t,
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group reth0 node 0 priority 100"))
 	if err != nil {
 		t.Fatalf("the tolerant path must not refuse: %v", err)
@@ -75,6 +76,7 @@ func TestTolerantPathAliasDoesNotModifyRealZeroRecord_10002(t *testing.T) {
 func TestTolerantPathDropsNonNumericNodeStatement_10002(t *testing.T) {
 	t.Run("flat set", func(t *testing.T) {
 		cfg, err := CompileConfigLenient(flatTreeFromSets(t,
+			"set chassis cluster no-private-rg-election",
 			"set chassis cluster redundancy-group 1 node 0 priority 200",
 			"set chassis cluster redundancy-group 1 node 1 priority 100",
 			"set chassis cluster redundancy-group 1 node one priority 7",
@@ -92,6 +94,7 @@ func TestTolerantPathDropsNonNumericNodeStatement_10002(t *testing.T) {
 	t.Run("hierarchical packed one-liner", func(t *testing.T) {
 		cfg, err := CompileConfigLenient(hierTree(t, `chassis {
     cluster {
+        no-private-rg-election;
         redundancy-group 1 {
             node 0 priority 200;
             node foo priority 7;
@@ -131,6 +134,7 @@ func TestTolerantPathNodeAliasAloneLeavesEmptyPriorities_10002(t *testing.T) {
 // with both drops announced.
 func TestTolerantPathAliasAndNegativeDropsCompose_10002(t *testing.T) {
 	cfg, err := CompileConfigLenient(flatTreeFromSets(t,
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group 0 node 0 priority 200",
 		"set chassis cluster redundancy-group 0 node 1 priority 100",
 		"set chassis cluster redundancy-group -1 node 0 priority 200",
@@ -190,6 +194,7 @@ func TestStrictPathStillRefusesNonNumericIdentities_10002(t *testing.T) {
 // gate flags).
 func TestTolerantPathKeepsLegitimateZeroIdentities_10002(t *testing.T) {
 	cfg, err := CompileConfigLenient(flatTreeFromSets(t,
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group 0 node 0 priority 200",
 		"set chassis cluster redundancy-group 00 node 1 priority 100",
 	))
@@ -212,6 +217,7 @@ func TestStrictPathRejectsRG0Preempt_10754(t *testing.T) {
 		"set chassis cluster authentication-key test-cluster-psk-10754",
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster node 0",
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group 0 node 0 priority 200",
 		"set chassis cluster redundancy-group 0 node 1 priority 100",
 		"set chassis cluster redundancy-group 0 preempt",
@@ -253,6 +259,7 @@ func TestTolerantPathDropsQuotedEmptyNodeIdentity_10002(t *testing.T) {
 			"flat set",
 			func(t *testing.T) *ConfigTree {
 				return build5636Tree(t,
+					"set chassis cluster no-private-rg-election",
 					"set chassis cluster redundancy-group 1 node 0 priority 200",
 					`set chassis cluster redundancy-group 1 node "" priority 7`,
 				)
@@ -299,6 +306,7 @@ func TestStrictPathRejectsQuotedEmptyNodeIdentity_10002(t *testing.T) {
 			func(t *testing.T) *ConfigTree {
 				return build5636Tree(t,
 					"set chassis cluster authentication-key test-cluster-psk-6611",
+					"set chassis cluster no-private-rg-election",
 					"set chassis cluster redundancy-group 1 node 0 priority 200",
 					`set chassis cluster redundancy-group 1 node "" priority 7`,
 				)

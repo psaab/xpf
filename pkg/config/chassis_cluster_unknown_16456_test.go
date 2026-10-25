@@ -24,6 +24,7 @@ func clusterBase16456(extra ...string) []string {
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster authentication-key " + clusterPSK16456,
 		"set chassis cluster node 0",
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 		"set chassis cluster redundancy-group 1 node 1 priority 100",
 		"set chassis cluster redundancy-group 1 interface-monitor ge-0/0/1 weight 255",
@@ -69,6 +70,7 @@ const hierBase16456 = `chassis {
         cluster-id 1;
         authentication-key test-cluster-psk-16456-long;
         node 0;
+        no-private-rg-election;
         redundancy-group 1 {
             node 0 priority 200;
             node 1 priority 100;
@@ -88,6 +90,7 @@ func TestChassisClusterUnknownStatements16456(t *testing.T) {
 	}{
 		// RG level: the acceptance spellings (flat-set shape).
 		{"flat interface-monitr", flat16456(clusterBase16456(
+			"set chassis cluster no-private-rg-election",
 			"set chassis cluster redundancy-group 1 interface-monitr ge-0/0/2 weight 255")...), "interface-monitr"},
 		{"flat interface-monitors", flat16456(clusterBase16456(
 			"set chassis cluster redundancy-group 1 interface-monitors ge-0/0/2 weight 255")...), "interface-monitors"},
@@ -100,9 +103,9 @@ func TestChassisClusterUnknownStatements16456(t *testing.T) {
 		{"flat xpfbogus in RG", flat16456(clusterBase16456(
 			"set chassis cluster redundancy-group 1 xpfbogus 5")...), "xpfbogus"},
 		// RG level: hierarchical shapes (container + packed instance line).
-		{"hier interface-monitr", hier16456(`chassis { cluster { cluster-id 1; authentication-key test-cluster-psk-16456-long; node 0; redundancy-group 1 { node 0 priority 200; interface-monitr ge-0/0/2 weight 255; } } }`), "interface-monitr"},
-		{"hier preemt", hier16456(`chassis { cluster { cluster-id 1; authentication-key test-cluster-psk-16456-long; node 0; redundancy-group 1 { node 0 priority 200; preemt; } } }`), "preemt"},
-		{"hier ip-monitorng", hier16456(`chassis { cluster { cluster-id 1; authentication-key test-cluster-psk-16456-long; node 0; redundancy-group 1 { node 0 priority 200; ip-monitorng { family inet 10.0.0.1 weight 100; } } } }`), "ip-monitorng"},
+		{"hier interface-monitr", hier16456(`chassis { cluster { cluster-id 1; authentication-key test-cluster-psk-16456-long; node 0; no-private-rg-election; redundancy-group 1 { node 0 priority 200; interface-monitr ge-0/0/2 weight 255; } } }`), "interface-monitr"},
+		{"hier preemt", hier16456(`chassis { cluster { cluster-id 1; authentication-key test-cluster-psk-16456-long; node 0; no-private-rg-election; redundancy-group 1 { node 0 priority 200; preemt; } } }`), "preemt"},
+		{"hier ip-monitorng", hier16456(`chassis { cluster { cluster-id 1; authentication-key test-cluster-psk-16456-long; node 0; no-private-rg-election; redundancy-group 1 { node 0 priority 200; ip-monitorng { family inet 10.0.0.1 weight 100; } } } }`), "ip-monitorng"},
 		// Cluster level: misspelt cluster statements and the RG keyword itself.
 		{"flat redundancy-grup", flat16456(
 			"set chassis cluster cluster-id 1",
@@ -132,11 +135,12 @@ func TestChassisClusterControlCompiles16456(t *testing.T) {
 		build func(*testing.T) *ConfigTree
 	}{
 		{"flat control", flat16456(clusterBase16456(
+			"set chassis cluster no-private-rg-election",
 			"set chassis cluster redundancy-group 1 preempt",
 			"set chassis cluster redundancy-group 1 ip-monitoring global-weight 255",
 			"set chassis cluster redundancy-group 1 ip-monitoring family inet 10.0.0.1 weight 100")...)},
 		{"hier control", hier16456(hierBase16456)},
-		{"hier packed control", hier16456(`chassis { cluster { cluster-id 1; authentication-key test-cluster-psk-16456-long; node 0; redundancy-group 1 node 0 priority 200 preempt; } }`)},
+		{"hier packed control", hier16456(`chassis { cluster { cluster-id 1; authentication-key test-cluster-psk-16456-long; node 0; no-private-rg-election; redundancy-group 1 node 0 priority 200 preempt; } }`)},
 		{"hier packed cluster control", hier16456(`chassis { cluster cluster-id 1 authentication-key test-cluster-psk-16456-long node 0 heartbeat-interval 200; }`)},
 	}
 	for _, tc := range controls {
@@ -177,6 +181,7 @@ func TestChassisClusterControlCompiles16456(t *testing.T) {
 // line stays dropped) — only the warning is new (#1960).
 func TestChassisClusterLenientKeepsShape16456(t *testing.T) {
 	cfg := assertLenientWarns16456(t, buildTree(t, clusterBase16456(
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group 1 interface-monitr ge-0/0/2 weight 255")), "interface-monitr")
 	rg := onlyRG6588(t, cfg)
 	if len(rg.InterfaceMonitors) != 2 {
@@ -204,8 +209,8 @@ func TestChassisClusterDeclaredAndMetaStayClean16456(t *testing.T) {
 			"set chassis cluster redundancy-group 1 strict-vip-ownership",
 			"set chassis cluster redundancy-group 1 allow-degraded-routing-takeover",
 			"set chassis cluster redundancy-group 1 ip-monitoring global-threshold 100")...)},
-		{"apply-macro in RG", hier16456(`chassis { cluster { cluster-id 1; authentication-key test-cluster-psk-16456-long; node 0; redundancy-group 1 { node 0 priority 200; apply-macro M { k v; } } } }`)},
-		{"apply-macro in cluster", hier16456(`chassis { cluster { cluster-id 1; authentication-key test-cluster-psk-16456-long; node 0; apply-macro M { k v; } redundancy-group 1 { node 0 priority 200; } } }`)},
+		{"apply-macro in RG", hier16456(`chassis { cluster { cluster-id 1; authentication-key test-cluster-psk-16456-long; node 0; no-private-rg-election; redundancy-group 1 { node 0 priority 200; apply-macro M { k v; } } } }`)},
+		{"apply-macro in cluster", hier16456(`chassis { cluster { cluster-id 1; authentication-key test-cluster-psk-16456-long; node 0; no-private-rg-election; apply-macro M { k v; } redundancy-group 1 { node 0 priority 200; } } }`)},
 		{"hier control", hier16456(hierBase16456)},
 	}
 	for _, tc := range clean {
@@ -227,6 +232,7 @@ func TestChassisClusterDeclaredAndMetaStayClean16456(t *testing.T) {
 		"set apply-groups G",
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster authentication-key " + clusterPSK16456,
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 	}), "preemt")
 	// The lenient flag must be registered or the tolerant path bricks.

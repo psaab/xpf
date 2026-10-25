@@ -28,6 +28,7 @@ func ifMonNameSetLines(iface string, extra ...string) []string {
 	lines := []string{
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster authentication-key test-cluster-psk-6611",
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 		"set chassis cluster redundancy-group 1 interface-monitor " + iface + " weight 255",
 	}
@@ -204,6 +205,7 @@ chassis {
     cluster {
         cluster-id 1;
         authentication-key test-cluster-psk-6611;
+        no-private-rg-election;
         redundancy-group 1 {
             node 0 priority 200;
             interface-monitor ge-0/0/0 weight 255;
@@ -220,6 +222,7 @@ chassis {
     cluster {
         cluster-id 1;
         authentication-key test-cluster-psk-6611;
+        no-private-rg-election;
         redundancy-group 1 {
             node 0 priority 200;
             interface-monitor ge-0/0/0 weight 255;
@@ -236,6 +239,7 @@ chassis {
     cluster {
         cluster-id 1;
         authentication-key test-cluster-psk-6611;
+        no-private-rg-election;
         redundancy-group 1 {
             node 0 priority 200;
             interface-monitor ge-0/0/0 weight 255;

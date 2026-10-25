@@ -37,6 +37,7 @@ func rgSpellingSetLines(spellings ...string) []string {
 	// carries a different statement, so a record that displaces another is
 	// visibly missing one half.
 	lines = append(lines,
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group "+spellings[0]+" node 0 priority 200",
 		"set chassis cluster redundancy-group "+spellings[0]+" node 1 priority 100")
 	for _, s := range spellings[1:] {
@@ -118,6 +119,7 @@ func TestRepeatedHierarchicalRGBlockCompilesToOneRecord(t *testing.T) {
         redundancy-group 1 {
             node 0 priority 200;
         }
+        no-private-rg-election;
         redundancy-group 1 {
             preempt;
         }
@@ -152,6 +154,7 @@ func TestDistinctRGIDsAreNotMerged(t *testing.T) {
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster authentication-key test-cluster-psk-6543",
 		"set chassis cluster node 0",
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group 0 node 0 priority 200",
 		"set chassis cluster redundancy-group 1 node 0 priority 150",
 		"set chassis cluster redundancy-group 2 node 0 priority 100",
@@ -185,6 +188,7 @@ func TestPriorityRangeGateSeesTheMergedRecord(t *testing.T) {
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster authentication-key test-cluster-psk-6543",
 		"set chassis cluster node 0",
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group 01 node 0 priority 255",
 		"set chassis cluster redundancy-group 1 preempt",
 	}

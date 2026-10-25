@@ -209,7 +209,15 @@ the userspace dataplane admission boundary is in
 
 - **Chassis cluster**: compiler default is private-RG election over the control
   link; RETH VRRP is suppressed (`compileChassis` in `pkg/config/compiler_chassis.go` — `PrivateRGElection` default;
-  `pkg/vrrp/vrrp.go:153-156`). Heartbeat staleness is interval × threshold,
+  `pkg/vrrp/vrrp.go:153-156`). Under private-RG election a cluster with
+  redundancy groups must set BOTH `control-interface` and `peer-address`:
+  the heartbeat is the only peer detector and starts only with the complete
+  pair, so strict commit rejects an incomplete pair (#16746 —
+  dual-primary when `control-interface` is absent, permanent no-primary
+  when only `peer-address` is absent; `validateChassisClusterStrict` in
+  `pkg/config/compiler_validate_strict_chassis.go`). The legacy
+  fabric-transport shape must set `no-private-rg-election` so RETH VRRP
+  arbitrates instead. Heartbeat staleness is interval × threshold,
   configured with `set chassis cluster heartbeat-interval <ms>` and
   `set chassis cluster heartbeat-threshold <n>`: 100ms × 5 = 500ms at runtime
   defaults or 200ms × 5 = 1s in the deployed lab config. While sync is

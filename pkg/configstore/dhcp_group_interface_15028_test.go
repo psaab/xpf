@@ -10,7 +10,7 @@ import (
 // interface refs that resolve to one kernel device must be rejected
 // naming both refs, and the valid control in the same shape must pass.
 func TestCheckTextRefusesDuplicateDHCPGroupInterface15028(t *testing.T) {
-	cluster := "chassis { cluster { authentication-key test-cluster-psk-15028; node 0; reth-count 2; redundancy-group 1 { node 0 priority 200; node 1 priority 100; } } } " +
+	cluster := "chassis { cluster { authentication-key test-cluster-psk-15028; node 0; reth-count 2; no-private-rg-election; redundancy-group 1 { node 0 priority 200; node 1 priority 100; } } } " +
 		"interfaces { ge-0/0/1 { gigether-options { redundant-parent reth1; } } " +
 		"reth1 { redundant-ether-options { redundancy-group 1; } unit 0 { family inet { address 10.0.61.1/24; } } } " +
 		"ge-0/0/2 { unit 0 { family inet { address 10.0.62.1/24; } } } } "

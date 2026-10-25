@@ -24,9 +24,12 @@ import (
 // sequential ids 0..n-1, each with a well-formed node priority so the compiler
 // materializes a RedundancyGroup instance.
 func rgSetLines(n int) []string {
-	lines := make([]string, 0, n+2)
+	lines := make([]string, 0, n+3)
 	lines = append(lines, "set chassis cluster cluster-id 1")
 	lines = append(lines, "set chassis cluster authentication-key test-cluster-psk-6611")
+	// #16746: opt out of private-RG election so the wire-width gates
+	// below are the first error, not the complete-control-link gate.
+	lines = append(lines, "set chassis cluster no-private-rg-election")
 	for i := 0; i < n; i++ {
 		lines = append(lines,
 			fmt.Sprintf("set chassis cluster redundancy-group %d node 0 priority 100", i))
@@ -64,6 +67,7 @@ func TestChassisRedundancyGroupIDFailsCommit(t *testing.T) {
 	tree := buildTree(t, []string{
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster authentication-key test-cluster-psk-6611",
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group 300 node 0 priority 100",
 	})
 
@@ -111,6 +115,7 @@ func TestChassisRedundancyGroupInRangeCommits(t *testing.T) {
 	boundary := buildTree(t, []string{
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster authentication-key test-cluster-psk-6611",
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group 0 node 0 priority 200",
 		fmt.Sprintf("set chassis cluster redundancy-group %d node 1 priority 100", MaxRedundancyGroups-1),
 	})
