@@ -865,6 +865,17 @@ pub(crate) fn worker_loop(
                     &mut ipsec_inner_completions,
                     IPSEC_INNER_DRAIN_BUDGET,
                 );
+                // #16497: deliver stale-generation / reaped terminals
+                // recorded into `reaped_verdicts` (by this worker's own
+                // `drain_worker` stale branch, or by a retire/join that
+                // raced this pass). They already won tombstone accounting
+                // and have no active entry, so they bypass
+                // `drain_verdicts_into`; completing them here is what makes
+                // a survivor's stale request finish as Denied on this pass
+                // instead of by Go ack timeout.
+                let mut reaped_verdicts = Vec::new();
+                transport.take_reaped_terminal_verdicts(&mut reaped_verdicts);
+                ipsec_inner_completions.extend(reaped_verdicts);
                 if let Some(slow_path) = slow_path.as_ref() {
                     for verdict in ipsec_inner_completions.drain(..) {
                         let _ = slow_path.complete_ipsec_inner_verdict(verdict);

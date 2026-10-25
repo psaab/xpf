@@ -299,7 +299,15 @@ Differences that matter (#1881):
   `join_worker_after_termination(id)` (the thread has exited) and delivers
   the reaped requests' terminal Deny verdicts to the completion core, so the
   router stops hashing IPsec-inner flows to the dead worker and admitted
-  requests complete as Denied instead of by ack timeout. The `dead` gate
+  requests complete as Denied instead of by ack timeout. Since #16497 the
+  retire's GLOBAL generation bump no longer orphans the survivors' queues:
+  a survivor's `drain_worker` records a `d11_stale_generation` Deny for
+  each descriptor stamped with the old generation (tombstone claim wins)
+  and its worker loop delivers reaped terminals on the same pass; and
+  `stop_inner` drains `take_reaped_terminal_verdicts` into
+  `complete_ipsec_inner_verdict` right after its retire+join loops, so a
+  full stop leaves zero undelivered verdicts instead of growing the list
+  by the reaped count per stop. The `dead` gate
   keeps this repair limited to panicked workers. The teardown-wide
   `retire_all_worker_holders` sweep runs after `workers.stop_and_clear` has
   joined its workers; vacating non-dead slots during teardown remains

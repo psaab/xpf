@@ -1841,6 +1841,11 @@ pub(crate) struct IpsecInnerWorkerTransport {
     /// entry verdict drain; the coordinator sweep drains them to the
     /// Go-facing completion core.
     reaped_verdicts: Mutex<Vec<IpsecInnerVerdict>>,
+    reaped_count: std::sync::atomic::AtomicUsize,
+    /// #16497: exact `reaped_verdicts` depth (mutated alongside every push /
+    /// take of that Vec). The worker poll gate reads it with an atomic load
+    /// only, so an undelivered reaped/stale terminal can never be hidden
+    /// behind the idle gate, and the gate stays lock-free when empty.
     /// #15151: serializes every ArcSwap read-modify-write publish
     /// (queues/active/uncertain) plus `retired`. Never held across
     /// adjudication; the idle poll path never takes it.
@@ -1881,6 +1886,7 @@ impl IpsecInnerWorkerTransport {
             active_count: std::sync::atomic::AtomicUsize::new(0),
             retired: Mutex::new(BTreeMap::new()),
             reaped_verdicts: Mutex::new(Vec::new()),
+            reaped_count: std::sync::atomic::AtomicUsize::new(0),
             lifecycle_lock: Mutex::new(()),
         }
     }
@@ -1909,7 +1915,22 @@ impl IpsecInnerWorkerTransport {
         self.worker_pending(worker_id).unwrap_or(0) != 0
             || self.verdicts.has_pending()
             || self.uncertain_count.load(Ordering::Acquire) != 0
+            || self.reaped_count.load(Ordering::Acquire) != 0
     }
+
+    /// #16497: lock-free check for an undelivered reaped/stale terminal.
+    pub(crate) fn has_reaped_verdicts(&self) -> bool {
+        self.reaped_count.load(Ordering::Acquire) != 0
+    }
+
+    fn push_reaped_verdict(&self, verdict: IpsecInnerVerdict) {
+        self.reaped_verdicts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(verdict);
+        self.reaped_count.fetch_add(1, Ordering::Release);
+    }
+
 
     /// Prepare a queue before its worker is spawned. Preparation never
     /// publishes the worker-set authority; the complete live set is published
@@ -2071,7 +2092,12 @@ impl IpsecInnerWorkerTransport {
             let desc = batch.batches[batch_index][read_index].clone();
             // The worker-set generation may rotate after admission but before
             // this poll. Such a descriptor is stale E4 and must never reach
-            // D13/D14.
+            // D13/D14. #16497: when the tombstone claim wins (the descriptor
+            // was not already terminalized by a worker verdict), record the
+            // same terminal Deny the reaper records, so the worker loop can
+            // deliver it on this same pass instead of leaving the Go-facing
+            // request to complete only by ack timeout. A survivor stays live,
+            // so no coordinator sweep will ever drain these on its behalf.
             if IpsecInnerRouter::check_generation(
                 &self.authority,
                 worker_id,
@@ -2080,9 +2106,23 @@ impl IpsecInnerWorkerTransport {
             .is_err()
                 || !self.pool.mark_worker_owned(desc.slab_id)
             {
-                self.tombstones.claim_stale(desc.request_id);
+                // Distinguish the two arms: a descriptor whose slab was
+                // already taken (mark_worker_owned loses) keeps the
+                // pre-#16497 silent-drop shape only when its request was not
+                // terminalized here; the generation-stale arm is the one
+                // whose request is still Queued in the completion core.
+                let claimed = self.tombstones.claim_stale(desc.request_id);
                 self.pool.force_release(desc.slab_id);
                 self.router.release(desc.flow_tag);
+                if claimed {
+                    self.push_reaped_verdict(IpsecInnerVerdict::Deny {
+                        request_id: desc.request_id,
+                        connection_id: desc.connection_id,
+                        stage: "d11_stale_generation",
+                        reason: reason::STALE_GENERATION,
+                        policy_id: 0,
+                    });
+                }
                 continue;
             }
             if taken != read_index {
@@ -2260,16 +2300,13 @@ impl IpsecInnerWorkerTransport {
                 // not by ack timeout. Recorded here because this reap is
                 // the terminalization point; the coordinator sweep drains
                 // these via `take_reaped_terminal_verdicts`.
-                self.reaped_verdicts
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(IpsecInnerVerdict::Deny {
-                        request_id: desc.request_id,
-                        connection_id: desc.connection_id,
-                        stage: "d11_worker_dead",
-                        reason: reason::SUBMIT_UNAVAILABLE,
-                        policy_id: 0,
-                    });
+                self.push_reaped_verdict(IpsecInnerVerdict::Deny {
+                    request_id: desc.request_id,
+                    connection_id: desc.connection_id,
+                    stage: "d11_worker_dead",
+                    reason: reason::SUBMIT_UNAVAILABLE,
+                    policy_id: 0,
+                });
                 reaped += 1;
             }
         }
@@ -2330,16 +2367,13 @@ impl IpsecInnerWorkerTransport {
                 // must remain the single terminal, so no Deny is recorded
                 // when the claim loses.
                 if self.tombstones.claim_stale(entry.desc.request_id) {
-                    self.reaped_verdicts
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .push(IpsecInnerVerdict::Deny {
-                            request_id: entry.desc.request_id,
-                            connection_id: entry.desc.connection_id,
-                            stage: "d11_worker_dead",
-                            reason: reason::SUBMIT_UNAVAILABLE,
-                            policy_id: 0,
-                        });
+                    self.push_reaped_verdict(IpsecInnerVerdict::Deny {
+                        request_id: entry.desc.request_id,
+                        connection_id: entry.desc.connection_id,
+                        stage: "d11_worker_dead",
+                        reason: reason::SUBMIT_UNAVAILABLE,
+                        policy_id: 0,
+                    });
                 }
                 self.pool
                     .reclaim_after_worker_death(entry.desc.slab_id);
@@ -2374,6 +2408,8 @@ impl IpsecInnerWorkerTransport {
             .unwrap_or_else(|e| e.into_inner());
         let taken = reaped.len();
         out.extend(reaped.drain(..));
+        drop(reaped);
+        self.reaped_count.store(0, Ordering::Release);
         taken
     }
 }
