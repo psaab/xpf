@@ -1,7 +1,7 @@
 package daemon
 
 // daemon_nft_netlink_parity_test.go is the #6387 PR-2 T1 ruleset-parity CI — the
-// SECURITY MERGE GATE. It proves the additive pkg/nftables netlink installer is
+// SECURITY MERGE GATE. It proves the production pkg/nftables netlink installer is
 // ruleset-equivalent to the CURRENT exec-`nft` payload builders in
 // daemon_nft.go (the ORACLE) for a construct-complete matrix (§9 / §12.1):
 //
