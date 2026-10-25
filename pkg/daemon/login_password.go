@@ -403,6 +403,14 @@ func claimOwnership(dir, name string, uid int) (ownershipClaim, error) {
 // rollback withdraws a claim this pass created, after the credential mutation
 // it was claiming has FAILED. It is a no-op for a claim that already existed.
 //
+// #16830: the withdrawal is itself a host mutation. A superseded owner
+// (errHostAuthStaleOwner14969) must abstain entirely: the marker it would
+// remove may now be the only record that a newer authority wrote/revokes
+// the credential (claimOwnershipFenced14969 reads preExisting before the
+// newer authority ran), so an unfenced os.Remove here deletes the newer
+// authority's provenance and orphans its live key/password. Route through
+// the fenced helper like every other marker removal.
+//
 // Best-effort by construction: the alternative to a failed removal is leaving
 // the overclaim in place, which is what this exists to prevent, and the caller
 // is already reporting the mutation failure that triggered it.
@@ -410,7 +418,7 @@ func (c ownershipClaim) rollback() {
 	if c.preExisting || c.dir == "" {
 		return
 	}
-	if err := removeProvenanceMarker(c.dir, c.name); err != nil {
+	if err := removeProvenanceMarkerFenced14969(c.dir, c.name); err != nil {
 		slog.Warn("could not withdraw ownership marker after a failed credential "+
 			"mutation; xpf may later revoke a credential it does not own",
 			"dir", c.dir, "name", c.name, "err", err)

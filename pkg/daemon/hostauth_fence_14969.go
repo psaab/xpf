@@ -14,7 +14,8 @@ import (
 
 // hostauth_fence_14969.go — #14969: generation fence for abandoned
 // host-auth closeout owners; #15539 extends it to every direct
-// write/install seam (the #15219 residual).
+// write/install seam (the #15219 residual); #16830 extends it to every
+// COMPENSATING seam (rollback / restore / revert).
 //
 // runHostAuthCloseoutOwners abandons an owner goroutine when the shared
 // budget expires. Since #14356 that abandonment also happens on LIVE
@@ -50,6 +51,18 @@ import (
 //     token, the stale seam returns errHostAuthStaleOwner14969 WITHOUT
 //     performing the syscall, and the owner abstains (its closeout
 //     outcome is already the fail-visible timed-out error).
+//   - Compensating seams are mutations too (#16830): ownershipClaim.
+//     rollback (login_password.go), restoreSSHPAMFaillockOnRollback
+//     and the PAM install write (ssh_faillock_11492.go, via the fenced
+//     sshdPAMWriteFile), and the drop-in revertDropIn (via the already
+//     fenced sshdWriteFile/sshdRemoveFile) must all abstain once
+//     superseded — otherwise the compensation withdraws the provenance
+//     marker or faillock the newer authority just installed, and a
+//     later revocation is marker-gated off a key that stays live. The
+//     exec seam's completed-child arm supports this: a child that
+//     finished before supersession was observed reports
+//     errHostAuthExecCompletedSuperseded16830 (not the stale sentinel),
+//     so callers do not roll back a mutation that may have landed.
 //   - A stale seam that passed its check before the newer authority
 //     began is ordered before that authority; the newer authority's own
 //     seam overwrites it. The newest authority therefore always wins,
