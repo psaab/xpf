@@ -16,10 +16,13 @@ import (
 // (#3751, #3756, #7223, #4423) are a body of rules that reads as one subject
 // and was previously separated from itself by the worker and lifecycle code.
 //
-// LOCK ORDER: everything here runs under e.mu, the evaluation/runtime lock.
+// LOCK ORDER: everything here runs under e.mu, the evaluation/runtime lock,
+// and e.mu is NEVER released mid-evaluation (#16645).
 // e.mu and enqueueMu (queue.go) are NEVER NESTED — nothing in this file may
 // call into queue admission while holding e.mu. See the matching note in
-// queue.go and on the Engine struct in engine.go.
+// queue.go and on the Engine struct in engine.go. Cooldown parks captured
+// under e.mu are inserted under pendingMu only after e.mu is released
+// (insertDeferredCooldownParks), so pendingMu is never taken under e.mu here.
 
 // maxThenCommands bounds clone-and-stamp work for each remediation batch.
 const maxThenCommands = 8
@@ -96,14 +99,28 @@ func (e *Engine) cooldownRemainingLocked(rt *policyRuntime, now time.Time) time.
 	return 0
 }
 
-// maybeDeferCooldownLocked parks a cooldown-suppressed edge (#15021). Caller holds e.mu.
+// deferredCooldownPark is a cooldown edge captured under e.mu (#15021)
+// for insertion under pendingMu after evaluateEventMode has released e.mu
+// (#16645).
+type deferredCooldownPark struct {
+	key  string
+	edge deferredEdge
+}
+
+// captureDeferCooldownLocked captures a cooldown-suppressed edge (#15021)
+// under e.mu. It NEVER releases e.mu: the planned action is built from the
+// live pol and the CURRENT e.semRev[pol.Name] while both are still the
+// generation evaluate is iterating (#16645). The caller collects the park
+// and inserts it under pendingMu after evaluate returns (see
+// insertDeferredCooldownParks), so a concurrent ApplyWithConfig cannot
+// interleave and pair the old policy's commands/plant class with the new
+// semantic revision.
 // matched records the evaluate-time withinMatches verdict for this exact event
 // (#16848/#15945): the drain must replay the crossing verdict, not re-decide it
 // against a window that may have decayed (short window < cooldown) or filled
 // past the trigger-until ceiling (events windowed while parked, #16641) in the
 // 30 s wait. The drain still re-checks revision / liveness only.
-// It unlocks e.mu internally to take pendingMu, then relocks.
-func (e *Engine) maybeDeferCooldownLocked(pol *config.EventPolicy, rt *policyRuntime, ev rpm.Event, now time.Time, matched bool) {
+func (e *Engine) captureDeferCooldownLocked(pol *config.EventPolicy, rt *policyRuntime, ev rpm.Event, now time.Time, matched bool) *deferredCooldownPark {
 	e.counters.cooldownSuppressed.Add(1)
 	if rt.suppressedDirection == nil {
 		rt.suppressedDirection = make(map[string]struct{})
@@ -115,23 +132,34 @@ func (e *Engine) maybeDeferCooldownLocked(pol *config.EventPolicy, rt *policyRun
 	trig := len(pol.WithinClauses) == 0 || policyHasTriggerOn(pol)
 	ops, ok := e.classifyPlanLocked(pol)
 	if !ok || len(ops) == 0 {
-		e.startDeferredWorker()
-		e.nudgePending()
-		return
+		return nil
 	}
 	a := plannedAction{policyName: pol.Name, semRev: e.semRev[pol.Name], policyOrder: e.policyOrder[pol.Name], plantClass: pol.PlantClass, event: ev.Name, testOwner: ev.TestOwner, testName: ev.TestName, ops: ops}
-	key := pol.Name + "\x00" + ev.Name
-	e.mu.Unlock()
+	return &deferredCooldownPark{key: pol.Name + "\x00" + ev.Name, edge: deferredEdge{action: a, evName: ev.Name, triggers: trig, matched: matched, hasMatched: true}}
+}
+
+// insertDeferredCooldownParks inserts edges captured under e.mu into
+// pending.cooldown under pendingMu. Called after evaluateEventMode has
+// released e.mu. The first park for a (policy,event) key wins, matching the
+// pre-#16645 semantics.
+func (e *Engine) insertDeferredCooldownParks(parks []*deferredCooldownPark) {
+	if len(parks) == 0 {
+		return
+	}
 	e.pendingMu.Lock()
 	if e.pending.cooldown == nil {
 		e.pending.cooldown = make(map[string]deferredEdge)
 	}
-	if _, exists := e.pending.cooldown[key]; !exists {
-		e.pending.cooldown[key] = deferredEdge{action: a, evName: ev.Name, triggers: trig, matched: matched, hasMatched: true}
-		e.counters.pendingDeferred.Add(1)
+	for _, p := range parks {
+		if p == nil {
+			continue
+		}
+		if _, exists := e.pending.cooldown[p.key]; !exists {
+			e.pending.cooldown[p.key] = p.edge
+			e.counters.pendingDeferred.Add(1)
+		}
 	}
 	e.pendingMu.Unlock()
-	e.mu.Lock()
 	e.startDeferredWorker()
 	e.nudgePending()
 }
@@ -163,9 +191,19 @@ func (e *Engine) evaluateEvent(ev rpm.Event) []triggeredPolicy {
 // evaluateEventMode: live=false defers cooldown edges; live=true proceeds
 // past cooldown (reserved for in-worker replays, #15021).
 func (e *Engine) evaluateEventMode(ev rpm.Event, live bool) []triggeredPolicy {
+	triggered, parks := e.evaluateEventLocked(ev, live)
+	e.insertDeferredCooldownParks(parks)
+	return triggered
+}
+
+// evaluateEventLocked runs the whole evaluation under e.mu (#16645) and
+// returns any cooldown parks captured along the way; the caller inserts
+// them under pendingMu only after e.mu is released.
+func (e *Engine) evaluateEventLocked(ev rpm.Event, live bool) ([]triggeredPolicy, []*deferredCooldownPark) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	var triggered []triggeredPolicy
+	var parks []*deferredCooldownPark
 	now := e.now()
 	for _, pol := range e.eventIndex[ev.Name] {
 		if pol == nil {
@@ -230,7 +268,9 @@ func (e *Engine) evaluateEventMode(ev rpm.Event, live bool) []triggeredPolicy {
 				// level). Only a genuine crossing is deferred.
 				continue
 			}
-			e.maybeDeferCooldownLocked(pol, rt, ev, now, matched)
+			if park := e.captureDeferCooldownLocked(pol, rt, ev, now, matched); park != nil {
+				parks = append(parks, park)
+			}
 			continue
 		}
 		if !matched {
@@ -255,7 +295,7 @@ func (e *Engine) evaluateEventMode(ev rpm.Event, live bool) []triggeredPolicy {
 			pol: pol, semRev: e.semRev[pol.Name], order: e.policyOrder[pol.Name],
 		})
 	}
-	return triggered
+	return triggered, parks
 }
 
 // attributesMatch checks if the event attributes match the policy's filters.
