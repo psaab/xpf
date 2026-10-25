@@ -565,11 +565,13 @@ zone denial (#16018 A7-03); the warning is WARN-only on every path.
   (`pkg/daemon/daemon_run_bringup.go:260-261`;
   `pkg/vrrp/manager.go:355-379`). `preemptNowCh` triggers instant
   preemption when sync completes early.
-- A non-preempting BACKUP that has heard no peer advertisement arms the 3s
-  deafness shield at process start and at sync-hold release; it is reset to the
-  normal master-down timer on the first received advert
+- A non-preempting BACKUP that has heard no peer advertisement arms
+  `max(3s, masterDownInterval())` at process start and at sync-hold release
+  (#16768: the 3s deafness shield is a floor, never a replacement for the
+  RFC horizon at long advertise intervals); it is reset to the normal
+  master-down timer on the first received advert
   (`pkg/vrrp/instance.go:71-93`;
-  `pkg/vrrp/instance_timing.go:11-41`;
+  `pkg/vrrp/instance_timing.go:11-51`;
   `pkg/vrrp/instance_rx.go:151-173`).
 - Sync-hold preempt gate (#2082): the non-force `preemptNowCh` shortcut
   is peer-priority gated. `becomeMaster()` runs on the kick only when the
