@@ -1274,9 +1274,39 @@ func (m *Manager) UpdatePolicyScheduleStateWithLatch(cfg *config.Config, activeS
 		return nil
 	}
 	if m.proc == nil || m.proc.Process == nil {
-		// #3780: the helper is not running, so no snapshot is being
-		// enforced — there is no stale permit to converge. The helper
-		// restart path re-applies the last snapshot. Converged.
+		// #16643: the helper is down, so nothing is enforced right now —
+		// but the restart path replays m.lastSnapshot verbatim
+		// (syncSnapshotLocked), so returning "converged" here would lose
+		// this transition: the restarted helper would re-enforce the
+		// stale inactive bits and later converged ticks only heartbeat.
+		// Fold the desired scheduler sections into the retained snapshot
+		// (without advancing published/applied bookkeeping — the helper
+		// has not accepted it) so the restart replay carries the new
+		// bits. The #3780 no-snapshot arm above still returns nil: with
+		// no retained snapshot the next full apply publishes the staged
+		// desired state.
+		next, _ := m.cloneRetainedSnapshotLocked()
+		next.Config = cfg
+		next.schedulerActiveState = copyPolicySchedulerActiveState(activeCopy)
+		next.schedulerActiveStateSet = true
+		resampled := m.resampleUnresolvedSectionsLocked(&next) // #9684
+		if err := m.rebuildScheduledPolicySectionsWithLatchLocked(&next, cfg, activeCopy, failClosed); err != nil {
+			slog.Warn("userspace: retaining prior snapshot; scheduler transition could not be folded in while helper is down", "err", err)
+			return fmt.Errorf("userspace: %w", err)
+		}
+		m.refreshCaptureAuthorityLocked(&next)
+		m.recordPolicyContentRejectionLocked(next.Capabilities.PolicyContentRejected)
+		// A retained-only fold is not a publication: do not resolve
+		// partial-outcome marks (the helper accepted nothing) and do not
+		// touch publishedSnapshot/lastSnapshotHash/applied identity. The
+		// generation bump makes the restart tick see unpublished work;
+		// syncSnapshotLocked's publish re-samples any unresolved section.
+		_ = resampled
+		m.bumpRetainedGenerationLocked(&next)
+		m.adoptPublishedGenerationLocked(&next, next.Generation)
+		m.lastSnapshot = &next
+		m.rebuildNeighborIndex()
+		m.rebuildMonitoredIfindexes()
 		return nil
 	}
 
