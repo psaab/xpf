@@ -140,6 +140,8 @@ jobs:
           command -v vtysh
       - name: Build all Go packages
         run: go build ./...
+      - name: Check scoped nftables and daemon netlink deadcode
+        run: make check-nft-deadcode
       - name: Test affected Go packages
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}

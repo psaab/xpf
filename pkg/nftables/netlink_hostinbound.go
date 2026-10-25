@@ -555,39 +555,6 @@ func emitHostInboundNonUnicastScopeNetlink(p *nlPlan, v HostInboundZoneView, f n
 	scoped().emit(verdictDrop()...)
 }
 
-// emitHostInboundMulticastFenceDropsNetlink keeps the host-inbound cold-boot
-// fence fail-closed for every catalog group.
-func emitHostInboundMulticastFenceDropsNetlink(p *nlPlan, views []HostInboundZoneView, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string) {
-	ambiguous := hostInboundAmbiguousIngressNetdevs(views)
-	for _, f := range []nlFamily{famV4, famV6} {
-		groups := config.HostInboundMulticastGroupsForFamily(familyToken(f))
-		if len(groups) == 0 {
-			continue
-		}
-		if len(unzonedIngressVRFSlaves) > 0 {
-			p.rule().sdifname(unzonedIngressVRFSlaves).daddr(f, groups, false).emit(verdictDrop()...)
-		}
-		if len(ambiguous) > 0 {
-			p.rule().iifname(ambiguous).daddr(f, groups, false).emit(verdictDrop()...)
-		}
-		if len(unzonedIngressNetdevs) > 0 {
-			p.rule().iifname(unzonedIngressNetdevs).daddr(f, groups, false).emit(verdictDrop()...)
-		}
-		for _, v := range views {
-			direct := hostInboundDirectIngressNetdevs(v)
-			if len(direct) > 0 {
-				p.rule().iifname(direct).daddr(f, groups, false).emit(verdictDrop()...)
-			}
-			for _, scope := range v.IngressVRFScopes {
-				if scope.Master != "" && len(scope.Slaves) > 0 {
-					p.rule().iifname([]string{scope.Master}).sdifname(scope.Slaves).
-						daddr(f, groups, false).emit(verdictDrop()...)
-				}
-			}
-		}
-	}
-}
-
 // emitHostInboundNonUnicastFenceDropsNetlink blocks limited broadcast and
 // IPv6 link-scope multicast until the current host-inbound generation is live.
 // The caller places mandatory ND/MLD admits before this and established flows
