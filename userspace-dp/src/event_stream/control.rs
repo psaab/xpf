@@ -169,6 +169,11 @@ pub(super) fn handle_drain_request(
         match rx.try_recv() {
             Ok(frame) => {
                 let frame_seq = frame.seq;
+                // #16570: same channel-exit release as the steady-state
+                // drain — a frame pulled here has left the bounded queue
+                // the budget bounds, and its replay retention is bounded
+                // by REPLAY_BUFFER_CAPACITY, not by this budget.
+                release_dataplane_event_queue_budget(shared, &frame);
                 push_replay_frame(shared, replay_buf, frame);
                 if frame_seq >= target_seq {
                     reached_target = true;

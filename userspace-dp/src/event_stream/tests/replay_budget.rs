@@ -323,8 +323,16 @@ fn test_replay_gap_seq_allocation_waits_for_producer_lock_5267() {
     worker.join().expect("replay worker");
 }
 
+// #16570 (reverses the pre-fix half of this cell): the queue budget bounds the
+// bounded channel, so draining the channel into the write backlog + replay
+// buffer RELEASES the slot — no ACK is needed. Before the fix the slot was held
+// until ACK trim, so this second emit was shed QueueFull until the daemon's
+// ~100 ms ACK arrived; that is the burst-shed defect. The first half keeps the
+// control the issue requires: while the frame still sits IN the channel (not
+// yet drained) the budget stays held, and the ACK-trim control stays green —
+// ACKing still works, it is simply no longer the release point.
 #[test]
-fn dataplane_event_budget_stays_held_after_connected_loop_drains_channel() {
+fn dataplane_event_budget_releases_when_connected_loop_drains_channel_16570() {
     let (mut daemon_side, helper_side) = std::os::unix::net::UnixStream::pair().unwrap();
     daemon_side
         .set_read_timeout(Some(Duration::from_secs(1)))
@@ -357,6 +365,19 @@ fn dataplane_event_budget_stays_held_after_connected_loop_drains_channel() {
         DataplaneEventEmitOutcome::Queued { seq: 1 }
     );
 
+    // Control: the frame is still in the channel (loop not started), so its
+    // budget slot is still held — a second emit sheds QueueFull.
+    assert_eq!(
+        handle.try_emit_dataplane_event_at(
+            test_dataplane_event(DataplaneEventKind::PolicyDeny, 7),
+            0
+        ),
+        DataplaneEventEmitOutcome::Dropped {
+            reason: DataplaneEventDropReason::QueueFull
+        },
+        "a frame still in the channel must still hold its telemetry budget"
+    );
+
     let loop_shared = shared.clone();
     let loop_join = thread::spawn(move || {
         let mut replay_buf: VecDeque<EventFrame> = VecDeque::with_capacity(REPLAY_BUFFER_CAPACITY);
@@ -385,20 +406,11 @@ fn dataplane_event_budget_stays_held_after_connected_loop_drains_channel() {
         .read_exact(&mut payload)
         .expect("dataplane frame payload");
 
-    assert_eq!(
-        handle.try_emit_dataplane_event_at(
-            test_dataplane_event(DataplaneEventKind::PolicyDeny, 7),
-            0
-        ),
-        DataplaneEventEmitOutcome::Dropped {
-            reason: DataplaneEventDropReason::QueueFull
-        },
-        "draining the mpsc channel into replay must not release telemetry budget"
-    );
-
-    daemon_side
-        .write_all(&build_raw_ack_frame(1))
-        .expect("send ACK");
+    // Defect assertion: the frame has left the channel (it is on the socket /
+    // in the replay buffer) with NO ACK sent, so its slot must already be
+    // free. Poll briefly only to tolerate loop scheduling; the release is a
+    // drain side effect, not an ACK side effect — no ACK is ever sent in
+    // this test before the successful emit.
     let deadline = Instant::now() + Duration::from_millis(250);
     loop {
         match handle
@@ -408,9 +420,17 @@ fn dataplane_event_budget_stays_held_after_connected_loop_drains_channel() {
             DataplaneEventEmitOutcome::Dropped {
                 reason: DataplaneEventDropReason::QueueFull,
             } if Instant::now() < deadline => thread::sleep(Duration::from_millis(1)),
-            other => panic!("telemetry budget should release after ACK, got {other:?}"),
+            other => panic!(
+                "telemetry budget must release on channel drain without an ACK (#16570), got {other:?}"
+            ),
         }
     }
+
+    // ACK-trim control: acknowledging the drained frames still works and is
+    // not a second release (no underflow, budget stays consistent).
+    daemon_side
+        .write_all(&build_raw_ack_frame(1))
+        .expect("send ACK");
 
     shared.stop.store(true, Ordering::Release);
     assert!(
@@ -419,8 +439,16 @@ fn dataplane_event_budget_stays_held_after_connected_loop_drains_channel() {
     );
 }
 
+// #16570: a frame pulled out of the channel and retained for replay holds NO
+// budget slot (the test releases explicitly at the modelled channel exit —
+// a raw `rx.try_recv` alone releases nothing). Replay eviction on wrap
+// therefore releases nothing either; it only counts the #2382 telemetry loss.
+// The emit below succeeds because of the channel-exit release, NOT because
+// of the eviction: with the pre-fix accounting (slot held across retention,
+// released on eviction) the emit between the channel pull and the eviction
+// would have shed QueueFull.
 #[test]
-fn dataplane_event_budget_releases_when_replay_eviction_drops_frame() {
+fn dataplane_event_budget_not_held_across_replay_retention_16570() {
     let capacity = 1;
     let (tx, rx) = mpsc::sync_channel::<EventFrame>(capacity);
     let shared = Arc::new(
@@ -446,40 +474,46 @@ fn dataplane_event_budget_releases_when_replay_eviction_drops_frame() {
         ),
         DataplaneEventEmitOutcome::Queued { seq: 1 }
     );
+    // Model the production drain's channel exit + its #16570 release, then
+    // retain the frame for replay exactly as `push_replay_frame` does.
     let frame = rx.try_recv().expect("queued dataplane frame");
+    release_dataplane_event_queue_budget(&shared, &frame);
     let mut replay_buf: VecDeque<EventFrame> = VecDeque::with_capacity(REPLAY_BUFFER_CAPACITY);
     push_replay_frame(&shared, &mut replay_buf, frame);
 
-    assert_eq!(
-        handle.try_emit_dataplane_event_at(
-            test_dataplane_event(DataplaneEventKind::PolicyDeny, 7),
-            0
-        ),
-        DataplaneEventEmitOutcome::Dropped {
-            reason: DataplaneEventDropReason::QueueFull
-        }
-    );
-
-    for seq in 2..=REPLAY_BUFFER_CAPACITY as u64 {
-        push_replay_frame(
-            &shared,
-            &mut replay_buf,
-            EventFrame::encode_drain_complete(seq),
-        );
-    }
-    push_replay_frame(
-        &shared,
-        &mut replay_buf,
-        EventFrame::encode_drain_complete(REPLAY_BUFFER_CAPACITY as u64 + 1),
-    );
-
+    // Retained-but-unACKed must NOT hold the budget: the next emit is admitted.
     assert_eq!(
         handle.try_emit_dataplane_event_at(
             test_dataplane_event(DataplaneEventKind::PolicyDeny, 7),
             0
         ),
         DataplaneEventEmitOutcome::Queued { seq: 2 },
-        "replay eviction is a definitive drop and must release telemetry budget"
+        "replay retention must not hold telemetry budget (#16570)"
+    );
+
+    let evicted_before = shared.frames_replay_evicted.load(Ordering::Relaxed);
+    // Fill the buffer (retained seq-1 plus 4095 fills = 4096), then one wrap
+    // push evicts the retained telemetry frame.
+    for seq in 3..=(REPLAY_BUFFER_CAPACITY as u64 + 1) {
+        push_replay_frame(
+            &shared,
+            &mut replay_buf,
+            EventFrame::encode_drain_complete(seq),
+        );
+    }
+    assert_eq!(replay_buf.len(), REPLAY_BUFFER_CAPACITY);
+    push_replay_frame(
+        &shared,
+        &mut replay_buf,
+        EventFrame::encode_drain_complete(REPLAY_BUFFER_CAPACITY as u64 + 2),
+    );
+    // The retained telemetry frame was evicted on wrap and counted (#2382
+    // accounting unchanged by #16570) — and evicting it released nothing, so
+    // no underflow trips despite the retained frame never holding a slot.
+    assert_eq!(
+        shared.frames_replay_evicted.load(Ordering::Relaxed),
+        evicted_before + 1,
+        "replay eviction of the retained frame must still be counted (#2382)"
     );
 
     drain_remaining(&rx, &shared);

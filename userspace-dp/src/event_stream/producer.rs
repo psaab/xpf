@@ -228,22 +228,23 @@ impl DataplaneEventQueueBudget {
     }
 
     /// Test-only budget seed: increment the per-kind (and total) queue budget
-    /// that a real `emit`/`try_acquire` would have charged for a frame.
+    /// that a real `emit`/`try_acquire` would have charged for a frame still
+    /// sitting IN THE CHANNEL.
     ///
-    /// The mod-level replay/drain tests build the replay buffer directly (via
-    /// `push_replay_frame`) to construct a full-buffer eviction scenario,
-    /// deliberately bypassing the producer's `emit` path. Any injected frame
-    /// carrying a `dataplane_event_kind()` (telemetry: deny/screen/filter/
-    /// RT_FLOW) is released through `release()` when it is evicted or popped;
-    /// without the matching acquire the release decrements a zero counter and
-    /// trips the #1826 underflow guard (`decrement_if_positive`). Seeding the
-    /// budget here mirrors production, where every buffered telemetry frame
-    /// holds exactly one budget slot from emit until removal.
+    /// Since #16570 the budget is an in-channel budget: a frame holds its slot
+    /// only until the I/O thread pulls it out of the channel (steady-state
+    /// drain, drain-request drain, or shutdown `drain_remaining`), at which
+    /// point that pull releases it. Replay retention holds no slot, so a test
+    /// that injects telemetry frames directly into the replay buffer
+    /// (`push_replay_frame`) must NOT seed the budget for them — their later
+    /// eviction/pop releases nothing. Seed only for a frame the test is about
+    /// to pull (or has pulled) through a channel-exit path whose release must
+    /// be balanced.
     ///
-    /// Bypasses the admission caps on purpose: the direct-injection tests build
-    /// buffer states larger than a single kind's admission budget (which
-    /// `try_acquire` would refuse), so this is a raw counter bump, not an
-    /// admission decision.
+    /// Bypasses the admission caps on purpose: a direct-injection test may
+    /// build channel states larger than a single kind's admission budget
+    /// (which `try_acquire` would refuse), so this is a raw counter bump, not
+    /// an admission decision.
     #[cfg(test)]
     pub(super) fn acquire_for_test(&self, kind: DataplaneEventKind) {
         self.total_queued.fetch_add(1, Ordering::Relaxed);
@@ -371,7 +372,8 @@ impl EventStreamWorkerHandle {
     /// rate-limited or budget-exhausted close/create never burns a seq. The
     /// frame's msg_type byte MUST map back to `kind` via
     /// `DataplaneEventKind::from_msg_type` so the I/O thread releases the
-    /// per-kind budget when the frame leaves the channel.
+    /// per-kind budget when the frame leaves the channel (#16570: at channel
+    /// exit, not at ACK trim — replay retention holds no slot).
     pub(crate) fn try_emit_dataplane_frame<F>(
         &self,
         kind: DataplaneEventKind,

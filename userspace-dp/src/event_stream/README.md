@@ -646,21 +646,29 @@ cluster-scoped.
   counters for later status surfacing. It also enforces the telemetry
   queue budget before sequence allocation or shared-channel enqueue;
   event budget drops are reported as queue-full drops. Accepted
-  telemetry holds that budget while retained for replay, releasing it
-  only when an ACK trims the frame or the helper definitively drops it
-  during replay eviction, enqueue failure, or shutdown. Budget release
+  telemetry holds that budget only while it sits in the bounded channel,
+  releasing it when the I/O thread pulls the frame out of the channel —
+  the steady-state drain, the dormant drain-request drain, or the
+  shutdown channel drain (#16570). Replay retention holds NO budget slot:
+  it is bounded separately by `REPLAY_BUFFER_CAPACITY` and counted by
+  `frames_replay_evicted` on wrap (#2382), so ACK-trim, replay eviction
+  and shutdown replay pops release nothing further. Before #16570 the
+  slot was held until ACK trim (~100 ms Go ACK tick), which shed every
+  SessionClose/SessionCreate burst above the per-kind in-channel budget
+  (ceil((8192/2)/5)=820) within one ACK interval and defeated the #14609
+  "below channel capacity a close is never shed" contract. Budget release
   saturates at zero; an underflow (accounting invariant broken) bumps a
   local-only diagnostic counter and logs one stderr line on first hit
   (#1826 — release builds compile out the debug_assert, the counter is
   intentionally not wire-plumbed). The invariant is symmetric: every
-  telemetry frame that reaches the replay buffer acquired one budget slot
-  at emit, so its release on eviction/ACK-trim/shutdown is always balanced.
-  A unit test that injects telemetry frames directly (`push_replay_frame`,
-  bypassing `emit`) MUST seed that slot with
-  `DataplaneEventQueueBudget::acquire_for_test()` for each frame, or the
-  eviction's release trips the debug_assert on a zero counter (#4607 — the
-  #2875 telemetry-eviction test bypassed the seed; session-sync frames need
-  no seed because they carry no `dataplane_event_kind()`).
+  telemetry frame holds exactly one budget slot from emit until it leaves
+  the channel, so its single release at channel exit is always balanced.
+  A unit test that injects telemetry frames directly into the replay
+  buffer (`push_replay_frame`, bypassing `emit`) must NOT seed the budget
+  with `DataplaneEventQueueBudget::acquire_for_test()` — retained frames
+  hold no slot since #16570 (session-sync frames never carry one either,
+  because they have no `dataplane_event_kind()`). Seed only for a frame
+  the test pulls through a channel-exit release path.
 - The Go daemon must know every helper→daemon frame type that carries a
   sequence number. For RT_FLOW-style dataplane telemetry, the daemon
   decodes valid frames through the same RT_FLOW adapter used for ringbuf
