@@ -95,6 +95,19 @@ xpf (0.0.0) unstable; urgency=medium
     config's segments while forwarding nothing, until the next commit
     or an xpfd restart. RA/Kea withdrawal failures now report the
     rollback DEGRADED instead of claiming the takeover was removed.
+  * LLDP: binary Chassis/Port ID subtypes are now decoded canonically
+    and keyed by raw MSAP identity (#16673). MAC port IDs (subtype 3)
+    and MAC chassis IDs render colon-separated, network-address IDs
+    (chassis 5 / port 4) render as the IP literal (or
+    iana-<family>:<hex> for non-IP families), printable text stays
+    sanitized verbatim, and any other non-printable identifier renders
+    hex. Previously such IDs were stored lossy-sanitized with the
+    subtype dropped, so distinct NICs under one chassis merged into
+    one flapping `show lldp neighbors` entry rendered as garbage, and
+    either one's TTL=0 withdrawal removed the other. The neighbor
+    table now keys on (interface, chassis subtype + raw bytes, port
+    subtype + raw bytes); subtype-truncated binary IDs are rejected
+    with the other truncated mandatory TLVs.
   * Feeds: a feed restored with a count baseline but no usable content
     epoch now re-establishes the epoch on its first guarded install
     (#16651). Legacy count-only records, records whose epoch digest was

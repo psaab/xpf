@@ -270,6 +270,22 @@ Two properties keep this safe (#2372 review findings 3 + 6):
   expiry logs and stored neighbor values from terminal/log injection and
   display-order spoofing; it is the LLDP counterpart of the #1798/#3900
   free-text sanitizer.
+- **Binary subtype identity (#16673):** the MSAP is (chassis subtype + raw
+  chassis bytes, port subtype + raw port bytes) per interface, and the
+  neighbor table keys on exactly that — never on the display strings.
+  `ParseTLVs` decodes binary subtypes to canonical display text (MAC port
+  subtype 3 / chassis subtype 4 as `52:54:00:aa:bb:01`, network-address
+  chassis subtype 5 / port subtype 4 as the IP literal, or `iana-<family>:<hex>`
+  for a non-IP/malformed family), keeps printable text sanitized verbatim, and
+  hex-encodes any other non-printable identifier, so no byte is folded away by
+  control/U+FFFD sanitization. Before this, binary IDs were stored
+  lossy-sanitized with the subtype dropped: distinct NICs under one chassis
+  merged into one flapping entry and either's TTL=0 removed the other.
+  Subtype-truncated binary IDs (short MAC, family-only network address) are
+  rejected under the same #2551 mandatory-TLV gating. `Neighbor` exposes the
+  subtypes (`ChassisSubtype`/`PortSubtype`) beside the canonical strings;
+  regression: `binary_subtype_16673_test.go`.
+
 
   Both `show lldp neighbors` renderers also quote every string cell through
   `termsafe.QuoteFieldForDisplay` and cap it at its column width. This is a
