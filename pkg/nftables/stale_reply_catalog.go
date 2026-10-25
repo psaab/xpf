@@ -496,15 +496,6 @@ func staleReplyDeniedPorts(catalog []uint16, allow []config.PortRange, proto uin
 	return denied
 }
 
-func collectIngressNetdevs(views []HostInboundZoneView) []string {
-	var out []string
-	for _, v := range views {
-		out = append(out, v.IngressNetdevs...)
-		out = append(out, v.IngressDenyNetdevs...)
-	}
-	return out
-}
-
 func collectIngressDenyNetdevs(views []HostInboundZoneView) []string {
 	var out []string
 	for _, v := range views {

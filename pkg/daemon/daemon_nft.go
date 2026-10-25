@@ -3033,17 +3033,6 @@ func emitHostInboundNonUnicastScope(rules *[]string, v dpuserspace.ZoneHostInbou
 	*rules = append(*rules, "    "+scope+" drop")
 }
 
-// ndpPositive reports whether the view's positives admit ND (explicit
-// ndp, or protocols all which expands to it).
-func ndpPositive(v dpuserspace.ZoneHostInboundView) bool {
-	for _, tok := range v.Protocols {
-		if tok == "ndp" || tok == "all" {
-			return true
-		}
-	}
-	return false
-}
-
 // emitHostInboundMulticastFenceDrops keeps the cold-boot fence fail-closed for
 // catalog groups. Ingress scopes exclude lifelines; every VRF view is scoped by
 // its exact local members.

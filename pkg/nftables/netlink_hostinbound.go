@@ -305,14 +305,6 @@ func hostInboundAnyNDPDefault(views []HostInboundZoneView) bool {
 	return false
 }
 
-// hostInboundNDPDefaultNetlink is retained for the fence: the fence has
-// no per-service accepts, so its ND admit is the same scoped emission
-// (see emitHostInboundNDPAcceptsNetlink). It reports whether the scoped
-// ND admits should be emitted for this view set.
-func hostInboundNDPDefaultNetlink(views []HostInboundZoneView) bool {
-	return hostInboundAnyNDPDefault(views)
-}
-
 // emitHostInboundNDPAcceptsNetlink emits the ND (133-136) accepts
 // scoped to each retaining view's ingress (#15931), mirroring
 // emitHostInboundNDPAcceptsText rule-for-rule. Per retaining view:
@@ -1231,17 +1223,6 @@ func addHostInboundScreenFloodSet(p *nlPlan, rule HostInboundScreenFloodRule, so
 		Operation: uint32(unix.NFT_DYNSET_OP_UPDATE),
 		Exprs:     []expr.Any{screenFloodLimit(rate)},
 	}
-}
-
-// hostInboundNDPPositiveNetlink reports whether the view's positives
-// admit ND (explicit ndp, or protocols all which expands to it).
-func hostInboundNDPPositiveNetlink(v HostInboundZoneView) bool {
-	for _, tok := range v.Protocols {
-		if tok == "ndp" || tok == "all" {
-			return true
-		}
-	}
-	return false
 }
 
 // hostInboundNDPMulticastAdmitsNetlink mirrors the text form: every

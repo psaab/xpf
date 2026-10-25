@@ -83,9 +83,5 @@ func canonSet(p *nlPlan, id uint32) string {
 	return strings.Join(toks, ",")
 }
 
-// buildHostInboundPlan / buildLo0Plan / buildFencePlan / buildGapPlan build the
-// respective ruleset into a fresh plan for inspection.
-func buildHostInboundPlan(p *nlPlan, spec HostInboundSpec) { buildHostInboundNetlink(p, spec) }
-
 // setElementsForID exposes an anonymous set's elements to a test (nil if none).
 func (p *nlPlan) setElementsForID(id uint32) []nftables.SetElement { return p.sets[id] }
