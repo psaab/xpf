@@ -2995,6 +2995,26 @@ never lock an operator out of a remote box it manages.
     Pinned by `sighup_15084_test.go`: the shutdown set excludes SIGHUP
     (and keeps SIGTERM/SIGINT), a real delivered HUP leaves the
     process alive, and the parsed unit forces the restart.
+  - **Second shutdown signal during the shutdown sequence is absorbed
+    (#16801).** `runShutdownSequence` called the signal context's
+    `stop()` before `wg.Wait()` and the fail-closed block;
+    `signal.Stop` restores the default disposition, so a second
+    `SIGTERM`/`SIGINT` in that window (a deliberate
+    `systemctl kill xpfd` / `kill <pid>` from root during a slow
+    stop) killed xpfd before `markDataplaneNotArmed` closed kernel
+    transit, before `rg_active` was cleared and (HA) before Kea
+    stopped — the #10643/#6787 fail-open hazard. The sequence now
+    installs `guardShutdownSignals()` (a buffered `signal.Notify`
+    sink over `daemonSignals`, logging "shutdown already in
+    progress") BEFORE `stop()` and releases it on return, so
+    `SIGKILL` (`TimeoutStopSec`) remains the only hard stop.
+    Interactive mode's guard is `SIGTERM`-only, leaving `SIGINT`
+    with the CLI. Pinned by `shutdown_second_signal_16801_test.go`:
+    a re-executed child drives the real `runShutdownSequence` with
+    a blocked `wg`, delivers a second `SIGTERM`+`SIGINT` during
+    `wg.Wait`, and must still print `completed-fail-closed=true`
+    (SIGHUP control unchanged); a second child proves the released
+    guard restores the default disposition.
   - **Wiring (the part that makes this actually fire on `systemctl stop`).**
     `applyCancelCtx` deliberately does **not** return `d.daemonCtx`. In
     production `cmd/xpfd` passes `context.Background()` into `Run`, and that

@@ -113,6 +113,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 	defer stopSIGHUP()
 	ctx, stop := startupSignalContext(ctx)
 	defer stop()
+	// #16801: runShutdownSequence installs a second-signal guard
+	// (guardShutdownSignals) before it calls stop() and releases it
+	// on return, so a second SIGTERM/SIGINT during wg.Wait and the
+	// fail-closed block is absorbed instead of killing xpfd. Run
+	// needs no guard state of its own: the sequence owns the guard
+	// for exactly its own lifetime, and return paths that never
+	// reach the sequence never call stop() while exposed (the
+	// deferred stop above still holds the NotifyContext capture).
 
 	// #5308: guarantee the two daemonCtx-bound background loops (policy
 	// scheduler + RPM probe-pin retry) are cancelled + joined even when Run
@@ -1125,6 +1133,59 @@ func ignoreSIGHUP() (stop func()) {
 	return func() {
 		signal.Stop(sighupCh)
 		close(done)
+	}
+}
+
+// guardShutdownSignals installs a long-lived sink for the shutdown
+// signal set (daemonSignals) that absorbs — and logs — any SIGTERM /
+// SIGINT delivered while runShutdownSequence is in progress (#16801).
+//
+// The defect: runShutdownSequence calls the NotifyContext stop()
+// before wg.Wait() and the fail-closed block (#9035/#9686/#10643/
+// #6787). signal.Stop restores the DEFAULT disposition, so a second
+// SIGTERM/SIGINT in that window terminated xpfd immediately — before
+// markDataplaneNotArmed closed kernel transit, before rg_active was
+// cleared, and (HA) before Kea was stopped: the exact fail-open
+// outcome those issues built the ordered stop to prevent. SIGKILL
+// (systemd TimeoutStopSec) remains the only hard stop.
+//
+// The guard MUST be installed BEFORE stop() is called: installing it
+// after would leave the stop()->install gap itself exposed. It is
+// therefore installed at the top of runShutdownSequence and released
+// via defer when the sequence returns; Run needs no guard of its own
+// because return paths that never reach the sequence never call
+// stop() while exposed (Run's deferred stop still holds the capture).
+//
+// Interactive mode: daemonSignals(true) is SIGTERM only, so a guard
+// installed there absorbs a second SIGTERM but deliberately leaves
+// SIGINT with the CLI's Ctrl-C handling, exactly as the primary
+// capture does.
+//
+// The returned stop func is idempotent (sync.Once) so a deferred
+// release after an explicit release cannot double-close. The channel
+// is buffered (capacity 4) so a burst cannot block the runtime's
+// signal delivery; each absorbed signal is logged so an operator who
+// resends a stop learns shutdown is already in progress.
+func guardShutdownSignals() (stop func()) {
+	ch := make(chan os.Signal, 4)
+	signal.Notify(ch, daemonSignals(isInteractive())...)
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case sig := <-ch:
+				slog.Warn("shutdown signal received while shutdown already in progress; ignoring until the fail-closed sequence completes (#16801)", "signal", sig)
+			case <-done:
+				return
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			signal.Stop(ch)
+			close(done)
+		})
 	}
 }
 

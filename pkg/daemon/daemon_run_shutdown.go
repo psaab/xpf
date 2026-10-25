@@ -58,6 +58,16 @@ type controlShutdownBounder interface{ BeginControlShutdown() }
 // so the 1690-LOC lifecycle stays reviewable (#4662 Increment 1). Returns runErr
 // unchanged.
 func (d *Daemon) runShutdownSequence(wg *sync.WaitGroup, stop func(), runErr error) error {
+	// #16801: absorb any second SIGTERM/SIGINT for the WHOLE sequence.
+	// stop() below calls signal.Stop on the NotifyContext, restoring
+	// the default kill disposition; without this guard a second stop
+	// signal during wg.Wait / shutdownIpsecCapture / the fail-closed
+	// block would kill xpfd before kernel transit is closed,
+	// rg_active cleared and (HA) Kea stopped. Installed BEFORE stop()
+	// so the stop()->guard gap is never exposed; released on return.
+	// SIGKILL (TimeoutStopSec) remains the only hard stop.
+	stopGuard := guardShutdownSignals()
+	defer stopGuard()
 	// #8621: stop answering ARP for source-NAT pool addresses FIRST. A node on
 	// its way down should stop claiming those addresses before the dataplane is
 	// torn out from under them — otherwise an upstream keeps a binding pointing
