@@ -4,37 +4,42 @@ Shared type definitions for the AF_XDP dataplane. Every long-lived
 struct that crosses module boundaries lives here so siblings can
 import them without circular module dependencies.
 
-Most modules are definitions only, but `shared_cos_lease/` is an
-exception: it owns the hot-path lease acquisition / release / epoch
-rotation algorithm (tag-checked CAS, two-CAS-with-rollback) for the
-shared CoS lease. That algorithm lives with the type because it's
-the contract for safe coordination across workers. Visibility is
-deliberately narrower than the rest: shared_cos_lease items are
-re-exported with `pub(super)` (afxdp-internal only), while the cos
-/ forwarding / tx / runtime sub-modules use `pub(in crate::afxdp)`
-globs.
+The type tree combines shared data definitions with behavior-bearing
+coordination code. `mod.rs` implements the HA shared-session indexes
+(`SharedNatAmbiguityIndex`, `SharedSessionBareTupleIndex`, and
+`SharedSessionOwnerRgIndexes`) as well as top-level type and re-export
+wiring. `shared_cos_lease/` also owns the hot-path lease acquisition /
+release / epoch-rotation algorithm (tag-checked CAS,
+two-CAS-with-rollback) for the shared CoS lease. Visibility is
+deliberately narrower there: its items are re-exported with `pub(super)`
+(afxdp-internal only), while the cos / forwarding / tx / runtime
+sub-modules use `pub(in crate::afxdp)` globs.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `mod.rs` | Re-export hub for the per-area type files below. |
 | `cos.rs` | CoS shaper / queue / flow-fair / runtime types (`CoSInterfaceRuntime`, `CoSQueueRuntime`, `CoSPendingTxItem`, `FlowFairState`, `WorkerCoSQueueFastPath`, etc.). Issue 68.1 split. |
-| `forwarding/mod.rs` | Routing / forwarding types hub (#16209 file-only split of the former `forwarding.rs`). Re-exports sibling files below via `pub(in crate::afxdp) use <sibling>::*;` plus preserved wider surfaces (`pub use fib::NeighborEntry`, `pub(crate) use disposition::{ForwardingDisposition, ForwardingResolution}`, mirrored by `types/mod.rs`). Three forwarding types had wider-than-`pub(super)` visibility in the original `mod.rs` and stay re-exported at their original surface. (`PacketDisposition` is in `mod.rs`; `ValidationState` is in `runtime.rs`.) |
-| `forwarding/state.rs` | `ForwardingState` (128-field definition, intact) + impl + paired-insert tests, `SynCookieMasterKey`, `InstallTables`, `FabricNatScopeIdentity`. |
+| `forwarding/binding.rs` | `BindingIdentity`, `WorkerBindingLookup`. |
+| `forwarding/disposition.rs` | `ForwardingDisposition`, `RouteIdentity`, `ForwardingLookupResult`, `ForwardingResolution`. |
+| `forwarding/fabric.rs` | `FabricLink`, `FabricSkipReason`, `FabricLinkSkip`. |
 | `forwarding/fib.rs` | Route / connected / leak / ECMP next-hop types, `MirrorRuntimeConfig`, `NeighborEntry`. |
 | `forwarding/local.rs` | `EgressInterface`. |
+| `forwarding/mod.rs` | Routing / forwarding type declarations and submodule wiring (#16209); re-exports preserved visibility surfaces from `types/mod.rs`. |
+| `forwarding/state.rs` | `ForwardingState` definition and implementation, paired-insert tests, `SynCookieMasterKey`, `InstallTables`, `FabricNatScopeIdentity`. |
 | `forwarding/tunnels.rs` | `TunnelEndpoint`, `WgRuntimePeer`. |
 | `forwarding/zones.rs` | `ZoneHostInbound`, `is_host_inbound_multicast_group`. |
-| `forwarding/fabric.rs` | `FabricLink`, `FabricSkipReason`, `FabricLinkSkip`. |
-| `forwarding/disposition.rs` | `ForwardingDisposition`, `RouteIdentity`, `ForwardingLookupResult`, `ForwardingResolution`. |
-| `forwarding/binding.rs` | `BindingIdentity`, `WorkerBindingLookup`. |
+| `mod.rs` | HA shared-session index types and implementations (`SharedNatAmbiguityIndex`, `SharedSessionBareTupleIndex`, `SharedSessionOwnerRgIndexes`), plus top-level type wiring, packet metadata/session types, and re-exports. |
 | `runtime.rs` | Per-worker runtime atomics and shared status types. |
-| `shared_cos_lease/mod.rs` | Shared per-CoS lease + V_min coordination types (#1035 P4): `SharedCoSQueueLease`, `SharedCoSRootLease`, `SharedCoSQueueVtimeFloor`, `SharedCoSExactBacklog`, `PaddedVtimeSlot`, `NOT_PARTICIPATING` sentinel. `SharedCoSExactBacklog` carries queued-byte telemetry, serviceable-byte telemetry, an exact-demand queue mask, and the shared residual-surplus token bucket used to keep best-effort/non-exact surplus inside the root rate left after exact guarantees. |
-| `shared_cos_lease/rotate_epoch_v8.rs` | `SharedCoSQueueLease::maybe_rotate_epoch_v8` — per-tick seqlock rotation state machine (#1229 Phase 6 v8 + #1231 v5 + #1290 v2). Extracted in #1329 as pure code motion. |
-| `shared_cos_lease/publish_equal_flow_epoch_v8.rs` | `publish_equal_flow_epoch_v8` — conditional equal-flow-suppression publish branch of the rotation. Extracted in #1329 as pure code motion. |
+| `runtime_view.rs` | `RuntimeView` — atomically-published paired validation and forwarding state (#6592). |
+| `shared_cos_lease/backlog.rs` | Interface-global exact-backlog visibility and residual-surplus token bucket. |
+| `shared_cos_lease/epoch.rs` | V8 lease-rotation epoch state, grant packing, and related enums/constants. |
+| `shared_cos_lease/lease.rs` | Shared CoS queue/root leases, token-bucket state, and v8 fair-share acquisition. |
+| `shared_cos_lease/mod.rs` | Wiring and re-exports for the shared-CoS backlog, epoch, lease, and virtual-time modules (#1035 P4, #2158). |
+| `shared_cos_lease/publish_equal_flow_epoch_v8.rs` | Conditional equal-flow-suppression publish branch of v8 epoch rotation. |
+| `shared_cos_lease/rotate_epoch_v8.rs` | `SharedCoSQueueLease::maybe_rotate_epoch_v8` — v8 epoch-rotation state machine. |
+| `shared_cos_lease/vtime.rs` | Cross-worker MQFQ V_min floor (`PaddedVtimeSlot`, `SharedCoSQueueVtimeFloor`). |
 | `tx.rs` | TX request / prepared-request shapes (`TxRequest`, `PreparedTxRequest`, etc.). |
-| `shared_cos_lease/shared_cos_lease_tests.rs` | Unit tests for the V_min lease coordination — pinned because the lease is the load-bearing primitive in #1229 v8. |
 
 ## Notable
 

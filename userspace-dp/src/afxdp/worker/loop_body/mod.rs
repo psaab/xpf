@@ -6,25 +6,21 @@
 // #1776 (Phase 2, narrowed v3.1 scope) carved out the two cold
 // extractions: the one-shot setup phase (setup.rs) and the
 // cfg(debug-log) verbose report / stall dump (debug_report.rs).
-// Everything per-tick — telemetry publish, ArcSwap config refresh,
-// HA load, command drain, the hot `poll_binding` sweep, heartbeat,
-// the always-on binding diagnostics + BindingLiveState publish, and
-// idle regulation — deliberately stays INLINE in this file: the
-// round-1 plan review (Codex r1-4) established that an
-// #[inline(never)] call boundary in front of the per-tick
-// `load_arc_if_changed` path risks regressing the 10K-100K ticks/s
-// loop.
+// #1776 kept the per-tick orchestration in this file because a
+// `#[inline(never)]` boundary in front of `load_arc_if_changed` risked
+// regressing the 10K–100K ticks/s loop. #13075 extracted selected
+// per-tick control slices (housekeeping, PPTP drain, conntrack/WG,
+// delta recovery, and CommandExport) into `#[inline(never)]` sibling
+// functions. Their call order remains here; the narrower #1776
+// constraint applies to `load_arc_if_changed`, not all per-tick work.
 //
-// #6291/#6592 carve-out: the per-tick path does now call one helper,
-// `refresh_runtime_view`, which exists to pin the SINGLE-load property
-// of the (validation, forwarding) pair and to expose a
-// controlled-interleaving test seam. It is `#[inline]` and its
-// production `between` argument is `|| {}` (a ZST whose `call_once`
-// body is empty), so it leaves NO call boundary in release: the
-// symbol is absent from `nm` on a `cargo build --release` binary
-// while its caller `worker_loop` is present, and the seam emits no
-// instructions. The no-inline-boundary constraint above still binds
-// for anything that would survive as a real call.
+// #6291/#6592 carve-out: the per-tick path calls one helper,
+// `refresh_runtime_view`, which pins the SINGLE-load property of the
+// (validation, forwarding) pair and exposes a controlled-interleaving
+// test seam. It remains `#[inline]`; its production `between` callback
+// carries the #15151 IPsec-inner pending-work drain through this refresh
+// path. The callback is work-bearing, not a ZST/no-op, so preserve the
+// inlined seam rather than adding a call boundary around that drain.
 //
 // `use super::*;` brings every type, helper, and sibling-submodule
 // item from worker/mod.rs into scope — the same pattern lifecycle.rs
@@ -247,7 +243,8 @@ pub(crate) fn worker_loop(
     // the steady per-tick loop body are TEXTUALLY UNCHANGED — the bundles
     // are MOVED in and consumed here with zero added clone / alloc /
     // reference-indirection, and nothing bundle-shaped survives into the
-    // hot 10K–100K-tick/s loop (the #1776 no-inline-boundary constraint).
+    // hot 10K–100K-tick/s loop. The launch protocol adds no per-tick
+    // bundle-field access; keep the shared state in the locals below.
     // The `runtime_atomics` (#869) / `cold_path_atomics` (#1621) publish
     // slots, the `startup_report_tx` (#5143) one-shot readiness channel,
     // and the #6242 telemetry lifecycle contract are documented on the

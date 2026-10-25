@@ -1,22 +1,21 @@
-// #13075 (D4-12) — cold snapshot-rotation session reconciliation, extracted
-// from loop_body/mod.rs (pure code motion; see that file's header for the
-// #1776 no-inline-boundary constraint these helpers are exempt from).
+// #13075 (D4-12) — cold snapshot-rotation session-reconciliation helpers,
+// extracted from loop_body/mod.rs (pure code motion).
 //
-// Everything here runs ONLY when `refresh_runtime_view` observes a
-// control-plane forwarding-snapshot rotation inside `worker_loop` — never
-// on the per-packet fast path (`poll_binding` lives in lifecycle.rs). The
-// fns are therefore `#[cold]`/`#[inline(never)]`-eligible by construction:
-// they were already out-of-line free fns in mod.rs and remain so, so this
-// extraction adds no call boundary to the hot loop and changes no codegen
-// on the per-tick path beyond shrinking `loop_body`'s translation unit.
+// The rebind/rematch walkers run only when `refresh_runtime_view`
+// observes a control-plane forwarding-snapshot rotation; they never run
+// on the per-packet path (`poll_binding` lives in lifecycle.rs). Those
+// walkers were already ordinary out-of-line functions in mod.rs, so this
+// extraction adds no call boundary or runtime work to the hot loop.
+// `refresh_runtime_view` itself runs each worker-loop pass and remains
+// `#[inline]`; its production `between` callback carries the #15151
+// IPsec-inner pending-work drain.
 //
 // Contents: the #10509 rebind discriminator (+ its unit tests), the
 // zone-ancestry matchers, the bound-first-policy rematch / snapshot rebind
 // walkers, the SINGLE-load (validation, forwarding) refresh seam
-// (#6291/#6592 — `#[inline]`, production `between` is a ZST no-op, so its
-// no-symbol property is preserved verbatim), and the #9856 resumable
-// owner-RG export state. `use super::*;` chains through loop_body/mod.rs
-// to worker/mod.rs, exactly as setup.rs/idle_poll.rs do.
+// (#6291/#6592 — `#[inline]`, carrying the per-tick #15151 drain), and the
+// #9856 resumable owner-RG export state. `use super::*;` chains through
+// loop_body/mod.rs to worker/mod.rs, exactly as setup.rs/idle_poll.rs do.
 
 use super::*;
 
@@ -739,19 +738,14 @@ pub(super) fn rebind_policy_sessions_from_snapshot(
 /// into two `ArcSwap` loads — in EITHER order — makes an injected publish tear
 /// the pair, which is exactly what
 /// `snapshot_refresh_runtime_view_pair_is_atomic_6592` asserts against.
-/// Production passes `|_| {}`: a ZST whose `call_once` body is empty, so
-/// `#[inline]` collapses this to the single load in release builds — no
-/// per-tick call boundary or cost (the loop deliberately stays inline; see the
-/// module header).
+/// In `worker_loop`, the production callback captures the #15151
+/// IPsec-inner transport and worker state to drain pending work and
+/// verdict completions. It is not a ZST/no-op: this `#[inline]` generic
+/// seam carries that work in the per-tick refresh path.
 ///
-/// It takes the just-read `ValidationState` as an argument for one reason: that
-/// makes the seam's POSITION a compile-time fact. The producer-side seam proves
-/// its own position by retaining the pre-store view (a hoist above the store is
-/// RED); the consumer seam needs the same defence, because a `between` hoisted
-/// above the load would let the injected publish land before ANY read and the
-/// test would pass vacuously on an old-old pair. Passing a value that only
-/// exists after the load makes that hoist fail to compile rather than pass
-/// silently. The argument is unused in production (`|_| {}`).
+/// The callback receives the loaded `RuntimeView`. Unit tests inject a
+/// publish from the callback after the load and assert that the returned
+/// validation/forwarding pair remains coherent.
 ///
 /// LIMIT, stated rather than left implicit: this seam pins the ordering INSIDE
 /// this function, and the test drives this function rather than the real
