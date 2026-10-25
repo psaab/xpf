@@ -95,11 +95,12 @@ func junosHostPayload(t *testing.T, cfg *config.Config) (string, []dpuserspace.J
 	return buildHostInboundFilterPayload(views, nil, nil, programs, nil, true), programs
 }
 
-// junosHostSection returns the payload lines from the junos-host window of the
-// INPUT chain — everything between the reply-direction established accept and
-// the ND accepts. Since #9504 that window holds the exemption shields and the
-// iifname-scoped jump; the zone's rules live in its subchain
-// (junosHostChainLines).
+// junosHostSection returns the payload lines from the fine junos-host
+// window of the INPUT chain — from the #16862 mandatory L3 admits through
+// the iifname-scoped jump. Since #9504 that window holds the mandatory
+// admits, the exemption shields and the jump; the zone's rules live in
+// its subchain (junosHostChainLines). It ends at the jump so coarse
+// ingress-zone rules below it stay out of the fine-window assertions.
 func junosHostSection(payload string) []string {
 	lines := strings.Split(payload, "\n")
 	var out []string
@@ -109,7 +110,12 @@ func junosHostSection(payload string) []string {
 			in = true
 			continue
 		}
-		if in && strings.Contains(l, "icmpv6 type { 1, 2, 3, 4 }") {
+		if in && strings.Contains(l, "jump "+xnft.HostInboundJunosHostChainName(0, "untrust")) {
+			out = append(out, l)
+			break
+		}
+		if in && strings.Contains(l, "jump junos_host_") {
+			out = append(out, l)
 			break
 		}
 		if in {
@@ -188,6 +194,12 @@ func TestJunosHostDenyRendersDropScopedByIifname(t *testing.T) {
 	// iifname scope, never a replacement for it.)
 	sec := append(junosHostSection(payload), junosHostChainLines(payload)...)
 	for _, l := range sec {
+		// #16862: the mandatory ND admits inside the fine window are
+		// ingress/destination-scoped by design (#15931) — not a junos-host
+		// daddr scope, so they are exempt from this check.
+		if strings.Contains(l, "133, 134, 135, 136") {
+			continue
+		}
 		if strings.Contains(l, "daddr") {
 			t.Errorf("junos-host section must not scope by daddr: %q", l)
 		}
@@ -199,14 +211,15 @@ func TestJunosHostDenyRendersDropScopedByIifname(t *testing.T) {
 		}
 	}
 
-	// Coarse-then-fine ordering: ESP/AH accept, then reply-established, then the
-	// fine DROP, then the ND accepts, then the residual established accept and
-	// the coarse per-zone ssh accept.
+	// Coarse-then-fine ordering with #16862 mandatory admits first: ESP/AH
+	// accept, then reply-established, then the ICMPv6 error + ND accepts,
+	// then the fine jump, then the residual established accept and the
+	// coarse per-zone ssh accept.
 	assertOrder(t, payload,
 		"meta l4proto { 50, 51 } accept",
 		"ct state established,related ct direction reply accept",
-		wantJump,
 		"icmpv6 type { 1, 2, 3, 4 }",
+		wantJump,
 		"ct state established,related accept",
 		"tcp dport 22 accept",
 	)

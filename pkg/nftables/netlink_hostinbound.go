@@ -57,7 +57,8 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		}
 	}
 	if len(spec.Programs) > 0 {
-		// junos-host path — coarse-then-fine order (#4146).
+		// junos-host path (#4146). #16862: mandatory L3 admits precede the
+		// fine jumps so a restricted permit's terminal drop cannot break ND.
 		p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
 		emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(
 			spec.Views, spec.UnzonedV4, spec.UnzonedV6, spec.WGListenPorts, hostInboundTrustedReinject(spec),
@@ -68,11 +69,11 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		emitJunosHostMulticastProgramJumpsNetlink(p, spec.Programs)
 		emitHostInboundMulticastGuardsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
 		p.rule().ctEstablishedRelated().ctDirectionReply().emit(verdictAccept()...)
+		emitHostInboundICMPAcceptsNetlink(p, spec.Views)
 		for i, prog := range spec.Programs {
 			emitJunosHostProgramJumpNetlink(p, i, prog)
 		}
 		emitHostInboundScreenFloodNetlink(p, HostInboundScreenFloodRules(spec.Views), false)
-		emitHostInboundICMPAcceptsNetlink(p, spec.Views)
 	} else {
 		p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
 		emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(

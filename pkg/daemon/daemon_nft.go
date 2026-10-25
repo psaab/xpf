@@ -2741,16 +2741,18 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 			rules = append(rules, "    iifname { "+strings.Join(quoted, ", ")+" } counter name \""+xnft.HostInputFenceOverlayCounterName(canonical)+"\" drop")
 		}
 	}
-	// #4146: when a `to-zone junos-host` DENY program is enforced, the chain is
-	// restructured into Rust's coarse-then-fine order — the fine DROP must run
-	// AFTER the genuinely pre-fine-exempt accepts (ESP/AH + firewall-originated
-	// reply-direction established) but BEFORE the ND/PMTUD accepts and the
-	// residual full established accept, because Rust runs the fine junos-host
-	// policy after coarse ND/PMTUD admission (a denied source's ND/PMTUD/original-
-	// direction-established inbound MUST also be dropped, mirroring the per-hit
-	// re-eval/teardown at poll_descriptor/mod.rs:1291). Both chain shapes keep
-	// the reply-direction split; original-direction established traffic is
-	// re-evaluated by ingress rules before the residual established accept.
+	// #4146: when a `to-zone junos-host` DENY program is enforced, the chain
+	// runs the genuinely pre-fine-exempt accepts (ESP/AH + firewall-originated
+	// reply-direction established) first. #16862: the mandatory L3 admits
+	// (ICMPv6 error 1-4, per-view ND 133-136 honouring `ndp except`, ICMPv4
+	// 3/11/12) run BEFORE the fine junos-host jumps — a restricted permit's
+	// #11065 terminal `meta nfproto ipv6 drop` (including the v6 terminal a
+	// v4-only permit adds) or an `application any` deny must not drop
+	// NS/NA/RS/RA or PMTUD errors, or IPv6 neighbour resolution breaks on
+	// that zone. Echo and other ICMP stay subject to authored denies.
+	// Original-direction established traffic is still re-evaluated by the
+	// fine program and the ingress rules before the residual established
+	// accept. Both chain shapes keep the reply-direction split.
 	if len(programs) > 0 {
 		// (1) Raw ESP (50) / AH (51) — GENUINELY fine-exempt: the userspace IPsec
 		// passthrough stage returns before the fine junos-host policy, and the
@@ -2769,15 +2771,15 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 		// reply direction is admitted ahead of the fine DROP; the denied source's
 		// original-direction established inbound falls through to the DROP below.
 		rules = append(rules, "    ct state established,related ct direction reply accept")
-		// (3) Fine junos-host programs: per ingress zone, the retained ident-RST
+		// (3) #16862: mandatory L3 admits before the fine jumps (see above).
+		emitHostInboundICMPAccepts(&rules, views)
+		// (4) Fine junos-host programs: per ingress zone, the retained ident-RST
 		// shield and an iifname-scoped jump to the zone's first-match subchain
-		// (#9504). Placed before the ND/PMTUD accepts (§6.4).
+		// (#9504).
 		for i, p := range programs {
 			emitJunosHostProgramJump(&rules, i, p)
 		}
 		emitHostInboundScreenFloodText(&rules, screenFloodRules, false)
-		// (4) ND/PMTUD/ICMP-error accepts for NON-denied sources.
-		emitHostInboundICMPAccepts(&rules, views)
 		// #11574: selected-port mismatch guards ran before the reply-direction
 		// accept; exact same-owner ingress/destination admits follow the fine
 		// junos-host jumps below.
@@ -2878,9 +2880,10 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 }
 
 // emitHostInboundICMPAccepts appends the GLOBAL IPv6 ND + v4/v6 PMTUD/error
-// control-message accepts — admitted regardless of the host-inbound set so
-// enforcement never breaks core L3 operation. The ICMP error subtypes accepted
-// here MUST stay in lock-step with the userspace host-inbound exemption
+// control-message accepts — admitted regardless of the host-inbound set and,
+// since #16862, ahead of every junos-host program jump so enforcement never
+// breaks core L3 operation. The ICMP error subtypes accepted here MUST stay
+// in lock-step with the userspace host-inbound exemption
 // (`is_icmp_host_inbound_global_accept` in
 // userspace-dp/.../forwarding/host_inbound.rs, #3171) so the kernel chain and
 // the XSK LocalDelivery classifier agree on a configured ping-less zone.
@@ -2891,8 +2894,7 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 // (11), and parameter-problem (12). Echo-request is NOT here — it stays gated
 // per-zone `ping` system-service. #4759: each accept carries a named AGGREGATE
 // counter (global rules, not per-zone). Factored out (#4146) so the payload
-// builder can place it either before the per-zone rules (no junos-host program)
-// or AFTER the fine junos-host DROP (coarse-then-fine order).
+// builder can place it before the fine junos-host jumps in both chain shapes.
 // zeroHopLimitLocalDropText is the #16841 Junos default rejection for
 // the text oracle: hop-limit-0 IPv6 to a firewall-local destination is
 // dropped before any accept. Empty when the knob admits it.
