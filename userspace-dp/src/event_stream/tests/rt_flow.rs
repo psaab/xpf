@@ -693,25 +693,31 @@ fn test_emit_session_create_rt_flow_flowexport_only_16579() {
 
 #[test]
 fn test_session_close_survives_production_rate_14609() {
-    // #14609 acceptance (z4): with the PRODUCTION limiter config
+    // #14609 acceptance (z4) + #16570: with the PRODUCTION limiter config
     // (DataplaneEventRateLimitConfig::default()) a burst of 5000
-    // back-to-back closes from ONE zone must all reach the channel, or
-    // SessionClose must be governed by a separately sized budget whose
-    // shed count is surfaced. Before the fix SessionClose shared the
-    // 1000/s GCRA, so this fails RED: about one burst admitted and the
-    // rest counted rate_limited, silently undercounting flow export
-    // and falsifying the advertised 1-in-N.
+    // back-to-back closes from ONE zone must all reach the channel. Before
+    // the #14609 fix SessionClose shared the 1000/s GCRA (~one burst
+    // admitted, the rest rate_limited). After #14609 but before #16570 the
+    // burst still shed QueueFull above the per-kind in-channel budget
+    // (ceil((8192/2)/5) = 820) per ACK interval, because the budget was
+    // released only on ACK trim while the Go ACK ticks every 100 ms.
     //
-    // Capacity 8192 mirrors CHANNEL_CAPACITY. The receiver is drained
-    // between batches and each drained frame releases its queue budget
-    // via release_dataplane_event_queue_budget, exactly as the
-    // production I/O thread does when a frame leaves the channel, so
-    // the per-kind queue budget (ceil((8192/2)/5) = 820 in flight) is
-    // not the gate; only the rate limiter can shed a close here.
-    // Batches of 500 stay below that 820 in-flight budget.
+    // Capacity 8192 mirrors CHANNEL_CAPACITY. Between batches the channel is
+    // drained through the REAL production drain
+    // (`drain_channel_into_write_buf`, the same function the connected I/O
+    // thread runs) into the write backlog + replay buffer, with NO ACK
+    // trim — exactly the no-ACK burst shape of #16570. The drain is the
+    // channel-exit point, so it releases each frame's queue budget; the
+    // #14609 claim that a test-side `rx.try_recv()` release is "exactly as
+    // the production I/O thread does" was the test-fidelity defect. Frames
+    // retained for replay hold no budget slot (#16570), so the replay
+    // buffer (capacity 4096 < 5000) wrapping mid-test only bumps the #2382
+    // eviction counter, which this cell does not gate on.
     let (handle, rx) = test_worker_handle(8192, DataplaneEventRateLimitConfig::default());
     let mut delta = test_close_delta(crate::session::SessionDeltaKind::Close);
     delta.metadata.ingress_zone = 7;
+    let mut replay_buf: VecDeque<EventFrame> = VecDeque::new();
+    let mut write_buf = WriteBacklog::with_capacity(WRITE_BACKLOG_MAX_BYTES);
     let mut received = 0usize;
     for batch in 0..10 {
         for _ in 0..500 {
@@ -733,13 +739,85 @@ fn test_session_close_survives_production_rate_14609() {
             "batch {batch}: queue budget must not shed while drained between batches"
         );
         assert_eq!(stats.session_close.sent, ((batch + 1) * 500) as u64);
-        while let Ok(frame) = rx.try_recv() {
-            release_dataplane_event_queue_budget(&handle.shared, &frame);
-            received += 1;
-        }
+        let outcome = drain_channel_into_write_buf(
+            &rx,
+            &handle.shared,
+            &mut replay_buf,
+            &mut write_buf,
+            false,
+            &mut None,
+        );
+        assert!(outcome.drained_any, "batch {batch}: drain must move frames");
+        assert!(!outcome.stalled, "batch {batch}: backlog must not stall");
+        received += 500usize;
+        // Every drained frame landed in the replay buffer (modulo #2382
+        // wrap eviction past 4096) and its bytes in the write backlog —
+        // proof the real drain, not a test-side channel pull, consumed it.
+        assert_eq!(
+            write_buf.pending_len(),
+            received * (FRAME_HEADER_SIZE + 168)
+        );
     }
     assert_eq!(
         received, 5000,
         "all 5000 closes must reach the channel under the production limiter"
     );
+}
+
+#[test]
+fn test_session_close_burst_5000_without_ack_16570() {
+    // #16570 acceptance cell (the va72_01 DEFECT shape): 5000 closes with NO
+    // intervening ACK must yield queue_full == 0. Production SessionClose
+    // GCRA (8192/s + burst 8192/zone) admits the whole burst at one instant;
+    // the only gate that shed it was the per-kind queue budget
+    // (ceil((8192/2)/5) = 820), held until ACK trim on the Go 100 ms tick.
+    //
+    // The faithful component shape interleaves emit and the REAL drain the
+    // way the production I/O thread does — emit a channel-capacity batch,
+    // drain it into the write backlog + replay buffer (no ACK, no
+    // `pop_replay_frame`), emit the next batch — because 5000 frames cannot
+    // sit in an 8192 channel behind a 4096/820 budget any other way, and
+    // because the defect is precisely that drain did not release. A pure
+    // emit-5000-then-drain cell would still shed at 820 both before and
+    // after the fix (the frames genuinely occupy the channel), so it could
+    // not discriminate; the interleaved cell sheds 4180 before the fix and
+    // 0 after. Drained frames stay retained-but-unACKed in `replay_buf`
+    // (wrapping past 4096 bumps only the #2382 eviction counter).
+    let (handle, rx) = test_worker_handle(8192, DataplaneEventRateLimitConfig::default());
+    let mut delta = test_close_delta(crate::session::SessionDeltaKind::Close);
+    delta.metadata.ingress_zone = 7;
+    let mut replay_buf: VecDeque<EventFrame> = VecDeque::new();
+    let mut write_buf = WriteBacklog::with_capacity(WRITE_BACKLOG_MAX_BYTES);
+    let mut drained = 0usize;
+    for batch in 0..10 {
+        for _ in 0..500 {
+            handle.emit_session_close_rt_flow(
+                &delta,
+                0,
+                0,
+                delta.metadata.policy_id,
+                delta.policy_generation,
+            );
+        }
+        let outcome = drain_channel_into_write_buf(
+            &rx,
+            &handle.shared,
+            &mut replay_buf,
+            &mut write_buf,
+            false,
+            &mut None,
+        );
+        assert!(outcome.drained_any, "batch {batch}: drain must move frames");
+        drained += 500usize;
+        assert_eq!(write_buf.pending_len(), drained * (FRAME_HEADER_SIZE + 168));
+    }
+    let stats = handle.dataplane_event_stats();
+    assert_eq!(
+        stats.session_close.queue_full, 0,
+        "5000 closes without an ACK must not shed queue_full (#16570)"
+    );
+    assert_eq!(stats.session_close.rate_limited, 0);
+    assert_eq!(stats.session_close.sent, 5000);
+    assert_eq!(stats.session_close.dropped, 0);
+    assert_eq!(drained, 5000);
 }

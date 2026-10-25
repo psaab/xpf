@@ -1,4 +1,21 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Userspace event stream: the SessionClose/SessionCreate telemetry queue
+    budget is now released when a frame leaves the bounded channel, not when
+    an ACK trims it from the replay buffer (#16570). The per-kind budget
+    (820 of 8192 channel slots) was held across replay retention until the
+    Go daemon's 100 ms ACK tick, so any close/create burst above 820 frames
+    in one ACK interval — `clear security flow session`, a mass expiry, a
+    policy-revocation sweep, an admission burst — shed queue-full and
+    silently lost NetFlow/IPFIX close records (and, since #16303, whole
+    flows whose SESSION_CREATE was shed) plus `then log session-close`
+    RT_FLOW records, defeating the #14609 never-shed-below-capacity
+    contract. Replay retention stays bounded by the 4096-frame replay
+    buffer and counted on wrap (#2382, unchanged); the in-channel admission
+    bound and the SessionClose 8192/s rate limiter are unchanged, and HA
+    session-sync deltas were never budgeted. The #14609 acceptance test now
+    drains through the real production drain instead of modelling a
+    release the I/O thread never performed.
+
   * Config: routing-policy `to` match conditions and unmodelled `then`
     action keywords no longer drop silently with only the #10707 advisory
     (#16569). A BGP import term scoped `to neighbor X` (Junos: equivalent

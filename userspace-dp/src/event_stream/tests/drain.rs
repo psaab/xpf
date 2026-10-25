@@ -334,24 +334,18 @@ fn telemetry_seq_frame(seq: u64) -> EventFrame {
     }
 }
 
-// Inject a telemetry frame into the replay buffer AND seed the per-kind queue
-// budget the producer's `emit` would have charged for it (#4607). The #2875
-// tests build the buffer directly via `push_replay_frame`, bypassing `emit`;
-// a telemetry frame (SCREEN_DROP etc.) carries a `dataplane_event_kind()`, so
-// when it is evicted/popped the I/O path calls `release()` on its budget. In
-// production that release balances the acquire taken at emit; without the seed
-// here the release decrements a zero counter and trips the #1826 underflow
-// guard (`decrement_if_positive`) — the actual #4607 panic. Session-sync
-// frames (`replay_seq_frame`) have no `dataplane_event_kind()`, so they never
-// touch the budget and do not need this.
+// Inject a telemetry frame into the replay buffer. The #2875 tests build the
+// buffer directly via `push_replay_frame`, bypassing `emit`. Since #16570 a
+// frame retained for replay carries NO queue-budget slot (the slot is released
+// when the frame leaves the channel), so no budget seeding is needed: the
+// eviction/pop of a retained frame releases nothing. (Before #16570 the slot
+// was held across retention and released on eviction/ACK-trim, seeded here via
+// #4607; session-sync frames `replay_seq_frame` likewise never touched it.)
 fn push_budgeted_replay_frame(
     shared: &Arc<EventStreamShared>,
     replay_buf: &mut VecDeque<EventFrame>,
     frame: EventFrame,
 ) {
-    if let Some(kind) = frame.dataplane_event_kind() {
-        shared.dataplane_event_queue.acquire_for_test(kind);
-    }
     push_replay_frame(shared, replay_buf, frame);
 }
 

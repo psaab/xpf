@@ -58,6 +58,11 @@ pub(super) struct DrainOutcome {
 /// The cap does not apply while paused: paused frames are consumed into the
 /// already-bounded replay buffer only, never into `write_buf`, so they cannot
 /// grow the backlog.
+///
+/// #16570: each frame pulled here releases its dataplane-event queue budget
+/// (the budget bounds this channel, not the replay buffer that retains the
+/// copy for ACK/replay — that retention is bounded separately by
+/// `REPLAY_BUFFER_CAPACITY` and counted by eviction, #2382).
 pub(super) fn drain_channel_into_write_buf(
     rx: &mpsc::Receiver<EventFrame>,
     shared: &Arc<EventStreamShared>,
@@ -81,6 +86,21 @@ pub(super) fn drain_channel_into_write_buf(
         match rx.try_recv() {
             Ok(frame) => {
                 drained_any = true;
+                // #16570: the frame has left the bounded channel — that is
+                // the queue this budget bounds. Release its telemetry slot
+                // here, not on ACK trim: with the connected Go ACK on a
+                // 100 ms tick, holding the slot until ACK shed every
+                // close/create burst above the per-kind in-channel budget
+                // (ceil((8192/2)/5)=820) within one ACK interval, defeating
+                // the #14609 "below channel capacity a close is never shed"
+                // contract. Replay retention stays bounded and counted by
+                // REPLAY_BUFFER_CAPACITY eviction (#2382), which is a
+                // separate bound and no longer double-counts this slot:
+                // `push_replay_frame`/`pop_replay_frame` must therefore NOT
+                // release again (see replay.rs). The release is placed
+                // before `push_replay_frame` so an eviction of an older
+                // frame triggered by this push cannot take the slot.
+                release_dataplane_event_queue_budget(shared, &frame);
                 // #5267: flush a parked FullResync barrier just BEFORE the first
                 // channel frame whose seq exceeds it, so the wire stays
                 // monotonic. The barrier's seq was allocated under
