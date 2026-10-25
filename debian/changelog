@@ -39,6 +39,15 @@ xpf (0.0.0) unstable; urgency=medium
     the original next-hop and blackholed traffic with no IGP path to
     it (the #2977 failure returning through the RR). Stanzas with no
     rendered route-reflector-client are byte-identical.
+  * Remote CLI: `cli -c` no longer exits 0 having done nothing when
+    a keyword-only node gets an unknown or unimplemented subcommand
+    (#16798). `dispatchOperational` now consults
+    `cmdtree.ValidateOperationalLine` before routing and refuses such
+    lines as `unknown <path> command: <token>` (exit 1), covering
+    `clear security ike security-associations`, `request system
+    software add`, a misspelt `failover`, and the 32-node census.
+    Bare keyword nodes keep their help; value-slot and leaf failures
+    keep their existing handler errors.
   * Cluster/config: an omitted `redundancy-group ip-monitoring
     global-weight` now defaults to 255, the Junos default (#16667).
     Previously it compiled to 0, so aggregate mode deducted nothing

@@ -173,6 +173,8 @@ ARBITRARILY many trailing words and is honoured **only in `Canonicalize`** —
 the completion walkers ask the other question and must not see it. That scope
 is bound by `TestAcceptsArgsIsHonouredOnlyInCanonicalize_8304`, an AST check
 with a `HasDynamic` positive control, so it cannot decay into a comment.
+(`ValidateOperationalLine`, #16798, reads the flag only to classify a node
+as NOT keyword-only; it does not honour it to accept arguments.)
 
 It is OPT-IN AND NEVER A RELAXATION: an unmarked node is exactly as strict as
 before, so it cannot re-open #8289. The mutant that deletes the opt-in and
@@ -242,7 +244,9 @@ and is not: `handleShowRoute` dispatches on `args[0]` and drops the rest, so
 `show route table X protocol Y` runs `show route table X`. Marking it would
 reopen the bypass through a sibling keyword instead of a junk word. `Options` is
 honoured only in `Canonicalize`, bound by
-`TestOptionsIsHonouredOnlyInCanonicalize9505`.
+`TestOptionsIsHonouredOnlyInCanonicalize9505`. (`ValidateOperationalLine`,
+#16798, reads the flag only to classify a node as NOT keyword-only; it does
+not parse options.)
 
 Verified differentially against master over 107 lines: every `usage:` string,
 plus option-order and junk variants.

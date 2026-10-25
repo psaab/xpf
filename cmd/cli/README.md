@@ -22,6 +22,20 @@ cap would otherwise truncate a large config with `ResourceExhausted`
 - `-c "<command>"` — single-command, non-interactive mode. Exits with
   the command's status. Useful for scripted operations.
 
+## Unknown subcommands under keyword-only nodes refuse (#16798)
+
+`dispatchOperational` consults `cmdtree.ValidateOperationalLine` (the
+operational SSOT) before routing. A line whose first unrecognised
+token sits under a keyword-only node — a node with keyword children
+and no value slot — is refused as `unknown <path> command: <token>`
+(ambiguous abbreviations as `ambiguous <path> command: <token>`),
+so `-c` exits 1 instead of printing help and exiting 0 for work that
+never happened (`clear security ike security-associations`,
+`request system software add`, a misspelt `failover`). Bare keyword
+nodes keep their help listing; failures involving a value slot or a
+leaf fall through to the existing strict handlers (usage /
+unknown-filter / exact-arity errors).
+
 ## Local-only verbs run without a live daemon (#4909)
 
 `main.go` normally probes the daemon with `GetStatus` at startup and

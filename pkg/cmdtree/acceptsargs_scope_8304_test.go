@@ -130,6 +130,13 @@ func TestAcceptsArgsIsHonouredOnlyInCanonicalize_8304(t *testing.T) {
 		if fn == "CanonicalForms" || fn == "chargeTokens16472" {
 			continue
 		}
+		// #16798: ValidateOperationalLine reads AcceptsArgs only to
+		// classify a node as NOT keyword-only (a free-form tail is a
+		// value slot, so an unknown token there is not a missing
+		// subcommand). It does not honour the flag to accept args.
+		if fn == "ValidateOperationalLine" {
+			continue
+		}
 		if fn != "Canonicalize" {
 			t.Errorf("AcceptsArgs is read in %s(), but it is honoured ONLY in Canonicalize (plus the #16472 form walk).\n"+
 				"  Read sites found: %v\n"+
