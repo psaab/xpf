@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
+	"github.com/psaab/xpf/pkg/logging"
 )
 
 // topTalkerEntry holds a session's display info for sorting.
@@ -1174,7 +1176,7 @@ func (c *CLI) showFlowTraceoptions() error {
 	}
 
 	fmt.Println("Flow traceoptions:")
-	fmt.Printf("  File:           %s\n", opts.File)
+	fmt.Printf("  File:           %s\n", filepath.Join(logging.TraceLogDir(), opts.File))
 	if opts.FileSize > 0 {
 		fmt.Printf("  Max size:       %d bytes\n", opts.FileSize)
 	}

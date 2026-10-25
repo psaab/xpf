@@ -24,4 +24,8 @@ func TestShowFlowTraceoptionsProto15679(t *testing.T) {
 	if !strings.Contains(buf.String(), "src=10.0.0.0/8") {
 		t.Fatalf("gRPC show missing src:\n%s", buf.String())
 	}
+	// #16576: the File line renders the confined absolute path.
+	if !strings.Contains(buf.String(), "/var/log/xpf-flow-trace/rt.log") {
+		t.Fatalf("gRPC show missing confined trace path:\n%s", buf.String())
+	}
 }

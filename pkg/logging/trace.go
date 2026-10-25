@@ -25,11 +25,19 @@ import (
 var errFileUnavailable = errors.New("audit log file unavailable (failed rotation)")
 
 // traceLogDir is the directory persistent flow-trace files are written to. It
-// is a package var (not a const) only so tests can redirect it to a temp dir;
-// production always writes under /var/log. The persistent
-// `security flow traceoptions file <name>` knob accepts a bare basename and the
-// file always lives directly under this directory.
-var traceLogDir = "/var/log"
+// is a dedicated, root-owned (0700) namespace UNDER /var/log rather than
+// /var/log itself (#5038, #16576): confining traces to a private directory
+// means an operator-supplied trace filename can never resolve onto — or
+// rotate/rename — an unrelated privileged system-log inode such as
+// /var/log/auth.log, and the 0700 ownership stops a non-root user from
+// pre-planting a symlink/inode the root daemon would then open. It is a
+// package var (not a const) only so tests can redirect it to a temp dir;
+// production always writes under /var/log/xpf-flow-trace.
+var traceLogDir = "/var/log/xpf-flow-trace"
+
+// TraceLogDir returns the directory persistent flow-trace files are confined
+// to (#16576), so show surfaces print the same absolute path the writer uses.
+func TraceLogDir() string { return traceLogDir }
 
 // SetTraceLogDirForTest redirects the flow-trace output directory to dir and
 // returns a function that restores the previous value. It exists only so tests
@@ -122,6 +130,28 @@ func openHardenedAuditLog(path string, mode int) (*os.File, error) {
 // front).
 func openTraceFile(name string) (*os.File, error) {
 	return openHardenedAuditLog(filepath.Join(traceLogDir, name), os.O_APPEND)
+}
+
+// ensureTraceLogDir creates traceLogDir 0700 after an #8482-style Lstat check
+// (mirrors cli.openTraceFile): MkdirAll stats THROUGH a symlink, so a
+// pre-existing symlink at traceLogDir would otherwise redirect the
+// O_NOFOLLOW file open to <target>/<name>. Fail closed on a symlinked or
+// non-directory trace dir and on any Lstat error that is not "absent".
+func ensureTraceLogDir() error {
+	if fi, err := os.Lstat(traceLogDir); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("trace dir %s is a symlink; refusing to write root-owned flow telemetry through it (#8482, #16576)", traceLogDir)
+		}
+		if !fi.IsDir() {
+			return fmt.Errorf("trace dir %s exists and is not a directory (mode %v); refusing to write flow telemetry (#8482, #16576)", traceLogDir, fi.Mode())
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat trace dir %s: %w", traceLogDir, err)
+	}
+	if err := os.MkdirAll(traceLogDir, 0o700); err != nil {
+		return fmt.Errorf("create trace dir: %w", err)
+	}
+	return nil
 }
 
 // TraceWriter writes matching flow events to a trace file with rotation.
@@ -237,7 +267,7 @@ func NewTraceWriter(opts *config.FlowTraceoptions) (*TraceWriter, error) {
 
 	// Reject a non-basename file value (absolute path, separator, or ".."
 	// escape) so a committed config cannot steer root-written flow telemetry
-	// outside /var/log (#3420). The commit-time gate rejects this loudly; here
+	// outside the dedicated trace dir (#3420, #16576). The commit-time gate rejects this loudly; here
 	// we fail safe (no trace writer) for a leniently-loaded / peer-synced value.
 	if err := sanitizeTraceFileName(opts.File); err != nil {
 		return nil, err
@@ -365,9 +395,10 @@ func NewTraceWriter(opts *config.FlowTraceoptions) (*TraceWriter, error) {
 		tw.filters = append(tw.filters, f)
 	}
 
-	// Open trace file under traceLogDir (O_NOFOLLOW, regular-file checked, 0600).
-	if err := os.MkdirAll(traceLogDir, 0755); err != nil {
-		return nil, fmt.Errorf("create trace dir: %w", err)
+	// Open trace file under the dedicated traceLogDir (O_NOFOLLOW,
+	// regular-file checked, 0600), creating it 0700 first (#16576, #8482).
+	if err := ensureTraceLogDir(); err != nil {
+		return nil, err
 	}
 	f, err := openTraceFile(name)
 	if err != nil {

@@ -13,12 +13,14 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/appid"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/logging"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -413,7 +415,7 @@ func (s *Server) showFlowTraceoptions(cfg *config.Config, buf *strings.Builder) 
 		return
 	}
 	buf.WriteString("Flow traceoptions:\n")
-	fmt.Fprintf(buf, "  File:           %s\n", opts.File)
+	fmt.Fprintf(buf, "  File:           %s\n", filepath.Join(logging.TraceLogDir(), opts.File))
 	if opts.FileSize > 0 {
 		fmt.Fprintf(buf, "  File size:      %d bytes\n", opts.FileSize)
 	}

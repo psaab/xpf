@@ -48,10 +48,12 @@ func TestPerformZeroizeWipeErasesFirewallLogs10300(t *testing.T) {
 	// Dedicated interactive monitor flow-trace namespace is entirely xpf-owned.
 	mustWriteFile(t, filepath.Join(flowDir, "monitor.log"), []byte("prior monitor flow"))
 	mustWriteFile(t, filepath.Join(flowDir, "monitor.log.1"), []byte("prior monitor flow"))
-	// Configured persistent trace uses /var/log/<basename> and rotates there.
-	for _, name := range []string{"trace.log", "trace.log.1", "trace.log.1.gz", "trace.log-20260918", "trace.log-2026-09-18.gz"} {
+	// Configured persistent trace lives in the dedicated flow-trace dir
+	// since #16576 (not /var/log/<basename>); it is erased with that dir.
+	for _, name := range []string{"xpf-flow-trace/trace.log", "xpf-flow-trace/trace.log.1", "xpf-flow-trace/trace.log.1.gz"} {
 		mustWriteFile(t, filepath.Join(varLog, name), []byte("prior persistent flow"))
 	}
+	mustWriteFile(t, filepath.Join(varLog, "auth.log"), []byte("host auth log"))
 	// Configured rsyslog outputs, including common host logrotate forms.
 	for _, name := range []string{"messages", "messages.1", "messages.1.gz", "messages-20260918", "messages-2026-09-18.gz", "audit"} {
 		mustWriteFile(t, filepath.Join(varLog, name), []byte("prior firewall syslog"))
@@ -73,7 +75,7 @@ func TestPerformZeroizeWipeErasesFirewallLogs10300(t *testing.T) {
 	for _, name := range []string{
 		"xpf/security.log", "xpf/security.log.1", "xpf/security.log.1.gz",
 		"xpf-flow-trace/monitor.log", "xpf-flow-trace/monitor.log.1",
-		"trace.log", "trace.log.1", "trace.log.1.gz", "trace.log-20260918", "trace.log-2026-09-18.gz",
+		"xpf-flow-trace/trace.log", "xpf-flow-trace/trace.log.1", "xpf-flow-trace/trace.log.1.gz",
 		"messages", "messages.1", "messages.1.gz", "messages-20260918", "messages-2026-09-18.gz", "audit",
 	} {
 		assertAbsent(t, filepath.Join(varLog, name))
@@ -82,6 +84,11 @@ func TestPerformZeroizeWipeErasesFirewallLogs10300(t *testing.T) {
 		assertAbsent(t, filepath.Join(rsyslogDir, name))
 	}
 	assertPresent(t, filepath.Join(rsyslogDir, "50-default.conf"))
+	// #16576: the trace basename no longer resolves under /var/log, so the
+	// named-generation leg cannot reach a host log there — on this
+	// appliance-seamed tree the wholesale `logfiles` leg clears /var/log
+	// regardless, so auth.log is absent for that reason, not because the
+	// trace name steered the wipe onto it.
 	for _, name := range []string{"messages-other", "auth.log", "operator log"} {
 		assertAbsent(t, filepath.Join(varLog, name))
 	}

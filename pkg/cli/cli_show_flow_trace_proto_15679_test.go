@@ -27,4 +27,9 @@ func TestShowFlowTraceoptionsProto15679(t *testing.T) {
 	if !strings.Contains(out, "proto=ospf") {
 		t.Fatalf("CLI show missing proto=ospf:\n%s", out)
 	}
+	// #16576: the File line renders the confined absolute path, not the bare
+	// basename an operator could mistake for /var/log/<name>.
+	if !strings.Contains(out, "/var/log/xpf-flow-trace/rt.log") {
+		t.Fatalf("CLI show missing confined trace path:\n%s", out)
+	}
 }
