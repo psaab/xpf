@@ -71,6 +71,20 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 		}
 	}
 
+	// #16485 time-wait-state ageout gate. Junos presents
+	// `session-ageout` and `session-timeout` as alternative TIME_WAIT
+	// policies. Strict on commit / commit-check; lenient on load /
+	// peer-sync (warn, #1960 no-brick — the dataplane keeps its
+	// ageout-wins precedence there, and RenderFlowTimeouts reports it).
+	if err := validateTimeWaitStateAgeoutStrict(cfg); err != nil {
+		if opts.lenientTimeWaitStateAgeout16485 {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("time-wait-state session-ageout (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #4434 chassis-cluster heartbeat wire-width gate. Strict on commit /
 	// commit-check (hard-reject a redundancy-group cardinality or id that
 	// exceeds the single-byte heartbeat count / GroupID fields — 256 RGs

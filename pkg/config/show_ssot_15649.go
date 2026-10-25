@@ -71,12 +71,76 @@ func RenderFlowTimeouts(w io.Writer, cfg *Config) {
 	}
 	tcpRow("TCP established timeout", TCPSessionEstablishedTimeoutLeaf, tcp.EstablishedTimeout)
 	tcpRow("TCP initial timeout", TCPSessionInitialTimeoutLeaf, tcp.InitialTimeout)
-	tcpRow("TCP closing timeout", TCPSessionClosingTimeoutLeaf, tcp.ClosingTimeout)
+	// #16485: the closing and TIME_WAIT rows must report the window the
+	// dataplane actually enforces — the same selector as Rust
+	// tcp_close_window_ns_with_app (userspace-dp/src/session/mod.rs) —
+	// not merely the configured closing-timeout / time-wait-timeout
+	// leaves. Without this, `time-wait-state session-ageout` held closed
+	// sessions for the established window (1800s by default) while every
+	// show surface printed the 30-150s TIME_WAIT figure, and
+	// `apply-to-half-closed-state` governed CLOSING sessions with the
+	// TIME_WAIT window while show printed closing-timeout.
+	//
+	// Effective windows, mirroring the Rust selector:
+	//   - TIME_WAIT base: session-timeout overrides time-wait-timeout,
+	//     unset falls back to the dataplane closing window (30s).
+	//   - session-ageout: TIME_WAIT (and CLOSING when half-closed also
+	//     applies) ages on the service-based timeout — per-session this
+	//     is the session's application inactivity timeout, and the
+	//     global fallback rendered here is the effective established
+	//     window (established-timeout, 1800s by default). Ageout wins
+	//     over an explicit session-timeout (strict commit rejects that
+	//     combination, #16485; a leniently loaded one enforces ageout).
+	//   - apply-to-half-closed-state alone: CLOSING uses the TIME_WAIT
+	//     window above instead of closing-timeout.
+	effectiveEstablished := tcp.EstablishedTimeout
+	establishedIsDefault := false
+	if effectiveEstablished <= 0 {
+		effectiveEstablished = DataplaneTCPEstablishedWindowSecs
+		establishedIsDefault = true
+	}
 	effectiveTimeWait := tcp.TimeWaitTimeout
+	timeWaitIsDefault := false
 	if tcp.TimeWaitStateSessionTimeout > 0 {
 		effectiveTimeWait = tcp.TimeWaitStateSessionTimeout
+	} else if effectiveTimeWait <= 0 {
+		if def, ok := TCPSessionTimeoutDataplaneDefault(TCPSessionTimeWaitTimeoutLeaf); ok {
+			effectiveTimeWait = def
+			timeWaitIsDefault = true
+		}
 	}
-	tcpRow("TCP time-wait timeout", TCPSessionTimeWaitTimeoutLeaf, effectiveTimeWait)
+	// derivedRow renders a close window selected by the time-wait-state
+	// flags rather than by the row's own leaf, with the annotation that
+	// names the selecting mechanism.
+	derivedRow := func(name string, val int, isDefault bool, annotation string) {
+		cell := fmt.Sprintf("%ds", val)
+		if isDefault {
+			cell += " (default)"
+		}
+		cell += " (" + annotation + ")"
+		fmt.Fprintf(w, "  %-30s %s\n", name+":", cell)
+	}
+	const (
+		ageoutAnnotation     = "service/established timeout (session-ageout)"
+		halfClosedAnnotation = "time-wait window (apply-to-half-closed-state)"
+	)
+	switch {
+	case tcp.TimeWaitStateApplyToHalfClosed && tcp.TimeWaitStateSessionAgeout:
+		derivedRow("TCP closing timeout", effectiveEstablished, establishedIsDefault, ageoutAnnotation)
+	case tcp.TimeWaitStateApplyToHalfClosed:
+		derivedRow("TCP closing timeout", effectiveTimeWait, timeWaitIsDefault, halfClosedAnnotation)
+	default:
+		tcpRow("TCP closing timeout", TCPSessionClosingTimeoutLeaf, tcp.ClosingTimeout)
+	}
+	if tcp.TimeWaitStateSessionAgeout {
+		derivedRow("TCP time-wait timeout", effectiveEstablished, establishedIsDefault, ageoutAnnotation)
+	} else if timeWaitIsDefault {
+		// Keep the "(default)" marker: pass the unset leaf through so
+		// tcpRow renders the dataplane fallback itself.
+		tcpRow("TCP time-wait timeout", TCPSessionTimeWaitTimeoutLeaf, 0)
+	} else {
+		tcpRow("TCP time-wait timeout", TCPSessionTimeWaitTimeoutLeaf, effectiveTimeWait)
+	}
 	fmt.Fprintf(w, "  %-30s %s\n", "UDP session timeout:", FlowTimeoutCell(flow.UDPSessionTimeout, DataplaneUDPSessionTimeoutSecs))
 	fmt.Fprintf(w, "  %-30s %s\n", "ICMP session timeout:", FlowTimeoutCell(flow.ICMPSessionTimeout, DataplaneICMPSessionTimeoutSecs))
 
