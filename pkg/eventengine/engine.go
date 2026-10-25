@@ -658,6 +658,53 @@ func (e *Engine) apply(policies []*config.EventPolicy, cfg *config.Config, enfor
 	e.runtime = nextRuntime
 	e.semRev = nextRev
 
+	// #16650: reconcile parked deferred edges against the new live set.
+	// The pending maps are keyed by policy name (cooldown also by event)
+	// with no generation, so without this a predecessor's parked entry
+	// survives a same-name redefine: it occupies the key, a successor's
+	// in-cooldown edge finds the key taken when its cooldown park is
+	// inserted and is silently dropped, and drainDeferred then deletes
+	// the stale entry on semRev mismatch without ever replaying the
+	// successor. The budget map has the same shape - deferBudget returns
+	// false when a stale hold occupies the policy key. Purge every parked
+	// entry whose stamped semRev no longer matches the live revision
+	// (redefined or removed policies), decrementing the gauge by the
+	// number removed. Entries for unchanged policies keep their stamp
+	// == live rev and survive, preserving the #15021 replay.
+	// Lock order: pendingMu -> e.mu is the deferred worker's order, so
+	// taking pendingMu while holding e.mu would invert it and can
+	// deadlock against drainDeferred/deferredWorker (which hold
+	// pendingMu while taking e.mu). Bound the purge to an unlock/
+	// relock window instead: snapshot the live revisions under e.mu,
+	// drop e.mu, purge under pendingMu alone, then relock. apply's
+	// caller contract does not promise atomicity across that window -
+	// an event evaluated in the gap still sees the predecessor's entry,
+	// exactly as if the purge had not yet run, and the next Apply (or
+	// drain) converges. nextRev is a fresh local map, so reading it
+	// after unlocking is race-free.
+	func() {
+		e.mu.Unlock()
+		defer e.mu.Lock()
+		e.pendingMu.Lock()
+		defer e.pendingMu.Unlock()
+		var purged int64
+		for key, de := range e.pending.cooldown {
+			if rev, ok := nextRev[de.action.policyName]; !ok || rev != de.action.semRev {
+				delete(e.pending.cooldown, key)
+				purged++
+			}
+		}
+		for name, a := range e.pending.budget {
+			if rev, ok := nextRev[name]; !ok || rev != a.semRev {
+				delete(e.pending.budget, name)
+				purged++
+			}
+		}
+		if purged > 0 {
+			e.counters.pendingDeferred.Add(-purged)
+		}
+	}()
+
 	// #4423 (review follow-up): drop the per-policy invalid-warning throttle
 	// entries for policies no longer present, so the map stays bounded to the
 	// live policy set instead of accumulating a stamp per name ever seen. The
