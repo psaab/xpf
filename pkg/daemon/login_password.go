@@ -824,12 +824,15 @@ func (d *Daemon) deprovisionLoginUser(name string) (retErr error) {
 		fail(fmt.Errorf("determine ownership for removed user %s: %w", name, ownErr))
 		return retErr
 	}
-	// #14695: an xpf-CREATED account (account marker) had its shell chosen by
-	// xpf at useradd (-s <shell>), even if no explicit usermod ever ran, so
-	// account ownership implies shell ownership for the nologin reset. A
-	// pre-existing account is shell-owned only via the shell marker written
-	// when applySystemLogin actually changed its shell.
-	ownsShell = ownsShell || ownsAccount
+	// #16755: shell ownership derives ONLY from the shell marker. The
+	// account marker records "xpf created it OR set its password" (see
+	// provisionedUsersDir doc), and reconcileUserPassword writes it for any
+	// pre-existing account whose password xpf sets — including one whose
+	// shell already equals the class shell, where applySystemLogin changed
+	// nothing and wrote no shell marker. Inferring shell ownership from
+	// ownsAccount reset such an operator account to nologin on removal.
+	// xpf-created accounts are covered because applySystemLogin now writes
+	// the shell marker in the useradd branch (where xpf chooses -s).
 	if !ownsPassword && !ownsKey && !ownsAccount && !ownsShell {
 		// Nothing xpf-owned for the current account (markers absent, or a UID
 		// mismatch already cleaned inline). NEVER touch a non-xpf / out-of-band
@@ -985,8 +988,8 @@ func (d *Daemon) deprovisionLoginUser(name string) (retErr error) {
 	// (applySystemLogin), and zeroize later enumerates only the account
 	// registry, so forgetting provenance here without resetting the shell
 	// would orphan the shell grant permanently. Gate on shell ownership
-	// (shell marker, or account ownership for xpf-created accounts) so a
-	// non-xpf shell is never touched; a re-presented user is fenced below
+	// (shell marker only, #16755) so a non-xpf shell is never touched; a
+	// re-presented user is fenced below
 	// before any marker cleanup, and a failed usermod retains markers for
 	// retry — the same fail-closed discipline as the password/key arms.
 	if ownsShell {
