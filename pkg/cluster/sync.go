@@ -629,15 +629,21 @@ type SyncStats struct {
 	// allocate the large session-sync socket buffers. A nonzero value means the
 	// cap absorbed a connection flood on the sync/control network; the reserved
 	// tail (preAuthPeerReserve) still admits the legitimate peer's reconnect.
-	PreAuthRejected    atomic.Uint64
-	Connected          atomic.Bool
-	BulkSyncStartTime  atomic.Int64
-	BulkSyncEndTime    atomic.Int64
-	BulkSyncSessions   atomic.Uint64
-	LastConfigSyncTime atomic.Int64
-	LastConfigSyncSize atomic.Uint64
-	LastFenceSeq       atomic.Uint64
-	LastFenceAckAt     atomic.Int64
+	PreAuthRejected atomic.Uint64
+	// PreAuthHandshakeFailed counts connections dropped because the
+	// pre-auth handshake failed (#16748): garbage/bad-magic frames,
+	// wrong PSK, or a stalled handshake on an admitted connection.
+	// Every failure increments it, so the rate-independent observable
+	// reflects all rejections even though the WARN is rate-limited.
+	PreAuthHandshakeFailed atomic.Uint64
+	Connected              atomic.Bool
+	BulkSyncStartTime      atomic.Int64
+	BulkSyncEndTime        atomic.Int64
+	BulkSyncSessions       atomic.Uint64
+	LastConfigSyncTime     atomic.Int64
+	LastConfigSyncSize     atomic.Uint64
+	LastFenceSeq           atomic.Uint64
+	LastFenceAckAt         atomic.Int64
 }
 
 // SyncStatsSnapshot is a point-in-time copy of SyncStats with plain
@@ -716,6 +722,7 @@ type SyncStatsSnapshot struct {
 	GenCapShrunk                         uint64 // #9915 F-044 review
 	AuthUpgradeIdentityErrors            uint64 // #9915 F-043 review
 	PreAuthRejected                      uint64
+	PreAuthHandshakeFailed               uint64 // #16748
 	OversizeFramesRefused                uint64 // #16041 per-type payload cap refusals
 	Connected                            bool
 	ActiveFabric                         int
@@ -1027,7 +1034,9 @@ type SessionSync struct {
 	// its pre-wire setup window (inbound AND outbound) so Stop() can close them
 	// and unblock a stalled handshake — the bool value records whether the entry
 	// holds a counted inbound admission slot. preAuthLogMono rate-limits the
-	// rejection warning to ~1/sec. All three are guarded by preAuthMu.
+	// rejection warning to ~1/sec; preAuthHandshakeLogMono does the same for
+	// the handshake-failure warning (#16748). The counters are guarded by
+	// preAuthMu; the mono fields are atomics.
 	// peerIPs is the construction-time resolved cache of the configured peer
 	// addresses (#14371): literals via parseAddrIP, hostnames resolved once
 	// (all v4+v6 answers). Written only by the constructors via refreshPeerIPs
@@ -1037,7 +1046,11 @@ type SessionSync struct {
 	preAuthInFlight int
 	setupConns      map[net.Conn]bool
 	preAuthLogMono  atomic.Int64
-	peerIPs         map[netip.Addr]struct{}
+	// preAuthHandshakeLogMono rate-limits the handshake-failure WARN
+	// to ~1/sec (#16748), independently of the admission-cap WARN so
+	// one flood class cannot starve the other's diagnostics.
+	preAuthHandshakeLogMono atomic.Int64
+	peerIPs                 map[netip.Addr]struct{}
 
 	listener   net.Listener
 	localAddr1 string
@@ -2413,7 +2426,7 @@ func (s *SessionSync) Stats() SyncStatsSnapshot {
 		InstallsStaleIgnored:                 s.stats.InstallsStaleIgnored.Load(),
 		SessionsStaleConfigIgnored:           s.stats.SessionsStaleConfigIgnored.Load(),
 		GenMapOverflow:                       s.stats.GenMapOverflow.Load(), GenTombstonesEvicted: s.stats.GenTombstonesEvicted.Load(),
-		PreAuthRejected: s.stats.PreAuthRejected.Load(), OversizeFramesRefused: s.stats.OversizeFramesRefused.Load(), Connected: s.stats.Connected.Load(),
+		PreAuthRejected: s.stats.PreAuthRejected.Load(), PreAuthHandshakeFailed: s.stats.PreAuthHandshakeFailed.Load(), OversizeFramesRefused: s.stats.OversizeFramesRefused.Load(), Connected: s.stats.Connected.Load(),
 		ActiveFabric:      activeFabric,
 		BulkSyncStartTime: s.stats.BulkSyncStartTime.Load(), BulkSyncEndTime: s.stats.BulkSyncEndTime.Load(),
 		BulkSyncSessions:   s.stats.BulkSyncSessions.Load(),

@@ -1774,6 +1774,17 @@ handshake:
   unblocking a stalled handshake read instead of waiting out the 5s shutdown
   budget. Outbound dials bypass the cap (they are our own, bounded to one per
   fabric) but are still tracked for this shutdown close.
+- **Bounded pre-auth logging (#16748).** The accept loop logs
+  "peer connected" at Debug only — it fires before authentication, so
+  at Info an unauthenticated host on the sync segment could drive one
+  journal line per connection ahead of the admission limiter. The
+  post-auth "handling new connection" Info (and, when keyed, the
+  "connection authenticated" Info) is the operator signal that a peer
+  actually connected. A failed handshake bumps
+  `PreAuthHandshakeFailed` on every failure and emits its WARN at
+  most ~1/sec through its own limiter (`notePreAuthHandshakeFailed`,
+  independent of the admission-cap limiter), carrying the cumulative
+  `failed_total` so the bound does not hide the volume.
 
 ### Bulk-Prime Retry Loop
 

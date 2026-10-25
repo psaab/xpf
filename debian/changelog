@@ -1,4 +1,12 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Cluster/session-sync: pre-auth logging on the sync listener is
+    now bounded (#16748). The accept loop's "peer connected" line is
+    Debug instead of Info (it fired before authentication, so a
+    PSK-less host on the sync segment drove one journal line per
+    connection), and the "auth handshake failed" warning is
+    rate-limited to about one per second with a new
+    PreAuthHandshakeFailed sync-stats counter recording every
+    failure. Post-auth connection logging is unchanged.
   * Config/firewall: the single-rate `firewall policer`
     `burst-size-limit` floor is now the shared one-frame floor of
     1514 bytes (#16714), unified with the three-color leaves
