@@ -94,20 +94,29 @@ func (s *Server) showFlowTimeouts(cfg *config.Config, buf *strings.Builder) {
 
 // showFlowStatistics renders global flow counters (sessions, packets,
 // drops, NAT, screen, host-inbound, NAT64, flow cache).
-// grpcSessionCount reads table occupancy via the shared backend counter.
-func grpcSessionCount(dp grpcRuntime) (v4, v6 int) {
-	if dp == nil {
-		return 0, 0
-	}
-	v4, v6, _ = backendSessionCountContext(context.Background(), dp)
-	return v4, v6
-}
-
-func (s *Server) showFlowStatistics(buf *strings.Builder) {
+//
+// The "Current sessions:" line is table occupancy, which
+// backendSessionCountContext obtains by a full v4+v6 session-table
+// walk. That walk is admitted through the shared sessionWalkLimiter
+// via AcquireCtx (#16677, regression of #5708/#7294 closed by #15577):
+// an over-cap caller fails fast with ResourceExhausted instead of
+// driving an unadmitted walk, and the lease context makes the walk
+// cancellable when the ShowText caller goes away instead of running
+// on context.Background() to completion. A walk failure is returned
+// as an error (sessionCountStatus), never rendered as a clean
+// "Current sessions: 0" — the same operator lie the #3345 warning
+// below exists to prevent for the global counters.
+func (s *Server) showFlowStatistics(ctx context.Context, buf *strings.Builder) error {
 	if s.dp == nil || !s.dp.IsLoaded() {
 		buf.WriteString("Flow statistics: dataplane not loaded\n")
-		return
+		return nil
 	}
+	release, walkCtx, err := sessionWalkLimiter.AcquireCtx(ctx)
+	if err != nil {
+		return status.Error(codes.ResourceExhausted,
+			"session scan concurrency limit reached; retry shortly")
+	}
+	defer release()
 	// #3345: surface a counter-read failure rather than emitting clean zeros
 	// that hide a degraded counter bridge.
 	var readErr error
@@ -122,7 +131,10 @@ func (s *Server) showFlowStatistics(buf *strings.Builder) {
 	sessClosed := readCtr(dataplane.GlobalCtrSessionsClosed)
 	// #15236 (A52-05): Current sessions = table occupancy (SessionCount),
 	// not create-minus-expire of locally created sessions.
-	v4Cur, v6Cur := grpcSessionCount(s.dp)
+	v4Cur, v6Cur, err := backendSessionCountContext(walkCtx, s.dp)
+	if err != nil {
+		return sessionCountStatus(walkCtx, err)
+	}
 	buf.WriteString("Flow statistics:\n")
 	fmt.Fprintf(buf, "  %-30s %d\n", "Current sessions:", v4Cur+v6Cur)
 	fmt.Fprintf(buf, "  %-30s %d\n", "Local forwarding sessions (created-closed):", dataplane.CurrentSessions(sessNew, sessClosed))
@@ -158,6 +170,7 @@ func (s *Server) showFlowStatistics(buf *strings.Builder) {
 	if readErr != nil {
 		fmt.Fprintf(buf, "warning: global counter read failed (statistics may be incomplete): %v\n", readErr)
 	}
+	return nil
 }
 
 // resolveSessionName is a package-level indirection over
