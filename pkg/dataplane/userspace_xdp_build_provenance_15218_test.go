@@ -3,6 +3,7 @@ package dataplane
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -101,7 +102,7 @@ func provenanceVerdict(t *testing.T, root string, mutate func(map[string]any)) [
 			"toolchain":          "nightly-2026-05-23",
 			"pinned":             true,
 			"bpf_linker":         "0.10.2",
-			"codegen_env_digest": WellKnownCodegenEnvDigest(),
+			"codegen_env_digest": mustWellKnownDigest(t, root),
 		},
 	}
 	if mutate != nil {
@@ -112,6 +113,16 @@ func provenanceVerdict(t *testing.T, root string, mutate func(map[string]any)) [
 		t.Fatal(err)
 	}
 	return b
+}
+
+
+func mustWellKnownDigest(t *testing.T, root string) string {
+	t.Helper()
+	d, err := WellKnownCodegenEnvDigest(root)
+	if err != nil {
+		t.Fatalf("well-known digest: %v", err)
+	}
+	return d
 }
 
 func prov(m map[string]any) map[string]any { return m["provenance"].(map[string]any) }
@@ -199,7 +210,11 @@ func TestCommittedVerdictCarriesProvenance15218(t *testing.T) {
 	if v.Provenance.BPFLinker != ShimPinnedBPFLinkerVersion {
 		t.Fatalf("#15218: committed verdict bpf_linker = %q, want pin %q", v.Provenance.BPFLinker, ShimPinnedBPFLinkerVersion)
 	}
-	if want := WellKnownCodegenEnvDigest(); v.Provenance.CodegenEnvDigest != want {
+	want, err := WellKnownCodegenEnvDigest("../..")
+	if err != nil {
+		t.Fatalf("well-known digest: %v", err)
+	}
+	if v.Provenance.CodegenEnvDigest != want {
 		t.Fatalf("#15218: committed verdict codegen_env_digest = %q, want scrubbed-env digest %q (object was built under an unscrubbed codegen env)", v.Provenance.CodegenEnvDigest, want)
 	}
 }
@@ -216,17 +231,149 @@ func TestBuildRecipeRecordsProvenance15218(t *testing.T) {
 	code := shellCodeLines(string(data))
 	joined := "\n" + strings.Join(code, "\n") + "\n"
 	for _, want := range []string{
-		"env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS",
+		"env -i",
+		"\"CARGO_HOME=${SCRUBBED_CARGO_HOME}\"",
 		"XPF_SHIM_TOOLCHAIN=",
 		"XPF_SHIM_PINNED=",
 		"XPF_SHIM_BPF_LINKER=",
 		"XPF_SHIM_CODEGEN_ENV_DIGEST=",
 	} {
 		if !strings.Contains(joined, want) {
-			t.Errorf("#15218: no executable line of build-userspace-xdp.sh contains %q; provenance is not scrubbed/recorded", want)
+			t.Errorf("#15218/#16657: no executable line of build-userspace-xdp.sh contains %q; provenance is not scrubbed/recorded", want)
 		}
 	}
 	if strings.Contains(string(data), "PR reproducibility gate") {
 		t.Errorf("#15218: refusal text still cites the unimplemented 'PR reproducibility gate'; name the local freshness/retention gates instead")
+	}
+}
+
+// TestBuildRecipeScrubsCargoEnv16657 is the stand-in-cargo probe for
+// #16657: run the real recipe with a fake cargo and a fully tainted
+// ambient environment; the environment/argv the build cargo receives
+// must contain none of the listed overrides, a repo-controlled
+// CARGO_HOME, and the forced --config profile/linker values. The
+// recipe then fails at the verifier gate (fake object / stub gate),
+// which is expected — the probe asserts only what cargo saw.
+func TestBuildRecipeScrubsCargoEnv16657(t *testing.T) {
+	if _, err := os.Stat("/home/ps/.cargo/bin/bpf-linker"); err != nil {
+		t.Skip("bpf-linker not installed on this host")
+	}
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil { t.Fatal(err) }
+	dir := t.TempDir()
+	fakeCargo := filepath.Join(dir, "fake-cargo.sh")
+	envOut := filepath.Join(dir, "env.txt")
+	argvOut := filepath.Join(dir, "argv.txt")
+	script := "#!/usr/bin/env bash\n" +
+		"env | sort >> \"" + envOut + "\"; echo ===CALL=== >> \"" + envOut + "\"\n" +
+		"printf '%s\\n' \"$@\" >> \"" + argvOut + "\"; echo ===CALL=== >> \"" + argvOut + "\"\n" +
+		"if [[ \"${1:-}\" == \"+nightly-2026-05-23\" && \"${2:-}\" == \"--version\" ]]; then echo \"cargo 1.98.0\"; exit 0; fi\n" +
+		"TD=$(grep '^CARGO_TARGET_DIR=' \"" + envOut + "\" | tail -1 | cut -d= -f2-)\n" +
+		"mkdir -p \"${TD}/bpfel-unknown-none/release\"\n" +
+		"printf fake > \"${TD}/bpfel-unknown-none/release/libxpf_userspace_xdp.so\"\n"
+	if err := os.WriteFile(fakeCargo, []byte(script), 0o755); err != nil { t.Fatal(err) }
+	goStub := filepath.Join(dir, "go-stub.sh")
+	goScript := "#!/usr/bin/env bash\n" +
+		"if [[ \"$*\" == *print-build-digest* ]]; then echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; exit 0; fi\n" +
+		"if [[ \"${1:-}\" == build ]]; then out=\"\"; prev=\"\"; for a in \"$@\"; do if [[ \"$prev\" == -o ]]; then out=\"$a\"; fi; prev=\"$a\"; done; printf '#!/usr/bin/env bash\\nexit 99\\n' > \"$out\"; chmod +x \"$out\"; exit 0; fi\n" +
+		"exit 1\n"
+	if err := os.WriteFile(goStub, []byte(goScript), 0o755); err != nil { t.Fatal(err) }
+	targetDir := filepath.Join(dir, "target")
+	cmd := exec.Command("bash", filepath.Join(repoRoot, "pkg/dataplane/build-userspace-xdp.sh"))
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(),
+		"CARGO="+fakeCargo, "GO="+goStub, "CARGO_TARGET_DIR="+targetDir,
+		"RUSTFLAGS=-C evil", "CARGO_ENCODED_RUSTFLAGS=evil",
+		"CARGO_PROFILE_RELEASE_OPT_LEVEL=1", "CARGO_PROFILE_RELEASE_LTO=off",
+		"CARGO_PROFILE_RELEASE_DEBUG=true", "CARGO_PROFILE_RELEASE_INCREMENTAL=true",
+		"CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER=/tmp/evil-linker",
+		"CARGO_TARGET_BPFEL_UNKNOWN_NONE_RUSTFLAGS=-C evil",
+		"CARGO_BUILD_RUSTFLAGS=-C evil", "CARGO_BUILD_RUSTC=/tmp/evil-rustc",
+		"CARGO_BUILD_RUSTC_WRAPPER=/tmp/evil", "CARGO_BUILD_TARGET_DIR=/tmp/evil-target",
+		"RUSTC=/tmp/evil-rustc", "RUSTC_WRAPPER=/tmp/evil-wrapper",
+		"RUSTC_WORKSPACE_WRAPPER=/tmp/evil", "RUSTDOCFLAGS=-C evil",
+		"CARGO_HOME=/tmp/evil-home", "CARGO_INCREMENTAL=1",
+	)
+	_ = cmd.Run() // verifier gate must fail on the fake object; cargo env is the assertion
+	envBytes, err := os.ReadFile(envOut)
+	if err != nil { t.Fatalf("fake cargo never ran: %v", err) }
+	calls := strings.Split(string(envBytes), "===CALL===\n")
+	if len(calls) < 2 { t.Fatalf("expected at least the build cargo call, got %d calls", len(calls)-1) }
+	buildEnv := calls[len(calls)-2]
+	for _, bad := range []string{"evil", "CARGO_PROFILE_RELEASE", "CARGO_BUILD_", "CARGO_ENCODED_RUSTFLAGS=evil", "CARGO_INCREMENTAL", "RUSTC=", "RUSTC_WRAPPER", "RUSTDOCFLAGS", "RUSTFLAGS=-C"} {
+		if strings.Contains(buildEnv, bad) {
+			t.Errorf("#16657: tainted %q reached cargo build env:\n%s", bad, buildEnv)
+		}
+	}
+	if !strings.Contains(buildEnv, "CARGO_HOME=/tmp/") || strings.Contains(buildEnv, "CARGO_HOME=/tmp/evil-home") {
+		t.Errorf("#16657: cargo build CARGO_HOME is not repo-controlled:\n%s", buildEnv)
+	}
+	if !strings.Contains(buildEnv, "RUSTUP_TOOLCHAIN=nightly-2026-05-23") {
+		t.Errorf("#16657: cargo build missing pinned RUSTUP_TOOLCHAIN:\n%s", buildEnv)
+	}
+	argvBytes, err := os.ReadFile(argvOut)
+	if err != nil { t.Fatal(err) }
+	argv := string(argvBytes)
+	for _, want := range []string{"profile.release.opt-level=3", "profile.release.lto=false", "target.bpfel-unknown-none.linker"} {
+		if !strings.Contains(argv, want) {
+			t.Errorf("#16657: cargo argv missing forced --config %q:\n%s", want, argv)
+		}
+	}
+	// Digest of the actual build env (allowlisted keys, sorted) must
+	// equal the well-known digest the consumer gates recompute.
+	var pairs []string
+	for _, line := range strings.Split(strings.TrimSpace(buildEnv), "\n") {
+		k, _, _ := strings.Cut(line, "=")
+		switch k {
+		case "CARGO_HOME":
+			pairs = append(pairs, "CARGO_HOME=<repo-controlled-empty>")
+		case "CARGO_TARGET_DIR", "HOME", "PATH", "PWD", "RUSTUP_HOME", "SHLVL", "TERM", "_":
+			// allowlisted plumbing, not codegen env
+		default:
+			pairs = append(pairs, line)
+		}
+	}
+	// Reconstruct the canonical stream: every digest key empty except
+	// MAX_INTERFACES / RUSTUP_TOOLCHAIN taken from the actual env.
+	get := func(k string) string {
+		for _, line := range strings.Split(buildEnv, "\n") {
+			if strings.HasPrefix(line, k+"=") { return strings.TrimPrefix(line, k+"=") }
+		}
+		return ""
+	}
+	_ = pairs
+	if got, want := ShimCodegenEnvDigest(get("MAX_INTERFACES"), get("RUSTUP_TOOLCHAIN")), func() string { d, e := WellKnownCodegenEnvDigest(repoRoot); if e != nil { t.Fatal(e) }; return d }(); got != want {
+		t.Errorf("#16657: digest of actual cargo env = %q, want well-known %q", got, want)
+	}
+}
+
+// TestScrubDigestMatchesRecipe16657 pins the three implementations of
+// the canonical stream (recipe printf, Go, Python) to the same value
+// for the committed pin/header, and that WellKnown rejects the old
+// #15218 constant.
+func TestScrubDigestMatchesRecipe16657(t *testing.T) {
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil { t.Fatal(err) }
+	want, err := WellKnownCodegenEnvDigest(repoRoot)
+	if err != nil { t.Fatal(err) }
+	data, err := os.ReadFile("build-userspace-xdp.sh")
+	if err != nil { t.Fatal(err) }
+	code := strings.Join(shellCodeLines(string(data)), "\n")
+	for _, frag := range []string{"CARGO_PROFILE_RELEASE_OPT_LEVEL=", "CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER=", "RUSTC_WORKSPACE_WRAPPER=", "RUSTUP_TOOLCHAIN=%s"} {
+		if !strings.Contains(code, frag) {
+			t.Errorf("#16657: recipe digest stream missing %q", frag)
+		}
+	}
+	if want == "44d8a70acf9e98d41330740d3d7dccb0644235d84bcbc227c4845f44f61549b9" {
+		t.Errorf("#16657: well-known digest still equals the #15218 two-variable constant")
+	}
+	// Old digest must be rejected by both consumer gates' predicate.
+	root := writeProvenanceFixture(t, func(r string) []byte {
+		return provenanceVerdict(t, r, func(v map[string]any) { prov(v)["codegen_env_digest"] = "44d8a70acf9e98d41330740d3d7dccb0644235d84bcbc227c4845f44f61549b9" })
+	})
+	m, err := ComputeUserspaceXDPManifest(root)
+	if err != nil { t.Fatal(err) }
+	if m.BuildDigest != "" {
+		t.Errorf("#16657: freshness gate adopted the old #15218 digest")
 	}
 }

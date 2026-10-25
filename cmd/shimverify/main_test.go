@@ -399,7 +399,7 @@ func TestShimverifyWritesGateVerdict(t *testing.T) {
 					case "XPF_SHIM_BPF_LINKER":
 						return "0.10.2"
 					case "XPF_SHIM_CODEGEN_ENV_DIGEST":
-						return dataplane.WellKnownCodegenEnvDigest()
+						return dataplane.ShimCodegenEnvDigest("65536", "nightly-2026-05-23")
 					}
 					return tc.override
 				},
@@ -427,7 +427,7 @@ func TestShimverifyWritesGateVerdict(t *testing.T) {
 				t.Errorf("schema/object binding = (%d, %q), want schema 2 and candidate SHA-256", got.SchemaVersion, got.ObjectSHA256)
 			}
 			if got.Provenance.Toolchain != "nightly-2026-05-23" || !got.Provenance.Pinned ||
-				got.Provenance.BPFLinker != "0.10.2" || got.Provenance.CodegenEnvDigest != dataplane.WellKnownCodegenEnvDigest() {
+				got.Provenance.BPFLinker != "0.10.2" || got.Provenance.CodegenEnvDigest != dataplane.ShimCodegenEnvDigest("65536", "nightly-2026-05-23") {
 				t.Errorf("#15218: recorded provenance = %+v, want pinned nightly-2026-05-23 / bpf-linker 0.10.2 / scrubbed-env digest", got.Provenance)
 			}
 			if got.BuildDigest != strings.Repeat("a", 64) {

@@ -172,20 +172,70 @@ func readUserspaceXDPGateVerdict(repoRoot string) (*userspaceXDPGateVerdict, err
 }
 
 // ShimCodegenEnvDigest is SHA-256 over the canonical codegen-env
-// stream "RUSTFLAGS=<v>\nCARGO_ENCODED_RUSTFLAGS=<v>\n" (#15218).
-// These two variables are the rustc-codegen inputs cargo honours from
-// the ambient environment; everything else that can steer codegen
-// for the bpfel target lives in hashed files (.cargo/config.toml,
-// Cargo.toml, the build recipe).
-func ShimCodegenEnvDigest(rustflags, encoded string) string {
-	sum := sha256.Sum256([]byte("RUSTFLAGS=" + rustflags + "\nCARGO_ENCODED_RUSTFLAGS=" + encoded + "\n"))
+// stream the scrubbed recipe actually passes to cargo (#15218,
+// residual #16657). The recipe runs cargo under env -i with an
+// allowlist, a repo-controlled empty CARGO_HOME, forced
+// --config profile.release.* / target.bpfel-unknown-none.linker
+// values, MAX_INTERFACES and RUSTUP_TOOLCHAIN=<toolchain>; every
+// other CARGO_*/RUSTC*/RUSTFLAGS* variable is empty by construction.
+// The digest is computed from that exact stream in build-userspace-
+// xdp.sh, userspace_xdp_manifest.go and retain_shim_verdict.py —
+// any drift fails both consumer gates closed.
+func ShimCodegenEnvDigest(maxInterfaces, toolchain string) string {
+	s := "CARGO_HOME=<repo-controlled-empty>\n" +
+		"CARGO_ENCODED_RUSTFLAGS=\n" +
+		"CARGO_PROFILE_RELEASE_CODEGEN_UNITS=\n" +
+		"CARGO_PROFILE_RELEASE_DEBUG=\n" +
+		"CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=\n" +
+		"CARGO_PROFILE_RELEASE_INCREMENTAL=\n" +
+		"CARGO_PROFILE_RELEASE_LTO=\n" +
+		"CARGO_PROFILE_RELEASE_OPT_LEVEL=\n" +
+		"CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=\n" +
+		"CARGO_PROFILE_RELEASE_PANIC=\n" +
+		"CARGO_PROFILE_RELEASE_STRIP=\n" +
+		"CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER=\n" +
+		"CARGO_TARGET_BPFEL_UNKNOWN_NONE_RUSTFLAGS=\n" +
+		"MAX_INTERFACES=" + maxInterfaces + "\n" +
+		"RUSTC=\n" +
+		"RUSTC_WRAPPER=\n" +
+		"RUSTC_WORKSPACE_WRAPPER=\n" +
+		"RUSTDOCFLAGS=\n" +
+		"RUSTFLAGS=\n" +
+		"RUSTUP_TOOLCHAIN=" + toolchain + "\n"
+	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
 }
 
-// WellKnownCodegenEnvDigest is ShimCodegenEnvDigest("",""): the only
-// codegen environment a gated build may have, because
-// build-userspace-xdp.sh scrubs both variables before running cargo.
-func WellKnownCodegenEnvDigest() string { return ShimCodegenEnvDigest("", "") }
+// ShimMaxInterfaces returns MAX_INTERFACES from bpf/headers/xpf_common.h.
+func ShimMaxInterfaces(repoRoot string) (string, error) {
+	b, err := os.ReadFile(filepath.Join(repoRoot, "bpf", "headers", "xpf_common.h"))
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 3 && f[0] == "#define" && f[1] == "MAX_INTERFACES" {
+			return f[2], nil
+		}
+	}
+	return "", fmt.Errorf("MAX_INTERFACES not found in bpf/headers/xpf_common.h")
+}
+
+// WellKnownCodegenEnvDigest is the digest for the pinned toolchain and
+// the header's MAX_INTERFACES at repoRoot: the only codegen environment
+// a gated build may have, because build-userspace-xdp.sh runs cargo
+// under env -i with that allowlist (#16657).
+func WellKnownCodegenEnvDigest(repoRoot string) (string, error) {
+	tc, err := pinnedShimToolchain(filepath.Join(repoRoot, "userspace-xdp", "rust-toolchain.toml"))
+	if err != nil {
+		return "", err
+	}
+	mi, err := ShimMaxInterfaces(repoRoot)
+	if err != nil {
+		return "", err
+	}
+	return ShimCodegenEnvDigest(mi, tc), nil
+}
 
 // pinnedShimToolchain extracts the pinned channel from
 // rust-toolchain.toml with the same strictness as the build recipe:
@@ -232,7 +282,7 @@ func pinnedShimToolchain(path string) (string, error) {
 }
 
 // verdictProvenanceClean reports whether a gate verdict's recorded
-// provenance (#15218) proves a pinned build under the scrubbed
+// provenance (#15218, #16657) proves a pinned build under the scrubbed
 // codegen env with the pinned bpf-linker. Anything else — absent
 // provenance, unpinned, wrong toolchain/linker, foreign env digest —
 // is not provenance a consumer gate may trust.
@@ -245,7 +295,11 @@ func verdictProvenanceClean(repoRoot string, v *userspaceXDPGateVerdict) bool {
 	if err != nil || p.Toolchain != pin {
 		return false
 	}
-	return p.BPFLinker == ShimPinnedBPFLinkerVersion && p.CodegenEnvDigest == WellKnownCodegenEnvDigest()
+	want, err := WellKnownCodegenEnvDigest(repoRoot)
+	if err != nil {
+		return false
+	}
+	return p.BPFLinker == ShimPinnedBPFLinkerVersion && p.CodegenEnvDigest == want
 }
 
 // UserspaceXDPBuildDigest returns the canonical digest of all source and

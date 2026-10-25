@@ -273,15 +273,20 @@ Guard layers (`build-userspace-xdp.sh`):
    path. `RUST_BPF_TOOLCHAIN=...` overrides the pin for bisects, but
    installing an unpinned object additionally requires
    `XPF_SHIM_ALLOW_UNPINNED_INSTALL=1`.
-   **Build provenance (#15218)**: the gate verdict (schema 2) records
-   the toolchain cargo ran, a `pinned` bool, the bpf-linker version
-   and a codegen-env digest. The recipe scrubs `RUSTFLAGS` /
-   `CARGO_ENCODED_RUSTFLAGS` for the cargo invocation (a pinned build
-   under ambient rustflags is not the pinned build), so the digest
-   is the well-known scrubbed-env value. The freshness gate and the
-   release retention gate both refuse verdicts whose provenance is
-   absent, unpinned, off-pin, or unscrubbed-env — an unpinned or
-   RUSTFLAGS install can no longer ship as a plain PASS.
+   **Build provenance (#15218, #16657)**: the gate verdict (schema 2)
+   records the toolchain cargo ran, a `pinned` bool, the bpf-linker
+   version and a codegen-env digest. The recipe runs cargo under
+   `env -i` with an explicit allowlist, a repo-controlled empty
+   `CARGO_HOME`, and forced `--config profile.release.*` /
+   `target.bpfel-unknown-none.linker` values (a pinned build under
+   ambient `CARGO_*`/`RUSTC*`/`RUSTFLAGS*` or `$CARGO_HOME` config is
+   not the pinned build), so the digest — computed in the recipe, Go
+   and Python from the same canonical stream over the environment
+   actually passed to cargo — is the well-known scrubbed-env value.
+   The freshness gate and the release retention gate both refuse
+   verdicts whose provenance is absent, unpinned, off-pin, or
+   unscrubbed-env — an unpinned or codegen-tainted install can no
+   longer ship as a plain PASS.
 3. **Deploy pre-flight** — `xpfd verify-dataplane` runs the same
    verify-only load against the object embedded in the invoked
    binary (exit 0 PASS / 3 verifier REJECT / 1 other).
