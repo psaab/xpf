@@ -217,7 +217,7 @@ func (m *Manager) runDHCPv4(ctx context.Context, ifaceName string) {
 		// keep succeeding; break out only to re-acquire from scratch.
 	renewalLoop:
 		for {
-			t1, t2Remaining, ok := renewalTimers(committed.LeaseTime)
+			t1, t2Remaining, ok := renewalSchedule(committed.LeaseTime, nil, committed.RenewAt, committed.RebindAt)
 			if !ok {
 				// A non-positive lease time is invalid (RFC 2131 lease 0 is
 				// not the infinite sentinel). The lease is unusable: do not
@@ -649,9 +649,13 @@ func leaseFromACKv4WithProtected(ifaceName string, ack *dhcpv4.DHCPv4, protected
 		}
 	}
 
-	// Lease time
+	// Lease time, plus server T1/T2 (options 58/59, #16553). The library
+	// returns the default (0 here) when the option is absent or
+	// malformed, so RenewAt/RebindAt stay 0 = "use RFC defaults".
 	lt := ack.IPAddressLeaseTime(3600 * time.Second) // default 1 hour
 	lease.LeaseTime = lt
+	lease.RenewAt = ack.IPAddressRenewalTime(0)
+	lease.RebindAt = ack.IPAddressRebindingTime(0)
 
 	return lease, nil
 }

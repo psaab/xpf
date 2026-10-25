@@ -39,13 +39,15 @@ import (
 // unit-tested directly — see renew_test.go.
 
 // renewalTimers computes the two waits of one renewal cycle from a lease
-// duration, following the RFC 2131 §4.4.5 / RFC 8415 §18.2.4 schedule:
-// t1 is the wait until the renew (RENEWING) attempt at 50% of the lease,
-// and t2Remaining is the ADDITIONAL wait from T1 to the rebind
-// (REBINDING) attempt at 87.5% of the lease (87.5% − 50% = 37.5% of the
-// lease). ok reports whether the lease is a usable finite lease; a
-// non-positive leaseTime is invalid and the caller must fail closed into
-// re-acquisition rather than schedule a renewal (see below).
+// duration with no server-supplied T1/T2, following the RFC 2131
+// §4.4.5 / RFC 8415 §18.2.4 default schedule: t1 is the wait until the
+// renew (RENEWING) attempt at 50% of the lease, and t2Remaining is the
+// ADDITIONAL wait from T1 to the rebind (REBINDING) attempt at 87.5%
+// of the lease (87.5% − 50% = 37.5% of the lease). ok reports whether
+// the lease is a usable finite lease; a non-positive leaseTime is
+// invalid and the caller must fail closed into re-acquisition rather
+// than schedule a renewal (see below). Callers holding server T1/T2
+// (#16553) use renewalSchedule directly.
 //
 // No fixed minimum is applied. A fixed 30s T1 / 1s T2 floor previously
 // clamped both waits (#5795): for any finite lease shorter than 60s that
@@ -72,16 +74,81 @@ import (
 // extracted here so both v4/v6 run loops share one definition and tests
 // can pin the schedule.
 func renewalTimers(leaseTime time.Duration) (t1, t2Remaining time.Duration, ok bool) {
+	return renewalSchedule(leaseTime, nil, 0, 0)
+}
+
+// renewalSchedule computes the T1 wait and the additional T1→T2 wait
+// for one renewal cycle, honoring server-supplied T1/T2 (#16553).
+//
+// The fallback base is the shortest valid lifetime among the lease
+// (LeaseTime) and every held delegated prefix: a tier the server left
+// at zero uses the RFC default ratio of that shortest lifetime
+// (T1 0.5, T2 0.875). Server timers are the earliest non-zero value
+// across the lease's own RenewAt/RebindAt and every held prefix's
+// RenewAt/RebindAt (RFC 8415 §18.2.4: Renew/Rebind not later than the
+// T1/T2 of ANY binding). Both tiers are then clamped so
+// 0 < T1 < T2 < shortest whenever the shortest lifetime is finite:
+// a server T1/T2 at/after expiry or a T2 <= T1 must never schedule a
+// renewal at/after the binding it renews, nor collapse the tiers.
+// The infinite sentinel is exempt from the before-expiry clamp (no
+// finite expiry exists), but T1 < T2 and T1 > 0 still hold.
+//
+// ok=false only when leaseTime <= 0 (unchanged #5795 fail-closed
+// contract). A positive leaseTime with degenerate server T1/T2 still
+// yields a usable pre-expiry schedule via the clamps.
+func renewalSchedule(leaseTime time.Duration, pds []DelegatedPrefix, serverT1, serverT2 time.Duration) (t1, t2Remaining time.Duration, ok bool) {
 	if leaseTime <= 0 {
-		// RFC 2131 lease time 0 is NOT the infinite sentinel (that is
-		// 0xFFFFFFFF); a zero or negative lifetime is unusable. Signal
-		// invalid so the run loop re-acquires instead of scheduling a
-		// renewal that would fire at or after an already-lapsed lease.
 		return 0, 0, false
 	}
-	t1 = leaseTime / 2
-	t2Remaining = leaseTime / 8 * 3
-	return t1, t2Remaining, true
+	shortest := leaseTime
+	srvT1, srvT2 := serverT1, serverT2
+	if srvT1 < 0 {
+		srvT1 = 0
+	}
+	if srvT2 < 0 {
+		srvT2 = 0
+	}
+	for _, dp := range pds {
+		if dp.ValidLifetime > 0 && dp.ValidLifetime < shortest {
+			shortest = dp.ValidLifetime
+		}
+		if dp.RenewAt > 0 && (srvT1 == 0 || dp.RenewAt < srvT1) {
+			srvT1 = dp.RenewAt
+		}
+		if dp.RebindAt > 0 && (srvT2 == 0 || dp.RebindAt < srvT2) {
+			srvT2 = dp.RebindAt
+		}
+	}
+	t1Abs := shortest / 2
+	if srvT1 > 0 {
+		t1Abs = srvT1
+	}
+	t2Abs := shortest - shortest/8
+	if srvT2 > 0 {
+		t2Abs = srvT2
+	}
+	if shortest < infiniteLifetime {
+		if t2Abs >= shortest {
+			t2Abs = shortest - shortest/8
+		}
+		if t1Abs >= t2Abs {
+			t1Abs = shortest / 2
+			if t1Abs >= t2Abs {
+				t1Abs = t2Abs / 2
+			}
+		}
+		if t1Abs <= 0 {
+			t1Abs = t2Abs / 2
+		}
+	} else {
+		if t1Abs <= 0 {
+			t1Abs = shortest / 2
+		}
+		if t2Abs <= t1Abs {
+			t2Abs = t1Abs + shortest/8
+		}
+	}
+	return t1Abs, t2Abs - t1Abs, true
 }
 
 // remainingTimer returns how long remains until deadline as observed at
@@ -161,6 +228,8 @@ func delegatedPrefixesChanged(prev, next []DelegatedPrefix) bool {
 		if prev[i].Prefix != next[i].Prefix ||
 			prev[i].PreferredLifetime != next[i].PreferredLifetime ||
 			prev[i].ValidLifetime != next[i].ValidLifetime ||
+			prev[i].RenewAt != next[i].RenewAt ||
+			prev[i].RebindAt != next[i].RebindAt ||
 			prev[i].Pinned != next[i].Pinned {
 			return true
 		}

@@ -113,22 +113,34 @@ Acquisition and renewal share one commit path, `commitLease`
 new address, store the lease (and DHCPv6 delegated prefixes), and fire
 the debounced `onAddressChange` callback when content changed.
 
-- **Renewal timer contract (`renewalTimers`, RFC 2131 §4.4.5 / RFC 8415
-  §18.2.4, #5795)**: T1 (renew) fires at **50%** of the lease and T2
-  (rebind) at **87.5%** — `renewalTimers` returns `t1 = lease/2` and
-  `t2Remaining = 3/8·lease` (the additional wait from T1 to T2). There is
-  **no fixed floor**: the ratios are proportional to the lease, so for
-  every positive lease `T1 (50%) < T2 (87.5%) < expiry`, down to the 1s
-  minimum the wire can express (T1 500ms, T2 875ms). A fixed 30s T1 / 1s
-  T2 floor previously pushed T1 past the RFC half-life for any lease under
-  60s and scheduled the renew **at or after expiry** for a lease under 30s
-  (the run loop kept forwarding on an expired binding, then churned into
-  re-acquisition). A **non-positive** lease time is invalid (`ok=false`) —
-  RFC 2131 lease 0 is not the infinite sentinel (that is `0xFFFFFFFF`,
-  overflow-safe via divide-first, #4526); the run loop **fails closed**,
-  abandoning the cycle and re-acquiring, paced by `reacquireBackstop` so a
-  server that keeps granting a 0-second lease cannot become a tight
-  DISCOVER/SOLICIT loop. v4 and v6 share this one definition.
+- **Renewal timer contract (`renewalSchedule`, RFC 2131 §4.4.5 /
+  RFC 8415 §18.2.4, #5795, #16553)**: the run loops schedule Renew at
+  the **earliest non-zero server T1** across every held binding —
+  DHCPv6 IA_NA T1, every held IA_PD's T1, or DHCPv4 option 58 — and
+  Rebind at the earliest non-zero T2 likewise (IA_PD T2 / option 59).
+  A tier the server left at zero falls back to the RFC default ratio
+  of the **shortest held valid lifetime** (T1 50%, T2 87.5%;
+  `t2Remaining` is the additional T1→T2 wait), so a delegated prefix
+  can never be scheduled to expire before its Renew fires. Before
+  #16553 the client never read any server T1/T2: `renewalTimers` was
+  always 50%/87.5% of the single IA_NA `LeaseTime`, so a PD with
+  valid < IA_NA T1 was pruned/withdrawn from LAN RA and only
+  re-requested at the IA_NA T1, every cycle. Server timers are
+  clamped so `0 < T1 < T2 < shortest-valid` for finite lifetimes (a
+  server T1/T2 at/after expiry or T2 ≤ T1 is pulled back to the
+  defaults); the infinite sentinel keeps T1 < T2 only. There is
+  **no fixed floor** (#5795): for every positive finite lease
+  `T1 < T2 < expiry`, down to the 1s wire minimum. A **non-positive**
+  lease time is invalid (`ok=false`) — RFC 2131 lease 0 is not the
+  infinite sentinel (that is `0xFFFFFFFF`, overflow-safe via
+  divide-first, #4526); the run loop **fails closed**, abandoning the
+  cycle and re-acquiring, paced by `reacquireBackstop` so a server
+  that keeps granting a 0-second lease cannot become a tight
+  DISCOVER/SOLICIT loop. `LeaseTime` itself is unchanged as the
+  expiry anchor (IA_NA valid, or shortest PD valid on PD-only /
+  address-less leases); only the schedule reads the extra bindings.
+  `renewalTimers(leaseTime)` remains the no-server-timer form.
+  Pinned by `server_t1t2_16553_test.go` and `commit_test.go`.
 - **DHCPv6 acquisition validation (#10858)**: acquisition and stateless replies
   must match the client DUID and successful message status; IA_NA / IA_PD
   contents are accepted only for the requested IAID and successful IA status.

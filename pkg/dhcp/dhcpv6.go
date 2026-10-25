@@ -281,7 +281,7 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 		// keep succeeding; break out only to re-acquire from scratch.
 	renewalLoop:
 		for {
-			t1, t2Remaining, ok := renewalTimers(committed.LeaseTime)
+			t1, t2Remaining, ok := renewalSchedule(committed.LeaseTime, committedPDs, committed.RenewAt, committed.RebindAt)
 			if !ok {
 				// See runDHCPv4: a non-positive lease time is invalid and
 				// must not schedule a renewal past an already-lapsed lease.
@@ -810,10 +810,43 @@ func carryForwardV6IANA(prev *Lease, now time.Time) (carried *Lease, ok bool) {
 		Address:            prev.Address,
 		LeaseTime:          prev.LeaseTime,
 		Obtained:           prev.Obtained,
+		RenewAt:            prev.RenewAt,
+		RebindAt:           prev.RebindAt,
 		leaseExpiryApplies: prev.leaseExpiryApplies,
 		v6ServerDUID:       prev.v6ServerDUID,
 	}
 	return carried, true
+}
+
+// ianaTimers returns the T1/T2 of the IA_NA that supplied the chosen
+// address (#16553). It re-walks the matching IA_NA options applying the
+// same filters selectIANAAddress used (expected IAID, Success status,
+// valid-lifetime > 0, preferred <= valid) and returns the timers of the
+// IA_NA carrying the chosen address. Zero timers mean the server set
+// T1/T2 to 0 (RFC 8415 §21.4: client chooses), handled by fallback.
+func ianaTimers(adv *dhcpv6.Message, expectedIAID *[4]byte, chosen netip.Addr) (t1, t2 time.Duration) {
+	for _, opt := range adv.Options.Options {
+		ianaOpt, ok := opt.(*dhcpv6.OptIANA)
+		if !ok {
+			continue
+		}
+		if expectedIAID != nil && ianaOpt.IaId != *expectedIAID {
+			continue
+		}
+		if !v6StatusOK(ianaOpt.Options.Status()) {
+			continue
+		}
+		for _, subOpt := range ianaOpt.Options.Options {
+			iaaddr, ok := subOpt.(*dhcpv6.OptIAAddress)
+			if !ok || iaaddr.ValidLifetime == 0 || iaaddr.PreferredLifetime > iaaddr.ValidLifetime {
+				continue
+			}
+			if a, ok := netip.AddrFromSlice(iaaddr.IPv6Addr); ok && a == chosen {
+				return ianaOpt.T1, ianaOpt.T2
+			}
+		}
+	}
+	return 0, 0
 }
 
 // kernelAddrLifetimes converts a lease's remaining lifetimes at now
@@ -1169,10 +1202,14 @@ func (m *Manager) parseV6ReplyChecked(ctx context.Context, ifaceName string, adv
 	// distinct from an absent IA_NA so the caller can discard vs keep+retry.
 	var iaNAExplicitlyInvalidated bool
 
+	var naT1, naT2 time.Duration
 	if wantNA {
 		var sawZeroLifetime bool
 		addr, validLT, sawZeroLifetime = selectIANAAddress(adv, expectedNA, m.protectedIPv6Prefixes())
 		iaNAExplicitlyInvalidated = !addr.IsValid() && sawZeroLifetime
+		if addr.IsValid() {
+			naT1, naT2 = ianaTimers(adv, expectedNA, addr)
+		}
 	}
 
 	// Extract IA_PD delegated prefixes, split into live and (RFC 8415
@@ -1264,9 +1301,12 @@ func (m *Manager) parseV6ReplyChecked(ctx context.Context, ifaceName string, adv
 	if addr.IsValid() {
 		lease.Address = netip.PrefixFrom(addr, 128)
 		lease.LeaseTime = validLT
+		lease.RenewAt, lease.RebindAt = naT1, naT2
 		// #14598: IA_NA present — LeaseTime stays the IA_NA lifetime for
-		// T1/T2. PD expiry is tracked per-prefix (ExpiresAt, pruning,
-		// earliest-expiry recompile wake), not by shortening this lease.
+		// expiry. The renewal SCHEDULE honors IA_PD T1/T2 and PD
+		// lifetimes via renewalSchedule (#16553); PD expiry is also
+		// tracked per-prefix (ExpiresAt, pruning), not by shortening
+		// this lease's expiry anchor.
 	} else if wantNA {
 		// #15071: no usable IA_NA in this Reply (absent, or only refused
 		// IAADDRs) but a live PD (or degenerate config) let us reach here.
@@ -1279,6 +1319,7 @@ func (m *Manager) parseV6ReplyChecked(ctx context.Context, ifaceName string, adv
 			lease.Address = carried.Address
 			lease.LeaseTime = carried.LeaseTime
 			lease.Obtained = carried.Obtained
+			lease.RenewAt, lease.RebindAt = carried.RenewAt, carried.RebindAt
 		} else if len(result.prefixes) > 0 {
 			lease.LeaseTime = result.prefixes[0].ValidLifetime
 			for _, dp := range result.prefixes[1:] {
@@ -1632,6 +1673,8 @@ func extractDelegatedPrefixesPinned(msg *dhcpv6.Message, ifaceName string, now t
 				PreferredLifetime: prefix.PreferredLifetime,
 				ValidLifetime:     prefix.ValidLifetime,
 				Obtained:          now,
+				RenewAt:           iapdOpt.T1,
+				RebindAt:          iapdOpt.T2,
 				Pinned:            pinned && !isWithdrawal,
 			}
 			if isWithdrawal {
