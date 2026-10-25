@@ -703,9 +703,7 @@ func (c *CLI) Run() error {
 			}
 			now := time.Now()
 			if now.Sub(lastInterrupt) < 2*time.Second {
-				if c.store.InConfigMode() {
-					c.store.ExitConfigure()
-				}
+				c.releaseLocalConfigureOnInterrupt()
 				close(exitCh)
 				return
 			}
@@ -731,11 +729,10 @@ func (c *CLI) Run() error {
 				continue
 			}
 			if err == io.EOF {
-				// Ctrl-D: exit config mode, or exit CLI if already in operational mode.
-				if c.store.InConfigMode() {
-					c.store.ExitConfigure()
-					c.rl.SetPrompt(c.operationalPrompt())
-					fmt.Println("\nExiting configuration mode")
+				// Ctrl-D: exit own config mode, or exit CLI if
+				// already in operational mode (or config mode is
+				// a foreign holder's — #16793).
+				if c.releaseLocalConfigureOnEOF() {
 					continue
 				}
 				return nil
@@ -766,6 +763,42 @@ func (c *CLI) Run() error {
 	// dispatch). A trailing `return nil` here was unreachable and tripped
 	// `go vet` (codex-182 A10-b00-C02); Go accepts the infinite `for {}` as
 	// the function's terminating statement, so no return is needed.
+}
+
+// releaseLocalConfigureOnEOF handles Ctrl-D (io.EOF from readline) for
+// the in-process console (#16793): it exits configuration mode only
+// when THIS session acquired the lock itself (configOwned) and then
+// only via the session-scoped release, so a foreign holder's candidate
+// and lock survive. It reports whether it stayed in the loop (true)
+// or the console should exit (false). A foreign-held global config
+// mode is NOT this session's to leave: EOF is an operational-mode
+// exit there, matching acceptance (holder grpc-peer-1 stays locked).
+func (c *CLI) releaseLocalConfigureOnEOF() bool {
+	if c.configOwned {
+		if c.store.ExitConfigureSession(localConfigSessionID) {
+			c.configOwned = false
+			if c.rl != nil {
+				c.rl.SetPrompt(c.operationalPrompt())
+			}
+			fmt.Println("\nExiting configuration mode")
+			return true
+		}
+		// Stale flag: this session no longer holds the lock (reclaimed
+		// or force-cleared). Clear it and fall through to exit.
+		c.configOwned = false
+	}
+	return false
+}
+
+// releaseLocalConfigureOnInterrupt releases this session's own
+// configuration lock on the double Ctrl-C exit path (#16793). A
+// foreign holder's candidate and lock MUST survive; the console is
+// ending anyway, which is the strictly stronger action.
+func (c *CLI) releaseLocalConfigureOnInterrupt() {
+	if c.configOwned {
+		c.store.ExitConfigureSession(localConfigSessionID)
+		c.configOwned = false
+	}
 }
 
 func (c *CLI) refreshPrompt() {
