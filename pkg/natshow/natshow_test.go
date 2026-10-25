@@ -106,6 +106,7 @@ func TestRenderDestRuleDetailGolden(t *testing.T) {
 		"    From zone: untrust\n" +
 		"    Match:\n" +
 		"      Destination addresses: 198.51.100.7/32\n" +
+		"      Source addresses:      0.0.0.0/0\n" +
 		"      Destination port:      443\n" +
 		"      IP protocol:           tcp\n" +
 		"    Action:                  pool p-dst\n" +
@@ -303,6 +304,7 @@ func TestRenderDestRuleDetailLoadedGolden(t *testing.T) {
 		"    From zone: untrust\n" +
 		"    Match:\n" +
 		"      Destination addresses: 198.51.100.7/32\n" +
+		"      Source addresses:      0.0.0.0/0\n" +
 		"      Destination port:      443\n" +
 		"      IP protocol:           tcp\n" +
 		"    Action:                  pool p-dst\n" +

@@ -79,7 +79,7 @@ const builderPkg = "pkg/dataplane/userspace"
 // the middle of a completion menu.
 var exemptRenderers = map[string]string{
 	"pkg/cli/completion.go:valueProvider":                                "tab-completion name list, not an enforcement render",
-	"pkg/grpcapi/server_cluster.go:valueProvider":                        "tab-completion name list, not an enforcement render",
+	"pkg/grpcapi/server_complete.go:valueProvider":                       "tab-completion name list, not an enforcement render",
 	"pkg/api/api.go:allInterfaceNames":                                   "#10530 adjacency — internal interface-name lookup emits no zone value",
 	"pkg/api/interfaces.go:interfacesHandler":                            "#10531 — REST structured interface wire needs explicit quarantine presence/counters",
 	"pkg/api/interfaces.go:writeInterfacesTerse":                         "#10530 adjacency — terse text view emits no zone value",
@@ -121,7 +121,6 @@ var exemptRenderers = map[string]string{
 	"pkg/grpcapi/server_show_security_text.go:showScreenStatisticsAll":   "#16556 adjacency — screen statistics qualify zone names, emit no interface membership",
 	"pkg/grpcapi/server_show_zones_text.go:zoneCounterSlotted":           "#16556 adjacency — counter-slot probe emits no zone or interface value",
 	"pkg/natshow/dest.go:RenderDestRuleDetail":                           "#16556 adjacency — NAT detail resolves zone IDs to names, emits no interface membership",
-	"pkg/natshow/source.go:RenderSourceRuleDetail":                       "#16556 adjacency — NAT detail resolves zone IDs to names, emits no interface membership",
 }
 
 var families = []family{
