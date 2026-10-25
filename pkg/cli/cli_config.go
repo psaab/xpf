@@ -184,6 +184,16 @@ func (c *CLI) handleLoad(args []string) error {
 		return fmt.Errorf("load: unknown mode %q (use 'rescue', 'override', 'merge', or 'set')", mode)
 	}
 
+	// #16602: Junos spells a cursor-relative load as
+	// `load merge terminal relative`, but neither this path nor
+	// LoadRequest carries the edit path, so a trailing token was
+	// silently dropped and the snippet applied at the root. Refuse
+	// every extra token — including `relative` — before reading any
+	// content, rather than reporting a root load as the scoped load.
+	if len(args) > 2 {
+		return fmt.Errorf("load: unexpected argument %q", args[2])
+	}
+
 	source := args[1]
 	if mode == "set" && source != "terminal" {
 		return fmt.Errorf("load set: only 'terminal' source is supported")

@@ -630,6 +630,13 @@ func (c *ctl) handleLoad(args []string) error {
 		return fmt.Errorf("load: unknown mode %q (use 'rescue', 'override', 'merge', or 'set')", mode)
 	}
 
+	// #16602: same guard as the local console CLI — Junos's trailing
+	// `relative` modifier (and any other extra token) was silently
+	// dropped here because LoadRequest has no path field, so the
+	// snippet applied at the root. Refuse before reading content.
+	if len(args) > 2 {
+		return fmt.Errorf("load: unexpected argument %q", args[2])
+	}
 	source := args[1]
 	var content string
 
