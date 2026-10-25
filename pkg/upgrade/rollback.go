@@ -333,9 +333,31 @@ func (r *Runner) defaultRollbackTarget(current string) (string, error) {
 				strings.Join(listing, ", "), predecessor.name, current)
 			return predecessor.name, nil
 		}
-		r.logf("upgrade: WARN committed predecessor %s of current %s is not a restorable candidate; ordered fallback candidates: %s",
-			currentStamp.Predecessor, current, strings.Join(listing, ", "))
-	} else if currentHasRecord {
+		// #16525: the committed predecessor is no longer restorable (e.g.
+		// GC removed it after repeated rollbacks). NEVER fall back to the
+		// newest committed version: that set includes versions committed
+		// AFTER current (the release the operator rolled away from), so a
+		// bare rollback would move FORWARD onto a rejected release and
+		// report success. Refuse and require an explicit --target.
+		return "", fmt.Errorf("committed predecessor %s of current %s is not restorable; refusing bare rollback (would require selecting a non-predecessor target); re-run with --target <version> naming an older restorable version, or re-seed the predecessor", currentStamp.Predecessor, current)
+	}
+	// No usable committed predecessor record for current. A fallback is
+	// only safe when it cannot move forward: restrict committed
+	// candidates to those committed strictly before current (when
+	// current has a commit time to compare against). Legacy (no-stamp)
+	// versions carry no commit time at all, so their mtime-only fallback
+	// is retained only when current itself has no committed record.
+	if currentHasRecord && currentStamp != nil && currentStamp.Committed {
+		for _, c := range committed {
+			if c.stamp.CommittedAtUnixNano < currentStamp.CommittedAtUnixNano {
+				r.logf("upgrade: WARN current %s has no usable committed predecessor; selecting newest committed version older than current: %s (ordered candidates: %s)",
+					current, c.name, strings.Join(listing, ", "))
+				return c.name, nil
+			}
+		}
+		return "", fmt.Errorf("no committed rollback target older than current %s found; refusing bare rollback; re-run with --target <version> naming an older restorable version", current)
+	}
+	if currentHasRecord {
 		r.logf("upgrade: WARN current %s has no usable committed predecessor; ordered fallback candidates: %s",
 			current, strings.Join(listing, ", "))
 	}

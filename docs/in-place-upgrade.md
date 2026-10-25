@@ -355,6 +355,16 @@ ROLLINGBACK journal, keeps the node passive for inspection (#12175). A
 standalone success prints `rollback complete`; failures are reported on
 stderr with the `upgrade --rollback...:` prefix.
 
+Without `--target`, the default rollback target is the committed
+predecessor of the current version (#10851). If that predecessor is no
+longer restorable (for example GC removed it after repeated rollbacks),
+the bare verb refuses and directs the operator to re-run with
+`--target <version>` naming an older restorable version; it never falls
+back to the newest committed version, which may be a newer release the
+operator already rolled away from (#16525). When the current version has
+no predecessor record, the fallback is restricted to committed versions
+older than the current one and likewise refuses when none exists.
+
 Rollback uses a **refuse-with-guidance** envelope-major policy. Before
 `StopUnit`, it parses the snapshot's `v=` and `min-reader=` fields and invokes
 the target binary's pure `--capability-check` probe. If either snapshot major
