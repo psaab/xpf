@@ -106,12 +106,13 @@ pub(in crate::afxdp::session_glue) fn handle_demote_owner_rgs(
                     metadata.fabric_ingress,
                     metadata.ingress_zone,
                 );
-                let resolution2 = super::super::rehome_or_retain_fabric_redirect_scoped_15958b(
+                let resolution2 = super::super::rehome_or_retain_fabric_redirect_16524(
                 forwarding,
                 decision.resolution,
                 enforced_resolution,
                 metadata.egress_zone,
                 destination_owner_active,
+                dest_rg == 0,
                 Some(resolution_target),
                 install_table_name_for_session(forwarding, decision, resolution_target),
             );

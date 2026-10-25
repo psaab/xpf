@@ -621,12 +621,13 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
             decision.resolution = if fabric_link_ingress {
                 enforced_resolution
             } else {
-                super::rehome_or_retain_fabric_redirect_scoped_15958b(
+                super::rehome_or_retain_fabric_redirect_16524(
                     forwarding,
                     resolved.decision.resolution,
                     enforced_resolution,
                     resolved.metadata.egress_zone,
                     destination_owner_active,
+                    dest_rg == 0,
                     Some(resolution_target),
                     session_table,
                 )
@@ -927,12 +928,13 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
         decision.resolution = if fabric_link_ingress {
             enforced_resolution
         } else {
-            super::rehome_or_retain_fabric_redirect_scoped_15958b(
+            super::rehome_or_retain_fabric_redirect_16524(
                 forwarding,
                 resolved.decision.resolution,
                 enforced_resolution,
                 resolved.metadata.egress_zone,
                 destination_owner_active,
+                dest_rg == 0,
                 Some(resolution_target_for_session(flow, resolved.decision)),
                 rev_table,
             )
