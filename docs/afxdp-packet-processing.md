@@ -466,8 +466,8 @@ packets only (#14949):
 table inet xpf_dp_rst {
   chain output {
     type filter hook output priority raw; policy accept;
-    ip saddr <snat_v4_addr> ct state invalid tcp flags & rst == rst counter drop
-    ip6 saddr <snat_v6_addr> ct state invalid tcp flags & rst == rst counter drop
+    ip saddr <snat_v4_addr> ct state invalid socket wildcard 1 tcp flags & rst == rst counter drop
+    ip6 saddr <snat_v6_addr> ct state invalid socket wildcard 1 tcp flags & rst == rst counter drop
   }
 }
 ```
@@ -482,6 +482,16 @@ a tracked bit), and by filter priority the OUTPUT conntrack hook
 (−200) has already attached a NEW entry to the locally generated RST.
 At raw priority (−300) the RST is still entry-less and reports
 INVALID, which is the only conntrack-less signature at OUTPUT.
+
+INVALID alone is not sufficient (#16839): at raw priority conntrack
+has not run yet, so a live local socket's abortive RST sourced from a
+protected address also reads INVALID there (it becomes ESTABLISHED
+only after the −200 hook) and the INVALID-only rule dropped it. The
+`socket wildcard 1` predicate completes the signature: it matches
+only the wildcard-bound `tcp_rst_sock` control mini-socket behind
+the spurious RST (and BREAKs, i.e. does not match, when there is no
+full socket at all), while a live socket bound to the protected
+address reads wildcard 0 and is spared.
 
 The rules are:
 - Auto-installed when forwarding state is rebuilt from the config snapshot.
