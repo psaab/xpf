@@ -335,7 +335,10 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // it now admits hop-limit-0 IPv6 to local addresses instead of
 // suppressing transit Time Exceeded. A v73 helper keeps the #15707
 // behaviour, so exact equality must refuse the pairing.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 74;
+// v74 -> v75 (#16877): idle persistent-NAT lease records carry the
+// permission bucket's mint_from_zone provenance. A v74 helper drops it, so
+// the manager's lease verb gate requires v75.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 75;
 
 /// #16589: hard cap on lease rows in ONE paged lease-export response.
 /// Sized so even a worst-case row (many permitted remotes) stays far
@@ -1683,6 +1686,11 @@ pub(crate) struct IdleLeaseWire {
     /// is the admitting rule's folded egress-zone scope; 0 is unscoped.
     #[serde(rename = "egress_scope", default)]
     pub egress_scope: Option<u32>,
+    /// #16877: original packet from-zone for this grant bucket. Optional so
+    /// older sync peers still decode; imports without it cannot use the
+    /// non-zone inbound fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mint_from_zone: Option<String>,
     /// Retained legacy scope fields; current permission grants are below.
     #[serde(
         rename = "remote_ip",

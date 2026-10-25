@@ -85,6 +85,10 @@ pub(crate) struct IdleLeaseRecord {
     pub(crate) routing_scope: u32,
     /// #14322: egress-zone scope of this record's grant bucket.
     pub(crate) egress_scope: u32,
+    /// #16877: original packet from-zone used to mint this grant bucket.
+    /// Older sync frames omit it; such imports remain ineligible for the
+    /// non-zone inbound fallback, which cannot invert `egress_scope`.
+    pub(crate) mint_from_zone: Option<String>,
     /// Legacy in-process field; endpoint-independent lease keys never use it.
     pub(crate) remote: Option<(IpAddr, u16)>,
     pub(crate) permit_any_remote: bool,
@@ -168,11 +172,11 @@ pub(crate) enum IdleLeaseImport {
 
 impl PortAllocator {
     /// Every locally owned lease that is idle and still inside its persistence
-    /// timeout. Imported idle leases remain peer-owned through a tentative local
-    /// reserve; only ordinary local `release_flow` completion promotes them for
-    /// export. This prevents echoing the reservation between peers, refreshing
-    /// receiver-clock lifetime or resurrecting a lease after its originator
-    /// retires it. A lease with live flows is not exported either: the peer
+    /// timeout. Imported leases remain peer-owned until this node becomes
+    /// primary or a local flow completes successfully; tentative reserves,
+    /// rollbacks and inbound-holder releases do not promote them. This prevents
+    /// standby echoing, receiver-clock lifetime refresh and retired-lease
+    /// resurrection. A lease with live flows is not exported either: the peer
     /// rebuilds it from sessions, and sending both would race two mechanisms
     /// onto one key.
     pub(crate) fn export_idle_leases(&self, now_ns: u64) -> Vec<IdleLeaseRecord> {
@@ -207,6 +211,7 @@ impl PortAllocator {
                             src_port: key.src_port,
                             routing_scope: key.routing_scope,
                             egress_scope,
+                            mint_from_zone: grants.mint_from_zone.clone(),
                             remote: None,
                             permit_any_remote: grants.any_remote,
                             permitted_remotes,
@@ -222,6 +227,48 @@ impl PortAllocator {
                     .collect::<Vec<_>>()
             })
             .collect()
+    }
+    /// Transfer imported leases to this node when HA makes it the sole local
+    /// owner. The sweep is called only after every local RG is active; late
+    /// sync batches promote only their newly installed records under the same
+    /// gate. Keeping this allocator-local preserves #10789-F4 no-echo behavior
+    /// while standby, but lets the new primary re-advertise idle copies after
+    /// failover (including inbound-only bindings without a local outbound
+    /// flow completion).
+    pub(crate) fn promote_imported_persistent_leases(&self) {
+        let mut live = self.lock_live();
+        for lease in live.persistent_by_source.values_mut() {
+            if lease.imported && !lease.revoked {
+                lease.imported = false;
+            }
+        }
+    }
+
+    /// Promote only the imported record installed by a late sync batch.
+    /// Unlike the activation-edge sweep, this must not change ownership of
+    /// unrelated imported leases when a batch is partial or refused.
+    pub(crate) fn promote_imported_persistent_lease_record(&self, record: &IdleLeaseRecord) {
+        let key = PersistentSourceKey {
+            protocol: record.protocol,
+            src_ip: record.src_ip,
+            src_port: record.src_port,
+            routing_scope: record.routing_scope,
+            remote: None,
+        };
+        let mut live = self.lock_live();
+        let translated = TranslatedTuple {
+            ip: record.translated_ip,
+            port: record.translated_port,
+        };
+        if let Some(lease) = live.persistent_by_source.get_mut(&key) {
+            if lease.imported && !lease.revoked && lease.translated == translated
+                && lease.address_only == record.address_only
+                && lease.deterministic == record.deterministic
+                && lease.deterministic_identity == record.deterministic_identity
+            {
+                lease.imported = false;
+            }
+        }
     }
 
     /// #8615: every persistent lease this node would HONOUR, for DISPLAY only.
@@ -452,9 +499,12 @@ impl PortAllocator {
                 // Only idle leases are refreshed: an active lease's expiry
                 // is owned by its live flows (it is not in the expiration
                 // index while active), and a revoked shell must drain, not
-                // be revived by a peer re-export.
+                // be revived by a peer re-export. Out-of-order echoes may
+                // carry less time than this node already holds, so a refresh
+                // never shortens an unexpired local deadline.
                 if existing.active_flows == 0 && !existing.revoked {
-                    let refreshed_expiry = now_ns.saturating_add(remaining_ns);
+                    let refreshed_expiry =
+                        now_ns.saturating_add(remaining_ns).max(existing.expires_at_ns);
                     if refreshed_expiry != existing.expires_at_ns
                         || timeout_ns != existing.timeout_ns
                     {
@@ -579,6 +629,9 @@ impl PortAllocator {
                     if total.saturating_add(additions) <= MAX_PERSISTENT_PERMITTED_REMOTES {
                         let was_any_remote = bucket.any_remote;
                         bucket.any_remote |= rec.permit_any_remote;
+                        if bucket.mint_from_zone.is_none() {
+                            bucket.mint_from_zone = rec.mint_from_zone.clone();
+                        }
                         if bucket.any_remote
                             && !was_any_remote
                             && generation_validated
@@ -669,7 +722,7 @@ impl PortAllocator {
             PersistentPermissionScope {
                 any_remote: rec.permit_any_remote,
                 remotes: rec.permitted_remotes.iter().copied().collect(),
-                mint_from_zone: None,
+                mint_from_zone: rec.mint_from_zone.clone(),
                 any_remote_permit_epoch: 0,
                 permit_change_authorized: permit_any_authorized,
                 authorized_epoch: if permit_any_authorized

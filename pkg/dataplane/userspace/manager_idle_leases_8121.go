@@ -73,8 +73,12 @@ func (m *Manager) ensurePersistentNatLeasePermissionProtocolLocked() error {
 		MinProtocolPersistentNatLeaseEgressScope, "egress scope"); err != nil {
 		return err
 	}
+	if err := m.ensurePersistentNatLeaseProtocolLocked(
+		MinProtocolPersistentNatLeasePermissions, "permissions"); err != nil {
+		return err
+	}
 	return m.ensurePersistentNatLeaseProtocolLocked(
-		MinProtocolPersistentNatLeasePermissions, "permissions")
+		MinProtocolPersistentNatLeaseMintFromZone, "mint-from-zone provenance")
 }
 
 func (m *Manager) ensurePersistentNatLeaseScopeProtocolLocked() error {
@@ -204,9 +208,8 @@ func validateDisplayLeaseScopes(leases []DisplayLeaseWire) error {
 // subsequent calls use that observation.
 
 // ExportIdleLeases returns locally-exportable persistent-NAT leases that have
-// no live flows but remain inside their persistence timeout. Session sync
-// cannot observe this idle population; peer-imported leases are filtered by the
-// allocator so they are not echoed back.
+// no live flows but remain inside their persistence timeout. Standby imports
+// remain filtered until primary RG activation promotes them to local ownership.
 func (m *Manager) ExportIdleLeases() ([]IdleLeaseWire, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

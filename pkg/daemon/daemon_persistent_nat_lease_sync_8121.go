@@ -90,17 +90,14 @@ func (d *Daemon) wirePersistentNatLeaseCallbacks(ss *cluster.SessionSync) {
 }
 
 // runPersistentNatLeaseSyncLoop re-advertises locally-owned idle leases on a
-// slow tick. Imported leases are filtered at the allocator. A local reserve
-// joining an imported lease, whether idle (0 -> 1) or active (N -> N+1), carries
-// a per-flow marker and transfers ownership only when that local flow completes
-// through ordinary `release_flow`. Rollback, synced joins, worker retirement,
-// and stale-tuple eviction do not promote. Once locally owned, the lease is
-// re-advertised after its final flow drains on the next tick, so the former
-// owner can rebuild it for failback/restart; failback before local completion
-// intentionally leaves the lease peer-owned.
-// The node-level RG-master gate still cannot identify per-RG lease ownership,
-// so an imported idle lease on a newly-mastered RG remains suppressed until
-// locally used.
+// slow tick. Imported leases are filtered at the allocator while this node is
+// standby. RG activation promotes its imported persistent leases to local
+// ownership, so the new primary advertises retained idle bindings even when
+// they were kept alive only by inbound sessions. Local reserve joins still
+// transfer ownership only after successful ordinary `release_flow`
+// completion; rollback, synced joins, worker retirement and stale-tuple
+// eviction do not. The allocator does not associate a lease with one RG, so
+// activation promotes imports node-wide.
 //
 // A peer older than #11486 cannot read generation-bearing type 41; the new
 // receiver ignores that peer's generation-less advertisements rather than

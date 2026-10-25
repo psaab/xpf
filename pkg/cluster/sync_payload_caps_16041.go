@@ -130,6 +130,7 @@ func syncPayloadCap(msgType uint8) (int, bool) {
 		return maxSyncPayload, true
 	case syncMsgIPsecSA, syncMsgIPsecSAChunk, syncMsgPersistentNatLease, syncMsgPersistentNatLeaseScoped,
 		syncMsgPersistentNatLeaseGeneration, syncMsgPersistentNatLeaseDeterministic,
+		syncMsgPersistentNatLeaseProvenance, syncMsgPersistentNatLeaseDeterministicProvenance,
 		syncMsgDHCPLeaseV4, syncMsgDHCPLeaseV6, syncMsgDHCPLeaseV4Chunk, syncMsgDHCPLeaseV6Chunk:
 		// Full-set / chunked-set types: encoders chunk below maxSyncPayload
 		// (encodePersistentNatLeaseBatchFrames, DHCP chunk splitter), so

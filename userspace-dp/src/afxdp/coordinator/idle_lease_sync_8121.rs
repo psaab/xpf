@@ -86,9 +86,9 @@ impl Coordinator {
     /// (`SourceNatPoolAllocatorKey` is built from the pool, not the rule), and
     /// exporting once per RULE would send the same lease as many times as there
     /// are rules pointing at that pool.
-    /// #10789-F4: the allocator export is local-origin only. Imported idle
-    /// leases are not echoed; the coordinator neither retracts records missing
-    /// from a later push nor carries tombstones for early retirement.
+    /// #10789-F4: the allocator export is local-origin only while this node
+    /// is a standby. Once every local RG is active, imported leases are
+    /// promoted to local ownership and become eligible for re-export.
     pub(crate) fn export_idle_persistent_leases(&self, now_ns: u64) -> Vec<PoolIdleLease> {
         let mut seen: HashSet<String> = HashSet::new();
         let mut out = Vec::new();
@@ -132,6 +132,22 @@ impl Coordinator {
             }
         }
         out
+    }
+
+    /// #16876: primary activation transfers this node's imported persistent
+    /// leases to local ownership. A source-NAT pool can be referenced by
+    /// several rules, so visit each shared allocator once; NAT64 allocators
+    /// are one-per-prefix.
+    pub(crate) fn promote_imported_persistent_nat_leases(&self) {
+        let mut seen: HashSet<&str> = HashSet::new();
+        for rule in &self.forwarding.source_nat_rules {
+            if rule.pool_mode && seen.insert(rule.pool_name.as_str()) {
+                rule.pool_allocator.promote_imported_persistent_leases();
+            }
+        }
+        for prefix in &self.forwarding.nat64.prefixes {
+            prefix.port_allocator.promote_imported_persistent_leases();
+        }
     }
 
     /// #8615: every persistent lease this node would honour, tagged with its
@@ -228,6 +244,7 @@ impl Coordinator {
         generation_validated: bool,
     ) -> IdleLeaseImportCounts {
         let mut counts = IdleLeaseImportCounts::default();
+        let mut imported_to_promote = Vec::new();
         for rec in records {
             if let Some(prefix_idx) = rec
                 .pool_name
@@ -289,7 +306,10 @@ impl Coordinator {
                     )
                 };
                 match outcome {
-                    IdleLeaseImport::Installed => counts.installed += 1,
+                    IdleLeaseImport::Installed => {
+                        counts.installed += 1;
+                        imported_to_promote.push((&prefix.port_allocator, &rec.lease));
+                    }
                     IdleLeaseImport::SkippedClearFenced => counts.skipped_clear_fenced += 1,
                     IdleLeaseImport::SkippedExisting => counts.skipped_existing += 1,
                     IdleLeaseImport::SkippedExpired => counts.skipped_expired += 1,
@@ -431,7 +451,10 @@ impl Coordinator {
                     }
                 }
                 match outcome {
-                    IdleLeaseImport::Installed => counts.installed += 1,
+                    IdleLeaseImport::Installed => {
+                        counts.installed += 1;
+                        imported_to_promote.push((&prefix.port_allocator, &rec.lease));
+                    }
                     IdleLeaseImport::SkippedClearFenced => counts.skipped_clear_fenced += 1,
                     IdleLeaseImport::SkippedExisting => counts.skipped_existing += 1,
                     IdleLeaseImport::SkippedExpired => counts.skipped_expired += 1,
@@ -548,7 +571,10 @@ impl Coordinator {
                 continue;
             }
             match outcome {
-                IdleLeaseImport::Installed => counts.installed += 1,
+                IdleLeaseImport::Installed => {
+                    counts.installed += 1;
+                    imported_to_promote.push((&rule.pool_allocator, &rec.lease));
+                }
                 IdleLeaseImport::SkippedClearFenced => counts.skipped_clear_fenced += 1,
                 IdleLeaseImport::SkippedExisting => counts.skipped_existing += 1,
                 IdleLeaseImport::SkippedExpired => counts.skipped_expired += 1,
@@ -556,6 +582,20 @@ impl Coordinator {
                 IdleLeaseImport::SkippedPortBusy => counts.skipped_port_busy += 1,
                 IdleLeaseImport::SkippedIdentityBusy => counts.skipped_identity_busy += 1,
                 IdleLeaseImport::SkippedCapacity => counts.skipped_capacity += 1,
+            }
+        }
+        // A generation batch can arrive after this node became primary.
+        // Promote only records this batch actually installed; a refused or
+        // partial batch must not sweep unrelated peer-owned entries.
+        let now_secs = monotonic_nanos() / 1_000_000_000;
+        let local_groups = self.ha.rg_runtime.load();
+        if !local_groups.is_empty()
+            && local_groups
+                .values()
+                .all(|group| group.is_forwarding_active(now_secs))
+        {
+            for (allocator, record) in imported_to_promote {
+                allocator.promote_imported_persistent_lease_record(record);
             }
         }
         counts

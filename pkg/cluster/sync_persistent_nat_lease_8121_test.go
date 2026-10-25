@@ -13,6 +13,12 @@ import (
 func persistentNatLeaseScope(v uint32) *uint32 {
 	return &v
 }
+func equalOptionalLeaseString(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
 
 func equalIdleLeaseWire(a, b userspace.IdleLeaseWire) bool {
 	if a.RoutingScope == nil || b.RoutingScope == nil {
@@ -29,6 +35,7 @@ func equalIdleLeaseWire(a, b userspace.IdleLeaseWire) bool {
 			a.DeterministicHostPrefixLen == b.DeterministicHostPrefixLen &&
 			a.DeterministicHostBase == b.DeterministicHostBase &&
 			a.DeterministicHostCount == b.DeterministicHostCount &&
+			equalOptionalLeaseString(a.MintFromZone, b.MintFromZone) &&
 			a.RemainingNs == b.RemainingNs && a.TimeoutNs == b.TimeoutNs
 	}
 	as, bs := *a.RoutingScope, *b.RoutingScope
@@ -48,6 +55,7 @@ func equalIdleLeaseWire(a, b userspace.IdleLeaseWire) bool {
 		a.DeterministicHostPrefixLen == b.DeterministicHostPrefixLen &&
 		a.DeterministicHostBase == b.DeterministicHostBase &&
 		a.DeterministicHostCount == b.DeterministicHostCount &&
+		equalOptionalLeaseString(a.MintFromZone, b.MintFromZone) &&
 		a.RemainingNs == b.RemainingNs && a.TimeoutNs == b.TimeoutNs
 }
 
@@ -153,6 +161,47 @@ func TestPersistentNatLeasePayload_RoundTrip(t *testing.T) {
 		}
 	}
 }
+func TestPersistentNatLeaseMintFromZoneProvenanceRoundTrip16877(t *testing.T) {
+	mintFromZone := "trust"
+	for _, deterministic := range []bool{false, true} {
+		lease := sampleIdleLease()
+		lease.MintFromZone = &mintFromZone
+		if deterministic {
+			lease.Deterministic = true
+			lease.DeterministicMode = 1
+			lease.DeterministicBlockSize = 32
+			lease.DeterministicBlocksPerIP = 2
+			lease.DeterministicHostPrefixLen = 24
+			lease.DeterministicHostBase = "203.0.113.0"
+			lease.DeterministicHostCount = 2
+		}
+		batch := sampleIdleLeaseBatch11486(lease)
+		frames, dropped, layoutDeterministic, err :=
+			encodePersistentNatLeaseBatchFramesCountedLayoutWithProvenance(batch, true)
+		if err != nil || dropped != 0 || len(frames) != 1 {
+			t.Fatalf("provenance frames = %d, dropped=%d, err=%v", len(frames), dropped, err)
+		}
+		if layoutDeterministic != deterministic {
+			t.Fatalf("deterministic layout = %v, want %v", layoutDeterministic, deterministic)
+		}
+		got, ok := decodePersistentNatLeaseBatchPayloadProvenance(frames[0], deterministic)
+		if !ok || len(got.Leases) != 1 || !equalIdleLeaseWire(got.Leases[0], lease) {
+			t.Fatalf("provenance round-trip = %+v, ok=%v; want %+v", got, ok, lease)
+		}
+
+		// Legacy 41/43 layouts stay byte-for-byte unchanged and remain
+		// decodable, but cannot recreate mint_from_zone.
+		legacy, err := encodePersistentNatLeaseBatchPayloadLayout(batch, deterministic)
+		if err != nil {
+			t.Fatalf("encode legacy layout: %v", err)
+		}
+		legacyBatch, ok := decodePersistentNatLeaseBatchPayloadLayout(legacy, deterministic)
+		if !ok || len(legacyBatch.Leases) != 1 || legacyBatch.Leases[0].MintFromZone != nil {
+			t.Fatalf("legacy decode = %+v, ok=%v; expected no provenance", legacyBatch, ok)
+		}
+	}
+}
+
 func TestPersistentNatLeasePermissionsAreBoundedAndValidated(t *testing.T) {
 	atLimit := sampleIdleLease()
 	atLimit.PermittedRemotes = make([]userspace.PersistentNatRemote, userspace.MaxPersistentNatLeaseRemotes)
@@ -356,6 +405,120 @@ func TestPersistentNatLeaseSyncRequiresClearGeneration11486(t *testing.T) {
 	if got.OriginID != "0123456789abcdef0123456789abcdef" || got.Generation != 4 ||
 		len(got.Leases) != 1 || !equalIdleLeaseWire(got.Leases[0], sampleIdleLease()) {
 		t.Fatalf("received batch = %+v", got)
+	}
+}
+func TestPersistentNatLeaseProvenanceFrameDispatch16877(t *testing.T) {
+	mintFromZone := "trust"
+	for _, deterministic := range []bool{false, true} {
+		lease := sampleIdleLease()
+		lease.MintFromZone = &mintFromZone
+		if deterministic {
+			lease.Deterministic = true
+			lease.DeterministicMode = 1
+			lease.DeterministicBlockSize = 32
+			lease.DeterministicBlocksPerIP = 2
+			lease.DeterministicHostPrefixLen = 24
+			lease.DeterministicHostBase = "203.0.113.0"
+			lease.DeterministicHostCount = 2
+		}
+		batch := sampleIdleLeaseBatch11486(lease)
+		sender := NewSessionSync(":0", "10.0.0.2:4785", nil)
+		cc := &captureConn{}
+		sender.mu.Lock()
+		sender.conn0 = cc
+		sender.mu.Unlock()
+
+		sender.handleMessage(nil, syncMsgPeerCapabilities,
+			persistentNatLeaseCapabilityFrame16877(t, true))
+		if !sender.PersistentNatLeaseProvenanceCapable() {
+			t.Fatal("provenance capability was not learned from the peer")
+		}
+		sender.QueuePersistentNatLeaseBatch(batch)
+		frames := cc.frames()
+		if len(frames) != 1 {
+			t.Fatalf("queued frames = %d, want 1", len(frames))
+		}
+		wantType := uint8(syncMsgPersistentNatLeaseProvenance)
+		if deterministic {
+			wantType = syncMsgPersistentNatLeaseDeterministicProvenance
+		}
+		if frames[0].msgType != wantType {
+			t.Fatalf("queued type = %d, want %d", frames[0].msgType, wantType)
+		}
+		receiver := &SessionSync{}
+		var got userspace.PersistentNatLeaseBatch
+		receiver.OnPersistentNatLeasesReceived = func(batch userspace.PersistentNatLeaseBatch) {
+			got = batch
+		}
+		if !receiver.handleMessage(nil, frames[0].msgType, frames[0].payload) {
+			t.Fatalf("message type %d was not accepted", frames[0].msgType)
+		}
+		if len(got.Leases) != 1 || !equalIdleLeaseWire(got.Leases[0], lease) {
+			t.Fatalf("received provenance lease = %+v, want %+v", got.Leases, lease)
+		}
+	}
+}
+
+func persistentNatLeaseCapabilityFrame16877(t *testing.T, provenance bool) []byte {
+	t.Helper()
+	payload := capabilityFrame14161(t, 8, localCapabilityFlags, SessionSyncWireVersion)
+	payload = append(payload, make([]byte, bootIncarnationLen+8+8)...)
+	if provenance {
+		payload = append(payload, localCapabilityFlags2)
+	}
+	return payload
+}
+
+func TestPersistentNatLeaseOldPeerGetsLegacyRefresh16877(t *testing.T) {
+	mintFromZone := "trust"
+	for _, deterministic := range []bool{false, true} {
+		lease := sampleIdleLease()
+		lease.MintFromZone = &mintFromZone
+		if deterministic {
+			lease.Deterministic = true
+			lease.DeterministicMode = 1
+			lease.DeterministicBlockSize = 32
+			lease.DeterministicBlocksPerIP = 2
+			lease.DeterministicHostPrefixLen = 24
+			lease.DeterministicHostBase = "203.0.113.0"
+			lease.DeterministicHostCount = 2
+		}
+		sender := NewSessionSync(":0", "10.0.0.2:4785", nil)
+		cc := &captureConn{}
+		sender.mu.Lock()
+		sender.conn0 = cc
+		sender.mu.Unlock()
+		sender.handleMessage(nil, syncMsgPeerCapabilities,
+			persistentNatLeaseCapabilityFrame16877(t, false))
+		if sender.PersistentNatLeaseProvenanceCapable() {
+			t.Fatal("legacy peer unexpectedly learned as provenance-capable")
+		}
+		sender.QueuePersistentNatLeaseBatch(sampleIdleLeaseBatch11486(lease))
+		frames := cc.frames()
+		if len(frames) != 1 {
+			t.Fatalf("queued frames = %d, want 1", len(frames))
+		}
+		wantType := uint8(syncMsgPersistentNatLeaseGeneration)
+		if deterministic {
+			wantType = syncMsgPersistentNatLeaseDeterministic
+		}
+		if frames[0].msgType != wantType {
+			t.Fatalf("legacy peer frame type = %d, want %d", frames[0].msgType, wantType)
+		}
+
+		receiver := &SessionSync{}
+		var got userspace.PersistentNatLeaseBatch
+		receiver.OnPersistentNatLeasesReceived = func(batch userspace.PersistentNatLeaseBatch) {
+			got = batch
+		}
+		if !receiver.handleMessage(nil, frames[0].msgType, frames[0].payload) {
+			t.Fatalf("legacy frame type %d was not accepted", frames[0].msgType)
+		}
+		want := lease
+		want.MintFromZone = nil
+		if len(got.Leases) != 1 || !equalIdleLeaseWire(got.Leases[0], want) {
+			t.Fatalf("legacy peer refresh = %+v, want %+v without provenance", got.Leases, want)
+		}
 	}
 }
 

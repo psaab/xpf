@@ -36,6 +36,7 @@ fn record(pool: &str, src: &str, translated: &str, port: u16) -> PoolIdleLease {
             src_port: 40000,
             routing_scope: 0,
             egress_scope: 0,
+            mint_from_zone: None,
             remote: Some(("8.8.8.8".parse().unwrap(), 443)),
             permit_any_remote: false,
             permitted_remotes: vec![("8.8.8.8".parse().unwrap(), 443)],
@@ -101,6 +102,7 @@ fn mint_active_local_identity(
             src_port: 40000,
             routing_scope: 0,
             egress_scope: 0,
+            mint_from_zone: None,
             remote: Some((dst_ip, 443)),
             permit_any_remote: false,
             permitted_remotes: vec![(dst_ip, 443)],
@@ -231,6 +233,7 @@ fn repeated_unique_import_batches_remain_within_pool_capacity_11475() {
             src_port: 40_000,
             routing_scope: 0,
             egress_scope: 0,
+            mint_from_zone: None,
             remote: Some(("8.8.8.8".parse().unwrap(), 443)),
             permit_any_remote: false,
             permitted_remotes: vec![("8.8.8.8".parse().unwrap(), 443)],
@@ -701,4 +704,277 @@ fn round_robin_nat64_import_rejects_out_of_pool_and_range_16488() {
     det_shaped.lease.deterministic = true;
     let counts = standby.import_idle_persistent_leases(&[det_shaped], 1000);
     assert_eq!(counts.installed, 0, "deterministic-shaped rr record must not install: {counts:?}");
+}
+/// #16876: imported idle leases remain peer-owned on a standby, then become
+/// exportable on RG promotion so a restarted former owner can relearn them.
+/// The second arm keeps the lease alive only with an inbound holder; releasing
+/// that holder rearms expiry but must not itself transfer ownership.
+#[test]
+fn imported_idle_lease_reaches_restarted_owner_after_promotion_16876() {
+    for inbound_only in [false, true] {
+        let mut active = Coordinator::new();
+        active.forwarding.source_nat_rules =
+            parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
+        let mut standby = Coordinator::new();
+        standby.forwarding.source_nat_rules =
+            parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
+
+        let local = mint_local_idle_lease(&active, "P");
+        let advertised = active.export_idle_persistent_leases(3_000);
+        assert_eq!(advertised.len(), 1);
+        assert_eq!(
+            standby
+                .import_idle_persistent_leases(&advertised, 10_000)
+                .installed,
+            1
+        );
+        assert!(
+            standby.export_idle_persistent_leases(11_000).is_empty(),
+            "standby must not echo before promotion (#10789-F4)"
+        );
+        if inbound_only {
+            let key = crate::nat::PersistentSourceKey {
+                protocol: local.lease.protocol,
+                src_ip: local.lease.src_ip,
+                src_port: local.lease.src_port,
+                routing_scope: local.lease.routing_scope,
+                remote: None,
+            };
+            let allocator = &standby.forwarding.source_nat_rules[0].pool_allocator;
+            assert!(allocator.acquire_persistent_inbound(key, 11_000));
+            allocator.release_persistent_inbound(key, 12_000);
+            assert!(
+                standby.export_idle_persistent_leases(13_000).is_empty(),
+                "inbound release alone must not promote peer-owned lease"
+            );
+        }
+
+        // Drive the actual HA activation path; this is when the idle lease's
+        // authority changes, not merely when an imported lease is installed.
+        standby
+            .update_ha_state(&[crate::HAGroupStatus {
+                rg_id: 1,
+                active: true,
+                ..crate::HAGroupStatus::default()
+            }])
+            .expect("RG promotion");
+        let pushed = standby.export_idle_persistent_leases(14_000);
+        assert_eq!(
+            pushed.len(),
+            1,
+            "#16876: promoted node must re-advertise imported idle lease (inbound_only={inbound_only})"
+        );
+
+        let restarted = Coordinator::new();
+        let mut restarted = restarted;
+        restarted.forwarding.source_nat_rules =
+            parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
+        assert_eq!(
+            restarted
+                .import_idle_persistent_leases(&pushed, 15_000)
+                .installed,
+            1,
+            "#16876: restarted former owner must relearn promoted binding"
+        );
+    }
+}
+
+/// #16876: the periodic peer batch can arrive after RG activation. A lease
+/// imported in that order is already locally authoritative and must be
+/// eligible for the next re-advertisement.
+#[test]
+fn imported_idle_lease_arriving_after_promotion_is_exportable_16876() {
+    let mut active = Coordinator::new();
+    active.forwarding.source_nat_rules = parse_source_nat_rules(&[pool_rule(
+        "r1",
+        "P",
+        &["203.0.113.1"],
+    )]);
+    let advertised = mint_local_idle_lease(&active, "P");
+
+    let mut primary = Coordinator::new();
+    primary.forwarding.source_nat_rules = parse_source_nat_rules(&[pool_rule(
+        "r1",
+        "P",
+        &["203.0.113.1"],
+    )]);
+    primary
+        .update_ha_state(&[crate::HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            ..crate::HAGroupStatus::default()
+        }])
+        .expect("RG promotion");
+
+    let imported = primary.import_idle_persistent_leases(&[advertised], 10_000);
+    assert_eq!(imported.installed, 1, "fixture: peer lease must import");
+    let pushed = primary.export_idle_persistent_leases(11_000);
+    assert_eq!(
+        pushed.len(),
+        1,
+        "#16876: a lease imported after promotion must be re-advertised"
+    );
+}
+
+/// #16876 F1: an imported lease cannot be promoted when only one of this
+/// node's two local RGs is active. A stale duplicate remains additive-only and
+/// cannot shorten the held lease's deadline.
+#[test]
+fn mixed_rg_import_refresh_is_additive_without_promotion_16876() {
+    let mut source = Coordinator::new();
+    source.forwarding.source_nat_rules =
+        parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
+    let mut advertised = mint_local_idle_lease(&source, "P");
+
+    let mut mixed = Coordinator::new();
+    mixed.forwarding.source_nat_rules =
+        parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
+    mixed
+        .update_ha_state(&[
+            crate::HAGroupStatus {
+                rg_id: 1,
+                active: true,
+                ..crate::HAGroupStatus::default()
+            },
+            crate::HAGroupStatus {
+                rg_id: 2,
+                active: false,
+                ..crate::HAGroupStatus::default()
+            },
+        ])
+        .expect("mixed RG state");
+
+    let imported = mixed.import_idle_persistent_leases(&[advertised.clone()], 10_000);
+    assert_eq!(imported.installed, 1, "fixture: peer lease must import");
+    let before = mixed
+        .export_display_persistent_leases(20_000)
+        .into_iter()
+        .find(|row| row.pool_name == "P")
+        .expect("imported lease remains held for display")
+        .lease;
+
+    advertised.lease.remaining_ns = 1;
+    let refresh = mixed.import_idle_persistent_leases(&[advertised], 20_000);
+    assert_eq!(refresh.skipped_existing, 1, "refresh must be additive: {refresh:?}");
+    let after = mixed
+        .export_display_persistent_leases(20_000)
+        .into_iter()
+        .find(|row| row.pool_name == "P")
+        .expect("existing lease must remain held after duplicate")
+        .lease;
+    assert_eq!(after.translated_ip, before.translated_ip, "duplicate must not displace lease");
+    assert_eq!(after.translated_port, before.translated_port, "duplicate must not displace lease");
+    assert_eq!(
+        after.remaining_ns, before.remaining_ns,
+        "duplicate import must not shorten lease deadline"
+    );
+    assert!(
+        mixed.export_idle_persistent_leases(20_000).is_empty(),
+        "partial RG ownership must not promote the node-wide imported lease set"
+    );
+}
+
+/// A partial late batch on an already-active node promotes only the records it
+/// installed; it must not sweep an unrelated imported lease in another pool.
+#[test]
+fn late_partial_import_promotes_only_installed_records_16876() {
+    let mut primary = Coordinator::new();
+    primary.forwarding.source_nat_rules = parse_source_nat_rules(&[
+        pool_rule("r1", "P", &["203.0.113.1"]),
+        pool_rule("r2", "Q", &["203.0.113.2"]),
+    ]);
+    primary
+        .update_ha_state(&[crate::HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            ..crate::HAGroupStatus::default()
+        }])
+        .expect("primary RG");
+
+    let unrelated = record("Q", "10.0.61.51", "203.0.113.2", 40_001);
+    let q_allocator = &primary
+        .forwarding
+        .source_nat_rules
+        .iter()
+        .find(|rule| rule.pool_name == "Q")
+        .expect("Q rule")
+        .pool_allocator;
+    assert_eq!(
+        q_allocator.import_idle_lease(
+            &unrelated.lease,
+            &["203.0.113.2".parse().unwrap()],
+            TIMEOUT_NS,
+            10_000,
+        ),
+        crate::nat::IdleLeaseImport::Installed
+    );
+
+    let mut source = Coordinator::new();
+    source.forwarding.source_nat_rules =
+        parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
+    let installed = mint_local_idle_lease(&source, "P");
+    let mut refused = installed.clone();
+    refused.pool_name = "unknown".to_string();
+    let counts = primary.import_idle_persistent_leases(&[installed, refused], 20_000);
+    assert_eq!((counts.installed, counts.skipped_unknown_pool), (1, 1));
+
+    let exported = primary.export_idle_persistent_leases(21_000);
+    assert_eq!(exported.len(), 1, "only the newly installed lease is promoted");
+    assert_eq!(exported[0].pool_name, "P");
+    assert!(
+        primary
+            .export_display_persistent_leases(21_000)
+            .iter()
+            .any(|row| row.pool_name == "Q"),
+        "the unrelated Q lease remains held, not swept or removed"
+    );
+}
+
+/// #16877: exercise the generation-validated coordinator import rather than
+/// the allocator-only test helper, so wildcard admission is checked after a
+/// real failover-shaped lease import.
+#[test]
+fn coordinator_imported_nonzone_any_remote_lease_admits_inbound_16877() {
+    let mut snapshot = pool_rule("r1", "P", &["203.0.113.1"]);
+    snapshot.from_zone.clear();
+    snapshot.to_zone.clear();
+    snapshot.persistent_nat_permit = "any-remote-host".to_string();
+    let rules = || parse_source_nat_rules(&[snapshot.clone()]);
+
+    let mut active = Coordinator::new();
+    active.forwarding.source_nat_rules = rules();
+    let advertised = mint_local_idle_lease(&active, "P");
+    assert!(advertised.lease.permit_any_remote);
+    assert_eq!(advertised.lease.mint_from_zone.as_deref(), Some("lan"));
+
+    let mut primary = Coordinator::new();
+    primary.forwarding.source_nat_rules = rules();
+    primary
+        .update_ha_state(&[crate::HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            ..crate::HAGroupStatus::default()
+        }])
+        .expect("RG promotion");
+    let imported = primary.import_idle_persistent_leases_after_generation_now(&[advertised.clone()]);
+    assert_eq!(imported.installed, 1, "peer lease must import: {imported:?}");
+
+    let rule = &primary.forwarding.source_nat_rules[0];
+    let decision = rule.pool_allocator.persistent_inbound_lookup_for_rule(
+        6,
+        advertised.lease.translated_ip,
+        advertised.lease.translated_port,
+        "203.0.113.99".parse().unwrap(),
+        9_999,
+        crate::afxdp::monotonic_nanos(),
+        rule,
+        "wan",
+        "wan",
+        "wan",
+        &crate::nat::NatScopeCtx::default(),
+    );
+    assert!(
+        matches!(decision, crate::nat::PersistentInbound::Permitted { .. }),
+        "#16877: generation-validated coordinator import must preserve non-zone AnyRemoteHost admission"
+    );
 }

@@ -13,20 +13,22 @@ func userspaceLeaseScope(v uint32) *uint32 {
 	return &v
 }
 
+func userspaceLeaseString(v string) *string { return &v }
+
 // #8121: the Go and Rust spellings of the idle-lease wire must AGREE.
 //
 // `IdleLeaseWire` exists twice — here (protocol.go) and in the helper
 // (userspace-dp/src/protocol/control.rs). They meet over the control socket in
-// `export_idle_leases` / `import_idle_leases`, and until now NOTHING asserted
-// they agree.
+// `export_idle_leases` / `import_idle_leases`. v75 (#16877) adds the original
+// mint from-zone, and the populated fixture below pins the new field's spelling.
 //
 // The tree's wire-invariant fixture would normally cover this, and could not:
 // it dumps `::default()` specimens, and `idle_leases` carries
 // `skip_serializing_if = "Vec::is_empty"`, so an empty vec is omitted and the
 // payload's field names never appeared. Four of the type's own fields are
 // `skip_serializing_if` too, so even a non-empty vec of defaults would have
-// hidden them. The Rust side now contributes a POPULATED specimen; this cell
-// asserts the Go side matches it.
+// hidden them. The Rust side now contributes a POPULATED specimen, including
+// mint_from_zone; this cell asserts the Go side matches it.
 //
 // ASSERT THE AGREEMENT, never pin one side to a literal. A literal here would
 // encode which side is trusted — and the failure mode being guarded is
@@ -64,6 +66,8 @@ func TestIdleLeaseWireAgreesWithTheHelperSpelling8121(t *testing.T) {
 		SrcIP: "10.0.61.102", SrcPort: 40000,
 		RoutingScope: userspaceLeaseScope(7),
 		RemoteIP:     "8.8.8.8", RemotePort: 443,
+		EgressScope:     userspaceLeaseScope(11),
+		MintFromZone:    userspaceLeaseString("trust"),
 		PermitAnyRemote: true,
 		PermittedRemotes: []PersistentNatRemote{
 			{IP: "8.8.8.8", Port: 0},

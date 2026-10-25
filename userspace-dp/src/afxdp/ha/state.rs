@@ -201,6 +201,16 @@ impl crate::afxdp::Coordinator {
         if activated_rgs.is_empty() {
             return;
         }
+        // #16876: idle-lease ownership changes only when this node owns every
+        // local RG. The lease record has no RG identity, so a partial
+        // activation cannot safely promote a node-wide imported set.
+        if !current.is_empty()
+            && current
+                .values()
+                .all(|group| group.is_forwarding_active(now_secs))
+        {
+            self.promote_imported_persistent_nat_leases();
+        }
         // #2120: the activated rg_epochs bump (and the node-level
         // rg_epochs[0] edge) moved to update_ha_state BEFORE
         // rg_runtime.store, so it is NOT repeated here — a double

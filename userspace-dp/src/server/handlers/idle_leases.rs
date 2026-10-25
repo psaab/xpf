@@ -76,6 +76,7 @@ fn to_wire(rec: &PoolIdleLease) -> IdleLeaseWire {
         // the real unscoped domain.
         routing_scope: Some(rec.lease.routing_scope),
         egress_scope: Some(rec.lease.egress_scope),
+        mint_from_zone: rec.lease.mint_from_zone.clone(),
         remote_ip,
         remote_port,
         permit_any_remote: rec.lease.permit_any_remote,
@@ -211,6 +212,7 @@ pub(super) fn from_wire(w: &IdleLeaseWire) -> Option<PoolIdleLease> {
             src_port: w.src_port,
             routing_scope,
             egress_scope,
+            mint_from_zone: w.mint_from_zone.clone(),
             remote,
             permit_any_remote: w.permit_any_remote,
             permitted_remotes,
@@ -397,6 +399,7 @@ mod tests {
             protocol: 6,
             routing_scope: Some(0),
             egress_scope: Some(0),
+            mint_from_zone: None,
             src_ip: "10.0.61.50".to_string(),
             src_port: 40000,
             remote_ip: "8.8.8.8".to_string(),
@@ -537,7 +540,8 @@ mod tests {
     /// dropping one that the receiver then defaults.
     #[test]
     fn idle_lease_wire_round_trips_8121() {
-        let w = wire();
+        let mut w = wire();
+        w.mint_from_zone = Some("trust".to_string());
         let rec = from_wire(&w).expect("control: the well-formed record must parse");
         assert_eq!(to_wire(&rec), w);
     }

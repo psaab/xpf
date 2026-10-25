@@ -3240,21 +3240,29 @@ Consequences to hold on to:
 
 `QueuePersistentNatLeaseBatch` exports one sender-origin/generation snapshot in
 size-bounded frames. The record layout is selected per lease, not per export:
-type 41 (`syncMsgPersistentNatLeaseGeneration`) carries only leases without a
-deterministic identity, and type 43 (`syncMsgPersistentNatLeaseDeterministic`)
-carries deterministic leases. A mixed batch is sent as type-41 chunks followed
-by type-43 chunks; every frame repeats the same origin and clear generation and
-has its own increasing full-set sequence. The receiver applies a newer
-generation as a clear barrier, then adds records from later frames of that
-generation.
+type 41 (`syncMsgPersistentNatLeaseGeneration`) carries non-deterministic leases
+without mint provenance, and type 43 (`syncMsgPersistentNatLeaseDeterministic`)
+carries deterministic leases without provenance. Types 50 and 51 are their
+provenance-bearing successors, carrying the mint-from-zone field needed to
+restore non-zone inbound admission (#16877).
 
-This split preserves the rolling-upgrade path for a peer that supports #11486
-but predates #14638: it can still decode dynamic leases from type 41 and ignores
-the unknown deterministic type 43. Deterministic idle leases are unavailable to
-that peer until it upgrades. A peer older than #11486 cannot read type 41, and
-new receivers continue to ignore its generation-less lease messages rather
-than bypass the durable replay floor. Empty or wholly unencodable batches still
-send one generation barrier frame; dropped records remain counted.
+Types 50/51 are sent only after the peer advertises
+`capFlag2PersistentNatLeaseProvenance` in the second capability byte. An
+unlearned or older peer continues receiving 41/43, so it does not lose ordinary
+lease refreshes when it cannot decode the new records. New receivers continue
+to decode 41/43 with absent provenance during rolling upgrades.
+
+A mixed batch is sent in layout groups; every frame repeats the same origin
+and clear generation and has its own increasing full-set sequence. The receiver
+applies a newer generation as a clear barrier, then adds records from later
+frames of that generation. This split preserves the rolling-upgrade path for a
+peer that supports #11486 but predates #14638: it can still decode dynamic
+leases from type 41 and ignores the unknown deterministic type 43.
+Deterministic idle leases are unavailable to that peer until it upgrades. A
+peer older than #11486 cannot read type 41, and new receivers continue to ignore
+its generation-less lease messages rather than bypassing the durable replay
+floor. Empty or wholly unencodable batches still send one generation barrier
+frame; dropped records remain counted.
 
 ## IPsec SA sync
 
