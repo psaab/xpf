@@ -94,17 +94,18 @@ func TestDrainReinjectCompletionsPartialFrameTimeoutIsError(t *testing.T) {
 	}
 	defer listener.Close()
 
-	serverDone := make(chan struct{})
+	serverConn := make(chan net.Conn, 1)
 	go func() {
-		defer close(serverDone)
 		conn, err := listener.Accept()
 		if err != nil {
 			return
 		}
-		defer conn.Close()
-		// Two bytes of a 4-byte header, then stall past the deadline.
+		serverConn <- conn
+		// Two bytes of a 4-byte header, then stall. Keep the server
+		// end open (no Close on return) so only the client's Close
+		// — or lack of it — can produce EOF at the read below.
 		_, _ = conn.Write([]byte{0, 0})
-		time.Sleep(50 * time.Millisecond)
+		select {}
 	}()
 
 	client := &SocketReinjectSubmitter{completePath: completePath, timeout: 5 * time.Millisecond}
@@ -119,7 +120,62 @@ func TestDrainReinjectCompletionsPartialFrameTimeoutIsError(t *testing.T) {
 	if client.complete != nil {
 		t.Fatal("partial-frame timeout must close the desynchronised completion connection")
 	}
-	<-serverDone
+	// The peer must observe EOF: merely clearing the local pointer
+	// leaves the Rust single-client server blocked on the abandoned
+	// stream until its 100ms timeout (#16863). A closed client conn
+	// delivers EOF promptly; an abandoned one does not.
+	conn := <-serverConn
+	_ = conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	buf := make([]byte, 1)
+	if _, readErr := conn.Read(buf); readErr == nil {
+		t.Fatal("server read after partial-frame timeout succeeded, want EOF (client conn not closed, #16863)")
+	} else if ne, ok := readErr.(net.Error); ok && ne.Timeout() {
+		t.Fatal("server observed no EOF within 300ms after partial-frame timeout: client conn abandoned, not closed (#16863)")
+	}
+
+}
+
+// TestDrainReinjectCompletionsBadLengthClosesConn16863 is the positive
+// control for #16863: the sibling invalid-length arm already closes
+// the conn, so its peer observes EOF. It must keep doing so.
+func TestDrainReinjectCompletionsBadLengthClosesConn16863(t *testing.T) {
+	completePath := filepath.Join(shortTempDir14678(t), "complete.sock")
+	listener, err := net.Listen("unix", completePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	serverConn := make(chan net.Conn, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		serverConn <- conn
+		// Zero length is an invalid framed-message length. Keep
+		// the server end open so only the client's Close can
+		// produce EOF at the read below.
+		_, _ = conn.Write([]byte{0, 0, 0, 0})
+		select {}
+	}()
+
+	client := &SocketReinjectSubmitter{completePath: completePath, timeout: time.Second}
+	defer client.Close()
+	if _, err := client.DrainReinjectCompletions(4); err == nil {
+		t.Fatal("bad-length drain: want error")
+	}
+	if client.complete != nil {
+		t.Fatal("bad-length drain must close the completion connection")
+	}
+	conn := <-serverConn
+	_ = conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	buf := make([]byte, 1)
+	if _, readErr := conn.Read(buf); readErr == nil {
+		t.Fatal("server read after bad-length close succeeded, want EOF")
+	} else if ne, ok := readErr.(net.Error); ok && ne.Timeout() {
+		t.Fatal("server observed no EOF within 300ms after bad-length close (control regression)")
+	}
 }
 
 // TestDrainReinjectCompletionsPartialHeaderThenCompletionRecovers
