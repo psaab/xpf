@@ -576,18 +576,34 @@ fn clamp_tcp_mss_no_op_on_tcp_ao_syn_15119() {
     assert_eq!(packet, pre, "TCP-AO SYN bytes must be untouched");
 }
 
-/// #15119: MSS + TCP-MD5 (kind 19) on a SYN — same no-op contract.
+/// #16819: MSS + TCP-MD5 (kind 19) on a SYN — the clamp MUST apply.
+/// RFC 2385 §2.0's digest covers the pseudo-header, the TCP header
+/// excluding options (checksum zeroed), and the segment data, so
+/// rewriting the MSS option value changes no digest input and the
+/// clamped SYN still validates at an MD5 peer. (Pre-#16819 this cell
+/// pinned the #15119 over-broad decline.) Only the MSS value and the
+/// TCP checksum may change: the MD5 option bytes stay intact and the
+/// post-clamp checksum must fold to 0xFFFF.
 #[test]
-fn clamp_tcp_mss_no_op_on_tcp_md5_syn_15119() {
+fn clamp_tcp_mss_clamps_tcp_md5_syn_16819() {
     let mut opts = vec![2u8, 4, 0x05, 0xb4, 19, 18];
     opts.extend_from_slice(&[0xAB; 16]);
-    let (mut packet, _src, _dst) = build_v4_ip_tcp_with_options(TCP_FLAG_SYN, &opts);
+    let (mut packet, src, dst) = build_v4_ip_tcp_with_options(TCP_FLAG_SYN, &opts);
     let pre = packet.clone();
     assert!(
-        !clamp_tcp_mss(&mut packet, 1200),
-        "TCP-MD5 SYN must not be clamped"
+        clamp_tcp_mss(&mut packet, 1200),
+        "TCP-MD5 SYN must be clamped (RFC 2385 digest excludes options)"
     );
-    assert_eq!(packet, pre, "TCP-MD5 SYN bytes must be untouched");
+    let tcp = tcp_segment_v4(&packet);
+    // MSS option at TCP offset 20; value at 22..24 is now 1200.
+    assert_eq!(u16::from_be_bytes([tcp[22], tcp[23]]), 1200);
+    // MD5 option (kind 19 at TCP offset 24) and its digest bytes intact.
+    assert_eq!(&tcp[24..tcp.len()], &pre[IPV4_HDR_LEN + 24..]);
+    assert_eq!(
+        checksum_tcp_v4(src, dst, tcp),
+        0xFFFF,
+        "post-clamp v4 TCP checksum must fold to 0xFFFF"
+    );
 }
 
 /// #15119 control: NOPs before MSS still clamp (walker reaches MSS).
