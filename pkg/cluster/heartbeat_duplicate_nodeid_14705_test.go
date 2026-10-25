@@ -8,7 +8,7 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// TestRecvLoop_DuplicateNodeIDHeartbeatRequiresHMAC_14705 is the #14705
+// TestRecvLoop_DuplicateNodeIDHeartbeatRequiresHMAC_14705 is the #14705/#16789
 // decisive regression. It drives the REAL heartbeatReceiver.readLoop over
 // real UDP sockets with a KEYED manager and a peer pin matching the sender,
 // so the only gate that can stop the forged frames is HMAC verification.
@@ -156,6 +156,81 @@ func TestRecvLoop_DuplicateNodeIDHeartbeatRequiresHMAC_14705(t *testing.T) {
 		if !r.admitFrame(peerFrame, parsed) {
 			t.Fatal("peer heartbeat with the duplicate frame's nonce was rejected — " +
 				"the duplicate path consumed replay state it must leave alone")
+		}
+	})
+
+	// #16789: a replay of THIS node's own heartbeat — valid MAC under
+	// the shared PSK, same NodeID, but trailer session equal to this
+	// manager's own heartbeat session — must NOT warn. Before the fix
+	// duplicateNodeIDAuthenticated verified only the MAC, so an on-link
+	// spoofer capturing this node's heartbeat and replaying it from the
+	// peer IP forged the ERROR log, the EventRG history entry, and a
+	// refreshed shared 30s limiter. The frame is produced via the real
+	// sender path (buildHeartbeat + heartbeatNonce session), not a
+	// hand-rolled session, so the test exercises the production session.
+	// FAIL-ON-REVERT: drop the own-session check and the own frame warns.
+	t.Run("own_reflected_heartbeat_does_not_warn_16789", func(t *testing.T) {
+		mgr, r, sendConn, dst := setup(t, psk, "")
+
+		// Mint this manager's own session the way the sender does, and
+		// build a frame exactly as heartbeatSender.send would (signed,
+		// own session, own node-id). buildHeartbeat draws the session
+		// via heartbeatNonce and stamps it on the packet.
+		ownPkt := mgr.buildHeartbeat()
+		if ownPkt.NodeID != nodeID {
+			t.Fatalf("fixture: own packet NodeID=%d, want %d", ownPkt.NodeID, nodeID)
+		}
+		ownSession, _ := mgr.heartbeatNonce()
+		if ownSession == 0 {
+			t.Fatal("fixture: own heartbeat session is zero (not minted)")
+		}
+		ownFrame := MarshalHeartbeatAuth(ownPkt, []byte(psk), ownSession, 99)
+		// The direct gate must refuse the own frame.
+		if r.duplicateNodeIDAuthenticated(ownFrame) {
+			t.Fatal("own reflected heartbeat passed the duplicate-node-id gate (#16789): " +
+				"trailer session equals this process's own heartbeat session")
+		}
+		// And through the real readLoop it must produce no warning,
+		// no history entry, and no limiter consumption.
+		send(t, sendConn, dst, ownFrame)
+		if waitWarn(mgr, 500*time.Millisecond) {
+			t.Fatal("own reflected heartbeat consumed the duplicate limiter (#16789)")
+		}
+		if got := beaconHistoryCount(mgr, "duplicate node-id"); got != 0 {
+			t.Fatalf("own reflected heartbeat produced %d duplicate history entries, want 0", got)
+		}
+		if got := r.lastSeen.Load(); got != 0 {
+			t.Fatalf("own reflected frame refreshed liveness: lastSeen=%d", got)
+		}
+		// The genuine beacon diagnostic must still fire — the limiter
+		// was not poisoned by the reflected frame.
+		mgr.NoteDuplicateNodeIDBeacon("em0")
+		if got := beaconHistoryCount(mgr, "authenticated control-link beacon"); got != 1 {
+			t.Fatalf("genuine beacon history entries = %d, want 1 (own reflected frame suppressed it)", got)
+		}
+	})
+
+	// #16789 acceptance counterpart: a correctly signed duplicate frame
+	// under a DIFFERENT session (a genuine second chassis) still warns.
+	t.Run("different_session_duplicate_still_warns_16789", func(t *testing.T) {
+		mgr, r, sendConn, dst := setup(t, psk, "")
+		// Ensure the local session is minted and differs from the
+		// duplicate's session.
+		ownSession, _ := mgr.heartbeatNonce()
+		const dupSession = 0x16789
+		if dupSession == ownSession {
+			t.Fatal("fixture: duplicate session collides with own session")
+		}
+		frame := MarshalHeartbeatAuth(dupPkt, []byte(psk), dupSession, 1)
+		if !r.duplicateNodeIDAuthenticated(frame) {
+			t.Fatal("different-session signed duplicate was refused by the gate (#16789 over-filter)")
+		}
+		send(t, sendConn, dst, frame)
+		if !waitWarn(mgr, 5*time.Second) {
+			t.Fatal("different-session signed duplicate did not warn (#16789)")
+		}
+		if got := beaconHistoryCount(mgr, "duplicate node-id: invalid cluster configuration"); got != 1 {
+			t.Fatalf("different-session duplicate history entries = %d, want 1", got)
 		}
 	})
 

@@ -371,7 +371,7 @@ type Manager struct {
 	// new Manager and so draws a fresh random session, which the ring admits as
 	// never-seen exactly as before.
 	hbNonceOnce sync.Once
-	hbSession   uint64
+	hbSession   atomic.Uint64
 	hbCounter   atomic.Uint64
 
 	// bootEpochOnce/bootEpoch/bootEpochReady hold this daemon incarnation's
