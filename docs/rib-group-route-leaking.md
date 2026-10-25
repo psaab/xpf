@@ -163,6 +163,17 @@ authorization holds in the compiled config, so a stale kernel rule from
 an older binary cannot republish an unauthorized `A.inet.0 -> B.inet.0`
 row. The iif/oif pair deduplicates to one route.
 
+Since #16799 the FIB gives that mirrored row the kernel's after-LPM
+semantics: a return row (kernel priority in (1000, 2000), including the
+legacy flat 1500) is deferred in the helper and evaluated only when
+the source table's own lookup misses — its default, a more-specific
+route, a connected prefix, or a discard/reject in the source table all
+win, exactly as the `l3mdev` lookup at 1000 precedes the return rules.
+Before #16799 the helper ran every leak before the source table's LPM,
+so A's own default (and even a more-specific /25) lost to a return row
+into B. The 30000-band leaks into `inet.0` are unaffected: they follow
+main's table rule in the kernel too and keep stage-1 precedence.
+
 ### Next-table / PBR targets (#11320)
 
 The VRF miss terminator also makes return traffic from next-table and PBR
