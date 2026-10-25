@@ -124,8 +124,14 @@ destination rule`, unknown selectors deny), matching the gRPC charges for
     emitted even when the dataplane is unloaded (#11806).
   - On a loopback bind the exposition is open to any local UID by default
     (#4162); `web-management api-auth metrics-require-auth` opts it into
-    requiring a valid api-auth credential even there (#16072). `/health`
-    is unaffected either way.
+    requiring a valid api-auth credential even there (#16072). On every
+    credential-gated leg (non-loopback bind, or loopback with
+    `metrics-require-auth`) the credential's login class must also hold
+    the `view` permission (#16727): a credential whose class lacks
+    `view` (e.g. `unauthorized`) gets 403, exactly as on every
+    `/api/v1` read, while a `view`-holding credential (e.g. `read-only`)
+    still scrapes. The ungated loopback default stays open to any local
+    UID. `/health` is unaffected either way.
 - `GET /api/v1/...` — REST mirrors of the gRPC API: sessions, routes,
   NAT, DHCP, IPsec, VRRP, OSPF, BGP, etc.
   - `GET /api/v1/security/policies` enumerates zone-pair policies AND
@@ -504,10 +510,14 @@ monitoring and support tooling on a box that never adopted RBAC keeps working
 byte-for-byte. What changes is a NON-root local uid outside the login model —
 exactly the population the issue exists to stop.
 
-**`/health` and `/metrics` stay open** and are not in the table. They carry no
-configuration, `authCheck` already exempts them, and the in-tree incus harnesses
-read `/metrics`. A sweep of every in-tree consumer found those two and nothing
-else touching REST at all, so gating `/api/v1` breaks no shipped tooling.
+**`/health` stays open; `/metrics` stays open only on the ungated
+loopback default.** `/health` carries no configuration and is exempt
+in authCheck. `/metrics` carries configured identifiers, so since
+#16727 a credential-gated leg (non-loopback, or loopback with
+`metrics-require-auth`) also requires the credential's class to hold
+`view`; the ungated loopback leg the in-tree incus harnesses read
+stays open. A sweep of every in-tree consumer found those two and nothing
+else touching REST at all, so gating the /api/v1 surface breaks no shipped tooling.
 
 `readAuthz` serves an UNGUARDED non-API safe route rather than refusing
 it — the opposite of the mutation gate's fail-closed default — precisely so
@@ -1188,9 +1198,11 @@ because the middleware does not consume the request body; the effect is that an
 `operator` principal cannot use its `clear-config-lock` verb over REST. It
 over-restricts rather than under-restricts.
 
-**Safe methods are untouched.** GET/HEAD/OPTIONS/TRACE, `/health`, `/metrics`
-and the SSE streams keep exactly their previous access rules (the #4162 metrics
-gate and `api-auth` still apply to them).
+**Safe methods keep their previous rules, with one addition.**
+GET/HEAD/OPTIONS/TRACE, `/health`, and the SSE streams are unchanged;
+since #16727 `GET /metrics` on a credential-gated leg additionally
+requires the credential's class to hold `view` (the #4162/#16072
+authN gate still applies first).
 
 **What this breaks, and the remedy.** One population changes behavior: a local
 process running as a **non-root UID that is not a configured `system login

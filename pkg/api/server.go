@@ -1318,8 +1318,16 @@ func (s *Server) setSlot0(slots *[]*authSlot, slot *authSlot) {
 // this slot; otherwise a retained leg could admit a newly published credential
 // between the two checks.
 type authSlot struct {
-	srv    *Server
-	pinned atomic.Pointer[AuthConfig]
+	srv *Server
+	// bindRequiresAuth is the per-leg #4162 bind classification captured
+	// when the leg's handler was built (true on a non-loopback bind). It
+	// lets readAuthz recover the leg's effective metrics gate without a
+	// second source of truth: gate = bindRequiresAuth || metricsGate().
+	// Zero-value (false) is the loopback default, so a directly
+	// constructed slot in tests is ungated unless the production
+	// leg constructors set it. Set once at build, never mutated.
+	bindRequiresAuth bool
+	pinned           atomic.Pointer[AuthConfig]
 	// isPinned is separate from a nil `pinned` because nil is a MEANINGFUL
 	// policy (no authentication at all), not "unset".
 	isPinned atomic.Bool
@@ -1352,6 +1360,24 @@ func (a *authSlot) metricsGate() bool {
 	return a.srv.metricsGate.Load()
 }
 
+// effectiveMetricsGate reports whether this leg's /metrics gate is ON
+// (#16727): the #4162 bind requires a credential, or the #16072
+// metrics-require-auth opt-in is in force for this leg (pinned value
+// once retired, server-wide intent while live), or the leg's live
+// credential snapshot carries MetricsRequireAuth. This is the same
+// predicate dynamicAuthMiddleware enforces for authentication
+// (effectiveMetricsRequireAuth folded with the slot gate), recovered
+// here so readAuthz can make the matching login-class decision.
+func (a *authSlot) effectiveMetricsGate() bool {
+	if a.bindRequiresAuth || a.metricsGate() {
+		return true
+	}
+	if c := a.load(); c != nil && c.MetricsRequireAuth {
+		return true
+	}
+	return false
+}
+
 // authForRequest returns the credential policy attached to the request's
 // listener. Direct handler tests without a connection context use the live
 // snapshot; production HTTP requests carry their per-leg authSlot from accept.
@@ -1378,6 +1404,29 @@ func (s *Server) gateForRequest(r *http.Request, fallback *authSlot) bool {
 		return fallback.metricsGate()
 	}
 	return s.metricsGate.Load()
+}
+
+// metricsGateForRequest reports the effective /metrics gate for this
+// request's leg (#16727): bind classification folded with the #16072
+// opt-in and the live snapshot's MetricsRequireAuth. The leg slot rides
+// the connection context in production; handler-direct tests (no
+// ConnContext) see the server-wide intent folded with the live
+// snapshot, which is ungated unless the operator opted in — and
+// correctly reports no per-leg bind gate, because no leg accepted
+// such a request.
+func (s *Server) metricsGateForRequest(r *http.Request) bool {
+	if r != nil {
+		if peer, ok := peerIdentityFrom(r.Context()); ok && peer.authSlot != nil {
+			return peer.authSlot.effectiveMetricsGate()
+		}
+	}
+	if s.metricsGate.Load() {
+		return true
+	}
+	if a := s.auth.Load(); a != nil && a.MetricsRequireAuth {
+		return true
+	}
+	return false
 }
 
 func (s *Server) connContextForAuthSlot(slot *authSlot) func(context.Context, net.Conn) context.Context {
@@ -1434,7 +1483,8 @@ func (s *Server) listenerHandler(addr string, slot *authSlot) http.Handler {
 		// package: one substitution cannot diverge from another.
 		slot = s.newAuthSlot()
 	}
-	return s.dynamicAuthMiddleware(!isLoopbackBindAddr(addr), slot, s.sharedBase)
+	slot.bindRequiresAuth = !isLoopbackBindAddr(addr)
+	return s.dynamicAuthMiddleware(slot.bindRequiresAuth, slot, s.sharedBase)
 }
 
 // buildHTTPServer constructs a fresh HTTP *http.Server bound-for addr with the
