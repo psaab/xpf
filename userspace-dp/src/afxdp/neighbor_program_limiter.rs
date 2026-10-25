@@ -204,12 +204,26 @@ fn clear_owed(bucket: &mut Bucket, key: (i32, IpAddr)) {
     }
 }
 
-/// Record `(key, mac)` as owed by `bucket` (#15770): update the key's
-/// existing owed entry, else take a way carrying no owed binding, else
-/// evict the oldest owed entry. Never touches a way's programmed binding
-/// or timestamp, so the rate cap is unaffected.
+/// Drop owed entries for `key` whose MAC differs from `mac` (#16508): a
+/// newer advert for the programmed binding supersedes an older owed
+/// change for the same key, while an owed entry for `mac` itself is kept.
+fn clear_owed_superseded(bucket: &mut Bucket, key: (i32, IpAddr), mac: [u8; 6]) {
+    for slot in bucket.iter_mut() {
+        if slot.desired_key == Some(key) && slot.desired_mac != mac {
+            slot.desired_key = None;
+        }
+    }
+}
+
+/// Record `(key, mac)` as owed by `bucket` (#15770, #16508): update the
+/// key's existing owed entry in place (at most one owed way per key),
+/// else take a way carrying no owed binding, else evict the oldest owed
+/// entry. Never touches a way's programmed binding or timestamp, so the
+/// rate cap is unaffected.
 fn record_owed(bucket: &mut Bucket, key: (i32, IpAddr), mac: [u8; 6], now_ns: u64) {
-    if bucket_owes(bucket, key, mac) {
+    if let Some(slot) = bucket.iter_mut().find(|s| s.desired_key == Some(key)) {
+        slot.desired_mac = mac;
+        slot.desired_ns = now_ns;
         return;
     }
     if let Some(slot) = bucket.iter_mut().find(|s| s.desired_key.is_none()) {
@@ -223,7 +237,6 @@ fn record_owed(bucket: &mut Bucket, key: (i32, IpAddr), mac: [u8; 6], now_ns: u6
         .unwrap_or(0);
     bucket[oldest].desired_key = Some(key);
     bucket[oldest].desired_mac = mac;
-
     bucket[oldest].desired_ns = now_ns;
 }
 /// Per-worker gate for `add_kernel_neighbor`. See the module docs.
@@ -280,10 +293,17 @@ impl KernelNeighborProgramLimiter {
         let owed_map_changed = bucket_owes(bucket, key, mac) || map_changed;
         if let Some(pos) = bucket.iter().position(|s| s.key == Some(key)) {
             let owes_other = bucket[pos].mac != mac;
-            if !owes_other && (bucket[pos].mac == mac || !owed_map_changed) {
-                if bucket[pos].mac != mac {
-                    clear_owed(bucket, key);
-                }
+            if !owes_other {
+                // Owning way already holds this exact binding. A newer
+                // advert for it supersedes any older owed change for
+                // this key (#16508); skip.
+                clear_owed_superseded(bucket, key, mac);
+                return false;
+            }
+            if !owed_map_changed {
+                // Proven-present repeat for a binding this way does not
+                // hold (e.g. its owed entry was evicted): per #15770 the
+                // kernel entry lags until the next changed advert.
                 return false;
             }
             if now_ns.saturating_sub(bucket[pos].last_program_ns) < min_interval_ns {
@@ -726,6 +746,12 @@ mod tests {
         assert!(!lim.should_program(victim, victim_mac, false, T0 + MIN + 1));
     }
 
+    fn owed_ways(lim: &KernelNeighborProgramLimiter, key: (i32, IpAddr)) -> usize {
+        let state = HotPathSeededState::new(crate::hot_hash_seed::hot_path_hash_seed());
+        let bucket = &lim.buckets[bucket_index_with(&key, state)];
+        bucket.iter().filter(|s| s.desired_key == Some(key)).count()
+    }
+
     #[test]
     fn owed_binding_superseded_by_newer_mac_15247() {
         let victim = v4(202);
@@ -734,9 +760,85 @@ mod tests {
         let mut lim = KernelNeighborProgramLimiter::new();
         fill_bucket_hot(&mut lim, victim, T0);
         assert!(!lim.should_program(victim, old_mac, true, T0 + 1));
+        assert_eq!(owed_ways(&lim, victim), 1, "#16508: one owed way per key");
         assert!(!lim.should_program(victim, new_mac, true, T0 + 2));
+        assert_eq!(
+            owed_ways(&lim, victim),
+            1,
+            "#16508: newer MAC must supersede the key's owed entry in place"
+        );
         assert!(lim.should_program(victim, new_mac, false, T0 + MIN + 2));
+        assert_eq!(
+            owed_ways(&lim, victim),
+            0,
+            "#16508: programming discharges owed"
+        );
         assert!(!lim.should_program(victim, old_mac, false, T0 + MIN + 3));
+    }
+
+    /// #16508 FAIL-ON-REVERT: one key flapping through 4 distinct MACs
+    /// inside one interval must occupy ONE owed way, not every owed way:
+    /// a distinct victim key's owed entry must survive the flap and
+    /// program on retry. Pre-fix, record_owed deduped on (key, mac), so
+    /// the flap filled all 4 owed ways and evicted the victim.
+    /// Positive control: the same victim without the flap programs too.
+    #[test]
+    fn one_key_flapping_macs_does_not_evict_victim_owed_16508() {
+        for flap in [true, false] {
+            let victim = v4(230);
+            let flapper = colliding_keys(victim, KERNEL_NEIGH_LIMITER_WAYS)[0];
+            let victim_mac = mac(0x77);
+            let mut lim = KernelNeighborProgramLimiter::new();
+            fill_bucket_hot(&mut lim, victim, T0);
+            // Victim's genuine change refused while every way is hot.
+            assert!(!lim.should_program(victim, victim_mac, true, T0 + 1));
+            assert_eq!(owed_ways(&lim, victim), 1);
+            if flap {
+                for i in 0..KERNEL_NEIGH_LIMITER_WAYS {
+                    assert!(!lim.should_program(
+                        flapper,
+                        mac(0x80 + i as u8),
+                        true,
+                        T0 + 2 + i as u64,
+                    ));
+                }
+                assert_eq!(owed_ways(&lim, flapper), 1, "#16508: <=1 owed way per key");
+            } else {
+                // Positive control: one owed advert for the same key.
+                assert!(!lim.should_program(flapper, mac(0x80), true, T0 + 2));
+                assert_eq!(owed_ways(&lim, flapper), 1);
+            }
+            assert_eq!(
+                owed_ways(&lim, victim),
+                1,
+                "#16508: victim owed must survive"
+            );
+            assert!(
+                lim.should_program(victim, victim_mac, false, T0 + MIN + 8),
+                "#16508: victim's owed program must survive a same-bucket flap (flap={flap})"
+            );
+        }
+    }
+
+    /// #16508: an owned-way advert for the programmed MAC supersedes an
+    /// older owed change for the same key (the previously dead
+    /// clear_owed branch in should_program).
+    #[test]
+    fn programmed_mac_advert_supersedes_older_owed_change_16508() {
+        let mut lim = KernelNeighborProgramLimiter::new();
+        let key = v4(231);
+        assert!(lim.should_program(key, mac(0xAA), true, T0));
+        // Rate-limited change to BB: owed.
+        assert!(!lim.should_program(key, mac(0xBB), true, T0 + 1));
+        assert_eq!(owed_ways(&lim, key), 1);
+        // Newer advert for the programmed AA binding (changed again in
+        // the userspace map): supersedes the owed BB entry.
+        assert!(!lim.should_program(key, mac(0xAA), true, T0 + 2));
+        assert_eq!(
+            owed_ways(&lim, key),
+            0,
+            "#16508: stale owed MAC must be superseded"
+        );
     }
 
     /// #15770 FAIL-ON-REVERT: with every way hot (an 8-key same-bucket
