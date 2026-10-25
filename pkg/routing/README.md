@@ -584,10 +584,14 @@ delegate to the owning domain. Exported types:
   #3308) rejects such a term at commit, but is lenient on load / peer-sync
   (#1960 no-brick), so a persisted / peer-synced contradiction can still reach
   the builder — hence the runtime skip.
-  **Term order protects carved-out traffic (#11325).** Linux ip rules cannot
+  **Term order protects carved-out traffic (#11325, #16623).** Linux ip rules cannot
   express first-match firewall-filter precedence. A later routing-instance
   term is dropped from the mirror, with a degraded build error, whenever a
-  preceding terminating term may match the same packet. The builder keeps a
+  preceding terminating term may match the same packet. Following #14632, a
+  term terminates unless it is an authored fall-through (`then next term`
+  with no terminal action and no routing-instance) — so a modifier-only
+  carve-out (`then count`/`log`/`forwarding-class` only, an implicit accept)
+  shadows a later steer just like an explicit accept. The builder keeps a
   later steer only when positive address, DSCP, protocol, or port selectors
   prove the terms disjoint; unknown, unrepresentable, prefix-list, and except
   predicates are treated as possible overlap. A non-denying earlier steer to the

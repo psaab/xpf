@@ -1800,9 +1800,58 @@ func TestBuildPBRRules_TerminatingPrecedence(t *testing.T) {
 			wantRules: 1,
 		},
 		{
-			name: "fall-through match does not shadow",
+			name: "authored fall-through match does not shadow",
 			prior: &config.FirewallFilterTerm{
 				Name: "next-term", DestAddresses: []string{"10.1.2.3/32"},
+				Count: "hits", NextTerm: true,
+			},
+			candidate: &config.FirewallFilterTerm{
+				Name: "steer-rest", DestAddresses: []string{"10.1.0.0/16"},
+				RoutingInstance: "ATT",
+			},
+			wantRules: 1,
+		},
+		{
+			name: "modifier-only count carve-out shadows later steer",
+			prior: &config.FirewallFilterTerm{
+				Name: "count-carve", DestAddresses: []string{"10.1.2.3/32"},
+				Count: "mgmt",
+			},
+			candidate: &config.FirewallFilterTerm{
+				Name: "steer-rest", DestAddresses: []string{"10.1.0.0/16"},
+				RoutingInstance: "ATT",
+			},
+			wantRules: 0, wantDegraded: true,
+		},
+		{
+			name: "modifier-only log carve-out shadows later steer",
+			prior: &config.FirewallFilterTerm{
+				Name: "log-carve", DestAddresses: []string{"10.1.2.3/32"},
+				Log: true,
+			},
+			candidate: &config.FirewallFilterTerm{
+				Name: "steer-rest", DestAddresses: []string{"10.1.0.0/16"},
+				RoutingInstance: "ATT",
+			},
+			wantRules: 0, wantDegraded: true,
+		},
+		{
+			name: "modifier-only forwarding-class carve-out shadows later steer",
+			prior: &config.FirewallFilterTerm{
+				Name: "fc-carve", DestAddresses: []string{"10.1.2.3/32"},
+				ForwardingClass: "best-effort",
+			},
+			candidate: &config.FirewallFilterTerm{
+				Name: "steer-rest", DestAddresses: []string{"10.1.0.0/16"},
+				RoutingInstance: "ATT",
+			},
+			wantRules: 0, wantDegraded: true,
+		},
+		{
+			name: "modifier-only disjoint carve-out remains steerable",
+			prior: &config.FirewallFilterTerm{
+				Name: "count-other", DestAddresses: []string{"192.0.2.0/24"},
+				Count: "mgmt",
 			},
 			candidate: &config.FirewallFilterTerm{
 				Name: "steer-rest", DestAddresses: []string{"10.1.0.0/16"},

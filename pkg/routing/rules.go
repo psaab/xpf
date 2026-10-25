@@ -1532,10 +1532,15 @@ func buildPBRFromFilter(filter *config.FirewallFilter, family int, tableIDs map[
 				}
 			}
 		}
-		// Both an explicit terminal action and routing-instance terminate the
-		// userspace walk. Record every such term even if its own mirror cannot
-		// be emitted, so a later rule cannot bypass it.
-		if term.Action != config.FilterActionUnset || term.RoutingInstance != "" {
+		// A term terminates unless it is an authored fall-through: only
+		// `then next term` with no terminal action and no routing-instance
+		// continues the userspace walk (#14632, matching the Rust
+		// continue_term predicate). A modifier-only term (count/log/
+		// forwarding-class/...) therefore terminates as implicit accept and
+		// must shadow a later steer exactly like an explicit accept (#16623).
+		// Record every terminating term even if its own mirror cannot be
+		// emitted, so a later rule cannot bypass it.
+		if !(term.NextTerm && term.Action == config.FilterActionUnset && term.RoutingInstance == "") {
 			precedingTerminating = append(precedingTerminating, term)
 		}
 		if term.RoutingInstance == "" {
