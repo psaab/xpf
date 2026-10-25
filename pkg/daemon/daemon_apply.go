@@ -81,11 +81,11 @@ func (d *Daemon) stampDigestIfConvergedUnderSem(err error, digest string) bool {
 }
 
 // applyConfig applies a compiled config to the dataplane / kernel.
-// Wraps applyConfigLocked under the apply semaphore for non-context
+// Wraps applyConfigLocked under the apply semaphore for non-request
 // callers (DHCP callbacks, config-poll, dynamic feeds, event engine,
-// in-process CLI commits, CLI auto-rollback, cluster sync recv).
-// Always succeeds in acquiring the lock because Background never
-// cancels.
+// in-process CLI commits, CLI auto-rollback, cluster sync recv). A
+// shutdown fence cancels only its admission wait; after admission, the
+// apply runs to completion.
 //
 // #846: HTTP/gRPC commit handlers go through commitAndApply /
 // commitConfirmedAndApply instead, which take the same semaphore
@@ -93,7 +93,7 @@ func (d *Daemon) stampDigestIfConvergedUnderSem(err error, digest string) bool {
 // to the client rather than hanging the request.
 func (d *Daemon) applyConfig(cfg *config.Config) {
 	cfg = d.resolveDNSBeforeApply(cfg)
-	if !d.beginBackgroundApply(context.Background(), "applyConfig") {
+	if !d.beginBackgroundApply(d.backgroundApplyCtx(), "applyConfig") {
 		return
 	}
 	defer d.applySem.Release(1)
@@ -104,18 +104,52 @@ func (d *Daemon) applyConfig(cfg *config.Config) {
 // by runShutdownSequence, at the very start and BEFORE the in-flight cancel and
 // the apply drain, so the drain is the LAST apply this process performs. Never
 // cleared: the process is exiting.
-func (d *Daemon) fenceBackgroundApplies() { d.applyFenced.Store(true) }
+func (d *Daemon) fenceBackgroundApplies() {
+	d.applyFenced.Store(true)
+	if d.backgroundApplyCancel != nil {
+		d.backgroundApplyCancel()
+	}
+}
 
 // applyFencedForBackground reports whether background config applies are fenced
 // (see Daemon.applyFenced).
 func (d *Daemon) applyFencedForBackground() bool { return d.applyFenced.Load() }
 
+// backgroundApplyCtx is the daemon-wide context for background semaphore
+// admission. Directly constructed Daemons in unit tests may omit it; those
+// retain the historical non-cancellable behavior until explicitly wired.
+func (d *Daemon) backgroundApplyCtx() context.Context {
+	if d.backgroundApplyContext != nil {
+		return d.backgroundApplyContext
+	}
+	return context.Background()
+}
+
+// acquireBackgroundApplySem serializes non-full-config background work that
+// runs from a DHCP lease callback. It uses the same cancellable admission and
+// fence re-test as beginBackgroundApply, returning context.Canceled when
+// shutdown won before the work acquired the semaphore.
+func (d *Daemon) acquireBackgroundApplySem() error {
+	if d.applyFencedForBackground() {
+		return context.Canceled
+	}
+	ctx := d.backgroundApplyCtx()
+	if err := d.applySem.Acquire(ctx, 1); err != nil {
+		return err
+	}
+	if ctx.Err() != nil || d.applyFencedForBackground() {
+		d.applySem.Release(1)
+		return context.Canceled
+	}
+	return nil
+}
+
 // beginBackgroundApply is the single gate every BACKGROUND full-config apply
 // passes through (#6788): the DHCP lease-change callback, the dynamic-feed
 // publication path, the config-poll / boot / rollback appliers. It reports
 // whether the caller may proceed; when it returns true the caller holds
-// d.applySem and MUST release it. The supplied context bounds only the
-// semaphore wait; legacy background callers pass context.Background().
+// d.applySem and MUST release it. The supplied context bounds the semaphore
+// wait; the daemon background context is used for shutdown-sensitive callers.
 //
 // One helper rather than three copies of the check. The three background entry
 // points (applyConfig, applyActiveConfig, applyActiveConfigResult) are a family
@@ -143,7 +177,7 @@ func (d *Daemon) applyFencedForBackground() bool { return d.applyFenced.Load() }
 // bootstrap must not apply behind it.
 func (d *Daemon) beginBackgroundApply(ctx context.Context, who string) bool {
 	if ctx == nil {
-		ctx = context.Background()
+		ctx = d.backgroundApplyCtx()
 	}
 	if d.applyFencedForBackground() {
 		slog.Info("shutdown: refusing background config apply; the daemon is stopping",
@@ -157,7 +191,7 @@ func (d *Daemon) beginBackgroundApply(ctx context.Context, who string) bool {
 	}
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
 		slog.Info("shutdown: background config apply acquire cancelled; the daemon is stopping",
-			"caller", who, "issue", "#11530")
+			"caller", who, "issue", "#17018")
 		return false
 	}
 	if ctx.Err() != nil {
@@ -227,7 +261,7 @@ func (d *Daemon) applyActiveConfig() {
 	}
 	// Resolve outside applySem on a clone if pre is published (#16601).
 	resolved := d.resolveDNSBeforeApply(pre)
-	if !d.beginBackgroundApply(context.Background(), "applyActiveConfig") {
+	if !d.beginBackgroundApply(d.backgroundApplyCtx(), "applyActiveConfig") {
 		return
 	}
 	defer d.applySem.Release(1)
@@ -267,7 +301,7 @@ func (d *Daemon) applyActiveConfigResult() error {
 		return nil
 	}
 	resolved := d.resolveDNSBeforeApply(pre)
-	if !d.beginBackgroundApply(context.Background(), "applyActiveConfigResult") {
+	if !d.beginBackgroundApply(d.backgroundApplyCtx(), "applyActiveConfigResult") {
 		return nil
 	}
 	defer d.applySem.Release(1)

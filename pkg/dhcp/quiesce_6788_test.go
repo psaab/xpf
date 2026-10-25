@@ -1,10 +1,13 @@
 package dhcp
 
 import (
+	"context"
 	"net/netip"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/sync/semaphore"
 )
 
 // shortDebounce shrinks the recompile debounce so the post-quiesce timer race
@@ -169,5 +172,83 @@ func TestQuiesceJoinsInFlightCallback6788(t *testing.T) {
 	}
 	if !finished.Load() {
 		t.Error("Quiesce returned before the in-flight callback finished")
+	}
+}
+
+// TestQuiesceJoinsCancelledCallbackWithinBound17018 covers the cancellation
+// half of #17018. The daemon cancels background apply semaphore waits before
+// calling Quiesce; a callback parked on that cancellable wait must observe
+// context.Canceled, unwind, and let Quiesce finish promptly. Quiesce still
+// joins the callback rather than returning early, and its lease state remains
+// intact for a graceful restart.
+func TestQuiesceJoinsCancelledCallbackWithinBound17018(t *testing.T) {
+	shortDebounce(t, 10*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	applySem := semaphore.NewWeighted(1)
+	if err := applySem.Acquire(context.Background(), 1); err != nil {
+		t.Fatalf("hold apply semaphore: %v", err)
+	}
+	defer applySem.Release(1)
+	entered := make(chan struct{})
+	callbackErr := make(chan error, 1)
+	m := &Manager{
+		clients: make(map[clientKey]*dhcpClient),
+		leases:  make(map[clientKey]*Lease),
+	}
+	key := clientKey{iface: "fxp0", family: AFInet}
+	m.clients[key] = &dhcpClient{done: make(chan struct{})}
+	m.leases[key] = &Lease{Address: netip.MustParsePrefix("10.0.0.5/24")}
+	m.onAddressChange = func() {
+		close(entered)
+		err := applySem.Acquire(ctx, 1)
+		callbackErr <- err
+		if err == nil {
+			applySem.Release(1)
+		}
+	}
+
+	m.scheduleRecompile()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("lease callback did not start")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		m.Quiesce()
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("Quiesce returned while the callback was parked on applySem")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	cancel() // fenceBackgroundApplies cancels the equivalent daemon context
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Quiesce did not return within 100ms after the parked callback's acquire was cancelled (#17018)")
+	}
+
+	select {
+	case err := <-callbackErr:
+		if err != context.Canceled {
+			t.Fatalf("callback error = %v, want context.Canceled", err)
+		}
+	default:
+		t.Fatal("Quiesce returned before the cancelled callback completed")
+	}
+	if !m.Quiesced() {
+		t.Fatal("Quiesce must latch when a callback acquire is cancelled")
+	}
+	if got, ok := m.leases[key]; !ok || got.Address != netip.MustParsePrefix("10.0.0.5/24") {
+		t.Fatalf("Quiesce must preserve the lease for graceful restart; lease=%v ok=%v", got, ok)
+	}
+	if len(m.clients) != 1 {
+		t.Fatalf("Quiesce must preserve the DHCP client; got %d clients, want 1", len(m.clients))
 	}
 }

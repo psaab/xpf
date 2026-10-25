@@ -558,42 +558,43 @@ startup-phase and shutdown ordering is untouched:
   `joinWithBudget` directly GREEN, which is why the wiring is bound separately).
 
   **Background-apply fence (#6788).** The first thing `runShutdownSequence`
-  does — before it cancels the in-flight apply and before the single apply
-  drain — is latch `Daemon.applyFenced` and quiesce the DHCP client's
-  address-change callback. The ordering is load-bearing: **fence, then cancel,
-  then drain.**
+  does — before it cancels the in-flight commit apply and before the single
+  apply drain — is latch `Daemon.applyFenced` and quiesce the DHCP client's
+  address-change callback. Latching the fence also cancels
+  `Daemon.backgroundApplyContext`, the context for waiting to acquire
+  `applySem`. The ordering is load-bearing: **fence/cancel admission, quiesce,
+  cancel the in-flight apply, then drain.**
 
   The drain is a drain-and-**release**, not a barrier. It acquires `applySem`
   to wait out an in-flight apply's #5643 closeout and hands the semaphore
   straight back, so without the fence any background applier that wakes
   afterwards acquires immediately and runs a FULL `applyConfigLocked` into a
   half-torn-down daemon — after FRR is stopped, the dataplane is torn down and
-  the VIPs are withdrawn. Cancellation cannot cover it: `applyCancelContext`
-  aborts an apply that is already RUNNING, and the background appliers bind
-  `context.Background()` deliberately so they always run to completion
-  (`applyConfigUnderSem`); there is nothing to cancel in an apply that has not
-  started. Refusing before it begins is also strictly better than aborting one
-  midway, since no half-finished apply is left behind.
+  the VIPs are withdrawn. The admission context cancels a background applier
+  parked on `applySem`; it does not interrupt an apply already admitted.
+  Background apply work still uses `context.Background()` inside
+  `applyConfigUnderSem` and runs to completion, so no half-finished apply is
+  left behind.
 
   Every background full apply passes the fence through ONE helper,
   `beginBackgroundApply` — `applyConfig`, `applyActiveConfig` and
   `applyActiveConfigResult` are a family that must agree, and a shared
-  predicate cannot drift the way three hand-written guards can. It tests the
-  fence **twice**, and the second test is the load-bearing one: an applier can
-  already be blocked on `applySem` behind an in-flight apply when shutdown
-  fences, and checking only before the acquire lets it through the instant that
-  apply releases — precisely the semaphore the drain just freed. The COMMIT
-  paths are deliberately not fenced: they bind request-scoped contexts, are
-  already covered by #2926 cancellation, and their servers are stopped during
-  teardown.
+  predicate cannot drift the way three hand-written guards can. The helper
+  uses the admission context and tests the fence before and after acquiring
+  `applySem`. The post-acquire check closes the race where the semaphore
+  becomes available as cancellation fires: a fenced waiter releases it rather
+  than becoming the apply the shutdown drain just freed. DHCP-only route, DNS,
+  IPsec and web-management refreshes use `acquireBackgroundApplySem` for the
+  same cancellable wait and post-acquire fence check. The COMMIT paths are
+  deliberately not fenced: they bind request-scoped contexts, are already
+  covered by #2926 cancellation, and their servers are stopped during teardown.
 
-  **Bootstrap refusal (#9884).** The same helper also refuses while in
-  bootstrap mode. A compile-failed `Load` can heal `ActiveConfig` to a
-  non-nil rollback target while still reporting `ErrConfigCompile`, so a
-  feed refresh, DHCP lease change, or config-poll apply would otherwise
-  reach the bootstrap-exit block and take over with no commit or sync. The
-  authorized exits (commit, sync, rollback) bypass the helper and are
-  unaffected.
+  **Bootstrap refusal (#9884).** The same full-apply helper also refuses while
+  in bootstrap mode. A compile-failed `Load` can heal `ActiveConfig` to a
+  non-nil rollback target while still reporting `ErrConfigCompile`, so a feed
+  refresh, DHCP lease change, or config-poll apply would otherwise reach the
+  bootstrap-exit block and take over with no commit or sync. The authorized
+  exits (commit, sync, rollback) bypass the helper and are unaffected.
 
   **Retry-owner gate (#15054).** The #9811 `configApplyReassertLoop` is a
   background applier too and passes the same helper
@@ -611,17 +612,25 @@ startup-phase and shutdown ordering is untouched:
   `executeConfirmedRollback` checks the fence before promoting, so a
   shutdown-fenced daemon never starts its unconditional apply.
 
-  The DHCP quiesce is separate and **both are required**. `dhcp.Manager.Quiesce`
-  stops the 2s lease-change debounce timer and latches so a lease event racing
-  shutdown re-arms nothing; it is emphatically NOT `StopAll`, because cancelling
-  a client runs `finishClient` → `removeAddress` and would strip the DHCP
-  address from every DHCP interface — including a DHCP-managed management NIC —
-  both during this shutdown and across a graceful restart, which is the exact
-  contract `pkg/dhcp`'s client-context comment preserves. And the fence alone is
-  not sufficient either: `onDHCPAddressChange` nudges the Surface-A DDNS
-  reconcile and, on its management-only branch, runs `applyMgmtVRFRoutes`
-  (netlink route writes) and `reconcileDNSFromDHCP` — none of which pass through
-  `beginBackgroundApply`. Stopping the callback is what closes that half.
+  Quiesce and the admission cancellation are separate and **both are required**.
+  `dhcp.Manager.Quiesce` stops the 2s lease-change debounce timer and latches so
+  a lease event racing shutdown re-arms nothing; it is emphatically NOT
+  `StopAll`, because cancelling a client runs `finishClient` →
+  `removeAddress` and would strip the DHCP address from every DHCP interface —
+  including a DHCP-managed management NIC — both during this shutdown and
+  across a graceful restart. The fence cancels a callback already parked on
+  `applySem` so that Quiesce's join can finish; Quiesce still joins callbacks
+  that had already entered non-cancellable work. It also cannot be removed:
+  `onDHCPAddressChange` nudges the Surface-A DDNS reconcile before acquiring
+  `applySem`, and it owns the timer/latch that prevents callbacks from starting
+  after the drain. DHCP full applies use `beginBackgroundApply`; the management
+  route, DNS and other lease refreshes use the matching cancellable
+  `acquireBackgroundApplySem`. Tests:
+  `TestParkedApplyConfigAbortsOnFence17018`,
+  `TestShutdownCancelsBackgroundApplyAdmission17018`,
+  `TestQuiesceJoinsParkedDHCPCallback17018`,
+  `TestQuiesceJoinsCancelledCallbackWithinBound17018` pin both unwind and
+  lease/client preservation.
 - `daemon_run_routehelpers.go` — route/tunnel inference helpers:
   `collectAppliedTunnels`, `linkLocalV6Net`, `inferIPv6StaticNextHopInterfaces`.
 

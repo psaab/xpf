@@ -555,7 +555,7 @@ func (d *Daemon) dnsInputLocked(cfg *config.Config) system.ResolvedDropinInput {
 // if it ever produces an empty merge (last lease expired, no static
 // name-server) that is a real "clear DNS".
 func (d *Daemon) reconcileDNSFromDHCP() {
-	if err := d.applySem.Acquire(context.Background(), 1); err != nil {
+	if err := d.acquireBackgroundApplySem(); err != nil {
 		slog.Warn("DNS: failed to acquire apply lock for DHCP reconcile", "err", err)
 		return
 	}

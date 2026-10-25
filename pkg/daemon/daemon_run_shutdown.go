@@ -93,12 +93,13 @@ func (d *Daemon) runShutdownSequence(wg *sync.WaitGroup, stop func(), runErr err
 	// the one that reaches it on a 2s debounce timer, but the feed publication
 	// and config-poll appliers take the same path.
 	//
-	// Cancellation cannot cover it. applyCancelContext aborts an apply that is
-	// already RUNNING; the background appliers deliberately bind
-	// context.Background() so they always run to completion, and there is
-	// nothing to cancel in an apply that has not started. Refusing before it
-	// begins is also strictly better than aborting one midway — no half-finished
-	// apply is left behind.
+	// applyCancelContext aborts an already-running commit apply at its next
+	// boundary. Background applies remain non-cancellable once admitted, but
+	// their semaphore wait has a separate context cancelled by the fence above.
+	// If acquisition races that cancellation, beginBackgroundApply re-tests the
+	// fence and returns the semaphore without applying. Thus no half-finished
+	// apply is left behind, and a callback parked on applySem can unwind before
+	// Quiesce joins it (#17018).
 	//
 	// Ordering is load-bearing: fence, then cancel, then drain. That makes the
 	// drain the LAST apply this process performs, which is what the drain has

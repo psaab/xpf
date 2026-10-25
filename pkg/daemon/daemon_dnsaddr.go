@@ -170,7 +170,7 @@ func (d *Daemon) refreshDNSOnce() {
 	if cfg == nil {
 		return
 	}
-	if !d.beginBackgroundApply(context.Background(), "dnsAddressRefreshSnapshot") {
+	if !d.beginBackgroundApply(d.backgroundApplyCtx(), "dnsAddressRefreshSnapshot") {
 		return
 	}
 	if d.store.ActiveConfig() != cfg {
@@ -306,7 +306,7 @@ func (d *Daemon) recordDNSBaselineForce(cfg *config.Config, answers map[string][
 // the applied clone keeps the store, the baseline, and the helper on
 // exactly the same answers. The baseline is keyed to the published clone.
 func (d *Daemon) applyDNSRefreshedConfig(base, refreshed *config.Config) (bool, error) {
-	if !d.beginBackgroundApply(context.Background(), "dnsAddressRefresh") {
+	if !d.beginBackgroundApply(d.backgroundApplyCtx(), "dnsAddressRefresh") {
 		return false, nil
 	}
 	defer d.applySem.Release(1)
