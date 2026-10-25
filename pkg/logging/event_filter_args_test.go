@@ -52,8 +52,8 @@ func TestParseEventFilterArgs(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error %v", err)
 		}
-		if n != 5 || f.Protocol != "tcp" || f.Action != "permit" || f.HasZone {
-			t.Errorf("got n=%d filter=%+v; want n=5 protocol=tcp action=permit no-zone", n, f)
+		if n != 5 || f.Protocol != "tcp" || f.ProtocolNum != 6 || !f.HasProtocol || f.Action != "permit" || f.HasZone {
+			t.Errorf("got n=%d filter=%+v; want n=5 protocol=tcp/6 action=permit no-zone", n, f)
 		}
 	})
 

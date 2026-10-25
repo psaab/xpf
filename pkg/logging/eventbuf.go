@@ -413,27 +413,72 @@ func (eb *EventBuffer) unsubscribe(sub *Subscription) {
 type EventFilter struct {
 	Zone     uint16 // zone ID to match against InZone/OutZone; gated by HasZone
 	HasZone  bool   // true if Zone is an active filter (0 = the unknown zone)
-	Protocol string // exact case-insensitive match on Protocol ("" = no filter)
-	Action   string // exact case-insensitive match on Action ("" = no filter)
+	Protocol string // raw operator token, retained for diagnostics; the
+	// matcher keys on ProtocolNum/HasProtocol when the token resolved
+	// (#16688). Direct construction with only this field still resolves
+	// through the same table in matches (see below).
+	ProtocolNum uint8  // resolved IP protocol number; gated by HasProtocol
+	HasProtocol bool   // true if ProtocolNum is an active filter (0 = HOPOPT)
+	Action      string // exact case-insensitive match on Action ("" = no filter)
 }
 
 // IsEmpty returns true if no filter criteria are set.
 func (f EventFilter) IsEmpty() bool {
-	return !f.HasZone && f.Protocol == "" && f.Action == ""
+	return !f.HasZone && !f.HasProtocol && f.Protocol == "" && f.Action == ""
 }
 
 func (f EventFilter) matches(rec *EventRecord) bool {
 	if f.HasZone && rec.InZone != f.Zone && rec.OutZone != f.Zone {
 		return false
 	}
+	// Protocol: compare resolved NUMBERS, not the rendered name (#16688).
+	// The rendered name (TCP/ICMPv6/ESP) never equals a numeric token
+	// ("6"/"58"/"50") or the icmp6 alias, so the old EqualFold(name) match
+	// silently narrowed those queries to nothing. Builders resolve the
+	// token once via ResolveEventProtocol (appid SSOT) and store the
+	// number; a directly-constructed filter that only sets Protocol is
+	// resolved here through the same table so literal filters in tests /
+	// other packages behave identically. An unresolvable token stored
+	// without a number matches nothing (fail closed — the builders reject
+	// it with an error before it can reach here; a hand-built bogus token
+	// must not widen to any protocol).
+	if f.HasProtocol || f.Protocol != "" {
+		want := f.ProtocolNum
+		if !f.HasProtocol {
+			n, ok := ResolveEventProtocol(f.Protocol)
+			if !ok {
+				return false
+			}
+			want = n
+		}
+		got := rec.ProtocolNum
+		// Hand-built and legacy records may not populate ProtocolNum;
+		// resolve the rendered form only in that case (mirrors
+		// monitorFlowFilter.matches, #13553). A non-zero raw number
+		// remains authoritative — including protocol 0 records whose
+		// rendered name resolves, and numeric-only protocols.
+		if got == 0 {
+			if n, valid := ResolveEventProtocol(rec.Protocol); valid {
+				got = n
+			} else if rec.Protocol != "" {
+				// ProtocolNum==0 with an unresolvable rendered name:
+				// only a protocol-0 (HOPOPT) filter can match it, and
+				// only if the rendered form is the numeric "0".
+				if want != 0 || rec.Protocol != "0" {
+					return false
+				}
+				got = 0
+			}
+		}
+		if got != want {
+			return false
+		}
+	}
 	// Exact (case-insensitive) match, NOT substring: substring matching
-	// over-matches for forensic queries — protocol=C would match TCP,
+	// over-matches for forensic queries — protocol=C must not match TCP,
 	// ICMP, and ICMPv6 simultaneously, and action substrings are equally
 	// ambiguous (#2939). This aligns the event filter with the exact
 	// matching the other operator surfaces use.
-	if f.Protocol != "" && !strings.EqualFold(rec.Protocol, f.Protocol) {
-		return false
-	}
 	if f.Action != "" && !strings.EqualFold(rec.Action, f.Action) {
 		return false
 	}

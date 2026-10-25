@@ -2789,10 +2789,14 @@ the drop fails loudly instead of going quietly vacuous.
   HTTP 400; gRPC and local CLI reject them with an invalid-argument/parse
   error, while peer requests preserve numeric protocol `0` rather than
   turning it into clear-all. The event filter (`pkg/logging`
-  `EventFilter.matches`) matches protocol/action
+  `EventFilter.matches`) matches protocol by resolved NUMBER and action
   EXACTLY (case-insensitive), not by substring — `protocol=C` no longer
-  over-matches TCP/ICMP/ICMPv6. These contracts are pinned by
-  `rest_filter_failclosed_test.go` (and, for the events `limit`,
+  over-matches TCP/ICMP/ICMPv6, and `protocol=6`/`58`/`50`/`icmp6` match
+  the same records as `tcp`/`icmpv6`/`esp` (#16688). REST resolves the
+  token via `logging.ResolveEventProtocol` (the `appid` SSOT) and
+  rejects an unknown token with HTTP 400. These contracts are pinned by
+  `rest_filter_failclosed_test.go`, `rest_events_protocol_16688_test.go`
+  (and, for the events `limit`,
   `rest_events_limit_failclosed_4926_test.go`) in this package.
 - The `GET /api/v1/security/sessions` view mirrors the gRPC `GetSessions`
   session contract (#3419). The REST `SessionEntry` previously diverged from
