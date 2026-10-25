@@ -31,8 +31,9 @@ func appendUniqueForm9524(forms []string, form string) []string {
 // under-covered it by exactly the form the compiler dropped. The strict gate
 // rejects both mixed and sole unsupported forms; the tolerant path warns and
 // Address.UsableValue/UsableValues return empty so policy and NAT resolvers
-// treat the entry as unresolvable. An oversized range-address is likewise
-// rejected here (recorded in Address.OversizedRange).
+// treat the entry as unresolvable. An invalid range-address (malformed,
+// reversed, mixed-family — #16563 removed the host-count cap in favour of
+// a CIDR cover) is likewise rejected here (recorded in Address.OversizedRange).
 //
 // It walks the global book and every zone-local book, and skips the synthetic
 // zone-local/ names the fold injects into the global book, so an error names

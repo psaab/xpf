@@ -455,6 +455,163 @@ func expandAddressRange(low, high string) ([]string, error) {
 	return result, nil
 }
 
+// expandAddressRangeToCIDRCover expands "low to high" into the minimal
+// CIDR cover: the smallest set of aligned prefixes whose union is
+// exactly [low, high] (#16563). Each step takes the largest block that
+// is aligned at cur and does not run past high — greedy is optimal
+// here because a cover prefix must start at cur (any smaller first
+// block can be merged upward without leaving the range). At most
+// 2*bits-2 prefixes result (62 IPv4, 254 IPv6) regardless of range
+// size, so unlike expandAddressRange there is no host-count cap: this
+// is the address-book `range-address` expander, whose consumers
+// (policy/NAT/junos-host/userspace matchers) pay per prefix, not per
+// host. NAT pools and proxy-arp keep the per-host expandAddressRange
+// and its 256 cap — they allocate one entry per host.
+//
+// Endpoints follow parseRangeEndpoint (bare IP or host prefix, same
+// family, low <= high); malformed input errors as expandAddressRange
+// does. The arithmetic is on fixed-width byte slices via the helpers
+// below — no big-int allocation on the compile path.
+func expandAddressRangeToCIDRCover(low, high string) ([]string, error) {
+	lowAddr, err := parseRangeEndpoint(low)
+	if err != nil {
+		return nil, err
+	}
+	highAddr, err := parseRangeEndpoint(high)
+	if err != nil {
+		return nil, err
+	}
+	if lowAddr.Is4() != highAddr.Is4() {
+		return nil, fmt.Errorf("address range endpoints %q and %q are different address families", low, high)
+	}
+	if highAddr.Compare(lowAddr) < 0 {
+		return nil, fmt.Errorf("low address %s > high address %s", low, high)
+	}
+	var cur, hi []byte
+	bits := 128
+	if lowAddr.Is4() {
+		a, b := lowAddr.As4(), highAddr.As4()
+		cur, hi = a[:], b[:]
+		bits = 32
+	} else {
+		a, b := lowAddr.As16(), highAddr.As16()
+		cur, hi = a[:], b[:]
+	}
+	cur = append([]byte(nil), cur...)
+	out := make([]string, 0, 8)
+	for {
+		size := trailingZeroBits(cur)
+		for size > 0 && !blockFits(cur, hi, size) {
+			size--
+		}
+		ones := bits - size
+		out = append(out, rangeCoverAddrString(cur, lowAddr.Is4())+"/"+strconv.Itoa(ones))
+		if blockCoversEnd(cur, hi, size) {
+			break
+		}
+		advanceByBlock(cur, size)
+	}
+	return out, nil
+}
+
+// trailingZeroBits counts low zero bits of big-endian b (the whole
+// slice read as one integer); an all-zero slice yields 8*len(b).
+func trailingZeroBits(b []byte) int {
+	n := 0
+	for i := len(b) - 1; i >= 0; i-- {
+		if b[i] == 0 {
+			n += 8
+			continue
+		}
+		for v := b[i]; v&1 == 0; v >>= 1 {
+			n++
+		}
+		break
+	}
+	return n
+}
+
+// blockFits reports whether the aligned block of 2^size hosts starting
+// at cur ends at or before hi, i.e. cur + 2^size - 1 <= hi; computed
+// as (hi - cur) >= 2^size - 1 without materialising hi+1.
+func blockFits(cur, hi []byte, size int) bool {
+	diff := make([]byte, len(cur))
+	borrow := 0
+	for i := len(cur) - 1; i >= 0; i-- {
+		d := int(hi[i]) - int(cur[i]) - borrow
+		if d < 0 {
+			d += 256
+			borrow = 1
+		} else {
+			borrow = 0
+		}
+		diff[i] = byte(d)
+	}
+	// diff >= 2^size - 1 iff a bit at or above size is set (diff >= 2^size)
+	// or every bit below size is set (diff == 2^size - 1 exactly there).
+	for bit := size; bit < len(diff)*8; bit++ {
+		if diff[len(diff)-1-bit/8]>>(bit%8)&1 == 1 {
+			return true
+		}
+	}
+	for bit := range size {
+		if diff[len(diff)-1-bit/8]>>(bit%8)&1 == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// blockCoversEnd reports whether the block of 2^size hosts starting at
+// cur reaches hi exactly as its last address (cur + 2^size - 1 == hi),
+// i.e. the cover is complete after this block.
+func blockCoversEnd(cur, hi []byte, size int) bool {
+	end := append([]byte(nil), cur...)
+	advanceByBlock(end, size)
+	for i := len(end) - 1; i >= 0; i-- {
+		if end[i] == 0 {
+			end[i] = 0xff
+			continue
+		}
+		end[i]--
+		break
+	}
+	for i := range end {
+		if end[i] != hi[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// advanceByBlock adds 2^size to big-endian b in place.
+func advanceByBlock(b []byte, size int) {
+	i := len(b) - 1 - size/8
+	if i < 0 {
+		return
+	}
+	carry := int(1) << (size % 8)
+	for ; i >= 0; i-- {
+		v := int(b[i]) + carry
+		b[i] = byte(v)
+		carry = v >> 8
+		if carry == 0 {
+			break
+		}
+	}
+}
+
+// rangeCoverAddrString renders big-endian bytes as an IP string of the
+// given family, matching netip formatting.
+func rangeCoverAddrString(b []byte, is4 bool) string {
+	if is4 {
+		return netip.AddrFrom4([4]byte{b[0], b[1], b[2], b[3]}).String()
+	}
+	var a16 [16]byte
+	copy(a16[:], b)
+	return netip.AddrFrom16(a16).String()
+}
+
 // applyDeterministicKeys reads deterministic CGNAT sub-tokens from a flat-set
 // key slice that begins immediately AFTER the "deterministic" keyword, e.g.
 // ["block-size","2016"] or ["host","address","100.64.0.0/22"] or ["host","X"].

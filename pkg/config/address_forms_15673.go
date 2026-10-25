@@ -15,7 +15,8 @@ import (
 //   - a prefix (IP/CIDR) — stored in Address.Value (pre-existing);
 //   - `range-address <low> { to { <high>; } }` (hierarchical) or
 //     `range-address <low> to <high>` (flat) — expanded natively at compile
-//     time via expandAddressRange into Address.ExpandedPrefixes;
+//     time via expandAddressRangeToCIDRCover (minimal CIDR cover, #16563)
+//     into Address.ExpandedPrefixes;
 //   - `wildcard-address <ip>/<wildcard-mask>` — Junos polarity (#16544):
 //     the bits set in the wildcard mask are compared (care bits); a 0 bit
 //     is ignored ("don't care"). The entry enforces the single prefix
@@ -286,9 +287,14 @@ func isAllOnes(b []byte) bool {
 	return true
 }
 
-// applyRangeAddress records a range-address expansion on addr. Oversized or
-// malformed ranges are recorded (OversizedRange / UnimplementedForms) rather
-// than failing compilation, so the tolerant path stays bootable (#8814 shape).
+// applyRangeAddress records a range-address expansion on addr: the
+// minimal CIDR cover of [low, high] (#16563), at most 62 IPv4 / 254
+// IPv6 prefixes for any range, so no host-count cap applies here —
+// the NAT-pool per-host cap stays on expandAddressRange's NAT and
+// proxy-arp callers only. Malformed ranges (bad endpoint, non-host
+// mask, mixed family, reversed) are recorded in OversizedRange
+// rather than failing compilation, so the tolerant path stays
+// bootable (#8814 shape); strict commit rejects the record.
 func applyRangeAddress(addr *Address, low, high string) {
 	noteAddressFormConflict(addr, "range-address")
 	if low == "" || high == "" {
@@ -296,7 +302,7 @@ func applyRangeAddress(addr *Address, low, high string) {
 		return
 	}
 	addr.RangeSpec = low + " to " + high
-	expanded, err := expandAddressRange(low, high)
+	expanded, err := expandAddressRangeToCIDRCover(low, high)
 	if err != nil {
 		addr.OversizedRange = fmt.Sprintf("%s to %s: %v", low, high, err)
 		return

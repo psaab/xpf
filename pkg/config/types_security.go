@@ -1950,10 +1950,13 @@ type Address struct {
 	DNSFamily    string   `json:"-"`
 	DNSAddresses []string `json:"-"`
 	// ExpandedPrefixes holds the native expansion of `range-address` /
-	// `wildcard-address` (#15673): bounded /32 (range, expandAddressRange cap)
-	// or the single wildcard-derived CIDR. OversizedRange records an
-	// oversized range-address so strict commit rejects and tolerant load
-	// keeps the entry unusable without failing to boot.
+	// `wildcard-address` (#15673): the minimal CIDR cover of the range
+	// (#16563; at most 62 IPv4 / 254 IPv6 prefixes, no host-count cap)
+	// or the single wildcard-derived CIDR. OversizedRange records a
+	// range-address the cover expander rejected (malformed endpoint,
+	// non-host mask, mixed family, reversed) so strict commit rejects
+	// and tolerant load keeps the entry unusable without failing to
+	// boot; the field name is retained from its #15673 origin.
 	ExpandedPrefixes []string `json:"-"`
 	OversizedRange   string   `json:"-"`
 	// RangeSpec / WildcardSpec retain the authored specification
@@ -1992,7 +1995,7 @@ func (a *Address) UsableValue() string {
 // UsableValues returns every prefix a resolver may enforce: the single
 // prefix, the native range/wildcard expansion, or the current DNS snapshot.
 // Tainted entries (unsupported/unknown form, duplicate prefix, trailing
-// tokens, oversized range) return nil (#9524/#14967/#15673).
+// tokens, invalid range) return nil (#9524/#14967/#15673).
 func (a *Address) UsableValues() []string {
 	if a == nil || len(a.UnimplementedForms) > 0 || len(a.DuplicatePrefixes) > 0 || len(a.TrailingTokens) > 0 || a.OversizedRange != "" {
 		return nil
