@@ -563,6 +563,107 @@ Session delta pending: 3
 Session delta drained: 19
 EOF
 assert_helper_status 1 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET_PENDING}" 15 174
+# #16500: shrinking gap since baseline. In-flight creates at the first
+# sample (baseline 20/17) are delivered (20/20): gap 3 -> 0, caught up,
+# idle. Non-atomic captures can leave received ahead at the baseline
+# (20/22) and then static (22/22): gap -2 throughout, idle. A gap that
+# grows since baseline (20/20 -> 25/20) and a shrunk gap with pending
+# nonzero stay not idle.
+SYNC_SHRINK_BASE_SOURCE="${TMP_DIR}/sync-shrink-base-source.txt"
+SYNC_SHRINK_BASE_TARGET="${TMP_DIR}/sync-shrink-base-target.txt"
+cat >"${SYNC_SHRINK_BASE_SOURCE}" <<'EOF'
+Services Synchronized:
+Session create 20 0
+
+Session delta pending: 0
+Session delta drained: 12
+EOF
+cat >"${SYNC_SHRINK_BASE_TARGET}" <<'EOF'
+Services Synchronized:
+Session create 0 17
+
+Session delta pending: 0
+Session delta drained: 19
+EOF
+SYNC_SHRUNK_SOURCE="${TMP_DIR}/sync-shrunk-source.txt"
+SYNC_SHRUNK_TARGET="${TMP_DIR}/sync-shrunk-target.txt"
+cat >"${SYNC_SHRUNK_SOURCE}" <<'EOF'
+Services Synchronized:
+Session create 20 0
+
+Session delta pending: 0
+Session delta drained: 12
+EOF
+cat >"${SYNC_SHRUNK_TARGET}" <<'EOF'
+Services Synchronized:
+Session create 0 20
+
+Session delta pending: 0
+Session delta drained: 19
+EOF
+assert_helper_status 0 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SHRUNK_SOURCE}" "${SYNC_SHRUNK_TARGET}" 20 17
+# Received ahead at baseline by non-atomic capture: 20/22 -> 22/22.
+SYNC_AHEAD_BASE_SOURCE="${TMP_DIR}/sync-ahead-base-source.txt"
+SYNC_AHEAD_BASE_TARGET="${TMP_DIR}/sync-ahead-base-target.txt"
+cat >"${SYNC_AHEAD_BASE_SOURCE}" <<'EOF'
+Services Synchronized:
+Session create 20 0
+
+Session delta pending: 0
+Session delta drained: 12
+EOF
+cat >"${SYNC_AHEAD_BASE_TARGET}" <<'EOF'
+Services Synchronized:
+Session create 0 22
+
+Session delta pending: 0
+Session delta drained: 19
+EOF
+SYNC_AHEAD_SOURCE="${TMP_DIR}/sync-ahead-source.txt"
+SYNC_AHEAD_TARGET="${TMP_DIR}/sync-ahead-target.txt"
+cat >"${SYNC_AHEAD_SOURCE}" <<'EOF'
+Services Synchronized:
+Session create 22 0
+
+Session delta pending: 0
+Session delta drained: 12
+EOF
+cat >"${SYNC_AHEAD_TARGET}" <<'EOF'
+Services Synchronized:
+Session create 0 22
+
+Session delta pending: 0
+Session delta drained: 19
+EOF
+assert_helper_status 0 ha_session_sync_idle_sample fw0 fw1 "${SYNC_AHEAD_SOURCE}" "${SYNC_AHEAD_TARGET}" 20 22
+# Gap grows since baseline: 20/20 -> 25/20 stays not idle.
+SYNC_GROWN_SOURCE="${TMP_DIR}/sync-grown-source.txt"
+SYNC_GROWN_TARGET="${TMP_DIR}/sync-grown-target.txt"
+cat >"${SYNC_GROWN_SOURCE}" <<'EOF'
+Services Synchronized:
+Session create 25 0
+
+Session delta pending: 0
+Session delta drained: 12
+EOF
+cat >"${SYNC_GROWN_TARGET}" <<'EOF'
+Services Synchronized:
+Session create 0 20
+
+Session delta pending: 0
+Session delta drained: 19
+EOF
+assert_helper_status 1 ha_session_sync_idle_sample fw0 fw1 "${SYNC_GROWN_SOURCE}" "${SYNC_GROWN_TARGET}" 20 20
+# Shrunk gap with pending nonzero stays not idle.
+SYNC_SHRUNK_TARGET_PENDING="${TMP_DIR}/sync-shrunk-target-pending.txt"
+cat >"${SYNC_SHRUNK_TARGET_PENDING}" <<'EOF'
+Services Synchronized:
+Session create 0 20
+
+Session delta pending: 3
+Session delta drained: 19
+EOF
+assert_helper_status 1 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SHRUNK_SOURCE}" "${SYNC_SHRUNK_TARGET_PENDING}" 20 17
 # Counter rewind since baseline (daemon restart / epoch reset) is the
 # distinct re-baseline verdict 3, never idle and never VOID.
 assert_helper_status 3 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_TARGET}" 15 174
@@ -737,6 +838,39 @@ VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=4' 'failover loop: first sample is never idl
 run_sync_loop_case userspace 30 'PASS-MARK loop: session sync idle (source_sent=15 target_recv=174 target_delta_pending=0 target_delta_drained=0)
 LOOPRC=0
 VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=4' 'userspace loop: first sample is never idle alone' '15/174/0'
+# #16500 shrinking gap: baseline 20/17 with 3 in flight, delivered to
+# 20/20 (repeated) -> 3 idle samples -> PASS at sample 4 (baseline + 3).
+run_sync_loop_case failover 30 'session sync node0->node1 baseline: source sent=20, target received=17, pending=0
+PASS-MARK loop: session sync idle (node0->node1, 3 consecutive samples)
+LOOPRC=0
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=4' 'failover loop: shrinking in-flight gap idles' '20/17/0' '20/20/0'
+run_sync_loop_case userspace 30 'PASS-MARK loop: session sync idle (source_sent=20 target_recv=20 target_delta_pending=0 target_delta_drained=0)
+LOOPRC=0
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=4' 'userspace loop: shrinking in-flight gap idles' '20/17/0' '20/20/0'
+# #16500 received-ahead baseline: 20/22 -> 22/22 (repeated) -> PASS.
+run_sync_loop_case failover 30 'session sync node0->node1 baseline: source sent=20, target received=22, pending=0
+PASS-MARK loop: session sync idle (node0->node1, 3 consecutive samples)
+LOOPRC=0
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=4' 'failover loop: received-ahead baseline idles' '20/22/0' '22/22/0'
+run_sync_loop_case userspace 30 'PASS-MARK loop: session sync idle (source_sent=22 target_recv=22 target_delta_pending=0 target_delta_drained=0)
+LOOPRC=0
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=4' 'userspace loop: received-ahead baseline idles' '20/22/0' '22/22/0'
+# #16500 growing gap never idles: 20/20 -> 25/20 repeated -> timeout.
+run_sync_loop_case failover 8 'session sync node0->node1 baseline: source sent=20, target received=20, pending=0
+session sync node0->node1 not idle: source sent=25 (baseline 20), target received=20 (baseline 20), pending=0
+session sync node0->node1 not idle: source sent=25 (baseline 20), target received=20 (baseline 20), pending=0
+session sync node0->node1 not idle: source sent=25 (baseline 20), target received=20 (baseline 20), pending=0
+session sync node0->node1 not idle: source sent=25 (baseline 20), target received=20 (baseline 20), pending=0
+session sync node0->node1 not idle: source sent=25 (baseline 20), target received=20 (baseline 20), pending=0
+session sync node0->node1 not idle: source sent=25 (baseline 20), target received=20 (baseline 20), pending=0
+session sync node0->node1 not idle: source sent=25 (baseline 20), target received=20 (baseline 20), pending=0
+FAIL-MARK loop: session sync did not become idle within 8s (node0->node1)
+LOOPRC=1
+VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=8' 'failover loop: growing gap never idles' '20/20/0' '25/20/0'
+run_sync_loop_case userspace 8 'FAIL-MARK loop: session sync did not become idle before timeout (source_sent=25 target_recv=20 target_delta_pending=0 target_delta_drained=0)
+LOOPRC=1
+VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=8' 'userspace loop: growing gap never idles' '20/20/0' '25/20/0'
+printf '#16500 shrinking-gap samples idle; growing gap never idles\n'
 printf '#16289 stateful wait loops keep outstanding deltas until received\n'
 
 assert_helper_value 5 ha_nondecreasing_delta 10 15
