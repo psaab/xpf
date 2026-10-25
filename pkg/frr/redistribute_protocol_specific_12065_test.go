@@ -34,16 +34,16 @@ func TestRedistributePolicyMapsAreProtocolSpecific12065(t *testing.T) {
 
 	got := New().buildManagedSection(fc)
 	for _, want := range []string{
-		"redistribute connected route-map TO-OSPF-connected-xpf-redist\n",
-		"redistribute static route-map TO-OSPF-static-xpf-redist\n",
+		"redistribute connected route-map TO-OSPF-connected-xpf-redist-ospf\n",
+		"redistribute static route-map TO-OSPF-static-xpf-redist-ospf\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing protocol-specific attachment %q:\n%s", want, got)
 		}
 	}
 
-	staticMap := routeMapBlock12065(got, "TO-OSPF-static-xpf-redist")
-	connectedMap := routeMapBlock12065(got, "TO-OSPF-connected-xpf-redist")
+	staticMap := routeMapBlock12065(got, "TO-OSPF-static-xpf-redist-ospf")
+	connectedMap := routeMapBlock12065(got, "TO-OSPF-connected-xpf-redist-ospf")
 	if staticMap == "" || connectedMap == "" {
 		t.Fatalf("protocol-specific route-map definition missing:\n%s", got)
 	}

@@ -975,10 +975,10 @@ func TestGenerateProtocols_OSPFExportPolicyStatement(t *testing.T) {
 	}
 	got := m.generateProtocols(ospf, nil, nil, nil, nil, "", 0, po, nil)
 	// "direct" maps to FRR "connected"; both protocols carry the route-map.
-	if !strings.Contains(got, "redistribute connected route-map EXPORT-DIRECT-STATIC-connected-xpf-redist\n") {
+	if !strings.Contains(got, "redistribute connected route-map EXPORT-DIRECT-STATIC-connected-xpf-redist-ospf\n") {
 		t.Errorf("missing redistribute connected route-map line, got:\n%s", got)
 	}
-	if !strings.Contains(got, "redistribute static route-map EXPORT-DIRECT-STATIC-static-xpf-redist\n") {
+	if !strings.Contains(got, "redistribute static route-map EXPORT-DIRECT-STATIC-static-xpf-redist-ospf\n") {
 		t.Errorf("missing redistribute static route-map line, got:\n%s", got)
 	}
 }
@@ -3032,7 +3032,7 @@ func TestGenerateProtocols_OSPFExportRouteMap(t *testing.T) {
 		},
 	}
 	got := m.generateProtocols(ospf, nil, nil, nil, nil, "", 0, po, nil)
-	if !strings.Contains(got, "redistribute connected route-map export-direct-connected-xpf-redist\n") {
+	if !strings.Contains(got, "redistribute connected route-map export-direct-connected-xpf-redist-ospf\n") {
 		t.Errorf("missing route-map redistribute, got:\n%s", got)
 	}
 	// Should NOT have bare "redistribute export-direct"
@@ -3331,18 +3331,19 @@ func TestGenerateProtocols_ProtocolLessPolicyExport(t *testing.T) {
 	// IPv4-fitting, non-self source (ospf excluded as self; ospf6 and
 	// ripng excluded as off-family).
 	for _, proto := range []string{"bgp", "connected", "isis", "kernel", "rip"} {
-		want := " redistribute " + proto + " route-map export-comm-" + proto + "-xpf-redist\n"
+		want := " redistribute " + proto + " route-map export-comm-" + proto + "-xpf-redist-ospf\n"
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q, got:\n%s", want, got)
 		}
 	}
 	// #15156: static is shared by both policies in the chain, so it
 	// composes into one line naming the composed per-source map.
-	composedStatic := "export-comm-export-static" + ReservedChainSuffix + "-static" + config.ReservedRedistSuffix
+	// #16864: under router ospf the composed map is the -ospf variant.
+	composedStatic := "export-comm-export-static" + ReservedChainSuffix + "-static" + config.ReservedRedistSuffix + "-ospf"
 	if !strings.Contains(got, " redistribute static route-map "+composedStatic+"\n") {
 		t.Errorf("missing composed static line %q, got:\n%s", composedStatic, got)
 	}
-	if strings.Contains(got, "redistribute static route-map export-static-static-xpf-redist") {
+	if strings.Contains(got, "redistribute static route-map export-static-static-xpf-redist-ospf") {
 		t.Errorf("chain-shared static must not keep the single-policy map, got:\n%s", got)
 	}
 
@@ -6057,7 +6058,7 @@ func TestResolveRedistribute_SelfExclusion(t *testing.T) {
 	if strings.Contains(got, "redistribute ospf route-map leak-ospf-xpf-redist") {
 		t.Errorf("self-redistribute via policy term must be excluded (#2943); got %q", got)
 	}
-	if !strings.Contains(got, "redistribute static route-map leak-static-xpf-redist") {
+	if !strings.Contains(got, "redistribute static route-map leak-static-xpf-redist-ospf") {
 		t.Errorf("non-self policy term must still render; got %q", got)
 	}
 }

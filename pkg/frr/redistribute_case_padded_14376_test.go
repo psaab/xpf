@@ -183,7 +183,7 @@ func TestRedistributeCasePaddedControls14376(t *testing.T) {
 			{Name: "t", FromProtocols: []string{"static"}, Action: "accept"},
 		}},
 	}}
-	if got := New().resolveRedistribute("exp", po, "ospf", nil); got != " redistribute static route-map exp-static-xpf-redist\n" {
+	if got := New().resolveRedistribute("exp", po, "ospf", nil); got != " redistribute static route-map exp-static-xpf-redist-ospf\n" {
 		t.Errorf("policy path changed: got %q", got)
 	}
 }

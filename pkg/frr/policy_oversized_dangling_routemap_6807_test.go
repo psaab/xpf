@@ -246,14 +246,16 @@ func TestOversizedRedistributeProtocolMapLeavesNoDangling6807(t *testing.T) {
 	}
 
 	got := New().buildManagedSection(fc)
-	protocolMap := redistProtocolRouteMapName("BIG", "static")
+	// #16864: the OSPF attachment names the -ospf variant; both it and
+	// the unsuffixed BGP-context map must resolve to bounded denies.
+	protocolMap := redistProtocolRouteMapName("BIG", "static") + "-ospf"
 	if n := countRouteMapRefs6807(got, protocolMap); n == 0 {
 		t.Fatalf("fixture emitted no redistribute attachment for %s:\\n%s", protocolMap, got)
 	}
 	if d := danglingRouteMapRefs6807(got); len(d) != 0 {
 		t.Fatalf("the managed section references undefined route-map(s) %v — FRR denies every route on the attached policy:\\n%s", d, got)
 	}
-	for _, name := range []string{"BIG", protocolMap} {
+	for _, name := range []string{"BIG", redistProtocolRouteMapName("BIG", "static"), protocolMap} {
 		headers := routeMapHeaders6807(got, name)
 		if len(headers) != 1 {
 			t.Fatalf("route-map %q must be defined by exactly one bounded header, got %d: %v", name, len(headers), headers)
@@ -348,7 +350,7 @@ func TestQuarantinedRouteMapsIsReportedAndReset6807(t *testing.T) {
 	got := m.QuarantinedRouteMaps()
 	// Both the BGP policy and its source-specific redistribute map are
 	// quarantined, so the gauge reports each attached name.
-	want := []string{"BIG", redistProtocolRouteMapName("BIG", "static")}
+	want := []string{"BIG", redistProtocolRouteMapName("BIG", "static"), redistProtocolRouteMapName("BIG", "static") + "-ospf"}
 	if len(got) != len(want) {
 		t.Fatalf("QuarantinedRouteMaps() = %v, want %v — the render did not record "+
 			"what it quarantined, so the xpf_frr_route_maps_quarantined gauge "+

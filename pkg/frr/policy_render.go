@@ -831,6 +831,13 @@ func (m *Manager) generatePolicyOptionsWithRefNodes15158(po *config.PolicyOption
 		// nil (direct callers) keeps the explicit-only set.
 		for _, proto := range redistReferencedProtocols14380(ps, referencedNodes[name]) {
 			b.WriteString(renderRedistributePolicyMapCluster15158(m, po, name, ps, proto, clusterMode))
+			// #16864: one variant per consuming IGP daemon/AF.
+			for _, ctx := range redistVariantsForNodes16864(referencedNodes[name]) {
+				if !redistProtoFitsVariant16864(proto, ctx) {
+					continue
+				}
+				b.WriteString(renderRedistributeVariantMapCluster16864(m, po, name, ps, proto, ctx, clusterMode))
+			}
 		}
 		for _, scope := range qnhMetrics.scopes() {
 			if routeMap := scope.policyMaps[name]; routeMap != "" {

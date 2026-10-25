@@ -629,6 +629,9 @@ func (m *Manager) ApplyFull(fc *FullConfig) error {
 		if err := redistProtocolMapCollision(fc.PolicyOptions); err != nil {
 			return err
 		}
+		if err := redistVariantMapCollision16864(fc); err != nil {
+			return err
+		}
 		// #15158: the cluster bare-redistribute guard map shares FRR's
 		// flat route-map namespace; an operator policy-statement with
 		// that exact name would fuse with it on a tolerant load.

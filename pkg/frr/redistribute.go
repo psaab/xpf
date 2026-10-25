@@ -95,6 +95,9 @@ type redistEntry struct {
 	proto       string
 	routeMap    string
 	clusterMode bool
+	// #16864: isis marks an entry whose routeMap is an IS-IS-AF
+	// variant base (still suffixed per line AF by isisRedistributeLines).
+	isis bool
 }
 
 func normalizedRedistProtocol(proto string) string {
@@ -186,6 +189,18 @@ func (m *Manager) redistChainEntries15156(chain []string, po *config.PolicyOptio
 			out = append(out, redistEntry{proto: proto})
 		}
 	}
+	if ctx, ok := redistVariantForNode16864(self, node); ok {
+		for i := range out {
+			if out[i].routeMap == "" {
+				continue
+			}
+			if ctx.isis {
+				out[i].isis = true
+				continue
+			}
+			out[i].routeMap += "-" + ctx.variant
+		}
+	}
 	return out
 }
 
@@ -227,9 +242,26 @@ func redistComposedChains15156(fc *FullConfig) map[string]redistComposedReq15156
 			if len(policies) < 2 {
 				continue
 			}
-			name := redistChainRouteMapName15156(policies, e.proto)
+			// #16864: key by the exact attached (variant) name.
+			name := e.routeMap
+			ctx := redistVariantBGP16864
+			if c, ok := redistVariantForNode16864(self, node); ok {
+				ctx = c
+			}
+			if ctx.isis {
+				for _, actx := range []redistVariantContext16864{redistVariantISIS416864, redistVariantISIS616864} {
+					if !redistProtoFitsVariant16864(e.proto, actx) {
+						continue
+					}
+					vname := redistVariantChainRouteMapName16864(policies, e.proto, actx)
+					if _, ok := out[vname]; !ok {
+						out[vname] = redistComposedReq15156{chain: append([]string(nil), policies...), proto: e.proto, ctx: actx}
+					}
+				}
+				continue
+			}
 			if _, ok := out[name]; !ok {
-				out[name] = redistComposedReq15156{chain: append([]string(nil), policies...), proto: e.proto}
+				out[name] = redistComposedReq15156{chain: append([]string(nil), policies...), proto: e.proto, ctx: ctx}
 			}
 		}
 	}
@@ -303,6 +335,7 @@ func containsString15156(s []string, v string) bool {
 type redistComposedReq15156 struct {
 	chain []string
 	proto string
+	ctx   redistVariantContext16864
 }
 
 // renderRedistComposedMaps15156 emits the composed per-source route-map
@@ -320,37 +353,37 @@ func (m *Manager) renderRedistComposedMaps15156(fc *FullConfig) string {
 	var b strings.Builder
 	for _, name := range names {
 		req := reqs[name]
-		b.WriteString(m.renderRedistComposedMapCluster15158(fc.PolicyOptions, name, req.chain, req.proto, fc != nil && fc.ClusterMode))
+		b.WriteString(m.renderRedistComposedMapVariant16864(fc.PolicyOptions, name, req.chain, req.proto, req.ctx, fc != nil && fc.ClusterMode))
 		b.WriteString("!\n")
 	}
 	return b.String()
 }
 
 // renderRedistComposedMap15156 renders one composed per-source map: each
-// chain member's per-source filtered terms in order, continuous sequences,
-// explicit defaults terminate (next-policy jumps to the next member), and
-// fall-off-the-end resolves to deny — the protocol default for IGP
-// redistribution and the fail-closed origination default for BGP.
-func (m *Manager) renderRedistComposedMap15156(po *config.PolicyOptionsConfig, name string, chain []string, proto string) string {
-	return m.renderRedistComposedMapCluster15158(po, name, chain, proto, false)
+func (m *Manager) renderRedistComposedMapCluster15158(po *config.PolicyOptionsConfig, name string, chain []string, proto string, clusterMode bool) string {
+	return m.renderRedistComposedMapVariant16864(po, name, chain, proto, redistVariantBGP16864, clusterMode)
 }
 
-// renderRedistComposedMapCluster15158 is renderRedistComposedMap15156
-// with the #15158 cluster guard: in cluster mode a composed static map
-// leads with the tag deny at sequence 5, below the parts starting at 10.
-func (m *Manager) renderRedistComposedMapCluster15158(po *config.PolicyOptionsConfig, name string, chain []string, proto string, clusterMode bool) string {
+// renderRedistComposedMapVariant16864 is the composed renderer with
+// the #16864 variant filter: each member's per-source terms are
+// variant-filtered against the ORIGINAL po (route-filter parsing),
+// then rendered against the family-restricted view.
+func (m *Manager) renderRedistComposedMapVariant16864(po *config.PolicyOptionsConfig, name string, chain []string, proto string, ctx redistVariantContext16864, clusterMode bool) string {
 	var filtered []*config.PolicyStatement
 	var names []string
 	var total uint64
+	vpo := redistVariantPO16864(po, ctx)
 	for _, pn := range chain {
 		ps := po.PolicyStatements[pn]
 		if ps == nil {
 			continue
 		}
-		f := redistPolicyForProtocol(ps, proto)
+		src := redistPolicyForProtocol(ps, proto)
+		f, dropped, denyAlls := redistPolicyForVariant16864(po, src, proto, ctx)
+		logRedistVariantDrop16864(pn, proto, ctx, dropped, denyAlls)
 		filtered = append(filtered, f)
 		names = append(names, pn)
-		total += config.RouteMapSequenceCount(po, f)
+		total += config.RouteMapSequenceCount(vpo, f)
 	}
 	if total > config.MaxRouteMapSequences {
 		slog.Warn("oversized composed redistribute route-map; rendering an explicit deny instead (#15156)",
@@ -370,7 +403,7 @@ func (m *Manager) renderRedistComposedMapCluster15158(po *config.PolicyOptionsCo
 	seq := 10
 	terminated := false
 	for i, f := range filtered {
-		definitions, body, next := m.renderPolicyTermSequencesWithDefinitions(po, name, name+"-"+names[i], f, seq)
+		definitions, body, next := m.renderPolicyTermSequencesWithDefinitions(vpo, name, name+"-"+names[i], f, seq)
 		p := part{definitions: definitions, body: body, nextPolicy: policyHasNextPolicyTerm(f), startSeq: seq}
 		seq = next
 		switch f.DefaultAction {
@@ -457,13 +490,21 @@ func redistChainMapCollision15156(fc *FullConfig) error {
 	// Cross-check against per-source and QNH names via final names.
 	for _, psName := range sortedKeysPS15156(po) {
 		ps := po.PolicyStatements[psName]
-		for _, proto := range redistReferencedProtocols14380(ps, redistReferencedNodes14380(fc)[psName]) {
-			final := frrName(redistProtocolRouteMapName(psName, proto))
-			if _, ok := reqs[final]; ok {
-				// reqs keyed by raw name; compare final forms.
-				for raw := range reqs {
-					if frrName(raw) == final {
-						return fmt.Errorf("composed redistribute route-map %q collides with per-source route-map %q; FRR merges same-named route-maps — refusing to render (#15156)", raw, redistProtocolRouteMapName(psName, proto))
+		nodes := redistReferencedNodes14380(fc)[psName]
+		for _, proto := range redistReferencedProtocols14380(ps, nodes) {
+			candidates := []string{redistProtocolRouteMapName(psName, proto)}
+			for _, ctx := range redistVariantsForNodes16864(nodes) {
+				if redistProtoFitsVariant16864(proto, ctx) {
+					candidates = append(candidates, redistVariantRouteMapName16864(psName, proto, ctx))
+				}
+			}
+			for _, cand := range candidates {
+				final := frrName(cand)
+				if _, ok := reqs[final]; ok {
+					for raw := range reqs {
+						if frrName(raw) == final {
+							return fmt.Errorf("composed redistribute route-map %q collides with per-source route-map %q; FRR merges same-named route-maps — refusing to render (#15156)", raw, cand)
+						}
 					}
 				}
 			}
@@ -996,6 +1037,7 @@ func applyQNHMetricRouteMap11447(export string, metrics *qnhMetricScope11447, en
 	for i := range entries {
 		if entries[i].proto == "static" {
 			entries[i].routeMap = routeMap
+			entries[i].isis = false
 		}
 	}
 }
@@ -1175,6 +1217,13 @@ func isisRedistributeLines(entries []redistEntry, isisLevel string) string {
 			}
 			for _, lv := range levels {
 				routeMap := e.routeMap
+				if e.isis && routeMap != "" {
+					if fam.bit == afiV6 {
+						routeMap += "-isis-v6"
+					} else {
+						routeMap += "-isis-v4"
+					}
+				}
 				if e.clusterMode && e.proto == "static" {
 					routeMap = guardedStaticRouteMap15158(e)
 				}
@@ -1333,13 +1382,15 @@ func (m *Manager) redistributeEntriesAt(export string, po *config.PolicyOptionsC
 				sort.Strings(sorted)
 				entries := make([]redistEntry, 0, len(sorted))
 				for _, proto := range sorted {
-					// #8597: the protocol and route-map are both belted at
-					// their output sites below. The map name is derived from
-					// the selected source protocol so each daemon receives
-					// only the terms it can evaluate.
-					entries = append(entries, redistEntry{
-						proto: proto, routeMap: redistProtocolRouteMapName(export, proto),
-					})
+					e := redistEntry{proto: proto, routeMap: redistProtocolRouteMapName(export, proto)}
+					if ctx, ok := redistVariantForNode16864(self, node); ok {
+						if ctx.isis {
+							e.isis = true
+						} else {
+							e.routeMap += "-" + ctx.variant
+						}
+					}
+					entries = append(entries, e)
 				}
 				return entries
 			}

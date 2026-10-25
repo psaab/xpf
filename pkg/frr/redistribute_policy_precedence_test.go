@@ -57,7 +57,7 @@ func TestIGPExportPolicyNamedStaticOSPF14369(t *testing.T) {
 		},
 	}
 	got := New().buildManagedSection(fc)
-	if !strings.Contains(got, "redistribute static route-map static-static-xpf-redist\n") {
+	if !strings.Contains(got, "redistribute static route-map static-static-xpf-redist-ospf\n") {
 		t.Errorf("missing filtered redistribute for policy named static:\n%s", got)
 	}
 	if hasBareLine14369(got, " redistribute static") {
@@ -73,7 +73,7 @@ func TestIGPExportPolicyNamedStaticRIP14369(t *testing.T) {
 		},
 	}
 	got := New().buildManagedSection(fc)
-	if !strings.Contains(got, "redistribute static route-map static-static-xpf-redist\n") {
+	if !strings.Contains(got, "redistribute static route-map static-static-xpf-redist-rip\n") {
 		t.Errorf("missing filtered redistribute for policy named static under RIP:\n%s", got)
 	}
 	if hasBareLine14369(got, " redistribute static") {
@@ -88,8 +88,8 @@ func TestIGPExportPolicyNamedStaticISIS14369(t *testing.T) {
 	}
 	got := New().buildManagedSection(fc)
 	for _, want := range []string{
-		"redistribute ipv4 static level-2 route-map static-static-xpf-redist\n",
-		"redistribute ipv6 static level-2 route-map static-static-xpf-redist\n",
+		"redistribute ipv4 static level-2 route-map static-static-xpf-redist-isis-v4\n",
+		"redistribute ipv6 static level-2 route-map static-static-xpf-redist-isis-v6\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q:\n%s", want, got)
@@ -129,7 +129,7 @@ func TestIGPExportBareStaticNoPolicy14369(t *testing.T) {
 func TestIGPExportPolicyNamedDirect14369(t *testing.T) {
 	m := New()
 	got := m.resolveRedistribute("direct", keywordNamedPolicy14369("direct"), "ospf", nil)
-	want := " redistribute static route-map direct-static-xpf-redist\n"
+	want := " redistribute static route-map direct-static-xpf-redist-ospf\n"
 	if got != want {
 		t.Errorf("policy named direct: got %q, want %q", got, want)
 	}
