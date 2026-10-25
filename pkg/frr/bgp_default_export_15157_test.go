@@ -102,15 +102,12 @@ func leakFC15157() *FullConfig {
 func TestBGPNoExportNeighborGetsDefaultExport15157(t *testing.T) {
 	got := New().buildManagedSection(leakFC15157())
 
-	// Origination still happens (A's EXP originates static). #16723:
-	// #15156 composed the per-source maps across the whole export set,
-	// so the single-policy spelling EXP-static-xpf-redist became the
-	// composed EXP-EXP2-TAG-xpf-chain-static-xpf-redist (the set here
-	// also exports TAG/EXP2). Assert the composed origination line —
-	// the production property (a filtered static redistribute exists)
-	// is unchanged, only its generated name follows the composition.
-	if !strings.Contains(got, " redistribute static route-map " +
-		"EXP-EXP2-TAG-xpf-chain-static-xpf-redist\n") {
+	// Origination still happens (A's EXP originates static). #16868:
+	// the cross-chain merge keeps first-seen chain order, so the
+	// composed OR spelling is 3:EXP;3:TAG,4:EXP2-xpf-or-xpf-chain-static-xpf-redist
+	// (EXP's chain first, then B's [TAG EXP2] chain).
+	if !strings.Contains(got, " redistribute static route-map "+
+		"3:EXP;3:TAG,4:EXP2-xpf-or-xpf-chain-static-xpf-redist\n") {
 		t.Fatalf("control: #14586 origination missing:\n%s", got)
 	}
 	// C (no export) now attaches the Junos default export, both AFs.

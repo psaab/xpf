@@ -1945,6 +1945,130 @@ func validatePolicyReservedRedistNameStrict(cfg *Config) error {
 // config.ReservedChainSuffix) so the two never drift.
 const ReservedChainSuffix = "-xpf-chain"
 
+// ReservedOrPrefix16868 is the prefix xpf reserves for generated
+// cross-chain OR redistribute route-maps (#16868): readable OR
+// names start with a length-prefixed structural encoding and hash
+// names start with this literal prefix. An operator policy named
+// to spell a generated OR name (e.g. an ordered chain
+// [xpf-or-<digest>-xpf or] reproducing the hash form) would merge
+// with it in FRR's global namespace, so the prefix namespace is
+// reserved exactly like the suffixes above. Policy names carrying
+// the structural separators of the readable form (leading digit,
+// ":" ";" ",") cannot be admitted either; the validator below
+// covers the spellable shapes (prefix + marker infix).
+const ReservedOrPrefix16868 = "xpf-or-"
+
+// ReservedOrMarker16868 is the infix every OR name carries.
+const ReservedOrMarker16868 = "-xpf-or"
+
+// validatePolicyReservedOrNameStrict16868 hard-rejects operator
+// policy-statements that can spell a generated OR route-map name:
+// names starting with ReservedOrPrefix16868, or containing the
+// ReservedOrMarker16868 infix (an ordered chain [A or] can join
+// into "<A>-xpf-or..."). Mirrors validatePolicyReservedChainNameStrict.
+func validatePolicyReservedOrNameStrict16868(cfg *Config) error {
+	if cfg == nil || cfg.PolicyOptions.PolicyStatements == nil {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.PolicyOptions.PolicyStatements))
+	for name := range cfg.PolicyOptions.PolicyStatements {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if strings.HasPrefix(name, ReservedOrPrefix16868) || strings.Contains(name, ReservedOrMarker16868) {
+			return fmt.Errorf(
+				"policy-statement %q intrudes on the reserved %q/%q namespace; xpf owns it "+
+					"for generated cross-chain OR redistribute route-maps (#16868), and an "+
+					"operator name there can spell a generated map in FRR's global route-map "+
+					"object — rename the policy-statement out of that namespace",
+				name, ReservedOrPrefix16868, ReservedOrMarker16868)
+		}
+	}
+	// Joined-name check: markers can also form ACROSS member
+	// boundaries of an ordered chain ([xpf or-... or] joins to
+	// xpf-or-...-xpf-or...). Judge every authored BGP/OSPF/RIP/
+	// IS-IS export chain's joined composed-name core against the
+	// same namespace, not just individual member names.
+	for _, joined := range composedChainCores16868(cfg) {
+		if strings.HasPrefix(joined, ReservedOrPrefix16868) || strings.Contains(joined, ReservedOrMarker16868) {
+			return fmt.Errorf(
+				"export chain composing to %q intrudes on the reserved %q/%q namespace; xpf owns it "+
+					"for generated cross-chain OR redistribute route-maps (#16868) — rename a member "+
+					"policy-statement so the joined chain name leaves that namespace",
+				joined, ReservedOrPrefix16868, ReservedOrMarker16868)
+		}
+	}
+	return nil
+}
+
+// composedChainCores16868 returns the joined (hyphen-joined,
+// suffix-free) cores of every ordered export chain of length >= 2
+// in the compiled config — the names an ordered composition would
+// spell before its reserved suffixes attach.
+func composedChainCores16868(cfg *Config) []string {
+	var out []string
+	add := func(chain []string) {
+		var def []string
+		for _, n := range chain {
+			if _, ok := cfg.PolicyOptions.PolicyStatements[n]; ok {
+				def = append(def, n)
+			}
+		}
+		if len(def) >= 2 {
+			out = append(out, strings.Join(def, "-"))
+		}
+	}
+	{
+		if cfg.Protocols.BGP != nil {
+			add(cfg.Protocols.BGP.Export)
+			for _, n := range cfg.Protocols.BGP.Neighbors {
+				if n != nil {
+					add(n.Export)
+				}
+			}
+		}
+		if cfg.Protocols.OSPF != nil {
+			add(cfg.Protocols.OSPF.Export)
+		}
+		if cfg.Protocols.OSPFv3 != nil {
+			add(cfg.Protocols.OSPFv3.Export)
+		}
+		if cfg.Protocols.RIP != nil {
+			add(cfg.Protocols.RIP.Redistribute)
+		}
+		if cfg.Protocols.ISIS != nil {
+			add(cfg.Protocols.ISIS.Export)
+		}
+	}
+	for _, inst := range cfg.RoutingInstances {
+		if inst == nil {
+			continue
+		}
+		if inst.BGP != nil {
+			add(inst.BGP.Export)
+			for _, n := range inst.BGP.Neighbors {
+				if n != nil {
+					add(n.Export)
+				}
+			}
+		}
+		if inst.OSPF != nil {
+			add(inst.OSPF.Export)
+		}
+		if inst.OSPFv3 != nil {
+			add(inst.OSPFv3.Export)
+		}
+		if inst.RIP != nil {
+			add(inst.RIP.Redistribute)
+		}
+		if inst.ISIS != nil {
+			add(inst.ISIS.Export)
+		}
+	}
+	return out
+}
+
 // validatePolicyReservedChainNameStrict hard-rejects an operator
 // policy-statement whose name ends in the reserved ReservedChainSuffix. That
 // suffix is owned by the FRR renderer's generated composed BGP policy-chain

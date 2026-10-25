@@ -1239,18 +1239,30 @@ step. Both are required — neither sees the other's case:
   `redistReferencedNodes14380` includes both nodes so a referenced
   no-from policy's expanded maps are defined. Regression cells:
   `bgp_export_redistribute_14586_test.go`.
-  **Chain composition (#15156).** FRR keeps one route-map per
+  **Chain composition (#15156, #16868).** FRR keeps one route-map per
   (router, AF, source), so an IGP `export [ P1 P2 ]` chain and the
-  #14586 BGP origination union now emit exactly one `redistribute` per
+  #14586 BGP origination now emit exactly one `redistribute` per
   source: a single-policy source keeps `<policy>-<proto>-xpf-redist`, a
   multi-policy source names the composed
-  `<P1>-<P2>-xpf-chain-<proto>-xpf-redist` map (chain order for IGP,
-  sorted OR-union for BGP), whose per-source terms run in order with
-  terminal actions terminal and fall-off-the-end deny.
-  `redistChainMapCollision15156` fails the apply closed on a name
-  collision. Regression cells: `redistribute_chain_15156_test.go`.
-  Composed-chain QNH metric overlay is not applied (single-policy and
-  bare static entries keep their metric maps).
+  `<P1>-<P2>-xpf-chain-<proto>-xpf-redist` map (chain order for IGP;
+  per-effective-chain for BGP; a source several chains produce
+  attaches a cross-chain OR map named by the producing chains in
+  first-seen order, where each chain renders first-terminal-wins
+  internally but a chain's reject demotes to fall-through so it
+  cannot veto another chain's accept), whose per-source terms
+  run in order with terminal actions terminal and fall-off-the-end
+  deny. #16868: composition triggers whenever ANY member enrols the
+  source — a reject-only guard, a protocol-less reject guard, or a
+  policy whose only terminal for the source is its policy-level
+  `then reject` enrols nothing under #14698 yet still runs in the
+  composed map; the named chain truncates at a terminal default
+  (extended only to keep a sole terminal guard's attachment
+  composed). `redistChainMapCollision15156` fails the apply closed on
+  a name collision. Regression cells:
+  `redistribute_chain_15156_test.go`,
+  `redistribute_chain_16868_test.go`. Composed-chain QNH metric
+  overlay is not applied (single-policy and bare static entries keep
+  their metric maps).
   Both `route-map out` emit sites (ipv4 + ipv6 AF) are guarded by
   `isDefinedPolicyStatement` (#2539, sibling of the #2490 inbound guard):
   `globalExport` is already restricted to defined policy-statements, but a
