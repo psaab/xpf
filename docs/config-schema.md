@@ -17295,6 +17295,18 @@ install fell back to the host sshd default.
   flat and hierarchical, unknown-knob rejection) and
   `pkg/daemon/ssh_no_password_15282_test.go` (drop-in rendering, exactly-once,
   absent-leaf control).
+- **brace-elided spelling (#16538)** — `ssh no-password-authentication;` /
+  `ssh no-passwords;` with the ssh brace elided compiled both flags false
+  until `(ssh, no-password-authentication)` and `(ssh, no-passwords)` were
+  admitted to `compactNormalizeInScope`, for the same reason and on the same
+  empty-equivalence evidence as the #8922 algorithm family above. The same
+  change admits `(api-auth, metrics-require-auth)`: the elided
+  `api-auth metrics-require-auth;` compiled `MetricsRequireAuth=false`, so
+  loopback `/metrics` stayed open and the #16072 credential precondition
+  never fired; admitted, the flag-only elided spelling takes the same
+  #16072 strict rejection as its braced twin. Pinned by
+  `pkg/config/compact_ssh_apiauth_16538_test.go`; the three sites are
+  anchored in `filedFixed` in the #2419 census.
 
 ## Grouped system/SNMP inert knobs — accept-with-advisory (#4306 S-5)
 

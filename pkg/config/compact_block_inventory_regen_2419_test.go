@@ -291,6 +291,21 @@ const inventoryNotes = `#
 #     #14442 routing; 'unit xpfarg family inet6 dad-disable' / 'mtu'
 #     stay divergent but their compact spelling now PARTIALLY compiles
 #     (shape empty -> partial) under it.
+#
+# #16538: checked 1234 -> 1322; 34 lines added, 2 removed, nothing else
+# changed in shape. The 2 removed are the stale 'protocols lldp disable'
+# and 'system internet-options no-ipv6-reject-zero-hop-limit' rows (both
+# now compile equivalently; the register lines are removed with them).
+# The 3 sites this issue fixes — 'system services ssh
+# no-password-authentication', 'system services ssh no-passwords', and
+# 'system services web-management api-auth metrics-require-auth' — were
+# admitted to compactNormalizeInScope, so they never appear here; they
+# are anchored in filedFixed instead. The other 31 new rows plus the
+# 'interfaces ... family inet6 dhcpv6' partial row are pre-existing
+# compact-blind readers the census could already see but this file had
+# not recorded (the ratchet was red at base); each is classified in the
+# permanent-exclusion register before this note was written, per site,
+# not per family.
 #`
 
 func TestRegenerateCompactBlockInventory2419(t *testing.T) {
