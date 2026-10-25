@@ -241,6 +241,16 @@ func checkIngressDomainCapacity(desired int) error {
 // by iterating the live map (the WG-zone-map pattern), so rows left by a
 // previous daemon in the pinned map are reaped even though no in-process
 // inventory names them (#14842).
+//
+// #16689: stale rows are deleted BEFORE any new row is written
+// (reconcileAddressMapKeys, the #13724 prune-first pattern), so peak
+// occupancy is max(len(current), len(desired)) rather than
+// len(current union desired). Writing first let an accepted re-plan whose
+// union exceeded the 8192-entry pinned hash hit E2BIG on a new-key
+// insert: the same-plan caller then failed closed (ctrl Enabled=0,
+// transit dropped until the status tick re-synced the old plan) and
+// the bootstrap caller returned before the helper ever started, so a
+// pinned over-union plan wedged the box at the next restart.
 func (m *Manager) syncIngressDomainMapLocked(domainMap *ebpf.Map, desired map[userspaceIngressDomainKey]uint32) error {
 	current := make(map[userspaceIngressDomainKey]uint32)
 	var key userspaceIngressDomainKey
@@ -264,20 +274,29 @@ func (m *Manager) syncIngressDomainMapLocked(domainMap *ebpf.Map, desired map[us
 	if same {
 		return nil
 	}
-	for k, v := range desired {
-		if err := domainMap.Update(k, v, ebpf.UpdateAny); err != nil {
-			return fmt.Errorf("update userspace_ingress_domains_vlan ifindex=%d vlan=%d: %w", k.Ifindex, k.VLANID, err)
-		}
+	desiredSet := make(map[userspaceIngressDomainKey]struct{}, len(desired))
+	for k := range desired {
+		desiredSet[k] = struct{}{}
 	}
+	var stale []userspaceIngressDomainKey
 	for k := range current {
-		if _, keep := desired[k]; keep {
-			continue
-		}
-		if err := domainMap.Delete(k); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return fmt.Errorf("delete stale userspace_ingress_domains_vlan ifindex=%d vlan=%d: %w", k.Ifindex, k.VLANID, err)
+		if _, keep := desired[k]; !keep {
+			stale = append(stale, k)
 		}
 	}
-	return nil
+	return reconcileAddressMapKeys(stale, desiredSet,
+		func(k userspaceIngressDomainKey) error {
+			if err := domainMap.Delete(k); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+				return fmt.Errorf("delete stale userspace_ingress_domains_vlan ifindex=%d vlan=%d: %w", k.Ifindex, k.VLANID, err)
+			}
+			return nil
+		},
+		func(k userspaceIngressDomainKey) error {
+			if err := domainMap.Update(k, desired[k], ebpf.UpdateAny); err != nil {
+				return fmt.Errorf("update userspace_ingress_domains_vlan ifindex=%d vlan=%d: %w", k.Ifindex, k.VLANID, err)
+			}
+			return nil
+		})
 }
 
 func localAddressRoutingDomain(snapshot *ConfigSnapshot, ifindex int) (uint32, bool) {
@@ -1131,27 +1150,28 @@ func (m *Manager) syncIngressIfaceMapLocked(snapshot *ConfigSnapshot) error {
 	newIngress := buildUserspaceIngressIfindexes(snapshot)
 	taggedOnly := buildUserspaceTaggedOnlyIngressIfindexes(snapshot)
 	prior := m.lastIngressIfaces
-	installed := make([]uint32, 0, len(newIngress))
+	// installed starts as a copy of the new plan: the prune-first
+	// order (#16689) deletes stale rows before any install, so a
+	// prune failure returns before the install loop runs, and
+	// retainDebt must still record the rows this pass intended to
+	// write or a later reap cannot reach a row a subsequent partial
+	// pass installs (#6537). The install loop below only writes; it
+	// does not append again.
+	installed := make([]uint32, len(newIngress))
+	copy(installed, newIngress)
 	retainDebt := func() {
 		m.lastIngressIfaces = mergeIngressInventory(prior, installed)
 	}
 	newIngressSet := make(map[uint32]struct{}, len(newIngress))
 	for _, ifindex := range newIngress {
 		newIngressSet[ifindex] = struct{}{}
-		flags := userspaceIngressIfaceFlagAdjudicated
-		if _, ok := taggedOnly[ifindex]; ok {
-			flags |= userspaceIngressIfaceFlagTaggedOnly
-		}
-		if err := ifaceMap.Update(ifindex, flags, ebpf.UpdateAny); err != nil {
-			retainDebt()
-			return fmt.Errorf("update userspace_ingress_ifaces %d: %w", ifindex, err)
-		}
-		installed = append(installed, ifindex)
 	}
-	if err := m.syncIngressDomainMapLocked(domainMap, buildUserspaceIngressDomainEntries(snapshot)); err != nil {
-		retainDebt()
-		return err
-	}
+	// #16689: prune stale ingress-iface rows before installing new
+	// ones, so the bounded ingress-ifaces hash also never needs
+	// len(current union desired) rows during a re-plan. Stale domain
+	// rows are pruned first inside syncIngressDomainMapLocked
+	// itself, before that sync writes any new domain row, so peak
+	// domain occupancy is likewise bounded by the larger plan.
 	for _, k := range prior {
 		if _, keep := newIngressSet[k]; keep {
 			continue
@@ -1160,6 +1180,20 @@ func (m *Manager) syncIngressIfaceMapLocked(snapshot *ConfigSnapshot) error {
 			retainDebt()
 			return fmt.Errorf("delete userspace_ingress_ifaces %d: %w", k, err)
 		}
+	}
+	for _, ifindex := range newIngress {
+		flags := userspaceIngressIfaceFlagAdjudicated
+		if _, ok := taggedOnly[ifindex]; ok {
+			flags |= userspaceIngressIfaceFlagTaggedOnly
+		}
+		if err := ifaceMap.Update(ifindex, flags, ebpf.UpdateAny); err != nil {
+			retainDebt()
+			return fmt.Errorf("update userspace_ingress_ifaces %d: %w", ifindex, err)
+		}
+	}
+	if err := m.syncIngressDomainMapLocked(domainMap, buildUserspaceIngressDomainEntries(snapshot)); err != nil {
+		retainDebt()
+		return err
 	}
 	m.lastIngressIfaces = newIngress
 	return nil
