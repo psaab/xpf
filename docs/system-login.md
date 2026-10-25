@@ -453,18 +453,32 @@ described below:
 - `all` / `super-user` → `super-user` (PermAll); `maintenance` → maintenance;
   `clear` → clear; `control` / `reset` → control; `configure` → configure;
   `view` / `view-configuration` → view.
-- **No privilege escalation** — the mapping never grants more than the Junos
-  token permits. Two Junos tokens are deceptive and are folded conservatively:
-  `reset` permits restarting software *daemons* (`restart <process>`), **not**
-  rebooting/halting/zeroizing the box, so it maps to **control**, never
-  `maintenance` (the destructive box verbs). `rollback` permits reverting to a
-  prior commit only, not arbitrary `set`/`delete`, so it folds to the
-  **view-only floor**, never `configure`.
-- **Every other** recognized token (a subsystem read like `network` /
-  `interface` / `routing` / `firewall`, a `*-control` write token, `shell`,
-  `secret`, …) folds **down** to a **view-only floor**. Under-granting is
-  deliberate: the coarse model must never silently grant config / control /
-  maintenance from a narrow subsystem token.
+- **No write-axis escalation, deliberate read-axis widening** — no token
+  maps to a write bucket (configure / control / maintenance / all) it does
+  not permit in Junos. Two Junos tokens are deceptive and are mapped
+  conservatively on that axis: `reset` permits restarting software
+  *daemons* (`restart <process>`), **not** rebooting/halting/zeroizing
+  the box, so it maps to **control**, never `maintenance` (the destructive
+  box verbs). `rollback` permits reverting to a prior commit only, not
+  arbitrary `set`/`delete`, so it maps to **view**, never `configure`.
+- **Subsystem tokens widen to the whole view bucket.** `view` in xpf is
+  whole-box read: it admits the non-secret configuration render and the
+  live session table (`ShowConfig` on the active configuration,
+  `GetSessions`, and the other view-priced reads) on the CLI, gRPC and
+  REST surfaces. Every other recognized token — a subsystem read like
+  `network` / `trace` / `snmp` / `interface` / `routing` / `firewall`,
+  `rollback`, a `*-control` write token, `shell`, `secret`, … — is granted
+  that full view bucket, which is **wider than the Junos token**: in
+  Junos, `network` permits ping/ssh/telnet/traceroute only and `view` is a
+  separate flag, so a migrated NOC/helpdesk class written as
+  `permissions [ network ]` can read the full policy, NAT and
+  address-book configuration and the live session table in xpf. The
+  commit advisory names this ("granted full view (wider than Junos
+  <token>)", `rollback` included). The widening is bounded to non-secret
+  read: no secret display, configure, control, clear or maintenance grant
+  follows, and on the write axis a `*-control` token still under-grants —
+  the coarse model has no per-subsystem read bucket, and it must never
+  silently grant config / control / maintenance from a narrow token.
 - `idle-timeout` is refused at commit because xpf does not enforce a login-class
   session deadline on the CLI, REST/gRPC, or SSH. Existing saved configs may
   still contain it; tolerant load/sync reports it as inactive. Remove the leaf

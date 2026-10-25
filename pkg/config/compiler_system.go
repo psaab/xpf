@@ -2000,7 +2000,7 @@ func loginClassAdvisoryWarnings(cfg *Config) []string {
 		if _, builtin := LoginClassPermissions[lc.Name]; builtin {
 			continue
 		}
-		_, folded := mapJunosPermissions(lc.Permissions)
+		_, widened := mapJunosPermissions(lc.Permissions)
 		// Report the EFFECTIVE set (lc.MappedPermissions), not a fresh
 		// mapJunosPermissions call (#5831). The two are identical for every
 		// class the tolerant #5831 fold did not touch, so this changes no
@@ -2035,9 +2035,14 @@ func loginClassAdvisoryWarnings(cfg *Config) []string {
 		if holdsConfig && !holdsAll {
 			msg += "; this class holds configure without super-user (all), so it cannot rewrite login/root/api credentials: mutations under system login, system root-authentication, and system services web-management api-auth are denied and require a super-user (all) class (#16080)"
 		}
-		if len(folded) > 0 {
-			sort.Strings(folded)
-			msg += fmt.Sprintf("; fine-grained permissions [%s] folded to view-only (xpf has no finer bucket)", strings.Join(folded, " "))
+		if len(widened) > 0 {
+			sort.Strings(widened)
+			// #16638: these tokens are granted the FULL view bucket,
+			// which is wider than the Junos token — PermView admits
+			// the whole non-secret configuration and the live session
+			// table, not just the named subsystem. Say so; "folded
+			// down" claimed the opposite on the read axis.
+			msg += fmt.Sprintf("; permissions [%s] granted full view (wider than Junos %s): view admits the whole non-secret configuration and session table; xpf has no finer read bucket, and no secret/configure/control/maintenance grant follows", strings.Join(widened, " "), strings.Join(widened, " "))
 		}
 		// Neutral not-enforced knobs. #7172 cut 6 removed allow-commands and
 		// allow-configuration from this list, because they are no longer
