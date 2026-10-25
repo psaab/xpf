@@ -1,4 +1,17 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Config: a bare presence statement inline (`set system services
+    ssh`, `set system syslog`) no longer discards a group's whole
+    container for the same keyword (#16546). The #4325 cross-shape
+    guard treated the 1-key leaf as a duplicate of the group's 1-key
+    container, so a hardening group's root-login deny, ciphers and
+    connection-limit (and group syslog/SNMP/LLDP settings) silently
+    never reached the compiled config. A bare `len(Keys)==1` leaf whose
+    schema node is a plain container now promotes to an empty container
+    and merges the group's children with inline precedence, exactly as
+    its empty braced spelling does; valued leaves (packed tails,
+    bracketed lists, collapsed leaf-lists) keep the guard, so the
+    #4325/#4070 no-duplicate and union invariants are unchanged.
+
   * Installer: stop creating the developer scratch tree on customer
     hosts (#16539). validate_archive_key pinned its temporary GnuPG
     home under /var/worktrees/.cache/tmpdir whenever TMPDIR was

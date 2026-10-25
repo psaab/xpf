@@ -1449,6 +1449,23 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 				}
 				continue
 			}
+			// #16546: a group CONTAINER whose inline peer is a BARE
+			// presence leaf (`ssh;` beside `ssh { root-login deny; ... }`).
+			// The bare leaf is the empty braced spelling, so promote it
+			// and merge the container's children into it with inline
+			// precedence instead of letting the #4325 guard below drop
+			// the whole container.
+			if peer := barePresenceContainerPeer16546(ancestorPath, *dst, s); peer != nil {
+				budget.notePromoted9855(peer)
+				children := cloneNodes(s.Children)
+				if err := budget.charge(countNodes(children)); err != nil {
+					return err
+				}
+				if err := mergeNodes(&peer.Children, children, appendPath(ancestorPath, peer.Keys), budget, group, vars, scope, haveExcept, deferWildcards); err != nil {
+					return err
+				}
+				continue
+			}
 		}
 		if !found {
 			// Cross-shape guard (#4325): a single-key group container whose
@@ -1463,6 +1480,7 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			// stanza; beside a group-adopted stanza the block materializes so
 			// #11821/#12821 can see both values.
 			if len(s.Keys) == 1 && hasMatchingLeaf(*dst, s.Keys) &&
+				!barePresenceGuardExempts16546(ancestorPath, *dst, s) &&
 				(!isDefaultPolicyGroupStanza12923(ancestorPath, s) ||
 					!groupDefaultPolicyStanzaAdopted12923(budget, *dst)) &&
 				!packedTailLeafExempts4325(ancestorPath, *dst, s) &&
