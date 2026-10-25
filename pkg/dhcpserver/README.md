@@ -1025,7 +1025,14 @@ This package owns the KEA side of #2239 cross-chassis DHCP-server lease sync
   quiesced, the pre-seed fails closed without replacing the memfile (#10895).
 
 - `WaitControlSocket{4,6}(ctx, within)` — bounded readiness wait before the
-  post-start seed.
+  post-start seed. #16855: socket readiness alone does not prove the new
+  process — a pre-restart Kea (active/active) also answers. The daemon's
+  post-start seed therefore first waits for the takeover apply's authority
+  generation to be marked applied (`Manager.AppliedGeneration`, published by
+  the apply body) and only then waits for the socket, so lease-add cannot be
+  rejected by the old process with "Invalid subnet-id" and lost. The v6 seed
+  wire form carries `iaid` as a pointer so an IAID-0 binding still emits
+  `"iaid":0`.
 
 **Memfile CSV schema is pinned as external ground truth (#2261).** The live
 Kea loader reads the pre-seeded memfile POSITIONALLY, so `keaMemfileHeader{4,6}`

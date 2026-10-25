@@ -55,6 +55,12 @@ const (
 	// dhcpLeaseSeedSocketWait bounds the post-start control-socket-ready wait
 	// before seeding on takeover.
 	dhcpLeaseSeedSocketWait = 10 * time.Second
+	// dhcpLeaseSeedApplyWait bounds the #16855 wait for the takeover apply's
+	// authority generation to be marked applied before the backstop seeds.
+	// The async apply (systemctl restart, 15s bound) usually lands in <1s;
+	// 20s covers it without wedging the seed goroutine forever.
+	dhcpLeaseSeedApplyWait = 20 * time.Second
+	dhcpLeaseSeedPoll      = 50 * time.Millisecond
 )
 
 // dhcpLeaseSyncState groups the #2239 HA DHCP-server lease-sync (PATH C)
@@ -483,6 +489,18 @@ func (d *Daemon) preSeedDHCPLeaseMemfile(stillMastering bool) {
 // filter as memfile pre-seeding, so an unproven or mismatched scope remains
 // conservative while a proven peer snapshot cannot seed another RG.
 func (d *Daemon) seedDHCPLeasesFromPeer(ctx context.Context) {
+	d.seedDHCPLeasesFromPeerGen(ctx, 0)
+}
+
+// seedDHCPLeasesFromPeerGen is seedDHCPLeasesFromPeer ordered after the
+// takeover ApplyAsync (#16855): gen is that apply's lease-authority
+// generation (0 = unknown/legacy, seed immediately). When gen != 0 the seed
+// first waits (bounded, fail-open on timeout) for the manager to mark that
+// generation applied, THEN waits for the control socket — otherwise, on an
+// active/active takeover, the still-running pre-restart Kea answers the
+// socket wait, rejects lease-add with "Invalid subnet-id" for the newly
+// taken RG, and the backstop never runs. Re-anchoring uses the post-wait clock.
+func (d *Daemon) seedDHCPLeasesFromPeerGen(ctx context.Context, gen uint64) {
 	if d.isResetting() {
 		return
 	}
@@ -502,9 +520,12 @@ func (d *Daemon) seedDHCPLeasesFromPeer(ctx context.Context) {
 	if len(leases4) == 0 && len(leases6) == 0 {
 		return
 	}
-	now := time.Now()
 	want4 := cfg != nil && cfg.System.DHCPServer.DHCPLocalServer != nil && len(leases4) > 0
 	want6 := cfg != nil && cfg.System.DHCPServer.DHCPv6LocalServer != nil && len(leases6) > 0
+	if gen != 0 {
+		d.waitForDHCPApplyGen(ctx, gen, want4, want6)
+	}
+	now := time.Now()
 
 	if want4 && !d.isResetting() {
 		// No ddnsResetMu here (unlike the memfile pre-seed): this writer only
@@ -535,6 +556,35 @@ func (d *Daemon) seedDHCPLeasesFromPeer(ctx context.Context) {
 			}
 		} else {
 			slog.Warn("cluster: DHCP v6 control socket not ready; relying on memfile pre-seed")
+		}
+	}
+}
+
+// waitForDHCPApplyGen blocks (bounded by dhcpLeaseSeedApplyWait / ctx) until
+// every wanted family's applied generation reaches gen. 0 means no
+// authority-bearing apply has completed yet, so it keeps waiting; the bounded
+// timeout proceeds anyway (fail-open) if the apply never lands.
+func (d *Daemon) waitForDHCPApplyGen(ctx context.Context, gen uint64, want4, want6 bool) {
+	deadline := time.Now().Add(dhcpLeaseSeedApplyWait)
+	for {
+		ready := true
+		if want4 && d.dhcpServer.AppliedGeneration(4) < gen {
+			ready = false
+		}
+		if want6 && d.dhcpServer.AppliedGeneration(6) < gen {
+			ready = false
+		}
+		if ready {
+			return
+		}
+		if time.Now().After(deadline) {
+			slog.Warn("cluster: DHCP lease seed proceeding before takeover apply completed (fail-open)", "gen", gen)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(dhcpLeaseSeedPoll):
 		}
 	}
 }
@@ -647,15 +697,16 @@ func (d *Daemon) enqueueDHCPApply(cfg *config.DHCPServerConfig, reason string) {
 	d.enqueueDHCPApplyWithAuthorityState(cfg, reason, fullCfg, masters)
 }
 
-func (d *Daemon) enqueueDHCPApplyWithAuthorityState(cfg *config.DHCPServerConfig, reason string, fullCfg *config.Config, masters map[int]bool) {
+func (d *Daemon) enqueueDHCPApplyWithAuthorityState(cfg *config.DHCPServerConfig, reason string, fullCfg *config.Config, masters map[int]bool) uint64 {
 	d.ddnsResetMu.Lock()
 	defer d.ddnsResetMu.Unlock()
 	if d.isResetting() || d.dhcpServer == nil {
-		return
+		return 0
 	}
 	if cfg == nil {
 		fullCfg = nil
 	}
 	authority := d.nextDHCPLeaseApplyAuthority(fullCfg, masters)
 	d.dhcpServer.ApplyAsyncWithLeaseAuthority(cfg, reason, authority)
+	return authority.Generation
 }

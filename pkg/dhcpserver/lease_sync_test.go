@@ -102,6 +102,8 @@ func missingSock9853(t *testing.T, name string) string {
 	return sock
 }
 
+func iaidPtr16855(v uint32) *uint32 { return &v }
+
 func leaseGetAllResponse(leases []keaLeaseJSON) keaResponse {
 	args, _ := json.Marshal(keaLeaseGetAllArgs{Leases: leases})
 	return keaResponse{Result: keaResultSuccess, Text: "ok", Arguments: args}
@@ -458,7 +460,7 @@ func TestSeedSyncLeases6_IdentityAndPD(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("captured %d lease6-add", len(got))
 	}
-	if got[0].DUID != "00:01:00:01" || got[0].IAID != 42 || got[0].Type != "IA_NA" {
+	if got[0].DUID != "00:01:00:01" || got[0].IAIDVal() != 42 || got[0].Type != "IA_NA" {
 		t.Errorf("NA lease wrong: %+v", got[0])
 	}
 	if got[1].Type != "IA_PD" || got[1].PrefixLen != 56 {
@@ -796,7 +798,7 @@ func TestPreSeedMemfileMerged6_PreservesLocalLeases(t *testing.T) {
 		case "lease6-get-all":
 			return leaseGetAllResponse([]keaLeaseJSON{{
 				IPAddress: "2001:db8:1::50", DUID: "00:03:00:01:aa:aa",
-				IAID: 50, Type: "IA_NA", SubnetID: 1, ValidLft: 3600,
+				IAID: iaidPtr16855(50), Type: "IA_NA", SubnetID: 1, ValidLft: 3600,
 				CLTT: localNow.Unix() - 100, State: keaStateDefault,
 			}})
 		default:
@@ -918,12 +920,12 @@ func TestPreSeedMemfileMerged6_QuiescesWindowGrants10895(t *testing.T) {
 	sock := tmpSocket(t, "k6reread.sock")
 	base := keaLeaseJSON{
 		IPAddress: "2001:db8:1::50", DUID: "00:03:00:01:aa:aa",
-		IAID: 50, Type: "IA_NA", SubnetID: 1, ValidLft: 3600,
+		IAID: iaidPtr16855(50), Type: "IA_NA", SubnetID: 1, ValidLft: 3600,
 		CLTT: localNow.Unix() - 100, State: keaStateDefault,
 	}
 	window := keaLeaseJSON{
 		IPAddress: "2001:db8:1::51", DUID: "00:03:00:01:bb:bb",
-		IAID: 51, Type: "IA_NA", SubnetID: 1, ValidLft: 3600,
+		IAID: iaidPtr16855(51), Type: "IA_NA", SubnetID: 1, ValidLft: 3600,
 		CLTT: localNow.Unix(), State: keaStateDefault,
 	}
 	var mu sync.Mutex
@@ -1968,7 +1970,7 @@ func TestKeaLeaseToSync_PreferredRemaining(t *testing.T) {
 	intp := func(n int) *int { return &n }
 	// cltt+valid-lft-now = (now-600+3600)-now = 3000 valid remaining.
 	base := keaLeaseJSON{
-		IPAddress: "2001:db8::1", DUID: "00:01:00:01", IAID: 7, Type: "IA_NA",
+		IPAddress: "2001:db8::1", DUID: "00:01:00:01", IAID: iaidPtr16855(7), Type: "IA_NA",
 		SubnetID: 1, ValidLft: 3600, CLTT: now.Unix() - 600, State: keaStateDefault,
 	}
 	cases := []struct {

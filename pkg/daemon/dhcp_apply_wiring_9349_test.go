@@ -101,8 +101,9 @@ func (r *recordingDHCPApplier9349) Shutdown() error                { return nil 
 func (r *recordingDHCPApplier9349) LeaseAuthorityResult(int) (uint64, []dhcpserver.LeaseScopeAuthority, bool) {
 	return 0, nil, false
 }
-func (r *recordingDHCPApplier9349) IsRunning() bool             { return false }
-func (r *recordingDHCPApplier9349) ApplyFailedForTesting() bool { return false }
+func (r *recordingDHCPApplier9349) AppliedGeneration(int) uint64 { return 0 }
+func (r *recordingDHCPApplier9349) IsRunning() bool              { return false }
+func (r *recordingDHCPApplier9349) ApplyFailedForTesting() bool  { return false }
 func (r *recordingDHCPApplier9349) GetLeasesWithSource4() ([]dhcpserver.Lease, dhcpserver.LeaseSource) {
 	return nil, dhcpserver.LeaseSource{}
 }

@@ -45,6 +45,7 @@ type dhcpApplier interface {
 	SetLeaseSyncEnabled(enabled bool)
 	Shutdown() error
 	LeaseAuthorityResult(family int) (uint64, []dhcpserver.LeaseScopeAuthority, bool)
+	AppliedGeneration(family int) uint64
 
 	GetSyncLeases4(ctx context.Context, now time.Time) ([]dhcpserver.SyncLease, error)
 	GetSyncLeases6(ctx context.Context, now time.Time) ([]dhcpserver.SyncLease, error)

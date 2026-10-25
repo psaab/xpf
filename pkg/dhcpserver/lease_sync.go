@@ -344,15 +344,15 @@ const (
 // accepts. Kea uses "valid-lft" + "cltt" (client-last-transaction-time epoch);
 // the absolute expiry is cltt+valid-lft. On add we send an absolute "expire".
 type keaLeaseJSON struct {
-	IPAddress string `json:"ip-address"`
-	HWAddress string `json:"hw-address,omitempty"`
-	ClientID  string `json:"client-id,omitempty"`
-	DUID      string `json:"duid,omitempty"`
-	IAID      uint32 `json:"iaid,omitempty"`
-	Type      string `json:"type,omitempty"`       // v6: IA_NA / IA_PD
-	PrefixLen int    `json:"prefix-len,omitempty"` // v6 IA_PD
-	SubnetID  int    `json:"subnet-id,omitempty"`
-	ValidLft  int    `json:"valid-lft,omitempty"`
+	IPAddress string  `json:"ip-address"`
+	HWAddress string  `json:"hw-address,omitempty"`
+	ClientID  string  `json:"client-id,omitempty"`
+	DUID      string  `json:"duid,omitempty"`
+	IAID      *uint32 `json:"iaid,omitempty"`
+	Type      string  `json:"type,omitempty"`       // v6: IA_NA / IA_PD
+	PrefixLen int     `json:"prefix-len,omitempty"` // v6 IA_PD
+	SubnetID  int     `json:"subnet-id,omitempty"`
+	ValidLft  int     `json:"valid-lft,omitempty"`
 	// PreferredLft is a POINTER so an absent field (nil, an older Kea or a v4
 	// lease) is distinguishable from an explicit preferred-lft:0 (a DEPRECATED
 	// v6 binding). omitempty only drops a nil pointer, so a &0 still emits
@@ -364,6 +364,23 @@ type keaLeaseJSON struct {
 	Hostname     string `json:"hostname,omitempty"`
 	FQDNFwd      bool   `json:"fqdn-fwd,omitempty"`
 	FQDNRev      bool   `json:"fqdn-rev,omitempty"`
+}
+
+// AppliedGeneration returns the daemon lease-authority generation of the most
+// recent APPLIED authority-bearing apply for family (0 if none). #16855: the
+// post-start lease-add backstop polls this so it only seeds the process that
+// loaded the takeover config, not a still-running pre-restart Kea.
+func (m *Manager) AppliedGeneration(family int) uint64 {
+	if family != 4 && family != 6 {
+		return 0
+	}
+	m.authorityMu.Lock()
+	defer m.authorityMu.Unlock()
+	r := m.authorityResults[authorityResultIndex(family)]
+	if !r.applied {
+		return 0
+	}
+	return r.generation
 }
 
 type keaLeaseGetAllArgs struct {
@@ -576,7 +593,7 @@ func keaLeaseToSync(kl keaLeaseJSON, family int, now time.Time) SyncLease {
 		HWAddress: kl.HWAddress,
 		ClientID:  kl.ClientID,
 		DUID:      kl.DUID,
-		IAID:      kl.IAID,
+		IAID:      kl.IAIDVal(),
 		LeaseType: kl.Type,
 		PrefixLen: kl.PrefixLen,
 		Hostname:  kl.Hostname,
@@ -608,6 +625,14 @@ func keaLeaseToSync(kl keaLeaseJSON, family int, now time.Time) SyncLease {
 		l.PreferredRemaining = l.Remaining
 	}
 	return l
+}
+
+// IAIDVal unwraps the optional IAID (absent ⇒ 0, a valid IAID).
+func (kl keaLeaseJSON) IAIDVal() uint32 {
+	if kl.IAID == nil {
+		return 0
+	}
+	return *kl.IAID
 }
 
 // readSyncLeasesViaMemfile is the fallback read path: parse the append-only
@@ -923,7 +948,7 @@ func syncLeaseToKea(l SyncLease, now time.Time) keaLeaseJSON {
 	}
 	if l.Family == 6 {
 		kl.DUID = l.DUID
-		kl.IAID = l.IAID
+		kl.IAID = &l.IAID // pointer: IAID 0 must still emit (#16855)
 		// #5073: carry the PREFERRED remaining onto the socket add/update path so
 		// a DEPRECATED binding (PreferredRemaining=0) is seeded deprecated rather
 		// than revived. Clamp to [0, rem] (rem is the floored valid-lft) so the

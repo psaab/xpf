@@ -41,6 +41,7 @@ type authorityReaderApplier10170 struct {
 func (r *authorityReaderApplier10170) LeaseAuthorityResult(int) (uint64, []dhcpserver.LeaseScopeAuthority, bool) {
 	return r.generation, r.scopes, r.applied
 }
+func (r *authorityReaderApplier10170) AppliedGeneration(int) uint64 { return 0 }
 
 func TestMakeDHCPLeaseSnapshotRejectsStaleAuthorityGeneration10170(t *testing.T) {
 	r := &authorityReaderApplier10170{
