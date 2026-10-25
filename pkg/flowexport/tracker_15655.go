@@ -350,6 +350,37 @@ func (t *FlowTracker) CloseWithBaseline(key FlowKey) (lastPackets, lastBytes, la
 	return 0, 0, 0, 0, false
 }
 
+// Clone returns an independent copy of the tracked flow, or nil.
+// Used to carry live state to a replacement exporter (#16742).
+func (t *FlowTracker) Clone(key FlowKey) *trackedFlow {
+	if !t.enabled() {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	f, ok := t.flows[key]
+	if !ok {
+		return nil
+	}
+	cp := *f
+	return &cp
+}
+
+// Adopt installs a previously cloned tracked flow unless one exists.
+func (t *FlowTracker) Adopt(f *trackedFlow) bool {
+	if !t.enabled() || f == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, ok := t.flows[f.key]; ok {
+		return false
+	}
+	cp := *f
+	t.flows[f.key] = &cp
+	return true
+}
+
 // Keys returns a snapshot of the currently tracked flow keys, so the
 // daemon's live-counter poll can address session lookups to exactly the
 // flows this tracker cares about instead of enumerating every session.

@@ -1016,6 +1016,11 @@ func (d *Daemon) walkUserspaceSessionDeltas(
 					continue
 				}
 				sink.openV4(key, val)
+				// #16742: a peer-synced open queued for the peer is
+				// also the promoted node's only open signal (no
+				// SESSION_CREATE, #15126); register it for flow
+				// export without a syslog CREATE.
+				d.trackFlowOpenFromSync(delta)
 				if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
 					src, dst := userspaceDeltaFlowStrings(delta)
 					slog.Debug("userspace delta: admitted V4", "src", src, "dst", dst, "ownerRG", delta.OwnerRGID)
@@ -1033,6 +1038,7 @@ func (d *Daemon) walkUserspaceSessionDeltas(
 					continue
 				}
 				sink.openV6(key, val)
+				d.trackFlowOpenFromSync(delta)
 				n++
 				if delta.FabricRedirect && !delta.FabricIngress {
 					if wireKey, wireVal, ok := userspaceForwardWireAliasV6(key, val); ok {

@@ -281,6 +281,21 @@ func (c *exporterCore) CollectorHealth() []CollectorHealth {
 // Close shuts down all collector connections.
 func (c *exporterCore) Close() { c.conns.close() }
 
+// HasFlowState reports whether this exporter holds any open state for
+// key (tracker entry or close-only sampled set) without consuming it.
+// The daemon uses it before CloseFlow to decide whether *any* group of
+// an instance recorded the open; only when none did may a close-time
+// fallback decision run (#16742).
+func (c *exporterCore) HasFlowState(key FlowKey) bool {
+	if c.tracker != nil && c.tracker.Has(key) {
+		return true
+	}
+	c.sampledMu.Lock()
+	_, ok := c.sampledFlows[key]
+	c.sampledMu.Unlock()
+	return ok
+}
+
 // CloseFlow forgets a flow on real session close (#15655) and reports
 // whether it had been selected at open, together with the tracker's
 // last-export baselines. The booleans/baselines are the close-side
@@ -301,6 +316,97 @@ func (c *exporterCore) CloseFlow(key FlowKey) (sampled bool, basePkts, baseBytes
 	}
 	c.sampledMu.Unlock()
 	return tracked || inSampledSet, basePkts, baseBytes, baseRevPkts, baseRevBytes
+}
+
+// CloseFlowOrSample is CloseFlow with the #16742 close-time fallback:
+// when this exporter holds no open state for key, make one 1-in-N
+// decision via decide (the instance's single close-time decision,
+// shared across its groups so it runs at most once). A decided-in
+// close exports with zero baselines (no interim was emitted for it
+// by this exporter). State that was present keeps the #16303 rule:
+// no second slot is consumed.
+func (c *exporterCore) CloseFlowOrSample(key FlowKey, decide func() bool) (sampled bool, basePkts, baseBytes, baseRevPkts, baseRevBytes uint64) {
+	if c.HasFlowState(key) {
+		return c.CloseFlow(key)
+	}
+	if decide != nil && decide() {
+		return true, 0, 0, 0, 0
+	}
+	// Absorb any state a concurrent open landed after the check so
+	// it does not leak past the close.
+	_, _, _, _, _ = c.CloseFlow(key)
+	return false, 0, 0, 0, 0
+}
+
+// TransferFlowStateTo carries this exporter's open state for key to
+// dst (the replacement exporter for the same group key, #16742):
+// the tracker entry (with its interim baselines) when dst has a
+// tracker, otherwise the close-only sampled mark. State already
+// present in dst wins. The source keeps its copy; the caller retires
+// the source, whose Run flush never re-emits tracker state, so the
+// close is exported exactly once by the replacement.
+func (c *exporterCore) TransferFlowStateTo(dst *exporterCore, key FlowKey) {
+	if dst == nil || dst == c {
+		return
+	}
+	if c.tracker != nil && dst.tracker != nil {
+		if f := c.tracker.Clone(key); f != nil {
+			dst.tracker.Adopt(f)
+			return
+		}
+	}
+	c.sampledMu.Lock()
+	_, ok := c.sampledFlows[key]
+	c.sampledMu.Unlock()
+	if ok {
+		if dst.tracker != nil && c.tracker == nil {
+			// Close-only source to tracker destination: register
+			// tracking (MarkFlowSampledAtOpen is a no-op there) so
+			// the replacement's tracker-driven close sees the flow.
+			// The start is unknown to the source; carry the zero
+			// start — the close path uses the close event's own
+			// stamps, not the tracker template start.
+			dst.TrackFlowOpen(key, time.Time{})
+		} else {
+			dst.MarkFlowSampledAtOpen(key)
+		}
+		return
+	}
+	// Tracker source to close-only destination: selection was
+	// implicit in tracking; preserve it as a sampled mark.
+	if c.tracker != nil && dst.tracker == nil && c.tracker.Has(key) {
+		dst.MarkFlowSampledAtOpen(key)
+	}
+}
+
+// SampledKeys snapshots the close-only sampled set (nil when empty).
+func (c *exporterCore) SampledKeys() []FlowKey {
+	c.sampledMu.Lock()
+	defer c.sampledMu.Unlock()
+	if len(c.sampledFlows) == 0 {
+		return nil
+	}
+	keys := make([]FlowKey, 0, len(c.sampledFlows))
+	for k := range c.sampledFlows {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// AbsorbSampledInto transfers every open-state key this exporter holds
+// (tracker keys plus close-only sampled marks) into dst via
+// TransferFlowStateTo. Used when dst replaces this exporter for the
+// same group key (#16742).
+func (c *exporterCore) AbsorbSampledInto(dst *exporterCore) {
+	if dst == nil || dst == c {
+		return
+	}
+	for _, key := range c.TrackedKeys() {
+		c.TransferFlowStateTo(dst, key)
+	}
+	for _, key := range c.SampledKeys() {
+		c.TransferFlowStateTo(dst, key)
+	}
 }
 
 // MarkFlowSampledAtOpen records that the instance's single sampling

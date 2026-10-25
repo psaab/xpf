@@ -794,6 +794,25 @@ dies at dial with a named error, whereas an unconditional `JoinHostPort`
 would emit `host:0` — which dials successfully and discards every record
 silently.
 
+**#16742 — close-time fallback, state carry, promote opens.**
+After #16303 the close exported only if THIS exporter object recorded
+the open, so flows spanning an RG failover (promoted node gets no
+CREATE) or an exporter-replacing commit lost their close record while
+the sampler still advertised 1-in-N. Three legs restore the contract:
+(1) When no group of an instance holds open state for the key
+(`HasFlowState`), the close makes ONE close-time 1-in-N decision per
+instance (`SampledForClose`, shared across the instance's groups via
+`sync.OnceValue` in the daemon callbacks; `CloseFlowOrSample` per
+group). A recorded open still consumes no second slot. (2) A
+replacing reconcile carries tracker/sampled state to the same-group-key
+replacement (`TransferFlowStateTo`/`AbsorbSampledInto`,
+`carryFlowState*Locked`) before publishing, preserving interim
+baselines so the close exports exactly one remainder record. (3) A
+peer-synced open queued by the HA session-sync walker registers for
+flow export via `trackFlowOpenFromSync` — an open for export without
+a syslog CREATE (the helper still emits CREATE only for fresh
+admissions, #15126).
+
 ## Per-collector write-health (#2464)
 
 Flow export is forensics/compliance data; a collector going unreachable

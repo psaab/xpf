@@ -635,6 +635,30 @@ func (e *Exporter) ExportSessionCloseRemainder(rec logging.EventRecord, evt Sess
 	e.exportSessionCloseRemainder(rec, evt, false, basePkts, baseBytes, baseRevPkts, baseRevBytes)
 }
 
+// CloseFlowOrSample is the #16742 close path: recorded open state
+// exports without a second slot; absent state makes one close-time
+// decision via decide.
+func (e *Exporter) CloseFlowOrSample(key FlowKey, decide func() bool) (bool, uint64, uint64, uint64, uint64) {
+	return e.exporterCore.CloseFlowOrSample(key, decide)
+}
+
+// TransferFlowStateTo carries open state to the replacement exporter
+// for the same group key (#16742).
+func (e *Exporter) TransferFlowStateTo(dst *Exporter, key FlowKey) {
+	if dst == nil {
+		return
+	}
+	e.exporterCore.TransferFlowStateTo(&dst.exporterCore, key)
+}
+
+// AbsorbSampledInto transfers all open state to dst (#16742).
+func (e *Exporter) AbsorbSampledInto(dst *Exporter) {
+	if dst == nil {
+		return
+	}
+	e.exporterCore.AbsorbSampledInto(&dst.exporterCore)
+}
+
 func (e *Exporter) sendTemplates() {
 	e.mu.Lock()
 	seq := e.seq
