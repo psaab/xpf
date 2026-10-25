@@ -1451,8 +1451,11 @@ impl super::Coordinator {
             // `take_delta_loss` resync re-exports the full owner-RG snapshot
             // (table truth) and no delta is silently lost. Mirrors the
             // #2442/#2874 push_delta loss latch (deliver-or-resync).
+            // #16630: only bindings with INCREMENTAL residue arm. A binding
+            // holding only bulk-export residue is holding the resync's own
+            // buffered output; arming it re-runs that resync every tick.
             for b in self.workers.live.values() {
-                if b.has_pending_session_deltas() {
+                if b.has_pending_incremental_session_deltas() {
                     b.set_delta_loss();
                 }
             }

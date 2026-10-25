@@ -91,6 +91,18 @@ orderings and `#[inline]` attributes moved byte-identical, and the
   fails (disconnected stream / bounded timeout) counts in
   `frames_dropped` but does not set `event_stream_out_of_sync`, so the
   worker loop's `set_delta_loss` is never re-armed by the export itself.
+- **...and the drain-side arm is bulk-aware too (#16630).** #8593 covered
+  only the push-side cap arm. The coordinator's fair drain
+  (`drain_session_deltas_fair_tracked` + `Coordinator::drain_session_deltas`)
+  armed on ANY residue, so a LossResync that buffered >256 bulk deltas was
+  re-armed by the next Go tick's drain (256/tick), refilled the buffer, and
+  looped for as long as owned sessions exceeded the per-tick budget.
+  Queue entries now carry their bulk/incremental origin
+  (`pending_session_deltas: VecDeque<(SessionDeltaInfo, bool)>`), and both
+  the overflow bit and the coordinator arm key on
+  `has_pending_incremental_session_deltas()`: only undrained INCREMENTAL
+  deltas arm. Bulk residue is still drained and delivered normally — it
+  just cannot trigger the resync that produced it.
 - **Status-snapshot `last_error` precedence (#4971 / #6145).**
   `snapshot()` (`snapshot.rs`) renders `last_error` from TWO sources with
   a fixed precedence: the `last_error` **mutex** string (written by the

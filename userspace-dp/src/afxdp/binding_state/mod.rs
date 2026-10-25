@@ -864,7 +864,7 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// serialised every producer against every other producer and
     /// against the owner's drain.
     pub(super) pending_tx: MpscInbox<TxRequest>,
-    pub(super) pending_session_deltas: Mutex<VecDeque<SessionDeltaInfo>>,
+    pub(super) pending_session_deltas: Mutex<VecDeque<(SessionDeltaInfo, bool)>>,
     /// #5290: per-binding loss-of-sync latch for the RPC-fallback session-delta
     /// buffer (`pending_session_deltas`). Set when a delta is silently dropped
     /// because the buffer hit `MAX_PENDING_SESSION_DELTAS`, OR when the
