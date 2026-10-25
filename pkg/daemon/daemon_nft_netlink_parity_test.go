@@ -1028,6 +1028,11 @@ func parityHostInboundInputs() (views []dpuserspace.ZoneHostInboundView, unzoned
 		// fence-mode any-service admits) is parity-proven, not just unit-asserted.
 		{Zone: "ndany", SystemServices: []string{"any-service"}, V4Addrs: []string{"10.0.17.1"}, V6Addrs: []string{"2001:db8:17::1"}, IngressNetdevs: []string{"ge-0-0-17"}},
 		{Zone: "ndexcept", SystemServices: []string{"ssh"}, Protocols: []string{"ospf"}, ProtocolsExcept: []string{"ndp"}, V4Addrs: []string{"10.0.18.1"}, V6Addrs: []string{"2001:db8:18::1"}, IngressNetdevs: []string{"ge-0-0-18"}},
+		// #16861: VRF-member ND — member-iifname admit must parity-match
+		// master+sdif in both renderers, and the ndp-except VRF view
+		// must gain no ND admit on any scope.
+		{Zone: "ndvrf", SystemServices: []string{"ssh"}, V6Addrs: []string{"2001:db8:19::1"}, IngressVRFScopes: []config.HostInboundVRFIngressScope{{Master: "vrf-blue", Slaves: []string{"ge-0-0-19"}}}},
+		{Zone: "ndvrfexcept", SystemServices: []string{"ssh"}, ProtocolsExcept: []string{"ndp"}, V6Addrs: []string{"2001:db8:20::1"}, IngressVRFScopes: []config.HostInboundVRFIngressScope{{Master: "vrf-red", Slaves: []string{"ge-0-0-20"}}}},
 	}
 	unzonedV4 = []string{"10.0.99.1"}
 	unzonedV6 = []string{"2001:db8:99::1"}

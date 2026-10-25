@@ -324,6 +324,8 @@ func hostInboundNDPDefaultNetlink(views []HostInboundZoneView) bool {
 // carries any scope at all OR no view excludes ndp (Codex F1).
 // counted attaches the aggregate ND counter (steady state); fence
 // callers pass counted=false (no counter objects in fences, #5719).
+// #16861: each VRF scope ALSO emits the ND admit keyed on the member
+// as iifname (NDISC presents member iifname, sdif unset).
 func emitHostInboundNDPAcceptsNetlink(p *nlPlan, views []HostInboundZoneView) {
 	emitHostInboundNDPAcceptsCountedNetlink(p, views, true)
 }
@@ -377,6 +379,14 @@ func emitHostInboundNDPAcceptsCountedNetlink(p *nlPlan, views []HostInboundZoneV
 			sc := scope
 			emitIngress(func() *ruleAsm {
 				return p.rule().iifname([]string{sc.Master}).sdifname(sc.Slaves)
+			})
+			// #16861: NDISC keeps the member as iifname with sdif
+			// unset (vrf_ip6_rcv), so the master+sdif pair above
+			// never matches NA/NS to the firewall. Admit members by
+			// their own iifname as well. NOT a master-iifname admit:
+			// non-member/co-member scope is unchanged.
+			emitIngress(func() *ruleAsm {
+				return p.rule().iifname(sc.Slaves)
 			})
 		}
 		if scoped {
@@ -621,8 +631,16 @@ func emitHostInboundNonUnicastFenceDropsNetlink(p *nlPlan, views []HostInboundZo
 						a := p.rule().iifname([]string{scope.Master}).sdifname(scope.Slaves).daddr(famV6, class.addrs, false)
 						a.icmpType(famV6, []uint8{133, 134, 135, 136})
 						a.emit(verdictAccept()...)
+						// #16861: NDISC member-iifname twin (sdif unset).
+						b := p.rule().iifname(scope.Slaves).daddr(famV6, class.addrs, false)
+						b.icmpType(famV6, []uint8{133, 134, 135, 136})
+						b.emit(verdictAccept()...)
 					}
 					p.rule().iifname([]string{scope.Master}).sdifname(scope.Slaves).
+						daddr(class.family, class.addrs, false).emit(verdictDrop()...)
+					// #16861: member-iifname traffic (NDISC included)
+					// reaches this drop with no sdif; judge it here.
+					p.rule().iifname(scope.Slaves).
 						daddr(class.family, class.addrs, false).emit(verdictDrop()...)
 				}
 			}

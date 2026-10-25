@@ -1869,6 +1869,11 @@ func emitHostInboundNDPAcceptsText(rules *[]string, views []dpuserspace.ZoneHost
 				continue
 			}
 			emitIngress(hostInboundVRFIngressPrefix(scope.Master, scope.Slaves))
+			// #16861: NDISC keeps the member as iifname with sdif
+			// unset (vrf_ip6_rcv), so the master+sdif pair above
+			// never matches NA/NS to the firewall. Admit members by
+			// their own iifname as well (not the master).
+			emitIngress("iifname " + nftIifnameSet(scope.Slaves) + " ")
 		}
 		if scoped {
 			anyScope = true
@@ -3104,8 +3109,13 @@ func emitHostInboundNonUnicastFenceDrops(rules *[]string, views []dpuserspace.Zo
 					scope := hostInboundVRFIngressPrefix(vrf.Master, vrf.Slaves)
 					if ndExempt {
 						*rules = append(*rules, "    "+scope+"ip6 daddr "+nftAddrSet(addrs)+" icmpv6 type { 133, 134, 135, 136 } accept")
+						// #16861: NDISC member-iifname twin (sdif unset).
+						*rules = append(*rules, "    iifname "+nftIifnameSet(vrf.Slaves)+" ip6 daddr "+nftAddrSet(addrs)+" icmpv6 type { 133, 134, 135, 136 } accept")
 					}
 					*rules = append(*rules, "    "+scope+family+" daddr "+nftAddrSet(addrs)+" drop")
+					// #16861: member-iifname traffic reaches this
+					// drop with no sdif; judge it here.
+					*rules = append(*rules, "    iifname "+nftIifnameSet(vrf.Slaves)+" "+family+" daddr "+nftAddrSet(addrs)+" drop")
 				}
 			}
 		}
