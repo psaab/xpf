@@ -257,7 +257,10 @@ the userspace dataplane admission boundary is in
   (`validateVRRPAuthenticationAST`, `pkg/config/compiler_interfaces.go`).
 - **Redundancy-group IP monitoring** (`chassis cluster redundancy-group N
   ip-monitoring`): each configured target is ICMP-echo probed every poll,
-  driving weight-based failover. **`global-threshold` gates `global-weight`
+  driving weight-based failover. An omitted `global-weight` defaults to
+  **255** (Junos parity, #16667) — the aggregate deduction, and the weight
+  an unweighted target inherits, are never silently 0; an explicit
+  `global-weight 0` still means no demotion. **`global-threshold` gates `global-weight`
   (vSRX semantics, #5271):** when `global-threshold` is configured (> 0), each
   unreachable target's `weight` accumulates into a per-RG cumulative
   reachability-loss sum, and a **single** deduction of `global-weight` is

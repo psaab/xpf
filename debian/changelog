@@ -1,4 +1,13 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Cluster/config: an omitted `redundancy-group ip-monitoring
+    global-weight` now defaults to 255, the Junos default (#16667).
+    Previously it compiled to 0, so aggregate mode deducted nothing
+    once the cumulative failure sum crossed `global-threshold` and an
+    unweighted target inherited zero debt in independent mode — the
+    redundancy group never demoted while status reported it healthy.
+    An explicit `global-weight 0` still means no demotion, and a later
+    folded block omitting the global no longer resets an earlier
+    explicit value.
   * Shim verifier provenance/headroom (#16701): the gate verdict is
     now schema 3 and records provenance.kernel_release (the uname -r
     the processed-insn count was measured on); freshness and release
