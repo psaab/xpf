@@ -566,3 +566,143 @@ fn explicit_pbr_still_routes_ambiguous_fabric_zone_11061() {
     assert_eq!(table, "tenant-a.inet.0");
     assert_eq!((pbr_domain, check), install_table_identity("tenant-a"));
 }
+
+/// #16503: a validated V2 fabric punt carries the peer's logical ingress in
+/// `fabric_ingress_ifindex` while `ingress_ifindex` stays the fabric link.
+/// The receiver must evaluate that scope's FBF filter (mirroring the CoS
+/// re-walk, #14663), so the sender's `then routing-instance blue` steer
+/// resolves in the instance table and stamps `install_table_identity`.
+/// RED pre-fix: the filter lookup keyed the fabric link (102, no filter) and
+/// fell back to the native/main table (`RouteOverride::None`).
+#[test]
+fn validated_v2_fabric_scope_consults_peer_fbf_filter_16503() {
+    const FABRIC_IFINDEX: i32 = 102;
+    // PBR filter lives on the tenant member (101); `blue` is the steer target.
+    // The diverted route exists only in blue so a wrong-table lookup is
+    // observable as a wrong egress, not merely NoRoute.
+    let mut snapshot = pbr_snapshot_for("10.0.0.99/32", "blue");
+    snapshot.routes.push(crate::RouteSnapshot {
+        table: "blue.inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "10.0.0.99/32".to_string(),
+        next_hops: vec!["10.0.0.99".to_string()],
+        ..Default::default()
+    });
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "ge-0/0/2".to_string(),
+        zone: "wan".to_string(),
+        routing_instance: "blue".to_string(),
+        routing_domain: install_table_identity("blue").0,
+        linux_name: "ge-0-0-2".to_string(),
+        ifindex: 103,
+        hardware_addr: "02:00:00:00:00:a3".to_string(),
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".to_string(),
+            address: "10.0.0.1/24".to_string(),
+            ..Default::default()
+        }],
+        redundancy_group: RG1,
+        ..Default::default()
+    });
+    let state = build_forwarding_state(&snapshot);
+    let flow = v4_flow(
+        Ipv4Addr::new(10, 0, 0, 42),
+        Ipv4Addr::new(10, 0, 0, 99),
+        0,
+    );
+    // Fabric-punt meta shape: raw ingress is the fabric link, the validated
+    // V2 scope names the peer's tenant ingress carrying the FBF filter.
+    let mut fabric_meta = v4_meta(FABRIC_IFINDEX);
+    fabric_meta.fabric_ingress_ifindex = TENANT_IFINDEX as u32;
+    let RouteOverride::Table {
+        table,
+        domain,
+        check,
+    } = ingress_route_table_override(
+        &state,
+        &[],
+        fabric_meta,
+        &flow,
+        Some(TEST_TRUST_ZONE_ID),
+        None,
+        0,
+        None,
+    ) else {
+        panic!("#16503: validated V2 fabric scope must consult the peer FBF filter and steer into blue");
+    };
+    assert_eq!(table, "blue.inet.0");
+    assert_eq!((domain, check), install_table_identity("blue"));
+    // The stamped table resolves the destination through the blue egress.
+    let resolved = lookup_forwarding_resolution_in_table_with_dynamic(
+        &state,
+        &Arc::new(ShardedNeighborMap::new()),
+        flow.dst_ip,
+        Some(table.as_str()),
+    )
+    .resolution;
+    assert_eq!(resolved.egress_ifindex, 103, "#16503: instance-table lookup must egress via blue");
+
+    // Local-ingress twin: identical flow arriving directly on the tenant
+    // member (no fabric scope) steers the same way — unchanged.
+    let RouteOverride::Table {
+        table: local_table,
+        domain: local_domain,
+        check: local_check,
+    } = ingress_route_table_override(
+        &state,
+        &[],
+        v4_meta(TENANT_IFINDEX),
+        &flow,
+        Some(TEST_TRUST_ZONE_ID),
+        None,
+        0,
+        None,
+    ) else {
+        panic!("local-ingress twin must still steer into blue");
+    };
+    assert_eq!(local_table, "blue.inet.0");
+    assert_eq!((local_domain, local_check), install_table_identity("blue"));
+}
+
+/// #16503 control: an ambiguous stamp does NOT populate
+/// `fabric_ingress_ifindex` (stage 9 withholds it), so the receiver must not
+/// consult the scope's FBF filter. Modelled at the meta contract: fabric raw
+/// ingress with the scope field zero must fall back to the native table even
+/// though the (withheld) scope interface carries a matching steer.
+#[test]
+fn ambiguous_fabric_shape_does_not_consult_scope_filter_16503() {
+    const FABRIC_IFINDEX: i32 = 102;
+    let snapshot = pbr_snapshot_for("10.0.0.99/32", "blue");
+    let state = build_forwarding_state(&snapshot);
+    let flow = v4_flow(
+        Ipv4Addr::new(10, 0, 0, 42),
+        Ipv4Addr::new(10, 0, 0, 99),
+        0,
+    );
+    // Ambiguous shape: `fabric_ingress_ifindex == 0` (withheld by stage 9).
+    // Without the scope, the fabric link (102, no filter) has no FBF filter,
+    // so the outcome is the native fallback for the claimed zone, never the
+    // blue steer the withheld scope's filter would have produced.
+    let meta = v4_meta(FABRIC_IFINDEX);
+    assert_eq!(meta.fabric_ingress_ifindex, 0);
+    let outcome = ingress_route_table_override(
+        &state,
+        &[],
+        meta,
+        &flow,
+        Some(TEST_TRUST_ZONE_ID),
+        None,
+        0,
+        None,
+    );
+    match outcome {
+        RouteOverride::Table { table, domain, check } => {
+            assert_ne!(
+                (table.as_str(), (domain, check)),
+                ("blue.inet.0", install_table_identity("blue")),
+                "#16503: ambiguous/withheld scope must not consult the peer FBF filter (blue steer)"
+            );
+        }
+        RouteOverride::None | RouteOverride::Drop => {}
+    }
+}
