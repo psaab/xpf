@@ -4218,7 +4218,11 @@ address or DHCP; a missing statement is a commit error. Tolerant load warns,
 while runtime quarantines ambiguous VID assignments rather than bridging
 them. ARP/LLDP still pass from XDP to the local kernel L2 path; networkd's
 explicit `Bridge=` attachments bound the kernel bridge flood to the declared
-members.
+members. Member VLAN devices are created by the dataplane compiler whether
+or not the member unit is also named in a security zone (#16634): the IRB
+layout (L2-only members, only `irb.N` zoned) needs no member zoning for the
+bridge to gain its ports, and zoning a member remains a policy choice, not
+a device-creation prerequisite.
 
 **And an escape can become live when someone else fixes the value-drop.** The
 archive-sites escape is inert TODAY only because the value is also dropped. A

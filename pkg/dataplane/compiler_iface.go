@@ -976,7 +976,190 @@ func programZoneMaps(dp DataPlane, cfg *config.Config, result *CompileResult) (*
 		}
 	}
 
+	// #16634: bridge-domain members that no zone names (the IRB layout:
+	// members L2-only, only irb.N zoned) were never visited above, so
+	// their VLAN children were never created and br-<bd> had no ports.
+	// Create them here, after the zone loop. It does NOT zone-map them,
+	// add them to pendingXDP, or reconcile addresses: they are L2 bridge
+	// ports, not zoned surfaces; networkd enslaves the existing child
+	// to br-<bd> via Bridge=.
+	if err := st.ensureBridgeDomainMemberVLANs(dp, cfg, result); err != nil {
+		return st, err
+	}
+
 	return st, nil
+}
+
+// bridgeMemberVLAN identifies one explicit bridge-domain member's VLAN
+// child: the Linux parent name, its VLAN ID, the member's config identity
+// (for disable resolution), and the bridge it joins.
+type bridgeMemberVLAN struct {
+	physName string
+	cfgName  string
+	unitNum  int
+	vlanID   int
+	subName  string
+	bridge   string
+}
+
+// bridgeDomainMemberVLANs enumerates the explicit bridge-domain members
+// that resolve to a configured tagged VLAN unit, using the same identity
+// rules buildBridgeDomainModels uses for BridgeMaster (explicit member
+// only, VID owned by exactly that domain, tagging enabled, unit present).
+// The list is sorted by subName so creation order is deterministic
+// despite Go map/range order over interfaces and domains.
+func bridgeDomainMemberVLANs(cfg *config.Config) []bridgeMemberVLAN {
+	if cfg == nil {
+		return nil
+	}
+	vidDomain := make(map[int]string)
+	ambiguousVID := make(map[int]bool)
+	for _, bd := range cfg.BridgeDomains {
+		if bd == nil {
+			continue
+		}
+		for _, vid := range bd.VlanIDs {
+			if owner, ok := vidDomain[vid]; ok && owner != bd.Name {
+				ambiguousVID[vid] = true
+			} else {
+				vidDomain[vid] = bd.Name
+			}
+		}
+	}
+	rethToPhysical := cfg.RethToPhysical()
+	bySub := make(map[string]bridgeMemberVLAN)
+	for _, bd := range cfg.BridgeDomains {
+		if bd == nil {
+			continue
+		}
+		bridgeName := "br-" + bd.Name
+		for _, raw := range bd.Members {
+			ref := cfg.SplitInterfaceUnitRef(raw)
+			if !ref.HasUnit {
+				continue
+			}
+			unitNumber, _, err := config.CanonicalLogicalUnit(ref.UnitTok)
+			if err != nil {
+				continue
+			}
+			ifc := cfg.Interfaces.Interfaces[ref.Base]
+			if ifc == nil {
+				continue
+			}
+			effective := ifc
+			effectiveName := ref.Base
+			memberBase := ref.Base
+			if ifc.RedundantParent != "" {
+				if parent := cfg.Interfaces.Interfaces[ifc.RedundantParent]; parent != nil {
+					effective = parent
+					effectiveName = ifc.RedundantParent
+				}
+			} else if physical, ok := rethToPhysical[ref.Base]; ok {
+				memberBase = physical
+			}
+			if !effective.TaggingEnabled() {
+				continue
+			}
+			unit := effective.Units[unitNumber]
+			if unit == nil {
+				continue
+			}
+			vid := unit.VlanID
+			if vid < 1 || vid > 4094 || ambiguousVID[vid] || vidDomain[vid] != bd.Name {
+				continue
+			}
+			physName := config.LinuxIfName(memberBase)
+			subName := fmt.Sprintf("%s.%d", physName, vid)
+			if _, dup := bySub[subName]; dup {
+				continue
+			}
+			bySub[subName] = bridgeMemberVLAN{
+				physName: physName,
+				cfgName:  effectiveName,
+				unitNum:  unitNumber,
+				vlanID:   vid,
+				subName:  subName,
+				bridge:   bridgeName,
+			}
+		}
+	}
+	out := make([]bridgeMemberVLAN, 0, len(bySub))
+	for _, m := range bySub {
+		out = append(out, m)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].subName < out[j].subName })
+	return out
+}
+
+// ensureBridgeDomainMemberVLANs creates the VLAN child for every explicit
+// bridge-domain member the zone loop did not already program (#16634).
+//
+// Failure semantics mirror mapZoneInterface's VLAN branch:
+//   - errVLANCreateFailed (LinkAdd refused) fails the apply: the config
+//     asked for a device, it does not exist, and networkd would enslave
+//     nothing while the commit reports success (#6893 rationale).
+//   - any other error (absent parent, adoption refusal, bring-up) keeps
+//     the soft skip but records an UnarmedSurface naming the member.
+//   - a missing parent likewise records (via missingInterfaceRecord) and
+//     skips, matching the zoned path's absent-parent policy.
+//
+// A zoned member whose creation succeeded already wrote its
+// vlan_iface_map entry (tracked in st.writtenVlanIface by child ifindex);
+// ensure is idempotent, so calling it again adopts the existing child,
+// and the written-set check below suppresses the duplicate map write.
+// A member whose zoned creation soft-failed has no written entry and is
+// retried here; a second failure records once (recordUnarmedSurface
+// dedups on name).
+func (st *zoneMapState) ensureBridgeDomainMemberVLANs(dp DataPlane, cfg *config.Config, result *CompileResult) error {
+	for _, m := range bridgeDomainMemberVLANs(cfg) {
+		physIface, err := result.cachedInterfaceByName(m.physName)
+		if err != nil {
+			result.recordUnarmedSurface(missingInterfaceRecord(m.physName, m.vlanID, "bridge-domain "+m.bridge, err))
+			continue
+		}
+		vlanDisabled := false
+		if dc, ok := cfg.Interfaces.Interfaces[m.cfgName]; ok && dc != nil {
+			if dc.Disable {
+				vlanDisabled = true
+			} else if du, ok := dc.Units[m.unitNum]; ok && du != nil && du.Disable {
+				vlanDisabled = true
+			}
+		}
+		subIfindex, vlanCreated, err := ensureVLANSubInterfaceFn(m.physName, m.vlanID, vlanDisabled)
+		if vlanCreated {
+			result.markHostMutated("created VLAN sub-interface")
+		}
+		if err != nil && errors.Is(err, errVLANCreateFailed) {
+			return fmt.Errorf("bridge-domain %s member %s.%d: %w", m.bridge, m.physName, m.vlanID, err)
+		}
+		if err != nil {
+			slog.Warn("bridge-domain member VLAN sub-interface failed, skipping",
+				"parent", m.physName, "vlan_id", m.vlanID, "bridge", m.bridge, "err", err)
+			what := "create failed"
+			switch {
+			case errors.Is(err, errVLANAdoptRefused):
+				what = "not adopted"
+			case errors.Is(err, errVLANBringUpFailed):
+				what = "created but could not be brought up"
+			}
+			result.recordUnarmedSurface(UnarmedSurface{
+				Name:   m.subName,
+				Reason: fmt.Sprintf("VLAN sub-interface %s for bridge-domain member in %s: %v", what, m.bridge, err),
+			})
+			continue
+		}
+		if st.writtenVlanIface[uint32(subIfindex)] {
+			continue
+		}
+		if err := dp.SetVlanIfaceInfo(subIfindex, physIface.Index, uint16(m.vlanID)); err != nil {
+			return fmt.Errorf("set vlan_iface_info %s: %w", m.subName, err)
+		}
+		st.writtenVlanIface[uint32(subIfindex)] = true
+		slog.Info("bridge-domain member VLAN sub-interface ensured",
+			"parent", m.physName, "vlan_id", m.vlanID,
+			"sub_ifindex", subIfindex, "bridge", m.bridge)
+	}
+	return nil
 }
 
 // mapZoneInterface maps one zone interface reference into the dataplane:
