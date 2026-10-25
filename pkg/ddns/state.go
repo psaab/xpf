@@ -351,7 +351,22 @@ type ownedRecord struct {
 	// the publish may have been applied despite the error, so this value
 	// stays a cleanup candidate alongside PriorAddrText until a later
 	// publish removes every candidate != the new value. Omitted when empty.
+	// Retained for backwards compatibility: stores written before #16578
+	// carry only this single slot. On load it is folded into
+	// AmbiguousPriorAddrTexts (see ambiguousCandidates); new writes keep it
+	// in sync with the first list element so a downgrade still sees one
+	// candidate rather than none.
 	AmbiguousPriorAddrText string `json:"ambiguous_prior_addr_text,omitempty"`
+	// AmbiguousPriorAddrTexts is the bounded append-only list of DESIRED
+	// values whose wire outcome is unknown after ambiguous publish errors
+	// (#16578, residual of #15225 A40-02). A single slot loses a candidate
+	// on the third ambiguity in a row (Arm 2) or, combined with the old
+	// >1 threading gate, on a first-publish ambiguity followed by a
+	// renumber (Arm 1): the overwritten value may be live on the wire yet
+	// no later publish ever removes it. The list is bounded by
+	// maxAmbiguousPriorCandidates; when full the oldest candidate is
+	// dropped (FIFO) — see appendAmbiguousCandidate. Omitted when empty.
+	AmbiguousPriorAddrTexts []string `json:"ambiguous_prior_addr_texts,omitempty"`
 	// Scope is the ScopeKey this record belongs to (#2691 P1b, plan §5.4). It
 	// is the per-family / per-interface / per-RG / per-routing-instance scope
 	// the record was published under, so two scopes for the same name+address
@@ -373,6 +388,92 @@ func (r ownedRecord) scopeOf() ScopeKey {
 		return ScopeKey{}
 	}
 	return *r.Scope
+}
+
+// maxAmbiguousPriorCandidates bounds the append-only ambiguous candidate
+// list (#16578). Each ambiguous publish can leave at most one extra value
+// live on the wire, so the list grows by at most one per renumber during
+// an outage. 16 covers any realistic renumber burst during a provider
+// outage (the issue's Arm 2 needs 3) while keeping the durable row and
+// every subsequent UPDATE message trivially small. When the bound is hit
+// the OLDEST candidate is dropped: it is the least likely to still be the
+// live value (every later publish attempted to replace it), and dropping
+// is fail-visible in that the dropped value, if somehow still live, is
+// exactly the pre-#16578 behaviour for that one value — never worse.
+const maxAmbiguousPriorCandidates = 16
+
+// ambiguousCandidates returns the full deduplicated ambiguous candidate
+// set for a record: the bounded list plus the legacy single slot (folded
+// in for stores written before #16578), empties dropped, order preserved
+// (oldest first).
+func (r ownedRecord) ambiguousCandidates() []string {
+	var out []string
+	add := func(s string) {
+		if s == "" {
+			return
+		}
+		for _, c := range out {
+			if c == s {
+				return
+			}
+		}
+		out = append(out, s)
+	}
+	for _, s := range r.AmbiguousPriorAddrTexts {
+		add(s)
+	}
+	add(r.AmbiguousPriorAddrText)
+	return out
+}
+
+// withAmbiguousCandidates returns a copy of r with its ambiguous candidate
+// set replaced by cands (deduplicated, bounded FIFO, empties dropped) and
+// the legacy single slot kept in sync with the first element so a
+// downgraded binary still retains one cleanup candidate.
+func (r ownedRecord) withAmbiguousCandidates(cands []string) ownedRecord {
+	var out []string
+	for _, s := range cands {
+		if s == "" {
+			continue
+		}
+		dup := false
+		for _, c := range out {
+			if c == s {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			out = append(out, s)
+		}
+	}
+	for len(out) > maxAmbiguousPriorCandidates {
+		out = out[1:]
+	}
+	r.AmbiguousPriorAddrTexts = out
+	if len(out) > 0 {
+		r.AmbiguousPriorAddrText = out[0]
+	} else {
+		r.AmbiguousPriorAddrText = ""
+	}
+	return r
+}
+
+// appendAmbiguousCandidate returns a copy of r with cand appended to its
+// ambiguous candidate set (no-op if already present or empty), bounded
+// FIFO via withAmbiguousCandidates.
+func (r ownedRecord) appendAmbiguousCandidate(cand string) ownedRecord {
+	if cand == "" {
+		return r
+	}
+	return r.withAmbiguousCandidates(append(r.ambiguousCandidates(), cand))
+}
+
+// normalizeAmbiguous folds the legacy single slot into the bounded list
+// and re-syncs the slot, so in-memory records are always in canonical
+// list form after a load. Idempotent.
+func (r ownedRecord) normalizeAmbiguous() ownedRecord {
+	return r.withAmbiguousCandidates(r.ambiguousCandidates())
 }
 
 // scopeNonFamily returns the record's scope with the Family axis
@@ -799,7 +900,7 @@ func loadDDNSState(path string) (*ddnsState, error) {
 		}
 	}
 	for _, r := range f.Records {
-		s.records[ownedRecordKey(r.scopeOf(), r.Identity, r.Address)] = r
+		s.records[ownedRecordKey(r.scopeOf(), r.Identity, r.Address)] = r.normalizeAmbiguous()
 	}
 	return s, nil
 }
@@ -820,6 +921,11 @@ func validOwnedRecordAddrs(r ownedRecord) error {
 	if r.AddrText != "" {
 		if _, err := netip.ParseAddr(r.AddrText); err != nil {
 			return fmt.Errorf("record %q addr_text %q: %w", r.FQDN, r.AddrText, err)
+		}
+	}
+	for _, c := range r.ambiguousCandidates() {
+		if _, err := netip.ParseAddr(c); err != nil {
+			return fmt.Errorf("record %q ambiguous_prior %q: %w", r.FQDN, c, err)
 		}
 	}
 	return nil

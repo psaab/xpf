@@ -1485,7 +1485,9 @@ func (m *SurfaceAManager) publishLocked(ctx context.Context, sc SurfaceAScope, a
 			}
 			addCand(prevOwned.PriorAddrText)
 			addCand(prevOwned.AddrText)
-			addCand(prevOwned.AmbiguousPriorAddrText)
+			for _, c := range prevOwned.ambiguousCandidates() {
+				addCand(c)
+			}
 		} else {
 			// The previously-published rdata lives in AddrText for a Surface A
 			// record (Address is the "" scope key, #2691 P2). Reading Address here
@@ -1508,15 +1510,22 @@ func (m *SurfaceAManager) publishLocked(ctx context.Context, sc SurfaceAScope, a
 	// xpf's own prior value, never a co-resident FOREIGN record at a shared
 	// name. On a first publish (or a lost prior value) PrevAddr stays invalid and
 	// the backend does an additive insert/create instead of clobbering the name.
-	// #15225: PrevAddrs carries the full ambiguous candidate set when >1.
+	// #15225/#16578: PrevAddrs carries the full candidate set whenever ANY
+	// candidate differs from the new value — dropping the old >1 gate. A
+	// first-publish pending row yields exactly one candidate (its AddrText,
+	// PriorAddrText==""); with the gate that single candidate was never
+	// threaded, so the backend fell back to Insert-only and a later renumber
+	// orphaned the possibly-live first value. Backends already union
+	// PrevAddr+PrevAddrs and skip candidates == Addr, so threading a
+	// single differing candidate is safe for settled rows too.
 	if prevAddr != "" {
 		if pa, perr := netip.ParseAddr(prevAddr); perr == nil {
 			rec.PrevAddr = pa.Unmap()
 		}
 	}
-	if len(prevCandidates) > 1 {
-		for _, cs := range prevCandidates {
-			if pa, perr := netip.ParseAddr(cs); perr == nil {
+	for _, cs := range prevCandidates {
+		if pa, perr := netip.ParseAddr(cs); perr == nil {
+			if pa.Unmap() != addr.Unmap() {
 				rec.PrevAddrs = append(rec.PrevAddrs, pa.Unmap())
 			}
 		}
@@ -1607,16 +1616,30 @@ func (m *SurfaceAManager) publishLocked(ctx context.Context, sc SurfaceAScope, a
 					m.state.delete(key, surfaceAIdentity, "")
 				}
 			} else if hadPrev && prevOwned.PublishPending {
-				// Already pending: preserve chained candidates.
+				// Already pending: append the prior desired to the bounded
+				// candidate list (#16578). The old single-slot overwrite
+				// lost the earlier desired on the third ambiguity in a
+				// row, orphaning it if it had landed. Prev candidates
+				// carried over from prevOwned are preserved; the new
+				// desired (ow.AddrText) is NOT itself a candidate — it
+				// is the pending desired, and becomes a candidate only
+				// if a later publish supersedes it ambiguously.
 				keep := ow
-				keep.AmbiguousPriorAddrText = prevOwned.AddrText
-				if keep.AmbiguousPriorAddrText == ow.AddrText {
-					keep.AmbiguousPriorAddrText = prevOwned.AmbiguousPriorAddrText
+				keep = keep.withAmbiguousCandidates(prevOwned.ambiguousCandidates())
+				if prevOwned.AddrText != ow.AddrText {
+					keep = keep.appendAmbiguousCandidate(prevOwned.AddrText)
 				}
 				m.state.put(keep)
+			} else if hadPrev && !prevOwned.PublishPending {
+				// Settled prior ambiguously superseded: the prior desired
+				// IS prevOwned's confirmed value, already retained as
+				// PriorAddrText (== prevAddr) on ow, so no ambiguous
+				// candidate is needed. Leaving ow is correct.
 			}
-			// Fresh ambiguous failure: ow already IS the pending row
-			// {desired, prior=confirmed}; leaving it is the fix.
+			// Fresh ambiguous failure (no prior): ow already IS the
+			// pending row {desired, prior=""}; its AddrText is the sole
+			// candidate and is threaded on the next publish via the
+			// pending branch (#16578 Arm 1). Leaving it is the fix.
 			_ = m.state.save()
 		}
 		m.upsertFail++
@@ -1665,7 +1688,7 @@ func (m *SurfaceAManager) publishLocked(ctx context.Context, sc SurfaceAScope, a
 	confirmed := ow
 	confirmed.PublishPending = false
 	confirmed.PriorAddrText = ""
-	confirmed.AmbiguousPriorAddrText = ""
+	confirmed = confirmed.withAmbiguousCandidates(nil)
 	m.state.put(confirmed)
 	if err := m.state.save(); err != nil {
 		slog.Warn("ddns surface-a: cannot persist confirmed ownership after publish (record still owned via pending write-ahead)",
@@ -1887,9 +1910,7 @@ func (m *SurfaceAManager) withdrawTargets(owned ownedRecord) []netip.Addr {
 		if owned.PriorAddrText != "" {
 			texts = append(texts, owned.PriorAddrText)
 		}
-		if owned.AmbiguousPriorAddrText != "" {
-			texts = append(texts, owned.AmbiguousPriorAddrText)
-		}
+		texts = append(texts, owned.ambiguousCandidates()...)
 	}
 	out := make([]netip.Addr, 0, len(texts))
 	seen := make(map[netip.Addr]struct{}, len(texts))

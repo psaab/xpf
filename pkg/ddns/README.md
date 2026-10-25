@@ -725,18 +725,25 @@ ownership so the next reconcile retries every candidate (an already-deleted one 
 benign). Fail-on-revert: `surface_a_withdraw_pending_5334_test.go` (both a
 single-`AddrText` revert and a prefer-`PriorAddrText`/skip revert go RED).
 
-**Ambiguous publish keeps every candidate (#15225 A40-02).** A publish whose
+**Ambiguous publish keeps every candidate (#15225 A40-02, #16578).** A publish whose
 wire UPDATE was applied but whose reply was lost returns an error that is
 indistinguishable from a failure — rolling the durable row back to the single
 confirmed prior would orphan the possibly-live new value. `publishLocked`
 therefore rolls back ONLY on a definitive rejection (`isDefinitivePublishRejection`:
 conflict refusal, auth, definitive rcodes, permanent config errors); every
 other error keeps the PENDING row with every candidate retained
-(`PriorAddrText` + `AmbiguousPriorAddrText`), `LeaseDNSRecord.PrevAddrs`
-threads the full set to the backend, and the next publish removes ALL
+(`PriorAddrText` + `AmbiguousPriorAddrTexts`, the bounded append-only list
+that superseded the single `AmbiguousPriorAddrText` slot — the slot is kept
+in sync with the first element for downgrade compat and folded in on load),
+`LeaseDNSRecord.PrevAddrs` threads the full set to the backend whenever ANY
+candidate differs from the new value (the old `>1` gate dropped the sole
+candidate of a first-publish pending row), and the next publish removes ALL
 candidates != the new value (rfc2136 in one UPDATE, cloudflare by deleting
-every candidate row, route53 in the merge). Withdraw deletes the ambiguous
-candidate too. Fail-on-revert: `surface_a_ambiguous_15225_test.go`.
+every candidate row, route53 in the merge). The list is bounded at
+`maxAmbiguousPriorCandidates` (16, FIFO drop-oldest). Withdraw deletes every
+ambiguous candidate too. Fail-on-revert: `surface_a_ambiguous_15225_test.go`,
+`surface_a_ambiguous_16578_test.go` (both lost-reply arms end with only the
+newest value on the wire).
 
 **Generic http:// credential gate (#15225 A40-03).** The #14386 fixed
 credential key-name list missed `pass=`/`key=`/`api-token=`/`pwd=`/`p=`; both
