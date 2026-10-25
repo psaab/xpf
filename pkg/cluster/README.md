@@ -4308,11 +4308,16 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   row. The primary's authoritative session-row presence is the liveness
   evidence; the mirror's `LastSeen` may lag due to budgeted refreshes.
   Per-session refresh cadence uses the tighter of the primary row's effective
-  timeout and the receiver's import-time timeout: unpromoted non-TCP app
-  overrides cannot outlive the receiver's global protocol window, and TCP
-  opening/closing rows use their state-specific windows. Newly queued shorter-
-  timeout rows and capability discovery wake/re-cap an idle timer. The marker
-  is sent only to a peer advertising the capability and is propagated to the
+  timeout and the receiver's effective import timeout. UDP/ICMP and TCP
+  opening/closing/TIME_WAIT windows track the applied dataplane flow profile;
+  it is seeded from and refreshed only by the reconciled capture authority, so
+  a worker-deferred candidate cannot advance the sender timer. TCP
+  handshake/close state is restored from sender memo before cadence and due
+  checks because the BPF mirror omits it.
+  A queued row's faster cadence survives concurrent scan publication, and both
+  single- and dual-fabric constructors initialize the buffered wake channel.
+  Capability discovery also wakes/re-caps an idle timer. The marker is sent only
+  to a peer advertising the capability and is propagated to the
   synthesized reverse companion, so both imported halves renew the standby
   HOLD clock without treating the snapshot as packet activity. When refreshes
   stop, the Rust timer wheel's stale-synced ceiling (#2120,

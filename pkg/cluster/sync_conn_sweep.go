@@ -28,7 +28,9 @@ func (s *SessionSync) StartSyncSweep(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-s.sweepWakeCh:
-				requestedScanSeconds := s.sweepWakeScanIntervalSeconds.Load()
+				// The buffered token owns the CAS-min payload; the timer case
+				// may win a select race without consuming that request.
+				requestedScanSeconds := s.sweepWakeScanIntervalSeconds.Swap(0)
 				if requestedScanSeconds > 0 {
 					interval = min(interval, time.Duration(requestedScanSeconds)*time.Second)
 				}
@@ -40,7 +42,6 @@ func (s *SessionSync) StartSyncSweep(ctx context.Context) {
 				}
 				timer.Reset(s.capSweepIntervalForLiveness(interval))
 			case <-timer.C:
-				s.sweepWakeScanIntervalSeconds.Store(0)
 				activeInterval, idleInterval = s.sweepIntervals()
 				synced := s.syncSweep()
 				if synced > 0 || s.syncBackfillNeeded.Load() {
@@ -73,16 +74,28 @@ func (s *SessionSync) capSweepIntervalForLiveness(interval time.Duration) time.D
 // queued row requires a faster liveness scan than the current adaptive cadence.
 // Long-lived rows do not disturb backoff; the buffered wake channel coalesces
 // bursts of shorter rows.
+// Each registration is counted even when it does not lower the current
+// minimum, so a concurrent publication preserves it for the next enumeration.
 func (s *SessionSync) wakeSweepForQueuedSession(protocol uint8, timeout, appTimeout uint32, replyPackets uint64, handshakeState, closeClass uint8) {
 	if s == nil || !s.PrimaryLivenessCapable() {
 		return
 	}
-	requested := primaryLivenessScanInterval(protocol, timeout, appTimeout, replyPackets, handshakeState, closeClass)
+	requested := s.primaryLivenessScanInterval(protocol, timeout, appTimeout, replyPackets, handshakeState, closeClass)
+	s.primaryLivenessScanIntervalMu.Lock()
 	current := s.primaryLivenessScanIntervalSeconds.Load()
 	if current == 0 {
 		current = initialPrimaryLivenessScanIntervalSeconds
 	}
-	if requested < current {
+	shorter := requested < current
+	if shorter {
+		s.primaryLivenessScanIntervalSeconds.Store(requested)
+	}
+	if pending := s.pendingPrimaryLivenessScanIntervalSeconds; pending == 0 || requested < pending {
+		s.pendingPrimaryLivenessScanIntervalSeconds = requested
+	}
+	s.pendingPrimaryLivenessScanGeneration++
+	s.primaryLivenessScanIntervalMu.Unlock()
+	if shorter {
 		s.wakeSyncSweepForInterval(requested)
 	}
 }
@@ -132,6 +145,38 @@ func (s *SessionSync) sweepNow() uint64 {
 	return monotonicSeconds()
 }
 
+func (s *SessionSync) restoreTCPSessionStateV4(key dataplane.SessionKey, value *dataplane.SessionValue) {
+	if key.Protocol != unix.IPPROTO_TCP || value.SessionID == 0 {
+		return
+	}
+	s.genState.genSentMu.Lock()
+	if memo, ok := s.genState.tcpHandshakeSentV4[key]; ok &&
+		memo.sessionID == value.SessionID && memo.state > value.TCPHandshakeState {
+		value.TCPHandshakeState = memo.state
+	}
+	if memo, ok := s.genState.closeClassSentV4[key]; ok &&
+		memo.sessionID == value.SessionID && memo.class > value.TCPCloseClass {
+		value.TCPCloseClass = memo.class
+	}
+	s.genState.genSentMu.Unlock()
+}
+
+func (s *SessionSync) restoreTCPSessionStateV6(key dataplane.SessionKeyV6, value *dataplane.SessionValueV6) {
+	if key.Protocol != unix.IPPROTO_TCP || value.SessionID == 0 {
+		return
+	}
+	s.genState.genSentMu.Lock()
+	if memo, ok := s.genState.tcpHandshakeSentV6[key]; ok &&
+		memo.sessionID == value.SessionID && memo.state > value.TCPHandshakeState {
+		value.TCPHandshakeState = memo.state
+	}
+	if memo, ok := s.genState.closeClassSentV6[key]; ok &&
+		memo.sessionID == value.SessionID && memo.class > value.TCPCloseClass {
+		value.TCPCloseClass = memo.class
+	}
+	s.genState.genSentMu.Unlock()
+}
+
 // stampSweepV4 rechecks a batch-read mirror row while holding the same
 // generation fence used by queue-time deletes. A close that wins the recheck
 // removes the row and is skipped; a close that races after the recheck waits
@@ -144,12 +189,15 @@ func (s *SessionSync) stampSweepV4(
 	s.bulkSnapshotGenMu.Lock()
 	defer s.bulkSnapshotGenMu.Unlock()
 	current, err := s.sessions.GetV4(key)
+	if err == nil {
+		s.restoreTCPSessionStateV4(key, &current)
+	}
 	if err != nil ||
 		current.IsReverse != 0 ||
 		(!primaryLiveness && current.Created < threshold) ||
 		current.Created > now ||
 		(primaryLiveness && (!s.PrimaryLivenessCapable() ||
-			!primaryLivenessDue(current.Created, key.Protocol, current.Timeout, current.AppTimeout, current.RevPackets, current.TCPHandshakeState, current.TCPCloseClass, current.SessionID, livenessThreshold, now))) ||
+			!s.primaryLivenessDue(current.Created, key.Protocol, current.Timeout, current.AppTimeout, current.RevPackets, current.TCPHandshakeState, current.TCPCloseClass, current.SessionID, livenessThreshold, now))) ||
 		!s.ShouldSyncSessionV4(current) {
 		return dataplane.SessionValue{}, false
 	}
@@ -167,18 +215,91 @@ func (s *SessionSync) stampSweepV6(
 	s.bulkSnapshotGenMu.Lock()
 	defer s.bulkSnapshotGenMu.Unlock()
 	current, err := s.sessions.GetV6(key)
+	if err == nil {
+		s.restoreTCPSessionStateV6(key, &current)
+	}
 	if err != nil ||
 		current.IsReverse != 0 ||
 		(!primaryLiveness && current.Created < threshold) ||
 		current.Created > now ||
 		(primaryLiveness && (!s.PrimaryLivenessCapable() ||
-			!primaryLivenessDue(current.Created, key.Protocol, current.Timeout, current.AppTimeout, current.RevPackets, current.TCPHandshakeState, current.TCPCloseClass, current.SessionID, livenessThreshold, now))) ||
+			!s.primaryLivenessDue(current.Created, key.Protocol, current.Timeout, current.AppTimeout, current.RevPackets, current.TCPHandshakeState, current.TCPCloseClass, current.SessionID, livenessThreshold, now))) ||
 		!s.ShouldSyncSessionV6(current) {
 		return dataplane.SessionValueV6{}, false
 	}
 	current.PrimaryLiveness = primaryLiveness
 	s.stampInstallGenV6(key, &current)
 	return current, true
+}
+
+// ReceiverSessionTimeoutProfile is the effective flow timeout configuration
+// compiled into the receiver dataplane. Zero TCP/UDP/ICMP values select the
+// dataplane defaults; TIME_WAIT flags mirror the corresponding config leaves.
+type ReceiverSessionTimeoutProfile struct {
+	UDPSessionSeconds            int
+	ICMPSessionSeconds           int
+	TCPEstablishedSeconds        int
+	TCPOpeningSeconds            int
+	TCPClosingSeconds            int
+	TCPTimeWaitSeconds           int
+	TCPTimeWaitSessionAgeout     bool
+	TCPTimeWaitApplyToHalfClosed bool
+	TCPFinInvalidateSession      bool
+}
+
+func defaultReceiverSessionTimeoutProfile() ReceiverSessionTimeoutProfile {
+	return ReceiverSessionTimeoutProfile{
+		UDPSessionSeconds:     config.DataplaneUDPSessionTimeoutSecs,
+		ICMPSessionSeconds:    config.DataplaneICMPSessionTimeoutSecs,
+		TCPEstablishedSeconds: config.DataplaneTCPEstablishedWindowSecs,
+		TCPOpeningSeconds:     config.DataplaneTCPOpeningWindowSecs,
+		TCPClosingSeconds:     config.DataplaneTCPClosingWindowSecs,
+		TCPTimeWaitSeconds:    config.DataplaneTCPClosingWindowSecs,
+	}
+}
+
+func normalizeReceiverSessionTimeoutSeconds(seconds, defaultSeconds int) int {
+	if seconds <= 0 {
+		return defaultSeconds
+	}
+	if int64(seconds) > config.MaxDurationSeconds {
+		return int(config.MaxDurationSeconds)
+	}
+	return seconds
+}
+
+func (profile ReceiverSessionTimeoutProfile) normalized() ReceiverSessionTimeoutProfile {
+	defaults := defaultReceiverSessionTimeoutProfile()
+	profile.UDPSessionSeconds = normalizeReceiverSessionTimeoutSeconds(profile.UDPSessionSeconds, defaults.UDPSessionSeconds)
+	profile.ICMPSessionSeconds = normalizeReceiverSessionTimeoutSeconds(profile.ICMPSessionSeconds, defaults.ICMPSessionSeconds)
+	profile.TCPEstablishedSeconds = normalizeReceiverSessionTimeoutSeconds(profile.TCPEstablishedSeconds, defaults.TCPEstablishedSeconds)
+	profile.TCPOpeningSeconds = normalizeReceiverSessionTimeoutSeconds(profile.TCPOpeningSeconds, defaults.TCPOpeningSeconds)
+	profile.TCPClosingSeconds = normalizeReceiverSessionTimeoutSeconds(profile.TCPClosingSeconds, defaults.TCPClosingSeconds)
+	profile.TCPTimeWaitSeconds = normalizeReceiverSessionTimeoutSeconds(profile.TCPTimeWaitSeconds, defaults.TCPTimeWaitSeconds)
+	return profile
+}
+
+// SetReceiverSessionTimeoutProfile publishes the timeout profile used by the
+// active dataplane snapshot and prompts the liveness sweep to re-evaluate it.
+func (s *SessionSync) SetReceiverSessionTimeoutProfile(profile ReceiverSessionTimeoutProfile) {
+	if s == nil {
+		return
+	}
+	next := profile.normalized()
+	current := s.receiverSessionTimeouts.Load()
+	if current != nil && *current == next {
+		return
+	}
+	s.receiverSessionTimeouts.Store(&next)
+	s.primaryLivenessScanIntervalMu.Lock()
+	s.primaryLivenessScanIntervalSeconds.Store(initialPrimaryLivenessScanIntervalSeconds)
+	if pending := s.pendingPrimaryLivenessScanIntervalSeconds; pending == 0 ||
+		initialPrimaryLivenessScanIntervalSeconds < pending {
+		s.pendingPrimaryLivenessScanIntervalSeconds = initialPrimaryLivenessScanIntervalSeconds
+	}
+	s.pendingPrimaryLivenessScanGeneration++
+	s.primaryLivenessScanIntervalMu.Unlock()
+	s.wakeSyncSweepForInterval(initialPrimaryLivenessScanIntervalSeconds)
 }
 
 const (
@@ -203,6 +324,13 @@ func primaryNonTCPLivenessTimeout(sessionTimeout, appOverride uint64, replyPacke
 	return min(primaryTimeout, receiverTimeout)
 }
 
+func (s *SessionSync) receiverSessionTimeoutProfile() ReceiverSessionTimeoutProfile {
+	if profile := s.receiverSessionTimeouts.Load(); profile != nil {
+		return *profile
+	}
+	return defaultReceiverSessionTimeoutProfile()
+}
+
 // primaryLivenessTimeout returns the tighter of the primary's active idle
 // timeout and the receiver's import-time timeout. Non-TCP app overrides are
 // promoted only after reply traffic on the primary, but the receiver does not
@@ -211,6 +339,23 @@ func primaryNonTCPLivenessTimeout(sessionTimeout, appOverride uint64, replyPacke
 // 1800s no-entry fallback, so opening and closing rows are capped at their
 // source-derived state defaults before applying a shorter measured window.
 func primaryLivenessTimeout(protocol uint8, timeout, appTimeout uint32, replyPackets uint64, handshakeState, closeClass uint8) uint64 {
+	return primaryLivenessTimeoutWithProfile(
+		protocol, timeout, appTimeout, replyPackets, handshakeState, closeClass,
+		defaultReceiverSessionTimeoutProfile(),
+	)
+}
+
+func (s *SessionSync) primaryLivenessTimeout(protocol uint8, timeout, appTimeout uint32, replyPackets uint64, handshakeState, closeClass uint8) uint64 {
+	return primaryLivenessTimeoutWithProfile(
+		protocol, timeout, appTimeout, replyPackets, handshakeState, closeClass,
+		s.receiverSessionTimeoutProfile(),
+	)
+}
+
+func primaryLivenessTimeoutWithProfile(
+	protocol uint8, timeout, appTimeout uint32, replyPackets uint64,
+	handshakeState, closeClass uint8, profile ReceiverSessionTimeoutProfile,
+) uint64 {
 	appOverride := uint64(appTimeout)
 	if appOverride == 0 || appOverride > 86_400 {
 		appOverride = 0
@@ -219,16 +364,40 @@ func primaryLivenessTimeout(protocol uint8, timeout, appTimeout uint32, replyPac
 
 	switch protocol {
 	case unix.IPPROTO_UDP, unix.IPPROTO_ICMP, unix.IPPROTO_ICMPV6:
-		receiverTimeout := uint64(config.DataplaneUDPSessionTimeoutSecs)
+		receiverTimeout := uint64(profile.UDPSessionSeconds)
 		if protocol == unix.IPPROTO_ICMP || protocol == unix.IPPROTO_ICMPV6 {
-			receiverTimeout = uint64(config.DataplaneICMPSessionTimeoutSecs)
+			receiverTimeout = uint64(profile.ICMPSessionSeconds)
 		}
 		return primaryNonTCPLivenessTimeout(sessionTimeout, appOverride, replyPackets, receiverTimeout)
 	case unix.IPPROTO_TCP:
 		if closeClass != 0 {
-			closeTimeout := uint64(config.DataplaneTCPClosingWindowSecs)
-			if closeClass == 3 {
+			closeTimeout := uint64(profile.TCPClosingSeconds)
+			switch closeClass {
+			case 2:
+				if profile.TCPFinInvalidateSession {
+					return 0
+				}
+				if profile.TCPTimeWaitSessionAgeout {
+					closeTimeout = uint64(profile.TCPEstablishedSeconds)
+					if appOverride != 0 {
+						closeTimeout = appOverride
+					}
+				} else {
+					closeTimeout = uint64(profile.TCPTimeWaitSeconds)
+				}
+			case 3:
 				closeTimeout = uint64(config.DataplaneTCPRSTWindowSecs)
+			default:
+				if profile.TCPTimeWaitApplyToHalfClosed {
+					if profile.TCPTimeWaitSessionAgeout {
+						closeTimeout = uint64(profile.TCPEstablishedSeconds)
+						if appOverride != 0 {
+							closeTimeout = appOverride
+						}
+					} else {
+						closeTimeout = uint64(profile.TCPTimeWaitSeconds)
+					}
+				}
 			}
 			if sessionTimeout == 0 {
 				return closeTimeout
@@ -237,7 +406,7 @@ func primaryLivenessTimeout(protocol uint8, timeout, appTimeout uint32, replyPac
 		}
 		if handshakeState != dataplane.TCPHandshakeStateAbsent &&
 			handshakeState != dataplane.TCPHandshakeStateEstablished {
-			openingTimeout := uint64(config.DataplaneTCPOpeningWindowSecs)
+			openingTimeout := uint64(profile.TCPOpeningSeconds)
 			if sessionTimeout == 0 {
 				return openingTimeout
 			}
@@ -259,13 +428,24 @@ func primaryLivenessTimeout(protocol uint8, timeout, appTimeout uint32, replyPac
 	}
 }
 
-func primaryLivenessScanInterval(protocol uint8, timeout, appTimeout uint32, replyPackets uint64, handshakeState, closeClass uint8) uint64 {
-	period := primaryLivenessTimeout(protocol, timeout, appTimeout, replyPackets, handshakeState, closeClass)
+func primaryLivenessScanIntervalForTimeout(period uint64) uint64 {
 	if period == 0 {
 		return maxPrimaryLivenessScanIntervalSeconds
 	}
 	return max(initialPrimaryLivenessScanIntervalSeconds,
 		min(maxPrimaryLivenessScanIntervalSeconds, period/2))
+}
+
+func primaryLivenessScanInterval(protocol uint8, timeout, appTimeout uint32, replyPackets uint64, handshakeState, closeClass uint8) uint64 {
+	return primaryLivenessScanIntervalForTimeout(
+		primaryLivenessTimeout(protocol, timeout, appTimeout, replyPackets, handshakeState, closeClass),
+	)
+}
+
+func (s *SessionSync) primaryLivenessScanInterval(protocol uint8, timeout, appTimeout uint32, replyPackets uint64, handshakeState, closeClass uint8) uint64 {
+	return primaryLivenessScanIntervalForTimeout(
+		s.primaryLivenessTimeout(protocol, timeout, appTimeout, replyPackets, handshakeState, closeClass),
+	)
 }
 
 // primaryLivenessDue schedules a stable, per-session refresh phase from
@@ -274,7 +454,22 @@ func primaryLivenessScanInterval(protocol uint8, timeout, appTimeout uint32, rep
 // The previous watermark advances only after a complete scan, so one scan
 // emits at most one refresh even if it crosses multiple periods.
 func primaryLivenessDue(created uint64, protocol uint8, timeout, appTimeout uint32, replyPackets uint64, handshakeState, closeClass uint8, sessionID, previous, now uint64) bool {
-	idleTimeout := primaryLivenessTimeout(protocol, timeout, appTimeout, replyPackets, handshakeState, closeClass)
+	return primaryLivenessDueForTimeout(
+		created,
+		primaryLivenessTimeout(protocol, timeout, appTimeout, replyPackets, handshakeState, closeClass),
+		sessionID, previous, now,
+	)
+}
+
+func (s *SessionSync) primaryLivenessDue(created uint64, protocol uint8, timeout, appTimeout uint32, replyPackets uint64, handshakeState, closeClass uint8, sessionID, previous, now uint64) bool {
+	return primaryLivenessDueForTimeout(
+		created,
+		s.primaryLivenessTimeout(protocol, timeout, appTimeout, replyPackets, handshakeState, closeClass),
+		sessionID, previous, now,
+	)
+}
+
+func primaryLivenessDueForTimeout(created, idleTimeout, sessionID, previous, now uint64) bool {
 	if idleTimeout == 0 || created > now {
 		return false
 	}
@@ -438,7 +633,15 @@ func (s *SessionSync) syncSweep() int {
 			s.lastClosedCounter = closedCtr
 		}
 	}
+	// Snapshot just before enumeration; queue/profile registrations after this
+	// point keep their pending minimum through publication.
 	threshold := s.lastSweepTime
+	var enumerationGeneration uint64
+	if livenessCapable {
+		s.primaryLivenessScanIntervalMu.Lock()
+		enumerationGeneration = s.pendingPrimaryLivenessScanGeneration
+		s.primaryLivenessScanIntervalMu.Unlock()
+	}
 
 	// now is also the plausibility ceiling for Created in the filters below:
 	// saturated (MaxUint64) rows are known corrupt/far-future values and must
@@ -460,16 +663,17 @@ func (s *SessionSync) syncSweep() int {
 			future = true
 			return true
 		}
+		s.restoreTCPSessionStateV4(key, &val)
 		regular := val.Created >= threshold && val.Created <= now
 		liveness := livenessScanDue && val.Created < threshold &&
-			primaryLivenessDue(val.Created, key.Protocol, val.Timeout, val.AppTimeout, val.RevPackets, val.TCPHandshakeState, val.TCPCloseClass, val.SessionID, livenessThreshold, now)
+			s.primaryLivenessDue(val.Created, key.Protocol, val.Timeout, val.AppTimeout, val.RevPackets, val.TCPHandshakeState, val.TCPCloseClass, val.SessionID, livenessThreshold, now)
 		syncable := false
 		if livenessCapable || regular {
 			syncable = s.ShouldSyncSessionV4(val)
 		}
 		if livenessCapable && syncable {
 			minimumLivenessScanInterval = min(minimumLivenessScanInterval,
-				primaryLivenessScanInterval(key.Protocol, val.Timeout, val.AppTimeout, val.RevPackets, val.TCPHandshakeState, val.TCPCloseClass))
+				s.primaryLivenessScanInterval(key.Protocol, val.Timeout, val.AppTimeout, val.RevPackets, val.TCPHandshakeState, val.TCPCloseClass))
 		}
 		if (regular || liveness) && syncable {
 			announced := s.installTableAnnouncedV4(key)
@@ -510,16 +714,17 @@ func (s *SessionSync) syncSweep() int {
 			future = true
 			return true
 		}
+		s.restoreTCPSessionStateV6(key, &val)
 		regular := val.Created >= threshold && val.Created <= now
 		liveness := livenessScanDue && val.Created < threshold &&
-			primaryLivenessDue(val.Created, key.Protocol, val.Timeout, val.AppTimeout, val.RevPackets, val.TCPHandshakeState, val.TCPCloseClass, val.SessionID, livenessThreshold, now)
+			s.primaryLivenessDue(val.Created, key.Protocol, val.Timeout, val.AppTimeout, val.RevPackets, val.TCPHandshakeState, val.TCPCloseClass, val.SessionID, livenessThreshold, now)
 		syncable := false
 		if livenessCapable || regular {
 			syncable = s.ShouldSyncSessionV6(val)
 		}
 		if livenessCapable && syncable {
 			minimumLivenessScanInterval = min(minimumLivenessScanInterval,
-				primaryLivenessScanInterval(key.Protocol, val.Timeout, val.AppTimeout, val.RevPackets, val.TCPHandshakeState, val.TCPCloseClass))
+				s.primaryLivenessScanInterval(key.Protocol, val.Timeout, val.AppTimeout, val.RevPackets, val.TCPHandshakeState, val.TCPCloseClass))
 		}
 		if (regular || liveness) && syncable {
 			announced := s.installTableAnnouncedV6(key)
@@ -573,7 +778,17 @@ func (s *SessionSync) syncSweep() int {
 		slog.Info("cluster sync: sweep replay recovered", "queued", count, "threshold", threshold)
 	}
 	if livenessCapable {
+		// Keep requests registered after enumeration for another scan even
+		// when this publication already merged their interval numerically.
+		s.primaryLivenessScanIntervalMu.Lock()
+		if pending := s.pendingPrimaryLivenessScanIntervalSeconds; pending > 0 {
+			minimumLivenessScanInterval = min(minimumLivenessScanInterval, pending)
+			if s.pendingPrimaryLivenessScanGeneration == enumerationGeneration {
+				s.pendingPrimaryLivenessScanIntervalSeconds = 0
+			}
+		}
 		s.primaryLivenessScanIntervalSeconds.Store(minimumLivenessScanInterval)
+		s.primaryLivenessScanIntervalMu.Unlock()
 		if livenessScanDue {
 			s.lastPrimaryLivenessSweepTime = now
 		}

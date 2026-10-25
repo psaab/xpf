@@ -386,6 +386,22 @@ func policyInvalidationAppliedConfig(rt any) *config.Config {
 	}
 	return nil
 }
+func hasSessionTimeoutCaptureAuthority(rt any) bool {
+	unwrapped := dataplane.Unwrap(rt)
+	if unwrapped == nil {
+		return false
+	}
+	if _, ok := unwrapped.(interface{ Manager() *dpuserspace.Manager }); ok {
+		return true
+	}
+	if _, ok := unwrapped.(interface{ PolicyReadConfig() *config.Config }); ok {
+		return true
+	}
+	if _, ok := unwrapped.(interface{ AppliedConfig() *config.Config }); ok {
+		return true
+	}
+	return false
+}
 func (d *Daemon) armPolicyInvalidationPlanWithRename(
 	oldCfg, newCfg *config.Config,
 	renameApply *pendingRenameApply,

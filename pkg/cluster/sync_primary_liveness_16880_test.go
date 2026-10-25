@@ -156,6 +156,175 @@ func TestStartSyncSweepKeepsShortTimeoutLivenessCadence16880(t *testing.T) {
 	}
 }
 
+type livenessPublishBarrierStore16880 struct {
+	dataplane.SessionStore
+	enumerated chan struct{}
+	release    chan struct{}
+}
+
+func (s livenessPublishBarrierStore16880) ForEachV4(fn func(dataplane.SessionKey, dataplane.SessionValue) bool) error {
+	err := s.SessionStore.ForEachV4(fn)
+	close(s.enumerated)
+	<-s.release
+	return err
+}
+
+func TestQueuedShortTimeoutSurvivesConcurrentSweepPublish16880(t *testing.T) {
+	const base = uint64(12_000)
+	existingKey := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 0, 1}, DstIP: [4]byte{10, 0, 0, 2},
+		SrcPort: 12345, DstPort: 443, Protocol: unix.IPPROTO_UDP,
+	}
+	newKey := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 0, 3}, DstIP: [4]byte{10, 0, 0, 4},
+		SrcPort: 12346, DstPort: 443, Protocol: unix.IPPROTO_UDP,
+	}
+	dp := &mockSweepDP{
+		v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{
+			existingKey: {
+				State: dataplane.SessStateEstablished, Created: base - 1,
+				Timeout: 30, AppTimeout: 30, SessionID: 1,
+			},
+		},
+		sessionCounter: 1,
+	}
+	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+	barrier := livenessPublishBarrierStore16880{
+		SessionStore: ss.sessions,
+		enumerated:   make(chan struct{}),
+		release:      make(chan struct{}),
+	}
+	ss.sessions = barrier
+	ss.stats.Connected.Store(true)
+	ss.peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
+	ss.IsPrimaryFn = func() bool { return true }
+	ss.lastSweepTime = base
+	ss.lastPrimaryLivenessSweepTime = base
+	ss.primaryLivenessScanIntervalSeconds.Store(10)
+	ss.testSweepNow = func() uint64 { return base + 1 }
+
+	done := make(chan int, 1)
+	go func() { done <- ss.syncSweep() }()
+	select {
+	case <-barrier.enumerated:
+	case <-time.After(time.Second):
+		close(barrier.release)
+		t.Fatal("sweep did not reach the post-enumeration barrier")
+	}
+
+	// The new row is visible to the next sweep, but arrives after this scan's
+	// V4 enumeration and before it publishes the old 10s minimum.
+	newValue := dataplane.SessionValue{
+		State: dataplane.SessStateEstablished, Created: base + 1,
+		Timeout: 2, AppTimeout: 2, SessionID: 2,
+	}
+	dp.v4sessions[newKey] = newValue
+	ss.QueueSessionV4(newKey, newValue)
+	close(barrier.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("sweep did not finish after releasing the enumeration barrier")
+	}
+
+	if got := ss.primaryLivenessScanIntervalSeconds.Load(); got != 1 {
+		t.Fatalf("concurrent sweep publish overwrote queued 1s cadence: got %ds", got)
+	}
+}
+func TestQueuedEqualCadenceRegistrationSurvivesPublication16880(t *testing.T) {
+	const base = uint64(13_000)
+	existingKey := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 0, 1}, DstIP: [4]byte{10, 0, 0, 2},
+		SrcPort: 12345, DstPort: 443, Protocol: unix.IPPROTO_UDP,
+	}
+	queuedKey := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 0, 3}, DstIP: [4]byte{10, 0, 0, 4},
+		SrcPort: 12346, DstPort: 443, Protocol: unix.IPPROTO_UDP,
+	}
+	dp := &mockSweepDP{
+		v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{
+			existingKey: {
+				State: dataplane.SessStateEstablished, Created: base - 1,
+				Timeout: 30, AppTimeout: 30, SessionID: 1,
+			},
+		},
+		sessionCounter: 1,
+	}
+	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+	barrier := livenessPublishBarrierStore16880{
+		SessionStore: ss.sessions,
+		enumerated:   make(chan struct{}),
+		release:      make(chan struct{}),
+	}
+	ss.sessions = barrier
+	ss.stats.Connected.Store(true)
+	ss.peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
+	ss.IsPrimaryFn = func() bool { return true }
+	ss.lastSweepTime = base
+	ss.lastPrimaryLivenessSweepTime = base
+	ss.primaryLivenessScanIntervalSeconds.Store(1)
+	now := base + 1
+	ss.testSweepNow = func() uint64 { return now }
+
+	// The first short request has the same cadence as the published interval.
+	// The second request lands after enumeration; publication must not consume
+	// the pending registration before a later scan can observe its row.
+	ss.wakeSweepForQueuedSession(unix.IPPROTO_UDP, 2, 2, 0, 0, 0)
+	done := make(chan int, 1)
+	go func() { done <- ss.syncSweep() }()
+	select {
+	case <-barrier.enumerated:
+	case <-time.After(time.Second):
+		close(barrier.release)
+		t.Fatal("sweep did not reach the post-enumeration barrier")
+	}
+
+	queuedValue := dataplane.SessionValue{
+		State: dataplane.SessStateEstablished, Created: base - 1,
+		Timeout: 2, AppTimeout: 2, SessionID: 2,
+	}
+	ss.QueueSessionV4(queuedKey, queuedValue)
+	for len(ss.sendCh) > 0 {
+		<-ss.sendCh
+	}
+	close(barrier.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("sweep did not finish after releasing the enumeration barrier")
+	}
+	ss.primaryLivenessScanIntervalMu.Lock()
+	pending := ss.pendingPrimaryLivenessScanIntervalSeconds
+	ss.primaryLivenessScanIntervalMu.Unlock()
+	if pending != 1 {
+		t.Fatalf("post-enumeration registration was consumed before a scan saw its row: pending=%d, want 1", pending)
+	}
+
+	// Model one additional stale mirror batch: the registration must keep the
+	// next publication at one second even when that scan still misses the row.
+	ss.sessions = barrier.SessionStore
+	now = base + 2
+	ss.syncSweep()
+	if got := ss.primaryLivenessScanIntervalSeconds.Load(); got != 1 {
+		t.Fatalf("lagged scan raised liveness cadence to %ds, want 1s", got)
+	}
+
+	dp.v4sessions[queuedKey] = queuedValue
+	now = base + 3
+	ss.syncSweep()
+	for len(ss.sendCh) > 0 {
+		frame := <-ss.sendCh
+		if len(frame) < syncHeaderSize || frame[4] != syncMsgSessionV4 {
+			continue
+		}
+		gotKey, gotValue, ok := decodeSessionV4Payload(frame[syncHeaderSize:])
+		if ok && gotKey == queuedKey && gotValue.PrimaryLiveness {
+			return
+		}
+	}
+	t.Fatal("row was not refreshed after becoming visible to the liveness scan")
+}
+
 type livenessSweepProfileSource16880 struct{}
 
 func (livenessSweepProfileSource16880) DrainSessionDeltas(uint32) (dpruntime.SessionDeltaSnapshot, error) {
@@ -313,16 +482,38 @@ func TestSecondCapabilityByteIndependentBits16880(t *testing.T) {
 }
 
 func primaryLivenessSwept16880(t *testing.T, protocol uint8, value dataplane.SessionValue, now, previous uint64) bool {
+	return primaryLivenessSweptWithProfile16880(t, protocol, value, now, previous, ReceiverSessionTimeoutProfile{})
+}
+
+func primaryLivenessSweptWithProfile16880(t *testing.T, protocol uint8, value dataplane.SessionValue, now, previous uint64, profile ReceiverSessionTimeoutProfile) bool {
 	t.Helper()
 	key := dataplane.SessionKey{
 		SrcIP: [4]byte{10, 0, 0, 1}, DstIP: [4]byte{10, 0, 0, 2},
 		SrcPort: 12345, DstPort: 443, Protocol: protocol,
+	}
+	handshakeState := value.TCPHandshakeState
+	closeClass := value.TCPCloseClass
+	if protocol == unix.IPPROTO_TCP {
+		if value.SessionID == 0 {
+			value.SessionID = 42
+		}
+		value.TCPHandshakeState = 0
+		value.TCPCloseClass = 0
 	}
 	dp := &mockSweepDP{
 		v4sessions:     map[dataplane.SessionKey]dataplane.SessionValue{key: value},
 		sessionCounter: 1,
 	}
 	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+	if profile != (ReceiverSessionTimeoutProfile{}) {
+		ss.SetReceiverSessionTimeoutProfile(profile)
+	}
+	if protocol == unix.IPPROTO_TCP {
+		ss.genState.genSentMu.Lock()
+		ss.genState.tcpHandshakeSentV4[key] = sentTCPHandshakeState{sessionID: value.SessionID, state: handshakeState}
+		ss.genState.closeClassSentV4[key] = sentCloseClass{sessionID: value.SessionID, class: closeClass}
+		ss.genState.genSentMu.Unlock()
+	}
 	ss.stats.Connected.Store(true)
 	ss.peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
 	ss.IsPrimaryFn = func() bool { return true }
@@ -416,6 +607,119 @@ func TestPrimaryLivenessCadenceUsesReceiverTimeout16880(t *testing.T) {
 	}
 }
 
+func TestPrimaryLivenessUsesConfiguredReceiverUDPTimeout16880(t *testing.T) {
+	const base = uint64(15_000)
+	key := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 0, 1}, DstIP: [4]byte{10, 0, 0, 2},
+		SrcPort: 12345, DstPort: 443, Protocol: unix.IPPROTO_UDP,
+	}
+	dp := &mockSweepDP{
+		v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{
+			key: {
+				State: dataplane.SessStateEstablished, Created: base,
+				Timeout: 3600, AppTimeout: 3600, RevPackets: 1, SessionID: 10,
+			},
+		},
+		sessionCounter: 1,
+	}
+	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+	ss.SetReceiverSessionTimeoutProfile(ReceiverSessionTimeoutProfile{UDPSessionSeconds: 10})
+	ss.stats.Connected.Store(true)
+	ss.peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
+	ss.IsPrimaryFn = func() bool { return true }
+	ss.lastSweepTime = base + 1
+	ss.lastPrimaryLivenessSweepTime = base + 9
+	ss.testSweepNow = func() uint64 { return base + 10 }
+
+	if sent := ss.syncSweep(); sent != 1 {
+		t.Fatalf("configured 10s UDP receiver timeout sent %d rows at its deadline, want 1", sent)
+	}
+	frame := <-ss.sendCh
+	if len(frame) < syncHeaderSize || frame[4] != syncMsgSessionV4 {
+		t.Fatalf("unexpected configured-timeout frame: len=%d", len(frame))
+	}
+	_, value, ok := decodeSessionV4Payload(frame[syncHeaderSize:])
+	if !ok || !value.PrimaryLiveness {
+		t.Fatalf("configured 10s UDP receiver timeout did not refresh at its deadline: ok=%t primary_liveness=%t", ok, value.PrimaryLiveness)
+	}
+}
+
+func TestPrimaryLivenessUsesConfiguredTCPWindows16880(t *testing.T) {
+	const (
+		created = uint64(18_000)
+		long    = uint32(config.DataplaneTCPEstablishedWindowSecs)
+	)
+	for _, tc := range []struct {
+		name    string
+		timeout uint64
+		value   dataplane.SessionValue
+		profile ReceiverSessionTimeoutProfile
+	}{
+		{
+			name:    "opening",
+			timeout: 10,
+			value: dataplane.SessionValue{
+				Timeout: long, SessionID: 10,
+				TCPHandshakeState: dataplane.TCPHandshakeStateOpening,
+			},
+			profile: ReceiverSessionTimeoutProfile{TCPOpeningSeconds: 10},
+		},
+		{
+			name:    "closing",
+			timeout: 12,
+			value: dataplane.SessionValue{
+				Timeout: long, SessionID: 12,
+				TCPHandshakeState: dataplane.TCPHandshakeStateEstablished, TCPCloseClass: 1,
+			},
+			profile: ReceiverSessionTimeoutProfile{TCPClosingSeconds: 12},
+		},
+		{
+			name:    "time-wait",
+			timeout: 14,
+			value: dataplane.SessionValue{
+				Timeout: long, SessionID: 14,
+				TCPHandshakeState: dataplane.TCPHandshakeStateEstablished, TCPCloseClass: 2,
+			},
+			profile: ReceiverSessionTimeoutProfile{TCPTimeWaitSeconds: 14},
+		},
+		{
+			name:    "time-wait window also governs half-closed",
+			timeout: 16,
+			value: dataplane.SessionValue{
+				Timeout: long, SessionID: 16,
+				TCPHandshakeState: dataplane.TCPHandshakeStateEstablished, TCPCloseClass: 1,
+			},
+			profile: ReceiverSessionTimeoutProfile{
+				TCPTimeWaitSeconds: 16, TCPTimeWaitApplyToHalfClosed: true,
+			},
+		},
+		{
+			name:    "time-wait ageout uses established window",
+			timeout: 11,
+			value: dataplane.SessionValue{
+				Timeout: long, SessionID: 11,
+				TCPHandshakeState: dataplane.TCPHandshakeStateEstablished, TCPCloseClass: 2,
+			},
+			profile: ReceiverSessionTimeoutProfile{
+				TCPEstablishedSeconds: 11, TCPTimeWaitSeconds: 16,
+				TCPTimeWaitSessionAgeout: true,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.value.State = dataplane.SessStateEstablished
+			tc.value.Created = created
+			if primaryLivenessSweptWithProfile16880(t, unix.IPPROTO_TCP, tc.value,
+				created+tc.timeout-1, created+tc.timeout-2, tc.profile) {
+				t.Fatalf("configured TCP receiver window refreshed before %ds", tc.timeout)
+			}
+			if !primaryLivenessSweptWithProfile16880(t, unix.IPPROTO_TCP, tc.value,
+				created+tc.timeout, created+tc.timeout-1, tc.profile) {
+				t.Fatalf("configured TCP receiver window did not refresh by %ds", tc.timeout)
+			}
+		})
+	}
+}
 func TestPrimaryLivenessCadenceRespectsTCPStates16880(t *testing.T) {
 	const (
 		created = uint64(2000)
@@ -459,6 +763,7 @@ func TestPrimaryLivenessCadenceRespectsTCPStates16880(t *testing.T) {
 			value := dataplane.SessionValue{
 				State: dataplane.SessStateEstablished, Created: created,
 				Timeout: tc.timeout, AppTimeout: longApp,
+				SessionID:         uint64(tc.cadenceTimeout),
 				TCPHandshakeState: tc.handshakeState, TCPCloseClass: tc.closeClass,
 			}
 			if primaryLivenessSwept16880(t, unix.IPPROTO_TCP, value,
@@ -579,5 +884,24 @@ func TestQueuedShortTimeoutWakesLivenessSweep16880(t *testing.T) {
 		case <-timeout.C:
 			t.Fatal("new one-second row did not wake the armed idle sweep in time for a liveness refresh")
 		}
+	}
+}
+
+func TestNewDualSessionSyncWakesForShortTimeout16880(t *testing.T) {
+	ss := NewDualSessionSync(":0", "10.0.0.2:4785", ":0", "10.0.0.3:4785", nil)
+	if !ss.IsDualFabric() {
+		t.Fatal("fixture did not construct dual-fabric session sync")
+	}
+	ss.peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
+	ss.primaryLivenessScanIntervalSeconds.Store(10)
+
+	ss.wakeSweepForQueuedSession(unix.IPPROTO_UDP, 2, 2, 0, 0, 0)
+	select {
+	case <-ss.sweepWakeCh:
+	default:
+		t.Fatal("dual-fabric SessionSync has no wake channel for a newly queued short-timeout row")
+	}
+	if got := ss.sweepWakeScanIntervalSeconds.Load(); got != 1 {
+		t.Fatalf("dual-fabric queued scan request = %ds, want 1s", got)
 	}
 }

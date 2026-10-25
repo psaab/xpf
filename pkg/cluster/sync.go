@@ -1351,6 +1351,14 @@ type SessionSync struct {
 	// primaryLivenessScanIntervalSeconds adapts full mirror walks to half the
 	// shortest live owner-session timeout, bounded to [1s, 10s].
 	primaryLivenessScanIntervalSeconds atomic.Uint64
+	// primaryLivenessScanIntervalMu serializes queued-row cadence tightening
+	// with the scanner's post-enumeration cadence publication.
+	primaryLivenessScanIntervalMu             sync.Mutex
+	receiverSessionTimeouts                   atomic.Pointer[ReceiverSessionTimeoutProfile]
+	pendingPrimaryLivenessScanIntervalSeconds uint64
+	// pendingPrimaryLivenessScanGeneration counts registrations under this
+	// mutex so a publication cannot consume a request made after enumeration.
+	pendingPrimaryLivenessScanGeneration uint64
 	// sweepWakeCh interrupts a long idle sweep timer when peer capability
 	// discovery or a newly queued shorter-timeout row tightens liveness cadence.
 	sweepWakeCh chan struct{}
@@ -2284,6 +2292,7 @@ func NewDualSessionSync(local, peer, local1, peer1 string, rt clusterRuntime) *S
 		localAddr1:                 local1,
 		peerAddr1:                  peer1,
 		sendCh:                     make(chan []byte, 4096),
+		sweepWakeCh:                make(chan struct{}, 1),
 		deleteJournalCap:           deleteJournalDefaultCap,
 		failoverWaiters:            make(map[int]failoverWaiter),
 		failoverCommitWaiters:      make(map[int]failoverWaiter),

@@ -202,6 +202,12 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 				})
 				mgr.SetCaptureAuthorityCommitter(func(configGeneration uint64, snapshot *dpuserspace.ConfigSnapshot) {
 					d.publishIpsecCaptureSnapshotAuthorityForSnapshot(configGeneration, snapshot)
+					// #16880: use only the capture authority's applied snapshot;
+					// candidate configs can be published while the helper still
+					// enforces an older snapshot.
+					if snapshot != nil && snapshot.Config != nil {
+						d.updateSessionSyncTimeoutProfile(snapshot.Config)
+					}
 				})
 				mgr.SetPolicySnapshotCommitter(d.policyInvalidationSnapshotPublished)
 				mgr.SetPolicySnapshotPublishFailure(d.rejectDeferredSnapshotPublish)
@@ -275,6 +281,9 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 			// failure arm: its non-nil result says the snapshot already landed.
 			fresh := applyResult == nil || !applyResult.SnapshotPublishDeferred
 			d.hostInboundDataplaneFresh.Store(fresh)
+			if fresh && !hasSessionTimeoutCaptureAuthority(rt) {
+				d.updateSessionSyncTimeoutProfile(cfg)
+			}
 			d.policyInvalidationPublishLanded = fresh
 			if applyResult != nil {
 				d.notePolicyInvalidationPublish(cfg, applyResult.Generation)
@@ -1467,6 +1476,9 @@ func (d *Daemon) reapplyAfterDeferredMAC(cfg *config.Config) {
 		}
 	}
 	if res == nil || !res.SnapshotPublishDeferred {
+		if !hasSessionTimeoutCaptureAuthority(rt) {
+			d.updateSessionSyncTimeoutProfile(cfg)
+		}
 		d.policyInvalidationPublishLanded = true
 	}
 }

@@ -467,8 +467,9 @@ func TestSessionValueFieldCountIsPinned7097(t *testing.T) {
 		// source-NAT selection across HA reconstruction. They are cluster-
 		// stable packet identity, not node-local resources, and must remain on
 		// the synced value.
-		// #16880's PrimaryLiveness marker is sync-only: it changes the Go field
-		// count without adding a BPF field or node-local resource.
+		// The #16880 primary-liveness marker adds one Go-only field per family:
+		// the base has 50/51 fields, so the current pin is 51/52. The older
+		// 47/48 count predates other sync-only fields and is not this delta.
 
 		{"SessionValue", reflect.TypeOf(SessionValue{}), 51},
 		{"SessionValueV6", reflect.TypeOf(SessionValueV6{}), 52},

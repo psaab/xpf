@@ -1443,6 +1443,7 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 			// Seed from an already-applied config before the new object becomes
 			// observable to concurrent sync and apply paths.
 			d.seedActiveSessionSyncZoneOwnership(ss)
+			d.seedActiveSessionSyncTimeoutProfile(ss)
 			if !d.publishSessionSyncIfCurrent(commsGen, ss) {
 				// A restart superseded this epoch while we were resolving the
 				// sync address; abort before wiring cluster state or binding.
