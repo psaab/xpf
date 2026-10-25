@@ -50,7 +50,7 @@ func TestTerminateAllSAsPartialFailure15279(t *testing.T) {
 	if strings.Contains(err.Error(), "site-a") || strings.Contains(err.Error(), "site-c") {
 		t.Fatalf("#15279: error must not name successfully terminated connections, got %q", err.Error())
 	}
-	got := rec.terminateCalls()
+	got := rec.allTerminateCalls()
 	if len(got) != 3 {
 		t.Fatalf("#15279: every SA must still be attempted, terminate calls = %v", got)
 	}
@@ -103,7 +103,7 @@ func TestTerminateAllSAsNoSAs15279(t *testing.T) {
 	if err != nil || count != 0 {
 		t.Fatalf("CONTROL: no SAs must return (0, nil), got (%d, %v)", count, err)
 	}
-	if got := rec.terminateCalls(); len(got) != 0 {
+	if got := rec.allTerminateCalls(); len(got) != 0 {
 		t.Fatalf("CONTROL: no SAs, no terminates expected, got %v", got)
 	}
 }

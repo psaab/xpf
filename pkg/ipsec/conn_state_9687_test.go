@@ -127,7 +127,7 @@ func TestStopMidTeardownLeavesDebtOnDisk9687(t *testing.T) {
 	rec := &swanctlRecorder{}
 	var during *connState
 	run := func(args ...string) ([]byte, error) {
-		if len(args) == 3 && args[0] == "--terminate" && args[2] == "site-a" {
+		if len(args) == 4 && args[0] == "--terminate" && args[2] == "site-a" && args[3] == "--force" {
 			st, err := loadConnState(path)
 			if err != nil {
 				t.Errorf("state unreadable while the teardown runs: %v", err)

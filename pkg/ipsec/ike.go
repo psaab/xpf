@@ -958,9 +958,22 @@ func activeSANames(sas []SAStatus) []string {
 	return names
 }
 
+// initiateTimeout bounds how long swanctl waits for the initiation to
+// complete before detaching (#16851, sibling of the terminate --force fix).
+// Without it swanctl waits until the IKE negotiation settles, so an
+// unresponsive peer rides until the 15 s swanctlTimeout kills the process:
+// on the reinitiate-changed-connections commit path that stalls the commit
+// under applySem, and on the HA failover path it delays every other SA the
+// failover still has to bring up. --timeout detaches swanctl once the
+// request is handed to charon; charon keeps negotiating in the background
+// (with its own retransmits), so a slow-but-alive peer still establishes.
+// 0 would detach immediately and is rejected as a safety floor; this value
+// only needs to cover handing the request to charon, so it stays short.
+const initiateTimeout = "5"
+
 // InitiateConnection initiates a single IPsec connection by name.
 func (m *Manager) InitiateConnection(name string) error {
-	if out, err := m.sc("--initiate", "--child", name); err != nil {
+	if out, err := m.sc("--initiate", "--child", name, "--timeout", initiateTimeout); err != nil {
 		return fmt.Errorf("swanctl --initiate %s: %w: %s", name, err, termsafe.SanitizeForDisplay(string(out)))
 	}
 	return nil

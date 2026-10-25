@@ -85,7 +85,7 @@ func (c *restartCharon15261) run(args ...string) ([]byte, error) {
 
 func (c *restartCharon15261) terminated(name string) bool {
 	for _, call := range c.calls {
-		if len(call) == 3 && call[0] == "--terminate" && call[1] == "--ike" && call[2] == name {
+		if len(call) == 4 && call[0] == "--terminate" && call[1] == "--ike" && call[2] == name && call[3] == "--force" {
 			return true
 		}
 	}

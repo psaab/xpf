@@ -72,7 +72,7 @@ func (c *refusedExistingCharon15141) run(args ...string) ([]byte, error) {
 	case "--list-sas":
 		return []byte(liveSA("a", "b")), nil
 	case "--terminate":
-		c.terminated = append(c.terminated, args[len(args)-1])
+		c.terminated = append(c.terminated, args[2])
 		return nil, nil
 	}
 	return nil, nil

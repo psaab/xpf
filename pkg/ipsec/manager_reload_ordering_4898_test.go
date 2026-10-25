@@ -42,7 +42,7 @@ func (r *reloadRecorder) run(args ...string) ([]byte, error) {
 func (r *reloadRecorder) terminated() []string {
 	var out []string
 	for _, c := range r.calls {
-		if len(c) == 3 && c[0] == "--terminate" && c[1] == "--ike" {
+		if len(c) == 4 && c[0] == "--terminate" && c[1] == "--ike" && c[3] == "--force" {
 			out = append(out, c[2])
 		}
 	}

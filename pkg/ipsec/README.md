@@ -90,7 +90,17 @@ the apply path pays no fsync (the file is regenerated on every apply).
   successful terminates, and returns a joined error naming each connection
   whose terminate failed (it never reports success over a failed kill);
   it lists and terminates through the Manager seams
-  (`listSAsForTerminate`/`sc`) like `TerminateConnection`.
+  (`listSAsForTerminate`/`sc`) like `TerminateConnection`. It deliberately
+  stays graceful (no `--force`): it is an operator clear, not a
+  de-authorization (#16851 scope). The commit/Clear-path teardown
+  (`terminateIKE`, manager.go) is the opposite: a removed or
+  security-changed connection is no longer authorized, so it forces
+  (`--terminate --ike <conn> --force`, #16851) — a graceful delete against
+  an unresponsive peer blocked the commit for the 15 s `swanctlTimeout`
+  and left the SA forwarding for ~165 s of charon retransmits.
+  `InitiateConnection` passes `--timeout 5` so swanctl detaches once the
+  request is handed to charon instead of waiting out the negotiation
+  (and, on a dead peer, the 15 s kill) on the commit/HA paths (#16851).
 - `PrepareConfig(cfg *config.Config) *config.IPsecConfig` — `policy.go`.
 - `ApplyWithHooks(ipsecCfg, hooks ApplyHooks) error`, `ApplyHooks{Written, Loaded}` and
   `ApplyNotifyLoaded(ipsecCfg, loaded func()) error` — `manager.go`. `Apply` with callbacks
