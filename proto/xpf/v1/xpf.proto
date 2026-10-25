@@ -373,6 +373,15 @@ message ZoneInfo {
   // is excluded from any bound count. Empty for a zone with no contested
   // member. An old server omits the field, which reads as empty.
   repeated string unbound_interfaces = 20;
+  // screen_disposition (#16568) classifies this zone's screen_profile
+  // reference: ENFORCING, UNDEFINED (reference does not resolve, lenient
+  // path) or INERT (defined but enables no checks). In both non-enforcing
+  // states the dataplane substitutes conservative_default(). UNKNOWN=0
+  // means an old server omitted the field, or the server could not give
+  // an honest verdict (no screen configured, quarantined zone, nil
+  // profile value); clients MUST fall back to the bare screen_profile
+  // rendering and MUST never render UNKNOWN as enforcing.
+  ZoneScreenDisposition screen_disposition = 21;
 }
 
 // InterfaceHostInbound (#3328, #3362) is a per-interface host-inbound-traffic
@@ -1594,4 +1603,21 @@ enum ZoneQuarantineState {
   // and per_zone_counter_availability is UNAVAILABLE: the server never
   // publishes the survivor's volume under the loser.
   ZONE_QUARANTINE_STATE_QUARANTINED = 2;
+}
+
+// ZoneScreenDisposition (#16568) reports whether a zone's screen
+// reference actually enforces its named profile. UNKNOWN IS 0 ON
+// PURPOSE (same skew argument as ZoneQuarantineState): an old server
+// omits the field and it decodes here; clients fall back to the
+// pre-#16568 bare rendering rather than guessing.
+enum ZoneScreenDisposition {
+  ZONE_SCREEN_DISPOSITION_UNKNOWN = 0;
+  // The named profile resolves and enables at least one check.
+  ZONE_SCREEN_DISPOSITION_ENFORCING = 1;
+  // The named profile is not defined (or is BadNumericUnresolved); the
+  // dataplane substitutes conservative_default().
+  ZONE_SCREEN_DISPOSITION_UNDEFINED = 2;
+  // The named profile is defined but enables no checks; the dataplane
+  // substitutes conservative_default().
+  ZONE_SCREEN_DISPOSITION_INERT = 3;
 }

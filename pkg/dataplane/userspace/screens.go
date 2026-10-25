@@ -883,3 +883,66 @@ func ScreenCheckValue(p *config.ScreenProfile) string {
 	}
 	return "enabled"
 }
+
+// ScreenZoneDisposition classifies one zone's screen reference for the
+// zone renderers (#16568): ENFORCING, UNDEFINED (lenient) or INERT
+// (strict-clean). UNKNOWN covers the states where no honest verdict
+// exists — no screen configured, a quarantined/DroppedEnforcementChild
+// zone the SSOTs skip, or a nil profile value.
+type ScreenZoneDisposition int
+
+const (
+	ScreenZoneDispositionUnknown ScreenZoneDisposition = iota
+	ScreenZoneDispositionEnforcing
+	ScreenZoneDispositionUndefined
+	ScreenZoneDispositionInert
+)
+
+// Qualifier returns the bracket qualifier appended to the zone's
+// `Screen: <profile>` line, or "" when the line must stay bare
+// (enforcing, or no honest verdict). Spellings match the issue
+// acceptance: `[UNDEFINED — conservative default applies]` /
+// `[ENFORCES NOTHING — conservative default applies]`.
+func (d ScreenZoneDisposition) Qualifier() string {
+	switch d {
+	case ScreenZoneDispositionUndefined:
+		return "[UNDEFINED — conservative default applies]"
+	case ScreenZoneDispositionInert:
+		return "[ENFORCES NOTHING — conservative default applies]"
+	default:
+		return ""
+	}
+}
+
+// ScreenZoneDispositionFor returns the disposition of zoneName's screen
+// reference in cfg, using the SAME SSOTs the screen views and metrics
+// use (ScreenMissingProfileRefs / ScreenInertProfileRefs), so the zone
+// views cannot disagree with them. A zone the SSOTs skip (quarantined,
+// DroppedEnforcementChild) or a nil profile value yields UNKNOWN — the
+// renderer must not guess.
+func ScreenZoneDispositionFor(cfg *config.Config, zoneName string) ScreenZoneDisposition {
+	if cfg == nil {
+		return ScreenZoneDispositionUnknown
+	}
+	zone := cfg.Security.Zones[zoneName]
+	if zone == nil || zone.ScreenProfile == "" {
+		return ScreenZoneDispositionUnknown
+	}
+	if p, ok := cfg.Security.Screen[zone.ScreenProfile]; ok && p == nil {
+		return ScreenZoneDispositionUnknown
+	}
+	for _, r := range ScreenMissingProfileRefs(cfg) {
+		if r.Zone == zoneName {
+			return ScreenZoneDispositionUndefined
+		}
+	}
+	for _, r := range ScreenInertProfileRefs(cfg) {
+		if r.Zone == zoneName {
+			return ScreenZoneDispositionInert
+		}
+	}
+	if p, ok := cfg.Security.Screen[zone.ScreenProfile]; !ok || p == nil {
+		return ScreenZoneDispositionUnknown
+	}
+	return ScreenZoneDispositionEnforcing
+}

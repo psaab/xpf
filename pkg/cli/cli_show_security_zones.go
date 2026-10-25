@@ -8,6 +8,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/policymatch"
 	"github.com/psaab/xpf/pkg/zonecounters"
 )
@@ -81,7 +82,14 @@ func (c *CLI) showZonesDisplay(cfg *config.Config, detail bool, filterZone strin
 		fmt.Printf("  Send reset for non-SYN session TCP packets: %s\n", tcpRstStr)
 		fmt.Printf("  Policy configurable: Yes\n")
 		if zone.ScreenProfile != "" {
-			fmt.Printf("  Screen: %s\n", zone.ScreenProfile)
+			// #16568: qualify an undefined/inert profile so the zone view
+			// does not claim the named profile's protection when the
+			// dataplane substituted conservative_default().
+			if q := dpuserspace.ScreenZoneDispositionFor(cfg, name).Qualifier(); q != "" {
+				fmt.Printf("  Screen: %s %s\n", zone.ScreenProfile, q)
+			} else {
+				fmt.Printf("  Screen: %s\n", zone.ScreenProfile)
+			}
 		}
 		// #16556: a member claimed by two zones is bound to NEITHER at
 		// runtime (quarantined, fails closed) — exclude it from the bound
@@ -213,8 +221,14 @@ func (c *CLI) showZonesDisplay(cfg *config.Config, detail bool, filterZone strin
 					// source/destination session limits, and icmp-fragment. This
 					// is the local-CLI peer of the gRPC showZonesDetail renderer
 					// and shares the same SSOT so neither can drift.
-					if checks := config.ScreenEnabledCheckList(profile); len(checks) > 0 {
+					// #16568: an inert profile's list is only the
+					// alarm-without-drop modifier — never present it as
+					// enabled checks; say what is actually enforced.
+					disp := dpuserspace.ScreenZoneDispositionFor(cfg, name)
+					if checks := config.ScreenEnabledCheckList(profile); len(checks) > 0 && disp != dpuserspace.ScreenZoneDispositionInert {
 						fmt.Printf("    Enabled checks: %s\n", strings.Join(checks, ", "))
+					} else if disp == dpuserspace.ScreenZoneDispositionInert {
+						fmt.Printf("    Enabled checks: (none) — %s\n", dpuserspace.ScreenInertDisposition)
 					} else {
 						fmt.Printf("    Enabled checks: (none)\n")
 					}
