@@ -617,6 +617,95 @@ fn purge_sessions_for_changed_input_filter_resolves_vlan_unit_16889() {
     );
 }
 
+#[test]
+fn purge_sessions_for_changed_input_filter_keeps_configured_vlan_child_16889() {
+    let mut old_forwarding = ForwardingState::default();
+    // XDP can deliver directly on configured VLAN child 13 (VID 50). The
+    // parent-keyed ingress map has no (13, 50) row; the child metadata itself
+    // preserves the session's logical ifindex.
+    old_forwarding
+        .ingress_logical_ifindex
+        .insert((10, 50), 10);
+    old_forwarding.egress.insert(
+        13,
+        crate::afxdp::EgressInterface {
+            bind_ifindex: 10,
+            vlan_id: 50,
+            mtu: 1500,
+            src_mac: [0; 6],
+            zone_id: 0,
+            redundancy_group: 0,
+            primary_v4: None,
+            primary_v6: None,
+        },
+    );
+    let forwarding = ForwardingState::default();
+    let mut sessions = SessionTable::new();
+    let child_key = test_key();
+    let mut child_metadata = test_metadata();
+    child_metadata.ingress_ifindex = 13;
+    child_metadata.ingress_vlan_id = 50;
+    assert!(sessions.install_with_protocol_with_origin(
+        child_key.clone(),
+        test_decision(),
+        child_metadata,
+        SessionOrigin::ForwardFlow,
+        1,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let _ = sessions.drain_deltas(16);
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+    let refs = || SharedSessionRefs {
+        sessions: &shared_sessions,
+        nat_sessions: &shared_nat_sessions,
+        forward_wire_sessions: &shared_forward_wire_sessions,
+        owner_rg_indexes: &shared_owner_rg_indexes,
+        peer_worker_commands: &peer_worker_commands,
+        worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
+        conntrack: ConntrackFds { v4: -1, v6: -1 },
+        tick: Tick { ns: 2, secs: 0 },
+    };
+
+    let unrelated_v4 = [24].into_iter().collect();
+    assert_eq!(
+        purge_sessions_for_changed_input_filter_cached_semantics(
+            &mut sessions,
+            SteeringMap::unshared_for_test(-1),
+            refs(),
+            &old_forwarding,
+            &forwarding,
+            &unrelated_v4,
+            &rustc_hash::FxHashSet::default(),
+            0,
+        ),
+        0,
+        "a configured VLAN child must survive an unrelated filter change"
+    );
+    assert!(sessions.entry_with_origin(&child_key).is_some());
+
+    let changed_child_v4 = [13].into_iter().collect();
+    assert_eq!(
+        purge_sessions_for_changed_input_filter_cached_semantics(
+            &mut sessions,
+            SteeringMap::unshared_for_test(-1),
+            refs(),
+            &old_forwarding,
+            &forwarding,
+            &changed_child_v4,
+            &rustc_hash::FxHashSet::default(),
+            0,
+        ),
+        1,
+        "a configured VLAN child must purge when its own filter changes"
+    );
+    assert!(sessions.entry_with_origin(&child_key).is_none());
+}
+
 fn test_local_delivery_decision() -> SessionDecision {
     SessionDecision {
         resolution: ForwardingResolution {

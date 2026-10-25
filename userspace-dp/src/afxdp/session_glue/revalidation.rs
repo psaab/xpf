@@ -149,21 +149,33 @@ pub(in crate::afxdp) fn purge_sessions_for_changed_input_filter_cached_semantics
                 return;
             }
         }
-        // Forward rows retain the physical parent plus VLAN VID. Compare both
+        // Forward rows retain ingress ifindex plus VLAN VID. Compare both
         // snapshots: a VLAN unit can be remapped during this same rotation,
         // and the session's old filter identity must not be lost by resolving
-        // only through the new forwarding map.
+        // only through the new forwarding map. Packets delivered on a
+        // configured VLAN child use the child's own ifindex, although the
+        // logical-ingress map is parent-keyed; recognize that identity when
+        // either snapshot still has the child/VID configuration.
         let ingress_ifindexes = if metadata.ingress_ifindex == 0 {
             None
         } else {
             let physical = metadata.ingress_ifindex as i32;
+            let is_configured_vlan_child = |state: &ForwardingState| {
+                state.egress.get(&physical).is_some_and(|iface| {
+                    iface.bind_ifindex != physical && iface.vlan_id == metadata.ingress_vlan_id
+                })
+            };
+            let configured_vlan_child =
+                is_configured_vlan_child(old_forwarding) || is_configured_vlan_child(forwarding);
             let resolve = |state: &ForwardingState| {
                 crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
                     state,
                     physical,
                     metadata.ingress_vlan_id,
                 )
-                .or_else(|| (metadata.ingress_vlan_id == 0).then_some(physical))
+                .or_else(|| {
+                    (metadata.ingress_vlan_id == 0 || configured_vlan_child).then_some(physical)
+                })
             };
             match (resolve(old_forwarding), resolve(forwarding)) {
                 (Some(old), Some(new)) => Some((old, new)),

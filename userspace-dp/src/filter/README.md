@@ -1333,8 +1333,9 @@ implementation (#1430); use it as the template:
    terminal-action, TX-selection, or policer semantics changed;
    `session_glue::purge_sessions_for_changed_input_filter_cached_semantics`
    matches those against each session's recorded logical ingress
-   (`ingress_ifindex` + VLAN). A missing ingress identity keeps the
-   conservative family fallback for peer-synced/reverse rows only.
+   (`ingress_ifindex` + VLAN), retaining configured VLAN-child identity from
+   either forwarding snapshot. If no ingress identity can be resolved (for
+   example, an unknown tagged VID), the conservative family fallback remains.
    Per-packet term-only and counter/log edits are re-evaluated on
    session hit and do not purge unrelated or unchanged sessions.
    `filter_term_semantics_match` remains the exhaustive #5293
