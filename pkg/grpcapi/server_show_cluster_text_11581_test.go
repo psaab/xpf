@@ -53,6 +53,7 @@ func (f fakeSyncStats11581) PeerSessionSyncWireVersion() uint16 {
 	return 0
 }
 func (f fakeSyncStats11581) UnauthenticatedSessionConns() []string { return nil }
+func (f fakeSyncStats11581) RetiredKeySessionConns() []string      { return nil }
 
 // fakeUserspaceDP11581 is the userspaceStatusProvider seam fake: it embeds the
 // mandatory grpcRuntime surface (*dataplane.Manager) and serves a populated
