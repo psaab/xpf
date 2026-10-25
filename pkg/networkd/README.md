@@ -116,7 +116,26 @@ Standard library only.
   `--` after the verb, so an interface name beginning with `-` reaches
   networkctl as an operand rather than as an option; the separator is
   spelled out in the expectation for the same non-circularity reason as the
-  names.
+  names. Since #16791 the reconfigure is PER INTERFACE (one single-name
+  call per eligible interface, in row order), so the expectation is the
+  ordered list of per-name argv.
+- **One absent netdev must not poison the reconfigure for every other
+  interface (#16791).** A managed row can name a device that does not
+  exist: an unzoned VLAN unit (`ge-0-0-1.60` compiles to a managed row but
+  its kernel child is only created for zoned units), an over-IFNAMSIZ
+  `br-*` bridge, or a transiently absent dynamically-created device.
+  `networkctl` resolves EVERY operand of one `reconfigure` argv before
+  acting, so a single batch containing the absent name failed wholesale
+  (`Failed to resolve interface ...: No such device`, nothing
+  reconfigured) and the #4954 debt recorded for all names could never
+  clear while the row persisted — the forced reconfigure of the existing
+  links was lost box-wide on every Apply. The tail therefore reconfigures
+  per interface: a name that definitively resolves to no live link
+  (`linkExists`) is skipped with a warning and carries NO debt (there is
+  no link to apply addresses to; when it later appears, its creating
+  Apply re-runs the tail for it), a genuine failure is owed only by its
+  own name, and an inconclusive existence lookup still attempts the
+  reconfigure rather than silently skipping a real link.
 - **The activation tail is owed whenever ANYONE reloads, not only when
   `Apply` does (#6912).** `pkg/daemon` runs `networkctl reload` from
   several sites of its own and reports the result through
