@@ -146,12 +146,14 @@ type CompileHealthSnapshot struct {
 // it), so it must never be rendered alone as "enforcement is in force"; paired
 // with LastApplyFailed it separates never-established / current / stale.
 type HostInboundAppliedSnapshot struct {
-	Known              bool // false = the daemon could not be asked; claims NOTHING
-	Established        bool
-	Generation         uint64
-	LastApplyFailed    bool
-	LastFailureUnixSec int64
-	GapFenceActive     bool
+	Known                bool // false = the daemon could not be asked; claims NOTHING
+	Established          bool
+	Generation           uint64
+	LastApplyFailed      bool
+	LastFailureUnixSec   int64
+	GapFenceActive       bool
+	BarrierRetained      bool
+	BarrierPendingDetail string
 }
 
 type BootstrapImportSnapshot struct {

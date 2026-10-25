@@ -70,6 +70,18 @@ type HostInboundAppliedState struct {
 	// through two tables, and an operator diagnosing reachability needs to
 	// know which one is answering.
 	GapFenceActive bool
+
+	// BarrierRetained reports that the #10751 early input barrier is
+	// still standing because a pre-handoff hold is open (#16785): the
+	// real table may be Current while every non-lifeline host-bound
+	// connection is still dropped by the barrier's policy DROP. Without
+	// this field a retained barrier read as plain Current and the
+	// operator chased the wrong subsystem.
+	BarrierRetained bool
+
+	// BarrierPendingDetail names the scopes holding the barrier (zone /
+	// interface / family), empty when no hold is open.
+	BarrierPendingDetail string
 }
 
 // Current reports whether the applied surface is both established and not
@@ -98,6 +110,10 @@ func (d *Daemon) HostInboundApplied() HostInboundAppliedState {
 	}
 	if at := d.hostInboundLastFailureUnixNano.Load(); at != 0 {
 		st.LastFailureAt = time.Unix(0, at)
+	}
+	if !d.earlyInputHandoffDone.Load() && !d.earlyInputHandoffPendingSince.IsZero() {
+		st.BarrierRetained = true
+		st.BarrierPendingDetail = d.earlyInputHandoffPendingDetail
 	}
 	return st
 }

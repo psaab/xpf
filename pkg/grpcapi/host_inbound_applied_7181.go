@@ -9,11 +9,13 @@ package grpcapi
 // cold-boot failure can no longer be reported as a configured default-deny in
 // force (codex-review-182:4394).
 type HostInboundApplied struct {
-	Known           bool
-	Established     bool
-	Generation      uint64
-	LastApplyFailed bool
-	GapFenceActive  bool
+	Known                bool
+	Established          bool
+	Generation           uint64
+	LastApplyFailed      bool
+	GapFenceActive       bool
+	BarrierRetained      bool
+	BarrierPendingDetail string
 }
 
 // AppliedStateLabel renders the tri-state verdict.

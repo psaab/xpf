@@ -278,6 +278,43 @@ type DHCPv6ClientConfig struct {
 	PinnedPrefixes []string
 }
 
+// DHCPv6ExpectsAddress reports whether this DHCPv6 client can install a
+// routable address on its own unit (#16785). A PD-only client
+// (client-ia-type ia-pd without ia-na) delegates prefixes for downstream
+// RA; it never installs a WAN address, so "DHCP intent, no global v6"
+// is its steady state, not a pending lease. A stateless client likewise
+// requests options only. Every other shape — bare `dhcpv6;` (nil
+// client), a client with no explicit IA types (the runtime defaults to
+// IA_NA), ia-na, or ia-na+ia-pd — expects an address.
+func (c *DHCPv6ClientConfig) DHCPv6ExpectsAddress() bool {
+	if c == nil {
+		return true
+	}
+	if c.ClientType == "stateless" {
+		return false
+	}
+	if len(c.ClientIATypes) == 0 {
+		return true
+	}
+	for _, t := range c.ClientIATypes {
+		if t == "ia-na" {
+			return true
+		}
+	}
+	return false
+}
+
+// UnitDHCPv6ExpectsAddress is DHCPv6ExpectsAddress for a unit: true when
+// the unit runs a DHCPv6 client that can install an address. Units with
+// no DHCPv6 intent at all also return true (no v6 lease is pending for
+// another reason); callers gate on DHCPv6/DHCPv6Client themselves.
+func (u *InterfaceUnit) UnitDHCPv6ExpectsAddress() bool {
+	if u == nil || u.DHCPv6Client == nil {
+		return true
+	}
+	return u.DHCPv6Client.DHCPv6ExpectsAddress()
+}
+
 // DHCPInetOptions holds DHCPv4 client options for family inet dhcp stanza.
 type DHCPInetOptions struct {
 	LeaseTime              int  // seconds (0 = default)

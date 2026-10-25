@@ -1152,9 +1152,11 @@ func screenChecks(p *config.ScreenProfile) []string {
 // render FAILED as healthy — the exact conflation #7181 exists to remove.
 func hostInboundAppliedInfo(snap HostInboundAppliedSnapshot) *HostInboundAppliedInfo {
 	out := &HostInboundAppliedInfo{
-		Generation:         snap.Generation,
-		LastFailureUnixSec: snap.LastFailureUnixSec,
-		GapFenceActive:     snap.GapFenceActive,
+		Generation:           snap.Generation,
+		LastFailureUnixSec:   snap.LastFailureUnixSec,
+		GapFenceActive:       snap.GapFenceActive,
+		BarrierRetained:      snap.BarrierRetained,
+		BarrierPendingDetail: snap.BarrierPendingDetail,
 	}
 	switch {
 	case !snap.Established:
