@@ -25,6 +25,19 @@ xpf (0.0.0) unstable; urgency=medium
     flows, and that absent-open or inactive-expired closes export
     nothing. The per-SESSION_CLOSE sampler wording is corrected in the
     README and in `ipfix.go`, and a docsref gate pins the contract.
+
+  * Config/BGP: leaves chained under a valueless BGP flag
+    (`passive`, `remove-private`, `log-updown`) are now validated at
+    the enclosing BGP container on strict commit (#16749), exactly as
+    the compilers expand them. Previously
+    `set protocols bgp group G passive hold-time 1` committed clean,
+    rendered `neighbor ... timers 1 1`, failed frr-reload.py, and
+    degraded every later FRR reload; chained unknown keywords now
+    also draw the #10707 advisory. The renderer additionally omits a
+    `timers` line for a hold-time of 1/2 (or above 65535) arriving on
+    the tolerant path, with a warning, instead of poisoning reloads.
+    Valid chained values (for example `passive hold-time 9`) commit
+    and apply as before.
   * Cluster/session-sync: pre-auth logging on the sync listener is
     now bounded (#16748). The accept loop's "peer connected" line is
     Debug instead of Info (it fired before authentication, so a
