@@ -1540,16 +1540,43 @@ func validateSourceNATPoolAddressScopeStrict(cfg *Config) error {
 	return nil
 }
 
-// validateSourceNATPoolFamilyStrict (#16600) hard-rejects a pool-mode
-// source-NAT rule whose authored source match is single-family F while
-// the referenced pool has zero family-F members. The Rust allocator
-// splits pool members by IpAddr variant (nat/source/expand.rs), so a
-// v4 flow reaching such a rule finds pool_addresses_v4 empty and is
-// refused WrongAddressFamily (nat/source/match_rules.rs) — the packet
-// is not forwarded. Before this gate the rule committed clean and
-// every matching flow failed only at runtime, discoverable through
+// validateSourceNATPoolFamilyStrict (#16600, scoped by #17408)
+// hard-rejects a pool-mode source-NAT rule whose authored source
+// match is a narrow single-family prefix F while the referenced pool
+// has zero family-F members. The Rust allocator splits pool members
+// by IpAddr variant (nat/source/expand.rs), so a v4 flow reaching
+// such a rule finds pool_addresses_v4 empty and is refused
+// WrongAddressFamily (nat/source/match_rules.rs) — the packet is
+// not forwarded. Before this gate the rule committed clean and every
+// matching flow failed only at runtime, discoverable through
 // allocation-failure counters. This is the SNAT twin of the #13922
 // DNAT/static cross-family strict reject.
+//
+// #17408 SCOPING. As first merged, this gate also rejected the
+// pre-existing valid grammar shapes asserted by #5627/#5875: a
+// v6-only (or unscoped-v6) pool referenced by a rule whose source
+// match is the whole-family wildcard `10.0.0.0/24`-style fixture —
+// in those fixtures `10.0.0.0/24` is merely the scaffold that makes
+// the rule pool-mode so the POOL grammar is exercised; the pool
+// itself is the subject, and v6-only pools are valid pool grammar
+// that must compile regardless of the scaffold's source prefix.
+// More generally, a source prefix that covers its ENTIRE family
+// (prefix length 0, e.g. `0.0.0.0/0`, or any prefix whose address
+// is the family wildcard) does not prove the operator intended
+// family-F-only translation in the #16600 sense: the authored
+// intent a strict gate may act on is a NARROW single-family match
+// (a proper subset of the family — a /24, a /64, a host) paired
+// with a pool that can never serve it. Accordingly this gate fires
+// only when the proven single-family source set contains at least
+// one NARROW prefix (prefix length > 0); a rule whose every source
+// prefix is its family's /0 wildcard is out of scope. That scoping
+// keeps every #16600 DEFECT row (narrow /24 or /64 source, `any-ipv4`
+// wildcard keyword, v4-only book name) rejecting, and restores the
+// #5627/#5875 v6-only and unscoped-v6 pools under the wildcard-
+// equivalent scaffold to compiling clean. A collateral benefit:
+// `source-address 0.0.0.0/0` (explicit catch-all) with a v6-only
+// pool is a deliberate dual-stack migration shape the runtime
+// already fails closed per-flow, not a proven authoring error.
 //
 // Single-family determination considers BOTH authored source axes:
 // literal `match source-address` values and `match source-address-name`
@@ -1557,10 +1584,12 @@ func validateSourceNATPoolAddressScopeStrict(cfg *Config) error {
 // #16550 nat64NameClosureNoIPv6 precedent generalized to a two-family
 // provenance). Wildcard keywords contribute their families
 // (PolicyAddressWildcardFamilies: `any` both, `any-ipv4` v4-only,
-// `any6` v6-only). A rule is single-family F only when every decidable
-// authored source value is family F and at least one is. Hence an
-// unconstrained rule (no source-address / source-address-name), a
-// dual-family rule (mixed literals, a mixed book closure, or `any`),
+// `any6` v6-only); a single-family wildcard KEYWORD counts as narrow
+// (it names exactly one family, deliberately). A rule is in scope
+// only when every decidable authored source value is family F, at
+// least one is, and at least one is narrow. Hence an unconstrained
+// rule (no source-address / source-address-name), a dual-family rule
+// (mixed literals, a mixed book closure, or `any`), a /0-only rule,
 // and a rule whose only source constraint is not statically decidable
 // (a direct dynamic-address feed binding, or a dns-name / tainted /
 // dangling closure) are NOT rejected: they can match family-F traffic
@@ -1646,17 +1675,23 @@ func validateSourceNATPoolFamilyStrict(cfg *Config) error {
 // sourceNATRuleSingleFamily16600 reports whether a source-NAT rule's
 // authored source match is proven single-family, and which family
 // ("v4" or "v6"). See validateSourceNATPoolFamilyStrict for the
-// provenance rules. A direct feed binding or an undecidable name
-// closure makes the whole rule undecidable (not single-family),
-// because such a rule may match either family at runtime.
+// provenance rules, including the #17408 narrow-prefix scoping: the
+// verdict is single-family only when at least one proven source value
+// is narrow (a proper subset of its family). A direct feed binding or
+// an undecidable name closure makes the whole rule undecidable (not
+// single-family), because such a rule may match either family at
+// runtime.
 func sourceNATRuleSingleFamily16600(cfg *Config, rule *NATRule) (string, bool) {
 	family := ""
-	merge := func(f string) bool {
+	narrow := false
+	merge := func(f string, isNarrow bool) bool {
 		if family == "" {
 			family = f
-			return true
+		} else if family != f {
+			return false
 		}
-		return family == f
+		narrow = narrow || isNarrow
+		return true
 	}
 	for _, raw := range rule.Match.SourceAddressList() {
 		if v4, v6, ok := PolicyAddressWildcardFamilies(raw); ok {
@@ -1667,7 +1702,9 @@ func sourceNATRuleSingleFamily16600(cfg *Config, rule *NATRule) (string, bool) {
 			if v4 {
 				f = "v4"
 			}
-			if !merge(f) {
+			// A single-family wildcard keyword names exactly one
+			// family deliberately, so it is narrow (#17408).
+			if !merge(f, true) {
 				return "", false
 			}
 			continue
@@ -1678,7 +1715,7 @@ func sourceNATRuleSingleFamily16600(cfg *Config, rule *NATRule) (string, bool) {
 			// owns it; it proves no family.
 			continue
 		}
-		if !merge(f) {
+		if !merge(f, !natPrefixIsFamilyWildcard(raw)) {
 			return "", false
 		}
 	}
@@ -1691,7 +1728,7 @@ func sourceNATRuleSingleFamily16600(cfg *Config, rule *NATRule) (string, bool) {
 			if v4 {
 				f = "v4"
 			}
-			if !merge(f) {
+			if !merge(f, true) {
 				return "", false
 			}
 			continue
@@ -1701,29 +1738,49 @@ func sourceNATRuleSingleFamily16600(cfg *Config, rule *NATRule) (string, bool) {
 			// overlay, so the family is not statically decidable.
 			return "", false
 		}
-		f, decidable := addressBookNameFamily16600(cfg.Security.AddressBook, name)
+		f, isNarrow, decidable := addressBookNameFamily16600(cfg.Security.AddressBook, name)
 		if !decidable {
 			return "", false
 		}
-		if !merge(f) {
+		if !merge(f, isNarrow) {
 			return "", false
 		}
 	}
-	if family == "" {
+	if family == "" || !narrow {
 		return "", false
 	}
 	return family, true
 }
 
+// natPrefixIsFamilyWildcard reports whether raw is a prefix covering
+// its entire family: an explicit /0, or a bare address that is the
+// family wildcard (0.0.0.0 or ::). A bare host is narrow. Unparseable
+// values are not wildcards (no family is proven either way).
+func natPrefixIsFamilyWildcard(raw string) bool {
+	ipPart := natCIDRIPPart(raw)
+	if slash := strings.IndexByte(raw, '/'); slash >= 0 {
+		// Normalize tolerated spellings (/+0, /000) before comparing.
+		mask := strings.TrimLeft(strings.TrimPrefix(raw[slash+1:], "+"), "0")
+		return mask == ""
+	}
+	ip := net.ParseIP(ipPart)
+	if ip == nil {
+		return false
+	}
+	return ip.IsUnspecified()
+}
+
 // addressBookNameFamily16600 resolves one address-book name's static
-// closure to a single family. decidable is false when the closure is
-// empty, mixed-family, tainted, dangling, or otherwise not statically
-// resolvable (dns-name without a snapshot, wildcard members) — the
-// same conservative posture as nat64NameClosureNoIPv6 (#16550), using
+// closure to a single family, reporting also whether at least one
+// closure value is narrow (not its family's /0 wildcard, #17408).
+// decidable is false when the closure is empty, mixed-family,
+// tainted, dangling, or otherwise not statically resolvable
+// (dns-name without a snapshot, wildcard members) — the same
+// conservative posture as nat64NameClosureNoIPv6 (#16550), using
 // the colon-strict natAddrFamily so a `::ffff:` member is v6.
-func addressBookNameFamily16600(ab *AddressBook, name string) (string, bool) {
+func addressBookNameFamily16600(ab *AddressBook, name string) (family string, narrow bool, decidable bool) {
 	if ab == nil {
-		return "", false
+		return "", false, false
 	}
 	var values []string
 	if addr, ok := ab.Addresses[name]; ok && addr != nil {
@@ -1731,12 +1788,12 @@ func addressBookNameFamily16600(ab *AddressBook, name string) (string, bool) {
 	} else {
 		leaves, err := expandAddressSetLeaves(name, ab)
 		if err != nil || len(leaves) == 0 {
-			return "", false
+			return "", false, false
 		}
 		for _, leaf := range leaves {
 			if v4, v6, ok := PolicyAddressWildcardFamilies(leaf); ok {
 				if v4 && v6 {
-					return "", false
+					return "", false, false
 				}
 				if v4 {
 					values = append(values, "0.0.0.0/0")
@@ -1747,31 +1804,33 @@ func addressBookNameFamily16600(ab *AddressBook, name string) (string, bool) {
 			}
 			member, ok := ab.Addresses[leaf]
 			if !ok || member == nil {
-				return "", false
+				return "", false, false
 			}
 			vals := member.UsableValues()
 			if len(vals) == 0 {
-				return "", false
+				return "", false, false
 			}
 			values = append(values, vals...)
 		}
 	}
 	if len(values) == 0 {
-		return "", false
+		return "", false, false
 	}
-	family := ""
 	for _, v := range values {
 		f := natAddrFamily(natCIDRIPPart(v))
 		if f == "" {
-			return "", false
+			return "", false, false
 		}
 		if family == "" {
 			family = f
 		} else if family != f {
-			return "", false
+			return "", false, false
+		}
+		if !natPrefixIsFamilyWildcard(v) {
+			narrow = true
 		}
 	}
-	return family, true
+	return family, narrow, true
 }
 
 // validateNATSourceAddressNameReferencesStrict hard-rejects a source or

@@ -96,7 +96,6 @@ func TestSourceNATRuleSingleFamilyWildcard16600(t *testing.T) {
 	}
 }
 
-
 func TestSourceNATPoolFamilyLenientWarns16600(t *testing.T) {
 	cfg, err := CompileConfigLenient(buildTree(t, snatFamilySet16600(
 		"source-address 10.0.0.0/24", "2001:db8::5")))
@@ -156,5 +155,41 @@ func TestSourceNATPoolFamilyFeedNameAdmitted16600(t *testing.T) {
 	}
 	if _, err := CompileConfig(buildTree(t, lines)); err != nil {
 		t.Fatalf("direct feed binding must commit (runtime-resolved): %v", err)
+	}
+}
+
+// #17408: the #16600 gate must be scoped to proven (narrow)
+// mismatches. A whole-family /0 source match with an opposite-family
+// pool is the pre-existing #5627/#5875 valid-grammar shape (the
+// source prefix is scaffold; the v6-only pool is the subject) and
+// must compile clean again, while a narrow single-family match with
+// an opposite-family pool still rejects.
+func TestSourceNATPoolFamilyWildcardSourceAdmitted17408(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		src  string
+		pool string
+	}{
+		{"v4-slash0 v6 pool", "source-address 0.0.0.0/0", "2001:db8::5"},
+		{"v6-slash0 v4 pool", "source-address ::/0", "192.0.2.5"},
+		{"v4-bare-wildcard v6 pool", "source-address 0.0.0.0", "2001:db8::5"},
+		{"v6-slash112 scaffold shape", "source-address 10.0.0.0/24", "2001:db8::/112"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The /24 scaffold shape is narrow, so only the /0 and
+			// bare-wildcard rows are admitted by scoping; the /24 row
+			// is asserted separately below to still reject.
+			if tc.name == "v6-slash112 scaffold shape" {
+				return
+			}
+			if _, err := CompileConfig(buildTree(t, snatFamilySet16600(tc.src, tc.pool))); err != nil {
+				t.Fatalf("whole-family source match must commit (#17408), got: %v", err)
+			}
+		})
+	}
+	// Narrow mismatch still rejects (the #16600 defect, unchanged).
+	if _, err := CompileConfig(buildTree(t, snatFamilySet16600(
+		"source-address 10.0.0.0/24", "2001:db8::/112"))); err == nil {
+		t.Fatal("narrow v4 source with v6-only /112 pool must still reject (#16600)")
 	}
 }

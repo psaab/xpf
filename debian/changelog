@@ -9,6 +9,14 @@ xpf (0.0.0) unstable; urgency=medium
     discoverable only through allocation-failure counters — the
     source-NAT twin of the #13922 destination/static cross-family
     reject. Unconstrained and dual-family rules still commit.
+  * Config/NAT: the #16600 source-NAT pool family gate is scoped
+    to proven mismatches (#17408): it now fires only for a narrow
+    single-family source match (a proper subset of its family),
+    not a whole-family /0 source match, and the #5627/#5875 pool
+    grammar test scaffolds use a dual-family source match so their
+    v6-only and unscoped-v6 pool cases exercise pool grammar rather
+    than the family gate. A narrow IPv4-only source with a v6-only
+    pool (and the reverse) is still rejected at strict commit.
   * DDNS/DHCP: the RFC 4701 device proof marker published under
     skip-existing/strict-fail to let a same-device sibling prove
     co-ownership (#14995) now has an owner and a delete path
