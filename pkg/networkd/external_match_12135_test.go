@@ -250,13 +250,17 @@ func TestExternalMACAddressForms12135(t *testing.T) {
 		pattern string
 		want    bool
 	}{
-		{name: "bare hex rejected", pattern: "525400aabbcc"},
 		{name: "eight-byte EUI-64 rejected", pattern: "52-54-00-aa-bb-cc-dd-ee"},
-		// #14701: IP literals are not hardware addresses; systemd's
-		// hw_addr parser drops them, so they must not parse as MACs.
-		{name: "eight-group colon IP literal rejected", pattern: "52:54:00:aa:bb:cc:dd:ee"},
-		{name: "IPv4 literal rejected", pattern: "192.0.2.1"},
-		{name: "IPv6 literal rejected", pattern: "2001:db8::1"},
+		// #16797: systemd 262 config_parse_hw_addrs uses
+		// parse_hw_addr_full(word, 0), which ACCEPTS IPv4/IPv6
+		// literals as 4/16-byte tunnel hardware addresses (the
+		// #14701 rejection was wrong). The 8-group colon spelling
+		// parses as a 16-byte IPv6-form address (inet_pton), never
+		// as 8 single bytes; the hyphen EUI-64 above stays dropped
+		// because inet_pton claims only the colon spelling.
+		{name: "eight-group colon literal is IPv6-form", pattern: "52:54:00:aa:bb:cc:dd:ee", want: true},
+		{name: "IPv4 literal accepted as tunnel address", pattern: "192.0.2.1", want: true},
+		{name: "IPv6 literal accepted as tunnel address", pattern: "2001:db8::1", want: true},
 		{name: "colon-separated address", pattern: "52:54:00:aa:bb:cc", want: true},
 		{name: "short colon groups", pattern: "5:4:0:a:b:c", want: true},
 		{name: "hyphen-separated address", pattern: "52-54-00-aa-bb-cc", want: true},

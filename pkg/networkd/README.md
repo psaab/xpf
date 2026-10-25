@@ -25,10 +25,14 @@ Triggers `networkctl reload` only when files actually changed.
   use the tested systemd-compatible `fnmatch` forms. Systemd consumes field-level
   backslashes before matching and rejects `:` in interface names, so matcher-helper
   escape and POSIX named-class coverage is not a file-level parity claim. MAC forms
-  normalize systemd's colon-, hyphen-, and dotted EUI-48 spellings; IP
-  literals are rejected as hardware addresses (#14701). A run of leading
-  `!` on a `Name=` word collapses to one negation, so a same-line
-  `Name=!eth0 !eth1` vetoes both names. Each `MACAddress=` assignment
+  normalize systemd's colon-, hyphen-, and dotted EUI-48 spellings plus 20-byte
+  IPoIB forms, and accept IPv4/IPv6 literals as raw 4/16-byte tunnel hardware
+  addresses (#16797: `config_parse_hw_addrs` → `parse_hw_addr_full(word, 0)`
+  accepts the IP forms; the #14701 rejection was wrong). Name negation strips
+  exactly one leading `!` (`net_condition_test_strv`), so a same-line
+  `Name=!eth0 !eth1` — stored by the parser as `["!eth0", "!!eth1"]` — vetoes
+  only eth0; eth1 matches by the all-negative default, as real networkd 262
+  does (the #14701 run-collapse was wrong). Each `MACAddress=` assignment
   rebuilds the list, so a later all-invalid assignment resets earlier
   valid words. A file whose
   effective `[Match]` has no valid setting (empty section, `Name=`/`MACAddress=`
