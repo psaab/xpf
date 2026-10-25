@@ -4095,6 +4095,30 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   secondary-hold, on commit, on `ResetFailover`, on peer loss, and on RG
   removal, so a later legitimate transfer-out still promotes. The abort
   send is best-effort and never masks the original failover error.
+- **An aborted node-targeted failover must demote the requester it
+  already promoted (#16818, R3-F08-01 — #15164 residual).** The marker
+  above only refuses FUTURE promotion; it did not undo a promotion the
+  local commit had already applied, because
+  `abortRequestedPeerFailover` re-ran the election only when it restored
+  a peer snapshot. Restoring the pre-request PRIMARY snapshot turned the
+  demotion into a dual-active decision a higher-priority requester wins,
+  and restoring the owner's hold snapshot (its hold heartbeat seen
+  before the commit) ran no election at all — so
+  `RequestPeerFailover` reported failure while the RG had moved,
+  possibly to a node whose local commit-ready settle had just failed.
+  Both abort paths (single and batch) now run the election
+  unconditionally, after recording the marker and restoring any local
+  hold: the #16592 aborted-marker arm in `electRG` demotes a primary
+  requester ("Peer transfer aborted") regardless of the restored
+  snapshot, and demoting before the abort frame is sent closes the race
+  where the owner's restored non-hold heartbeat would expire the marker
+  in `applyTransferCommitOverridesOnPeerStateLocked` before any election
+  applied it. A lost abort frame still leaves the documented ownerless
+  window bounded by the #5079 lease; on delivered rows the owner is
+  restored promptly as before. Pinned by
+  `failover_abort_16818_test.go` (both priority orderings, both post-ACK
+  abort causes, abort frame delivered/lost, hold heartbeat before/after
+  the commit, plus the batch form).
 - **The ISSU drain pin is a state fact, not a derived weight (#16743).**
   `ForceSecondary` sets `forcedSecondary` alongside `ManualFailover` and
   `Weight=0`. While set, `recalcWeight`, `debtDerivedWeightLocked`, and
