@@ -274,12 +274,14 @@ func (s *Server) GetSystemInfo(ctx context.Context, req *pb.GetSystemInfoRequest
 		}
 
 	case "boot-messages":
-		out, err := outputTimeout(ctx, "journalctl", "--boot", "-n", "100", "--no-pager")
+		out, err := outputTimeout(ctx, "journalctl", "-k", "--boot", "-n", "100", "--no-pager")
 		if err != nil {
 			return nil, diagExecError("running journalctl", err)
 		}
-		// #6584 sweep: same journald text as ShowText{log}; not named in the
-		// issue.
+		// #16725: -k restricts to kernel messages only (the Junos
+		// boot-messages contract). Without it, --boot returns the
+		// whole system journal (sshd/sudo/other daemons) to this
+		// PermView RPC. #6584: still sanitize the kernel text.
 		buf.WriteString(termsafe.SanitizeBlockForDisplay(string(out)))
 
 	case "connections":

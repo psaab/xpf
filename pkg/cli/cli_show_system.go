@@ -633,12 +633,12 @@ func (c *CLI) showSystemUptime() error {
 // showSystemBootMessages shows recent boot messages via journalctl.
 
 func (c *CLI) showSystemBootMessages() error {
-	// #6584: this is the SAME journald text as `show log`, and it was not
-	// named in the issue — it was found by sweeping the predicate rather than
-	// the two cited sites. It has to be BUFFERED to be guarded at all: wiring
-	// cmd.Stdout straight to os.Stdout leaves no string to sanitize. The
-	// output is bounded at 100 lines, so buffering costs nothing.
-	out, err := exec.Command("journalctl", "--boot", "-n", "100", "--no-pager").CombinedOutput()
+	// #16725: -k restricts to kernel messages only (the Junos
+	// boot-messages contract). Without it, --boot returns the whole
+	// system journal (sshd/sudo/other daemons) to a view-only class.
+	// #6584: this is journald text like `show log`, buffered so it can
+	// be sanitized; output is bounded at 100 lines.
+	out, err := exec.Command("journalctl", "-k", "--boot", "-n", "100", "--no-pager").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("journalctl --boot: %w", err)
 	}

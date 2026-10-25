@@ -694,7 +694,7 @@ Gap audit: `docs/archived/userspace-forwarding-and-failover-gap-audit.md` (PR #3
 ## Sprint 23 (`6af0688`)
 - **load set terminal:** Paste multiple set commands in configure mode; ParseSetCommand+SetPath per line; file mode; LoadSet() in configstore with tests
 - **Port validation:** validatePortSpec (1-65535, named ports, ranges), validateProtocol (names/numbers 0-255); warnings in compileApplications; 10 test cases
-- **show system boot-messages:** journalctl --boot -n 100 via CLI/gRPC
+- **show system boot-messages:** journalctl -k --boot -n 100 via CLI/gRPC (kernel messages only; #16725)
 - **configure exclusive:** Mutex-based exclusive config mode; EnterConfigureExclusive/IsExclusiveLocked; prevents concurrent edits
 - Files: 10 files, 405 insertions — pkg/{cli,cmdtree,config,configstore,grpcapi}/, cmd/cli/, proto/
 
