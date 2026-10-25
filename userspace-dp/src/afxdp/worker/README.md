@@ -13,11 +13,23 @@ cold extractions out of the fn: `loop_body/setup.rs` (one-shot setup,
 returns the loop's initial `WorkerLoopSetup` state) and
 `loop_body/debug_report.rs` (the cfg(debug-log) verbose report /
 stall dump + `DbgCounters`, feature-gated at the `mod` declaration so
-release builds compile none of it). All per-tick logic — including
-the hot `poll_binding` sweep, the ArcSwap config refresh, command
-drain, and the always-on `BindingLiveState` publish — stays inline in
-`loop_body/mod.rs` by design (no call boundary added to the per-tick
-path; Codex r1-4).
+release builds compile none of it). #13075 (D4-12) split selected
+per-tick control work from this file into deliberate
+`#[inline(never)]` calls: `housekeeping::run_session_housekeeping`,
+`pptp_drain::run_pptp_control_drain`, `ct_slice::run_ct_slice`,
+`delta_recovery::run_delta_recovery`, and
+`export_slice::run_export_slice`. The loop in `loop_body/mod.rs`
+retains their call order, ArcSwap/config refreshes
+(`load_arc_if_changed`), worker-command drain, binding poll sweep,
+and periodic `BindingLiveState` publication. The same split moved
+snapshot-rotation helpers to `reconcile.rs` and GC/delete helpers
+to `gc_teardown.rs`; see the file table. The narrower #1776 codegen
+constraint still applies specifically to `load_arc_if_changed`: do
+not place a new `#[inline(never)]` boundary in front of that hot
+per-tick refresh path. The paired-runtime refresh,
+`refresh_runtime_view` (#6291/#6592), remains `#[inline]`; production's
+`between` closure is a zero-sized no-op, so the helper leaves no
+release call boundary.
 
 #5189 (A1-b8-F5) narrowed what "always-on" covers at the ~1 s report
 tick. #1776 gated only the `eprintln!` and left the `binding_summary`
@@ -81,11 +93,19 @@ pass. RX is unaffected either way — the rings are swept on every loop pass;
 | File | Purpose |
 |------|---------|
 | `mod.rs` | `BindingWorker` struct + shared-binding helpers + `pub(crate) use loop_body::worker_loop` re-export + `pub(crate) use launch::{…}` bundle re-exports (#6241). |
-| `loop_body/mod.rs` | `worker_loop` body (extracted in #1326 Phase 1; decomposed in #1776). Per-tick orchestrator — all per-tick logic stays inline here. #6241: `worker_loop` now takes 5 typed launch bundles (see `launch.rs`) and destructures them at entry into the same locals used today, so the setup call and the steady loop body are textually unchanged. |
+| `loop_body/mod.rs` | `worker_loop` steady-state orchestrator (extracted in #1326 Phase 1; decomposed in #1776 and #13075). The per-tick call ordering stays here while selected control slices are `#[inline(never)]` calls into sibling modules. #6241: `worker_loop` takes 5 typed launch bundles (see `launch.rs`) and destructures them at entry into the same locals used today. |
+| `loop_body/housekeeping.rs` | #13075 — per-tick session expiry/GC housekeeping and close-delta drain (`run_session_housekeeping`, `#[inline(never)]`). |
+| `loop_body/pptp_drain.rs` | #13075 — per-tick PPTP control-inbox drain (`run_pptp_control_drain`, `#[inline(never)]`). |
+| `loop_body/ct_slice.rs` | #13075 — per-tick conntrack refresh and fabric/WG drains (`run_ct_slice`, `#[inline(never)]`); also the pending-neighbor retry timer. |
+| `loop_body/delta_recovery.rs` | #13075 — per-tick delta-loss recovery and stale-session sweeps (`run_delta_recovery`, `#[inline(never)]`). |
+| `loop_body/export_slice.rs` | #13075 — per-tick CommandExport slice and steady-state delta drain (`run_export_slice`, `#[inline(never)]`). |
+| `loop_body/reconcile.rs` | #13075 — forwarding-snapshot rotation reconciliation helpers, including the `#[inline]` `refresh_runtime_view` refresh seam. |
+| `loop_body/gc_teardown.rs` | #13075 — session-expiry/GC and control-plane delete teardown helpers, re-exported for worker call sites. |
+| `loop_body/screen_status.rs` | Publishes the worker's cumulative ScreenState status through a live binding on the report tick. |
 | `launch.rs` | #6241 — the 5 typed worker-launch bundles (`WorkerLaunchPlan`, `WorkerSharedDataplane`, `WorkerControlChannels`, `WorkerCoSState`, `WorkerPublishedTelemetry`) + 2 nested (`WorkerNeighbors`, `WorkerSharedSessions`) that replace the old 38-parameter positional `worker_loop` protocol. `WorkerSharedDataplane::from_coord` / `WorkerCoSState::from_coord` (coordinator-published state) and the `::new` builders (per-worker slots) are the single named construction sites; `Arc::ptr_eq` wiring tests bind them (fail-on-revert for the session-map and heartbeat/export-ack silent-swap hazards). |
 | `loop_body/setup.rs` | #1776 — one-shot cold setup (`worker_loop_setup`): thread pin via `pin_current_thread` (defined in `afxdp/neighbor.rs`), TSC calibration, binding construction, BPF-map-FD cache; returns `WorkerLoopSetup`. #6245: binding construction now accumulates EXPLICIT per-slot terminal failures (`binding_failures`) + recovered shared-group fallbacks (`recovered_fallbacks`), sorted deterministically and carried through `WorkerLoopSetup` into `WorkerStartupReport` (the failed slot is no longer signalled only by OMISSION from `bindings`). See `coordinator/README.md` #6245. |
 | `loop_body/debug_report.rs` | #1776 — cfg(debug-log)-only `DbgCounters` + per-second verbose report (`emit_periodic_report`) + stall dump (`check_and_dump_stall`). #5189: also the per-binding diagnostics build (`build_binding_summary` — `String` + per-binding `statistics_v2()`/`SO_ERROR` `getsockopt`), which #1776 had left inline and ungated in `loop_body/mod.rs`. Compiled out of release builds. |
-| `loop_body/idle_poll.rs` | #6431 — classification of the Interrupt-mode idle-regulation `poll(2)` return (`classify` -> `Waited` / `Interrupted` / `Degraded`, plus `fault_summary` for the caller's one-shot log). Idle path only, so it is outside the per-tick no-call-boundary constraint. See "Idle regulation" below. |
+| `loop_body/idle_poll.rs` | #6431 — `#[inline]` classification of the Interrupt-mode idle-regulation `poll(2)` return (`classify` -> `Waited` / `Interrupted` / `Degraded`, plus `fault_summary` for the caller's one-shot log). |
 | `lifecycle.rs` | `poll_binding` — the per-poll RX/TX orchestrator. The "central function" extracted in Issue 73 step 2. |
 | `cos.rs` | Per-worker CoS runtime helpers + shared-exact threshold (the empirical sustained per-worker exact throughput ceiling — see comment block in the file for the evidence basis). |
 | `cos_state.rs` | `WorkerCos` (#959 Phase 3) — per-binding CoS-engine state. |
