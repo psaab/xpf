@@ -2814,6 +2814,19 @@ type compileOpts struct {
 	// interface as a plain L3 interface with its address rather than
 	// half-applying a redundancy group. Same doctrine as lenientRethMember.
 	lenientRethRGOwnership bool
+
+	// lenientRethMultiChild (#16586) downgrades the reth LAG gate
+	// (validateRethMultiChildAST) from a hard compile error to a
+	// cfg.Warnings entry. A reth with two or more local children per
+	// node is a Junos reth LAG; xpf binds only the lexically-first
+	// local child (RethToPhysical) and the extra children would come
+	// up zoneless with a duplicate 169.254 link-local. The strict
+	// commit / commit-check path hard-rejects so the silently-lost
+	// redundancy is operator-visible; the tolerant load / peer-sync
+	// paths warn so an already-persisted or peer-synced config that
+	// predates this gate still BOOTS (#1960 no-brick). Same doctrine
+	// as lenientRethMember.
+	lenientRethMultiChild bool
 	// lenientReservedZoneNames (#3055) downgrades the reserved zone-name
 	// definition gate (validateReservedZoneNamesStrict) from a hard compile
 	// error to a cfg.Warnings entry. The strict commit / commit-check path
@@ -3971,6 +3984,7 @@ func lenientCompileOpts() compileOpts {
 		lenientRoutingInstanceType9814:           true,
 		lenientRethMember:                        true,
 		lenientRethRGOwnership:                   true,
+		lenientRethMultiChild:                    true,
 		lenientReservedZoneNames:                 true,
 		lenientBackupRouterDst:                   true,
 		lenientDDNSRequireTSIG:                   true,

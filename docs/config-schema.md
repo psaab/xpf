@@ -557,6 +557,23 @@ previously pinned. The boundary is *authored vs unset*: a bare
 authors no numeric leaf and still arms the #3230 Junos default, and an
 unset syn-flood subfield or limit-session cap stays disabled (#15269).
 
+### A reth with more than one child per node is a reth LAG (16586)
+
+Junos forms a reth LAG from two or more child interfaces per node on
+one reth (up to 8 per node; the remaining links take over a failed
+link's load). xpf implements no reth LAG: `RethToPhysical` binds one
+local child per reth, and before #16586 the extra children committed
+strict-clean, came up zoneless with a duplicate `169.254.<rg>.<node>`
+link-local and their physical MAC, and carried no traffic for the
+reth. `validateRethMultiChildAST` (pre-expansion, unioning the
+authored view with the node0/node1 group expansions so both cluster
+nodes verdict identically) now strict-rejects that shape, naming the
+reth, the node, the bound child and the ignored children; the
+tolerant load / peer-sync path downgrades to a warning
+(`lenientRethMultiChild`, #1960). The canonical one-child-per-node
+spelling (`ge-0/...` + `ge-7/...`) is unchanged, and slash/dash
+spellings of one port count as one child.
+
 ### Bracketed lists: when to ACCUMULATE and when to REFUSE (9424)
 
 The lexer strips `[`/`]`, so a bracketed list collapses onto ONE leaf's `Keys`
