@@ -35,7 +35,9 @@ func TestBothSurfacesShareHistoryWiring_15284(t *testing.T) {
 			"cliterm.ConfigureReadlineHistory(&readline.Config{",
 			"cliterm.ReadHistorySeed(historyFile)",
 			"cliterm.SeedHistory(",
-			"cliterm.RecordHistoryLine(",
+			// #16794: recording must be cursor-aware on BOTH surfaces,
+			// or edit-context secrets leak on the un-wired one.
+			"cliterm.RecordHistoryLineAt(",
 		)
 		if strings.Contains(src, "DisableReadlineHistoryAutoSave") {
 			t.Errorf("%s still uses DisableReadlineHistoryAutoSave", path)
