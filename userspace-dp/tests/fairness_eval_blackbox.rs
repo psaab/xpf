@@ -1321,6 +1321,68 @@ fn expect_saturation_without_shaper_rate_is_arg_error() {
     );
 }
 
+#[test]
+fn all_zero_throughput_fails_gate1_case_d16540() {
+    // #16540 case D: every stream delivers 0 bytes across the whole
+    // steady-state window (a class blackhole). Pre-fix this returned
+    // PASS (exit 0): starved_flow_count short-circuited on
+    // total_bytes == 0, observed CoV was 0, and no harness arms
+    // --expect-saturation. Gate 1 must now FAIL with every flow
+    // counted starved, so automation keyed on `verdict`/exit code
+    // cannot accept a zero-throughput run.
+    let tmp = TempGuard::new("zero_throughput");
+    let sockets = [5u64, 6, 7, 8, 9, 10];
+    let mut intervals: Vec<Vec<StreamSample>> = Vec::new();
+    for i in 0..60u64 {
+        let mut iv = Vec::new();
+        for &sock in &sockets {
+            iv.push(StreamSample {
+                socket: sock,
+                start: i as f64,
+                end: i as f64 + 1.0,
+                bits_per_second: 0.0,
+            });
+        }
+        intervals.push(iv);
+    }
+    let json_str = synth_iperf3_json(60, &sockets, intervals);
+    // TSV still reports all 6 flows active (a_i_sum diagnostic only);
+    // with every flow starved the expected non-starved sum is 0, so
+    // the sum guard will also fire — the load-bearing assertion is
+    // that Gate 1 fires and the verdict is FAIL / exit 1.
+    let tsv_str = make_balanced_tsv(6, &timestamps_for(60), "ge-0-0-2");
+    let (output, verdict) = run_with_inputs(&tmp, &json_str, &tsv_str, &[
+        "--iface", "ge-0-0-2",
+        "--n-workers", "6",
+        "--warmup-secs", "0",
+        "--final-burst-secs", "0",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "all-zero throughput must exit 1 (FAIL), not PASS; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v = verdict.expect("verdict JSON on FAIL");
+    assert_eq!(v["verdict"], "FAIL");
+    assert_eq!(
+        v["starved_flow_count"], 6,
+        "every flow delivered zero bytes, so every flow is starved: {v}"
+    );
+    assert!(
+        v["aggregate_mbps"].as_f64().unwrap_or(-1.0).abs() < 1e-9,
+        "aggregate must be ~0 in this fixture: {v}"
+    );
+    let reasons = v["failure_reasons"].as_array().expect("failure_reasons array");
+    assert!(
+        reasons.iter().any(|r| {
+            let s = r.as_str().unwrap_or("");
+            s.contains("Gate 1") && s.contains("no throughput")
+        }),
+        "failure_reasons must contain a Gate 1 no-throughput entry; got: {reasons:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Shared input builders.
 // ---------------------------------------------------------------------------

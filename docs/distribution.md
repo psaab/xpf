@@ -150,7 +150,13 @@ and pin.
   non-negative integer number of seconds, `0` disables only the margin and
   never the expired check) — an expired suite would otherwise be published
   and then refused by every apt client (#15277). Rebuild/re-sign the stale
-  suite before publishing; do not publish around it.
+  suite before publishing; do not publish around it. The same gate also
+  refuses EVERY suite whose signed `Suite` or `Codename` does not exactly
+  (single, present field) equal its `dists/<suite>` directory, and every
+  channel pointer whose `channel` field does not equal the channel it is
+  served from (absent refuses) — a mis-synced pointer or suite verifies
+  perfectly under the shared signing key, so without this the gate would
+  report PASSED and publish bytes every client then refuses (#16542).
 - Images: `latest.json` (signed) names the current version per channel, and
   `xpf-deploy.py fetch` **consumes** it: with no `--version` it fetches
   `<channel>/latest.json`, minisign-verifies it against any configured image

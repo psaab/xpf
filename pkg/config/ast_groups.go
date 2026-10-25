@@ -709,6 +709,10 @@ func expandLevelRefs15033(nodes *[]*Node, groups map[string]*Node, ancestorPath 
 //     precedence and order; group members not already present are appended,
 //     deduplicated. This holds across BOTH AST shapes (collapsed leaf and block
 //     container) on either side, and yields exactly ONE node for the key.
+//     Repeated same-key inline statements stay separate sibling nodes, so
+//     the union deduplicates over ALL of them and appends to the LAST:
+//     inline `a`, `b` plus group `c` yields [a b c], and a group member
+//     equal to a later inline member is not duplicated (#16541).
 //   - SCALAR leaf (host-name, ...): inline OVERRIDES the group value (the
 //     explicit stanza wins via first-match ordering — unchanged).
 //   - Unmodeled leaf (not resolvable in setSchema): OVERRIDE, the safe
@@ -1021,8 +1025,17 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 				// range-bearing leaves all take the override path.
 				if leafListUnionEligible(ancestorPath, key, peer, s) ||
 					groupReplacePortUnionEligible(ancestorPath, key, peer, s) {
-					mergeLeafListInto(peer, s)
-					appendDuplicateBlockMergeMarkersToLeaves9023([]*Node{peer}, markers)
+					// #16541: dedup over ALL same-key siblings and append to
+					// the LAST one, so group members follow every inline
+					// member ([a b c], never [a c b] or [a b b]). Eligibility
+					// was decided on the selected peer; the sibling form
+					// only retargets where appended members land.
+					target := peer
+					if eligiblePeer := lastLeafListPeer16541(*dst, key); eligiblePeer != nil {
+						target = eligiblePeer
+					}
+					mergeLeafListIntoSiblings16541(leafListPeers16541(*dst, key), s)
+					appendDuplicateBlockMergeMarkersToLeaves9023([]*Node{target}, markers)
 				} else if body, ok := promoteLeafPeerForPackedGroup9855(ancestorPath, peer, s); ok {
 					// #9855: a PACKED group leaf naming the same instance as an
 					// inline LEAF peer. Promoting the peer to its braced shape
@@ -1210,15 +1223,27 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 				if !matches && zoneLeafHasApplyMacroTail13112(d) && len(s.Keys) == 2 {
 					matches = keysMatchWildcard(d.Keys[:2], s.Keys)
 				}
-				if matches && (!d.IsLeaf || zoneLeafTakesWildcard9801(ancestorPath, d)) {
+				// #16543: generalize #9801 — a bare named-instance leaf
+				// whose schema slot is a container that compiles from a
+				// leaf (OSPF interface, BGP neighbor, RA interface, ...)
+				// takes the wildcard exactly like its braced spelling.
+				// Top-level interfaces / routing-instances stay excluded
+				// (#9838 compiles no instance from their bare leaves).
+				bare16543 := bareInstanceLeaf16543(ancestorPath, d)
+				if matches && (!d.IsLeaf || bare16543 || zoneLeafTakesWildcard9801(ancestorPath, d)) {
 					// #9801: a zone written as a leaf becomes the empty container its
 					// braced spelling is, and takes the group the same way.
+					// #16543: the same flip for every bare instance leaf
+					// that compiles from a leaf (bareInstanceLeaf16543).
 					// #9862: when filtering is active the flip waits for an
 					// adoption (growth-detect): an all-filtered merge must not
 					// reshape the leaf it adds nothing to. mergeNodes only
 					// appends, so growth is exactly adoption. Unconditional
 					// when filtering is off, exactly as before.
 					promoteZoneMacroLeaf13112(d)
+					if bare16543 {
+						promoteBareInstanceLeaf16543(d)
+					}
 					leafKids := -1
 					if haveExcept {
 						leafKids = len(d.Children)
@@ -1258,8 +1283,13 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			if peer := leafListPeer(*dst, s.Keys[0]); peer != nil {
 				if leafListUnionEligible(ancestorPath, s.Keys[0], peer, s) ||
 					groupReplacePortUnionEligible(ancestorPath, s.Keys[0], peer, s) {
-					mergeLeafListInto(peer, s)
-					appendDuplicateBlockMergeMarkersToLeaves9023([]*Node{peer},
+					// #16541: same sibling-wide union as the leaf branch.
+					target := peer
+					if eligiblePeer := lastLeafListPeer16541(*dst, s.Keys[0]); eligiblePeer != nil {
+						target = eligiblePeer
+					}
+					mergeLeafListIntoSiblings16541(leafListPeers16541(*dst, s.Keys[0]), s)
+					appendDuplicateBlockMergeMarkersToLeaves9023([]*Node{target},
 						duplicateBlockMergeMarkers9023(s))
 				} else if rpeer, rkey, ok := budget.shallowerAdoptedPeer15033(*dst, s, budget.applyOriginLevel15033); ok &&
 					!leafListUnionEligible(ancestorPath, rkey, rpeer, s) &&
@@ -1278,8 +1308,13 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			peer := leafListPeer(*dst, s.Keys[0])
 			if peer != nil && peer.IsLeaf {
 				if groupReplacePortUnionEligible(ancestorPath, s.Keys[0], peer, s) {
-					mergeLeafListInto(peer, s)
-					appendDuplicateBlockMergeMarkersToLeaves9023([]*Node{peer},
+					// #16541: same sibling-wide union as the leaf branch.
+					target := peer
+					if eligiblePeer := lastLeafListPeer16541(*dst, s.Keys[0]); eligiblePeer != nil {
+						target = eligiblePeer
+					}
+					mergeLeafListIntoSiblings16541(leafListPeers16541(*dst, s.Keys[0]), s)
+					appendDuplicateBlockMergeMarkersToLeaves9023([]*Node{target},
 						duplicateBlockMergeMarkers9023(s))
 				}
 				continue
@@ -1449,6 +1484,23 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 				}
 				continue
 			}
+			// #16546: a group CONTAINER whose inline peer is a BARE
+			// presence leaf (`ssh;` beside `ssh { root-login deny; ... }`).
+			// The bare leaf is the empty braced spelling, so promote it
+			// and merge the container's children into it with inline
+			// precedence instead of letting the #4325 guard below drop
+			// the whole container.
+			if peer := barePresenceContainerPeer16546(ancestorPath, *dst, s); peer != nil {
+				budget.notePromoted9855(peer)
+				children := cloneNodes(s.Children)
+				if err := budget.charge(countNodes(children)); err != nil {
+					return err
+				}
+				if err := mergeNodes(&peer.Children, children, appendPath(ancestorPath, peer.Keys), budget, group, vars, scope, haveExcept, deferWildcards); err != nil {
+					return err
+				}
+				continue
+			}
 		}
 		if !found {
 			// Cross-shape guard (#4325): a single-key group container whose
@@ -1463,6 +1515,7 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			// stanza; beside a group-adopted stanza the block materializes so
 			// #11821/#12821 can see both values.
 			if len(s.Keys) == 1 && hasMatchingLeaf(*dst, s.Keys) &&
+				!barePresenceGuardExempts16546(ancestorPath, *dst, s) &&
 				(!isDefaultPolicyGroupStanza12923(ancestorPath, s) ||
 					!groupDefaultPolicyStanzaAdopted12923(budget, *dst)) &&
 				!packedTailLeafExempts4325(ancestorPath, *dst, s) &&
@@ -1683,6 +1736,162 @@ func leafListPeer(dst []*Node, key string) *Node {
 	return nil
 }
 
+// leafListPeers16541 returns every dst node that expresses the leaf-list
+// keyed by key, in destination order — the same match rule as leafListPeer.
+// Repeated flat-set statements (`set ... export a` then `set ... export b`)
+// stay SEPARATE sibling leaves, so a leaf-list at one level can be spread
+// over several nodes; a union that only looks at the first of them splices
+// the group's members between inline members (#16541).
+func leafListPeers16541(dst []*Node, key string) []*Node {
+	if key == "" {
+		return nil
+	}
+	var out []*Node
+	for _, n := range dst {
+		if n == nil || len(n.Keys) == 0 || n.Keys[0] != key {
+			continue
+		}
+		if n.IsLeaf || len(n.Keys) == 1 {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// lastLeafListPeer16541 returns the LAST dst node expressing the leaf-list
+// keyed by key, or nil. It is the union TARGET: appending the group's
+// members there keeps every inline member ahead of every group member
+// (#16541), where appending to the first sibling produced [a c b] for
+// inline `a`, `b` plus group `c`.
+func lastLeafListPeer16541(dst []*Node, key string) *Node {
+	peers := leafListPeers16541(dst, key)
+	if len(peers) == 0 {
+		return nil
+	}
+	return peers[len(peers)-1]
+}
+
+// mergeLeafListIntoSiblings16541 unions src's members into the leaf-list
+// spread over peers (all same-key siblings at one level, in order), as
+// mergeLeafListInto unions into a single node. Deduplication is computed
+// over ALL siblings — a group member equal to a LATER inline member is
+// already present, so it is not appended to an earlier sibling (the
+// [a b b] duplicate) — and new members are appended to the LAST sibling,
+// so the compiled order is every inline member in authored order followed
+// by the new group members (#16541). When a duplicate spans siblings its
+// #9862 ownership is recorded on the sibling that actually carries it,
+// which mergeLeafListInto cannot know from the last sibling alone; the
+// member-aligned view built here keeps that bookkeeping exact instead.
+//
+// The single-peer case is exactly mergeLeafListInto, which also carries
+// the #9627 bare self-repeat onto the target; a multi-sibling union must
+// not lose that repeat (the #9027 gate scans the merged tree), so
+// self-repeats are carried onto the last sibling as well.
+func mergeLeafListIntoSiblings16541(peers []*Node, src *Node) {
+	if len(peers) == 0 || src == nil || len(src.Keys) == 0 {
+		return
+	}
+	if len(peers) == 1 {
+		mergeLeafListInto(peers[0], src)
+		return
+	}
+	last := peers[len(peers)-1]
+	self := src.Keys[0]
+	var allMembers []leafListMemberGroups9862
+	ownerOf := make(map[string]*Node)
+	trackMembers := len(src.leafMemberGroups9862) > 0 || len(src.fromGroups) > 0
+	for _, p := range peers {
+		members := leafListMemberGroupsForNode9862(p)
+		if len(p.leafMemberGroups9862) > 0 || len(p.fromGroups) > 0 {
+			trackMembers = true
+		}
+		for _, m := range members {
+			if _, ok := ownerOf[m.value]; !ok {
+				ownerOf[m.value] = p
+			}
+			allMembers = append(allMembers, m)
+		}
+	}
+	srcMembers := leafListMemberGroupsForNode9862(src)
+	seen := make(map[string]bool)
+	for _, m := range allMembers {
+		if m.value != self || m.quoted {
+			seen[m.value] = true
+		}
+	}
+	perPeer := make(map[*Node][]leafListMemberGroups9862, len(peers))
+	{
+		idx := 0
+		for _, p := range peers {
+			n := len(leafListMemberGroupsForNode9862(p))
+			if trackMembers {
+				perPeer[p] = append([]leafListMemberGroups9862(nil), allMembers[idx:idx+n]...)
+			}
+			idx += n
+		}
+	}
+	for _, m := range srcMembers {
+		if m.value == self && !m.quoted {
+			last.Keys = append(last.Keys, m.value)
+			appendKeyQuoted9627(last, false)
+			if trackMembers {
+				perPeer[last] = append(perPeer[last], m)
+			}
+			continue
+		}
+		if seen[m.value] {
+			if trackMembers {
+				if owner := ownerOf[m.value]; owner != nil {
+					members := perPeer[owner]
+					for i := range members {
+						if members[i].value == m.value {
+							if len(members[i].groups) == 0 || len(m.groups) == 0 {
+								members[i].groups = nil
+							} else {
+								unionMemberGroups9862(&members[i].groups, m.groups)
+							}
+							break
+						}
+					}
+					perPeer[owner] = members
+				}
+			}
+			if owner := ownerOf[m.value]; owner != nil {
+				mergeLeafListDupOwnership9862(owner, src, m.value)
+			}
+			continue
+		}
+		seen[m.value] = true
+		if last.IsLeaf {
+			last.Keys = append(last.Keys, m.value)
+			appendKeyQuoted9627(last, m.quoted)
+		} else {
+			child := &Node{
+				Keys:          []string{m.value},
+				IsLeaf:        true,
+				InheritedFrom: src.InheritedFrom,
+				fromGroups:    append([]string(nil), m.groups...),
+			}
+			if m.quoted {
+				child.KeysQuoted = []bool{true}
+			}
+			last.Children = append(last.Children, child)
+		}
+		ownerOf[m.value] = last
+		if trackMembers {
+			perPeer[last] = append(perPeer[last], m)
+		}
+	}
+	if trackMembers {
+		for _, p := range peers {
+			if p.fromGroups != nil {
+				p.fromGroups = nil
+			}
+			p.leafMemberGroups9862 = perPeer[p]
+		}
+	}
+}
+
 // mergeLeafListInto unions the members of a group leaf-list node src into an
 // existing inline leaf-list node dst. Members are read across both AST shapes
 // (Keys[1:] AND child leaves), with their quote provenance. Inline members keep
@@ -1690,7 +1899,9 @@ func leafListPeer(dst []*Node, key string) *Node {
 // order, deduplicated. The dst node's shape is preserved -- a collapsed leaf
 // grows on Keys, a block container gains one child leaf per added member -- so
 // the result is exactly ONE node for the key regardless of the two inputs'
-// shapes.
+// shapes. mergeLeafListIntoSiblings16541 is the sibling-wide form: it keeps
+// this single-node behaviour for one peer and otherwise deduplicates over
+// every same-key sibling, appending to the last (#16541).
 //
 // #9627: an UNQUOTED repeat of the leaf's own keyword in src is the ambiguous
 // #9027 shape, and it is carried onto dst's Keys whatever dst's shape, never

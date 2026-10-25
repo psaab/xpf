@@ -3998,8 +3998,24 @@ alone deliberately — that spelling is not authorable Junos (Junos writes one
 value per statement inside a block), the readers differ for stated reasons
 (`multiLeafAuthoredValues` keeps empty values to hold the
 `multiLeafAuthoredValues(n)[0] == nodeVal(n)` invariant; `proxyARPAddressValues`
-holds #6673's measured install-parity), and adding the spelling to the gate
-would assert a defect at 30 sites that no operator can author.
+holds #6673's measured install-parity), and adding the spelling to the
+compiled-output differential would assert a defect at 30 sites that no
+operator can author.
+
+**The validation side of that spelling is now closed (#16535).** The
+parser admits `leaf { v1 v2; }` even though Junos does not write it, and
+pre-#16535 `validateMultiValueLeaf` checked only `c.Keys[:1]` of each
+block child, so a rejected second token could commit (reaching compilers
+that read every child key, e.g. RA `dns-server-address`) while a valid
+second token was silently dropped by `Keys[0]` readers (proxy-ARP). The
+walker now REFUSES a multi-token block child — one value per statement
+inside a value block — at every typed multi leaf and at untyped multi
+leaves such as proxy-arp `address`. Leaves whose compiler reads EVERY
+child key (`allChildKeysAreValues`, the `firewallMatchValues` readers)
+are exempt: every token there is a value and every token is validated.
+The slot-escape sweep probes the form as `G-hier-one-child-multi-token`;
+the refusal itself is pinned by
+`TestOneChildMultiTokenBlockRefused16535`.
 
 **A silent DROP can be closed by diagnosing it instead of widening the read
 (#6714, proxy-ARP).** `security nat proxy-arp … address` accepts one

@@ -15,21 +15,20 @@ artifact in the publish set is properly signed:
       with Valid-Until after Date, Date not beyond the 5-minute future skew,
       Valid-Until unexpired and more than the freshness margin away (default
       7 days, XPF_APT_FRESHNESS_MARGIN_SECONDS) for EVERY suite in the tree,
-      target and non-target, flat and reprepro (#15277); for flat repos,
-      the signed Packages index matches the suite pool and every Filename,
-      Package, Version, and Architecture agrees with dpkg metadata. In a normal
-      image+apt publish, its package version must equal the signed target
-      latest.json version. Reprepro's separate retention policy is preserved;
+      target and non-target, flat and reprepro (#15277), and exactly one
+      Suite and one Codename both equal to the suite's dists/<suite>
+      directory (#16542); for flat repos,
   (c) install.sh is PRESENT (required by default — the Tier-A one-liner URL
       404s without it; opt out with --no-installer), carries NO placeholder
       key and NO unsubstituted %%…%% marker (it must be stamped first), and
       has a verifying install.sh.minisig;
   (d) the TARGET channel's latest.json verifies against the image pubkey, has a
-      date within the 90-day freshness window, AND names a version present in
-      the image set; every OTHER channel's latest.json in the tree also carries
-      a verifying signature and fresh date — the whole dist tree is uploaded,
-      so a stale/unsigned non-target pointer must not ship unverified (HB165
-      H-13).
+      date within the 90-day freshness window, a `channel` field equal to the
+      channel it is served from (absent refuses) (#16542), AND names a version
+      present in the image set; every OTHER channel's latest.json in the tree
+      also carries a verifying signature, fresh date, and matching `channel`
+      field — the whole dist tree is uploaded, so a stale/unsigned/mis-synced
+      non-target pointer must not ship unverified (HB165 H-13).
 
 For every image set, publish also opens the qcow offline and requires a
 parseable, non-placeholder installed archive keyring (#12188); when
@@ -832,6 +831,13 @@ def _gate_one_latest(dist, channel, pub, require_present):
         die(f"{channel}/latest.json is not valid JSON after verify: {e}")
     if not isinstance(data, dict):
         die(f"{channel}/latest.json is not a JSON object")
+    got_chan = data.get("channel")
+    if got_chan != channel:
+        die(f"{channel}/latest.json channel field {got_chan!r} does not "
+            f"match channel {channel!r} — refusing to publish a pointer "
+            "that every client would refuse (a mis-synced or swapped "
+            "pointer verifies fine; the signature says who wrote it, not "
+            "where it belongs) (#16542).")
     try:
         sign.validate_latest_date(data.get("date"))
     except sign.SignError as e:
@@ -1138,13 +1144,48 @@ def _gate_apt_freshness(suite, release_text, now=None, margin=None):
     return date_epoch, valid_until_epoch
 
 
+def _gate_apt_suite_identity(suite, release_text):
+    """Bind a signed Release to its dists/<suite> directory (#16542).
+
+    Parses the SIGNED cleartext (gpg --decrypt output of InRelease, so the
+    bytes are signature-verified) rather than the unsigned on-disk
+    Release/Release.gpg. Exactly one Suite and one Codename are required,
+    and both must equal the directory the suite is served from; duplicates,
+    a missing field, or a mismatch refuse closed. A signed Release naming
+    another suite verifies perfectly (the same archive key signs every
+    suite), so a mis-synced or swapped suite would otherwise pass the gate
+    and then be refused by apt/install.sh channel binding for every
+    client.
+    """
+    fields = {}
+    for line in release_text.splitlines():
+        if line[:1].isspace() or ":" not in line:
+            continue
+        key, _sep, value = line.partition(":")
+        if key in ("Suite", "Codename"):
+            fields.setdefault(key, []).append(value.strip())
+    for key in ("Suite", "Codename"):
+        values = fields.get(key, [])
+        if len(values) != 1:
+            die(f"apt suite {suite} signed Release has {len(values)} {key} "
+                f"fields, want exactly 1 — refusing to publish an apt suite "
+                "whose identity cannot be established (#16542).")
+        if values[0] != suite:
+            die(f"apt suite {suite} signed Release {key} is "
+                f"{values[0]!r}, not {suite!r} — refusing to publish a "
+                "suite that every client would refuse (a mis-synced or "
+                "swapped suite verifies fine; the signature says who "
+                "wrote it, not where it belongs) (#16542).")
+
+
 def gate_apt(dist, channel, expected_versions=None, now=None):
     """Verify signed apt metadata and, for flat suites, bind the Packages
     index to the exact pool and dpkg identities. `expected_versions` is the
     already-verified target image version. Every suite in apt/ must be signed,
     and every suite's signed Release must be unexpired and outside the
-    freshness margin (#15277). `now` is injectable for deterministic tests;
-    production passes None (wall clock)."""
+    freshness margin (#15277) and carry exactly one Suite and one Codename
+    equal to its dists/<suite> directory (#16542). `now` is injectable for
+    deterministic tests; production passes None (wall clock)."""
     # Reject symlinks anywhere under apt/ (Codex-r5): the apt tree is uploaded
     # as part of the dist root, and a dereferencing backend could follow a
     # symlink to publish unverified bytes — the same class as the image-sweep
@@ -1208,6 +1249,10 @@ def gate_apt(dist, channel, expected_versions=None, now=None):
             # the unsigned on-disk Release. Every suite (flat + reprepro,
             # target + non-target) must be unexpired and outside the margin.
             _gate_apt_freshness(suite, clear.stdout, now=now)
+            # #16542: suite identity is judged on the same VERIFIED
+            # cleartext. Every suite's signed Suite and Codename must
+            # equal its dists/<suite> directory, target and non-target.
+            _gate_apt_suite_identity(suite, clear.stdout)
             # Flat repositories have a suite-scoped pool and exact-set
             # semantics. Reprepro keeps its own package history in a shared
             # component pool; preserve that opt-in backend's retention policy.

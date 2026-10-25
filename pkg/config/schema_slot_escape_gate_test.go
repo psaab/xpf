@@ -236,10 +236,19 @@ var slotEscapeTokens = []string{
 	"esp", "aes-256-cbc", "group14", "main", "virtual-router", "discard", "reject",
 }
 
-// slotEscapeForms are the spellings a two-element value list admits. All five
-// are probed: #6687 escaped in the hierarchical bracket and block forms as well
-// as the flat-set one, so restricting to the flat-set grammar would have missed
-// two thirds of that defect's surface.
+// slotEscapeForms are the spellings a two-element value list admits. All
+// six are probed in the sweep below (A–E plus G, the #16535 one-child
+// multi-token block): #6687 escaped in the hierarchical bracket and block
+// forms as well as the flat-set one, so restricting to the flat-set
+// grammar would have missed two thirds of that defect's surface. Form G
+// (`leaf { v1 v2; }`) is expected to be REFUSED at the walker (#16535)
+// rather than validated token-by-token, so for a gated leaf the sweep's
+// slot-0 control itself is a refusal and the form carries no verdict
+// (slotEscapeSweepOutcomes requires a clean control); the refusal is
+// pinned directly by TestOneChildMultiTokenBlockRefused16535. For an
+// UNGATED leaf form G still probes: a clean two-token commit there is
+// recorded, and a rejected token moved to slot 1 must still be rejected
+// wherever the leaf does validate.
 type slotEscapeForm struct {
 	name string
 	run  func(g gateLeaf, vals []string) error
@@ -285,6 +294,14 @@ func slotEscapeForms() []slotEscapeForm {
 				cmds = append(cmds, flatPrefix(g)+" "+v)
 			}
 			return slotEscapeCommitSet(cmds)
+		}},
+		{"G-hier-one-child-multi-token", func(g gateLeaf, vals []string) error {
+			// #16535: sixth spelling — BOTH tokens on ONE statement inside
+			// the block (`leaf { v1 v2; }`), a single AST child with
+			// Keys=[v1 v2]. Distinct from B-hier-block, which writes one
+			// value per statement.
+			return slotEscapeCommitBrace(gateBraceConfig(g.path,
+				fmt.Sprintf("%s { %s; }", g.leaf, strings.Join(vals, " "))))
 		}},
 	}
 }

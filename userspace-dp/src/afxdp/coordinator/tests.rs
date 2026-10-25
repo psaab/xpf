@@ -14465,6 +14465,48 @@ fn stop_preserving_retires_holders_on_preserved_allocator_15966r() {
 }
 
 #[test]
+fn stop_for_link_cycle_retires_holders_on_preserved_allocator_16549() {
+    use crate::nat::NatHolder;
+    let mut coordinator = Coordinator::new();
+    let rec = WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle());
+    coordinator.workers.register(3, rec, None);
+    let egress: std::net::IpAddr = "192.0.2.7".parse().unwrap();
+    let alloc = coordinator.forwarding.iface_nat_allocators.allocator_for(egress).expect("allocator");
+    let flow = crate::nat::SourceNatFlowKey { protocol: 6, src_ip: "10.0.0.5".parse().unwrap(), dst_ip: "198.51.100.9".parse().unwrap(), src_port: 4000, dst_port: 80, routing_scope: 0 };
+    assert!(alloc.reserve_flow(flow, crate::nat::TranslatedTuple { ip: egress, port: 20000 }, 0, false, 1_000, NatHolder::Worker(3)));
+    assert!(alloc.debug_is_port_occupied(0, 20000));
+    coordinator.stop_for_link_cycle();
+    assert!(!alloc.debug_is_port_occupied(0, 20000), "#16549: holder retirement through link-cycle stop must free the preserved allocator's port");
+    assert!(coordinator.workers.records().is_empty());
+}
+
+#[test]
+fn stop_for_link_cycle_holder_retirement_is_durable_after_plan_shrink_16549() {
+    use crate::nat::NatHolder;
+    // Durable shape from the issue: worker 3 holds a port, the link-cycle
+    // stop joins it, and no later stop ever names worker 3 again (plan
+    // shrink). Pre-fix the mem::take walked a default allocator set and
+    // spent the one-shot CAS, so the bit survived every later stop too.
+    let mut coordinator = Coordinator::new();
+    let rec = WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle());
+    coordinator.workers.register(3, rec, None);
+    let egress: std::net::IpAddr = "192.0.2.7".parse().unwrap();
+    let alloc = coordinator.forwarding.iface_nat_allocators.allocator_for(egress).expect("allocator");
+    let flow = crate::nat::SourceNatFlowKey { protocol: 6, src_ip: "10.0.0.5".parse().unwrap(), dst_ip: "198.51.100.9".parse().unwrap(), src_port: 4000, dst_port: 80, routing_scope: 0 };
+    assert!(alloc.reserve_flow(flow, crate::nat::TranslatedTuple { ip: egress, port: 20000 }, 0, false, 1_000, NatHolder::Worker(3)));
+    assert!(alloc.debug_is_port_occupied(0, 20000));
+    coordinator.stop_for_link_cycle();
+    assert!(!alloc.debug_is_port_occupied(0, 20000), "#16549: link-cycle stop must retire worker 3's bit on the preserved allocator");
+    // Later stop with a shrunken plan (worker 4 only, no worker 3) must
+    // not resurrect or depend on same-id replay; the port stays free.
+    let rec4 = WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle());
+    coordinator.workers.register(4, rec4, None);
+    coordinator.stop_for_link_cycle();
+    assert!(!alloc.debug_is_port_occupied(0, 20000), "#16549: port must stay free after a later stop whose plan lacks worker 3");
+    assert!(coordinator.workers.records().is_empty());
+}
+
+#[test]
 fn coordinator_recovery_publish_advances_pptp_epoch_15966r7() {
     use crate::session::pptp_control::PendingControlSegment;
     let mut coord = Coordinator::new();

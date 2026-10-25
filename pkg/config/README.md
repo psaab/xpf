@@ -822,7 +822,10 @@ one value form. `range-address <low> to <high>` expands natively at compile
 time via `expandAddressRange` (256-address cap; oversized ranges are recorded
 in `Address.OversizedRange`, rejected at strict commit, unusable on tolerant
 load), `wildcard-address <ip>/<wildcard-mask>` expands to the single
-wildcard-derived CIDR (non-contiguous masks have no CIDR equivalent and stay
+wildcard-derived CIDR under Junos polarity (#16544: mask bits set to 1 are
+compared, 0 bits are ignored — `10.1.2.3/255.255.255.0` → `10.1.2.0/24`,
+`.../255.255.255.255` → the host /32; non-contiguous masks, including the
+Cisco-polarity spelling `.../0.0.0.255`, have no CIDR equivalent and stay
 unimplemented), and `dns-name <fqdn> [ipv4-only|ipv6-only]` is modelled in
 `Address.DNSName`/`DNSFamily` with the current resolution in
 `Address.DNSAddresses` — refreshed at apply time and periodically by the
@@ -2324,6 +2327,15 @@ names. Both rules apply only to `security-zone` statements directly under
   the wildcard merge visited only non-leaf destinations, so
   `security-zone trust;` lost a group's screen that `security-zone trust { }`
   took.
+- #16543 generalizes that flip: a `<*>` group reaches ANY bare named-instance
+  leaf whose schema slot is a container that compiles from a leaf
+  (`bareInstanceLeaf16543`, `group_merge_bare_leaf_16543.go`) — OSPF/OSPFv3/
+  IS-IS interface, BGP neighbor, RA interface, LLDP interface, and the like.
+  Before #16543 `interface ge-0/0/0.0;` / `neighbor 192.0.2.2;` lost a wildcard
+  OSPF-MD5 / BGP-MD5 template and ran unauthenticated on a clean commit. The
+  #9838 exclusion is kept: a bare top-level `interfaces <name>;` /
+  `routing-instances <name>;` leaf still compiles no instance and still
+  refuses, group or not.
 - A brace-elided interface instance (`ge-0/0/0 unit 0 family inet
   address A;`, a packed leaf under `interfaces`) is promoted to its
   braced shape before group merge (#15032,

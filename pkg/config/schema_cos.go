@@ -705,6 +705,15 @@ var schemaFirewall = &schemaNode{desc: "Firewall filters and policers", children
 						"dscp":          {desc: "Rewrite the DSCP value (name or number)", args: 1, placeholder: "<dscp>", children: nil},
 						"traffic-class": {desc: "Rewrite the traffic class (DSCP name or number)", args: 1, placeholder: "<traffic-class>", children: nil},
 						"policer":       {desc: "Apply a policer to matching traffic", args: 1, placeholder: "<policer-name>", children: nil},
+						// #16533: `then next term` is a compiler-read action
+						// (compileFilterThen sets NextTerm) that the schema never
+						// declared, so packedBodyChildren declined on `next` and
+						// dropped the whole packed `then` tail. Declare it with
+						// its optional `term` qualifier as a child, mirroring
+						// `reject`'s message-type children.
+						"next": {desc: "Continue to the next term", children: map[string]*schemaNode{
+							"term": {desc: "Continue to the next term", children: nil},
+						}},
 					}},
 				}},
 			}},
@@ -814,6 +823,10 @@ var schemaFirewall = &schemaNode{desc: "Firewall filters and policers", children
 						"dscp":          {desc: "Rewrite the DSCP value (name or number)", args: 1, placeholder: "<dscp>", children: nil},
 						"traffic-class": {desc: "Rewrite the traffic class (DSCP name or number)", args: 1, placeholder: "<traffic-class>", children: nil},
 						"policer":       {desc: "Apply a policer to matching traffic", args: 1, placeholder: "<policer-name>", children: nil},
+						// #16533: see family inet `then` above.
+						"next": {desc: "Continue to the next term", children: map[string]*schemaNode{
+							"term": {desc: "Continue to the next term", children: nil},
+						}},
 					}},
 				}},
 			}},

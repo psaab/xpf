@@ -366,11 +366,20 @@ func validateTypedLeaf(node *Node, leafSchema *schemaNode, parentPath []string, 
 //     `destination-port 20000 to 20003`. On every other typed multi
 //     leaf `to` is validated as an ordinary value, #4556 L-01), and
 //   - the hierarchical block-list shape, one child node per value
-//     (`name-server { 1.1.1.1; 8.8.8.8; }`). By default only each child's
-//     FIRST token is validated, matching leaves whose compiler reads only
-//     the child name (e.g. name-server / virtual-address). A leaf can opt in
-//     via allChildKeysAreValues when its compiler consumes the full child
-//     Keys tail; `as-path-prepend` does because it uses firewallMatchValues.
+//     (`name-server { 1.1.1.1; 8.8.8.8; }`).
+//
+// #16535: the parser also admits a SIXTH spelling — one block child
+// carrying several tokens (`leaf { v1 v2; }`, child Keys=[v1 v2]).
+// Junos writes one value per statement inside a block, so the walker
+// REFUSES a multi-token block child rather than guessing which tokens
+// the compiler will use: compilers legitimately differ there (some
+// read every child key, some read Names/[Keys[0]] only), so validating
+// every token would bless a spelling whose second value is silently
+// dropped, and validating only the first lets a rejected second value
+// escape into compilers that read every key. One refusal covers both
+// directions. Leaves whose compiler reads every child key opt in via
+// allChildKeysAreValues; there every token IS a value, so every token
+// is validated and nothing is refused.
 //
 // A leaf with no value in either position fails, as do dangling /
 // separator-only tails (["to"], ["20000","to"]).
@@ -417,11 +426,20 @@ func validateMultiValueLeaf(node *Node, leafSchema *schemaNode, parentPath []str
 		}
 	}
 
-	// Block-list children default to one compiler-consumed value per child.
-	// Opt-in leaves like as-path-prepend validate every key they compile.
+	// Block-list children (#16535): one value per statement. A
+	// multi-token child is refused unless the leaf opts in via
+	// allChildKeysAreValues, in which case every token is validated
+	// (and compiled — see firewallMatchValues / the opt-in readers).
 	for _, c := range node.Children {
 		if c == nil || len(c.Keys) == 0 {
 			continue
+		}
+		if len(c.Keys) > 1 && !leafSchema.allChildKeysAreValues {
+			err := typedLeafErrorf(path, "only one value per statement inside a value block; write %q as separate statements (%s { %s; %s; }) or a bracket list (%s [ %s %s ])", strings.Join(c.Keys, " "), leafName, c.Keys[0], c.Keys[1], leafName, c.Keys[0], c.Keys[1])
+			if vc.recordTypedLeaf(err) {
+				continue
+			}
+			return err
 		}
 		keys := c.Keys[:1]
 		if leafSchema.allChildKeysAreValues {

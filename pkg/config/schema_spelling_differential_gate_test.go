@@ -166,13 +166,24 @@ package config
 // differential, and it is written up in docs/config-schema.md ("The one-sided
 // read has a SECOND half").
 //
-// A sixth spelling was measured and deliberately NOT added: `leaf { v1 v2; }`
-// (two tokens on one statement inside a value block) still drops at 30 sites,
-// all of them readers that legitimately take one key per child
+// A sixth spelling was measured and deliberately NOT added as a
+// DIFFERENTIAL form: `leaf { v1 v2; }` (two tokens on one statement
+// inside a value block) still drops at 30 sites, all of them readers
+// that legitimately take one key per child
 // (multiLeafAuthoredValues, addressSetMemberValues, proxyARPAddressValues).
-// Junos writes one value per statement inside a block, so adding it would
-// assert a defect at 30 sites no operator can author — the same mistake
-// notAValueList exists to avoid.
+// Junos writes one value per statement inside a block, so adding it as a
+// compiled-output form would assert a defect at 30 sites no operator can
+// author — the same mistake notAValueList exists to avoid. #16535 closes
+// the VALIDATION side instead: the schema walker now REFUSES a
+// multi-token block child at every typed multi leaf (and at untyped
+// multi leaves such as proxy-arp `address`), so neither a dropped valid
+// value nor an unvalidated rejected value can commit in that spelling.
+// The refusal is pinned by TestOneChildMultiTokenBlockRefused16535 in
+// schema_walk_multi_token_16535_test.go, and the slot-escape sweep probes
+// the same form as G-hier-one-child-multi-token (see
+// schema_slot_escape_gate_test.go). Only leaves whose compiler reads
+// EVERY child key (allChildKeysAreValues — firewallMatchValues readers)
+// are exempt: there every token is a value and every token is validated.
 //
 // A SEVENTH spelling WAS added, by #6693: `leaf <v1> { <v2>; }` — a value in
 // the identifier slot BESIDE a block (F-hier-mixed). It is the only spelling
