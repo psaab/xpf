@@ -168,8 +168,9 @@ func runEarlyStrictAndFolds(cfg *Config, opts compileOpts) error {
 		}
 	}
 	// #15685 — reject a `security dynamic-address address-name <name>` that
-	// shares its name with a static `address`/`address-set` (global or
-	// zone-local). Userspace lowering checks a declared binding BEFORE the
+	// shares its name with a static `address`/`address-set` (global, named
+	// #15672 books, or zone-local). Userspace lowering checks a declared
+	// binding BEFORE the
 	// static book, so while the feed is unready (or the binding has no
 	// profile feed-name at all) the name lowers to __unsupported_address__
 	// and rejects the whole snapshot instead of enforcing the static entry;
@@ -177,7 +178,10 @@ func runEarlyStrictAndFolds(cfg *Config, opts compileOpts) error {
 	// stanza declares. MUST run here, on the PRISTINE books BEFORE the
 	// zone-local fold, because bindings are keyed by authored name and the
 	// userspace lookup unqualifies zone-local tokens back to that name.
-	// Strict on commit / commit-check; tolerant load / peer-sync downgrades
+	// It also runs before resolveNamedAddressBooks15672 so an attached
+	// named-book entry is reported against its book (#16838), not only as
+	// the folded zone-local entry. Strict on commit / commit-check;
+	// tolerant load / peer-sync downgrades
 	// to a warning (lenientDynamicAddressFeedRef, #1960 no-brick) — the
 	// runtime stays fail-closed for the name while its feed is unready.
 	if err := validateDynamicAddressStaticCollisionStrict(cfg); err != nil {

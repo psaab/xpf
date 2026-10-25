@@ -752,15 +752,18 @@ orphan also shadowed any same-named static `address`/`address-set`.
 `len(FeedNames) == 0` at commit (naming the binding and the missing
 `profile feed-name`), and `validateDynamicAddressStaticCollisionStrict`
 (run in `runEarlyStrictAndFolds` on the pristine books, before the
-zone-local fold) rejects ANY binding — feed-backed or not — whose name
-collides with a static `address` or `address-set` in the global or any
-zone-local book: while the feed is unready the name fails closed instead of
-enforcing the static entry, and once ready it enforces the union, so the
-name never has the single meaning either stanza declares. Both gates
-downgrade to warnings on the tolerant load / peer-sync path
-(`lenientDynamicAddressFeedRef`, #1960 no-brick); the runtime stays
-fail-closed for such names. Regression coverage:
-`dynamic_address_no_profile_15685_test.go`.
+named-book and zone-local folds) rejects ANY binding — feed-backed or
+not — whose name collides with a static `address` or `address-set` in
+the global book, any named address book (#15672, #16838 — attached or
+not, named in the error), or any zone-local book: while the feed is
+unready the name fails closed instead of enforcing the static entry,
+and once ready it enforces the union, so the name never has the single
+meaning either stanza declares. Both gates downgrade to warnings on
+the tolerant load / peer-sync path (`lenientDynamicAddressFeedRef`,
+#1960 no-brick); the runtime stays fail-closed for such names.
+Regression coverage: `dynamic_address_no_profile_15685_test.go` and
+`dynamic_address_named_book_16838_test.go` (including the cross-gate
+pristine-book census).
 
 **Warn pass must agree with strict on the valid address-reference forms
 (#3958):** the non-fatal `ValidateConfig` warn pass

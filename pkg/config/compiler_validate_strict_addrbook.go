@@ -123,8 +123,8 @@ func validateAddressBookNameCollisionStrict(cfg *Config) error {
 
 // validateDynamicAddressStaticCollisionStrict (#15685) hard-rejects a
 // `security dynamic-address address-name <name>` binding that shares its name
-// with a static `address` or `address-set` — in the global book or in ANY
-// zone-local book.
+// with a static `address` or `address-set` — in the global book, in ANY
+// named address book (#15672, #16838), or in ANY zone-local book.
 //
 // Dynamic bindings and static entries share one operator-visible namespace
 // at policy/NAT resolution, but userspace lowering does NOT treat them as
@@ -149,6 +149,16 @@ func validateAddressBookNameCollisionStrict(cfg *Config) error {
 // (dynamicAddressLookupName), so a zone-local `address blocked` really does
 // collide with `address-name blocked` even though the post-fold global keys
 // differ. The caller (runEarlyStrictAndFolds) enforces that ordering.
+//
+// Named books (#16838): this gate MUST also run before
+// resolveNamedAddressBooks15672 folds an attached named book into its
+// zones. Before #16838 it walked only the global and zone-local books, so
+// `security address-book eng-book address blocked` attached to trust
+// committed strict-clean, was folded to zone-local/trust/blocked, and then
+// hit the same declared-binding-first lowering refusal as a direct
+// zone-local collision. Walking the pristine NamedAddressBooks (attached
+// or not, like the sibling pristine gates) closes that hole and names the
+// book in the error.
 //
 // Strict on commit / commit-check hard-rejects; the tolerant load / peer-sync
 // path (opts.lenientDynamicAddressFeedRef, #1960 no-brick) downgrades to a
@@ -200,6 +210,26 @@ func validateDynamicAddressStaticCollisionStrict(cfg *Config) error {
 					"rename the address-name or the static entry so the "+
 					"name has one meaning",
 				name, kind, name)
+		}
+		for _, bn := range sortedNamedBookNames15672(cfg.Security.NamedAddressBooks) {
+			nb := cfg.Security.NamedAddressBooks[bn]
+			if nb == nil {
+				continue
+			}
+			if kind := kindIn(&nb.AddressBook, name); kind != "" {
+				return fmt.Errorf(
+					"security dynamic-address address-name %q collides with "+
+						"security address-book %q %s %q: the dynamic binding "+
+						"and the static entry share one policy namespace, but the "+
+						"binding is checked first at lowering — while its feed is "+
+						"unready (or has no profile feed-name, #15685) the name "+
+						"lowers to __unsupported_address__ and rejects the whole "+
+						"userspace snapshot instead of enforcing the static "+
+						"entry, and once ready it enforces the union of both; "+
+						"rename the address-name or the static entry so the "+
+						"name has one meaning (#16838)",
+					name, bn, kind, name)
+			}
 		}
 		for _, z := range zoneNames {
 			zone := cfg.Security.Zones[z]
