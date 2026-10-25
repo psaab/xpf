@@ -12,6 +12,7 @@ route-map xpf-cluster-null0-xpf-redist permit 10
 exit
 !
 router ospf
+ distance ospf intra-area 10 inter-area 10 external 150
  ospf router-id 10.0.0.1
  redistribute static route-map xpf-cluster-null0-xpf-redist
 exit
@@ -22,6 +23,7 @@ exit
 !
 router bgp 65000
  no bgp ebgp-requires-policy
+ distance bgp 170 170 170
  neighbor 192.0.2.1 remote-as 65001
  redistribute static route-map xpf-cluster-null0-xpf-redist
  !

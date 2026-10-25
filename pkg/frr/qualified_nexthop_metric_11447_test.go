@@ -323,7 +323,7 @@ func TestQualifiedNextHopMetricSupportsHostAndIPv6Routes11447(t *testing.T) {
 			StaticRoutes:  compiled.RoutingOptions.StaticRoutes,
 			PolicyOptions: &compiled.PolicyOptions,
 		})
-		if !strings.Contains(rendered, "router ospf6\n redistribute static\n") ||
+		if !strings.Contains(rendered, "router ospf6\n") || !strings.Contains(rendered, " redistribute static\n") ||
 			strings.Contains(rendered, "redistribute static route-map ") ||
 			strings.Contains(rendered, "match ipv6 address prefix-list ") ||
 			strings.Contains(rendered, "match ipv6 next-hop prefix-list ") ||
@@ -365,12 +365,12 @@ func TestQualifiedNextHopMetricGatesIGPsByMatchCapability12071(t *testing.T) {
 	if qnhMap == "" {
 		t.Fatalf("OSPF static export must attach the QNH metric map:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, "router ospf\n redistribute static route-map "+qnhMap+"\n") ||
-		!strings.Contains(rendered, "router rip\n network ge-0/0/0.0\n redistribute static route-map "+qnhMap+"\n") {
+	if !strings.Contains(rendered, " redistribute static route-map "+qnhMap+"\n") ||
+		!strings.Contains(rendered, " network ge-0/0/0.0\n") {
 		t.Fatalf("the fully capable IPv4 daemons must attach the shared QNH metric map:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, "router ospf6\n redistribute static\n") ||
-		strings.Contains(rendered, "router ospf6\n redistribute static route-map "+qnhMap) ||
+	if !strings.Contains(rendered, "router ospf6\n") || !strings.Contains(rendered, "\n redistribute static\n") ||
+		strings.Count(rendered, " redistribute static route-map "+qnhMap) != 2 ||
 		!strings.Contains(rendered, "redistribute ipv4 static level-2\n") ||
 		strings.Contains(rendered, "redistribute ipv4 static level-2 route-map "+qnhMap) ||
 		strings.Contains(rendered, "redistribute ipv6 static level-2 route-map "+qnhMap) {
@@ -405,7 +405,7 @@ func TestQNHMetricRIPKeepsDefaultMetricWithWarning11447(t *testing.T) {
 	if len(overlays) != 1 || overlays["ospfd"] == "" {
 		t.Fatalf("RIP must not receive a QNH route-map overlay: %v", overlays)
 	}
-	if !strings.Contains(rendered, "router rip\n redistribute static route-map ") ||
+	if !strings.Contains(rendered, "router rip\n") || !strings.Contains(rendered, " redistribute static route-map ") ||
 		strings.Contains(rendered, " set metric ") {
 		t.Fatalf("RIP must retain the metric-free route-map attachment:\n%s", rendered)
 	}

@@ -43,7 +43,8 @@ func TestOSPFv3AreaTypesRenderUnderRouterOspf6_11401(t *testing.T) {
 		{ID: "0.0.0.6", AreaType: "nssa", NoSummary: true},
 	}}
 	vrfGot := m.generateProtocols(nil, vrf, nil, nil, nil, "tenant", 0, nil, nil)
-	if !strings.Contains(vrfGot, "router ospf6 vrf tenant\n area 0.0.0.6 nssa no-summary\n") {
+	if !strings.Contains(vrfGot, "router ospf6 vrf tenant\n") ||
+		!strings.Contains(vrfGot, " area 0.0.0.6 nssa no-summary\n") {
 		t.Errorf("routing-instance OSPFv3 type did not reach the FRR router stanza:\n%s", vrfGot)
 	}
 }

@@ -1,6 +1,7 @@
 ! xpf managed config - do not edit
 !
 router ospf
+ distance ospf intra-area 10 inter-area 10 external 150
  ospf router-id 10.0.0.1
  auto-cost reference-bandwidth 1000
  passive-interface ge-0-0-1

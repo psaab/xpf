@@ -77,8 +77,10 @@ import (
 // LearnedRouteImportPreference is the fallback preference assigned to imported
 // kernel-selected routes when no same-prefix dynamic protocol distance applies.
 //
-// The snapshot builder compares BGP, OSPF, IS-IS and RIP routes with their
-// default FRR distances when deciding whether a configured route wins. Other
+// The snapshot builder compares BGP, OSPF, IS-IS and RIP routes with
+// their effective managed-section distances (#16620 Junos scale:
+// OSPF 10, RIP 100, BGP 170, IS-IS at FRR's fixed 115) when deciding
+// whether a configured route wins. Other
 // learned routes keep this preference: configured routes at this preference
 // or better remain sole, while a worse configured fallback stays beside the
 // imported route. This value also mirrors FRR's DHCP default distance.

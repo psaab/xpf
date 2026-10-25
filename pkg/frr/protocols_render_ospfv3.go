@@ -26,6 +26,9 @@ func (m *Manager) renderOSPFv316125(b *strings.Builder, ospfv3 *config.OSPFv3Con
 	}
 	if ospfv3 != nil {
 		fmt.Fprintf(b, "router ospf6%s\n", vrfSuffix)
+		// #16620: pin OSPFv3 to Junos preferences (internal 10,
+		// external 150); see protocol_distance_16620.go.
+		b.WriteString(junosOSPF6DistanceLine)
 		if validRouterID(ospfv3.RouterID) {
 			fmt.Fprintf(b, " ospf6 router-id %s\n", ospfv3.RouterID)
 		}

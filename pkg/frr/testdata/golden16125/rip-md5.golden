@@ -1,6 +1,7 @@
 ! xpf managed config - do not edit
 !
 router rip
+ distance 100
  network ge-0-0-0
  network ge-0-0-1
  passive-interface ge-0-0-1

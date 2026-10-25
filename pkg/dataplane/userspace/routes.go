@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/frr"
 	"github.com/psaab/xpf/pkg/routing"
 	"github.com/vishvananda/netlink"
 )
@@ -618,12 +619,13 @@ func buildRouteSnapshotsWithRGPrimary(cfg *config.Config, interfaces []Interface
 	//
 	// PREFERENCE-AWARE GAP-FILL. Keep a config-derived route when its
 	// preference is at least as good as the imported route's learned
-	// protocol distance (eBGP 20, OSPF 110, IS-IS 115, RIP 120; other
-	// protocols 200). When the config route is a worse-preference fallback
-	// (for example preference 250), publish both: the Rust FIB's
-	// ascending-preference tie-break then selects the kernel's
-	// already-selected learned route. This preserves ordinary config routes
-	// as winners while honoring floating fallbacks.
+	// protocol distance (#16620 Junos scale: OSPF 10, IS-IS 115 (FRR
+	// fixed), RIP 100, BGP 170; other protocols 200). When the config
+	// route is a worse-preference fallback (for example preference
+	// 250), publish both: the Rust FIB's ascending-preference
+	// tie-break then selects the kernel's already-selected learned
+	// route. This preserves ordinary config routes as winners while
+	// honoring floating fallbacks.
 	//
 	// THE OVERLAY ALWAYS WINS, and the gap-fill rule — not this call's
 	// position — is what guarantees it. Measured, because the obvious claim
@@ -1800,24 +1802,18 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 	return capped, suppressedMTUs, nil
 }
 
-// learnedRouteProtocolDistance returns FRR's default distance for dynamic
-// routes whose kernel protocol identifies their routing daemon. RTPROT_BGP
-// does not distinguish eBGP from iBGP, so use the default external BGP
-// distance here; the kernel-selected row itself is the source of truth that
-// the route is active.
+// learnedRouteProtocolDistance returns the effective distance the
+// managed section assigns (#16620) for dynamic routes whose kernel
+// protocol identifies their routing daemon, so the helper FIB orders
+// an imported learned route against Junos-scale config preferences
+// exactly as zebra does. Delegates to pkg/frr's table (the renderer's
+// own constants) so the two can never drift: OSPF 10 (internal),
+// RIP 100, BGP 170, IS-IS at FRR's fixed 115. RTPROT_BGP does not
+// distinguish eBGP from iBGP, and Junos has a single BGP preference
+// (170), so 170 is correct for both. The kernel-selected row itself
+// is the source of truth that the route is active.
 func learnedRouteProtocolDistance(protocol string) (int, bool) {
-	switch protocol {
-	case "bgp":
-		return 20, true
-	case "ospf":
-		return 110, true
-	case "isis":
-		return 115, true
-	case "rip":
-		return 120, true
-	default:
-		return 0, false
-	}
+	return frr.JunosProtocolDistance(protocol)
 }
 
 // learnedRouteGapKey is the (table, family, destination) identity used to

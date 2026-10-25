@@ -14,6 +14,7 @@ route-map xpf-qnh-static-ec82feb6c470a32b-xpf-redist permit 20
 exit
 !
 router ospf
+ distance ospf intra-area 10 inter-area 10 external 150
  redistribute static route-map xpf-qnh-static-ec82feb6c470a32b-xpf-redist
 exit
 !

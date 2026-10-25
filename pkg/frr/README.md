@@ -820,12 +820,28 @@ step. Both are required — neither sees the other's case:
   the helper snapshot, while the shared static-route exclusion map gives the
   show surfaces the same `NOT INSTALLED` reason. The Rust snapshot builder also
   fails closed on a mismatched literal before its family-specific parser runs.
+- **Protocol distances on the Junos scale (#16620).** Static
+  `preference` values are Junos preferences and render VERBATIM as the
+  FRR static distance (see the #12060 range note below), so the dynamic
+  protocols are pinned to their Junos preferences in every stanza
+  (global and per-VRF): OSPF/OSPFv3 `distance ospf|ospf6 intra-area 10
+  inter-area 10 external 150`, BGP `distance bgp 170 170 170` (external,
+  internal, local — Junos has one BGP preference), RIP `distance 100`.
+  IS-IS has NO distance knob in FRR stable/10.6 (no CLI/YANG leaf;
+  isisd sends no ZAPI distance), so zebra keeps its fixed 115 against
+  Junos 15 (L1) / 18 (L2): statics at preference 15..115 (L1) /
+  18..115 (L2) order differently against IS-IS than on Junos — the one
+  bounded residual. `protocol_distance_16620.go` owns the constants;
+  `JunosProtocolDistance` is the shared table the helper FIB
+  (`pkg/dataplane/userspace` learned-route gap-fill) compares against,
+  and `protocol_distance_16620_test.go` proves the zebra winner equals
+  the Junos winner for every static preference 1..254 outside that
+  IS-IS window (`preference 180` loses to iBGP, `preference 12` loses
+  to OSPF internal). Internal distances stay consistent on the new
+  scale without moving: DHCP 200 and cluster Null0 250 remain worse
+  than a default static (5), and the ip-monitoring overlay at 1 still
+  beats everything.
 - **FRR static-distance range (#12060).** Route-level and qualified-next-hop
-  `preference` leaves accept only 1..254. FRR's CLI grammar accepts 255, but
-  zebra treats it as `DISTANCE_INFINITY`, so it never installs that route.
-  Tolerant loads clamp larger effective distances to 254 with a warning before
-  rendering (including discard/reject routes); an omitted preference still
-  omits the operand and uses FRR's default distance 1.
 - **Floating static via `qualified-next-hop` (#3871).** A static route's
   `qualified-next-hop <gw> { preference N; metric M; }` is the Junos floating-
   static idiom — a primary next-hop plus a LESS-preferred backup that installs

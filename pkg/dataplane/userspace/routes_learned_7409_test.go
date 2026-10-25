@@ -354,10 +354,11 @@ func TestLearnedRouteOutranksWorsePreferenceConfigRoute(t *testing.T) {
 	}
 }
 
-// Dynamic FRR routes use their protocol's default distance when a configured
-// static is a worse fallback. The helper must retain both rows and order the
-// learned route first, rather than comparing every protocol against DHCP's
-// fixed import preference of 200.
+// Dynamic routes use their protocol's effective distance (#16620 Junos
+// scale: OSPF 10, RIP 100, BGP 170, IS-IS at FRR's fixed 115) when a
+// configured static is a worse fallback. The helper must retain both
+// rows and order the learned route first, rather than comparing every
+// protocol against DHCP's fixed import preference of 200.
 func TestDynamicLearnedRouteGapFillUsesProtocolDistance12037(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -365,18 +366,18 @@ func TestDynamicLearnedRouteGapFillUsesProtocolDistance12037(t *testing.T) {
 		staticPreference  int
 		learnedPreference int
 	}{
-		{"bgp-21", "bgp", 21, 20},
-		{"bgp-150", "bgp", 150, 20},
-		{"bgp-200", "bgp", 200, 20},
-		{"ospf-111", "ospf", 111, 110},
-		{"ospf-150", "ospf", 150, 110},
-		{"ospf-200", "ospf", 200, 110},
+		{"bgp-171", "bgp", 171, 170},
+		{"bgp-200", "bgp", 200, 170},
+		{"bgp-250-legacy200", "bgp", 250, 200},
+		{"ospf-11", "ospf", 11, 10},
+		{"ospf-150", "ospf", 150, 10},
+		{"ospf-200", "ospf", 200, 10},
 		{"isis-116", "isis", 116, 115},
 		{"isis-150", "isis", 150, 115},
 		{"isis-200", "isis", 200, 115},
-		{"rip-121", "rip", 121, 120},
-		{"rip-150", "rip", 150, 120},
-		{"rip-200", "rip", 200, 120},
+		{"rip-101", "rip", 101, 100},
+		{"rip-150", "rip", 150, 100},
+		{"rip-200", "rip", 200, 100},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -461,10 +462,10 @@ func TestDynamicLearnedRouteDoesNotOverrideEqualDistanceConfigRoute12037(t *test
 		protocol string
 		distance int
 	}{
-		{"bgp", 20},
-		{"ospf", 110},
+		{"bgp", 170},
+		{"ospf", 10},
 		{"isis", 115},
-		{"rip", 120},
+		{"rip", 100},
 	}
 	for _, tc := range tests {
 		t.Run(tc.protocol, func(t *testing.T) {

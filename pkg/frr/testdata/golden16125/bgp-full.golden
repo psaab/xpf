@@ -2,6 +2,7 @@
 !
 router bgp 65000
  no bgp ebgp-requires-policy
+ distance bgp 170 170 170
  bgp router-id 10.0.0.3
  bgp cluster-id 10.0.0.3
  bgp graceful-restart

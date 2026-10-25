@@ -2,6 +2,7 @@
 !
 router bgp 65000
  no bgp ebgp-requires-policy
+ distance bgp 170 170 170
  neighbor 192.0.2.1 remote-as 65001
 exit
 !

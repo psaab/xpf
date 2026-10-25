@@ -26,6 +26,11 @@ func (m *Manager) renderOSPF16125(b *strings.Builder, ospf *config.OSPFConfig, v
 	}
 	if ospf != nil {
 		fmt.Fprintf(b, "router ospf%s\n", vrfSuffix)
+		// #16620: pin OSPF to Junos preferences (internal 10, external
+		// 150) so a verbatim Junos static preference arbitrates in
+		// zebra exactly as it does on Junos. See
+		// protocol_distance_16620.go.
+		b.WriteString(junosOSPFDistanceLine)
 		if validRouterID(ospf.RouterID) {
 			fmt.Fprintf(b, " ospf router-id %s\n", ospf.RouterID)
 		}

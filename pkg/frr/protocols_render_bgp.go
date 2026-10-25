@@ -41,6 +41,11 @@ func (m *Manager) renderBGP16125(b *strings.Builder, bgp *config.BGPConfig, vali
 		// as Junos does. Neighbors WITH policies are unaffected: their
 		// route-maps still filter exactly as before.
 		b.WriteString(" no bgp ebgp-requires-policy\n")
+		// #16620: pin BGP (external, internal, local) to the single
+		// Junos BGP preference 170 so a verbatim Junos static
+		// preference arbitrates as on Junos; see
+		// protocol_distance_16620.go.
+		b.WriteString(junosBGPDistanceLine)
 		if validRouterID(bgp.RouterID) {
 			fmt.Fprintf(b, " bgp router-id %s\n", bgp.RouterID)
 		}
