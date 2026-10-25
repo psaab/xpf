@@ -168,8 +168,7 @@ pub(super) fn forwarding_snapshot(include_neighbor: bool) -> ConfigSnapshot {
                 discard: false,
                 next_table: String::new(),
                 preference: 0,
-                rule_priority: 0, mtu: 0,
-            },
+                rule_priority: 0, mtu: 0, next_table_route: false },
             RouteSnapshot {
                 reject: false,
             cluster_terminal: false,
@@ -181,8 +180,7 @@ pub(super) fn forwarding_snapshot(include_neighbor: bool) -> ConfigSnapshot {
                 discard: false,
                 next_table: String::new(),
                 preference: 0,
-                rule_priority: 0, mtu: 0,
-            },
+                rule_priority: 0, mtu: 0, next_table_route: false },
         ],
         neighbors: if include_neighbor {
             vec![
@@ -311,8 +309,7 @@ pub(super) fn native_gre_snapshot(include_neighbor: bool) -> ConfigSnapshot {
                 discard: false,
                 next_table: String::new(),
                 preference: 0,
-                rule_priority: 0, mtu: 0,
-            },
+                rule_priority: 0, mtu: 0, next_table_route: false },
             RouteSnapshot {
                 reject: false,
             cluster_terminal: false,
@@ -324,8 +321,7 @@ pub(super) fn native_gre_snapshot(include_neighbor: bool) -> ConfigSnapshot {
                 discard: false,
                 next_table: String::new(),
                 preference: 0,
-                rule_priority: 0, mtu: 0,
-            },
+                rule_priority: 0, mtu: 0, next_table_route: false },
         ],
         neighbors: if include_neighbor {
             vec![NeighborSnapshot {
@@ -455,8 +451,7 @@ pub(super) fn wg_outer_mtu_snapshot() -> ConfigSnapshot {
             discard: false,
             next_table: String::new(),
             preference: 0,
-            rule_priority: 0, mtu: 0,
-        }],
+            rule_priority: 0, mtu: 0, next_table_route: false }],
         ..Default::default()
     })
 }
@@ -503,7 +498,7 @@ pub(super) fn wg_two_peer_dnat_snapshot() -> ConfigSnapshot {
     next_table: String::new(),
     preference: 0,
     rule_priority: 0,
-    mtu: 0, });
+    mtu: 0, next_table_route: false });
     // Mirror peer B in the endpoint hydration so `endpoint.wg_peers` matches the
     // live two-peer engine the test inserts (the dispatch path selects via the
     // engine's AllowedIPs LPM; this keeps the hydrated snapshot consistent).
@@ -653,8 +648,7 @@ pub(super) fn forwarding_snapshot_with_next_table(include_neighbor: bool) -> Con
                 discard: false,
                 next_table: "blue.inet.0".to_string(),
                 preference: 0,
-                rule_priority: 0, mtu: 0,
-            },
+                rule_priority: 0, mtu: 0, next_table_route: false },
             RouteSnapshot {
                 reject: false,
             cluster_terminal: false,
@@ -666,8 +660,7 @@ pub(super) fn forwarding_snapshot_with_next_table(include_neighbor: bool) -> Con
                 discard: false,
                 next_table: String::new(),
                 preference: 0,
-                rule_priority: 0, mtu: 0,
-            },
+                rule_priority: 0, mtu: 0, next_table_route: false },
             RouteSnapshot {
                 reject: false,
             cluster_terminal: false,
@@ -679,8 +672,7 @@ pub(super) fn forwarding_snapshot_with_next_table(include_neighbor: bool) -> Con
                 discard: false,
                 next_table: "blue.inet6.0".to_string(),
                 preference: 0,
-                rule_priority: 0, mtu: 0,
-            },
+                rule_priority: 0, mtu: 0, next_table_route: false },
             RouteSnapshot {
                 reject: false,
             cluster_terminal: false,
@@ -692,8 +684,7 @@ pub(super) fn forwarding_snapshot_with_next_table(include_neighbor: bool) -> Con
                 discard: false,
                 next_table: String::new(),
                 preference: 0,
-                rule_priority: 0, mtu: 0,
-            },
+                rule_priority: 0, mtu: 0, next_table_route: false },
         ],
         neighbors: if include_neighbor {
             vec![
@@ -740,8 +731,7 @@ pub(super) fn forwarding_snapshot_with_next_table_loop() -> ConfigSnapshot {
             discard: false,
             next_table: "inet.0".to_string(),
             preference: 0,
-            rule_priority: 0, mtu: 0,
-        }],
+            rule_priority: 0, mtu: 0, next_table_route: false }],
         ..Default::default()
     })
 }
@@ -834,8 +824,7 @@ pub(super) fn nat_snapshot() -> ConfigSnapshot {
                 discard: false,
                 next_table: String::new(),
                 preference: 0,
-                rule_priority: 0, mtu: 0,
-            },
+                rule_priority: 0, mtu: 0, next_table_route: false },
             RouteSnapshot {
                 reject: false,
             cluster_terminal: false,
@@ -847,8 +836,7 @@ pub(super) fn nat_snapshot() -> ConfigSnapshot {
                 discard: false,
                 next_table: String::new(),
                 preference: 0,
-                rule_priority: 0, mtu: 0,
-            },
+                rule_priority: 0, mtu: 0, next_table_route: false },
         ],
         source_nat_rules: vec![
             SourceNATRuleSnapshot {
@@ -1275,8 +1263,7 @@ pub(super) fn static_nat_snapshot() -> ConfigSnapshot {
             discard: false,
             next_table: String::new(),
             preference: 0,
-            rule_priority: 0, mtu: 0,
-        }],
+            rule_priority: 0, mtu: 0, next_table_route: false }],
         static_nat_rules: vec![StaticNATRuleSnapshot {
             name: "web-server".to_string(),
             from_zone: "untrust".to_string(),
@@ -1473,7 +1460,7 @@ fn tunnel_routes_6722() -> Vec<RouteSnapshot> {
         next_table: String::new(),
         preference: 5,
         rule_priority: 0,
-        mtu: 0, })
+        mtu: 0, next_table_route: false })
         .collect()
 }
 

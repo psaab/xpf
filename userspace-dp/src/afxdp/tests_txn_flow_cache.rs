@@ -4266,7 +4266,7 @@ fn flowless_dnat_snapshot(policy_destination: &str) -> ConfigSnapshot {
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
-        mtu: 0, },
+        mtu: 0, next_table_route: false },
         RouteSnapshot { reject: false, cluster_terminal: false, table: "inet6.0".to_string(),
         family: "inet6".to_string(),
         destination: "fd00:100::/48".to_string(),
@@ -4276,7 +4276,7 @@ fn flowless_dnat_snapshot(policy_destination: &str) -> ConfigSnapshot {
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
-        mtu: 0, },
+        mtu: 0, next_table_route: false },
     ]);
     snapshot.source_nat_rules.clear();
     snapshot.destination_nat_rules = vec![DestinationNATRuleSnapshot {
@@ -5620,7 +5620,7 @@ fn route_overlay_fib_bump_reseeds_packet_egress_11599() {
     next_table: String::new(),
     preference: 0,
     rule_priority: 0,
-    mtu: 0, });
+    mtu: 0, next_table_route: false });
     let v1_forwarding = build_forwarding_state(&snapshot);
     let ha_state = txn_ha_state();
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);

@@ -792,7 +792,7 @@ fn noroute_descriptor_uses_effective_protocol_for_ah_deny_13769() {
     next_table: String::new(),
     preference: 0,
     rule_priority: 0,
-    mtu: 0, });
+    mtu: 0, next_table_route: false });
     snapshot.tunnel_endpoints[0].destination = "2001:db8:dead::7".to_string();
     let forwarding = build_forwarding_state(&snapshot);
 

@@ -105,6 +105,9 @@ func TestKernelBandOrderAppliesInBothFamilies11319(t *testing.T) {
 		var ntPrios, rgPrios, pbrPrios []int
 		var returnPrios []int
 		for _, rule := range ntOps.rules[family] {
+			if rule.Priority == config.NextTableMissTerminatorPriority {
+				continue // #16614 shadow, not a leak lookup
+			}
 			ntPrios = append(ntPrios, rule.Priority)
 			if rule.Dst == nil {
 				t.Errorf("family %d: next-table rule has no destination: %+v", family, rule)

@@ -327,7 +327,11 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // v71 -> v72 (#16581): FlowSnapshot carries tcp_fin_invalidate_session;
 // a v71 helper ignores it and holds FIN-closed sessions for the
 // closing/TIME_WAIT window instead of immediate teardown on FIN close.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 72;
+// v72 -> v73 (#16614): RouteSnapshot carries next_table_route for
+// config-authored next-table statics. A v72 helper ignores it and
+// keeps the target-miss fall-through to inet.0's default — the WAN
+// leak the field exists to close — so exact equality must refuse it.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 73;
 
 /// #16589: hard cap on lease rows in ONE paged lease-export response.
 /// Sized so even a worst-case row (many permitted remotes) stays far
@@ -372,7 +376,6 @@ pub(crate) fn snapshot_post_teardown_refusal(verb: &str, stage: &impl std::fmt::
         "{SNAPSHOT_POST_TEARDOWN_PREFIX} {verb} after teardown ({stage}); dataplane down — snapshot not persisted"
     )
 }
-
 
 /// #9344/#9856: the owner-RG session export paging contract this helper
 /// implements.

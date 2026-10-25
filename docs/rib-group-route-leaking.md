@@ -58,6 +58,18 @@ override before looking up destination routes. Before #11319, the kernel's
 next-table (100-199) and rib-group (30000-30999) bands both sorted ahead of PBR
 (31000-31999), so a leak could select a different table for the same packet.
 
+Since #16614, every admitted config next-table leak also installs a
+selector-identical `unreachable` shadow at priority 32765 (immediately
+before main): `to P iif <if> unreachable`. A target-table miss therefore
+ends ENETUNREACH on the kernel path instead of falling through to main's
+default (usually the WAN). In the AF_XDP FIB the same static is a Junos
+route in inet.0 (`next_table_route`, protocol v73): it competes by LPM
+(prefix, then preference), a more-specific inet.0 route beats it, and a
+target miss is terminal RejectRoute. Measured kernel limitation: the
+RPDB cannot express that LPM rescue, so on the kernel path only, an
+inet.0 carve-out inside a leaked prefix is blackholed rather than
+rescued (fail-closed, never leaked). Rib-group leaks are unchanged.
+
 The old next-table and PBR bands are retained only for upgrade cleanup:
 `nextTableManager.clear()` removes stale rules at 32000-32099 and 100-199, and
 `pbrManager.clear()` removes stale selector-bearing rules at 31000-31999.

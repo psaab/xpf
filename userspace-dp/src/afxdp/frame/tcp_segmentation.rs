@@ -1890,8 +1890,7 @@ mod mode_aware_segmentation_tests {
             next_table: String::new(),
             preference: 0,
             rule_priority: 0,
-            mtu: 0,
-        });
+            mtu: 0, next_table_route: false });
         snap.tunnel_endpoints[0].outer_family = "inet6".to_string();
         snap.tunnel_endpoints[0].transport_table = "inet6.0".to_string();
         let mut state = crate::afxdp::forwarding_build::build_forwarding_state(&snap);
@@ -1976,8 +1975,7 @@ mod mode_aware_segmentation_tests {
             next_table: String::new(),
             preference: 0,
             rule_priority: 0,
-            mtu: 0,
-        });
+            mtu: 0, next_table_route: false });
         snap.tunnel_endpoints[0].outer_family = "inet6".to_string();
         snap.tunnel_endpoints[0].transport_table = "inet6.0".to_string();
         let state = crate::afxdp::forwarding_build::build_forwarding_state(&snap);

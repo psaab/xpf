@@ -35,7 +35,7 @@ func TestManagementInterfacesDoNotGetNextTableIngressRules_12061(t *testing.T) {
 		}
 	}
 	want := map[string]bool{"ge-0-0-1": true, "ge-0-0-2": true}
-	if count != len(want) || len(got) != len(want) {
+	if count != 2*len(want) || len(got) != len(want) {
 		t.Fatalf("installed %d rules for ingress ifnames %v; want only %v", count, got, want)
 	}
 	for iif := range want {

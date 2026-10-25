@@ -2269,8 +2269,7 @@ fn push_gre_underlay_10630(snapshot: &mut crate::protocol::snapshot::ConfigSnaps
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     snapshot.neighbors.push(crate::NeighborSnapshot {
         interface: "ge-0-0-0.80".into(),
         ifindex: 12,
@@ -2357,8 +2356,7 @@ fn forwarding_with_blue_pbr_tunnel_10630() -> ForwardingState {
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     for iface in snapshot.interfaces.iter_mut() {
         if iface.ifindex == LAN_IFINDEX {
             iface.filter_input_v4 = "edge-in".into();
@@ -2405,8 +2403,7 @@ fn forwarding_with_green_pbr_native_10630() -> ForwardingState {
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     snapshot.neighbors.push(crate::NeighborSnapshot {
         interface: "ge-0-0-0.80".into(),
         ifindex: 12,
@@ -2464,8 +2461,7 @@ fn forwarding_with_green_pbr_tunnel_10630() -> ForwardingState {
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     for iface in snapshot.interfaces.iter_mut() {
         if iface.ifindex == LAN_IFINDEX {
             iface.filter_input_v4 = "edge-in".into();

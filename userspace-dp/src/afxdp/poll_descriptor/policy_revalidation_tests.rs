@@ -507,6 +507,7 @@ fn imported_snat_worker_forwarding(with_static: bool) -> ForwardingState {
             preference: 0,
             mtu: 1500,
             rule_priority: 0,
+            next_table_route: false,
         }],
     );
     forwarding.neighbors.insert(
@@ -3180,6 +3181,7 @@ fn reverse_snat_forwarding_13771(with_pool: bool) -> ForwardingState {
             preference: 0,
             mtu: 1500,
             rule_priority: 0,
+            next_table_route: false,
         }],
     );
     forwarding
@@ -5504,6 +5506,7 @@ fn forward_hit_revalidation_still_rebinds_pair_14941() {
             preference: 0,
             mtu: 1500,
             rule_priority: 0,
+            next_table_route: false,
         }],
     );
     let mut sessions = SessionTable::new();

@@ -246,9 +246,39 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 		// instance. Every copy shares the route's prefix-derived priority.
 		// The expansion remains fault-atomic: the first add failure rolls back
 		// successful siblings, while the admission reservation stays consumed.
+		//
+		// #16614: each admitted leak also installs ONE selector-identical
+		// unreachable shadow per ingress interface at
+		// NextTableMissTerminatorPriority (32765, immediately before main).
+		// The shadow is installed FIRST (PBR #11394 precedent): while it
+		// exists without its lookup, matching traffic is unreachable —
+		// fail-closed. A target-table miss then ends at the shadow instead
+		// of falling through to main's default (usually the WAN). Shadows
+		// do NOT consume admission slots: the cap counts leak lookups, and
+		// every admitted lookup carries exactly one shadow per iif.
 		leakFailed := false
 		var leakRules []*netlink.Rule
+		var shadowRules []*netlink.Rule
 		for _, iif := range ingressIfaces {
+			shadow := netlink.NewRule()
+			shadow.Dst = dst
+			shadow.Table = -1
+			shadow.Type = nl.FR_ACT_UNREACHABLE
+			shadow.Priority = config.NextTableMissTerminatorPriority
+			shadow.Family = family
+			shadow.IifName = iif
+			if err := n.ops.RuleAdd(shadow); err != nil {
+				if !isRuleAlreadyPresent(err) {
+					errs = append(errs, fmt.Errorf(
+						"add next-table miss terminator destination %s instance %s iif %s: %w",
+						sr.Destination, sr.NextTable, iif, err))
+					leakFailed = true
+					break
+				}
+			} else {
+				shadowRules = append(shadowRules, shadow)
+			}
+
 			rule := netlink.NewRule()
 			rule.Dst = dst
 			rule.Table = tableID
@@ -274,6 +304,18 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 					errs = append(errs, fmt.Errorf(
 						"roll back next-table rule destination %s instance %s table %d iif %s: %w",
 						sr.Destination, sr.NextTable, tableID, rule.IifName, err))
+				}
+			}
+			// A shadow whose lookup rolled back must not linger: it
+			// would blackhole the prefix with no leak behind it. A
+			// failed shadow delete is aggregated like any rollback
+			// failure; the residue is still fail-closed, never a leak
+			// into main.
+			for _, shadow := range shadowRules {
+				if err := n.ops.RuleDel(shadow); err != nil && !isRuleAlreadyGone(err) {
+					errs = append(errs, fmt.Errorf(
+						"roll back next-table miss terminator destination %s instance %s iif %s: %w",
+						sr.Destination, sr.NextTable, shadow.IifName, err))
 				}
 			}
 			continue
@@ -426,7 +468,7 @@ func hasExactlyOneVRFRuleInterface(r netlink.Rule) bool {
 // brief, unobservable self-healing-orphan window described in #2273.
 
 func (n *nextTableManager) clear() error {
-	return clearMatchingRules(n.ops, "next-table", func(r netlink.Rule) bool {
+	match := func(r netlink.Rule) bool {
 		leakShape := isNonReservedRuleTable(r.Table) && r.Src == nil &&
 			r.OifName == "" && hasNoAdditionalRuleSelectors(r)
 		inCurrent := r.Priority >= nextTableRulePriority &&
@@ -441,18 +483,66 @@ func (n *nextTableManager) clear() error {
 		inLegacy := r.Priority >= legacyNextTableRulePriority &&
 			r.Priority < legacyNextTableRulePriority+maxNextTableRules &&
 			r.Dst != nil && leakShape
-		return inCurrent || inPrevious || inLegacy
-	})
+		return inCurrent || inPrevious || inLegacy || isNextTableMissTerminatorShape(r)
+	}
+	var errs []error
+	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
+		rules, err := n.ops.RuleList(family)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("list next-table rules family %d: %w", family, err))
+			continue
+		}
+		for _, r := range rules {
+			if !match(r) {
+				continue
+			}
+			// #16614: RuleList does not decode the fib-rule action, so a
+			// terminator delete must be attempted under the unreachable
+			// action; a lookup delete under RTN_UNICAST. PBR clear
+			// (#11394) uses the same try-expected-then-other order: an
+			// ENOENT under the first action retries the second before
+			// the already-gone verdict is accepted.
+			firstAction, secondAction := uint8(unix.RTN_UNICAST), uint8(nl.FR_ACT_UNREACHABLE)
+			if isNextTableMissTerminatorShape(r) {
+				firstAction, secondAction = secondAction, firstAction
+			}
+			candidate := r
+			candidate.Type = firstAction
+			delErr := n.ops.RuleDel(&candidate)
+			if isRuleAlreadyGone(delErr) {
+				candidate.Type = secondAction
+				delErr = n.ops.RuleDel(&candidate)
+			}
+			if delErr != nil && !isRuleAlreadyGone(delErr) {
+				slog.Warn("failed to delete stale next-table rule",
+					"priority", r.Priority, "err", delErr)
+				errs = append(errs, fmt.Errorf(
+					"delete stale next-table rule prio %d: %w", r.Priority, delErr))
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
-// clearMatchingRules is the shared clear() skeleton for exactly the two
-// true twins nextTableManager and ribGroupManager (#16174). Each caller
-// keeps its own ownership predicate and its kind string, from which the
-// list/delete error text and the log messages are formed, so the
-// per-family error and ordering contract is unchanged: families are
-// walked AF_INET then AF_INET6, every listed rule the predicate matches
-// is deleted, and failures are aggregated in walk order with
-// errors.Join.
+// isNextTableMissTerminatorShape reports whether a listed rule has the
+// #16614 shadow shape: exact terminator priority, destination + ingress
+// scope, no source/oif or extra selectors, and no leak table. The action
+// itself is not visible through RuleList (netlink v1.3.1), so the delete
+// path above retries under both actions.
+func isNextTableMissTerminatorShape(r netlink.Rule) bool {
+	return r.Priority == config.NextTableMissTerminatorPriority &&
+		r.Dst != nil && r.IifName != "" && r.Src == nil && r.OifName == "" &&
+		!isNonReservedRuleTable(r.Table) && hasNoAdditionalRuleSelectors(r)
+}
+
+// clearMatchingRules is the shared clear() skeleton retained for
+// ribGroupManager (#16174). nextTableManager no longer calls it: its
+// #16614 miss-terminator shadows need an action-aware delete (RuleList
+// does not decode the fib-rule action), so its clear retries each delete
+// under the expected action first. The per-family error and ordering
+// contract is unchanged for the remaining caller: families are walked
+// AF_INET then AF_INET6, every listed rule the predicate matches is
+// deleted, and failures are aggregated in walk order with errors.Join.
 //
 // A per-family RuleList dump failure is aggregated and the walk
 // continues with the next family (see the #2273 rationale on

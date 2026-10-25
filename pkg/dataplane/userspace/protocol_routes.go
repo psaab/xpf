@@ -51,6 +51,17 @@ type RouteSnapshot struct {
 	// absent/unknown and imposes no extra constraint. An old helper would
 	// ignore it and forward oversized DF packets, so snapshot v38 fences it.
 	MTU int `json:"mtu,omitempty"`
+	// NextTableRoute marks a CONFIG-AUTHORED next-table static (#16614):
+	// in Junos it is a route P in the source table whose next hop hands
+	// the lookup to the target table, so it competes in the source
+	// table's LPM by prefix length and preference, and a target-table
+	// miss is terminal (the target forwarding table ends in a default
+	// reject) instead of falling through to a less-specific source-table
+	// route. Rib-group leaks, rib-group returns, and live ip-rule mirrors
+	// keep the kernel RPDB model (stage-1 priority walk, fall-through on
+	// miss) and leave this false. Fenced by the v73 bump: a v72 helper
+	// ignores the field and keeps the fall-through defect.
+	NextTableRoute bool `json:"next_table_route,omitempty"`
 	// metricTierOrder is an in-process stable-sort hint for config-derived
 	// same-preference QNH rows. It is intentionally unexported and never goes
 	// on the snapshot wire; row order is the contract consumed by the Rust FIB.

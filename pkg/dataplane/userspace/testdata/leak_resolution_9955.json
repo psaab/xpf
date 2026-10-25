@@ -17,7 +17,8 @@
         "destination": "2001:db8:1::/48",
         "discard": false,
         "next_table": "blue",
-        "rule_priority": 30160
+        "rule_priority": 30160,
+        "next_table_route": true
       },
       {
         "table": "inet6.0",
@@ -25,7 +26,8 @@
         "destination": "2001:db8:1::/48",
         "discard": false,
         "next_table": "red",
-        "rule_priority": 30160
+        "rule_priority": 30160,
+        "next_table_route": true
       },
       {
         "table": "red.inet6.0",
@@ -58,7 +60,8 @@
         "destination": "10.1.2.0/24",
         "discard": false,
         "next_table": "red",
-        "rule_priority": 30016
+        "rule_priority": 30016,
+        "next_table_route": true
       },
       {
         "table": "inet.0",
@@ -66,7 +69,8 @@
         "destination": "10.1.2.0/24",
         "discard": false,
         "next_table": "blue",
-        "rule_priority": 30016
+        "rule_priority": 30016,
+        "next_table_route": true
       },
       {
         "table": "red.inet.0",

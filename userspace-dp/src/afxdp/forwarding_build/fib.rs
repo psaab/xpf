@@ -888,7 +888,7 @@ pub(super) fn populate_routes(
                     destination: route.destination.clone(),
                 });
             }
-            if !route.next_table.is_empty() {
+            if !route.next_table.is_empty() && !route.next_table_route {
                 state
                     .leak_rules_v4
                     .entry(table)
@@ -900,6 +900,14 @@ pub(super) fn populate_routes(
                         incarnation: 0,
                     });
             } else {
+                // #16614: a config next-table route keeps its target on
+                // the ordinary entry so source-table LPM can select it;
+                // kernel-model leaks keep next_table empty here.
+                let entry_next_table = if route.next_table_route {
+                    canonical_next_table(&route.next_table, false).into_owned()
+                } else {
+                    String::new()
+                };
                 state
                     .routes_v4
                     .entry(table)
@@ -910,10 +918,11 @@ pub(super) fn populate_routes(
                         discard: route.discard,
                         reject: route.reject,
                         cluster_terminal: route.cluster_terminal,
-                        next_table: String::new(),
+                        next_table: entry_next_table,
                         preference: route.preference,
                         mtu: route.mtu as u32,
                         rule_priority: route.rule_priority,
+                        next_table_route: route.next_table_route,
                     });
             }
             continue;
@@ -956,7 +965,7 @@ pub(super) fn populate_routes(
                     destination: route.destination.clone(),
                 });
             }
-            if !route.next_table.is_empty() {
+            if !route.next_table.is_empty() && !route.next_table_route {
                 state
                     .leak_rules_v6
                     .entry(table)
@@ -968,6 +977,13 @@ pub(super) fn populate_routes(
                         incarnation: 0,
                     });
             } else {
+                // #16614: v4 twin — config next-table routes keep their
+                // target for source-table LPM selection.
+                let entry_next_table = if route.next_table_route {
+                    canonical_next_table(&route.next_table, true).into_owned()
+                } else {
+                    String::new()
+                };
                 state
                     .routes_v6
                     .entry(table)
@@ -978,10 +994,11 @@ pub(super) fn populate_routes(
                         discard: route.discard,
                         reject: route.reject,
                         cluster_terminal: route.cluster_terminal,
-                        next_table: String::new(),
+                        next_table: entry_next_table,
                         preference: route.preference,
                         mtu: route.mtu as u32,
                         rule_priority: route.rule_priority,
+                        next_table_route: route.next_table_route,
                     });
             }
             continue;

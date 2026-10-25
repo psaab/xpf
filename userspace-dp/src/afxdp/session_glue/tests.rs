@@ -5326,6 +5326,7 @@ fn adopted_cluster_terminal_live_fib_shape_16217() {
                 preference: 200,
                 mtu: 0,
                 rule_priority: 0,
+                next_table_route: false,
             }],
         );
         let dyn_map = Arc::new(ShardedNeighborMap::new());
@@ -5597,6 +5598,7 @@ fn gate_falls_back_to_stored_forward_candidate_on_standby_fib_16217() {
                 preference: 200,
                 mtu: 0,
                 rule_priority: 0,
+                next_table_route: false,
             }],
         );
         // Premise: plain re-resolution IS the cluster terminal.
@@ -22647,8 +22649,7 @@ fn established_session_re_resolves_discard_and_next_hop_changes_11373() {
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     let discard_forwarding = build_forwarding_state(&snapshot);
     sessions.set_forwarding_revalidation_gen(1, 2);
     assert!(
@@ -25210,6 +25211,7 @@ fn connected_owner_static_route_does_not_claim_16217() {
             preference: 10,
             mtu: 1500,
             rule_priority: 0,
+            next_table_route: false,
         }],
     );
     let target = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));

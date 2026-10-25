@@ -69,6 +69,12 @@ func newFakeRuleOps() *fakeRuleOps {
 }
 
 func (f *fakeRuleOps) RuleAdd(r *netlink.Rule) error {
+	if r.Type == 0 {
+		// Mirror netlink ruleHandle: a zero action on create is RTN_UNICAST.
+		clone := *r
+		clone.Type = unix.RTN_UNICAST
+		r = &clone
+	}
 	if f.addErr != nil {
 		return f.addErr
 	}
@@ -112,7 +118,15 @@ func (f *fakeRuleOps) RuleDel(r *netlink.Rule) error {
 	out := list[:0:0]
 	found := false
 	for _, e := range list {
-		if reflect.DeepEqual(e, *r) {
+		stored := e
+		if stored.Type == 0 {
+			stored.Type = unix.RTN_UNICAST
+		}
+		want := *r
+		if want.Type == 0 {
+			want.Type = unix.RTN_UNICAST
+		}
+		if reflect.DeepEqual(stored, want) {
 			found = true
 			continue
 		}
@@ -533,11 +547,11 @@ func TestNextTableRulesApply_Fake(t *testing.T) {
 	if !ops.hasTable(unix.AF_INET6, 101) {
 		t.Errorf("expected IPv6 next-table rule for table 101, rules=%v", ops.rules[unix.AF_INET6])
 	}
-	if got := ops.count(unix.AF_INET); got != 1 {
-		t.Errorf("expected 1 IPv4 rule (unknown-vr skipped), got %d", got)
+	if got := ops.count(unix.AF_INET); got != 2 {
+		t.Errorf("expected 2 IPv4 rules (lookup+shadow, unknown-vr skipped), got %d", got)
 	}
-	if got := ops.count(unix.AF_INET6); got != 1 {
-		t.Errorf("expected 1 IPv6 rule, got %d", got)
+	if got := ops.count(unix.AF_INET6); got != 2 {
+		t.Errorf("expected 2 IPv6 rules (lookup+shadow), got %d", got)
 	}
 }
 
@@ -582,8 +596,8 @@ func TestNextTableApplyAggregatesAddErrors(t *testing.T) {
 	if ops2.count(unix.AF_INET) != 0 {
 		t.Errorf("failed v4 rule must not be recorded, got %d", ops2.count(unix.AF_INET))
 	}
-	if ops2.count(unix.AF_INET6) != 1 {
-		t.Errorf("sibling v6 rule must still install (forward progress), got %d", ops2.count(unix.AF_INET6))
+	if ops2.count(unix.AF_INET6) != 2 {
+		t.Errorf("sibling v6 rules must still install (forward progress), got %d", ops2.count(unix.AF_INET6))
 	}
 }
 
@@ -605,13 +619,13 @@ func TestNextTableApplyIdempotentReapply(t *testing.T) {
 	if err := nt.Apply(routes, instances, testNextTableIifs); err != nil {
 		t.Fatalf("clean Apply must return nil, got %v", err)
 	}
-	if got := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); got != 2 {
-		t.Fatalf("expected 2 rules after clean apply, got %d", got)
+	if got := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); got != 4 {
+		t.Fatalf("expected 4 rules after clean apply (lookup+shadow per family), got %d", got)
 	}
 	if err := nt.Apply(routes, instances, testNextTableIifs); err != nil {
 		t.Fatalf("idempotent re-apply must return nil, got %v", err)
 	}
-	if got := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); got != 2 {
+	if got := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); got != 4 {
 		t.Fatalf("re-apply must keep a stable rule set, got %d", got)
 	}
 }
@@ -643,10 +657,10 @@ func TestNextTableAdmissionCap(t *testing.T) {
 			t.Fatalf("Apply: %v", err)
 		}
 		total := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6)
-		if total != config.NextTableRuleWindow {
-			t.Fatalf("expected all %d routes programmed at the limit, got %d", config.NextTableRuleWindow, total)
+		if total != 2*config.NextTableRuleWindow {
+			t.Fatalf("expected all %d routes programmed at the limit (lookup+shadow), got %d", config.NextTableRuleWindow, total)
 		}
-		assertAllRulesInRange(t, ops, nextTableRulePriority, nextTableRulePriority+config.RouteLeakRulePriorityWindow)
+		assertNextTableLookupsInRange16614(t, ops)
 	})
 
 	// One over the window: cap fires, only 100 admitted, none out of range,
@@ -660,10 +674,9 @@ func TestNextTableAdmissionCap(t *testing.T) {
 			t.Fatal("over-limit Apply must return a degraded error naming the cap (#6467)")
 		}
 		total := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6)
-		if total != config.NextTableRuleWindow {
-			t.Fatalf("expected cap to hold at %d programmed rules, got %d", config.NextTableRuleWindow, total)
+		if total != 2*config.NextTableRuleWindow {
+			t.Fatalf("expected cap to hold at %d programmed rules (lookup+shadow), got %d", config.NextTableRuleWindow, total)
 		}
-		assertAllRulesInRange(t, ops, nextTableRulePriority, nextTableRulePriority+config.RouteLeakRulePriorityWindow)
 
 		// Re-apply must leave no residue: every programmed rule is inside
 		// clear()'s window, so clear-then-add keeps the count stable. A
@@ -673,8 +686,8 @@ func TestNextTableAdmissionCap(t *testing.T) {
 			t.Fatal("re-apply over-limit must still surface the degraded error (#6467)")
 		}
 		total = ops.count(unix.AF_INET) + ops.count(unix.AF_INET6)
-		if total != config.NextTableRuleWindow {
-			t.Fatalf("re-apply leaked rules: expected %d, got %d", config.NextTableRuleWindow, total)
+		if total != 2*config.NextTableRuleWindow {
+			t.Fatalf("re-apply leaked rules: expected %d, got %d", 2*config.NextTableRuleWindow, total)
 		}
 	})
 }
@@ -803,6 +816,23 @@ func assertAllRulesInRange(t *testing.T, ops *fakeRuleOps, lo, hi int) {
 			if r.Priority < lo || r.Priority >= hi {
 				t.Errorf("rule priority %d outside cleared window [%d,%d) — would leak",
 					r.Priority, lo, hi)
+			}
+		}
+	}
+}
+
+// assertNextTableLookupsInRange16614 checks every next-table lookup stays
+// in the shared leak window and every shadow sits at the terminator
+// priority — both are inside clear()'s ownership, so neither leaks.
+func assertNextTableLookupsInRange16614(t *testing.T, ops *fakeRuleOps) {
+	t.Helper()
+	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
+		for _, r := range ops.rules[family] {
+			if r.Priority == config.NextTableMissTerminatorPriority {
+				continue
+			}
+			if r.Priority < nextTableRulePriority || r.Priority >= nextTableRulePriority+config.RouteLeakRulePriorityWindow {
+				t.Errorf("lookup priority %d outside cleared window", r.Priority)
 			}
 		}
 	}

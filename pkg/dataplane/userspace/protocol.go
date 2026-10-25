@@ -502,7 +502,12 @@ const (
 	// a v71 helper ignores it and holds FIN-closed sessions for the
 	// closing/TIME_WAIT window instead of tearing them down immediately
 	// on completed FIN close (the Junos fin-invalidate-session defect).
-	ProtocolVersion = 72
+	// v72 -> v73 (#16614): RouteSnapshot carries next_table_route for
+	// config-authored next-table statics. A v72 helper ignores it and
+	// keeps treating the row as a kernel-model stage-1 leak whose target
+	// miss falls through to inet.0's default — the exact WAN leak the
+	// field exists to close — so the pairing must refuse, not degrade.
+	ProtocolVersion = 73
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
