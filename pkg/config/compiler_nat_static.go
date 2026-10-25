@@ -522,6 +522,14 @@ func staticNATRoutingInstanceFromKeys(keys []string) string {
 // else (undefined, an address with no prefix, an empty / multi-member set,
 // dangling) is not a valid scalar 1:1 target and returns ok=false so the caller
 // leaves Then=="" and the strict guard rejects it.
+//
+// #16837: the target must denote EXACTLY ONE usable value and must not be a
+// dynamic dns-name object. A range/wildcard/dns entry's singular UsableValue()
+// silently picks the first of many prefixes (a multi-host range commits as
+// 1:1 NAT to its first host), and a dns-name target would be frozen at the
+// compile/refresh-time answer while the address book follows DNS. Both are
+// refused here via UsableValues()+DNSName, leaving Then=="" so strict commit
+// rejects and the lenient path warns (#4290).
 func resolveStaticNATThenPrefixName(ab *AddressBook, name string) (string, bool) {
 	if ab == nil || name == "" {
 		return "", false
@@ -530,7 +538,7 @@ func resolveStaticNATThenPrefixName(ab *AddressBook, name string) (string, bool)
 		return "", false
 	}
 	if a, ok := ab.Addresses[name]; ok && a != nil {
-		if value := a.UsableValue(); value != "" {
+		if value, ok := staticNATScalarPrefix(a); ok {
 			return value, true
 		}
 	}
@@ -543,12 +551,26 @@ func resolveStaticNATThenPrefixName(ab *AddressBook, name string) (string, bool)
 			return "", false
 		}
 		if a, ok := ab.Addresses[members[0]]; ok && a != nil {
-			if value := a.UsableValue(); value != "" {
+			if value, ok := staticNATScalarPrefix(a); ok {
 				return value, true
 			}
 		}
 	}
 	return "", false
+}
+
+// staticNATScalarPrefix returns the sole usable prefix iff a denotes exactly
+// one static value. dns-name entries (DNSName != "") are dynamic objects and
+// never a static 1:1 target, even when the current snapshot has one answer.
+func staticNATScalarPrefix(a *Address) (string, bool) {
+	if a == nil || a.DNSName != "" {
+		return "", false
+	}
+	values := a.UsableValues()
+	if len(values) != 1 || values[0] == "" {
+		return "", false
+	}
+	return values[0], true
 }
 
 // addressBookNameCollidesForStaticNAT checks the requested name and every set
