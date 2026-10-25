@@ -1,4 +1,17 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Userspace DP: stop cloning counter/policer handles on live
+    TX-selection walks (#16496). `merge_matched_tx_modifiers` pushed
+    an `Arc::clone` of every matched term's counter and three-color
+    policer into the result on every walk, including the metered and
+    counted live transit walks that immediately discard them — a
+    strong-count RMW on the cross-worker shared line per counted
+    term per packet, plus a heap spill at three or more handles.
+    Handles are now collected only by the deferred generated-reply
+    walk (#15268), via a threaded `collect_deferred` flag and the
+    new `evaluate_filter_ref_tx_selection_deferred` entry point;
+    live walks charge inline exactly as before and collect nothing,
+    and the deferred replay still charges exactly once after
+    admission. No enforcement or accounting behaviour changes.
 
   * Docs: correct the session module contract for #9412 and the
     established timeout (#16493). The session README still documented

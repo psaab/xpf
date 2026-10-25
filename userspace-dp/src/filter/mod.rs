@@ -1331,9 +1331,12 @@ pub(crate) struct TxSelectionFilterResult<'a> {
     pub(crate) forwarding_class: Option<&'a str>,
     pub(crate) dscp_rewrite: Option<u8>,
     pub(crate) policer_drop: bool,
-    // #15268: handles matched by this walk. `counters` is collected even on
-    // the counter-suppressed walk so a caller that defers the charge (a
-    // generated reply whose zone token is taken after classification) can
+    // #15268/#16496: handles matched by the DEFERRED walk only
+    // (`evaluate_filter_ref_tx_selection_deferred`). Live metered/counted
+    // walks charge inline and collect nothing, so they pay no per-packet
+    // `Arc` strong-count RMW or SmallVec spill for handles they would
+    // immediately discard. `counters` lets a caller that defers the charge
+    // (a generated reply whose zone token is taken after classification)
     // replay exactly the matched set once admitted; `three_color_policers`
     // likewise lets the deferred replay re-run the meter with `now_ns`.
     pub(crate) counters: CachedFilterCounters,
