@@ -816,6 +816,12 @@ type compileOpts struct {
 	// renderer withholds RIP enrollment for the over-long key
 	// instead of emitting a line ripd rejects forever.
 	lenientRIPAuthKeyLength15013 bool
+	// lenientRIPGroupExport16625 downgrades the #16625 RIP
+	// per-group export conflict rejection (one interface in two
+	// groups with different exports) to a warning on tolerant
+	// paths. A persisted config must still BOOT (#1960); the FRR
+	// renderer withholds the contested interfaces instead.
+	lenientRIPGroupExport16625 bool
 	// lenientMultiLeafSelfRepeat downgrades the #9027 ambiguity rejection to a
 	// warning on the tolerant paths. A config an older binary accepted must
 	// still BOOT; on that path the existing readers keep their behaviour and
@@ -3839,6 +3845,7 @@ func lenientCompileOpts() compileOpts {
 		lenientISISAuthTypeRequiresKey14399:      true,
 		lenientRIPAuthTypeWithoutKey:             true,
 		lenientRIPAuthKeyLength15013:             true,
+		lenientRIPGroupExport16625:               true,
 		lenientMultiLeafSelfRepeat:               true,
 		lenientDynamicAddressFeedRef:             true,
 		lenientDuplicateNamedBlock:               true,

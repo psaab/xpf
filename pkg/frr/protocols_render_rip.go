@@ -91,28 +91,77 @@ func (m *Manager) renderRIP16125(b *strings.Builder, rip *config.RIPConfig, vrfS
 			// Fail closed on the enclosing capability: no `router rip`
 			// enrollment and no per-interface auth block at all.
 		} else {
-			fmt.Fprintf(b, "router rip%s\n", vrfSuffix)
+			// #16625: per-group export. When Groups is present,
+			// render per-interface outbound filtering instead of
+			// one global redistribute chain (which leaked/lossed
+			// per-group policy). Contested interfaces (in 2+
+			// groups with differing exports — strict-rejected,
+			// lenient-warned) are withheld entirely: fail closed.
+			contested16625 := make(map[string]bool)
+			for _, iface := range config.RIPContestedInterfaces16625(rip) {
+				contested16625[iface] = true
+				slog.Warn("frr: rip interface in multiple groups with different exports; NOT enrolling it rather than leaking one group's routes to another (#16625)",
+					"interface", iface)
+			}
+			enrolled16625 := make([]string, 0, len(rip.Interfaces))
 			for _, iface := range rip.Interfaces {
-				fmt.Fprintf(b, " network %s\n", iface)
+				if contested16625[iface] {
+					continue
+				}
+				enrolled16625 = append(enrolled16625, iface)
 			}
-			for _, iface := range rip.Passive {
-				fmt.Fprintf(b, " passive-interface %s\n", iface)
+			// Any enrolled interface at all? If every interface is
+			// contested, emit no router rip stanza (mirrors the
+			// auth fail-closed shape) rather than an empty one.
+			if len(rip.Interfaces) > 0 && len(enrolled16625) == 0 && len(rip.Groups) > 0 {
+				// fail closed: nothing safe to enroll
+			} else {
+				ripDefs16625 := ""
+				ripBody16625 := ""
+				grouped16625 := len(rip.Groups) > 0
+				if grouped16625 {
+					ripDefs16625, ripBody16625 = m.renderRIPPerGroup16625(rip, enrolled16625, policyOptions, clusterMode, qnhMetrics, m.nextRIPGroupIndex16625())
+					b.WriteString(ripDefs16625)
+				}
+				fmt.Fprintf(b, "router rip%s\n", vrfSuffix)
+				for _, iface := range enrolled16625 {
+					fmt.Fprintf(b, " network %s\n", iface)
+				}
+				for _, iface := range rip.Passive {
+					if contested16625[iface] {
+						continue
+					}
+					fmt.Fprintf(b, " passive-interface %s\n", iface)
+				}
+				if !grouped16625 {
+					b.WriteString(m.resolveRedistributeChainCluster15158(rip.Redistribute, policyOptions, "rip", clusterMode, qnhMetricScopeForDaemon11447(qnhMetrics, "rip")))
+				} else {
+					b.WriteString(ripBody16625)
+				}
+				// #12531: restore per-QNH RIP metrics with ripd-native
+				// offset-lists. ripd ignores route-map set metric for
+				// redistributed statics (live FRR 10.7.1: map readback had
+				// metric 7, RIP database and RIPv2 wire stayed at 1), and
+				// no daemon-scoped load confines a route-map action to
+				// ripd. The offset-list lives only in this router rip
+				// stanza, matches the QNH destination via its generated
+				// access-list, and adds metric-1 so the advertised metric
+				// equals the configured QNH metric (clamped to 16).
+				// NOTE (#16625): QNH offset-lists are router-global;
+				// with per-group filtering a QNH metric may apply on
+				// an interface whose group does not export that route
+				// — harmless (no route, no advertisement).
+				b.WriteString(renderRIPQNHMetricOffsets12531(qnhMetrics, rip, policyOptions))
+				b.WriteString("exit\n!\n")
 			}
-			b.WriteString(m.resolveRedistributeChainCluster15158(rip.Redistribute, policyOptions, "rip", clusterMode, qnhMetricScopeForDaemon11447(qnhMetrics, "rip")))
-			// #12531: restore per-QNH RIP metrics with ripd-native
-			// offset-lists. ripd ignores route-map set metric for
-			// redistributed statics (live FRR 10.7.1: map readback had
-			// metric 7, RIP database and RIPv2 wire stayed at 1), and
-			// no daemon-scoped load confines a route-map action to
-			// ripd. The offset-list lives only in this router rip
-			// stanza, matches the QNH destination via its generated
-			// access-list, and adds metric-1 so the advertised metric
-			// equals the configured QNH metric (clamped to 16).
-			b.WriteString(renderRIPQNHMetricOffsets12531(qnhMetrics, rip, policyOptions))
-			b.WriteString("exit\n!\n")
-			// RIP per-interface authentication
+			// RIP per-interface authentication. #16625: only
+			// enrolled interfaces get an auth block.
+			authIfaces16625 := rip.Interfaces
+			if len(rip.Groups) > 0 {
+				authIfaces16625 = enrolled16625
+			}
 			if rip.AuthKey.Reveal() != "" {
-				for _, iface := range rip.Interfaces {
+				for _, iface := range authIfaces16625 {
 					fmt.Fprintf(b, "interface %s\n", iface)
 					// #9105: an ABSENT type is not `unrecognized`, so this warning could not
 					// fire for it -- and it renders the key in CLEARTEXT exactly as a

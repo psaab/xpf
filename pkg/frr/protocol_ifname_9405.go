@@ -151,6 +151,23 @@ func resolveRIPIfNames(resolve func(string) string, rip *config.RIPConfig) *conf
 	out := *rip
 	out.Interfaces = resolveIfNameList(resolve, rip.Interfaces, "rip")
 	out.Passive = resolveIfNameList(resolve, rip.Passive, "rip")
+	// #16625: deep-copy Groups with resolved interface names so
+	// the per-group renderer matches the resolved Interfaces.
+	if rip.Groups != nil {
+		groups := make([]*config.RIPGroup, 0, len(rip.Groups))
+		for _, g := range rip.Groups {
+			if g == nil {
+				groups = append(groups, nil)
+				continue
+			}
+			ng := *g
+			ng.Interfaces = resolveIfNameList(resolve, g.Interfaces, "rip")
+			ng.Export = append([]string(nil), g.Export...)
+			groups = append(groups, &ng)
+		}
+		out.Groups = groups
+	}
+	out.Redistribute = append([]string(nil), rip.Redistribute...)
 	return &out
 }
 
