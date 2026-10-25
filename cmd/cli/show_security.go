@@ -319,7 +319,16 @@ func (c *ctl) showZones(filter string) error {
 			fmt.Println("  TCP RST: enabled")
 		}
 		if z.ScreenProfile != "" {
-			fmt.Printf("  Screen: %s\n", z.ScreenProfile)
+			// #16568: qualify from the structured disposition; UNKNOWN
+			// (old server) stays bare rather than guessing.
+			switch z.GetScreenDisposition() {
+			case pb.ZoneScreenDisposition_ZONE_SCREEN_DISPOSITION_UNDEFINED:
+				fmt.Printf("  Screen: %s [UNDEFINED — conservative default applies]\n", z.ScreenProfile)
+			case pb.ZoneScreenDisposition_ZONE_SCREEN_DISPOSITION_INERT:
+				fmt.Printf("  Screen: %s [ENFORCES NOTHING — conservative default applies]\n", z.ScreenProfile)
+			default:
+				fmt.Printf("  Screen: %s\n", z.ScreenProfile)
+			}
 		}
 		// #3654 (H09/M03/M06): consume the structured split system-services /
 		// protocols and per-interface overrides from the gRPC response and

@@ -474,7 +474,11 @@ func (c *CLI) testSecurityZone(args []string) error {
 					fmt.Printf("  Description: %s\n", zone.Description)
 				}
 				if zone.ScreenProfile != "" {
-					fmt.Printf("  Screen:      %s\n", zone.ScreenProfile)
+					if q := dpuserspace.ScreenZoneDispositionFor(cfg, zoneName).Qualifier(); q != "" {
+						fmt.Printf("  Screen:      %s %s\n", zone.ScreenProfile, q)
+					} else {
+						fmt.Printf("  Screen:      %s\n", zone.ScreenProfile)
+					}
 				}
 				// #3654 (H06/M03): this DIAGNOSTIC is supposed to explain
 				// per-interface admission, so report the EFFECTIVE (zone UNION

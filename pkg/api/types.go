@@ -122,9 +122,16 @@ type ZoneInfo struct {
 	// security-zone <z> tcp-rst` is configured, a non-SYN TCP packet dropped
 	// at the strict-SYN session-miss gate may receive a TCP RST. Policy denies
 	// remain silent. Omitted (false) for zones without it.
-	TcpRst        bool     `json:"tcp_rst,omitempty"`
-	ScreenProfile string   `json:"screen_profile,omitempty"`
-	Interfaces    []string `json:"interfaces"`
+	TcpRst        bool   `json:"tcp_rst,omitempty"`
+	ScreenProfile string `json:"screen_profile,omitempty"`
+	// ScreenDisposition (#16568) classifies ScreenProfile: "enforcing",
+	// "undefined" (not defined; conservative default applies), "inert"
+	// (defined but enables no checks; conservative default applies).
+	// Empty when no honest verdict exists (no screen, quarantined zone,
+	// nil profile value) or no screen is configured; mirrors gRPC
+	// ZoneInfo.screen_disposition.
+	ScreenDisposition string   `json:"screen_disposition,omitempty"`
+	Interfaces        []string `json:"interfaces"`
 	// UnboundInterfaces (#16556) lists authored members of this zone that
 	// duplicate zone membership left bound to NEITHER claiming zone (the
 	// runtime map omits them; they fail closed). They still appear in

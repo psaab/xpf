@@ -64,6 +64,15 @@ func (s *Server) zonesHandler(w http.ResponseWriter, _ *http.Request) {
 		}
 		if zone.ScreenProfile != "" {
 			zi.ScreenProfile = zone.ScreenProfile
+			// #16568: mirror the gRPC disposition (see types.go).
+			switch dpuserspace.ScreenZoneDispositionFor(cfg, zoneName) {
+			case dpuserspace.ScreenZoneDispositionEnforcing:
+				zi.ScreenDisposition = "enforcing"
+			case dpuserspace.ScreenZoneDispositionUndefined:
+				zi.ScreenDisposition = "undefined"
+			case dpuserspace.ScreenZoneDispositionInert:
+				zi.ScreenDisposition = "inert"
+			}
 		}
 
 		// Host-inbound services. #3328: surface the admission posture

@@ -63,6 +63,18 @@ func (s *Server) GetZones(_ context.Context, _ *pb.GetZonesRequest) (*pb.GetZone
 		}
 		if zone.ScreenProfile != "" {
 			zi.ScreenProfile = zone.ScreenProfile
+			// #16568: expose the disposition so structured clients do not
+			// read the bare name as the named profile's protection.
+			switch dpuserspace.ScreenZoneDispositionFor(cfg, zoneName) {
+			case dpuserspace.ScreenZoneDispositionEnforcing:
+				zi.ScreenDisposition = pb.ZoneScreenDisposition_ZONE_SCREEN_DISPOSITION_ENFORCING
+			case dpuserspace.ScreenZoneDispositionUndefined:
+				zi.ScreenDisposition = pb.ZoneScreenDisposition_ZONE_SCREEN_DISPOSITION_UNDEFINED
+			case dpuserspace.ScreenZoneDispositionInert:
+				zi.ScreenDisposition = pb.ZoneScreenDisposition_ZONE_SCREEN_DISPOSITION_INERT
+			default:
+				zi.ScreenDisposition = pb.ZoneScreenDisposition_ZONE_SCREEN_DISPOSITION_UNKNOWN
+			}
 		}
 		// #3328: surface the host-inbound admission posture distinctly. The
 		// legacy host_inbound_services list stays as a flattened back-compat

@@ -124,7 +124,12 @@ func (s *Server) showZonesDetail(cfg *config.Config, filter string, buf *strings
 			buf.WriteString("  TCP RST: enabled\n")
 		}
 		if zone.ScreenProfile != "" {
-			fmt.Fprintf(buf, "  Screen: %s\n", zone.ScreenProfile)
+			// #16568: qualify undefined/inert profiles (see CLI twin).
+			if q := dpuserspace.ScreenZoneDispositionFor(cfg, name).Qualifier(); q != "" {
+				fmt.Fprintf(buf, "  Screen: %s %s\n", zone.ScreenProfile, q)
+			} else {
+				fmt.Fprintf(buf, "  Screen: %s\n", zone.ScreenProfile)
+			}
 		}
 		// #3654: render the zone-level admitted set, the no-stanza default-deny
 		// posture line, AND any per-interface host-inbound override through the
@@ -272,8 +277,13 @@ func (s *Server) showZonesDetail(cfg *config.Config, filter string, buf *strings
 				// screenEnabledCheckList) instead of a hand-built list that
 				// omitted port-scan, ip-sweep, the source/destination session
 				// limits, and icmp-fragment.
-				if checks := screenEnabledCheckList(profile); len(checks) > 0 {
+				// #16568: never present an inert profile's modifier-only
+				// list as enabled checks.
+				disp := dpuserspace.ScreenZoneDispositionFor(cfg, name)
+				if checks := screenEnabledCheckList(profile); len(checks) > 0 && disp != dpuserspace.ScreenZoneDispositionInert {
 					fmt.Fprintf(buf, "    Enabled checks: %s\n", strings.Join(checks, ", "))
+				} else if disp == dpuserspace.ScreenZoneDispositionInert {
+					fmt.Fprintf(buf, "    Enabled checks: (none) — %s\n", dpuserspace.ScreenInertDisposition)
 				}
 			}
 		}
@@ -404,7 +414,11 @@ func (s *Server) showTestZone(req *pb.ShowTextRequest, cfg *config.Config, buf *
 						fmt.Fprintf(buf, "  Description: %s\n", zone.Description)
 					}
 					if zone.ScreenProfile != "" {
-						fmt.Fprintf(buf, "  Screen:      %s\n", zone.ScreenProfile)
+						if q := dpuserspace.ScreenZoneDispositionFor(cfg, zoneName).Qualifier(); q != "" {
+							fmt.Fprintf(buf, "  Screen:      %s %s\n", zone.ScreenProfile, q)
+						} else {
+							fmt.Fprintf(buf, "  Screen:      %s\n", zone.ScreenProfile)
+						}
 					}
 					// #3654 (H08/M03): this is the per-interface admission
 					// DIAGNOSTIC, so report the EFFECTIVE (zone UNION interface)
