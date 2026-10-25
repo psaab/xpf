@@ -155,8 +155,16 @@ func (s *Server) authorizeRPCCommand(cfg *config.Config, class, fullMethod strin
 			"login class %q restricts commands and this RPC's arguments cannot be "+
 				"named as a command, so the restriction cannot be applied to it", class)
 	}
+	// #16605: judge every remote-cli line that performs this RPC, not
+	// only the fixed charge — the typed-line aliases are alternative
+	// spellings of the same executed command.
+	_, method16605, _ := splitFullMethod(fullMethod)
+	forms = withAliasForms16605(method16605, req, forms)
 	if decision := rules.EvaluateForms(forms[0], forms[0], forms[1:]...); !decision.Allowed {
 		if remoteDistinctRescue16472(rules, forms) {
+			return nil
+		}
+		if aliasFormsDenyRescued16605(rules, method16605, req, forms) {
 			return nil
 		}
 		return fmt.Errorf("login class %q denies %q (%s)", class, cmd, decision.Reason)
@@ -186,6 +194,58 @@ func remoteDistinctRescue16472(rules config.CompiledLoginRegexes, forms []string
 		return false
 	}
 	return cmdtree.DistinctNarrowerAllowed(rules, executed, executed, baseForm, fullForm, selectorForms)
+}
+
+// aliasFormsDenyRescued16605 is the cross-spelling deny-with-exceptions
+// rescue for #16605. Adding alias spellings must not turn a charge and
+// its typed line into mutual lockout: deny `^show interfaces detail$`
+// beside allow `^show interfaces$` is an operator excepting the bare
+// line from the detail spelling, and the reverse pair excepts the
+// charge spelling. The rescue fires only when some form is
+// affirmatively allowed (DecidedBy==Allow, Allowed), no executed
+// spelling (forms[0] / the request-discriminated typed line) is
+// tier-denied — a deny naming what was actually executed always
+// vetoes — and every tier-denied form is a sibling spelling answered
+// by that affirmative allow. A denied form's own allow that lost its
+// tier comparison does not count: Evaluate(f) is that comparison and
+// it denied.
+func aliasFormsDenyRescued16605(rules config.CompiledLoginRegexes, method string, req any, forms []string) bool {
+	if _, ok := rpcAliasCommands16605[method]; !ok {
+		return false
+	}
+	executed := executedSpellings16605(method, req, forms)
+	anyAllowed := false
+	for _, f := range forms {
+		if d := rules.Evaluate(f); d.Allowed && d.DecidedBy == config.LoginRegexAllow {
+			anyAllowed = true
+		}
+	}
+	if !anyAllowed {
+		return false
+	}
+	for _, f := range forms {
+		d := rules.Evaluate(f)
+		if d.Allowed || !isTierDeny(d) {
+			continue
+		}
+		if executed[f] {
+			return false
+		}
+		rescued := false
+		for _, g := range forms {
+			if g == f {
+				continue
+			}
+			if gd := rules.Evaluate(g); gd.Allowed && gd.DecidedBy == config.LoginRegexAllow {
+				rescued = true
+				break
+			}
+		}
+		if !rescued {
+			return false
+		}
+	}
+	return true
 }
 
 // isCompleteMethod reports whether fullMethod is the Complete RPC.
@@ -579,6 +639,13 @@ var allCanonicalCommands = sync.OnceValue(func() []string {
 	}
 	for _, cmd := range bgpNATCanonicalCommands15076 {
 		seen[cmd] = true
+	}
+	// #16605: the typed-line aliases are also commands this surface
+	// presents to a deny regex, so the #8189 advisory must know them.
+	for _, aliases := range rpcAliasCommands16605 {
+		for _, cmd := range aliases {
+			seen[cmd] = true
+		}
 	}
 	out := make([]string, 0, len(seen))
 	for cmd := range seen {
