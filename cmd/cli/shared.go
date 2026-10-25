@@ -429,11 +429,11 @@ func (c *ctl) dispatchConfig(line string) error {
 			return nil
 		}
 		if norm := config.NormalizeEditPathTokens(c.editPath); len(norm) > 0 {
+			// #16825: resolve via the one shared helper the server
+			// gate adjudicates with (cursor-prepend unless bare,
+			// then bare-resolve under the source parent).
+			dstParts = config.ResolveCopyRenameDestination(norm, srcParts, dstParts)
 			srcParts = append(append([]string{}, norm...), srcParts...)
-			// #15237 A53-04: a bare destination stays under the
-			// source parent — do NOT prepend the cursor to it.
-			// The daemon applies the same rule (BareDestinationParent).
-			dstParts = config.PrependEditPathForCopyDst(norm, srcParts, dstParts)
 		}
 		fullInput := parts[0] + " " + config.JoinConfigPathTokens(srcParts) + " to " + config.JoinConfigPathTokens(dstParts)
 		_, err := c.client.Set(c.ctx(), &pb.SetRequest{Input: fullInput})
