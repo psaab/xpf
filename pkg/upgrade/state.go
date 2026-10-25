@@ -132,8 +132,23 @@ type Journal struct {
 	// It closes the crash window where the snapshot is installed and .old
 	// retained but the process dies before the binary flip: a retry must not
 	// rotate the already-restored live DB into .old and destroy the original
-	// failed-runtime copy. Forward-cut journals leave this false.
+	// failed-runtime copy. Forward-cut (auto) journals leave this false and
+	// use AutoRollbackDBRestored instead (#16529).
 	RollbackDBRestored bool `json:"rollback_db_restored,omitempty"`
+	// AutoRollbackDBRestored records the auto-rollback's (rollback(), the
+	// forward-cut failure path) completed DB swap (#16529). It closes the
+	// same crash/health window as RollbackDBRestored but for the
+	// non-operator flavour: rollback() persisted at StateRollingBack after
+	// StartUnit only on a HelperHealthy failure, with the old daemon
+	// RUNNING against the restored DB. A resume that re-STOPped and
+	// re-restored the cut-boundary snapshot would destroy every config
+	// commit made on that running daemon and delete <ConfigDBDir>.old with
+	// no copy. When this bit is set a resume MUST skip the restore (the
+	// snapshot is already installed) and, on the fast path, skip the STOP
+	// entirely once the running daemon re-proves healthy. Legacy journals
+	// written before this bit existed leave it false; they are healed by
+	// the .old / byte-identity signals rollback() checks on resume.
+	AutoRollbackDBRestored bool `json:"auto_rollback_db_restored,omitempty"`
 	// OperatorRollback distinguishes the CLI rollback journal from the legacy
 	// automatic forward-cut failure journal. Runner.Run uses it to resume the
 	// retained-.old DB path rather than the cleanup-oriented auto path.

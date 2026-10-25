@@ -271,8 +271,12 @@ func (r *Runner) Run(opts Options) (err error) {
 	// Resume an interrupted rollback FIRST (Codex r1 Critical#1): a crash
 	// mid-rollback must complete the rollback to PreviousVersion, not resume
 	// the failed forward cut. Operator rollback journals use the retained-DB
-	// path so a retry cannot destroy ConfigDBDir+".old"; legacy auto-rollback
-	// journals continue through rollback() unchanged.
+	// path so a retry cannot destroy ConfigDBDir+".old". Auto-rollback
+	// journals resume through rollback(), which now persists
+	// AutoRollbackDBRestored before its swap and heals legacy preserved
+	// journals from the swap's residue (.old / byte-identity), so a resume
+	// never re-restores over commits made on a running rolled-back daemon
+	// and never stops a daemon that re-proves healthy (#16529).
 	if j.State == StateRollingBack {
 		r.logf("upgrade: resuming interrupted rollback to %s", j.PreviousVersion)
 		if j.OperatorRollback {

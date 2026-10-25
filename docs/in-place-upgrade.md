@@ -327,6 +327,28 @@ would boot an N daemon that fatal-rejects the N+1 envelope DB (a brick).
 The HA path disables auto-rollback — HA rollback is operator-driven (an
 auto re-flip mid-rolling un-coordinates the cluster).
 
+#### Preserved rollback journals and post-rollback commits (#16529)
+
+When the rolled-back daemon starts but its helper does not confirm
+within `StartHealthDeadline`, the rollback journal is preserved at
+`ROLLINGBACK` with the old daemon **running** against the restored DB
+(#14721). The restore has already happened at that point, so a resume
+must never re-restore the cut-boundary snapshot: commits made on the
+running daemon would be destroyed and `<ConfigDBDir>.old` deleted with
+no copy. Both rollback flavours persist a restored bit **before** the
+swap (`AutoRollbackDBRestored` for the auto path, `RollbackDBRestored`
+for the operator path) and re-persist it after `StartUnit`, so the
+preserved journal carries it. On resume, if `current` already names
+the destination and the daemon re-proves healthy, the rollback
+completes **without stopping the daemon or touching its DB**; if it
+does not re-prove healthy, the full stop → flip → start sequence runs
+but the restore is still skipped. Journals written before the auto bit
+existed are healed on resume from the swap's own residue — a surviving
+`.old`, a live DB byte-identical to the snapshot, or (for a
+`ROLLINGBACK` journal with `AdvancedStateFloor`) `current` already
+naming the destination, which proves the mandatory
+restore-before-flip order already ran.
+
 #### Operator rollback verb and envelope policy (#10024)
 
 The manual sequence above is available as one guarded command:
