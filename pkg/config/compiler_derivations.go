@@ -112,6 +112,12 @@ func resolveDerivedConfig(cfg *Config, opts compileOpts) {
 		}
 	}
 
+	// #16865: derive the IS-IS NET from `family iso address` (Junos
+	// carries it on lo0) when no explicit `protocols isis net` was
+	// authored. Must run after interfaces and protocols are compiled
+	// and before the P6 gates / FRR renderer read ISISConfig.NET.
+	resolveISISNETFromISO16865(cfg)
+
 	// #4021: fold interface-level CoS bindings (`class-of-service interfaces
 	// geX { scheduler-map M; ... }` with no `unit`) into the interface's
 	// configured logical units. Runs after the child loop so both the

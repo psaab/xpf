@@ -68,9 +68,11 @@ func TestISISAuthTypeWithoutKeyIsRefused14399(t *testing.T) {
 			"set protocols isis authentication-type simple",
 			"set protocols isis authentication-key s3cret"}, true, ""},
 		{"interface keyed md5", []string{
+			"set protocols isis net 49.0001.0100.0000.0001.00",
 			"set protocols isis interface ge-0/0/0 authentication-type md5",
 			"set protocols isis interface ge-0/0/0 authentication-key s3cret"}, true, ""},
 		{"interface keyed simple", []string{
+			"set protocols isis net 49.0001.0100.0000.0001.00",
 			"set protocols isis interface ge-0/0/0 authentication-type simple",
 			"set protocols isis interface ge-0/0/0 authentication-key s3cret"}, true, ""},
 		{"ri keyed md5", []string{
@@ -80,6 +82,7 @@ func TestISISAuthTypeWithoutKeyIsRefused14399(t *testing.T) {
 		{"neither leaf", []string{
 			"set protocols isis net 49.0001.0100.0000.0001.00"}, true, ""},
 		{"interface neither leaf", []string{
+			"set protocols isis net 49.0001.0100.0000.0001.00",
 			"set protocols isis interface ge-0/0/0 passive"}, true, ""},
 		// Key at one level does NOT satisfy the other level's type.
 		{"global keyed but interface type-only", []string{

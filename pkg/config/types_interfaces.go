@@ -146,6 +146,12 @@ type InterfaceUnit struct {
 	// FamilyInet6 records authored inet6 presence for the IPv6 MTU gate.
 	// It is compiler evidence, not snapshot wire data.
 	FamilyInet6 bool `json:"-"`
+	// ISOAddresses records `family iso address <NET>` values (#16865).
+	// Junos carries the IS-IS NET here (preferably lo0); the derivation
+	// in compiler_derivations.go folds a lo0 NET into ISISConfig.NET
+	// when no explicit `protocols isis net` was authored. Compiler-only
+	// evidence, like FamilyInet above.
+	ISOAddresses []string `json:"-"`
 }
 
 // PrimaryAddressForFamily returns the unit's primary address for the

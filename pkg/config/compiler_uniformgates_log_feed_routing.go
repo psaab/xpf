@@ -535,6 +535,17 @@ func runUniformGatesLogFeedRouting(tree *ConfigTree, cfg *Config, opts compileOp
 		}
 	}
 
+	// #16865: IS-IS with interfaces but no NET (neither `protocols
+	// isis net` nor a derivable lo0 `family iso address`) can never
+	// form an adjacency. Strict rejects; tolerant warns (#1960) and
+	// the renderer withholds the stanza. Runs after the cluster IGP
+	// gate so a shared-NET split keeps its established diagnostic.
+	if w, err := validateISISNETPresenceStrict(cfg, opts.lenientISISNETPresence16865); err != nil {
+		return err
+	} else {
+		cfg.Warnings = append(cfg.Warnings, w...)
+	}
+
 	// #2889: FRR auth-value gate. A BGP neighbor password or an
 	// OSPF/RIP/IS-IS authentication key containing whitespace cannot be
 	// rendered as a single FRR/vtysh token (FRR's command lexer has no

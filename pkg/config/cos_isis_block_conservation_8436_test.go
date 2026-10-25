@@ -46,6 +46,7 @@ func TestDuplicateISISInterfaceBlocksMerge8436(t *testing.T) {
 	cfg := mustCompile8436(t, `
 protocols {
     isis {
+        net 49.0001.0100.0000.0001.00;
         interface ge-0/0/0.0 {
             metric 42;
         }
@@ -80,6 +81,7 @@ func TestDistinctISISInterfaceBlocksStillAppend8436(t *testing.T) {
 	cfg := mustCompile8436(t, `
 protocols {
     isis {
+        net 49.0001.0100.0000.0001.00;
         interface ge-0/0/0.0 {
             metric 42;
         }

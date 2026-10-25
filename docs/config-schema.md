@@ -2147,6 +2147,24 @@ needs no `local-as`/`peer-as`. Before #16572 these statements were
 unmodelled: the interface form compiled to an *active* interface and
 the gate then asked the operator to admit the excluded protocol.
 
+### IS-IS NET from `family iso address` (#16865)
+
+Junos has no `protocols isis net` statement: the NET is configured as
+`interfaces lo0 unit 0 family iso address <NET>` (preferably on lo0).
+xpf models `family iso address` (validated by `ValidateISISNET`) and
+derives `ISISConfig.NET` from it at compile time when no explicit
+`protocols isis net` was authored — per scope: the default scope uses
+interfaces owned by no routing instance, an instance uses its own
+members, lo0 first in each. NET identity compares canonical bytes, so
+case/dot-grouping spellings of the same NET are one identity. A
+disagreeing explicit/ISO pair, or two distinct in-scope ISO NETs, is
+rejected at strict commit as an ambiguous identity. An enabled IS-IS
+scope (global or routing-instance) with interfaces but no derivable
+NET is rejected at strict commit; on tolerant load it warns and the
+FRR renderer withholds the whole `router isis` stanza rather than
+activating a NET-less process. A NET-less scope with no enabled
+interfaces stays inert.
+
 ### `protocols lldp` TTL bounds (#4596)
 
 The `transmit-interval` and `hold-multiplier` leaves (`schema_routing.go`) now

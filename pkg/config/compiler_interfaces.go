@@ -1106,6 +1106,45 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 								unit.DHCPv6Client = dc
 							}
 						}
+					case "iso":
+						// #16865: Junos `family iso address <NET>` — the
+						// IS-IS NET source. Hierarchical form carries an
+						// `address` child; the packed one-line form
+						// collapses `address <NET>` onto afNode.Keys; the
+						// flat-set form nests the same way as hierarchical.
+						for _, addrNode := range afNode.FindChildren("address") {
+							if v := nodeVal(addrNode); v != "" {
+								unit.ISOAddresses = append(unit.ISOAddresses, v)
+							}
+							// Bracketed / packed extra NETs on the leaf.
+							// Guard the slice: a valueless `address;`
+							// carries only Keys[0] (#16865 F1).
+							if len(addrNode.Keys) > 2 {
+								for _, v := range addrNode.Keys[2:] {
+									if v != "" {
+										unit.ISOAddresses = append(unit.ISOAddresses, v)
+									}
+								}
+							}
+						}
+						// Flat-set repeated `family iso address` lines
+						// merge onto one leaf (Keys[1:] holds every
+						// value); nodeVal above took Keys[1] only, so
+						// scan Keys[2:] even without an address child.
+						if len(afNode.Keys) >= 2 && afNode.Keys[1] == "iso" {
+							// afNode is [family iso ...]: values after iso
+							// that are not the address keyword.
+							for _, v := range afNode.Keys[2:] {
+								if v != "" && v != "address" {
+									unit.ISOAddresses = append(unit.ISOAddresses, v)
+								}
+							}
+						}
+						for i, k := range afNode.Keys {
+							if k == "address" && i+1 < len(afNode.Keys) {
+								unit.ISOAddresses = append(unit.ISOAddresses, afNode.Keys[i+1])
+							}
+						}
 					}
 				}
 			}

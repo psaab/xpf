@@ -391,6 +391,15 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 					}},
 				}},
 			}},
+			"iso": {desc: "ISO protocol (IS-IS NET)", packedStatements: true, children: map[string]*schemaNode{
+				// #16865: Junos carries the IS-IS NET on an interface
+				// (preferably lo0) as `family iso address <NET>`; there is
+				// no `protocols isis net` statement in Junos. Model the
+				// leaf with the same NET validator as `protocols isis net`
+				// so a malformed NET rejects at commit, and compile it
+				// into InterfaceUnit.ISOAddresses for the IS-IS derivation.
+				"address": {desc: "ISO NET address", args: 1, placeholder: "<net-address>", valueType: ValueIdentifier, valueDesc: "IS-IS NET (hex octets in dot-separated groups, 8 to 20 octets)", valueExamples: []string{"49.0001.0100.0000.0001.00"}, validator: ValidateISISNET, children: nil},
+			}},
 		}},
 	}},
 }}}

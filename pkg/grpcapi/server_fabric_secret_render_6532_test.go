@@ -99,6 +99,7 @@ var fabricSecretConfig = []string{
 	// matches its intent.
 	"set protocols rip authentication-key FAB6532-RIPKEY",
 	"set protocols rip authentication-type md5",
+	"set protocols isis net 49.0001.0100.0000.0001.00",
 	"set protocols isis authentication-key FAB6532-ISIS-AREA-AUTHKEY",
 	"set protocols isis authentication-type md5",
 	"set protocols isis interface ge-0-0-2 authentication-key FAB6532-ISIS-IFACE-AUTHKEY",

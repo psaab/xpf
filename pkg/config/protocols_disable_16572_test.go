@@ -160,6 +160,7 @@ func TestOSPF3ISISInterfaceDisableModelled16572(t *testing.T) {
 	cfg, err := CompileConfig(buildTree(t, []string{
 		"set protocols ospf3 area 0.0.0.0 interface ge-0/0/0.0",
 		"set protocols ospf3 area 0.0.0.0 interface ge-0/0/1.0 disable",
+		"set protocols isis net 49.0001.0100.0000.0001.00",
 		"set protocols isis interface ge-0/0/0.0",
 		"set protocols isis interface ge-0/0/1.0 disable",
 	}))

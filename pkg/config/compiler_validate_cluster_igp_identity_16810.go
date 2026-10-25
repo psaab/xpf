@@ -153,6 +153,47 @@ func nodeGroupHasIGPIdentity16810(group *Node) bool {
 		if child.Name() == "routing-instances" && nodeHasIGPIdentity16810(child) {
 			return true
 		}
+		// #16865 F3: the Junos NET source `interfaces ... family iso
+		// address` is an IS-IS identity too; distinct per-node ISO
+		// NETs must earn the same exemption as `protocols isis net`.
+		if child.Name() == "interfaces" && nodeHasISOAddress16865(child) {
+			return true
+		}
+	}
+	return false
+}
+
+// nodeHasISOAddress16865 reports whether an interfaces subtree
+// carries a `family iso ... address <NET>` in any AST shape
+// (hierarchical child, packed Keys tail, flat-set child).
+func nodeHasISOAddress16865(n *Node) bool {
+	return isoInSubtree16865(n, false)
+}
+
+func isoInSubtree16865(n *Node, underISO bool) bool {
+	if n == nil {
+		return false
+	}
+	nowISO := underISO || n.Name() == "iso"
+	for _, k := range n.Keys {
+		if k == "iso" {
+			nowISO = true
+		}
+	}
+	if nowISO && n.Name() == "address" {
+		return true
+	}
+	if nowISO {
+		for i, k := range n.Keys {
+			if k == "address" && i+1 < len(n.Keys) {
+				return true
+			}
+		}
+	}
+	for _, c := range n.Children {
+		if isoInSubtree16865(c, nowISO) {
+			return true
+		}
 	}
 	return false
 }
@@ -212,7 +253,20 @@ func igpIdentityNodeViewsDistinct16810(tree *ConfigTree) bool {
 		if !spans[0] && !spans[1] {
 			continue
 		}
-		if ids[0] == "" || ids[1] == "" || ids[0] == ids[1] {
+		if ids[0] == "" || ids[1] == "" {
+			return false
+		}
+		// #16865 R2: IS-IS identities compare by canonical NET bytes
+		// so case/grouping-equivalent spellings of one NET do not
+		// count as distinct node identities. OSPF router-ids keep
+		// raw comparison.
+		same := ids[0] == ids[1]
+		if strings.HasSuffix(key, "/isis") {
+			if c0, c1 := canonicalNET16865(ids[0]), canonicalNET16865(ids[1]); c0 != "" && c1 != "" {
+				same = c0 == c1
+			}
+		}
+		if same {
 			return false
 		}
 		excused = true
@@ -309,9 +363,19 @@ func igpIdentityScopes16810(cfg *Config) []igpIdentityScope16810 {
 					names = append(names, iface.Name)
 				}
 			}
+			// #16865 B-NEW-1: IS-IS identity is canonical NET bytes
+			// for every comparison in this file (gate + exemption),
+			// so case/grouping spellings of one NET are one identity
+			// whether the NET came from `protocols isis net` or ISO
+			// derivation. Invalid values fall back to raw (the NET
+			// gate owns those diagnostics).
+			identity := isis.NET
+			if canon := canonicalNET16865(identity); canon != "" {
+				identity = canon
+			}
 			scopes = append(scopes, igpIdentityScope16810{
 				key: key + "/isis", scopeLabel: prefix + "protocols isis",
-				protoLabel: "protocols isis", identity: isis.NET,
+				protoLabel: "protocols isis", identity: identity,
 				rgs: distinctDataRGs(names),
 			})
 		}
