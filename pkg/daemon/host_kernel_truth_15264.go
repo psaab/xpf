@@ -29,6 +29,18 @@ import (
 // flushed intentionally. The next successful apply clears the staleness via
 // noteHostInboundApplySucceeded / applyLo0Filter as before.
 //
+// #16823 (R3-F09-02): marking stale alone was FAIL-OPEN on the documented
+// recovery step. The host-inbound arm now also clears the day-2 retention
+// state (hostInboundEnforced / hostInboundCoveredAddrs /
+// hostInboundDHCPRetainedAddrs, plus the gap marker/spec when the gap
+// table is also gone), mirroring the lo0 arm and the #5790 teardown: a
+// re-apply whose real install then fails takes the cold-boot fence path
+// instead of computing an empty uncovered set from the stale covered set
+// and installing no fence at all. HostInboundApplied().Established keeps
+// reporting the historical establishment via the separate sticky
+// hostInboundEstablished15264 bit (also the probe gate above), while
+// LastApplyFailed keeps the state Stale until a real install succeeds.
+//
 // Probe choice:
 //   - xpf_hostinbound: TableDropsInput. A real generation always carries a
 //     DROP verdict on its base input chain except a junos-host program-only
@@ -63,10 +75,14 @@ func (d *Daemon) recheckHostKernelTruth15264(now time.Time) {
 	}
 	drift := false
 
-	// Host-inbound: only an established surface can drift. A successful
-	// no-enforcement teardown clears hostInboundEnforced, so an absent
-	// table after teardown is the desired state, not drift.
-	if d.hostInboundEnforced.Load() {
+	// Host-inbound: only an established surface can drift. The probe gate
+	// is hostInboundEstablished15264, NOT hostInboundEnforced: on drift the
+	// enforced latch is cleared (#16823, below), so a latch-gated probe
+	// would go blind after the first drift episode and could never observe
+	// a heal or a second flush. The established bit is sticky until a
+	// successful real install or a daemon teardown clears it, so the
+	// warn de-dupe and the never-established no-probe property both hold.
+	if d.hostInboundEstablished15264.Load() {
 		drops, err := nftInstaller.TableDropsInput(xnft.HostInboundTableName)
 		switch {
 		case err != nil:
@@ -81,6 +97,34 @@ func (d *Daemon) recheckHostKernelTruth15264(now time.Time) {
 			enforcing, enErr := nftInstaller.TableEnforcing(xnft.HostInboundTableName)
 			if enErr == nil && !enforcing {
 				d.noteHostInboundApplyFailed(now)
+				// #16823 (R3-F09-02): the kernel-false premise must also
+				// clear the day-2 retention state, mirroring the lo0 arm
+				// below and the #5790 teardown. Leaving
+				// hostInboundEnforced set made a re-apply whose real
+				// install failed take the day-2 branch, compute an
+				// empty uncovered set from the stale covered set, and
+				// install NEITHER the cold-boot fence NOR a gap fence
+				// for previously covered addresses — the documented
+				// recovery step (re-apply after `nft flush ruleset`)
+				// left every previously covered local address with no
+				// kernel default-deny until a later apply succeeded.
+				d.hostInboundEnforced.Store(false)
+				d.hostInboundCoveredAddrs = nil
+				d.hostInboundDHCPRetainedAddrs = nil
+				// The gap/pre-activation fences share the flushed
+				// ruleset. Probe the gap table before clearing its
+				// marker/spec: a gap fence that somehow still stands
+				// (partial flush) stays reported, and its spec stays
+				// mergeable by the next gap install. The cold-boot
+				// fence replaces the MAIN table, so it shares the main
+				// table's fate and needs no separate probe.
+				if d.hostInboundGapFenceActive.Load() {
+					if gapEnforcing, gapErr := nftInstaller.TableEnforcing(xnft.HostInboundGapTableName); gapErr == nil && !gapEnforcing {
+						d.hostInboundGapFenceActive.Store(false)
+						d.hostInboundGapFenceSpec = nil
+						d.hostInboundPreActivationFence = nil
+					}
+				}
 				drift = true
 			}
 		}
