@@ -33,6 +33,16 @@ func (m *Manager) CommitLeaseForTesting(ifaceName string, af AddressFamily, leas
 	return m.commitLease(clientKey{iface: ifaceName, family: af}, lease, prev, nil, nil, false)
 }
 
+// CommitLeaseWithPDsForTesting drives commitLease with an already-reconciled
+// PD set (#16773), so daemon-package tests can model a fixed-lifetime PD
+// renewal (fresh Obtained, identical granted lifetimes) through the real
+// content-change predicates instead of seeding the PD map directly — seeding
+// would bypass the very notify path under test. Callers must not use this
+// from production code paths.
+func (m *Manager) CommitLeaseWithPDsForTesting(ifaceName string, lease, prev *Lease, prefixes, prevPDs []DelegatedPrefix) error {
+	return m.commitLease(clientKey{iface: ifaceName, family: AFInet6}, lease, prev, prefixes, prevPDs, true)
+}
+
 // SeedDelegatedPrefixesForTesting installs the IA_PD delegations recorded for
 // ifaceName, replacing any already held for it. It lets a caller outside pkg/dhcp
 // (the #9413 REST handler cell) drive DelegatedPrefixes() without real DHCPv6
@@ -108,6 +118,21 @@ func (m *Manager) SeedDelegatedPrefixesForRATesting(sourceIface, raIface string,
 		m.v6opts[sourceIface] = opts
 	}
 	opts.RAIface = raIface
+}
+
+// ReplaceDelegatedPrefixesForTesting replaces the stored PD set for
+// sourceIface (preserving the given order) while keeping the RA target
+// installed by SeedDelegatedPrefixesForRATesting (#16773). It models the
+// stored state after a renewal commit without re-seeding the target map.
+// Callers must not use this from production code paths.
+func (m *Manager) ReplaceDelegatedPrefixesForTesting(sourceIface string, pds []DelegatedPrefix) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(pds) == 0 {
+		delete(m.delegatedPDs, sourceIface)
+		return
+	}
+	m.delegatedPDs[sourceIface] = append([]DelegatedPrefix(nil), pds...)
 }
 
 // RunningClientHandlesForTesting returns an opaque handle per running

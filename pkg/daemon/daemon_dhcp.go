@@ -129,9 +129,20 @@ func (d *Daemon) onDHCPAddressChange() {
 }
 
 // onDHCPUnchangedLease is the #11497 escape hatch for a content-identical
-// T1/T2 renewal. Healthy renewals stay silent; while a double nft failure is
-// owed, the lease commit nudges the 30s host-inbound gap retry owner to
-// re-drive the active config promptly instead of waiting for its next tick.
+// T1/T2 renewal. Healthy renewals stay silent for the full-recompile path;
+// while a double nft failure is owed, the lease commit nudges the 30s
+// host-inbound gap retry owner to re-drive the active config promptly
+// instead of waiting for its next tick.
+//
+// #16773: a content-identical PD renewal is NOT silent for RA. Since
+// #15057 the RA desired set carries the ABSOLUTE expiry (Obtained+granted),
+// and a fixed-lifetime renewal moves Obtained — so the applied RA config
+// must be refreshed with the renewed ValidExpiresAt even though
+// leaseContentChanged/delegatedPrefixesChanged stay false. The nudge below
+// wakes the RA-scoped renew loop, whose digest-gated reconcile re-applies
+// ONLY when the expiry actually moved (a v4 or non-PD v6 renewal leaves
+// the digest unchanged and costs one buildRAConfigs). This must NOT trigger
+// a full recompile (#1777) and must NOT apply inline (#16559, below).
 //
 // #16559: this MUST NOT apply inline. It runs on the DHCP client goroutine
 // (commitLease -> notifyLeaseStateChanged), and applyActiveConfig parks
@@ -144,6 +155,21 @@ func (d *Daemon) onDHCPAddressChange() {
 func (d *Daemon) onDHCPUnchangedLease() {
 	if d.hostInboundGapOwed() {
 		d.nudgeHostInboundGapReassert()
+	}
+	d.nudgeStandaloneRARenew()
+}
+
+// nudgeStandaloneRARenew requests a prompt standalone RA renew reconcile
+// (#16773). Non-blocking depth-1 send that coalesces a burst, for the same
+// #16559 client-goroutine reason as nudgeHostInboundGapReassert. Safe
+// before the loop starts and on a nil channel (a Daemon built without New).
+func (d *Daemon) nudgeStandaloneRARenew() {
+	if d.raRenewWakeCh == nil {
+		return
+	}
+	select {
+	case d.raRenewWakeCh <- struct{}{}:
+	default:
 	}
 }
 

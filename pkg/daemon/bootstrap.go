@@ -648,6 +648,7 @@ func (d *Daemon) withdrawAbandonedServicesForBootstrap() []bootstrapTeardownStep
 		}
 		d.raReconcileMu.Lock()
 		d.lastRAReconcileHash = ""
+		d.lastStandaloneRAHash = ""
 		d.raReconcileMu.Unlock()
 	}
 	if d.dhcpServer != nil {

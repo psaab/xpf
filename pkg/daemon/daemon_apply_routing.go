@@ -39,6 +39,13 @@ func (d *Daemon) applyServicesReconcile(cfg *config.Config) (error, error) {
 		if d.ra != nil && len(raConfigs) > 0 {
 			if err := d.ra.Apply(raConfigs); err != nil {
 				slog.Warn("failed to apply RA config", "err", err)
+			} else {
+				// #16773: keep the standalone renew-reconcile digest in
+				// sync with what this commit just applied, so a later
+				// content-identical PD renewal is gated against the
+				// CURRENT desired set (and a renewal that moves only the
+				// expiry is not mistaken for already-converged).
+				d.syncStandaloneRAHash(raConfigs)
 			}
 		} else if d.ra != nil {
 			// No RA configs remain — the operator removed all RA. Gracefully
@@ -48,6 +55,8 @@ func (d *Daemon) applyServicesReconcile(cfg *config.Config) (error, error) {
 			// (default 1800s) expires. Withdraw is a no-op when no senders exist.
 			if err := d.ra.Withdraw(); err != nil {
 				slog.Warn("failed to withdraw RA config", "err", err)
+			} else {
+				d.syncStandaloneRAHash(nil)
 			}
 		}
 	}
