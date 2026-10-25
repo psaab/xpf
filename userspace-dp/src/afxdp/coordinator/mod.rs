@@ -806,23 +806,33 @@ impl Coordinator {
     /// `sessions.synced`/`nat`/`forward_wire`/`owner_rg_indexes`
     /// (`clear_synced_state=false`), plus `forwarding` and `validation`.
     ///
-    /// Restoring `forwarding` is not cosmetic. `stop_inner` runs
-    /// `retire_worker_holders` against `self.forwarding`'s allocators
-    /// while the (now-joined) worker records still name their holders,
-    /// then defaults `forwarding` — discarding the `PortAllocator`
-    /// instances (persistent-NAT leases in `persistent_by_source`, live
-    /// flow records) and the `tunnel_endpoints` baseline. The following
-    /// `rebind` -> `reconcile` builds its new forwarding with
+    /// Restoring `forwarding` is not cosmetic. Without preservation,
+    /// `stop_inner` defaults `forwarding` — discarding the
+    /// `PortAllocator` instances (persistent-NAT leases in
+    /// `persistent_by_source`, live flow records) and the
+    /// `tunnel_endpoints` baseline. The following `rebind` ->
+    /// `reconcile` builds its new forwarding with
     /// `previous = Some(&coord.forwarding)` for allocator reuse and
     /// captures `tunnel_owners`/`snapshot_was_installed` in `tear_down`
     /// BEFORE its own `stop_inner(false)`; a defaulted forwarding makes
     /// both see an empty baseline (no allocator carry-over, remap purge
     /// blind). Preserving the struct across the worker stop keeps those
-    /// baselines intact until `tear_down` captures them. The allocator
-    /// objects themselves are `Arc`-shared, so the holder retirement
-    /// inside `stop_inner` still frees worker-held bits on the SAME
-    /// allocators the preserved forwarding (and the later rebuild, via
-    /// `previous`) will reuse — no leak, no double-free.
+    /// baselines intact until `tear_down` captures them.
+    ///
+    /// #16549: the original forwarding must stay INSTALLED while
+    /// `stop_inner` joins workers and runs `retire_worker_holders`,
+    /// because that retirement walks `self.forwarding`'s allocators and
+    /// spends each worker's one-shot `holders_retired` CAS. Taking the
+    /// forwarding out with `mem::take` first would walk a default
+    /// (empty) allocator set, spend the CAS, and leave the joined
+    /// workers' holder bits set on the preserved allocators — pool
+    /// ports held until a later same-id stop, or durably after a plan
+    /// shrink. Cloning (the collections hold `Arc`s / shared stores, so
+    /// this is cheap on this teardown-only path) and reinstalling the
+    /// clone after `stop_inner` defaults `self.forwarding` keeps
+    /// retirement aimed at the same allocator instances the preserved
+    /// forwarding (and the later rebuild, via `previous`) will reuse —
+    /// no leak, no double-free.
     ///
     /// `validation` is preserved for the same reason: `tear_down`
     /// captures `snapshot_was_installed` from it, and defaulting it
@@ -830,11 +840,7 @@ impl Coordinator {
     ///
     /// The event stream is NOT torn down (same as `stop`): it must
     /// survive XSK bind/unbind cycles.
-    /// #15950: bring-up failure rollback that stops workers (so none forward
-    /// the rejected snapshot) but preserves forwarding/validation, like
-    /// stop_for_link_cycle, so a retry builds with previous = the new
-    /// generation (allocator/WG/counter carry) instead of a default.
-    pub(crate) fn stop_preserving_forwarding(&mut self) {
+    fn stop_preserving_forwarding_inner(&mut self) {
         // Clone the Arc-shared forwarding state (collections hold Arcs /
         // shared stores; this is the teardown-only path) and keep the
         // ORIGINAL installed while stop_inner joins workers and retires
@@ -849,18 +855,16 @@ impl Coordinator {
         self.publish_runtime_view();
     }
 
+    /// #15950: bring-up failure rollback that stops workers (so none forward
+    /// the rejected snapshot) but preserves forwarding/validation, like
+    /// stop_for_link_cycle, so a retry builds with previous = the new
+    /// generation (allocator/WG/counter carry) instead of a default.
+    pub(crate) fn stop_preserving_forwarding(&mut self) {
+        self.stop_preserving_forwarding_inner();
+    }
+
     pub fn stop_for_link_cycle(&mut self) {
-        let preserved_forwarding = std::mem::take(&mut self.forwarding);
-        let preserved_validation = self.validation;
-        self.stop_inner(false);
-        self.forwarding = preserved_forwarding;
-        self.validation = preserved_validation;
-        // `stop_inner` re-attached the shared SA store onto the defaulted
-        // forwarding; the preserved forwarding already carries its own.
-        // Republish so the worker-visible view pairs the preserved
-        // forwarding/validation instead of the defaulted pair stop_inner
-        // published. Workers are joined, so this is teardown-only.
-        self.publish_runtime_view();
+        self.stop_preserving_forwarding_inner();
         self.last_reconcile_stage = ReconcileStage::Stopped;
     }
 

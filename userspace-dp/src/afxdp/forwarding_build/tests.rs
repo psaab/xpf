@@ -12660,10 +12660,12 @@ fn forwarding_publish_population_is_pinned_7015() {
     let want: &[(&str, usize)] = &[
         // Test-only retained-state mutation after publishing a FIB view; not an apply.
         ("coordinator/fib_dump.rs", 1),
-        // Teardown reset + #14677 link-cycle restore + #15950 bring-up preserve (stop_for_link_cycle/stop_preserving_forwarding
+        // Teardown reset + the shared preserving-stop helper (#14677
+        // link-cycle restore + #15950 bring-up preserve, unified by
+        // #16549 into stop_preserving_forwarding_inner, which
         // re-installs the preserved forwarding after stop_inner defaults
         // it) — neither is an apply, neither publishes a commit.
-        ("coordinator/mod.rs", 3),
+        ("coordinator/mod.rs", 2),
         ("coordinator/reconcile/mod.rs", 1),
         // THE RECONCILE APPLY's publish. Its commit point is in reconcile/mod.rs,
         // after bring_up_workers — deliberately not here.
