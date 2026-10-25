@@ -93,36 +93,26 @@ func isoNETSources16865(cfg *Config) []isoNETSource16865 {
 	return out
 }
 
-// riOwnedRefs16865 returns the interface refs owned by routing
-// instances, keyed by CANONICAL ref (SplitInterfaceUnitRef Literal)
-// so alias spellings (`ge-0/0/2.00`, signed units, declared dotted
-// names) match the canonical source keys generated in
-// isoNETSources16865 (#16865 R1). A bare member owns every unit ref
-// of that interface (Junos per-instance loopback units use the bare
-// form); declared-name precedence comes from the splitter, not a
-// dot heuristic.
+// riOwnedRefs16865 returns the logical interface refs owned by
+// routing instances, resolved through the SAME contract actual RI
+// membership uses (RoutingInstanceMemberDeviceKeys): declared-name
+// precedence, numeric-unit canonicalisation, slash/dash Linux-name
+// aliases, and bare-member unit fanout (#16865 R1, round 3). Keys
+// are the resolver's InterfaceKeys, which match the canonical
+// source keys generated in isoNETSources16865.
 func riOwnedRefs16865(cfg *Config) map[string]string {
 	owned := map[string]string{}
 	if cfg == nil {
 		return owned
 	}
+	tunnelNames := cfg.TunnelNameMap()
 	for _, ri := range cfg.RoutingInstances {
 		if ri == nil {
 			continue
 		}
-		for _, m := range ri.Interfaces {
-			split := cfg.SplitInterfaceUnitRef(m)
-			key := split.Literal
-			if key == "" {
-				key = m
-			}
-			owned[key] = ri.Name
-			if !split.HasUnit {
-				if ifc := cfg.Interfaces.Interfaces[split.Base]; ifc != nil {
-					for n := range ifc.Units {
-						owned[fmt.Sprintf("%s.%d", split.Base, n)] = ri.Name
-					}
-				}
+		for _, key := range RoutingInstanceMemberDeviceKeysForInstance(cfg, tunnelNames, ri) {
+			if key.InterfaceKey != "" {
+				owned[key.InterfaceKey] = ri.Name
 			}
 		}
 	}
@@ -139,12 +129,8 @@ func isoNETCandidatesForScope16865(cfg *Config, instance string) []isoNETSource1
 	var out []isoNETSource16865
 	for _, src := range isoNETSources16865(cfg) {
 		// Source keys are generated canonical (declared base + int
-		// unit); canonicalize defensively through the same splitter.
-		srcKey := cfg.SplitInterfaceUnitRef(src.ref).Literal
-		if srcKey == "" {
-			srcKey = src.ref
-		}
-		owner := owned[srcKey]
+		// unit), matching the resolver's InterfaceKey form.
+		owner := owned[src.ref]
 		if instance == "" {
 			if owner != "" {
 				continue

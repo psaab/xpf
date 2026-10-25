@@ -323,6 +323,58 @@ func TestISISNETRoutingInstanceAliasMember16865(t *testing.T) {
 	}
 }
 
+// R1 round 3: slash/dash Linux-name aliases. RI membership spelled
+// `ge-0-0-2.0` (or bare `ge-0-0-2`) resolves to declared `ge-0/0/2`
+// for actual membership; NET ownership must agree.
+func TestISISNETRoutingInstanceDashAlias16865(t *testing.T) {
+	const netB = "49.0001.0100.0000.0002.00"
+	for _, member := range []string{"ge-0-0-2.0", "ge-0-0-2"} {
+		t.Run("own-scope "+member, func(t *testing.T) {
+			cfg, err := CompileConfig(buildTree(t, []string{
+				"set interfaces lo0 unit 0 family iso address " + isisNET16865,
+				"set interfaces ge-0/0/1 unit 0 family inet address 198.51.100.1/24",
+				"set interfaces ge-0/0/2 unit 0 family iso address " + netB,
+				"set protocols isis interface ge-0/0/1.0",
+				"set routing-instances tenant instance-type virtual-router",
+				"set routing-instances tenant interface " + member,
+				"set routing-instances tenant protocols isis interface ge-0/0/2.0",
+			}))
+			if err != nil {
+				t.Fatalf("dash-alias member %q rejected: %v", member, err)
+			}
+			if cfg.Protocols.ISIS.NET != isisNET16865 {
+				t.Fatalf("default NET = %q, want %s", cfg.Protocols.ISIS.NET, isisNET16865)
+			}
+			if len(cfg.RoutingInstances) != 1 || cfg.RoutingInstances[0].ISIS.NET != netB {
+				t.Fatalf("tenant NET via %q = %+v, want %s", member, cfg.RoutingInstances, netB)
+			}
+		})
+		t.Run("no-borrow "+member, func(t *testing.T) {
+			lines := []string{
+				"set interfaces ge-0/0/1 unit 0 family inet address 198.51.100.1/24",
+				"set interfaces ge-0/0/2 unit 0 family iso address " + netB,
+				"set protocols isis interface ge-0/0/1.0",
+				"set routing-instances tenant instance-type virtual-router",
+				"set routing-instances tenant interface " + member,
+				"set routing-instances tenant protocols isis interface ge-0/0/2.0",
+			}
+			if _, err := CompileConfig(buildTree(t, lines)); err == nil {
+				t.Fatalf("default borrowed tenant NET via dash member %q (#16865 R1r3)", member)
+			}
+			cfg, err := CompileConfigLenient(buildTree(t, lines))
+			if err != nil {
+				t.Fatalf("tolerant dash member %q: %v", member, err)
+			}
+			if cfg.Protocols.ISIS.NET != "" {
+				t.Fatalf("tolerant default NET = %q, want empty", cfg.Protocols.ISIS.NET)
+			}
+			if len(cfg.RoutingInstances) != 1 || cfg.RoutingInstances[0].ISIS.NET != netB {
+				t.Fatalf("tolerant tenant NET via %q = %+v, want %s", member, cfg.RoutingInstances, netB)
+			}
+		})
+	}
+}
+
 // F1: a valueless `address;` must not panic on tolerant ingress.
 func TestISISISOValuelessAddressTolerant16865(t *testing.T) {
 	tree, errs := NewParser(`interfaces { lo0 { unit 0 { family iso { address; } } } }
