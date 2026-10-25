@@ -33,6 +33,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
+	"golang.org/x/sys/unix"
 )
 
 // UserspaceShimMinVerifierHeadroomPct is the committed floor for how much
@@ -130,16 +131,52 @@ var ErrUserspaceShimVerifierReject = errors.New("userspace shim verifier reject"
 // VerifyEmbeddedUserspaceShim runs the verify-only load against the
 // shim object embedded in this binary (the exact bytes the daemon
 // would load at startup). Used by `xpfd verify-dataplane` as the
-// deploy-time pre-flight.
 func VerifyEmbeddedUserspaceShim() error {
+	_, _, err := VerifyEmbeddedUserspaceShimStats()
+	return err
+}
+
+// KernelRelease returns the running kernel's uname -r, trimmed.
+// Provenance for verifier measurements (#16701): the same object
+// can cost materially different processed-insn counts on different
+// kernels, so a headroom figure without its kernel is not
+// comparable. Fail-closed: an unreadable release is an error,
+// never an empty string a caller could record as provenance.
+func KernelRelease() (string, error) {
+	var uts unix.Utsname
+	if err := unix.Uname(&uts); err != nil {
+		return "", fmt.Errorf("uname: %w", err)
+	}
+	release := strings.TrimSpace(strings.TrimRight(string(uts.Release[:]), "\x00"))
+	if release == "" {
+		return "", fmt.Errorf("uname: empty kernel release")
+	}
+	return release, nil
+}
+
+// VerifyEmbeddedUserspaceShimStats is VerifyEmbeddedUserspaceShim
+// plus the verifier's processed-insn stats and the kernel release
+// the measurement was taken on (#16701). verify-dataplane uses it
+// so the in-guest / target-kernel pre-flight can print and ENFORCE
+// the same 15% headroom floor shimverify enforces on the build
+// host — guest kernels have charged the same object 3.8-6.1% more
+// (#15645, #15854), so a host-only floor hid guest REJECTs until
+// the deploy pre-flight refused them.
+func VerifyEmbeddedUserspaceShimStats() (ShimVerifierStats, string, error) {
+	var stats ShimVerifierStats
+	kernel, err := KernelRelease()
+	if err != nil {
+		return stats, "", err
+	}
 	if err := rlimit.RemoveMemlock(); err != nil {
-		return fmt.Errorf("remove memlock rlimit: %w", err)
+		return stats, kernel, fmt.Errorf("remove memlock rlimit: %w", err)
 	}
 	spec, err := loadRustUserspaceXDP()
 	if err != nil {
-		return err
+		return stats, kernel, err
 	}
-	return verifyUserspaceShimSpecOnly(spec)
+	stats, err = verifyUserspaceShimSpecWithShrinkStats(spec, true)
+	return stats, kernel, err
 }
 
 // VerifyUserspaceShimObject runs the verify-only load against an
