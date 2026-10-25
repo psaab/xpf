@@ -10,17 +10,26 @@ import (
 func u8p(v uint8) *uint8 { return &v }
 
 // PredefinedApplications contains built-in Junos application definitions.
-// Based on the official Junos OS predefined application list.
+// The simple (single protocol/port) entries added for #16815, and the
+// InactivityTimeout values on junos-snmp-agentx / junos-wxcontrol, are
+// pinned to the Junos OS 12.1X44-D35.5 `show configuration groups
+// junos-defaults` capture (51sec.org, 2014-09-21); that capture is
+// version-bounded and does not establish current-release vSRX parity.
+// Capture names whose terms carry `uuid` or `rpc-program-number`
+// constraints xpf does not implement (#9603) are deliberately omitted
+// rather than widened to their bare protocol/port — see
+// docs/feature-gaps.md (#16815) for the omitted list.
 var PredefinedApplications = map[string]*Application{
 	// --- Basic services ---
-	"junos-ftp":    {Name: "junos-ftp", Protocol: "tcp", DestinationPort: "21", ALG: "ftp"},
-	"junos-ssh":    {Name: "junos-ssh", Protocol: "tcp", DestinationPort: "22"},
-	"junos-telnet": {Name: "junos-telnet", Protocol: "tcp", DestinationPort: "23"},
-	"junos-smtp":   {Name: "junos-smtp", Protocol: "tcp", DestinationPort: "25"},
-	"junos-smtps":  {Name: "junos-smtps", Protocol: "tcp", DestinationPort: "465"},
-	"junos-http":   {Name: "junos-http", Protocol: "tcp", DestinationPort: "80"},
-	"junos-https":  {Name: "junos-https", Protocol: "tcp", DestinationPort: "443"},
-	"junos-rtsp":   {Name: "junos-rtsp", Protocol: "tcp", DestinationPort: "554"},
+	"junos-ftp":       {Name: "junos-ftp", Protocol: "tcp", DestinationPort: "21", ALG: "ftp"},
+	"junos-ssh":       {Name: "junos-ssh", Protocol: "tcp", DestinationPort: "22"},
+	"junos-telnet":    {Name: "junos-telnet", Protocol: "tcp", DestinationPort: "23"},
+	"junos-smtp":      {Name: "junos-smtp", Protocol: "tcp", DestinationPort: "25"},
+	"junos-smtps":     {Name: "junos-smtps", Protocol: "tcp", DestinationPort: "465"},
+	"junos-http":      {Name: "junos-http", Protocol: "tcp", DestinationPort: "80"},
+	"junos-https":     {Name: "junos-https", Protocol: "tcp", DestinationPort: "443"},
+	"junos-rtsp":      {Name: "junos-rtsp", Protocol: "tcp", DestinationPort: "554"},
+	"junos-realaudio": {Name: "junos-realaudio", Protocol: "tcp", DestinationPort: "554", ALG: "rtsp"},
 
 	// --- DNS ---
 	"junos-dns-udp": {Name: "junos-dns-udp", Protocol: "udp", DestinationPort: "53"},
@@ -30,6 +39,7 @@ var PredefinedApplications = map[string]*Application{
 	"junos-pop3":  {Name: "junos-pop3", Protocol: "tcp", DestinationPort: "110"},
 	"junos-imap":  {Name: "junos-imap", Protocol: "tcp", DestinationPort: "143"},
 	"junos-imaps": {Name: "junos-imaps", Protocol: "tcp", DestinationPort: "993"},
+	"junos-mail":  {Name: "junos-mail", Protocol: "tcp", DestinationPort: "25"},
 	"junos-nntp":  {Name: "junos-nntp", Protocol: "tcp", DestinationPort: "119"},
 
 	// --- DHCP & Boot ---
@@ -37,6 +47,7 @@ var PredefinedApplications = map[string]*Application{
 	"junos-dhcp-server": {Name: "junos-dhcp-server", Protocol: "udp", DestinationPort: "67"},
 	"junos-bootpc":      {Name: "junos-bootpc", Protocol: "udp", DestinationPort: "68"},
 	"junos-bootps":      {Name: "junos-bootps", Protocol: "udp", DestinationPort: "67"},
+	"junos-dhcp-relay":  {Name: "junos-dhcp-relay", Protocol: "udp", DestinationPort: "67"},
 
 	// --- File transfer ---
 	"junos-tftp": {Name: "junos-tftp", Protocol: "udp", DestinationPort: "69"},
@@ -44,8 +55,10 @@ var PredefinedApplications = map[string]*Application{
 	// --- Network management ---
 	"junos-ntp":            {Name: "junos-ntp", Protocol: "udp", DestinationPort: "123"},
 	"junos-snmp":           {Name: "junos-snmp", Protocol: "udp", DestinationPort: "161"},
-	"junos-snmp-agentx":    {Name: "junos-snmp-agentx", Protocol: "tcp", DestinationPort: "705"},
+	"junos-snpp":           {Name: "junos-snpp", Protocol: "tcp", DestinationPort: "444"},
+	"junos-snmp-agentx":    {Name: "junos-snmp-agentx", Protocol: "tcp", DestinationPort: "705", InactivityTimeout: 7560},
 	"junos-syslog":         {Name: "junos-syslog", Protocol: "udp", DestinationPort: "514"},
+	"junos-wxcontrol":      {Name: "junos-wxcontrol", Protocol: "tcp", DestinationPort: "3578", InactivityTimeout: 7560},
 	"junos-xnm-ssl":        {Name: "junos-xnm-ssl", Protocol: "tcp", DestinationPort: "3220"},
 	"junos-xnm-clear-text": {Name: "junos-xnm-clear-text", Protocol: "tcp", DestinationPort: "3221"},
 
@@ -84,7 +97,26 @@ var PredefinedApplications = map[string]*Application{
 	"junos-sun-rpc-tcp": {Name: "junos-sun-rpc-tcp", Protocol: "tcp", DestinationPort: "111"},
 	"junos-sun-rpc-udp": {Name: "junos-sun-rpc-udp", Protocol: "udp", DestinationPort: "111"},
 	"junos-nfsd-tcp":    {Name: "junos-nfsd-tcp", Protocol: "tcp", DestinationPort: "2049"},
+	"junos-nfs":         {Name: "junos-nfs", Protocol: "udp", DestinationPort: "111"},
 	"junos-nfsd-udp":    {Name: "junos-nfsd-udp", Protocol: "udp", DestinationPort: "2049"},
+
+	// --- #16815: simple Junos 12.1X44-D35.5 junos-defaults (single term) ---
+	"junos-echo":                     {Name: "junos-echo", Protocol: "udp", DestinationPort: "7"},
+	"junos-discard":                  {Name: "junos-discard", Protocol: "udp", DestinationPort: "9"},
+	"junos-chargen":                  {Name: "junos-chargen", Protocol: "udp", DestinationPort: "19"},
+	"junos-biff":                     {Name: "junos-biff", Protocol: "udp", DestinationPort: "512"},
+	"junos-who":                      {Name: "junos-who", Protocol: "udp", DestinationPort: "513"},
+	"junos-lpr":                      {Name: "junos-lpr", Protocol: "tcp", DestinationPort: "515"},
+	"junos-uucp":                     {Name: "junos-uucp", Protocol: "udp", DestinationPort: "540"},
+	"junos-nsm":                      {Name: "junos-nsm", Protocol: "udp", DestinationPort: "69"},
+	"junos-internet-locator-service": {Name: "junos-internet-locator-service", Protocol: "tcp", DestinationPort: "389"},
+	"junos-sql-monitor":              {Name: "junos-sql-monitor", Protocol: "udp", DestinationPort: "1434"},
+	"junos-r2cp":                     {Name: "junos-r2cp", Protocol: "udp", DestinationPort: "28672"},
+	// Four terms of junos-ymsg, expanded by the set below.
+	"junos-ymsg-tcp-5000-5010": {Name: "junos-ymsg-tcp-5000-5010", Protocol: "tcp", DestinationPort: "5000-5010"},
+	"junos-ymsg-tcp-5050":      {Name: "junos-ymsg-tcp-5050", Protocol: "tcp", DestinationPort: "5050"},
+	"junos-ymsg-udp-5000-5010": {Name: "junos-ymsg-udp-5000-5010", Protocol: "udp", DestinationPort: "5000-5010"},
+	"junos-ymsg-udp-5050":      {Name: "junos-ymsg-udp-5050", Protocol: "udp", DestinationPort: "5050"},
 
 	// --- Printing ---
 	"junos-printer": {Name: "junos-printer", Protocol: "tcp", DestinationPort: "515"},
@@ -269,6 +301,16 @@ var PredefinedApplicationSets = map[string]*ApplicationSet{
 	"junos-mgcp": {
 		Name:         "junos-mgcp",
 		Applications: []string{"junos-mgcp-ua", "junos-mgcp-ca"},
+	},
+	// #16815: junos-ymsg is four terms in the 12.1X44-D35.5 capture
+	// (tcp/udp 5000-5010 + 5050); set-only so app-first resolution cannot
+	// shadow it with a single term.
+	"junos-ymsg": {
+		Name: "junos-ymsg",
+		Applications: []string{
+			"junos-ymsg-tcp-5000-5010", "junos-ymsg-tcp-5050",
+			"junos-ymsg-udp-5000-5010", "junos-ymsg-udp-5050",
+		},
 	},
 }
 
