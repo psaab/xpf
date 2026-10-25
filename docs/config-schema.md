@@ -10596,7 +10596,18 @@ reserved for whole-dataplane selection where a rewrite shim
   BOTH nodes, both redundancy-group weights reach 0, and neither node
   owns the group. Monitor the physical members instead. Pinned by
   `compiler_validate_strict_chassis_ifmon_name_15037_test.go`, including
-  the shipped HA configs for both node personalities.
+  the shipped HA configs for both node personalities. **#16574** fixes
+  the fabric arm of that attribution: `member-interfaces` lives at
+  `interfaces > fabN > fabric-options > member-interfaces` (depth 3),
+  so the stanza scan's `depth == 0 || in-groups` gate made the arm
+  unreachable outside `groups` and a fabric-member monitor was
+  strict-rejected once any other physical interface was declared (the
+  refusal text itself claimed a fabric entry was acceptable). The scan
+  now mints fabric members on that exact attributable path in every
+  spelling (via the shared `fabricMemberValues` reader), and the
+  regression cells declare an unrelated physical interface so the
+  empty-set fallback can no longer mask loss of the arm — deleting the
+  arm turns them red.
   **#5695 (codex-182 M16)** completes the `gratuitous-arp-count`
   "sanity-cap-belongs-in-the-runtime" note above: the runtime now clamps
   the effective GARP/NA burst to `config.GratuitousARPBurstClamp` (32, 2×

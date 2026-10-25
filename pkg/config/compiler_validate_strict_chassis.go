@@ -335,14 +335,15 @@ func physicalInterfacesInTree(tree *ConfigTree) map[string]bool {
 
 // collectPhysicalInterfaces adds every physical name under nodes to out:
 // every direct child NAME of every `interfaces` node that parses to an
-// FPC slot, and every `member-interfaces` entry under fabric-options.
+// FPC slot, and every `member-interfaces` entry under an attributable
+// `interfaces > fabN > fabric-options` path (#16574).
 // The stanza name is the child's Keys[0] in every spelling (block,
 // flat-set child, packed one-liner carrying its body behind the name —
 // compileInterfaces reads child.Name() the same way); joining the Keys
 // would fuse the name with its body tokens.
 func collectPhysicalInterfaces(nodes []*Node, out map[string]bool) {
-	var walk func(ns []*Node, inGroups bool, depth int)
-	walk = func(ns []*Node, inGroups bool, depth int) {
+	var walk func(ns []*Node, inGroups bool, depth int, parent, grandparent, greatGrandparent *Node)
+	walk = func(ns []*Node, inGroups bool, depth int, parent, grandparent, greatGrandparent *Node) {
 		for _, n := range ns {
 			if n == nil {
 				continue
@@ -356,9 +357,17 @@ func collectPhysicalInterfaces(nodes []*Node, out map[string]bool) {
 			// node nested under an ordinary compiled section (for
 			// example class-of-service interfaces) is a reference, not a
 			// declaration, and must not mint attribution.
+			// `interfaces` declarations are gated as above. The
+			// member-interfaces arm cannot share that gate: at top
+			// level it sits at depth 3, so `depth == 0` excluded it
+			// entirely (#16574). It carries its own exact-path
+			// check below (parent fabric-options, grandparent fab*,
+			// great-grandparent the declaration interfaces node),
+			// which is what keeps a stray member-interfaces — or one
+			// nested under a reference such as class-of-service
+			// interfaces — from minting attribution.
 			if depth == 0 || childInGroups {
-				switch n.Name() {
-				case "interfaces":
+				if n.Name() == "interfaces" {
 					for _, child := range n.Children {
 						if child == nil {
 							continue
@@ -367,26 +376,23 @@ func collectPhysicalInterfaces(nodes []*Node, out map[string]bool) {
 							out[LinuxIfName(cname)] = true
 						}
 					}
-				case "member-interfaces":
-					for _, k := range n.Keys[1:] {
-						if k != "" && InterfaceSlot(k) >= 0 {
-							out[LinuxIfName(k)] = true
-						}
-					}
-					for _, child := range n.Children {
-						if child == nil {
-							continue
-						}
-						if cname := child.Name(); cname != "" && InterfaceSlot(cname) >= 0 {
-							out[LinuxIfName(cname)] = true
-						}
+				}
+			}
+			if n.Name() == "member-interfaces" &&
+				parent != nil && parent.Name() == "fabric-options" &&
+				grandparent != nil && strings.HasPrefix(grandparent.Name(), "fab") &&
+				greatGrandparent != nil && greatGrandparent.Name() == "interfaces" &&
+				(depth == 3 || childInGroups) {
+				for _, v := range fabricMemberValues(n) {
+					if v != "" && InterfaceSlot(v) >= 0 {
+						out[LinuxIfName(v)] = true
 					}
 				}
 			}
-			walk(n.Children, childInGroups, depth+1)
+			walk(n.Children, childInGroups, depth+1, n, parent, grandparent)
 		}
 	}
-	walk(nodes, false, 0)
+	walk(nodes, false, 0, nil, nil, nil)
 }
 
 // isClusterKeywordName reports whether name is a chassis-cluster /
