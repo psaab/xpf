@@ -3051,3 +3051,126 @@ fn nat64_mss_clamped_both_directions_15948() {
     .expect("NAT64 reverse SYN-ACK must build");
     assert_eq!(built_ipv6_mss(&rbuilt), 1300, "reverse NAT64 SYN-ACK MSS must clamp 1460 -> 1300");
 }
+
+/// #16511: the NAT64 tunnel-egress MSS clamp must use the EMITTED
+/// (translated) family, not the ingress family. `gre_forwarding_8896`
+/// is a native GRE endpoint with an IPv4 outer and a 1500-byte transport,
+/// so the inner budget is 1500 - 20 (outer v4) - 4 (GRE) = 1476.
+///   * reverse v4->v6 (emitted v6): 1476 - 40 - 20 = 1416
+///   * forward v6->v4 (emitted v4): 1476 - 20 - 20 = 1436
+/// Pre-fix the reverse arm keyed on the ingress AF_INET and emitted
+/// 1436 into the IPv6 inner (20 bytes too high); the forward arm was
+/// 20 bytes low (safe direction). Both arms go through the real
+/// builder so a fix narrowed to one direction reds.
+#[test]
+fn nat64_gre_mss_uses_translated_family_16511() {
+    let client: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let synthetic: Ipv6Addr = "64:ff9b::808:808".parse().unwrap();
+    let server = Ipv4Addr::new(8, 8, 8, 8);
+    let pool = Ipv4Addr::new(203, 0, 113, 1);
+    let tunnel_id = 1u16;
+    let fwd = gre_forwarding_8896(tunnel_id);
+
+    // GRE-encapsulated frames are outer(eth 14 + IPv4 20 + GRE 4) +
+    // inner; read the MSS out of the encapsulated inner TCP header.
+    fn gre_inner_mss(frame: &[u8], inner_is_v6: bool) -> u16 {
+        assert_eq!(&frame[12..14], &0x0800u16.to_be_bytes(), "GRE outer must be IPv4");
+        assert_eq!(frame[23], 47, "GRE outer protocol must be 47");
+        let inner_l3 = 14 + 20 + 4;
+        let (ip_len, version) = if inner_is_v6 { (40usize, 6u8) } else { (20usize, 4u8) };
+        assert_eq!(frame[inner_l3] >> 4, version, "inner family mismatch");
+        let mss_off = inner_l3 + ip_len + 22;
+        u16::from_be_bytes([frame[mss_off], frame[mss_off + 1]])
+    }
+
+    // Forward: v6 SYN (MSS 1460) -> v4 inner, encapsulated.
+    let syn = build_ipv6_tcp_syn_with_mss(client, synthetic, 40000, 443, 1460);
+    let fwd_nat = Nat64State::forward_decision(pool, server, 40001);
+    let mut fwd_decision = icmp_test_decision(fwd_nat.clone());
+    fwd_decision.resolution.tunnel_endpoint_id = tunnel_id;
+    let fbuilt = build_nat64_forwarded_frame(
+        &syn,
+        nat64_forward_meta(),
+        &fwd_decision,
+        None,
+        false,
+        &fwd,
+    )
+    .expect("NAT64 forward SYN through GRE must build");
+    assert_eq!(
+        gre_inner_mss(&fbuilt, false),
+        1436,
+        "#16511: forward v6->v4 GRE inner MSS must use the emitted v4 budget 1436"
+    );
+
+    // Reverse: v4 SYN-ACK (MSS 1460) -> v6 inner, encapsulated.
+    let mut synack = build_ipv4_tcp_syn_with_mss(server, pool, 443, 40001, 1460);
+    synack[14 + 20 + 13] = crate::tcp_flags::TCP_SYN | crate::tcp_flags::TCP_ACK;
+    let rev_nat = fwd_nat.reverse(IpAddr::V6(client), IpAddr::V6(synthetic), 40000, 443);
+    let info = Nat64ReverseInfo { orig_src_v6: client, orig_dst_v6: synthetic };
+    let mut rev_decision = icmp_test_decision(rev_nat);
+    rev_decision.resolution.tunnel_endpoint_id = tunnel_id;
+    let rbuilt = build_nat64_forwarded_frame(
+        &synack,
+        nat64_reverse_meta(),
+        &rev_decision,
+        Some(&info),
+        false,
+        &fwd,
+    )
+    .expect("NAT64 reverse SYN-ACK through GRE must build");
+    // The encapsulated inner is IPv6: bytes 14+20+4 .. carry a 0x86dd
+    // GRE payload type, and the inner header version is 6.
+    assert_eq!(
+        u16::from_be_bytes([rbuilt[14 + 20 + 2], rbuilt[14 + 20 + 3]]),
+        0x86dd,
+        "#16511: GRE payload type must announce the IPv6 inner"
+    );
+    assert_eq!(
+        gre_inner_mss(&rbuilt, true),
+        1416,
+        "#16511: reverse v4->v6 GRE inner MSS must use the emitted v6 budget 1416,          not the ingress-v4 budget 1436"
+    );
+}
+
+/// #16511 (WG twin): the same family choice through `tunnel_tcp_mss`'s
+/// WireGuard arm. The WG engine cannot be built from the plaintext
+/// `gre_forwarding_8896` fixture (no established session / AllowedIPs
+/// coverage for the translated destinations), so this cell pins the
+/// selection layer the builder now feeds: with the endpoint flipped
+/// to wireguard, `select_tcp_mss` on the translated (v6) meta must
+/// yield the v6-inner WG value, and the ingress (v4) meta the v4 one.
+/// Outer is IPv4, transport MTU 1500, so:
+///   * v6 inner: 1500 - 60 (WG v4 overhead) - 15 (pad) - 40 - 20 = 1365
+///   * v4 inner: 1500 - 60 - 15 - 20 - 20 = 1385
+#[test]
+fn nat64_wg_mss_uses_translated_family_16511() {
+    let tunnel_id = 1u16;
+    let mut fwd = gre_forwarding_8896(tunnel_id);
+    fwd.tunnel_endpoints.get_mut(&tunnel_id).expect("row").mode = "wireguard".into();
+
+    let mut decision = icmp_test_decision(Nat64State::forward_decision(
+        Ipv4Addr::new(203, 0, 113, 1),
+        Ipv4Addr::new(8, 8, 8, 8),
+        40001,
+    ));
+    decision.resolution.tunnel_endpoint_id = tunnel_id;
+
+    let mut v6_meta = nat64_forward_meta();
+    // nat64_forward_meta is AF_INET6 ingress; the translated meta flips it.
+    v6_meta.addr_family = libc::AF_INET6 as u8;
+    let mut v4_meta = nat64_reverse_meta();
+    v4_meta.addr_family = libc::AF_INET as u8;
+
+    // Emitted families: forward emits v4, reverse emits v6.
+    assert_eq!(
+        crate::afxdp::forwarding::select_tcp_mss(&fwd, &decision, &ForwardPacketMeta::from(v4_meta)),
+        1385,
+        "#16511: WG MSS for an emitted IPv4 inner must be 1385"
+    );
+    assert_eq!(
+        crate::afxdp::forwarding::select_tcp_mss(&fwd, &decision, &ForwardPacketMeta::from(v6_meta)),
+        1365,
+        "#16511: WG MSS for an emitted IPv6 inner must be 1365 (20 below the v4 value)"
+    );
+}

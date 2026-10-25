@@ -467,7 +467,17 @@ pub(super) fn build_nat64_forwarded_frames_with_commit_and_dynamic(
     // operator tcp-mss ceiling was silently bypassed in both
     // directions. Select with the same per-packet context as the
     // generic build and clamp each translated inner frame below.
-    let selected_tcp_mss = crate::afxdp::forwarding::select_tcp_mss(forwarding, decision, &meta);
+    // #16511: the MSS budget must use the EMITTED (translated) family,
+    // not the ingress family — v4->v6 into GRE/WG was 20 bytes too high
+    // (and v6->v4 20 bytes too low). `nat64_translated_meta` flips the
+    // family exactly as the encapsulation below does; it returns None
+    // only for a non-IP ingress family, which `build_nat64_inner_frame`
+    // rejects anyway, so fall back to the ingress meta there (the build
+    // then fails closed as before).
+    let translated_meta = nat64_translated_meta(meta, decision);
+    let mss_meta = translated_meta.unwrap_or(meta);
+    let selected_tcp_mss =
+        crate::afxdp::forwarding::select_tcp_mss(forwarding, decision, &mss_meta);
     let mut inner = build_nat64_inner_frame(frame, meta, decision, nat64_reverse, no_v6_frag_header)?;
     if selected_tcp_mss > 0 {
         if let Some(l3) = frame_l3_offset(&inner) {
@@ -482,7 +492,7 @@ pub(super) fn build_nat64_forwarded_frames_with_commit_and_dynamic(
     if decision.resolution.tunnel_endpoint_id == 0 {
         return Some(inner_frames.into_iter().map(|frame| (frame, None)).collect());
     }
-    let inner_meta = nat64_translated_meta(meta, decision)?;
+    let inner_meta = translated_meta?;
     let kind = forwarding.tunnel_endpoints.get(&decision.resolution.tunnel_endpoint_id)
         .map(|e| tunnel_mode_kind(&e.mode));
     let mut frames: SmallVec<[(crate::afxdp::cos::redirect_pool::PooledBuffer, Option<wg::WgEncapCommit>); 1]> = SmallVec::new();

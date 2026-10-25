@@ -366,11 +366,20 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame_with_outlet(
         );
         return false;
     }
-    let nat64_mss = crate::afxdp::forwarding::select_tcp_mss(
-        forwarding,
-        &decision,
-        &crate::afxdp::ForwardPacketMeta::from(meta),
-    );
+    // #16511: NAT64 emits the opposite family, so select the tunnel MSS
+    // budget with the translated family (mirrors the frame builder).
+    // Tunnel-marked frames are not reinjected here, so this is the
+    // static/all-tcp value in practice; keep the family correct anyway.
+    let mut nat64_mss_meta = crate::afxdp::ForwardPacketMeta::from(meta);
+    if decision.nat.nat64 {
+        nat64_mss_meta.addr_family = match nat64_mss_meta.addr_family as i32 {
+            x if x == libc::AF_INET => libc::AF_INET6 as u8,
+            x if x == libc::AF_INET6 => libc::AF_INET as u8,
+            other => other as u8,
+        };
+    }
+    let nat64_mss =
+        crate::afxdp::forwarding::select_tcp_mss(forwarding, &decision, &nat64_mss_meta);
     let packet = if decision.nat.nat64 {
         crate::afxdp::frame::build_nat64_l3_packet_for_slow_path_with_mss(
             frame,
