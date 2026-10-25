@@ -377,15 +377,14 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 
 	// #3072 zone-interface membership gate. Strict on commit / commit-check
 	// (hard-reject a config that assigns the same interface to more than one
-	// security zone — the userspace interface->zone map resolves a duplicate
-	// first-writer-wins over the SORTED zone names, so the interface silently
-	// lands in whichever zone sorts first and traffic is evaluated against the
-	// wrong zone's policy); lenient on load / peer-sync (warn so an already-
+	// security zone); lenient on load / peer-sync (warn so an already-
 	// persisted or peer-synced config still boots — #1960 no-brick; the
-	// interface->zone map keeps its deterministic first-writer-wins resolution,
-	// so a leniently-loaded duplicate forwards exactly as before). Runs AFTER the
-	// zone-count gate so a structural / policy / zone-count error still wins the
-	// first-error slot.
+	// contested key is then QUARANTINED: ZoneInterfaceQuarantineExclusions
+	// omits it from the runtime interface->zone map and no XDP shim is
+	// attached, so the interface matches no zone policy and fails closed
+	// rather than forwarding under a first-writer-wins zone). Runs AFTER the
+	// zone-count gate so a structural / policy / zone-count error still wins
+	// the first-error slot.
 	if err := validateZoneInterfaceMembershipStrict(cfg); err != nil {
 		if opts.lenientZoneInterfaceMembership {
 			cfg.Warnings = append(cfg.Warnings,

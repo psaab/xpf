@@ -1,6 +1,9 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Shared quarantine show-spelling SSOT (#10489 Q7, #6895 lesson).
 //
@@ -69,6 +72,19 @@ const ZoneQuarantineReferenceQualifier = "(references quarantined zone — live 
 // ZoneQuarantineInterfacesQualifier qualifies an interfaces header whose
 // authored member list is kept verbatim; per-interface detail is unchanged.
 const ZoneQuarantineInterfacesQualifier = "(would be unzoned if this snapshot is applied — quarantine candidate)"
+
+// ZoneInterfaceQuarantineUnboundQualifierFor marks ONE authored zone member
+// that duplicate membership left bound to NEITHER claiming zone (#16556):
+// the runtime interface→zone map omits the key and no XDP shim is attached,
+// so the member fails closed while a bare listing would read as bound. The
+// claimant names come from ZoneInterfaceQuarantineExclusions — the same
+// verdict the builder omits on — so text and runtime cannot diverge.
+func ZoneInterfaceQuarantineUnboundQualifierFor(claimants []string) string {
+	if len(claimants) == 0 {
+		return "[UNBOUND — claimed by multiple security zones]"
+	}
+	return fmt.Sprintf("[UNBOUND — claimed by zones %s]", strings.Join(claimants, " and "))
+}
 
 // ZoneQuarantinePoliciesQualifier prefixes zone policy references/summaries
 // for a quarantined zone.

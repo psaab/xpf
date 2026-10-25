@@ -104,10 +104,21 @@ func (s *Server) showZonesDetail(cfg *config.Config, filter string, buf *strings
 		if zone.Description != "" {
 			fmt.Fprintf(buf, "  Description: %s\n", zone.Description)
 		}
+		// #16556: mark a member claimed by two zones as bound to NEITHER,
+		// via the same shared verdict the builder omits on.
+		renderedIfaces := make([]string, 0, len(zone.Interfaces))
+		for _, ifName := range zone.Interfaces {
+			if claimants := config.ZoneInterfaceQuarantineClaimants(cfg, ifName); claimants != nil {
+				renderedIfaces = append(renderedIfaces,
+					ifName+" "+config.ZoneInterfaceQuarantineUnboundQualifierFor(claimants))
+			} else {
+				renderedIfaces = append(renderedIfaces, ifName)
+			}
+		}
 		if reason != "" {
-			fmt.Fprintf(buf, "  Interfaces: %s %s\n", strings.Join(zone.Interfaces, ", "), config.ZoneQuarantineInterfacesQualifier)
+			fmt.Fprintf(buf, "  Interfaces: %s %s\n", strings.Join(renderedIfaces, ", "), config.ZoneQuarantineInterfacesQualifier)
 		} else {
-			fmt.Fprintf(buf, "  Interfaces: %s\n", strings.Join(zone.Interfaces, ", "))
+			fmt.Fprintf(buf, "  Interfaces: %s\n", strings.Join(renderedIfaces, ", "))
 		}
 		if zone.TCPRst {
 			buf.WriteString("  TCP RST: enabled\n")
@@ -229,7 +240,12 @@ func (s *Server) showZonesDetail(cfg *config.Config, filter string, buf *strings
 		if len(zone.Interfaces) > 0 {
 			buf.WriteString("  Interface details:\n")
 			for _, ifName := range zone.Interfaces {
-				fmt.Fprintf(buf, "    %s:\n", ifName)
+				if claimants := config.ZoneInterfaceQuarantineClaimants(cfg, ifName); claimants != nil {
+					fmt.Fprintf(buf, "    %s: %s\n", ifName,
+						config.ZoneInterfaceQuarantineUnboundQualifierFor(claimants))
+				} else {
+					fmt.Fprintf(buf, "    %s:\n", ifName)
+				}
 				// #12898: a zone binds a LOGICAL member ("ge-0/0/0.0",
 				// "reth0.50") but cfg.Interfaces.Interfaces is BASE-keyed
 				// ("ge-0/0/0" / "reth0"), so the prior direct
@@ -365,6 +381,12 @@ func (s *Server) showTestZone(req *pb.ShowTextRequest, cfg *config.Config, buf *
 		}
 		sort.Strings(allZoneNames)
 		quarantineNames := config.ZoneQuarantineNamesForConfig(cfg)
+		// #16556: a contested interface belongs to NEITHER claimant.
+		if claimants := config.ZoneInterfaceQuarantineClaimants(cfg, ifName); claimants != nil {
+			fmt.Fprintf(buf, "Interface %s belongs to zone: (none) %s\n", ifName,
+				config.ZoneInterfaceQuarantineUnboundQualifierFor(claimants))
+			found = true
+		}
 		for _, zoneName := range allZoneNames {
 			zone := cfg.Security.Zones[zoneName]
 			if zone == nil { // #3493: tolerant/HA-sync path may carry a nil zone value

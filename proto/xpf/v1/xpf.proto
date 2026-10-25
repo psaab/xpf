@@ -365,6 +365,14 @@ message ZoneInfo {
   // QUARANTINED. It names the earlier-sorting zone that owns the shared
   // StableZoneID. It is empty for UNKNOWN and NOT_QUARANTINED.
   string quarantine_survivor_zone = 19;
+  // unbound_interfaces (#16556) lists authored members of THIS zone that
+  // duplicate zone membership left bound to NEITHER claiming zone: the
+  // runtime interface->zone map omits them and no XDP shim is attached, so
+  // they match no zone policy and fail closed. Such a member still appears
+  // in `interfaces` (the authored list) but MUST NOT be read as bound; it
+  // is excluded from any bound count. Empty for a zone with no contested
+  // member. An old server omits the field, which reads as empty.
+  repeated string unbound_interfaces = 20;
 }
 
 // InterfaceHostInbound (#3328, #3362) is a per-interface host-inbound-traffic

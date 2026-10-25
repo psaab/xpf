@@ -39,6 +39,14 @@ func (s *Server) GetZones(_ context.Context, _ *pb.GetZonesRequest) (*pb.GetZone
 			Interfaces:  zone.Interfaces,
 			TcpRst:      zone.TCPRst,
 		}
+		// #16556: members claimed by two zones are bound to NEITHER at
+		// runtime — name them so a structured client does not read the
+		// authored `interfaces` list as bound.
+		for _, ifName := range zone.Interfaces {
+			if config.ZoneInterfaceQuarantineReason(cfg, zoneName, ifName) != "" {
+				zi.UnboundInterfaces = append(zi.UnboundInterfaces, ifName)
+			}
+		}
 		_, quarantined := quarantinedZones[zoneName]
 		if quarantined {
 			zi.QuarantineState = pb.ZoneQuarantineState_ZONE_QUARANTINE_STATE_QUARANTINED

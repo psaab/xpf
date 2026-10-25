@@ -83,14 +83,28 @@ func (c *CLI) showZonesDisplay(cfg *config.Config, detail bool, filterZone strin
 		if zone.ScreenProfile != "" {
 			fmt.Printf("  Screen: %s\n", zone.ScreenProfile)
 		}
-		fmt.Printf("  Interfaces bound: %d\n", len(zone.Interfaces))
+		// #16556: a member claimed by two zones is bound to NEITHER at
+		// runtime (quarantined, fails closed) — exclude it from the bound
+		// count and mark it, instead of listing it as bound under both.
+		boundCount := 0
+		for _, ifName := range zone.Interfaces {
+			if config.ZoneInterfaceQuarantineReason(cfg, name, ifName) == "" {
+				boundCount++
+			}
+		}
+		fmt.Printf("  Interfaces bound: %d\n", boundCount)
 		interfaceHeader := "  Interfaces:"
 		if reason != "" {
 			interfaceHeader += " " + config.ZoneQuarantineInterfacesQualifier
 		}
 		fmt.Println(interfaceHeader)
 		for _, ifName := range zone.Interfaces {
-			fmt.Printf("    %s\n", ifName)
+			if claimants := config.ZoneInterfaceQuarantineClaimants(cfg, ifName); claimants != nil {
+				fmt.Printf("    %s %s\n", ifName,
+					config.ZoneInterfaceQuarantineUnboundQualifierFor(claimants))
+			} else {
+				fmt.Printf("    %s\n", ifName)
+			}
 		}
 		// #3654: render the zone-level admitted set, the no-stanza default-deny
 		// posture line, AND any per-interface host-inbound override through the
@@ -165,7 +179,12 @@ func (c *CLI) showZonesDisplay(cfg *config.Config, detail bool, filterZone strin
 			if len(zone.Interfaces) > 0 {
 				fmt.Println("  Interface details:")
 				for _, ifName := range zone.Interfaces {
-					fmt.Printf("    %s:\n", ifName)
+					if claimants := config.ZoneInterfaceQuarantineClaimants(cfg, ifName); claimants != nil {
+						fmt.Printf("    %s: %s\n", ifName,
+							config.ZoneInterfaceQuarantineUnboundQualifierFor(claimants))
+					} else {
+						fmt.Printf("    %s:\n", ifName)
+					}
 					// #5325/#12898: a zone binds a LOGICAL interface such as
 					// "ge-0/0/9.0" or "reth0.50", but
 					// cfg.Interfaces.Interfaces is keyed by the BASE name

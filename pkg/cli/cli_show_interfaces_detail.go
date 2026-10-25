@@ -107,11 +107,17 @@ func (c *CLI) showInterfacesDetail(filterName string) error {
 			fmt.Printf("  Current address: %s\n", attrs.HardwareAddr)
 		}
 		if zone, ok := ifZoneMap[dispName]; ok {
-			qualifier := ""
-			if cfg != nil && config.ZoneQuarantineExcludedReason(zone, cfg) != "" {
-				qualifier = " " + config.ZoneQuarantineInterfacesQualifier
+			// #16556: a contested member is bound to NEITHER claimant.
+			if claimants := config.ZoneInterfaceQuarantineClaimantsForRows(cfg)[dispName]; claimants != nil {
+				fmt.Printf("  Security zone: (none) %s\n",
+					config.ZoneInterfaceQuarantineUnboundQualifierFor(claimants))
+			} else {
+				qualifier := ""
+				if cfg != nil && config.ZoneQuarantineExcludedReason(zone, cfg) != "" {
+					qualifier = " " + config.ZoneQuarantineInterfacesQualifier
+				}
+				fmt.Printf("  Security zone: %s%s\n", zone, qualifier)
 			}
-			fmt.Printf("  Security zone: %s%s\n", zone, qualifier)
 		}
 
 		// Logical interface with flags and addresses
@@ -238,11 +244,17 @@ func (c *CLI) showInterfacesRethDetail(cfg *config.Config, maps config.RethShowM
 			}
 			fmt.Println()
 			if zone, ok := ifZone[fmt.Sprintf("%s.%d", reth, ru.Unit)]; ok {
-				qualifier := ""
-				if config.ZoneQuarantineExcludedReason(zone, cfg) != "" {
-					qualifier = " " + config.ZoneQuarantineInterfacesQualifier
+				ref := fmt.Sprintf("%s.%d", reth, ru.Unit)
+				if claimants := config.ZoneInterfaceQuarantineClaimants(cfg, ref); claimants != nil {
+					fmt.Printf("    Security zone: (none) %s\n",
+						config.ZoneInterfaceQuarantineUnboundQualifierFor(claimants))
+				} else {
+					qualifier := ""
+					if config.ZoneQuarantineExcludedReason(zone, cfg) != "" {
+						qualifier = " " + config.ZoneQuarantineInterfacesQualifier
+					}
+					fmt.Printf("    Security zone: %s%s\n", zone, qualifier)
 				}
-				fmt.Printf("    Security zone: %s%s\n", zone, qualifier)
 			}
 			if len(ru.V4Addrs) > 0 || len(ru.V6Addrs) > 0 {
 				fmt.Println("    Addresses:")

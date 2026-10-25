@@ -41,6 +41,13 @@ func (s *Server) zonesHandler(w http.ResponseWriter, _ *http.Request) {
 			TcpRst:      zone.TCPRst,
 			Interfaces:  zone.Interfaces,
 		}
+		// #16556: members claimed by two zones are bound to NEITHER at
+		// runtime — name them so the authored list is not read as bound.
+		for _, ifName := range zone.Interfaces {
+			if config.ZoneInterfaceQuarantineReason(cfg, zoneName, ifName) != "" {
+				zi.UnboundInterfaces = append(zi.UnboundInterfaces, ifName)
+			}
+		}
 		_, quarantined := quarantinedZones[zoneName]
 		if quarantined {
 			zi.Quarantine = &ZoneQuarantineInfo{

@@ -405,8 +405,12 @@ func (c *CLI) showInterfaces(args []string) error {
 				fmt.Println(line)
 			}
 
+			// #16556: a member claimed by two zones is bound to NEITHER —
+			// never print a map-order-chosen zone for it.
 			zoneLabel := li.zoneName
-			if config.ZoneQuarantineExcludedReason(li.zoneName, cfg) != "" {
+			if claimants := config.ZoneInterfaceQuarantineClaimants(cfg, li.ifaceRef); claimants != nil {
+				zoneLabel = "(none) " + config.ZoneInterfaceQuarantineUnboundQualifierFor(claimants)
+			} else if config.ZoneQuarantineExcludedReason(li.zoneName, cfg) != "" {
 				zoneLabel += " " + config.ZoneQuarantineInterfacesQualifier
 			}
 			fmt.Printf("    Security: Zone: %s\n", zoneLabel)

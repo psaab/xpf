@@ -126,7 +126,7 @@ func addresslessEnforcingZonesFromSnapshots(cfg *config.Config, snaps []Interfac
 		}
 	}
 	excludedZones := config.ZoneQuarantineExclusionsForConfig(cfg)
-	conflictedInterfaces := config.QuarantinedZoneInterfaceKeys(cfg)
+	conflictedInterfaces := config.ZoneInterfaceQuarantineExclusions(cfg)
 	names := make([]string, 0, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		names = append(names, name)
@@ -269,7 +269,7 @@ func addresslessEnforcingInterfacesFromSnapshots(cfg *config.Config, snaps []Int
 	lifelines := hostInboundLifelineSet(cfg)
 	zoneByIface := buildInterfaceZoneMap(cfg)
 	excludedZones := config.ZoneQuarantineExclusionsForConfig(cfg)
-	conflictedInterfaces := config.QuarantinedZoneInterfaceKeys(cfg)
+	conflictedInterfaces := config.ZoneInterfaceQuarantineExclusions(cfg)
 
 	// Per-unit resolved-family presence, from the SAME sources the views
 	// core scopes the kernel deny with: the interface snapshots (static

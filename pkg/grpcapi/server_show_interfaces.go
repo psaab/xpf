@@ -358,8 +358,12 @@ func (s *Server) ShowInterfacesDetail(_ context.Context, req *pb.ShowInterfacesD
 				}
 			}
 
+			// #16556: a member claimed by two zones is bound to NEITHER —
+			// never print a map-order-chosen zone for it.
 			zoneLabel := li.zoneName
-			if config.ZoneQuarantineExcludedReason(li.zoneName, cfg) != "" {
+			if claimants := config.ZoneInterfaceQuarantineClaimants(cfg, li.ifaceRef); claimants != nil {
+				zoneLabel = "(none) " + config.ZoneInterfaceQuarantineUnboundQualifierFor(claimants)
+			} else if config.ZoneQuarantineExcludedReason(li.zoneName, cfg) != "" {
 				zoneLabel += " " + config.ZoneQuarantineInterfacesQualifier
 			}
 			fmt.Fprintf(&buf, "    Security: Zone: %s\n", zoneLabel)
@@ -1046,11 +1050,17 @@ func writeRethDetail(buf *strings.Builder, cfg *config.Config, maps config.RethS
 			}
 			fmt.Fprintln(buf)
 			if zone, ok := ifZone[fmt.Sprintf("%s.%d", reth, ru.Unit)]; ok {
-				qualifier := ""
-				if config.ZoneQuarantineExcludedReason(zone, cfg) != "" {
-					qualifier = " " + config.ZoneQuarantineInterfacesQualifier
+				ref := fmt.Sprintf("%s.%d", reth, ru.Unit)
+				if claimants := config.ZoneInterfaceQuarantineClaimants(cfg, ref); claimants != nil {
+					fmt.Fprintf(buf, "    Security zone: (none) %s\n",
+						config.ZoneInterfaceQuarantineUnboundQualifierFor(claimants))
+				} else {
+					qualifier := ""
+					if config.ZoneQuarantineExcludedReason(zone, cfg) != "" {
+						qualifier = " " + config.ZoneQuarantineInterfacesQualifier
+					}
+					fmt.Fprintf(buf, "    Security zone: %s%s\n", zone, qualifier)
 				}
-				fmt.Fprintf(buf, "    Security zone: %s%s\n", zone, qualifier)
 			}
 			if len(ru.V4Addrs) > 0 || len(ru.V6Addrs) > 0 {
 				fmt.Fprintln(buf, "    Addresses:")

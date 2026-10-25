@@ -78,33 +78,50 @@ const builderPkg = "pkg/dataplane/userspace"
 // claim that a rule is armed, and annotating one would put "NOT INSTALLED" in
 // the middle of a completion menu.
 var exemptRenderers = map[string]string{
-	"pkg/cli/completion.go:valueProvider":                       "tab-completion name list, not an enforcement render",
-	"pkg/grpcapi/server_cluster.go:valueProvider":               "tab-completion name list, not an enforcement render",
-	"pkg/api/api.go:allInterfaceNames":                          "#10530 adjacency — internal interface-name lookup emits no zone value",
-	"pkg/api/interfaces.go:interfacesHandler":                   "#10531 — REST structured interface wire needs explicit quarantine presence/counters",
-	"pkg/api/interfaces.go:writeInterfacesTerse":                "#10530 adjacency — terse text view emits no zone value",
-	"pkg/api/nat.go:natPoolStatsHandler":                        "#10531 — REST structured NAT pool wire needs explicit quarantine presence/counters",
-	"pkg/api/security.go:zonesHandler":                          "deferred to #10531 — structured-wire quarantine enum/presence and counter truthfulness",
-	"pkg/api/sessions.go:buildSessionView":                      "#10531 — REST structured session view needs explicit quarantine disposition",
-	"pkg/api/sessions.go:sessionZonePairHandler":                "#10531 — REST structured zone-pair wire needs explicit quarantine disposition",
-	"pkg/api/stats.go:ifaceStatsHandler":                        "#10531 — REST structured interface-stats wire needs explicit quarantine presence/counters",
-	"pkg/cli/apply.go:syslogZoneNameMap":                        "#10530 adjacency — internal syslog ID map emits no zone text",
-	"pkg/cli/cli_show_cluster.go:showChassisClusterStatus":      "#10530 adjacency — cluster status emits counters, not zone identity",
-	"pkg/cli/cli_show_flow.go:showFlowSession":                  "#10530 — applied session IDs collapse collisions; text cannot truthfully qualify runtime traffic",
-	"pkg/cli/cli_show_flow.go:showTopTalkers":                   "#10530 — applied session IDs collapse collisions; text cannot truthfully qualify runtime traffic",
-	"pkg/cli/cli_show_security_log.go:showSecurityLog":          "#10530 — event-time zone names are historical; current config must not rewrite them",
-	"pkg/cli/session_filter.go:populateIfaceMaps":               "#10530 adjacency — internal session filter map emits no zone text",
-	"pkg/grpcapi/server_helpers.go:allInterfaceNames":           "#10530 adjacency — internal interface-name lookup emits no zone value",
-	"pkg/grpcapi/server_nat.go:GetNATDestination":               "#10531 — gRPC structured NAT wire needs explicit quarantine presence/counters",
-	"pkg/grpcapi/server_nat.go:GetNATPoolStats":                 "#10531 — gRPC structured NAT wire needs explicit quarantine presence/counters",
-	"pkg/grpcapi/server_sessions.go:buildSessionFilter":         "#10530 adjacency — internal session filter emits no zone text",
-	"pkg/grpcapi/server_sessions.go:computeZonePairSummary":     "#10531 — gRPC structured zone-pair wire needs explicit quarantine disposition",
-	"pkg/grpcapi/server_show_events.go:GetEvents":               "#10531 — gRPC structured event wire needs event-time disposition fields",
-	"pkg/grpcapi/server_show_flow.go:showSessionsTop":           "#10530 — applied session IDs collapse collisions; text cannot truthfully qualify runtime traffic",
-	"pkg/grpcapi/server_show_interfaces.go:GetInterfaces":       "#10531 — gRPC structured interface wire needs explicit quarantine presence/counters",
-	"pkg/grpcapi/server_show_interfaces.go:showInterfacesTerse": "#10530 adjacency — terse text view emits no zone value",
-	"pkg/grpcapi/server_show_zones.go:GetZones":                 "deferred to #10531 — structured-wire quarantine enum/presence and counter truthfulness",
-	"pkg/grpcapi/server_show_security_text.go:showSecurityLog":  "#10530 — event-time zone names are historical; current config must not rewrite them",
+	"pkg/cli/completion.go:valueProvider":                                "tab-completion name list, not an enforcement render",
+	"pkg/grpcapi/server_cluster.go:valueProvider":                        "tab-completion name list, not an enforcement render",
+	"pkg/api/api.go:allInterfaceNames":                                   "#10530 adjacency — internal interface-name lookup emits no zone value",
+	"pkg/api/interfaces.go:interfacesHandler":                            "#10531 — REST structured interface wire needs explicit quarantine presence/counters",
+	"pkg/api/interfaces.go:writeInterfacesTerse":                         "#10530 adjacency — terse text view emits no zone value",
+	"pkg/api/nat.go:natPoolStatsHandler":                                 "#10531 — REST structured NAT pool wire needs explicit quarantine presence/counters",
+	"pkg/api/security.go:zonesHandler":                                   "deferred to #10531 — structured-wire quarantine enum/presence and counter truthfulness",
+	"pkg/api/sessions.go:buildSessionView":                               "#10531 — REST structured session view needs explicit quarantine disposition",
+	"pkg/api/sessions.go:sessionZonePairHandler":                         "#10531 — REST structured zone-pair wire needs explicit quarantine disposition",
+	"pkg/api/stats.go:ifaceStatsHandler":                                 "#10531 — REST structured interface-stats wire needs explicit quarantine presence/counters",
+	"pkg/cli/apply.go:syslogZoneNameMap":                                 "#10530 adjacency — internal syslog ID map emits no zone text",
+	"pkg/cli/cli_show_cluster.go:showChassisClusterStatus":               "#10530 adjacency — cluster status emits counters, not zone identity",
+	"pkg/cli/cli_show_flow.go:showFlowSession":                           "#10530 — applied session IDs collapse collisions; text cannot truthfully qualify runtime traffic",
+	"pkg/cli/cli_show_flow.go:showTopTalkers":                            "#10530 — applied session IDs collapse collisions; text cannot truthfully qualify runtime traffic",
+	"pkg/cli/cli_show_security_log.go:showSecurityLog":                   "#10530 — event-time zone names are historical; current config must not rewrite them",
+	"pkg/cli/session_filter.go:populateIfaceMaps":                        "#10530 adjacency — internal session filter map emits no zone text",
+	"pkg/grpcapi/server_helpers.go:allInterfaceNames":                    "#10530 adjacency — internal interface-name lookup emits no zone value",
+	"pkg/grpcapi/server_nat.go:GetNATDestination":                        "#10531 — gRPC structured NAT wire needs explicit quarantine presence/counters",
+	"pkg/grpcapi/server_nat.go:GetNATPoolStats":                          "#10531 — gRPC structured NAT wire needs explicit quarantine presence/counters",
+	"pkg/grpcapi/server_sessions.go:buildSessionFilter":                  "#10530 adjacency — internal session filter emits no zone text",
+	"pkg/grpcapi/server_sessions.go:computeZonePairSummary":              "#10531 — gRPC structured zone-pair wire needs explicit quarantine disposition",
+	"pkg/grpcapi/server_show_events.go:GetEvents":                        "#10531 — gRPC structured event wire needs event-time disposition fields",
+	"pkg/grpcapi/server_show_flow.go:showSessionsTop":                    "#10530 — applied session IDs collapse collisions; text cannot truthfully qualify runtime traffic",
+	"pkg/grpcapi/server_show_interfaces.go:GetInterfaces":                "#10531 — gRPC structured interface wire needs explicit quarantine presence/counters",
+	"pkg/grpcapi/server_show_interfaces.go:showInterfacesTerse":          "#10530 adjacency — terse text view emits no zone value",
+	"pkg/grpcapi/server_show_zones.go:GetZones":                          "deferred to #10531 — structured-wire quarantine enum/presence and counter truthfulness",
+	"pkg/grpcapi/server_show_security_text.go:showSecurityLog":           "#10530 — event-time zone names are historical; current config must not rewrite them",
+	"pkg/api/api.go:interfaceZoneMap":                                    "#16556 adjacency — internal interface->zone lookup emits no zone value; consumers annotate",
+	"pkg/api/metrics_counters.go:collectZoneCounters":                    "#16556 adjacency — per-zone counter gauge emits no interface membership",
+	"pkg/cli/cli_show_nat.go:showNATDestinationSummary":                  "#16556 adjacency — NAT summary resolves zone IDs to names, emits no interface membership",
+	"pkg/cli/cli_show_nat.go:showNATSourceSummary":                       "#16556 adjacency — NAT summary resolves zone IDs to names, emits no interface membership",
+	"pkg/cli/cli_show_security_screen.go:showScreen":                     "#16556 adjacency — screen renderer qualifies zone names, emits no interface membership",
+	"pkg/cli/cli_show_security_screen.go:showScreenIdsOption":            "#16556 adjacency — screen renderer qualifies zone names, emits no interface membership",
+	"pkg/cli/cli_show_security_screen.go:showScreenIdsOptionDetail":      "#16556 adjacency — screen renderer qualifies zone names, emits no interface membership",
+	"pkg/cli/cli_show_security_screen.go:showScreenStatisticsAll":        "#16556 adjacency — screen statistics qualify zone names, emit no interface membership",
+	"pkg/cli/cli_show_security_zones.go:zoneCounterSlotted":              "#16556 adjacency — counter-slot probe emits no zone or interface value",
+	"pkg/grpcapi/server_helpers.go:interfaceZoneMap":                     "#16556 adjacency — internal interface->zone lookup emits no zone value; consumers annotate",
+	"pkg/grpcapi/server_show_security_text.go:showScreen":                "#16556 adjacency — screen renderer qualifies zone names, emits no interface membership",
+	"pkg/grpcapi/server_show_security_text.go:showScreenIDSOption":       "#16556 adjacency — screen renderer qualifies zone names, emits no interface membership",
+	"pkg/grpcapi/server_show_security_text.go:showScreenIDSOptionDetail": "#16556 adjacency — screen renderer qualifies zone names, emits no interface membership",
+	"pkg/grpcapi/server_show_security_text.go:showScreenStatisticsAll":   "#16556 adjacency — screen statistics qualify zone names, emit no interface membership",
+	"pkg/grpcapi/server_show_zones_text.go:zoneCounterSlotted":           "#16556 adjacency — counter-slot probe emits no zone or interface value",
+	"pkg/natshow/dest.go:RenderDestRuleDetail":                           "#16556 adjacency — NAT detail resolves zone IDs to names, emits no interface membership",
+	"pkg/natshow/source.go:RenderSourceRuleDetail":                       "#16556 adjacency — NAT detail resolves zone IDs to names, emits no interface membership",
 }
 
 var families = []family{
@@ -227,6 +244,22 @@ var families = []family{
 		BuilderPredicates: []string{"ZoneQuarantineExclusions"},
 		SurfacePredicates: []string{"ZoneQuarantineExclusions", "ZoneQuarantineExcludedReason"},
 		Unannotated:       nil, // every remaining census member is annotated or exempted above
+	},
+	{
+		// #16556: an interface claimed by two zones is quarantined from
+		// BOTH runtime zone maps (bound to neither, no XDP shim, fails
+		// closed) while cfg.Security.Zones still lists it under each
+		// claimant. The builder (authoredZoneRefs / InterfaceZoneMap via
+		// pkg/dataplane/userspace) consults
+		// ZoneInterfaceQuarantineExclusions; every renderer of a zone's
+		// member list or an interface's zone must consult the same verdict
+		// (per-member ZoneInterfaceQuarantineReason / Claimants) instead of
+		// printing the authored claim as bound.
+		Name:              "security zone interface (duplicate membership)",
+		Collections:       []string{"Security.Zones", "ZoneIDs"},
+		BuilderPredicates: []string{"ZoneInterfaceQuarantineExclusions"},
+		SurfacePredicates: []string{"ZoneInterfaceQuarantineExclusions", "ZoneInterfaceQuarantineReason", "ZoneInterfaceQuarantineClaimants", "ZoneInterfaceQuarantineClaimantsForRows"},
+		Unannotated:       nil, // closed by #16556 — see exemptRenderers for non-enforcement readers
 	},
 }
 
