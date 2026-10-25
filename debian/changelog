@@ -17,6 +17,18 @@ xpf (0.0.0) unstable; urgency=medium
     helper's static table — passed strict commit but aborted every
     later apply in the #4960 pre-pass naming an NPTv6 overlap, even
     with zero NPTv6 rules. True NPTv6/NPTv6 overlaps still reject.
+  * LLDP: Stop()/re-Apply can no longer hang on a silent link (#16669).
+    The RX goroutine previously parked in a bare Recvfrom on the AF_PACKET
+    socket and teardown relied on shutdown()+close() to wake it; shutdown
+    is ENOTCONN on a connectionless AF_PACKET socket and close does not
+    wake an in-flight Recvfrom on Linux, so an LLDP config change, a
+    disable, or daemon shutdown blocked until a frame arrived (forever on
+    silent `interface all` members), wedging the whole config-apply
+    pipeline behind applySem and forcing the TimeoutStopSec SIGKILL path.
+    recv now waits in ppoll on the RX fd plus a per-session wake eventfd,
+    Stop runs cancel -> signal -> wg.Wait() -> close (in that order, so
+    no recv is ever in flight on a closed/fd-reused descriptor), and
+    rxLoop re-checks the context after every successful recv.
   * Feeds: a feed restored with a count baseline but no usable content
     epoch now re-establishes the epoch on its first guarded install
     (#16651). Legacy count-only records, records whose epoch digest was

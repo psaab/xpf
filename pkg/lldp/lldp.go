@@ -7,6 +7,7 @@ package lldp
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -178,8 +179,9 @@ type Manager struct {
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 	// sessions are the per-interface RX/TX sockets for the current Apply
-	// generation. Stop() closes each one to unblock the parked RX Recvfrom
-	// immediately, so shutdown does not wait out a read timeout. Guarded by mu.
+	// generation. Stop() signals each session's wake eventfd to unblock the
+	// RX goroutine parked in ppoll, joins the goroutines, and only then
+	// closes the sockets (#16669). Guarded by mu.
 	sessions []*ifSession
 
 	// applyCount counts Apply() calls. It exists so the daemon's day-2 reconcile
@@ -194,17 +196,29 @@ type Manager struct {
 }
 
 // ifSession owns the RX and TX AF_PACKET sockets for one interface for the life
-// of an Apply() generation. close() shuts down and closes rxFD, which makes a
-// parked unix.Recvfrom in the RX goroutine return immediately, so Stop() does
-// not block waiting out a read timeout. This mirrors the close-to-unblock
-// pattern VRRP uses for its receiver (pkg/vrrp/instance.go stop()).
+// of an Apply() generation (#16669).
+//
+// Receive wakeup: rxLoop must NOT park in a bare Recvfrom on rxFD. On Linux,
+// close(2) — and shutdown(2), which returns ENOTCONN on a connectionless
+// AF_PACKET socket — do NOT reliably wake a Recvfrom already parked on that
+// fd: the in-flight syscall keeps its reference to the old file description
+// and stays blocked until a frame arrives, and the freed fd number can be
+// reused by an unrelated socket which the parked recv then reads from. Stop
+// therefore wakes recv through ppoll: recv waits on {rxFD, wakeFD} and
+// signalStop writes to the eventfd wakeFD. wakeFD is created before any
+// goroutine starts and is written by signalStop; the sockets themselves are
+// closed only by close, which stopLocked calls AFTER wg.Wait() has joined
+// rxLoop (signal → wait → close), so no recv can ever be in flight on a
+// closed or reused fd.
 type ifSession struct {
 	iface     *net.Interface
 	rxFD      int // AF_PACKET bound to ifindex, ETH_P_LLDP
 	txFD      int // AF_PACKET for periodic Sendto, opened once and reused
+	wakeFD    int // eventfd signalled by signalStop to wake a ppoll-parked recv
 	closeOnce sync.Once
+	wakeOnce  sync.Once
 
-	// recvFn, when non-nil, replaces the real unix.Recvfrom-based recv. It is
+	// recvFn, when non-nil, replaces the real ppoll/Recvfrom-based recv. It is
 	// the test seam for exercising rxLoop's transient-error handling (EINTR /
 	// EAGAIN retry vs fatal exit) and the PACKET_OUTGOING self-frame filter
 	// deterministically, without a real socket or signal delivery. The middle
@@ -240,12 +254,15 @@ var interfacesFn = net.Interfaces
 var interfaceByNameFn = net.InterfaceByName
 
 // newIfSessionFn is the construction seam for ifSession. Tests override it to
-// inject a socketpair(2)-backed session so the Stop-unblocks-recv contract can
-// be exercised without CAP_NET_RAW or a real interface.
+// inject an AF_PACKET session (in a private netns) or a recvFn stub so the
+// Stop-unblocks-recv contract can be exercised; the socketpair seam it
+// replaced could not reproduce the AF_PACKET close-does-not-wake defect
+// (#16669).
 var newIfSessionFn = newIfSession
 
-// newIfSession opens and binds the RX socket and opens the TX socket for one
-// interface. Both fds live for the Apply generation and are released by close().
+// newIfSession opens and binds the RX socket, creates the wake eventfd, and
+// opens the TX socket for one interface. All fds live for the Apply
+// generation and are released by close() after rxLoop has returned.
 func newIfSession(iface *net.Interface) (*ifSession, error) {
 	rxFD, err := linuxsock.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(htons(etherTypeLLDP)))
 	if err != nil {
@@ -258,29 +275,70 @@ func newIfSession(iface *net.Interface) (*ifSession, error) {
 		unix.Close(rxFD)
 		return nil, fmt.Errorf("lldp: rx bind: %w", err)
 	}
-	// No SO_RCVTIMEO: recv blocks indefinitely and is unblocked by closing the
-	// fd in close(), not by a polling timeout.
+	// The wake eventfd is what makes recv cancellable (#16669): recv ppolls
+	// on {rxFD, wakeFD} instead of parking in Recvfrom, so Stop never needs
+	// close/shutdown on rxFD to wake it. NONBLOCK so a duplicate write can
+	// never block the stopper; CLOEXEC so it never leaks into a child.
+	wakeFD, err := unix.Eventfd(0, unix.EFD_NONBLOCK|unix.EFD_CLOEXEC)
+	if err != nil {
+		unix.Close(rxFD)
+		return nil, fmt.Errorf("lldp: wake eventfd: %w", err)
+	}
 
 	txFD, err := linuxsock.Socket(unix.AF_PACKET, unix.SOCK_RAW, txProtocol)
 	if err != nil {
+		unix.Close(wakeFD)
 		unix.Close(rxFD)
 		return nil, fmt.Errorf("lldp: tx socket: %w", err)
 	}
 
-	return &ifSession{iface: iface, rxFD: rxFD, txFD: txFD}, nil
+	return &ifSession{iface: iface, rxFD: rxFD, txFD: txFD, wakeFD: wakeFD}, nil
 }
 
-// recv reads one frame from the RX socket. It blocks until a frame arrives or
-// the fd is closed by close(). It returns the number of bytes read and the
-// AF_PACKET packet type (sll_pkttype) from the returned sockaddr_ll. The packet
-// type lets rxLoop distinguish a genuine inbound peer frame (PACKET_HOST /
-// PACKET_MULTICAST / PACKET_BROADCAST) from the host's own transmitted frame
-// that the kernel loops back on the same AF_PACKET socket (PACKET_OUTGOING).
-// Without that distinction the daemon learns its own LLDP advertisements as a
-// neighbor (#2992).
+// errRecvStopped is returned by recv when signalStop has fired. rxLoop maps
+// it (via ctx cancellation, checked before the error classification) to a
+// clean return; it never reaches the operational-error backoff path while
+// the context is live because only Stop signals the wake fd.
+var errRecvStopped = errors.New("lldp: recv stopped")
+
+// recv reads one frame from the RX socket. It blocks in ppoll on
+// {rxFD, wakeFD} until a frame is readable or signalStop fires, then reads
+// exactly one frame with Recvfrom. It returns the number of bytes read and
+// the AF_PACKET packet type (sll_pkttype) from the returned sockaddr_ll. The
+// packet type lets rxLoop distinguish a genuine inbound peer frame
+// (PACKET_HOST / PACKET_MULTICAST / PACKET_BROADCAST) from the host's own
+// transmitted frame that the kernel loops back on the same AF_PACKET socket
+// (PACKET_OUTGOING). Without that distinction the daemon learns its own LLDP
+// advertisements as a neighbor (#2992).
+//
+// rxFD stays blocking: ppoll guarantees readability before Recvfrom, so the
+// read itself does not park. If both fds are ready the frame wins — the
+// wake is level-triggered on the eventfd counter, so no wakeup is lost by
+// preferring the frame; rxLoop checks ctx after the successful recv and
+// exits before looping.
 func (s *ifSession) recv(buf []byte) (int, int, error) {
 	if s.recvFn != nil {
 		return s.recvFn(buf)
+	}
+	for {
+		fds := []unix.PollFd{
+			{Fd: int32(s.rxFD), Events: unix.POLLIN},
+			{Fd: int32(s.wakeFD), Events: unix.POLLIN},
+		}
+		_, err := unix.Ppoll(fds, nil, nil)
+		if err != nil {
+			if err == unix.EINTR {
+				continue
+			}
+			return 0, 0, err
+		}
+		if fds[0].Revents&unix.POLLIN != 0 {
+			break
+		}
+		if fds[1].Revents&(unix.POLLIN|unix.POLLHUP|unix.POLLERR) != 0 {
+			return 0, 0, errRecvStopped
+		}
+		// Spurious wakeup with neither fd readable: poll again.
 	}
 	n, from, err := unix.Recvfrom(s.rxFD, buf, 0)
 	if err != nil {
@@ -305,23 +363,42 @@ func (s *ifSession) send(frame []byte) error {
 	return unix.Sendto(s.txFD, frame, 0, addr)
 }
 
-// close releases both sockets. It is idempotent (closeOnce) so a double-close
-// from a racing Stop cannot panic or double-free.
+// signalStop wakes a recv parked in ppoll on wakeFD. It is idempotent
+// (wakeOnce): Stop signals once, then joins rxLoop, then closes. The write
+// is non-blocking (EFD_NONBLOCK) and its error is ignored — if the counter
+// were somehow saturated the fd is already readable, which is all recv
+// needs. Sessions built by tests without a wake fd (wakeFD <= 0, e.g.
+// recvFn stubs that never call the real recv) skip the write; production
+// sessions always have wakeFD > 0.
+func (s *ifSession) signalStop() {
+	if s.wakeFD <= 0 {
+		return
+	}
+	s.wakeOnce.Do(func() {
+		var b [8]byte
+		binary.LittleEndian.PutUint64(b[:], 1)
+		_, _ = unix.Write(s.wakeFD, b[:])
+	})
+}
+
+// close releases both sockets and the wake eventfd. It is idempotent
+// (closeOnce) so a double-close from a racing Stop cannot panic or
+// double-free.
 //
-// shutdown(SHUT_RDWR) precedes close on rxFD on purpose: closing an fd that
-// another goroutine is actively blocked reading on is NOT a reliable wakeup —
-// the fd number is freed but the in-flight Recvfrom can stay parked. shutdown
-// reliably wakes a blocked reader. On a connectionless AF_PACKET socket shutdown
-// returns ENOTCONN (harmless, ignored) and the subsequent close is what tears
-// down the RX queue and unblocks recv (the pattern VRRP relies on); on a
-// connection-oriented socket (the socketpair used in tests) shutdown is the
-// authoritative wakeup. Doing both is correct for either socket family.
+// close MUST only run after rxLoop has returned (stopLocked: signalStop →
+// wg.Wait() → close, #16669). Closing rxFD while a Recvfrom is parked on it
+// does not wake that syscall on Linux and frees the fd number for reuse
+// under the parked reader; the ppoll wakeup plus this ordering makes that
+// state unreachable. No shutdown() is issued: it is ENOTCONN on AF_PACKET
+// and was never the wake mechanism.
 func (s *ifSession) close() {
 	s.closeOnce.Do(func() {
-		_ = unix.Shutdown(s.rxFD, unix.SHUT_RDWR)
 		unix.Close(s.rxFD)
 		if s.txFD != s.rxFD {
 			unix.Close(s.txFD)
+		}
+		if s.wakeFD > 0 && s.wakeFD != s.rxFD && s.wakeFD != s.txFD {
+			unix.Close(s.wakeFD)
 		}
 	})
 }
@@ -631,12 +708,15 @@ func (m *Manager) Stop() {
 // lifecycleMu (Stop acquires it; Apply already holds it), which is what
 // serializes the cancel/wg access against a racing Apply/Stop.
 //
-// Ordering is load-bearing: cancel the context (stops the timer-driven TX and
-// expiry loops), then close every session's sockets (unblocks any RX goroutine
-// parked in recv immediately), then wg.Wait(). Closing the fds BEFORE the wait
-// is what makes Stop bounded — waiting first would re-introduce the read-timeout
-// stall. The close-under-read race is benign: a recv on a just-closed fd returns
-// an error and the RX loop treats any post-cancel error as "shutdown, return".
+// Ordering is load-bearing (#16669): cancel the context (stops the
+// timer-driven TX and expiry loops), then signalStop every session (wakes
+// any RX goroutine parked in ppoll on the wake eventfd), then wg.Wait(),
+// and only AFTER the join close the sockets. Closing rxFD before the join
+// was the pre-fix design: close does not wake a Recvfrom parked on an
+// AF_PACKET socket, so Stop blocked until a frame arrived (forever on a
+// silent link), and the freed fd number could be reused under the parked
+// reader. Signal → wait → close makes Stop bounded on silent links and
+// ensures no recv is ever in flight on a closed or reused fd.
 func (m *Manager) stopLocked() {
 	m.mu.Lock()
 	sessions := m.sessions
@@ -645,12 +725,15 @@ func (m *Manager) stopLocked() {
 
 	if m.cancel != nil {
 		m.cancel()
-		// Close sockets to unblock any blocking Recvfrom in rxLoop.
+		// Wake every RX goroutine parked in ppoll, then join, then close.
 		for _, s := range sessions {
-			s.close()
+			s.signalStop()
 		}
 		m.wg.Wait()
 		m.cancel = nil
+		for _, s := range sessions {
+			s.close()
+		}
 	} else {
 		// Defensive: close any sessions even if cancel was never set (no
 		// goroutines should be running, but never leak an fd).
@@ -778,12 +861,15 @@ func (m *Manager) sendFrame(sess *ifSession, ttl int, sysName, sysDesc string, c
 var rxErrorBackoff = 1 * time.Second
 
 // rxLoop receives LLDP frames on the session's interface and updates the
-// neighbor table. The RX socket has no read timeout: recv blocks until a frame
-// arrives or Stop() closes the fd. On Stop() the closed fd makes recv return an
-// error and, because the context is cancelled, the loop exits promptly without
-// waiting out a read timeout. On an UNEXPECTED recv error while the context is
-// still live (e.g. a transient interface flap), the loop backs off and retries
-// rather than terminating — it survives operational errors for the life of the
+// neighbor table. recv blocks in ppoll on {rxFD, wakeFD} until a frame
+// arrives or Stop signals the wake eventfd (#16669). On Stop the wake makes
+// recv return errRecvStopped and, because the context is cancelled, the
+// loop exits promptly; after every successful recv the loop re-checks ctx
+// before processing or looping, so a frame that raced the Stop signal
+// cannot keep the loop (or a stale neighbor) alive into the next
+// generation. On an UNEXPECTED recv error while the context is still live
+// (e.g. a transient interface flap), the loop backs off and retries rather
+// than terminating — it survives operational errors for the life of the
 // Apply() generation and exits only on shutdown.
 func (m *Manager) rxLoop(ctx context.Context, sess *ifSession) {
 	iface := sess.iface
@@ -802,8 +888,8 @@ func (m *Manager) rxLoop(ctx context.Context, sess *ifSession) {
 				continue
 			}
 			// recv was unblocked by something other than a transient error. If
-			// the context is cancelled, this is the expected close-to-unblock on
-			// Stop(): the fd is closed, return immediately.
+			// the context is cancelled, this is the expected wake on Stop():
+			// signalStop fired the wake eventfd (errRecvStopped), return now.
 			if ctx.Err() != nil {
 				return
 			}
@@ -824,6 +910,13 @@ func (m *Manager) rxLoop(ctx context.Context, sess *ifSession) {
 			case <-time.After(rxErrorBackoff):
 			}
 			continue
+		}
+		// #16669: a frame that raced signalStop (both fds ready in ppoll, the
+		// frame won) must not be learned into a table Stop is tearing down,
+		// and must not loop back into recv. Check ctx after every successful
+		// recv, before any processing.
+		if ctx.Err() != nil {
+			return
 		}
 		if n < ethHdrLen {
 			continue

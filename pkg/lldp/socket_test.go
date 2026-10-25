@@ -12,69 +12,74 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// newSocketpairSession builds an ifSession whose rxFD and txFD are both set
-// to one end of a socketpair(2) (fds[0]). A parked unix.Recvfrom on rxFD
-// blocks until bytes are written to peerFD (fds[1]) or rxFD is closed, so it
-// faithfully reproduces the AF_PACKET RX socket's blocking behaviour without
-// CAP_NET_RAW or a real interface. peerFD lets a test feed a frame to recv or
-// just sit idle to keep recv parked. The caller owns peerFD and must close it.
+// newSocketpairSession builds an ifSession whose rxFD is one end of a
+// socketpair(2) (fds[0]) and whose wakeFD is a real eventfd, so recv
+// exercises the production ppoll path. A parked recv blocks until bytes
+// are written to peerFD (fds[1]) or signalStop fires the eventfd. The
+// caller owns peerFD and must close it.
 //
 // SOCK_SEQPACKET (not SOCK_STREAM): the production RX socket is AF_PACKET
-// SOCK_RAW, a message-oriented datagram socket where one frame is one recv.
-// SEQPACKET preserves that one-write-one-read boundary (so a fed LLDP frame is
-// never split across two recv calls), while still being connection-oriented so
-// shutdown(SHUT_RDWR)+close on rxFD unblocks a parked reader exactly as the
-// close-to-unblock design relies on. SOCK_STREAM would not preserve boundaries
-// and could deliver a partial frame to rxLoop.
+// SOCK_RAW, a message-oriented datagram socket where one frame is one
+// recv; SEQPACKET preserves that one-write-one-read boundary.
+//
+// #16669: the pre-fix helper had no wakeFD and the tests relied on
+// shutdown()+close() of the SEQPACKET fd to wake a parked recv — which
+// works on a connection-oriented socketpair but NOT on connectionless
+// AF_PACKET (shutdown is ENOTCONN there and close does not wake a parked
+// Recvfrom), so those tests passed while production hung on silent links.
+// The AF_PACKET-faithful cell is TestStopSilentVsChatty16669 in
+// stop_wakeup_16669_test.go; this helper now drives the same ppoll wake
+// the production socket uses.
 func newSocketpairSession(t *testing.T, iface *net.Interface) (sess *ifSession, peerFD int) {
 	t.Helper()
 	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET, 0)
 	if err != nil {
 		t.Fatalf("socketpair: %v", err)
 	}
+	wakeFD, err := unix.Eventfd(0, unix.EFD_NONBLOCK|unix.EFD_CLOEXEC)
+	if err != nil {
+		unix.Close(fds[0])
+		unix.Close(fds[1])
+		t.Fatalf("eventfd: %v", err)
+	}
 	// fds[0] is the session's rx/tx fd; fds[1] is the test-controlled peer.
-	return &ifSession{iface: iface, rxFD: fds[0], txFD: fds[0]}, fds[1]
+	return &ifSession{iface: iface, rxFD: fds[0], txFD: fds[0], wakeFD: wakeFD}, fds[1]
 }
 
-// TestSessionRecvUnblocksOnClose proves the core latency fix: a goroutine parked
-// in ifSession.recv returns immediately when close() is called, rather than
-// waiting out any read timeout. Without the SO_RCVTIMEO removal + fd-close
-// design this could only be observed on a timeout boundary.
+// TestSessionRecvUnblocksOnClose proves the wake latency fix (#16669): a
+// goroutine parked in ifSession.recv returns immediately when signalStop
+// fires the wake eventfd — without rxFD being closed first. Pre-fix this
+// relied on close() waking a parked Recvfrom, which does not happen on
+// AF_PACKET.
 func TestSessionRecvUnblocksOnClose(t *testing.T) {
 	sess, peerFD := newSocketpairSession(t, &net.Interface{Name: "test0", Index: 1})
 	defer unix.Close(peerFD)
+	defer sess.close()
 
 	started := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		buf := make([]byte, 64)
 		close(started)           // signal: about to enter recv
-		_, _, _ = sess.recv(buf) // blocks until close() unblocks the fd
+		_, _, _ = sess.recv(buf) // blocks in ppoll until signalStop or data
 		close(done)
 	}()
 
-	// Wait until the goroutine has signalled it is about to call recv, then
-	// yield the scheduler so the goroutine has a chance to actually enter the
-	// blocking syscall before close() is issued.  This does not provide a
-	// hard guarantee that the goroutine is IN recv — a non-blocking wakeup
-	// (EBADF on an already-closed fd) would also close done promptly — but
-	// the window is negligibly small after Gosched().  The mutation-verified
-	// guarantee lives in TestStopUnblocksParkedRX which uses frame injection.
 	<-started
 	runtime.Gosched()
 	select {
 	case <-done:
-		t.Fatal("recv returned before close() — it should block while no data and fd open")
+		t.Fatal("recv returned before signalStop() — it should block while no data and no wake")
 	default:
 	}
 
-	sess.close()
+	sess.signalStop()
 
 	select {
 	case <-done:
-		// recv unblocked promptly.
+		// recv unblocked promptly via the wake eventfd.
 	case <-time.After(2 * time.Second):
-		t.Fatal("recv did not unblock within 2s after close() — Stop would stall")
+		t.Fatal("recv did not unblock within 2s after signalStop() — Stop would stall (#16669)")
 	}
 }
 
@@ -87,14 +92,16 @@ func TestSessionCloseIdempotent(t *testing.T) {
 	sess.close() // must be a no-op via closeOnce
 }
 
-// TestStopUnblocksParkedRX is the regression test for the 0-2s shutdown tail
-// (#2035). It installs a socketpair-backed session via the newIfSessionFn seam,
-// starts the RX goroutine through the normal Manager.Apply path, then asserts
-// Stop() returns well within a deadline far below the old 2s SO_RCVTIMEO floor.
+// TestStopUnblocksParkedRX is the regression test for the shutdown stall
+// (#2035, #16669). It installs a socketpair-backed session (real ppoll recv
+// + wake eventfd) via the newIfSessionFn seam, starts the RX goroutine
+// through the normal Manager.Apply path, then asserts Stop() returns well
+// within 250ms while the RX goroutine is parked with no further traffic.
 //
-// Against the pre-fix code (SO_RCVTIMEO=2s, cancel-then-Wait with no fd close)
-// this Stop would block up to ~2s; the 250ms deadline makes the test fail if
-// that behaviour is reintroduced.
+// #16669 note: the pre-#16669 version passed against the broken production
+// code because shutdown() wakes a SEQPACKET socketpair reader; on a real
+// AF_PACKET socket it does not. The AF_PACKET-faithful silent/chatty cell
+// is TestStopSilentVsChatty16669 (stop_wakeup_16669_test.go).
 func TestStopUnblocksParkedRX(t *testing.T) {
 	var peerFDs []int
 	var mu sync.Mutex
