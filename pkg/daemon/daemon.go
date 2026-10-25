@@ -1861,6 +1861,13 @@ type Daemon struct {
 	bootstrapLifelineCaptured bool
 	bootstrapLifelinePresent  bool
 	bootstrapLifelineNetwork  []byte
+	// bootstrapLifelineKernelName/LogicalName is the #16675 pre-takeover
+	// kernel name and bootstrap-exit logical name of a non-index-0
+	// lifeline renamed positionally at exit. Empty unless that shape was
+	// captured; the first-commit rollback renames back and removes the
+	// takeover .link. Guarded by bootstrapLifelineMu.
+	bootstrapLifelineKernelName  string
+	bootstrapLifelineLogicalName string
 
 	// bootstrapLifelineGeneration binds the persisted snapshot to the config
 	// that took over the bootstrap lifeline.
