@@ -55,6 +55,13 @@ import (
 // identity whose raw token is not a well-formed non-negative integer,
 // including an explicitly quoted-empty token. See the file-level comment for
 // the doctrine.
+//
+// #16663: the cluster body is resolved through normalizedClusterNode — the
+// same view compileChassis reads — so every spelling (container, packed on
+// the cluster line, packed on the chassis line, brace-top-level) is judged.
+// Walking `forEachChild(chassis.Children, "cluster", ...)` alone missed the
+// `chassis cluster { ... }` spelling, whose keyword sits on the chassis
+// node's own Keys.
 func validateChassisClusterIdentitiesAST(nodes []*Node, lenient bool) ([]string, error) {
 	var warnings []string
 	emit := func(what, token string) error {
@@ -95,39 +102,37 @@ func validateChassisClusterIdentitiesAST(nodes []*Node, lenient bool) ([]string,
 		n, err := strconv.Atoi(tok)
 		return err == nil && n >= 0
 	}
-	walkErr := forEachChild(nodes, "chassis", func(chassis *Node) error {
-		return forEachChild(chassis.Children, "cluster", func(cluster *Node) error {
-			for _, rgInst := range namedInstances(cluster.FindChildren("redundancy-group")) {
-				if !validID(rgInst.name) {
-					if err := emit("redundancy-group", rgInst.name); err != nil {
-						return err
-					}
+	for _, chassis := range chassisNodes(nodes) {
+		cluster := normalizedClusterNode(chassis)
+		if cluster == nil {
+			continue
+		}
+		for _, rgInst := range namedInstances(cluster.FindChildren("redundancy-group")) {
+			if !validID(rgInst.name) {
+				if err := emit("redundancy-group", rgInst.name); err != nil {
+					return nil, err
 				}
-				// The RG-scoped `node <id>` identity (nested `node { ... }` or
-				// the packed one-liner `node 0 priority <v>`; compileChassis
-				// reads both via nodeVal(child) on a `node` CHILD).
-				// #6588: the body may be packed onto the RG instance's own Keys.
-				for _, child := range redundancyGroupBody(rgInst.node) {
-					if child.Name() != "node" {
-						continue
-					}
-					v := nodeVal(child)
-					// A quoted-empty identity is a real second key whose
-					// text is empty; do not confuse it with a node shape that
-					// has no identity slot at all.
-					if (v == "" && len(child.Keys) >= 2) ||
-						(v != "" && !validID(v)) {
-						if err := emit("redundancy-group node", v); err != nil {
-							return err
-						}
+			}
+			// The RG-scoped `node <id>` identity (nested `node { ... }` or
+			// the packed one-liner `node 0 priority <v>`; compileChassis
+			// reads both via nodeVal(child) on a `node` CHILD).
+			// #6588: the body may be packed onto the RG instance's own Keys.
+			for _, child := range redundancyGroupBody(rgInst.node) {
+				if child.Name() != "node" {
+					continue
+				}
+				v := nodeVal(child)
+				// A quoted-empty identity is a real second key whose
+				// text is empty; do not confuse it with a node shape
+				// that has no identity slot at all.
+				if (v == "" && len(child.Keys) >= 2) ||
+					(v != "" && !validID(v)) {
+					if err := emit("redundancy-group node", v); err != nil {
+						return nil, err
 					}
 				}
 			}
-			return nil
-		})
-	})
-	if walkErr != nil {
-		return nil, walkErr
+		}
 	}
 	return warnings, nil
 }

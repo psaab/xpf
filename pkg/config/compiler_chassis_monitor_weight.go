@@ -56,6 +56,13 @@ import (
 // apart about which token is a weight, which entry it belongs to, or how a
 // bracketed list splits.
 //
+// #16663: the cluster body is resolved through normalizedClusterNode — the
+// same view compileChassis reads — so every spelling (container, packed on
+// the cluster line, packed on the chassis line, brace-top-level) is judged.
+// Walking `forEachChild(chassis.Children, "cluster", ...)` alone missed the
+// `chassis cluster { ... }` spelling, whose keyword sits on the chassis
+// node's own Keys.
+//
 // Returns (warnings, nil) when lenient, (nil, error) on the first offender when
 // strict.
 func validateMonitorWeightTokensAST(nodes []*Node, lenient bool) ([]string, error) {
@@ -172,51 +179,49 @@ func validateMonitorWeightTokensAST(nodes []*Node, lenient bool) ([]string, erro
 		return nil
 	}
 
-	walkErr := forEachChild(nodes, "chassis", func(chassis *Node) error {
-		return forEachChild(chassis.Children, "cluster", func(cluster *Node) error {
-			for _, rgInst := range namedInstances(cluster.FindChildren("redundancy-group")) {
-				// #15036: duplicate detection is per redundancy-group and
-				// spans every statement in its (possibly multi-block,
-				// #6543-folded) body, so both maps live outside the child loop.
-				seenIfMon := make(map[string]bool)
-				seenIP := make(map[string]bool)
-				for _, child := range redundancyGroupBody(rgInst.node) {
-					switch child.Name() {
-					case "interface-monitor":
-						if err := checkEntries(rgInst.name, "interface-monitor",
-							monitorEntryNodes(child, 1), seenIfMon); err != nil {
-							return err
+	for _, chassis := range chassisNodes(nodes) {
+		cluster := normalizedClusterNode(chassis)
+		if cluster == nil {
+			continue
+		}
+		for _, rgInst := range namedInstances(cluster.FindChildren("redundancy-group")) {
+			// #15036: duplicate detection is per redundancy-group and
+			// spans every statement in its (possibly multi-block,
+			// #6543-folded) body, so both maps live outside the child loop.
+			seenIfMon := make(map[string]bool)
+			seenIP := make(map[string]bool)
+			for _, child := range redundancyGroupBody(rgInst.node) {
+				switch child.Name() {
+				case "interface-monitor":
+					if err := checkEntries(rgInst.name, "interface-monitor",
+						monitorEntryNodes(child, 1), seenIfMon); err != nil {
+						return nil, err
+					}
+				case "ip-monitoring":
+					// One packedStatementProps result feeds both the
+					// globals and the family walk, so the gate sees
+					// exactly the node set compileRGIPMonitoring compiles
+					// from.
+					ipmProps := packedStatementProps(child, 1, isIPMonitoringProp)
+					if err := checkIPMonitoringGlobals(rgInst.name, ipmProps); err != nil {
+						return nil, err
+					}
+					for _, familyNode := range ipmProps {
+						if familyNode.Name() != "family" {
+							continue
 						}
-					case "ip-monitoring":
-						// One packedStatementProps result feeds both the
-						// globals and the family walk, so the gate sees
-						// exactly the node set compileRGIPMonitoring compiles
-						// from.
-						ipmProps := packedStatementProps(child, 1, isIPMonitoringProp)
-						if err := checkIPMonitoringGlobals(rgInst.name, ipmProps); err != nil {
-							return err
+						inetNode, inetSkip := ipMonitoringInetNode(familyNode)
+						if inetNode == nil {
+							continue
 						}
-						for _, familyNode := range ipmProps {
-							if familyNode.Name() != "family" {
-								continue
-							}
-							inetNode, inetSkip := ipMonitoringInetNode(familyNode)
-							if inetNode == nil {
-								continue
-							}
-							if err := checkEntries(rgInst.name, "ip-monitoring family inet",
-								monitorEntryNodes(inetNode, inetSkip), seenIP); err != nil {
-								return err
-							}
+						if err := checkEntries(rgInst.name, "ip-monitoring family inet",
+							monitorEntryNodes(inetNode, inetSkip), seenIP); err != nil {
+							return nil, err
 						}
 					}
 				}
 			}
-			return nil
-		})
-	})
-	if walkErr != nil {
-		return nil, walkErr
+		}
 	}
 	return warnings, nil
 }

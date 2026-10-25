@@ -57,6 +57,13 @@ var redundancyGroupNoArgStatements = map[string]bool{
 // compiler sees — including the packed instance line and the bare
 // `redundancy-group { <id> ... }` wrapper.
 //
+// #16663: the cluster body is resolved through normalizedClusterNode — the
+// same view compileChassis reads — so every spelling (container, packed on
+// the cluster line, packed on the chassis line, brace-top-level) is judged.
+// Walking `forEachChild(chassis.Children, "cluster", ...)` alone missed the
+// `chassis cluster { ... }` spelling, whose keyword sits on the chassis
+// node's own Keys.
+//
 // Returns (warnings, nil) when lenient, (nil, error) on the first offender when
 // strict.
 func validateRGNoArgStatementsAST(nodes []*Node, lenient bool) ([]string, error) {
@@ -71,41 +78,39 @@ func validateRGNoArgStatementsAST(nodes []*Node, lenient bool) ([]string, error)
 		return fmt.Errorf("%s", msg)
 	}
 
-	walkErr := forEachChild(nodes, "chassis", func(chassis *Node) error {
-		return forEachChild(chassis.Children, "cluster", func(cluster *Node) error {
-			for _, rgInst := range namedInstances(cluster.FindChildren("redundancy-group")) {
-				for _, child := range redundancyGroupBody(rgInst.node) {
-					name := child.Name()
-					if !redundancyGroupNoArgStatements[name] {
-						continue
+	for _, chassis := range chassisNodes(nodes) {
+		cluster := normalizedClusterNode(chassis)
+		if cluster == nil {
+			continue
+		}
+		for _, rgInst := range namedInstances(cluster.FindChildren("redundancy-group")) {
+			for _, child := range redundancyGroupBody(rgInst.node) {
+				name := child.Name()
+				if !redundancyGroupNoArgStatements[name] {
+					continue
+				}
+				// Keys[0] is the statement itself; anything after it was
+				// written as an inline argument. Children are a block body.
+				// Both are discarded by the compiler, so both are reported.
+				if len(child.Keys) > 1 {
+					if err := emit("chassis cluster redundancy-group %s %s: takes no "+
+						"argument but carries %q — those tokens are silently discarded, so "+
+						"the configuration does not do what it reads as; remove them",
+						rgInst.name, name, child.Keys[1:]); err != nil {
+						return nil, err
 					}
-					// Keys[0] is the statement itself; anything after it was
-					// written as an inline argument. Children are a block body.
-					// Both are discarded by the compiler, so both are reported.
-					if len(child.Keys) > 1 {
-						if err := emit("chassis cluster redundancy-group %s %s: takes no "+
-							"argument but carries %q — those tokens are silently discarded, so "+
-							"the configuration does not do what it reads as; remove them",
-							rgInst.name, name, child.Keys[1:]); err != nil {
-							return err
-						}
-						continue
-					}
-					if len(child.Children) > 0 {
-						if err := emit("chassis cluster redundancy-group %s %s: takes no "+
-							"argument but carries a %q block — it is silently discarded, so the "+
-							"configuration does not do what it reads as; remove it",
-							rgInst.name, name, child.Children[0].Name()); err != nil {
-							return err
-						}
+					continue
+				}
+				if len(child.Children) > 0 {
+					if err := emit("chassis cluster redundancy-group %s %s: takes no "+
+						"argument but carries a %q block — it is silently discarded, so the "+
+						"configuration does not do what it reads as; remove it",
+						rgInst.name, name, child.Children[0].Name()); err != nil {
+						return nil, err
 					}
 				}
 			}
-			return nil
-		})
-	})
-	if walkErr != nil {
-		return nil, walkErr
+		}
 	}
 	return warnings, nil
 }
