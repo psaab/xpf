@@ -92,6 +92,13 @@ func collectPolicyContentRejections(policies []PolicyRuleSnapshot) []string {
 			len(rule.rejectedApplications) == 0 {
 			appBad = false
 		}
+		// #16595: a rule poisoned only because DNS never resolved is not
+		// rejected content — the config is representable, the resolver is
+		// down, and previous-good/default-deny is the enforcement state.
+		if rule.dnsLookupFailClosed && !srcBad && !dstBad && !schedulerBad &&
+			len(rule.malformedZonePairShapes) == 0 && len(rule.unknownSecurityPoliciesChildren) == 0 {
+			continue
+		}
 		if !appBad && !srcBad && !dstBad && !schedulerBad {
 			continue
 		}

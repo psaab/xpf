@@ -24,6 +24,40 @@ func allAddressTokensRepresentable(addrRepresentable func(tok string) bool, addr
 	return true
 }
 
+// tokenResolvesViaDNSLookupFailure reports whether a policy address token
+// is runtime-empty ONLY because a dns-name lookup failed (#16595): the
+// name (or a member of its set closure) is a dns-name entry flagged
+// DNSLookupFailed with no usable prefixes. A successful lookup returning
+// zero addresses, a tainted form, and an undefined name are NOT this.
+// Callers treat the token as match-none — per-entry fail-closed — instead
+// of poisoning the whole snapshot with the address sentinel.
+func tokenResolvesViaDNSLookupFailure(cfg *config.Config, tok string) bool {
+	if cfg == nil || cfg.Security.AddressBook == nil {
+		return false
+	}
+	if !cfg.Security.AddressBook.DNSEntryLookupFailed(tok) {
+		return false
+	}
+	// The entry must currently contribute nothing; a stale answer retained
+	// by stale-while-error is concrete and takes the normal path.
+	ab := cfg.Security.AddressBook
+	if _, known := ab.Addresses[tok]; !known {
+		if _, isSet := ab.AddressSets[tok]; !isSet {
+			return false
+		}
+	}
+	v4, v6 := expandBookNameToCIDRs(cfg, nil, tok)
+	return len(v4) == 0 && len(v6) == 0
+}
+
+// ruleSideAddressTokens returns the tokens of one policy address side.
+func ruleSideAddressTokens(pol *config.Policy, destination bool) []string {
+	if destination {
+		return pol.Match.DestinationAddresses
+	}
+	return pol.Match.SourceAddresses
+}
+
 // nameRepresentable reports whether an address-book name (Address or
 // AddressSet, recursively) is FULLY representable by the userspace matcher
 // (#3261). It is structural and content-independent: every resolved member must
@@ -83,6 +117,24 @@ func nameRepresentable(ab *config.AddressBook, feedOverlay map[string][]string, 
 	// fail-open. See nameRepresentability.
 	r, c := nameRepresentability(ab, feedOverlay, bindings, name, visited)
 	return r && c
+}
+
+// sideDNSMatchNone reports whether every token on a policy address side
+// that fails representability does so ONLY because a dns-name lookup
+// failed (#16595), and at least one token does. A side that is fully
+// representable, or that fails for any static reason, is not this.
+func sideDNSMatchNone(cfg *config.Config, addrRepresentable func(string) bool, addrs []string) bool {
+	failed := false
+	for _, tok := range addrs {
+		if addrRepresentable(tok) {
+			continue
+		}
+		if !tokenResolvesViaDNSLookupFailure(cfg, tok) {
+			return false
+		}
+		failed = true
+	}
+	return failed
 }
 
 // nameRepresentability returns (representable, concrete) for an address-book

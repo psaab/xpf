@@ -169,7 +169,15 @@ func junosHostNameUnrepresentable(ab *AddressBook, feedBound map[string]bool, na
 		}
 		// #15673: an address with no usable prefixes (tainted mixed form,
 		// unresolvable dns-name, oversized range) cannot be projected.
-		if a, ok := ab.Addresses[name]; ok && a != nil && len(a.UsableValues()) == 0 {
+		// #16595: a dns-name whose latest lookup FAILED is runtime-empty,
+		// not statically unresolvable — it must not withdraw the zone's
+		// whole program. It contributes no prefixes (match-none for that
+		// entry) while sibling static terms keep rendering; the per-family
+		// projection already drops a positive side that matches nothing.
+		// A name that resolved successfully to zero addresses still
+		// cannot be projected.
+		if a, ok := ab.Addresses[name]; ok && a != nil && len(a.UsableValues()) == 0 &&
+			!(a.DNSName != "" && a.DNSLookupFailed) {
 			return true
 		}
 	}

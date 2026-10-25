@@ -433,6 +433,13 @@ func policyMatchAddressBookResolves(ab *AddressBook, name string) error {
 // excluded set can never be committed, so it can never reach the dataplane and
 // invert to match-all (the historic fail-open this constraint guards against).
 //
+// #16595: a token whose closure is empty ONLY because a dns-name lookup
+// FAILED is exempt — the strict gate must not depend on live DNS. The
+// compiler warning ("will match nothing until DNS resolves") still fires,
+// and the dataplane enforces the entry fail-closed (match-none, or the
+// per-rule deny/excluded fail-closed) until a resolution succeeds. A
+// dns-name that resolved successfully to zero addresses stays rejected.
+//
 // Resolution mirrors resolveUserspaceAddressBookEntry +
 // expandUserspacePolicyAddresses EXACTLY (see policyMatchAddressBookResolves),
 // so the commit gate and the runtime gate cannot diverge. `any` / `any-ipv4` /
@@ -474,6 +481,11 @@ func validatePolicyMatchAddressSetMembersStrict(cfg *Config) error {
 			return nil
 		}
 		if err := policyMatchAddressBookResolves(ab, tok); err != nil {
+			// #16595: runtime-empty because the resolver failed is not a
+			// static shape — warn-only (the compile warning names it).
+			if ab.DNSEntryLookupFailed(tok) {
+				return nil
+			}
 			return policyMatchAddressSetError(scope, policyName, field, displayPolicyAddressBookName(tok), err)
 		}
 		return nil

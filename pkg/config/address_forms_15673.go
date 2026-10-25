@@ -25,8 +25,10 @@ import (
 //     have no single CIDR equivalent and stay unimplemented.
 //   - `dns-name <fqdn> [ipv4-only|ipv6-only]` — modelled in Address.DNSName /
 //     DNSFamily; the current resolution lives in Address.DNSAddresses and is
-//     refreshed by the daemon (RefreshDNSAddressBooks). An unresolvable name
-//     yields no usable prefixes (match-none, fail-closed), never an error.
+//     refreshed by the daemon (RefreshDNSAddressBooks). A lookup FAILURE
+//     keeps the last good answer (stale-while-error, #16595, flagged by
+//     DNSLookupFailed); a successful lookup with no usable address is
+//     match-none (fail-closed). Neither is an error.
 //
 // Unknown/future forms and any entry mixing a prefix with another form stay
 // in UnimplementedForms (#9524) and are unusable.
@@ -92,18 +94,62 @@ func dnsIPsToPrefixes(ips []string, family string) []string {
 	return out
 }
 
-// resolveDNSAddressEntry (re)resolves one dns-name entry in place. Resolution
-// failure leaves the entry with no usable prefixes (fail-closed).
+// resolveDNSAddressEntry (re)resolves one dns-name entry in place (#16595).
+// A lookup error keeps the previous DNSAddresses (stale-while-error) and
+// sets DNSLookupFailed, so a transient resolver outage does not discard
+// the last answer. A successful lookup — even one yielding no addresses,
+// or none in the entry's family — replaces the answer and clears the
+// flag: "name has no addresses" stays distinct from "resolver failed".
 func resolveDNSAddressEntry(a *Address) {
 	if a == nil || a.DNSName == "" {
 		return
 	}
 	ips, err := lookupAddressDNSName(a.DNSName)
 	if err != nil {
-		a.DNSAddresses = nil
+		a.DNSLookupFailed = true
 		return
 	}
+	a.DNSLookupFailed = false
 	a.DNSAddresses = dnsIPsToPrefixes(ips, a.DNSFamily)
+}
+
+// DNSEntryLookupFailed reports whether a (possibly nested) address-book
+// name's closure contains a dns-name entry whose latest resolution FAILED
+// (#16595). Such an entry is runtime-empty, not statically unresolvable:
+// consumers that would otherwise treat an empty expansion as a static
+// shape (the strict commit gate, the junos-host projection) must not let
+// a resolver outage veto them. An entry that resolved successfully to
+// zero addresses is NOT lookup-failed. Cycle-safe; mirrors the closure
+// walks of the strict resolver.
+func (ab *AddressBook) DNSEntryLookupFailed(name string) bool {
+	if ab == nil {
+		return false
+	}
+	seen := map[string]bool{}
+	var walk func(ref string) bool
+	walk = func(ref string) bool {
+		if seen[ref] {
+			return false
+		}
+		seen[ref] = true
+		if a, ok := ab.Addresses[ref]; ok && a != nil {
+			return a.DNSName != "" && a.DNSLookupFailed
+		}
+		if set, ok := ab.AddressSets[ref]; ok && set != nil {
+			for _, m := range set.Addresses {
+				if walk(m) {
+					return true
+				}
+			}
+			for _, m := range set.AddressSets {
+				if walk(m) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return walk(name)
 }
 
 // RefreshDNSAddressBooks re-resolves every dns-name entry in the global,
