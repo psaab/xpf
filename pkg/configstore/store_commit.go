@@ -421,6 +421,10 @@ func (s *Store) commitWithDescriptionLocked(description, principal string) (*con
 	// inside clearPendingConfirmLocked and converges autonomously.
 	cleared, _ := s.clearPendingConfirmLocked()
 	if cleared {
+		// #16721: a plain commit that confirms a pending window is a
+		// confirmation path — journal it with this commit's principal
+		// (in addition to the commit row below).
+		s.journalCommitConfirmLocked(principal)
 		slog.Info("plain commit confirmed a pending commit-confirmed window")
 	} else if s.confirmRecoveryReadFailed && !resolutionDrained {
 		// #9887: a plain commit ALSO supersedes the #8566 lost window. No
@@ -1239,6 +1243,25 @@ func (s *Store) cancelPendingConfirmTimerLocked() bool {
 	return true
 }
 
+// journalCommitConfirmLocked records a confirmation of a pending
+// commit-confirmed window (#16721). Every path that clears a pending
+// window through clearPendingConfirmLocked — explicit confirm, plain
+// commit, HA sync supersede, demotion — journals exactly one
+// commit_confirm row with its principal, so `show system commit
+// history` can show that the window was confirmed and by whom. The
+// row carries the active config hash at confirmation time. Caller
+// holds s.mu; journalLog never fails the caller.
+func (s *Store) journalCommitConfirmLocked(principal string) {
+	if principal == "" {
+		principal = UnknownPrincipal
+	}
+	s.journalLog(&JournalEntry{
+		Action:     "commit_confirm",
+		ConfigHash: journalConfigHash(s.active),
+		Principal:  principal,
+	})
+}
+
 // ConfirmCommit cancels the auto-rollback timer, confirming the config.
 func (s *Store) ConfirmCommit() error { return s.ConfirmCommitAs("") }
 
@@ -1274,6 +1297,11 @@ func (s *Store) ConfirmCommitAs(sessionID string) error {
 	if !cleared {
 		return fmt.Errorf("no pending confirmed commit")
 	}
+	// #16721: journal the confirmation. sessionID is the bearer-like
+	// lock token and must never be persisted, so this session-scoped
+	// entry point records the explicit unknown sentinel;
+	// ConfirmCommitPrincipalAs carries a redacted transport principal.
+	s.journalCommitConfirmLocked(UnknownPrincipal)
 
 	slog.Info("commit confirmed")
 	// #5835: the timer is cancelled and the config is confirmed IN MEMORY, but
@@ -1281,6 +1309,37 @@ func (s *Store) ConfirmCommitAs(sessionID string) error {
 	// the retained background retry heals could resurrect the stale rollback.
 	// The retry debt + degraded health were already retained inside
 	// clearPendingConfirmLocked; returning the error lets the operator act.
+	if removeErr != nil {
+		return fmt.Errorf("commit confirmed in memory, but durably clearing the pending "+
+			"commit-confirmed record failed (persistence degraded; a restart before the "+
+			"background retry heals may roll back): %w", removeErr)
+	}
+	return nil
+}
+
+// ConfirmCommitPrincipalAs is ConfirmCommitAs with an explicit journal
+// principal (#16721): transport handlers that already derived a
+// redacted principal (FormatJournalPrincipal) pass it so the
+// commit_confirm journal row names who confirmed. sessionID remains
+// the holder-scope token only and is never journaled.
+func (s *Store) ConfirmCommitPrincipalAs(sessionID, principal string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureHolderLocked(sessionID); err != nil {
+		return err
+	}
+	if sessionID != "" && s.confirmTimer != nil && s.effectiveHolderLocked() != sessionID {
+		return fmt.Errorf("%w", ErrConfigLockedByOther)
+	}
+	cleared, removeErr := s.clearPendingConfirmLocked()
+	if !cleared {
+		return fmt.Errorf("no pending confirmed commit")
+	}
+	if principal == "" {
+		principal = UnknownPrincipal
+	}
+	s.journalCommitConfirmLocked(principal)
+	slog.Info("commit confirmed")
 	if removeErr != nil {
 		return fmt.Errorf("commit confirmed in memory, but durably clearing the pending "+
 			"commit-confirmed record failed (persistence degraded; a restart before the "+
@@ -1315,6 +1374,9 @@ func (s *Store) ConfirmPendingOnDemotion() bool {
 	if !cleared {
 		return false
 	}
+	// #16721: demotion is a confirmation path with no operator
+	// principal; record it under the system demotion label.
+	s.journalCommitConfirmLocked("system:rg-demotion")
 
 	// #5835: demotion is an event with no operator to return an error to; a
 	// durable-removal failure is already retained as retry debt + degraded
@@ -1622,30 +1684,127 @@ func (s *Store) ListHistory() []*HistoryEntry {
 	return s.history.List()
 }
 
-// ListCommitHistory returns recent commit journal entries (most recent
-// last). MEMORY is bounded by limit (#1896): the tail scan stops after
-// limit entries — but work is O(scanned suffix), up to O(segment) per
-// segment when entries are sparse, all under the journal lock; "O(limit)"
-// in older comments names the memory, not the I/O (#9898). Semantics
-// preserved from v1: the last `limit` entries of ANY action are read
-// first, THEN filtered to commit actions — fewer than `limit` commits can
-// come back when other actions interleave. limit <= 0 reads everything
-// subject to the per-segment byte cap (persist_failure_test relies on it).
+// CommitHistoryRow is one row of `show system commit history` (#16721).
+// RollbackSlot is the row's Junos rollback label: 0 for the live
+// (most recent) commit (`rollback 0` = the active config), k>=1 for
+// the commit whose tree `rollback k` restores (slot k holds that
+// commit's promoted tree), and -1 when the row carries no label (a
+// commit_confirm or auto_rollback record, or a commit whose tree has
+// rotated out of the retained ladder). Renderers print the label
+// only when it is >= 0, so label k names the commit `rollback k`
+// restores.
+type CommitHistoryRow struct {
+	Entry        *JournalEntry
+	RollbackSlot int // -1 = no label
+}
+
+// ListCommitHistory returns recent commit journal entries in journal
+// order (most recent last). MEMORY is bounded by limit (#1896): the
+// tail scan stops after limit entries — but work is O(scanned suffix),
+// up to O(segment) per segment when entries are sparse, all under the
+// journal lock; "O(limit)" in older comments names the memory, not the
+// I/O (#9898). Semantics preserved from v1: the last `limit` entries
+// of ANY action are read first, THEN filtered to commit actions —
+// fewer than `limit` commits can come back when other actions
+// interleave. limit <= 0 reads everything subject to the per-segment
+// byte cap (persist_failure_test relies on it).
 // No Store.mu needed: the journal serializes Log/Tail internally.
 func (s *Store) ListCommitHistory(limit int) ([]*JournalEntry, error) {
+	rows, err := s.ListCommitHistoryRows(limit)
+	if err != nil {
+		return nil, err
+	}
+	commits := make([]*JournalEntry, len(rows))
+	for i, r := range rows {
+		commits[i] = r.Entry
+	}
+	return commits, nil
+}
+
+// ListCommitHistoryRows is ListCommitHistory plus the Junos rollback
+// label of each row (#16721). Rows stay in journal order (most recent
+// last); rendering most-recent-first is the renderer's job.
+//
+// Label derivation is positional, not hash-based. Every
+// history-pushing commit (commit / commit_confirmed promotion)
+// appends exactly one journal row and pushes exactly one history
+// entry in the same critical section. The entry a commit pushes is
+// its displaced active tree — i.e. the PREVIOUS commit's promoted
+// tree, keeping its identity as it moves into slot 1, then slot 2,
+// and so on. Slot k therefore holds the tree produced by the commit
+// that is k steps older than the live one, and `rollback k` restores
+// exactly that tree. So the acceptance property — row label k names
+// the commit that `rollback k` restores — is satisfied by labelling
+// the live (newest) commit 0 (`rollback 0` = its active tree) and
+// counting 1,2,... newest-first. Equivalently in slot terms:
+// `rollback k` undoes the (k+1) newest commits, landing on the
+// k-labelled commit's tree. A label k>=1 is printed only while that
+// commit's tree is still retained (history depth >= k).
+// commit_confirm and auto_rollback rows push no history entry and
+// never get a label. Positional alignment stays exact for
+// duplicate-content commits where hash matching would alias. An
+// auto_rollback row also suppresses the label of the
+// commit_confirmed commit it reverted (that tree exists in no
+// slot); labelling resumes at the restored generation.
+//
+// Caveat (auto-rollback): PromoteRollback reverts the active tree
+// without popping the ladder and without re-running
+// saveRollbackFiles, so the on-disk slots — what `rollback N` reads
+// via the reloaded ladder — still hold the pushed trees; positional
+// labels stay aligned with the slots after a timeout revert as well.
+//
+// Known positional skew: a history-pushing commit cut off by the
+// bounded Tail(limit) window, or a SyncApply that pushed a history
+// entry without a commit journal row (it journals config_sync, which
+// is filtered out), shifts the alignment of older rows in the window.
+// A skewed label can at worst name a neighbouring generation —
+// `rollback` only stages into the candidate and `show | compare`
+// exposes the staged tree before any commit.
+func (s *Store) ListCommitHistoryRows(limit int) ([]CommitHistoryRow, error) {
 	entries, err := s.journal.Tail(limit)
 	if err != nil {
 		return nil, err
 	}
-	// Filter to commit/rollback actions only
-	var commits []*JournalEntry
+	// Retained ladder depth bounds which pre-images still exist.
+	s.mu.RLock()
+	ladder := s.history.Len()
+	s.mu.RUnlock()
+	var rows []CommitHistoryRow
 	for _, e := range entries {
 		switch e.Action {
-		case "commit", "commit_confirmed", "auto_rollback":
-			commits = append(commits, e)
+		case "commit", "commit_confirmed", "auto_rollback", "commit_confirm":
+			rows = append(rows, CommitHistoryRow{Entry: e, RollbackSlot: -1})
 		}
 	}
-	return commits, nil
+	// Assign labels newest-first among history-pushing rows: the
+	// newest is 0 (live), the next is 1, etc. Label k names the
+	// commit whose tree `rollback k` restores; it is printed only
+	// while that tree is retained (k <= ladder). An auto_rollback
+	// row marks a timeout revert: the commit_confirmed commit it
+	// undid (the newest not-yet-labelled history-pushing row older
+	// than it) had its tree reverted away, so it consumes no label —
+	// labelling resumes with the generation the revert restored.
+	label := 0
+	reverted := 0 // rolled-back commits still to skip (from auto_rollback rows)
+	for i := len(rows) - 1; i >= 0; i-- {
+		a := rows[i].Entry.Action
+		if a == "auto_rollback" {
+			reverted++
+			continue
+		}
+		if a != "commit" && a != "commit_confirmed" {
+			continue
+		}
+		if reverted > 0 {
+			reverted--
+			continue // this commit's tree was reverted away: no label
+		}
+		if label == 0 || label <= ladder {
+			rows[i].RollbackSlot = label
+		}
+		label++
+	}
+	return rows, nil
 }
 
 // LogSystemAction appends an unattributed system-action entry for legacy and

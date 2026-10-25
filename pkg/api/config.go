@@ -480,7 +480,7 @@ func (s *Server) configCommitHandler(w http.ResponseWriter, r *http.Request) {
 	// them AND clears the timer (#3861), so they are committed rather than
 	// silently dropped.
 	if s.store.ConfirmOnly() {
-		if err := s.store.ConfirmCommitAs(sessionID); err != nil {
+		if err := s.store.ConfirmCommitPrincipalAs(sessionID, journalPrincipalForRequest(r, sessionID)); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -931,7 +931,7 @@ func (s *Server) configConfirmHandler(w http.ResponseWriter, r *http.Request) {
 	// #5870: confirming a pending commit-confirmed is a holder-scoped op — only
 	// the REST-held candidate may be confirmed from REST; a CLI/gRPC holder's
 	// pending window is rejected (ErrConfigLockedByOther → 409).
-	if err := s.store.ConfirmCommitAs(sessionID); err != nil {
+	if err := s.store.ConfirmCommitPrincipalAs(sessionID, journalPrincipalForRequest(r, sessionID)); err != nil {
 		writeConfigMutationError(w, err)
 		return
 	}

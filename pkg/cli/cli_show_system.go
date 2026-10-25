@@ -874,24 +874,14 @@ func (c *CLI) handleShowSystem(args []string) error {
 	case "commit":
 		// "show system commit history"
 		if len(args) >= 2 && args[1] == "history" {
-			entries, err := c.store.ListCommitHistory(50)
+			rows, err := c.store.ListCommitHistoryRows(50)
 			if err != nil {
 				return fmt.Errorf("commit history: %v", err)
 			}
-			if len(entries) == 0 {
-				fmt.Println("No commit history available")
-				return nil
-			}
-			for i, e := range entries {
-				detail := ""
-				if e.Detail != "" {
-					// #15144: legacy journal lines may carry control
-					// characters; escape Detail so one entry renders as
-					// one line (new descriptions are rejected at commit).
-					detail = "  " + termsafe.SanitizeForDisplay(e.Detail)
-				}
-				fmt.Printf("  %d  %s  %s%s\n", i, e.Timestamp.Format("2006-01-02 15:04:05"), e.Action, detail)
-			}
+			// #16721: most-recent-first, rollback-slot labels,
+			// <rollback pending> while a window is armed — shared
+			// renderer with the gRPC surface.
+			fmt.Print(configstore.RenderCommitHistory(rows, c.store.IsConfirmPending()))
 			return nil
 		}
 		fmt.Println("show system commit:")

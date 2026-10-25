@@ -406,7 +406,7 @@ func (c *CLI) handleCommit(args []string) error {
 	// AND clears the confirm timer, so the edits are committed rather than
 	// silently dropped (the pre-#4000 intercept confirmed-and-discarded).
 	if c.store.ConfirmOnly() {
-		if err := c.store.ConfirmCommitAs(c.cliConfigSessionID()); err != nil {
+		if err := c.store.ConfirmCommitPrincipalAs(c.cliConfigSessionID(), c.journalPrincipal()); err != nil {
 			return fmt.Errorf("confirm commit: %w", err)
 		}
 		fmt.Println("commit confirmed")
