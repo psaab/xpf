@@ -1799,13 +1799,6 @@ func (d *Daemon) systemSyslogRetryOwed() bool { return d.systemSyslogRetryDebt.L
 
 func (d *Daemon) setSystemSyslogRetryOwed(owed bool) { d.systemSyslogRetryDebt.Store(owed) }
 
-func (d *Daemon) reassertSystemSyslogOnceForTest(cfg *config.Config) {
-	if !d.systemSyslogRetryOwed() || cfg == nil {
-		return
-	}
-	d.applySystemSyslog(cfg)
-}
-
 // rsyslogConfDir is the directory holding the xpf-managed rsyslog drop-ins. A
 // var rather than a literal so a test can reconcile against a temp dir instead
 // of the host's real /etc/rsyslog.d.
