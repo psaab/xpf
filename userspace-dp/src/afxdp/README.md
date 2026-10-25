@@ -1024,6 +1024,14 @@ sync.
   saturation for both indexes ride `ProcessStatus` as
   `shared_{nat,wire}_ambiguity_{keys,saturated}` /
   `xpf_userspace_shared_{nat,wire}_ambiguity_{keys,saturated}`.
+- **#16564 — saturation-era aliases are backfilled, not stranded.** A
+  publish that arrives while the index is saturated records its owner in
+  `owners` but gets no alias record; pre-fix it stayed unresolvable for
+  its whole lifetime. The index now keeps a bounded FIFO (16,384) of
+  such unrecorded `(alias, owner)` claims and drains it, in arrival
+  order, into alias capacity freed by `forget_owner`; multi-owner
+  claims drain as ambiguous (`None`), never as unique. (The sibling
+  wire-roster latch was separately made live by #16561.)
 - `frame/` — packet parsing (L2 / L3 / L4), checksum helpers, TCP MSS
   clamp. `tests.rs` was relocated out of `mod.rs` in #1046 Phase 1.
   `headers.rs` holds the consolidated outer-header serializers (#1440).

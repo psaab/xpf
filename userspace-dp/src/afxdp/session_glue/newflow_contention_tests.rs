@@ -1018,8 +1018,21 @@ fn shared_nat_ambiguity_live_bound_fails_closed_and_recovers_15104() {
         );
         assert_eq!(ambiguities.unique_owner(&probe), None);
     }
-    // Removing one entry drops the live population below the bound.
-    maps.remove(&entries[0].key);
+    // #16564: removing entries drops the live population below the bound.
+    // The fill's tail aliases were queued while saturated, so the
+    // first freed slots refill from that queue (the pre-#16564 form of
+    // this cell, which expected a single removal to clear saturation,
+    // only held because those aliases were silently dropped). Remove
+    // until the population actually drops below the bound: the queue is
+    // finite, so this terminates with the live population below the cap.
+    for e in &entries {
+        maps.remove(&e.key);
+        let below = {
+            let a = maps.indexes.nat_ambiguities.lock().expect("ambiguity index");
+            !a.saturated()
+        };
+        if below { break; }
+    }
     let ambiguities = maps
         .indexes
         .nat_ambiguities
@@ -1029,9 +1042,12 @@ fn shared_nat_ambiguity_live_bound_fails_closed_and_recovers_15104() {
         !ambiguities.saturated(),
         "dropping below the live bound must clear saturation without restart"
     );
-    let probe = ambiguity_probe(&entries[1]);
+    // The survivor probe must name an entry the loop did not remove:
+    // entries[0] went first, and tail entries were never removed.
+    let survivor = entries.last().expect("fill entries");
+    let probe = ambiguity_probe(survivor);
     assert!(
-        ambiguities.is_unique_for(&probe, &entries[1].key),
+        ambiguities.is_unique_for(&probe, &survivor.key),
         "a surviving unique owner must resolve again below the bound"
     );
 }
@@ -1241,4 +1257,175 @@ fn wire_roster_live_ceiling_fails_closed_and_recovers_16561() {
     );
     crate::afxdp::types::WIRE_KEY_CAP_OVERRIDE
         .store(prev, Ordering::Relaxed);
+}
+
+// #16564 (R3-A71-04): a reverse-NAT alias published while the ambiguity
+// index is saturated is never recorded, so that session stays
+// unresolvable through the ambiguity-gated shared lookups after the
+// index recovers. The cells below drive the REAL publish/remove path
+// over the REAL 16,384 bound, mirroring the va71 research cell: a
+// pre-saturation control, a subject published during saturation, and a
+// post-recovery twin.
+//
+// RED on pre-fix: the subject's `is_unique_for` / `unique_owner` /
+// `shared_forward_nat_candidate_is_unique` stay false/None after
+// removals drop the live population below the bound.
+
+fn saturation_fill_16564(maps: &SharedMaps, count: u32) -> Vec<SyncedSessionEntry> {
+    let mut fill = Vec::new();
+    for i in 0..count {
+        let mut e = nat_entry_15104(41001, 1024 + (i % 60_000) as u16);
+        e.key.src_port = 10_000 + (i % 1000) as u16;
+        e.key.dst_port = 5201 + (i % 500) as u16;
+        e.key.dst_ip = IpAddr::V4(Ipv4Addr::new(172, 16, (i / 256) as u8, (i % 256) as u8));
+        maps.publish(&e);
+        fill.push(e);
+    }
+    fill
+}
+
+#[test]
+fn shared_nat_ambiguity_saturation_era_alias_backfills_16564() {
+    let _g = counter_reader_guard();
+    let maps = SharedMaps::new();
+    let control = nat_entry_15104(41001, 31001);
+    maps.publish(&control);
+    let fill = saturation_fill_16564(&maps, 16_384);
+    let subject = nat_entry_15104(41002, 31002);
+    maps.publish(&subject);
+    let subject_probe = ambiguity_probe(&subject);
+    {
+        let ambiguities = maps.indexes.nat_ambiguities.lock().expect("ambiguity index");
+        assert!(ambiguities.saturated(), "index must be saturated at the bound");
+        assert!(!ambiguities.is_unique_for(&subject_probe, &subject.key), "saturated index must fail closed for the subject");
+        assert!(ambiguities.unrecorded_len() >= 1, "subject claim must be queued");
+    }
+    for e in &fill { maps.remove(&e.key); }
+    let ambiguities = maps.indexes.nat_ambiguities.lock().expect("ambiguity index");
+    assert!(!ambiguities.saturated(), "index must recover below the bound");
+    assert_eq!(ambiguities.unrecorded_len(), 0, "queue must drain on recovery");
+    assert!(ambiguities.is_unique_for(&ambiguity_probe(&control), &control.key), "pre-saturation control must still resolve after recovery");
+    assert!(ambiguities.is_unique_for(&subject_probe, &subject.key), "saturation-era subject must resolve after recovery (was never recorded pre-fix)");
+    assert_eq!(ambiguities.unique_owner(&subject_probe), Some(&subject.key));
+    drop(ambiguities);
+    let reply_key = crate::session::reverse_session_key(&subject.key, subject.decision.nat);
+    assert!(crate::afxdp::shared_ops::shared_forward_nat_candidate_is_unique(&maps.nat_sessions, &maps.indexes, &crate::session::reverse_match_key(&reply_key), &subject.key, subject.decision.nat), "shared_forward_nat_candidate_is_unique must pass for the subject after recovery");
+    let twin = nat_entry_15104(41003, 31003);
+    maps.publish(&twin);
+    let ambiguities = maps.indexes.nat_ambiguities.lock().expect("ambiguity index");
+    assert!(ambiguities.is_unique_for(&ambiguity_probe(&twin), &twin.key));
+}
+
+#[test]
+fn shared_nat_ambiguity_saturation_era_collisions_stay_ambiguous_16564() {
+    let _g = counter_reader_guard();
+    let maps = SharedMaps::new();
+    let fill = saturation_fill_16564(&maps, 16_384);
+    let translated = Ipv4Addr::new(203, 0, 113, 7);
+    let first = nat_entry(1, translated);
+    let second = nat_entry(2, translated);
+    maps.publish(&first);
+    maps.publish(&second);
+    let canonical = crate::session::reverse_canonical_key(&second.key, second.decision.nat);
+    let probe = crate::session::reverse_match_key(&canonical);
+    for e in &fill { maps.remove(&e.key); }
+    {
+        let ambiguities = maps.indexes.nat_ambiguities.lock().expect("ambiguity index");
+        assert!(!ambiguities.saturated());
+        assert!(ambiguities.contains(&probe), "colliding saturation-era owners must stay ambiguous after recovery");
+        assert!(!ambiguities.is_unique_for(&probe, &first.key));
+        assert!(!ambiguities.is_unique_for(&probe, &second.key));
+        assert_eq!(ambiguities.unique_owner(&probe), None);
+    }
+    maps.remove(&second.key);
+    let ambiguities = maps.indexes.nat_ambiguities.lock().expect("ambiguity index");
+    assert!(ambiguities.is_unique_for(&probe, &first.key), "sole survivor of a saturation-era collision must resolve after twin removal");
+    assert_eq!(ambiguities.unique_owner(&probe), Some(&first.key));
+}
+
+#[test]
+fn shared_nat_ambiguity_saturation_era_then_removed_never_backfills_16564() {
+    let _g = counter_reader_guard();
+    let maps = SharedMaps::new();
+    let fill = saturation_fill_16564(&maps, 16_384);
+    let subject = nat_entry_15104(41002, 31002);
+    maps.publish(&subject);
+    let queued_before = { let a = maps.indexes.nat_ambiguities.lock().expect("ambiguity index"); a.unrecorded_len() };
+    assert!(queued_before >= 1, "subject claim must be queued");
+    maps.remove(&subject.key);
+    {
+        let ambiguities = maps.indexes.nat_ambiguities.lock().expect("ambiguity index");
+        assert!(ambiguities.unrecorded_len() < queued_before, "removed subject must leave the queue; before={queued_before} after={}", ambiguities.unrecorded_len());
+    }
+    for e in &fill { maps.remove(&e.key); }
+    let ambiguities = maps.indexes.nat_ambiguities.lock().expect("ambiguity index");
+    assert!(!ambiguities.saturated());
+    let probe = ambiguity_probe(&subject);
+    assert!(!ambiguities.contains(&probe), "dead subject must not be resurrected");
+    assert!(!ambiguities.is_unique_for(&probe, &subject.key));
+    assert_eq!(ambiguities.unique_owner(&probe), None);
+}
+
+#[test]
+fn shared_nat_ambiguity_saturation_partial_recovery_stays_bounded_16564() {
+    let _g = counter_reader_guard();
+    let maps = SharedMaps::new();
+    let fill = saturation_fill_16564(&maps, 16_384);
+    let mut subjects = Vec::new();
+    for i in 0..4u16 {
+        let s = nat_entry_15104(41_100 + i, 31_100 + i);
+        maps.publish(&s);
+        subjects.push(s);
+    }
+    {
+        let ambiguities = maps.indexes.nat_ambiguities.lock().expect("ambiguity index");
+        assert!(ambiguities.unrecorded_len() >= 4);
+    }
+    maps.remove(&fill[0].key);
+    maps.remove(&fill[1].key);
+    {
+        let ambiguities = maps.indexes.nat_ambiguities.lock().expect("ambiguity index");
+        assert!(ambiguities.len() <= 16_384, "backfill must never exceed the bound");
+        assert!(ambiguities.unrecorded_len() >= 1, "later subjects must still wait");
+        assert!(!ambiguities.is_unique_for(&ambiguity_probe(&subjects[3]), &subjects[3].key));
+    }
+    for e in &fill[2..] { maps.remove(&e.key); }
+    let ambiguities = maps.indexes.nat_ambiguities.lock().expect("ambiguity index");
+    assert_eq!(ambiguities.unrecorded_len(), 0);
+    for s in &subjects {
+        assert!(ambiguities.is_unique_for(&ambiguity_probe(s), &s.key), "every saturation-era subject must resolve once capacity allows");
+    }
+}
+
+#[test]
+fn shared_nat_ambiguity_recovery_holds_when_population_exact_16564() {
+    let _g = counter_reader_guard();
+    let maps = SharedMaps::new();
+    let mut fill = Vec::new();
+    for i in 0..16_384u32 {
+        let mut e = entry(41001);
+        e.key.src_ip = IpAddr::V4(Ipv4Addr::new(10, (i >> 16) as u8, (i >> 8) as u8, (i & 0xff) as u8));
+        e.key.src_port = 10_000 + (i % 50_000) as u16;
+        maps.publish(&e);
+        fill.push(e);
+    }
+    let subject = { let mut e = entry(41001); e.key.src_ip = IpAddr::V4(Ipv4Addr::new(10, 200, 1, 1)); e.key.src_port = 59999; e };
+    maps.publish(&subject);
+    {
+        let a = maps.indexes.nat_ambiguities.lock().unwrap();
+        assert_eq!(a.len(), 16_384);
+        assert!(a.saturated());
+        assert!(a.unrecorded_len() >= 1);
+    }
+    maps.remove(&fill[0].key);
+    {
+        let a = maps.indexes.nat_ambiguities.lock().unwrap();
+        assert_eq!(a.len(), 16_384, "freed slot must go to the oldest queued claim");
+        assert!(!a.is_unique_for(&ambiguity_probe(&subject), &subject.key), "subject is behind tail fill claims in the queue");
+    }
+    for e in &fill[1..] { maps.remove(&e.key); }
+    let a = maps.indexes.nat_ambiguities.lock().unwrap();
+    assert_eq!(a.len(), 1);
+    assert!(!a.saturated());
+    assert!(a.is_unique_for(&ambiguity_probe(&subject), &subject.key));
 }
