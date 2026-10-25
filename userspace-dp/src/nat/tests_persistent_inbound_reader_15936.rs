@@ -444,6 +444,7 @@ fn imported_nonzone_any_remote_preserves_mint_provenance_16877() {
     let standby = sibling_rules();
     let pool_addresses = ["203.0.113.10".parse().expect("pool")];
     let mut installed = false;
+    let mut merged_sibling_scope = false;
     for record in &records {
         match standby[0].pool_allocator.import_idle_lease(
             record,
@@ -452,11 +453,22 @@ fn imported_nonzone_any_remote_preserves_mint_provenance_16877() {
             10_000,
         ) {
             super::IdleLeaseImport::Installed => installed = true,
-            super::IdleLeaseImport::SkippedExisting => {}
+            super::IdleLeaseImport::SkippedExisting => merged_sibling_scope = true,
             other => panic!("unexpected sibling idle-lease import result: {other:?}"),
         }
     }
     assert!(installed, "origin idle lease is installed on standby");
+    assert!(
+        merged_sibling_scope,
+        "the strict sibling scope merges into the imported shared lease"
+    );
+    assert!(
+        matches!(
+            inbound_as_production(&standby[1], translated, strict_dst, 443, 11_000),
+            PersistentInbound::Permitted { .. }
+        ),
+        "imported strict sibling must retain its own target-host-port grant"
+    );
     assert!(
         matches!(
             inbound_as_production(&standby[0], translated, arbitrary, 9_999, 11_000),
