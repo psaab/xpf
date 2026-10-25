@@ -95,3 +95,58 @@ func (d *Daemon) queueUserspaceSessionDeltasComplete(
 	}
 	return n, nil
 }
+
+// queueUserspaceSessionDeltasCompleteStream is the streaming form: produce
+// invokes the paged export, whose pages walk into the shared paced sink via
+// walkPageIntoPacedSink. The #7194 schema gate is applied inside that walk
+// for the first page only (before any install of the window): checking
+// per page would flood the withheld counter/log dampener, and admitting
+// early pages then withholding later ones would partially queue the window.
+// If the gate withholds, the sink is flagged and this returns
+// errUserspaceDeltaSchemaWithheld. On a mid-stream export error the caller
+// discards the result; installs already queued from earlier pages ride the
+// incremental stream, never a framed bulk window.
+func (d *Daemon) queueUserspaceSessionDeltasCompleteStream(
+	installWait time.Duration,
+	produce func(*pacedQueueDeltaSink) error,
+) (int, error) {
+	ss := d.getSessionSync()
+	if ss == nil {
+		return 0, errors.New("session sync not ready")
+	}
+	sink := &pacedQueueDeltaSink{ss: ss, wait: installWait}
+	if err := produce(sink); err != nil {
+		if sink.schemaWithheld {
+			return 0, errUserspaceDeltaSchemaWithheld
+		}
+		return 0, err
+	}
+	if sink.missed > 0 {
+		return sink.installs - sink.missed, fmt.Errorf("%d of %d session installs did not reach the session-sync send queue",
+			sink.missed, sink.installs)
+	}
+	return sink.installs - sink.missed, nil
+}
+
+// walkPageIntoPacedSink walks one streamed page into the paced sink. The
+// first page carries the #7194 schema gate for the whole window (see
+// queueUserspaceSessionDeltasCompleteStream); missed-install accounting
+// lives on the sink itself.
+func (d *Daemon) walkPageIntoPacedSink(sink *pacedQueueDeltaSink, zoneIDs map[string]uint16, deltas []dpuserspace.SessionDeltaInfo) error {
+	ss := d.getSessionSync()
+	if ss == nil {
+		return errors.New("session sync not ready")
+	}
+	if !sink.gateChecked {
+		sink.gateChecked = true
+		if !d.userspaceDeltaSchemaAdmits(len(deltas)) {
+			sink.schemaWithheld = true
+			return errUserspaceDeltaSchemaWithheld
+		}
+	}
+	if sink.schemaWithheld {
+		return errUserspaceDeltaSchemaWithheld
+	}
+	d.walkUserspaceSessionDeltas(ss, zoneIDs, deltas, sink)
+	return nil
+}

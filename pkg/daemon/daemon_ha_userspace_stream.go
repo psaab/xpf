@@ -845,6 +845,11 @@ type pacedQueueDeltaSink struct {
 	wait     time.Duration
 	installs int
 	missed   int
+	// #16515 streaming: the #7194 schema gate is evaluated once, on the
+	// first streamed page; schemaWithheld aborts the window before any
+	// install is queued.
+	gateChecked    bool
+	schemaWithheld bool
 }
 
 // installWait is the next install's wait: none once an install has timed out.

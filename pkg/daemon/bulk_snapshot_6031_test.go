@@ -20,13 +20,18 @@ type recordingExporter struct {
 	gotRGIDs []int
 }
 
-func (r *recordingExporter) ExportOwnerRGSessionsPaged(rgIDs []int) ([]dpuserspace.SessionDeltaInfo, dpuserspace.ProcessStatus, error) {
+func (r *recordingExporter) ExportOwnerRGSessionsPagedStream(rgIDs []int, sink dpuserspace.OwnerRGExportPageSink) (dpuserspace.ProcessStatus, int, error) {
 	r.calls++
 	r.gotRGIDs = append([]int(nil), rgIDs...)
 	if r.err != nil {
-		return nil, dpuserspace.ProcessStatus{}, r.err
+		return dpuserspace.ProcessStatus{}, 0, r.err
 	}
-	return append([]dpuserspace.SessionDeltaInfo(nil), r.deltas...), dpuserspace.ProcessStatus{}, nil
+	if len(r.deltas) > 0 {
+		if err := sink.OnOwnerRGExportPage(append([]dpuserspace.SessionDeltaInfo(nil), r.deltas...)); err != nil {
+			return dpuserspace.ProcessStatus{}, 0, err
+		}
+	}
+	return dpuserspace.ProcessStatus{}, len(r.deltas), nil
 }
 
 func snapshot6031Daemon() (*Daemon, *cluster.SessionSync, *config.Config) {

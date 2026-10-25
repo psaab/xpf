@@ -50,12 +50,12 @@ func newResyncExporterDP(name string) *resyncExporterDP {
 	return &resyncExporterDP{name: name}
 }
 
-func (r *resyncExporterDP) ExportOwnerRGSessionsPaged(rgIDs []int) (
-	[]dpuserspace.SessionDeltaInfo, dpuserspace.ProcessStatus, error,
+func (r *resyncExporterDP) ExportOwnerRGSessionsPagedStream(rgIDs []int, sink dpuserspace.OwnerRGExportPageSink) (
+	dpuserspace.ProcessStatus, int, error,
 ) {
 	r.exports.Add(1)
 	r.lastRGs.Store(append([]int(nil), rgIDs...))
-	return nil, dpuserspace.ProcessStatus{}, nil
+	return dpuserspace.ProcessStatus{}, 0, nil
 }
 
 var _ userspaceSessionExporter = (*resyncExporterDP)(nil)

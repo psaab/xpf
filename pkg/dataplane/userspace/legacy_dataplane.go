@@ -990,6 +990,15 @@ func (a *LegacyDataPlaneAdapter) ExportOwnerRGSessionsPaged(rgIDs []int) ([]Sess
 	return m.ExportOwnerRGSessionsPaged(rgIDs)
 }
 
+// ExportOwnerRGSessionsPagedStream forwards the #16515 streaming export.
+func (a *LegacyDataPlaneAdapter) ExportOwnerRGSessionsPagedStream(rgIDs []int, sink OwnerRGExportPageSink) (ProcessStatus, int, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return ProcessStatus{}, 0, err
+	}
+	return m.ExportOwnerRGSessionsPagedStream(rgIDs, sink)
+}
+
 // BatchDeleteSessionsScoped forwards the #9364 domain-carrying batch delete.
 //
 // THIS FORWARDER IS THE WHOLE POINT, and its omission is #9482. `Manager.Sessions()`

@@ -401,47 +401,66 @@ func TestOwnerRGExportCompletesSixWorkerWindow15161(t *testing.T) {
 	}
 }
 
-// TestOwnerRGExportRejectsActualAccumulatorBudget15161 keeps the byte bound
-// fail-closed under the #15161 actual charge: deltas whose strings really
-// are full-width cost close to their actual size, so enough full pages of
-// them still exceed ownerRGExportMaxAccumulatorBytes and are refused with
-// no partial window escaping. The page count needed is derived from the
-// measured actual cost, not restated, so a wider struct moves it.
-func TestOwnerRGExportRejectsActualAccumulatorBudget15161(t *testing.T) {
-	// Measure one fake delta as the helper builds it (Event "open", short
-	// SrcIP). Small deltas fit many pages under 256 MiB; the bound must
-	// still trip before maxOwnerRGExportDataPages, proving it is the byte
-	// charge and not the page cap that refuses.
-	probe := SessionDeltaInfo{Event: "open", SrcIP: "10.0.0.1"}
-	perDelta := ownerRGExportActualDeltaBytes(&probe)
-	if perDelta <= 0 {
-		t.Fatalf("VOID: actual delta cost %d", perDelta)
-	}
-	fullPagesUnderBound := ownerRGExportMaxAccumulatorBytes / (ownerRGExportPageDeltas * perDelta)
-	// One more page than fits is requested and refused before append, so
-	// the helper sees fullPagesUnderBound+1 requests.
-	pagesToExceed := fullPagesUnderBound + 1
-	if pagesToExceed >= maxOwnerRGExportDataPages {
-		t.Fatalf("VOID: %d pages to exceed the byte bound is not below the %d-page structural cap; this cell would measure the page cap, not the byte bound", pagesToExceed, maxOwnerRGExportDataPages)
-	}
+// TestOwnerRGExportStreamsSixteenWorkerWindow16515 is the #16515 acceptance:
+// 16 workers x 65536 forward deltas = 1048576 deltas over 128 full pages
+// must COMPLETE through the streaming API. The counting sink retains only
+// a count, so this passes only if the collector no longer holds a
+// []SessionDeltaInfo window under a byte budget. On the pre-#16515 code the
+// 256 MiB actual-bytes bound tripped around page 51-62 of this window
+// (realistic ~646 B rows / 520 B struct floor) and returned
+// ErrOwnerRGExportIncomplete with zero collected.
+func TestOwnerRGExportStreamsSixteenWorkerWindow16515(t *testing.T) {
 	m, _, sock := pagingManager9344(t, MinProtocolOwnerRGExportPaging)
-	pages := make([]pageReply9344, pagesToExceed)
-	for i := range pagesToExceed {
-		pages[i] = pageReply9344{deltas: ownerRGExportPageDeltas, more: true}
+	const pages = 128 // 128 * 8192 = 1048576 = 16 * 65536 forward deltas
+	replies := make([]pageReply9344, pages)
+	for i := range pages - 1 {
+		replies[i] = pageReply9344{deltas: ownerRGExportPageDeltas, more: true}
 	}
-	h := startPagingHelper9344(t, sock, pages)
+	replies[pages-1] = pageReply9344{deltas: ownerRGExportPageDeltas, more: false}
+	h := startPagingHelper9344(t, sock, replies)
 
-	deltas, _, err := m.ExportOwnerRGSessionsPaged([]int{1})
-	if !errors.Is(err, ErrOwnerRGExportIncomplete) {
-		t.Fatalf("err = %v, want ErrOwnerRGExportIncomplete from the actual byte bound", err)
+	counted := 0
+	pageCount := 0
+	_, collected, err := m.ExportOwnerRGSessionsPagedStream([]int{1}, OwnerRGExportPageFunc(func(deltas []SessionDeltaInfo) error {
+		pageCount++
+		if len(deltas) != ownerRGExportPageDeltas {
+			t.Errorf("page %d carried %d deltas, want %d", pageCount, len(deltas), ownerRGExportPageDeltas)
+		}
+		counted += len(deltas)
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("#16515: 128-page sixteen-worker window must complete via stream, got %v after %d requests", err, len(h.got))
 	}
-	if deltas != nil {
-		t.Fatalf("returned %d deltas alongside accumulator-budget error", len(deltas))
+	if collected != pages*ownerRGExportPageDeltas || counted != collected {
+		t.Fatalf("collected=%d counted=%d, want %d", collected, counted, pages*ownerRGExportPageDeltas)
 	}
-	// The refusing page is requested, then refused before append: the
-	// helper sees exactly the first page past the bound.
-	if len(h.got) != pagesToExceed {
-		t.Fatalf("helper saw %d requests, want %d (the bound trips on that page)", len(h.got), pagesToExceed)
+	if pageCount != pages {
+		t.Fatalf("sink saw %d pages, want %d", pageCount, pages)
+	}
+	if len(h.got) != pages {
+		t.Fatalf("helper saw %d requests, want %d", len(h.got), pages)
+	}
+}
+
+// TestOwnerRGExportStreamSinkErrorAborts16515 pins fail-closed on sink error:
+// an error from the page sink aborts the window and is returned, and no
+// further page is requested.
+func TestOwnerRGExportStreamSinkErrorAborts16515(t *testing.T) {
+	m, _, sock := pagingManager9344(t, MinProtocolOwnerRGExportPaging)
+	h := startPagingHelper9344(t, sock, []pageReply9344{
+		{deltas: 2, more: true},
+		{deltas: 2, more: false},
+	})
+	sentinel := errors.New("sink refused page")
+	_, _, err := m.ExportOwnerRGSessionsPagedStream([]int{1}, OwnerRGExportPageFunc(func(deltas []SessionDeltaInfo) error {
+		return sentinel
+	}))
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("err = %v, want sink sentinel", err)
+	}
+	if len(h.got) != 1 {
+		t.Fatalf("helper saw %d requests, want 1 (sink error must abort paging)", len(h.got))
 	}
 }
 
@@ -505,8 +524,8 @@ func TestOwnerRGExportRefusesWithoutThePagingContract9856(t *testing.T) {
 // field a full-width IPv6 literal, every numeric at its type maximum — so a
 // field added to the wire schema moves this measurement instead of leaving a
 // stale number in a comment. The measured value is also the lower bound for
-// ownerRGExportEstimatedDeltaBytes, which sizes ONE page (#15161: retained
-// deltas are charged ownerRGExportActualDeltaBytes, not this worst case).
+// ownerRGExportEstimatedDeltaBytes, which sizes ONE page (#16515: retained
+// deltas are no longer charged at all; pages stream to a sink).
 func TestOwnerRGExportPageFitsTheResponseCap9344(t *testing.T) {
 	worst := worstCaseDeltaBytes9344(t)
 	if worst < 200 {
