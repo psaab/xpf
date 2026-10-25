@@ -76,6 +76,33 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test/incus/wire-gate-lib.sh
 source "${SCRIPT_DIR}/wire-gate-lib.sh"
+
+# #11416 populated-RI transcript (pure printer, no incus): the single source
+# of the add/delete CLI statements cli_commit_populated sends live. The live
+# path resolves these vars from cluster-env/defaults below; the selftest pins
+# them to the fixture defaults explicitly so the rendered statements are
+# deterministic without a cluster. Defaults here mirror the live defaults.
+RI_NAME="${RI_NAME:-wire-10136}"
+DEST_IP="${DEST_IP:-172.16.80.201}"
+WAN_SRC="${WAN_SRC:-172.16.80.8}"
+POPULATED_GRE_UNIT="${POPULATED_GRE_UNIT:-gr-0/0/1.0}"
+POPULATED_GRE_DEV="${POPULATED_GRE_DEV:-gr-0/0/1}"
+POPULATED_GRE_ADDR="${POPULATED_GRE_ADDR:-198.18.117.1}"
+POPULATED_ZONE="${POPULATED_ZONE:-wire-vrf}"
+populated_cli_transcript() {
+    local action="$1"
+    if [[ "$action" == add ]]; then
+        printf 'configure\nrollback 0\nset interfaces %s tunnel source %s\nset interfaces %s tunnel destination %s\nset interfaces %s unit 0 family inet address %s/32\nset routing-instances %s interface %s\nset security zones security-zone %s interfaces %s\nset security policies from-zone lan to-zone %s policy wire-vrf-allow match source-address any\nset security policies from-zone lan to-zone %s policy wire-vrf-allow match destination-address any\nset security policies from-zone lan to-zone %s policy wire-vrf-allow match application any\nset security policies from-zone lan to-zone %s policy wire-vrf-allow then permit\nset security nat source rule-set lan-to-wire-vrf from zone lan\nset security nat source rule-set lan-to-wire-vrf to zone %s\nset security nat source rule-set lan-to-wire-vrf rule snat match source-address 0.0.0.0/0\nset security nat source rule-set lan-to-wire-vrf rule snat then source-nat interface\ncommit check\ncommit\nexit\nquit\n' \
+            "$POPULATED_GRE_DEV" "$WAN_SRC" "$POPULATED_GRE_DEV" "$DEST_IP" \
+            "$POPULATED_GRE_DEV" "$POPULATED_GRE_ADDR" "$RI_NAME" "$POPULATED_GRE_UNIT" \
+            "$POPULATED_ZONE" "$POPULATED_GRE_UNIT" \
+            "$POPULATED_ZONE" "$POPULATED_ZONE" "$POPULATED_ZONE" "$POPULATED_ZONE" \
+            "$POPULATED_ZONE"
+    else
+        printf 'configure\nrollback 0\ndelete security nat source rule-set lan-to-wire-vrf\ndelete security policies from-zone lan to-zone %s\ndelete security zones security-zone %s\ndelete routing-instances %s interface %s\ndelete interfaces %s\ncommit check\ncommit\nexit\nquit\n' \
+            "$POPULATED_ZONE" "$POPULATED_ZONE" "$RI_NAME" "$POPULATED_GRE_UNIT" "$POPULATED_GRE_DEV"
+    fi
+}
 cli_commit_succeeded() {
     local out="$1"
     grep -qE '^[[:space:]]*configuration check succeeds[[:space:]]*$' <<<"$out" &&
@@ -187,27 +214,39 @@ if [[ "$MODE" == selftest ]]; then
     fi
     rm -f "$set_a" "$set_b" "$set_c" "$set_d"
 
-    # #11416 fixture-shape guards (source-text, no cluster): the populated
-    # GRE member must land in the dedicated wire-vrf zone with its own
-    # lan->wire-vrf permit + SNAT, never in the cross-context wan zone.
-    # Reverting the zone to wan (or dropping the policy/NAT pair) makes the
-    # populated commit collide with the #11061 validator again — these
-    # cells are the unit-level proof that cannot happen by construction.
-    script_text="$(cat "$0")"
-    wan_zone_lines="$(grep 'security-zone wan interfaces' "$0" | grep -vc 'wan_zone_lines' || true)"
-    if [[ "$script_text" == *'set security zones security-zone %s interfaces %s'* &&
-        "$script_text" == *'from-zone lan to-zone %s policy wire-vrf-allow'* &&
-        "$script_text" == *'rule-set lan-to-wire-vrf to zone %s'* &&
-        "$wan_zone_lines" == 0 ]]; then
+    # #11416 fixture-shape guards (#16516, rendered transcript, no cluster):
+    # assert on the statements populated_cli_transcript actually prints rather
+    # than on the source text, whose guard needles self-matched and let a
+    # dropped policy/NAT pair stay green. The GRE
+    # member must land in the dedicated wire-vrf zone with its own lan->wire-vrf
+    # permit + SNAT, never in the cross-context wan zone. Reverting the zone to
+    # wan (or dropping the policy/NAT pair) makes the populated commit collide
+    # with the #11061 validator again — these cells are the unit-level proof
+    # that cannot happen by construction.
+    RI_NAME=wire-10136 DEST_IP=172.16.80.201 WAN_SRC=172.16.80.8 \
+        POPULATED_GRE_UNIT=gr-0/0/1.0 POPULATED_GRE_DEV=gr-0/0/1 \
+        POPULATED_GRE_ADDR=198.18.117.1 POPULATED_ZONE=wire-vrf
+    pop_add="$(populated_cli_transcript add)"
+    pop_del="$(populated_cli_transcript delete)"
+    if [[ "$pop_add" == *$'set security zones security-zone wire-vrf interfaces gr-0/0/1.0\n'* &&
+        "$pop_add" == *$'set security policies from-zone lan to-zone wire-vrf policy wire-vrf-allow match source-address any\n'* &&
+        "$pop_add" == *$'set security policies from-zone lan to-zone wire-vrf policy wire-vrf-allow match destination-address any\n'* &&
+        "$pop_add" == *$'set security policies from-zone lan to-zone wire-vrf policy wire-vrf-allow match application any\n'* &&
+        "$pop_add" == *$'set security policies from-zone lan to-zone wire-vrf policy wire-vrf-allow then permit\n'* &&
+        "$pop_add" == *$'set security nat source rule-set lan-to-wire-vrf from zone lan\n'* &&
+        "$pop_add" == *$'set security nat source rule-set lan-to-wire-vrf to zone wire-vrf\n'* &&
+        "$pop_add" == *$'set security nat source rule-set lan-to-wire-vrf rule snat match source-address 0.0.0.0/0\n'* &&
+        "$pop_add" == *$'set security nat source rule-set lan-to-wire-vrf rule snat then source-nat interface\n'* &&
+        "$pop_add" != *'security-zone wan interfaces'* ]]; then
         echo "  PASS  populated GRE member uses dedicated wire-vrf zone, not wan"
         pass=$((pass + 1))
     else
         echo "  FAIL  populated GRE member uses dedicated wire-vrf zone, not wan"
         fail=$((fail + 1))
     fi
-    if [[ "$script_text" == *'delete security policies from-zone lan to-zone %s'* &&
-        "$script_text" == *'delete security nat source rule-set lan-to-wire-vrf'* &&
-        "$script_text" == *'delete security zones security-zone %s'* ]]; then
+    if [[ "$pop_del" == *$'delete security nat source rule-set lan-to-wire-vrf\n'* &&
+        "$pop_del" == *$'delete security policies from-zone lan to-zone wire-vrf\n'* &&
+        "$pop_del" == *$'delete security zones security-zone wire-vrf\n'* ]]; then
         echo "  PASS  populated cleanup deletes owned zone policy and SNAT"
         pass=$((pass + 1))
     else
@@ -393,14 +432,14 @@ NODE="${NODE:-${FW0:-${INCUS_REMOTE}:xpf-userspace-fw0}}"
 NODE0="${FW0:-${INCUS_REMOTE}:xpf-userspace-fw0}"
 NODE1="${FW1:-${INCUS_REMOTE}:xpf-userspace-fw1}"
 TARGET="${TARGET:-${MOUSE_TARGET_REF}}"
-RI_NAME="${RI_NAME:-wire-10136}"
+# (also defaulted at the populated_cli_transcript printer; env wins)
 [[ "$RI_NAME" =~ ^[A-Za-z][A-Za-z0-9_-]{0,31}$ ]] || {
     printf 'WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0 precommit_control_offered=0 precommit_control_observed=0 populated_offered=0 populated_observed=0 populated_control_offered=0 populated_control_observed=0 removed_offered=0 removed_observed=0 removed_control_offered=0 removed_control_observed=0\n'
     exit 2
 }
 VRF_NAME="${VRF_NAME:-vrf-${RI_NAME}}"
 VRF_TABLE=""
-DEST_IP="${DEST_IP:-172.16.80.201}"
+# DEST_IP defaulted at the printer above; env still wins.
 EGRESS_DEV="${EGRESS_DEV:-ge-0-0-2.80}"
 # #11416 populated-RI positive leg. The GRE member is test-owned: its underlay
 # source is the FW's own reth0.80 address (outer transport deliberately stays
@@ -408,10 +447,7 @@ EGRESS_DEV="${EGRESS_DEV:-ge-0-0-2.80}"
 # its unit address comes from the 198.18.0.0/15 benchmark range already
 # reserved for this fixture family. Absence is checked against both node
 # baselines before any write.
-WAN_SRC="${WAN_SRC:-172.16.80.8}"
-POPULATED_GRE_UNIT="${POPULATED_GRE_UNIT:-gr-0/0/1.0}"
-POPULATED_GRE_DEV="${POPULATED_GRE_DEV:-gr-0/0/1}"
-POPULATED_GRE_ADDR="${POPULATED_GRE_ADDR:-198.18.117.1}"
+# WAN_SRC/POPULATED_GRE_* defaulted at the printer above; env still wins.
 LAN_REF="${CLUSTER_LAN_HOST:-${INCUS_REMOTE}:cluster-userspace-host}"
 LAN_ADDR="${LAN_ADDR:-${LAN_HOST_IP:-10.0.61.102}}"
 LAN_ADDR="${LAN_ADDR%%/*}"
@@ -546,28 +582,13 @@ cli_commit_probe_allow() {
 # leaf. The member must NOT join the existing wan zone: wan also carries
 # MAIN-context reth0.50/.80, so the #11061 fabric-zone validator rejects a
 # zone spanning MAIN and the RI (the 2026-10-16 live VOID).
-POPULATED_ZONE="${POPULATED_ZONE:-wire-vrf}"
 cli_commit_populated() {
     local action="$1" out
-    if [[ "$action" == add ]]; then
-        out="$(printf 'configure\nrollback 0\nset interfaces %s tunnel source %s\nset interfaces %s tunnel destination %s\nset interfaces %s unit 0 family inet address %s/32\nset routing-instances %s interface %s\nset security zones security-zone %s interfaces %s\nset security policies from-zone lan to-zone %s policy wire-vrf-allow match source-address any\nset security policies from-zone lan to-zone %s policy wire-vrf-allow match destination-address any\nset security policies from-zone lan to-zone %s policy wire-vrf-allow match application any\nset security policies from-zone lan to-zone %s policy wire-vrf-allow then permit\nset security nat source rule-set lan-to-wire-vrf from zone lan\nset security nat source rule-set lan-to-wire-vrf to zone %s\nset security nat source rule-set lan-to-wire-vrf rule snat match source-address 0.0.0.0/0\nset security nat source rule-set lan-to-wire-vrf rule snat then source-nat interface\ncommit check\ncommit\nexit\nquit\n' \
-            "$POPULATED_GRE_DEV" "$WAN_SRC" "$POPULATED_GRE_DEV" "$DEST_IP" \
-            "$POPULATED_GRE_DEV" "$POPULATED_GRE_ADDR" "$RI_NAME" "$POPULATED_GRE_UNIT" \
-            "$POPULATED_ZONE" "$POPULATED_GRE_UNIT" \
-            "$POPULATED_ZONE" "$POPULATED_ZONE" "$POPULATED_ZONE" "$POPULATED_ZONE" \
-            "$POPULATED_ZONE" |
-            $SG "incus exec ${NODE} -- cli" 2>&1)" || {
-            printf '%s\n' "$out" >&2
-            return 1
-        }
-    else
-        out="$(printf 'configure\nrollback 0\ndelete security nat source rule-set lan-to-wire-vrf\ndelete security policies from-zone lan to-zone %s\ndelete security zones security-zone %s\ndelete routing-instances %s interface %s\ndelete interfaces %s\ncommit check\ncommit\nexit\nquit\n' \
-            "$POPULATED_ZONE" "$POPULATED_ZONE" "$RI_NAME" "$POPULATED_GRE_UNIT" "$POPULATED_GRE_DEV" |
-            $SG "incus exec ${NODE} -- cli" 2>&1)" || {
-            printf '%s\n' "$out" >&2
-            return 1
-        }
-    fi
+    out="$(populated_cli_transcript "$action" |
+        $SG "incus exec ${NODE} -- cli" 2>&1)" || {
+        printf '%s\n' "$out" >&2
+        return 1
+    }
     if ! cli_commit_succeeded "$out"; then
         printf '%s\n' "$out" >&2
         return 1
