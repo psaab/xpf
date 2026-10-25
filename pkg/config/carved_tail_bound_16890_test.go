@@ -92,6 +92,7 @@ func carvedComposedTailBoundaryTree16890(t *testing.T, totalSequences int) *Conf
 	first := (totalSequences + 1) / 2
 	second := totalSequences - first
 	sets := []string{
+		"set routing-options autonomous-system 65000",
 		"set protocols bgp group g neighbor 192.0.2.1 peer-as 65001",
 		"set protocols bgp group g neighbor 192.0.2.1 export [ A B ]",
 		"set protocols bgp group g neighbor 192.0.2.2 peer-as 65002",
@@ -113,6 +114,7 @@ func carvedComposedTailBoundaryTree16890(t *testing.T, totalSequences int) *Conf
 func carvedTailBoundaryTree16890(t *testing.T, termSequences int, nextPolicy, explicitDefault bool) *ConfigTree {
 	t.Helper()
 	sets := []string{
+		"set routing-options autonomous-system 65000",
 		"set protocols bgp group g neighbor 192.0.2.1 peer-as 65001",
 		"set protocols bgp group g neighbor 192.0.2.1 export BIG",
 		"set protocols bgp group g neighbor 192.0.2.2 peer-as 65002",
