@@ -85,21 +85,39 @@ func ValidatePolicerBurstSize(raw string) error {
 	return nil
 }
 
-// validateThreeColorPolicerBurstSize11827 preserves the existing strict
-// compiler contract for three-color buckets: any positive, representable
-// byte count is accepted. The legacy firewall policer validator also adds
-// a 1500-byte minimum, which is outside this diagnostic-only change.
+// minThreeColorBurstBytes16610 is the one-frame floor for every
+// three-color burst bucket (#16610, twin of #10310's minPolicerBurstBytes).
+// The userspace meter charges the full Ethernet frame (meta.pkt_len is the
+// buffer length, #8581), so a bucket below one maximum-sized frame
+// (1500-byte MTU payload + 14-byte Ethernet header, untagged) can never
+// admit that frame: it colours Red at any offered rate and `then discard`
+// drops it, silently turning the meter into a frame-size filter. Junos
+// gives 1500 as the minimum for all four leaves; the charged cost here is
+// frame bytes, so the floor is expressed in that unit (1514).
+const minThreeColorBurstBytes16610 uint64 = 1514
+
+// validateThreeColorPolicerBurstSize11827 validates a three-color burst
+// leaf (#11827 diagnostics; #16610 one-frame floor). Any positive,
+// representable byte count below minThreeColorBurstBytes16610 is rejected:
+// such a bucket cannot admit one ordinary maximum-sized frame.
 func validateThreeColorPolicerBurstSize11827(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		return fmt.Errorf("missing value (expected a positive burst size in bytes, e.g. 1k, 1500, 15k)")
+		return fmt.Errorf("missing value (expected a burst size in bytes, e.g. 1514, 15k)")
 	}
 	n, err := parseBurstSizeLimitStrict(trimmed)
 	if err != nil {
-		return fmt.Errorf("not a valid burst size (expected bytes, optionally with a k/m/g suffix, e.g. 1k or 15k): %w", err)
+		return fmt.Errorf("not a valid burst size (expected bytes, optionally with a k/m/g suffix, e.g. 1514 or 15k): %w", err)
 	}
 	if n == 0 {
 		return fmt.Errorf("burst size must be positive (at least one byte)")
+	}
+	if n < minThreeColorBurstBytes16610 {
+		return fmt.Errorf(
+			"burst size must be at least one maximum-sized frame (%d bytes: 1500-byte packet plus 14-byte Ethernet header, the meter's frame-byte cost unit), got %d",
+			minThreeColorBurstBytes16610,
+			n,
+		)
 	}
 	return nil
 }

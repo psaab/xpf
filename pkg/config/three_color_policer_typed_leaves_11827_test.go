@@ -17,10 +17,10 @@ type threeColorPolicerLeaf11827 struct {
 // declarations even though there are five distinct token names.
 var threeColorPolicerLeaves11827 = []threeColorPolicerLeaf11827{
 	{mode: "single-rate", name: "committed-information-rate", validValue: "1.5m", overflow: "1e309"},
-	{mode: "single-rate", name: "committed-burst-size", validValue: "1500", overflow: "18446744073709551616"},
+	{mode: "single-rate", name: "committed-burst-size", validValue: "1514", overflow: "18446744073709551616"},
 	{mode: "single-rate", name: "excess-burst-size", validValue: "15k", overflow: "18446744073709551616"},
 	{mode: "two-rate", name: "committed-information-rate", validValue: "1.5m", overflow: "1e309"},
-	{mode: "two-rate", name: "committed-burst-size", validValue: "1500", overflow: "18446744073709551616"},
+	{mode: "two-rate", name: "committed-burst-size", validValue: "1514", overflow: "18446744073709551616"},
 	{mode: "two-rate", name: "peak-information-rate", validValue: "1.5m", overflow: "1e309"},
 	{mode: "two-rate", name: "peak-burst-size", validValue: "15k", overflow: "18446744073709551616"},
 }
@@ -90,10 +90,10 @@ func TestThreeColorPolicerTypedLeavesAcceptValidValues11827(t *testing.T) {
 func TestThreeColorPolicerTypedLeavesPreserveJunosForms11827(t *testing.T) {
 	sets := []string{
 		"set firewall three-color-policer single single-rate committed-information-rate 1.5m",
-		"set firewall three-color-policer single single-rate committed-burst-size 1000",
+		"set firewall three-color-policer single single-rate committed-burst-size 1514",
 		"set firewall three-color-policer single single-rate excess-burst-size 2k",
 		"set firewall three-color-policer dual two-rate committed-information-rate 1m",
-		"set firewall three-color-policer dual two-rate committed-burst-size 1500",
+		"set firewall three-color-policer dual two-rate committed-burst-size 1514",
 		"set firewall three-color-policer dual two-rate peak-information-rate 1.5m",
 		"set firewall three-color-policer dual two-rate peak-burst-size 15k",
 	}

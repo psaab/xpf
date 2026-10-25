@@ -5,8 +5,14 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"strings"
 )
 
+// validateThreeColorPolicersStrict rejects three-color policers that are
+// structurally incomplete or whose burst buckets fall below the one-frame
+// floor (#16610). Strict on commit / commit-check; on tolerant load /
+// peer-sync the caller downgrades the burst-floor violation to a warning
+// (#1960 no-brick) — see validateThreeColorBurstFloor16610.
 func validateThreeColorPolicersStrict(policers map[string]*ThreeColorPolicerConfig) error {
 	for name, pol := range policers {
 		if pol == nil {
@@ -34,6 +40,9 @@ func validateThreeColorPolicersStrict(policers map[string]*ThreeColorPolicerConf
 			}
 			return fmt.Errorf("firewall three-color-policer %q requires positive excess-burst-size", displayName)
 		}
+		if err := validateThreeColorBurstFloor16610(displayName, pol); err != nil {
+			return err
+		}
 		if pol.TwoRate {
 			if pol.PIR == 0 {
 				return fmt.Errorf("firewall three-color-policer %q requires positive peak-information-rate", displayName)
@@ -47,6 +56,42 @@ func validateThreeColorPolicersStrict(policers map[string]*ThreeColorPolicerConf
 		}
 	}
 	return nil
+}
+
+// validateThreeColorBurstFloor16610 enforces the #16610 one-frame floor on
+// the ceiling bucket that decides whether a maximum-sized frame can ever
+// be admitted non-Red: max(CBS, EBS) for single-rate (a large EBS rescues
+// a frame as Yellow even when CBS is tiny, per RFC 2697 srTCM) and PBS
+// for two-rate (RFC 2698 trTCM; PBS >= CBS is separately gated, so PBS is
+// the ceiling). A ceiling below minThreeColorBurstBytes16610 colours every
+// full-size frame Red at any rate. Zero buckets are the caller's
+// "requires positive ..." case and are skipped here. Sorted iteration is
+// unnecessary: the caller returns the first policer error.
+func validateThreeColorBurstFloor16610(displayName string, pol *ThreeColorPolicerConfig) error {
+	if pol.TwoRate {
+		if pol.PBS != 0 && pol.PBS < minThreeColorBurstBytes16610 {
+			return fmt.Errorf("firewall three-color-policer %q peak-burst-size must be at least one maximum-sized frame (%d bytes: 1500-byte packet plus 14-byte Ethernet header, the meter's frame-byte cost unit), got %d", displayName, minThreeColorBurstBytes16610, pol.PBS)
+		}
+		return nil
+	}
+	ceiling := pol.CBS
+	ceilingLeaf := "committed-burst-size"
+	if pol.PBS > ceiling {
+		ceiling = pol.PBS
+		ceilingLeaf = "excess-burst-size"
+	}
+	if ceiling != 0 && ceiling < minThreeColorBurstBytes16610 {
+		return fmt.Errorf("firewall three-color-policer %q %s must be at least one maximum-sized frame (%d bytes: 1500-byte packet plus 14-byte Ethernet header, the meter's frame-byte cost unit) when it is the larger of committed-burst-size/excess-burst-size, got %d (committed-burst-size %d, excess-burst-size %d)", displayName, ceilingLeaf, minThreeColorBurstBytes16610, ceiling, pol.CBS, pol.PBS)
+	}
+	return nil
+}
+
+// threeColorBurstFloorError16610 reports whether err contains a #16610
+// burst-floor violation from validateThreeColorPolicersStrict, so the
+// tolerant path can downgrade only that violation to a warning while
+// keeping every other three-color defect strict (#1960).
+func threeColorBurstFloorError16610(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "maximum-sized frame")
 }
 
 // validateFirewallPolicerLimitsStrict hard-rejects a single-rate policer
