@@ -828,10 +828,13 @@ re-picking the live implicit source) and retries that packet on the
 fresh socket; a healthy socket whose source was renumbered away but
 whose writes still succeed (the IPv6 leg) is re-dialed by the
 pre-write canary, and `health()` reports it unhealthy with a
-not-assigned reason. A failure with the source still assigned keeps
-the unhealthy+backoff behaviour with no re-dial churn. A failed
-re-dial parks the collector unhealthy behind the existing probe
-backoff instead of writing from the removed address.
+not-assigned reason. "Assigned" means an assigned address's IP exactly
+equals the socket source, ignoring the on-link mask (#16757) — prefix
+containment would miss a same-subnet DHCP/SLAAC renumber. A failure
+with the source still assigned keeps the unhealthy+backoff behaviour
+with no re-dial churn. A failed re-dial parks the collector unhealthy
+behind the existing probe backoff instead of writing from the removed
+address.
 
 The snapshot is surfaced through `Exporter.CollectorHealth()` /
 `IPFIXExporter.CollectorHealth()` → `Daemon.FlowCollectorHealth()`
