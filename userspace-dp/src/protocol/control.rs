@@ -331,7 +331,11 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // config-authored next-table statics. A v72 helper ignores it and
 // keeps the target-miss fall-through to inet.0's default — the WAN
 // leak the field exists to close — so exact equality must refuse it.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 73;
+// v73 -> v74 (#16841): no_ipv6_reject_zero_hop_limit changes meaning:
+// it now admits hop-limit-0 IPv6 to local addresses instead of
+// suppressing transit Time Exceeded. A v73 helper keeps the #15707
+// behaviour, so exact equality must refuse the pairing.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 74;
 
 /// #16589: hard cap on lease rows in ONE paged lease-export response.
 /// Sized so even a worst-case row (many permitted remotes) stays far

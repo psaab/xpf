@@ -186,13 +186,10 @@ func emitDHCPBackstopGapDropNetlink(p *nlPlan, f nlFamily, netdevs, vrfSlaves, r
 // that signal back into an authoritative zero — add a distinct fence-state
 // signal instead.
 func buildHostInboundFenceNetlink(p *nlPlan, spec FenceSpec) {
+	EmitZeroHopLimitLocalDrop(p, spec.NoIPv6RejectZeroHopLimit)
 	emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyFenceRules(
 		spec.Views, spec.UnzonedV4, spec.UnzonedV6, spec.WGListenPorts,
 	))
-	// Preserve global ESP/AH and catalog guards. Mandatory L3 admits precede
-	// the non-unicast fence, which in turn must precede established flows.
-	p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
-	emitHostInboundMulticastFenceDropsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
 	emitHostInboundFenceL3AdmitsNetlink(p, spec.Views)
 	p.rule().daddr(famV6, []string{"ff02::/16"}, false).
 		icmpType(famV6, []uint8{130, 131, 132, 143}).emit(verdictReturn()...)
@@ -210,6 +207,7 @@ func buildLo0FenceNetlink(p *nlPlan, spec FenceSpec) {
 }
 
 func buildFenceMandatoryDropsNetlink(p *nlPlan, spec FenceSpec) {
+	EmitZeroHopLimitLocalDrop(p, spec.NoIPv6RejectZeroHopLimit)
 	hostInboundFenceMandatoryAdmitsNetlinkViews(p, spec.Views)
 	buildFenceDropsAfterMandatoryAdmitsNetlink(p, spec)
 }
@@ -242,6 +240,7 @@ func buildFenceDropsAfterMandatoryAdmitsNetlink(p *nlPlan, spec FenceSpec) {
 // excluding retained covered destinations. The caller has created the table +
 // `input` chain (priority nftHostInboundGapPriority, policy accept).
 func buildHostInboundGapFenceNetlink(p *nlPlan, spec GapFenceSpec) {
+	EmitZeroHopLimitLocalDrop(p, spec.NoIPv6RejectZeroHopLimit)
 	emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(
 		nil, spec.UncoveredV4, spec.UncoveredV6, spec.WGListenPorts, false,
 	))

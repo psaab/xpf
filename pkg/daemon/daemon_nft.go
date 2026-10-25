@@ -569,16 +569,17 @@ func (d *Daemon) installLo0ColdBootFence(sets dpuserspace.FenceAddrSets, wgZoneP
 	}
 	logFenceWithheld(xnft.Lo0TableName, sets)
 	spec := xnft.FenceSpec{
-		Views:                toNftViews(views),
-		UnzonedV4:            unzonedV4,
-		UnzonedV6:            unzonedV6,
-		WGZonePorts:          wgZonePorts,
-		UnleasedV4:           sets.UnleasedV4,
-		UnleasedV6:           sets.UnleasedV6,
-		UnleasedVRFSlavesV4:  sets.UnleasedVRFSlavesV4,
-		UnleasedVRFSlavesV6:  sets.UnleasedVRFSlavesV6,
-		DHCPv6Admit:          sets.AdmitV6,
-		DHCPv6AdmitVRFSlaves: sets.AdmitVRFSlavesV6,
+		Views:                    toNftViews(views),
+		UnzonedV4:                unzonedV4,
+		UnzonedV6:                unzonedV6,
+		WGZonePorts:              wgZonePorts,
+		UnleasedV4:               sets.UnleasedV4,
+		UnleasedV6:               sets.UnleasedV6,
+		UnleasedVRFSlavesV4:      sets.UnleasedVRFSlavesV4,
+		UnleasedVRFSlavesV6:      sets.UnleasedVRFSlavesV6,
+		DHCPv6Admit:              sets.AdmitV6,
+		DHCPv6AdmitVRFSlaves:     sets.AdmitVRFSlavesV6,
+		NoIPv6RejectZeroHopLimit: sets.NoIPv6RejectZeroHopLimit,
 	}
 	if err := hostAuthNftInstaller14969().InstallLo0ColdBootFence(spec); err != nil {
 		err = tagNftInstallErr(err)
@@ -679,6 +680,11 @@ func buildLo0FilterPayload(cfg *config.Config, filterV4, filterV6 string) string
 	rules = append(rules, "  chain input {")
 	// #3364: explicit distinct priority so lo0 evaluates BEFORE xpf_hostinbound.
 	rules = append(rules, fmt.Sprintf("    type filter hook input priority %d; policy accept;", nftLo0FilterPriority))
+	if cfg.System.InternetOptions == nil || !cfg.System.InternetOptions.NoIPv6RejectZeroHopLimit {
+		if drop := zeroHopLimitLocalDropText(false); drop != "" {
+			rules = append(rules, drop)
+		}
+	}
 	rules = append(rules, ruleLines...)
 	rules = append(rules, "  }")
 	rules = append(rules, "}")
@@ -760,12 +766,13 @@ func (d *Daemon) applyHostInboundPreNetworkdAddressFence(cfg *config.Config) err
 		return nil
 	}
 	spec := xnft.GapFenceSpec{
-		PreActivation:   true,
-		UncoveredV4:     uncoveredV4,
-		UncoveredV6:     uncoveredV6,
-		SharedV4:        sharedV4,
-		SharedV6:        sharedV6,
-		LifelineNetdevs: lifelines,
+		PreActivation:            true,
+		UncoveredV4:              uncoveredV4,
+		UncoveredV6:              uncoveredV6,
+		SharedV4:                 sharedV4,
+		SharedV6:                 sharedV6,
+		LifelineNetdevs:          lifelines,
+		NoIPv6RejectZeroHopLimit: cfg.System.InternetOptions != nil && cfg.System.InternetOptions.NoIPv6RejectZeroHopLimit,
 	}
 	if err := d.installHostInboundGapFence(spec); err != nil {
 		d.noteHostInboundGapApplyResult(err)
@@ -1066,6 +1073,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// via H7); the flag is untouched and the next call-site outcome re-drives
 	// it — see hostInboundDataplaneFresh for the full transition table.
 	spec := toNftHostInboundSpecWithUnzonedIngress(views, unzonedV4, unzonedV6, unzonedIngressNetdevs, unzonedIngressVRFSlaves, programs, wgListenPorts, wgZonePorts, d.hostInboundDataplaneFresh.Load(), overlay)
+	spec.NoIPv6RejectZeroHopLimit = cfg.System.InternetOptions != nil && cfg.System.InternetOptions.NoIPv6RejectZeroHopLimit
 	spec.UnleasedV4, spec.UnleasedV6 = unleasedV4, unleasedV6
 	spec.UnleasedVRFSlavesV4, spec.UnleasedVRFSlavesV6 = dhcpBackstops.VRFSlavesV4, dhcpBackstops.VRFSlavesV6
 	spec.DHCPv6Admit, spec.DHCPv6AdmitVRFSlaves = dhcpBackstops.AdmitV6, dhcpBackstops.AdmitVRFSlavesV6
@@ -1144,22 +1152,23 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			hasDHCPBackstop := len(unleasedV4)+len(unleasedV6)+len(dhcpBackstops.VRFSlavesV4)+len(dhcpBackstops.VRFSlavesV6) > 0
 			if len(uncoveredV4) > 0 || len(uncoveredV6) > 0 || hasDHCPBackstop {
 				spec := xnft.GapFenceSpec{
-					Views:                toNftViews(views),
-					UncoveredV4:          uncoveredV4,
-					UncoveredV6:          uncoveredV6,
-					WGListenPorts:        wgListenPorts,
-					WGZonePorts:          wgZonePorts,
-					UnleasedV4:           unleasedV4,
-					UnleasedV6:           unleasedV6,
-					UnleasedVRFSlavesV4:  dhcpBackstops.VRFSlavesV4,
-					UnleasedVRFSlavesV6:  dhcpBackstops.VRFSlavesV6,
-					DHCPv6Admit:          dhcpBackstops.AdmitV6,
-					DHCPv6AdmitVRFSlaves: dhcpBackstops.AdmitVRFSlavesV6,
-					SharedV4:             sharedV4,
-					SharedV6:             sharedV6,
-					LifelineNetdevs:      dpuserspace.HostInboundLifelineIngressNetdevs(cfg),
-					RetainedV4:           retainedV4,
-					RetainedV6:           retainedV6,
+					Views:                    toNftViews(views),
+					UncoveredV4:              uncoveredV4,
+					UncoveredV6:              uncoveredV6,
+					WGListenPorts:            wgListenPorts,
+					WGZonePorts:              wgZonePorts,
+					UnleasedV4:               unleasedV4,
+					UnleasedV6:               unleasedV6,
+					UnleasedVRFSlavesV4:      dhcpBackstops.VRFSlavesV4,
+					UnleasedVRFSlavesV6:      dhcpBackstops.VRFSlavesV6,
+					DHCPv6Admit:              dhcpBackstops.AdmitV6,
+					DHCPv6AdmitVRFSlaves:     dhcpBackstops.AdmitVRFSlavesV6,
+					SharedV4:                 sharedV4,
+					SharedV6:                 sharedV6,
+					LifelineNetdevs:          dpuserspace.HostInboundLifelineIngressNetdevs(cfg),
+					RetainedV4:               retainedV4,
+					RetainedV6:               retainedV6,
+					NoIPv6RejectZeroHopLimit: cfg.System.InternetOptions != nil && cfg.System.InternetOptions.NoIPv6RejectZeroHopLimit,
 				}
 				if gapErr := d.installHostInboundGapFence(spec); gapErr != nil {
 					// A day-2 double failure has no protecting fence for the
@@ -1622,19 +1631,20 @@ func (d *Daemon) installHostInboundColdBootFence(sets dpuserspace.FenceAddrSets,
 	// #6387 PR-3: install via netlink (parity-proven equivalent to the exec-`nft`
 	// buildHostInboundFencePayload oracle).
 	spec := xnft.FenceSpec{
-		Views:                   toNftViews(views),
-		UnzonedV4:               unzonedV4,
-		UnzonedV6:               unzonedV6,
-		WGListenPorts:           wgListenPorts,
-		WGZonePorts:             wgZonePorts,
-		UnleasedV4:              sets.UnleasedV4,
-		UnleasedV6:              sets.UnleasedV6,
-		UnleasedVRFSlavesV4:     sets.UnleasedVRFSlavesV4,
-		UnleasedVRFSlavesV6:     sets.UnleasedVRFSlavesV6,
-		DHCPv6Admit:             sets.AdmitV6,
-		DHCPv6AdmitVRFSlaves:    sets.AdmitVRFSlavesV6,
-		UnzonedIngressNetdevs:   sets.UnzonedIngressNetdevs,
-		UnzonedIngressVRFSlaves: sets.UnzonedIngressVRFSlaves,
+		Views:                    toNftViews(views),
+		UnzonedV4:                unzonedV4,
+		UnzonedV6:                unzonedV6,
+		WGListenPorts:            wgListenPorts,
+		WGZonePorts:              wgZonePorts,
+		UnleasedV4:               sets.UnleasedV4,
+		UnleasedV6:               sets.UnleasedV6,
+		UnleasedVRFSlavesV4:      sets.UnleasedVRFSlavesV4,
+		UnleasedVRFSlavesV6:      sets.UnleasedVRFSlavesV6,
+		DHCPv6Admit:              sets.AdmitV6,
+		DHCPv6AdmitVRFSlaves:     sets.AdmitVRFSlavesV6,
+		UnzonedIngressNetdevs:    sets.UnzonedIngressNetdevs,
+		UnzonedIngressVRFSlaves:  sets.UnzonedIngressVRFSlaves,
+		NoIPv6RejectZeroHopLimit: sets.NoIPv6RejectZeroHopLimit,
 	}
 	if err := hostAuthNftInstaller14969().InstallColdBootFence(spec); err != nil {
 		err = tagNftInstallErr(err)
@@ -1717,6 +1727,9 @@ func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.
 	rules = append(rules, "table inet "+tableName+" {")
 	rules = append(rules, "  chain input {")
 	rules = append(rules, fmt.Sprintf("    type filter hook input priority %d; policy accept;", priority))
+	if drop := zeroHopLimitLocalDropText(false); drop != "" {
+		rules = append(rules, drop)
+	}
 	if guardStaleReplies {
 		rules = append(rules, hostInboundStaleReplyGuardText(
 			xnft.HostInboundStaleReplyFenceRules(toNftViews(views), unzonedV4, unzonedV6, wgListenPorts),
@@ -2247,6 +2260,9 @@ func buildHostInboundGapFencePayloadForTable(tableName string, priority int, vie
 	rules = append(rules, "table inet "+tableName+" {")
 	rules = append(rules, "  chain input {")
 	rules = append(rules, fmt.Sprintf("    type filter hook input priority %d; policy accept;", priority))
+	if drop := zeroHopLimitLocalDropText(false); drop != "" {
+		rules = append(rules, drop)
+	}
 	rules = append(rules, hostInboundStaleReplyGuardText(
 		xnft.HostInboundStaleReplyGuardRules(nil, uncoveredV4, uncoveredV6, wgListenPorts, false),
 	)...)
@@ -2538,14 +2554,18 @@ func hostInboundHasIngressScope(views []dpuserspace.ZoneHostInboundView, unzoned
 //     removes an installed accept on the next render. The F3 window is closed by
 //     construction, not by probe.
 func buildHostInboundFilterPayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wgZonePorts map[string][]uint16, dataplaneFresh bool) string {
-	return buildHostInboundFilterPayloadWithOverlay(views, unzonedV4, unzonedV6, programs, wgZonePorts, dataplaneFresh, nil, nil, nil, dhcpBackstopLists{})
+	return buildHostInboundFilterPayloadWithAdmit(views, unzonedV4, unzonedV6, programs, wgZonePorts, dataplaneFresh, false)
+}
+
+func buildHostInboundFilterPayloadWithAdmit(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wgZonePorts map[string][]uint16, dataplaneFresh bool, admitZeroHop bool) string {
+	return buildHostInboundFilterPayloadWithUnzonedIngress(views, unzonedV4, unzonedV6, nil, nil, programs, wgZonePorts, dataplaneFresh, nil, nil, nil, dhcpBackstopLists{}, admitZeroHop)
 }
 
 func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wgZonePorts map[string][]uint16, dataplaneFresh bool, overlay *xnft.HostInputFenceOverlay, unleasedV4, unleasedV6 []string, vrfBackstop dhcpBackstopLists) string {
-	return buildHostInboundFilterPayloadWithUnzonedIngress(views, unzonedV4, unzonedV6, nil, nil, programs, wgZonePorts, dataplaneFresh, overlay, unleasedV4, unleasedV6, vrfBackstop)
+	return buildHostInboundFilterPayloadWithUnzonedIngress(views, unzonedV4, unzonedV6, nil, nil, programs, wgZonePorts, dataplaneFresh, overlay, unleasedV4, unleasedV6, vrfBackstop, false)
 }
 
-func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string, programs []dpuserspace.JunosHostProgram, wgZonePorts map[string][]uint16, dataplaneFresh bool, overlay *xnft.HostInputFenceOverlay, unleasedV4, unleasedV6 []string, vrfBackstop dhcpBackstopLists) string {
+func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string, programs []dpuserspace.JunosHostProgram, wgZonePorts map[string][]uint16, dataplaneFresh bool, overlay *xnft.HostInputFenceOverlay, unleasedV4, unleasedV6 []string, vrfBackstop dhcpBackstopLists, admitZeroHop ...bool) string {
 	// #11076: the stale-reply guards are scope-independent (port set only);
 	// derive the flat set from the zone map. Nothing else in this builder
 	// may use flat ports — WireGuard admission is per-zone below.
@@ -2700,6 +2720,9 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 	rules = append(rules, "  chain input {")
 	// #3364: explicit distinct priority so host-inbound evaluates AFTER xpf_lo0.
 	rules = append(rules, fmt.Sprintf("    type filter hook input priority %d; policy accept;", nftHostInboundPriority))
+	if drop := zeroHopLimitLocalDropText(len(admitZeroHop) > 0 && admitZeroHop[0]); drop != "" {
+		rules = append(rules, drop)
+	}
 	if overlay != nil {
 		canonical := xnft.CanonicalHostInputFenceOverlay(*overlay)
 		for _, pair := range canonical.MasterSlavePairs {
@@ -2865,6 +2888,16 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 // counter (global rules, not per-zone). Factored out (#4146) so the payload
 // builder can place it either before the per-zone rules (no junos-host program)
 // or AFTER the fine junos-host DROP (coarse-then-fine order).
+// zeroHopLimitLocalDropText is the #16841 Junos default rejection for
+// the text oracle: hop-limit-0 IPv6 to a firewall-local destination is
+// dropped before any accept. Empty when the knob admits it.
+func zeroHopLimitLocalDropText(admit bool) string {
+	if admit {
+		return ""
+	}
+	return "    ip6 hoplimit 0 fib daddr type { local, anycast } drop"
+}
+
 func emitHostInboundICMPAccepts(rules *[]string, views []dpuserspace.ZoneHostInboundView) {
 	*rules = append(*rules, "    icmpv6 type { 1, 2, 3, 4 } counter name \""+xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptICMP6Error)+"\" accept")
 	// #15931: ND default accept, scoped to each retaining view's ingress.

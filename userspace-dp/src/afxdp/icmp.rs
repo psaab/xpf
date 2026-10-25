@@ -207,11 +207,11 @@ pub(super) fn packet_ttl_would_expire(frame: &[u8], meta: UserspaceDpMeta) -> Op
     }
 }
 
-/// #15707: the IPv6 hop limit carried by `frame`, or `None` when the
-/// frame is not a parseable IPv6 packet. Used to distinguish a packet
-/// that ARRIVED with hop limit 0 (the `no-ipv6-reject-zero-hop-limit`
-/// case) from one that merely expires after the forwarding decrement
-/// (hop limit 1).
+/// #16841: the IPv6 hop limit carried by `frame`, or `None` when the
+/// frame is not a parseable IPv6 packet. Used by the local-delivery
+/// zero-hop gate to distinguish a packet that ARRIVED with hop limit 0
+/// (the Junos `no-ipv6-reject-zero-hop-limit` case) from one that merely
+/// expires after the forwarding decrement (hop limit 1).
 pub(super) fn packet_hop_limit_v6(frame: &[u8], meta: UserspaceDpMeta) -> Option<u8> {
     if meta.addr_family as i32 != libc::AF_INET6 {
         return None;
@@ -221,6 +221,28 @@ pub(super) fn packet_hop_limit_v6(frame: &[u8], meta: UserspaceDpMeta) -> Option
         _ => frame_l3_offset(frame)?,
     };
     frame.get(l3 + 7).copied()
+}
+
+/// #16841: Junos `system internet-options no-ipv6-reject-zero-hop-limit`
+/// governs ONLY packets addressed to the local host: by default (knob
+/// unset) a hop-limit-0 IPv6 packet to a local address is REJECTED
+/// (dropped); with the knob set it is admitted. Transit packets are
+/// unaffected here — they are dropped with an ICMPv6 Time Exceeded
+/// under RFC 4443 §3.3 regardless of the knob (see
+/// `build_local_time_exceeded_v6`). `dst_is_local` must be the caller's
+/// table-scoped local-delivery verdict for this packet (a
+/// `LocalDelivery` resolution, or the shim's local-destination test),
+/// never a global address-membership guess.
+#[inline]
+pub(super) fn zero_hop_limit_local_drop(
+    forwarding: &ForwardingState,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    dst_is_local: bool,
+) -> bool {
+    dst_is_local
+        && !forwarding.no_ipv6_reject_zero_hop_limit
+        && packet_hop_limit_v6(frame, meta) == Some(0)
 }
 
 pub(super) fn build_local_time_exceeded_request(
@@ -239,16 +261,10 @@ pub(super) fn build_local_time_exceeded_request(
     if !matches!(packet_ttl_would_expire(frame, meta), Some(true)) {
         return None;
     }
-    // #15707: `system internet-options no-ipv6-reject-zero-hop-limit` —
-    // a packet that arrived with hop limit 0 must not draw an ICMPv6
-    // Time Exceeded (the Junos no-reject posture). A hop-limit-1 packet
-    // still expires normally. The trigger packet's disposition is
-    // unchanged (dropped here either way); only the error is suppressed.
-    if forwarding.no_ipv6_reject_zero_hop_limit
-        && packet_hop_limit_v6(frame, meta) == Some(0)
-    {
-        return None;
-    }
+    // #16841: transit Time Exceeded is UNCONDITIONAL (RFC 4443 §3.3,
+    // subject to the rate limiter below). The Junos
+    // `no-ipv6-reject-zero-hop-limit` knob governs only LOCAL delivery
+    // (see `zero_hop_limit_local_drop`); it must not suppress this error.
     // #2237: RFC 1812 §4.3.2.7 / RFC 4443 §2.4 suppression — do not
     // originate a Time Exceeded in reply to an ICMP error, a non-first
     // fragment, a group/broadcast destination, or a bogus source. The
@@ -667,15 +683,8 @@ pub(super) fn build_local_time_exceeded_v6(
     ingress_ifindex: i32,
     forwarding: &ForwardingState,
 ) -> Option<Vec<u8>> {
-    // #15707: `no-ipv6-reject-zero-hop-limit` suppresses the ICMPv6 Time
-    // Exceeded for a packet that arrived with hop limit 0. Direct
-    // callers of this builder get the same posture as the request path.
-    if forwarding.no_ipv6_reject_zero_hop_limit
-        && packet_hop_limit_v6(frame, meta) == Some(0)
-    {
-        return None;
-    }
-    // ICMPv6 Time Exceeded: type 3, code 0.
+    // ICMPv6 Time Exceeded: type 3, code 0. #16841: unconditional —
+    // the zero-hop knob no longer suppresses transit expiry here.
     build_local_icmp_error_v6(frame, meta, ingress_ifindex, forwarding, 3, 0)
 }
 

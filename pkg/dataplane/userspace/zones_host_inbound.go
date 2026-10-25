@@ -1758,6 +1758,8 @@ type FenceAddrSets struct {
 	// Unzoned input scopes for catalog-group default-deny during cold boot.
 	UnzonedIngressNetdevs   []string
 	UnzonedIngressVRFSlaves []string
+	// NoIPv6RejectZeroHopLimit (#16841) from the compiled config.
+	NoIPv6RejectZeroHopLimit bool
 }
 
 // BuildFenceAddrSets derives the cold-boot fence's drop scope from cfg and the
@@ -1770,6 +1772,7 @@ func buildFenceAddrSetsFromSnaps(cfg *config.Config, snaps []InterfaceSnapshot, 
 	if cfg == nil {
 		return out
 	}
+	out.NoIPv6RejectZeroHopLimit = cfg.System.InternetOptions != nil && cfg.System.InternetOptions.NoIPv6RejectZeroHopLimit
 	out.UnzonedIngressNetdevs, out.UnzonedIngressVRFSlaves =
 		BuildUnzonedHostInboundIngressNetdevsFromSnapshots(cfg, snaps, views)
 	lifelines := hostInboundLifelineSet(cfg)

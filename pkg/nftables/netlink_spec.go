@@ -228,6 +228,9 @@ type Lo0FlexMatch struct {
 type Lo0FilterSpec struct {
 	V4Terms []Lo0FilterTerm
 	V6Terms []Lo0FilterTerm
+	// NoIPv6RejectZeroHopLimit (#16841): when false the chain drops
+	// hop-limit-0 IPv6 before any term; when true it is admitted.
+	NoIPv6RejectZeroHopLimit bool
 }
 
 // HostInputFencePair binds one VRF master to one enslaved tunnel slave.
@@ -363,6 +366,10 @@ type HostInboundSpec struct {
 	// DHCPv6AdmitVRFSlaves are the corresponding configured VRF members, matched
 	// through sdifname at LOCAL_IN.
 	DHCPv6AdmitVRFSlaves []string
+	// NoIPv6RejectZeroHopLimit (#16841): when false (Junos default) the
+	// chain drops hop-limit-0 IPv6 to a local destination before any
+	// accept; when true the packet is admitted.
+	NoIPv6RejectZeroHopLimit bool
 }
 
 // FenceSpec is the cold-boot fail-closed fence render request (#5644): address
@@ -385,6 +392,8 @@ type FenceSpec struct {
 	// Unzoned ingress scopes for fail-closed catalog-group drops.
 	UnzonedIngressNetdevs   []string
 	UnzonedIngressVRFSlaves []string
+	// NoIPv6RejectZeroHopLimit (#16841), as in HostInboundSpec.
+	NoIPv6RejectZeroHopLimit bool
 }
 
 // GapFenceSpec is the additive coverage-gap fence render request (#5789): the
@@ -426,4 +435,6 @@ type GapFenceSpec struct {
 	// Empty with non-empty Shared omits the exception (fail-closed:
 	// shared stays bare-DROPped on every ingress).
 	LifelineNetdevs []string
+	// NoIPv6RejectZeroHopLimit (#16841), as in HostInboundSpec.
+	NoIPv6RejectZeroHopLimit bool
 }

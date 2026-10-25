@@ -203,6 +203,7 @@ func toNftPortRanges(prs []config.PortRange) []xnft.PortRange {
 
 func toNftLo0Spec(cfg *config.Config, filterV4, filterV6 string) xnft.Lo0FilterSpec {
 	var spec xnft.Lo0FilterSpec
+	spec.NoIPv6RejectZeroHopLimit = cfg.System.InternetOptions != nil && cfg.System.InternetOptions.NoIPv6RejectZeroHopLimit
 	pl := cfg.PolicyOptions.PrefixLists
 	if filterV4 != "" {
 		if f, ok := cfg.Firewall.FiltersInet[filterV4]; ok {

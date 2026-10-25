@@ -6,9 +6,9 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #15707: the snapshot builder must carry
+// #16841: the snapshot builder must carry
 // `system internet-options no-ipv6-reject-zero-hop-limit` onto the wire
-// so the helper can suppress its ICMPv6 Time Exceeded for hop-limit=0.
+// so the helper admits hop-limit-0 IPv6 to local addresses when set.
 func TestSnapshotCarriesNoIPv6RejectZeroHopLimit15707(t *testing.T) {
 	cfg := &config.Config{System: config.SystemConfig{
 		InternetOptions: &config.InternetOptionsConfig{NoIPv6RejectZeroHopLimit: true},

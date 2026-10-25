@@ -150,6 +150,12 @@ const USERSPACE_CTRL_FLAG_STRICT: u32 = 8;
 /// already-loaded flags word restores the true zero-cost-when-absent
 /// property.
 const USERSPACE_CTRL_FLAG_WG_RX: u32 = 16;
+/// #16841: set iff `system internet-options
+/// no-ipv6-reject-zero-hop-limit` is configured. When CLEAR (the Junos
+/// default) the shim drops a hop-limit-0 IPv6 packet whose destination
+/// is firewall-local instead of passing it to the kernel; when set the
+/// packet is admitted. Transit destinations never read this bit.
+const USERSPACE_CTRL_FLAG_NO_IPV6_REJECT_ZERO_HOP_LIMIT: u32 = 32;
 mod binding_index;
 mod degraded_ctrl_disabled;
 mod degraded_ndp;
@@ -1074,6 +1080,11 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                 // packet's LAND disposition for every arm below it,
                 // including this one. A second check here was the dead
                 // code the unconditional shim drop left behind.
+                // #16841: a cached PASS_TO_KERNEL row must not resurrect
+                // a hop-limit-0 local packet the knob rejects.
+                if zero_hop_limit_local_drop_shim(&parsed, ctrl.flags) {
+                    return Ok(xdp_action::XDP_DROP);
+                }
                 record_trace(
                     ctrl.flags,
                     ingress_ifindex,
@@ -1160,6 +1171,13 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                     parsed.udp_wg_transport_data,
                 );
                 if local_destination && !wg_worker_claim {
+                    // #16841: hop-limit-0 IPv6 to a local address is
+                    // rejected by default (Junos); the knob admits it.
+                    // Drop here instead of passing to the kernel.
+                    if zero_hop_limit_local_drop_shim(&parsed, ctrl.flags) {
+                        incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_SESSION_MISS_LOCAL);
+                        return Ok(xdp_action::XDP_DROP);
+                    }
                     record_trace(
                         ctrl.flags,
                         ingress_ifindex,
@@ -1953,6 +1971,11 @@ fn is_degraded_local_or_control(
     {
         return true;
     }
+    // #16841: the degraded path must not pass a hop-limit-0 local
+    // packet the knob rejects, via any arm below.
+    if destination_is_local && zero_hop_limit_local_drop_shim(parsed, ctrl.flags) {
+        return false;
+    }
     // #15946: degraded PASS_TO_KERNEL session + WG steer (healthy :1049/:982).
     if live_userspace_session_action(parsed) == USERSPACE_SESSION_ACTION_PASS_TO_KERNEL {
         return true;
@@ -2676,6 +2699,17 @@ fn wg_zone_admits_packet(pkt: &ParsedPacket, ingress_ifindex: u32) -> bool {
         addr: pkt.dst_addr,
     };
     unsafe { USERSPACE_WG_ZONE_ADMISSION.get(&admission_key) }.is_some()
+}
+
+/// #16841: true when a hop-limit-0 IPv6 packet must be rejected at
+/// local delivery: the destination is already known local (callers
+/// gate on `is_local_destination`) and the knob is unset. IPv4 and
+/// hop-limit>=1 never drop here; transit never reaches this helper.
+#[inline(always)]
+fn zero_hop_limit_local_drop_shim(pkt: &ParsedPacket, ctrl_flags: u32) -> bool {
+    pkt.addr_family == AF_INET6
+        && pkt.hop_limit == 0
+        && (ctrl_flags & USERSPACE_CTRL_FLAG_NO_IPV6_REJECT_ZERO_HOP_LIMIT) == 0
 }
 
 #[inline(always)]

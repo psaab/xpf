@@ -32,6 +32,7 @@ const unzonedHostInboundZoneLabel = "junos-host"
 // policy accept) on the plan.
 func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 	declareHostInboundCounters(p, spec)
+	EmitZeroHopLimitLocalDrop(p, spec.NoIPv6RejectZeroHopLimit)
 	reinjectV4, reinjectV6 := hostInboundReinjectDestinations(spec.Views)
 
 	// #9504: each program's first-match rules live in a regular chain the input

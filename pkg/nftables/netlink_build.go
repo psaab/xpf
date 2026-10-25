@@ -357,6 +357,28 @@ func (a *ruleAsm) fibLocalOrAnycast() *ruleAsm {
 	)
 }
 
+// hopLimitZero appends `ip6 hoplimit 0` (network-header offset 7), the
+// #16841 zero-hop predicate. The caller conjoins it with a local
+// destination test; alone it would match transit too.
+func (a *ruleAsm) hopLimitZero() *ruleAsm {
+	a.needNfproto(famV6)
+	return a.add(
+		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 7, Len: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{0}},
+	)
+}
+
+// EmitZeroHopLimitLocalDrop queues the #16841 default rejection
+// (`ip6 hoplimit 0 fib daddr type { local, anycast } drop`) unless the
+// knob admits local hop-limit-0 packets. Shared by every kernel input
+// chain builder so the text oracle and netlink builds cannot drift.
+func EmitZeroHopLimitLocalDrop(p *nlPlan, admit bool) {
+	if admit {
+		return
+	}
+	p.rule().hopLimitZero().fibLocalOrAnycast().emit(verdictDrop()...)
+}
+
 // iifnameExcept appends `iifname != "<n>"` / `iifname != { .. }` — the
 // uncovered-ingress fallback scope for stale-reply guards. Single-name uses
 // CmpOpNeq; multi-name uses an anonymous-set Lookup with Invert, which is

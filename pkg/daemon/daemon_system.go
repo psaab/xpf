@@ -1380,10 +1380,12 @@ func (d *Daemon) applyKernelTuning(cfg *config.Config) {
 	reconcileNoRedirects(cfg.System.NoRedirects)
 
 	// system { internet-options { no-ipv6-reject-zero-hop-limit; } }
-	// #15707: this knob suppresses the ICMPv6 Time Exceeded a hop-limit=0
-	// packet would otherwise draw. The userspace dataplane enforces it
-	// from the snapshot (ForwardingState.no_ipv6_reject_zero_hop_limit);
-	// the kernel path must NOT be touched: writing 0 to
+	// #16841 (correcting #15707): this knob admits hop-limit-0 IPv6
+	// packets addressed to the local host; by default they are
+	// dropped. The dataplane enforces it from the snapshot
+	// (ForwardingState.no_ipv6_reject_zero_hop_limit) and the shim
+	// ctrl flag; transit Time Exceeded stays unconditional.
+	// The kernel sysctl path must NOT be touched: writing 0 to
 	// /proc/sys/net/ipv6/icmp/ratelimit DISABLES ICMPv6 error rate
 	// limiting entirely (0 = unlimited in icmpv6_xrlim_allow), the
 	// opposite of suppressing one error class, and the old code never
