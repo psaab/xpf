@@ -986,15 +986,21 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 
 	// #5848 generation-bound commit transaction (commit-confirmed variant).
 	// #1956 R-8/V-3 device-map pre-flight: validate BOTH the candidate AND the
-	// rollback target (the currently-active config, restored on a confirmed-commit
-	// timeout) against present hardware. If EITHER would strand management on next
+	// rollback target (the config restored on a confirmed-commit timeout)
+	// against present hardware. If EITHER would strand management on next
 	// boot, reject while the operator is still connected — so when a timeout fires
 	// the target is KNOWN-safe and is applied UNCONDITIONALLY (OQ-15.2, no
 	// rollback-time abort). The pre-flight and the promotion are now bound to one
 	// candidate generation, so a concurrent candidate edit cannot slip a different
 	// candidate into the promotion after the pre-flight cleared the examined one.
-	// The rollback target (active) is stable across the transaction: it changes
+	// The rollback target is stable across the transaction: it changes
 	// only under d.applySem, held here from pre-flight through the commit.
+	// #16668: on a NESTED arm (a window already pending) the store retains
+	// the ORIGINAL rollback target, not the unconfirmed active config, so
+	// the gates below resolve the target via RollbackTargetForArm rather
+	// than ActiveConfig — pre-flighting the unconfirmed config falsely
+	// refuses an extension whose unconfirmed config is not yet appliable
+	// and falsely clears one whose true target is unappliable.
 	var peerSnapshotAuth *peerSnapshotProtocolAuthorization
 	oldActive, compiled, err := d.commitWithGenBinding(
 		discardGen,
@@ -1053,6 +1059,7 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 			// nothing has been promoted.
 			// #9588: the Go refusal mirror decides, with the LIVE feed overlay
 			// for this target (representability is feed-aware).
+			rollbackTarget, _, _ := d.store.RollbackTargetForArm()
 			// #16665: while in the #9615 refused-target bootstrap safe
 			// state the active config IS the refused target, so this gate
 			// would refuse every `commit confirmed` and leave no commit
@@ -1060,14 +1067,15 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 			// to the same safe state (re-checked at fire by #9615), not
 			// create a new store/dataplane split. The plain-commit exit
 			// above is primary; this keeps the confirmed route usable
-			// too. Outside that provenance the gate is unchanged.
-			rollbackTarget := d.store.ActiveConfig()
+			// too. Outside that provenance the gate is unchanged. On a
+			// nested arm the #16668 target resolution above stands: the
+			// refused target is the retained one, not the active config.
 			if !(d.inBootstrap() && d.bootstrapFromRefusedRollback.Load()) {
 				if rerr := rollbackTargetAppliablePreflight(rollbackTarget, d.feedSnapshotsForConfig(rollbackTarget)); rerr != nil {
 					return rerr
 				}
 			}
-			return d.deviceMapCommitPreflight(cand, d.store.ActiveConfig())
+			return d.deviceMapCommitPreflight(cand, rollbackTarget)
 		},
 		func(gen uint64) (*config.Config, error) {
 			return d.store.CommitConfirmedGenAs(authority, minutes, gen)
