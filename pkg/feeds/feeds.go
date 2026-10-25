@@ -341,7 +341,7 @@ func (m *Manager) RestoreShrinkHighWater(records []ShrinkHighWater) {
 		// drops exactly the rotated epochs. A corrupt (non-canonical) set,
 		// or a set whose digest mismatches a present EpochHash, is dropped
 		// fail-closed: the count epoch still restores and the content epoch
-		// then re-bootstraps under the #14994 remembered-baseline guard.
+		// then re-bootstraps on the first guarded install (#16651).
 		if len(record.Prefixes) > 0 && len(record.Prefixes) <= maxFeedPrefixes {
 			canon := canonicalize(append([]string(nil), record.Prefixes...))
 			if len(canon) == len(record.Prefixes) {
@@ -1661,19 +1661,30 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 		fs.shrinkHighWaterHash = res.hash
 	}
 	// #14395 epoch rebase: ONLY a true bootstrap (no remembered baseline)
-	// or an acknowledged (guardBypass) install moves the content epoch. An
-	// ordinary unacknowledged install — including equal-count rotations
-	// that pass the epoch floor — never rebases, so cumulative rotation
-	// cannot boil the frog. The same non-rebase applies to growth on a
-	// remembered-baseline feed (#14994): comparing a growing candidate
+	// or an acknowledged (guardBypass) install moves an EXISTING content
+	// epoch. An ordinary unacknowledged install — including equal-count
+	// rotations that pass the epoch floor — never rebases, so cumulative
+	// rotation cannot boil the frog. The same non-rebase applies to growth
+	// on a remembered-baseline feed (#14994): comparing a growing candidate
 	// against the restored epoch must not move shrinkHighWaterHash/
 	// epochContentPrefixes ahead of that epoch before acknowledgement
 	// (#14395 intentional non-rebase on growth, preserved). When the epoch
 	// rebases on acknowledgement, the count high-water rebases with it to
 	// the acknowledged set (mirrors the existing acknowledged-shrink epoch
 	// semantics).
+	//
+	// #16651: when NO epoch exists — a legacy count-only record, a record
+	// whose epoch digest was dropped as corrupt, or a pre-#15075 rotated
+	// record dropped on restore — and this candidate has passed every
+	// guard above (including the restored count high-water), the install
+	// re-establishes the epoch from the installed set and persists it.
+	// Keying this on !hasRememberedBaseline left every such feed
+	// epoch-less forever: churn then stayed predecessor-only (the empty
+	// epoch fell back to fs.prefixes per install), and the count-only
+	// record was re-persisted on each restart. This arm only fires while
+	// the epoch is empty, so it cannot move a live epoch.
 	epochRebased := false
-	if (wasBootstrap && !hasRememberedBaseline) || guardBypass {
+	if (wasBootstrap && !hasRememberedBaseline) || guardBypass || len(fs.epochContentPrefixes) == 0 {
 		fs.epochContentPrefixes = append([]string(nil), res.prefixes...)
 		fs.epochContentHash = res.hash
 		epochRebased = true

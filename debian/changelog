@@ -1,4 +1,14 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Feeds: a feed restored with a count baseline but no usable content
+    epoch now re-establishes the epoch on its first guarded install
+    (#16651). Legacy count-only records, records whose epoch digest was
+    dropped as corrupt, and pre-#15075 rotated records restored without
+    an epoch previously stayed epoch-less forever, so the #14395
+    epoch-anchored churn refusal never engaged and successive
+    51%-retained rotations could cumulatively replace an enforced set
+    with no refusal. The first install passing every guard (including
+    the restored count high-water) now becomes and persists the epoch;
+    live epochs are never moved by this arm.
   * Daemon/RPM: `rpmProbeTestGating` source-address→VIP matching is
     now canonical (#16639): RETH unit addresses and `vrrp-group`
     virtual-addresses key the VIP→RG map by parsed `netip.Addr`
