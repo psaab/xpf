@@ -2331,6 +2331,47 @@ type PKIConfig struct {
 	CAProfiles map[string]*PKICAProfile
 }
 
+// MarshalJSON redacts credentials embedded in the enrollment and CRL
+// URLs on every JSON render (#16732). A SCEP enrollment or CRL URL can
+// carry userinfo or a query credential, and the REST config-read
+// surface json-encodes the compiled *Config directly, so the plain
+// string fields marshalled VERBATIM — while the raw-AST `show
+// configuration` surface already transforms the same leaves through
+// RedactURL (its generic `url` leaf). This makes the two agree
+// (#6703/#6733). RedactURL leaves a credential-free URL untouched, so
+// an ordinary config renders identically.
+//
+// The receiver is a VALUE for robustness rather than necessity:
+// PKIConfig holds `CAProfiles map[string]*PKICAProfile`, so a pointer
+// receiver would be reached today. A value receiver is reached
+// through BOTH a *PKICAProfile and a PKICAProfile, so it keeps
+// working if the container is ever changed to hold values — a
+// redaction that silently stops applying when a field's container
+// changes shape is the failure the #6733 census exists to catch.
+//
+// The alias type sheds this method to avoid recursion while
+// preserving every field, so a field added to PKICAProfile later is
+// still marshalled.
+func (p PKICAProfile) MarshalJSON() ([]byte, error) {
+	type alias PKICAProfile
+	v := alias(p)
+	v.EnrollmentURL = RedactURL(v.EnrollmentURL)
+	v.CRLURL = RedactURL(v.CRLURL)
+	return json.Marshal(v)
+}
+
+// MarshalYAML mirrors MarshalJSON for the gopkg.in/yaml.v3 marshaller
+// (future-proofing; no config YAML marshaller exists today — #2053
+// doctrine), so the JSON and YAML redaction surfaces cannot diverge.
+// Keep the redaction above and this projection in sync.
+func (p PKICAProfile) MarshalYAML() (any, error) {
+	type alias PKICAProfile
+	v := alias(p)
+	v.EnrollmentURL = RedactURL(v.EnrollmentURL)
+	v.CRLURL = RedactURL(v.CRLURL)
+	return v, nil
+}
+
 // PKICAProfile is one `security pki ca-profile <name>` stanza.
 type PKICAProfile struct {
 	Name                    string
