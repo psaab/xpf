@@ -115,6 +115,22 @@ xpf (0.0.0) unstable; urgency=medium
     failover the new owner ran no HA-gated probes and kept its old
     publish gate (and the new standby kept both). The event paths
     now schedule the gating reconcile off the event goroutine.
+  * Daemon/HA: the #15258 sync-hold mirror refresh is now an edge
+    producer on every path (#16692). Previously, in legacy
+    no-private-rg-election mode, watchVRRPEvents never refreshed the
+    mirror, so the preempt MASTER event ReleaseSyncHold itself triggers
+    was judged against syncHold=true — no rg_active write and no RETH
+    services — and the later handleClusterEvent/reconcile refresh
+    discarded the transition its own SetSyncHold produced, so neither
+    path saw tr.Changed. The preempt-failback owner served no RG-scoped
+    Kea DHCP and re-initiated no RG-anchored IPsec SAs until an
+    unrelated RG edge or commit. Now watchVRRPEvents and
+    watchClusterEvents refresh the mirror scoped to the event's RG at
+    the top of per-event handling and merge the refresh transition into
+    the handler's tr; handleClusterEvent re-refreshes scoped so direct
+    callers are covered; reconcileRGState ORs the pass-wide refresh
+    into each RG's tr. Scoping prevents an event for one RG from
+    consuming another RG's pending release edge.
   * Daemon/bootstrap: the #9615 refused-target bootstrap safe state
     now has a commit exit (#16665). Previously bootstrap refused
     plain `commit` and the #6707 gate refused `commit confirmed`
