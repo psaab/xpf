@@ -469,8 +469,9 @@ func TestApplyFullRefusesCrossFamilyAliasWitness16867(t *testing.T) {
 // contains protos outside that set (dual-stack/IPv6-only sources and
 // self at a v4 node); every such phantom raw is asserted ABSENT.
 // The Gate5 witness (TestApplyFullRefusesCrossFamilyAliasWitness16867)
-// remains the ApplicationFull-level refusal control, and the clean
-// ApplyFull below proves this non-fusing shape applies.
+// remains the ApplyFull-level refusal control; the exact
+// unreferenced/no-from acceptance shape is covered at ApplyFull level
+// by TestApplyFullUnusedFixedNameAndUnreferencedP16867 (cell b).
 //
 // FAIL-ON-REVERT: restoring the ("", "") whole-domain pass adds the
 // phantom identities back and the absence assertions red; the belt
@@ -542,4 +543,67 @@ func TestBeltEnumerationHasNoPhantomRedist16867(t *testing.T) {
 	// territory. The phantom pin above is the enumeration-level
 	// invariant Gate6 F1 names: phantom identities must not EXIST in
 	// the belt's set, whatever other (real) pairs a fixture carries.
+}
+
+// Gate7 Astra F1+F2 controls (tolerant path, real ApplyFull):
+//  (a) an UNREFERENCED operator policy named exactly as a fixed
+//      generated map (`xpf-emptied-chain-xpf-chain` /
+//      `xpf-default-export-xpf-chain`) beside an ordinary static route,
+//      with NO BGP at all — the generated definitions are never emitted
+//      (their emitters are conditional), so the cross-family belt must
+//      NOT invent them; the config applies cleanly. Pre-fix the belt
+//      added both fixed identities unconditionally and refused this
+//      non-fusing config.
+//  (b) the exact previously untested acceptance shape: entirely
+//      unreferenced no-from P (Gate5 witness name) with the composed
+//      import chain [C B] present — P has no referencing nodes, emits
+//      no per-source map, and the config applies.
+//
+// FAIL-ON-REVERT: restoring unconditional fixed identities reds (a);
+// restoring the ("", "") phantom pass does not red (b) at ApplyFull
+// level (P emits nothing either way) — (b) is the acceptance control
+// the enumeration pin (TestBeltEnumerationHasNoPhantomRedist16867)
+// complements, not its RED proof.
+func TestApplyFullUnusedFixedNameAndUnreferencedP16867(t *testing.T) {
+	writeConf := func(t *testing.T) (string, *Manager) {
+		t.Helper()
+		confPath := filepath.Join(t.TempDir(), "frr.conf")
+		if err := os.WriteFile(confPath, []byte("log syslog informational\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return confPath, &Manager{frrConf: confPath, exec: &fakeExecutor{}}
+	}
+
+	// (a) unused fixed names + ordinary static route, no BGP.
+	_, m := writeConf(t)
+	fcA := &FullConfig{
+		StaticRoutes: []*config.StaticRoute{{Destination: "10.9.0.0/16", NextHops: []config.NextHopEntry{{Address: "192.0.2.1"}}}},
+		PolicyOptions: &config.PolicyOptionsConfig{PolicyStatements: map[string]*config.PolicyStatement{
+			emptiedChainDenyName:      {Name: emptiedChainDenyName, Terms: []*config.PolicyTerm{{Name: "t1", Action: "accept"}}},
+			bgpDefaultExportName15157: {Name: bgpDefaultExportName15157, Terms: []*config.PolicyTerm{{Name: "t1", Action: "accept"}}},
+		}},
+	}
+	if err := m.ApplyFull(fcA); err != nil {
+		t.Fatalf("(a) unused fixed-name policies must APPLY cleanly (no generated definition exists to fuse with), got: %v", err)
+	}
+
+	// (b) exact unused/no-from P acceptance shape.
+	pName, cName, bName, _ := witnessNames16867()
+	_, m2 := writeConf(t)
+	fcB := &FullConfig{
+		BGP: &config.BGPConfig{
+			LocalAS: 65000,
+			Neighbors: []*config.BGPNeighbor{
+				{Address: "10.0.0.2", PeerAS: 65001, FamilyInet: true, Import: []string{cName, bName}},
+			},
+		},
+		PolicyOptions: &config.PolicyOptionsConfig{PolicyStatements: map[string]*config.PolicyStatement{
+			pName: {Name: pName, Terms: []*config.PolicyTerm{{Name: "t1", Action: "accept"}}},
+			cName: {Name: cName, Terms: []*config.PolicyTerm{{Name: "t1", Action: "reject"}}},
+			bName: {Name: bName, Terms: []*config.PolicyTerm{{Name: "t1", Action: "reject"}}},
+		}},
+	}
+	if err := m2.ApplyFull(fcB); err != nil {
+		t.Fatalf("(b) unreferenced no-from P with composed import chain must APPLY cleanly, got: %v", err)
+	}
 }

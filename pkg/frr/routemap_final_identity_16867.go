@@ -34,7 +34,8 @@ import (
 // whole-domain enumeration would invent phantom maps the emitter never
 // renders and could refuse a non-fusing config), narrowed-chain
 // aliases, QNH metric maps, and the fixed generated maps (derived from
-// the #16871 registry; cluster Null0 guard when ClusterMode) — is
+// the #16871 registry, each included only when its emitter actually
+// emits it; cluster Null0 guard when ClusterMode) — is
 // normalized through frrName, and two distinct identities sharing a
 // final name are refused. Same identity reached twice (an identity
 // enumerated by two passes) is one map and stays clean. Deterministic
@@ -174,8 +175,46 @@ func beltRouteMapIdentities16867(fc *FullConfig) []beltRouteMapIdentity16867 {
 	// itself is untouched. Cluster Null0 is not in that registry (it
 	// ends in the redist suffix and is guarded separately), so it stays
 	// an explicit addition under ClusterMode.
+	// Fixed generated maps fire ONLY when their emitter would
+	// actually emit them (Gate7 Astra F1): the emptied-chain deny and
+	// default-export definitions are conditional (unused chain ⇒ no
+	// definition rendered), so adding them unconditionally made the
+	// belt refuse a tolerant-path operator policy that merely SHARES
+	// the reserved name while the generated map does not exist — a
+	// phantom refusal of a non-fusing config. The predicates are the
+	// emitters' own (bgpUsesEmptiedChainDeny /
+	// bgpUsesDefaultExport15157, the same ones their dedicated
+	// collision guards use), evaluated over fc.BGP + every instance,
+	// exactly as renderEmptiedChainDeny / renderBGPDefaultExport15157
+	// do. Cluster Null0's emitter is the cluster-mode render itself,
+	// so ClusterMode remains its emission condition.
+	usedFixed := func(uses func(*config.BGPConfig, *config.PolicyOptionsConfig) bool) bool {
+		if uses(fc.BGP, po) {
+			return true
+		}
+		for i := range fc.Instances {
+			if uses(fc.Instances[i].BGP, po) {
+				return true
+			}
+		}
+		return false
+	}
 	for _, reserved := range reservedGeneratedRouteMaps16871 {
-		add("generated "+reserved.kind, reserved.name)
+		switch reserved.name {
+		case emptiedChainDenyName:
+			if usedFixed(bgpUsesEmptiedChainDeny) {
+				add("generated "+reserved.kind, reserved.name)
+			}
+		case bgpDefaultExportName15157:
+			if usedFixed(bgpUsesDefaultExport15157) {
+				add("generated "+reserved.kind, reserved.name)
+			}
+		default:
+			// A future registry member whose emitter is unconditional
+			// (or not yet classified here): included — failing closed
+			// on a registered generated name is the registry's contract.
+			add("generated "+reserved.kind, reserved.name)
+		}
 	}
 	if fc.ClusterMode {
 		add("generated cluster Null0 guard", clusterNull0DenyRouteMap15158)
