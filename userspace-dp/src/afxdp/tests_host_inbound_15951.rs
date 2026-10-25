@@ -139,6 +139,212 @@ fn capacity_refused_local_delivery_is_dropped_not_trusted_15951() {
     );
 }
 
+// ---- #16532: LocalMiss pressure-shed preflight -------------------------
+//
+// A table held at cap by sheddable unreplied ForwardFlow embryos must not
+// refuse a new host-bound SYN: the LocalMiss arm now runs the same
+// `can_admit_new_flow` preflight as transit, sheds one embryo pair, and
+// admits. The cap-0 cell above stays green (nothing sheddable, no slots).
+
+fn embryo_key(port: u16) -> SessionKey {
+    SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: std::net::IpAddr::V4(Ipv4Addr::new(198, 51, 100, 99)),
+        dst_ip: std::net::IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        src_port: port,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    }
+}
+
+fn fill_with_embryos(sessions: &mut SessionTable, pairs: u16) {
+    let decision = tunnel_marked_decision(ForwardingDisposition::ForwardCandidate);
+    for i in 0..pairs {
+        let fwd = embryo_key(40_000 + i);
+        let rev = crate::session::reverse_session_key(&fwd, decision.nat);
+        let mut fm = icmp_err_metadata();
+        fm.is_reverse = false;
+        let mut rm = icmp_err_metadata();
+        rm.is_reverse = true;
+        assert!(sessions.install_with_protocol(
+            fwd,
+            decision,
+            fm,
+            1_000_000_000,
+            PROTO_TCP,
+            TCP_FLAG_SYN,
+        ));
+        assert!(sessions.install_with_protocol(
+            rev,
+            decision,
+            rm,
+            1_000_000_000,
+            PROTO_TCP,
+            TCP_FLAG_SYN,
+        ));
+    }
+}
+
+/// #16532 defect cell (vn07 probe): cap 16 filled with 8 embryo pairs; a
+/// DNAT-to-self SYN must shed one pair and be delivered + installed.
+/// RED at base: `local=0 create=0 refused=1`.
+#[test]
+fn full_of_sheddable_embryos_admits_host_syn_16532() {
+    let fw = forwarding(PLAIN);
+    let mut sessions = SessionTable::new();
+    sessions.set_max_sessions_for_test(16);
+    fill_with_embryos(&mut sessions, 8);
+    assert_eq!(session_count(&sessions), 16);
+    let (_batch, d) = from_wan(&fw, &mut sessions, VIP, 443, TCP_FLAG_SYN);
+    assert_eq!(d.local, 1, "host SYN must be delivered after shedding (local={})", d.local);
+    assert_eq!(d.session_create, 1, "host SYN must install after shedding");
+    assert_eq!(sessions.admission_refused(), 0, "no refusal when a shed frees a slot");
+    // One embryo pair (2 slots) shed, one LocalMiss (1 slot) installed.
+    assert_eq!(session_count(&sessions), 15);
+}
+
+/// #16532 control: one free slot (15/16) still delivers without shedding.
+#[test]
+fn one_free_slot_delivers_without_shed_16532() {
+    let fw = forwarding(PLAIN);
+    let mut sessions = SessionTable::new();
+    sessions.set_max_sessions_for_test(16);
+    fill_with_embryos(&mut sessions, 7);
+    // One established single fills to 15, leaving exactly one free slot.
+    let decision = tunnel_marked_decision(ForwardingDisposition::ForwardCandidate);
+    assert!(sessions.install_with_protocol(
+        embryo_key(49_999),
+        decision,
+        icmp_err_metadata(),
+        1_000_000_000,
+        PROTO_TCP,
+        crate::tcp_flags::TCP_ACK,
+    ));
+    assert_eq!(session_count(&sessions), 15);
+    let (_batch, d) = from_wan(&fw, &mut sessions, VIP, 443, TCP_FLAG_SYN);
+    assert_eq!(d.local, 1);
+    assert_eq!(d.session_create, 1);
+    assert_eq!(sessions.admission_refused(), 0);
+    assert_eq!(session_count(&sessions), 16, "no shed when a slot is free");
+}
+
+/// #16532: a full table of ESTABLISHED (non-sheddable) sessions still
+/// refuses fail-closed — shedding never evicts established sessions.
+#[test]
+fn full_of_established_still_refuses_host_syn_16532() {
+    let fw = forwarding(PLAIN);
+    let mut sessions = SessionTable::new();
+    sessions.set_max_sessions_for_test(16);
+    let decision = tunnel_marked_decision(ForwardingDisposition::ForwardCandidate);
+    for i in 0..16u16 {
+        assert!(sessions.install_with_protocol(
+            embryo_key(41_000 + i),
+            decision,
+            icmp_err_metadata(),
+            1_000_000_000,
+            PROTO_TCP,
+            crate::tcp_flags::TCP_ACK,
+        ));
+    }
+    assert_eq!(session_count(&sessions), 16);
+    let (_batch, d) = from_wan(&fw, &mut sessions, VIP, 443, TCP_FLAG_SYN);
+    assert_eq!(d.local, 0, "established-full table must still fail closed");
+    assert_eq!(d.session_create, 0);
+    assert_eq!(sessions.admission_refused(), 1);
+    assert_eq!(session_count(&sessions), 16, "established sessions never shed");
+}
+
+/// #16532: a host-bound UDP first packet (non-TCP newcomer, #16019
+/// protocol symmetry) also sheds an embryo pair instead of refusing.
+/// Driven with a caller-provided shared map so the shed victim's shared
+/// row removal is observable: transit-parity release.
+#[test]
+fn full_of_embryos_admits_host_udp_and_releases_shed_shared_row_16532() {
+    let fw = forwarding(PLAIN);
+    let mut sessions = SessionTable::new();
+    sessions.set_max_sessions_for_test(16);
+    fill_with_embryos(&mut sessions, 8);
+    assert_eq!(session_count(&sessions), 16);
+    // Seed shared rows for every embryo forward so the shed's shared-row
+    // removal (exactly one victim pair's forward row) is observable.
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    {
+        let mut shared = shared_sessions.lock().expect("shared lock");
+        for i in 0..8u16 {
+            let k = embryo_key(40_000 + i);
+            let (entry, _origin) = sessions
+                .probe_with_origin(&k)
+                .expect("embryo forward present");
+            shared.insert(
+                k.clone(),
+                SyncedSessionEntry {
+                    key: k.clone(),
+                    decision: entry.decision,
+                    metadata: entry.metadata.clone(),
+                    source_nat_static: None,
+                    leak_incarnation: 0,
+                    origin: SessionOrigin::ForwardFlow,
+                    protocol: PROTO_TCP,
+                    tcp_flags: TCP_FLAG_SYN,
+                    generation: 0,
+                    session_id: sessions.session_id_for(&k),
+                    tcp_close_class: 0,
+                    tcp_handshake_state: 1,
+                    rev_packets: 0,
+                    fwd_packets: 0,
+                    pptp_call_ids: 0,
+                },
+            );
+        }
+    }
+    // UDP first packet to the local address directly (LOCAL is reth1.0's
+    // own address; the DNAT rule here is TCP-only). build_udp_frame_v4
+    // uses src port 49152 -> dst port 53. The meta must carry PROTO_UDP
+    // (txn_meta_v4 is TCP-shaped) with the parser's offsets for a
+    // 20-byte IPv4 + 8-byte UDP header.
+    let mut frame = build_udp_frame_v4(CLIENT, LOCAL);
+    frame[..6].copy_from_slice(&crate::afxdp::tests_support::TEST_WAN_MAC);
+    let mut meta = txn_meta_v4(WAN_IFINDEX as u32, 0, frame.len() as u16);
+    meta.protocol = PROTO_UDP;
+    meta.payload_offset = 42;
+    meta.flow_src_port = 49152;
+    meta.flow_dst_port = 53;
+    {
+        let mut a = [0u8; 16];
+        a[..4].copy_from_slice(&CLIENT.octets());
+        meta.flow_src_addr = a;
+        let mut baddr = [0u8; 16];
+        baddr[..4].copy_from_slice(&LOCAL.octets());
+        meta.flow_dst_addr = baddr;
+    }
+    meta.ingress_vlan_id = 80;
+    let mut b = BindingWorker::new_for_mirror_test(0, 0, WAN_IFINDEX, 0);
+    b.interface = Arc::<str>::from("reth0.80");
+    let (_batch, d) = txn_run_descriptor_with_shared_sessions(
+        &mut b,
+        &mut sessions,
+        &fw,
+        &txn_ha_state(),
+        &frame,
+        meta,
+        &shared_sessions,
+    );
+    assert_eq!(d.local, 1, "host UDP must be delivered after shedding (local={})", d.local);
+    assert_eq!(d.session_create, 1, "host UDP must install after shedding");
+    assert_eq!(sessions.admission_refused(), 0);
+    // Exactly one embryo forward shared row was shed (removed); 7 remain,
+    // plus the new LocalMiss row published by the install helper.
+    let shared = shared_sessions.lock().expect("shared lock");
+    let embryo_rows = (0..8u16)
+        .filter(|i| shared.contains_key(&embryo_key(40_000 + *i)))
+        .count();
+    assert_eq!(embryo_rows, 7, "exactly one shed victim's shared row released");
+    drop(shared);
+    assert_eq!(session_count(&sessions), 15);
+}
+
 /// H41-02 (session-miss): a `junos-host` deny credits `policy_denied_packets`.
 #[test]
 fn junos_host_deny_on_miss_credits_policy_denied_15951() {
