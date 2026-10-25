@@ -60,6 +60,27 @@ func (m *Manager) renderBGP16125(b *strings.Builder, bgp *config.BGPConfig, vali
 			// RR loop-prevention loss is operator-visible.
 			logOmittedBGPClusterID(bgp.ClusterID)
 		}
+		// #16800: FRR bgpd evaluates an outbound route-map for a
+		// REFLECTED (IBGP->IBGP) advertisement on a dummy attribute
+		// copy unless `bgp route-reflector allow-outbound-policy` is
+		// set, so every export-policy `set` clause — the #5115
+		// `then next-hop self` lowering (`set ip/ipv6 next-hop
+		// peer-address`), `set local-preference`, `set community`,
+		// ... — is silently discarded on exactly the routes the
+		// #2977 fix claims to rewrite, and RR clients receive the
+		// original next-hop/attributes (blackhole when they have no
+		// IGP path to that next-hop). The knob is a router-global
+		// toggle with no per-neighbor/AF form, so render it once,
+		// after cluster-id, in every stanza (default AND each VRF)
+		// that actually renders a route-reflector-client neighbor.
+		// Gating on a rendered client — not on which policies are
+		// attached — keeps the line present for accept/reject-only
+		// and later-attached policies, while a stanza with no client
+		// (including one whose only clients the #14585 belt omits as
+		// eBGP) renders byte-identically to before.
+		if bgpRRAllowsOutboundPolicy16800(bgp.LocalAS, validNeighbors) {
+			b.WriteString(" bgp route-reflector allow-outbound-policy\n")
+		}
 		if bgp.GracefulRestart {
 			b.WriteString(" bgp graceful-restart\n")
 		}
@@ -487,8 +508,10 @@ func (m *Manager) renderBGP16125(b *strings.Builder, bgp *config.BGPConfig, vali
 				// ran after route selection and rewrote EVERY route advertised
 				// to the peer, widening a term-scoped action to all of the
 				// neighbor's routes (#5115). The route-map lowering still
-				// overrides iBGP / route-reflector-reflected next-hops (the
-				// #2977 fix), now scoped to the term. See the `term.NextHop ==
+				// overrides iBGP next-hops (the #2977 fix), now scoped to
+				// the term, and route-reflector-reflected next-hops when
+				// the stanza renders `bgp route-reflector
+				// allow-outbound-policy` (#16800). See the `term.NextHop ==
 				//
 				// Inbound filter (#2490/#5277). Same chain composition as the
 				rm = bgpNeighborImportRef(n, bgp, globalImportChain, policyOptions)
