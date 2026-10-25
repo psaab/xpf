@@ -1562,7 +1562,7 @@ func (d *Daemon) startupGoodbyeBegin(rgID int) bool {
 // serializes retries.
 func (d *Daemon) runStartupGoodbye(rgID int, rgRA []*config.RAInterfaceConfig) {
 	requested := len(rgRA)
-	rgRA = startupGoodbyeConfigs(rgRA)
+	rgRA = d.startupGoodbyeConfigsForRG(rgID, rgRA)
 	done := len(rgRA) == 0
 	if !done {
 		withdraw := d.startupGoodbyeWithdrawFn
@@ -1596,13 +1596,32 @@ func (d *Daemon) runStartupGoodbye(rgID int, rgRA []*config.RAInterfaceConfig) {
 	}
 }
 
+// startupGoodbyeConfigs filters shared-identity configs out of a cold-boot
+// goodbye set when no config is available to consult for VIP membership
+// (rgID <= 0 / nil cfg): only the auto stable pattern is suppressed. The
+// production path uses startupGoodbyeConfigsForRG, which also suppresses
+// a configured RETH-unit link-local installed as an RG VIP (#16624).
 func startupGoodbyeConfigs(rgRA []*config.RAInterfaceConfig) []*config.RAInterfaceConfig {
+	return startupGoodbyeConfigsFiltered(nil, nil, 0, rgRA)
+}
+
+func (d *Daemon) startupGoodbyeConfigsForRG(rgID int, rgRA []*config.RAInterfaceConfig) []*config.RAInterfaceConfig {
+	var cfg *config.Config
+	var peerCfg *config.Config
+	if d != nil && d.store != nil {
+		cfg = d.store.ActiveConfig()
+		peerCfg, _ = d.peerRAConfig(cfg)
+	}
+	return startupGoodbyeConfigsFiltered(cfg, peerCfg, rgID, rgRA)
+}
+
+func startupGoodbyeConfigsFiltered(cfg, peerCfg *config.Config, rgID int, rgRA []*config.RAInterfaceConfig) []*config.RAInterfaceConfig {
 	if len(rgRA) == 0 {
 		return rgRA
 	}
 	filtered := make([]*config.RAInterfaceConfig, 0, len(rgRA))
 	for _, cfgRA := range rgRA {
-		if cfgRA == nil || isSharedStableRASource(cfgRA.SourceLinkLocal) {
+		if cfgRA == nil || isSharedRASourceBothViews(cfg, peerCfg, rgID, cfgRA.SourceLinkLocal) {
 			continue
 		}
 		filtered = append(filtered, cfgRA)
@@ -1934,12 +1953,13 @@ func configuredRASource(allRA []*config.RAInterfaceConfig, iface string) string 
 }
 
 // sharedStableRAInterfaces returns the subset of ifaces whose RA source is
-// the shared stable RETH identity, judged on the CONFIGURED source whenever
-// one exists. Status reports an empty SrcAddr until a sender's conn opens,
-// so a source check on Status alone misses an unopened shared-identity
-// sender and leaves Apply to withdraw the peer's router with a graceful
-// goodbye (D34-01).
-func sharedStableRAInterfaces(ifaces map[string]bool, senders []ra.SenderInfo, allRA []*config.RAInterfaceConfig) []string {
+// a shared router identity for cfg's rgID — the auto stable pattern or a
+// configured RETH-unit link-local installed as an RG VIP (#16624) — judged
+// on the CONFIGURED source whenever one exists. Status reports an empty
+// SrcAddr until a sender's conn opens, so a source check on Status alone
+// misses an unopened shared-identity sender and leaves Apply to withdraw
+// the peer's router with a graceful goodbye (D34-01).
+func sharedStableRAInterfaces(cfg, peerCfg *config.Config, rgID int, ifaces map[string]bool, senders []ra.SenderInfo, allRA []*config.RAInterfaceConfig) []string {
 	var names []string
 	seen := make(map[string]bool)
 	for _, sender := range senders {
@@ -1951,7 +1971,7 @@ func sharedStableRAInterfaces(ifaces map[string]bool, senders []ra.SenderInfo, a
 		if cfg := configuredRASource(allRA, sender.Interface); cfg != "" {
 			source = cfg
 		}
-		if isSharedStableRASource(source) {
+		if isSharedRASourceBothViews(cfg, peerCfg, rgID, source) {
 			names = append(names, sender.Interface)
 		}
 	}
@@ -1959,7 +1979,7 @@ func sharedStableRAInterfaces(ifaces map[string]bool, senders []ra.SenderInfo, a
 		if cfgRA == nil || !ifaces[cfgRA.Interface] || seen[cfgRA.Interface] {
 			continue
 		}
-		if isSharedStableRASource(cfgRA.SourceLinkLocal) {
+		if isSharedRASourceBothViews(cfg, peerCfg, rgID, cfgRA.SourceLinkLocal) {
 			names = append(names, cfgRA.Interface)
 		}
 	}
@@ -1967,6 +1987,14 @@ func sharedStableRAInterfaces(ifaces map[string]bool, senders []ra.SenderInfo, a
 }
 
 func clearRethRASendersWithoutGoodbye(clearer raScopedClearer, cfg *config.Config, rgID int) error {
+	return clearRethRASendersWithoutGoodbyePeer(clearer, cfg, nil, rgID)
+}
+
+// clearRethRASendersWithoutGoodbyePeer is the daemon-bound form: peerCfg
+// is the peer node's effective view, used to veto a silent clear for a
+// `groups nodeN` per-node source (#16624). A nil peerCfg keeps the
+// local-only verdict.
+func clearRethRASendersWithoutGoodbyePeer(clearer raScopedClearer, cfg, peerCfg *config.Config, rgID int) error {
 	if clearer == nil || cfg == nil || cfg.Chassis.Cluster == nil {
 		return nil
 	}
@@ -1978,8 +2006,11 @@ func clearRethRASendersWithoutGoodbye(clearer raScopedClearer, cfg *config.Confi
 	for _, name := range rgIfaces {
 		rgIfaceSet[name] = true
 	}
+	// peerCfg (possibly nil) refines the verdict: a `groups nodeN`
+	// per-node source is a VIP only in the local view and keeps its
+	// graceful goodbye; nil keeps the local-only verdict.
 	d := &Daemon{}
-	names := sharedStableRAInterfaces(rgIfaceSet, clearer.Status(), d.buildRAConfigs(cfg))
+	names := sharedStableRAInterfaces(cfg, peerCfg, rgID, rgIfaceSet, clearer.Status(), d.buildRAConfigs(cfg))
 	if len(names) == 0 {
 		return nil
 	}
@@ -2019,7 +2050,8 @@ func (d *Daemon) clearRethServicesForRG(rgID int) {
 		// started before this ownership transition. Later reconciles observe the
 		// already-inactive RG and cannot re-arm its sender.
 		d.raReconcileMu.Lock()
-		err := clearRethRASendersWithoutGoodbye(d.ra, cfg, rgID)
+		peerCfgForClear, _ := d.peerRAConfig(cfg)
+		err := clearRethRASendersWithoutGoodbyePeer(d.ra, cfg, peerCfgForClear, rgID)
 		d.raReconcileMu.Unlock()
 		if err != nil {
 			slog.Warn("ra: failed to clear demoted RG senders without goodbye",

@@ -704,39 +704,223 @@ func TestDemotionUnopenedSharedSenderClearedWithoutGoodbye14978(t *testing.T) {
 	}
 }
 
+// perNodeClusterStore16624 builds a cluster store whose RETH unit carries
+// a DIFFERENT link-local per node via `groups nodeN` + apply-groups
+// "${node}". Hierarchical text is loaded through SyncApply (LoadSet
+// cannot author apply-groups), with the store bound to nodeID.
+func perNodeClusterStore16624(t *testing.T, nodeID int) *configstore.Store {
+	t.Helper()
+	s, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetNodeID(nodeID)
+	text := `
+groups {
+    node0 {
+        chassis { cluster { node 0; } }
+        interfaces { reth0 { unit 50 { family inet6 { address fe80::face/64; } } } }
+    }
+    node1 {
+        chassis { cluster { node 1; } }
+        interfaces { reth0 { unit 50 { family inet6 { address fe80::beef/64; } } } }
+    }
+}
+apply-groups "${node}";
+chassis {
+    cluster {
+        cluster-id 1;
+        authentication-key test-cluster-psk-6611;
+        redundancy-group 1 { node 0 priority 200; node 1 priority 100; }
+    }
+}
+interfaces {
+    reth0 {
+        vlan-tagging;
+        redundant-ether-options { redundancy-group 1; }
+        unit 50 { vlan-id 50; family inet6 { address 2001:db8:1077:9::1/64; } }
+    }
+    ge-0/0/0 { gigether-options { redundant-parent reth0; } }
+    ge-7/0/0 { gigether-options { redundant-parent reth0; } }
+}
+protocols { router-advertisement { interface reth0.50 { prefix 2001:db8:1077:9::/64; } } }
+`
+	if _, err := s.SyncApply(text, nil); err != nil {
+		t.Fatalf("node%d SyncApply per-node fixture: %v", nodeID, err)
+	}
+	return s
+}
+
 // TestDemotionPerNodeSourceNotSilentlyCleared14978 is the adjacent control:
-// an explicit per-node source on the demoted RG keeps its graceful goodbye
-// and must NOT be silently cleared. The demoted interface carries a
-// configured per-node link-local, so buildRAConfigs reports that source
-// (not the implicit stable one) and the configured-source check must not
-// match it.
+// a link-local authored only under `groups node0` / `groups node1` is
+// per-node — each node's effective view carries its OWN address, so the
+// peer view does not install it as a VIP and the source must NOT be
+// silently cleared; its graceful goodbye is retained. Before #16624 this
+// cell used a shared-section fe80::face fixture, which is in fact
+// VIP-managed and IS silently cleared after #16624 — it pinned the wrong
+// behaviour. The groups-nodeN spelling below is the correct control.
 func TestDemotionPerNodeSourceNotSilentlyCleared14978(t *testing.T) {
+	for _, node := range []struct {
+		id     int
+		source string
+	}{
+		{0, "fe80::face"},
+		{1, "fe80::beef"},
+	} {
+		s := perNodeClusterStore16624(t, node.id)
+		cfg := s.ActiveConfig()
+		if cfg == nil {
+			t.Fatalf("node%d: nil active config", node.id)
+		}
+		d0 := &Daemon{store: s}
+		raCfgs := d0.buildRAConfigs(cfg)
+		if len(raCfgs) != 1 || raCfgs[0].SourceLinkLocal != node.source {
+			t.Fatalf("node%d precondition: RA source = %+v, want %s (per-node view did not materialize)", node.id, raCfgs, node.source)
+		}
+		peerCfg, ok := d0.peerRAConfig(cfg)
+		if !ok || peerCfg == nil {
+			t.Fatalf("node%d: peer view unavailable, per-node control cannot be exercised", node.id)
+		}
+		if !isSharedRASource(cfg, 1, node.source) {
+			t.Fatalf("node%d: local isSharedRASource(%s)=false, want true (local VIP)", node.id, node.source)
+		}
+		if isSharedRASource(peerCfg, 1, node.source) {
+			t.Fatalf("node%d: peer view also installs %s - fixture is shared, not per-node", node.id, node.source)
+		}
+		if isSharedRASourceBothViews(cfg, peerCfg, 1, node.source) {
+			t.Fatalf("node%d: per-node source %s classified shared across both views", node.id, node.source)
+		}
+		clearer := &sharedLLClearSpy10779{
+			statuses: []ra.SenderInfo{
+				{Interface: "ge-0-0-0.50", SrcAddr: node.source, State: "active"},
+			},
+		}
+		if err := clearRethRASendersWithoutGoodbyePeer(clearer, cfg, peerCfg, 1); err != nil {
+			t.Fatalf("node%d clear demoted RG senders: %v", node.id, err)
+		}
+		if len(clearer.calls) != 0 {
+			t.Fatalf("node%d per-node source %s was silently cleared %v, want graceful goodbye retained", node.id, node.source, clearer.calls)
+		}
+		if got := startupGoodbyeConfigsFiltered(cfg, peerCfg, 1, raCfgs); len(got) != 1 {
+			t.Fatalf("node%d startup goodbye for per-node source retained %d configs, want 1", node.id, len(got))
+		}
+		// The full reconcile path must also retain it: on this node the RG
+		// is inactive, so the sender must NOT appear in silentStop.
+		spy := &raApplySpy{}
+		var cleared [][]string
+		d := &Daemon{
+			store:      s,
+			rgStates:   make(map[int]*rgStateMachine),
+			raStatusFn: func() []ra.SenderInfo { return nil },
+			raApplyFn:  spy.apply,
+			raClearInterfacesFn: func(names []string) error {
+				cleared = append(cleared, append([]string(nil), names...))
+				return nil
+			},
+		}
+		d.getOrCreateRGState(1).SetVRRP("reth0", false)
+		d.reconcileClusterRAServices("demoted-per-node")
+		if len(cleared) != 0 {
+			t.Fatalf("node%d reconcile silently cleared per-node source: %v", node.id, cleared)
+		}
+	}
+}
+
+// TestDemotionNonVIPSourceKeepsGoodbye16624: a source in no RG's VIP set
+// and outside the stable pattern is not shared on either view.
+func TestDemotionNonVIPSourceKeepsGoodbye16624(t *testing.T) {
 	s := raClusterStore(t, "2001:db8:1077:9::/64")
+	cfg := s.ActiveConfig()
+	if isSharedRASource(cfg, 1, "fe80::face") {
+		t.Fatal("isSharedRASource(fe80::face) = true, want false (not VIP, not stable)")
+	}
+	if isSharedRASourceBothViews(cfg, nil, 1, "fe80::face") {
+		t.Fatal("isSharedRASourceBothViews(fe80::face) = true, want false")
+	}
+}
+
+// TestConfiguredSharedLinkLocalSilentlyCleared16624 is the #16624
+// acceptance cell (residual of #14978 D34-01 leg 1): a shared-section
+// fe80::1/64 on reth0.50 is installed as an RG VIP on both nodes, so on
+// demotion it must be silently cleared ([[ge-0-0-0.50]]) and the startup
+// goodbye must return nothing for it - even though fe80::1 does not
+// match the auto fe80::...bf72... stable pattern.
+func TestConfiguredSharedLinkLocalSilentlyCleared16624(t *testing.T) {
+	s := raClusterStore(t, "2001:db8:1::/64")
 	if err := s.EnterConfigure(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.LoadSet("set interfaces reth0 unit 50 family inet6 address fe80::face/64\n"); err != nil {
-		t.Fatalf("LoadSet per-node LL: %v", err)
+	if _, err := s.LoadSet("set interfaces reth0 unit 50 family inet6 address fe80::1/64\n"); err != nil {
+		t.Fatalf("LoadSet shared LL: %v", err)
 	}
 	if _, err := s.Commit(); err != nil {
-		t.Fatalf("Commit per-node LL: %v", err)
+		t.Fatalf("Commit shared LL: %v", err)
 	}
 	s.ExitConfigure()
 	cfg := s.ActiveConfig()
 	d0 := &Daemon{}
 	raCfgs := d0.buildRAConfigs(cfg)
-	if len(raCfgs) != 1 || raCfgs[0].SourceLinkLocal != "fe80::face" {
-		t.Fatalf("precondition: RA source = %+v, want fe80::face", raCfgs)
+	if len(raCfgs) != 1 || raCfgs[0].SourceLinkLocal != "fe80::1" {
+		t.Fatalf("precondition: RA source = %+v, want fe80::1", raCfgs)
 	}
-	clearer := &sharedLLClearSpy10779{
-		statuses: []ra.SenderInfo{
-			{Interface: "ge-0-0-0.50", SrcAddr: "fe80::face", State: "active"},
+	foundVIP := false
+	for _, cidrs := range cfg.RethVIPsForRG(1) {
+		for _, c := range cidrs {
+			if c == "fe80::1/64" {
+				foundVIP = true
+			}
+		}
+	}
+	if !foundVIP {
+		t.Fatalf("precondition: fe80::1/64 not in RethVIPsForRG(1)=%v", cfg.RethVIPsForRG(1))
+	}
+	if !isSharedRASource(cfg, 1, "fe80::1") {
+		t.Fatal("isSharedRASource(fe80::1) = false, want true (RG VIP)")
+	}
+	spy := &raApplySpy{}
+	var cleared [][]string
+	d := &Daemon{
+		store:      s,
+		rgStates:   make(map[int]*rgStateMachine),
+		raStatusFn: func() []ra.SenderInfo { return nil },
+		raApplyFn:  spy.apply,
+		raClearInterfacesFn: func(names []string) error {
+			cleared = append(cleared, append([]string(nil), names...))
+			return nil
 		},
 	}
+	d.getOrCreateRGState(1).SetVRRP("reth0", false)
+	d.reconcileClusterRAServices("demoted-configured-shared-ll")
+	if !reflect.DeepEqual(cleared, [][]string{{"ge-0-0-0.50"}}) {
+		t.Fatalf("demotion silent clear = %v, want [[ge-0-0-0.50]]", cleared)
+	}
+	clearer := &sharedLLClearSpy10779{statuses: []ra.SenderInfo{
+		{Interface: "ge-0-0-0.50", SrcAddr: "fe80::1", State: "active"},
+	}}
 	if err := clearRethRASendersWithoutGoodbye(clearer, cfg, 1); err != nil {
 		t.Fatalf("clear demoted RG senders: %v", err)
 	}
-	if len(clearer.calls) != 0 {
-		t.Fatalf("per-node source was silently cleared %v, want no silent clear (graceful goodbye retained)", clearer.calls)
+	if !reflect.DeepEqual(clearer.calls, [][]string{{"ge-0-0-0.50"}}) {
+		t.Fatalf("demotion-edge silent clear = %v, want [[ge-0-0-0.50]]", clearer.calls)
+	}
+	dd := &Daemon{store: s}
+	if got := dd.startupGoodbyeConfigsForRG(1, raCfgs); len(got) != 0 {
+		t.Fatalf("startupGoodbyeConfigsForRG = %v, want nothing for shared fe80::1", got)
+	}
+	if got := startupGoodbyeConfigsFiltered(cfg, nil, 1, raCfgs); len(got) != 0 {
+		t.Fatalf("startupGoodbyeConfigsFiltered = %v, want nothing", got)
+	}
+	called := false
+	rd := &Daemon{store: s, startupGoodbyeInflight: map[int]bool{1: true}}
+	rd.startupGoodbyeWithdrawFn = func([]*config.RAInterfaceConfig) []ra.GoodbyeResult {
+		called = true
+		return nil
+	}
+	rd.runStartupGoodbye(1, raCfgs)
+	if called {
+		t.Fatal("runStartupGoodbye invoked WithdrawOnce for shared fe80::1 VIP identity")
+	}
+	if !rd.startupGoodbyeRA[1] {
+		t.Fatal("shared-VIP startup suppression did not mark cleanup complete")
 	}
 }
