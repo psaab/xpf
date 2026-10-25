@@ -20,6 +20,13 @@ type userspaceTakeoverReadiness interface {
 	TakeoverReady() (bool, []string)
 }
 
+// userspacePeerAwareTakeoverReadiness is the #16844 peer-liveness-aware
+// form of the userspace readiness query. Backends that only implement
+// userspaceTakeoverReadiness keep the peer-alive (fail-closed) form.
+type userspacePeerAwareTakeoverReadiness interface {
+	TakeoverReadyForPeer(peerAlive bool) (bool, []string)
+}
+
 func (d *Daemon) tryPrepareUserspaceRGDemotion(rgID int) {
 	if err := d.prepareUserspaceRGDemotionWithTimeout(rgID, 5*time.Second); err != nil {
 		slog.Warn("userspace: prepare rg demotion failed", "rg", rgID, "err", err)
@@ -254,7 +261,7 @@ func (d *Daemon) takeoverReadinessForRG(rt dataplane.RuntimeDataPlane, rgID int,
 		takeoverGateReady = true // no VRRP = always ready
 	}
 
-	userspaceReady, userspaceReasons := d.checkUserspaceTakeoverReadinessFor(rt, rgID)
+	userspaceReady, userspaceReasons := d.checkUserspaceTakeoverReadinessFor(rt, rgID, d.peerAliveForReadiness())
 	ready := ifReady && takeoverGateReady && fabricReady && userspaceReady
 
 	var reasons []string
@@ -299,6 +306,16 @@ func userspaceRGConfigured(cfg *config.Config, rgID int) bool {
 	return false
 }
 
+// peerAliveForReadiness is the HA peer-liveness input to the userspace
+// readiness query (#16844). A nil cluster means no peer liveness can be
+// proven down, so it reports alive and the query stays fail-closed.
+func (d *Daemon) peerAliveForReadiness() bool {
+	if d.cluster == nil {
+		return true
+	}
+	return d.cluster.PeerAlive()
+}
+
 // checkUserspaceTakeoverReadiness returns whether the userspace dataplane
 // is ready to take over forwarding for the given RG. Returns (true, nil)
 // for non-userspace RGs or when the dataplane is healthy. It takes ONE
@@ -306,12 +323,15 @@ func userspaceRGConfigured(cfg *config.Config, rgID int) bool {
 // checkUserspaceTakeoverReadinessFor with its per-pass snapshot (#2114,
 // Codex PR #6743 r2-1).
 func (d *Daemon) checkUserspaceTakeoverReadiness(rgID int) (bool, []string) {
-	return d.checkUserspaceTakeoverReadinessFor(d.dataplane(), rgID)
+	return d.checkUserspaceTakeoverReadinessFor(d.dataplane(), rgID, d.peerAliveForReadiness())
 }
 
 // checkUserspaceTakeoverReadinessFor is checkUserspaceTakeoverReadiness
 // against a caller-supplied snapshot (one evaluation per reconcile pass).
-func (d *Daemon) checkUserspaceTakeoverReadinessFor(rt dataplane.RuntimeDataPlane, rgID int) (bool, []string) {
+// peerAlive carries the HA peer's liveness (#16844): the #15918
+// fabric-installability clause inside the userspace query applies only
+// while the peer is alive, mirroring the daemon's fabricReady exemption.
+func (d *Daemon) checkUserspaceTakeoverReadinessFor(rt dataplane.RuntimeDataPlane, rgID int, peerAlive bool) (bool, []string) {
 	cfg := d.store.ActiveConfig()
 	if !userspaceRGConfigured(cfg, rgID) {
 		return true, nil
@@ -321,6 +341,9 @@ func (d *Daemon) checkUserspaceTakeoverReadinessFor(rt dataplane.RuntimeDataPlan
 	// not ready — never report takeover-ready for an absent backend.
 	if rt == nil {
 		return false, []string{fmt.Sprintf("userspace dataplane not initialized for RG %d", rgID)}
+	}
+	if peerAware, ok := rt.(userspacePeerAwareTakeoverReadiness); ok {
+		return peerAware.TakeoverReadyForPeer(peerAlive)
 	}
 	ready, ok := rt.(userspaceTakeoverReadiness)
 	if !ok {

@@ -397,10 +397,29 @@ func (m *Manager) desiredForwardingArmedLocked() bool {
 // begin queue bring-up work during UpdateRGActive().
 // While restart inventory debt is outstanding, it also asks the connected peer
 // for a complete session bulk, throttled to avoid duplicate requests.
+//
+// TakeoverReady assumes the peer is alive (peerAlive=true): every caller
+// that cannot prove the peer is down gets the full #15918 fabric gate.
+// Daemon readiness queries that know the peer is down must use
+// TakeoverReadyForPeer(false) instead (#16844).
 func (m *Manager) TakeoverReady() (bool, []string) {
+	return m.TakeoverReadyForPeer(true)
+}
+
+// TakeoverReadyForPeer is TakeoverReady with the HA peer's liveness.
+// The #15918 fabric-installability clause is only relevant while the
+// peer is alive: fabric forwarding exists to reach the peer, and a lone
+// surviving node has no fabric peer to install a link to. Applying the
+// clause with no live peer held every data RG secondary until the
+// #7161 degraded fallback fired 2m later on a cold boot where the peer
+// was confirmed absent (#16844). Every other gate is local and applies
+// regardless of peer liveness. HATakeoverReadiness (metrics) keeps the
+// peer-alive form so an unresolved fabric still surfaces as a blocker
+// while it can still matter.
+func (m *Manager) TakeoverReadyForPeer(peerAlive bool) (bool, []string) {
 
 	m.mu.Lock()
-	ready, reasons := m.takeoverReadyLocked()
+	ready, reasons := m.takeoverReadyLocked(peerAlive)
 	generation := m.sessionInventoryDebtGen
 	request := m.sessionInventoryRequester
 	requestAt := time.Time{}
@@ -572,7 +591,7 @@ func IsHATakeoverBlocker(name string) bool {
 // transport counters without performing RPCs or changing Manager state.
 func (m *Manager) HATakeoverReadiness() HATakeoverReadiness {
 	m.mu.Lock()
-	ready, reasons := m.takeoverReadyLocked()
+	ready, reasons := m.takeoverReadyLocked(true)
 	s := HATakeoverReadiness{
 		Ready: ready, SessionMirrorFailed: m.sessionMirrorFailed,
 		RepairOverflow:        m.sessionRepairOverflowErr != "",
@@ -615,7 +634,7 @@ func (m *Manager) MarkSessionInventoryReconciled(generation uint64) bool {
 	return true
 }
 
-func (m *Manager) takeoverReadyLocked() (bool, []string) {
+func (m *Manager) takeoverReadyLocked(peerAlive bool) (bool, []string) {
 	var reasons []string
 	if m.proc == nil || m.proc.Process == nil {
 		reasons = append(reasons, "userspace helper not running")
@@ -711,7 +730,16 @@ func (m *Manager) takeoverReadyLocked() (bool, []string) {
 	// the builder emitted no row (missing interface stanza is only a
 	// config warning), the gate still applies — the explicit no-fabric
 	// exemption is only for configs naming no fabric at all.
-	if m.clusterHA && m.lastSnapshot != nil {
+	//
+	// #16844: the whole clause applies only while the peer is alive. Fabric
+	// readiness is "only relevant when peer is alive" (the daemon's
+	// fabricReady term has carried that exemption since before #15918):
+	// with no live peer there is no fabric peer to resolve and no peer
+	// session sync to protect, so an unresolved PeerMAC must not hold a
+	// lone surviving node secondary until the degraded fallback. The
+	// unconverged-fabric debt is exempt for the same reason — the helper's
+	// local forwarding does not depend on a fabric link to an absent peer.
+	if peerAlive && m.clusterHA && m.lastSnapshot != nil {
 		configured := len(m.lastSnapshot.Fabrics) > 0
 		if !configured && m.lastSnapshot.Config != nil && m.lastSnapshot.Config.Chassis.Cluster != nil {
 			cc := m.lastSnapshot.Config.Chassis.Cluster
