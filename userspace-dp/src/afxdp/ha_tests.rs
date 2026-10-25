@@ -11518,15 +11518,29 @@ fn clear_mirror_bpf_failure_retains_authority_10512() {
     );
 }
 
-/// P4: over-cap single-shot fails closed touching nothing (the
-/// take(cap+1) snapshot bounds the transient Vec, proven here with a
-/// 1-row cap against 2 rows).
+/// #16649: a table above the old single-shot cap used to fail with
+/// `clear-cap-exceeded` and revoke nothing. The paged clear must
+/// instead revoke EVERY row in bounded batches under one fence.
+/// This cell seeds 5 rows and clears with batch=2 (three rounds:
+/// 2+2+1), then asserts every shared map is empty and the BPF
+/// counts are the helper-confirmed (0,0) with no BPF maps bound.
+/// Ports vary per row (not routing domains) so each row is a
+/// distinct bare tuple and its synthesized reverse companion is
+/// distinct too — the forward+reverse publish is what makes the
+/// shared table hold 2× the logical sessions, so exercising
+/// distinct tuples is the honest shape of the over-cap table.
+///
+/// FAIL-ON-REVERT: restoring the single-shot cap check
+/// (`keys.len() > cap -> clear-cap-exceeded`) makes this cell fail
+/// at `expect` (5 rows over batch 2 refused); restoring the cap
+/// check at the production 262,144 while keeping the loop makes
+/// the batch=2 rounds refuse on round 1 for the same reason.
 #[test]
-fn clear_mirror_over_cap_fails_closed_untouched_10512() {
+fn clear_mirror_over_old_cap_pages_to_empty_16649() {
     let coordinator = Coordinator::new();
-    for domain in [7u32, 8u32] {
+    for i in 0..5u16 {
         let mut key = test_key();
-        key.routing_domain = domain;
+        key.src_port = 40000 + i;
         let entry = SyncedSessionEntry { key,
         decision: test_decision(),
         metadata: test_metadata(),
@@ -11535,7 +11549,7 @@ fn clear_mirror_over_cap_fails_closed_untouched_10512() {
         protocol: PROTO_TCP,
         tcp_flags: 0x10,
         generation: 0,
-        session_id: 0xC1EA9000 + domain as u64,
+        session_id: 0xC1EA9000 + i as u64,
         tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
         source_nat_static: None, };
         crate::afxdp::shared_ops::publish_shared_session(
@@ -11546,15 +11560,75 @@ fn clear_mirror_over_cap_fails_closed_untouched_10512() {
             &entry,
         );
     }
-    let domain = coordinator.session_domain();
-    let err = domain
-        .clear_mirror_with_cap(1)
-        .expect_err("2 rows over a 1-row cap must fail");
-    assert_eq!(err, "clear-cap-exceeded");
+    // publish_shared_session stores only the forward row in `synced`
+    // (reverse companions are separate publish calls), so 5 rows.
     assert_eq!(
         coordinator.sessions.synced.lock().expect("synced").len(),
-        2,
-        "over-cap clear must touch nothing"
+        5,
+        "fixture must hold all 5 rows"
+    );
+    let domain = coordinator.session_domain();
+    let counts = domain
+        .clear_mirror_with_batch(2)
+        .expect("over-old-cap clear must succeed in bounded rounds");
+    assert_eq!(counts, (0, 0), "no BPF maps bound in unit tests");
+    assert!(
+        coordinator
+            .sessions
+            .synced
+            .lock()
+            .expect("synced")
+            .is_empty(),
+        "paged clear must empty the shared synced map"
+    );
+    assert!(
+        coordinator.sessions.nat.lock().expect("nat").is_empty(),
+        "paged clear must empty the shared nat map"
+    );
+    assert!(
+        coordinator
+            .sessions
+            .forward_wire
+            .lock()
+            .expect("wire")
+            .is_empty(),
+        "paged clear must empty the shared forward-wire map"
+    );
+}
+
+/// #16649: batch=0 would loop forever on a non-empty table, so it
+/// is refused before the fence/BPF sweep and touches nothing.
+#[test]
+fn clear_mirror_zero_batch_refused_untouched_16649() {
+    let coordinator = Coordinator::new();
+    let key = test_key();
+    let entry = SyncedSessionEntry { key: key.clone(),
+    decision: test_decision(),
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0xC1EA9,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    source_nat_static: None, };
+    crate::afxdp::shared_ops::publish_shared_session(
+        &coordinator.sessions.synced,
+        &coordinator.sessions.nat,
+        &coordinator.sessions.forward_wire,
+        &coordinator.sessions.owner_rg_indexes,
+        &entry,
+    );
+    let domain = coordinator.session_domain();
+    let err = domain
+        .clear_mirror_with_batch(0)
+        .expect_err("zero batch must be refused");
+    assert_eq!(err, "clear-batch-zero");
+    assert_eq!(
+        coordinator.sessions.synced.lock().expect("synced").len(),
+        1,
+        "zero-batch refusal must touch nothing"
     );
 }
 

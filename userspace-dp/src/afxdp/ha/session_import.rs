@@ -801,44 +801,91 @@ impl crate::afxdp::ha::SessionDomain {
         )
     }
 
-    /// Hard cap on one clear snapshot (P4): take(cap+1) bounds the
-    /// transient key Vec even against a hostile table (262144 × ~72B ≈
-    /// 18MB max); over-cap fails closed touching nothing.
+    /// Bounded batch for one round of the paged clear (#16649): each
+    /// round materialises at most this many keys, so the transient key
+    /// Vec stays bounded (≈ batch × ~72B ≈ 18MB at the production
+    /// batch) no matter how large the shared table is. This is a
+    /// per-round batch bound, NOT a table-size cap: `clear_mirror`
+    /// loops rounds until the table is empty, so a table of any size
+    /// (including 2× or more of the old single-shot cap) clears in
+    /// full. The name keeps the old constant's value so the per-round
+    /// memory bound is unchanged.
     pub(crate) const CLEAR_MIRROR_KEY_CAP: usize = 262_144;
 
     pub(crate) fn clear_mirror(&self) -> Result<(usize, usize), &'static str> {
-        self.clear_mirror_with_cap(Self::CLEAR_MIRROR_KEY_CAP)
+        self.clear_mirror_with_batch(Self::CLEAR_MIRROR_KEY_CAP)
     }
 
-    pub(crate) fn clear_mirror_with_cap(&self, cap: usize) -> Result<(usize, usize), &'static str> {
-        let fence = crate::afxdp::bpf_map::global_tuple_gate().begin_clear()?;
-        let keys: Vec<SessionKey> = lock_shared_recover(&self.sessions.synced)
-            .keys()
-            .take(cap.saturating_add(1))
-            .cloned()
-            .collect();
-        if keys.len() > cap {
-            return Err("clear-cap-exceeded");
+    /// Paged clear (#16649): page the clear inside the helper under
+    /// ONE clear fence, in bounded key batches, until the shared
+    /// table is empty.
+    ///
+    /// Why paging under one fence, not one shot or many fences:
+    /// - One shot materialised the whole key set before deleting
+    ///   anything, so the old cap had to refuse tables above
+    ///   262,144 entries outright (`clear-cap-exceeded`, #16649) —
+    ///   exactly the incident-time table sizes clear-all exists for.
+    /// - Re-acquiring the fence per batch would open windows where
+    ///   new publishes land between batches and survive a clear the
+    ///   operator believes was complete; holding the fence across
+    ///   all rounds keeps every publish/delete gated for the whole
+    ///   clear (the fence blocks tuple admission, it does not hold
+    ///   the shared-map lock, so no new row can appear mid-clear).
+    ///
+    /// Fail-closed ordering per round is preserved: the BPF sweep
+    /// runs FIRST and only once (before the first batch); if it
+    /// fails, no authority is touched and the caller may retry.
+    /// After the sweep, per-key deletes are unconditional
+    /// (`delete_gen=0, expected_id=0`), so a batch cannot decline:
+    /// every enumerated key in a round is deleted in that round,
+    /// the next round enumerates only what remains, and the loop
+    /// terminates when a round finds the table empty. Rows deleted
+    /// concurrently by another path simply shrink later rounds.
+    ///
+    /// `batch == 0` is refused (`clear-batch-zero`) without touching
+    /// anything and without sweeping BPF: a zero batch would loop
+    /// forever on a non-empty table, so it is a programming error,
+    /// not a clear.
+    pub(crate) fn clear_mirror_with_batch(
+        &self,
+        batch: usize,
+    ) -> Result<(usize, usize), &'static str> {
+        if batch == 0 {
+            return Err("clear-batch-zero");
         }
+        let fence = crate::afxdp::bpf_map::global_tuple_gate().begin_clear()?;
         // BPF sweep FIRST (P3): on failure nothing is touched
         // (fail-closed, retryable) — authority clears only after the
-        // kernel sweep lands.
+        // kernel sweep lands. Exactly one sweep for the whole clear:
+        // `clear_bpf_conntrack_maps` empties both maps outright, so
+        // no per-round sweep is needed (or correct — later rounds
+        // would recount an already-empty map).
         let maps = self.bpf_maps.load();
         let v4_fd = maps.conntrack_v4_fd.as_ref().map_or(-1, |fd| fd.fd);
         let v6_fd = maps.conntrack_v6_fd.as_ref().map_or(-1, |fd| fd.fd);
         let counts = crate::afxdp::bpf_map::clear_bpf_conntrack_maps(v4_fd, v6_fd)?;
-        for key in keys {
-            let _ = self.delete_synced_session_gen_marked(
-                key,
-                0,
-                false,
-                false,
-                Some(&fence),
-                false,
-                0,
-                None,
-                None,
-            );
+        loop {
+            let keys: Vec<SessionKey> = lock_shared_recover(&self.sessions.synced)
+                .keys()
+                .take(batch)
+                .cloned()
+                .collect();
+            if keys.is_empty() {
+                break;
+            }
+            for key in keys {
+                let _ = self.delete_synced_session_gen_marked(
+                    key,
+                    0,
+                    false,
+                    false,
+                    Some(&fence),
+                    false,
+                    0,
+                    None,
+                    None,
+                );
+            }
         }
         self.sessions.owner_rg_indexes.clear(&self.sessions.synced);
         lock_shared_recover(&self.sessions.nat).clear();
