@@ -388,7 +388,12 @@ Both branches of `executeConfirmedRollback` are reachable in that window:
   `enterBootstrapMode` + `reconcileManagementAfterPromotion` instead of an
   apply. Its teardown steps are individually nil-guarded
   (`relinquishClusterForBootstrap` on `d.cluster`, the FRR and dataplane steps
-  on theirs).
+  on theirs). #16678: `enterBootstrapMode` also withdraws the abandoned
+  config's LAN-facing service claims (`withdrawAbandonedServicesForBootstrap`:
+  RA lifetime-0 goodbye, Kea `Apply(nil)`, DHCP relay to nil) — those owners
+  are otherwise reached only from the apply path and shutdown, so without
+  that step the rollback kept advertising/leasing on segments it no longer
+  forwards for while logging "config-driven takeover removed".
 
 **Coverage is at the DISPATCH, not just at the guarded function.** The cell that
 enters `applyTailReconciles` directly binds the guard but cannot see an

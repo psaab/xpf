@@ -424,11 +424,14 @@ func (d *Daemon) exitBootstrapMode(reason string) {
 // not to run. Instead this performs explicit cleanup, in order:
 //
 //  1. set bootstrap mode,
-//  2. retire xpf-written takeover .network files, preserving a validated
+//  2. retire the abandoned config's LAN-facing service claims — withdraw the
+//     Router Advertisement senders (lifetime-0 goodbye), stop the Kea DHCP
+//     server units, and stop the DHCP relay (#16678),
+//  3. retire xpf-written takeover .network files, preserving a validated
 //     bootstrap lifeline or restoring its exact pre-takeover content on the
 //     first-commit path only, then networkctl reload,
-//  3. clear the FRR managed section,
-//  4. detach the dataplane (inverse of Start; the helper object is kept so a
+//  4. clear the FRR managed section,
+//  5. detach the dataplane (inverse of Start; the helper object is kept so a
 //     later confirmed commit can re-arm it).
 //
 // Renames persist deliberately — reverting them would link-cycle a degraded
@@ -501,6 +504,13 @@ func (d *Daemon) enterBootstrapModeWithLifeline(restoreLifeline bool) error {
 	// including the rollback unit tests that stub the apply body. It is a no-op
 	// on a standalone node.
 	clusterSteps := d.relinquishClusterForBootstrap()
+	// #16678: relinquishClusterForBootstrap resigns the RGs (their demote edge
+	// clears shared-identity RA senders silently and re-derives Kea), but in
+	// standalone mode nothing runs at all, and in cluster mode the node-local
+	// RA/Kea state survives derived from the abandoned config. Withdraw the
+	// abandoned config's remaining service claims explicitly, and fold any
+	// failure into the same honest DEGRADED aggregation as every other step.
+	serviceSteps := d.withdrawAbandonedServicesForBootstrap()
 
 	var steps []bootstrapTeardownStep
 	switch {
@@ -524,6 +534,7 @@ func (d *Daemon) enterBootstrapModeWithLifeline(restoreLifeline bool) error {
 	// FIRST — a failed resign is part of the same honest report, not a separate
 	// channel that a stubbed teardown could hide.
 	steps = append(clusterSteps, steps...)
+	steps = append(serviceSteps, steps...)
 
 	// #5868: aggregate the per-step outcomes and report HONESTLY. A partial
 	// teardown must never be logged/returned as a clean rollback.
@@ -584,6 +595,64 @@ func summarizeBootstrapTeardown(steps []bootstrapTeardownStep) (err error, degra
 // earlier failures — a bootstrap rollback tears down as much as it can — but
 // failures are captured (not discarded) so the caller can report DEGRADED.
 // Runs under the caller's d.applySem.
+// withdrawAbandonedServicesForBootstrap retires the abandoned config's
+// LAN-facing service claims on entry to the bootstrap safe state (#16678):
+// the Router Advertisement senders, the Kea DHCP server units and the DHCP
+// relay. Those owners are otherwise reached only from the config-apply path
+// (daemon_apply_routing.go / daemon_apply_tail.go) and from shutdown, and
+// the first-commit / nil-target rollback branch returns without an apply —
+// so without this step the box kept advertising itself as an IPv6 default
+// router and kept leasing DHCP with itself as gateway on segments it no
+// longer forwards for, while logging "config-driven takeover removed".
+//
+// RA: Withdraw emits the lifetime-0 goodbye and stops every sender
+// (RFC 4861 §6.2.5, the same terminal the apply path uses when RA is
+// removed, #5092). In cluster mode the RG resign above has already
+// stopped the shared-stable-identity senders silently via the demote
+// edge, so the senders left for Withdraw are the node-local and
+// per-node-source ones, for which the goodbye is correct. The cluster
+// reconcile digest is cleared so a later commit re-derives RA instead
+// of matching the abandoned set's digest (inert empty after withdrawal).
+//
+// Kea: stopped with Apply(nil), the same synchronous clear the
+// factory-reset quiesce uses — the Kea units outlive xpfd, so they must
+// be stopped explicitly (pkg/dhcpserver README, #6787). Shutdown() is
+// NOT used because it latches and would prevent a corrected commit
+// from restarting Kea without an xpfd restart. The relay is reconciled
+// through the usual reconcileDHCPRelay with an empty config, which
+// stops every relay.
+//
+// Each failure is returned as a teardown step so the caller reports the
+// rollback DEGRADED instead of claiming "config-driven takeover removed".
+// Runs under the caller's d.applySem.
+func (d *Daemon) withdrawAbandonedServicesForBootstrap() []bootstrapTeardownStep {
+	var steps []bootstrapTeardownStep
+	if d.ra != nil {
+		if err := d.ra.Withdraw(); err != nil {
+			steps = append(steps, bootstrapTeardownStep{
+				name: "withdraw router advertisements",
+				err:  err,
+			})
+		}
+		d.raReconcileMu.Lock()
+		d.lastRAReconcileHash = ""
+		d.raReconcileMu.Unlock()
+	}
+	if d.dhcpServer != nil {
+		d.dhcpServer.SetLeaseSyncEnabled(false)
+		if err := d.dhcpServer.Apply(nil); err != nil {
+			steps = append(steps, bootstrapTeardownStep{
+				name: "stop DHCP server",
+				err:  err,
+			})
+		}
+	}
+	if d.dhcpRelay != nil {
+		d.reconcileDHCPRelay(&config.Config{})
+	}
+	return steps
+}
+
 // relinquishClusterForBootstrap resigns every redundancy group this node holds
 // and stops cluster comms, so a node that has rolled back into bootstrap mode
 // cannot keep acting clustered while logically unconfigured (#6742).
