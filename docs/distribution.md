@@ -374,8 +374,9 @@ older hosts — the archive key, and the apt URL/channel) BEFORE any mutation,
 then installs the pinned archive keyring and writes the deb822 apt source. After
 APT verifies the selected signed Release identity, it writes the managed
 channel preference and runs `apt install xpf-appliance`. If that apt step fails,
-the installer removes the source and restores the previous marked pin (or
-removes a new one). It also restores the previous keyring (or removes the
+the installer restores the previous apt source when a re-run overwrote one
+(or removes the source on first install) and restores the previous marked
+pin (or removes a new one). It also restores the previous keyring (or removes the
 bootstrap keyring on first install) only while the live path is still the
 bootstrap object (device/inode identity) with matching bytes (#12543); a
 dpkg replacement is preserved even if byte-identical to the bootstrap write.

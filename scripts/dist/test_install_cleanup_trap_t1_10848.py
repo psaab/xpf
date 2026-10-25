@@ -87,6 +87,7 @@ def _render_harness(tmpdir, action, trap_enabled):
         'mv() { t1_log "mv $*"; t1_path_guard "$@" || return 97; command mv "$@"; }',
         'rm() { t1_log "rm $*"; t1_path_guard "$@" || return 97; command rm "$@"; }',
         'info() { printf "xpf-install: %s\\n" "$*"; }',
+        'die() { printf "xpf-install ERROR: %s\\n" "$*" >&2; exit 1; }',
         'SRC="$T1_TMP/xpf.sources"',
         'PIN="$T1_TMP/xpf-channel.pref"',
         'KEYRING="$T1_TMP/xpf-archive-keyring.asc"',
@@ -94,6 +95,8 @@ def _render_harness(tmpdir, action, trap_enabled):
         'CHANNEL=stable',
         'DRY=0',
         'SRC_WRITTEN=0',
+        "SRC_BACKUP=''",
+        "SRC_TEMP=''",
         'INSTALL_OK=0',
         'PIN_WRITTEN=0',
         "PIN_BACKUP=''",
@@ -101,6 +104,7 @@ def _render_harness(tmpdir, action, trap_enabled):
         'KEYRING_WRITTEN=0',
         "KEYRING_BACKUP=''",
         "KEYRING_TEMP=''",
+        "KEYRING_IDENT=''",
         "ARCHIVE_KEY=stub-key",
         "PIN_MARKER='# xpf appliance channel pin; Managed by install.sh (#11133)'",
     ]
@@ -129,6 +133,15 @@ class TrapTextTests(unittest.TestCase):
             self.assertIn(f"{name}() {{", source)
         self.assertIn("SRC_WRITTEN=1", source)
         self.assertIn("PIN_WRITTEN=1", source)
+
+    def test_source_backup_restore_is_wired(self):
+        source = _install_source()
+        self.assertIn("SRC_BACKUP=''", source)
+        self.assertIn("SRC_TEMP=''", source)
+        self.assertIn("SRC_BACKUP=$(mktemp", source)
+        self.assertIn("cp -p \"$SRC\" \"$SRC_BACKUP\"", source)
+        self.assertIn("restoring previous $SRC", source)
+        self.assertIn('mv -f "$SRC_BACKUP" "$SRC"', source)
 
     def test_exit_trap_registered_before_main_guard(self):
         source = _install_source()
@@ -209,6 +222,62 @@ class TrapFiresTests(unittest.TestCase):
             self.assertTrue(pin.exists(), "success run removed pin")
             self.assertNotIn("rm -f", calls)
             self.assertNotIn("install failed", out)
+
+    def test_failed_rerun_restores_preexisting_source_byte_for_byte(self):
+        # #16534 defect cell: a re-run (documented channel rebind) overwrites
+        # a working source, then the apt step fails. The source must come
+        # back byte-for-byte (and keep its mode), not be rm -f'd.
+        with tempfile.TemporaryDirectory(prefix="t1-16534-rerun-") as tmp:
+            tmpdir = Path(tmp)
+            src = tmpdir / "xpf.sources"
+            pin = tmpdir / "xpf-channel.pref"
+            original = ("# xpf appliance apt source (#1924). Managed by install.sh.\n"
+                        "Types: deb\nURIs: https://example.invalid/apt\nSuites: stable\n"
+                        "Components: main\nArchitectures: amd64\nSigned-By: /k\n")
+            src.write_text(original)
+            src.chmod(0o640)
+            rc, out = _run_harness(
+                tmpdir, "write_source\nwrite_channel_pin\nfalse")
+            self.assertNotEqual(rc, 0, out[-2000:])
+            self.assertNotIn("stub refused", out)
+            self.assertIn("restoring previous %s" % src, out)
+            self.assertTrue(src.exists(), "failed re-run deleted pre-existing source")
+            self.assertEqual(src.read_text(), original)
+            self.assertEqual(src.stat().st_mode & 0o777, 0o640)
+            self.assertFalse(pin.exists(), "new pin should still be removed")
+            self.assertEqual(
+                list(tmpdir.glob(".xpf.sources.*")), [],
+                "source temp/backup must not leak")
+
+    def test_successful_rerun_keeps_new_source_and_cleans_backup(self):
+        with tempfile.TemporaryDirectory(prefix="t1-16534-ok-") as tmp:
+            tmpdir = Path(tmp)
+            src = tmpdir / "xpf.sources"
+            src.write_text("old source\n")
+            rc, out = _run_harness(
+                tmpdir, "write_source\nINSTALL_OK=1\nexit 0")
+            self.assertEqual(rc, 0, out[-2000:])
+            self.assertNotIn("stub refused", out)
+            self.assertTrue(src.exists())
+            self.assertIn("Suites: stable", src.read_text())
+            self.assertNotIn("old source", src.read_text())
+            self.assertEqual(
+                list(tmpdir.glob(".xpf.sources.*")), [],
+                "source temp/backup must not leak on success")
+
+    def test_symlink_source_is_refused_and_preserved(self):
+        with tempfile.TemporaryDirectory(prefix="t1-16534-symlink-") as tmp:
+            tmpdir = Path(tmp)
+            src = tmpdir / "xpf.sources"
+            target = tmpdir / "operator-source"
+            target.write_text("operator source\n")
+            src.symlink_to(target)
+            rc, out = _run_harness(tmpdir, "write_source")
+            self.assertNotEqual(rc, 0, out[-2000:])
+            self.assertIn("refusing to replace symlink", out)
+            self.assertTrue(src.is_symlink())
+            self.assertEqual(target.read_text(), "operator source\n")
+            self.assertEqual(list(tmpdir.glob(".xpf.sources.*")), [])
 
 
 if __name__ == "__main__":
