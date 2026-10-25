@@ -1175,10 +1175,20 @@ evidence, not as active eBPF source-removal blockers.
   analogue of `ip -6 neigh add proxy <addr> dev <if>`) in addition to enabling the
   `net.ipv6.conf.<if>.proxy_ndp` sysctl. The kernel answers a v6 NS only with
   forwarding + `proxy_ndp` + a matching v6 pneigh entry (`net/ipv6/ndisc.c`), so
-  all three pieces are wired -- v6 static-NAT / NAT64 external proxy is functional
-  end-to-end. v6 is `pneigh_lookup`-gated (per-address by construction), so there
+  all three pieces are wired. v6 is `pneigh_lookup`-gated (per-address by construction), so there
   is no v6 over-answer breadth; the narrowing concern below is IPv4-only. A
   v4-mapped (`::ffff:a.b.c.d`) literal classifies as IPv4 and takes the v4 path.
+- **On-link unicast NDP in the userspace shim (#16660, residual of #15117):**
+  the kernel pneigh lookup is keyed by the RECEIVE device, so an on-link
+  unicast NS (NUD PROBE) to a v6 proxy target must reach the kernel on the
+  netdev the entry sits on. The XDP shim therefore publishes the v6
+  proxy-NDP target set per routing domain (`userspace_proxy_ndp_v6_domain`,
+  from the same `proxy-arp`/`proxy-ndp` config the installer consumes) and
+  passes ICMPv6 133-137 with hop limit 255 to such a destination on its
+  ingress netdev, mirroring the #15117 interface-NAT arm. Without it the NS
+  was LocalDelivered into the `xpf-usp0` TUN, whose per-device lookup
+  misses, and no NA was sent — multicast re-resolution still worked, so the
+  failure was recurring NUD churn, not a blackhole.
 
 - **Forwarded unicast NUD probes (#12611):** IPv6 proxy NDP also requires
   `net.ipv6.conf.all.proxy_ndp=1`. The forwarding/kernel path for unicast NS

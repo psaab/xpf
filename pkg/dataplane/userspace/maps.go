@@ -43,12 +43,14 @@ const (
 	mapNameUserspaceSessions  = "userspace_sessions"
 
 	// Per-interface address, ingress-zone, and NAT maps consumed at snapshot apply.
-	mapNameUserspaceIngressIfaces   = "userspace_ingress_ifaces"
-	mapNameUserspaceIngressDomains  = "userspace_ingress_domains_vlan"
-	mapNameUserspaceLocalV4         = "userspace_local_v4_domain"
-	mapNameUserspaceLocalV6         = "userspace_local_v6_domain"
-	mapNameUserspaceInterfaceNATv4  = "userspace_interface_nat_v4_domain"
-	mapNameUserspaceInterfaceNATv6  = "userspace_interface_nat_v6_domain"
+	mapNameUserspaceIngressIfaces  = "userspace_ingress_ifaces"
+	mapNameUserspaceIngressDomains = "userspace_ingress_domains_vlan"
+	mapNameUserspaceLocalV4        = "userspace_local_v4_domain"
+	mapNameUserspaceLocalV6        = "userspace_local_v6_domain"
+	mapNameUserspaceInterfaceNATv4 = "userspace_interface_nat_v4_domain"
+	mapNameUserspaceInterfaceNATv6 = "userspace_interface_nat_v6_domain"
+	// #16660: v6 proxy-NDP targets for the shim's on-link NDP kernel pass.
+	mapNameUserspaceProxyNDPv6      = "userspace_proxy_ndp_v6_domain"
 	mapNameUserspaceWgIngressZones  = "userspace_wg_ingress_zones"
 	mapNameUserspaceWgZoneAdmission = "userspace_wg_zone_admission"
 	mapNameUserspaceLandScreen      = "userspace_land_screen"
