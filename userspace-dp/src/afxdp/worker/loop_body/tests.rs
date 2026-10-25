@@ -695,11 +695,14 @@ mod flow_cache_invalidation_tests {
             } else {
                 None
             };
+            let shared_owner_rg_indexes =
+                crate::afxdp::types::SharedSessionOwnerRgIndexes::default();
             crate::afxdp::worker::retry_deferred_conntrack_deletes(
                 &mut sessions,
                 CONNTRACK_TEST_MAP_FD,
                 CONNTRACK_TEST_MAP_FD,
                 &shared_sessions,
+                &shared_owner_rg_indexes,
             );
             assert_eq!(
                 conntrack_row_for_test(&key).unwrap().session_id,
@@ -743,6 +746,7 @@ mod flow_cache_invalidation_tests {
                 CONNTRACK_TEST_MAP_FD,
                 CONNTRACK_TEST_MAP_FD,
                 &shared_sessions,
+                &shared_owner_rg_indexes,
             );
             assert!(
                 sessions.take_deferred_conntrack_deletes().is_empty(),
@@ -760,6 +764,207 @@ mod flow_cache_invalidation_tests {
                 ),
             }
         }
+        crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+    }
+
+    // #16491: a poisoned shared_sessions mutex must be recovered, not
+    // re-panicked, and a shared row in a different scope sharing the
+    // bare tuple must still fence the delete (the kernel conntrack row
+    // is keyed by bare tuple alone, and close_delta_is_stale_incarnation
+    // treats has_other_scope as stale for the same reason).
+    #[test]
+    fn conntrack_retry_recovers_poison_and_other_scope_fences_16491() {
+        use crate::afxdp::bpf_map::{
+            CONNTRACK_TEST_MAP_FD, conntrack_row_for_test,
+            publish_bpf_conntrack_entry_with_source_nat,
+        };
+        use crate::afxdp::types::SharedSessionOwnerRgIndexes;
+        use crate::afxdp::worker::SyncedSessionEntry;
+        use crate::session::SessionTable;
+        use std::sync::{Arc, Mutex};
+
+        crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+        let key = reap_key(63001);
+        assert_eq!(
+            publish_bpf_conntrack_entry_with_source_nat(
+                CONNTRACK_TEST_MAP_FD,
+                CONNTRACK_TEST_MAP_FD,
+                &key,
+                reap_decision(None),
+                &reap_metadata(),
+                &FastMap::default(),
+                0,
+                0,
+                72001,
+                300,
+                SessionOrigin::ForwardFlow,
+                None,
+            ),
+            crate::afxdp::bpf_map::ConntrackPublishResult::Written
+        );
+        // Shared replacement lives in a DIFFERENT scope (routing_domain
+        // 99) with a different session_id, sharing the bare tuple. The
+        // kernel conntrack row is keyed by bare tuple alone, so this
+        // fences the delete exactly as the pre-fix scan did (and as
+        // close_delta_is_stale_incarnation's has_other_scope arm does).
+        let mut other_scope_key = key.clone();
+        other_scope_key.routing_domain = 99;
+        let indexes = SharedSessionOwnerRgIndexes::default();
+        {
+            let mut idx = crate::afxdp::shared_ops::lock_shared_recover(
+                &indexes.bare_tuple_sessions,
+            );
+            idx.insert(&other_scope_key);
+        }
+        let shared_sessions = Arc::new(Mutex::new({
+            let mut map = FastMap::default();
+            map.insert(
+                other_scope_key.clone(),
+                SyncedSessionEntry { key: other_scope_key.clone(),
+                decision: reap_decision(None),
+                metadata: reap_metadata(),
+                source_nat_static: None,
+                leak_incarnation: 0,
+                origin: SessionOrigin::ForwardFlow,
+                protocol: PROTO_TCP,
+                tcp_flags: crate::tcp_flags::TCP_ACK,
+                generation: 0,
+                session_id: 72002,
+                tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, },
+            );
+            map
+        }));
+        // Poison the shared mutex the way a prior worker panic would.
+        let poison_target = Arc::clone(&shared_sessions);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = poison_target.lock().expect("test lock");
+            panic!("poison shared_sessions for #16491 test");
+        }));
+        assert!(shared_sessions.lock().is_err(), "precondition: poisoned");
+        let before = crate::afxdp::shared_ops::SHARED_SESSION_POISON_RECOVERIES
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let mut sessions = SessionTable::new();
+        sessions.defer_conntrack_delete(crate::session::DeferredConntrackDelete {
+            key: key.clone(),
+            session_id: 72001,
+        });
+        // Pre-fix this panics with "shared sessions poisoned".
+        crate::afxdp::worker::retry_deferred_conntrack_deletes(
+            &mut sessions,
+            CONNTRACK_TEST_MAP_FD,
+            CONNTRACK_TEST_MAP_FD,
+            &shared_sessions,
+            &indexes,
+        );
+        let after = crate::afxdp::shared_ops::SHARED_SESSION_POISON_RECOVERIES
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert!(after > before, "#16491: poison must be recovered and counted");
+        assert_eq!(
+            conntrack_row_for_test(&key).unwrap().session_id,
+            72001,
+            "#16491: other-scope shared row sharing the bare tuple must fence \
+             the delete (kernel row is bare-tuple keyed)"
+        );
+        crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+    }
+
+    // #16491: an exact-scope shared replacement with a different
+    // session_id must still fence the delete (no fail-open weakening),
+    // and the check must stay O(1) as the shared map grows.
+    #[test]
+    fn conntrack_retry_exact_scope_replacement_still_fences_16491() {
+        use crate::afxdp::bpf_map::{
+            CONNTRACK_TEST_MAP_FD, conntrack_row_for_test,
+            publish_bpf_conntrack_entry_with_source_nat,
+        };
+        use crate::afxdp::types::SharedSessionOwnerRgIndexes;
+        use crate::afxdp::worker::SyncedSessionEntry;
+        use crate::session::SessionTable;
+        use std::sync::{Arc, Mutex};
+
+        crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+        let key = reap_key(63002);
+        assert_eq!(
+            publish_bpf_conntrack_entry_with_source_nat(
+                CONNTRACK_TEST_MAP_FD,
+                CONNTRACK_TEST_MAP_FD,
+                &key,
+                reap_decision(None),
+                &reap_metadata(),
+                &FastMap::default(),
+                0,
+                0,
+                72011,
+                300,
+                SessionOrigin::ForwardFlow,
+                None,
+            ),
+            crate::afxdp::bpf_map::ConntrackPublishResult::Written
+        );
+        let indexes = SharedSessionOwnerRgIndexes::default();
+        {
+            let mut idx = crate::afxdp::shared_ops::lock_shared_recover(
+                &indexes.bare_tuple_sessions,
+            );
+            idx.insert(&key);
+            // Grow the shared population: the fence verdict must not
+            // depend on scanning these unrelated rows.
+            for i in 0..2000u16 {
+                idx.insert(&reap_key(40000u16.wrapping_add(i)));
+            }
+        }
+        let shared_sessions = Arc::new(Mutex::new({
+            let mut map = FastMap::default();
+            for i in 0..2000u16 {
+                let filler = reap_key(40000u16.wrapping_add(i));
+                map.insert(
+                    filler.clone(),
+                    SyncedSessionEntry { key: filler.clone(),
+                    decision: reap_decision(None),
+                    metadata: reap_metadata(),
+                    source_nat_static: None,
+                    leak_incarnation: 0,
+                    origin: SessionOrigin::ForwardFlow,
+                    protocol: PROTO_TCP,
+                    tcp_flags: crate::tcp_flags::TCP_ACK,
+                    generation: 0,
+                    session_id: 90000 + u64::from(i),
+                    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, },
+                );
+            }
+            map.insert(
+                key.clone(),
+                SyncedSessionEntry { key: key.clone(),
+                decision: reap_decision(None),
+                metadata: reap_metadata(),
+                source_nat_static: None,
+                leak_incarnation: 0,
+                origin: SessionOrigin::ForwardFlow,
+                protocol: PROTO_TCP,
+                tcp_flags: crate::tcp_flags::TCP_ACK,
+                generation: 0,
+                session_id: 72012,
+                tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, },
+            );
+            map
+        }));
+        let mut sessions = SessionTable::new();
+        sessions.defer_conntrack_delete(crate::session::DeferredConntrackDelete {
+            key: key.clone(),
+            session_id: 72011,
+        });
+        crate::afxdp::worker::retry_deferred_conntrack_deletes(
+            &mut sessions,
+            CONNTRACK_TEST_MAP_FD,
+            CONNTRACK_TEST_MAP_FD,
+            &shared_sessions,
+            &indexes,
+        );
+        assert_eq!(
+            conntrack_row_for_test(&key).unwrap().session_id,
+            72011,
+            "#16491: exact-scope replacement must fence the delete (row survives)"
+        );
         crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
     }
 }

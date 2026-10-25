@@ -157,6 +157,7 @@ pub(super) fn run_session_housekeeping(
         conntrack_v4_fd,
         conntrack_v6_fd,
         shared_sessions,
+        shared_owner_rg_indexes,
     );
     let expired_entries = sessions.expire_stale_entries_ha(loop_now_ns, Some(&ha_ctx));
     // #11053: if the control TCP session idles out, forget its PPTP calls
