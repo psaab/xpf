@@ -3260,6 +3260,10 @@ type compileOpts struct {
 	// authoring order. Same doctrine as lenientPolicyCommunityRef.
 	lenientPolicyASPathRegex    bool
 	lenientPolicyCommunityRegex bool // #8449: sibling of the as-path gate; see lenientPolicyASPathRegex
+	// lenientBGPNeighborDescriptionPipe16776 (#16776) downgrades the
+	// neighbor-description "| " rejection to a warning on tolerant
+	// load / peer-sync (#1960); the render belt omits the line.
+	lenientBGPNeighborDescriptionPipe16776 bool
 	// lenientPolicyThenOperands downgrades the compiled #12070/#12513 operand
 	// gate and the #12517 then-tail gate to warnings for tolerant loads. The
 	// FRR renderer omits invalid operands; quoted-then reject parsing retains
@@ -4145,6 +4149,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyASPathRef:                   true,
 		lenientPolicyASPathRegex:                 true,
 		lenientPolicyCommunityRegex:              true,
+		lenientBGPNeighborDescriptionPipe16776:   true,
 		lenientPolicyThenOperands:                true,
 		lenientPolicyNamelessTerm12521:           true,
 		lenientPolicyReservedRedistName:          true,

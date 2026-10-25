@@ -116,6 +116,15 @@ xpf (0.0.0) unstable; urgency=medium
     had no effect on the on-box CLI. The deny-with-exceptions idiom
     (`^show log 100$` beside `^show log$`, public-vrf) still runs
     through a benign pipe.
+  * FRR/community: no rendered frr.conf line contains "| " (#16776).
+    FRR's vty pipe hook refused such lines with "% Unknown action"
+    while frr-reload.py exited 0, so multi-member community-lists
+    (literal boundaries "(^| )") and operator regex members silently
+    never installed and reject terms over them failed open.
+    Community members are pipe-free via the #16788 per-community
+    translation (any "| " member refuses at commit / fails closed),
+    and "| " neighbor descriptions are refused at commit and
+    omitted on tolerant paths.
   * Shim verifier provenance/headroom (#16701): the gate verdict is
     now schema 3 and records provenance.kernel_release (the uname -r
     the processed-insn count was measured on); freshness and release

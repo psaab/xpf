@@ -344,6 +344,18 @@ func runUniformGatesLogFeedRouting(tree *ConfigTree, cfg *Config, opts compileOp
 		}
 	}
 
+	// #16776: neighbor description "| " gate. Strict on commit so the
+	// operator rewords it; tolerant paths warn and the renderer omits
+	// the description line.
+	if err := validateBGPNeighborDescriptionPipeStrict16776(cfg); err != nil {
+		if opts.lenientBGPNeighborDescriptionPipe16776 {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("BGP neighbor description pipe (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #5116/#12065: reserved route-map-suffix gate. The FRR renderer derives
 	// per-source-protocol redistribute maps ending in "-xpf-redist" to keep
 	// each IGP attachment's terms scoped without relying on daemon-specific
