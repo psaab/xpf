@@ -967,9 +967,12 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 // priority-0 routine advert out while this node still held its VIPs,
 // triggering the peer's 1ms priority-0 takeover into a two-owner
 // window. becomeBackup applies the stashed 0 once the VIPs are off
-// the wire; the explicit priority-0 burst after it remains the
-// takeover signal, and masterDownInterval at the stashed 0 keeps the
-// resigned instance from winning a re-election.
+// the wire (an already-BACKUP instance applies it in the stepBackup
+// resign arm, #16821); the explicit priority-0 burst after it remains
+// the takeover signal. The resigned instance then keeps priority 0 —
+// so its master-down skew is longest and it cannot win a re-election
+// — until a priority restore (UpdateRGPriority / updateConfig)
+// supersedes and drops the stash.
 // Used when cluster state transitions from Primary to Secondary
 // (manual failover, weight drop, etc.) in non-preempt mode.
 //
@@ -1040,6 +1043,10 @@ func (m *Manager) UpdateRGPriority(rgID int, priority int) {
 			old := vi.cfg.Priority
 			newPriority := clampConfigPriority(priority)
 			vi.cfg.Priority = newPriority
+			// #16821: this restore supersedes a pending
+			// resignation — drop the stashed 0 so a later,
+			// unrelated becomeBackup cannot install it.
+			vi.discardPendingResign()
 			vi.mu.Unlock()
 			if old != newPriority {
 				slog.Info("vrrp: immediate priority update",

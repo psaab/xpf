@@ -1505,10 +1505,17 @@ dataplane reuses this Go walker, and do NOT try to consolidate them.
   demoting; `VRRPEvent`/`InstanceStates()`/`emitEvent` carry
   `EffectivePriority` and `TrackDown` so structured consumers stop
   repeating the configured-value lie.
-- **Pending resign (A25-06)** — `ResignRG` records a pending
+- **Pending resign (A25-06, #16821)** — `ResignRG` records a pending
   resignation (`beginResign`: priority 0 stashed in `resignPriority`)
   instead of overwriting `cfg.Priority`. Routine MASTER adverts keep
   the pre-resign priority until `becomeBackup` applies the stash after
   the VIP removal; only the explicit priority-0 burst after
-  `becomeBackup` signals takeover. `masterDownInterval` also uses the
-  stashed 0 while pending so the resigned instance cannot re-elect.
+  `becomeBackup` signals takeover. An already-BACKUP instance applies
+  the stash in the `stepBackup` resign arm (its VIPs are already off
+  the wire). A superseding priority assignment — `UpdateRGPriority`
+  or `updateConfig` — drops the stash (`discardPendingResign`) so a
+  later, unrelated step-down cannot install the resolved 0.
+  `getPriority` ignores the stash (it exists to hide 0 from routine
+  adverts), so `masterDownInterval`'s skew uses the pre-resign
+  priority while pending; once the stash is applied or dropped the
+  interval follows `cfg.Priority` again.
