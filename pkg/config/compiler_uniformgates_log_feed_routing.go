@@ -518,6 +518,23 @@ func runUniformGatesLogFeedRouting(tree *ConfigTree, cfg *Config, opts compileOp
 		}
 	}
 
+	// #16810: cluster split-brain IGP identity gate. A shared
+	// OSPF/OSPFv3 router-id or IS-IS NET whose interfaces span RETHs
+	// of more than one data RG makes both nodes originate LSAs under
+	// one identity during an active/active split. Strict rejects;
+	// tolerant warns (#1960) and the daemon render belt keeps only
+	// one participant. The ${node} groups idiom is excused when both
+	// per-node views carry distinct identities (the generic compile
+	// only sees the node0 fallback).
+	if err := validateClusterIGPIdentityStrict(cfg); err != nil {
+		if opts.lenientClusterIGPIdentity16810 {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("cluster IGP identity (downgraded to warning on tolerant path): %v", err))
+		} else if !opts.igpIdentityExcused16810 {
+			return err
+		}
+	}
+
 	// #2889: FRR auth-value gate. A BGP neighbor password or an
 	// OSPF/RIP/IS-IS authentication key containing whitespace cannot be
 	// rendered as a single FRR/vtysh token (FRR's command lexer has no

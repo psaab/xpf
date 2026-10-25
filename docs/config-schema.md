@@ -16714,6 +16714,32 @@ two declared sibling leaves, so both values reach the routing compiler. Braced
 configuration still requires a semicolon between the statements; a fused run
 is rejected at strict commit and warned on tolerant load.
 
+### #16810 — cluster IGP identity must be node-specific when it spans RGs
+
+In cluster mode, an OSPF/OSPFv3 `router-id` (explicit, or inherited
+from `routing-options router-id`) or an IS-IS `net` whose enabled
+interfaces span RETHs of more than one data redundancy group is
+rejected at strict commit: one config is synced to both nodes, so in
+an active/active split both nodes would originate LSAs under the
+same identity and neighbours would keep only one node's prefixes
+(RFC 2328 §1.2 requires a unique router-id per router). Configure a
+node-specific identity, for example:
+
+```
+groups {
+    node0 { protocols { ospf { router-id 10.0.0.1; } } }
+    node1 { protocols { ospf { router-id 10.0.0.2; } } }
+}
+apply-groups "${node}";
+```
+
+or confine the protocol to RETHs of a single redundancy group, or
+leave the router-id unset so FRR auto-derives a per-node value.
+Tolerant load / peer-sync warn instead of rejecting (#1960); the
+daemon then lets only the owner of the lowest-numbered spanning
+data RG participate in that IGP, so a leniently loaded duplicate
+identity never originates from both nodes at once.
+
 
 The other affected knobs do not have equivalent xpf consumers and must not
 look silently supported:

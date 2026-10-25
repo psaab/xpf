@@ -32,6 +32,12 @@ type compileOpts struct {
 	// admits a tail somebody reads is caught rather than reasoned about.
 	// Production never sets it.
 	skipCompactNormalize bool
+	// igpIdentityExcused16810 is set by compileTree after the
+	// pre-expansion AST check finds distinct per-node IGP identities
+	// (the ${node} groups idiom, #16810); runUniformGates then skips
+	// the cluster IGP identity gate instead of re-deriving node views
+	// from the already-expanded tree. Internal only.
+	igpIdentityExcused16810 bool
 
 	// lenientUnknownTopLevelStanza lets tolerant compilation retain an operator-
 	// visible warning while ignoring a root stanza the compiler does not model.
@@ -2574,6 +2580,17 @@ type compileOpts struct {
 	// the malformed value never reaches frr.conf and a leniently-loaded bad
 	// router-id is inert. Same doctrine as lenientBGPNeighborPeerAS.
 	lenientRouterID bool
+	// lenientClusterIGPIdentity16810 (#16810) downgrades the cluster
+	// split-brain IGP identity gate (validateClusterIGPIdentityStrict)
+	// from a hard compile error to a cfg.Warnings entry. The gate
+	// rejects a cluster config whose OSPF/OSPFv3 router-id or IS-IS
+	// NET is shared by both nodes while IGP interfaces span RETHs of
+	// more than one data RG, because in an active/active split both
+	// nodes then originate LSAs under one identity. Strict commit
+	// hard-rejects; tolerant load / peer-sync warn so an already-
+	// persisted config still boots (#1960), with the daemon's
+	// single-participant render belt keeping the duplicate inert.
+	lenientClusterIGPIdentity16810 bool
 	// lenientSNMPTrapGroup (#2990) downgrades the SNMP trap-group commit gate
 	// (unknown trap-group child key, e.g. a `tragets` typo, and an
 	// enabled-but-zero-target trap group) from a hard compile error to a
@@ -4093,6 +4110,7 @@ func lenientCompileOpts() compileOpts {
 		lenientBGPDuplicateNeighbor:              true,
 		lenientBGPNeighborAddress:                true,
 		lenientRouterID:                          true,
+		lenientClusterIGPIdentity16810:           true,
 		lenientSNMPTrapGroup:                     true,
 		lenientBridgeDomainVlanID:                true,
 		lenientDDNSDuration:                      true,

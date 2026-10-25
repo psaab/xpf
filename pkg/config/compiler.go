@@ -545,6 +545,20 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 		return nil, rethLAGErr
 	}
 
+	// #16810: ${node} distinct-IGP-identity excuse. Runs PRE-expansion
+	// (the expanded tree no longer carries the groups stanza). Both
+	// the generic compile (node0 fallback view) and a per-node strict
+	// compile need it: neither view alone can see that the peer's
+	// identity differs. Tolerant compiles only warn, so they skip
+	// the both-node-views comparison. The probe is a cheap AST scan;
+	// the comparison runs only when a node group actually sets an
+	// IGP identity, and its inner compiles are lenient so there is
+	// no recursion.
+	if !opts.lenientClusterIGPIdentity16810 &&
+		igpIdentityNodeViewsDistinct16810(tree) {
+		opts.igpIdentityExcused16810 = true
+	}
+
 	// #3075: stable-zone-id collision gate. Like the tunnel gate above it runs
 	// on the PRE-expansion tree and unions zone names across all groups (Views
 	// 1/2/3, see zoneid.go) so both cluster nodes accept/reject identically.
