@@ -3622,7 +3622,15 @@ never lock an operator out of a remote box it manages.
   (`reconcileRouteLeakSnapshot`), and maintains the managed VRF miss-terminator
   desired state after networkd activation (`ReassertVRFMissTerminator`). #5844,
   #5696, #10421, and #10458 make those failures visible as deferred commit
-  errors, while this owner retries the idempotent reconciles. Configured
+  errors, while this owner retries the idempotent reconciles. #16804
+  extends the owner with the networkd flush arm: the shipped
+  `ManageForeignRoutingPolicyRules=no` drop-in stops networkd deleting
+  xpf's bands, and on a host without it the tick compares the desired
+  terminator against a RuleList readback — a desired-but-missing
+  pref-2000 rule escalates the tick to re-run the policy bands, the
+  route-leak republish and `applyMgmtDNSRules`, so an external networkd
+  restart heals without a commit (tests:
+  `networkd_rule_flush_16804_test.go`). Configured
   management-scoped statics and the system backup-router are installed in
   table 999 by `applyMgmtVRFStaticRoutesTo`, independently of FRR and DHCP:
   every management static (single-path and ECMP) and the backup-router as
