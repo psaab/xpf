@@ -2,6 +2,7 @@ package userspace
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -56,7 +57,7 @@ func multiAppExpansionConfig() *config.Config {
 // agree with this handle — NOT with the span-accumulated dataplane snapshot
 // PolicyID.
 func callerCounterID(policySetID uint32, sliceIndex int) uint32 {
-	return policySetID*dataplane.MaxRulesPerPolicy + uint32(sliceIndex)
+	return PolicyCounterID(policySetID, uint32(sliceIndex))
 }
 
 // Test_3143_CounterResolutionMatchesSliceIndexCallers verifies that the counter
@@ -199,8 +200,8 @@ func TestPolicyCounterResolverCountsNilPolicySetsLikeWalkPolicyRuleSlots(t *test
 
 // Test_3145_SnapshotPolicyIDIsSpanAccumulated documents the OTHER namespace: the
 // dataplane snapshot's PolicyID is span-accumulated (advances by the app-set
-// expansion count), distinct from the slice-index counter handle above. This is
-// the namespace the MaxRulesPerPolicy cap (#3145) protects.
+// expansion count), distinct from the slice-index counter handle above. Since
+// #16560 sets are contiguous ranges, so the global set starts at 2 (not 256).
 func Test_3145_SnapshotPolicyIDIsSpanAccumulated(t *testing.T) {
 	cfg := multiAppExpansionConfig()
 	snaps, err := buildPolicySnapshots(cfg)
@@ -211,13 +212,14 @@ func Test_3145_SnapshotPolicyIDIsSpanAccumulated(t *testing.T) {
 	for _, s := range snaps {
 		ids[s.Name] = s.PolicyID
 	}
-	// allow-web expands to 2, so allow-ssh's snapshot PolicyID is 2 (span
-	// accumulated), and the global set starts at MaxRulesPerPolicy.
+	// allow-web expands to 2 (IDs 0..1 as one policy slot at base 0), so
+	// allow-ssh's snapshot PolicyID is 2 (span accumulated), and the global
+	// set starts contiguously at 3 (#16560, not the legacy 256 block).
 	if ids["allow-web"] != 0 || ids["allow-ssh"] != 2 {
 		t.Fatalf("snapshot PolicyID spacing: allow-web=%d allow-ssh=%d, want 0 and 2", ids["allow-web"], ids["allow-ssh"])
 	}
-	if ids["global-allow"] != dataplane.MaxRulesPerPolicy {
-		t.Fatalf("global snapshot PolicyID = %d, want %d", ids["global-allow"], dataplane.MaxRulesPerPolicy)
+	if ids["global-allow"] != 3 {
+		t.Fatalf("global snapshot PolicyID = %d, want 3 (contiguous after 2+1 expanded)", ids["global-allow"])
 	}
 }
 
@@ -261,58 +263,25 @@ func singleBigPolicyConfig(nApps int) *config.Config {
 	return cfg
 }
 
-// Test_3145_MaxRulesPerPolicyCap verifies the per-set MaxRulesPerPolicy cap on
-// the LIVE userspace snapshot path. The 256-slot namespace is indices 0..255
-// (the full MaxRulesPerPolicy range), so a set whose cumulative app-set
-// expansion EXACTLY fills it (256 terms → IDs 0..255) builds; only an expansion
-// that would require an ID at index >= 256 is rejected fail-closed.
-//
-// Fail-on-revert (#3404): with the off-by-one >= guard, the exact-256 case is
-// rejected and this test's "256 builds" assertion fails RED.
-func Test_3145_MaxRulesPerPolicyCap(t *testing.T) {
-	const max = dataplane.MaxRulesPerPolicy
-
-	// 255 effective terms: under the cap, build succeeds (IDs 0..254).
-	if _, err := buildPolicySnapshots(singleBigPolicyConfig(max - 1)); err != nil {
-		t.Fatalf("buildPolicySnapshots(255 apps) returned error, want success: %v", err)
-	}
-	// 256 effective terms: EXACTLY fills the namespace (IDs 0..255), accepted.
-	// This is the #3404 boundary: rejected by the old >= guard, accepted by >.
-	// buildPolicySnapshots emits one snapshot per POLICY (slot), so the single
-	// big policy yields one snapshot whose span fills indices 0..255.
-	snaps256, err := buildPolicySnapshots(singleBigPolicyConfig(max))
-	if err != nil {
-		t.Fatalf("buildPolicySnapshots(256 apps) returned error, want success (exact 256-fill is in-namespace): %v", err)
-	}
-	if len(snaps256) != 1 {
-		t.Fatalf("buildPolicySnapshots(256-term single policy) emitted %d snapshots, want 1", len(snaps256))
-	}
-	// The exact-fill set must occupy IDs 0..255 — none at or past MaxRulesPerPolicy.
-	for _, s := range snaps256 {
-		if s.PolicyID >= max {
-			t.Fatalf("256-fill snapshot %q has runtime ID %d >= %d (spilled out of its own namespace)", s.Name, s.PolicyID, max)
+// Test16560_PerSetCapRemoved verifies #16560 on the LIVE userspace
+// snapshot path: a single set expanding to 257 or 1000 terms builds, and
+// IDs are contiguous (no 256-block spill concept). Only the total bound
+// (65536) still rejects. Fail-on-revert: restoring the per-set cap makes
+// the 257/1000 builds RED.
+func Test16560_PerSetCapRemoved(t *testing.T) {
+	for _, n := range []int{256, 257, 1000} {
+		snaps, err := buildPolicySnapshots(singleBigPolicyConfig(n))
+		if err != nil {
+			t.Fatalf("buildPolicySnapshots(%d apps) err = %v, want success (#16560)", n, err)
+		}
+		if len(snaps) != 1 || snaps[0].PolicyID != 0 {
+			t.Fatalf("buildPolicySnapshots(%d) snaps=%+v, want one at ID 0", n, snaps)
 		}
 	}
-	// 257 effective terms: over the cap (would need index 256), rejected.
-	if _, err := buildPolicySnapshots(singleBigPolicyConfig(max + 1)); err == nil {
-		t.Fatalf("buildPolicySnapshots(257 apps) succeeded, want MaxRulesPerPolicy rejection")
-	}
-}
-
-// Test_3404_ExactFillNoCrossSetCollision proves the corrected boundary keeps
-// adjacent policy sets in disjoint ID namespaces. The first zone-pair set is
-// filled with exactly MaxRulesPerPolicy (256) single-application policies
-// (indices 0..255); a second set follows. The first set's last ID must be
-// policySetID*256+255 and the second set's first ID must be (policySetID+1)*256,
-// so the +1 boundary cannot let set N's last ID collide with set N+1's first.
-//
-// Fail-on-revert (#3404): the old >= guard rejects the exact 256-fill outright,
-// so buildPolicySnapshots errors and this test fails RED at the build step.
-func Test_3404_ExactFillNoCrossSetCollision(t *testing.T) {
-	const max = dataplane.MaxRulesPerPolicy
+	// 257 plain policies in one pair + a second set: contiguous bases.
 	cfg := &config.Config{}
-	first := make([]*config.Policy, 0, max)
-	for i := 0; i < max; i++ {
+	first := make([]*config.Policy, 0, 257)
+	for i := 0; i < 257; i++ {
 		first = append(first, &config.Policy{
 			Name:   fmt.Sprintf("rule-%d", i),
 			Match:  config.PolicyMatch{Applications: []string{"junos-ssh"}},
@@ -327,111 +296,71 @@ func Test_3404_ExactFillNoCrossSetCollision(t *testing.T) {
 			Action: config.PolicyPermit,
 		}}},
 	}
-
+	// 257 globals also build contiguously after zone pairs.
+	for i := 0; i < 257; i++ {
+		cfg.Security.GlobalPolicies = append(cfg.Security.GlobalPolicies, &config.Policy{
+			Name:   fmt.Sprintf("g%d", i),
+			Match:  config.PolicyMatch{Applications: []string{"junos-ssh"}},
+			Action: config.PolicyPermit,
+		})
+	}
 	snaps, err := buildPolicySnapshots(cfg)
 	if err != nil {
-		t.Fatalf("buildPolicySnapshots(exact 256-fill + second set): %v", err)
+		t.Fatalf("buildPolicySnapshots(257+1+257): %v", err)
 	}
-
 	seen := map[uint32]string{}
-	var firstMax, nextBase uint32
-	haveNext := false
+	var nextBase, globalBase uint32
 	for _, s := range snaps {
 		key := stablePolicyRuleID(s.FromZone, s.ToZone, s.Name)
 		if prev, ok := seen[s.PolicyID]; ok && prev != key {
-			t.Fatalf("runtime policy ID %d shared by %q and %q (cross-set namespace collision)", s.PolicyID, prev, key)
+			t.Fatalf("runtime ID %d shared by %q and %q", s.PolicyID, prev, key)
 		}
 		seen[s.PolicyID] = key
-		if s.FromZone == "lan" && s.PolicyID > firstMax {
-			firstMax = s.PolicyID
-		}
 		if s.Name == "next-set-rule" {
 			nextBase = s.PolicyID
-			haveNext = true
+		}
+		if s.Name == "g0" {
+			globalBase = s.PolicyID
 		}
 	}
-	if firstMax != max-1 {
-		t.Fatalf("first set's max runtime ID = %d, want %d (indices 0..255)", firstMax, max-1)
+	if nextBase != 257 {
+		t.Fatalf("second set base = %d, want 257 (contiguous)", nextBase)
 	}
-	if !haveNext || nextBase != max {
-		t.Fatalf("second set base runtime ID = %d, want %d (its own namespace, no overlap with first set's %d)", nextBase, max, firstMax)
+	if globalBase != 258 {
+		t.Fatalf("global base = %d, want 258 (contiguous after zone pairs)", globalBase)
 	}
-}
-
-// Test_3145_NoSpillIntoNextPolicySet is the direct spill regression. The first
-// zone-pair set has a policy expanding to exactly 256 terms followed by a
-// one-app trailer; a second zone-pair set follows. WITHOUT the cap the trailer
-// would be assigned runtime ID 256 — identical to the second set's base ID —
-// colliding the two namespaces. WITH the cap the build is rejected fail-closed.
-//
-// Fail-on-revert: removing the cap makes buildPolicySnapshots succeed and emit
-// two distinct policies sharing runtime ID 256, which this test detects.
-func Test_3145_NoSpillIntoNextPolicySet(t *testing.T) {
-	const max = dataplane.MaxRulesPerPolicy
-	cfg := &config.Config{}
-	bigAppSet(cfg, max) // first policy expands to 256 terms
-	cfg.Security.Policies = []*config.ZonePairPolicies{
-		{
-			FromZone: "lan",
-			ToZone:   "wan",
-			Policies: []*config.Policy{
-				{
-					Name:   "big",
-					Match:  config.PolicyMatch{Applications: []string{"big-set"}},
-					Action: config.PolicyPermit,
-				},
-				{
-					Name:   "trailer",
-					Match:  config.PolicyMatch{Applications: []string{"junos-ssh"}},
-					Action: config.PolicyPermit,
-				},
-			},
-		},
-		{
-			FromZone: "dmz",
-			ToZone:   "wan",
-			Policies: []*config.Policy{{
-				Name:   "next-set-rule",
-				Match:  config.PolicyMatch{Applications: []string{"junos-ssh"}},
-				Action: config.PolicyPermit,
-			}},
-		},
+	// Stability across unrelated edit: inserting a policy in the SECOND
+	// set must not renumber the first set or globals before it; deleting
+	// it restores IDs. IDs are deterministic from config order on both
+	// nodes (same walker), so cross-node identity follows.
+	idsBefore := PolicyIDsByStableKey(cfg)
+	cfg2 := &config.Config{}
+	cfg2.Security.Policies = []*config.ZonePairPolicies{
+		{FromZone: "lan", ToZone: "wan", Policies: first},
+		{FromZone: "dmz", ToZone: "wan", Policies: []*config.Policy{
+			{Name: "inserted", Match: config.PolicyMatch{Applications: []string{"junos-ssh"}}, Action: config.PolicyPermit},
+			{Name: "next-set-rule", Match: config.PolicyMatch{Applications: []string{"junos-ssh"}}, Action: config.PolicyPermit},
+		}},
 	}
-
-	snaps, err := buildPolicySnapshots(cfg)
-	if err == nil {
-		// Cap was removed (revert): prove the spill actually occurred.
-		seen := map[uint32]string{}
-		for _, s := range snaps {
-			key := stablePolicyRuleID(s.FromZone, s.ToZone, s.Name)
-			if prev, ok := seen[s.PolicyID]; ok && prev != key {
-				t.Fatalf("runtime policy ID %d shared by %q and %q (namespace spill into next policy set)", s.PolicyID, prev, key)
+	cfg2.Security.GlobalPolicies = cfg.Security.GlobalPolicies
+	idsAfter := PolicyIDsByStableKey(cfg2)
+	// Positional IDs: only sets BEFORE the edited set are stable; the
+	// edited set's successors and all later sets (globals) shift by the
+	// inserted span — that is the documented positional contract, and
+	// daemon invalidation sweeps the shifted IDs.
+	for k, v := range idsBefore {
+		if strings.HasPrefix(k, "lan->wan/") {
+			if idsAfter[k] != v {
+				t.Fatalf("unrelated edit renumbered earlier set %s: %d -> %d", k, v, idsAfter[k])
 			}
-			seen[s.PolicyID] = key
 		}
-		t.Fatal("buildPolicySnapshots accepted a 256-term expansion that spills into the next policy set; want MaxRulesPerPolicy rejection")
-	}
-
-	// A safe two-set config (first set under the cap) keeps the sets in
-	// distinct namespaces with no shared runtime IDs.
-	safe := &config.Config{}
-	bigAppSet(safe, max-2) // 254 terms + 1-app trailer = 255 < 256
-	safe.Security.Policies = cfg.Security.Policies
-	snaps, err = buildPolicySnapshots(safe)
-	if err != nil {
-		t.Fatalf("buildPolicySnapshots(safe two-set): %v", err)
-	}
-	seen := map[uint32]string{}
-	for _, s := range snaps {
-		key := stablePolicyRuleID(s.FromZone, s.ToZone, s.Name)
-		if prev, ok := seen[s.PolicyID]; ok && prev != key {
-			t.Fatalf("runtime policy ID %d shared by %q and %q in safe config", s.PolicyID, prev, key)
+		if strings.HasPrefix(k, "junos-global->junos-global/") {
+			if idsAfter[k] != v+1 {
+				t.Fatalf("global after edited set must shift by inserted span: %s: %d -> %d", k, v, idsAfter[k])
+			}
 		}
-		seen[s.PolicyID] = key
 	}
-	for _, s := range snaps {
-		if s.Name == "next-set-rule" && s.PolicyID < max {
-			t.Fatalf("next-set-rule runtime ID = %d, want >= %d (its own policy-set namespace)", s.PolicyID, max)
-		}
+	if idsAfter["dmz->wan/next-set-rule"] != idsBefore["dmz->wan/next-set-rule"]+1 {
+		t.Fatalf("inserted policy must shift only its own set successors: before %d after %d", idsBefore["dmz->wan/next-set-rule"], idsAfter["dmz->wan/next-set-rule"])
 	}
 }

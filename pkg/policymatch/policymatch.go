@@ -897,7 +897,7 @@ type Result struct {
 	// table and the policy-deny/permit audit log even when policy names collide
 	// across scopes. Meaningful only when Matched is true; 0 for the
 	// default-policy / host-inbound verdicts (and for a config that overflows
-	// MaxRulesPerPolicy, which cannot be applied anyway — see RuntimePolicyIDs).
+	// the total/set bounds, which cannot be applied anyway — see RuntimePolicyIDs).
 	PolicyID uint32
 
 	PolicyName  string
@@ -2100,7 +2100,7 @@ func quarantinedZoneNames(cfg *config.Config) map[string]struct{} {
 // RuntimePolicyIDs namespace. setIdx/sliceIdx are the [policySetID, sliceIndex]
 // coordinates of the policy in the typed config — the exact key RuntimePolicyIDs
 // uses (a global policy's setIdx is len(cfg.Security.Policies)). A missing key
-// (a config that overflows MaxRulesPerPolicy and so cannot be applied) yields
+// (a config that overflows the total/set bounds and so cannot be applied) yields
 // PolicyID 0; the zone scope + name still disambiguate the verdict.
 func matchedResult(ids map[[2]uint32]uint32, pol *config.Policy, global bool, fromZone, toZone string, setIdx, sliceIdx int) Result {
 	// #3668: stamp the stable rule identity, mirroring the inventory EXACTLY. The

@@ -110,7 +110,7 @@ func TestCompilePolicies_SkipsQuarantinedZoneStanzas(t *testing.T) {
 	if len(res.PolicyScheduleRuleSlots) != 2 {
 		t.Fatalf("schedule slots=%v want survivor+after only", res.PolicyScheduleRuleSlots)
 	}
-	if res.PolicyScheduleRuleSlots[1].PolicySetID != 2 || res.PolicyScheduleRuleSlots[1].RuleID != 2*MaxRulesPerPolicy {
+	if res.PolicyScheduleRuleSlots[1].PolicySetID != 2 || res.PolicyScheduleRuleSlots[1].RuleID != 1 { // #16560 contiguous: survivor occupies ID 0, after is ID 1
 		t.Fatalf("after schedule slot shifted: %+v", res.PolicyScheduleRuleSlots[1])
 	}
 	if res.PolicySets != 2 {
@@ -147,13 +147,13 @@ func TestCompilePolicies_SkipsQuarantinedZoneStanzas(t *testing.T) {
 	if len(dp3.sets) != 0 || len(dp3.rules) != 0 {
 		t.Fatalf("unknown-zone stanza wrote sets=%v rules=%v, want none", dp3.sets, dp3.rules)
 	}
-	// Fail-closed: non-quarantined >256 still rejected.
+	// #16560: non-quarantined >256 now compiles (no per-set cap).
 	cfg4 := &config.Config{}
 	cfg4.Security.Zones = map[string]*config.ZoneConfig{"trust": {Name: "trust"}, "untrust": {Name: "untrust"}}
 	cfg4.Security.Policies = []*config.ZonePairPolicies{{FromZone: "trust", ToZone: "untrust", Policies: big}}
 	res4 := &CompileResult{ZoneIDs: make(map[string]uint16), AddrIDs: make(map[string]uint32), AppIDs: make(map[string]config.AssignedAppID)}
 	assignZoneIDs(res4, cfg4)
-	if err := compilePolicies(&quarantinePolicyDP14336{}, cfg4, res4); err == nil {
-		t.Fatal("non-quarantined >256 must still fail closed")
+	if err := compilePolicies(&quarantinePolicyDP14336{}, cfg4, res4); err != nil {
+		t.Fatalf("non-quarantined >256 must compile (#16560): %v", err)
 	}
 }

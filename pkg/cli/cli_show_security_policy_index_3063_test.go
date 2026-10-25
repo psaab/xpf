@@ -14,7 +14,7 @@ import (
 // span 2) followed by "allow-ssh" (single application, span 1), plus a global
 // "global-allow" policy. The runtime/RT_FLOW policy ID is span-accumulated, so
 // allow-ssh occupies runtime slot 2 (NOT the raw ordinal 1) and the global set
-// starts at MaxRulesPerPolicy (256).
+// starts contiguously at 3 (#16560).
 func multiAppPolicyIndexConfig() *config.Config {
 	cfg := &config.Config{}
 	cfg.Applications.ApplicationSets = map[string]*config.ApplicationSet{
@@ -87,8 +87,8 @@ func Test_3063_PolicyDetailIndexMatchesRuntimePolicyID(t *testing.T) {
 	if got := policyDetailIndex(t, out, "deny-ssh"); got != 2 {
 		t.Fatalf("deny-ssh Index = %d, want 2 (span-accumulated runtime ID, NOT raw ordinal 1)", got)
 	}
-	if got := policyDetailIndex(t, out, "global-allow"); got != 256 {
-		t.Fatalf("global-allow Index = %d, want 256 (MaxRulesPerPolicy base of the global set)", got)
+	if got := policyDetailIndex(t, out, "global-allow"); got != 3 {
+		t.Fatalf("global-allow Index = %d, want 3 (contiguous base of the global set, #16560)", got)
 	}
 }
 
@@ -161,7 +161,7 @@ func Test_3063_SingleAppPolicyIndexUnchanged(t *testing.T) {
 		}
 	})
 
-	for name, want := range map[string]uint32{"p0": 0, "p1": 1, "p2": 2, "g0": 256} {
+	for name, want := range map[string]uint32{"p0": 0, "p1": 1, "p2": 2, "g0": 3} {
 		if got := policyDetailIndex(t, out, name); got != want {
 			t.Fatalf("%s Index = %d, want %d (single-app config must be byte-identical to raw ordinal)", name, got, want)
 		}

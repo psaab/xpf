@@ -2,10 +2,26 @@ package config
 
 import "fmt"
 
-// MaxPolicyRulesPerSet is the wire/runtime namespace capacity shared with
-// pkg/dataplane.MaxRulesPerPolicy. Policy rule IDs reserve one 256-ID block
-// per zone-pair set and one for global policies.
+// MaxPolicyRulesPerSet is the per-set capacity in the runtime policy-ID
+// namespace. Policy rule IDs are allocated as contiguous per-set ranges
+// (#16560): each set's first expanded rule starts at the cumulative offset
+// of all earlier (non-quarantined) sets, so a set is no longer confined to
+// a fixed 256-ID block. The value is retained only as a compatibility
+// alias for the legacy eBPF map geometry (MAX_RULES_PER_POLICY /
+// MAX_POLICIES); it no longer limits how many expanded rules one set may
+// contain. The binding limits are MaxTotalPolicyRuleExpansion below and
+// MaxPolicySets (the legacy policy_counters / policy_rules map capacity).
 const MaxPolicyRulesPerSet = 256
+
+// MaxPolicySets bounds the number of non-quarantined policy sets (zone
+// pairs plus the global set) whose contiguous ID ranges fit the legacy
+// policy maps: policy_counters has MAX_POLICIES (4096) entries and
+// policy_rules has MAX_POLICIES*MAX_RULES_PER_POLICY entries, so the
+// slice-index counter handle (setOrdinal*256+sliceIndex, setOrdinal <
+// MaxPolicySets) and the span-accumulated runtime ID (bounded by
+// MaxTotalPolicyRuleExpansion) both stay in range. Mirrored as
+// dataplane.MaxPolicySets; pkg/config cannot import pkg/dataplane.
+const MaxPolicySets = 4096
 
 // MaxTotalPolicyRuleExpansion mirrors
 // pkg/dataplane/userspace.MaxTotalPolicyRuleExpansion (#11081): the TOTAL
@@ -55,12 +71,14 @@ func expandedPolicyApplicationCount14353(cfg *Config, memo *appSetMemo, pol *Pol
 	return len(seen)
 }
 
-// validatePolicyExpandedRuleCountStrict rejects a policy set whose
-// application expansion cannot fit its policy-ID block, or a config
-// whose total expansion across all sets exceeds
-// MaxTotalPolicyRuleExpansion. The snapshot builder (walkPolicyRuleSlots)
-// has the same guards, but reaching them only during apply makes commit
-// report success while leaving the previous dataplane snapshot active.
+// validatePolicyExpandedRuleCountStrict rejects a config whose total
+// expanded rule count across all sets exceeds MaxTotalPolicyRuleExpansion,
+// or that has more than MaxPolicySets sets. Since #16560 there is no
+// per-set expanded-rule cap: runtime IDs are contiguous per-set ranges, so
+// a single zone pair (or the global set) may hold up to the total bound.
+// The snapshot builder (walkPolicyRuleSlots) has the same guards, but
+// reaching them only during apply makes commit report success while
+// leaving the previous dataplane snapshot active.
 //
 // Accounting mirrors walkPolicyRuleSlots exactly so commit and apply
 // cannot diverge: zone-pair sets touching a quarantined zone
@@ -69,9 +87,10 @@ func expandedPolicyApplicationCount14353(cfg *Config, memo *appSetMemo, pol *Pol
 // them, #14329) are skipped, and a global rule whose configured match
 // side is fully quarantined (ScopedGlobalQuarantineDropped over the
 // non-reserved quarantined set, as the walker's
-// globalScopeFullyQuarantined computes it) is skipped. Per-set overflow
-// is reported before the total: the walker returns it while walking, so
-// a config violating both gets the per-set error at apply too.
+// globalScopeFullyQuarantined computes it) is skipped. The set count
+// counts every non-quarantined zone-pair stanza (even an empty one, as
+// the walker advances its set ordinal for it) plus the global set when
+// it holds at least one surviving rule.
 func validatePolicyExpandedRuleCountStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -94,20 +113,14 @@ func validatePolicyExpandedRuleCountStrict(cfg *Config) error {
 
 	memo := newAppSetMemo()
 	total := 0
-	addSet := func(scope string, policies []*Policy) error {
-		setTotal := 0
+	sets := 0
+	countSet := func(policies []*Policy) {
 		for _, pol := range policies {
 			if pol == nil {
 				continue
 			}
-			span := expandedPolicyApplicationCount14353(cfg, memo, pol)
-			if span > MaxPolicyRulesPerSet-setTotal {
-				return fmt.Errorf("%s: expanded rules exceed MaxRulesPerPolicy (%d)", scope, MaxPolicyRulesPerSet)
-			}
-			setTotal += span
+			total += expandedPolicyApplicationCount14353(cfg, memo, pol)
 		}
-		total += setTotal
-		return nil
 	}
 	for _, zpp := range cfg.Security.Policies {
 		if zpp == nil {
@@ -119,9 +132,8 @@ func validatePolicyExpandedRuleCountStrict(cfg *Config) error {
 		if _, drop := quarantined[zpp.ToZone]; drop {
 			continue
 		}
-		if err := addSet(fmt.Sprintf("policy %s->%s", zpp.FromZone, zpp.ToZone), zpp.Policies); err != nil {
-			return err
-		}
+		sets++
+		countSet(zpp.Policies)
 	}
 	globals := make([]*Policy, 0, len(cfg.Security.GlobalPolicies))
 	for _, pol := range cfg.Security.GlobalPolicies {
@@ -133,8 +145,12 @@ func validatePolicyExpandedRuleCountStrict(cfg *Config) error {
 		}
 		globals = append(globals, pol)
 	}
-	if err := addSet("global policy", globals); err != nil {
-		return err
+	if len(globals) > 0 {
+		sets++
+		countSet(globals)
+	}
+	if sets > MaxPolicySets {
+		return fmt.Errorf("policy: %d policy sets exceed MaxPolicySets (%d)", sets, MaxPolicySets)
 	}
 	if total > MaxTotalPolicyRuleExpansion {
 		return fmt.Errorf("policy: total expanded rules %d exceed MaxTotalPolicyRuleExpansion (%d); the dataplane evaluates tiers linearly per new flow — split, prune, or collapse application expansions",

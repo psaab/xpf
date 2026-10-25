@@ -45,13 +45,30 @@ const lenientDroppedConstraintToken = "lenient-dropped-policy-enforcement-constr
 // Must stay in lock-step with userspace-dp policy.rs UNREPRESENTABLE_ADDRESS_SENTINEL.
 const unsupportedAddressSentinel = "__unsupported_address__"
 
-// policyRuleSlot describes a single configured policy's assignment within the
-// runtime policy-ID namespace. The numeric runtime policy ID is
-// PolicySetID*MaxRulesPerPolicy + RuleIndex, and the policy occupies Span
-// contiguous IDs starting at that base (one per application-set expansion term).
+// PolicyCounterID returns the slice-index COUNTER handle for the policy at
+// (policySetID, sliceIndex): policySetID*MaxRulesPerPolicy + sliceIndex.
+// This is the ONLY positional encoding left after #16560 and it is a
+// handle, not an identity: the counter store is name-keyed, so the handle
+// only needs caller/resolver agreement. It stays in the legacy 256-wide
+// block geometry so the retired eBPF policy_counters map (MAX_POLICIES
+// entries) keeps working; MaxPolicySets bounds policySetID. Runtime
+// PolicyIDs (policyID below) are a different namespace: contiguous
+// per-set ranges, span-accumulated.
+func PolicyCounterID(policySetID uint32, sliceIndex uint32) uint32 {
+	return policySetID*dataplane.MaxRulesPerPolicy + sliceIndex
+}
+
+// policyRuleSlot describes a single configured policy's assignment within
+// the runtime policy-ID namespace. The numeric runtime policy ID is
+// BaseID + RuleIndex, where BaseID is the cumulative expanded-rule offset
+// of all earlier non-quarantined sets (#16560 contiguous allocation), and
+// the policy occupies Span contiguous IDs starting there (one per
+// application-set expansion term). PolicySetID remains the raw config
+// ordinal, used only for the slice-index counter handle.
 type policyRuleSlot struct {
 	PolicySetID uint32
-	RuleIndex   uint32 // start index within the policy set's 256-slot namespace
+	BaseID      uint32 // cumulative expanded offset of this slot's set
+	RuleIndex   uint32 // start index within the policy set's expanded range
 	SliceIndex  uint32 // raw position within the set's policy slice (display key)
 	Span        uint32 // expansion slots consumed (>=1)
 	FromZone    string
@@ -65,31 +82,30 @@ type policyRuleSlot struct {
 }
 
 func (s policyRuleSlot) policyID() uint32 {
-	return s.PolicySetID*dataplane.MaxRulesPerPolicy + s.RuleIndex
+	return s.BaseID + s.RuleIndex
 }
 
 // walkPolicyRuleSlots invokes fn for every configured policy in config order,
 // assigning each policy its slot in the runtime policy-ID namespace. It is the
-// SHARED contract behind both the snapshot builder (the ID-WRITE side, #3145)
-// and the counter resolver (the ID-READ side, #3143) so the two can never
-// drift on how a policy ID maps to a (policy-set, rule-index) pair.
+// SHARED contract behind the snapshot builder (the ID-WRITE side, #3145),
+// the runtime-ID maps, and the daemon invalidation diff so they can never
+// drift on how a policy ID maps to a configured policy.
 //
-// Each policy's application-set expansion advances the per-set rule index by
-// userspacePolicyRuleExpansionCount. A policy set may exactly fill its 256-slot
-// namespace (indices 0..255, the full MaxRulesPerPolicy range) — every such ID
-// stays inside the set's own namespace. Only a policy whose expansion would
-// advance the per-set rule index PAST MaxRulesPerPolicy (256) — i.e. require an
-// ID at index >= 256 — would cross into the following set's namespace; that is
-// rejected fail-closed so the apply path retains the prior good dataplane state.
-// This mirrors the legacy compiler guard (pkg/dataplane/compiler.go).
+// Since #16560 IDs are allocated as contiguous per-set ranges: each set's
+// first expanded rule starts at the cumulative expanded-rule offset of all
+// earlier non-quarantined sets, and each policy's application-set expansion
+// advances its set-local rule index by userspacePolicyRuleExpansionCount.
+// A set may therefore hold far more than the legacy 256-ID block; the only
+// expansion bound is MaxTotalPolicyRuleExpansion across all sets, plus
+// MaxPolicySets on the number of sets (the legacy counter-handle geometry).
 // MaxTotalPolicyRuleExpansion caps the TOTAL expanded rule count across all
-// zone-pair sets and globals (#11081). The per-set gate (MaxRulesPerPolicy)
-// bounds ID-namespace spill, but the Rust evaluator scans pair + wildcard +
-// global tiers linearly per new flow — an unbounded set list is per-packet
-// CPU amplification under new-flow flood with no ceiling. 65536 expanded
-// rules (256 full sets) is far above legitimate configs and catches
+// zone-pair sets and globals (#11081): the Rust evaluator scans pair +
+// wildcard + global tiers linearly per new flow — an unbounded set list is
+// per-packet CPU amplification under new-flow flood with no ceiling.
+// 65536 expanded rules is far above legitimate configs and catches
 // runaway application expansion with a clear error instead of a silent
-// slowdown.
+// slowdown. Overflow is rejected fail-closed so the apply path retains
+// the prior good dataplane state.
 const MaxTotalPolicyRuleExpansion = 65536
 
 func walkPolicyRuleSlots(cfg *config.Config, fn func(slot policyRuleSlot) error) error {
@@ -97,6 +113,8 @@ func walkPolicyRuleSlots(cfg *config.Config, fn func(slot policyRuleSlot) error)
 		return nil
 	}
 	var totalExpanded uint64
+	var setCount uint32
+	var nextID uint32
 	policySetID := uint32(0)
 	// The snapshot quarantine later removes collision losers and poisoned
 	// zones' zone-pair rules. Exclude those sets before expansion accounting
@@ -125,18 +143,17 @@ func walkPolicyRuleSlots(cfg *config.Config, fn func(slot policyRuleSlot) error)
 			policySetID++
 			continue
 		}
+		setCount++
+		baseID := nextID
 		ruleIndex := uint32(0)
 		for sliceIdx, pol := range zpp.Policies {
 			if pol == nil {
 				continue
 			}
 			span := userspacePolicyRuleExpansionCount(cfg, pol.Match.Applications)
-			if ruleIndex+span > dataplane.MaxRulesPerPolicy {
-				return fmt.Errorf("policy %s->%s: expanded rules exceed MaxRulesPerPolicy (%d) and would spill into the next policy set's ID namespace",
-					zpp.FromZone, zpp.ToZone, dataplane.MaxRulesPerPolicy)
-			}
 			if err := fn(policyRuleSlot{
 				PolicySetID: policySetID,
+				BaseID:      baseID,
 				RuleIndex:   ruleIndex,
 				SliceIndex:  uint32(sliceIdx),
 				Span:        span,
@@ -149,6 +166,7 @@ func walkPolicyRuleSlots(cfg *config.Config, fn func(slot policyRuleSlot) error)
 			ruleIndex += span
 			totalExpanded += uint64(span)
 		}
+		nextID = baseID + ruleIndex
 		policySetID++
 	}
 	globalRuleIndex := uint32(0)
@@ -180,6 +198,8 @@ func walkPolicyRuleSlots(cfg *config.Config, fn func(slot policyRuleSlot) error)
 		}
 		return true
 	}
+	globalBase := nextID
+	globalCounted := false
 	for sliceIdx, pol := range cfg.Security.GlobalPolicies {
 		if pol == nil {
 			continue
@@ -187,13 +207,14 @@ func walkPolicyRuleSlots(cfg *config.Config, fn func(slot policyRuleSlot) error)
 		if globalScopeFullyQuarantined(pol.Match.FromZones) || globalScopeFullyQuarantined(pol.Match.ToZones) {
 			continue
 		}
-		span := userspacePolicyRuleExpansionCount(cfg, pol.Match.Applications)
-		if globalRuleIndex+span > dataplane.MaxRulesPerPolicy {
-			return fmt.Errorf("global policy: expanded rules exceed MaxRulesPerPolicy (%d) and would spill into the next policy set's ID namespace",
-				dataplane.MaxRulesPerPolicy)
+		if !globalCounted {
+			setCount++
+			globalCounted = true
 		}
+		span := userspacePolicyRuleExpansionCount(cfg, pol.Match.Applications)
 		if err := fn(policyRuleSlot{
 			PolicySetID: policySetID,
+			BaseID:      globalBase,
 			RuleIndex:   globalRuleIndex,
 			SliceIndex:  uint32(sliceIdx),
 			Span:        span,
@@ -206,6 +227,9 @@ func walkPolicyRuleSlots(cfg *config.Config, fn func(slot policyRuleSlot) error)
 		}
 		globalRuleIndex += span
 		totalExpanded += uint64(span)
+	}
+	if setCount > dataplane.MaxPolicySets {
+		return fmt.Errorf("policy: %d policy sets exceed MaxPolicySets (%d)", setCount, dataplane.MaxPolicySets)
 	}
 	if totalExpanded > MaxTotalPolicyRuleExpansion {
 		return fmt.Errorf("policy: total expanded rules %d exceed MaxTotalPolicyRuleExpansion (%d); the dataplane evaluates tiers linearly per new flow — split, prune, or collapse application expansions",

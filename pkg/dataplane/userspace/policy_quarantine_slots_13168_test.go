@@ -161,15 +161,14 @@ func TestWalkPolicyRuleSlotsSkipsQuarantinedZones13168(t *testing.T) {
 		}
 	})
 
-	t.Run("survivor_overflow_still_fails_closed", func(t *testing.T) {
+	t.Run("survivor_beyond_former_per_set_cap_builds_16560", func(t *testing.T) {
+		// #16560: no per-set cap — a surviving 257-rule set builds; only
+		// the total bound (covered elsewhere) fails closed.
 		cfg := d412Cfg(colliding,
 			&config.ZonePairPolicies{FromZone: "trust", ToZone: "untrust", Policies: d412Rules("big", 257)},
 		)
-		if _, err := buildSnapshotWithSchedulerState(cfg, config.UserspaceConfig{}, 1, 1, nil, nil, nil); err == nil {
-			t.Fatal("survivor set beyond MaxRulesPerPolicy built without error, want fail-closed")
-		}
-		if reasons := PolicyContentRejectionReasons(cfg, nil); len(reasons) == 0 {
-			t.Fatal("PolicyContentRejectionReasons empty for survivor overflow, want rejection")
+		if _, err := buildSnapshotWithSchedulerState(cfg, config.UserspaceConfig{}, 1, 1, nil, nil, nil); err != nil {
+			t.Fatalf("survivor 257-rule set must build (#16560): %v", err)
 		}
 	})
 }

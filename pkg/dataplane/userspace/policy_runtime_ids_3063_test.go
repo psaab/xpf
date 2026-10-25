@@ -3,7 +3,6 @@ package userspace
 import (
 	"testing"
 
-	"github.com/psaab/xpf/pkg/dataplane"
 )
 
 // Test_3063_RuntimePolicyIDsMatchSnapshot verifies the exported display helper
@@ -24,9 +23,9 @@ func Test_3063_RuntimePolicyIDsMatchSnapshot(t *testing.T) {
 	if got := ids[[2]uint32{0, 1}]; got != 2 {
 		t.Fatalf("allow-ssh runtime ID = %d, want 2 (span-accumulated, not raw ordinal 1)", got)
 	}
-	// Global set occupies policy-set index len(Policies)=1, base MaxRulesPerPolicy.
-	if got := ids[[2]uint32{1, 0}]; got != dataplane.MaxRulesPerPolicy {
-		t.Fatalf("global-allow runtime ID = %d, want %d", got, dataplane.MaxRulesPerPolicy)
+	// Global set occupies policy-set index len(Policies)=1, contiguous base 3 (#16560: 2+1 expanded).
+	if got := ids[[2]uint32{1, 0}]; got != 3 {
+		t.Fatalf("global-allow runtime ID = %d, want 3", got)
 	}
 
 	// Cross-check against the authoritative snapshot PolicyID assignment.

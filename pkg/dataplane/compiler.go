@@ -1420,6 +1420,13 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 	result.PolicyNames[DefaultPolicySentinelID] = DefaultPolicyName
 
 	policySetID := uint32(0)
+	// #16560: contiguous runtime-ID allocation. nextPolicyID is the
+	// cumulative expanded-rule offset of earlier non-quarantined sets;
+	// totalExpanded/policySets enforce the same bounds as
+	// walkPolicyRuleSlots (MaxTotalPolicyRuleExpansion / MaxPolicySets).
+	var nextPolicyID uint32
+	var totalExpanded int
+	var policySets int
 	// #14336: exclude quarantined zone stanzas (collision losers / poisoned
 	// zones, #13168) exactly as walkPolicyRuleSlots does: discarded rules
 	// must neither abort the compile (>MaxRulesPerPolicy), clobber the
@@ -1539,10 +1546,20 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 			}
 		}
 
-		if len(expanded) > MaxRulesPerPolicy {
-			return fmt.Errorf("policy %s->%s: %d expanded rules exceeds MaxRulesPerPolicy (%d)",
-				zpp.FromZone, zpp.ToZone, len(expanded), MaxRulesPerPolicy)
+		if len(expanded) > 65535 {
+			return fmt.Errorf("policy %s->%s: %d expanded rules exceeds the legacy policy-set rule count (65535)",
+				zpp.FromZone, zpp.ToZone, len(expanded))
 		}
+		totalExpanded += len(expanded)
+		if totalExpanded > config.MaxTotalPolicyRuleExpansion {
+			return fmt.Errorf("policy: total expanded rules %d exceed MaxTotalPolicyRuleExpansion (%d)", totalExpanded, config.MaxTotalPolicyRuleExpansion)
+		}
+		policySets++
+		if policySets > MaxPolicySets {
+			return fmt.Errorf("policy: %d policy sets exceed MaxPolicySets (%d)", policySets, MaxPolicySets)
+		}
+		setBaseID := nextPolicyID
+		nextPolicyID += uint32(len(expanded))
 
 		ps := PolicySet{
 			PolicySetID:   policySetID,
@@ -1559,7 +1576,7 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 		for i, er := range expanded {
 			pol := er.pol
 			rule := PolicyRule{
-				RuleID:      uint32(policySetID*MaxRulesPerPolicy + uint32(i)),
+				RuleID:      setBaseID + uint32(i),
 				PolicySetID: policySetID,
 				Sequence:    uint16(i),
 				AppID:       uint32(er.appID),
@@ -1675,10 +1692,19 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 			}
 		}
 
-		if len(expanded) > MaxRulesPerPolicy {
-			return fmt.Errorf("global policy: %d expanded rules exceeds MaxRulesPerPolicy (%d)",
-				len(expanded), MaxRulesPerPolicy)
+		if len(expanded) > 65535 {
+			return fmt.Errorf("global policy: %d expanded rules exceeds the legacy policy-set rule count (65535)", len(expanded))
 		}
+		totalExpanded += len(expanded)
+		if totalExpanded > config.MaxTotalPolicyRuleExpansion {
+			return fmt.Errorf("policy: total expanded rules %d exceed MaxTotalPolicyRuleExpansion (%d)", totalExpanded, config.MaxTotalPolicyRuleExpansion)
+		}
+		policySets++
+		if policySets > MaxPolicySets {
+			return fmt.Errorf("policy: %d policy sets exceed MaxPolicySets (%d)", policySets, MaxPolicySets)
+		}
+		setBaseID := nextPolicyID
+		nextPolicyID += uint32(len(expanded))
 
 		ps := PolicySet{
 			PolicySetID:   policySetID,
@@ -1694,7 +1720,7 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 		for i, er := range expanded {
 			pol := er.pol
 			rule := PolicyRule{
-				RuleID:      uint32(policySetID*MaxRulesPerPolicy + uint32(i)),
+				RuleID:      setBaseID + uint32(i),
 				PolicySetID: policySetID,
 				Sequence:    uint16(i),
 				AppID:       uint32(er.appID),

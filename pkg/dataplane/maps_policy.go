@@ -43,6 +43,10 @@ func (m *Manager) SetZonePairPolicy(fromZone, toZone uint16, ps PolicySet) error
 }
 
 // SetPolicyRule writes a policy rule at the computed flat index.
+// #16560: the flat index is the contiguous runtime RuleID itself (the
+// policy_rules map holds MAX_POLICIES*MAX_RULES_PER_POLICY entries and
+// total expanded rules are capped at MaxTotalPolicyRuleExpansion, so the
+// ID is always in range), not policySetID*MaxRulesPerPolicy+ruleIndex.
 func (m *Manager) SetPolicyRule(policySetID uint32, ruleIndex uint32, rule PolicyRule) error {
 	zm, present, st := m.lookupMapLocked("policy_rules")
 	if st == registryFresh {
@@ -51,8 +55,7 @@ func (m *Manager) SetPolicyRule(policySetID uint32, ruleIndex uint32, rule Polic
 	if !present {
 		return fmt.Errorf("policy_rules map not found")
 	}
-	idx := policySetID*MaxRulesPerPolicy + ruleIndex
-	return zm.Update(idx, rule, ebpf.UpdateAny)
+	return zm.Update(rule.RuleID, rule, ebpf.UpdateAny)
 }
 
 // SetAddressBookEntry writes an LPM trie entry for an address.
@@ -314,7 +317,7 @@ func (m *Manager) UpdatePolicyScheduleState(_ *config.Config, activeState map[st
 			active = true // default active if scheduler not found
 		}
 
-		idx := slot.PolicySetID*MaxRulesPerPolicy + slot.RuleIndex
+		idx := slot.RuleID
 		var rule PolicyRule
 		if err := zm.Lookup(idx, &rule); err != nil {
 			continue

@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/psaab/xpf/pkg/config"
-	"github.com/psaab/xpf/pkg/dataplane"
 )
 
 // Runtime policy-ID namespace and stable rule identities.
@@ -26,12 +25,13 @@ import (
 // landed on the wrong row.
 //
 // Returned IDs are display identity only; they are NOT the counter handle. The
-// per-policy counter store is name-keyed and ReadPolicyCounters takes the raw
-// ordinal handle that round-trips through policyRuleIDForCounter — callers MUST
-// keep passing the raw ordinal to ReadPolicyCounters. On a config that would
-// overflow MaxRulesPerPolicy the walk stops early and the partial map omits the
-// offending entries; a caller falls back to the raw ordinal for any missing key
-// (such a config cannot be applied anyway, so the dataplane never enforces it).
+// per-policy counter store is name-keyed and ReadPolicyCounters takes the
+// PolicyCounterID handle that round-trips through policyRuleIDForCounter —
+// callers MUST keep passing that handle to ReadPolicyCounters. On a config
+// that would overflow the total/set bounds the walk stops early and the
+// partial map omits the offending entries; a caller falls back to the
+// PolicyCounterID handle for any missing key (such a config cannot be
+// applied anyway, so the dataplane never enforces it).
 func RuntimePolicyIDs(cfg *config.Config) map[[2]uint32]uint32 {
 	out := make(map[[2]uint32]uint32)
 	_ = walkPolicyRuleSlots(cfg, func(slot policyRuleSlot) error {
@@ -63,7 +63,7 @@ func RuntimePolicyIDs(cfg *config.Config) map[[2]uint32]uint32 {
 // which is exactly the intended semantics (a deleted policy's OLD ID identifies
 // its OLD sessions, independent of any NEW policy that inherits that slot).
 //
-// A config that would overflow MaxRulesPerPolicy stops the walk early (as in
+// A config that would overflow the total/set bounds stops the walk early (as in
 // RuntimePolicyIDs); such a config is rejected at apply and never enforced, so a
 // partial map is harmless.
 func PolicyIDsByStableKey(cfg *config.Config) map[string]uint32 {
@@ -109,22 +109,21 @@ func StablePolicyRuleID(fromZone, toZone, ruleName string) string {
 	return fmt.Sprintf("%s->%s/%s", fromZone, toZone, ruleName)
 }
 
-// RuntimePolicyIndex returns the span-accumulated runtime/RT_FLOW policy ID for
+// RuntimePolicyIndex returns the contiguous runtime/RT_FLOW policy ID for
 // the policy at (policySetID, sliceIndex) from a RuntimePolicyIDs map, falling
-// back to the raw ordinal policySetID*MaxRulesPerPolicy + sliceIndex when the
-// map has no entry (a config the dataplane would reject for MaxRulesPerPolicy
-// overflow — byte-identical to the pre-#3063 ordinal). This is the DISPLAY
-// identity an inventory surface should report as policy_id so it matches the
-// numeric ID the RT_FLOW/event path logs; it is NOT the counter handle passed
-// to ReadPolicyCounters (callers keep passing the raw ordinal). Exported for
-// the REST/gRPC inventory surfaces (#3336), the gRPC text detail renderer, and
-// the local CLI detail renderer (which now delegates here) so the Index column
-// cannot drift across surfaces (#3667).
+// back to the PolicyCounterID handle when the map has no entry (a config the
+// dataplane would reject for exceeding the total/set bounds). This is the
+// DISPLAY identity an inventory surface should report as policy_id so it
+// matches the numeric ID the RT_FLOW/event path logs; it is NOT the counter
+// handle passed to ReadPolicyCounters (callers keep passing PolicyCounterID).
+// Exported for the REST/gRPC inventory surfaces (#3336), the gRPC text detail
+// renderer, and the local CLI detail renderer (which now delegates here) so
+// the Index column cannot drift across surfaces (#3667).
 func RuntimePolicyIndex(ids map[[2]uint32]uint32, policySetID, sliceIndex uint32) uint32 {
 	if id, ok := ids[[2]uint32{policySetID, sliceIndex}]; ok {
 		return id
 	}
-	return policySetID*dataplane.MaxRulesPerPolicy + sliceIndex
+	return PolicyCounterID(policySetID, sliceIndex)
 }
 
 func userspacePolicyRuleExpansionCount(cfg *config.Config, apps []string) uint32 {

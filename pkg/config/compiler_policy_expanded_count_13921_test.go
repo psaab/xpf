@@ -6,14 +6,11 @@ import (
 	"testing"
 )
 
-// #13921 (H02-02): a zone-pair or global policy set whose rules expand
-// past 256 (MaxRulesPerPolicy) was ACCEPTED by strict commit, then
-// failed at snapshot build (walkPolicyRuleSlots / legacy compiler),
-// leaving the previously active config in place and no commit-time
-// signal. The fix rejects the expanded count at commit time.
-//
-// fail-on-revert: removing validatePolicyExpandedRuleCountStrict (or
-// its dispatch) turns the reject cases GREEN => RED here.
+// #16560: the per-set 256 expanded-rule cap (#13921) is removed. Runtime
+// policy IDs are contiguous per-set ranges, so 257 and 1000 rules in one
+// zone pair (or the global set) commit; only the total
+// MaxTotalPolicyRuleExpansion bound remains. Fail-on-revert: restoring
+// the per-set cap makes the 257/1000 cases RED.
 
 func policyExpansionCmds(scope string, nPolicies int, appsPerPolicy int) []string {
 	cmds := append([]string{}, zoneBoilerplate...)
@@ -43,19 +40,25 @@ func policyExpansionCmds(scope string, nPolicies int, appsPerPolicy int) []strin
 	return cmds
 }
 
-func TestPolicyExpandedRuleCountExceeds256RejectedAtCommit13921(t *testing.T) {
+func TestPolicyExpandedRuleCountPerSetCapRemoved16560(t *testing.T) {
 	for _, scope := range []string{"zonepair", "global"} {
-		t.Run(scope+" 257 plain rules", func(t *testing.T) {
+		t.Run(scope+" 257 plain rules accepted", func(t *testing.T) {
 			tree := buildAppMatchTree(t, policyExpansionCmds(scope, 257, 0)...)
-			if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "MaxRulesPerPolicy") {
-				t.Fatalf("CompileConfig err = %v, want MaxRulesPerPolicy reject", err)
+			if _, err := CompileConfig(tree); err != nil {
+				t.Fatalf("CompileConfig 257 err = %v, want nil (#16560)", err)
 			}
 		})
-		t.Run(scope+" app-set multiplication", func(t *testing.T) {
-			// 13 policies x 20-app set = 260 expanded > 256, raw count 13.
+		t.Run(scope+" 1000 plain rules accepted", func(t *testing.T) {
+			tree := buildAppMatchTree(t, policyExpansionCmds(scope, 1000, 0)...)
+			if _, err := CompileConfig(tree); err != nil {
+				t.Fatalf("CompileConfig 1000 err = %v, want nil (#16560)", err)
+			}
+		})
+		t.Run(scope+" app-set multiplication accepted", func(t *testing.T) {
+			// 13 policies x 20-app set = 260 expanded > legacy 256.
 			tree := buildAppMatchTree(t, policyExpansionCmds(scope, 13, 20)...)
-			if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "MaxRulesPerPolicy") {
-				t.Fatalf("CompileConfig err = %v, want MaxRulesPerPolicy reject", err)
+			if _, err := CompileConfig(tree); err != nil {
+				t.Fatalf("CompileConfig app-set err = %v, want nil (#16560)", err)
 			}
 		})
 		t.Run(scope+" exact 256 accepted", func(t *testing.T) {
@@ -65,21 +68,17 @@ func TestPolicyExpandedRuleCountExceeds256RejectedAtCommit13921(t *testing.T) {
 			}
 		})
 	}
-	// Tolerant path downgrades to warning, still compiles (#1960).
-	t.Run("lenient warns not rejects", func(t *testing.T) {
+	// Tolerant path: 257 in one set is no longer even a warning.
+	t.Run("lenient 257 no expansion warning", func(t *testing.T) {
 		tree := buildAppMatchTree(t, policyExpansionCmds("zonepair", 257, 0)...)
 		cfg, err := CompileConfigLenient(tree)
 		if err != nil {
 			t.Fatalf("CompileConfigLenient err = %v, want nil", err)
 		}
-		found := false
 		for _, w := range cfg.Warnings {
-			if strings.Contains(w, "MaxRulesPerPolicy") {
-				found = true
+			if strings.Contains(w, "MaxRulesPerPolicy") || strings.Contains(w, "expanded rule count") {
+				t.Fatalf("lenient 257 must not warn per-set cap: %v", cfg.Warnings)
 			}
-		}
-		if !found {
-			t.Fatalf("lenient warnings missing MaxRulesPerPolicy: %v", cfg.Warnings)
 		}
 	})
 }

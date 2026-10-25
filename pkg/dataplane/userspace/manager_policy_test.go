@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
-	"github.com/psaab/xpf/pkg/dataplane"
 )
 
 func TestUserspaceSupportsSimpleZonePolicies(t *testing.T) {
@@ -242,7 +241,7 @@ func TestBuildPolicySnapshotsRoundTripsSchedulerInactiveAndRuleID(t *testing.T) 
 	if got, want := snap[1].RuleID, "junos-global->junos-global/global-deny-all"; got != want {
 		t.Fatalf("snap[1].RuleID = %q, want %q", got, want)
 	}
-	if got, want := snap[1].PolicyID, uint32(dataplane.MaxRulesPerPolicy); got != want {
+	if got, want := snap[1].PolicyID, uint32(1); got != want { // #16560 contiguous: zone set has 1 rule, global starts at 1
 		t.Fatalf("snap[1].PolicyID = %d, want %d", got, want)
 	}
 	if snap[1].Inactive {

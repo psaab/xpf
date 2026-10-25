@@ -328,7 +328,7 @@ func (s *Server) GetPolicies(_ context.Context, _ *pb.GetPoliciesRequest) (*pb.G
 				pr.HitCountersUnavailable = true
 			}
 			if !pr.Quarantined && (statsEnabled || rule.Count) && readPolicy != nil {
-				policyID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
+				policyID := dpuserspace.PolicyCounterID(policySetID, uint32(i))
 				ctrs, err := readPolicy(policyID)
 				switch {
 				case err == nil:
@@ -442,7 +442,7 @@ func (s *Server) GetPolicies(_ context.Context, _ *pb.GetPoliciesRequest) (*pb.G
 				pr.HitCountersUnavailable = true
 			}
 			if !pr.Quarantined && (statsEnabled || rule.Count) && readPolicy != nil {
-				policyID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
+				policyID := dpuserspace.PolicyCounterID(policySetID, uint32(i))
 				ctrs, err := readPolicy(policyID)
 				switch {
 				case err == nil:

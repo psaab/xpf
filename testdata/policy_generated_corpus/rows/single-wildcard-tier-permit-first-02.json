@@ -38,7 +38,7 @@
     "default_used": false,
     "unsupported_tuple_family": false,
     "policy_name": "from-any-deny",
-    "policy_id": 256
+    "policy_id": 1
   },
   "rust_verdict": {
     "action": "deny",
@@ -46,7 +46,7 @@
     "default_used": false,
     "unsupported_tuple_family": false,
     "policy_name": "from-any-deny",
-    "policy_id": 256
+    "policy_id": 1
   },
   "snapshot": {
     "default_policy": "deny",
@@ -85,7 +85,7 @@
       },
       {
         "rule_id": "any->trust/from-any-deny",
-        "policy_id": 256,
+        "policy_id": 1,
         "name": "from-any-deny",
         "from_zone": "any",
         "to_zone": "trust",
