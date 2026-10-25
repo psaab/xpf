@@ -256,42 +256,23 @@ pub(super) fn poll_binding(
             did_work |= binding.pending_pmech_reverse.len() < pending_pmech_before;
         }
         let mut pending_forwards = core::mem::take(&mut binding.scratch.scratch_forwards);
-        let mut rst_teardowns = core::mem::take(&mut binding.scratch.scratch_rst_teardowns);
-        // #15947 (H29-01): two accepted RSTs for one session in the same
-        // batch must not cross-cancel. Collect every triggering request's
-        // (flow key, desc.addr) exception BEFORE any teardown mutates
-        // pending_forwards; each teardown then keeps that batch's entire
-        // trigger set (duplicates are harmless), rather than only its own.
-        let rst_trigger_keeps: Vec<(SessionKey, u64)> = rst_teardowns
-            .iter()
-            .filter_map(|(_, _, trigger)| trigger.clone())
-            .collect();
-        for (forward_key, nat, _trigger) in rst_teardowns.drain(..) {
-            // Evict from flow cache so stale entries aren't used after RST.
-            // #918: 4-way set-associative cache requires walking the set
-            // for the matching key — `invalidate_slot` does that.
-            invalidate_rst_flow_cache_slot(binding, &forward_key);
-            teardown_tcp_rst_flow(
-                left,
-                binding,
-                right,
-                sessions,
-                shared_sessions,
-                shared_nat_sessions,
-                shared_forward_wire_sessions,
-                &shared_owner_rg_indexes,
-                peer_worker_commands,
-                &forward_key,
-                nat,
-                &mut pending_forwards,
-                shared_recycles,
-                &rst_trigger_keeps,
-                forwarding,
-                worker_commands_by_id,
-                worker_id,
-                now_ns,
-            );
-        }
+        drain_rst_teardowns(
+            left,
+            binding,
+            right,
+            sessions,
+            shared_sessions,
+            shared_nat_sessions,
+            shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            peer_worker_commands,
+            &mut pending_forwards,
+            shared_recycles,
+            forwarding,
+            worker_commands_by_id,
+            worker_id,
+            now_ns,
+        );
         // #7212: evict the flow-cache slots backing every session this pass
         // REVOKED against a changed static interface INPUT filter.
         //
@@ -402,6 +383,81 @@ pub(super) fn poll_binding(
     counters.flush(&binding.live);
     update_binding_debug_state(binding);
     did_work
+}
+/// #16504: drain one batch's queued RST teardowns and return both
+/// scratch buffers to `current` with their capacities intact.
+///
+/// A named helper rather than inline statements in `poll_binding` for
+/// the same reason as `drain_revoked_flow_cache_keys` below: the poll
+/// function is not callable from a test (it needs live XSK rings), so
+/// with the take/drain/restore inline, dropping the restore left every
+/// existing cell green while the next RST batch reallocated both
+/// buffers from zero. This helper IS the production path — the test
+/// drives it directly and asserts the capacities survive.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn drain_rst_teardowns(
+    left: &mut [BindingWorker],
+    current: &mut BindingWorker,
+    right: &mut [BindingWorker],
+    sessions: &mut SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    pending_forwards: &mut Vec<PendingForwardRequest>,
+    shared_recycles: &mut Vec<(u32, u64)>,
+    forwarding: &ForwardingState,
+    worker_commands_by_id: &WorkerCommandQueues,
+    worker_id: u32,
+    now_ns: u64,
+) {
+    let mut rst_teardowns = core::mem::take(&mut current.scratch.scratch_rst_teardowns);
+    // #15947 (H29-01): two accepted RSTs for one session in the same
+    // batch must not cross-cancel. Collect every triggering request's
+    // (flow key, desc.addr) exception BEFORE any teardown mutates
+    // pending_forwards; each teardown then keeps that batch's entire
+    // trigger set (duplicates are harmless), rather than only its own.
+    // #16504: fill the reusable scratch keeps buffer instead of a
+    // per-batch `collect`, and return both buffers to the binding
+    // below so their pre-sized capacities survive the take/drain
+    // cycle (a dropped Vec here forced the next RST batch to
+    // reallocate both from zero).
+    let mut rst_trigger_keeps = core::mem::take(&mut current.scratch.scratch_rst_trigger_keeps);
+    rst_trigger_keeps.clear();
+    rst_trigger_keeps.extend(
+        rst_teardowns
+            .iter()
+            .filter_map(|(_, _, trigger)| trigger.clone()),
+    );
+    for (forward_key, nat, _trigger) in rst_teardowns.drain(..) {
+        // Evict from flow cache so stale entries aren't used after RST.
+        // #918: 4-way set-associative cache requires walking the set
+        // for the matching key — `invalidate_slot` does that.
+        invalidate_rst_flow_cache_slot(current, &forward_key);
+        teardown_tcp_rst_flow(
+            left,
+            current,
+            right,
+            sessions,
+            shared_sessions,
+            shared_nat_sessions,
+            shared_forward_wire_sessions,
+            shared_owner_rg_indexes,
+            peer_worker_commands,
+            &forward_key,
+            nat,
+            pending_forwards,
+            shared_recycles,
+            &rst_trigger_keeps,
+            forwarding,
+            worker_commands_by_id,
+            worker_id,
+            now_ns,
+        );
+    }
+    current.scratch.scratch_rst_teardowns = rst_teardowns;
+    current.scratch.scratch_rst_trigger_keeps = rst_trigger_keeps;
 }
 
 /// #7212: evict the flow-cache slots backing every session the poll pass
@@ -557,3 +613,9 @@ pub(in crate::afxdp) fn invalidate_flow_cache_slots_for_keys(
 #[cfg(test)]
 #[path = "lifecycle_revoked_flow_cache_7212_tests.rs"]
 mod lifecycle_revoked_flow_cache_7212_tests;
+
+// #16504: the RST teardown drain returns both scratch buffers with
+// their capacities intact, without a per-batch collect.
+#[cfg(test)]
+#[path = "lifecycle_rst_scratch_16504_tests.rs"]
+mod lifecycle_rst_scratch_16504_tests;

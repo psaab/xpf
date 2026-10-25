@@ -1129,6 +1129,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
     binding.scratch.scratch_recycle.clear();
     binding.scratch.scratch_forwards.clear();
     binding.scratch.scratch_rst_teardowns.clear();
+    binding.scratch.scratch_rst_trigger_keeps.clear();
     let injected_addr = injected_desc.as_ref().map(|(desc, _)| desc.addr);
     binding.pending_pmech_replay.clear();
     binding.scratch.pmech_injected_replay_addrs.clear();

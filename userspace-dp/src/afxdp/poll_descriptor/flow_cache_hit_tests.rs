@@ -581,6 +581,7 @@ fn scratch() -> WorkerScratch {
         scratch_post_recycles: Vec::new(),
         scratch_cross_binding_tx: Vec::new(),
         scratch_rst_teardowns: Vec::new(),
+        scratch_rst_trigger_keeps: Vec::new(),
         scratch_filter_revoked_keys: Vec::new(),
         pmech_injected_replay_addrs: Vec::new(),
     }
