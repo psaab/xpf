@@ -253,8 +253,28 @@ func LoadMutationLines(content string) ([]string, error) {
 		var lines []string
 		for _, raw := range strings.Split(uncommented, "\n") {
 			line := strings.TrimSpace(raw)
-			if fields := strings.Fields(line); len(fields) > 0 && loadMutationVerbs[fields[0]] {
-				lines = append(lines, line)
+			fields := strings.Fields(line)
+			if len(fields) == 0 || !loadMutationVerbs[fields[0]] {
+				continue
+			}
+			lines = append(lines, line)
+			// #16598: a flat `set` line the store splits at schema
+			// arity into several statements must be adjudicated as
+			// those statements, exactly as the hierarchical branch
+			// renders through FormatSet. Emit each executed statement
+			// as its own `set` line after the verbatim line (kept, so
+			// a deny matching only the joined spelling keeps its
+			// verdict and TestStoreFlatLoadVerbsAreTakenVerbatim9892's
+			// single-statement lines are unchanged: a line executing
+			// as one statement yields no split lines). Only the four
+			// replay verbs reach the flat store branch; copy/rename/
+			// insert/annotate flat lines are not store-replayable and
+			// keep their verbatim adjudication.
+			if fields[0] == "set" {
+				parts, quoted := lexConfigMutationLine9938(line)
+				for _, p := range executedMutationPaths16598(nil, parts, quoted) {
+					lines = append(lines, "set "+p)
+				}
 			}
 		}
 		return lines, nil

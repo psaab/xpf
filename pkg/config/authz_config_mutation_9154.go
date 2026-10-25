@@ -308,6 +308,81 @@ func configMutationPaths(editPath, parts []string, quoted []bool) ([]string, boo
 	return []string{resolve(parts[1:])}, true
 }
 
+// #16598: a flat `set` line is not necessarily ONE statement. The store
+// (SetPathQuotedGrouped) re-splits the token run at schema arity, so a
+// multi-value leaf closes after its value and the next keyword becomes a
+// SIBLING statement: `set system domain-search x login user evil class
+// super-user` writes both `system domain-search x` AND `system login user
+// evil class super-user`. Adjudicating only the joined path
+// `system domain-search x login user evil ...` matched neither an anchored
+// `^system login` nor the plain substring `system login`, so a restricted
+// class committed a super-user account past its deny-configuration fence.
+//
+// executedMutationPaths16598 returns the paths the store will actually
+// act on for a `set` line: apply the parsed line (edit-path resolved,
+// exactly as the store applies it) to a scratch tree and render it back
+// with FormatSet. nil means the decomposition did not apply (not a set
+// verb, or the tokens cannot be faithfully re-parsed) and the caller
+// keeps the joined path as its floor.
+func executedMutationPaths16598(editPath, parts []string, quoted []bool) []string {
+	if len(parts) == 0 || parts[0] != "set" {
+		return nil
+	}
+	full := make([]string, 0, len(editPath)+len(parts)-1)
+	full = append(full, editPath...)
+	full = append(full, parts[1:]...)
+	var b strings.Builder
+	b.WriteString("set")
+	for i, tok := range full {
+		b.WriteByte(' ')
+		q := false
+		if i >= len(editPath) && quoted != nil {
+			idx := i - len(editPath) + 1
+			if idx >= 0 && idx < len(quoted) {
+				q = quoted[idx]
+			}
+		}
+		if strings.Contains(tok, `"`) {
+			return nil
+		}
+		if q || strings.ContainsAny(tok, " \t\n") {
+			b.WriteByte('"')
+			b.WriteString(tok)
+			b.WriteByte('"')
+		} else {
+			b.WriteString(tok)
+		}
+	}
+	_, path, pq, grouped, closed, err := ParseSetVerbGroupedClosed(b.String())
+	if err != nil || len(path) == 0 {
+		return nil
+	}
+	tree := &ConfigTree{}
+	if err := tree.SetPathQuotedGrouped(path, pq, grouped, closed); err != nil {
+		return nil
+	}
+	rendered := strings.TrimSpace(tree.FormatSet())
+	if rendered == "" {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(rendered, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != "set" {
+			continue
+		}
+		out = append(out, strings.TrimSpace(strings.TrimPrefix(line, "set ")))
+	}
+	if len(out) <= 1 {
+		return nil
+	}
+	return out
+}
+
 // lexConfigMutationLine9938 tokenizes a config-mode line THE WAY THE STORE DOES,
 // with quotes consumed.
 //
@@ -570,6 +645,17 @@ func authorizeConfigMutationDepth9939(cfg *Config, class string, editPath []stri
 	if !gated && verbOnly15167 {
 		paths, gated = []string{strings.Join(editPath, " ")}, true
 	}
+	// #16598: a `set` line the store splits into several statements is
+	// several acted-upon paths (#9938 F-029). Decompose it on a scratch
+	// tree and adjudicate every executed statement in addition to the
+	// joined path, which stays as a floor so a deny matching only the
+	// joined spelling keeps its verdict. The credential surcharge below
+	// likewise sees every executed statement.
+	splitPaths16598 := executedMutationPaths16598(editPath, parts, quoted)
+	if len(splitPaths16598) > 0 {
+		gated = true
+	}
+	adjudicatedPaths16598 := append(append([]string{}, paths...), splitPaths16598...)
 	if !gated {
 		return nil
 	}
@@ -594,16 +680,16 @@ func authorizeConfigMutationDepth9939(cfg *Config, class string, editPath []stri
 	// fence (or the destination half of one); mutating that endpoint
 	// rewrites/removes the credential subtree beneath it, so it is
 	// fenced even though the typed path never names the fence.
-	if hit := credentialConfigPathsHit16080(paths); hit != "" &&
+	if hit := credentialConfigPathsHit16080(adjudicatedPaths16598); hit != "" &&
 		!ClassHasPermission(cfg, class, PermAll) {
 		return fmt.Errorf("permission denied: login class %q denies %s under %q (%s)",
-			class, parts[0], configAuditRoot(paths[0]),
+			class, parts[0], configAuditRoot(adjudicatedPaths16598[0]),
 			"credential path "+hit+" requires the super-user permission (all), not merely configure (#16080)")
 	}
-	if credentialConfigPathsTouch16080(paths) &&
+	if credentialConfigPathsTouch16080(adjudicatedPaths16598) &&
 		!ClassHasPermission(cfg, class, PermAll) {
 		return fmt.Errorf("permission denied: login class %q denies %s under %q (%s)",
-			class, parts[0], configAuditRoot(paths[0]),
+			class, parts[0], configAuditRoot(adjudicatedPaths16598[0]),
 			"mutation of a credential ancestor can rewrite login/root/api credentials and requires the super-user permission (all), not merely configure (#16080)")
 	}
 	if !ok {
@@ -631,7 +717,7 @@ func authorizeConfigMutationDepth9939(cfg *Config, class string, editPath []stri
 	// refuses the whole command. A copy or rename that is permitted at one
 	// endpoint and denied at the other must not run at all — half of it is
 	// still a mutation of a path the class was denied.
-	for _, path := range paths {
+	for _, path := range adjudicatedPaths16598 {
 		decision := rules.Evaluate(path)
 		if decision.Allowed {
 			continue
