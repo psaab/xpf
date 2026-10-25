@@ -166,6 +166,69 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 		return false, nil
 	}
 	if m.proc == nil || m.proc.Process == nil {
+		// #16643: the helper is down, so nothing is enforced right now —
+		// but the restart path replays m.lastSnapshot verbatim
+		// (syncSnapshotLocked). Returning (false, nil) here commits the
+		// overlay cache (deferred commit above) while the retained
+		// snapshot keeps the old routes, and daemon_ipmon treats
+		// !published && !pendingFIBBump as converged — so the failover
+		// route would be missing from the restarted helper's FIB until
+		// the next ipmon transition or commit. Fold the desired routes
+		// (and any scheduler sections this call carries) into the
+		// retained snapshot, without advancing published/applied
+		// bookkeeping, so the restart replay carries them. The #5680
+		// hybrid guard is enforced inside the scheduler rebuild and by
+		// the explicit check mirroring the helper-up path below for
+		// route-only folds; a refused fold returns an error, which also
+		// suppresses the deferred overlay commit so the actuator stays
+		// dirty and retries.
+		if schedulerState == nil && routeOnlyPublishHybrid(cfg, m.lastSnapshot.Config) {
+			return false, fmt.Errorf("refusing route-only publish: cfg content differs from the applied " +
+				"snapshot; publishing would ACK a config whose snapshot sections were not rebuilt (#5680)")
+		}
+		next, _ := m.cloneRetainedSnapshotLocked()
+		next.Config = cfg
+		// Stash the desired overlay for the duration of the fold only:
+		// prepareSnapshotForApply may rebuild Routes via
+		// routeOverlayForSnapshot (retained-config snapshots read
+		// m.routeOverlay, #16606), and it must see the NEW overlay, not
+		// the last-applied one. Restored before return; the deferred
+		// commit above installs it for real on a nil error.
+		savedOverlay := m.routeOverlay
+		m.routeOverlay = desiredOverlay
+		m.prepareSnapshotForApply(&next)
+		m.routeOverlay = savedOverlay
+		next.TunnelEndpoints = append([]TunnelEndpointSnapshot(nil), next.TunnelEndpoints...)
+		for i := range next.TunnelEndpoints {
+			next.TunnelEndpoints[i].LinkUp = snapshotLinkUp(next.TunnelEndpoints[i].LinuxName)
+		}
+		resampled := m.resampleUnresolvedSectionsLocked(&next) // #9684
+		var routeErr error
+		next.Routes, next.LearnedRouteImportCapped, routeErr = buildRouteSnapshotsWithRGPrimary(cfg, next.Interfaces, desiredOverlay, m.rgPrimaryProvider)
+		if routeErr != nil {
+			return false, fmt.Errorf("build route overlay snapshot: %w", routeErr)
+		}
+		next.Interfaces = markConnectedRGPeerOwned(cfg, next.Interfaces, m.rgPrimaryProvider)
+		if schedulerState != nil {
+			if err := m.rebuildScheduledPolicySectionsWithLatchLocked(&next, cfg, schedulerCopy, failClosed); err != nil {
+				return false, fmt.Errorf("build policy overlay snapshot for scheduler state: %w", err)
+			}
+			next.schedulerActiveState = copyPolicySchedulerActiveState(schedulerCopy)
+			next.schedulerActiveStateSet = true
+		}
+		m.recordPolicyContentRejectionLocked(next.Capabilities.PolicyContentRejected)
+		m.refreshCaptureAuthorityLocked(&next)
+		// Retained-only fold: not a publication (see the scheduler fold
+		// in manager_compile.go). published=false with a nil error still
+		// reads "converged" to the actuator, which is now true: the
+		// restart replay carries these routes, so no FIB bump is owed
+		// for content the helper does not yet hold.
+		_ = resampled
+		m.bumpRetainedGenerationLocked(&next)
+		m.adoptPublishedGenerationLocked(&next, next.Generation)
+		m.lastSnapshot = &next
+		m.rebuildNeighborIndex()
+		m.rebuildMonitoredIfindexes()
 		return false, nil
 	}
 

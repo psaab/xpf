@@ -570,7 +570,14 @@ func TestUpdatePolicyScheduleStateRefusesOldHelperForScheduledPolicies(t *testin
 	}
 }
 
-func TestUpdatePolicyScheduleStateWithoutHelperDoesNotMutateSnapshot(t *testing.T) {
+// #16643: without a helper, UpdatePolicyScheduleState must NOT publish —
+// but it must fold the transition into the retained snapshot, because the
+// supervisor restart replays m.lastSnapshot verbatim and nothing else
+// re-sends the transition. (Before #16643 this cell pinned the opposite:
+// the retained snapshot stayed stale, which is exactly the lost
+// closing-window permit.) The applied/show state still must not advance:
+// no helper has applied the folded state yet.
+func TestUpdatePolicyScheduleStateWithoutHelperFoldsIntoRetained16643(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Security.Policies = []*config.ZonePairPolicies{{
 		FromZone: "trust",
@@ -590,13 +597,18 @@ func TestUpdatePolicyScheduleStateWithoutHelperDoesNotMutateSnapshot(t *testing.
 	m.lastSnapshot = mustBuildSnapshot(t, cfg, config.UserspaceConfig{}, 7, 0)
 	m.lastSnapshot.Policies[0].Inactive = false
 
-	m.UpdatePolicyScheduleState(cfg, map[string]bool{"workhours": false})
-
-	if m.generation != 7 {
-		t.Fatalf("generation = %d, want unchanged 7", m.generation)
+	if err := m.UpdatePolicyScheduleState(cfg, map[string]bool{"workhours": false}); err != nil {
+		t.Fatalf("helper-down scheduler update must converge by folding, not error: %v", err)
 	}
-	if m.lastSnapshot == nil || len(m.lastSnapshot.Policies) != 1 || m.lastSnapshot.Policies[0].Inactive {
-		t.Fatalf("lastSnapshot mutated without helper: %+v", m.lastSnapshot)
+
+	if m.generation != 8 {
+		t.Fatalf("generation = %d, want 8: the fold bumps the retained generation so the restart tick republishes", m.generation)
+	}
+	if m.lastSnapshot == nil || len(m.lastSnapshot.Policies) != 1 || !m.lastSnapshot.Policies[0].Inactive {
+		t.Fatalf("closing transition not folded into retained snapshot: %+v", m.lastSnapshot)
+	}
+	if m.publishedSnapshot != 0 {
+		t.Fatalf("publishedSnapshot = %d, want 0: the helper accepted nothing while down", m.publishedSnapshot)
 	}
 	m.mu.Lock()
 	desired, desiredOK := m.policySchedulerDesired["workhours"]
