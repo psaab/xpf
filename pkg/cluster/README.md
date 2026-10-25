@@ -3236,6 +3236,26 @@ Consequences to hold on to:
   closes the disclosure without touching carriage, so the three can be
   resolved as one design later rather than under time pressure.
 
+## Persistent-NAT idle-lease sync (#8121)
+
+`QueuePersistentNatLeaseBatch` exports one sender-origin/generation snapshot in
+size-bounded frames. The record layout is selected per lease, not per export:
+type 41 (`syncMsgPersistentNatLeaseGeneration`) carries only leases without a
+deterministic identity, and type 43 (`syncMsgPersistentNatLeaseDeterministic`)
+carries deterministic leases. A mixed batch is sent as type-41 chunks followed
+by type-43 chunks; every frame repeats the same origin and clear generation and
+has its own increasing full-set sequence. The receiver applies a newer
+generation as a clear barrier, then adds records from later frames of that
+generation.
+
+This split preserves the rolling-upgrade path for a peer that supports #11486
+but predates #14638: it can still decode dynamic leases from type 41 and ignores
+the unknown deterministic type 43. Deterministic idle leases are unavailable to
+that peer until it upgrades. A peer older than #11486 cannot read type 41, and
+new receivers continue to ignore its generation-less lease messages rather
+than bypass the durable replay floor. Empty or wholly unencodable batches still
+send one generation barrier frame; dropped records remain counted.
+
 ## IPsec SA sync
 
 Active IKE/child-SA connection names ride the session-sync channel so the

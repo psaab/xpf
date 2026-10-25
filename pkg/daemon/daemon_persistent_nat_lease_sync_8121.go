@@ -102,11 +102,13 @@ func (d *Daemon) wirePersistentNatLeaseCallbacks(ss *cluster.SessionSync) {
 // so an imported idle lease on a newly-mastered RG remains suppressed until
 // locally used.
 //
-// A rolling-upgrade peer cannot read the generation-bearing frame; the new
-// receiver therefore ignores its generation-less advertisements rather than
-// allowing them to bypass the replay floor. Idle-lease sync resumes when both
-// nodes run the new protocol. A lease already installed on an old peer can remain
-// usable until its derived expiry if that peer cannot process a clear.
+// A peer older than #11486 cannot read generation-bearing type 41; the new
+// receiver ignores that peer's generation-less advertisements rather than
+// allowing them to bypass the replay floor. A peer that supports #11486 but
+// predates #14638 still receives non-deterministic leases on type 41, while
+// deterministic leases on type 43 become readable after its upgrade. A lease
+// already installed on an old peer can remain usable until its derived expiry
+// if that peer cannot process a clear.
 func (d *Daemon) runPersistentNatLeaseSyncLoop(ctx context.Context) {
 	ticker := time.NewTicker(persistentNatLeaseSyncInterval)
 	defer ticker.Stop()
