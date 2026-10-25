@@ -52,6 +52,14 @@ func armToStuckArming(t *testing.T) (*KernelRunner, *fakeKernelSystem) {
 	if armed, _, _ := r.IsArmed(); armed {
 		t.Fatal("IsArmed must be FALSE at ARMING — an unconfirmed arm is not a verified trial (#5847)")
 	}
+	// #16809 control: IsArmed is state-only by design, but the BOOT must also
+	// classify as no-trial here — the fake defaults BootCurrent to the queued
+	// BootNext ("" after the failed arm's clear, i.e. the known-good slot) and
+	// the running kernel is the known-good, so TrialInFlight must stay false
+	// and an interrupted arm's node must still be able to rejoin.
+	if trial, _, terr := r.TrialInFlight(); terr != nil || trial {
+		t.Fatalf("TrialInFlight = %v err=%v at ARMING on a known-good boot, want false/nil (#16809 control)", trial, terr)
+	}
 	return r, f
 }
 

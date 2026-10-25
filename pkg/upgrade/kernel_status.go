@@ -29,8 +29,22 @@ import (
 type ChannelStatus struct {
 	// Armed is true only for a genuine in-flight trial (the VERIFIED ARMED
 	// state — not ARMING, which is prepared intent whose firmware one-shot was
-	// never read back, and which the next boot does NOT honor).
+	// never read back; an ARMING boot is a genuine trial only with the
+	// #16809 boot evidence, reported separately as UnconfirmedTrial).
 	Armed bool
+	// UnconfirmedTrial is true when the journal is ARMING but THIS boot is
+	// positively the candidate (BootCurrent == the inactive slot's entry and
+	// the running kernel == CandidateVersion): a one-shot was queued without
+	// a verified ARMED record (#16809 — process death between SetBootNext
+	// and the ARMED rename, or a landed-but-errored SetBootNext). It is
+	// gated and held exactly like a verified trial. False with
+	// TrialClassificationErr set means the classification could not be made.
+	UnconfirmedTrial bool
+	// TrialClassificationErr records a failure to classify an ARMING boot
+	// (boot entries / BootCurrent / running kernel unreadable). It does NOT
+	// set ReadErr: the durable channel state WAS read, and conflating the
+	// two would hide which half is broken.
+	TrialClassificationErr error
 	// Journal is the persisted channel state. Its State is KernelStateInit
 	// when no run is in progress.
 	Journal KernelJournal
@@ -108,6 +122,19 @@ func ReadChannelStatus(journalPath string, sys KernelSystem) ChannelStatus {
 	} else {
 		st.Refusal = rec
 	}
+	// #16809: an ARMING journal is classified against THIS boot's evidence
+	// (BootCurrent + running kernel), never asserted known-good from the
+	// state alone. A nil sys cannot classify: the journal was still read, so
+	// the renderer must say "could not determine", not "known-good".
+	if st.Journal.State == KernelStateArming {
+		if sys == nil {
+			st.TrialClassificationErr = fmt.Errorf("no system surface to classify the ARMING boot")
+		} else if trial, _, terr := r.UnconfirmedTrial(); terr != nil {
+			st.TrialClassificationErr = terr
+		} else {
+			st.UnconfirmedTrial = trial
+		}
+	}
 	if sys == nil {
 		return st
 	}
@@ -164,7 +191,28 @@ func RenderChannelStatus(w io.Writer, st ChannelStatus) {
 	}
 
 	// ── armed candidate ──
-	if st.Armed {
+	if st.TrialClassificationErr != nil {
+		fmt.Fprintf(w, "  WARNING: could not classify the ARMING boot: %v\n", st.TrialClassificationErr)
+	}
+	if st.UnconfirmedTrial {
+		// #16809: the journal never reached ARMED, but THIS boot IS the
+		// candidate — a one-shot was queued without a verified record.
+		// It is a trial in flight and must read as one, not as the
+		// "next boot is known-good" intent an ordinary ARMING means.
+		j := st.Journal
+		fmt.Fprintln(w, "  Armed:           yes — an UNCONFIRMED candidate trial is IN FLIGHT (#16809)")
+		fmt.Fprintf(w, "    Candidate:     %s\n", dashIfEmpty(j.CandidateVersion))
+		fmt.Fprintf(w, "    Known-good:    %s\n", dashIfEmpty(j.KnownGoodVersion))
+		fmt.Fprintf(w, "    Active slot:   %s\n", dashIfEmpty(j.ActiveSlot))
+		fmt.Fprintf(w, "    Candidate slot:%s\n", " "+dashIfEmpty(j.InactiveSlot))
+		fmt.Fprintf(w, "    State:         %s (one-shot queued but never read back; this boot IS the candidate)\n", dashIfEmpty(string(j.State)))
+		if !j.StartedAt.IsZero() {
+			fmt.Fprintf(w, "    Armed at:      %s\n", j.StartedAt.UTC().Format("2006-01-02 15:04:05 UTC"))
+		}
+		if j.PromoteAttempts > 0 {
+			fmt.Fprintf(w, "    Revert attempts: %d of %d\n", j.PromoteAttempts, maxPromoteAttempts)
+		}
+	} else if st.Armed {
 		j := st.Journal
 		fmt.Fprintln(w, "  Armed:           yes — a candidate trial is IN FLIGHT")
 		fmt.Fprintf(w, "    Candidate:     %s\n", dashIfEmpty(j.CandidateVersion))
@@ -192,8 +240,15 @@ func RenderChannelStatus(w io.Writer, st ChannelStatus) {
 		fmt.Fprintf(w, "  Armed:           no — a run is in progress at state %s\n", st.Journal.State)
 		fmt.Fprintf(w, "    Candidate:     %s\n", dashIfEmpty(st.Journal.CandidateVersion))
 		if st.Journal.State == KernelStateArming {
-			fmt.Fprintln(w, "    NOTE: ARMING is prepared intent only — the firmware one-shot was")
-			fmt.Fprintln(w, "          never confirmed, so the next boot is the KNOWN-GOOD kernel.")
+			if st.TrialClassificationErr != nil {
+				fmt.Fprintln(w, "    NOTE: ARMING with unclassifiable boot evidence — the one-shot")
+				fmt.Fprintln(w, "          may have been queued (#16809); this boot could NOT be")
+				fmt.Fprintln(w, "          proven known-good, so do not assume it is.")
+			} else {
+				fmt.Fprintln(w, "    NOTE: ARMING is prepared intent only — the firmware one-shot was")
+				fmt.Fprintln(w, "          never confirmed, and this boot is positively the KNOWN-GOOD")
+				fmt.Fprintln(w, "          kernel (the candidate slot did not boot / is not running).")
+			}
 		}
 	} else {
 		fmt.Fprintln(w, "  Armed:           no — no candidate kernel is armed")
@@ -239,6 +294,9 @@ func RenderChannelStatus(w io.Writer, st ChannelStatus) {
 // summaryLine is a one-line form for embedding in a wider status render.
 func (st ChannelStatus) summaryLine() string {
 	switch {
+	case st.UnconfirmedTrial:
+		return strings.TrimSpace(fmt.Sprintf("unconfirmed trial candidate %s (known-good %s)",
+			dashIfEmpty(st.Journal.CandidateVersion), dashIfEmpty(st.Journal.KnownGoodVersion)))
 	case st.Armed:
 		return strings.TrimSpace(fmt.Sprintf("armed candidate %s (known-good %s)",
 			dashIfEmpty(st.Journal.CandidateVersion), dashIfEmpty(st.Journal.KnownGoodVersion)))

@@ -33,15 +33,21 @@ type fakeKernelSystem struct {
 
 	entriesErr error
 
-	bootCurrent         string
-	bootCurrentErr      error
-	getBootNextErr      error  // #5847: force a readback error (stay ARMING)
-	clearBootNextErr    error  // #6758: force the un-undoable case (NVRAM stays armed)
-	getBootNextRet      string // #5847: override readback (firmware "lied"); "" => mirror bootNext
-	runningErr          error
-	armWatchdogErr      error
-	disarmWatchdogErr   error
-	setBootNextErr      error
+	bootCurrent       string
+	bootCurrentErr    error
+	getBootNextErr    error  // #5847: force a readback error (stay ARMING)
+	clearBootNextErr  error  // #6758: force the un-undoable case (NVRAM stays armed)
+	getBootNextRet    string // #5847: override readback (firmware "lied"); "" => mirror bootNext
+	runningErr        error
+	armWatchdogErr    error
+	disarmWatchdogErr error
+	setBootNextErr    error
+	// #16809: the SetBootNext write lands in firmware but the exec then
+	// reports an error (the 10s kill timeout after SetVariable, or a
+	// non-zero exit after the write). The write must still be visible so
+	// the arm's clear-on-failure and the boot-time trial predicate see
+	// the queued one-shot the error claimed never happened.
+	setBootNextLands    bool
 	rebootErr           error
 	armWatchdogCalls    int
 	disarmWatchdogCalls int
@@ -137,6 +143,9 @@ func (f *fakeKernelSystem) ReadSlotSelector(slot string) (string, error) {
 func (f *fakeKernelSystem) SetBootNext(id string) error {
 	f.log("bootnext:" + id)
 	if f.setBootNextErr != nil {
+		if f.setBootNextLands {
+			f.bootNext = id
+		}
 		return f.setBootNextErr
 	}
 	f.bootNext = id

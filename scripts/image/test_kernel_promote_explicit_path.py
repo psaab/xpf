@@ -371,8 +371,22 @@ class TestNoPathResolution(unittest.TestCase):
         self.assertIn(
             'JOURNAL_ARMED_STATE="ARMED"',
             text,
-            "the armed-state token is no longer pinned; ARMING is prepared "
-            "intent and must NOT read as a trial in flight (upgrade.IsArmed)",
+            "the armed-state token is no longer pinned; ARMED is the verified "
+            "trial state (upgrade.IsArmed)",
+        )
+        self.assertIn(
+            'JOURNAL_ARMING_STATE="ARMING"',
+            text,
+            "the ARMING token is no longer pinned; ARMING *with the arm record "
+            "present* is the #16809 unconfirmed-trial shape and must run the "
+            "recorded gate, while ARMING without a record stays not-a-trial",
+        )
+        self.assertIn(
+            "ARM_RECORD",
+            body,
+            "journal_state must consult the arm record to distinguish an "
+            "interrupted arm (ARMING, no record) from an unconfirmed trial "
+            "(ARMING, record present) (#16809)",
         )
 
     def test_no_command_v_probe_for_xpfd(self):
@@ -1670,16 +1684,42 @@ class TestArmedWithoutARecordIsNotLaundered(_GateBase):
         res = self._run()
         self._assert_refused(res, "compact single-line ARMED journal")
 
-    def test_arming_state_is_not_a_trial_in_flight(self):
-        # OVER-REACH GUARD. ARMING is PREPARED INTENT recorded before the
-        # firmware one-shot is read back; only the verified ARMED state is a
-        # trial. `upgrade.IsArmed` draws exactly this line, and a journal stuck
-        # at ARMING is an ordinary boot. Refusing here would put a loud error
-        # on every boot of a box whose arm was interrupted.
+    def test_arming_state_without_a_record_is_not_a_trial_in_flight(self):
+        # OVER-REACH GUARD (record ABSENT). ARMING is PREPARED INTENT recorded
+        # before the firmware one-shot is read back, and with no arm record
+        # there is no designated binary to gate with either way, so this stays
+        # the quiet ordinary boot. `upgrade.IsArmed` draws exactly this line,
+        # and refusing here would put a loud error on every boot of a box whose
+        # arm was interrupted before recordPromoteBinary.
         self.arm_explicitly_absent = True
         self.journal = self.journal_body("ARMING")
         res = self._run()
-        self._assert_nothing_armed(res, "journal at ARMING, not ARMED")
+        self._assert_nothing_armed(res, "journal at ARMING, no record")
+
+    def test_arming_state_WITH_a_record_runs_the_recorded_gate(self):
+        # #16809 DEFECT ROW. The record is written (recordPromoteBinary)
+        # BEFORE the verified ARMED transition, so ARMING + record present is
+        # the process-death / landed-but-errored-SetBootNext shape: BootNext
+        # may have been queued and THIS boot may be the candidate. The gate
+        # must RUN the recorded binary — the Go half convicts on BootCurrent +
+        # uname -r and gates or no-ops — never refuse it as "not a trial"
+        # (the pre-#16809 reading, which left the unverified candidate
+        # running with no gate at all) and never take the quiet exit.
+        _live, live_ran = self._arm_a_live_binary()
+        self.journal = self.journal_body("ARMING")
+        self.stub_loadstate = "loaded"
+
+        res = self._run()
+        self._assert_ran(res, live_ran, "ARMING journal with an arm record")
+        self.assertIn("may have been", res.stderr)
+        self.assertIn("queued without a verified", res.stderr)
+        self.assertIn("#16809", res.stderr)
+        self.assertNotIn(
+            "nothing to promote",
+            res.stderr,
+            "an ARMING+record boot was reported as a benign nothing-to-promote "
+            f"(#16809): {res.stderr}",
+        )
 
     def test_terminal_journal_states_are_not_a_trial_in_flight(self):
         # Same guard for the other side: a PROMOTED/REVERTED journal that has
@@ -2178,13 +2218,24 @@ class TestBusyboxParity(_GateBase):
         self.assertEqual(rec.get("journal_state"), "armed")
         self.assertTrue(rec.get("reason"), f"no reason recorded under busybox: {rec}")
 
-    def test_arming_state_is_not_a_trial_under_busybox(self):
-        # The other side of the same glob: ARMING must NOT match, or busybox
-        # boxes get a loud error on every ordinary boot.
+    def test_arming_state_without_a_record_is_not_a_trial_under_busybox(self):
+        # The other side of the same glob: ARMING *without a record* must NOT
+        # match the trial glob, or busybox boxes get a loud error on every
+        # ordinary interrupted-arm boot.
         self.arm_explicitly_absent = True
         self.journal = self.journal_body("ARMING")
         res = self._run()
-        self._assert_nothing_armed(res, "busybox sh, journal ARMING")
+        self._assert_nothing_armed(res, "busybox sh, journal ARMING, no record")
+
+    def test_arming_state_WITH_a_record_runs_the_gate_under_busybox(self):
+        # #16809 parity: the ARMING+record -> run-the-gate branch must behave
+        # identically under busybox sh, the other early-boot shell.
+        _live, live_ran = self._arm_a_live_binary()
+        self.journal = self.journal_body("ARMING")
+        self.stub_loadstate = "loaded"
+        res = self._run()
+        self._assert_ran(res, live_ran, "busybox sh, ARMING journal with a record")
+        self.assertIn("#16809", res.stderr)
 
 
 if __name__ == "__main__":

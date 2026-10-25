@@ -412,9 +412,10 @@ func TestArmRefusesWhenTheSidecarCannotBeWritten(t *testing.T) {
 }
 
 var (
-	kernelJournalPathRE = regexp.MustCompile(`(?m)^KERNEL_JOURNAL="([^"]+)"`)
-	journalArmedStateRE = regexp.MustCompile(`(?m)^JOURNAL_ARMED_STATE="([^"]+)"`)
-	promoteUnitRE       = regexp.MustCompile(`(?m)^PROMOTE_UNIT="([^"]+)"`)
+	kernelJournalPathRE  = regexp.MustCompile(`(?m)^KERNEL_JOURNAL="([^"]+)"`)
+	journalArmedStateRE  = regexp.MustCompile(`(?m)^JOURNAL_ARMED_STATE="([^"]+)"`)
+	journalArmingStateRE = regexp.MustCompile(`(?m)^JOURNAL_ARMING_STATE="([^"]+)"`)
+	promoteUnitRE        = regexp.MustCompile(`(?m)^PROMOTE_UNIT="([^"]+)"`)
 )
 
 // TestPromoteScriptJournalMatchesGo is the CROSS-LANGUAGE canary for the r7
@@ -451,12 +452,24 @@ func TestPromoteScriptJournalMatchesGo(t *testing.T) {
 		t.Errorf("promote script looks for journal state %q but Go writes %q", got, want)
 	}
 	// ARMING is PREPARED INTENT recorded before the firmware one-shot is read
-	// back — not a trial in flight. upgrade.IsArmed draws exactly this line, and
-	// matching it here would put a loud refusal on every boot of a box whose arm
-	// was interrupted.
+	// back — the ARMED token must stay the verified state, never ARMING.
 	if got == string(KernelStateArming) {
-		t.Errorf("promote script treats %q as a trial in flight; only the verified "+
-			"%q state is one (see IsArmed)", KernelStateArming, KernelStateArmed)
+		t.Errorf("promote script treats %q as the verified trial state; only the "+
+			"verified %q state is one (see IsArmed)", KernelStateArming, KernelStateArmed)
+	}
+	// #16809: the script ALSO names ARMING separately, so an ARMING journal
+	// WITH the arm record present (a one-shot queued without a verified
+	// record) runs the recorded gate instead of refusing it. Pin that token
+	// against Go too: drift here silently restores the unverified-candidate
+	// skip this issue exists to close.
+	m = journalArmingStateRE.FindSubmatch(data)
+	if m == nil {
+		t.Fatal("no `JOURNAL_ARMING_STATE=\"...\"` assignment in the promote script; " +
+			"an ARMING+record boot would no longer be recognized as a possible " +
+			"unconfirmed trial (#16809)")
+	}
+	if got, want := string(m[1]), string(KernelStateArming); got != want {
+		t.Errorf("promote script looks for ARMING journal state %q but Go writes %q", got, want)
 	}
 }
 

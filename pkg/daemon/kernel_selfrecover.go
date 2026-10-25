@@ -80,7 +80,13 @@ func (d *Daemon) holdSecondaryIfKernelCandidateArmed() {
 	if err != nil {
 		return
 	}
-	armed, j, err := r.IsArmed()
+	// #16809: classify on TrialInFlight, not bare IsArmed. An ARMING journal
+	// whose boot evidence convicts it as a genuine (unconfirmed) trial is
+	// running an UNVERIFIED candidate: it must acquire the same election
+	// hold as a verified ARMED trial, not boot election-eligible while the
+	// promotion gate has never run. A classification ERROR falls into the
+	// fail-closed branch below, exactly like an unreadable journal.
+	trial, j, err := r.TrialInFlight()
 	if err != nil {
 		// #5682 (codex-review-182 M24): the journal is UNREADABLE — an I/O error,
 		// corruption, or parse failure. IsArmed/loadKernelJournal already fold a
@@ -105,7 +111,7 @@ func (d *Daemon) holdSecondaryIfKernelCandidateArmed() {
 			"(SECONDARY) until the state can be re-read", "err", err)
 		return
 	}
-	if !armed {
+	if !trial {
 		return
 	}
 	candidateRunning, err := d.runningKernelMatchesCandidate(j.CandidateVersion)
@@ -194,10 +200,10 @@ func (d *Daemon) reconcileKernelUpgradeHold() {
 		if err != nil {
 			return // cannot construct a reader; keep holding fail-closed
 		}
-		armed, j, ierr := r.IsArmed()
+		armed, j, ierr := r.TrialInFlight()
 		switch {
 		case ierr != nil:
-			return // journal still unreadable; keep holding fail-closed
+			return // journal still unreadable/unclassifiable; keep holding fail-closed
 		case armed:
 			candidateRunning, err := d.runningKernelMatchesCandidate(j.CandidateVersion)
 			if err != nil {
@@ -278,15 +284,19 @@ func (d *Daemon) startKernelSelfRecovery(ctx context.Context) {
 	sr := upgrade.NewKernelSelfRecovery(upgrade.SelfRecoveryConfig{
 		NodeID: d.cluster.NodeID(),
 		Logf:   func(f string, a ...any) { slog.Info("kernel-self-recovery", "msg", fmt.Sprintf(f, a...)) },
-		// Refuse self-recovery while a candidate trial is still ARMED — even if
-		// the orchestrator lease expired (r2 AGY long-hanging-roll TTL split-brain).
+		// Refuse self-recovery while a candidate trial is in flight — a verified
+		// ARMED trial, or an ARMING journal this boot's evidence convicts as an
+		// unconfirmed trial (#16809) — even if the orchestrator lease expired
+		// (r2 AGY long-hanging-roll TTL split-brain). An ordinary ARMING boot
+		// (positively known-good) still reports no trial, so an interrupted
+		// arm's drained node can still rejoin (#5847).
 		Armed: func() (bool, error) {
 			r, err := upgrade.NewKernelRunner(upgrade.KernelConfig{Sys: daemonKernelSystem()})
 			if err != nil {
 				return false, err
 			}
-			armed, _, err := r.IsArmed()
-			return armed, err
+			trial, _, err := r.TrialInFlight()
+			return trial, err
 		},
 	}, kernelSRCluster{m: d.cluster})
 

@@ -78,6 +78,69 @@ func (r *KernelRunner) ktransition(j *KernelJournal, s KernelState) error {
 	return r.saveKernelJournal(j)
 }
 
+// UnconfirmedTrial reports whether the CURRENT boot is a genuine candidate
+// trial whose journal never reached the verified ARMED state (#16809).
+//
+// The two-phase arm records ARMING before SetBootNext and ARMED only after a
+// positive readback, so ARMING alone is prepared intent. But two paths reach
+// a boot with BootNext actually queued while the journal still says ARMING:
+// (a) process death between SetBootNext and the ARMED rename, and (b) a
+// SetBootNext error after the write landed whose clear could not run (or
+// itself failed). On such a boot the firmware booted the candidate WITHOUT
+// verify-dataplane or the beacon ever running, yet Promote, the daemon
+// election hold and self-recovery all classified ARMING as an ordinary boot.
+//
+// The discriminator is boot EVIDENCE, not the journal state alone: the
+// firmware booted the INACTIVE slot (BootCurrent == entries[InactiveSlot])
+// AND the running kernel IS the candidate (uname -r == CandidateVersion).
+// Both are required — BootCurrent alone could be a stale slot whose selector
+// no longer points at the candidate, and uname -r alone cannot tie the boot
+// to the armed slot.
+//
+// Fail-closed: any read failure (journal, boot entries, BootCurrent, running
+// kernel), a missing candidate slot, or an empty candidate version returns
+// an ERROR, never a bare "not a trial" — a caller that cannot prove the boot
+// is off the candidate must not classify it as an ordinary boot. A journal
+// at ARMED (or beyond) is not "unconfirmed": it is the verified trial the
+// existing predicates already handle, so it reports (false, nil). Any other
+// state, and ARMING with positive non-candidate evidence, reports
+// (false, nil).
+func (r *KernelRunner) UnconfirmedTrial() (bool, *KernelJournal, error) {
+	j, err := r.loadKernelJournal()
+	if err != nil {
+		return false, nil, err
+	}
+	if j.State != KernelStateArming {
+		return false, j, nil
+	}
+	if j.CandidateVersion == "" || j.InactiveSlot == "" {
+		return false, j, fmt.Errorf("kernel-upgrade: ARMING journal has empty candidate/slot "+
+			"(candidate=%q inactive=%q); cannot classify the boot", j.CandidateVersion, j.InactiveSlot)
+	}
+	sys := r.cfg.Sys
+	entries, err := sys.BootEntries()
+	if err != nil {
+		return false, j, fmt.Errorf("kernel-upgrade: ARMING boot classification: read boot entries: %w", err)
+	}
+	candID, ok := entries[j.InactiveSlot]
+	if !ok {
+		return false, j, fmt.Errorf("kernel-upgrade: ARMING boot classification: candidate slot %s "+
+			"not in boot entries", j.InactiveSlot)
+	}
+	cur, err := sys.BootCurrent()
+	if err != nil {
+		return false, j, fmt.Errorf("kernel-upgrade: ARMING boot classification: read BootCurrent: %w", err)
+	}
+	if cur != candID {
+		return false, j, nil
+	}
+	running, err := sys.RunningKernel()
+	if err != nil {
+		return false, j, fmt.Errorf("kernel-upgrade: ARMING boot classification: running kernel: %w", err)
+	}
+	return running == j.CandidateVersion, j, nil
+}
+
 // Arm runs the PRE-REBOOT half of the LANE-1 channel for a candidate kernel
 // version: preflight -> install -> arm one-shot -> reboot. On success it does
 // NOT return (the host reboots into the candidate); the Promote half then runs
@@ -506,12 +569,18 @@ func (r *KernelRunner) armCandidate(j *KernelJournal) (bool, error) {
 	}
 
 	if err := sys.SetBootNext(inactiveID); err != nil {
-		// BootNext was not set; the journal is only ARMING (no verified trial),
-		// so the box still boots the known-good default and a retry re-arms
-		// cleanly. Leave the journal at ARMING (do NOT drop back to INSTALLED):
-		// re-entry resumes the arm, and self-recovery already treats ARMING as
-		// no-trial.
-		return false, disarmWatchdogAfterArmFailure(sys,
+		// #16809: an error here does NOT prove BootNext was never set. The
+		// write can land in firmware and the exec still report failure —
+		// runCmdTimeout kills efibootmgr at kernelNVRAMTimeout after the
+		// SetVariable already completed, or efibootmgr exits non-zero
+		// after the write. Treating the error as "never set" (the
+		// pre-#16809 comment) left the candidate queued for an arbitrary
+		// later reboot while the journal said ARMING and every gate
+		// classified the node as unarmed. Clear unconditionally via the
+		// same helper the post-SetBootNext paths use: clearing an absent
+		// BootNext is already a success, and a clear failure is reported
+		// loudly with the manual delete-bootnext command.
+		return false, disarmAfterArmFailure(sys,
 			fmt.Errorf("kernel-upgrade arm: efibootmgr --bootnext %s: %w", inactiveID, err))
 	}
 
@@ -582,9 +651,10 @@ func disarmStrictWatchdogAfterArmFailure(sys KernelSystem, armErr error) error {
 		ErrKernelChannelUnavailable, armErr)
 }
 
-// disarmAfterArmFailure clears BootNext before disarming the watchdog, after
-// SetBootNext succeeds. It preserves the original cause plus cleanup errors
-// (#6758, #12162). (The failed-Reboot path uses disarmAfterFailedReboot.)
+// disarmAfterArmFailure clears BootNext before disarming the watchdog, at or
+// after the SetBootNext call. It preserves the original cause plus cleanup
+// errors (#6758, #12162, #16809). (The failed-Reboot path uses
+// disarmAfterFailedReboot.)
 //
 // THE DIVERGENCE IT CLOSES. The two-phase arm records ARMING before touching
 // NVRAM and only advances to ARMED after a positive BootNext readback. Every
@@ -603,8 +673,10 @@ func disarmStrictWatchdogAfterArmFailure(sys KernelSystem, armErr error) error {
 // was designated to verify it — an armed candidate with nothing to run the
 // promotion gate, which #6601 added that record specifically to prevent.
 //
-// SINGLE-SOURCED for armCandidate's four post-SetBootNext failure paths; a
-// failed Reboot uses the same clear step and disarms only after it succeeds.
+// SINGLE-SOURCED for armCandidate's failure paths at or after the SetBootNext
+// call (#16809: including SetBootNext's own error, whose write may have
+// landed before the exec reported failure); a failed Reboot uses the same
+// clear step and disarms only after it succeeds.
 // Clearing an absent BootNext is not an error, so this is safe on the
 // readback-mismatch path where the firmware may have dropped the variable.
 //
@@ -659,16 +731,45 @@ func (r *KernelRunner) Promote() (KernelRollOutcome, error) {
 		return KernelRollOutcome{}, err
 	}
 	if !j.State.atLeast(KernelStateArmed) {
-		// Nothing armed -> this is an ordinary boot, not a candidate trial.
-		// A prune deferred by an earlier revert survives the journal clear
-		// that ended that roll in its own sidecar (#16811); this ordinary
-		// boot is where it is collected, exactly once, now that the running
-		// kernel can be proven not to be the deferred candidate.
-		if err := r.settlePruneOwed(); err != nil {
-			return KernelRollOutcome{}, err
+		// #16809: ARMING is prepared intent ONLY if this boot is not the
+		// candidate. Process death between SetBootNext and the ARMED
+		// rename (or a landed-but-errored SetBootNext whose clear never
+		// ran) queues BootNext while the journal stays ARMING, so the
+		// candidate CAN be the running kernel here. Classify on boot
+		// evidence: a genuine trial is gated exactly like ARMED below;
+		// unreadable evidence fails closed indeterminate (no prune, no
+		// reboot, journal kept); positive non-candidate evidence is the
+		// ordinary boot this branch has always meant.
+		if j.State == KernelStateArming {
+			trial, tj, terr := r.UnconfirmedTrial()
+			if terr != nil {
+				return KernelRollOutcome{}, r.recoverIndeterminate(j, terr)
+			}
+			if !trial {
+				if err := r.settlePruneOwed(); err != nil {
+					return KernelRollOutcome{}, err
+				}
+				r.logf("kernel-upgrade: no armed candidate (state=%s); ordinary boot, nothing to promote", j.State)
+				return KernelRollOutcome{}, nil
+			}
+			j = tj
+			r.logf("kernel-upgrade: ARMING journal but BootCurrent is the candidate slot "+
+				"and the running kernel IS candidate %s — an unconfirmed trial whose "+
+				"one-shot was queued without a verified ARMED record (#16809); running "+
+				"the promotion gate", j.CandidateVersion)
+			// Fall through to the ARMED gate below with this journal.
+		} else {
+			// Nothing armed -> this is an ordinary boot, not a candidate trial.
+			// A prune deferred by an earlier revert survives the journal clear
+			// that ended that roll in its own sidecar (#16811); this ordinary
+			// boot is where it is collected, exactly once, now that the running
+			// kernel can be proven not to be the deferred candidate.
+			if err := r.settlePruneOwed(); err != nil {
+				return KernelRollOutcome{}, err
+			}
+			r.logf("kernel-upgrade: no armed candidate (state=%s); ordinary boot, nothing to promote", j.State)
+			return KernelRollOutcome{}, nil
 		}
-		r.logf("kernel-upgrade: no armed candidate (state=%s); ordinary boot, nothing to promote", j.State)
-		return KernelRollOutcome{}, nil
 	}
 	if j.State == KernelStatePromoted || j.State == KernelStateReverted {
 		// The trial is terminal but its journal clear has not landed (or
@@ -1070,15 +1171,41 @@ func (r *KernelRunner) cleanupAlreadyOnKnownGood(j *KernelJournal, why error) (K
 	return outcome, nil
 }
 
-// IsArmed reports whether a candidate is currently armed (used by the
+// IsArmed reports whether a VERIFIED candidate trial is recorded (used by the
 // promotion oneshot to decide whether to run the gate at all, and by the HA
-// orchestrator's version-check).
+// orchestrator's version-check). It is deliberately state-only: ARMING is
+// false here even when the current boot is an unconfirmed trial, because
+// pre-boot callers (Arm's re-arm refusal, an offline status read) have no
+// boot evidence to classify with. Boot-time callers that must not miss an
+// unconfirmed trial use TrialInFlight (#16809).
 func (r *KernelRunner) IsArmed() (bool, *KernelJournal, error) {
 	j, err := r.loadKernelJournal()
 	if err != nil {
 		return false, nil, err
 	}
 	return j.State.atLeast(KernelStateArmed) && j.State != KernelStatePromoted && j.State != KernelStateReverted, j, nil
+}
+
+// TrialInFlight reports whether THIS boot is a candidate trial that must be
+// gated and held: either a verified ARMED journal, or an ARMING journal the
+// boot evidence convicts as a genuine (unconfirmed) trial (#16809). It is the
+// single boot-time predicate for the daemon election hold and kernel
+// self-recovery, replacing a bare IsArmed there: an unconfirmed trial runs an
+// UNVERIFIED candidate, so it must be held SECONDARY and must suppress
+// expired-lease failback exactly like ARMED, not rejoin as an ordinary boot.
+//
+// Fail-closed: classification errors are returned, never folded to false —
+// a caller that cannot prove the boot is off the candidate must hold /
+// suppress, not proceed. ARMED short-circuits WITHOUT the boot-evidence
+// reads, preserving the verified path's behavior exactly (including the
+// known-good-fallback discrimination, which the daemon applies on top of
+// this predicate via the running-kernel check).
+func (r *KernelRunner) TrialInFlight() (bool, *KernelJournal, error) {
+	armed, j, err := r.IsArmed()
+	if err != nil || armed {
+		return armed, j, err
+	}
+	return r.UnconfirmedTrial()
 }
 
 // summary is a short human string for status output.
