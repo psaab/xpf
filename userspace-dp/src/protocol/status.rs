@@ -188,6 +188,11 @@ pub(crate) struct ProcessStatus {
     /// whole maximum lifetime. Additive + `default`ed (#1961).
     #[serde(rename = "frag_max_lifetime_evictions_total", default)]
     pub frag_max_lifetime_evictions_total: u64,
+    /// #16593: first-fragment installs refused at the per-zone quota or a
+    /// full shard after expired reclaim (own-session recycles are admitted,
+    /// not refusals). Additive + `default`ed (#1961).
+    #[serde(rename = "frag_quota_refusals_total", default)]
+    pub frag_quota_refusals_total: u64,
     /// #9901 (F-074): forwarded frames whose egress-MTU decision ran with no
     /// known MTU and fail-opened to `Forward`. Additive + `default`ed (#1961).
     #[serde(rename = "egress_mtu_unknown_forward_total", default)]

@@ -573,6 +573,10 @@ type ProcessStatus struct {
 	// one key consulted continuously for the whole maximum lifetime.
 	// Surfaced as xpf_userspace_frag_max_lifetime_evictions_total.
 	FragMaxLifetimeEvictionsTotal uint64 `json:"frag_max_lifetime_evictions_total,omitempty"`
+	// FragQuotaRefusalsTotal is #16593: first-fragment installs refused at
+	// the per-zone quota or a full shard (own-session recycles admitted).
+	// Surfaced as xpf_userspace_frag_quota_refusals_total.
+	FragQuotaRefusalsTotal uint64 `json:"frag_quota_refusals_total,omitempty"`
 	// EgressMTUUnknownForwardTotal is #9901 (F-074): forwarded frames whose
 	// egress-MTU decision ran with no known MTU and fail-opened to Forward.
 	// Surfaced as xpf_userspace_egress_mtu_unknown_forward_total.

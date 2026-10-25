@@ -499,6 +499,7 @@ pub(crate) fn run() -> Result<(), String> {
             ipv6_ah_flowless_total: 0,
             nat64_frag_protocol_alias_misses_total: 0,
             frag_max_lifetime_evictions_total: 0,
+            frag_quota_refusals_total: 0,
             egress_mtu_unknown_forward_total: 0,
             ptb_unbuildable_total: 0,
             embedded_quote_subminimal_refused_total: 0,

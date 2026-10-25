@@ -139,6 +139,16 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 			"exists to stop.",
 		nil, nil,
 	)
+	c.userspaceFragQuotaRefusals = prometheus.NewDesc(
+		"xpf_userspace_frag_quota_refusals_total",
+		"#16593: first-fragment installs refused at the fragment-association "+
+			"per-zone quota or a full shard after expired entries were "+
+			"reclaimed. A session at its own per-session quota recycles its "+
+			"own oldest association instead, so a nonzero here means "+
+			"shard/zone capacity \u2014 not one busy flow \u2014 refused the "+
+			"datagram, whose tails then drop fail-closed.",
+		nil, nil,
+	)
 	c.userspaceEgressMTUUnknownForward = prometheus.NewDesc(
 		"xpf_userspace_egress_mtu_unknown_forward_total",
 		"#9901 (F-074): forwarded frames whose egress-MTU decision ran with "+

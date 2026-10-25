@@ -14,6 +14,19 @@ xpf (0.0.0) unstable; urgency=medium
     alongside the exact A/AAAA delete, so a fully released name
     leaves no RR; deleting a marker that was never published is an
     exact-match no-op and never removes a foreign DHCID.
+  * Fragment association: a session at its own 32-entry per-shard quota
+    now recycles its OWN oldest association instead of refusing new
+    first fragments (#16593). The #11058 refusal capped one NAT'd
+    fragmented flow at ~16 datagrams/s (32 entries / 2 s TTL, refreshed
+    on every tail hit, never released on completion) and starved
+    same-zone sources sharing its shard. Recycling only ever displaces
+    the installing session's own entry, so a spoofing session still
+    cannot spend or evict another session's quota (#11058), and the
+    per-zone (#14321) and full-shard bounds still refuse fail-closed.
+    A completed datagram's association is also released when its MF=0
+    tail consults, and zone/shard refusals are now counted
+    (xpf_userspace_frag_quota_refusals_total); own-quota recycles report
+    as live evictions on the existing nat64_frag_assoc_evicted counter.
 
   * GRE keepalive: a config apply during a peer outage no longer
     re-ups a keepalive-down tunnel (#16582). The dataplane zone

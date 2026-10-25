@@ -205,6 +205,9 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 	c.emitConstMetric(ch, c.userspaceFragMaxLifetimeEvictions,
 		prometheus.CounterValue,
 		float64(status.FragMaxLifetimeEvictionsTotal))
+	c.emitConstMetric(ch, c.userspaceFragQuotaRefusals,
+		prometheus.CounterValue,
+		float64(status.FragQuotaRefusalsTotal))
 	c.emitConstMetric(ch, c.userspaceEgressMTUUnknownForward,
 		prometheus.CounterValue,
 		float64(status.EgressMTUUnknownForwardTotal))

@@ -12,7 +12,7 @@ use super::*;
 // move stays motion-only and no guard changes.
 use crate::fragment_assoc::{
     FRAG_CAP_PER_SESSION_PER_SHARD, FRAG_CAP_PER_SHARD, FRAG_CAP_PER_ZONE_PER_SHARD,
-    FRAG_MAX_LIFETIME_EVICTIONS,
+    FRAG_MAX_LIFETIME_EVICTIONS, FRAG_QUOTA_REFUSALS,
     FRAG_MAX_LIFETIME_NS, FRAG_SHARDS, FRAG_TTL_NS, FragAssoc, FragAuthority, FragKey,
     NAT64_FRAG_CROSS_DOMAIN_MISSES, NAT64_FRAG_PROTOCOL_ALIAS_MISSES, first_fragment_key,
     frag_shard_index, frag_shard_index_seeded, nonfirst_fragment_key,
@@ -6069,9 +6069,12 @@ fn frag_assoc_quota_is_admitting_session_scoped_11058() {
         "the spoofing session's earlier live association remains intact"
     );
 
-    let refused_key = make_key((FRAG_CAP_PER_SESSION_PER_SHARD + 1) as u32);
-    cache.install_with_session(
-        refused_key,
+    // #16593: at its own quota the attacker recycles its OWN oldest
+    // association instead of being refused \u2014 the new key installs, the
+    // session's total stays at quota, and no other session is displaced.
+    let recycled_key = make_key((FRAG_CAP_PER_SESSION_PER_SHARD + 1) as u32);
+    let evicted = cache.install_with_session(
+        recycled_key,
         decision,
         None,
         attacker_session,
@@ -6080,14 +6083,30 @@ fn frag_assoc_quota_is_admitting_session_scoped_11058() {
         1,
         0,
     );
+    assert!(evicted, "#16593: own-quota recycle must report the live eviction");
     assert_eq!(
         cache.len(),
         FRAG_CAP_PER_SESSION_PER_SHARD + 1,
-        "one session cannot exceed its own bounded quota"
+        "one session cannot exceed its own bounded quota (recycle keeps it at quota)"
     );
     assert!(
-        cache.lookup(&refused_key, 1_001, 1, |_| true).is_none(),
-        "the over-quota association is refused"
+        cache.lookup(&recycled_key, 1_001, 1, |_| true).is_some(),
+        "#16593: the over-quota association installs by recycling its own oldest"
+    );
+    // The pre-recycle lookups above hit-refreshed ident 0 to the back
+    // (lookup is LRU), so the least-recently-touched own entry \u2014 ident 1
+    // \u2014 is the recycle victim, and ident 0 survives.
+    assert!(
+        cache.lookup(&make_key(1), 1_001, 1, |_| true).is_none(),
+        "#16593: the session's oldest (least-recently-touched) association is the recycle victim"
+    );
+    assert!(
+        cache.lookup(&make_key(0), 1_001, 1, |_| true).is_some(),
+        "#16593: a recently-hit own association survives the recycle"
+    );
+    assert!(
+        cache.lookup(&victim_key, 1_001, 1, |_| true).is_some(),
+        "#16593: recycling never touches another session's association"
     );
 }
 
@@ -6152,6 +6171,93 @@ fn frag_assoc_zone_quota_cannot_starve_other_zone_14321() {
     cache.install_with_session(victim, decision, None, session_for(30_000), 1000, 1_000, 1, 0);
     assert!(cache.lookup(&victim, 1_001, 1, |_| true).is_some(),
         "zone-3 victim must not be starved by zone-9 fill");
+}
+
+#[test]
+fn frag_assoc_sustained_rate_recycles_own_oldest_16593() {
+    // #16593 acceptance: one session at 200 two-fragment datagrams/s for
+    // 10 s (2000 datagrams) must have 0 tail misses. Pre-fix the 32-entry
+    // per-session quota refused every datagram past the first 32 until
+    // their 2 s TTL expired (~1840 misses); own-oldest recycling admits
+    // each new head by displacing only that session's oldest entry.
+    // Two release variants are driven: with MF=0 release (the production
+    // consult path) and without it (recycle alone must suffice).
+    use std::sync::atomic::Ordering;
+    let src = IpAddr::V6("2001:db8::593".parse().unwrap());
+    let dst = IpAddr::V6("64:ff9b::0808:0808".parse().unwrap());
+    let family = libc::AF_INET6 as u8;
+    let decision = frag_test_decision(Nat64State::forward_decision(
+        Ipv4Addr::new(198, 51, 100, 1),
+        Ipv4Addr::new(8, 8, 8, 8),
+        5000,
+    ));
+    let session = crate::session::SessionKey {
+        addr_family: family,
+        protocol: PROTO_UDP,
+        src_ip: src,
+        dst_ip: dst,
+        src_port: 40000,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let mk = |ident: u32| FragKey {
+        addr_family: family,
+        src,
+        dst,
+        ident,
+        protocol: PROTO_UDP,
+        authority: frag_test_authority(),
+    };
+    for release_on_tail in [true, false] {
+        let cache = FragAssoc::new();
+        let refusals_before = FRAG_QUOTA_REFUSALS.load(Ordering::Relaxed);
+        let mut misses = 0usize;
+        // 200 datagrams/s for 10 s: datagram i at t = i * 5 ms.
+        for i in 0..2000u32 {
+            let now = 1_000_000_000u64 + u64::from(i) * 5_000_000;
+            let key = mk(i);
+            cache.install_with_session(key, decision, None, session.clone(), 77, now, 1, 0);
+            if cache.lookup(&key, now + 1, 1, |_| true).is_none() {
+                misses += 1;
+            } else if release_on_tail {
+                assert!(cache.release(&key), "installed association must release");
+            }
+        }
+        assert_eq!(misses, 0, "#16593: sustained 200/s flow must have 0 tail misses (release={release_on_tail})");
+        assert!(cache.len() <= FRAG_CAP_PER_SESSION_PER_SHARD, "session stays within its quota");
+        assert_eq!(
+            FRAG_QUOTA_REFUSALS.load(Ordering::Relaxed) - refusals_before,
+            0,
+            "#16593: a single busy session must never be quota-refused"
+        );
+    }
+    // A zone-quota refusal (new session, session_len=0) is still counted
+    // and fail-closed: recycling only ever helps the session at its OWN
+    // quota. Covered by frag_assoc_zone_quota_cannot_starve_other_zone_14321
+    // for the admission outcome; here the counter must move.
+    let cache = FragAssoc::new();
+    let idents = frag_idents_in_one_shard(src, dst, family, FRAG_CAP_PER_ZONE_PER_SHARD + 1);
+    let session_for = |port: u16| crate::session::SessionKey {
+        addr_family: family,
+        protocol: PROTO_UDP,
+        src_ip: src,
+        dst_ip: dst,
+        src_port: port,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    for (i, &ident) in idents[..FRAG_CAP_PER_ZONE_PER_SHARD].iter().enumerate() {
+        let key = FragKey { authority: frag_other_authority(), ..mk(ident) };
+        cache.install_with_session(key, decision, None, session_for(10_000 + i as u16), 900 + i as u64, 1_000, 1, 0);
+    }
+    let refusals_before = FRAG_QUOTA_REFUSALS.load(Ordering::Relaxed);
+    let refused = FragKey { authority: frag_other_authority(), ..mk(idents[FRAG_CAP_PER_ZONE_PER_SHARD]) };
+    let evicted = cache.install_with_session(refused, decision, None, session_for(20_000), 999, 1_000, 1, 0);
+    assert!(!evicted, "zone refusal must not report a live eviction");
+    assert!(cache.lookup(&refused, 1_001, 1, |_| true).is_none(), "zone refusal stays fail-closed");
+    assert_eq!(FRAG_QUOTA_REFUSALS.load(Ordering::Relaxed) - refusals_before, 1, "#16593: zone/shard refusals must be counted");
 }
 
 #[test]
