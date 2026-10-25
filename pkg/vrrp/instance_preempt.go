@@ -34,9 +34,50 @@ func (vi *vrrpInstance) restorePreempt() {
 	vi.mu.Unlock()
 }
 
+// discardPendingPreemptNow drops any queued one-shot preempt kick and
+// clears the ForceRGMaster one-shot flag (#16766). A token posted
+// while this instance is MASTER (sync-hold release racing a
+// master-down promotion, or ForceRGMaster raced past its non-MASTER
+// filter) is meaningless for the current tenure: stepMaster never
+// consumes preemptNowCh, so without this drain the stale token would
+// survive the next forced resignation and the first stepBackup would
+// consume it as a fresh "preempt now", re-promoting the just-resigned
+// node (at the stashed priority 0) until a peer advert or the posture
+// reconcile demotes it again. Draining on every MASTER entry — and
+// again at the resign edge in stepMaster — enforces the channel-token
+// lifetime invariant: a one-shot signal is consumed or invalidated at
+// the state edge it was issued for. Called only from the run-loop
+// goroutine (becomeMaster / stepMaster), so the channel drain races
+// only with concurrent posters, never with a second consumer.
+func (vi *vrrpInstance) discardPendingPreemptNow() {
+	vi.mu.Lock()
+	vi.forcePreemptOnce = false
+	vi.mu.Unlock()
+	select {
+	case <-vi.preemptNowCh:
+	default:
+	}
+}
+
 // triggerPreemptNow signals the run loop to attempt immediate preemption.
 // Non-blocking: if a signal is already pending it is silently dropped.
+//
+// #16766: a kick posted while the instance is MASTER is never posted at
+// all. stepMaster does not select on preemptNowCh, so the token would
+// park in the capacity-1 channel until the next BACKUP tenure and then
+// fire as a stale "preempt now" (see discardPendingPreemptNow). The
+// state check and the send are serialized against setState by vi.mu:
+// either the token lands before the BACKUP→MASTER edge and
+// becomeMaster drains it, or the edge lands first and this gate drops
+// it. A ForceRGMaster force flag that raced past ForceRGMaster's
+// non-MASTER filter is likewise cleared by the MASTER-entry drain.
 func (vi *vrrpInstance) triggerPreemptNow() {
+	vi.mu.RLock()
+	if vi.state == StateMaster {
+		vi.mu.RUnlock()
+		return
+	}
+	vi.mu.RUnlock()
 	select {
 	case vi.preemptNowCh <- struct{}{}:
 	default:

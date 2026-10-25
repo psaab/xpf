@@ -125,6 +125,13 @@ func (vi *vrrpInstance) becomeMaster() bool {
 	slog.Info("vrrp: transitioning to MASTER",
 		"key", vi.key(), "priority", pri)
 	vi.setState(StateMaster)
+	// #16766: entering MASTER invalidates any queued one-shot preempt
+	// kick (and ForceRGMaster one-shot). A token posted for a BACKUP —
+	// or raced in while MASTER — must not survive this tenure into the
+	// next BACKUP, where stepBackup would consume it as a fresh
+	// "preempt now" and re-promote a just-resigned node. Drain before
+	// claiming ownership so no later BACKUP iteration can see it.
+	vi.discardPendingPreemptNow()
 	gen := vi.ownerGen.Load()
 
 	vi.vipMu.Lock()
