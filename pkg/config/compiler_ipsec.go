@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -1038,6 +1039,67 @@ func IsUsableIPsecEndpointList(s string) bool {
 // (validateIPsecGatewayReferencesStrict, pkg/config) and the swanctl
 // render belt (pkg/ipsec, which imports pkg/config) share one predicate
 // with no import cycle.
+// IsAnyIPsecSelector reports whether s is an ID_ANY spelling: a selector
+// that discriminates no peer at all (#16845). The empty string, the
+// strongSwan wildcards "%any"/"%any6"/"*", and any unspecified IP
+// (0.0.0.0, ::, 0::0, ::ffff:0.0.0.0, ...) all parse to ID_ANY in
+// strongSwan, so a PSK scoped by one of them — or dialed to one of
+// them — matches any peer. The strict PSK gates and the render belts
+// share this one predicate so a wildcard spelling cannot slip one gate
+// and pass another.
+//
+// Only the IP-literal spellings are family-agnostic: netip.ParseAddr
+// normalizes every unspecified spelling, so IsUnspecified covers them
+// all. Non-IP values (hostnames, @fqdn identities, distinguished names)
+// are not ID_ANY and return false; callers that accept only inet/inet6
+// identities apply it to the parsed IP value (see
+// IsAnyIPsecRemoteIdentity).
+func IsAnyIPsecSelector(s string) bool {
+	s = strings.TrimSpace(s)
+	switch s {
+	case "", "%any", "%any6", "*":
+		return true
+	}
+	if addr, err := netip.ParseAddr(s); err == nil {
+		return addr.Unmap().IsUnspecified()
+	}
+	return false
+}
+
+// IsAnyIPsecRemoteIdentity reports whether a gateway remote-identity
+// (type, value) is an ID_ANY spelling (#16845). Only inet/inet6
+// identities carry an IP value strongSwan parses as ID_ANY; other types
+// (hostname/@fqdn, key-id, distinguished-name, ...) discriminate by
+// their value as before. A bare "*" or "%any" value is ID_ANY under
+// every type (strongSwan parses "*" as a wildcard identity), so it is
+// refused regardless of the declared type.
+func IsAnyIPsecRemoteIdentity(idType, idValue string) bool {
+	v := strings.TrimSpace(idValue)
+	if v == "*" || v == "%any" || v == "%any6" {
+		return true
+	}
+	switch idType {
+	case "inet", "inet6":
+		return IsAnyIPsecSelector(v)
+	}
+	return false
+}
+
+// HasDiscriminatingIPsecAddress reports whether a comma-separated
+// endpoint list carries at least one IP-literal entry that is not an
+// ID_ANY spelling (#16845): the only entries that become PSK peer
+// selectors (#16680/#16708). A list of only unspecified addresses
+// (0.0.0.0, ::) discriminates no peer, exactly like a hostname-only
+// list.
+func HasDiscriminatingIPsecAddress(list string) bool {
+	for _, addr := range SplitIPsecEndpointList(list) {
+		if a, err := netip.ParseAddr(addr); err == nil && !a.Unmap().IsUnspecified() {
+			return true
+		}
+	}
+	return false
+}
+
 func IsUsableIPsecEndpoint(s string) bool {
 	if s == "" {
 		return false

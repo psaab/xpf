@@ -570,7 +570,7 @@ func (m *Manager) renderConfigMembersWithExternalInterfaceFailClosed(
 				"vpn", name)
 			continue
 		}
-		if authMethod == "psk" && responderOnlyGateway(gw) && gw.RemoteIDValue == "" && gw.DynamicHostname == "" {
+		if authMethod == "psk" && responderOnlyGateway(gw) && !hasDiscriminatingRemoteIdentityRender(gw) && gw.DynamicHostname == "" {
 			skipped[name] = true
 			slog.Warn("skipping IPsec VPN: responder-only gateway has "+
 				"no remote-identity or dynamic hostname, so its "+
@@ -597,14 +597,20 @@ func (m *Manager) renderConfigMembersWithExternalInterfaceFailClosed(
 		// this belt skips the VPN on tolerant load / peer sync. A
 		// mixed hostname+IP list keeps rendering: its IP literals
 		// still scope the secret. Pubkey VPNs are unaffected.
+		// #16845: an unspecified-only address (0.0.0.0/::) or an
+		// ID_ANY remote-identity likewise yields no selector here
+		// (pskPeerSelectors drops unspecified entries and ID_ANY
+		// remote-ids), so this belt skips those shapes too.
 		if authMethod == "psk" && !responderOnlyGateway(gw) && len(pskPeerSelectors(remoteAddr, gw)) == 0 {
 			skipped[name] = true
-			slog.Warn("skipping IPsec VPN: hostname-addressed gateway "+
-				"has no remote-identity, so its pre-shared key cannot "+
-				"be scoped to the peer — configure a remote-identity "+
-				"on the gateway or address it by IP literal "+
-				"(rendering the connection would let a holder of "+
-				"another VPN's key authenticate into it)",
+			slog.Warn("skipping IPsec VPN: gateway has no "+
+				"discriminating peer selector (hostname-only or "+
+				"unspecified/wildcard address with no remote-identity), "+
+				"so its pre-shared key cannot be scoped to the peer — "+
+				"configure a remote-identity on the gateway or address "+
+				"it by a peer IP literal (rendering the connection "+
+				"would let a holder of another VPN's key authenticate "+
+				"into it)",
 				"vpn", name, "gateway", vpn.Gateway)
 			continue
 		}
@@ -761,7 +767,7 @@ func (m *Manager) renderConfigMembersWithExternalInterfaceFailClosed(
 				// a single-address endpoint only (#15766), and only
 				// when it is an IP literal (#16680): a hostname dial
 				// target is never the identity the peer presents.
-				if _, err := netip.ParseAddr(addrs[0]); err == nil {
+				if _, err := netip.ParseAddr(addrs[0]); err == nil && !config.IsAnyIPsecSelector(addrs[0]) {
 					fmt.Fprintf(&b, "      id = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(addrs[0])))
 				}
 			}
@@ -884,6 +890,17 @@ func (m *Manager) renderConfigMembersWithExternalInterfaceFailClosed(
 // ResponderOnly flag, or a `dynamic hostname` gateway whose flag was not
 // carried (direct construction / peer sync) — DynamicHostname only ever
 // means the responder identity form (#14590).
+// hasDiscriminatingRemoteIdentityRender reports whether gw carries a
+// remote-identity that discriminates a peer at render (#16845): present
+// and not an ID_ANY spelling (inet 0.0.0.0 / inet6 :: / * / %any). The
+// commit-time twin is hasDiscriminatingRemoteIdentity in pkg/config.
+func hasDiscriminatingRemoteIdentityRender(gw *config.IPsecGateway) bool {
+	if gw == nil || gw.RemoteIDValue == "" {
+		return false
+	}
+	return !config.IsAnyIPsecRemoteIdentity(gw.RemoteIDType, gw.RemoteIDValue)
+}
+
 func responderOnlyGateway(gw *config.IPsecGateway) bool {
 	return gw != nil && (gw.ResponderOnly || gw.DynamicHostname != "")
 }
@@ -1424,7 +1441,7 @@ func pskPeerSelectors(remoteAddr string, gw *config.IPsecGateway) []string {
 	// D5-06). The whole comma-joined string is not an IKE identity —
 	// it matches no peer, silently leaving the secret unscoped for
 	// every address in the list.
-	if gw != nil && gw.RemoteIDValue != "" {
+	if gw != nil && gw.RemoteIDValue != "" && !config.IsAnyIPsecRemoteIdentity(gw.RemoteIDType, gw.RemoteIDValue) {
 		add(formatIdentity(gw.RemoteIDType, gw.RemoteIDValue))
 	} else if gw != nil && gw.DynamicHostname != "" {
 		// #14590: a dynamic-hostname peer is matched by its presented
@@ -1443,6 +1460,12 @@ func pskPeerSelectors(remoteAddr string, gw *config.IPsecGateway) []string {
 		// a box-shared local owner (see pskIDSelectors).
 		for _, addr := range strings.Split(remoteAddr, ",") {
 			addr = strings.TrimSpace(addr)
+			// #16845: an unspecified address (0.0.0.0/::) is ID_ANY,
+			// not a peer selector — emitting it would scope the
+			// secret to any peer.
+			if config.IsAnyIPsecSelector(addr) {
+				continue
+			}
 			if _, err := netip.ParseAddr(addr); err != nil {
 				continue
 			}
@@ -1484,6 +1507,9 @@ func defaultRemoteID(gw *config.IPsecGateway) string {
 	}
 	addrs := config.SplitIPsecEndpointList(gw.Address)
 	if len(addrs) != 1 {
+		return ""
+	}
+	if config.IsAnyIPsecSelector(addrs[0]) {
 		return ""
 	}
 	if _, err := netip.ParseAddr(addrs[0]); err != nil {
