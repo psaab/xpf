@@ -37,12 +37,17 @@ func FRRRoutingProtocolKeyword(token string) (string, bool) {
 		return "connected", true
 	case "static":
 		return "static", true
-	// ospf6 / ripng are the FRR keywords for OSPFv3 / RIPng. Without them a
-	// bare `export ospf6` / `export ripng` falls through to the skip-and-warn
-	// path and IPv6 IGP redistribution cannot be expressed (#2943).
 	case "ospf":
 		return "ospf", true
-	case "ospf6":
+	// Junos spells the version-specific OSPF source protocols ospf2
+	// (OSPFv2 routes only) and ospf3 (OSPFv3 routes only); FRR calls the
+	// latter ospf6 (#16577). Aliasing ospf3 here makes every consumer of
+	// this SSOT — the strict gate, route-map rendering, sequence counting
+	// and redistribute resolution — agree that `from protocol ospf3`
+	// strict-commits as OSPFv3.
+	case "ospf2":
+		return "ospf", true
+	case "ospf3", "ospf6":
 		return "ospf6", true
 	case "bgp":
 		return "bgp", true

@@ -33,6 +33,12 @@ func TestRoutingPolicyProtocolDomainIsGated_7121(t *testing.T) {
 		// Junos spells directly-connected routes "direct"; BOTH renderers
 		// rewrite it to "connected". Rejecting it would break a working config.
 		{"direct", true},
+		// #16577: Junos version-specific OSPF spellings alias through the
+		// SSOT (ospf2 -> ospf, ospf3 -> ospf6) and strict-commit.
+		{"ospf2", true}, {"ospf3", true}, {"OSPF3", true},
+		// Valid Junos source protocols FRR cannot emit: strict-rejected,
+		// tolerant-poisoned (#16577).
+		{"aggregate", false}, {"local", false}, {"access-internal", false},
 		// The issue's own example.
 		{"ospv", false},
 		// NOT the sibling leaf's domain. `firewall filter ... from protocol` is
@@ -108,5 +114,30 @@ func TestDirectMapsToConnected_7121(t *testing.T) {
 	}
 	if got, _ := FRRRoutingProtocolKeyword("connected"); got != "connected" {
 		t.Errorf(`the FRR spelling must resolve to itself, got %q`, got)
+	}
+}
+
+// #16577: the Junos version-specific OSPF spellings resolve through the
+// SSOT to the FRR keywords, so rendering, sequence counting and
+// redistribute resolution all see OSPFv3/OSPFv2.
+func TestJunosOSPFVersionAliases_16577(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"ospf3", "ospf6"}, {"OSPF3", "ospf6"}, {" ospf3 ", "ospf6"},
+		{"ospf2", "ospf"}, {"OSPF2", "ospf"},
+	} {
+		got, ok := FRRRoutingProtocolKeyword(tc.in)
+		if !ok || got != tc.want {
+			t.Errorf("FRRRoutingProtocolKeyword(%q) = %q, %v; want %q, true", tc.in, got, ok, tc.want)
+		}
+		if got := CanonicalSourceProtocol(tc.in); got != tc.want {
+			t.Errorf("CanonicalSourceProtocol(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	// The Junos tokens FRR cannot emit stay outside the domain: the strict
+	// gate rejects them and the tolerant poison keys off the same verdict.
+	for _, tok := range []string{"aggregate", "local", "access-internal"} {
+		if RoutingProtocolResolvable(tok) {
+			t.Errorf("%q must stay unresolvable (strict-reject / tolerant-poison)", tok)
+		}
 	}
 }
