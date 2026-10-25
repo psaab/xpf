@@ -480,6 +480,13 @@ func (s *Server) showTestPolicy(req *pb.ShowTextRequest, cfg *config.Config, buf
 			for _, reason := range res.ContentRejectionReasons {
 				fmt.Fprintf(buf, "    %s\n", reason)
 			}
+		case res.HostOriginated:
+			// #16805: from-zone junos-host is host-ORIGINATED — the traffic
+			// egresses via the kernel TX path and no security policy is
+			// consulted. Reporting it through the UnzonedIngress arm below
+			// would falsely name an unknown-zone unconditional deny.
+			fmt.Fprintf(buf, "Host-originated (from-zone junos-host -> %s): not evaluated by security policy\n", toZone)
+			fmt.Fprintf(buf, "  %s\n", policymatch.HostOriginatedShowLine)
 		case res.UnzonedIngress:
 			// #8318: the runtime denies an unzoned ingress unconditionally
 			// (#6682). Reporting it through the default: arm below would print

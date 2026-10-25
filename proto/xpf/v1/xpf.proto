@@ -1273,6 +1273,15 @@ message MatchPoliciesResponse {
   // unsupported_tuple_family: IPv4 source with IPv6 destination (#5720);
   // NAT46 unimplemented, the runtime matcher fails the tuple closed.
   bool unsupported_tuple_family = 34;
+  // #16805: host_originated is true when the query's FROM zone is the
+  // reserved junos-host self-traffic zone: the query asks about
+  // host-ORIGINATED (locally-generated) traffic, which egresses via the
+  // kernel TX path and is never evaluated by the security-policy RX gate
+  // (#3611 Piece A / #4230), so no transit/global/default policy applies.
+  // Action carries HostOriginatedActionString. Distinct from
+  // unzoned_ingress: junos-host is a reserved KNOWN context, not an
+  // unknown zone, and there is no unconditional deny to report.
+  bool host_originated = 35;
 }
 
 // HostInboundAdmissionStatus classifies how the ingress zone's

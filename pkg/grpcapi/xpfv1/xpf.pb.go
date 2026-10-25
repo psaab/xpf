@@ -8235,8 +8235,17 @@ type MatchPoliciesResponse struct {
 	// unsupported_tuple_family: IPv4 source with IPv6 destination (#5720);
 	// NAT46 unimplemented, the runtime matcher fails the tuple closed.
 	UnsupportedTupleFamily bool `protobuf:"varint,34,opt,name=unsupported_tuple_family,json=unsupportedTupleFamily,proto3" json:"unsupported_tuple_family,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// #16805: host_originated is true when the query's FROM zone is the
+	// reserved junos-host self-traffic zone: the query asks about
+	// host-ORIGINATED (locally-generated) traffic, which egresses via the
+	// kernel TX path and is never evaluated by the security-policy RX gate
+	// (#3611 Piece A / #4230), so no transit/global/default policy applies.
+	// Action carries HostOriginatedActionString. Distinct from
+	// unzoned_ingress: junos-host is a reserved KNOWN context, not an
+	// unknown zone, and there is no unconditional deny to report.
+	HostOriginated bool `protobuf:"varint,35,opt,name=host_originated,json=hostOriginated,proto3" json:"host_originated,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *MatchPoliciesResponse) Reset() {
@@ -8503,6 +8512,13 @@ func (x *MatchPoliciesResponse) GetContentRejected() bool {
 func (x *MatchPoliciesResponse) GetUnsupportedTupleFamily() bool {
 	if x != nil {
 		return x.UnsupportedTupleFamily
+	}
+	return false
+}
+
+func (x *MatchPoliciesResponse) GetHostOriginated() bool {
+	if x != nil {
+		return x.HostOriginated
 	}
 	return false
 }
@@ -10666,7 +10682,7 @@ const file_xpf_proto_rawDesc = "" +
 	"\n" +
 	"_icmp_typeB\f\n" +
 	"\n" +
-	"_icmp_code\"\xd2\v\n" +
+	"_icmp_code\"\xfb\v\n" +
 	"\x15MatchPoliciesResponse\x12\x1f\n" +
 	"\vpolicy_name\x18\x01 \x01(\tR\n" +
 	"policyName\x12\x16\n" +
@@ -10703,7 +10719,8 @@ const file_xpf_proto_rawDesc = "" +
 	"\x13post_nat_input_note\x18\x1f \x01(\tR\x10postNatInputNote\x12'\n" +
 	"\x0funzoned_ingress\x18  \x01(\bR\x0eunzonedIngress\x12)\n" +
 	"\x10content_rejected\x18! \x01(\bR\x0fcontentRejected\x128\n" +
-	"\x18unsupported_tuple_family\x18\" \x01(\bR\x16unsupportedTupleFamilyB\f\n" +
+	"\x18unsupported_tuple_family\x18\" \x01(\bR\x16unsupportedTupleFamily\x12'\n" +
+	"\x0fhost_originated\x18# \x01(\bR\x0ehostOriginatedB\f\n" +
 	"\n" +
 	"_policy_id\"\x9e\x01\n" +
 	"\x14HostInboundAdmission\x12:\n" +

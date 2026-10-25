@@ -865,6 +865,13 @@ type MatchPoliciesResult struct {
 	// dataplane denies this transit flow unconditionally (#6682), not by
 	// default-policy.
 	UnzonedIngress bool `json:"unzoned_ingress,omitempty"`
+	// HostOriginated is true when the query's FROM zone is the reserved
+	// junos-host self-traffic zone (#16805): host-originated traffic egresses
+	// via the kernel TX path and is never evaluated by the security-policy RX
+	// gate (#3611/#4230), so Action is HostOriginatedActionString and no
+	// transit/global/default verdict applies. Distinct from UnzonedIngress:
+	// junos-host is a reserved KNOWN context, not an unknown zone.
+	HostOriginated bool `json:"host_originated,omitempty"`
 	// UnzonedEgress is true when the query's TO zone is not known. A resolved
 	// zone-0 egress is denied before default-policy (#11067); the simulator
 	// cannot distinguish the zero-identity NoRoute exception without FIB input.

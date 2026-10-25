@@ -1198,6 +1198,22 @@ protocol, port, or ICMP type/code never matches an application term constrained
 on that dimension; unconstrained terms may still match. A verdict for a partly
 specified query is not exhaustive — a skipped deny can let a later permit match.
 
+**Host-originated queries (#16805).** A `from-zone junos-host` query asks
+about host-ORIGINATED (locally-generated) traffic — e.g. whether the firewall
+itself may reach its NTP or DNS server. Such traffic egresses via the kernel
+TX path and never traverses the AF_XDP RX policy gate, so no security policy
+(transit, global, or default) is consulted for it; strict commit rejects both
+`from-zone junos-host` policy forms for exactly that reason (#3611 Piece A /
+#4230). Every simulator surface therefore answers `from-zone junos-host ...`
+with the dedicated verdict `not evaluated by security policy (host-originated:
+...)` (typed `host_originated` on REST / gRPC `MatchPolicies`), NOT the
+unknown-ingress-zone unconditional deny — `junos-host` is a reserved, known
+self-traffic context, not an unknown zone, and there is no enforcement effect
+to deny. The from-axis governs: `from-zone junos-host to-zone junos-host` is
+still host-originated. The controls are unchanged: `from-zone nosuch` remains
+the unknown-ingress-zone deny and `to-zone junos-host` remains the host-bound
+host-gate verdict.
+
 **Per-interface host-inbound scoping (#5579).** A security zone can carry
 MULTIPLE per-interface `host-inbound-traffic` effective views (#3362) — e.g. SSH
 exposed on one unit of a zone and default-denied on a sibling. For a `to-zone

@@ -1055,6 +1055,10 @@ func (s *Server) matchPoliciesHandler(w http.ResponseWriter, r *http.Request) {
 			// #8318/#11067: expose direction-specific unknown-zone denies
 			// rather than making clients infer them from Action text.
 			UnzonedIngress: res.UnzonedIngress,
+			// #16805: from-zone junos-host is host-originated (kernel TX
+			// path, never policy-evaluated) — expose the typed flag so a
+			// client does not read the verdict as an unknown-zone deny.
+			HostOriginated: res.HostOriginated,
 			UnzonedEgress:  res.UnzonedEgress,
 			// #3627 M06: echo the queried zone pair for no-match/default and
 			// unzoned verdicts, which do not carry matched-policy scope.
