@@ -4022,6 +4022,26 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   secondary-hold, on commit, on `ResetFailover`, on peer loss, and on RG
   removal, so a later legitimate transfer-out still promotes. The abort
   send is best-effort and never masks the original failover error.
+- **The ISSU drain pin is a state fact, not a derived weight (#16743).**
+  `ForceSecondary` sets `forcedSecondary` alongside `ManualFailover` and
+  `Weight=0`. While set, `recalcWeight`, `debtDerivedWeightLocked`, and
+  `reconcileMonitorDebtsLocked` keep the weight at 0 instead of recomputing
+  it from monitor debt. Before this, any commit or peer config sync with
+  interface monitors fed every monitor through `SetMonitorWeight` ->
+  `recalcWeight` (daemon apply tail), restoring weight 255 on the drained
+  node; its heartbeat then advertised 255 at the higher priority, the peer
+  preempt-yielded, and the drained node's `ManualFailover` arm parked it
+  secondary — zero owners after the CLI had reported the drain complete.
+  The pin is cleared wherever `ManualFailover` is deliberately cleared:
+  `ResetFailover` (hence `ResetAllFailover`), peer loss in
+  `handlePeerTimeout` (including the #15211 fence-abort snapshot/restore),
+  the electRG dual-resign/lease restores, a peer-transfer request consuming
+  the hold (snapshot carries the flag + pinned weight so a failed transfer
+  restores both, #10004/#10245), `FinalizePeerTransferOut`, and
+  `AbortRemoteTransferOut`. Plain `ManualFailover` does NOT set it — that
+  path preserves monitor-derived weight. Pinned by
+  `force_secondary_pin_16743_test.go` (two real managers, real heartbeats,
+  preempt + non-preempt rows).
 - **The applied-ack is the promotion gate, not the heartbeat (#16592,
   R3-B22-01 — #15164 residual).** The #15164 fix above covered only the
   post-ACK abort exits: the request-ACK error exit (`reqID, err := fn(...)`)

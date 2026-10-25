@@ -140,6 +140,7 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 				"rg", rg.GroupID, "req_id", m.remoteTransferOutLeaseReqID[rg.GroupID])
 			m.clearRemoteTransferOutLeaseLocked(rg.GroupID)
 			rg.ManualFailover = false
+			rg.forcedSecondary = false
 			rg.ManualFailoverAt = time.Time{}
 			m.manualFailoverRestoreWeightLocked(rg)
 			clearedManualFailover = true
@@ -178,6 +179,7 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 				"peer_state", peerGroup.State.String(),
 				"peer_weight", peerGroup.Weight)
 			rg.ManualFailover = false
+			rg.forcedSecondary = false
 			rg.ManualFailoverAt = time.Time{}
 			// Recalculate weight (recalcWeight calls runElection which would
 			// recurse back to electRG).
@@ -1074,14 +1076,26 @@ func rgWeightFromDebt(totalLost int) int {
 
 // recalcWeight recalculates the effective weight for a redundancy group
 // and triggers re-election if needed.
+//
+// #16743: while the ISSU drain pin (forcedSecondary) is set, the weight
+// stays 0. Without this, any recalc — e.g. the daemon apply tail feeding
+// every interface monitor through SetMonitorWeight on every commit or peer
+// config sync — recomputes 255 from (empty) monitor debt and silently
+// un-drains the node: its heartbeat then advertises weight 255 at the
+// higher priority, the peer preempt-yields, and this node's ManualFailover
+// arm parks it secondary, leaving no owner.
 func (m *Manager) recalcWeight(rg *RedundancyGroupState) {
-	totalLost := 0
-	for _, iface := range rg.MonitorFails {
-		key := monitorKey{rgID: rg.GroupID, iface: iface}
-		totalLost += m.monitorWeights[key]
-	}
 	oldWeight := rg.Weight
-	rg.Weight = rgWeightFromDebt(totalLost)
+	if rg.forcedSecondary {
+		rg.Weight = 0
+	} else {
+		totalLost := 0
+		for _, iface := range rg.MonitorFails {
+			key := monitorKey{rgID: rg.GroupID, iface: iface}
+			totalLost += m.monitorWeights[key]
+		}
+		rg.Weight = rgWeightFromDebt(totalLost)
+	}
 	if oldWeight != rg.Weight {
 		slog.Info("cluster: weight changed",
 			"rg", rg.GroupID, "old", oldWeight, "new", rg.Weight)
@@ -1196,17 +1210,24 @@ func (m *Manager) reconcileMonitorDebtsLocked(cfg *config.ClusterConfig) {
 
 	// Recompute the effective weight of each affected RG from its now-current
 	// debt set (mirrors recalcWeight's arithmetic without re-electing).
+	// #16743: a forced-secondary RG keeps weight 0 here too — UpdateConfig
+	// runs this on every commit, so recomputing from debt would un-drain it
+	// exactly as recalcWeight would.
 	for rgID := range affected {
 		rg, ok := m.groups[rgID]
 		if !ok {
 			continue
 		}
-		totalLost := 0
-		for _, iface := range rg.MonitorFails {
-			totalLost += m.monitorWeights[monitorKey{rgID: rgID, iface: iface}]
-		}
 		oldWeight := rg.Weight
-		rg.Weight = rgWeightFromDebt(totalLost)
+		if rg.forcedSecondary {
+			rg.Weight = 0
+		} else {
+			totalLost := 0
+			for _, iface := range rg.MonitorFails {
+				totalLost += m.monitorWeights[monitorKey{rgID: rgID, iface: iface}]
+			}
+			rg.Weight = rgWeightFromDebt(totalLost)
+		}
 		if oldWeight != rg.Weight {
 			slog.Info("cluster: monitor debt reconciled on config change",
 				"rg", rgID, "old", oldWeight, "new", rg.Weight)

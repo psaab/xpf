@@ -49,9 +49,26 @@ type RedundancyGroupState struct {
 	Preempt          bool
 	ManualFailover   bool      // true if manually forced
 	ManualFailoverAt time.Time // when ManualFailover was set (for deadlock detection)
-	Weight           int       // current effective weight (255 - sum of down monitor weights)
-	FailoverCount    int
-	MonitorFails     []string // names of currently-failed monitors
+	// forcedSecondary is the ISSU drain pin (#16743): ForceSecondary sets it
+	// alongside ManualFailover, and it pins Weight to 0 as a state fact. While
+	// set, recalcWeight / debtDerivedWeightLocked / reconcile keep Weight=0
+	// instead of recomputing it from monitor debt — otherwise any commit or
+	// peer config sync with interface monitors (which feeds every monitor
+	// through SetMonitorWeight -> recalcWeight) silently un-drains the node,
+	// and under preempt the peer then yields to the still-parked node,
+	// leaving no owner. Cleared wherever ManualFailover is deliberately
+	// cleared: ResetFailover (hence ResetAllFailover), peer loss in
+	// handlePeerTimeout, the electRG dual-resign/lease restores, a peer-
+	// transfer request consuming the hold, FinalizePeerTransferOut, and the
+	// AbortRemoteTransferOut restore. ManualFailover alone (operator
+	// `request chassis cluster failover`) does NOT set it — that path
+	// preserves monitor-derived weight. A stacked ManualFailover after
+	// ForceSecondary inherits the pin (State becomes SecondaryHold, weight
+	// stays 0) until one of the clears above.
+	forcedSecondary bool
+	Weight          int // current effective weight (255 - sum of down monitor weights)
+	FailoverCount   int
+	MonitorFails    []string // names of currently-failed monitors
 	// transferCommitRolePinned preserves the role granted by the last completed
 	// transfer against ordinary election until peer state or operator action
 	// establishes a new ownership decision.

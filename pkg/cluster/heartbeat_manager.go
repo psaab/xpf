@@ -978,22 +978,23 @@ func (m *Manager) handlePeerTimeout() {
 	// (under preempt, an unrequested move back). Only restore on abort;
 	// a takeover that proceeds keeps the clears exactly as before.
 	type peerLossHoldSnapshot15211 struct {
-		rg            *RedundancyGroupState
-		manual        bool
-		at            time.Time
-		state         NodeState
-		weight        int
-		overrideReqID uint64
-		hasOverride   bool
-		previous      peerGroupSnapshot
-		hasPrevious   bool
-		abortedReqID  uint64
-		hasAborted    bool
+		rg              *RedundancyGroupState
+		manual          bool
+		forcedSecondary bool
+		at              time.Time
+		state           NodeState
+		weight          int
+		overrideReqID   uint64
+		hasOverride     bool
+		previous        peerGroupSnapshot
+		hasPrevious     bool
+		abortedReqID    uint64
+		hasAborted      bool
 	}
 	holds15211 := make(map[int]peerLossHoldSnapshot15211)
 	if m.peerFencing == PeerFencingDisableRGConfirmed {
 		for _, rg := range m.groups {
-			snap := peerLossHoldSnapshot15211{rg: rg, manual: rg.ManualFailover, at: rg.ManualFailoverAt, state: rg.State, weight: rg.Weight}
+			snap := peerLossHoldSnapshot15211{rg: rg, manual: rg.ManualFailover, forcedSecondary: rg.forcedSecondary, at: rg.ManualFailoverAt, state: rg.State, weight: rg.Weight}
 			if reqID, ok := m.peerTransferOutOverride[rg.GroupID]; ok {
 				snap.overrideReqID, snap.hasOverride = reqID, true
 			}
@@ -1032,6 +1033,10 @@ func (m *Manager) handlePeerTimeout() {
 		if rg.ManualFailover {
 			slog.Info("cluster: clearing manual failover (peer lost)", "rg", rg.GroupID)
 			rg.ManualFailover = false
+			// #16743: peer loss also ends the ISSU drain pin — the survivor
+			// must be able to take over (cleared BEFORE the weight restore
+			// so debtDerivedWeightLocked recomputes the real weight).
+			rg.forcedSecondary = false
 			rg.ManualFailoverAt = time.Time{}
 			m.manualFailoverRestoreWeightLocked(rg)
 		}
@@ -1105,6 +1110,7 @@ func (m *Manager) handlePeerTimeout() {
 				if snap.rg != nil && m.groups[rgID] == snap.rg && snap.manual {
 					oldState := snap.rg.State
 					snap.rg.ManualFailover = true
+					snap.rg.forcedSecondary = snap.forcedSecondary
 					snap.rg.ManualFailoverAt = snap.at
 					snap.rg.Weight = snap.weight
 					snap.rg.State = snap.state
