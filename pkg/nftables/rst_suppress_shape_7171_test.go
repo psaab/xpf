@@ -65,42 +65,58 @@ func TestRSTDropExprsShape(t *testing.T) {
 				t.Fatalf("expr[4] = %#v, want Ct{STATE} (#14949 conntrack-less scoping)", exprs[4])
 			}
 
-			// meta l4proto tcp
-			if m, ok := exprs[7].(*expr.Meta); !ok || m.Key != expr.MetaKeyL4PROTO {
-				t.Fatalf("expr[7] = %#v, want Meta{L4PROTO}", exprs[7])
+			// socket wildcard == 1 at [7..8] (#16839): only a packet
+			// with no live full socket behind it may be dropped. A
+			// live socket bound to the protected address reads
+			// wildcard 0; the kernel's no-socket RST (control
+			// mini-socket, wildcard-bound) reads 1, and a packet
+			// with no socket at all BREAKs in nft_socket_eval so
+			// the rule does not match. Pinning the exact key and
+			// value matters silently: wildcard==0 would invert the
+			// guard (drop live-socket RSTs, pass spurious ones).
+			if s, ok := exprs[7].(*expr.Socket); !ok || s.Key != expr.SocketKeyWildcard {
+				t.Fatalf("expr[7] = %#v, want Socket{WILDCARD} (#16839 live-socket guard)", exprs[7])
 			}
-			if c, ok := exprs[8].(*expr.Cmp); !ok || !bytes.Equal(c.Data, []byte{unix.IPPROTO_TCP}) {
-				t.Fatalf("expr[8] = %#v, want Cmp{Eq, IPPROTO_TCP}", exprs[8])
+			if c, ok := exprs[8].(*expr.Cmp); !ok || c.Op != expr.CmpOpEq || !bytes.Equal(c.Data, []byte{1}) {
+				t.Fatalf("expr[8] = %#v, want Cmp{Eq, 1} (socket wildcard == 1)", exprs[8])
+			}
+
+			// meta l4proto tcp
+			if m, ok := exprs[9].(*expr.Meta); !ok || m.Key != expr.MetaKeyL4PROTO {
+				t.Fatalf("expr[9] = %#v, want Meta{L4PROTO}", exprs[9])
+			}
+			if c, ok := exprs[10].(*expr.Cmp); !ok || !bytes.Equal(c.Data, []byte{unix.IPPROTO_TCP}) {
+				t.Fatalf("expr[10] = %#v, want Cmp{Eq, IPPROTO_TCP}", exprs[10])
 			}
 
 			// tcp flags & RST != 0. Offset 13 is the TCP flags byte and the
 			// mask is RST (0x04) -- 0x02 would match SYN, 0x01 FIN, and any
 			// of those installs cleanly while suppressing the wrong packet.
-			fp, ok := exprs[9].(*expr.Payload)
+			fp, ok := exprs[11].(*expr.Payload)
 			if !ok || fp.Base != expr.PayloadBaseTransportHeader {
-				t.Fatalf("expr[9] = %#v, want Payload{TransportHeader}", exprs[9])
+				t.Fatalf("expr[11] = %#v, want Payload{TransportHeader}", exprs[11])
 			}
 			if fp.Offset != 13 || fp.Len != 1 {
 				t.Errorf("tcp flags payload = offset %d len %d, want offset 13 len 1", fp.Offset, fp.Len)
 			}
-			b, ok := exprs[10].(*expr.Bitwise)
+			b, ok := exprs[12].(*expr.Bitwise)
 			if !ok || !bytes.Equal(b.Mask, []byte{0x04}) || !bytes.Equal(b.Xor, []byte{0x00}) {
-				t.Fatalf("expr[10] = %#v, want Bitwise{mask 0x04, xor 0x00}", exprs[10])
+				t.Fatalf("expr[12] = %#v, want Bitwise{mask 0x04, xor 0x00}", exprs[12])
 			}
-			if c, ok := exprs[11].(*expr.Cmp); !ok || c.Op != expr.CmpOpNeq || !bytes.Equal(c.Data, []byte{0x00}) {
-				t.Fatalf("expr[11] = %#v, want Cmp{Neq, 0x00}", exprs[11])
+			if c, ok := exprs[13].(*expr.Cmp); !ok || c.Op != expr.CmpOpNeq || !bytes.Equal(c.Data, []byte{0x00}) {
+				t.Fatalf("expr[13] = %#v, want Cmp{Neq, 0x00}", exprs[13])
 			}
 
 			// counter then drop -- a rule that matches but does not drop is
 			// the same silent failure as one that never matches.
-			if _, ok := exprs[12].(*expr.Counter); !ok {
-				t.Fatalf("expr[12] = %#v, want Counter", exprs[12])
+			if _, ok := exprs[14].(*expr.Counter); !ok {
+				t.Fatalf("expr[14] = %#v, want Counter", exprs[14])
 			}
-			if v, ok := exprs[13].(*expr.Verdict); !ok || v.Kind != expr.VerdictDrop {
-				t.Fatalf("expr[13] = %#v, want Verdict{Drop}", exprs[13])
+			if v, ok := exprs[15].(*expr.Verdict); !ok || v.Kind != expr.VerdictDrop {
+				t.Fatalf("expr[15] = %#v, want Verdict{Drop}", exprs[15])
 			}
-			if len(exprs) != 14 {
-				t.Errorf("len(exprs) = %d, want 14", len(exprs))
+			if len(exprs) != 16 {
+				t.Errorf("len(exprs) = %d, want 16", len(exprs))
 			}
 		})
 	}

@@ -11,12 +11,15 @@ the counter READERS the observability surface scrapes.
 - `InstallRSTSuppression()` — atomic delete-then-create within a single
   netlink batch, so there is no window where the old table is gone but
   the new one isn't installed. Each drop rule is scoped to
-  conntrack-less packets (`ct state invalid` at raw priority, #14949
-  as corrected by #15727 — `ct state == 0` is unsatisfiable because
-  nft_ct never writes 0, and at filter priority the OUTPUT conntrack
-  hook has already attached a NEW entry): only the kernel's spurious
-  no-socket RSTs for userspace-owned flows are dropped, while tracked
-  RSTs (`reject with tcp reset`, local socket RSTs) survive.
+  conntrack-less, socket-less packets (`ct state invalid` AND
+  `socket wildcard 1` at raw priority, #14949 as corrected by #15727
+  and #16839 — `ct state == 0` is unsatisfiable because nft_ct never
+  writes 0, at filter priority the OUTPUT conntrack hook has already
+  attached a NEW entry, and at raw priority a live socket's RST also
+  reads INVALID until conntrack runs, so the socket predicate is what
+  spares it): only the kernel's spurious no-socket RSTs for
+  userspace-owned flows are dropped, while tracked RSTs
+  (`reject with tcp reset`, local socket RSTs) survive.
 
 ### Host-inbound / lo0 / fence installer (#6387 PR-2 additive, PR-3 CUTOVER)
 The `Installer` interface (`netlink_installer.go`) is the concrete

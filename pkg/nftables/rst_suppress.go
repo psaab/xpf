@@ -26,13 +26,16 @@ type rstSuppressionPlan struct {
 
 // InstallRSTSuppression creates nftables rules to DROP outgoing TCP RSTs
 // from interface-NAT (SNAT) addresses, but ONLY for packets the kernel
-// reports as ct state invalid at OUTPUT -- its no-conntrack-entry
-// signature (see rstDropExprs, #14949 as corrected by #15727). These
-// addresses are owned by the userspace dataplane; the kernel has no
-// sockets for them and should never emit RSTs for the flows the
-// dataplane owns. Conntrack-tracked RSTs from the same addresses --
-// nft reject-with-tcp-reset (policy reject / ident-reset) and local
-// control-plane socket RSTs -- are legitimate and must survive.
+// reports as ct state invalid at OUTPUT with no live full socket behind
+// them -- its no-conntrack-entry, no-socket signature (see rstDropExprs,
+// #14949 as corrected by #15727 and #16839). These addresses are owned
+// by the userspace dataplane; the kernel has no sockets for them and
+// should never emit RSTs for the flows the dataplane owns.
+// Conntrack-tracked RSTs from the same addresses -- nft
+// reject-with-tcp-reset (policy reject / ident-reset) and local
+// control-plane socket RSTs -- are legitimate and must survive, as are
+// RSTs from live local sockets on those addresses even though no
+// conntrack entry exists yet when the raw-priority chain runs (#16839).
 //
 // When the table already exists, delete + create is performed in a single
 // atomic netlink batch to eliminate the race window where no rules exist
@@ -120,12 +123,17 @@ func queueRSTSuppression(c *nftables.Conn, plan rstSuppressionPlan) bool {
 	// Verified live: the same rule counts the RST at priority raw and
 	// counts nothing at priority filter. At raw the RST still carries
 	// no entry, so nft_ct reports INVALID -- the signature rstDropExprs
-	// matches. Legitimate tracked RSTs keep their tracked bit at raw
-	// too: a local socket's RST carries its socket conntrack entry
-	// (attached before OUTPUT), and a reject-synthesized RST is
-	// emitted from the ingress hook itself, never reaches OUTPUT as
-	// a fresh socket-less packet, and in any case is not emitted
-	// from an interface-NAT source address owned by the dataplane.
+	// matches. That signature alone is NOT sufficient (#16839): a
+	// local socket's RST also carries no nfct at raw (conntrack has
+	// not run yet on OUTPUT), so it too reads INVALID even though its
+	// connection is tracked once conntrack runs. rstDropExprs
+	// therefore additionally requires that no live full socket owns
+	// the packet (socket wildcard == 1 via the kernel's timewait/
+	// request-socket control socket), which only the spurious
+	// no-socket RST satisfies. A reject-synthesized RST is emitted
+	// from the ingress hook itself, never reaches OUTPUT as a fresh
+	// socket-less packet, and in any case is not emitted from an
+	// interface-NAT source address owned by the dataplane.
 	chain := c.AddChain(&nftables.Chain{
 		Name:     "output",
 		Table:    table,
@@ -144,7 +152,7 @@ func queueRSTSuppression(c *nftables.Conn, plan rstSuppressionPlan) bool {
 	return true
 }
 
-// addRSTDropRule adds: meta nfproto <family> ip/ip6 saddr <addr> ct state invalid tcp flags & rst != 0 counter drop
+// addRSTDropRule adds: meta nfproto <family> ip/ip6 saddr <addr> ct state invalid socket wildcard 1 tcp flags & rst != 0 counter drop
 func addRSTDropRule(c *nftables.Conn, table *nftables.Table, chain *nftables.Chain, addr netip.Addr) {
 	c.AddRule(&nftables.Rule{
 		Table: table,
@@ -210,30 +218,30 @@ func rstDropExprs(addr netip.Addr) []expr.Any {
 			Register: 1,
 			Data:     addrBytes,
 		},
-		// ct state invalid -- no conntrack entry at OUTPUT (#14949
-		// scoping, corrected by #15727). Linux nft_ct_get_eval
-		// (net/netfilter/nft_ct.c, NFT_CT_STATE) never writes 0: it
-		// writes NF_CT_STATE_BIT(ctinfo) for a tracked packet,
-		// NF_CT_STATE_UNTRACKED_BIT (0x40) when ctinfo is
-		// IP_CT_UNTRACKED, and NF_CT_STATE_INVALID_BIT (0x01)
-		// otherwise. The pre-#15727 predicate `state & 0x4f == 0`
-		// was therefore unsatisfiable and the rule never fired.
+		// ct state invalid -- no conntrack entry yet at OUTPUT
+		// (#14949 scoping, corrected by #15727). Linux
+		// nft_ct_get_eval (net/netfilter/nft_ct.c, NFT_CT_STATE)
+		// never writes 0: it writes NF_CT_STATE_BIT(ctinfo) for a
+		// tracked packet, NF_CT_STATE_UNTRACKED_BIT (0x40) when
+		// ctinfo is IP_CT_UNTRACKED, and NF_CT_STATE_INVALID_BIT
+		// (0x01) otherwise. The pre-#15727 predicate
+		// `state & 0x4f == 0` was therefore unsatisfiable and the
+		// rule never fired.
 		//
-		// INVALID is the only conntrack-less signature a locally
-		// generated RST presents at OUTPUT: tcp_v4_send_reset emits
-		// it via a fresh control socket with no nfct attached (any
-		// ingress-created entry is detached by nf_reset_ct), and
-		// the OUTPUT conntrack hook creates no entry for it -- with
-		// nf_conntrack_tcp_loose=0 tcp_new rejects a non-SYN, and a
-		// lone RST in TCP_CONNTRACK_NONE maps to TCP_CONNTRACK_MAX
-		// so the hook drops the entry and reports invalid. Every
-		// legitimate RST from these addresses carries a confirmed
-		// entry and reports its tracked ctinfo bit instead: an nft
-		// reject-with-tcp-reset creates the entry before its
-		// synthesized RST traverses OUTPUT, and a local socket RST
-		// belongs to a tracked connection. Matching INVALID alone
-		// therefore drops the spurious RSTs and lets both legitimate
-		// classes through.
+		// INVALID alone does not prove the packet is socket-less
+		// (#16839): this chain runs at raw priority (-300), BEFORE
+		// the OUTPUT conntrack hook (-200), so a live local
+		// socket's abortive RST (tcp_send_active_reset ->
+		// ip_local_out, skb->sk set, no nfct attached yet) also
+		// reads INVALID here and only becomes ESTABLISHED after
+		// conntrack. The premise in the pre-#16839 comment -- "a
+		// local socket's RST carries its socket conntrack entry
+		// (attached before OUTPUT)" -- is false at raw priority;
+		// it was measured live (witness counters, kernel 7.2.8):
+		// a server-abort RST sourced from the protected address
+		// counted as ct-invalid at raw and ct-established at
+		// filter. The socket-wildcard predicate below is what
+		// separates the two classes.
 		//
 		// UNTRACKED is deliberately not matched: it requires a
 		// NOTRACK decision (ingress raw table) that the kernel's own
@@ -258,6 +266,42 @@ func rstDropExprs(addr netip.Addr) []expr.Any {
 			Op:       expr.CmpOpEq,
 			Register: 1,
 			Data:     binaryutil.NativeEndian.PutUint32(expr.CtStateBitINVALID),
+		},
+		// socket wildcard == 1 -- no live full socket owns this
+		// packet (#16839). nft_socket_eval (net/netfilter/
+		// nft_socket.c, NFT_SOCKET_WILDCARD) BREAKs (rule does not
+		// match) when there is no socket at all or the socket is
+		// not a full socket, and otherwise stores whether the
+		// socket is bound to a wildcard address
+		// (inet_rcv_saddr == 0 / ipv6_addr_any(rcv_saddr)). A live
+		// local socket's RST reaches OUTPUT with skb->sk set to
+		// that full socket, bound to the specific interface-NAT
+		// address, so wildcard == 0 and the rule does not drop it
+		// -- regardless of whether conntrack has attached an
+		// entry yet. The spurious RST this table exists to
+		// suppress is emitted by tcp_v4_send_reset /
+		// tcp_v6_send_response via tcp_rst_sock, a per-cpu control
+		// socket (a request/timewait-class mini-socket, not a
+		// full socket) bound to the wildcard address, so
+		// wildcard == 1. Measured live (kernel 7.2.8, witness
+		// counters at raw OUTPUT): spurious RSTs counted
+		// wildcard==1 3/3 and wildcard==0 0/3; a live server
+		// socket's abortive RST sourced from the protected
+		// address counted wildcard==0 1/1 and wildcard==1 0/1.
+		//
+		// Deliberate scope: a live socket bound to the wildcard
+		// address (0.0.0.0 / ::) whose source is rewritten to the
+		// protected address only by a later NAT hook would read
+		// wildcard == 1 here; at raw priority no such rewrite has
+		// happened, its on-wire source is not the protected
+		// address yet, and the saddr predicate above has already
+		// excluded it. Sockets bound to the protected address
+		// itself -- the #16839 cell -- read wildcard == 0.
+		&expr.Socket{Key: expr.SocketKeyWildcard, Register: 1},
+		&expr.Cmp{
+			Op:       expr.CmpOpEq,
+			Register: 1,
+			Data:     []byte{1},
 		},
 		// meta l4proto tcp
 		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
