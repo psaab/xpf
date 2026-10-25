@@ -561,6 +561,193 @@ func natMatchEmptyAppSetError(natKind, ruleSet, ruleName, name string) error {
 // The caller downgrades the error to a warning on the tolerant load / peer-sync
 // path (#1960 no-brick): a config persisted before this gate existed still
 // boots, and the dataplane drops the inert rule on its own.
+
+// validateNATMappedCompatStrict (#16875, R3-B09-03) hard-rejects a
+// static-NAT, destination-NAT or source-NAT literal that is IPv4-mapped
+// (::ffff:a.b.c.d) or IPv4-compatible (::a.b.c.d, excluding :: and ::1).
+//
+// Such a literal commits clean today but can never match. The helper
+// drops every native (non-WG-underlay) IPv6 frame whose src OR dst is
+// v4-mapped/compatible at ingress before NAT (#10686/#11669,
+// ipv6_addr_is_v4_mapped_or_compat /
+// ipv6_frame_has_v4_mapped_or_compat in
+// userspace-dp/src/afxdp/frame/inspect.rs, dropped in
+// poll_descriptor with v4_mapped_ipv6_dropped += 1), so no IPv6 packet
+// carrying the identity ever reaches the NAT tables. An IPv4 packet to
+// the embedded v4 address keys IpAddr::V4 and misses the V6-keyed
+// static/DNAT entry (parse_nat_prefix in nat/static_nat.rs keeps
+// IpAddr::V6(::ffff:...)); a SNAT pool member keyed V6 is likewise
+// allocated only from the dropped v6 identity. Proxy-ARP already
+// unmaps this spelling (#8631); NAT does not, so the product handled
+// the identical literal inconsistently. This gate rejects rather
+// than unmaps: rewriting a NAT match/target to IPv4 would change the
+// rule's family and its #13922 cross-family verdict — a silent
+// semantic rewrite at commit — whereas rejection names the spelling
+// and lets the operator author the intended family explicitly.
+//
+// The predicate is natAddrIsV4MappedOrCompat, mirroring the Rust
+// ingress predicate octet-for-octet (excluding ::/::1). Sites, in
+// deterministic order (static rule-sets in slice order, DNAT
+// rule-sets sorted by name, DNAT pools sorted by name, SNAT pools in
+// referenced order then sorted for the unreferenced sweep):
+//
+//   - static-NAT: every authored match destination-address
+//     (MatchAddresses, falling back to the scalar Match), the
+//     selected Match, and the `then static-nat prefix` target.
+//     NPTv6 rules and `then static-nat inet` are skipped — their
+//     prefixes are genuine IPv6 translations / the NAT64 keyword,
+//     owned by their own gates, and never key the static_nat table
+//     under a mapped identity in this sense.
+//   - destination-NAT: every literal match destination-address and
+//     every destination pool address.
+//   - source-NAT: every pool member (SourceNATPoolMembers) of every
+//     pool — referenced or not, because a mapped member is the
+//     defect regardless of which rule references it today; an
+//     unreferenced pool carrying one is inert-but-wrong config the
+//     next rule reference would silently activate.
+//
+// Address-book names and unparseable tokens report false from the
+// predicate and are left to their existing gates. A prefix whose
+// masked base is mapped/compat (e.g. ::ffff:203.0.113.0/120) is
+// rejected on its authored address part, matching the ingress drop
+// of every host in it.
+//
+// Strict on commit / commit-check (hard reject naming the NAT kind,
+// rule-set/rule or pool, slot, and offending value); the registry
+// call site downgrades to a warning on the tolerant load / peer-sync
+// path (#1960 no-brick) — the dataplane already fails such rules
+// closed (the entry never matches), so a leniently-loaded config
+// boots and forwards untranslated exactly as before.
+func validateNATMappedCompatStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	const cause = "is an IPv4-mapped or IPv4-compatible IPv6 literal " +
+		"(::ffff:a.b.c.d or ::a.b.c.d); the dataplane drops every IPv6 " +
+		"frame carrying such an identity at ingress before NAT " +
+		"(#10686), and an IPv4 packet keys IPv4 and misses the " +
+		"IPv6-keyed entry, so the rule can never match — author the " +
+		"address in native IPv4 or native IPv6 form instead"
+	// Static NAT.
+	for _, rs := range cfg.Security.NAT.Static {
+		if rs == nil {
+			continue
+		}
+		for _, rule := range rs.Rules {
+			if rule == nil || rule.IsNPTv6 || rule.Then == "inet" {
+				continue
+			}
+			matchAddrs := rule.MatchAddresses
+			if len(matchAddrs) == 0 && rule.Match != "" {
+				matchAddrs = []string{rule.Match}
+			}
+			for _, addr := range matchAddrs {
+				if addr == "" {
+					continue
+				}
+				if natAddrIsV4MappedOrCompat(addr) {
+					return fmt.Errorf(
+						"static-nat rule-set %q rule %q: match destination-address %q %s (#16875)",
+						rs.Name, rule.Name, addr, cause)
+				}
+			}
+			if rule.Then != "" && natAddrIsV4MappedOrCompat(rule.Then) {
+				return fmt.Errorf(
+					"static-nat rule-set %q rule %q: then static-nat prefix %q %s (#16875)",
+					rs.Name, rule.Name, rule.Then, cause)
+			}
+		}
+	}
+	// Destination NAT: match literals.
+	if cfg.Security.NAT.Destination != nil {
+		rulesets := append([]*NATRuleSet(nil), cfg.Security.NAT.Destination.RuleSets...)
+		sort.SliceStable(rulesets, func(i, j int) bool {
+			if rulesets[i] == nil || rulesets[j] == nil {
+				return rulesets[i] != nil
+			}
+			return rulesets[i].Name < rulesets[j].Name
+		})
+		for _, rs := range rulesets {
+			if rs == nil {
+				continue
+			}
+			for _, rule := range rs.Rules {
+				if rule == nil {
+					continue
+				}
+				for _, raw := range rule.Match.DestinationAddressList() {
+					if natAddrIsV4MappedOrCompat(raw) {
+						return fmt.Errorf(
+							"destination-nat rule-set %q rule %q: match destination-address %q %s (#16875)",
+							rs.Name, rule.Name, raw, cause)
+					}
+				}
+			}
+		}
+		// Destination NAT: pool (target) addresses, sorted for a
+		// deterministic first offender.
+		names := make([]string, 0, len(cfg.Security.NAT.Destination.Pools))
+		for name := range cfg.Security.NAT.Destination.Pools {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			pool := cfg.Security.NAT.Destination.Pools[name]
+			if pool == nil || pool.Address == "" {
+				continue
+			}
+			if natAddrIsV4MappedOrCompat(pool.Address) {
+				return fmt.Errorf(
+					"destination-nat pool %q: address %q %s (#16875)",
+					name, pool.Address, cause)
+			}
+		}
+	}
+	// Source NAT: pool members (the R3-A08-02 cohort site). All pools,
+	// sorted by name — a mapped member never serves a flow whether or
+	// not a rule references the pool today.
+	{
+		names := make([]string, 0, len(cfg.Security.NAT.SourcePools))
+		for name := range cfg.Security.NAT.SourcePools {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			pool := cfg.Security.NAT.SourcePools[name]
+			if pool == nil {
+				continue
+			}
+			for _, a := range SourceNATPoolMembers(pool) {
+				if natAddrIsV4MappedOrCompat(a) {
+					return fmt.Errorf(
+						"source-nat pool %q: address %q %s (#16875)",
+						name, a, cause)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// natMappedCompatDNATMatch returns the #16875 mapped/compat verdict
+// for one DNAT rule's destination-address list, or nil. It is called
+// at the TOP of validateDestinationNATAddressesStrict so a mapped
+// literal reports the never-matching cause rather than the
+// downstream family-mismatch verdict it also trips (the mapped form
+// keys V6, the authored pool is often V4) — the family error would
+// send the operator to fix the pool, not the spelling that can
+// never match any packet.
+func natMappedCompatDNATMatch(rsName, ruleName string, destAddrs []string) error {
+	for _, raw := range destAddrs {
+		if natAddrIsV4MappedOrCompat(raw) {
+			return fmt.Errorf(
+				"destination-nat rule-set %q rule %q: match destination-address %q is an IPv4-mapped or IPv4-compatible IPv6 literal (::ffff:a.b.c.d or ::a.b.c.d); the dataplane drops every IPv6 frame carrying such an identity at ingress before NAT (#10686), and an IPv4 packet keys IPv4 and misses the IPv6-keyed entry, so the rule can never match — author the address in native IPv4 or native IPv6 form instead (#16875)",
+				rsName, ruleName, raw)
+		}
+	}
+	return nil
+}
+
 func validateDestinationNATAddressesStrict(cfg *Config) error {
 	if cfg == nil || cfg.Security.NAT.Destination == nil {
 		return nil
@@ -586,6 +773,12 @@ func validateDestinationNATAddressesStrict(cfg *Config) error {
 			if len(destAddrs) == 0 {
 				// No destination match at all — out of scope.
 				continue
+			}
+			// #16875: a mapped/compat destination can never match
+			// (ingress drop precedes NAT); report that cause before
+			// the parse/family verdicts below.
+			if err := natMappedCompatDNATMatch(rs.Name, rule.Name, destAddrs); err != nil {
+				return err
 			}
 			// #3228: reject the rule if ANY listed destination-address is
 			// unparseable, not just when they ALL are. The snapshot builder

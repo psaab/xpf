@@ -599,6 +599,33 @@ var natGates = []natGate{
 			return nil
 		},
 	},
+	{
+		name:    "natMappedCompat",
+		lenient: func(opts compileOpts) bool { return opts.lenientDestNATAddresses },
+		run: func(cfg *Config, lenient bool) error {
+			// #16875 (R3-B09-03) v4-mapped/compatible NAT literal gate.
+			// A static/DNAT/SNAT literal in ::ffff:a.b.c.d or ::a.b.c.d
+			// form keyed V6 but the helper drops every such IPv6 frame
+			// at ingress before NAT (#10686), and an IPv4 packet keys
+			// V4 and misses — the rule can never match. Strict on
+			// commit / commit-check (hard-reject); lenient on load /
+			// peer-sync (downgrade to a warning so a config persisted
+			// before this gate existed still boots — #1960 no-brick;
+			// the dataplane already fails such rules closed). Shares
+			// the lenientDestNATAddresses flag (same NAT silent-drop
+			// doctrine). Runs last so every older gate's first-error
+			// slot is unchanged for configs tripping both.
+			if err := validateNATMappedCompatStrict(cfg); err != nil {
+				if lenient {
+					warnNATDiagnostic16145(cfg, "natMappedCompat",
+						fmt.Sprintf("nat mapped/compat address (downgraded to warning on tolerant path): %v", err))
+				} else {
+					return err
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // warnNATDiagnostic16145 appends one tolerant-path NAT warning: the

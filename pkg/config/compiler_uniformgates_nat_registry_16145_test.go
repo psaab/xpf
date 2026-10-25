@@ -14,7 +14,7 @@ import (
 //     order; reordering, inserting, or dropping an entry fails here, so
 //     the strict first-error slot (invariant #6) and the tolerant
 //     warning-accumulation order (invariant #7) cannot drift silently.
-//   - per-gate fail-on-revert: every one of the 19 registry entries is
+//   - per-gate fail-on-revert: every one of the 20 registry entries is
 //     driven directly with a config that trips it, in strict and
 //     tolerant modes; gutting an entry's validator call turns that
 //     gate's subtest RED — the fourth-link wiring proof PR-0
@@ -42,7 +42,8 @@ import (
 // pool unknown-leaf gates, deterministic, source pool port-range,
 // pool address-range, pool references, rule persistent-NAT, pool
 // address scope, pool address grammar, pool family (#16600), aggregate
-// cardinality, and the DNAT off-shadow gate.
+// cardinality, the DNAT off-shadow gate, and the mapped/compat gate
+// (#16875, appended last so older first-error slots are unchanged).
 // appendDNATOffShadowPotentialWarnings is not a gate (warning-only, no
 // strict error) and stays outside the census.
 var natGateOrderCensus16145 = []string{
@@ -65,6 +66,7 @@ var natGateOrderCensus16145 = []string{
 	"sourceNATPoolFamily",
 	"sourceNATAggregateCardinality",
 	"dnatOffShadow",
+	"natMappedCompat",
 }
 
 // TestNATGateRegistryOrderCensus16145 pins the registry slice to the
@@ -389,6 +391,20 @@ func TestNATGateRegistryFailOnRevert16145(t *testing.T) {
 			},
 			strictSubstr: "shadowed",
 			warnPrefix:   "destination-nat off shadowed (downgraded to warning on tolerant path): ",
+		},
+		{
+			name: "natMappedCompat",
+			build: func(t *testing.T) *Config {
+				return mustCompileShape16145(t, []string{
+					"set security zones security-zone untrust",
+					"set security nat destination pool dp address ::ffff:10.0.0.5",
+					"set security nat destination rule-set rs1 from zone untrust",
+					"set security nat destination rule-set rs1 rule r1 match destination-address ::ffff:203.0.113.5/128",
+					"set security nat destination rule-set rs1 rule r1 then destination-nat pool dp",
+				})
+			},
+			strictSubstr: "IPv4-mapped or IPv4-compatible",
+			warnPrefix:   "nat mapped/compat address (downgraded to warning on tolerant path): ",
 		},
 	}
 

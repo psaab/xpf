@@ -23,7 +23,6 @@ func TestDNATCrossFamilyPoolRejected13922(t *testing.T) {
 	for _, tc := range []struct{ name, dst, pool string }{
 		{"v4 destination v6 pool", "203.0.113.10/32", "2001:db8::10/128"},
 		{"v6 destination v4 pool", "2001:db8::10/128", "10.0.0.10/32"},
-		{"IPv4-mapped IPv6 destination is v6", "::ffff:203.0.113.10/128", "10.0.0.10/32"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := CompileConfig(buildTree(t, dnatFamilySet13922(tc.dst, tc.pool)))
@@ -32,6 +31,16 @@ func TestDNATCrossFamilyPoolRejected13922(t *testing.T) {
 			}
 		})
 	}
+	// #16875 supersedes the mapped spelling of the cross-family row:
+	// a ::ffff: destination is rejected as a never-matching mapped
+	// literal (it keys V6 but the ingress drop precedes NAT), not
+	// merely as a family mismatch against the v4 pool.
+	t.Run("IPv4-mapped IPv6 destination is mapped", func(t *testing.T) {
+		_, err := CompileConfig(buildTree(t, dnatFamilySet13922("::ffff:203.0.113.10/128", "10.0.0.10/32")))
+		if err == nil || !strings.Contains(err.Error(), "IPv4-mapped or IPv4-compatible") {
+			t.Fatalf("mapped DNAT destination must be rejected as mapped/compat (#16875), got: %v", err)
+		}
+	})
 }
 
 func TestDNATCrossFamilyPoolLenientWarns13922(t *testing.T) {
@@ -71,7 +80,6 @@ func TestStaticNATCrossFamilyPairRejected13922(t *testing.T) {
 	for _, tc := range []struct{ name, match, prefix string }{
 		{"v4 external v6 internal", "203.0.113.5/32", "2001:db8::5/128"},
 		{"v6 external v4 internal", "2001:db8::5/128", "10.0.0.5/32"},
-		{"IPv4-mapped IPv6 external is v6", "::ffff:203.0.113.5/128", "10.0.0.5/32"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := CompileConfig(buildTree(t, staticNATFamilySet13922(tc.match, tc.prefix)))
@@ -83,6 +91,15 @@ func TestStaticNATCrossFamilyPairRejected13922(t *testing.T) {
 			}
 		})
 	}
+	// #16875 supersedes the mapped spelling: a ::ffff: external is
+	// rejected as a never-matching mapped literal, not merely as a
+	// family mismatch against the v4 target.
+	t.Run("IPv4-mapped IPv6 external is mapped", func(t *testing.T) {
+		_, err := CompileConfig(buildTree(t, staticNATFamilySet13922("::ffff:203.0.113.5/128", "10.0.0.5/32")))
+		if err == nil || !strings.Contains(err.Error(), "IPv4-mapped or IPv4-compatible") {
+			t.Fatalf("mapped static external must be rejected as mapped/compat (#16875), got: %v", err)
+		}
+	})
 }
 
 func TestStaticNATCrossFamilyPairLenientWarns13922(t *testing.T) {

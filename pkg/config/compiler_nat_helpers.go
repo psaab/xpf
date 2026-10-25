@@ -61,6 +61,37 @@ func NATAddrFamily(ipPart string) string { return natAddrFamily(ipPart) }
 // CIDR mask before the textual family classification. See natCIDRIPPart.
 func NATCIDRIPPart(cidr string) string { return natCIDRIPPart(cidr) }
 
+// natAddrIsV4MappedOrCompat reports whether raw (a bare IP literal or a
+// CIDR; the mask, if any, is ignored) names an IPv6 address that is
+// IPv4-mapped (::ffff:a.b.c.d) or IPv4-compatible (::a.b.c.d). It
+// mirrors ipv6_addr_is_v4_mapped_or_compat in
+// userspace-dp/src/afxdp/frame/inspect.rs EXACTLY (#10686/#16875):
+// the first 96 bits are all zero (compat) or 80 zero bits + 0xffff
+// (mapped), and :: (unspecified) and ::1 (loopback) are EXCLUDED —
+// both fall inside ::/96 numerically but are legitimate local IPv6
+// identities with their own handling, never a v4 identity smuggled
+// past family-typed policy. Parsing goes through netip.ParseAddr,
+// never net.IP.To4 (which folds the mapped form); a zone-bearing or
+// unparseable token is not this predicate's concern and reports
+// false. Octet compares only, no allocation beyond the parse.
+func natAddrIsV4MappedOrCompat(raw string) bool {
+	addr, err := netip.ParseAddr(natCIDRIPPart(raw))
+	if err != nil || !addr.Is6() || addr.Zone() != "" {
+		return false
+	}
+	if addr.IsUnspecified() || addr.IsLoopback() {
+		return false
+	}
+	o := addr.As16()
+	for i := range 10 {
+		if o[i] != 0 {
+			return false
+		}
+	}
+	// compat: o[10]==o[11]==0; mapped: o[10]==o[11]==0xff.
+	return o[10] == o[11] && (o[10] == 0 || o[10] == 0xff)
+}
+
 // isHostMaskAddress reports whether addr is a host route the static-NAT
 // dataplane can install: a bare IP (no mask) or the canonical host mask
 // (/32 for IPv4, /128 for IPv6). It mirrors EXACTLY the Rust host-mask gate
