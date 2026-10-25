@@ -121,6 +121,13 @@ pub(crate) struct WorkerScratch {
         NatDecision,
         Option<(SessionKey, u64)>,
     )>,
+    /// #16504: reusable copy of the batch's RST trigger exceptions,
+    /// filled from `scratch_rst_teardowns` before its drain so every
+    /// teardown in the batch sees the full trigger set without a
+    /// per-batch `collect` allocation. Returned to the binding after
+    /// the drain and cleared at the next batch start, beside the other
+    /// scratch clears, retaining its capacity.
+    pub(crate) scratch_rst_trigger_keeps: Vec<(SessionKey, u64)>,
     /// #7212: forward + reverse keys of every session this poll pass REVOKED
     /// because a static interface INPUT filter now denies it.
     ///
@@ -177,6 +184,7 @@ impl WorkerScratch {
             scratch_post_recycles: Vec::with_capacity(RX_BATCH_SIZE as usize),
             scratch_cross_binding_tx: Vec::with_capacity(RX_BATCH_SIZE as usize),
             scratch_rst_teardowns: Vec::with_capacity(16),
+            scratch_rst_trigger_keeps: Vec::with_capacity(16),
             // #7212: pre-sized for the worst case ONE RX batch can produce, so
             // a push inside the packet loop never reallocates. The old
             // hand-written 16 was under the bound by 12x.
