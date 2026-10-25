@@ -108,6 +108,25 @@ type AppliedNATView struct {
 // reconciled. m.appliedSnapshot therefore stays at the previous reconciled
 // generation, so coherency correctly evaluates false (HOLD) during the defer
 // window.
+
+// helperHoldsLastSnapshotLocked reports whether the helper provably holds
+// m.lastSnapshot: this Manager published that generation, no full-snapshot
+// publish is still pending, the helper's last status echoes the generation,
+// and no apply/partial outcome is unknown. This is the status-loop catch-up
+// predicate (process_status.go) plus the pending latch, reused by the
+// post-link-cycle rebind (#16521) so it only marks applied snapshots the
+// helper actually accepted. Caller MUST hold m.mu.
+func (m *Manager) helperHoldsLastSnapshotLocked() bool {
+	if m.lastSnapshot == nil {
+		return false
+	}
+	gen := m.lastSnapshot.Generation
+	return m.publishedSnapshot == gen && gen != 0 &&
+		!m.pendingFullSnapshotMetadata &&
+		m.lastStatus.LastSnapshotGeneration >= gen &&
+		!m.applySnapshotOutcomeUnknown && m.partialOutcomeUnknown == 0
+}
+
 func (m *Manager) markAppliedSnapshotLocked() {
 	if m.lastSnapshot == nil {
 		return
