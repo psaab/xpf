@@ -561,7 +561,7 @@ func anyHARGActiveMap(active map[int]bool, groups map[int]struct{}) bool {
 // cluster watcher. It re-reads config and ownership only after acquiring the
 // shared apply semaphore, so queued edges coalesce naturally to latest state.
 func (d *Daemon) scheduleFRRHAReconcile(reason string) {
-	if d == nil || d.cluster == nil || d.frr == nil || d.store == nil || d.isResetting() {
+	if d == nil || d.cluster == nil || d.frr == nil || d.store == nil || d.applySem == nil || d.isResetting() {
 		return
 	}
 	ctx := d.applyCancelCtx()

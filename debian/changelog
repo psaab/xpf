@@ -151,6 +151,15 @@ xpf (0.0.0) unstable; urgency=medium
     entries whose stamped revision no longer matches the live
     revision, adjusting the pending-deferred gauge; entries for
     unchanged policies survive and still replay after the cooldown.
+  * Daemon/test: `scheduleConnectedRGRepublish`,
+    `republishConnectedRGSync` and `scheduleFRRHAReconcile` now
+    refuse a nil `applySem` (#16655), like every other background
+    semaphore consumer. Previously an HA test fixture built as
+    `&Daemon{store, cluster, ...}` without `applySem` panicked in
+    a spawned goroutine on demotion/promotion, killing the whole
+    `pkg/daemon` test binary after ~609 of 3,495 tests and hiding
+    the remaining results (filed as #17474). Production Daemons
+    always set `applySem`, so there is no runtime change.
   * Daemon/RPM: `rpmProbeTestGating` source-address→VIP matching is
     now canonical (#16639): RETH unit addresses and `vrrp-group`
     virtual-addresses key the VIP→RG map by parsed `netip.Addr`

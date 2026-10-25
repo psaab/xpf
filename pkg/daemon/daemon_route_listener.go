@@ -345,7 +345,7 @@ func (d *Daemon) republishConnectedRG(reason string) bool {
 // activation path additionally runs republishConnectedRG synchronously
 // (#16270) so forwarding-active is never reported ahead of the FIB.
 func (d *Daemon) scheduleConnectedRGRepublish(reason string) {
-	if d == nil || d.store == nil || d.isResetting() {
+	if d == nil || d.store == nil || d.applySem == nil || d.isResetting() {
 		return
 	}
 	ctx := d.applyCancelCtx()
@@ -363,7 +363,7 @@ func (d *Daemon) scheduleConnectedRGRepublish(reason string) {
 // activation sequence before SetRGActive so the helper FIB holds
 // the connected row before the RG reports forwarding-active.
 func (d *Daemon) republishConnectedRGSync(ctx context.Context, reason string) {
-	if d == nil || d.store == nil || d.isResetting() {
+	if d == nil || d.store == nil || d.applySem == nil || d.isResetting() {
 		return
 	}
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
