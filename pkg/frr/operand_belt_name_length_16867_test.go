@@ -448,3 +448,98 @@ func TestApplyFullRefusesCrossFamilyAliasWitness16867(t *testing.T) {
 		t.Fatalf("control: non-colliding neighbor config must apply, got: %v", err)
 	}
 }
+
+// Gate6 F1 (Opus): the cross-family belt must enumerate the
+// EMITTER-ACCURATE per-source set, not the unfiltered whole domain.
+// Its first version added redistProtocolsForNode(ps, "", "") for every
+// policy: a no-from accept-capable policy then acquired phantom
+// <policy>-<proto>-xpf-redist identities for every keyword in
+// RedistributionSourceKeywords — including protos the emitter never
+// renders at its referencing nodes (node-filtered by
+// redistSourceFitsNode) and for policies with no referencing node at
+// all. A phantom final aliasing a REAL final (composed / operator /
+// QNH) would refuse a config whose render contains no fusion.
+//
+// The phantom hazard is pinned at the level it lives — the belt's own
+// enumeration. beltRouteMapIdentities16867 (extracted from the belt so
+// this test and ApplyFull share it) must, for a no-from accept policy
+// referenced only at an OSPF node, produce per-source identities for
+// EXACTLY redistReferencedProtocols14380's set: the node-filtered
+// protos, no unfiltered additions. The unfiltered domain strictly
+// contains protos outside that set (dual-stack/IPv6-only sources and
+// self at a v4 node); every such phantom raw is asserted ABSENT.
+// The Gate5 witness (TestApplyFullRefusesCrossFamilyAliasWitness16867)
+// remains the ApplicationFull-level refusal control, and the clean
+// ApplyFull below proves this non-fusing shape applies.
+//
+// FAIL-ON-REVERT: restoring the ("", "") whole-domain pass adds the
+// phantom identities back and the absence assertions red; the belt
+// would then refuse whenever one of those phantoms aliases a real
+// final (the Gate5 b3656692 construction transposed to a phantom
+// proto needs only a colliding composed/operator name, which the
+// alias arithmetic makes constructible).
+func TestBeltEnumerationHasNoPhantomRedist16867(t *testing.T) {
+	pName, cName, bName, _ := witnessNames16867()
+	po := &config.PolicyOptionsConfig{PolicyStatements: map[string]*config.PolicyStatement{
+		pName: {Name: pName, Terms: []*config.PolicyTerm{{Name: "t1", Action: "accept"}}},
+		cName: {Name: cName, Terms: []*config.PolicyTerm{{Name: "t1", Action: "reject"}}},
+		bName: {Name: bName, Terms: []*config.PolicyTerm{{Name: "t1", Action: "reject"}}},
+	}}
+	fc := &FullConfig{
+		OSPF: &config.OSPFConfig{RouterID: "10.0.0.1", Export: []string{pName},
+			Areas: []*config.OSPFArea{{ID: "0.0.0.0"}}},
+		BGP: &config.BGPConfig{
+			LocalAS: 65000,
+			Neighbors: []*config.BGPNeighbor{
+				{Address: "10.0.0.2", PeerAS: 65001, FamilyInet: true, Import: []string{cName, bName}},
+			},
+		},
+		PolicyOptions: po,
+	}
+
+	identities := beltRouteMapIdentities16867(fc)
+	byIdentity := make(map[string]bool, len(identities))
+	for _, id := range identities {
+		byIdentity[id.family+"\x00"+id.identity] = true
+	}
+	// P's emitter set at its OSPF referencing node (plus explicit leg):
+	want := redistReferencedProtocols14380(po.PolicyStatements[pName],
+		redistReferencedNodes14380(fc)[pName])
+	if len(want) == 0 {
+		t.Fatal("fixture: P must have a non-empty emitter proto set")
+	}
+	for _, proto := range want {
+		raw := redistProtocolRouteMapName(pName, proto)
+		if !byIdentity["redistribute\x00"+raw] {
+			t.Errorf("emitted per-source map %q missing from belt enumeration", raw)
+		}
+	}
+	// Every keyword OUTSIDE P's emitter set is a phantom for P: the
+	// belt must not carry its per-source identity.
+	for _, kw := range config.RedistributionSourceKeywords() {
+		proto := normalizedRedistProtocol(kw)
+		found := false
+		for _, w := range want {
+			if normalizedRedistProtocol(w) == proto {
+				found = true
+				break
+			}
+		}
+		if found {
+			continue
+		}
+		raw := redistProtocolRouteMapName(pName, proto)
+		if byIdentity["redistribute\x00"+raw] {
+			t.Errorf("phantom per-source identity %q enumerated (proto %q outside P's emitter set %v) — Gate6 F1", raw, proto, want)
+		}
+	}
+
+	// No ApplyFull leg here: this fixture ALSO carries the real Gate5
+	// composed-vs-static fusion (P's static map IS in its emitter set
+	// at the OSPF node — static fits ospf — and the composed import
+	// chain aliases to the same final), so ApplyFull correctly refuses
+	// it via the witness pair; that refusal is the witness test's
+	// territory. The phantom pin above is the enumeration-level
+	// invariant Gate6 F1 names: phantom identities must not EXIST in
+	// the belt's set, whatever other (real) pairs a fixture carries.
+}

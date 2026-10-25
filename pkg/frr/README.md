@@ -321,8 +321,11 @@ The render belts cover the path the gate cannot reach:
   (ApplyFull, after every per-family belt) compares final identities
   ACROSS all emitted route-map populations — operator, composed BGP,
   composed redist, per-source/variant redist, narrowed aliases, QNH
-  metric maps, and the fixed generated maps — and refuses before any
-  write or reload. The per-family guards and the #16871 registry are
+  metric maps, and the fixed generated maps (derived from the #16871
+  registry) — over exactly the emitter's enumerated sets
+  (`redistReferencedProtocols14380` for per-source maps; Gate6: no
+  unfiltered whole-domain phantom enumeration) — and refuses before
+  any write or reload. The per-family guards and the #16871 registry are
   unchanged; this belt only adds the cross-family union.
 
 `TestEveryRenderedObjectNameIsOneTokenAndResolves9493` is a behavioural census,

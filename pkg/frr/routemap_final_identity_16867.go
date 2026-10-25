@@ -24,52 +24,72 @@ import (
 // narrowedAliasCollision10129, qualifiedNextHopMetricCollision11447,
 // the #16871 reserved registry, the operator-alias guard) each compare
 // within one population; none compares ACROSS populations. This belt is
-// that missing union: it collects every final route-map identity the
-// managed section can emit — operator policy-statements, composed BGP
-// chains (every BGP in fc + instances), composed redist maps,
-// per-source and variant redist maps for every referenced node, plus
-// every protocol in the unreferenced-node fallback (the same superset
-// redistProtocolMapCollision uses), narrowed-chain aliases, QNH metric
-// maps, and the fixed generated maps (default-export, emptied-chain
-// deny, cluster Null0 guard when ClusterMode) — normalizes each through
-// frrName, and refuses when two distinct identities share a final name.
-// Same identity reached twice (e.g. an unreferenced policy enumerated
-// under both the referenced-node and fallback passes) is one map and
-// stays clean. Deterministic order: families in the order above,
-// identities sorted, so refusal text is stable.
+// that missing union (beltRouteMapIdentities16867): every final
+// route-map identity the managed section can emit — operator
+// policy-statements, composed BGP chains (every BGP in fc +
+// instances), composed redist maps, per-source and variant redist
+// maps for EXACTLY the emitter's set (redistReferencedProtocols14380:
+// explicit tokens plus node-filtered per-referencing-node expansion —
+// what generatePolicyOptions defines; Gate6 F1: an unfiltered
+// whole-domain enumeration would invent phantom maps the emitter never
+// renders and could refuse a non-fusing config), narrowed-chain
+// aliases, QNH metric maps, and the fixed generated maps (derived from
+// the #16871 registry; cluster Null0 guard when ClusterMode) — is
+// normalized through frrName, and two distinct identities sharing a
+// final name are refused. Same identity reached twice (an identity
+// enumerated by two passes) is one map and stays clean. Deterministic
+// order: families in enumeration order, identities sorted, so refusal
+// text is stable.
 //
 // It does NOT replace or weaken any per-family guard: those keep their
 // precise diagnostics and the #16871 registry; this belt only adds the
 // cross-family comparison none of them performs. Wired into ApplyFull
-// after all per-family belts, before buildManagedSection — so a refusal
-// precedes any write or reload and FRR keeps its last-good config.
+// after all per-family belts, before buildManagedSection — so a
+// refusal precedes any write or reload and FRR keeps its last-good
+// config.
 func emittedRouteMapFinalCollision16867(fc *FullConfig) error {
-	if fc == nil || fc.PolicyOptions == nil {
-		return nil
-	}
-	po := fc.PolicyOptions
-	seen := make(map[string]string) // final name -> identity
-	add := func(family, identity string) error {
-		final := frrName(identity)
-		key := family + "\x00" + identity
+	seen := make(map[string]string) // final name -> "family\x00identity"
+	for _, id := range beltRouteMapIdentities16867(fc) {
+		final := frrName(id.identity)
+		key := id.family + "\x00" + id.identity
 		if prev, ok := seen[final]; ok && prev != key {
 			pf, pi, _ := strings.Cut(prev, "\x00")
 			return fmt.Errorf(
-				"route-map %q (%s %q) and %q (%s %q) render as the same FRR route-map %q; "+
+				"route-maps %s %q and %s %q render as the same FRR route-map %q; "+
 					"FRR merges same-named route-maps and would fuse two distinct filters (#16867) — refusing to render",
-				pi, pf, pi, identity, family, identity, final)
+				pf, pi, id.family, id.identity, final)
 		}
 		if _, ok := seen[final]; !ok {
 			seen[final] = key
 		}
+	}
+	return nil
+}
+
+// beltRouteMapIdentity16867 is one (family, raw identity) pair the
+// cross-family belt compares in final frrName space.
+type beltRouteMapIdentity16867 struct {
+	family   string
+	identity string
+}
+
+// beltRouteMapIdentities16867 enumerates every route-map identity the
+// managed section can emit, per family, in deterministic order. It is
+// the belt's single derivation — shared with the Gate6
+// phantom-enumeration pin so no second derivation can drift.
+func beltRouteMapIdentities16867(fc *FullConfig) []beltRouteMapIdentity16867 {
+	if fc == nil || fc.PolicyOptions == nil {
 		return nil
+	}
+	po := fc.PolicyOptions
+	var out []beltRouteMapIdentity16867
+	add := func(family, identity string) {
+		out = append(out, beltRouteMapIdentity16867{family: family, identity: identity})
 	}
 
 	// Operator policy-statements (rendered as route-maps by name).
 	for _, name := range sortedKeys16867(po.PolicyStatements) {
-		if err := add("policy-statement", name); err != nil {
-			return err
-		}
+		add("policy-statement", name)
 	}
 
 	// Composed BGP chain maps (fc.BGP + every instance).
@@ -89,48 +109,32 @@ func emittedRouteMapFinalCollision16867(fc *FullConfig) error {
 	}
 	sort.Strings(composedNames)
 	for _, name := range composedNames {
-		if err := add("composed BGP chain", name); err != nil {
-			return err
-		}
+		add("composed BGP chain", name)
 	}
 
 	// Composed redist maps (keys are the exact attached names).
 	for _, name := range mapKeysReq15156(redistComposedChains15156(fc)) {
-		if err := add("composed redistribute", name); err != nil {
-			return err
-		}
+		add("composed redistribute", name)
 	}
 
-	// Per-source + variant redist maps: referenced-node pass (the
-	// candidates the node-aware guards use), then the unreferenced-node
-	// fallback over the whole protocol domain (the superset
-	// redistProtocolMapCollision enumerates for unreferenced policies).
+	// Per-source + variant redist maps for exactly the emitter's set
+	// (see header; Gate6 F1 — no unfiltered whole-domain pass).
 	nodesByPolicy := redistReferencedNodes14380(fc)
-	addPerSource := func(policy string, protos []string, ctxs []redistVariantContext16864) error {
+	addPerSource := func(policy string, protos []string, ctxs []redistVariantContext16864) {
 		for _, proto := range protos {
-			if err := add("redistribute", redistProtocolRouteMapName(policy, proto)); err != nil {
-				return err
-			}
+			add("redistribute", redistProtocolRouteMapName(policy, proto))
 			for _, ctx := range ctxs {
 				if !redistProtoFitsVariant16864(proto, ctx) {
 					continue
 				}
-				if err := add("redistribute variant", redistVariantRouteMapName16864(policy, proto, ctx)); err != nil {
-					return err
-				}
+				add("redistribute variant", redistVariantRouteMapName16864(policy, proto, ctx))
 			}
 		}
-		return nil
 	}
 	for _, policy := range sortedKeysPS15156(po) {
 		ps := po.PolicyStatements[policy]
 		nodes := nodesByPolicy[policy]
-		if err := addPerSource(policy, redistReferencedProtocols14380(ps, nodes), redistVariantsForNodes16864(nodes)); err != nil {
-			return err
-		}
-		if err := addPerSource(policy, redistProtocolsForNode(ps, "", ""), nil); err != nil {
-			return err
-		}
+		addPerSource(policy, redistReferencedProtocols14380(ps, nodes), redistVariantsForNodes16864(nodes))
 	}
 
 	// Narrowed-chain aliases (only sites that actually alias).
@@ -144,9 +148,7 @@ func emittedRouteMapFinalCollision16867(fc *FullConfig) error {
 		if !narrowedAliasEligible10821(site, po) {
 			continue
 		}
-		if err := add("narrowed chain alias", narrowedAliasName10129(site.Kept)); err != nil {
-			return err
-		}
+		add("narrowed chain alias", narrowedAliasName10129(site.Kept))
 	}
 
 	// QNH metric maps (static + per-policy), when a metric set exists.
@@ -161,29 +163,22 @@ func emittedRouteMapFinalCollision16867(fc *FullConfig) error {
 			if name == "" {
 				continue
 			}
-			if err := add("QNH metric", name); err != nil {
-				return err
-			}
+			add("QNH metric", name)
 		}
 	}
 
-	// Fixed generated maps. Their names are short (alias-stable), so
-	// these only fuse with an operator/generated name of the exact —
-	// or aliased-to-exact — spelling; included so the union is complete
-	// over every route-map definition the section can emit. The #16871
-	// registry itself is untouched (bgpComposedChainCollision above).
-	for _, fixed := range []struct{ family, name string }{
-		{"generated default-export", bgpDefaultExportName15157},
-		{"generated emptied-chain deny", emptiedChainDenyName},
-	} {
-		if err := add(fixed.family, fixed.name); err != nil {
-			return err
-		}
+	// Fixed generated maps, derived from the config-owned #16871
+	// registry (reservedGeneratedRouteMaps16871) so a future generated
+	// name registered there joins this union structurally instead of
+	// drifting. Their names are short (alias-stable). The registry
+	// itself is untouched. Cluster Null0 is not in that registry (it
+	// ends in the redist suffix and is guarded separately), so it stays
+	// an explicit addition under ClusterMode.
+	for _, reserved := range reservedGeneratedRouteMaps16871 {
+		add("generated "+reserved.kind, reserved.name)
 	}
 	if fc.ClusterMode {
-		if err := add("generated cluster Null0 guard", clusterNull0DenyRouteMap15158); err != nil {
-			return err
-		}
+		add("generated cluster Null0 guard", clusterNull0DenyRouteMap15158)
 	}
-	return nil
+	return out
 }
