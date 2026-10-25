@@ -1187,15 +1187,23 @@ func ddnsServicesSchema() *schemaNode {
 // the two parents do not alias a mutable map (same pattern as
 // dhcpDynamicDNSSchema / dhcpStaticBindingSchema).
 //
-// Floor split (SMR MAJOR-3, fail-safe default): the three TIMERS
-// (reclaim/flush/hold) use ValidateIntegerMin(1) because a 0 some Kea
-// versions reject would take DHCP DOWN on the fail-closed restart; the
-// two CAP knobs (max-leases, max-time) use ValidateIntegerMin(0) because
-// Kea documents 0 = unlimited there (a value the model tracks distinctly
-// from unset — invariant H2), and unwarned-cycles uses Min(0). Kea has
-// no documented hard upper bound on these knobs, so min-only validation
-// is correct (no schema-only cap, per the docs/config-schema.md range
-// policy).
+// Range split (fail-safe default): the three TIMERS
+// (reclaim/flush/hold) keep a floor of 1 because a 0 some Kea versions
+// reject would take DHCP DOWN on the fail-closed restart; the two CAP
+// knobs (max-leases, max-time) allow 0 because Kea documents 0 =
+// unlimited there (a value the model tracks distinctly from unset —
+// invariant H2), and unwarned-cycles allows 0.
+//
+// Every leaf also carries Kea's hard upper bound (#16691): the deployed
+// Kea parser rejects reclaim/flush timers and unwarned-cycles above
+// 65535, max-time above 10000, and hold-time / max-leases above
+// 4294967295, and a rejected value refuses the whole family file at the
+// fail-closed restart. A min-only schema therefore turned a tuning knob
+// into a family-wide DHCP kill switch on a clean commit, so the maxima
+// are part of the commit gate (docs/config-schema.md range policy: the
+// binding bound is what the runtime actually consumes). The renderer
+// mirrors the same bounds for the tolerant load / peer-sync path,
+// where SchemaValidate only warns (see keaExpiredLeasesMap).
 func dhcpExpiredLeasesSchema() *schemaNode {
 	return &schemaNode{desc: "Kea expired-lease reclamation policy (#1387)", children: map[string]*schemaNode{
 		"enable": {desc: "Enable expired-lease reclamation tuning", children: nil},
@@ -1203,54 +1211,54 @@ func dhcpExpiredLeasesSchema() *schemaNode {
 			desc:          "Seconds between reclamation cycles (reclaim-timer-wait-time)",
 			args:          1,
 			valueType:     ValueInteger,
-			valueDesc:     "Seconds (>= 1)",
+			valueDesc:     "Seconds (1..65535)",
 			valueExamples: []string{"10"},
-			validator:     ValidateIntegerMin(1),
+			validator:     ValidateInteger(1, 65535),
 			children:      nil,
 		},
 		"flush-timer": {
 			desc:          "Seconds between reclaimed-lease flush passes (flush-reclaimed-timer-wait-time)",
 			args:          1,
 			valueType:     ValueInteger,
-			valueDesc:     "Seconds (>= 1)",
+			valueDesc:     "Seconds (1..65535)",
 			valueExamples: []string{"25"},
-			validator:     ValidateIntegerMin(1),
+			validator:     ValidateInteger(1, 65535),
 			children:      nil,
 		},
 		"hold-time": {
 			desc:          "Seconds a reclaimed lease is held before removal (hold-reclaimed-time)",
 			args:          1,
 			valueType:     ValueInteger,
-			valueDesc:     "Seconds (>= 1)",
+			valueDesc:     "Seconds (1..4294967295)",
 			valueExamples: []string{"600"},
-			validator:     ValidateIntegerMin(1),
+			validator:     ValidateInteger(1, maxWireU32),
 			children:      nil,
 		},
 		"max-leases": {
 			desc:          "Maximum leases reclaimed per cycle, 0 = unlimited (max-reclaim-leases)",
 			args:          1,
 			valueType:     ValueInteger,
-			valueDesc:     "Leases per cycle (>= 0; 0 = unlimited)",
+			valueDesc:     "Leases per cycle (0..4294967295; 0 = unlimited)",
 			valueExamples: []string{"100", "0"},
-			validator:     ValidateIntegerMin(0),
+			validator:     ValidateInteger(0, maxWireU32),
 			children:      nil,
 		},
 		"max-time": {
 			desc:          "Max milliseconds spent reclaiming per cycle, 0 = unlimited (max-reclaim-time)",
 			args:          1,
 			valueType:     ValueInteger,
-			valueDesc:     "Milliseconds (>= 0; 0 = unlimited)",
+			valueDesc:     "Milliseconds (0..10000; 0 = unlimited)",
 			valueExamples: []string{"250", "0"},
-			validator:     ValidateIntegerMin(0),
+			validator:     ValidateInteger(0, 10000),
 			children:      nil,
 		},
 		"unwarned-cycles": {
 			desc:          "Consecutive capped cycles before Kea warns (unwarned-reclaim-cycles)",
 			args:          1,
 			valueType:     ValueInteger,
-			valueDesc:     "Cycles (>= 0)",
+			valueDesc:     "Cycles (0..65535)",
 			valueExamples: []string{"5"},
-			validator:     ValidateIntegerMin(0),
+			validator:     ValidateInteger(0, 65535),
 			children:      nil,
 		},
 	}}
