@@ -387,6 +387,7 @@ fn purge_sessions_for_changed_filter_falls_back_for_unknown_ingress_16889() {
                 },
             },
             &forwarding,
+            &forwarding,
             &changed_v4,
             &changed_v6,
             0,
@@ -415,6 +416,9 @@ fn purge_sessions_for_input_filter_rotation_keeps_unchanged_ingress_16889() {
     changed_metadata.ingress_ifindex = 10;
     let mut unchanged_metadata = test_metadata();
     unchanged_metadata.ingress_ifindex = 11;
+    let unchanged_reverse_key =
+        crate::session::reverse_session_key(&unchanged_key, test_decision().nat);
+
     assert!(sessions.install_with_protocol_with_origin(
         changed_key.clone(),
         test_decision(),
@@ -428,6 +432,18 @@ fn purge_sessions_for_input_filter_rotation_keeps_unchanged_ingress_16889() {
         unchanged_key.clone(),
         test_decision(),
         unchanged_metadata,
+        SessionOrigin::ForwardFlow,
+        1,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let mut unchanged_reverse_metadata = test_metadata();
+    unchanged_reverse_metadata.ingress_ifindex = 0;
+    unchanged_reverse_metadata.is_reverse = true;
+    assert!(sessions.install_with_protocol_with_origin(
+        unchanged_reverse_key.clone(),
+        test_decision(),
+        unchanged_reverse_metadata,
         SessionOrigin::ForwardFlow,
         1,
         PROTO_TCP,
@@ -512,6 +528,7 @@ fn purge_sessions_for_input_filter_rotation_keeps_unchanged_ingress_16889() {
                 },
             },
             &forwarding,
+            &forwarding,
             &changed_v4,
             &changed_v6,
             0,
@@ -524,12 +541,18 @@ fn purge_sessions_for_input_filter_rotation_keeps_unchanged_ingress_16889() {
         sessions.entry_with_origin(&unchanged_key).is_some(),
         "an unchanged sibling input filter must keep its same-family session (#16889)"
     );
+    assert!(
+        sessions.entry_with_origin(&unchanged_reverse_key).is_some(),
+        "a reverse companion with no ingress metadata must not trigger family-wide purge (#16889)"
+    );
 }
 
 #[test]
 fn purge_sessions_for_changed_input_filter_resolves_vlan_unit_16889() {
+    let mut old_forwarding = ForwardingState::default();
+    old_forwarding.ingress_logical_ifindex.insert((10, 80), 20);
     let mut forwarding = ForwardingState::default();
-    forwarding.ingress_logical_ifindex.insert((10, 80), 20);
+    forwarding.ingress_logical_ifindex.insert((10, 80), 21);
     let mut sessions = SessionTable::new();
     let changed_key = test_key();
     let mut unchanged_key = test_key();
@@ -579,6 +602,7 @@ fn purge_sessions_for_changed_input_filter_resolves_vlan_unit_16889() {
                 conntrack: ConntrackFds { v4: -1, v6: -1 },
                 tick: Tick { ns: 2, secs: 0 },
             },
+            &old_forwarding,
             &forwarding,
             &changed_v4,
             &rustc_hash::FxHashSet::default(),

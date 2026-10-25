@@ -1053,6 +1053,11 @@ pub(crate) fn worker_loop(
                     rematched_purged,
                 );
             }
+            // Keep the old interface/VLAN mapping for session filter identity
+            // resolution; teardown itself must use the rotated forwarding
+            // state so carried NAT reservations are released there.
+            let old_forwarding_for_filter_purge = forwarding.clone();
+
             forwarding = new_forwarding;
             // #15188 (C08-02): consume this generation's single-use rebinds
             // exactly once. The coordinator strips the retained metadata
@@ -1133,6 +1138,7 @@ pub(crate) fn worker_loop(
                     conntrack: ConntrackFds { v4: conntrack_v4_fd, v6: conntrack_v6_fd },
                     tick: Tick { ns: loop_now_ns, secs: 0 },
                 },
+                &old_forwarding_for_filter_purge,
                 &forwarding,
                 &purge_input_filter_v4,
                 &purge_input_filter_v6,

@@ -115,6 +115,7 @@ pub(in crate::afxdp) fn purge_sessions_for_changed_input_filter_cached_semantics
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
     shared: SharedSessionRefs<'_>,
+    old_forwarding: &ForwardingState,
     forwarding: &ForwardingState,
     changed_v4: &rustc_hash::FxHashSet<i32>,
     changed_v6: &rustc_hash::FxHashSet<i32>,
@@ -135,36 +136,61 @@ pub(in crate::afxdp) fn purge_sessions_for_changed_input_filter_cached_semantics
         if changed_ifindexes.is_empty() {
             return;
         }
-        // Forward rows retain the physical parent plus VLAN VID; compare the
-        // logical unit used to resolve its input filter. A missing identity or
-        // an unresolved tagged VID cannot identify the old logical interface,
-        // so keep the conservative family fallback for those entries only.
-        let ingress_ifindex = if metadata.ingress_ifindex == 0 {
+        // Reverse companions carry no ingress identity of their own. Their
+        // forward row owns the filter identity and pair teardown, so only use
+        // a reverse row as a conservative fallback when it is truly orphaned.
+        if metadata.is_reverse {
+            let forward_key = crate::session::reverse_session_key(key, decision.nat);
+            if forward_key != *key
+                && sessions
+                    .entry_with_origin(&forward_key)
+                    .is_some_and(|(_, forward_metadata, _)| !forward_metadata.is_reverse)
+            {
+                return;
+            }
+        }
+        // Forward rows retain the physical parent plus VLAN VID. Compare both
+        // snapshots: a VLAN unit can be remapped during this same rotation,
+        // and the session's old filter identity must not be lost by resolving
+        // only through the new forwarding map.
+        let ingress_ifindexes = if metadata.ingress_ifindex == 0 {
             None
         } else {
             let physical = metadata.ingress_ifindex as i32;
-            match crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
-                forwarding,
-                physical,
-                metadata.ingress_vlan_id,
-            ) {
-                Some(logical) => Some(logical),
-                None if metadata.ingress_vlan_id == 0 => Some(physical),
-                None => None,
+            let resolve = |state: &ForwardingState| {
+                crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
+                    state,
+                    physical,
+                    metadata.ingress_vlan_id,
+                )
+                .or_else(|| (metadata.ingress_vlan_id == 0).then_some(physical))
+            };
+            match (resolve(old_forwarding), resolve(forwarding)) {
+                (Some(old), Some(new)) => Some((old, new)),
+                _ => None,
             }
         };
-        if ingress_ifindex.is_none_or(|ifindex| changed_ifindexes.contains(&ifindex)) {
+        let changed = match ingress_ifindexes {
+            Some((old, new)) => {
+                changed_ifindexes.contains(&old) || changed_ifindexes.contains(&new)
+            }
+            // A missing identity or unresolved tagged VID cannot identify the
+            // old logical interface, so keep the conservative family fallback.
+            None => true,
+        };
+        if changed {
             stale.push((key.clone(), decision, metadata.clone(), origin));
         }
     });
     let purged = stale.len();
     for (key, decision, metadata, origin) in stale {
-        // #5622: `delete_terminal_filtered_session` now owns the per-entry
-        // source-NAT / NAT64 release AND the forward<->reverse companion
-        // teardown, so the purge no longer releases separately (that would
-        // double-process the pair). Both halves of a translated flow are in
-        // `stale`; the helper is idempotent, so whichever half is visited first
-        // frees the shared reservation once and the second visit is a no-op.
+        // #5622: `delete_terminal_filtered_session` owns the per-entry
+        // source-NAT / NAT64 release and forward<->reverse companion teardown,
+        // so the purge no longer releases separately (that would double-process
+        // the pair). Reverse companions are omitted when their forward exists;
+        // an orphaned reverse row is still independently selected if needed.
+        // Allocator release self-gates on `is_reverse`, so a conservative
+        // fallback selecting both entries still frees the reservation once.
         delete_terminal_filtered_session(
             sessions,
             session_map,

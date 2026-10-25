@@ -256,6 +256,13 @@ companion entry and the pool port on every translated LocalDelivery terminal
 deny.
 
 
+For #16889, the rotation purge resolves a saved physical/VLAN ingress through
+both the previous and current forwarding maps so a remapped VLAN unit still
+matches the session's old filter identity. It selects reverse companions only
+when their forward entry is absent; otherwise the forward row supplies the
+filter identity and terminal teardown removes the pair.
+
+
 ## Deleted first-policy purge (`purge_sessions_bound_to_deleted_first_policy`, #9526)
 
 The daemon's commit sweep clears a deleted policy's sessions by `policy_id`
