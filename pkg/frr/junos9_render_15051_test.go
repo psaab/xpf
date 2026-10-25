@@ -282,6 +282,7 @@ func TestJunos9PrefixedPlaintextOSPFISIS15990(t *testing.T) {
 	cmds := []string{
 		`set protocols ospf area 0.0.0.0 interface ge-0/0/0.0 authentication md5 1 key "` + outer + `"`,
 		`set protocols ospf area 0.0.0.0 interface ge-0/0/1.0 authentication simple-password "` + outer + `"`,
+		"set protocols isis net 49.0001.0100.0000.0001.00",
 		"set protocols isis authentication-type md5",
 		`set protocols isis authentication-key "` + outer + `"`,
 		"set protocols isis interface ge-0/0/2.0 authentication-type md5",

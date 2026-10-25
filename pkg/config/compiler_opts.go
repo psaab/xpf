@@ -2589,6 +2589,10 @@ type compileOpts struct {
 	// persisted config still boots (#1960), with the daemon's
 	// single-participant render belt keeping the duplicate inert.
 	lenientClusterIGPIdentity16810 bool
+	// lenientISISNETPresence16865 downgrades the #16865 missing /
+	// conflicting IS-IS NET gate to a warning on tolerant paths
+	// (#1960); the FRR renderer withholds a NET-less IS-IS stanza.
+	lenientISISNETPresence16865 bool
 	// lenientSNMPTrapGroup (#2990) downgrades the SNMP trap-group commit gate
 	// (unknown trap-group child key, e.g. a `tragets` typo, and an
 	// enabled-but-zero-target trap group) from a hard compile error to a
@@ -4108,6 +4112,7 @@ func lenientCompileOpts() compileOpts {
 		lenientBGPNeighborAddress:                true,
 		lenientRouterID:                          true,
 		lenientClusterIGPIdentity16810:           true,
+		lenientISISNETPresence16865:              true,
 		lenientSNMPTrapGroup:                     true,
 		lenientBridgeDomainVlanID:                true,
 		lenientDDNSDuration:                      true,

@@ -342,6 +342,7 @@ func TestQualifiedNextHopMetricGatesIGPsByMatchCapability12071(t *testing.T) {
 		"set protocols ospf3 export static",
 		"set protocols rip group g neighbor ge-0/0/0.0",
 		"set protocols rip redistribute static",
+		"set protocols isis net 49.0001.0100.0000.0001.00",
 		"set protocols isis interface ge-0/0/0.0",
 		"set protocols isis export static",
 	)

@@ -196,7 +196,7 @@ func TestCommitGateAndRendererAgreeOnBareTokenFamilies_9667(t *testing.T) {
 			func(c *config.Config) []string { return c.Protocols.OSPFv3.Export }},
 		{"rip", "rip", "set protocols rip group g neighbor ge-0/0/0.0", "set protocols rip redistribute %s",
 			func(c *config.Config) []string { return c.Protocols.RIP.Redistribute }},
-		{"isis", "isis", "set protocols isis interface ge-0/0/0.0", "set protocols isis export %s",
+		{"isis", "isis", "set protocols isis net 49.0001.0100.0000.0001.00", "set protocols isis export %s",
 			func(c *config.Config) []string { return c.Protocols.ISIS.Export }},
 		{"bgp", "bgp", "set protocols bgp local-as 65001", "set protocols bgp export %s",
 			func(c *config.Config) []string { return c.Protocols.BGP.Export }},

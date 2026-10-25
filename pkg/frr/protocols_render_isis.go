@@ -86,7 +86,27 @@ func (m *Manager) renderISIS16125(b *strings.Builder, isis *config.ISISConfig, v
 				"refusing to activate IS-IS unauthenticated (#14977)",
 				"authentication_type", sanitizeFRRValue(isis.AuthType))
 		}
-		isisRender14977 := !isisGlobalAuthBad14977
+		// #16865: an IS-IS scope with enabled interfaces but no valid
+		// NET must never activate: isisd without a NET has no
+		// system-id, forms no adjacency and originates no LSP. Strict
+		// commit rejects this shape; a NET-less config arriving via
+		// tolerant load / peer sync withholds the whole stanza. A
+		// NET-less scope with NO enabled interfaces keeps rendering
+		// (it enrols nothing; redistribute-only shapes rely on it).
+		isisNETLess16865 := false
+		if !config.ValidISISNET(isis.NET) {
+			for _, iface := range isis.Interfaces {
+				if iface != nil && !iface.Disable {
+					isisNETLess16865 = true
+					break
+				}
+			}
+		}
+		if isisNETLess16865 {
+			slog.Warn("frr: omitting the IS-IS stanza; it has interfaces but no valid NET — " +
+				"refusing to activate IS-IS without a system-id (#16865)")
+		}
+		isisRender14977 := !isisGlobalAuthBad14977 && !isisNETLess16865
 		if isisRender14977 {
 			fmt.Fprintf(b, "router isis xpf%s\n", vrfSuffix)
 			// #9493: the NET was rendered verbatim, spaces and all.
