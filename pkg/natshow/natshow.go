@@ -50,7 +50,8 @@
 // RenderPersistent is NOT one of the walking renderers and takes no context:
 // its only dataplane read is PersistentNATTable.All(), an in-process snapshot
 // copy. Renderers that read config alone (RenderStatic, RenderStaticRule,
-// RenderNPTv6) take no context for the same reason.
+// RenderNPTv6, RenderNAT64) take no context for the same reason; RenderNAT64
+// (#16681) additionally takes the #16547 runtime verdict map, not a Reader.
 package natshow
 
 import (

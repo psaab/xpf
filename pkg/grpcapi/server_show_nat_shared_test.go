@@ -107,6 +107,11 @@ func TestGRPCNATWrappersMatchSharedRenderers(t *testing.T) {
 			func(b *strings.Builder) { s.showPersistentNATDetail(context.Background(), b) },
 			func(b *strings.Builder) { natshow.RenderPersistentDetail(context.Background(), b, s.dp) },
 		},
+		{
+			"nat64",
+			func(b *strings.Builder) { s.showNAT64(sharedGRPCNAT64Fixture16681(), b) },
+			func(b *strings.Builder) { natshow.RenderNAT64(b, sharedGRPCNAT64Fixture16681(), nil) },
+		},
 	}
 
 	for _, tc := range cases {
