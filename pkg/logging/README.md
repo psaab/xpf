@@ -717,13 +717,26 @@ channel, the ≤1/s warning above, so a warning that had already been
 rate-limited away left nothing behind at all. `EventReader.SyslogDropStats()`
 snapshots every installed client, the daemon wires it as
 `api.Config.SyslogDropsFn`, and the collector emits
-`xpf_syslog_messages_dropped_total{addr,protocol,reason}` BEFORE the
+`xpf_syslog_messages_dropped_total{sink,addr,protocol,reason}` BEFORE the
 dataplane gate — syslog clients run whether or not the dataplane loaded,
 and a box that failed to load its dataplane is exactly the box whose logs
 an operator needs. All three reasons are emitted even at zero: a series
 that appears only once it becomes non-zero has no prior sample for
 `increase()`, and its absence is indistinguishable from a scrape that
 never reached the code.
+
+**#16769 — the system-syslog sibling set.** The #9165 reader snapshotted
+only the EventReader (security-log stream) clients. The
+`system syslog host` clients behind `SyslogSlogHandler` — the collectors
+that carry authorization and commit records — counted the same drops
+(UDP ECONNREFUSED, #16083 queue overflow) with no metric or show reader.
+`Daemon.syslogDropStats` now appends `SyslogSlogHandler.SyslogDropStats()`,
+labelled `sink="system"` (security rows carry `sink="security"`), so the
+same addr:port on both sinks stays two series. Both sets also fold each
+retired client's final counters into a per-(sink, addr, protocol)
+accumulator before the client is closed, so the exported counter is
+cumulative per destination across commits that rebuild the client set
+instead of resetting to the fresh client's zero.
 
 The log LEVEL was deliberately not changed. `ringbuf.go`'s
 `slog.Debug("syslog send failed", ...)` sits in the per-event fan-out

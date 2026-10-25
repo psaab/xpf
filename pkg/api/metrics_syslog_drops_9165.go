@@ -16,8 +16,13 @@ func (c *xpfCollector) initSyslogDropDescriptors() {
 		// dial/cooldown drops, so a series that is UDP and non-zero on `write`
 		// alone is the expected shape, not a gap — and #9165 was precisely a
 		// UDP-only silence.
-		"Remote syslog messages dropped, by collector and reason.",
-		[]string{"addr", "protocol", "reason"}, nil,
+		//
+		// `sink` (#16769) separates the security-log streams ("security")
+		// from the `system syslog host` collectors ("system"): the same
+		// addr:port may be configured on both, and without the label their
+		// counters would collide into one series.
+		"Remote syslog messages dropped, by sink, collector and reason.",
+		[]string{"sink", "addr", "protocol", "reason"}, nil,
 	)
 }
 
@@ -46,9 +51,13 @@ func (c *xpfCollector) collectSyslogDrops(ch chan<- prometheus.Metric) {
 			{"dial", st.Dials},
 			{"cooldown", st.Cooldown},
 		} {
+			sink := st.Sink
+			if sink == "" {
+				sink = "security"
+			}
 			c.emitConstMetric(ch, c.syslogMessagesDropped,
 				prometheus.CounterValue, float64(r.v),
-				st.RemoteAddr, st.Protocol, r.name)
+				sink, st.RemoteAddr, st.Protocol, r.name)
 		}
 	}
 }
