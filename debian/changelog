@@ -1,4 +1,14 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Installer: stop creating the developer scratch tree on customer
+    hosts (#16539). validate_archive_key pinned its temporary GnuPG
+    home under /var/worktrees/.cache/tmpdir whenever TMPDIR was
+    unset (always under `curl … | sudo sh`), leaving that tree behind
+    and aborting the install when /var could not create it. It now
+    uses `mktemp -d -t`, honouring TMPDIR and otherwise falling
+    back to /tmp; scripts/dist/install.sh is exempt from the
+    #14833 scratch-pinning audit, which covers repo build/test
+    scratch only.
+
   * Routing: default the native-GRE anchor TUN MTU from the underlay
     minus GRE overhead when no MTU is configured (#16517). An
     unconfigured GRE anchor previously kept the kernel TUN default

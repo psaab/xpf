@@ -243,6 +243,45 @@ validate
         result = self._run(script, self.test_key)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    @unittest.skipUnless(shutil.which("gpg"), "gpg is required for public-key parsing")
+    def test_archive_key_validation_unset_tmpdir_avoids_worktrees_scratch(self):
+        # #16539: under `curl | sudo sh` TMPDIR is unset; validate_archive_key
+        # must not create / use the developer /var/worktrees scratch tree.
+        # Shim mktemp/mkdir to record argv, then delegate to the real tools:
+        # pre-fix the unset cell logs `mkdir -p /var/worktrees/.cache/tmpdir`
+        # and a mktemp template under that tree; post-fix it logs only
+        # `mktemp -d -t xpf-archive-key-check.XXXXXX`.
+        trace = self.root / "mktemp-mkdir-trace"
+        trace.touch()
+        real_mktemp = shutil.which("mktemp")
+        real_mkdir = shutil.which("mkdir")
+        self.assertIsNotNone(real_mktemp)
+        self.assertIsNotNone(real_mkdir)
+        self._shim("mktemp", "#!/bin/sh\n"
+                             "printf 'mktemp %s\\n' \"$*\" >> \"$XPF_TEST_TRACE\"\n"
+                             f"exec {real_mktemp} \"$@\"\n")
+        self._shim("mkdir", "#!/bin/sh\n"
+                            "printf 'mkdir %s\\n' \"$*\" >> \"$XPF_TEST_TRACE\"\n"
+                            f"exec {real_mkdir} \"$@\"\n")
+        env = self._env()
+        env.pop("TMPDIR", None)
+        env["XPF_TEST_TRACE"] = str(trace)
+        script = ". \"$1\"; ARCHIVE_KEY=\"$2\"; validate_archive_key\n"
+        result = self._run(script, self.test_key, env=env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        logged = trace.read_text()
+        self.assertNotIn("/var/worktrees", logged)
+        self.assertIn("mktemp -d -t xpf-archive-key-check.XXXXXX", logged)
+        # TMPDIR set: mktemp -t honours it (no /var/worktrees either).
+        custom = self.root / "custom-tmpdir"
+        custom.mkdir()
+        trace.write_text("")
+        env["TMPDIR"] = str(custom)
+        result = self._run(script, self.test_key, env=env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("/var/worktrees", trace.read_text())
+        self.assertEqual(list(custom.glob("xpf-archive-key-check.*")), [])
+
     @unittest.skipUnless(shutil.which("gpg"), "gpg is required for secret-key parsing")
     def test_secret_key_material_is_rejected(self):
         script = """. "$1"; ARCHIVE_KEY="$2"; validate_archive_key

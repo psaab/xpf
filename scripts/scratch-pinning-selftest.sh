@@ -5,7 +5,9 @@
 # inherits TMPDIR (shell mktemp / python tempfile) or pins explicitly.
 # Non-goals: remote-VM temp paths (run_vm/run_host/incus exec strings),
 # guest paths in bake.py, fixture literals in *_test files, legacy
-# mutate-*.py one-offs (their wt-* worktrees are historical).
+# mutate-*.py one-offs (their wt-* worktrees are historical), and the
+# shipped installer scripts/dist/install.sh (#16539: it runs on customer
+# hosts, so it uses mktemp -t honouring TMPDIR / falling back to /tmp).
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 fail=0
 bad='TMPDIR=/tmp|TMPDIR:-/tmp|TMPDIR:-/var/tmp|MUTATE_WORKDIR:-/var/tmp|ARTIFACT_DIR:-/tmp|"/tmp"|/dev/shm|get\("TMPDIR", "/tmp"\)|TMPDIR", "/tmp"|environ\.get\("TMPDIR", "/tmp"\)'
@@ -34,7 +36,6 @@ scripts/mutate.sh
 scripts/miri-leg.sh
 scripts/debug-leg-census-selftest.sh
 scripts/dist/selftest.sh
-scripts/dist/install.sh
 scripts/image/test-grow-root.sh
 scripts/image/bake.py
 scripts/run-selftests.sh
