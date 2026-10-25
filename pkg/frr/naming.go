@@ -312,3 +312,36 @@ func inlinePrefixListNameCollision(po *config.PolicyOptionsConfig) error {
 
 	return nil
 }
+
+// ripGateNameCollision16866 refuses operator prefix-lists
+// intruding on the generated RIP distribute-list gate
+// namespace (config.ReservedRIPGatePrefix, `xpf-rip-…`).
+// Generated gates are defined into the same flat FRR
+// prefix-list object the operator's entries render into;
+// FRR merges same-named lists by sequence, so a foreign
+// permit could survive past the gate's entries (leak) or a
+// deny-all gate could overwrite an unrelated policy.
+// Defense-in-depth for the tolerant path, mirroring
+// inlinePrefixListNameCollision; called from ApplyFull.
+func ripGateNameCollision16866(po *config.PolicyOptionsConfig) error {
+	if po == nil {
+		return nil
+	}
+	names := make([]string, 0, len(po.PrefixLists))
+	for name := range po.PrefixLists {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if strings.HasPrefix(frrName(name), config.ReservedRIPGatePrefix) {
+			return fmt.Errorf(
+				"prefix-list %q uses the reserved %q namespace xpf reserves for "+
+					"generated RIP distribute-list gates (#16866); FRR merges "+
+					"same-named prefix-lists, so an operator name in this namespace "+
+					"could merge with a generated gate and silently alter RIP "+
+					"advertisement — rename the prefix-list off the reserved prefix",
+				name, config.ReservedRIPGatePrefix)
+		}
+	}
+	return nil
+}

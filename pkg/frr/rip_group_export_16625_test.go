@@ -154,6 +154,10 @@ func TestRIPPerGroupContestedWithheld16625(t *testing.T) {
 }
 
 func TestRIPNoGroupsLegacyByteShape16625(t *testing.T) {
+	// #16866 supersedes the byte-identical-legacy clause of this
+	// test: group-less RIP now also carries the per-interface
+	// deny-all gate (bare tokens advertise nothing in Junos).
+	// The legacy stanza lines themselves are unchanged.
 	m := New()
 	rip := &config.RIPConfig{
 		Interfaces:   []string{"trust0", "dmz0"},
@@ -161,12 +165,9 @@ func TestRIPNoGroupsLegacyByteShape16625(t *testing.T) {
 		Redistribute: []string{"connected", "static"},
 	}
 	got := m.generateProtocols(nil, nil, nil, rip, nil, "", 0, nil, nil)
-	if strings.Contains(got, "distribute-list") || strings.Contains(got, "xpf-rip-") {
-		t.Errorf("group-less RIP must render legacy shape, got:\n%s", got)
-	}
-	for _, want := range []string{"router rip\n", " network trust0\n", " redistribute connected\n", " redistribute static\n"} {
+	for _, want := range []string{"router rip\n", " network trust0\n", " redistribute connected\n", " redistribute static\n", " distribute-list prefix "} {
 		if !strings.Contains(got, want) {
-			t.Errorf("legacy line %q missing:\n%s", want, got)
+			t.Errorf("line %q missing:\n%s", want, got)
 		}
 	}
 }

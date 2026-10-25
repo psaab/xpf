@@ -674,6 +674,12 @@ func (m *Manager) ApplyFull(fc *FullConfig) error {
 		if err := routeFilterACLNameCollision(fc.PolicyOptions); err != nil {
 			return err
 		}
+		// #16866 gate5 R1 belt, same posture: operator
+		// prefix-lists in the reserved generated-RIP-gate
+		// namespace would merge with a gate list.
+		if err := ripGateNameCollision16866(fc.PolicyOptions); err != nil {
+			return err
+		}
 		// #7625 render-side belt, same posture: the reserved emptied-chain deny
 		// route-map must not fuse with an operator policy-statement of that exact
 		// name — a merge could pull permit sequences into the deny and reopen the

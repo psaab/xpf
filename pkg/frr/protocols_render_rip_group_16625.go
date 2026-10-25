@@ -29,10 +29,18 @@ import (
 //     ip/ipv6 prefix-lists at top level.
 //  3. Each group interface gets distribute-list bindings for
 //     both families, confining the union pool to its group's
-//     accepted set. Interfaces enrolled only globally (no group)
-//     get NO binding: they receive the union, which is the only
-//     expressible reading of a global neighbor under a grouped
-//     config (Junos: put the interface in a group for isolation).
+//     accepted set.
+//
+// #16866 (R3-B07-03) extends the gate to every enrolled
+// interface and to ripd's native candidates: `network <if>`
+// originates connected subnets and re-advertises RIP-learned
+// routes, which Junos advertises only through an export policy.
+// Interfaces with no export boundary (no group, empty group
+// export, or a group-less render) carry the empty chain and
+// render deny-all. `redistribute rip` is never rendered
+// (FRR-invalid self-source); connected enrols only through
+// the ordinary composed redistribution chain, and the prefix
+// gate confines every candidate per interface.
 //
 // Fail closed, never leak: a chain that is not expressible as
 // finite prefix sets (bare protocol token such as `static`, or
@@ -60,6 +68,14 @@ type ripChainGroup16625 struct {
 // ripGroupChains16625 groups enrolled interfaces by distinct
 // export chain (order-preserved, deduped), sorted by first
 // interface for determinism.
+//
+// #16866: interfaces with NO export boundary are grouped too,
+// under the empty chain, which renders deny-all: enrolled but
+// in no group (grouped config), or in a group with no export.
+// Junos advertises nothing to a neighbor without an export
+// policy, so an empty chain is a real boundary, not the absence
+// of one. Only enrolled interfaces are considered — contested
+// interfaces were already withheld by the caller.
 func ripGroupChains16625(rip *config.RIPConfig, enrolled []string) []ripChainGroup16625 {
 	enrolledSet := make(map[string]bool, len(enrolled))
 	for _, iface := range enrolled {
@@ -99,6 +115,30 @@ func ripGroupChains16625(rip *config.RIPConfig, enrolled []string) []ripChainGro
 		}
 		cg.ifaces = append(cg.ifaces, ifaces...)
 	}
+	// #16866: enrolled interfaces claimed by no group carry the
+	// empty (deny-all) chain.
+	claimed := make(map[string]bool)
+	for _, cg := range order {
+		for _, iface := range cg.ifaces {
+			claimed[iface] = true
+		}
+	}
+	var unclaimed []string
+	for _, iface := range enrolled {
+		if !claimed[iface] {
+			unclaimed = append(unclaimed, iface)
+		}
+	}
+	if len(unclaimed) > 0 {
+		key := config.RIPGroupExportKey16625(nil)
+		cg, ok := byKey[key]
+		if !ok {
+			cg = &ripChainGroup16625{}
+			byKey[key] = cg
+			order = append(order, cg)
+		}
+		cg.ifaces = append(cg.ifaces, unclaimed...)
+	}
 	sort.Slice(order, func(i, j int) bool { return order[i].ifaces[0] < order[j].ifaces[0] })
 	out := make([]ripChainGroup16625, 0, len(order))
 	for _, cg := range order {
@@ -109,9 +149,9 @@ func ripGroupChains16625(rip *config.RIPConfig, enrolled []string) []ripChainGro
 
 func ripGroupListName16625(instanceIdx, chainIdx int, v6 bool) string {
 	if v6 {
-		return fmt.Sprintf("xpf-rip-%d-grp-%d-v6", instanceIdx, chainIdx)
+		return fmt.Sprintf("%s%d-grp-%d-v6", config.ReservedRIPGatePrefix, instanceIdx, chainIdx)
 	}
-	return fmt.Sprintf("xpf-rip-%d-grp-%d", instanceIdx, chainIdx)
+	return fmt.Sprintf("%s%d-grp-%d", config.ReservedRIPGatePrefix, instanceIdx, chainIdx)
 }
 
 func (m *Manager) nextRIPGroupIndex16625() int {
@@ -123,19 +163,35 @@ func (m *Manager) nextRIPGroupIndex16625() int {
 // renderRIPPerGroup16625 renders prefix-list definitions (to be
 // emitted BEFORE `router rip`, at top level) plus the router-rip
 // body lines (union redistribution + distribute-list bindings).
-// Empty-export groups are skipped (no boundary authored).
+//
+// #16866: EVERY enrolled interface gets a binding. The empty
+// chain (no group, or a group with no export) renders deny-all —
+// Junos advertises nothing without an export policy, while
+// ripd's `network` otherwise originates connected subnets and
+// re-advertises RIP-learned routes ungated.
+//
+// Native candidates: ripd cannot `redistribute rip` (FRR
+// 10.7.1 rejects the self-source, exit 2 — verified), and
+// interface routes skip redistribute route-maps, so connected /
+// RIP-learned candidates are enforced ONLY by the per-interface
+// prefix gate. That gate is exact only for the policy shapes
+// ripGroupAcceptedPrefixes16625 admits; everything else renders
+// deny-all (fail closed, no leak of native routes). Connected
+// enrolment itself comes from the ordinary union chain above
+// (resolveRedistributeChainCluster15158 on rip.Redistribute).
 func (m *Manager) renderRIPPerGroup16625(rip *config.RIPConfig, enrolled []string, policyOptions *config.PolicyOptionsConfig, clusterMode bool, qnhMetrics *qnhMetricScope11447, instanceIdx int) (defs string, body string) {
 	var db, bb strings.Builder
 	bb.WriteString(m.resolveRedistributeChainCluster15158(rip.Redistribute, policyOptions, "rip", clusterMode, qnhMetricScopeForDaemon11447(qnhMetrics, "rip")))
 	chains := ripGroupChains16625(rip, enrolled)
 	for idx, cg := range chains {
-		if len(cg.chain) == 0 {
-			continue
-		}
-		v4, v6, ok := ripGroupAcceptedPrefixes16625(cg.chain, policyOptions)
-		if !ok {
-			slog.Warn("frr: rip group export is not expressible as a per-interface prefix filter (bare protocol token or non-prefix accept condition); advertising NOTHING on those interfaces rather than leaking the union (#16625)",
-				"chain", cg.chain, "interfaces", cg.ifaces)
+		var v4, v6 []string
+		if len(cg.chain) > 0 {
+			var ok bool
+			v4, v6, ok = ripGroupAcceptedPrefixes16625(cg.chain, policyOptions)
+			if !ok {
+				slog.Warn("frr: rip group export is not expressible as a per-interface prefix filter (bare protocol token or non-prefix accept condition); advertising NOTHING on those interfaces rather than leaking the union (#16625)",
+					"chain", cg.chain, "interfaces", cg.ifaces)
+			}
 		}
 		name4 := ripGroupListName16625(instanceIdx, idx, false)
 		name6 := ripGroupListName16625(instanceIdx, idx, true)
@@ -199,22 +255,11 @@ func writeRIPGroupPrefixList16625(b *strings.Builder, name string, v6 bool, pref
 func ripGroupAcceptedPrefixes16625(chain []string, po *config.PolicyOptionsConfig) (v4 []string, v6 []string, ok bool) {
 	if po == nil {
 		// No policy-options at all: any policy name is undefined
-		// and any token is bare — inexpressible unless the chain
-		// is empty (accepts nothing via redistribute; the
-		// interface still gets connected/direct routes, which
-		// distribute-list also gates — an empty chain means the
-		// group exports nothing redistributed, but Junos RIP
-		// still advertises direct routes. A deny-all list would
-		// withdraw those too. Empty chain = no export statement:
-		// Junos default is to advertise direct + RIP-learned
-		// only, which the prefix-list cannot express either.
-		// Fail closed is WRONG here (it withdraws direct
-		// routes the operator never restricted). Signal
-		// inexpressible; caller warns + deny-all. This matches
-		// the issue's fail-closed direction for an authored
-		// export that cannot be honoured; a group with NO
-		// export has no boundary to leak, handled by caller
-		// skipping empty chains before calling here.
+		// and any token is bare — inexpressible. The caller
+		// renders deny-all (#16866): Junos advertises nothing
+		// (no connected subnet, no RIP-learned route) without
+		// an export policy that accepts it, so deny-all is the
+		// faithful render, not a loss.
 		return nil, nil, false
 	}
 	type entry = struct {
@@ -244,11 +289,34 @@ func ripGroupAcceptedPrefixes16625(chain []string, po *config.PolicyOptionsConfi
 		if len(ps.UnknownFrom) > 0 || len(ps.UnknownTo) > 0 {
 			return nil, nil, false
 		}
+		// Explicit statement-level reject terminates the chain
+		// (#16866 re-review F1): later policies are unreachable
+		// for candidates this statement rejects, so the chain
+		// must stop here. The composed route-map renderer emits
+		// a terminating deny for the same shape
+		// (redistribute.go renderRedistComposedMapVariant16864).
+		// A `next policy` term anywhere in the statement makes
+		// the default unreachable for matched candidates, in
+		// which case fall-through is correct.
 		for _, term := range ps.Terms {
 			if term == nil {
 				continue
 			}
 			if len(term.UnknownFrom) > 0 || len(term.UnknownTo) > 0 || len(term.UnknownThen) > 0 {
+				return nil, nil, false
+			}
+			if term.NextPolicy {
+				// `then next policy` (F2, gate2 B1): matched
+				// candidates skip the remaining terms and this
+				// statement's default. A destination-only list
+				// cannot decide whether the jump fires for a
+				// native candidate: no prefix entries means
+				// match-ALL (no from) or a source-only subset —
+				// both fire for some candidate class — and an
+				// empty prefix-list's Junos match semantics are
+				// unproven. `len(entries)==0` therefore proves
+				// nothing. ANY NextPolicy term makes the chain
+				// inexpressible here: fail closed.
 				return nil, nil, false
 			}
 			isAccept := term.Action == "accept"
@@ -263,7 +331,16 @@ func ripGroupAcceptedPrefixes16625(chain []string, po *config.PolicyOptionsConfi
 				continue
 			}
 			// Non-prefix conditions make matching depend on
-			// more than the prefix.
+			// more than the prefix. A prefix-list decides by
+			// destination alone, so it cannot reproduce
+			// source-protocol, community, as-path or next-hop
+			// predicates for ripd's NATIVE candidates: interface
+			// routes skip redistribute route-maps entirely
+			// (FRR 10.7.1 ripd excludes RIP_ROUTE_INTERFACE) and
+			// RIP-learned routes have no `redistribute rip` verb
+			// to carry one. Permitting a static-only term's
+			// prefixes here would leak connected/RIP routes in
+			// the same range (#16866 F2). Fail closed.
 			if len(term.FromProtocols) > 0 || len(term.FromCommunity) > 0 || len(term.FromASPath) > 0 || term.NextHop != "" {
 				if isAccept {
 					return nil, nil, false
@@ -274,32 +351,13 @@ func ripGroupAcceptedPrefixes16625(chain []string, po *config.PolicyOptionsConfi
 				// leak). Conservative: inexpressible.
 				return nil, nil, false
 			}
-			// Collect this term's prefix entries.
-			var termEntries []entry
-			for _, plName := range term.PrefixList {
-				pl, found := po.PrefixLists[plName]
-				if !found || pl == nil {
-					if isAccept {
-						return nil, nil, false
-					}
-					return nil, nil, false
-				}
-				for _, p := range pl.Prefixes {
-					termEntries = append(termEntries, entry{p, strings.Contains(p, ":")})
-				}
-			}
-			for _, rf := range term.RouteFilters {
-				if rf == nil {
-					continue
-				}
-				text, is6, rendered := ripRouteFilterEntryText16625(rf)
-				if !rendered {
-					if isAccept {
-						return nil, nil, false
-					}
-					return nil, nil, false
-				}
-				termEntries = append(termEntries, entry{text, is6})
+			// Collect this term's prefix entries with Junos
+			// longest-match lowering for its route-filters
+			// (F3): overlapping filters in one term decide by
+			// longest containing base, not by walkup/OR.
+			termEntries, termOK := ripTermEntries16625(term, po)
+			if !termOK {
+				return nil, nil, false
 			}
 			if len(termEntries) == 0 {
 				// Terminal term matching EVERYTHING.
@@ -312,16 +370,36 @@ func ripGroupAcceptedPrefixes16625(chain []string, po *config.PolicyOptionsConfi
 				return ripSplitEntries16625(entries)
 			}
 			for _, e := range termEntries {
-				if isAccept {
+				// Entries arrive pre-tagged: "deny\x00" marks a
+				// longest-match stop or a reject term's set.
+				if isAccept && !strings.HasPrefix(e.text, "deny\x00") {
 					add(e.text, e.v6)
+					continue
 				}
-				// Reject entries: prefixes rejected here must
-				// NOT be added by later accepts for the SAME
-				// exact entry text. Track denied texts so a
-				// later identical accept entry is suppressed.
-				// (Overlapping-but-not-identical ranges are
-				// ordered correctly by FRR first-match only if
-				// we emit deny entries too — we do, below.)
+				if isAccept {
+					// Longest-match stop inside an accept term
+					// (gate2 R2): candidates under it fail THIS
+					// term and continue to LATER terms/policies,
+					// which may accept them. A single ordered
+					// list cannot express "term no-match, keep
+					// evaluating" — promoting the stop to a
+					// chain deny over-denies later accepts, and
+					// omitting it over-permits. Inexpressible:
+					// fail closed for the whole chain.
+					return nil, nil, false
+				}
+				if isReject && strings.HasPrefix(e.text, "deny\x00") {
+					// A rejecting term's longest-match stop is
+					// inexpressible (gate3 Astra R2): a
+					// candidate failing the longest match does
+					// NOT match this term at all and must fall
+					// through to later terms — copying the stop
+					// into the chain deny over-denies them.
+					// Only stop-tagged entries trigger this;
+					// plain reject entries fall through to the
+					// deny emission below.
+					return nil, nil, false
+				}
 				if isReject {
 					add("deny\x00"+e.text, e.v6)
 				}
@@ -331,12 +409,129 @@ func ripGroupAcceptedPrefixes16625(chain []string, po *config.PolicyOptionsConfi
 		if ps.DefaultAction == "accept" {
 			return nil, nil, false
 		}
-		// reject / implicit reject: chain continues to next
-		// policy (next-policy semantics for redistribution
-		// chains: a policy that does not accept falls through
-		// to the next policy in the export chain).
+		if ps.DefaultAction == "reject" {
+			// F1: explicit reject terminates the chain —
+			// entries so far stand, later policies never run.
+			// No next-policy carve-out (gate2 B2): any
+			// NextPolicy term already failed the chain closed
+			// above, so no live jump can suppress termination.
+			break
+		}
+		// Implicit reject (no statement default): the chain
+		// continues to the next policy (a policy that does not
+		// accept falls through, #5277 chain semantics).
 	}
 	return ripSplitEntries16625(entries)
+}
+
+// ripTermEntries16625 collects one terminal term's prefix
+// entries (prefix-list refs expanded, route-filters lowered),
+// ok=false when the term is inexpressible at a destination-only
+// gate. Junos ANDs distinct `from` types in one term (the
+// route-map renderer keeps them as separate ANDed matches,
+// policy_render.go from-prefix-list arm), so a term carrying
+// BOTH prefix-list refs and route-filters cannot be lowered to
+// one union list — inexpressible, fail closed (gate3 B1).
+// Prefix-list entries are normalised through
+// config.NormalizePrefixListEntry + sanitizeFRRValue exactly
+// like the canonical renderer (policy_render.go): a malformed
+// entry would otherwise break the whole vtysh reload (exit 2)
+// and a newline-bearing entry would inject frr.conf lines
+// (gate3 B2, #10823/#4482). Any unrenderable entry fails the
+// term closed. Route-filters of one term are lowered with
+// Junos longest-match semantics (#16762): permits sort by
+// descending base length, and after each distinct base that a
+// broader renderable filter contains, a `deny <base> le <max>`
+// stop is emitted (pre-tagged "deny\x00").
+func ripTermEntries16625(term *config.PolicyTerm, po *config.PolicyOptionsConfig) (entries []struct {
+	text string
+	v6   bool
+}, ok bool) {
+	type entry = struct {
+		text string
+		v6   bool
+	}
+	if len(term.PrefixList) > 0 && len(term.RouteFilters) > 0 {
+		return nil, false
+	}
+	for _, plName := range term.PrefixList {
+		pl, found := po.PrefixLists[plName]
+		if !found || pl == nil {
+			return nil, false
+		}
+		for _, p := range pl.Prefixes {
+			normalized, normOK := config.NormalizePrefixListEntry(p)
+			if !normOK {
+				return nil, false
+			}
+			entries = append(entries, entry{sanitizeFRRValue(normalized), strings.Contains(normalized, ":")})
+		}
+	}
+	// Route-filters: collect renderable permits with bases.
+	type rfEntry struct {
+		text  string
+		v6    bool
+		ipnet *net.IPNet
+		plen  int
+	}
+	var rfs []rfEntry
+	for _, rf := range term.RouteFilters {
+		if rf == nil {
+			continue
+		}
+		text, is6, rendered := ripRouteFilterEntryText16625(rf)
+		if !rendered {
+			return nil, false
+		}
+		ipnet, plen := parseRouteFilterPrefix16762(rf.Prefix)
+		rfs = append(rfs, rfEntry{text, is6, ipnet, plen})
+	}
+	// Longest-match order: descending base length, stable.
+	sort.SliceStable(rfs, func(i, j int) bool { return rfs[i].plen > rfs[j].plen })
+	for i, e := range rfs {
+		entries = append(entries, entry{e.text, e.v6})
+		if e.ipnet == nil || e.plen <= 0 {
+			continue
+		}
+		// Stop needed only when a BROADER renderable filter
+		// could otherwise catch a failed candidate.
+		canStillMatch := false
+		for _, o := range rfs {
+			if o.ipnet == nil {
+				canStillMatch = true
+				break
+			}
+			if routeFilterBaseContains16762(o.ipnet, e.ipnet) {
+				canStillMatch = true
+				break
+			}
+		}
+		if !canStillMatch {
+			continue
+		}
+		lastOfBase := true
+		for j := i + 1; j < len(rfs); j++ {
+			if rfs[j].ipnet != nil && sameRouteFilterBase16762(e.ipnet, rfs[j].ipnet) {
+				lastOfBase = false
+				break
+			}
+		}
+		if !lastOfBase {
+			continue
+		}
+		maxLen := 32
+		if e.v6 {
+			maxLen = 128
+		}
+		// The stop body names the BASE prefix (authored text
+		// before any ge/le), mirroring #16762's layout.
+		base := e.text
+		if idx := strings.Index(base, " "); idx >= 0 {
+			base = base[:idx]
+		}
+		entries = append(entries, entry{"deny\x00" + fmt.Sprintf("%s le %d", base, maxLen), e.v6})
+	}
+	return entries, true
 }
 
 func ripSplitEntries16625(entries []struct {
