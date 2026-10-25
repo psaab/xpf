@@ -17,6 +17,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"net/netip"
 	"sort"
 	"strings"
 	"time"
@@ -199,9 +200,17 @@ func rpmProbeTestGating(cfg *config.Config) map[probeTestKey]int {
 	}
 
 	// RETH interface → RG, plus RETH unit VIP addresses for
-	// source-address matching.
+	// source-address matching. The VIP map is keyed by canonical
+	// address (#16639): the interface stanza and the test's
+	// source-address are authored independently, so the same IPv6
+	// address can be spelled with different case or zero runs on
+	// either side — an exact string match then misses and the
+	// referenced test falls back to the lowest data RG, running
+	// only on a node that does not hold the VIP. Virtual addresses
+	// of an explicit vrrp-group on the unit are VIPs of the same
+	// RETH RG, so they key the same map.
 	rethRG := make(map[string]int)
-	rethVIPs := make(map[string]int)
+	rethVIPs := make(map[netip.Addr]int)
 	for name, ifc := range cfg.Interfaces.Interfaces {
 		if ifc == nil || ifc.RedundancyGroup <= 0 || !strings.HasPrefix(name, "reth") {
 			continue
@@ -212,11 +221,19 @@ func rpmProbeTestGating(cfg *config.Config) map[probeTestKey]int {
 				continue
 			}
 			for _, addr := range unit.Addresses {
-				ip := addr
-				if i := strings.IndexByte(ip, '/'); i >= 0 {
-					ip = ip[:i]
+				if vip, ok := canonicalRPMVIPAddr(addr); ok {
+					rethVIPs[vip] = ifc.RedundancyGroup
 				}
-				rethVIPs[ip] = ifc.RedundancyGroup
+			}
+			for _, group := range unit.VRRPGroups {
+				if group == nil {
+					continue
+				}
+				for _, addr := range group.VirtualAddresses {
+					if vip, ok := canonicalRPMVIPAddr(addr); ok {
+						rethVIPs[vip] = ifc.RedundancyGroup
+					}
+				}
 			}
 		}
 	}
@@ -250,8 +267,8 @@ func rpmProbeTestGating(cfg *config.Config) map[probeTestKey]int {
 					continue
 				}
 			}
-			if test.SourceAddress != "" {
-				if rg, ok := rethVIPs[test.SourceAddress]; ok {
+			if src, ok := canonicalRPMVIPAddr(test.SourceAddress); ok {
+				if rg, ok := rethVIPs[src]; ok {
 					gated[key] = rg
 					continue
 				}
@@ -262,6 +279,31 @@ func rpmProbeTestGating(cfg *config.Config) map[probeTestKey]int {
 		}
 	}
 	return gated
+}
+
+// canonicalRPMVIPAddr parses an interface-address / virtual-address
+// token (bare or CIDR) or an RPM source-address into the canonical
+// key of the #16639 VIP map: the host address with any prefix, zone
+// (%zone suffix), or IPv4-in-IPv6 spelling folded away. The two
+// spellings denote the same on-host address — the kernel compares
+// the bytes, not the text — so they must gate alike. An empty or
+// unparseable token reports ok=false; it keys nothing and matches
+// nothing, exactly as an unknown source-address did pre-fix.
+func canonicalRPMVIPAddr(s string) (netip.Addr, bool) {
+	if s == "" {
+		return netip.Addr{}, false
+	}
+	if i := strings.IndexByte(s, '/'); i >= 0 {
+		s = s[:i]
+	}
+	if i := strings.IndexByte(s, '%'); i >= 0 {
+		s = s[:i]
+	}
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return addr.Unmap(), true
 }
 
 // rpmProbeGatingRGs returns the probes inside the §4.4 gating scope,
