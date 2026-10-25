@@ -63,6 +63,7 @@ func TestHostInboundAppliedCarriesItsEvidence7181(t *testing.T) {
 	got := hostInboundAppliedInfo(HostInboundAppliedSnapshot{
 		Known: true, Established: true, LastApplyFailed: true,
 		Generation: 7, LastFailureUnixSec: 1690000000, GapFenceActive: true,
+		BarrierRetained: true, BarrierPendingDetail: "untrust/ge-0-0-1.0 inet6",
 	})
 	if got.Generation != 7 {
 		t.Errorf("Generation = %d, want 7", got.Generation)
@@ -74,6 +75,9 @@ func TestHostInboundAppliedCarriesItsEvidence7181(t *testing.T) {
 		t.Error("GapFenceActive lost. A box enforcing through the additive gap fence " +
 			"is in a different state from one whose main table covers everything, and an " +
 			"operator diagnosing reachability needs to know which table is answering")
+	}
+	if !got.BarrierRetained || got.BarrierPendingDetail != "untrust/ge-0-0-1.0 inet6" {
+		t.Errorf("barrier fields lost: %+v, want retained with pending detail (#16785)", got)
 	}
 }
 

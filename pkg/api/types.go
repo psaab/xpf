@@ -1127,10 +1127,12 @@ type AnnotateRequest struct {
 //	                    an address that appeared since may be covered only by
 //	                    the additive gap fence, or not at all.
 type HostInboundAppliedInfo struct {
-	State              string `json:"state"`
-	Generation         uint64 `json:"generation"`
-	LastFailureUnixSec int64  `json:"last_failure_unix_sec,omitempty"`
-	GapFenceActive     bool   `json:"gap_fence_active,omitempty"`
+	State                string `json:"state"`
+	Generation           uint64 `json:"generation"`
+	LastFailureUnixSec   int64  `json:"last_failure_unix_sec,omitempty"`
+	GapFenceActive       bool   `json:"gap_fence_active,omitempty"`
+	BarrierRetained      bool   `json:"barrier_retained,omitempty"`
+	BarrierPendingDetail string `json:"barrier_pending_detail,omitempty"`
 }
 
 // Applied-state values, exported so consumers compare against a constant

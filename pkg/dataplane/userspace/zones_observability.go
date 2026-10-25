@@ -113,7 +113,13 @@ func addresslessEnforcingZonesFromSnapshots(cfg *config.Config, snaps []Interfac
 			continue
 		}
 		for un, unit := range iface.Units {
-			if unit == nil || unit.Disable || (!unit.DHCP && !unit.DHCPv6 && unit.DHCPv6Client == nil) {
+			if unit == nil || unit.Disable {
+				continue
+			}
+			// #16785: only address-expecting intent counts. A PD-only or
+			// stateless DHCPv6 client never installs a routable address,
+			// so its link-local-only zone is already fully enforced.
+			if !unit.DHCP && !((unit.DHCPv6 || unit.DHCPv6Client != nil) && unit.UnitDHCPv6ExpectsAddress()) {
 				continue
 			}
 			unitRef := fmt.Sprintf("%s.%d", ifName, un)
@@ -381,7 +387,7 @@ func addresslessEnforcingInterfacesFromSnapshots(cfg *config.Config, snaps []Int
 			// disables IPv6 RA on every managed interface, so DHCPv6 (stateful or
 			// the dhcpv6-client stanza) is the only dynamic v6 path — SLAAC is not
 			// a separate case (see BuildZoneHostInboundViews).
-			if (unit.DHCPv6 || unit.DHCPv6Client != nil) && !hasFam[unitName]["inet6"] {
+			if (unit.DHCPv6 || unit.DHCPv6Client != nil) && unit.UnitDHCPv6ExpectsAddress() && !hasFam[unitName]["inet6"] {
 				out = append(out, AddresslessEnforcingInterface{
 					Zone: zoneName, Interface: unitName,
 					Family: "inet6", Reason: AddresslessDHCPPending,
@@ -412,6 +418,10 @@ func addresslessEnforcingInterfacesFromSnapshots(cfg *config.Config, snaps []Int
 // live-kernel addresses (interface snapshots) plus configured VRRP VIPs —
 // excluding kernel scope-link rows, which never satisfy lease intent (#10751
 // R4-1: a DHCPv6 client beside only its automatic fe80::/64 is still pending).
+// A PD-only or stateless DHCPv6 client is NOT pending (#16785): it never
+// installs an address on its own unit, so "no global v6" is its steady
+// state and the installed link-local deny already covers everything
+// reachable on that unit.
 //
 // Only DHCP-pending is reported (see AddresslessDHCPPending): a static address or
 // a VRRP VIP is scoped into the enforced deny from config regardless of link or
@@ -431,6 +441,20 @@ func AddresslessEnforcingInterfaces(cfg *config.Config) []AddresslessEnforcingIn
 		return nil
 	}
 	return addresslessEnforcingInterfacesFromSnapshots(cfg, buildInterfaceSnapshots(cfg))
+}
+
+// AddresslessEnforcingZonesFromSnapshots is
+// addresslessEnforcingZonesFromSnapshots exported for callers that
+// already hold a snapshot (#16785 pending-detail rendering).
+func AddresslessEnforcingZonesFromSnapshots(cfg *config.Config, snaps []InterfaceSnapshot) []AddresslessEnforcingZone {
+	return addresslessEnforcingZonesFromSnapshots(cfg, snaps)
+}
+
+// AddresslessEnforcingInterfacesFromSnapshots is
+// addresslessEnforcingInterfacesFromSnapshots exported for callers that
+// already hold a snapshot (#16785 pending-detail rendering).
+func AddresslessEnforcingInterfacesFromSnapshots(cfg *config.Config, snaps []InterfaceSnapshot) []AddresslessEnforcingInterface {
+	return addresslessEnforcingInterfacesFromSnapshots(cfg, snaps)
 }
 
 // HostInboundPendingIntentFromSnapshots reports whether any configured

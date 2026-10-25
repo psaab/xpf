@@ -109,7 +109,13 @@ func (d *Daemon) hostInboundGapReassertLoop(ctx context.Context) {
 // and honors the normal background-apply shutdown/bootstrap fences. Host-inbound
 // apply success discharges the debt; a failure leaves it for the next 30s tick.
 func (d *Daemon) reassertHostInboundGapOnce(ctx context.Context) {
-	if ctx.Err() != nil || d.store == nil || !d.hostInboundGapOwed() {
+	if ctx.Err() != nil || d.store == nil {
+		return
+	}
+	// #16785: an expired pre-handoff pending hold also owes a re-apply
+	// so the bounded handoff fires without a commit or a lease.
+	barrierOwed := !d.earlyInputHandoffDone.Load() && d.earlyInputPendingExpired()
+	if !d.hostInboundGapOwed() && !barrierOwed {
 		return
 	}
 	if err := hostInboundGapReassertFn(d); err != nil {

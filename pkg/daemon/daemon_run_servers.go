@@ -213,11 +213,13 @@ func (d *Daemon) startGRPCServer(ctx context.Context, wg *sync.WaitGroup, eventB
 		HostInboundAppliedFn: func() grpcapi.HostInboundApplied {
 			st := d.HostInboundApplied()
 			return grpcapi.HostInboundApplied{
-				Known:           true,
-				Established:     st.Established,
-				Generation:      st.Generation,
-				LastApplyFailed: st.LastApplyFailed,
-				GapFenceActive:  st.GapFenceActive,
+				Known:                true,
+				Established:          st.Established,
+				Generation:           st.Generation,
+				LastApplyFailed:      st.LastApplyFailed,
+				GapFenceActive:       st.GapFenceActive,
+				BarrierRetained:      st.BarrierRetained,
+				BarrierPendingDetail: st.BarrierPendingDetail,
 			}
 		},
 		RPMResultsFn: func() []*rpm.ProbeResult {
@@ -681,11 +683,13 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 		HostInboundAppliedFn: func() api.HostInboundAppliedSnapshot {
 			st := d.HostInboundApplied()
 			snap := api.HostInboundAppliedSnapshot{
-				Known:           true,
-				Established:     st.Established,
-				Generation:      st.Generation,
-				LastApplyFailed: st.LastApplyFailed,
-				GapFenceActive:  st.GapFenceActive,
+				Known:                true,
+				Established:          st.Established,
+				Generation:           st.Generation,
+				LastApplyFailed:      st.LastApplyFailed,
+				GapFenceActive:       st.GapFenceActive,
+				BarrierRetained:      st.BarrierRetained,
+				BarrierPendingDetail: st.BarrierPendingDetail,
 			}
 			if !st.LastFailureAt.IsZero() {
 				snap.LastFailureUnixSec = st.LastFailureAt.Unix()

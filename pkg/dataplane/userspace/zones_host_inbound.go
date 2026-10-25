@@ -1204,7 +1204,7 @@ func BuildUnzonedDHCPUnleasedNetdevs(cfg *config.Config, snaps []InterfaceSnapsh
 			}
 			fam := hasFam[unitRef]
 			v4unleased := unit.DHCP && !fam["inet"]
-			v6unleased := (unit.DHCPv6 || unit.DHCPv6Client != nil) && !fam["inet6"]
+			v6unleased := (unit.DHCPv6 || unit.DHCPv6Client != nil) && unit.UnitDHCPv6ExpectsAddress() && !fam["inet6"]
 			if !v4unleased && !v6unleased {
 				continue
 			}
@@ -1379,7 +1379,7 @@ func buildUnzonedVRFDHCPBackstops(cfg *config.Config, snaps []InterfaceSnapshot)
 				seenV4[linuxName] = true
 				out.VRFSlavesV4 = append(out.VRFSlavesV4, linuxName)
 			}
-			if (unit.DHCPv6 || unit.DHCPv6Client != nil) && !families["inet6"] {
+			if (unit.DHCPv6 || unit.DHCPv6Client != nil) && unit.UnitDHCPv6ExpectsAddress() && !families["inet6"] {
 				if !seenV6[linuxName] {
 					seenV6[linuxName] = true
 					out.VRFSlavesV6 = append(out.VRFSlavesV6, linuxName)
@@ -1458,7 +1458,11 @@ func buildZonedDHCPHostInboundBackstopNetdevs(cfg *config.Config) (HostInboundDH
 				seenV4[linuxName] = true
 				backstops.V4 = append(backstops.V4, linuxName)
 			}
-			dhcpv6 := unit.DHCPv6 || unit.DHCPv6Client != nil
+			// #16785: a PD-only/stateless client never installs an
+			// address, so it gets no v6 backstop drop (which would
+			// blanket-drop its link-local host traffic forever) and no
+			// DHCPv6 reply admit.
+			dhcpv6 := (unit.DHCPv6 || unit.DHCPv6Client != nil) && unit.UnitDHCPv6ExpectsAddress()
 			if dhcpv6 && !seenV6[linuxName] {
 				seenV6[linuxName] = true
 				backstops.V6 = append(backstops.V6, linuxName)

@@ -1220,6 +1220,22 @@ type Daemon struct {
 	// (plus the single-threaded bootstrap path, which runs before applies).
 	earlyInputHandoffDone atomic.Bool
 
+	// earlyInputHandoffPendingSince is the wall-clock start of the current
+	// pre-handoff pending hold (#16785): the first apply that retained the
+	// barrier for pending DHCP intent, lo0 failure, changed addresses, or
+	// an uncovered fallback. Zero when no hold is open. The bounded
+	// handoff compares it against earlyInputPendingHandoffBound; the 30s
+	// host-inbound gap loop re-drives an apply so the bound fires without
+	// a commit. Serialized under applySem like earlyInputHandoffDone.
+	earlyInputHandoffPendingSince time.Time
+	// earlyInputHandoffPendingDetail names the scopes holding the barrier
+	// (e.g. "untrust/ge-0-0-1.0 inet6"), for the retained log and the
+	// HostInboundApplied projection. Guarded by applySem.
+	earlyInputHandoffPendingDetail string
+	// earlyInputBarrierRetainedNowFn is the wall clock for the pending
+	// hold. A var so #16785 tests drive the bound deterministically.
+	earlyInputBarrierRetainedNowFn func() time.Time
+
 	// earlyInputGuardSwapFailed latches a failed bootstrap lifeline-guard
 	// swap (the global barrier was retained instead). Surfaced via the
 	// xpf_early_input_guard_swap_failed gauge and /health (non-fatal),
