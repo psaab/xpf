@@ -1,4 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Config/firewall: all four `firewall three-color-policer` burst
+    leaves now enforce a one-frame floor of 1514 bytes (#16610):
+    `committed-burst-size`/`excess-burst-size` (single-rate) and
+    `committed-burst-size`/`peak-burst-size` (two-rate) below 1514
+    are rejected at strict commit and warned on tolerant load.
+    Previously any positive value (64, 1000, 1k) committed clean;
+    because the userspace meter charges the full Ethernet frame,
+    such a bucket coloured every maximum-sized frame red at any
+    rate and `then discard` dropped it, silently turning the meter
+    into a frame-size filter — the three-color twin of the #10310
+    single-rate policer floor. A burst at exactly 1514 still
+    commits.
   * Config/NAT: a source-NAT rule whose source match is
     single-family but whose pool has no member of that family
     (an IPv6-only pool, or an IPv4-mapped `::ffff:` literal, for

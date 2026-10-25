@@ -345,6 +345,13 @@ type compileOpts struct {
 	// so a persisted or synced config carrying one must still boot
 	// (#1960); commit / commit-check stay strict.
 	lenientSchedulerDateRange15695 bool
+	// lenientThreeColorBurstFloor16610 downgrades only the #16610
+	// one-frame burst-floor violation in validateThreeColorPolicersStrict
+	// to a warning on tolerant load / peer-sync paths. A sub-frame bucket
+	// persisted by an older binary (which accepted any positive burst)
+	// must still boot (#1960); every other three-color defect stays
+	// strict, and commit / commit-check stay strict.
+	lenientThreeColorBurstFloor16610 bool
 	// lenientSchedulerWindowPairs11358 downgrades conflicting repeated
 	// start-time/stop-time boundaries (#11358) and weekday all-day, exclude,
 	// and time-window meanings split across separate weekday statements
@@ -3787,6 +3794,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicySchedulerRef:                true,
 		lenientSchedulerMapRef:                   true,
 		lenientSchedulerDateRange15695:           true,
+		lenientThreeColorBurstFloor16610:         true,
 		lenientSchedulerWindowPairs11358:         true,
 		lenientDuplicateRootLogin14447:           true,
 		lenientCodelTarget11825:                  true,
