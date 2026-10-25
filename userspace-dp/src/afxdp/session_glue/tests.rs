@@ -704,6 +704,48 @@ fn purge_sessions_for_changed_input_filter_keeps_configured_vlan_child_16889() {
         "a configured VLAN child must purge when its own filter changes"
     );
     assert!(sessions.entry_with_origin(&child_key).is_none());
+
+    // A child added only in the new generation cannot retroactively make a
+    // synced session with an unresolved saved ingress identity known.
+    let mut unknown_key = test_key();
+    unknown_key.src_port = 55071;
+    let mut unknown_metadata = test_metadata();
+    unknown_metadata.ingress_ifindex = 13;
+    unknown_metadata.ingress_vlan_id = 50;
+    assert!(sessions.install_with_protocol_with_origin(
+        unknown_key.clone(),
+        test_decision(),
+        unknown_metadata,
+        SessionOrigin::SyncImport,
+        1,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let _ = sessions.drain_deltas(16);
+    let unknown_old_forwarding = ForwardingState::default();
+    let mut new_only_child_forwarding = ForwardingState::default();
+    new_only_child_forwarding
+        .ingress_logical_ifindex
+        .insert((10, 50), 10);
+    new_only_child_forwarding.egress.insert(
+        13,
+        old_forwarding.egress.get(&13).unwrap().clone(),
+    );
+    assert_eq!(
+        purge_sessions_for_changed_input_filter_cached_semantics(
+            &mut sessions,
+            SteeringMap::unshared_for_test(-1),
+            refs(),
+            &unknown_old_forwarding,
+            &new_only_child_forwarding,
+            &unrelated_v4,
+            &rustc_hash::FxHashSet::default(),
+            0,
+        ),
+        1,
+        "a new child configuration must not resolve an old unknown tagged ingress"
+    );
+    assert!(sessions.entry_with_origin(&unknown_key).is_none());
 }
 
 fn test_local_delivery_decision() -> SessionDecision {

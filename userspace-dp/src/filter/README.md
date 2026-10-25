@@ -1332,10 +1332,11 @@ implementation (#1430); use it as the template:
    detector returns exact ifindexes whose cached routing-instance,
    terminal-action, TX-selection, or policer semantics changed;
    `session_glue::purge_sessions_for_changed_input_filter_cached_semantics`
-   matches those against each session's recorded logical ingress
-   (`ingress_ifindex` + VLAN), retaining configured VLAN-child identity from
-   either forwarding snapshot. If no ingress identity can be resolved (for
-   example, an unknown tagged VID), the conservative family fallback remains.
+   matches those against each session's recorded ingress (`ingress_ifindex` +
+   VLAN), resolving configured VLAN children from each snapshot. The saved
+   identity must resolve in the old snapshot: a child appearing only in the
+   new snapshot cannot validate an old unknown tagged VID. The conservative
+   family fallback remains when no old identity can be resolved.
    Per-packet term-only and counter/log edits are re-evaluated on
    session hit and do not purge unrelated or unchanged sessions.
    `filter_term_semantics_match` remains the exhaustive #5293
