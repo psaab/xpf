@@ -21,7 +21,7 @@ import (
 // Acceptance: def-packed equals ctl-braced, and no compiled instance name
 // contains `<`.
 
-const packedWildcardOSPF16548Secret = "ospf-md5-secret-16548"
+const packedWildcardOSPF16548Secret = "ospf-md5-key"
 
 func packedWildcardOSPF16548(template string) string {
 	return `groups { AUTH { protocols { ospf { area 0.0.0.0 { ` + template + ` } } } } }
@@ -228,7 +228,7 @@ func TestPackedWildcardInlineAuthWins16548(t *testing.T) {
 	text := `groups { AUTH { protocols { ospf { area 0.0.0.0 { interface <*> authentication md5 1 key "` + packedWildcardOSPF16548Secret + `"; } } } } }
 apply-groups AUTH;
 interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } } }
-protocols { ospf { area 0.0.0.0 { interface ge-0/0/0.0 { authentication { simple-password "inline-secret"; } } } } }
+protocols { ospf { area 0.0.0.0 { interface ge-0/0/0.0 { authentication { simple-password "inlinepw"; } } } } }
 `
 	cfg := compileWildcard9423(t, text)
 	assertNoPhantom16548(t, cfg)

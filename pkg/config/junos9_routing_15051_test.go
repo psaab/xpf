@@ -32,7 +32,6 @@ func TestJunos9RoutingKeysDecodedAtCompile15051(t *testing.T) {
 		"set protocols bgp group g1 neighbor 10.0.0.1 peer-as 65001",
 		"set protocols bgp group g1 neighbor 10.0.0.1 authentication-key \"" + junos9Blob15051 + "\"",
 		"set protocols ospf area 0.0.0.0 interface ge-0/0/0.0 authentication md5 1 key \"" + junos9Blob15051 + "\"",
-		"set protocols ospf area 0.0.0.0 interface ge-0/0/1.0 authentication simple-password \"" + junos9Blob15051 + "\"",
 		"set protocols isis authentication-type md5",
 		"set protocols isis authentication-key \"" + junos9Blob15051 + "\"",
 		"set protocols isis interface ge-0/0/2.0 authentication-type md5",
@@ -51,28 +50,22 @@ func TestJunos9RoutingKeysDecodedAtCompile15051(t *testing.T) {
 	if got := cfg.Protocols.BGP.Neighbors[0].AuthPassword.Reveal(); got != junos9Plain15051 {
 		t.Errorf("BGP AuthPassword = %q, want decoded %q (#15051)", got, junos9Plain15051)
 	}
-	var md5Iface, simpleIface *OSPFInterface
+	var md5Iface *OSPFInterface
 	for _, area := range cfg.Protocols.OSPF.Areas {
 		for _, iface := range area.Interfaces {
-			switch iface.Name {
-			case "ge-0/0/0.0":
+			if iface.Name == "ge-0/0/0.0" {
 				md5Iface = iface
-			case "ge-0/0/1.0":
-				simpleIface = iface
 			}
 		}
 	}
-	if md5Iface == nil || simpleIface == nil {
-		t.Fatalf("OSPF interfaces missing (md5=%v simple=%v) — fixture dead", md5Iface != nil, simpleIface != nil)
+	if md5Iface == nil {
+		t.Fatalf("OSPF md5 interface missing — fixture dead")
 	}
 	if got := md5Iface.AuthKey.Reveal(); got != junos9Plain15051 {
 		t.Errorf("OSPF md5 AuthKey = %q, want decoded %q (#15051)", got, junos9Plain15051)
 	}
 	if len(md5Iface.AuthMD5Keys) != 1 || md5Iface.AuthMD5Keys[0].Key.Reveal() != junos9Plain15051 {
 		t.Errorf("OSPF AuthMD5Keys = %+v, want one key decoded to %q (#15051)", md5Iface.AuthMD5Keys, junos9Plain15051)
-	}
-	if got := simpleIface.AuthKey.Reveal(); got != junos9Plain15051 {
-		t.Errorf("OSPF simple AuthKey = %q, want decoded %q (#15051)", got, junos9Plain15051)
 	}
 	if got := cfg.Protocols.ISIS.AuthKey.Reveal(); got != junos9Plain15051 {
 		t.Errorf("IS-IS AuthKey = %q, want decoded %q (#15051)", got, junos9Plain15051)
@@ -85,6 +78,50 @@ func TestJunos9RoutingKeysDecodedAtCompile15051(t *testing.T) {
 	}
 	if got := cfg.Protocols.RIP.AuthKey.Reveal(); got != junos9Plain15051 {
 		t.Errorf("RIP AuthKey = %q, want decoded %q (#15051)", got, junos9Plain15051)
+	}
+}
+
+// TestJunos9OSPFSimpleDecodedAtCompile15051 pins the OSPF
+// simple-password leaf separately: its decoded plaintext
+// (junos9Plain15051, 10 chars) exceeds the #16628 8-character bound,
+// so strict compile must REFUSE it (the bound applies to the decoded
+// plaintext ospfd would hold), while the tolerant path still boots
+// with the plaintext installed and a #16628 warning.
+func TestJunos9OSPFSimpleDecodedAtCompile15051(t *testing.T) {
+	lines := []string{
+		"set protocols ospf area 0.0.0.0 interface ge-0/0/1.0 authentication simple-password \"" + junos9Blob15051 + "\"",
+	}
+	if _, err := CompileConfig(buildTree(t, lines)); err == nil {
+		t.Fatalf("strict compile accepted a $9$ simple-password decoding to %d chars over the #16628 bound", len(junos9Plain15051))
+	} else if !strings.Contains(err.Error(), "16628") {
+		t.Fatalf("strict refusal does not cite #16628: %v", err)
+	}
+	cfg, err := CompileConfigLenient(buildTree(t, lines))
+	if err != nil {
+		t.Fatalf("lenient compile: %v", err)
+	}
+	var simpleIface *OSPFInterface
+	for _, area := range cfg.Protocols.OSPF.Areas {
+		for _, iface := range area.Interfaces {
+			if iface.Name == "ge-0/0/1.0" {
+				simpleIface = iface
+			}
+		}
+	}
+	if simpleIface == nil {
+		t.Fatal("OSPF simple interface missing — fixture dead")
+	}
+	if got := simpleIface.AuthKey.Reveal(); got != junos9Plain15051 {
+		t.Errorf("OSPF simple AuthKey = %q, want decoded %q (#15051)", got, junos9Plain15051)
+	}
+	var warned bool
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "16628") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Errorf("lenient $9$ simple over-bound produced no #16628 warning; warnings=%v", cfg.Warnings)
 	}
 }
 

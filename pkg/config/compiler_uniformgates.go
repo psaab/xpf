@@ -218,6 +218,20 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	} else {
 		cfg.Warnings = append(cfg.Warnings, w...)
 	}
+	// #16628 (R3-A12-04): an OSPF MD5 key over 16 characters or a
+	// simple-password over 8 is silently truncated by ospfd, so every
+	// frr-reload deletes and re-adds it (perpetual diff) and the
+	// effective key diverges from `show configuration`. Appended
+	// beside the #14397 gate so a new error cannot steal established
+	// first-error priority. Runs after decodeJunos9AtCompile (#15051,
+	// first in runUniformGatesLogFeedRouting), so the bound applies
+	// to the decoded plaintext. Tolerant loads preserve the config
+	// with a warning; the renderer withholds the over-long key.
+	if w, err := validateOSPFKeyLengthStrict(cfg, opts.lenientOSPFKeyLength16628); err != nil {
+		return err
+	} else {
+		cfg.Warnings = append(cfg.Warnings, w...)
+	}
 	// #15935: same-ID OSPF MD5 restated with a different key. Appended
 	// beside #14397 so it cannot steal established first-error priority.
 	if err := validateOSPFMD5DuplicateKeys15935(cfg); err != nil {

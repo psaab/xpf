@@ -19,7 +19,7 @@ import (
 var secretSentinels = []string{
 	"LEAK-IKE-PSK",            // IKEPolicy.PSK
 	"LEAK-IPSEC-VPN-PSK",      // IPsecVPN.PSK (legacy vpn-level)
-	"LEAK-OSPF-AUTHKEY",       // OSPFInterface.AuthKey
+	"LEAK-OSPF-KEY",           // OSPFInterface.AuthKey
 	"LEAK-RIP-AUTHKEY",        // RIPConfig.AuthKey
 	"LEAK-ISIS-AREA-AUTHKEY",  // ISISConfig.AuthKey
 	"LEAK-ISIS-IFACE-AUTHKEY", // ISISInterface.AuthKey
@@ -66,7 +66,7 @@ var secretSetCommands = []string{
 	"set security ipsec vpn site-a ipsec-policy aes256",
 	"set security ipsec vpn site-a pre-shared-key LEAK-IPSEC-VPN-PSK",
 	// OSPF interface auth key.
-	"set protocols ospf area 0.0.0.0 interface ge-0-0-1 authentication md5 1 key LEAK-OSPF-AUTHKEY",
+	"set protocols ospf area 0.0.0.0 interface ge-0-0-1 authentication md5 1 key LEAK-OSPF-KEY",
 	// RIP auth key.
 	"set protocols rip neighbor ge-0-0-1",
 	"set protocols rip authentication-type md5",

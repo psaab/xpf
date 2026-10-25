@@ -1488,10 +1488,58 @@ The fix is split, mirroring #9105/#14398/#14977:
   than emitting a line ripd rejects forever or an unauthenticated block.
 
 The bound counts **characters (runes)**, matching the operator-visible
-length. Only the RIP key is capped: OSPF/IS-IS/BGP keys render through
-different FRR commands and are deliberately untouched. Neighbouring
-legitimate behaviour is unchanged — a 16-character key (md5 or
-simple/text), a short key, and the no-auth shape render byte-identically.
+length. Only the RIP key is capped by #15013: OSPF keys are capped by
+#16628 below; IS-IS/BGP keys render through different FRR commands and
+are deliberately untouched by either gate. Neighbouring legitimate
+behaviour is unchanged — a 16-character key (md5 or simple/text), a
+short key, and the no-auth shape render byte-identically.
+
+### `protocols ospf ... authentication` keys — MD5 at most 16, simple at most 8 characters (#16628)
+
+FRR ospfd's `ip ospf message-digest-key <id> md5 <key>` holds a
+**16-character** MD5 key (RFC 2328 D.4.3: "The 16 byte MD5 key is
+appended to the OSPF packet") and `ip ospf authentication-key <pw>`
+holds an **8-character** simple password (RFC 2328 D.2: simple
+password is "a 64-bit field"). Both leaves were untyped with no
+validator and no compiled length gate, so a 17-character MD5 key or a
+9-character simple-password committed clean, rendered verbatim, and
+ospfd silently truncated it in running-config. Every `frr-reload`
+then saw a delete-and-add pair for the key — a perpetual diff that
+also permanently defeats the #15203 reload-diff certification — and
+the effective key diverged silently from `show configuration`.
+
+The fix is split, mirroring #15013 for RIP and #14397/#14977 for OSPF:
+
+- **Commit (strict)**: the schema leaves now carry
+  `ValidateOSPFMD5KeyLength` / `ValidateOSPFSimplePasswordLength`
+  (`ValueIdentifier`, 1..16 / 1..8 characters, shared by the global
+  and routing-instance copies via `schemaProtocols`), and the
+  compiled gate `validateOSPFKeyLengthStrict` enforces the same
+  bounds on the compiled `OSPFConfig` — every `AuthMD5Keys` entry
+  (plus the legacy `AuthKey` view) and the simple `AuthKey`, globally
+  and per routing instance. Both reject one-over and accept
+  at-the-bound; neither error nor warning ever contains the key
+  value, only its length.
+- **Tolerant load / HA sync (#1960)**: the compiled gate downgrades
+  to a warning (`lenientOSPFKeyLength16628`) so a persisted config
+  still boots.
+- **Render belt**: `pkg/frr` withholds an over-long key fail-closed.
+  For MD5 only the over-long entry is dropped — a valid rollover key
+  on the same interface still renders, and if no key survives the
+  #14388 whole-interface omission applies. For simple the whole
+  interface block is omitted (no `interface`, no `ip ospf area`),
+  exactly like the #14977 unrenderable-token arm — rather than
+  emitting a truncating line or an unauthenticated block.
+
+The bound counts **characters (runes)**, matching the operator-visible
+length. The Junos `$9$` case follows #15051: `decodeJunos9AtCompile`
+decodes the blob to plaintext before this gate runs, so the bound
+applies to the decoded plaintext ospfd would hold, never to the
+authored blob. Neighbouring legitimate behaviour is unchanged — a
+16-character MD5 key, an 8-character simple-password, a short key,
+and the no-auth shape render byte-identically. Only the OSPF keys
+are capped here: RIP is #15013's gate, and IS-IS/BGP keys are
+deliberately untouched.
 
 ### `protocols isis interface <if> level` — the PER-INTERFACE circuit type (#8450)
 

@@ -1041,6 +1041,15 @@ type compileOpts struct {
 	// independently omits the keyless-auth interface rather than
 	// activating it unauthenticated.
 	lenientOSPFAuthKeyPresence14397 bool
+	// lenientOSPFKeyLength16628 downgrades the #16628 OSPF key-length
+	// rejection (MD5 key >16 characters, simple-password >8, which
+	// FRR ospfd silently truncates so every frr-reload deletes and
+	// re-adds the key) to a warning on the tolerant paths
+	// (Store.Load, Store.SyncApply). A config an older binary
+	// accepted must still BOOT (#1960); the FRR renderer withholds
+	// the over-long key fail-closed instead of rendering a line
+	// ospfd truncates forever.
+	lenientOSPFKeyLength16628 bool
 	// lenientOSPFMD5DuplicateKey15935 downgrades a same-ID OSPF MD5
 	// restatement with a different key to a warning on tolerant load /
 	// peer-sync (#15935); the first key wins deterministically.
@@ -3867,6 +3876,7 @@ func lenientCompileOpts() compileOpts {
 		lenientOSPFMD5KeyID11794:                 true,
 		lenientOSPFMD5DuplicateKey15935:          true,
 		lenientOSPFAuthKeyPresence14397:          true,
+		lenientOSPFKeyLength16628:                true,
 		lenientISISMetric11823:                   true,
 		lenientBGPPrefixLimit11793:               true,
 		lenientBGPSAFI11815:                      true,

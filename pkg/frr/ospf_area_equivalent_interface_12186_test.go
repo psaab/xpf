@@ -88,7 +88,7 @@ func TestOSPFAreaEquivalentUnionAcrossOrderings12186(t *testing.T) {
 				costFrag := &config.OSPFInterface{Name: "eth0", Cost: 10, BFDInterval: 100}
 				settingsFrag := &config.OSPFInterface{
 					Name:     "eth0",
-					AuthType: "simple", AuthKey: config.NewSecret("union-secret-12186"),
+					AuthType: "simple", AuthKey: config.NewSecret("union-pw"),
 					HelloInterval: 5, DeadInterval: 20, RetransmitInt: 7,
 					HasPriority: true, // Priority 0 ("never DR") is set, not unset.
 					NetworkType: "point-to-point",
@@ -110,7 +110,7 @@ func TestOSPFAreaEquivalentUnionAcrossOrderings12186(t *testing.T) {
 				for _, want := range []string{
 					" ip ospf cost 10\n",
 					" ip ospf authentication\n",
-					" ip ospf authentication-key union-secret-12186\n",
+					" ip ospf authentication-key union-pw\n",
 					" ip ospf hello-interval 5\n",
 					" ip ospf dead-interval 20\n",
 					" ip ospf retransmit-interval 7\n",
@@ -229,7 +229,7 @@ func TestOSPFStrictCompileCostPlusMD512186(t *testing.T) {
 		t.Run("areas "+areas[0]+"-then-"+areas[1], func(t *testing.T) {
 			cfg := compileTree12186(t, true,
 				"set protocols ospf area "+areas[0]+" interface ge-0/0/1.0 cost 10",
-				"set protocols ospf area "+areas[1]+" interface ge-0/0/1.0 authentication md5 7 key auth-secret-12186",
+				"set protocols ospf area "+areas[1]+" interface ge-0/0/1.0 authentication md5 7 key auth-key-12186",
 			)
 			got := renderManaged12186(cfg)
 			if n := countInterfaceBlocks12186(got, "ge-0-0-1"); n != 1 {
@@ -238,7 +238,7 @@ func TestOSPFStrictCompileCostPlusMD512186(t *testing.T) {
 			for _, want := range []string{
 				" ip ospf cost 10\n",
 				" ip ospf authentication message-digest\n",
-				" ip ospf message-digest-key 7 md5 auth-secret-12186\n",
+				" ip ospf message-digest-key 7 md5 auth-key-12186\n",
 				" ip ospf area " + areas[0] + "\n",
 			} {
 				if !strings.Contains(got, want) {
@@ -268,7 +268,7 @@ func TestOSPFStrictCompileAliasSpellings12186(t *testing.T) {
 			t.Run(sanitize.Replace(alias)+"-"+shape.name, func(t *testing.T) {
 				cfg := compileTree12186(t, true,
 					"set protocols ospf area "+shape.areas[0]+" interface ge-0/0/1.0 cost 10",
-					"set protocols ospf area "+shape.areas[1]+" interface "+alias+" authentication md5 7 key alias-secret-12186",
+					"set protocols ospf area "+shape.areas[1]+" interface "+alias+" authentication md5 7 key alias-key-12186",
 				)
 				got := renderManaged12186(cfg)
 				if n := countInterfaceBlocks12186(got, "ge-0-0-1"); n != 1 {
@@ -277,7 +277,7 @@ func TestOSPFStrictCompileAliasSpellings12186(t *testing.T) {
 				for _, want := range []string{
 					" ip ospf cost 10\n",
 					" ip ospf authentication message-digest\n",
-					" ip ospf message-digest-key 7 md5 alias-secret-12186\n",
+					" ip ospf message-digest-key 7 md5 alias-key-12186\n",
 					" ip ospf area " + shape.areas[0] + "\n",
 				} {
 					if !strings.Contains(got, want) {
@@ -302,12 +302,12 @@ func TestOSPFStrictCompileMD5Rollover12186(t *testing.T) {
 		area string
 	}{
 		{"same-area", []string{
-			"set protocols ospf area 0 interface ge-0/0/1.0 authentication md5 1 key rollover-first-12186",
-			"set protocols ospf area 0 interface ge-0/0/1.0 authentication md5 2 key rollover-second-12186",
+			"set protocols ospf area 0 interface ge-0/0/1.0 authentication md5 1 key rollover-1st",
+			"set protocols ospf area 0 interface ge-0/0/1.0 authentication md5 2 key rollover-2nd",
 		}, "0"},
 		{"equivalent-areas", []string{
-			"set protocols ospf area 0 interface ge-0/0/1.0 authentication md5 1 key rollover-first-12186",
-			"set protocols ospf area 0.0.0.0 interface ge-0/0/1.0 authentication md5 2 key rollover-second-12186",
+			"set protocols ospf area 0 interface ge-0/0/1.0 authentication md5 1 key rollover-1st",
+			"set protocols ospf area 0.0.0.0 interface ge-0/0/1.0 authentication md5 2 key rollover-2nd",
 		}, "0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -317,8 +317,8 @@ func TestOSPFStrictCompileMD5Rollover12186(t *testing.T) {
 				t.Fatalf("rendered %d ge-0-0-1 blocks; want exactly one:\n%s", n, got)
 			}
 			for _, want := range []string{
-				" ip ospf message-digest-key 1 md5 rollover-first-12186\n",
-				" ip ospf message-digest-key 2 md5 rollover-second-12186\n",
+				" ip ospf message-digest-key 1 md5 rollover-1st\n",
+				" ip ospf message-digest-key 2 md5 rollover-2nd\n",
 				" ip ospf area " + tc.area + "\n",
 			} {
 				if !strings.Contains(got, want) {
@@ -337,7 +337,7 @@ func TestOSPFStrictCompileMD5Rollover12186(t *testing.T) {
 func TestOSPFStrictCompileApplyGroupsMD512186(t *testing.T) {
 	t.Run("group-md5-plus-inline-cost", func(t *testing.T) {
 		cfg := compileTree12186(t, true,
-			"set groups OSPF-MD5-12186 protocols ospf area 0.0.0.0 interface ge-0/0/1.0 authentication md5 7 key group-secret-12186",
+			"set groups OSPF-MD5-12186 protocols ospf area 0.0.0.0 interface ge-0/0/1.0 authentication md5 7 key group-key-12186",
 			"set apply-groups OSPF-MD5-12186",
 			"set protocols ospf area 0 interface ge-0/0/1.0 cost 10",
 		)
@@ -348,7 +348,7 @@ func TestOSPFStrictCompileApplyGroupsMD512186(t *testing.T) {
 		for _, want := range []string{
 			" ip ospf cost 10\n",
 			" ip ospf authentication message-digest\n",
-			" ip ospf message-digest-key 7 md5 group-secret-12186\n",
+			" ip ospf message-digest-key 7 md5 group-key-12186\n",
 			" ip ospf area 0\n",
 		} {
 			if !strings.Contains(got, want) {
@@ -359,17 +359,17 @@ func TestOSPFStrictCompileApplyGroupsMD512186(t *testing.T) {
 
 	t.Run("group-md5-plus-inline-md5-rollover", func(t *testing.T) {
 		cfg := compileTree12186(t, true,
-			"set groups OSPF-MD5-12186 protocols ospf area 0 interface ge-0/0/1.0 authentication md5 1 key group-first-12186",
+			"set groups OSPF-MD5-12186 protocols ospf area 0 interface ge-0/0/1.0 authentication md5 1 key group-1st-12186",
 			"set apply-groups OSPF-MD5-12186",
-			"set protocols ospf area 0 interface ge-0/0/1.0 authentication md5 2 key inline-second-12186",
+			"set protocols ospf area 0 interface ge-0/0/1.0 authentication md5 2 key inline-2nd-12186",
 		)
 		got := renderManaged12186(cfg)
 		if n := countInterfaceBlocks12186(got, "ge-0-0-1"); n != 1 {
 			t.Fatalf("rendered %d ge-0-0-1 blocks; want exactly one:\n%s", n, got)
 		}
 		for _, want := range []string{
-			" ip ospf message-digest-key 1 md5 group-first-12186\n",
-			" ip ospf message-digest-key 2 md5 inline-second-12186\n",
+			" ip ospf message-digest-key 1 md5 group-1st-12186\n",
+			" ip ospf message-digest-key 2 md5 inline-2nd-12186\n",
 			" ip ospf area 0\n",
 		} {
 			if !strings.Contains(got, want) {
@@ -459,8 +459,8 @@ func TestOSPFTolerantConflictRetainsFirstPresent12186(t *testing.T) {
 		t.Run("ospfv2 "+name, func(t *testing.T) {
 			logs, restore := captureSlog12186()
 			defer restore()
-			a := &config.OSPFInterface{Name: "eth0", Cost: 10, HelloInterval: 5, AuthType: "simple", AuthKey: config.NewSecret("first-secret-12186")}
-			b := &config.OSPFInterface{Name: "eth0", Cost: 20, HelloInterval: 9, AuthType: "simple", AuthKey: config.NewSecret("second-secret-12186")}
+			a := &config.OSPFInterface{Name: "eth0", Cost: 10, HelloInterval: 5, AuthType: "simple", AuthKey: config.NewSecret("first-pw")}
+			b := &config.OSPFInterface{Name: "eth0", Cost: 20, HelloInterval: 9, AuthType: "simple", AuthKey: config.NewSecret("secondpw")}
 			want, absent := a, b
 			if swap {
 				want, absent = b, a
@@ -492,7 +492,7 @@ func TestOSPFTolerantConflictRetainsFirstPresent12186(t *testing.T) {
 				}
 			}
 			assertConflictWarned12186(t, logs.String(), "OSPF", []string{"cost", "hello-interval", "authentication simple-password"})
-			for _, secret := range []string{"first-secret-12186", "second-secret-12186"} {
+			for _, secret := range []string{"first-pw", "secondpw"} {
 				if strings.Contains(logs.String(), secret) {
 					t.Errorf("conflict warning exposed a secret: %s", logs.String())
 				}
@@ -528,8 +528,8 @@ func TestOSPFTolerantConflictRetainsFirstPresent12186(t *testing.T) {
 		t.Run("ospfv2 md5-same-id "+name, func(t *testing.T) {
 			logs, restore := captureSlog12186()
 			defer restore()
-			a := &config.OSPFInterface{Name: "eth0", AuthType: "md5", AuthKeyID: 7, AuthKey: config.NewSecret("md5-first-12186")}
-			b := &config.OSPFInterface{Name: "eth0", AuthType: "md5", AuthKeyID: 7, AuthKey: config.NewSecret("md5-second-12186")}
+			a := &config.OSPFInterface{Name: "eth0", AuthType: "md5", AuthKeyID: 7, AuthKey: config.NewSecret("md5-1st-12186")}
+			b := &config.OSPFInterface{Name: "eth0", AuthType: "md5", AuthKeyID: 7, AuthKey: config.NewSecret("md5-2nd-12186")}
 			want, absent := a, b
 			if swap {
 				want, absent = b, a
@@ -549,7 +549,7 @@ func TestOSPFTolerantConflictRetainsFirstPresent12186(t *testing.T) {
 				t.Errorf("conflicting later key leaked:\n%s", got)
 			}
 			assertConflictWarned12186(t, logs.String(), "OSPF", []string{"authentication md5 key"})
-			for _, secret := range []string{"md5-first-12186", "md5-second-12186"} {
+			for _, secret := range []string{"md5-1st-12186", "md5-2nd-12186"} {
 				if strings.Contains(logs.String(), secret) {
 					t.Errorf("conflict warning exposed a secret: %s", logs.String())
 				}
@@ -558,8 +558,8 @@ func TestOSPFTolerantConflictRetainsFirstPresent12186(t *testing.T) {
 		t.Run("ospfv2 incompatible-auth-type "+name, func(t *testing.T) {
 			logs, restore := captureSlog12186()
 			defer restore()
-			md5 := &config.OSPFInterface{Name: "eth0", AuthType: "md5", AuthKeyID: 11, AuthKey: config.NewSecret("md5-auth-first-12186")}
-			simple := &config.OSPFInterface{Name: "eth0", AuthType: "simple", AuthKey: config.NewSecret("simple-auth-second-12186")}
+			md5 := &config.OSPFInterface{Name: "eth0", AuthType: "md5", AuthKeyID: 11, AuthKey: config.NewSecret("md5-auth-1st")}
+			simple := &config.OSPFInterface{Name: "eth0", AuthType: "simple", AuthKey: config.NewSecret("simplepw")}
 			first, later := md5, simple
 			if swap {
 				first, later = simple, md5
@@ -573,21 +573,21 @@ func TestOSPFTolerantConflictRetainsFirstPresent12186(t *testing.T) {
 				t.Fatalf("rendered %d interface blocks; want exactly one:\n%s", n, got)
 			}
 			if first.AuthType == "md5" {
-				if !strings.Contains(got, " ip ospf message-digest-key 11 md5 md5-auth-first-12186\n") ||
+				if !strings.Contains(got, " ip ospf message-digest-key 11 md5 md5-auth-1st\n") ||
 					strings.Contains(got, " ip ospf authentication-key ") ||
-					strings.Contains(got, "simple-auth-second-12186") {
+					strings.Contains(got, "simplepw") {
 					t.Errorf("simple-password key crossed into first-present MD5 auth:\n%s", got)
 				}
 			} else {
-				if !strings.Contains(got, " ip ospf authentication-key simple-auth-second-12186\n") ||
+				if !strings.Contains(got, " ip ospf authentication-key simplepw\n") ||
 					strings.Contains(got, " ip ospf authentication message-digest\n") ||
 					strings.Contains(got, " ip ospf message-digest-key ") ||
-					strings.Contains(got, "md5-auth-first-12186") {
+					strings.Contains(got, "md5-auth-1st") {
 					t.Errorf("MD5 key crossed into first-present simple auth:\n%s", got)
 				}
 			}
 			assertConflictWarned12186(t, logs.String(), "OSPF", []string{"authentication-type"})
-			for _, secret := range []string{"md5-auth-first-12186", "simple-auth-second-12186"} {
+			for _, secret := range []string{"md5-auth-1st", "simplepw"} {
 				if strings.Contains(logs.String(), secret) {
 					t.Errorf("conflict warning exposed a secret: %s", logs.String())
 				}

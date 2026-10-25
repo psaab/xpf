@@ -90,8 +90,8 @@ var fabricSecretConfig = []string{
 	"set security ipsec vpn site-a pre-shared-key FAB6532-IPSEC-VPN-PSK",
 	"set security ipsec vpn site-a ike gateway gw1",
 	"set security ipsec vpn site-a bind-interface st0",
-	"set protocols ospf area 0.0.0.0 interface ge-0-0-1 authentication md5 1 key FAB6532-OSPF-MD5KEY",
-	"set protocols ospf area 0.0.0.0 interface ge-0-0-9 authentication simple-password FAB6532-OSPF-SIMPLE",
+	"set protocols ospf area 0.0.0.0 interface ge-0-0-1 authentication md5 1 key FAB6532-MD5KEY",
+	"set protocols ospf area 0.0.0.0 interface ge-0-0-9 authentication simple-password FABSIMPL",
 	// #9105: each key needs an explicit `authentication-type`. An absent type
 	// is now refused at commit because it is indistinguishable at the render
 	// site from a chosen PLAINTEXT one, and this fixture's whole subject is
@@ -126,8 +126,8 @@ var fabricSecretConfig = []string{
 // fabricSecretSentinels is the cleartext token of each staged secret. Any of
 // these appearing in a fabric-reachable render is a credential disclosure.
 var fabricSecretSentinels = []string{
-	"FAB6532-IKE-PSK", "FAB6532-IPSEC-VPN-PSK", "FAB6532-OSPF-MD5KEY",
-	"FAB6532-OSPF-SIMPLE", "FAB6532-RIPKEY", "FAB6532-ISIS-AREA-AUTHKEY",
+	"FAB6532-IKE-PSK", "FAB6532-IPSEC-VPN-PSK", "FAB6532-MD5KEY",
+	"FABSIMPL", "FAB6532-RIPKEY", "FAB6532-ISIS-AREA-AUTHKEY",
 	"FAB6532-ISIS-IFACE-AUTHKEY", "FAB6532-BGP-AUTHPW", fabricAPIAuthUserPasswordSentinel,
 	fabricAPIAuthLegacyKeySentinel, "FAB6532-SNMPV3-AUTHPW", "FAB6532-SNMPV3-PRIVPW",
 	"FAB6532-SNMP-COMMUNITY", "FAB6532-TSIG-SECRET", "FAB6532-DDNS-APITOKEN",
