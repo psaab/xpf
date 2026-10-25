@@ -412,6 +412,11 @@ pub(super) fn apply(
             // the restored snapshot.
             let prev_bindings = guard.status.bindings.clone();
             let prev_workers = guard.status.workers;
+            // #16555: fence the candidate against the CURRENT live
+            // forwarding/dynamic state before it becomes the stored
+            // baseline the reconcile (and later rebind/arm) builds from.
+            let mut snapshot = snapshot;
+            guard.afxdp.fence_snapshot_neighbors(&mut snapshot);
             let prev_snapshot = std::mem::replace(&mut guard.snapshot, Some(snapshot));
             if let Err(err) =
                 reconcile_status_bindings_with_policy_state(guard, policy_state.take())
@@ -514,6 +519,14 @@ pub(super) fn apply(
                     err
                 );
                 return;
+            }
+            // #16555: the refresh built from the RAW snapshot (its build
+            // already fenced against the previous generation); store the
+            // FENCED rows so a refused MAC is never persisted for
+            // rebind/arm to rebuild as the static binding.
+            let mut snapshot = snapshot;
+            if guard.afxdp.fence_snapshot_neighbors(&mut snapshot) {
+                snapshot.content_digest.clear();
             }
             guard.snapshot = Some(snapshot);
         }
@@ -623,6 +636,18 @@ pub(super) fn apply(
             guard
                 .afxdp
                 .prune_local_tunnel_sources_for_snapshot(&snapshot);
+        }
+        // #16555: fence the candidate before it becomes the stored
+        // baseline. On the non-defer leg the reconcile below builds with
+        // previous = the live forwarding, so its static table is already
+        // fenced; this keeps the STORED rows aligned with it. On the
+        // defer leg no build has installed the candidate yet, so this
+        // pre-fence is the only guard before persistence — and it stays
+        // correct at arm time because the arm build fences again
+        // against the then-live state.
+        let mut snapshot = snapshot;
+        if guard.afxdp.fence_snapshot_neighbors(&mut snapshot) {
+            snapshot.content_digest.clear();
         }
         let prev_snapshot = std::mem::replace(&mut guard.snapshot, Some(snapshot));
         guard.status.bindings = replanned;

@@ -2885,6 +2885,155 @@ fn manager_neighbor_mirror_cannot_replace_live_mac_without_confirmation_13951() 
     );
 }
 
+/// #16555: the va71 subject cell — a same-plan config apply carrying a
+/// spoofed STALE kernel row must not launder the attacker MAC into the
+/// static table, the fence must then still admit the genuine MAC once
+/// the monitor confirms it, and a permanent row may still replace.
+/// Fail-on-revert: restoring the unconditional `populate_neighbors`
+/// insert installs the spoofed MAC at the refresh and every assertion
+/// on `original.mac` below flips.
+#[test]
+fn snapshot_refresh_cannot_launder_refused_neighbor_mac_16555() {
+    let mut coordinator = Coordinator::new();
+    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 50));
+    let original = NeighborEntry {
+        mac: [0x02, 0, 0, 0, 0, 1],
+    };
+    let spoofed = NeighborEntry {
+        mac: [0x02, 0, 0, 0, 0, 2],
+    };
+    let snap = |mac: [u8; 6], state: &str| ConfigSnapshot {
+        neighbors: vec![NeighborSnapshot {
+            interface: "ge-0-0-1".to_string(),
+            ifindex: 7,
+            family: "inet".to_string(),
+            ip: target.to_string(),
+            mac: format!(
+                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+            ),
+            state: state.to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let lookup = |coordinator: &Coordinator| {
+        lookup_neighbor_entry(
+            &coordinator.forwarding,
+            Some(coordinator.dynamic_neighbors_ref()),
+            7,
+            target,
+        )
+        .map(|entry| entry.mac)
+    };
+    // Baseline: the genuine MAC G is the live static binding, installed
+    // twice (the second install is the live binding the fence defends).
+    assert!(coordinator.apply_manager_neighbors(true, 1, &[(7, target, original)]));
+    assert!(coordinator.apply_manager_neighbors(true, 2, &[(7, target, original)]));
+    // Control: the mirror fence refuses the spoofed MAC.
+    assert!(coordinator.apply_manager_neighbors(true, 3, &[(7, target, spoofed)]));
+    assert_eq!(lookup(&coordinator), Some(original.mac));
+    // THE DEFECT LEG: a config apply (same-plan refresh) whose snapshot
+    // carries the spoof-updated kernel row (STALE, not permanent) must
+    // keep G, not install the attacker MAC as the static binding.
+    coordinator
+        .refresh_runtime_snapshot(&snap(spoofed.mac, "stale"))
+        .expect("refresh must succeed");
+    assert_eq!(
+        lookup(&coordinator),
+        Some(original.mac),
+        "a config apply must not launder the mirror-refused MAC into the static table"
+    );
+    assert_eq!(
+        coordinator
+            .forwarding
+            .neighbors
+            .get(&(7, target))
+            .map(|e| e.mac),
+        Some(original.mac),
+        "the static table itself must retain G after the spoofed refresh"
+    );
+    // Self-perpetuation check: the genuine mirror re-push must not be
+    // refused in favour of a laundered attacker MAC. (Pre-fix the
+    // laundered MAC became the defended prior and this stayed spoofed.)
+    assert!(coordinator.apply_manager_neighbors(true, 4, &[(7, target, original)]));
+    assert_eq!(lookup(&coordinator), Some(original.mac));
+    // Convergence: once the monitor's dynamic cache confirms the new
+    // MAC, both the mirror and a subsequent refresh admit it.
+    coordinator
+        .dynamic_neighbors_ref()
+        .insert((7, target), spoofed);
+    assert!(coordinator.apply_manager_neighbors(true, 5, &[(7, target, spoofed)]));
+    assert_eq!(lookup(&coordinator), Some(spoofed.mac));
+    coordinator
+        .refresh_runtime_snapshot(&snap(spoofed.mac, "stale"))
+        .expect("confirmed refresh must succeed");
+    assert_eq!(
+        lookup(&coordinator),
+        Some(spoofed.mac),
+        "a dynamic-confirmed MAC must converge through a config apply"
+    );
+    // Permanent exception through the build boundary.
+    let permanent = NeighborEntry {
+        mac: [0x02, 0, 0, 0, 0, 3],
+    };
+    coordinator
+        .refresh_runtime_snapshot(&snap(permanent.mac, "permanent"))
+        .expect("permanent refresh must succeed");
+    assert_eq!(
+        lookup(&coordinator),
+        Some(permanent.mac),
+        "a NUD_PERMANENT snapshot row may replace the live binding"
+    );
+}
+
+/// #16555 twin: the full-reconcile build (`build_reconcile_forwarding`,
+/// previous = live forwarding) must fence the same spoofed row the
+/// same-plan refresh fences. Drives the production reconcile build
+/// entry directly; a worker-spawning `reconcile()` is not needed to
+/// prove the build boundary.
+#[test]
+fn reconcile_build_cannot_launder_refused_neighbor_mac_16555() {
+    let mut coordinator = Coordinator::new();
+    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 51));
+    let original = NeighborEntry {
+        mac: [0x02, 0, 0, 0, 0, 1],
+    };
+    let spoofed = NeighborEntry {
+        mac: [0x02, 0, 0, 0, 0, 2],
+    };
+    assert!(coordinator.apply_manager_neighbors(true, 1, &[(7, target, original)]));
+    assert!(coordinator.apply_manager_neighbors(true, 2, &[(7, target, original)]));
+    let spoofed_snap = ConfigSnapshot {
+        neighbors: vec![NeighborSnapshot {
+            interface: "ge-0-0-1".to_string(),
+            ifindex: 7,
+            family: "inet".to_string(),
+            ip: target.to_string(),
+            mac: "02:00:00:00:00:02".to_string(),
+            state: "stale".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    // Drive the production dynamic-carrying build with previous = the
+    // live forwarding — the exact call `build_reconcile_forwarding`
+    // makes — without spawning workers.
+    let built = crate::afxdp::forwarding_build::build_forwarding_state_with_policy_counters_previous_and_dynamic(
+        &spoofed_snap,
+        &coordinator.policy_counters,
+        &coordinator.nat_counters,
+        Some(&coordinator.forwarding),
+        Some(coordinator.dynamic_neighbors_ref()),
+    )
+    .expect("reconcile build must succeed");
+    assert_eq!(
+        built.neighbors.get(&(7, target)).map(|e| e.mac),
+        Some(original.mac),
+        "the full-reconcile build must retain G against a spoofed STALE row"
+    );
+}
+
 #[test]
 fn manager_neighbor_replace_preserves_packet_learned_entries() {
     let mut coordinator = Coordinator::new();

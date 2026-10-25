@@ -49,6 +49,9 @@ mod connected_ifindex_12063;
 mod primary_address_15155;
 
 pub(crate) use fib::neighbor_family_mismatch;
+// #16555: the single #13951 neighbor-MAC accept rule, shared with the
+// coordinator mirror verb and the server neighbor handler.
+pub(crate) use fib::fenced_neighbor_mac;
 pub(in crate::afxdp) use interfaces::{
     connected_route_tables, is_host_inbound_lifeline, pick_interface_v4, pick_interface_v6,
 };
@@ -324,6 +327,27 @@ pub(super) fn build_forwarding_state_with_policy_counters_and_previous(
         nat_counters,
         previous,
         None,
+        None,
+    )
+}
+
+/// #16555: production build carrying the live dynamic neighbor map so
+/// `populate_neighbors` can apply the #13951 fence (previous static +
+/// dynamic confirmation) instead of laundering a spoofed kernel MAC.
+pub(super) fn build_forwarding_state_with_policy_counters_previous_and_dynamic(
+    snapshot: &ConfigSnapshot,
+    policy_counters: &PolicyCounterStore,
+    nat_counters: &crate::nat::NatCounterStore,
+    previous: Option<&ForwardingState>,
+    dynamic: Option<&crate::afxdp::ShardedNeighborMap>,
+) -> Result<ForwardingState, crate::policy::SnapshotIntegrityError> {
+    build_forwarding_state_with_policy_state_and_previous(
+        snapshot,
+        policy_counters,
+        nat_counters,
+        previous,
+        None,
+        dynamic,
     )
 }
 
@@ -340,6 +364,26 @@ pub(super) fn build_forwarding_state_with_preparsed_policy_and_previous(
         nat_counters,
         previous,
         Some(policy_state),
+        None,
+    )
+}
+
+/// #16555: preparsed-policy twin of the dynamic-carrying build.
+pub(super) fn build_forwarding_state_with_preparsed_policy_previous_and_dynamic(
+    snapshot: &ConfigSnapshot,
+    policy_counters: &PolicyCounterStore,
+    nat_counters: &crate::nat::NatCounterStore,
+    previous: Option<&ForwardingState>,
+    policy_state: crate::policy::PolicyState,
+    dynamic: Option<&crate::afxdp::ShardedNeighborMap>,
+) -> Result<ForwardingState, crate::policy::SnapshotIntegrityError> {
+    build_forwarding_state_with_policy_state_and_previous(
+        snapshot,
+        policy_counters,
+        nat_counters,
+        previous,
+        Some(policy_state),
+        dynamic,
     )
 }
 
@@ -349,6 +393,7 @@ fn build_forwarding_state_with_policy_state_and_previous(
     nat_counters: &crate::nat::NatCounterStore,
     previous: Option<&ForwardingState>,
     policy_state: Option<crate::policy::PolicyState>,
+    dynamic: Option<&crate::afxdp::ShardedNeighborMap>,
 ) -> Result<ForwardingState, crate::policy::SnapshotIntegrityError> {
     // #6995: capture both live counter registries BEFORE the fallible build.
     //
@@ -372,6 +417,7 @@ fn build_forwarding_state_with_policy_state_and_previous(
         nat_counters,
         previous,
         policy_state,
+        dynamic,
     ) {
         Ok(state) => state,
         Err(err) => {
@@ -612,6 +658,7 @@ fn build_fallible_forwarding_state(
     nat_counters: &crate::nat::NatCounterStore,
     previous: Option<&ForwardingState>,
     policy_state: Option<crate::policy::PolicyState>,
+    dynamic: Option<&crate::afxdp::ShardedNeighborMap>,
 ) -> Result<ForwardingState, crate::policy::SnapshotIntegrityError> {
     let mut state = ForwardingState::default();
     state.bindless_ipsec_selector_fence =
@@ -665,7 +712,9 @@ fn build_fallible_forwarding_state(
     fib::rebuild_leak_incarnation_indexes(&mut state);
     // #3771 (M11): fail the snapshot CLOSED on a neighbor whose `family`
     // contradicts its IP; unknown/failed states are skipped inside.
-    fib::populate_neighbors(snapshot, &mut state)?;
+    // #16555: the previous generation + live dynamic map fence a changed
+    // MAC per the #13951 rule inside `populate_neighbors`.
+    fib::populate_neighbors(snapshot, &mut state, previous, dynamic)?;
     fib::populate_fabrics(snapshot, &mut state, &iface_ctx);
 
     state.policy = match policy_state {

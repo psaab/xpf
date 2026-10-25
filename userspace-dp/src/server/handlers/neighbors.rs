@@ -66,63 +66,70 @@ pub(super) fn update(
             generation,
             guard.afxdp.last_applied_manager_neighbor_generation()
         );
-    } else if let Some(snapshot) = guard.snapshot.as_mut() {
-        if replace {
-            // #12195: an accepted replace defines the stored reconcile-neighbor set.
-            // Keep the snapshot (which arm/rebind rebuild from) in sync, and request
-            // a state write when that set or its digest changes, like update_fabrics (#3773).
-            // #3771 (M11): a family-mismatched row cannot enter this stored
-            // reconcile input, even though the manager table accepts it.
-            let is_family_mismatch = |neigh: &NeighborSnapshot| {
-                if neigh.ifindex <= 0 {
-                    return false;
-                }
-                let Ok(ip) = neigh.ip.parse::<std::net::IpAddr>() else {
-                    return false;
-                };
-                afxdp::neighbor_family_mismatch(&neigh.family, &ip)
-            };
-            let filtered_neighbors = if neighbors.iter().any(|neigh| is_family_mismatch(neigh)) {
-                Some(
-                    neighbors
-                        .iter()
-                        .filter(|neigh| !is_family_mismatch(neigh))
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                )
-            } else {
-                None
-            };
-            let has_family_mismatch = filtered_neighbors.is_some();
-            let stored_set_changed = if let Some(filtered_neighbors) = filtered_neighbors {
-                if snapshot.neighbors.as_slice() != filtered_neighbors.as_slice() {
-                    snapshot.neighbors = filtered_neighbors;
+    } else {
+        // #16555: compute the fenced set BEFORE borrowing the stored
+        // snapshot mutably — `fenced_neighbor_snapshots` reads the
+        // coordinator's live (post-apply, fenced) forwarding table.
+        let fenced_meta: Option<(Vec<NeighborSnapshot>, bool)> = if replace {
+            let raw_filtered: Vec<NeighborSnapshot> = neighbors
+                .iter()
+                .filter(|neigh| {
+                    if neigh.ifindex <= 0 {
+                        return true;
+                    }
+                    let Ok(ip) = neigh.ip.parse::<std::net::IpAddr>() else {
+                        return true;
+                    };
+                    !afxdp::neighbor_family_mismatch(&neigh.family, &ip)
+                })
+                .cloned()
+                .collect();
+            let flagged = raw_filtered.len() != neighbors.len();
+            let fenced = guard
+                .afxdp
+                .fenced_neighbor_snapshots(&raw_filtered);
+            // A raw row the coordinator dropped entirely (e.g. a
+            // directed broadcast) has no fenced counterpart; the flag
+            // still forces the digest clear below.
+            let dropped = fenced.len() != raw_filtered.len();
+            Some((fenced, flagged || dropped))
+        } else {
+            None
+        };
+        if let Some(snapshot) = guard.snapshot.as_mut() {
+            if replace {
+                // #12195: an accepted replace defines the stored reconcile-neighbor set.
+                // Keep the snapshot (which arm/rebind rebuild from) in sync, and request
+                // a state write when that set or its digest changes, like update_fabrics (#3773).
+                // #3771 (M11): a family-mismatched row cannot enter this stored
+                // reconcile input, even though the manager table accepts it.
+                // #16555: store the FENCED set, not the raw rows — a MAC the
+                // #13951 fence refused must never be persisted for rebind/arm
+                // to rebuild as the static binding.
+                let (fenced, has_flagged) = fenced_meta.expect("replace fenced set");
+                let stored_set_changed = if snapshot.neighbors.as_slice() != fenced.as_slice() {
+                    snapshot.neighbors = fenced;
                     true
                 } else {
                     false
+                };
+                if stored_set_changed {
+                    // #9520: the stored snapshot is no longer the full apply its
+                    // content digest describes, so it must not vouch for a
+                    // same-generation retry of that apply.
+                    snapshot.content_digest.clear();
+                    *persist_state = true;
+                } else if has_flagged && !snapshot.content_digest.is_empty() {
+                    // The applied replace changed the live manager table even though
+                    // M11 excluded its rows from the stored reconcile snapshot.
+                    snapshot.content_digest.clear();
+                    *persist_state = true;
                 }
-            } else if snapshot.neighbors.as_slice() != neighbors {
-                snapshot.neighbors = neighbors.to_vec();
-                true
             } else {
-                false
-            };
-            if stored_set_changed {
-                // #9520: the stored snapshot is no longer the full apply its
-                // content digest describes, so it must not vouch for a
-                // same-generation retry of that apply.
+                // Additive updates still change enforced content even though they
+                // cannot replace the stored neighbor set.
                 snapshot.content_digest.clear();
-                *persist_state = true;
-            } else if has_family_mismatch && !snapshot.content_digest.is_empty() {
-                // The applied replace changed the live manager table even though
-                // M11 excluded its rows from the stored reconcile snapshot.
-                snapshot.content_digest.clear();
-                *persist_state = true;
             }
-        } else {
-            // Additive updates still change enforced content even though they
-            // cannot replace the stored neighbor set.
-            snapshot.content_digest.clear();
         }
     }
     refresh_status(guard);

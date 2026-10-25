@@ -71,7 +71,7 @@
 //! so it has no live readers — it uses the choke point for uniformity, so that
 //! no site in the tree contradicts this section.
 use super::*;
-use crate::afxdp::forwarding_build::build_forwarding_state_with_preparsed_policy_and_previous;
+use crate::afxdp::forwarding_build::build_forwarding_state_with_preparsed_policy_previous_and_dynamic;
 
 impl super::Coordinator {
     /// Refresh fabric link info from updated snapshots. Called when the
@@ -323,12 +323,13 @@ impl super::Coordinator {
         // preflight above. Passing it into the full forwarding build reuses
         // that parse while keeping all other build checks in their original
         // order.
-        let new_forwarding = match build_forwarding_state_with_preparsed_policy_and_previous(
+        let new_forwarding = match build_forwarding_state_with_preparsed_policy_previous_and_dynamic(
             snapshot,
             &self.policy_counters,
             &self.nat_counters,
             Some(&self.forwarding),
             policy_state.take_state(),
+            Some(&self.neighbors.dynamic),
         ) {
             Ok(fwd) => fwd,
             Err(err) => {
