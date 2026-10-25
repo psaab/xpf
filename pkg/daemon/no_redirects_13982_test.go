@@ -80,6 +80,9 @@ func withRedirectSysctlRoot(t *testing.T, initial string) (root, v4Fwd, v6Fwd st
 		redirectSysctlRoot, ipv4ForwardSysctlPath, ipv6ForwardSysctlPath = origRoot, origV4, origV6
 		applianceMarkerFile = origMarker
 		noRedirectsActive.Store(origNoRedirects)
+		redirectCaptureMu.Lock()
+		capturedRedirects = nil
+		redirectCaptureMu.Unlock()
 	})
 	return root, v4Fwd, v6Fwd
 }
@@ -228,25 +231,45 @@ func TestNoRedirectsNeverAssertedWithoutKnob13982(t *testing.T) {
 
 // TestNoRedirectsDeleteRestoresKernel15710: deleting `system
 // no-redirects` (applying a config without it after one with it) must
-// restore send_redirects/accept_redirects to 1 across ipv4/ipv6 conf.
-// Pre-fix, applyKernelTuning only stored false and
-// applyNoRedirectsPosture early-returned, leaving the knobs at 0
-// forever. Control: a daemon that never set the knob must not write 1s
-// over an operator's own 0s on a no-knob apply.
+// restore the values captured when the posture was asserted, not a
+// constant 1 (#16779). Pre-#16779 the restore wrote 1 everywhere,
+// which under ip_forward=1 left ipv4 accept_redirects above the
+// kernel router default of 0. Control: a daemon that never set the
+// knob must not write over an operator's own 0s on a no-knob apply.
 func TestNoRedirectsDeleteRestoresKernel15710(t *testing.T) {
-	root, _, _ := withRedirectSysctlRoot(t, "1")
+	root, v4Fwd, _ := withRedirectSysctlRoot(t, "1")
 	knobs := noRedirectKnobPaths(root)
 	d := &Daemon{}
 	d.applyKernelTuning(&config.Config{System: config.SystemConfig{NoRedirects: true}})
 	assertKnobs(t, knobs, "0", "after apply with no-redirects")
+	// Production steady state at delete time: the transit gate is
+	// open, so ip_forward=1. The apply tail closes the gate on this
+	// never-armed test daemon, so re-open it by hand to simulate
+	// the gate-open moment the restore must read.
+	if err := os.WriteFile(v4Fwd, []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	// Delete the stanza: next apply has NoRedirects=false.
+	// Captured values were all 1, but ipv4 accept_redirects must be
+	// capped at the router default !ip_forward = 0 (#16779); the
+	// other knobs restore their captured 1.
 	d.applyKernelTuning(&config.Config{})
-	assertKnobs(t, knobs, "1", "after deleting no-redirects (restore)")
+	for _, p := range knobs {
+		want := "1"
+		if isIPv4AcceptRedirects(p) {
+			want = "0"
+		}
+		assertKnobs(t, []string{p}, want, "after deleting no-redirects (captured restore, ipv4 accept capped)")
+	}
 	// A second no-knob apply is a no-op (restore fires once, on transition).
-	// Knock one knob back to 0 as an operator might; it must stay.
-	// (Verified indirectly: no further writes expected.)
 	d.applyKernelTuning(&config.Config{})
-	assertKnobs(t, knobs, "1", "after second no-knob apply")
+	for _, p := range knobs {
+		want := "1"
+		if isIPv4AcceptRedirects(p) {
+			want = "0"
+		}
+		assertKnobs(t, []string{p}, want, "after second no-knob apply")
+	}
 
 	// Control: never-active daemon leaves pre-existing 0s untouched.
 	root2, _, _ := withRedirectSysctlRoot(t, "0")
@@ -255,4 +278,84 @@ func TestNoRedirectsDeleteRestoresKernel15710(t *testing.T) {
 	d2.applyKernelTuning(&config.Config{})
 	assertKnobs(t, noRedirectKnobPaths(root2), "0",
 		"never-active daemon must not restore knobs it never asserted")
+}
+
+// TestR3A36NoRedirectsRestoreVsRouterDefault is the #16779 acceptance
+// probe: with ip_forward=1 the set-then-delete sequence must leave
+// ipv4/conf/all/accept_redirects at 0 (the kernel router default
+// !ip_forward), not the constant 1 the #15710 restore wrote. A
+// captured operator 0 must survive, and with ip_forward=0 a captured
+// 1 is faithfully restored.
+func TestR3A36NoRedirectsRestoreVsRouterDefault(t *testing.T) {
+	root, v4Fwd, _ := withRedirectSysctlRoot(t, "1")
+	allAccept := filepath.Join(root, "ipv4", "conf", "all", "accept_redirects")
+	d := &Daemon{}
+	d.applyKernelTuning(&config.Config{System: config.SystemConfig{NoRedirects: true}})
+	assertKnobs(t, []string{allAccept}, "0", "after set no-redirects")
+	if err := os.WriteFile(v4Fwd, []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d.applyKernelTuning(&config.Config{})
+	assertKnobs(t, []string{allAccept}, "0",
+		"after delete no-redirects under ip_forward=1 (router default)")
+
+	// Captured operator hardening (0) is restored as 0, not raised.
+	root2, v4Fwd2, _ := withRedirectSysctlRoot(t, "0")
+	allAccept2 := filepath.Join(root2, "ipv4", "conf", "all", "accept_redirects")
+	d2 := &Daemon{}
+	d2.applyKernelTuning(&config.Config{System: config.SystemConfig{NoRedirects: true}})
+	if err := os.WriteFile(v4Fwd2, []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d2.applyKernelTuning(&config.Config{})
+	assertKnobs(t, []string{allAccept2}, "0",
+		"captured operator 0 restored under ip_forward=1")
+
+	// With ip_forward=0 a captured 1 restores faithfully to 1.
+	root3, v4Fwd3, _ := withRedirectSysctlRoot(t, "1")
+	if err := os.WriteFile(v4Fwd3, []byte("0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	allAccept3 := filepath.Join(root3, "ipv4", "conf", "all", "accept_redirects")
+	d3 := &Daemon{}
+	d3.applyKernelTuning(&config.Config{System: config.SystemConfig{NoRedirects: true}})
+	// Gate tail already leaves ip_forward=0 on this never-armed daemon.
+	d3.applyKernelTuning(&config.Config{})
+	assertKnobs(t, []string{allAccept3}, "1",
+		"captured 1 restored when ip_forward=0")
+
+}
+
+// TestNoRedirectsRestorePreservesForeignHardening16779 pins the
+// capture half of #16779: per-path values that differ (foreign
+// sysctl.d hardening, e.g. send_redirects=0 on one interface only)
+// are restored per path, not flattened to a constant.
+func TestNoRedirectsRestorePreservesForeignHardening16779(t *testing.T) {
+	root, v4Fwd, _ := withRedirectSysctlRoot(t, "1")
+	// Foreign hardening: ipv4 send on r0 = 0, ipv6 accept on r0 = 0,
+	// everything else 1. ip_forward is re-opened by hand before the
+	// delete apply (the tail closes it on this never-armed daemon).
+	seed := func(p, v string) {
+		if err := os.WriteFile(p, []byte(v+"\n"), 0o644); err != nil {
+			t.Fatalf("seed %s: %v", p, err)
+		}
+	}
+	r0Send := filepath.Join(root, "ipv4", "conf", "r0", "send_redirects")
+	r0V6Accept := filepath.Join(root, "ipv6", "conf", "r0", "accept_redirects")
+	seed(r0Send, "0")
+	seed(r0V6Accept, "0")
+	d := &Daemon{}
+	d.applyKernelTuning(&config.Config{System: config.SystemConfig{NoRedirects: true}})
+	assertKnobs(t, noRedirectKnobPaths(root), "0", "after set no-redirects")
+	if err := os.WriteFile(v4Fwd, []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d.applyKernelTuning(&config.Config{})
+	assertKnobs(t, []string{r0Send}, "0", "foreign send_redirects=0 preserved")
+	assertKnobs(t, []string{r0V6Accept}, "0", "foreign ipv6 accept=0 preserved")
+	// Untouched-by-foreign paths restore captured 1 except ipv4
+	// accept_redirects, capped at 0 under ip_forward=1.
+	assertKnobs(t, []string{filepath.Join(root, "ipv4", "conf", "r0", "send_redirects")}, "0", "r0 send")
+	assertKnobs(t, []string{filepath.Join(root, "ipv6", "conf", "all", "accept_redirects")}, "1", "ipv6 all restored to captured 1")
+	assertKnobs(t, []string{filepath.Join(root, "ipv4", "conf", "all", "send_redirects")}, "1", "ipv4 send restored to captured 1")
 }
