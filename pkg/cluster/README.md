@@ -3404,6 +3404,29 @@ standby can re-initiate the primary's tunnels on takeover:
   place for `reinitiateIPsecSAs` to re-initiate on takeover. Convergence to an
   empty/updated set is driven by the primary re-advertising, not by the standby
   self-clearing.
+- **Chunked over-bound sets (#16758)** — `decodeIPsecSAPayload` refuses any
+  legacy frame over `maxIPsecSANames` (4096) names (#9061), and
+  `QueueIPsecSA` used to emit the whole live set as one such frame, so a
+  primary with more than 4096 active child SAs had every advertise refused
+  whole and the standby kept its frozen prior set for takeover. Now a set
+  over the bound is split across additive `syncMsgIPsecSAChunk = 49`
+  frames (`sync_ipsec_chunk_16758.go`, the #15160 precedent): each chunk
+  payload is `{generation u64, index u32, total u32, totalNames u32}` plus
+  the newline-joined names for that chunk (at most 4096), every chunk
+  carries its own increasing full-set seq, and the receiver assembles by
+  `(incarnation, generation)` under `ipsecApplyMu`, committing atomically
+  only when every chunk has arrived — an unclosed or inconsistent
+  generation never commits and the prior set is retained; a committed
+  legacy set discards pending assemblies. Sets at or under the bound keep
+  the exact legacy `syncMsgIPsecSA` shape, and a pre-#16758 peer ignores
+  the unknown chunk type, so a mixed pair loses only over-bound pushes
+  until both sides upgrade. The sender latches `IPsecSAOversizeAlarmLatched`,
+  counts `IPsecSAOverCapSets`, and warns on the primary; it refuses
+  (counted via `IPsecSAMalformedIgnored`) a set containing a name over
+  `maxIPsecSANameLen` or a total over `ipsecChunkMaxTotalNames` (1<<20)
+  before any frame is written. The receiver counts every malformed legacy
+  or chunk refusal in `IPsecSAMalformedIgnored` (rendered in cluster
+  status when nonzero). Cells: `ipsec_sa_chunk_16758_test.go`.
 
 ## DHCP-server lease sync (#2239)
 

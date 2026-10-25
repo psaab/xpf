@@ -246,6 +246,8 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		return s.handleAuthUpgradeConfirmFrame(conn, payload)
 	case syncMsgIPsecSA:
 		return s.handleIPsecSA(conn, payload)
+	case syncMsgIPsecSAChunk:
+		return s.handleIPsecSAChunk(conn, payload)
 	case syncMsgPersistentNatLease:
 		return s.handlePersistentNatLease(conn, payload)
 	case syncMsgPersistentNatLeaseScoped:

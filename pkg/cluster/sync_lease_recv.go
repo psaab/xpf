@@ -42,6 +42,7 @@ func (s *SessionSync) handleIPsecSA(conn net.Conn, payload []byte) bool {
 		// truncated prefix must not overwrite it; the standby keeps its prior
 		// state until a complete frame arrives. Crucially, this does not
 		// consume the sequence number.
+		s.stats.IPsecSAMalformedIgnored.Add(1)
 		slog.Warn("cluster sync: refusing a malformed IPsec SA full set",
 			"payload_bytes", len(payload), "incarnation", incarnation, "seq", seq)
 		return false
@@ -56,6 +57,9 @@ func (s *SessionSync) handleIPsecSA(conn net.Conn, payload []byte) bool {
 		s.peerSnaps.peerIPsecSAsMu.Lock()
 		s.peerSnaps.peerIPsecSAs = names
 		s.peerSnaps.peerIPsecSAsMu.Unlock()
+		// #16758: a committed legacy set supersedes every in-flight chunk
+		// assembly (its seq is newer by the guard that just advanced).
+		s.ipsecChunkState.discardAll()
 	}
 	s.recvSeqMu.Unlock()
 	if !applied {
@@ -68,6 +72,81 @@ func (s *SessionSync) handleIPsecSA(conn net.Conn, payload []byte) bool {
 	slog.Debug("cluster sync: received IPsec SA list", "count", len(names), "incarnation", incarnation, "seq", seq)
 	if s.OnIPsecSAReceived != nil {
 		s.OnIPsecSAReceived(names)
+	}
+	s.ipsecApplyMu.Unlock()
+	return true
+}
+
+func (s *SessionSync) handleIPsecSAChunk(conn net.Conn, payload []byte) bool {
+	// #16758: one chunk of an over-bound IPsec SA full-set. Chunks are
+	// admitted in per-frame seq order, assembled by (incarnation,
+	// generation), and committed atomically only when the last chunk
+	// lands; anything else leaves the held set untouched.
+	s.stats.IPsecSAReceived.Add(1)
+	base, incarnation, seq := stripFullSetSeq(payload)
+	s.recvSeqMu.Lock()
+	admit := s.ipsecRecvSeq.newer(incarnation, seq)
+	commitEpoch := s.recvEpoch
+	s.recvSeqMu.Unlock()
+	if !admit {
+		s.stats.IPsecSAStaleIgnored.Add(1)
+		slog.Warn("cluster sync: dropping out-of-order IPsec SA chunk (stale sequence) — standby retains newer set",
+			"incarnation", incarnation, "seq", seq)
+		return false
+	}
+	generation, index, total, totalNames, chunkBody, ok := decodeIPsecSAChunkHeader(base)
+	if !ok {
+		s.stats.IPsecSAMalformedIgnored.Add(1)
+		slog.Warn("cluster sync: dropping malformed IPsec SA chunk header",
+			"incarnation", incarnation, "seq", seq, "bytes", len(base))
+		return false
+	}
+	names, malformed := decodeIPsecSAChunkBody(chunkBody)
+	if malformed {
+		s.stats.IPsecSAMalformedIgnored.Add(1)
+		slog.Warn("cluster sync: dropping malformed IPsec SA chunk — prior set retained",
+			"generation", generation, "index", index)
+		return false
+	}
+	if len(names) > ipsecChunkNamesPerChunk {
+		s.stats.IPsecSAMalformedIgnored.Add(1)
+		slog.Warn("cluster sync: dropping IPsec SA chunk over per-chunk name bound — prior set retained",
+			"generation", generation, "index", index, "names", len(names), "cap", ipsecChunkNamesPerChunk)
+		return false
+	}
+	s.ipsecApplyMu.Lock()
+	s.recvSeqMu.Lock()
+	chunkApplied := s.recvEpoch == commitEpoch && s.ipsecRecvSeq.advanceIfNewer(incarnation, seq)
+	if !chunkApplied {
+		s.recvSeqMu.Unlock()
+		s.ipsecApplyMu.Unlock()
+		s.stats.IPsecSAStaleIgnored.Add(1)
+		slog.Warn("cluster sync: dropping out-of-order IPsec SA chunk (stale sequence) — prior set retained",
+			"incarnation", incarnation, "seq", seq)
+		return false
+	}
+	key := ipsecSAChunkGeneration{incarnation: incarnation, generation: generation}
+	complete, closed, accepted := s.ipsecChunkState.addChunk(key, index, total, totalNames, names)
+	if !accepted {
+		s.recvSeqMu.Unlock()
+		s.ipsecApplyMu.Unlock()
+		s.stats.IPsecSAMalformedIgnored.Add(1)
+		slog.Warn("cluster sync: dropping inconsistent IPsec SA chunk assembly — prior set retained",
+			"generation", generation, "index", index)
+		return false
+	}
+	if !closed {
+		s.recvSeqMu.Unlock()
+		s.ipsecApplyMu.Unlock()
+		return true
+	}
+	s.peerSnaps.peerIPsecSAsMu.Lock()
+	s.peerSnaps.peerIPsecSAs = complete
+	s.peerSnaps.peerIPsecSAsMu.Unlock()
+	s.recvSeqMu.Unlock()
+	slog.Debug("cluster sync: received chunked IPsec SA list", "count", len(complete), "chunks", total, "incarnation", incarnation, "generation", generation)
+	if s.OnIPsecSAReceived != nil {
+		s.OnIPsecSAReceived(complete)
 	}
 	s.ipsecApplyMu.Unlock()
 	return true
