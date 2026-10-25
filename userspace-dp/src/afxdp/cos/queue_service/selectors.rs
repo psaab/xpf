@@ -59,7 +59,7 @@ pub(in crate::afxdp) fn select_cos_guarantee_batch_with_fast_path(
             );
         } else {
             let transmit_rate_bytes = queue.transmit_rate_bytes();
-            let buffer_bytes = queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES);
+            let buffer_bytes = cos_effective_burst_bytes(queue.config.buffer_bytes);
             refill_cos_tokens(
                 &mut queue.hot.tokens,
                 transmit_rate_bytes,

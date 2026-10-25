@@ -18,6 +18,7 @@
 //! coordinator-scope paths keep resolving). Builders and match
 //! predicates called only from this file stay private.
 use super::*;
+use crate::afxdp::cos::token_bucket::cos_effective_burst_bytes;
 
 impl super::Coordinator {
     pub(super) fn refresh_cos_owner_worker_map_from_identities(&mut self) {
@@ -577,7 +578,7 @@ pub(super) fn build_shared_cos_root_leases_reusing_existing(
             .copied()
             .unwrap_or(1)
             .max(1);
-        let burst_bytes = iface.burst_bytes.max(64 * 1500);
+        let burst_bytes = cos_effective_burst_bytes(iface.burst_bytes);
         if let Some(lease) = existing.get(&ifindex).filter(|lease| {
             lease.matches_config(iface.shaping_rate_bytes, burst_bytes, active_shards)
         }) {
@@ -648,7 +649,7 @@ pub(super) fn build_shared_cos_queue_leases_reusing_existing(
             if queue.transmit_rate_bytes == 0 {
                 continue;
             }
-            let burst_bytes = queue.buffer_bytes.max(64 * 1500);
+            let burst_bytes = cos_effective_burst_bytes(queue.buffer_bytes);
             let key = (ifindex, queue.queue_id);
             if !queue.exact {
                 // #4265 (R-2): a non-exact GUARANTEED queue that runs the

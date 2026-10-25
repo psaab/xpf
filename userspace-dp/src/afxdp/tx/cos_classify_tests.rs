@@ -717,6 +717,61 @@ fn cos_admission_drop_counts_dedicated_counter_not_tx_errors() {
     assert!(binding.telemetry.dbg_cos_queue_overflow > 0);
 }
 
+// #16545: with an explicit 5000 B queue buffer, the first 3000 B item is
+// admitted and the second counts admission_buffer_drops. Pre-fix the
+// runtime/admission 96 KB floor admitted both. (1250 B would floor to
+// one 4096 B frame, so 5000 B exercises the explicit value directly.)
+#[test]
+fn enqueue_cos_item_enforces_explicit_sub_floor_buffer_16545() {
+    let root = test_cos_runtime_with_queues(
+        125_000,
+        vec![CoSQueueConfig {
+            queue_id: 0,
+            forwarding_class: "best-effort".into(),
+            priority: 5,
+            transmit_rate_bytes: 125_000,
+            guarantee_enabled: true,
+            exact: true,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            equal_flow_target_policy: EqualFlowTargetPolicy::Slowest,
+            surplus_weight: 1,
+            buffer_bytes: 5_000,
+            dscp_rewrite: None,
+            codel_target_ns: 0,
+        }],
+    );
+    let fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![(0, test_queue_fast_path(false, 0, None, None))],
+        None,
+        None,
+    );
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+
+    for _ in 0..2 {
+        assert!(
+            enqueue_cos_item(
+                &mut binding,
+                42,
+                Some(0),
+                3_000,
+                test_cos_item(3_000),
+                0,
+                None,
+            )
+            .is_ok()
+        );
+    }
+    let queue = &binding.cos.cos_interfaces.get(&42).expect("runtime").queues[0];
+    assert_eq!(queue.config.buffer_bytes, 5_000);
+    assert_eq!(queue.hot.queued_bytes, 3_000);
+    assert_eq!(queue.telemetry.drop_counters.admission_buffer_drops, 1);
+}
+
 #[test]
 fn clone_prepared_request_for_cos_returns_local_copy_with_metadata() {
     let mut area = MmapArea::new(4096).expect("mmap");

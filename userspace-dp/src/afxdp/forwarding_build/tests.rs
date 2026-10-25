@@ -332,9 +332,9 @@ fn build_cos_state_resolves_percent_buffer_size_from_interface_burst_pool() {
     );
 
     let runtime = crate::afxdp::cos::builders::build_cos_interface_runtime(iface, 0);
-    assert!(
-        runtime.queues[0].config.buffer_bytes >= crate::afxdp::cos::COS_MIN_BURST_BYTES,
-        "runtime queue buffer must retain a non-zero capacity after the queue floor"
+    assert_eq!(
+        runtime.queues[0].config.buffer_bytes, 25_600,
+        "#16545: explicit percent-resolved buffer must not be raised to the 96 KB floor"
     );
 }
 
