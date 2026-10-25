@@ -105,10 +105,12 @@ pub(crate) struct WgCounters {
     /// handshake-admission bucket before the responder Noise read. Distinct
     /// from `hs_rx_drops_replayed_init`, which is reached only after DH.
     pub(crate) hs_rx_under_load_admission_drops: AtomicU64,
-    /// #4094 PR-A: under-load initiations dropped WITHOUT a cookie reply.
-    /// Includes per-source token-bucket throttling and fail-closed drops when
-    /// the OS CSPRNG is unavailable for the secret/nonce (BUG-2; impossible on
-    /// Linux).
+    /// #4094 PR-A: under-load initiations dropped WITHOUT a cookie reply
+    /// because the reply could not be built. The name is legacy (it
+    /// predates #16526, which removed the per-source cookie-reply token
+    /// bucket — replies are now unthrottled, matching the references);
+    /// today this counts only fail-closed drops when the OS CSPRNG is
+    /// unavailable for the secret/nonce (BUG-2; impossible on Linux).
     pub(crate) hs_cookie_reply_budget_drops: AtomicU64,
     /// Type byte ∉ {1,2,3,4}. Zero-length UDP datagrams never reach
     /// type dispatch (consumed by the `Ok(_) => break` recv arm in

@@ -251,85 +251,79 @@ fn fill_random_reports_success_and_fills() {
 }
 
 // ===================================================================
-// #4332 per-SOURCE cookie-reply token bucket.
+// #9908 per-SOURCE handshake-admission token bucket. (#16526 removed
+// the #4332 cookie-reply bucket: cookie replies are unthrottled, so
+// there is no reply-bucket unit surface left to pin — the engine-level
+// spoof tests in engine_tests.rs pin the unthrottled reply instead.)
 // ===================================================================
 
 fn ipv4(a: u8) -> IpAddr {
     IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, a))
 }
 
-/// A fresh source draws exactly [`SOURCE_REPLY_BURST`] replies back-to-back
-/// (same instant, no refill) and is then throttled; one [`PACKET_COST_NS`]
-/// of accrued time refills exactly one token.
+/// GC reclaims handshake buckets idle for a full
+/// [`SOURCE_GC_INTERVAL_NS`]: as spoofed sources come and go the table
+/// shrinks back, so a burst of short-lived sources does not permanently
+/// pin the map at its cap.
 #[test]
-fn source_bucket_burst_then_throttle() {
-    let cc = CookieChecker::new(&[0x81u8; 32]);
-    let now = 10_000_000_000u64;
-    let s = ipv4(1);
-    let mut granted = 0u64;
-    for _ in 0..(SOURCE_REPLY_BURST + 10) {
-        if cc.source_reply_allowed(s, now) {
-            granted += 1;
-        }
-    }
+fn handshake_gc_reclaims_idle_buckets() {
+    let cc = CookieChecker::new(&[0x84u8; 32]);
+    let base = 10_000_000_000u64;
+    let idle = ipv4(1);
+    let active = ipv4(2);
+    assert!(cc.source_handshake_allowed(idle, base));
+    assert_eq!(cc.handshake_source_table_len_for_test(), 1);
+    // A full GC interval later a DIFFERENT source sends: the sweep drops
+    // the idle bucket before admitting the active one.
+    let later = base + SOURCE_GC_INTERVAL_NS + 1;
+    assert!(cc.source_handshake_allowed(active, later));
     assert_eq!(
-        granted, SOURCE_REPLY_BURST,
-        "a source may burst exactly SOURCE_REPLY_BURST replies, then throttles"
+        cc.handshake_source_table_len_for_test(),
+        1,
+        "the idle source was GC-reclaimed; only the active source remains"
     );
-    // One packet-cost of accrued time → exactly one more token, then dry.
-    assert!(cc.source_reply_allowed(s, now + PACKET_COST_NS));
-    assert!(!cc.source_reply_allowed(s, now + PACKET_COST_NS));
+    assert!(!cc.handshake_source_contains_for_test(idle));
+    assert!(cc.handshake_source_contains_for_test(active));
 }
 
-/// Per-source buckets remain independent: exhausting source A's burst does
-/// not stop a different source from drawing its own burst.
+/// Monotonic-clock discipline (#4330/#4321): a backwards `now_ns`
+/// credits nothing and never lowers the bucket's `last_ns` high-water
+/// mark, so the glitch cannot be replayed into an over-credit on the
+/// next forward step.
 #[test]
-fn source_bucket_isolates_sources() {
-    let cc = CookieChecker::new(&[0x82u8; 32]);
-    let now = 10_000_000_000u64;
-    let a = ipv4(1);
-    let b = ipv4(2);
-    for _ in 0..(SOURCE_REPLY_BURST + 5) {
-        cc.source_reply_allowed(a, now);
+fn handshake_bucket_ignores_backwards_clock() {
+    let cc = CookieChecker::new(&[0x85u8; 32]);
+    let s = ipv4(1);
+    let t_hi = 10_000_000_000u64;
+    // Drain the burst at t_hi.
+    for _ in 0..SOURCE_HANDSHAKE_BURST {
+        assert!(cc.source_handshake_allowed(s, t_hi));
     }
     assert!(
-        !cc.source_reply_allowed(a, now),
-        "source A is throttled after exhausting its own bucket"
+        !cc.source_handshake_allowed(s, t_hi),
+        "burst exhausted at t_hi"
     );
-    let mut granted_b = 0u64;
-    for _ in 0..(SOURCE_REPLY_BURST + 5) {
-        if cc.source_reply_allowed(b, now) {
-            granted_b += 1;
-        }
-    }
-    assert_eq!(
-        granted_b, SOURCE_REPLY_BURST,
-        "a different source is unaffected by A's flood (per-source isolation)"
+    // A backwards step must NOT credit (saturating_sub → 0 elapsed) and
+    // must NOT lower last_ns — else the following forward jump back to
+    // t_hi would credit the whole (t_hi - t_lo) span and refill to the
+    // ceiling.
+    let t_lo = t_hi - 5 * SOURCE_GC_INTERVAL_NS;
+    assert!(
+        !cc.source_handshake_allowed(s, t_lo),
+        "a backwards clock step credits nothing"
     );
-}
-
-/// The table remains bounded but replaces an old bucket to keep new peers
-/// eligible under a rotating-source flood.
-#[test]
-fn source_table_cap_evicts_for_new_sources() {
-    let cc = CookieChecker::new(&[0x83u8; 32]);
-    let now = 10_000_000_000u64;
-    for i in 0..SOURCE_TABLE_MAX {
-        let ip = IpAddr::V4(std::net::Ipv4Addr::from(0x0A00_0000u32 + i as u32));
-        assert!(cc.source_reply_allowed(ip, now));
-    }
-    let legit = IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 1));
-    assert!(cc.source_reply_allowed(legit, now));
-    assert_eq!(cc.source_table_len_for_test(), SOURCE_TABLE_MAX);
+    assert!(
+        !cc.source_handshake_allowed(s, t_hi),
+        "the forward jump after a backwards step is not replayed into an over-credit"
+    );
 }
 
 /// #9908: valid-MAC2 admission has its own bounded source table and
-/// token bucket. The reply table's cap must not be the only bound: a
-/// spoofed-IP flood that reaches the admission seam cannot grow the new
-/// map without limit. #14639: keys are aggregated (IPv6 /64, IPv4 /32),
-/// and a new key at the cap evicts the least-recently-refilled bucket
-/// instead of being refused, so the table stays bounded without
-/// locking new peers out.
+/// token bucket: a spoofed-IP flood that reaches the admission seam
+/// cannot grow the map without limit. #14639: keys are aggregated
+/// (IPv6 /64, IPv4 /32), and a new key at the cap evicts the
+/// least-recently-refilled bucket instead of being refused, so the
+/// table stays bounded without locking new peers out.
 #[test]
 fn handshake_source_bucket_burst_and_table_cap() {
     let cc = CookieChecker::new(&[0x86u8; 32]);
@@ -374,56 +368,6 @@ fn handshake_source_bucket_burst_and_table_cap() {
     );
 }
 
-/// GC reclaims buckets idle for a full [`SOURCE_GC_INTERVAL_NS`]: as
-/// spoofed sources come and go the table shrinks back, so a burst of
-/// short-lived sources does not permanently pin the map at its cap.
-#[test]
-fn source_gc_reclaims_idle_buckets() {
-    let cc = CookieChecker::new(&[0x84u8; 32]);
-    let base = 10_000_000_000u64;
-    let idle = ipv4(1);
-    let active = ipv4(2);
-    assert!(cc.source_reply_allowed(idle, base));
-    assert_eq!(cc.source_table_len_for_test(), 1);
-    // A full GC interval later a DIFFERENT source sends: the sweep drops
-    // the idle bucket before admitting the active one.
-    let later = base + SOURCE_GC_INTERVAL_NS + 1;
-    assert!(cc.source_reply_allowed(active, later));
-    assert_eq!(
-        cc.source_table_len_for_test(),
-        1,
-        "the idle source was GC-reclaimed; only the active source remains"
-    );
-    assert!(!cc.source_contains_for_test(idle));
-    assert!(cc.source_contains_for_test(active));
-}
-
-/// Monotonic-clock discipline (#4330/#4321): a backwards `now_ns` credits
-/// nothing and never lowers the bucket's `last_ns` high-water mark, so the
-/// glitch cannot be replayed into an over-credit on the next forward step.
-#[test]
-fn source_bucket_ignores_backwards_clock() {
-    let cc = CookieChecker::new(&[0x85u8; 32]);
-    let s = ipv4(1);
-    let t_hi = 10_000_000_000u64;
-    // Drain the burst at t_hi.
-    for _ in 0..SOURCE_REPLY_BURST {
-        assert!(cc.source_reply_allowed(s, t_hi));
-    }
-    assert!(!cc.source_reply_allowed(s, t_hi), "burst exhausted at t_hi");
-    // A backwards step must NOT credit (saturating_sub → 0 elapsed) and must
-    // NOT lower last_ns — else the following forward jump back to t_hi would
-    // credit the whole (t_hi - t_lo) span and refill to the ceiling.
-    let t_lo = t_hi - 5 * SOURCE_GC_INTERVAL_NS;
-    assert!(
-        !cc.source_reply_allowed(s, t_lo),
-        "a backwards clock step credits nothing"
-    );
-    assert!(
-        !cc.source_reply_allowed(s, t_hi),
-        "the forward jump after a backwards step is not replayed into an over-credit"
-    );
-}
 
 // ===================================================================
 // #14639: IPv6 /64 aggregation + LRU eviction for source admission.
@@ -442,17 +386,12 @@ fn handshake_slash64_flood_does_not_lock_out_other_prefix_14639() {
     // Attacker in 2001:db8:aaaa::/64 refreshes SOURCE_TABLE_MAX /128s.
     for i in 0..SOURCE_TABLE_MAX as u64 {
         cc.source_handshake_allowed(ipv6_in(0x2001_0db8_aaaa_0000, i), now);
-        cc.source_reply_allowed(ipv6_in(0x2001_0db8_aaaa_0000, i), now);
     }
-    // Legitimate peer in a different /64 must still be admitted (both gates).
+    // Legitimate peer in a different /64 must still be admitted.
     let legit = ipv6_in(0x2001_0db8_bbbb_0000, 1);
     assert!(
         cc.source_handshake_allowed(legit, now),
         "legitimate peer in another /64 locked out by one /64 refreshing 2048 /128s (handshake)"
-    );
-    assert!(
-        cc.source_reply_allowed(legit, now),
-        "legitimate peer in another /64 locked out by one /64 refreshing 2048 /128s (reply)"
     );
     // Control: after attacker activity is GC-idle, admission still works.
     let later = now + SOURCE_GC_INTERVAL_NS + 1;
@@ -473,17 +412,6 @@ fn handshake_slash64_shares_one_budget_14639() {
     assert_eq!(
         granted, SOURCE_HANDSHAKE_BURST,
         "one /64 receives at most SOURCE_HANDSHAKE_BURST handshake admissions per refill"
-    );
-    // Reply budget likewise shared per /64.
-    let mut granted_r = 0u64;
-    for i in 0..(SOURCE_REPLY_BURST + 5) {
-        if cc.source_reply_allowed(ipv6_in(0x2001_0db8_dddd_0000, i), now) {
-            granted_r += 1;
-        }
-    }
-    assert_eq!(
-        granted_r, SOURCE_REPLY_BURST,
-        "one /64 receives at most SOURCE_REPLY_BURST replies per refill"
     );
     // A different /64 is unaffected.
     assert!(cc.source_handshake_allowed(ipv6_in(0x2001_0db8_eeee_0000, 1), now));

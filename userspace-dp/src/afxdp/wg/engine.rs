@@ -648,7 +648,7 @@ impl WgEngine {
     /// spending a Noise responder handshake. Records the arrival on the
     /// load gate and, when under load, requires a valid MAC2 (a cookie the
     /// initiator can only hold if it received our cookie reply at its real
-    /// source) — otherwise it issues a budget-gated cookie challenge and
+    /// source) — otherwise it issues an unthrottled cookie challenge and
     /// drops the initiation. `out` receives the type-3 CookieReply on the
     /// [`InitiationAction::SendCookie`] arm; it is untouched otherwise, so
     /// the caller may reuse the same buffer for `consume_...`'s response.
@@ -664,8 +664,12 @@ impl WgEngine {
     ///    turn us into a reflector. MAC2 is never verified for these.
     /// 3. Under load + MAC1 valid + valid MAC2 → the per-source #9908
     ///    handshake-admission bucket must also pass before `Process`.
-    /// 4. Under load + MAC1 valid + MAC2 missing/bad → `SendCookie` (budget
-    ///    permitting) else `Drop`.
+    /// 4. Under load + MAC1 valid + MAC2 missing/bad → `SendCookie`,
+    ///    unthrottled (#16526: the source key is unauthenticated, so a
+    ///    per-source reply bucket lets a spoofer spend a victim's reply
+    ///    budget; both references reply without a limit and rate-limit
+    ///    only MAC2-valid packets); `Drop` only if the reply cannot be
+    ///    built (fail-closed on a broken CSPRNG).
     pub(crate) fn classify_initiation(
         &self,
         msg: &[u8],
@@ -702,13 +706,14 @@ impl WgEngine {
             WgCounters::bump(&self.counters.hs_rx_under_load_mac2_ok);
             return InitiationAction::Process;
         }
-        // Per-source limiting is the only cookie-reply rate gate. A global
-        // first-come cap lets a rotating fresh-source flood starve legitimate
-        // peers (#13958).
-        if !self.cookie.source_reply_allowed(from.ip(), now_ns) {
-            WgCounters::bump(&self.counters.hs_cookie_reply_budget_drops);
-            return InitiationAction::Drop;
-        }
+        // #16526: no rate gate on the cookie reply. `from` is
+        // unauthenticated — a valid MAC1 proves only knowledge of our
+        // public key — so keying a reply budget on it lets a spoofer
+        // spend a victim's budget and silently lock the victim out of
+        // victim-initiated handshakes. wireguard-go and Linux both send
+        // the cookie unthrottled and rate-limit only MAC2-valid packets
+        // (the #9908 bucket above); a 64 B reply to a 148 B initiation
+        // is not amplification.
         match self.cookie.build_cookie_reply(msg, from, now_ns, out) {
             Ok(len) => {
                 WgCounters::bump(&self.counters.hs_cookie_replies_sent);
@@ -722,8 +727,10 @@ impl WgEngine {
             // DEFEAT the mitigation (#4094 BUG-2), so dropping is the safe
             // choice; or (b) a defensive buffer/length error (`out` is
             // >= WG_MSG_RESPONSE_LEN 92 at the sole caller and the init
-            // length is type-gated, so (b) is unreachable). Counted with the
-            // budget-drop family: "under load, dropped without a cookie".
+            // length is type-gated, so (b) is unreachable). Counted with
+            // the legacy budget-drop family name: "under load, dropped
+            // without a cookie" (the counter name predates #16526; no
+            // reply budget exists any more).
             Err(_) => {
                 WgCounters::bump(&self.counters.hs_cookie_reply_budget_drops);
                 InitiationAction::Drop
