@@ -884,6 +884,7 @@ mod mode_aware_segmentation_tests {
         TunnelEndpoint {
             id: TUN_ID,
             logical_ifindex: EGRESS_IFINDEX,
+            mtu: 0,
             interface_label: "wg0.0".to_string(),
             interface: "wg0.0".to_string(),
             redundancy_group: 0,

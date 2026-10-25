@@ -10,6 +10,14 @@ use super::super::*;
 pub(in crate::afxdp) struct TunnelEndpoint {
     pub(in crate::afxdp) id: u16,
     pub(in crate::afxdp) logical_ifindex: i32,
+    /// #16514: the tunnel logical interface MTU carried from
+    /// `TunnelEndpointSnapshot.mtu` (the configured `interfaces
+    /// <tunnel> [unit N] mtu`, else the kernel anchor MTU). For GRE
+    /// this is the tunnel IP MTU and caps `native_gre_inner_mtu`;
+    /// 0 = unknown (non-limiting, see `min_nonzero_mtu`). WireGuard
+    /// deliberately does NOT consume it (#2680/#2684: WG derives its
+    /// inner MTU from the physical underlay minus encap overhead).
+    pub(in crate::afxdp) mtu: i32,
     /// #1865: the snapshot row's attachment label (linux_name, else
     /// the logical interface name) carried so the telemetry row name
     /// fallback chain matches the plan: ifindex_to_name -> this ->
@@ -90,6 +98,7 @@ impl std::fmt::Debug for TunnelEndpoint {
         f.debug_struct("TunnelEndpoint")
             .field("id", &self.id)
             .field("logical_ifindex", &self.logical_ifindex)
+            .field("mtu", &self.mtu)
             .field("interface_label", &self.interface_label)
             .field("redundancy_group", &self.redundancy_group)
             .field("mode", &self.mode)

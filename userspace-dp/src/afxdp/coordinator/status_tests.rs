@@ -518,6 +518,7 @@ fn wg_tunnel_status_carries_endpoint_resolver_counters_7936() {
         TunnelEndpoint {
             id: ID,
             logical_ifindex: 41,
+            mtu: 0,
             interface_label: "wg0".into(),
             interface: "wg0.0".into(),
             redundancy_group: 0,
@@ -608,6 +609,7 @@ fn wg_tunnel_status_reports_zeros_without_a_resolver_7936() {
         TunnelEndpoint {
             id: ID,
             logical_ifindex: 42,
+            mtu: 0,
             interface_label: "wg1".into(),
             interface: "wg1.0".into(),
             redundancy_group: 0,

@@ -61,9 +61,23 @@ pub(in crate::afxdp) fn native_gre_inner_mtu(
         _ => return 0,
     };
     let gre_header_len = 4usize + if endpoint.key != 0 { 4 } else { 0 };
-    transport_mtu
+    let physical_inner = transport_mtu
         .checked_sub(outer_ip_header_len + gre_header_len)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // #16514: the configured gr- logical MTU (`interfaces gr-…
+    // [unit N] mtu`, carried as `endpoint.mtu`) is the tunnel IP MTU
+    // and caps the physical-derived budget. This is the single SSOT
+    // for the PTB decision, the GRE MSS clamp and TCP
+    // re-segmentation, so all three honour the knob. `min_nonzero_mtu`
+    // keeps an unknown logical MTU (0) non-limiting; an unconfigured
+    // GRE anchor defaults to 1500, so `min(1476, 1500)` keeps the
+    // historical value. GRE only — this helper is never called for
+    // WireGuard (#2680/#2684 derive WG from the physical underlay).
+    // The encap drop guard in gre.rs stays physical-only: it refuses
+    // outer frames the NIC cannot transmit, while an inner packet
+    // between the logical MTU and the physical budget is PTB'd /
+    // MSS-clamped / re-segmented before it ever reaches that guard.
+    min_nonzero_mtu(physical_inner, endpoint.mtu.max(0) as usize)
 }
 
 pub(in crate::afxdp) fn native_gre_tcp_mss(

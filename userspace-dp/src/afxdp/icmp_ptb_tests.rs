@@ -1203,6 +1203,7 @@ fn insert_tunnel_endpoint(fwd: &mut ForwardingState, mode: &str, outer_family: i
         TunnelEndpoint {
             id: TUN_ID,
             logical_ifindex: TRANSPORT_IFINDEX,
+            mtu: 0,
             interface_label: "tun0".into(),
             interface: "tun0.0".into(),
             redundancy_group: 0,
@@ -1238,6 +1239,78 @@ fn post_transform_inner_mtu_gre_subtracts_outer_and_gre_header() {
         inner,
         native_gre_inner_mtu(&fwd, &decision),
         "post-transform GRE inner MTU MUST equal the #2331 encap-guard SSOT"
+    );
+}
+
+#[test]
+fn gre_logical_mtu_caps_inner_mtu_and_mss_16514() {
+    // #16514 acceptance: physical transport 1500 (IPv4 outer, no key)
+    // gives a physical inner budget of 1476, but a configured gr-
+    // logical MTU of 1400 must cap it: PTB inner MTU 1400 and, for an
+    // IPv4 inner, MSS 1400 - 20 - 20 = 1360. Pre-fix both read the
+    // physical value only (1476 / 1436).
+    let mut fwd = forwarding_with_egress(1500);
+    insert_tunnel_endpoint(&mut fwd, "gre", libc::AF_INET, 0);
+    fwd.tunnel_endpoints.get_mut(&TUN_ID).expect("endpoint").mtu = 1400;
+    let decision = tunnel_decision();
+    assert_eq!(
+        native_gre_inner_mtu(&fwd, &decision),
+        1400,
+        "#16514: logical MTU 1400 must cap the physical-derived 1476"
+    );
+    assert_eq!(
+        post_transform_inner_mtu(&decision, &fwd, false, libc::AF_INET as u8, 1500, None),
+        1400,
+        "#16514: PTB inner MTU must advertise the logical MTU"
+    );
+    assert_eq!(
+        native_gre_tcp_mss(&fwd, &decision, libc::AF_INET as u8),
+        1360,
+        "#16514: GRE MSS must be logical MTU 1400 - 20 IP - 20 TCP"
+    );
+    // The dispatcher's forwarded_egress_mtu returns the logical
+    // interface MTU for tunnel decisions; the NAT64+tunnel arm
+    // composes on the tunnel budget, so it must see the same cap.
+    assert_eq!(
+        post_transform_inner_mtu(&decision, &fwd, true, libc::AF_INET as u8, 1400, None),
+        1380,
+        "#16514: NAT64-over-GRE composes the RFC 7915 delta on the logical-capped budget"
+    );
+}
+
+#[test]
+fn gre_logical_mtu_at_or_above_physical_keeps_physical_16514() {
+    // Control: logical 1500 (the unconfigured GRE anchor default) must
+    // keep 1476 / 1436, and an unknown logical MTU (0) is non-limiting.
+    let mut fwd = forwarding_with_egress(1500);
+    insert_tunnel_endpoint(&mut fwd, "gre", libc::AF_INET, 0);
+    let decision = tunnel_decision();
+    fwd.tunnel_endpoints.get_mut(&TUN_ID).expect("endpoint").mtu = 1500;
+    assert_eq!(native_gre_inner_mtu(&fwd, &decision), 1476);
+    assert_eq!(
+        native_gre_tcp_mss(&fwd, &decision, libc::AF_INET as u8),
+        1436
+    );
+    fwd.tunnel_endpoints.get_mut(&TUN_ID).expect("endpoint").mtu = 0;
+    assert_eq!(native_gre_inner_mtu(&fwd, &decision), 1476);
+    assert_eq!(
+        native_gre_tcp_mss(&fwd, &decision, libc::AF_INET as u8),
+        1436
+    );
+}
+
+#[test]
+fn gre_logical_mtu_below_physical_with_smaller_transport_16514() {
+    // Both constraints present: transport 1400 (physical inner 1376)
+    // with logical 1400 keeps 1376 — the logical MTU never raises the
+    // physical budget.
+    let mut fwd = forwarding_with_egress(1400);
+    insert_tunnel_endpoint(&mut fwd, "gre", libc::AF_INET, 0);
+    fwd.tunnel_endpoints.get_mut(&TUN_ID).expect("endpoint").mtu = 1400;
+    assert_eq!(
+        native_gre_inner_mtu(&fwd, &tunnel_decision()),
+        1376,
+        "logical MTU must only lower, never raise, the physical budget"
     );
 }
 
