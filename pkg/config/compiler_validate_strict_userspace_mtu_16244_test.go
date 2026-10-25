@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// #16244: MTU 9000 on a userspace-dataplane-bound interface must be
+// #16244: MTU 9000 (authored media MTU; #16594 effective L3 8986 untagged) on a userspace-dataplane-bound interface must be
 // refused at commit with a named refusal, not committed clean and then
 // dropped at line rate. The netdev takes the MTU (planPhysDesired ->
 // LinkSetMTU runs before the deferred XDP attach), but the AF_XDP
@@ -26,7 +26,7 @@ func TestUserspaceMTU9000BoundRejected16244(t *testing.T) {
 	if err == nil {
 		t.Fatal("strict commit ACCEPTED MTU 9000 on a dataplane-bound interface")
 	}
-	for _, want := range []string{"ge-0/0/1", "9000", "3566", "#16244"} {
+	for _, want := range []string{"ge-0/0/1", "8986", "3566", "#16244"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal %q does not name %q", err.Error(), want)
 		}
@@ -36,19 +36,19 @@ func TestUserspaceMTU9000BoundRejected16244(t *testing.T) {
 func TestUserspaceMTUBoundary16244(t *testing.T) {
 	// Exactly the budget fits one UMEM frame: accepted.
 	assertCommitAccepts(t, flatTreeFromSets(t,
-		"set interfaces ge-0/0/1 mtu 3566",
+		"set interfaces ge-0/0/1 mtu 3580",
 		"set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24",
 		"set security zones security-zone trust interfaces ge-0/0/1.0",
 	))
 	// One byte over: refused.
 	assertCommitRejects(t, flatTreeFromSets(t,
-		"set interfaces ge-0/0/1 mtu 3567",
+		"set interfaces ge-0/0/1 mtu 3581",
 		"set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24",
 		"set security zones security-zone trust interfaces ge-0/0/1.0",
 	), "#16244")
 	// Ordinary MTU: accepted, no refusal.
 	assertCommitAccepts(t, flatTreeFromSets(t,
-		"set interfaces ge-0/0/1 mtu 1500",
+		"set interfaces ge-0/0/1 mtu 1514",
 		"set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24",
 		"set security zones security-zone trust interfaces ge-0/0/1.0",
 	))
@@ -88,7 +88,7 @@ func TestUserspaceMTUTaggedParentRejected16244(t *testing.T) {
 	if err == nil {
 		t.Fatal("strict commit ACCEPTED an over-budget tagged parent")
 	}
-	for _, want := range []string{"ge-0/0/1", "9000", "3566", "#16244"} {
+	for _, want := range []string{"ge-0/0/1", "8982", "3566", "#16244"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("tagged-parent refusal %q does not name %q", err.Error(), want)
 		}
@@ -164,7 +164,7 @@ func TestUserspaceMTULenientWarns16244(t *testing.T) {
 		t.Fatalf("lenient compile must accept a persisted jumbo config (#1960), got %v", err)
 	}
 	joined := strings.Join(cfg.Warnings, "\n")
-	for _, want := range []string{"ge-0/0/1", "9000", "#16244"} {
+	for _, want := range []string{"ge-0/0/1", "8986", "#16244"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("lenient warnings %q do not name %q", joined, want)
 		}

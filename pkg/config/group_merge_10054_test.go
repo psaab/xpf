@@ -161,7 +161,7 @@ interfaces {
 func TestNestedWildcardInnerExceptStaysFiltered10054(t *testing.T) {
 	const text = `groups {
   J { interfaces { <*> { description FROM-J; } } }
-  H { interfaces { <*> { mtu 9000; apply-groups J; } } }
+  H { interfaces { <*> { mtu 9014; apply-groups J; } } }
   G { interfaces { apply-groups-except J; } apply-groups H; }
 }
 apply-groups G;

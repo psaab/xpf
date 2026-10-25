@@ -17,7 +17,7 @@ import "testing"
 func TestUnitMTUOrderIndependent10050(t *testing.T) {
 	flat := []string{
 		"set interfaces ge-0-0-2 vlan-tagging",
-		"set interfaces ge-0-0-2 mtu 1400",
+		"set interfaces ge-0-0-2 mtu 1418",
 		"set interfaces ge-0-0-2 unit 50 vlan-id 50",
 	}
 	flatCases := map[string][]string{
@@ -47,7 +47,7 @@ func TestUnitMTUOrderIndependent10050(t *testing.T) {
 		"inet before inet6": `interfaces {
     ge-0-0-2 {
         vlan-tagging;
-        mtu 1400;
+        mtu 1418;
         unit 50 {
             vlan-id 50;
             family inet { mtu 9000; }
@@ -58,7 +58,7 @@ func TestUnitMTUOrderIndependent10050(t *testing.T) {
 		"inet6 before inet": `interfaces {
     ge-0-0-2 {
         vlan-tagging;
-        mtu 1400;
+        mtu 1418;
         unit 50 {
             vlan-id 50;
             family inet6 { mtu 1300; }
@@ -86,7 +86,7 @@ func TestUnitMTUOrderIndependent10050(t *testing.T) {
 func TestUnitMTUMinIsSymmetric10050(t *testing.T) {
 	base := []string{
 		"set interfaces ge-0-0-2 vlan-tagging",
-		"set interfaces ge-0-0-2 mtu 1400",
+		"set interfaces ge-0-0-2 mtu 1418",
 		"set interfaces ge-0-0-2 unit 50 vlan-id 50",
 	}
 	cases := map[string][]string{
@@ -119,7 +119,7 @@ func TestUnitMTUMinIsSymmetric10050(t *testing.T) {
 func TestUnitMTUOrderIndependentGateAccepts10050(t *testing.T) {
 	base := []string{
 		"set interfaces ge-0-0-2 vlan-tagging",
-		"set interfaces ge-0-0-2 mtu 1400",
+		"set interfaces ge-0-0-2 mtu 1418",
 		"set interfaces ge-0-0-2 unit 50 vlan-id 50",
 	}
 	cases := map[string][]string{

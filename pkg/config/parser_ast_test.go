@@ -3864,7 +3864,7 @@ func TestRIPAuthSetSyntax(t *testing.T) {
 }
 
 func TestInterfaceDuplexSetSyntax(t *testing.T) {
-	cmds := []string{"set interfaces trust0 speed 1g", "set interfaces trust0 duplex full", "set interfaces trust0 mtu 9000", "set interfaces trust0 description \"LAN interface\""}
+	cmds := []string{"set interfaces trust0 speed 1g", "set interfaces trust0 duplex full", "set interfaces trust0 mtu 9014", "set interfaces trust0 description \"LAN interface\""}
 	tree := &ConfigTree{}
 	for _, cmd := range cmds {
 		path, err := ParseSetCommand(cmd)

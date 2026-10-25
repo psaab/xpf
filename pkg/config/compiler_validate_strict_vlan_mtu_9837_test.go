@@ -12,7 +12,7 @@ import (
 func TestVlanUnitMTUAboveParentRejected9837(t *testing.T) {
 	_, err := CompileConfig(flatTreeFromSets(t,
 		"set interfaces ge-0-0-2 vlan-tagging",
-		"set interfaces ge-0-0-2 mtu 1400",
+		"set interfaces ge-0-0-2 mtu 1418",
 		"set interfaces ge-0-0-2 unit 50 vlan-id 50",
 		"set interfaces ge-0-0-2 unit 50 family inet address 172.16.50.8/24",
 		"set interfaces ge-0-0-2 unit 50 family inet mtu 9000",
@@ -34,7 +34,7 @@ func TestVlanUnitMTUHierarchicalRejected9837(t *testing.T) {
 	assertCommitRejects(t, hierTree(t, `interfaces {
     ge-0-0-2 {
         vlan-tagging;
-        mtu 1400;
+        mtu 1418;
         unit 50 {
             vlan-id 50;
             family inet {
@@ -54,7 +54,7 @@ func TestVlanUnitMTUControlsAccepted9837(t *testing.T) {
 	cases := map[string][]string{
 		// An untagged unit's MTU replaces the parent's: cannot exceed it.
 		"untagged unit above interface mtu": {
-			"set interfaces ge-0-0-0 mtu 1400",
+			"set interfaces ge-0-0-0 mtu 1414",
 			"set interfaces ge-0-0-0 unit 0 family inet address 10.0.0.1/24",
 			"set interfaces ge-0-0-0 unit 0 family inet mtu 9000",
 		},
@@ -69,14 +69,14 @@ func TestVlanUnitMTUControlsAccepted9837(t *testing.T) {
 		// Boundary: the kernel refuses ABOVE, not equal.
 		"tagged unit equal to parent mtu": {
 			"set interfaces ge-0-0-2 vlan-tagging",
-			"set interfaces ge-0-0-2 mtu 1400",
+			"set interfaces ge-0-0-2 mtu 1418",
 			"set interfaces ge-0-0-2 unit 50 vlan-id 50",
 			"set interfaces ge-0-0-2 unit 50 family inet address 172.16.50.8/24",
 			"set interfaces ge-0-0-2 unit 50 family inet mtu 1400",
 		},
 		"tagged unit below parent mtu": {
 			"set interfaces ge-0-0-2 vlan-tagging",
-			"set interfaces ge-0-0-2 mtu 1400",
+			"set interfaces ge-0-0-2 mtu 1418",
 			"set interfaces ge-0-0-2 unit 50 vlan-id 50",
 			"set interfaces ge-0-0-2 unit 50 family inet address 172.16.50.8/24",
 			"set interfaces ge-0-0-2 unit 50 family inet mtu 1300",
@@ -96,7 +96,7 @@ func TestVlanUnitMTUControlsAccepted9837(t *testing.T) {
 func TestVlanUnitMTUFamilyOrderMatchesRuntime9837(t *testing.T) {
 	base := []string{
 		"set interfaces ge-0-0-2 vlan-tagging",
-		"set interfaces ge-0-0-2 mtu 1400",
+		"set interfaces ge-0-0-2 mtu 1418",
 		"set interfaces ge-0-0-2 unit 50 vlan-id 50",
 	}
 	cases := map[string][]string{
@@ -125,7 +125,7 @@ func TestVlanUnitMTUFamilyOrderMatchesRuntime9837(t *testing.T) {
 func TestVlanUnitMTUInet6OnlyRejected9837(t *testing.T) {
 	assertCommitRejects(t, flatTreeFromSets(t,
 		"set interfaces ge-0-0-2 vlan-tagging",
-		"set interfaces ge-0-0-2 mtu 1400",
+		"set interfaces ge-0-0-2 mtu 1418",
 		"set interfaces ge-0-0-2 unit 50 vlan-id 50",
 		"set interfaces ge-0-0-2 unit 50 family inet6 address fd00:50::8/64",
 		"set interfaces ge-0-0-2 unit 50 family inet6 mtu 9000",
@@ -140,7 +140,7 @@ func TestVlanUnitMTUInet6OnlyRejected9837(t *testing.T) {
 func TestVlanUnitMTULenientWarns9837(t *testing.T) {
 	cfg, err := CompileConfigLenient(flatTreeFromSets(t,
 		"set interfaces ge-0-0-2 vlan-tagging",
-		"set interfaces ge-0-0-2 mtu 1400",
+		"set interfaces ge-0-0-2 mtu 1418",
 		"set interfaces ge-0-0-2 unit 50 vlan-id 50",
 		"set interfaces ge-0-0-2 unit 50 family inet address 172.16.50.8/24",
 		"set interfaces ge-0-0-2 unit 50 family inet mtu 9000",
@@ -161,11 +161,11 @@ func TestVlanUnitMTULenientWarns9837(t *testing.T) {
 func TestVlanUnitMTUFirstErrorStable9837(t *testing.T) {
 	_, err := CompileConfig(flatTreeFromSets(t,
 		"set interfaces ge-0-0-3 vlan-tagging",
-		"set interfaces ge-0-0-3 mtu 1400",
+		"set interfaces ge-0-0-3 mtu 1418",
 		"set interfaces ge-0-0-3 unit 7 vlan-id 7",
 		"set interfaces ge-0-0-3 unit 7 family inet mtu 9000",
 		"set interfaces ge-0-0-2 vlan-tagging",
-		"set interfaces ge-0-0-2 mtu 1400",
+		"set interfaces ge-0-0-2 mtu 1418",
 		"set interfaces ge-0-0-2 unit 60 vlan-id 60",
 		"set interfaces ge-0-0-2 unit 60 family inet mtu 9000",
 		"set interfaces ge-0-0-2 unit 50 vlan-id 50",
@@ -191,7 +191,7 @@ func TestVlanUnitMTUUntaggedSiblingOverride9837(t *testing.T) {
 	t.Run("sibling override accepts runtime-fine shape", func(t *testing.T) {
 		assertCommitAccepts(t, flatTreeFromSets(t,
 			"set interfaces ge-0-0-2 vlan-tagging",
-			"set interfaces ge-0-0-2 mtu 1400",
+			"set interfaces ge-0-0-2 mtu 1418",
 			"set interfaces ge-0-0-2 unit 0 family inet address 10.0.9.1/24",
 			"set interfaces ge-0-0-2 unit 0 family inet mtu 1500",
 			"set interfaces ge-0-0-2 unit 50 vlan-id 50",
@@ -204,7 +204,7 @@ func TestVlanUnitMTUUntaggedSiblingOverride9837(t *testing.T) {
 	t.Run("override raises the bar, still rejects above it", func(t *testing.T) {
 		assertCommitRejects(t, flatTreeFromSets(t,
 			"set interfaces ge-0-0-2 vlan-tagging",
-			"set interfaces ge-0-0-2 mtu 1400",
+			"set interfaces ge-0-0-2 mtu 1418",
 			"set interfaces ge-0-0-2 unit 0 family inet address 10.0.9.1/24",
 			"set interfaces ge-0-0-2 unit 0 family inet mtu 1500",
 			"set interfaces ge-0-0-2 unit 50 vlan-id 50",
@@ -217,7 +217,7 @@ func TestVlanUnitMTUUntaggedSiblingOverride9837(t *testing.T) {
 	t.Run("unreferenced sibling does not count", func(t *testing.T) {
 		assertCommitRejects(t, flatTreeFromSets(t,
 			"set interfaces ge-0-0-2 vlan-tagging",
-			"set interfaces ge-0-0-2 mtu 1400",
+			"set interfaces ge-0-0-2 mtu 1418",
 			"set interfaces ge-0-0-2 unit 0 family inet address 10.0.9.1/24",
 			"set interfaces ge-0-0-2 unit 0 family inet mtu 1500",
 			"set interfaces ge-0-0-2 unit 50 vlan-id 50",
@@ -235,7 +235,7 @@ func TestVlanUnitMTUUntaggedSiblingOverride9837(t *testing.T) {
 		// lowest-wins rule itself stays in the validator/planner.
 		assertCommitRejects(t, flatTreeFromSets(t,
 			"set interfaces ge-0-0-2 vlan-tagging",
-			"set interfaces ge-0-0-2 mtu 1400",
+			"set interfaces ge-0-0-2 mtu 1418",
 			"set interfaces ge-0-0-2 unit 0 family inet address 10.0.9.1/24",
 			"set interfaces ge-0-0-2 unit 0 family inet mtu 1300",
 			"set interfaces ge-0-0-2 unit 50 vlan-id 50",
