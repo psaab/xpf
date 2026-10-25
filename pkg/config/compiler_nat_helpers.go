@@ -99,25 +99,25 @@ func natAddrIsV4MappedOrCompat(raw string) bool {
 }
 
 // natPrefixContainsV4MappedOrCompat reports whether the PREFIX raw
-// (a bare IP or a CIDR) REPRESENTS at least one IPv4-mapped or
-// IPv4-compatible address — the pool/prefix-slot companion of
-// natAddrIsV4MappedOrCompat. The packet predicate's exact ::/::1
-// exemptions are per-ADDRESS: a prefix rooted at :: still contains
-// ::2/::3 (compat, ingress-dropped), so judging a pool prefix by its
-// base address alone exempts every subnet starting at :: (review
-// finding on #17697: `address ::/126` allocated ::2/::3 outbound).
+// (a bare IP or a CIDR) REPRESENTS at least one NON-EXEMPT
+// IPv4-mapped or IPv4-compatible address — the allocation-set
+// companion of natAddrIsV4MappedOrCompat, for slots whose value is
+// expanded into individual identities (SNAT pool members, DNAT
+// pool targets). It must NOT be used for match selectors: a native
+// match prefix (::/0, ::/1) contains compat addresses as a subset
+// yet matches native traffic perfectly well, so match slots keep
+// the per-address predicate (round-3 review on #17697).
 //
-// Rule: mask the address to its prefix; the represented set contains
-// a mapped/compat address iff the masked base is itself mapped/
-// compat, OR the prefix is wider than a host and its base lies in
-// ::/96 (compat space, first 96 bits zero) or ::ffff:0:0/96 (mapped
-// space) — a wider block rooted inside either space necessarily
-// contains further mapped/compat hosts beyond any exempt base.
-// A bare address or /128 is a single host and defers to the address
-// predicate (so bare ::, ::1 and their /128 forms stay exempt, and
-// a match-side ::/0 — whose base ::/96 argument would otherwise
-// fire — is only judged here where callers mean a represented SET;
-// match slots keep using the address predicate).
+// Rule: mask the address to its prefix. The set contains a
+// forbidden member iff the masked base is itself a non-exempt
+// mapped/compat host, OR the prefix is rooted in compat space
+// (::/96, first 96 bits zero) and contains a non-exempt compat
+// host beyond the exempt pair — rooted at :: that means bits
+// <= 126 (::/127 is exactly {::, ::1}, both exempt) — OR the
+// prefix is rooted in mapped space (::ffff:0:0/96) and wider than
+// a host. A bare address or /128 is a single host and defers to
+// the address predicate (bare ::, ::1 and their /128 forms stay
+// exempt).
 func natPrefixContainsV4MappedOrCompat(raw string) bool {
 	if natAddrIsV4MappedOrCompat(raw) {
 		return true
@@ -141,15 +141,15 @@ func natPrefixContainsV4MappedOrCompat(raw string) bool {
 	p := netip.PrefixFrom(addr, bits).Masked()
 	base := p.Addr()
 	if base == netip.IPv6Unspecified() {
-		// Any wider prefix rooted at :: contains ::2.. (compat).
-		// bits < 128 here, so the set has at least two addresses and
-		// cannot be only the exempt :: itself.
-		return true
+		// Rooted at ::: /127 is exactly {::, ::1} — both exempt.
+		// /126 and wider contain ::2 (compat, non-exempt).
+		return bits <= 126
 	}
 	o := base.As16()
-	// Inside compat space ::/96 (first 12 bytes zero) or mapped
-	// space ::ffff:0:0/96 (80 zero bits + ffff + zero): a wider
-	// block contains mapped/compat hosts beyond its base.
+	// Compat space ::/96 (first 12 bytes zero): any wider block
+	// rooted at a nonzero compat base contains compat hosts beyond
+	// the base (the base itself already fired above when it is a
+	// non-exempt compat host; ::1-rooted /127 masks to :: above).
 	compatSpace := true
 	for i := range 12 {
 		if o[i] != 0 {
@@ -160,6 +160,8 @@ func natPrefixContainsV4MappedOrCompat(raw string) bool {
 	if compatSpace {
 		return true
 	}
+	// Mapped space ::ffff:0:0/96: a wider block contains mapped
+	// hosts beyond any single base.
 	mappedSpace := o[10] == 0xff && o[11] == 0xff && o[12] == 0 && o[13] == 0 && o[14] == 0 && o[15] == 0
 	if !mappedSpace {
 		return false
@@ -170,6 +172,73 @@ func natPrefixContainsV4MappedOrCompat(raw string) bool {
 		}
 	}
 	return true
+}
+
+// natPrefixIsV4MappedOrCompatOnly reports whether EVERY address a
+// match prefix represents is a mapped/compat identity (or an exempt
+// ::/::1) — i.e. the prefix can match NO native IPv6 traffic and NO
+// IPv4 traffic (which keys V4). This is the match-selector
+// companion: broad native prefixes (::/0, ::/1, 2001:db8::/64)
+// return false even though compat addresses are a subset of them,
+// while a prefix entirely inside compat space (::203.0.113.0/120,
+// ::/126, ::2/127) or mapped space (::ffff:0:0/96 and narrower
+// mapped-rooted blocks) returns true. Single hosts defer to the
+// address predicate. Used where a match value must be judged as a
+// selector (address-book values, NAT64 source selectors) rather
+// than as an allocation set.
+func natPrefixIsV4MappedOrCompatOnly(raw string) bool {
+	if natAddrIsV4MappedOrCompat(raw) {
+		return true
+	}
+	ipPart := natCIDRIPPart(raw)
+	addr, err := netip.ParseAddr(ipPart)
+	if err != nil || !addr.Is6() || addr.Zone() != "" {
+		return false
+	}
+	bits := 128
+	if slash := strings.IndexByte(raw, '/'); slash >= 0 {
+		n, err := strconv.Atoi(raw[slash+1:])
+		if err != nil || n < 0 || n > 128 {
+			return false
+		}
+		bits = n
+	}
+	if bits >= 128 {
+		return false
+	}
+	p := netip.PrefixFrom(addr, bits).Masked()
+	base := p.Addr()
+	o := base.As16()
+	// Entirely inside compat space ::/96 requires the first 96
+	// bits fixed at zero: bits >= 96 and base in ::/96. (A wider
+	// prefix such as ::/0 spans native space too — not only.)
+	if bits >= 96 {
+		inCompat := true
+		for i := range 12 {
+			if o[i] != 0 {
+				inCompat = false
+				break
+			}
+		}
+		if inCompat {
+			// ::/127's set is {::, ::1}, both exempt — it matches
+			// only exempt identities, which are not forbidden; a
+			// match on them is the operator's native loopback/
+			// unspecified selector, not a compat smuggle. Wider
+			// compat sets contain non-exempt compat hosts only.
+			return !(base == netip.IPv6Unspecified() && bits == 127)
+		}
+		inMapped := o[10] == 0xff && o[11] == 0xff
+		if inMapped {
+			for i := range 10 {
+				if o[i] != 0 {
+					return false
+				}
+			}
+			return true
+		}
+	}
+	return false
 }
 
 // isHostMaskAddress reports whether addr is a host route the static-NAT

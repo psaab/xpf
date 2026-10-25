@@ -373,10 +373,11 @@ func TestMappedCompatPrefixContainsPredicate16875(t *testing.T) {
 		{"::ffff:0:0/120", true},
 		{"::ffff:127.0.0.0/120", true},
 		{"::203.0.113.0/120", true},
-		{"::", false},     // single exempt host
-		{"::1", false},    // single exempt host
-		{"::/128", false}, // single exempt host
-		{"::1/128", false},
+		{"::/127", false},  // exactly {::, ::1}, both exempt
+		{"::1/127", false}, // masks to the same exempt-only set
+		{"::", false},      // single exempt host
+		{"::1", false},     // single exempt host
+		{"::/128", false},  // single exempt host
 		{"2001:db8::/64", false},
 		{"2001:db8::5", false},
 		{"0.0.0.0/0", false},
@@ -391,6 +392,27 @@ func TestMappedCompatPrefixContainsPredicate16875(t *testing.T) {
 	// at match slots.
 	if natAddrIsV4MappedOrCompat("::/0") {
 		t.Error("address predicate must keep ::/0 exempt")
+	}
+	// Only-semantics (match selectors): broad native prefixes are
+	// NOT only-mapped/compat even though compat hosts are a subset.
+	for _, tc := range []struct {
+		in   string
+		want bool
+	}{
+		{"::/0", false},
+		{"0:0:0:0:0:0:0:0/0", false},
+		{"::/1", false},
+		{"::/127", false}, // exempt-only set
+		{"2001:db8::/64", false},
+		{"::/126", true},
+		{"::2/127", true},
+		{"::203.0.113.0/120", true},
+		{"::ffff:0:0/96", true},
+		{"::ffff:203.0.113.0/120", true},
+	} {
+		if got := natPrefixIsV4MappedOrCompatOnly(tc.in); got != tc.want {
+			t.Errorf("natPrefixIsV4MappedOrCompatOnly(%q) = %v, want %v", tc.in, got, tc.want)
+		}
 	}
 }
 
@@ -416,6 +438,80 @@ func TestMappedCompatSNATSubnetPoolRejected16875(t *testing.T) {
 	}
 	if !hasWarningContaining(cfg.Warnings, "IPv4-mapped or IPv4-compatible") {
 		t.Fatalf("lenient load must warn about the compat-containing pool, got: %v", cfg.Warnings)
+	}
+}
+
+func TestMappedCompatRound3Boundaries16875(t *testing.T) {
+	// Book broad native prefixes compile in every book kind, with
+	// no false warning (match selectors, not allocation sets).
+	for _, tc := range []struct{ name, line string }{
+		{"global zero", "set security address-book global address all-v6 ::/0"},
+		{"global zero long", "set security address-book global address all-v6 0:0:0:0:0:0:0:0/0"},
+		{"global half", "set security address-book global address half-v6 ::/1"},
+		{"named zero", "set security address-book book1 address all-v6 ::/0"},
+		{"zone-local zero", "set security zones security-zone trust address-book address all-v6 ::/0"},
+		{"global exempt pair", "set security address-book global address pair ::/127"},
+		{"global native", "set security address-book global address n 2001:db8::/32"},
+	} {
+		t.Run("book/"+tc.name, func(t *testing.T) {
+			cfg, err := CompileConfig(buildTree(t, []string{tc.line}))
+			if err != nil {
+				t.Fatalf("broad native book entry must compile, got: %v", err)
+			}
+			for _, w := range cfg.Warnings {
+				if strings.Contains(w, "IPv4-mapped or IPv4-compatible") || strings.Contains(w, "IPv4-compatible IPv6") {
+					t.Fatalf("broad native book entry must not warn mapped/compat, got: %v", cfg.Warnings)
+				}
+			}
+			if _, err := CompileConfigLenient(buildTree(t, []string{tc.line})); err != nil {
+				t.Fatalf("lenient must compile: %v", err)
+			}
+		})
+	}
+	// Range/wildcard expansions spanning native space compile; a
+	// compat-only expansion still rejects (round-2 witness kept).
+	for _, line := range []string{
+		"set security address-book global address r1 range-address :: to 2001:db8::9",
+		"set security address-book global address w1 wildcard-address ::/0:0:0:0::",
+	} {
+		if _, err := CompileConfig(buildTree(t, []string{line})); err != nil {
+			t.Fatalf("native-spanning expansion %q must compile, got: %v", line, err)
+		}
+	}
+	if _, err := CompileConfig(buildTree(t, []string{
+		"set security address-book global address r1 range-address ::2 to ::3",
+	})); err == nil || !strings.Contains(err.Error(), "IPv4-compatible") {
+		t.Fatalf("compat-only range ::2-::3 must reject, got: %v", err)
+	}
+	// NAT64 broad/equivalent source selectors compile; compat-only
+	// and mapped-only selectors still reject.
+	nat64Src := func(src string) []string {
+		return []string{
+			"set security nat source pool P address 192.0.2.5",
+			"set security nat nat64 rule-set n64 prefix 64:ff9b::/96",
+			"set security nat nat64 rule-set n64 match source-address " + src,
+			"set security nat nat64 rule-set n64 source-pool P",
+		}
+	}
+	for _, src := range []string{"::/1", "0:0:0:0:0:0:0:0/0", "::/0", "2001:db8::/64", "::/127"} {
+		if _, err := CompileConfig(buildTree(t, nat64Src(src))); err != nil {
+			t.Fatalf("NAT64 native source %q must compile, got: %v", src, err)
+		}
+	}
+	for _, src := range []string{"::/126", "::2/127", "::ffff:0:0/96", "::203.0.113.0/120"} {
+		if _, err := CompileConfig(buildTree(t, nat64Src(src))); err == nil ||
+			!strings.Contains(err.Error(), "IPv4-mapped or IPv4-compatible") {
+			t.Fatalf("NAT64 compat/mapped-only source %q must reject, got: %v", src, err)
+		}
+	}
+	// SNAT exempt-only subnet compiles; ::/126 still rejects.
+	if _, err := CompileConfig(buildTree(t, snatFamilySet16600(
+		"source-address 2001:db8:1::/64", "::/127"))); err != nil {
+		t.Fatalf("SNAT pool ::/127 (exempt-only set) must compile, got: %v", err)
+	}
+	if _, err := CompileConfig(buildTree(t, snatFamilySet16600(
+		"source-address 2001:db8:1::/64", "::1/127"))); err != nil {
+		t.Fatalf("SNAT pool ::1/127 (masks to exempt-only set) must compile, got: %v", err)
 	}
 }
 

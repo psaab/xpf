@@ -377,7 +377,13 @@ func validateAddressBookMappedPrefixesStrict(cfg *Config) error {
 							"use a non-mapped IPv4 or IPv6 prefix (#10688)",
 						scope, name, v)
 				}
-				if natPrefixContainsV4MappedOrCompat(v) {
+				// Match-selector semantics: a book prefix is a
+				// MATCH value, so only a prefix whose EVERY member
+				// is mapped/compat (or exempt) can never match —
+				// broad native prefixes (::/0, ::/1) contain compat
+				// hosts as a subset yet match native traffic and
+				// must compile (round-3 review on #17697).
+				if natPrefixIsV4MappedOrCompatOnly(v) {
 					return fmt.Errorf(
 						"%s address-book address %q has IPv4-mapped or IPv4-compatible IPv6 prefix %q; "+
 							"the helper drops every IPv6 frame carrying such an identity at ingress "+

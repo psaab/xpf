@@ -814,12 +814,14 @@ func validateNATMappedCompatStrict(cfg *Config) error {
 	}
 	// NAT64 rule-sets (the supported `security nat nat64` collection,
 	// distinct from the rejected static `inet` sentinel): the /96
-	// translation prefix and every match source-address. A mapped/
-	// compat prefix makes every translated destination identity
-	// ingress-dropped before the NAT64 lookup; a mapped/compat
-	// source selector can never be satisfied. Judged with prefix
-	// semantics: a wider-than-host prefix rooted in compat/mapped
-	// space contains such identities even when its base is exempt.
+	// translation prefix and every match source-address. The prefix
+	// is a translation SET (every destination under it is rewritten
+	// into the prefix's last 32 bits), judged by represented set; a
+	// source selector is a MATCH, judged by only-semantics — broad
+	// native selectors (::/0 in any spelling, ::/1) match native
+	// sources even though compat hosts are a subset, and only a
+	// selector entirely inside mapped/compat space can never be
+	// satisfied (round-3 review on #17697).
 	for _, rs := range cfg.Security.NAT.NAT64 {
 		if rs == nil {
 			continue
@@ -830,18 +832,13 @@ func validateNATMappedCompatStrict(cfg *Config) error {
 				rs.Name, rs.Prefix, cause)
 		}
 		for _, a := range rs.SourceAddresses {
-			// ::/0 (and the other wildcard spellings the NAT64 scope
-			// gate classifies as match-any) is the authored
-			// match-any source, not a compat identity: it matches
-			// native IPv6 sources, so the represented-set argument
-			// that fires for pool prefixes must not fire here.
-			if a == "" || a == "::/0" {
+			if a == "" {
 				continue
 			}
 			if _, _, isWildcard := PolicyAddressWildcardFamilies(a); isWildcard {
 				continue
 			}
-			if natPrefixContainsV4MappedOrCompat(a) {
+			if natPrefixIsV4MappedOrCompatOnly(a) {
 				return fmt.Errorf(
 					"nat64 rule-set %q: match source-address %q %s (#16875)",
 					rs.Name, a, cause)
