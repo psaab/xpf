@@ -858,10 +858,10 @@ func TestPeerIdentityIsResolvedOncePerConnectionAtAccept_5278(t *testing.T) {
 	// still usable, which is exactly the window a hostile client engineers.
 	swap(authz.PeerIdentity{Local: true, Detail: "local peer has no established socket"})
 
-	_, err = client.Commit(ctx, &pb.CommitRequest{})
-	assertNotDenied(t, "Commit after the peer answer changed", err)
 	_, err = client.EnterConfigure(ctx, &pb.EnterConfigureRequest{})
 	assertNotDenied(t, "EnterConfigure after the peer answer changed", err)
+	_, err = client.Commit(ctx, &pb.CommitRequest{})
+	assertNotDenied(t, "Commit after the peer answer changed", err)
 
 	if got := count(); got != 1 {
 		t.Fatalf("peer resolver ran %d times across three RPCs on ONE connection, "+
@@ -893,7 +893,9 @@ func TestANewConnectionGetsAFreshIdentity_5278(t *testing.T) {
 
 	first := dialPrimary(t, addr)
 	ctx := callCtx(t)
-	_, err := first.Commit(ctx, &pb.CommitRequest{})
+	_, err := first.EnterConfigure(ctx, &pb.EnterConfigureRequest{})
+	assertNotDenied(t, "first connection (super-user) EnterConfigure", err)
+	_, err = first.Commit(ctx, &pb.CommitRequest{})
 	assertNotDenied(t, "first connection (super-user) Commit", err)
 
 	mu.Lock()

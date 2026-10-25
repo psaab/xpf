@@ -108,7 +108,9 @@ func newNATPoolStatsStore(t *testing.T) *configstore.Store {
 	if err := store.EnterConfigure(); err != nil {
 		t.Fatalf("EnterConfigure() error = %v", err)
 	}
-	if _, err := store.LoadSet(`set security nat source pool bigpool address 10.0.0.0/24
+	if _, err := store.LoadSet(`set security zones security-zone trust
+set security zones security-zone untrust
+set security nat source pool bigpool address 10.0.0.0/24
 set security nat source rule-set rs from zone trust
 set security nat source rule-set rs to zone untrust
 set security nat source rule-set rs rule r1 match source-address 10.0.0.0/8

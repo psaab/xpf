@@ -156,15 +156,19 @@ system {
 				[]byte(tc.content), 0o600); err != nil {
 				t.Fatalf("write malformed flat rescue: %v", err)
 			}
+			// #9892/#16080: a non-superuser class is refused a
+			// whole-candidate rescue load at the gate, BEFORE the
+			// file is parsed — so the wire error is PermissionDenied
+			// (never a parse error, never the secret, never a
+			// spoofed position). The parse-position/leak property
+			// itself is pinned below via LoadRescueConfigRedacted,
+			// which reads the same file without the gate.
 			_, err := client.Load(ctx, &pb.LoadRequest{Mode: "rescue"})
-			if status.Code(err) != codes.InvalidArgument {
-				t.Fatalf("malformed flat rescue error = %v, want InvalidArgument", err)
+			if status.Code(err) != codes.PermissionDenied {
+				t.Fatalf("malformed flat rescue error = %v, want PermissionDenied (gate refuses before parsing)", err)
 			}
 			if strings.Contains(err.Error(), secret) {
-				t.Fatalf("gRPC parse error leaked rescue secret %q: %v", secret, err)
-			}
-			if !strings.Contains(err.Error(), "line 2") || strings.Contains(err.Error(), "line 9") {
-				t.Fatalf("gRPC parse error reported the wrong flat-file source position: %v", err)
+				t.Fatalf("gRPC gate error leaked rescue secret %q: %v", secret, err)
 			}
 			if got := store.ShowCandidateSet(); got != before {
 				t.Fatalf("malformed flat rescue changed candidate: before=%q after=%q", before, got)

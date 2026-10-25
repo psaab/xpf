@@ -27,10 +27,14 @@ func unitMemberGRPCStore(t *testing.T) *Server {
 	if err := store.EnterConfigure(); err != nil {
 		t.Fatalf("EnterConfigure() error = %v", err)
 	}
-	if _, err := store.LoadSet(`set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24
+	if _, err := store.LoadSet(`set interfaces ge-0/0/0 vlan-tagging
+set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24
+set interfaces ge-0/0/0 unit 50 vlan-id 50
 set interfaces ge-0/0/0 unit 50 family inet address 10.0.10.1/24
 set interfaces ge-0/0/0 unit 50 family inet6 dhcpv6
+set interfaces ge-0/0/1 vlan-tagging
 set interfaces ge-0/0/1 unit 0 family inet address 192.168.1.1/24
+set interfaces ge-0/0/1 unit 7 vlan-id 7
 set interfaces ge-0/0/1 unit 7 family inet address 192.168.7.1/24
 set security zones security-zone trust interfaces ge-0/0/0.0
 set security zones security-zone trust interfaces ge-0/0/0.50

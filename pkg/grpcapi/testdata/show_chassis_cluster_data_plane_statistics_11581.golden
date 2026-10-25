@@ -24,6 +24,7 @@ Userspace dataplane helper:
   Ring entries:              4096
   Last snapshot generation:  0
   Last FIB generation:       0
+  Last snapshot policies:    0
   Interface addresses:       0
   Neighbor entries:          0
   Session table entries:     321/1000
@@ -50,8 +51,15 @@ Userspace dataplane helper:
   Unknown VLAN drops:        0
   Destination MAC drops:     0
   Martian drops:             0
+  DNS illegal-reply drops:   0
   IPv6 ext-header drops:     0
   V4-mapped IPv6 drops:    0
+  Transit output-filter drops: 0
+  Transit source-martian drops: 0
+  Transit IPsec-fence drops:  0
+  Transit L2-group drops:     0
+  Forward build failures:     0
+  No-egress-binding drops:    0
   Invalid fabric-stamp drops: 0
   Unstamped fabric-ingress drops: 0
   Ambiguous fabric-zone drops: 0
@@ -61,6 +69,7 @@ Userspace dataplane helper:
   Flow cache hits:           0
   Flow cache misses:         0
   Flow cache evictions:      0
+  Flow cache evictions by arm: gen=0 rg_epoch=0 lease=0 deny_expiry=0 scheduler=0 phase_flush=0 collision=0 neighbor_mac=0 decision_invalid=0 deny_superseded=0 session_dead=0 enforce_changed=0 owner_active_redirect=0 fabric_local_wins=0 fabric_ingress_local_wins=0 fabric_redirect_on_fabric=0 fabric_local_same_owner=0 fabric_ingress_discard_now_local=0 forward_candidate_egress_departed=0
   Session hits:              100
   Session misses:            18
   Session creates:           8

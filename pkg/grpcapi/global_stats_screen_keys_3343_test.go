@@ -51,21 +51,25 @@ func TestGetGlobalStatsScreenDropDetailKeysAreCanonical(t *testing.T) {
 	// independent of the SSOT struct so a same-direction edit to both can't
 	// hide a regression.
 	want := map[string]uint64{
-		"syn-flood":       1,
-		"icmp-flood":      2,
-		"udp-flood":       3,
-		"port-scan":       4,
-		"ip-sweep":        5,
-		"land-attack":     6,
-		"ping-of-death":   7,
-		"teardrop":        8,
-		"tcp-syn-fin":     9,
-		"tcp-no-flag":     10,
-		"tcp-fin-no-ack":  11,
-		"winnuke":         12,
-		"ip-source-route": 13,
-		"syn-frag":        14,
-		"session-limit":   15,
+		"syn-flood":              1,
+		"icmp-flood":             2,
+		"udp-flood":              3,
+		"port-scan":              4,
+		"ip-sweep":               5,
+		"land-attack":            6,
+		"ping-of-death":          7,
+		"teardrop":               8,
+		"tcp-syn-fin":            9,
+		"tcp-no-flag":            10,
+		"tcp-fin-no-ack":         11,
+		"winnuke":                12,
+		"ip-source-route":        13,
+		"syn-frag":               14,
+		"session-limit":          15,
+		"icmp-fragment":          16,
+		"ip-malformed":           17,
+		"syn-cookie-unavailable": 18,
+		"syn-cookie-invalid":     19,
 	}
 	for k, v := range want {
 		got, ok := resp.ScreenDropDetails[k]
@@ -85,8 +89,7 @@ func TestGetGlobalStatsScreenDropDetailKeysAreCanonical(t *testing.T) {
 		}
 	}
 
-	// No unexpected per-screen-reason key leaked in (syncookie-* are a distinct
-	// set and read 0 here, so the only keys present must be the canonical 15).
+	// No unexpected per-screen-reason key leaked in.
 	if len(resp.ScreenDropDetails) != len(want) {
 		t.Errorf("screen_drop_details has %d keys, want %d: %v", len(resp.ScreenDropDetails), len(want), resp.ScreenDropDetails)
 	}

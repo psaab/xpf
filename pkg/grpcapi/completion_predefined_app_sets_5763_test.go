@@ -146,10 +146,10 @@ func TestCompleteConfigPairs_PredefinedApplicationSets_5763(t *testing.T) {
 	}
 
 	for _, command := range []string{
-		"applications application junos-ms-rpc protocol tcp",
-		"applications application junos-ms-rpc destination-port 9999",
-		"applications application junos-ms-rpc description \"configured application shadow\"",
-		"applications application-set junos-sip application junos-http",
+		"applications application custom-ms-rpc protocol tcp",
+		"applications application custom-ms-rpc destination-port 9999",
+		"applications application custom-ms-rpc description \"configured application shadow\"",
+		"applications application-set custom-sip application junos-http",
 	} {
 		if err := store.SetFromInput(command); err != nil {
 			t.Fatalf("SetFromInput(%q) error = %v", command, err)
@@ -166,15 +166,15 @@ func TestCompleteConfigPairs_PredefinedApplicationSets_5763(t *testing.T) {
 	if active := store.ActiveConfig(); active == nil {
 		t.Fatal("ActiveConfig() remained nil after shadow Commit()")
 	}
-	shadowApp := shadowConfig.Applications.Applications["junos-ms-rpc"]
+	shadowApp := shadowConfig.Applications.Applications["custom-ms-rpc"]
 	if shadowApp == nil {
-		t.Fatal("compiled Applications[\"junos-ms-rpc\"] is nil")
+		t.Fatal("compiled Applications[\"custom-ms-rpc\"] is nil")
 	}
 	if shadowApp.Description != "configured application shadow" {
-		t.Fatalf("compiled junos-ms-rpc description = %q, want %q", shadowApp.Description, "configured application shadow")
+		t.Fatalf("compiled custom-ms-rpc description = %q, want %q", shadowApp.Description, "configured application shadow")
 	}
-	if shadowSet := shadowConfig.Applications.ApplicationSets["junos-sip"]; shadowSet == nil {
-		t.Fatal("compiled ApplicationSets[\"junos-sip\"] is nil")
+	if shadowSet := shadowConfig.Applications.ApplicationSets["custom-sip"]; shadowSet == nil {
+		t.Fatal("compiled ApplicationSets[\"custom-sip\"] is nil")
 	}
 
 	for _, path := range paths {
@@ -184,13 +184,12 @@ func TestCompleteConfigPairs_PredefinedApplicationSets_5763(t *testing.T) {
 			if path.hint == config.ValueHintAppSetName {
 				requireCompletion5763(t, pairs, "junos-ms-rpc", "predefined application-set")
 			} else {
-				requireCompletion5763(t, pairs, "junos-ms-rpc", "configured application shadow")
+				requireCompletion5763(t, pairs, "custom-ms-rpc", "configured application shadow")
 			}
-			requireCompletion5763(t, pairs, "junos-sip", "application-set")
+			if path.hint != config.ValueHintAppSetName {
+				requireCompletion5763(t, pairs, "custom-sip", "application-set")
+			}
 			for _, name := range predefinedApplicationSetNames5763 {
-				if name == "junos-ms-rpc" || name == "junos-sip" {
-					continue
-				}
 				requireCompletion5763(t, pairs, name, "predefined application-set")
 			}
 		})
