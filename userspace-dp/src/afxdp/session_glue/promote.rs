@@ -254,6 +254,7 @@ fn promote_synced_session_with_conntrack(
         // #9412: republish the promoted session with its LIVE close class, so
         // a worker materializing it from the shared maps keeps the close state.
         tcp_close_class: sessions.close_class_wire_for(key), tcp_handshake_state: sessions.handshake_state_wire_for(key), rev_packets: sessions.rev_packets_for(key), fwd_packets: sessions.fwd_packets_for(key), pptp_call_ids: sessions.pptp_call_ids_wire_for(key),
+        persistent_lease_hold: None,
         source_nat_static: sessions.source_nat_static_for(key), };
         publish_shared_session(
             shared.sessions,
@@ -449,6 +450,7 @@ pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit_with_context(
             session_id,
         });
     }
+    let persistent_hold_16615 = sessions.take_persistent_lease_hold(key);
     sessions.delete(key);
     evicted_keys.push(key.clone());
     if let (SharedRemoval::Removed(_), Some((session_id, _))) = (removed, shared_identity) {
@@ -469,7 +471,7 @@ pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit_with_context(
     // `handle_delete_synced` does on the delete-sync teardown. `is_reverse` is
     // the ownership guard (a reverse entry owns no source-NAT/NAT64 reservation);
     // both calls are a no-op for a non-pool / non-reserved session.
-    release_source_nat_allocation_for_worker(
+    crate::nat::release_source_nat_allocation_for_worker_with_hold(
         &forwarding.iface_nat_allocators,
         &forwarding.source_nat_rules,
         key,
@@ -477,6 +479,7 @@ pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit_with_context(
         metadata.is_reverse,
         shared.tick.ns,
         worker_id,
+        persistent_hold_16615,
     );
     crate::nat64::release_nat64_allocation_for_worker(
         &forwarding.nat64,

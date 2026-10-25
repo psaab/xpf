@@ -282,6 +282,7 @@ fn shared_refs_conntrack_v4_reaches_purge_16185() {
             tcp_handshake_state: 0,
             pptp_call_ids: 0,
             rev_packets: 0,
+            persistent_lease_hold: None,
             source_nat_static: None,
             leak_incarnation: 0,
             tcp_flags: 0x10,

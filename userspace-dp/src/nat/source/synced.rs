@@ -215,39 +215,46 @@ pub(crate) fn acquire_persistent_inbound_for_synced(
     nat: NatDecision,
     is_reverse: bool,
     now_ns: u64,
-) {
+) -> Option<(crate::nat::PersistentSourceKey, usize)> {
     if is_reverse {
-        return;
+        return None;
     }
     let Some(internal_ip) = nat.rewrite_dst else {
-        return;
+        return None;
     };
     if nat.nat64 || nat.nptv6 {
-        return;
+        return None;
     }
     // Outbound discriminator (see doc comment): the internal host is the
     // session source and rewrite_dst is merely its post-DNAT destination;
     // the reserve body's persistent join already holds that lease.
     let internal_port = nat.rewrite_dst_port.unwrap_or(key.dst_port);
     if internal_ip == key.src_ip && internal_port == key.src_port {
-        return;
+        return None;
     }
-    let lease_key = crate::nat::PersistentSourceKey {
-        protocol: key.protocol,
-        src_ip: internal_ip,
-        src_port: internal_port,
-        routing_scope: key.routing_domain,
-        remote: None,
-    };
+    // #16615: discover the lease by its translated tuple (the synced key's
+    // destination), never by re-deriving routing_scope from arrival domain.
+    // The lease's own key (with its minting scope) is what we record.
     for rule in rules {
-        if rule.pool_mode
-            && rule
-                .pool_allocator
-                .acquire_persistent_inbound(lease_key, now_ns)
+        if !rule.pool_mode {
+            continue;
+        }
+        let Some(lease_key) = rule.pool_allocator.persistent_lease_key_for_translated(
+            key.protocol,
+            key.dst_ip,
+            key.dst_port,
+            now_ns,
+        ) else {
+            continue;
+        };
+        if rule
+            .pool_allocator
+            .acquire_persistent_inbound(lease_key, now_ns)
         {
-            break;
+            return Some((lease_key, rule.pool_allocator.debug_shared_identity()));
         }
     }
+    None
 }
 
 /// #6211 F2: reserve a synced translation and record `worker_id` as a HOLDER.
@@ -289,7 +296,7 @@ pub(crate) fn reserve_synced_source_nat_allocation_for_worker(
         domains,
     );
     if reserved {
-        acquire_persistent_inbound_for_synced(rules, key, nat, is_reverse, now_ns);
+        let _ = acquire_persistent_inbound_for_synced(rules, key, nat, is_reverse, now_ns);
     }
     reserved
 }
@@ -329,7 +336,7 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked(
         domains,
     );
     if reserved {
-        acquire_persistent_inbound_for_synced(rules, key, nat, is_reverse, now_ns);
+        let _ = acquire_persistent_inbound_for_synced(rules, key, nat, is_reverse, now_ns);
     }
     reserved
 }
@@ -361,7 +368,7 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked_with_holder_snapsho
         domains,
     );
     if reserved {
-        acquire_persistent_inbound_for_synced(rules, key, nat, is_reverse, now_ns);
+        let _ = acquire_persistent_inbound_for_synced(rules, key, nat, is_reverse, now_ns);
     }
     (reserved, previous_holders)
 }
@@ -1372,4 +1379,103 @@ fn reserve_synced_on_first_pool_owner<'a>(
     } else {
         SyncedReserveOutcome::NothingToReserve
     }
+}
+
+/// #16615: worker reserve that returns the recorded persistent hold so the
+/// caller can stamp it on the installed session.
+pub(crate) fn reserve_synced_source_nat_allocation_for_worker_with_hold(
+    iface_allocs: &InterfaceNatAllocators,
+    rules: &[SourceNatRule],
+    key: &crate::session::SessionKey,
+    nat: NatDecision,
+    is_reverse: bool,
+    synced_zones: SyncedNatZones<'_>,
+    now_ns: u64,
+    worker_id: u32,
+    domains: SyncedSourceNatDomains<'_>,
+) -> (bool, Option<(crate::nat::PersistentSourceKey, usize)>) {
+    let mut previous_holders = None;
+    let reserved = reserve_synced_source_nat_allocation_with_holder(
+        iface_allocs,
+        rules,
+        key,
+        nat,
+        is_reverse,
+        synced_zones,
+        now_ns,
+        NatHolder::Worker(worker_id),
+        false,
+        &mut previous_holders,
+        domains,
+    );
+    let hold = if reserved {
+        acquire_persistent_inbound_for_synced(rules, key, nat, is_reverse, now_ns)
+    } else {
+        None
+    };
+    (reserved, hold)
+}
+
+pub(crate) fn reserve_synced_source_nat_allocation_untracked_with_hold(
+    iface_allocs: &InterfaceNatAllocators,
+    rules: &[SourceNatRule],
+    key: &crate::session::SessionKey,
+    nat: NatDecision,
+    is_reverse: bool,
+    synced_zones: SyncedNatZones<'_>,
+    now_ns: u64,
+    domains: SyncedSourceNatDomains<'_>,
+) -> (bool, Option<(crate::nat::PersistentSourceKey, usize)>) {
+    let mut previous_holders = None;
+    let reserved = reserve_synced_source_nat_allocation_with_holder(
+        iface_allocs,
+        rules,
+        key,
+        nat,
+        is_reverse,
+        synced_zones,
+        now_ns,
+        NatHolder::Untracked,
+        false,
+        &mut previous_holders,
+        domains,
+    );
+    let hold = if reserved {
+        acquire_persistent_inbound_for_synced(rules, key, nat, is_reverse, now_ns)
+    } else {
+        None
+    };
+    (reserved, hold)
+}
+
+pub(crate) fn reserve_synced_source_nat_allocation_untracked_with_holder_snapshot_and_hold(
+    iface_allocs: &InterfaceNatAllocators,
+    rules: &[SourceNatRule],
+    key: &crate::session::SessionKey,
+    nat: NatDecision,
+    is_reverse: bool,
+    synced_zones: SyncedNatZones<'_>,
+    now_ns: u64,
+    domains: SyncedSourceNatDomains<'_>,
+) -> (bool, Option<SourceNatReservationSnapshot>, Option<(crate::nat::PersistentSourceKey, usize)>) {
+    let mut previous_holders = None;
+    let reserved = reserve_synced_source_nat_allocation_with_holder(
+        iface_allocs,
+        rules,
+        key,
+        nat,
+        is_reverse,
+        synced_zones,
+        now_ns,
+        NatHolder::Untracked,
+        true,
+        &mut previous_holders,
+        domains,
+    );
+    let hold = if reserved {
+        acquire_persistent_inbound_for_synced(rules, key, nat, is_reverse, now_ns)
+    } else {
+        None
+    };
+    (reserved, previous_holders, hold)
 }

@@ -1651,6 +1651,7 @@ mod handshake_monotonic_16223_tests {
             install_table_check: 0,
         },
         metadata,
+        persistent_lease_hold: None,
         source_nat_static: None,
         leak_incarnation: 0,
         origin: SessionOrigin::ForwardFlow,

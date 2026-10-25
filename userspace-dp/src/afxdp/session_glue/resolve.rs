@@ -120,6 +120,7 @@ fabric_adopted: bool,) -> (SessionLookup, bool) { if let Some(shared) = resolved
             // worker that happens to see its next packet.
             tcp_close_class: replica.tcp_close_class,
             tcp_handshake_state: replica.tcp_handshake_state,
+            persistent_lease_hold: replica.persistent_lease_hold,
             // #16217 (run11): a materialized shared hit inherits the
             // shared row's carried service counts, exactly as it
             // inherits the id and close class above.

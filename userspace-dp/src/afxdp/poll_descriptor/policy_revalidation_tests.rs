@@ -171,6 +171,7 @@ fn tun_origin_reverse_exempt_lookup_10038() {
     generation: 0,
     session_id: 0,
     tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            persistent_lease_hold: None,
     source_nat_static: None, };
     let fresh_shared = || Arc::new(Mutex::new(FastMap::default()));
 
@@ -333,6 +334,7 @@ fn tun_origin_legacy_ha_transit_import_does_not_match_10038() {
         generation: 0,
         session_id: 0,
         tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            persistent_lease_hold: None,
         source_nat_static: None, },
     );
     assert!(
@@ -665,7 +667,7 @@ fn ha_imported_transient_dynamic_snat_uses_wire_provenance_12187() {
     let alias = SyncedSessionEntry {
         key: translated_key.clone(),
         ..synced.clone()
-    };
+};
     let flow = SessionFlow {
         src_ip: translated_key.src_ip,
         dst_ip: translated_key.dst_ip,
@@ -882,7 +884,7 @@ fn ha_imported_transient_dynamic_snat_keeps_canonical_worker_entry_12187() {
     let alias = SyncedSessionEntry {
         key: translated_key.clone(),
         ..synced.clone()
-    };
+};
     let flow = SessionFlow {
         src_ip: translated_key.src_ip,
         dst_ip: translated_key.dst_ip,
@@ -1037,7 +1039,7 @@ fn ha_imported_transient_dynamic_snat_local_alias_keeps_shared_canonical_12187()
     let alias = SyncedSessionEntry {
         key: translated_key.clone(),
         ..synced.clone()
-    };
+};
     let flow = SessionFlow {
         src_ip: translated_key.src_ip,
         dst_ip: translated_key.dst_ip,
@@ -5819,6 +5821,7 @@ fn nat64_deterministic_stale_geometry_revokes_15178() {
     generation: 0,
     session_id: 15178,
     tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            persistent_lease_hold: None,
     source_nat_static: None, };
     let flow = SessionFlow {
         src_ip: key.src_ip,
@@ -6023,6 +6026,7 @@ fn nat64_scoped_cross_generation_revalidation_15932() {
     generation: 0,
     session_id: 15932,
     tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            persistent_lease_hold: None,
     source_nat_static: None, };
     let flow = SessionFlow {
         src_ip: key.src_ip,
@@ -6075,6 +6079,7 @@ fn nat64_scoped_cross_generation_revalidation_15932() {
     generation: entry.generation,
     session_id: entry.session_id,
     tcp_close_class: entry.tcp_close_class, tcp_handshake_state: entry.tcp_handshake_state, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: entry.pptp_call_ids,
+            persistent_lease_hold: None,
     source_nat_static: entry.source_nat_static, };
     let forwarding = mk_forwarding(crate::nat64::Nat64State::from_snapshots(&[
         det_a.clone(),
@@ -7274,7 +7279,7 @@ fn imported_terminal_stored_resolution_judged_by_reresolved_16109() {
                 SyncedSessionEntry {
                     decision: terminal_decision,
                     ..synced.clone()
-                }
+}
                 .into_session_install(1),
                 false
             )
@@ -7407,7 +7412,7 @@ fn imported_terminal_stored_resolution_judged_by_reresolved_16109() {
             SyncedSessionEntry {
                 decision: stored,
                 ..synced.clone()
-            }
+}
             .into_session_install(1),
             false
         )
@@ -7539,7 +7544,7 @@ fn demoted_local_snat_terminal_row_declines_on_old_owner_16215() {
         SyncedSessionEntry {
             decision: terminal,
             ..synced.clone()
-        }
+}
         .into_session_install(1),
         false
     ));
@@ -7690,7 +7695,7 @@ fn peer_synced_fabric_redirect_snat_declines_16215() {
         SyncedSessionEntry {
             decision: fabric_decision,
             ..synced.clone()
-        }
+}
         .into_session_install(1),
         false
     ));

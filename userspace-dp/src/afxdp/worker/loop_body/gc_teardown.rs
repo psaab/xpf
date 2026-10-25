@@ -141,7 +141,7 @@ pub(super) fn reap_expired_sessions(
         if replica_fenced {
             continue;
         }
-        release_source_nat_allocation_for_worker(
+        crate::nat::release_source_nat_allocation_for_worker_with_hold(
             &forwarding.iface_nat_allocators,
             &forwarding.source_nat_rules,
             &expired_entry.key,
@@ -149,6 +149,7 @@ pub(super) fn reap_expired_sessions(
             expired_entry.metadata.is_reverse,
             now_ns,
             worker_id,
+            expired_entry.persistent_lease_hold,
         );
         // #4381: return the reaped NAT64 forward flow's translated pool port to
         // its allocator (self-gated on the forward NAT64 entry).

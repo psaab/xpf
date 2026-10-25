@@ -180,6 +180,7 @@ fn probe_publish(
     generation: 0,
     session_id: PROBE_SESSION_ID,
     tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            persistent_lease_hold: None,
     source_nat_static: None, };
     publish_shared_session(&maps.0, &maps.1, &maps.2, &maps.3, &entry);
 }

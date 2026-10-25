@@ -1541,6 +1541,11 @@ struct SessionEntry {
     /// row's stored decision) — once the egress RG departs again the claim
     /// lapses and the flow converts toward the fabric again (failback).
     fabric_established: bool,
+    /// #16615: exact persistent-NAT lease key this session acquired an inbound
+    /// hold on, with granting allocator shared identity. None = no hold.
+    /// Release consumes exactly this pair exactly once, never re-derives from
+    /// arrival routing_domain (ingress property, not lease routing_scope).
+    persistent_lease_hold: Option<(crate::nat::PersistentSourceKey, usize)>,
 }
 
 /// Snapshot of one live half after a policy rebind. The worker uses this
@@ -2954,6 +2959,35 @@ impl SessionTable {
         {
             record.entry.input_policers = policers;
         }
+    }
+
+    /// #16615: stamp the exact persistent lease hold acquired for this session.
+    pub(crate) fn set_persistent_lease_hold(
+        &mut self,
+        key: &SessionKey,
+        hold: Option<(crate::nat::PersistentSourceKey, usize)>,
+    ) {
+        if let Some(entry) = self.entry_by_key_mut(key) {
+            entry.persistent_lease_hold = hold;
+        }
+    }
+
+    /// #16615: read the recorded persistent lease hold without consuming it.
+    pub(crate) fn persistent_lease_hold_for(
+        &self,
+        key: &SessionKey,
+    ) -> Option<(crate::nat::PersistentSourceKey, usize)> {
+        self.entry_by_key(key)
+            .and_then(|entry| entry.persistent_lease_hold)
+    }
+
+    /// #16615: consume the recorded hold exactly once.
+    pub(crate) fn take_persistent_lease_hold(
+        &mut self,
+        key: &SessionKey,
+    ) -> Option<(crate::nat::PersistentSourceKey, usize)> {
+        self.entry_by_key_mut(key)
+            .and_then(|entry| entry.persistent_lease_hold.take())
     }
 
     /// #14120: the stored INPUT-filter policer handles a WIRE tuple resolves
@@ -6684,6 +6718,7 @@ impl SessionTable {
                         key: key.clone(),
                         decision: entry.decision,
                         metadata: entry.metadata.clone(),
+                        persistent_lease_hold: entry.persistent_lease_hold,
                         origin: entry.origin,
                         session_id: entry.session_id,
                         close_class: entry.tcp_close_class_wire(),
