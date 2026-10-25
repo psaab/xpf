@@ -115,45 +115,61 @@ func sumBindingCounters(status *ProcessStatus) userspaceCounterSnapshot {
 	return s
 }
 
-// resolvedBindingIfindex maps a requested logical ifindex to the physical
-// binding that carries its traffic. A VLAN subinterface (ge-0/0/0.<vlan>) has
-// its own kernel ifindex, but the AF_XDP helper binds only the parent
-// physical netdev, so BindingStatus rows exist solely for the parent. When
-// the retained snapshot names a row whose Ifindex is the request and whose
-// ParentIfindex is bound, the parent binding is authoritative for that
-// logical interface. Returns 0 when no such row exists.
-func (m *Manager) resolvedBindingIfindex(ifindex int) int {
+// childBindingRow returns a copy of the retained snapshot row for ifindex
+// when that row is a logical child of a different physical netdev
+// (ParentIfindex > 0 and != ifindex), or nil when no such row exists.
+// Unit-0 rows that collapse onto the parent netdev (ParentIfindex ==
+// Ifindex) are not children: they share the parent's kernel ifindex and
+// are served by the direct binding.
+//
+// #16646: this identifies a child row whose traffic is carried only by a
+// parent binding; ReadInterfaceCounters must not return the parent
+// aggregate as the child's own counters.
+func (m *Manager) childBindingRow(ifindex int) *InterfaceSnapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.lastSnapshot == nil {
-		return 0
+		return nil
 	}
 	for i := range m.lastSnapshot.Interfaces {
 		row := &m.lastSnapshot.Interfaces[i]
-		if row.Ifindex == ifindex && row.ParentIfindex > 0 {
-			return row.ParentIfindex
+		if row.Ifindex == ifindex && row.ParentIfindex > 0 && row.ParentIfindex != ifindex {
+			cp := *row
+			return &cp
 		}
 	}
-	return 0
+	return nil
 }
 
 // ReadInterfaceCounters returns the helper's per-interface traffic counters,
 // aggregating all queue bindings. Unavailable helper status must not be
 // represented as an authoritative zero.
 //
-// #15656: a VLAN subinterface's kernel ifindex never appears as a
-// BindingStatus.Ifindex — the helper binds the parent physical netdev.
-// Exact matching therefore returned success+zero for every tagged unit even
-// while the parent carried traffic. When no binding matches directly and
-// the retained snapshot identifies the request as a VLAN child, resolve to
-// the parent binding and return its aggregated counters. When neither a
-// direct binding nor a snapshot parent covers the ifindex, fail closed
-// with an error rather than an authoritative zero; a genuinely idle bound
-// interface still matches directly and returns its real zero.
+// #15656/#16646: a VLAN subinterface's kernel ifindex never appears as a
+// BindingStatus.Ifindex — the helper binds the parent physical netdev and
+// exports only per-physical-queue counters, with no per-(ifindex,vlan)
+// breakdown. Exact matching therefore returned success+zero for every
+// tagged unit (#15656), and resolving the child to the parent returned the
+// parent's whole trunk aggregate under every sibling unit's label
+// (#16646), so Prometheus (which dedupes by kernel ifindex) emitted the
+// parent traffic N+1 times. Until the helper exports per-VLAN counters,
+// any logical child row (ParentIfindex set and distinct from its own
+// ifindex) — VLAN-tagged or not, disabled or unzoned included (H5-03
+// cohort) — fails closed with an explicit unavailable error rather than
+// the parent total or an authoritative zero. A genuinely idle bound
+// interface (including a unit-0 row collapsed onto its parent netdev,
+// ParentIfindex == Ifindex) still matches directly and returns its real
+// zero.
 func (m *Manager) ReadInterfaceCounters(ifindex int) (dataplane.InterfaceCounterValue, error) {
 	status, ok := m.CachedStatus()
 	if !ok {
 		return dataplane.InterfaceCounterValue{}, errors.New("userspace interface counters unavailable: helper status not available")
+	}
+	// A logical child has no per-child counter source: fail closed before
+	// any direct-match shortcut, so a stray binding row for the child
+	// ifindex cannot resurrect the parent-total lie.
+	if row := m.childBindingRow(ifindex); row != nil {
+		return dataplane.InterfaceCounterValue{}, fmt.Errorf("userspace interface counters unavailable: no per-interface counters for logical child %s (ifindex %d, parent ifindex %d)", row.Name, ifindex, row.ParentIfindex)
 	}
 	var total dataplane.InterfaceCounterValue
 	matched := false
@@ -170,23 +186,6 @@ func (m *Manager) ReadInterfaceCounters(ifindex int) (dataplane.InterfaceCounter
 	}
 	if matched {
 		return total, nil
-	}
-	// No direct binding: a VLAN child is carried by its parent binding.
-	if parent := m.resolvedBindingIfindex(ifindex); parent > 0 && parent != ifindex {
-		for i := range status.Bindings {
-			b := &status.Bindings[i]
-			if b.Ifindex != parent {
-				continue
-			}
-			matched = true
-			total.RxPackets += b.RXPackets
-			total.RxBytes += b.RXBytes
-			total.TxPackets += b.TXPackets
-			total.TxBytes += b.TXBytes
-		}
-		if matched {
-			return total, nil
-		}
 	}
 	if ifindex <= 0 {
 		return total, nil

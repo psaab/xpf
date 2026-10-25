@@ -4,8 +4,10 @@
 //   - ReadInterfaceCounters sums RX/TX packets/bytes across all cached helper
 //     bindings for the requested ifindex (multi-queue).
 //   - An ifindex no binding covers fails closed with an error (#15656);
-//     a VLAN subinterface resolves to its parent binding (see
-//     vlan_subinterface_counters_15656_test.go).
+//     a logical child (VLAN or otherwise) fails closed with an explicit
+//     unavailable error and never reports the parent total (#16646; see
+//     vlan_subinterface_counters_15656_test.go and
+//     vlan_child_counters_16646_test.go).
 //   - No cached helper status fails closed with an error so callers do not emit
 //     confident zeros when counters cannot be read.
 //   - The published LegacyDataPlaneAdapter delegates to Manager rather than
