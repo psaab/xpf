@@ -931,6 +931,10 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		// unprotected. Clearing the coverage set keeps the two in agreement (a stale
 		// covered set would falsely report the torn-down addresses as still covered).
 		d.hostInboundEnforced.Store(false)
+		// #16823: teardown also clears the sticky established bit, so the
+		// next episode's probe gate and Established projection start from
+		// the torn-down (nothing-established) state, exactly as before.
+		d.hostInboundEstablished15264.Store(false)
 		// #7181: both tables are gone, so no gap fence stands and the last
 		// attempt succeeded. Leaving staleness set would render teardown as failure.
 		d.hostInboundGapFenceActive.Store(false)
@@ -1439,6 +1443,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		// covering exactly the desired set, but STALE — never recorded as a
 		// fresh success alongside a failing commit result.
 		d.hostInboundEnforced.Store(true)
+		d.hostInboundEstablished15264.Store(true)
 		d.hostInboundCoveredAddrs = desiredDrop
 		d.hostInboundDHCPRetainedAddrs = hostInboundDestinationWideDropAddrs(views, unzonedV4, unzonedV6)
 		d.hostInboundGapFenceActive.Store(gapFenceRetained || preActivationFenceRetained)
@@ -1450,6 +1455,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// and therefore skips the cold-boot fallback. This does not prove current
 	// table presence (#5790).
 	d.hostInboundEnforced.Store(true)
+	d.hostInboundEstablished15264.Store(true)
 	// #7181: advance the applied generation and clear the staleness flag and any
 	// gap-fence marker -- the real table now covers the desired set on its own.
 	d.noteHostInboundApplySucceeded()
@@ -1470,6 +1476,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			// is incomplete without a durable marker: established-
 			// but-STALE, and the next apply retries the marker.
 			d.hostInboundEnforced.Store(true)
+			d.hostInboundEstablished15264.Store(true)
 			d.hostInboundCoveredAddrs = desiredDrop
 			d.hostInboundDHCPRetainedAddrs = hostInboundDestinationWideDropAddrs(views, unzonedV4, unzonedV6)
 			d.hostInboundGapFenceActive.Store(gapFenceRetained || preActivationFenceRetained)
@@ -1641,6 +1648,7 @@ func (d *Daemon) installHostInboundColdBootFence(sets dpuserspace.FenceAddrSets,
 	noteHostInboundInstalled()
 	if fenceHasScopedDrop {
 		d.hostInboundEnforced.Store(true)
+		d.hostInboundEstablished15264.Store(true)
 		// #5789: the fence retains its address and ingress scopes; record its
 		// destination coverage separately for the day-2 address handoff check.
 		d.hostInboundCoveredAddrs = destinationWide

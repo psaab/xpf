@@ -41,6 +41,18 @@ func TestKernelTruthDriftMarksHostInboundStale15264(t *testing.T) {
 	if st.Current() {
 		t.Fatalf("after flush, probe still Current: %+v (B06-02 stale status)", st)
 	}
+	// #16823: Established stays sticky (renders Stale, not NotEstablished)
+	// while the day-2 retention latch and coverage sets are cleared, so a
+	// failed re-apply takes the cold-boot fence path.
+	if !st.Established {
+		t.Fatalf("after flush, Established must stay sticky-true (Stale): %+v (#16823)", st)
+	}
+	if d.hostInboundEnforced.Load() {
+		t.Fatalf("after flush, hostInboundEnforced must clear so a failed re-apply fences: %+v (#16823)", st)
+	}
+	if d.hostInboundCoveredAddrs != nil || d.hostInboundDHCPRetainedAddrs != nil {
+		t.Fatalf("after flush, coverage sets must clear: covered=%v dhcp=%v (#16823)", d.hostInboundCoveredAddrs, d.hostInboundDHCPRetainedAddrs)
+	}
 	if !st.LastApplyFailed {
 		t.Fatalf("after flush, LastApplyFailed must be true: %+v", st)
 	}
@@ -53,7 +65,9 @@ func TestKernelTruthDriftMarksHostInboundStale15264(t *testing.T) {
 	if !strings.Contains(buf.String(), "15264") {
 		t.Fatalf("expected Warn log naming #15264 on drift, got: %q", buf.String())
 	}
-	// Idempotent: second check stays stale, no panic.
+	// Idempotent: second check stays stale, no panic. The probe gate is the
+	// sticky established bit, so the recheck still probes after the latch
+	// clear above.
 	d.recheckHostKernelTruth15264(time.Now())
 	if d.HostInboundApplied().Current() {
 		t.Fatal("second check resurrected Current")
@@ -139,4 +153,241 @@ func TestKernelTruthReadErrorKeepsCurrent15264(t *testing.T) {
 		t.Fatalf("read error must not mark stale (unreadable proves nothing): %+v", d.HostInboundApplied())
 	}
 	_ = xnft.HostInboundTableName
+}
+
+// #16823 (R3-F09-02) DEFECT arm: after the recheck proves the established
+// host-inbound table gone (`nft flush ruleset`), a re-apply whose real
+// install FAILS must install the cold-boot fence for the previously
+// covered addresses. Pre-fix the recheck left hostInboundEnforced and the
+// covered set set, so the re-apply took the day-2 retention branch,
+// computed an empty uncovered set, and installed NEITHER fence — this
+// cell is RED pre-fix (fenceCalls==0, gapCalls==0) and GREEN post-fix.
+func TestKernelTruthFlushThenFailedReapplyInstallsColdBootFence16823(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	cfg := hostInboundTestConfig()
+
+	// Step 1: real install succeeds → covered={172.16.50.8, 2001:db8:50::8}.
+	nftInstaller = &fakeNftInstaller{}
+	d := &Daemon{}
+	if err := d.applyHostInboundFilter(cfg); err != nil {
+		t.Fatalf("step 1 (install): %v", err)
+	}
+	if !d.hostInboundEnforced.Load() {
+		t.Fatal("step 1: hostInboundEnforced must be true after a successful real install")
+	}
+	if _, ok := d.hostInboundCoveredAddrs[hostInboundDropAddrKey('4', "172.16.50.8")]; !ok {
+		t.Fatalf("step 1: covered set must include 172.16.50.8, got %v", d.hostInboundCoveredAddrs)
+	}
+
+	// Step 2: out-of-band `nft flush ruleset` → recheck proves both tables
+	// (and the gap table) gone.
+	nftInstaller = &fakeNftInstaller{
+		tableDropsInput: func(string) (bool, error) { return false, nil },
+		tableEnforcing:  func(string) (bool, error) { return false, nil },
+	}
+	d.recheckHostKernelTruth15264(time.Now())
+	st := d.HostInboundApplied()
+	if !st.Established || !st.LastApplyFailed || st.Current() {
+		t.Fatalf("step 2: after flush the state must stay established-but-stale, got %+v", st)
+	}
+	if d.hostInboundEnforced.Load() {
+		t.Fatalf("step 2 (#16823): recheck must clear hostInboundEnforced on kernel-proven drift")
+	}
+	if d.hostInboundCoveredAddrs != nil || d.hostInboundDHCPRetainedAddrs != nil {
+		t.Fatalf("step 2 (#16823): recheck must clear coverage sets, covered=%v dhcp=%v",
+			d.hostInboundCoveredAddrs, d.hostInboundDHCPRetainedAddrs)
+	}
+
+	// Step 3: operator re-applies (the documented convergence step); the
+	// real install FAILS. The cold-boot fence must stand for the
+	// previously covered addresses.
+	injected := errors.New("nftables: re-apply install failed")
+	var fenceCalls, gapCalls int
+	var fenceSpec xnft.FenceSpec
+	nftInstaller = &fakeNftInstaller{
+		hostInbound: func(xnft.HostInboundSpec) error { return injected },
+		coldBootFence: func(spec xnft.FenceSpec) error {
+			fenceCalls++
+			fenceSpec = spec
+			return nil
+		},
+		gapFence: func(xnft.GapFenceSpec) error { gapCalls++; return nil },
+	}
+	err := d.applyHostInboundFilter(cfg)
+	if err == nil || !errors.Is(err, injected) {
+		t.Fatalf("step 3: failed re-apply must surface the install error, got %v", err)
+	}
+	if fenceCalls != 1 {
+		t.Fatalf("step 3 (#16823 FAIL-OPEN): after flush + failed re-apply, cold-boot fence installs=%d gap installs=%d; "+
+			"want exactly one cold-boot fence denying the previously covered addresses", fenceCalls, gapCalls)
+	}
+	if gapCalls != 0 {
+		t.Fatalf("step 3: cold-boot path must not also install a gap fence, got %d", gapCalls)
+	}
+	if !sliceContains(fenceViewAddrs(fenceSpec, false), "172.16.50.8") {
+		t.Errorf("step 3: fence must deny previously covered 172.16.50.8:\n%+v", fenceSpec)
+	}
+	if !sliceContains(fenceViewAddrs(fenceSpec, true), "2001:db8:50::8") {
+		t.Errorf("step 3: fence must deny previously covered 2001:db8:50::8:\n%+v", fenceSpec)
+	}
+	if !d.hostInboundEnforced.Load() {
+		t.Fatal("step 3: the standing fence must re-establish hostInboundEnforced")
+	}
+	if st := d.HostInboundApplied(); !st.Established || !st.LastApplyFailed || st.Current() {
+		t.Fatalf("step 3: fence fallback after a failed real install must read established-but-stale, got %+v", st)
+	}
+}
+
+// #16823 positive control: a flushed box whose re-apply SUCCEEDS converges
+// to Current with the real coverage restored and no fence installed. This
+// is the documented recovery path and must stay green on both sides of
+// the fix.
+func TestKernelTruthFlushThenSuccessfulReapplyConverges16823(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	cfg := hostInboundTestConfig()
+
+	nftInstaller = &fakeNftInstaller{}
+	d := &Daemon{}
+	if err := d.applyHostInboundFilter(cfg); err != nil {
+		t.Fatalf("step 1 (install): %v", err)
+	}
+	nftInstaller = &fakeNftInstaller{
+		tableDropsInput: func(string) (bool, error) { return false, nil },
+		tableEnforcing:  func(string) (bool, error) { return false, nil },
+	}
+	d.recheckHostKernelTruth15264(time.Now())
+	if st := d.HostInboundApplied(); st.Current() {
+		t.Fatalf("step 2: flushed box must not read Current: %+v", st)
+	}
+
+	var fenceCalls int
+	nftInstaller = &fakeNftInstaller{
+		coldBootFence: func(xnft.FenceSpec) error { fenceCalls++; return nil },
+	}
+	if err := d.applyHostInboundFilter(cfg); err != nil {
+		t.Fatalf("step 3 (successful re-apply): %v", err)
+	}
+	if fenceCalls != 0 {
+		t.Fatalf("step 3: successful re-apply must not install a fence, got %d", fenceCalls)
+	}
+	st := d.HostInboundApplied()
+	if !st.Current() || st.Generation != 2 {
+		t.Fatalf("step 3: converged state must be Current at generation 2, got %+v", st)
+	}
+	if !d.hostInboundEnforced.Load() {
+		t.Fatal("step 3: successful re-apply must re-establish hostInboundEnforced")
+	}
+	if _, ok := d.hostInboundCoveredAddrs[hostInboundDropAddrKey('4', "172.16.50.8")]; !ok {
+		t.Fatalf("step 3: covered set must be restored, got %v", d.hostInboundCoveredAddrs)
+	}
+}
+
+// #16823 gap arm: drift also clears the gap marker/spec when the gap table
+// is gone, and retains both when the gap table still stands (partial
+// flush) or cannot be read.
+func TestKernelTruthDriftClearsGapMarkerWhenGapTableGone16823(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+
+	newDriftGapDaemon := func() *Daemon {
+		d := hostDriftDaemon15264()
+		d.hostInboundGapFenceActive.Store(true)
+		d.hostInboundGapFenceSpec = &xnft.GapFenceSpec{UncoveredV4: []string{"203.0.113.9"}}
+		d.hostInboundPreActivationFence = &xnft.GapFenceSpec{PreActivation: true, UncoveredV4: []string{"203.0.113.10"}}
+		return d
+	}
+
+	t.Run("gap gone clears marker and specs", func(t *testing.T) {
+		d := newDriftGapDaemon()
+		nftInstaller = &fakeNftInstaller{
+			tableDropsInput: func(string) (bool, error) { return false, nil },
+			tableEnforcing:  func(string) (bool, error) { return false, nil },
+		}
+		d.recheckHostKernelTruth15264(time.Now())
+		if d.HostInboundApplied().GapFenceActive {
+			t.Fatal("gap table gone: GapFenceActive must clear (#16823)")
+		}
+		if d.hostInboundGapFenceSpec != nil || d.hostInboundPreActivationFence != nil {
+			t.Fatalf("gap table gone: specs must clear, gap=%v pre=%v", d.hostInboundGapFenceSpec, d.hostInboundPreActivationFence)
+		}
+	})
+
+	t.Run("gap standing retains marker and specs", func(t *testing.T) {
+		d := newDriftGapDaemon()
+		nftInstaller = &fakeNftInstaller{
+			tableDropsInput: func(string) (bool, error) { return false, nil },
+			tableEnforcing: func(name string) (bool, error) {
+				return name == xnft.HostInboundGapTableName, nil
+			},
+		}
+		d.recheckHostKernelTruth15264(time.Now())
+		if !d.HostInboundApplied().GapFenceActive {
+			t.Fatal("gap table still enforcing: GapFenceActive must stay (#16823)")
+		}
+		if d.hostInboundGapFenceSpec == nil {
+			t.Fatal("gap table still enforcing: gap spec must stay for the next merge")
+		}
+		// The main-table drift arm still fired.
+		if d.hostInboundEnforced.Load() {
+			t.Fatal("main table gone: hostInboundEnforced must clear even when the gap stands")
+		}
+	})
+
+	t.Run("gap read error retains marker", func(t *testing.T) {
+		d := newDriftGapDaemon()
+		nftInstaller = &fakeNftInstaller{
+			tableDropsInput: func(string) (bool, error) { return false, nil },
+			tableEnforcing: func(name string) (bool, error) {
+				if name == xnft.HostInboundGapTableName {
+					return false, errors.New("netlink boom")
+				}
+				return false, nil
+			},
+		}
+		d.recheckHostKernelTruth15264(time.Now())
+		if !d.HostInboundApplied().GapFenceActive {
+			t.Fatal("gap read error proves nothing: GapFenceActive must stay")
+		}
+	})
+}
+
+// #16823 warn de-dupe: after a drift episode the probe gate survives the
+// latch clear, a heal re-arms the one-shot Warn, and a second flush warns
+// again (exactly once).
+func TestKernelTruthDriftWarnRearmsAfterHeal16823(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	d := hostDriftDaemon15264()
+	flushed := &fakeNftInstaller{
+		tableDropsInput: func(string) (bool, error) { return false, nil },
+		tableEnforcing:  func(string) (bool, error) { return false, nil },
+	}
+	present := &fakeNftInstaller{} // drops=true, enforcing=true
+
+	buf, restore := captureSlog(t)
+	defer restore()
+
+	nftInstaller = flushed
+	d.recheckHostKernelTruth15264(time.Now())
+	d.recheckHostKernelTruth15264(time.Now())
+	if got := strings.Count(buf.String(), "marking applied state stale"); got != 1 {
+		t.Fatalf("first episode must warn exactly once, got %d warns:\n%s", got, buf.String())
+	}
+
+	// Heal: a successful real install clears staleness; the next clean
+	// pass re-arms the de-dupe.
+	d.noteHostInboundApplySucceeded()
+	nftInstaller = present
+	d.recheckHostKernelTruth15264(time.Now())
+	if d.hostDriftNoticed15264.Load() {
+		t.Fatal("clean pass after heal must re-arm the drift warn")
+	}
+
+	nftInstaller = flushed
+	d.recheckHostKernelTruth15264(time.Now())
+	if got := strings.Count(buf.String(), "marking applied state stale"); got != 2 {
+		t.Fatalf("second flush must warn again (total 2), got %d:\n%s", got, buf.String())
+	}
 }

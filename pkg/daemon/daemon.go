@@ -1194,13 +1194,17 @@ type Daemon struct {
 	// table installed the "a protecting table exists" premise no longer holds, so
 	// a later enforceable generation whose first real load fails must take the
 	// cold-boot fence path rather than assume a retained table (#5790). A teardown
-	// FAILURE (a table may still be installed) does NOT clear it. True proves
-	// neither current xpf_hostinbound table presence nor coverage of every current
-	// local address — the day-2 COVERAGE gap is tracked separately by
-	// hostInboundCoveredAddrs (#5789, #5790). Production access is serialized
-	// under applySem; atomic.Bool preserves the existing type, not a current
-	// readiness reader. nft success and the following Store are ordered
-	// operations in separate state domains, not one atomic publication.
+	// FAILURE (a table may still be installed) does NOT clear it. #16823: the
+	// #15264 kernel-truth recheck ALSO Stores false (and clears the coverage
+	// sets) when an established table is kernel-proven gone after an out-of-band
+	// `nft flush ruleset` — the retention premise is equally false there, and a
+	// failed re-apply must fence instead of trusting the stale covered set.
+	// True proves neither current xpf_hostinbound table presence nor coverage
+	// of every current local address — the day-2 COVERAGE gap is tracked
+	// separately by hostInboundCoveredAddrs (#5789, #5790). Production access
+	// is serialized under applySem; atomic.Bool preserves the existing type,
+	// not a current readiness reader. nft success and the following Store are
+	// ordered operations in separate state domains, not one atomic publication.
 	hostInboundEnforced atomic.Bool
 	// hostInboundPreActivationFence retains temporary address drops across
 	// consecutive applies until a successful full host-inbound render retires
@@ -1284,6 +1288,20 @@ type Daemon struct {
 	hostInboundLastApplyFailed     atomic.Bool
 	hostInboundLastFailureUnixNano atomic.Int64
 	hostInboundGapFenceActive      atomic.Bool
+	// hostInboundEstablished15264 is the STICKY historical establishment bit
+	// behind HostInboundApplied().Established (#16823): set wherever a real
+	// load or scoped fallback first establishes host-inbound protection
+	// (every hostInboundEnforced Store(true) site), cleared only by a
+	// successful no-enforcement teardown — the same transitions that used to
+	// drive Established through hostInboundEnforced. It exists separately
+	// because #16823 clears hostInboundEnforced on kernel-proven drift (so a
+	// failed re-apply takes the cold-boot fence path) while Established must
+	// keep reporting "established but stale" until a real install succeeds,
+	// and because the #15264 recheck probe gate must survive that clearing
+	// (a latch-gated probe would go blind after the first drift episode).
+	// Set under applySem alongside hostInboundEnforced; read atomically by
+	// the recheck tick and the operator projections.
+	hostInboundEstablished15264 atomic.Bool
 	// hostDriftNoticed15264 de-dupes the #15264 kernel-drift Warn to one
 	// line per episode (mirrors mgmtReassertNoticed #6803): set when the
 	// low-rate kernel-truth recheck first finds an established table
