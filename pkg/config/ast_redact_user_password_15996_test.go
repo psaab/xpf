@@ -301,10 +301,15 @@ func TestGroupNamedIdentityDoesNotMaskLoginUser15996(t *testing.T) {
 		}
 	}
 	// Negative structural controls: same tokens, wrong position/root.
+	// #16850: depth beneath a valid ADA root no longer saves a path —
+	// only a broken root chain (intervening token before ADA, wrong
+	// root, or a group named after the stanza wrapping login) does.
 	for _, fp := range [][]string{
 		{"groups", "active-directory-access", "system", "login", "user", "user-password", "class", "super-user"},
 		{"system", "active-directory-access", "user-password", "x"},
 		{"services", "foo", "active-directory-access", "user-password", "x"},
+		{"services", "user-identification", "foo", "active-directory-access", "user-password", "x"},
+		{"security", "foo", "user-identification", "active-directory-access", "user-password", "x"},
 	} {
 		if isSecretValueIndex(fp, len(fp)-1) {
 			t.Errorf("non-AD position wrongly marked secret: %v", fp)
@@ -439,5 +444,128 @@ func TestADUserPasswordNotInSchemaPinnedSet15996(t *testing.T) {
 	fpUser := []string{"services", "user-identification", "active-directory-access", "user-name", "bind-svc-account"}
 	if isSecretValueIndex(fpUser, 4) {
 		t.Fatalf("user-name value wrongly marked secret: %v", fpUser)
+	}
+}
+
+// TestADUserPasswordDomainScopeRedacted16850 is the #16850 RED-on-revert
+// net: the #15996 gate required active-directory-access (plus the optional
+// user-name pair) immediately before user-password, so the domain-scoped
+// spellings — `domain <D>`, packed `domain-name <D>`, and the hierarchical
+// `domain D { … }` block — returned false and the AD bind credential
+// rendered clear on every PermView surface. Accepts any depth beneath the
+// structural root chain; goes RED if the gate regresses to the exact
+// parent chain. The non-secret tokens (domain, bind user) stay legible.
+func TestADUserPasswordDomainScopeRedacted16850(t *testing.T) {
+	const secret = "LEAK-AD-USER-PASSWORD-16850"
+	const user = "bind-svc-account"
+
+	shapes := []struct {
+		name string
+		root string
+		tree *ConfigTree
+		keep string
+	}{
+		{
+			name: "flat services ADA domain instance",
+			root: "services",
+			tree: buildRedactTree(t, []string{
+				"set services user-identification active-directory-access domain example.com user-password " + secret,
+			}),
+			keep: "example.com",
+		},
+		{
+			name: "flat services ADA packed domain-name",
+			root: "services",
+			tree: buildRedactTree(t, []string{
+				"set services user-identification active-directory-access domain-name example.com user-password " + secret,
+			}),
+			keep: "example.com",
+		},
+		{
+			name: "flat ADA domain with user-name pair",
+			root: "services",
+			tree: buildRedactTree(t, []string{
+				"set services user-identification active-directory-access domain example.com user-name " + user + " user-password " + secret,
+			}),
+			keep: user,
+		},
+		{
+			name: "flat security-root ADA domain instance",
+			root: "security",
+			tree: buildRedactTree(t, []string{
+				"set security active-directory-access domain example.com user-password " + secret,
+			}),
+			keep: "example.com",
+		},
+		{
+			name: "hierarchical ADA domain block",
+			root: "services",
+			tree: parseHierText(t, `services {
+    user-identification {
+        active-directory-access {
+            domain example.com {
+                user-name `+user+`;
+                user-password `+secret+`;
+            }
+        }
+    }
+}`),
+			keep: user,
+		},
+		{
+			name: "hierarchical ADA packed domain-name sibling",
+			root: "services",
+			tree: parseHierText(t, `services {
+    user-identification {
+        active-directory-access {
+            domain-name example.com;
+            user-name `+user+`;
+            user-password `+secret+`;
+        }
+    }
+}`),
+			keep: user,
+		},
+		{
+			name: "flat grouped ADA domain instance",
+			root: "groups",
+			tree: buildRedactTree(t, []string{
+				"set groups g1 services user-identification active-directory-access domain example.com user-password " + secret,
+			}),
+			keep: "example.com",
+		},
+	}
+	for _, tc := range shapes {
+		t.Run(tc.name, func(t *testing.T) {
+			assertMasked15996(t, tc.name, tc.tree, tc.root, secret, tc.keep)
+		})
+	}
+
+	// Embedded change-configuration command with a domain layer must mask
+	// through the same secretIndices resolution.
+	t.Run("embedded command", func(t *testing.T) {
+		cmd := "set services user-identification active-directory-access domain example.com user-password " + secret
+		if got := RedactEmbeddedChangeConfigCommand(cmd); strings.Contains(got, secret) || !strings.Contains(got, SecretDataPlaceholder) {
+			t.Errorf("embedded command leaked domain-scoped user-password: %q", got)
+		}
+	})
+
+	// Structural positives: any depth beneath the root chain is secret.
+	for _, fp := range [][]string{
+		{"services", "user-identification", "active-directory-access", "domain", "example.com", "user-password", "x"},
+		{"services", "user-identification", "active-directory-access", "domain-name", "example.com", "user-password", "x"},
+		{"security", "active-directory-access", "domain", "example.com", "user-name", "u", "user-password", "x"},
+		{"groups", "g1", "services", "user-identification", "active-directory-access", "domain", "example.com", "user-password", "x"},
+		{"set", "services", "user-identification", "active-directory-access", "domain", "example.com", "user-password", "x"},
+	} {
+		if !isSecretValueIndex(fp, len(fp)-1) {
+			t.Errorf("domain-scoped AD leaf not marked secret: %v", fp)
+		}
+	}
+	// Generic `password` control from the probe: the bind `password` under
+	// a domain-scoped ADA user stays masked via its own gate (unchanged).
+	fpGeneric := []string{"services", "user-identification", "active-directory-access", "domain", "example.com", "user", "bind", "password", "x"}
+	if !isSecretValueIndex(fpGeneric, len(fpGeneric)-1) {
+		t.Errorf("generic password under ADA domain wrongly unmarked: %v", fpGeneric)
 	}
 }

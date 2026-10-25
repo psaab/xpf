@@ -995,7 +995,7 @@ func secretIndices(fp []string) []int {
 				out = append(out, j)
 			}
 		case "user-password":
-			// AD bind credential (#15996) — STRUCTURALLY GATED, not
+			// AD bind credential (#15996, #16850) — STRUCTURALLY GATED, not
 			// distinctive: `user-password` is also a legal login USER NAME
 			// (`system login user user-password class …`), where every token
 			// after it is the account's class/full-name, not a credential.
@@ -1003,16 +1003,18 @@ func secretIndices(fp []string) []int {
 			// `active-directory-access`/`user-identification` (apply-groups
 			// bodies flatten to `groups <name> system login user
 			// user-password …`) would put those tokens earlier in the path
-			// and mask the login identity. The leaf is secret only in the
-			// exact structural position the issue names — the token
-			// sequence (services|security) [user-identification]
-			// active-directory-access immediately before it, i.e. the
-			// stanza is its immediate parent chain at the tree root.
-			// The stanza is unmodelled (no schema leaf by that name), so
-			// the schema-pinned secretLeafKeywords set cannot name it and
-			// the fix must live AST-side only — control-char/schema
-			// diagnostics resolve through secretIndices and pick it up
-			// from here.
+			// and mask the login identity. The leaf is secret only beneath
+			// the structural root chain rooted at services/security
+			// (optionally under one groups <name> prefix) through
+			// active-directory-access; beneath that stanza it may sit at
+			// any depth (#16850: `domain <D>`, packed `domain-name <D>`,
+			// hierarchical `domain D { … }`, the optional `user-name <name>`
+			// pair, and any other sibling/instance layers Junos AD
+			// profiles carry). The stanza is unmodelled (no schema leaf by
+			// that name), so the schema-pinned secretLeafKeywords set
+			// cannot name it and the fix must live AST-side only —
+			// control-char/schema diagnostics resolve through
+			// secretIndices and pick it up from here.
 			if isADUserPasswordLeaf15996(fp, i) {
 				for j := i + 1; j < len(fp); j++ {
 					out = append(out, j)
@@ -1135,26 +1137,32 @@ func isSNMPTrapGroupIdentity(fp []string, i int) bool {
 }
 
 // isADUserPasswordLeaf15996 reports whether fp[i] (a `user-password` token)
-// is the value leaf of the AD identity stanza in one of the spellings the
-// issue names. Structural position — never an ancestor scan — so any other
-// subtree merely NAMED active-directory-access / user-identification cannot
-// arm it, and a login user named user-password (system login user …) never
-// matches.
+// is the value leaf of the AD identity stanza (#15996, #16850). The
+// structural ROOT chain is exact — never a bare ancestor scan — so any
+// other subtree merely NAMED active-directory-access / user-identification
+// cannot arm it, and a login user named user-password (system login
+// user …) never matches. Beneath that root chain the leaf may sit at ANY
+// depth: Junos AD access profiles carry `domain <D>`,
+// `domain-name <D>`, the `user-name <name>` pair and other sibling or
+// instance layers between active-directory-access and user-password
+// (#16850 — the #15996 gate required ADA immediately before the leaf or
+// the pair, so every domain-scoped spelling leaked).
 //
-// Accepted flattened shapes (prefix = "" | "groups <name>", root =
-// services|security, ADA = active-directory-access, UP = user-password at i):
+// Accepted flattened shape (prefix = "" | "groups <name>", root =
+// services|security, ADA = active-directory-access, UP = user-password
+// at i):
 //
-//	prefix root ADA [user-name <name>] UP    (root spellings, pair optional)
-//	prefix root user-identification ADA [user-name <name>] UP
+//	prefix root [user-identification] ADA <any tokens> UP
 //
 // The groups spelling is the same stanza DEFINED inside a config group
 // (`groups g1 services user-identification …`, applied via apply-groups);
-// the raw groups render is itself a PermView surface, so it must mask too.
-// The stanza may carry sibling leaves before user-password (domain-name,
-// user-name <name>, … — Junos AD access profiles do), but the identity
-// stanza must be the leaf's parent chain rooted at services/security
-// (optionally under one groups <name> prefix): nothing may intervene
-// between root and the stanza, nor between ADA and the pair.
+// the raw groups render is itself a PermView surface, so it must mask
+// too. Nothing may intervene between the prefix and root, between root
+// and the optional user-identification wrapper, or between the wrapper
+// and ADA — that root anchoring is what keeps a group NAMED
+// active-directory-access wrapping `system login user user-password`
+// (and any non-services/security root) unmasked. Everything strictly
+// between ADA and UP is unconstrained.
 func isADUserPasswordLeaf15996(fp []string, i int) bool {
 	if i < 2 || i >= len(fp) || fp[i] != "user-password" {
 		return false
@@ -1169,21 +1177,22 @@ func isADUserPasswordLeaf15996(fp []string, i int) bool {
 	if off+1 < len(fp) && fp[off] == "groups" {
 		off += 2
 	}
-	p := i - 1 // index of the token immediately before user-password
-	// Optional bind-user pair: user-name <name> directly before it.
-	if p-off >= 2 && fp[p-1] == "user-name" {
-		p -= 2
-	}
-	if p-off < 1 || fp[p] != "active-directory-access" {
+	// Root chain: (services|security) [user-identification]
+	// active-directory-access, anchored at off.
+	if off >= len(fp) || (fp[off] != "services" && fp[off] != "security") {
 		return false
 	}
-	switch p - off {
-	case 1: // [prefix] root ADA …
-		return fp[off] == "services" || fp[off] == "security"
-	case 2: // [prefix] root user-identification ADA …
-		return (fp[off] == "services" || fp[off] == "security") && fp[off+1] == "user-identification"
+	p := off + 1
+	if p < len(fp) && fp[p] == "user-identification" {
+		p++
 	}
-	return false
+	if p >= len(fp) || fp[p] != "active-directory-access" {
+		return false
+	}
+	// ADA must be strictly before the leaf; any tokens between them
+	// (domain/domain-name instance, user-name pair, nested blocks
+	// flattened onto the path) are the stanza's own interior.
+	return p < i
 }
 
 // keyHasOSPFMD5Ancestor reports whether the flattened path fp contains a
