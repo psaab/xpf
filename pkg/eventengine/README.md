@@ -123,6 +123,12 @@ commands/plant class with the new semantic revision and slip past the #3750
 "policy redefined" gate. The parked action keeps the revision of the
 generation that produced it and is rejected as stale after a redefinition.
 
+The deferred worker recomputes its wake time from the currently parked
+holds on every iteration and stores zero when both maps are empty
+(#16658): with nothing parked it arms no timer and blocks on the park
+nudge, so a drained deferral never leaves a stale past wake spinning
+zero-length timers for the rest of the daemon's life.
+
 The slot is reserved only when the action is ready to commit, and a commit
 that never promotes — a transient `commitFn` returning `(nil, err)`, a
 standalone commit failure, or an `ErrClusterReadOnly` deferral — refunds

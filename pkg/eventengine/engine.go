@@ -961,15 +961,24 @@ func (e *Engine) startDeferredWorker() {
 }
 
 // deferredWorker replays parked budget/cooldown actions (#15021).
+//
+// The wake time is recomputed from CURRENT parked state on every
+// iteration (#16658): the minimum over the cooldown anchors of the
+// cooldown holds actually in the map plus the oldest-slot expiry when
+// a budget hold is present. It is never seeded from the previous
+// iteration's stored wakeAt — that value survived a full drain, lay in
+// the past on the next iteration, clamped the timer delay to zero, and
+// spun the worker (taking pendingMu+e.mu on every pass via
+// drainDeferred) for the rest of the daemon's life. With both maps
+// empty, wake stays zero, pending.wakeAt is stored zero, and no timer
+// is armed at all: the worker blocks on pendingWake/stopCh until the
+// next park nudges it.
 func (e *Engine) deferredWorker() {
 	defer e.deferredWorkerWG.Done()
 	for {
 		e.pendingMu.Lock()
 		now := e.now()
 		var wake time.Time
-		if !e.pending.wakeAt.IsZero() {
-			wake = e.pending.wakeAt
-		}
 		for _, de := range e.pending.cooldown {
 			e.mu.Lock()
 			rt := e.runtime[de.action.policyName]
@@ -985,13 +994,26 @@ func (e *Engine) deferredWorker() {
 				}
 			}
 		}
-		for range e.pending.budget {
-			if exp, ok := e.oldestBudgetExpiryLocked(now); ok {
+		if len(e.pending.budget) > 0 {
+			// Prefer the test override so a deferred budget hold wakes
+			// when the test asked it to, mirroring deferBudget's use
+			// of the same seam; production takes the oldest slot's
+			// expiry. The hold decides WHETHER to wake; this only
+			// decides WHEN. Note the override is one-shot by nature:
+			// budgetWakeAtFn(now) is recomputed every iteration, so a
+			// test fn returning a fixed offset from now re-arms that
+			// offset after every wake while the hold stays parked
+			// (e.g. waiting out the real slot expiry) — bounded by
+			// the offset, never a zero-length spin.
+			if e.budgetWakeAtFn != nil {
+				if cand := e.budgetWakeAtFn(now); wake.IsZero() || cand.Before(wake) {
+					wake = cand
+				}
+			} else if exp, ok := e.oldestBudgetExpiryLocked(now); ok {
 				if wake.IsZero() || exp.Before(wake) {
 					wake = exp
 				}
 			}
-			break
 		}
 		e.pending.wakeAt = wake
 		e.pendingMu.Unlock()
@@ -1575,6 +1597,10 @@ func (e *Engine) dropGlobalBudget(a plannedAction) {
 
 // deferBudget parks a pre-commit budget-denied action until the oldest slot
 // expires (#15021). Returns false if already parked for this policy.
+// The stored wakeAt is only a hint of this hold's expiry for
+// wakeAtLocked observers; deferredWorker recomputes the real wake from
+// current parked state each iteration and overwrites it (#16658), so a
+// stale hint can never seed a zero-length timer after the hold drains.
 func (e *Engine) deferBudget(a plannedAction) bool {
 	e.pendingMu.Lock()
 	if _, ok := e.pending.budget[a.policyName]; ok {
