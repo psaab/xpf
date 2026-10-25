@@ -55,6 +55,29 @@ func newFRRHADemotionState(d *Daemon, cfg *config.Config) *frrHADemotionState {
 // managed section resets the BGP session and withdraws its advertisements;
 // removing an IGP's RETH interface withdraws the corresponding adjacency and
 // its originated routes. Config objects remain immutable across the render.
+//
+// #16810 single-participant belt: a leniently loaded cluster config may
+// still carry ONE shared OSPF/OSPFv3 router-id or IS-IS NET whose
+// interfaces span RETHs of more than one data RG (strict commit now
+// rejects that shape; tolerant load only warns). Without this belt both
+// nodes would originate LSAs under the same identity during a split.
+// When — after per-RG pruning — this node still holds interfaces of a
+// shared-identity IGP and the UNPRUNED protocol spans more than one
+// data RG, only the owner of the lowest-numbered spanning data RG
+// keeps the protocol; the other node drops the whole protocol (empty
+// areas/interfaces, identity retained on the copy is inert because no
+// interface remains to originate from). A strictly committed config
+// never reaches this belt with a shared identity: per-node identities
+// are distinct, so each node's identity is its own and both
+// participate. Deciding "shared" needs the peer's identity, which the
+// daemon cannot see from one node's compiled config — so the belt
+// conservatively treats every multi-RG-spanning IGP on a cluster node
+// as potentially shared. That costs a strictly-committed multi-RG
+// IGP with a (distinct-per-node) identity its second participant
+// until the operator confines it or the peer view is plumbed; the
+// alternative (both nodes originating under one ID) corrupts the
+// whole IGP area, which is worse. Single-RG and non-cluster renders
+// are untouched.
 func (s *frrHADemotionState) filterProtocols(cfg *config.Config, protocols config.ProtocolsConfig, instanceInterfaces []string) config.ProtocolsConfig {
 	if s == nil {
 		return protocols
@@ -67,7 +90,203 @@ func (s *frrHADemotionState) filterProtocols(cfg *config.Config, protocols confi
 	if protocols.BGP != nil {
 		protocols.BGP = s.filterBGP(cfg, protocols.BGP, groups)
 	}
+	s.enforceSingleIGPParticipant16810(cfg, &protocols, instanceInterfaces)
 	return protocols
+}
+
+// enforceSingleIGPParticipant16810 drops a multi-RG-spanning OSPF,
+// OSPFv3 or IS-IS protocol on this node when this node does not own
+// the lowest-numbered data RG the UNFILTERED protocol spans (#16810).
+// The surviving node keeps its per-RG-pruned interfaces, so both
+// nodes' prefixes still reach the area — via the one participating
+// node — instead of flapping under a duplicate identity.
+//
+// NOT applied to BGP: BGP router-id duplication across nodes does
+// not corrupt a link-state area (each session is independent), and
+// the issue scope is the IGP identity.
+func (s *frrHADemotionState) enforceSingleIGPParticipant16810(cfg *config.Config, protocols *config.ProtocolsConfig, instanceInterfaces []string) {
+	if cfg == nil || protocols == nil {
+		return
+	}
+	// Source scope matching: the global call passes nil
+	// instanceInterfaces and must be judged against cfg.Protocols
+	// only. An instance call passes that instance's interface list;
+	// its source is the routing instance whose Interfaces equal it.
+	// Judging an instance render against the global source (or vice
+	// versa) would withhold the wrong scope.
+	var srcOSPF *config.OSPFConfig
+	var srcOSPFv3 *config.OSPFv3Config
+	var srcISIS *config.ISISConfig
+	if len(instanceInterfaces) == 0 {
+		srcOSPF, srcOSPFv3, srcISIS = cfg.Protocols.OSPF, cfg.Protocols.OSPFv3, cfg.Protocols.ISIS
+	} else {
+		for _, ri := range cfg.RoutingInstances {
+			if ri == nil || !stringSlicesEqual16810(ri.Interfaces, instanceInterfaces) {
+				continue
+			}
+			srcOSPF, srcOSPFv3, srcISIS = ri.OSPF, ri.OSPFv3, ri.ISIS
+			break
+		}
+		if srcOSPF == nil && srcOSPFv3 == nil && srcISIS == nil {
+			return
+		}
+	}
+	if protocols.OSPF != nil && ospfSpansMultipleDataRGs16810(cfg, srcOSPF, protocols.OSPF) &&
+		!s.ownsLowestSpanningRG16810(cfg, srcOSPF, nil, nil) {
+		if len(protocols.OSPF.Areas) != 0 {
+			slog.Warn("frr: withholding OSPF on this node — shared IGP identity spans multiple data RGs and this node is not the lowest-RG participant (#16810)")
+		}
+		dropped := *protocols.OSPF
+		dropped.Areas = nil
+		protocols.OSPF = &dropped
+	}
+	if protocols.OSPFv3 != nil && ospfv3SpansMultipleDataRGs16810(cfg, srcOSPFv3, protocols.OSPFv3) &&
+		!s.ownsLowestSpanningRG16810(cfg, nil, srcOSPFv3, nil) {
+		if len(protocols.OSPFv3.Areas) != 0 {
+			slog.Warn("frr: withholding OSPFv3 on this node — shared IGP identity spans multiple data RGs and this node is not the lowest-RG participant (#16810)")
+		}
+		dropped := *protocols.OSPFv3
+		dropped.Areas = nil
+		protocols.OSPFv3 = &dropped
+	}
+	if protocols.ISIS != nil && isisSpansMultipleDataRGs16810(cfg, srcISIS, protocols.ISIS) &&
+		!s.ownsLowestSpanningRG16810(cfg, nil, nil, srcISIS) {
+		if len(protocols.ISIS.Interfaces) != 0 {
+			slog.Warn("frr: withholding IS-IS on this node — shared IGP identity spans multiple data RGs and this node is not the lowest-RG participant (#16810)")
+		}
+		dropped := *protocols.ISIS
+		dropped.Interfaces = nil
+		protocols.ISIS = &dropped
+	}
+}
+
+func stringSlicesEqual16810(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// ownsLowestSpanningRG16810 reports whether this node owns the
+// lowest-numbered data RG spanned by the ONE source protocol given.
+// Both nodes compute the same spanning set from the synced config
+// and the same lowest RG, and exactly one of them owns it at a time
+// in a split, so exactly one participant remains.
+func (s *frrHADemotionState) ownsLowestSpanningRG16810(cfg *config.Config, ospf *config.OSPFConfig, ospfv3 *config.OSPFv3Config, isis *config.ISISConfig) bool {
+	var names []string
+	switch {
+	case ospf != nil:
+		for _, a := range ospf.Areas {
+			if a == nil {
+				continue
+			}
+			for _, i := range a.Interfaces {
+				if i != nil && !i.Disable {
+					names = append(names, i.Name)
+				}
+			}
+		}
+	case ospfv3 != nil:
+		for _, a := range ospfv3.Areas {
+			if a == nil {
+				continue
+			}
+			for _, i := range a.Interfaces {
+				if i != nil && !i.Disable {
+					names = append(names, i.Name)
+				}
+			}
+		}
+	case isis != nil:
+		for _, i := range isis.Interfaces {
+			if i != nil && !i.Disable {
+				names = append(names, i.Name)
+			}
+		}
+	default:
+		return true
+	}
+	rgs := dataRGsForNames16810(cfg, names)
+	if len(rgs) < 2 {
+		return true
+	}
+	return s.active[rgs[0]]
+}
+
+func dataRGsForNames16810(cfg *config.Config, names []string) []int {
+	owners := cfg.RethRGOwners()
+	set := map[int]bool{}
+	for _, n := range names {
+		rg, ok := owners[n]
+		if !ok {
+			if base, _, dotted := config.SplitIfaceRef(n); dotted {
+				rg, ok = owners[base]
+			}
+		}
+		if ok && rg > 0 {
+			set[rg] = true
+		}
+	}
+	out := make([]int, 0, len(set))
+	for rg := range set {
+		out = append(out, rg)
+	}
+	sort.Ints(out)
+	return out
+}
+
+func ospfSpansMultipleDataRGs16810(cfg *config.Config, source, filtered *config.OSPFConfig) bool {
+	if source == nil || source.RouterID == "" || source.Disable {
+		return false
+	}
+	var names []string
+	for _, a := range source.Areas {
+		if a == nil {
+			continue
+		}
+		for _, i := range a.Interfaces {
+			if i != nil && !i.Disable {
+				names = append(names, i.Name)
+			}
+		}
+	}
+	return len(dataRGsForNames16810(cfg, names)) >= 2 && filtered != nil && len(filtered.Areas) != 0
+}
+
+func ospfv3SpansMultipleDataRGs16810(cfg *config.Config, source, filtered *config.OSPFv3Config) bool {
+	if source == nil || source.RouterID == "" || source.Disable {
+		return false
+	}
+	var names []string
+	for _, a := range source.Areas {
+		if a == nil {
+			continue
+		}
+		for _, i := range a.Interfaces {
+			if i != nil && !i.Disable {
+				names = append(names, i.Name)
+			}
+		}
+	}
+	return len(dataRGsForNames16810(cfg, names)) >= 2 && filtered != nil && len(filtered.Areas) != 0
+}
+
+func isisSpansMultipleDataRGs16810(cfg *config.Config, source, filtered *config.ISISConfig) bool {
+	if source == nil || source.NET == "" || source.Disable {
+		return false
+	}
+	var names []string
+	for _, i := range source.Interfaces {
+		if i != nil && !i.Disable {
+			names = append(names, i.Name)
+		}
+	}
+	return len(dataRGsForNames16810(cfg, names)) >= 2 && filtered != nil && len(filtered.Interfaces) != 0
 }
 
 // filterStaticRoutes drops (or prunes next-hops of) static routes whose
