@@ -193,8 +193,6 @@ func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) bool
 		peerWire = binary.LittleEndian.Uint16(payload[3:5])
 	}
 	oldWire := s.peerSessionSyncWire.Load()
-	capabilityChanged := oldProto != uint32(peerProto) ||
-		oldFlags != uint32(peerFlags) || oldWire != uint32(peerWire)
 	// #9818: the sender's process identity rides after the existing
 	// capabilities fields. Old peers ignore this trailing extension; a
 	// short frame leaves the connection unattributed and therefore on the
@@ -209,6 +207,22 @@ func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) bool
 			}
 		}
 	}
+	// #16756: the second capability byte rides AFTER the identity tail.
+	// It cannot sit at [5]: a pre-#9818 peer sends a 5-byte frame whose
+	// [5] does not exist, while a #9818 peer's [5:21] is its boot id —
+	// a fixed offset would misread a boot byte as capabilities. The
+	// sender appends exactly one byte after however much identity it
+	// sent, so the byte is at len-1 iff the frame is longer than every
+	// pre-#16756 layout (5, 21, 29, 37). A shorter frame is a peer that
+	// predates the byte: flags2 = 0, incapable, which is true of it.
+	var peerFlags2 uint8
+	if len(payload) > 5+bootIncarnationLen+8+8 {
+		peerFlags2 = payload[len(payload)-1]
+	}
+	oldFlags2 := s.peerCapabilityFlags2.Load()
+	capabilityChanged := oldProto != uint32(peerProto) ||
+		oldFlags != uint32(peerFlags) || oldWire != uint32(peerWire) ||
+		oldFlags2 != uint32(peerFlags2)
 	// noteConn runs for every frame (as before): it may PROMOTE a
 	// pending-retirement connection to current (#9818), so it must
 	// precede the membership gate below — gating first would leave
@@ -232,6 +246,7 @@ func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) bool
 		ac.peerSnapshotVersion = peerProto
 		ac.peerCapabilityFlags = peerFlags
 		ac.peerSessionSyncWire = peerWire
+		ac.peerCapabilityFlags2 = peerFlags2
 	}
 	s.peerSnaps.peerSnapshotProtocolWriteMu.Lock()
 	if s.peerSnaps.peerSnapshotProtocol.Load() != uint32(peerProto) {
@@ -240,6 +255,7 @@ func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) bool
 	s.peerSnaps.peerSnapshotProtocol.Store(uint32(peerProto))
 	s.peerSnaps.peerSnapshotProtocolWriteMu.Unlock()
 	s.peerCapabilityFlags.Store(uint32(peerFlags))
+	s.peerCapabilityFlags2.Store(uint32(peerFlags2))
 	s.peerSessionSyncWire.Store(uint32(peerWire))
 	s.mu.Unlock()
 	// #10512 learn-trigger: learning completed (capable or not) —

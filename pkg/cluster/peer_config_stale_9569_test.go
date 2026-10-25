@@ -111,6 +111,12 @@ func TestForceSecondaryRefusesAConfigStalePeer_9569(t *testing.T) {
 // the peer positively acknowledges successful apply of the newest generation.
 func TestPeerConfigStaleRequiresPositiveApplyAck11070(t *testing.T) {
 	s := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
+	// #16756: model an ACK-capable peer incarnation. Without this the
+	// fixture is a legacy peer (no advertisement), which the gate now
+	// judges by NACK-only semantics and this test's premise — silence
+	// is stale — would not hold.
+	s.peerCapabilityFlags2.Store(uint32(capFlag2ConfigApplyAck))
+	s.lastSentConfigAckCapable16756.Store(true)
 	nack := func(typ uint8, gen uint64) {
 		var p [8]byte
 		binary.LittleEndian.PutUint64(p[:], gen)

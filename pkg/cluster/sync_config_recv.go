@@ -29,6 +29,11 @@ func (s *SessionSync) handleConfigApplyNack(conn net.Conn, payload []byte) bool 
 			"nacked_gen", nackedGen, "last_sent_gen", sent)
 		return false
 	}
+	// #16756: record the NACKed generation for the legacy-peer fallback
+	// in PeerConfigStale. Only reached for a NACK of the newest send
+	// (the straggler guard above returned otherwise), so a plain store
+	// of the matched generation is the high-water.
+	s.peerConfigNackedGen16756.Store(nackedGen)
 	s.stats.ConfigApplyNacksReceived.Add(1)
 	// #9569: the peer did not apply the config generation. A handover onto it
 	// remains refused until the peer positively acknowledges a successful apply.

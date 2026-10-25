@@ -495,9 +495,19 @@ func (s *SessionSync) queueConfigOnConn(
 	return true
 }
 func (s *SessionSync) recordLastSentConfigGen(gen uint64) {
+	// #16756: record the receiving incarnation's ACK capability
+	// atomically with the mark (senders hold writeMu, and this CAS is
+	// the only writer) so PeerConfigStale charges a missing ACK only
+	// to a peer that promised one for THIS send. CAS first, then the
+	// bit, so a racing PeerConfigStale never pairs a new generation
+	// with the previous send's capability.
 	for {
 		old := s.lastSentConfigGen.Load()
-		if gen <= old || s.lastSentConfigGen.CompareAndSwap(old, gen) {
+		if gen <= old {
+			return
+		}
+		if s.lastSentConfigGen.CompareAndSwap(old, gen) {
+			s.lastSentConfigAckCapable16756.Store(s.ConfigApplyAckCapable())
 			return
 		}
 	}

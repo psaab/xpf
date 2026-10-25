@@ -3916,10 +3916,16 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
     applied generation re-ACKs it, recovering a lost response. While a config
     is in flight the sender remains fail-closed; only its matching ACK clears
     the gate.
-  - Older peers do not send apply ACKs; once a config is pushed to one, handover
-    remains refused until an upgraded peer reconnects and positively
-    acknowledges the current generation. Reconnection alone does not clear the
-    gate. With no session sync there is no push that could have failed, so
+  - A peer predating the type-40 ACK (28556c2b19) can never ACK, so the
+    gate falls back for it to the pre-ACK semantics — stale iff the
+    newest sent generation was NACKed (#16756). ACK support is
+    advertised as `capFlag2ConfigApplyAck` in a second capability byte
+    appended after the identity tail of `syncMsgPeerCapabilities`; the
+    capability recorded at send time (`lastSentConfigAckCapable16756`)
+    decides which semantics a given send is judged by, and a
+    downgrade-on-reconnect re-judges under the current peer. The legacy
+    refusal names the real cause ("peer predates config-apply ACK").
+    With no session sync there is no push that could have failed, so
     handover proceeds as before. Crash takeover stays ungated.
 - `TakeoverHoldTime` adds extra delay before election when this node would
   immediately preempt. Used to avoid election thrash on simultaneous boot.
