@@ -1376,6 +1376,12 @@ func computeDesired(cfg *config.DHCPRelayConfig, resolveIfName func(string) stri
 		}
 		sgName := group.ActiveServerGroup
 		if sgName == "" {
+			// #16580: relay-level default for hand-built/lenient
+			// configs that did not pass through the compiler's
+			// inheritance (mirrors the v6 runtime fallback).
+			sgName = cfg.ActiveServerGroup
+		}
+		if sgName == "" {
 			slog.Warn("dhcp-relay: active server group is empty", "group", group.Name)
 			continue
 		}

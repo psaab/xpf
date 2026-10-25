@@ -113,13 +113,20 @@ func (c *CLI) showDHCPRelay() error {
 			fmt.Printf("  %s: %s\n", name, strings.Join(sg.Servers, ", "))
 		}
 	}
+	if relay.ActiveServerGroup != "" {
+		fmt.Printf("  Default active server group: %s\n", relay.ActiveServerGroup)
+	}
 
 	if len(relay.Groups) > 0 {
 		fmt.Println("Relay groups:")
 		for name, g := range relay.Groups {
 			fmt.Printf("  %s:\n", name)
 			fmt.Printf("    Interfaces: %s\n", strings.Join(g.Interfaces, ", "))
-			fmt.Printf("    Active server group: %s\n", g.ActiveServerGroup)
+			activeServerGroup := g.ActiveServerGroup
+			if activeServerGroup == "" {
+				activeServerGroup = relay.ActiveServerGroup
+			}
+			fmt.Printf("    Active server group: %s\n", activeServerGroup)
 			var overrides []string
 			if g.AlwaysBroadcast {
 				overrides = append(overrides, "always-broadcast")

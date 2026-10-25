@@ -41,6 +41,16 @@ import (
 // load / peer-sync paths (opts.lenientDHCPRelayChildTokens), so a persisted
 // config still BOOTS (#1960). The v4 compiler reads only the two declared
 // children; the DHCPv6 compiler owns the separate family subtree.
+//
+// #16580: the schema now also declares the relay-level
+// `active-server-group` default, so this gate permits it automatically
+// and compileDHCPRelay inherits it into v4 groups. The strict-path
+// message below must describe the rejection itself, not the old
+// silent-drop outcome ("it commits clean … and relays nothing" was
+// printed as the reason for refusing the commit, which contradicts
+// the refusal); the "compiles to NOTHING" wording remains accurate
+// only on the tolerant path, where the token is dropped with a
+// warning.
 func validateDHCPRelayChildTokensAST(nodes []*Node, lenient bool) ([]string, error) {
 	declared := dhcpRelayChildTokens9552()
 	if len(declared) == 0 {
@@ -58,9 +68,16 @@ func validateDHCPRelayChildTokensAST(nodes []*Node, lenient bool) ([]string, err
 		if tok == "" || tok == "dhcpv6" || permitted[tok] || routingInstanceApplyMetaKeyword9323(tok) {
 			return nil
 		}
+		// #16580: strict refuses, so the message describes the refusal;
+		// only the tolerant path (which drops the token and boots)
+		// may say it compiles to nothing.
 		msg := fmt.Sprintf("forwarding-options dhcp-relay: %q is not a dhcp-relay statement "+
-			"xpf implements (known: %s) — it compiles to NOTHING: it commits clean, renders "+
-			"in `show configuration`, and relays nothing (#9552)", tok, strings.Join(declared, ", "))
+			"xpf implements (known: %s) — this statement is rejected and will not be compiled (#9552)", tok, strings.Join(declared, ", "))
+		if lenient {
+			msg = fmt.Sprintf("forwarding-options dhcp-relay: %q is not a dhcp-relay statement "+
+				"xpf implements (known: %s) — it compiles to NOTHING: it renders "+
+				"in `show configuration`, and relays nothing (#9552)", tok, strings.Join(declared, ", "))
+		}
 		if !lenient {
 			return fmt.Errorf("%s", msg)
 		}

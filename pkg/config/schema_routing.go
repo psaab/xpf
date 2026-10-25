@@ -969,10 +969,13 @@ var schemaForwardingOptions = &schemaNode{desc: "Packet forwarding options", chi
 			}},
 		}},
 	}},
-	"dhcp-relay": {desc: "DHCP relay", children: map[string]*schemaNode{
+	"dhcp-relay": {desc: "DHCP relay", packedStatements: true, children: map[string]*schemaNode{
 		// DHCPv4 relay grammar.
 		"server-group": {desc: "DHCP server group", args: 1, placeholder: "<name>", children: nil},
-		"group": {desc: "DHCP relay group", args: 1, placeholder: "<name>", children: map[string]*schemaNode{
+		// #16580: Junos relay-level default, inherited by v4 groups
+		// without their own active-server-group (mirrors dhcpv6).
+		"active-server-group": {desc: "Default DHCPv4 server group", args: 1, placeholder: "<server-group>", children: nil},
+		"group": {desc: "DHCP relay group", args: 1, placeholder: "<name>", packedStatements: true, children: map[string]*schemaNode{
 			"active-server-group": {desc: "Active server group", args: 1, placeholder: "<server-group>", children: nil},
 			"interface":           {desc: "Interface to relay on", args: 1, multi: true, placeholder: "<interface>", children: nil},
 			"overrides": {desc: "Relay overrides", children: map[string]*schemaNode{
@@ -1009,7 +1012,7 @@ var schemaForwardingOptions = &schemaNode{desc: "Packet forwarding options", chi
 			"server-group":             {desc: "DHCPv6 server group", args: 1, placeholder: "<name>", children: nil},
 			"active-server-group":      {desc: "Default DHCPv6 server group", args: 1, placeholder: "<server-group>", children: nil},
 			"relay-agent-interface-id": {desc: "DHCPv6 relay Interface-ID option", args: 1, allowEmptyValue: true, placeholder: "<interface-id>", children: nil},
-			"group": {desc: "DHCPv6 relay group", args: 1, placeholder: "<name>", children: map[string]*schemaNode{
+			"group": {desc: "DHCPv6 relay group", args: 1, placeholder: "<name>", packedStatements: true, children: map[string]*schemaNode{
 				"active-server-group":      {desc: "DHCPv6 active server group", args: 1, placeholder: "<server-group>", children: nil},
 				"interface":                {desc: "Interface to relay DHCPv6 on", args: 1, multi: true, placeholder: "<interface>", valueHint: ValueHintInterfaceName, valueType: ValueInterfaceName, valueDesc: "interface name (ge-0/0/0.0, reth0.50, st0.1)", validator: ValidateInterfaceName, children: nil},
 				"relay-agent-interface-id": {desc: "DHCPv6 relay Interface-ID option", args: 1, allowEmptyValue: true, placeholder: "<interface-id>", children: nil},
