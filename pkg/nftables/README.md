@@ -21,7 +21,7 @@ the counter READERS the observability surface scrapes.
   userspace-owned flows are dropped, while tracked RSTs
   (`reject with tcp reset`, local socket RSTs) survive.
 
-### Host-inbound / lo0 / fence installer (#6387 PR-2 additive, PR-3 CUTOVER)
+### Host-inbound / lo0 / fence installer (#6387)
 The `Installer` interface (`netlink_installer.go`) is the concrete
 injection seam covering every kernel-touching host-inbound / lo0 / fence
 operation. Since #6387 PR-3 it is the PRODUCTION path: `pkg/daemon`
@@ -37,27 +37,35 @@ needs the kernel `nf_tables` MODULE but no `nft` BINARY:
 - `InstallColdBootFence(FenceSpec)` — the #5644 cold-boot fail-closed
   fence (scope-independent mandatory admits, per-zone WG accepts, and
   address drops; no service accepts).
+- `InstallLo0ColdBootFence(FenceSpec)` — the #6476 lo0 cold-boot fail-closed
+  fence, preserving established-flow admits while dropping firewall-local
+  addresses.
 - `InstallGapFence(GapFenceSpec)` — the #5789 additive coverage-gap fence,
   with per-zone WG accepts limited to uncovered addresses.
 - `InstallLo0(Lo0FilterSpec)` — the lo0 loopback input filter (#3445/#3392).
 - `DeleteTable(name)` — idempotent teardown (fail-closed on a real error).
 
+**Other `Installer` operations:**
+- **Early-input barrier:** `InstallEarlyInputBarrier()`, `InstallEarlyInputBarrierWithLifelineAdmit(lifelines)`, `RemoveEarlyInputBarrier()`, and `EarlyInputBarrierPresent()` install the pre-networkd host-input guard (optionally preserving lifeline access), remove it at handoff, and read back its presence before link activation.
+- **Transit barrier:** `InstallTransitBarrier()`, `InstallArmedTransitFence(spec)`, and `RemoveTransitBarrier()` manage the unarmed or armed forward-hook fence and its provenance-scoped pinholes.
+- **IPsec divert:** `InstallIpsecDivert(spec)`, `RemoveIpsecDivert()`, and `VerifyIpsecQuarantineGuard()` manage the two-family diversion and verify the fail-closed quarantine guard.
+- **Overlay readback:** `VerifyHostInboundOverlay(overlay)` checks the exact marker and leading DROP rule for a candidate overlay before publication.
+- **Table probes:** `TableEnforcing(name)` distinguishes an active input-hook table from an empty shell; `TableDropsInput(name)` additionally verifies that its input hook contains a DROP verdict.
+
 `NewNetlinkInstaller()` returns the production netlink implementation.
-Each method is ONE atomic `Flush()` transaction; on any error the kernel
-retains the previous table untouched (the `nft -f -` atomicity, #H4). The
-delete-then-recreate is existence-check-first, so an absent table on cold
-boot does NOT abort the batch (#12.2). Table names `xpf_hostinbound` (prio
-10) / `xpf_hostinbound_gap` (prio 11) / `xpf_lo0` (prio 0) and the named
-counters are unchanged from the exec-`nft` path, so the readers below and
-operator `nft list` output are identical.
+Host-inbound, lo0, and fence table replacement uses one atomic `Flush()`
+batch per table. A `Flush()` error does not prove rollback: the kernel may
+have committed the batch while its ACK was lost (#12128). `replaceTable`
+reads back the table against the complete plan and treats an exact match as
+success; otherwise it preserves the `Flush()` error, joining any readback
+error. Callers must not assume that an error means the previous table remains
+untouched. The delete-then-recreate is existence-check-first, so an absent
+table on cold boot does NOT abort the batch (#12.2). Table names
+`xpf_hostinbound` (prio 10) / `xpf_hostinbound_gap` (prio 11) / `xpf_lo0`
+(prio 0) and the named counters are unchanged from the exec-`nft` path, so
+the readers below and operator `nft list` output are identical.
 
-**Status (PR-2 of 3):** ADDITIVE — the daemon still shells to `nft`. PR-3
-wires the apply path to this `Installer` and ports the 14 fail-closed
-tests onto its single failure-injection seam (a fake `Installer` that
-returns an error). The `build*Payload` string builders in `daemon_nft.go`
-are RETAINED as the parity-test ORACLE, not deleted.
-
-**Parity CI (the point of PR-2, the security gate).** The netlink build
+**Parity CI (regression gate for the production cutover and a security gate).** The netlink build
 must be bit-for-bit equivalent to the exec-`nft` oracle or a
 dropped/widened/weakened rule is a host-inbound fail-open on the PRIMARY
 host path. Three test layers pin this:
@@ -135,8 +143,9 @@ against the real kernel under `CAP_NET_ADMIN`.
 
 ## Callers
 
-`pkg/daemon` (installer/probe wiring lands in PR-3), `pkg/api`
-(counter readers), `pkg/dataplane/userspace` (RST suppression).
+`pkg/daemon` (`daemon_nft_netlink.go`: production installer/probe wiring and
+converters), `cmd/xpfd` (input/transit barrier operations), `pkg/api`
+(counter readers), and `pkg/dataplane/userspace` (RST suppression).
 
 ## Dependencies
 

@@ -18,8 +18,9 @@ package daemon
 // or `unshare` is absent it SKIPs with an explicit logged reason (memory rule:
 // no silent caps) — the parent runs it where `nft` exists.
 //
-// The converter below (daemon dpuserspace views/programs/terms -> pkg/nftables
-// spec) is the field-copy PR-3 will promote to production; here it is test-only.
+// The production converter in daemon_nft_netlink.go maps daemon dpuserspace
+// views/programs/terms to pkg/nftables specs. This test exercises that converter
+// while comparing the resulting ruleset with the retained exec-`nft` oracle.
 
 import (
 	"os"
