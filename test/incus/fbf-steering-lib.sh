@@ -236,13 +236,15 @@ fbf_table_holds_default() {
 #
 # Print the one unambiguous status for POLICY; return nonzero when the report
 # omitted it, duplicated it, or changed shape. UNKNOWN is a valid status value.
+# PARTIAL (#16632: some tests measured, others verdict-less) is also valid —
+# it is not PASS, so callers gating on PASS correctly refuse to proceed.
 fbf_ipmon_policy_state() {
 	local policy="${1:-}" output="${2:-}" state
 	[[ -n "${policy//[[:space:]]/}" && -n "${output//[[:space:]]/}" ]] || return 1
 	state="$(awk -v policy="$policy" '
 		$1 == "Policy" && $2 == "-" && $3 == policy {
 			count++
-			if ($0 ~ /\(Status: (PASS|FAIL|UNKNOWN)\)/) {
+			if ($0 ~ /\(Status: (PASS|FAIL|UNKNOWN|PARTIAL)\)/) {
 				line = $0
 				sub(/^.*\(Status: /, "", line)
 				sub(/\).*$/, "", line)

@@ -27,11 +27,20 @@ func FormatStatus(w io.Writer, statuses []PolicyStatus) {
 	for _, ps := range statuses {
 		// #3761 H7: an unknown health (no probe result yet) is NOT PASS —
 		// reporting PASS would tell an operator failover protection is
-		// active and healthy when no probe has run.
+		// active and healthy when no probe has run. #16632 A49-02: a
+		// PARTIAL health (some tests have verdicts, others have never
+		// been measured) is not PASS either — the verdict-less tests
+		// are named as UNKNOWN rows below instead of hidden behind a
+		// wildcard "* PASS" row.
 		state := "PASS"
 		switch {
 		case ps.Failed:
 			state = "FAIL"
+		case len(ps.UnknownTests) > 0 && (len(ps.PassingTests) > 0 || len(ps.FailingTests) > 0):
+			// Mixed: some tests measured, some never (#16632).
+			state = "PARTIAL"
+		case len(ps.UnknownTests) > 0:
+			state = "UNKNOWN"
 		case !ps.Known:
 			state = "UNKNOWN"
 		}
@@ -39,15 +48,21 @@ func FormatStatus(w io.Writer, statuses []PolicyStatus) {
 		fmt.Fprintf(w, "  RPM Probes:\n")
 		fmt.Fprintf(w, "    Probe name           Test Name        Address          Status\n")
 		fmt.Fprintf(w, "    ---------------------- --------------- ---------------- ---------\n")
-		if len(ps.FailingTests) == 0 {
+		if len(ps.FailingTests) == 0 && len(ps.UnknownTests) == 0 && len(ps.PassingTests) == 0 {
 			rowStatus := "PASS"
 			if !ps.Known {
 				rowStatus = "UNKNOWN"
 			}
 			fmt.Fprintf(w, "    %-22s %-15s %-16s %s\n", ps.Probe, "*", "-", rowStatus)
 		} else {
+			for _, test := range ps.PassingTests {
+				fmt.Fprintf(w, "    %-22s %-15s %-16s %s\n", ps.Probe, test, "-", "PASS")
+			}
 			for _, test := range ps.FailingTests {
 				fmt.Fprintf(w, "    %-22s %-15s %-16s %s\n", ps.Probe, test, "-", "FAIL")
+			}
+			for _, test := range ps.UnknownTests {
+				fmt.Fprintf(w, "    %-22s %-15s %-16s %s\n", ps.Probe, test, "-", "UNKNOWN")
 			}
 		}
 

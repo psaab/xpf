@@ -208,14 +208,28 @@ routing-instance, tracked unit, metric, and reason — shown by
 
 `Status`/`FormatStatus`/metrics distinguish converged truth from intent:
 
-- **UNKNOWN vs PASS (H7).** `PolicyStatus.Known` is false until the
-  policy's probe has produced at least one pass/fail verdict.
-  `FormatStatus` renders `Status: UNKNOWN` in that window — never
-  `PASS`. An operator reading `PASS` would assume failover protection
-  is active when no probe has run. (#15233 A49-01: rpm seeds every test
-  `LastStatus: "unknown"` before any verdict; `seedResultsLocked` now
-  records only pass/fail rows in `knownTests`/`failedTests`, so an
-  unknown-only snapshot no longer marks the policy Known.)
+- **UNKNOWN vs PASS vs PARTIAL (H7).** `PolicyStatus.Known` is true
+  only once *every* observed test of the policy's probe has a
+  pass/fail verdict (observed = present in a results snapshot or a
+  transition, tracked in `seenTests`). `FormatStatus` renders
+  `Status: UNKNOWN` while no test has a verdict, `Status: PARTIAL`
+  while some tests have verdicts and others have never been
+  measured, and `Status: PASS` only when every observed test is
+  known-passing — never `PASS` for a partially-measured probe. An
+  operator reading `PASS` would assume failover protection is
+  active when part of it has never run. (#15233 A49-01: rpm seeds
+  every test `LastStatus: "unknown"` before any verdict;
+  `seedResultsLocked` records only pass/fail rows in
+  `knownTests`/`failedTests`, so an unknown-only snapshot does not
+  mark the policy Known. #16632 A49-02: a *mixed* snapshot — one
+  test passing, another held `unknown` forever by a setup/pin
+  failure — previously rendered a wildcard `* PASS` row and hid
+  the verdict-less test; `Status()` now carries it in
+  `PolicyStatus.UnknownTests` (plus `PassingTests`), and
+  `FormatStatus` renders one row per test — PASS/FAIL/UNKNOWN —
+  naming e.g. `wan-b` as `UNKNOWN` under a `PARTIAL` policy.
+  `Known=false` therefore means UNKNOWN *or* PARTIAL; scrapers
+  must accept `PARTIAL` alongside `PASS|FAIL|UNKNOWN`.)
 - **Stale snapshot fence (A49-03, #15233).** `reconcileIPMon` takes
   `rpm.ResultsVersioned()` — snapshot + transition generation under the
   rpm lock — and calls `ApplyVersioned`. A snapshot older than

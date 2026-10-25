@@ -105,14 +105,26 @@ type PolicyStatus struct {
 	Name   string
 	Probe  string
 	Failed bool
-	// Known is true once at least one pass/fail RPM verdict for the
-	// policy's probe has been observed (#3761 H7, #15233 A49-01: an
-	// "unknown" seed row is not a verdict). While false the policy's
-	// health is UNKNOWN — status/metrics must NOT report it as PASS,
-	// because "no probe has run" is not "the uplink is healthy".
-	Known             bool
-	Since             time.Time // last state-change time (zero = never evaluated)
-	FailingTests      []string
+	// Known is true once EVERY observed test of the policy's probe
+	// has a pass/fail verdict (#3761 H7, #15233 A49-01, #16632
+	// A49-02: an "unknown" seed row is not a verdict). While false
+	// the health is not fully known — status must NOT report PASS,
+	// because "one test has never been measured" is not "healthy".
+	// No observed test at all also stays not-Known (UNKNOWN).
+	Known        bool
+	Since        time.Time // last state-change time (zero = never evaluated)
+	FailingTests []string
+	// UnknownTests lists, sorted, observed tests of the policy's
+	// probe with no pass/fail verdict yet (#16632) — e.g. a test
+	// held forever by a probe-setup/pin failure. Empty when every
+	// observed test has a verdict (or none observed). Rendered as
+	// per-test UNKNOWN rows; policy is PARTIAL while non-empty and
+	// no test is failing.
+	UnknownTests []string
+	// PassingTests lists, sorted, observed tests with a pass verdict
+	// (#16632). Rendered as per-test PASS rows alongside FAIL/UNKNOWN
+	// rows so every observed test is named exactly once.
+	PassingTests      []string
 	HoldDownSecs      int
 	PendingRecoveryAt time.Time // non-zero while a recovery hold-down is running
 	// Routes is the DESIRED winner-resolved overlay for this policy — the
@@ -163,6 +175,7 @@ type Engine struct {
 	policies                 map[string]*policyState
 	failedTests              map[string]map[string]bool // probe → test → failed (verdict-known tests only, #15233)
 	knownTests               map[string]map[string]bool // probe → test → has pass/fail verdict (#15233)
+	seenTests                map[string]map[string]bool // probe → test → observed with any status incl. "unknown" (#16632)
 	lastTransitionGeneration uint64                     // latest ordered RPM snapshot accepted
 
 	// publishEnabled implements HA primary-only overlay publication
@@ -260,6 +273,7 @@ func New(actuate func(ctx context.Context) bool) *Engine {
 		policies:       make(map[string]*policyState),
 		failedTests:    make(map[string]map[string]bool),
 		knownTests:     make(map[string]map[string]bool),
+		seenTests:      make(map[string]map[string]bool),
 		publishEnabled: true,
 		actuate:        actuate,
 		now:            time.Now,
@@ -566,8 +580,16 @@ func (e *Engine) HandleTransition(t rpm.Transition) {
 	if e.knownTests[t.ProbeName] == nil {
 		e.knownTests[t.ProbeName] = make(map[string]bool)
 	}
-	// Only a genuine pass/fail verdict makes a test known (#15233);
-	// any other status string leaves it unknown.
+	if e.seenTests == nil {
+		e.seenTests = make(map[string]map[string]bool)
+	}
+	if e.seenTests[t.ProbeName] == nil {
+		e.seenTests[t.ProbeName] = make(map[string]bool)
+	}
+	// Any observed status — including a held "unknown" — makes the
+	// test seen (#16632); only a genuine pass/fail verdict makes it
+	// known (#15233), any other status leaves it unknown.
+	e.seenTests[t.ProbeName][t.TestName] = true
 	if t.Status == "fail" || t.Status == "pass" {
 		e.knownTests[t.ProbeName][t.TestName] = true
 		e.failedTests[t.ProbeName][t.TestName] = t.Status == "fail"
@@ -796,13 +818,25 @@ func (e *Engine) Status() []PolicyStatus {
 	out := make([]PolicyStatus, 0, len(names))
 	for _, name := range names {
 		st := e.policies[name]
-		known := len(e.knownTests[st.cfg.MatchRPMProbe]) > 0
+		probe := st.cfg.MatchRPMProbe
+		var unknownTests []string
+		for test := range e.seenTests[probe] {
+			if !e.knownTests[probe][test] {
+				unknownTests = append(unknownTests, test)
+			}
+		}
+		sort.Strings(unknownTests)
+		// Known only when at least one test was observed and every
+		// observed test has a verdict (#16632): a mixed known/unknown
+		// probe is PARTIAL, not PASS. No observed test stays UNKNOWN.
+		known := len(e.seenTests[probe]) > 0 && len(unknownTests) == 0
 		ps := PolicyStatus{
 			Name:              name,
-			Probe:             st.cfg.MatchRPMProbe,
+			Probe:             probe,
 			Failed:            st.failed,
 			Known:             known,
 			Since:             st.since,
+			UnknownTests:      unknownTests,
 			HoldDownSecs:      st.cfg.HoldDownSecs,
 			PendingRecoveryAt: st.pendingRecoveryAt,
 			Routes:            byPolicy[name],
@@ -811,12 +845,15 @@ func (e *Engine) Status() []PolicyStatus {
 			SuppressedRoutes:  detail.suppressed[name],
 			Transitions:       st.transitions,
 		}
-		for test, failed := range e.failedTests[st.cfg.MatchRPMProbe] {
+		for test, failed := range e.failedTests[probe] {
 			if failed {
 				ps.FailingTests = append(ps.FailingTests, test)
+			} else if e.knownTests[probe][test] {
+				ps.PassingTests = append(ps.PassingTests, test)
 			}
 		}
 		sort.Strings(ps.FailingTests)
+		sort.Strings(ps.PassingTests)
 		out = append(out, ps)
 	}
 	return out
@@ -855,16 +892,24 @@ func (e *Engine) ActuationFailures() uint64 {
 // neither mark the policy Known (it would render PASS) nor be recorded
 // in failedTests (evaluateLocked only reads the failed flag, but keeping
 // unknown rows out keeps failedTests == verdict-known failed/pass state).
+// Every row — pass, fail, or "unknown" — marks the test seen (#16632),
+// so a verdict-less test surfaces in PolicyStatus.UnknownTests instead
+// of being hidden behind a wildcard PASS row.
 func (e *Engine) seedResultsLocked(results []*rpm.ProbeResult) {
 	if results == nil {
 		return
 	}
 	fresh := make(map[string]map[string]bool)
 	known := make(map[string]map[string]bool)
+	seen := make(map[string]map[string]bool)
 	for _, r := range results {
 		if r == nil {
 			continue
 		}
+		if seen[r.ProbeName] == nil {
+			seen[r.ProbeName] = make(map[string]bool)
+		}
+		seen[r.ProbeName][r.TestName] = true
 		if r.LastStatus != "pass" && r.LastStatus != "fail" {
 			continue
 		}
@@ -877,6 +922,7 @@ func (e *Engine) seedResultsLocked(results []*rpm.ProbeResult) {
 	}
 	e.failedTests = fresh
 	e.knownTests = known
+	e.seenTests = seen
 }
 
 // evaluateLocked runs the FAIL/recover state machine at time now.

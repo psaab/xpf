@@ -176,6 +176,8 @@ ipmon_state="$(fbf_ipmon_policy_state fbf-fallback "$IPMON_STATUS" 2>/dev/null |
 checki IPMON_FAIL_STATE FAIL "$ipmon_state"
 ipmon_state="$(fbf_ipmon_policy_state fbf-fallback 'Policy - fbf-fallback (Status: PASS)' 2>/dev/null || printf INVALID)"
 checki IPMON_PASS_STATE PASS "$ipmon_state"
+ipmon_state="$(fbf_ipmon_policy_state fbf-fallback 'Policy - fbf-fallback (Status: PARTIAL)' 2>/dev/null || printf INVALID)"
+checki IPMON_PARTIAL_STATE PARTIAL "$ipmon_state"
 ipmon_state="$(fbf_ipmon_policy_state fbf-fallback 'Policy - other (Status: FAIL)' 2>/dev/null || printf INVALID)"
 checki IPMON_MISSING_POLICY INVALID "$ipmon_state"
 ipmon_state="$(fbf_ipmon_policy_state fbf-fallback $'Policy - fbf-fallback (Status: FAIL)\nPolicy - fbf-fallback (Status: PASS)' 2>/dev/null || printf INVALID)"
