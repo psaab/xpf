@@ -173,12 +173,26 @@ fn ingress_route_table_override_with_mode(
     reject_sink: Option<PbrRejectSink<'_>>,
     count: bool,
 ) -> RouteTableOverrideOutcome {
-    let ingress_ifindex = resolve_ingress_logical_ifindex(
-        forwarding,
-        meta.ingress_ifindex as i32,
-        meta.ingress_vlan_id,
-    )
-    .unwrap_or(meta.ingress_ifindex as i32);
+    // #16503: a validated V2 fabric stamp names the peer's logical ingress
+    // in `fabric_ingress_ifindex`; the raw `ingress_ifindex` is then the
+    // fabric link, which carries no customer FBF filter. Mirror the CoS
+    // re-walk's effective-ingress rule (#14663): consult the scope's filter
+    // so the receiver re-applies the sender's `then routing-instance` steer.
+    // Stage 9 populates this field only for a ValidScoped stamp, and the
+    // poll path clears it when the owner-RG gate withholds the zone, so an
+    // ambiguous stamp (which leaves it 0) never consults the scope filter.
+    // V1-only punts keep the fabric-link lookup — a documented limitation,
+    // as they carry no scoped ingress identity.
+    let ingress_ifindex = if meta.fabric_ingress_ifindex != 0 {
+        meta.fabric_ingress_ifindex as i32
+    } else {
+        resolve_ingress_logical_ifindex(
+            forwarding,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+        )
+        .unwrap_or(meta.ingress_ifindex as i32)
+    };
     let is_v6 = matches!(flow.dst_ip, IpAddr::V6(_));
     // #10312: native RI membership is the fallback route-table scope when no
     // PBR routing-instance term supplies an explicit override. The same helper
