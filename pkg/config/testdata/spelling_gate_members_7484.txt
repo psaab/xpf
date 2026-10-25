@@ -422,6 +422,7 @@ COMPARED	protocols bgp damping half-life
 COMPARED	protocols bgp damping max-suppress
 COMPARED	protocols bgp damping reuse
 COMPARED	protocols bgp damping suppress
+flag (read, but value-less)	protocols bgp disable
 COMPARED	protocols bgp export
 flag (read, but value-less)	protocols bgp graceful-restart
 COMPARED	protocols bgp group <*> authentication-key
@@ -429,6 +430,7 @@ unreachable (leaf changed nothing)	protocols bgp group <*> bfd-liveness-detectio
 unreachable (leaf changed nothing)	protocols bgp group <*> bfd-liveness-detection multiplier
 flag (read, but value-less)	protocols bgp group <*> default-originate
 COMPARED	protocols bgp group <*> description
+flag (read, but value-less)	protocols bgp group <*> disable
 COMPARED	protocols bgp group <*> export
 advisory (read, value ignored, warning says so)	protocols bgp group <*> family inet unicast prefix-limit maximum
 advisory (read, value ignored, warning says so)	protocols bgp group <*> family inet6 unicast prefix-limit maximum
@@ -443,6 +445,7 @@ COMPARED	protocols bgp group <*> neighbor <*> bfd-liveness-detection minimum-int
 COMPARED	protocols bgp group <*> neighbor <*> bfd-liveness-detection multiplier
 flag (read, but value-less)	protocols bgp group <*> neighbor <*> default-originate
 COMPARED	protocols bgp group <*> neighbor <*> description
+flag (read, but value-less)	protocols bgp group <*> neighbor <*> disable
 COMPARED	protocols bgp group <*> neighbor <*> export
 COMPARED	protocols bgp group <*> neighbor <*> family inet unicast prefix-limit maximum
 COMPARED	protocols bgp group <*> neighbor <*> family inet6 unicast prefix-limit maximum
@@ -467,11 +470,13 @@ flag (read, but value-less)	protocols bgp multipath multiple-as
 COMPARED	protocols bgp router-id
 COMPARED	protocols isis authentication-key
 COMPARED	protocols isis authentication-type
+flag (read, but value-less)	protocols isis disable
 COMPARED	protocols isis export
 COMPARED	protocols isis interface <*> authentication-key
 COMPARED	protocols isis interface <*> authentication-type
 COMPARED	protocols isis interface <*> bfd-liveness-detection minimum-interval
 COMPARED	protocols isis interface <*> bfd-liveness-detection multiplier
+flag (read, but value-less)	protocols isis interface <*> disable
 COMPARED	protocols isis interface <*> level
 COMPARED	protocols isis interface <*> metric
 flag (read, but value-less)	protocols isis interface <*> passive
@@ -494,6 +499,7 @@ COMPARED	protocols ospf area <*> interface <*> bfd-liveness-detection minimum-in
 COMPARED	protocols ospf area <*> interface <*> bfd-liveness-detection multiplier
 COMPARED	protocols ospf area <*> interface <*> cost
 COMPARED	protocols ospf area <*> interface <*> dead-interval
+flag (read, but value-less)	protocols ospf area <*> interface <*> disable
 COMPARED	protocols ospf area <*> interface <*> hello-interval
 COMPARED	protocols ospf area <*> interface <*> interface-type
 flag (read, but value-less)	protocols ospf area <*> interface <*> no-passive
@@ -508,6 +514,7 @@ unreachable (leaf changed nothing)	protocols ospf area <*> virtual-link <*> auth
 unreachable (leaf changed nothing)	protocols ospf area <*> virtual-link <*> ipsec-sa
 unreachable (leaf changed nothing)	protocols ospf area <*> virtual-link <*> keychain
 COMPARED	protocols ospf area <*> virtual-link <*> transit-area
+flag (read, but value-less)	protocols ospf disable
 COMPARED	protocols ospf export
 flag (read, but value-less)	protocols ospf passive
 COMPARED	protocols ospf reference-bandwidth
@@ -523,16 +530,19 @@ COMPARED	protocols ospf3 area <*> interface <*> bfd-liveness-detection minimum-i
 COMPARED	protocols ospf3 area <*> interface <*> bfd-liveness-detection multiplier
 COMPARED	protocols ospf3 area <*> interface <*> cost
 COMPARED	protocols ospf3 area <*> interface <*> dead-interval
+flag (read, but value-less)	protocols ospf3 area <*> interface <*> disable
 COMPARED	protocols ospf3 area <*> interface <*> hello-interval
 unreachable (leaf changed nothing)	protocols ospf3 area <*> interface <*> ipsec-sa
 unreachable (leaf changed nothing)	protocols ospf3 area <*> interface <*> keychain
 flag (read, but value-less)	protocols ospf3 area <*> interface <*> passive
 COMPARED	protocols ospf3 area <*> interface <*> priority
 COMPARED	protocols ospf3 area <*> interface <*> retransmit-interval
+flag (read, but value-less)	protocols ospf3 disable
 COMPARED	protocols ospf3 export
 COMPARED	protocols ospf3 router-id
 COMPARED	protocols rip authentication-key
 COMPARED	protocols rip authentication-type
+flag (read, but value-less)	protocols rip disable
 COMPARED	protocols rip group <*> export
 COMPARED	protocols rip group <*> neighbor
 COMPARED	protocols rip neighbor
@@ -566,6 +576,7 @@ COMPARED	routing-instances <*> protocols bgp damping half-life
 COMPARED	routing-instances <*> protocols bgp damping max-suppress
 COMPARED	routing-instances <*> protocols bgp damping reuse
 COMPARED	routing-instances <*> protocols bgp damping suppress
+flag (read, but value-less)	routing-instances <*> protocols bgp disable
 COMPARED	routing-instances <*> protocols bgp export
 flag (read, but value-less)	routing-instances <*> protocols bgp graceful-restart
 unreachable (leaf changed nothing)	routing-instances <*> protocols bgp group <*> authentication-key
@@ -573,6 +584,7 @@ unreachable (leaf changed nothing)	routing-instances <*> protocols bgp group <*>
 unreachable (leaf changed nothing)	routing-instances <*> protocols bgp group <*> bfd-liveness-detection multiplier
 unreachable (leaf changed nothing)	routing-instances <*> protocols bgp group <*> default-originate
 unreachable (leaf changed nothing)	routing-instances <*> protocols bgp group <*> description
+flag (read, but value-less)	routing-instances <*> protocols bgp group <*> disable
 unreachable (leaf changed nothing)	routing-instances <*> protocols bgp group <*> export
 advisory (read, value ignored, warning says so)	routing-instances <*> protocols bgp group <*> family inet unicast prefix-limit maximum
 advisory (read, value ignored, warning says so)	routing-instances <*> protocols bgp group <*> family inet6 unicast prefix-limit maximum
@@ -587,6 +599,7 @@ COMPARED	routing-instances <*> protocols bgp group <*> neighbor <*> bfd-liveness
 COMPARED	routing-instances <*> protocols bgp group <*> neighbor <*> bfd-liveness-detection multiplier
 flag (read, but value-less)	routing-instances <*> protocols bgp group <*> neighbor <*> default-originate
 COMPARED	routing-instances <*> protocols bgp group <*> neighbor <*> description
+flag (read, but value-less)	routing-instances <*> protocols bgp group <*> neighbor <*> disable
 COMPARED	routing-instances <*> protocols bgp group <*> neighbor <*> export
 COMPARED	routing-instances <*> protocols bgp group <*> neighbor <*> hold-time
 COMPARED	routing-instances <*> protocols bgp group <*> neighbor <*> import
@@ -609,11 +622,13 @@ flag (read, but value-less)	routing-instances <*> protocols bgp multipath multip
 COMPARED	routing-instances <*> protocols bgp router-id
 COMPARED	routing-instances <*> protocols isis authentication-key
 COMPARED	routing-instances <*> protocols isis authentication-type
+flag (read, but value-less)	routing-instances <*> protocols isis disable
 COMPARED	routing-instances <*> protocols isis export
 COMPARED	routing-instances <*> protocols isis interface <*> authentication-key
 COMPARED	routing-instances <*> protocols isis interface <*> authentication-type
 COMPARED	routing-instances <*> protocols isis interface <*> bfd-liveness-detection minimum-interval
 COMPARED	routing-instances <*> protocols isis interface <*> bfd-liveness-detection multiplier
+flag (read, but value-less)	routing-instances <*> protocols isis interface <*> disable
 COMPARED	routing-instances <*> protocols isis interface <*> level
 COMPARED	routing-instances <*> protocols isis interface <*> metric
 flag (read, but value-less)	routing-instances <*> protocols isis interface <*> passive
@@ -632,6 +647,7 @@ COMPARED	routing-instances <*> protocols ospf area <*> interface <*> bfd-livenes
 COMPARED	routing-instances <*> protocols ospf area <*> interface <*> bfd-liveness-detection multiplier
 COMPARED	routing-instances <*> protocols ospf area <*> interface <*> cost
 COMPARED	routing-instances <*> protocols ospf area <*> interface <*> dead-interval
+flag (read, but value-less)	routing-instances <*> protocols ospf area <*> interface <*> disable
 COMPARED	routing-instances <*> protocols ospf area <*> interface <*> hello-interval
 COMPARED	routing-instances <*> protocols ospf area <*> interface <*> interface-type
 flag (read, but value-less)	routing-instances <*> protocols ospf area <*> interface <*> no-passive
@@ -646,6 +662,7 @@ unreachable (leaf changed nothing)	routing-instances <*> protocols ospf area <*>
 unreachable (leaf changed nothing)	routing-instances <*> protocols ospf area <*> virtual-link <*> ipsec-sa
 unreachable (leaf changed nothing)	routing-instances <*> protocols ospf area <*> virtual-link <*> keychain
 COMPARED	routing-instances <*> protocols ospf area <*> virtual-link <*> transit-area
+flag (read, but value-less)	routing-instances <*> protocols ospf disable
 COMPARED	routing-instances <*> protocols ospf export
 flag (read, but value-less)	routing-instances <*> protocols ospf passive
 COMPARED	routing-instances <*> protocols ospf reference-bandwidth
@@ -661,16 +678,19 @@ COMPARED	routing-instances <*> protocols ospf3 area <*> interface <*> bfd-livene
 COMPARED	routing-instances <*> protocols ospf3 area <*> interface <*> bfd-liveness-detection multiplier
 COMPARED	routing-instances <*> protocols ospf3 area <*> interface <*> cost
 COMPARED	routing-instances <*> protocols ospf3 area <*> interface <*> dead-interval
+flag (read, but value-less)	routing-instances <*> protocols ospf3 area <*> interface <*> disable
 COMPARED	routing-instances <*> protocols ospf3 area <*> interface <*> hello-interval
 unreachable (leaf changed nothing)	routing-instances <*> protocols ospf3 area <*> interface <*> ipsec-sa
 unreachable (leaf changed nothing)	routing-instances <*> protocols ospf3 area <*> interface <*> keychain
 flag (read, but value-less)	routing-instances <*> protocols ospf3 area <*> interface <*> passive
 COMPARED	routing-instances <*> protocols ospf3 area <*> interface <*> priority
 COMPARED	routing-instances <*> protocols ospf3 area <*> interface <*> retransmit-interval
+flag (read, but value-less)	routing-instances <*> protocols ospf3 disable
 COMPARED	routing-instances <*> protocols ospf3 export
 COMPARED	routing-instances <*> protocols ospf3 router-id
 COMPARED	routing-instances <*> protocols rip authentication-key
 COMPARED	routing-instances <*> protocols rip authentication-type
+flag (read, but value-less)	routing-instances <*> protocols rip disable
 COMPARED	routing-instances <*> protocols rip group <*> export
 COMPARED	routing-instances <*> protocols rip group <*> neighbor
 COMPARED	routing-instances <*> protocols rip neighbor

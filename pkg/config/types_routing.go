@@ -550,6 +550,10 @@ type OSPFv3Config struct {
 	RouterID string
 	Areas    []*OSPFv3Area
 	Export   []string
+	// Disable (#16572): `protocols ospf3 disable` — the whole protocol
+	// is shut. The compiler still records areas/interfaces so the
+	// statement survives, but no consumer may activate OSPFv3.
+	Disable bool
 }
 
 // OSPFv3Area defines an OSPFv3 area.
@@ -562,8 +566,11 @@ type OSPFv3Area struct {
 
 // OSPFv3Interface defines an interface participating in OSPFv3.
 type OSPFv3Interface struct {
-	Name          string
-	Passive       bool
+	Name    string
+	Passive bool
+	// Disable (#16572): `... interface <if> disable` excludes this
+	// interface from OSPFv3; it must never be activated.
+	Disable       bool
 	Cost          int
 	HelloInterval int  // hello-interval in seconds, 0 = ospf6d default (10)
 	DeadInterval  int  // dead-interval in seconds, 0 = ospf6d default (40)
@@ -582,6 +589,8 @@ type RIPConfig struct {
 	Redistribute []string // "connected", "static", "ospf"
 	AuthKey      Secret   // authentication key/password; redacted on marshal (#2053)
 	AuthType     string   // "md5" or "simple"
+	// Disable (#16572): `protocols rip disable` shuts the protocol.
+	Disable bool
 }
 
 // MaxISISMetric is the FRR wide-style IS-IS interface metric ceiling. FRR
@@ -599,13 +608,18 @@ type ISISConfig struct {
 	AuthType        string   // "md5" or "simple" (plaintext)
 	WideMetricsOnly bool     // use wide (32-bit) metrics
 	Overload        bool     // set overload bit
+	// Disable (#16572): `protocols isis disable` shuts the protocol.
+	Disable bool
 }
 
 // ISISInterface defines an interface participating in IS-IS.
 type ISISInterface struct {
-	Name          string
-	Level         string // override per-interface
-	Passive       bool
+	Name    string
+	Level   string // override per-interface
+	Passive bool
+	// Disable (#16572): `... interface <if> disable` excludes this
+	// interface from IS-IS; it must never be activated.
+	Disable       bool
 	Metric        int    // 0 = default; negative marks a malformed parsed value
 	AuthKey       Secret // per-interface authentication key; redacted on marshal (#2053)
 	AuthType      string // "md5" or "simple"
@@ -770,6 +784,10 @@ type OSPFConfig struct {
 	PassiveDefault         bool // all interfaces passive by default
 	Areas                  []*OSPFArea
 	Export                 []string // export policy names (future)
+	// Disable (#16572): `protocols ospf disable` — the whole protocol
+	// is shut. Areas/interfaces are still recorded, but no consumer
+	// may activate OSPF.
+	Disable bool
 }
 
 // OSPFArea defines an OSPF area.
@@ -789,9 +807,13 @@ type OSPFVirtualLink struct {
 
 // OSPFInterface defines an interface participating in OSPF.
 type OSPFInterface struct {
-	Name          string
-	Passive       bool   // passive interface (no hello)
-	NoPassive     bool   // override passive-default (explicitly active)
+	Name      string
+	Passive   bool // passive interface (no hello)
+	NoPassive bool // override passive-default (explicitly active)
+	// Disable (#16572): `... interface <if> disable` excludes this
+	// interface from OSPF; it must never be activated (unlike passive,
+	// which still advertises the prefix and receives).
+	Disable       bool
 	Cost          int    // OSPF cost, 0 = default
 	HelloInterval int    // hello-interval in seconds, 0 = FRR default (10)
 	DeadInterval  int    // dead-interval (router-dead-interval) in seconds, 0 = FRR default (40)
@@ -833,6 +855,9 @@ type BGPConfig struct {
 	Neighbors            []*BGPNeighbor
 	Export               []string // "connected", "static", "ospf", etc.
 	Import               []string // inbound filter policy-statements (route-map in); #2490
+	// Disable (#16572): `protocols bgp disable` shuts the protocol;
+	// no `router bgp` stanza may be rendered.
+	Disable bool
 }
 
 // BGPNeighbor defines a BGP peer.
@@ -879,6 +904,10 @@ type BGPNeighbor struct {
 	// Presence, not validity: never replace an authored invalid peer-as with
 	// the internal-group default. The peer-as gate must still reject it.
 	peerASConfigured bool
+	// Disable (#16572): `... neighbor <ip> disable` (or an inherited
+	// group `disable`) shuts this peering; it must not be declared,
+	// activated, or given a BFD peer.
+	Disable bool
 }
 
 // TunnelMode is a tunnel encapsulation mode (#16141). It is a

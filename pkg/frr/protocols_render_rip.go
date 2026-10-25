@@ -19,6 +19,10 @@ import (
 // per-interface authentication blocks into b. Moved verbatim from
 // generateProtocolsCluster15158 (#16125).
 func (m *Manager) renderRIP16125(b *strings.Builder, rip *config.RIPConfig, vrfSuffix string, policyOptions *config.PolicyOptionsConfig, clusterMode bool, qnhMetrics *qnhMetricScope11447) {
+	// #16572: `protocols rip disable` renders nothing at all.
+	if rip != nil && rip.Disable {
+		return
+	}
 	if rip != nil {
 		// #14398: a non-absent `authentication-type` with NO
 		// `authentication-key` must never render as a silent no-auth RIP

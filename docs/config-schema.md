@@ -2013,6 +2013,26 @@ load / peer-sync path downgrades to a warning
 committed under an older binary still boots (#1960 no-brick); the
 `CosQueueIdOutOfRange` fail-close is the stale-but-safe backstop on that boot.
 
+### `protocols {ospf,ospf3,bgp,isis,rip} disable` — modelled shut (#16572)
+
+Junos `disable` under the routing protocols is modelled at both levels.
+The protocol roots (`ospf`, `ospf3`, `bgp`, `isis`, `rip`) accept
+`disable`, recorded as `Disable` on the typed config; the FRR renderer
+then emits no stanza at all for that protocol (no `router ospf`, no
+`router bgp`, …). At the interface/neighbor level,
+`ospf area <a> interface <if> disable`, the `ospf3` and `isis`
+equivalents, `bgp group <g> disable` (inherited by the group's
+neighbors) and `bgp group <g> neighbor <ip> disable` record `Disable`
+on the interface/neighbor, and the renderer emits no activation for it
+(no `ip ospf area`, no `ipv6 ospf6 area`, no `ip router isis`, no BGP
+neighbor declaration/BFD peer). A disabled fragment wins over an
+enabled fragment of the same name. Because the disabled scope is not
+enabled, the #11571 managed-routing host-inbound gate demands no
+`ospf`/`ospf3`/`rip` token for it, and a disabled BGP process/neighbor
+needs no `local-as`/`peer-as`. Before #16572 these statements were
+unmodelled: the interface form compiled to an *active* interface and
+the gate then asked the operator to admit the excluded protocol.
+
 ### `protocols lldp` TTL bounds (#4596)
 
 The `transmit-interval` and `hold-multiplier` leaves (`schema_routing.go`) now

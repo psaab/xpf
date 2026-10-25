@@ -22,6 +22,10 @@ import (
 // generateProtocolsCluster15158 (#16125); bfd is the shared BFD
 // accumulator owned by the caller.
 func (m *Manager) renderISIS16125(b *strings.Builder, isis *config.ISISConfig, vrfSuffix string, policyOptions *config.PolicyOptionsConfig, clusterMode bool, qnhMetrics *qnhMetricScope11447, bfd *bfdSection) {
+	// #16572: `protocols isis disable` renders nothing at all.
+	if isis != nil && isis.Disable {
+		return
+	}
 	if isis != nil {
 		// #14977 (D33-05): pre-validate IS-IS authentication BEFORE
 		// emitting the router stanza or any interface activation, the
@@ -165,7 +169,7 @@ func (m *Manager) renderISIS16125(b *strings.Builder, isis *config.ISISConfig, v
 		} // isisRender14977 (global stanza)
 		if isisRender14977 {
 			for _, iface := range isis.Interfaces {
-				if iface == nil {
+				if iface == nil || iface.Disable {
 					continue
 				}
 				if isisIfaceAuthBad14977[iface.Name] {

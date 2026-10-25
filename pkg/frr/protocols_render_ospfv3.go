@@ -20,6 +20,10 @@ import (
 // generateProtocolsCluster15158 (#16125); bfd is the shared BFD
 // accumulator owned by the caller.
 func (m *Manager) renderOSPFv316125(b *strings.Builder, ospfv3 *config.OSPFv3Config, vrfSuffix string, ecmpMaxPaths int, policyOptions *config.PolicyOptionsConfig, clusterMode bool, qnhMetrics *qnhMetricScope11447, bfd *bfdSection) {
+	// #16572: `protocols ospf3 disable` renders nothing at all.
+	if ospfv3 != nil && ospfv3.Disable {
+		return
+	}
 	if ospfv3 != nil {
 		fmt.Fprintf(b, "router ospf6%s\n", vrfSuffix)
 		if validRouterID(ospfv3.RouterID) {
@@ -70,6 +74,9 @@ func (m *Manager) renderOSPFv316125(b *strings.Builder, ospfv3 *config.OSPFv3Con
 		for _, area := range ospfv3.Areas {
 			areaKey := ospfAreaIdentity11400(area.ID)
 			for _, iface := range area.Interfaces {
+				if iface.Disable {
+					continue
+				}
 				state, seen := renderedAreaByInterface[iface.Name]
 				if seen && state.area.key != areaKey {
 					slog.Warn("frr: dropping an OSPFv3 interface assigned to multiple areas; keeping the first area (#11400)",

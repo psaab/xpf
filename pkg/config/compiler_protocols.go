@@ -233,6 +233,9 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 				applyOSPFReferenceBandwidth9408(proto.OSPF, child)
 			case "passive":
 				proto.OSPF.PassiveDefault = true
+			case "disable":
+				// #16572: whole-protocol shut.
+				proto.OSPF.Disable = true
 			case "export":
 				// Multi-value leaf (#2587): `export [ p1 p2 ]` collapses onto
 				// child.Keys[1:] (flat-set) or child.Children (hierarchical
@@ -289,6 +292,10 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 					switch prop.Name() {
 					case "passive":
 						iface.Passive = true
+					case "disable":
+						// #16572: interface-level shut — any
+						// fragment's disable wins.
+						iface.Disable = true
 					case "no-passive":
 						iface.NoPassive = true
 					case "interface-type":
@@ -544,6 +551,9 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 		bgpExpanded := &Node{Keys: bgpNode.Keys, Children: bgpChildren}
 		for _, child := range bgpChildren {
 			switch child.Name() {
+			case "disable":
+				// #16572: whole-protocol shut.
+				proto.BGP.Disable = true
 			case "local-as":
 				if len(child.Keys) >= 2 {
 					// #4713: reject out-of-range/negative AS instead of the
@@ -632,6 +642,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 			var groupPassive bool
 			var groupDesc string
 			var groupMultihop int
+			var groupDisable bool
 			var groupExport []string
 			var groupImport []string
 			var familyInet, familyInet6 bool
@@ -746,6 +757,9 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 						}
 					case "passive":
 						groupPassive = true
+					case "disable":
+						// #16572: group shut, inherited below.
+						groupDisable = true
 					case "description":
 						groupDesc = nodeVal(child)
 					case "multihop":
@@ -884,6 +898,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 									HoldTime:                groupHoldTime,
 									Passive:                 groupPassive,
 									Description:             groupDesc,
+									Disable:                 groupDisable,
 									MultihopTTL:             groupMultihop,
 									Export:                  groupExport,
 									Import:                  groupImport,
@@ -979,6 +994,8 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 				if len(child.Keys) >= 2 {
 					proto.OSPFv3.RouterID = child.Keys[1]
 				}
+			case "disable":
+				proto.OSPFv3.Disable = true
 			case "export":
 				// Multi-value leaf (#2587): accumulate ALL policies across
 				// both AST shapes via the firewallMatchValues SSOT.
@@ -1028,6 +1045,9 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 					switch prop.Name() {
 					case "passive":
 						iface.Passive = true
+					case "disable":
+						// #16572: interface-level shut.
+						iface.Disable = true
 					case "cost":
 						if v := nodeVal(prop); v != "" {
 							if n, err := strconv.Atoi(v); err == nil {
@@ -1130,6 +1150,9 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 		ripSchema := ripLeafSchema8939()
 		for _, child := range expandFlatRun(packedTopChildren(ripNode, ripSchema), ripSchema) {
 			switch child.Name() {
+			case "disable":
+				// #16572: whole-protocol shut.
+				proto.RIP.Disable = true
 			case "group":
 				// #15017: a packed tail ending in the group container
 				// (`rip authentication-key K ... group g1 neighbor I;`)
@@ -1211,6 +1234,9 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 		}
 		for _, child := range expandFlatRun(isisChildren, isisLeafSchema8939()) {
 			switch child.Name() {
+			case "disable":
+				// #16572: whole-protocol shut.
+				proto.ISIS.Disable = true
 			case "net":
 				if len(child.Keys) >= 2 {
 					proto.ISIS.NET = child.Keys[1]
@@ -1326,6 +1352,9 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 							}
 						case "passive":
 							iface.Passive = true
+						case "disable":
+							// #16572: interface-level shut.
+							iface.Disable = true
 						case "metric":
 							if len(prop.Keys) >= 2 {
 								if v, err := strconv.Atoi(prop.Keys[1]); err == nil {
@@ -1365,6 +1394,9 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 						switch k {
 						case "passive":
 							iface.Passive = true
+						case "disable":
+							// #16572: packed `interface <if> disable`.
+							iface.Disable = true
 						case "level":
 							// next key is the level value, handled above
 						}

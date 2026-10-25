@@ -712,7 +712,9 @@ func validateBGPNeighborAddressStrict(cfg *Config) error {
 	}
 
 	checkBGP := func(scope string, bgp *BGPConfig) error {
-		if bgp == nil {
+		// #16572: a disabled BGP process renders nothing, so its
+		// neighbors need no renderable address.
+		if bgp == nil || bgp.Disable {
 			return nil
 		}
 		neighbors := append([]*BGPNeighbor(nil), bgp.Neighbors...)
@@ -720,7 +722,7 @@ func validateBGPNeighborAddressStrict(cfg *Config) error {
 			return neighbors[i].Address < neighbors[j].Address
 		})
 		for _, n := range neighbors {
-			if n == nil {
+			if n == nil || n.Disable {
 				continue
 			}
 			if err := ValidateBGPNeighborAddress(n.Address); err != nil {
@@ -796,7 +798,7 @@ func validateBGPNeighborPeerASStrict(cfg *Config) error {
 			return neighbors[i].Address < neighbors[j].Address
 		})
 		for _, n := range neighbors {
-			if n == nil {
+			if n == nil || n.Disable {
 				continue
 			}
 			if n.PeerAS == 0 {
@@ -896,7 +898,9 @@ func validateBGPRouterASStrict(cfg *Config) error {
 	}
 
 	checkBGP := func(scope string, bgp *BGPConfig) error {
-		if bgp == nil || bgp.LocalAS != 0 {
+		// #16572: a disabled BGP process renders nothing, so it needs
+		// no router AS.
+		if bgp == nil || bgp.Disable || bgp.LocalAS != 0 {
 			return nil
 		}
 		return fmt.Errorf("%sprotocols bgp: missing router AS — set local-as or "+

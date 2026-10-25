@@ -222,6 +222,11 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 	if bgp != nil {
 		validNeighbors = make([]*config.BGPNeighbor, 0, len(bgp.Neighbors))
 		for _, n := range bgp.Neighbors {
+			// #16572: a disabled neighbor (own `disable` or inherited
+			// group disable, or whole-protocol disable) never renders.
+			if bgp.Disable || n.Disable {
+				continue
+			}
 			if n.PeerAS == 0 {
 				continue
 			}

@@ -87,6 +87,7 @@ func (u *OSPFInterfaceUnion12186) Merge(src *OSPFInterface) []string {
 		u.Name = src.Name
 	}
 	u.Passive = u.Passive || src.Passive
+	u.Disable = u.Disable || src.Disable
 	u.NoPassive = u.NoPassive || src.NoPassive
 	conflicts = mergeOSPFInt12186(&u.Cost, src.Cost, "cost", conflicts)
 	conflicts = mergeOSPFInt12186(&u.HelloInterval, src.HelloInterval, "hello-interval", conflicts)
@@ -170,6 +171,7 @@ func (u *OSPFv3InterfaceUnion12186) Merge(src *OSPFv3Interface) []string {
 		u.Name = src.Name
 	}
 	u.Passive = u.Passive || src.Passive
+	u.Disable = u.Disable || src.Disable
 	conflicts = mergeOSPFInt12186(&u.Cost, src.Cost, "cost", conflicts)
 	conflicts = mergeOSPFInt12186(&u.HelloInterval, src.HelloInterval, "hello-interval", conflicts)
 	conflicts = mergeOSPFInt12186(&u.DeadInterval, src.DeadInterval, "dead-interval", conflicts)
