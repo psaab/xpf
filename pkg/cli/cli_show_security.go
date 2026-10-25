@@ -353,25 +353,14 @@ func printPolicyMatchAddresses(cfg *config.Config, pol *config.Policy) {
 }
 
 // cliPolicyStats renders then-count + Session statistics via the shared
-// SSOT (#15649 V2-02), translating dataplane counter errors.
-func (c *CLI) cliPolicyStats(countIndent, statsIndent string, cfg *config.Config, pol *config.Policy, quarantined bool, ruleID uint32, statsDisabled *int, readErr *error) {
+// SSOT (#15649 V2-02), translating dataplane counter errors. The counter
+// reader is built ONCE by showPoliciesDetail (#16693) and passed in: building
+// it here per policy would take one full ReadAllPolicyCounters snapshot
+// (O(P+C)) per policy — the O(P*(P+C)) cliff #3965/#4344 removed from the
+// sibling surfaces. read may be nil (dataplane not loaded, or no policy will
+// be read); PolicyDetailStats tolerates a nil read.
+func (c *CLI) cliPolicyStats(countIndent, statsIndent string, cfg *config.Config, pol *config.Policy, quarantined bool, ruleID uint32, read func(uint32) (config.PolicyCounter, error), statsDisabled *int, readErr *error) {
 	statsEnabled := cfg != nil && cfg.Security.PolicyStatsEnabled
-	var read func(uint32) (config.PolicyCounter, error)
-	if c.dp != nil && c.dp.IsLoaded() {
-		rp := dpuserspace.NewPolicyCounterReader(c.dp, cfg, c.dp.ReadPolicyCounters)
-		if rp != nil {
-			read = func(id uint32) (config.PolicyCounter, error) {
-				cv, err := rp(id)
-				if err != nil {
-					if errors.Is(err, dpuserspace.ErrPolicyCounterUnpublished) {
-						return config.PolicyCounter{}, config.ErrPolicyCounterUnpublished
-					}
-					return config.PolicyCounter{}, err
-				}
-				return config.PolicyCounter{Packets: cv.Packets, Bytes: cv.Bytes}, nil
-			}
-		}
-	}
 	disabled, rerr := config.PolicyDetailStats(stdoutWriter{}, countIndent, statsIndent, pol, quarantined, statsEnabled, read, ruleID)
 	if disabled && statsDisabled != nil {
 		*statsDisabled++
@@ -379,6 +368,56 @@ func (c *CLI) cliPolicyStats(countIndent, statsIndent string, cfg *config.Config
 	if rerr != nil && readErr != nil && *readErr == nil {
 		*readErr = rerr
 	}
+}
+
+// cliPolicyCounterRead adapts a bulk per-policy reader (built once per
+// render) to the config.PolicyCounter shape PolicyDetailStats consumes,
+// translating the unpublished-counter sentinel. Nil in, nil out.
+func cliPolicyCounterRead(rp func(uint32) (dataplane.CounterValue, error)) func(uint32) (config.PolicyCounter, error) {
+	if rp == nil {
+		return nil
+	}
+	return func(id uint32) (config.PolicyCounter, error) {
+		cv, err := rp(id)
+		if err != nil {
+			if errors.Is(err, dpuserspace.ErrPolicyCounterUnpublished) {
+				return config.PolicyCounter{}, config.ErrPolicyCounterUnpublished
+			}
+			return config.PolicyCounter{}, err
+		}
+		return config.PolicyCounter{Packets: cv.Packets, Bytes: cv.Bytes}, nil
+	}
+}
+
+// anyPolicyNeedsCounterRead reports whether any policy the detail view will
+// render (zone-pair or global) will actually be read: policy-stats enabled
+// system-wide, or any non-nil policy carrying `count`. Quarantined policies
+// are included conservatively — PolicyDetailStats returns before reading
+// them, and the only cost of the over-approximation is one snapshot that a
+// filtered view might not consume. A nil cfg needs no read.
+func anyPolicyNeedsCounterRead(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	if cfg.Security.PolicyStatsEnabled {
+		return true
+	}
+	for _, zpp := range cfg.Security.Policies {
+		if zpp == nil {
+			continue
+		}
+		for _, pol := range zpp.Policies {
+			if pol != nil && pol.Count {
+				return true
+			}
+		}
+	}
+	for _, pol := range cfg.Security.GlobalPolicies {
+		if pol != nil && pol.Count {
+			return true
+		}
+	}
+	return false
 }
 
 type stdoutWriter struct{}
@@ -408,6 +447,19 @@ func (c *CLI) showPoliciesDetail(cfg *config.Config, fromZone, toZone string) er
 			parts[i] = qualifyZone(name)
 		}
 		return strings.Join(parts, " ")
+	}
+	// #16693: build the bulk counter reader ONCE for the whole detail view,
+	// and only when some policy will actually be read (policy-stats enabled
+	// or any policy carries `count`). Previously cliPolicyStats built it per
+	// policy — one full ReadAllPolicyCounters snapshot per policy even when
+	// stats were off and nothing was read. Accumulate the stats-disabled
+	// count and first read error across every policy so the trailing #8177
+	// note and #3408 warning below can fire, as the gRPC renderer does.
+	var statsDisabledDetail int
+	var readErr error
+	var read func(uint32) (config.PolicyCounter, error)
+	if c.dp != nil && c.dp.IsLoaded() && anyPolicyNeedsCounterRead(cfg) {
+		read = cliPolicyCounterRead(dpuserspace.NewPolicyCounterReader(c.dp, cfg, c.dp.ReadPolicyCounters))
 	}
 
 	// #3063: the displayed Index must equal the runtime/RT_FLOW policy ID,
@@ -473,13 +525,7 @@ func (c *CLI) showPoliciesDetail(cfg *config.Config, fromZone, toZone string) er
 				if modes := pol.Log.SessionLogModes(); len(modes) > 0 {
 					fmt.Printf("  Session log: %s\n", strings.Join(modes, ", "))
 				}
-				{
-					var sd int
-					var rerr error
-					c.cliPolicyStats("  ", "  ", cfg, pol, ruleQuarantined, dpuserspace.PolicyCounterID(policySetID, uint32(i)), &sd, &rerr)
-					_ = sd
-					_ = rerr
-				}
+				c.cliPolicyStats("  ", "  ", cfg, pol, ruleQuarantined, dpuserspace.PolicyCounterID(policySetID, uint32(i)), read, &statsDisabledDetail, &readErr)
 				seqNum++
 			}
 			fmt.Println()
@@ -544,18 +590,23 @@ func (c *CLI) showPoliciesDetail(cfg *config.Config, fromZone, toZone string) er
 			if modes := pol.Log.SessionLogModes(); len(modes) > 0 {
 				fmt.Printf("  Session log: %s\n", strings.Join(modes, ", "))
 			}
-			{
-				var sd int
-				var rerr error
-				c.cliPolicyStats("  ", "  ", cfg, pol, ruleQuarantined, dpuserspace.PolicyCounterID(policySetID, uint32(i)), &sd, &rerr)
-				_ = sd
-				_ = rerr
-			}
+			c.cliPolicyStats("  ", "  ", cfg, pol, ruleQuarantined, dpuserspace.PolicyCounterID(policySetID, uint32(i)), read, &statsDisabledDetail, &readErr)
 			seqNum++
 
 			_ = ruleID
 		}
 		fmt.Println()
+	}
+	if readErr != nil {
+		fmt.Printf("warning: policy counter read failed (session statistics may be incomplete): %v\n", readErr)
+	}
+	// #8177: byte-identical to the gRPC detail renderer
+	// (server_show_policies_text.go) and the sibling CLI tables.
+	if statsDisabledDetail > 0 {
+		fmt.Printf("note: %d policy count(s) read 0 because policy-stats is disabled "+
+			"system-wide, not because no traffic matched (enable with "+
+			"`set security policy-stats system-wide enable`, or add `count` to an "+
+			"individual policy)\n", statsDisabledDetail)
 	}
 	return nil
 }
