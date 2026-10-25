@@ -398,6 +398,15 @@ func runUniformGatesLogFeedRouting(tree *ConfigTree, cfg *Config, opts compileOp
 			return err
 		}
 	}
+	// #16868: reserved OR-namespace gate (same strict/lenient split).
+	if err := validatePolicyReservedOrNameStrict16868(cfg); err != nil {
+		if opts.lenientPolicyReservedOrName16868 {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("reserved OR namespace (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 
 	// #16871: composed-chain forgery of a reserved GENERATED route-map. The
 	// suffix gate above forbids NAMING a policy-statement into the reserved

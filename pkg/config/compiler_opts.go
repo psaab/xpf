@@ -3328,6 +3328,8 @@ type compileOpts struct {
 	// (validatePrefixListReservedRIPGateStrict) to a warning on
 	// tolerant paths; the pkg/frr apply guard fails closed.
 	lenientPrefixListReservedRIPGate16866 bool
+	// lenientPolicyReservedOrName16868 downgrades the #16868 OR-namespace gate.
+	lenientPolicyReservedOrName16868 bool
 	// lenientVRRPVirtualAddress (#3013) downgrades the VRRP virtual-address
 	// subnet-containment gate (validateVRRPVirtualAddressSubnet) from a hard
 	// compile error to a cfg.Warnings entry. A VRRP virtual-address that does
@@ -4195,6 +4197,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyReservedRedistName:          true,
 		lenientPolicyReservedChainName:           true,
 		lenientPrefixListReservedRIPGate16866:    true,
+		lenientPolicyReservedOrName16868:         true,
 		lenientVRRPVirtualAddress:                true,
 		lenientVRRPVIPCount:                      true,
 		lenientVRRPVIPEmpty:                      true,

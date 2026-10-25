@@ -347,7 +347,14 @@ func redistComposedChains15156(fc *FullConfig) map[string]redistComposedReq15156
 				}
 				continue
 			}
-			if _, ok := out[name]; !ok {
+			if prev, ok := out[name]; ok {
+				if redistReqIdentity16868(prev) != redistReqIdentity16868(redistComposedReq15156{chain: policies, proto: e.proto, ctx: ctx}) {
+					// Distinct programs, one name: never silently
+					// keep the first (#16868 gate4). Record a
+					// poisoned request the collision guard refuses.
+					out[name] = redistComposedReq15156{poisoned: name}
+				}
+			} else {
 				out[name] = redistComposedReq15156{chain: append([]string(nil), policies...), proto: e.proto, ctx: ctx}
 			}
 		}
@@ -370,7 +377,12 @@ func redistComposedChains15156(fc *FullConfig) map[string]redistComposedReq15156
 					if len(ps) < 2 {
 						continue
 					}
-					if _, ok := out[e.routeMap]; !ok {
+					cand := redistComposedReq15156{chain: ps, proto: e.proto}
+					if prev, ok := out[e.routeMap]; ok {
+						if redistReqIdentity16868(prev) != redistReqIdentity16868(cand) {
+							out[e.routeMap] = redistComposedReq15156{poisoned: e.routeMap}
+						}
+					} else {
 						out[e.routeMap] = redistComposedReq15156{chain: append([]string(nil), ps...), proto: e.proto}
 					}
 				}
@@ -393,7 +405,14 @@ func redistComposedChains15156(fc *FullConfig) map[string]redistComposedReq15156
 					continue
 				}
 				if redistOrRouteMapName16868(bgp, po, "bgp", node, e.proto) == e.routeMap {
-					out[e.routeMap] = redistComposedReq15156{chains: chains, proto: e.proto}
+					cand := redistComposedReq15156{chains: chains, proto: e.proto}
+					if prev, ok := out[e.routeMap]; ok {
+						if redistReqIdentity16868(prev) != redistReqIdentity16868(cand) {
+							out[e.routeMap] = redistComposedReq15156{poisoned: e.routeMap}
+						}
+					} else {
+						out[e.routeMap] = cand
+					}
 				}
 			}
 		}
@@ -430,7 +449,11 @@ func containsString15156(s []string, v string) bool {
 }
 
 type redistComposedReq15156 struct {
-	chain []string
+	// poisoned, when non-empty, marks two structurally distinct
+	// requests that derived this same map name; the collision guard
+	// refuses the apply rather than rendering either.
+	poisoned string
+	chain    []string
 	// chains, when non-empty, is a cross-chain OR composition: each
 	// inner chain renders first-terminal-wins internally, a chain's
 	// reject falls through to the next chain, and only a chain's
@@ -438,6 +461,16 @@ type redistComposedReq15156 struct {
 	chains [][]string
 	proto  string
 	ctx    redistVariantContext16864
+}
+
+// redistReqIdentity16868 is the complete structural identity of a
+// composed request: operation (ordered vs OR), member boundaries,
+// chain boundaries, source, and variant context.
+func redistReqIdentity16868(r redistComposedReq15156) string {
+	if len(r.chains) > 0 {
+		return "or\x00" + redistOrStructuralName16868(r.chains) + "\x00" + r.proto + "\x00" + r.ctx.variant
+	}
+	return "ord\x00" + strings.Join(r.chain, "\x00") + "\x00" + r.proto + "\x00" + r.ctx.variant
 }
 
 // renderRedistComposedMaps15156 emits the composed per-source route-map
@@ -846,9 +879,20 @@ func redistChainMapCollision15156(fc *FullConfig) error {
 	if len(reqs) == 0 {
 		return nil
 	}
+	for name, req := range reqs {
+		if req.poisoned != "" {
+			return fmt.Errorf("redistribute map %q is claimed by two structurally distinct policy programs; refusing to render either (#16868)", name)
+		}
+	}
 	operator := make(map[string]string)
 	for name := range po.PolicyStatements {
 		operator[frrName(name)] = name
+		// #16868 gate4: any operator policy intruding on the OR
+		// namespace can spell a generated OR name via an ordered
+		// chain; refuse the apply on the lenient path too.
+		if strings.HasPrefix(name, config.ReservedOrPrefix16868) || strings.Contains(name, config.ReservedOrMarker16868) {
+			return fmt.Errorf("policy-statement %q intrudes on the reserved OR namespace (%q/%q) for generated cross-chain route-maps — refusing to render (#16868)", name, config.ReservedOrPrefix16868, config.ReservedOrMarker16868)
+		}
 	}
 	// Generated names that must stay distinct.
 	generated := make(map[string]string)

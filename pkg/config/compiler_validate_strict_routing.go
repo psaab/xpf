@@ -1945,6 +1945,49 @@ func validatePolicyReservedRedistNameStrict(cfg *Config) error {
 // config.ReservedChainSuffix) so the two never drift.
 const ReservedChainSuffix = "-xpf-chain"
 
+// ReservedOrPrefix16868 is the prefix xpf reserves for generated
+// cross-chain OR redistribute route-maps (#16868): readable OR
+// names start with a length-prefixed structural encoding and hash
+// names start with this literal prefix. An operator policy named
+// to spell a generated OR name (e.g. an ordered chain
+// [xpf-or-<digest>-xpf or] reproducing the hash form) would merge
+// with it in FRR's global namespace, so the prefix namespace is
+// reserved exactly like the suffixes above. Policy names carrying
+// the structural separators of the readable form (leading digit,
+// ":" ";" ",") cannot be admitted either; the validator below
+// covers the spellable shapes (prefix + marker infix).
+const ReservedOrPrefix16868 = "xpf-or-"
+
+// ReservedOrMarker16868 is the infix every OR name carries.
+const ReservedOrMarker16868 = "-xpf-or"
+
+// validatePolicyReservedOrNameStrict16868 hard-rejects operator
+// policy-statements that can spell a generated OR route-map name:
+// names starting with ReservedOrPrefix16868, or containing the
+// ReservedOrMarker16868 infix (an ordered chain [A or] can join
+// into "<A>-xpf-or..."). Mirrors validatePolicyReservedChainNameStrict.
+func validatePolicyReservedOrNameStrict16868(cfg *Config) error {
+	if cfg == nil || cfg.PolicyOptions.PolicyStatements == nil {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.PolicyOptions.PolicyStatements))
+	for name := range cfg.PolicyOptions.PolicyStatements {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if strings.HasPrefix(name, ReservedOrPrefix16868) || strings.Contains(name, ReservedOrMarker16868) {
+			return fmt.Errorf(
+				"policy-statement %q intrudes on the reserved %q/%q namespace; xpf owns it "+
+					"for generated cross-chain OR redistribute route-maps (#16868), and an "+
+					"operator name there can spell a generated map in FRR's global route-map "+
+					"object — rename the policy-statement out of that namespace",
+				name, ReservedOrPrefix16868, ReservedOrMarker16868)
+		}
+	}
+	return nil
+}
+
 // validatePolicyReservedChainNameStrict hard-rejects an operator
 // policy-statement whose name ends in the reserved ReservedChainSuffix. That
 // suffix is owned by the FRR renderer's generated composed BGP policy-chain

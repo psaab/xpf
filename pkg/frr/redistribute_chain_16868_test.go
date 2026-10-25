@@ -765,8 +765,10 @@ func TestBGPOrSetSemantics16868(t *testing.T) {
 	// the spill honestly — B accepts. Pin it as documented spill,
 	// not as correctness: if a future encoding isolates chains,
 	// this expectation flips to deny and the log must be updated.
+	// Parent adjudication (gate4): the spill is ACCEPTED as a
+	// documented residual, not a defect to re-block on.
 	if v := evalRoute16868(t, seqs, "192.168.50.0/24", false); v != "permit" {
-		t.Errorf("documented spill: NEEDTAG accepts after TAGREJ set (see residual), got %q", v)
+		t.Errorf("adjudicated spill (parent, gate4): NEEDTAG accepts after TAGREJ set — accepted residual, confined to origination; per-peer route-map out re-filters, got %q", v)
 	}
 }
 
@@ -1012,7 +1014,45 @@ func TestBGPOrHyphenAlias16868(t *testing.T) {
 			t.Errorf("map %s must be defined for its grouping:\n%s", n, got)
 		}
 	}
-	if err := redistChainMapCollision15156(fc); err != nil {
-		t.Errorf("distinct groupings must not trip the collision guard: %v", err)
+	// The two ORDERED chains [A-B C] and [A B-C] legitimately
+	// alias as A-B-C-xpf-chain (pre-existing #5277 hyphen
+	// ambiguity, refused by bgpComposedChainCollision on the
+	// ApplyFull path); the redistribute guard now also refuses
+	// the shared ordered name rather than keeping the first.
+	if err := redistChainMapCollision15156(fc); err == nil {
+		t.Errorf("aliased ordered name must be refused, not first-wins kept")
+	}
+}
+
+// TestBGPOrForgedOrderedNameRefused16868 (gate4 B1): an ordered
+// chain [xpf-or-<digest>-xpf, or] would spell the OR hash name.
+// Post-gate4 the operator policies are refused at the render-side
+// collision guard (their names intrude on the reserved OR
+// namespace), and two structurally distinct requests sharing a
+// name are refused instead of first-wins discarded.
+func TestBGPOrForgedOrderedNameRefused16868(t *testing.T) {
+	la := strings.Repeat("A", 50)
+	lb := strings.Repeat("B", 50)
+	po := &config.PolicyOptionsConfig{PolicyStatements: map[string]*config.PolicyStatement{}}
+	for _, n := range []string{la, lb, "xpf-or-2aff27e47a5d420d-xpf", "or"} {
+		po.PolicyStatements[n] = &config.PolicyStatement{Name: n, Terms: []*config.PolicyTerm{{Name: "t", FromProtocols: []string{"static"}, Action: "accept"}}}
+	}
+	bgp := &config.BGPConfig{LocalAS: 65001, RouterID: "1.1.1.1", Neighbors: []*config.BGPNeighbor{
+		{Address: "192.0.2.2", PeerAS: 65002, FamilyInet: true, Export: []string{la}},
+		{Address: "192.0.2.3", PeerAS: 65003, FamilyInet: true, Export: []string{lb}},
+	}}
+	orName := redistOrRouteMapName16868(bgp, po, "bgp", "bgp", "static")
+	if orName != "xpf-or-2aff27e47a5d420d-xpf-or-xpf-chain-static-xpf-redist" {
+		t.Fatalf("witness OR name changed: %q", orName)
+	}
+	fc := &FullConfig{
+		PolicyOptions: po,
+		BGP:           bgp,
+		Instances: []InstanceConfig{{VRFName: "blue", BGP: &config.BGPConfig{LocalAS: 65001, RouterID: "1.1.1.1", Neighbors: []*config.BGPNeighbor{
+			{Address: "192.0.2.4", PeerAS: 65002, FamilyInet: true, Export: []string{"xpf-or-2aff27e47a5d420d-xpf", "or"}},
+		}}}},
+	}
+	if err := redistChainMapCollision15156(fc); err == nil {
+		t.Fatalf("forged ordered chain spelling OR name %q must be refused", orName)
 	}
 }
