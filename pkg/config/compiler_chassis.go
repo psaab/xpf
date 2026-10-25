@@ -1043,12 +1043,19 @@ func compileRGNodePriority(rg *RedundancyGroup, child *Node) {
 		}
 		nodeID = n
 	}
-	// Look for "priority" in inline keys or children
+	// #16672: only the FIRST inline `priority` belongs to this node.
+	// A missing `;` fuses a second `node <n> priority <p>` onto this
+	// node's Keys; scanning every `priority` assigned the second
+	// node's priority to this node, last-wins. The strict gate
+	// (validateRGNodePriorityShapeAST) rejects the fused shape at
+	// commit; on the tolerant path keep this node's own (first)
+	// priority and ignore the fused tail.
 	for i := 2; i < len(child.Keys)-1; i++ {
 		if child.Keys[i] == "priority" {
 			if n, err := strconv.Atoi(child.Keys[i+1]); err == nil {
 				rg.NodePriorities[nodeID] = n
 			}
+			break
 		}
 	}
 	if priNode := child.FindChild("priority"); priNode != nil {
