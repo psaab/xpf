@@ -1084,6 +1084,16 @@ pub(crate) struct ZoneSnapshot {
     /// treated as tcp-rst off (pre-#3071 behavior).
     #[serde(rename = "tcp_rst", default)]
     pub tcp_rst: bool,
+    /// #16831: Junos functional zone (`security zones functional-zone
+    /// management`): host-only, no transit. `parse_policy_state_with_counters`
+    /// excludes its id from the concrete zone universe (global/default and
+    /// wildcard tiers never match its pairs) and denies any transit
+    /// evaluation naming it on either side; host-inbound admission still
+    /// applies. Additive via serde default: a snapshot from an old Go
+    /// binary lacks the field, in which case the zone is treated as an
+    /// ordinary transit zone (pre-#16831 behavior).
+    #[serde(rename = "functional", default)]
+    pub functional: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]

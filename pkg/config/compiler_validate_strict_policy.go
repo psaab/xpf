@@ -594,6 +594,24 @@ func validatePolicyZoneReferencesStrict(cfg *Config) error {
 		_, ok := cfg.Security.Zones[zone]
 		return ok
 	}
+	// #16831: a functional zone (`security zones functional-zone
+	// management`) is host-only — Junos: "Traffic entering management
+	// zones does not match policies; therefore, traffic cannot transit
+	// out of any other interface if it was received in the management
+	// interface." A zone-pair policy naming it on either side can never
+	// match transit (the dataplane drops functional ingress/egress
+	// before policy), so reject it at strict commit instead of
+	// committing a rule the operator believes forwards management
+	// traffic. The lenient path downgrades via lenientPolicyZoneRefs
+	// (this gate's caller) and the Rust preflight then excludes the
+	// zone from global/default matching and drops its transit, so a
+	// tolerated legacy config fails closed rather than forwarding.
+	// Host-inbound (`host-inbound-traffic` / `to-zone junos-host`) is
+	// unaffected — that is the management zone's legitimate traffic.
+	isFunctional := func(zone string) bool {
+		z := cfg.Security.Zones[zone]
+		return z != nil && z.Functional
+	}
 	for _, zpp := range cfg.Security.Policies {
 		if zpp == nil {
 			continue
@@ -633,6 +651,15 @@ func validatePolicyZoneReferencesStrict(cfg *Config) error {
 			return fmt.Errorf(
 				"security policy from-zone %q to-zone %q names %q as its %s: that is the reserved global-policy context, not a security zone, and a zone-pair stanza cannot reference it — write the policy under `security policies global` instead (#3055, #9570)",
 				zpp.FromZone, zpp.ToZone, JunosGlobalZoneName, side)
+		}
+		if isFunctional(zpp.FromZone) || isFunctional(zpp.ToZone) {
+			side := zpp.ToZone
+			if isFunctional(zpp.FromZone) {
+				side = zpp.FromZone
+			}
+			return fmt.Errorf(
+				"security policy from-zone %q to-zone %q names functional zone %q: a functional-zone (management) interface is host-only and its traffic does not match policies, so this rule can never forward transit — remove the policy or move the interface to a security-zone (#16831)",
+				zpp.FromZone, zpp.ToZone, side)
 		}
 		if !defined(zpp.FromZone) {
 			if len(zpp.Policies) == 0 {
@@ -714,6 +741,25 @@ func validatePolicyZoneReferencesStrict(cfg *Config) error {
 			return fmt.Errorf(
 				"security policies global policy %q match to-zone list %v mixes `junos-host` with other zones; a host-inbound global must scope `to-zone junos-host` alone (#4626/#3639)",
 				pol.Name, pol.Match.ToZones)
+		}
+		// #16831: a global policy scoped to the functional zone can never
+		// match transit either (functional traffic does not match
+		// policies); reject the scope at strict commit. An UNSCOPED
+		// global stays legal — the dataplane excludes functional zones
+		// from its zone-pair scope rather than rejecting the rule.
+		for _, z := range pol.Match.FromZones {
+			if isFunctional(z) {
+				return fmt.Errorf(
+					"security policies global policy %q match from-zone %q names a functional zone: functional-zone (management) traffic does not match policies — remove the match context (#16831)",
+					pol.Name, z)
+			}
+		}
+		for _, z := range pol.Match.ToZones {
+			if isFunctional(z) {
+				return fmt.Errorf(
+					"security policies global policy %q match to-zone %q names a functional zone: functional-zone (management) traffic does not match policies — remove the match context (#16831)",
+					pol.Name, z)
+			}
 		}
 		for _, z := range pol.Match.FromZones {
 			if z == "junos-host" {

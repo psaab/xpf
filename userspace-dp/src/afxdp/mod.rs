@@ -16,7 +16,7 @@ use crate::nat64::{Nat64ReverseInfo, Nat64State};
 use crate::nptv6::Nptv6State;
 use crate::policy::{
     AppCatalog, PolicyAction, PolicyCounterStore, PolicyState, evaluate_policy,
-    parse_policy_state_with_counters,
+    parse_policy_state_with_counters, parse_policy_state_with_counters_and_functional,
 };
 use crate::prefix::{PrefixV4, PrefixV6};
 use crate::screen::{

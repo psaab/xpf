@@ -697,11 +697,16 @@ func compileZones(node *Node, sec *SecurityConfig) error {
 	// compiled first; a literal `security-zone management` then merges
 	// into the same ZoneConfig find-or-create (last-wins scalars, unioned
 	// membership/host-inbound, #4818), never a second zone object.
+	//
+	// #16831: the functional arm also stamps ZoneConfig.Functional. The
+	// literal security-zone arm never clears it: Junos models ONE
+	// management zone, so a config carrying both spellings keeps the
+	// functional (host-only) semantics for the merged zone.
 	for _, mgmt := range managementFunctionalZoneInstances15668(node) {
-		compileZoneBody15668(mgmt, "management", functionalZoneManagementSchema15668(), sec)
+		compileZoneBody15668(mgmt, "management", functionalZoneManagementSchema15668(), sec, true)
 	}
 	for _, inst := range bracketedGroupInstances8794(node.FindChildren("security-zone")) {
-		compileZoneBody15668(inst.node, inst.name, securityZoneSchema9792(), sec)
+		compileZoneBody15668(inst.node, inst.name, securityZoneSchema9792(), sec, false)
 	}
 	// Keep authored bindings intact through P6b: strict membership checks
 	// need them to preserve first-error priority, and tolerant conflict
@@ -713,7 +718,10 @@ func compileZones(node *Node, sec *SecurityConfig) error {
 
 // compileZoneBody15668 compiles one zone body (a security-zone instance
 // or the functional-zone management stanza, #15668) into
-// sec.Zones[name], find-or-create.
+// sec.Zones[name], find-or-create. functional (#16831) is true only for
+// the functional-zone arm and stamps ZoneConfig.Functional; the
+// security-zone arm passes false and never clears a stamp the
+// functional arm already made on the merged "management" zone.
 //
 // #4818: find-or-create by name rather than always allocating a fresh
 // ZoneConfig. A hand-authored `load override` config can carry two
@@ -737,11 +745,14 @@ func compileZones(node *Node, sec *SecurityConfig) error {
 // with no natural union; they are last-wins across sibling instances
 // (matches their existing last-wins behaviour across repeated properties
 // WITHIN one instance).
-func compileZoneBody15668(instNode *Node, instName string, schema *schemaNode, sec *SecurityConfig) {
+func compileZoneBody15668(instNode *Node, instName string, schema *schemaNode, sec *SecurityConfig, functional bool) {
 	zone := sec.Zones[instName]
 	if zone == nil {
 		zone = &ZoneConfig{Name: instName}
 		sec.Zones[instName] = zone
+	}
+	if functional {
+		zone.Functional = true
 	}
 
 	// #9792: a packed one-line run reaches this reader on the lenient path
