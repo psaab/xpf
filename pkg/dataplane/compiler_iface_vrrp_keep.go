@@ -1,6 +1,9 @@
 package dataplane
 
-import "github.com/psaab/xpf/pkg/config"
+import (
+	"github.com/psaab/xpf/pkg/config"
+	"github.com/vishvananda/netlink"
+)
 
 // unitCarriesStandaloneVRRP reports whether unit carries a standalone
 // (generic, non-RETH) vrrp-group with at least one virtual address (#15061).
@@ -29,6 +32,39 @@ func unitCarriesStandaloneVRRP(unit *config.InterfaceUnit) bool {
 		}
 	}
 	return false
+}
+
+// unitStandaloneVRRPVIPs returns the canonicalised virtual addresses of
+// unit's standalone vrrp-groups (#16833), in authored order, deduplicated.
+// Canonicalisation via netlink.ParseAddr puts the keep set in the same key
+// space planAddressReconcile uses for kernel addresses, so a VIP authored
+// as 10.0.1.1/24 matches the kernel's 10.0.1.1/24. Unparseable entries are
+// dropped: pkg/vrrp cannot install them either, so there is no foreign
+// address to keep. The caller filters disabled units.
+func unitStandaloneVRRPVIPs(unit *config.InterfaceUnit) []string {
+	if unit == nil {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, vg := range unit.VRRPGroups {
+		if vg == nil {
+			continue
+		}
+		for _, vip := range vg.VirtualAddresses {
+			addr, err := netlink.ParseAddr(vip)
+			if err != nil || addr == nil || addr.IPNet == nil {
+				continue
+			}
+			key := addr.IPNet.String()
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, key)
+		}
+	}
+	return out
 }
 
 // interfaceCarriesStandaloneVRRP reports whether any unit of ifCfg carries

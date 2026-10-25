@@ -40,7 +40,7 @@ func addrKeys15944(addrs []*netlink.Addr) map[string]bool {
 func TestPlanAddressReconcileFreshPrimaryPromotes15944(t *testing.T) {
 	// Existing peer 10.0.0.1/24 (flags=0), desired adds primary 10.0.0.2/24.
 	existing := []netlink.Addr{mkAddr15944(t, "10.0.0.1/24", 0)}
-	del, add, _ := planAddressReconcile(existing, []string{"10.0.0.1/24", "10.0.0.2/24"}, "ge-0-0-0", "10.0.0.2/24", "")
+	del, add, _ := planAddressReconcile(existing, []string{"10.0.0.1/24", "10.0.0.2/24"}, nil, "ge-0-0-0", "10.0.0.2/24", "")
 	delKeys := addrKeys15944(del)
 	addKeys := addrKeys15944(add)
 	if !delKeys["10.0.0.1/24"] {
@@ -72,7 +72,7 @@ func TestPlanAddressReconcileSecondaryPrimaryStillPromotes15944(t *testing.T) {
 		mkAddr15944(t, "10.0.0.1/24", 0),
 		mkAddr15944(t, "10.0.0.2/24", unix.IFA_F_SECONDARY),
 	}
-	del, add, _ := planAddressReconcile(existing, []string{"10.0.0.1/24", "10.0.0.2/24"}, "ge-0-0-0", "10.0.0.2/24", "")
+	del, add, _ := planAddressReconcile(existing, []string{"10.0.0.1/24", "10.0.0.2/24"}, nil, "ge-0-0-0", "10.0.0.2/24", "")
 	delKeys := addrKeys15944(del)
 	addKeys := addrKeys15944(add)
 	if !delKeys["10.0.0.2/24"] || !addKeys["10.0.0.2/24"] {
@@ -86,7 +86,7 @@ func TestPlanAddressReconcileConvergedPrimaryNoChurn15944(t *testing.T) {
 		mkAddr15944(t, "10.0.0.2/24", 0),
 		mkAddr15944(t, "10.0.0.1/24", unix.IFA_F_SECONDARY),
 	}
-	del, add, _ := planAddressReconcile(existing, []string{"10.0.0.1/24", "10.0.0.2/24"}, "ge-0-0-0", "10.0.0.2/24", "")
+	del, add, _ := planAddressReconcile(existing, []string{"10.0.0.1/24", "10.0.0.2/24"}, nil, "ge-0-0-0", "10.0.0.2/24", "")
 	if len(del) != 0 || len(add) != 0 {
 		t.Fatalf("converged primary must plan no change, got del=%v add=%v", addrKeys15944(del), addrKeys15944(add))
 	}

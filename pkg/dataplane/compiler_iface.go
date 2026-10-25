@@ -456,7 +456,7 @@ func orderPrimariesFirst(desired []string, primaryV4, primaryV6 string) []string
 //
 // A FAILED AddrDel/AddrAdd does not set it: the address list is unchanged in
 // that direction, and those failures already warn on their own line.
-func reconcileInterfaceAddresses(ifaceName string, desired []string, primaries ...string) bool {
+func reconcileInterfaceAddresses(ifaceName string, desired []string, keep []string, primaries ...string) bool {
 	link, err := addrLinkByNameSeam(ifaceName)
 	if err != nil {
 		slog.Warn("cannot find interface for address reconciliation",
@@ -481,7 +481,7 @@ func reconcileInterfaceAddresses(ifaceName string, desired []string, primaries .
 	// is a redesign — and it is what makes the converged case testable without
 	// root: an empty plan is the discriminator that keeps the host-mutation
 	// flag meaningful.
-	del, add, dadfailedCount := planAddressReconcile(existing, desired, ifaceName, primaries...)
+	del, add, dadfailedCount := planAddressReconcile(existing, desired, keep, ifaceName, primaries...)
 	if dadfailedCount > 0 {
 		slog.Warn("repairing configured IPv6 addresses after DAD failure",
 			"name", ifaceName, "dadfailed_count", dadfailedCount)
@@ -555,7 +555,11 @@ func reconcileInterfaceAddresses(ifaceName string, desired []string, primaries .
 // order) so the fresh primary lands first and the kernel marks it
 // primary. Peers are only cycled when the primary itself is missing:
 // a present non-secondary primary plans no churn.
-func planAddressReconcile(existing []netlink.Addr, desired []string, ifaceName string, primaries ...string) (del []*netlink.Addr, add []*netlink.Addr, dadfailedCount int) {
+// #16833: keep lists foreign addresses (standalone vrrp-group VIPs owned
+// by pkg/vrrp) present on the interface that must survive the reconcile:
+// they are excluded from del and never added (a BACKUP must not gain
+// them from this path; pkg/vrrp withdraws them when the group goes).
+func planAddressReconcile(existing []netlink.Addr, desired []string, keep []string, ifaceName string, primaries ...string) (del []*netlink.Addr, add []*netlink.Addr, dadfailedCount int) {
 	var primaryV4, primaryV6 string
 	if len(primaries) > 0 {
 		primaryV4 = primaries[0]
@@ -578,6 +582,17 @@ func planAddressReconcile(existing []netlink.Addr, desired []string, ifaceName s
 			order = append(order, key)
 		}
 		want[key] = addr
+	}
+	// #16833: foreign addresses owned by another component (standalone
+	// vrrp-group VIPs installed by pkg/vrrp) are never deleted and never
+	// added by this planner. Canonicalised to the same key space.
+	keepSet := make(map[string]bool, len(keep))
+	for _, k := range keep {
+		if addr, err := netlink.ParseAddr(k); err == nil && addr != nil && addr.IPNet != nil {
+			keepSet[addr.IPNet.String()] = true
+		} else {
+			keepSet[k] = true
+		}
 	}
 	primaryKeys := map[string]bool{}
 	promoteSubnets := map[string]bool{}
@@ -648,6 +663,9 @@ func planAddressReconcile(existing []netlink.Addr, desired []string, ifaceName s
 			continue
 		}
 		key := addr.IPNet.String()
+		if keepSet[key] {
+			continue
+		}
 		if desiredAddr, ok := want[key]; ok {
 			if addr.IP.To4() == nil && addr.Flags&unix.IFA_F_DADFAILED != 0 {
 				del = append(del, addr)
@@ -1272,6 +1290,7 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 		// manages DHCP addresses, VRRP manages RETH VIP addresses.
 		subName := fmt.Sprintf("%s.%d", physName, vlanID)
 		var addrs []string
+		var keepAddrs []string
 		var subPrimaryV4, subPrimaryV6 string
 		isDHCPSub := false
 		isReth := false
@@ -1282,6 +1301,9 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 					addrs = unit.Addresses
 					subPrimaryV4 = unit.PrimaryAddressForFamily(false)
 					subPrimaryV6 = unit.PrimaryAddressForFamily(true)
+					// #16833: standalone vrrp-group VIPs on this unit are
+					// foreign (pkg/vrrp-owned); keep, never add/delete.
+					keepAddrs = unitStandaloneVRRPVIPs(unit)
 				}
 				isDHCPSub = unit.DHCP || unitHasDHCPv6(unit)
 			}
@@ -1290,7 +1312,7 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 			}
 		}
 		if !isDHCPSub && !isReth {
-			if reconcileInterfaceAddresses(subName, addrs, subPrimaryV4, subPrimaryV6) {
+			if reconcileInterfaceAddresses(subName, addrs, keepAddrs, subPrimaryV4, subPrimaryV6) {
 				result.markHostMutated("reconciled VLAN sub-interface addresses")
 			}
 		}
@@ -1609,7 +1631,7 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 	if vlanID == 0 && !st.physReconciled[physName] {
 		st.physReconciled[physName] = true
 		if pd := st.physDesired[physName]; pd != nil && !pd.skipAddrs {
-			if reconcileInterfaceAddresses(physName, pd.addrs, pd.primaryV4, pd.primaryV6) {
+			if reconcileInterfaceAddresses(physName, pd.addrs, pd.keepAddrs, pd.primaryV4, pd.primaryV6) {
 				result.markHostMutated("reconciled interface addresses")
 			}
 		}

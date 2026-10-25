@@ -61,6 +61,13 @@ type physDesired struct {
 	// and promotes a secondary desired primary via delete+re-add.
 	primaryV4 string
 	primaryV6 string
+	// keepAddrs is the set of foreign addresses (standalone vrrp-group
+	// VIPs, #16833) installed by pkg/vrrp on this netdev that the
+	// reconcile must never delete. They are NOT in addrs: this path
+	// must not add them (BACKUP must not carry them) nor delete them
+	// (MASTER owns them). Canonicalised via netlink.ParseAddr so the
+	// planner compares in the same key space as existing addresses.
+	keepAddrs []string
 }
 
 // unitHasDHCPv6 reports either representation of a DHCPv6-managed unit.
@@ -182,6 +189,7 @@ func planPhysDesired(cfg *config.Config) map[string]*physDesired {
 	// unit number that supplied the current mtu, per phys; -1 = interface level.
 	mtuUnit := map[string]int{}
 	seenAddr := map[string]map[string]bool{}
+	seenKeep := map[string]map[string]bool{}
 	planFor := func(physName string) *physDesired {
 		pd := out[physName]
 		if pd == nil {
@@ -189,6 +197,7 @@ func planPhysDesired(cfg *config.Config) map[string]*physDesired {
 			out[physName] = pd
 			mtuUnit[physName] = -2 // nothing decided yet
 			seenAddr[physName] = map[string]bool{}
+			seenKeep[physName] = map[string]bool{}
 		}
 		return pd
 	}
@@ -280,6 +289,13 @@ func planPhysDesired(cfg *config.Config) map[string]*physDesired {
 				}
 				seenAddr[physName][a] = true
 				pd.addrs = append(pd.addrs, a)
+			}
+			for _, vip := range unitStandaloneVRRPVIPs(unit) {
+				if seenKeep[physName][vip] {
+					continue
+				}
+				seenKeep[physName][vip] = true
+				pd.keepAddrs = append(pd.keepAddrs, vip)
 			}
 			if pd.primaryV4 == "" {
 				pd.primaryV4 = unit.PrimaryAddressForFamily(false)
