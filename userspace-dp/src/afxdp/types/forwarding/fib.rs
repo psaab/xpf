@@ -10,8 +10,8 @@ use super::super::*;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::afxdp) struct MirrorRuntimeConfig {
-pub(in crate::afxdp) output_ifindex: i32,
-pub(in crate::afxdp) rate: u32,
+    pub(in crate::afxdp) output_ifindex: i32,
+    pub(in crate::afxdp) rate: u32,
 }
 
 /// One resolved weighted ECMP next-hop candidate for a route (#2389/#11402).
@@ -133,6 +133,10 @@ pub(in crate::afxdp) struct RouteEntryV4 {
     /// #9955: kernel ip-rule priority for a next-table leak. Zero for
     /// ordinary routes and legacy snapshots.
     pub(in crate::afxdp) rule_priority: u32,
+    /// #16614: config-authored next-table route. Such rows live in the
+    /// ordinary LPM list (not the stage-1 leak index): selection hands
+    /// the lookup to `next_table`, and a target miss is terminal.
+    pub(in crate::afxdp) next_table_route: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -152,6 +156,8 @@ pub(in crate::afxdp) struct RouteEntryV6 {
     /// #9955: kernel ip-rule priority for a next-table leak. Zero for
     /// ordinary routes and legacy snapshots.
     pub(in crate::afxdp) rule_priority: u32,
+    /// #16614: v4 twin (see `RouteEntryV4`).
+    pub(in crate::afxdp) next_table_route: bool,
 }
 
 impl RouteEntryV4 {
@@ -217,6 +223,7 @@ impl RouteEntryV4 {
             preference,
             mtu: 0,
             rule_priority: 0,
+            next_table_route: false,
         }
     }
 }
@@ -248,6 +255,7 @@ impl RouteEntryV6 {
             preference,
             mtu: 0,
             rule_priority: 0,
+            next_table_route: false,
         }
     }
 }

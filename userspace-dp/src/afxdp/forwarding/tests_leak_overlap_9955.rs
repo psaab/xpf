@@ -1,22 +1,25 @@
-//! #9955/#11396 — kernel leak-resolution priority contract.
+//! #9955/#11396 kernel leak contract + #16614 Junos next-table contract.
 //!
-//! `next-table` / rib-group leaks are kernel policy-routing rules, not
-//! ordinary routes in one shared userspace LPM list:
+//! Kernel-model leaks (rib-group, live ip-rule mirrors; `next_table_route
+//! == false`) are kernel policy-routing rules, not ordinary routes:
 //!
 //!   * stage 1 scans matching leak rules by ascending `rule_priority`;
 //!   * a target-table miss falls through to the next rule;
 //!   * stage 2 performs ordinary per-table longest-prefix matching.
 //!
-//! The Go producer assigns both leak kinds priorities from the same
-//! prefix-derived range, so a more-specific destination precedes a broader
-//! leak regardless of source kind. The Rust builder partitions next-table rows
-//! into a priority-ordered leak index and leaves only ordinary routes in each
-//! table's LPM list. The target lookup runs stage 2 without restarting stage 1
-//! from the selected table.
+//! Config-authored next-table statics (#16614, `next_table_route == true`)
+//! are Junos routes in their source table instead:
 //!
-//! These tests guard overlapping leak order, leak-versus-ordinary precedence,
-//! and fall-through when a selected target table is empty. The generated
-//! cross-language corpus adds IPv4/IPv6 and both declaration-order coverage.
+//!   * they compete in source-table LPM by prefix length, then preference;
+//!   * a winning route hands the lookup to its target table;
+//!   * a target-table miss is terminal RejectRoute, never a fall-through.
+//!
+//! These tests guard both contracts. The snapshot fixtures below model
+//! kernel leaks (next_table_route=false) except the explicit #16614 cells,
+//! which mark the leak as a config route. The generated cross-language
+//! corpus adds IPv4/IPv6 and both declaration-order coverage for the
+//! kernel model; its config-order shapes now carry next_table_route=true
+//! and exercise the Junos hand-off through the same production path.
 
 use super::super::forwarding_build::*;
 use super::*;
@@ -91,7 +94,7 @@ fn snapshot_for(leaks: &[Leak]) -> crate::ConfigSnapshot {
         next_table: format!("{}.inet.0", leak.target),
         preference: 0,
         rule_priority: leak.rule_priority,
-        mtu: 0, });
+        mtu: 0, next_table_route: false });
         // A route in the target table so the recursion resolves to something
         // distinguishable.
         routes.push(RouteSnapshot { reject: false, cluster_terminal: false, table: format!("{}.inet.0", leak.target),
@@ -106,7 +109,7 @@ fn snapshot_for(leaks: &[Leak]) -> crate::ConfigSnapshot {
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
-        mtu: 0, });
+        mtu: 0, next_table_route: false });
     }
 
     let interfaces = leaks
@@ -264,9 +267,11 @@ fn leak_overlap_resolution_matches_the_kernel_9955() {
     );
 }
 
-/// A leak rule is evaluated before ordinary routes in the source table.
-/// Consequently a matching /8 leak wins over a more-specific /24 ordinary
-/// route when the target table contains a route for the destination.
+/// #16614 flip of the pre-#16614 kernel-model expectation: a CONFIG
+/// next-table route is a Junos route in inet.0, so it competes by LPM.
+/// A matching /8 next-table route therefore LOSES to a more-specific
+/// /24 ordinary route in the same table. (Kernel-model leaks keep the
+/// old stage-1 precedence; see the differential above.)
 #[test]
 fn leak_versus_ordinary_route_in_the_same_table_9955() {
     let leak = Leak {
@@ -277,6 +282,12 @@ fn leak_versus_ordinary_route_in_the_same_table_9955() {
         subnet: 50,
     };
     let mut snapshot = snapshot_for(&[leak]);
+    // #16614: this cell models the CONFIG static, not a kernel leak.
+    for r in &mut snapshot.routes {
+        if !r.next_table.is_empty() {
+            r.next_table_route = true;
+        }
+    }
     // An ordinary, more-specific route in the SAME table as the leak, out a
     // third interface so the winner is unambiguous.
     snapshot.routes.push(RouteSnapshot { reject: false, cluster_terminal: false, table: "inet.0".to_string(),
@@ -288,7 +299,7 @@ fn leak_versus_ordinary_route_in_the_same_table_9955() {
     next_table: String::new(),
     preference: 0,
     rule_priority: 0,
-    mtu: 0, });
+    mtu: 0, next_table_route: false });
     snapshot.interfaces.push(InterfaceSnapshot {
         name: "ge-0/0/14.50".to_string(),
         zone: "wan".to_string(),
@@ -323,18 +334,17 @@ fn leak_versus_ordinary_route_in_the_same_table_9955() {
         "premise: the fixture must resolve, or this measures nothing"
     );
     assert_eq!(
-        resolved.egress_ifindex, 12,
-        "the leak rule must run before main-table LPM, even with a shorter prefix"
+        resolved.egress_ifindex, 14,
+        "#16614: the more-specific ordinary /24 must beat the broader /8 next-table route in inet.0 LPM"
     );
 }
 
-/// THIRD shape family: a leak whose TARGET TABLE MISSES.
+/// THIRD shape family: a CONFIG next-table route whose TARGET MISSES.
 ///
-/// The kernel treats the matching rule as a miss and continues to the next
-/// rule, eventually reaching the ordinary main-table lookup. The helper must
-/// preserve that fall-through rather than returning the target miss as the
-/// final answer. The test below keeps the main fallback broader than the leak
-/// so it proves the rule miss path rather than accidentally bypassing it.
+/// #16614 flip: Junos ends the target forwarding-table lookup in a
+/// default reject, so the miss is terminal RejectRoute — it must NOT
+/// fall through to the broader main-table fallback (the WAN leak).
+/// Kernel-model leaks keep the fall-through (corpus + differential).
 #[test]
 fn a_leak_into_a_table_that_misses_falls_through_9955() {
     // The leak is the MORE SPECIFIC entry (/24) and the main-table fallback is
@@ -351,6 +361,11 @@ fn a_leak_into_a_table_that_misses_falls_through_9955() {
         subnet: 50,
     };
     let mut snapshot = snapshot_for(&[leak]);
+    for r in &mut snapshot.routes {
+        if !r.next_table.is_empty() {
+            r.next_table_route = true;
+        }
+    }
     // Remove the target table's route so the leak lands on an EMPTY table.
     snapshot.routes.retain(|r| r.table != "red.inet.0");
     // Main can route it perfectly well, via a BROADER prefix.
@@ -363,7 +378,7 @@ fn a_leak_into_a_table_that_misses_falls_through_9955() {
     next_table: String::new(),
     preference: 0,
     rule_priority: 0,
-    mtu: 0, });
+    mtu: 0, next_table_route: false });
     snapshot.interfaces.push(InterfaceSnapshot {
         name: "ge-0/0/14.50".to_string(),
         zone: "wan".to_string(),
@@ -395,10 +410,9 @@ fn a_leak_into_a_table_that_misses_falls_through_9955() {
 
     assert_eq!(
         resolved.disposition,
-        ForwardingDisposition::ForwardCandidate,
-        "a target-table miss must fall through to the main table"
+        ForwardingDisposition::RejectRoute,
+        "#16614: a config next-table target miss is terminal, not a fall-through to the WAN default"
     );
-    assert_eq!(resolved.egress_ifindex, 14);
 }
 
 /// A CONTROL that must pass both before and after any fix: with a SINGLE leak
@@ -1049,4 +1063,99 @@ fn leak_target_identity_and_miss_stay_distinct_v9506() {
         "a miss must not claim the default main-table identity"
     );
     assert_eq!(missed.selected_route, None, "a miss has no route identity");
+}
+
+/// #16614 acceptance probe (Rust helper agreement): leak 10/8 -> red,
+/// red covers only 10.1.0.0/16, inet.0 has 172.16.5.0/24 via xwan and a
+/// default via xwan. 10.99.0.1 (hole) must be RejectRoute, 172.16.5.9
+/// must egress xwan, 10.1.0.5 must egress red.
+#[test]
+fn junos_next_table_acceptance_probe_16614() {
+    // Reuse snapshot_for with a single /8 leak to red (ifindex 12), then
+    // reshape into the acceptance topology.
+    let leak = Leak {
+        prefix_len: 8,
+        rule_priority: leak_priority(8, 32, LeakKind::NextTable),
+        target: "red",
+        egress_ifindex: 12,
+        subnet: 50,
+    };
+    let mut snapshot = snapshot_for(&[leak]);
+    for r in &mut snapshot.routes {
+        if !r.next_table.is_empty() {
+            r.next_table_route = true;
+        }
+    }
+    // Red covers only 10.1.0.0/16 (snapshot_for gave it 10/8; narrow it).
+    for r in &mut snapshot.routes {
+        if r.table == "red.inet.0" {
+            r.destination = "10.1.0.0/16".to_string();
+        }
+    }
+    // inet.0: 172.16.5.0/24 + default via xwan ifindex 14.
+    snapshot.routes.push(RouteSnapshot { reject: false, cluster_terminal: false, table: "inet.0".to_string(),
+    family: "inet".to_string(), destination: "172.16.5.0/24".to_string(), next_hop_weights: vec![],
+    next_hops: vec!["172.16.52.1@ge-0/0/14.50".to_string()], discard: false, next_table: String::new(),
+    preference: 0, rule_priority: 0, mtu: 0, next_table_route: false });
+    snapshot.routes.push(RouteSnapshot { reject: false, cluster_terminal: false, table: "inet.0".to_string(),
+    family: "inet".to_string(), destination: "0.0.0.0/0".to_string(), next_hop_weights: vec![],
+    next_hops: vec!["172.16.52.1@ge-0/0/14.50".to_string()], discard: false, next_table: String::new(),
+    preference: 0, rule_priority: 0, mtu: 0, next_table_route: false });
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "ge-0/0/14.50".to_string(), zone: "wan".to_string(), linux_name: "ge-0-0-14.50".to_string(),
+        ifindex: 14, hardware_addr: "02:bf:72:00:50:08".to_string(),
+        addresses: vec![InterfaceAddressSnapshot { family: "inet".to_string(), address: "172.16.52.8/24".to_string(), scope: 0, ..Default::default() }],
+        ..Default::default()
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-14.50".to_string(), ifindex: 14, family: "inet".to_string(), ip: "172.16.52.1".to_string(),
+        mac: "00:11:22:33:44:55".to_string(), state: "reachable".to_string(), router: true, link_local: false, ..Default::default()
+    });
+    let state = build_forwarding_state(&snapshot);
+    let hole = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(10, 99, 0, 1))).resolution;
+    assert_eq!(hole.disposition, ForwardingDisposition::RejectRoute, "10.99.0.1 hole must be unreachable, got {:?}", hole.disposition);
+    let wan = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(172, 16, 5, 9))).resolution;
+    assert_eq!(wan.disposition, ForwardingDisposition::ForwardCandidate);
+    assert_eq!(wan.egress_ifindex, 14, "172.16.5.9 must resolve via xwan");
+    let ctl = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(10, 1, 0, 5))).resolution;
+    assert_eq!(ctl.disposition, ForwardingDisposition::ForwardCandidate);
+    assert_eq!(ctl.egress_ifindex, 12, "10.1.0.5 control must egress red unchanged");
+}
+
+/// #16614: a more-specific ordinary inet.0 carve-out beats a broader
+/// config next-table route even when the target covers the destination.
+#[test]
+fn junos_more_specific_inet0_route_beats_next_table_16614() {
+    let leak = Leak {
+        prefix_len: 8,
+        rule_priority: leak_priority(8, 32, LeakKind::NextTable),
+        target: "red",
+        egress_ifindex: 12,
+        subnet: 50,
+    };
+    let mut snapshot = snapshot_for(&[leak]);
+    for r in &mut snapshot.routes {
+        if !r.next_table.is_empty() {
+            r.next_table_route = true;
+        }
+    }
+    // inet.0 carve-out 10.99.0.0/16 via xwan (14).
+    snapshot.routes.push(RouteSnapshot { reject: false, cluster_terminal: false, table: "inet.0".to_string(),
+    family: "inet".to_string(), destination: "10.99.0.0/16".to_string(), next_hop_weights: vec![],
+    next_hops: vec!["172.16.52.1@ge-0/0/14.50".to_string()], discard: false, next_table: String::new(),
+    preference: 0, rule_priority: 0, mtu: 0, next_table_route: false });
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "ge-0/0/14.50".to_string(), zone: "wan".to_string(), linux_name: "ge-0-0-14.50".to_string(),
+        ifindex: 14, hardware_addr: "02:bf:72:00:50:08".to_string(),
+        addresses: vec![InterfaceAddressSnapshot { family: "inet".to_string(), address: "172.16.52.8/24".to_string(), scope: 0, ..Default::default() }],
+        ..Default::default()
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-14.50".to_string(), ifindex: 14, family: "inet".to_string(), ip: "172.16.52.1".to_string(),
+        mac: "00:11:22:33:44:55".to_string(), state: "reachable".to_string(), router: true, link_local: false, ..Default::default()
+    });
+    let state = build_forwarding_state(&snapshot);
+    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(10, 99, 0, 1))).resolution;
+    assert_eq!(resolved.disposition, ForwardingDisposition::ForwardCandidate);
+    assert_eq!(resolved.egress_ifindex, 14, "inet.0 /16 carve-out must beat the /8 next-table route");
 }

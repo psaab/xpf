@@ -123,8 +123,7 @@ fn snapshot_with_lan_rule(lan_action: Option<&str>) -> crate::ConfigSnapshot {
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     if let Some(action) = lan_action {
         snapshot.policies.push(PolicyRuleSnapshot {
             name: "lan-out".into(),
@@ -6549,8 +6548,7 @@ fn forwarding_with_fabric_dmz_10507() -> ForwardingState {
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     snapshot.neighbors.push(NeighborSnapshot {
         interface: "ge-0-0-2".to_string(),
         ifindex: DMZ_IFINDEX,
@@ -7004,8 +7002,7 @@ fn forwarding_with_fabric_dmz_armed_10507() -> ForwardingState {
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     snapshot.neighbors.push(NeighborSnapshot {
         interface: "ge-0-0-2".to_string(),
         ifindex: DMZ_IFINDEX,
@@ -10007,8 +10004,7 @@ fn add_fib_move_route_12074(
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
 }
 
 #[test]
@@ -10730,8 +10726,7 @@ fn fib_only_reply_nonforwarding_route_12074(
             next_table: String::new(),
             preference: 0,
             rule_priority: 0,
-            mtu: 0,
-        });
+            mtu: 0, next_table_route: false });
     } else {
         moved.routes.retain(|route| route.family != "inet");
     }
@@ -11128,8 +11123,7 @@ fn no_local_entry_current_route_12074(
                 next_table: String::new(),
                 preference: 0,
                 rule_priority: 0,
-                mtu: 0,
-            });
+                mtu: 0, next_table_route: false });
             if permit_new_zone {
                 let mut permit = current
                     .policies

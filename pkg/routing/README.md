@@ -624,6 +624,15 @@ delegate to the owning domain. Exported types:
   (the guard never fires); an over-cap term steers nothing in the kernel mirror
   (the userspace filter path still enforces it exactly), so the operator sees the
   degraded gauge/log and authors a tighter match.
+- `32765`: the #16614 next-table miss terminator — one
+  selector-identical `unreachable` shadow per admitted config
+  next-table leak and ingress interface, immediately before main
+  (32766). A target-table miss ends here instead of reaching main's
+  default. In the AF_XDP FIB the config static is instead a Junos
+  inet.0 route (LPM + terminal target miss, protocol v73); the kernel
+  RPDB cannot express the LPM carve-out rescue, so kernel-only traffic
+  to a carved-out prefix is blackholed (fail-closed). See
+  `docs/log/16614.md`.
 - `32000–32099`: legacy next-table leak priorities, cleared only to remove
   stale rules left by an in-place upgrade.
 - `33000–33099`: legacy pre-#3876 blanket rib-group rules. New rules are

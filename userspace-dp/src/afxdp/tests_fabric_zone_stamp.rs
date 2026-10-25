@@ -2649,8 +2649,7 @@ fn split_rg_cluster_terminal_punt_redirects_15742() {
         next_table: String::new(),
         preference: 200,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     let forwarding = build_forwarding_state(&snapshot);
     let now_secs = monotonic_nanos() / 1_000_000_000;
     // Split: LAN RG2 local, WAN RG1 peer-owned.

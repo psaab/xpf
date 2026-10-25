@@ -605,7 +605,9 @@ func vrfMissTerminatorNetnsChild9819(t *testing.T) {
 		t.Fatalf("second ApplyRibGroupRules: %v", err)
 	}
 	for _, fam := range []string{"-4", "-6"} {
-		if n := strings.Count(rules(fam), "unreachable"); n != 1 {
+		// #16614: next-table miss shadows are also `unreachable` rules
+		// (at 32765); count only the #9819 l3mdev terminator at 2000.
+		if n := strings.Count(rules(fam), "2000:"); n != 1 {
 			t.Errorf("ip %s rule: %d terminators after a re-apply, want 1:\n%s", fam, n, rules(fam))
 		}
 	}

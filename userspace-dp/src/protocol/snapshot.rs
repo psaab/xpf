@@ -354,6 +354,17 @@ pub(crate) struct RouteSnapshot {
     /// Go RouteSnapshot.MTU and is fenced by protocol v38.
     #[serde(rename = "mtu", default, skip_serializing_if = "is_zero_i32")]
     pub mtu: i32,
+    /// #16614: config-authored next-table static. True rows are Junos
+    /// routes in their source table: they join that table's LPM (prefix
+    /// length, then preference) and a target-table miss is terminal
+    /// RejectRoute. False rows keep the kernel RPDB leak model
+    /// (stage-1 priority walk, fall-through on miss). Fenced by v73.
+    #[serde(
+        rename = "next_table_route",
+        default,
+        skip_serializing_if = "crate::protocol::bool_is_false"
+    )]
+    pub next_table_route: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]

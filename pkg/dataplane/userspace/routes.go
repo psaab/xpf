@@ -25,10 +25,10 @@ var ruleListFn = netlink.RuleList
 // NextHops are part of the key so distinct same-preference QNH metric-tier
 // rows survive deduplication; equal-metric members are grouped in one row.
 func routeSnapshotDedupeKey(snap RouteSnapshot) string {
-	return fmt.Sprintf("%s|%s|%s|%s|%v|%s|%t|%t|%t|%d|%d|%d",
+	return fmt.Sprintf("%s|%s|%s|%s|%v|%s|%t|%t|%t|%d|%d|%d|%t",
 		snap.Table, snap.Family, snap.Destination,
 		strings.Join(snap.NextHops, ","), snap.NextHopWeights, snap.NextTable,
-		snap.Discard, snap.Reject, snap.ClusterTerminal, snap.Preference, snap.RulePriority, snap.MTU)
+		snap.Discard, snap.Reject, snap.ClusterTerminal, snap.Preference, snap.RulePriority, snap.MTU, snap.NextTableRoute)
 }
 
 // ipRuleHasUnsupportedRouteLeakSelectors reports whether the destination-only
@@ -405,6 +405,11 @@ func buildRouteSnapshotsWithRGPrimary(cfg *config.Config, interfaces []Interface
 				NextTable:    route.NextTable,
 				RulePriority: nextTableRulePriorities[route],
 				Preference:   route.Preference,
+				// #16614: a config-authored next-table static is a Junos
+				// route in this table (LPM + terminal target miss). Only
+				// rows that actually carry a leak target are marked; the
+				// live ip-rule mirrors below keep the kernel RPDB model.
+				NextTableRoute: route.NextTable != "",
 			}
 			// QNH metric is the tie-breaker after each next-hop's effective
 			// preference. Emit a separate ordered snapshot per metric tier;
@@ -689,16 +694,19 @@ func buildRouteSnapshotsWithRGPrimary(cfg *config.Config, interfaces []Interface
 	// their order then followed build input such as map or kernel iteration,
 	// causing snapshot diffs and ECMP-member churn.
 	//
-	// Leak rows are stage-1 rules, so RulePriority orders them at the same
-	// destination. Equal-priority leaks retain producer order because kernel
-	// rules with a shared priority are installed and observed in that order.
-	// Ordinary rows sort by preference, then the in-process QNH metric-tier
-	// hint, followed by next-hop/weight/next-table/discard details.
+	// Kernel-model leak rows are stage-1 rules, so RulePriority orders them
+	// at the same destination. Equal-priority leaks retain producer order
+	// because kernel rules with a shared priority are installed and observed
+	// in that order. Ordinary rows sort by preference, then the in-process
+	// QNH metric-tier hint, followed by next-hop/weight/next-table/discard
+	// details.
 	//
-	// A NextTable row is always a leak; an ordinary route never competes with
-	// it in this priority comparison. The Rust consumer builds a separate
-	// priority-ordered leak index and performs ordinary LPM only after a leak
-	// target misses.
+	// A kernel-model NextTable row is always a leak; an ordinary route never
+	// competes with it in this priority comparison. The Rust consumer builds
+	// a separate priority-ordered leak index and performs ordinary LPM only
+	// after a leak target misses. #16614 config next-table routes
+	// (NextTableRoute) instead join the source table's ordinary LPM in Rust;
+	// this sort comparator is only snapshot determinism for them.
 	sort.SliceStable(out, func(i, j int) bool {
 		a, b := out[i], out[j]
 		if a.Table != b.Table {
@@ -1041,9 +1049,11 @@ func forwardingGatewayInterface(riName, family string, gateway net.IP, interface
 // including all ECMP next-hops) and the single overlay route is appended.
 // A positive route MTU is retained only from same-path rows for the exact
 // (table, family, canonical prefix), because an unrelated next hop's MTU is
-// not a constraint on the overlay path. NextTable snapshots are priority-
-// ordered stage-1 leak rules and are retained even when their prefix matches
-// an overlay entry.
+// not a constraint on the overlay path. NextTable snapshots are retained
+// even when their prefix matches an overlay entry: kernel-model leaks are
+// priority-ordered stage-1 rules, and #16614 config next-table routes are
+// source-table LPM entries — neither is an ordinary route the overlay
+// replaces.
 func applyRouteOverlay(cfg *config.Config, routes []RouteSnapshot, overlay []config.RouteOverlayEntry) []RouteSnapshot {
 	if len(overlay) == 0 {
 		return routes
@@ -1599,10 +1609,13 @@ func routeNextHopsMatchByMeaning(cfg *config.Config, a, b []string) bool {
 //
 // `existing` is the config-derived snapshot set built so far; it is read to
 // find the best preference at each canonical (table, family, destination) key
-// and never mutated. Only ORDINARY table routes count. A NextTable row is a
-// priority-ordered stage-1 rule, not an answer from a table's LPM; if its
-// target table misses, kernel evaluation falls through and the ordinary
-// main-table route must still be imported. The imported destination is
+// and never mutated. Only ORDINARY table routes count. A kernel-model
+// NextTable row is a priority-ordered stage-1 rule, not an answer from a
+// table's LPM; if its target table misses, kernel evaluation falls through
+// and the ordinary main-table route must still be imported. A #16614
+// config next-table route IS a source-table route, but it has no ordinary
+// next hop for the gap-fill preference comparison, so it likewise does not
+// suppress a learned route at its prefix. The imported destination is
 // normalised through routeDestinationForWire first so a kernel rendering can
 // never miss an ordinary config route it is semantically identical to.
 // A failure from the importer is returned, not swallowed: same #3772 M9

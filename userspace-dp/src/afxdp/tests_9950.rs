@@ -1130,8 +1130,7 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
         discard: false,
         next_table: String::new(),
         preference: 0,
-        rule_priority: 0, mtu: 0,
-    }];
+        rule_priority: 0, mtu: 0, next_table_route: false }];
     snapshot.neighbors = vec![
         NeighborSnapshot {
             interface: "ge-0-0-0.80".to_string(),
@@ -1445,8 +1444,7 @@ fn f053_pool_snat_reply_nonfirst_translated_on_wire_9950() {
         discard: false,
         next_table: String::new(),
         preference: 0,
-        rule_priority: 0, mtu: 0,
-    }];
+        rule_priority: 0, mtu: 0, next_table_route: false }];
     snapshot.neighbors = vec![
         NeighborSnapshot {
             interface: "ge-0-0-0.80".to_string(),
@@ -1686,8 +1684,7 @@ fn f053_second_reply_datagram_post_cache_translates_9950() {
         discard: false,
         next_table: String::new(),
         preference: 0,
-        rule_priority: 0, mtu: 0,
-    }];
+        rule_priority: 0, mtu: 0, next_table_route: false }];
     snapshot.neighbors = vec![
         NeighborSnapshot {
             interface: "ge-0-0-0.80".to_string(),

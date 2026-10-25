@@ -1828,8 +1828,7 @@ fn post_transform_wg_inner_mtu_uses_physical_underlay_not_logical_v6() {
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
-        mtu: 0,
-    }];
+        mtu: 0, next_table_route: false }];
 
     let state = build_forwarding_state(&snap);
     assert_eq!(
@@ -1953,7 +1952,7 @@ fn wg_two_peer_asymmetric_snapshot() -> crate::ConfigSnapshot {
     next_table: String::new(),
     preference: 0,
     rule_priority: 0,
-    mtu: 0, });
+    mtu: 0, next_table_route: false });
     {
         let ep = &mut snap.tunnel_endpoints[0];
         // Peer A: give it the smaller pubkey so it is first in any sorted order
@@ -2107,8 +2106,7 @@ fn post_transform_wg_inner_mtu_charges_selected_peer_family_14118() {
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
-        mtu: 0,
-    }];
+        mtu: 0, next_table_route: false }];
     let mut state = build_forwarding_state(&snap);
     // Flip ONLY the row family back to v4: the selected peer (engine +
     // wg_peers) still points at the v6 endpoint.

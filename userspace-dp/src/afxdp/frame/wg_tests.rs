@@ -1530,7 +1530,7 @@ fn wg_encap_frame_sources_outer_from_physical_wan_primary_v6() {
     discard: false,
     next_table: String::new(),
     preference: 0,
-    rule_priority: 0, mtu: 0, });
+    rule_priority: 0, mtu: 0, next_table_route: false });
     // The WG endpoint's transport table follows the v6 outer family.
     snap.tunnel_endpoints[0].outer_family = "inet6".to_string();
     snap.tunnel_endpoints[0].transport_table = "inet6.0".to_string();

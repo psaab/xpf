@@ -1008,6 +1008,38 @@ fn lookup_forwarding_resolution_v4_inner(
             }
         }
     }
+    // #16614: a config next-table route that wins this table's LPM hands
+    // the lookup to its target table. Unlike the kernel-model stage
+    // above, a target miss is TERMINAL (RejectRoute, the Junos default
+    // reject at the end of the target forwarding table): it must not
+    // fall through to a less-specific route in this table (typically
+    // the WAN default). Only the source-table entry lookup
+    // (evaluate_leaks) competes this way; a leak-target walk
+    // (!evaluate_leaks) performs plain LPM in the selected table.
+    if evaluate_leaks {
+        if let Some(winner) = junos_next_table_winner_v4(state, ip, table) {
+            match winner {
+                JunosNextTable::Terminal => return reject_route_lookup_result(),
+                JunosNextTable::HandOff(next_table) => {
+                    let resolved = lookup_forwarding_resolution_v4_inner(
+                        state,
+                        dynamic_neighbors,
+                        ip,
+                        next_table.as_ref(),
+                        depth + 1,
+                        false,
+                        allow_tunnels,
+                        ecmp_flow_hash,
+                        suppress_nat_local,
+                    );
+                    if resolved.resolution.disposition == ForwardingDisposition::NoRoute {
+                        return reject_route_lookup_result();
+                    }
+                    return resolved;
+                }
+            }
+        }
+    }
     match select_v4_route(state, dynamic_neighbors, ip, table, depth, ecmp_flow_hash) {
         Some(ResolvedRouteV4::Connected {
             ifindex,
@@ -1366,6 +1398,32 @@ fn lookup_forwarding_resolution_v6_inner(
             }
         }
     }
+    // #16614: v4 twin — a winning config next-table route hands off
+    // terminally; a target miss is RejectRoute, never a fall-through.
+    if evaluate_leaks {
+        if let Some(winner) = junos_next_table_winner_v6(state, ip, table) {
+            match winner {
+                JunosNextTable::Terminal => return reject_route_lookup_result(),
+                JunosNextTable::HandOff(next_table) => {
+                    let resolved = lookup_forwarding_resolution_v6_inner(
+                        state,
+                        dynamic_neighbors,
+                        ip,
+                        next_table.as_ref(),
+                        depth + 1,
+                        false,
+                        allow_tunnels,
+                        ecmp_flow_hash,
+                        suppress_nat_local,
+                    );
+                    if resolved.resolution.disposition == ForwardingDisposition::NoRoute {
+                        return reject_route_lookup_result();
+                    }
+                    return resolved;
+                }
+            }
+        }
+    }
     match select_v6_route(state, dynamic_neighbors, ip, table, depth, ecmp_flow_hash) {
         Some(ResolvedRouteV6::Connected {
             ifindex,
@@ -1586,6 +1644,122 @@ pub(in crate::afxdp) fn table_unavailable_resolution() -> ForwardingResolution {
         route_mtu: 0,
         transport_route_mtu: 0,
     }
+}
+
+enum JunosNextTable {
+    /// Hand the lookup to this (canonical) table; a miss there is
+    /// terminal (#16614).
+    HandOff(String),
+    /// The selected route is itself a next-table route whose target is
+    /// unusable (empty): terminal, never a fall-through.
+    Terminal,
+}
+
+/// #16614: if the LPM winner in `table` is a config next-table route,
+/// return its hand-off. Ordinary and kernel-model rows return None and
+/// keep their existing selection path bit-identically. Connected wins
+/// inside `select_*_route` at >= prefix length suppress the hand-off,
+/// mirroring connected-beats-static in one Junos table.
+fn junos_next_table_winner_v4(
+    state: &ForwardingState,
+    ip: Ipv4Addr,
+    table: &str,
+) -> Option<JunosNextTable> {
+    let routes = state.routes_v4.get(table)?;
+    // routes_v4 is sorted longest-prefix first, then preference
+    // (sort_routes); the first containing next-table-route row at the
+    // winning length/preference is the Junos winner. A longer ordinary
+    // route wins outright, so stop at the first containing row whose
+    // length is the maximum containing length.
+    let mut best_len: Option<u8> = None;
+    for route in routes {
+        if !route.prefix.contains(ip) {
+            continue;
+        }
+        let len = route.prefix.prefix_len();
+        if best_len.is_some_and(|b| len < b) {
+            break;
+        }
+        if best_len.is_none() {
+            // First containing row fixes the winning length; a connected
+            // prefix at >= this length wins inside select_v4_route.
+            if state
+                .connected_v4
+                .iter()
+                .any(|c| c.table == table && c.prefix.contains(ip) && c.prefix.prefix_len() >= len)
+            {
+                return None;
+            }
+            best_len = Some(len);
+        }
+        if route.next_table_route {
+            if route.next_table.is_empty() {
+                return Some(JunosNextTable::Terminal);
+            }
+            return Some(JunosNextTable::HandOff(route.next_table.clone()));
+        }
+        // An ordinary/discard/reject row at the winning length with a
+        // better-or-equal preference sorting first wins; but rows are
+        // preference-sorted only within equal length, and the first
+        // containing row is already the best preference at this length.
+        // Any later next-table row at the same length has worse
+        // preference, so the ordinary winner stands.
+        return None;
+    }
+    None
+}
+
+fn junos_next_table_winner_v6(
+    state: &ForwardingState,
+    ip: Ipv6Addr,
+    table: &str,
+) -> Option<JunosNextTable> {
+    let routes = state.routes_v6.get(table)?;
+    let mut best_len: Option<u8> = None;
+    for route in routes {
+        if !route.prefix.contains(ip) {
+            continue;
+        }
+        let len = route.prefix.prefix_len();
+        if best_len.is_some_and(|b| len < b) {
+            break;
+        }
+        if best_len.is_none() {
+            if state
+                .connected_v6
+                .iter()
+                .any(|c| c.table == table && c.prefix.contains(ip) && c.prefix.prefix_len() >= len)
+            {
+                return None;
+            }
+            best_len = Some(len);
+        }
+        if route.next_table_route {
+            if route.next_table.is_empty() {
+                return Some(JunosNextTable::Terminal);
+            }
+            return Some(JunosNextTable::HandOff(route.next_table.clone()));
+        }
+        return None;
+    }
+    None
+}
+
+fn reject_route_lookup_result() -> ForwardingLookupResult {
+    no_route_lookup_result(ForwardingResolution {
+        disposition: ForwardingDisposition::RejectRoute,
+        local_ifindex: 0,
+        egress_ifindex: 0,
+        tx_ifindex: 0,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    })
 }
 
 enum ResolvedRouteV4<'a> {

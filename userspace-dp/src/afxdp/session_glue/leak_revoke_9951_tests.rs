@@ -1089,8 +1089,7 @@ fn ri_leak_snapshot() -> ConfigSnapshot {
                 next_table: "red.inet.0".to_string(),
                 preference: 0,
                 rule_priority: 0,
-                mtu: 0,
-            },
+                mtu: 0, next_table_route: false },
             RouteSnapshot {
                 table: "red.inet.0".to_string(),
                 reject: false,
@@ -1103,8 +1102,7 @@ fn ri_leak_snapshot() -> ConfigSnapshot {
                 next_table: String::new(),
                 preference: 0,
                 rule_priority: 0,
-                mtu: 0,
-            },
+                mtu: 0, next_table_route: false },
             RouteSnapshot {
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
@@ -1117,8 +1115,7 @@ fn ri_leak_snapshot() -> ConfigSnapshot {
                 next_table: "red.inet.0".to_string(),
                 preference: 0,
                 rule_priority: 0,
-                mtu: 0,
-            },
+                mtu: 0, next_table_route: false },
             RouteSnapshot {
                 table: "red.inet.0".to_string(),
                 family: "inet".to_string(),
@@ -1131,8 +1128,7 @@ fn ri_leak_snapshot() -> ConfigSnapshot {
                 next_table: String::new(),
                 preference: 0,
                 rule_priority: 0,
-                mtu: 0,
-            },
+                mtu: 0, next_table_route: false },
         ],
         neighbors: vec![NeighborSnapshot {
             interface: "ge-0-0-0.51".to_string(),

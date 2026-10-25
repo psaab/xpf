@@ -63,11 +63,11 @@ func TestNextTableApplyCapAggregatesDegradedError(t *testing.T) {
 	}
 	// The cap still holds: exactly NextTableRuleWindow rules install. Their
 	// prefix-derived priorities remain in the shared destination-leak range.
-	if total := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); total != config.NextTableRuleWindow {
+	if total := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); total != 2*config.NextTableRuleWindow {
 		t.Errorf("expected the cap to hold at %d installed rules, got %d",
 			config.NextTableRuleWindow, total)
 	}
-	assertAllRulesInRange(t, ops, nextTableRulePriority, nextTableRulePriority+config.RouteLeakRulePriorityWindow)
+	assertNextTableLookupsInRange16614(t, ops)
 }
 
 // TestNextTableApplyUnderCapNoError is the companion no-false-positive guard:
@@ -92,7 +92,7 @@ func TestNextTableApplyUnderCapNoError(t *testing.T) {
 		t.Fatalf("exactly %d next-table routes must apply without a degraded error, got %v",
 			config.NextTableRuleWindow, err)
 	}
-	if total := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); total != config.NextTableRuleWindow {
+	if total := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); total != 2*config.NextTableRuleWindow {
 		t.Fatalf("expected all %d routes programmed at the limit, got %d",
 			config.NextTableRuleWindow, total)
 	}
@@ -153,7 +153,7 @@ func TestNextTableApplyDroppedCountCountsOnlyEligible(t *testing.T) {
 		t.Errorf("drop count must NOT include the 30 dangling routes that never install, got %v", err)
 	}
 	// Only the window's worth of valid rules installed.
-	if total := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); total != config.NextTableRuleWindow {
+	if total := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); total != 2*config.NextTableRuleWindow {
 		t.Errorf("expected the cap to hold at %d installed rules, got %d", config.NextTableRuleWindow, total)
 	}
 }
@@ -209,7 +209,7 @@ func TestNextTableApplyDroppedCountExcludesMalformedCIDR(t *testing.T) {
 		t.Errorf("drop count must NOT count the malformed-CIDR route that never installs, got %v", err)
 	}
 	// The malformed route must not be installed, and the cap holds at the window.
-	if total := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); total != config.NextTableRuleWindow {
+	if total := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); total != 2*config.NextTableRuleWindow {
 		t.Errorf("expected the cap to hold at %d installed rules, got %d", config.NextTableRuleWindow, total)
 	}
 }
@@ -277,19 +277,19 @@ func TestNextTableDrawsDownV4FirstRegardlessOfCallerOrder6583(t *testing.T) {
 	_ = nt.Apply(routes, instances, testNextTableIifs)
 
 	gotV4, gotV6 := ops.count(unix.AF_INET), ops.count(unix.AF_INET6)
-	if total := gotV4 + gotV6; total != config.NextTableRuleWindow {
+	if total := gotV4 + gotV6; total != 2*config.NextTableRuleWindow {
 		t.Fatalf("installed %d rules (v4=%d v6=%d), want the cap %d — fixture is not "+
 			"over-subscribing the window, so the draw-down order is not observable",
 			total, gotV4, gotV6, config.NextTableRuleWindow)
 	}
-	if gotV4 != perFamily {
-		t.Errorf("v4 installed %d of %d offered. IPv4 must draw the window down FIRST "+
+	if gotV4 != 2*perFamily {
+		t.Errorf("v4 installed %d of %d offered (x2 with shadows). IPv4 must draw the window down FIRST "+
 			"so the kernel agrees with the userspace FIB, which programs inet.0 before "+
 			"inet6.0. The caller offered v6 first and the window followed it (#6583).",
 			gotV4, perFamily)
 	}
-	if want := config.NextTableRuleWindow - perFamily; gotV6 != want {
-		t.Errorf("v6 installed %d, want %d (the remainder after v4 draws down first)", gotV6, want)
+	if want := 2 * (config.NextTableRuleWindow - perFamily); gotV6 != want {
+		t.Errorf("v6 installed %d, want %d (the remainder after v4 draws down first, x2 with shadows)", gotV6, want)
 	}
 
 	// The families must not interleave in the window either: every v4 rule
@@ -297,11 +297,17 @@ func TestNextTableDrawsDownV4FirstRegardlessOfCallerOrder6583(t *testing.T) {
 	// pass on an alternating layout that still splits differently from the FIB.
 	maxV4, minV6 := -1, 1<<30
 	for _, r := range ops.rules[unix.AF_INET] {
+		if r.Priority == config.NextTableMissTerminatorPriority {
+			continue
+		}
 		if r.Priority > maxV4 {
 			maxV4 = r.Priority
 		}
 	}
 	for _, r := range ops.rules[unix.AF_INET6] {
+		if r.Priority == config.NextTableMissTerminatorPriority {
+			continue
+		}
 		if r.Priority < minV6 {
 			minV6 = r.Priority
 		}
@@ -318,6 +324,12 @@ func TestNextTableDrawsDownV4FirstRegardlessOfCallerOrder6583(t *testing.T) {
 	// partition that grouped correctly but shuffled inside the group would
 	// match on COUNTS and still install a different SET than the FIB.
 	byPrio := append([]netlink.Rule(nil), ops.rules[unix.AF_INET]...)
+	byPrio = byPrio[:0]
+	for _, r := range ops.rules[unix.AF_INET] {
+		if r.Priority != config.NextTableMissTerminatorPriority {
+			byPrio = append(byPrio, r)
+		}
+	}
 	sort.Slice(byPrio, func(i, j int) bool { return byPrio[i].Priority < byPrio[j].Priority })
 	for i, r := range byPrio {
 		want := v4[i].Destination
@@ -328,7 +340,7 @@ func TestNextTableDrawsDownV4FirstRegardlessOfCallerOrder6583(t *testing.T) {
 		}
 	}
 
-	assertAllRulesInRange(t, ops, nextTableRulePriority, nextTableRulePriority+config.RouteLeakRulePriorityWindow)
+	assertNextTableLookupsInRange16614(t, ops)
 }
 
 // TestNextTableCapHoldsOnMixedFamilyFixture6583 closes the fixture gap this
@@ -366,13 +378,13 @@ func TestNextTableCapHoldsOnMixedFamilyFixture6583(t *testing.T) {
 		t.Errorf("degraded error must name the %d dropped leaks on a mixed-family set, got %v", over, err)
 	}
 	gotV4, gotV6 := ops.count(unix.AF_INET), ops.count(unix.AF_INET6)
-	if gotV4+gotV6 != config.NextTableRuleWindow {
+	if gotV4+gotV6 != 2*config.NextTableRuleWindow {
 		t.Errorf("mixed-family cap: installed v4=%d v6=%d (total %d), want %d",
-			gotV4, gotV6, gotV4+gotV6, config.NextTableRuleWindow)
+			gotV4, gotV6, gotV4+gotV6, 2*config.NextTableRuleWindow)
 	}
 	if gotV6 == 0 {
 		t.Error("the mixed-family fixture installed ZERO v6 rules — the v6 term is still " +
 			"absent, so this guard cannot see a family-ordering change (#6583)")
 	}
-	assertAllRulesInRange(t, ops, nextTableRulePriority, nextTableRulePriority+config.RouteLeakRulePriorityWindow)
+	assertNextTableLookupsInRange16614(t, ops)
 }

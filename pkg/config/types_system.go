@@ -1151,6 +1151,15 @@ const (
 	// prefix length plus the leak-kind tie-break and is independent of each
 	// manager's admission cap.
 	RouteLeakRulePriorityWindow = 1000
+	// NextTableMissTerminatorPriority is the priority of the per-prefix
+	// unreachable shadow (#16614) installed immediately before the kernel
+	// main rule (32766) for every admitted config next-table leak prefix:
+	// `to P iif <if> unreachable pref 32765`. It sits after every leak
+	// rule (30000-30999), so a leak target-table miss ends here with
+	// ENETUNREACH instead of falling through to main's default (usually
+	// the WAN). It carries Dst=P and the leak's iif scope, so it never
+	// matches traffic outside the leaked prefix. See docs/log/16614.md.
+	NextTableMissTerminatorPriority = 32765
 	// NextTableRuleWindow caps the number of next-table ip-rule entries. One
 	// leak costs one entry per default-instance ingress interface (#9810), so
 	// the applier, commit-time gate, and userspace FIB mirror share this cap.

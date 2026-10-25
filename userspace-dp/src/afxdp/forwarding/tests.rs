@@ -567,8 +567,7 @@ fn fabric_ingress_redirect_per_flow_revalidation_keeps_split_rg_16222() {
         next_table: String::new(),
         preference: 5,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     let state = build_forwarding_state(&snapshot);
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let ha_state = BTreeMap::from([
@@ -1061,8 +1060,7 @@ fn split_rg_cluster_reject_does_not_shadow_forwarding_default_15742() {
         next_table: String::new(),
         preference: 200,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     snapshot.routes.push(RouteSnapshot {
         reject: true,
         cluster_terminal: false,
@@ -1075,8 +1073,7 @@ fn split_rg_cluster_reject_does_not_shadow_forwarding_default_15742() {
         next_table: String::new(),
         preference: 200,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     let state = build_forwarding_state(&snapshot);
     let now_secs = monotonic_nanos() / 1_000_000_000;
 
@@ -1192,8 +1189,7 @@ fn split_rg_cluster_discard_demotes_to_fabric_redirect_15742() {
             next_table: String::new(),
             preference: 200,
             rule_priority: 0,
-            mtu: 0,
-        });
+            mtu: 0, next_table_route: false });
         snapshot.routes.push(RouteSnapshot {
             reject: false,
             cluster_terminal: cluster,
@@ -1206,8 +1202,7 @@ fn split_rg_cluster_discard_demotes_to_fabric_redirect_15742() {
             next_table: String::new(),
             preference: 200,
             rule_priority: 0,
-            mtu: 0,
-        });
+            mtu: 0, next_table_route: false });
         build_forwarding_state(&snapshot)
     };
     let now_secs = monotonic_nanos() / 1_000_000_000;
@@ -1321,8 +1316,7 @@ fn demoted_cluster_terminal_discard_route_rescues_via_fabric_16216() {
         next_table: String::new(),
         preference: 200,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     let state = build_forwarding_state(&snapshot);
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let inactive_map = BTreeMap::from([(1, inactive_ha_runtime(now_secs))]);
@@ -1420,8 +1414,7 @@ fn split_rg_connected_wan_prefix_does_not_shadow_default_15742() {
         next_table: String::new(),
         preference: 200,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     snapshot.routes.push(RouteSnapshot {
         reject: true,
         cluster_terminal: false,
@@ -1434,8 +1427,7 @@ fn split_rg_connected_wan_prefix_does_not_shadow_default_15742() {
         next_table: String::new(),
         preference: 200,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     for iface in &mut snapshot.interfaces {
         if iface.name == "reth0.80" {
             iface.connected_rg_peer_owned = true;
@@ -6121,8 +6113,7 @@ fn forwarding_resolution_falls_through_cross_table_rule_misses() {
                 next_table: "red.inet.0".to_string(),
                 preference: 0,
                 rule_priority: 0,
-                mtu: 0,
-            },
+                mtu: 0, next_table_route: false },
             crate::RouteSnapshot {
                 reject: false,
                 cluster_terminal: false,
@@ -6135,8 +6126,7 @@ fn forwarding_resolution_falls_through_cross_table_rule_misses() {
                 next_table: "inet.0".to_string(),
                 preference: 0,
                 rule_priority: 0,
-                mtu: 0,
-            },
+                mtu: 0, next_table_route: false },
         ],
         ..Default::default()
     };
@@ -7411,8 +7401,7 @@ fn ecmp_static_route_retains_all_next_hops_and_skips_dead() {
             next_table: String::new(),
             preference: 5,
             rule_priority: 0,
-            mtu: 0,
-        }],
+            mtu: 0, next_table_route: false }],
         // Only the SECOND next-hop's neighbor is resolved; the first is dead.
         neighbors: vec![crate::NeighborSnapshot {
             interface: "ge-0-0-2".to_string(),
@@ -7542,8 +7531,7 @@ fn ecmp_interface_only_member_is_live_alongside_gateway() {
             next_table: String::new(),
             preference: 5,
             rule_priority: 0,
-            mtu: 0,
-        }],
+            mtu: 0, next_table_route: false }],
         // ONLY the gateway member's neighbor is resolved. The interface-only
         // member's neighbor (the per-flow destination) is deliberately absent —
         // it can only resolve lazily once the member is actually selected.
@@ -7699,8 +7687,7 @@ fn ecmp_down_interface_only_member_does_not_share_gateway_hashes_11404() {
                 next_table: String::new(),
                 preference: 5,
                 rule_priority: 0,
-                mtu: 0,
-            },
+                mtu: 0, next_table_route: false },
             crate::RouteSnapshot {
                 reject: false,
                 cluster_terminal: false,
@@ -7716,8 +7703,7 @@ fn ecmp_down_interface_only_member_does_not_share_gateway_hashes_11404() {
                 next_table: String::new(),
                 preference: 5,
                 rule_priority: 0,
-                mtu: 0,
-            },
+                mtu: 0, next_table_route: false },
         ],
         neighbors: vec![
             crate::NeighborSnapshot {
@@ -7853,8 +7839,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths() {
         next_table: String::new(),
         preference: 5,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     let state = build_forwarding_state(&snapshot);
 
     // The FIB retains BOTH next-hops, and exactly one carries a tunnel id.
@@ -8072,8 +8057,7 @@ fn ecmp_mixed_with_noroute_underlay_tunnel_uses_only_live_direct_hop() {
         next_table: String::new(),
         preference: 5,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     let state = build_forwarding_state(&snapshot);
 
     // Sweep the per-flow hash: EVERY flow must forward via the live direct hop
@@ -8167,8 +8151,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths_v6() {
         next_table: String::new(),
         preference: 5,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     let state = build_forwarding_state(&snapshot);
 
     // The sfmix.inet6.0 table also holds the GRE outer prefix; find OUR mixed prefix.
@@ -8344,8 +8327,7 @@ fn ecmp_static_route_spreads_per_flow_not_per_destination() {
             next_table: String::new(),
             preference: 5,
             rule_priority: 0,
-            mtu: 0,
-        }],
+            mtu: 0, next_table_route: false }],
         // BOTH next-hop neighbors are resolved/live, so the live pool is
         // the full set of equal-cost members.
         neighbors: vec![
@@ -8659,8 +8641,7 @@ fn ecmp_dual_enumeration_snapshot_11686(
                 next_table: String::new(),
                 preference: 5,
                 rule_priority: 0,
-                mtu: 0,
-            },
+                mtu: 0, next_table_route: false },
             crate::RouteSnapshot {
                 reject: false,
                 cluster_terminal: false,
@@ -8673,8 +8654,7 @@ fn ecmp_dual_enumeration_snapshot_11686(
                 next_table: String::new(),
                 preference: 5,
                 rule_priority: 0,
-                mtu: 0,
-            },
+                mtu: 0, next_table_route: false },
             crate::RouteSnapshot {
                 reject: false,
                 cluster_terminal: false,
@@ -8690,8 +8670,7 @@ fn ecmp_dual_enumeration_snapshot_11686(
                 next_table: String::new(),
                 preference: 5,
                 rule_priority: 0,
-                mtu: 0,
-            },
+                mtu: 0, next_table_route: false },
         ],
         neighbors: vec![
             neighbor("ge-0-0-1", if_a, "inet", "192.0.2.2", "00:11:22:33:44:55"),
@@ -8986,8 +8965,7 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
                 next_table: String::new(),
                 preference: 50,
                 rule_priority: 0,
-                mtu: 0,
-            },
+                mtu: 0, next_table_route: false },
             // BETTER route second (lower preference).
             crate::RouteSnapshot {
                 reject: false,
@@ -9001,8 +8979,7 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
                 next_table: String::new(),
                 preference: 5,
                 rule_priority: 0,
-                mtu: 0,
-            },
+                mtu: 0, next_table_route: false },
         ],
         neighbors: vec![
             crate::NeighborSnapshot {
@@ -9576,8 +9553,7 @@ fn secure_tunnel_snapshot_6713(policy: TunnelPolicy6713) -> ConfigSnapshot {
             next_table: String::new(),
             preference: 5,
             rule_priority: 0,
-            mtu: 0,
-        }],
+            mtu: 0, next_table_route: false }],
         default_policy: "deny".to_string(),
         policies: vec![match policy {
             TunnelPolicy6713::PermitLanToVpn => PolicyRuleSnapshot {
@@ -12298,8 +12274,7 @@ fn split_rg_live_shape_no_forwarding_default_fabric_redirects_15742() {
         next_table: String::new(),
         preference: 200,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     snapshot.routes.push(RouteSnapshot {
         reject: false,
         cluster_terminal: true,
@@ -12312,8 +12287,7 @@ fn split_rg_live_shape_no_forwarding_default_fabric_redirects_15742() {
         next_table: String::new(),
         preference: 200,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     let state = build_forwarding_state(&snapshot);
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let inactive = Arc::new(ArcSwap::from_pointee(BTreeMap::from([(
@@ -12433,8 +12407,7 @@ fn terminal_attribution_table_scoped_lpm_15917() {
             next_table: String::new(),
             preference: 200,
             rule_priority: 0,
-            mtu: 0,
-        });
+            mtu: 0, next_table_route: false });
     }
     let state = build_forwarding_state(&snapshot);
     let now_secs = monotonic_nanos() / 1_000_000_000;
@@ -12558,8 +12531,7 @@ fn terminal_attribution_same_table_lpm_15917() {
         next_table: String::new(),
         preference: 200,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     let state = build_forwarding_state(&snapshot);
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let ha = Arc::new(ArcSwap::from_pointee(BTreeMap::from([
@@ -12675,8 +12647,7 @@ fn terminal_gateway_owner_table_scoped_15917() {
         next_table: String::new(),
         preference: 200,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     snapshot.routes.push(RouteSnapshot {
         reject: false,
         cluster_terminal: true,
@@ -12689,8 +12660,7 @@ fn terminal_gateway_owner_table_scoped_15917() {
         next_table: String::new(),
         preference: 200,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     let state = build_forwarding_state(&snapshot);
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let ha = Arc::new(ArcSwap::from_pointee(BTreeMap::from([
@@ -12814,8 +12784,7 @@ fn terminal_attribution_equal_prefix_tie_lowest_ifindex_15917() {
         next_table: String::new(),
         preference: 200,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     let state = build_forwarding_state(&snapshot);
     let now_secs = monotonic_nanos() / 1_000_000_000;
     // Both candidate RGs peer-owned, mirroring the markings above.
@@ -13056,8 +13025,7 @@ fn republication_ordering_connected_wins_16270() {
         next_table: String::new(),
         preference: 200,
         rule_priority: 0,
-        mtu: 0,
-    });
+        mtu: 0, next_table_route: false });
     let now_secs = monotonic_nanos() / 1_000_000_000;
     // The on-link WAN target needs a neighbor row, exactly as the
     // live kernel table holds it (#15742 live-shape precedent).
@@ -13128,8 +13096,7 @@ fn connected_beats_operator_discard_only_when_cluster_terminal_present_16270() {
             next_table: String::new(),
             preference: 200,
             rule_priority: 0,
-            mtu: 0,
-        });
+            mtu: 0, next_table_route: false });
         if with_cluster {
             snapshot.routes.push(RouteSnapshot {
                 reject: false,
@@ -13143,8 +13110,7 @@ fn connected_beats_operator_discard_only_when_cluster_terminal_present_16270() {
                 next_table: String::new(),
                 preference: 200,
                 rule_priority: 0,
-                mtu: 0,
-            });
+                mtu: 0, next_table_route: false });
         }
         if cover_peer_owned {
             // Suppress the covering /24 from transit: it survives only
