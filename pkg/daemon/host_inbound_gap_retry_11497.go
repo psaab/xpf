@@ -65,9 +65,30 @@ func (d *Daemon) hostInboundGapOwed() bool {
 	return d.hostInboundGapDebt.owed
 }
 
+// nudgeHostInboundGapReassert requests an immediate host-inbound gap
+// re-assert (#16559). Non-blocking depth-1 send that coalesces a burst:
+// the caller is a DHCP client goroutine, and reassertHostInboundGapOnce
+// acquires applySem. A synchronous apply there would park the client
+// uncancellably on applySem; if the apply holding applySem then stops
+// or restarts that client (reconcileDHCPClients -> Reconcile waits on
+// its done channel), neither side can proceed and applySem never
+// releases. Safe before the loop starts and on a nil channel (a Daemon
+// built without New).
+func (d *Daemon) nudgeHostInboundGapReassert() {
+	if d.hostInboundGapWakeCh == nil {
+		return
+	}
+	select {
+	case d.hostInboundGapWakeCh <- struct{}{}:
+	default:
+	}
+}
+
 // hostInboundGapReassertLoop is the bounded wall-clock convergence owner for
 // double failures. It does no work while no debt is owed and is joined by Run's
-// daemon WaitGroup on shutdown.
+// daemon WaitGroup on shutdown. It also wakes immediately on
+// nudgeHostInboundGapReassert (#16559) so an unchanged-lease renewal can
+// re-drive convergence without applying inline on the client goroutine.
 func (d *Daemon) hostInboundGapReassertLoop(ctx context.Context) {
 	t := time.NewTicker(hostInboundGapReassertInterval)
 	defer t.Stop()
@@ -76,6 +97,8 @@ func (d *Daemon) hostInboundGapReassertLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			d.reassertHostInboundGapOnce(ctx)
+		case <-d.hostInboundGapWakeCh:
 			d.reassertHostInboundGapOnce(ctx)
 		}
 	}

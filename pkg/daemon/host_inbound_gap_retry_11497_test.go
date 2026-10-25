@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -187,27 +188,44 @@ func TestHostInboundGapReassertDoesNothingWhenNothingOwed11497(t *testing.T) {
 }
 
 // TestUnchangedDHCPRenewalReassertsOnlyOwedGapDebt11497 proves the daemon-side
-// T1/T2 exception: an unchanged lease event drives a full active-config apply
-// while the exact gap debt is owed, then is silent again after convergence.
+// T1/T2 exception: an unchanged lease event re-drives a full active-config
+// apply while the exact gap debt is owed, then is silent again after
+// convergence. Since #16559 the hook only nudges the retry owner, so the
+// apply is observed through the running reassert loop, not synchronously.
 func TestUnchangedDHCPRenewalReassertsOnlyOwedGapDebt11497(t *testing.T) {
 	store, _ := newRollbackTestStore(t)
-	d := &Daemon{applySem: semaphore.NewWeighted(1), store: store}
-	applies := 0
-	d.applyBodyForTest = func(*config.Config) { applies++ }
+	d := &Daemon{applySem: semaphore.NewWeighted(1), store: store, hostInboundGapWakeCh: make(chan struct{}, 1)}
+	var applies atomic.Int64
+	d.applyBodyForTest = func(*config.Config) { applies.Add(1) }
 	d.noteHostInboundGapApplyResult(errors.New("real host-inbound and gap nft failures"))
 	if owed, _, _ := d.HostInboundGapDebt(); !owed {
 		t.Fatal("failure injection did not latch host-inbound gap debt")
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); d.hostInboundGapReassertLoop(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
 	d.onDHCPUnchangedLease()
-	if applies != 1 {
-		t.Fatalf("unchanged-lease retry performed %d applies, want exactly one", applies)
+	// The hook is now async: poll briefly for the loop-driven apply and
+	// the debt discharge it performs on success.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if owed, _, _ := d.HostInboundGapDebt(); !owed && applies.Load() == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if applies.Load() != 1 {
+		t.Fatalf("unchanged-lease retry performed %d applies, want exactly one", applies.Load())
 	}
 	if owed, _, _ := d.HostInboundGapDebt(); owed {
 		t.Fatal("successful active-config apply did not discharge gap debt")
 	}
 	d.onDHCPUnchangedLease()
-	if applies != 1 {
-		t.Fatalf("unchanged lease with no debt performed another apply: total=%d", applies)
+	time.Sleep(150 * time.Millisecond)
+	if applies.Load() != 1 {
+		t.Fatalf("unchanged lease with no debt performed another apply: total=%d", applies.Load())
 	}
 }

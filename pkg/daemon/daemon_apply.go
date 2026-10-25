@@ -438,6 +438,21 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// applyBodyForTest seam so the reset holds on the stubbed path too.
 	d.policyInvalidationCapture = nil
 
+	// Successful full applies discharge scoped gap debt even when the active
+	// config no longer renders a host-inbound table to install (for example,
+	// a config change removed the last enforcing scope). Placed BEFORE the
+	// applyBodyForTest seam return (#16559): the seam is an early return, so
+	// a discharge deferred after it (its pre-#16559 position, past the nil
+	// guard) never ran on the stubbed path the #11497 tests drive — those
+	// tests passed pre-#16559 only because the inline hook reached
+	// applyConfigUnderSem's own discharge, which applyActiveConfigResult
+	// (the retry owner's path) does not have.
+	defer func() {
+		if retErr == nil {
+			d.noteHostInboundGapApplyResult(nil)
+		}
+	}()
+
 	if d.applyBodyForTest != nil {
 		d.applyBodyForTest(cfg)
 		d.policyInvalidationPublishLanded = !applyErrSkipsPeerSync(d.applyErrForTest)
@@ -468,14 +483,8 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 			d.resolveDeferredSnapshotApplyAfterSynchronousPublish(cfg, result.Generation)
 		}
 	}()
-	// Successful full applies discharge scoped gap debt even when the active
-	// config no longer renders a host-inbound table to install (for example,
-	// a config change removed the last enforcing scope).
-	defer func() {
-		if retErr == nil {
-			d.noteHostInboundGapApplyResult(nil)
-		}
-	}()
+	// (The #11497 gap-debt discharge defer is registered before the
+	// applyBodyForTest seam above — see the #16559 note there.)
 
 	// #5281 defense-in-depth: refuse to reconcile once a factory reset has
 	// entered the terminal reset generation. The commit / sync / rollback entry

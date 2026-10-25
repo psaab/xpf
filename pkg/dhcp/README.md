@@ -306,6 +306,11 @@ the debounced `onAddressChange` callback when content changed.
   for nothing. When a caller registers the optional unchanged-lease hook, it
   fires only on such renewals and outside the manager lock; the daemon uses
   that exception solely while #11497 host-inbound gap debt is owed.
+  The hook runs ON the committing client goroutine (#16559), so it must
+  never block uncancellably: the daemon hook only nudges the gap retry
+  owner (non-blocking depth-1 send), which owns the `applySem` apply. An
+  inline apply parking on `applySem` deadlocks when the apply holding it
+  stops/restarts this client (`Reconcile` waits on its done channel).
   `Reconcile` keys on config identity (never lease state), so the re-drive
   cannot restart clients in a loop — only recompile churn.
   An IA_PD reply with **no prefixes** (silence) retains previously delegated
