@@ -375,13 +375,13 @@ fn flowless_cos_ba_queue_id(
     .unwrap_or(iface.default_queue)
 }
 
-/// #13968/#14636: egress DSCP rewrite keyed by the packet's final
-/// forwarding-class rather than the materialization-clamped queue. A
-/// filter-selected class (`filter_forwarding_class`) overrides BA
-/// classification, so it keys the rewrite first; otherwise the BA class
-/// re-walked from the trusted classifiers keys it; the clamped queue is
-/// the fallback. The queue-keyed `dscp_rewrite_by_fc_lp` entry for a
-/// filter class is its class's global queue id from `CoSState`.
+/// #13968/#14636/#16506: egress DSCP rewrite keyed ONLY by the packet's
+/// final forwarding-class. A filter-selected class
+/// (`filter_forwarding_class`) is the final class and outranks BA
+/// classification; otherwise the BA class re-walked from the trusted
+/// classifiers is the final class. Neither the overridden BA class nor a
+/// clamped/pinned queue carrying another class's entry may supply the
+/// rewrite. The class key is the class's global queue id from `CoSState`.
 fn resolve_cos_ba_class_rewrite(
     forwarding: &ForwardingState,
     egress_ifindex: i32,
@@ -619,8 +619,8 @@ fn cached_cos_tx_selection_flowless(
             queue_id = filter_queue;
         }
     }
-    // #13968/#14636: keyed by the packet's final class, not the clamped
-    // queue. A filter-selected class keys first; otherwise the BA class.
+    // #13968/#14636/#16506: keyed ONLY by the packet's final class. A
+    // filter-selected class is final; otherwise the BA class is.
     let cos_rewrite = match (iface, queue_id) {
         (Some(iface), Some(queue_id)) => resolve_cos_ba_class_rewrite(
             forwarding,
@@ -979,9 +979,10 @@ pub(in crate::afxdp) fn reclassify_cached_ba_queue_and_lp_rewrite(
 }
 
 /// Re-resolve only the packet-dependent LP rewrite for a filter-pinned queue.
-/// #14636: `filter_class_queue_id` is the pinned filter class's global queue
-/// id stored on the descriptor; it keys the rewrite before the packet's BA
-/// class, which in turn keys before the pinned queue.
+/// #14636/#16506: `filter_class_queue_id` is the pinned filter class's global
+/// queue id stored on the descriptor; it is the final class and the ONLY
+/// class that keys the rewrite — never the overridden BA class or the
+/// pinned (possibly clamped/aliased) queue.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn reclassify_cached_cos_lp_rewrite(
     forwarding: &ForwardingState,
@@ -1004,9 +1005,9 @@ pub(in crate::afxdp) fn reclassify_cached_cos_lp_rewrite(
             ..Default::default()
         },
     );
-    // #13968/#14636: the pinned queue may be the clamped default for an
-    // unmaterialized class; key the LP rewrite by the filter class first,
-    // then the packet's BA class, falling back to the pinned queue's entry.
+    // #13968/#14636/#16506: the pinned queue may be the clamped default for
+    // an unmaterialized class; key the LP rewrite ONLY by the final
+    // (filter) class — the BA class it overrides never keys it.
     let class_queue_id = forwarding
         .cos
         .interfaces
@@ -1444,8 +1445,8 @@ fn resolve_cos_tx_selection_internal(
                 queue_id = filter_queue;
             }
         }
-        // #13968/#14636: keyed by the final forwarding-class, not the clamped
-        // queue; a filter-selected class keys before the BA class.
+        // #13968/#14636/#16506: keyed ONLY by the final forwarding-class;
+        // a filter-selected class is final, otherwise the BA class is.
         let cos_rewrite = match (iface, queue_id) {
             (Some(iface), Some(queue_id)) => resolve_cos_ba_class_rewrite(
                 forwarding,
@@ -1733,11 +1734,11 @@ fn resolve_cos_tx_selection_internal(
     // queue. A filter DSCP rewrite (`effective_dscp_rewrite`) still takes
     // precedence; the CoS rewrite-rule only fills the gap, matching the drain
     // ordering `req.dscp_rewrite.or(queue_dscp_rewrite)` this replaces.
-    // #13968/#14636: keyed by the packet's final forwarding-class, not the
-    // clamped egress queue — a BA class with no materialized egress queue
-    // (or a filter class pinned to the default queue) must not be re-marked
-    // with the default queue's class entry, and a filter class keys before
-    // the BA class it overrides.
+    // #13968/#14636/#16506: keyed ONLY by the packet's final forwarding-class
+    // — a BA class with no materialized egress queue (or a filter class
+    // pinned to the default queue) must not be re-marked with the default
+    // queue's class entry, and a filter class is the final class: the BA
+    // class it overrides never keys the rewrite.
     let cos_rewrite = resolve_cos_ba_class_rewrite(
         forwarding,
         egress_ifindex,
