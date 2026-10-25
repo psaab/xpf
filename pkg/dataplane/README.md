@@ -1456,14 +1456,23 @@ snap`, and there are two of them — one per acceptance path).
     both converges in that same commit (#9845) — and successful MTU writes
     join the #4960 host-mutation record.
     **A unit MTU that is
-    DELETED resets the child to its parent's live MTU (#9757)** — the value a
+    DELETED resets the child to its parent's planned MTU when this apply plans
+    one, else its parent's live MTU (#9757/#16633)** — the value a
     freshly created VLAN child inherits. Before that the write happened only
     when `unit.MTU > 0`, with no other branch, and nothing else writes a VLAN
     unit's MTU: deleting `family inet mtu` left the device, and the userspace
     egress MTU read from it, at the old value, so the committed configuration
     stopped describing the running state (measured on the loss cluster: both
     nodes' children sat at 1400 after the delete, and the only repair was to
-    commit an explicit mtu and delete it again). The reset writes only on a real
+    commit an explicit mtu and delete it again). #16633: the reset used to read
+    the parent's CACHED pre-write MTU, so raising the interface `mtu` (or
+    deleting a lowered one, which plans the 1500 default) in the same commit
+    made the stale target equal the child's live MTU — no write, no
+    MTUUnconverged record, child stuck at the old value until the next commit.
+    The reset now targets `physDesired`'s planned parent MTU when a plan
+    exists (converging via the #9845 retry when the kernel refuses the raise
+    before the parent moves) and falls back to the live parent MTU otherwise.
+    The reset writes only on a real
     difference, because this path runs on every commit. Sorting the zone map would have made
     the outcome stable and still arbitrary, so the second writer is removed
     rather than made to lose consistently. The witness is

@@ -23,9 +23,11 @@ import (
 // nine seconds after the commit. The only repair was to commit an explicit
 // `mtu 1500` and delete it again.
 //
-// The reset target is the PARENT link's MTU, which is what a freshly created
-// VLAN child inherits — so the device lands where it would have been had the
-// statement never existed, rather than at a number this code invented.
+// The reset target is the PARENT's MTU after the apply (#16633: the same-pass
+// plan when one exists, else the parent link's live MTU), which is what a
+// freshly created VLAN child inherits — so the device lands where it would
+// have been had the statement never existed, rather than at a number this
+// code invented.
 
 // noUnitMTUConfig9757 is taggedOnlyConfig9757's shape: unit 50 keeps an explicit
 // unit MTU, unit 80 has none. The two live side by side deliberately, so one
@@ -42,22 +44,27 @@ func noUnitMTUConfig9757() *config.Config {
 }
 
 // A unit with NO mtu statement whose device carries a stale lowered value is
-// reset to the parent's MTU.
+// reset to the parent's planned MTU (#16633: the same-pass plan, here the
+// interface-level 1400, not the parent's cached live value).
 func TestDeletedUnitMTUResetsTheSubInterface9757(t *testing.T) {
 	cfg := noUnitMTUConfig9757()
 	sub80 := taggedParent9761 + ".80"
 
-	// Parent at 1500; the stale 1400 is what the deleted statement left behind.
-	h, writes := applyTaggedParent9761(t, cfg, 1500, 1300, 1400)
+	// The fixture plans 1400 on the parent; the parent link is still cached
+	// at 1500 and the stale 1400 on the child is what the deleted statement
+	// left behind. The reset target is the planned 1400.
+	h, _ := applyTaggedParent9761(t, cfg, 1500, 1300, 1400)
 
-	if got := h.mtu[sub80]; got != 1500 {
-		t.Fatalf("#9757: %s kept MTU %d after the mtu statement was deleted, want the parent's 1500.\n"+
+	if got := h.mtu[sub80]; got != 1400 {
+		t.Fatalf("#9757/#16633: %s kept MTU %d after the mtu statement was deleted, want the parent's planned 1400.\n"+
 			"The committed configuration no longer describes the running state: DF-set traffic between "+
 			"the stale value and the link MTU keeps drawing Frag-Needed from the box, and the userspace "+
 			"egress MTU is read from this same device", sub80, got)
 	}
-	if writes[sub80] == 0 {
-		t.Fatalf("no MTU write reached %s, so the reset did not happen through the seam", sub80)
+	// The child already sits at the planned value, so the reset is a no-op
+	// write-wise; the parent itself must still converge 1500 -> 1400.
+	if got := h.mtu[taggedParent9761]; got != 1400 {
+		t.Fatalf("parent %s mtu = %d, want its planned 1400", taggedParent9761, got)
 	}
 
 	// CONTROL, in the same apply: the unit that DOES carry a statement still
@@ -69,37 +76,46 @@ func TestDeletedUnitMTUResetsTheSubInterface9757(t *testing.T) {
 	}
 }
 
-// Idempotence: a device already at the parent's MTU draws no write. Without
-// this, the reset could re-write the same value on every apply — churn on a
-// path that runs on every commit, and the kind of thing that only shows up as
-// log noise until someone counts.
+// Idempotence: a device already at the parent's planned MTU draws no write.
+// Without this, the reset could re-write the same value on every apply —
+// churn on a path that runs on every commit, and the kind of thing that only
+// shows up as log noise until someone counts.
 func TestUnitMTUResetIsIdempotent9757(t *testing.T) {
 	cfg := noUnitMTUConfig9757()
 	sub80 := taggedParent9761 + ".80"
 
-	// Already where the reset wants it.
-	h, writes := applyTaggedParent9761(t, cfg, 1500, 1300, 1500)
+	// Already where the reset wants it: parent and child both at the planned
+	// 1400 (the fixture's interface-level mtu).
+	h, writes := applyTaggedParent9761(t, cfg, 1400, 1300, 1400)
 
-	if got := h.mtu[sub80]; got != 1500 {
-		t.Fatalf("%s must stay at 1500, got %d", sub80, got)
+	if got := h.mtu[sub80]; got != 1400 {
+		t.Fatalf("%s must stay at 1400, got %d", sub80, got)
 	}
 	if writes[sub80] != 0 {
-		t.Fatalf("#9757: %s drew %d MTU writes while already at the parent's MTU; the reset must be "+
+		t.Fatalf("#9757: %s drew %d MTU writes while already at the parent's planned MTU; the reset must be "+
 			"a no-op when the device is already correct", sub80, writes[sub80])
 	}
 }
 
-// The reset follows the PARENT, not a constant. A parent lowered by an
-// interface-level `mtu` is the value a new child would inherit, so an
-// unstatemented unit must land there too — 1500 is not hardcoded anywhere.
+// The reset follows the PARENT'S PLAN, not a constant and not the parent's
+// stale live value. A parent raised by an interface-level `mtu` in this same
+// commit is the value a new child would inherit, so an unstatemented unit
+// must land there too — 1500 is not hardcoded anywhere. The parent link here
+// still reads its OLD 1500 live (cached, pre-write) while the plan is 9000;
+// on the pre-#16633 code the reset targeted 1500 and left the child there.
 func TestUnitMTUResetFollowsTheParent9757(t *testing.T) {
 	cfg := noUnitMTUConfig9757()
+	cfg.Interfaces.Interfaces[taggedParent9761].MTU = 9000
 	sub80 := taggedParent9761 + ".80"
 
-	h, _ := applyTaggedParent9761(t, cfg, 9000, 1300, 1400)
+	h, _ := applyTaggedParent9761(t, cfg, 1500, 1300, 1400)
 
+	if got := h.mtu[taggedParent9761]; got != 9000 {
+		t.Fatalf("premise: parent mtu = %d, want its planned 9000 after the apply", got)
+	}
 	if got := h.mtu[sub80]; got != 9000 {
-		t.Fatalf("#9757: %s reset to %d, want the parent's 9000. The reset target must be the parent "+
-			"link's MTU — what a freshly created VLAN child inherits — not a constant", sub80, got)
+		t.Fatalf("#9757/#16633: %s reset to %d, want the parent's planned 9000. The reset target must be the parent "+
+			"MTU after this apply — what a freshly created VLAN child inherits — not a constant and not the "+
+			"parent's cached pre-write MTU", sub80, got)
 	}
 }

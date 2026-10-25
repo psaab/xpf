@@ -716,3 +716,135 @@ func TestConvergedEndStateSkipsTheRetry_9845(t *testing.T) {
 		t.Errorf("records = %+v, want none: the converged end state is journal-only", recs)
 	}
 }
+
+// #16633: raising ONLY the parent's interface mtu (the unit carries no MTU
+// statement of its own — the usual Junos shape) must converge the
+// statement-less child in the SAME apply. Before the fix the reset targeted
+// the parent's cached pre-write MTU (1500), which equalled the child's live
+// 1500, so it no-opped with no write and no MTUUnconverged record; the child
+// stayed at 1500 until the next commit. The planned target (3000) is refused
+// while the parent is still at 1500 and converges on the #9845 retry.
+func TestStatementlessChildFollowsParentRaiseInOneApply_16633(t *testing.T) {
+	const parent = "ge-0-0-9"
+	cfg := &config.Config{}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"trust": {Name: "trust", Interfaces: []string{parent + ".80"}},
+	}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		parent: {
+			Name: parent, VlanTagging: true, MTU: 3000,
+			Units: map[int]*config.InterfaceUnit{
+				80: {Number: 80, VlanID: 80, Addresses: []string{"10.80.0.1/24"}},
+			},
+		},
+	}
+	if u := cfg.Interfaces.Interfaces[parent].Units[80]; u.MTU != 0 {
+		t.Fatalf("premise: unit 80 must carry no MTU statement, got %d", u.MTU)
+	}
+	if pd := planPhysDesired(cfg)[parent]; pd == nil || pd.mtu != 3000 {
+		t.Fatalf("premise: parent plan = %+v, want mtu 3000", pd)
+	}
+	child := parent + ".80"
+	h, attempts, result := applyWithKernelMTU9845(t, cfg, map[string]int{parent: 1500, child: 1500})
+
+	if got := h.mtu[parent]; got != 3000 {
+		t.Fatalf("parent %s mtu = %d after one apply, want 3000", parent, got)
+	}
+	if got := h.mtu[child]; got != 3000 {
+		t.Fatalf("#16633: statement-less child %s kept MTU %d after one apply raising its parent to 3000, want 3000.\n"+
+			"The reset read the parent's cached pre-write MTU, equalled the child's live value, and no-opped "+
+			"with no write and no record until the next commit", child, got)
+	}
+	// Refused-attempt + retry pair, mirroring the explicit-unit raise cell:
+	// the first write (3000 > parent's live 1500) is refused, the retry after
+	// the parent's raise succeeds. On the pre-fix code this is 0 attempts.
+	if n := len(attempts[child]); n != 2 {
+		t.Errorf("child %s drew %d MTU attempts, want 2 (refused-attempt + one retry after the parent's raise)", child, n)
+	} else {
+		if attempts[child][0].err == nil || attempts[child][0].mtu != 3000 {
+			t.Errorf("first child attempt = %+v, want a refused write of 3000 (the planned reset target)", attempts[child][0])
+		}
+		if err := attempts[child][1].err; err != nil {
+			t.Errorf("retry of %s after the parent's raise failed: %v", child, err)
+		}
+	}
+	if n := len(attempts[parent]); n != 1 {
+		t.Errorf("parent %s drew %d MTU attempts, want exactly 1", parent, n)
+	}
+	if recs := result.sortedMTUUnconverged(); len(recs) != 0 {
+		t.Errorf("converged apply carries %d MTUUnconverged records, want none (the retry success must clear): %+v", len(recs), recs)
+	}
+}
+
+// #16633 control: the same statement-less child on a CONVERGED host (parent
+// and child already at the planned MTU) draws no write at all — the planned
+// target must not reintroduce per-commit churn. Companion to
+// TestConvergedApplyWritesNoMTU_9845 (explicit unit) and
+// TestUnitMTUResetIsIdempotent9757 (direct-call shape).
+func TestStatementlessConvergedApplyWritesNoMTU_16633(t *testing.T) {
+	const parent = "ge-0-0-9"
+	cfg := &config.Config{}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"trust": {Name: "trust", Interfaces: []string{parent + ".80"}},
+	}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		parent: {
+			Name: parent, VlanTagging: true, MTU: 3000,
+			Units: map[int]*config.InterfaceUnit{
+				80: {Number: 80, VlanID: 80, Addresses: []string{"10.80.0.1/24"}},
+			},
+		},
+	}
+	child := parent + ".80"
+	h, attempts, result := applyWithKernelMTU9845(t, cfg, map[string]int{parent: 3000, child: 3000})
+
+	if len(attempts) != 0 {
+		t.Errorf("a converged statement-less apply tried MTU writes %v, want none", attempts)
+	}
+	if h.mtu[parent] != 3000 || h.mtu[child] != 3000 {
+		t.Errorf("converged MTUs moved: parent=%d child=%d, want 3000/3000", h.mtu[parent], h.mtu[child])
+	}
+	if recs := result.sortedMTUUnconverged(); len(recs) != 0 {
+		t.Errorf("converged apply carries MTUUnconverged records %+v, want none", recs)
+	}
+}
+
+// #16633: deleting a LOWERED interface mtu plans the 1500 default on the
+// parent. A statement-less child left above it by the old lowered value's
+// era (parent live 1400, child 1400, plan 1500) must still converge in one
+// apply: the planned 1500 exceeds the parent's live 1400, so the first write
+// is refused and the retry after the parent's write to 1500 lands it. This
+// is the delete arm of the issue ("or that deletes a lowered value").
+func TestStatementlessChildFollowsDeletedLoweredParentMTU_16633(t *testing.T) {
+	const parent = "ge-0-0-9"
+	cfg := &config.Config{}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"trust": {Name: "trust", Interfaces: []string{parent + ".80"}},
+	}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		parent: {
+			Name: parent, VlanTagging: true, // no interface mtu: deleted
+			Units: map[int]*config.InterfaceUnit{
+				80: {Number: 80, VlanID: 80, Addresses: []string{"10.80.0.1/24"}},
+			},
+		},
+	}
+	if pd := planPhysDesired(cfg)[parent]; pd == nil || pd.mtu != defaultPhysicalMTU9985 {
+		t.Fatalf("premise: parent plan = %+v, want the materialised default %d", pd, defaultPhysicalMTU9985)
+	}
+	child := parent + ".80"
+	h, attempts, result := applyWithKernelMTU9845(t, cfg, map[string]int{parent: 1400, child: 1400})
+
+	if got := h.mtu[parent]; got != 1500 {
+		t.Fatalf("parent %s mtu = %d after one apply, want the default 1500", parent, got)
+	}
+	if got := h.mtu[child]; got != 1500 {
+		t.Fatalf("#16633: statement-less child %s kept MTU %d after the lowered parent mtu was deleted, want 1500 in the same apply", child, got)
+	}
+	if n := len(attempts[child]); n != 2 {
+		t.Errorf("child %s drew %d MTU attempts, want 2 (refused-attempt + retry)", child, n)
+	}
+	if recs := result.sortedMTUUnconverged(); len(recs) != 0 {
+		t.Errorf("converged apply carries MTUUnconverged records %+v, want none", recs)
+	}
+}

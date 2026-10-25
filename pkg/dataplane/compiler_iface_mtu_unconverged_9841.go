@@ -64,9 +64,11 @@ const (
 	// above the parent's live MTU with no parent plan at all). No sequence
 	// of xpf applies converges it; the config has to change.
 	MTUGradeConfigImpossible MTUUnconvergedGrade = "config-impossible"
-	// MTUGradeResetTargetUnresolved: a unit with no MTU statement whose
-	// #9757 reset target (the parent's live MTU) could not be read. Want
-	// is unknown; the device keeps whatever it had.
+	// MTUGradeResetTargetUnresolved: a unit with no MTU statement and no
+	// parent plan whose #9757 fall-back reset target (the parent's live
+	// MTU) could not be read. Want is unknown; the device keeps whatever
+	// it had. With a plan, #16633 targets the planned value directly and
+	// this grade is unreachable.
 	MTUGradeResetTargetUnresolved MTUUnconvergedGrade = "reset-target-unresolved"
 	// MTUGradeBlockedByChildLive: a parent lower refused while a live VLAN
 	// child sits above the want. Pure live observation (no plan modeling):
