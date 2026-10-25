@@ -667,6 +667,30 @@ A promotion taken on this row sets `DegradedPromoted` and records its reason in
 the RG event history, the same as the #7161/#7939 timeout fallback, so
 `show chassis cluster status` distinguishes it from a normal promotion.
 
+### Both nodes at weight 0 from monitor debt (#16736)
+
+Junos keeps exactly one owner when neither node is healthier: "If the
+monitored interfaces of a redundancy group on both nodes reach their
+thresholds at the same time, the redundancy group becomes primary on
+the node with the lower node ID" (Juniper, Monitoring Chassis Cluster
+Interfaces). `electRG` implements this as a both-zero arm ahead of the
+"Local weight 0" / "Peer weight 0" arms: when the peer is alive, both
+weights are 0, the peer reports neither `StateSecondaryHold` nor
+`StatePrimary`, the local RG is not under `ManualFailover`, and the
+local weight is positively monitor-debt-derived
+(`localWeightIsMonitorDebtLocked`: `Weight == rgWeightFromDebt(totalLost)`
+with `totalLost > 0`), the lower node ID elects primary and the higher
+stays secondary. A `ForceSecondary` pin (weight 0 with no 255 debt)
+fails the debt test and stays drained; a local kernel-upgrade hold
+never reaches the arm (`electRG` returns first); a peer
+`StateSecondaryHold` is left to the "Peer transfer out" arm; duplicate
+node IDs fail closed to secondary (#4549 F11). A peer kernel hold
+advertises the same weight-0/secondary wire shape as monitor debt and
+cannot be distinguished in-band today — if the peer is in fact held,
+the lower node taking primary matches the existing #9452 held-peer
+degraded-promotion behaviour, and the held node itself never promotes.
+Cells: `election_both_zero_16736_test.go`.
+
 ## Duplicate node-id (invalid cluster, #4549 F11)
 
 Two chassis sharing a node-id is an invalid cluster: the HA protocol

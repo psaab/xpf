@@ -220,6 +220,88 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 	localEff := EffectivePriority(localPriority, localWeight)
 	peerEff := EffectivePriority(peerPriority, peerWeight)
 
+	// #16736: both weights 0 from monitor debt — Junos keeps exactly one
+	// owner: "If the monitored interfaces of a redundancy group on both
+	// nodes reach their thresholds at the same time, the redundancy group
+	// becomes primary on the node with the lower node ID"
+	// (Juniper, Monitoring Chassis Cluster Interfaces). Without this,
+	// each node takes "Local weight 0" below and the RG is owned by
+	// NEITHER node for the duration of the fault.
+	//
+	// This arm MUST distinguish monitor debt from the other weight-0
+	// shapes, because electing on those would resurrect a node that
+	// deliberately resigned:
+	//
+	//   - Local explicit resignation: rg.ManualFailover (ManualFailover /
+	//     ForceSecondary). Local weight is then pinned 0 or the state is
+	//     secondary-hold; the ManualFailover block above has already
+	//     returned for a plain hold, and ForceSecondary also sets
+	//     ManualFailover, so reaching here with ManualFailover set means
+	//     the dual-resign guard just cleared it for THIS election —
+	//     that path already intends normal election (its restore puts
+	//     back the monitor-derived weight, so localWeight is the debt
+	//     weight, not a pin). The explicit !rg.ManualFailover check
+	//     below is therefore belt-and-braces for any future producer
+	//     that pins weight 0 without the flag.
+	//   - Local kernel-upgrade hold: electRG returned at the top
+	//     (m.kernelUpgradeHold); a held node never reaches here.
+	//   - Peer explicit resignation: the peer reports
+	//     StateSecondaryHold (ManualFailover) — excluded below; the
+	//     existing "Peer transfer out" arm owns that case.
+	//   - Peer kernel-upgrade hold: a held node keeps its local weight
+	//     but buildHeartbeat clamps its advertised weight to 0 and
+	//     perpetually reports StateSecondary (the hold blocks its
+	//     election; SetKernelUpgradeHold also demotes). That wire shape
+	//     is INDISTINGUISHABLE from a peer whose monitors took it to
+	//     weight 0 and which is likewise secondary. No in-band signal
+	//     separates them today (see peerYieldedOwnership). [INFERENCE]
+	//     The harm is bounded: if the peer is in fact held, the lower
+	//     node taking primary is exactly what the existing #9452
+	//     held-peer degraded promotion already does (availability
+	//     over ownerlessness), the held node itself never promotes
+	//     (its own electRG returns first), and when it clears the
+	//     hold ordinary election resumes. The alternative — treating
+	//     every both-zero peer as held — restores the defect.
+	//
+	// Monitor debt is positively identified locally: weight 0 is
+	// debt-derived iff rg.Weight equals the debt-derived weight AND
+	// that derivation actually consumed debt (totalLost > 0). A
+	// ForceSecondary pin (Weight=0 with no debt, or with debt smaller
+	// than 255) fails the equality/debt test. Debts >= 255 from
+	// helper-crash-loop cost (HelperCrashLoopMonitorCost) also read as
+	// debt here — deliberately: that producer resigns so a HEALTHIER
+	// peer takes over, and when both nodes are at 0 neither is
+	// healthier, so the Junos lower-ID owner is the availability-
+	// preserving outcome rather than an ownerless RG. [INFERENCE]
+	//
+	// Duplicate node ID (m.nodeID == m.peerNodeID) is INVALID
+	// (#4549 F11): no asymmetric tie-break exists, so fail closed to
+	// secondary and surface it, exactly as the preempt tie arm does.
+	// A peer reporting StatePrimary at weight 0 is left to the
+	// dual-active / peer-primary arms below rather than resolved
+	// here — this arm only fires when BOTH sides report non-primary.
+	if localWeight <= 0 && peerWeight <= 0 &&
+		peerGroup.State != StateSecondaryHold && peerGroup.State != StatePrimary &&
+		!rg.ManualFailover && m.localWeightIsMonitorDebtLocked(rg) {
+		if m.nodeID == m.peerNodeID {
+			m.warnDuplicateNodeIDLocked()
+			if rg.State != StateSecondary {
+				return electLocalSecondary, "Both weights 0: duplicate node-id yields (invalid config)"
+			}
+			return electNoChange, ""
+		}
+		if m.nodeID < m.peerNodeID {
+			if rg.State != StatePrimary {
+				return electLocalPrimary, "Both weights 0: lower node ID wins tie"
+			}
+			return electNoChange, ""
+		}
+		if rg.State != StateSecondary {
+			return electLocalSecondary, "Both weights 0: higher node ID loses tie"
+		}
+		return electNoChange, ""
+	}
+
 	// Weight 0 → always secondary.
 	if localWeight <= 0 {
 		if rg.State != StateSecondary {
@@ -1130,6 +1212,24 @@ func (m *Manager) reconcileMonitorDebtsLocked(cfg *config.ClusterConfig) {
 				"rg", rgID, "old", oldWeight, "new", rg.Weight)
 		}
 	}
+}
+
+// localWeightIsMonitorDebtLocked reports whether rg.Weight is the
+// monitor-debt-derived weight AND that derivation consumed real debt
+// (#16736). It positively separates monitor debt (interface monitors,
+// ip-monitoring, helper-crash-loop cost — all installed through
+// SetMonitorWeight into monitorWeights/MonitorFails) from a weight
+// pinned to 0 by ForceSecondary, which sets Weight=0 directly without
+// installing debt of 255: with no debt the derived weight is 255, and
+// with partial debt it is >0, so a pinned 0 fails the equality. A
+// kernel-upgrade hold never reaches the caller (electRG returns
+// first) and does not touch Weight at all. Caller must hold m.mu.
+func (m *Manager) localWeightIsMonitorDebtLocked(rg *RedundancyGroupState) bool {
+	totalLost := 0
+	for _, iface := range rg.MonitorFails {
+		totalLost += m.monitorWeights[monitorKey{rgID: rg.GroupID, iface: iface}]
+	}
+	return totalLost > 0 && rg.Weight == rgWeightFromDebt(totalLost)
 }
 
 // readinessGateVerdictLocked is the ONE readiness-gate decision, shared by both
