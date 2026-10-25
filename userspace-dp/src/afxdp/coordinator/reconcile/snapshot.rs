@@ -321,12 +321,13 @@ pub(super) fn build_reconcile_forwarding(
     snapshot: &ConfigSnapshot,
     policy_state: &mut crate::policy::PreparedPolicyState,
 ) -> Result<ForwardingState, crate::policy::SnapshotIntegrityError> {
-    match crate::afxdp::forwarding_build::build_forwarding_state_with_preparsed_policy_and_previous(
+    match crate::afxdp::forwarding_build::build_forwarding_state_with_preparsed_policy_previous_and_dynamic(
         snapshot,
         &coord.policy_counters,
         &coord.nat_counters,
         Some(&coord.forwarding),
         policy_state.take_state(),
+        Some(&coord.neighbors.dynamic),
     ) {
         Ok(fwd) => Ok(fwd),
         Err(err) => {

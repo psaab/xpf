@@ -11609,6 +11609,7 @@ fn rejected_build_leaves_the_zone_store_clean_against_live_sibling_stores() {
             &inner_nat,
             Some(&prev),
             None,
+            None,
         )
         .err()
         .unwrap_or_else(|| panic!("{label}: the inner builder must reject this snapshot"));

@@ -1053,9 +1053,41 @@ pub(super) fn sort_routes(state: &mut ForwardingState) {
     }
 }
 
+/// #16555: the single #13951 accept rule for a changed neighbor MAC,
+/// shared by the mirror verb (`Coordinator::apply_manager_neighbors_*`)
+/// and every snapshot build (`populate_neighbors`). A differing MAC is
+/// accepted only when the row is NUD_PERMANENT or the monitor's dynamic
+/// entry already carries the same MAC (probe-confirmed). Otherwise the
+/// prior binding (static, else dynamic) is retained. A brand-new key
+/// (no prior) is always accepted — there is no live binding to defend.
+/// `None` previous/dynamic means no prior evidence, not a fence.
+pub(crate) fn fenced_neighbor_mac(
+    previous: Option<&ForwardingState>,
+    dynamic: Option<&crate::afxdp::ShardedNeighborMap>,
+    key: (i32, IpAddr),
+    candidate_mac: [u8; 6],
+    permanent: bool,
+) -> [u8; 6] {
+    if permanent {
+        return candidate_mac;
+    }
+    let dynamic_entry = dynamic.and_then(|map| map.get(&key));
+    if dynamic_entry.is_some_and(|entry| entry.mac == candidate_mac) {
+        return candidate_mac;
+    }
+    let prior_static = previous.and_then(|prev| prev.neighbors.get(&key).copied());
+    let prior = prior_static.or(dynamic_entry);
+    match prior {
+        Some(prior) if prior.mac != candidate_mac => prior.mac,
+        _ => candidate_mac,
+    }
+}
+
 pub(super) fn populate_neighbors(
     snapshot: &ConfigSnapshot,
     state: &mut ForwardingState,
+    previous: Option<&ForwardingState>,
+    dynamic: Option<&crate::afxdp::ShardedNeighborMap>,
 ) -> Result<(), crate::policy::SnapshotIntegrityError> {
     for neigh in &snapshot.neighbors {
         if neigh.ifindex <= 0 {
@@ -1098,6 +1130,17 @@ pub(super) fn populate_neighbors(
         let Some(mac) = parse_mac(&neigh.mac) else {
             continue;
         };
+        // #16555: apply the #13951 fence at the build boundary. A Go
+        // config snapshot is a mirror of the same kernel table the
+        // mirror verb fences; without this a config apply (same-plan
+        // refresh or full reconcile) launders a spoof-updated kernel
+        // MAC into the static table, where it then wins lookup and the
+        // fence defends it against the genuine MAC.
+        let permanent = neigh
+            .state
+            .split('|')
+            .any(|token| token.trim().eq_ignore_ascii_case("permanent"));
+        let mac = fenced_neighbor_mac(previous, dynamic, (neigh.ifindex, ip), mac, permanent);
         state
             .neighbors
             .insert((neigh.ifindex, ip), NeighborEntry { mac });

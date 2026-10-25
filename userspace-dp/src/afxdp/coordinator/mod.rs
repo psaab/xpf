@@ -891,6 +891,82 @@ impl Coordinator {
         &self.neighbors.dynamic
     }
 
+    /// #16555 (test): the live static neighbor MAC for a key, so
+    /// server-level cells can assert the fenced binding without
+    /// reaching into `ForwardingState`'s private table.
+    #[cfg(test)]
+    pub(crate) fn static_neighbor_mac_for_test(&self, ifindex: i32, ip: IpAddr) -> Option<[u8; 6]> {
+        self.forwarding.neighbors.get(&(ifindex, ip)).map(|e| e.mac)
+    }
+
+    /// #16555: the fenced static neighbor table as `NeighborSnapshot`
+    /// rows, for storing the ACCEPTED set (not the raw kernel mirror)
+    /// into `guard.snapshot.neighbors`. Only the MAC is taken from the
+    /// live `self.forwarding.neighbors` after a mirror apply, so a MAC
+    /// the fence refused never enters the stored snapshot that rebind /
+    /// arm rebuild from; every other field (including the raw `state`
+    /// string, e.g. `REACHABLE` vs `reachable`) is preserved verbatim
+    /// so an unchanged accepted set still compares equal and does not
+    /// churn the persisted state file (#12195).
+    pub(crate) fn fenced_neighbor_snapshots(
+        &self,
+        raw: &[crate::NeighborSnapshot],
+    ) -> Vec<crate::NeighborSnapshot> {
+        raw.iter()
+            .filter_map(|neigh| {
+                if neigh.ifindex <= 0 {
+                    return None;
+                }
+                let ip = neigh.ip.parse::<IpAddr>().ok()?;
+                let entry = self.forwarding.neighbors.get(&(neigh.ifindex, ip))?;
+                let mut out = neigh.clone();
+                out.mac = super::format_mac(entry.mac);
+                Some(out)
+            })
+            .collect()
+    }
+
+    /// #16555: rewrite a snapshot's neighbor rows to the fenced MACs of
+    /// the CURRENT live forwarding state, dropping rows the fence
+    /// refused entirely is NOT done (a refused row keeps the prior
+    /// MAC); rows with no live entry keep their snapshot MAC (new key
+    /// / dynamic-only binding with no static prior). Called on the
+    /// stored snapshot after a successful apply so rebind/arm rebuild
+    /// from the fenced set, and so the persisted snapshot never carries
+    /// a laundered MAC. Permanent rows keep their MAC (explicit
+    /// exception). Returns true when any row changed.
+    pub(crate) fn fence_snapshot_neighbors(&self, snapshot: &mut crate::ConfigSnapshot) -> bool {
+        let dynamic: &crate::afxdp::ShardedNeighborMap = &self.neighbors.dynamic;
+        let mut changed = false;
+        for neigh in &mut snapshot.neighbors {
+            if neigh.ifindex <= 0 {
+                continue;
+            }
+            let Ok(ip) = neigh.ip.parse::<IpAddr>() else {
+                continue;
+            };
+            let Some(candidate) = crate::afxdp::parse_mac_str(&neigh.mac) else {
+                continue;
+            };
+            let permanent = neigh
+                .state
+                .split('|')
+                .any(|token| token.trim().eq_ignore_ascii_case("permanent"));
+            let fenced = crate::afxdp::forwarding_build::fenced_neighbor_mac(
+                Some(&self.forwarding),
+                Some(dynamic),
+                (neigh.ifindex, ip),
+                candidate,
+                permanent,
+            );
+            if fenced != candidate {
+                neigh.mac = super::format_mac(fenced);
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// #919: zone name → ID lookup, used by main.rs's
     /// `build_synced_session_entry` to translate legacy
     /// `SessionSyncRequest.ingress_zone` strings to u16 IDs when
@@ -1020,17 +1096,25 @@ impl Coordinator {
                 }
                 let key = (*ifindex, *ip);
                 let permanent = permanent_keys.contains(&key);
-                let dynamic = self.neighbors.dynamic.get(&key);
-                let prior_static = self.forwarding.neighbors.get(&key).copied();
-                let prior = prior_static.or(dynamic);
-                // The mirror is not evidence that a changed MAC was solicited.
-                // The monitor applies its CAS before the debounced replace;
-                // a matching dynamic entry is its probe-confirmed signal.
-                if !permanent
-                    && dynamic != Some(*entry)
-                    && prior.is_some_and(|prior| prior.mac != entry.mac)
-                {
-                    return prior_static.map(|prior| (*ifindex, *ip, prior));
+                // #16555: the single #13951 accept rule, shared with
+                // `populate_neighbors`. A differing MAC is kept only
+                // when permanent or dynamic-confirmed; otherwise the
+                // prior static binding is retained (a dynamic-only
+                // binding is left untouched by returning no static row).
+                let fenced_mac = crate::afxdp::forwarding_build::fenced_neighbor_mac(
+                    Some(&self.forwarding),
+                    Some(&self.neighbors.dynamic),
+                    key,
+                    entry.mac,
+                    permanent,
+                );
+                if fenced_mac != entry.mac {
+                    return self
+                        .forwarding
+                        .neighbors
+                        .get(&key)
+                        .copied()
+                        .map(|prior| (*ifindex, *ip, prior));
                 }
                 Some((*ifindex, *ip, *entry))
             })

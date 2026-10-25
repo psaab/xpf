@@ -7168,6 +7168,156 @@ fn update_neighbors_mismatched_replace_with_empty_digest_does_not_write_12195() 
     let _ = std::fs::remove_file(&state_file);
 }
 
+/// #16555: an `update_neighbors` replace carrying a spoofed MAC the
+/// #13951 fence refuses must store the FENCED (prior) MAC in
+/// `guard.snapshot.neighbors`, not the raw attacker row — otherwise a
+/// later rebind/arm rebuilds the laundered MAC as the static binding.
+/// Fail-on-revert: storing `neighbors.to_vec()` persists the spoofed
+/// MAC and the stored-neighbors assertion flips.
+#[test]
+fn update_neighbors_stores_fenced_mac_not_refused_raw_16555() {
+    use crate::{ConfigSnapshot, NeighborSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    let genuine = NeighborSnapshot {
+        interface: "ge-0-0-1".to_string(),
+        ifindex: 7,
+        family: "inet".to_string(),
+        ip: "10.0.0.1".to_string(),
+        mac: "02:00:00:00:00:01".to_string(),
+        state: "reachable".to_string(),
+        ..NeighborSnapshot::default()
+    };
+    let state = new_state(ProcessStatus::default());
+    state.lock().expect("state").snapshot = Some(ConfigSnapshot {
+        version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        generation: 1,
+        fib_generation: 1,
+        generated_at: chrono::Utc::now(),
+        neighbors: vec![genuine.clone()],
+        ..ConfigSnapshot::default()
+    });
+    // Install G twice so it is the live binding the fence defends.
+    {
+        let mut guard = state.lock().expect("state");
+        let g = crate::afxdp::NeighborEntry {
+            mac: [0x02, 0, 0, 0, 0, 1],
+        };
+        let ip: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+        assert!(guard.afxdp.apply_manager_neighbors(true, 1, &[(7, ip, g)]));
+        assert!(guard.afxdp.apply_manager_neighbors(true, 2, &[(7, ip, g)]));
+    }
+    // Spoofed mirror replace: fence refuses it live; stored must keep G.
+    let mut spoofed_req = req("update_neighbors");
+    spoofed_req.neighbor_replace = true;
+    spoofed_req.neighbor_generation = 3;
+    spoofed_req.neighbors = Some(vec![NeighborSnapshot {
+        mac: "02:00:00:00:00:02".to_string(),
+        state: "stale".to_string(),
+        ..genuine.clone()
+    }]);
+    let resp = run_request(state.clone(), spoofed_req);
+    assert!(resp.ok, "spoofed replace failed: {}", resp.error);
+    {
+        let guard = state.lock().expect("state");
+        let stored = guard.snapshot.as_ref().expect("stored snapshot");
+        assert_eq!(
+            stored.neighbors.len(),
+            1,
+            "stored set must carry exactly the fenced row"
+        );
+        assert_eq!(
+            stored.neighbors[0].mac, "02:00:00:00:00:01",
+            "the stored snapshot must carry the FENCED MAC, not the refused raw MAC"
+        );
+        // And the live forwarding (what lookup reads) keeps G.
+        let ip: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+        assert_eq!(
+            guard.afxdp.static_neighbor_mac_for_test(7, ip),
+            Some([0x02, 0, 0, 0, 0, 1]),
+            "live forwarding must keep G after the refused mirror replace"
+        );
+    }
+}
+
+/// #16555: a same-plan `apply_snapshot` carrying the spoofed kernel row
+/// must (a) keep G live and (b) store fenced rows, so the persisted
+/// baseline a rebind rebuilds from never carries the attacker MAC.
+#[test]
+fn apply_snapshot_stores_fenced_neighbor_mac_16555() {
+    use crate::{ConfigSnapshot, NeighborSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    let row = |mac: &str, state: &str| NeighborSnapshot {
+        interface: "ge-0-0-1".to_string(),
+        ifindex: 7,
+        family: "inet".to_string(),
+        ip: "10.0.0.1".to_string(),
+        mac: mac.to_string(),
+        state: state.to_string(),
+        ..NeighborSnapshot::default()
+    };
+    let state = new_state(ProcessStatus {
+        forwarding_armed: true,
+        last_snapshot_generation: 1,
+        last_fib_generation: 1,
+        capabilities: forwarding_caps(),
+        ..ProcessStatus::default()
+    });
+    // Seed the stored baseline + status directly (no reconcile), then
+    // install G live. Both applies below share the (empty) binding
+    // plan, so they take the same-plan refresh leg — the leg whose
+    // build laundered the MAC pre-fix.
+    state.lock().expect("state").snapshot = Some(ConfigSnapshot {
+        version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        generation: 1,
+        fib_generation: 1,
+        generated_at: chrono::Utc::now(),
+        capabilities: forwarding_caps(),
+        map_pins: ok_map_pins(),
+        neighbors: vec![row("02:00:00:00:00:01", "reachable")],
+        ..ConfigSnapshot::default()
+    });
+    state.lock().expect("state").afxdp.force_ipsec_sa_ready = true;
+    {
+        let mut guard = state.lock().expect("state");
+        guard
+            .afxdp
+            .refresh_runtime_snapshot(&ConfigSnapshot {
+                generation: 1,
+                fib_generation: 1,
+                neighbors: vec![row("02:00:00:00:00:01", "reachable")],
+                ..ConfigSnapshot::default()
+            })
+            .expect("seed refresh must succeed");
+    }
+    // Same-plan gen-2 apply carrying the spoofed STALE row.
+    {
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            generation: 2,
+            fib_generation: 2,
+            generated_at: chrono::Utc::now(),
+            capabilities: forwarding_caps(),
+            map_pins: ok_map_pins(),
+            neighbors: vec![row("02:00:00:00:00:02", "stale")],
+            ..ConfigSnapshot::default()
+        });
+        let resp = run_request(state.clone(), request);
+        assert!(resp.ok, "spoofed apply failed: {}", resp.error);
+    }
+    let guard = state.lock().expect("state");
+    let stored = guard.snapshot.as_ref().expect("stored snapshot");
+    assert_eq!(stored.neighbors.len(), 1);
+    assert_eq!(
+        stored.neighbors[0].mac, "02:00:00:00:00:01",
+        "the persisted baseline must carry the fenced MAC, not the spoofed row"
+    );
+    let ip: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+    assert_eq!(
+        guard.afxdp.static_neighbor_mac_for_test(7, ip),
+        Some([0x02, 0, 0, 0, 0, 1]),
+        "live forwarding must keep G after the spoofed apply"
+    );
+}
+
 /// #9803: an `update_fabrics` carrying a new fabric parent ifindex, followed by
 /// a full apply with the same rows, must end with the fabric bindings replanned.
 /// The helper's `update_fabrics` arm stores the rows in its retained snapshot
