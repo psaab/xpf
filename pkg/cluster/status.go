@@ -200,6 +200,11 @@ func (m *Manager) FormatStatus() string {
 			"  Cleartext config payloads: sent %d, received %d. Investigate the fallback; if a control-link PSK is configured, rotate it after encrypted sync is restored.\n",
 			syncStats.ConfigsSentCleartext, syncStats.ConfigsReceivedCleartext)
 	}
+	if syncStats := m.GetSyncStats(); syncStats != nil && syncStats.IPsecSAOversizeAlarmLatched {
+		fmt.Fprintf(&b, "\nWarning: IPsec SA set exceeded the single-frame bound and was sent chunked (#16758; alarm latched).\n"+
+			"  Over-cap IPsec SA pushes: %d. A new standby holds the chunked set; a pre-#16758 peer ignores chunk frames and keeps its prior set.\n",
+			syncStats.IPsecSAOverCapSets)
+	}
 	return b.String()
 }
 
@@ -864,6 +869,10 @@ func (m *Manager) FormatStatistics() string {
 		}
 		fmt.Fprintf(&b, "    %-32s %-12d %d\n", "IPsec SA",
 			syncStats.IPsecSASent, syncStats.IPsecSAReceived)
+		if syncStats.IPsecSAMalformedIgnored > 0 || syncStats.IPsecSAOverCapSets > 0 {
+			fmt.Fprintf(&b, "    %-32s %-12d %d\n", "IPsec SA malformed/over-cap",
+				syncStats.IPsecSAOverCapSets, syncStats.IPsecSAMalformedIgnored)
+		}
 		fmt.Fprintf(&b, "    %-32s %-12d %d\n", "DHCP leases",
 			syncStats.DHCPLeasesSent, syncStats.DHCPLeasesReceived)
 		if syncStats.DHCPLeasesSeeded > 0 {
@@ -1077,6 +1086,10 @@ func (m *Manager) FormatDataPlaneStatistics() string {
 	}
 	fmt.Fprintf(&b, "    %-32s %-12d %d\n", "IPsec SA",
 		syncStats.IPsecSASent, syncStats.IPsecSAReceived)
+	if syncStats.IPsecSAMalformedIgnored > 0 || syncStats.IPsecSAOverCapSets > 0 {
+		fmt.Fprintf(&b, "    %-32s %-12d %d\n", "IPsec SA malformed/over-cap",
+			syncStats.IPsecSAOverCapSets, syncStats.IPsecSAMalformedIgnored)
+	}
 	fmt.Fprintf(&b, "    %-32s %-12d %d\n", "DHCP leases",
 		syncStats.DHCPLeasesSent, syncStats.DHCPLeasesReceived)
 	if syncStats.DHCPLeasesSeeded > 0 {

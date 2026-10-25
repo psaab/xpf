@@ -1313,6 +1313,8 @@ refused). New sender → old receiver:
 
 Newline-separated (`\n`) list of the SA names `swanctl --list-sas` reports on the sender (`ipsec.ActiveConnectionNames`), followed by a single `\n` delimiter and then the 24-byte #5706 (incarnation, seq) ordering trailer — i.e. `vpn-gw1\nsite-a-ts1\nsite-a-ts2\n<trailer>`. The delimiter keeps the trailer from fusing onto the last name for an old newline-decoder (see the mixed-version note above); a new receiver strips both the trailer and the delimiter.
 
+**Chunked over-bound sets (#16758).** A legacy frame over `maxIPsecSANames` (4096) names is refused whole by the receiver (#9061), so a sender whose live set exceeds the bound splits it across additive `syncMsgIPsecSAChunk = 49` frames: `{generation u64, index u32, total u32, totalNames u32}` plus that chunk's newline-joined names (at most 4096 per chunk), each chunk carrying its own increasing (incarnation, seq) trailer. The receiver assembles by (incarnation, generation) and commits the concatenated set atomically only when every chunk has arrived; an unclosed or inconsistent generation never commits and the prior set is retained. Sets at or under the bound keep the legacy type-9 shape; a pre-#16758 peer ignores type 49. The sender latches an operator-visible alarm (`IPsecSAOversizeAlarmLatched`, counted by `IPsecSAOverCapSets`) and the receiver counts malformed legacy/chunk refusals in `IPsecSAMalformedIgnored`.
+
 The names are **SA names, normally CHILD SA names**, not VPN names (#9511). A VPN with no `traffic-selector` has one child named after the VPN (`vpn-gw1`); a VPN with `traffic-selector` entries has one child `<vpn>-<selector>` per selector and no child named `<vpn>` (`site-a-ts1`, `site-a-ts2`). The IKE SA name (= the VPN name) appears only for an IKE SA that has no child yet, and for a multi-selector VPN that name cannot be initiated with `--child`, because no child section carries it. On failover the taking node calls `swanctl --initiate --child <name>` for each name it owns, which is why the field carries child names and must keep doing so; the receiver maps a name back to its VPN (for per-redundancy-group attribution) through `ipsec.BuildSANameIndex`, not through the wire.
 
 ## Sync Algorithms
@@ -1658,6 +1660,8 @@ All counters are `atomic.Uint64` / `atomic.Bool`, lock-free:
 | ConfigsDeadIncarnationDropped | Config payloads dropped because the boot incarnation they arrived under has been replaced by a re-prime (#5084) — a queued prior-boot config that would otherwise apply across the reset and strand the generation high-water. Expected once per peer reboot that races a queued config; a persistently rising counter means the peer is flapping |
 | IPsecSASent/Received | IPsec SA list messages |
 | IPsecSAStaleIgnored | IPsec SA full-sets dropped by the #5706 ordering guard (incoming `(incarnation, seq)` not strictly newer — a reorder across the redundant fabric streams) |
+| IPsecSAMalformedIgnored | IPsec SA frames refused before commit: malformed legacy payload (#9061) or malformed/inconsistent chunk (#16758); the held set is retained |
+| IPsecSAOverCapSets / IPsecSAOversizeAlarmLatched | Sender pushes whose name count exceeded 4096 and were sent chunked (#16758); the latch is the operator-visible alarm on the primary |
 | DHCPLeasesSent/Received | DHCP-server full-set lease push messages (per family) |
 | DHCPLeasesStaleIgnored | DHCP lease full-sets dropped by the #5706 ordering guard (per family) — the DHCP analog of `IPsecSAStaleIgnored` |
 | Errors | Send failures, channel overflows, bad magic |

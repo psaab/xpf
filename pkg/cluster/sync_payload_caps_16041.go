@@ -128,7 +128,7 @@ func syncPayloadCap(msgType uint8) (int, bool) {
 		// plus generation/ancestry trailers. Config is the one legitimately
 		// large control payload; it keeps the global cap as its per-type cap.
 		return maxSyncPayload, true
-	case syncMsgIPsecSA, syncMsgPersistentNatLease, syncMsgPersistentNatLeaseScoped,
+	case syncMsgIPsecSA, syncMsgIPsecSAChunk, syncMsgPersistentNatLease, syncMsgPersistentNatLeaseScoped,
 		syncMsgPersistentNatLeaseGeneration, syncMsgPersistentNatLeaseDeterministic,
 		syncMsgDHCPLeaseV4, syncMsgDHCPLeaseV6, syncMsgDHCPLeaseV4Chunk, syncMsgDHCPLeaseV6Chunk:
 		// Full-set / chunked-set types: encoders chunk below maxSyncPayload

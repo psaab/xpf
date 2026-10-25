@@ -266,6 +266,16 @@ const (
 	// DHCP lease chunk types above.
 	syncMsgFailoverAbort      = 47
 	syncMsgFailoverBatchAbort = 48
+	// #16758: chunked IPsec SA full-sets. When the name set exceeds the
+	// receiver's per-frame element bound (maxIPsecSANames), QueueIPsecSA
+	// splits it across additive frames of this type instead of emitting
+	// one legacy frame the receiver must refuse whole. Each chunk payload
+	// is {generation u64, index u32, total u32, totalNames u32} followed
+	// by the newline-joined names for that chunk; every chunk carries its
+	// own increasing full-set seq. A pre-#16758 peer ignores the unknown
+	// type (additive, no version bump; the #15160 precedent), so over-cap
+	// sets resume once both peers upgrade.
+	syncMsgIPsecSAChunk = 49
 )
 
 // syncHeader is the wire header for each sync message.
@@ -479,6 +489,21 @@ type SyncStats struct {
 	// redundant fabric streams. A nonzero value means the guard prevented a
 	// stale IPsec SA set from regressing the standby's held set.
 	IPsecSAStaleIgnored atomic.Uint64
+	// IPsecSAMalformedIgnored counts IPsec SA frames refused before commit:
+	// a malformed legacy payload (#9061) or a malformed/inconsistent chunk
+	// (#16758). The held set is retained and the sequence is not consumed
+	// for legacy frames; chunk assemblies are invalidated. A climbing value
+	// means the peer is sending sets this node cannot install.
+	IPsecSAMalformedIgnored atomic.Uint64
+	// IPsecSAOversizeAlarmLatched records that this node, as sender, had to
+	// chunk an IPsec SA set over maxIPsecSANames (#16758). Operator-visible
+	// in cluster status; it never clears in-process so an extreme selector
+	// count is not silent on the primary.
+	IPsecSAOversizeAlarmLatched atomic.Bool
+	// IPsecSAOverCapSets counts sender pushes whose name count exceeded
+	// maxIPsecSANames and were therefore sent chunked (#16758); receiver
+	// chunk commits are counted in IPsecSAReceived like legacy pushes.
+	IPsecSAOverCapSets atomic.Uint64
 	// #2239 HA DHCP-server lease sync counters. Sent/Received count
 	// full-set lease push MESSAGES (one per family per push); Seeded counts
 	// leases written into a freshly-started Kea on takeover; errors fold
@@ -689,6 +714,9 @@ type SyncStatsSnapshot struct {
 	IPsecSASent                          uint64
 	IPsecSAReceived                      uint64
 	IPsecSAStaleIgnored                  uint64
+	IPsecSAMalformedIgnored              uint64
+	IPsecSAOversizeAlarmLatched          bool
+	IPsecSAOverCapSets                   uint64
 	DHCPLeasesSent                       uint64
 	DHCPLeasesReceived                   uint64
 	DHCPLeasesStaleIgnored               uint64
@@ -1896,6 +1924,11 @@ type SessionSync struct {
 	// final chunk lands; a newer committed set discards it.
 	dhcpChunkState4 dhcpChunkState
 	dhcpChunkState6 dhcpChunkState
+	// #16758: pending IPsec SA chunk assembly, guarded by ipsecApplyMu
+	// (touched only by the IPsec chunk handler's commit section and the
+	// legacy arm's supersede). A pending assembly never commits until its
+	// final chunk lands; a newer committed set discards it.
+	ipsecChunkState ipsecSAChunkState
 	// recvEpoch fences full-set DHCP commits against receiver resets
 	// (fold-2 HIGH-2): bumped under recvSeqMu by resetRecvGen alongside
 	// the guard resets. DHCP arms capture it with the newer-check and
@@ -2396,8 +2429,11 @@ func (s *SessionSync) Stats() SyncStatsSnapshot {
 		ConfigsQueueFullDropped:        s.stats.ConfigsQueueFullDropped.Load(),
 		ConfigApplyNacksReceived:       s.stats.ConfigApplyNacksReceived.Load(),
 		IPsecSASent:                    s.stats.IPsecSASent.Load(), IPsecSAReceived: s.stats.IPsecSAReceived.Load(),
-		IPsecSAStaleIgnored: s.stats.IPsecSAStaleIgnored.Load(),
-		DHCPLeasesSent:      s.stats.DHCPLeasesSent.Load(), DHCPLeasesReceived: s.stats.DHCPLeasesReceived.Load(),
+		IPsecSAStaleIgnored:         s.stats.IPsecSAStaleIgnored.Load(),
+		IPsecSAMalformedIgnored:     s.stats.IPsecSAMalformedIgnored.Load(),
+		IPsecSAOversizeAlarmLatched: s.stats.IPsecSAOversizeAlarmLatched.Load(),
+		IPsecSAOverCapSets:          s.stats.IPsecSAOverCapSets.Load(),
+		DHCPLeasesSent:              s.stats.DHCPLeasesSent.Load(), DHCPLeasesReceived: s.stats.DHCPLeasesReceived.Load(),
 		DHCPLeasesStaleIgnored: s.stats.DHCPLeasesStaleIgnored.Load(),
 		DHCPLeasesSeeded:       s.stats.DHCPLeasesSeeded.Load(),
 		FencesSent:             s.stats.FencesSent.Load(), FencesReceived: s.stats.FencesReceived.Load(),
@@ -2783,19 +2819,68 @@ func (s *SessionSync) QueueIPsecSA(connectionNames []string) bool {
 	// delimiter before the trailer so an OLD pre-#5706 receiver decodes every
 	// real SA name cleanly instead of fusing the trailer onto the last name
 	// (#5706 review fold; see ipsecFullSetDelim).
-	seq := s.ipsecSeqCounter.Add(1)
-	payload := appendIPsecFullSetSeq(encodeIPsecSAPayload(connectionNames), s.syncEpoch, seq)
-	s.writeMu.Lock()
-	err := writeMsg(conn, syncMsgIPsecSA, payload)
-	s.writeMu.Unlock()
-	if err != nil {
-		slog.Warn("cluster sync: IPsec SA send error", "err", err)
-		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
+	// #16758: a set over the receiver's per-frame bound must be chunked,
+	// not emitted whole for the standby to refuse. Legacy shape is kept
+	// for every set that fits, so a pre-#16758 peer decodes it identically.
+	if len(connectionNames) <= maxIPsecSANames {
+		seq := s.ipsecSeqCounter.Add(1)
+		payload := appendIPsecFullSetSeq(encodeIPsecSAPayload(connectionNames), s.syncEpoch, seq)
+		s.writeMu.Lock()
+		err := writeMsg(conn, syncMsgIPsecSA, payload)
+		s.writeMu.Unlock()
+		if err != nil {
+			slog.Warn("cluster sync: IPsec SA send error", "err", err)
+			s.stats.Errors.Add(1)
+			s.handleDisconnect(conn)
+			return false
+		}
+		s.stats.IPsecSASent.Add(1)
+		slog.Debug("cluster sync: IPsec SA list sent", "count", len(connectionNames))
+		return true
+	}
+	// Over-bound: alarm on the primary (latched + counted + Warn) and
+	// split into maxIPsecSANames-sized chunks. A single name over
+	// maxIPsecSANameLen can never be installed by any receiver; count it
+	// malformed and refuse the push rather than chunking a set the peer
+	// must refuse.
+	for _, n := range connectionNames {
+		if len(n) > maxIPsecSANameLen {
+			s.stats.IPsecSAMalformedIgnored.Add(1)
+			slog.Warn("cluster sync: refusing IPsec SA set with over-long name",
+				"name_bytes", len(n), "cap", maxIPsecSANameLen, "count", len(connectionNames))
+			return false
+		}
+	}
+	if len(connectionNames) > ipsecChunkMaxTotalNames {
+		s.stats.IPsecSAMalformedIgnored.Add(1)
+		slog.Warn("cluster sync: refusing IPsec SA set over chunked-set name cap",
+			"count", len(connectionNames), "cap", ipsecChunkMaxTotalNames)
 		return false
 	}
+	s.stats.IPsecSAOverCapSets.Add(1)
+	s.stats.IPsecSAOversizeAlarmLatched.Store(true)
+	slog.Warn("cluster sync: IPsec SA set exceeds single-frame bound; sending chunked",
+		"count", len(connectionNames), "cap", maxIPsecSANames)
+	bodies, total := encodeIPsecSAChunkBodies(connectionNames)
+	generation := s.ipsecSeqCounter.Add(1)
+	for i, body := range bodies {
+		seq := generation
+		if i > 0 {
+			seq = s.ipsecSeqCounter.Add(1)
+		}
+		payload := appendFullSetSeq(encodeIPsecSAChunkPayload(body, generation, uint32(i), uint32(len(bodies)), uint32(total)), s.syncEpoch, seq)
+		s.writeMu.Lock()
+		err := writeMsg(conn, syncMsgIPsecSAChunk, payload)
+		s.writeMu.Unlock()
+		if err != nil {
+			slog.Warn("cluster sync: IPsec SA chunk send error", "err", err)
+			s.stats.Errors.Add(1)
+			s.handleDisconnect(conn)
+			return false
+		}
+	}
 	s.stats.IPsecSASent.Add(1)
-	slog.Debug("cluster sync: IPsec SA list sent", "count", len(connectionNames))
+	slog.Debug("cluster sync: IPsec SA list sent chunked", "count", total, "chunks", len(bodies))
 	return true
 }
 

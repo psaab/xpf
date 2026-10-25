@@ -326,7 +326,7 @@ func TestPerTypePayloadCapRefusedAtHeader16041(t *testing.T) {
 			syncMsgConfigApplyNack, syncMsgConfigApplyAck, syncMsgHeartbeat, syncMsgHeartbeatAck,
 			syncMsgConfig, syncMsgConfigEncrypted, syncMsgConfigKeyExchange,
 			syncMsgAuthUpgradeRequest, syncMsgAuthUpgradeHello, syncMsgAuthUpgradeProof, syncMsgAuthUpgradeConfirm,
-			syncMsgIPsecSA, syncMsgPersistentNatLease, syncMsgPersistentNatLeaseScoped,
+			syncMsgIPsecSA, syncMsgIPsecSAChunk, syncMsgPersistentNatLease, syncMsgPersistentNatLeaseScoped,
 			syncMsgPersistentNatLeaseGeneration, syncMsgPersistentNatLeaseDeterministic,
 			syncMsgDHCPLeaseV4, syncMsgDHCPLeaseV6, syncMsgDHCPLeaseV4Chunk, syncMsgDHCPLeaseV6Chunk,
 			syncMsgFailover, syncMsgFailoverAck, syncMsgFailoverCommit, syncMsgFailoverCommitAck,
