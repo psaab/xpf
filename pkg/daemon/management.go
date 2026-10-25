@@ -132,6 +132,11 @@ type mgmtEndpoint struct {
 	// and it degrades again).
 	httpDegraded  bool
 	httpsDegraded bool
+	// bindDevices is the #16709 SO_BINDTODEVICE scope per bind address
+	// (nil/empty = every leg unscoped). It is part of the endpoint
+	// identity: a scope change at an unchanged address must still force
+	// a rebind, or the old socket keeps serving with the wrong scope.
+	bindDevices map[string]string
 }
 
 func (e mgmtEndpoint) summary() string {
@@ -167,7 +172,7 @@ func effectiveMgmtAddrs(multi []string, single string) []string {
 func endpointOf(cfg api.Config) mgmtEndpoint {
 	addrs := effectiveMgmtAddrs(cfg.Addrs, cfg.Addr)
 	httpsAddrs := effectiveMgmtAddrs(cfg.HTTPSAddrs, cfg.HTTPSAddr)
-	e := mgmtEndpoint{addrs: addrs, httpsAddrs: httpsAddrs, tls: cfg.TLS, httpDegraded: cfg.HTTPBindDegraded, httpsDegraded: cfg.HTTPSBindDegraded}
+	e := mgmtEndpoint{addrs: addrs, httpsAddrs: httpsAddrs, tls: cfg.TLS, httpDegraded: cfg.HTTPBindDegraded, httpsDegraded: cfg.HTTPSBindDegraded, bindDevices: cfg.BindDevices}
 	if len(addrs) > 0 {
 		e.addr = addrs[0]
 	}
@@ -235,6 +240,35 @@ func mgmtAddrsEqual(a, b []string) bool {
 	return true
 }
 
+// bindDevicesEqual compares two #16709 scope maps, treating nil and
+// empty (and ""-valued entries, which cloneBindDevices drops) as the
+// same unscoped state.
+func bindDevicesEqual(a, b map[string]string) bool {
+	na, nb := 0, 0
+	for _, v := range a {
+		if v != "" {
+			na++
+		}
+	}
+	for _, v := range b {
+		if v != "" {
+			nb++
+		}
+	}
+	if na != nb {
+		return false
+	}
+	for k, v := range a {
+		if v == "" {
+			continue
+		}
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
 // isZero reports whether the fingerprint names no leg at all.
 func (e mgmtEndpoint) isZero() bool {
 	return e.addr == "" && len(e.addrs) == 0 && e.httpsAddr == "" && len(e.httpsAddrs) == 0 && !e.tls
@@ -259,6 +293,7 @@ func (m *managementReconciler) desired(cfg *config.Config) api.Config {
 	next.HTTPBindDegraded = false
 	next.HTTPSBindDegraded = false
 	next.HTTPSAddrs = nil
+	next.BindDevices = nil
 	next.TLS = false
 	next.TLSCertificate = ""
 	next.TLSPrivateKey = ""
@@ -682,11 +717,17 @@ func (m *managementReconciler) reconcileTo(next api.Config) error {
 		m.srv.ReplaceMetricsRequireAuth(true)
 	}
 
+	// #16709: publish the desired bind scopes BEFORE any leg rebind, so
+	// listenAddr scopes the new sockets; the api-side adoption check
+	// then replaces any same-address leg whose live scope differs.
+	m.srv.SetBindDevices(next.BindDevices)
+	scopeChanged := !bindDevicesEqual(nextE.bindDevices, m.cur.bindDevices)
+
 	// HTTP leg: rebind only when the address set changes (or its degraded
-	// state changes, #14582); an empty desired address disables the cleartext
-	// listener. Retry an unexpected exit only when a non-empty bind is still
-	// requested.
-	if !mgmtAddrsEqual(nextE.httpAddrs(), m.cur.httpAddrs()) || next.HTTPBindDegraded != m.cur.httpDegraded || (len(nextE.httpAddrs()) > 0 && !m.srv.HTTPServing()) {
+	// state changes, #14582, or its bind scope changes, #16709); an empty
+	// desired address disables the cleartext listener. Retry an
+	// unexpected exit only when a non-empty bind is still requested.
+	if !mgmtAddrsEqual(nextE.httpAddrs(), m.cur.httpAddrs()) || next.HTTPBindDegraded != m.cur.httpDegraded || scopeChanged || (len(nextE.httpAddrs()) > 0 && !m.srv.HTTPServing()) {
 		// Record the attempted bind so `show system services` reports the address
 		// a boot-failed listener is retrying, not the one it failed at boot (#6401).
 		m.lastHTTPAttempt = next.Addr
@@ -720,7 +761,7 @@ func (m *managementReconciler) reconcileTo(next api.Config) error {
 	// server what is actually serving is the same question startTo asks after the
 	// boot bind (#5561 round 14, MAJOR 5); this is that check applied to the
 	// steady state rather than only to boot.
-	if next.TLS != m.cur.tls || !mgmtAddrsEqual(nextE.httpsBindAddrs(), m.cur.httpsBindAddrs()) || next.HTTPSBindDegraded != m.cur.httpsDegraded || (next.TLS && !m.srv.HTTPSServing()) {
+	if next.TLS != m.cur.tls || !mgmtAddrsEqual(nextE.httpsBindAddrs(), m.cur.httpsBindAddrs()) || next.HTTPSBindDegraded != m.cur.httpsDegraded || scopeChanged || (next.TLS && !m.srv.HTTPSServing()) {
 		hErr := m.srv.ReconcileHTTPSAddrs(next.TLS, nextE.httpsBindAddrs())
 		m.syncCurFromLiveLocked(next)
 		if hErr != nil {
@@ -1138,6 +1179,16 @@ func (m *managementReconciler) syncCurFromLiveLocked(next api.Config) {
 		m.cur.httpsAddr = ""
 		m.cur.httpsAddrs = nil
 		m.cur.httpsDegraded = next.HTTPSBindDegraded
+	}
+	// #16709: advance the scope fingerprint to the server's published
+	// snapshot only when a leg is serving to carry it; a plane whose
+	// bind failed keeps the previous value as retry debt (SetBindDevices
+	// already published the desired snapshot, and scopeChanged will
+	// re-drive the reconcile until a leg lands with that scope).
+	if len(httpLive) > 0 || len(httpsLive) > 0 {
+		m.cur.bindDevices = m.srv.BindDevices()
+	} else if len(nextE.httpAddrs()) == 0 && len(nextE.httpsBindAddrs()) == 0 {
+		m.cur.bindDevices = nil
 	}
 	// If TLS is desired but no HTTPS leg is serving, keep the previous
 	// HTTPS fingerprint so the change predicate retries the bind.

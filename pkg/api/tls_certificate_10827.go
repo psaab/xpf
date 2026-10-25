@@ -641,7 +641,7 @@ func (s *Server) recoverHTTPSLegsIfNeededLocked() {
 		if i < len(s.httpsServers) && s.httpsServers[i] != nil {
 			srv = s.httpsServers[i]
 		}
-		ln, err := s.listen("tcp", addr)
+		ln, err := s.listenAddr(addr)
 		if err != nil {
 			slog.Error("api: HTTPS listener bind failed during certificate recovery; HTTPS disabled until the next reconcile", "addr", addr, "err", err)
 			legs = append(legs, nil)

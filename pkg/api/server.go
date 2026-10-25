@@ -184,6 +184,20 @@ type Config struct {
 	HTTPSAddr string // HTTPS listen address (empty = no HTTPS)
 	// HTTPSAddrs is the HTTPS counterpart of Addrs (#14583).
 	HTTPSAddrs []string
+	// BindDevices maps a full listen address ("host:port", IPv6 host
+	// bracketed, exactly as it appears in Addrs/HTTPSAddrs) to the kernel
+	// device the listener socket must be scoped to via SO_BINDTODEVICE
+	// (#16709). Keys absent from the map (or mapping to "") bind unscoped,
+	// the pre-#16709 net.Listen behaviour. The daemon populates this for
+	// web-management legs whose configured interface is enslaved to a VRF
+	// (fxp0 -> vrf-mgmt, or a tenant virtual-router member -> vrf-<name>):
+	// an unscoped bind to a VRF-slave address is refused EADDRNOTAVAIL
+	// because the address lives only in the VRF's local table, so the
+	// usual Junos `web-management ... interface fxp0.0` idiom could never
+	// serve. Scoping to the VRF master (not the slave interface) keeps
+	// every address of that VRF reachable on the leg, mirroring the
+	// grpcapi fabric listener. Production only; nil is the default.
+	BindDevices map[string]string
 	// HTTPBindDegraded / HTTPSBindDegraded mark that Addr/Addrs (resp.
 	// HTTPSAddr/HTTPSAddrs) is the loopback fallback because the configured
 	// interface had no usable kernel address at resolution time (#14582), not
@@ -733,6 +747,23 @@ type Server struct {
 	// test injects a fake so the make-before-break reconcile is exercised without
 	// binding real ports.
 	listen func(network, address string) (net.Listener, error)
+	// bindDevices is Config.BindDevices as an atomic snapshot (#16709):
+	// listenAddr consults it on every bind so a day-2 device-scope change
+	// rebinds through the new scope without bouncing legs whose scope is
+	// unchanged. Replaced wholesale (never mutated) by SetBindDevices; the
+	// pointer makes the hot read lock-free. Nil (bare &Server{} fixtures)
+	// means no leg is device-scoped.
+	bindDevices atomic.Pointer[bindDeviceMap]
+	// customListen marks an injected Config.ListenFunc (#16709). The
+	// production default (net.Listen) is applied through the VRF-aware
+	// listenAddr; an injected factory always wins so tests model bind
+	// outcomes without real socket options.
+	customListen bool
+	// legDevices records, per live leg address, the SO_BINDTODEVICE
+	// device that leg was bound with ("" = unscoped), so reconcile can
+	// tell a same-address leg with the wrong scope from a converged one
+	// (#16709). Guarded by lifeMu; written only via listenAddr.
+	legDevices map[string]string
 	// connGate bounds concurrent accepted connections across every REST
 	// leg (#16081, conn_bound_16081.go). An atomic pointer because bare
 	// &Server{} test fixtures never install one (nil = unwrapped/no-op)
@@ -985,8 +1016,12 @@ func NewServer(cfg Config) *Server {
 	s.metricsGate.Store(cfg.MetricsRequireAuth || (initialAuth != nil && initialAuth.MetricsRequireAuth))
 	// #5866: the listener factory (Config.ListenFunc or net.Listen).
 	s.listen = cfg.ListenFunc
+	s.customListen = cfg.ListenFunc != nil
 	if s.listen == nil {
 		s.listen = net.Listen
+	}
+	if len(cfg.BindDevices) > 0 {
+		s.bindDevices.Store(&bindDeviceMap{m: cloneBindDevices(cfg.BindDevices)})
 	}
 	// #16081: bound concurrent connections across every REST leg. Installed
 	// here (not lazily) so every NewServer-built server — Start legs,
@@ -1627,13 +1662,13 @@ func (s *Server) bindListeners() (httpLn, httpsLn net.Listener, err error) {
 	if hs == nil {
 		return nil, nil, fmt.Errorf("api: no HTTP listener configured")
 	}
-	httpLn, err = s.listen("tcp", hs.Addr)
+	httpLn, err = s.listenAddr(hs.Addr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("api: bind HTTP listener %q: %w", hs.Addr, err)
 	}
 	httpLn = s.boundListener(httpLn)
 	if ss := s.httpsServer(); ss != nil {
-		httpsLn, err = s.listen("tcp", ss.Addr)
+		httpsLn, err = s.listenAddr(ss.Addr)
 		if err != nil {
 			// The HTTP listener already bound — close it so a failed startup
 			// leaves no orphaned socket behind (#5058).

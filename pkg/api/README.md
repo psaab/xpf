@@ -1703,6 +1703,24 @@ the drop fails loudly instead of going quietly vacuous.
     re-enable, HTTPS-bind-only change, HTTP-change-keeps-HTTPS, auth swap,
     bind-failure retain-old). `Run`/`serveBound` remain the single-lifecycle test
     entry point.
+  - **VRF-scoped binds (#16709).** A leg whose address lives on a
+    VRF-enslaved interface (fxp0 in `vrf-mgmt`, or a tenant
+    virtual-router member in `vrf-<name>`) cannot bind unscoped: the
+    address exists only in the VRF's local table, so `net.Listen`
+    fails `EADDRNOTAVAIL` and `web-management ... interface fxp0.0`
+    never served. `Config.BindDevices` maps such a listen address to
+    its VRF master device; `Server.listenAddr` (the single bind entry
+    for Start, reconcile, `Run`, and cert recovery) then binds via a
+    `net.ListenConfig` whose Control sets `SO_BINDTODEVICE` to that
+    master — the grpcapi fabric-listener pattern. An injected
+    `Config.ListenFunc` always wins (tests never see a real socket
+    option). The scope is part of leg identity: `SetBindDevices`
+    publishes the desired map before a reconcile, adoption requires
+    the live leg's recorded scope to match, and the daemon's endpoint
+    fingerprint carries the map so a scope-only change still rebinds.
+    Default-VRF legs stay unscoped. Pinned by
+    `pkg/api/listener_vrf_16709_test.go` and the real-kernel netns
+    acceptance `TestWebMgmtVRFBind16709Netns` in `pkg/daemon`.
   - `EffectiveHTTPAddr()` (#6385/#6401) returns the live HTTP leg's ACTUAL bound
     address (`httpLeg.ln.Addr()`) — an ephemeral `:0` request resolves to its
     concrete port, a wildcard/hostname bind is normalized — or `""` when no HTTP
