@@ -3746,7 +3746,8 @@ func TestGeneratePolicyOptionsCommunityExpandedVsStandard(t *testing.T) {
 		// entry under its name (#15008), with per-member lines only on
 		// the generated delete backing.
 		"bgp community-list standard LIT-ONLY permit 65000:100 no-export",
-		// Wildcard member renders the member as-is into an expanded list.
+		// Wildcard member renders its #16788 per-community translation
+		// into an expanded list ("." confined to [^ ]).
 		"bgp community-list expanded WILD permit 65000:*",
 		// Mixed definition: the conjunction goes into the expanded list
 		// under the name — the literal member must NOT regress to a
@@ -3754,9 +3755,11 @@ func TestGeneratePolicyOptionsCommunityExpandedVsStandard(t *testing.T) {
 		// in FRR. Both members survive inside the conjunction.
 		// #15779: POSIX ERE has no lookahead, so the conjunction is the
 		// two ordered-sequence permutations, not one `(?=...)` pattern
-		// (which FRR regcomp rejected, aborting frr-reload).
-		"bgp community-list expanded MIXED permit (^| )65000:100( |$).*65001:.*",
-		"bgp community-list expanded MIXED permit 65001:.*.*(^| )65000:100( |$)",
+		// (which FRR regcomp rejected, aborting frr-reload). #16788:
+		// the literal token anchor is pipe-free (^|[ ])...([ ]|$)
+		// and the regex factor is per-community confined.
+		"bgp community-list expanded MIXED permit (^|[ ])65000:100([ ][^ ]+)*[ ][^ ]*65001:[^ ]*",
+		"bgp community-list expanded MIXED permit (^|[ ])65001:[^ ]*[^ ]*([ ][^ ]+)*[ ]65000:100([ ]|$)",
 		// Brace-bound member must render expanded, not standard.
 		"bgp community-list expanded BOUND permit 65000:1{2,3}",
 	}

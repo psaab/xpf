@@ -123,6 +123,15 @@ func ValidCommunityMember(member string) error {
 			"FRR `expanded` community-list, but it is not a valid POSIX extended "+
 			"regular expression: %w", CommunityRegexChars, err)
 	}
+	// #16788: a compilable member can still be untranslatable to FRR's
+	// whole-joined-string match (interior anchors, a space-matching
+	// construct, a non-POSIX escape). Junos evaluates the member
+	// against each community individually; a member that cannot be
+	// confined to one community token must not commit, and the render
+	// belt omits its whole definition so referencing terms fail closed.
+	if err := ValidCommunityMemberRegex(member); err != nil {
+		return err
+	}
 	return nil
 }
 
