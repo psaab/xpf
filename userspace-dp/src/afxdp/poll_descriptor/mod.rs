@@ -6642,7 +6642,40 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     Some(ingress_logical)
                                 },
                             };
-                            let local_session_capacity_available =
+                            // #16532: LocalMiss admission parity with the
+                            // transit (#10890/#16019) and MissingNeighbor
+                            // sites. Previously this arm defaulted capacity
+                            // to `true` (or only credited an owner closing
+                            // pair) and let the raw install refuse at cap,
+                            // so a table held at cap by sheddable unreplied
+                            // embryos dropped every new host-bound SYN,
+                            // SYN|ACK and non-TCP first packet while a
+                            // transit initial SYN on the same table was
+                            // admitted by shedding. Run the same preflight:
+                            // `can_admit_new_flow(1, ..)` — which sheds at
+                            // the 90% watermark for a qualifying newcomer
+                            // (TCP initial SYN; any non-TCP first packet) —
+                            // and release shed rows with the same
+                            // NAT/BPF/shared-row sequence as transit. Only a
+                            // genuine remaining refusal fails closed (#15951).
+                            //
+                            // SYN|ACK (TCP with ACK set) is not an initial
+                            // SYN, so `can_admit_new_flow`'s TCP arm retains
+                            // the hard cap for it and no shed runs on its
+                            // behalf; that mirrors the transit non-SYN rule
+                            // (#10890: a non-initial SYN retains the hard
+                            // cap). The issue's optional reserved host-local
+                            // headroom for non-TCP/SYN|ACK is NOT taken:
+                            // non-TCP newcomers already qualify for shedding
+                            // under #16019 protocol symmetry, and a static
+                            // headroom would strand transit slots and break
+                            // the `can_admit` post-preflight infallibility
+                            // contract shared by every install site. The
+                            // asymmetry closed here is the one the probe
+                            // proved — initial SYNs (and, via #16019,
+                            // non-TCP first packets) now shed instead of
+                            // refusing at a full table.
+                            let local_reuse_fits =
                                 if let Some(reuse_key) = owner_syn_reuse_key.as_ref() {
                                     sessions.can_admit_after_closing_tcp_pair_for_syn(
                                         1,
@@ -6650,8 +6683,154 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         meta.tcp_flags,
                                     )
                                 } else {
-                                    true
+                                    sessions.can_admit(1)
                                 };
+                            let (local_session_capacity_available, mut local_pressure_shed) =
+                                if local_reuse_fits {
+                                    (true, crate::session::PressureShedSessions::new())
+                                } else {
+                                    sessions.can_admit_new_flow(
+                                        1,
+                                        meta.protocol,
+                                        meta.tcp_flags,
+                                    )
+                                };
+                            // #16532: release shed victims exactly as the
+                            // transit site does (#10890/#12862/#16019 fold
+                            // 2): one tuple-gate lease over every shed key,
+                            // reply-evidence retention, shared-row removal
+                            // under the incarnation fence, BPF/conntrack/
+                            // DNAT/live-row deletion, and NAT/NAT64 hold
+                            // release — including when the host install is
+                            // later refused. On lease contention the local
+                            // rows are already removed; defer the external
+                            // teardown for the housekeeping retry rather
+                            // than making allocations reusable while stale
+                            // authority remains.
+                            let local_shed_keys: Vec<_> = local_pressure_shed
+                                .iter()
+                                .map(|shed| shed.key.clone())
+                                .collect();
+                            let local_replied_sheds: Vec<bool> = local_pressure_shed
+                                .iter()
+                                .map(|shed| {
+                                    !shed.is_reverse
+                                        && (sessions.session_replied(&shed.key)
+                                            || crate::afxdp::shared_ops::shared_session_replied(
+                                                worker_ctx.shared_sessions,
+                                                &shed.key,
+                                                shed.decision.nat,
+                                            ))
+                                })
+                                .collect();
+                            let local_shed_lease = crate::afxdp::bpf_map::global_tuple_gate()
+                                .acquire_lease(local_shed_keys);
+                            if local_shed_lease.is_ok() {
+                                for (shed_idx, shed) in
+                                    local_pressure_shed.into_iter().enumerate()
+                                {
+                                    if local_replied_sheds[shed_idx] {
+                                        sessions.cancel_pending_close(
+                                            &shed.key,
+                                            shed.session_id,
+                                        );
+                                        continue;
+                                    }
+                                    let shared_removal =
+                                        crate::afxdp::shared_ops::remove_shared_session_if(
+                                            worker_ctx.shared_sessions,
+                                            worker_ctx.shared_nat_sessions,
+                                            worker_ctx.shared_forward_wire_sessions,
+                                            &worker_ctx.shared_owner_rg_indexes,
+                                            &shed.key,
+                                            |current| {
+                                                is_pressure_shed_shared_unreplied(
+                                                    current, &shed,
+                                                )
+                                            },
+                                        );
+                                    if matches!(
+                                        shared_removal,
+                                        crate::afxdp::shared_ops::SharedRemoval::Declined
+                                    ) {
+                                        if sessions.probe_with_origin(&shed.key).is_none() {
+                                            crate::nat::release_source_nat_allocation_for_worker(
+                                                &worker_ctx.forwarding.iface_nat_allocators,
+                                                &worker_ctx.forwarding.source_nat_rules,
+                                                &shed.key,
+                                                shed.decision.nat,
+                                                shed.is_reverse,
+                                                now_ns,
+                                                worker_id,
+                                            );
+                                            crate::nat64::release_nat64_allocation_for_worker(
+                                                &worker_ctx.forwarding.nat64,
+                                                &shed.key,
+                                                shed.decision.nat,
+                                                shed.is_reverse,
+                                                now_ns,
+                                                worker_id,
+                                            );
+                                        }
+                                        continue;
+                                    }
+                                    crate::afxdp::bpf_map::release_coordinator_session_rows(
+                                        binding.bpf_maps.session_map.handle(),
+                                        &shed.key,
+                                    );
+                                    binding
+                                        .flow
+                                        .flow_cache
+                                        .invalidate_slot(&shed.key, binding.ifindex);
+                                    let _ =
+                                        crate::afxdp::bpf_map::delete_bpf_conntrack_entry_under_gate(
+                                            conntrack_v4_fd,
+                                            conntrack_v6_fd,
+                                            &shed.key,
+                                        );
+                                    if !shed.is_reverse {
+                                        crate::afxdp::checksum::delete_dnat_table_entry(
+                                            &worker_ctx.dnat_fds,
+                                            &shed.key,
+                                            shed.decision.nat,
+                                        );
+                                    }
+                                    crate::afxdp::bpf_map::delete_live_session_entry(
+                                        binding.bpf_maps.session_map.handle(),
+                                        &shed.key,
+                                        shed.decision.nat,
+                                        shed.is_reverse,
+                                    );
+                                    crate::nat::release_source_nat_allocation_for_worker(
+                                        &worker_ctx.forwarding.iface_nat_allocators,
+                                        &worker_ctx.forwarding.source_nat_rules,
+                                        &shed.key,
+                                        shed.decision.nat,
+                                        shed.is_reverse,
+                                        now_ns,
+                                        worker_id,
+                                    );
+                                    crate::nat64::release_nat64_allocation_for_worker(
+                                        &worker_ctx.forwarding.nat64,
+                                        &shed.key,
+                                        shed.decision.nat,
+                                        shed.is_reverse,
+                                        now_ns,
+                                        worker_id,
+                                    );
+                                    crate::afxdp::session_glue::replicate_session_delete_repairing(
+                                        worker_ctx.peer_worker_commands,
+                                        worker_ctx.worker_commands_by_id,
+                                        worker_ctx.forwarding,
+                                        &shed.key,
+                                        shed.decision.nat,
+                                        shed.is_reverse,
+                                        now_ns,
+                                    );
+                                }
+                            } else if !local_pressure_shed.is_empty() {
+                                sessions.defer_pressure_shed(local_pressure_shed);
+                            }
                             if owner_syn_reuse && local_session_capacity_available {
                                 crate::afxdp::shared_ops::evict_owner_closing_tcp_pair_for_syn(
                                     sessions,
