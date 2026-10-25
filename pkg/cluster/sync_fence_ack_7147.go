@@ -202,6 +202,11 @@ const (
 	// never send one, so the #9569 gate falls back to NACK-only
 	// semantics for it rather than refusing forever.
 	capFlag2ConfigApplyAck uint8 = 1 << 0
+	// capFlag2PersistentNatLeaseProvenance (#16877): the peer decodes
+	// persistent-NAT lease types 50/51, which carry mint-from-zone
+	// provenance. Absent or unlearned peers receive the legacy 41/43
+	// layouts so their lease refreshes continue without unsupported data.
+	capFlag2PersistentNatLeaseProvenance uint8 = 1 << 1
 )
 
 // localCapabilityFlags is what this build advertises. It is a compile-time
@@ -211,10 +216,10 @@ const (
 const localCapabilityFlags = capFlagFenceAck | capFlagPeerDeleteOwnership | capFlagPurgeRetirementForwardOnly | capFlagInstallTableIdentity | capFlagConfigAncestry | capFlagConfigEpochReverseTag | capFlagIpsecTunnelDiscriminator
 
 // localCapabilityFlags2 is what this build advertises in the second
-// capability byte (#16756), appended after the wire-version field in
-// syncMsgPeerCapabilities. Compile-time for the same reason as
-// localCapabilityFlags: a property of the binary, not runtime state.
-const localCapabilityFlags2 = capFlag2ConfigApplyAck
+// capability byte (#16756, extended by #16877), appended after the
+// wire-version field in syncMsgPeerCapabilities. Compile-time for the same
+// reason as localCapabilityFlags: a property of the binary, not runtime state.
+const localCapabilityFlags2 = capFlag2ConfigApplyAck | capFlag2PersistentNatLeaseProvenance
 
 // FenceResult is what the local fence handler reports about what it achieved.
 // It is the daemon's answer to "how many RGs did you just drive to
@@ -440,6 +445,17 @@ func (s *SessionSync) ConfigApplyAckCapable() bool {
 		return false
 	}
 	return uint8(s.peerCapabilityFlags2.Load())&capFlag2ConfigApplyAck != 0
+}
+
+// PersistentNatLeaseProvenanceCapable reports whether the peer advertised
+// support for persistent-NAT provenance lease frames (types 50/51). Senders
+// must also require peerCapabilitiesLearned and fall back to legacy frames
+// while discovery is pending.
+func (s *SessionSync) PersistentNatLeaseProvenanceCapable() bool {
+	if s == nil {
+		return false
+	}
+	return uint8(s.peerCapabilityFlags2.Load())&capFlag2PersistentNatLeaseProvenance != 0
 }
 
 // peerCapabilitiesLearned reports whether a syncMsgPeerCapabilities frame has been

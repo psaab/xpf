@@ -329,8 +329,9 @@ pub(super) struct PersistentPermissionScope {
     /// recorded verbatim so the non-zone inbound reader — which knows
     /// only the arrival zone and cannot invert the bucket hash — can
     /// verify a held bucket belongs to its rule by re-folding with
-    /// (recorded_from, arrival). None for legacy/imported buckets
-    /// (idle-lease sync, NAT64 BIBs); those never take the fallback.
+    /// (recorded_from, arrival). None for legacy idle-lease frames
+    /// (before #16877) and NAT64 BIBs; those without provenance never
+    /// take the fallback.
     pub(super) mint_from_zone: Option<String>,
     /// #16017: authorizing rule's permit epoch when `any_remote` was
     /// granted or explicitly re-authorized after an import. `remotes`
@@ -487,12 +488,12 @@ impl PersistentPermissions {
     /// (`PersistentPermissionScope::mint_from_zone`) at record time and this
     /// check re-folds THIS rule with that recorded pair: a held bucket
     /// belongs to the rule iff the re-fold reproduces the bucket key.
-    /// Legacy/imported buckets carry no provenance and never match, and
-    /// a sibling whose authored fields differ re-folds differently for
-    /// every pair, so its buckets never match either — the fallback never
-    /// widens to UNSCOPED/any-bucket. Returns Some(permitted) when such a
-    /// bucket exists, None when the lease holds no bucket for this rule
-    /// (caller treats it as a Miss so the minting sibling decides).
+    /// Current imported records preserve provenance (#16877); legacy imported
+    /// buckets without it never match. A sibling whose authored fields differ
+    /// re-folds differently for every pair, so the fallback never widens to
+    /// UNSCOPED/any-bucket. Returns Some(permitted) when such a bucket exists,
+    /// None when the lease holds no bucket for this rule (caller treats it as
+    /// a Miss so the minting sibling decides).
     pub(super) fn permits_authored_any_from(
         &self,
         rule: &super::source::SourceNatRule,

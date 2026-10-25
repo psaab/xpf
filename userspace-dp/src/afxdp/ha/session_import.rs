@@ -3325,6 +3325,7 @@ mod rejected_mirror_reservation_10790_tests {
                             src_port: key.src_port,
                             routing_scope: key.routing_domain,
                             egress_scope: 0,
+                            mint_from_zone: None,
                             remote: None,
                             permit_any_remote: false,
                             permitted_remotes: Vec::new(),

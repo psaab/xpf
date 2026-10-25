@@ -7,8 +7,8 @@
 // rules can point at ONE pool, and the lease must then be exported once.
 
 use super::*;
-use crate::SourceNATRuleSnapshot;
 use crate::nat::parse_source_nat_rules;
+use crate::SourceNATRuleSnapshot;
 
 const TIMEOUT_NS: u64 = 300 * 1_000_000_000;
 
@@ -24,6 +24,7 @@ fn pool_rule(name: &str, pool: &str, addrs: &[&str]) -> SourceNATRuleSnapshot {
         ..SourceNATRuleSnapshot::default()
     }
 }
+
 /// Seed an idle lease through the IMPORT path. `allocate_translation` is
 /// private to `nat`, and these cells are about ROUTING rather than minting —
 /// part 1's cells already bind the allocator behaviour.
@@ -36,6 +37,7 @@ fn record(pool: &str, src: &str, translated: &str, port: u16) -> PoolIdleLease {
             src_port: 40000,
             routing_scope: 0,
             egress_scope: 0,
+            mint_from_zone: None,
             remote: Some(("8.8.8.8".parse().unwrap(), 443)),
             permit_any_remote: false,
             permitted_remotes: vec![("8.8.8.8".parse().unwrap(), 443)],
@@ -101,6 +103,7 @@ fn mint_active_local_identity(
             src_port: 40000,
             routing_scope: 0,
             egress_scope: 0,
+            mint_from_zone: None,
             remote: Some((dst_ip, 443)),
             permit_any_remote: false,
             permitted_remotes: vec![(dst_ip, 443)],
@@ -231,6 +234,7 @@ fn repeated_unique_import_batches_remain_within_pool_capacity_11475() {
             src_port: 40_000,
             routing_scope: 0,
             egress_scope: 0,
+            mint_from_zone: None,
             remote: Some(("8.8.8.8".parse().unwrap(), 443)),
             permit_any_remote: false,
             permitted_remotes: vec![("8.8.8.8".parse().unwrap(), 443)],
@@ -492,16 +496,24 @@ fn deterministic_shaped_lease_never_installs_via_generic_pool_14638() {
         parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
     let mut rec = record("P", "10.0.61.50", "203.0.113.1", 2048);
     rec.lease.deterministic = true;
-    rec.lease.deterministic_identity = Some(crate::nat::DeterministicPortedIdentity::V6(crate::nat::DeterministicV6 {
-        block_size: 32,
-        blocks_per_ip: 2,
-        host_prefix_len: 32,
-        host_base: "2001:db8::".parse::<std::net::Ipv6Addr>().unwrap().octets(),
-        host_count: 2,
-    }));
+    rec.lease.deterministic_identity = Some(crate::nat::DeterministicPortedIdentity::V6(
+        crate::nat::DeterministicV6 {
+            block_size: 32,
+            blocks_per_ip: 2,
+            host_prefix_len: 32,
+            host_base: "2001:db8::".parse::<std::net::Ipv6Addr>().unwrap().octets(),
+            host_count: 2,
+        },
+    ));
     let counts = coord.import_idle_persistent_leases(&[rec], 1_000);
-    assert_eq!(counts.installed, 0, "deterministic lease must not install as dynamic: {counts:?}");
-    assert_eq!(counts.skipped_identity_busy, 1, "deterministic-via-generic must count identity-busy: {counts:?}");
+    assert_eq!(
+        counts.installed, 0,
+        "deterministic lease must not install as dynamic: {counts:?}"
+    );
+    assert_eq!(
+        counts.skipped_identity_busy, 1,
+        "deterministic-via-generic must count identity-busy: {counts:?}"
+    );
     assert_eq!(coord.export_idle_persistent_leases(2_000).len(), 0);
 }
 
@@ -565,14 +577,20 @@ fn deterministic_nat64_display_and_clear_revoke_and_fence_14676() {
         "deterministic NAT64 lease must appear in SHOW: {display:?}"
     );
     assert_eq!(display[0].pool_name, "nat64-deterministic-0");
-    assert!(display[0].lease.deterministic, "display lease must be deterministic");
+    assert!(
+        display[0].lease.deterministic,
+        "display lease must be deterministic"
+    );
     assert_eq!(
         display[0].lease.deterministic_identity,
         Some(crate::nat::DeterministicPortedIdentity::V6(params))
     );
     // Clear leg.
     let cleared = coord.clear_persistent_nat_leases();
-    assert_eq!(cleared, 1, "clear must revoke the deterministic NAT64 lease");
+    assert_eq!(
+        cleared, 1,
+        "clear must revoke the deterministic NAT64 lease"
+    );
     assert!(
         coord.export_idle_persistent_leases(22).is_empty(),
         "cleared NAT64 lease must not export as idle"
@@ -583,7 +601,10 @@ fn deterministic_nat64_display_and_clear_revoke_and_fence_14676() {
     );
     // Fence leg: a stale pre-clear record must not reinstall.
     let counts = coord.import_idle_persistent_leases(&exported, 23);
-    assert_eq!(counts.installed, 0, "stale NAT64 lease must not reinstall after clear: {counts:?}");
+    assert_eq!(
+        counts.installed, 0,
+        "stale NAT64 lease must not reinstall after clear: {counts:?}"
+    );
     assert_eq!(
         counts.skipped_clear_fenced, 1,
         "stale NAT64 import must be clear-fenced, not installed: {counts:?}"
@@ -604,7 +625,10 @@ fn round_robin_nat64_display_export_clear_and_fence_16488() {
     let mut coord = Coordinator::new();
     coord.forwarding.nat64 = crate::nat64::Nat64State::from_snapshots(&[snap.clone()]);
     let prefix = &coord.forwarding.nat64.prefixes[0];
-    assert!(prefix.deterministic_v6.is_none(), "fixture must be round-robin");
+    assert!(
+        prefix.deterministic_v6.is_none(),
+        "fixture must be round-robin"
+    );
     let flow = crate::nat::SourceNatFlowKey {
         protocol: 6,
         src_ip: "2001:db8::1".parse().unwrap(),
@@ -632,24 +656,50 @@ fn round_robin_nat64_display_export_clear_and_fence_16488() {
         crate::nat::NatHolder::Untracked
     ));
     let exported = coord.export_idle_persistent_leases(21);
-    assert_eq!(exported.len(), 1, "round-robin NAT64 idle BIB must export: {exported:?}");
+    assert_eq!(
+        exported.len(),
+        1,
+        "round-robin NAT64 idle BIB must export: {exported:?}"
+    );
     assert_eq!(exported[0].pool_name, "nat64-0");
     assert!(!exported[0].lease.deterministic);
-    assert!(exported[0].lease.permit_any_remote, "NAT64 BIB is AnyRemoteHost");
+    assert!(
+        exported[0].lease.permit_any_remote,
+        "NAT64 BIB is AnyRemoteHost"
+    );
     let display = coord.export_display_persistent_leases(21);
-    assert_eq!(display.len(), 1, "round-robin NAT64 lease must appear in SHOW: {display:?}");
+    assert_eq!(
+        display.len(),
+        1,
+        "round-robin NAT64 lease must appear in SHOW: {display:?}"
+    );
     assert_eq!(display[0].pool_name, "nat64-0");
     let mut standby = Coordinator::new();
     standby.forwarding.nat64 = crate::nat64::Nat64State::from_snapshots(&[snap.clone()]);
     let counts = standby.import_idle_persistent_leases(&exported, 1000);
-    assert_eq!(counts.installed, 1, "round-robin BIB must import on standby: {counts:?}");
+    assert_eq!(
+        counts.installed, 1,
+        "round-robin BIB must import on standby: {counts:?}"
+    );
     let cleared = coord.clear_persistent_nat_leases();
     assert_eq!(cleared, 1, "clear must revoke the round-robin NAT64 lease");
-    assert!(coord.export_idle_persistent_leases(22).is_empty(), "cleared BIB must not export");
-    assert!(coord.export_display_persistent_leases(22).is_empty(), "cleared BIB must not show");
+    assert!(
+        coord.export_idle_persistent_leases(22).is_empty(),
+        "cleared BIB must not export"
+    );
+    assert!(
+        coord.export_display_persistent_leases(22).is_empty(),
+        "cleared BIB must not show"
+    );
     let counts = coord.import_idle_persistent_leases(&exported, 23);
-    assert_eq!(counts.installed, 0, "stale round-robin BIB must not reinstall after clear: {counts:?}");
-    assert_eq!(counts.skipped_clear_fenced, 1, "stale round-robin import must be clear-fenced: {counts:?}");
+    assert_eq!(
+        counts.installed, 0,
+        "stale round-robin BIB must not reinstall after clear: {counts:?}"
+    );
+    assert_eq!(
+        counts.skipped_clear_fenced, 1,
+        "stale round-robin import must be clear-fenced: {counts:?}"
+    );
 }
 
 /// #16488 import validation: out-of-pool / out-of-range records must not install.
@@ -681,7 +731,13 @@ fn round_robin_nat64_import_rejects_out_of_pool_and_range_16488() {
     )
     .unwrap();
     assert!(crate::nat::release_nat64_pool_port(
-        &prefix.port_allocator, flow, ip, port, 20, false, crate::nat::NatHolder::Untracked
+        &prefix.port_allocator,
+        flow,
+        ip,
+        port,
+        20,
+        false,
+        crate::nat::NatHolder::Untracked
     ));
     let exported = coord.export_idle_persistent_leases(21);
     assert_eq!(exported.len(), 1);
@@ -690,15 +746,411 @@ fn round_robin_nat64_import_rejects_out_of_pool_and_range_16488() {
     let mut bad_addr = exported[0].clone();
     bad_addr.lease.translated_ip = "203.0.113.99".parse().unwrap();
     let counts = standby.import_idle_persistent_leases(&[bad_addr], 1000);
-    assert_eq!(counts.installed, 0, "out-of-pool BIB must not install: {counts:?}");
+    assert_eq!(
+        counts.installed, 0,
+        "out-of-pool BIB must not install: {counts:?}"
+    );
     assert_eq!(counts.skipped_unknown_address, 1, "{counts:?}");
     let mut bad_port = exported[0].clone();
     bad_port.lease.translated_port = 80;
     let counts = standby.import_idle_persistent_leases(&[bad_port], 1000);
-    assert_eq!(counts.installed, 0, "out-of-range BIB must not install: {counts:?}");
+    assert_eq!(
+        counts.installed, 0,
+        "out-of-range BIB must not install: {counts:?}"
+    );
     assert_eq!(counts.skipped_identity_busy, 1, "{counts:?}");
     let mut det_shaped = exported[0].clone();
     det_shaped.lease.deterministic = true;
     let counts = standby.import_idle_persistent_leases(&[det_shaped], 1000);
-    assert_eq!(counts.installed, 0, "deterministic-shaped rr record must not install: {counts:?}");
+    assert_eq!(
+        counts.installed, 0,
+        "deterministic-shaped rr record must not install: {counts:?}"
+    );
+}
+/// #16876: imported idle leases remain peer-owned on a standby, then become
+/// exportable on RG promotion so a restarted former owner can relearn them.
+/// The second arm keeps the lease alive only with an inbound holder; releasing
+/// that holder rearms expiry but must not itself transfer ownership.
+#[test]
+fn imported_idle_lease_reaches_restarted_owner_after_promotion_16876() {
+    for inbound_only in [false, true] {
+        let mut active = Coordinator::new();
+        active.forwarding.source_nat_rules =
+            parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
+        let mut standby = Coordinator::new();
+        standby.forwarding.source_nat_rules =
+            parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
+
+        let local = mint_local_idle_lease(&active, "P");
+        let advertised = active.export_idle_persistent_leases(3_000);
+        assert_eq!(advertised.len(), 1);
+        assert_eq!(
+            standby
+                .import_idle_persistent_leases(&advertised, 10_000)
+                .installed,
+            1
+        );
+        assert!(
+            standby.export_idle_persistent_leases(11_000).is_empty(),
+            "standby must not echo before promotion (#10789-F4)"
+        );
+        if inbound_only {
+            let key = crate::nat::PersistentSourceKey {
+                protocol: local.lease.protocol,
+                src_ip: local.lease.src_ip,
+                src_port: local.lease.src_port,
+                routing_scope: local.lease.routing_scope,
+                remote: None,
+            };
+            let allocator = &standby.forwarding.source_nat_rules[0].pool_allocator;
+            assert!(allocator.acquire_persistent_inbound(key, 11_000));
+            allocator.release_persistent_inbound(key, 12_000);
+            assert!(
+                standby.export_idle_persistent_leases(13_000).is_empty(),
+                "inbound release alone must not promote peer-owned lease"
+            );
+        }
+
+        // Drive the actual HA activation path; this is when the idle lease's
+        // authority changes, not merely when an imported lease is installed.
+        standby
+            .update_ha_state(&[crate::HAGroupStatus {
+                rg_id: 1,
+                active: true,
+                ..crate::HAGroupStatus::default()
+            }])
+            .expect("RG promotion");
+        let pushed = standby.export_idle_persistent_leases(14_000);
+        assert_eq!(
+            pushed.len(),
+            1,
+            "#16876: promoted node must re-advertise imported idle lease (inbound_only={inbound_only})"
+        );
+
+        let restarted = Coordinator::new();
+        let mut restarted = restarted;
+        restarted.forwarding.source_nat_rules =
+            parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
+        assert_eq!(
+            restarted
+                .import_idle_persistent_leases(&pushed, 15_000)
+                .installed,
+            1,
+            "#16876: restarted former owner must relearn promoted binding"
+        );
+    }
+}
+
+/// #16876: the periodic peer batch can arrive after RG activation. A lease
+/// imported in that order is already locally authoritative and must be
+/// eligible for the next re-advertisement.
+#[test]
+fn imported_idle_lease_arriving_after_promotion_is_exportable_16876() {
+    let mut active = Coordinator::new();
+    active.forwarding.source_nat_rules =
+        parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
+    let advertised = mint_local_idle_lease(&active, "P");
+
+    let mut primary = Coordinator::new();
+    primary.forwarding.source_nat_rules =
+        parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
+    primary
+        .update_ha_state(&[crate::HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            ..crate::HAGroupStatus::default()
+        }])
+        .expect("RG promotion");
+
+    let imported = primary.import_idle_persistent_leases(&[advertised], 10_000);
+    assert_eq!(imported.installed, 1, "fixture: peer lease must import");
+    let pushed = primary.export_idle_persistent_leases(11_000);
+    assert_eq!(
+        pushed.len(),
+        1,
+        "#16876: a lease imported after promotion must be re-advertised"
+    );
+}
+
+/// #16876 F1: a node-wide lease remains peer-owned until all of this node's
+/// configured RGs are active. A stale duplicate remains additive-only and
+/// cannot shorten the held lease's deadline.
+#[test]
+fn mixed_rg_import_refresh_is_additive_without_promotion_16876() {
+    let mut source = Coordinator::new();
+    source.forwarding.source_nat_rules =
+        parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
+    let mut advertised = mint_local_idle_lease(&source, "P");
+
+    let mut mixed = Coordinator::new();
+    mixed.forwarding.source_nat_rules =
+        parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
+    mixed
+        .update_ha_state(&[
+            crate::HAGroupStatus {
+                rg_id: 1,
+                active: true,
+                ..crate::HAGroupStatus::default()
+            },
+            crate::HAGroupStatus {
+                rg_id: 2,
+                active: false,
+                ..crate::HAGroupStatus::default()
+            },
+        ])
+        .expect("mixed RG state");
+
+    let imported = mixed.import_idle_persistent_leases(&[advertised.clone()], 10_000);
+    assert_eq!(imported.installed, 1, "fixture: peer lease must import");
+    let before = mixed
+        .export_display_persistent_leases(20_000)
+        .into_iter()
+        .find(|row| row.pool_name == "P")
+        .expect("imported lease remains held for display")
+        .lease;
+
+    advertised.lease.remaining_ns = 1;
+    let refresh = mixed.import_idle_persistent_leases(&[advertised], 20_000);
+    assert_eq!(
+        refresh.skipped_existing, 1,
+        "refresh must be additive: {refresh:?}"
+    );
+    let after = mixed
+        .export_display_persistent_leases(20_000)
+        .into_iter()
+        .find(|row| row.pool_name == "P")
+        .expect("existing lease must remain held after duplicate")
+        .lease;
+    assert_eq!(
+        after.translated_ip, before.translated_ip,
+        "duplicate must not displace lease"
+    );
+    assert_eq!(
+        after.translated_port, before.translated_port,
+        "duplicate must not displace lease"
+    );
+    assert_eq!(
+        after.remaining_ns, before.remaining_ns,
+        "duplicate import must not shorten lease deadline"
+    );
+    assert!(
+        mixed.export_idle_persistent_leases(20_000).is_empty(),
+        "partial RG ownership must not promote the node-wide imported lease set"
+    );
+}
+
+/// A partial late batch on an already-active node promotes only the records it
+/// installed; it must not sweep an unrelated imported lease in another pool.
+#[test]
+fn late_partial_import_promotes_only_installed_records_16876() {
+    let mut primary = Coordinator::new();
+    primary.forwarding.source_nat_rules = parse_source_nat_rules(&[
+        pool_rule("r1", "P", &["203.0.113.1"]),
+        pool_rule("r2", "Q", &["203.0.113.2"]),
+    ]);
+    primary
+        .update_ha_state(&[crate::HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            ..crate::HAGroupStatus::default()
+        }])
+        .expect("primary RG");
+
+    let unrelated = record("Q", "10.0.61.51", "203.0.113.2", 40_001);
+    let q_allocator = &primary
+        .forwarding
+        .source_nat_rules
+        .iter()
+        .find(|rule| rule.pool_name == "Q")
+        .expect("Q rule")
+        .pool_allocator;
+    assert_eq!(
+        q_allocator.import_idle_lease(
+            &unrelated.lease,
+            &["203.0.113.2".parse().unwrap()],
+            TIMEOUT_NS,
+            10_000,
+        ),
+        crate::nat::IdleLeaseImport::Installed
+    );
+
+    let mut source = Coordinator::new();
+    source.forwarding.source_nat_rules =
+        parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
+    let installed = mint_local_idle_lease(&source, "P");
+    let mut refused = installed.clone();
+    refused.pool_name = "unknown".to_string();
+    let counts = primary.import_idle_persistent_leases(&[installed, refused], 20_000);
+    assert_eq!((counts.installed, counts.skipped_unknown_pool), (1, 1));
+
+    let exported = primary.export_idle_persistent_leases(21_000);
+    assert_eq!(
+        exported.len(),
+        1,
+        "only the newly installed lease is promoted"
+    );
+    assert_eq!(exported[0].pool_name, "P");
+    assert!(
+        primary
+            .export_display_persistent_leases(21_000)
+            .iter()
+            .any(|row| row.pool_name == "Q"),
+        "the unrelated Q lease remains held, not swept or removed"
+    );
+}
+
+/// The Go manager filters its fixed 16-slot BPF arrays against its seeded HA
+/// inventory before sending groups here. These coordinator tests model that
+/// configured inventory, including an inactive RG with no egress interface.
+fn configured_ha_inventory(active: &[i32]) -> Vec<crate::HAGroupStatus> {
+    (1..=2)
+        .map(|rg_id| crate::HAGroupStatus {
+            rg_id,
+            active: active.contains(&rg_id),
+            ..crate::HAGroupStatus::default()
+        })
+        .collect()
+}
+
+#[test]
+fn promotion_uses_configured_ha_inventory_16876_gate2() {
+    // Unused slots are removed by the Go manager before this coordinator sees
+    // the configured RG1/RG2 statuses.
+    let groups = configured_ha_inventory(&[1, 2]);
+    assert_eq!(groups.len(), 2, "coordinator receives only configured RGs");
+
+    // Activation path.
+    let mut source = Coordinator::new();
+    source.forwarding.source_nat_rules =
+        parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
+    let advertised = mint_local_idle_lease(&source, "P");
+    let mut standby = Coordinator::new();
+    standby.forwarding.source_nat_rules =
+        parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
+    assert_eq!(
+        standby
+            .import_idle_persistent_leases(&[advertised.clone()], 10_000)
+            .installed,
+        1
+    );
+    standby.update_ha_state(&groups).expect("HA update");
+    assert_eq!(
+        standby.export_idle_persistent_leases(14_000).len(),
+        1,
+        "configured-all-active must promote despite unused inactive slots"
+    );
+
+    // Late-import path on an already-active node.
+    let mut primary = Coordinator::new();
+    primary.forwarding.source_nat_rules =
+        parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
+    primary.update_ha_state(&groups).expect("HA update");
+    assert_eq!(
+        primary
+            .import_idle_persistent_leases(&[advertised], 20_000)
+            .installed,
+        1
+    );
+    assert_eq!(
+        primary.export_idle_persistent_leases(21_000).len(),
+        1,
+        "late import must promote when only unused slots are inactive"
+    );
+}
+
+#[test]
+fn promotion_blocked_by_configured_inactive_rg_16876_gate2() {
+    // RG2 is present in the manager-seeded inventory but has no egress entry
+    // in this coordinator snapshot; its inactive status must still block.
+    let groups = configured_ha_inventory(&[1]);
+    let mut source = Coordinator::new();
+    source.forwarding.source_nat_rules =
+        parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
+    let advertised = mint_local_idle_lease(&source, "P");
+    let mut standby = Coordinator::new();
+    standby.forwarding.source_nat_rules =
+        parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
+    assert_eq!(
+        standby
+            .import_idle_persistent_leases(&[advertised.clone()], 10_000)
+            .installed,
+        1
+    );
+    standby.update_ha_state(&groups).expect("HA update");
+    assert!(
+        standby.export_idle_persistent_leases(14_000).is_empty(),
+        "a configured inactive RG must block promotion"
+    );
+
+    // The same configured inactive RG must block a late batch on an already-
+    // active node, not just the activation-time promotion path.
+    let mut late_primary = Coordinator::new();
+    late_primary.forwarding.source_nat_rules =
+        parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
+    late_primary.update_ha_state(&groups).expect("HA update");
+    assert_eq!(
+        late_primary
+            .import_idle_persistent_leases(&[advertised], 20_000)
+            .installed,
+        1
+    );
+    assert!(
+        late_primary
+            .export_idle_persistent_leases(21_000)
+            .is_empty(),
+        "configured peer-owned RG must block late-import promotion"
+    );
+}
+
+/// #16877: exercise the generation-validated coordinator import rather than
+/// the allocator-only test helper, so wildcard admission is checked after a
+/// real failover-shaped lease import.
+#[test]
+fn coordinator_imported_nonzone_any_remote_lease_admits_inbound_16877() {
+    let mut snapshot = pool_rule("r1", "P", &["203.0.113.1"]);
+    snapshot.from_zone.clear();
+    snapshot.to_zone.clear();
+    snapshot.persistent_nat_permit = "any-remote-host".to_string();
+    let rules = || parse_source_nat_rules(&[snapshot.clone()]);
+
+    let mut active = Coordinator::new();
+    active.forwarding.source_nat_rules = rules();
+    let advertised = mint_local_idle_lease(&active, "P");
+    assert!(advertised.lease.permit_any_remote);
+    assert_eq!(advertised.lease.mint_from_zone.as_deref(), Some("lan"));
+
+    let mut primary = Coordinator::new();
+    primary.forwarding.source_nat_rules = rules();
+    primary
+        .update_ha_state(&[crate::HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            ..crate::HAGroupStatus::default()
+        }])
+        .expect("RG promotion");
+    let imported =
+        primary.import_idle_persistent_leases_after_generation_now(&[advertised.clone()]);
+    assert_eq!(
+        imported.installed, 1,
+        "peer lease must import: {imported:?}"
+    );
+
+    let rule = &primary.forwarding.source_nat_rules[0];
+    let decision = rule.pool_allocator.persistent_inbound_lookup_for_rule(
+        6,
+        advertised.lease.translated_ip,
+        advertised.lease.translated_port,
+        "203.0.113.99".parse().unwrap(),
+        9_999,
+        crate::afxdp::monotonic_nanos(),
+        rule,
+        "wan",
+        "wan",
+        "wan",
+        &crate::nat::NatScopeCtx::default(),
+    );
+    assert!(
+        matches!(decision, crate::nat::PersistentInbound::Permitted { .. }),
+        "#16877: generation-validated coordinator import must preserve non-zone AnyRemoteHost admission"
+    );
 }

@@ -183,9 +183,14 @@ func (s *SessionSync) handlePersistentNatLeaseGeneration(conn net.Conn, msgType 
 	}
 	var batch userspace.PersistentNatLeaseBatch
 	var ok bool
-	if msgType == syncMsgPersistentNatLeaseDeterministic {
+	switch msgType {
+	case syncMsgPersistentNatLeaseProvenance:
+		batch, ok = decodePersistentNatLeaseBatchPayloadProvenance(base, false)
+	case syncMsgPersistentNatLeaseDeterministicProvenance:
+		batch, ok = decodePersistentNatLeaseBatchPayloadProvenance(base, true)
+	case syncMsgPersistentNatLeaseDeterministic:
 		batch, ok = decodePersistentNatLeaseBatchPayloadDeterministic(base)
-	} else {
+	default:
 		batch, ok = decodePersistentNatLeaseBatchPayload(base)
 	}
 	if !ok {

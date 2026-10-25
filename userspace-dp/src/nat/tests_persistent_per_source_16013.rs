@@ -302,6 +302,7 @@ fn idle_lease_import_charges_source_16013() {
         src_port: sport,
         routing_scope: 0,
         egress_scope: 0,
+        mint_from_zone: None,
         remote: None,
         permit_any_remote: true,
         permitted_remotes: Vec::new(),

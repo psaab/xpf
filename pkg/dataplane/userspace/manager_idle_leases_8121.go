@@ -67,14 +67,12 @@ func (m *Manager) ensurePersistentNatLeaseProtocolLocked(required int, feature s
 }
 
 func (m *Manager) ensurePersistentNatLeasePermissionProtocolLocked() error {
-	// #14322: lease verbs require the egress-scope fence too — an old helper
-	// would ignore EgressScope and merge two zones' permissions on import.
-	if err := m.ensurePersistentNatLeaseProtocolLocked(
-		MinProtocolPersistentNatLeaseEgressScope, "egress scope"); err != nil {
-		return err
-	}
+	// The newest idle-lease wire floor subsumes the earlier permission and
+	// egress-scope fields. Check it once: probing each floor in sequence can
+	// issue a redundant status request after an old helper has already been
+	// observed.
 	return m.ensurePersistentNatLeaseProtocolLocked(
-		MinProtocolPersistentNatLeasePermissions, "permissions")
+		MinProtocolPersistentNatLeaseMintFromZone, "mint-from-zone provenance")
 }
 
 func (m *Manager) ensurePersistentNatLeaseScopeProtocolLocked() error {
@@ -204,9 +202,8 @@ func validateDisplayLeaseScopes(leases []DisplayLeaseWire) error {
 // subsequent calls use that observation.
 
 // ExportIdleLeases returns locally-exportable persistent-NAT leases that have
-// no live flows but remain inside their persistence timeout. Session sync
-// cannot observe this idle population; peer-imported leases are filtered by the
-// allocator so they are not echoed back.
+// no live flows but remain inside their persistence timeout. Standby imports
+// remain filtered until primary RG activation promotes them to local ownership.
 func (m *Manager) ExportIdleLeases() ([]IdleLeaseWire, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

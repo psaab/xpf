@@ -248,6 +248,7 @@ fn idle_record(
         src_port: 40000,
         routing_scope: 0,
         egress_scope,
+        mint_from_zone: None,
         remote: None,
         permit_any_remote: false,
         permitted_remotes: vec![remote],

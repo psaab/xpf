@@ -582,6 +582,7 @@ func TestMergeHAStateFromMaps(t *testing.T) {
 
 	merged, err := mergeHAStateFromMaps(rgMap, wdMap, map[int]HAGroupStatus{
 		0: {RGID: 0, Active: false},
+		2: {RGID: 2, Active: false},
 	})
 	if err != nil {
 		t.Fatalf("mergeHAStateFromMaps: %v", err)
@@ -597,17 +598,12 @@ func TestMergeHAStateFromMaps(t *testing.T) {
 	}
 }
 
-// TestMergeHAStateFromMapsFabricatesGroupsFromArrayMap documents the #1928
-// failure mechanism: rg_active is a fixed-size ARRAY (max_entries 16), so it
-// is ALWAYS fully populated with keys 0-15 regardless of whether any
-// redundancy group is configured. On a standalone (non-cluster) firewall every
-// entry is value=0, and mergeHAStateFromMaps therefore returns 16 inactive HA
-// groups. Shipping those to the helper makes its per-packet HA gate drop all
-// transit traffic as HAInactive. The startup path in Apply guards
-// refreshHAStateFromMapsLocked/syncHAStateLocked behind m.clusterHA so a
-// standalone never fabricates and publishes these phantom groups (matching the
-// pre-existing m.clusterHA guard on the periodic status poll in process.go).
-func TestMergeHAStateFromMapsFabricatesGroupsFromArrayMap(t *testing.T) {
+// TestMergeHAStateFromMapsUsesConfiguredArrayInventory pins the production
+// shape: rg_active and ha_watchdog are fixed-size arrays, but only groups
+// already seeded from the cluster config (plus a previously published RG0)
+// belong in the helper inventory. An inactive configured RG remains present
+// even when it has no forwarding interface.
+func TestMergeHAStateFromMapsUsesConfiguredArrayInventory(t *testing.T) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		t.Skipf("RemoveMemlock: %v", err)
 	}
@@ -632,18 +628,36 @@ func TestMergeHAStateFromMapsFabricatesGroupsFromArrayMap(t *testing.T) {
 	}
 	defer wdMap.Close()
 
-	// Leave both arrays at their default zero values — the standalone case.
-	merged, err := mergeHAStateFromMaps(rgMap, wdMap, map[int]HAGroupStatus{})
+	active := uint8(1)
+	for _, rgID := range []uint32{0, 1} {
+		if err := rgMap.Update(rgID, active, ebpf.UpdateAny); err != nil {
+			t.Fatalf("rgMap.Update(%d): %v", rgID, err)
+		}
+	}
+	watchdog := uint64(12345)
+	if err := wdMap.Update(uint32(2), watchdog, ebpf.UpdateAny); err != nil {
+		t.Fatalf("wdMap.Update: %v", err)
+	}
+
+	merged, err := mergeHAStateFromMaps(rgMap, wdMap, map[int]HAGroupStatus{
+		0: {RGID: 0, Active: false},
+		1: {RGID: 1, Active: false},
+		2: {RGID: 2, Active: false},
+	})
 	if err != nil {
 		t.Fatalf("mergeHAStateFromMaps: %v", err)
 	}
-	if len(merged) != 16 {
-		t.Fatalf("array map yielded %d HA groups, want 16 (the phantom-group source #1928 guards against)", len(merged))
+	if len(merged) != 3 {
+		t.Fatalf("merged inventory has %d groups, want configured RG0, RG1, RG2 only: %+v", len(merged), merged)
 	}
-	for id, group := range merged {
-		if group.Active {
-			t.Fatalf("standalone array entry RG%d unexpectedly Active", id)
-		}
+	if !merged[0].Active || !merged[1].Active {
+		t.Fatalf("configured RG0/RG1 did not refresh from rg_active: %+v", merged)
+	}
+	if merged[2].Active || merged[2].WatchdogTimestamp != watchdog {
+		t.Fatalf("configured inactive RG2 lost its map state: %+v", merged[2])
+	}
+	if _, ok := merged[15]; ok {
+		t.Fatal("unconfigured active array slot RG15 was added to the HA inventory")
 	}
 }
 

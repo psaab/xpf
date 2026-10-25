@@ -204,6 +204,7 @@ func TestProtocolFloorsAreImmutableLiterals6648(t *testing.T) {
 		{"NAT64 multi-RI scope landed in the v64 bump (#16049)", MinProtocolNAT64RoutingInstanceList, 64},
 		{"persistent NAT lease routing scope landed in the v25 bump (#10018)", MinProtocolPersistentNatLeaseScope, 25},
 		{"persistent NAT lease permissions landed in v48 (#13945)", MinProtocolPersistentNatLeasePermissions, 48},
+		{"persistent NAT lease mint-from-zone provenance landed in v75 (#16877)", MinProtocolPersistentNatLeaseMintFromZone, 75},
 		{"the secure-tunnel refusal contract completed at the v7 bump (8c011681c)", MinProtocolSecureTunnelRefusal, 7},
 	} {
 		if tc.got != tc.want {

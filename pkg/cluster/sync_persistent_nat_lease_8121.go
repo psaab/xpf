@@ -20,23 +20,15 @@ import (
 // whose flows all closed within the persistence timeout keeps its translated
 // port there and loses it across a failover. This carries that population.
 //
-// The generation-bearing message type and replay semantics remain unchanged
-// for the legacy record layout. #14638: the seven Deterministic* fields
-// cannot be appended to that layout — decodeOnePersistentNatLease demands
-// exact consumption (off == len(buf)), so an old receiver would reject the
-// whole batch and a silent append is not an extension. The deterministic
-// record therefore rides a NEW message type
-// (syncMsgPersistentNatLeaseDeterministic) whose record layout appends the
-// deterministic identity after TimeoutNs. A pre-#14638 peer ignores the
-// unknown type; a new peer receiving the old type decodes the legacy layout
-// with Deterministic=false exactly as before. QueuePersistentNatLeaseBatch
-// separates records by layout: type 41 frames contain only non-deterministic
-// leases, and type 43 frames contain deterministic leases. A pre-#14638 peer
-// therefore loses only deterministic idle leases during a rolling upgrade,
-// never mis-installs one as dynamic. Do not bump
-// SessionSyncWireVersion / CurrentHAProtocolVersion for this additive type:
-// on the #2239/#6650 precedent an old peer ignores it and session sync
-// across a mixed pair must not be refused.
+// The generation-bearing type 41 and its replay semantics remain unchanged.
+// #14638 gives deterministic leases a separate type-43 record layout; mixed
+// batches split type-41 and type-43 records under one generation.
+// #16877 adds provenance successors 50/51, carrying mint_from_zone after the
+// corresponding legacy/deterministic layout. New senders use 50/51 only for a
+// peer that advertises provenance support; otherwise they fall back to 41/43
+// with provenance omitted. New receivers still decode 41/43 as no provenance,
+// and old receivers ignore the additive successor types. Unknown types are
+// additive under the existing #2239/#6650 precedent.
 const (
 	// The config schema permits persistent NAT inactivity timeouts up to 24h.
 	// Refuse larger peer lifetimes before handing the record to the dataplane.
@@ -57,11 +49,15 @@ const (
 	// syncMsgPersistentNatLeaseDeterministic is the #14638 record-layout
 	// successor to syncMsgPersistentNatLeaseGeneration: same origin/generation
 	// envelope and lease-count framing, but each record carries the seven
-	// Deterministic* fields after TimeoutNs. Value 43 is the next free
-	// post-install type (42 is syncMsgBulkRequest). Type-43 frames carry only
-	// deterministic records; mixed exports send other leases separately as
-	// type 41, while an all-dropped batch retains its detected layout.
+	// Deterministic* fields after TimeoutNs. Value 43 remains the deterministic
+	// layout; type 51 carries the same records plus mint_from_zone (#16877).
+	// Mixed batches split dynamic and deterministic records.
 	syncMsgPersistentNatLeaseDeterministic = 43
+	// #16877: successor layouts append mint_from_zone after all existing
+	// fields. Old peers ignore these additive message types; new peers continue
+	// decoding 41/43 with no provenance during rolling upgrades.
+	syncMsgPersistentNatLeaseProvenance              = 50
+	syncMsgPersistentNatLeaseDeterministicProvenance = 51
 )
 
 // encodePersistentNatLeasePayload serializes the scoped idle-lease set inside
@@ -82,9 +78,15 @@ func encodePersistentNatLeasePayloadDeterministic(leases []userspace.IdleLeaseWi
 }
 
 func encodePersistentNatLeasePayloadLayout(leases []userspace.IdleLeaseWire, deterministic bool) []byte {
+	return encodePersistentNatLeasePayloadLayoutWithProvenance(leases, deterministic, false)
+}
+
+func encodePersistentNatLeasePayloadLayoutWithProvenance(
+	leases []userspace.IdleLeaseWire, deterministic, provenance bool,
+) []byte {
 	recs := make([][]byte, 0, len(leases))
 	for _, l := range leases {
-		rec, err := encodeOnePersistentNatLeaseLayout(l, deterministic)
+		rec, err := encodeOnePersistentNatLeaseLayoutWithProvenance(l, deterministic, provenance)
 		if err != nil {
 			slog.Warn("cluster sync: dropping unencodable persistent-NAT lease from sync push",
 				"pool", l.Pool, "src", l.SrcIP, "err", err)
@@ -106,6 +108,12 @@ func encodeOnePersistentNatLease(l userspace.IdleLeaseWire) ([]byte, error) {
 }
 
 func encodeOnePersistentNatLeaseLayout(l userspace.IdleLeaseWire, deterministicLayout bool) ([]byte, error) {
+	return encodeOnePersistentNatLeaseLayoutWithProvenance(l, deterministicLayout, false)
+}
+
+func encodeOnePersistentNatLeaseLayoutWithProvenance(
+	l userspace.IdleLeaseWire, deterministicLayout, provenanceLayout bool,
+) ([]byte, error) {
 	if !deterministicLayout && persistentNatLeaseIsDeterministic(l) {
 		return nil, errors.New("encode idle lease: deterministic identity requires the deterministic record layout (#14638)")
 	}
@@ -184,6 +192,16 @@ func encodeOnePersistentNatLeaseLayout(l userspace.IdleLeaseWire, deterministicL
 		}
 		b = binary.LittleEndian.AppendUint32(b, l.DeterministicHostCount)
 	}
+	if provenanceLayout {
+		if l.MintFromZone == nil {
+			b = append(b, 0)
+		} else {
+			b = append(b, 1)
+			if b, err = putLeaseString(b, *l.MintFromZone); err != nil {
+				return nil, fmt.Errorf("encode idle lease MintFromZone: %w", err)
+			}
+		}
+	}
 	return b, nil
 }
 
@@ -200,6 +218,12 @@ func decodePersistentNatLeasePayloadDeterministic(buf []byte) ([]userspace.IdleL
 }
 
 func decodePersistentNatLeasePayloadLayout(buf []byte, deterministicLayout bool) ([]userspace.IdleLeaseWire, bool) {
+	return decodePersistentNatLeasePayloadLayoutWithProvenance(buf, deterministicLayout, false)
+}
+
+func decodePersistentNatLeasePayloadLayoutWithProvenance(
+	buf []byte, deterministicLayout, provenanceLayout bool,
+) ([]userspace.IdleLeaseWire, bool) {
 	if len(buf) < 4 {
 		return nil, false
 	}
@@ -257,7 +281,8 @@ func decodePersistentNatLeasePayloadLayout(buf []byte, deterministicLayout bool)
 		if n < 0 || n > len(buf)-off {
 			return out, false
 		}
-		rec, ok := decodeOnePersistentNatLeaseLayout(buf[off:off+n], deterministicLayout)
+		rec, ok := decodeOnePersistentNatLeaseLayoutWithProvenance(
+			buf[off:off+n], deterministicLayout, provenanceLayout)
 		if !ok {
 			return out, false
 		}
@@ -275,15 +300,21 @@ func persistentNatLeaseIsDeterministic(l userspace.IdleLeaseWire) bool {
 		l.DeterministicHostBase != "" || l.DeterministicHostCount != 0
 }
 
-// persistentNatLeaseBatchIsDeterministic reports whether any lease carries a
-// deterministic identity.
-func persistentNatLeaseBatchIsDeterministic(batch userspace.PersistentNatLeaseBatch) bool {
+// persistentNatLeaseBatchLayouts detects optional record layouts in one pass.
+func persistentNatLeaseBatchLayouts(batch userspace.PersistentNatLeaseBatch) (deterministic, provenance bool) {
 	for _, l := range batch.Leases {
-		if persistentNatLeaseIsDeterministic(l) {
-			return true
+		deterministic = deterministic || persistentNatLeaseIsDeterministic(l)
+		provenance = provenance || l.MintFromZone != nil
+		if deterministic && provenance {
+			return true, true
 		}
 	}
-	return false
+	return deterministic, provenance
+}
+
+func persistentNatLeaseBatchIsDeterministic(batch userspace.PersistentNatLeaseBatch) bool {
+	deterministic, _ := persistentNatLeaseBatchLayouts(batch)
+	return deterministic
 }
 
 // encodePersistentNatLeaseBatchPayload wraps the scoped lease rows with the
@@ -322,6 +353,7 @@ const persistentNatLeaseFrameBudget = maxSyncPayload - 64
 type persistentNatLeaseFrame struct {
 	payload       []byte
 	deterministic bool
+	provenance    bool
 }
 
 // encodePersistentNatLeaseBatchFrames encodes one origin/generation batch
@@ -359,11 +391,24 @@ func encodePersistentNatLeaseBatchFramesCounted(batch userspace.PersistentNatLea
 }
 
 // encodePersistentNatLeaseBatchFramesCountedLayout splits mixed batches by
-// record layout. Legacy-layout frames are emitted first, so a pre-#14638 peer
-// still receives its dynamic leases; deterministic records follow in type-43
-// frames under the same origin/generation. Each layout is chunked independently
-// and the returned dropped count covers both groups.
+// record layout. Legacy-layout frames are emitted first; deterministic records
+// follow under the same origin/generation. Provenance is optional and selected
+// by the sender only for a peer that advertised support.
 func encodePersistentNatLeaseBatchFramesCountedLayout(batch userspace.PersistentNatLeaseBatch) ([]persistentNatLeaseFrame, int, error) {
+	deterministic, _ := persistentNatLeaseBatchLayouts(batch)
+	return encodePersistentNatLeaseBatchFramesCountedLayoutCore(batch, deterministic, false)
+}
+
+func encodePersistentNatLeaseBatchFramesCountedLayoutWithProvenance(
+	batch userspace.PersistentNatLeaseBatch, provenance bool,
+) ([]persistentNatLeaseFrame, int, error) {
+	deterministic, _ := persistentNatLeaseBatchLayouts(batch)
+	return encodePersistentNatLeaseBatchFramesCountedLayoutCore(batch, deterministic, provenance)
+}
+
+func encodePersistentNatLeaseBatchFramesCountedLayoutCore(
+	batch userspace.PersistentNatLeaseBatch, deterministic, provenance bool,
+) ([]persistentNatLeaseFrame, int, error) {
 	if len(batch.OriginID) != 32 {
 		return nil, 0, errors.New("persistent-NAT batch origin must be 16-byte hex")
 	}
@@ -378,16 +423,16 @@ func encodePersistentNatLeaseBatchFramesCountedLayout(batch userspace.Persistent
 
 	var frames []persistentNatLeaseFrame
 	dropped := 0
-	for _, deterministic := range []bool{false, true} {
+	for _, deterministicLayout := range []bool{false, true} {
 		groupFrames, groupDropped := encodePersistentNatLeaseLayoutFrames(
-			batch.Leases, envelope, deterministic, false,
+			batch.Leases, envelope, deterministicLayout, provenance, false,
 		)
 		frames = append(frames, groupFrames...)
 		dropped += groupDropped
 	}
 	if len(frames) == 0 {
 		emptyFrames, _ := encodePersistentNatLeaseLayoutFrames(
-			nil, envelope, persistentNatLeaseBatchIsDeterministic(batch), true,
+			nil, envelope, deterministic, provenance, true,
 		)
 		frames = append(frames, emptyFrames...)
 	}
@@ -395,7 +440,7 @@ func encodePersistentNatLeaseBatchFramesCountedLayout(batch userspace.Persistent
 }
 
 func encodePersistentNatLeaseLayoutFrames(
-	leases []userspace.IdleLeaseWire, envelope []byte, deterministic bool, emitEmpty bool,
+	leases []userspace.IdleLeaseWire, envelope []byte, deterministic, provenance, emitEmpty bool,
 ) ([]persistentNatLeaseFrame, int) {
 	overhead := len(envelope) + 4
 	var frames []persistentNatLeaseFrame
@@ -410,7 +455,7 @@ func encodePersistentNatLeaseLayoutFrames(
 			b = append(b, rec...)
 		}
 		frames = append(frames, persistentNatLeaseFrame{
-			payload: b, deterministic: deterministic,
+			payload: b, deterministic: deterministic, provenance: provenance,
 		})
 		cur = nil
 		curBytes = overhead
@@ -420,7 +465,7 @@ func encodePersistentNatLeaseLayoutFrames(
 		if persistentNatLeaseIsDeterministic(l) != deterministic {
 			continue
 		}
-		rec, err := encodeOnePersistentNatLeaseLayout(l, deterministic)
+		rec, err := encodeOnePersistentNatLeaseLayoutWithProvenance(l, deterministic, provenance)
 		if err != nil {
 			slog.Warn("cluster sync: dropping unencodable persistent-NAT lease from sync push",
 				"pool", l.Pool, "src", l.SrcIP, "err", err)
@@ -453,8 +498,19 @@ func decodePersistentNatLeaseBatchPayload(buf []byte) (userspace.PersistentNatLe
 func decodePersistentNatLeaseBatchPayloadDeterministic(buf []byte) (userspace.PersistentNatLeaseBatch, bool) {
 	return decodePersistentNatLeaseBatchPayloadLayout(buf, true)
 }
+func decodePersistentNatLeaseBatchPayloadProvenance(
+	buf []byte, deterministic bool,
+) (userspace.PersistentNatLeaseBatch, bool) {
+	return decodePersistentNatLeaseBatchPayloadLayoutWithProvenance(buf, deterministic, true)
+}
 
 func decodePersistentNatLeaseBatchPayloadLayout(buf []byte, deterministic bool) (userspace.PersistentNatLeaseBatch, bool) {
+	return decodePersistentNatLeaseBatchPayloadLayoutWithProvenance(buf, deterministic, false)
+}
+
+func decodePersistentNatLeaseBatchPayloadLayoutWithProvenance(
+	buf []byte, deterministic, provenance bool,
+) (userspace.PersistentNatLeaseBatch, bool) {
 	var batch userspace.PersistentNatLeaseBatch
 	origin, off, ok := getLeaseString(buf, 0)
 	if !ok || len(origin) != 32 {
@@ -468,11 +524,8 @@ func decodePersistentNatLeaseBatchPayloadLayout(buf []byte, deterministic bool) 
 	}
 	batch.OriginID = origin
 	batch.Generation = binary.LittleEndian.Uint64(buf[off:])
-	if deterministic {
-		batch.Leases, ok = decodePersistentNatLeasePayloadDeterministic(buf[off+8:])
-	} else {
-		batch.Leases, ok = decodePersistentNatLeasePayload(buf[off+8:])
-	}
+	batch.Leases, ok = decodePersistentNatLeasePayloadLayoutWithProvenance(
+		buf[off+8:], deterministic, provenance)
 	if !ok {
 		return userspace.PersistentNatLeaseBatch{}, false
 	}
@@ -480,6 +533,12 @@ func decodePersistentNatLeaseBatchPayloadLayout(buf []byte, deterministic bool) 
 }
 
 func decodeOnePersistentNatLeaseLayout(buf []byte, deterministicLayout bool) (userspace.IdleLeaseWire, bool) {
+	return decodeOnePersistentNatLeaseLayoutWithProvenance(buf, deterministicLayout, false)
+}
+
+func decodeOnePersistentNatLeaseLayoutWithProvenance(
+	buf []byte, deterministicLayout, provenanceLayout bool,
+) (userspace.IdleLeaseWire, bool) {
 	var l userspace.IdleLeaseWire
 	off := 0
 	var ok bool
@@ -648,8 +707,24 @@ func decodeOnePersistentNatLeaseLayout(buf []byte, deterministicLayout bool) (us
 			return l, false
 		}
 	}
-	// The permission-bearing record is self-contained: trailing bytes are not
-	// an append-only extension because they could hide a layout mismatch.
+	if provenanceLayout {
+		if off >= len(buf) || buf[off] > 1 {
+			return l, false
+		}
+		hasMintFromZone := buf[off] == 1
+		off++
+		if hasMintFromZone {
+			mintFromZone, next, ok := getLeaseString(buf, off)
+			if !ok {
+				return l, false
+			}
+			l.MintFromZone = &mintFromZone
+			off = next
+		}
+	}
+
+	// Each message type has one exact layout; only provenance successor types
+	// parse their marker/string. Any remaining bytes are a layout mismatch.
 	return l, off == len(buf)
 }
 
@@ -662,17 +737,21 @@ func decodeOnePersistentNatLeaseDeterministic(buf []byte) (userspace.IdleLeaseWi
 }
 
 // QueuePersistentNatLeaseBatch sends one sender-origin/generation snapshot
-// as one or more sub-cap frames (#14607). Empty batches are sent too so a
-// clear generation reaches the peer even when no idle leases remain. All
-// chunks share the batch origin/generation and are written in order under
-// writeMu, each with its own increasing full-set sequence, so the peer
-// applies the generation barrier on the first chunk and adds the rest.
+// as one or more sub-cap frames (#14607). Provenance-bearing types 50/51 are
+// selected only after the peer advertises support; an unlearned or older peer
+// receives the compatible 41/43 layout so ordinary lease refreshes continue.
+// Empty batches still send the legacy generation barrier. All chunks share the
+// batch origin/generation and are written in order under writeMu, each with its
+// own increasing full-set sequence, so the peer applies the barrier first.
 func (s *SessionSync) QueuePersistentNatLeaseBatch(batch userspace.PersistentNatLeaseBatch) {
 	conn := s.getActiveConn()
 	if conn == nil {
 		return
 	}
-	frames, dropped, err := encodePersistentNatLeaseBatchFramesCountedLayout(batch)
+	deterministic, hasProvenance := persistentNatLeaseBatchLayouts(batch)
+	provenance := hasProvenance && s.peerCapabilitiesLearned() && s.PersistentNatLeaseProvenanceCapable()
+	frames, dropped, err := encodePersistentNatLeaseBatchFramesCountedLayoutCore(
+		batch, deterministic, provenance)
 	if err != nil {
 		slog.Warn("cluster sync: refusing invalid persistent-NAT lease batch", "err", err)
 		s.stats.MalformedRecordsDropped.Add(1)
@@ -691,8 +770,14 @@ func (s *SessionSync) QueuePersistentNatLeaseBatch(batch userspace.PersistentNat
 		seq := s.persistentNatLeaseSeqCounter.Add(1)
 		payload := appendFullSetSeq(frame.payload, s.syncEpoch, seq)
 		msgType := uint8(syncMsgPersistentNatLeaseGeneration)
+		if frame.provenance {
+			msgType = syncMsgPersistentNatLeaseProvenance
+		}
 		if frame.deterministic {
 			msgType = syncMsgPersistentNatLeaseDeterministic
+			if frame.provenance {
+				msgType = syncMsgPersistentNatLeaseDeterministicProvenance
+			}
 		}
 		s.writeMu.Lock()
 		err = writeMsg(conn, msgType, payload)

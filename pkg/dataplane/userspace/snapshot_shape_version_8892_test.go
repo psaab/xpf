@@ -638,9 +638,9 @@ const (
 	// a v71 helper ignores it and holds FIN-closed sessions for the
 	// closing/TIME_WAIT window (the defect). Golden regenerated.
 	// v73 (#16614) and v74 (#16841) change helper-visible semantics
-	// without adding a wire field, so the golden is unchanged in
-	// shape but the version pin moves with ProtocolVersion.
-	snapshotShapeVersion8892 = 74
+	// without adding snapshot fields. v75 (#16877) changes the idle-lease
+	// control wire but not the snapshot shape; the protocol pin still moves.
+	snapshotShapeVersion8892 = 75
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

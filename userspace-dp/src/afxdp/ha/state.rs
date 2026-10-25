@@ -197,9 +197,24 @@ impl crate::afxdp::Coordinator {
             .collect()
     }
 
-    fn handle_activated_rgs(&self, activated_rgs: &[i32], current: &BTreeMap<i32, HAGroupRuntime>, now_secs: u64) {
+    fn handle_activated_rgs(
+        &self,
+        activated_rgs: &[i32],
+        current: &BTreeMap<i32, HAGroupRuntime>,
+        now_secs: u64,
+    ) {
         if activated_rgs.is_empty() {
             return;
+        }
+        // #16876: the Go manager publishes the seeded configured HA inventory,
+        // not unused fixed-array map slots. A lease has no RG identity, so
+        // partial activation cannot safely promote a node-wide imported set.
+        if !current.is_empty()
+            && current
+                .values()
+                .all(|group| group.is_forwarding_active(now_secs))
+        {
+            self.promote_imported_persistent_nat_leases();
         }
         // #2120: the activated rg_epochs bump (and the node-level
         // rg_epochs[0] edge) moved to update_ha_state BEFORE
@@ -313,7 +328,8 @@ impl crate::afxdp::Coordinator {
 
     pub fn ha_groups(&self) -> Vec<HAGroupStatus> {
         let now_secs = monotonic_nanos() / 1_000_000_000;
-        self.ha.rg_runtime
+        self.ha
+            .rg_runtime
             .load()
             .iter()
             .map(|(rg_id, runtime)| {

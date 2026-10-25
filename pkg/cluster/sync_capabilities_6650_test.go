@@ -287,6 +287,8 @@ func liveSyncMessageTypesExcept(under int) []syncMessageType {
 		{syncMsgPersistentNatLeaseScoped, "PersistentNatLeaseScoped"},
 		{syncMsgPersistentNatLeaseGeneration, "PersistentNatLeaseGeneration"},
 		{syncMsgPersistentNatLeaseDeterministic, "PersistentNatLeaseDeterministic"},
+		{syncMsgPersistentNatLeaseProvenance, "PersistentNatLeaseProvenance"},
+		{syncMsgPersistentNatLeaseDeterministicProvenance, "PersistentNatLeaseDeterministicProvenance"},
 		{syncMsgDHCPLeaseV4Chunk, "DHCPLeaseV4Chunk"}, {syncMsgDHCPLeaseV6Chunk, "DHCPLeaseV6Chunk"},
 		{syncMsgBulkRequest, "BulkRequest"},
 		{syncMsgFailoverAbort, "FailoverAbort"}, {syncMsgFailoverBatchAbort, "FailoverBatchAbort"},

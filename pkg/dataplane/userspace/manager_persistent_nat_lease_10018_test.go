@@ -44,7 +44,7 @@ func TestPersistentNatLeaseVerbsFailClosedOnProtocol10018(t *testing.T) {
 				return err
 			},
 			old:     true,
-			minimum: MinProtocolPersistentNatLeasePermissions,
+			minimum: MinProtocolPersistentNatLeaseMintFromZone,
 		},
 		{
 			name: "display-old-helper",
@@ -61,7 +61,7 @@ func TestPersistentNatLeaseVerbsFailClosedOnProtocol10018(t *testing.T) {
 				return m.ImportIdleLeases([]IdleLeaseWire{scopedLease10018()})
 			},
 			old:     true,
-			minimum: MinProtocolPersistentNatLeasePermissions,
+			minimum: MinProtocolPersistentNatLeaseMintFromZone,
 		},
 		{
 			name: "export-status-probe-failure",

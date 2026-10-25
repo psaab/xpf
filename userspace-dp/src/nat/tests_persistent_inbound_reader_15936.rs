@@ -392,3 +392,93 @@ fn inbound_reader_exact_bucket_does_not_shadow_provenance_grant_15936() {
         "a remote neither mint granted must still deny (#15936)"
     );
 }
+
+/// #16877: a failover-imported interface-scoped AnyRemoteHost bucket must
+/// retain its mint_from_zone provenance so the production-shaped non-zone
+/// inbound fallback can find it on the new primary.
+#[test]
+fn imported_nonzone_any_remote_preserves_mint_provenance_16877() {
+    let origin = sibling_rules();
+    let dst: IpAddr = "198.51.100.30".parse().expect("remote");
+    let arbitrary: IpAddr = "203.0.113.99".parse().expect("arbitrary");
+    let translated = outbound(&origin, "ge-0/0/0.0", dst, 443, 1_000);
+    let strict_dst: IpAddr = "198.51.100.20".parse().expect("strict remote");
+    let strict_translated = outbound(&origin, "ge-0/0/1.0", strict_dst, 443, 1_000);
+    assert_eq!(
+        strict_translated, translated,
+        "sibling flows share the imported translated binding"
+    );
+    assert!(origin[0].pool_allocator.release_flow(
+        SourceNatFlowKey {
+            protocol: PROTO_TCP,
+            src_ip: "10.0.0.5".parse().expect("src"),
+            src_port: 40_000,
+            dst_ip: dst,
+            dst_port: 443,
+            routing_scope: 0,
+        },
+        translated,
+        2_000,
+        NatHolder::Untracked,
+    ));
+    assert!(origin[1].pool_allocator.release_flow(
+        SourceNatFlowKey {
+            protocol: PROTO_TCP,
+            src_ip: "10.0.0.5".parse().expect("src"),
+            src_port: 40_000,
+            dst_ip: strict_dst,
+            dst_port: 443,
+            routing_scope: 0,
+        },
+        strict_translated,
+        2_000,
+        NatHolder::Untracked,
+    ));
+    let records = origin[0].pool_allocator.export_idle_leases(3_000);
+    let any_remote_record = records
+        .iter()
+        .find(|record| record.permit_any_remote)
+        .expect("origin exports any-remote idle lease");
+    assert!(any_remote_record.mint_from_zone.is_some());
+
+    let standby = sibling_rules();
+    let pool_addresses = ["203.0.113.10".parse().expect("pool")];
+    let mut installed = false;
+    let mut merged_sibling_scope = false;
+    for record in &records {
+        match standby[0].pool_allocator.import_idle_lease(
+            record,
+            &pool_addresses,
+            300_000_000_000,
+            10_000,
+        ) {
+            super::IdleLeaseImport::Installed => installed = true,
+            super::IdleLeaseImport::SkippedExisting => merged_sibling_scope = true,
+            other => panic!("unexpected sibling idle-lease import result: {other:?}"),
+        }
+    }
+    assert!(installed, "origin idle lease is installed on standby");
+    assert!(
+        merged_sibling_scope,
+        "the strict sibling scope merges into the imported shared lease"
+    );
+    assert!(
+        matches!(
+            inbound_as_production(&standby[1], translated, strict_dst, 443, 11_000),
+            PersistentInbound::Permitted { .. }
+        ),
+        "imported strict sibling must retain its own target-host-port grant"
+    );
+    assert!(
+        matches!(
+            inbound_as_production(&standby[0], translated, arbitrary, 9_999, 11_000),
+            PersistentInbound::Permitted { .. }
+        ),
+        "#16877: imported any-remote grant must retain the non-zone mint provenance"
+    );
+    assert_eq!(
+        inbound_as_production(&standby[1], translated, arbitrary, 9_999, 11_000),
+        PersistentInbound::Denied,
+        "imported any-remote provenance must not grant the strict sibling rule"
+    );
+}

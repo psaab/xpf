@@ -514,7 +514,10 @@ const (
 	// — accepting local hop-limit-0 by default and suppressing the
 	// RFC 4443 §3.3 error when set — so exact-equality versioning
 	// fences the pairing instead of degrading silently.
-	ProtocolVersion = 74
+	// v74 -> v75 (#16877): idle lease control records preserve
+	// PersistentPermissionScope.mint_from_zone. A v74 helper drops that
+	// provenance and would lose non-zone inbound permission admission.
+	ProtocolVersion = 75
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -582,6 +585,10 @@ const (
 	// whose persistent-NAT lease records carry EgressScope (#14322). Below
 	// it a helper would ignore the field and merge two egress zones.
 	MinProtocolPersistentNatLeaseEgressScope = 50
+	// MinProtocolPersistentNatLeaseMintFromZone is the first protocol
+	// version whose control-socket idle lease records carry permission-bucket
+	// mint_from_zone provenance (#16877). Immutable wire feature floor.
+	MinProtocolPersistentNatLeaseMintFromZone = 75
 	// MinProtocolPersistentNatLeasePermissions is the first protocol version
 	// whose helper lease records preserve inbound permission scopes. A helper
 	// below this version can silently import permission-less leases.
@@ -655,6 +662,7 @@ type IdleLeaseWire struct {
 	SrcPort                    uint16                `json:"src_port"`
 	RoutingScope               *uint32               `json:"routing_scope"`
 	EgressScope                *uint32               `json:"egress_scope"`
+	MintFromZone               *string               `json:"mint_from_zone,omitempty"`
 	RemoteIP                   string                `json:"remote_ip,omitempty"`
 	RemotePort                 uint16                `json:"remote_port,omitempty"`
 	PermitAnyRemote            bool                  `json:"permit_any_remote"`

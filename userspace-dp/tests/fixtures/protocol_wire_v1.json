@@ -881,6 +881,7 @@
         "deterministic_host_prefix_len": 32,
         "deterministic_mode": 2,
         "egress_scope": 11,
+        "mint_from_zone": "trust",
         "permit_any_remote": true,
         "permitted_remotes": [
           {
@@ -1015,6 +1016,7 @@
         "deterministic_host_prefix_len": 32,
         "deterministic_mode": 2,
         "egress_scope": 11,
+        "mint_from_zone": "trust",
         "permit_any_remote": true,
         "permitted_remotes": [
           {
@@ -2122,6 +2124,7 @@
     "deterministic_host_prefix_len": 32,
     "deterministic_mode": 2,
     "egress_scope": 11,
+    "mint_from_zone": "trust",
     "permit_any_remote": true,
     "permitted_remotes": [
       {
