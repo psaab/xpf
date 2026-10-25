@@ -8,6 +8,14 @@ xpf (0.0.0) unstable; urgency=medium
     exit 4 below floor, 5 unmeasured; no guest-side override), so a
     guest kernel charging more than the build host (#15645, #15854:
     +3.8-6.1%) refuses early instead of hiding a later REJECT.
+  * Flowexport/docs: `pkg/flowexport/README.md` now documents the
+    post-#15946/#16126/#16303 contract (#16763): one sampling decision
+    at SESSION_OPEN (`SampledForOpen` via the single
+    `flowExportOpenCallback`), tracker active/inactive semantics with
+    the 60s/15s defaults, the 1s live-counter poll feeding tracked
+    flows, and that absent-open or inactive-expired closes export
+    nothing. The per-SESSION_CLOSE sampler wording is corrected in the
+    README and in `ipfix.go`, and a docsref gate pins the contract.
   * Cluster/session-sync: pre-auth logging on the sync listener is
     now bounded (#16748). The accept loop's "peer connected" line is
     Debug instead of Info (it fired before authentication, so a

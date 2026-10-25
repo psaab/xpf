@@ -1,18 +1,31 @@
 # pkg/flowexport
 
-NetFlow v9 and IPFIX (NetFlow v10) exporters. Both ship session-close
-events to remote collectors with per-zone direction filters and 1-in-N
-session sampling. Wired off `pkg/logging.EventReader` SESSION_CLOSE
-events in `pkg/daemon/daemon_flowexport.go`, not the conntrack GC
-delete callback. No per-packet sampling path.
+NetFlow v9 and IPFIX (NetFlow v10) exporters. Both ship flow records to
+remote collectors with per-zone direction filters and 1-in-N session
+sampling. Wired off `pkg/logging.EventReader` SESSION_OPEN and
+SESSION_CLOSE events in `pkg/daemon/daemon_flowexport.go`, not the
+conntrack GC delete callback. No per-packet sampling path.
+
+**The sampling decision is made once at open, not at close (#15946 /
+#16303).** The single SESSION_OPEN fanout callback
+(`flowExportOpenCallback`) evaluates `SampledForOpen` — one sampling decision at SESSION_OPEN per
+instance — and a sampled flow is remembered by its exporter (a tracker
+entry when active/inactive timeouts are configured, otherwise the
+close-only sampled set). The SESSION_CLOSE callbacks make no second 1-in-N decision at close:
+`CloseFlow` recalls and forgets the open decision, and only a flow
+recorded as sampled at open exports its close. See "Open-time sampling,
+tracker, and live feed" below for the full contract, including
+absent-open and inactive-expiry behaviour.
 
 Flow record *assembly* is **entirely control-plane**: the userspace
-dataplane does NOT build/format NetFlow/IPFIX records — flow records are
-assembled in this package from SESSION_CLOSE `logging.EventRecord`s. The
-Rust dataplane carried a dead `FlowExporter` and a write-only
-`flow_export_config` field that emitted nothing; both were removed in
-#2130. (The Go→Rust `flow_export` snapshot wire field is retained as
-reserved/ignored to preserve the #1977 decode-safety tests.)
+dataplane does NOT build/format NetFlow/IPFIX records — close records
+are assembled in this package from SESSION_CLOSE `logging.EventRecord`s,
+and tracker interim/final records from the open-time template plus live
+counters (`tracker_15655.go`). The Rust dataplane carried a dead
+`FlowExporter` and a write-only `flow_export_config` field that emitted
+nothing; both were removed in #2130. (The Go→Rust `flow_export` snapshot
+wire field is retained as reserved/ignored to preserve the #1977
+decode-safety tests.)
 
 **#2460 — the SESSION_CLOSE events ARE now produced in userspace mode.**
 Before #2460, the userspace dataplane emitted a session close ONLY as a
@@ -222,8 +235,8 @@ sampling-direction, opt-in.** flowDirection is exported again, but only when a
 template configures `export-extension flow-dir`, and the value is a REAL signal
 derived in Go — never the synthetic ingress=0 #2613 removed. The signal source
 is the per-zone, per-family (#14608) sampling-direction xpf already
-consults to DECIDE whether to export a flow
-(`ExportConfig.ShouldExport(in, out, isIPv6)`): a flow is exported because
+consults to DECIDE at SESSION_OPEN whether to export a flow
+(via `SampledForOpen`; the direction itself is `FlowDirectionIface`): a flow is exported because
 its ingress zone has `sampling input` in the flow's own family (observed
 at ingress → `0`) or its egress zone has `sampling output` in that family
 (observed at egress → `1`). `ExportConfig.FlowDirection` mirrors that
@@ -235,7 +248,7 @@ record's initiator-tuple anchor.
 The dataplane is unchanged: it has no zone-role/trust signal, so the original
 "Rust-stamp `[146]`" idea is infeasible — the reserved `[146]` byte on the
 SESSION_CLOSE frame stays reserved. The daemon callback computes
-`sd.Direction = lead.FlowDirection(rec.InZone, rec.OutZone, sd.IsIPv6)` and the v9 / IPFIX
+`sd.Direction = lead.FlowDirectionIface(rec.InZone, rec.OutZone, sd.IsIPv6, rec.IngressIface, rec.EgressIface)` and the v9 / IPFIX
 encoders write it **only** in groups whose template enabled flow-dir
 (`IncludeFlowDir`). The templates splice IE 61 in just before the post-NAT
 trailer (`buildTemplateFieldsV4/V6`, `ipfixTemplateFieldsV4/V6`); a config that
@@ -409,7 +422,8 @@ and a collector re-learns the template on the next refresh; an unknown-PEN
 collector simply skips the 8-byte field via the template-declared length
 (RFC 7011 §8), so the change is backward-safe. The #3740 stable
 SourceID/ODID and the #2609 sequence-across-refresh behaviour are untouched
-(still one record per session).
+(the close still yields one final record; active-timeout interims for a
+long-lived flow are additional delta records — see below).
 
 The counters are **always present** (like the #2526 post-NAT tuple), not
 opt-in: they are core accounting data and skippable by a collector that does
@@ -448,8 +462,8 @@ template ID **258** — distinct from the 256/257 data IDs) and an **Options
 Data Record** (Set ID 258) carrying the sampling configuration.
 
 **#5312 — describe FLOW selection, not packet sampling.** xpf samples 1-in-N at
-**SESSION-RECORD (Flow) granularity**: `ShouldExport` applies the modulo per
-SESSION_CLOSE event, selecting whole Flows, *not* 1-in-N packets in the datapath
+**SESSION-RECORD (Flow) granularity**: `SampledForOpen` applies the modulo at SESSION_OPEN,
+selecting whole Flows, *not* 1-in-N packets in the datapath
 the way Junos jflow does. #3748 originally advertised this with the PSAMP
 **packet-selection** IEs (`selectorAlgorithm` 304 / `samplingPacketInterval` 305
 / `samplingPacketSpace` 306), which tell a standards-based collector this is
@@ -484,7 +498,7 @@ build time (same discipline as the #2526 data-record pins), so a
 template/encoder drift panics at init.
 
 **Emitted only for sampled groups (`SamplingRate > 1`).** This matches the
-`ShouldExport` gate exactly. An unsampled / export-all group (rate 0 or 1)
+open-time gate exactly (one slot consumed by `SampledForOpen` at SESSION_OPEN). An unsampled / export-all group (rate 0 or 1)
 advertises **nothing** — a collector then correctly assumes 1-in-1 — which
 also keeps the #2609 template-refresh sequence behaviour bit-identical for the
 common unsampled case. The Options Template and record are precomputed once at
@@ -521,12 +535,104 @@ the record advances the sequence by one), and
 `TestIPFIXSamplerOptionsAbsentWhenUnsampled` (rate 0/1 emit no options
 message). Removing the sampler emission flips these RED.
 
-**Sub-part (a) — active-timeout interim records — DEFERRED.** The related gap
-that a configured `flow-active-timeout` emits no interim records (long-lived
-flows under-report in-progress volume) is a separate, multi-surface
-Rust + Go + wire + HA change with a delta-accounting invariant and must be its
-own `make test-failover`-gated PR. It is NOT implemented here; the converged
-design is recorded on #3748.
+**Sub-part (a) — active-timeout interim records — IMPLEMENTED
+(#15655/#15946/#16303).** A configured `flow-active-timeout` emits
+interim delta records for long-lived flows via the tracker (see
+"Open-time sampling, tracker, and live feed" below); interim + final +
+close-remainder deltas sum to the session total with no double count.
+
+## Open-time sampling, tracker, and live feed (#15946/#16126/#16303)
+
+**Open-time single decision.** Since #15946/#16303 there is one sampling decision at SESSION_OPEN:
+the daemon's single `flowExportOpenCallback` (registered once via
+`ensureFlowExportOpenCallback`, so dual-format v9+IPFIX deployments do
+not evaluate an open twice) fans the SESSION_OPEN record to every
+published instance, and each instance's lead config consumes exactly one
+slot via `SampledForOpen` (the daemon zone/interface gate,
+`ShouldExportIfaceDaemon`). A sampled open is remembered per exporter
+group: `TrackFlowOpenRecord` registers the tracker entry carrying the
+open-time template (tuple/NAT/ifindex/ToS/flags), or, for a close-only
+exporter, `MarkFlowSampledAtOpen` records the key in the sampled set
+(deleted at close, so it is bounded by live sampled sessions). The
+SESSION_CLOSE callbacks (`flowExportCallback` / `ipfixExportCallback`)
+skip SESSION_OPEN records, make no second 1-in-N decision at close, and
+export only groups whose `CloseFlow` reports the key was sampled at
+open; each such group queues `ExportSessionCloseRemainder`.
+
+**Absent-open and unsampled closes export nothing.** A close whose open
+was never sampled, whose SESSION_OPEN was never delivered to this
+exporter object (exporter generation rebuilt at a commit, node freshly
+promoted with no CREATE for pre-existing flows), or whose flow already
+left the tracker (inactive expiry, below) finds no sampled/tracked key:
+`CloseFlow` returns `sampled=false` and the close produces no record.
+That is the deliberate single-decision semantics — re-deciding at close
+would consume a second 1-in-N slot and corrupt the cadence — but it
+means closes spanning an exporter rebuild or a promotion without a
+CREATE are not exported; operators must not expect a close-only record
+for them. (The underlying absent-open/evicted-flow gaps are tracked
+separately as R3-A46-01/02/03; this section documents current
+behaviour, it does not claim they are fixed.)
+
+**Tracker active/inactive semantics (#15655, `tracker_15655.go`).**
+`NewFlowTracker(FlowActiveTimeout, FlowInactiveTimeout)` returns nil
+when both timeouts are <= 0, and a nil tracker is a safe no-op:
+close-only export. With a tracker:
+
+- *Active*: when `now - lastExport >= FlowActiveTimeout`,
+  `CollectDueExports` emits an interim record carrying the delta since
+  the last export (saturating per-field, #16750) and resets the window;
+  the flow stays tracked. Interim records copy the open-time template,
+  so fields only the close enrichment computes (route masks, flow
+  direction) are absent/zero on interims (tracked separately).
+- *Inactive*: when `now - lastActivity >= FlowInactiveTimeout` (checked
+  first, so an idle flow gets one final record, not an interim plus a
+  final), the tracker emits a final delta record and forgets the flow:
+  inactive expiry. Counter *progress* — any field advancing against the
+  stored cumulative, not a backward snapshot — is what refreshes
+  `lastActivity`; a flow whose counters keep advancing is never
+  idle-removed. Because the entry is gone, a later resumption of the
+  same 5-tuple is not re-polled and its real close reports not sampled
+  (R3-A46-03) and exports nothing.
+- *Real close*: `CloseFlow` atomically forgets the flow and returns the
+  last-export baselines; `ExportSessionCloseRemainder` queues only the
+  unexported remainder (lifetime counters minus baselines, saturated at
+  zero), so interim + final + close sum to the session total
+  (#16303 fold 2, per-exporter baselines — same-instance template
+  groups may hold different baselines). A close after inactive expiry
+  finds nothing and produces no duplicate final.
+- Re-opening an existing key resets its window and template.
+
+Timeouts come from the referenced template (`flow-active-timeout` /
+`flow-inactive-timeout`, seconds); an absent or out-of-range value falls
+back to the built-in defaults `FlowActiveTimeout` = 60s and
+`FlowInactiveTimeout` = 15s (`defaultTemplateContext`, #6769
+range-checked), so a tracker is present by default and close-only export
+requires explicitly configuring both timeouts <= 0 in a hand-built
+`ExportConfig` (exporters built by the resolvers always carry the
+defaults). The tracker map is keyed by the pre-NAT 5-tuple `FlowKey`
+and bounded only by live sampled flows — there is no size cap or LRU
+eviction; entries leave via close, inactive expiry, or exporter
+teardown.
+
+**Live feed source and cadence (#16303 F5).** Open/close events alone
+cannot drive the timers: the daemon runs a daemon-lifetime live-counter poll
+(`ensureFlowLiveFeed`, 1s ticker `flowLiveFeedInterval`) that, for each
+published exporter group, reads the cumulative forward+reverse counters
+for exactly the keys that group's tracker holds (`TrackedKeys` — no
+full session enumeration) from the dataplane session store's forward
+entry (`liveFlowCounters`) and feeds them via
+`TouchFlowBidirectional`. A key the store no longer holds is skipped;
+it leaves via its close or inactive expiry. Each exporter's `Run` loop
+drains due interim/final records on its 100ms batch ticker
+(`CollectDueExports` + flush), and templates refresh on
+`TemplateRefreshRate` (default 60s).
+
+**Shared core (#16126).** Both exporters embed `exporterCore`
+(`exporter_core.go`): the `buildFlowRecord` enrichment, the close /
+close-remainder path, `CollectDueExports` batch draining, and the
+open-decision bookkeeping (`MarkFlowSampledAtOpen` / `CloseFlow` /
+`TrackFlowOpenRecord`) are defined once; only the stateful v9/IPFIX
+encoders and sequence/template semantics stay per-protocol.
 
 ## File layout
 
@@ -534,9 +640,18 @@ The package is split by responsibility (#1988):
 
 - `manager.go` — resolved export config (`ExportConfig`,
   `CollectorConfig`, `SamplingDir`), the sampling scheduler
-  (`ShouldExport`), the shared `FlowRecord`/`SessionCloseData` shapes,
+  (`SampledForOpen` / `ShouldExportIfaceDaemon`; the strict
+  `ShouldExport`/`ShouldExportIface` forms remain for non-daemon
+  callers), the shared `FlowRecord`/`SessionCloseData` shapes,
   and the `BuildExportConfig` / `BuildIPFIXExportConfig` /
   `BuildSamplingZones` config resolvers.
+- `exporter_core.go` — the shared `exporterCore` embedded by both
+  exporters (#16126): `buildFlowRecord` enrichment, the close /
+  close-remainder path, and the open-decision bookkeeping
+  (`MarkFlowSampledAtOpen` / `CloseFlow` / `TrackFlowOpenRecord`).
+- `tracker_15655.go` — `FlowTracker` active/inactive timeout
+  enforcement (#15655): open registration, live-counter `Touch`, and
+  `CollectDueExports` interim/final delta records.
 - `netflow.go` — NetFlow v9 template/record encoding and the `Exporter`
   that drives it.
 - `ipfix.go` — IPFIX (v10) template/record encoding and the
@@ -779,12 +894,14 @@ through `joinWithBudget`.
 
 Interface sampling is likewise no longer zone-OR-ed: `BuildSamplingZones`
 also records `IfacesV4`/`IfacesV6` keyed by authored unit ref, and the
-daemon callbacks gate on `ShouldExportIface(..., rec.IngressIface,
-rec.EgressIface)` — the record's own interfaces (from
-Ingress/EgressIfindex via the ifindex->name table). An unsampled
+daemon open path gates on `SampledForOpen` (which wraps the daemon gate
+`ShouldExportIfaceDaemon(..., rec.IngressIface, rec.EgressIface)`) — the
+flow's own interfaces (from Ingress/EgressIfindex via the ifindex->name
+table). An unsampled
 interface in a sampled zone is denied before the 1-in-N counter and
-counts as zone-filtered; an unknown interface fails closed under a
-per-interface restriction. Hand-built configs without per-interface
+counts as zone-filtered; a record naming no interface falls back to zone
+semantics on the daemon path, while the strict `ShouldExportIface`
+form fails closed on empty refs. Hand-built configs without per-interface
 data keep the prior zone semantics via `ShouldExport`.
 
 The `if fs.Port > 0` guard before `net.JoinHostPort` is kept even though
@@ -1143,9 +1260,9 @@ emits one `*ExportConfig` per group:
 - **Per-instance sampling.** 1-in-N sampling is a sampling-INSTANCE
   property (#2462). The template groups of ONE instance share that
   instance's `sampleCounter` (a pointer); two different instances each get
-  their own counter. The daemon evaluates `ShouldExport` exactly once per
-  instance per SESSION_CLOSE and fans the record out to that instance's
-  groups.
+  their own counter. The daemon evaluates `SampledForOpen` exactly once per
+  instance at SESSION_OPEN and fans the (close/interim) records out to that instance's
+  groups (see "Open-time sampling, tracker, and live feed").
 - `BuildExportConfig` / `BuildIPFIXExportConfig` (singular) are retained
   for single-aggregate callers and now return the first resolved group.
 
@@ -1176,18 +1293,18 @@ grouping key is `(instance, version, template)`:
   sampling-instance selector** in the config model. So `ServesInet` /
   `ServesInet6` record which families an instance has a surviving collector
   group for (a group whose template is undefined does not count; see the
-  #9172 bullet below), and `ExportConfig.ServesFamily(isIPv6)` gates a record — an
-  inet-only instance never exports an IPv6 flow. The daemon callback walks
+  #9172 bullet below), and `ExportConfig.ServesFamily(isIPv6)` gates a flow — an
+  inet-only instance never exports an IPv6 flow. The daemon open callback walks
   the contiguous per-instance run of groups, applies the family gate + the
-  single per-instance sampling decision, then fans to that instance's
+  single per-instance sampling decision at open, then fans to that instance's
   groups.
 - **Interface sampling is per-family (#14608).** `family inet { sampling }`
   and `family inet6 { sampling }` are separate selections: the compiler
   carries four flags on the unit (`SamplingV4Input/Output`,
   `SamplingV6Input/Output`), `BuildSamplingZones` returns a
   `FamilySamplingDirs` (one zone->direction map per family), and
-  `ShouldExport(in, out, isIPv6)` / `FlowDirection(in, out, isIPv6)`
-  consult only the record's own family. Once any family is sampled, a
+  the open gate (`SampledForOpen`) / `FlowDirection(in, out, isIPv6)`
+  consult only the flow's own family. Once any family is sampled, a
   family sampled nowhere fails closed (non-nil empty map) and never
   consumes a 1-in-N slot; no sampling anywhere keeps both maps nil
   (export-all). This is distinct from the collector-side `ServesFamily`
@@ -1255,11 +1372,12 @@ no per-callback removal), the reconcile registers ONE stable
 indirection callback per family exactly once
 (`flowCBOnce`/`ipfixCBOnce`) that reads the live `(exporter, config)`
 pair lock-free from an `atomic.Pointer` bundle; reconcile swaps the
-bundle atomically. The callback calls `Exporter.ExportSessionClose()`
-(NetFlow v9) / `IPFIXExporter.ExportSessionClose()` (IPFIX) from the
-`logging.EventReader` SESSION_CLOSE event. The resolved `*ExportConfig`
-is shared by pointer everywhere — in the bundle, by the callback's
-`ShouldExport`, AND inside the exporter — so there is exactly ONE live
+bundle atomically. The callbacks handle SESSION_CLOSE via
+`CloseFlow` + `ExportSessionCloseRemainder`; the separate single
+`flowExportOpenCallback` handles SESSION_OPEN (one `SampledForOpen` per
+instance, fanned to both families). The resolved `*ExportConfig`
+is shared by pointer everywhere — in the bundle, by the callbacks'
+sampling decision, AND inside the exporter — so there is exactly ONE live
 1-in-N `sampleCounter` (`atomic.Uint64`) per sampling INSTANCE (#2462;
 shared across that instance's template groups, distinct between
 instances). `ExportConfig` is
@@ -1325,11 +1443,11 @@ and are the only post-expiry state: no second sampling decision is made.
   If a tolerant load still carries an absent-unit zone ref while sampling is
   configured on another unit of that interface, `BuildSamplingZones` preserves
   a non-nil empty restriction (both families — the absent unit's family
-  flags are unknowable) and `ShouldExport` denies sessions of that family
+  flags are unknowable) and the sampling gate denies sessions of that family
   rather than interpreting the filtered result as export-all. Both family
   maps nil continues to mean that no zone restriction is configured.
-- `ExportSessionClose` builds the flow record synchronously from the
-  event-reader callback. The export goroutine (started in `Run(ctx)`)
+- The close record is built synchronously from the event-reader
+  callback (`ExportSessionCloseRemainder` via `CloseFlow`). The export goroutine (started in `Run(ctx)`)
   is what actually transmits and refreshes templates; record assembly
   itself isn't offloaded.
 - Collector destination and source-bind addresses are built with
@@ -1379,7 +1497,8 @@ flow.
 
 **`ServesInet`/`ServesInet6` deliberately stay per-INSTANCE.** They keep their
 #2462 meaning — *does this instance serve this family at all* — and gate the
-single sampling DECISION, which must run before `ShouldExport` so a record of an
+single sampling DECISION, which must run before the slot is consumed (`SampledForOpen` at
+SESSION_OPEN) so a flow of an
 unserved family never consumes a 1-in-N slot. `GroupIsV6` gates which groups that
 decision then fans out to. Collapsing the two would either re-open the cross-fan
 or change the sampling denominator.
