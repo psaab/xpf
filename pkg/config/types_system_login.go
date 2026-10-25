@@ -155,33 +155,46 @@ type LoginClass struct {
 	RegexValues15712 map[string][]string `json:"-" yaml:"-"`
 }
 
-// mapJunosPermissions folds a custom login class's Junos permission tokens onto
-// xpf's coarse permission model (#4304 S-2). Only the unambiguous whole-box
-// tokens map precisely; every other recognized subsystem/-control token folds
-// DOWN to a PermView floor (least-privilege — never silently grant config,
-// control, or maintenance from a narrow subsystem token) and is returned in
-// foldedToView so the compiler advisory can list what is coarsely mapped. The
-// PermView floor lets the class holder log in and view even when no token maps
-// precisely; `unauthorized` (empty token set) grants nothing.
+// mapJunosPermissions maps a custom login class's Junos permission tokens onto
+// xpf's coarse permission model (#4304 S-2). Whole-box tokens map precisely;
+// every other recognized token is granted the full PermView bucket and is
+// returned in widenedToView so the compiler advisory can name the widening.
+// PermView is whole-box read: it admits the non-secret configuration render
+// and the live session table (ShowConfig ACTIVE, GetSessions and the other
+// PermView-priced reads), not just the subsystem the Junos token names. A
+// narrow subsystem-read token (network, trace, snmp, interface, rollback,
+// ...) therefore WIDENS on the read axis: the class reads more in xpf than
+// the token permits in Junos. That widening is bounded — PermView carries no
+// secret, configure, control, clear or maintenance grant — and it is the
+// deliberate coarse-model trade: xpf has no per-subsystem read bucket.
+// Tokens that would imply a write bucket in Junos (a *-control token,
+// shell, secret, ...) likewise receive only PermView, so on the write axis
+// the mapping still never grants config, control or maintenance from a
+// narrow token. The PermView bucket lets the class holder log in and view
+// even when no token maps precisely; unauthorized (empty token set) grants
+// nothing.
 //
-// `all` and `super-user` map to PermAll even on a custom class because this bit
+// all and super-user map to PermAll even on a custom class because this bit
 // describes command authorization. It does not grant the CLI's cleartext
 // secret-display exception, which is keyed to the exact built-in class name.
 //
-// CRITICAL (no privilege escalation, review of #4311): the mapping must never
-// grant MORE than the Junos token permits. Two Junos tokens are deceptive:
-//   - `reset` permits restarting software DAEMONS (`restart <process>`), NOT
+// CRITICAL (write-axis no-escalation, review of #4311): no token maps to a
+// write bucket it does not permit in Junos. Two Junos tokens are deceptive:
+//   - reset permits restarting software DAEMONS (restart <process>), NOT
 //     rebooting/halting/zeroizing the box. It must map to PermControl, NOT
 //     PermMaint — PermMaint is exactly the destructive box verbs (request
 //     system reboot/halt/power-off/zeroize + chassis cluster failover), which
-//     `reset` does not authorize.
-//   - `rollback` permits reverting to a prior commit only, NOT arbitrary
-//     set/delete. It must map to the PermView floor, NOT PermConfig (which
-//     gates entering configure to make arbitrary changes).
+//     reset does not authorize.
+//   - rollback permits reverting to a prior commit only, NOT arbitrary
+//     set/delete. It must map to PermView, NOT PermConfig (which gates
+//     entering configure to make arbitrary changes). rollback is one of the
+//     widened tokens above: Junos rollback alone grants no general read,
+//     but PermView admits the whole non-secret configuration and session
+//     table.
 //
-// Only `maintenance` maps to PermMaint (the correct whole-box-destructive
-// grant), and only `configure` maps to PermConfig.
-func mapJunosPermissions(tokens []string) (perms []LoginClassPermission, foldedToView []string) {
+// Only maintenance maps to PermMaint (the correct whole-box-destructive
+// grant), and only configure maps to PermConfig.
+func mapJunosPermissions(tokens []string) (perms []LoginClassPermission, widenedToView []string) {
 	have := map[LoginClassPermission]bool{}
 	add := func(p LoginClassPermission) {
 		if !have[p] {
@@ -204,25 +217,29 @@ func mapJunosPermissions(tokens []string) (perms []LoginClassPermission, foldedT
 		case "configure":
 			add(PermConfig)
 		case "rollback":
-			// `rollback` reverts to a prior commit only, not arbitrary
-			// set/delete; fold to the least-privilege view floor rather than
-			// PermConfig.
+			// rollback reverts to a prior commit only, not arbitrary
+			// set/delete, so it must not map to PermConfig. It is a
+			// widened token (#16638): PermView admits the whole
+			// non-secret configuration and session table, which Junos
+			// rollback alone does not.
 			add(PermView)
+			widenedToView = append(widenedToView, tok)
 		case "view", "view-configuration":
 			add(PermView)
 		default:
-			// Any other recognized Junos permission (a subsystem read like
-			// `network`/`interface`/`routing`/`firewall`, a `*-control`
-			// write token, `shell`, `secret`, ...) is coarsely folded to a
-			// view-only floor. Under-granting is the safe direction: xpf's
-			// coarse model cannot faithfully represent per-subsystem write
-			// scope, so it must not over-grant config/control from a narrow
-			// token.
+			// Any other recognized Junos permission (a subsystem read
+			// like network/interface/routing/firewall, a *-control
+			// write token, shell, secret, ...) is granted the full
+			// PermView bucket. On the read axis this widens a narrow
+			// token (see the function comment); on the write axis it
+			// under-grants, because the coarse model cannot represent
+			// per-subsystem write scope and must not grant config,
+			// control or maintenance from a narrow token.
 			add(PermView)
-			foldedToView = append(foldedToView, tok)
+			widenedToView = append(widenedToView, tok)
 		}
 	}
-	return perms, foldedToView
+	return perms, widenedToView
 }
 
 // LoginUser defines a system user account.

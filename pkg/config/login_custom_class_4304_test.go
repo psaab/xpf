@@ -52,10 +52,11 @@ func TestCustomLoginClassCommitsWithAdvisory(t *testing.T) {
 	}
 }
 
-// TestCustomLoginClassPermissionMapping checks the least-privilege folding:
+// TestCustomLoginClassPermissionMapping checks the coarse folding:
 // unambiguous whole-box tokens map precisely, and any other subsystem/-control
-// token folds DOWN to a view-only floor (never silently grants config/control
-// from a narrow token).
+// token is granted the full PermView bucket (never silently grants config/
+// control/maint from a narrow token; on the read axis this WIDENS the token
+// to whole-box non-secret read — #16638, stated by the commit advisory).
 func TestCustomLoginClassPermissionMapping(t *testing.T) {
 	tree := buildTree4303(t, []string{
 		"set system login class ops permissions [ view clear network interface-control ]",
@@ -76,7 +77,7 @@ func TestCustomLoginClassPermissionMapping(t *testing.T) {
 	if !perms[PermView] || !perms[PermClear] {
 		t.Fatalf("expected view+clear in %v", lc.MappedPermissions)
 	}
-	// `network` and `interface-control` fold to view-only — they must NOT
+	// `network` and `interface-control` are granted view — they must NOT
 	// silently grant config/control/maint.
 	if perms[PermConfig] || perms[PermControl] || perms[PermMaint] || perms[PermAll] {
 		t.Fatalf("subsystem tokens over-granted: %v", lc.MappedPermissions)
@@ -110,7 +111,7 @@ func TestUndefinedLoginClassStillRejected(t *testing.T) {
 //   - `reset` (restart daemons) maps to PermControl, NOT PermMaint (the
 //     destructive box verbs). RED on revert: reset->PermMaint lets a class
 //     scoped to daemon restarts run `request system zeroize`.
-//   - `rollback` (revert to a prior commit) maps to the PermView floor, NOT
+//   - `rollback` (revert to a prior commit) maps to PermView, NOT
 //     PermConfig (arbitrary set/delete).
 //   - only `maintenance` maps to PermMaint.
 func TestCustomLoginClassNoPrivEsc(t *testing.T) {
@@ -135,13 +136,13 @@ func TestCustomLoginClassNoPrivEsc(t *testing.T) {
 		t.Errorf("permissions reset must NOT map to PermAll; got %v", resetPerms)
 	}
 
-	// `rollback` -> PermView floor, NOT PermConfig.
+	// `rollback` -> PermView, NOT PermConfig.
 	rbPerms, _ := mapJunosPermissions([]string{"rollback"})
 	if has(rbPerms, PermConfig) {
 		t.Errorf("permissions rollback must NOT map to PermConfig; got %v", rbPerms)
 	}
 	if !has(rbPerms, PermView) {
-		t.Errorf("permissions rollback should map to the PermView floor; got %v", rbPerms)
+		t.Errorf("permissions rollback should map to PermView; got %v", rbPerms)
 	}
 
 	// `maintenance` is the ONLY token that legitimately maps to PermMaint.

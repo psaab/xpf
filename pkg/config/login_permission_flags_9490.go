@@ -11,10 +11,10 @@ import (
 //
 // #9490: `system login class <c> permissions` carried no validator, so a typo
 // such as `permissions view xpfbogus v1` committed clean. mapJunosPermissions
-// folds any token it does not special-case to PermView, so the misspelled class
-// silently became a different class from the one written. The mapping stays as
-// it is for a persisted config (the tolerant load path does not run
-// SchemaValidate); the commit gate is what refuses the typo.
+// grants any token it does not special-case the full PermView bucket, so the
+// misspelled class silently became a different class from the one written.
+// The mapping stays as it is for a persisted config (the tolerant load path
+// does not run SchemaValidate); the commit gate is what refuses the typo.
 var junosLoginPermissionFlags = map[string]struct{}{
 	"access": {}, "access-control": {}, "admin": {}, "admin-control": {}, "all": {},
 	"clear": {}, "configure": {}, "control": {}, "field": {}, "firewall": {},
@@ -53,6 +53,6 @@ func ValidateLoginPermission(raw string) error {
 		return nil
 	}
 	return fmt.Errorf("%q is not a Junos login-class permission flag (e.g. view, configure, "+
-		"clear, maintenance, all); an unrecognised token would silently fold to view-only, "+
+		"clear, maintenance, all); an unrecognised token would silently be granted full view, "+
 		"granting a different class from the one written", raw)
 }

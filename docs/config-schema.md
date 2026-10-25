@@ -17341,14 +17341,19 @@ blocking the whole config. This is accept-with-advisory now:
   (before users) into `LoginConfig.Classes`, folding the Junos `permissions`
   tokens onto the coarse xpf model via `mapJunosPermissions`
   (`LoginClass.MappedPermissions`). Only whole-box tokens map precisely;
-  everything else folds DOWN to a PermView floor (never over-grants
-  config/control/maint from a narrow subsystem token). **No privilege
-  escalation** (#4311 review): `reset` = restart daemons → PermControl (NOT
-  PermMaint — the destructive reboot/halt/zeroize verbs); `rollback` = revert
-  to a prior commit → PermView floor (NOT PermConfig); only `maintenance` →
-  PermMaint and only `configure` → PermConfig.
+  every other recognized token is granted the full PermView bucket, which
+  WIDENS a narrow subsystem token on the read axis (#16638 — PermView
+  admits the whole non-secret configuration and session table) while
+  never over-granting config/control/maint on the write axis. **No
+  write-axis escalation** (#4311 review): `reset` = restart daemons →
+  PermControl (NOT PermMaint — the destructive reboot/halt/zeroize
+  verbs); `rollback` = revert to a prior commit → PermView (NOT
+  PermConfig), and `rollback` is one of the widened tokens the advisory
+  names; only `maintenance` → PermMaint and only `configure` → PermConfig.
 - **advisory** — `loginClassAdvisoryWarnings` emits one `cfg.Warnings` entry
-  per custom class naming the mapped permissions. `allow-commands` /
+  per custom class naming the mapped permissions, and naming every widened
+  token as "granted full view (wider than Junos <token>)" (#16638).
+  `allow-commands` /
   `allow-configuration` / `idle-timeout` are named as accepted-but-not-enforced
   (neutral) — ignoring an ADDITIVE grant can only under-grant, so it is
   fail-closed. The advisory says nothing about `deny-commands` /
