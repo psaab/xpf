@@ -228,9 +228,10 @@ an lo0 input filter, or a `to-zone junos-host` policy (the three
 translated flow is TWO independent entries (forward `is_reverse=false`
 + reverse companion `is_reverse=true`) and the hit can land on EITHER,
 the teardown must resolve and remove BOTH halves and release the
-NAT pool reservation, exactly like the ordinary idle reap
-(`worker/loop_body::reap_expired_sessions`) and the DSCP-filter purge
-(`purge_sessions_for_input_dscp_filter_revalidation`) do per entry.
+NAT pool reservation, exactly like the ordinary idle reap and the
+ingress-scoped input-filter cache-revalidation purge
+(`worker/loop_body::reap_expired_sessions` and
+`purge_sessions_for_changed_input_filter_cached_semantics`) do per entry.
 
 `delete_terminal_filtered_session` therefore:
 
@@ -247,11 +248,12 @@ NAT pool reservation, exactly like the ordinary idle reap
   and the shared HA maps, queues the cross-worker `DeleteSynced`, and
   emits its close delta (suppressed for the reverse half).
 
-The DSCP purge no longer releases allocations separately — the helper
-owns that now; `release_flow` is idempotent, so a caller that visits both
-halves in turn stays correct. Before #5622 the helper deleted only the
-supplied key and released nothing, leaking the same-worker companion
-entry and the pool port on every translated LocalDelivery terminal deny.
+The input-filter rotation purge no longer releases allocations separately —
+the helper owns that now; `release_flow` is idempotent, so a caller that
+visits both halves in turn stays correct. Before #5622 the helper deleted
+only the supplied key and released nothing, leaking the same-worker
+companion entry and the pool port on every translated LocalDelivery terminal
+deny.
 
 
 ## Deleted first-policy purge (`purge_sessions_bound_to_deleted_first_policy`, #9526)

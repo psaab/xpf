@@ -1,16 +1,12 @@
-// Cold filter-rotation semantic comparison (#6237, extracted verbatim from
+// Filter-rotation semantic comparisons (#6237, extracted from
 // cache_sensitive.rs). This is the control-plane / worker-loop change-detection
-// domain: the family-level structural-equality predicates that decide when
-// cached per-session filter decisions must be INVALIDATED on a config rotation.
-// Bodies are byte-identical with the pre-split cache_sensitive.rs; only the
-// module-level `use` prefix shifts +1 `super::` because this submodule sits one
-// level deeper (engine::cache_sensitive::rotation).
+// domain: comparisons that decide when cached per-session filter state must
+// be invalidated on a config rotation.
 //
-// The #5293 EXHAUSTIVE FilterTerm destructure in filter_term_semantics_match
-// (no `..` rest pattern) is the compile-time anti-drift guard that makes this
-// physical separation from the cached rebuild path safe: adding a FilterTerm
-// field fails to compile here until it is classified as match-relevant or
-// deliberately excluded.
+// The #5293 exhaustive FilterTerm destructures in
+// `filter_term_semantics_match` and `filter_term_route_match_semantics_match`
+// keep both the full semantic comparison and the PBR matcher comparison honest:
+// adding a field fails to compile here until each path classifies it.
 
 use super::super::super::*;
 
@@ -188,38 +184,211 @@ fn dscp_sensitive_filter_semantics_match(old: &Filter, new: &Filter) -> bool {
             .zip(new.terms.iter())
             .all(|(old, new)| filter_term_semantics_match(old, new))
 }
+// The per-packet session-hit evaluator re-reads DSCP/L4 terms on every hit.
+// Rotation therefore needs to purge only when a cached dimension changed:
+// routing-instance selection, a terminal action, or cached TX/policer state.
+// Counter/log-only changes are deliberately excluded; their live evaluators
+// already observe the new filter without tearing down the session.
+fn filter_term_route_match_semantics_match(old: &FilterTerm, new: &FilterTerm) -> bool {
+    // #5293: keep this matcher-only view exhaustive. Adding a FilterTerm
+    // field must be classified here as well as in the full semantic comparator.
+    let FilterTerm {
+        id: _,
+        name: _,
+        source_v4: _,
+        source_v6: _,
+        dest_v4: _,
+        dest_v6: _,
+        source_addr_constrained: _,
+        dest_addr_constrained: _,
+        source_except: _,
+        dest_except: _,
+        protocol_bitmap: _,
+        protocol_match_enabled: _,
+        source_ports: _,
+        dest_ports: _,
+        source_port_constrained: _,
+        dest_port_constrained: _,
+        source_port_except: _,
+        dest_port_except: _,
+        dscp_bitmap: _,
+        dscp_match_enabled: _,
+        tcp_flags_mask: _,
+        tcp_flags_forbidden: _,
+        is_fragment: _,
+        icmp_type_bitmap: _,
+        icmp_type_match_enabled: _,
+        icmp_code_bitmap: _,
+        icmp_code_match_enabled: _,
+        flex_enabled: _,
+        flex_offset: _,
+        flex_length: _,
+        flex_value: _,
+        flex_mask: _,
+        flex_match_start: _,
+        action: _,
+        continue_term: _,
+        count: _,
+        has_count: _,
+        log: _,
+        policer_name: _,
+        three_color_policer: _,
+        routing_instance: _,
+        forwarding_class: _,
+        dscp_rewrite: _,
+        counter: _,
+    } = new;
+    old.source_v4 == new.source_v4
+        && old.source_v6 == new.source_v6
+        && old.dest_v4 == new.dest_v4
+        && old.dest_v6 == new.dest_v6
+        && old.source_addr_constrained == new.source_addr_constrained
+        && old.dest_addr_constrained == new.dest_addr_constrained
+        && old.source_except == new.source_except
+        && old.dest_except == new.dest_except
+        && old.protocol_bitmap == new.protocol_bitmap
+        && old.protocol_match_enabled == new.protocol_match_enabled
+        && old.source_ports == new.source_ports
+        && old.dest_ports == new.dest_ports
+        && old.source_port_constrained == new.source_port_constrained
+        && old.dest_port_constrained == new.dest_port_constrained
+        && old.source_port_except == new.source_port_except
+        && old.dest_port_except == new.dest_port_except
+        && old.dscp_bitmap == new.dscp_bitmap
+        && old.dscp_match_enabled == new.dscp_match_enabled
+        && old.tcp_flags_mask == new.tcp_flags_mask
+        && old.tcp_flags_forbidden == new.tcp_flags_forbidden
+        && old.is_fragment == new.is_fragment
+        && old.icmp_type_bitmap == new.icmp_type_bitmap
+        && old.icmp_type_match_enabled == new.icmp_type_match_enabled
+        && old.icmp_code_bitmap == new.icmp_code_bitmap
+        && old.icmp_code_match_enabled == new.icmp_code_match_enabled
+        && old.flex_enabled == new.flex_enabled
+        && old.flex_offset == new.flex_offset
+        && old.flex_length == new.flex_length
+        && old.flex_value == new.flex_value
+        && old.flex_mask == new.flex_mask
+        && old.flex_match_start == new.flex_match_start
+}
 
-fn input_dscp_filter_family_changed(
+fn filter_term_has_cached_side_effect(term: &FilterTerm) -> bool {
+    term.action != FilterAction::Accept
+        || term.continue_term
+        || !term.routing_instance.is_empty()
+        || !term.forwarding_class.is_empty()
+        || term.dscp_rewrite.is_some()
+        || !term.policer_name.is_empty()
+        || term.three_color_policer.is_some()
+}
+
+fn input_filter_cached_semantics_match(old: &Filter, new: &Filter) -> bool {
+    if old.name != new.name
+        || old.family != new.family
+        || old.affects_tx_selection != new.affects_tx_selection
+        || old.affects_route_lookup != new.affects_route_lookup
+        || old.has_terminal_action_terms != new.has_terminal_action_terms
+        || old.has_three_color_policer_terms != new.has_three_color_policer_terms
+    {
+        return false;
+    }
+    let route_lookup_changed = old.affects_route_lookup || new.affects_route_lookup;
+    let common_terms = old.terms.len().min(new.terms.len());
+    if (route_lookup_changed && old.terms.len() != new.terms.len())
+        || old.terms[common_terms..]
+            .iter()
+            .any(filter_term_has_cached_side_effect)
+        || new.terms[common_terms..]
+            .iter()
+            .any(filter_term_has_cached_side_effect)
+    {
+        return false;
+    }
+    old.terms.iter().zip(new.terms.iter()).all(|(old, new)| {
+        old.action == new.action
+            && old.continue_term == new.continue_term
+            && old.routing_instance == new.routing_instance
+            && old.forwarding_class == new.forwarding_class
+            && old.dscp_rewrite == new.dscp_rewrite
+            && old.policer_name == new.policer_name
+            && three_color_policer_semantics_match(
+                &old.three_color_policer,
+                &new.three_color_policer,
+            )
+            && (!route_lookup_changed || filter_term_route_match_semantics_match(old, new))
+    })
+}
+
+fn input_filter_cached_changed_ifindexes(
     old_filters: &rustc_hash::FxHashMap<i32, Arc<Filter>>,
     new_filters: &rustc_hash::FxHashMap<i32, Arc<Filter>>,
-) -> bool {
-    old_filters
-        .iter()
-        .filter(|(_, filter)| filter.has_dscp_match_terms)
-        .any(|(ifindex, old)| {
-            new_filters
+    has_sensitive_terms: fn(&Filter) -> bool,
+) -> rustc_hash::FxHashSet<i32> {
+    let mut changed = rustc_hash::FxHashSet::default();
+    for (ifindex, old) in old_filters {
+        if has_sensitive_terms(old)
+            && new_filters
                 .get(ifindex)
-                .is_none_or(|new| !dscp_sensitive_filter_semantics_match(old, new))
-        })
-        || new_filters
-            .iter()
-            .filter(|(_, filter)| filter.has_dscp_match_terms)
-            .any(|(ifindex, new)| {
-                old_filters
-                    .get(ifindex)
-                    .is_none_or(|old| !dscp_sensitive_filter_semantics_match(old, new))
-            })
+                .is_none_or(|new| !input_filter_cached_semantics_match(old, new))
+        {
+            changed.insert(*ifindex);
+        }
+    }
+    for (ifindex, new) in new_filters {
+        if has_sensitive_terms(new)
+            && old_filters
+                .get(ifindex)
+                .is_none_or(|old| !input_filter_cached_semantics_match(old, new))
+        {
+            changed.insert(*ifindex);
+        }
+    }
+    changed
 }
 
-pub(crate) fn input_dscp_filter_families_changed(
+fn has_dscp_match_terms(filter: &Filter) -> bool {
+    filter.has_dscp_match_terms
+}
+
+fn has_per_packet_l4_match_terms(filter: &Filter) -> bool {
+    filter.has_per_packet_l4_match_terms
+}
+
+pub(crate) fn input_dscp_filter_ifindexes_changed(
     old: &FilterState,
     new: &FilterState,
-) -> (bool, bool) {
+) -> (rustc_hash::FxHashSet<i32>, rustc_hash::FxHashSet<i32>) {
     (
-        input_dscp_filter_family_changed(&old.iface_filter_v4_fast, &new.iface_filter_v4_fast),
-        input_dscp_filter_family_changed(&old.iface_filter_v6_fast, &new.iface_filter_v6_fast),
+        input_filter_cached_changed_ifindexes(
+            &old.iface_filter_v4_fast,
+            &new.iface_filter_v4_fast,
+            has_dscp_match_terms,
+        ),
+        input_filter_cached_changed_ifindexes(
+            &old.iface_filter_v6_fast,
+            &new.iface_filter_v6_fast,
+            has_dscp_match_terms,
+        ),
     )
 }
+
+pub(crate) fn input_per_packet_l4_filter_ifindexes_changed(
+    old: &FilterState,
+    new: &FilterState,
+) -> (rustc_hash::FxHashSet<i32>, rustc_hash::FxHashSet<i32>) {
+    (
+        input_filter_cached_changed_ifindexes(
+            &old.iface_filter_v4_fast,
+            &new.iface_filter_v4_fast,
+            has_per_packet_l4_match_terms,
+        ),
+        input_filter_cached_changed_ifindexes(
+            &old.iface_filter_v6_fast,
+            &new.iface_filter_v6_fast,
+            has_per_packet_l4_match_terms,
+        ),
+    )
+}
+
 
 /// #11330: compares the optional lo0 filters semantically so a rebuild that
 /// only creates fresh `Arc`s or changes a positional filter ID does not trigger
@@ -269,53 +438,11 @@ pub(crate) fn interface_output_filter_has_dscp_match(
     filter.is_some_and(|filter| filter.has_dscp_match_terms)
 }
 
-// ---------------------------------------------------------------------------
 // #2362 per-packet L4 match (tcp-flags / is-fragment / icmp-type / icmp-code).
-// These vary per packet within a 5-tuple flow exactly like DSCP, so they get
-// the same cache-coherency treatment: a flow-cache decline (flow_cache.rs), a
-// per-packet re-evaluation on session hit (poll_descriptor/filter.rs), and a
-// config-rotation purge (worker/loop_body) when the per-packet-L4 filter set
-// changes. The structural equality test reuses dscp_sensitive_filter_semantics_match
-// (which now also compares the per-packet term fields).
-// ---------------------------------------------------------------------------
+// The flow-cache declines these filters and session hits re-evaluate them
+// against the current snapshot. Rotation purges only when cached route/action
+// semantics changed, not for per-packet term, counter, or log edits.
 
-fn input_per_packet_l4_filter_family_changed(
-    old_filters: &rustc_hash::FxHashMap<i32, Arc<Filter>>,
-    new_filters: &rustc_hash::FxHashMap<i32, Arc<Filter>>,
-) -> bool {
-    old_filters
-        .iter()
-        .filter(|(_, filter)| filter.has_per_packet_l4_match_terms)
-        .any(|(ifindex, old)| {
-            new_filters
-                .get(ifindex)
-                .is_none_or(|new| !dscp_sensitive_filter_semantics_match(old, new))
-        })
-        || new_filters
-            .iter()
-            .filter(|(_, filter)| filter.has_per_packet_l4_match_terms)
-            .any(|(ifindex, new)| {
-                old_filters
-                    .get(ifindex)
-                    .is_none_or(|old| !dscp_sensitive_filter_semantics_match(old, new))
-            })
-}
-
-pub(crate) fn input_per_packet_l4_filter_families_changed(
-    old: &FilterState,
-    new: &FilterState,
-) -> (bool, bool) {
-    (
-        input_per_packet_l4_filter_family_changed(
-            &old.iface_filter_v4_fast,
-            &new.iface_filter_v4_fast,
-        ),
-        input_per_packet_l4_filter_family_changed(
-            &old.iface_filter_v6_fast,
-            &new.iface_filter_v6_fast,
-        ),
-    )
-}
 
 pub(crate) fn interface_input_filter_has_per_packet_l4_match(
     state: &FilterState,

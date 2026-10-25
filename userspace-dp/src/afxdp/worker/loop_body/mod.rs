@@ -912,8 +912,8 @@ pub(crate) fn worker_loop(
             // Compare BEFORE assignment — needs both old and new.
             let cos_changed =
                 cos_runtime_config_changed(forwarding.as_ref(), new_forwarding.as_ref());
-            let (dscp_changed_v4, dscp_changed_v6) =
-                crate::filter::input_dscp_filter_families_changed(
+            let (mut purge_input_filter_v4, mut purge_input_filter_v6) =
+                crate::filter::input_dscp_filter_ifindexes_changed(
                     &forwarding.filter_state,
                     &new_forwarding.filter_state,
                 );
@@ -926,19 +926,17 @@ pub(crate) fn worker_loop(
                     &new_forwarding.filter_state,
                 );
             let lo0_filter_changed = lo0_filter_changed_v4 || lo0_filter_changed_v6;
-            // #2362: a per-packet-L4 (tcp-flags / is-fragment / icmp-type /
-            // icmp-code) input filter rotation has the same revalidation
-            // requirement as a DSCP filter rotation — established sessions whose
-            // first packet was admitted under the old term set must be purged so
-            // the new term is re-evaluated. Fold the two change-sets into one
-            // purge per family.
+            // #2362: per-packet-L4 filters share the DSCP session-hit
+            // re-evaluation path. Merge the per-family sets of interfaces
+            // whose cached route/action semantics changed; ordinary term,
+            // counter, and log edits are handled by the next session hit.
             let (per_packet_changed_v4, per_packet_changed_v6) =
-                crate::filter::input_per_packet_l4_filter_families_changed(
+                crate::filter::input_per_packet_l4_filter_ifindexes_changed(
                     &forwarding.filter_state,
                     &new_forwarding.filter_state,
                 );
-            let purge_input_dscp_v4 = dscp_changed_v4 || per_packet_changed_v4;
-            let purge_input_dscp_v6 = dscp_changed_v6 || per_packet_changed_v6;
+            purge_input_filter_v4.extend(per_packet_changed_v4);
+            purge_input_filter_v6.extend(per_packet_changed_v6);
             // #9526: compare BEFORE assignment. The Go commit sweep cannot clear
             // the literal first policy's sessions (policy_id 0 is overloaded on
             // the wire), so when this rotation removes the old snapshot's
@@ -1122,7 +1120,7 @@ pub(crate) fn worker_loop(
                     purged_removed_zone_sessions,
                 );
             }
-            let purged_input_dscp = purge_sessions_for_input_dscp_filter_revalidation(
+            let purged_input_filter = purge_sessions_for_changed_input_filter_cached_semantics(
                 &mut sessions,
                 session_map.handle(),
                 SharedSessionRefs {
@@ -1136,15 +1134,15 @@ pub(crate) fn worker_loop(
                     tick: Tick { ns: loop_now_ns, secs: 0 },
                 },
                 &forwarding,
-                purge_input_dscp_v4,
-                purge_input_dscp_v6,
+                &purge_input_filter_v4,
+                &purge_input_filter_v6,
                 worker_id,
             );
-            if purged_input_dscp > 0 {
+            if purged_input_filter > 0 {
                 debug_log!(
-                    "INPUT_DSCP_FILTER_PURGE: worker={} sessions={}",
+                    "INPUT_FILTER_CACHE_REVALIDATION_PURGE: worker={} sessions={}",
                     worker_id,
-                    purged_input_dscp,
+                    purged_input_filter,
                 );
             }
             if !extensive_rematch {

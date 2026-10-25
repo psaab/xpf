@@ -111,23 +111,49 @@ fn uses_kernel_local_demotion_candidate(
         && decision.install_table_domain == 0
 }
 
-pub(in crate::afxdp) fn purge_sessions_for_input_dscp_filter_revalidation(sessions: &mut SessionTable,
-session_map: SteeringMap<'_>,
-shared: SharedSessionRefs<'_>,
-forwarding: &ForwardingState,
-purge_v4: bool,
-purge_v6: bool,
-// #6211 F2: THIS worker's id — the purge tears down sessions that may be
-// peer-synced, whose reservation every worker holds.
-worker_id: u32,) -> usize {
-    if !purge_v4 && !purge_v6 {
+pub(in crate::afxdp) fn purge_sessions_for_changed_input_filter_cached_semantics(
+    sessions: &mut SessionTable,
+    session_map: SteeringMap<'_>,
+    shared: SharedSessionRefs<'_>,
+    forwarding: &ForwardingState,
+    changed_v4: &rustc_hash::FxHashSet<i32>,
+    changed_v6: &rustc_hash::FxHashSet<i32>,
+    // #6211 F2: THIS worker's id — the purge tears down sessions that may be
+    // peer-synced, whose reservation every worker holds.
+    worker_id: u32,
+) -> usize {
+    if changed_v4.is_empty() && changed_v6.is_empty() {
         return 0;
     }
     let mut stale = Vec::new();
     sessions.iter_with_origin(|key, decision, metadata, origin| {
-        let family_matches = (purge_v4 && key.addr_family == libc::AF_INET as u8)
-            || (purge_v6 && key.addr_family == libc::AF_INET6 as u8);
-        if family_matches {
+        let changed_ifindexes = match key.addr_family {
+            family if family == libc::AF_INET as u8 => changed_v4,
+            family if family == libc::AF_INET6 as u8 => changed_v6,
+            _ => return,
+        };
+        if changed_ifindexes.is_empty() {
+            return;
+        }
+        // Forward rows retain the physical parent plus VLAN VID; compare the
+        // logical unit used to resolve its input filter. A missing identity or
+        // an unresolved tagged VID cannot identify the old logical interface,
+        // so keep the conservative family fallback for those entries only.
+        let ingress_ifindex = if metadata.ingress_ifindex == 0 {
+            None
+        } else {
+            let physical = metadata.ingress_ifindex as i32;
+            match crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
+                forwarding,
+                physical,
+                metadata.ingress_vlan_id,
+            ) {
+                Some(logical) => Some(logical),
+                None if metadata.ingress_vlan_id == 0 => Some(physical),
+                None => None,
+            }
+        };
+        if ingress_ifindex.is_none_or(|ifindex| changed_ifindexes.contains(&ifindex)) {
             stale.push((key.clone(), decision, metadata.clone(), origin));
         }
     });
@@ -354,10 +380,10 @@ new_policy: &crate::policy::PolicyState,) -> Option<String> {
 /// companion. The discriminator is the admitting rule's counter handle a
 /// session binds at install; host-local, neighbor-seed, fabric, tunnel and
 /// peer-synced sessions bind none, so they are never touched. Teardown is
-/// `delete_terminal_filtered_session`, the same full-pair path the DSCP purge
-/// uses: NAT release, BPF and conntrack aliases, the shared HA maps, the
-/// cross-worker `DeleteSynced`, and a close delta the daemon turns into an HA
-/// peer delete. Returns the number of forward sessions purged.
+/// `delete_terminal_filtered_session`, the same full-pair path the
+/// input-filter rotation purge uses: NAT release, BPF/conntrack aliases,
+/// shared HA maps, cross-worker `DeleteSynced`, and a close delta the daemon
+/// turns into an HA peer delete. Returns the number of forward sessions purged.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn purge_sessions_bound_to_deleted_first_policy(sessions: &mut SessionTable,
 session_map: SteeringMap<'_>,
@@ -494,8 +520,9 @@ worker_id: u32,) {
     // pre-#5622 body deleted ONLY the supplied key and released NO allocator
     // state, so the same-worker forward<->reverse COMPANION entry AND the
     // source-NAT / NAT64 pool RESERVATION were both left behind — a resource
-    // leak the ordinary idle reap (`reap_expired_sessions`) and the DSCP-filter
-    // purge (`purge_sessions_for_input_dscp_filter_revalidation`) already avoid
+    // leak the ordinary idle reap (`reap_expired_sessions`) and the ingress-
+    // scoped input-filter purge
+    // (`purge_sessions_for_changed_input_filter_cached_semantics`) already avoid
     // by releasing per entry. Tear down BOTH halves and release each allocation
     // exactly as the reap path does per `ExpiredSession`.
     //
@@ -508,7 +535,7 @@ worker_id: u32,) {
     // halves returns the reservation EXACTLY ONCE (the reverse call is a no-op)
     // — no double free. `release_flow` is idempotent (returns false when the
     // flow was already freed), so a caller that hands both halves in turn (the
-    // DSCP purge) stays correct too.
+    // input-filter rotation purge) stays correct too.
     let companion_key = reverse_session_key(key, decision.nat);
     let companion = if companion_key != *key {
         sessions.entry_with_origin(&companion_key)
@@ -550,7 +577,7 @@ worker_id: u32,) {
 /// the cross-worker `DeleteSynced`, and emit its close delta (suppressed for a
 /// reverse entry). Called once per direction by `delete_terminal_filtered_session`
 /// so a translated LocalDelivery terminal hit performs the SAME full-pair
-/// teardown the idle reap and DSCP purge do.
+/// teardown the idle reap and input-filter rotation purge do.
 #[allow(clippy::too_many_arguments)]
 fn delete_terminal_half(
     worker_id: u32,

@@ -84,11 +84,15 @@ Mirrors the BPF firewall-filter pipeline in userspace.
   purely STATIC input filter's verdict once per config generation, revoking
   the session only when the verdict has become a DENY (see "Static
   input-filter revalidation stamp (#7212)" in `session/README.md`).
-  Forwarding rotations compare
-  DSCP-sensitive input filter content by stable names, terms, and
-  three-color policer runtime shape, not by compiler-positional filter
-  IDs, before deciding whether existing sessions need a conservative
-  packet-family purge.
+  Forwarding rotations compare DSCP/per-packet-L4 input filter content by stable
+  names and cached action/modifier semantics, not by compiler-positional
+  filter IDs. Changes to cached action, TX-selection, route, or policer
+  behavior produce exact v4/v6 interface-index sets. The session purge maps
+  stored physical ingress plus VLAN back to the logical interface, preserving
+  sessions admitted by unchanged same-family filters. Counter/log-only and
+  non-PBR match-only edits remain per-packet re-evaluated without teardown;
+  PBR matcher changes purge because route selection is cached. Sessions
+  without a usable ingress identity retain the conservative family fallback.
 
   **Interface `filter output` matches the POST-NAT on-wire tuple (#3642).**
   Junos applies an egress interface output firewall filter AFTER NAT
@@ -1322,31 +1326,21 @@ implementation (#1430); use it as the template:
    `userspace-dp/src/afxdp/poll_descriptor/mod.rs:217-244`
    (`evaluate_dscp_sensitive_input_filter_on_session_hit`) is
    the DSCP shape; mirror it.
-6. **Forwarding-rotation purge** —
-   `userspace-dp/src/afxdp/worker/loop_body/mod.rs:295-330`
-   uses `input_dscp_filter_families_changed` to decide whether
-   to purge sessions. Extend the semantics-match comparison in
-   `userspace-dp/src/filter/engine/cache_sensitive/rotation.rs`
-   (`filter_term_semantics_match`) to cover the new match
-   field's aggregate flag and per-term content. **Compare by
-   content, never by compiler-positional filter/term IDs** —
-   `Filter.id` and `FilterTerm.id` are stable only within a
-   snapshot. **#5293: `filter_term_semantics_match` now derives
-   its equality from an EXHAUSTIVE `let FilterTerm { .. } = new;`
-   destructure with NO `..` rest pattern** — a newly-added
-   FilterTerm field fails to compile there until it is classified
-   as compared (bound to a name and checked) or intentionally
-   ignored (bound to `_`, e.g. `id`/`counter`). This closes the
-   class of bug where a match field is silently omitted from the
-   change detector: before #5293 the six `flex_*`
-   flexible-match-range fields (#3077/#3232) were absent, so a
-   PBR/filter rotation touching ONLY a flex value/mask/offset/
-   length/enable/match-start compared equal, the worker skipped
-   its per-packet-L4 session purge, and an established session
-   stranded on its stale (pre-rotation) routing-instance /
-   forwarding decision until timeout. Regression test:
-   `filter/engine/cache_sensitive/rotation.rs`
-   ::`flex_field_change_is_not_cache_equal`.
+6. **Forwarding-rotation cache revalidation** —
+   `userspace-dp/src/afxdp/worker/loop_body/mod.rs` combines the
+   DSCP and per-packet-L4 change sets by interface. The rotation
+   detector returns exact ifindexes whose cached routing-instance,
+   terminal-action, TX-selection, or policer semantics changed;
+   `session_glue::purge_sessions_for_changed_input_filter_cached_semantics`
+   matches those against each session's recorded logical ingress
+   (`ingress_ifindex` + VLAN). A missing ingress identity keeps the
+   conservative family fallback for peer-synced/reverse rows only.
+   Per-packet term-only and counter/log edits are re-evaluated on
+   session hit and do not purge unrelated or unchanged sessions.
+   `filter_term_semantics_match` remains the exhaustive #5293
+   comparison for full filter semantics; routing-semantic matching
+   separately includes every match field so a PBR route change still
+   invalidates only sessions on the affected ingress.
 7. **Tests** in `userspace-dp/src/afxdp/flow_cache_tests.rs`
    following the DSCP runbook pattern in
    `from_forward_decision_skips_cache_for_dscp_matched_input_filter`
@@ -1364,7 +1358,7 @@ Reference tests (already in the tree, cite from new field PRs):
   / `_output_filter`
 - rotation purge positional-ID immunity:
   `filter/tests.rs:1806`
-  (`input_dscp_filter_families_changed_ignores_positional_filter_id_change`)
+  (`input_dscp_filter_ifindexes_changed_ignores_positional_filter_id_change`)
 - session-hit re-eval: `afxdp/tests.rs:3184`
 
 ### Path (a) — extend `SessionKey`

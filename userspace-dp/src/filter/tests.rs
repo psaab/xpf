@@ -31,6 +31,23 @@ fn make_filter_state_with_interfaces(
     parse_filter_state(filters, &[], interfaces, "", "").expect("filter state compiles")
 }
 
+fn assert_changed_input_ifindexes(
+    changed: (rustc_hash::FxHashSet<i32>, rustc_hash::FxHashSet<i32>),
+    expected_v4: &[i32],
+    expected_v6: &[i32],
+) {
+    assert_eq!(
+        changed.0,
+        expected_v4.iter().copied().collect(),
+        "unexpected IPv4 cached-filter change set"
+    );
+    assert_eq!(
+        changed.1,
+        expected_v6.iter().copied().collect(),
+        "unexpected IPv6 cached-filter change set"
+    );
+}
+
 // -- #14656: the coalescer itself is exercised in test builds -------------
 //
 // Before #14656 `record_filter_counter` was `#[cfg(not(test))]` for the
@@ -5541,7 +5558,7 @@ fn dscp_match_in_term() {
 }
 
 #[test]
-fn input_dscp_filter_families_changed_detects_same_ifindex_content_change() {
+fn input_dscp_filter_ifindexes_changed_detects_cached_action_change() {
     let iface = crate::InterfaceSnapshot {
         name: "reth1.0".into(),
         ifindex: 10,
@@ -5578,14 +5595,11 @@ fn input_dscp_filter_families_changed_detects_same_ifindex_content_change() {
         &[iface],
     );
 
-    assert_eq!(
-        input_dscp_filter_families_changed(&old, &new),
-        (true, false)
-    );
+    assert_changed_input_ifindexes(input_dscp_filter_ifindexes_changed(&old, &new), &[10], &[]);
 }
 
 #[test]
-fn input_dscp_filter_families_changed_ignores_unchanged_filter() {
+fn input_dscp_filter_ifindexes_changed_ignores_unchanged_filter() {
     let iface = crate::InterfaceSnapshot {
         name: "reth1.0".into(),
         ifindex: 10,
@@ -5611,14 +5625,11 @@ fn input_dscp_filter_families_changed_ignores_unchanged_filter() {
     );
     let new = make_filter_state_with_interfaces(&[filter], &[iface]);
 
-    assert_eq!(
-        input_dscp_filter_families_changed(&old, &new),
-        (false, false)
-    );
+    assert_changed_input_ifindexes(input_dscp_filter_ifindexes_changed(&old, &new), &[], &[]);
 }
 
 #[test]
-fn input_dscp_filter_families_changed_ignores_positional_filter_id_change() {
+fn input_dscp_filter_ifindexes_changed_ignores_positional_filter_id_change() {
     let iface = crate::InterfaceSnapshot {
         name: "reth1.0".into(),
         ifindex: 10,
@@ -5658,14 +5669,11 @@ fn input_dscp_filter_families_changed_ignores_positional_filter_id_change() {
         new.iface_filter_v4_fast.get(&10).unwrap().id,
         "test setup must shift the compiler-positional filter id"
     );
-    assert_eq!(
-        input_dscp_filter_families_changed(&old, &new),
-        (false, false)
-    );
+    assert_changed_input_ifindexes(input_dscp_filter_ifindexes_changed(&old, &new), &[], &[]);
 }
 
 #[test]
-fn input_dscp_filter_families_changed_detects_three_color_shape_change() {
+fn input_dscp_filter_ifindexes_changed_detects_three_color_shape_change() {
     let iface = crate::InterfaceSnapshot {
         name: "reth1.0".into(),
         ifindex: 10,
@@ -5731,18 +5739,15 @@ fn input_dscp_filter_families_changed_detects_three_color_shape_change() {
         ),
         "test setup must create a new runtime for the changed policer shape"
     );
-    assert_eq!(
-        input_dscp_filter_families_changed(&old, &new),
-        (true, false)
-    );
+    assert_changed_input_ifindexes(input_dscp_filter_ifindexes_changed(&old, &new), &[10], &[]);
 }
 
-// AC2 coverage for #1546: add/remove of a DSCP-sensitive interface filter
-// must invalidate the affected family. The same_ifindex/positional/three-color
-// tests above cover the other three AC2 scenarios; these two close the gap.
+// DSCP- and per-packet-L4-sensitive interface filter add/remove must report
+// only the affected ifindex. Same-ifindex and positional-ID tests cover
+// content, identity, and cached-runtime changes.
 
 #[test]
-fn input_dscp_filter_families_changed_detects_filter_added_to_interface() {
+fn input_dscp_filter_ifindexes_changed_detects_filter_added_to_interface() {
     let iface = crate::InterfaceSnapshot {
         name: "reth1.0".into(),
         ifindex: 10,
@@ -5770,17 +5775,14 @@ fn input_dscp_filter_families_changed_detects_filter_added_to_interface() {
         ..Default::default()
     };
     let old = make_filter_state_with_interfaces(&[], std::slice::from_ref(&bare_iface));
-    // `new` adds the DSCP-sensitive filter on the same interface — must trigger v4 family change.
+    // `new` adds the DSCP-sensitive filter on ifindex 10.
     let new = make_filter_state_with_interfaces(&[filter], &[iface]);
 
-    assert_eq!(
-        input_dscp_filter_families_changed(&old, &new),
-        (true, false)
-    );
+    assert_changed_input_ifindexes(input_dscp_filter_ifindexes_changed(&old, &new), &[10], &[]);
 }
 
 #[test]
-fn input_dscp_filter_families_changed_detects_filter_removed_from_interface() {
+fn input_dscp_filter_ifindexes_changed_detects_filter_removed_from_interface() {
     let iface = crate::InterfaceSnapshot {
         name: "reth1.0".into(),
         ifindex: 10,
@@ -5806,7 +5808,7 @@ fn input_dscp_filter_families_changed_detects_filter_removed_from_interface() {
         std::slice::from_ref(&filter),
         std::slice::from_ref(&iface),
     );
-    // `new` removes the filter binding — must trigger v4 family change.
+    // `new` removes the DSCP-sensitive filter from ifindex 10.
     let bare_iface = crate::InterfaceSnapshot {
         name: "reth1.0".into(),
         ifindex: 10,
@@ -5814,9 +5816,210 @@ fn input_dscp_filter_families_changed_detects_filter_removed_from_interface() {
     };
     let new = make_filter_state_with_interfaces(&[], &[bare_iface]);
 
-    assert_eq!(
-        input_dscp_filter_families_changed(&old, &new),
-        (true, false)
+    assert_changed_input_ifindexes(input_dscp_filter_ifindexes_changed(&old, &new), &[10], &[]);
+}
+
+#[test]
+fn input_dscp_filter_ifindexes_changed_ignores_counter_only_edit_16889() {
+    let iface = crate::InterfaceSnapshot {
+        name: "reth1.0".into(),
+        ifindex: 10,
+        filter_input_v4: "dscp-filter".into(),
+        ..Default::default()
+    };
+    let filter = |count: &str| FirewallFilterSnapshot {
+        name: "dscp-filter".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "dscp-term".into(),
+            dscp_values: vec![46],
+            action: "accept".into(),
+            count: count.into(),
+            ..Default::default()
+        }],
+    };
+    let old =
+        make_filter_state_with_interfaces(&[filter("counter-old")], std::slice::from_ref(&iface));
+    let new = make_filter_state_with_interfaces(&[filter("counter-new")], &[iface]);
+
+    assert_changed_input_ifindexes(input_dscp_filter_ifindexes_changed(&old, &new), &[], &[]);
+}
+
+#[test]
+fn input_dscp_filter_ifindexes_changed_ignores_per_packet_term_edit_16889() {
+    let iface = crate::InterfaceSnapshot {
+        name: "reth1.0".into(),
+        ifindex: 10,
+        filter_input_v4: "dscp-filter".into(),
+        ..Default::default()
+    };
+    let filter = |dscp| FirewallFilterSnapshot {
+        name: "dscp-filter".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "dscp-term".into(),
+            dscp_values: vec![dscp],
+            action: "accept".into(),
+            ..Default::default()
+        }],
+    };
+    let old = make_filter_state_with_interfaces(&[filter(0)], std::slice::from_ref(&iface));
+    let new = make_filter_state_with_interfaces(&[filter(46)], &[iface]);
+
+    assert_changed_input_ifindexes(input_dscp_filter_ifindexes_changed(&old, &new), &[], &[]);
+}
+
+#[test]
+fn input_dscp_filter_ifindexes_changed_detects_cached_effect_in_added_term_16889() {
+    let iface = crate::InterfaceSnapshot {
+        name: "reth1.0".into(),
+        ifindex: 10,
+        filter_input_v4: "dscp-filter".into(),
+        ..Default::default()
+    };
+    let term = |name: &str, dscp, forwarding_class: &str| FirewallTermSnapshot {
+        name: name.into(),
+        dscp_values: vec![dscp],
+        action: "accept".into(),
+        forwarding_class: forwarding_class.into(),
+        ..Default::default()
+    };
+    let filter = |terms| FirewallFilterSnapshot {
+        name: "dscp-filter".into(),
+        family: "inet".into(),
+        terms,
+    };
+    let old = make_filter_state_with_interfaces(
+        &[filter(vec![term("existing", 0, "best-effort")])],
+        std::slice::from_ref(&iface),
+    );
+    let new = make_filter_state_with_interfaces(
+        &[filter(vec![
+            term("existing", 0, "best-effort"),
+            term("added", 46, "expedited"),
+        ])],
+        &[iface],
+    );
+    assert!(
+        old.iface_filter_v4_fast[&10].affects_tx_selection
+            && new.iface_filter_v4_fast[&10].affects_tx_selection
+    );
+
+    assert_changed_input_ifindexes(input_dscp_filter_ifindexes_changed(&old, &new), &[10], &[]);
+}
+
+#[test]
+fn input_dscp_filter_ifindexes_changed_tracks_pbr_routing_instance_16889() {
+    let iface = crate::InterfaceSnapshot {
+        name: "reth1.0".into(),
+        ifindex: 10,
+        filter_input_v4: "dscp-filter".into(),
+        ..Default::default()
+    };
+    let filter = |routing_instance: &str| FirewallFilterSnapshot {
+        name: "dscp-filter".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "pbr-term".into(),
+            dscp_values: vec![46],
+            routing_instance: routing_instance.into(),
+            action: "accept".into(),
+            ..Default::default()
+        }],
+    };
+    let old = make_filter_state_with_interfaces(&[filter("blue")], std::slice::from_ref(&iface));
+    let new = make_filter_state_with_interfaces(&[filter("red")], &[iface]);
+
+    assert_changed_input_ifindexes(input_dscp_filter_ifindexes_changed(&old, &new), &[10], &[]);
+}
+
+#[test]
+fn input_dscp_filter_ifindexes_changed_scopes_to_changed_interface_16889() {
+    let changed_iface = crate::InterfaceSnapshot {
+        name: "reth1.0".into(),
+        ifindex: 10,
+        filter_input_v4: "changed-filter".into(),
+        ..Default::default()
+    };
+    let stable_iface = crate::InterfaceSnapshot {
+        name: "reth2.0".into(),
+        ifindex: 11,
+        filter_input_v4: "stable-filter".into(),
+        ..Default::default()
+    };
+    let filter = |name: &str, action: &str| FirewallFilterSnapshot {
+        name: name.into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "dscp-term".into(),
+            dscp_values: vec![46],
+            action: action.into(),
+            ..Default::default()
+        }],
+    };
+    let interfaces = [changed_iface, stable_iface];
+    let old = make_filter_state_with_interfaces(
+        &[
+            filter("changed-filter", "accept"),
+            filter("stable-filter", "accept"),
+        ],
+        &interfaces,
+    );
+    let new = make_filter_state_with_interfaces(
+        &[
+            filter("changed-filter", "discard"),
+            filter("stable-filter", "accept"),
+        ],
+        &interfaces,
+    );
+
+    assert_changed_input_ifindexes(input_dscp_filter_ifindexes_changed(&old, &new), &[10], &[]);
+}
+
+#[test]
+fn input_per_packet_l4_filter_ifindexes_changed_tracks_one_interface_16889() {
+    let changed_iface = crate::InterfaceSnapshot {
+        name: "reth1.0".into(),
+        ifindex: 10,
+        filter_input_v4: "changed-filter".into(),
+        ..Default::default()
+    };
+    let stable_iface = crate::InterfaceSnapshot {
+        name: "reth2.0".into(),
+        ifindex: 11,
+        filter_input_v4: "stable-filter".into(),
+        ..Default::default()
+    };
+    let filter = |name: &str, action: &str| FirewallFilterSnapshot {
+        name: name.into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "syn-term".into(),
+            tcp_flags: Some(0x02),
+            action: action.into(),
+            ..Default::default()
+        }],
+    };
+    let interfaces = [changed_iface, stable_iface];
+    let old = make_filter_state_with_interfaces(
+        &[
+            filter("changed-filter", "accept"),
+            filter("stable-filter", "accept"),
+        ],
+        &interfaces,
+    );
+    let new = make_filter_state_with_interfaces(
+        &[
+            filter("changed-filter", "discard"),
+            filter("stable-filter", "accept"),
+        ],
+        &interfaces,
+    );
+
+    assert_changed_input_ifindexes(
+        input_per_packet_l4_filter_ifindexes_changed(&old, &new),
+        &[10],
+        &[],
     );
 }
 
