@@ -1949,6 +1949,15 @@ type compileOpts struct {
 	// refuses the whole rendered file, and every pool of the family
 	// stops serving.
 	lenientDHCPServerIfaceRef bool
+	// lenientDHCPServerRelayOverlap (#16694) downgrades the DHCP
+	// server/relay same-device gate
+	// (validateDHCPServerRelayOverlapStrict) to a cfg.Warnings entry on
+	// the tolerant load / peer-sync paths, so a persisted config with
+	// the same resolved device in both a server group and a relay group
+	// still boots (#1960). The strict commit / commit-check path
+	// hard-rejects it: Kea and the relay bind the same UDP port on that
+	// device and whichever starts second serves nothing there.
+	lenientDHCPServerRelayOverlap bool
 	// lenientWireguardPeers (#1434 multi-peer) downgrades the WireGuard
 	// per-peer gate (validateWireguardPeersStrict) from a hard compile
 	// error to a cfg.Warnings entry. The strict commit / commit-check
@@ -3996,6 +4005,7 @@ func lenientCompileOpts() compileOpts {
 		lenientDHCPPoolValues:                    true,
 		lenientDHCPGroupInterfaces:               true,
 		lenientDHCPServerIfaceRef:                true,
+		lenientDHCPServerRelayOverlap:            true,
 		lenientWireguardPeers:                    true,
 		lenientTunnelOuterFamily:                 true,
 		lenientGreDuplicateOuter:                 true,

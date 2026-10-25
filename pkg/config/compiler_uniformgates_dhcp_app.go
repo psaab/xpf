@@ -104,6 +104,23 @@ func runUniformGatesDHCPApp(tree *ConfigTree, cfg *Config, opts compileOpts) err
 		}
 	}
 
+	// #16694 DHCP server/relay same-device gate. Strict on commit /
+	// commit-check: a resolved kernel device in both a dhcp-local-server
+	// group and a dhcp-relay group of the same family (v6: dhcpv6-local-
+	// server vs dhcp-relay dhcpv6) makes Kea and the relay bind the same
+	// UDP port on that device; whichever starts second fails to bind and
+	// the segment is served by only one configured service while both
+	// report healthy. The tolerant load / peer-sync paths warn so a
+	// persisted config still boots (#1960).
+	if err := validateDHCPServerRelayOverlapStrict(cfg); err != nil {
+		if opts.lenientDHCPServerRelayOverlap {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("DHCP server/relay interface overlap (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #2142 application-definition port/protocol fail-open gate. Strict on
 	// commit / commit-check (hard-reject a `set applications application` whose
 	// destination-port / source-port is malformed or whose protocol is unknown
