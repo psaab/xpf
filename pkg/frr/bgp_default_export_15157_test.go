@@ -104,10 +104,10 @@ func TestBGPNoExportNeighborGetsDefaultExport15157(t *testing.T) {
 
 	// Origination still happens (A's EXP originates static). #16868:
 	// the cross-chain merge keeps first-seen chain order, so the
-	// composed OR spelling is EXP-xpf-bnd-TAG-EXP2-xpf-or-xpf-chain-static-xpf-redist
+	// composed OR spelling is 3:EXP;3:TAG,4:EXP2-xpf-or-xpf-chain-static-xpf-redist
 	// (EXP's chain first, then B's [TAG EXP2] chain).
 	if !strings.Contains(got, " redistribute static route-map "+
-		"EXP-xpf-bnd-TAG-EXP2-xpf-or-xpf-chain-static-xpf-redist\n") {
+		"3:EXP;3:TAG,4:EXP2-xpf-or-xpf-chain-static-xpf-redist\n") {
 		t.Fatalf("control: #14586 origination missing:\n%s", got)
 	}
 	// C (no export) now attaches the Junos default export, both AFs.

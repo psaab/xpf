@@ -152,7 +152,7 @@ func TestBGPOriginationAcrossNeighborChainsSingleRedistribute15156(t *testing.T)
 	// fall-through — a deny-before-permit flattening would let one
 	// neighbour's guard veto the other's accept. BGP context:
 	// unsuffixed name (the -ospf suffix applies only to OSPF).
-	composed := "NO-RFC1918-xpf-bnd-STATICS-xpf-or" + ReservedChainSuffix + "-static" + config.ReservedRedistSuffix
+	composed := "10:NO-RFC1918;7:STATICS-xpf-or" + ReservedChainSuffix + "-static" + config.ReservedRedistSuffix
 	seqs := parseOrSeqs16868(t, got, composed)
 	if v := evalRoute16868(t, seqs, "192.168.50.0/24", false); v != "permit" {
 		t.Fatalf("OR map must permit a route NO-RFC1918 does not reject, got %q over %v\n%s", v, seqs, got)

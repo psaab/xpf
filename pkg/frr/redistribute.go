@@ -13,6 +13,8 @@
 package frr
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -725,7 +727,6 @@ func (m *Manager) renderRedistOrComposedMap16868(po *config.PolicyOptionsConfig,
 			seq     int
 			clauses []string
 			demote  bool
-			bare    bool
 		}
 		var seqs []outSeq
 		for _, sp := range kept {
@@ -746,13 +747,11 @@ func (m *Manager) renderRedistOrComposedMap16868(po *config.PolicyOptionsConfig,
 				}
 			}
 			demote := sp.verb == "deny" && (!last || hasMatch)
-			seqs = append(seqs, outSeq{verb: sp.verb, seq: sp.seq, clauses: clauses, demote: demote, bare: !hasMatch})
+			seqs = append(seqs, outSeq{verb: sp.verb, seq: sp.seq, clauses: clauses, demote: demote})
 		}
 		nextBase := chainBase + kept[len(kept)-1].seq + 10
 		for si, sq := range seqs {
 			newSeq := chainBase + sq.seq
-			isLastKept := si == len(seqs)-1
-			_ = isLastKept
 			if sq.demote {
 				if last {
 					finalDemoted = true
@@ -1430,13 +1429,46 @@ func redistOrChains16868(bgp *config.BGPConfig, po *config.PolicyOptionsConfig, 
 
 // redistOrRouteMapName16868 names the cross-chain OR map for proto
 // from its producing chains.
+// redistOrStructuralName16868 encodes the full grouping
+// unambiguously: every policy member is length-prefixed
+// (<len>:<raw>), members join with ",", chains join with ";", so
+// no two distinct groupings (hyphens inside names included) can
+// ever flatten to the same name. This is the structural identity
+// also used for collision keys.
+func redistOrStructuralName16868(chains [][]string) string {
+	var cb strings.Builder
+	for ci, chain := range chains {
+		if ci > 0 {
+			cb.WriteString(";")
+		}
+		for mi, name := range chain {
+			if mi > 0 {
+				cb.WriteString(",")
+			}
+			fmt.Fprintf(&cb, "%d:%s", len(name), name)
+		}
+	}
+	return cb.String()
+}
+
+// redistOrRouteMapName16868 names the cross-chain OR map. Readable
+// form when it fits under the 96-byte generated-name bound; over
+// budget it falls back to a bounded hash form over the structural
+// identity (same 64-bit digest discipline as inlinePrefixListName),
+// so the route-map name token itself can never exceed FRR's
+// 128-byte limit however long the policy names are.
 func redistOrRouteMapName16868(bgp *config.BGPConfig, po *config.PolicyOptionsConfig, self, node, proto string) string {
 	chains := redistOrChains16868(bgp, po, self, node, proto)
-	var parts []string
-	for _, chain := range chains {
-		parts = append(parts, strings.Join(chain, "-"))
+	structural := redistOrStructuralName16868(chains)
+	suffix := "-xpf-or" + ReservedChainSuffix + "-" + normalizedRedistProtocol(proto) + config.ReservedRedistSuffix
+	readable := structural + suffix
+	if len(readable) <= 96 {
+		return readable
 	}
-	return strings.Join(parts, "-xpf-bnd-") + "-xpf-or" + ReservedChainSuffix + "-" + normalizedRedistProtocol(proto) + config.ReservedRedistSuffix
+	sum := sha256.Sum256([]byte(structural))
+	var digest [16]byte
+	hex.Encode(digest[:], sum[:8])
+	return "xpf-or-" + string(digest[:]) + suffix
 }
 
 func (m *Manager) bgpPolicyRedistEntriesAt14586(policies []string, po *config.PolicyOptionsConfig, self, node string) []redistEntry {

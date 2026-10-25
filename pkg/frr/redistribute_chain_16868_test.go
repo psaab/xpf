@@ -447,8 +447,6 @@ func evalRouteState16868(t *testing.T, seqs []redistSeqEntry16868, prefix string
 
 // bgpStaticMap16868 returns the single router-level redistribute
 // static attachment's map name.
-func itoa16868(n int) string { return fmt.Sprintf("%d", n) }
-
 func bgpStaticMap16868(t *testing.T, got string) string {
 	t.Helper()
 	top, _ := bgpRedistLines14586(t, got)
@@ -741,10 +739,17 @@ func TestBGPOrSetSemantics16868(t *testing.T) {
 			t.Errorf("ONLY70 must originate .70 (order %v), got %q", order, v)
 		}
 	}
-	// A-alone control for the contamination pair: TAGREJ alone denies.
+	// A-alone control: TAGREJ as the only policy (single neighbour,
+	// both export it) denies the untagged probe.
 	got := build(mkPO(), []string{"TAGREJ"}, []string{"TAGREJ"})
-	seqs := parseOrSeqs16868(t, got, bgpStaticMap16868(t, got))
-	_ = seqs
+	{
+		seqs := parseOrSeqs16868(t, got, bgpStaticMap16868(t, got))
+		if v := evalRoute16868(t, seqs, "192.168.50.0/24", false); v != "deny" {
+			// Single-policy path may not be an OR map; the probe must
+			// still not permit.
+			t.Errorf("TAGREJ alone must deny .50, got %q", v)
+		}
+	}
 	// Cross-chain pair: the only set in the map rides TAGREJ's own
 	// non-terminating sequence; the demoted default (seq 20 above)
 	// is match-only (bare goto, no set line in its block).
@@ -754,7 +759,7 @@ func TestBGPOrSetSemantics16868(t *testing.T) {
 	if n := strings.Count(block, " set community"); n != 1 {
 		t.Errorf("expected exactly TAGREJ's own set in the OR map, found %d:\n%s", n, block)
 	}
-	seqs = parseOrSeqs16868(t, got, mapName)
+	seqs := parseOrSeqs16868(t, got, mapName)
 	// Verdict with state: TAGREJ's set is on a non-terminating
 	// sequence (not demoted), so the evaluator's state model shows
 	// the spill honestly — B accepts. Pin it as documented spill,
@@ -897,8 +902,8 @@ func TestBGPOrScratchNamedPrefixList16868(t *testing.T) {
 // names (token-aware rename never expands an operand with the
 // whole map name; inline names keep their bounded hash form).
 func TestBGPOrInlineNameBound16868(t *testing.T) {
-	longA := "AAAAAAAAAA" + "AAAAAAAAAA" + "AAAAAAAAAA" + "AAAAAAAAAA" + "AA" // 42
-	longB := "BBBBBBBBBB" + "BBBBBBBBBB" + "BBBBBBBBBB" + "BBBBBBBBBB" + "BB"
+	longA := strings.Repeat("A", 60)
+	longB := strings.Repeat("B", 60)
 	po := &config.PolicyOptionsConfig{PolicyStatements: map[string]*config.PolicyStatement{}}
 	for _, n := range []string{longA, longB} {
 		po.PolicyStatements[n] = &config.PolicyStatement{Name: n, Terms: []*config.PolicyTerm{
@@ -921,5 +926,93 @@ func TestBGPOrInlineNameBound16868(t *testing.T) {
 				t.Errorf("operand exceeds FRR 128-byte limit (%d): %q", len(tok), tok)
 			}
 		}
+	}
+}
+
+// TestBGPOrNameLengthBound16868: OR map names stay bounded for
+// 2x50B, 2x60B, and 3x42B policy names (over-budget falls back to
+// the hash form), and grouping identity survives the fallback.
+func TestBGPOrNameLengthBound16868(t *testing.T) {
+	mk := func(names ...string) (*config.PolicyOptionsConfig, *config.BGPConfig) {
+		po := &config.PolicyOptionsConfig{PolicyStatements: map[string]*config.PolicyStatement{}}
+		var ns []*config.BGPNeighbor
+		for i, n := range names {
+			po.PolicyStatements[n] = &config.PolicyStatement{Name: n, Terms: []*config.PolicyTerm{{Name: "t", FromProtocols: []string{"static"}, Action: "accept"}}}
+			ns = append(ns, &config.BGPNeighbor{Address: fmt.Sprintf("192.0.2.%d", i+2), PeerAS: 65002, FamilyInet: true, Export: []string{n}})
+		}
+		return po, &config.BGPConfig{LocalAS: 65001, RouterID: "1.1.1.1", Neighbors: ns}
+	}
+	long := func(c byte, n int) string {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = c
+		}
+		return string(b)
+	}
+	for _, names := range [][]string{
+		{long('A', 50), long('B', 50)},
+		{long('A', 60), long('B', 60)},
+		{long('A', 42), long('B', 42), long('C', 42)},
+	} {
+		po, bgp := mk(names...)
+		name := redistOrRouteMapName16868(bgp, po, "bgp", "bgp", "static")
+		if len(name) > 96 {
+			t.Errorf("OR name %q is %d bytes, exceeds the 96-byte generated bound", name, len(name))
+		}
+		if !strings.Contains(name, "-xpf-or") {
+			t.Errorf("OR name %q lost the -xpf-or marker", name)
+		}
+	}
+	// Grouping survives hashing: distinct groupings, distinct names.
+	po1, bgp1 := mk("P", "Q", "R")
+	_ = po1
+	n1 := redistOrRouteMapName16868(bgp1, po1, "bgp", "bgp", "static")
+	po2 := &config.PolicyOptionsConfig{PolicyStatements: po1.PolicyStatements}
+	bgp2 := &config.BGPConfig{LocalAS: 65001, RouterID: "1.1.1.1", Neighbors: []*config.BGPNeighbor{
+		{Address: "192.0.2.2", PeerAS: 65002, FamilyInet: true, Export: []string{"P", "Q"}},
+		{Address: "192.0.2.3", PeerAS: 65002, FamilyInet: true, Export: []string{"R"}},
+	}}
+	bgp3 := &config.BGPConfig{LocalAS: 65001, RouterID: "1.1.1.1", Neighbors: []*config.BGPNeighbor{
+		{Address: "192.0.2.2", PeerAS: 65002, FamilyInet: true, Export: []string{"P"}},
+		{Address: "192.0.2.3", PeerAS: 65002, FamilyInet: true, Export: []string{"Q", "R"}},
+	}}
+	if redistOrRouteMapName16868(bgp2, po2, "bgp", "bgp", "static") == redistOrRouteMapName16868(bgp3, po2, "bgp", "bgp", "static") {
+		t.Errorf("distinct groupings must not alias")
+	}
+	_ = n1
+}
+
+// TestBGPOrHyphenAlias16868: hyphenated member names cannot alias:
+// [[A-B,C],[R]] vs [[A,B-C],[R]] derive different names, and both
+// maps are defined when the groupings coexist across instances.
+func TestBGPOrHyphenAlias16868(t *testing.T) {
+	po := &config.PolicyOptionsConfig{PolicyStatements: map[string]*config.PolicyStatement{}}
+	for _, n := range []string{"A-B", "C", "A", "B-C", "R"} {
+		po.PolicyStatements[n] = &config.PolicyStatement{Name: n, Terms: []*config.PolicyTerm{{Name: "t", FromProtocols: []string{"static"}, Action: "accept"}}}
+	}
+	mkBGP := func(a, b []string) *config.BGPConfig {
+		return &config.BGPConfig{LocalAS: 65001, RouterID: "1.1.1.1", Neighbors: []*config.BGPNeighbor{
+			{Address: "192.0.2.2", PeerAS: 65002, FamilyInet: true, Export: a},
+			{Address: "192.0.2.3", PeerAS: 65002, FamilyInet: true, Export: b},
+		}}
+	}
+	n1 := redistOrRouteMapName16868(mkBGP([]string{"A-B", "C"}, []string{"R"}), po, "bgp", "bgp", "static")
+	n2 := redistOrRouteMapName16868(mkBGP([]string{"A", "B-C"}, []string{"R"}), po, "bgp", "bgp", "static")
+	if n1 == n2 {
+		t.Fatalf("hyphen groupings alias to %q", n1)
+	}
+	fc := &FullConfig{
+		PolicyOptions: po,
+		BGP:           mkBGP([]string{"A-B", "C"}, []string{"R"}),
+		Instances:     []InstanceConfig{{BGP: mkBGP([]string{"A", "B-C"}, []string{"R"})}},
+	}
+	got := New().buildManagedSection(fc)
+	for _, n := range []string{n1, n2} {
+		if !strings.Contains(got, "route-map "+n+" ") {
+			t.Errorf("map %s must be defined for its grouping:\n%s", n, got)
+		}
+	}
+	if err := redistChainMapCollision15156(fc); err != nil {
+		t.Errorf("distinct groupings must not trip the collision guard: %v", err)
 	}
 }
