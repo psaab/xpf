@@ -87,9 +87,11 @@ func realLocalAddrs() ([]net.Addr, error) { return net.InterfaceAddrs() }
 var staleSourceGrace = 2 * time.Minute
 
 // addrIsAssigned reports whether the IP literal ip (from a dialed socket's
-// LocalAddr) is still among the host's assigned addresses. A bare IP with no
-// CIDR matches an assigned address whose IP equals it or whose prefix
-// contains it.
+// LocalAddr) is still among the host's assigned addresses. Only an exact
+// address equality counts: the real net.InterfaceAddrs view carries
+// on-link masks (e.g. 192.0.2.2/24), so prefix containment would call a
+// same-subnet renumber (192.0.2.1 -> 192.0.2.2) still assigned and park
+// export on the dead socket (#16757). The mask is ignored.
 func addrIsAssigned(ip string) bool {
 	addrsFn := localAddrsFn
 	if addrsFn == nil {
@@ -103,20 +105,19 @@ func addrIsAssigned(ip string) bool {
 	if err != nil {
 		return true
 	}
+	// Unmap so a 4-in-6 LocalAddr compares equal to a v4 assigned address.
+	needle = needle.Unmap()
 	for _, a := range addrs {
 		switch v := a.(type) {
 		case *net.IPNet:
 			if v.IP != nil {
-				if addr, ok := netipxFromIP(v.IP); ok && (addr == needle || netip.PrefixFrom(addr, addr.BitLen()).Contains(needle)) {
-					return true
-				}
-				if pfx, err := netip.ParsePrefix(v.String()); err == nil && pfx.Contains(needle) {
+				if addr, ok := netipxFromIP(v.IP); ok && addr.Unmap() == needle {
 					return true
 				}
 			}
 		case *net.IPAddr:
 			if v.IP != nil {
-				if addr, ok := netipxFromIP(v.IP); ok && addr == needle {
+				if addr, ok := netipxFromIP(v.IP); ok && addr.Unmap() == needle {
 					return true
 				}
 			}
