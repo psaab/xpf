@@ -1,4 +1,11 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Cluster/session-sync: the #15176 NAT-scope fold now carries the
+    tagged RETH unit (#16826). It folded the logical child's ifindex
+    with vlan 0, truncating `reth0.80` to `reth0`, and the receiver
+    kept only the parent ifindex — so HA-imported sessions on a tagged
+    RETH unit were revalidated against the parent's interface/RI scope
+    and revoked on their first hit after failover. The scope now folds
+    as (parent, VLAN) and imports as the logical unit ifindex.
 
   * Config/dynamic-address: the #15685 dynamic-address/static
     name-collision commit gate now also walks named address books

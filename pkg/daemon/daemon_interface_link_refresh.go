@@ -184,6 +184,7 @@ func (d *Daemon) refreshIngressFoldClosures(cfg *config.Config, resolver func(*c
 	if ss := d.getSessionSync(); ss != nil {
 		ss.SetZoneOwnership(buildZoneRGMap(cfg, buildZoneIDs(cfg)),
 			buildZoneFoldRGMap(cfg), foldFn(cfg))
+		ss.SetNatScopeFoldFn(buildNatScopeFoldFn(cfg))
 	}
 }
 

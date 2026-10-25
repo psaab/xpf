@@ -31,6 +31,7 @@ func (d *Daemon) installActiveSessionSyncZoneOwnership(ss *cluster.SessionSync) 
 		return
 	}
 	ss.SetZoneOwnership(buildZoneRGMap(cfg, buildZoneIDs(cfg)), buildZoneFoldRGMap(cfg), buildIngressFoldFn(cfg))
+	ss.SetNatScopeFoldFn(buildNatScopeFoldFn(cfg))
 }
 
 // seedActiveSessionSyncZoneOwnership initializes a constructor-local object
@@ -52,6 +53,7 @@ func (d *Daemon) seedActiveSessionSyncZoneOwnership(ss *cluster.SessionSync) {
 		return
 	}
 	ss.SetZoneOwnership(zoneRG, foldRG, ingressFold)
+	ss.SetNatScopeFoldFn(buildNatScopeFoldFn(cfg))
 }
 
 // activeAppliedZoneOwnershipSnapshot captures only a stable active snapshot

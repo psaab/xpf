@@ -302,9 +302,16 @@ func (m *Manager) fillSessionSyncValue(view *sessionSyncView, req *SessionSyncRe
 		req.IngressIfindex = int(ifindex)
 		req.IngressVLANID = vlan
 	}
-	// #15176: resolve the NAT-scope fold to this node's logical unit.
-	if ifindex, _, ok := m.resolveIngressFoldLocked(view.natScopeFold()); ok {
-		req.NatScopeIfindex = int32(ifindex)
+	// #15176/#16826: resolve the NAT-scope fold to this node's logical
+	// unit. The fold names (parent physical, VLAN); the recorded scope
+	// must be the LOGICAL ifindex — the snapshot row for that pair — not
+	// the parent the resolver returns, or the helper revalidates against
+	// the parent's interface/RI scope and revokes. A pair with no logical
+	// row leaves the scope unset (the #15176 no-scope keep).
+	if ifindex, vlan, ok := m.resolveIngressFoldLocked(view.natScopeFold()); ok {
+		if logical, found := m.logicalIfindexForParentVLANLocked(ifindex, vlan); found {
+			req.NatScopeIfindex = int32(logical)
+		}
 	}
 	// #7239 (#7160/#2387): hand the helper the domain the SENDER stamped at
 	// install, so it does not have to re-derive one from the fold resolved
@@ -621,6 +628,40 @@ func findUserspaceEgressInterfaceSnapshot(snapshot *ConfigSnapshot, fibIfindex i
 		}
 	}
 	return InterfaceSnapshot{}, false
+}
+
+// logicalIfindexForParentVLANLocked maps a resolved (parent physical
+// ifindex, VLAN) pair to this node's LOGICAL unit ifindex through the
+// current snapshot (#16826) — the Go mirror of the helper's
+// `ingress_logical_ifindex[(parent, vlan)]`. With vlan 0 the parent
+// itself is the logical unit when a row names it, else the unit-0 child
+// collapsed onto it. No row for the pair means the scope cannot be named
+// locally: the caller leaves NatScopeIfindex unset. Caller holds m.mu
+// (the fill path's contract, as resolveIngressFoldLocked).
+func (m *Manager) logicalIfindexForParentVLANLocked(parent uint32, vlan uint16) (int, bool) {
+	snap := m.lastSnapshot
+	if snap == nil || parent == 0 {
+		return 0, false
+	}
+	if vlan != 0 {
+		for _, iface := range snap.Interfaces {
+			if iface.ParentIfindex == int(parent) && iface.VLANID == int(vlan) && iface.Ifindex > 0 {
+				return iface.Ifindex, true
+			}
+		}
+		return 0, false
+	}
+	for _, iface := range snap.Interfaces {
+		if iface.Ifindex == int(parent) {
+			return iface.Ifindex, true
+		}
+	}
+	for _, iface := range snap.Interfaces {
+		if iface.ParentIfindex == int(parent) && iface.Ifindex > 0 {
+			return iface.Ifindex, true
+		}
+	}
+	return 0, false
 }
 
 // resolveIngressFoldLocked maps a peer's #7095 cluster-stable ingress fold to this
