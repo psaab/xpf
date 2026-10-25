@@ -244,3 +244,118 @@ func TestDeferredRemovedPolicyNoReplay15945(t *testing.T) {
 		t.Fatalf("PendingDeferred=%d after drain, want 0", got)
 	}
 }
+
+// #16848 recorded-verdict drain: an edge carrying a recorded NON-crossing
+// verdict (matched=false, hasMatched=true) must NOT replay — even when the
+// live window at drain time WOULD match. This guards the drain against
+// falling back to the live-window re-check for real parked edges: had the
+// drain called withinMatches here, count=3 >= TriggerOn=3 would replay and
+// commits would reach 2.
+func TestDeferredRecordedVerdictFalseNoReplay16848(t *testing.T) {
+	pol := &config.EventPolicy{
+		Name:          "p",
+		Events:        []string{"ping_test_failed"},
+		WithinClauses: []*config.EventWithin{{Seconds: 300, TriggerOn: 3}},
+		ThenCommands:  []string{"set system host-name recovered"},
+	}
+	e, cur := setupCooldown15945(t, pol)
+
+	// Cross and fire once so the cooldown anchor is armed.
+	for i := int64(0); i < 3; i++ {
+		cur.set(i)
+		e.HandleEvent(eventFor("ping_test_failed"))
+	}
+	waitCommitted15945(t, e, 1)
+	waitCooldownArmed15945(t, e)
+
+	// Park a recorded-false edge (same live revision). The window already
+	// holds 3 in-window timestamps, so a live re-check would return true.
+	e.mu.Lock()
+	rev := e.semRev["p"]
+	e.mu.Unlock()
+	e.pendingMu.Lock()
+	e.pending.cooldown["p\x00ping_test_failed"] = deferredEdge{
+		action:     plannedAction{policyName: "p", semRev: rev, event: "ping_test_failed"},
+		evName:     "ping_test_failed",
+		triggers:   true,
+		matched:    false,
+		hasMatched: true,
+	}
+	e.pendingMu.Unlock()
+	e.counters.pendingDeferred.Add(1)
+
+	cur.set(40)
+	e.drainDeferred()
+	time.Sleep(200 * time.Millisecond)
+	if got := e.Stats().Committed; got != 1 {
+		t.Fatalf("recorded-false edge replayed: commits=%d, want 1 (drain must honour the parked verdict, not re-check the live window)", got)
+	}
+	if got := e.Stats().PendingDeferred; got != 0 {
+		t.Fatalf("PendingDeferred=%d after drain, want 0", got)
+	}
+}
+
+// #16848 flap probe (R3-F16-01): a genuine `trigger on 1` crossing with a
+// 10 s window (< 30 s cooldown) parked early in the cooldown must still
+// replay at drain even though its window has fully decayed by then.
+// fail (P commits) -> succeed (Q commits "link-up") -> re-fail inside P's
+// cooldown parks P's crossing -> drain at t=31 must commit P, ending in
+// "link-down-remediated". Pre-fix the drain re-checked the decayed window
+// (count 0 < 1) and silently discarded the re-failure. The t=25 arm is the
+// control: the parked event is still inside its 10 s window at the t=30+
+// drain, so it replays both pre- and post-fix.
+func TestDeferredTriggerOnShortWindowFlapReplays16848(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		at   int64
+	}{
+		{name: "re-fail early in cooldown (window decays)", at: 15},
+		{name: "control re-fail late in cooldown (window live)", at: 25},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newStore(t)
+			base := time.Unix(1_800_000_000, 0)
+			clk := &clock15945{}
+			e := New(s, nil)
+			t.Cleanup(func() { e.Close() })
+			e.nowFn = func() time.Time { return clk.now(base) }
+			pPol := &config.EventPolicy{
+				Name:          "p",
+				Events:        []string{"ping_test_failed"},
+				WithinClauses: []*config.EventWithin{{Seconds: 10, TriggerOn: 1}},
+				ThenCommands:  []string{"set system host-name link-down-remediated"},
+			}
+			qPol := &config.EventPolicy{
+				Name:         "q",
+				Events:       []string{"ping_test_succeeded"},
+				ThenCommands: []string{"set system host-name link-up"},
+			}
+			applyPolicies9984(e, []*config.EventPolicy{pPol, qPol})
+
+			clk.set(0)
+			e.HandleEvent(eventFor("ping_test_failed")) // P commits
+			waitFor(t, "P first commit", func() bool { return e.Stats().Committed >= 1 })
+			waitFor(t, "P cooldown armed", func() bool {
+				e.mu.Lock()
+				defer e.mu.Unlock()
+				rt := e.runtime["p"]
+				return rt != nil && !rt.lastTrigger().IsZero()
+			})
+			clk.set(5)
+			e.HandleEvent(eventFor("ping_test_succeeded")) // Q commits "link-up"
+			waitFor(t, "Q commit", func() bool { return e.Stats().Committed >= 2 })
+
+			clk.set(tc.at)
+			e.HandleEvent(eventFor("ping_test_failed")) // genuine re-fail crossing, parks
+			if got := e.Stats().PendingDeferred; got == 0 {
+				t.Fatalf("genuine re-fail was not parked: %+v", e.Stats())
+			}
+			clk.set(31)
+			e.drainDeferred()
+			waitFor(t, "P replay commit", func() bool { return e.Stats().Committed >= 3 })
+			if got := s.ActiveConfig().System.HostName; got != "link-down-remediated" {
+				t.Fatalf("host-name=%q, want %q (re-fail remediation must replay after cooldown)", got, "link-down-remediated")
+			}
+		})
+	}
+}
