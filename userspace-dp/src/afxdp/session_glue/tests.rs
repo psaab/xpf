@@ -311,10 +311,12 @@ fn lo0_republish_false_gate_avoids_full_table_scan_in_release() {
 }
 
 #[test]
-fn purge_sessions_for_input_dscp_filter_revalidation_removes_family() {
+fn purge_sessions_for_changed_filter_falls_back_for_unknown_ingress_16889() {
     let forwarding = ForwardingState::default();
     let mut sessions = SessionTable::new();
-    let v4_key = test_key();
+    let unknown_vlan_key = test_key();
+    let mut no_ingress_key = test_key();
+    no_ingress_key.src_port = 55069;
     let v6_key = SessionKey {
         addr_family: libc::AF_INET6 as u8,
         protocol: PROTO_TCP,
@@ -325,11 +327,23 @@ fn purge_sessions_for_input_dscp_filter_revalidation_removes_family() {
         discriminator: Default::default(),
         routing_domain: 0,
     };
+    let mut unknown_vlan_metadata = test_metadata();
+    unknown_vlan_metadata.ingress_ifindex = 10;
+    unknown_vlan_metadata.ingress_vlan_id = 80;
     assert!(sessions.install_with_protocol_with_origin(
-        v4_key.clone(),
+        unknown_vlan_key.clone(),
+        test_decision(),
+        unknown_vlan_metadata,
+        SessionOrigin::SyncImport,
+        1,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    assert!(sessions.install_with_protocol_with_origin(
+        no_ingress_key.clone(),
         test_decision(),
         test_metadata(),
-        SessionOrigin::ForwardFlow,
+        SessionOrigin::SyncImport,
         1,
         PROTO_TCP,
         TCP_FLAG_ACK,
@@ -350,8 +364,232 @@ fn purge_sessions_for_input_dscp_filter_revalidation_removes_family() {
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
 
+    let changed_v4 = [20].into_iter().collect();
+    let changed_v6 = rustc_hash::FxHashSet::default();
     assert_eq!(
-        purge_sessions_for_input_dscp_filter_revalidation(
+        purge_sessions_for_changed_input_filter_cached_semantics(
+            &mut sessions,
+            SteeringMap::unshared_for_test(-1),
+            SharedSessionRefs {
+                sessions: &shared_sessions,
+                nat_sessions: &shared_nat_sessions,
+                forward_wire_sessions: &shared_forward_wire_sessions,
+                owner_rg_indexes: &shared_owner_rg_indexes,
+                peer_worker_commands: &peer_worker_commands,
+                worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
+                conntrack: ConntrackFds {
+                    v4: -1,
+                    v6: -1,
+                },
+                tick: Tick {
+                    ns: 2,
+                    secs: 0,
+                },
+            },
+            &forwarding,
+            &forwarding,
+            &changed_v4,
+            &changed_v6,
+            0,
+        ),
+        2
+    );
+    assert!(sessions.entry_with_origin(&unknown_vlan_key).is_none());
+    assert!(sessions.entry_with_origin(&no_ingress_key).is_none());
+    assert!(sessions.entry_with_origin(&v6_key).is_some());
+    let deltas = sessions.drain_deltas(16);
+    assert_eq!(deltas.len(), 2);
+    assert_eq!(deltas[0].kind, SessionDeltaKind::Close);
+    assert!(deltas.iter().all(|delta| delta.kind == SessionDeltaKind::Close));
+    assert!(deltas.iter().any(|delta| delta.key == unknown_vlan_key));
+    assert!(deltas.iter().any(|delta| delta.key == no_ingress_key));
+}
+
+#[test]
+fn purge_sessions_for_input_filter_rotation_keeps_unchanged_ingress_16889() {
+    let forwarding = ForwardingState::default();
+    let mut sessions = SessionTable::new();
+    let changed_key = test_key();
+    let mut unchanged_key = test_key();
+    unchanged_key.src_port = 55069;
+    let mut changed_metadata = test_metadata();
+    changed_metadata.ingress_ifindex = 10;
+    let mut unchanged_metadata = test_metadata();
+    unchanged_metadata.ingress_ifindex = 11;
+    let unchanged_reverse_key =
+        crate::session::reverse_session_key(&unchanged_key, test_decision().nat);
+
+    assert!(sessions.install_with_protocol_with_origin(
+        changed_key.clone(),
+        test_decision(),
+        changed_metadata,
+        SessionOrigin::ForwardFlow,
+        1,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    assert!(sessions.install_with_protocol_with_origin(
+        unchanged_key.clone(),
+        test_decision(),
+        unchanged_metadata,
+        SessionOrigin::ForwardFlow,
+        1,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let mut unchanged_reverse_metadata = test_metadata();
+    unchanged_reverse_metadata.ingress_ifindex = 0;
+    unchanged_reverse_metadata.is_reverse = true;
+    assert!(sessions.install_with_protocol_with_origin(
+        unchanged_reverse_key.clone(),
+        test_decision(),
+        unchanged_reverse_metadata,
+        SessionOrigin::ForwardFlow,
+        1,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let _ = sessions.drain_deltas(16);
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+
+    let changed_iface = crate::InterfaceSnapshot {
+        name: "reth1.0".into(),
+        ifindex: 10,
+        filter_input_v4: "changed-filter".into(),
+        ..Default::default()
+    };
+    let unchanged_iface = crate::InterfaceSnapshot {
+        name: "reth2.0".into(),
+        ifindex: 11,
+        filter_input_v4: "unchanged-filter".into(),
+        ..Default::default()
+    };
+    let filter = |name: &str, action: &str| crate::FirewallFilterSnapshot {
+        name: name.into(),
+        family: "inet".into(),
+        terms: vec![crate::FirewallTermSnapshot {
+            name: "dscp-term".into(),
+            dscp_values: vec![46],
+            action: action.into(),
+            ..Default::default()
+        }],
+    };
+    let interfaces = [changed_iface, unchanged_iface];
+    let old_filter_state = crate::filter::parse_filter_state(
+        &[
+            filter("changed-filter", "accept"),
+            filter("unchanged-filter", "accept"),
+        ],
+        &[],
+        &interfaces,
+        "",
+        "",
+    )
+    .expect("old filter state compiles");
+    let new_filter_state = crate::filter::parse_filter_state(
+        &[
+            filter("changed-filter", "discard"),
+            filter("unchanged-filter", "accept"),
+        ],
+        &[],
+        &interfaces,
+        "",
+        "",
+    )
+    .expect("new filter state compiles");
+    let (changed_v4, changed_v6) =
+        crate::filter::input_dscp_filter_ifindexes_changed(&old_filter_state, &new_filter_state);
+    assert!(changed_v4.contains(&10));
+    assert!(!changed_v4.contains(&11));
+    assert!(changed_v6.is_empty());
+
+    assert_eq!(
+        purge_sessions_for_changed_input_filter_cached_semantics(
+            &mut sessions,
+            SteeringMap::unshared_for_test(-1),
+            SharedSessionRefs {
+                sessions: &shared_sessions,
+                nat_sessions: &shared_nat_sessions,
+                forward_wire_sessions: &shared_forward_wire_sessions,
+                owner_rg_indexes: &shared_owner_rg_indexes,
+                peer_worker_commands: &peer_worker_commands,
+                worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
+                conntrack: ConntrackFds {
+                    v4: -1,
+                    v6: -1,
+                },
+                tick: Tick {
+                    ns: 2,
+                    secs: 0,
+                },
+            },
+            &forwarding,
+            &forwarding,
+            &changed_v4,
+            &changed_v6,
+            0,
+        ),
+        1,
+        "rotating one input filter must purge only sessions matched to it (#16889)"
+    );
+    assert!(sessions.entry_with_origin(&changed_key).is_none());
+    assert!(
+        sessions.entry_with_origin(&unchanged_key).is_some(),
+        "an unchanged sibling input filter must keep its same-family session (#16889)"
+    );
+    assert!(
+        sessions.entry_with_origin(&unchanged_reverse_key).is_some(),
+        "a reverse companion with no ingress metadata must not trigger family-wide purge (#16889)"
+    );
+}
+
+#[test]
+fn purge_sessions_for_changed_input_filter_resolves_vlan_unit_16889() {
+    let mut old_forwarding = ForwardingState::default();
+    old_forwarding.ingress_logical_ifindex.insert((10, 80), 20);
+    let mut forwarding = ForwardingState::default();
+    forwarding.ingress_logical_ifindex.insert((10, 80), 21);
+    let mut sessions = SessionTable::new();
+    let changed_key = test_key();
+    let mut unchanged_key = test_key();
+    unchanged_key.src_port = 55070;
+    let mut changed_metadata = test_metadata();
+    changed_metadata.ingress_ifindex = 10;
+    changed_metadata.ingress_vlan_id = 80;
+    let mut unchanged_metadata = test_metadata();
+    unchanged_metadata.ingress_ifindex = 10;
+    assert!(sessions.install_with_protocol_with_origin(
+        changed_key.clone(),
+        test_decision(),
+        changed_metadata,
+        SessionOrigin::ForwardFlow,
+        1,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    assert!(sessions.install_with_protocol_with_origin(
+        unchanged_key.clone(),
+        test_decision(),
+        unchanged_metadata,
+        SessionOrigin::ForwardFlow,
+        1,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let _ = sessions.drain_deltas(16);
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+    let changed_v4 = [20].into_iter().collect();
+
+    assert_eq!(
+        purge_sessions_for_changed_input_filter_cached_semantics(
             &mut sessions,
             SteeringMap::unshared_for_test(-1),
             SharedSessionRefs {
@@ -364,20 +602,150 @@ fn purge_sessions_for_input_dscp_filter_revalidation_removes_family() {
                 conntrack: ConntrackFds { v4: -1, v6: -1 },
                 tick: Tick { ns: 2, secs: 0 },
             },
+            &old_forwarding,
             &forwarding,
-            true,
-            false,
+            &changed_v4,
+            &rustc_hash::FxHashSet::default(),
             0,
         ),
         1
     );
+    assert!(sessions.entry_with_origin(&changed_key).is_none());
+    assert!(
+        sessions.entry_with_origin(&unchanged_key).is_some(),
+        "untagged sibling unit on the same parent must survive"
+    );
+}
 
-    assert!(sessions.entry_with_origin(&v4_key).is_none());
-    assert!(sessions.entry_with_origin(&v6_key).is_some());
-    let deltas = sessions.drain_deltas(16);
-    assert_eq!(deltas.len(), 1);
-    assert_eq!(deltas[0].kind, SessionDeltaKind::Close);
-    assert_eq!(deltas[0].key, v4_key);
+#[test]
+fn purge_sessions_for_changed_input_filter_keeps_configured_vlan_child_16889() {
+    let mut old_forwarding = ForwardingState::default();
+    // XDP can deliver directly on configured VLAN child 13 (VID 50). The
+    // parent-keyed ingress map has no (13, 50) row; the child metadata itself
+    // preserves the session's logical ifindex.
+    old_forwarding
+        .ingress_logical_ifindex
+        .insert((10, 50), 10);
+    old_forwarding.egress.insert(
+        13,
+        crate::afxdp::EgressInterface {
+            bind_ifindex: 10,
+            vlan_id: 50,
+            mtu: 1500,
+            src_mac: [0; 6],
+            zone_id: 0,
+            redundancy_group: 0,
+            primary_v4: None,
+            primary_v6: None,
+        },
+    );
+    let forwarding = ForwardingState::default();
+    let mut sessions = SessionTable::new();
+    let child_key = test_key();
+    let mut child_metadata = test_metadata();
+    child_metadata.ingress_ifindex = 13;
+    child_metadata.ingress_vlan_id = 50;
+    assert!(sessions.install_with_protocol_with_origin(
+        child_key.clone(),
+        test_decision(),
+        child_metadata,
+        SessionOrigin::ForwardFlow,
+        1,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let _ = sessions.drain_deltas(16);
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+    let refs = || SharedSessionRefs {
+        sessions: &shared_sessions,
+        nat_sessions: &shared_nat_sessions,
+        forward_wire_sessions: &shared_forward_wire_sessions,
+        owner_rg_indexes: &shared_owner_rg_indexes,
+        peer_worker_commands: &peer_worker_commands,
+        worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
+        conntrack: ConntrackFds { v4: -1, v6: -1 },
+        tick: Tick { ns: 2, secs: 0 },
+    };
+
+    let unrelated_v4 = [24].into_iter().collect();
+    assert_eq!(
+        purge_sessions_for_changed_input_filter_cached_semantics(
+            &mut sessions,
+            SteeringMap::unshared_for_test(-1),
+            refs(),
+            &old_forwarding,
+            &forwarding,
+            &unrelated_v4,
+            &rustc_hash::FxHashSet::default(),
+            0,
+        ),
+        0,
+        "a configured VLAN child must survive an unrelated filter change"
+    );
+    assert!(sessions.entry_with_origin(&child_key).is_some());
+
+    let changed_child_v4 = [13].into_iter().collect();
+    assert_eq!(
+        purge_sessions_for_changed_input_filter_cached_semantics(
+            &mut sessions,
+            SteeringMap::unshared_for_test(-1),
+            refs(),
+            &old_forwarding,
+            &forwarding,
+            &changed_child_v4,
+            &rustc_hash::FxHashSet::default(),
+            0,
+        ),
+        1,
+        "a configured VLAN child must purge when its own filter changes"
+    );
+    assert!(sessions.entry_with_origin(&child_key).is_none());
+
+    // A child added only in the new generation cannot retroactively make a
+    // synced session with an unresolved saved ingress identity known.
+    let mut unknown_key = test_key();
+    unknown_key.src_port = 55071;
+    let mut unknown_metadata = test_metadata();
+    unknown_metadata.ingress_ifindex = 13;
+    unknown_metadata.ingress_vlan_id = 50;
+    assert!(sessions.install_with_protocol_with_origin(
+        unknown_key.clone(),
+        test_decision(),
+        unknown_metadata,
+        SessionOrigin::SyncImport,
+        1,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let _ = sessions.drain_deltas(16);
+    let unknown_old_forwarding = ForwardingState::default();
+    let mut new_only_child_forwarding = ForwardingState::default();
+    new_only_child_forwarding
+        .ingress_logical_ifindex
+        .insert((10, 50), 10);
+    new_only_child_forwarding.egress.insert(
+        13,
+        old_forwarding.egress.get(&13).unwrap().clone(),
+    );
+    assert_eq!(
+        purge_sessions_for_changed_input_filter_cached_semantics(
+            &mut sessions,
+            SteeringMap::unshared_for_test(-1),
+            refs(),
+            &unknown_old_forwarding,
+            &new_only_child_forwarding,
+            &unrelated_v4,
+            &rustc_hash::FxHashSet::default(),
+            0,
+        ),
+        1,
+        "a new child configuration must not resolve an old unknown tagged ingress"
+    );
+    assert!(sessions.entry_with_origin(&unknown_key).is_none());
 }
 
 fn test_local_delivery_decision() -> SessionDecision {
