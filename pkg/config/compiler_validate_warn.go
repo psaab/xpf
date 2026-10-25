@@ -2027,6 +2027,12 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 	// carrying it on the recompute-from-active alarm surfaces.
 	warnings = append(warnings, validateDHCPServerInterfaceRefWarnings(cfg)...)
 
+	// #16694: a resolved device in both a DHCP-server group and a
+	// same-family relay group makes the two services bind the same
+	// port; the strict gate covers the next commit, this advisory
+	// covers a config already carrying the overlap.
+	warnings = append(warnings, dhcpServerRelayOverlapWarnings(cfg)...)
+
 	warnings = append(warnings, validateHostInboundZoneLevelDHCPWarnings(cfg)...)
 	warnings = append(warnings, validateHostInboundOverrideReplaceWarnings(cfg)...)
 	warnings = append(warnings, validateHostInboundCrossScopeExceptWarnings(cfg)...)
