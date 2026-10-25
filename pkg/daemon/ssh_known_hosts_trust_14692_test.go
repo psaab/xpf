@@ -185,23 +185,63 @@ func TestApplySSHKnownHosts14692ValidFormsRender(t *testing.T) {
 	}
 }
 
-// TestApplySSHKnownHosts14692PoisonOnlyPreservesExisting: when every entry
-// is invalid, a previously rendered managed file must not be replaced by a
-// header-only (or poisoned) file.
-func TestApplySSHKnownHosts14692PoisonOnlyPreservesExisting(t *testing.T) {
+// TestApplySSHKnownHosts16770AllInvalidRevokesManagedFile: when entries are
+// configured but none validate, the previously rendered managed file must
+// be REMOVED so a revoked key cannot outlive the replacement config
+// (#16770, restoring the #5112 contract over the #14692 leave-untouched
+// direction). The valid-replacement control still renders the new key.
+func TestApplySSHKnownHosts16770AllInvalidRevokesManagedFile(t *testing.T) {
 	path := withTempSSHKnownHostsPath(t)
 	_, edBlob := realKey14692(t, "ssh-ed25519")
+	_, edBlob2 := realKey14692(t, "ssh-ed25519")
 	ed := config.SSHKnownHostKey{Type: "ssh-ed25519-key", Key: edBlob}
 
-	good := applyKnownHosts14692(t, path, map[string][]config.SSHKnownHostKey{"good.example": {ed}})
-	if good == "" {
-		t.Fatal("valid seed entry did not render")
+	good := applyKnownHosts14692(t, path, map[string][]config.SSHKnownHostKey{"archive.example": {ed}})
+	if !strings.Contains(good, "archive.example ssh-ed25519 "+edBlob) {
+		t.Fatalf("valid seed entry did not render:\n%s", good)
 	}
+	// c3: same host, replacement key typed with the OpenSSH spelling
+	// (no Junos -key suffix) — fails validation, old key must go.
 	after := applyKnownHosts14692(t, path, map[string][]config.SSHKnownHostKey{
-		"*":                 {ed},
-		"@cert-authority *": {ed},
+		"archive.example": {{Type: "ssh-ed25519", Key: edBlob2}},
 	})
-	if after != good {
-		t.Fatalf("poison-only apply mutated managed file:\nbefore:\n%s\nafter:\n%s", good, after)
+	if after != "" {
+		t.Fatalf("all-invalid apply left managed file in place:\n%s", after)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("managed file should be removed on all-invalid apply (stat err=%v)", err)
+	}
+	// Valid replacement control: a new valid key renders again.
+	control := applyKnownHosts14692(t, path, map[string][]config.SSHKnownHostKey{
+		"archive.example": {{Type: "ssh-ed25519-key", Key: edBlob2}},
+	})
+	if !strings.Contains(control, "archive.example ssh-ed25519 "+edBlob2) {
+		t.Fatalf("valid replacement did not render:\n%s", control)
+	}
+	// c4 twin: archive host removed, a different host added with a
+	// malformed key — the removed host must not stay trusted.
+	after2 := applyKnownHosts14692(t, path, map[string][]config.SSHKnownHostKey{
+		"other.example": {{Type: "ssh-ed25519-key", Key: "!!!not-base64!!!"}},
+	})
+	if after2 != "" || strings.Contains(after2, "archive.example") {
+		t.Fatalf("removed-host apply left stale trust:\n%s", after2)
+	}
+}
+
+// TestApplySSHKnownHosts16770AllInvalidLeavesForeignFile: the all-invalid
+// removal is ownership-guarded like the empty-config removal — a file
+// without the managed header is never deleted.
+func TestApplySSHKnownHosts16770AllInvalidLeavesForeignFile(t *testing.T) {
+	path := withTempSSHKnownHostsPath(t)
+	foreign := "hand-maintained.example ssh-ed25519 AAAAforeign\n"
+	if err := os.WriteFile(path, []byte(foreign), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, edBlob := realKey14692(t, "ssh-ed25519")
+	got := applyKnownHosts14692(t, path, map[string][]config.SSHKnownHostKey{
+		"*": {{Type: "ssh-ed25519-key", Key: edBlob}},
+	})
+	if got != foreign {
+		t.Fatalf("foreign file mutated by all-invalid apply:\n%q", got)
 	}
 }

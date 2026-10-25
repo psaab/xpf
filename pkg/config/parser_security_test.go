@@ -3991,7 +3991,7 @@ func TestSSHKnownHostsAndPolicyStats(t *testing.T) {
 security {
     ssh-known-hosts {
         host 192.168.0.253 {
-            ecdsa-sha2-nistp256-key AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY;
+            ecdsa-sha2-nistp256-key AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBOzePLJ+YX/jjDmcAr2E4oB/RJ/6aCPsl39581dbjpCEDhdW6ahp+JDUUsHsHkYdJ0qw6cG8qlUbjezKfB3O4Rw=;
         }
     }
     policy-stats {
