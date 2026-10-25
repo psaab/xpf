@@ -549,8 +549,13 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 		bgpSchema := bgpLeafSchema8939()
 		bgpChildren := expandFlatRun(flattenChainedChildren(bgpNode.Children, bgpSchema), bgpSchema)
 		bgpExpanded := &Node{Keys: bgpNode.Keys, Children: bgpChildren}
+		// #16621: protocol-level authentication-key, inherited by every
+		// neighbor (group key overrides it, neighbor key overrides both).
+		var bgpAuthKey string
 		for _, child := range bgpChildren {
 			switch child.Name() {
+			case "authentication-key":
+				bgpAuthKey = nodeVal(child)
 			case "disable":
 				// #16572: whole-protocol shut.
 				proto.BGP.Disable = true
@@ -650,7 +655,9 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 			var groupSAFIWarningRecords []bgpSAFIWarning11815
 			var groupPrefixLimitInet, groupPrefixLimitInet6 int
 			var groupPrefixLimitTDInet, groupPrefixLimitTDInet6 bgpPrefixLimitTeardown15010
-			var groupAuthKey string
+			// #16621: seed from the protocol-level key; a group key
+			// (pass 0) overrides it, a neighbor key overrides both.
+			groupAuthKey := bgpAuthKey
 			var groupBFD bool
 			var groupBFDInterval int
 			var groupBFDMultiplier int
@@ -824,7 +831,11 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 					case "remove-private":
 						groupRemovePrivateAS = true
 					case "authentication-key":
-						groupAuthKey = nodeVal(child)
+						// #16621: group key overrides the protocol-level
+						// key for this group's neighbors.
+						if v := nodeVal(child); v != "" {
+							groupAuthKey = v
+						}
 					case "bfd-liveness-detection":
 						groupBFD = true
 						for _, bc := range child.Children {

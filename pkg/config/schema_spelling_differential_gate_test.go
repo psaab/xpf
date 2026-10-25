@@ -1073,6 +1073,11 @@ var gateParentPrereq = map[string]string{
 	// Verified: 13 leaves under `protocols bgp group <*>` move from no-verdict
 	// to compared.
 	"protocols bgp group <*>": "neighbor 10.211.199.1;",
+	// #16621: a top-level BGP authentication-key is inherited by neighbors,
+	// so it is observable only once a group+neighbor materialises. Same
+	// shape as the group row above, one level up.
+	"protocols bgp":                       "group xwgate { peer-as 65002; neighbor 10.211.199.1; }",
+	"routing-instances <*> protocols bgp": "group xwgate { peer-as 65002; neighbor 10.211.199.1; }",
 	// #7492: a `security log stream` with no `host` compiles to NOTHING —
 	// cfg.Security.Log.Streams["s"] stays nil — so every stream-level leaf
 	// (severity, facility, category, source-address, source-interface, ...)
