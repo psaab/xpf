@@ -2470,6 +2470,26 @@ impl crate::afxdp::ha::SessionDomain {
                 }
             }
         }
+        // #16575: after a successful shared removal of a forward entry,
+        // release the coordinator's holder-less import reservation. The
+        // per-worker loop above covers only a REFUSED delete push for a
+        // worker that adopted the reservation; a worker whose import
+        // fan-out was refused (repair debt) but whose delete push was
+        // accepted never adopted it, so nobody else releases it. The
+        // untracked release frees only `holders == 0` records, so an
+        // adopted twin (any worker bit set) is untouched here and freed
+        // exactly once by the last worker's own teardown.
+        if let Some(entry) = removed_entry.as_ref()
+            && self.release_unadopted_import_reservation_untracked(forwarding, entry, &key)
+        {
+            // #16575: count an actual holder-less free here so the tunnel
+            // purge (which runs the same untracked sweep right after this
+            // delete) does not lose the #8138/#14961 count when its own
+            // attempt no-ops because the port is already freed.
+            self.sessions
+                .tunnel_purge_reservations_released
+                .fetch_add(1, Ordering::Relaxed);
+        }
         if strict_mirror && !mirror_delete_ok {
             SyncedDeleteOutcome::RefusedMirrorDelete
         } else {
@@ -2520,6 +2540,55 @@ impl crate::afxdp::ha::SessionDomain {
             now_ns,
             worker_id,
         );
+    }
+
+    /// #16575: release the coordinator's import-time `Untracked`
+    /// reservation for a forward entry whose shared authority this delete
+    /// just removed. Returns whether either family actually freed.
+    ///
+    /// The import fan-out can be refused per worker (repair debt) while
+    /// this delete's push is then accepted before the worker reaches the
+    /// repair boundary. The worker drains a `DeleteSynced` for a session
+    /// it never adopted: its local table has no entry, so
+    /// `handle_delete_synced`'s alias-gated release never runs, and the
+    /// repair boundary's shared-miss arm hits the same absent-local-entry
+    /// shape. Without this call the `holders == 0` record survives for
+    /// the life of the allocator — no sweep touches `Untracked`
+    /// records, and the per-worker dropped-delete repair runs only when
+    /// THIS delete's push is refused.
+    ///
+    /// Over-release-safe by construction: an `Untracked` release frees
+    /// only a record with `holders == 0` (`drop_holder_locked` keeps any
+    /// record a worker has adopted, to be freed by that worker's own
+    /// teardown). Each family is self-gated (SNAT on `rewrite_src`,
+    /// NAT64 on `nat.nat64`), so calling both mirrors the reserve twin
+    /// in `reserve_synced_translation`.
+    fn release_unadopted_import_reservation_untracked(
+        &self,
+        forwarding: &ForwardingState,
+        entry: &SyncedSessionEntry,
+        key: &SessionKey,
+    ) -> bool {
+        if entry.metadata.is_reverse {
+            return false;
+        }
+        let now_ns = crate::afxdp::wg::counters::monotonic_now_ns();
+        let snat_freed = crate::nat::release_synced_source_nat_allocation_untracked(
+            &forwarding.iface_nat_allocators,
+            &forwarding.source_nat_rules,
+            key,
+            entry.decision.nat,
+            entry.metadata.is_reverse,
+            now_ns,
+        );
+        let nat64_freed = crate::nat64::release_synced_nat64_allocation_untracked_for_purge(
+            &forwarding.nat64,
+            key,
+            entry.decision.nat,
+            entry.metadata.is_reverse,
+            now_ns,
+        );
+        snat_freed || nat64_freed
     }
 
     /// #4054 test seam: install a qualifying LOCAL forward session (owner-RG 0
@@ -4137,5 +4206,335 @@ mod rejected_mirror_reservation_10790_tests {
             "an unknown stable ID must not retain a positional index"
         );
         assert!(stored.metadata.policy_counter.is_none());
+    }
+
+    // -------------------------------------------------------------------
+    // #16575: an import whose UpsertSynced fan-out is refused (repair
+    // debt) reserves Untracked; a peer delete whose push is then accepted
+    // before the repair boundary must still release that reservation.
+    // -------------------------------------------------------------------
+
+    fn fill_worker_queue(commands: &Arc<Mutex<VecDeque<WorkerCommand>>>) {
+        let mut pending = commands.lock().expect("worker commands");
+        for i in 0..crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
+            let mut filler = v4_key();
+            filler.src_port = 30_000 + (i as u16 % 20_000);
+            pending.push_back(WorkerCommand::DeleteSynced(filler));
+        }
+        assert_eq!(
+            pending.len(),
+            crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS,
+            "fixture: queue must be at capacity so the import fan-out is refused"
+        );
+    }
+
+    fn drain_worker_once(
+        coordinator: &Coordinator,
+        commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
+        worker_sessions: &mut crate::session::SessionTable,
+        scratch: &mut VecDeque<WorkerCommand>,
+        worker_id: u32,
+    ) {
+        let dynamic_neighbors = Arc::new(crate::afxdp::ShardedNeighborMap::new());
+        let results = crate::afxdp::session_glue::apply_worker_commands(
+            commands,
+            worker_sessions,
+            crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &coordinator.forwarding,
+            &std::collections::BTreeMap::new(),
+            &dynamic_neighbors,
+            worker_id,
+            scratch,
+        );
+        let mut stale = Vec::new();
+        let mut deleted = Vec::new();
+        crate::afxdp::session_glue::apply_session_import_repairs(
+            &results.session_import_repairs,
+            &coordinator.sessions.synced,
+            worker_sessions,
+            crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
+            &coordinator.forwarding,
+            &std::collections::BTreeMap::new(),
+            &dynamic_neighbors,
+            &mut stale,
+            &mut deleted,
+            worker_id,
+        );
+    }
+
+    /// DEFECT (SNAT): refused import + accepted delete -> PORT_HELD must
+    /// become false. Pre-fix the Untracked record survives the delete and
+    /// the repair boundary's shared-miss delete (no local entry).
+    #[test]
+    fn refused_import_then_accepted_delete_releases_untracked_snat_16575() {
+        const WORKER_ID: u32 = 0;
+        crate::afxdp::worker_queue::clear_session_import_repairs(WORKER_ID);
+        let (coordinator, commands) = worker_registered_coordinator(nat64_forwarding());
+        let key = v4_key();
+        let nat = NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2))),
+            rewrite_src_port: Some(51_075),
+            ..NatDecision::default()
+        };
+        let entry = synced_entry(key.clone(), nat, 1, 7_575);
+        fill_worker_queue(&commands);
+        assert_eq!(
+            coordinator.session_domain.upsert_synced_session(entry),
+            SyncedImportOutcome::AppliedRepairPending,
+            "fixture: refused fan-out must latch repair debt"
+        );
+        assert!(
+            crate::afxdp::worker_queue::has_session_import_repair_debt(WORKER_ID),
+            "fixture: repair debt must be latched"
+        );
+        let alloc = &coordinator.forwarding.source_nat_rules[0].pool_allocator;
+        assert!(
+            alloc.debug_is_port_occupied(0, 51_075),
+            "fixture: coordinator Untracked reservation must hold the port"
+        );
+        {
+            let mut pending = commands.lock().expect("worker commands");
+            pending.pop_front();
+        }
+        coordinator.session_domain.delete_synced_session(key.clone(), false);
+        assert!(
+            !alloc.debug_is_port_occupied(0, 51_075),
+            "#16575: accepted delete after refused import stranded the \
+             holder-less reservation (PORT_HELD=true)"
+        );
+        let mut worker_sessions = crate::session::SessionTable::new();
+        let mut scratch = VecDeque::new();
+        for _ in 0..64 {
+            if commands.lock().expect("commands").is_empty()
+                && !crate::afxdp::worker_queue::has_session_import_repair_debt(WORKER_ID)
+            {
+                break;
+            }
+            drain_worker_once(&coordinator, &commands, &mut worker_sessions, &mut scratch, WORKER_ID);
+        }
+        assert!(
+            !alloc.debug_is_port_occupied(0, 51_075),
+            "port must stay free after drain + repair boundary"
+        );
+        crate::afxdp::worker_queue::clear_session_import_repairs(WORKER_ID);
+    }
+
+    /// DEFECT (NAT64 twin): same interleaving on a NAT64 decision.
+    #[test]
+    fn refused_import_then_accepted_delete_releases_untracked_nat64_16575() {
+        const WORKER_ID: u32 = 0;
+        crate::afxdp::worker_queue::clear_session_import_repairs(WORKER_ID);
+        let (coordinator, commands) = worker_registered_coordinator(nat64_forwarding());
+        let key = nat64_key();
+        let nat = translated_nat64(51_076);
+        let entry = synced_entry(key.clone(), nat, 1, 7_576);
+        fill_worker_queue(&commands);
+        assert_eq!(
+            coordinator.session_domain.upsert_synced_session(entry),
+            SyncedImportOutcome::AppliedRepairPending
+        );
+        let flow = crate::nat::SourceNatFlowKey {
+            protocol: key.protocol,
+            src_ip: key.src_ip,
+            dst_ip: nat.rewrite_dst.expect("nat64 dst"),
+            src_port: key.src_port,
+            dst_port: key.dst_port,
+            routing_scope: 0,
+        };
+        let alloc = &coordinator.forwarding.nat64.prefixes[0].port_allocator;
+        let permit = crate::nat::PersistentNatPermit::AnyRemoteHost;
+        assert_eq!(
+            alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+            Some(1),
+            "fixture: NAT64 Untracked reservation must hold one active flow"
+        );
+        {
+            let mut pending = commands.lock().expect("worker commands");
+            pending.pop_front();
+        }
+        coordinator.session_domain.delete_synced_session(key.clone(), false);
+        assert_eq!(
+            alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+            Some(0),
+            "#16575 NAT64: accepted delete stranded the holder-less NAT64 reservation"
+        );
+        let mut worker_sessions = crate::session::SessionTable::new();
+        let mut scratch = VecDeque::new();
+        for _ in 0..64 {
+            if commands.lock().expect("commands").is_empty()
+                && !crate::afxdp::worker_queue::has_session_import_repair_debt(WORKER_ID)
+            {
+                break;
+            }
+            drain_worker_once(&coordinator, &commands, &mut worker_sessions, &mut scratch, WORKER_ID);
+        }
+        assert_eq!(
+            alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+            Some(0),
+            "NAT64 active flows must stay 0 after drain + repair"
+        );
+        crate::afxdp::worker_queue::clear_session_import_repairs(WORKER_ID);
+    }
+
+    /// CONTROL A: refused delete (queue still full) frees via #6979 F4.
+    #[test]
+    fn refused_delete_still_frees_via_dropped_repair_16575() {
+        const WORKER_ID: u32 = 0;
+        crate::afxdp::worker_queue::clear_session_import_repairs(WORKER_ID);
+        let (coordinator, commands) = worker_registered_coordinator(nat64_forwarding());
+        let key = v4_key();
+        let nat = NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2))),
+            rewrite_src_port: Some(51_077),
+            ..NatDecision::default()
+        };
+        let entry = synced_entry(key.clone(), nat, 1, 7_577);
+        assert_eq!(
+            coordinator.session_domain.upsert_synced_session(entry),
+            SyncedImportOutcome::Applied
+        );
+        let mut worker_sessions = crate::session::SessionTable::new();
+        let mut scratch = VecDeque::new();
+        drain_worker_once(&coordinator, &commands, &mut worker_sessions, &mut scratch, WORKER_ID);
+        assert!(
+            worker_sessions.entry_with_origin(&key).is_some(),
+            "fixture: worker must have adopted the session"
+        );
+        let alloc = &coordinator.forwarding.source_nat_rules[0].pool_allocator;
+        assert!(alloc.debug_is_port_occupied(0, 51_077));
+        fill_worker_queue(&commands);
+        let drops_before = crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_DROPS
+            .load(std::sync::atomic::Ordering::Relaxed);
+        coordinator.session_domain.delete_synced_session(key.clone(), false);
+        assert!(
+            crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_DROPS
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > drops_before,
+            "fixture: delete must have been dropped"
+        );
+        assert!(
+            !alloc.debug_is_port_occupied(0, 51_077),
+            "control A: refused delete must free via dropped-delete repair"
+        );
+        crate::afxdp::worker_queue::clear_session_import_repairs(WORKER_ID);
+    }
+
+    /// CONTROL B: accepted import + accepted delete frees via worker drain.
+    #[test]
+    fn accepted_import_then_accepted_delete_frees_via_worker_16575() {
+        const WORKER_ID: u32 = 0;
+        crate::afxdp::worker_queue::clear_session_import_repairs(WORKER_ID);
+        let (coordinator, commands) = worker_registered_coordinator(nat64_forwarding());
+        let key = v4_key();
+        let nat = NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2))),
+            rewrite_src_port: Some(51_078),
+            ..NatDecision::default()
+        };
+        let entry = synced_entry(key.clone(), nat, 1, 7_578);
+        assert_eq!(
+            coordinator.session_domain.upsert_synced_session(entry),
+            SyncedImportOutcome::Applied
+        );
+        let mut worker_sessions = crate::session::SessionTable::new();
+        let mut scratch = VecDeque::new();
+        drain_worker_once(&coordinator, &commands, &mut worker_sessions, &mut scratch, WORKER_ID);
+        let alloc = &coordinator.forwarding.source_nat_rules[0].pool_allocator;
+        assert!(alloc.debug_is_port_occupied(0, 51_078));
+        coordinator.session_domain.delete_synced_session(key.clone(), false);
+        assert!(
+            alloc.debug_is_port_occupied(0, 51_078),
+            "control B: adopted reservation must survive coordinator delete until worker drains"
+        );
+        for _ in 0..8 {
+            if !alloc.debug_is_port_occupied(0, 51_078) {
+                break;
+            }
+            drain_worker_once(&coordinator, &commands, &mut worker_sessions, &mut scratch, WORKER_ID);
+        }
+        assert!(
+            !alloc.debug_is_port_occupied(0, 51_078),
+            "control B: worker drain of accepted delete must free the port"
+        );
+        crate::afxdp::worker_queue::clear_session_import_repairs(WORKER_ID);
+    }
+
+    /// Adopted twin: two workers hold the reservation; coordinator delete
+    /// must not free while any worker bit remains.
+    #[test]
+    fn adopted_two_workers_delete_frees_exactly_once_16575() {
+        let (mut coordinator, _commands0) = worker_registered_coordinator(nat64_forwarding());
+        let commands1 = Arc::new(Mutex::new(VecDeque::new()));
+        coordinator.workers.register(
+            1,
+            crate::afxdp::coordinator::WorkerRuntimeRecord::for_test(worker_handle(commands1)),
+            None,
+        );
+        let key = v4_key();
+        let nat = NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2))),
+            rewrite_src_port: Some(51_079),
+            ..NatDecision::default()
+        };
+        let entry = synced_entry(key.clone(), nat, 1, 7_579);
+        assert_eq!(
+            coordinator.session_domain.upsert_synced_session(entry),
+            SyncedImportOutcome::Applied
+        );
+        let flow = crate::nat::SourceNatFlowKey {
+            protocol: key.protocol,
+            src_ip: key.src_ip,
+            dst_ip: key.dst_ip,
+            src_port: key.src_port,
+            dst_port: key.dst_port,
+            routing_scope: 0,
+        };
+        let alloc = &coordinator.forwarding.source_nat_rules[0].pool_allocator;
+        assert_eq!(alloc.holder_mask_for_flow(&flow), Some(0));
+        for wid in [0u32, 1] {
+            assert!(crate::nat::reserve_synced_source_nat_allocation_for_worker(
+                &coordinator.forwarding.iface_nat_allocators,
+                &coordinator.forwarding.source_nat_rules,
+                &key,
+                nat,
+                false,
+                None,
+                1_000,
+                wid,
+                crate::nat::SyncedSourceNatDomains::default(),
+            ));
+        }
+        assert_eq!(alloc.holder_mask_for_flow(&flow), Some(0b11));
+        coordinator.session_domain.delete_synced_session(key.clone(), false);
+        assert!(
+            alloc.debug_is_port_occupied(0, 51_079),
+            "adopted twin: coordinator must not free while worker bits remain"
+        );
+        assert_eq!(alloc.holder_mask_for_flow(&flow), Some(0b11));
+        crate::nat::release_source_nat_allocation_for_worker(
+            &coordinator.forwarding.iface_nat_allocators,
+            &coordinator.forwarding.source_nat_rules,
+            &key,
+            nat,
+            false,
+            2_000,
+            0,
+        );
+        assert!(alloc.debug_is_port_occupied(0, 51_079), "one holder remains");
+        crate::nat::release_source_nat_allocation_for_worker(
+            &coordinator.forwarding.iface_nat_allocators,
+            &coordinator.forwarding.source_nat_rules,
+            &key,
+            nat,
+            false,
+            3_000,
+            1,
+        );
+        assert!(
+            !alloc.debug_is_port_occupied(0, 51_079),
+            "last worker release must free exactly once"
+        );
     }
 }
