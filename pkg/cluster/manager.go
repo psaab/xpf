@@ -215,8 +215,21 @@ type Manager struct {
 	// #7161 readiness gate still sees a cold boot (gated) rather than a peer
 	// loss (fail-open). Cleared when a peer heartbeat arrives. See #10697.
 	peerConfirmedAbsent bool
-	peerNodeID          int
-	peerGroups          map[int]PeerGroupState
+	// #16751: Manager-owned never-seen clock. Armed by UpdateConfig while a
+	// control link is configured and no peer has ever been seen, so peer
+	// absence is confirmed after heartbeatStartupGrace even when the
+	// heartbeat receiver never starts (e.g. the control interface has no
+	// address because a direct control cable has no carrier and networkd
+	// does not configure it). Previously the only driver of
+	// handlePeerNeverSeen was the receiver's checkTimeout, so a failed
+	// heartbeat start held every non-preempt RG secondary forever with no
+	// degraded fallback. Guarded by m.mu; neverSeenTimerGen invalidates a
+	// timer callback that raced a disarm.
+	neverSeenSince    time.Time
+	neverSeenTimer    *time.Timer
+	neverSeenTimerGen uint64
+	peerNodeID        int
+	peerGroups        map[int]PeerGroupState
 	// latestPeerHeartbeatSession/Sequence are the session/sequence of the
 	// most recent peer heartbeat frame accepted by handlePeerHeartbeat
 	// (zero when none, or when that frame carried no echo-capable
@@ -1178,6 +1191,10 @@ func (m *Manager) Stop() {
 	// fired and its closure is parked on m.mu: it acquires the lock after this
 	// section releases it, observes m.stopped, and returns without electing.
 	m.stopped = true
+	// #16751: the Manager-owned never-seen clock is torn down with the
+	// manager; confirmNeverSeenIfDue also checks m.stopped for a callback
+	// already parked on m.mu.
+	m.disarmNeverSeenClockLocked()
 	for _, rg := range m.groups {
 		if rg.holdTimer != nil {
 			rg.holdTimer.Stop()

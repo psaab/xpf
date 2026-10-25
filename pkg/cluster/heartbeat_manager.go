@@ -763,6 +763,8 @@ func (m *Manager) handlePeerHeartbeat(pkt *HeartbeatPacket) {
 	m.peerAlive = true
 	m.peerEverSeen = true
 	m.peerConfirmedAbsent = false
+	// #16751: a heard peer retires the Manager-owned never-seen clock.
+	m.disarmNeverSeenClockLocked()
 	if m.peerHeartbeatRecoveredFn != nil {
 		m.peerHeartbeatRecoveredFn()
 	}
@@ -1224,6 +1226,95 @@ func (m *Manager) handlePeerNeverSeen() {
 	m.history.Record(EventHeartbeat, -1, "Peer never seen (timeout)")
 	m.electSingleNode()
 }
+
+// neverSeenGrace is how long the Manager-owned never-seen clock waits before
+// confirming a never-heard peer absent. It is a package var only so the
+// #16751 cells can shorten the floor without sleeping 30s; production keeps
+// the cold-boot heartbeatStartupGrace — the same floor the receiver's
+// never-seen arm uses, because the hazard it guards (a simultaneous cold
+// boot whose first heartbeats are dropped by the local config-apply
+// disruption, #4386) is identical whichever component confirms absence.
+var neverSeenGrace = heartbeatStartupGrace
+
+// armNeverSeenClockLocked starts (or keeps) the Manager-owned never-seen
+// clock. It is armed only while all of these hold: a control link is
+// configured, no peer heartbeat has ever been seen, absence is not already
+// confirmed, and the manager is not stopped. The first arming stamps
+// neverSeenSince; re-arms (routine UpdateConfig re-applies) keep the
+// original stamp so a commit cannot push the floor out indefinitely. Any
+// state that makes the clock meaningless — peer seen, absence confirmed,
+// control link removed, stopped manager — disarms it.
+//
+// Caller must hold m.mu.
+func (m *Manager) armNeverSeenClockLocked() {
+	if m.stopped || m.controlInterface == "" || m.peerEverSeen || m.peerConfirmedAbsent {
+		m.disarmNeverSeenClockLocked()
+		return
+	}
+	if m.neverSeenTimer != nil {
+		return
+	}
+	if m.neverSeenSince.IsZero() {
+		m.neverSeenSince = time.Now()
+	}
+	remaining := neverSeenGrace - time.Since(m.neverSeenSince)
+	if remaining < 0 {
+		remaining = 0
+	}
+	m.neverSeenTimerGen++
+	gen := m.neverSeenTimerGen
+	m.neverSeenTimer = time.AfterFunc(remaining, func() { m.confirmNeverSeenIfDue(gen) })
+}
+
+// disarmNeverSeenClockLocked stops the Manager-owned never-seen clock and
+// invalidates any callback that already fired and is parked on m.mu.
+//
+// Caller must hold m.mu.
+func (m *Manager) disarmNeverSeenClockLocked() {
+	m.neverSeenTimerGen++
+	if m.neverSeenTimer != nil {
+		m.neverSeenTimer.Stop()
+		m.neverSeenTimer = nil
+	}
+	m.neverSeenSince = time.Time{}
+}
+
+// confirmNeverSeenIfDue is the Manager-owned never-seen clock's callback.
+// It re-checks every arming condition under m.mu — the peer may have been
+// heard, the control link removed, or the manager stopped while the timer
+// was in flight — and while fresh session-sync proof says the peer is
+// active it reschedules the check instead of confirming absence (#11566:
+// the suppression has no fixed cap, matching the receiver path). Otherwise
+// it drives the same confirmation the receiver drives.
+func (m *Manager) confirmNeverSeenIfDue(gen uint64) {
+	m.mu.Lock()
+	if gen != m.neverSeenTimerGen || m.stopped || m.controlInterface == "" ||
+		m.peerEverSeen || m.peerConfirmedAbsent {
+		m.mu.Unlock()
+		return
+	}
+	// This callback is the live timer firing: clear the handle before any
+	// re-arm so armNeverSeenClockLocked can schedule the sync-proof recheck.
+	m.neverSeenTimer = nil
+	if m.peerNeverSeenSyncFreshFn != nil && m.peerNeverSeenSyncFreshFn() {
+		slog.Debug("cluster: suppressing never-seen peer confirmation while session-sync proof is fresh")
+		m.neverSeenTimer = time.AfterFunc(neverSeenRecheckInterval, func() {
+			m.confirmNeverSeenIfDue(gen)
+		})
+		m.mu.Unlock()
+		return
+	}
+	m.neverSeenSince = time.Time{}
+	m.mu.Unlock()
+	m.handlePeerNeverSeen()
+}
+
+// neverSeenRecheckInterval is how often the Manager-owned clock re-probes
+// session-sync freshness while that proof suppresses absence confirmation.
+// It matches the heartbeat receiver's tick cadence order (the receiver
+// re-probes on every timeout tick) without coupling to the heartbeat
+// interval, which this clock deliberately does not depend on.
+const neverSeenRecheckInterval = time.Second
 
 // HeartbeatStats returns current heartbeat counters.
 //

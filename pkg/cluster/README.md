@@ -471,6 +471,22 @@ readiness gate armed. A ready node promotes normally; an unready node stays
 secondary until the degraded fallback, which marks and warns on the degraded
 promotion. A peer heartbeat clears the confirmed-absent state.
 
+The never-seen clock is owned by the **Manager**, not only the receiver
+(#16751). `UpdateConfig` arms it (`armNeverSeenClockLocked`) whenever a
+control interface is configured and no peer has ever been seen; after the
+same `heartbeatStartupGrace` floor it drives `handlePeerNeverSeen` itself —
+re-probing the #11566 sync proof on a 1s recheck while that proof stays
+fresh. This closes the case where the receiver never exists: the control
+interface has no address (a back-to-back control cable with no carrier
+while the peer is powered off is not configured by networkd), the daemon's
+heartbeat start-retry exhausts, and previously nothing ever confirmed
+absence, so every non-preempt RG stayed secondary forever without even
+arming the degraded fallback. A peer heartbeat, removal of the control
+interface, or `Stop` disarms the clock; routine config re-applies keep the
+original arming stamp so a commit cannot push the floor out. The receiver's
+own never-seen arm is unchanged and races harmlessly with the Manager's:
+both funnel into `handlePeerNeverSeen`, which confirms at most once.
+
 ### Asymmetric peer visibility (#10775)
 
 Every current heartbeat carries a per-Manager session and increasing sequence,

@@ -167,6 +167,20 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 		m.hbThreshold = DefaultHeartbeatThreshold
 	}
 	m.controlInterface = cfg.ControlInterface
+	// #16751: own the never-seen clock in the Manager. While a control link
+	// is configured the absence hold is only released by confirming the peer
+	// absent (handlePeerNeverSeen) or by hearing the peer, and previously the
+	// sole caller of that confirmation was the heartbeat receiver's timeout
+	// loop — so when the heartbeat could not start at all (control interface
+	// without an address, e.g. a back-to-back cable with no carrier while
+	// the peer is powered off), nothing ever confirmed absence and every
+	// non-preempt RG stayed secondary indefinitely, never even reaching the
+	// readiness gate that arms the degraded fallback. Arming here covers
+	// that case: after heartbeatStartupGrace the Manager confirms absence
+	// itself, whether or not a receiver exists. The election below still
+	// runs first (it holds while unconfirmed), and the helper is a no-op
+	// once the peer has been seen or absence is already confirmed.
+	m.armNeverSeenClockLocked()
 
 	// #4107: plumb the control-channel PSK. Reveal() reads the cleartext
 	// secret; it is stored as raw bytes and NEVER logged. Empty clears it
