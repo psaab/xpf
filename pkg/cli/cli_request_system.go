@@ -405,6 +405,7 @@ func (c *CLI) handleRequestSystemConfiguration(args []string) error {
 			return fmt.Errorf("request system configuration rescue delete does not accept arguments (%q)", strings.Join(args[2:], " "))
 		}
 		if err := c.store.DeleteRescueConfig(); err != nil {
+			return fmt.Errorf("delete rescue configuration: %w", err)
 		}
 		fmt.Println("Rescue configuration deleted")
 		return nil
