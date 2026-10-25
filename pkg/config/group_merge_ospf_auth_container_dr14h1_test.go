@@ -19,8 +19,8 @@ import (
 // The fix exempts packed-tail leaves (len(Keys) > 1) from the guard so
 // the container is adopted beside the leaf; compilers already merge
 // both siblings (the inline-inline control below proves it). Bare
-// leaves (len(Keys) == 1) keep the guard: a genuine duplicate stays
-// dropped.
+// leaves (len(Keys) == 1) are presence statements: since #16546 they
+// promote to empty containers and inherit (see the inverted pin below).
 
 func ospfAuth14388Helper(t *testing.T, text string) *OSPFInterface {
 	t.Helper()
@@ -188,10 +188,10 @@ apply-groups G;
 	}
 }
 
-// Genuine-duplicate control: a bare leaf (no packed tail) still
-// suppresses the group container exactly as today. `rip;` is bare
-// (Keys len 1) and the compiler reads nothing from it, so the group
-// rip body stays dropped.
+// #16546 inversion: a bare leaf (no packed tail) is a presence statement
+// (`rip;` == `rip { }`), not a duplicate of the group container body.
+// The group rip body now inherits into the promoted empty container.
+// The previous pin (bare suppresses) encoded the wrong premise.
 func TestGroupBareLeafDuplicateStillDropped14414(t *testing.T) {
 	text := `
 groups { G { protocols { rip { authentication-key GROUPKEY; authentication-type md5; } } } }
@@ -206,9 +206,9 @@ apply-groups G;
 	if cfg.Protocols.RIP == nil {
 		t.Fatal("RIP config missing")
 	}
-	if cfg.Protocols.RIP.AuthKey.Reveal() != "" || cfg.Protocols.RIP.AuthType != "" {
-		t.Fatalf("bare rip; must still suppress group rip container, got AuthKey=%q AuthType=%q — #4325 guard broken",
-			cfg.Protocols.RIP.AuthKey, cfg.Protocols.RIP.AuthType)
+	if cfg.Protocols.RIP.AuthKey.Reveal() != "GROUPKEY" || cfg.Protocols.RIP.AuthType != "md5" {
+		t.Fatalf("bare rip; must inherit group rip container (presence == empty braces), got AuthKey=%q AuthType=%q — #16546",
+			cfg.Protocols.RIP.AuthKey.Reveal(), cfg.Protocols.RIP.AuthType)
 	}
 }
 
