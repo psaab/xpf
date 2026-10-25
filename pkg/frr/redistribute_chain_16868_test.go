@@ -1201,14 +1201,27 @@ func TestBGPOrSplitNameRefusedBothOrders16868(t *testing.T) {
 	if len(seqs) == 0 {
 		t.Fatalf("shared OR map must be defined")
 	}
-	// Each sequence number appears in exactly one definition line.
+	// Defined-once across the WHOLE section (gate7): count every
+	// target-map sequence header in got, not just the first block
+	// routeMapBlock11447 returns (it stops at the first "!"), so a
+	// second complete duplicate block cannot hide. Each numeric
+	// sequence must be defined exactly once.
 	seenSeq := map[string]int{}
-	for _, ln := range strings.Split(routeMapBlock11447(got, sharedName), "\n") {
-		if strings.HasPrefix(ln, "route-map "+sharedName+" ") {
-			seenSeq[ln]++
-			if seenSeq[ln] > 1 {
-				t.Errorf("sequence defined twice: %q", ln)
+	total := 0
+	for _, ln := range strings.Split(got, "\n") {
+		f := strings.Fields(ln)
+		if len(f) == 4 && f[0] == "route-map" && f[1] == sharedName {
+			total++
+			seenSeq[f[3]]++
+			if seenSeq[f[3]] > 1 {
+				t.Errorf("sequence %s of %s defined more than once across the section", f[3], sharedName)
 			}
 		}
+	}
+	if total == 0 {
+		t.Fatalf("shared OR map %s has no sequence definitions in the section", sharedName)
+	}
+	if total != len(seenSeq) {
+		t.Fatalf("shared OR map %s: %d headers but %d distinct sequences (duplicate block?)", sharedName, total, len(seenSeq))
 	}
 }
