@@ -621,28 +621,35 @@ contract.
 - **Commit error-code contract (#5742).** `Commit` / `CommitConfirmed`
   classify the callback error structurally via `commitApplyStatus`,
   which maps the shared `configstore.ClassifyCommitError` class
-  (#16156; the same classifier the REST twin uses) onto gRPC codes,
-  keying off whether the daemon returned the committed config alongside it:
+  (#16156; the same classifier the REST twin uses) onto gRPC codes:
   a **non-fatal tail-reconcile / ordinary dataplane-apply** error (networkd
   write, Kea restart, IPsec reload, interface reconcile, non-abort apply —
   the daemon commits+arms the config and returns it *with* the error) →
   `codes.Unavailable` (transient, **retryable**; the config was accepted and
-  self-heals on the next commit/feed retry, #5646). A true **config-validation
-  / compile-reject** (compiler/schema reject, `compileErrorMustAbortApply`
-  fail-closed gate, device-map preflight, bootstrap refusal, pre-promotion
-  persistence — no config committed, `nil` returned) → `codes.InvalidArgument`
-  (fix the config). `context.Canceled` / `DeadlineExceeded` are preserved and
-  take precedence. The human-readable message is unchanged; only the code
-  distinguishes "retry" from "fix your config". Unclassifiable errors fail
-  safe to `InvalidArgument`.
+  self-heals on the next commit/feed retry, #5646). A **committed-but-not-
+  applied** abort (#16828 — the store already promoted+persisted the config,
+  then the apply aborted at the required-protocol gate, a policy-session
+  READ authority refusal, or a daemon-stop boundary; the daemon returns the
+  promoted config with an `ErrCommittedNotApplied`-wrapped error) →
+  `codes.FailedPrecondition` (the config is active and becomes live on a
+  later apply or boot; resolve the gate cause or restart — do not edit it
+  away as rejected). A true **pre-promotion reject** (compiler/schema reject,
+  device-map preflight, bootstrap refusal, pre-promotion persistence — no
+  config committed, `nil` returned, no sentinel) → `codes.InvalidArgument`
+  (fix the config). `context.Canceled` / `DeadlineExceeded` are preserved
+  for pre-promotion aborts only; a post-promotion abort wraps
+  `context.Canceled` under the sentinel and classifies as committed-not-
+  applied. The human-readable message carries the preserved error text;
+  only the code distinguishes "retry" / "committed, resolve" / "fix your
+  config". Unclassifiable errors fail safe to `InvalidArgument`.
 - **REST twin (#15281 D08-02).** `pkg/api` `writeCommitError` applies the
   same structural classification to `POST /config/commit` and
   `/config/commit-confirmed`: context errors → 503 `commit busy: ...`;
-  `compiled != nil` (committed, persisted, live; non-fatal tail/peer-push
-  error) → 503 with `success:false` and `data.committed:true` /
-  `data.status:"committed_with_error"` plus the preserved error text —
+  committed classes → 503 with `success:false` and `data.committed:true`
+  (`data.status:"committed_with_error"` when live, `"committed_not_applied"`
+  when promoted-but-not-applied, #16828) plus the preserved error text —
   distinguishable from a reject without reading as a clean success;
-  `compiled == nil` → 400 (unchanged fail-safe).
+  `compiled == nil` with no sentinel → 400 (unchanged fail-safe).
 - **Zeroize goes through the apply gate AND stops xpfd (#5281).** The
   `SystemAction{zeroize}` handler does NOT call the wipe
   (`pkg/factoryreset`, extracted in #16138) directly. It routes through `ZeroizeFn` (wired by the daemon to

@@ -100,6 +100,7 @@ func TestClassifyCommitError16156(t *testing.T) {
 	nonNil := &config.Config{Warnings: []string{"tail warning"}}
 	tailErr := errors.New("networkd write failed: transient control-socket hiccup")
 	rejectErr := errors.New("schema validation rejected: unknown zone reference")
+	notApplied := fmt.Errorf("%w: %w", ErrCommittedNotApplied, rejectErr)
 
 	cases := []struct {
 		name     string
@@ -113,6 +114,15 @@ func TestClassifyCommitError16156(t *testing.T) {
 		{"context_canceled_beats_config", nonNil, fmt.Errorf("commit aborted: %w", context.Canceled), CommitErrCanceled},
 		{"context_deadline", nil, fmt.Errorf("commit slow: %w", context.DeadlineExceeded), CommitErrDeadlineExceeded},
 		{"context_deadline_beats_config", nonNil, fmt.Errorf("commit slow: %w", context.DeadlineExceeded), CommitErrDeadlineExceeded},
+		// #16828: the committed-not-applied sentinel keys the class with
+		// or without the promoted config (a discarding caller passes nil).
+		{"committed_not_applied_with_config", nonNil, notApplied, CommitErrCommittedNotApplied},
+		{"committed_not_applied_nil_config", nil, notApplied, CommitErrCommittedNotApplied},
+		// #16828 precedence: a post-promotion daemon-stop abort wraps
+		// context.Canceled under the sentinel and must NOT read as a
+		// pre-promotion Canceled (the config WAS committed).
+		{"committed_not_applied_beats_context", nonNil,
+			fmt.Errorf("%w: %w", ErrCommittedNotApplied, context.Canceled), CommitErrCommittedNotApplied},
 		// Fail-safe: an unclassifiable error with no committed config is a
 		// reject, never retryable/committed.
 		{"unknown_nil_config", nil, errors.New("boom"), CommitErrRejected},

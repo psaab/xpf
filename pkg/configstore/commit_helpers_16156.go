@@ -53,41 +53,90 @@ func (s *Store) ConfirmOnly() bool {
 }
 
 // CommitErrorClass is the structural class of a commit-callback error
-// (#16156). The daemon commit path encodes the class in whether it
-// returns the committed config alongside the error, so classification
-// needs no error-text matching and no cross-package sentinel.
+// (#16156, #16828). The daemon commit path encodes the class in
+// whether it returns the committed config alongside the error, so
+// classification needs no error-text matching. Two committed classes
+// exist: a tail error (the dataplane IS armed under the new config,
+// only a best-effort subsystem step failed) and a committed-not-applied
+// error (the store promoted+persisted the config but the apply aborted
+// before publication — required-protocol gate #2138 or policy-session
+// READ authority refusal). The committed classes are distinguished by
+// the ErrCommittedNotApplied sentinel wrapping the latter's error.
 type CommitErrorClass uint8
 
 const (
-	// CommitErrCanceled: err wraps context.Canceled. Checked FIRST so
-	// a wrapped context error can never be mis-classified even if the
-	// callback also returns a non-nil config.
+	// CommitErrCanceled: err wraps context.Canceled. Reserved for an
+	// error that occurred BEFORE promotion (applySem acquisition,
+	// request-context abort); a post-promotion abort is never Canceled —
+	// it is CommitErrCommittedNotApplied. See ClassifyCommitError.
 	CommitErrCanceled CommitErrorClass = iota
-	// CommitErrDeadlineExceeded: err wraps context.DeadlineExceeded.
-	// Checked FIRST, like CommitErrCanceled.
+	// CommitErrDeadlineExceeded: err wraps context.DeadlineExceeded;
+	// same pre-promotion reservation as CommitErrCanceled.
 	CommitErrDeadlineExceeded
 	// CommitErrCommittedTail: compiled != nil — the config was
 	// committed, persisted and is live; only a non-fatal tail-reconcile
 	// / peer-push step failed (transient, retryable).
 	CommitErrCommittedTail
+	// CommitErrCommittedNotApplied: the store promoted+persisted the
+	// config (it is the active config and becomes live on a later apply
+	// or boot) but the apply aborted before publication
+	// (applyAndSyncCommitted returns the promoted config with an
+	// ErrCommittedNotApplied-wrapped error). Distinct from
+	// CommitErrCommittedTail: the dataplane is NOT armed under the new
+	// config, so the error must not be presented as transient/retryable-
+	// live; distinctly from CommitErrRejected: the config was NOT
+	// rejected, so the client must not be told to edit/abandon it.
+	CommitErrCommittedNotApplied
 	// CommitErrRejected: compiled == nil — a real config-validation /
 	// compile reject; nothing was committed. This is the FAIL-SAFE
-	// default: an error that cannot be positively identified as a
-	// tail-reconcile is never told to a client as committed/retryable.
+	// default: an error that cannot be positively identified as
+	// committed is never told to a client as committed/retryable.
 	CommitErrRejected
 )
 
+// ErrCommittedNotApplied marks a commit-callback error whose config
+// was already promoted+persisted by the store before the apply aborted
+// (the #16828 post-promotion abort class: required-protocol gate,
+// policy-session READ authority refusal, daemon-stop abort). The daemon
+// wraps the underlying apply error with this sentinel and returns the
+// promoted config alongside it, so ClassifyCommitError can distinguish
+// "committed, not applied" from both a true pre-promotion reject
+// (compiled == nil) and a live-with-tail-error commit (compiled != nil,
+// no sentinel). Defined here so both the daemon producer and the
+// REST/gRPC classifiers can reference it without an import cycle
+// (the underlying protocol/authority sentinels live in the dataplane
+// package, which must not be imported by the classifier).
+var ErrCommittedNotApplied = errors.New("configuration committed but not applied")
+
 // ClassifyCommitError classifies a non-nil commit-callback error
-// (commitFn / commitConfirmedFn) structurally on (compiled, err),
-// exactly as the gRPC commitApplyStatus (#5742) and the REST
-// writeCommitError (#15281) mappings did before this helper existed.
-// Callers MUST pass a non-nil err. Each surface maps the class onto
-// its own wire representation (gRPC codes / REST HTTP status +
-// envelope); only the machine-readable classification is shared —
-// the human-readable "%v" error text is each caller's own and is
-// byte-identical to the pre-#16156 mappings.
+// (commitFn / commitConfirmedFn). Callers MUST pass a non-nil err.
+// Each surface maps the class onto its own wire representation (gRPC
+// codes / REST HTTP status + envelope); only the machine-readable
+// classification is shared — the human-readable "%v" error text is
+// each caller's own.
+//
+// Precedence (first match wins):
+//  1. ErrCommittedNotApplied — the committed-not-applied class. Checked
+//     BEFORE the context arms: a post-promotion daemon-stop abort wraps
+//     context.Canceled under this sentinel, and the config WAS
+//     committed, so it must never be reported as a pre-promotion
+//     "commit busy" rejection. Its compiled config may be nil (a
+//     peer-sync caller that discards the promoted config), so this arm
+//     keys on the sentinel, not the pointer.
+//  2. context.Canceled / context.DeadlineExceeded — a PRE-promotion
+//     abort (semaphore acquisition, request cancel); nothing was
+//     committed. Beats the compiled!=nil arm so a wrapped context
+//     error is never mis-mapped even if a caller also returns a
+//     non-nil config.
+//  3. compiled != nil — committed and live, only a tail/peer step
+//     failed (CommitErrCommittedTail).
+//  4. default — a true reject (CommitErrRejected), the fail-safe: an
+//     error that cannot be positively identified as committed is never
+//     told to a client as committed.
 func ClassifyCommitError(compiled *config.Config, err error) CommitErrorClass {
 	switch {
+	case errors.Is(err, ErrCommittedNotApplied):
+		return CommitErrCommittedNotApplied
 	case errors.Is(err, context.Canceled):
 		return CommitErrCanceled
 	case errors.Is(err, context.DeadlineExceeded):

@@ -1056,17 +1056,20 @@ func (s *Server) configAnnotateHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, Response{Success: true})
 }
 
-// commitCommittedResponse is the REST body for a commit that WAS promoted,
-// persisted and is live, but whose non-fatal apply tail (or peer push)
-// failed (#15281 D08-02). It is deliberately NOT the success envelope:
-// Success stays false and the HTTP status is 503 (retryable), so existing
-// clients that only check success/status do not mistake it for a clean
-// commit — but Data.committed=true plus the preserved error text let a
-// client distinguish "config is live, retry the tail" from a 400 config
-// reject (compiled == nil). This mirrors the gRPC commitApplyStatus
-// classification (#5742), which the REST handlers previously lacked:
-// they blanket-mapped every non-context error to 400 success:false,
-// indistinguishable from a reject, while the config was live.
+// commitCommittedResponse is the REST body for a commit that WAS promoted
+// and persisted. It is deliberately NOT the success envelope: Success stays
+// false and the HTTP status is 503, so existing clients that only check
+// success/status do not mistake it for a clean commit — but Data.committed=
+// true plus the preserved error text let a client distinguish a committed
+// config from a 400 config reject (compiled == nil). Two committed classes
+// share this shape with distinct Status strings (#15281, #16828):
+// "committed_with_error" (live; only a non-fatal tail/peer step failed) and
+// "committed_not_applied" (promoted+persisted but the apply aborted before
+// publication; live on a later apply or boot, not now). This mirrors the
+// gRPC commitApplyStatus classification (#5742), which the REST handlers
+// previously lacked: they blanket-mapped every non-context error to 400
+// success:false, indistinguishable from a reject, while the config was
+// committed.
 type commitCommittedResponse struct {
 	Status    string   `json:"status"`
 	Committed bool     `json:"committed"`
@@ -1079,15 +1082,30 @@ type commitCommittedResponse struct {
 // is shared with gRPC via configstore.ClassifyCommitError (#16156,
 // #5742):
 //
-//   - context.Canceled / DeadlineExceeded (checked FIRST): 503
+//   - CommitErrCommittedNotApplied (#16828): the store promoted+
+//     persisted the config but the apply aborted before publication.
+//     503 with committed:true and status committed_not_applied — the
+//     client must learn the config WAS committed (active; live on a
+//     later apply or boot), not edit/abandon it as a 400 reject.
+//   - context.Canceled / DeadlineExceeded (PRE-promotion only; a
+//     post-promotion abort carries ErrCommittedNotApplied): 503
 //     "commit busy: ..." — unchanged from the pre-#15281 mapping.
-//   - compiled != nil: the daemon committed+ persisted the config and
-//     returned it alongside a non-fatal tail/peer error. 503 with
-//     committed:true and the error text — retryable, NOT a reject.
+//   - compiled != nil (tail): the daemon committed+persisted the
+//     config and returned it alongside a non-fatal tail/peer error.
+//     503 with committed:true and the error text — retryable, NOT a
+//     reject.
 //   - compiled == nil (default): a real config reject. 400 — unchanged,
 //     fail-safe: an unclassifiable error is never told "committed".
 func writeCommitError(w http.ResponseWriter, compiled *config.Config, err error) {
 	switch configstore.ClassifyCommitError(compiled, err) {
+	case configstore.CommitErrCommittedNotApplied:
+		resp := commitCommittedResponse{
+			Status:    "committed_not_applied",
+			Committed: true,
+			Error:     err.Error(),
+			Warnings:  configstore.WarningsOf(compiled),
+		}
+		writeJSON(w, http.StatusServiceUnavailable, Response{Success: false, Data: resp, Error: err.Error()})
 	case configstore.CommitErrCanceled, configstore.CommitErrDeadlineExceeded:
 		writeError(w, http.StatusServiceUnavailable, "commit busy: "+err.Error())
 	case configstore.CommitErrCommittedTail:

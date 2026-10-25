@@ -135,7 +135,10 @@ func TestCommitAndApplySyncsPeerOnCleanCommit(t *testing.T) {
 
 // TestCommitAndApplySkipsPeerSyncOnFatalApplyError proves a FATAL
 // required-protocol-gate error (dataplane disarmed, fail-closed) does NOT push a
-// disarm-config to the standby.
+// disarm-config to the standby. #16828: the store has already promoted the
+// config, so the promoted config is returned with an
+// ErrCommittedNotApplied-wrapped error (previously nil, which the
+// REST/gRPC classifiers misread as a pre-promotion reject).
 func TestCommitAndApplySkipsPeerSyncOnFatalApplyError(t *testing.T) {
 	s := newCommitReadyStore(t, "system host-name OLD", "system host-name NEW")
 	d := &Daemon{applySem: semaphore.NewWeighted(1), store: s}
@@ -149,12 +152,15 @@ func TestCommitAndApplySkipsPeerSyncOnFatalApplyError(t *testing.T) {
 	if !errors.Is(err, dpuserspace.ErrPolicySchedulerProtocolIncompatible) {
 		t.Fatalf("fatal apply error must surface; got %v", err)
 	}
+	if !errors.Is(err, configstore.ErrCommittedNotApplied) {
+		t.Fatalf("fatal post-promotion error must wrap ErrCommittedNotApplied (#16828); got %v", err)
+	}
 	if syncCalls != 0 {
 		t.Fatalf("a fatal (dataplane-disarmed) apply error must NOT push a disarm-config "+
 			"to the peer; got %d pushes", syncCalls)
 	}
-	if compiled != nil {
-		t.Fatalf("fatal apply error must return a nil config; got %+v", compiled)
+	if compiled == nil || compiled.System.HostName != "NEW" {
+		t.Fatalf("fatal post-promotion abort must return the promoted config (#16828); got %+v", compiled)
 	}
 }
 

@@ -56,39 +56,48 @@ func (s *Server) bindCommitGate(ctx context.Context, authority configstore.Commi
 
 // commitApplyStatus maps a non-nil commit-callback error (commitFn /
 // commitConfirmedFn) to the right gRPC status code (#5742). The
-// structural (compiled, err) classification is shared with REST via
+// structural classification is shared with REST via
 // configstore.ClassifyCommitError (#16156); this function only maps
-// the shared class onto gRPC codes. The daemon commit path
-// (commitAndApply / commitConfirmedAndApply → applyAndSyncCommitted)
-// already encodes the error CLASS in whether it returns the committed
-// config alongside the error, so no error-text matching or new
-// cross-package sentinel is needed — classify structurally on
-// (compiled, err):
-//   - context.Canceled / context.DeadlineExceeded (checked FIRST so a wrapped
-//     context error can never be mis-mapped even if a caller also returns a
-//     non-nil config): the commit was aborted by a daemon stop or a busy
-//     apply-lock. Preserved as Canceled / DeadlineExceeded, unchanged.
-//   - A NON-FATAL tail-reconcile / ordinary dataplane-apply error — networkd
-//     write (#1778), Kea restart (#2987), IPsec reload (#4433), interface
-//     reconcile (#5310), non-abort apply (#5679), #5578 deletion-clear:
-//     applyAndSyncCommitted returns the committed config ALONGSIDE the error
-//     (compiled != nil). The config is VALID and committed+active; only a
-//     transient control-socket / subsystem step failed and self-heals on retry
-//     (#5646). Map to codes.Unavailable (transient, retryable) so an operator /
-//     automation client retries rather than editing a config that was never
-//     rejected — the whole point of #5742.
-//   - Everything else (compiled == nil): a real config-validation / compile
-//     reject (the #5679 abort gate compileErrorMustAbortApply), a device-map
-//     commit preflight reject, a bootstrap-mode refusal, or a pre-promotion
+// the shared class onto gRPC codes:
+//   - CommitErrCommittedNotApplied (#16828): the store promoted+
+//     persisted the config but the apply aborted before publication
+//     (required-protocol gate, policy READ authority refusal, daemon-
+//     stop abort). The config was NOT rejected — it is active and
+//     becomes live on a later apply or boot — so it must not be
+//     InvalidArgument. It is also not live now, so it must not be the
+//     tail class's plain retryable-live reading either. Map to
+//     codes.FailedPrecondition: the box is in a committed-but-not-
+//     applied state the operator must resolve (fix the gate cause or
+//     restart), not a bad request and not a transient hiccup.
+//   - context.Canceled / context.DeadlineExceeded (PRE-promotion only —
+//     a post-promotion abort carries ErrCommittedNotApplied and is
+//     classified above it): the commit never promoted. Preserved as
+//     Canceled / DeadlineExceeded, unchanged.
+//   - A NON-FATAL tail-reconcile / ordinary dataplane-apply error: the
+//     daemon returns the committed config ALONGSIDE the error
+//     (compiled != nil, no sentinel). The config is VALID, committed+
+//     active and LIVE; only a transient control-socket / subsystem
+//     step failed and self-heals on retry (#5646). Map to
+//     codes.Unavailable (transient, retryable) so an operator /
+//     automation client retries rather than editing a config that was
+//     never rejected — the whole point of #5742.
+//   - Everything else (compiled == nil, no sentinel): a real
+//     config-validation / compile reject, a device-map commit
+//     preflight reject, a bootstrap-mode refusal, or a pre-promotion
 //     store persistence error — the config was NOT committed. Keep the
-//     historical codes.InvalidArgument. This is the FAIL-SAFE default: an error
-//     that cannot be positively identified as a tail-reconcile stays
-//     InvalidArgument, so a client is never told to retry genuinely-bad config.
+//     historical codes.InvalidArgument. This is the FAIL-SAFE default:
+//     an error that cannot be positively identified as committed stays
+//     InvalidArgument, so a client is never told to retry genuinely-
+//     bad config.
 //
-// Only the machine-readable code moves; the human-readable "%v" error text is
-// byte-identical to the pre-#5742 mapping. Callers MUST pass a non-nil err.
+// Only the machine-readable code moves; the human-readable "%v" error
+// text is preserved (the committed-not-applied text additionally
+// carries the ErrCommittedNotApplied marker). Callers MUST pass a
+// non-nil err.
 func commitApplyStatus(compiled *config.Config, err error) error {
 	switch configstore.ClassifyCommitError(compiled, err) {
+	case configstore.CommitErrCommittedNotApplied:
+		return status.Errorf(codes.FailedPrecondition, "%v", err)
 	case configstore.CommitErrCanceled:
 		return status.Errorf(codes.Canceled, "commit busy: %v", err)
 	case configstore.CommitErrDeadlineExceeded:

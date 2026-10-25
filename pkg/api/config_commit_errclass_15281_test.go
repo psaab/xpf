@@ -57,6 +57,12 @@ func TestRESTCommitErrorClassification_15281(t *testing.T) {
 
 	tailErr := errors.New("networkd write failed: transient control-socket hiccup")
 	rejectErr := errors.New("schema validation rejected: unknown zone reference")
+	// #16828: the daemon's post-promotion abort shape — promoted config
+	// returned with an ErrCommittedNotApplied-wrapped error.
+	notAppliedErr := fmt.Errorf("%w: %w", configstore.ErrCommittedNotApplied,
+		errors.New("policy session READ authority unavailable"))
+	// wantStatus, when non-empty, asserts data.status exactly (the two
+	// committed classes share committed:true but differ in status).
 
 	cases := []struct {
 		name          string
@@ -65,14 +71,29 @@ func TestRESTCommitErrorClassification_15281(t *testing.T) {
 		wantCode      int
 		wantCommitted bool
 		wantMsg       string
+		wantStatus    string
 	}{
 		{
 			name: "tail_reconcile_nonfatal", compiled: nonNil, err: tailErr,
 			wantCode: http.StatusServiceUnavailable, wantCommitted: true, wantMsg: "networkd write failed",
+			wantStatus: "committed_with_error",
 		},
 		{
 			name: "schema_reject", compiled: nil, err: rejectErr,
 			wantCode: http.StatusBadRequest, wantCommitted: false, wantMsg: "schema validation rejected",
+		},
+		{
+			// #16828: committed but not applied — non-400 with
+			// committed:true and the distinct status, so automation does
+			// not treat a persisted config as rejected.
+			name: "committed_not_applied", compiled: nonNil, err: notAppliedErr,
+			wantCode: http.StatusServiceUnavailable, wantCommitted: true, wantMsg: "committed but not applied",
+			wantStatus: "committed_not_applied",
+		},
+		{
+			name: "committed_not_applied_nil_config", compiled: nil, err: notAppliedErr,
+			wantCode: http.StatusServiceUnavailable, wantCommitted: true, wantMsg: "committed but not applied",
+			wantStatus: "committed_not_applied",
 		},
 		{
 			name: "context_canceled", compiled: nil, err: fmt.Errorf("commit aborted: %w", context.Canceled),
@@ -84,6 +105,15 @@ func TestRESTCommitErrorClassification_15281(t *testing.T) {
 			// must check context errors BEFORE compiled != nil.
 			name: "context_canceled_beats_config", compiled: nonNil, err: fmt.Errorf("commit aborted: %w", context.Canceled),
 			wantCode: http.StatusServiceUnavailable, wantCommitted: false, wantMsg: "commit busy",
+		},
+		{
+			// #16828 precedence: a POST-promotion abort wraps
+			// context.Canceled under the sentinel — committed wins over
+			// the pre-promotion "commit busy" reading.
+			name: "committed_not_applied_beats_context", compiled: nonNil,
+			err:      fmt.Errorf("%w: %w", configstore.ErrCommittedNotApplied, context.Canceled),
+			wantCode: http.StatusServiceUnavailable, wantCommitted: true, wantMsg: "committed but not applied",
+			wantStatus: "committed_not_applied",
 		},
 		{
 			name: "context_deadline", compiled: nil, err: fmt.Errorf("commit slow: %w", context.DeadlineExceeded),
@@ -106,7 +136,7 @@ func TestRESTCommitErrorClassification_15281(t *testing.T) {
 				req := withRESTConfigSession(
 					httptest.NewRequest("POST", "/api/v1/config/commit", nil), testRESTConfigSessionID)
 				s.configCommitHandler(rr, req)
-				assertRESTCommitErr15281(t, rr, tc.wantCode, tc.wantCommitted, tc.wantMsg)
+				assertRESTCommitErr15281(t, rr, tc.wantCode, tc.wantCommitted, tc.wantMsg, tc.wantStatus)
 			})
 			t.Run("CommitConfirmed", func(t *testing.T) {
 				store := restHolderStore(t)
@@ -121,13 +151,13 @@ func TestRESTCommitErrorClassification_15281(t *testing.T) {
 					httptest.NewRequest("POST", "/api/v1/config/commit-confirmed",
 						strings.NewReader(`{"minutes":5}`)), testRESTConfigSessionID)
 				s.configCommitConfirmedHandler(rr, req)
-				assertRESTCommitErr15281(t, rr, tc.wantCode, tc.wantCommitted, tc.wantMsg)
+				assertRESTCommitErr15281(t, rr, tc.wantCode, tc.wantCommitted, tc.wantMsg, tc.wantStatus)
 			})
 		})
 	}
 }
 
-func assertRESTCommitErr15281(t *testing.T, rr *httptest.ResponseRecorder, wantCode int, wantCommitted bool, wantMsg string) {
+func assertRESTCommitErr15281(t *testing.T, rr *httptest.ResponseRecorder, wantCode int, wantCommitted bool, wantMsg string, wantStatus ...string) {
 	t.Helper()
 	if rr.Code != wantCode {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, wantCode, rr.Body.String())
@@ -144,10 +174,14 @@ func assertRESTCommitErr15281(t *testing.T, rr *httptest.ResponseRecorder, wantC
 			t.Fatalf("committed response has no data; body: %s", rr.Body.String())
 		}
 		if !env.Data.Committed {
-			t.Fatalf("data.committed = false, want true (config is live); body: %s", rr.Body.String())
+			t.Fatalf("data.committed = false, want true (config is committed); body: %s", rr.Body.String())
 		}
-		if env.Data.Status != "committed_with_error" {
-			t.Fatalf("data.status = %q, want committed_with_error; body: %s", env.Data.Status, rr.Body.String())
+		want := "committed_with_error"
+		if len(wantStatus) > 0 && wantStatus[0] != "" {
+			want = wantStatus[0]
+		}
+		if env.Data.Status != want {
+			t.Fatalf("data.status = %q, want %q; body: %s", env.Data.Status, want, rr.Body.String())
 		}
 	} else if env.Data != nil && env.Data.Committed {
 		t.Fatalf("data.committed = true for a non-committed error; body: %s", rr.Body.String())
