@@ -686,10 +686,14 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				// result, and reds 14 existing NAT cells (#4521, #4422, #5144,
 				// #6812, deterministic-NAT flat-set). Measured both ways on master.
 				"address": {desc: "Address or range in the source NAT pool", args: 1, multi: true, groupReplace: true, placeholder: "<address>", children: nil},
-				"port": {desc: "Source pool port block configuration", wildcard: &schemaNode{desc: "Single translated source port (1..65535)", placeholder: "<port>"}, children: map[string]*schemaNode{
+				"port": {desc: "Source pool port block configuration", tailValidator: validateSourcePoolPortTail16717, wildcard: &schemaNode{desc: "Single translated source port (1..65535)", placeholder: "<port>"}, children: map[string]*schemaNode{
 					// #3906: `range <low> to <high>` (Junos) and the legacy
 					// `range low <lo> high <hi>` both collapse onto this multi
 					// leaf; the compiler parses both via parseSourcePoolPortRange.
+					// #16717: the port tail is a compiler-owned value
+					// grammar, validated as a unit on the port node (the
+					// flat-set AST splits `range low ...` across child
+					// nodes, so the unit is the whole port tail).
 					"range": {desc: "Explicit source port range for the pool (<low> to <high>)", multi: true, absorbBeforeWildcard: true, children: nil},
 					// #3906: preserve the original source port (1:1) — the
 					// pool translates the address only. Value-less leaf.

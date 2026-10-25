@@ -1244,7 +1244,12 @@ func (s *Server) mutationAuthzGuard(next http.Handler) http.Handler {
 		// #13249: evaluate body-independent operational commands before
 		// buffering. Request-decoded commands (notably system/action) must
 		// wait until their body has been buffered.
-		if !isRequestDecodedRoute9952(route) {
+		if restBodyIndependentCommandRoutes[route] {
+			if err := s.authorizeRESTCommandBare(r, cfg, p); err != nil {
+				deny(p, err)
+				return
+			}
+		} else if !isRequestDecodedRoute9952(route) {
 			if err := s.authorizeRESTCommand(r, cfg, p); err != nil {
 				deny(p, err)
 				return

@@ -459,6 +459,58 @@ func evaluateRESTForms9952(rules config.CompiledLoginRegexes, class, cmd, route 
 	return nil
 }
 
+// restBodyIndependentCommandRoutes are POST routes whose canonical
+// command does not depend on the request body (#16717). Their
+// argument-bearing forms (#16067) are rebuilt from the buffered body in
+// pass 2; pass 1 must still enforce an argument-free deny (e.g.
+// deny-commands "ping") before bufferMutationBody reads the caller.
+// Routes whose command is decoded from the body (system/action) or
+// whose selectors live in the query are not listed here.
+var restBodyIndependentCommandRoutes = map[string]bool{
+	"POST /api/v1/diagnostics/ping":       true,
+	"POST /api/v1/diagnostics/traceroute": true,
+}
+
+// authorizeRESTCommandBare judges only the argument-free charge of a
+// body-independent route, without touching r.Body. It mirrors
+// evaluateRESTForms9952's bare-form unanimity for the pre-buffer pass:
+// a deny that matches the bare command (or any canonical spelling of
+// it) vetoes, while an argument-scoped pattern simply does not match
+// the bare form and is left for the post-buffer pass to judge with
+// the full argument-bearing forms.
+func (s *Server) authorizeRESTCommandBare(r *http.Request, cfg *config.Config, p authz.Principal) error {
+	class := p.Class
+	if class == "" || p.Superuser {
+		return nil
+	}
+	rules, ok, err := config.OperationalLoginRegexesFor(cfg, class)
+	if err != nil {
+		return fmt.Errorf("permission denied: login class %q has an invalid command regex: %w", class, err)
+	}
+	if !ok {
+		return nil
+	}
+	route := canonicalRESTRoute14712(r.Method, r.URL.Path)
+	cmd, mapped := restRouteCommand[route]
+	if !mapped {
+		return fmt.Errorf("permission denied: login class %q restricts commands and this route "+
+			"has no canonical command to evaluate, so the restriction cannot be applied to it", class)
+	}
+	forms := restChargeForms16472(cmd)
+	if len(forms) == 0 {
+		return fmt.Errorf("permission denied: login class %q restricts commands and this "+
+			"request's arguments cannot be named as a command, so the restriction cannot be "+
+			"applied to it", class)
+	}
+	if decision := rules.EvaluateForms(forms[0], forms[0], forms[1:]...); !decision.Allowed {
+		if restDistinctRescue16472(rules, forms) {
+			return nil
+		}
+		return fmt.Errorf("permission denied: login class %q denies %q (%s)", class, cmd, decision.Reason)
+	}
+	return nil
+}
+
 // restDistinctRescue16472 is the REST twin of the gRPC/console #14687
 // distinct-narrower rescue (#16472), via the shared
 // cmdtree.DistinctNarrowerAllowed. pkg/api keeps its own thin wrapper

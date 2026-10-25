@@ -64,6 +64,8 @@ func natPoolGauges(t *testing.T, setLines []string, poolIDs map[string]uint8) (m
 // and published 64512 — a utilisation ratio 256x too high.
 func TestNATPoolTotalPortsGaugeExpandsPrefixMembers7000(t *testing.T) {
 	got, _ := natPoolGauges(t, []string{
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
 		"set security nat source pool wide address 203.0.113.0/24",
 		"set security nat source rule-set rs from zone trust",
 		"set security nat source rule-set rs to zone untrust",
@@ -85,6 +87,8 @@ func TestNATPoolTotalPortsGaugeExpandsPrefixMembers7000(t *testing.T) {
 // non-canonical mask makes the whole pool `invalid_pool`.
 func TestNATPoolTotalPortsGaugeIsZeroForRefusedPool7000(t *testing.T) {
 	got, _ := natPoolGauges(t, []string{
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
 		"set security nat source pool bad address 10.0.0.0/016",
 		"set security nat source pool good address 203.0.113.1/32",
 		"set security nat source rule-set rs from zone trust",
