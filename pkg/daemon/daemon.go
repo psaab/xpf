@@ -716,6 +716,7 @@ type Daemon struct {
 	snmpHash           uint64             // FxHash-free FNV of the SNMP stanza and its management-VRF bind
 	snmpHashSet        bool               // true once snmpHash reflects a running agent
 	snmpVRFDevice      string             // VRF device pinned by the running listener; empty means main table
+	snmpVRFIndex       int                // kernel ifindex of snmpVRFDevice at listener start; 0 = main table / unknown (#16626)
 	snmpMonitorRunning bool               // true while the link-state trap monitor goroutine is live
 	// Cumulative SNMP trap counters survive Agent replacement during
 	// disable/re-enable and management-VRF changes. Guarded by snmpReconMu.

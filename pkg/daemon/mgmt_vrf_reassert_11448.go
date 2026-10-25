@@ -52,12 +52,14 @@ func (d *Daemon) reassertMgmtVRFOnce(ctx context.Context) {
 
 	// #15223: re-create a deleted vrf-mgmt before deriving drift, so the
 	// bind pass below runs against the new device index in the same tick.
+	recreated := false
 	if d.routing != nil && d.mgmtVRFMissing() {
 		if !d.ensureVRFDeviceForReassert(routing.VRFSpec{
 			Name: config.ManagementVRFInstanceName, TableID: config.ManagementVRFTableID,
 		}) {
 			return
 		}
+		recreated = true
 	}
 	bindingChanged = d.activeTransport().BindingChanged
 	drifted = nil
@@ -65,6 +67,9 @@ func (d *Daemon) reassertMgmtVRFOnce(ctx context.Context) {
 		drifted = d.mgmtVRFInterfacesOutsideVRF()
 	}
 	if len(drifted) == 0 && !bindingChanged {
+		if recreated {
+			d.restartSNMPForVRFRecreate()
+		}
 		return
 	}
 	rebound := false
@@ -91,6 +96,37 @@ func (d *Daemon) reassertMgmtVRFOnce(ctx context.Context) {
 	if len(drifted) > 0 {
 		routeErr := mgmtVRFRouteReconcileFn(d)
 		d.noteMgmtRouteReconcileResult(routeErr)
+	}
+	if recreated {
+		d.restartSNMPForVRFRecreate()
+	}
+}
+
+// restartSNMPForVRFRecreate rebinds the SNMP listener after vrf-mgmt was
+// re-created (#16626). The old socket's SO_BINDTODEVICE resolved to the
+// dead ifindex; the name alone (snmpConfigHash / snmpVRFDevice) is
+// unchanged, so reconcileSNMP would no-op on the next commit. Restart
+// only when a listener is actually pinned to vrf-mgmt; a main-table
+// listener or a stopped agent needs no bounce. The restart goes through
+// reconcileSNMP, whose ifindex check performs the teardown+start and,
+// on a bind failure, leaves the hash unrecorded so the next commit
+// retries (#5110 contract).
+func (d *Daemon) restartSNMPForVRFRecreate() {
+	d.snmpReconMu.Lock()
+	running := d.snmpAgent != nil && d.snmpVRFDevice == config.ManagementVRFDeviceName
+	d.snmpReconMu.Unlock()
+	if !running {
+		return
+	}
+	if d.store == nil {
+		return
+	}
+	cfg := d.store.ActiveConfig()
+	if cfg == nil || !snmpEnabled(cfg) {
+		return
+	}
+	if d.reconcileSNMP(cfg) {
+		slog.Info("SNMP agent restarted after management VRF re-create", "issue", "#16626")
 	}
 }
 
