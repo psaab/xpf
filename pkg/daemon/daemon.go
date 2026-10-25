@@ -638,12 +638,10 @@ type Daemon struct {
 	// #15230: per-group build state. Failed groups (key family\x00instance)
 	// that the last reconcile could not build; healthy groups of the same
 	// family were published anyway. Retained old exporters for a failed
-	// group keep their own generation so a partial swap never closes a
-	// failed group's still-running exporter.
+	// group keep their per-exporter context (#16752) so a partial swap
+	// never closes a failed group's still-running exporter.
 	flowFailedGroups  map[string]bool
 	ipfixFailedGroups map[string]bool
-	flowGens          []v9Gen
-	ipfixGens         []ipfixGen
 	dhcpRelay         *dhcprelay.Manager
 	// mgmt owns the HTTP/HTTPS management-listener lifecycle (#5866): it starts
 	// the listener at boot and, on every day-2 commit, reconciles the live
@@ -1859,7 +1857,6 @@ type Daemon struct {
 	// can be made permanent without a reboot. Generic bootstrap
 	// (factory / fail-closed / first-commit rollback) leaves it false.
 	bootstrapFromRefusedRollback atomic.Bool
-
 
 	// bootstrapLifelineMu protects the pre-takeover snapshot from an explicit
 	// commit-confirm resolving the first-commit window outside applySem.

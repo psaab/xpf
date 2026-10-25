@@ -196,7 +196,9 @@ func TestTelemetryJoinCompletesWhenItCan9035(t *testing.T) {
 // the budget, and neither may carry a bare Wait() on its generation
 // WaitGroup. Driving the real teardown needs live exporters and sockets, so
 // this is the half a behavioural test cannot reach — and it is the half the
-// mutation showed was unguarded.
+// mutation showed was unguarded. #16752 moved the join into the
+// per-group teardowns (teardownV9GroupsLocked/teardownIPFIXGroupsLocked);
+// the Locked wrappers only capture and unpublish the bundle.
 func TestExporterTeardownsJoinThroughTheBudget9035(t *testing.T) {
 	const file = "daemon_flowexport.go"
 	fset := token.NewFileSet()
@@ -204,7 +206,7 @@ func TestExporterTeardownsJoinThroughTheBudget9035(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse %s: %v", file, err)
 	}
-	want := map[string]bool{"teardownV9Locked": true, "teardownIPFIXLocked": true}
+	want := map[string]bool{"teardownV9GroupsLocked": true, "teardownIPFIXGroupsLocked": true}
 	seen := map[string]bool{}
 	budgeted := map[string]int{}
 	bareWait := map[string][]string{}

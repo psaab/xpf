@@ -888,9 +888,9 @@ the new config, only the failing group is marked failed
 (`FlowExportFailedGroups`, family `BuildFailed` stays set, hash not
 recorded so the 30s retry / next commit retries it), and a failing
 group with a previously running exporter keeps that exporter.
-Generations are tracked per build (`flowGens`/`ipfixGens`) so a partial
-swap never closes a retained group; teardown joins every generation
-through `joinWithBudget`.
+Each exporter runs under its own child context (#16752) so a partial
+swap retires exactly the replaced groups and never closes a retained
+group; teardown joins every live group through `joinWithBudget`.
 
 Interface sampling is likewise no longer zone-OR-ed: `BuildSamplingZones`
 also records `IfacesV4`/`IfacesV6` keyed by authored unit ref, and the
