@@ -254,11 +254,41 @@ func parseNATMatchScopes(node *Node) []natMatchScope {
 	return out
 }
 
+// dedupeNATScopes drops exact (kind, value) repeats, preserving first-seen
+// order (#16874). A repeated scope value — `from zone [ untrust untrust ]`,
+// repeated `from zone untrust;` clauses, or a packed-header restatement —
+// carries no meaning in Junos (a list value repeated is one value), but
+// before this dedupe the Cartesian expansion emitted one rule-set per
+// spelling. For NPTv6 that produced two identical StaticNATRuleSets whose
+// strict-commit self-skip (#4339, keyed on rule-set+rule names only)
+// suppressed the overlap verdict while the dataplane pre-pass
+// (NPTv6OverlapConflict, no name-identity skip) and the Rust helper both
+// rejected "rule r1 overlaps rule r1" — so a clean commit wedged every
+// later apply. Distinct values (including distinct kinds sharing a value
+// string, and the match-any {zone, ""} default) are untouched.
+func dedupeNATScopes(scopes []natMatchScope) []natMatchScope {
+	if len(scopes) < 2 {
+		return scopes
+	}
+	seen := make(map[natMatchScope]struct{}, len(scopes))
+	out := scopes[:0]
+	for _, s := range scopes {
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
 // collectNATScopes reads the `from` (and, when wantTo, `to`) clauses of a
 // rule-set node into from/to scope lists. It injects the match-any default
 // ({kind:"zone", value:""}) only for an absent clause; a present clause that
 // contains no non-empty scope stays empty so it cannot widen to match-any.
 // #3096.
+//
+// Repeated (kind, value) scopes are deduped (#16874): see dedupeNATScopes.
 //
 // natKind (source|destination|static) is accepted for call-site symmetry
 // with the gates; the packed-header expansion is kind-independent.
@@ -286,7 +316,7 @@ func collectNATScopes(rsNode *Node, wantTo bool, natKind ...string) (fromScopes,
 	if wantTo && !toPresent {
 		toScopes = []natMatchScope{{kind: "zone", value: ""}}
 	}
-	return fromScopes, toScopes
+	return dedupeNATScopes(fromScopes), dedupeNATScopes(toScopes)
 }
 
 // #16604: an authored `routing-instance default` with no instance of
