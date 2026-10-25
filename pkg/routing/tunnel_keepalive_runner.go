@@ -3,6 +3,7 @@ package routing
 import (
 	"context"
 	"log/slog"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -259,6 +260,21 @@ func keepaliveProbeDeadline(intervalSec int) time.Duration {
 //  5. The single LinkSetUp/LinkSetDown, OUTSIDE state.mu, capturing err.
 //  6. Commit Up ONLY on netlink success; on error leave Up unchanged so
 //     the transition retries.
+//
+// #16582: the down intent is NOT gated solely on state.Up. Once
+// Failures >= MaxRetries the tunnel is held down, and a second writer
+// (the dataplane zone compile, an operator `ip link set up`) can have
+// re-upped the netdev while state.Up stayed false — the old
+// `state.Up && Failures>=MaxRetries` edge then never fired again and
+// the dead tunnel stayed admin UP for the rest of the outage. A dead
+// tick at/past threshold therefore also issues LinkSetDown when the
+// OBSERVED link is admin UP (IFF_UP), even though state.Up is already
+// false. That re-down is idempotent: when the link is observed down
+// no netlink op is issued, so the steady held-down state still costs
+// zero LinkSetDowns (TestKeepaliveDeadGoesDownOnce). A LinkSetDown
+// error on the re-down leaves Up=false (already committed) and is
+// simply retried on the next dead tick, because the observed-UP check
+// runs again.
 func (t *tunnelManager) keepaliveLoop(ctx context.Context, done chan struct{}, tunnelName string, state *KeepaliveState, prober tunnelProber, gen *atomic.Uint64, startGen uint64) {
 	defer close(done)
 	// Clamp before the Duration multiply: an un-gated / overflowing
@@ -301,7 +317,13 @@ func (t *tunnelManager) keepaliveTick(tunnelName string, state *KeepaliveState, 
 		state.LastFailure = time.Now()
 		state.clearUnknownLocked()
 		state.Failures++
-		if state.Up && state.Failures >= state.MaxRetries {
+		if state.Failures >= state.MaxRetries {
+			// #16582: see the keepaliveLoop contract above — at/past
+			// threshold the link must be down regardless of whether
+			// state.Up still believes it is. wantDown here only
+			// ARMS the observed-state check after LinkByName; the
+			// LinkSetDown itself is suppressed below when the link
+			// is already observed down.
 			wantDown = true
 		}
 	case ProbeUnsupported:
@@ -334,6 +356,21 @@ func (t *tunnelManager) keepaliveTick(tunnelName string, state *KeepaliveState, 
 		return
 	}
 
+	// ---- Step 3b (#16582): suppress a redundant down ----
+	// wantDown at/past threshold with state.Up already false means
+	// either the ordinary held-down steady state (link observed down:
+	// nothing to do, no netlink op) or an external re-up (link
+	// observed admin UP: fall through and re-down it). wantUp and the
+	// primary down edge (state.Up true at intent time) always act.
+	if wantDown {
+		state.mu.Lock()
+		alreadyDown := !state.Up
+		state.mu.Unlock()
+		if alreadyDown && link.Attrs().Flags&net.FlagUp == 0 {
+			return
+		}
+	}
+
 	// ---- Step 4: lock-free generation guard (defense-in-depth) --
 	if gen.Load() != startGen {
 		// The link was recreated by Apply since this runner started.
@@ -355,12 +392,15 @@ func (t *tunnelManager) keepaliveTick(tunnelName string, state *KeepaliveState, 
 	if nlErr != nil {
 		// Up retains its pre-transition value → the transition is
 		// retried next tick until the kernel op succeeds. Never a
-		// lost transition (Codex r3 counterexample).
+		// lost transition (Codex r3 counterexample). For a #16582
+		// re-down Up is already false, so retaining it is correct and
+		// the observed-UP check re-arms the retry next dead tick.
 		slog.Warn("keepalive netlink transition failed; will retry",
 			"tunnel", tunnelName, "want_up", wantUp, "err", nlErr)
 		return
 	}
 	state.mu.Lock()
+	wasUp := state.Up
 	if wantUp {
 		state.Up = true
 		state.Failures = 0
@@ -373,8 +413,15 @@ func (t *tunnelManager) keepaliveTick(tunnelName string, state *KeepaliveState, 
 			"failures", state.Failures)
 	}
 	state.mu.Unlock()
-	if callback := t.livenessChange.Load(); callback != nil {
-		(*callback)(tunnelName, wantUp)
+	// #16582: a re-down of an externally re-upped link is not a
+	// liveness transition (Up was already false; the snapshot already
+	// reports the endpoint down), so it must not re-fire the
+	// liveness-change callback — that would spuriously nudge the
+	// route listener on every re-down.
+	if wantUp || wasUp {
+		if callback := t.livenessChange.Load(); callback != nil {
+			(*callback)(tunnelName, wantUp)
+		}
 	}
 }
 
@@ -456,4 +503,37 @@ func (t *tunnelManager) GetKeepaliveState(tunnelName string) *KeepaliveState {
 		return nil
 	}
 	return runner.state
+}
+
+// TunnelHeldDown reports whether a live keepalive runner for the
+// tunnel currently holds it down: a runner exists and its committed
+// state is Up==false with Failures at/past MaxRetries (#16582).
+//
+// The failures threshold matters: a freshly started runner is
+// Up==true, and a runner that has merely not yet succeeded (or is in
+// hold-on-unknown with failures below threshold) must not be read as
+// holding the link down — the link's admin state was never taken down
+// by keepalive in that case. Only the state keepaliveTick itself
+// commits on the down edge (Up=false after Failures>=MaxRetries,
+// including a LinkSetDown that is still being retried via the
+// observed-UP check) counts.
+//
+// Callers outside the routing package (the dataplane zone compile,
+// via a resolver registered by the daemon) use this to avoid
+// re-upping a tunnel keepalive is holding down. A nil manager or a
+// tunnel with no runner answers false.
+func (t *tunnelManager) TunnelHeldDown(tunnelName string) bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	runner, ok := t.keepalives[tunnelName]
+	t.mu.Unlock()
+	if !ok || runner == nil || runner.state == nil {
+		return false
+	}
+	state := runner.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return !state.Up && state.Failures >= state.MaxRetries
 }

@@ -173,6 +173,19 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// `system management-interface` leaf. Set even in NoDataplane mode is
 	// harmless (the compiler is not exercised there).
 	dataplane.SetProtectedInterfaceResolver(d.resolveProtectedInterfaces)
+	// #16582: the dataplane zone compile must not re-up a GRE tunnel a
+	// keepalive runner is holding down. d.routing is not constructed
+	// until phase 3, so the resolver reads it lazily on each compile;
+	// a nil routing manager (NoDataplane/test paths) answers not-held.
+	// The keepalive runner also re-downs an externally re-upped link
+	// on its next dead tick, so this is the fast path, not the only
+	// defence.
+	dataplane.SetTunnelHeldDownResolver(func(linuxName string) bool {
+		if d.routing == nil {
+			return false
+		}
+		return d.routing.TunnelHeldDown(linuxName)
+	})
 
 	// ===== PHASES 1-4: mutating startup, cancellable via the signal ctx (#5807) =====
 	// Each phase mutates real host / manager / dataplane state. runStartupOrAbort

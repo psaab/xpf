@@ -1290,15 +1290,29 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 		if ifCfg, ok := cfg.Interfaces.Interfaces[cfgName]; ok && ifCfg != nil && ifCfg.Disable {
 			isDisabled = true
 			if nlErr == nil {
-				if downErr = netlink.LinkSetDown(nl); downErr != nil {
+				if downErr = zoneLinkSetDownSeam(nl); downErr != nil {
 					slog.Warn("failed to bring disabled interface down",
 						"name", physName, "err", downErr)
 				} else {
 					slog.Info("interface administratively disabled", "name", physName)
 				}
 			}
+		} else if nlErr == nil && tunnelHeldDown(physName) {
+			// #16582: a keepalive runner holds this tunnel down
+			// (peer dead, failures past threshold). Bringing it up
+			// here would restore its connected/static/IGP routes
+			// and re-admit it to the userspace FIB ECMP set for
+			// the rest of the outage, while `show interfaces`
+			// keepalive status still reads down. Leave the admin
+			// state exactly as keepalive left it; the runner
+			// re-ups it on the first alive probe. The surface is
+			// intentionally down, not unarmed — it stays out of
+			// the XDP attach set below just like a disabled one.
+			isDisabled = true
+			slog.Info("zone interface held down by tunnel keepalive; leaving down",
+				"name", physName, "zone", name)
 		} else if nlErr == nil {
-			if err := netlink.LinkSetUp(nl); err != nil {
+			if err := zoneLinkSetUpSeam(nl); err != nil {
 				slog.Warn("failed to bring interface up",
 					"name", physName, "err", err)
 			}

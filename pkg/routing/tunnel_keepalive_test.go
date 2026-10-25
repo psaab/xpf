@@ -2,6 +2,7 @@ package routing
 
 import (
 	"errors"
+	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,6 +54,8 @@ func (p *fakeProber) Probe(transportInstance, source, dst string, seq int, nonce
 type kaOps struct {
 	mu sync.Mutex
 
+	observedUp bool
+
 	setUps   int
 	setDowns int
 
@@ -68,15 +71,23 @@ type kaOps struct {
 	entered   chan struct{}
 }
 
-func newKaOps() *kaOps { return &kaOps{} }
+func newKaOps() *kaOps { return &kaOps{observedUp: true} }
 
+// observedUp (#16582) models the kernel admin state keepaliveTick
+// observes via LinkByName: true renders IFF_UP on the returned link.
+// Tests flip it to simulate an external writer re-upping a
+// keepalive-down tunnel between ticks.
 func (o *kaOps) LinkByName(name string) (netlink.Link, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.byNameErr != nil {
 		return nil, o.byNameErr
 	}
-	return &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: name, Index: 1}}, nil
+	attrs := netlink.LinkAttrs{Name: name, Index: 1}
+	if o.observedUp {
+		attrs.Flags = net.FlagUp
+	}
+	return &netlink.Dummy{LinkAttrs: attrs}, nil
 }
 
 func (o *kaOps) LinkAdd(netlink.Link) error { return nil }
@@ -98,6 +109,7 @@ func (o *kaOps) AddrList(netlink.Link, int) ([]netlink.Addr, error) {
 func (o *kaOps) LinkSetUp(netlink.Link) error {
 	o.mu.Lock()
 	o.setUps++
+	o.observedUp = true
 	err := o.setUpErr
 	o.mu.Unlock()
 	return err
@@ -106,6 +118,9 @@ func (o *kaOps) LinkSetUp(netlink.Link) error {
 func (o *kaOps) LinkSetDown(netlink.Link) error {
 	o.mu.Lock()
 	o.setDowns++
+	if o.setDownErr == nil {
+		o.observedUp = false
+	}
 	block := o.blockDown
 	entered := o.entered
 	err := o.setDownErr

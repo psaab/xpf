@@ -898,9 +898,16 @@ when the existing kernel link is genuinely incompatible:
 - **Keepalives** (BOTH the anchor and the legacy branch, #4071): runners
   are reconciled by normalized identity `(remote, source, interval,
   retry<=0→3)` and survive unrelated applies; `LinkSetUp` is SKIPPED
-  when a retained runner holds the tunnel down (the down-transition in
-  `keepaliveLoop` is gated on `state.Up`, so re-upping would strand
-  the link admin UP). A change to the tunnel SOURCE restarts the runner
+  when a retained runner holds the tunnel down. (#16582: that skip
+  alone was not enough — the dataplane zone compile is a second
+  writer that re-upped the tunnel on any commit during an outage.
+  Two defences now close it: the zone loop consults the daemon-
+  registered `TunnelHeldDown` resolver by Linux netdev name before
+  `LinkSetUp` and leaves a held-down tunnel down, and the runner
+  re-downs a link OBSERVED admin UP on any dead tick at/past
+  threshold, so writers the resolver does not cover are corrected
+  within one probe interval. The observed-down steady state issues
+  no extra `LinkSetDown`.) A change to the tunnel SOURCE restarts the runner
   (#1918 §5c): the source is the probe bind address. The prober is
   dataplane-agnostic (raw ICMP over the underlay FIB), so the production
   userspace-dp anchor path (`applyAnchorLocked`) starts the SAME engine as
@@ -1022,7 +1029,12 @@ prior underlay-only liveness behavior.
   `LinkByName`/`LinkSet*` error leaves `Up` unchanged so the transition
   retries next tick (never a lost or half-applied transition), and a
   racing `GetStatus` never blocks behind a slow netlink op nor observes
-  an uncommitted `Up`.
+  an uncommitted `Up`. (#16582: the down intent arms at
+  `Failures >= MaxRetries` regardless of `state.Up`; after
+  `LinkByName` it is suppressed only when `state.Up` is already false
+  AND the link is observed admin DOWN, so an externally re-upped link
+  is re-downed while the held-down steady state stays silent. A
+  re-down does not re-fire the liveness-change callback.)
 - **Recreate safety**: both `applyKernelTunnelLocked` and (since #4071)
   `applyAnchorLocked` cancel + DRAIN the existing keepalive runner BEFORE
   they delete/recreate the kernel link (drain-before-recreate), so no
