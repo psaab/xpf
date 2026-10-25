@@ -6,41 +6,37 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #15193 (D04-01): the #3952 PSK id selector scopes the secret to the peer
-// ADDRESS only, and no remote.id is rendered for a fixed-address gateway.
-// With no remote-identity/local-identity (the Junos default shape), charon
-// acting as INITIATOR looks the key up as (local-ip, %any), finds no secret
-// whose id list contains the local identity, and aborts IKE_AUTH. Every
-// xpf-initiated path fails; only peer-initiated SAs come up and two xpf
-// boxes in this shape never establish the tunnel either way.
+// #15193 (D04-01) / #16708 (R3-VA16-S1): the #3952 PSK id selector scopes
+// the secret to the peer ADDRESS only, and no remote.id is rendered for a
+// fixed-address gateway. With no remote-identity/local-identity (the Junos
+// default shape) the #15193 fix added a box-shared local owner (%any /
+// pinned local address / local-id) so charon's initiator lookup would hit.
+// #16708 measured that owner matching the responder side of every exchange
+// (charon tries every secret whose ANY owner matches either side), so a
+// holder of one VPN's PSK authenticated into every other VPN. The local
+// owner is therefore REMOVED: secrets carry peer selectors only. The
+// initiator cells still establish because the render pins remote.id (the
+// peer identity charon initiates against), so the initiator lookup
+// carries the peer as other_id — re-measured in the charon netns lab
+// (docs/log/16708.md) for IKEv2 in both directions.
 //
-// Contract pinned here (fix direction: render remote id = peer address AND
-// add this side's local identity/address as a second secret owner, so both
-// selector spells required by charon's lookups resolve):
+// Contract pinned here:
 //
 //   - fixed-address GW, no identities, no explicit local-address: remote.id
-//     is the peer address and the secret owners include the local side
-//     (%any) so the initiator lookup (<local ip>, %any) matches regardless of
-//     which local source address charon picks.
-//   - fixed-address GW, no identities, explicit LocalAddress: secret owners
-//     are exactly {peer address, local address} — the peer selector keeps
-//     #3952/#14591 isolation (no cross-peer claim) and the local address is
-//     the exact initiator lookup key.
-//   - multi-address GW: remote.id is NOT pinned to one address (#15766
-//     supersedes the first-address pin — swanctl remote.id is
-//     single-valued and the peer may present from either address);
-//     the secret carries one selector per peer address plus local.
+//     is the peer address and the secret owner is exactly {peer address}.
+//   - fixed-address GW, no identities, explicit LocalAddress: secret owner
+//     is exactly {peer address} (no local address, no %any).
+//   - multi-address GW: remote.id is NOT pinned to one address (#15766);
+//     the secret carries one selector per peer address, nothing else.
 //   - local-identity configured (no remote-identity): local.id unchanged,
-//     remote.id defaults to the peer address, secret owners include the
-//     configured local identity (never re-adds the raw local address when an
-//     explicit local identity exists — strongSwan uses the configured id).
-//   - remote-identity configured: both ids and the secret owners are
-//     byte-identical to pre-fix (#3952 control).
-//   - IPv6 fixed address: same treatment with the v6 peer/local addresses.
+//     remote.id defaults to the peer address, secret owner is exactly
+//     {peer address} (no local-id owner — a box-shared local-id would
+//     cross VPNs sharing it, #16708).
+//   - remote-identity configured: remote.id / local.id unchanged, secret
+//     owner is exactly {remote-id}.
+//   - IPv6 fixed address: same treatment with the v6 peer address.
 //   - two fixed-address default-shape VPNs: each secret is claimed by its
-//     own peer only; the shared %any owner alone never lets one VPN's secret
-//     match the other peer (isolation comes from the peer selector — an
-//     extra local owner can never cause a wrong-peer match).
+//     own peer only; no selector value is shared between the two secrets.
 
 func initiatorCfg15193(gw *config.IPsecGateway, psk string) *config.IPsecConfig {
 	return &config.IPsecConfig{
@@ -79,15 +75,10 @@ func TestInitiatorDefaultIdentity15193(t *testing.T) {
 		if blk.secret != "site-secret" {
 			t.Errorf("ike-gw secret = %q, want site-secret", blk.secret)
 		}
-		// Peer selector (responder + discriminating owner, #3952 kept).
-		if !containsStr(blk.ids, "203.0.113.1") {
-			t.Errorf("ike-gw id selectors %v missing peer 203.0.113.1", blk.ids)
-		}
-		// Initiator owner: charon looks the key up as (<local ip>, %any)
-		// when we initiate with no local identity/address; without an
-		// owner matching that lookup the secret is never selected.
-		if !containsStr(blk.ids, "%any") {
-			t.Errorf("ike-gw id selectors %v missing local initiator owner %%any (charon initiator lookup (<local ip>, %%any) finds no key)", blk.ids)
+		// Peer selector only (#16708): no local owner may be emitted — a
+		// box-shared owner matches the responder side of every exchange.
+		if len(blk.ids) != 1 || !containsStr(blk.ids, "203.0.113.1") {
+			t.Errorf("ike-gw id selectors %v, want exactly [203.0.113.1] (peer selector only, #16708)", blk.ids)
 		}
 	})
 
@@ -106,16 +97,8 @@ func TestInitiatorDefaultIdentity15193(t *testing.T) {
 		conn.at(t, "local").hasNoSetting(t, "id")
 
 		blk := parseSecretBlocks(t, text)["ike-gw"]
-		if !containsStr(blk.ids, "203.0.113.1") {
-			t.Errorf("id selectors %v missing peer 203.0.113.1", blk.ids)
-		}
-		// Exact initiator key: with local_addrs pinned, charon's lookup is
-		// (198.51.100.1, 203.0.113.1) — the local address must be an owner.
-		if !containsStr(blk.ids, "198.51.100.1") {
-			t.Errorf("id selectors %v missing local initiator owner 198.51.100.1", blk.ids)
-		}
-		if containsStr(blk.ids, "%any") {
-			t.Errorf("id selectors %v: %%any owner must not be emitted when the local address is the exact key (peer-address discrimination depends on it)", blk.ids)
+		if len(blk.ids) != 1 || !containsStr(blk.ids, "203.0.113.1") {
+			t.Errorf("id selectors %v, want exactly [203.0.113.1] (peer selector only; the pinned local address is a box-shared owner, #16708)", blk.ids)
 		}
 	})
 
@@ -131,10 +114,8 @@ func TestInitiatorDefaultIdentity15193(t *testing.T) {
 		conn.at(t, "remote").hasNoSetting(t, "id")
 
 		blk := parseSecretBlocks(t, text)["ike-gw"]
-		for _, want := range []string{"203.0.113.1", "203.0.113.2", "198.51.100.1"} {
-			if !containsStr(blk.ids, want) {
-				t.Errorf("id selectors %v missing %q (one selector per peer address plus local owner)", blk.ids, want)
-			}
+		if len(blk.ids) != 2 || !containsStr(blk.ids, "203.0.113.1") || !containsStr(blk.ids, "203.0.113.2") {
+			t.Errorf("id selectors %v, want exactly [203.0.113.1 203.0.113.2] (one selector per peer address, no local owner, #16708)", blk.ids)
 		}
 	})
 
@@ -146,8 +127,8 @@ func TestInitiatorDefaultIdentity15193(t *testing.T) {
 		conn := parseSwanctlDoc(t, text).at(t, "connections", "gw")
 		conn.at(t, "remote").requireSetting(t, "id", `"2001:db8:ffff::1"`)
 		blk := parseSecretBlocks(t, text)["ike-gw"]
-		if !containsStr(blk.ids, "2001:db8:ffff::1") || !containsStr(blk.ids, "2001:db8:1::1") {
-			t.Errorf("id selectors %v, want peer 2001:db8:ffff::1 and local 2001:db8:1::1", blk.ids)
+		if len(blk.ids) != 1 || !containsStr(blk.ids, "2001:db8:ffff::1") {
+			t.Errorf("id selectors %v, want exactly [2001:db8:ffff::1] (peer selector only, #16708)", blk.ids)
 		}
 	})
 
@@ -162,17 +143,8 @@ func TestInitiatorDefaultIdentity15193(t *testing.T) {
 		conn.at(t, "remote").requireSetting(t, "id", `"203.0.113.1"`)
 
 		blk := parseSecretBlocks(t, text)["ike-gw"]
-		if !containsStr(blk.ids, "203.0.113.1") {
-			t.Errorf("id selectors %v missing peer 203.0.113.1", blk.ids)
-		}
-		if !containsStr(blk.ids, "@fw.example.com") {
-			t.Errorf("id selectors %v missing configured local identity @fw.example.com (initiator lookup key)", blk.ids)
-		}
-		if containsStr(blk.ids, "198.51.100.1") {
-			t.Errorf("id selectors %v: raw local address must not be added when an explicit local identity is configured (strongSwan uses the configured id)", blk.ids)
-		}
-		if containsStr(blk.ids, "%any") {
-			t.Errorf("id selectors %v: %%any must not be added when a local identity is configured", blk.ids)
+		if len(blk.ids) != 1 || !containsStr(blk.ids, "203.0.113.1") {
+			t.Errorf("id selectors %v, want exactly [203.0.113.1] (peer selector only; a shared local-id owner crosses VPNs, #16708)", blk.ids)
 		}
 	})
 
@@ -188,12 +160,12 @@ func TestInitiatorDefaultIdentity15193(t *testing.T) {
 		conn.at(t, "local").requireSetting(t, "id", `"@fw.example.com"`)
 
 		blk := parseSecretBlocks(t, text)["ike-gw"]
-		if len(blk.ids) != 2 || !containsStr(blk.ids, "@peer.example.com") || !containsStr(blk.ids, "@fw.example.com") {
-			t.Errorf("id selectors %v, want exactly [@peer.example.com @fw.example.com] (pre-fix #3952 shape)", blk.ids)
+		if len(blk.ids) != 1 || !containsStr(blk.ids, "@peer.example.com") {
+			t.Errorf("id selectors %v, want exactly [@peer.example.com] (peer selector only, #16708)", blk.ids)
 		}
 	})
 
-	t.Run("two default-shape VPNs keep peer isolation under shared initiator owner", func(t *testing.T) {
+	t.Run("two default-shape VPNs share no selector value", func(t *testing.T) {
 		cfg := &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
 				"a": {Gateway: "gw-a", PSK: config.NewSecret("secret-a")},
@@ -214,18 +186,18 @@ func TestInitiatorDefaultIdentity15193(t *testing.T) {
 		}
 		blocks := parseSecretBlocks(t, text)
 		a, b := blocks["ike-gw-a"], blocks["ike-gw-b"]
-		// Each secret claims its own peer; the peer selector is what keeps
-		// charon from binding secret-a to peer 203.0.113.2.
 		if !containsStr(a.ids, "203.0.113.1") || containsStr(a.ids, "203.0.113.2") {
 			t.Errorf("ike-gw-a selectors %v must claim 203.0.113.1 only among peers", a.ids)
 		}
 		if !containsStr(b.ids, "203.0.113.2") || containsStr(b.ids, "203.0.113.1") {
 			t.Errorf("ike-gw-b selectors %v must claim 203.0.113.2 only among peers", b.ids)
 		}
-		// Both carry the initiator owner so each can initiate; a shared
-		// local owner cannot cross peers because the peer selector differs.
-		if !containsStr(a.ids, "%any") || !containsStr(b.ids, "%any") {
-			t.Errorf("initiator owners: a=%v b=%v, want %%any on both", a.ids, b.ids)
+		// #16708 acceptance: no selector value is shared between the two
+		// secrets (pre-fix both carried the %any local owner).
+		for _, av := range a.ids {
+			if containsStr(b.ids, av) {
+				t.Errorf("selector %q shared between ike-gw-a %v and ike-gw-b %v (#16708)", av, a.ids, b.ids)
+			}
 		}
 	})
 

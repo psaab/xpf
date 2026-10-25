@@ -103,9 +103,12 @@ func TestIKEGatewayMultiAddressCompileValidateAndRender(t *testing.T) {
 		if !ok {
 			t.Fatalf("missing ike-gw1 secret block:\n%s", text)
 		}
-		for _, want := range []string{"198.51.100.1", "198.51.100.2", "198.51.100.10"} {
+		if len(blk.ids) != 2 {
+			t.Errorf("ike-gw1 id selectors %v, want exactly the two peer addresses (no local owner, #16708)", blk.ids)
+		}
+		for _, want := range []string{"198.51.100.1", "198.51.100.2"} {
 			if !containsStr(blk.ids, want) {
-				t.Errorf("ike-gw1 id selectors %v missing %q (one selector per peer address plus local owner)", blk.ids, want)
+				t.Errorf("ike-gw1 id selectors %v missing %q (one selector per peer address)", blk.ids, want)
 			}
 		}
 		return text

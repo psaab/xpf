@@ -926,39 +926,48 @@ all files stay in `package ipsec`, so the public API is unchanged.
   `remote.id`: the hostname is a dial target strongSwan DNS-resolves,
   never the identity the peer presents (Junos/strongSwan default to
   the resolved/own IP), so pinning it refused default-identity peers
-  in both directions. The secret is then selected by its local owner
-  alone (the shared-owner isolation question is #16708). Since #15193
-  the render ALSO pins the Junos default remote identity on fixed-address
-  PSK gateways with no `remote-identity`/`local-identity` configured:
-  `remote { id = "<sole IP-literal gateway address>" }` (per-address PSK selectors
-  still cover the whole multi-address list), and the secret gains a LOCAL
-  owner so charon's initiator-side shared-key lookup selects it — the
-  configured `local-id` when set, else the pinned local address, else
-  `%any` (charon picks the source per attempt, so only the wildcard owner
-  matches whatever local IP it presents; `%any` as one owner among peer
-  selectors cannot cross peers because selection still requires the peer
-  selector). Before this, a default-shape (no identities) fixed-address
-  VPN rendered neither, charon-as-initiator looked the key up as
-  `(<local ip>, %any)` / `(%any, <remote ip>)`, found no matching secret,
-  and aborted IKE_AUTH — every xpf-initiated path failed and two
-  default-shape xpf boxes never established the tunnel. Pubkey
-  connections and responder-only gateways are unchanged. A dynamic
-  responder-only peer (`remote_addrs = %any`) with no `remote-id` and no
-  dynamic hostname has nothing to scope by: since #14591 such a PSK VPN
-  is rejected at commit (`validateIPsecResponderIdentityStrict`) and
-  skipped at render, so an unscoped secret never loads. (The #14591 rule
-  targets the lone `%any` PEER selector, which would match all peers; the
-  #15193 local-owner `%any` never replaces the peer selector.)
-  Configure `remote-identity` on the gateway (or use
-  `dynamic hostname <fqdn>`); the peer presenting that identity with
-  this VPN's key is then the only one the secret matches. Since #15989
-  (H-4) the same rule covers a gateway-less PSK VPN (no `ike gateway`
-  leaf): it renders with no `remote_addrs` and no peer selector, so it
-  would likewise carry a lone `%any` selector — commit rejects it and
-  the render belt skips it. Inline endpoints (a usable IP/hostname in
+  in both directions. Since #16708 such a hostname-addressed PSK VPN
+  with no `remote-identity` is rejected at commit and skipped at
+  render (below). Since #15193 the render ALSO pins the Junos default
+  remote identity on fixed-address PSK gateways with no
+  `remote-identity`/`local-identity` configured:
+  `remote { id = "<sole IP-literal gateway address>" }` (per-address
+  PSK selectors still cover the whole multi-address list). Before
+  #15193, a default-shape (no identities) fixed-address VPN rendered
+  neither, charon-as-initiator found no matching secret, and aborted
+  IKE_AUTH — every xpf-initiated path failed and two default-shape xpf
+  boxes never established the tunnel. #15193 fixed that by ALSO adding
+  a LOCAL owner to the secret (the configured `local-id`, else the
+  pinned local address, else `%any`); #16708 (R3-VA16-S1) REMOVES that
+  owner. Measured against strongSwan 6.1.0, a secret is enumerated
+  when ANY of its owners matches EITHER side of the `(me, other)`
+  pair, and the IKEv2 PSK verifier tries every enumerated secret
+  against the peer's AUTH — so the box-shared local owner made every
+  secret verify every peer: a holder of one VPN's PSK authenticated
+  into another fixed VPN from that peer's address, and into a
+  responder-only `dynamic hostname` VPN from any address by claiming
+  its identity (reopening #14591). With peer selectors only, the
+  initiator lookup still hits: the pinned `remote.id` carries the peer
+  as `other_id` (IKEv2 build and IKEv1 configured-identity/address
+  fallbacks), re-measured in the charon netns lab for both directions
+  (`docs/log/16708.md`). No selector value is shared between two
+  secrets in a render. Pubkey connections and responder-only gateways
+  render their connection shape unchanged (responder-only secrets were
+  always peer-only). A dynamic responder-only peer
+  (`remote_addrs = %any`) with no `remote-id` and no dynamic hostname
+  has nothing to scope by: since #14591 such a PSK VPN is rejected at
+  commit (`validateIPsecResponderIdentityStrict`) and skipped at
+  render, so an unscoped secret never loads. Configure
+  `remote-identity` on the gateway (or use `dynamic hostname <fqdn>`);
+  the peer presenting that identity with this VPN's key is then the
+  only one the secret matches. Since #15989 (H-4) the same rule covers
+  a gateway-less PSK VPN (no `ike gateway` leaf): it renders with no
+  `remote_addrs` and no peer selector — commit rejects it and the
+  render belt skips it. Inline IP endpoints (a usable IP literal in
   the gateway leaf, no gateway object) are unaffected: the peer
-  address scopes their secret. A cert/EAP VPN has no PSK,
-  so it emits no secret block and is unaffected. The selector values reuse
+  address scopes their secret; inline hostname endpoints are refused
+  like hostname gateways (#16708). A cert/EAP VPN has no PSK, so it
+  emits no secret block and is unaffected. The selector values reuse
   the `sanitizeSwanctlValue`/`escapeSwanctlQuoted` quoting (#1798/#2126).
   Two #14139 (D5-06) refinements: a comma-separated multi-address gateway
   yields one `id-<n>` per address (the comma-joined string is not an IKE

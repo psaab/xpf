@@ -11441,20 +11441,28 @@ reserved for whole-dataplane selection where a rewrite shim
     the tunnel by claiming that peer's identity. Commit rejects that
     bare shape (`validateIPsecResponderIdentityStrict`); tolerant loads
     warn and the renderer skips the connection.
-  - **#15193 (fixed-address default identity / initiator PSK lookup):** a
-    fixed-address (`address <ip>`) PSK gateway with neither
-    `remote-identity` nor `local-identity` — the Junos default shape,
-    accepted by strict commit — now renders the Junos default remote
+  - **#15193 (fixed-address default identity / initiator PSK lookup), as
+    amended by #16708:** a fixed-address (`address <ip>`) PSK gateway with
+    neither `remote-identity` nor `local-identity` — the Junos default
+    shape, accepted by strict commit — renders the Junos default remote
     identity `remote { id = "<first gateway address>" }` in swanctl and
-    scopes the PSK by every gateway address PLUS a local owner (the
-    configured `local-id`, else the pinned local address, else `%any`).
-    Without the local owner charon-as-initiator found no secret for its
-    `(<local ip>, %any)` lookup and aborted IKE_AUTH, so every
-    xpf-initiated tunnel in the default shape failed. Explicit
+    scopes the PSK by every gateway address (peer selectors only).
+    #15193 originally also added a box-shared local owner (`local-id`,
+    else the pinned local address, else `%any`) so charon-as-initiator
+    found the secret; #16708 measured that owner matching the responder
+    side of every exchange (any owner matching either side enumerates
+    the secret, and the verifier tries them all), so a holder of one
+    VPN's PSK authenticated into every other VPN — the owner is removed
+    and the pinned `remote.id` alone carries the initiator lookup
+    (re-measured, `docs/log/16708.md`). Explicit
     `remote-identity`/`local-identity`, `dynamic hostname` gateways,
     responder-only gateways (#14591) and certificate gateways render
-    exactly as before. No new configuration knob is introduced — the
-    identities remain optional on a fixed-address gateway.
+    exactly as before. A hostname-addressed (`address <fqdn>`) PSK
+    gateway with no `remote-identity` now REQUIRES that identity at
+    commit (#16708, extending `validateIPsecResponderIdentityStrict`):
+    the hostname is a dial target, never the presented identity, so no
+    peer selector exists; tolerant loads warn and the renderer skips
+    the VPN. No new configuration knob is introduced.
   - `security nat static rule-set rule match` — declared the
     `source-address` / `destination-address` children the static-NAT
     compiler reads (the subtree was previously unreachable by the walker).

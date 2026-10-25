@@ -7,12 +7,15 @@ import (
 )
 
 // TestRenderValidEndpoints_5630 is the render-side companion to the #5630
-// commit-time endpoint gate: it pins that a VALID IPv4 / IPv6 / FQDN remote
+// commit-time endpoint gate: it pins that a VALID IPv4 / IPv6 remote
 // gateway address, and a valid local-address, still render into the swanctl
 // `remote_addrs` / `local_addrs` settings unchanged. The commit-time gate
 // (validateIPsecEndpointsStrict, pkg/config) rejects only endpoints strongSwan
 // would refuse; this test guards that the fix does not disturb the render of
-// endpoints it accepts.
+// endpoints it accepts. Since #16708 a hostname-addressed PSK gateway with
+// no remote-identity is skipped at render (its key cannot be scoped to a
+// peer), so the FQDN cell below now carries an explicit remote-identity —
+// the hostname dial target itself still renders unchanged.
 func TestRenderValidEndpoints_5630(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -36,7 +39,7 @@ func TestRenderValidEndpoints_5630(t *testing.T) {
 			wantLocal:  "2001:db8::2",
 		},
 		{
-			name:       "FQDN remote",
+			name:       "FQDN remote with remote-identity (#16708)",
 			gwAddr:     "peer.example.com",
 			gwLocal:    "",
 			wantRemote: "peer.example.com",
@@ -47,9 +50,15 @@ func TestRenderValidEndpoints_5630(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
+			gw := &config.IPsecGateway{Name: "gw", Address: c.gwAddr, LocalAddress: c.gwLocal}
+			if c.gwAddr == "peer.example.com" {
+				// #16708: a hostname PSK gateway renders only with an
+				// explicit remote-identity to scope its secret by.
+				gw.RemoteIDType, gw.RemoteIDValue = "hostname", "peer.example.com"
+			}
 			cfg := &config.IPsecConfig{
 				Gateways: map[string]*config.IPsecGateway{
-					"gw": {Name: "gw", Address: c.gwAddr, LocalAddress: c.gwLocal},
+					"gw": gw,
 				},
 				VPNs: map[string]*config.IPsecVPN{
 					"tun": {PSK: config.NewSecret("fixture-secret"), Name: "tun", Gateway: "gw", IPsecPolicy: "ipsec-pol"},
