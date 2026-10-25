@@ -36,12 +36,22 @@
 //! TTL-bounded: ≈48B key + 128B ranges (16×8B) + stamps ≈ 200B/entry × 1024 entries
 //! (16 shards × 64) ≈ 200KB fixed. The TTL only sets how long attack residue squats,
 //! which the absolute bound + shard caps contain.
-//! Fairness (#10658, #14321, #15103, #15288): one sender (`routing_domain`, family, `src`) holds at most
+//! Fairness (#10658, #14321, #15103, #15288, #16599): one sender (`routing_domain`, family, `src`) holds at most
 //! 8 incomplete entries per shard; a `(routing_domain, ingress_zone)` pair
 //! holds at most 32 entries per shard (`OVERLAP_CAP_PER_ZONE_PER_SHARD`).
 //! Completed entries remain overlap anchors and do not
 //! consume a sender's incomplete-datagram quota, avoiding modest-rate refusal
-//! of conformant completed traffic. All entries count toward their zone's
+//! of conformant completed traffic. At the sender bound (#16599), the
+//! sender's own oldest settled-incomplete entry (`pending == 0`, not
+//! failed, not covering a terminal end — `overlap_entry_incomplete`) is
+//! reclaimed to admit the new datagram
+//! (`FRAG_OVERLAP_SAME_SENDER_INCOMPLETE_RECLAIMED`) instead of refusing:
+//! abandoned tail-lost datagrams otherwise squat the quota for the full
+//! 30 s TTL and ShardFull-drop the sender's surviving traffic across all
+//! destinations, while a receiver timing out those datagrams does not
+//! refuse the sender's new ones. The sender still never holds more than
+//! 8 incomplete entries per shard, and no other sender's, domain's, or
+//! origin's entry is touched on this path. All entries count toward their zone's
 //! 32-entry reserve; at the bound, the oldest completed anchor in that zone
 //! may be reclaimed to admit a new key. At the fixed 64-entry shard cap
 //! (#15103), a candidate whose zone is below its reserve reclaims the
@@ -50,11 +60,12 @@
 //! behind two zones' completed anchors. When no completed anchor is
 //! reclaimable (#15288), the same below-reserve candidate reclaims the
 //! globally oldest incomplete anchor of a DIFFERENT zone in its routing
-//! domain (`FRAG_OVERLAP_CROSS_ZONE_INCOMPLETE_RECLAIMED`) — the sole
-//! exception to the never-reclaim-incomplete rule, without which two
+//! domain (`FRAG_OVERLAP_CROSS_ZONE_INCOMPLETE_RECLAIMED`) — beyond the
+//! same-sender reclaim above, the sole exception to the
+//! never-reclaim-incomplete rule, without which two
 //! zones at their reserves of incomplete anchors leave a third zone no
 //! admission path at all. Failed (poisoned) anchors are never reclaimed
-//! on either path, and all entries
+//! on any path, and all entries
 //! remain subject to the fixed 64-entry shard cap, which stays the aggregate
 //! memory bound when many zones share one shard. Post-translation entries
 //! charge the sender quota to the pre-translation origin (`fairness_origin`,
@@ -72,7 +83,9 @@
 //!
 //! Failure directions (explicit — they differ from `fragment_assoc`):
 //!   * Overlap/empty/overflow/capacity all fail CLOSED (drop). Sender quota
-//!     applies to incomplete entries; the zone cap counts all entries in
+//!     applies to incomplete entries and, at its bound, reclaims the
+//!     sender's own oldest settled-incomplete entry (#16599) before
+//!     refusing; the zone cap counts all entries in
 //!     its (domain, zone) and reclaims completed anchors only at that cap;
 //!     the shard cap reclaims the oldest completed anchor of any zone in
 //!     the domain (#15103), or — with none reclaimable — the oldest
@@ -163,6 +176,19 @@ pub(crate) static FRAG_OVERLAP_CROSS_ZONE_RECLAIMED: AtomicU64 = AtomicU64::new(
 /// protection for the rest of their TTL. Failed (poisoned) anchors are
 /// never reclaimed on this path either.
 pub(crate) static FRAG_OVERLAP_CROSS_ZONE_INCOMPLETE_RECLAIMED: AtomicU64 = AtomicU64::new(0);
+/// Incomplete anchors reclaimed from the candidate's own sender at the
+/// per-sender quota (#16599): when a sender is at its 8-per-shard
+/// incomplete cap, its own oldest settled-incomplete entry
+/// (`pending == 0`, not failed, ranges not covering a terminal end) is
+/// evicted to admit the new datagram instead of ShardFull. This keeps
+/// lossy conformant senders from being refused for the full 30 s TTL
+/// by their own tail-lost datagrams, without touching another sender's,
+/// another domain's, or another origin's entries. Failed anchors are
+/// never reclaimed on this path. A rising rate means a sender is
+/// churning abandoned datagrams; the evicted anchors lose overlap
+/// protection for the rest of their TTL — the same trade the completed
+/// and cross-zone reclaims already accept.
+pub(crate) static FRAG_OVERLAP_SAME_SENDER_INCOMPLETE_RECLAIMED: AtomicU64 = AtomicU64::new(0);
 /// Post-translation overlap drops (TX-site hook, translated key).
 pub(crate) static FRAG_OVERLAP_POST_NAT_DROPPED: AtomicU64 = AtomicU64::new(0);
 /// Absolute-lifetime evictions (sustained same-key streams).
@@ -392,9 +418,11 @@ fn overlap_entry_complete(e: &OverlapEntry) -> bool {
 /// every recorded fragment has settled (`pending == 0`), it has not
 /// failed, and its ranges do not cover a terminal end — the settled
 /// counterpart of a completed anchor. This is the class the cross-zone
-/// incomplete reclaim (#15288) may evict, and only for a candidate from
-/// a different zone below its own reserve. Still-pending anchors
-/// (`pending > 0`) are outside this class; the fallback's
+/// incomplete reclaim (#15288) may evict for a candidate from a
+/// different zone below its own reserve, and the class the same-sender
+/// reclaim (#16599) may evict for a candidate from the same sender at
+/// its per-sender quota. Still-pending anchors
+/// (`pending > 0`) are outside this class; both reclaims'
 /// `pending == 0` gate leaves them anchored for settlement.
 #[inline]
 fn overlap_entry_incomplete(e: &OverlapEntry) -> bool {
@@ -967,15 +995,62 @@ impl OverlapTracker {
             }
         }
         if sender_entries >= OVERLAP_CAP_PER_SENDER_PER_SHARD {
-            FRAG_OVERLAP_SHARD_FULL_DROPPED.fetch_add(1, Ordering::Relaxed);
-            return OverlapCheckResult {
-                dropped: true,
-                reason: Some(OverlapDropReason::ShardFull),
-                lifetime_evictions,
-                completion: None,
-                admission: None,
-                tracker: None,
+            // #16599: the sender is at its incomplete cap. Reclaim the
+            // sender's OWN oldest settled-incomplete entry instead of
+            // refusing: abandoned (tail-lost) datagrams otherwise squat
+            // the quota for the full 30 s TTL and ShardFull-drop the
+            // sender's surviving datagrams across all destinations,
+            // while a receiver timing out those datagrams does not
+            // refuse the sender's new ones. Eligibility is exactly the
+            // quota-counting predicate AND `overlap_entry_incomplete`
+            // (`pending == 0`, not failed, not covering a terminal end),
+            // so still-pending and failed (poisoned) anchors are never
+            // reclaimed, and — via the predicate — no other sender's,
+            // domain's, or (pre-poison) origin's entry is touched. When
+            // poisoned, entries that count only via the poisoned
+            // cross-origin broadening are eligible only if they are the
+            // candidate origin's own entries: reclaiming another origin's
+            // entry would evict a tenant that never exhausted its own
+            // budget. The sender still holds at most
+            // OVERLAP_CAP_PER_SENDER_PER_SHARD incomplete entries after
+            // admission, so the #10658 never-completing fill bound is
+            // unchanged; only which of the sender's own datagrams stays
+            // anchored changes (the oldest abandoned one loses overlap
+            // protection for the rest of its TTL — the same trade the
+            // completed and cross-zone reclaims already accept).
+            let mut reclaim_pos = None;
+            let mut oldest_created_ns = u64::MAX;
+            for (pos, entry) in shard.iter().enumerate() {
+                let own = match key.fairness_origin {
+                    None => overlap_sender(&entry.key) == sender,
+                    Some(_) => entry.key.fairness_origin == key.fairness_origin,
+                };
+                if own
+                    && overlap_entry_counts_for_sender_quota(entry, &key, sender, poisoned)
+                    && overlap_entry_incomplete(entry)
+                    && entry.created_ns < oldest_created_ns
+                {
+                    reclaim_pos = Some(pos);
+                    oldest_created_ns = entry.created_ns;
+                }
+            }
+            let Some(pos) = reclaim_pos else {
+                FRAG_OVERLAP_SHARD_FULL_DROPPED.fetch_add(1, Ordering::Relaxed);
+                return OverlapCheckResult {
+                    dropped: true,
+                    reason: Some(OverlapDropReason::ShardFull),
+                    lifetime_evictions,
+                    completion: None,
+                    admission: None,
+                    tracker: None,
+                };
             };
+            FRAG_OVERLAP_SAME_SENDER_INCOMPLETE_RECLAIMED.fetch_add(1, Ordering::Relaxed);
+            shard.remove(pos);
+            // Reclaiming freed a (domain, zone) slot as well; the entry
+            // below inserts into the same (domain, zone), so the zone
+            // count must not be charged twice.
+            zone_entries = zone_entries.saturating_sub(1);
         }
         if zone_entries >= OVERLAP_CAP_PER_ZONE_PER_SHARD {
             let mut reclaim_pos = None;
@@ -1126,7 +1201,8 @@ impl OverlapTracker {
     /// 60s absolute lifetime expires them via the usual liveness sweep.
     /// Completed anchors do not consume sender quotas, but count toward the
     /// (domain, zone) reserve and may be reclaimed there. Incomplete anchors are
-    /// evicted for capacity only by the cross-zone incomplete reclaim (#15288).
+    /// evicted for capacity by the same-sender reclaim at the sender quota
+    /// (#16599) or the cross-zone incomplete reclaim (#15288).
     ///
     /// Returns `true` when this settlement completes the datagram
     /// (all settled, no failure, ranges cover the terminal end); the
@@ -3063,8 +3139,10 @@ mod tests {
         // distinct first fragments incomplete; tenant B's different
         // incomplete fragment must still be admitted on the post-NAT key
         // (its pre-NAT key fits trivially), while tenant A's ninth is
-        // refused. RED on master: the post key's sender is the shared
-        // pool address, so B is denied by A's quota.
+        // admitted only by reclaiming tenant A's own oldest entry and
+        // never tenant B's (#16599 supersedes the pre-#16599 ninth-
+        // refusal expectation). RED on master: the post key's sender is
+        // the shared pool address, so B is denied by A's quota.
         let pool = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8));
         let ext = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
         let nat = NatDecision {
@@ -3122,14 +3200,36 @@ mod tests {
             !tracker.check_and_record(b_post, 0, 8, now_ns, &FRAG_OVERLAP_POST_NAT_DROPPED),
             "tenant B must not share tenant A's post-NAT sender quota"
         );
-        // Tenant A's ninth incomplete datagram exceeds its own quota.
+        // Tenant A's ninth incomplete datagram is at its own quota: it
+        // is admitted by reclaiming tenant A's OWN oldest settled-
+        // incomplete entry (#16599; the check_and_record admissions
+        // above have settled, pending==0), never tenant B's. Pre-#16599
+        // it failed closed here; the per-tenant property this test
+        // guards is that B's budget and anchor are untouched.
+        let a_oldest = post_key(tenant_a, a_idents[0]);
+        let a_second = post_key(tenant_a, a_idents[1]);
         let a_ninth = post_key(tenant_a, a_idents[OVERLAP_CAP_PER_SENDER_PER_SHARD]);
         assert!(
-            tracker.check_and_record(a_ninth, 0, 8, now_ns, &FRAG_OVERLAP_POST_NAT_DROPPED),
-            "tenant A's ninth incomplete datagram must fail closed on its own quota"
+            !tracker.check_and_record(a_ninth, 0, 8, now_ns, &FRAG_OVERLAP_POST_NAT_DROPPED),
+            "tenant A's ninth must be admitted by reclaiming its own oldest entry (#16599)"
         );
-        // Completing tenant A's datagrams does not retroactively deny
-        // tenant B: B can still add a tail to its admitted head.
+        assert!(
+            !tracker.check_overlap(a_oldest, 4, 12, now_ns, &FRAG_OVERLAP_DROPPED),
+            "tenant A's oldest anchor is the one reclaimed"
+        );
+        assert!(
+            tracker.check_overlap(a_second, 4, 12, now_ns, &FRAG_OVERLAP_DROPPED),
+            "tenant A's surviving anchors stay protected"
+        );
+        assert!(
+            tracker.check_overlap(b_post, 4, 12, now_ns, &FRAG_OVERLAP_DROPPED),
+            "tenant B's anchor must not be reclaimed for tenant A"
+        );
+        // Completing tenant A's surviving datagrams does not
+        // retroactively deny tenant B: B can still add a tail to its
+        // admitted head. (a_idents[0]'s anchor was reclaimed above, so
+        // its tail now plants a fresh entry under the same key — the
+        // "lost anchor" consequence of the reclaim — and is admitted.)
         for &ident in &a_idents[..OVERLAP_CAP_PER_SENDER_PER_SHARD] {
             let post = post_key(tenant_a, ident);
             assert!(
@@ -3142,7 +3242,6 @@ mod tests {
             "tenant B tail must remain admitted after A completes"
         );
     }
-
     #[test]
     fn domain_change_without_rewrite_gets_post_key_14127() {
         // No address rewrite but egress_domain != pre.routing_domain:
@@ -3794,6 +3893,351 @@ mod tests {
                 .wrapping_sub(inc1),
             0,
             "failed-anchor refusal must not bump the incomplete-reclaim counter"
+        );
+    }
+
+    #[test]
+    fn sender_at_quota_reclaims_own_oldest_settled_incomplete_16599() {
+        // #16599: a sender whose tails are lost upstream leaves settled-
+        // incomplete (head-only, pending==0) entries that squatted the
+        // 8-per-shard quota for the full 30 s TTL, ShardFull-dropping
+        // its surviving datagrams. At the bound the sender's own oldest
+        // settled-incomplete entry is reclaimed instead. Controls:
+        // still-pending and failed anchors are never reclaimed, another
+        // sender's entry is never touched, and the 8-entry bound holds.
+        // RED-on-revert: without the reclaim the 9th admission drops
+        // ShardFull (reason + FRAG_OVERLAP_SHARD_FULL_DROPPED delta).
+        let t = OverlapTracker::with_seed(1);
+        let mk = |src_last: u8, ident: u32, dst_last: u8| OverlapKey {
+            addr_family: libc::AF_INET as u8,
+            src: IpAddr::V4(Ipv4Addr::new(10, 0, 99, src_last)),
+            dst: IpAddr::V4(Ipv4Addr::new(172, 16, 99, dst_last)),
+            ident,
+            protocol: 17,
+            routing_domain: 0,
+            ingress_zone: 0,
+            fairness_origin: None,
+        };
+        let probe = mk(100, 0, 200);
+        let shard = t.shard_index(&probe);
+        let find_key = |t: &OverlapTracker, src_last: u8, skip: &[u32]| -> OverlapKey {
+            let mut ident = 0u32;
+            loop {
+                let k = mk(src_last, ident, 200);
+                if t.shard_index(&k) == shard && !skip.contains(&ident) {
+                    return k;
+                }
+                ident += 1;
+                assert!(ident < 10_000_000, "must find same-shard key");
+            }
+        };
+        let now_ns = 1_000u64;
+        // Fill the sender's quota in this shard with 8 settled-incomplete
+        // datagrams spread across destinations (the quota key ignores
+        // dst, so varying dst must not mint fresh quota), each admitted
+        // with a strictly increasing created_ns so "oldest" is exact.
+        let mut planted: Vec<OverlapKey> = Vec::new();
+        {
+            let mut ident = 0u32;
+            let mut n = 0u32;
+            while planted.len() < OVERLAP_CAP_PER_SENDER_PER_SHARD {
+                let mut k = mk(100, ident, 200);
+                k.dst = IpAddr::V4(Ipv4Addr::new(172, 16, 99, 200u8.wrapping_add(n as u8)));
+                if t.shard_index(&k) == shard {
+                    let mut r = t.check_and_record_fragment_detailed(
+                        k,
+                        0,
+                        8,
+                        false,
+                        now_ns + u64::from(n),
+                        &FRAG_OVERLAP_DROPPED,
+                    );
+                    assert!(
+                        !r.dropped,
+                        "quota fill n={n} must admit, reason={:?}",
+                        r.reason
+                    );
+                    assert!(
+                        !t.commit_admission(r.admission.take().expect("fill admission")),
+                        "head-only fragment must not complete"
+                    );
+                    planted.push(k);
+                    n += 1;
+                }
+                ident += 1;
+                assert!(ident < 10_000_000, "must find same-shard idents");
+            }
+        }
+        assert_eq!(t.len(), OVERLAP_CAP_PER_SENDER_PER_SHARD);
+        // The 9th datagram (new destination again) is admitted by
+        // reclaiming the sender's own oldest settled-incomplete entry.
+        let ninth = find_key(
+            &t,
+            100,
+            &planted.iter().map(|k| k.ident).collect::<Vec<_>>(),
+        );
+        let full0 = FRAG_OVERLAP_SHARD_FULL_DROPPED.load(Ordering::Relaxed);
+        let rec0 = FRAG_OVERLAP_SAME_SENDER_INCOMPLETE_RECLAIMED.load(Ordering::Relaxed);
+        let mut r = t.check_and_record_fragment_detailed(
+            ninth,
+            0,
+            8,
+            false,
+            now_ns + 100,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        assert!(
+            !r.dropped,
+            "9th datagram must be admitted by same-sender reclaim, reason={:?}",
+            r.reason
+        );
+        assert!(!t.commit_admission(r.admission.take().expect("9th admission")));
+        assert_eq!(
+            t.len(),
+            OVERLAP_CAP_PER_SENDER_PER_SHARD,
+            "reclaim keeps the 8-per-shard sender bound"
+        );
+        assert_eq!(
+            FRAG_OVERLAP_SHARD_FULL_DROPPED
+                .load(Ordering::Relaxed)
+                .wrapping_sub(full0),
+            0,
+            "admitted 9th datagram must not count as a shard-full refusal"
+        );
+        // The seven surviving anchors and the 9th still detect overlap
+        // (checked before the evicted key is replumbed below, since
+        // replanting it would reclaim the next-oldest anchor).
+        for k in &planted[1..] {
+            assert!(
+                t.check_overlap(*k, 4, 12, now_ns + 102, &FRAG_OVERLAP_DROPPED),
+                "surviving anchor ident={} must still detect overlap",
+                k.ident
+            );
+        }
+        assert!(
+            t.check_overlap(ninth, 4, 12, now_ns + 102, &FRAG_OVERLAP_DROPPED),
+            "9th datagram's anchor must detect overlap"
+        );
+        // The reclaimed (oldest) anchor's protection is gone: a fragment
+        // that would have overlapped it plants a fresh entry instead.
+        let evicted = planted[0];
+        let mut r = t.check_and_record_fragment_detailed(
+            evicted,
+            4,
+            12,
+            false,
+            now_ns + 101,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        assert!(
+            !r.dropped,
+            "evicted oldest anchor must no longer drop overlaps, reason={:?}",
+            r.reason
+        );
+        assert!(!t.commit_admission(r.admission.take().expect("replant admission")));
+        // Control: still-pending anchors are never reclaimed. A fresh
+        // sender fills its quota and its bare admission tokens are
+        // HELD (never settled), so every entry stays pending==1; its
+        // 9th datagram must fail closed and evict nothing. (The bool
+        // check_and_record_fragment wrapper auto-commits, and a
+        // dropped OverlapCheckResult fails its admission on Drop —
+        // either would settle the entry and make it reclaimable, so
+        // neither models "still in flight".)
+        let t2 = OverlapTracker::with_seed(1);
+        let mut pending_keys: Vec<OverlapKey> = Vec::new();
+        let mut held: Vec<OverlapAdmissionToken> = Vec::new();
+        {
+            let mut ident = 0u32;
+            while pending_keys.len() < OVERLAP_CAP_PER_SENDER_PER_SHARD {
+                let k = mk(100, ident, 200);
+                if t2.shard_index(&k) == shard {
+                    let mut r = t2.check_and_record_fragment_detailed(
+                        k,
+                        0,
+                        8,
+                        false,
+                        now_ns,
+                        &FRAG_OVERLAP_DROPPED,
+                    );
+                    assert!(!r.dropped, "pending fill ident={ident} must admit");
+                    held.push(r.admission.take().expect("pending admission"));
+                    pending_keys.push(k);
+                }
+                ident += 1;
+                assert!(ident < 10_000_000);
+            }
+        }
+        let _held = held;
+        let ninth2 = find_key(
+            &t2,
+            100,
+            &pending_keys.iter().map(|k| k.ident).collect::<Vec<_>>(),
+        );
+        let rec1 = FRAG_OVERLAP_SAME_SENDER_INCOMPLETE_RECLAIMED.load(Ordering::Relaxed);
+        let r2 = t2.check_and_record_fragment_detailed(
+            ninth2,
+            0,
+            8,
+            false,
+            now_ns,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        assert!(
+            r2.dropped && r2.reason == Some(OverlapDropReason::ShardFull),
+            "still-pending anchors must never be reclaimed: 9th must fail closed, got dropped={} reason={:?}",
+            r2.dropped,
+            r2.reason
+        );
+        assert_eq!(
+            t2.len(),
+            OVERLAP_CAP_PER_SENDER_PER_SHARD,
+            "refusal must not evict"
+        );
+        assert_eq!(
+            FRAG_OVERLAP_SAME_SENDER_INCOMPLETE_RECLAIMED
+                .load(Ordering::Relaxed)
+                .wrapping_sub(rec1),
+            0,
+            "pending refusal must not bump the same-sender reclaim counter"
+        );
+        // Control: failed anchors are never reclaimed either.
+        let t3 = OverlapTracker::with_seed(1);
+        {
+            let mut ident = 0u32;
+            let mut planted3 = 0usize;
+            while planted3 < OVERLAP_CAP_PER_SENDER_PER_SHARD {
+                let k = mk(100, ident, 200);
+                if t3.shard_index(&k) == shard {
+                    let mut r = t3.check_and_record_fragment_detailed(
+                        k,
+                        0,
+                        8,
+                        false,
+                        now_ns,
+                        &FRAG_OVERLAP_DROPPED,
+                    );
+                    assert!(!r.dropped, "failed fill ident={ident} must admit");
+                    assert!(t3.fail_admission(r.admission.take().expect("failed-fill admission")));
+                    planted3 += 1;
+                }
+                ident += 1;
+                assert!(ident < 10_000_000);
+            }
+        }
+        // Derive the 9th key avoiding the planted idents.
+        let ninth3 = {
+            let mut planted_idents: Vec<u32> = Vec::new();
+            let mut ident = 0u32;
+            while planted_idents.len() < OVERLAP_CAP_PER_SENDER_PER_SHARD {
+                let k = mk(100, ident, 200);
+                if t3.shard_index(&k) == shard {
+                    planted_idents.push(ident);
+                }
+                ident += 1;
+            }
+            find_key(&t3, 100, &planted_idents)
+        };
+        let rec2 = FRAG_OVERLAP_SAME_SENDER_INCOMPLETE_RECLAIMED.load(Ordering::Relaxed);
+        let r3 = t3.check_and_record_fragment_detailed(
+            ninth3,
+            0,
+            8,
+            false,
+            now_ns,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        assert!(
+            r3.dropped && r3.reason == Some(OverlapDropReason::ShardFull),
+            "failed anchors must never be reclaimed: 9th must fail closed, got dropped={} reason={:?}",
+            r3.dropped,
+            r3.reason
+        );
+        assert_eq!(
+            t3.len(),
+            OVERLAP_CAP_PER_SENDER_PER_SHARD,
+            "refusal must not evict"
+        );
+        assert_eq!(
+            FRAG_OVERLAP_SAME_SENDER_INCOMPLETE_RECLAIMED
+                .load(Ordering::Relaxed)
+                .wrapping_sub(rec2),
+            0,
+            "failed-anchor refusal must not bump the same-sender reclaim counter"
+        );
+    }
+
+    #[test]
+    fn sender_quota_under_tail_loss_16599() {
+        // Acceptance shape (#16599): 1000 fragmented datagrams/s for
+        // 60 s from one sender, 1% with the tail lost upstream. Every
+        // surviving datagram must be admitted (zero ShardFull refusals);
+        // the 1% abandoned heads are recycled by the same-sender
+        // reclaim instead of squatting the quota for 30 s. Time is
+        // simulated via now_ns (1 ms spacing); no wall-clock sleep.
+        // RED-on-revert: pre-fix this refuses most datagrams once the
+        // abandoned heads fill 8-per-shard in every shard.
+        let t = OverlapTracker::new();
+        let mut base = v4_key();
+        base.protocol = 17;
+        let full0 = FRAG_OVERLAP_SHARD_FULL_DROPPED.load(Ordering::Relaxed);
+        let mut refused = 0usize;
+        let mut abandoned = 0usize;
+        for ident in 0..60_000u32 {
+            base.ident = ident;
+            let now_ns = 1_000_000u64 + u64::from(ident) * 1_000_000;
+            let tail_lost = ident % 100 == 99;
+            let mut head = t.check_and_record_fragment_detailed(
+                base,
+                0,
+                8,
+                false,
+                now_ns,
+                &FRAG_OVERLAP_DROPPED,
+            );
+            if head.dropped {
+                refused += 1;
+                continue;
+            }
+            assert!(
+                !t.commit_admission(head.admission.take().expect("head admission")),
+                "head alone must not complete ident={ident}"
+            );
+            if tail_lost {
+                abandoned += 1;
+                continue;
+            }
+            let mut tail = t.check_and_record_fragment_detailed(
+                base,
+                8,
+                16,
+                true,
+                now_ns + 1,
+                &FRAG_OVERLAP_DROPPED,
+            );
+            if tail.dropped {
+                refused += 1;
+                continue;
+            }
+            assert!(
+                t.commit_admission(tail.admission.take().expect("tail admission")),
+                "surviving datagram ident={ident} must complete"
+            );
+        }
+        assert_eq!(abandoned, 600, "1% of 60000 datagrams lose their tail");
+        assert_eq!(
+            refused, 0,
+            "no surviving datagram may be ShardFull-refused under 1% tail loss"
+        );
+        assert_eq!(
+            FRAG_OVERLAP_SHARD_FULL_DROPPED
+                .load(Ordering::Relaxed)
+                .wrapping_sub(full0),
+            0,
+            "zero shard-full drops across the 60 s train"
+        );
+        assert!(
+            FRAG_OVERLAP_SAME_SENDER_INCOMPLETE_RECLAIMED.load(Ordering::Relaxed) > 0,
+            "the reclaim must have recycled abandoned heads"
         );
     }
 }
