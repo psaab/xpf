@@ -876,6 +876,19 @@ type compileOpts struct {
 	// told to write it once. Same doctrine as lenientDuplicateNATRuleName.
 	lenientDuplicateNATRuleSetName bool
 
+	// lenientSourceNATDuplicateContext (#16607) downgrades the duplicate
+	// source-NAT rule-set-context gate (validateSourceNATDuplicateContextAST)
+	// from a hard error to a warning on the tolerant load / peer-sync paths.
+	// Two differently-named source rule-sets with the same normalised
+	// (from, to) context both survive and are concatenated in definition
+	// order, so a later rule-set's rules — including a `source-nat off`
+	// exemption — are unreachable behind an earlier catch-all. An
+	// already-persisted config (or one synced from a peer) may carry such a
+	// pair; an upgrading / receiving node must still boot through it (warn —
+	// the runtime keeps the historical concatenated behaviour) rather than
+	// fail-closed-on-load (#1960 class). Commit / commit-check stay strict.
+	lenientSourceNATDuplicateContext bool
+
 	// lenientDuplicateNamesExpanded (#6455 Finding 1) downgrades the
 	// POST-expansion duplicate-name gate (validateDuplicateNamesExpandedAST)
 	// from a hard error to a warning on the tolerant load / peer-sync paths.
@@ -3823,6 +3836,7 @@ func lenientCompileOpts() compileOpts {
 		lenientDuplicateNamedBlock:               true,
 		lenientDuplicateNATRuleName:              true,
 		lenientDuplicateNATRuleSetName:           true,
+		lenientSourceNATDuplicateContext:         true,
 		lenientDuplicateNamesExpanded:            true,
 		lenientAPIAuthDuplicateScalar:            true,
 		lenientNATPoolAlarmThreshold:             true,

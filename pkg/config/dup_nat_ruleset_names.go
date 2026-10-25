@@ -5,6 +5,143 @@ import (
 	"sort"
 )
 
+// validateSourceNATDuplicateContextAST rejects (strict) or warns (lenient)
+// when two DISTINCTLY-NAMED source-NAT rule-sets share the same normalised
+// (from, to) context (#16607).
+//
+// Junos forbids this: "You cannot specify the same source and destination
+// conditions for source NAT rule sets." xpf compiles each rule-set by
+// appending its rules to one first-match snapshot (buildSourceNATSnapshots)
+// after a stable sort by scope tier (#4161); equal contexts keep config
+// order, so an early catch-all (for example `source-nat interface` matching
+// any) silently shadows every rule of the later rule-set — including a
+// `source-nat off` exemption that never acts as authored. Merged rules in
+// ONE rule-set can express the exemption if ordered first; across two
+// rule-sets the operator gets no signal.
+//
+// Normalisation mirrors the compiler: each side is the SET of (kind, value)
+// scopes from collectNATScopes (which injects the {zone, ""} match-any
+// default for an absent clause), so bracket lists compare as sets
+// regardless of order (`[ trust dmz ]` == `[ dmz trust ]`, and a bracketed
+// list equals repeated clauses), duplicate spellings of one value collapse,
+// and a single authored rule-set carrying a list (#3096 Cartesian expansion)
+// is ONE instance and never self-collides. Scope kinds compare verbatim:
+// `from zone trust` and `from interface ge-0/0/0.0` are different contexts.
+// Rule-set names are required to differ — a same-named pair is owned by the
+// #6454 gate which runs first on the strict path and would otherwise double
+// report. An empty (quoted) name is skipped here; #6454 owns it too.
+//
+// Like the #6454 gate this runs PRE-expansion on top-level `security`
+// stanzas only; validateDuplicateNamesExpandedAST re-runs it on the
+// group-expanded clone (#6455 Finding 1 mechanism) so a duplicate-context
+// pair authored entirely inside an applied group is caught as well.
+// Strict rejects on the commit / commit-check path naming BOTH rule-sets;
+// lenient (Load / peer-sync, #1960) warns and keeps the historical
+// concatenated behaviour.
+func validateSourceNATDuplicateContextAST(tree *ConfigTree, lenient bool) ([]string, error) {
+	if tree == nil {
+		return nil, nil
+	}
+	type ctxPair struct {
+		first, second string
+		fromKey       string
+		toKey         string
+	}
+	var pairs []ctxPair
+	seen := map[string]string{} // ctxKey -> first rule-set name
+	reported := map[string]bool{}
+	for _, top := range tree.Children {
+		if top.Name() != "security" {
+			continue
+		}
+		for _, nat := range top.FindChildren("nat") {
+			for _, sub := range nat.FindChildren("source") {
+				for _, rsInst := range namedInstances(sub.FindChildren("rule-set")) {
+					if rsInst.name == "" {
+						continue
+					}
+					fromScopes, toScopes := collectNATScopes(rsInst.node, true, "source")
+					key := scopeSetKey(fromScopes) + "\x00" + scopeSetKey(toScopes)
+					first, ok := seen[key]
+					if !ok {
+						seen[key] = rsInst.name
+						continue
+					}
+					if first == rsInst.name {
+						// Same-name duplicate: #6454 owns it.
+						continue
+					}
+					pairKey := key + "\x00" + first + "\x00" + rsInst.name
+					if reported[pairKey] {
+						continue
+					}
+					reported[pairKey] = true
+					pairs = append(pairs, ctxPair{
+						first: first, second: rsInst.name,
+						fromKey: scopeSetKey(fromScopes), toKey: scopeSetKey(toScopes),
+					})
+				}
+			}
+		}
+	}
+	if len(pairs) == 0 {
+		return nil, nil
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].first != pairs[j].first {
+			return pairs[i].first < pairs[j].first
+		}
+		return pairs[i].second < pairs[j].second
+	})
+	format := func(p ctxPair) string {
+		return fmt.Sprintf("source NAT rule-sets %q and %q have the same from/to "+
+			"context (from [%s], to [%s]): Junos does not allow two source NAT "+
+			"rule sets with the same source and destination conditions, and in "+
+			"xpf the rule-sets are evaluated in definition order so the rules of "+
+			"%q — including any `source-nat off` exemption — are unreachable "+
+			"behind an earlier matching rule in %q; merge them into one "+
+			"rule-set (#16607)", p.first, p.second, p.fromKey, p.toKey, p.second, p.first)
+	}
+	if !lenient {
+		return nil, fmt.Errorf("%s", format(pairs[0]))
+	}
+	warnings := make([]string, 0, len(pairs))
+	for _, p := range pairs {
+		warnings = append(warnings, format(p))
+	}
+	return warnings, nil
+}
+
+// scopeSetKey renders a normalised scope set for comparison and display:
+// duplicate (kind, value) tokens collapse and entries sort, so list order
+// and repeated spellings never change the key. The empty value renders as
+// the match-any wildcard marker.
+func scopeSetKey(scopes []natMatchScope) string {
+	uniq := make(map[string]bool, len(scopes))
+	parts := make([]string, 0, len(scopes))
+	for _, s := range scopes {
+		v := s.value
+		if v == "" {
+			v = "<any>"
+		}
+		p := s.kind + " " + v
+		if uniq[p] {
+			continue
+		}
+		uniq[p] = true
+		parts = append(parts, p)
+	}
+	sort.Strings(parts)
+	out := ""
+	for i, p := range parts {
+		if i > 0 {
+			out += ", "
+		}
+		out += p
+	}
+	return out
+}
+
 // natRuleSetSubBlocks lists the NAT sub-blocks whose rule-SETS carry a named
 // operational identity that must be unique within the sub-block's natType
 // namespace. It EXTENDS natRuleSubBlocks (source / destination / static — the
