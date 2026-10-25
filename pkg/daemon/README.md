@@ -4366,7 +4366,11 @@ never lock an operator out of a remote box it manages.
   via `PublishRouteOverlaySnapshot` → `BumpFIBGeneration` ONLY after
   publish success, under `applySem`). The ip-monitoring engine lives
   in `pkg/ipmon`; RG transitions re-evaluate gating via
-  `reconcileIPMonGating` from `reconcileRGState`.
+  `reconcileIPMonGating` from `reconcileRGState` and, off the event
+  goroutine via `scheduleIPMonGating` (#16690), from the
+  `handleClusterEvent` ownership edges and the `tr.Changed` arms of
+  `watchVRRPEvents` — the event paths consume the rg-state edge, so
+  the reconcile safety net alone would see `Changed=false` and skip it.
 - `daemon_route_listener.go` filters kernel route events through
   `routing.LearnedRouteTableIDs` and marks a `pkg/coalesce` loop rather than
   publishing per event; subscription gaps and errors mark it as well. Coalesced

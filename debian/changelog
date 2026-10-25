@@ -78,6 +78,14 @@ xpf (0.0.0) unstable; urgency=medium
     REST SessionEntry, stamped at all four gRPC sites and in REST;
     renderers prefer it and treat empty (pre-#16697 peer) as unknown.
     Active/Backup rows unchanged.
+  * Daemon/ip-monitoring: HA gating is now re-evaluated on
+    event-delivered RG failovers (#16690). Previously the probe set
+    and overlay publish gate were only refreshed when the periodic
+    reconcile itself observed the rg-state edge, which the cluster /
+    VRRP event handlers had already consumed, so after a normal
+    failover the new owner ran no HA-gated probes and kept its old
+    publish gate (and the new standby kept both). The event paths
+    now schedule the gating reconcile off the event goroutine.
   * Daemon/bootstrap: the #9615 refused-target bootstrap safe state
     now has a commit exit (#16665). Previously bootstrap refused
     plain `commit` and the #6707 gate refused `commit confirmed`
