@@ -552,6 +552,23 @@ func TestCompactNormalizeScopePreservesCompiledResult8690(t *testing.T) {
 		// missing-subnet gate and the site no longer disarms anything.
 		// The elided static-binding spelling itself still compiles
 		// (pinned by TestDHCPStaticBindingFlatSet / the #9235 reader).
+		// #16538: NOT a `benign` disarm. The census fixture for
+		// `system services web-management api-auth metrics-require-auth`
+		// is the flag alone with no credential, so with the pass enabled
+		// the flag survives and validateWebManagementAuthStrict rejects
+		// it under #16072 ("requires at least one usable api-auth
+		// credential"), while with the pass disabled the flag is dropped
+		// and the same fixture is accepted. That is the
+		// accepted-without / rejected-with arm (introducedRejection),
+		// not the disarm arm: the gate refuses the CONSEQUENCE of the
+		// value's presence, and the pass makes a dropped tail visible to
+		// it. Measured with gateVerdict8690 at 9dfad41542: elided
+		// flag-only touched=1 passOFF=accepted passON=REJECTED; braced
+		// flag-only touched=0 passOFF=REJECTED passON=REJECTED. With a
+		// usable credential and expiry the elided spelling compiles to
+		// MetricsRequireAuth=true exactly as braced (pinned by
+		// TestCompactSSHAPIAuthFlagsCompile16538). No benign entry is
+		// recorded because no gate moves REJECTED -> accepted here.
 		"snmp trap-group xpfarg targets": "the gate refuses the CONSEQUENCE of the drop, not " +
 			"the spelling. Measured: with the pass disabled the elided " +
 			"`trap-group tg1 targets 10.0.0.1;` loses its targets and snmp rejects with " +

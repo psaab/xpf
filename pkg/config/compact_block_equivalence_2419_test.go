@@ -698,6 +698,13 @@ var filedFixed = map[string]string{
 	// deleted so the census keeps checking them in both directions.
 	"system archival configuration transfer-on-commit": "#15710",
 	"system no-redirects":                              "#15710",
+	// #16538: compact `ssh no-password-authentication;` /
+	// `ssh no-passwords;` and `api-auth metrics-require-auth;` now
+	// compile via compactNormalizeInScope admission. Moved here rather
+	// than deleted so the census keeps checking them in both directions.
+	"system services ssh no-password-authentication":               "#16538",
+	"system services ssh no-passwords":                             "#16538",
+	"system services web-management api-auth metrics-require-auth": "#16538",
 }
 
 // filedByDesign is the category the inventory did not previously distinguish:

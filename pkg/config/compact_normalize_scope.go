@@ -834,6 +834,22 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 	switch containerKeyword + " " + head {
 	case
 		"api-auth api-key",
+		// #16538: valueless metrics gate. Without this pair the compact
+		// spelling `api-auth metrics-require-auth;` (tail packed onto the
+		// api-auth node) compiled MetricsRequireAuth=false while the braced
+		// spelling set it, so loopback /metrics stayed open and the #16072
+		// credential precondition never fired. Empty-equivalent measured by
+		// the #2419 census (shape "empty": the compact spelling compiles as
+		// the empty stanza). #8921 check: `api-auth` names exactly one
+		// container (system services web-management, reached directly and
+		// through the groups mirror of the same node) and
+		// `metrics-require-auth` is declared by no other container, so the
+		// admission cannot leak to a same-named neighbour. Admitting it
+		// converts the flag-only elided spelling from a silent drop into
+		// the same #16072 strict rejection its braced twin gets (no usable
+		// credential), classified benign in
+		// compact_normalize_scope_8690_test.go.
+		"api-auth metrics-require-auth",
 		"autoupdate url",
 		"coalescence adaptive",
 		"coalescence rx-usecs",
@@ -898,6 +914,24 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"ssh connection-limit",
 		"ssh key-exchange",
 		"ssh macs",
+		// #16538: valueless SSH hardening flags. Without these pairs the
+		// compact spelling `ssh no-password-authentication;` /
+		// `ssh no-passwords;` (tail packed onto the ssh node) compiled
+		// NoPasswordAuthentication/NoPasswords=false while the braced
+		// spelling set them, so the sshd drop-in omitted
+		// `PasswordAuthentication no` (and, for no-passwords,
+		// KbdInteractiveAuthentication no) and the host default applied.
+		// Both are SCHEMA-IDENTICAL flag leaves (args:0, children:nil) read
+		// by FindChild presence in compiler_system.go, and each renders
+		// into the same sshd drop-in as the #8922 algorithm family above.
+		// Admitting one without the other would repeat the #8922 partial-
+		// application shape. Empty-equivalence measured by the #2419
+		// census (shape "empty": the compact spelling compiles as the
+		// empty stanza). #8921 check: `ssh` names exactly one container
+		// (reached directly and through the groups mirror of the same
+		// node), and neither flag is declared by any other container.
+		"ssh no-password-authentication",
+		"ssh no-passwords",
 		"ssh root-login",
 		"static-binding host-name",
 		// issue 8858: the OUTER half of the root-authentication fold, and the
