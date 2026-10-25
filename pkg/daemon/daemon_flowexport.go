@@ -165,33 +165,23 @@ func (d *Daemon) liveFlowCounters(key flowexport.FlowKey) (uint64, uint64, uint6
 // v9Group is one running NetFlow v9 template-group exporter and its
 // resolved config (#2461). One flow-server template => one group => one
 // exporter, so a collector receives exactly the template it referenced.
+// cancel/wg retire exactly this exporter (#16752): exporters of one
+// build no longer share a generation context, so a replaced member of
+// a partially retained set can be stopped without stopping its
+// retained siblings.
 type v9Group struct {
-	exp *flowexport.Exporter
-	ec  *flowexport.ExportConfig
+	exp    *flowexport.Exporter
+	ec     *flowexport.ExportConfig
+	cancel context.CancelFunc
+	wg     *sync.WaitGroup
 }
 
 // ipfixGroup is the IPFIX equivalent of v9Group.
 type ipfixGroup struct {
-	exp *flowexport.IPFIXExporter
-	ec  *flowexport.ExportConfig
-}
-
-// v9Gen is one generation of NetFlow v9 exporters built by a reconcile
-// (#15230). A partial reconcile may leave several generations live at
-// once: healthy groups from the newest build plus retained groups whose
-// replacement failed to build. Each generation owns its cancel/wg.
-type v9Gen struct {
+	exp    *flowexport.IPFIXExporter
+	ec     *flowexport.ExportConfig
 	cancel context.CancelFunc
 	wg     *sync.WaitGroup
-	exps   []*flowexport.Exporter
-	groups []v9Group
-}
-
-type ipfixGen struct {
-	cancel context.CancelFunc
-	wg     *sync.WaitGroup
-	exps   []*flowexport.IPFIXExporter
-	groups []ipfixGroup
 }
 
 func flowGroupKey(ec *flowexport.ExportConfig) string {
@@ -363,7 +353,6 @@ func (d *Daemon) reconcileV9Exporter(cfg *config.Config) bool {
 			oldByKey[flowGroupKey(g.ec)] = g
 		}
 	}
-	flowCtx, cancel := context.WithCancel(d.daemonCtx)
 	var newGroups []v9Group
 	var newExps []*flowexport.Exporter
 	var failedErr error
@@ -389,9 +378,8 @@ func (d *Daemon) reconcileV9Exporter(cfg *config.Config) bool {
 		newExps = append(newExps, exp)
 		newGroups = append(newGroups, v9Group{exp: exp, ec: ec})
 	}
-	retainedGroups, retainedExps, retainedGens := d.retainedV9Locked(failedInstances, desiredKeys, oldByKey)
+	retainedGroups, retainedExps := d.retainedV9Locked(failedInstances, desiredKeys, oldByKey)
 	if len(newGroups) == 0 && len(retainedGroups) == 0 {
-		cancel()
 		if !wasRunning {
 			d.flowBundle.Store(&exporterBundle{})
 		}
@@ -405,13 +393,21 @@ func (d *Daemon) reconcileV9Exporter(cfg *config.Config) bool {
 	d.flowCBOnce.Do(func() {
 		d.eventReader.AddCallback(d.flowExportCallback)
 	})
-	newWg := &sync.WaitGroup{}
-	for _, exp := range newExps {
-		newWg.Add(1)
-		go func(e *flowexport.Exporter) {
-			defer newWg.Done()
-			e.Run(flowCtx)
-		}(exp)
+	// Every exporter runs under its OWN child of the daemon context
+	// (#16752), so a later reconcile can retire exactly the replaced
+	// groups of a partially retained build without cancelling
+	// retained siblings.
+	for i := range newGroups {
+		childCtx, childCancel := context.WithCancel(d.daemonCtx)
+		wg := &sync.WaitGroup{}
+		wg.Add(1)
+		newGroups[i].cancel = childCancel
+		newGroups[i].wg = wg
+		exp := newGroups[i].exp
+		go func() {
+			defer wg.Done()
+			exp.Run(childCtx)
+		}()
 	}
 	newByKey := make(map[string]v9Group)
 	for _, g := range newGroups {
@@ -433,17 +429,9 @@ func (d *Daemon) reconcileV9Exporter(cfg *config.Config) bool {
 	allExps := make([]*flowexport.Exporter, 0, len(newExps)+len(retainedExps))
 	allExps = append(allExps, retainedExps...)
 	allExps = append(allExps, newExps...)
-	gens := append([]v9Gen{}, retainedGens...)
-	if len(newExps) > 0 {
-		gens = append(gens, v9Gen{cancel: cancel, wg: newWg, exps: newExps, groups: newGroups})
-	} else {
-		cancel()
-	}
-	oldGens := d.flowGens
-	d.flowGens = gens
 	d.flowExporters = allExps
-	if len(gens) > 0 {
-		last := gens[len(gens)-1]
+	if len(published) > 0 {
+		last := published[len(published)-1]
 		d.flowCancel = last.cancel
 		d.flowWg = last.wg
 	} else {
@@ -454,44 +442,11 @@ func (d *Daemon) reconcileV9Exporter(cfg *config.Config) bool {
 	// publishing, so the swap does not drop every live flow's close.
 	d.carryFlowStateV9Locked(published)
 	d.flowBundle.Store(&exporterBundle{groups: published})
-	replaced := make(map[*flowexport.Exporter]bool)
+	publishedExp := make(map[*flowexport.Exporter]bool)
 	for _, g := range published {
-		replaced[g.exp] = true
+		publishedExp[g.exp] = true
 	}
-	tracked := make(map[*sync.WaitGroup]bool)
-	for _, g2 := range gens {
-		tracked[g2.wg] = true
-	}
-	for _, gen := range oldGens {
-		if tracked[gen.wg] {
-			continue
-		}
-		var doomed []*flowexport.Exporter
-		anyPublished := false
-		for _, e := range gen.exps {
-			if replaced[e] {
-				anyPublished = true
-			} else {
-				doomed = append(doomed, e)
-			}
-		}
-		if anyPublished {
-			// Mixed generation: cannot cancel per-exporter; keep it
-			// tracked whole. Unpublished exps are unreachable via bundle.
-			d.flowGens = append(d.flowGens, gen)
-			continue
-		}
-		for _, e := range doomed {
-			e.Retire()
-		}
-		if gen.cancel != nil {
-			gen.cancel()
-		}
-		joinWithBudget(gen.wg, "netflow-v9")
-		for _, e := range doomed {
-			e.Close()
-		}
-	}
+	retireV9Groups(oldByKey, publishedExp)
 	if failedErr != nil {
 		d.flowHashSet = false
 		d.flowExportErr = failedErr
@@ -509,53 +464,61 @@ func (d *Daemon) reconcileV9Exporter(cfg *config.Config) bool {
 	return true
 }
 
-// retainedV9Locked returns old groups/exps/gens that must stay live
-// because their instance failed to build (#15230 per-group #3742).
-func (d *Daemon) retainedV9Locked(failedInstances map[string]bool, desiredKeys map[string]bool, oldByKey map[string]v9Group) ([]v9Group, []*flowexport.Exporter, []v9Gen) {
+// retireV9Groups stops exactly the exporters of oldByKey that are not
+// in publishedExp (#16752). Each group owns its child context, so a
+// replaced healthy exporter is retired and closed even when a sibling
+// of its original build was retained for a failed instance. Retire
+// happens after the new bundle is published (#4963 handoff lease),
+// then this group's context is cancelled, joined, and closed.
+func retireV9Groups(oldByKey map[string]v9Group, publishedExp map[*flowexport.Exporter]bool) {
+	var doomed []v9Group
+	seen := make(map[*flowexport.Exporter]bool)
+	for _, g := range oldByKey {
+		if g.exp == nil || publishedExp[g.exp] || seen[g.exp] {
+			continue
+		}
+		seen[g.exp] = true
+		doomed = append(doomed, g)
+	}
+	for _, g := range doomed {
+		g.exp.Retire()
+	}
+	for _, g := range doomed {
+		if g.cancel != nil {
+			g.cancel()
+		}
+		joinWithBudget(g.wg, "netflow-v9")
+		g.exp.Close()
+	}
+}
+
+// retainedV9Locked returns old groups/exps that must stay live because
+// their instance failed to build (#15230 per-group #3742). Retained
+// groups keep their per-exporter context (#16752), so a later
+// reconcile can still retire them individually.
+func (d *Daemon) retainedV9Locked(failedInstances map[string]bool, desiredKeys map[string]bool, oldByKey map[string]v9Group) ([]v9Group, []*flowexport.Exporter) {
 	var groups []v9Group
-	retainedExp := make(map[*flowexport.Exporter]bool)
+	var exps []*flowexport.Exporter
+	seenExp := make(map[*flowexport.Exporter]bool)
 	for k, g := range oldByKey {
 		if !desiredKeys[k] || !failedInstances[g.ec.InstanceName] {
 			continue
 		}
 		groups = append(groups, g)
-		retainedExp[g.exp] = true
-	}
-	var exps []*flowexport.Exporter
-	seenExp := make(map[*flowexport.Exporter]bool)
-	var gens []v9Gen
-	for _, gen := range d.flowGens {
-		keep := false
-		for _, e := range gen.exps {
-			if retainedExp[e] {
-				keep = true
-				if !seenExp[e] {
-					seenExp[e] = true
-					exps = append(exps, e)
-				}
-			}
-		}
-		if keep {
-			gens = append(gens, gen)
+		if !seenExp[g.exp] {
+			seenExp[g.exp] = true
+			exps = append(exps, g.exp)
 		}
 	}
-	if len(gens) == 0 && len(groups) > 0 && len(d.flowGens) == 0 && d.flowCancel != nil {
-		for _, g := range groups {
-			if !seenExp[g.exp] {
-				seenExp[g.exp] = true
-				exps = append(exps, g.exp)
-			}
-		}
-		gens = append(gens, v9Gen{cancel: d.flowCancel, wg: d.flowWg, exps: exps, groups: groups})
-	}
-	return groups, exps, gens
+	return groups, exps
 }
 
-// teardownV9Locked cancels, waits for, and closes the running NetFlow v9
-// exporter generation, clearing the daemon's per-generation handles. The
-// caller MUST hold flowReconMu and MUST unpublish d.flowBundle first (the
-// removal path swaps it to empty) so a session-close callback can no longer
-// queue into an exporter this tears down (#3742). Nil-safe / idempotent.
+// teardownV9Locked cancels, waits for, and closes the running NetFlow
+// v9 exporters, clearing the daemon's handles. It captures the live
+// bundle BEFORE unpublishing it, so it stays correct when a caller
+// (the removal reconcile) has not unpublished yet; stopFlowExporter
+// captures first and calls teardownV9GroupsLocked directly. The
+// caller MUST hold flowReconMu. Nil-safe / idempotent.
 // telemetryDrainBudget bounds a flow-exporter generation join at shutdown
 // (#9035).
 //
@@ -613,10 +576,31 @@ func joinWithBudget(wg *sync.WaitGroup, what string) bool {
 }
 
 func (d *Daemon) teardownV9Locked() {
-	// #4963 + #15230: retire every live generation, cancel, bounded-join
-	// each wg via joinWithBudget, then close. Multiple generations may be
-	// live after a partial reconcile.
-	if len(d.flowGens) == 0 && len(d.flowExporters) > 0 {
+	live := d.flowBundle.Load()
+	d.flowBundle.Store(&exporterBundle{})
+	d.teardownV9GroupsLocked(liveGroupsV9(live))
+}
+
+func liveGroupsV9(b *exporterBundle) []v9Group {
+	if b == nil {
+		return nil
+	}
+	return b.groups
+}
+
+func liveGroupsIPFIX(b *ipfixBundle) []ipfixGroup {
+	if b == nil {
+		return nil
+	}
+	return b.groups
+}
+
+// teardownV9GroupsLocked retires exactly groups (#4963 + #16752):
+// every live group owns its context, so retire, cancel, bounded-join,
+// and close each group exactly once. With no groups it falls back to
+// the exporter list, which carries no per-exporter handles.
+func (d *Daemon) teardownV9GroupsLocked(groups []v9Group) {
+	if len(groups) == 0 {
 		for _, exp := range d.flowExporters {
 			exp.Retire()
 		}
@@ -628,25 +612,29 @@ func (d *Daemon) teardownV9Locked() {
 			exp.Close()
 		}
 	} else {
-		for _, gen := range d.flowGens {
-			for _, exp := range gen.exps {
-				exp.Retire()
+		seen := make(map[*flowexport.Exporter]bool)
+		var live []v9Group
+		for _, g := range groups {
+			if g.exp == nil || seen[g.exp] {
+				continue
 			}
+			seen[g.exp] = true
+			live = append(live, g)
 		}
-		for _, gen := range d.flowGens {
-			if gen.cancel != nil {
-				gen.cancel()
+		for _, g := range live {
+			g.exp.Retire()
+		}
+		for _, g := range live {
+			if g.cancel != nil {
+				g.cancel()
 			}
-			joinWithBudget(gen.wg, "netflow-v9")
-			for _, exp := range gen.exps {
-				exp.Close()
-			}
+			joinWithBudget(g.wg, "netflow-v9")
+			g.exp.Close()
 		}
 	}
 	d.flowExporters = nil
 	d.flowCancel = nil
 	d.flowWg = nil
-	d.flowGens = nil
 }
 
 // FlowExportError returns the last NetFlow v9 exporter build error, or nil
@@ -690,7 +678,6 @@ func (d *Daemon) reconcileIPFIXExporter(cfg *config.Config) bool {
 			oldByKey[flowGroupKey(g.ec)] = g
 		}
 	}
-	ipfixCtx, cancel := context.WithCancel(d.daemonCtx)
 	var newGroups []ipfixGroup
 	var newExps []*flowexport.IPFIXExporter
 	var failedErr error
@@ -716,9 +703,8 @@ func (d *Daemon) reconcileIPFIXExporter(cfg *config.Config) bool {
 		newExps = append(newExps, exp)
 		newGroups = append(newGroups, ipfixGroup{exp: exp, ec: ec})
 	}
-	retainedGroups, retainedExps, retainedGens := d.retainedIPFIXLocked(failedInstances, desiredKeys, oldByKey)
+	retainedGroups, retainedExps := d.retainedIPFIXLocked(failedInstances, desiredKeys, oldByKey)
 	if len(newGroups) == 0 && len(retainedGroups) == 0 {
-		cancel()
 		if !wasRunning {
 			d.ipfixBundlePtr.Store(&ipfixBundle{})
 		}
@@ -732,13 +718,19 @@ func (d *Daemon) reconcileIPFIXExporter(cfg *config.Config) bool {
 	d.ipfixCBOnce.Do(func() {
 		d.eventReader.AddCallback(d.ipfixExportCallback)
 	})
-	newWg := &sync.WaitGroup{}
-	for _, exp := range newExps {
-		newWg.Add(1)
-		go func(e *flowexport.IPFIXExporter) {
-			defer newWg.Done()
-			e.Run(ipfixCtx)
-		}(exp)
+	// Every exporter runs under its OWN child of the daemon context
+	// (#16752), mirroring reconcileV9Exporter.
+	for i := range newGroups {
+		childCtx, childCancel := context.WithCancel(d.daemonCtx)
+		wg := &sync.WaitGroup{}
+		wg.Add(1)
+		newGroups[i].cancel = childCancel
+		newGroups[i].wg = wg
+		exp := newGroups[i].exp
+		go func() {
+			defer wg.Done()
+			exp.Run(childCtx)
+		}()
 	}
 	newByKey := make(map[string]ipfixGroup)
 	for _, g := range newGroups {
@@ -760,17 +752,9 @@ func (d *Daemon) reconcileIPFIXExporter(cfg *config.Config) bool {
 	allExps := make([]*flowexport.IPFIXExporter, 0, len(newExps)+len(retainedExps))
 	allExps = append(allExps, retainedExps...)
 	allExps = append(allExps, newExps...)
-	gens := append([]ipfixGen{}, retainedGens...)
-	if len(newExps) > 0 {
-		gens = append(gens, ipfixGen{cancel: cancel, wg: newWg, exps: newExps, groups: newGroups})
-	} else {
-		cancel()
-	}
-	oldGens := d.ipfixGens
-	d.ipfixGens = gens
 	d.ipfixExporters = allExps
-	if len(gens) > 0 {
-		last := gens[len(gens)-1]
+	if len(published) > 0 {
+		last := published[len(published)-1]
 		d.ipfixCancel = last.cancel
 		d.ipfixWg = last.wg
 	} else {
@@ -780,42 +764,11 @@ func (d *Daemon) reconcileIPFIXExporter(cfg *config.Config) bool {
 	// #16742: carry live open state to same-key replacements (v9 twin).
 	d.carryFlowStateIPFIXLocked(published)
 	d.ipfixBundlePtr.Store(&ipfixBundle{groups: published})
-	replaced := make(map[*flowexport.IPFIXExporter]bool)
+	publishedExp := make(map[*flowexport.IPFIXExporter]bool)
 	for _, g := range published {
-		replaced[g.exp] = true
+		publishedExp[g.exp] = true
 	}
-	tracked := make(map[*sync.WaitGroup]bool)
-	for _, g2 := range gens {
-		tracked[g2.wg] = true
-	}
-	for _, gen := range oldGens {
-		if tracked[gen.wg] {
-			continue
-		}
-		var doomed []*flowexport.IPFIXExporter
-		anyPublished := false
-		for _, e := range gen.exps {
-			if replaced[e] {
-				anyPublished = true
-			} else {
-				doomed = append(doomed, e)
-			}
-		}
-		if anyPublished {
-			d.ipfixGens = append(d.ipfixGens, gen)
-			continue
-		}
-		for _, e := range doomed {
-			e.Retire()
-		}
-		if gen.cancel != nil {
-			gen.cancel()
-		}
-		joinWithBudget(gen.wg, "netflow-v9")
-		for _, e := range doomed {
-			e.Close()
-		}
-	}
+	retireIPFIXGroups(oldByKey, publishedExp)
 	if failedErr != nil {
 		d.ipfixHashSet = false
 		d.ipfixExportErr = failedErr
@@ -833,51 +786,56 @@ func (d *Daemon) reconcileIPFIXExporter(cfg *config.Config) bool {
 	return true
 }
 
-func (d *Daemon) retainedIPFIXLocked(failedInstances map[string]bool, desiredKeys map[string]bool, oldByKey map[string]ipfixGroup) ([]ipfixGroup, []*flowexport.IPFIXExporter, []ipfixGen) {
+// retireIPFIXGroups is the IPFIX equivalent of retireV9Groups (#16752).
+func retireIPFIXGroups(oldByKey map[string]ipfixGroup, publishedExp map[*flowexport.IPFIXExporter]bool) {
+	var doomed []ipfixGroup
+	seen := make(map[*flowexport.IPFIXExporter]bool)
+	for _, g := range oldByKey {
+		if g.exp == nil || publishedExp[g.exp] || seen[g.exp] {
+			continue
+		}
+		seen[g.exp] = true
+		doomed = append(doomed, g)
+	}
+	for _, g := range doomed {
+		g.exp.Retire()
+	}
+	for _, g := range doomed {
+		if g.cancel != nil {
+			g.cancel()
+		}
+		joinWithBudget(g.wg, "ipfix")
+		g.exp.Close()
+	}
+}
+
+func (d *Daemon) retainedIPFIXLocked(failedInstances map[string]bool, desiredKeys map[string]bool, oldByKey map[string]ipfixGroup) ([]ipfixGroup, []*flowexport.IPFIXExporter) {
 	var groups []ipfixGroup
-	retainedExp := make(map[*flowexport.IPFIXExporter]bool)
+	var exps []*flowexport.IPFIXExporter
+	seenExp := make(map[*flowexport.IPFIXExporter]bool)
 	for k, g := range oldByKey {
 		if !desiredKeys[k] || !failedInstances[g.ec.InstanceName] {
 			continue
 		}
 		groups = append(groups, g)
-		retainedExp[g.exp] = true
-	}
-	var exps []*flowexport.IPFIXExporter
-	seenExp := make(map[*flowexport.IPFIXExporter]bool)
-	var gens []ipfixGen
-	for _, gen := range d.ipfixGens {
-		keep := false
-		for _, e := range gen.exps {
-			if retainedExp[e] {
-				keep = true
-				if !seenExp[e] {
-					seenExp[e] = true
-					exps = append(exps, e)
-				}
-			}
-		}
-		if keep {
-			gens = append(gens, gen)
+		if !seenExp[g.exp] {
+			seenExp[g.exp] = true
+			exps = append(exps, g.exp)
 		}
 	}
-	if len(gens) == 0 && len(groups) > 0 && len(d.ipfixGens) == 0 && d.ipfixCancel != nil {
-		for _, g := range groups {
-			if !seenExp[g.exp] {
-				seenExp[g.exp] = true
-				exps = append(exps, g.exp)
-			}
-		}
-		gens = append(gens, ipfixGen{cancel: d.ipfixCancel, wg: d.ipfixWg, exps: exps, groups: groups})
-	}
-	return groups, exps, gens
+	return groups, exps
 }
 
-// teardownIPFIXLocked is the IPFIX equivalent of teardownV9Locked. The
-// caller MUST hold ipfixReconMu and MUST unpublish d.ipfixBundlePtr first.
+// teardownIPFIXLocked is the IPFIX equivalent of teardownV9Locked.
 func (d *Daemon) teardownIPFIXLocked() {
-	// #4963 + #15230: retire every live generation, bounded-join each.
-	if len(d.ipfixGens) == 0 && len(d.ipfixExporters) > 0 {
+	live := d.ipfixBundlePtr.Load()
+	d.ipfixBundlePtr.Store(&ipfixBundle{})
+	d.teardownIPFIXGroupsLocked(liveGroupsIPFIX(live))
+}
+
+// teardownIPFIXGroupsLocked retires exactly groups (#4963 + #16752).
+func (d *Daemon) teardownIPFIXGroupsLocked(groups []ipfixGroup) {
+	if len(groups) == 0 {
 		for _, exp := range d.ipfixExporters {
 			exp.Retire()
 		}
@@ -889,25 +847,29 @@ func (d *Daemon) teardownIPFIXLocked() {
 			exp.Close()
 		}
 	} else {
-		for _, gen := range d.ipfixGens {
-			for _, exp := range gen.exps {
-				exp.Retire()
+		seen := make(map[*flowexport.IPFIXExporter]bool)
+		var live []ipfixGroup
+		for _, g := range groups {
+			if g.exp == nil || seen[g.exp] {
+				continue
 			}
+			seen[g.exp] = true
+			live = append(live, g)
 		}
-		for _, gen := range d.ipfixGens {
-			if gen.cancel != nil {
-				gen.cancel()
+		for _, g := range live {
+			g.exp.Retire()
+		}
+		for _, g := range live {
+			if g.cancel != nil {
+				g.cancel()
 			}
-			joinWithBudget(gen.wg, "ipfix")
-			for _, exp := range gen.exps {
-				exp.Close()
-			}
+			joinWithBudget(g.wg, "ipfix")
+			g.exp.Close()
 		}
 	}
 	d.ipfixExporters = nil
 	d.ipfixCancel = nil
 	d.ipfixWg = nil
-	d.ipfixGens = nil
 }
 
 // IPFIXExportError returns the last IPFIX exporter build error, or nil when

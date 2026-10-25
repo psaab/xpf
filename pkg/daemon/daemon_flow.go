@@ -1005,10 +1005,11 @@ func logFinalStats(ready dataplaneReadyProbe, telemetry dataplane.Telemetry) {
 func (d *Daemon) stopFlowExporter() {
 	d.flowReconMu.Lock()
 	defer d.flowReconMu.Unlock()
-	// Unpublish the bundle before teardown (#3742), then cancel + wait +
-	// close via the shared helper (flowWg is now a nil-safe pointer).
+	// Capture the live groups before unpublishing (#16752): teardown
+	// retires exactly those per-exporter contexts.
+	live := d.flowBundle.Load()
 	d.flowBundle.Store(&exporterBundle{})
-	d.teardownV9Locked()
+	d.teardownV9GroupsLocked(liveGroupsV9(live))
 	d.flowExportErr = nil
 }
 
@@ -1016,8 +1017,9 @@ func (d *Daemon) stopFlowExporter() {
 func (d *Daemon) stopIPFIXExporter() {
 	d.ipfixReconMu.Lock()
 	defer d.ipfixReconMu.Unlock()
+	live := d.ipfixBundlePtr.Load()
 	d.ipfixBundlePtr.Store(&ipfixBundle{})
-	d.teardownIPFIXLocked()
+	d.teardownIPFIXGroupsLocked(liveGroupsIPFIX(live))
 	d.ipfixExportErr = nil
 }
 
