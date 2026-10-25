@@ -22,7 +22,7 @@ import (
 // catastrophic one. It is gone; ExportOwnerRGSessionsPaged returns a complete
 // window or an error.
 type userspaceSessionExporter interface {
-	ExportOwnerRGSessionsPaged(rgIDs []int) ([]dpuserspace.SessionDeltaInfo, dpuserspace.ProcessStatus, error)
+	ExportOwnerRGSessionsPagedStream(rgIDs []int, sink dpuserspace.OwnerRGExportPageSink) (dpuserspace.ProcessStatus, int, error)
 }
 
 // userspaceEventStreamExporter is retained only as the documented legacy
@@ -69,13 +69,20 @@ func (d *Daemon) exportUserspaceOwnerRGSessionsWithConfig(
 	if exporter == nil || cfg == nil || len(rgIDs) == 0 {
 		return 0, nil
 	}
-	deltas, _, err := exporter.ExportOwnerRGSessionsPaged(rgIDs)
+	// #16515/#9767: stream pages through the paced queue sink. The sink
+	// counts every missed install across all pages; a nil return acknowledges
+	// the FullResync frame, so it must also mean every page reached the queue.
+	zoneIDs := buildZoneIDs(cfg)
+	queued, err := d.queueUserspaceSessionDeltasCompleteStream(d.fullResyncInstallWait(), func(sink *pacedQueueDeltaSink) error {
+		_, _, err := exporter.ExportOwnerRGSessionsPagedStream(rgIDs, dpuserspace.OwnerRGExportPageFunc(func(deltas []dpuserspace.SessionDeltaInfo) error {
+			return d.walkPageIntoPacedSink(sink, zoneIDs, deltas)
+		}))
+		return err
+	})
 	if err != nil {
 		return 0, err
 	}
-	// #9767: a nil error acknowledges the FullResync frame, so it must also mean
-	// the schema gate admitted the batch and every install reached the queue.
-	return d.queueUserspaceSessionDeltasComplete(buildZoneIDs(cfg), deltas, d.fullResyncInstallWait())
+	return queued, nil
 }
 
 // userspaceBulkSnapshotWithConfig gathers the authoritative, owner-RG-filtered
@@ -130,12 +137,18 @@ func (d *Daemon) userspaceBulkSnapshotWithConfig(
 	if cfg == nil {
 		return cluster.BulkSnapshot{}, errors.New("no active config")
 	}
-	deltas, _, err := exporter.ExportOwnerRGSessionsPaged(rgIDs)
+	// #16515: stream each page into the snapshot sink instead of retaining
+	// the whole []SessionDeltaInfo window. On error the partial sink is
+	// discarded with the (unframed) snapshot, preserving fail-closed.
+	sink := newSnapshotDeltaSink()
+	zoneIDs := buildZoneIDs(cfg)
+	_, _, err := exporter.ExportOwnerRGSessionsPagedStream(rgIDs, dpuserspace.OwnerRGExportPageFunc(func(deltas []dpuserspace.SessionDeltaInfo) error {
+		d.walkUserspaceSessionDeltas(ss, zoneIDs, deltas, sink)
+		return nil
+	}))
 	if err != nil {
 		return cluster.BulkSnapshot{}, fmt.Errorf("export owner-RG sessions: %w", err)
 	}
-	sink := newSnapshotDeltaSink()
-	d.walkUserspaceSessionDeltas(ss, buildZoneIDs(cfg), deltas, sink)
 	return sink.snapshot(), nil
 }
 

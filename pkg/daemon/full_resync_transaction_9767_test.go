@@ -28,8 +28,8 @@ type resyncDeltaExporterDP struct {
 	exportOnce sync.Once
 }
 
-func (r *resyncDeltaExporterDP) ExportOwnerRGSessionsPaged(rgIDs []int) (
-	[]dpuserspace.SessionDeltaInfo, dpuserspace.ProcessStatus, error,
+func (r *resyncDeltaExporterDP) ExportOwnerRGSessionsPagedStream(rgIDs []int, sink dpuserspace.OwnerRGExportPageSink) (
+	dpuserspace.ProcessStatus, int, error,
 ) {
 	r.exports.Add(1)
 	if r.exported != nil {
@@ -38,7 +38,12 @@ func (r *resyncDeltaExporterDP) ExportOwnerRGSessionsPaged(rgIDs []int) (
 	if r.during != nil {
 		r.during()
 	}
-	return append([]dpuserspace.SessionDeltaInfo(nil), r.deltas...), dpuserspace.ProcessStatus{}, nil
+	if len(r.deltas) > 0 {
+		if err := sink.OnOwnerRGExportPage(append([]dpuserspace.SessionDeltaInfo(nil), r.deltas...)); err != nil {
+			return dpuserspace.ProcessStatus{}, 0, err
+		}
+	}
+	return dpuserspace.ProcessStatus{}, len(r.deltas), nil
 }
 
 var _ userspaceSessionExporter = (*resyncDeltaExporterDP)(nil)

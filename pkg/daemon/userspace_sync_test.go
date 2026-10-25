@@ -181,9 +181,14 @@ type fakeUserspaceSessionExporter struct {
 	calls  int
 }
 
-func (f *fakeUserspaceSessionExporter) ExportOwnerRGSessionsPaged(rgIDs []int) ([]dpuserspace.SessionDeltaInfo, dpuserspace.ProcessStatus, error) {
+func (f *fakeUserspaceSessionExporter) ExportOwnerRGSessionsPagedStream(rgIDs []int, sink dpuserspace.OwnerRGExportPageSink) (dpuserspace.ProcessStatus, int, error) {
 	f.calls++
-	return append([]dpuserspace.SessionDeltaInfo(nil), f.deltas...), dpuserspace.ProcessStatus{}, nil
+	if len(f.deltas) > 0 {
+		if err := sink.OnOwnerRGExportPage(append([]dpuserspace.SessionDeltaInfo(nil), f.deltas...)); err != nil {
+			return dpuserspace.ProcessStatus{}, 0, err
+		}
+	}
+	return dpuserspace.ProcessStatus{}, len(f.deltas), nil
 }
 
 // TestUserspaceSessionFromDeltaCarriesRTFlowSessionID5212 verifies the delta ->
@@ -1237,9 +1242,14 @@ func (p *primeRetryDualExporterDP) ExportAllSessionsViaEventStream() error {
 	return nil
 }
 
-func (p *primeRetryDualExporterDP) ExportOwnerRGSessionsPaged(rgIDs []int) ([]dpuserspace.SessionDeltaInfo, dpuserspace.ProcessStatus, error) {
+func (p *primeRetryDualExporterDP) ExportOwnerRGSessionsPagedStream(rgIDs []int, sink dpuserspace.OwnerRGExportPageSink) (dpuserspace.ProcessStatus, int, error) {
 	p.ownerRGCalls.Add(1)
-	return append([]dpuserspace.SessionDeltaInfo(nil), p.deltas...), dpuserspace.ProcessStatus{}, nil
+	if len(p.deltas) > 0 {
+		if err := sink.OnOwnerRGExportPage(append([]dpuserspace.SessionDeltaInfo(nil), p.deltas...)); err != nil {
+			return dpuserspace.ProcessStatus{}, 0, err
+		}
+	}
+	return dpuserspace.ProcessStatus{}, len(p.deltas), nil
 }
 
 var _ userspaceEventStreamExporter = (*primeRetryDualExporterDP)(nil)

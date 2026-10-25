@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"unsafe"
 )
 
 // #9344: the owner-RG session export had no terminating bound.
@@ -44,11 +43,9 @@ const (
 	// ownerRGExportEstimatedDeltaBytes conservatively mirrors the measured
 	// worst-case JSON sizing (the test reflects the current wire schema). It
 	// sizes ONE page against MaxControlResponseBytes; it must NOT be charged
-	// against every retained delta (#15161), because typical decoded deltas
-	// are an order of magnitude smaller and the charge capped a complete
-	// window at 17 pages (~139k-144k deltas).
+	// against retained deltas (#15161/#16515), because retained form is no
+	// longer []SessionDeltaInfo at all.
 	ownerRGExportEstimatedDeltaBytes = 1863 // #11064 ICMP, #11070 ingress/rule-ID, #12187 source-NAT provenance; reflected worst-case 1863 (TestOwnerRGExportPageFitsTheResponseCap9344)
-	ownerRGExportMaxAccumulatorBytes = 256 * 1024 * 1024
 	// maxOwnerRGExportDataPages is the structural data-page bound. Each
 	// kick-visible session can produce one open plus one terminal tombstone
 	// while the window drains: 16 workers * DEFAULT_MAX_SESSIONS * 2 /
@@ -57,34 +54,7 @@ const (
 	// One additional request is reserved for the terminal probe when the
 	// final data page filled exactly while the worker ACK still lagged.
 	maxOwnerRGExportPages = maxOwnerRGExportDataPages + 1
-	// maxOwnerRGExportAccumulatorPages was the old worst-case retained-slice
-	// budget in full pages (256 MiB / (8192 * 1863) = 17). It is no longer a
-	// collector budget: #15161 charges actual decoded retention instead and
-	// bounds the window by maxOwnerRGExportDataPages, the same structural
-	// ceiling the helper asserts. Kept only so existing references and the
-	// history of the 17-page cap stay nameable.
-	maxOwnerRGExportAccumulatorPages = ownerRGExportMaxAccumulatorBytes /
-		(ownerRGExportPageDeltas * ownerRGExportEstimatedDeltaBytes)
 )
-
-// ownerRGExportActualDeltaBytes is the #15161 actual decoded retention for
-// one delta: the fixed-size struct plus every heap string payload it points
-// at. The [16]byte/[6]byte/json:"-" legs live inside the struct and are
-// already counted by unsafe.Sizeof. This replaces charging the 1863-byte
-// worst-case JSON size for every delta, which capped a complete window at
-// 17 pages regardless of the real decoded size. The accumulator still fails
-// closed at ownerRGExportMaxAccumulatorBytes, so a window of genuinely
-// wide deltas (full-width IPv6 literals on every string field) is refused
-// rather than retained without bound.
-func ownerRGExportActualDeltaBytes(d *SessionDeltaInfo) int {
-	n := int(unsafe.Sizeof(*d))
-	n += len(d.Interface) + len(d.Event) + len(d.SrcIP) + len(d.DstIP) +
-		len(d.IngressZone) + len(d.EgressZone) + len(d.Disposition) +
-		len(d.Origin) + len(d.NextHop) + len(d.NeighborMAC) + len(d.SrcMAC) +
-		len(d.NATSrcIP) + len(d.NATDstIP) + len(d.PolicyRuleID) +
-		len(d.Nat64SnatV4)
-	return n
-}
 
 // ownerRGExportLease serializes paged windows without holding a Manager's
 // general mutex across every control round trip.
@@ -100,8 +70,23 @@ var ErrOwnerRGExportUnterminated = errors.New("owner-RG session export did not t
 // supposedly complete window.
 var ErrOwnerRGExportIncomplete = errors.New("owner-RG session export incomplete")
 
-// ExportOwnerRGSessionsPaged collects ONE owner-RG export window, paging when
-// the helper supports it.
+// OwnerRGExportPageSink receives each decoded page of an owner-RG export
+// window (#16515). The slice is caller-owned only for the call; it is reused
+// for the next page, so a sink must convert/copy what it retains. Returning
+// an error aborts the window with that error (wrapped by the caller).
+type OwnerRGExportPageSink interface {
+	OnOwnerRGExportPage(deltas []SessionDeltaInfo) error
+}
+
+// OwnerRGExportPageFunc adapts a function to OwnerRGExportPageSink.
+type OwnerRGExportPageFunc func(deltas []SessionDeltaInfo) error
+
+func (f OwnerRGExportPageFunc) OnOwnerRGExportPage(deltas []SessionDeltaInfo) error {
+	return f(deltas)
+}
+
+// ExportOwnerRGSessionsPagedStream collects ONE owner-RG export window,
+// paging when the helper supports it and streaming each page to sink.
 //
 // The dedicated per-worker export buffers are distinct from the incremental
 // buffers, so the export lease can release the Manager mutex between pages.
@@ -117,7 +102,23 @@ var ErrOwnerRGExportIncomplete = errors.New("owner-RG session export incomplete"
 // status, and helper truth keeps flowing through the 1 Hz poll and the
 // explicit state verbs, so suppressing the per-page status loses nothing
 // and keeps applyHelperStatusLocked the single writer in RPC order.
-func (m *Manager) ExportOwnerRGSessionsPaged(rgIDs []int) ([]SessionDeltaInfo, ProcessStatus, error) {
+//
+// #16515: no window-wide []SessionDeltaInfo is retained. Only one decoded
+// page (<=8192 deltas) lives at a time; the sink converts each page into its
+// own compact form (cluster rows / queued installs) before the next request.
+// The structural bound is maxOwnerRGExportDataPages (512 pages = 16 workers
+// x DEFAULT_MAX_SESSIONS x 2 records), not a byte budget: a 16-worker
+// realistic window (~1M forward deltas) previously exceeded any fixed
+// 256 MiB retention bound at the 520-byte struct floor alone.
+//
+// On any error the window is incomplete: sink may already have consumed
+// earlier pages, so callers must discard/abort any derived state and must
+// not frame or acknowledge a window. ExportOwnerRGSessionsPaged wraps this
+// for callers that still need the whole slice.
+func (m *Manager) ExportOwnerRGSessionsPagedStream(rgIDs []int, sink OwnerRGExportPageSink) (ProcessStatus, int, error) {
+	if sink == nil {
+		return ProcessStatus{}, 0, fmt.Errorf("%w: nil page sink", ErrOwnerRGExportIncomplete)
+	}
 	ownerRGExportLease.Lock()
 	defer ownerRGExportLease.Unlock()
 
@@ -125,7 +126,7 @@ func (m *Manager) ExportOwnerRGSessionsPaged(rgIDs []int) ([]SessionDeltaInfo, P
 	if m.proc == nil {
 		status := m.lastStatus
 		m.mu.Unlock()
-		return nil, status, errors.New("userspace dataplane helper not running")
+		return status, 0, errors.New("userspace dataplane helper not running")
 	}
 	status := m.lastStatus
 	protocol := status.SessionExportPagingProtocolVersion
@@ -134,10 +135,10 @@ func (m *Manager) ExportOwnerRGSessionsPaged(rgIDs []int) ([]SessionDeltaInfo, P
 	exportConfigGen := m.generation
 	m.mu.Unlock()
 	if len(rgIDs) == 0 {
-		return nil, status, nil
+		return status, 0, nil
 	}
 	if protocol < MinProtocolOwnerRGExportPaging {
-		return nil, status, fmt.Errorf(
+		return status, 0, fmt.Errorf(
 			"%w: helper advertises paging protocol %d, want %d",
 			ErrOwnerRGExportIncomplete,
 			protocol,
@@ -145,8 +146,7 @@ func (m *Manager) ExportOwnerRGSessionsPaged(rgIDs []int) ([]SessionDeltaInfo, P
 		)
 	}
 
-	var all []SessionDeltaInfo
-	var retainedBytes int
+	collected := 0
 	expectedStatusIncarnation := status.SessionExportIncarnation
 	var incarnation, sequence uint64
 	for page := range maxOwnerRGExportPages {
@@ -168,7 +168,7 @@ func (m *Manager) ExportOwnerRGSessionsPaged(rgIDs []int) ([]SessionDeltaInfo, P
 			m.cfg.ControlSocket != controlSocket {
 			status = m.lastStatus
 			m.mu.Unlock()
-			return nil, status, fmt.Errorf(
+			return status, collected, fmt.Errorf(
 				"%w: helper/config generation changed during export window",
 				ErrOwnerRGExportIncomplete,
 			)
@@ -190,7 +190,7 @@ func (m *Manager) ExportOwnerRGSessionsPaged(rgIDs []int) ([]SessionDeltaInfo, P
 			m.cfg.ControlSocket != controlSocket {
 			status = m.lastStatus
 			m.mu.Unlock()
-			return nil, status, fmt.Errorf(
+			return status, collected, fmt.Errorf(
 				"%w: helper/config generation changed during export window",
 				ErrOwnerRGExportIncomplete,
 			)
@@ -198,10 +198,11 @@ func (m *Manager) ExportOwnerRGSessionsPaged(rgIDs []int) ([]SessionDeltaInfo, P
 		status = m.lastStatus
 		m.mu.Unlock()
 		if err != nil {
-			return nil, ProcessStatus{}, err
+			return ProcessStatus{}, collected, err
 		}
+
 		if resp.SessionExportDropped != 0 {
-			return nil, status, fmt.Errorf(
+			return status, collected, fmt.Errorf(
 				"%w: helper reported %d dropped delta(s) for seq=%d",
 				ErrOwnerRGExportIncomplete,
 				resp.SessionExportDropped,
@@ -209,7 +210,7 @@ func (m *Manager) ExportOwnerRGSessionsPaged(rgIDs []int) ([]SessionDeltaInfo, P
 			)
 		}
 		if resp.SessionExportIncarnation == 0 || resp.SessionExportSeq == 0 {
-			return nil, status, fmt.Errorf(
+			return status, collected, fmt.Errorf(
 				"%w: helper omitted nonzero incarnation/sequence on page %d",
 				ErrOwnerRGExportIncomplete,
 				page+1,
@@ -220,7 +221,7 @@ func (m *Manager) ExportOwnerRGSessionsPaged(rgIDs []int) ([]SessionDeltaInfo, P
 			sequence = resp.SessionExportSeq
 			if expectedStatusIncarnation != 0 &&
 				incarnation != expectedStatusIncarnation {
-				return nil, status, fmt.Errorf(
+				return status, collected, fmt.Errorf(
 					"%w: helper incarnation %d differs from status %d",
 					ErrOwnerRGExportIncomplete,
 					incarnation,
@@ -228,7 +229,7 @@ func (m *Manager) ExportOwnerRGSessionsPaged(rgIDs []int) ([]SessionDeltaInfo, P
 				)
 			}
 		} else if resp.SessionExportIncarnation != incarnation || resp.SessionExportSeq != sequence {
-			return nil, status, fmt.Errorf(
+			return status, collected, fmt.Errorf(
 				"%w: continuation token changed from (%d,%d) to (%d,%d)",
 				ErrOwnerRGExportIncomplete,
 				incarnation,
@@ -238,7 +239,7 @@ func (m *Manager) ExportOwnerRGSessionsPaged(rgIDs []int) ([]SessionDeltaInfo, P
 			)
 		}
 		if !probe && len(resp.SessionDeltas) > ownerRGExportPageDeltas {
-			return nil, status, fmt.Errorf(
+			return status, collected, fmt.Errorf(
 				"%w: helper returned %d deltas on page %d, max %d",
 				ErrOwnerRGExportIncomplete,
 				len(resp.SessionDeltas),
@@ -247,48 +248,57 @@ func (m *Manager) ExportOwnerRGSessionsPaged(rgIDs []int) ([]SessionDeltaInfo, P
 			)
 		}
 		if probe {
-			// The probe is not another data page: it only gives a worker whose
-			// final push preceded its ACK a chance to publish more=false.
 			if len(resp.SessionDeltas) != 0 || resp.SessionExportMore {
-				return nil, status, fmt.Errorf(
+				return status, collected, fmt.Errorf(
 					"%w: terminal probe returned %d delta(s), more=%t",
 					ErrOwnerRGExportUnterminated,
 					len(resp.SessionDeltas),
 					resp.SessionExportMore,
 				)
 			}
-			return all, status, nil
+			return status, collected, nil
 		}
-		// #15161: charge ACTUAL decoded retention, not the 1863-byte
-		// worst-case JSON size. The old charge capped a complete window at
-		// 17 pages (~139k-144k deltas) even when every delta decoded to a
-		// few hundred bytes, so cold prime / FullResync failed closed on
-		// any owner holding more than that. The byte bound is unchanged:
-		// a window whose deltas really are wide still fails closed here,
-		// and maxOwnerRGExportDataPages (512) remains the structural cap.
-		var pageBytes int
-		for i := range resp.SessionDeltas {
-			pageBytes += ownerRGExportActualDeltaBytes(&resp.SessionDeltas[i])
+		if err := sink.OnOwnerRGExportPage(resp.SessionDeltas); err != nil {
+			return status, collected, err
 		}
-		if pageBytes > ownerRGExportMaxAccumulatorBytes ||
-			retainedBytes > ownerRGExportMaxAccumulatorBytes-pageBytes {
-			return nil, status, fmt.Errorf(
-				"%w: export accumulator exceeds %d-byte bound",
-				ErrOwnerRGExportIncomplete,
-				ownerRGExportMaxAccumulatorBytes,
-			)
-		}
-		retainedBytes += pageBytes
-		all = append(all, resp.SessionDeltas...)
+		collected += len(resp.SessionDeltas)
 		if !resp.SessionExportMore {
-			return all, status, nil
+			return status, collected, nil
 		}
 	}
-	return nil, status, fmt.Errorf(
+	return status, collected, fmt.Errorf(
 		"%w: still reporting more after %d data pages and a terminal probe of %d deltas (%d collected)",
 		ErrOwnerRGExportUnterminated,
 		maxOwnerRGExportDataPages,
 		ownerRGExportPageDeltas,
-		len(all),
+		collected,
 	)
+}
+
+// ExportOwnerRGSessionsPaged collects ONE complete window into a slice.
+// Retained for callers/tests that need the whole window; production bulk
+// and FullResync paths stream via ExportOwnerRGSessionsPagedStream so a
+// 16-worker window is not retained as []SessionDeltaInfo (#16515).
+func (m *Manager) ExportOwnerRGSessionsPaged(rgIDs []int) ([]SessionDeltaInfo, ProcessStatus, error) {
+	var all []SessionDeltaInfo
+	// Empty RG set: preserve the no-request fast path (stream validates
+	// the sink before the empty check, so handle it here too).
+	if len(rgIDs) == 0 {
+		m.mu.Lock()
+		status := m.lastStatus
+		running := m.proc != nil
+		m.mu.Unlock()
+		if !running {
+			return nil, status, errors.New("userspace dataplane helper not running")
+		}
+		return nil, status, nil
+	}
+	status, _, err := m.ExportOwnerRGSessionsPagedStream(rgIDs, OwnerRGExportPageFunc(func(deltas []SessionDeltaInfo) error {
+		all = append(all, deltas...)
+		return nil
+	}))
+	if err != nil {
+		return nil, status, err
+	}
+	return all, status, nil
 }
