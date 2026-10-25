@@ -906,7 +906,21 @@ func (m *Manager) notifyLinkCycle(release bool) error {
 	// counters the helper will report. m.deferWorkers is cleared by the daemon
 	// before NotifyLinkCycle, so markAppliedSnapshotLocked's defer-skip does
 	// not suppress this capture.
-	m.markAppliedSnapshotLocked()
+	//
+	// #16521: that justification holds ONLY when the helper already holds
+	// m.lastSnapshot. A same-plan commit retained by Compile's
+	// pendingXSKStartup deferral (pendingFullSnapshotMetadata, helper still
+	// on the published generation) also reaches this rebind, and marking it
+	// applied would advance PolicyReadConfig/capture authority and fire the
+	// policy-invalidation discharge for a generation the helper never
+	// accepted — skipping the deferred-publish re-capture. Gate on the
+	// helper-holds predicate (same shape as the status-loop catch-up):
+	// published, not pending, helper echoes the generation, and no
+	// unknown-outcome apply outstanding. Otherwise leave the mark to the
+	// deferred publish in syncSnapshotLocked.
+	if m.lastSnapshot != nil && m.helperHoldsLastSnapshotLocked() {
+		m.markAppliedSnapshotLocked()
+	}
 	ready := 0
 	for _, b := range status.Bindings {
 		if b.Ready {
