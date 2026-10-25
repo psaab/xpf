@@ -270,7 +270,6 @@ pub(super) fn local_tunnel_source_loop(
     }
 
     let mut packet = vec![0u8; 65_536];
-    let mut next_slot = 0usize;
     let mut local_sessions = FastMap::<SessionKey, u64>::default();
     let mut local_sessions_last_prune_ns = 0u64;
     let tun_fd = tun.as_raw_fd();
@@ -383,9 +382,8 @@ pub(super) fn local_tunnel_source_loop(
                                 &identities,
                                 &live,
                                 plan.tx_ifindex,
-                                next_slot,
+                                plan.tx_request.flow_key.as_ref(),
                             ) {
-                                next_slot = next_slot.wrapping_add(1);
                                 if let Err(err) = target_live.enqueue_tx(plan.tx_request) {
                                     record_local_tunnel_exception(
                                         &recent_exceptions,
@@ -999,11 +997,18 @@ pub(super) fn wait_for_local_tunnel_session_install(
     }
 }
 
+/// #16520: select the TX binding for a local-origin tunnel packet by
+/// hashing its flow key, so consecutive packets of one self-originated
+/// flow stay on the same binding (drained by one worker/queue) and
+/// intra-flow order is preserved — matching every other ECMP/queue
+/// choice in the dataplane. Flowless packets (`flow_key: None`, e.g.
+/// non-first fragments) use a fixed slot (0), i.e. the first bound
+/// binding, rather than spraying per packet.
 pub(super) fn select_live_binding_for_ifindex(
     identities: &BTreeMap<u32, BindingIdentity>,
     live: &BTreeMap<u32, Arc<BindingLiveState>>,
     tx_ifindex: i32,
-    next_slot: usize,
+    flow_key: Option<&SessionKey>,
 ) -> Option<Arc<BindingLiveState>> {
     let mut candidate_count = 0usize;
     for identity in identities.values() {
@@ -1019,7 +1024,10 @@ pub(super) fn select_live_binding_for_ifindex(
     if candidate_count == 0 {
         return None;
     }
-    let target_index = next_slot % candidate_count;
+    let target_index = match flow_key {
+        Some(key) => (super::forwarding::ecmp_hash_flow(key) as usize) % candidate_count,
+        None => 0,
+    };
     let mut current_index = 0usize;
     for identity in identities.values() {
         if identity.ifindex != tx_ifindex {
