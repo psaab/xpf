@@ -24,13 +24,14 @@ func validateFlowTraceProtocol15679(raw string) error {
 // flowTraceFileNameError reports why an operator-supplied
 // `security flow traceoptions file <name>` value is unsafe, or nil if the
 // value is an acceptable bare basename. The persistent flow-trace file always
-// lives directly under /var/log (NewTraceWriter), so only a bare filename is
-// permitted: an absolute path, a path separator, or a "." / ".." component
-// would let a committed config steer root-written flow telemetry (internal
-// addresses, ports, zones, actions, policy IDs) outside the appliance log area
-// — e.g. `file /tmp/x` is kept verbatim and `file ../../tmp/x` cleans to
-// /tmp/x (#3420, Codex audit 097 H02). This is the persistent-config sibling
-// of the interactive `monitor security flow file` hardening (#3378).
+// lives directly under /var/log/xpf-flow-trace (NewTraceWriter, #16576), so
+// only a bare filename is permitted: an absolute path, a path separator, or
+// a "." / ".." component would let a committed config steer root-written
+// flow telemetry (internal addresses, ports, zones, actions, policy IDs)
+// outside the dedicated trace area — e.g. `file /tmp/x` is kept verbatim
+// and `file ../../tmp/x` cleans to /tmp/x (#3420, Codex audit 097 H02).
+// This is the persistent-config sibling of the interactive
+// `monitor security flow file` hardening (#3378).
 func flowTraceFileNameError(name string) error {
 	if name == "" {
 		// A missing value token is the schema walker's concern, not this gate.
@@ -41,11 +42,11 @@ func flowTraceFileNameError(name string) error {
 	}
 	if strings.ContainsAny(name, `/\`) {
 		return fmt.Errorf("trace filename %q must be a bare name, not a path "+
-			"(the file is written under /var/log)", name)
+			"(the file is written under /var/log/xpf-flow-trace)", name)
 	}
 	if filepath.IsAbs(name) || name != filepath.Base(name) {
 		return fmt.Errorf("trace filename %q must be a bare name, not a path "+
-			"(the file is written under /var/log)", name)
+			"(the file is written under /var/log/xpf-flow-trace)", name)
 	}
 	return nil
 }
@@ -72,12 +73,12 @@ const (
 // validateFlowTraceFileAST is the #3420 commit-time path-traversal gate for
 // `security flow traceoptions file <name>`. The compiler stores the filename
 // verbatim (compileFlow traceoptions: to.File = nodeVal(fileNode)) and
-// NewTraceWriter then joins/opens it under /var/log without rejecting an
-// absolute path or a ".." escape, so a committed config can append flow trace
-// records anywhere the daemon user can write. The filename is a single AST
-// value the declarative SchemaValidate walker treats as opaque free text, so —
-// like the syslog port and tls-profile gates — it is checked here on the
-// group-expanded tree, descending compileFlow's traversal
+// NewTraceWriter then joins/opens it under /var/log/xpf-flow-trace without
+// rejecting an absolute path or a ".." escape, so a committed config can
+// append flow trace records anywhere the daemon user can write. The filename
+// is a single AST value the declarative SchemaValidate walker treats as
+// opaque free text, so — like the syslog port and tls-profile gates — it is
+// checked here on the group-expanded tree, descending compileFlow's traversal
 // (flow > traceoptions > file) with forEachChild at EVERY level so an
 // offending value in a duplicate flow/traceoptions/file sub-block is rejected
 // (#3566, the sub-level sibling of the #3562 duplicate-top-level class).
@@ -88,7 +89,7 @@ const (
 // already-persisted or peer-synced config an older binary accepted still boots;
 // NewTraceWriter independently refuses the unsafe path at runtime, so a
 // leniently-loaded value simply disables tracing rather than writing outside
-// /var/log (#1960 / #3261 fail-closed-on-load class).
+// /var/log/xpf-flow-trace (#1960 / #3261 fail-closed-on-load class).
 func validateFlowTraceFileAST(nodes []*Node, prefix string, lenient bool) ([]string, error) {
 	var warnings []string
 	// Descend security > flow > traceoptions > file with forEachChild at EVERY
@@ -107,7 +108,7 @@ func validateFlowTraceFileAST(nodes []*Node, prefix string, lenient bool) ([]str
 						msg := fmt.Sprintf("%s: %s", path, err.Error())
 						if lenient {
 							warnings = append(warnings, msg+
-								" (ignored: tracing disabled, not written outside /var/log)")
+								" (ignored: tracing disabled, not written outside /var/log/xpf-flow-trace)")
 							return nil
 						}
 						return fmt.Errorf("%s", msg)

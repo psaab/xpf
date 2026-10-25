@@ -31,8 +31,9 @@ type ZeroizeLogInventory struct {
 	// each written by rsyslog to /var/log/<name> (daemon applySyslogFiles).
 	SyslogFiles []string
 	// TraceFile is the `security flow traceoptions file <name>` basename,
-	// written by logging.TraceWriter to /var/log/<name> plus .<N> rotations.
-	// "" means persistent tracing was not configured.
+	// written by logging.TraceWriter under /var/log/xpf-flow-trace/<name>
+	// plus .<N> rotations (#16576). "" means persistent tracing was not
+	// configured.
 	TraceFile string
 }
 
@@ -51,19 +52,18 @@ func ZeroizeLogInventoryFromConfig(cfg *config.Config) ZeroizeLogInventory {
 }
 
 var (
-	// wipeVarLogDir is the shared /var/log root the persistent flow-trace
-	// file and the rsyslog-written syslog outputs live directly under. A
-	// package var (not a const) only so tests drive the wipe against a
-	// throwaway tree; production is always /var/log.
+	// wipeVarLogDir is the shared /var/log root the rsyslog-written syslog
+	// outputs live directly under. A package var (not a const) only so tests
+	// drive the wipe against a throwaway tree; production is always /var/log.
 	wipeVarLogDir = "/var/log"
 	// wipeSecurityLogDir holds the event-mode security log
 	// (security.log plus .<N> rotations, logging.NewLocalLogWriter). Seamed
 	// for the same hermeticity reason; production is always /var/log/xpf.
 	wipeSecurityLogDir = "/var/log/xpf"
-	// wipeFlowTraceDir is the dedicated interactive-monitor trace
-	// namespace (cli.openTraceFile, #5038). Every entry in it is
-	// xpf-written flow telemetry. Seamed like the others; production is
-	// always /var/log/xpf-flow-trace.
+	// wipeFlowTraceDir is the dedicated flow-trace namespace
+	// (cli.openTraceFile #5038; logging.TraceWriter since #16576). Every
+	// entry in it is xpf-written flow telemetry. Seamed like the others;
+	// production is always /var/log/xpf-flow-trace.
 	wipeFlowTraceDir = "/var/log/xpf-flow-trace"
 	// wipeRsyslogConfDir holds xpf's persistent rsyslog selectors. Leaving
 	// these drop-ins behind lets a post-zeroize rsyslog restart recreate the
@@ -250,12 +250,11 @@ func wipeRemoveRsyslogDropins(dir string, fail func(error), skipped *[]configsto
 //
 // The wiped surface, enumerated from the logging paths (miss none):
 //   - /var/log/xpf/security.log plus .<N> rotations (static default);
-//   - /var/log/xpf-flow-trace/*, the whole dedicated interactive-trace dir;
-//   - /var/log/<trace> plus .<N> rotations (configured persistent trace);
+//   - /var/log/xpf-flow-trace/*, the whole dedicated flow-trace dir
+//     (interactive monitor trace #5038 and, since #16576, the configured
+//     persistent trace plus its rotations);
 //   - /var/log/<name> and recognized host-rotation forms for each configured
 //     `system syslog file` output;
-//   - /etc/rsyslog.d/10-xpf-*.conf, the xpf-owned selectors that would
-//     otherwise recreate those outputs after a daemon restart.
 //
 // Explicitly NOT covered (receipt scope): journald copies and the remote
 // syslog collector (the durable cross-wipe record lives there by design,
@@ -283,12 +282,18 @@ func wipeFirewallLogs(inv ZeroizeLogInventory) error {
 	fail(os.RemoveAll(wipeFlowTraceDir))
 
 	// Configured persistent trace, plus the writer's rotated generations.
+	// Since #16576 the persistent writer is confined to the same dedicated
+	// xpf-flow-trace dir as the interactive monitor trace (RemoveAll above
+	// already erases every entry there); this leg is the named-generation
+	// backstop inside that dir. It must NOT resolve the basename under
+	// /var/log itself: a host log sharing the name (auth.log, syslog) is
+	// not xpf's and must survive a zeroize that names it only as a trace.
 	if inv.TraceFile != "" {
 		if !wipeValidLogBaseName(inv.TraceFile) {
 			slog.Warn("zeroize: ignoring invalid flow-trace filename; the writer refuses it too, so no trace was written",
 				"name", inv.TraceFile)
 		} else {
-			wipeRemoveLogGenerations(wipeVarLogDir, inv.TraceFile, fail, &hardlinks)
+			wipeRemoveLogGenerations(wipeFlowTraceDir, inv.TraceFile, fail, &hardlinks)
 		}
 	}
 
