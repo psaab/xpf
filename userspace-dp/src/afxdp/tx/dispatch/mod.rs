@@ -1147,8 +1147,10 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
         // #11074: an admitted live or owned transit frame can wait in this
         // queue while the forwarding snapshot changes. Recheck the source
         // against the current domain-scoped martian index before final TX.
-        if !matches!(&request.frame, PendingForwardFrame::Prebuilt(_))
-            && request
+        if !matches!(
+            &request.frame,
+            PendingForwardFrame::Prebuilt(_) | PendingForwardFrame::PrebuiltTransit { .. }
+        ) && request
                 .meta
                 .l3_addrs_unfiltered()
                 .is_some_and(|(source, _)| {
@@ -1181,8 +1183,10 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
         }
         // #11413: keep a final destination-class backstop for live transit
         // requests that wait in this queue while forwarding state changes.
-        if !matches!(&request.frame, PendingForwardFrame::Prebuilt(_))
-            && request
+        if !matches!(
+            &request.frame,
+            PendingForwardFrame::Prebuilt(_) | PendingForwardFrame::PrebuiltTransit { .. }
+        ) && request
                 .meta
                 .l3_addrs_unfiltered()
                 .is_some_and(|(_, destination)| {
@@ -1238,8 +1242,31 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
 
         // Fast path: prebuilt frame (e.g. ICMP error NAT reversal).
         // The frame is already fully rewritten — just enqueue for TX.
+        // #16603: normalize PrebuiltTransit into (wire, mirror) parts up
+        // front. `mirror_frame`/`mirror_meta` are the RECEIVED bytes and
+        // ingress identity for transit reversals (plan-1376: the analyzer
+        // gets the full original Ethernet frame); for plain Prebuilt
+        // (device-generated Time-Exceeded) they remain the generated wire
+        // frame and request meta, as before. The ingress copy is moved
+        // out here so the staging below never clones when no mirror row
+        // matches or the sample declines.
         let mirror_sample_counter_pre = ingress_binding.mirror_sample_counter;
-        if let PendingForwardFrame::Prebuilt(prebuilt) = &mut request.frame {
+        let mut prebuilt_mirror: Option<(Vec<u8>, ForwardPacketMeta)> = None;
+        if let PendingForwardFrame::PrebuiltTransit {
+            ingress_frame,
+            ingress_meta,
+            ..
+        } = &mut request.frame
+        {
+            prebuilt_mirror = Some((core::mem::take(ingress_frame), *ingress_meta));
+        }
+        let prebuilt_wire: Option<&mut crate::afxdp::cos::redirect_pool::PooledBuffer> =
+            match &mut request.frame {
+                PendingForwardFrame::Prebuilt(prebuilt) => Some(prebuilt),
+                PendingForwardFrame::PrebuiltTransit { frame, .. } => Some(frame),
+                _ => None,
+            };
+        if let Some(prebuilt) = prebuilt_wire {
             // #1946: a Prebuilt frame (e.g. an embedded-ICMP NAT-reversed
             // error) can carry a FabricRedirect resolution
             // (`finalize_embedded_icmp_resolution`). When that frame is
@@ -1289,26 +1316,42 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                 recycle_ingress_frame(ingress_binding, source_offset, now_ns);
                 continue;
             };
-            // #15947 (H26-02 arm 4): stage the mirror selection BEFORE
-            // the enqueue consumes the Vec, but copy the bytes only if
-            // the sample is actually selected. The pre-fix code cloned
-            // the whole frame unconditionally, so every unsampled or
-            // unmirrored Prebuilt TX paid a full frame copy. The staged
-            // snapshot IS the single copy (fold 2): `commit` below reads
-            // it via `frame_snapshot`, so no second Vec is materialised
-            // here. Oversize frames snapshot to None and commit records
-            // NoFrame from the (then empty) fallback, as before.
+            // #15947 (H26-02 arm 4) + #16603: stage the mirror selection
+            // BEFORE the enqueue consumes the wire Vec, but copy bytes
+            // only if the sample is actually selected. For PrebuiltTransit
+            // the staged bytes/meta are the RECEIVED frame and ingress
+            // meta (plan-1376 original-frame contract), not the translated
+            // egress frame; the ingress copy carried on the request is
+            // MOVED into the snapshot (no clone) and dropped uncloned when
+            // no mirror row matches or the sample declines. For plain
+            // Prebuilt the generated wire frame is staged as before.
+            // Oversize frames snapshot to None and commit records NoFrame
+            // from the (then empty) fallback, as before.
+            let (mirror_frame, mirror_meta): (&[u8], ForwardPacketMeta) =
+                match prebuilt_mirror.as_ref() {
+                    Some((ingress_frame, ingress_meta)) => {
+                        (ingress_frame.as_slice(), *ingress_meta)
+                    }
+                    None => (prebuilt.as_slice(), request.meta),
+                };
             let mut staged_mirror = stage_sampled_mirror_clone(
                 forwarding,
-                request.meta.ingress_ifindex as i32,
-                request.meta.ingress_vlan_id,
+                mirror_meta.ingress_ifindex as i32,
+                mirror_meta.ingress_vlan_id,
                 mirror_sample_counter_pre,
-                prebuilt,
-                request.meta,
+                mirror_frame,
+                mirror_meta,
                 request.flow_key.as_ref(),
             );
             if let Some(staged) = staged_mirror.as_mut() {
-                snapshot_staged_mirror_clone(staged, prebuilt);
+                if staged.is_selected() {
+                    match prebuilt_mirror.take() {
+                        Some((ingress_frame, _)) => {
+                            snapshot_staged_mirror_clone(staged, &ingress_frame);
+                        }
+                        None => snapshot_staged_mirror_clone(staged, prebuilt),
+                    }
+                }
             }
             let frame_len = prebuilt.len();
             let req = TxRequest {
@@ -1324,16 +1367,17 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                 overlap_admissions: overlap_admissions.take(),
                 enqueue_ns: 0,
             };
-            // #15251 (A75-04): a successfully enqueued Prebuilt transit
-            // frame (embedded-ICMP NAT reversal, incl. NAT64) must also be
-            // port-mirrored like Live/Owned frames. The sample was
-            // staged above (#15947 H26-02 arm 4); commit it here, after
-            // the enqueue succeeds, honouring sampling and the analyzer
-            // output filter (inside commit). The frame bytes are the
-            // already-rewritten wire frame, so meta/flow_key from the
-            // request describe it (flow_key is None for flowless errors,
-            // which mirror_output_filter_drops handles fail-closed on
-            // port terms).
+            // #15251 (A75-04) + #16603: a successfully enqueued Prebuilt
+            // transit frame (embedded-ICMP NAT reversal, incl. NAT64) must
+            // also be port-mirrored like Live/Owned frames. The sample was
+            // staged above (#15947/#16603); commit it here, after the
+            // enqueue succeeds, honouring sampling and the analyzer output
+            // filter (inside commit). For transit reversals the staged
+            // bytes/meta are the RECEIVED frame and ingress meta, so the
+            // analyzer sees the original Ethernet frame (ingress L2/VLAN,
+            // pre-reversal addresses, original family/TTL); flow_key is
+            // None for flowless errors, which mirror_output_filter_drops
+            // handles fail-closed on port terms via the ingress meta.
             if enqueue_local_request_to_target_or_owner(target_binding, req).is_err() {
                 if prebuilt_is_fabric_redirect {
                     ingress_live
@@ -1428,7 +1472,9 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                     continue;
                 }
             }
-            PendingForwardFrame::Prebuilt(_) => unreachable!(),
+            PendingForwardFrame::Prebuilt(_) | PendingForwardFrame::PrebuiltTransit { .. } => {
+                unreachable!()
+            }
         };
         let enqueue_count_before = dbg.enqueue_ok;
         let mirror_sample_counter = ingress_binding.mirror_sample_counter;

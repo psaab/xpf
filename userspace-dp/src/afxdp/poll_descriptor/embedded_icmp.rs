@@ -303,6 +303,7 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
     let queued = queue_prebuilt_embedded_icmp_error(
         desc,
         meta,
+        packet_frame,
         binding_index,
         worker_ctx,
         scratch_forwards,
@@ -341,6 +342,11 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
 pub(super) fn queue_prebuilt_embedded_icmp_error(
     desc: XdpDesc,
     meta: UserspaceDpMeta,
+    // #16603: the received frame as it arrived (post-GRE-decap inner
+    // bytes where applicable), used only for the port-mirror clone so
+    // the analyzer sees the original frame, not the translated egress
+    // frame. `meta` already describes these bytes.
+    ingress_frame: &[u8],
     binding_index: usize,
     worker_ctx: &WorkerContext,
     scratch_forwards: &mut Vec<PendingForwardRequest>,
@@ -468,7 +474,19 @@ pub(super) fn queue_prebuilt_embedded_icmp_error(
         target_binding_index,
         ingress_queue_id: worker_ctx.ident.queue_id,
         desc,
-        frame: PendingForwardFrame::Prebuilt(rewritten_frame),
+        // #16603: carry the received bytes alongside the translated wire
+        // frame so dispatch mirrors the original frame (plan-1376), while
+        // `meta` below still describes the wire frame for TX/filtering.
+        // The copy is trimmed to the ingress descriptor length; GRE-
+        // decapped callers pass the inner frame, matching `meta`.
+        frame: PendingForwardFrame::PrebuiltTransit {
+            frame: rewritten_frame,
+            ingress_frame: ingress_frame
+                .get(..desc.len as usize)
+                .unwrap_or(ingress_frame)
+                .to_vec(),
+            ingress_meta: meta.into(),
+        },
         // #15947 (H26-02): the queued frame is the TRANSLATED wire frame,
         // so the request meta must describe it (family/protocol/DSCP/offsets
         // from wire_forward_meta), not the ingress packet — dispatch stamps

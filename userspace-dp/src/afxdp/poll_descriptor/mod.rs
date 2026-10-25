@@ -9667,6 +9667,21 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 policy_icmp,
                                             ))
                                         }
+                                        PendingForwardFrame::PrebuiltTransit {
+                                            frame, ..
+                                        } => Some(enforce_queued_embedded_icmp_policy(
+                                            frame,
+                                            meta,
+                                            ingress_zone_override,
+                                            ambiguous_zone,
+                                            forward.decision.resolution,
+                                            worker_ctx,
+                                            now_ns,
+                                            now_secs,
+                                            related_admit,
+                                            policy_src_ip,
+                                            policy_icmp,
+                                        )),
                                         _ => None,
                                     })
                                     .unwrap_or(false);
@@ -9801,6 +9816,21 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 policy_icmp,
                                             ))
                                         }
+                                        PendingForwardFrame::PrebuiltTransit {
+                                            frame, ..
+                                        } => Some(enforce_queued_embedded_icmp_policy(
+                                            frame,
+                                            meta,
+                                            ingress_zone_override,
+                                            ambiguous_zone,
+                                            forward.decision.resolution,
+                                            worker_ctx,
+                                            now_ns,
+                                            now_secs,
+                                            related_admit,
+                                            policy_src_ip,
+                                            policy_icmp,
+                                        )),
                                         _ => None,
                                     })
                                     .unwrap_or(false);
