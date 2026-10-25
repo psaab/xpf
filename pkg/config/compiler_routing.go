@@ -1869,6 +1869,11 @@ func compilePolicyOptions(node *Node, po *PolicyOptionsConfig) error {
 				}
 			case "from":
 				ps.UnknownFrom = append(ps.UnknownFrom, policyStatementUnknownFrom11779(prop)...)
+			case "to":
+				// #16569: statement-level `to` has no typed matcher either;
+				// record it on UnknownTo so the #11779-style gate rejects it
+				// strict and forces every term to reject on tolerant loads.
+				ps.UnknownTo = append(ps.UnknownTo, policyStatementUnknownFrom11779(prop)...)
 			case "then":
 				// Default action at the policy level. #8939: the only two
 				// leaves here are `accept` and `reject`, which are mutually
@@ -1979,9 +1984,9 @@ func recordPolicyDefaultAction14433(stmt *PolicyStatement, action string) {
 }
 
 // parsePolicyStatementInlineKeys11779 records policy-level clauses packed
-// onto the named policy-statement node. Policy-level `from` has no typed
+// onto the named policy-statement node. Policy-level `from`/`to` have no typed
 // representation in the FRR compiler, so every such clause must remain
-// visible to the strict reject / tolerant fail-closed gate.
+// visible to the strict reject / tolerant fail-closed gate (#11779/#16569).
 func parsePolicyStatementInlineKeys11779(stmt *PolicyStatement, keys []string) {
 	if stmt == nil {
 		return
@@ -1989,11 +1994,17 @@ func parsePolicyStatementInlineKeys11779(stmt *PolicyStatement, keys []string) {
 	for i := range keys {
 		switch keys[i] {
 		case "from":
-			if i+1 >= len(keys) || keys[i+1] == "then" || keys[i+1] == "from" {
+			if i+1 >= len(keys) || keys[i+1] == "then" || keys[i+1] == "from" || keys[i+1] == "to" {
 				stmt.UnknownFrom = append(stmt.UnknownFrom, policyFromMissingPredicate11779)
 				continue
 			}
 			stmt.UnknownFrom = append(stmt.UnknownFrom, keys[i+1])
+		case "to":
+			if i+1 >= len(keys) || keys[i+1] == "then" || keys[i+1] == "from" || keys[i+1] == "to" {
+				stmt.UnknownTo = append(stmt.UnknownTo, policyFromMissingPredicate11779)
+				continue
+			}
+			stmt.UnknownTo = append(stmt.UnknownTo, keys[i+1])
 		case "then":
 			if i+1 < len(keys) {
 				switch keys[i+1] {
@@ -2386,12 +2397,20 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 					} else {
 						term.FromASPath = append(term.FromASPath, firewallMatchValues(fc)...)
 					}
-				case "then":
+				case "then", "to":
 					term.UnknownFrom = append(term.UnknownFrom, fc.Name())
 				default:
 					term.UnknownFrom = append(term.UnknownFrom, fc.Name())
 				}
 			}
+		case "to":
+			// #16569: `to` is the sibling match clause of `from` (Junos:
+			// `to neighbor X` in a BGP import policy ≡ `from neighbor X`,
+			// `to protocol`/`to level` likewise scope the term). xpf has no
+			// typed `to` matcher, so record the first predicate leaf on
+			// UnknownTo — mirroring policyStatementUnknownFrom11779 — and
+			// let the gate strict-reject / tolerant-force-reject.
+			term.UnknownTo = append(term.UnknownTo, policyStatementUnknownFrom11779(tc)...)
 		case "then":
 			// #8939: `set … term t1 then accept load-balance per-packet
 			// local-preference 200` nests each action under the previous one,
@@ -2461,6 +2480,18 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 				case "origin":
 					term.Origin = nodeVal(ac)
 					extraCount = 1
+				default:
+					// #16569: a *known Junos* `then` action keyword xpf
+					// does not model (e.g. `preference`, `tag`) was
+					// silently skipped here with only the #10707
+					// advisory, while the packed term-line spelling
+					// already strict-rejects unknown actions via #12517.
+					// Arbitrary unknown words stay the #10707 open-world
+					// case (#12517 B2) and are NOT recorded; only the
+					// known-but-unmodelled Junos actions are.
+					if action != "" && policyTermKnownUnmodelledThen16569[action] {
+						term.UnknownThen = append(term.UnknownThen, action)
+					}
 				}
 				// An unknown statement keyword here is a separate authored
 				// statement under an open-world container: the #10707
@@ -2589,7 +2620,7 @@ func applyCommunityAction(term *PolicyTerm, vals []string) {
 // parsePolicyTermInlineKeys. It is used to find where a variable-length
 // value run (e.g. a multi-protocol "from protocol [ ... ]" list) ends.
 var policyTermInlineKeywords = map[string]bool{
-	"from": true, "then": true, "protocol": true, "prefix-list": true,
+	"from": true, "then": true, "to": true, "protocol": true, "prefix-list": true,
 	"route-filter": true, "next-hop": true, "load-balance": true,
 	"local-preference": true, "metric": true, "metric-type": true,
 	"community": true, "as-path": true, "as-path-prepend": true,
@@ -2774,6 +2805,15 @@ func policyTermClauseKeyword11779(key string) bool {
 	return key == "from" || key == "then"
 }
 
+// policyTermMatchClauseKeyword16569 is the clause set for `to`-aware
+// readers (#16569): `to` opens a sibling match clause like `from`/`then`.
+// Quoted-key and bracket-closure consumers keep the original from/then
+// set via policyTermClauseKeyword11779 so a quoted `"to"` list value is
+// not reclassified as a clause boundary.
+func policyTermMatchClauseKeyword16569(key string) bool {
+	return policyTermClauseKeyword11779(key) || key == "to"
+}
+
 // appendInlineBracketedMatchValues11779 reads all values of a multi-value
 // `from` leaf until a known leaf/action boundary. Bracket metadata determines
 // whether a keyword belongs to a closed value list or an unclosed list.
@@ -2826,8 +2866,18 @@ func isPolicyTermCommunityActionOperand(keys []string, i int) bool {
 // "as-path-prepend", "65001"
 func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quoted []bool, bracketedClosed bool) {
 	inFrom := false
+	inTo := false
 	seenThen := false
 	for i := 0; i < len(keys); i++ {
+		if inTo {
+			// #16569: first `to` predicate leaf is the recorded unknown;
+			// skip its operands until the next clause keyword.
+			if keys[i] == "from" || keys[i] == "then" || keys[i] == "to" {
+				inTo = false
+			} else {
+				continue
+			}
+		}
 		if inFrom && policyTermFromUnsupportedThenKeywords11779[keys[i]] {
 			term.UnknownFrom = append(term.UnknownFrom, keys[i])
 			i = skipUnknownPolicyTermFromTail11779(keys, i)
@@ -2839,13 +2889,23 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 		switch keys[i] {
 		case "from":
 			inFrom = true
-			if i+1 >= len(keys) || keys[i+1] == "then" || keys[i+1] == "from" {
+			if i+1 >= len(keys) || keys[i+1] == "then" || keys[i+1] == "from" || keys[i+1] == "to" {
 				term.UnknownFrom = append(term.UnknownFrom, policyFromMissingPredicate11779)
+			}
+			continue
+		case "to":
+			inFrom = false
+			inTo = true
+			if i+1 >= len(keys) || keys[i+1] == "then" || keys[i+1] == "from" || keys[i+1] == "to" {
+				term.UnknownTo = append(term.UnknownTo, policyFromMissingPredicate11779)
+			} else {
+				term.UnknownTo = append(term.UnknownTo, keys[i+1])
 			}
 			continue
 		case "then":
 			seenThen = true
 			inFrom = false
+			inTo = false
 			if i+1 < len(keys) {
 				if keys[i+1] == "next" {
 					i++

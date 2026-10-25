@@ -58,18 +58,18 @@ func policyTermBody12537(leafSchema *schemaNode, term *Node, inline bool) []*Nod
 	keys := term.Keys
 	i, _ := consumeNodeKeys(keys, leafSchema)
 	if fromSchema == nil || thenSchema == nil || i >= len(keys) ||
-		!policyTermClauseKeyword11779(keys[i]) {
+		!policyTermMatchClauseKeyword16569(keys[i]) {
 		return nil
 	}
 	// A clause word inside a `[ ... ]` list is a value, never a clause.
 	clauseAt := func(k int) bool {
-		return !term.KeyBracketed(k) && policyTermClauseKeyword11779(keys[k])
+		return !term.KeyBracketed(k) && policyTermMatchClauseKeyword16569(keys[k])
 	}
 	actionAt := func(k int) bool {
 		return !term.KeyBracketed(k) && resolveSchemaChild(thenSchema, keys[k]) != nil
 	}
 	var body []*Node
-	var from, then *Node
+	var from, to, then *Node
 	for i < len(keys) {
 		end := i + 1
 		if keys[i] == "from" {
@@ -94,6 +94,27 @@ func policyTermBody12537(leafSchema *schemaNode, term *Node, inline bool) []*Nod
 				if cut > 0 {
 					break
 				}
+			}
+			i = end
+			continue
+		}
+		if keys[i] == "to" {
+			// #16569: keep the whole `to ...` run as one `to` child so
+			// parsePolicyTermChildren records it on UnknownTo instead of
+			// dropping it when a packed group term is rebuilt.
+			for end < len(keys) && !clauseAt(end) {
+				end++
+			}
+			if to == nil {
+				to = &Node{Keys: []string{"to"}, InheritedFrom: term.InheritedFrom}
+				body = append(body, to)
+			}
+			if end > i+1 {
+				span := keySpan12537(term, i+1, end)
+				// First key is the predicate leaf name; keep leaf shape.
+				to.Children = append(to.Children, span)
+			} else {
+				to.Children = append(to.Children, &Node{Keys: []string{"to"}, IsLeaf: true, InheritedFrom: term.InheritedFrom})
 			}
 			i = end
 			continue

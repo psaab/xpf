@@ -503,6 +503,14 @@ Multi-value matches survive `Format` / `FormatSet` replay. List closure is
 tracked structurally: bare or quoted clause words are values inside a balanced
 list, while an unclosed bracketed `from` list fails closed.
 
+**Routing-policy `to` matches and unmodelled `then` actions fail closed
+(#16569):** the `to` sibling of `from` (Junos BGP-import `to neighbor` ≡
+`from neighbor`) is recorded on `UnknownTo` (term and statement level) and
+known-but-unmodelled Junos `then` actions (e.g. `preference`, `tag`) on
+`UnknownThen`; both strict-reject and tolerant-force `reject` through the
+#11779 gate, so a neighbor-scoped import accept no longer widens to every
+peer. Arbitrary unknown `then` words stay #10707 warn-only (#12517 B2).
+
 **Routing policy-statement conflicting `then` actions are rejected (#14425):**
 a merged term carrying both `then accept` and `then reject` — whether
 hand-authored, flat-set, or composed by apply-groups (group terminal

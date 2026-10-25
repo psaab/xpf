@@ -8950,6 +8950,25 @@ provenance: any observed unclosed bracketed `from` list fails closed, while a
 bare or quoted clause word inside a balanced list remains a value. Fail-on-revert
 coverage is in `pkg/config/routing_policy_unknown_from_11779_test.go`.
 
+The sibling `to` match clause and unmodelled `then` action keywords fail
+closed the same way (#16569). Junos allows most `from` match conditions
+under `to` — for BGP import policies `to neighbor X` is equivalent to
+`from neighbor X`, and `to protocol` / `to level` likewise scope the term —
+but xpf compiles no `to` matcher, so a dropped `to` widened a neighbor-scoped
+import accept to every peer sharing the policy. Term-level `to` predicates
+are retained in `PolicyTerm.UnknownTo` and statement-level ones in
+`PolicyStatement.UnknownTo`; strict compilation rejects them with a #16569
+diagnostic, and tolerant loads force affected terms (and, for statement-level
+`to`, the default) to `reject`, so the FRR route-map renders `deny`.
+Known Junos `then` actions xpf does not model (for example `preference`,
+`tag`, `color`, `metric2`) are retained in `PolicyTerm.UnknownThen` and
+rejected / forced to `reject` identically; arbitrary unknown words in a
+braced `then` block remain the #10707 open-world warn-only case (#12517 B2),
+and the packed term-line unknown-action spelling remains rejected via
+#12517. Fail-on-revert coverage is in
+`pkg/config/routing_policy_unknown_to_16569_test.go` and
+`pkg/frr/policy_unknown_to_16569_test.go`.
+
 Policy-level `from` predicates (the term-less `policy-statement { from ...;
 then ...; }` form) have no typed matcher in xpf's FRR compiler. They are
 retained as `PolicyStatement.UnknownFrom` and therefore strict-rejected; a

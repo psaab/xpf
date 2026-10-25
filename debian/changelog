@@ -1,4 +1,20 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Config: routing-policy `to` match conditions and unmodelled `then`
+    action keywords no longer drop silently with only the #10707 advisory
+    (#16569). A BGP import term scoped `to neighbor X` (Junos: equivalent
+    to `from neighbor X`) previously compiled to a route-filter-only accept
+    and was rendered as a permit route-map entry on every peer sharing the
+    policy, accepting the prefix from unintended peers; `to protocol` /
+    `to level` widened likewise, and a dropped `then preference` kept its
+    accept at default preference. Term-level `to` is now recorded on
+    PolicyTerm.UnknownTo, statement-level `to` on
+    PolicyStatement.UnknownTo, and known Junos `then` actions xpf does not
+    model (preference, tag, color, metric2, ...) on PolicyTerm.UnknownThen;
+    the #11779 gate strict-rejects all three and tolerant loads warn and
+    force affected terms (and the statement default for statement-level
+    `to`) to reject, rendering deny. Arbitrary unknown `then` words remain
+    the #10707 open-world warn-only case.
+
   * Daemon/DHCP: an unchanged-lease renewal while host-inbound gap
     debt is owed no longer applies inline on the DHCP client
     goroutine (#16559). The hook parked uncancellably on applySem;
