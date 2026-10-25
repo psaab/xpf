@@ -124,6 +124,9 @@ func (m *Manager) renderRIP16125(b *strings.Builder, rip *config.RIPConfig, vrfS
 					b.WriteString(ripDefs16625)
 				}
 				fmt.Fprintf(b, "router rip%s\n", vrfSuffix)
+				// #16620: pin RIP to the Junos RIP preference 100; see
+				// protocol_distance_16620.go.
+				b.WriteString(junosRIPDistanceLine)
 				for _, iface := range enrolled16625 {
 					fmt.Fprintf(b, " network %s\n", iface)
 				}

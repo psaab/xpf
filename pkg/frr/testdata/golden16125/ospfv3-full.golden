@@ -1,6 +1,7 @@
 ! xpf managed config - do not edit
 !
 router ospf6
+ distance ospf6 intra-area 10 inter-area 10 external 150
  ospf6 router-id 10.0.0.2
  area 0.0.0.2 nssa
  redistribute connected
