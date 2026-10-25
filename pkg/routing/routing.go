@@ -239,6 +239,16 @@ func (m *Manager) GetKeepaliveState(tunnelName string) *KeepaliveState {
 	return m.tunnel.GetKeepaliveState(tunnelName)
 }
 
+// TunnelHeldDown reports whether a live keepalive runner currently
+// holds the named tunnel down (#16582). See
+// tunnelManager.TunnelHeldDown for the exact predicate.
+func (m *Manager) TunnelHeldDown(tunnelName string) bool {
+	if m == nil || m.tunnel == nil {
+		return false
+	}
+	return m.tunnel.TunnelHeldDown(tunnelName)
+}
+
 // --- XFRM domain ---
 
 // ApplyXfrmi creates XFRM virtual interfaces for IPsec VPN tunnels.

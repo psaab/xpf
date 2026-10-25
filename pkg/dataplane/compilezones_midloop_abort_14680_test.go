@@ -330,7 +330,7 @@ func TestCompileZonesAbortWiring14680(t *testing.T) {
 	}
 	isrc := string(ifaceSrc)
 	stag := strings.Index(isrc, "rxVlanStagHwParseActivationError(physName, stagErr)")
-	up := strings.Index(isrc, "netlink.LinkSetUp(nl)")
+	up := strings.Index(isrc, "zoneLinkSetUpSeam(nl)")
 	if stag < 0 || up < 0 || stag > up {
 		t.Fatalf("#14680: stag gate (offset %d) must precede LinkSetUp (offset %d) in compiler_iface.go", stag, up)
 	}

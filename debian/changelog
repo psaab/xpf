@@ -1,4 +1,23 @@
 xpf (0.0.0) unstable; urgency=medium
+  * GRE keepalive: a config apply during a peer outage no longer
+    re-ups a keepalive-down tunnel (#16582). The dataplane zone
+    compile (`mapZoneInterface`) was a second writer of the tunnel's
+    admin state: it LinkSetUp'd every zoned netdev moments after
+    ApplyTunnels honoured the runner's held-down skipUp, and the
+    runner's down edge (`state.Up && Failures>=MaxRetries`) never
+    fired again, so the dead tunnel carried routes and FIB ECMP
+    selection for the rest of the outage while keepalive status
+    still read down. Two defences: the zone loop now consults a
+    daemon-registered held-down resolver (routing
+    `Manager.TunnelHeldDown`: runner present, Up==false, failures
+    at/past threshold) by Linux netdev name before LinkSetUp and
+    leaves a held-down tunnel down as an intentionally-down surface;
+    and the runner re-downs a link observed admin UP on any dead
+    tick at/past threshold (the observed-down steady state issues no
+    extra LinkSetDown, and a re-down does not re-fire the
+    liveness-change callback). Recovery on the first alive probe is
+    unchanged.
+
   * Userspace event stream: the SessionClose/SessionCreate telemetry queue
     budget is now released when a frame leaves the bounded channel, not when
     an ACK trims it from the replay buffer (#16570). The per-kind budget
