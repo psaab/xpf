@@ -1,4 +1,14 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Config/firewall: the single-rate `firewall policer`
+    `burst-size-limit` floor is now the shared one-frame floor of
+    1514 bytes (#16714), unified with the three-color leaves
+    (#16610): values 1500..1513 are rejected at strict commit and
+    warned on tolerant load. Previously 1500 committed clean (the
+    #10310 L3-byte floor) while the userspace meter charges the
+    full Ethernet frame (1500-byte MTU payload + 14-byte header),
+    so every full-size frame was discarded at any rate. A burst at
+    exactly 1514 still commits; tagged (1518) or jumbo traffic
+    needs a proportionally larger burst.
   * Config: packed hierarchical `security flow tcp-session
     time-wait-state session-timeout N;` / `session-ageout;` (and the
     half-close leaves, including multi-leaf packed runs) now compile

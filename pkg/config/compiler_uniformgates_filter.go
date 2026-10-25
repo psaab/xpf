@@ -324,11 +324,18 @@ func runUniformGatesFilter(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 	// which the dataplane lowers to a fail-closed drop-all meter. Runs
 	// after the then-action gates: an unknown/conflicting action means
 	// intent is already uncharacterized and is reported first.
+	// #16714: the same gate also enforces the shared one-frame burst
+	// floor; only that violation downgrades on tolerant paths.
 	if err := validateFirewallPolicerLimitsStrict(cfg); err != nil {
-		if opts.lenientPolicerMissingLimits {
+		isFloor := policerBurstFloorError16714(err)
+		switch {
+		case isFloor && opts.lenientSingleRateBurstFloor16714:
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("firewall policer burst floor (downgraded to warning on tolerant path; the sub-frame bucket drops every maximum-sized frame): %v", err))
+		case !isFloor && opts.lenientPolicerMissingLimits:
 			cfg.Warnings = append(cfg.Warnings,
 				fmt.Sprintf("firewall policer missing limits (downgraded to warning on tolerant path): %v", err))
-		} else {
+		default:
 			return err
 		}
 	}

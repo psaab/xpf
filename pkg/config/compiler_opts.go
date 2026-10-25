@@ -352,6 +352,15 @@ type compileOpts struct {
 	// must still boot (#1960); every other three-color defect stays
 	// strict, and commit / commit-check stay strict.
 	lenientThreeColorBurstFloor16610 bool
+	// lenientSingleRateBurstFloor16714 downgrades only the #16714
+	// one-frame burst-floor violation in
+	// validateFirewallPolicerLimitsStrict to a warning on tolerant
+	// load / peer-sync paths. A sub-frame burst persisted by an older
+	// binary (1500..1513, or any sub-frame value that reached the
+	// compiled gate) must still boot (#1960); missing limits and
+	// every other policer defect stay under their own gates, and
+	// commit / commit-check stay strict.
+	lenientSingleRateBurstFloor16714 bool
 	// lenientSchedulerWindowPairs11358 downgrades conflicting repeated
 	// start-time/stop-time boundaries (#11358) and weekday all-day, exclude,
 	// and time-window meanings split across separate weekday statements
@@ -3826,6 +3835,7 @@ func lenientCompileOpts() compileOpts {
 		lenientSchedulerMapRef:                   true,
 		lenientSchedulerDateRange15695:           true,
 		lenientThreeColorBurstFloor16610:         true,
+		lenientSingleRateBurstFloor16714:         true,
 		lenientSchedulerWindowPairs11358:         true,
 		lenientDuplicateRootLogin14447:           true,
 		lenientCodelTarget11825:                  true,

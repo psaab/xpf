@@ -53,6 +53,31 @@ func ValidateByteSize(raw string) error {
 	return nil
 }
 
+// minPolicerBurstBytes16714 is the shared one-frame floor for every
+// policer burst leaf (#16714, unifying #10310's single-rate floor with
+// #16610's three-color floor): the two-color
+// `if-exceeding burst-size-limit` and the four three-color
+// `committed-burst-size` / `excess-burst-size` / `peak-burst-size`
+// leaves. The userspace meter charges the full Ethernet frame
+// (meta.pkt_len is the buffer length, L3 + 14 untagged / 18 tagged,
+// #8581), so a bucket below one maximum-sized frame
+// (1500-byte MTU payload + 14-byte Ethernet header, 1514 untagged;
+// 1518 tagged) can never admit that frame: it colours Red at any
+// offered rate and `then discard` drops it, silently turning the
+// meter into a frame-size filter. Junos gives 1500 as the minimum
+// in L3 bytes; the charged cost here is frame bytes, so the floor
+// is expressed in that unit.
+//
+// The floor is the untagged frame (1514), matching #16610: a single
+// 802.1Q tag adds 4 bytes, so a tagged maximum frame needs 1518 and
+// jumbo MTUs need proportionally more. Raising the committed floor
+// to 1518 would reject the untagged floor twin that #16610 pinned;
+// operators policing tagged or jumbo traffic must configure a
+// burst at least their interface MTU + L2 overhead. This constant
+// is the one shared source both validators and the strict
+// compiled-config gates enforce; do not fork it per leaf.
+const minPolicerBurstBytes16714 uint64 = 1514
+
 // ValidatePolicerBurstSize validates a legacy firewall policer
 // `if-exceeding burst-size-limit` value (#5299). Junos accepts a byte
 // count either bare (100000) or with a k/m/g suffix (15k), so — unlike
@@ -61,45 +86,32 @@ func ValidateByteSize(raw string) error {
 // compiling input before this gate). What IS rejected is the fail-closed
 // input the pre-#5299 parseBurstSizeLimit silently coerced to 0 (or, on
 // overflow, wrapped to a small nonzero), plus a bucket smaller than one
-// maximum-sized packet. A sub-packet bucket cannot admit an ordinary MTU
+// maximum-sized frame. A sub-frame bucket cannot admit an ordinary MTU
 // frame and otherwise commits a configuration that drops/marks every such
 // packet.
-const minPolicerBurstBytes uint64 = 1500
-
 func ValidatePolicerBurstSize(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		return fmt.Errorf("missing value (expected a burst size in bytes, e.g. 15k, 100000, 1m)")
+		return fmt.Errorf("missing value (expected a burst size in bytes, e.g. 1514, 15k, 100000, 1m)")
 	}
 	n, err := parseBurstSizeLimitStrict(trimmed)
 	if err != nil {
-		return fmt.Errorf("not a valid burst-size-limit (expected bytes, optionally with a k/m/g suffix, e.g. 15k): %w", err)
+		return fmt.Errorf("not a valid burst-size-limit (expected bytes, optionally with a k/m/g suffix, e.g. 1514 or 15k): %w", err)
 	}
-	if n < minPolicerBurstBytes {
+	if n < minPolicerBurstBytes16714 {
 		return fmt.Errorf(
-			"burst-size-limit must be at least one 1500-byte packet (%d bytes), got %d",
-			minPolicerBurstBytes,
+			"burst-size-limit must be at least one maximum-sized frame (%d bytes: 1500-byte packet plus 14-byte Ethernet header, the meter's frame-byte cost unit), got %d",
+			minPolicerBurstBytes16714,
 			n,
 		)
 	}
 	return nil
 }
 
-// minThreeColorBurstBytes16610 is the one-frame floor for every
-// three-color burst bucket (#16610, twin of #10310's minPolicerBurstBytes).
-// The userspace meter charges the full Ethernet frame (meta.pkt_len is the
-// buffer length, #8581), so a bucket below one maximum-sized frame
-// (1500-byte MTU payload + 14-byte Ethernet header, untagged) can never
-// admit that frame: it colours Red at any offered rate and `then discard`
-// drops it, silently turning the meter into a frame-size filter. Junos
-// gives 1500 as the minimum for all four leaves; the charged cost here is
-// frame bytes, so the floor is expressed in that unit (1514).
-const minThreeColorBurstBytes16610 uint64 = 1514
-
 // validateThreeColorPolicerBurstSize11827 validates a three-color burst
-// leaf (#11827 diagnostics; #16610 one-frame floor). Any positive,
-// representable byte count below minThreeColorBurstBytes16610 is rejected:
-// such a bucket cannot admit one ordinary maximum-sized frame.
+// leaf (#11827 diagnostics; #16610 one-frame floor; #16714 shared floor).
+// Any positive, representable byte count below minPolicerBurstBytes16714
+// is rejected: such a bucket cannot admit one ordinary maximum-sized frame.
 func validateThreeColorPolicerBurstSize11827(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -112,10 +124,10 @@ func validateThreeColorPolicerBurstSize11827(raw string) error {
 	if n == 0 {
 		return fmt.Errorf("burst size must be positive (at least one byte)")
 	}
-	if n < minThreeColorBurstBytes16610 {
+	if n < minPolicerBurstBytes16714 {
 		return fmt.Errorf(
 			"burst size must be at least one maximum-sized frame (%d bytes: 1500-byte packet plus 14-byte Ethernet header, the meter's frame-byte cost unit), got %d",
-			minThreeColorBurstBytes16610,
+			minPolicerBurstBytes16714,
 			n,
 		)
 	}

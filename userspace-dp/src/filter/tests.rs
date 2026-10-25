@@ -1667,6 +1667,82 @@ fn single_rate_policer_discard_is_enforced() {
     assert!(status[0].drop_packets >= 1, "a drop must be counted");
 }
 
+// #16714: burst = the shared one-frame floor (1514) must admit a
+// maximum-sized frame for BOTH the two-color (legacy single-rate
+// `firewall policer`, CBS=EBS=burst with yellow+red drop, as
+// build_single_rate_policer_state lowers it) and the three-color
+// paths. The meter charges the full Ethernet frame (meta.pkt_len):
+// a 1500-byte MTU payload is a 1514-byte untagged frame. Pre-fix the
+// Go floor was 1500, so a burst-1500 two-color policer dropped this
+// frame at any rate (now rejected at commit by the shared 1514
+// floor). FAIL-ON-REVERT (Go side): lowering
+// minPolicerBurstBytes16714 below 1514 re-admits the dropping config;
+// this cell pins the meter semantics the floor is expressed in.
+#[test]
+fn policer_burst_floor_16714_admits_max_frame_both_paths() {
+    const FLOOR: u64 = 1514; // 1500 MTU + 14 Ethernet header (untagged)
+    const MAX_FRAME: u64 = 1514;
+    let drop_treatments = ThreeColorTreatments {
+        green: ColorTreatment::default(),
+        yellow: ColorTreatment::drop(),
+        red: ColorTreatment::drop(),
+    };
+    // Two-color lowering (CBS=EBS=burst, discard): floor admits max frame.
+    let two = ThreeColorPolicerState::sr_tcm_with_treatments(
+        100_000_000,
+        FLOOR,
+        FLOOR,
+        true,
+        drop_treatments,
+    )
+    .expect("floor two-color policer");
+    let d = two.meter(0, MAX_FRAME, PacketColor::Green);
+    assert_eq!(d.color, PacketColor::Green, "two-color floor must admit max frame as Green");
+    assert!(!d.drop, "two-color floor must not drop max frame");
+    // Two-color at the old 1500 floor drops the same frame (the defect
+    // #16714 now rejects at commit; meter semantics unchanged).
+    let old = ThreeColorPolicerState::sr_tcm_with_treatments(
+        100_000_000,
+        1500,
+        1500,
+        true,
+        drop_treatments,
+    )
+    .expect("old two-color policer");
+    let d_old = old.meter(0, MAX_FRAME, PacketColor::Green);
+    assert!(d_old.drop, "1500 burst must drop a 1514-byte frame (pre-#16714 defect)");
+    // Three-color single-rate: CBS=EBS=floor admits the max frame.
+    let three = ThreeColorPolicerState::sr_tcm_with_treatments(
+        100_000_000,
+        FLOOR,
+        FLOOR,
+        true,
+        ThreeColorTreatments {
+            red: ColorTreatment::drop(),
+            ..ThreeColorTreatments::default()
+        },
+    )
+    .expect("floor three-color policer");
+    let d3 = three.meter(0, MAX_FRAME, PacketColor::Green);
+    assert_eq!(d3.color, PacketColor::Green, "three-color floor must admit max frame as Green");
+    // Three-color two-rate: CBS=PBS=floor admits the max frame.
+    let three2 = ThreeColorPolicerState::tr_tcm_with_treatments(
+        100_000_000,
+        FLOOR,
+        200_000_000,
+        FLOOR,
+        true,
+        ThreeColorTreatments {
+            red: ColorTreatment::drop(),
+            ..ThreeColorTreatments::default()
+        },
+    )
+    .expect("floor two-rate policer");
+    let d32 = three2.meter(0, MAX_FRAME, PacketColor::Green);
+    assert_eq!(d32.color, PacketColor::Green, "two-rate floor must admit max frame as Green");
+    assert!(!d32.drop, "two-rate floor must not drop max frame");
+}
+
 #[test]
 fn three_color_runtime_ids_and_miss_path_counters_are_stable() {
     let state = make_filter_state_with_three_color(
