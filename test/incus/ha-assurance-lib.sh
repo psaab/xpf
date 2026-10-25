@@ -239,19 +239,29 @@ PY
 # Idle is baseline-relative (#16289): the caller passes the (sent, received)
 # pair captured on the first sample of a wait (empty before that sample) and
 # this helper is idle when every session created since the baseline has been
-# received (sent - baseline_sent == received - baseline_received) with
+# received (sent - baseline_sent <= received - baseline_received) with
 # pending == 0. Absolute sent == received is unsatisfiable whenever the two
 # daemons did not start counting from the same epoch (e.g. the target
 # received creates before the source last restarted and zeroed its sent
 # counter), which made the gate time out forever on a fully caught-up pair.
-# Verdicts: 0 idle, 1 ordinary not-idle (baseline kept; an outstanding
-# unreceived delta must persist until received, never be absorbed into a
-# new baseline), 2 VOID (blind/malformed evidence, malformed baseline),
-# 3 counter rewind (a daemon restarted and reset the epoch; not idle, and
-# the ONLY verdict on which the caller re-baselines). Drained is required
-# and parseable, informational only. Every evidence field is parsed before
-# any baseline branch, so blind evidence is VOID even on the
-# baseline-establishing sample and even on a rewound sample.
+# The inequality (#16500), not equality, is required: the first sample's
+# gap can include creates in flight that are later delivered (sent -
+# received shrinks as received catches up), so equality would never read
+# idle on a pair that has caught up. Counters meeting in absolute terms
+# (sent == received) is likewise idle: it covers creates recorded only
+# on the target at the baseline because the two CLI captures are
+# non-atomic (received ahead at the baseline, sent then reaching that
+# already-received count). A gap that instead grows since the baseline
+# (sent outruns received, counters unequal) stays not idle. Verdicts:
+# 0 idle, 1 ordinary not-idle (baseline kept; an outstanding
+# unreceived delta must persist until received, never be absorbed into
+# a new baseline), 2 VOID (blind/malformed evidence, malformed
+# baseline), 3 counter rewind (a daemon restarted and reset the epoch;
+# not idle, and the ONLY verdict on which the caller re-baselines).
+# Drained is required and parseable,
+# informational only. Every evidence field is parsed before any baseline
+# branch, so blind evidence is VOID even on the baseline-establishing
+# sample and even on a rewound sample.
 ha_session_sync_idle_sample() {
 	if [[ $# -ne 6 ]]; then
 		printf 'session sync sample: expected <source-node> <target-node> <source-stats> <target-stats> <baseline-sent> <baseline-received>\n' >&2
@@ -292,7 +302,7 @@ ha_session_sync_idle_sample() {
 			"$source_node" "$target_node" "$sent" "$baseline_sent" "$received" "$baseline_received" "$pending" >&2
 		return 3
 	fi
-	if (( sent - baseline_sent == received - baseline_received )) && [[ "$pending" == "0" ]]; then
+	if { (( sent - baseline_sent <= received - baseline_received )) || (( sent == received )); } && [[ "$pending" == "0" ]]; then
 		return 0
 	fi
 	printf 'session sync %s->%s not idle: source sent=%s (baseline %s), target received=%s (baseline %s), pending=%s\n' \
