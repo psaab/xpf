@@ -48,6 +48,16 @@ xpf (0.0.0) unstable; urgency=medium
     software add`, a misspelt `failover`, and the 32-node census.
     Bare keyword nodes keep their help; value-slot and leaf failures
     keep their existing handler errors.
+  * Userspace FIB: rib-group return rows (kernel ip-rule priorities
+    1001-1999) now run after the source VRF table's own lookup in the
+    AF_XDP helper, matching the kernel's l3mdev rule at 1000 (#16799).
+    Previously every return row was evaluated before the source table's
+    longest-prefix match, so tenant A's own default — and even a
+    more-specific route in A — lost to a return row into tenant B,
+    steering A's traffic into B (or dropping it on zone policy) while
+    the kernel and Junos used A's route. A return row now fires only
+    when the source table misses; the 30000-band leaks into inet.0 are
+    unchanged.
   * Cluster/config: an omitted `redundancy-group ip-monitoring
     global-weight` now defaults to 255, the Junos default (#16667).
     Previously it compiled to 0, so aggregate mode deducted nothing

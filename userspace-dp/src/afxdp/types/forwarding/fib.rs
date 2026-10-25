@@ -95,6 +95,12 @@ pub(in crate::afxdp) struct LeakRuleV4 {
     pub(in crate::afxdp) next_table: String,
     /// #9955: lower kernel ip-rule priorities are evaluated first.
     pub(in crate::afxdp) rule_priority: u32,
+    /// #16799: a rib-group return row (kernel priority in (1000, 2000))
+    /// runs AFTER the source VRF table's own lookup (the l3mdev rule at
+    /// 1000), not before it. Deferred rows are evaluated only when the
+    /// source table's own LPM (and, for main, the 30000-band leaks)
+    /// produced no route. All other leaks keep stage-1 precedence.
+    pub(in crate::afxdp) post_table: bool,
     /// #9951: stable per-incarnation identity. A removed and later re-added
     /// leak gets a new value, so an old session cannot pass an ABA check.
     pub(in crate::afxdp) incarnation: u64,
@@ -106,6 +112,8 @@ pub(in crate::afxdp) struct LeakRuleV6 {
     pub(in crate::afxdp) next_table: String,
     /// #9955: lower kernel ip-rule priorities are evaluated first.
     pub(in crate::afxdp) rule_priority: u32,
+    /// #16799: v4 twin (see `LeakRuleV4::post_table`).
+    pub(in crate::afxdp) post_table: bool,
     /// #9951: stable per-incarnation identity (see `LeakRuleV4`).
     pub(in crate::afxdp) incarnation: u64,
 }

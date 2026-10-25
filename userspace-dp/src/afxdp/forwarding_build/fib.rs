@@ -77,7 +77,7 @@ impl FibFamily for V4Family {
         parse_route_next_hop_generic(spec)
     }
     fn leak_identity_matches(a: &Self::Leak, b: &Self::Leak) -> bool {
-        a.prefix == b.prefix && a.next_table == b.next_table && a.rule_priority == b.rule_priority
+        a.prefix == b.prefix && a.next_table == b.next_table && a.rule_priority == b.rule_priority && a.post_table == b.post_table
     }
     fn leak_incarnation(leak: &Self::Leak) -> u64 {
         leak.incarnation
@@ -134,7 +134,7 @@ impl FibFamily for V6Family {
         parse_route_next_hop_generic(spec)
     }
     fn leak_identity_matches(a: &Self::Leak, b: &Self::Leak) -> bool {
-        a.prefix == b.prefix && a.next_table == b.next_table && a.rule_priority == b.rule_priority
+        a.prefix == b.prefix && a.next_table == b.next_table && a.rule_priority == b.rule_priority && a.post_table == b.post_table
     }
     fn leak_incarnation(leak: &Self::Leak) -> u64 {
         leak.incarnation
@@ -897,6 +897,11 @@ pub(super) fn populate_routes(
                         prefix,
                         next_table: canonical_next_table(&route.next_table, false).into_owned(),
                         rule_priority: route.rule_priority,
+                        // #16799: rib-group return rows carry a kernel
+                        // priority in (1000, 2000) (see Go
+                        // IsRibGroupReturnRulePriority, incl. legacy 1500).
+                        // They run after the source VRF table's lookup.
+                        post_table: route.rule_priority > 1000 && route.rule_priority < 2000,
                         incarnation: 0,
                     });
             } else {
@@ -974,6 +979,7 @@ pub(super) fn populate_routes(
                         prefix,
                         next_table: canonical_next_table(&route.next_table, true).into_owned(),
                         rule_priority: route.rule_priority,
+                        post_table: route.rule_priority > 1000 && route.rule_priority < 2000,
                         incarnation: 0,
                     });
             } else {
@@ -1677,6 +1683,7 @@ mod fib_genericize_16130_tests {
             prefix: PrefixV4::from_net(prefix.parse().unwrap()),
             next_table: table.into(),
             rule_priority: prio,
+            post_table: false,
             incarnation: inc,
         };
         prev.leak_rules_v4.insert(
@@ -1705,6 +1712,7 @@ mod fib_genericize_16130_tests {
             prefix: PrefixV6::from_net(prefix.parse().unwrap()),
             next_table: table.into(),
             rule_priority: prio,
+            post_table: false,
             incarnation: inc,
         };
         prev.leak_rules_v6.insert(

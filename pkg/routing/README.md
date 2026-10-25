@@ -476,7 +476,11 @@ delegate to the owning domain. Exported types:
   AF_XDP FIB mirrors the same authorized destination scopes as reverse
   `NextTable` routes from the source instance table to the peer table,
   carrying the kernel priority for LPM ordering; a stale kernel rule
-  without the import-rib authorization is not mirrored.
+  without the import-rib authorization is not mirrored. Since #16799
+  the FIB defers a mirrored return row (priority in (1000, 2000)) until
+  the source table's own lookup misses, mirroring the l3mdev rule at
+  1000 preceding these rules: the source's own default, more-specific,
+  connected, or discard/reject route wins over the return.
 - `2000`: the **VRF miss terminator** (#9819), `l3mdev unreachable`, once
   per family. `vrfMissTerminatorPriority` in `vrf_miss_terminator_9819.go`.
   `vrfManager.Reconcile` (and `Create`) installs it before creating any VRF
