@@ -31,6 +31,7 @@ func TestCommitWithGenBindingRepreflightsOnConcurrentEdit(t *testing.T) {
 	var examined []string
 	attempt := 0
 	oldActive, compiled, err := d.commitWithGenBinding(
+		0,
 		func(cand *config.Config) error {
 			examined = append(examined, cand.System.HostName)
 			if attempt == 0 {
@@ -76,6 +77,7 @@ func TestCommitWithGenBindingSurfacesPersistentConflict(t *testing.T) {
 
 	preflights := 0
 	_, _, err := d.commitWithGenBinding(
+		0,
 		func(cand *config.Config) error {
 			preflights++
 			// Always edit the candidate → the examined generation is always
@@ -104,6 +106,7 @@ func TestCommitWithGenBindingNoRaceCommitsOnce(t *testing.T) {
 
 	preflights := 0
 	_, compiled, err := d.commitWithGenBinding(
+		0,
 		func(cand *config.Config) error { preflights++; return nil },
 		func(gen uint64) (*config.Config, error) { return s.CommitWithDescriptionGen("", gen) },
 	)

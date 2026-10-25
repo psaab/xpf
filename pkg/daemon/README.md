@@ -2432,9 +2432,18 @@ never lock an operator out of a remote box it manages.
   The first-commit `PromoteRollback` branch also bumps `holderEpoch`, so a
   holder-bound commit authority minted before the timeout fails verification
   at promotion instead of promoting the reset candidate; an ordinary
-  (non-first) rollback does not bump it. `InternalCommitter` authorities are
-  stopped by the daemon recheck, not the epoch. Regression:
-  `bootstrap_commit_race_15055_test.go`.
+  (non-first) rollback over a CLEAN candidate does not bump it.
+  `InternalCommitter` authorities are stopped by the daemon recheck, not
+  the epoch. Regression: `bootstrap_commit_race_15055_test.go`.
+- **Dirty-discarding rollback fences parked commits (#16719).** A non-first
+  rollback that discards a DIRTY candidate (staged edits inside the window)
+  advances the store's `rollbackDiscardGen` counter instead of `holderEpoch`
+  (the holder did not change). Store-minted authorities record the counter
+  at mint and are refused at promotion with
+  `ErrCommitConfirmedRolledBack`; `InternalCommitter` commits are fenced by
+  sampling the counter before `applySem.Acquire` and re-checking it in
+  `commitWithGenBinding`. Regression: `commit_rollback_discard_16719_test.go`
+  (daemon + configstore).
 
 ## Notable gotchas
 
