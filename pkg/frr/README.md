@@ -1776,6 +1776,15 @@ step. Both are required — neither sees the other's case:
   whole-definition at render, so referencing terms fail closed
   (#10822). Unanchored edges keep Junos substring meaning inside
   one token.
+- **No other rendered line may contain `| ` (#16776).** Beyond the
+  community patterns above (now pipe-free via #16788), a neighbor
+  description carrying `| ` would be refused by FRR's vty pipe hook
+  (`% Unknown action`, `frr-reload.py` still exiting 0) and silently
+  never install. It is rejected at commit
+  (`validateBGPNeighborDescriptionPipeStrict16776`) and omitted at
+  render on tolerant paths; `rewriteFRRPipeSequences` in
+  `render_validate.go` remains the shared pipe belt for rest-of-line
+  operands.
 - **Policy community references are validated at commit (#2881).** A
   policy-statement term's `from community <name>` renders `match community
   <name>` and `then community delete <name>` (the strip-by-list operation

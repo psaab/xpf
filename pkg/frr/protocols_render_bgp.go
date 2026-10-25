@@ -169,7 +169,16 @@ func (m *Manager) renderBGP16125(b *strings.Builder, bgp *config.BGPConfig, vali
 				fmt.Fprintf(b, " neighbor %s timers %d %d\n", n.Address, keepalive, n.HoldTime)
 			}
 			if n.Description != "" {
-				fmt.Fprintf(b, " neighbor %s description %s\n", n.Address, sanitizeFRRValue(n.Description))
+				// #16776: a description carrying "| " would be
+				// refused by FRR's vty pipe hook while the reload
+				// reports success. Omit it on the tolerant path
+				// (the strict gate rejects it at commit).
+				if !config.FRRDescriptionPipeSafe16776(n.Description) {
+					slog.Warn("frr: omitting neighbor description containing \"| \"; it would be refused by the vty pipe hook (#16776)",
+						"neighbor", sanitizeFRRValue(n.Address))
+				} else {
+					fmt.Fprintf(b, " neighbor %s description %s\n", n.Address, sanitizeFRRValue(n.Description))
+				}
 			}
 			if n.MultihopTTL > 0 {
 				fmt.Fprintf(b, " neighbor %s ebgp-multihop %d\n", n.Address, frrClampInt("bgp ebgp-multihop", n.MultihopTTL, 255))

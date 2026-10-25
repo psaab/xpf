@@ -2071,6 +2071,62 @@ func validatePolicyCommunityRegexStrict(cfg *Config) error {
 					"\"65000:100\"`",
 					name, member, err, name, member, name)
 			}
+			// #16776: a member whose "| " space is a pattern atom
+			// cannot be rendered pipe-safe without changing meaning.
+			if err := ValidCommunityMemberPipe16776(member); err != nil {
+				return fmt.Errorf("policy-options community %s members %q: %v", name, member, err)
+			}
+		}
+	}
+	return nil
+}
+
+// validateBGPNeighborDescriptionPipeStrict16776 hard-rejects a BGP
+// neighbor description carrying "| " (#16776). The description is a
+// literal rest-of-line operand with no regex grouping, so the pipe
+// hook would refuse the whole `neighbor ... description` line while
+// frr-reload.py exits 0. Strict on commit; the tolerant path warns
+// (lenientBGPNeighborDescriptionPipe16776) and the render belt omits
+// the description line.
+func validateBGPNeighborDescriptionPipeStrict16776(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	checkBGP := func(scope string, bgp *BGPConfig) error {
+		if bgp == nil || bgp.Disable {
+			return nil
+		}
+		neighbors := append([]*BGPNeighbor(nil), bgp.Neighbors...)
+		sort.SliceStable(neighbors, func(i, j int) bool {
+			return neighbors[i].Address < neighbors[j].Address
+		})
+		for _, n := range neighbors {
+			if n == nil || n.Disable || n.Description == "" {
+				continue
+			}
+			if !FRRDescriptionPipeSafe16776(n.Description) {
+				detail := fmt.Sprintf("%sprotocols bgp neighbor %q description %q", scope, n.Address, n.Description)
+				if n.GroupName != "" {
+					detail = fmt.Sprintf("%sprotocols bgp group %s neighbor %q description %q", scope, n.GroupName, n.Address, n.Description)
+				}
+				return fmt.Errorf("%s: contains \"| \" — FRR's vty pipe hook refuses the "+
+					"rendered `neighbor %s description ...` line with \"%% Unknown action\" "+
+					"while frr-reload.py exits 0, so the description would silently never "+
+					"install (#16776); remove the \"| \" (write \"|\" without the space, "+
+					"or reword the description)", detail, n.Address)
+			}
+		}
+		return nil
+	}
+	if err := checkBGP("", cfg.Protocols.BGP); err != nil {
+		return err
+	}
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil {
+			continue
+		}
+		if err := checkBGP(fmt.Sprintf("routing-instance %s ", ri.Name), ri.BGP); err != nil {
+			return err
 		}
 	}
 	return nil

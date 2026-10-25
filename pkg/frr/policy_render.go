@@ -819,8 +819,10 @@ func asPathListMissingAtRender(po *config.PolicyOptionsConfig, name string) bool
 // communityListMissingAtRender reports whether `match community <name>` would
 // dangle: no such definition, or one the community-list loop omits because it
 // has no (deduplicated) members, contains a member that fails
-// ValidCommunityMember, or is an expanded definition past the #15779
-// permutation bound. Same predicates as renderCommunityListDefinitions
+// ValidCommunityMember (which since #16788 includes per-community
+// translatability, subsuming the #16776 "| " refusal), or is an
+// expanded definition past the #15779 permutation bound. Same
+// predicates as renderCommunityListDefinitions
 // (communityListRenderable + expandedCommunityConjunctionRenderable +
 // dedup), so the two cannot drift.
 func communityListMissingAtRender(po *config.PolicyOptionsConfig, name string) bool {
