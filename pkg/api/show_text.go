@@ -117,7 +117,12 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 						// restore/peer-sync loads.
 						continue
 					}
-					fmt.Fprintf(&buf, "  %s: %s\n", name, strings.Join(tg.Targets, ", "))
+					// #16728: since #15052 the trap-group name IS the v1/v2c
+					// trap community, so it masks unconditionally here (REST
+					// carries no login class) with the same shared helper as
+					// the communities above. Targets stay visible.
+					fmt.Fprintf(&buf, "  %s: %s\n",
+						config.SNMPCommunityDisplayName(name, true), strings.Join(tg.Targets, ", "))
 				}
 			}
 			// #15725: SNMPv3 USM users, matching the gRPC showSNMP renderer

@@ -105,7 +105,7 @@ func TestShowTextSNMPKeepsNonSecretFields(t *testing.T) {
 		"GRPC6532-CONTACT-NOC",         // sysContact
 		"GRPC6532-DESCRIPTION-EDGE-FW", // sysDescr
 		"read-only",                    // community authorization mode
-		"tg1", "10.9.9.9",              // trap group + target
+		"10.9.9.9",                     // trap target (name masked since #16728)
 		"u1", "sha256", "des", // v3 user + auth/priv protocols
 	} {
 		if !strings.Contains(out, want) {
@@ -179,9 +179,10 @@ func TestShowTextSNMPRenderIsDeterministic(t *testing.T) {
 		}
 	}
 	// Guard against the render collapsing to nothing, which would make the
-	// equality above vacuously true.
-	if n := strings.Count(first, config.SecretDataPlaceholder); n != 3 {
-		t.Errorf("expected 3 masked community lines, got %d:\n%s", n, first)
+	// equality above vacuously true. #16728: 3 communities + 2 trap groups
+	// all render the same placeholder.
+	if n := strings.Count(first, config.SecretDataPlaceholder); n != 5 {
+		t.Errorf("expected 5 masked community+trap-group lines, got %d:\n%s", n, first)
 	}
 }
 

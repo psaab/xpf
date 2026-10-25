@@ -435,16 +435,16 @@ func (s *Secret) UnmarshalYAML(value *yaml.Node) error {
 // TestSecretLeafKeywordsExistInSchema (no dead entries) and against the known
 // credential leaves by TestSecretLeafKeywordsCoverKnownCredentials.
 var secretLeafKeywords = map[string]bool{
-	"authentication-key": true,
-	"pre-shared-key":     true,
-	"preshared-key":      true,
-	"private-key":        true,
-	"encrypted-password": true,
-	"plain-text-password": true,
+	"authentication-key":        true,
+	"pre-shared-key":            true,
+	"preshared-key":             true,
+	"private-key":               true,
+	"encrypted-password":        true,
+	"plain-text-password":       true,
 	"plain-text-password-value": true,
-	"password":           true,
-	"tsig-secret":        true,
-	"api-key":            true,
+	"password":                  true,
+	"tsig-secret":               true,
+	"api-key":                   true,
 }
 
 // secretLeafKeywordsByRoot qualifies a DUAL-USE keyword by the top-level
@@ -462,8 +462,13 @@ var secretLeafKeywords = map[string]bool{
 // wherever it appears, and wrong the moment a spelling is reused for something
 // that is not a credential. Add to THIS map, not the set above, whenever that
 // is true.
+//
+// `trap-group` (#16728) is the second entry: under `snmp` its identity
+// token is the v1/v2c trap community (#15052); the keyword has no other
+// Junos use, but root-gating keeps the registry honest if one appears.
 var secretLeafKeywordsByRoot = map[string]map[string]bool{
-	"community": {"snmp": true},
+	"community":  {"snmp": true},
+	"trap-group": {"snmp": true},
 }
 
 // IsSecretLeafKeyword reports whether an UNAMBIGUOUS config leaf keyword
