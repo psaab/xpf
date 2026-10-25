@@ -95,6 +95,8 @@ func natPoolUsedPortsSamples(t *testing.T, setLines []string, poolIDs map[string
 // `collectNATPoolMetrics` and the `bad` leg reds.
 func TestNATPoolUsedPortsIsNotEmittedForRefusedPool7473(t *testing.T) {
 	seen := natPoolUsedPortsSamples(t, []string{
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
 		// `10.0.0.0/016` is #7000's own measured case: the non-canonical mask
 		// makes the whole pool `invalid_pool`. Deliberately UNREFERENCED — the
 		// #5877 strict gate rejects a malformed pool a rule references, and the

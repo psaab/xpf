@@ -152,6 +152,8 @@ func TestCollectNATPoolMetricsDeterministicBlocks(t *testing.T) {
 		t.Fatalf("EnterConfigure: %v", err)
 	}
 	if _, err := store.LoadSet(strings.Join([]string{
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
 		// Deterministic pool: 1 address, default range 1024-65535 (64512),
 		// block-size 512 -> 126 blocks; subscriber /26 -> 64 allocated.
 		"set security nat source pool det address 203.0.113.5/32",

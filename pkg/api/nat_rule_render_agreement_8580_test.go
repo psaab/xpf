@@ -31,6 +31,8 @@ func natRenderStore(t *testing.T) *configstore.Store {
 		t.Fatalf("EnterConfigure: %v", err)
 	}
 	lines := []string{
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
 		"set security address-book global address trusted 10.0.0.0/8",
 		"set security nat source rule-set rs1 from zone trust",
 		"set security nat source rule-set rs1 to zone untrust",

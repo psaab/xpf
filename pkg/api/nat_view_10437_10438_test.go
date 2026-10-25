@@ -83,6 +83,8 @@ func natView10438FindSourceRule(t *testing.T, cfg *config.Config, name string) *
 // rendering from natshow.RuleMatchDestination.
 func TestRESTNATDestCarriesCompleteMatch_10437(t *testing.T) {
 	store := natView10437CommitStore(t, []string{
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
 		"set security address-book global address web-net 203.0.113.0/24",
 		"set security nat destination pool dp1 address 10.0.0.5",
 		"set security nat destination rule-set drs from zone untrust",
@@ -172,6 +174,8 @@ func TestRESTNATDestCarriesCompleteMatch_10437(t *testing.T) {
 // source match from natshow.RuleMatchSource.
 func TestRESTNATSourceActionAndMatch_10438(t *testing.T) {
 	committed := natView10437CommitStore(t, []string{
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
 		"set security address-book global address trusted 10.0.0.0/8",
 		"set security address-book global address corp 172.16.0.0/12",
 		"set security nat source pool p1 address 203.0.113.10/32",
