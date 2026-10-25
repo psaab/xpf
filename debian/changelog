@@ -46,6 +46,14 @@ xpf (0.0.0) unstable; urgency=medium
     the tolerant path, with a warning, instead of poisoning reloads.
     Valid chained values (for example `passive hold-time 9`) commit
     and apply as before.
+  * VRRP/HA: a sync-hold-release preempt kick posted while an instance
+    is already MASTER is no longer parked in preemptNowCh (#16766).
+    Previously the undrained token survived the next forced
+    resignation and the first BACKUP iteration consumed it,
+    re-promoting the just-resigned node at priority 0 (spurious
+    MASTER/BACKUP pair and extra priority-0 adverts). The kick is now
+    gated at post time while MASTER and drained (with forcePreemptOnce
+    cleared) on every MASTER entry and at the resign edge.
   * Cluster/session-sync: pre-auth logging on the sync listener is
     now bounded (#16748). The accept loop's "peer connected" line is
     Debug instead of Info (it fired before authentication, so a
