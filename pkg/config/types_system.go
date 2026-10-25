@@ -1298,6 +1298,13 @@ type PortMirrorInstance struct {
 type DHCPRelayConfig struct {
 	ServerGroups map[string]*DHCPRelayServerGroup
 	Groups       map[string]*DHCPRelayGroup
+	// ActiveServerGroup is the relay-level default server group
+	// (#16580, Junos `forwarding-options dhcp-relay
+	// active-server-group`). A v4 group with no active-server-group
+	// of its own inherits this one at compile time; the compiled
+	// group itself carries the effective value. Empty means no
+	// relay-level default.
+	ActiveServerGroup string
 	// V6 carries the DHCPv6 relay (RFC 8415) compiled from
 	// `forwarding-options dhcp-relay dhcpv6` (#9553). Nil when no dhcpv6
 	// stanza was authored. Lives here — rather than as a separate

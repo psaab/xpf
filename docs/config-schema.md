@@ -7513,6 +7513,25 @@ peer-sync paths report the same semantic failures as `DHCPRelay` warnings, and
 the runtime independently excludes unusable addresses before building relay
 state. Valid server address strings are retained unchanged.
 
+### Relay-level `active-server-group` default (#16580)
+
+Junos also allows `active-server-group` directly under `dhcp-relay`:
+it sets the default server group for v4 groups that do not override
+it. xpf's DHCPv6 compiler implemented that inheritance (#9553) while
+the v4 #9552 closed-world gate rejected the same family-level
+statement — with a message claiming the rejected config "commits
+clean … and relays nothing". The schema now declares the v4
+relay-level leaf, `compileDHCPRelay` records it as
+`DHCPRelayConfig.ActiveServerGroup` and inherits it into every
+group lacking its own (the compiled group carries the effective
+value), and #11693 validation judges that effective value: an
+undefined relay default refuses strict commit and warns on the
+tolerant path, where the group still carries the attempted value.
+A group-level `active-server-group` wins over the relay default.
+The strict #9552 message now describes the rejection itself; the
+"compiles to NOTHING" wording remains only on the tolerant path,
+where the unknown token is dropped and the config boots.
+
 ## `forwarding-options dhcp-relay dhcpv6` — supported RFC 8415 subset (#9553); historical refusal (#9411)
 
 The full-stanza refusal from #9411 is **historical and retired for the

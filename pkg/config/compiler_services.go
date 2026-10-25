@@ -2031,6 +2031,13 @@ func compileForwardingOptionsWithOpts(node *Node, fo *ForwardingOptionsConfig, o
 	// first dhcp-relay node that is NOT the dhcpv6 spelling;
 	// validateDHCPRelayDHCPv6AST now permits the implemented #9553 subset.
 	relayNode := dhcpRelayV4Node9411(node)
+	if relayNode == nil && len(node.Keys) >= 3 && node.Keys[1] == "dhcp-relay" && node.Keys[2] != "dhcpv6" {
+		// #16580: fully packed `forwarding-options dhcp-relay …;`
+		// keeps the whole relay on the forwarding-options Keys when
+		// no admission folds it (defensive, mirrors the v6 packed
+		// path for persisted trees). Synthesize the braced shape.
+		relayNode = dhcpRelayV4PackedNode16580(node.Keys[2:])
+	}
 	if relayNode != nil {
 		if err := compileDHCPRelay(relayNode, fo); err != nil {
 			return err
@@ -2515,6 +2522,36 @@ func compileDHCPRelay(node *Node, fo *ForwardingOptionsConfig) error {
 		Groups:       make(map[string]*DHCPRelayGroup),
 	}
 
+	// #16580: Junos relay-level `active-server-group` is the default
+	// server group for v4 groups that do not override it (the v6
+	// compiler implements the same inheritance, #9553). Read every
+	// shape the statement can arrive in: a braced/flat-set child, a
+	// singly-elided tail on the relay node's own Keys
+	// (`dhcp-relay active-server-group sg …`), and a fully packed
+	// tail on the forwarding-options node (handled by the caller-
+	// visible packed form below). A braced child with children is
+	// malformed (mirrors the v6 scalar gate) and contributes no
+	// value; strict validation of the effective group below then
+	// fails closed.
+	// A packed run can also arrive as ONE child carrying the whole
+	// tail (the #8768 splitter declines it: `server-group`'s value
+	// tokens are not schema children). Expand such runs first so the
+	// readers below see the braced shape.
+	node = dhcpRelayExpandPacked16580(node)
+	for _, prop := range node.FindChildren("active-server-group") {
+		if prop != nil && len(prop.Children) == 0 {
+			if v := nodeVal(prop); v != "" {
+				relay.ActiveServerGroup = v
+			}
+		}
+	}
+	for i := 1; i < len(node.Keys); i++ {
+		if node.Keys[i] == "active-server-group" && i+1 < len(node.Keys) {
+			relay.ActiveServerGroup = node.Keys[i+1]
+			i++
+		}
+	}
+
 	for _, sgInst := range namedInstances(node.FindChildren("server-group")) {
 		sg := relay.ServerGroups[sgInst.name]
 		if sg == nil {
@@ -2685,8 +2722,121 @@ func compileDHCPRelay(node *Node, fo *ForwardingOptionsConfig) error {
 		}
 	}
 
+	// #16580: inherit the relay-level default into groups lacking
+	// their own, mirroring validateDHCPRelayV6Config9553's fallback.
+	// The compiled group carries the effective value so the runtime
+	// (pkg/dhcprelay computeDesired) and `show` need no second lookup;
+	// validateDHCPRelayV4Config11693 then judges the effective value.
+	if relay.ActiveServerGroup != "" {
+		for _, g := range relay.Groups {
+			if g != nil && g.ActiveServerGroup == "" {
+				g.ActiveServerGroup = relay.ActiveServerGroup
+			}
+		}
+	}
+
 	fo.DHCPRelay = relay
 	return nil
+}
+
+// dhcpRelayExpandPacked16580 expands a packed run that arrives as a
+// single child (or as the relay node's own tail beyond its first
+// statement) into the braced shape. Only runs whose head is a known
+// relay statement are expanded; anything else is returned unchanged
+// so unknown tokens stay exactly as authored for the gates.
+func dhcpRelayExpandPacked16580(node *Node) *Node {
+	if node == nil {
+		return node
+	}
+	if len(node.Keys) > 2 {
+		if expanded := dhcpRelayV4PackedNode16580(node.Keys[1:]); len(expanded.Children) > 1 ||
+			(len(expanded.Children) == 1 && len(node.Children) > 0) {
+			out := &Node{Keys: []string{"dhcp-relay"}}
+			out.Children = append(out.Children, expanded.Children...)
+			out.Children = append(out.Children, node.Children...)
+			return out
+		}
+	}
+	needs := false
+	for _, ch := range node.Children {
+		if ch != nil && len(ch.Children) == 0 && len(ch.Keys) > 2 {
+			switch ch.Keys[0] {
+			case "active-server-group", "server-group", "group":
+				needs = true
+			}
+		}
+	}
+	if !needs {
+		return node
+	}
+	out := &Node{Keys: append([]string(nil), node.Keys...)}
+	for _, ch := range node.Children {
+		if ch != nil && len(ch.Children) == 0 && len(ch.Keys) > 2 {
+			switch ch.Keys[0] {
+			case "active-server-group", "server-group", "group":
+				out.Children = append(out.Children, dhcpRelayV4PackedNode16580(ch.Keys).Children...)
+				continue
+			}
+		}
+		out.Children = append(out.Children, ch)
+	}
+	return out
+}
+
+// dhcpRelayV4PackedNode16580 turns a fully packed
+// `forwarding-options dhcp-relay <tail>;` key tail into the braced
+// Node shape compileDHCPRelay consumes. Mirrors
+// dhcpRelayV6PackedNode9553: group/server-group boundaries split
+// the tail, group properties stay packed on the group node (the
+// existing inline-keys reader handles them), and unknown tokens
+// stay visible as children so no remainder is silently dropped
+// beyond what the packed braced spelling itself would lose.
+func dhcpRelayV4PackedNode16580(keys []string) *Node {
+	relay := &Node{Keys: []string{"dhcp-relay"}}
+	for i := 0; i < len(keys); {
+		tok := keys[i]
+		switch tok {
+		case "server-group":
+			if i+1 >= len(keys) {
+				relay.Children = append(relay.Children, &Node{Keys: []string{tok}, IsLeaf: true})
+				i++
+				continue
+			}
+			n := &Node{Keys: []string{"server-group", keys[i+1]}}
+			i += 2
+			for i < len(keys) && keys[i] != "server-group" && keys[i] != "group" && keys[i] != "active-server-group" {
+				n.Children = append(n.Children, &Node{Keys: []string{keys[i]}, IsLeaf: true})
+				i++
+			}
+			relay.Children = append(relay.Children, n)
+		case "group":
+			if i+1 >= len(keys) {
+				relay.Children = append(relay.Children, &Node{Keys: []string{tok}, IsLeaf: true})
+				i++
+				continue
+			}
+			n := &Node{Keys: []string{"group", keys[i+1]}}
+			i += 2
+			start := i
+			for i < len(keys) && keys[i] != "server-group" && keys[i] != "group" {
+				i++
+			}
+			n.Keys = append(n.Keys, keys[start:i]...)
+			relay.Children = append(relay.Children, n)
+		case "active-server-group":
+			if i+1 < len(keys) {
+				relay.Children = append(relay.Children, &Node{Keys: []string{tok, keys[i+1]}, IsLeaf: true})
+				i += 2
+			} else {
+				relay.Children = append(relay.Children, &Node{Keys: []string{tok}, IsLeaf: true})
+				i++
+			}
+		default:
+			relay.Children = append(relay.Children, &Node{Keys: []string{tok}, IsLeaf: true})
+			i++
+		}
+	}
+	return relay
 }
 
 // IsUsableDHCPRelayV4ServerIP reports whether ip can be used as a DHCPv4
@@ -2733,6 +2883,9 @@ func validateDHCPRelayV4Config11693(relay *DHCPRelayConfig) error {
 			return fmt.Errorf("forwarding-options dhcp-relay group %q: group definition is empty (#11693)", name)
 		}
 		serverGroupName := group.ActiveServerGroup
+		if serverGroupName == "" {
+			serverGroupName = relay.ActiveServerGroup
+		}
 		if serverGroupName == "" {
 			return fmt.Errorf("forwarding-options dhcp-relay group %q: active-server-group is required (#11693)", name)
 		}

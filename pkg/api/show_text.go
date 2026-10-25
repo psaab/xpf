@@ -162,6 +162,9 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 					fmt.Fprintf(&buf, "  %s: %s\n", name, strings.Join(sg.Servers, ", "))
 				}
 			}
+			if relay.ActiveServerGroup != "" {
+				fmt.Fprintf(&buf, "  Default active server group: %s\n", relay.ActiveServerGroup)
+			}
 			if len(relay.Groups) > 0 {
 				buf.WriteString("Relay groups:\n")
 				for _, name := range sortedKeys(relay.Groups) {
@@ -173,7 +176,11 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 					}
 					fmt.Fprintf(&buf, "  %s:\n", name)
 					fmt.Fprintf(&buf, "    Interfaces: %s\n", strings.Join(g.Interfaces, ", "))
-					fmt.Fprintf(&buf, "    Active server group: %s\n", g.ActiveServerGroup)
+					activeServerGroup := g.ActiveServerGroup
+					if activeServerGroup == "" {
+						activeServerGroup = relay.ActiveServerGroup
+					}
+					fmt.Fprintf(&buf, "    Active server group: %s\n", activeServerGroup)
 				}
 			}
 			if relay.V6 != nil {

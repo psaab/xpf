@@ -1144,8 +1144,12 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"unit scheduler-map",
 		"unit shaping-rate":
 		return true
-	// forwarding-options: 21 pairs.
-	case "dhcp-relay group",
+	// forwarding-options: 22 pairs (#16580 adds dhcp-relay
+	// active-server-group; the pair reaches exactly the v4
+	// dhcp-relay level and the dhcpv6 family level, both of which
+	// compile the relay-level default).
+	case "dhcp-relay active-server-group",
+		"dhcp-relay group",
 		"dhcp-relay server-group",
 		"flow-server port",
 		"flow-server source-address",
