@@ -48,7 +48,7 @@ func reconcileAddrErrno10529(t *testing.T, injected error) (bool, string) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{
 		Level: slog.LevelWarn,
 	})))
-	changed := reconcileInterfaceAddresses("xpf-10529", []string{"10.0.99.1/24"})
+	changed := reconcileInterfaceAddresses("xpf-10529", []string{"10.0.99.1/24"}, nil)
 	return changed, logs.String()
 }
 

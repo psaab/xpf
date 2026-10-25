@@ -109,7 +109,7 @@ func TestDualStackPrimaryAddressAndNetlinkPromotion(t *testing.T) {
 
 	// (b) fresh install: adds ordered primary-first per subnet.
 	desired := []string{"10.0.0.1/24", "10.0.0.2/24", "2001:db8::1/64", "2001:db8::2/64"}
-	_, add, _ := planAddressReconcile(nil, desired, "ge-0-0-0", "10.0.0.2/24", "2001:db8::2/64")
+	_, add, _ := planAddressReconcile(nil, desired, nil, "ge-0-0-0", "10.0.0.2/24", "2001:db8::2/64")
 	if len(add) != 4 {
 		t.Fatalf("fresh add count=%d want 4", len(add))
 	}
@@ -144,7 +144,7 @@ func TestDualStackPrimaryAddressAndNetlinkPromotion(t *testing.T) {
 		mk("10.0.0.1/24", 0),
 		mk("10.0.0.2/24", unix.IFA_F_SECONDARY),
 	}
-	del, add2, _ := planAddressReconcile(existing, []string{"10.0.0.1/24", "10.0.0.2/24"}, "ge-0-0-0", "10.0.0.2/24", "")
+	del, add2, _ := planAddressReconcile(existing, []string{"10.0.0.1/24", "10.0.0.2/24"}, nil, "ge-0-0-0", "10.0.0.2/24", "")
 	if len(del) == 0 || len(add2) == 0 {
 		t.Fatalf("primary flip must delete+re-add, got del=%d add=%d (no-op flip)", len(del), len(add2))
 	}
@@ -168,12 +168,12 @@ func TestDualStackPrimaryAddressAndNetlinkPromotion(t *testing.T) {
 
 	// Control: already-primary (no SECONDARY) is converged (empty plan).
 	existingOK := []netlink.Addr{mk("10.0.0.2/24", 0), mk("10.0.0.1/24", unix.IFA_F_SECONDARY)}
-	del3, add3, _ := planAddressReconcile(existingOK, []string{"10.0.0.1/24", "10.0.0.2/24"}, "ge-0-0-0", "10.0.0.2/24", "")
+	del3, add3, _ := planAddressReconcile(existingOK, []string{"10.0.0.1/24", "10.0.0.2/24"}, nil, "ge-0-0-0", "10.0.0.2/24", "")
 	if len(del3) != 0 || len(add3) != 0 {
 		t.Errorf("converged primary must be empty plan, got del=%d add=%d", len(del3), len(add3))
 	}
 	// Control: no primaries -> legacy converged empty.
-	del4, add4, _ := planAddressReconcile(existing, []string{"10.0.0.1/24", "10.0.0.2/24"}, "ge-0-0-0")
+	del4, add4, _ := planAddressReconcile(existing, []string{"10.0.0.1/24", "10.0.0.2/24"}, nil, "ge-0-0-0")
 	if len(del4) != 0 || len(add4) != 0 {
 		t.Errorf("no-primary converged must be empty, got del=%d add=%d", len(del4), len(add4))
 	}
