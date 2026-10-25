@@ -217,17 +217,20 @@ func TestStableRethLLInUnzonedAddrs10303(t *testing.T) {
 	}
 }
 
-// TestStableRethLLExplicitLinkLocalSuppresses10303 pins daemon parity: when
-// unit 0 carries an explicit link-local, addStableRethLinkLocal installs
-// nothing on that interface, so the views must not scope a phantom LL.
+// TestStableRethLLExplicitLinkLocalSuppresses10303 pins per-unit daemon
+// parity (#15684, #16686): an explicit link-local on unit 0 suppresses the
+// stable LL on THAT unit only. The daemon still installs it on unit 50, so
+// wan must scope it and lan must not scope a phantom LL.
 func TestStableRethLLExplicitLinkLocalSuppresses10303(t *testing.T) {
 	cfg := stableLLHAConfig10303()
 	cfg.Interfaces.Interfaces["reth0"].Units[0].Addresses = []string{"10.0.61.1/24", "2001:db8:61::1/64", "fe80::9/64"}
 	want := wantStableLL10303(t, 7, 1)
-	for _, v := range BuildZoneHostInboundViews(cfg) {
-		if containsStr10303(v.V6Addrs, want) {
-			t.Errorf("zone %s scopes phantom stable LL %s despite explicit unit-0 LL (daemon installs nothing there, #10303)", v.Zone, want)
-		}
+	byZone := viewsByZone10303(BuildZoneHostInboundViews(cfg))
+	if v := byZone["lan"]; containsStr10303(v.V6Addrs, want) {
+		t.Errorf("zone lan scopes phantom stable LL %s despite explicit unit-0 LL (daemon installs nothing on that unit, #10303/#15684)", want)
+	}
+	if v := byZone["wan"]; !containsStr10303(v.V6Addrs, want) {
+		t.Errorf("zone wan V6Addrs = %v, want containing stable LL %s (unit 50 still carries it per-unit, #15684)", v.V6Addrs, want)
 	}
 }
 
@@ -260,5 +263,70 @@ func TestStableRethLLOnlyOnIPv6Units10303(t *testing.T) {
 	}
 	if v := byZone["dmz"]; containsStr10303(v.V6Addrs, want) {
 		t.Errorf("dmz V6Addrs = %v: v4-only unit's zone must not scope the LL the daemon never installs there (#10303)", v.V6Addrs)
+	}
+}
+
+// #16686: a tagged unit 0 (reth0 unit 0 vlan-id 100) must scope reth0.0 —
+// the daemon now installs the stable LL on <member>.100 for that unit, not
+// the bare member. Pre-fix stableRethLinkLocalTargets emitted only the
+// bare reth0 identity for unit 0 and suppressed via unit 0 globally.
+//
+// Fail-on-revert: restoring the bare-base + unitNum>0 walk yields target
+// iface "reth0" (not "reth0.0") -> RED.
+func TestStableRethLLTaggedUnit0_16686(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Chassis.Cluster = &config.ClusterConfig{
+		ClusterID:        7,
+		NodeID:           0,
+		NodeIDSet:        true,
+		RedundancyGroups: []*config.RedundancyGroup{{ID: 1}},
+	}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"reth0": {Name: "reth0", RedundancyGroup: 1, Units: map[int]*config.InterfaceUnit{
+			0:  {Number: 0, VlanID: 100, Addresses: []string{"2001:db8:100::1/64"}},
+			50: {Number: 50, VlanID: 50, Addresses: []string{"2001:db8:50::1/64"}},
+		}},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"lan": {Name: "lan", Interfaces: []string{"reth0.0"}, HostInboundTraffic: &config.HostInboundTraffic{}},
+		"wan": {Name: "wan", Interfaces: []string{"reth0.50"}, HostInboundTraffic: &config.HostInboundTraffic{SystemServices: []string{"ssh"}}},
+	}
+	targets := stableRethLinkLocalTargets(cfg)
+	want := wantStableLL10303(t, 7, 1)
+	var ifaces []string
+	for _, tg := range targets {
+		if tg.addr != want {
+			t.Errorf("target %+v addr = %q, want %q", tg, tg.addr, want)
+		}
+		ifaces = append(ifaces, tg.iface)
+	}
+	sort.Strings(ifaces)
+	if len(ifaces) != 2 || ifaces[0] != "reth0.0" || ifaces[1] != "reth0.50" {
+		t.Fatalf("stable LL targets = %v, want [reth0.0 reth0.50] (tagged unit 0 scopes reth0.0, #16686)", ifaces)
+	}
+	byZone := viewsByZone10303(BuildZoneHostInboundViews(cfg))
+	if v := byZone["lan"]; !containsStr10303(v.V6Addrs, want) {
+		t.Errorf("lan V6Addrs = %v, want containing stable LL %s (tagged unit 0, #16686)", v.V6Addrs, want)
+	}
+}
+
+// #16686/#15684: an explicit LL on tagged unit 0 suppresses only that unit.
+func TestStableRethLLTaggedUnit0ExplicitSuppressesOnlyThatUnit_16686(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Chassis.Cluster = &config.ClusterConfig{
+		ClusterID:        7,
+		NodeID:           0,
+		NodeIDSet:        true,
+		RedundancyGroups: []*config.RedundancyGroup{{ID: 1}},
+	}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"reth0": {Name: "reth0", RedundancyGroup: 1, Units: map[int]*config.InterfaceUnit{
+			0:  {Number: 0, VlanID: 100, Addresses: []string{"fe80::100:1/64", "2001:db8:100::1/64"}},
+			50: {Number: 50, VlanID: 50, Addresses: []string{"2001:db8:50::1/64"}},
+		}},
+	}
+	targets := stableRethLinkLocalTargets(cfg)
+	if len(targets) != 1 || targets[0].iface != "reth0.50" {
+		t.Fatalf("stable LL targets = %+v, want only reth0.50 (unit 0 explicit LL suppresses only unit 0)", targets)
 	}
 }

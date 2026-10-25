@@ -72,7 +72,9 @@ func TestDisabledRethHasNoStableHostInboundLinkLocal13149(t *testing.T) {
 	cfg := &config.Config{
 		Chassis: config.ChassisConfig{Cluster: &config.ClusterConfig{ClusterID: 1}},
 		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
-			"reth0":    {Name: "reth0", Disable: true, RedundancyGroup: 1},
+			"reth0": {Name: "reth0", Disable: true, RedundancyGroup: 1, Units: map[int]*config.InterfaceUnit{
+				0: {Number: 0, Addresses: []string{"2001:db8:61::1/64"}},
+			}},
 			"ge-0/0/0": {Name: "ge-0/0/0", RedundantParent: "reth0"},
 		}},
 	}

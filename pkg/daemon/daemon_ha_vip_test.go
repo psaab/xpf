@@ -168,3 +168,184 @@ func TestDirectSendGARPsPerUnitRouterLinkLocal15684(t *testing.T) {
 		}
 	}
 }
+
+// #16686: a tagged unit 0 (reth0 vlan-tagging; unit 0 vlan-id 100) never
+// got the stable LL on <member>.100 — addStableRethLinkLocal keyed the
+// VLAN branch on unitNum > 0 and put unit 0 on the bare member, while the
+// RA builder binds reth0.0's sender to the stable LL on <member>.100, so
+// ndp.Listen failed and no RAs were sent on that VLAN.
+//
+// Fail-on-revert: restoring unitNum > 0 / bare-member unit 0 yields adds
+// {ge-0-0-0} (not .100), removes missing .100, and router NAs on
+// ge-0-0-0 (not .100) -> RED.
+
+func taggedUnit0Store(t *testing.T) *configstore.Store {
+	t.Helper()
+	s, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LoadSet(
+		"set chassis cluster cluster-id 1\n" +
+			"set chassis cluster authentication-key test-cluster-psk-6611\n" +
+			"set chassis cluster redundancy-group 1 node 0 priority 200\n" +
+			"set chassis cluster redundancy-group 1 node 1 priority 100\n" +
+			"set interfaces reth0 vlan-tagging\n" +
+			"set interfaces reth0 redundant-ether-options redundancy-group 1\n" +
+			"set interfaces ge-0/0/0 gigether-options redundant-parent reth0\n" +
+			"set interfaces ge-7/0/0 gigether-options redundant-parent reth0\n" +
+			"set interfaces reth0 unit 0 vlan-id 100\n" +
+			"set interfaces reth0 unit 0 family inet6 address 2001:db8:100::1/64\n" +
+			"set interfaces reth0 unit 10 vlan-id 10\n" +
+			"set interfaces reth0 unit 10 family inet6 address 2001:db8:10::1/64\n",
+	); err != nil {
+		t.Fatalf("LoadSet: %v", err)
+	}
+	if _, err := s.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	s.ExitConfigure()
+	return s
+}
+
+func TestAddStableRethLinkLocalTaggedUnit0_16686(t *testing.T) {
+	s := taggedUnit0Store(t)
+	stableLL := cluster.StableRethLinkLocal(1, 1)
+	var added []string
+	origAdd := addStableLLToInterfaceFn
+	addStableLLToInterfaceFn = func(ifName string, ll net.IP) {
+		if !ll.Equal(stableLL) {
+			t.Errorf("addStableLL(%s) ll = %v, want stable %v", ifName, ll, stableLL)
+		}
+		added = append(added, ifName)
+	}
+	t.Cleanup(func() { addStableLLToInterfaceFn = origAdd })
+	d := &Daemon{store: s}
+	d.addStableRethLinkLocal(1)
+	sort.Strings(added)
+	want := []string{"ge-0-0-0.10", "ge-0-0-0.100"}
+	if len(added) != len(want) {
+		t.Fatalf("stable LL added to %v, want %v (tagged unit 0 on .100, not bare ge-0-0-0)", added, want)
+	}
+	for i := range want {
+		if added[i] != want[i] {
+			t.Fatalf("stable LL added to %v, want %v", added, want)
+		}
+	}
+}
+
+func TestRemoveStableRethLinkLocalTaggedUnit0_16686(t *testing.T) {
+	s := taggedUnit0Store(t)
+	stableLL := cluster.StableRethLinkLocal(1, 1)
+	var removed []string
+	origRem := removeStableLLFromInterfaceFn
+	removeStableLLFromInterfaceFn = func(ifName string, ll net.IP) {
+		if !ll.Equal(stableLL) {
+			t.Errorf("removeStableLL(%s) ll = %v, want stable %v", ifName, ll, stableLL)
+		}
+		removed = append(removed, ifName)
+	}
+	t.Cleanup(func() { removeStableLLFromInterfaceFn = origRem })
+	d := &Daemon{store: s}
+	d.removeStableRethLinkLocal(1)
+	sort.Strings(removed)
+	// .100 and .10 must be removed; bare ge-0-0-0 is also attempted so a
+	// pre-fix install on the parent is cleaned up.
+	want := []string{"ge-0-0-0", "ge-0-0-0.10", "ge-0-0-0.100"}
+	if len(removed) != len(want) {
+		t.Fatalf("stable LL removed from %v, want %v", removed, want)
+	}
+	for i := range want {
+		if removed[i] != want[i] {
+			t.Fatalf("stable LL removed from %v, want %v", removed, want)
+		}
+	}
+}
+
+func TestAddStableRethLinkLocalTaggedUnit0ConfiguredLL_16686(t *testing.T) {
+	s, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LoadSet(
+		"set chassis cluster cluster-id 1\n" +
+			"set chassis cluster authentication-key test-cluster-psk-6611\n" +
+			"set chassis cluster redundancy-group 1 node 0 priority 200\n" +
+			"set chassis cluster redundancy-group 1 node 1 priority 100\n" +
+			"set interfaces reth0 vlan-tagging\n" +
+			"set interfaces reth0 redundant-ether-options redundancy-group 1\n" +
+			"set interfaces ge-0/0/0 gigether-options redundant-parent reth0\n" +
+			"set interfaces ge-7/0/0 gigether-options redundant-parent reth0\n" +
+			"set interfaces reth0 unit 0 vlan-id 100\n" +
+			"set interfaces reth0 unit 0 family inet6 address fe80::100:1/64\n" +
+			"set interfaces reth0 unit 0 family inet6 address 2001:db8:100::1/64\n",
+	); err != nil {
+		t.Fatalf("LoadSet: %v", err)
+	}
+	if _, err := s.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	s.ExitConfigure()
+	var added []string
+	origAdd := addStableLLToInterfaceFn
+	addStableLLToInterfaceFn = func(ifName string, ll net.IP) { added = append(added, ifName) }
+	t.Cleanup(func() { addStableLLToInterfaceFn = origAdd })
+	d := &Daemon{store: s}
+	d.addStableRethLinkLocal(1)
+	if len(added) != 0 {
+		t.Fatalf("stable LL added to %v, want none (tagged unit 0 has explicit LL)", added)
+	}
+}
+
+func TestDirectSendGARPsTaggedUnit0RouterNA_16686(t *testing.T) {
+	s := taggedUnit0Store(t)
+	stableLL := cluster.StableRethLinkLocal(1, 1)
+	type naCall struct {
+		iface string
+		ip    string
+	}
+	var nas []naCall
+	installBurstSeams(t,
+		func(string, net.IP, int, cluster.BurstStillValid) error { return nil },
+		func(iface string, ip net.IP, _ int, _ cluster.BurstStillValid) error {
+			nas = append(nas, naCall{iface, ip.String()})
+			return nil
+		})
+	prevProbe := directARPProbeFn
+	directARPProbeFn = func(string, net.IP, net.IP) error { return nil }
+	t.Cleanup(func() { directARPProbeFn = prevProbe })
+	d := &Daemon{
+		store:             s,
+		rgStates:          make(map[int]*rgStateMachine),
+		directVIPOwned:    map[int]bool{1: true},
+		directAnnounceSeq: map[int]uint64{1: 1},
+	}
+	d.directSendGARPs(1)
+	seenNA := make(map[naCall]bool)
+	var routerNAs []naCall
+	for _, n := range nas {
+		if ip := net.ParseIP(n.ip); ip != nil && ip.IsLinkLocalUnicast() && !seenNA[n] {
+			seenNA[n] = true
+			routerNAs = append(routerNAs, n)
+		}
+	}
+	sort.Slice(routerNAs, func(i, j int) bool { return routerNAs[i].iface < routerNAs[j].iface })
+	want := []naCall{
+		{"ge-0-0-0.10", stableLL.String()},
+		{"ge-0-0-0.100", stableLL.String()},
+	}
+	if len(routerNAs) != len(want) {
+		t.Fatalf("router link-local NAs = %v, want %v (tagged unit 0 on .100, not bare)", routerNAs, want)
+	}
+	for i := range want {
+		if routerNAs[i] != want[i] {
+			t.Fatalf("router link-local NAs = %v, want %v", routerNAs, want)
+		}
+	}
+}
