@@ -506,7 +506,6 @@ pub(crate) struct TermMatchExtra<'a> {
 // new read of this struct outside those consumers must still be checked
 // against static revalidation and the `Never` bullet in `filter/README.md`.
 
-
 impl<'a> TermMatchExtra<'a> {
     /// #3077: drop the borrowed L3 slice, yielding a `'static`-lifetime copy
     /// safe to STORE in a deferred request (`PendingForwardRequest`) that
@@ -534,6 +533,28 @@ impl<'a> TermMatchExtra<'a> {
             flex_l4: None,
         }
     }
+}
+
+/// #16502: apply the shared #9894 `(0,0)`-port rule to `extra`.
+///
+/// A flow whose source AND destination ports are both zero carries a
+/// synthetic L3-only tuple (keyed GRE and other portless contexts substitute
+/// `0,0` by construction), not wire ports. Every walk that evaluates such a
+/// flow — PBR enforcement, the pre-screen verdict, session-hit re-derivation,
+/// and the static deny/log walks — must fail port-constrained terms closed
+/// (`ports_unknown`) instead of matching the synthetic value, in both
+/// polarities. Routing every site through this one helper keeps those walks
+/// from drifting: pre-screen deny must imply enforcement deny.
+#[inline]
+pub(crate) fn mark_ports_unknown_for_zero_flow<'a>(
+    mut extra: TermMatchExtra<'a>,
+    src_port: u16,
+    dst_port: u16,
+) -> TermMatchExtra<'a> {
+    if src_port == 0 && dst_port == 0 {
+        extra.ports_unknown = true;
+    }
+    extra
 }
 
 /// Inclusive port range.

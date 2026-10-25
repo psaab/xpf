@@ -530,7 +530,7 @@ pub(super) fn enforce_tunnel_outer_input_filter(
 /// input filter rejects from mutating screen sketches or triggering a
 /// SYN-cookie reply first.
 #[inline]
-pub(super) fn input_filter_would_deny_before_screen(
+pub(in crate::afxdp) fn input_filter_would_deny_before_screen(
     forwarding: &ForwardingState,
     packet_frame: &[u8],
     flow: Option<&SessionFlow>,
@@ -572,6 +572,14 @@ pub(super) fn input_filter_would_deny_before_screen(
         // values and must not make positive/negated port terms match.
         extra.ports_unknown = true;
     }
+    // #16502/#9894: a flow-backed (0,0) tuple is likewise synthetic. Fail
+    // port-constrained terms closed here exactly as PBR enforcement does, so
+    // pre-screen deny implies enforcement deny (see shared helper).
+    let extra = crate::filter::mark_ports_unknown_for_zero_flow(
+        extra,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+    );
     if crate::filter::filter_ref_static_verdict(
         filter,
         flow.src_ip,
@@ -1026,17 +1034,19 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
             // the established HIT just as on MISS, so evaluate these
             // filters against this frame instead of declining the route
             // transition. Static filters keep the tuple-only fast shape.
-            let mut extra = if filter.varies_per_packet_within_flow() {
+            let extra = if filter.varies_per_packet_within_flow() {
                 crate::afxdp::frame::term_match_extra_from_frame(packet_frame, meta)
             } else {
                 crate::filter::TermMatchExtra::default()
             };
-            // #9894: keyed-GRE and other L3-only flows use (0,0) as a
+            // #9894/#16502: keyed-GRE and other L3-only flows use (0,0) as a
             // synthetic tuple. Port-constrained PBR terms must fail closed
             // on both HIT and MISS, including except/negated-port terms.
-            if flow.forward_key.src_port == 0 && flow.forward_key.dst_port == 0 {
-                extra.ports_unknown = true;
-            }
+            let extra = crate::filter::mark_ports_unknown_for_zero_flow(
+                extra,
+                flow.forward_key.src_port,
+                flow.forward_key.dst_port,
+            );
             match crate::filter::evaluate_filter_ref_routing_instance_uncounted(
                 filter,
                 flow.src_ip,
@@ -1322,6 +1332,14 @@ pub(super) fn static_hit_log_for_action(
     extra: crate::filter::TermMatchExtra<'_>,
     final_action: Option<crate::filter::FilterAction>,
 ) -> Option<(CachedInputFilterLog, FilterLogSource)> {
+    // #16502: label (and log-match) with the same (0,0) rule the verdict
+    // walks use, so a synthetic tuple cannot be labelled Pbr — or matched to
+    // a log term — through a port constraint enforcement fails closed.
+    let extra = crate::filter::mark_ports_unknown_for_zero_flow(
+        extra,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+    );
     if !filter.has_log_terms {
         return None;
     }
@@ -1422,7 +1440,12 @@ pub(super) fn evaluate_input_filter_on_session_hit(
         // On a PBR deny the routing walk owns counters for its matched
         // fall-through and terminating terms; running the ordinary counted
         // walk first would charge shared fall-through counters twice.
-        let extra = term_match_extra_from_frame(frame, meta);
+        // #16502: same (0,0) rule as the miss-path PBR walk (shared helper).
+        let extra = crate::filter::mark_ports_unknown_for_zero_flow(
+            term_match_extra_from_frame(frame, meta),
+            flow.forward_key.src_port,
+            flow.forward_key.dst_port,
+        );
         if filter.affects_route_lookup
             && let Some(pbr) = crate::filter::evaluate_filter_ref_routing_instance_uncounted(
                 filter,
@@ -1917,6 +1940,11 @@ pub(super) fn evaluate_input_filter_on_session_hit(
 /// and every per-packet-L4 condition inert (a static filter carries none by
 /// construction), so what remains is exactly the 5-tuple verdict — the right
 /// answer in both directions, not merely the safe one.
+/// #16502 exception: the (0,0) `ports_unknown` rule IS applied on top of
+/// `default()` via `mark_ports_unknown_for_zero_flow`. That bit is a property
+/// of the flow tuple, not of the frame, so it cannot revive the fragment
+/// hazard above; without it this walk would match a synthetic port pair the
+/// PBR enforcement walk fails closed.
 ///
 /// **#8114 item 1: the ROUTE-LOOKUP-AFFECTING case.** A filter carrying any
 /// `routing-instance` term used to be declined outright, because the non-routing
@@ -1961,7 +1989,15 @@ fn static_input_filter_deny_eval(
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
 ) -> Option<(NonPbrInputFilterEval, FilterLogSource)> {
-    let extra = crate::filter::TermMatchExtra::default();
+    // #16502: keep the deliberate `default()` extra (see fn doc) but apply
+    // the shared (0,0) rule — a synthetic L3-only tuple must fail
+    // port-constrained terms closed on this walk too, so it cannot deny (or
+    // label) where PBR enforcement would not.
+    let extra = crate::filter::mark_ports_unknown_for_zero_flow(
+        crate::filter::TermMatchExtra::default(),
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+    );
     if filter.affects_route_lookup
         && let Some(pbr) = crate::filter::evaluate_filter_ref_routing_instance_uncounted(
             filter,
