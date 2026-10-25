@@ -2661,6 +2661,133 @@ fn nat64_v6_to_v4_packet_too_big_becomes_frag_needed_with_mtu() {
 }
 
 #[test]
+fn nat64_v6_to_v4_ptb_fragment_quote_uses_delta28_16666() {
+    // #16666 / RFC 7915 §5.2 FAIL-ON-REVERT: an ICMPv6 Packet-Too-Big
+    // (MTU 1400) quoting a translated IPv6 FIRST fragment (Fragment
+    // Header, offset 0, MF=1) must become Frag-Needed with Next-Hop
+    // MTU 1372 (1400 - 28), not 1380 (1400 - 20). The translated
+    // fragment is `v4_len + 28` (20-byte header delta + 8-byte
+    // Fragment Header); advertising 1380 leaves every retry 8 bytes
+    // over the 1400 bottleneck — a non-converging PMTUD black hole.
+    // Reverting the PTB arm to the unconditional -20 makes this
+    // assert 1380 and fails.
+    let client_v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let dst_v6: Ipv6Addr = "64:ff9b::0808:0808".parse().unwrap();
+    let snat_v4 = Ipv4Addr::new(198, 51, 100, 1);
+    let dst_v4 = Ipv4Addr::new(8, 8, 8, 8);
+
+    // Embedded = original v6 forward packet as a first fragment:
+    // Fragment Header (44) wrapping TCP, offset 0, MF=1.
+    let inner_l4 = [0x30u8, 0x39, 0x00, 0x50, 0x01, 0x02, 0x03, 0x04];
+    let embedded = make_ipv6_frag_tcp_quote(client_v6, dst_v6, &inner_l4, 0, true, 0x1666);
+    let icmp = build_icmpv6_error(2, 0, 1400u32.to_be_bytes(), &embedded);
+    let hop_v6: Ipv6Addr = "2001:db8:ffff::1".parse().unwrap();
+    let mut v6_pkt = build_v6_with_l4(hop_v6, client_v6, PROTO_ICMPV6_C, 64, &icmp);
+    v6_pkt[42..44].copy_from_slice(&[0, 0]);
+    let s = checksum16_ipv6_pseudo(hop_v6, client_v6, PROTO_ICMPV6_C, &v6_pkt[40..]);
+    v6_pkt[42..44].copy_from_slice(&s.to_be_bytes());
+
+    let v4 = translate_v6_to_v4(&v6_pkt, snat_v4, dst_v4, false)
+        .expect("PTB quoting a first fragment must translate to Frag-Needed");
+    assert_eq!(v4[20], 3, "ICMPv4 Destination Unreachable type");
+    assert_eq!(v4[21], 4, "ICMPv4 Fragmentation Needed code");
+    let mtu = u16::from_be_bytes([v4[26], v4[27]]);
+    assert_eq!(mtu, 1372, "fragment quote: next-hop MTU = v6 MTU - 28");
+    assert_eq!(checksum16(&v4[..20]), 0, "outer IPv4 header checksum");
+    assert_eq!(checksum16(&v4[20..]), 0, "outer ICMPv4 checksum");
+    // The embedded quote keeps its first-fragment geometry (MF copied).
+    let emb = &v4[28..];
+    assert_eq!(emb[0], 0x45, "embedded IPv4 header");
+    assert_eq!(emb[9], PROTO_TCP, "embedded protocol preserved");
+    assert_eq!(
+        u16::from_be_bytes([emb[6], emb[7]]) & 0x2000,
+        0x2000,
+        "embedded MF copied from the quoted Fragment Header"
+    );
+    assert_eq!(checksum16(&emb[..20]), 0, "embedded IPv4 header checksum");
+}
+
+#[test]
+fn nat64_v6_to_v4_ptb_atomic_fragment_quote_uses_delta28_16666() {
+    // #16666: an ATOMIC fragment quote (Fragment Header, offset 0,
+    // MF=0, RFC 6946) also carries the Fragment Header on the wire,
+    // so RFC 7915 §5.2's "whether or not the packet in error includes
+    // a Fragment Header" still selects the 28-byte delta.
+    let client_v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let dst_v6: Ipv6Addr = "64:ff9b::0808:0808".parse().unwrap();
+    let snat_v4 = Ipv4Addr::new(198, 51, 100, 1);
+    let dst_v4 = Ipv4Addr::new(8, 8, 8, 8);
+
+    let inner_l4 = [0x30u8, 0x39, 0x00, 0x50, 0x01, 0x02, 0x03, 0x04];
+    let embedded = make_ipv6_frag_tcp_quote(client_v6, dst_v6, &inner_l4, 0, false, 0x1667);
+    let icmp = build_icmpv6_error(2, 0, 1400u32.to_be_bytes(), &embedded);
+    let hop_v6: Ipv6Addr = "2001:db8:ffff::1".parse().unwrap();
+    let mut v6_pkt = build_v6_with_l4(hop_v6, client_v6, PROTO_ICMPV6_C, 64, &icmp);
+    v6_pkt[42..44].copy_from_slice(&[0, 0]);
+    let s = checksum16_ipv6_pseudo(hop_v6, client_v6, PROTO_ICMPV6_C, &v6_pkt[40..]);
+    v6_pkt[42..44].copy_from_slice(&s.to_be_bytes());
+
+    let v4 = translate_v6_to_v4(&v6_pkt, snat_v4, dst_v4, false)
+        .expect("PTB quoting an atomic fragment must translate");
+    let mtu = u16::from_be_bytes([v4[26], v4[27]]);
+    assert_eq!(mtu, 1372, "atomic fragment quote: next-hop MTU = v6 MTU - 28");
+}
+
+#[test]
+fn nat64_v6_to_v4_ptb_unfragmented_quote_keeps_delta20_16666() {
+    // #16666 control: the unfragmented quote keeps the plain 20-byte
+    // delta (1400 -> 1380). The pre-existing 1500 -> 1480 cell
+    // (nat64_v6_to_v4_packet_too_big_becomes_frag_needed_with_mtu)
+    // covers the same arm at a second MTU.
+    let client_v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let dst_v6: Ipv6Addr = "64:ff9b::0808:0808".parse().unwrap();
+    let snat_v4 = Ipv4Addr::new(198, 51, 100, 1);
+    let dst_v4 = Ipv4Addr::new(8, 8, 8, 8);
+
+    let inner_l4 = [0x30u8, 0x39, 0x00, 0x50, 0x01, 0x02, 0x03, 0x04];
+    let embedded = build_v6_with_l4(client_v6, dst_v6, PROTO_TCP, 1, &inner_l4);
+    let icmp = build_icmpv6_error(2, 0, 1400u32.to_be_bytes(), &embedded);
+    let hop_v6: Ipv6Addr = "2001:db8:ffff::1".parse().unwrap();
+    let mut v6_pkt = build_v6_with_l4(hop_v6, client_v6, PROTO_ICMPV6_C, 64, &icmp);
+    v6_pkt[42..44].copy_from_slice(&[0, 0]);
+    let s = checksum16_ipv6_pseudo(hop_v6, client_v6, PROTO_ICMPV6_C, &v6_pkt[40..]);
+    v6_pkt[42..44].copy_from_slice(&s.to_be_bytes());
+
+    let v4 = translate_v6_to_v4(&v6_pkt, snat_v4, dst_v4, false)
+        .expect("PTB quoting an unfragmented packet must translate");
+    let mtu = u16::from_be_bytes([v4[26], v4[27]]);
+    assert_eq!(mtu, 1380, "unfragmented quote: next-hop MTU = v6 MTU - 20");
+}
+
+/// Build an IPv6 packet carrying a Fragment Header (44) wrapping the
+/// given TCP bytes, with explicit offset/M/Identification — the quoted
+/// packet shape for the #16666 PTB tests.
+fn make_ipv6_frag_tcp_quote(
+    src: Ipv6Addr,
+    dst: Ipv6Addr,
+    l4: &[u8],
+    offset_units: u16,
+    more: bool,
+    frag_id: u32,
+) -> Vec<u8> {
+    let mut frag = vec![0u8; 8 + l4.len()];
+    frag[0] = PROTO_TCP;
+    let word = (offset_units << 3) | u16::from(more);
+    frag[2..4].copy_from_slice(&word.to_be_bytes());
+    frag[4..8].copy_from_slice(&frag_id.to_be_bytes());
+    frag[8..].copy_from_slice(l4);
+    let mut pkt = vec![0u8; 40 + frag.len()];
+    pkt[0] = 0x60;
+    pkt[4..6].copy_from_slice(&(frag.len() as u16).to_be_bytes());
+    pkt[6] = 44;
+    pkt[7] = 64;
+    pkt[8..24].copy_from_slice(&src.octets());
+    pkt[24..40].copy_from_slice(&dst.octets());
+    pkt[40..].copy_from_slice(&frag);
+    pkt
+}
+
+#[test]
 fn nat64_v6_to_v4_time_exceeded_translates() {
     // ICMPv6 Time Exceeded (3) -> ICMPv4 Time Exceeded (11), code preserved.
     let client_v6: Ipv6Addr = "2001:db8::1".parse().unwrap();

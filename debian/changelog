@@ -20,6 +20,14 @@ xpf (0.0.0) unstable; urgency=medium
     covered destinations into the runtime allowlist; without it the
     fetch stays default-deny. Public hostnames and literals, and the
     plaintext-http gate, behave as before.
+  * NAT64: ICMPv6 Packet-Too-Big translated to ICMPv4
+    Fragmentation-Needed now subtracts 28 (not 20) when the packet
+    in error carries a Fragment Header, per RFC 7915 §5.2 (#16666).
+    A translated fragment is `v4_len + 28` (20-byte header delta
+    plus the 8-byte Fragment Header); the old unconditional -20
+    advertised a Next-Hop MTU 8 bytes too large, so every DF-clear
+    retry still exceeded the IPv6 bottleneck and PMTUD never
+    converged. Unfragmented quotes keep the -20 adjustment.
   * Routing/VRF: instance-to-VRF-device mapping is now unconditional
     (#16664). `diagcmd.VRFDeviceName` previously returned a
     `vrf-`-prefixed routing-instance name unchanged (#2143), while the
