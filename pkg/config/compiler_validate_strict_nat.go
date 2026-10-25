@@ -5697,20 +5697,28 @@ func natPoolOverlapOwners(cfg *Config) []natAllocOwner {
 		if pool == nil {
 			continue
 		}
-		// #15678: key by (prefix, from-zone, routing-instance, pool) so
-		// two same-prefix rule-sets in different scopes sharing one pool
-		// are distinct owners; the overlap gate then still rejects them
-		// (they share one pool's external tuples) — scoping does not mint
-		// a separate allocator per scope in the dataplane's pool identity.
+		// #15678/#16873: key by (prefix, from-zone, routing-instance,
+		// effective source set, pool) so two same-prefix rule-sets in
+		// different scopes sharing one pool are distinct owners; the
+		// overlap gate then still rejects them (they share one pool's
+		// external tuples) — scoping does not mint a separate allocator
+		// per scope in the dataplane's pool identity. The source
+		// component mirrors Rust's Nat64ScopeKey (#16484): the sorted
+		// resolved source prefixes, or the unconstrained marker. An
+		// unprovable source set has no equivalence key: the rule-set
+		// is retained as an owner under its own identity and never
+		// deduped into a sibling (over-refusal, never under-refusal).
 		prefixKey, ok := nat64PrefixOwnerKeyScoped(rs)
 		if !ok {
 			continue
 		}
-		key := prefixKey + "\x00" + rs.SourcePool
-		if nat64Seen[key] {
-			continue
+		if srcKey, known := nat64OwnerSourceKey(cfg, rs); known {
+			key := prefixKey + "\x00" + srcKey + "\x00" + encodeKeyElements([]string{rs.SourcePool})
+			if nat64Seen[key] {
+				continue
+			}
+			nat64Seen[key] = true
 		}
-		nat64Seen[key] = true
 		owners = append(owners, natAllocOwner{
 			desc: fmt.Sprintf("nat64 rule-set %q (prefix %s) source-pool %q",
 				rs.Name, rs.Prefix, rs.SourcePool),
@@ -6027,10 +6035,27 @@ func nat64EffectiveRoutingInstances(rs *NAT64RuleSet) []string {
 	return out
 }
 
+// encodeKeyElements length-prefixes each element ("<len>:<bytes>;"),
+// making the encoding injective for arbitrary element strings: two
+// different element lists can never serialise to the same bytes, no
+// matter which separator-like characters (comma, NUL, colon) an
+// element contains. Used for every multi-element owner-key component
+// (#16873 gate fold: zone "x,y" vs zones {x,y} must not collide).
+func encodeKeyElements(elems []string) string {
+	var b strings.Builder
+	for _, e := range elems {
+		fmt.Fprintf(&b, "%d:%s;", len(e), e)
+	}
+	return b.String()
+}
+
 // nat64PrefixOwnerKeyScoped is the SHADOW key (#9555/#15678): same
 // prefix + same effective scope = the later rule-set can never be
 // selected. Name/pool are deliberately absent — different owners under
-// one scope still shadow.
+// one scope still shadow. Zone/RI sets are length-prefixed
+// (encodeKeyElements), never comma-joined: a comma is a legal ident
+// character (lexer.go isIdentChar), so a zone literally named "x,y"
+// must not collide with the set {x, y} in the #5144 owner dedup.
 func nat64PrefixOwnerKeyScoped(rs *NAT64RuleSet) (string, bool) {
 	if rs == nil {
 		return "", false
@@ -6043,7 +6068,7 @@ func nat64PrefixOwnerKeyScoped(rs *NAT64RuleSet) (string, bool) {
 	sort.Strings(zones)
 	ris := append([]string(nil), nat64EffectiveRoutingInstances(rs)...)
 	sort.Strings(ris)
-	return prefixKey + "\x00" + strings.Join(zones, ",") + "\x00" + strings.Join(ris, ","), true
+	return prefixKey + "\x00" + encodeKeyElements(zones) + "\x00" + encodeKeyElements(ris), true
 }
 
 // nat64ShadowedRuleSets maps every NAT64 rule-set the dataplane can NEVER select
@@ -6063,21 +6088,351 @@ func nat64PrefixOwnerKeyScoped(rs *NAT64RuleSet) (string, bool) {
 // CONSERVATIVE on "built". An earlier rule-set shadows only if Rust definitely
 // builds it (nat64RuleSetDefinitelyBuilt). If it might be skipped, it shadows
 // nothing, so a later rule-set stays an owner: over-refusal, never under-refusal.
+
+// nat64OwnerSourceKey is the source component of the #5144 NAT64 owner
+// key (#16873): the canonical effective source set, so two rule-sets
+// that can both be selected (disjoint or merely different source sets)
+// are distinct owners even over one pool, while two rule-sets with the
+// identical effective set over one pool are one owner (the later is
+// shadowed anyway). Unconstrained keys as "*"; a provable set keys as
+// its sorted masked prefixes. An unprovable set has NO key (ok=false):
+// equivalence is unproven, so the caller must retain the rule-set as
+// an independent owner under its own identity — any serialised
+// fallback (e.g. comma-joining raw selectors) can collide distinct
+// predicates ("left,right" as one name vs two names, or a token
+// moved between the literal and name namespaces) and silently drop
+// a live allocator from the #5144 sweep.
+func nat64OwnerSourceKey(cfg *Config, rs *NAT64RuleSet) (string, bool) {
+	prefixes, unconstrained, known := nat64EffectiveSourcePrefixes(cfg, rs)
+	if unconstrained {
+		return "*", true
+	}
+	if !known {
+		return "", false
+	}
+	strs := make([]string, 0, len(prefixes))
+	for _, p := range prefixes {
+		strs = append(strs, p.String())
+	}
+	sort.Strings(strs)
+	return encodeKeyElements(strs), true
+}
+
+// nat64EffectiveSourcePrefixes returns the IPv6 source prefixes a NAT64
+// rule-set can match, resolving address-book names statically, together
+// with whether the set is provably complete (#16873).
+//
+// unconstrained is true (and prefixes nil) when the selector is authored
+// match-any: no literal and no name, or a v6-covering wildcard anywhere
+// (literal ::/0 / any-family keyword, or a name resolving to ::/0).
+// A wildcard is only proven AFTER every real name has been resolved:
+// the snapshot builder resolves all names first and poison wins over
+// wildcard (a poisoned name makes the whole side never-match, so a
+// rule-set carrying `any` beside a poisoned name matches NOTHING, not
+// prefix). A zoned literal (fe80::%eth0) is likewise unprovable: Go's
+// ParseAddr accepts the zone and PrefixFrom silently strips it, but
+// Rust's Ipv6Net/Ipv6Addr parsers reject the token and drop it, so it
+// enforces no coverage. A name closure containing a dns-name is
+// unprovable at ANY cache state: UsableValues returns the current
+// mutable DNS snapshot, and a later refresh (before first apply or
+// periodic, neither of which re-runs the commit tail gates) can move
+// the set, so a warm-cache answer must never become a permanent
+// shadow/owner-equivalence proof. known is false when any part
+// cannot be proven statically: an unparseable, zoned, or non-IPv6
+// literal, a poisoned / tainted / dangling / empty / feed-only /
+// dns-dependent name closure, or a v4-only wildcard literal
+// (never-match in Rust, but not a provable prefix). On known=false
+// the caller must treat the rule-set as NOT covering and NOT
+// covered-except-by-unconstrained: it cannot prove shadowing, so it
+// must not claim UNREACHABLE (#8667). Over-refusal of the #5144
+// overlap gate is preserved by keeping such a rule-set in the owner
+// set (nat64ShadowedRuleSets does that automatically when it is not
+// marked shadowed).
+func nat64EffectiveSourcePrefixes(cfg *Config, rs *NAT64RuleSet) (prefixes []netip.Prefix, unconstrained, known bool) {
+	if rs == nil {
+		return nil, false, false
+	}
+	if len(rs.SourceAddresses) == 0 && len(rs.SourceAddressNames) == 0 {
+		return nil, true, true
+	}
+	wildcard := false
+	for _, a := range rs.SourceAddresses {
+		if a == "" {
+			return nil, false, false
+		}
+		if a == "::/0" {
+			wildcard = true
+			continue
+		}
+		if _, v6, isWildcard := PolicyAddressWildcardFamilies(a); isWildcard {
+			if v6 {
+				wildcard = true
+				continue
+			}
+			// v4-only wildcard: Rust keeps it as a constrained
+			// never-match entry, not a prefix. Not provable.
+			return nil, false, false
+		}
+		pfx, err := netip.ParsePrefix(a)
+		if err != nil {
+			addr, aerr := netip.ParseAddr(a)
+			if aerr != nil || !addr.Is6() || addr.Zone() != "" {
+				return nil, false, false
+			}
+			pfx = netip.PrefixFrom(addr, 128)
+		}
+		if pfx.Addr().Zone() != "" {
+			return nil, false, false
+		}
+		if !pfx.Addr().Is6() {
+			return nil, false, false
+		}
+		prefixes = append(prefixes, pfx.Masked())
+	}
+	for _, n := range rs.SourceAddressNames {
+		if n == "" {
+			return nil, false, false
+		}
+		if _, v6, isWildcard := PolicyAddressWildcardFamilies(n); isWildcard {
+			if v6 {
+				wildcard = true
+				continue
+			}
+			return nil, false, false
+		}
+		// A direct feed binding carries no static closure to prove.
+		if cfg != nil {
+			if _, isFeed := cfg.Security.DynamicAddress.AddressBindings[n]; isFeed {
+				return nil, false, false
+			}
+		}
+		vals, ok := nat64StaticNamePrefixes(cfg, n)
+		if !ok {
+			return nil, false, false
+		}
+		for _, p := range vals {
+			if p == netip.PrefixFrom(netip.AddrFrom16([16]byte{}), 0) {
+				wildcard = true
+				continue
+			}
+			prefixes = append(prefixes, p)
+		}
+	}
+	if wildcard {
+		// Every literal and name above resolved without poison, so
+		// the wildcard genuinely lowers the side to match-any
+		// (builder: wildcard wins only when no name poisoned).
+		return nil, true, true
+	}
+	if len(prefixes) == 0 {
+		// Authored constraint resolving to nothing provable (e.g. an
+		// all-IPv4 name that reached here past the #16550 gate on the
+		// lenient path): constrained never-match, not unconstrained.
+		return nil, false, false
+	}
+	return prefixes, false, true
+}
+
+// nat64StaticNamePrefixes resolves one source-address-name to its static
+// IPv6 prefixes. ok is false unless the WHOLE closure is provably
+// usable, mirroring expandBookNameRecursive poison semantics: a direct
+// address needs usable values; a set must be non-empty (after pruning
+// cycle-visited members every member must resolve), carry no unknown
+// members, and every direct address member and every nested set must
+// itself resolve. An empty nested set therefore poisons the parent
+// even when sibling leaves survive — a flattened leaf list must never
+// stand in for whole-closure validity.
+func nat64StaticNamePrefixes(cfg *Config, name string) ([]netip.Prefix, bool) {
+	if cfg == nil || cfg.Security.AddressBook == nil {
+		return nil, false
+	}
+	ab := cfg.Security.AddressBook
+	if _, colliding := ab.CollidingNames[name]; colliding {
+		return nil, false
+	}
+	values, ok := nat64ResolveNameValues(ab, name, make(map[string]bool), 0)
+	if !ok || len(values) == 0 {
+		return nil, false
+	}
+	var out []netip.Prefix
+	for _, v := range values {
+		if _, v6, isWildcard := PolicyAddressWildcardFamilies(v); isWildcard {
+			if v6 {
+				out = append(out, netip.PrefixFrom(netip.AddrFrom16([16]byte{}), 0))
+				continue
+			}
+			return nil, false
+		}
+		pfx, err := netip.ParsePrefix(v)
+		if err != nil {
+			addr, aerr := netip.ParseAddr(v)
+			if aerr != nil || !addr.Is6() || addr.Zone() != "" {
+				return nil, false
+			}
+			pfx = netip.PrefixFrom(addr, 128)
+		}
+		if pfx.Addr().Zone() != "" {
+			return nil, false
+		}
+		if !pfx.Addr().Is6() {
+			return nil, false
+		}
+		out = append(out, pfx.Masked())
+	}
+	return out, true
+}
+
+// nat64ResolveNameValues expands one address-book name to raw usable
+// values with runtime poison semantics (expandBookNameRecursive with
+// no feed overlay): unknown iff the name is undefined, colliding,
+// tainted (UsableValues empty: dns without answers, unsupported form,
+// duplicate/trailing/oversized), or a set that is nil, carries unknown
+// members, is empty, or has any member that is itself unknown. A
+// dns-name is unknown at ANY cache state: its answers are a mutable
+// snapshot a later refresh can move without re-running the commit
+// gates, so they can never ground an immutable coverage proof. A
+// member already on the current expansion path contributes nothing
+// without poisoning (the runtime visited-set behaviour); depth beyond
+// maxAddressSetDepth is unknown, as the leaf expander errors there.
+func nat64ResolveNameValues(ab *AddressBook, name string, visited map[string]bool, depth int) ([]string, bool) {
+	if depth > maxAddressSetDepth {
+		return nil, false
+	}
+	if _, colliding := ab.CollidingNames[name]; colliding {
+		return nil, false
+	}
+	if visited[name] {
+		return nil, true
+	}
+	if addr, ok := ab.Addresses[name]; ok {
+		if addr == nil || addr.DNSName != "" {
+			return nil, false
+		}
+		vals := addr.UsableValues()
+		if len(vals) == 0 {
+			return nil, false
+		}
+		return vals, true
+	}
+	set, ok := ab.AddressSets[name]
+	if !ok || set == nil || len(set.UnknownMembers) > 0 {
+		return nil, false
+	}
+	if len(set.Addresses) == 0 && len(set.AddressSets) == 0 {
+		return nil, false
+	}
+	visited[name] = true
+	defer delete(visited, name)
+	var out []string
+	for _, member := range set.Addresses {
+		vals, ok := nat64ResolveNameValues(ab, member, visited, depth+1)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, vals...)
+	}
+	for _, nested := range set.AddressSets {
+		vals, ok := nat64ResolveNameValues(ab, nested, visited, depth+1)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, vals...)
+	}
+	return out, true
+}
+
+// nat64SourceCover reports whether earlier's effective source set provably
+// covers later's: every later prefix is contained in some earlier prefix.
+// Callers handle the unconstrained cases before calling; unknown sets
+// never cover and are never (provably) covered here.
+func nat64SourceCover(earlierPrefixes []netip.Prefix, earlierKnown bool, laterPrefixes []netip.Prefix, laterKnown bool) bool {
+	if !earlierKnown || !laterKnown {
+		return false
+	}
+	for _, lp := range laterPrefixes {
+		covered := false
+		for _, ep := range earlierPrefixes {
+			if ep.Bits() <= lp.Bits() && ep.Contains(lp.Addr()) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			return false
+		}
+	}
+	return true
+}
+
+// nat64ScopeCover reports whether earlier's zone/RI scope provably covers
+// later's, mirroring prefix_scope_matches: an axis with no authored
+// values on earlier admits any packet on that axis; otherwise later's
+// set on that axis must be a subset of earlier's. (Strict commit already
+// rejects a rule-set carrying both axes; the subset test is applied per
+// axis regardless, so a hand-built both-axes config stays conservative:
+// an earlier rule-set scoped on one axis never covers a later one scoped
+// only on the other, because its scoped axis excludes packets whose
+// zone/RI is empty/unknown.)
+func nat64ScopeCover(earlier, later *NAT64RuleSet) bool {
+	ez, lz := nat64EffectiveZones(earlier), nat64EffectiveZones(later)
+	if len(ez) > 0 {
+		if len(lz) == 0 {
+			return false
+		}
+		set := make(map[string]bool, len(ez))
+		for _, z := range ez {
+			set[z] = true
+		}
+		for _, z := range lz {
+			if !set[z] {
+				return false
+			}
+		}
+	}
+	er, lr := nat64EffectiveRoutingInstances(earlier), nat64EffectiveRoutingInstances(later)
+	if len(er) > 0 {
+		if len(lr) == 0 {
+			return false
+		}
+		set := make(map[string]bool, len(er))
+		for _, ri := range er {
+			set[ri] = true
+		}
+		for _, ri := range lr {
+			if !set[ri] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func nat64ShadowedRuleSets(cfg *Config) map[*NAT64RuleSet]*NAT64RuleSet {
 	shadowed := make(map[*NAT64RuleSet]*NAT64RuleSet)
 	if cfg == nil {
 		return shadowed
 	}
-	// #15678: shadowing is scope-aware. The dataplane selects the FIRST
-	// built prefix whose /96 AND ingress scope (from-zone / routing-instance)
-	// AND source-address set all match. An earlier rule-set therefore only
-	// shadows a later one when its scope covers the later one's: same scope,
-	// or an unscoped earlier rule-set (covers every scope). Source-address
-	// narrowing is ignored here (conservative: over-refusal of shadowing,
-	// never under-refusal — a source-scoped earlier rule-set is treated as
-	// covering, matching the pre-#15678 same-prefix behaviour).
-	first := make(map[string]*NAT64RuleSet)
-	unscopedFirst := make(map[string]*NAT64RuleSet)
+	// #16873: shadowing is scope- AND source-aware. The dataplane selects
+	// the FIRST built prefix whose /96 AND ingress scope (from-zone /
+	// routing-instance) AND source-address set all match
+	// (prefix_scope_matches). An earlier rule-set therefore shadows a
+	// later one only when it provably covers the later one on every
+	// axis: its zone/RI sets are supersets (an unscoped axis covers any
+	// value on that axis) AND its effective source set is unconstrained
+	// or a prefix-superset of the later one's. A source-scoped earlier
+	// rule-set leaves sources outside its prefixes to the later
+	// rule-set, so the later one stays reachable (and stays in the
+	// #5144 owner set). A source set that cannot be proven statically
+	// (feed/dns/poisoned name, unparseable literal) never proves
+	// coverage and is never proven covered except by an unconstrained
+	// earlier source: no UNREACHABLE claim is made on a guess (#8667).
+	type earlierEntry struct {
+		rs               *NAT64RuleSet
+		srcPrefixes      []netip.Prefix
+		srcUnconstrained bool
+		srcKnown         bool
+	}
+	var earlierBuilt []earlierEntry
 	for _, rs := range cfg.Security.NAT.NAT64 {
 		if rs == nil || rs.Prefix == "" {
 			continue
@@ -6086,30 +6441,31 @@ func nat64ShadowedRuleSets(cfg *Config) map[*NAT64RuleSet]*NAT64RuleSet {
 		if !ok {
 			continue
 		}
-		scopedKey, _ := nat64PrefixOwnerKeyScoped(rs)
-		// #15932/#16049: shadowing compares the effective zone / RI SETs:
-		// a rule-set whose scope sets are identical to an earlier one's
-		// (or covered by an unscoped earlier rule-set) can never be
-		// selected; a disjoint or merely overlapping set still owns
-		// its other members.
-		isUnscoped := len(nat64EffectiveZones(rs)) == 0 && len(nat64EffectiveRoutingInstances(rs)) == 0
-		if earlier, seen := first[scopedKey]; seen {
-			shadowed[rs] = earlier
-			continue
-		}
-		if !isUnscoped {
-			if earlier, seen := unscopedFirst[prefixKey]; seen {
-				shadowed[rs] = earlier
+		srcPrefixes, srcUnconstrained, srcKnown := nat64EffectiveSourcePrefixes(cfg, rs)
+		for _, e := range earlierBuilt {
+			epk, _ := nat64PrefixOwnerKey(e.rs.Prefix)
+			if epk != prefixKey {
 				continue
 			}
+			if !nat64ScopeCover(e.rs, rs) {
+				continue
+			}
+			covered := e.srcUnconstrained || nat64SourceCover(e.srcPrefixes, e.srcKnown, srcPrefixes, srcKnown && !srcUnconstrained)
+			if srcUnconstrained {
+				// Later matches any source: only an unconstrained
+				// earlier source covers it (handled above).
+				covered = e.srcUnconstrained
+			}
+			if covered {
+				shadowed[rs] = e.rs
+				break
+			}
+		}
+		if _, isShadowed := shadowed[rs]; isShadowed {
+			continue
 		}
 		if nat64RuleSetDefinitelyBuilt(cfg, rs) {
-			first[scopedKey] = rs
-			if isUnscoped {
-				if _, seen := unscopedFirst[prefixKey]; !seen {
-					unscopedFirst[prefixKey] = rs
-				}
-			}
+			earlierBuilt = append(earlierBuilt, earlierEntry{rs: rs, srcPrefixes: srcPrefixes, srcUnconstrained: srcUnconstrained, srcKnown: srcKnown})
 		}
 	}
 	return shadowed
