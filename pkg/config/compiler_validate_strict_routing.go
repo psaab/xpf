@@ -1985,7 +1985,88 @@ func validatePolicyReservedOrNameStrict16868(cfg *Config) error {
 				name, ReservedOrPrefix16868, ReservedOrMarker16868)
 		}
 	}
+	// Joined-name check: markers can also form ACROSS member
+	// boundaries of an ordered chain ([xpf or-... or] joins to
+	// xpf-or-...-xpf-or...). Judge every authored BGP/OSPF/RIP/
+	// IS-IS export chain's joined composed-name core against the
+	// same namespace, not just individual member names.
+	for _, joined := range composedChainCores16868(cfg) {
+		if strings.HasPrefix(joined, ReservedOrPrefix16868) || strings.Contains(joined, ReservedOrMarker16868) {
+			return fmt.Errorf(
+				"export chain composing to %q intrudes on the reserved %q/%q namespace; xpf owns it "+
+					"for generated cross-chain OR redistribute route-maps (#16868) — rename a member "+
+					"policy-statement so the joined chain name leaves that namespace",
+				joined, ReservedOrPrefix16868, ReservedOrMarker16868)
+		}
+	}
 	return nil
+}
+
+// composedChainCores16868 returns the joined (hyphen-joined,
+// suffix-free) cores of every ordered export chain of length >= 2
+// in the compiled config — the names an ordered composition would
+// spell before its reserved suffixes attach.
+func composedChainCores16868(cfg *Config) []string {
+	var out []string
+	add := func(chain []string) {
+		var def []string
+		for _, n := range chain {
+			if _, ok := cfg.PolicyOptions.PolicyStatements[n]; ok {
+				def = append(def, n)
+			}
+		}
+		if len(def) >= 2 {
+			out = append(out, strings.Join(def, "-"))
+		}
+	}
+	{
+		if cfg.Protocols.BGP != nil {
+			add(cfg.Protocols.BGP.Export)
+			for _, n := range cfg.Protocols.BGP.Neighbors {
+				if n != nil {
+					add(n.Export)
+				}
+			}
+		}
+		if cfg.Protocols.OSPF != nil {
+			add(cfg.Protocols.OSPF.Export)
+		}
+		if cfg.Protocols.OSPFv3 != nil {
+			add(cfg.Protocols.OSPFv3.Export)
+		}
+		if cfg.Protocols.RIP != nil {
+			add(cfg.Protocols.RIP.Redistribute)
+		}
+		if cfg.Protocols.ISIS != nil {
+			add(cfg.Protocols.ISIS.Export)
+		}
+	}
+	for _, inst := range cfg.RoutingInstances {
+		if inst == nil {
+			continue
+		}
+		if inst.BGP != nil {
+			add(inst.BGP.Export)
+			for _, n := range inst.BGP.Neighbors {
+				if n != nil {
+					add(n.Export)
+				}
+			}
+		}
+		if inst.OSPF != nil {
+			add(inst.OSPF.Export)
+		}
+		if inst.OSPFv3 != nil {
+			add(inst.OSPFv3.Export)
+		}
+		if inst.RIP != nil {
+			add(inst.RIP.Redistribute)
+		}
+		if inst.ISIS != nil {
+			add(inst.ISIS.Export)
+		}
+	}
+	return out
 }
 
 // validatePolicyReservedChainNameStrict hard-rejects an operator

@@ -309,6 +309,20 @@ func redistChainKey15156(chain []string, proto string) string {
 // section needs: IGP export chains of >=2 policies sharing a source, and
 // the BGP origination union (sorted distinct defined policies per source).
 // Keys are the composed route-map names.
+// redistReqPut16868 inserts cand under name, comparing full
+// structural identity BEFORE any dedup decision: an identical
+// program dedupes; a structurally distinct one poisons the entry
+// so the collision guard refuses the apply. Returns nothing.
+func redistReqPut16868(out map[string]redistComposedReq15156, name string, cand redistComposedReq15156) {
+	if prev, ok := out[name]; ok {
+		if prev.poisoned == "" && redistReqIdentity16868(prev) != redistReqIdentity16868(cand) {
+			out[name] = redistComposedReq15156{poisoned: name}
+		}
+		return
+	}
+	out[name] = cand
+}
+
 func redistComposedChains15156(fc *FullConfig) map[string]redistComposedReq15156 {
 	out := make(map[string]redistComposedReq15156)
 	if fc == nil || fc.PolicyOptions == nil {
@@ -341,22 +355,11 @@ func redistComposedChains15156(fc *FullConfig) map[string]redistComposedReq15156
 						continue
 					}
 					vname := redistVariantChainRouteMapName16864(policies, e.proto, actx)
-					if _, ok := out[vname]; !ok {
-						out[vname] = redistComposedReq15156{chain: append([]string(nil), policies...), proto: e.proto, ctx: actx}
-					}
+					redistReqPut16868(out, vname, redistComposedReq15156{chain: append([]string(nil), policies...), proto: e.proto, ctx: actx})
 				}
 				continue
 			}
-			if prev, ok := out[name]; ok {
-				if redistReqIdentity16868(prev) != redistReqIdentity16868(redistComposedReq15156{chain: policies, proto: e.proto, ctx: ctx}) {
-					// Distinct programs, one name: never silently
-					// keep the first (#16868 gate4). Record a
-					// poisoned request the collision guard refuses.
-					out[name] = redistComposedReq15156{poisoned: name}
-				}
-			} else {
-				out[name] = redistComposedReq15156{chain: append([]string(nil), policies...), proto: e.proto, ctx: ctx}
-			}
+			redistReqPut16868(out, name, redistComposedReq15156{chain: append([]string(nil), policies...), proto: e.proto, ctx: ctx})
 		}
 	}
 	addBGP := func(bgp *config.BGPConfig) {
@@ -377,14 +380,7 @@ func redistComposedChains15156(fc *FullConfig) map[string]redistComposedReq15156
 					if len(ps) < 2 {
 						continue
 					}
-					cand := redistComposedReq15156{chain: ps, proto: e.proto}
-					if prev, ok := out[e.routeMap]; ok {
-						if redistReqIdentity16868(prev) != redistReqIdentity16868(cand) {
-							out[e.routeMap] = redistComposedReq15156{poisoned: e.routeMap}
-						}
-					} else {
-						out[e.routeMap] = redistComposedReq15156{chain: append([]string(nil), ps...), proto: e.proto}
-					}
+					redistReqPut16868(out, e.routeMap, redistComposedReq15156{chain: append([]string(nil), ps...), proto: e.proto})
 				}
 			}
 		}
@@ -397,22 +393,12 @@ func redistComposedChains15156(fc *FullConfig) map[string]redistComposedReq15156
 				if !strings.Contains(e.routeMap, ReservedChainSuffix) {
 					continue
 				}
-				if _, ok := out[e.routeMap]; ok {
-					continue
-				}
 				chains := redistOrChains16868(bgp, po, "bgp", node, e.proto)
 				if len(chains) < 2 {
 					continue
 				}
 				if redistOrRouteMapName16868(bgp, po, "bgp", node, e.proto) == e.routeMap {
-					cand := redistComposedReq15156{chains: chains, proto: e.proto}
-					if prev, ok := out[e.routeMap]; ok {
-						if redistReqIdentity16868(prev) != redistReqIdentity16868(cand) {
-							out[e.routeMap] = redistComposedReq15156{poisoned: e.routeMap}
-						}
-					} else {
-						out[e.routeMap] = cand
-					}
+					redistReqPut16868(out, e.routeMap, redistComposedReq15156{chains: chains, proto: e.proto})
 				}
 			}
 		}
@@ -892,6 +878,53 @@ func redistChainMapCollision15156(fc *FullConfig) error {
 		// chain; refuse the apply on the lenient path too.
 		if strings.HasPrefix(name, config.ReservedOrPrefix16868) || strings.Contains(name, config.ReservedOrMarker16868) {
 			return fmt.Errorf("policy-statement %q intrudes on the reserved OR namespace (%q/%q) for generated cross-chain route-maps — refusing to render (#16868)", name, config.ReservedOrPrefix16868, config.ReservedOrMarker16868)
+		}
+	}
+	// Joined cores: markers formed across member boundaries of an
+	// ordered chain ([xpf or-... or]) are refused too.
+	{
+		var cores []string
+		addCore := func(chain []string) {
+			var def []string
+			for _, n := range chain {
+				if _, ok := po.PolicyStatements[n]; ok {
+					def = append(def, n)
+				}
+			}
+			if len(def) >= 2 {
+				cores = append(cores, strings.Join(def, "-"))
+			}
+		}
+		walkCore := func(ospf *config.OSPFConfig, ospfv3 *config.OSPFv3Config, bgp *config.BGPConfig, rip *config.RIPConfig, isis *config.ISISConfig) {
+			if ospf != nil {
+				addCore(ospf.Export)
+			}
+			if ospfv3 != nil {
+				addCore(ospfv3.Export)
+			}
+			if rip != nil {
+				addCore(rip.Redistribute)
+			}
+			if isis != nil {
+				addCore(isis.Export)
+			}
+			if bgp != nil {
+				addCore(bgp.Export)
+				for _, n := range bgp.Neighbors {
+					if n != nil {
+						addCore(n.Export)
+					}
+				}
+			}
+		}
+		walkCore(fc.OSPF, fc.OSPFv3, fc.BGP, fc.RIP, fc.ISIS)
+		for _, inst := range fc.Instances {
+			walkCore(inst.OSPF, inst.OSPFv3, inst.BGP, inst.RIP, inst.ISIS)
+		}
+		for _, core := range cores {
+			if strings.HasPrefix(core, config.ReservedOrPrefix16868) || strings.Contains(core, config.ReservedOrMarker16868) {
+				return fmt.Errorf("export chain composing to %q intrudes on the reserved OR namespace — refusing to render (#16868)", core)
+			}
 		}
 	}
 	// Generated names that must stay distinct.

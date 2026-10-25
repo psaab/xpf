@@ -38,6 +38,28 @@ func TestPolicyReservedOrNormalNameAccepted16868(t *testing.T) {
 	}
 }
 
+// Joined markers across member boundaries are refused too:
+// [xpf or-<digest>-xpf or] joins into the OR namespace even
+// though each member alone is legal.
+func TestPolicyReservedOrJoinedSplitRejected16868(t *testing.T) {
+	sets := []string{"set routing-options autonomous-system 65000"}
+	for _, n := range []string{"xpf", "or-2aff27e47a5d420d-xpf", "or"} {
+		sets = append(sets,
+			"set policy-options policy-statement "+n+" term t1 from protocol static",
+			"set policy-options policy-statement "+n+" term t1 then accept")
+	}
+	sets = append(sets,
+		"set protocols bgp group g type external",
+		"set protocols bgp group g peer-as 65001",
+		"set protocols bgp group g neighbor 10.0.0.2 export xpf",
+		"set protocols bgp group g neighbor 10.0.0.2 export or-2aff27e47a5d420d-xpf",
+		"set protocols bgp group g neighbor 10.0.0.2 export or")
+	tree := buildTreeFromSet(t, sets)
+	if _, err := CompileConfig(tree); err == nil {
+		t.Fatal("joined split-name chain must be rejected (#16868 gate5)")
+	}
+}
+
 func TestPolicyReservedOrNameLenientWarns16868(t *testing.T) {
 	tree := buildTreeFromSet(t, []string{
 		"set policy-options policy-statement xpf-or-abc term t1 from protocol static",

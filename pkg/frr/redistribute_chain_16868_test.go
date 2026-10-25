@@ -1056,3 +1056,88 @@ func TestBGPOrForgedOrderedNameRefused16868(t *testing.T) {
 		t.Fatalf("forged ordered chain spelling OR name %q must be refused", orName)
 	}
 }
+
+// splitWitnessPO16868 builds the gate5 fixture: LA/LB singleton
+// acceptors (.50/.60) and the ordered forgery chain members
+// xpf / or-<digest>-xpf / or (.60-reject, .70, .80 accepts).
+func splitWitness16868() (*config.PolicyOptionsConfig, string, string) {
+	la := strings.Repeat("A", 50)
+	lb := strings.Repeat("B", 50)
+	po := &config.PolicyOptionsConfig{PolicyStatements: map[string]*config.PolicyStatement{}}
+	acc := func(n, pfx string) {
+		po.PolicyStatements[n] = &config.PolicyStatement{Name: n, Terms: []*config.PolicyTerm{
+			{Name: "t", FromProtocols: []string{"static"}, RouteFilters: []*config.RouteFilter{{Prefix: pfx, MatchType: "exact"}}, Action: "accept"},
+		}, DefaultAction: "reject"}
+	}
+	acc(la, "192.168.50.0/24")
+	acc(lb, "192.168.60.0/24")
+	acc("or-2aff27e47a5d420d-xpf", "192.168.70.0/24")
+	acc("or", "192.168.80.0/24")
+	po.PolicyStatements["xpf"] = &config.PolicyStatement{Name: "xpf", Terms: []*config.PolicyTerm{
+		{Name: "r", FromProtocols: []string{"static"}, RouteFilters: []*config.RouteFilter{{Prefix: "192.168.60.0/24", MatchType: "exact"}}, Action: "reject"},
+	}}
+	return po, la, lb
+}
+
+// TestBGPOrSplitNameRefusedBothOrders16868 (gate5 B1): the marker
+// split across three legal members [xpf or-<digest>-xpf or] joins
+// to the OR hash name. Both collection orders (ordered-first and
+// OR-first) must refuse through the production guard, with a real
+// VRF and distinct route sets.
+func TestBGPOrSplitNameRefusedBothOrders16868(t *testing.T) {
+	po, la, lb := splitWitness16868()
+	orderedNB := []*config.BGPNeighbor{
+		{Address: "192.0.2.2", PeerAS: 65002, FamilyInet: true, Export: []string{"xpf", "or-2aff27e47a5d420d-xpf", "or"}},
+	}
+	orNB := []*config.BGPNeighbor{
+		{Address: "192.0.2.2", PeerAS: 65002, FamilyInet: true, Export: []string{la}},
+		{Address: "192.0.2.3", PeerAS: 65003, FamilyInet: true, Export: []string{lb}},
+	}
+	mkFC := func(orderedFirst bool) *FullConfig {
+		defBGP := &config.BGPConfig{LocalAS: 65001, RouterID: "1.1.1.1"}
+		blue := InstanceConfig{VRFName: "blue", BGP: &config.BGPConfig{LocalAS: 65001, RouterID: "1.1.1.1"}}
+		if orderedFirst {
+			defBGP.Neighbors = orderedNB
+			blue.BGP.Neighbors = orNB
+		} else {
+			defBGP.Neighbors = orNB
+			blue.BGP.Neighbors = []*config.BGPNeighbor{
+				{Address: "192.0.2.2", PeerAS: 65002, FamilyInet: true, Export: []string{"xpf", "or-2aff27e47a5d420d-xpf", "or"}},
+			}
+			// ordered in blue needs its own BGP; def holds OR.
+			return &FullConfig{
+				PolicyOptions: po,
+				BGP:           defBGP,
+				Instances:     []InstanceConfig{{VRFName: "blue", BGP: blue.BGP}},
+			}
+		}
+		return &FullConfig{PolicyOptions: po, BGP: defBGP, Instances: []InstanceConfig{blue}}
+	}
+	for _, orderedFirst := range []bool{true, false} {
+		fc := mkFC(orderedFirst)
+		if err := redistChainMapCollision15156(fc); err == nil {
+			t.Errorf("orderedFirst=%v: split-name forgery must be refused, not silently merged", orderedFirst)
+		}
+	}
+	// Positive control: identical OR requests in two instances
+	// dedupe to one map without refusal.
+	po2, la2, lb2 := splitWitness16868()
+	fc := &FullConfig{
+		PolicyOptions: po2,
+		BGP: &config.BGPConfig{LocalAS: 65001, RouterID: "1.1.1.1", Neighbors: []*config.BGPNeighbor{
+			{Address: "192.0.2.2", PeerAS: 65002, FamilyInet: true, Export: []string{la2}},
+			{Address: "192.0.2.3", PeerAS: 65003, FamilyInet: true, Export: []string{lb2}},
+		}},
+		Instances: []InstanceConfig{{VRFName: "blue", BGP: &config.BGPConfig{LocalAS: 65001, RouterID: "1.1.1.1", Neighbors: []*config.BGPNeighbor{
+			{Address: "192.0.2.2", PeerAS: 65002, FamilyInet: true, Export: []string{la2}},
+			{Address: "192.0.2.3", PeerAS: 65003, FamilyInet: true, Export: []string{lb2}},
+		}}}},
+	}
+	if err := redistChainMapCollision15156(fc); err != nil {
+		t.Errorf("identical OR programs must dedupe, got refusal: %v", err)
+	}
+	got := New().buildManagedSection(fc)
+	if n := strings.Count(got, "route-map xpf-or-2aff27e47a5d420d-xpf-or-xpf-chain-static-xpf-redist permit"); n == 0 {
+		t.Errorf("shared OR map must be defined once:\n%s", got)
+	}
+}
