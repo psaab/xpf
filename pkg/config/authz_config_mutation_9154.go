@@ -275,16 +275,42 @@ func configMutationPaths(editPath, parts []string, quoted []bool) ([]string, boo
 		return []string{resolvedSrc, resolvedDst}, true
 
 	case "insert":
-		// `insert <element-path> before|after <ref>` moves the element; the ref
-		// is a SIBLING identifier that is not itself mutated, and it lives under
-		// the same parent, so a deny covering the element covers it.
+		// #16786: `insert <element-path> before|after <ref>` moves the
+		// element RELATIVE TO the reference, and in a first-match list
+		// (security policies, firewall terms) that reorder changes the
+		// reference's effective position even though its statement is
+		// untouched. Adjudicate BOTH endpoints, as copy/rename do: the
+		// resolved reference path is built exactly as the executors
+		// build it (InsertRefPath over the edit-resolved element, the
+		// ref tokens replacing the element's trailing identifier under
+		// the same parent), so the path judged is the path reordered.
+		//
+		// The pre-#16786 rationale — "the ref is a SIBLING identifier
+		// that is not itself mutated, so a deny covering the element
+		// covers it" — holds only for a deny on the common parent. A
+		// deny on the reference itself (anchored `^security policies
+		// p1$` or plain) never matched the element-only string, so a
+		// restricted class could move a permitted permit ahead of a
+		// protected deny policy and the set-line multiset the commit
+		// gate compares stayed identical.
 		// #14147: only a BARE keyword separates, for the same reason as
 		// copy/rename above — a quoted "before" is an element token.
-		elem, _, _, kwOK := splitInsertTokens(parts, quoted)
+		elem, refTokens, _, kwOK := splitInsertTokens(parts, quoted)
 		if !kwOK {
 			break // malformed: fall back to the whole remainder, see above
 		}
-		return []string{resolve(elem)}, true
+		resolvedElem := make([]string, 0, len(editPath)+len(elem))
+		resolvedElem = append(resolvedElem, editPath...)
+		resolvedElem = append(resolvedElem, elem...)
+		paths := []string{strings.Join(resolvedElem, " ")}
+		// A ref longer than the resolved element is refused by every
+		// executor (ParseInsertCommand / handleInsert arity check), so
+		// there is no reference path to adjudicate; the element verdict
+		// above still stands.
+		if len(refTokens) <= len(resolvedElem) {
+			paths = append(paths, strings.Join(insertRefPath(resolvedElem, refTokens), " "))
+		}
+		return paths, true
 
 	case "annotate":
 		// `annotate <path> "comment"`. The comment is dropped from the path, but
