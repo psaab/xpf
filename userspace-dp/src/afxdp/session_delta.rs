@@ -42,9 +42,24 @@ pub(in crate::afxdp) fn drain_session_deltas_fair(
     max: usize,
     start_cursor: usize,
 ) -> (Vec<SessionDeltaInfo>, usize, bool) {
+    let (out, cursor, overflow, _contributed) =
+        drain_session_deltas_fair_tracked(bindings, max, start_cursor);
+    (out, cursor, overflow)
+}
+
+/// #16584: [`drain_session_deltas_fair`] plus the indexes (into `bindings`)
+/// of every binding that contributed at least one drained delta, in first-
+/// contribution order. The RPC-fallback dispatcher uses this to arm
+/// loss-of-sync on exactly the contributing bindings when the response
+/// carrying the destructively-drained batch fails to reach the peer.
+pub(in crate::afxdp) fn drain_session_deltas_fair_tracked(
+    bindings: &[&BindingLiveState],
+    max: usize,
+    start_cursor: usize,
+) -> (Vec<SessionDeltaInfo>, usize, bool, Vec<usize>) {
     let n = bindings.len();
     if n == 0 {
-        return (Vec::new(), start_cursor, false);
+        return (Vec::new(), start_cursor, false, Vec::new());
     }
     let mut budget = max.max(1);
     // Per-turn quantum: spread the budget across all live bindings so no single
@@ -53,6 +68,7 @@ pub(in crate::afxdp) fn drain_session_deltas_fair(
     // remaining bindings on the next call).
     let quantum = (budget / n).max(1);
     let mut out = Vec::new();
+    let mut contributed: Vec<usize> = Vec::new();
     let mut cursor = start_cursor % n;
     loop {
         let mut progressed = false;
@@ -61,11 +77,15 @@ pub(in crate::afxdp) fn drain_session_deltas_fair(
                 break;
             }
             let take = quantum.min(budget);
+            let drained_from = cursor;
             let drained = bindings[cursor].drain_session_deltas(take);
             cursor = (cursor + 1) % n;
             let got = drained.len();
             if got > 0 {
                 progressed = true;
+                if !contributed.contains(&drained_from) {
+                    contributed.push(drained_from);
+                }
                 // got <= take <= budget, so this never underflows.
                 budget = budget.saturating_sub(got);
                 out.extend(drained);
@@ -81,7 +101,7 @@ pub(in crate::afxdp) fn drain_session_deltas_fair(
     // full pass drained nothing, every binding is empty and no delta was left
     // behind. The scan re-locks each buffer (cold control path only).
     let overflow = budget == 0 && bindings.iter().any(|b| b.has_pending_session_deltas());
-    (out, cursor, overflow)
+    (out, cursor, overflow, contributed)
 }
 
 /// #9752 round 4 item 3: TABLE leg of purge-close staleness — the predicate

@@ -41,6 +41,9 @@ pub(in crate::afxdp) struct OpenExportWindow {
     incarnation: u64,
     since_ns: u64,
     buffers: Vec<Arc<crate::afxdp::binding_state::ExportBufferState>>,
+    /// #16584: worker ids parallel to `buffers`, so a continuation page
+    /// attributes its drained deltas to the same workers as the kick page.
+    worker_ids: Vec<u32>,
     acks: Vec<Arc<AtomicU64>>,
     dropped_at_begin: Vec<u64>,
     shed: u32,
@@ -313,6 +316,7 @@ impl SessionManager {
         sequence: u64,
         now_ns: u64,
         buffers: &[Arc<crate::afxdp::binding_state::ExportBufferState>],
+        worker_ids: &[u32],
         acks: &[Arc<AtomicU64>],
         shed: u32,
     ) {
@@ -322,6 +326,7 @@ impl SessionManager {
             incarnation: self.export_incarnation,
             since_ns: now_ns,
             buffers: buffers.to_vec(),
+            worker_ids: worker_ids.to_vec(),
             acks: acks.to_vec(),
             dropped_at_begin,
             shed,
@@ -334,7 +339,8 @@ impl SessionManager {
     }
 
     /// #9856: adopt the open window for a continuation: clones out the
-    /// sequence, incarnation, buffers, acks, drop baselines and shed count.
+    /// sequence, incarnation, buffers, worker ids, acks, drop baselines
+    /// and shed count.
     pub(in crate::afxdp) fn open_export_adopt(
         &self,
         now_ns: u64,
@@ -342,6 +348,7 @@ impl SessionManager {
         u64,
         u64,
         Vec<Arc<crate::afxdp::binding_state::ExportBufferState>>,
+        Vec<u32>,
         Vec<Arc<AtomicU64>>,
         Vec<u64>,
         u32,
@@ -353,6 +360,7 @@ impl SessionManager {
                 w.sequence,
                 w.incarnation,
                 w.buffers.clone(),
+                w.worker_ids.clone(),
                 w.acks.clone(),
                 w.dropped_at_begin.clone(),
                 w.shed,

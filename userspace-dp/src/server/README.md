@@ -73,6 +73,19 @@ this surface over a Unix socket using a newline-delimited text protocol.
     `drain_session_deltas_survive_write_state_failure_5294` (a rigged
     `write_state` failure must still deliver every drained delta; reverting to
     pop-then-fallible-write drops the batch → EOF on the client read → RED).
+  - **A failed response write after a destructive drain arms loss (#16584).**
+    The drain and the owner-RG collect record exactly which bindings /
+    workers contributed to `response.session_deltas`
+    (`drain_session_deltas_attributed` / `wait_and_collect_attributed`). If
+    encode/write/flush then fails — the peer hit its deadline and closed —
+    the tail arms `set_delta_loss` on every contributor before returning the
+    error, so the owning workers re-export table truth instead of the batch
+    (notably its closes) vanishing until peer GC. An empty drain/collect
+    arms nothing and no longer flags a persist. The persist itself now runs
+    after the successful flush. Pinned by
+    `drain_session_deltas_write_failure_arms_delta_loss_16584` and
+    `owner_rg_collect_write_failure_arms_delta_loss_16584` (closed-client
+    dispatcher cells; connected controls stay latch-clear).
 - `helpers/` — shared daemon-loop utilities, split into cohesive
   submodules (#6234) behind a narrow `helpers/mod.rs` re-export facade so
   every `server::helpers::<name>` call site is unchanged:

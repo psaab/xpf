@@ -1404,6 +1404,21 @@ impl super::Coordinator {
     }
 
     pub fn drain_session_deltas(&self, max: usize) -> Vec<SessionDeltaInfo> {
+        self.drain_session_deltas_attributed(max).0
+    }
+
+    /// #16584: like [`Self::drain_session_deltas`] but also returns the slots
+    /// of the bindings that contributed at least one drained delta. The
+    /// dispatcher tail needs exactly those slots: if the response carrying a
+    /// destructively-drained batch then fails to encode/write/flush, it arms
+    /// `set_delta_loss` on every contributing binding (deliver-or-resync,
+    /// #2442/#2874) instead of silently stranding the batch. Attribution is
+    /// drained-batch-driven, not budget-driven: a failed write with an empty
+    /// batch arms nothing.
+    pub(crate) fn drain_session_deltas_attributed(
+        &self,
+        max: usize,
+    ) -> (Vec<SessionDeltaInfo>, Vec<u32>) {
         // #5290: fair, rotating-cursor drain instead of whole-budget-first-slot.
         // The old drain handed the entire caller budget to each live binding in
         // slot order with an early break, so during the event-stream RPC
@@ -1412,12 +1427,15 @@ impl super::Coordinator {
         // depended on worker-slot assignment.
         let bindings: Vec<&BindingLiveState> =
             self.workers.live.values().map(|b| b.as_ref()).collect();
+        let slots: Vec<u32> = self.workers.live.keys().copied().collect();
         let start = self
             .workers
             .session_delta_drain_cursor
             .load(Ordering::Relaxed);
-        let (out, next_cursor, overflow) =
-            crate::afxdp::session_delta::drain_session_deltas_fair(&bindings, max, start);
+        let (out, next_cursor, overflow, contributed_idx) =
+            crate::afxdp::session_delta::drain_session_deltas_fair_tracked(
+                &bindings, max, start,
+            );
         self.workers
             .session_delta_drain_cursor
             .store(next_cursor, Ordering::Relaxed);
@@ -1434,7 +1452,41 @@ impl super::Coordinator {
                 }
             }
         }
-        out
+        let contributed: Vec<u32> = contributed_idx
+            .iter()
+            .filter_map(|&i| slots.get(i).copied())
+            .collect();
+        (out, contributed)
+    }
+
+    /// #16584: arm the per-binding loss-of-sync latch on each slot in
+    /// `slots`. Called by the dispatcher tail when a response carrying a
+    /// destructively-drained delta batch failed to encode/write/flush, so
+    /// the owning workers' `take_delta_loss` resync re-exports table truth
+    /// instead of the batch vanishing with the connection. Unknown slots
+    /// (binding torn down since the drain) are skipped — that binding's
+    /// worker is gone and its resync obligation dies with it.
+    pub(crate) fn arm_delta_loss_for_slots(&self, slots: &[u32]) {
+        for slot in slots {
+            if let Some(live) = self.workers.live.get(slot) {
+                live.set_delta_loss();
+            }
+        }
+    }
+
+    /// #16584: arm loss on the bindings owning each worker id in
+    /// `worker_ids` (slot→identity→live). Used for the owner-RG export leg,
+    /// whose deltas are worker-keyed rather than slot-keyed: a failed
+    /// response write after `wait_and_collect` drained a page must resync
+    /// every worker that contributed to that page.
+    pub(crate) fn arm_delta_loss_for_workers(&self, worker_ids: &[u32]) {
+        for (slot, ident) in self.workers.identities.iter() {
+            if worker_ids.contains(&ident.worker_id) {
+                if let Some(live) = self.workers.live.get(slot) {
+                    live.set_delta_loss();
+                }
+            }
+        }
     }
 
     /// #5294 test seam: insert a live binding at `slot` pre-loaded with `count`
@@ -1448,6 +1500,43 @@ impl super::Coordinator {
             live.push_session_delta(crate::protocol::SessionDeltaInfo::default());
         }
         self.workers.live.insert(slot, live);
+    }
+
+    /// #16584 test seam: insert a live binding at `slot` bound to `worker_id`
+    /// with `count` pending deltas, so a dispatcher cell can assert the
+    /// tail arms loss on exactly the contributing worker's bindings.
+    #[cfg(test)]
+    pub(crate) fn seed_pending_deltas_with_worker_for_test(
+        &mut self,
+        slot: u32,
+        worker_id: u32,
+        count: usize,
+    ) {
+        let live = std::sync::Arc::new(crate::afxdp::binding_state::BindingLiveState::new());
+        for _ in 0..count {
+            live.push_session_delta(crate::protocol::SessionDeltaInfo::default());
+        }
+        self.workers.live.insert(slot, live);
+        self.workers.identities.insert(
+            slot,
+            crate::afxdp::BindingIdentity {
+                slot,
+                queue_id: 0,
+                worker_id,
+                interface: std::sync::Arc::from("test"),
+                ifindex: 0,
+            },
+        );
+    }
+
+    /// #16584 test seam: consume the loss latch on the binding at `slot`.
+    #[cfg(test)]
+    pub(crate) fn take_delta_loss_for_test(&self, slot: u32) -> bool {
+        self.workers
+            .live
+            .get(&slot)
+            .map(|live| live.take_delta_loss())
+            .unwrap_or(false)
     }
 
     pub fn worker_heartbeats(&self) -> Vec<chrono::DateTime<Utc>> {

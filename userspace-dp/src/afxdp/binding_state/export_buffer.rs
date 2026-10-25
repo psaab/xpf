@@ -114,6 +114,13 @@ impl ExportBufferState {
         self.export_dropped.load(Ordering::Relaxed)
     }
 
+    /// #16584: cumulative entries drained from this buffer. The owner-RG
+    /// collector diffs it around a collect to attribute the page to the
+    /// buffers (hence workers) that actually contributed.
+    pub(in crate::afxdp) fn export_drained(&self) -> u64 {
+        self.export_drained.load(Ordering::Relaxed)
+    }
+
     /// Record tombstones that overflowed the bounded session-side harvest
     /// before they could reach this buffer. The active export fails closed on
     /// the same cumulative metric as direct buffer drops.
