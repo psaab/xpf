@@ -1041,6 +1041,15 @@ datagram writes and exclude periodic template refreshes. A climbing
 `dropped_total`, or a sustained nonzero `depth`, signals that the export drain
 cannot keep up.
 
+The daemon's live-counter feed (#16760) counts session-store lookups that
+found no entry for a tracked flow in `Daemon.FlowLiveFeedMisses()`, surfaced
+as the unlabeled Prometheus counter `xpf_flow_export_live_feed_misses_total`
+(omitted when unwired, emitted before the dataplane gate). Session-key ports
+on the map are `__be16`, so the feed converts the host-order `FlowKey` ports
+with `userspaceHostToNetwork16`; a sustained climb of the miss counter while
+flows are tracked means the feed is not reaching the store and active
+interims will export zero counters.
+
 ## Retirement handoff admission lease (#4963)
 
 `#3742` publishes the new exporter bundle BEFORE tearing the old generation

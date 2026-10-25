@@ -1155,6 +1155,7 @@ type xpfCollector struct {
 	flowExportMissingStartTimeTotal    *prometheus.Desc
 	flowExportClockSkewClampedTotal    *prometheus.Desc
 	flowExportSamplingEvaluatedTotal   *prometheus.Desc
+	flowExportLiveFeedMissesTotal      *prometheus.Desc
 	flowExportSamplingSelectedTotal    *prometheus.Desc
 	flowExportZoneFilteredTotal        *prometheus.Desc
 	// #15086/#16707: scrape-health counters for the label-sanitize choke
@@ -1240,6 +1241,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	defer c.emitDataplaneSilentSkips(ch)
 	defer c.emitDataplaneSafety(ch)
 	defer c.emitSNMPServeBudget(ch)
+	defer c.emitFlowExportLiveFeedMisses(ch)
 	// #15086: scrape-health samples, deferred with the other pre-gate
 	// emits so they land on every return path. A pass recovered by the
 	// lane (metrics_handler.go) unwinds through these defers while Gather

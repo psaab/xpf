@@ -103,13 +103,18 @@ func (d *Daemon) flowLiveFeedLoop(ctx context.Context) {
 // after inactive expiry is observed and re-armed. Keys are unioned per
 // group so a flow tracked by several template groups of one instance is
 // read once and fed to each. A key the source no longer holds is
-// skipped (its close or inactive expiry will forget it).
+// skipped (its close or inactive expiry will forget it) and counted in
+// flowLiveFeedMisses (#16760): before the port byte-order fix every
+// lookup missed, so this counter is the operator-visible signal that
+// the live feed is not reaching the session store.
 func (d *Daemon) feedFlowLiveCounters(now time.Time) {
 	if b := d.flowBundle.Load(); b != nil {
 		for _, g := range b.groups {
 			for _, key := range g.exp.TrackedKeys() {
 				if fp, fb, rp, rb, ok := d.liveFlowCounters(key); ok {
 					g.exp.TouchFlowBidirectional(key, now, fp, fb, rp, rb)
+				} else {
+					d.flowLiveFeedMisses.Add(1)
 				}
 			}
 		}
@@ -119,17 +124,40 @@ func (d *Daemon) feedFlowLiveCounters(now time.Time) {
 			for _, key := range g.exp.TrackedKeys() {
 				if fp, fb, rp, rb, ok := d.liveFlowCounters(key); ok {
 					g.exp.TouchFlowBidirectional(key, now, fp, fb, rp, rb)
+				} else {
+					d.flowLiveFeedMisses.Add(1)
 				}
 			}
 		}
 	}
 }
 
+// FlowLiveFeedMisses returns the cumulative count of live-counter
+// lookups that found no session-store entry for a tracked flow
+// (#16760). A sustained climb while flows are tracked means the live
+// feed cannot reach the session store (wrong key encoding, store
+// absent), so active interims export zero counters and the inactive
+// timer forgets continuously-active flows as idle.
+func (d *Daemon) FlowLiveFeedMisses() uint64 {
+	if d == nil {
+		return 0
+	}
+	return d.flowLiveFeedMisses.Load()
+}
+
 // liveFlowCounters is the production per-key counter source: the
 // dataplane session store's forward entry for the tracked tuple. The
 // forward entry's counters already sum both directions' volume as the
 // helper maintains them (fwd = initiator direction, rev = responder).
-// Tests override d.flowLiveCounters instead of standing up a dataplane.
+// SessionKey ports carry __be16 (network order) on the map — the Rust
+// helper writes them with src_port.to_be() (#16760) — while FlowKey
+// ports are host order (parseSrcPort), so convert with
+// userspaceHostToNetwork16 or every lookup misses on the raw key bytes.
+// The IP must be parsed directly, not via parseHost: FlowKey addresses
+// are the bare IP strings FlowKeyFromClose stored (net.IP.String()),
+// and parseHost's last-colon strip would truncate a bare IPv6 address
+// at its final hextet. Tests override d.flowLiveCounters instead of
+// standing up a dataplane.
 func (d *Daemon) liveFlowCounters(key flowexport.FlowKey) (uint64, uint64, uint64, uint64, bool) {
 	if d.flowLiveCounters != nil {
 		return d.flowLiveCounters(key)
@@ -144,18 +172,18 @@ func (d *Daemon) liveFlowCounters(key flowexport.FlowKey) (uint64, uint64, uint6
 	}
 	if key.IsIPv6 {
 		var src, dst [16]byte
-		copy(src[:], parseHost(key.SrcIP).To16())
-		copy(dst[:], parseHost(key.DstIP).To16())
-		val, err := store.GetV6(dataplane.SessionKeyV6{SrcIP: src, DstIP: dst, SrcPort: key.SrcPort, DstPort: key.DstPort, Protocol: key.Protocol})
+		copy(src[:], net.ParseIP(key.SrcIP).To16())
+		copy(dst[:], net.ParseIP(key.DstIP).To16())
+		val, err := store.GetV6(dataplane.SessionKeyV6{SrcIP: src, DstIP: dst, SrcPort: userspaceHostToNetwork16(key.SrcPort), DstPort: userspaceHostToNetwork16(key.DstPort), Protocol: key.Protocol})
 		if err != nil {
 			return 0, 0, 0, 0, false
 		}
 		return val.FwdPackets, val.FwdBytes, val.RevPackets, val.RevBytes, true
 	}
 	var src, dst [4]byte
-	copy(src[:], parseHost(key.SrcIP).To4())
-	copy(dst[:], parseHost(key.DstIP).To4())
-	val, err := store.GetV4(dataplane.SessionKey{SrcIP: src, DstIP: dst, SrcPort: key.SrcPort, DstPort: key.DstPort, Protocol: key.Protocol})
+	copy(src[:], net.ParseIP(key.SrcIP).To4())
+	copy(dst[:], net.ParseIP(key.DstIP).To4())
+	val, err := store.GetV4(dataplane.SessionKey{SrcIP: src, DstIP: dst, SrcPort: userspaceHostToNetwork16(key.SrcPort), DstPort: userspaceHostToNetwork16(key.DstPort), Protocol: key.Protocol})
 	if err != nil {
 		return 0, 0, 0, 0, false
 	}

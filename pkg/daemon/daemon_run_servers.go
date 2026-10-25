@@ -1056,6 +1056,8 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 		FlowExportBatchStatsFn: d.FlowExportBatchStats,
 		// #13307: per-instance sampling and filtering decisions.
 		FlowExportSamplingStatsFn: d.FlowExportSamplingStats,
+		// #16760: live-feed session-store lookup misses.
+		FlowExportLiveFeedMissesFn: d.FlowLiveFeedMisses,
 		// #3419 M6: report whether this node is the active cluster member
 		// for RG0 so the REST session view's ha_active field matches the
 		// gRPC contract (server_sessions.go IsLocalPrimary(0)). Standalone

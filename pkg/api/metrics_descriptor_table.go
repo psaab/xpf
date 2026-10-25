@@ -115,6 +115,7 @@ var collectorDescFamilies = []collectorDescFamily{
 	{name: "fwdstatus", init: (*xpfCollector).initFwdStatusDescriptors, fields: collectorDescFwdStatus},
 	{name: "hatakeover", init: (*xpfCollector).initHATakeoverDescriptors13301, fields: collectorDescHATakeover},
 	{name: "snmpservebudget", init: (*xpfCollector).initSNMPServeBudgetDescriptors, fields: collectorDescSNMPServeBudget},
+	{name: "flowexportlivefeed", init: (*xpfCollector).initFlowExportLiveFeedDescriptors, fields: collectorDescFlowExportLiveFeed},
 	{name: "restconn", init: (*xpfCollector).initRESTConnDescriptors, fields: collectorDescRESTConn},
 	{name: "fabricconn", init: (*xpfCollector).initFabricConnDescriptors, fields: collectorDescFabricConn},
 	{name: "dataplanesafety", init: (*xpfCollector).initDataplaneSafetyDescriptors, fields: collectorDescDataplaneSafety},
@@ -899,6 +900,11 @@ var collectorDescHATakeover = []int{
 	xpfCollectorDescFieldIndex("userspaceSessionSocketErrorsTotal"),
 	xpfCollectorDescFieldIndex("userspaceSessionSocketTimeoutsTotal"),
 	xpfCollectorDescFieldIndex("userspaceSyncedImportRefusalsTotal"),
+}
+
+// initFlowExportLiveFeedDescriptors (metrics_flowexport_livefeed_16760.go).
+var collectorDescFlowExportLiveFeed = []int{
+	xpfCollectorDescFieldIndex("flowExportLiveFeedMissesTotal"),
 }
 
 // initSNMPServeBudgetDescriptors (metrics_snmp_serve_budget_13309.go).

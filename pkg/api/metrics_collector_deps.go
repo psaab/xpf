@@ -99,6 +99,7 @@ type collectorDeps struct {
 	flowCollectorHealthFn                func() []flowexport.ExporterCollectorHealth
 	flowExportBatchStatsFn               func() []flowexport.ExporterBatchStats
 	flowExportSamplingStatsFn            func() []flowexport.SamplingStatsSnapshot
+	flowExportLiveFeedMissesFn           func() uint64
 	neighborPhaseAgeFn                   func() map[string]float64
 	ipmonStatusFn                        func() []ipmon.PolicyStatus
 	routeListenerMarksFn                 func() uint64
@@ -183,6 +184,7 @@ func collectorDepsFromServer(srv *Server) collectorDeps {
 		flowCollectorHealthFn:                srv.flowCollectorHealthFn,
 		flowExportBatchStatsFn:               srv.flowExportBatchStatsFn,
 		flowExportSamplingStatsFn:            srv.flowExportSamplingStatsFn,
+		flowExportLiveFeedMissesFn:           srv.flowExportLiveFeedMissesFn,
 		neighborPhaseAgeFn:                   srv.neighborPhaseAgeFn,
 		ipmonStatusFn:                        srv.ipmonStatusFn,
 		routeListenerMarksFn:                 srv.routeListenerMarksFn,

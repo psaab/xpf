@@ -620,6 +620,10 @@ type Daemon struct {
 	// test seam overrides the per-key counter source.
 	flowLiveFeedOnce sync.Once
 	flowLiveCounters func(key flowexport.FlowKey) (fwdPkts, fwdBytes, revPkts, revBytes uint64, ok bool)
+	// #16760: live-feed lookups that found no session-store entry for a
+	// tracked flow. Surfaced via FlowLiveFeedMisses() and the
+	// xpf_flow_export_live_feed_misses_total Prometheus counter.
+	flowLiveFeedMisses atomic.Uint64
 	// #4963 fixed-cardinality handoff-drop totals. Each exporter of a family
 	// is injected (SetHandoffCounter) with a pointer to the matching counter
 	// here, so a session-close record rejected because it reached an exporter
