@@ -14,11 +14,47 @@ import (
 // effective = base_priority * (weight / 255)
 // Returns an integer value scaled to avoid floating-point issues.
 // Higher value = higher priority = more likely to be primary.
+//
+// The scaled value orders candidates only in the election arms that opt
+// into weight-decisiveness: the #12164 dataplane-arm-debt yield / pin
+// release (where a fresh node at the weight-1 floor must lose) and the
+// unmanaged cold-start / split-brain arms below. Preempt itself does NOT
+// use it while both weights are above zero (#16739): Junos fails an RG
+// over only when its monitor threshold reaches zero, so a partial
+// monitor loss must not move a preempt RG whose raw priority still wins.
 func EffectivePriority(basePriority, weight int) int {
 	if weight <= 0 {
 		return 0
 	}
 	return basePriority * weight / 255
+}
+
+// preemptEffectivePriority is the ordering electRG uses under preempt
+// while both weights are above zero (#16739). It returns the RAW base
+// priority: Junos "Interface failover occurs only when the redundancy
+// group's threshold reaches zero", so partial monitor debt (weight > 0)
+// must not demote a node whose configured priority still wins — a
+// Junos-sized config (e.g. two monitors of weight 128, priorities
+// 200/100) would otherwise fail over AND back on a single tolerated
+// link flap. Weight stays decisive exactly where it must:
+//
+//   - weight 0 is handled before the preempt arm (local weight 0 is
+//     always secondary; peer weight 0 hands us primary), so neither
+//     side reaches here at 0;
+//   - the #12164 dataplane-arm-debt yield and committed-pin release,
+//     which compare the SCALED EffectivePriority so a fresh node at
+//     the weight-1 arm floor (EffectivePriority truncates to 0 for
+//     small priorities) still loses to a healthy peer. That arm is
+//     non-preempt-only today, but the preempt pin-release conjunct
+//     shares the scaled comparison and must keep it.
+//
+// Both callers must therefore keep using EffectivePriority for the
+// arm-debt ordering and this helper only for the preempt comparison.
+func preemptEffectivePriority(basePriority, weight int) int {
+	if weight <= 0 {
+		return 0
+	}
+	return basePriority
 }
 
 // electionResult is the outcome of a per-RG election.
@@ -33,8 +69,9 @@ const (
 // elect performs election for a single RG considering peer state.
 // It implements the full Junos-style election logic:
 //   - If peer is lost, local becomes primary (if weight > 0)
-//   - If peer is alive, compare effective priorities
-//   - Preempt: higher effective priority wins immediately
+//   - If peer is alive, compare priorities
+//   - Preempt: higher RAW priority wins while weight > 0 (#16739);
+//     weight is decisive only at 0 and in the #12164 arm-debt rule
 //   - Non-preempt: incumbent stays, except a dataplane-unready data-RG
 //     incumbent (RG0 excluded) yields to a healthier peer
 //   - Split-brain (both primary): lower node ID wins
@@ -290,11 +327,55 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 		}
 	}
 
-	// Preempt enabled: higher effective priority wins.
-	// This takes priority over split-brain detection since preempt explicitly
-	// requests priority-based election.
+	// #12164 arm-debt exception under preempt: a primary whose dataplane
+	// is not ready (positive arm debt, weight at the floor) must yield
+	// to a verified healthier peer even though its RAW priority still
+	// wins — otherwise the #16739 raw-priority rule would let an
+	// unready node blackhole the RG it just claimed. This mirrors the
+	// non-preempt yield below (RG0 excluded, positive arm debt only,
+	// greater peer raw weight, peer wins the SCALED receiver ordering,
+	// live echo lease) and is the "keep weight decisive in the #12164
+	// arm-debt rule" half of #16739. Ordinary monitor debt (partial
+	// loss, weight > 1) does NOT fire here: that is exactly the Junos
+	// partial-loss case that must keep the incumbent.
+	if rg.Preempt && rg.State == StatePrimary && rg.GroupID != 0 &&
+		m.dataplaneArmDebtLocked(rg.GroupID) > 0 &&
+		(peerGroup.State == StatePrimary || peerGroup.State == StateSecondary) &&
+		peerWeight > localWeight &&
+		(peerEff > localEff || (peerEff == localEff && m.peerNodeID < m.nodeID)) &&
+		peerGroup.heartbeatEchoSession == m.LocalProcessToken() &&
+		peerGroup.heartbeatEchoSequence > 0 &&
+		time.Now().Before(peerGroup.heartbeatEchoLeaseUntil) {
+		return electLocalSecondary, "Local dataplane not ready; verified peer takes over"
+	}
+
+	// Symmetric takeover: the peer has yielded at the arm-debt floor
+	// (secondary at weight 1, observed primary earlier this session,
+	// live echo). Promote over it even though the peer's raw priority
+	// might still win on paper — it has told us it cannot serve. The
+	// readiness gate's peerYieldedOwnership arm uses the same shape.
+	// Without this the promotion depends solely on the peer node's own
+	// yield firing; a wedged peer would strand the RG.
+	if rg.Preempt && rg.GroupID != 0 && rg.State != StatePrimary &&
+		peerGroup.State == StateSecondary && peerGroup.Weight == 1 &&
+		peerGroup.peerWasPrimaryThisSession &&
+		peerGroup.heartbeatEchoSession == m.LocalProcessToken() &&
+		peerGroup.heartbeatEchoSequence > 0 &&
+		time.Now().Before(peerGroup.heartbeatEchoLeaseUntil) {
+		return electLocalPrimary, "Peer yielded at arm-debt floor; taking over"
+	}
+
+	// Preempt enabled: higher priority wins. While both weights are
+	// above zero the comparison is on RAW priority (#16739): Junos
+	// fails over only at threshold 0, so partial monitor debt must not
+	// move the RG. Weight 0 never reaches here (handled above), and
+	// the #12164 arm-debt ordering keeps the scaled values computed at
+	// the top of this function. This takes priority over split-brain
+	// detection since preempt explicitly requests priority election.
 	if rg.Preempt {
-		if localEff > peerEff {
+		localPreemptEff := preemptEffectivePriority(localPriority, localWeight)
+		peerPreemptEff := preemptEffectivePriority(peerPriority, peerWeight)
+		if localPreemptEff > peerPreemptEff {
 			if rg.State != StatePrimary {
 				return electLocalPrimary, "Preempt: higher priority"
 			}
@@ -305,7 +386,7 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 				// by the non-preempt dual-active path.
 				return electNoChange, "Dual-active: winner stays"
 			}
-		} else if localEff < peerEff {
+		} else if localPreemptEff < peerPreemptEff {
 			if rg.State != StateSecondary {
 				return electLocalSecondary, "Preempt: lower priority"
 			}

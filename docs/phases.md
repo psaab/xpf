@@ -756,16 +756,17 @@ Gap audit: `docs/archived/userspace-forwarding-and-failover-gap-audit.md` (PR #3
 - **Election integration:** `UpdateConfig()`, `recalcWeight()`, `ResetFailover()` all use `runElection()` when peer alive, `electSingleNode()` otherwise
 
 ## Sprint CC-4: Election Logic (pkg/cluster/election.go)
-- **`EffectivePriority(base, weight)`:** `base * weight / 255` — integer-scaled priority
+- **`EffectivePriority(base, weight)`:** `base * weight / 255` — integer-scaled priority. Orders the #12164 arm-debt yield / pin release and the unmanaged cold-start / split-brain arms.
+- **`preemptEffectivePriority(base, weight)` (#16739):** raw `base` while weight > 0 — the preempt ordering. Junos fails over only at threshold 0, so partial monitor debt must not move a preempt RG.
 - **`electRG(rg, peerGroup)`:** Full Junos-style election per redundancy group:
   - Peer lost + weight > 0 → primary; weight = 0 → always secondary
-  - Peer alive: compare effective priorities
-  - **Preempt mode:** Higher effective priority wins immediately
+  - Peer alive: compare priorities
+  - **Preempt mode:** Higher RAW priority wins while weight > 0 (#16739); weight decisive only at 0 and in the #12164 arm-debt yield (positive arm debt + scaled receiver ordering + live echo, RG0 excluded)
   - **Non-preempt mode:** Incumbent stays unless weight reaches 0. The narrow
     dataplane-arm exception (#12164) yields only to a greater-raw-weight peer
     that wins receiver effective-priority/node-ID ordering. RG0 is excluded.
   - **Split-brain:** Both primary → lower node ID wins
-  - **Tie-breaking:** Lower node ID wins on equal effective priority
+  - **Tie-breaking:** Lower node ID wins on equal priority
   - Skips disabled and manually failed-over groups
 - **`runElection()`:** Iterates all RGs, applies `electRG()`, emits state change events
 
