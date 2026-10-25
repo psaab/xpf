@@ -176,12 +176,18 @@ type rfc2136Updater struct {
 	// as rec.PairedClientID. Pairing candidate for the cross-family
 	// proof when SiblingClientID is empty (first pass).
 	pairedClientID string
-
-	// siblingMarkerRR is the DHCID-shaped proof marker published by a
-	// successful cross-family add under skip-existing/strict-fail
-	// (#14995), which otherwise write no DHCID. It lets the SIBLING
-	// family's later add prove co-ownership. nil when no marker has
-	// been written yet in this updater's lifetime.
+	// siblingMarkerRR is the DHCID-shaped proof marker whose last publish
+	// SUCCEEDED under skip-existing/strict-fail in THIS pass (#14995/#16597)
+	// at the current updater lifetime's active name and not yet observed to
+	// be withdrawn by a same-device last-family delete (which clears it so
+	// a later re-claim is not refused). The manager consults namedMarker
+	// (a snapshot of this value) to learn which marker, if any, a pass
+	// actually published, so marker cleanup is driven by ownership state
+	// rather than per-updater lifetime alone. Ghost (unprovoked) marker
+	// deletes are exact-match no-ops, so a delete attempted when no marker
+	// was published is harmless. Nil when no marker has been published in
+	// this updater's lifetime, after the last last-family withdraw cleared
+	// it, or after a name switch in UpsertLease.
 	siblingMarkerRR *dns.DHCID
 
 	// selfOwned marks a backend that publishes the FIREWALL'S OWN records
@@ -737,10 +743,36 @@ func (u *rfc2136Updater) siblingCandidate(rr dns.RR) bool {
 	return u.siblingProofIdentity() != ""
 }
 
+// namedMarker returns the retained proof marker for name, or nil
+// (#16597). The manager consults it after a pass to learn which
+// device marker (if any) was actually published under
+// skip-existing/strict-fail in that pass, so marker cleanup can be
+// driven by ownership state rather than per-updater lifetime alone.
+// UpsertLease resets the retained marker on a name switch so a
+// multi-name updater never leaks name A's proof into name B's
+// siblingDHCIDRR fallback or delete; a same-name different-device
+// delete still recomputes its marker value-specifically from the
+// deleting record's own identity.
+func (u *rfc2136Updater) namedMarker(name string) *dns.DHCID {
+	if u == nil || u.siblingMarkerRR == nil {
+		return nil
+	}
+	if dns.CanonicalName(u.siblingMarkerRR.Hdr.Name) != dns.CanonicalName(name) {
+		return nil
+	}
+	return dns.Copy(u.siblingMarkerRR).(*dns.DHCID)
+}
+
 // UpsertLease publishes the forward A/AAAA and reverse PTR for a lease
 // (plan §4.1). The forward add is the operation whose success governs the
 // lease's reconcile result; a PTR NOTAUTH/REFUSED is a counted skip.
 func (u *rfc2136Updater) UpsertLease(ctx context.Context, rec LeaseDNSRecord) error {
+	// #16597: a name switch in the updater's lifetime resets the
+	// retained marker so multi-name updater lifetimes never leak
+	// name A's proof into name B's siblingDHCIDRR fallback or delete.
+	if u.siblingMarkerRR != nil && dns.CanonicalName(u.siblingMarkerRR.Hdr.Name) != dns.CanonicalName(rec.FQDN) {
+		u.siblingMarkerRR = nil
+	}
 	u.dhcidClientID = rec.ClientID
 	u.selfOwnedPrevAddr = rec.PrevAddr // #3739: value-specific self-owned replace
 	u.selfOwnedPrevAddrs = rec.PrevAddrs
@@ -826,8 +858,10 @@ func (u *rfc2136Updater) DeleteLease(ctx context.Context, rec LeaseDNSRecord) er
 	// FQDN+ClientID (a dual-stack client's surviving family), so delete the
 	// forward A/AAAA but keep the shared DHCID — the surviving record stays
 	// DHCID-protected and its later delete still satisfies the DHCID-match
-	// prerequisite.
-	if err := u.sendRemoveForward(ctx, zone, forwardRR, rec.KeepForwardDHCID); err != nil {
+	// prerequisite. rec.KeepSiblingMarker (#16597) is the skip-existing/
+	// strict-fail analogue: keep the device proof marker while a same-device
+	// sibling survives; the last family's delete removes it value-specifically.
+	if err := u.sendRemoveForward(ctx, zone, forwardRR, rec.KeepForwardDHCID, rec.KeepSiblingMarker); err != nil {
 		return fmt.Errorf("ddns: forward delete %s %s: %w", rec.ForwardType, rec.FQDN, err)
 	}
 	if rec.PTRName != "" {
@@ -1178,23 +1212,30 @@ func (u *rfc2136Updater) sendAdd(ctx context.Context, zone string, rr dns.RR) er
 	}
 	switch resp.Rcode {
 	case dns.RcodeSuccess:
-		// #14995: under skip-existing/strict-fail the forward add
-		// wrote no DHCID, so a same-device sibling desired in this
-		// same pass has nothing on the wire to prove against.
+		// #14995/#16597: under skip-existing/strict-fail the forward
+		// add wrote no DHCID, so a same-device sibling desired in
+		// this same pass has nothing on the wire to prove against.
 		// Publish the device proof marker now — once, in this
 		// updater's lifetime — so the sibling family's add present
-		// in this same pass can prove it. The marker is a normal
-		// DHCID RR; a delete under these policies never replays a
-		// DHCID prerequisite, so it cannot poison a later delete.
+		// in this same pass can prove it. Only a SUCCESSFUL marker
+		// exchange is retained; on exchange error the forward add
+		// has already succeeded, so surface the error (the forward
+		// stays owned and the marker is re-attempted next cycle)
+		// rather than recording ownership of a marker never
+		// published. On last-family withdrawal the manager drives
+		// a value-specific delete of this marker when it is the
+		// last same-name family of that device (#16597), so the
+		// marker cannot burn the name after the owned A/AAAA are
+		// gone.
 		if u.siblingCandidate(rr) {
 			if sib, ok := u.siblingDHCIDRR(rr); ok && u.siblingMarkerRR == nil {
-				u.siblingMarkerRR = sib
 				mark := new(dns.Msg)
 				mark.SetUpdate(dns.Fqdn(zone))
 				mark.Insert([]dns.RR{sib})
 				if _, merr := u.exchange(ctx, mark); merr != nil {
 					return merr
 				}
+				u.siblingMarkerRR = sib
 			}
 		}
 		return nil
@@ -1231,6 +1272,15 @@ func (u *rfc2136Updater) dhcidForRR(rr dns.RR) (*dns.DHCID, bool) {
 		return nil, false
 	}
 	return dhcidRR(u.dhcidClientID, rr.Header().Name, rr.Header().Ttl)
+}
+
+// ownDHCIDRR returns the DHCID this updater's current client identity
+// would publish at rr's name — the device marker the skip-existing/
+// strict-fail marker cleanup deletes value-specifically (#16597).
+// Because the digest is device-canonicalized, either family's
+// publishing identity recomputes the same marker.
+func (u *rfc2136Updater) ownDHCIDRR(rr dns.RR) (*dns.DHCID, bool) {
+	return u.dhcidForRR(rr)
 }
 
 // sendAddOwned implements the replace-owned ownership-proving add via RFC 4703
@@ -1678,7 +1728,13 @@ func (u *rfc2136Updater) sendRemove(ctx context.Context, zone string, rr dns.RR)
 // the Remove section, so only the specific A/AAAA is removed. When this is the
 // LAST owned record under the name (keepDHCID=false) the DHCID is removed with
 // it (the pre-#2700 behaviour), so a fully-released name leaves no orphan DHCID.
-func (u *rfc2136Updater) sendRemoveForward(ctx context.Context, zone string, rr dns.RR, keepDHCID bool) error {
+// keepSiblingMarker (#16597): when OTHER same-device owned records
+// still share this FQDN, the device proof marker stays so the
+// surviving family's next-cycle add can prove its sibling on the
+// wire. When this is the last family (#16597 false), the marker is
+// removed value-specifically so the name is not burned for a later
+// single-family or foreign claim.
+func (u *rfc2136Updater) sendRemoveForward(ctx context.Context, zone string, rr dns.RR, keepDHCID bool, keepSiblingMarker ...bool) error {
 	// #14429/#14432: a garbage policy must not take any delete branch.
 	// Valid non-replace-owned policies keep the plain exact-RR delete;
 	// an invalid value (only reachable via a directly-built updater,
@@ -1687,7 +1743,34 @@ func (u *rfc2136Updater) sendRemoveForward(ctx context.Context, zone string, rr 
 		if u.conflictPolicy != "skip-existing" && u.conflictPolicy != "strict-fail" {
 			return fmt.Errorf("ddns: invalid conflict-policy %q (valid: replace-owned, skip-existing, strict-fail); refusing DELETE of %s", u.conflictPolicy, rr.Header().Name)
 		}
-		return u.sendRemove(ctx, zone, rr)
+		keep := len(keepSiblingMarker) > 0 && keepSiblingMarker[0]
+		if keep {
+			return u.sendRemove(ctx, zone, rr)
+		}
+		// #16597: withdraw the device proof marker with the last
+		// family. Two steps: first the device DHCID (a ghost when
+		// never published — an exact-match no-op), then the
+		// exact-RR forward delete. A preceding marker delete must
+		// not strand the forward RR when the caller already decided
+		// this is the last family (the forward tuple is already owned
+		// and proven by state, not by the marker which is never
+		// replayed as a prerequisite under these policies). A failed
+		// marker delete surfaces after the forward delete is still
+		// attempted so a transient marker error cannot wedge the
+		// forward delete forever; the marker retry is driven by the
+		// retained siblingMarkerRR on the next delete cycle.
+		var markErr error
+		if marker, ok := u.ownDHCIDRR(rr); ok {
+			markErr = u.sendRemove(ctx, zone, marker)
+			if markErr == nil && u.namedMarker(rr.Header().Name) != nil &&
+				dns.CanonicalName(u.siblingMarkerRR.Hdr.Name) == dns.CanonicalName(rr.Header().Name) {
+				u.siblingMarkerRR = nil
+			}
+		}
+		if err := u.sendRemove(ctx, zone, rr); err != nil {
+			return err
+		}
+		return markErr
 	}
 	dhcid, hasDHCID := u.dhcidForRR(rr)
 	if !hasDHCID {

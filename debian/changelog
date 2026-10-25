@@ -1,4 +1,20 @@
 xpf (0.0.0) unstable; urgency=medium
+  * DDNS/DHCP: the RFC 4701 device proof marker published under
+    skip-existing/strict-fail to let a same-device sibling prove
+    co-ownership (#14995) now has an owner and a delete path
+    (#16597). Previously it was tracked only in the per-cycle
+    updater and never withdrawn, so after a dual-stack lease under
+    those policies expired the lone DHCID permanently burned the
+    name: the same device returning single-family, or any later
+    client, was refused by the name-level guard against xpf's own
+    leftover and counted as a third-party conflict. The manager now
+    keeps the marker while a same-device sibling survives
+    (markerSharedWithSibling/KeepSiblingMarker) and the last
+    same-name family's delete withdraws it value-specifically
+    alongside the exact A/AAAA delete, so a fully released name
+    leaves no RR; deleting a marker that was never published is an
+    exact-match no-op and never removes a foreign DHCID.
+
   * GRE keepalive: a config apply during a peer outage no longer
     re-ups a keepalive-down tunnel (#16582). The dataplane zone
     compile (`mapZoneInterface`) was a second writer of the tunnel's

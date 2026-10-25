@@ -1224,6 +1224,37 @@ func (m *Manager) dhcidSharedWithOther(owned ownedRecord) bool {
 	return false
 }
 
+// markerSharedWithSibling reports whether another owned record
+// should keep the skip-existing/strict-fail device proof marker
+// alive when `owned` is withdrawn (#16597): a same-device record
+// (device digest matches — either family) at the same canonical
+// FQDN in the same scope-modulo-family. A foreign-device row at the
+// same name does NOT keep the marker (it never needed it and must
+// not burn the name). Caller holds m.mu.
+func (m *Manager) markerSharedWithSibling(owned ownedRecord) bool {
+	if owned.ClientID == "" {
+		return false
+	}
+	ownedKey := ownedRecordKey(owned.scopeOf(), owned.Identity, owned.Address)
+	ownedFQDN := dnsCanonicalFQDN(owned.FQDN)
+	ownedDigest := dhcidDigestClientID(owned.ClientID)
+	for k, r := range m.state.records {
+		if k == ownedKey || r.ClientID == "" {
+			continue
+		}
+		if dnsCanonicalFQDN(r.FQDN) != ownedFQDN {
+			continue
+		}
+		if r.scopeNonFamily() != owned.scopeNonFamily() {
+			continue
+		}
+		if dhcidDigestClientID(r.ClientID) == ownedDigest {
+			return true
+		}
+	}
+	return false
+}
+
 // crossTypeSiblingOwned returns the manager-owned opposite-family
 // record at owned's canonical FQDN that may act as a sibling for
 // owned's publish, or nil when there is none (#14604/#14602).
@@ -2100,16 +2131,20 @@ func (m *Manager) deleteOwnedLocked(ctx context.Context, updater DNSUpdater, own
 	// backend recomputes the same RFC 4701 DHCID — the delete prerequisite
 	// then proves xpf owns the record before removing it.
 	rec.ClientID = owned.ClientID
-	// #2700: if ANOTHER owned record still shares this record's FQDN + ClientID
-	// (a dual-stack client whose A and AAAA carry the SAME shared DHCID — the
-	// DHCID digest folds in client-identity||FQDN, NOT the address, so both
-	// families produce one DHCID), keep the shared DHCID on the wire so the
-	// surviving family's record stays DHCID-protected (RFC 4703) and its later
-	// delete still satisfies the DHCID-match prerequisite. Only when THIS is the
-	// last owned record under the name is the DHCID removed with it.
-	// #14189: keepDHCIDForMove extends the same keep to a same-pass MOVE whose
-	// replacement (in the desired set, not yet in the store) shares the DHCID.
+	// #2700/#16597 convention:
+	//   - KeepForwardDHCID (replace-owned) is keep-shared when another owned
+	//     record still hashes to the same wire DHCID at this name.
+	//   - KeepSiblingMarker (skip/strict) is keep-marker when another owned
+	//     record at this name is the same device (device digest matches)
+	//     AND shares the same scope-modulo-family — the marker's only
+	//     legitimate sibling scope. A foreign same-name row must NOT keep
+	//     our marker alive, or the name stays burned (#16597). The marker
+	//     delete itself is value-specific on the exact device DHCID, so a
+	//     foreign DHCID at the name is never removed; the residual risk of
+	//     identical-digest collision across scopes is zero (the digest binds
+	//     device identity + FQDN, and foreign identities cannot collide).
 	rec.KeepForwardDHCID = m.dhcidSharedWithOther(owned) || keepDHCIDForMove
+	rec.KeepSiblingMarker = m.markerSharedWithSibling(owned)
 	if err := m.providerIO(func() error { return updater.DeleteLease(ctx, rec) }); err != nil {
 		m.deleteFail.Add(1)
 		return err
