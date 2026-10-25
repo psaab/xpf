@@ -12,6 +12,13 @@ xpf (0.0.0) unstable; urgency=medium
     unattached named books are covered like every sibling pristine gate.
 
 xpf (0.0.0) unstable; urgency=medium
+  * Daemon/cluster: fab1 transport debt no longer churns session sync
+    every 30 s while fab1 is unaddressed (#16842). The #15687 debt rode
+    on BindingChanged, so the #11448 reassert tore down and rebuilt the
+    working single-fabric epoch indefinitely. The debt now travels on a
+    dedicated Fab1Debt transport-key field; comms restart exactly once
+    when fab1 actually resolves (via the next commit or the reassert
+    tick), and every other transport difference restarts as before.
   * Policy simulator: a `from-zone junos-host` match-policies / test-policy
     Locally-generated traffic egresses via the kernel TX path and is never
     evaluated by the security-policy RX gate (#3611/#4230), but the
