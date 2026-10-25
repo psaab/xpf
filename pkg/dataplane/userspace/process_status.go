@@ -518,6 +518,15 @@ func (m *Manager) statusLoop(ctx context.Context) {
 			haReplayAttemptedThisTick := false
 			var status ProcessStatus
 			pollProc, pollProcGen := m.proc, m.procGen
+			// #16653: snapshot the helper-status publication sequence
+			// before dropping m.mu. Any status applied while the poll RPC
+			// is off-lock (disarm, RG update, snapshot apply — all bump
+			// lastStatusSeq via setLastStatusLocked) makes this reply
+			// older than the cached truth; applying it would resurrect
+			// ctrl/bindings/ForwardingArmed over a newer disarm for up
+			// to one tick. The pager sibling (R3-B16-02) is already
+			// closed by #16518 SuppressStatus.
+			pollStatusSeq := m.lastStatusSeq
 			controlSocket, requestHook := m.cfg.ControlSocket, m.controlRequestHook
 			m.mu.Unlock()
 			var pollErr error
@@ -549,6 +558,19 @@ func (m *Manager) statusLoop(ctx context.Context) {
 			if m.linkCycleInFlight() {
 				m.mu.Unlock()
 				slog.Debug("userspace: status poll discarded; RETH MAC link cycle started during helper RPC")
+				continue
+			}
+			// #16653: a concurrent mutator applied a newer helper status
+			// while this poll was off-lock. Discard the older reply in
+			// the same shape as the link-cycle discard above: skip the
+			// whole tick body. Every serviced action is level-triggered
+			// on persistent state, so the next tick re-evaluates against
+			// the newer cached status; applying the stale reply first
+			// would only overwrite it (ctrl=1 / ForwardingArmed=true
+			// over a durable disarm) until that tick.
+			if m.lastStatusSeq != pollStatusSeq {
+				m.mu.Unlock()
+				slog.Debug("userspace: status poll discarded; newer helper status applied during helper RPC")
 				continue
 			}
 			if err := pollErr; err == nil {
