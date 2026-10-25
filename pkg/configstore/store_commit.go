@@ -449,6 +449,10 @@ func (s *Store) commitWithDescriptionLocked(description, principal string) (*con
 	})
 
 	s.saveRollbackFiles()
+	// #16492: this durable promotion supersedes a deferred api-auth
+	// migration; retire its staging record now that the sidecar binds the
+	// new active generation.
+	s.retireSupersededAPIAuthMigrationStaging()
 
 	// Auto-archive if configured (#3441 H4). Capture the JUST-COMMITTED
 	// text, directory, max, and a nanosecond-resolution timestamp INSIDE
@@ -877,6 +881,9 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 	runCommitConfirmedCrashHook(commitConfirmedStageJournal)
 
 	s.saveRollbackFiles()
+	// #16492: a durable confirmed promotion supersedes a deferred api-auth
+	// migration just like a plain commit does.
+	s.retireSupersededAPIAuthMigrationStaging()
 	runCommitConfirmedCrashHook(commitConfirmedStageHistory)
 
 	// Start auto-rollback with the deadline recorded after commit work. The
@@ -1485,6 +1492,9 @@ func (s *Store) PromoteRollback(gen uint64) (prevCfg *config.Config, ok bool) {
 		// rollback sidecar to it or the next restart tombstones the ladder.
 		// History itself is unchanged by the revert, so only metadata moves.
 		s.rebindRollbackMetadataLocked()
+		// #16492: the durable rollback target supersedes a deferred
+		// api-auth migration; retire its staging record.
+		s.retireSupersededAPIAuthMigrationStaging()
 		// #5835: removal is durable-or-retry — a failed DeleteConfirm retains
 		// retry debt + degraded health rather than being swallowed, so a crash
 		// before the retry heals cannot leave a stale record that re-reverts.
