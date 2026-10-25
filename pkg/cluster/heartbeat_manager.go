@@ -843,6 +843,7 @@ func (m *Manager) handlePeerHeartbeat(pkt *HeartbeatPacket) {
 			heartbeatEchoSequence:     peerEchoSequence,
 			heartbeatEchoLeaseUntil:   leaseUntil,
 			peerWasPrimaryThisSession: wasPrimary || NodeState(g.State) == StatePrimary,
+			takeoverReady:             int(g.Weight) > maxRedundancyGroupWeight-DataplaneArmMonitorCost,
 		}
 	}
 	// Apply pending transfer-commit overrides + expire transfer-grace

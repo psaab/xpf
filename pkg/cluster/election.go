@@ -410,6 +410,23 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 			}
 		}
 	}
+	// #16741: a preempt incumbent must not yield to a higher-priority
+	// peer that is still at the dataplane-arm floor. Every fresh HA RG
+	// starts SECONDARY at weight 1 until XDP is proven, so weight 1 is
+	// a peer that has not finished arming and cannot claim the RG is
+	// forwarding-ready; demoting to it leaves the RG owned by neither
+	// node. A weight-0 peer is this shape too (an unready node that had
+	// resigning monitor debt clamps at 0 the same way). The carve-out
+	// is deliberately narrow: the peer must not be PRIMARY (a live
+	// primary is a dual-active to resolve) and the local node must
+	// currently own the RG. When the peer arms it advertises its real
+	// weight again and ordinary preempt ordering resumes, so the
+	// higher-priority rejoiner still takes over — just without the
+	// ownerless window in between. This is also the shape
+	// peerYieldedOwnership already trusts for the reverse direction
+	// (#12164's arm-debt yield), so both sides agree on what weight 1
+	// means.
+	peerCannotTakeOver := peerGroup.State != StatePrimary && !peerGroup.takeoverReady
 
 	// #12164 arm-debt exception under preempt: a primary whose dataplane
 	// is not ready (positive arm debt, weight at the floor) must yield
@@ -456,6 +473,10 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 	// the #12164 arm-debt ordering keeps the scaled values computed at
 	// the top of this function. This takes priority over split-brain
 	// detection since preempt explicitly requests priority election.
+	// The lower-priority and tie-loss yield arms below are suppressed
+	// while peerCannotTakeOver and this node already owns the RG
+	// (#16741 above); a node that does not own the RG still
+	// yields/stands down exactly as before.
 	if rg.Preempt {
 		localPreemptEff := preemptEffectivePriority(localPriority, localWeight)
 		peerPreemptEff := preemptEffectivePriority(peerPriority, peerWeight)
@@ -471,6 +492,9 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 				return electNoChange, "Dual-active: winner stays"
 			}
 		} else if localPreemptEff < peerPreemptEff {
+			if rg.State == StatePrimary && peerCannotTakeOver {
+				return electNoChange, ""
+			}
 			if rg.State != StateSecondary {
 				return electLocalSecondary, "Preempt: lower priority"
 			}
@@ -484,6 +508,9 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 					return electNoChange, "Dual-active: winner stays"
 				}
 			} else if m.nodeID > m.peerNodeID {
+				if rg.State == StatePrimary && peerCannotTakeOver {
+					return electNoChange, ""
+				}
 				if rg.State != StateSecondary {
 					return electLocalSecondary, "Higher node ID loses tie"
 				}
@@ -1001,6 +1028,27 @@ func (m *Manager) dataplaneArmDebtLocked(rgID int) int {
 	return m.monitorWeights[monitorKey{rgID: rgID, iface: DataplaneArmMonitorIface}]
 }
 
+// SetStartupSyncHold installs or clears the #16741 startup-sync-hold
+// election debt on every RG. While held, the RG's weight sits at the
+// arm floor (weight 1): a preempt incumbent on the peer reads that shape
+// as "cannot take over" and keeps the RG, so the rejoiner's hold delays
+// its takeover without removing the current owner. Clearing the hold
+// restores the debt-derived weight and re-runs election, so a
+// higher-priority rejoiner takes over through ordinary preempt ordering.
+// The cost never reaches weight 0 (it composes with the arm debt at the
+// same floor), so a lone held node retains VIP ownership.
+func (m *Manager) SetStartupSyncHold(held bool) {
+	m.mu.RLock()
+	ids := make([]int, 0, len(m.groups))
+	for id := range m.groups {
+		ids = append(ids, id)
+	}
+	m.mu.RUnlock()
+	for _, id := range ids {
+		m.SetMonitorWeight(id, startupSyncHoldMonitorIface, held, startupSyncHoldMonitorCost)
+	}
+}
+
 // maxRedundancyGroupWeight is the full (no-debt) redundancy-group weight AND
 // the largest value the weight domain admits. It is both the Junos starting
 // weight and the ceiling of the single-byte heartbeat weight field
@@ -1031,6 +1079,19 @@ const DataplaneArmMonitorIface = "__dataplane-arm__"
 // [1,254]: that machinery already settled that "demoted" means the bottom of
 // the range, never out of it.
 const DataplaneArmMonitorCost = maxRedundancyGroupWeight - 1
+
+// startupSyncHoldMonitorIface is the election-debt key for the startup
+// session-sync hold (#16741). It carries the same floor-1 cost as the
+// dataplane-arm debt: they compose to weight 1 rather than stacking to
+// 0, so a held node with no peer still retains primary/VIP ownership,
+// and a held node's heartbeat advertises the arm floor — the shape a
+// preempt incumbent must not yield to.
+const startupSyncHoldMonitorIface = "__session-sync-startup-hold__"
+
+// startupSyncHoldMonitorCost is the election debt a startup sync hold
+// contributes while it is active. Same value as the arm cost by design:
+// both bottom out at weight 1 and neither may resign a standalone node.
+const startupSyncHoldMonitorCost = maxRedundancyGroupWeight - 1
 
 // HelperCrashLoopMonitorIface is the election-debt key for a userspace helper
 // that has exhausted its restart backoff. Unlike ordinary dataplane-arm debt,

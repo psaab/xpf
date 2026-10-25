@@ -67,6 +67,9 @@ func (d *Daemon) armNoRethSyncHold(timeout time.Duration) {
 	})
 	if d.cluster != nil {
 		d.cluster.SetStartupSyncHoldStatus("no-reth", true, "")
+		// #16741: hold the rejoiner at the arm floor on the wire so a
+		// preempt incumbent does not yield into an ownerless RG.
+		d.cluster.SetStartupSyncHold(true)
 	}
 	slog.Info("cluster: no-RETH startup promotion hold active", "timeout", timeout)
 }
@@ -93,6 +96,7 @@ func (d *Daemon) releaseNoRethSyncHold(reason string) {
 	d.noRethSyncHoldMu.Unlock()
 	if d.cluster != nil {
 		d.cluster.SetStartupSyncHoldStatus("no-reth", false, reason)
+		d.cluster.SetStartupSyncHold(false)
 	}
 	slog.Info("cluster: no-RETH startup promotion hold released", "reason", reason)
 	// Readiness is computed on a reconcile pass, so releasing the hold has to
