@@ -632,8 +632,11 @@ func (m *Manager) renderRedistOrComposedMap16868(po *config.PolicyOptionsConfig,
 	bodies := make([]string, len(chains))
 	totalSeqs := 0
 	for i, chain := range chains {
-		scratch := fmt.Sprintf("xpf-or-scratch-%d", i)
-		body := m.renderRedistComposedMapVariant16864(po, scratch, chain, proto, ctx, clusterMode)
+		// Render directly under the final map name: inline
+		// prefix-list identities derive from it through the
+		// bounded naming path, and operator operands (even one
+		// named like a scratch map) pass through untouched.
+		body := m.renderRedistComposedMapVariant16864(po, name, chain, proto, ctx, clusterMode)
 		bodies[i] = body
 		for _, ln := range strings.Split(body, "\n") {
 			if strings.HasPrefix(ln, "route-map ") {
@@ -652,10 +655,10 @@ func (m *Manager) renderRedistOrComposedMap16868(po *config.PolicyOptionsConfig,
 	if clusterStatic {
 		out.WriteString(clusterTagDeny15158(name))
 	}
-	// Definitions first, renamed onto the real map name, deduped.
+	// Definitions first (bodies already render under the final
+	// map name, so inline identities are final), deduped.
 	seenDef := make(map[string]bool)
-	for ci, body := range bodies {
-		scratch := fmt.Sprintf("xpf-or-scratch-%d", ci)
+	for _, body := range bodies {
 		for _, ln := range strings.Split(body, "\n") {
 			if strings.HasPrefix(ln, "route-map ") {
 				break
@@ -663,7 +666,7 @@ func (m *Manager) renderRedistOrComposedMap16868(po *config.PolicyOptionsConfig,
 			if strings.TrimSpace(ln) == "" || ln == "!" {
 				continue
 			}
-			renamed := strings.ReplaceAll(ln, frrName(scratch), frrName(name))
+			renamed := ln
 			if !seenDef[renamed] {
 				seenDef[renamed] = true
 				out.WriteString(renamed)
@@ -696,7 +699,6 @@ func (m *Manager) renderRedistOrComposedMap16868(po *config.PolicyOptionsConfig,
 	base := 0
 	for ci := range chains {
 		scratchBody := bodies[ci]
-		scratch := fmt.Sprintf("xpf-or-scratch-%d", ci)
 		last := ci == len(chains)-1
 		lines := strings.Split(scratchBody, "\n")
 		spans := parseSpans(lines)
@@ -716,12 +718,18 @@ func (m *Manager) renderRedistOrComposedMap16868(po *config.PolicyOptionsConfig,
 			continue
 		}
 		chainBase := base
-		nextBase := chainBase + kept[len(kept)-1].seq + 10
+		// nextBase is computed after kept+helper layout below.
 		finalDemoted := false
-		for si, sp := range kept {
-			newSeq := chainBase + sp.seq
+		type outSeq struct {
+			verb    string
+			seq     int
+			clauses []string
+			demote  bool
+			bare    bool
+		}
+		var seqs []outSeq
+		for _, sp := range kept {
 			bodyLines := lines[sp.start+1 : sp.end]
-			// Classify the sequence body (excluding trailing "exit"/"!").
 			var clauses []string
 			for _, bl := range bodyLines {
 				t := strings.TrimSpace(bl)
@@ -732,61 +740,66 @@ func (m *Manager) renderRedistOrComposedMap16868(po *config.PolicyOptionsConfig,
 			}
 			hasMatch := false
 			for _, c := range clauses {
-				if strings.HasPrefix(strings.TrimSpace(c), "match ") {
+				ct := strings.TrimSpace(c)
+				if strings.HasPrefix(ct, "match ") {
 					hasMatch = true
 				}
 			}
-			// Demotion (see the function comment): a deny in a
-			// non-final chain becomes permit+match+goto-next-chain
-			// (match clauses kept verbatim; a bare deny legitimately
-			// becomes a match-all jump because every route reaching
-			// it matched it). In the final chain only conditional
-			// denies demote, onto the trailing deny appended below;
-			// a bare final deny is the map's verdict and stays.
-			// Set/call clauses are stripped from every emitted
-			// sequence: origination acceptance is match-only, and
-			// per-peer route-map out re-applies each peer's sets.
 			demote := sp.verb == "deny" && (!last || hasMatch)
-			if demote {
+			seqs = append(seqs, outSeq{verb: sp.verb, seq: sp.seq, clauses: clauses, demote: demote, bare: !hasMatch})
+		}
+		nextBase := chainBase + kept[len(kept)-1].seq + 10
+		for si, sq := range seqs {
+			newSeq := chainBase + sq.seq
+			isLastKept := si == len(seqs)-1
+			_ = isLastKept
+			if sq.demote {
 				if last {
 					finalDemoted = true
 				}
 				fmt.Fprintf(&out, "route-map %s permit %d\n", frrName(name), newSeq)
-				for _, c := range clauses {
+				for _, c := range sq.clauses {
 					ct := strings.TrimSpace(c)
 					if strings.HasPrefix(ct, "set ") || strings.HasPrefix(ct, "on-match ") || strings.HasPrefix(ct, "call ") {
 						continue
 					}
-					out.WriteString(strings.ReplaceAll(c, frrName(scratch), frrName(name)))
+					out.WriteString(c)
 					out.WriteString("\n")
 				}
 				fmt.Fprintf(&out, " on-match goto %d\n", nextBase)
 				out.WriteString("exit\n")
 				continue
 			}
-			fmt.Fprintf(&out, "route-map %s %s %d\n", frrName(name), sp.verb, newSeq)
-			for _, c := range clauses {
+			fmt.Fprintf(&out, "route-map %s %s %d\n", frrName(name), sq.verb, newSeq)
+			for _, c := range sq.clauses {
 				ct := strings.TrimSpace(c)
-				if strings.HasPrefix(ct, "set ") || strings.HasPrefix(ct, "call ") {
+				if strings.HasPrefix(ct, "call ") {
 					continue
 				}
 				rewritten := relocateContinuation16868(c, chainBase, newSeq, kept, si, nextBase, last)
-				out.WriteString(strings.ReplaceAll(rewritten, frrName(scratch), frrName(name)))
+				out.WriteString(rewritten)
 				out.WriteString("\n")
 			}
 			out.WriteString("exit\n")
+			// Sets are preserved verbatim: later terms of the
+			// same chain must observe them (finding-1 contract).
+			// Cross-chain isolation is provided by FRR's
+			// route_map_apply passing the SAME path object only
+			// within one application — see the snapshot analysis
+			// in the redesign note: mutations are per-application,
+			// and redistribution is re-applied per redistribute
+			// line, so a rejected chain's mutations never persist
+			// into the next chain's SEPARATE application. Within
+			// this single OR map, the spill exists in FRR's model
+			// (finding 5); it is mitigated, not eliminated, by the
+			// match-only demotion of rejects: a rejected route's
+			// mutations ride only into chains that then ACCEPT it
+			// through predicates that authored those attributes as
+			// inputs, and per-peer route-map out re-applies.
 		}
-		if last {
-			// If the final chain had a conditional deny demoted,
-			// its goto target (nextBase) needs a real sequence:
-			// the trailing deny every redist map ends with. When
-			// the final chain kept a bare terminal deny instead,
-			// nextBase was never a goto target and no extra
-			// sequence is emitted (the kept deny already ends it).
-			if finalDemoted {
-				fmt.Fprintf(&out, "route-map %s deny %d\n", frrName(name), nextBase) // trailing verdict for demoted final-chain rejects
-				out.WriteString("exit\n")
-			}
+		if last && finalDemoted {
+			fmt.Fprintf(&out, "route-map %s deny %d\n", frrName(name), nextBase)
+			out.WriteString("exit\n")
 		}
 		base = nextBase - 10
 	}
@@ -1423,7 +1436,7 @@ func redistOrRouteMapName16868(bgp *config.BGPConfig, po *config.PolicyOptionsCo
 	for _, chain := range chains {
 		parts = append(parts, strings.Join(chain, "-"))
 	}
-	return strings.Join(parts, "-") + "-xpf-or" + ReservedChainSuffix + "-" + normalizedRedistProtocol(proto) + config.ReservedRedistSuffix
+	return strings.Join(parts, "-xpf-bnd-") + "-xpf-or" + ReservedChainSuffix + "-" + normalizedRedistProtocol(proto) + config.ReservedRedistSuffix
 }
 
 func (m *Manager) bgpPolicyRedistEntriesAt14586(policies []string, po *config.PolicyOptionsConfig, self, node string) []redistEntry {
