@@ -52,6 +52,16 @@ xpf (0.0.0) unstable; urgency=medium
     on a storage fault. The writer now returns the write error and
     setupBootstrapLifeline refuses before the .link write, the rename
     and the reload, exactly as for an observation failure.
+  * Sessions/HA display: unresolvable session HA ownership now renders
+    "unknown" on every surface (#16697). Previously `sessionHAActive`
+    returned known=false but GetSessions stamped `HaActive=false` on a
+    plain bool wire field, so the remote CLI and the console peer block
+    guessed "Backup" (on a no-RETH cluster, for every session) while
+    local rows said "unknown". Added additive tri-state `ha_state`
+    ("Active"/"Backup"/"unknown") to gRPC SessionEntry (field 31) and
+    REST SessionEntry, stamped at all four gRPC sites and in REST;
+    renderers prefer it and treat empty (pre-#16697 peer) as unknown.
+    Active/Backup rows unchanged.
   * Daemon/bootstrap: the #9615 refused-target bootstrap safe state
     now has a commit exit (#16665). Previously bootstrap refused
     plain `commit` and the #6707 gate refused `commit confirmed`

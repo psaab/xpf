@@ -423,6 +423,11 @@ type SessionEntry struct {
 	// (#3419 M6). HAActive defaults true on a standalone firewall.
 	SessionID uint64 `json:"session_id,omitempty"`
 	HAActive  bool   `json:"ha_active"`
+	// HAState is the tri-state HA ownership (#16697): "Active", "Backup",
+	// or "unknown" when ownership is unresolvable. Empty only for a peer
+	// view served by a pre-#16697 node. ha_active is meaningful only when
+	// HAState is "Active"/"Backup".
+	HAState string `json:"ha_state,omitempty"`
 	// Origin is the row's stored provenance (#16110): "local" or
 	// "cluster-synced". Empty only for a peer view served by a
 	// pre-#16110 node.
