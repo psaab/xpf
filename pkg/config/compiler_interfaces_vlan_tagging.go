@@ -9,7 +9,7 @@ import (
 
 // compiler_interfaces_vlan_tagging.go carries the #14574 vlan-id-without-
 // tagging gate and its #15034 sibling: a non-zero unit with no VLAN tag
-// on an untagged parent.
+// (extended by #16583 to tagging parents as well).
 //
 // Background: a unit carrying `vlan-id N` (N > 0) asks for an 802.1Q
 // sub-interface `<parent>.N`. That device only exists when the parent
@@ -41,27 +41,36 @@ import (
 // without tagging, as does `vlan-tags outer 0`.
 //
 // #15034 (residual of #14574, whose predicate keyed on a positive tag
-// only): a unit with NUMBER > 0, no positive tag and a parent without
-// tagging is the mirror-image split. ResolveKernelIfName and
-// snapshotLinuxName derive `kernelBase.<unit.Number>` for it — a
-// device nothing creates — while buildInterfaceNetworkdModels folds
-// every unit's addresses onto the untagged parent. The address lands
-// on the parent (unit 0's zone) while the unit's own zone and input
-// filter bind to the never-created `.<unit>` device, so the filter is
-// never installed. Junos rejects a non-zero untagged unit on an
-// untagged parent for the same reason; the gate below strict-rejects
-// it (lenient warns, #1960). Exemptions are exactly the shapes whose
-// device is created by another owner: a unit or interface `tunnel`
-// stanza (per-unit tunnel device, or the interface tunnel / WireGuard
-// device the unit shares), a secure-tunnel name (`st<N>`, whose unit
-// device is the xfrmi), a loopback name (`lo<N>`, Junos multi-unit
-// loopback), and `irb` (bridge-domain routing-interface). A `reth<N>`
-// unit is NOT exempt: it resolves onto the member's `.<unit>` device,
-// which only tagging creates, so an untagged non-zero reth unit splits
-// the same way.
+// only): a unit with NUMBER > 0 and no positive tag is the mirror-image
+// split. ResolveKernelIfName and snapshotLinuxName derive
+// `kernelBase.<unit.Number>` for it — a device nothing creates — while
+// buildInterfaceNetworkdModels / planPhysDesired fold every vlanID==0
+// unit's addresses onto the parent. The address lands on the parent
+// (unit 0's zone) while the unit's own zone and input filter bind to
+// the never-created `.<unit>` device, so the filter is never installed.
+// Junos rejects a non-zero untagged unit for the same reason; the gate
+// below strict-rejects it (lenient warns, #1960). Exemptions are exactly
+// the shapes whose device is created by another owner: a unit or
+// interface `tunnel` stanza (per-unit tunnel device, or the interface
+// tunnel / WireGuard device the unit shares), a secure-tunnel name
+// (`st<N>`, whose unit device is the xfrmi), a loopback name (`lo<N>`,
+// Junos multi-unit loopback), and `irb` (bridge-domain
+// routing-interface). A `reth<N>` unit is NOT exempt: it resolves onto
+// the member's `.<unit>` device, which only tagging creates, so an
+// untagged non-zero reth unit splits the same way.
+//
+// #16583 (residual of #15034): the original arm skipped tagging parents
+// outright (`ifaceTaggingEnabled` short-circuit), so the same shape on
+// a `vlan-tagging` / `flexible-vlan-tagging` parent also committed
+// clean. Tagging does not rescue it: a VLAN child is created only for
+// vlanID > 0, so the untagged non-zero unit still derives
+// `parent.<unit>`, nothing creates that device, its addresses still fold
+// onto the parent, and its zone/filter still bind to the phantom
+// device. The #15034 arm therefore applies regardless of parent
+// tagging mode; only the #14574 arm (positive tag) keys on tagging.
 // vlanIDTaggingFinding records one (interface, unit) that carries a
 // positive VLAN tag while its parent enables neither tagging mode, or
-// (#15034) a non-zero unit number with no positive tag on such a
+// (#15034/#16583) a non-zero unit number with no positive tag on any
 // parent. Exactly one of stmts / untaggedUnit is set.
 type vlanIDTaggingFinding struct {
 	iface        string
@@ -73,14 +82,13 @@ type vlanIDTaggingFinding struct {
 
 func (f vlanIDTaggingFinding) message() string {
 	if f.untaggedUnit {
-		return fmt.Sprintf("interfaces %s unit %s: non-zero unit without `vlan-id` on an untagged interface — "+
-			"unit %s carries no positive vlan-id/vlan-tags tag and interface %s enables neither "+
-			"`vlan-tagging` nor `flexible-vlan-tagging`, so the networkd writer would place the unit's "+
-			"addresses on the untagged parent %s while the zone/dataplane writers bind the unit's zone "+
+		return fmt.Sprintf("interfaces %s unit %s: non-zero unit without `vlan-id` — "+
+			"unit %s carries no positive vlan-id/vlan-tags tag, so the networkd writer would place the unit's "+
+			"addresses on the parent %s while the zone/dataplane writers bind the unit's zone "+
 			"and filters to %s, a device nothing creates: the unit's filter is never installed and its "+
-			"subnet is attributed to the parent unit's zone. Add `vlan-tagging` with a `vlan-id` to "+
+			"subnet is attributed to the parent unit's zone. Add a `vlan-id` to "+
 			"unit %s, renumber it to unit 0, or remove the unit (#15034)",
-			f.iface, f.unit, f.unit, f.iface, f.iface, f.dev, f.unit)
+			f.iface, f.unit, f.unit, f.iface, f.dev, f.unit)
 	}
 	return fmt.Sprintf("interfaces %s unit %s: `vlan-id` without `vlan-tagging` — unit carries `%s` "+
 		"but interface %s enables neither `vlan-tagging` nor `flexible-vlan-tagging`; "+
@@ -192,13 +200,15 @@ func authoredVlanDevice(ifName string, unit *Node) string {
 	return ""
 }
 
-// untaggedNonzeroUnit15034 reports whether a unit on an untagged parent
-// is the #15034 shape: unit number > 0, no positive tag (the caller has
-// already established that), and no other device owner. The tunnel test
-// is AST-level (a `tunnel` child on the unit or its parent), mirroring
-// how compileInterfaces creates unit.Tunnel / shares the interface
-// tunnel device; the name tests reuse the canonical class predicates
-// so a name no resolver treats as tunnel/loopback is not exempted.
+// untaggedNonzeroUnit15034 reports whether a unit is the #15034 shape:
+// unit number > 0, no positive tag (the caller has already established
+// that), and no other device owner. Parent tagging mode is irrelevant
+// (#16583): a VLAN child exists only for a positive tag. The tunnel
+// test is AST-level (a `tunnel` child on the unit or its parent),
+// mirroring how compileInterfaces creates unit.Tunnel / shares the
+// interface tunnel device; the name tests reuse the canonical class
+// predicates so a name no resolver treats as tunnel/loopback is not
+// exempted.
 func untaggedNonzeroUnit15034(ifName string, iface, unit *Node, unitName string) bool {
 	n, err := strconv.Atoi(unitName)
 	if err != nil || n <= 0 {
@@ -222,9 +232,10 @@ func collectVlanIDTaggingFromInterfacesNode(ifacesNode *Node, out map[string]vla
 	}
 	for _, iface := range ifacesNode.Children {
 		ifName := iface.Name()
-		if ifName == "" || ifaceTaggingEnabled(iface) {
+		if ifName == "" {
 			continue
 		}
+		tagging := ifaceTaggingEnabled(iface)
 		// A declared dotted name (`p.0`, `ge-0/0/5.0`) is an authored
 		// interface in its own right (#8994/#9821), not a physical
 		// parent: its units' vlan devices derive from the dotted base
@@ -238,10 +249,12 @@ func collectVlanIDTaggingFromInterfacesNode(ifacesNode *Node, out map[string]vla
 			stmts := positiveTagStmts(unitInst.node)
 			key := ifName + "\x00" + unitInst.name
 			if len(stmts) == 0 {
-				// #15034: no positive tag — a non-zero unit number on
-				// this untagged parent derives a `.<unit>` device
-				// nothing creates. A unit already reported under a
-				// tag finding (other node view) keeps that finding.
+				// #15034/#16583: no positive tag — a non-zero unit
+				// number derives a `.<unit>` device nothing creates,
+				// on a tagging parent as well as an untagged one (a
+				// VLAN child exists only for vlanID > 0). A unit
+				// already reported under a tag finding (other node
+				// view) keeps that finding.
 				if _, seen := out[key]; seen {
 					continue
 				}
@@ -252,6 +265,11 @@ func collectVlanIDTaggingFromInterfacesNode(ifacesNode *Node, out map[string]vla
 					iface: ifName, unit: unitInst.name, untaggedUnit: true,
 					dev: fmt.Sprintf("%s.%s", LinuxIfName(ifName), unitInst.name),
 				}
+				continue
+			}
+			if tagging {
+				// #14574: a positive tag is only a defect without
+				// tagging; with tagging the tagged child is real.
 				continue
 			}
 			// Authored device the dataplane writer creates: the
@@ -287,8 +305,8 @@ func collectVlanIDTaggingFindingsForNode(tree *ConfigTree, nodeID int, out map[s
 	return true
 }
 
-// validateVlanIDTaggingAST is the #14574 gate, extended by #15034 to
-// the untagged non-zero unit. See file header.
+// validateVlanIDTaggingAST is the #14574 gate, extended by #15034 and
+// #16583 to the untagged non-zero unit on any parent. See file header.
 func validateVlanIDTaggingAST(tree *ConfigTree, lenient bool) ([]string, error) {
 	findings := make(map[string]vlanIDTaggingFinding)
 	expandedAny := collectVlanIDTaggingFindingsForNode(tree, 0, findings)
