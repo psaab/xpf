@@ -30,6 +30,13 @@ func ospfAreaIdentity11400(id string) string {
 	return "raw:" + id
 }
 
+// OSPFAreaIdentity16631 is the exported spelling-normalized area
+// identity (#11400) for cross-package render/filter consumers
+// (#16631). It is exactly ospfAreaIdentity11400.
+func OSPFAreaIdentity16631(id string) string {
+	return ospfAreaIdentity11400(id)
+}
+
 // validateOSPFAreaInterfaceReuse11400 rejects a resolved Linux interface that
 // belongs to multiple OSPF areas within one routing domain. FRR stores a single
 // area activation per interface, so multiple area commands silently overwrite
