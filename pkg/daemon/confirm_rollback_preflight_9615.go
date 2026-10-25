@@ -200,10 +200,16 @@ func (d *Daemon) confirmRollbackTargetHandledAtFire(gen uint64) bool {
 		// Superseded between the check and the promotion; nothing to do.
 		return true
 	}
+	// #16665: record the provenance so the commit gates can distinguish
+	// this already-committed safe state (plain commit allowed; #6707
+	// gate skipped) from a generic first-takeover bootstrap.
+	// enterBootstrapModeWithLifeline clears the flag on generic entry,
+	// so this branch re-sets it after enterBootstrapMode below.
 	slog.Error("commit confirmed timed out and its rollback target is refused by the dataplane; "+
 		"NOT applying it. The configuration store is reverted to the target and persisted as "+
 		"committed, and the daemon enters the bootstrap/lifeline safe state; fix the "+
-		"configuration from the CLI", "err", rerr, "issue", "#9615")
+		"configuration from the CLI with a plain `commit` of a corrected candidate "+
+		"(or `commit confirmed`; its rollback target is this same safe state)", "err", rerr, "issue", "#9615")
 	// #15056: re-sync the promoted target to the peer BEFORE the bootstrap
 	// entry below relinquishes the cluster. Capture the peer-snapshot
 	// authorization first — the same fresh token the ordinary #3868 re-sync
@@ -225,6 +231,10 @@ func (d *Daemon) confirmRollbackTargetHandledAtFire(gen uint64) bool {
 		slog.Error("commit-confirmed rollback to the bootstrap safe state is DEGRADED: teardown "+
 			"did not fully converge", "err", err, "issue", "#9615")
 	}
+	// Set after enterBootstrapMode (which clears it for generic entry);
+	// stays set even on degraded teardown — the box is still in the
+	// refused-target safe state and still needs the commit exit.
+	d.bootstrapFromRefusedRollback.Store(true)
 	d.reconcileManagementAfterPromotion(d.store.ActiveConfig(),
 		"commit confirmed timeout: rollback target refused by the dataplane")
 	return true

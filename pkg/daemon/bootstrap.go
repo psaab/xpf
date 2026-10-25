@@ -410,6 +410,7 @@ func (d *Daemon) inBootstrap() bool {
 // running the full normal reconcile (rename, networkd, dataplane, FRR) after
 // this returns; exitBootstrapMode only flips the flag.
 func (d *Daemon) exitBootstrapMode(reason string) {
+	d.bootstrapFromRefusedRollback.Store(false)
 	if d.bootstrapMode.CompareAndSwap(true, false) {
 		slog.Info("exiting bootstrap mode; full interface/dataplane takeover will proceed",
 			"reason", reason)
@@ -447,6 +448,11 @@ func (d *Daemon) enterBootstrapMode() error {
 }
 
 func (d *Daemon) enterBootstrapModeWithLifeline(restoreLifeline bool) error {
+	// #16665: a generic bootstrap entry (first-commit rollback, nil
+	// target) is not the refused-target provenance. The #9615 branch
+	// re-sets the flag after this returns; clearing here prevents a
+	// stale refused provenance from surviving a later generic entry.
+	d.bootstrapFromRefusedRollback.Store(false)
 	d.bootstrapMode.Store(true)
 
 	// #15054: discharge any config-apply debt. A failed auto-rollback or

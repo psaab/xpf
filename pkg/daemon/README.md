@@ -339,6 +339,23 @@ always stays armed and the check runs twice:
     standby holding the abandoned unconfirmed config as its permanent active.
   - An appliable target rolls back and applies exactly as before.
 
+- **Commit exit from that safe state (#16665).** The refused branch
+  records `bootstrapFromRefusedRollback` (set after `enterBootstrapMode`,
+  which clears it on generic entry; cleared on bootstrap exit). In
+  that provenance `commitAndApply` does not apply the generic
+  bootstrap plain-commit refusal — the refused target is already the
+  persisted committed active config, so a plain `commit` of a
+  corrected candidate is a correction to a committed box, not a
+  #1922 first takeover — and `commitConfirmedAndApply` skips the
+  #6707 rollback-target gate, whose target is that same refused
+  active config (a timeout returns to the same safe state, re-checked
+  at fire by this section's fire path). Generic bootstrap (factory,
+  fail-closed, first-commit rollback) is unchanged: plain commit is
+  still refused and `commit confirmed` is still gated. Regression
+  coverage: `confirm_rollback_bootstrap_exit_16665_test.go` (plain
+  and confirmed exits after the refused fire, the generic-bootstrap
+  control, and the healthy-window control).
+
 ### The recovered commit-confirmed rollback fires against a HALF-BUILT daemon (#6739)
 
 `Store.Load` restores a still-live `commit confirmed` window by re-arming
