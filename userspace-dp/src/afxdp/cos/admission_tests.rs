@@ -1765,6 +1765,60 @@ fn shared_exact_buffer_limit_restores_prospective_flow_headroom() {
     );
 }
 
+/// #16536: the shared_exact per-flow cap must scale with active_shards.
+/// Acceptance cell from the issue: 10 Gb/s, buffer 12.5 MB, 6 shards,
+/// 8 local flows -> cap <= buffer_limit / 2. Pre-fix the BDP floor
+/// used the class-wide rate over the worker-local count, yielding
+/// 75% of the worker budget; post-fix it uses the per-worker rate
+/// share (rate / 6) and yields 25%.
+#[test]
+fn shared_exact_per_flow_cap_scales_with_active_shards() {
+    let mut root = test_cos_runtime_with_queues(
+        25_000_000_000 / 8,
+        vec![CoSQueueConfig {
+            queue_id: 5,
+            forwarding_class: "iperf-b".into(),
+            priority: 5,
+            transmit_rate_bytes: 10_000_000_000 / 8,
+            guarantee_enabled: true,
+            exact: true,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            equal_flow_target_policy: EqualFlowTargetPolicy::Slowest,
+            surplus_weight: 1,
+            buffer_bytes: 12_500_000,
+            dscp_rewrite: None,
+            codel_target_ns: 0,
+        }],
+    );
+    let queue = &mut root.queues[0];
+    enable_test_flow_fair(queue);
+    queue.config.shared_exact = true;
+    test_flow_fair_state_mut(queue).active_flow_buckets = 8;
+    for bucket in 0..8 {
+        test_flow_fair_state_mut(queue).flow_bucket_bytes[bucket] = 1_000;
+    }
+    let active_shards = 6usize;
+    let buffer_limit = cos_shared_exact_buffer_limit(queue, 0, active_shards);
+    let share =
+        cos_queue_flow_share_limit_with_active_shards(queue, buffer_limit, 0, active_shards);
+    assert!(
+        share <= buffer_limit / 2,
+        "#16536: per-flow cap ({share}) must be <= buffer_limit/2 ({}) \
+         at 10G/6 shards/8 local flows (buffer_limit={buffer_limit})",
+        buffer_limit / 2
+    );
+    // Single-shard control stays unchanged: with 1 shard the cap is
+    // bit-identical to the legacy class-wide-rate formula.
+    let buffer_limit_1 = cos_shared_exact_buffer_limit(queue, 0, 1);
+    let share_1 = cos_queue_flow_share_limit_with_active_shards(queue, buffer_limit_1, 0, 1);
+    assert_eq!(
+        share_1,
+        cos_queue_flow_share_limit(queue, buffer_limit_1, 0),
+        "single-shard cap must match the legacy entry point"
+    );
+}
+
 proptest::proptest! {
     /// If integer division already gives each worker a full-frame share, its
     /// summed base stays within the configured value. When it does not, the

@@ -204,6 +204,16 @@ pub(in crate::afxdp) fn cos_queue_flow_share_limit(
     buffer_limit: u64,
     flow_bucket: usize,
 ) -> u64 {
+    cos_queue_flow_share_limit_with_active_shards(queue, buffer_limit, flow_bucket, 1)
+}
+
+#[inline]
+pub(in crate::afxdp) fn cos_queue_flow_share_limit_with_active_shards(
+    queue: &CoSQueueRuntime,
+    buffer_limit: u64,
+    flow_bucket: usize,
+    active_shards: usize,
+) -> u64 {
     #[cfg(test)]
     FLOW_SHARE_LIMIT_CALLS.with(|calls| calls.set(calls.get() + 1));
     if !queue.flow_fair() {
@@ -248,7 +258,17 @@ pub(in crate::afxdp) fn cos_queue_flow_share_limit(
         // boundary-condition tail-drops. The legacy path picked
         // div_ceil for that reason; shared_exact should follow.
         let fair_share = flow_share_div_ceil(buffer_limit, prospective);
-        let bdp = bdp_floor_bytes(queue.transmit_rate_bytes(), prospective);
+        // #16536: buffer_limit is already this worker's shard partition
+        // (#11768: configured base / active_shards), while `prospective`
+        // counts only this worker's local flows. The BDP floor must
+        // therefore use the per-worker rate share, not the class-wide
+        // rate, or one local elephant can hold 75-100% of the worker
+        // budget at low-to-moderate local flow counts. Dividing the
+        // rate by active_shards restores the #914 mouse protection
+        // consistently with the partitioned buffer. Single-shard
+        // callers (active_shards == 1) are bit-identical to before.
+        let per_worker_rate = queue.transmit_rate_bytes() / (active_shards.max(1) as u64);
+        let bdp = bdp_floor_bytes(per_worker_rate, prospective);
         return clamp_flow_share_to_buffer(
             fair_share
                 .saturating_mul(SHARED_EXACT_BURST_HEADROOM)

@@ -297,7 +297,7 @@ mod.rs for further file-level breakdown.
   mirror the runtime `refresh_cos_interface_activity` R-5(a) path.)
   `release_unused_v8` reduces to the legacy `release_unused` for a legacy
   (v8=None) lease.
-- **Queue-wide shared_exact admission limits (#11768).** The effective
+- **Queue-wide shared_exact admission limits (#11768, #16536).** The effective
   configured base is divided by active shards, with a one-frame minimum per
   worker so even very high shard counts can admit. Flow-fair shared_exact
   queues then apply the #707 prospective-flow expansion and #717 per-worker
@@ -307,7 +307,13 @@ mod.rs for further file-level breakdown.
   base. Shard-count churn can leave resident `queued_bytes` above a newly
   lowered sum of limits until workers drain; this is a limit bound, not a
   strict instantaneous queued-byte invariant. Owner-local queues keep their
-  existing flow-aware admission limit.
+  existing flow-aware admission limit. The #914 per-flow BDP floor inside
+  `cos_queue_flow_share_limit_with_active_shards` uses the per-worker rate
+  share (`transmit_rate_bytes / active_shards`) over the worker-local
+  prospective flow count, consistently with the partitioned buffer —
+  using the class-wide rate there let one local elephant hold 75-100%
+  of a worker's budget at low-to-moderate local flow counts (#16536).
+  Single-shard callers are bit-identical to the pre-#16536 formula.
 - `COS_MIN_BURST_BYTES` (64 × MTU) is canonically owned by
   `token_bucket.rs`; siblings import it via the `cos/mod.rs`
   re-export.
