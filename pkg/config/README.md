@@ -910,7 +910,15 @@ B: if B's policy references it and the global book has no such entry,
 `validatePolicyMatchAddressesStrict` (#2008) rejects it at commit, exactly as
 Junos treats an undefined reference. NAT rule address-name references
 (`source-address-name` etc.) remain global-only; zone-local resolution is
-scoped to security-policy match addresses.
+scoped to security-policy match addresses. Authored reference tokens may
+not spell the synthetic key either (#16554): `validateReservedZoneLocalRefTokensStrict`
+runs on the pristine books before the fold and rejects any policy,
+global-policy, NAT, NAT64, static-NAT `prefix-name`, or address-set-member
+token beginning with `zone-local/`; the tolerant path warns and poisons the
+referencing policy/NAT rule (and quarantines the token in `CollidingNames`)
+so a cross-zone spelling never enforces another zone's object. An own-zone
+authored name (e.g. `web` in a trust policy) still commits and is rewritten
+to the synthetic key by the fold.
 
 Unknown direct entries in either address-book scope are now retained as
 compiler metadata instead of disappearing. Strict compilation rejects them;
