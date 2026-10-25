@@ -1169,12 +1169,21 @@ Important current behavior:
   paths (filter-class priority itself from #14636), and when `<fc>` has
   no materialized egress queue: the queue clamps to the interface default
   but the rewrite still keys on the filter class's
-  canonical (pre-clamp) class id. On V2 fabric arrivals the customer input
-  filter is looked up on the validated fabric-scoped logical ingress unit,
-  not the fabric link; a fabric stamp whose owner-RG gate rejects it does
-  not steer BA classification at all. A base-interface row (`is_unit ==
-  Some(false)`) sharing an ifindex with a logical unit never overwrites the
-  unit's CoS interface/loss-priority-rewrite state.
+  canonical (pre-clamp) class id. The rewrite keys ONLY on that final class
+  (#16506): when `<fc>` has NO entry in the egress rewrite-rule the packet
+  is NOT rewritten — it is never re-marked with the overridden BA class's
+  entry, nor with the entry of the queue it was clamped/pinned to when
+  that queue carries another class's entry. The same final-class-only
+  keying applies without a filter: an unmaterialized BA class absent from
+  the rule is not rewritten either (it does not inherit the default
+  queue's class entry); only a packet no classifier assigned any class to
+  still keys the rewrite by its selected egress queue. On V2 fabric
+  arrivals the customer input filter is looked up on the validated
+  fabric-scoped logical ingress unit, not the fabric link; a fabric stamp
+  whose owner-RG gate rejects it does not steer BA classification at all.
+  A base-interface row (`is_unit == Some(false)`) sharing an ifindex with
+  a logical unit never overwrites the unit's CoS interface/loss-priority
+  rewrite state.
 - a BA classifier code-point that maps to a forwarding-class whose queue the
   interface does NOT materialize (the forwarding-class has no `scheduler-map`
   entry on that interface) falls back to the interface **default best-effort

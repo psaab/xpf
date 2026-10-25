@@ -217,10 +217,31 @@ pub(super) fn resolve_cos_queue_lp_rewrite(
     lp.dscp_rewrite_by_queue_lp.get(&(queue_id, plp)).copied()
 }
 
-/// #14636: resolve the egress DSCP rewrite with an explicit forwarding-class
-/// queue id taking precedence over the packet's BA class: a filter-selected
-/// class overrides BA classification, so the rewrite must key on that class
-/// first, then the BA class, then the clamped queue.
+/// #16506 (with Y28-05): resolve the egress DSCP rewrite keyed ONLY on the
+/// packet's FINAL forwarding class. The rewrite rule is keyed
+/// `(forwarding-class, loss-priority)` (docs/cos-traffic-shaping.md, #3995),
+/// so the only legitimate keys are the final class's own entry and — when
+/// that final class is materialized on the egress interface — the entry
+/// compiled under its own queue. There is deliberately NO fallback to any
+/// other class:
+///
+/// - With a filter class (`filter_class_queue_id: Some`): the filter class
+///   is the final class (#14636/#14663). The overridden BA class's entry and
+///   the clamped/pinned queue's entry (that queue is the filter class's
+///   materialized queue, the default queue when the class is
+///   unmaterialized, or a scheduler alias — in the alias and default cases
+///   it carries a DIFFERENT class's entry) must never supply the rewrite.
+///   A filter class absent from the rule is "not rewritten" (`None`).
+/// - Without a filter class the BA class is the final class. Its own entry
+///   keys first (#13968); the queue entry is consulted only when that queue
+///   IS the BA class's own materialized queue — i.e. the class is
+///   materialized on egress, so both keys name the same
+///   `(class, loss-priority)` entry. An unmaterialized BA class clamped to
+///   the default queue must not inherit the default queue's class entry
+///   (Y28-05).
+/// - With NO class at all (unclassified / locally generated): the egress
+///   queue itself is the classification result, so its own entry keys the
+///   rewrite — the pre-#13968 queue-keyed behaviour, preserved.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_cos_priority_class_lp_rewrite(
     forwarding: &ForwardingState,
@@ -244,21 +265,47 @@ pub(super) fn resolve_cos_priority_class_lp_rewrite(
         vlan_present,
         trust,
     );
-    filter_class_queue_id
-        .and_then(|cq| lp.dscp_rewrite_by_fc_lp.get(&(cq, plp)).copied())
-        .or_else(|| {
-            class_queue_id.and_then(|cq| lp.dscp_rewrite_by_fc_lp.get(&(cq, plp)).copied())
-        })
-        .or_else(|| lp.dscp_rewrite_by_queue_lp.get(&(queue_id, plp)).copied())
+    // The final class: a filter-selected class outranks BA classification;
+    // otherwise the packet's BA class. `None` = no class was ever assigned.
+    if let Some(final_class_queue_id) = filter_class_queue_id.or(class_queue_id) {
+        if let Some(rewrite) = lp
+            .dscp_rewrite_by_fc_lp
+            .get(&(final_class_queue_id, plp))
+            .copied()
+        {
+            return Some(rewrite);
+        }
+        // Queue-keyed fallback ONLY when the egress queue is the final
+        // class's own materialized queue (its global queue id), so the
+        // `(queue, LP)` entry names the same `(class, LP)` pair as the
+        // class key above. This preserves the queue-compiled view for a
+        // materialized class (the two tables are compiled from the same
+        // rule, so for a materialized class they agree); it never crosses
+        // to another class's entry.
+        if queue_id == final_class_queue_id {
+            return lp.dscp_rewrite_by_queue_lp.get(&(queue_id, plp)).copied();
+        }
+        return None;
+    }
+    // No class was ever assigned (both class ids `None`): there is no
+    // final class, but the egress queue itself was still selected (egress
+    // classifiers for locally generated packets, or the interface
+    // default). The queue IS the classification result in that case, so
+    // its own entry keys the rewrite exactly as the pre-#13968
+    // queue-keyed resolver did. This arm must NOT run when a class WAS
+    // assigned: then the queue may be a clamp/alias carrying another
+    // class's entry (#16506/Y28-05).
+    lp.dscp_rewrite_by_queue_lp.get(&(queue_id, plp)).copied()
 }
 
-/// #13968: resolve the egress DSCP rewrite by the packet's ORIGINAL
-/// forwarding-class (its pre-clamp BA class queue id) and loss-priority,
-/// falling back to the clamped-queue entry only when the class has no
-/// rewrite entry of its own. When the class IS materialized on egress both
-/// keys name the same (class, LP) entry, so this is bit-identical to
-/// [`resolve_cos_queue_lp_rewrite`]; when it is not, the clamped queue's
-/// class (usually best-effort) must not bleach the packet's marking.
+/// #13968/#16506: resolve the egress DSCP rewrite by the packet's ORIGINAL
+/// forwarding-class (its pre-clamp BA class queue id) and loss-priority.
+/// Without a filter class the BA class IS the final class, so this shares
+/// the final-class-only keying of
+/// [`resolve_cos_priority_class_lp_rewrite`]: the class's own entry, then
+/// the queue entry only when the queue is that class's own materialized
+/// queue. When the class is not materialized, the clamped queue's class
+/// (usually best-effort) must not bleach the packet's marking (Y28-05).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_cos_class_lp_rewrite(
     forwarding: &ForwardingState,
@@ -271,17 +318,16 @@ pub(super) fn resolve_cos_class_lp_rewrite(
     vlan_present: bool,
     trust: BaIngressTrust,
 ) -> Option<u8> {
-    let lp = forwarding.cos.lp_rewrite.get(&egress_ifindex)?;
-    let plp = resolve_trusted_ba_loss_priority(
-        lp,
+    resolve_cos_priority_class_lp_rewrite(
         forwarding,
+        egress_ifindex,
         ingress_ifindex,
+        None,
+        class_queue_id,
+        queue_id,
         dscp,
         ingress_pcp,
         vlan_present,
         trust,
-    );
-    class_queue_id
-        .and_then(|cq| lp.dscp_rewrite_by_fc_lp.get(&(cq, plp)).copied())
-        .or_else(|| lp.dscp_rewrite_by_queue_lp.get(&(queue_id, plp)).copied())
+    )
 }

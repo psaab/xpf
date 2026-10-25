@@ -295,6 +295,283 @@ fn unmaterialized_filter_forwarding_class_preserves_egress_dscp_rewrite_14663() 
     );
 }
 
+// ---------------------------------------------------------------------------
+// #16506 (R3-B14-01, with Y28-05): the egress DSCP rewrite keys ONLY on the
+// packet's FINAL forwarding class. A filter class absent from the rewrite
+// rule is "not rewritten" — never re-marked with the BA class the filter
+// overrode, and never with the queue the packet was clamped/pinned to when
+// that queue carries another class's entry.
+//
+// Fixture extends the #14663 fixture: ingress BA classifier {0,10,46}
+// (0/10 -> best-effort q0, 46 -> expedited-forwarding q5), input filter
+// tcp dport 5060 -> expedited-forwarding, partial egress rule with ONLY
+// `best-effort low -> 0` (no EF entry).
+// ---------------------------------------------------------------------------
+
+fn snapshot_16506() -> ConfigSnapshot {
+    let mut snapshot = snapshot_14663(true);
+    // Ingress BA: DSCP 10 must also classify best-effort (the seed packet
+    // of the acceptance cell), so extend the classifier entries.
+    if let Some(cos) = snapshot.class_of_service.as_mut() {
+        cos.dscp_classifiers[0].entries[0].dscp_values = vec![0, 10];
+        // Partial ("bleach best-effort only") rewrite rule: NO entry for
+        // the filter-selected expedited-forwarding class.
+        cos.dscp_rewrite_rules[0].entries = vec![rewrite_entry("best-effort", 0)];
+    }
+    snapshot
+}
+
+#[test]
+fn filter_class_absent_from_rewrite_rule_is_not_rewritten_16506() {
+    let forwarding = build_forwarding_state(&snapshot_16506());
+    let key = key_14663(5060);
+
+    // Subject (fresh): DSCP 10 is BA best-effort; the filter reclassifies
+    // to EF (queue 5). EF has no rewrite entry, so the packet must leave
+    // UNREWRITTEN. RED pre-fix: Some(0) — the overridden BE class's entry.
+    let fresh = resolve_cos_tx_selection(
+        &forwarding,
+        EGRESS,
+        meta_14663(10),
+        Some(&key),
+        TermMatchExtra::default(),
+    );
+    assert_eq!(
+        fresh.queue_id,
+        Some(5),
+        "#16506: filter EF class queues on EF"
+    );
+    assert_eq!(
+        fresh.dscp_rewrite, None,
+        "#16506: filter class absent from the rewrite rule must NOT be \
+         re-marked with the overridden BA class's code-point"
+    );
+
+    // Cached seed: same resolution, and neither reclassify flag may arm a
+    // hit-path re-derivation that could resurrect the BA entry — the seed
+    // value IS what a non-reclassifying hit replays.
+    let cached = resolve_cached_cos_tx_selection(&forwarding, EGRESS, meta_14663(10), &key);
+    assert_eq!(cached.queue_id, Some(5), "#16506: cached seed queues on EF");
+    assert_eq!(
+        cached.dscp_rewrite, None,
+        "#16506: cached seed must not carry the overridden BA rewrite"
+    );
+    assert_eq!(cached.filter_class_queue_id, Some(5));
+    assert!(
+        !cached.ba_reclassify,
+        "#16506: filter-pinned seed must not BA-reclassify on hits"
+    );
+    // cos_lp_reclassify stays disarmed here: the ONLY rewrite entry is
+    // (BE, low) under queue 0 / class 0, while the pinned queue and the
+    // filter class are both 5 — nothing to re-resolve. Assert the hit
+    // consumer's exact replay therefore yields None, and also drive the
+    // LP re-resolution directly (a second packet, DSCP 46) to prove it
+    // cannot resurrect the BA entry even if it were armed.
+    assert!(
+        !cached.cos_lp_reclassify,
+        "#16506: no EF/queue-5 rewrite entry exists, so LP re-resolution must stay disarmed"
+    );
+    let replayed = if cached.cos_lp_reclassify {
+        reclassify_cached_cos_lp_rewrite(
+            &forwarding,
+            EGRESS,
+            cached.queue_id.expect("filter queue"),
+            46,
+            0,
+            false,
+            INGRESS,
+            0,
+            0,
+            cached.filter_class_queue_id,
+        )
+    } else {
+        cached.dscp_rewrite
+    };
+    assert_eq!(
+        replayed, None,
+        "#16506: two-packet cache hit (seed DSCP 10, hit DSCP 46) must yield None"
+    );
+    let hit_lp = reclassify_cached_cos_lp_rewrite(
+        &forwarding,
+        EGRESS,
+        cached.queue_id.expect("filter queue"),
+        46,
+        0,
+        false,
+        INGRESS,
+        0,
+        0,
+        cached.filter_class_queue_id,
+    );
+    assert_eq!(
+        hit_lp, None,
+        "#16506: hit LP re-resolution must key only on the filter class (absent -> None)"
+    );
+
+    // Probe twin: same flow, seed packet DSCP 46 (BA class == filter
+    // class). Also None — the only input that changed the marking
+    // pre-fix was the overridden BA class.
+    let twin = resolve_cos_tx_selection(
+        &forwarding,
+        EGRESS,
+        meta_14663(46),
+        Some(&key),
+        TermMatchExtra::default(),
+    );
+    assert_eq!(twin.queue_id, Some(5));
+    assert_eq!(twin.dscp_rewrite, None);
+
+    // Control A: filter class WITH its own entry (full #14663 rule) still
+    // rewrites by the filter class.
+    let full = build_forwarding_state(&snapshot_14663(true));
+    let control_a = resolve_cos_tx_selection(
+        &full,
+        EGRESS,
+        meta_14663(10),
+        Some(&key),
+        TermMatchExtra::default(),
+    );
+    assert_eq!(control_a.queue_id, Some(5));
+    assert_eq!(
+        control_a.dscp_rewrite,
+        Some(46),
+        "control A: EF entry present -> filter class rewrites 46"
+    );
+
+    // Control B: no filter match (dport 443) — BA best-effort keeps its
+    // own entry on the fresh AND cached-seed paths.
+    let control_b = resolve_cos_tx_selection(
+        &forwarding,
+        EGRESS,
+        meta_14663(10),
+        Some(&key_14663(443)),
+        TermMatchExtra::default(),
+    );
+    assert_eq!(control_b.queue_id, Some(0));
+    assert_eq!(
+        control_b.dscp_rewrite,
+        Some(0),
+        "control B: unfiltered BA best-effort still rewrites 0"
+    );
+    let control_b_cached =
+        resolve_cached_cos_tx_selection(&forwarding, EGRESS, meta_14663(10), &key_14663(443));
+    assert_eq!(control_b_cached.dscp_rewrite, Some(0));
+
+    // Flowless: the portless evaluator cannot match the dport term, so the
+    // packet keeps its BA class; DSCP 10 stays best-effort -> Some(0).
+    let flowless =
+        cached_cos_tx_selection_flowless(&forwarding, EGRESS, meta_14663(10), &key, Some(&key));
+    assert_eq!(flowless.dscp_rewrite, Some(0));
+}
+
+#[test]
+fn unmaterialized_filter_class_absent_from_rule_is_not_rewritten_16506() {
+    // Unmaterialized variant: egress materializes only best-effort, so the
+    // EF filter class clamps the queue to the default (0) — the queue that
+    // carries the BE rewrite entry. The packet must still NOT be bleached:
+    // the clamped queue is not the filter class's own queue.
+    // RED pre-fix: Some(0) via the BA arm (and the queue arm names it too).
+    let mut snapshot = snapshot_16506();
+    if let Some(cos) = snapshot.class_of_service.as_mut() {
+        cos.scheduler_maps[0]
+            .entries
+            .retain(|e| e.forwarding_class != "expedited-forwarding");
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    let key = key_14663(5060);
+
+    let fresh = resolve_cos_tx_selection(
+        &forwarding,
+        EGRESS,
+        meta_14663(10),
+        Some(&key),
+        TermMatchExtra::default(),
+    );
+    assert_eq!(
+        fresh.queue_id,
+        Some(0),
+        "#16506: unmaterialized EF clamps to default queue"
+    );
+    assert_eq!(
+        fresh.dscp_rewrite, None,
+        "#16506: clamped default queue's BE entry must not bleach an EF-classified packet"
+    );
+    let cached = resolve_cached_cos_tx_selection(&forwarding, EGRESS, meta_14663(10), &key);
+    assert_eq!(cached.queue_id, Some(0));
+    assert_eq!(
+        cached.dscp_rewrite, None,
+        "#16506: cached seed must not bleach via the clamped queue"
+    );
+}
+
+#[test]
+fn unmaterialized_ba_class_absent_from_rule_is_not_rewritten_y28_05() {
+    // Y28-05 (same resolver, no filter): an UNMATERIALIZED BA class with
+    // NO rewrite entry of its own, clamped to the default queue, must not
+    // inherit the default queue's class entry. Ingress BA: DSCP 46 -> EF
+    // (q5, unmaterialized on egress); DSCP 10 -> BE (q0). Rule: BE only.
+    // RED pre-fix: Some(0) via the clamped-queue arm.
+    let mut snapshot = snapshot_16506();
+    if let Some(cos) = snapshot.class_of_service.as_mut() {
+        cos.scheduler_maps[0]
+            .entries
+            .retain(|e| e.forwarding_class != "expedited-forwarding");
+    }
+    // No filter match on dport 443: pure BA classification.
+    let forwarding = build_forwarding_state(&snapshot);
+    let key = key_14663(443);
+
+    let fresh = resolve_cos_tx_selection(
+        &forwarding,
+        EGRESS,
+        meta_14663(46),
+        Some(&key),
+        TermMatchExtra::default(),
+    );
+    assert_eq!(
+        fresh.queue_id,
+        Some(0),
+        "Y28-05: unmaterialized EF BA class clamps to default queue"
+    );
+    assert_eq!(
+        fresh.dscp_rewrite, None,
+        "Y28-05: unmaterialized BA class absent from the rule must not inherit the clamped queue's entry"
+    );
+    let cached = resolve_cached_cos_tx_selection(&forwarding, EGRESS, meta_14663(46), &key);
+    assert_eq!(
+        cached.dscp_rewrite, None,
+        "Y28-05: cached seed must not bleach"
+    );
+    assert!(
+        cached.ba_reclassify,
+        "Y28-05: BA flow must re-resolve on hits"
+    );
+    let hit =
+        reclassify_cached_ba_queue_and_lp_rewrite(&forwarding, EGRESS, 46, 0, false, INGRESS, 0, 0)
+            .expect("Y28-05: cached BA hit must resolve");
+    assert_eq!(
+        hit.1, None,
+        "Y28-05: cached hit must not inherit the clamped queue's entry"
+    );
+    // Control: DSCP 10 (materialized BE) still rewrites 0 on every path.
+    let be_fresh = resolve_cos_tx_selection(
+        &forwarding,
+        EGRESS,
+        meta_14663(10),
+        Some(&key),
+        TermMatchExtra::default(),
+    );
+    assert_eq!(
+        be_fresh.dscp_rewrite,
+        Some(0),
+        "control: materialized BE rewrites 0"
+    );
+    let be_hit =
+        reclassify_cached_ba_queue_and_lp_rewrite(&forwarding, EGRESS, 10, 0, false, INGRESS, 0, 0)
+            .expect("control: cached BA hit must resolve");
+    assert_eq!(be_hit.1, Some(0), "control: materialized BE hit rewrites 0");
+}
+
 #[test]
 fn fabric_scoped_ingress_consults_customer_input_filter_14663() {
     // V2 fabric: the packet arrives on the fabric link (ifindex 4242) but its
