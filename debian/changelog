@@ -67,6 +67,12 @@ xpf (0.0.0) unstable; urgency=medium
     aborts cleanly with the daemon live; at/after STOP it is logged
     as deferred and honoured only after START/rollback completes
     with the unit running.
+  * Config: bridge-domain names whose derived `br-<name>` device exceeds
+    IFNAMSIZ (15 bytes) or fails dev_valid_name (e.g. contains `:`) are now
+    rejected at strict commit/commit-check and quarantined on tolerant load
+    (#16792). Previously an L2-only domain such as `customer-vlan-100`
+    committed clean while networkd discarded its `.netdev`, so the bridge
+    never existed. A 12-byte name (br- + 12 = 15) still commits.
   * Cluster/config: an omitted `redundancy-group ip-monitoring
     global-weight` now defaults to 255, the Junos default (#16667).
     Previously it compiled to 0, so aggregate mode deducted nothing

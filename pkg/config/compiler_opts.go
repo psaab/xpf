@@ -2139,6 +2139,10 @@ type compileOpts struct {
 	// only for instances that would create a vrf-<name> device; forwarding
 	// instances create no VRF device and remain active.
 	lenientRoutingInstanceKernelName bool
+	// lenientBridgeDomainKernelName (#16792) skips the strict derived bridge
+	// device-name gate. Tolerant load and peer-sync quarantine an invalid name
+	// in compileBridgeDomains; every bridge domain creates a br-<name> device.
+	lenientBridgeDomainKernelName bool
 	// lenientAddressBookNames (#3061, narrowed in #4340) downgrades the
 	// address-book / zone name gate (validateAddressBookEntryNamesStrict) from a
 	// hard compile error to a cfg.Warnings entry. The strict commit /
@@ -4046,6 +4050,7 @@ func lenientCompileOpts() compileOpts {
 		lenientRoutingInstanceTableIDCollision:   true,
 		lenientReservedRoutingInstanceName:       true,
 		lenientRoutingInstanceKernelName:         true,
+		lenientBridgeDomainKernelName:            true,
 		lenientAddressBookNames:                  true,
 		lenientReservedZoneLocalRefs:             true,
 		lenientReservedAddressNames:              true,

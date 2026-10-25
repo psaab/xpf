@@ -12597,6 +12597,18 @@ reserved for whole-dataplane selection where a rewrite shim
   and apply-group forwarding instances) and
   `pkg/configstore/check_routinginstance_kernel_name_11391_test.go`
   (`CheckText` commit-check path).
+- **#16792 (derived bridge device names):** every bridge domain creates
+  `br-<name>` directly (L2-only and IRB-backed alike). `ValidateBridgeDomainName`
+  and `validateBridgeDomainKernelNameAST` check expanded names at strict
+  commit and commit-check: a bridge-derived name must fit in 15 bytes
+  (`IFNAMSIZ`, counted as bytes) and pass Linux `dev_valid_name` (no slash,
+  colon, ASCII whitespace, or NUL). A 12-byte bridge-domain name is the
+  longest valid ASCII name because of the three-byte `br-` prefix.
+  Tolerant load skips the strict gate and quarantines invalid names (recorded
+  in `Config.QuarantinedBridgeDomains` with one warning), so they never reach
+  bridge planning. Regression coverage:
+  `pkg/config/bridgedomain_kernel_name_16792_test.go` and
+  `pkg/configstore/check_bridgedomain_kernel_name_16792_test.go`.
 - **#9657 (the routing-instance collision gate counts only instances some
   compile path lands):** the `#3855` routing-instance table-id gate's
   pre-expansion view counted instances in every `groups` block, including

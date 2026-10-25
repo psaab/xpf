@@ -27,5 +27,8 @@ func ValidateBridgeDomainName(raw string) error {
 	if glob := rendersafe.FirstGlobMetacharacter(raw); glob != "" {
 		return fmt.Errorf("bridge-domain name %q contains the glob metacharacter %q; it becomes [Match] Name=br-%s and systemd reads that as a shell-style glob claiming every matching interface (#10089)", raw, glob, raw)
 	}
+	if deviceName, reason := bridgeDomainBridgeDeviceNameIssue(raw); reason != "" {
+		return fmt.Errorf("bridge-domain name %q derives invalid Linux bridge device name %q: %s (#16792)", raw, deviceName, reason)
+	}
 	return nil
 }
