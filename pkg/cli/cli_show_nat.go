@@ -1215,63 +1215,14 @@ func (c *CLI) showNATStatic(cfg *config.Config, args []string) error {
 }
 
 func (c *CLI) showNAT64(cfg *config.Config) error {
-	if cfg == nil || len(cfg.Security.NAT.NAT64) == 0 {
-		fmt.Println("No NAT64 rule-sets configured.")
-		return nil
+	// #16681/#1687: shared with the gRPC ShowText path via pkg/natshow,
+	// which now also renders the source-address scope both copies omitted.
+	v := c.natRuntimeVerdicts()
+	var runtime natshow.RuntimeVerdicts
+	if v.Available && len(v.NAT64Rules) > 0 {
+		runtime = natshow.RuntimeVerdicts(v.NAT64Rules)
 	}
-
-	for _, rs := range cfg.Security.NAT.NAT64 {
-		fmt.Printf("NAT64 rule-set: %s\n", rs.Name)
-		if rs.Prefix != "" {
-			fmt.Printf("  Prefix:      %s\n", rs.Prefix)
-		}
-		// #15932/#16049: one block per authored rule-set; render its
-		// zone / routing-instance unions so operators see the full
-		// admission set.
-		zones := rs.FromZones
-		if len(zones) == 0 && rs.FromZone != "" {
-			zones = []string{rs.FromZone}
-		}
-		if len(zones) > 0 {
-			fmt.Printf("  From zones:   %s\n", strings.Join(zones, ", "))
-		}
-		ris := rs.FromRoutingInstances
-		if len(ris) == 0 && rs.FromRoutingInstance != "" {
-			ris = []string{rs.FromRoutingInstance}
-		}
-		// #16604: a lowered explicit-master member ("") renders as the
-		// authored `default`, never as a blank list entry.
-		for i, ri := range ris {
-			if ri == "" {
-				ris[i] = "default"
-			}
-		}
-		if len(ris) > 0 {
-			fmt.Printf("  From routing-instances: %s\n", strings.Join(ris, ", "))
-		}
-		if rs.SourcePool != "" {
-			fmt.Printf("  Source pool:  %s\n", rs.SourcePool)
-		}
-		// #16547: the NAT64 twin of the runtime quarantine. Config-only
-		// pool verdict first; the applied snapshot's NAT64 verdict fills
-		// the runtime-only gap.
-		nat64Reason := ""
-		if rs.SourcePool != "" {
-			if pool, ok := cfg.Security.NAT.SourcePools[rs.SourcePool]; ok {
-				nat64Reason = config.SourceNATPoolUnusableReason(pool)
-			}
-		}
-		if nat64Reason == "" {
-			if v := c.natRuntimeVerdicts(); v.Available {
-				nat64Reason = v.NAT64Rules[rs.Name]
-			}
-		}
-		if nat64Reason != "" {
-			fmt.Printf("  NOT INSTALLED — %s\n", config.SourceNATDisarmReasonText(nat64Reason))
-		}
-		fmt.Println()
-	}
-
+	natshow.RenderNAT64(os.Stdout, cfg, runtime)
 	return nil
 }
 

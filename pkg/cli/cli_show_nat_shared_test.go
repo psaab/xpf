@@ -112,6 +112,11 @@ func TestCLINATWrappersMatchSharedRenderers(t *testing.T) {
 			func() error { return c.showPersistentNATDetail() },
 			func(b *strings.Builder) { natshow.RenderPersistentDetail(context.Background(), b, dp) },
 		},
+		{
+			"nat64",
+			func() error { return c.showNAT64(sharedNAT64Fixture16681()) },
+			func(b *strings.Builder) { natshow.RenderNAT64(b, sharedNAT64Fixture16681(), nil) },
+		},
 	}
 
 	for _, tc := range cases {
