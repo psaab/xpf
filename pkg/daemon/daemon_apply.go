@@ -758,6 +758,15 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// the route-leak snapshot, and VRF miss-terminator reconciliation; it is
 	// forbidden from touching FRR.
 	frrErr := d.applyFRRFull(cfg, commitOverlay)
+	// #16782: the pre-FRR applyMgmtDNSRules above ran before FRR installed
+	// this commit's operator statics (RTPROT_ZSTATIC), so a nameserver
+	// newly covered by such a static was not yet refused. Re-run the
+	// reconcile now that FRR has converged; it is idempotent and also
+	// removes stale steering for newly refused servers. Its error joins
+	// the management-route commit error like the earlier run.
+	if postFRRErr := d.applyMgmtDNSRules(); postFRRErr != nil {
+		mgmtRouteErr = errors.Join(mgmtRouteErr, postFRRErr)
+	}
 
 	// #5844: applyRoutingRules RETURNS the joined next-table / rib-group / PBR
 	// ip-rule reconcile failures (a partial clear/add left stale-or-missing

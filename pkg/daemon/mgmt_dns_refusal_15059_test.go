@@ -110,3 +110,83 @@ func TestMgmtDNSRefusalIsExactPeerNotPrefix15059(t *testing.T) {
 		t.Fatalf("non-peer nameserver refused incorrectly: %+v", ops.rules)
 	}
 }
+
+// #16782: every operator static is FRR-installed as RTPROT_ZSTATIC (196),
+// not RTPROT_STATIC (4), so the #15059 static leg was dead in production.
+// A non-default 196 route must refuse; a 196 default (the FRR-rendered
+// WAN DHCP default) must NOT refuse a legitimate mgmt nameserver.
+func TestMgmtDNSRefusesFRRZStaticCoveredNameserver16782(t *testing.T) {
+	mgmt := map[string]bool{"fxp0": true}
+	covered := netip.MustParseAddr("10.20.0.53")
+	legit := netip.MustParseAddr("198.51.101.53")
+	leases := []*dhcp.Lease{{Interface: "fxp0", Family: dhcp.AFInet,
+		DNS: []netip.Addr{covered, legit}}}
+	mainRoutes := []netlink.Route{
+		route15059("10.20.0.0/16", 196, unix.RT_TABLE_MAIN),
+		// FRR-rendered default: covers everything, must not refuse legit.
+		{Protocol: netlink.RouteProtocol(196), Table: unix.RT_TABLE_MAIN,
+			Type: unix.RTN_UNICAST, Gw: net.ParseIP("198.51.100.1")},
+	}
+	if reason, refused := mgmtDNSRefusedNameserver(covered, mainRoutes, nil); !refused {
+		t.Fatalf("proto-196 covered nameserver not refused")
+	} else if !strings.Contains(reason, "static") || !strings.Contains(reason, "10.20.0.0/16") {
+		t.Fatalf("refusal reason = %q, want static 10.20.0.0/16", reason)
+	}
+	if reason, refused := mgmtDNSRefusedNameserver(legit, mainRoutes, nil); refused {
+		t.Fatalf("legit nameserver refused via default only: %q", reason)
+	}
+	// Manual RTPROT_STATIC default likewise must not refuse.
+	if _, refused := mgmtDNSRefusedNameserver(legit, []netlink.Route{
+		route15059("0.0.0.0/0", unix.RTPROT_STATIC, unix.RT_TABLE_MAIN),
+	}, nil); refused {
+		t.Fatal("RTPROT_STATIC default refused legit nameserver")
+	}
+	// Manual non-default static still refuses (pre-existing leg).
+	if _, refused := mgmtDNSRefusedNameserver(covered, []netlink.Route{
+		route15059("10.20.0.0/16", unix.RTPROT_STATIC, unix.RT_TABLE_MAIN),
+	}, nil); !refused {
+		t.Fatal("RTPROT_STATIC non-default no longer refuses")
+	}
+	// A 196 route in a non-main table must not refuse.
+	if _, refused := mgmtDNSRefusedNameserver(covered, []netlink.Route{
+		route15059("10.20.0.0/16", 196, 999),
+	}, nil); refused {
+		t.Fatal("table-999 196 route refused nameserver")
+	}
+	ops := &fakeMgmtDNSRuleOps{}
+	if err := reconcileMgmtDNSRulesFiltered(ops, leases, mgmt, mainRoutes, &config.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(ops.rules) != 4 {
+		t.Fatalf("installed %d rules, want 4 for legit only: %+v", len(ops.rules), ops.rules)
+	}
+	if got := mgmtDNSRefusedSet(leases, mgmt, mainRoutes, &config.Config{}); !got[covered.String()] || got[legit.String()] {
+		t.Fatalf("refused set = %v", got)
+	}
+	// IPv6 FRR static leg.
+	v6 := netip.MustParseAddr("2001:db8:20::53")
+	if _, refused := mgmtDNSRefusedNameserver(v6, []netlink.Route{
+		route15059("2001:db8:20::/48", 196, unix.RT_TABLE_MAIN),
+	}, nil); !refused {
+		t.Fatal("IPv6 proto-196 covered nameserver not refused")
+	}
+}
+
+// #16782 ordering: the first mgmt-DNS reconcile in applyConfigLocked runs
+// before applyFRRFull, so a second reconcile must run after it or a
+// nameserver newly covered by this commit's FRR statics stays steered.
+func TestMgmtDNSReconcileRerunsAfterFRR16782(t *testing.T) {
+	src := stripLineComments6791(readDaemonSource(t, "daemon_apply.go"))
+	frr := strings.Index(src, "frrErr := d.applyFRRFull(cfg, commitOverlay)")
+	if frr < 0 {
+		t.Fatal("applyFRRFull call not found")
+	}
+	first := strings.Index(src, "d.applyMgmtDNSRules()")
+	second := strings.Index(src[frr:], "d.applyMgmtDNSRules()")
+	if first < 0 || first > frr {
+		t.Fatal("pre-FRR applyMgmtDNSRules missing")
+	}
+	if second < 0 {
+		t.Fatal("no applyMgmtDNSRules re-run after applyFRRFull (#16782)")
+	}
+}
