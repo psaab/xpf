@@ -165,3 +165,104 @@ func TestSaveRescueConfigNewestWins_14722(t *testing.T) {
 		t.Fatalf("stale older save overwrote newer rescue.conf: %q", got)
 	}
 }
+
+// TestDeleteRescueConfigDoesNotUnlinkLaterSave_16783 pins the reverse
+// ordering of #14722: a save that STARTS after a delete claims a later
+// generation and must not be unlinked by that delete. The delete is
+// deterministically paused inside its rbRemove seam — after it has
+// claimed its generation and bumped the applied generation, before
+// the unlink lands — while a later save runs. Before the fix the
+// delete released rescueMu before unlinking, so the later save took
+// rescueMu, wrote durably, reported success, and was then unlinked
+// by the paused delete, leaving no rescue.conf. With the fix the
+// delete holds rescueMu across the unlink, so the later save cannot
+// complete while the delete is paused: it either blocks behind
+// rescueMu (and then writes after the delete finishes) or, had it
+// landed before the delete's critical section, would be removed by
+// it. Either way a save that reports success leaves its file.
+func TestDeleteRescueConfigDoesNotUnlinkLaterSave_16783(t *testing.T) {
+	restoreRollbackSeams(t)
+	s := newTestStore(t)
+	if _, err := s.SyncApply("system { host-name before-delete-16783; }", nil); err != nil {
+		t.Fatalf("SyncApply before-delete: %v", err)
+	}
+	if err := s.SaveRescueConfig(); err != nil {
+		t.Fatalf("initial SaveRescueConfig: %v", err)
+	}
+	rescuePath := s.rescuePath()
+	if _, err := os.Stat(rescuePath); err != nil {
+		t.Fatalf("rescue.conf must exist after initial save: %v", err)
+	}
+	if _, err := s.SyncApply("system { host-name later-save-16783; }", nil); err != nil {
+		t.Fatalf("SyncApply later-save: %v", err)
+	}
+
+	// Pause the delete inside rbRemove: its generation is already
+	// claimed/applied, but the unlink has not landed.
+	removeEntered := make(chan struct{})
+	releaseRemove := make(chan struct{})
+	var removeOnce, releaseOnce sync.Once
+	releaseRemoveFn := func() { releaseOnce.Do(func() { close(releaseRemove) }) }
+	defer releaseRemoveFn()
+	origRemove := rbRemove
+	rbRemove = func(path string) error {
+		removeOnce.Do(func() { close(removeEntered) })
+		<-releaseRemove
+		return origRemove(path)
+	}
+
+	deleteDone := make(chan error, 1)
+	go func() { deleteDone <- s.DeleteRescueConfig() }()
+	select {
+	case <-removeEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("delete did not reach rbRemove")
+	}
+
+	saveDone := make(chan error, 1)
+	go func() { saveDone <- s.SaveRescueConfig() }()
+
+	// Give a broken implementation the chance to complete the later
+	// save inside the delete's paused window. On fixed code the save
+	// blocks on rescueMu; the short wait only schedules it, the
+	// assertions below do not depend on it having blocked.
+	select {
+	case err := <-saveDone:
+		// The save completed while the delete was paused between
+		// its generation bump and its unlink (the pre-fix window).
+		// Release the delete; its unlink must not remove the file
+		// this successful save just wrote.
+		if err != nil {
+			releaseRemoveFn()
+			<-deleteDone
+			t.Fatalf("later save during paused delete = %v, want success", err)
+		}
+		releaseRemoveFn()
+		if err := <-deleteDone; err != nil {
+			t.Fatalf("DeleteRescueConfig: %v", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		// Fixed shape: the later save is still blocked behind the
+		// delete's rescueMu. Release the delete, then the save.
+		releaseRemoveFn()
+		if err := <-deleteDone; err != nil {
+			t.Fatalf("DeleteRescueConfig: %v", err)
+		}
+		select {
+		case err := <-saveDone:
+			if err != nil {
+				t.Fatalf("later SaveRescueConfig after delete: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("later save did not finish after delete released rescueMu")
+		}
+	}
+
+	data, err := os.ReadFile(rescuePath)
+	if err != nil {
+		t.Fatalf("rescue.conf missing after later save reported success: %v", err)
+	}
+	if got := string(data); !strings.Contains(got, "later-save-16783") {
+		t.Fatalf("rescue.conf = %q, want the later save's content", got)
+	}
+}
