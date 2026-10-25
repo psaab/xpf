@@ -367,4 +367,3 @@ func newSocketpairSession16669(t *testing.T, iface *net.Interface) (sess *ifSess
 	t.Helper()
 	return newSocketpairSession(t, iface)
 }
-

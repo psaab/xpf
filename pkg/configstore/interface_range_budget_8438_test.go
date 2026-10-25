@@ -45,8 +45,19 @@ func rangeBody8438(members, shared int, useRange bool) string {
 		}
 	}
 	b.WriteString("        mtu 9000;\n")
+	if shared > 1 {
+		b.WriteString("        vlan-tagging;\n")
+	}
+	// #16723: shared statements after the first were untagged `unit <j>`
+	// blocks, which the #15034 gate now rejects (non-zero unit without
+	// vlan-id), and repeated `unit 0` blocks trip the #8427 duplicate
+	// gate. The budget subject is members x shared STATEMENTS, so the
+	// remaining shared statements are tagged units (vlan-id == unit
+	// number) — same replay count, gate-compliant shape. The extra
+	// vlan-tagging statement is emitted only when shared > 1, so the
+	// at-budget row (shared=1, exactly 4096 applications) is unmoved.
 	for j := 0; j < shared-1; j++ {
-		fmt.Fprintf(&b, "        unit %d { family inet { address 10.%d.0.1/24; } }\n", j, j)
+		fmt.Fprintf(&b, "        unit %d { vlan-id %d; family inet { address 10.%d.0.1/24; } }\n", j+1, j+1, j)
 	}
 	b.WriteString("    }\n}\n")
 	return b.String()
@@ -115,7 +126,7 @@ func TestInterfaceRangeAtBudgetStillExpands8438(t *testing.T) {
 		t.Fatalf("expanded %d interfaces, want 4096 — the budget must not perturb an "+
 			"accepted expansion", got)
 	}
-	if ifc := cfg.Interfaces.Interfaces["ge-0/0/4095"]; ifc == nil || ifc.MTU != 9000 {
+	if ifc := cfg.Interfaces.Interfaces["ge-0/0/4095"]; ifc == nil || ifc.MTU != 8986 { // #16723/#16594: authored 9000 stored as effective 8986 (media MTU minus Ethernet header)
 		t.Fatalf("the last member did not receive the range's shared config: %+v", ifc)
 	}
 }

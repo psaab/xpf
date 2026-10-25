@@ -35,8 +35,9 @@ func TestDuplicateUnitGateControls_8427(t *testing.T) {
 	cases := map[string]string{
 		"a single unit": `interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.1.1/24; } } } }`,
 		"two DIFFERENT units on one interface": `interfaces { ge-0/0/0 {
+			vlan-tagging;
 			unit 0 { family inet { address 10.0.1.1/24; } }
-			unit 1 { family inet { address 10.0.2.1/24; } } } }`,
+			unit 1 { vlan-id 1; family inet { address 10.0.2.1/24; } } } }`,
 		"the same unit on two DIFFERENT interfaces": `interfaces {
 			ge-0/0/0 { unit 0 { family inet { address 10.0.1.1/24; } } }
 			ge-0/0/1 { unit 0 { family inet { address 10.0.3.1/24; } } } }`,

@@ -287,7 +287,7 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 		FeedPublicationDebt: publicationDebt,
 		// #3104: skip scheduler-inactive policies like the runtime does, so the
 		// simulator falls through to the next active rule / default-policy.
-		PolicyInactiveFn: s.policyInactiveFn(),
+		PolicyInactiveForFn: s.policyInactiveForFn(cfg),
 	})
 	// #3285: a `to-zone junos-host` query that matched no host-bound policy is
 	// NOT a transit default — the dataplane host gate returns None (local

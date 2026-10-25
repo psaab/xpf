@@ -117,14 +117,14 @@ func policyNode6673(t *testing.T, tree *config.ConfigTree, path ...string) *conf
 func TestEventAttributesMatch6673BracketListYieldsSeparateConstraints(t *testing.T) {
 	pol, _ := compilePolicy6673(t, `event-options {
   policy p {
-    events e;
-    attributes-match [ "e.test-owner matches ^alice$" "e.test-name matches ^wan$" ];
+    events ping_test_failed;
+    attributes-match [ "ping_test_failed.test-owner matches ^alice$" "ping_test_failed.test-name matches ^wan$" ];
     then { change-configuration { commands { "set system host-name fired"; } } }
   }
 }`)
 
 	e := &Engine{}
-	authored := rpm.Event{Name: "e", TestOwner: "alice", TestName: "wan"}
+	authored := rpm.Event{Name: "ping_test_failed", TestOwner: "alice", TestName: "wan"}
 	if !e.attributesMatch(pol, authored) {
 		t.Fatalf("policy does not fire for the event it was written for "+
 			"(TestOwner=%q TestName=%q); compiled constraints = %q.\n"+
@@ -147,8 +147,8 @@ func TestEventAttributesMatch6673BracketListYieldsSeparateConstraints(t *testing
 		name string
 		ev   rpm.Event
 	}{
-		{"first member must bind", rpm.Event{Name: "e", TestOwner: "bob", TestName: "wan"}},
-		{"second member must bind", rpm.Event{Name: "e", TestOwner: "alice", TestName: "lan"}},
+		{"first member must bind", rpm.Event{Name: "ping_test_failed", TestOwner: "bob", TestName: "wan"}},
+		{"second member must bind", rpm.Event{Name: "ping_test_failed", TestOwner: "alice", TestName: "lan"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if e.attributesMatch(pol, tc.ev) {
@@ -175,7 +175,7 @@ func TestEventAttributesMatch6673BracketListYieldsSeparateConstraints(t *testing
 func TestEventChangeConfigCommands6673MixedShapeStaysExecutable(t *testing.T) {
 	const cfgText = `event-options {
   policy p {
-    events e;
+    events ping_test_failed;
     then { change-configuration { commands bogus { "set system host-name fired"; } } }
   }
 }`
@@ -215,7 +215,7 @@ func TestEventChangeConfigCommands6673MixedShapeStaysExecutable(t *testing.T) {
 func TestEventChangeConfigCommands6673PackedFormStillWidens(t *testing.T) {
 	pol, tree := compilePolicy6673(t, `event-options {
   policy p {
-    events e;
+    events ping_test_failed;
     then { change-configuration { commands [ "set system host-name a" "set system host-name b" ]; } }
   }
 }`)
@@ -240,8 +240,8 @@ func TestEventChangeConfigCommands6673PackedFormStillWidens(t *testing.T) {
 func TestEventAttributesMatch6673PackedFormStillWidens(t *testing.T) {
 	pol, tree := compilePolicy6673(t, `event-options {
   policy p {
-    events e;
-    attributes-match "e.test-owner matches ^alice$";
+    events ping_test_failed;
+    attributes-match "ping_test_failed.test-owner matches ^alice$";
   }
 }`)
 	amNode := policyNode6673(t, tree, "policy", "attributes-match")
@@ -250,11 +250,11 @@ func TestEventAttributesMatch6673PackedFormStillWidens(t *testing.T) {
 			"packed attributes-match; it must compile nothing", got)
 	}
 	e := &Engine{}
-	if !e.attributesMatch(pol, rpm.Event{Name: "e", TestOwner: "alice"}) {
+	if !e.attributesMatch(pol, rpm.Event{Name: "ping_test_failed", TestOwner: "alice"}) {
 		t.Fatalf("packed attributes-match does not admit the event it names; "+
 			"constraints = %q", pol.AttributesMatch)
 	}
-	if e.attributesMatch(pol, rpm.Event{Name: "e", TestOwner: "bob"}) {
+	if e.attributesMatch(pol, rpm.Event{Name: "ping_test_failed", TestOwner: "bob"}) {
 		t.Fatalf("packed attributes-match compiled to nothing (the #6659 "+
 			"fail-open is back); constraints = %q", pol.AttributesMatch)
 	}
@@ -268,8 +268,8 @@ func TestEventAttributesMatch6673PackedFormStillWidens(t *testing.T) {
 func TestEventAttributesMatch6673UnquotedPackedStaysOneExpression(t *testing.T) {
 	pol, _ := compilePolicy6673(t, `event-options {
   policy p {
-    events e;
-    attributes-match e.test-owner matches alice;
+    events ping_test_failed;
+    attributes-match ping_test_failed.test-owner matches alice;
   }
 }`)
 	if len(pol.AttributesMatch) != 1 {
@@ -278,7 +278,7 @@ func TestEventAttributesMatch6673UnquotedPackedStaysOneExpression(t *testing.T) 
 			len(pol.AttributesMatch), pol.AttributesMatch)
 	}
 	e := &Engine{}
-	if !e.attributesMatch(pol, rpm.Event{Name: "e", TestOwner: "alice"}) {
+	if !e.attributesMatch(pol, rpm.Event{Name: "ping_test_failed", TestOwner: "alice"}) {
 		t.Fatalf("unquoted packed constraint %q does not admit its own event",
 			pol.AttributesMatch)
 	}
@@ -338,7 +338,7 @@ func compileFlatSetPolicy6673(t *testing.T, cmds ...string) *config.EventPolicy 
 // path inside the op separates them.
 func TestEventChangeConfigCommands6673FlatSetBracketStaysExecutable(t *testing.T) {
 	pol := compileFlatSetPolicy6673(t,
-		"set event-options policy p events e",
+		"set event-options policy p events ping_test_failed",
 		`set event-options policy p then change-configuration commands [ "set system host-name foo" "delete system host-name" ]`,
 	)
 
@@ -380,12 +380,12 @@ func TestEventChangeConfigCommands6673FlatSetBracketStaysExecutable(t *testing.T
 // so the cost is a policy that never fires rather than one that always does.
 func TestEventAttributesMatch6673FlatSetBracketYieldsSeparateConstraints(t *testing.T) {
 	pol := compileFlatSetPolicy6673(t,
-		"set event-options policy p events e",
-		`set event-options policy p attributes-match [ "e.test-owner matches ^alice$" "e.test-name matches ^wan$" ]`,
+		"set event-options policy p events ping_test_failed",
+		`set event-options policy p attributes-match [ "ping_test_failed.test-owner matches ^alice$" "ping_test_failed.test-name matches ^wan$" ]`,
 	)
 
 	e := &Engine{}
-	authored := rpm.Event{Name: "e", TestOwner: "alice", TestName: "wan"}
+	authored := rpm.Event{Name: "ping_test_failed", TestOwner: "alice", TestName: "wan"}
 	if !e.attributesMatch(pol, authored) {
 		t.Fatalf("policy does not fire for the event it was written for "+
 			"(TestOwner=%q TestName=%q); compiled constraints = %q. A "+
@@ -404,8 +404,8 @@ func TestEventAttributesMatch6673FlatSetBracketYieldsSeparateConstraints(t *test
 		name string
 		ev   rpm.Event
 	}{
-		{"first member must bind", rpm.Event{Name: "e", TestOwner: "bob", TestName: "wan"}},
-		{"second member must bind", rpm.Event{Name: "e", TestOwner: "alice", TestName: "lan"}},
+		{"first member must bind", rpm.Event{Name: "ping_test_failed", TestOwner: "bob", TestName: "wan"}},
+		{"second member must bind", rpm.Event{Name: "ping_test_failed", TestOwner: "alice", TestName: "lan"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if e.attributesMatch(pol, tc.ev) {
@@ -429,7 +429,7 @@ func TestEventAttributesMatch6673FlatSetBracketYieldsSeparateConstraints(t *test
 // firsthand before choosing the reader fix instead.
 func TestEventChangeConfigCommands6673FlatSetUnquotedStaysOneCommand(t *testing.T) {
 	pol := compileFlatSetPolicy6673(t,
-		"set event-options policy p events e",
+		"set event-options policy p events ping_test_failed",
 		`set event-options policy p then change-configuration commands set system host-name foo`,
 	)
 	e := &Engine{}
@@ -456,7 +456,7 @@ func TestEventChangeConfigCommands6673FlatSetUnquotedStaysOneCommand(t *testing.
 // sibling-aware.
 func TestEventChangeConfigCommands6673FlatSetRepeatedStatementsAllSurvive(t *testing.T) {
 	pol := compileFlatSetPolicy6673(t,
-		"set event-options policy p events e",
+		"set event-options policy p events ping_test_failed",
 		`set event-options policy p then change-configuration commands "set system host-name foo"`,
 		`set event-options policy p then change-configuration commands "delete system host-name"`,
 	)

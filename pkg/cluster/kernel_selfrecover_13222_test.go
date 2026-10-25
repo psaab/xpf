@@ -92,4 +92,3 @@ func TestResetAllFailoverRejoinsAllDrainedRGs13222(t *testing.T) {
 		t.Errorf("rejoin promotion events = %v, want RG0 before RG1", promoted)
 	}
 }
-

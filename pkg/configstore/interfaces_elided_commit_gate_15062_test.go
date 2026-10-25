@@ -67,8 +67,8 @@ func TestElidedInterfaceMeetsBracedCheckTextGate15062(t *testing.T) {
 					t.Fatalf("elided %s unit0 = %+v, want address %s (#15062)", c.wantIface, u0, c.wantAddr)
 				}
 			}
-			if c.name == "ge address and mtu" && ic.MTU != 9000 {
-				t.Fatalf("elided ge-0/0/0 MTU=%d, want 9000 (#15062)", ic.MTU)
+			if c.name == "ge address and mtu" && ic.MTU != 8986 {
+				t.Fatalf("elided ge-0/0/0 MTU=%d, want 8986 (#15062; authored 9000 stored as effective MTU per #16594)", ic.MTU)
 			}
 			if c.name == "dhcp unit" {
 				u0 := ic.Units[0]

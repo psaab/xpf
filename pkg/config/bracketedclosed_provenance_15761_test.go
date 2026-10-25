@@ -177,9 +177,9 @@ func TestStripInactiveSyncsCloneFields15761(t *testing.T) {
 				Keys: []string{"policy-options"},
 				Children: []*Node{
 					{
-						Keys:            []string{"policy-statement", "P"},
-						KeysBracketed:   []bool{false, false, false, false, false, true, true},
-						BracketedClosed: true,
+						Keys:                           []string{"policy-statement", "P"},
+						KeysBracketed:                  []bool{false, false, false, false, false, true, true},
+						BracketedClosed:                true,
 						duplicateBlockMergeMarkers9023: []string{"m1", "m2"},
 						leafMemberGroups9862: []leafListMemberGroups9862{
 							{value: "ospf", quoted: false, groups: []string{"g1", "g2"}},

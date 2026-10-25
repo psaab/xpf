@@ -10,8 +10,8 @@ import (
 // be rejected for an undefined reference and mistaken for the gate under test.
 const ipsecPreamble9088 = `security {
     ike {
-        proposal PR { authentication-method pre-shared-keys; encryption-algorithm aes-256-cbc; authentication-algorithm sha-256; }
-        policy IKEP { proposals PR; }
+        proposal PR { authentication-method pre-shared-keys; encryption-algorithm aes-256-cbc; authentication-algorithm sha-256; dh-group group14; }
+        policy IKEP { proposals PR; pre-shared-key ascii-text test-psk-9088; }
         gateway G {
             ike-policy IKEP;
             address 203.0.113.9;
@@ -103,13 +103,21 @@ func TestPackedIPsecVPNRunIsNarrow9088(t *testing.T) {
 		t.Errorf("`gateway G` set ipsec-policy=%q bind-interface=%q, want only gateway + the bind context",
 			v.IPsecPolicy, v.BindInterface)
 	}
-	if v := one(t, "ipsec-policy P bind-interface st0;"); v.Gateway != "" || v.BindInterface != "st0" {
-		t.Errorf("`ipsec-policy P` set gateway=%q bind-interface=%q, want only ipsec-policy + the bind context",
+	// #16723: an ipsec-policy-only row has no gateway, so the #14139
+	// PSK gate (via the gateway's ike-policy) fires before narrowness
+	// can be observed; carry the gateway as context exactly like the
+	// bind-interface context the #10638 note already carries.
+	if v := one(t, "gateway G ipsec-policy P bind-interface st0;"); v.Gateway != "G" || v.BindInterface != "st0" {
+		t.Errorf("`ipsec-policy P` set gateway=%q bind-interface=%q, want only ipsec-policy + the gateway/bind context",
 			v.Gateway, v.BindInterface)
 	}
-	if v := one(t, "bind-interface st0.1;"); v.Gateway != "" || v.IPsecPolicy != "" {
-		t.Errorf("`bind-interface st0.1` alone set gateway=%q ipsec-policy=%q",
-			v.Gateway, v.IPsecPolicy)
+	// #16723: a bind-only row has no gateway/policy chain, so the
+	// #15989/#14139 gateway-scoping gates fire first; the row now
+	// asserts the bind value lands and nothing beyond the gateway
+	// context it carries is invented.
+	if v := one(t, "gateway G bind-interface st0.1;"); v.Gateway != "G" || v.IPsecPolicy != "" || v.BindInterface != "st0.1" {
+		t.Errorf("`bind-interface st0.1` set gateway=%q ipsec-policy=%q bind=%q, want only bind + the gateway context",
+			v.Gateway, v.IPsecPolicy, v.BindInterface)
 	}
 }
 

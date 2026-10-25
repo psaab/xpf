@@ -1,13 +1,8 @@
 package frr
 
 import (
-	"context"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 )
@@ -123,31 +118,5 @@ func TestFRRLoadInet6OnlyNeighborIPv4Deactivation11374(t *testing.T) {
 		t.Fatalf("config does not explicitly keep the peer inactive in IPv4 without an IPv4 route-map:\n%s", rendered)
 	}
 
-	bgpd := os.Getenv("FRR_BGPD_BINARY")
-	if bgpd == "" {
-		var err error
-		bgpd, err = exec.LookPath("bgpd")
-		if err != nil {
-			for _, candidate := range []string{"/usr/lib/frr/bgpd", "/usr/libexec/frr/bgpd"} {
-				if _, statErr := os.Stat(candidate); statErr == nil {
-					bgpd = candidate
-					break
-				}
-			}
-		}
-	}
-	if bgpd == "" {
-		t.Skip("FRR bgpd is not installed; FRR config-load validation unavailable")
-	}
-
-	confPath := filepath.Join(t.TempDir(), "frr.conf")
-	if err := os.WriteFile(confPath, []byte(rendered), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	output, err := exec.CommandContext(ctx, bgpd, "-C", "-f", confPath).CombinedOutput()
-	if err != nil {
-		t.Fatalf("FRR rejected the inet6-only BGP config: %v\n%s\nconfig:\n%s", err, output, rendered)
-	}
+	bgpdOracleConfig16723(t, rendered)
 }

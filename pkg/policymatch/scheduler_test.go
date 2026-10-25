@@ -29,11 +29,28 @@ func inactiveFnFor(active map[string]bool) func(string) bool {
 // agree with the runtime (policy.rs try_match_rule), which drops a
 // scheduler-inactive rule BEFORE app/address matching. Reverting the skip in
 // ruleMatches makes case #1 (inactive scheduled permit -> default-deny) go RED.
+// withDefinedSchedulers16723 defines the schedulers these fixtures
+// bind, as a committed config would: the #12244 content-rejection SSOT
+// poisons a rule naming an UNDEFINED scheduler (config-wide
+// ContentRejected), which otherwise masks the scheduler-inactivity
+// verdict under test. Mutating the shared fixture (not cfgWith, whose
+// other callers may deliberately use undefined names) keeps the
+// subject isolated.
+func withDefinedSchedulers16723(cfg *config.Config, names ...string) *config.Config {
+	if cfg.Schedulers == nil {
+		cfg.Schedulers = make(map[string]*config.SchedulerConfig, len(names))
+	}
+	for _, n := range names {
+		cfg.Schedulers[n] = &config.SchedulerConfig{Name: n}
+	}
+	return cfg
+}
+
 func TestSchedulerInactiveSkipsLikeRuntime(t *testing.T) {
 	// Case 1: an inactive scheduled PERMIT must NOT be reported as a match;
 	// the verdict falls through to the configured default-policy (deny).
 	t.Run("inactive scheduled permit -> default deny", func(t *testing.T) {
-		cfg := cfgWith(config.SecurityConfig{
+		cfg := withDefinedSchedulers16723(cfgWith(config.SecurityConfig{
 			DefaultPolicy: config.PolicyDeny,
 			Policies: []*config.ZonePairPolicies{
 				zonePair("trust", "untrust",
@@ -41,7 +58,7 @@ func TestSchedulerInactiveSkipsLikeRuntime(t *testing.T) {
 						Applications: []string{"any"},
 					}), "after-hours")),
 			},
-		}, config.ApplicationsConfig{})
+		}, config.ApplicationsConfig{}), "after-hours", "business-hours", "maint")
 		q := Query{
 			FromZone:         "trust",
 			ToZone:           "untrust",
@@ -60,9 +77,14 @@ func TestSchedulerInactiveSkipsLikeRuntime(t *testing.T) {
 	})
 
 	// Case 2: an inactive scheduled DENY must be skipped so a LATER active
-	// permit wins — the runtime would forward such traffic.
+	// permit wins — the runtime would forward such traffic. (Ordinary
+	// inactive state, NO fail-closed latch: under the latch the builder
+	// keeps the deny eligible and this fall-through must NOT happen —
+	// pinned separately by TestSchedulerLatchedDenyStaysEligible16723.
+	// This case uses the name-only predicate, which is exactly the
+	// ordinary-inactive disposition.)
 	t.Run("inactive scheduled deny -> falls through to active permit", func(t *testing.T) {
-		cfg := cfgWith(config.SecurityConfig{
+		cfg := withDefinedSchedulers16723(cfgWith(config.SecurityConfig{
 			DefaultPolicy: config.PolicyDeny,
 			Policies: []*config.ZonePairPolicies{
 				zonePair("trust", "untrust",
@@ -71,7 +93,7 @@ func TestSchedulerInactiveSkipsLikeRuntime(t *testing.T) {
 					}), "business-hours"),
 					permit("allow-rest", config.PolicyMatch{Applications: []string{"any"}})),
 			},
-		}, config.ApplicationsConfig{})
+		}, config.ApplicationsConfig{}), "after-hours", "business-hours", "maint")
 		q := Query{
 			FromZone:         "trust",
 			ToZone:           "untrust",
@@ -88,7 +110,7 @@ func TestSchedulerInactiveSkipsLikeRuntime(t *testing.T) {
 
 	// Case 3: a scheduler flip changes the verdict for the same query/config.
 	t.Run("scheduler flip changes verdict", func(t *testing.T) {
-		cfg := cfgWith(config.SecurityConfig{
+		cfg := withDefinedSchedulers16723(cfgWith(config.SecurityConfig{
 			DefaultPolicy: config.PolicyDeny,
 			Policies: []*config.ZonePairPolicies{
 				zonePair("trust", "untrust",
@@ -96,7 +118,7 @@ func TestSchedulerInactiveSkipsLikeRuntime(t *testing.T) {
 						Applications: []string{"any"},
 					}), "maint")),
 			},
-		}, config.ApplicationsConfig{})
+		}, config.ApplicationsConfig{}), "after-hours", "business-hours", "maint")
 		baseQ := func(active bool) Query {
 			return Query{
 				FromZone:         "trust",
@@ -121,13 +143,13 @@ func TestSchedulerInactiveSkipsLikeRuntime(t *testing.T) {
 	// active-state map contents. PolicyInactiveFn must never be consulted for a
 	// policy with an empty scheduler name.
 	t.Run("non-scheduled policy unchanged", func(t *testing.T) {
-		cfg := cfgWith(config.SecurityConfig{
+		cfg := withDefinedSchedulers16723(cfgWith(config.SecurityConfig{
 			DefaultPolicy: config.PolicyDeny,
 			Policies: []*config.ZonePairPolicies{
 				zonePair("trust", "untrust",
 					permit("plain-allow", config.PolicyMatch{Applications: []string{"any"}})),
 			},
-		}, config.ApplicationsConfig{})
+		}, config.ApplicationsConfig{}), "after-hours", "business-hours", "maint")
 		q := Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80}
 
 		// No PolicyInactiveFn (offline surface / pre-#3104 behavior).
@@ -169,7 +191,7 @@ func TestSchedulerInactiveSkipsLikeRuntime(t *testing.T) {
 // the simulator side; the dataplane side is pinned by the snapshot builder test
 // (pkg/dataplane/userspace: "fail-closed true" with nil scheduler state).
 func TestSchedulerUnavailableStateFailsClosed(t *testing.T) {
-	cfg := cfgWith(config.SecurityConfig{
+	cfg := withDefinedSchedulers16723(cfgWith(config.SecurityConfig{
 		DefaultPolicy: config.PolicyDeny,
 		Policies: []*config.ZonePairPolicies{
 			zonePair("trust", "untrust",
@@ -177,7 +199,7 @@ func TestSchedulerUnavailableStateFailsClosed(t *testing.T) {
 					Applications: []string{"any"},
 				}), "after-hours")),
 		},
-	}, config.ApplicationsConfig{})
+	}, config.ApplicationsConfig{}), "after-hours", "business-hours", "maint")
 
 	// inactiveFnFor(nil) is exactly what the live surfaces thread when
 	// per-scheduler active-state is unavailable (accessor not wired / early

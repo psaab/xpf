@@ -2,7 +2,6 @@ package userspace
 
 import (
 	"testing"
-
 )
 
 // Test_3063_RuntimePolicyIDsMatchSnapshot verifies the exported display helper

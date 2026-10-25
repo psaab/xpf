@@ -35,6 +35,7 @@ func cfg9406(t *testing.T) *config.Config {
 	text := `
 interfaces {
     ge-0/0/0 {
+        vlan-tagging;
         unit 0 { family inet { address 10.0.1.1/24; } }
         unit 80 { vlan-id 180; family inet { address 10.0.80.1/24; } }
     }

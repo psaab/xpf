@@ -34,10 +34,17 @@ func TestGetSessionSummaryFiltered15236(t *testing.T) {
 	mk := func(proto uint8, dstPort uint16) struct {
 		key dataplane.SessionKey
 		val dataplane.SessionValue
-	} { var e struct {
-		key dataplane.SessionKey
-		val dataplane.SessionValue
-	}; e.key = dataplane.SessionKey{Protocol: proto, DstPort: hostToNetwork16(dstPort)}; copy(e.key.SrcIP[:], net.ParseIP("10.0.0.1").To4()); copy(e.key.DstIP[:], net.ParseIP("10.0.0.2").To4()); e.val = dataplane.SessionValue{State: dataplane.SessStateEstablished}; return e }
+	} {
+		var e struct {
+			key dataplane.SessionKey
+			val dataplane.SessionValue
+		}
+		e.key = dataplane.SessionKey{Protocol: proto, DstPort: hostToNetwork16(dstPort)}
+		copy(e.key.SrcIP[:], net.ParseIP("10.0.0.1").To4())
+		copy(e.key.DstIP[:], net.ParseIP("10.0.0.2").To4())
+		e.val = dataplane.SessionValue{State: dataplane.SessStateEstablished}
+		return e
+	}
 	dp := &summaryFilterDP15236{Manager: dataplane.New()}
 	dp.v4 = append(dp.v4, mk(6, 443), mk(17, 53), mk(6, 80))
 	s := newSummaryFieldsServer(t, dp)

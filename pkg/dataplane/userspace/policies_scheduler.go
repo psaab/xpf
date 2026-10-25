@@ -96,3 +96,23 @@ func PolicyInactiveFn(activeState map[string]bool) func(schedulerName string) bo
 		return policyRuleInactive(schedulerName, activeState)
 	}
 }
+
+// PolicyInactiveFnWithLatch is PolicyInactiveFn with the snapshot
+// builder's action-aware dispositions (#16723): while the fail-closed
+// latch is set, a scheduled DENY/REJECT stays eligible (suppressing it
+// would fail open to a later permit), and a policy whose scheduler the
+// tolerant compile marked Unresolvable (#16010) likewise keeps its
+// DENY/REJECT eligible while its permits fail closed. This is the
+// predicate the live simulator must use to agree with the dataplane:
+// PolicyInactiveFn alone skips a latched deny the builder publishes
+// as active, so the simulator certified a later permit the runtime
+// never reaches. cfg may be nil (programmatic fixtures), in which
+// case only the latch disposition applies.
+func PolicyInactiveFnWithLatch(cfg *config.Config, activeState map[string]bool, failClosed bool) func(*config.Policy) bool {
+	return func(pol *config.Policy) bool {
+		if pol == nil {
+			return false
+		}
+		return policyRuleInactiveForScheduler(cfg, pol.SchedulerName, pol.Action, activeState, failClosed)
+	}
+}

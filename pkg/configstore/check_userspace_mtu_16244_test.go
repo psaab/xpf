@@ -23,7 +23,7 @@ func TestCheckTextRejectsJumboBoundMTU16244(t *testing.T) {
 	if err == nil {
 		t.Fatal("CheckText ACCEPTED MTU 9000 on a dataplane-bound interface")
 	}
-	for _, want := range []string{"ge-0/0/1", "9000", "#16244"} {
+	for _, want := range []string{"ge-0/0/1", "8986", "3566"} { // #16723: refusal now names the effective MTU (8986) and the budget (3566)
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("CheckText refusal %q does not name %q", err.Error(), want)
 		}

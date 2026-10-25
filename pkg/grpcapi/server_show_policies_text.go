@@ -65,6 +65,16 @@ type policySchedulerStateProvider interface {
 	PolicySchedulerActiveState() map[string]bool
 }
 
+// policySchedulerLatchProvider is the optional capability carrying the
+// DESIRED scheduler state + fail-closed latch (#16723). When present,
+// the simulator predicate is built with the builder's action-aware
+// dispositions; otherwise it falls back to the name-only predicate
+// (whose #3414 unavailable-state direction is unchanged, and stricter
+// for denies than the latch — fail-closed, never fail-open).
+type policySchedulerLatchProvider interface {
+	PolicySchedulerDesiredStateAndFailClosed() (map[string]bool, bool)
+}
+
 // policySchedulerActiveState returns the live scheduler active-state map
 // and whether it could be queried. ok=false means the runtime state is
 // unknown and the caller must not claim any policy is scheduler-inactive.
@@ -93,6 +103,26 @@ func (s *Server) policySchedulerActiveState() (state map[string]bool, ok bool) {
 func (s *Server) policyInactiveFn() func(string) bool {
 	state, _ := s.policySchedulerActiveState()
 	return dpuserspace.PolicyInactiveFn(state)
+}
+
+// policyInactiveForFn mirrors the CLI's action-aware predicate
+// (#16723): latch-aware when the dataplane carries the desired
+// scheduler state + latch, else the name-only predicate adapted
+// (stricter for denies — fail-closed).
+func (s *Server) policyInactiveForFn(cfg *config.Config) func(*config.Policy) bool {
+	if s != nil && s.dp != nil {
+		if lp, ok := s.dpProbe().(policySchedulerLatchProvider); ok {
+			state, failClosed := lp.PolicySchedulerDesiredStateAndFailClosed()
+			return dpuserspace.PolicyInactiveFnWithLatch(cfg, state, failClosed)
+		}
+	}
+	nameOnly := s.policyInactiveFn()
+	return func(pol *config.Policy) bool {
+		if pol == nil {
+			return false
+		}
+		return nameOnly(pol.SchedulerName)
+	}
 }
 
 // policyDetailStateSuffix returns the per-policy detail header suffix for

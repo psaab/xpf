@@ -71,7 +71,7 @@ func TestValidateStateFilePath_10769(t *testing.T) {
 	if err := ValidateStateFilePath(atLimit); err != nil {
 		t.Errorf("ValidateStateFilePath(at-limit) = %v, want accepted", err)
 	}
-	if err := ValidateStateFilePath(atLimit+"a"); err == nil {
+	if err := ValidateStateFilePath(atLimit + "a"); err == nil {
 		t.Error("ValidateStateFilePath(over-limit) = nil, want rejection")
 	}
 }

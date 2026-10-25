@@ -692,7 +692,7 @@ func (c *CLI) showMatchPolicies(cfg *config.Config, args []string) error {
 		FeedPublicationDebt: c.feedPublicationDebt(),
 		// #3104: skip scheduler-inactive policies like the runtime does, so the
 		// simulator falls through to the next active rule / default-policy.
-		PolicyInactiveFn: c.policyInactiveFn(),
+		PolicyInactiveForFn: c.policyInactiveForFn(cfg),
 	})
 	if res.PostNATInputNote != "" {
 		fmt.Printf("NOTE: %s\n", res.PostNATInputNote)

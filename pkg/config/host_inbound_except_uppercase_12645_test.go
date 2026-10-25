@@ -112,6 +112,7 @@ func TestHostInboundExceptUppercaseAliasTuples12645(t *testing.T) {
 		}
 	}
 }
+
 // Both override scopes are lenient-loaded independently before their tokens
 // are merged. Pin each direction so alias canonicalization cannot work only
 // within a stanza while leaving the physical/unit union exposed.

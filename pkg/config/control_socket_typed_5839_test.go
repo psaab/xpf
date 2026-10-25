@@ -60,7 +60,7 @@ func TestValidateUnixSocketPath_5839(t *testing.T) {
 	if err := ValidateUnixSocketPath(atLimit); err != nil {
 		t.Errorf("ValidateUnixSocketPath(<%d octets>) = %v, want accepted", maxUnixSocketPathLen, err)
 	}
-	if err := ValidateUnixSocketPath(atLimit+"a"); err == nil {
+	if err := ValidateUnixSocketPath(atLimit + "a"); err == nil {
 		t.Errorf("ValidateUnixSocketPath(<%d octets>) = nil, want rejection", maxUnixSocketPathLen+1)
 	}
 }

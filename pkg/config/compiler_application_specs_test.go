@@ -1018,6 +1018,7 @@ applications {
 		assertExpanded(t, cfg, "plain", []string{"plain-t-http"})
 	})
 }
+
 // #15120 (A86-01, #14340 residual): in a container-form application term,
 // header tokens packed beside the term name (`t-ssh destination-port 22 { ... }`)
 // were silently discarded by expandContainerTerm14340, which built

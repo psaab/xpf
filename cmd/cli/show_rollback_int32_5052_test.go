@@ -65,9 +65,12 @@ func (f *showRollbackRecorderClient) GetStatus(
 // before any RPC — never truncate to a valid-looking slot and render it.
 func TestShowRollbackDisplaySelectorOverflowNoRPC_5052(t *testing.T) {
 	// 4294967297 == 2^32+1 -> int32 wraps to 1; 4294967296 == 2^32 -> 0;
-	// 2147483648 == MaxInt32+1 -> ErrRange; plus a malformed and a
-	// non-positive token that must also be rejected.
-	overflow := []string{"4294967297", "4294967296", "2147483648", "foo", "0"}
+	// 2147483648 == MaxInt32+1 -> ErrRange; plus a malformed token.
+	// #16723: "0" left this list when #15657 made rollback 0 the active
+	// configuration (min 0 at every parse site); rejecting it here
+	// contradicted the operational compare-0 contract pinned by
+	// pkg/configstore's rollback_compare_active_15657 tests.
+	overflow := []string{"4294967297", "4294967296", "2147483648", "foo"}
 
 	for _, arg := range overflow {
 		arg := arg
@@ -156,4 +159,25 @@ func TestShowRollbackDisplaySelectorValidPassthrough_5052(t *testing.T) {
 			t.Fatalf("ShowCompare calls=%d RollbackN=%d; want 1 / %d", fake.compareCalls, fake.compareN, maxInt32)
 		}
 	})
+}
+
+// #15657/#16723: rollback 0 (the active configuration) is a VALID
+// selector on every display surface and passes through as N=0.
+func TestShowRollbackZeroIsActiveConfig_5052_15657(t *testing.T) {
+	fake := &showRollbackRecorderClient{}
+	c := configModeCtl(fake)
+	if err := c.dispatchOperational("show system rollback 0"); err != nil {
+		t.Fatalf("show system rollback 0 must succeed (active config): %v", err)
+	}
+	if fake.rollbackCalls != 1 || fake.rollbackN != 0 {
+		t.Fatalf("ShowRollback calls=%d N=%d; want 1 / 0", fake.rollbackCalls, fake.rollbackN)
+	}
+	fake2 := &showRollbackRecorderClient{}
+	c2 := configModeCtl(fake2)
+	if err := c2.dispatchOperational("show system rollback compare 0"); err != nil {
+		t.Fatalf("show system rollback compare 0 must succeed: %v", err)
+	}
+	if fake2.compareCalls != 1 || fake2.compareN != 0 {
+		t.Fatalf("ShowCompare calls=%d N=%d; want 1 / 0", fake2.compareCalls, fake2.compareN)
+	}
 }

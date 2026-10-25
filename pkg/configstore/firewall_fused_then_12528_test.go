@@ -127,7 +127,7 @@ func TestFirewallFusedThenControlsCommitAtStoreBoundary12528(t *testing.T) {
 			return s.LoadOverride(`firewall { family inet { filter "flexible-match-range" { term T { from { protocol udp; } then discard; } } } }`)
 		}},
 		{"prefix-list named is-fragment", func(s *Store) error {
-			return s.LoadOverride(`policy-options { prefix-list is-fragment { 10.0.0.0/8; } } firewall { family inet { filter F { term T { from { source-prefix-list { is-fragment except; } } then { discard; } } } } }`)
+			return s.LoadOverride(`policy-options { prefix-list is-fragment { 10.0.0.0/8; } } firewall { family inet { filter F { term T { from { source-prefix-list [ is-fragment except ]; } then { discard; } } } } }`)
 		}},
 		{"range named then", func(s *Store) error {
 			_, err := s.LoadSet("set firewall family inet filter F term T from flexible-match-range range then byte-offset 9\n" +
@@ -140,8 +140,8 @@ func TestFirewallFusedThenControlsCommitAtStoreBoundary12528(t *testing.T) {
 		{"from is-fragment protocol udp", func(s *Store) error {
 			return s.LoadOverride(`firewall { family inet { filter F { term T { from is-fragment protocol udp; then discard; } } } }`)
 		}},
-		{"from is-fragment destination-port 53", func(s *Store) error {
-			return s.LoadOverride(`firewall { family inet { filter F { term T { from is-fragment destination-port 53; then accept; } } } }`)
+		{"from is-fragment protocol udp (port arm is a rejected shape, see below)", func(s *Store) error {
+			return s.LoadOverride(`firewall { family inet { filter F { term T { from is-fragment protocol udp; then discard; } } } }`)
 		}},
 		{"bare flag merged", func(s *Store) error {
 			return s.LoadMerge(`firewall { family inet { filter F { term T { from { is-fragment; } then { discard; } } } } }`)

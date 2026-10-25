@@ -14,12 +14,23 @@ import (
 // silently restoring the pre-divert claim that INPUT is delivered.
 func TestIpsecAdvisoryMatchesInstalledDivertDrop10517(t *testing.T) {
 	tree := &config.ConfigTree{}
-	path, err := config.ParseSetCommand("set security ipsec vpn myvpn bind-interface st0.0")
-	if err != nil {
-		t.Fatalf("ParseSetCommand: %v", err)
-	}
-	if err := tree.SetPath(path); err != nil {
-		t.Fatalf("SetPath: %v", err)
+	// #16723: the fixture must satisfy the later strict gates (#14139 PSK
+	// presence, #15989 gateway scoping) that now reject a bare bind-only
+	// VPN at CompileConfig; the #5619 advisory under test is emitted
+	// regardless once the tunnel compiles.
+	for _, cmd := range []string{
+		"set security ike gateway gw1 address 192.0.2.1",
+		"set security ipsec vpn myvpn ike gateway gw1",
+		"set security ipsec vpn myvpn pre-shared-key test-psk-10517",
+		"set security ipsec vpn myvpn bind-interface st0.0",
+	} {
+		path, err := config.ParseSetCommand(cmd)
+		if err != nil {
+			t.Fatalf("ParseSetCommand: %v", err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath: %v", err)
+		}
 	}
 	cfg, err := config.CompileConfig(tree)
 	if err != nil {

@@ -1273,13 +1273,20 @@ func TestKeaSubnetIDStableAcrossSpellingChange(t *testing.T) {
 	const newSpelling = "10.0.1.5/24"
 	render := func(subnet string) int {
 		t.Helper()
-		cfg := v4Config()
+		cfg := v4Config("ge-0-0-0")
 		cfg.DHCPLocalServer.Groups["g0"].Pools[0].Subnet = subnet
 		m, _ := testManager(t, map[string]bool{}, "")
 		if err := m.generateKea4Config(cfg); err != nil {
 			t.Fatalf("generate Kea config for %s: %v", subnet, err)
 		}
-		return subnetIDMap(t, m.confPath4, "4")[subnet]
+		ids := subnetIDMap(t, m.confPath4, "4")
+		if len(ids) != 1 {
+			t.Fatalf("rendered %d subnets for %s, want exactly 1: %v", len(ids), subnet, ids)
+		}
+		for _, id := range ids {
+			return id
+		}
+		return 0
 	}
 
 	// A lease recorded under the old config carries this subnet_id in Kea's

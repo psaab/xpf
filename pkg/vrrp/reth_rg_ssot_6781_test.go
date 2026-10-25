@@ -17,6 +17,15 @@ import (
 // decide ownership from a `RedundancyGroup` comparison or a `"reth"` name test
 // of its own. Both must route through config.RethRGOwners.
 //
+// #16723 re-anchor: the direct-mode collector's body moved to pkg/config
+// (Config.RethVIPsForRG in reth_vips.go, #15038) and the vrrp.RethVIPsForRG
+// spelling kept here is a one-line delegate to it. Scanning only the
+// delegate for RethRGOwners() therefore names the wrapper, not the
+// collector: the census now scans CollectRethInstances in vrrp.go AND
+// Config.RethVIPsForRG in ../config/reth_vips.go, and separately pins
+// that the delegate routes to the config collector and carries no
+// private ownership reading of its own.
+//
 // The two tests fail in different ways on purpose. Deleting the shared
 // predicate and hand-rolling an equivalent reading in both collectors keeps the
 // behavioural test GREEN and reds this one.
@@ -27,12 +36,30 @@ func TestRethOwnershipCollectorsUseTheSharedPredicate(t *testing.T) {
 	}
 	body := stripLineComments(string(src))
 
-	for _, fn := range []string{"CollectRethInstances", "RethVIPsForRG"} {
+	cfgSrc, err := os.ReadFile("../config/reth_vips.go")
+	if err != nil {
+		t.Fatalf("read ../config/reth_vips.go: %v", err)
+	}
+	cfgBody := stripLineComments(string(cfgSrc))
+
+	// Each collector is scanned in the file that now owns its body:
+	// CollectRethInstances stayed in vrrp.go; the direct-mode collector
+	// is Config.RethVIPsForRG in pkg/config/reth_vips.go (#15038/#16723).
+	collectors := []struct {
+		fn   string
+		src  string
+		file string
+	}{
+		{"CollectRethInstances", body, "vrrp.go"},
+		{"RethVIPsForRG", cfgBody, "../config/reth_vips.go"},
+	}
+	for _, col := range collectors {
+		fn := col.fn
 		t.Run(fn, func(t *testing.T) {
-			b, ok := funcBody(body, fn)
+			b, ok := funcBody(col.src, fn)
 			if !ok {
-				t.Fatalf("could not locate func %s in vrrp.go — this guard is "+
-					"anchored on the function name; rename it here too", fn)
+				t.Fatalf("could not locate func %s in %s — this guard is "+
+					"anchored on the function name; rename it here too", fn, col.file)
 			}
 			if !strings.Contains(b, "RethRGOwners()") {
 				t.Errorf("%s does not call cfg.RethRGOwners(); RETH redundancy-"+
@@ -53,6 +80,29 @@ func TestRethOwnershipCollectorsUseTheSharedPredicate(t *testing.T) {
 			}
 		})
 	}
+
+	// The vrrp.RethVIPsForRG delegate must stay a delegate: it routes to
+	// Config.RethVIPsForRG and must not grow a private ownership reading
+	// (a RedundancyGroup comparison or a "reth" name test) of its own.
+	t.Run("RethVIPsForRG delegate", func(t *testing.T) {
+		b, ok := funcBody(body, "RethVIPsForRG")
+		if !ok {
+			t.Fatalf("could not locate func RethVIPsForRG in vrrp.go — this guard is " +
+				"anchored on the function name; rename it here too")
+		}
+		if !strings.Contains(b, "cfg.RethVIPsForRG(rgID)") {
+			t.Errorf("vrrp.RethVIPsForRG does not delegate to cfg.RethVIPsForRG(rgID); " +
+				"the direct-mode collector must stay the pkg/config body (#15038)")
+		}
+		if m := regexp.MustCompile(`\.RedundancyGroup\s*(<=|>=|==|!=|>|<)`).FindString(b); m != "" {
+			t.Errorf("vrrp.RethVIPsForRG compares .RedundancyGroup directly (%q); "+
+				"ownership is decided by config.RethRGOwners (#6781)", m)
+		}
+		if strings.Contains(b, `HasPrefix(name, "reth")`) ||
+			strings.Contains(b, `HasPrefix(ifName, "reth")`) {
+			t.Errorf("vrrp.RethVIPsForRG name-tests for \"reth\"; use config.RethRGOwners (#6781)")
+		}
+	})
 }
 
 // stripLineComments removes //-comments so the scan cannot be satisfied — or

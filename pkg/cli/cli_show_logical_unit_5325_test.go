@@ -27,6 +27,7 @@ func logicalUnitCLIStore(t *testing.T) *CLI {
 	if err := store.LoadOverride(`
 interfaces {
     ge-0/0/9 {
+        vlan-tagging;
         unit 50 {
             vlan-id 50;
             family inet {
@@ -35,6 +36,7 @@ interfaces {
         }
     }
     ge-0/0/1 {
+        vlan-tagging;
         unit 10 {
             vlan-id 10;
             family inet {
