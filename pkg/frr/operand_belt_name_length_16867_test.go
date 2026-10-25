@@ -354,3 +354,97 @@ func TestApplyFullRefusesAliasPair16867(t *testing.T) {
 		t.Fatalf("control: overlong prefix-list alone must apply (aliased), got: %v", err)
 	}
 }
+
+// Gate5 Astra F1 witness (deterministic, computed in the gate report):
+// the bounded alias ERASES generated-family suffix separation. With
+// X = "a"x113: P = X+"R133605" (redist raw P+"-static-xpf-redist", 138
+// bytes) and C = X+"C6471" with B="B" (composed raw C+"-B-xpf-chain",
+// 130 bytes) share the 112-byte fragment AND the 4-byte hash b3656692,
+// so both render as the identical 128-byte final name. No per-family
+// guard compares composed-BGP finals against redist finals. The
+// cross-family belt (emittedRouteMapFinalCollision16867, wired into
+// ApplyFull) must refuse the exact witness through REAL ApplyFull —
+// before any write or reload — and a neighboring non-colliding control
+// must apply.
+//
+// FAIL-ON-REVERT: removing emittedRouteMapFinalCollision16867 (or its
+// ApplyFull call) lets the witness apply fused.
+func witnessNames16867() (pName, cName, bName, final string) {
+	x := strings.Repeat("a", 113)
+	return x + "R133605", x + "C6471", "B",
+		strings.Repeat("a", 112) + "-xpfesc-b3656692"
+}
+
+func witnessFC16867(pName, cName, bName string, collide bool) *FullConfig {
+	cMember := cName
+	if !collide {
+		cMember = "CCTRL" // short, non-colliding chain member
+	}
+	po := &config.PolicyOptionsConfig{PolicyStatements: map[string]*config.PolicyStatement{
+		pName: {Name: pName, Terms: []*config.PolicyTerm{
+			{Name: "t1", FromProtocols: []string{"static"}, Action: "accept"},
+		}},
+		cMember: {Name: cMember, Terms: []*config.PolicyTerm{{Name: "t1", Action: "reject"}}},
+		bName:   {Name: bName, Terms: []*config.PolicyTerm{{Name: "t1", Action: "reject"}}},
+	}}
+	bgp := &config.BGPConfig{
+		LocalAS: 65000,
+		Neighbors: []*config.BGPNeighbor{
+			{Address: "10.0.0.2", PeerAS: 65001, FamilyInet: true, Import: []string{cMember, bName}},
+		},
+		Export: []string{pName},
+	}
+	return &FullConfig{BGP: bgp, PolicyOptions: po}
+}
+
+func TestApplyFullRefusesCrossFamilyAliasWitness16867(t *testing.T) {
+	pName, cName, bName, final := witnessNames16867()
+	// Fixture sanity: the two raw generated names really do alias to
+	// the witness final (guards against a vacuous fixture).
+	if got := frrName(pName + "-static-xpf-redist"); got != final {
+		t.Fatalf("redist raw aliases to %q, want witness %q", got, final)
+	}
+	if got := frrName(cName + "-B-xpf-chain"); got != final {
+		t.Fatalf("composed raw aliases to %q, want witness %q", got, final)
+	}
+
+	confPath := filepath.Join(t.TempDir(), "frr.conf")
+	if err := os.WriteFile(confPath, []byte("log syslog informational\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	exec := &fakeExecutor{}
+	m := &Manager{frrConf: confPath, exec: exec}
+	lastGood := &FullConfig{BGP: &config.BGPConfig{
+		LocalAS:   64512,
+		Neighbors: []*config.BGPNeighbor{{Address: "198.51.100.1", PeerAS: 64513, FamilyInet: true}},
+	}}
+	if err := m.ApplyFull(lastGood); err != nil {
+		t.Fatalf("ApplyFull(last-good): %v", err)
+	}
+	before, err := os.ReadFile(confPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloadsBefore := exec.frrReloadPyCalls
+
+	err = m.ApplyFull(witnessFC16867(pName, cName, bName, true))
+	if err == nil || !strings.Contains(err.Error(), "#16867") || !strings.Contains(err.Error(), final) {
+		t.Fatalf("ApplyFull accepted the cross-family alias witness; want a fail-closed #16867 refusal naming %q, got %v", final, err)
+	}
+	after, err := os.ReadFile(confPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("refused witness rewrote frr.conf:\n got %q\nwant %q", after, before)
+	}
+	if exec.frrReloadPyCalls != reloadsBefore {
+		t.Fatalf("refused witness triggered a reload (reloads %d -> %d); refusal must precede write/reload", reloadsBefore, exec.frrReloadPyCalls)
+	}
+
+	// Neighboring non-colliding control: same shape, chain member
+	// renamed off the colliding fragment — must apply successfully.
+	if err := m.ApplyFull(witnessFC16867(pName, cName, bName, false)); err != nil {
+		t.Fatalf("control: non-colliding neighbor config must apply, got: %v", err)
+	}
+}

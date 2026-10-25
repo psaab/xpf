@@ -315,6 +315,15 @@ The render belts cover the path the gate cannot reach:
   into `ApplyFull`) refuse any same-class pair whose final rendered
   names coincide; `bgpComposedChainCollision` likewise compares
   composed chain names AFTER `frrName`.
+  Gate5: the bounded alias also erases GENERATED-family suffix
+  separation (a composed `-xpf-chain` final can equal a per-source
+  `-xpf-redist` final), so `emittedRouteMapFinalCollision16867`
+  (ApplyFull, after every per-family belt) compares final identities
+  ACROSS all emitted route-map populations — operator, composed BGP,
+  composed redist, per-source/variant redist, narrowed aliases, QNH
+  metric maps, and the fixed generated maps — and refuses before any
+  write or reload. The per-family guards and the #16871 registry are
+  unchanged; this belt only adds the cross-family union.
 
 `TestEveryRenderedObjectNameIsOneTokenAndResolves9493` is a behavioural census,
 not a list of sites. It renders a config whose every name carries a space and

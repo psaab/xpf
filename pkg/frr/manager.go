@@ -708,6 +708,15 @@ func (m *Manager) ApplyFull(fc *FullConfig) error {
 		if err := frrNameAliasCollision(fc.PolicyOptions); err != nil {
 			return err
 		}
+		// #16867 Gate5 cross-family belt, same posture: the bounded
+		// alias erases generated-family suffix separation, so a composed
+		// BGP chain final and a per-source redist final (and narrowed /
+		// QNH / fixed generated finals) can coincide across families —
+		// a collision no per-family guard compares. Refuse before any
+		// write or reload; FRR keeps its last-good config.
+		if err := emittedRouteMapFinalCollision16867(fc); err != nil {
+			return err
+		}
 	}
 
 	section, overlays := m.buildManagedSectionWithQNH11447(fc)
