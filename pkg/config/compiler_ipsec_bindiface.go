@@ -6,6 +6,19 @@ import (
 	"strings"
 )
 
+// MaxRouteBasedVPNCaptureTunnels is the maximum number of distinct
+// route-based VPN capture tunnels (distinct XFRM if_ids) in one IPsec
+// capture generation (#16699). The daemon capture allocator
+// (pkg/daemon: ipsecCaptureMaxTunnels) owns four NFQUEUE provenance
+// classes per tunnel and bounds a generation to this many tunnels;
+// pkg/daemon aliases this constant so commit-time and runtime agree.
+// A config beyond the limit cannot be represented by the capture plan:
+// every apply would install a box-wide QUEUE_OPEN quarantine. Strict
+// commit therefore rejects it (see the #16699 arm in
+// validateSecureTunnelBindInterfaceAST); the lenient load/peer-sync
+// path warns and still boots (#1960).
+const MaxRouteBasedVPNCaptureTunnels = 32
+
 // compiler_ipsec_bindiface.go carries the #2933 reject-at-commit gate for two
 // distinct secure-tunnel `bind-interface` aliases that derive the SAME Linux
 // XFRM if_id.
@@ -241,6 +254,36 @@ func validateSecureTunnelBindInterfaceAST(nodes []*Node, lenient bool) ([]string
 				"st0.1); without one every apply installs a box-wide capture "+
 				"quarantine dropping all non-loopback traffic (#10638)",
 			name); err != nil {
+			return nil, err
+		}
+	}
+
+	// #16699: fail closed when the distinct capture-tunnel count (distinct
+	// non-zero XFRM if_ids, i.e. len(byID)) exceeds the capture generation
+	// bound. Each distinct if_id owns four NFQUEUE provenance classes in
+	// the daemon capture plan, so a 33rd distinct tunnel cannot be
+	// represented: buildIpsecCaptureQueuePlan would emit a 129th key and
+	// stageIpsecCapture would install a box-wide QUEUE_OPEN quarantine on
+	// every apply while the commit reports success. Count DISTINCT if_ids,
+	// not VPN names: VPNs sharing one bind-interface (permitted by #11380
+	// when selectors are disjoint) share one capture tunnel, and aliases
+	// deriving the same if_id (st0 vs st0.0) count once here; the #2933
+	// arm below rejects that aliasing separately. Strict hard-rejects
+	// naming the limit; lenient warns so a persisted/peer-synced
+	// over-limit config still BOOTS (#1960) — the daemon QUEUE_OPEN stage
+	// error is the runtime backstop and now fails the apply visibly.
+	if len(byID) > MaxRouteBasedVPNCaptureTunnels {
+		if err := emit(
+			"too many route-based IPsec VPNs: %d distinct secure-tunnel "+
+				"capture tunnels (distinct bind-interface if_ids) exceed "+
+				"the supported limit of %d route-based VPNs per capture "+
+				"generation; a 33rd tunnel cannot be represented by the "+
+				"IPsec capture plan, so every apply would install a "+
+				"box-wide capture quarantine dropping all non-loopback "+
+				"traffic. Reduce the number of distinct bind-interface "+
+				"tunnels to %d or fewer (#16699)",
+			len(byID), MaxRouteBasedVPNCaptureTunnels,
+			MaxRouteBasedVPNCaptureTunnels); err != nil {
 			return nil, err
 		}
 	}

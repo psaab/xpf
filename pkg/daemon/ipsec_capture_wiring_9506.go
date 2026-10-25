@@ -1370,10 +1370,25 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 			_ = d.ipsecS4.retireQueue(handle, true, true)
 		}
 	}
+	// quarantineWith builds the fail-closed QUEUE_OPEN/Unknown runtime.
+	// #16699: the wrapped stage error is RETURNED (not discarded) when the
+	// reason is QueueOpen, so an over-cap or queue-alloc/open/submit
+	// failure fails the apply visibly via captureStageErr instead of
+	// silently installing a box-wide quarantine under a successful
+	// commit. The staged quarantine runtime is still installed by
+	// commitIpsecCaptureStage (fail-closed); only the error propagation
+	// changes. Unknown-reason quarantines (origin registry / pipeline /
+	// divert-spec construction) keep their nil return: they are not the
+	// QUEUE_OPEN capacity/queue-open class the issue scopes, and their
+	// staged runtime already carries the quarantine reason.
 	quarantineWith := func(reason xnft.IpsecQuarantineReason, stageErr error) (*ipsecCaptureRuntime, error) {
 		plan.addQuarantine(reason)
 		plan.finalize(generation)
-		return stagedIpsecQuarantineRuntime(d, generation, plan.Quarantine), nil
+		rt := stagedIpsecQuarantineRuntime(d, generation, plan.Quarantine)
+		if reason == xnft.IpsecQuarantineReasonQueueOpen && stageErr != nil {
+			return rt, fmt.Errorf("ipsec capture: queue-open quarantine (generation %d): %w", generation, stageErr)
+		}
+		return rt, nil
 	}
 	// A single generation is bounded to the supported tunnel count. The
 	// allocator holds two generations (old + staged), so without this
@@ -1383,18 +1398,18 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 	for _, key := range keys {
 		if stagedGenerationHandles >= ipsecCaptureMaxGenerationHandles {
 			cleanupHandles()
-			staged, _ = quarantineWith(xnft.IpsecQuarantineReasonQueueOpen, errIpsecQueueExhausted)
+			staged, err = quarantineWith(xnft.IpsecQuarantineReasonQueueOpen, fmt.Errorf("%w: %d distinct route-based VPN capture tunnels exceed the supported limit of %d per capture generation (#16699)", errIpsecQueueExhausted, len(keys)/ipsecCaptureQueuesPerTunnel, ipsecCaptureMaxTunnels))
 			d.ipsecCaptureStaged = staged
 			d.ipsecCaptureStagePending = true
-			return old, staged, nil
+			return old, staged, err
 		}
 		handle, allocErr := d.ipsecS4.allocateQueue(key)
 		if allocErr != nil {
 			cleanupHandles()
-			staged, _ = quarantineWith(xnft.IpsecQuarantineReasonQueueOpen, allocErr)
+			staged, err = quarantineWith(xnft.IpsecQuarantineReasonQueueOpen, allocErr)
 			d.ipsecCaptureStaged = staged
 			d.ipsecCaptureStagePending = true
-			return old, staged, nil
+			return old, staged, err
 		}
 		handles = append(handles, handle)
 		stagedGenerationHandles++
@@ -1413,10 +1428,10 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 		if openErr != nil {
 			closeStagedCaptureQueues(queues)
 			cleanupHandles()
-			staged, _ = quarantineWith(xnft.IpsecQuarantineReasonQueueOpen, openErr)
+			staged, err = quarantineWith(xnft.IpsecQuarantineReasonQueueOpen, openErr)
 			d.ipsecCaptureStaged = staged
 			d.ipsecCaptureStagePending = true
-			return old, staged, nil
+			return old, staged, err
 		}
 		queues = append(queues, IpsecCaptureQueue{
 			Queue:              queue,
@@ -1435,10 +1450,10 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 	if submitErr != nil {
 		closeStagedCaptureQueues(queues)
 		cleanupHandles()
-		staged, _ = quarantineWith(xnft.IpsecQuarantineReasonQueueOpen, submitErr)
+		staged, err = quarantineWith(xnft.IpsecQuarantineReasonQueueOpen, submitErr)
 		d.ipsecCaptureStaged = staged
 		d.ipsecCaptureStagePending = true
-		return old, staged, nil
+		return old, staged, err
 	}
 	queueEpochs := make(map[uint16]uint64, len(handles))
 	for _, handle := range handles {
