@@ -847,6 +847,15 @@ pre-#15673 `a.Value == ""` sole-form bypass is removed), tolerant load /
 peer-sync warns naming the form, and `UsableValue()`/`UsableValues()` return
 empty so no resolver enforces a subset. Regression coverage:
 `address_forms_15673_test.go`, `address_unimplemented_forms_9524_test.go`.
+Show surfaces (#16552): `Address.RangeSpec`/`WildcardSpec` retain the
+authored range/wildcard specification next to the expansion, and
+`config.RenderAddressBook` / `AddressDisplayValue`
+(`show_address_book_16552.go`) are the single renderer the local CLI,
+gRPC ShowText and REST show-text all call — each entry prints its
+authored form (`dns-name X [ipv4-only]`, `range-address A to B`,
+`wildcard-address W`) plus the enforced `UsableValues()` set, an
+explicit `unresolved — matches nothing` marker when that set is empty,
+or `NOT ENFORCED: <taint>` for tainted entries.
 
 **An address takes exactly one prefix; duplicates are explicit (#14967):**
 a Junos address names a single prefix, so two distinct prefixes for one

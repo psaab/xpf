@@ -1956,6 +1956,13 @@ type Address struct {
 	// keeps the entry unusable without failing to boot.
 	ExpandedPrefixes []string `json:"-"`
 	OversizedRange   string   `json:"-"`
+	// RangeSpec / WildcardSpec retain the authored specification
+	// (#16552) so show surfaces can render what the operator
+	// configured (`range-address A to B`, `wildcard-address W`)
+	// alongside the enforced expansion. Compiler metadata, never
+	// persisted; copied wherever ExpandedPrefixes is copied.
+	RangeSpec    string `json:"-"`
+	WildcardSpec string `json:"-"`
 }
 
 // UsableValue returns the prefix a policy or NAT resolver may enforce:

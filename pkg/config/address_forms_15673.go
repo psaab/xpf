@@ -295,6 +295,7 @@ func applyRangeAddress(addr *Address, low, high string) {
 		addr.UnimplementedForms = appendUniqueForm9524(addr.UnimplementedForms, "range-address")
 		return
 	}
+	addr.RangeSpec = low + " to " + high
 	expanded, err := expandAddressRange(low, high)
 	if err != nil {
 		addr.OversizedRange = fmt.Sprintf("%s to %s: %v", low, high, err)
@@ -306,6 +307,9 @@ func applyRangeAddress(addr *Address, low, high string) {
 // applyWildcardAddress records a wildcard-address expansion on addr.
 func applyWildcardAddress(addr *Address, spec string) {
 	noteAddressFormConflict(addr, "wildcard-address")
+	if spec != "" {
+		addr.WildcardSpec = spec
+	}
 	prefix, err := expandWildcardAddress(spec)
 	if err != nil {
 		addr.UnimplementedForms = appendUniqueForm9524(addr.UnimplementedForms, "wildcard-address")

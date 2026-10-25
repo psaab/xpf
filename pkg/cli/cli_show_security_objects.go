@@ -26,72 +26,41 @@ func (c *CLI) showAddressBook(args []string) error {
 		filterName = args[0]
 	}
 
-	if len(ab.Addresses) > 0 {
-		if filterName == "" {
-			fmt.Println("Addresses:")
+	if filterName == "" {
+		// #16552: shared renderer with gRPC/REST so dns-name /
+		// range-address / wildcard-address entries show their authored
+		// form, enforced set, and unresolved / NOT ENFORCED markers
+		// instead of a blank Value.
+		var sb strings.Builder
+		config.RenderAddressBook(&sb, ab)
+		if len(ab.Addresses) == 0 && len(ab.AddressSets) == 0 {
+			fmt.Println("Address book is empty")
+			return nil
 		}
-		for _, addr := range ab.Addresses {
-			if addr == nil {
-				// #7197: a present-but-nil *Address map value is admitted by
-				// the tolerant-load / peer-sync path (#1960) — the SAME
-				// nil-tolerant class #3494 codifies for AddressBook.Addresses
-				// itself (compiler_validate_warn_nil_3494_test.go injects
-				// "zz-nil-addr": nil as part of that contract) and the one
-				// the #5221 guard above already skips for application sets.
-				// Skip it rather than dereferencing addr.Name / addr.Value
-				// and panicking the CLI display.
-				continue
-			}
-			if filterName != "" && addr.Name != filterName {
-				continue
-			}
-			fmt.Printf("  %-24s %s\n", addr.Name, addr.Value)
-		}
+		fmt.Print(sb.String())
+		return nil
 	}
 
-	if len(ab.AddressSets) > 0 {
-		if filterName == "" {
-			fmt.Println("Address sets:")
+	// Filtered view: one address or one address-set by name.
+	if addr, ok := ab.Addresses[filterName]; ok && addr != nil {
+		fmt.Printf("  %-24s %s\n", filterName, config.AddressDisplayValue(addr))
+	}
+	if as, ok := ab.AddressSets[filterName]; ok && as != nil {
+		var parts []string
+		for _, a := range as.Addresses {
+			parts = append(parts, a)
 		}
-		for _, as := range ab.AddressSets {
-			if as == nil {
-				// #7197: mirrors the #3494 nil-tolerant contract for
-				// AddressBook.AddressSets ("zz-nil-set": nil in the same
-				// compiler_validate_warn_nil_3494_test.go fixture) and the
-				// #5221 application-set guard's shape. Skip rather than
-				// dereferencing as.Name / as.Addresses / as.AddressSets.
-				continue
-			}
-			if filterName != "" && as.Name != filterName {
-				continue
-			}
-			var parts []string
-			for _, a := range as.Addresses {
-				parts = append(parts, a)
-			}
-			for _, s := range as.AddressSets {
-				parts = append(parts, "set:"+s)
-			}
-			fmt.Printf("  %-24s members: %s\n", as.Name, strings.Join(parts, ", "))
-			// If filtering by name, show member details. ab.Addresses is keyed
-			// by address NAME, so a direct map lookup replaces the O(n*m)
-			// nested scan the pre-fix code ran (an inner range over every
-			// address book entry, for every member, with no early exit even
-			// after a match) — #6218 item 13.
-			if filterName != "" {
-				for _, a := range as.Addresses {
-					if addr, ok := ab.Addresses[a]; ok && addr != nil {
-						fmt.Printf("    %-22s %s\n", addr.Name, addr.Value)
-					}
-				}
+		for _, s := range as.AddressSets {
+			parts = append(parts, "set:"+s)
+		}
+		fmt.Printf("  %-24s members: %s\n", as.Name, strings.Join(parts, ", "))
+		// Member details via direct map lookup (#6218 item 13).
+		for _, a := range as.Addresses {
+			if addr, ok := ab.Addresses[a]; ok && addr != nil {
+				fmt.Printf("    %-22s %s\n", a, config.AddressDisplayValue(addr))
 			}
 		}
 	}
-
-	if filterName == "" && len(ab.Addresses) == 0 && len(ab.AddressSets) == 0 {
-		fmt.Println("Address book is empty")
-	}
-
 	return nil
 }
 
