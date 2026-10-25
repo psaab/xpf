@@ -316,6 +316,16 @@ func warnUnknownRoutingLeaves10707(tree *ConfigTree) []string {
 				warn(path, keyword)
 				continue
 			}
+			// #16749: a valueless BGP flag carries chained children the
+			// compiler hoists to the parent container. Those children ARE
+			// schema keywords at the parent: descend into them there so a
+			// chained unknown keyword warns, while a chained known leaf
+			// stays silent (its value is strict-validated at the parent).
+			if isValuelessFlag16749(childSchema) && len(node.Children) > 0 && isBGPFlatRunContainer16749(parent) {
+				childPath := append(append([]string(nil), path...), keyword)
+				walkChildren(node.Children, parent, childPath)
+				continue
+			}
 			// A leaf with no declared children or wildcard may carry a value
 			// list or an opaque compiler-owned body. Its children are not
 			// schema keywords.

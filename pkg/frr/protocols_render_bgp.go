@@ -131,7 +131,16 @@ func (m *Manager) renderBGP16125(b *strings.Builder, bgp *config.BGPConfig, vali
 			// hold-time (#4286): FRR `timers <keepalive> <holdtime>`; keepalive
 			// defaults to hold/3 per the BGP convention (Junos derives the same
 			// way). A mismatched hold-time shortens or breaks the session.
-			if n.HoldTime > 0 {
+			// #16749/#14585 belt: a hold-time of 1 or 2 (or above the 16-bit
+			// wire max) renders a timers line bgpd refuses, failing the whole
+			// frr-reload. The strict gate rejects it (ValidateBGPHoldTime),
+			// but a leniently loaded / peer-synced value must not poison
+			// every later reload — omit the line and warn, like the other
+			// #14585 render belts. HoldTime 0 keeps its unset meaning.
+			if n.HoldTime == 1 || n.HoldTime == 2 || n.HoldTime > 65535 {
+				slog.Warn("frr: omitting neighbor timers with hold-time FRR rejects (#16749)",
+					"neighbor", sanitizeFRRValue(n.Address), "hold_time", n.HoldTime)
+			} else if n.HoldTime > 0 {
 				keepalive := n.HoldTime / 3
 				if keepalive < 1 {
 					keepalive = 1
