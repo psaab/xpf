@@ -32,7 +32,7 @@ moved with its assertions intact.
 | `backend_bind.go` | Source-address, destination-interface, and routing-instance binding for DDNS transports (#2665), including kernel-device resolution and `SO_BINDTODEVICE` socket binding. |
 | `backend_plaintext_14386.go` | Runtime guard refusing credentialed requests to non-loopback plaintext HTTP endpoints (#14386); loopback endpoints remain allowed for local providers and tests. |
 | `withdraw_anchor.go` | Per-address-family last-live-backend selection so owned records can be withdrawn without sending one family's cleanup to the other family's endpoint (#7521). |
-| `withdraw_reset.go` | `Manager.WithdrawForReset`: withdraw owned DHCP-lease DDNS records before factory reset, requiring a matching backend fingerprint and failing closed when cleanup authority is uncertain. |
+| `withdraw_reset.go` | Factory-reset withdrawal for both DDNS surfaces: `Manager.WithdrawForReset` withdraws owned DHCP-lease records and `SurfaceAManager.WithdrawForReset` withdraws owned router/interface-address records, each using matching backend fingerprints and failing closed when cleanup authority is uncertain. |
 | `zeroize.go` | Factory-reset ownership-state checks and durable erasure helpers; refuse to erase state while records or untrusted residue remain. |
 
 Tests moved with the code: `manager_test.go` (engine + state-store + hostname),
