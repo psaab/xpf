@@ -631,6 +631,20 @@ type ZoneConfig struct {
 	// zone-qualified internal names by resolveZoneLocalAddressBooks during
 	// compile, so the dataplane resolution path stays global-only.
 	AddressBook *AddressBook
+	// Functional marks a zone compiled from a Junos functional-zone stanza
+	// (`security zones functional-zone management`, #16831). Junos: "Traffic
+	// entering management zones does not match policies; therefore, traffic
+	// cannot transit out of any other interface if it was received in the
+	// management interface." A functional zone is host-only: zone-pair
+	// policies naming it are rejected at strict commit, global/default
+	// policy matching excludes it, and the dataplane drops transit
+	// ingress/egress on its interfaces while host-inbound treatment
+	// (HostInboundTraffic above) still applies. Authored only by the
+	// functional-zone compile arm in compileZones; a literal
+	// `security-zone management` never sets it, so the twin control config
+	// keeps ordinary transit semantics. `json:"-"`: the flag reaches the
+	// dataplane on the ZoneSnapshot wire (functional), not via Config JSON.
+	Functional bool `json:"-"`
 }
 
 // AdvancedConnectionTracking is the zone-level

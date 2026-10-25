@@ -97,6 +97,12 @@ func buildZoneSnapshots(cfg *config.Config) []ZoneSnapshot {
 		if z := cfg.Security.Zones[name]; z != nil && z.TCPRst {
 			zs.TCPRst = true
 		}
+		// #16831: carry the functional-zone (host-only) mark to the
+		// dataplane so transit on the zone's interfaces is dropped and
+		// global/default policy matching excludes the zone.
+		if z := cfg.Security.Zones[name]; z != nil && z.Functional {
+			zs.Functional = true
+		}
 		out = append(out, zs)
 	}
 	return out

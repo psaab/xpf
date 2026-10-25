@@ -998,12 +998,16 @@ impl PreparedPolicyState {
     ) -> Result<Self, SnapshotIntegrityError> {
         let tracked_ids_before = counter_store.tracked_rule_ids();
         let zones = zone_name_to_id_from_snapshot(&snapshot.zones);
-        match parse_policy_state_with_counters(
+        // #16831: thread this snapshot's functional (host-only) zone ids
+        // so functional transit is denied and excluded from global scope.
+        let functional = functional_zone_ids_from_snapshot(&snapshot.zones);
+        match parse_policy_state_with_counters_and_functional(
             &snapshot.default_policy,
             &snapshot.policies,
             &zones,
             &snapshot.address_books,
             counter_store,
+            &functional,
         ) {
             Ok(mut state) => {
                 state.scheduler_lease = scheduler_lease;
@@ -1883,6 +1887,18 @@ pub(crate) struct PolicyState {
     /// slot map from the identical config (the histogram is local per-node
     /// telemetry — not wire-synced — but its slot layout stays symmetric).
     concrete_zone_ids: Vec<u32>,
+    /// #16831: ids of Junos functional zones (`security zones
+    /// functional-zone management`) in this snapshot. A functional zone is
+    /// host-only: traffic entering it does not match policies and cannot
+    /// transit to another interface. `evaluate_policy_result_counted`
+    /// denies any transit pair naming one of these ids on either side
+    /// (before every rule tier and before the implicit default), and the
+    /// ids are excluded from `concrete_zone_ids` so wildcard/global
+    /// scopes never resolve to them. Host-inbound evaluation
+    /// (`evaluate_junos_host_policy_*`, to-zone junos-host) does NOT
+    /// consult this set — host-inbound is the functional zone's
+    /// legitimate traffic. Empty for every pre-#16831 snapshot.
+    functional_zone_ids: FxHashSet<u32>,
     /// #1606: deduplicated address-book table. Rules reference
     /// books by dense `u32` index (`PolicyRule::source_book_idxs`).
     /// #15091: behind `Arc` so `ForwardingState::clone` in
@@ -1967,6 +1983,7 @@ impl Default for PolicyState {
             // #3783: the Default state carries no zones, so the wildcard/global
             // histogram-slot expansion has an empty concrete-zone universe.
             concrete_zone_ids: Vec::new(),
+            functional_zone_ids: FxHashSet::default(),
             books: Arc::new(Vec::new()),
             book_id_to_idx: FxHashMap::default(),
             has_junos_host_rules: false,
@@ -2584,6 +2601,48 @@ pub(crate) fn parse_policy_state(
         .expect("parse_policy_state: rules must be well-formed (no books; zones must resolve)")
 }
 
+/// #16831: functional-zone-aware variant of [`parse_policy_state`].
+/// `functional_zone_ids` carries the ids of Junos functional zones
+/// (`security zones functional-zone management`) in this snapshot; the
+/// legacy entry point above delegates with an empty set so its callers
+/// keep byte-identical pre-#16831 behavior.
+pub(crate) fn parse_policy_state_with_functional(
+    default_policy: &str,
+    rules: &[PolicyRuleSnapshot],
+    zone_name_to_id: &FxHashMap<String, u32>,
+    functional_zone_ids: &FxHashSet<u32>,
+) -> PolicyState {
+    let counter_store = PolicyCounterStore::default();
+    parse_policy_state_with_counters_and_functional(
+        default_policy,
+        rules,
+        zone_name_to_id,
+        &[],
+        &counter_store,
+        functional_zone_ids,
+    )
+    .expect("parse_policy_state_with_functional: rules must be well-formed (no books; zones must resolve)")
+}
+
+/// #16831: ids of the functional (host-only) zones in a snapshot's zone
+/// list, under the SAME validity rules as
+/// [`zone_name_to_id_from_snapshot`] (id 0, empty name, and reserved-range
+/// ids are unaddressable and skipped). The Go control plane marks the
+/// zone on the wire (`ZoneSnapshot.functional`); an old Go binary omits
+/// the field and yields an empty set (pre-#16831 behavior).
+pub(crate) fn functional_zone_ids_from_snapshot(zones: &[ZoneSnapshot]) -> FxHashSet<u32> {
+    let mut set = FxHashSet::default();
+    for zone in zones {
+        if zone.id == 0 || zone.name.is_empty() || zone.id >= ZONE_ID_RESERVED_MIN {
+            continue;
+        }
+        if zone.functional {
+            set.insert(zone.id);
+        }
+    }
+    set
+}
+
 /// #1606: fallible policy-state parser. Returns
 /// `SnapshotIntegrityError` for duplicate/zero/unknown book IDs.
 /// Callers MUST run this as a preflight before any side-effecting
@@ -2594,6 +2653,28 @@ pub(crate) fn parse_policy_state_with_counters(
     zone_name_to_id: &FxHashMap<String, u32>,
     address_books: &[AddressBookSnapshot],
     counter_store: &PolicyCounterStore,
+) -> Result<PolicyState, SnapshotIntegrityError> {
+    parse_policy_state_with_counters_and_functional(
+        default_policy,
+        rules,
+        zone_name_to_id,
+        address_books,
+        counter_store,
+        &FxHashSet::default(),
+    )
+}
+
+/// #16831: [`parse_policy_state_with_counters`] plus the functional
+/// (host-only) zone ids of this snapshot. Functional ids are excluded
+/// from the concrete zone universe and recorded on the state so transit
+/// evaluation denies any pair naming one (see `functional_zone_ids`).
+pub(crate) fn parse_policy_state_with_counters_and_functional(
+    default_policy: &str,
+    rules: &[PolicyRuleSnapshot],
+    zone_name_to_id: &FxHashMap<String, u32>,
+    address_books: &[AddressBookSnapshot],
+    counter_store: &PolicyCounterStore,
+    functional_zone_ids: &FxHashSet<u32>,
 ) -> Result<PolicyState, SnapshotIntegrityError> {
     #[cfg(test)]
     counter_store.parse_calls.fetch_add(1, Ordering::Relaxed);
@@ -2672,10 +2753,13 @@ pub(crate) fn parse_policy_state_with_counters(
     // and their first-packet latency samples are silently dropped. Reserved
     // sentinels (junos-host / junos-global, id >= ZONE_ID_RESERVED_MIN) and the
     // id-0 "unknown zone" are excluded — they never form a transit zone-pair.
+    // #16831: functional (host-only) zones are excluded from the concrete
+    // universe — traffic entering them does not match policies, so no
+    // wildcard/global histogram pair may name one.
     let mut concrete_zone_ids: Vec<u32> = zone_name_to_id
         .values()
         .copied()
-        .filter(|&id| id != 0 && id < ZONE_ID_RESERVED_MIN)
+        .filter(|&id| id != 0 && id < ZONE_ID_RESERVED_MIN && !functional_zone_ids.contains(&id))
         .collect();
     concrete_zone_ids.sort_unstable();
     concrete_zone_ids.dedup();
@@ -2692,6 +2776,9 @@ pub(crate) fn parse_policy_state_with_counters(
         // #3783: the concrete-zone universe backing the wildcard/global
         // histogram-slot expansion (computed above from `zone_name_to_id`).
         concrete_zone_ids,
+        // #16831: functional (host-only) zone ids; transit evaluation
+        // denies any pair naming one (see evaluate_policy_result_counted).
+        functional_zone_ids: functional_zone_ids.clone(),
         books: Arc::new(Vec::with_capacity(address_books.len())),
         book_id_to_idx: FxHashMap::default(),
         // #3019: armed below if any rule names the `junos-host` self zone.
@@ -4025,6 +4112,27 @@ fn evaluate_policy_result_counted(
     // every other `to_id == 0` caller is a resolved unzoned egress, denied
     // below without a walk.
     let unresolved_egress = !egress_resolved && to_id == 0;
+    // #16831: a functional zone (`security zones functional-zone
+    // management`) is host-only — Junos: "Traffic entering management
+    // zones does not match policies; therefore, traffic cannot transit
+    // out of any other interface if it was received in the management
+    // interface." Any transit pair naming a functional zone on either
+    // side is denied BEFORE every rule tier (a leniently-loaded
+    // management->trust permit stays indexed but can never fire) and
+    // before the implicit default (a default-permit cannot rescue it).
+    // Host-inbound (LocalDelivery / to-zone junos-host) never reaches
+    // this gate — it is adjudicated by evaluate_junos_host_policy_*,
+    // which does not consult this set — so ssh to the management
+    // interface address is still admitted by host-inbound-traffic.
+    // Placed before the tier gate so it also covers an unresolved-egress
+    // (NoRoute) flow out of the functional zone.
+    if state.functional_zone_ids.contains(&from_id) || state.functional_zone_ids.contains(&to_id) {
+        return PolicyEvaluationResult {
+            action: PolicyAction::Deny,
+            policy_id: UNATTRIBUTED_POLICY_ID,
+            ..PolicyEvaluationResult::default()
+        };
+    }
     if from_id != 0 && (to_id != 0 || unresolved_egress) {
         if to_id != 0 {
             let key = zone_pair_key(from_id, to_id);
@@ -5474,3 +5582,7 @@ mod policy_junos_global_9570_tests;
 #[cfg(test)]
 #[path = "policy_prop_tests/mod.rs"]
 mod policy_prop_tests;
+
+#[cfg(test)]
+#[path = "policy_functional_zone_16831_tests.rs"]
+mod policy_functional_zone_16831_tests;

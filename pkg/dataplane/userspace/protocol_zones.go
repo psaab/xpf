@@ -39,6 +39,16 @@ type ZoneSnapshot struct {
 	// field: an old Rust helper without the field treats every zone as
 	// tcp-rst off (pre-#3071 behavior); an old Go binary omits it (omitempty).
 	TCPRst bool `json:"tcp_rst,omitempty"`
+	// Functional marks a Junos functional zone (`security zones
+	// functional-zone management`, #16831): host-only, no transit. The
+	// Rust PolicyState excludes its id from the concrete zone universe
+	// (so global/default and wildcard tiers never match its pairs) and
+	// denies any transit evaluation naming it on either side, while
+	// host-inbound admission for the zone still applies. Additive wire
+	// field: an old Rust helper without the field treats every zone as
+	// an ordinary transit zone (pre-#16831 behavior); an old Go binary
+	// omits it (omitempty).
+	Functional bool `json:"functional,omitempty"`
 }
 
 // ScreenProfileSnapshot captures a per-zone screen profile for the userspace

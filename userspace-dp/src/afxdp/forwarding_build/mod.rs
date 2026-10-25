@@ -719,12 +719,14 @@ fn build_fallible_forwarding_state(
 
     state.policy = match policy_state {
         Some(policy_state) => policy_state,
-        None => parse_policy_state_with_counters(
+        // #16831: functional (host-only) zones ride the snapshot rows.
+        None => parse_policy_state_with_counters_and_functional(
             &snapshot.default_policy,
             &snapshot.policies,
             &state.zone_name_to_id,
             &snapshot.address_books,
             policy_counters,
+            &crate::policy::functional_zone_ids_from_snapshot(&snapshot.zones),
         )?,
     };
     state.policy_rematch_extensive = snapshot.policy_rematch_extensive;
