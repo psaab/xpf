@@ -386,30 +386,12 @@ func redistComposedChains15156(fc *FullConfig) map[string]redistComposedReq15156
 				if _, ok := out[e.routeMap]; ok {
 					continue
 				}
-				// Recover the union chain from the map name is
-				// fragile; recompute it from the producing chains.
-				var union []string
-				inUnion := make(map[string]bool)
-				for _, chain := range bgpEffectiveExportChains14586(bgp, po) {
-					produced := false
-					for _, ce := range m.redistBGPUnionEntries16868(chain, po, "bgp", node) {
-						if ce.proto == e.proto {
-							produced = true
-							break
-						}
-					}
-					if !produced {
-						continue
-					}
-					for _, name := range chain {
-						if !inUnion[name] {
-							inUnion[name] = true
-							union = append(union, name)
-						}
-					}
+				chains := redistOrChains16868(bgp, po, "bgp", node, e.proto)
+				if len(chains) < 2 {
+					continue
 				}
-				if len(union) >= 2 && redistChainRouteMapName15156(union, e.proto) == e.routeMap {
-					out[e.routeMap] = redistComposedReq15156{chain: union, proto: e.proto}
+				if redistOrRouteMapName16868(bgp, po, "bgp", node, e.proto) == e.routeMap {
+					out[e.routeMap] = redistComposedReq15156{chains: chains, proto: e.proto}
 				}
 			}
 		}
@@ -447,8 +429,13 @@ func containsString15156(s []string, v string) bool {
 
 type redistComposedReq15156 struct {
 	chain []string
-	proto string
-	ctx   redistVariantContext16864
+	// chains, when non-empty, is a cross-chain OR composition: each
+	// inner chain renders first-terminal-wins internally, a chain's
+	// reject falls through to the next chain, and only a chain's
+	// accept (or the trailing deny) is terminal for the map.
+	chains [][]string
+	proto  string
+	ctx    redistVariantContext16864
 }
 
 // renderRedistComposedMaps15156 emits the composed per-source route-map
@@ -466,7 +453,11 @@ func (m *Manager) renderRedistComposedMaps15156(fc *FullConfig) string {
 	var b strings.Builder
 	for _, name := range names {
 		req := reqs[name]
-		b.WriteString(m.renderRedistComposedMapVariant16864(fc.PolicyOptions, name, req.chain, req.proto, req.ctx, fc != nil && fc.ClusterMode))
+		if len(req.chains) > 0 {
+			b.WriteString(m.renderRedistOrComposedMap16868(fc.PolicyOptions, name, req.chains, req.proto, req.ctx, fc != nil && fc.ClusterMode))
+		} else {
+			b.WriteString(m.renderRedistComposedMapVariant16864(fc.PolicyOptions, name, req.chain, req.proto, req.ctx, fc != nil && fc.ClusterMode))
+		}
 		b.WriteString("!\n")
 	}
 	return b.String()
@@ -572,6 +563,132 @@ func (m *Manager) renderRedistComposedMapVariant16864(po *config.PolicyOptionsCo
 	return b.String()
 }
 
+// renderRedistOrComposedMap16868 renders a cross-chain OR map: the
+// union of several independent effective BGP export chains for one
+// source. Each chain renders first-terminal-wins internally via
+// renderRedistComposedMapVariant16864 into a scratch body, then the
+// bodies are spliced in chain order with deny sequences demoted to
+// fall-through, so a reject (term or policy default) in chain A
+// cannot veto an accept in chain B — only an accept is terminal
+// across chains, and the map ends in the usual trailing deny.
+//
+// Splice mechanics: the scratch render numbers sequences from 10 in
+// steps of 10 and the demotion needs one continuation target per
+// demoted deny. FRR permits `on-match goto` only on permit
+// sequences and requires the target to exceed the sequence number,
+// so each demoted deny becomes `permit <seq>` with its match/set
+// clauses replaced by a match-all `on-match goto <target>`: the
+// route jumps over the rest of its own chain to the next chain's
+// first sequence. Match clauses cannot ride on the permit (it must
+// match every route reaching it, including routes its own chain
+// rejected), so the demoted sequence is match-all by construction.
+// The final chain's rejects need no demotion: they fall into the
+// trailing deny, exactly the single-chain render. Set clauses from
+// a rejected route's earlier non-terminating terms still applied
+// before the jump; origination only reads the terminal verb, so
+// they are inert here (per-peer route-map out re-applies them).
+// A non-final chain whose scratch body is a quarantine deny (or
+// that ends in a terminal default-accept permit) keeps its body
+// verbatim: the quarantine must stay fail-closed and a default
+// accept is a genuine cross-chain accept.
+func (m *Manager) renderRedistOrComposedMap16868(po *config.PolicyOptionsConfig, name string, chains [][]string, proto string, ctx redistVariantContext16864, clusterMode bool) string {
+	bodies := make([]string, len(chains))
+	totalSeqs := 0
+	for i, chain := range chains {
+		scratch := fmt.Sprintf("xpf-or-scratch-%d", i)
+		body := m.renderRedistComposedMapVariant16864(po, scratch, chain, proto, ctx, clusterMode)
+		bodies[i] = body
+		for _, ln := range strings.Split(body, "\n") {
+			if strings.HasPrefix(ln, "route-map ") {
+				totalSeqs++
+			}
+		}
+	}
+	if totalSeqs > config.MaxRouteMapSequences {
+		slog.Warn("oversized OR-composed redistribute route-map; rendering an explicit deny instead (#16868)",
+			"route_map", name, "sequences", totalSeqs, "max", config.MaxRouteMapSequences)
+		m.noteQuarantined(name)
+		return renderQuarantineDenyRouteMap(name) + "!\n"
+	}
+	var out strings.Builder
+	if clusterMode && proto == "static" {
+		out.WriteString(clusterTagDeny15158(name))
+	}
+	// Prefix-list / ACL definitions from every scratch body come
+	// first (they are name-keyed globals; the scratch render keys
+	// them by the scratch map name, so rename them onto the real
+	// name to match the sequence bodies rewritten below).
+	for ci, body := range bodies {
+		scratch := fmt.Sprintf("xpf-or-scratch-%d", ci)
+		for _, ln := range strings.Split(body, "\n") {
+			if strings.HasPrefix(ln, "route-map ") {
+				break
+			}
+			if strings.TrimSpace(ln) == "" || ln == "!" {
+				continue
+			}
+			out.WriteString(strings.ReplaceAll(ln, frrName(scratch), frrName(name)))
+			out.WriteString("\n")
+		}
+	}
+	seqOffset := 0
+	for ci := range chains {
+		scratchBody := bodies[ci]
+		scratch := fmt.Sprintf("xpf-or-scratch-%d", ci)
+		last := ci == len(chains)-1
+		lines := strings.Split(scratchBody, "\n")
+		type seqSpan struct {
+			start, end, seq int
+			verb            string
+		}
+		var spans []seqSpan
+		for i, ln := range lines {
+			f := strings.Fields(ln)
+			if len(f) == 4 && f[0] == "route-map" {
+				var n int
+				if _, err := fmt.Sscanf(f[3], "%d", &n); err == nil {
+					spans = append(spans, seqSpan{start: i, seq: n, verb: f[2]})
+				}
+			}
+		}
+		for j := range spans {
+			if j+1 < len(spans) {
+				spans[j].end = spans[j+1].start
+			} else {
+				spans[j].end = len(lines)
+			}
+		}
+		if len(spans) == 0 {
+			continue
+		}
+		maxSeq := spans[len(spans)-1].seq
+		base := seqOffset
+		nextBase := base + maxSeq + 10
+		for _, sp := range spans {
+			newSeq := base + sp.seq
+			if !last && sp.verb == "deny" {
+				fmt.Fprintf(&out, "route-map %s permit %d\n", frrName(name), newSeq)
+				fmt.Fprintf(&out, " on-match goto %d\n", nextBase)
+				out.WriteString("exit\n")
+				continue
+			}
+			for _, ln := range lines[sp.start:sp.end] {
+				if strings.HasPrefix(ln, "route-map ") {
+					fmt.Fprintf(&out, "route-map %s %s %d\n", frrName(name), sp.verb, newSeq)
+					continue
+				}
+				// Sequence bodies before the first route-map header
+				// are definitions (already emitted above); skip
+				// any stray pre-header lines inside a span.
+				out.WriteString(strings.ReplaceAll(ln, frrName(scratch), frrName(name)))
+				out.WriteString("\n")
+			}
+		}
+		seqOffset = nextBase - 10
+	}
+	return out.String()
+}
+
 // redistChainMapCollision15156 refuses (fail-closed) a composed
 // redistribute map name that collides with an operator policy-statement,
 // a per-source map, a #5277 composed BGP chain map, or a distinct
@@ -598,14 +715,17 @@ func redistChainMapCollision15156(fc *FullConfig) error {
 			return fmt.Errorf("composed redistribute route-map %q (chain %v, source %s) collides with operator policy-statement %q; FRR merges same-named route-maps — refusing to render (#15156)", name, req.chain, req.proto, op)
 		}
 		key := redistChainKey15156(req.chain, req.proto)
+		if len(req.chains) > 0 {
+			var flat []string
+			for _, c := range req.chains {
+				flat = append(flat, strings.Join(c, "-"))
+			}
+			key = "or\x00" + strings.Join(flat, "\x01") + "\x02" + req.proto
+		}
 		if prev, ok := generated[final]; ok && prev != key {
 			return fmt.Errorf("redistribute chains derive the same composed route-map %q; FRR would merge them — refusing to render (#15156)", name)
 		}
 		generated[final] = key
-		// Per-source maps.
-		for _, pn := range req.chain {
-			_ = pn
-		}
 	}
 	// Cross-check against per-source and QNH names via final names.
 	for _, psName := range sortedKeysPS15156(po) {
@@ -1106,10 +1226,10 @@ func (m *Manager) redistBGPUnionEntries16868(chain []string, po *config.PolicyOp
 // bgpChainRedistEntries16868 unions redist entries over the
 // distinct effective export chains of bgp at (self, node). FRR
 // keeps one route-map per source, so a source produced by several
-// chains merges into the composed map over the union of the
-// producing chains' members in first-seen order (the #15156
-// cross-neighbour OR composition); a source produced by exactly
-// one chain keeps that chain's entry.
+// chains attaches a cross-chain OR map (renderRedistOrComposedMap16868)
+// named by the producing chains in first-seen order; a source
+// produced by exactly one chain keeps that chain's entry. A reject
+// in one chain never vetoes another chain's accept.
 func (m *Manager) bgpChainRedistEntries16868(bgp *config.BGPConfig, po *config.PolicyOptionsConfig, self, node string) []redistEntry {
 	chains := bgpEffectiveExportChains14586(bgp, po)
 	perChain := make([][]redistEntry, len(chains))
@@ -1128,7 +1248,6 @@ func (m *Manager) bgpChainRedistEntries16868(bgp *config.BGPConfig, po *config.P
 	var out []redistEntry
 	for _, proto := range protos {
 		idxs := byProto[proto]
-		// Distinct attachments among producing chains.
 		var distinct []redistEntry
 		seenE := make(map[redistEntry]bool)
 		for _, i := range idxs {
@@ -1143,23 +1262,36 @@ func (m *Manager) bgpChainRedistEntries16868(bgp *config.BGPConfig, po *config.P
 			out = append(out, distinct[0])
 			continue
 		}
-		var union []string
-		inUnion := make(map[string]bool)
-		for _, i := range idxs {
-			for _, name := range chains[i] {
-				if !inUnion[name] {
-					inUnion[name] = true
-					union = append(union, name)
-				}
+		out = append(out, redistEntry{proto: proto, routeMap: redistOrRouteMapName16868(bgp, po, self, node, proto)})
+	}
+	return out
+}
+
+// redistOrChains16868 returns the producing chains for proto in
+// first-seen order (those whose per-chain entry for proto exists).
+func redistOrChains16868(bgp *config.BGPConfig, po *config.PolicyOptionsConfig, self, node, proto string) [][]string {
+	m := New()
+	var out [][]string
+	for _, chain := range bgpEffectiveExportChains14586(bgp, po) {
+		for _, e := range m.redistBGPUnionEntries16868(chain, po, self, node) {
+			if e.proto == proto {
+				out = append(out, chain)
+				break
 			}
-		}
-		if len(union) >= 2 {
-			out = append(out, redistEntry{proto: proto, routeMap: redistChainRouteMapName15156(union, proto)})
-		} else {
-			out = append(out, distinct[0])
 		}
 	}
 	return out
+}
+
+// redistOrRouteMapName16868 names the cross-chain OR map for proto
+// from its producing chains.
+func redistOrRouteMapName16868(bgp *config.BGPConfig, po *config.PolicyOptionsConfig, self, node, proto string) string {
+	chains := redistOrChains16868(bgp, po, self, node, proto)
+	var parts []string
+	for _, chain := range chains {
+		parts = append(parts, strings.Join(chain, "-"))
+	}
+	return strings.Join(parts, "-") + ReservedChainSuffix + "-" + normalizedRedistProtocol(proto) + config.ReservedRedistSuffix
 }
 
 func (m *Manager) bgpPolicyRedistEntriesAt14586(policies []string, po *config.PolicyOptionsConfig, self, node string) []redistEntry {

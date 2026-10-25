@@ -136,9 +136,15 @@ func TestRedistEntriesAtNodesAreCovered_9667(t *testing.T) {
 	// resolver has only its two enumeration loops left as
 	// (self,node) forwarders; the BGP nodes enter via the wrappers.
 	wrapRE := regexp.MustCompile(`bgpPolicyRedistEntriesAt14586\(policies, po, "([a-z0-9-]+)", "([a-z0-9-]+)"\)`)
+	// #16868: the production BGP render sites use the per-chain
+	// grouped wrappers, which pin ("bgp","bgp") and
+	// ("bgp","bgp-ipv6") into bgpChainRedistEntries16868. Prove both
+	// literals so a wrong-family node on the IPv6 wrapper fails here.
+	chainWrapRE := regexp.MustCompile(`bgpChainRedistEntries16868\(bgp, po, "([a-z0-9-]+)", "([a-z0-9-]+)"\)`)
 	calls, pass, fwd := 0, 0, 0
 	nodes := map[string]int{}
 	wraps := map[string]int{}
+	chainWraps := map[string]int{}
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
@@ -157,6 +163,10 @@ func TestRedistEntriesAtNodesAreCovered_9667(t *testing.T) {
 			wraps[string(mm[2])]++
 			nodes[string(mm[2])]++
 		}
+		for _, mm := range chainWrapRE.FindAllSubmatch(b, -1) {
+			chainWraps[string(mm[2])]++
+			nodes[string(mm[2])]++
+		}
 	}
 	lit := 0
 	for _, c := range nodes {
@@ -166,12 +176,13 @@ func TestRedistEntriesAtNodesAreCovered_9667(t *testing.T) {
 	// the literal bgp-ipv6 call, and the 2 (self,node) enumeration
 	// forwarders in redistChainEntries15156 (fwdRE).
 	if pass != 1 || fwd != 2 || calls != 4 || len(wraps) != 2 {
+		t.Fatalf("redistributeEntriesAt: %d calls, %d pass-through, %d forwarder, %d literal nodes %v (wrappers %v); a call this census cannot read is a node the filter cannot see", calls, pass, fwd, lit, nodes, wraps)
+	}
+	if chainWraps["bgp"] == 0 || chainWraps["bgp-ipv6"] == 0 {
+		t.Fatalf("positive control: the #16868 BGP chain wrapper literals were not both found: %v", chainWraps)
 	}
 	if nodes["bgp-ipv6"] == 0 {
 		t.Fatal("positive control: the BGP IPv6 address-family caller was not found")
-	}
-	if wraps["bgp"] == 0 || wraps["bgp-ipv6"] == 0 {
-		t.Fatalf("positive control: the #14586 BGP wrapper literals were not both found: %v", wraps)
 	}
 	for node := range nodes {
 		if _, ok := frrRedistNodeAFI[node]; !ok {

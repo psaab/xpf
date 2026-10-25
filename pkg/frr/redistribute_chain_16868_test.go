@@ -1,6 +1,7 @@
 package frr
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -230,5 +231,174 @@ func TestISISRejectGuardComposes16868(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("IS-IS chain must emit composed redistribute lines, got %v\n%s", lines, got)
+	}
+}
+
+// evalOrSeqs16868 simulates FRR route-map evaluation over the spliced
+// OR map for the two probe routes: "bad" matches 192.168.60.0/24
+// (the NO-60 reject filter), "good" matches 192.168.50.0/24. A permit
+// with `on-match goto N` jumps to sequence N on match; a permit/deny
+// without a continuation is terminal. Returns the terminal verb.
+func evalOrSeqs16868(t *testing.T, seqs []string, route string) string {
+	t.Helper()
+	type seq struct {
+		verb     string
+		num      int
+		gotoN    int
+		matchBad bool
+		matchAny bool
+	}
+	var parsed []seq
+	byNum := map[int]int{}
+	for _, s := range seqs {
+		f := strings.Fields(s)
+		if len(f) < 2 {
+			t.Fatalf("unparseable seq %q", s)
+		}
+		var n, g int
+		fmtSscanf16868(t, f[1], &n)
+		// A retained conditional sequence (it kept its match
+		// clauses — only demoted denies become bare goto permits)
+		// matches "bad" when its clauses name the guard's filter
+		// and "good" otherwise. Inline ACL names embed the guard
+		// policy name (NO-60 / NO-RFC1918), which is the marker.
+		p := seq{verb: f[0], num: n, gotoN: -1, matchAny: !strings.Contains(s, "match ") || strings.Contains(s, "on-match goto")}
+		if strings.Contains(s, "match ") && (strings.Contains(s, "NO-60") || strings.Contains(s, "NO-RFC1918")) {
+			p.matchBad = true
+			p.matchAny = false
+		}
+		if i := strings.Index(s, "on-match goto "); i >= 0 {
+			fmtSscanf16868(t, strings.Fields(s[i+len("on-match goto "):])[0], &g)
+			p.gotoN = g
+		}
+		byNum[n] = len(parsed)
+		parsed = append(parsed, p)
+	}
+	idx := 0
+	for idx < len(parsed) {
+		p := parsed[idx]
+		matched := p.matchAny || (p.matchBad && route == "bad")
+		if matched {
+			if p.gotoN >= 0 {
+				j, ok := byNum[p.gotoN]
+				if !ok {
+					t.Fatalf("goto target %d has no sequence in %v", p.gotoN, seqs)
+				}
+				idx = j
+				continue
+			}
+			return p.verb
+		}
+		idx++
+	}
+	return "deny"
+}
+
+func fmtSscanf16868(t *testing.T, s string, out *int) {
+	t.Helper()
+	if _, err := fmt.Sscanf(s, "%d", out); err != nil {
+		t.Fatalf("bad seq number %q: %v", s, err)
+	}
+}
+
+// TestBGPCrossChainOrSemantics16868 pins the Astra counterexample:
+// neighbour A exports [NO-60 STATICS], neighbour B exports [STATICS].
+// Origination must be the OR of the chains — both statics originate
+// (B accepts .60), regardless of neighbour order — while A's own
+// chain still rejects .60 for A (per-peer route-map out is separate).
+// A terminal-default guard in the first chain must not veto either.
+func TestBGPCrossChainOrSemantics16868(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		first []string
+	}{
+		{"guard-chain first", []string{"NO-60", "STATICS"}},
+		{"acceptor first", []string{"STATICS"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			po := guardChainPO16868()
+			var neighbors []*config.BGPNeighbor
+			if tc.name == "guard-chain first" {
+				neighbors = []*config.BGPNeighbor{
+					{Address: "192.0.2.2", PeerAS: 65002, FamilyInet: true, Export: []string{"NO-60", "STATICS"}},
+					{Address: "192.0.2.3", PeerAS: 65003, FamilyInet: true, Export: []string{"STATICS"}},
+				}
+			} else {
+				neighbors = []*config.BGPNeighbor{
+					{Address: "192.0.2.3", PeerAS: 65003, FamilyInet: true, Export: []string{"STATICS"}},
+					{Address: "192.0.2.2", PeerAS: 65002, FamilyInet: true, Export: []string{"NO-60", "STATICS"}},
+				}
+			}
+			fc := &FullConfig{
+				PolicyOptions: po,
+				BGP: &config.BGPConfig{
+					LocalAS: 65001, RouterID: "1.1.1.1", Neighbors: neighbors,
+				},
+			}
+			got := New().buildManagedSection(fc)
+			top, af6 := bgpRedistLines14586(t, got)
+			_ = af6
+			var staticLines []string
+			for _, ln := range top {
+				if strings.Contains(ln, "redistribute static") {
+					staticLines = append(staticLines, ln)
+				}
+			}
+			if len(staticLines) != 1 {
+				t.Fatalf("exactly one redistribute static expected, got %v\n%s", staticLines, got)
+			}
+			// The attachment must be the OR map; evaluate it.
+			fields := strings.Fields(staticLines[0])
+			mapName := fields[len(fields)-1]
+			seqs := redistSeqs16864(t, got, mapName)
+			if v := evalOrSeqs16868(t, seqs, "good"); v != "permit" {
+				t.Errorf("192.168.50.0/24 must originate (permit), evaluated %q over %v", v, seqs)
+			}
+			if v := evalOrSeqs16868(t, seqs, "bad"); v != "permit" {
+				t.Errorf("192.168.60.0/24 must originate via B's chain (OR permit), evaluated %q over %v — a reject in A's chain vetoed B", v, seqs)
+			}
+			// Every goto target must exist and exceed its sequence.
+			for _, s := range seqs {
+				if !strings.Contains(s, "permit") && strings.Contains(s, "on-match") {
+					t.Errorf("deny sequence carries a continuation (FRR rejects it): %q", s)
+				}
+			}
+		})
+	}
+}
+
+// TestBGPCrossChainTerminalGuardOr16868: the first chain
+// [ONLY-STATIC DIRECT] default-rejects connected inside the chain
+// (ONLY-STATIC's only terminal for connected is its policy-level
+// reject, truncated before DIRECT); the second chain [DIRECT]
+// accepts it. The first chain's terminal default must not veto
+// the second chain's accept in the OR map.
+func TestBGPCrossChainTerminalGuardOr16868(t *testing.T) {
+	po := guardChainPO16868()
+	fc := &FullConfig{
+		PolicyOptions: po,
+		BGP: &config.BGPConfig{
+			LocalAS: 65001, RouterID: "1.1.1.1",
+			Neighbors: []*config.BGPNeighbor{
+				{Address: "192.0.2.2", PeerAS: 65002, FamilyInet: true, Export: []string{"ONLY-STATIC", "DIRECT"}},
+				{Address: "192.0.2.3", PeerAS: 65003, FamilyInet: true, Export: []string{"DIRECT"}},
+			},
+		},
+	}
+	got := New().buildManagedSection(fc)
+	top, _ := bgpRedistLines14586(t, got)
+	var connLines []string
+	for _, ln := range top {
+		if strings.Contains(ln, "redistribute connected") {
+			connLines = append(connLines, ln)
+		}
+	}
+	if len(connLines) != 1 {
+		t.Fatalf("exactly one redistribute connected expected, got %v\n%s", connLines, got)
+	}
+	fields := strings.Fields(connLines[0])
+	seqs := redistSeqs16864(t, got, fields[len(fields)-1])
+	if v := evalOrSeqs16868(t, seqs, "good"); v != "permit" {
+		t.Errorf("connected must originate via DIRECT chain despite ONLY-STATIC default reject, evaluated %q over %v", v, seqs)
 	}
 }
