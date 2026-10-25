@@ -53,8 +53,17 @@ func TestMatchMappedIPv6SourceNotGated(t *testing.T) {
 	if res.UnsupportedTupleFamily {
 		t.Fatalf("mapped-IPv6 source %q -> %q must NOT be gated unsupported (same-family V6/V6), got res=%+v", srcText, dstText, res)
 	}
-	if res.Action != config.PolicyPermit {
-		t.Fatalf("mapped-IPv6 tuple should fall through to default-permit, got %v", res.Action)
+	// #16803: since #10686 the runtime drops mapped/compat IPv6 at ingress
+	// before policy, so this tuple now reports the ingress-drop verdict
+	// instead of falling through to normal evaluation (see README).
+	if !res.V4MappedCompatIngressDrop {
+		t.Fatalf("mapped-IPv6 source %q -> %q must report the #10686 ingress drop (#16803), got res=%+v", srcText, dstText, res)
+	}
+	if res.Matched || res.DefaultUsed || res.Action != config.PolicyDeny {
+		t.Fatalf("ingress-drop verdict must carry no matched/default verdict, got res=%+v", res)
+	}
+	if got := res.DisplayAction(); got != V4MappedCompatIngressDropActionString {
+		t.Fatalf("DisplayAction() = %q, want V4MappedCompatIngressDropActionString", got)
 	}
 }
 
@@ -91,7 +100,7 @@ func TestMatchTextFamilyClassifiesGenuineTuples(t *testing.T) {
 			if res.UnsupportedTupleFamily != tc.wantGated {
 				t.Fatalf("%s: UnsupportedTupleFamily = %v, want %v (res=%+v)", tc.name, res.UnsupportedTupleFamily, tc.wantGated, res)
 			}
-			if !tc.wantGated && res.Action != config.PolicyPermit {
+			if !tc.wantGated && !res.V4MappedCompatIngressDrop && res.Action != config.PolicyPermit {
 				t.Fatalf("%s: expected fall-through to default-permit, got %v", tc.name, res.Action)
 			}
 		})
@@ -137,6 +146,10 @@ func TestMatchMappedIPv6SourceNotEvaluatedAsV4(t *testing.T) {
 	}, config.ApplicationsConfig{})
 
 	// Mapped-IPv6 source: MUST be evaluated as V6 → no V6 rule → default-deny.
+	// #16803 supersedes the fall-through half of that expectation: since
+	// #10686 the runtime drops the mapped tuple at ingress before policy,
+	// so Match now reports the ingress-drop verdict. The fail-open half is
+	// unchanged — the mapped source must never match permit-v4.
 	mappedRes := Match(cfg, Query{
 		FromZone: "trust", ToZone: "untrust",
 		SrcIP:     net.ParseIP("::ffff:192.0.2.1"), // folds (To4) to 192.0.2.1 ∈ v4src
@@ -146,8 +159,8 @@ func TestMatchMappedIPv6SourceNotEvaluatedAsV4(t *testing.T) {
 	if mappedRes.Matched || mappedRes.Action == config.PolicyPermit {
 		t.Fatalf("mapped-IPv6 source must NOT match the V4-only permit rule (fabricated permit); got res=%+v", mappedRes)
 	}
-	if !mappedRes.DefaultUsed || mappedRes.Action != config.PolicyDeny {
-		t.Fatalf("mapped-IPv6 source should fall to default-deny, got res=%+v", mappedRes)
+	if !mappedRes.V4MappedCompatIngressDrop || mappedRes.Action != config.PolicyDeny {
+		t.Fatalf("mapped-IPv6 source should report the #10686 ingress drop (#16803), got res=%+v", mappedRes)
 	}
 
 	// Control: a GENUINE dotted-quad V4 source in the same subnet MUST still
@@ -182,5 +195,13 @@ func TestQueryTupleFamilyFallbackFolds(t *testing.T) {
 	})
 	if !res.UnsupportedTupleFamily {
 		t.Fatalf("without a text hint the mapped source must fold to v4 and gate (pre-#6377 fallback), got res=%+v", res)
+	}
+	// #16803: the folded fallback classifies the side as "v4", so the
+	// colon-strict ingress-drop gate does not ALSO fire for this caller —
+	// the unsupported-tuple verdict above is the preserved pre-#6377
+	// fallback answer for net.IP-only callers. Callers that thread the
+	// hint (all five live surfaces) get the ingress-drop verdict instead.
+	if res.V4MappedCompatIngressDrop {
+		t.Fatalf("folded fallback must not double-report the ingress drop, got res=%+v", res)
 	}
 }

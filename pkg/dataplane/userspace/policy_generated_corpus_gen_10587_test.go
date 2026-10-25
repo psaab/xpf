@@ -79,8 +79,8 @@ func generatedSeedManifestIDs10587(t *testing.T) []string {
 	if err := json.Unmarshal(blob, &manifest); err != nil {
 		t.Fatalf("seed_manifest.json is invalid JSON: %v", err)
 	}
-	if manifest.SchemaVersion != 1 || len(manifest.IDs) != 52 {
-		t.Fatalf("seed_manifest.json has schema %d and %d IDs, want schema 1 and exactly 52",
+	if manifest.SchemaVersion != 1 || len(manifest.IDs) != 51 {
+		t.Fatalf("seed_manifest.json has schema %d and %d IDs, want schema 1 and exactly 51",
 			manifest.SchemaVersion, len(manifest.IDs))
 	}
 	return manifest.IDs
@@ -88,8 +88,8 @@ func generatedSeedManifestIDs10587(t *testing.T) []string {
 
 func assertGeneratedSnapshotCoverage10587(t *testing.T, rows []generatedSnapshotRow10587) {
 	t.Helper()
-	if len(rows) < 52 {
-		t.Fatalf("generated policy row contract collapsed to %d (want >=52)", len(rows))
+	if len(rows) < 51 {
+		t.Fatalf("generated policy row contract collapsed to %d (want >=51)", len(rows))
 	}
 	seen := make(map[string]bool, len(rows))
 	for _, row := range rows {
@@ -137,8 +137,8 @@ func buildGeneratedSnapshot10587(t *testing.T, row generatedSnapshotRow10587) po
 func TestPolicyGeneratedGoSnapshotsAreFresh10587(t *testing.T) {
 	rows := generatedSnapshotRows10587(t)
 	assertGeneratedSnapshotCoverage10587(t, rows)
-	if os.Getenv("XPF_POLICY_ROWS_DIR") == "" && len(rows) != 52 {
-		t.Fatalf("committed generated policy row contract has %d rows, want exactly 52", len(rows))
+	if os.Getenv("XPF_POLICY_ROWS_DIR") == "" && len(rows) != 51 {
+		t.Fatalf("committed generated policy row contract has %d rows, want exactly 51", len(rows))
 	}
 	for _, row := range rows {
 		t.Run(row.ID, func(t *testing.T) {

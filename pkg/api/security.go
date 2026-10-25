@@ -1026,6 +1026,19 @@ func (s *Server) matchPoliciesHandler(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if res.V4MappedCompatIngressDrop {
+		// #16803: the dataplane drops a v4-mapped/compatible IPv6 tuple at
+		// ingress before policy (#10686) — surface the typed flag + the
+		// SSOT action string, NOT a fabricated permit/deny/default verdict.
+		writeOK(w, MatchPoliciesResult{
+			PostNATInputNote:          res.PostNATInputNote,
+			V4MappedCompatIngressDrop: true,
+			Action:                    res.DisplayAction(),
+			QueriedFromZone:           fromZone,
+			QueriedToZone:             toZone,
+		})
+		return
+	}
 	if res.HostInboundUnmatched {
 		writeOK(w, MatchPoliciesResult{
 			HostInboundUnmatched: true,

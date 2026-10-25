@@ -876,6 +876,13 @@ type MatchPoliciesResult struct {
 	// zone-0 egress is denied before default-policy (#11067); the simulator
 	// cannot distinguish the zero-identity NoRoute exception without FIB input.
 	UnzonedEgress bool `json:"unzoned_egress,omitempty"`
+	// V4MappedCompatIngressDrop is true when either side of the query is an
+	// IPv4-mapped (::ffff:0:0/96) or IPv4-compatible (::/96, excluding ::
+	// and ::1) IPv6 address (#16803). The dataplane drops such frames at
+	// ingress before security-policy evaluation (#10686), so Action is the
+	// explanatory V4MappedCompatIngressDropActionString rather than an
+	// enforced permit/deny/default verdict; Matched/DefaultUsed are false.
+	V4MappedCompatIngressDrop bool `json:"v4_mapped_compat_ingress_drop,omitempty"`
 	// QueriedFromZone/QueriedToZone echo the zone pair the caller ASKED about
 	// (#3627 M06). Unlike FromZone/ToZone (the SCOPE of the MATCHED policy, set
 	// only on a positive match), these are populated on EVERY response —

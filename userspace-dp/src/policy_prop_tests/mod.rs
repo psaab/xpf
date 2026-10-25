@@ -6,7 +6,7 @@
 //! to a directory to emit Rust-computed rows for the Go consumer.
 //!
 //! Normal CI uses bounded property counts.  `PROPTEST_CASES=1000` is the
-//! supported deep soak: P2/P4/P7 each accept only 2 of 52 seed rows, so the
+//! supported deep soak: P2/P4/P7 each accept only 2 of 51 seed rows, so the
 //! default 65,536 local-reject budget reaches roughly 2,500 cases.  A
 //! 100,000-case run would exceed that reject budget unless proptest's config
 //! is deliberately raised.  Record the effective case count, generated row
@@ -38,14 +38,14 @@ fn cfg(cases: u32) -> ProptestConfig {
 fn assert_seed_rows_are_fresh(rows: &[GeneratedRow]) {
     assert_eq!(
         rows.len(),
-        52,
-        "generated policy seed contract changed (want exactly 52 rows)"
+        51,
+        "generated policy seed contract changed (want exactly 51 rows)"
     );
     let expected_ids = manifest_ids();
     assert_eq!(
         expected_ids.len(),
-        52,
-        "seed_manifest.json must contain exactly 52 IDs"
+        51,
+        "seed_manifest.json must contain exactly 51 IDs"
     );
     let actual_ids: Vec<_> = rows.iter().map(|row| row.id.clone()).collect();
     assert_eq!(
@@ -161,12 +161,13 @@ proptest! {
         assert_row_oracle(&row);
     }
 
-    // P5 — address books, exclusions, IPv6, and mapped IPv6 are concrete
-    // differential rows; nil/unspecified addresses remain a Go-only contract.
+    // P5 — address books, exclusions, and IPv6 are concrete differential
+    // rows; nil/unspecified addresses remain a Go-only contract. A mapped
+    // IPv6 source is a Go-only pre-policy boundary since #16803 (the frame
+    // is dropped at ingress #10686 before the Rust policy evaluator).
     #[test]
     fn p5_address_families_exclusions_10587(row in seed_row_strategy().prop_filter("address", |r| {
         matches!(r.source_case.as_str(), "source-address-scoping" | "excluded-source-address-scoping")
-            || r.id == "mapped-v6-source"
     })) {
         assert_row_oracle(&row);
     }

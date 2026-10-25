@@ -74,6 +74,15 @@ xpf (0.0.0) unstable; urgency=medium
     unconfirmed trial in kernel status, with unreadable evidence
     failing closed. ARMING on a positively known-good boot is
     unchanged.
+  * Policy simulator: `show security match-policies` / `test policy` /
+    REST / gRPC now report the #10686 ingress drop for IPv4-mapped
+    (::ffff:0:0/96) and IPv4-compatible (::/96) IPv6 tuples instead of
+    certifying a policy verdict (#16803). The dataplane drops such
+    frames before security-policy evaluation, for transit and
+    host-bound queries alike; the simulator returns the new
+    V4MappedCompatIngressDrop verdict (typed REST field
+    v4_mapped_compat_ingress_drop, gRPC proto field 36), while v4,
+    ordinary-v6, link-local, :: and ::1 queries are unchanged.
   * Cluster/heartbeat: the duplicate-node-id heartbeat warning now
     drops a replay of this node's own heartbeat (#16789). The #14705
     gate verified only the HMAC, so an on-link spoofer replaying a

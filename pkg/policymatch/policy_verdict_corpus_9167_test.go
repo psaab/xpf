@@ -201,6 +201,18 @@ func TestPolicyVerdictCorpusGoHalf9167(t *testing.T) {
 						"nothing about the tier walk.", q.Line, res.ContentRejectionReasons)
 					continue
 				}
+				// #16803: the embedded-v4 case records the policy-CORE
+				// verdict (see the corpus header); since #10686 the frame
+				// is dropped at ingress, so Match reports the ingress
+				// drop instead of the recorded policy verdict. Accept
+				// exactly that shape for those rows — the Rust half
+				// still pins the policy-core verdict the bypass reached.
+				if res.V4MappedCompatIngressDrop {
+					if c.Name != "embedded-v4-ipv6-policy-family-10686" {
+						t.Errorf("corpus line %d: unexpected ingress-drop verdict outside the #10686 case", q.Line)
+					}
+					continue
+				}
 				if gotAction != q.WantAction || gotPolicy != q.WantPolicy {
 					t.Errorf("corpus line %d: %s %s->%s %s %s:%d->%s:%d\n"+
 						"  Go simulator: %s %s\n  corpus       : %s %s\n"+

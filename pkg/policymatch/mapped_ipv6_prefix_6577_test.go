@@ -132,9 +132,13 @@ func TestMappedIPv6PrefixMatchesMappedDestination_6577(t *testing.T) {
 		SrcFamily: "v6",
 		DstFamily: config.NATAddrFamily(dstText),
 	})
-	if res.Action != config.PolicyDeny || res.PolicyName != "block-mapped-range" {
-		t.Fatalf("%q is inside the %q DENY and the dataplane drops it (PrefixV6 unfolded u128 "+
-			"compare); got %v via %q", dstText, denyDst, res.Action, res.PolicyName)
+	// #16803 supersedes the policy-attribution half at the Match level:
+	// since #10686 the box drops the mapped destination at ingress before
+	// policy, so Match reports the ingress drop rather than block-mapped-range.
+	// The prefix-classification contract this file pins is unchanged
+	// (resolveTokenFamilies below).
+	if !res.V4MappedCompatIngressDrop || res.Action != config.PolicyDeny || res.PolicyName != "" {
+		t.Fatalf("mapped dst %q must report the #10686 ingress drop (#16803), got %+v", dstText, res)
 	}
 }
 
@@ -169,9 +173,10 @@ func TestBareMappedIPv6AddressClassifiedV6_6577(t *testing.T) {
 		SrcFamily: "v6",
 		DstFamily: config.NATAddrFamily(denyDst),
 	})
-	if res.Action != config.PolicyDeny || res.PolicyName != "block-mapped-range" {
-		t.Fatalf("the mapped destination %q is the bare v6 /128 the deny names; want deny via "+
-			"block-mapped-range, got %v via %q", denyDst, res.Action, res.PolicyName)
+	// #16803: same ingress-drop supersession as above — the mapped
+	// destination never reaches the bare v6 /128 deny at the Match level.
+	if !res.V4MappedCompatIngressDrop || res.Action != config.PolicyDeny || res.PolicyName != "" {
+		t.Fatalf("mapped destination %q must report the #10686 ingress drop (#16803), got %+v", denyDst, res)
 	}
 }
 

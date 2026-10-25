@@ -311,6 +311,20 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 			QueriedToZone:    req.ToZone,
 		}, nil
 	}
+	if res.V4MappedCompatIngressDrop {
+		// #16803: the dataplane drops a v4-mapped/compatible IPv6 tuple at
+		// ingress before policy (#10686) — set the typed flag + the SSOT
+		// action string so a gRPC client does not read a fabricated
+		// permit/deny/default verdict. Matched/DefaultUsed stay false.
+		return &pb.MatchPoliciesResponse{
+			PostNatInputNote:          res.PostNATInputNote,
+			Matched:                   false,
+			V4MappedCompatIngressDrop: true,
+			Action:                    res.DisplayAction(),
+			QueriedFromZone:           req.FromZone,
+			QueriedToZone:             req.ToZone,
+		}, nil
+	}
 	if res.HostInboundUnmatched {
 		// #3375: render the same explanatory action string REST returns instead
 		// of leaving it blank, so a gRPC client showing `action` directly gets a

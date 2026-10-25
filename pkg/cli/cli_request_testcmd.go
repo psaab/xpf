@@ -196,6 +196,13 @@ func (c *CLI) testPolicy(args []string) error {
 		fmt.Printf("%s\n", res.DisplayAction())
 		return nil
 	}
+	if res.V4MappedCompatIngressDrop {
+		// #16803: a v4-mapped/compatible IPv6 tuple is dropped at ingress
+		// before policy (#10686); surface the dedicated verdict instead of
+		// a fabricated "Default … (no matching policy)" verdict.
+		fmt.Printf("%s\n", res.DisplayAction())
+		return nil
+	}
 	if !res.Matched {
 		fmt.Printf("Default %s (no matching policy for %s -> %s)\n",
 			policymatch.ActionString(res.Action), fromZone, toZone)
