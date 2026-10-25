@@ -114,13 +114,25 @@ func (t *FlowTracker) Touch(key FlowKey, now time.Time, packets, bytes uint64) {
 	if !ok {
 		return
 	}
-	if packets > f.record.Packets || bytes > f.record.Bytes {
+	// #16750: cumulative counters are monotonic per field. A snapshot
+	// that raced backwards (helper restart, mirror-row alternation
+	// between workers) must not lower the stored cumulative: the next
+	// delta would otherwise under-report, and deltaRecord/baseline
+	// arithmetic could be driven below its last-export baseline.
+	progress := false
+	if packets > f.record.Packets {
+		f.record.Packets = packets
+		progress = true
+	}
+	if bytes > f.record.Bytes {
+		f.record.Bytes = bytes
+		progress = true
+	}
+	if progress {
 		// #15946: progress vs cumulative record, not last-export baseline
 		// (which CollectDueExports advances, masking activity).
 		f.lastActivity = now
 	}
-	f.record.Packets = packets
-	f.record.Bytes = bytes
 }
 
 // TouchBidirectional is Touch with the reverse-direction cumulative
@@ -137,15 +149,30 @@ func (t *FlowTracker) TouchBidirectional(key FlowKey, now time.Time, fwdPackets,
 	if !ok {
 		return
 	}
-	packets := fwdPackets + revPackets
-	bytes := fwdBytes + revBytes
-	if packets > f.record.Packets+f.record.RevPackets || bytes > f.record.Bytes+f.record.RevBytes {
+	// #16750: monotonic per field (see Touch), and activity is any
+	// single field advancing — not the forward+reverse sum, which a
+	// backward-moving mirror field can hold flat while another field
+	// genuinely progresses.
+	progress := false
+	if fwdPackets > f.record.Packets {
+		f.record.Packets = fwdPackets
+		progress = true
+	}
+	if fwdBytes > f.record.Bytes {
+		f.record.Bytes = fwdBytes
+		progress = true
+	}
+	if revPackets > f.record.RevPackets {
+		f.record.RevPackets = revPackets
+		progress = true
+	}
+	if revBytes > f.record.RevBytes {
+		f.record.RevBytes = revBytes
+		progress = true
+	}
+	if progress {
 		f.lastActivity = now
 	}
-	f.record.Packets = fwdPackets
-	f.record.Bytes = fwdBytes
-	f.record.RevPackets = revPackets
-	f.record.RevBytes = revBytes
 }
 
 // CollectDueExports returns interim (active-timeout) and final
@@ -189,10 +216,14 @@ func (f *trackedFlow) deltaRecord(now time.Time) FlowRecord {
 		r.StartTime = f.start
 	}
 	r.EndTime = now
-	r.Packets = f.record.Packets - f.lastPackets
-	r.Bytes = f.record.Bytes - f.lastBytes
-	r.RevPackets = f.record.RevPackets - f.lastRevPackets
-	r.RevBytes = f.record.RevBytes - f.lastRevBytes
+	// #16750: saturate like the close remainder (exporter_core.go
+	// satSub): a record that raced below its last-export baseline
+	// yields a zero delta, never a ~2^64 wrap that poisons collector
+	// aggregates.
+	r.Packets = satSub(f.record.Packets, f.lastPackets)
+	r.Bytes = satSub(f.record.Bytes, f.lastBytes)
+	r.RevPackets = satSub(f.record.RevPackets, f.lastRevPackets)
+	r.RevBytes = satSub(f.record.RevBytes, f.lastRevBytes)
 	return r
 }
 
