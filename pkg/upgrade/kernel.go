@@ -34,6 +34,9 @@
 //     recoverable and idempotent.
 //   - The ACTIVE slot's kernel is NEVER pruned (the A/B rollback guarantee);
 //     GC removes only the un-promoted candidate + its inactive-slot staging.
+//     A GC deferred because the candidate is the running kernel (#14165) is
+//     persisted as a prune-owed record and collected by the next boot that
+//     is positively off the candidate (#16811) — never silently dropped.
 //   - Promotion is a NON-destructive BootOrder reorder (preserve PXE/recovery).
 package upgrade
 
