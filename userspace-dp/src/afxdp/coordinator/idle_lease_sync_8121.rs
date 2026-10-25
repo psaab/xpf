@@ -87,8 +87,9 @@ impl Coordinator {
     /// exporting once per RULE would send the same lease as many times as there
     /// are rules pointing at that pool.
     /// #10789-F4: the allocator export is local-origin only while this node
-    /// is a standby. Once every local RG is active, imported leases are
-    /// promoted to local ownership and become eligible for re-export.
+    /// is a standby. After this node owns every configured forwarding RG,
+    /// imported leases are promoted to local ownership and become eligible for
+    /// re-export.
     pub(crate) fn export_idle_persistent_leases(&self, now_ns: u64) -> Vec<PoolIdleLease> {
         let mut seen: HashSet<String> = HashSet::new();
         let mut out = Vec::new();
@@ -589,11 +590,7 @@ impl Coordinator {
         // partial batch must not sweep unrelated peer-owned entries.
         let now_secs = monotonic_nanos() / 1_000_000_000;
         let local_groups = self.ha.rg_runtime.load();
-        if !local_groups.is_empty()
-            && local_groups
-                .values()
-                .all(|group| group.is_forwarding_active(now_secs))
-        {
+        if self.all_configured_forwarding_rgs_active(&local_groups, now_secs) {
             for (allocator, record) in imported_to_promote {
                 allocator.promote_imported_persistent_lease_record(record);
             }

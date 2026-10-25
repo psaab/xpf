@@ -197,18 +197,33 @@ impl crate::afxdp::Coordinator {
             .collect()
     }
 
+    pub(in crate::afxdp) fn all_configured_forwarding_rgs_active(
+        &self,
+        current: &BTreeMap<i32, HAGroupRuntime>,
+        now_secs: u64,
+    ) -> bool {
+        let mut has_configured_rg = false;
+        self.forwarding
+            .egress
+            .values()
+            .filter(|interface| interface.redundancy_group > 0)
+            .all(|interface| {
+                has_configured_rg = true;
+                current
+                    .get(&interface.redundancy_group)
+                    .is_some_and(|group| group.is_forwarding_active(now_secs))
+            })
+            && has_configured_rg
+    }
+
     fn handle_activated_rgs(&self, activated_rgs: &[i32], current: &BTreeMap<i32, HAGroupRuntime>, now_secs: u64) {
         if activated_rgs.is_empty() {
             return;
         }
         // #16876: idle-lease ownership changes only when this node owns every
-        // local RG. The lease record has no RG identity, so a partial
-        // activation cannot safely promote a node-wide imported set.
-        if !current.is_empty()
-            && current
-                .values()
-                .all(|group| group.is_forwarding_active(now_secs))
-        {
+        // configured forwarding RG. The lease record has no RG identity, so a
+        // partial activation cannot safely promote a node-wide imported set.
+        if self.all_configured_forwarding_rgs_active(current, now_secs) {
             self.promote_imported_persistent_nat_leases();
         }
         // #2120: the activated rg_epochs bump (and the node-level
