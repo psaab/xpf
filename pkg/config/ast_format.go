@@ -626,18 +626,54 @@ func FormatCompareAtPath(oldTree, newTree *ConfigTree, path []string) string {
 	return b.String()
 }
 
+// keyProvenanceID is the provenance-aware sibling identity (#16527): the
+// joined KeyPath plus, per key, its count position and its authored
+// quote/bracket bits. KeyPath alone joins Keys with spaces, so
+// `"set" "system host-name pwned"` (two quoted members) and
+// `set system host-name pwned` (one bare command) — and `"a b"` vs `a b`,
+// or a bracketed group vs the same tokens bare — collapse to one string
+// even though provenance-sensitive readers (eventMultiWordLeafValues)
+// compile them differently. Nil provenance reads as all-false through
+// KeyQuoted/KeyBracketed, so all-bare and provenance-less trees keep
+// their pre-#16527 identity and render no new diffs.
+func keyProvenanceID(n *Node) string {
+	var sb strings.Builder
+	sb.WriteString(n.KeyPath())
+	for i := range n.Keys {
+		fmt.Fprintf(&sb, "\x00%d:%t:%t", i, n.KeyQuoted(i), n.KeyBracketed(i))
+	}
+	return sb.String()
+}
+
+// sameKeyProvenance reports whether a and b carry the same keys with the
+// same per-key quote/bracket provenance (#16527). It compares key count
+// plus KeyQuoted(i)/KeyBracketed(i) for every i; nil masks read as
+// all-false, so two provenance-less nodes with equal Keys stay equal.
+func sameKeyProvenance(a, b *Node) bool {
+	if len(a.Keys) != len(b.Keys) {
+		return false
+	}
+	for i := range a.Keys {
+		if a.KeyQuoted(i) != b.KeyQuoted(i) || a.KeyBracketed(i) != b.KeyBracketed(i) {
+			return false
+		}
+	}
+	return true
+}
+
 // alignSiblings aligns two sibling lists as sequences (#15168, B24-01).
 //
-// Pairing is by KeyPath, but duplicates are content-aware: among siblings
-// sharing a KeyPath, a content-equal old/new pair is matched first, so with
-// repeated containers (two `from-zone trust to-zone untrust` blocks) removing
-// a policy from one block reports that policy — not a same-KeyPath survivor
-// from the other block — as removed. Leftover duplicates pair in occurrence
-// order. A pair is a move when it falls off the longest increasing
-// subsequence of new indices (pairs taken in old order): it renders as -/+
-// at its old/new positions instead of as unchanged.
+// Pairing is by provenance-aware key identity (#16527), but duplicates are
+// content-aware: among siblings sharing an identity, a content-equal
+// old/new pair is matched first, so with repeated containers (two
+// `from-zone trust to-zone untrust` blocks) removing a policy from one
+// block reports that policy — not a same-KeyPath survivor from the other
+// block — as removed. Leftover duplicates pair in occurrence order. A
+// pair is a move when it falls off the longest increasing subsequence of
+// new indices (pairs taken in old order): it renders as -/+ at its
+// old/new positions instead of as unchanged.
 type siblingAlignment struct {
-	pairs    [][2]int // (oldIdx, newIdx) for every KeyPath-matched pair
+	pairs    [][2]int // (oldIdx, newIdx) for every identity-matched pair
 	movedOld map[int]bool
 	movedNew map[int]bool
 	oldOnly  []int
@@ -651,12 +687,12 @@ func alignSiblings(oldNodes, newNodes []*Node) siblingAlignment {
 	// would hide authored policy order.
 	oldByKey := make(map[string][]int)
 	for i, n := range oldNodes {
-		k := n.KeyPath()
+		k := keyProvenanceID(n)
 		oldByKey[k] = append(oldByKey[k], i)
 	}
 	newByKey := make(map[string][]int)
 	for i, n := range newNodes {
-		k := n.KeyPath()
+		k := keyProvenanceID(n)
 		newByKey[k] = append(newByKey[k], i)
 	}
 	a := siblingAlignment{
@@ -957,6 +993,13 @@ func diffNodes(b *strings.Builder, oldNodes, newNodes []*Node, editPath []string
 // semantic for first-match constructs (policies, terms, rules).
 func nodesEqual(a, b *Node) bool {
 	if a.KeyPath() != b.KeyPath() {
+		return false
+	}
+	// #16527: KeyPath joins keys with spaces, so it cannot see key
+	// grouping or quote/bracket provenance. A grouping change that a
+	// provenance-sensitive reader compiles differently (e.g. event
+	// change-configuration commands) must not compare equal.
+	if !sameKeyProvenance(a, b) {
 		return false
 	}
 	if a.IsLeaf != b.IsLeaf {
