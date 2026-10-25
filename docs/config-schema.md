@@ -15325,7 +15325,12 @@ the value sits in a single typed slot:
     `session-timeout` is rejected at strict commit
     (`validateTimeWaitStateAgeoutStrict`) and warned on the tolerant
     load / peer-sync path, where the dataplane's ageout-wins
-    precedence applies and is what `show` reports.
+    precedence applies and is what `show` reports. #16662: the packed
+    hierarchical spelling (`time-wait-state session-timeout 120;`,
+    `time-wait-state session-ageout;`, and the half-close leaves,
+    including multi-leaf packed runs) now compiles to the same fields
+    as the braced spelling; previously it passed strict commit and
+    compiled to nothing.
     (**#6539** narrowed an older sentence: the dataplane does have TCP state —
     #3152 adds OPENING vs established and #3046 distinguishes RST vs FIN close.
     Those states are precisely why the TIMEOUT leaves need a differently-worded

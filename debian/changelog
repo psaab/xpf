@@ -1,4 +1,12 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Config: packed hierarchical `security flow tcp-session
+    time-wait-state session-timeout N;` / `session-ageout;` (and the
+    half-close leaves, including multi-leaf packed runs) now compile
+    to the same `TCPSessionConfig` fields as the braced spelling
+    (#16662). Previously the time-wait-state compiler loop read only
+    the node's Children, so the packed spelling passed strict commit,
+    displayed as configured, and silently kept the default TIME_WAIT
+    close-window handling.
   * Config/feeds: strict commit now rejects a dynamic-address feed-server
     whose URL/hostname host is a non-public IP literal (private, loopback,
     link-local, CGNAT, benchmarking, ULA, transition/special-purpose)

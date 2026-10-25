@@ -617,6 +617,19 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 		walkChildren = expandRunChildren9235(walkChildren, childSchema)
 	}
 	if childSchema.packedTail && len(node.Keys) > consumed {
+		// #16662: packedBodyChildren declines (returns the authored
+		// Children) when the tail leaves the modelled grammar, so a
+		// bogus packed leaf would validate nothing while the compiler
+		// now reads the same expansion. A non-empty tail that expands
+		// to exactly the authored children is that declined case:
+		// under a closed-world container the tail token is an unknown
+		// keyword and must reject, mirroring the braced spelling.
+		if expanded := packedBodyChildren(node, childSchema); len(expanded) == len(node.Children) && (len(expanded) == 0 || (len(node.Children) > 0 && &expanded[0] == &node.Children[0])) {
+			if childClosed {
+				return schemaErrorf(newPath, "%s: unknown configuration keyword %q under closed-world subtree",
+					strings.Join(redactSecretPath(newPath), " "), node.Keys[consumed])
+			}
+		}
 		// The packed body is authored on the container line.
 		walkChildren = packedBodyChildren(node, childSchema)
 	} else {

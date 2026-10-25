@@ -306,6 +306,13 @@ const inventoryNotes = `#
 # not recorded (the ratchet was red at base); each is classified in the
 # permanent-exclusion register before this note was written, per site,
 # not per family.
+# #16662: 3 lines removed, nothing added or changed in shape. The
+# time-wait-state reader in compileFlow now expands the packed
+# hierarchical tail, so 'security flow tcp-session time-wait-state
+# session-timeout', '... session-ageout' and '...
+# apply-to-half-closed-state' compile identically to the braced form;
+# their register lines are removed with them and the sites are anchored
+# in filedFixed instead.
 #`
 
 func TestRegenerateCompactBlockInventory2419(t *testing.T) {
