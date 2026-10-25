@@ -68,6 +68,17 @@ func resolveSyslogSource(cfg *Config, srcIface, family string) string {
 	// guard `!= ""`, which a whitespace-only value passes.
 	srcIface = strings.TrimSpace(srcIface)
 
+	// #16772: no source-interface configured is the default shape, not an
+	// audit-loss condition. Return unbound silently — the #15078 WARN below
+	// is only for a CONFIGURED interface with no address of the collector's
+	// family. Without this, every default stream (empty per-stream and
+	// global source-interface, resolved unconditionally by the daemon
+	// fingerprints) logged a false "leaving the syslog source unbound
+	// (#15078)" on every apply.
+	if srcIface == "" {
+		return ""
+	}
+
 	// Parse "iface.unit" — e.g. "reth1.100" → base="reth1", unit=100
 	base, unitStr, hasUnit := strings.Cut(srcIface, ".")
 	unitNum := 0

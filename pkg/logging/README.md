@@ -858,6 +858,10 @@ with no valueType and no validator, so any string reached the dialer's resolver.
   wrong-family source; a hostname collector carries no family and keeps
   the legacy resolution. Both apply paths (daemon `applySyslogConfig`,
   CLI `buildSyslogClients`) and the rebuild fingerprint resolve this way.
+  An empty source-interface (the default shape) resolves unbound
+  silently (#16772): the WARN is only for a configured interface with
+  no address of the collector's family, so the fingerprints calling
+  the resolver unconditionally do not spam it on every apply.
 
 ## Gotchas
 
