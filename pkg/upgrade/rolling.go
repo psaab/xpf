@@ -210,6 +210,10 @@ type RollingConfig struct {
 	RejoinDeadline time.Duration
 	// PollInterval is the predicate poll cadence.
 	PollInterval time.Duration
+	// SignalGuard is the #16796 interrupt capture forwarded to the
+	// inner cut/rollback (may be nil). Pre-STOP it aborts (the rolling
+	// driver then fails back); at/after STOP it defers to completion.
+	SignalGuard *SignalGuard
 }
 
 func (c *RollingConfig) withDefaults() {
@@ -263,7 +267,9 @@ func RunRolling(r *Runner, cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("upgrade --rolling: %w", err)
 	}
-	return runRollingWith(r, cl, RollingConfig{})
+	return RunWithSignalGuard(r.logf, func(g *SignalGuard) error {
+		return runRollingWith(r, cl, RollingConfig{SignalGuard: g})
+	})
 }
 
 // RunRollingRollback performs the HA per-node rollback with the same
@@ -280,7 +286,9 @@ func RunRollingRollback(r *Runner, cfg Config, target string) error {
 	if err != nil {
 		return fmt.Errorf("upgrade --rollback --rolling: %w", err)
 	}
-	return runRollingRollbackWith(r, cl, RollingConfig{}, target)
+	return RunWithSignalGuard(r.logf, func(g *SignalGuard) error {
+		return runRollingRollbackWith(r, cl, RollingConfig{SignalGuard: g}, target)
+	})
 }
 
 // runRollingRollbackWith is the testable HA rollback core. It performs the
@@ -370,6 +378,7 @@ func runRollingRollbackWith(r *Runner, cl RollingCluster, rc RollingConfig, targ
 	if err := r.RollbackTo(plan.toVersion, RollbackOptions{
 		ClusterCoordinated: true,
 		LockAlreadyHeld:    true,
+		SignalGuard:        rc.SignalGuard,
 	}); err != nil {
 		if errors.Is(err, errRollbackRefusedBeforeStop) {
 			r.logf("rolling rollback: refused before STOP; resetting failover and aborting")
@@ -590,7 +599,7 @@ func runRollingWith(r *Runner, cl RollingCluster, rc RollingConfig) (err error) 
 	//    3-4 above), so the per-node cut is sanctioned even on a clustered
 	//    node — it bypasses the #5284 pre-STOP cluster gate that refuses a
 	//    BARE standalone cut on a member with /etc/xpf/node-id present.
-	if cutErr := r.Run(Options{SkipStartHealthRollback: true, LockAlreadyHeld: true, ClusterCoordinated: true}); cutErr != nil {
+	if cutErr := r.Run(Options{SkipStartHealthRollback: true, LockAlreadyHeld: true, ClusterCoordinated: true, SignalGuard: rc.SignalGuard}); cutErr != nil {
 		var beforeStop *cutBeforeStopError
 		if errors.As(cutErr, &beforeStop) {
 			logf("rolling: single-node cut refused before STOP; resetting failover and aborting")

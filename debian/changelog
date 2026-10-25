@@ -58,6 +58,15 @@ xpf (0.0.0) unstable; urgency=medium
     the kernel and Junos used A's route. A return row now fires only
     when the source table misses; the 30000-band leaks into inet.0 are
     unchanged.
+  * Upgrade signals: `xpfd upgrade` (binary cut, --rollback, --rolling
+    and the `upgrade kernel` sub-verb) now captures SIGINT/SIGHUP/
+    SIGTERM for the whole run (#16796). Previously no disposition was
+    installed, so Ctrl-C or an SSH drop during the STOP window killed
+    the runner after `systemctl stop xpfd` and left a standalone
+    daemon down with nothing to restart it. A signal before STOP
+    aborts cleanly with the daemon live; at/after STOP it is logged
+    as deferred and honoured only after START/rollback completes
+    with the unit running.
   * Cluster/config: an omitted `redundancy-group ip-monitoring
     global-weight` now defaults to 255, the Junos default (#16667).
     Previously it compiled to 0, so aggregate mode deducted nothing

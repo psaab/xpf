@@ -28,6 +28,12 @@ func (e *cutBeforeStopError) Error() string { return e.err.Error() }
 func (e *cutBeforeStopError) Unwrap() error { return e.err }
 
 // Options modify a single Run.
+//
+// SignalGuard, when set, is the #16796 interrupt capture consulted at
+// phase boundaries (see signal_defer_16796.go). The CLI installs one
+// for the whole verb; tests install one to deliver a signal mid-run.
+// Nil leaves the run without a capture (library callers that manage
+// their own disposition), matching pre-#16796 behaviour for them.
 type Options struct {
 	// SkipStartHealthRollback disables the post-start auto-rollback (used
 	// by the HA path, where rollback is operator-driven, plan §8 inv. 8).
@@ -81,6 +87,11 @@ type Options struct {
 	// readiness fence would blackhole a not-ready peer. Set EXCLUSIVELY by
 	// runRollingWith; never plumb it through the CLI or the postinst.
 	ClusterCoordinated bool
+
+	// SignalGuard is the #16796 interrupt capture for this run (may be
+	// nil). Consulted at phase boundaries: pre-STOP it aborts the run,
+	// at/after STOP it only logs deferral and the run completes.
+	SignalGuard *SignalGuard
 }
 
 // errNoSourceGeneration is the INIT sentinel for "no published staged
@@ -170,6 +181,13 @@ func (r *Runner) Run(opts Options) (err error) {
 			err = &cutBeforeStopError{err: err}
 		}
 	}()
+	// #16796: a captured interrupt aborts only before STOP. Check at
+	// entry too so a signal delivered while the caller waited on the
+	// upgrade lock (or in pre-Run CLI work) aborts a run that has not
+	// stopped anything, instead of starting a cut nobody wants.
+	if sig, abort := opts.SignalGuard.MayAbort(!stopAttempted); abort {
+		return fmt.Errorf("upgrade: aborted by %s before STOP; the daemon was not stopped (#16796)", sig)
+	}
 
 	// ---- CLUSTER GATE (#5284): refuse an UNCOORDINATED standalone cut on a
 	// clustered node. This is the FINAL privileged boundary — evaluated
@@ -249,6 +267,16 @@ func (r *Runner) Run(opts Options) (err error) {
 	// the UnitAlreadyStopped seed from entry (MINOR-1): with the STOP block
 	// skipped, later flip/start failures must not read as pre-STOP.
 	stopAttempted = stopAttempted || j.State == StateRollingBack || j.State.atLeast(StateStopped)
+	// #16796 boundary (post-journal): a journal at/after STOPPED (or
+	// ROLLINGBACK) means a prior attempt already stopped the unit, so a
+	// pending signal must defer, never abort this resume. A pre-STOP
+	// journal aborts here before any further phase runs.
+	if sig, abort := opts.SignalGuard.MayAbort(!stopAttempted); abort {
+		return fmt.Errorf("upgrade: aborted by %s before STOP; the daemon was not stopped (#16796)", sig)
+	}
+	if sig, pending := opts.SignalGuard.Pending(); pending && stopAttempted {
+		r.logf("upgrade: %s deferred: the unit was already stopped by an earlier attempt; finishing START/rollback before honouring it (#16796)", sig)
+	}
 
 	// A loaded journal's version fields key versions/<ver>, the .dbsnap
 	// dotfile, the `current` symlink, and the unit drop-in (#1964 C1). A
@@ -982,6 +1010,14 @@ func (r *Runner) Run(opts Options) (err error) {
 		}
 	}
 	resumingStopped := j.State == StateStopped
+	// #16796 boundary (immediately before STOP): the last abortable
+	// point. Past here StopUnit runs and any pending signal defers.
+	if !j.State.atLeast(StateStopped) {
+		if sig, abort := opts.SignalGuard.MayAbort(!stopAttempted); abort {
+			r.discardPredecessorBackup(predecessorBackup)
+			return fmt.Errorf("upgrade: aborted by %s before STOP; the daemon was not stopped (#16796)", sig)
+		}
+	}
 	// ---- STOP + CUT-BOUNDARY DB SNAPSHOT (live mutation #1) ----
 	//
 	// PREFLIGHT, COPY and VERIFY all run while the old daemon is live, so a
@@ -1142,6 +1178,7 @@ func (r *Runner) Run(opts Options) (err error) {
 	// present in versions/current (the flip's 6a current-repoint is the only
 	// substep that could have run; current still resolves to a launchable
 	// version either way).
+	r.logDeferredSignal(opts.SignalGuard, "FLIP")
 	if !j.State.atLeast(StateFlipped) {
 		if err := r.flip(j.TargetVersion); err != nil {
 			r.discardPredecessorBackup(predecessorBackup)
@@ -1224,6 +1261,10 @@ func (r *Runner) Run(opts Options) (err error) {
 	}
 	r.recordCommittedCut(j.TargetVersion)
 	r.discardPredecessorBackup(predecessorBackup)
+	if sig, pending := opts.SignalGuard.Pending(); pending {
+		r.logf("upgrade: cut committed; deferred %s now honoured — exiting so the operator interrupt takes effect with the daemon running (#16796)", sig)
+		return fmt.Errorf("upgrade: cut to %s committed, then honoured deferred %s (#16796)", j.TargetVersion, sig)
+	}
 	return nil
 }
 
@@ -1391,6 +1432,16 @@ func (r *Runner) validateForwardEnvelopeCompatibility(targetVersion, targetBin s
 			"booting the target would fail closed", compat.FormatVersion, compat.MinReader, targetVersion, reader)
 	}
 	return nil
+}
+
+// logDeferredSignal records a pending #16796 interrupt that arrived
+// at/after STOP: it is NOT honoured until the run completes or rolls
+// back with the unit running. Called at post-STOP boundaries so the
+// deferral is visible even when the signal raced in between checks.
+func (r *Runner) logDeferredSignal(g *SignalGuard, where string) {
+	if sig, pending := g.Pending(); pending {
+		r.logf("upgrade: %s deferred at %s: finishing START/rollback so the daemon is not left stopped (#16796)", sig, where)
+	}
 }
 
 // firstNonNil returns the first non-nil error.
