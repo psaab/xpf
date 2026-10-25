@@ -255,10 +255,11 @@ func returnRules9819(ops *fakeRuleOps, family int) []string {
 }
 
 // TestRibGroupReturnRules9819 pins which destinations get a return path and
-// what it is. The population is the leak-into-main set, narrowed to families
-// and exact prefixes whose leak installed, and to instances that have a VRF
-// device. Each iif/oif rule carries `to <leaked-prefix>` (#11062); no catch-all
-// may let unrelated VRF misses reach main.
+// what it is. Since #16616 a return exists only for a peer whose rib the
+// source's own rib-group names in import-rib (the VRF->VRF import case);
+// tenants that each leak only into main get NO tenant->tenant return. Each
+// iif/oif rule carries `to <leaked-prefix>` (#11062); no catch-all may let
+// unrelated VRF misses reach main.
 func TestRibGroupReturnRules9819(t *testing.T) {
 	ribGroups := map[string]*config.RibGroup{
 		"src-leak":  {ImportRibs: []string{"src.inet.0", "inet.0"}},
@@ -284,17 +285,9 @@ func TestRibGroupReturnRules9819(t *testing.T) {
 		"n":     {"10.70.0.0/24"},
 		"plain": {"10.80.0.0/24"},
 	}
-	// All peer prefixes here are /24: 1001+(32-24)*28 = 1225.
-	wantV4 := []string{
-		"iif= oif=vrf-b table=200 dst=10.30.0.0/24 src=<nil> pref=1225",
-		"iif= oif=vrf-b table=500 dst=10.60.0.0/24 src=<nil> pref=1225",
-		"iif= oif=vrf-src table=300 dst=10.40.0.0/24 src=<nil> pref=1225",
-		"iif= oif=vrf-src table=500 dst=10.60.0.0/24 src=<nil> pref=1225",
-		"iif=vrf-b oif= table=200 dst=10.30.0.0/24 src=<nil> pref=1225",
-		"iif=vrf-b oif= table=500 dst=10.60.0.0/24 src=<nil> pref=1225",
-		"iif=vrf-src oif= table=300 dst=10.40.0.0/24 src=<nil> pref=1225",
-		"iif=vrf-src oif= table=500 dst=10.60.0.0/24 src=<nil> pref=1225",
-	}
+	// #16616: no source names a peer rib (src-leak imports only src+main,
+	// b-leak only b+main, f-leak only f+main), so no return rules at all.
+	wantV4 := []string{}
 	wantV6 := []string{}
 
 	ops := newFakeRuleOps()
@@ -313,12 +306,52 @@ func TestRibGroupReturnRules9819(t *testing.T) {
 		}
 	}
 
-	// The final rib-group removal takes the return rules with the leaks.
+	// The final rib-group removal takes any return rules with the leaks.
 	if err := rg.Apply(nil, instances, connected); err != nil {
 		t.Fatalf("zero-transition Apply: %v", err)
 	}
 	if got := append(returnRules9819(ops, unix.AF_INET), returnRules9819(ops, unix.AF_INET6)...); len(got) != 0 {
 		t.Fatalf("return rules must not outlive the last rib-group: %q", got)
+	}
+}
+
+// TestRibGroupReturnRulesAuthorizedPeer16616 pins the authorized side of
+// #16616: when src's rib-group names b's rib (and vice versa), each gets
+// the destination-scoped return to the other's leaked prefix; a third
+// tenant leaking only into main gets none, and receives none.
+func TestRibGroupReturnRulesAuthorizedPeer16616(t *testing.T) {
+	ribGroups := map[string]*config.RibGroup{
+		"src-auth": {ImportRibs: []string{"src.inet.0", "b.inet.0", "inet.0"}},
+		"b-auth":   {ImportRibs: []string{"b.inet.0", "src.inet.0", "inet.0"}},
+		"c-leak":   {ImportRibs: []string{"c.inet.0", "inet.0"}},
+	}
+	instances := []*config.RoutingInstanceConfig{
+		{Name: "src", TableID: 200, InterfaceRoutesRibGroup: "src-auth"},
+		{Name: "b", TableID: 300, InterfaceRoutesRibGroup: "b-auth"},
+		{Name: "c", TableID: 400, InterfaceRoutesRibGroup: "c-leak"},
+	}
+	connected := map[string][]string{
+		"src": {"10.30.0.0/24"},
+		"b":   {"10.40.0.0/24"},
+		"c":   {"10.50.0.0/24"},
+	}
+	// All peer prefixes here are /24: 1001+(32-24)*28 = 1225.
+	wantV4 := []string{
+		"iif= oif=vrf-b table=200 dst=10.30.0.0/24 src=<nil> pref=1225",
+		"iif= oif=vrf-src table=300 dst=10.40.0.0/24 src=<nil> pref=1225",
+		"iif=vrf-b oif= table=200 dst=10.30.0.0/24 src=<nil> pref=1225",
+		"iif=vrf-src oif= table=300 dst=10.40.0.0/24 src=<nil> pref=1225",
+	}
+	ops := newFakeRuleOps()
+	rg := &ribGroupManager{ops: ops}
+	if err := rg.Apply(ribGroups, instances, connected); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if got := returnRules9819(ops, unix.AF_INET); strings.Join(got, "\n") != strings.Join(wantV4, "\n") {
+		t.Errorf("v4 return rules =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(wantV4, "\n"))
+	}
+	if got := returnRules9819(ops, unix.AF_INET6); len(got) != 0 {
+		t.Errorf("v6 return rules = %v, want none (no v6 groups)", got)
 	}
 }
 
@@ -539,8 +572,10 @@ func vrfMissTerminatorNetnsChild9819(t *testing.T) {
 	}
 	expect("PBR clear removes IPv4 lookup and shadow", pbrIngressMiss4, "dev xmain")
 	expect("PBR clear removes IPv6 lookup and shadow", pbrIngressMiss6, "dev xmain")
-	// #11062: a source VRF can look up another leaking instance's prefix in
-	// that peer's table. Main-only destinations still hit the terminator.
+	// #16616: src and b each leak only into main (no import-rib names the
+	// other's rib), so a source VRF lookup to the other tenant's leaked
+	// prefix must hit the terminator, not the peer's table. Main-only
+	// destinations likewise stay terminated.
 	for _, c := range []struct {
 		label string
 		args  []string
@@ -552,16 +587,16 @@ func vrfMissTerminatorNetnsChild9819(t *testing.T) {
 		{"source outside the return-rule context", foreignSource4},
 		{"socket lookup of a non-peer leaked prefix", leakSocket4},
 		{"slave lookup of a non-peer leaked prefix", leakSlave4},
+		{"lookup to another instance's leaked peer prefix", srcOtherLeak4},
+		{"return lookup from the source's slave", returnSlave4},
+		{"VRF-bound socket lookup to a peer prefix", returnSocket4},
+		{"v6 VRF-bound socket lookup to a peer prefix", returnSocket6},
 	} {
 		expect(c.label, c.args, "unreachable")
 	}
 	// Controls.
 	expect("VRF connected route", connected4, "table 100")
 	expect("VRF static route", static4, "table 100")
-	expect("lookup to another instance's leaked peer prefix", srcOtherLeak4, "table 300")
-	expect("return lookup from the source's slave", returnSlave4, "table 300")
-	expect("VRF-bound socket lookup to a peer prefix", returnSocket4, "table 300")
-	expect("v6 VRF-bound socket lookup to a peer prefix", returnSocket6, "table 300")
 	// 3. A second apply of both is clean and installs nothing twice.
 	if err := m.ReconcileVRFs(desired); err != nil {
 		t.Fatalf("second ReconcileVRFs (EEXIST must be success): %v", err)
@@ -575,7 +610,7 @@ func vrfMissTerminatorNetnsChild9819(t *testing.T) {
 		}
 	}
 	expect("source socket miss after re-apply", unboundMain4, "unreachable")
-	expect("explicitly sourced return lookup after re-apply", returnSocket4, "table 300")
+	expect("peer lookup still terminated after re-apply", returnSocket4, "unreachable")
 
 	// 4. Removal takes everything back out.
 	if err := m.ApplyRibGroupRules(nil, instances, nil); err != nil {

@@ -572,6 +572,13 @@ func buildRouteSnapshotsWithRGPrimary(cfg *config.Config, interfaces []Interface
 				if !ok || peerName == sourceName {
 					continue
 				}
+				// #16616: mirror only returns the source is authorized
+				// to make. A stale rule from an older binary (which
+				// installed returns for every main-leaking peer) must
+				// not republish an unauthorized A->B row into the FIB.
+				if !ribGroupReturnAuthorized(cfg, sourceName, peerName, family) {
+					continue
+				}
 				addLiveSnapshot(RouteSnapshot{
 					Table:        sourceName + suffix,
 					Family:       familyStr,
@@ -757,6 +764,48 @@ func ribGroupReturnRuleInstance(rule netlink.Rule, instanceTableIDs map[string]i
 		instanceName = candidate
 	}
 	return instanceName, instanceName != ""
+}
+
+// ribGroupReturnAuthorized reports whether sourceName's interface-routes
+// rib-group for family names peerName's rib in its import-rib list — the
+// #16616 authorization for a rib-group return. It mirrors the kernel
+// applier's authorization against the compiled config so a stale kernel
+// return rule left by an older binary cannot republish an unauthorized
+// tenant->tenant row into the userspace FIB. A source with no matching
+// instance or rib-group is unauthorized (fail-closed).
+func ribGroupReturnAuthorized(cfg *config.Config, sourceName, peerName string, family int) bool {
+	if cfg == nil || sourceName == "" || peerName == "" || sourceName == peerName {
+		return false
+	}
+	var source *config.RoutingInstanceConfig
+	for _, inst := range cfg.RoutingInstances {
+		if inst != nil && inst.Name == sourceName {
+			source = inst
+			break
+		}
+	}
+	if source == nil {
+		return false
+	}
+	groupName := source.InterfaceRoutesRibGroup
+	want := peerName + ".inet.0"
+	if family == syscall.AF_INET6 {
+		groupName = source.InterfaceRoutesRibGroupV6
+		want = peerName + ".inet6.0"
+	}
+	if groupName == "" {
+		return false
+	}
+	rgDef, ok := cfg.RoutingOptions.RibGroups[groupName]
+	if !ok || rgDef == nil {
+		return false
+	}
+	for _, ribName := range rgDef.ImportRibs {
+		if ribName == want {
+			return true
+		}
+	}
+	return false
 }
 
 // qualifyForwardingInstanceNextHops makes a forwarding-instance route's

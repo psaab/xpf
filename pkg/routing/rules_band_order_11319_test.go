@@ -71,14 +71,17 @@ func TestKernelBandOrderAppliesInBothFamilies11319(t *testing.T) {
 
 	rgOps := newFakeRuleOps()
 	rg := &ribGroupManager{ops: rgOps}
-	// Two leaking instances so the #11062 return rules install alongside the
-	// leaks; the return rules sit at 1500 and must not be mistaken for band
-	// members below.
+	// Two leaking instances that name each other's rib so the #11062/#16616
+	// authorized return rules install alongside the leaks; the return rules
+	// sit in (1000,2000) and must not be mistaken for band members below.
 	if err := rg.Apply(
-		map[string]*config.RibGroup{"leak": {Name: "leak", ImportRibs: []string{"inet.0", "inet6.0"}}},
+		map[string]*config.RibGroup{
+			"a-leak": {Name: "a-leak", ImportRibs: []string{"inet.0", "inet6.0", "b-vr.inet.0", "b-vr.inet6.0"}},
+			"b-leak": {Name: "b-leak", ImportRibs: []string{"inet.0", "inet6.0", "a-vr.inet.0", "a-vr.inet6.0"}},
+		},
 		[]*config.RoutingInstanceConfig{
-			{Name: "a-vr", TableID: 101, InterfaceRoutesRibGroup: "leak", InterfaceRoutesRibGroupV6: "leak"},
-			{Name: "b-vr", TableID: 102, InterfaceRoutesRibGroup: "leak", InterfaceRoutesRibGroupV6: "leak"},
+			{Name: "a-vr", TableID: 101, InterfaceRoutesRibGroup: "a-leak", InterfaceRoutesRibGroupV6: "a-leak"},
+			{Name: "b-vr", TableID: 102, InterfaceRoutesRibGroup: "b-leak", InterfaceRoutesRibGroupV6: "b-leak"},
 		},
 		map[string][]string{
 			"a-vr": {"10.0.1.0/24", "2001:db8:1::/64"},

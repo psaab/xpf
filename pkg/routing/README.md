@@ -461,28 +461,22 @@ delegate to the owning domain. Exported types:
   because it is a LOOKUP rule: a lookup that misses the VRF's table moves on
   down this list.
 - `1001–1999`: rib-group **return rules** (#9819, narrowed by #11062,
-  LPM-ordered by #14975). For each family in which a source instance leaked,
-  install an iif/oif pair per prefix leaked by a different instance at
-  `pref = config.RibGroupReturnRulePriority(prefix-len, addr-bits)`
+  LPM-ordered by #14975, authorized by #16616). For each family in which a
+  source instance leaked, install an iif/oif pair per prefix leaked by a
+  different instance — but only when the source's own rib-group for that
+  family names the peer's rib (`<peer>.inet.0` / `<peer>.inet6.0`) in its
+  import-rib list. Tenants leaking only into main get no tenant->tenant
+  return. Priority is `pref = config.RibGroupReturnRulePriority(prefix-len, addr-bits)`
   (1001 + (bits−len)×28 for IPv4, ×7 for IPv6; longer prefixes first):
   `to <peer-prefix> iif vrf-<instance> lookup <peer-table>` and
   `to <peer-prefix> oif vrf-<instance> lookup <peer-table>`. The pre-#14975
   flat `pref 1500` is legacy: recognized by clear() and the FIB mirror for
-  upgrade cleanup, never installed. Main-only destinations that are not
-  another instance's leaked peer prefix miss these rules and reach the VRF
-  miss terminator. The AF_XDP FIB mirrors the same destination scopes as
-  reverse `NextTable` routes from the source instance table to the peer
-  table, carrying the kernel priority for LPM ordering.
-- Next-table and PBR target return paths (#11320) do not receive a broad
-  `lookup main` exception. The commit warns for each target because a
-  main-only peer may be unreachable from its VRF. Configure a target-specific
-  static next-hop route inside the instance; per-instance `next-table` is
-  unsupported. See `docs/rib-group-route-leaking.md` for the supported Junos
-  spelling.
-- Scoped rib-group return rules sit after the kernel's l3mdev rule at 1000 and
-  before the VRF miss terminator at 2000. They look up the peer's table only
-  for explicitly leaked peer-prefix destinations; the Dst scope prevents a
-  VRF-wide escape to unrelated main routes.
+  upgrade cleanup, never installed. Main-only and unauthorized peer
+  destinations miss these rules and reach the VRF miss terminator. The
+  AF_XDP FIB mirrors the same authorized destination scopes as reverse
+  `NextTable` routes from the source instance table to the peer table,
+  carrying the kernel priority for LPM ordering; a stale kernel rule
+  without the import-rib authorization is not mirrored.
 - `2000`: the **VRF miss terminator** (#9819), `l3mdev unreachable`, once
   per family. `vrfMissTerminatorPriority` in `vrf_miss_terminator_9819.go`.
   `vrfManager.Reconcile` (and `Create`) installs it before creating any VRF

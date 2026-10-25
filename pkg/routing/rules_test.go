@@ -263,30 +263,29 @@ func TestRibGroupRulesApply_Fake(t *testing.T) {
 	if ops.hasTable(unix.AF_INET, 100) {
 		t.Errorf("self-only should not leak table 100, rules=%v", ops.rules[unix.AF_INET])
 	}
-	// #11062: dmz-vr returns to the other leaking instance's prefix only, in
-	// that peer's table; its own prefix and unrelated destinations do not
-	// receive a return rule. The peer gets the reciprocal dmz-vr prefix.
-	peerReturn, ok := ops.findDstRule(unix.AF_INET, 102, "10.0.40.0/24")
-	if !ok || !IsRibGroupReturnRulePriority(peerReturn.Priority) ||
-		peerReturn.Priority != ribGroupReturnRulePriorityFor(peerReturn.Dst) ||
-		(peerReturn.IifName != "vrf-dmz-vr" && peerReturn.OifName != "vrf-dmz-vr") {
-		t.Errorf("missing dmz-vr return rule to peer table 102 scoped to 10.0.40.0/24: %+v", peerReturn)
-	}
+	// #16616: dmz-vr and peer-vr each leak only into main (neither rib-group
+	// names the other's rib), so NO destination-scoped return rule is
+	// installed in either direction. Tenant->tenant reach requires an
+	// import-rib naming the peer rib (see
+	// TestRibGroupReturnRulesAuthorizedPeer16616).
 	for _, rule := range ops.rules[unix.AF_INET] {
-		if IsRibGroupReturnRulePriority(rule.Priority) &&
-			(rule.IifName == "vrf-dmz-vr" || rule.OifName == "vrf-dmz-vr") &&
-			(rule.Dst == nil || rule.Dst.String() != "10.0.40.0/24") {
-			t.Errorf("dmz-vr return rule is not scoped to the other leaked prefix: %+v", rule)
+		if IsRibGroupReturnRulePriority(rule.Priority) {
+			t.Errorf("unauthorized peer return rule must not be installed: %+v", rule)
+		}
+	}
+	for _, rule := range ops.rules[unix.AF_INET6] {
+		if IsRibGroupReturnRulePriority(rule.Priority) {
+			t.Errorf("unauthorized peer return rule must not be installed (v6): %+v", rule)
 		}
 	}
 	if got := rulesInWindow9819(ops, unix.AF_INET, ribGroupLeakRulePriority, ribGroupLeakRulePriority+config.RouteLeakRulePriorityWindow); got != 2 {
 		t.Errorf("expected exactly 2 IPv4 leak rules, got %d", got)
 	}
-	if got := ops.count(unix.AF_INET); got != 6 {
-		t.Errorf("expected 2 IPv4 leak rules and 4 peer-scoped return rules, got %d rules", got)
+	if got := ops.count(unix.AF_INET); got != 2 {
+		t.Errorf("expected 2 IPv4 leak rules and no return rules, got %d rules", got)
 	}
-	if got := ops.count(unix.AF_INET6); got != 6 {
-		t.Errorf("expected 2 IPv6 leak rules and 4 peer-scoped return rules, got %d rules", got)
+	if got := ops.count(unix.AF_INET6); got != 2 {
+		t.Errorf("expected 2 IPv6 leak rules and no return rules, got %d rules", got)
 	}
 
 	// Re-applying must clear the prior rules first (clear-then-add), so
@@ -295,8 +294,8 @@ func TestRibGroupRulesApply_Fake(t *testing.T) {
 	if err := rg.Apply(ribGroups, instances, connected); err != nil {
 		t.Fatalf("Apply (second): %v", err)
 	}
-	if got := ops.count(unix.AF_INET); got != 6 {
-		t.Errorf("after re-apply expected 2 IPv4 leak rules and 4 peer-scoped return rules, got %d rules", got)
+	if got := ops.count(unix.AF_INET); got != 2 {
+		t.Errorf("after re-apply expected 2 IPv4 leak rules and no return rules, got %d rules", got)
 	}
 	if ops.dels == 0 {
 		t.Error("expected re-apply to delete the prior rules (clear-then-add)")
