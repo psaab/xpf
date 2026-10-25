@@ -647,6 +647,22 @@ recovered ready peer; clearing the hold does not automatically return
 ownership. The same keep can follow the two-minute degraded-promotion timeout
 if the hold lasts longer than that timeout.
 
+**Not-takeover-ready peers do not take the RG from a preempt incumbent
+(#16741).** The startup sync hold (#7162/#14406) gates only the rejoiner:
+it stays secondary until bulk sync completes or the 30s hold times out.
+That left the incumbent's preempt arm untouched, so a rejoining
+higher-priority node that had armed (weight back to 255) but was still
+held made the incumbent demote into an RG owned by neither node for the
+rest of the hold. While the hold is active the daemon installs a
+startup-hold election debt (`SetStartupSyncHold`, same floor-1 cost as
+the dataplane-arm debt) on the rejoiner, so its heartbeat advertises
+the arm floor — the shape the receiver records as
+`PeerGroupState.takeoverReady=false`. A preempt incumbent that already
+owns the RG then stays owner (its yield arms are skipped) until the
+hold releases and the real weight returns, at which point ordinary
+preempt ordering hands the RG over. A peer that IS primary is not
+covered — that is a dual-active to resolve, not a hold to wait out.
+
 It is FALSE for a peer that is merely `StateSecondary` with weight > 1, or
 at weight 1 without observed PRIMARY history (both are cold-boot shapes,
 where the gate must still hold), and for `peerGroup == nil` (peer loss or

@@ -114,6 +114,9 @@ func (d *Daemon) onSessionSyncBulkReceived() {
 			if r := d.vrrpMgr.SyncHoldReason(); r != "" {
 				d.cluster.SetStartupSyncHoldStatus("reth-vrrp", d.vrrpMgr.InSyncHold(), r)
 			}
+			// #16741: bulk sync done — clear the rejoiner's election debt so
+			// ordinary preempt hands the RG over.
+			d.cluster.SetStartupSyncHold(false)
 		}
 	}
 	// #7162: the no-RETH sibling release. Unconditional, exactly like the VRRP

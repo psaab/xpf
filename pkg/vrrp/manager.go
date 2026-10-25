@@ -187,6 +187,11 @@ type Manager struct {
 	// syncHold: syncHold only suppresses PREEMPTION, dead-master takeover is
 	// ungated by it — this hold gates becomeMaster itself.
 	kernelUpgradeHold bool
+	// onSyncHoldRelease, when set, fires after the sync hold releases by
+	// EITHER edge (bulk sync or its own 30s timer) — the daemon uses it
+	// to clear the #16741 startup-hold election debt, whose release must
+	// not depend on which edge fired.
+	onSyncHoldRelease func()
 	onEventDrop       func() // called when an event is dropped (full channel)
 
 	// Interface tracking (#1814): ONE singleton link-watcher goroutine
@@ -443,6 +448,14 @@ func (m *Manager) SetSyncHold(timeout time.Duration) {
 	slog.Info("vrrp: sync hold active, preemption disabled", "timeout", timeout)
 }
 
+// SetOnSyncHoldRelease installs a hook fired after the sync hold
+// releases by either edge (bulk sync or the 30s timer). Nil clears it.
+func (m *Manager) SetOnSyncHoldRelease(fn func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onSyncHoldRelease = fn
+}
+
 // ReleaseSyncHold restores configured preempt values on all instances,
 // allowing normal VRRP preemption to proceed. Records reason as
 // "bulk-sync-complete" (the normal path).
@@ -454,8 +467,8 @@ func (m *Manager) ReleaseSyncHold() {
 // the sync hold was released.
 func (m *Manager) releaseSyncHoldWithReason(reason string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if !m.syncHold {
+		m.mu.Unlock()
 		return
 	}
 	m.syncHold = false
@@ -468,7 +481,12 @@ func (m *Manager) releaseSyncHoldWithReason(reason string) {
 		vi.restorePreempt()
 		vi.triggerPreemptNow()
 	}
+	hook := m.onSyncHoldRelease
+	m.mu.Unlock()
 	slog.Info("vrrp: sync hold released, preemption enabled", "reason", reason)
+	if hook != nil {
+		hook()
+	}
 }
 
 // InSyncHold returns true if the manager is in sync-hold state (startup,

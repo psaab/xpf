@@ -817,6 +817,16 @@ type PeerGroupState struct {
 	// a cold-booting secondary at the arm floor is not mistaken for a
 	// peer that yielded (MAJOR-2).
 	peerWasPrimaryThisSession bool
+	// takeoverReady records that the peer's last heartbeat advertised a
+	// weight above the dataplane-arm floor. False means the peer cannot
+	// claim the RG is forwarding-armed yet — e.g. it is still before
+	// XDP arm completes under its startup sync hold — so a preempt
+	// incumbent must not yield to it (#16741). Derived from the wire
+	// weight: every fresh HA RG sits at the arm floor (weight 1, or 0
+	// with resigning debt) until its dataplane is proven, and a node
+	// that has genuinely finished arming advertises its real weight.
+	// Not a new wire field.
+	takeoverReady bool
 }
 
 // heartbeatSender sends periodic heartbeat packets.
