@@ -87,17 +87,49 @@ func TestGetISISAdjacencyVRFUsesFRRVRFName15265(t *testing.T) {
 	}
 }
 
-// Already-prefixed input must not be doubled (vrf-vrf-tenant).
-func TestGetBGPSummaryVRFPrefixedNameNotDoubled15265(t *testing.T) {
+// #16664: an instance named "vrf-cust" is realised by FRR as
+// "vrf-vrf-cust"; the query must prefix unconditionally, with and
+// without a sibling instance "cust". The #2143 exactly-once guard
+// queried sibling "cust"'s VRF ("vrf-cust") for instance "vrf-cust".
+func TestGetBGPSummaryVRFPrefixedInstance16664(t *testing.T) {
 	fake := &fakeExecutor{vtyshResp: map[string]string{
-		"show bgp vrf vrf-tenant summary json": bgpSummaryJSONFixture,
+		"show bgp vrf vrf-vrf-cust summary json": bgpSummaryJSONFixture,
 	}}
 	manager := &Manager{exec: fake}
-	if _, err := manager.GetBGPSummaryVRF(context.Background(), "vrf-tenant"); err != nil {
-		t.Fatalf("GetBGPSummaryVRF(vrf-tenant): %v", err)
+	if _, err := manager.GetBGPSummaryVRF(context.Background(), "vrf-cust"); err != nil {
+		t.Fatalf("GetBGPSummaryVRF(vrf-cust): %v", err)
 	}
-	if fake.lastVtyshCmd != "show bgp vrf vrf-tenant summary json" {
-		t.Fatalf("vtysh command = %q, want single prefix", fake.lastVtyshCmd)
+	if fake.lastVtyshCmd != "show bgp vrf vrf-vrf-cust summary json" {
+		t.Fatalf("vtysh command = %q, want vrf-vrf-cust (instance vrf-cust, not sibling cust)", fake.lastVtyshCmd)
+	}
+}
+
+// Control: sibling instance "cust" still queries its own VRF.
+func TestGetBGPSummaryVRFBareInstanceControl16664(t *testing.T) {
+	fake := &fakeExecutor{vtyshResp: map[string]string{
+		"show bgp vrf vrf-cust summary json": bgpSummaryJSONFixture,
+	}}
+	manager := &Manager{exec: fake}
+	if _, err := manager.GetBGPSummaryVRF(context.Background(), "cust"); err != nil {
+		t.Fatalf("GetBGPSummaryVRF(cust): %v", err)
+	}
+	if fake.lastVtyshCmd != "show bgp vrf vrf-cust summary json" {
+		t.Fatalf("vtysh command = %q, want vrf-cust for instance cust", fake.lastVtyshCmd)
+	}
+}
+
+// An instance named "vrf-mgmt" must not be judged on the management
+// VRF ("vrf-mgmt"); it queries its own "vrf-vrf-mgmt" (#16664).
+func TestGetOSPFNeighborsVRFPrefixedMgmtInstance16664(t *testing.T) {
+	const output = "Neighbor ID     Pri State           Address         Interface\n" +
+		"1.1.1.1         1   Full/DR         192.0.2.2       reth0\n"
+	fake := &fakeExecutor{vtyshResp: map[string]string{"show ip ospf vrf vrf-vrf-mgmt neighbor": output}}
+	manager := &Manager{exec: fake}
+	if _, err := manager.GetOSPFNeighborsVRF(context.Background(), "vrf-mgmt"); err != nil {
+		t.Fatalf("GetOSPFNeighborsVRF(vrf-mgmt): %v", err)
+	}
+	if fake.lastVtyshCmd != "show ip ospf vrf vrf-vrf-mgmt neighbor" {
+		t.Fatalf("vtysh command = %q, want vrf-vrf-mgmt (not management vrf-mgmt)", fake.lastVtyshCmd)
 	}
 }
 

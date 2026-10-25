@@ -62,12 +62,10 @@ func (c *CLI) handlePing(args []string) error {
 }
 
 // buildPingArgv builds the argv for the local CLI ping command. It
-// delegates to the shared diagcmd builder so the VRF-device
-// normalization (apply "vrf-" exactly once, #2143) and the "--"
+// delegates to the shared diagcmd builder so the VRF-device mapping
+// ("vrf-"+instance, unconditional, #16664) and the "--"
 // end-of-options separator (#2084) match the REST and gRPC surfaces
-// byte-for-byte. Before #2143 this path prepended "vrf-"
-// unconditionally, turning `routing-instance vrf-red` into the
-// non-existent device `vrf-vrf-red`.
+// byte-for-byte.
 //
 // The payload size is clamped to diagcmd.MaxPingSize so this third
 // control surface shares the single upper ceiling the REST and gRPC
@@ -161,7 +159,7 @@ func (c *CLI) handleTraceroute(args []string) error {
 
 // buildTracerouteArgv builds the argv for the local CLI traceroute
 // command. Like buildPingArgv it delegates to the shared diagcmd builder
-// so VRF normalization (#2143) and the "--" separator (#2084) stay
+// so VRF mapping (#16664) and the "--" separator (#2084) stay
 // identical across the CLI, REST, and gRPC surfaces.
 func buildTracerouteArgv(target, source, vrfName string) []string {
 	return diagcmd.TracerouteArgv(diagcmd.TracerouteOptions{

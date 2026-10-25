@@ -148,8 +148,11 @@ func TestResolveBindConfigResolvesKernelDevices(t *testing.T) {
 		{"reth-vlan-unit", config.DHCPDynamicDNSConfig{DestinationInterface: "reth0.100"}, "ge-0-0-3.100"},
 		// RI-only → vrf-<name> master (no resolver needed for this half).
 		{"ri-only", config.DHCPDynamicDNSConfig{RoutingInstance: "WAN"}, "vrf-WAN"},
-		// already vrf-prefixed → unchanged (prefix applied once, #2143).
-		{"ri-already-prefixed", config.DHCPDynamicDNSConfig{RoutingInstance: "vrf-red"}, "vrf-red"},
+		// #16664: instance "vrf-red" → vrf-vrf-red (prefix unconditional);
+		// "vrf-red" alone is sibling instance "red".
+		{"ri-vrf-prefixed-instance", config.DHCPDynamicDNSConfig{RoutingInstance: "vrf-red"}, "vrf-vrf-red"},
+		// control: sibling "red" still binds its own device.
+		{"ri-bare-sibling-control", config.DHCPDynamicDNSConfig{RoutingInstance: "red"}, "vrf-red"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

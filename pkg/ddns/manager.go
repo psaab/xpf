@@ -191,7 +191,7 @@ type ReconcileOptions struct {
 	// node's kernel device name for SO_BINDTODEVICE (#5070). The daemon passes
 	// cfg.ResolveKernelIfName (the SSOT resolver). Nil ⇒ the leaf
 	// slash-substitution fallback (a routing-instance still resolves to its
-	// vrf-<name> master via diagcmd.VRFDeviceName regardless).
+	// vrf-<name> master via routing.VRFDeviceName regardless).
 	InterfaceResolver func(ref string) string
 }
 

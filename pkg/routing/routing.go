@@ -188,7 +188,7 @@ func (m *Manager) StreamRoutes(fn func(RouteEntry) bool) (stopped bool, err erro
 	return m.routes.StreamRoutes(fn)
 }
 
-// GetVRFRoutes reads routes from a VRF's routing table by VRF device name.
+// GetVRFRoutes reads routes from a VRF's routing table by routing-instance name (#16664).
 func (m *Manager) GetVRFRoutes(vrfName string) ([]RouteEntry, error) {
 	return m.routes.GetVRFRoutes(vrfName)
 }

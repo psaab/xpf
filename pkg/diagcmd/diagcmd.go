@@ -2,13 +2,11 @@
 // ping/traceroute diagnostics that the local CLI, the REST API, and the
 // gRPC API all expose. Keeping the VRF-device normalization and the
 // option-confusion hardening in one place prevents the three control
-// surfaces from drifting apart: before this package existed the local
-// CLI unconditionally prepended "vrf-" while REST and gRPC guarded
-// against a name that already started with "vrf-", so the same
-// `routing-instance vrf-red` produced a non-existent `vrf-vrf-red`
-// device on the CLI but the correct `vrf-red` device on the APIs
-// (#2143). The "--" end-of-options separator (#2084) likewise had to be
-// applied three times; it now lives here too.
+// surfaces from drifting apart. The VRF mapping itself is owned by
+// pkg/routing (routing.VRFDeviceName, prepended unconditionally,
+// #16664); this package delegates to it. The "--" end-of-options
+// separator (#2084) likewise had to be applied three times; it now
+// lives here too.
 package diagcmd
 
 import (
@@ -17,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/psaab/xpf/pkg/routing"
 )
 
 // PingRequestOptions is the validated CLI ping selector set. Numeric values
@@ -179,29 +179,23 @@ func ParseTestInterface(args []string) (value string, present bool, err error) {
 	return args[1], true, nil
 }
 
-// vrfPrefix is the prefix the daemon uses for the kernel VRF master
-// device that backs a Junos routing-instance (a routing-instance named
-// "red" is realized as the VRF device "vrf-red"). See pkg/cli/apply.go,
-// where the daemon creates the device with this exact prefix.
-const vrfPrefix = "vrf-"
-
 // VRFDeviceName maps a Junos routing-instance name to the kernel VRF
-// master device name the daemon created for it, applying the "vrf-"
-// prefix exactly once. A name that the operator already typed with the
-// prefix (e.g. "vrf-red") is returned unchanged; a bare name (e.g.
-// "red") gets the prefix added. An empty name yields an empty result so
-// callers can branch on "no routing-instance requested".
+// master device name the daemon created for it. It delegates to
+// routing.VRFDeviceName — the single source of truth owned by the
+// package that creates the device — which prepends "vrf-"
+// unconditionally (#16664): an instance literally named "vrf-cust"
+// is realised as "vrf-vrf-cust", so resolving it to "vrf-cust" would
+// silently probe sibling instance "cust" (or a nonexistent device),
+// and an instance named "vrf-mgmt" must never map onto the management
+// VRF "vrf-mgmt". An empty name yields "".
 //
-// This is the single source of truth for the prefix: applying it again
-// at the call site would re-introduce the #2143 double-prefix bug.
+// History: #2143 introduced an exactly-once guard (already-prefixed
+// input returned unchanged) on the premise that operators type device
+// names. That premise is false for every config-sourced consumer
+// (DDNS, HA/FRR readiness) and for ping/traceroute, whose
+// routing-instance argument is an instance name; the guard is removed.
 func VRFDeviceName(name string) string {
-	if name == "" {
-		return ""
-	}
-	if strings.HasPrefix(name, vrfPrefix) {
-		return name
-	}
-	return vrfPrefix + name
+	return routing.VRFDeviceName(name)
 }
 
 // MaxPingSize is the largest ping payload (ping -s) any control surface
@@ -345,7 +339,7 @@ type TracerouteOptions struct {
 }
 
 // TracerouteArgv builds the full argv for a traceroute diagnostic,
-// mirroring PingArgv: VRF wrapping with single-application normalization
+// mirroring PingArgv: VRF wrapping via VRFDeviceName (#16664)
 // and the "--" end-of-options separator before the target (#2084).
 func TracerouteArgv(opts TracerouteOptions) []string {
 	var cmd []string

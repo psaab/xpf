@@ -30,7 +30,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/psaab/xpf/pkg/diagcmd"
+	"github.com/psaab/xpf/pkg/routing"
 )
 
 // RIPRouteEntry represents a RIP route.
@@ -130,14 +130,15 @@ type ISISAdjacency struct {
 }
 
 // frrVRFName maps a routing-instance name to the FRR VRF name
-// ("vrf-"+name) via the shared diagcmd helper (#15265 B08-03). The
-// argument to the Get*VRF queries is the bare Junos routing-instance
-// name (as haRoutingRequirementsForRG stores it); FRR only knows the
-// prefixed device name the daemon creates (daemon_ipmon.go:
-// "vrf-"+ri.Name). Passing the bare name asked FRR about a VRF that
-// does not exist. Already-prefixed names are not doubled.
+// ("vrf-"+name) via routing.VRFDeviceName, the single source of truth
+// (#15265 B08-03, #16664). The argument to the Get*VRF queries is the
+// bare Junos routing-instance name (as haRoutingRequirementsForRG
+// stores it); FRR only knows the prefixed device name the daemon
+// creates ("vrf-"+ri.Name). The prefix is applied unconditionally:
+// an instance named "vrf-cust" queries "vrf-vrf-cust", never sibling
+// instance "cust".
 func frrVRFName(instance string) string {
-	return diagcmd.VRFDeviceName(instance)
+	return routing.VRFDeviceName(instance)
 }
 
 // routingInstanceName maps an FRR VRF name back to the bare

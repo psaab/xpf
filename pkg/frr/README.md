@@ -1798,7 +1798,7 @@ step. Both are required — neither sees the other's case:
 
   **VRF names + all-VRF summary (#15265).** The `Get*VRF` status queries take
   the bare routing-instance name and normalize it through `frrVRFName`
-  (`diagcmd.VRFDeviceName`, prefix applied exactly once) inside
+  (`routing.VRFDeviceName`, "vrf-"+name unconditionally, #16664) inside
   `vrfShowCommand`, so `tenant` queries `show bgp vrf vrf-tenant summary
   json` — the VRF FRR actually has. Previously the bare name was interpolated,
   FRR answered `{}`, and `parseBGPSummaryJSON` returned zero peers with no
