@@ -1032,12 +1032,21 @@ regressed.
   DUID / v4 hwaddr / Ethernet client-id; `dev:cid:<id>` / `dev:duid:<DUID>`
   otherwise), so one device carries ONE DHCID RR across its A and AAAA —
   never two DHCID RRs at one name (RFC 4701 §3.5). An unpairable identity
-  digests verbatim and can only ever match itself. **Pre-#14995 residual:**
-  records published before the device canonicalization carry the legacy
-  per-identity digest; their guarded delete's `Used` prerequisite computes
-  the device digest, so a legacy record's delete is a counted skip (ownership
-  still dropped — no wire leak beyond the stale RR the operator can remove;
-  a same-device re-publish converges the name onto the device DHCID).
+  digests verbatim and can only ever match itself. **Pre-#14995 legacy
+  migration (#16591):** records published before the device
+  canonicalization carry the legacy per-identity digest (raw clientID,
+  including the IAID-bearing v6 form); Attempt B and the guarded
+  forward delete also accept that legacy digest of the SAME identity
+  as proof of ownership (`legacyDHCIDRR` / `legacyProbe`, probed
+  only after the device digest fails — never as an AND-ed
+  prerequisite), and a legacy-matched add replaces the legacy DHCID
+  with the device DHCID in the same UPDATE, so an upgraded name
+  renumbers, force-refreshes and withdraws normally. A sibling
+  publish proven only by the sibling's legacy DHCID retains that RR
+  (the sibling's only proof until it migrates) and adds the device
+  DHCID alongside; the sibling's own refresh then migrates it and
+  the last delete sweeps both. A foreign (different-identity)
+  DHCID — device- or legacy-shaped — is still refused.
   A cross-family publish earns a guard downgrade ONLY by proving the
   sibling's exact DHCID on the wire: the manager threads the sibling's
   identity (`SiblingClientID` from the durable store, narrowed to same

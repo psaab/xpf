@@ -960,6 +960,109 @@ func dhcidDigestClientID(clientID string) string {
 	return clientID
 }
 
+// legacyDHCIDDigestClientID returns the identity bytes the pre-#14995
+// dhcidRR folded into the digest (#16591): the raw clientID verbatim,
+// including the IAID-bearing v6 form ("duid:.../<IAID>").
+func legacyDHCIDDigestClientID(clientID string) string {
+	return clientID
+}
+
+// dhcidDigest returns the SHA-256 over identityBytes || canonical
+// FQDN wire form (RFC 4701 §3.5) for one digest flavour.
+func dhcidDigest(identity, name string, wire []byte, off int) []byte {
+	h := sha256.New()
+	h.Write([]byte(identity))
+	h.Write(wire[:off])
+	return h.Sum(nil)
+}
+
+// dhcidRRFromDigest builds a DHCID RR from a precomputed digest.
+func dhcidRRFromDigest(name string, ttl uint32, idType int, digest []byte) *dns.DHCID {
+	rdata := make([]byte, 0, 3+len(digest))
+	rdata = append(rdata, byte(idType>>8), byte(idType&0xff))
+	rdata = append(rdata, byte(dhcidDigestTypeSHA256))
+	rdata = append(rdata, digest...)
+	return &dns.DHCID{
+		Hdr: dns.RR_Header{
+			Name:   name,
+			Rrtype: dns.TypeDHCID,
+			Class:  dns.ClassINET,
+			Ttl:    ttl,
+		},
+		Digest: base64.StdEncoding.EncodeToString(rdata),
+	}
+}
+
+// dhcidIdentifierTypeForDigest mirrors dhcidRR's idType selection for
+// a digest flavour: the device digest stamps the htype+chaddr form
+// for a MAC pairing (#14995); the legacy digest keeps the presenting
+// identity's own form, exactly as the pre-#14995 dhcidRR did.
+func dhcidIdentifierTypeForDigest(clientID string, legacy bool) int {
+	idType := dhcidIdentifierType(clientID)
+	if !legacy && strings.HasPrefix(pairedIdentityKey(clientID), "mac:") {
+		idType = dhcidIDTypeHTypeChaddr
+	}
+	return idType
+}
+
+// dhcidRRWithDigest builds the DHCID for clientID under one digest
+// flavour: legacy=false is the current device digest (dhcidRR);
+// legacy=true is the pre-#14995 per-identity digest (#16591).
+func dhcidRRWithDigest(clientID, fqdn string, ttl uint32, legacy bool) (*dns.DHCID, bool) {
+	if clientID == "" {
+		return nil, false
+	}
+	name := dns.CanonicalName(dns.Fqdn(fqdn))
+	wire := make([]byte, len(name)+1)
+	off, err := dns.PackDomainName(name, wire, 0, nil, false)
+	if err != nil {
+		return nil, false
+	}
+	identity := dhcidDigestClientID(clientID)
+	if legacy {
+		identity = legacyDHCIDDigestClientID(clientID)
+	}
+	digest := dhcidDigest(identity, name, wire, off)
+	return dhcidRRFromDigest(name, ttl, dhcidIdentifierTypeForDigest(clientID, legacy), digest), true
+}
+
+// legacyDHCIDRR builds the pre-#14995 DHCID (#16591), or ok=false
+// when the legacy digest coincides with the current device digest
+// (identity has no pairing key, so the two flavours are identical
+// and there is no distinct legacy RR to match).
+func legacyDHCIDRR(clientID, fqdn string, ttl uint32) (*dns.DHCID, bool) {
+	if pairedIdentityKey(clientID) == "" {
+		return nil, false
+	}
+	return dhcidRRWithDigest(clientID, fqdn, ttl, true)
+}
+
+// legacyDHCIDForRR is legacyDHCIDRR for this updater's forward RR.
+func (u *rfc2136Updater) legacyDHCIDForRR(rr dns.RR) (*dns.DHCID, bool) {
+	if rr.Header().Rrtype != dns.TypeA && rr.Header().Rrtype != dns.TypeAAAA {
+		return nil, false
+	}
+	return legacyDHCIDRR(u.dhcidClientID, rr.Header().Name, rr.Header().Ttl)
+}
+
+// legacyProbe exhausts the sequential used-DHCID proof attempts
+// against the wire: it tries each candidate DHCID as a Used
+// prerequisite probe (no update section) in order and returns the
+// index of the first that holds, or -1 when none holds. A transport
+// error aborts immediately. Candidates must be non-nil.
+func (u *rfc2136Updater) legacyProbe(ctx context.Context, zone string, candidates []*dns.DHCID) (int, error) {
+	for i, cand := range candidates {
+		proven, err := u.proveSiblingDHCID(ctx, zone, cand)
+		if err != nil {
+			return -1, err
+		}
+		if proven {
+			return i, nil
+		}
+	}
+	return -1, nil
+}
+
 // dhcidRR builds the RFC 4701 DHCID resource record that proves xpf owns a
 // forward name. The RDATA is: 2-byte identifier-type || 1-byte digest-type
 // || SHA-256(client-identity || canonical-FQDN-in-wire-form) (RFC 4701
@@ -978,44 +1081,7 @@ func dhcidDigestClientID(clientID string) string {
 // of two per-family DHCIDs. The identifier-TYPE octets still
 // describe the presenting identity's form (RFC 4701 §3.3).
 func dhcidRR(clientID, fqdn string, ttl uint32) (*dns.DHCID, bool) {
-	if clientID == "" {
-		return nil, false
-	}
-	name := dns.CanonicalName(dns.Fqdn(fqdn))
-	wire := make([]byte, len(name)+1)
-	off, err := dns.PackDomainName(name, wire, 0, nil, false)
-	if err != nil {
-		// A name that cannot be packed (should not happen for a validated
-		// FQDN) means we cannot bind the digest to it: omit the DHCID and let
-		// the caller fall back to the name-not-in-use prerequisite.
-		return nil, false
-	}
-	h := sha256.New()
-	h.Write([]byte(dhcidDigestClientID(clientID)))
-	h.Write(wire[:off])
-	digest := h.Sum(nil)
-
-	idType := dhcidIdentifierType(clientID)
-	// #14995: a device-paired identity writes the DEVICE's marker:
-	// stamp the htype+chaddr form for a MAC pairing so both families
-	// write the IDENTICAL DHCID RR (second Insert is idempotent).
-	if strings.HasPrefix(pairedIdentityKey(clientID), "mac:") {
-		idType = dhcidIDTypeHTypeChaddr
-	}
-	rdata := make([]byte, 0, 3+len(digest))
-	rdata = append(rdata, byte(idType>>8), byte(idType&0xff))
-	rdata = append(rdata, byte(dhcidDigestTypeSHA256))
-	rdata = append(rdata, digest...)
-
-	return &dns.DHCID{
-		Hdr: dns.RR_Header{
-			Name:   name,
-			Rrtype: dns.TypeDHCID,
-			Class:  dns.ClassINET,
-			Ttl:    ttl,
-		},
-		Digest: base64.StdEncoding.EncodeToString(rdata),
-	}, true
+	return dhcidRRWithDigest(clientID, fqdn, ttl, false)
 }
 
 // sendAdd issues an exact-RR ADD honoring the conflict policy.
@@ -1079,6 +1145,18 @@ func (u *rfc2136Updater) sendAdd(ctx context.Context, zone string, rr dns.RR) er
 				return perr
 			}
 			siblingProven = proven
+			if !siblingProven {
+				// #16591: sibling may carry only its legacy DHCID.
+				if sibID := u.siblingProofIdentity(); sibID != "" {
+					if legacySib, lok := legacyDHCIDRR(sibID, rr.Header().Name, rr.Header().Ttl); lok {
+						lproven, lerr := u.legacyProbe(ctx, zone, []*dns.DHCID{legacySib})
+						if lerr != nil {
+							return lerr
+						}
+						siblingProven = lproven >= 0
+					}
+				}
+			}
 		}
 	}
 	m := new(dns.Msg)
@@ -1197,6 +1275,21 @@ func (u *rfc2136Updater) sendAddOwned(ctx context.Context, zone string, rr dns.R
 			if proven {
 				return u.sendAddSiblingProven(ctx, zone, rr)
 			}
+			// #16591: the sibling may still carry its pre-#14995
+			// legacy DHCID (published before the device digest).
+			// siblingDHCIDRR digests from the SIBLING identity, so
+			// the legacy candidate is that identity's legacy RR.
+			if sibID := u.siblingProofIdentity(); sibID != "" {
+				if legacySib, lok := legacyDHCIDRR(sibID, rr.Header().Name, rr.Header().Ttl); lok {
+					lproven, lerr := u.legacyProbe(ctx, zone, []*dns.DHCID{legacySib})
+					if lerr != nil {
+						return lerr
+					}
+					if lproven >= 0 {
+						return u.sendAddSiblingProvenLegacy(ctx, zone, rr, legacySib)
+					}
+				}
+			}
 		}
 	}
 	dhcid, hasDHCID := u.dhcidForRR(rr)
@@ -1254,10 +1347,106 @@ func (u *rfc2136Updater) sendAddOwned(ctx context.Context, zone string, rr dns.R
 	case dns.RcodeSuccess:
 		return nil
 	case dns.RcodeYXRrset, dns.RcodeYXDomain, dns.RcodeNXRrset, dns.RcodeNameError:
+		// The existing DHCID is NOT ours under the current device
+		// digest — but it may be the pre-#14995 legacy per-identity
+		// digest of the SAME client (#16591). Probe it before
+		// refusing: on a legacy match, adopt the name AND migrate it
+		// onto the device DHCID in the same UPDATE.
+		if legacy, ok := u.legacyDHCIDForRR(rr); ok {
+			proven, perr := u.legacyProbe(ctx, zone, []*dns.DHCID{legacy})
+			if perr != nil {
+				return perr
+			}
+			if proven >= 0 {
+				return u.sendAddOwnedLegacy(ctx, zone, rr, dhcid, legacy)
+			}
+		}
 		// The existing DHCID is NOT ours (or absent): a third party owns this
 		// name. Refuse to claim it — record NO ownership (the sentinel tells
 		// the manager not to put()), so a later release cannot delete it
 		// (#2648).
+		if u.onConflict != nil {
+			u.onConflict()
+		}
+		return errDDNSConflictRefused
+	default:
+		return rcodeError(resp.Rcode)
+	}
+}
+
+// sendAddOwnedLegacy adopts a name proven (by legacyProbe) to carry
+// the pre-#14995 DHCID of this same client (#16591): one UPDATE that
+// requires the legacy DHCID, publishes the new forward RR + the
+// current device DHCID, and removes the legacy DHCID, so the name
+// converges onto the device digest. When keepSiblingDHCID holds
+// (the other family's record still shares the name), the caller —
+// sendAddSiblingProvenLegacy — has already rewritten the message;
+// this entry point always migrates (removes the legacy RR).
+func (u *rfc2136Updater) sendAddOwnedLegacy(ctx context.Context, zone string, rr dns.RR, dhcid, legacy *dns.DHCID) error {
+	return u.sendAddOwnedLegacyKeep(ctx, zone, rr, dhcid, legacy, false)
+}
+
+// sendAddOwnedLegacyKeep is sendAddOwnedLegacy with the migration
+// conditional: keepSibling=true publishes the new family RR +
+// device DHCID but RETAINS the legacy DHCID, which is still the
+// surviving sibling family's only wire proof (its delete replays
+// its own identity, and its Attempt B can only match its legacy
+// digest until it too migrates — removing the legacy RR here would
+// strand the sibling exactly as #16591 strands the primary).
+func (u *rfc2136Updater) sendAddOwnedLegacyKeep(ctx context.Context, zone string, rr dns.RR, dhcid, legacy *dns.DHCID, keepSibling bool) error {
+	m := new(dns.Msg)
+	m.SetUpdate(dns.Fqdn(zone))
+	m.Used([]dns.RR{dns.Copy(legacy)})
+	m.Insert([]dns.RR{rr, dhcid})
+	if !keepSibling {
+		m.Remove([]dns.RR{dns.Copy(legacy)})
+	}
+	resp, err := u.exchange(ctx, m)
+	if err != nil {
+		return err
+	}
+	switch resp.Rcode {
+	case dns.RcodeSuccess:
+		return nil
+	case dns.RcodeYXRrset, dns.RcodeYXDomain, dns.RcodeNXRrset, dns.RcodeNameError:
+		if u.onConflict != nil {
+			u.onConflict()
+		}
+		return errDDNSConflictRefused
+	default:
+		return rcodeError(resp.Rcode)
+	}
+}
+
+// sendAddSiblingProvenLegacy publishes this family's forward RR at a
+// name whose sibling DHCID was proven only under the pre-#14995
+// legacy digest (#16591): the sibling's presence is proven, but the
+// legacy DHCID is RETAINED (see sendAddOwnedLegacyKeep) and the
+// device DHCID is added alongside it — RFC 4701 §3.5 caps DHCID at
+// one RR per owner, but the two RRs here are ONE logical owner's
+// migration bridge: the sibling's own refresh migrates it (removes
+// the legacy RR) and the last delete removes the device RR, so the
+// name ends with exactly one DHCID again. A same-type RRset that
+// predates the sibling still refuses via RRsetNotUsed.
+func (u *rfc2136Updater) sendAddSiblingProvenLegacy(ctx context.Context, zone string, rr dns.RR, legacy *dns.DHCID) error {
+	dhcid, hasDHCID := u.dhcidForRR(rr)
+	m := new(dns.Msg)
+	m.SetUpdate(dns.Fqdn(zone))
+	m.RRsetNotUsed([]dns.RR{rr})
+	m.Used([]dns.RR{dns.Copy(legacy)})
+	if hasDHCID {
+		m.Insert([]dns.RR{rr, dhcid})
+	} else {
+		m.Insert([]dns.RR{rr})
+	}
+	resp, err := u.exchange(ctx, m)
+	if err != nil {
+		return err
+	}
+	switch resp.Rcode {
+	case dns.RcodeSuccess:
+		return nil
+	case dns.RcodeYXRrset, dns.RcodeYXDomain, dns.RcodeNXRrset, dns.RcodeNameError:
 		if u.onConflict != nil {
 			u.onConflict()
 		}
@@ -1506,18 +1695,54 @@ func (u *rfc2136Updater) sendRemoveForward(ctx context.Context, zone string, rr 
 		// fall back to the plain exact-RR delete of the firewall's own tuple.
 		return u.sendRemove(ctx, zone, rr)
 	}
+	// #16591: probe device first, then legacy (same order as Attempt
+	// B). A single AND-ed Used(device,legacy) can never hold — the
+	// name carries at most one of the two RRs in the common case.
+	matchedLegacy := false
+	if legacy, ok := u.legacyDHCIDForRR(rr); ok {
+		idx, perr := u.legacyProbe(ctx, zone, []*dns.DHCID{dhcid, legacy})
+		if perr != nil {
+			return perr
+		}
+		if idx < 0 {
+			if u.onConflict != nil {
+				u.onConflict()
+			}
+			return nil
+		}
+		matchedLegacy = idx == 1
+	}
 	m := new(dns.Msg)
 	m.SetUpdate(dns.Fqdn(zone))
 	// Separate DHCID copies for the prerequisite vs the delete: Remove() sets
 	// CLASS=NONE in place, which would otherwise corrupt the value-dependent
 	// Used() prerequisite that proves we own the record.
-	m.Used([]dns.RR{dns.Copy(dhcid)}) // prerequisite: our exact DHCID must exist
-	if keepDHCID {
-		// A sibling family's record still shares this DHCID (#2700): remove only
-		// the A/AAAA, leave the shared DHCID so the survivor stays protected.
-		m.Remove([]dns.RR{rr})
+	if matchedLegacy {
+		legacy, _ := u.legacyDHCIDForRR(rr)
+		m.Used([]dns.RR{dns.Copy(legacy)})
+		if keepDHCID {
+			m.Remove([]dns.RR{rr})
+		} else {
+			// Last owner: remove the legacy DHCID AND sweep any
+			// device DHCID left by a sibling's legacy migration.
+			m.Remove([]dns.RR{rr, legacy, dhcid})
+		}
 	} else {
-		m.Remove([]dns.RR{rr, dhcid})
+		m.Used([]dns.RR{dns.Copy(dhcid)}) // prerequisite: our exact DHCID must exist
+		if keepDHCID {
+			// A sibling family's record still shares this DHCID (#2700): remove only
+			// the A/AAAA, leave the shared DHCID so the survivor stays protected.
+			m.Remove([]dns.RR{rr})
+		} else {
+			m.Remove([]dns.RR{rr, dhcid})
+			// #16591: also sweep a co-resident legacy DHCID of the
+			// SAME identity (left by a sibling migration) so the
+			// last delete leaves no orphan. Exact-RR remove of an
+			// absent RR is a no-op.
+			if legacy, ok := u.legacyDHCIDForRR(rr); ok {
+				m.Remove([]dns.RR{legacy})
+			}
+		}
 	}
 	resp, err := u.exchange(ctx, m)
 	if err != nil {
@@ -1528,12 +1753,9 @@ func (u *rfc2136Updater) sendRemoveForward(ctx context.Context, zone string, rr 
 		// Prerequisite held (our DHCID is present): the delete applied.
 		return nil
 	case dns.RcodeNXRrset, dns.RcodeYXRrset, dns.RcodeYXDomain, dns.RcodeNameError:
-		// The DHCID prerequisite failed: the name's DHCID is not ours (NXRRSET
-		// = our value-dependent DHCID RRset is absent; NXDOMAIN = the name is
-		// gone). Either way xpf does NOT own this record on the wire — skip the
-		// delete and count it. The reconciler still clears the ownership entry
-		// so xpf stops managing a name it no longer owns. (A name that simply
-		// vanished is also a benign "nothing to delete".)
+		// The DHCID prerequisite failed between probe and delete
+		// (or, with no distinct legacy, the device prerequisite
+		// failed): the name's DHCID is not ours. Skip + count.
 		if u.onConflict != nil {
 			u.onConflict()
 		}
