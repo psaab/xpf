@@ -123,6 +123,16 @@ override_dh_auto_install:
 	install -d debian/xpf/etc/needrestart/conf.d
 	install -m 0644 debian/xpf.needrestart \
 	                debian/xpf/etc/needrestart/conf.d/xpf.conf
+	@# #16804: stage the networkd foreign-rule drop-in so every xpf
+	@# install (baked image or foreign host) keeps xpf's ip-rule bands
+	@# across `networkctl reconfigure` and networkd restarts. /usr/lib is
+	@# package-owned (not a conffile under /etc), the single source is
+	@# etc/systemd/networkd.conf.d/xpf.conf, and unlike a /usr/lib/sysctl.d
+	@# payload the setting takes effect only at the next networkd start,
+	@# so installing it never disturbs a running foreign host's rules.
+	install -d debian/xpf/usr/lib/systemd/networkd.conf.d
+	install -m 0644 etc/systemd/networkd.conf.d/xpf.conf \
+	                debian/xpf/usr/lib/systemd/networkd.conf.d/xpf.conf
 	@# #16455: the .deb installs NO hugepage sysctl. #16243 shipped
 	@# etc/sysctl.d/99-xpf-hugepages.conf under /usr/lib/sysctl.d so a
 	@# foreign-host / manual install got the same knob as the baked

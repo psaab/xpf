@@ -135,6 +135,15 @@ SYSCTL_CONF = (
 # docs/deploy-quickstart.md / docs/userspace-dataplane-architecture.md.
 HUGEPAGES_CONF_PATH = os.path.join(ROOT, "etc", "sysctl.d", "99-xpf-hugepages.conf")
 #
+# #16804: systemd-networkd's default ManageForeignRoutingPolicyRules=yes
+# deletes every xpf ip rule on `networkctl reconfigure` and on every
+# networkd restart. The bake ships the drop-in that turns that cleanup
+# off in the image; the .deb stages the same bytes under
+# /usr/lib/systemd/networkd.conf.d (see debian/rules). The repo file is
+# the single source so the baked image and the package cannot drift.
+NETWORKD_CONF_PATH = os.path.join(ROOT, "etc", "systemd", "networkd.conf.d",
+                                  "xpf.conf")
+#
 # The shipped default pool and the large-ring floor, in 2 MiB pages.
 # DEFAULT_HUGEPAGES is what etc/sysctl.d/99-xpf-hugepages.conf must carry
 # verbatim: 5 pages per binding (ring-entries 1024 UMEM rounded up to
@@ -1050,6 +1059,7 @@ def virt_customize(work_qcow, xpf_deb, hugepages=None):
         "--run-command", "chmod 0755 /usr/lib/systemd/incus-agent-setup",
         "--write", f"/etc/sysctl.d/99-xpf.conf:{SYSCTL_CONF}",
         "--write", f"/etc/sysctl.d/99-xpf-hugepages.conf:{hugepages_conf(pages=hugepages)}",
+        "--copy-in", f"{NETWORKD_CONF_PATH}:/etc/systemd/networkd.conf.d",
         "--run-command", "mkdir -p /etc/xpf && chmod 0750 /etc/xpf",
         # #7114: the appliance-image marker. xpfd's #1922 bootstrap lifeline
         # refuses to rename or bring up ANY NIC when it cannot identify a

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 // Routing reconcile retry owner (#9693).
@@ -31,14 +33,86 @@ import (
 // bootstrap mode suppresses that takeover write. It never runs the FRR apply,
 // whose manager owns its own degraded retry.
 
+// #16804 adds the flush arm: systemd-networkd's default foreign-rule
+// cleanup (ManageForeignRoutingPolicyRules=yes) deletes every xpf rule
+// band on `networkctl reconfigure` and on networkd restart. The shipped
+// drop-in disables that cleanup, but on a host without it (or after any
+// external flush) this owner is the no-commit healer. The always-on
+// terminator re-assert above runs first in the tick; its RuleList
+// readback (terminatorFlushed16804) then decides whether the tick
+// escalates to re-run the policy bands, the route-leak republish and
+// the mgmt-DNS steering reconcile, latching any failure as ordinary
+// routing debt. Post-#16804 ordering invariant: the terminator
+// re-assert precedes the mgmt-DNS re-assert, because tenant-VRF DNS
+// lookups at prefs 2500-2503 rely on the pref-2000 l3mdev miss
+// terminator ahead of them; installing steering first would open a
+// window where a VRF-context lookup that should terminate instead
+// follows the fresh steering rule.
+
+// vrfMissTerminatorPriority16804 is the pref-2000 #9819 terminator
+// priority (pkg/routing's vrfMissTerminatorPriority, unexported). The
+// flush probe matches it in the live rule table.
+const vrfMissTerminatorPriority16804 = 2000
+
+// terminatorFlushRuleListFn reads the live policy-rule table for the
+// #16804 flush probe. Production uses netlink; tests substitute a fake
+// so no privileged handle is needed.
+var terminatorFlushRuleListFn = func(family int) ([]int, error) {
+	rules, err := netlink.RuleList(family)
+	if err != nil {
+		return nil, err
+	}
+	prio := make([]int, 0, len(rules))
+	for _, r := range rules {
+		prio = append(prio, r.Priority)
+	}
+	return prio, nil
+}
+
+// terminatorFlushed16804 reports whether the VRF miss terminator is
+// desired but missing from the live kernel rule table — the canary for
+// a networkd foreign-rule flush (#16804). The probe compares the
+// desired state (shouldReassertVRFMissTerminator) against a fresh
+// RuleList readback in both families. A missing terminator means
+// networkd (or another foreign writer) deleted xpf's rules, and every
+// other band went with it.
+func terminatorFlushed16804(d *Daemon) (bool, error) {
+	if d.routing == nil || d.store == nil {
+		return false, nil
+	}
+	cfg := d.store.ActiveConfig()
+	if cfg == nil || !d.shouldReassertVRFMissTerminator(cfg) {
+		return false, nil
+	}
+	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
+		prios, err := terminatorFlushRuleListFn(family)
+		if err != nil {
+			return false, err
+		}
+		found := false
+		for _, p := range prios {
+			if p == vrfMissTerminatorPriority16804 {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // routingReconcileReassertInterval paces the retry owner, matching its sibling
 // re-assert loops.
 var routingReconcileReassertInterval = 30 * time.Second
 
-// routingPolicyReconcileFn, routeLeakReconcileFn, and
-// vrfMissTerminatorReconcileFn are the retry owner's reconciles, overridable in
-// tests: policy-routing and route-leak writes use concrete routing/dataplane
-// managers, while the VRF callback restores the #10421 post-networkd invariant.
+// routingPolicyReconcileFn, routeLeakReconcileFn,
+// vrfMissTerminatorReconcileFn and mgmtDNSRulesReconcileFn are the retry
+// owner's reconciles, overridable in tests: policy-routing and route-leak
+// writes use concrete routing/dataplane managers, the VRF callback
+// restores the #10421 post-networkd invariant, and the DNS callback
+// restores the #16804 mgmt-DNS steering pairs.
 var (
 	routingPolicyReconcileFn = func(d *Daemon, cfg *config.Config) error {
 		return d.applyPolicyRoutingRules(cfg)
@@ -55,6 +129,9 @@ var (
 			return nil
 		}
 		return d.routing.ReassertVRFMissTerminator()
+	}
+	mgmtDNSRulesReconcileFn = func(d *Daemon) error {
+		return d.applyMgmtDNSRules()
 	}
 )
 
@@ -211,7 +288,28 @@ func (d *Daemon) reassertRoutingReconcileOnce(ctx context.Context) {
 	mgmtRoutesOwed := d.routingDebt.mgmtRoutesOwed
 	d.routingDebt.mu.Unlock()
 
-	if !routingOwed {
+	// #16804: detect external networkd foreign-rule cleanup (a networkd
+	// restart on a host without the shipped drop-in, or any flush between
+	// commits). The terminator above is the canary: when the always-on
+	// re-assert finds kernel rules missing — the terminator had to be
+	// (re)installed — every other xpf band was flushed too, so the tick
+	// escalates to a full re-assert of the policy bands, the route-leak
+	// snapshot and the mgmt-DNS steering pairs, then latches the outcome
+	// as routing debt so a failure keeps retrying. RuleList/readback
+	// counts as detection: the terminator reconcile reads live state on
+	// every tick. Nothing is written on a healthy no-flush tick beyond
+	// the terminator's existing check.
+	flushed := false
+	if !d.inBootstrap() {
+		f, ferr := terminatorFlushed16804(d)
+		if ferr != nil {
+			slog.Warn("networkd foreign-rule flush probe failed; will retry",
+				"err", ferr, "issue", "#16804")
+		}
+		flushed = f
+	}
+
+	if !routingOwed && !flushed {
 		// The VRF miss terminator remains an always-on day-2 check, independent
 		// of whether policy-routing or management routes are owed.
 		d.noteRoutingReconcileResult(vrfErr)
@@ -224,6 +322,7 @@ func (d *Daemon) reassertRoutingReconcileOnce(ctx context.Context) {
 			routingPolicyReconcileFn(d, cfg),
 			routeLeakReconcileFn(d, cfg, d.commitOverlayForConfig(cfg)),
 			vrfErr,
+			mgmtDNSRulesReconcileFn(d),
 		)
 		d.noteRoutingReconcileResult(err)
 		if err != nil {

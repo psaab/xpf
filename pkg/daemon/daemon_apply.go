@@ -767,6 +767,19 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	if postFRRErr := d.applyMgmtDNSRules(); postFRRErr != nil {
 		mgmtRouteErr = errors.Join(mgmtRouteErr, postFRRErr)
 	}
+	// #16804: the networkd activation inside applyDataplaneAndHACore ran
+	// `networkctl reconfigure`, whose default foreign-rule cleanup
+	// (ManageForeignRoutingPolicyRules=yes, now disabled by the shipped
+	// drop-in on packaged installs) deletes the mgmt-DNS 2500-2503 pairs
+	// the pre-FRR reconcile above installed before activation. Re-run the
+	// same idempotent reconcile here — after activation AND after FRR —
+	// so the tail reconcileDNSLocked readiness gate sees the steering
+	// rules that are actually live and keeps the management DHCP
+	// name-servers in resolv.conf. The #9693 owner below re-asserts the
+	// same rules on its 30 s readback tick, so a later external networkd
+	// restart (which also flushes the next-table/rib-group/PBR bands that
+	// owner re-runs) is healed without a commit. Its error joins the
+	// management-route commit error like the earlier runs.
 
 	// #5844: applyRoutingRules RETURNS the joined next-table / rib-group / PBR
 	// ip-rule reconcile failures (a partial clear/add left stale-or-missing

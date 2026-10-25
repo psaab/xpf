@@ -351,6 +351,21 @@ delegate to the owning domain. Exported types:
 
 ## ip-rule priorities
 
+All bands below are xpf-owned kernel state that must be present after a
+successful apply. systemd-networkd is a potential second writer: its
+default `ManageForeignRoutingPolicyRules=yes` deletes every rule it did
+not install on `networkctl reconfigure` and on networkd restart. The
+shipped drop-in `etc/systemd/networkd.conf.d/xpf.conf`
+(`ManageForeignRoutingPolicyRules=no`, staged by the .deb under
+`/usr/lib/systemd/networkd.conf.d` and copied into baked images)
+disables that cleanup (#16804). As a belt on hosts without the drop-in,
+the daemon re-runs the mgmt-DNS steering reconcile after the networkd
+activation on every apply, and the #9693 routing owner uses the
+pref-2000 terminator as a readback canary on its 30 s tick: a desired
+but missing terminator escalates the tick to a full re-assert of the
+policy bands, the route-leak snapshot and the mgmt-DNS pairs, so an
+external networkd restart is healed without a commit.
+
 - `50–99`: RPM probe next-hop pins (`fwmark <mark> lookup <table>`,
   #1827). Constants live in `pkg/config` (`ProbeRulePriorityBase`,
   `ProbeTableBase` 7000-7049, `ProbeFwmarkBase` 0x1000) because
