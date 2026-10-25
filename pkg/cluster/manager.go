@@ -544,6 +544,17 @@ type Manager struct {
 	// hbRestartOwedHold is the grace end the failed restart was carrying
 	// (#9722): the retry's replacement inherits it.
 	hbRestartOwedHold time.Time
+	// hbCommsRestartSeed / hbCommsRestartHold carry the outgoing receiver's
+	// peer-liveness seed across a deliberate StopHeartbeat -> StartHeartbeat
+	// comms restart in the same Manager lifetime (#16745). StopHeartbeat
+	// stashes them (only when that receiver had seen the peer); the next
+	// published StartHeartbeat consumes them so its receiver is armed as a
+	// restart (armRestart, #9722) instead of a cold start. A start that
+	// publishes for any other reason also consumes/clears them, and a fresh
+	// Manager (daemon restart) has none — cold-boot semantics unchanged.
+	// Guarded by mu.
+	hbCommsRestartSeed int64
+	hbCommsRestartHold time.Time
 	// hbDeliberateStops counts exported StopHeartbeat calls. A failed restart
 	// records its debt only if none landed while it retried: a comms teardown
 	// in that window stopped the heartbeat on purpose (#9751).

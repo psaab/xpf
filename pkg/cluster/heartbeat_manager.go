@@ -53,14 +53,31 @@ func heartbeatUDPNetwork(addr string) string {
 // the previous goroutines — their stopCh is never closed, so N restarts leak
 // N heartbeat goroutines and duplicate the on-wire heartbeat rate (#4033).
 func (m *Manager) StartHeartbeat(localAddr, peerAddr, vrfDevice, controlIface string) error {
-	return m.startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface, 0, time.Time{})
+	// #16745: a comms restart is StopHeartbeat followed by StartHeartbeat in
+	// the same Manager lifetime. StopHeartbeat stashed the outgoing
+	// receiver's lastSeen/grace-end (hbCommsRestartSeed/Hold); seed from it
+	// when the Manager has seen a live peer, so the replacement is armed as
+	// a restart (#9722) instead of a cold start. Without the seed a peer
+	// silent from the restart onward was never declared lost (the
+	// never-seen arm is a no-op once peerEverSeen is set) and a peer heard
+	// once then lost was held for the 30s cold-boot grace. An explicit seed
+	// from RestartHeartbeat still wins: it passes restartSeed != 0 below.
+	// When no stash exists this is exactly the pre-#16745 cold start.
+	m.mu.RLock()
+	seed, hold := m.hbCommsRestartSeed, m.hbCommsRestartHold
+	if !(m.peerEverSeen && m.peerAlive) {
+		seed, hold = 0, time.Time{}
+	}
+	m.mu.RUnlock()
+	return m.startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface, seed, hold)
 }
 
 // startHeartbeat is StartHeartbeat plus the replacement-receiver seed
 // RestartHeartbeat passes (#9722). A non-zero restartSeed arms the new receiver
 // (armRestart) with the replaced receiver's last-seen heartbeat and the short
-// restart grace, before the receiver starts. StartHeartbeat passes 0, which is
-// a cold start. inheritedHold is the end of any grace the replaced receiver was
+// restart grace, before the receiver starts. StartHeartbeat passes the
+// comms-restart stash StopHeartbeat left (#16745), or 0 on a true cold start.
+// inheritedHold is the end of any grace the replaced receiver was
 // still inside; the new receiver keeps it (#9722).
 func (m *Manager) startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface string, restartSeed int64, inheritedHold time.Time) error {
 	// Serialize the whole stop-previous + create + install sequence so
@@ -202,6 +219,10 @@ func (m *Manager) startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface st
 	m.hbRestartOwed = false
 	m.hbRestartOwedSeed = 0
 	m.hbRestartOwedHold = time.Time{}
+	// #16745: a published start consumes the comms-restart stash (it either
+	// used it as restartSeed above or, for RestartHeartbeat, supplied its own).
+	m.hbCommsRestartSeed = 0
+	m.hbCommsRestartHold = time.Time{}
 	// Start the LOCALS, and start them INSIDE the critical section (#7257).
 	// Locals because the pre-#7257 code re-read m.hbReceiver/m.hbSender after
 	// unlocking, which raced StopHeartbeat nilling them — a nil-deref panic if
@@ -280,6 +301,23 @@ func (m *Manager) StopHeartbeat() {
 	m.hbRestartOwed = false
 	m.hbRestartOwedSeed = 0
 	m.hbRestartOwedHold = time.Time{}
+	// #16745: stash the outgoing receiver's peer-liveness seed for the next
+	// StartHeartbeat in this Manager lifetime (the comms-restart pair:
+	// stopClusterComms -> StopHeartbeat, next epoch -> StartHeartbeat).
+	// Only a receiver that had seen the peer leaves a seed; otherwise clear
+	// any older stash so a later cold start cannot inherit stale liveness.
+	// The internal stopHeartbeat paths (idempotent start teardown,
+	// RestartHeartbeat) do NOT touch the stash — RestartHeartbeat carries
+	// its own seed explicitly.
+	if m.hbReceiver != nil {
+		if seed := m.hbReceiver.lastSeen.Load(); seed != 0 {
+			m.hbCommsRestartSeed = seed
+			m.hbCommsRestartHold = m.hbReceiver.startedAt.Add(m.hbReceiver.seenThenLostGrace())
+		} else {
+			m.hbCommsRestartSeed = 0
+			m.hbCommsRestartHold = time.Time{}
+		}
+	}
 	m.mu.Unlock()
 	m.stopHeartbeat()
 	// #16022: queue a final durable latch/floor snapshot, but never join
@@ -1143,6 +1181,22 @@ func (m *Manager) handlePeerTimeout() {
 // this confirms absence without marking the peer ever seen, preserving the
 // readiness gate while allowing single-node promotion.
 func (m *Manager) handlePeerNeverSeen() {
+	// #16745 defense in depth: a receiver that never saw the peer on THIS
+	// incarnation (lastSeen==0) but whose Manager has seen a live peer is
+	// not a cold boot — it is a peer that was alive and is now silent (the
+	// comms-restart gap before the seed reaches a replacement, or any
+	// future unseeded replacement). Route it through the peer-loss path,
+	// which still honours the sync-recency/timeout guards, instead of
+	// returning on peerEverSeen and never declaring the peer lost. Cold
+	// boots (never seen, not alive) keep the absence-confirmation path
+	// below exactly as before (#4386/#11566).
+	m.mu.RLock()
+	seenAlive := m.peerEverSeen && m.peerAlive
+	m.mu.RUnlock()
+	if seenAlive {
+		m.handlePeerTimeout()
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

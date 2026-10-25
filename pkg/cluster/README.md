@@ -520,9 +520,28 @@ sync-recency guard that `handlePeerTimeout` consults
 
 Two receivers are never armed and keep the cold-boot floor on both arms:
 - a replacement for a receiver that had NEVER seen the peer;
-- any receiver started by `StartHeartbeat` (boot, comms restart).
+- a cold-start receiver on a fresh Manager (daemon boot): `StartHeartbeat`
+  with no comms-restart stash (below).
 
 Cells: `heartbeat_restart_grace_9722_test.go`.
+
+**A comms restart is a restart too (#16745).** The production comms-restart
+path is not `RestartHeartbeat`: `stopClusterComms` calls the deliberate
+`StopHeartbeat`, and the next epoch's `startClusterComms` calls
+`StartHeartbeat`, which passed seed 0 — a cold start. If the peer was silent
+from the restart onward, the new receiver's `lastSeen` stayed 0, every tick
+took the never-seen arm, and `handlePeerNeverSeen` returned on
+`peerEverSeen`, so the peer was never declared lost and its RGs were never
+taken over; a peer heard once then lost was held for the 30s cold-boot
+grace. `StopHeartbeat` now stashes the outgoing receiver's `lastSeen` and
+grace end (`hbCommsRestartSeed`/`hbCommsRestartHold`, only when that
+receiver had seen the peer), and `StartHeartbeat` seeds from the stash when
+`peerEverSeen && peerAlive`, so its receiver is armed exactly like a
+`RestartHeartbeat` replacement. A published start consumes the stash; a
+fresh Manager has none. As defense in depth, `handlePeerNeverSeen` routes
+a Manager with `peerEverSeen && peerAlive` through `handlePeerTimeout`
+(guards intact) instead of returning. Cells:
+`heartbeat_comms_restart_16745_test.go`.
 
 **A restart never SHORTENS a grace still in progress.** The config apply at
 BOOT restarts the heartbeat too, about a second after the cold start, while the
