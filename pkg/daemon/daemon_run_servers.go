@@ -240,6 +240,8 @@ func (d *Daemon) startGRPCServer(ctx context.Context, wg *sync.WaitGroup, eventB
 		// #10025: active pre-break fabric-auth clock alarms.
 		ClockSkewAlarmsFn:           d.clockSkewAlarms,
 		PeerSnapshotProtocolAlarmFn: d.peerSnapshotProtocolDeferredAlarm,
+		// #16753: real reader for the #7194 withheld-batch counter.
+		DeltaSchemaWithheldFn: d.UserspaceDeltaSchemaWithheldCount,
 		FeedsFn: func() map[string]feeds.FeedInfo {
 			if d.feeds != nil {
 				return d.feeds.AllFeeds()

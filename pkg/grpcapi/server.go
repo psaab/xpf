@@ -122,7 +122,10 @@ type Config struct {
 	// PeerSnapshotProtocolAlarmFn returns the active peer snapshot-protocol
 	// config-sync deferral alarm for `show system alarms`.
 	PeerSnapshotProtocolAlarmFn func() string
-	FeedsFn                     func() map[string]feeds.FeedInfo // returns live feed status
+	// DeltaSchemaWithheldFn returns the daemon's #7194/#16753 withheld-batch
+	// count for `show chassis cluster statistics`. Nil when unwired.
+	DeltaSchemaWithheldFn func() uint64
+	FeedsFn               func() map[string]feeds.FeedInfo // returns live feed status
 	// FeedsAckFn acknowledges only the exact refused dynamic-address feed
 	// candidate identified by its ID, candidate and baseline hashes, and old/new
 	// prefix counts. Nil when the live feeds manager is unavailable.
@@ -254,6 +257,7 @@ type Server struct {
 	natPoolExhaustionAlarmsFn   func() []natpoolalarm.ActiveExhaustionAlarm
 	clockSkewAlarmsFn           func() []clockskew.ActiveAlarm
 	peerSnapshotProtocolAlarmFn func() string
+	deltaSchemaWithheldFn       func() uint64
 	feedsFn                     func() map[string]feeds.FeedInfo
 	feedsAckFn                  func(name string, refusalID uint64, candidateHash, baselineHash string, oldCount, newCount int, actor, reason string) error
 	feedOverlayFn               func() map[string][]string
@@ -434,6 +438,7 @@ func NewServer(addr string, cfg Config) *Server {
 		natPoolExhaustionAlarmsFn:   cfg.NATPoolExhaustionAlarmsFn,
 		clockSkewAlarmsFn:           cfg.ClockSkewAlarmsFn,
 		peerSnapshotProtocolAlarmFn: cfg.PeerSnapshotProtocolAlarmFn,
+		deltaSchemaWithheldFn:       cfg.DeltaSchemaWithheldFn,
 		feedsFn:                     cfg.FeedsFn,
 		feedsAckFn:                  cfg.FeedsAckFn,
 		feedOverlayFn:               cfg.FeedOverlayFn,

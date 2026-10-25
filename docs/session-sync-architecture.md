@@ -2624,11 +2624,19 @@ been copied.
 | equal to the daemon's | match | proceed |
 | anything else | mismatch | WITHHOLD the delta batch |
 
-Enforcement sits on the two queue entry points the three producers use:
-`queueUserspaceSessionDeltas` for the binary stream and the JSON drain, and
-`queueUserspaceSessionDeltasComplete` for the FullResync export. The export's
-form reports a withheld batch as a failure, so its frame is not acknowledged
-(#9767).
+Enforcement sits on the queue entry points the producers use:
+`queueUserspaceSessionDeltas` for the binary stream and the JSON drain,
+`queueUserspaceSessionDeltasComplete` for the FullResync export, and
+`userspaceBulkSnapshotWithConfig` for the #6031 cold-prime / resync /
+inventory bulk snapshot (`BulkSnapshotSource`). The export's form reports
+a withheld batch as a failure, so its frame is not acknowledged (#9767);
+the bulk form returns `errUserspaceDeltaSchemaWithheld`, so `doBulkSync`
+frames no window and leaves the cold-prime/resync obligation armed
+(#16753). The bulk source records the export's returned `ProcessStatus`
+fingerprint before admitting, so it is gated even when no drain has run
+yet. The withheld-batch counter (`UserspaceDeltaSchemaWithheldCount`) is
+surfaced by `show chassis cluster statistics` on both the console and the
+remote gRPC renderer.
 
 **The refusal is loud on purpose.** Withholding quietly would trade a silent
 zero-fill for a silently dead HA sync — the standby would stop receiving
