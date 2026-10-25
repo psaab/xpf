@@ -74,7 +74,7 @@ func buildStaticNATSnapshots(cfg *config.Config, natCounterIDs map[string]uint32
 			out = append(out, StaticNATRuleSnapshot{
 				Name:                 rule.Name,
 				FromZone:             rs.FromZone,
-				FromInterface:        rs.FromInterface,
+				FromInterface:        cfg.CanonicalNATInterfaceScopeRef(rs.FromInterface),
 				FromRoutingInstance:  config.NATRoutingInstanceScopeWire(cfg, rs.FromRoutingInstance, rs.FromRoutingInstanceDefault),
 				SourceAddresses:      sourceAddrs,
 				ExternalIP:           rule.Match,
