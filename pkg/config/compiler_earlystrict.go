@@ -29,8 +29,9 @@ import (
 //     zone-local). Same pristine-book ordering constraint as (2): runs before
 //     the fold so a global vs a different-zone name are not misreported as a
 //     collision. Strict on commit; downgraded on lenientAddressBookNameCollision.
-//     2c. validateAddressBookMappedPrefixesStrict (#10688) — rejects mapped
-//     IPv6 values that Go would file in prefixes_v4 while Rust parses as v6.
+//     2c. validateAddressBookMappedPrefixesStrict (#10688/#16875) — rejects
+//     mapped IPv6 values that Go would file in prefixes_v4 while Rust parses
+//     as v6, and IPv4-compatible values whose identity Rust drops at ingress.
 //     Runs on the pristine books before the fold; tolerant load warns instead.
 //  3. resolveZoneLocalAddressBooks (MUT cfg.Security) — folds zone-local books
 //     into the global book under zone-qualified internal names. Output consumed

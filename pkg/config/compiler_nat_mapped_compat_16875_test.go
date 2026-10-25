@@ -97,6 +97,158 @@ func TestMappedCompatMappedLoopbackLenientWarns16875(t *testing.T) {
 	}
 }
 
+func TestMappedCompatStaticSourceAddressRejected16875(t *testing.T) {
+	// The static source selector is honored (SourceConstraint) and
+	// the Rust ingress drop checks SRC or DST, so a mapped/compat
+	// source is exactly as unsatisfiable as a mapped destination.
+	for _, tc := range []struct{ name, src string }{
+		{"mapped source", "::ffff:10.0.0.1/128"},
+		{"compat source", "::10.0.0.1/128"},
+		{"mapped loopback source", "::ffff:127.0.0.1/128"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := []string{
+				"set security zones security-zone untrust",
+				"set security nat static rule-set rs1 from zone untrust",
+				"set security nat static rule-set rs1 rule r1 match source-address " + tc.src,
+				"set security nat static rule-set rs1 rule r1 match destination-address 2001:db8::5/128",
+				"set security nat static rule-set rs1 rule r1 then static-nat prefix 2001:db8:1::5/128",
+			}
+			_, err := CompileConfig(buildTree(t, lines))
+			if err == nil || !strings.Contains(err.Error(), "IPv4-mapped or IPv4-compatible") ||
+				!strings.Contains(err.Error(), "match source-address") {
+				t.Fatalf("mapped/compat static source %q must be rejected naming match source-address, got: %v", tc.src, err)
+			}
+		})
+	}
+	// Native v6 / v4 source selectors still compile.
+	for _, src := range []string{"2001:db8:9::1/128", "10.0.0.1/32", "::1/128"} {
+		lines := []string{
+			"set security zones security-zone untrust",
+			"set security nat static rule-set rs1 from zone untrust",
+			"set security nat static rule-set rs1 rule r1 match source-address " + src,
+			"set security nat static rule-set rs1 rule r1 match destination-address 2001:db8::5/128",
+			"set security nat static rule-set rs1 rule r1 then static-nat prefix 2001:db8:1::5/128",
+		}
+		if _, err := CompileConfig(buildTree(t, lines)); err != nil {
+			t.Fatalf("native static source %q must compile, got: %v", src, err)
+		}
+	}
+	// Lenient warns for a mapped source selector.
+	cfg, err := CompileConfigLenient(buildTree(t, []string{
+		"set security zones security-zone untrust",
+		"set security nat static rule-set rs1 from zone untrust",
+		"set security nat static rule-set rs1 rule r1 match source-address ::ffff:10.0.0.1/128",
+		"set security nat static rule-set rs1 rule r1 match destination-address 2001:db8::5/128",
+		"set security nat static rule-set rs1 rule r1 then static-nat prefix 2001:db8:1::5/128",
+	}))
+	if err != nil {
+		t.Fatalf("lenient load must not fail: %v", err)
+	}
+	if !hasWarningContaining(cfg.Warnings, "IPv4-mapped or IPv4-compatible") {
+		t.Fatalf("lenient load must warn about the mapped static source, got: %v", cfg.Warnings)
+	}
+}
+
+func TestMappedCompatSourceMatchRejected16875(t *testing.T) {
+	// DNAT `match source-address` and SNAT `match source-address` /
+	// `match destination-address` are honored match slots; a
+	// mapped/compat literal in any of them can never be satisfied.
+	dnat := func(leaf, val string) []string {
+		return []string{
+			"set security zones security-zone untrust",
+			"set security nat destination pool dp address 2001:db8::5",
+			"set security nat destination rule-set rs1 from zone untrust",
+			"set security nat destination rule-set rs1 rule r1 match " + leaf + " " + val,
+			"set security nat destination rule-set rs1 rule r1 match destination-address 2001:db8::5/128",
+			"set security nat destination rule-set rs1 rule r1 then destination-nat pool dp",
+		}
+	}
+	// De-duplicate the destination leaf when it is the slot under test.
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		leaf  string
+	}{
+		{"dnat source mapped", dnat("source-address", "::ffff:10.0.0.1/128"), "match source-address"},
+		{"dnat source compat", dnat("source-address", "::10.0.0.1/128"), "match source-address"},
+		{"snat source mapped", snatFamilySet16600("source-address ::ffff:10.0.0.0/120", "2001:db8::5"), "match source-address"},
+		{"snat source compat", snatFamilySet16600("source-address ::10.0.0.0/120", "2001:db8::5"), "match source-address"},
+		{"snat destination mapped", append(snatFamilySet16600("source-address 2001:db8:1::/64", "2001:db8::5"),
+			"set security nat source rule-set rs1 rule r1 match destination-address ::ffff:203.0.113.5/128"), "match destination-address"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := CompileConfig(buildTree(t, tc.lines))
+			if err == nil || !strings.Contains(err.Error(), "IPv4-mapped or IPv4-compatible") ||
+				!strings.Contains(err.Error(), tc.leaf) {
+				t.Fatalf("%s must be rejected naming %s, got: %v", tc.name, tc.leaf, err)
+			}
+		})
+	}
+	// Controls: native source selectors compile for both kinds.
+	if _, err := CompileConfig(buildTree(t, dnat("source-address", "2001:db8:9::1/128"))); err != nil {
+		t.Fatalf("native DNAT source must compile, got: %v", err)
+	}
+	if _, err := CompileConfig(buildTree(t, snatFamilySet16600("source-address 2001:db8:1::/64", "2001:db8::5"))); err != nil {
+		t.Fatalf("native SNAT source must compile, got: %v", err)
+	}
+}
+
+func TestCompatAddressBookRejected16875(t *testing.T) {
+	// A compat book value is not Is4In6, so the #10688 mapped-only
+	// check missed it; the book gate now rejects compat too, so a
+	// NAT name reference (or a static prefix-name target folded from
+	// the book) cannot smuggle the spelling past the literal gate.
+	for _, tc := range []struct {
+		name  string
+		lines []string
+	}{
+		{"global entry alone", []string{
+			"set security address-book global address c1 ::203.0.113.5/128",
+		}},
+		{"zone-local entry", []string{
+			"set security zones security-zone trust address-book address c1 ::203.0.113.5/128",
+		}},
+		{"dnat destination-address-name", []string{
+			"set security zones security-zone untrust",
+			"set security address-book global address c1 ::203.0.113.5/128",
+			"set security nat destination pool dp address 2001:db8::5",
+			"set security nat destination rule-set rs1 from zone untrust",
+			"set security nat destination rule-set rs1 rule r1 match destination-address-name c1",
+			"set security nat destination rule-set rs1 rule r1 then destination-nat pool dp",
+		}},
+		{"static prefix-name target", []string{
+			"set security zones security-zone untrust",
+			"set security address-book global address c1 ::10.0.0.5/128",
+			"set security nat static rule-set rs1 from zone untrust",
+			"set security nat static rule-set rs1 rule r1 match destination-address 2001:db8::5/128",
+			"set security nat static rule-set rs1 rule r1 then static-nat prefix-name c1",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := CompileConfig(buildTree(t, tc.lines))
+			if err == nil || !strings.Contains(err.Error(), "IPv4-compatible") {
+				t.Fatalf("compat address-book value (%s) must be rejected, got: %v", tc.name, err)
+			}
+			cfg, err := CompileConfigLenient(buildTree(t, tc.lines))
+			if err != nil {
+				t.Fatalf("lenient load must not fail (%s): %v", tc.name, err)
+			}
+			if !hasWarningContaining(cfg.Warnings, "IPv4-compatible") {
+				t.Fatalf("lenient load must warn about the compat book value (%s), got: %v", tc.name, cfg.Warnings)
+			}
+		})
+	}
+	// Controls: :: and ::1 book entries, and native entries, compile.
+	for _, v := range []string{"::/128", "::1/128", "2001:db8::5/128", "203.0.113.5/32"} {
+		if _, err := CompileConfig(buildTree(t, []string{
+			"set security address-book global address ok1 " + v,
+		})); err != nil {
+			t.Fatalf("control book entry %q must compile, got: %v", v, err)
+		}
+	}
+}
+
 func TestMappedCompatDNATRejected16875(t *testing.T) {
 	for _, tc := range []struct{ name, match, pool string }{
 		{"mapped match + mapped pool", "::ffff:203.0.113.5/128", "::ffff:10.0.0.5"},

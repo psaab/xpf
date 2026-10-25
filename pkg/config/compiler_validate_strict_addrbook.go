@@ -321,10 +321,17 @@ func addressBookNameCollision(scope string, ab *AddressBook) error {
 }
 
 // validateAddressBookMappedPrefixesStrict rejects IPv4-mapped IPv6 address-book
-// values (#10688). Go's net.IP.To4 folds these prefixes into the IPv4 wire
-// array, while the userspace helper parses the colon-bearing token as IPv6 and
-// rejects the whole snapshot's wrong-family prefix. A strict commit must not
-// create that silent whole-snapshot refusal.
+// values (#10688) and IPv4-compatible values (#16875). Go's net.IP.To4 folds
+// mapped prefixes into the IPv4 wire array, while the userspace helper parses
+// the colon-bearing token as IPv6 and rejects the whole snapshot's
+// wrong-family prefix; a compat prefix is filed IPv6 on both sides but keys
+// an identity the helper drops at ingress before any NAT/policy match
+// (#10686), so a NAT rule resolving to it via an address-book name could
+// never match — the #16875 smuggle path. A strict commit must not
+// create either silent refusal. The compat arm goes through
+// natAddrIsV4MappedOrCompat, which excludes only the exact :: and ::1
+// identities (mapped 127/8 included); the mapped arm keeps
+// FRRAddrIsMapped so padded-mask spellings netip rejects still fire.
 func validateAddressBookMappedPrefixesStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -343,12 +350,23 @@ func validateAddressBookMappedPrefixesStrict(cfg *Config) error {
 		sort.Strings(names)
 		for _, name := range names {
 			address := book.Addresses[name]
-			if address != nil && FRRAddrIsMapped(address.Value) {
+			if address == nil {
+				continue
+			}
+			if FRRAddrIsMapped(address.Value) {
 				return fmt.Errorf(
 					"%s address-book address %q has IPv4-mapped IPv6 prefix %q; "+
 						"the userspace snapshot builder files it in prefixes_v4, "+
 						"but the helper parses it as IPv6 and rejects the entire policy snapshot; "+
 						"use a non-mapped IPv4 or IPv6 prefix (#10688)",
+					scope, name, address.Value)
+			}
+			if natAddrIsV4MappedOrCompat(address.Value) {
+				return fmt.Errorf(
+					"%s address-book address %q has IPv4-compatible IPv6 prefix %q; "+
+						"the helper drops every IPv6 frame carrying such an identity at ingress "+
+						"before NAT/policy matching (#10686), so any rule resolving to it can "+
+						"never match; use a native IPv4 or IPv6 prefix (#16875)",
 					scope, name, address.Value)
 			}
 		}
