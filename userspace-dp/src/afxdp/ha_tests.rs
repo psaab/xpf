@@ -11644,6 +11644,7 @@ fn clear_mirror_zero_batch_refused_untouched_16649() {
     generation: 0,
     session_id: 0xC1EA9,
     tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    persistent_lease_hold: None,
     source_nat_static: None, };
     crate::afxdp::shared_ops::publish_shared_session(
         &coordinator.sessions.synced,
