@@ -410,11 +410,13 @@ func ParseBGPSummaryAllJSON(data string) ([]BGPPeerSummary, error) {
 
 // GetBGPSummaryVRF queries BGP peer state in one FRR routing instance.
 // vrf is the bare routing-instance name; it is normalized to the FRR
-// VRF name ("vrf-"+name) by vrfShowCommand (#15265 B08-03).
+// VRF name ("vrf-"+name) by vrfShowCommand (#15265 B08-03). The empty
+// (default/global) instance queries only the default VRF via
+// "show bgp summary json" — NOT GetBGPSummary's "vrf all" — so a
+// same-address peer Established in another instance cannot satisfy a
+// default-instance requirement (#16829). Returned peers are filtered
+// to the requested instance as defence in depth.
 func (m *Manager) GetBGPSummaryVRF(ctx context.Context, vrf string) ([]BGPPeerSummary, error) {
-	if vrf == "" {
-		return m.GetBGPSummary(ctx)
-	}
 	command, err := vrfShowCommand(vrf, "show bgp", "summary json")
 	if err != nil {
 		return nil, err
@@ -428,18 +430,44 @@ func (m *Manager) GetBGPSummaryVRF(ctx context.Context, vrf string) ([]BGPPeerSu
 		return nil, err
 	}
 	if peers == nil {
+		if vrf == "" {
+			// Global/default path keeps the no-peers/no-error contract
+			// (cf. GetBGPSummary): an empty summary is "no peers".
+			return nil, nil
+		}
 		// `{}` / empty / non-JSON for a CONFIGURED instance means the
 		// instance does not exist in FRR (or vtysh is wedged) — a status
 		// error, not zero peers. Fail closed so HA readiness reports the
 		// real reason instead of a misleading "no adjacency" (#15265).
 		return nil, fmt.Errorf("BGP status unavailable for routing instance %q: empty or unparseable summary from %q", vrf, command)
 	}
-	for i := range peers {
-		if peers[i].Instance == "" {
-			peers[i].Instance = vrf
+	filtered := make([]BGPPeerSummary, 0, len(peers))
+	for _, peer := range peers {
+		switch {
+		case peer.Instance == vrf:
+			// Stamped with the requested instance (for "" this is the
+			// default instance, stamped from vrfName "default").
+			filtered = append(filtered, peer)
+		case vrf != "" && peer.Instance == "" && !hasStampedVRFPeer(peers):
+			// Unstamped peers from a single-VRF reply whose family
+			// omitted vrfName belong to the queried instance.
+			peer.Instance = vrf
+			filtered = append(filtered, peer)
 		}
 	}
-	return peers, nil
+	return filtered, nil
+}
+
+// hasStampedVRFPeer reports whether any peer carries a non-default
+// instance stamp, i.e. the payload was a multi-instance ("vrf all")
+// shape rather than a single-VRF reply that merely omitted vrfName.
+func hasStampedVRFPeer(peers []BGPPeerSummary) bool {
+	for _, peer := range peers {
+		if peer.Instance != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // parseBGPSummaryJSON parses FRR's "show bgp summary json" output into

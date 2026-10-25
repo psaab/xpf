@@ -105,6 +105,67 @@ func TestDynamicRoutingReadinessUsesMatchingRoutingInstanceAdjacency(t *testing.
 	}
 }
 
+// #16829: a default-instance BGP requirement (vrf "") must not be
+// satisfied by a same-address peer Established in another instance,
+// even when that peer is (incorrectly) present in the default bucket —
+// the shape GetBGPSummaryVRF("") produced when it delegated to the
+// "vrf all" GetBGPSummary.
+func TestDynamicRoutingReadinessBGPInstanceMustMatch16829(t *testing.T) {
+	requirements := []haRoutingRequirement{{
+		protocol: "bgp", routeProto: "bgp", tableID: 254, vrf: "", neighbors: []string{"10.0.0.1"},
+	}}
+
+	// Mixed: default peer down (Active), tenant peer Established with
+	// the same neighbor address, both in the default bucket.
+	mixed := haRoutingAdjacencies{bgp: map[string][]frr.BGPPeerSummary{
+		"": {
+			{Neighbor: "10.0.0.1", Instance: "", State: "Active"},
+			{Neighbor: "10.0.0.1", Instance: "tenant", State: "Established"},
+		},
+	}}
+	ready, reasons := dynamicRoutingReady(requirements, nil, mixed)
+	if ready || len(reasons) == 0 {
+		t.Fatalf("tenant Established must not satisfy default requirement: ready=%v reasons=%v, want not ready", ready, reasons)
+	}
+
+	// Control: default-only, peer down.
+	downOnly := haRoutingAdjacencies{bgp: map[string][]frr.BGPPeerSummary{
+		"": {{Neighbor: "10.0.0.1", Instance: "", State: "Active"}},
+	}}
+	ready, reasons = dynamicRoutingReady(requirements, nil, downOnly)
+	if ready || len(reasons) == 0 {
+		t.Fatalf("default peer Active: ready=%v reasons=%v, want not ready", ready, reasons)
+	}
+
+	// Positive: default peer Established stays ready.
+	up := haRoutingAdjacencies{bgp: map[string][]frr.BGPPeerSummary{
+		"": {{Neighbor: "10.0.0.1", Instance: "", State: "Established"}},
+	}}
+	ready, reasons = dynamicRoutingReady(requirements, nil, up)
+	if !ready || len(reasons) != 0 {
+		t.Fatalf("default peer Established: ready=%v reasons=%v, want ready", ready, reasons)
+	}
+
+	// Reverse: a tenant requirement is not satisfied by a default peer.
+	tenantReq := []haRoutingRequirement{{
+		protocol: "bgp", routeProto: "bgp", tableID: 1001, vrf: "tenant", neighbors: []string{"10.0.0.1"},
+	}}
+	defaultInTenantBucket := haRoutingAdjacencies{bgp: map[string][]frr.BGPPeerSummary{
+		"tenant": {{Neighbor: "10.0.0.1", Instance: "", State: "Established"}},
+	}}
+	ready, reasons = dynamicRoutingReady(tenantReq, nil, defaultInTenantBucket)
+	if ready || len(reasons) == 0 {
+		t.Fatalf("default Established must not satisfy tenant requirement: ready=%v reasons=%v, want not ready", ready, reasons)
+	}
+	tenantUp := haRoutingAdjacencies{bgp: map[string][]frr.BGPPeerSummary{
+		"tenant": {{Neighbor: "10.0.0.1", Instance: "tenant", State: "Established"}},
+	}}
+	ready, reasons = dynamicRoutingReady(tenantReq, nil, tenantUp)
+	if !ready || len(reasons) != 0 {
+		t.Fatalf("tenant peer Established: ready=%v reasons=%v, want ready", ready, reasons)
+	}
+}
+
 func TestHARoutingRequirementsAreScopedToRGAndInstanceTable(t *testing.T) {
 	cfg := &config.Config{
 		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
