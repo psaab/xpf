@@ -1668,10 +1668,10 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 	}
 	rethToPhys := cfg.RethToPhysical()
 	rethMACIndexes := cfg.RethMACIndexes()
-	rethMemberNames := make(map[string]struct{}, len(rethToPhys))
-	for _, physicalName := range rethToPhys {
-		rethMemberNames[config.LinuxIfName(physicalName)] = struct{}{}
-	}
+	// #16860: recovery must exclude every configured interface, not only
+	// current RETH members — a configured standalone port carrying a stale
+	// virtual MAC is not an unnamed device awaiting recovery.
+	rethMemberNames := cfg.ConfiguredLinuxNames()
 	for ifName, ifCfg := range cfg.Interfaces.Interfaces {
 		if ifCfg == nil {
 			continue

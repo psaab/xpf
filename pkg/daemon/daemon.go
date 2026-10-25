@@ -1121,6 +1121,12 @@ type Daemon struct {
 	// (#16601) — notably the DNS refresher's clone — so the pre-apply
 	// resolver does not resolve them again. Guarded by dnsRefreshMu.
 	dnsResolvedConfigs map[*config.Config]struct{}
+	// lastRethMembers records the local RETH member Linux names programmed by
+	// the previous apply (#16860). A member that leaves its RETH keeps the
+	// virtual MAC until the next apply restores its PermHWAddr; without this
+	// record a swap leaves two local ports on one MAC and recovery can claim
+	// the former member for a missing replacement. Mutated only under applySem.
+	lastRethMembers map[string]struct{}
 	// buildRuntimeDataPlaneForTest replaces dataplane construction in the
 	// startup fixture. It is nil in production and exists so the setup path
 	// can be exercised without arming a host dataplane.

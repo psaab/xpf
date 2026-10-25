@@ -45,9 +45,25 @@ The reth0 addresses retain the original encoding. The final octet adds the RETH 
 
 During an upgrade, several same-RG members may still carry the old shared MAC.
 Recovery first seeks the indexed MAC; if it is absent, it excludes every
-configured RETH member name and accepts the legacy MAC only when one unconfigured
-interface matches. Multiple legacy matches are ambiguous, so recovery leaves
-them untouched rather than renaming a sibling.
+configured interface name (#16860 — not only current RETH members, so a
+configured standalone port carrying a stale virtual MAC is never claimed)
+and accepts the legacy MAC only when one unconfigured interface matches.
+Multiple legacy matches are ambiguous, so recovery leaves them untouched
+rather than renaming a sibling.
+
+## Former Members Restore Their Permanent MAC (#16860)
+
+A port that leaves a RETH (member swap, or the RETH is deleted) must not keep
+the virtual MAC for the rest of the boot: two local ports would share one MAC
+after a swap, and the missing-member recovery above could rename the former
+member — now possibly a configured standalone port — into a replacement
+member slot. Step 2.6 therefore records the previous apply's local member set
+(`Daemon.lastRethMembers`, mutated under `applySem`) and, before programming
+the current members, restores each former member's `PermHWAddr` through the
+same `programRethMAC` worker-join/link-cycle discipline (VLAN children
+included). Recovery that would claim a configured interface simply finds no
+candidate; the missing member's MAC set then fails as an ordinary absent-link
+warning rather than hijacking the configured port.
 
 ## Ordering
 
