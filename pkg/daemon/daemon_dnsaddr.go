@@ -14,6 +14,70 @@ import (
 // the normal apply path when an answer changes.
 var dnsAddressRefreshInterval = 5 * time.Minute
 
+// markDNSResolved records cfg as already resolved outside applySem
+// (#16601) so resolveDNSBeforeApply does not resolve it again.
+func (d *Daemon) markDNSResolved(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	d.dnsRefreshMu.Lock()
+	defer d.dnsRefreshMu.Unlock()
+	if d.dnsResolvedConfigs == nil {
+		d.dnsResolvedConfigs = make(map[*config.Config]struct{})
+	}
+	d.dnsResolvedConfigs[cfg] = struct{}{}
+}
+
+func (d *Daemon) isDNSResolved(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	d.dnsRefreshMu.Lock()
+	defer d.dnsRefreshMu.Unlock()
+	_, ok := d.dnsResolvedConfigs[cfg]
+	return ok
+}
+
+func (d *Daemon) consumeDNSResolved(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	d.dnsRefreshMu.Lock()
+	defer d.dnsRefreshMu.Unlock()
+	_, ok := d.dnsResolvedConfigs[cfg]
+	if ok {
+		delete(d.dnsResolvedConfigs, cfg)
+	}
+	return ok
+}
+
+// resolveDNSBeforeApply resolves dns-name entries OUTSIDE applySem
+// (#16601) and returns the config to apply. Marked configs (refresher
+// clone) return as-is. Published active configs are cloned first so
+// the published generation is never mutated. Owned configs are
+// resolved via a throwaway clone for the network work, then their
+// entries are populated from the cache — the applied pointer stays
+// the caller's pointer (digest/stamp identity kept).
+func (d *Daemon) resolveDNSBeforeApply(cfg *config.Config) *config.Config {
+	if cfg == nil || !config.HasDNSNames(cfg) {
+		return cfg
+	}
+	if d.consumeDNSResolved(cfg) {
+		return cfg
+	}
+	if d.store != nil && d.store.ActiveConfig() == cfg {
+		clone := cfg.CloneForDNSRefresh()
+		config.RefreshDNSAddressBooks(clone)
+		d.markDNSResolved(clone)
+		return clone
+	}
+	probe := cfg.CloneForDNSRefresh()
+	config.RefreshDNSAddressBooks(probe)
+	config.PopulateDNSFromCache(cfg)
+	d.markDNSResolved(cfg)
+	return cfg
+}
+
 // dnsBookHasNames reports whether cfg carries any dns-name entry.
 func dnsBookHasNames(cfg *config.Config) bool {
 	if cfg == nil {
@@ -124,7 +188,10 @@ func (d *Daemon) refreshDNSOnce() {
 	d.applySem.Release(1)
 
 	config.RefreshDNSAddressBooks(refreshed)
+	d.markDNSResolved(refreshed)
 	if dnsAnswersEqual(before, snapshotDNSAnswers(refreshed)) {
+		// No change: drop the marker; the clone is discarded.
+		d.consumeDNSResolved(refreshed)
 		return
 	}
 	slog.Info("dns-name address-book answer changed, recompiling dataplane")
@@ -139,13 +206,24 @@ func (d *Daemon) refreshDNSOnce() {
 }
 
 // dnsBaselineFor returns the recorded applied answers for cfg, or nil.
+// #16601: after #16606 publishes a refreshed clone, the active pointer
+// is the clone; a baseline recorded under the previous active pointer
+// (background apply of that generation) still describes the same
+// authored generation, so fall back to it when the pointer differs
+// but a baseline exists. Generation changes record a new baseline or
+// clear it, so the fallback cannot cross generations in practice
+// (commits record/clear under applySem before the next tick reads).
 func (d *Daemon) dnsBaselineFor(cfg *config.Config) map[string][]string {
 	d.dnsRefreshMu.Lock()
 	defer d.dnsRefreshMu.Unlock()
-	if d.lastDNSRefreshBase == cfg && d.lastDNSRefreshAnswers != nil {
+	if d.lastDNSRefreshAnswers == nil {
+		return nil
+	}
+	if d.lastDNSRefreshBase == cfg {
 		return cloneDNSAnswers(d.lastDNSRefreshAnswers)
 	}
-	return nil
+	// Fallback: any recorded baseline (see above).
+	return cloneDNSAnswers(d.lastDNSRefreshAnswers)
 }
 
 func (d *Daemon) clearDNSBaseline() {
@@ -167,19 +245,36 @@ func (d *Daemon) recordAppliedDNSBaseline(cfg *config.Config, applyErr error) {
 	if d.applyBodyForTest != nil {
 		return
 	}
+	// #16601: cfg may be a DNS-resolved clone of the active config
+	// (resolveDNSBeforeApply) or the marked refresher clone. Its answers
+	// are the actually-applied state. The refresher publish path
+	// (applyDNSRefreshedConfig) records its own baseline keyed on the
+	// published clone and returns before this defer matters; for the
+	// background-apply clone, key the baseline on the ACTIVE pointer
+	// but re-key it if the store later publishes a refreshed clone —
+	// dnsBaselineFor falls back to any recorded baseline when the
+	// pointer moved to a published clone with identical authored names.
+	base := cfg
+	isCloneOfActive := false
+	if d.store != nil {
+		if active := d.store.ActiveConfig(); active != nil && active != cfg && dnsBookHasNames(cfg) {
+			base = active
+			isCloneOfActive = true
+		}
+	}
 	if applyErr != nil {
-		if d.store != nil && d.store.ActiveConfig() == cfg {
+		if d.store != nil && (d.store.ActiveConfig() == cfg || isCloneOfActive) {
 			d.clearDNSBaseline()
 		}
 		return
 	}
-	if d.store == nil || d.store.ActiveConfig() != cfg || !dnsBookHasNames(cfg) {
+	if d.store == nil || !dnsBookHasNames(cfg) {
 		return
 	}
-	// Under applySem the applied state is the newest by construction, so
-	// this record must win over a same-generation tick record: force it
-	// by recording with the guard satisfied via a direct write.
-	d.recordDNSBaselineForce(cfg, snapshotDNSAnswers(cfg))
+	if !isCloneOfActive && d.store.ActiveConfig() != cfg {
+		return
+	}
+	d.recordDNSBaselineForce(base, snapshotDNSAnswers(cfg))
 }
 
 // recordDNSBaselineForce unconditionally sets the baseline (under
@@ -232,6 +327,11 @@ func (d *Daemon) applyDNSRefreshedConfig(base, refreshed *config.Config) (bool, 
 		d.stampActiveAppliedIfConvergedUnderSem(nil)
 		return true, nil
 	}
+	// #16601: consume the refresher marker BEFORE the apply so
+	// applyConfigLocked's deferred baseline (which keys clones on the
+	// active pointer) does not overwrite the published-clone baseline
+	// recorded below with the pre-publish pointer.
+	d.consumeDNSResolved(refreshed)
 	err := d.applyConfigLocked(context.Background(), refreshed)
 	if err != nil {
 		return false, err

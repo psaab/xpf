@@ -32,6 +32,9 @@ func TestDNSStaleWhileError16595(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
+	// #16601: compile is cache-only; the initial answer arrives via the
+	// off-lock refresh the daemon performs before apply.
+	RefreshDNSAddressBooks(cfg)
 	a := cfg.Security.AddressBook.Addresses["partner-api"]
 	if got := a.UsableValues(); !reflect.DeepEqual(got, []string{"203.0.113.10/32"}) {
 		t.Fatalf("initial UsableValues = %v", got)
@@ -59,9 +62,14 @@ func TestDNSStaleWhileError16595(t *testing.T) {
 }
 
 func TestDNSLookupFailedDistinctFromEmpty16595(t *testing.T) {
+	// #16601: resolveDNSAddressEntry is cache-only; a failed resolution
+	// is recorded in the cache by RefreshDNSAddressBooks. Drive entries
+	// through a one-entry config refresh.
 	stubLookup16595(t, func(string) ([]string, error) { return nil, errDNSDown16595 })
 	a := &Address{Name: "bad", DNSName: "bad.example.com"}
-	resolveDNSAddressEntry(a)
+	cfgBad := &Config{}
+	cfgBad.Security.AddressBook = &AddressBook{Addresses: map[string]*Address{"bad": a}}
+	RefreshDNSAddressBooks(cfgBad)
 	if !a.DNSLookupFailed {
 		t.Fatal("failed first lookup must set DNSLookupFailed")
 	}
@@ -72,7 +80,9 @@ func TestDNSLookupFailedDistinctFromEmpty16595(t *testing.T) {
 	// Successful empty is NOT lookup-failed.
 	a2 := &Address{Name: "empty", DNSName: "empty.example.com"}
 	stubLookup16595(t, func(string) ([]string, error) { return nil, nil })
-	resolveDNSAddressEntry(a2)
+	cfgEmpty := &Config{}
+	cfgEmpty.Security.AddressBook = &AddressBook{Addresses: map[string]*Address{"empty": a2}}
+	RefreshDNSAddressBooks(cfgEmpty)
 	ab.Addresses["empty"] = a2
 	if ab.DNSEntryLookupFailed("empty") {
 		t.Fatal("successful empty answer must not be lookup-failed")
@@ -106,6 +116,9 @@ func TestStrictCommitWarnsNotRejectsWhenDNSDown16595(t *testing.T) {
 		"set security policies from-zone trust to-zone untrust policy allow-good match application any",
 		"set security policies from-zone trust to-zone untrust policy allow-good then permit",
 	})
+	probe := &Config{}
+	probe.Security.AddressBook = &AddressBook{Addresses: map[string]*Address{"bad": {Name: "bad", DNSName: "bad.example.com"}}}
+	RefreshDNSAddressBooks(probe)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("strict commit must not depend on live DNS (#16595): %v", err)
@@ -132,6 +145,9 @@ func TestStrictCommitWarnsNotRejectsWhenDNSDown16595(t *testing.T) {
 
 func TestStrictCommitStillRejectsSuccessfulEmptyDNS16595(t *testing.T) {
 	stubLookup16595(t, func(string) ([]string, error) { return nil, nil })
+	probe := &Config{}
+	probe.Security.AddressBook = &AddressBook{Addresses: map[string]*Address{"bad": {Name: "bad", DNSName: "bad.example.com"}}}
+	RefreshDNSAddressBooks(probe)
 	tree := buildTree(t, []string{
 		"set security zones security-zone trust",
 		"set security zones security-zone untrust",

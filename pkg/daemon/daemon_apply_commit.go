@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
-	"time"
-
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"log/slog"
+	"strings"
+	"time"
 )
 
 // bootstrapFromFile reads the text Junos config file and imports it as the
@@ -392,6 +392,7 @@ func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 	// apply; the flush sweep inside repopulates it, and the projection
 	// below reads it alongside the old-vs-new full-admit comparison.
 	d.clearKeptSuspicious10752()
+	compiled = d.resolveDNSBeforeApply(compiled)
 	respCfg, applyErr := d.applyConfigLockedForCommit(d.applyCancelCtx(), compiled)
 	if applyErr != nil && !d.policyInvalidationPublishLanded {
 		if debt := d.policyInvalidationDebt; debt != nil &&
@@ -604,6 +605,21 @@ func (d *Daemon) syncAndApplyWithAncestry(
 	chassisPreserve func(*config.ConfigTree),
 	ancestry []configstore.RenameDescriptor,
 ) (compiled *config.Config, retErr error) {
+	// #16601: resolve DNS outside applySem/s.mu without touching the
+	// store. Parse+compile here is cache-only (compile never does
+	// network I/O); only unresolved names are then resolved with the
+	// bounded pool. The real SyncApply below recompiles under s.mu
+	// reading the warmed cache (0 lookups under the lock). Parse or
+	// compile failures fall through — the real call reports them.
+	if d.store != nil && strings.Contains(configText, "dns-name") {
+		if tree, perrs := config.NewParser(configText).Parse(); len(perrs) == 0 && tree != nil {
+			if peekCfg, cerr := config.CompileConfigLenient(tree); cerr == nil {
+				if pairs := config.PeekDNSNames(peekCfg); len(pairs) > 0 {
+					config.ResolveDNSNames(pairs)
+				}
+			}
+		}
+	}
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
 		return nil, err
 	}
@@ -848,6 +864,7 @@ func (d *Daemon) syncAndApplyWithAncestry(
 	} else {
 		d.armPolicyInvalidationPlan(oldActive, compiled)
 	}
+	compiled = d.resolveDNSBeforeApply(compiled)
 	applyErr := d.applyConfigLocked(d.applyCancelCtx(), compiled)
 	if applyErrSkipsPeerSync(applyErr) {
 		return nil, applyErr
@@ -1241,6 +1258,7 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 	// timer callback with no caller to report to, unlike the commit path where
 	// the operator sees the error and re-commits. noteConfigApplyResult also
 	// DISCHARGES on success, so an apply that works needs no separate site.
+	prevCfg = d.resolveDNSBeforeApply(prevCfg)
 	applyErr := d.applyConfigLocked(context.Background(), prevCfg)
 	d.noteConfigApplyResult(applyErr)
 	if applyErr != nil {

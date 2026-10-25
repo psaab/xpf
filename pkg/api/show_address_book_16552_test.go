@@ -19,6 +19,10 @@ func stageAddressBookForms16552(t *testing.T) *Server {
 		return nil, nil
 	})
 	t.Cleanup(restore)
+	// #16601: compile is cache-only; seed the resolved answer the
+	// daemon's off-lock refresh would have produced before apply.
+	seed := config.SeedDNSAnswerCacheForTest("up.example.com", "ipv4-only", []string{"198.51.100.10/32"})
+	t.Cleanup(seed)
 	return stageShowTextConfig(t, []string{
 		"set security address-book global address h1 10.0.0.1/32",
 		"set security address-book global address rng range-address 192.0.2.1 to 192.0.2.3",

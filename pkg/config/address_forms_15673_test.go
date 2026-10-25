@@ -375,15 +375,24 @@ func TestDNSNameModelled15673(t *testing.T) {
 	if a == nil || a.DNSName != "api.example.com" {
 		t.Fatalf("DNSName not modelled: %+v", a)
 	}
+	// #16601: compile does no network I/O, so the fresh entry is
+	// fail-closed empty until an off-lock RefreshDNSAddressBooks.
+	if got := a.UsableValues(); len(got) != 0 {
+		t.Fatalf("compile must not resolve; got %v before refresh", got)
+	}
+	RefreshDNSAddressBooks(cfg)
+	a = cfg.Security.AddressBook.Addresses["partner-api"]
 	want := []string{"2001:db8::10/128", "203.0.113.10/32"}
 	if got := a.UsableValues(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("dns UsableValues = %v, want %v", got, want)
 	}
-	// ipv4-only filters v6.
+	// ipv4-only filters v6 (cache now holds the refreshed answer above;
+	// the family filter is applied per-entry at populate time).
 	cfg4, err := CompileConfig(soleFormTree(t, `address partner-api { dns-name api.example.com { ipv4-only; } }`))
 	if err != nil {
 		t.Fatalf("ipv4-only must commit: %v", err)
 	}
+	RefreshDNSAddressBooks(cfg4)
 	a4 := cfg4.Security.AddressBook.Addresses["partner-api"]
 	if a4 == nil || a4.DNSFamily != "ipv4-only" {
 		t.Fatalf("DNSFamily not modelled: %+v", a4)
@@ -399,16 +408,18 @@ func TestDNSNameModelled15673(t *testing.T) {
 	if err != nil {
 		t.Fatalf("flat ipv6-only must commit: %v", err)
 	}
+	RefreshDNSAddressBooks(cfg6)
 	a6 := cfg6.Security.AddressBook.Addresses["partner-api"]
 	if a6 == nil || a6.DNSFamily != "ipv6-only" || !reflect.DeepEqual(a6.UsableValues(), []string{"2001:db8::10/128"}) {
 		t.Fatalf("ipv6-only flat wrong: %+v values=%v", a6, a6.UsableValues())
 	}
 	// Unresolvable DNS: usable empty (fail-closed), not an error.
 	lookupAddressDNSName = func(string) ([]string, error) { return nil, nil }
-	cfgU, err := CompileConfig(soleFormTree(t, `address partner-api { dns-name api.example.com; }`))
+	cfgU, err := CompileConfig(soleFormTree(t, `address partner-api { dns-name never.example.com; }`))
 	if err != nil {
 		t.Fatalf("unresolvable dns-name must still commit (dynamic): %v", err)
 	}
+	RefreshDNSAddressBooks(cfgU)
 	if a := cfgU.Security.AddressBook.Addresses["partner-api"]; a == nil || len(a.UsableValues()) != 0 {
 		t.Fatalf("unresolvable dns must be match-none, got %+v", a)
 	}
