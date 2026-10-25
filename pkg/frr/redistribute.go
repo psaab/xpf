@@ -124,35 +124,128 @@ func redistChainRouteMapName15156(chain []string, proto string) string {
 	return composedChainName(chain) + "-" + normalizedRedistProtocol(proto) + config.ReservedRedistSuffix
 }
 
-// redistChainForSource15156 resolves a proto across an ordered policy
-// chain. It returns the distinct defined policies (in chain order) whose
-// per-source enrollment includes proto, and whether the source appears
-// only via bare protocol tokens (then it has no composed map).
-func (m *Manager) redistChainForSource15156(chain []string, po *config.PolicyOptionsConfig, self, node, proto string) (policies []string, bare bool, ok bool) {
+// redistChainDefined16868 returns the distinct defined policy names in
+// chain order (bare tokens and empty entries dropped).
+func redistChainDefined16868(chain []string, po *config.PolicyOptionsConfig) []string {
 	seen := make(map[string]bool)
+	var out []string
 	for _, name := range chain {
-		if name == "" {
+		if name == "" || seen[name] || !isDefinedPolicyStatement(name, po) {
 			continue
 		}
-		if !isDefinedPolicyStatement(name, po) {
-			if kw, isProto := config.FRRRoutingProtocolKeyword(name); isProto && normalizedRedistProtocol(kw) == proto {
-				bare = true
-			}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out
+}
+
+// redistChainHasBare15156 reports whether proto appears in chain only
+// via a bare protocol token.
+func redistChainHasBare15156(chain []string, po *config.PolicyOptionsConfig, proto string) bool {
+	for _, name := range chain {
+		if name == "" || isDefinedPolicyStatement(name, po) {
 			continue
 		}
-		for _, e := range m.redistributeEntriesAt(name, po, self, node) {
-			if e.proto == proto && !seen[name] {
-				seen[name] = true
-				policies = append(policies, name)
-			}
+		if kw, isProto := config.FRRRoutingProtocolKeyword(name); isProto && normalizedRedistProtocol(kw) == proto {
+			return true
 		}
 	}
-	return policies, bare, len(policies) > 0 || bare
+	return false
+}
+
+// redistChainEnrols15156 reports whether ps enrols proto under
+// #14698 at (self, node): proto is in the policy's node-filtered
+// per-source protocol set (redistProtocolsForNode applies the same
+// accept-only, known-token, self/family and permit-dominated gates
+// as the entry renderer, without rendering entries).
+func redistChainEnrols15156(ps *config.PolicyStatement, self, node, proto string) bool {
+	for _, p := range redistProtocolsForNode(ps, self, node) {
+		if p == proto {
+			return true
+		}
+	}
+	return false
+}
+
+// redistChainMemberTerminal16868 reports whether ps, evaluated for
+// proto, terminates the chain at its policy default: an authored
+// accept/reject default with no bare `then next policy` term in the
+// per-source filtered view. Mirrors the termination rule in
+// renderRedistComposedMapVariant16864 / #5277.
+func redistChainMemberTerminal16868(ps *config.PolicyStatement, proto string) bool {
+	if ps == nil || (ps.DefaultAction != "accept" && ps.DefaultAction != "reject") {
+		return false
+	}
+	return !policyHasNextPolicyTerm(redistPolicyForProtocol(ps, proto))
+}
+
+// redistChainEffective16868 returns the members named for proto
+// when the chain composes: the prefix through the first
+// terminal-default member, extended through the first enrolling
+// member after it when the terminal member is the ONLY member in
+// that prefix (so the prefix is exactly the guard) — then the
+// enrollee keeps the attachment composed instead of collapsing to
+// the guard's per-source map (the k3 shape: a connected source
+// guarded only by a default reject). When the prefix already
+// contains an enrolling member beside the terminal (e.g. a
+// protocol-less default-accept policy that enrols every source),
+// the prefix stands and later members stay excluded, mirroring
+// Junos termination. enrolled reports per-member #14698 enrolment.
+func redistChainEffective16868(chain []string, po *config.PolicyOptionsConfig, proto string, enrolled func(string) bool) []string {
+	termIdx := -1
+	for i, name := range chain {
+		if redistChainMemberTerminal16868(po.PolicyStatements[name], proto) {
+			termIdx = i
+			break
+		}
+	}
+	if termIdx != 0 {
+		if termIdx < 0 {
+			return append([]string(nil), chain...)
+		}
+		return append([]string(nil), chain[:termIdx+1]...)
+	}
+	for i := 1; i < len(chain); i++ {
+		if enrolled(chain[i]) {
+			return append([]string(nil), chain[:i+1]...)
+		}
+	}
+	return append([]string(nil), chain[:1]...)
+}
+
+// redistChainForSource15156 resolves a proto across an ordered policy
+// chain. #16868: whenever any member enrols the source, the composed
+// chain is the whole defined chain (truncated at a terminal default,
+// see redistChainEffective16868) — a reject-only guard, a protocol-less
+// reject guard, or a policy whose only terminal for the source is its
+// policy-level reject enrols nothing under #14698 yet must still run
+// first in the composed map. It returns that effective chain, whether
+// the source also appears via a bare protocol token, and whether any
+// member enrols it.
+func (m *Manager) redistChainForSource15156(chain []string, po *config.PolicyOptionsConfig, self, node, proto string) (policies []string, bare bool, ok bool) {
+	bare = redistChainHasBare15156(chain, po, proto)
+	defined := redistChainDefined16868(chain, po)
+	enrolled := func(name string) bool {
+		return redistChainEnrols15156(po.PolicyStatements[name], self, node, proto)
+	}
+	any := false
+	for _, name := range defined {
+		if enrolled(name) {
+			any = true
+			break
+		}
+	}
+	if len(defined) == 0 || !any {
+		return nil, bare, bare
+	}
+	return redistChainEffective16868(defined, po, proto, enrolled), bare, true
 }
 
 // redistChainEntries15156 composes one entry per source across a chain:
-// bare-token sources stay bare, a single-policy source keeps its
-// per-source map, and a multi-policy source names the composed map.
+// bare-token sources stay bare, a source enrolled by exactly one
+// defined member (in a single-member chain) keeps its per-source map,
+// and a source enrolled in a multi-member chain names the composed
+// map over the whole effective chain (#16868).
 func (m *Manager) redistChainEntries15156(chain []string, po *config.PolicyOptionsConfig, self, node string) []redistEntry {
 	protoSet := make(map[string]bool)
 	var protos []string
@@ -222,15 +315,7 @@ func redistComposedChains15156(fc *FullConfig) map[string]redistComposedReq15156
 	po := fc.PolicyOptions
 	m := New()
 	addChain := func(chain []string, self, node string) {
-		// Distinct defined policies in chain order.
-		var defined []string
-		seen := make(map[string]bool)
-		for _, n := range chain {
-			if isDefinedPolicyStatement(n, po) && !seen[n] {
-				seen[n] = true
-				defined = append(defined, n)
-			}
-		}
+		defined := redistChainDefined16868(chain, po)
 		if len(defined) < 2 {
 			return
 		}
@@ -269,34 +354,62 @@ func redistComposedChains15156(fc *FullConfig) map[string]redistComposedReq15156
 		if bgp == nil {
 			return
 		}
-		policies := bgpExportPolicies14586(bgp, po)
-		if len(policies) < 2 {
-			return
-		}
-		for _, node := range []string{"bgp", "bgp-ipv6"} {
-			// Per node, enrollment differs by family; compose per source
-			// with the policies enrolling there, sorted (bgpExportPolicies
-			// is sorted) for a deterministic OR composition.
-			protoPolicies := make(map[string][]string)
-			var protos []string
-			for _, name := range policies {
-				for _, e := range m.redistributeEntriesAt(name, po, "bgp", node) {
-					if !containsString15156(protoPolicies[e.proto], name) {
-						if len(protoPolicies[e.proto]) == 0 {
-							protos = append(protos, e.proto)
-						}
-						protoPolicies[e.proto] = append(protoPolicies[e.proto], name)
+		// Per-chain composed maps.
+		for _, chain := range bgpEffectiveExportChains14586(bgp, po) {
+			if len(chain) < 2 {
+				continue
+			}
+			for _, node := range []string{"bgp", "bgp-ipv6"} {
+				for _, e := range m.redistChainEntries15156(chain, po, "bgp", node) {
+					if !strings.Contains(e.routeMap, ReservedChainSuffix) {
+						continue
+					}
+					ps, _, _ := m.redistChainForSource15156(chain, po, "bgp", node, e.proto)
+					if len(ps) < 2 {
+						continue
+					}
+					if _, ok := out[e.routeMap]; !ok {
+						out[e.routeMap] = redistComposedReq15156{chain: append([]string(nil), ps...), proto: e.proto}
 					}
 				}
 			}
-			for _, proto := range protos {
-				ps := protoPolicies[proto]
-				if len(ps) < 2 {
+		}
+		// Cross-chain merged maps: a source several chains produce
+		// attaches the union composition (see
+		// bgpChainRedistEntries16868); define it here or the
+		// attachment dangles.
+		for _, node := range []string{"bgp", "bgp-ipv6"} {
+			for _, e := range m.bgpChainRedistEntries16868(bgp, po, "bgp", node) {
+				if !strings.Contains(e.routeMap, ReservedChainSuffix) {
 					continue
 				}
-				name := redistChainRouteMapName15156(ps, proto)
-				if _, ok := out[name]; !ok {
-					out[name] = redistComposedReq15156{chain: append([]string(nil), ps...), proto: proto}
+				if _, ok := out[e.routeMap]; ok {
+					continue
+				}
+				// Recover the union chain from the map name is
+				// fragile; recompute it from the producing chains.
+				var union []string
+				inUnion := make(map[string]bool)
+				for _, chain := range bgpEffectiveExportChains14586(bgp, po) {
+					produced := false
+					for _, ce := range m.redistBGPUnionEntries16868(chain, po, "bgp", node) {
+						if ce.proto == e.proto {
+							produced = true
+							break
+						}
+					}
+					if !produced {
+						continue
+					}
+					for _, name := range chain {
+						if !inUnion[name] {
+							inUnion[name] = true
+							union = append(union, name)
+						}
+					}
+				}
+				if len(union) >= 2 && redistChainRouteMapName15156(union, e.proto) == e.routeMap {
+					out[e.routeMap] = redistComposedReq15156{chain: union, proto: e.proto}
 				}
 			}
 		}
@@ -383,7 +496,14 @@ func (m *Manager) renderRedistComposedMapVariant16864(po *config.PolicyOptionsCo
 		logRedistVariantDrop16864(pn, proto, ctx, dropped, denyAlls)
 		filtered = append(filtered, f)
 		names = append(names, pn)
+		// #16868: the sequence bound counts only members that
+		// actually render — the loop below stops at a terminal
+		// default, and members after it (named solely to keep a
+		// terminal guard's attachment composed) emit nothing.
 		total += config.RouteMapSequenceCount(vpo, f)
+		if redistChainMemberTerminal16868(f, proto) {
+			break
+		}
 	}
 	if total > config.MaxRouteMapSequences {
 		slog.Warn("oversized composed redistribute route-map; rendering an explicit deny instead (#15156)",
@@ -848,6 +968,42 @@ func (m *Manager) resolveRedistributeCluster15158(export string, po *config.Poli
 	return formatRedistEntries(entries)
 }
 
+// bgpEffectiveExportChains14586 returns the distinct effective
+// export chains of bgp (global chain when there are no neighbours,
+// else each neighbour's most-specific chain), de-duplicated. The
+// #14586 origination union is the set of policies in these chains,
+// but #16868 grouping keeps each chain's composition separate: a
+// guard only composes with the acceptors in its OWN chain.
+func bgpEffectiveExportChains14586(bgp *config.BGPConfig, po *config.PolicyOptionsConfig) [][]string {
+	if bgp == nil || po == nil {
+		return nil
+	}
+	global := bgpGlobalExportChain(bgp, po)
+	var chains [][]string
+	seen := make(map[string]bool)
+	add := func(chain []string) {
+		if len(chain) == 0 {
+			return
+		}
+		key := strings.Join(chain, "\x00")
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		chains = append(chains, append([]string(nil), chain...))
+	}
+	if len(bgp.Neighbors) == 0 {
+		add(global)
+	}
+	for _, n := range bgp.Neighbors {
+		if n == nil {
+			continue
+		}
+		add(bgpNeighborExportChain(n, global, po))
+	}
+	return chains
+}
+
 // bgpExportPolicies14586 returns the sorted, de-duplicated set of DEFINED
 // policy-statements referenced by the effective BGP export chain of any
 // neighbor in this BGP instance (global default or per-neighbor override,
@@ -864,24 +1020,11 @@ func (m *Manager) resolveRedistributeCluster15158(export string, po *config.Poli
 // per-peer `route-map out`. This is not the #2473 leak: redistribution
 // is gated by that filtered map (fail-closed deny), never unfiltered.
 func bgpExportPolicies14586(bgp *config.BGPConfig, po *config.PolicyOptionsConfig) []string {
-	if bgp == nil || po == nil {
-		return nil
-	}
-	global := bgpGlobalExportChain(bgp, po)
 	seen := make(map[string]bool)
-	add := func(chain []string) {
+	for _, chain := range bgpEffectiveExportChains14586(bgp, po) {
 		for _, name := range chain {
 			seen[name] = true
 		}
-	}
-	if len(bgp.Neighbors) == 0 {
-		add(global)
-	}
-	for _, n := range bgp.Neighbors {
-		if n == nil {
-			continue
-		}
-		add(bgpNeighborExportChain(n, global, po))
 	}
 	out := make([]string, 0, len(seen))
 	for name := range seen {
@@ -929,10 +1072,100 @@ func (m *Manager) bgpPolicyIPv6RedistEntriesCluster15158(policies []string, po *
 	return entries
 }
 
+// bgpChainRedistEntriesCluster16868 is the per-chain grouped
+// origination at the router-level BGP node (#16868).
+func (m *Manager) bgpChainRedistEntriesCluster16868(bgp *config.BGPConfig, po *config.PolicyOptionsConfig, clusterMode bool) []redistEntry {
+	entries := m.bgpChainRedistEntries16868(bgp, po, "bgp", "bgp")
+	for i := range entries {
+		entries[i].clusterMode = clusterMode
+	}
+	return entries
+}
+
+// bgpChainIPv6RedistEntriesCluster16868 is the per-chain grouped
+// origination at the bgp-ipv6 node (#16868).
+func (m *Manager) bgpChainIPv6RedistEntriesCluster16868(bgp *config.BGPConfig, po *config.PolicyOptionsConfig, clusterMode bool) []redistEntry {
+	entries := m.bgpChainRedistEntries16868(bgp, po, "bgp", "bgp-ipv6")
+	for i := range entries {
+		entries[i].clusterMode = clusterMode
+	}
+	return entries
+}
+
+// redistBGPUnionEntries16868 resolves one effective BGP export
+// chain through the ordered-chain resolver: whenever any member
+// enrols a source in a multi-member chain, the attachment is the
+// composed map over the whole effective chain (reject-only guards
+// included, #16868); a single-member chain keeps its per-source
+// map. The render site unions the per-chain entries, so a guard
+// composes only with its own chain's acceptors.
+func (m *Manager) redistBGPUnionEntries16868(chain []string, po *config.PolicyOptionsConfig, self, node string) []redistEntry {
+	return m.redistChainEntries15156(chain, po, self, node)
+}
+
+// bgpChainRedistEntries16868 unions redist entries over the
+// distinct effective export chains of bgp at (self, node). FRR
+// keeps one route-map per source, so a source produced by several
+// chains merges into the composed map over the union of the
+// producing chains' members in first-seen order (the #15156
+// cross-neighbour OR composition); a source produced by exactly
+// one chain keeps that chain's entry.
+func (m *Manager) bgpChainRedistEntries16868(bgp *config.BGPConfig, po *config.PolicyOptionsConfig, self, node string) []redistEntry {
+	chains := bgpEffectiveExportChains14586(bgp, po)
+	perChain := make([][]redistEntry, len(chains))
+	byProto := make(map[string][]int)
+	var protos []string
+	for i, chain := range chains {
+		perChain[i] = m.redistBGPUnionEntries16868(chain, po, self, node)
+		for _, e := range perChain[i] {
+			if _, ok := byProto[e.proto]; !ok {
+				protos = append(protos, e.proto)
+			}
+			byProto[e.proto] = append(byProto[e.proto], i)
+		}
+	}
+	sort.Strings(protos)
+	var out []redistEntry
+	for _, proto := range protos {
+		idxs := byProto[proto]
+		// Distinct attachments among producing chains.
+		var distinct []redistEntry
+		seenE := make(map[redistEntry]bool)
+		for _, i := range idxs {
+			for _, e := range perChain[i] {
+				if e.proto == proto && !seenE[e] {
+					seenE[e] = true
+					distinct = append(distinct, e)
+				}
+			}
+		}
+		if len(distinct) == 1 {
+			out = append(out, distinct[0])
+			continue
+		}
+		var union []string
+		inUnion := make(map[string]bool)
+		for _, i := range idxs {
+			for _, name := range chains[i] {
+				if !inUnion[name] {
+					inUnion[name] = true
+					union = append(union, name)
+				}
+			}
+		}
+		if len(union) >= 2 {
+			out = append(out, redistEntry{proto: proto, routeMap: redistChainRouteMapName15156(union, proto)})
+		} else {
+			out = append(out, distinct[0])
+		}
+	}
+	return out
+}
+
 func (m *Manager) bgpPolicyRedistEntriesAt14586(policies []string, po *config.PolicyOptionsConfig, self, node string) []redistEntry {
-	// #15156: compose per source across the whole policy set — one entry
-	// per source (bare/single/composed), never one map per policy.
-	return m.redistChainEntries15156(policies, po, self, node)
+	// Flat-set callers (origination detection, single-policy tests)
+	// keep the chain resolver over the sorted set as one chain.
+	return m.redistBGPUnionEntries16868(policies, po, self, node)
 }
 
 // redistReferencedNodes14380 collects the (self, node) pairs at which

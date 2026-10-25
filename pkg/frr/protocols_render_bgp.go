@@ -326,8 +326,7 @@ func (m *Manager) renderBGP16125(b *strings.Builder, bgp *config.BGPConfig, vali
 		// now, de-duplicated against the bare-token lines above; IPv6
 		// lines join bgpIPv6Redist for the address-family block below,
 		// de-duplicated against bare-token IPv6 lines already collected.
-		bgpPolicies14586 := bgpExportPolicies14586(bgp, policyOptions)
-		b.WriteString(formatRedistEntries(m.bgpPolicyRedistEntriesCluster15158(bgpPolicies14586, policyOptions, clusterMode)))
+		b.WriteString(formatRedistEntries(m.bgpChainRedistEntriesCluster16868(bgp, policyOptions, clusterMode)))
 		{
 			seen6 := make(map[redistEntry]bool)
 			for _, ln := range strings.Split(bgpIPv6Redist.String(), "\n") {
@@ -346,7 +345,7 @@ func (m *Manager) renderBGP16125(b *strings.Builder, bgp *config.BGPConfig, vali
 				}
 			}
 			var extra6 strings.Builder
-			for _, ent := range m.bgpPolicyIPv6RedistEntriesCluster15158(bgpPolicies14586, policyOptions, clusterMode) {
+			for _, ent := range m.bgpChainIPv6RedistEntriesCluster16868(bgp, policyOptions, clusterMode) {
 				if seen6[ent] {
 					continue
 				}
