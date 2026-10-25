@@ -129,6 +129,35 @@ func hostInputFenceOverlayAuthorityMatches(o *xnft.HostInputFenceOverlay, permit
 		o.State == permit.state.String() &&
 		o.CloseRequestKey == fmt.Sprintf("%d/%d/%v", permit.closeRequestKey.Ready, permit.closeRequestKey.WatchGeneration, permit.closeRequestKey.Tuples)
 }
+
+// ipsecHostInputFenceSettledNoDivert reports whether a CLOSING, SAFE,
+// ACKed permit has nothing left for the reconciler to do without the
+// semaphore (#16777). That is exactly the state tryOpenIpsecPermitAfterFenceAck
+// already no-ops on: no committed divert to open for, no removal pending,
+// and no conntrack revocation owed. The overlay must be the ACKed one for
+// this exact permit (or the ACKed desired overlay must be empty, which the
+// reconciler publishes for a census with no resolvable xfrmi master) — a
+// non-empty ACKed overlay with a since-removed divert is settled too,
+// because only the later OPEN/capture transitions change it.
+func (d *Daemon) ipsecHostInputFenceSettledNoDivert(permit *permitRecord) bool {
+	if d == nil || d.ipsecS4 == nil || permit == nil ||
+		permit.state != ipsecPermitClosing || permit.closeRequestKey.Ready != ipsecReadySafe ||
+		d.HostInputFenceConntrackRevocationOwed() {
+		return false
+	}
+	if d.ipsecCaptureRemovalPending.Load() {
+		return false
+	}
+	acked := d.ipsecOverlayAcked.Load()
+	if !hostInputFenceOverlayAuthorityMatches(acked, permit) {
+		return false
+	}
+	d.ipsecCaptureMu.Lock()
+	divertActive := d.ipsecCapture != nil
+	d.ipsecCaptureMu.Unlock()
+	return !divertActive
+}
+
 func (d *Daemon) tryOpenIpsecPermitAfterFenceAck(permit *permitRecord) {
 	if d == nil || d.ipsecS4 == nil || permit == nil ||
 		permit.state != ipsecPermitClosing || permit.closeRequestKey.Ready != ipsecReadySafe ||
@@ -280,6 +309,12 @@ func (d *Daemon) reconcileIpsecHostInputFence(ctx context.Context) {
 	if permit.state == ipsecPermitClosing &&
 		hostInputFenceOverlayAuthorityMatches(d.ipsecOverlayAcked.Load(), permit) &&
 		(permit.closeRequestKey.Ready != ipsecReadySafe || d.HostInputFenceConntrackRevocationOwed()) {
+		return
+	}
+	// #16777: settled SAFE/CLOSING/ACKed with no divert — taking applySem
+	// would only re-discover that tryOpenIpsecPermitAfterFenceAck no-ops.
+	// The 5 ms supervisor tick must not park behind commits in this state.
+	if d.ipsecHostInputFenceSettledNoDivert(permit) {
 		return
 	}
 	if permit.state == ipsecPermitOpen && d.ipsecOverlay.Load() == nil {

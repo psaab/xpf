@@ -8,6 +8,14 @@ xpf (0.0.0) unstable; urgency=medium
     An explicit `global-weight 0` still means no demotion, and a later
     folded block omitting the global no longer resets an earlier
     explicit value.
+  * IPsec host-input fence: the 5 ms supervisor reconcile no longer
+    acquires applySem on settled boxes without a route-based VPN
+    (#16777). With a SAFE census, a CLOSING permit and an ACKed
+    overlay but no committed divert, every tick took the semaphore
+    only to find nothing to open, parking behind whole commits. The
+    reconciler now returns before acquiring in exactly that settled
+    state; non-SAFE, un-ACKed, removal-pending and divert-active
+    states are unchanged.
   * Shim verifier provenance/headroom (#16701): the gate verdict is
     now schema 3 and records provenance.kernel_release (the uname -r
     the processed-insn count was measured on); freshness and release
