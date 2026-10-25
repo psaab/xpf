@@ -219,6 +219,33 @@ func validateStrictSynCheckStrict(cfg *Config) error {
 	return nil
 }
 
+// validateTimeWaitStateAgeoutStrict is the #16485 commit-time gate for
+// `security flow tcp-session time-wait-state`. Junos presents
+// `session-ageout` ("set a TCP session to age out, using the service
+// based timeout value") and `session-timeout <seconds>` as alternative
+// TIME_WAIT policies. Before #16485 xpf accepted both together: the
+// dataplane silently enforced ageout (the established/service window)
+// while `show security flow` printed the session-timeout, so neither
+// surface told the operator which policy was in force. Strict on
+// commit / commit-check; the call site downgrades to a warning on the
+// tolerant load / peer-sync path so an already-persisted or peer-synced
+// config still boots (#1960 no-brick) — there the dataplane keeps its
+// ageout-wins precedence, which the show renderer now reports.
+func validateTimeWaitStateAgeoutStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	ts := cfg.Security.Flow.TCPSession
+	if ts == nil || !ts.TimeWaitStateSessionAgeout || ts.TimeWaitStateSessionTimeout <= 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"security flow tcp-session time-wait-state: `session-ageout` cannot be enabled "+
+			"together with `session-timeout %d` (Junos presents them as alternative "+
+			"TIME_WAIT policies, #16485); remove one of the two leaves",
+		ts.TimeWaitStateSessionTimeout)
+}
+
 // #1830 (e): the #1733 MaxEqualFlowWorkers constant and
 // validateEqualFlowWorkerCapStrict were retired together with the Rust
 // MAX_WORKERS_SCRATCH cap they mirrored. The v8 lease rotation scratch

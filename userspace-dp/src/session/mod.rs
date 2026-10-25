@@ -916,9 +916,14 @@ pub(crate) fn tcp_close_window_for_entry(
 
 /// #15946: close window with the per-session service-based timeout.
 /// `session-ageout` makes TIME_WAIT (and, with apply-to-half-closed,
-/// CLOSING) age on the established/app window; an explicit TW
-/// session-timeout (tcp_time_wait_ns distinct via config) still wins
-/// when no app override exists — modelled by callers passing None.
+/// CLOSING) age on the established/app window. When both ageout and an
+/// explicit TW `session-timeout` are configured, ageout wins:
+/// `tcp_time_wait_ns` (which folds in the session-timeout override) is
+/// not consulted on the ageout arm, so a session without a per-app
+/// override reaps on `tcp_established_ns`, not on the session-timeout.
+/// Strict commit rejects that combination (#16485); a leniently loaded
+/// one enforces this ageout-wins precedence, which the show surface
+/// reports.
 #[inline]
 pub(crate) fn tcp_close_window_ns_with_app(
     class: TcpCloseClass,

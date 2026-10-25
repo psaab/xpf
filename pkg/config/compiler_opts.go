@@ -2636,6 +2636,13 @@ type compileOpts struct {
 	// combination keeps the dataplane's fail-closed precedence (strict wins
 	// at the session-MISS gate), so it is bounded to the stricter behavior.
 	lenientStrictSynCheck16479 bool
+	// lenientTimeWaitStateAgeout16485 (#16485) downgrades the
+	// time-wait-state session-ageout/session-timeout mutual-exclusion
+	// gate (validateTimeWaitStateAgeoutStrict) to a warning on the
+	// tolerant load / peer-sync path (#1960 no-brick). A leniently-loaded
+	// combination keeps the dataplane's ageout-wins precedence, which
+	// RenderFlowTimeouts now reports.
+	lenientTimeWaitStateAgeout16485 bool
 	// lenientChassisRG (#4434) downgrades the chassis-cluster heartbeat
 	// wire-width gate (validateChassisClusterStrict) from a hard compile
 	// error to a cfg.Warnings entry. The strict commit / commit-check path
@@ -3907,6 +3914,7 @@ func lenientCompileOpts() compileOpts {
 		lenientAddressBookCIDRMaskSpelling:       true,
 		lenientFlowAging:                         true,
 		lenientStrictSynCheck16479:               true,
+		lenientTimeWaitStateAgeout16485:          true,
 		lenientChassisRG:                         true,
 		lenientVRRPGroupID:                       true,
 		lenientVRRPGroupPriority:                 true,
