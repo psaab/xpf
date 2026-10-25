@@ -1350,7 +1350,7 @@ func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 	// one that crossed (#15271 B21-02).
 	overflowed := false
 	build := func(atts []pbrAttachment, filters map[string]*config.FirewallFilter, family int) {
-		for _, att := range atts {
+		for attIdx, att := range atts {
 			if overflowed {
 				return
 			}
@@ -1445,9 +1445,9 @@ func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 				// (every steering term is over budget at once) without
 				// expanding any Cartesian product.
 				overflowed = true
-				accountPBRWindowExhausted(&errs, atts, att.Filter, filters, family, tableIDs, pls)
+				accountPBRWindowExhausted(&errs, atts[attIdx+1:], filters, family, tableIDs, pls)
 				if family == unix.AF_INET {
-					accountPBRWindowExhausted(&errs, inet6Attached, "", fw.FiltersInet6, unix.AF_INET6, tableIDs, pls)
+					accountPBRWindowExhausted(&errs, inet6Attached, fw.FiltersInet6, unix.AF_INET6, tableIDs, pls)
 				}
 				return
 			}
@@ -1498,27 +1498,22 @@ func PBRBuildRulesAndStats(cfg *config.Config) (rules []PBRRule, degraded int) {
 // accountPBRWindowExhausted records one degraded (overflow) error for every
 // routing-instance term that the full PBR window leaves unbuilt, so the
 // degraded error and count name all that is lost rather than only the term
-// that crossed the budget (#15271 B21-02). It walks the attachments of one
-// family in build order; skipFilter names the filter of the attachment whose
-// build triggered the exhaustion — that attachment and every later one are
-// accounted, except that the triggering filter's own remaining terms were
-// already each accounted by its partial build (an over-budget term there
-// returns one error per remaining steering term when budget hits zero
-// exactly), so accounting resumes at the NEXT attachment. The accounting
-// itself expands no Cartesian product: with budget 0 every steering term
-// fails the size check immediately, and the returned rules are discarded.
-// Loopback and VRF-member attachments are not special-cased here: their
-// steering was already doomed by those arms, and the overflow error is an
-// additional accurate description of why the window never reached them.
-func accountPBRWindowExhausted(errs *[]error, atts []pbrAttachment, skipFilter string, filters map[string]*config.FirewallFilter, family int, tableIDs map[string]int, pls map[string]*config.PrefixList) {
-	pastTrigger := skipFilter == ""
+// that crossed the budget (#15271 B21-02). atts holds exactly the
+// attachments after the triggering (filter, iif) attachment in build
+// order: the triggering filter's own remaining terms were already each
+// accounted by its partial build (an over-budget term there returns one
+// error per remaining steering term when budget hits zero exactly), so
+// accounting resumes strictly at the NEXT attachment (#16802 — keying
+// the resume by filter name alone re-accounted every earlier attachment
+// of a multi-attached filter, including the trigger itself). The
+// accounting itself expands no Cartesian product: with budget 0 every
+// steering term fails the size check immediately, and the returned rules
+// are discarded. Loopback and VRF-member attachments are not
+// special-cased here: their steering was already doomed by those arms,
+// and the overflow error is an additional accurate description of why
+// the window never reached them.
+func accountPBRWindowExhausted(errs *[]error, atts []pbrAttachment, filters map[string]*config.FirewallFilter, family int, tableIDs map[string]int, pls map[string]*config.PrefixList) {
 	for _, att := range atts {
-		if !pastTrigger {
-			if att.Filter == skipFilter {
-				pastTrigger = true
-			}
-			continue
-		}
 		filter := filters[att.Filter]
 		if filter == nil {
 			continue
