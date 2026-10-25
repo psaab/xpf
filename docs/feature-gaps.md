@@ -780,7 +780,15 @@ carry is the positional filter/term identity the Rust side assigns from the
 snapshot the Go control plane rendered — so `userspace.FilterTermSyslogMap`
 projects the answer from that same snapshot (one ordering source, since a
 divergence would silently mis-route in either direction) and the daemon installs
-it on every apply via `EventReader.SetFilterTermSyslog`.
+it on every apply via `EventReader.SetFilterTermSyslog`. #16775
+generation-binds that install: FILTER_LOG frames stamp the
+filter-snapshot generation (GEN1 at [140:144], generation at
+[144:152]), the daemon installs with
+`SetFilterTermSyslogForGeneration` at the dataplane publish, and a
+stamped mismatch is suppressed on both remote sinks rather than
+resolved under the previous config's positional map during the
+publish-to-apply-tail window. Unstamped legacy frames keep the
+current-map behaviour.
 
 **Local visibility is unaffected**, and that is what makes the subtractive
 direction safe: the event buffer behind `show security log`, the daemon log

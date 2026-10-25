@@ -247,6 +247,20 @@ config with all filters removed installs, so the reader cannot resume forwarding
 under deleted terms' ids. `FilterTermSyslog()` returns the map rather than a
 count for exactly this reason: both states have length zero.
 
+**Generation binding (#16775).** The positional ids are only meaningful
+under the filter snapshot that assigned them. The dataplane publish
+precedes the apply-tail install, so FILTER_LOG frames now stamp the
+filter-snapshot generation (GEN1 marker at [140:144], generation at
+[144:152]; legacy 144-byte frames are unstamped), the daemon installs
+the projection with `SetFilterTermSyslogForGeneration` at the publish
+(retained across a deferred publish until it lands), and a stamped
+event whose generation mismatches the installed map is suppressed on
+both remote sinks — fail-closed, at the cost of a transient missing
+`then syslog` record, rather than forwarding a `then log` hit off-box.
+Unstamped frames keep the legacy current-map behaviour. Coverage:
+`filter_log_generation_16775_test.go`. Sibling of the #11698
+policy-name generation.
+
 Only FILTER_LOG is gated. Session/policy/screen events have no per-term spelling
 to honour, and suppressing them would be a logging outage dressed as a parity
 fix.

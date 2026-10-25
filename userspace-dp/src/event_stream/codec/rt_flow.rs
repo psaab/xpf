@@ -103,9 +103,10 @@ pub(crate) struct DataplaneEventPayload {
     pub(crate) application_id: u16,
     pub(crate) filter_id: u32,
     pub(crate) screen_id: u32,
-    /// Config generation that evaluated a POLICY_DENY. The event encoder
-    /// carries this in duplicate rule/term slots so Go can refuse to resolve
-    /// its positional policy ID from another generation's name map.
+    /// Config generation that evaluated a POLICY_DENY or FILTER_LOG. For
+    /// POLICY_DENY the encoder carries it in duplicate rule/term slots
+    /// ([56:64]); for FILTER_LOG it rides the additive [144:152] tail, so
+    /// Go can refuse to resolve positional IDs from another generation.
     pub(crate) config_generation: u64,
     pub(crate) timestamp_ns: u64,
 }
@@ -598,6 +599,15 @@ impl EventFrame {
         } else {
             buf[base + 56..base + 60].copy_from_slice(&event.rule_id.to_le_bytes());
             buf[base + 60..base + 64].copy_from_slice(&event.term_id.to_le_bytes());
+        }
+        if event.kind == DataplaneEventKind::FilterLog {
+            // #16775: FILTER_LOG keeps rule/term at [56:64], so its
+            // filter-snapshot generation rides the additive tail:
+            // GEN1 marker at [140:144], generation at [144:152]. A Go
+            // reader on a 144-byte legacy frame sees no stamp.
+            buf[base + 140..base + 144]
+                .copy_from_slice(&POLICY_CONFIG_GENERATION_MARKER.to_le_bytes());
+            buf[base + 144..base + 152].copy_from_slice(&event.config_generation.to_le_bytes());
         }
         buf[base + 64..base + 66].copy_from_slice(&event.owner_rg_id.to_le_bytes());
         write_ip_opt_16(&mut buf, base + 72, event.nat_src_ip);

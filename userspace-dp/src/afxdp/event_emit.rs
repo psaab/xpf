@@ -554,7 +554,12 @@ pub(super) fn emit_filter_log_event(
         application_id: app_id,
         filter_id,
         screen_id: 0,
-        config_generation: 0,
+        // #16775: stamp the filter-snapshot (config) generation that
+        // evaluated this hit, like POLICY_DENY (#10978). Cached replays
+        // pass the hit packet's meta, whose generation is the live
+        // snapshot's; a stale cached term is suppressed Go-side rather
+        // than resolved under a new generation's positional map.
+        config_generation: meta.config_generation,
         // #2470: stamp the dataplane DECISION instant (wall-clock Unix ns) at
         // emit time. `now_ns` is CLOCK_MONOTONIC.
         timestamp_ns: crate::event_stream::mono_ns_to_wall_clock_unix_ns(now_ns),

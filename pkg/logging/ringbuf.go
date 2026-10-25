@@ -143,6 +143,11 @@ const (
 	policyConfigGenerationMarkerOffset    = 140
 	rawEventSessionPolicyGenerationOffset = 160
 	rawEventSessionPolicyGenerationSize   = 168
+	// #16775: FILTER_LOG generation tail. Marker at [140:144] (shared
+	// GEN1), generation LE u64 at [144:152]. Additive: a 144-byte legacy
+	// FILTER_LOG frame is unstamped and keeps the legacy gate behaviour.
+	rawEventFilterLogGenerationOffset = 144
+	rawEventFilterLogGenerationSize   = 152
 )
 
 const (
@@ -174,6 +179,19 @@ func policyNameConfigGeneration(data []byte) (uint64, bool) {
 		return 0, false
 	}
 	return binary.LittleEndian.Uint64(data[rawEventSessionPolicyGenerationOffset : rawEventSessionPolicyGenerationOffset+8]), true
+}
+
+// filterLogConfigGeneration returns the filter-snapshot generation stamped
+// on a FILTER_LOG frame (#16775), mirroring policyDenyConfigGeneration.
+func filterLogConfigGeneration(data []byte) (uint64, bool) {
+	if len(data) < rawEventFilterLogGenerationSize || data[52] != eventTypeFilterLog {
+		return 0, false
+	}
+	marker := binary.LittleEndian.Uint32(data[policyConfigGenerationMarkerOffset : policyConfigGenerationMarkerOffset+4])
+	if marker != policyConfigGenerationMarker {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint64(data[rawEventFilterLogGenerationOffset : rawEventFilterLogGenerationOffset+8]), true
 }
 
 const protoICMPv6 = 58
@@ -693,6 +711,7 @@ func (er *EventReader) logEvent(data []byte) {
 	}
 	policyGeneration, policyNameStamped := policyNameConfigGeneration(data)
 	policyDenyStamped := evt.EventType == eventTypePolicyDeny && policyNameStamped
+	filterGeneration, filterGenerationStamped := filterLogConfigGeneration(data)
 
 	srcStr, dstStr, natSrcStr, natDstStr := formatRawEventAddrs(&evt)
 
@@ -884,7 +903,7 @@ func (er *EventReader) logEvent(data []byte) {
 	// slog emission changes. The local (base-handler) copy is kept: the
 	// suppress marker withholds only the handler's remote forwarding.
 	filterLogSyslogAllowed := evt.EventType != eventTypeFilterLog ||
-		er.filterSyslogRoute.allows(rec.RuleID, rec.TermID)
+		er.filterSyslogRoute.allowsAtGeneration(rec.RuleID, rec.TermID, filterGeneration, filterGenerationStamped)
 	slogInfo := eventReaderSlogInfo
 	if !filterLogSyslogAllowed {
 		slogInfo = eventReaderSlogInfoSuppressSystemSyslog

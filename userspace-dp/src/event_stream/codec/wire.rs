@@ -86,6 +86,10 @@ pub(crate) const MSG_SESSION_CREATE_RT_FLOW: u8 = 15;
 // policy ID at [160:168]. [140:144] contains the "GEN1" marker so old frames
 // remain distinguishable from newly stamped ones. Non-session security events
 // retain their 160-byte payload; only session frames use the [160:168] tail.
+//
+// #16775: FILTER_LOG frames stamp the filter-snapshot generation at
+// [144:152] under the same GEN1 marker at [140:144]; rule/term stay at
+// [56:64]. Legacy 144-byte frames carry no stamp.
 #[allow(dead_code)]
 pub(crate) const SECURITY_EVENT_PAYLOAD_SIZE: usize = 160;
 pub(crate) const SESSION_POLICY_GENERATION_OFFSET: usize = 160;
