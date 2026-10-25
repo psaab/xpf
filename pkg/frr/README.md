@@ -1759,7 +1759,18 @@ step. Both are required — neither sees the other's case:
   backreferences interact with sequencing. The #16788 sequencer
   shares the single separator between adjacent factors (the
   #16835 adjacent-literal row); one community satisfying two
-  members (the #16835 shared-token row) still under-matches.
+  regex members (the #16835 shared-token row) is evaluated by the
+  #16835 chain (`community_chain_16835.go`): one generated
+  single-factor list per distinct member
+  (`<frrName>-xpf-com-<digest>`), emitted for every rendered
+  multi-member expanded definition and chained with `on-match
+  next`, so each member is matched against the route's communities
+  independently — exactly Junos' per-member evaluation. The public
+  list keeps its permutation render unchanged; chain lists are
+  never a `then community delete` target, and
+  `communityListCollision` refuses an apply where a chain list
+  would fuse with an operator list, a delete backing, or another
+  definition's chain list.
 - **Community member regexes match per community (#16788, R3-A11-05).**
   Junos evaluates each member against each community on the route,
   but FRR matches an expanded list against the whole space-joined
