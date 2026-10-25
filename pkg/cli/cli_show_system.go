@@ -397,11 +397,11 @@ func (c *CLI) showSystemServices() error {
 	}
 
 	if cfg.System.Services != nil && cfg.System.Services.SSH != nil {
-		rootLogin := cfg.System.Services.SSH.RootLogin
-		if rootLogin == "" {
-			rootLogin = "deny"
-		}
-		fmt.Printf("  SSH:            enabled (root-login: %s)\n", rootLogin)
+		// #16735: report the EFFECTIVE root-login policy. An unset leaf
+		// emits no PermitRootLogin in the managed drop-in, so the factory
+		// prohibit-password posture applies — not "deny".
+		fmt.Printf("  SSH:            enabled (root-login: %s)\n",
+			config.SSHRootLoginDisplayName(cfg.System.Services.SSH.RootLogin))
 	}
 	if cfg.System.Services != nil && cfg.System.Services.NetconfSSH {
 		fmt.Println("  NETCONF SSH:    configured but NOT served (no NETCONF daemon; tcp/830 not served)")
