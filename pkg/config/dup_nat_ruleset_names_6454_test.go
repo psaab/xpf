@@ -287,11 +287,14 @@ func TestDuplicateNATRuleSetNameLenientWarns(t *testing.T) {
 // cleanly with the expected rule-sets present.
 func TestDuplicateNATRuleSetNameNoFalsePositive(t *testing.T) {
 	t.Run("distinct rule-set names in one nat type", func(t *testing.T) {
+		// #16607: distinct names must also carry distinct contexts here;
+		// two unscoped rule-sets are now a duplicate-context reject, so
+		// this cell scopes them apart to stay a #6454 accept control.
 		cfg, err := CompileConfig(parseHier6454(t, `security {
     nat {
         source {
-            rule-set RS_A { rule R1 { then { source-nat { interface; } } } }
-            rule-set RS_B { rule R1 { then { source-nat { off; } } } }
+            rule-set RS_A { from zone trust; to zone untrust; rule R1 { then { source-nat { interface; } } } }
+            rule-set RS_B { from zone dmz; to zone untrust; rule R1 { then { source-nat { off; } } } }
         }
     }
 }`))

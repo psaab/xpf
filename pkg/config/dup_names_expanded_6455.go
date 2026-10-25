@@ -7,7 +7,7 @@ import (
 
 // #6455 Finding 1 — group-authored duplicate names.
 //
-// The three pre-expansion duplicate-name gates
+// The pre-expansion duplicate-name gates
 // (validateDuplicateNamedBlockAST #5180, validateDuplicateNATRuleNamesAST
 // #5649, validateDuplicateNATRuleSetNamesAST #6454) scan only TOP-LEVEL
 // stanzas. That is deliberate and still correct for them: apply-groups
@@ -71,12 +71,13 @@ var expandedDupNodeViews = []int{0, 1}
 //
 // It is a slice rather than three inline calls so a fourth pre-expansion
 // duplicate-name gate cannot be added to the family without a decision about
-// this view: TestDupExpanded6455ScannerSetMatchesPreExpansionFamily pins the
-// membership against the pre-expansion call sites.
+// this view. #16607 adds validateSourceNATDuplicateContextAST as the fourth
+// scanner (the duplicate-context axis, not a name axis).
 var dupNameScannersExpanded = []func(*ConfigTree, bool) ([]string, error){
 	validateDuplicateNamedBlockAST,
 	validateDuplicateNATRuleNamesAST,
 	validateDuplicateNATRuleSetNamesAST,
+	validateSourceNATDuplicateContextAST,
 }
 
 // expandCandidateForNode returns a group-expanded CLONE of tree under the given
