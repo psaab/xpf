@@ -410,6 +410,11 @@ func (d *Daemon) resolveAPIBinds(apiCfg *api.Config, cfg *config.Config) {
 			}
 			apiCfg.Addrs = joinBindAddrs(httpHosts, webmgmt.HTTPPortString())
 			apiCfg.Addr = apiCfg.Addrs[0]
+			// #16709: scope the legs to the interface's VRF device when
+			// it is enslaved, else the bind is refused EADDRNOTAVAIL.
+			if dev := webMgmtBindDevice(cfg, wm.HTTPInterface); dev != "" {
+				apiCfg.BindDevices = mergeBindDevices(apiCfg.BindDevices, bindDevicesForInterface(apiCfg.Addrs, dev))
+			}
 			slog.Info("HTTP web-management bound", "interface", wm.HTTPInterface, "addrs", apiCfg.Addrs)
 		}
 		// Enable HTTPS if configured — bind the canonical TCP/443 (webmgmt SSOT).
@@ -424,6 +429,9 @@ func (d *Daemon) resolveAPIBinds(apiCfg *api.Config, cfg *config.Config) {
 			apiCfg.TLS = true
 			apiCfg.HTTPSAddrs = joinBindAddrs(httpsHosts, webmgmt.HTTPSPortString())
 			apiCfg.HTTPSAddr = apiCfg.HTTPSAddrs[0]
+			if dev := webMgmtBindDevice(cfg, wm.HTTPSInterface); dev != "" {
+				apiCfg.BindDevices = mergeBindDevices(apiCfg.BindDevices, bindDevicesForInterface(apiCfg.HTTPSAddrs, dev))
+			}
 			slog.Info("HTTPS web-management bound", "interface", wm.HTTPSInterface, "addrs", apiCfg.HTTPSAddrs)
 		}
 		// API authentication
@@ -556,6 +564,9 @@ func (d *Daemon) resolveAPIBinds(apiCfg *api.Config, cfg *config.Config) {
 			apiCfg.HTTPSAddr = apiCfg.HTTPSAddrs[0]
 		}
 	}
+	// #16709: a clamp-rewritten (loopback) address must not keep the
+	// VRF scope of the interface address it replaced.
+	apiCfg.BindDevices = rebuildBindDevicesAfterClamp(apiCfg.BindDevices, apiCfg.Addrs, apiCfg.HTTPSAddrs)
 }
 
 // helperCrashEpisodes reports the monotonic count of unexpected

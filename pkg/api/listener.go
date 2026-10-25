@@ -459,7 +459,7 @@ func (s *Server) Start(ctx context.Context) error {
 	if len(s.httpServers) > 0 {
 		legs := make([]*listenerLeg, 0, len(s.httpServers))
 		for i, srv := range s.httpServers {
-			ln, err := s.listen("tcp", srv.Addr)
+			ln, err := s.listenAddr(srv.Addr)
 			if err != nil {
 				if i == 0 {
 					return fmt.Errorf("api: bind HTTP listener %q: %w", srv.Addr, err)
@@ -479,7 +479,7 @@ func (s *Server) Start(ctx context.Context) error {
 	if len(s.httpsServers) > 0 {
 		legs := make([]*listenerLeg, 0, len(s.httpsServers))
 		for i, srv := range s.httpsServers {
-			ln, err := s.listen("tcp", srv.Addr)
+			ln, err := s.listenAddr(srv.Addr)
 			if err != nil {
 				slog.Error("api: HTTPS listener bind failed at start; HTTPS disabled until the next reconcile",
 					"addr", srv.Addr, "err", err)
@@ -759,12 +759,19 @@ func (s *Server) reconcileLegsLocked(addrs []string, isTLS bool) error {
 		// else ANY serving leg already on addr — the swap/adoption case.
 		// The same-address short circuit requires the leg to still be
 		// SERVING (#6803/#6827): a dead-but-installed leg must be replaced.
+		// #16709: adoption also requires the leg's bind SCOPE to match
+		// the desired device for addr. A same-address leg bound unscoped
+		// (pre-enslavement, or before this fix) must be replaced by a
+		// SO_BINDTODEVICE leg, and a leg scoped to a device the config
+		// no longer names must be replaced by an unscoped one; adopting
+		// either would leave the wrong socket serving indefinitely.
+		wantDev := s.bindDeviceFor(addr)
 		var cur *listenerLeg
-		if i < len(legs) && legs[i].serving() && legs[i].srv.Addr == addr {
+		if i < len(legs) && legs[i].serving() && legs[i].srv.Addr == addr && s.legDeviceLocked(addr) == wantDev {
 			cur = legs[i]
 		} else {
 			for _, leg := range legs {
-				if leg.serving() && leg.srv.Addr == addr && !adopted[leg] {
+				if leg.serving() && leg.srv.Addr == addr && !adopted[leg] && s.legDeviceLocked(addr) == wantDev {
 					cur = leg
 					break
 				}
@@ -782,7 +789,7 @@ func (s *Server) reconcileLegsLocked(addrs []string, isTLS bool) error {
 		if i < len(legs) && !adopted[legs[i]] {
 			displaced = legs[i]
 		}
-		ln, err := s.listen("tcp", addr)
+		ln, err := s.listenAddr(addr)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("api: bind %s listener %q: %w", legKind(isTLS), addr, err))
 			next[i] = displaced // retain the previous leg (fail-closed)
@@ -844,6 +851,17 @@ func (s *Server) reconcileLegsLocked(addrs []string, isTLS bool) error {
 		s.httpsServers, s.httpsSlots = servers, slots
 	} else {
 		s.httpServers, s.httpSlots = servers, slots
+	}
+	// #16709: drop scope records for addresses that left the desired
+	// set; retained/replaced legs were (re-)recorded by their binds.
+	{
+		serving := make([]string, 0, len(next))
+		for _, leg := range next {
+			if leg != nil {
+				serving = append(serving, leg.srv.Addr)
+			}
+		}
+		s.pruneLegDevicesLocked(serving)
 	}
 	if len(errs) > 0 {
 		return errors.Join(errs...)
