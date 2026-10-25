@@ -2321,6 +2321,24 @@ never lock an operator out of a remote box it manages.
     unprotected. Both sites now share `isDefaultRoute`, which requires a nil
     destination or an unspecified destination with prefix length 0
     (`0.0.0.0/0` / `::/0`); a non-zero mask is never a default route.
+  - **A failed `.network` write refuses (#16682).** The writer above
+    returned its errors, but its own `fsatomic.WriteFileAtomic` failure
+    was laundered into `(false, nil)` — the #5842 shape, where
+    `(false, nil)` already means "already correct". So on a storage
+    fault (ENOSPC/EROFS/EIO) under `/etc/systemd/network`,
+    `setupBootstrapLifeline` proceeded to write the `.link`, rename
+    (cycle) the management NIC to fxp0 and reload, with no fxp0
+    `.network` to re-address it: the name-keyed host config no longer
+    matched and the link cycle flushed the default route on a bootstrap
+    box with nothing committed to roll back to. The writer now returns
+    the wrapped write error (mirroring `writeLinkFile` /
+    `writeBootstrapFxp0Network`), and the caller refuses before the
+    `.link` write, the rename and the reload — exactly as for an
+    observation failure. The refusal is unconditional: unlike the
+    #6789 observation refusal it is not scoped by provenance, because a
+    failed write means no correct `.network` exists for either
+    provenance, and the appliance factory DHCP content is exactly what
+    failed to land.
 - **Protected set** (`resolveProtectedInterfaces` →
   `dataplane.SetProtectedInterfaceResolver`): fxp0 + the lifeline NIC are NEVER
   marked Unmanaged / always-down / address-stripped, even on an

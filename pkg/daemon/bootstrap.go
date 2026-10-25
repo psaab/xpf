@@ -1742,6 +1742,18 @@ func (d *Daemon) setupBootstrapLifeline() {
 		return
 	}
 
+	// #16682: a FAILED fxp0 .network write refuses here too — before the
+	// .link write, the rename and the reload, before anything further is
+	// mutated. Until now the writer laundered that failure into
+	// (false, nil) (the #5842 shape), so a storage fault
+	// (ENOSPC/EROFS/EIO) left no fxp0 .network for the renamed NIC and
+	// the rename's link cycle flushed the default route on a bootstrap
+	// box with no committed config to roll back to: console-only on a
+	// storage fault, when the documented posture is to change nothing.
+	// The caller log covers BOTH error sources (observation and write);
+	// both mean the same thing — the .network cannot be produced
+	// correctly, so nothing may proceed on the strength of it.
+
 	// The lifeline NIC would become fxp0. Snapshot its current addressing
 	// into the bootstrap .network BEFORE the rename, so the link cycle
 	// restores the same reachability under the fxp0 name.
@@ -1754,11 +1766,11 @@ func (d *Daemon) setupBootstrapLifeline() {
 	// live addressing untouched, which is the #1922 console-only posture
 	// chooseBootstrapLifeline documents as "selects nothing".
 	if _, err := writeBootstrapLifelineNetwork(lifeline, source == lifelineSourceDefaultRoute); err != nil {
-		slog.Error("bootstrap lifeline: could not observe the management NIC's addressing, so the "+
-			"bootstrap fxp0 .network cannot be written correctly. Refusing to rename/cycle any "+
-			"interface; staying in bootstrap with NO interface changes so management keeps its "+
-			"current name and addressing. Reach the box via its console and 'commit confirmed' "+
-			"a config.",
+		slog.Error("bootstrap lifeline: could not observe the management NIC's addressing or could not "+
+			"write the bootstrap fxp0 .network, so the .network cannot be produced correctly. "+
+			"Refusing to rename/cycle any interface; staying in bootstrap with NO interface "+
+			"changes so management keeps its current name and addressing. Reach the box via its "+
+			"console and 'commit confirmed' a config.",
 			"interface", lifeline, "err", err)
 		return
 	}
@@ -1840,7 +1852,11 @@ func (d *Daemon) setupBootstrapLifeline() {
 // reconfigure). A lifeline with a static address in some family gets that
 // family's Address=/Gateway= lines plus a DHCP= directive for any other family
 // classified as DHCP-managed by the finite-lifetime heuristic.
-// Returns true if the file changed.
+// Returns true if the file changed. A write FAILURE is returned as an
+// error (#16682): (false, nil) already means "already correct", so
+// laundering a failed write into it left the caller unable to distinguish
+// a converged boot from one whose fxp0 .network never landed — and the
+// caller renames (cycles) the management NIC on the strength of it.
 func writeBootstrapLifelineNetwork(lifeline string, hasRouteEvidence bool) (bool, error) {
 	path := filepath.Join(linkDir, linkPrefix+"fxp0.network")
 
@@ -1922,7 +1938,7 @@ func writeBootstrapLifelineNetwork(lifeline string, hasRouteEvidence bool) (bool
 	// is re-derived next boot.
 	if err := fsatomic.WriteFileAtomic(path, []byte(content), 0644); err != nil {
 		slog.Warn("bootstrap lifeline: failed to write fxp0 .network", "path", path, "err", err)
-		return false, nil
+		return false, fmt.Errorf("write fxp0 .network %s: %w", path, err)
 	}
 	slog.Info("bootstrap lifeline: wrote fxp0 bootstrap .network", "source_interface", lifeline)
 	return true, nil
