@@ -36,6 +36,14 @@ xpf (0.0.0) unstable; urgency=medium
     `preempt delay` all committed while the container spelling
     rejected them. Strict commit now rejects identically in every
     spelling; the tolerant load path warns as before (#1960).
+  * Daemon/bootstrap: a failed fxp0 `.network` write now refuses the
+    bootstrap lifeline rename (#16682). writeBootstrapLifelineNetwork
+    laundered a failed atomic write into (false, nil), so bootstrap
+    still wrote the .link, renamed/cycled the management NIC to fxp0
+    and reloaded with no fxp0 .network to re-address it — console-only
+    on a storage fault. The writer now returns the write error and
+    setupBootstrapLifeline refuses before the .link write, the rename
+    and the reload, exactly as for an observation failure.
   * Daemon/bootstrap: the #9615 refused-target bootstrap safe state
     now has a commit exit (#16665). Previously bootstrap refused
     plain `commit` and the #6707 gate refused `commit confirmed`
