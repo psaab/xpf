@@ -2147,8 +2147,17 @@ impl PortAllocator {
         let occupancy = (0..num_addresses)
             .map(|_| AddressOccupancy::new(port_low, range))
             .collect();
-        let max_tracked_flows = allocator_capacity(num_addresses, port_low, port_high)
-            .min(MAX_SOURCE_NAT_POOL_TRACKED_FLOWS);
+        // #16840: a 0/0 range is an address-only allocator (pure
+        // `port no-translation` pool): it builds no bitmap, but its flows
+        // are tracked by reverse identity, not by port slot, so the cap
+        // must not collapse to 0. Give it the global tracked-flow ceiling.
+        // Other degenerate ranges keep the historical 0 (fail-closed PAT).
+        let max_tracked_flows = if port_low == 0 && port_high == 0 && num_addresses > 0 {
+            MAX_SOURCE_NAT_POOL_TRACKED_FLOWS
+        } else {
+            allocator_capacity(num_addresses, port_low, port_high)
+                .min(MAX_SOURCE_NAT_POOL_TRACKED_FLOWS)
+        };
         Self {
             shared: Arc::new(PortAllocatorShared {
                 allocator_id: next_allocator_id(),
