@@ -12,7 +12,7 @@ use super::*;
 #[test]
 fn empty_configured_zone_default_denies() {
     const TCP: u8 = 6;
-    const ZONE: u16 = 7;
+    const ZONE: u32 = 7;
 
     let mut state = ForwardingState::default();
     // A configured zone with NO tokens = the no-stanza / empty-stanza shape.
@@ -137,7 +137,7 @@ fn all_except_igmp_emitted_protocols_do_not_admit_proto2_12318() {
 fn ident_reset_does_not_admit_113() {
     const TCP: u8 = 6;
     const UDP: u8 = 17;
-    const ZONE: u16 = 11;
+    const ZONE: u32 = 11;
 
     let mut state = ForwardingState::default();
     // A zone that declares ident-reset ALONGSIDE ssh + http (so the test
@@ -229,7 +229,7 @@ fn per_interface_override_keys_by_ifindex() {
     const TCP: u8 = 6;
     const IFINDEX_UPLINK: i32 = 100; // ssh override
     const IFINDEX_OTHER: i32 = 200; // no override (zone fallback)
-    const ZONE: u16 = 5; // zone-keyed set = ping only
+    const ZONE: u32 = 5; // zone-keyed set = ping only
 
     let mut state = ForwardingState::default();
     // Zone-level set: ping (ICMP echo) only — NO ssh.
@@ -380,7 +380,7 @@ fn protocols_all_admits_ip_routing_not_l2() {
 fn system_services_all_is_scoped_not_packet_wide() {
     const TCP: u8 = 6;
     const UDP: u8 = 17;
-    const ZONE: u16 = 11;
+    const ZONE: u32 = 11;
 
     let mut state = ForwardingState::default();
     state
@@ -443,7 +443,7 @@ fn system_services_all_is_scoped_not_packet_wide() {
 // `any-service` as well, every assertion here flips.
 #[test]
 fn any_service_remains_full_admit() {
-    const ZONE: u16 = 12;
+    const ZONE: u32 = 12;
 
     let mut state = ForwardingState::default();
     state.zone_host_inbound.insert(
@@ -539,7 +539,7 @@ fn system_services_all_excludes_non_junos_extensions() {
 fn system_services_all_admits_documented_junos_services_3226() {
     const TCP: u8 = 6;
     const UDP: u8 = 17;
-    const ZONE: u16 = 14;
+    const ZONE: u32 = 14;
 
     let mut state = ForwardingState::default();
     state
@@ -601,7 +601,7 @@ fn system_services_all_admits_documented_junos_services_3226() {
 fn unported_services_admit_nothing_3226() {
     const TCP: u8 = 6;
     const UDP: u8 = 17;
-    const ZONE: u16 = 21;
+    const ZONE: u32 = 21;
 
     // A representative sweep: the two historical guesses, plus ports that would
     // plausibly be reached for these services, plus a raw IP protocol.
@@ -685,7 +685,7 @@ fn unported_services_admit_nothing_3226() {
 #[test]
 fn system_services_all_excludes_rexec_3226() {
     const TCP: u8 = 6;
-    const ZONE: u16 = 15;
+    const ZONE: u32 = 15;
 
     let mut state = ForwardingState::default();
     state
@@ -714,7 +714,7 @@ fn system_services_all_excludes_rexec_3226() {
 // this the exclusion above could be "fixed" by deleting the gre arm entirely.
 #[test]
 fn explicit_gre_service_still_admits_proto_47() {
-    const ZONE: u16 = 13;
+    const ZONE: u32 = 13;
 
     let mut state = ForwardingState::default();
     state
@@ -751,7 +751,7 @@ fn cold_forwarding_state_admits_every_host_inbound_service_6873() {
     const UDP: u8 = 17;
     const GRE: u8 = 47;
     const IFINDEX: i32 = 10;
-    const ZONE: u16 = 7;
+    const ZONE: u32 = 7;
 
     // A cold state: exactly what `ForwardingState::default()` produces before
     // any snapshot is applied, and what `stop_inner` resets to on teardown.
@@ -806,7 +806,7 @@ fn cold_forwarding_state_admits_every_host_inbound_service_6873() {
 // zone receive traffic for another routing protocol's multicast destination.
 #[test]
 fn ospf_multicast_is_scoped_to_exact_group_family_and_token_11571() {
-    const ZONE: u16 = 51;
+    const ZONE: u32 = 51;
     let mut v4 = ForwardingState::default();
     v4.zone_host_inbound.insert(
         ZONE,
@@ -956,7 +956,7 @@ fn ospf_multicast_is_scoped_to_exact_group_family_and_token_11571() {
 // effective set replaces (rather than unions with) its zone's protocol tokens.
 #[test]
 fn vrrp_multicast_is_dual_family_default_deny_and_override_scoped_11571() {
-    const ZONE: u16 = 52;
+    const ZONE: u32 = 52;
     const OVERRIDE_IFINDEX: i32 = 520;
     let mut state = ForwardingState::default();
     state.zone_host_inbound.insert(

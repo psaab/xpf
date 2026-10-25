@@ -127,10 +127,10 @@ func TestSessionCloseSamplingPerInterface15230(t *testing.T) {
 
 	// Unsampled ingress open: the single open decision must deny it
 	// without consuming a slot, so its close exports nothing.
-	if !d.eventReader.ProcessRawEvent(openRawWithIngress15230(12, trust, untrust)) {
+	if !d.eventReader.ProcessRawEvent(openRawWithIngress15230(12, uint16(trust), uint16(untrust))) {
 		t.Fatal("ProcessRawEvent rejected unsampled open")
 	}
-	if !d.eventReader.ProcessRawEvent(closeRawWithIngress15230(12, trust, untrust)) {
+	if !d.eventReader.ProcessRawEvent(closeRawWithIngress15230(12, uint16(trust), uint16(untrust))) {
 		t.Fatal("ProcessRawEvent rejected unsampled close")
 	}
 	if probe.IngressIface != "ge-0/0/1.0" {
@@ -163,7 +163,7 @@ func TestSessionCloseSamplingPerInterface15230(t *testing.T) {
 	// is sampled, rate 1 here, so the close exports and consumes
 	// exactly one fallback slot. The strict unit-level fail-closed
 	// contract (ShouldExportIface) itself stays pinned in pkg/flowexport.
-	if !d.eventReader.ProcessRawEvent(closeRawWithIngress15230(99, trust, untrust)) {
+	if !d.eventReader.ProcessRawEvent(closeRawWithIngress15230(99, uint16(trust), uint16(untrust))) {
 		t.Fatal("ProcessRawEvent rejected nameless close")
 	}
 	if got := waitFlows(t, d.flowBundle.Load().firstExp().Stats); got < 1 {
@@ -177,10 +177,10 @@ func TestSessionCloseSamplingPerInterface15230(t *testing.T) {
 
 	// Sampled control: open makes the one decision; close exports
 	// without consuming another slot (rate 1 in this config).
-	if !d.eventReader.ProcessRawEvent(openRawWithIngress15230(11, trust, untrust)) {
+	if !d.eventReader.ProcessRawEvent(openRawWithIngress15230(11, uint16(trust), uint16(untrust))) {
 		t.Fatal("ProcessRawEvent rejected sampled open")
 	}
-	if !d.eventReader.ProcessRawEvent(closeRawWithIngress15230(11, trust, untrust)) {
+	if !d.eventReader.ProcessRawEvent(closeRawWithIngress15230(11, uint16(trust), uint16(untrust))) {
 		t.Fatal("ProcessRawEvent rejected sampled close")
 	}
 	if probe.IngressIface != "ge-0/0/0.0" {

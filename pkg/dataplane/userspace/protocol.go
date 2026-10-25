@@ -913,10 +913,10 @@ type PolicyRenameAncestry struct {
 	// Numeric ids are captured from the validated old/new snapshots. Rust
 	// checks them against the session's recorded zones and the destination
 	// forwarding map; names alone are not an identity proof across snapshots.
-	SourceFromZoneID       uint16 `json:"source_from_zone_id,omitempty"`
-	SourceToZoneID         uint16 `json:"source_to_zone_id,omitempty"`
-	DestinationFromZoneID  uint16 `json:"destination_from_zone_id,omitempty"`
-	DestinationToZoneID    uint16 `json:"destination_to_zone_id,omitempty"`
+	SourceFromZoneID       uint32 `json:"source_from_zone_id,omitempty"`
+	SourceToZoneID         uint32 `json:"source_to_zone_id,omitempty"`
+	DestinationFromZoneID  uint32 `json:"destination_from_zone_id,omitempty"`
+	DestinationToZoneID    uint32 `json:"destination_to_zone_id,omitempty"`
 	SourceFromZoneAny      bool   `json:"source_from_zone_any,omitempty"`
 	SourceToZoneAny        bool   `json:"source_to_zone_any,omitempty"`
 	DestinationFromZoneAny bool   `json:"destination_from_zone_any,omitempty"`

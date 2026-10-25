@@ -31,7 +31,7 @@ func TestGRPCZoneDetailRefsQualifyQuarantinedPeer12896(t *testing.T) {
 		t.Fatalf("healthy zones-detail lost its Policies references line:\n%s", out.String())
 	}
 	// RED on master: the reference to the quarantined peer read as live.
-	if !strings.Contains(refsLine, "from z214 (1 rules) "+config.ZoneQuarantinePoliciesQualifier) {
+	if !strings.Contains(refsLine, "from zzq8100 (1 rules) "+config.ZoneQuarantinePoliciesQualifier) {
 		t.Fatalf("quarantined-peer reference lacks the #12896 scrub qualifier:\n%s", refsLine)
 	}
 	// Control: the live self-reference on the same line stays unqualified.

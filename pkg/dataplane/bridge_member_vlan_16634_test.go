@@ -37,8 +37,8 @@ type recordingDP16634 struct {
 	setZone  int
 }
 
-func (d *recordingDP16634) SetZoneConfig(uint16, ZoneConfig) error { return nil }
-func (d *recordingDP16634) SetZone(int, uint16, uint16, uint32, uint8, uint8, uint32) error {
+func (d *recordingDP16634) SetZoneConfig(uint32, ZoneConfig) error { return nil }
+func (d *recordingDP16634) SetZone(int, uint16, uint32, uint32, uint8, uint8, uint32) error {
 	d.setZone++
 	return nil
 }

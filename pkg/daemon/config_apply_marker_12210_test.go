@@ -136,7 +136,7 @@ func TestBootRetryReconstructsZoneSnapshotAndReceivesBulkAck12210(t *testing.T) 
 	if !markerApplied {
 		t.Error("#12210: successful retry left the active config's applied marker unset")
 	}
-	if !zoneInstalled || !local.ShouldSyncZone(config.StableZoneID("trust")) {
+	if !zoneInstalled || !local.ShouldSyncZone(uint16(config.StableZoneID("trust"))) {
 		t.Error("#12210: reconstructed session sync did not install the applied config's trust-zone ownership snapshot")
 	}
 	if !ackReceived {

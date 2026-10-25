@@ -169,7 +169,7 @@ func (d *destinationSummarySessionCLIDP13243) IterateSessions(fn func(dataplane.
 func TestShowNATDestinationSummaryCountsFromZoneOnly13243(t *testing.T) {
 	dp := &destinationSummarySessionCLIDP13243{
 		Manager: dataplane.New(),
-		result: &dataplane.ApplyResult{ZoneIDs: map[string]uint16{
+		result: &dataplane.ApplyResult{ZoneIDs: map[string]uint32{
 			"untrust": 8, "dmz": 9,
 		}},
 	}

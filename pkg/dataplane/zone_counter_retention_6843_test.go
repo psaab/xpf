@@ -28,11 +28,11 @@ import (
 // with the stale value still readable.
 func TestReplaceZoneCounterOffsetsDropsAbsentZones(t *testing.T) {
 	m := New()
-	const kept uint16 = 50675 // config.StableZoneID("trust")
-	const gone uint16 = 20665 // config.StableZoneID("untrust")
+	const kept uint32 = 101 // synthetic slotted zone id (#16557: StableZoneID now exceeds dense slot space)
+	const gone uint32 = 102 // synthetic slotted zone id
 
 	// Poll N: both zones reporting.
-	m.ReplaceZoneCounterOffsets(map[uint16][2]CounterValue{
+	m.ReplaceZoneCounterOffsets(map[uint32][2]CounterValue{
 		kept: {{Packets: 1, Bytes: 100}, {Packets: 2, Bytes: 200}},
 		gone: {{Packets: 9, Bytes: 900}, {Packets: 8, Bytes: 800}},
 	})
@@ -42,7 +42,7 @@ func TestReplaceZoneCounterOffsetsDropsAbsentZones(t *testing.T) {
 
 	// Poll N+1: `gone` is no longer published (lost its slot / removed /
 	// helper restarted). `kept` advances.
-	m.ReplaceZoneCounterOffsets(map[uint16][2]CounterValue{
+	m.ReplaceZoneCounterOffsets(map[uint32][2]CounterValue{
 		kept: {{Packets: 5, Bytes: 500}, {Packets: 6, Bytes: 600}},
 	})
 
@@ -65,8 +65,8 @@ func TestReplaceZoneCounterOffsetsDropsAbsentZones(t *testing.T) {
 // helper-downgrade cases: an empty published set means nothing is populated.
 func TestReplaceZoneCounterOffsetsEmptyClearsAll(t *testing.T) {
 	m := New()
-	const id uint16 = 50675
-	m.ReplaceZoneCounterOffsets(map[uint16][2]CounterValue{
+	const id uint32 = 101
+	m.ReplaceZoneCounterOffsets(map[uint32][2]CounterValue{
 		id: {{Packets: 3, Bytes: 300}, {Packets: 4, Bytes: 400}},
 	})
 	if _, err := m.ReadZoneCounters(id, 0); err != nil {
@@ -77,7 +77,7 @@ func TestReplaceZoneCounterOffsetsEmptyClearsAll(t *testing.T) {
 	if _, err := m.ReadZoneCounters(id, 0); !errors.Is(err, ErrCounterNotPopulated) {
 		t.Errorf("empty snapshot must clear the map; got err = %v, want ErrCounterNotPopulated", err)
 	}
-	m.ReplaceZoneCounterOffsets(map[uint16][2]CounterValue{})
+	m.ReplaceZoneCounterOffsets(map[uint32][2]CounterValue{})
 	if _, err := m.ReadZoneCounters(id, 0); !errors.Is(err, ErrCounterNotPopulated) {
 		t.Errorf("empty (non-nil) snapshot must clear the map; got err = %v", err)
 	}
@@ -89,7 +89,7 @@ func TestReplaceZoneCounterOffsetsEmptyClearsAll(t *testing.T) {
 	// the top of this test, which t.Fatalf's before reaching here — so this leg
 	// does NOT bind always-clear, and an earlier version of this comment which
 	// claimed it did was wrong.
-	m.ReplaceZoneCounterOffsets(map[uint16][2]CounterValue{
+	m.ReplaceZoneCounterOffsets(map[uint32][2]CounterValue{
 		id: {{Packets: 7, Bytes: 700}, {Packets: 8, Bytes: 800}},
 	})
 	if v, err := m.ReadZoneCounters(id, 0); err != nil || v.Packets != 7 || v.Bytes != 700 {
@@ -105,9 +105,9 @@ func TestReplaceZoneCounterOffsetsEmptyClearsAll(t *testing.T) {
 // totals, never a resurrected pre-removal value.
 func TestReplaceZoneCounterOffsetsRemoveThenReadd(t *testing.T) {
 	m := New()
-	const id uint16 = 56918 // config.StableZoneID("dmz")
+	const id uint32 = 103 // synthetic slotted zone id
 
-	m.ReplaceZoneCounterOffsets(map[uint16][2]CounterValue{
+	m.ReplaceZoneCounterOffsets(map[uint32][2]CounterValue{
 		id: {{Packets: 100, Bytes: 10000}, {Packets: 200, Bytes: 20000}},
 	})
 	m.ReplaceZoneCounterOffsets(nil) // removed from config
@@ -119,7 +119,7 @@ func TestReplaceZoneCounterOffsetsRemoveThenReadd(t *testing.T) {
 	// The caller's map is MUTATED after the call below, so an implementation
 	// that stored it by reference (rather than copying) would be caught here as
 	// well as by TestReplaceZoneCounterOffsetsCopiesInput.
-	readd := map[uint16][2]CounterValue{
+	readd := map[uint32][2]CounterValue{
 		id: {{Packets: 1, Bytes: 64}, {Packets: 0, Bytes: 0}},
 	}
 	m.ReplaceZoneCounterOffsets(readd)
@@ -145,8 +145,8 @@ func TestReplaceZoneCounterOffsetsRemoveThenReadd(t *testing.T) {
 // stored offsets behind the manager's lock.
 func TestReplaceZoneCounterOffsetsCopiesInput(t *testing.T) {
 	m := New()
-	const id uint16 = 50675
-	rows := map[uint16][2]CounterValue{
+	const id uint32 = 101
+	rows := map[uint32][2]CounterValue{
 		id: {{Packets: 7, Bytes: 700}, {Packets: 8, Bytes: 800}},
 	}
 	m.ReplaceZoneCounterOffsets(rows)
@@ -164,8 +164,8 @@ func TestReplaceZoneCounterOffsetsCopiesInput(t *testing.T) {
 	// implementation passes everything above — one populated snapshot cannot
 	// distinguish replace from merge, and replace-not-merge is the whole point
 	// of this method.
-	const other uint16 = 20665
-	m.ReplaceZoneCounterOffsets(map[uint16][2]CounterValue{
+	const other uint32 = 102
+	m.ReplaceZoneCounterOffsets(map[uint32][2]CounterValue{
 		other: {{Packets: 1, Bytes: 10}, {Packets: 2, Bytes: 20}},
 	})
 	if _, err := m.ReadZoneCounters(id, 0); !errors.Is(err, ErrCounterNotPopulated) {

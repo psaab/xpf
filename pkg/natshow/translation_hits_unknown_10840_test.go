@@ -50,7 +50,7 @@ func TestTranslationHitsUnknownWhenCounterIDMissing_10840(t *testing.T) {
 				t.Run(ids.name, func(t *testing.T) {
 					dp := &fakeReader{}
 					cr := &dataplane.ApplyResult{
-						ZoneIDs:       map[string]uint16{"trust": 7, "untrust": 8, "dmz": 9},
+						ZoneIDs:       map[string]uint32{"trust": 7, "untrust": 8, "dmz": 9},
 						NATCounterIDs: ids.m,
 					}
 					var b strings.Builder
@@ -84,7 +84,7 @@ func TestTranslationHitsWarnWhenCounterReadFails_10840(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dp := &counterErrReader{err: errors.New("helper restart: counter map closed")}
 			cr := &dataplane.ApplyResult{
-				ZoneIDs:       map[string]uint16{"trust": 7, "untrust": 8, "dmz": 9},
+				ZoneIDs:       map[string]uint32{"trust": 7, "untrust": 8, "dmz": 9},
 				NATCounterIDs: map[string]uint32{tc.ruleKey: 5},
 			}
 			var b strings.Builder

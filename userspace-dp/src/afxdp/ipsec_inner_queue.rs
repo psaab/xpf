@@ -177,7 +177,7 @@ pub(crate) struct IpsecInnerDescriptor {
     pub logical_ifindex: i32,
     pub rx_queue_index: u32,
     pub flow_tag: u64,
-    pub advisory_zone_id: u16,
+    pub advisory_zone_id: u32,
     pub advisory_if_id: u32,
     /// Expected route domain (`D_usp1` = kernel main table, non-VRF).
     pub expected_routing_domain: u32,

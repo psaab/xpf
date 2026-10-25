@@ -36,7 +36,7 @@ type zoneRealReadDP struct {
 	*descriptorCoverageDP
 }
 
-func (d *zoneRealReadDP) ReadZoneCounters(zoneID uint16, dir int) (dataplane.CounterValue, error) {
+func (d *zoneRealReadDP) ReadZoneCounters(zoneID uint32, dir int) (dataplane.CounterValue, error) {
 	return d.Manager.ReadZoneCounters(zoneID, dir)
 }
 
@@ -50,7 +50,7 @@ type zoneReadErrDP struct {
 	*descriptorCoverageDP
 }
 
-func (d *zoneReadErrDP) ReadZoneCounters(uint16, int) (dataplane.CounterValue, error) {
+func (d *zoneReadErrDP) ReadZoneCounters(uint32, int) (dataplane.CounterValue, error) {
 	return dataplane.CounterValue{}, errZoneRead
 }
 
@@ -67,9 +67,9 @@ func (d *zoneReadErrDP) ReadZoneCounters(uint16, int) (dataplane.CounterValue, e
 // a comment: if the hash or MaxZones ever changed such that these ids fell
 // inside the dense range, this test would announce that it had stopped
 // exercising the OOB case instead of silently passing for the wrong reason.
-func fixtureZoneIDs(t *testing.T) map[string]uint16 {
+func fixtureZoneIDs(t *testing.T) map[string]uint32 {
 	t.Helper()
-	ids := map[string]uint16{}
+	ids := map[string]uint32{}
 	for _, name := range []string{"trust", "untrust"} {
 		id := config.StableZoneID(name)
 		if id < dataplane.MaxZones {
@@ -390,7 +390,7 @@ func TestZoneUnpopulatedGaugeMatchesRESTAvailability(t *testing.T) {
 func TestZoneUnpopulatedGaugeMatchesRESTQuarantineCollision10530(t *testing.T) {
 	s, ids := quarantinedZonesConfig10530(t)
 	mgr := dataplane.New()
-	mgr.SetZoneCounterOffset(ids["z174"],
+	mgr.SetZoneCounterOffset(ids["zzq17760"],
 		dataplane.CounterValue{Packets: 1, Bytes: 100},
 		dataplane.CounterValue{Packets: 2, Bytes: 200})
 	mgr.SetZoneCounterOffset(ids["trust"],
@@ -584,7 +584,7 @@ func TestZoneMetricsFollowTheHelperAcrossSlotLoss(t *testing.T) {
 	mgr := dataplane.New()
 
 	// Poll N: both zones hold slots and publish.
-	mgr.ReplaceZoneCounterOffsets(map[uint16][2]dataplane.CounterValue{
+	mgr.ReplaceZoneCounterOffsets(map[uint32][2]dataplane.CounterValue{
 		ids["trust"]:   {{Packets: 10, Bytes: 1000}, {Packets: 11, Bytes: 1100}},
 		ids["untrust"]: {{Packets: 20, Bytes: 2000}, {Packets: 21, Bytes: 2100}},
 	})
@@ -608,7 +608,7 @@ func TestZoneMetricsFollowTheHelperAcrossSlotLoss(t *testing.T) {
 	// Poll N+1: `trust` was pushed past slot capacity by a later config. It is
 	// still configured (still in ZoneIDs) but the helper no longer publishes
 	// it, so the sparse snapshot carries only `untrust`.
-	mgr.ReplaceZoneCounterOffsets(map[uint16][2]dataplane.CounterValue{
+	mgr.ReplaceZoneCounterOffsets(map[uint32][2]dataplane.CounterValue{
 		ids["untrust"]: {{Packets: 25, Bytes: 2500}, {Packets: 26, Bytes: 2600}},
 	})
 

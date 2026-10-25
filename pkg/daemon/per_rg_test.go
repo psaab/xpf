@@ -315,7 +315,7 @@ func TestBuildZoneRGMap(t *testing.T) {
 		},
 	}
 
-	zoneIDs := map[string]uint16{
+	zoneIDs := map[string]uint32{
 		"dmz":     1,
 		"trust":   2,
 		"untrust": 3,
@@ -339,13 +339,13 @@ func TestBuildZoneRGMap(t *testing.T) {
 	}
 }
 func TestBuildZoneRGMapSkipsQuarantinedCollisionLoser12237(t *testing.T) {
-	// z174 and z214 share stable zone ID 53547. z174 is the sorted-first
-	// survivor; z214 is quarantined and must not contribute its distinct RG.
+	// zzq17760 and zzq8100 share stable zone ID 1679679597. zzq17760 is the sorted-first
+	// survivor; zzq8100 is quarantined and must not contribute its distinct RG.
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			Zones: map[string]*config.ZoneConfig{
-				"z174": {Name: "z174", Interfaces: []string{"reth0.0"}},
-				"z214": {Name: "z214", Interfaces: []string{"reth1.0"}},
+				"zzq17760": {Name: "zzq17760", Interfaces: []string{"reth0.0"}},
+				"zzq8100":  {Name: "zzq8100", Interfaces: []string{"reth1.0"}},
 			},
 		},
 		Interfaces: config.InterfacesConfig{
@@ -355,13 +355,13 @@ func TestBuildZoneRGMapSkipsQuarantinedCollisionLoser12237(t *testing.T) {
 			},
 		},
 	}
-	zoneID := config.StableZoneID("z174")
-	if zoneID != config.StableZoneID("z214") {
-		t.Fatalf("fixture zones do not collide: z174=%d z214=%d", zoneID, config.StableZoneID("z214"))
+	zoneID := config.StableZoneID("zzq17760")
+	if zoneID != config.StableZoneID("zzq8100") {
+		t.Fatalf("fixture zones do not collide: zzq17760=%d zzq8100=%d", zoneID, config.StableZoneID("zzq8100"))
 	}
 	zoneRG := buildZoneRGMap(cfg, buildZoneIDs(cfg))
-	if got := zoneRG[zoneID]; len(got) != 1 || got[0] != 1 {
-		t.Fatalf("survivor ownership RG set = %v, want only RG 1 (quarantined z214 RG 2 must be absent)", got)
+	if got := zoneRG[uint16(zoneID)]; len(got) != 1 || got[0] != 1 {
+		t.Fatalf("survivor ownership RG set = %v, want only RG 1 (quarantined zzq8100 RG 2 must be absent)", got)
 	}
 
 	// Unattributable survivor-zone sessions use the zone-set fallback. Being
@@ -370,30 +370,30 @@ func TestBuildZoneRGMapSkipsQuarantinedCollisionLoser12237(t *testing.T) {
 		IsPrimaryForRGFn: func(rg int) bool { return rg == 2 },
 	}
 	ss.SetZoneOwnership(zoneRG, nil, nil)
-	row := dataplane.SessionValue{IngressZone: zoneID}
+	row := dataplane.SessionValue{IngressZone: uint16(zoneID)}
 	if ss.ShouldSyncSessionV4(row) {
-		t.Fatal("survivor-zone session was sync-owned by quarantined z214 RG 2")
+		t.Fatal("survivor-zone session was sync-owned by quarantined zzq8100 RG 2")
 	}
 	ss.IsPrimaryForRGFn = func(rg int) bool { return rg == 1 }
 	if !ss.ShouldSyncSessionV4(row) {
-		t.Fatal("survivor-zone session was not sync-owned by survivor z174 RG 1")
+		t.Fatal("survivor-zone session was not sync-owned by survivor zzq17760 RG 1")
 	}
 }
 
 // TestBuildZoneRGMapUsesNodeScopedQuarantine12247 pins the HA ownership map to
 // the runtime zone-name set the dataplane quarantine decides over (#12247).
-// z174 exists only in groups node0 and z214 only in groups node1; both fold to
-// one stable ID, and both nodes' dataplanes quarantine z214. On node1, where
-// z214 is the ID's only claimant, z214's RG 2 must not own the ID; node0 keeps
-// z174's RG 1.
+// zzq17760 exists only in groups node0 and zzq8100 only in groups node1; both fold to
+// one stable ID, and both nodes' dataplanes quarantine zzq8100. On node1, where
+// zzq8100 is the ID's only claimant, zzq8100's RG 2 must not own the ID; node0 keeps
+// zzq17760's RG 1.
 func TestBuildZoneRGMapUsesNodeScopedQuarantine12247(t *testing.T) {
-	zoneID := config.StableZoneID("z174")
-	if zoneID != config.StableZoneID("z214") {
-		t.Fatalf("fixture zones do not collide: z174=%d z214=%d", zoneID, config.StableZoneID("z214"))
+	zoneID := config.StableZoneID("zzq17760")
+	if zoneID != config.StableZoneID("zzq8100") {
+		t.Fatalf("fixture zones do not collide: zzq17760=%d zzq8100=%d", zoneID, config.StableZoneID("zzq8100"))
 	}
 	tree, errs := config.NewParser(`groups {
-  node0 { security { zones { security-zone z174 { interfaces { reth0.0; } } } } }
-  node1 { security { zones { security-zone z214 { interfaces { reth1.0; } } } } }
+  node0 { security { zones { security-zone zzq17760 { interfaces { reth0.0; } } } } }
+  node1 { security { zones { security-zone zzq8100 { interfaces { reth1.0; } } } } }
 }
 apply-groups "${node}";`).Parse()
 	if len(errs) != 0 {
@@ -404,8 +404,8 @@ apply-groups "${node}";`).Parse()
 		zone   string
 		want   []int
 	}{
-		{nodeID: 0, zone: "z174", want: []int{1}},
-		{nodeID: 1, zone: "z214", want: nil},
+		{nodeID: 0, zone: "zzq17760", want: []int{1}},
+		{nodeID: 1, zone: "zzq8100", want: nil},
 	} {
 		cfg, err := config.CompileConfigForNodeLenient(tree, tc.nodeID)
 		if err != nil {
@@ -424,7 +424,7 @@ apply-groups "${node}";`).Parse()
 			t.Fatalf("node%d precondition: zone %q = %+v with id %d, want one reth unit and id %d",
 				tc.nodeID, tc.zone, zone, zoneIDs[tc.zone], zoneID)
 		}
-		if got := buildZoneRGMap(cfg, zoneIDs)[zoneID]; !slices.Equal(got, tc.want) {
+		if got := buildZoneRGMap(cfg, zoneIDs)[uint16(zoneID)]; !slices.Equal(got, tc.want) {
 			t.Fatalf("node%d zone RG set for id %d = %v, want %v", tc.nodeID, zoneID, got, tc.want)
 		}
 	}
@@ -469,7 +469,7 @@ func TestBuildZoneRGMapSkipsNilZones(t *testing.T) {
 	// nil-slot invariant exercised by the other nil-safety tests.
 	cfg.Security.Zones["bogus"] = nil
 
-	zoneIDs := map[string]uint16{
+	zoneIDs := map[string]uint32{
 		"trust": 2,
 		"bogus": 9,
 	}
@@ -507,7 +507,7 @@ func TestBuildZoneRGMapSkipsNilInterfaceValue(t *testing.T) {
 		},
 	}
 
-	zoneIDs := map[string]uint16{"trust": 2, "bad": 5}
+	zoneIDs := map[string]uint32{"trust": 2, "bad": 5}
 
 	// Must not panic on the nil "reth9" interface value.
 	m := buildZoneRGMap(cfg, zoneIDs)
@@ -703,7 +703,7 @@ func TestBuildZoneRGMapResolvesRedundantParent11012(t *testing.T) {
 			"ge-0/0/1": {Name: "ge-0/0/1", RedundantParent: "reth0"},
 		}},
 	}
-	got := buildZoneRGMap(cfg, map[string]uint16{"member-zone": 9})
+	got := buildZoneRGMap(cfg, map[string]uint32{"member-zone": 9})
 	if rgs := got[9]; len(rgs) != 1 || rgs[0] != 2 {
 		t.Fatalf("member-backed zone RG set = %v, want [2]", rgs)
 	}

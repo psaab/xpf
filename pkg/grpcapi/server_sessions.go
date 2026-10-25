@@ -600,7 +600,7 @@ func (s *Server) buildSessionFilter(req *pb.GetSessionsRequest) *sessionFilter {
 	// Build zone/policy/app name maps.
 	cr := s.applyResult()
 	if cr != nil {
-		f.zoneNames = config.SurvivorZoneNames(cr.ZoneIDs, f.cfg)
+		f.zoneNames = survivorZoneNames16(cr.ZoneIDs, f.cfg)
 		f.policyNames = cr.PolicyNames
 		f.appNames = cr.AppNames
 	}
@@ -617,7 +617,7 @@ func (s *Server) buildSessionFilter(req *pb.GetSessionsRequest) *sessionFilter {
 				// zone.Interfaces[0] made the ingress arm of the filter
 				// independent of the session, so an interface-scoped
 				// clear deleted sibling-interface sessions.
-				f.zoneIfaces[zid] = append(f.zoneIfaces[zid], zone.Interfaces...)
+				f.zoneIfaces[uint16(zid)] = append(f.zoneIfaces[uint16(zid)], zone.Interfaces...)
 			}
 		}
 		table := buildSessionTable(f.cfg, s.ifindexLookup())
@@ -1298,7 +1298,7 @@ func (s *Server) computeZonePairSummary(ctx context.Context) ([]*pb.ZonePairSess
 	}
 	zoneNames := make(map[uint16]string)
 	if cr := s.applyResult(); cr != nil {
-		zoneNames = config.SurvivorZoneNames(cr.ZoneIDs, cfg)
+		zoneNames = survivorZoneNames16(cr.ZoneIDs, cfg)
 	}
 
 	type zpKey struct{ from, to uint16 }
@@ -1507,14 +1507,14 @@ func (s *Server) ClearSessions(ctx context.Context, req *pb.ClearSessionsRequest
 			config.ZoneQuarantineExcludedReason(req.Zone, cfg) != "" {
 			return nil, status.Errorf(codes.InvalidArgument, "zone %q not found", req.Zone)
 		}
-		var zoneID uint16
+		var zoneID uint32
 		if cr := s.applyResult(); cr != nil {
 			zoneID = cr.ZoneIDs[req.Zone]
 		}
 		if zoneID == 0 {
 			return nil, status.Errorf(codes.InvalidArgument, "zone %q not found", req.Zone)
 		}
-		getReq.Zone = uint32(zoneID)
+		getReq.Zone = zoneID
 	}
 	filter := s.buildSessionFilter(getReq)
 	if err := filter.validate(); err != nil {

@@ -1149,8 +1149,8 @@ fn replay_filter_drops_stale_zone_pair_and_keeps_tunnel_semantics_10612() {
     };
     let make = |key: &SessionKey,
                 tunnel_endpoint_id: u16,
-                ingress_zone: u16,
-                egress_zone: u16,
+                ingress_zone: u32,
+                egress_zone: u32,
                 is_reverse: bool| SyncedSessionEntry { key: key.clone(),
                 decision: SessionDecision {
                     resolution: resolution(tunnel_endpoint_id),

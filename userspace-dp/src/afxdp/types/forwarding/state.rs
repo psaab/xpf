@@ -55,7 +55,7 @@ pub(in crate::afxdp) struct InstallTables {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::afxdp) struct FabricNatScopeIdentity {
-    pub(in crate::afxdp) zone_id: u16,
+    pub(in crate::afxdp) zone_id: u32,
     pub(in crate::afxdp) ifindex: i32,
     pub(in crate::afxdp) redundancy_group: i32,
 }
@@ -67,8 +67,8 @@ pub(in crate::afxdp) struct ForwardingState {
     /// #11574: the unique configured security zone owning each local interface
     /// address. Zero is the fail-closed sentinel for absent or cross-zone
     /// ambiguous owners; WG underlay admission compares this with arrival zone.
-    pub(in crate::afxdp) wg_local_address_zone_v4: FastMap<Ipv4Addr, u16>,
-    pub(in crate::afxdp) wg_local_address_zone_v6: FastMap<Ipv6Addr, u16>,
+    pub(in crate::afxdp) wg_local_address_zone_v4: FastMap<Ipv4Addr, u32>,
+    pub(in crate::afxdp) wg_local_address_zone_v6: FastMap<Ipv6Addr, u32>,
     /// #3769: table (VRF) attribution for the local-delivery DECISION.
     /// `local_v4`/`local_v6` are GLOBAL membership sets ("some subsystem
     /// answers for this IP somewhere"); before #3769 the local-delivery
@@ -330,12 +330,12 @@ pub(in crate::afxdp) struct ForwardingState {
     /// maps this missing fabric identity to a per-zone nonzero sentinel outside
     /// the install-table ID band, so it cannot alias the default-domain session
     /// key; native route resolution then fails closed (#11061).
-    pub(in crate::afxdp) zone_routing_domain: FastMap<u16, u32>,
+    pub(in crate::afxdp) zone_routing_domain: FastMap<u32, u32>,
     /// Zone IDs whose member interfaces disagree on routing domain. Retained
     /// separately from `zone_routing_domain` so status and transition logs can
     /// report the quarantine without guessing whether an absent mapping is
     /// ambiguous or simply has no routed member.
-    pub(in crate::afxdp) ambiguous_fabric_zone_ids: FastSet<u16>,
+    pub(in crate::afxdp) ambiguous_fabric_zone_ids: FastSet<u32>,
     /// #7160: true iff ANY interface resolves to a non-zero routing domain,
     /// i.e. iff at least one interface is a member of a named routing
     /// instance. Single-bool gate so a deployment with no routing-instance
@@ -360,7 +360,7 @@ pub(in crate::afxdp) struct ForwardingState {
     /// zone NAME via the `zone_name_to_id` lookup. Hot-path callers
     /// read u16 directly; slow-path display sites translate via
     /// `zone_id_to_name`. Unknown / dropped zones map to `0`.
-    pub(in crate::afxdp) ifindex_to_zone_id: FastMap<i32, u16>,
+    pub(in crate::afxdp) ifindex_to_zone_id: FastMap<i32, u32>,
     /// #6722: ifindex → the nonzero zone id this ifindex EGRESSES into, or
     /// ABSENT when it identifies no single zone.
     ///
@@ -405,9 +405,9 @@ pub(in crate::afxdp) struct ForwardingState {
     /// row, because `state.egress` is written last-write-wins per ifindex and a
     /// row-sourced zone let the final row re-arm an ifindex this map holds
     /// ambiguous.
-    pub(in crate::afxdp) ifindex_unambiguous_zone_id: FastMap<i32, u16>,
-    pub(in crate::afxdp) zone_name_to_id: FastMap<String, u16>,
-    pub(in crate::afxdp) zone_id_to_name: FastMap<u16, String>,
+    pub(in crate::afxdp) ifindex_unambiguous_zone_id: FastMap<i32, u32>,
+    pub(in crate::afxdp) zone_name_to_id: FastMap<String, u32>,
+    pub(in crate::afxdp) zone_id_to_name: FastMap<u32, String>,
     /// The zone maps passed the snapshot-level duplicate/collision validator.
     /// Hand-built test states leave this false, so removed-zone purging is
     /// fail-closed unless the maps came from the real forwarding builder.
@@ -421,7 +421,7 @@ pub(in crate::afxdp) struct ForwardingState {
     /// stamped zone claim is a proved peer punt only when at least one
     /// bound RG is not forwarding-active locally; all-locally-active is
     /// the #15916 ambiguous shape (owner-RG promotion decides).
-    pub(in crate::afxdp) zone_to_rgs: FastMap<u16, Vec<i32>>,
+    pub(in crate::afxdp) zone_to_rgs: FastMap<u32, Vec<i32>>,
     /// #3070: per-zone host-inbound-traffic admission set, keyed by the same
     /// validated zone id as `zone_id_to_name`. A zone is present here only when
     /// the config declared a `host-inbound-traffic` stanza for it; an absent
@@ -429,7 +429,7 @@ pub(in crate::afxdp) struct ForwardingState {
     /// host-bound (local-delivery) traffic ingressing that zone. Read on the
     /// local-delivery admit path (session miss AND session hit) to default-deny
     /// host-bound traffic whose service/protocol is not listed.
-    pub(in crate::afxdp) zone_host_inbound: FastMap<u16, ZoneHostInbound>,
+    pub(in crate::afxdp) zone_host_inbound: FastMap<u32, ZoneHostInbound>,
     /// #3362: per-INTERFACE host-inbound-traffic OVERRIDE admission set, keyed by
     /// ingress ifindex. Populated only for an interface that declared an
     /// interface-level `host-inbound-traffic` stanza (and is not a lifeline); the
@@ -445,7 +445,7 @@ pub(in crate::afxdp) struct ForwardingState {
     /// enabled. A non-SYN TCP transit packet dropped for a session miss whose
     /// ingress (from) zone is present here may receive a TCP RST toward the
     /// source. Policy denies stay silent. Absent zone ⇒ tcp-rst off.
-    pub(in crate::afxdp) zone_tcp_rst: FastMap<u16, bool>,
+    pub(in crate::afxdp) zone_tcp_rst: FastMap<u32, bool>,
     /// #3618: per-(from-)zone rate-limit buckets for locally-generated reject
     /// replies (policy `then reject`, firewall-filter / lo0 `then reject`, and
     /// zone `tcp-rst` session-miss resets). One GCRA `TokenBucket` per CONFIGURED zone id,
@@ -468,7 +468,7 @@ pub(in crate::afxdp) struct ForwardingState {
     /// `populate_zones` and installs fresh limiters (reset-on-commit, accepted
     /// for a diagnostic limiter). See `docs/generated-reply-rate-limit.md`.
     pub(in crate::afxdp) reject_buckets:
-        FastMap<u16, std::sync::Arc<crate::afxdp::icmp_ratelimit::ZoneLimiter>>,
+        FastMap<u32, std::sync::Arc<crate::afxdp::icmp_ratelimit::ZoneLimiter>>,
     /// #5856: per-(from-)zone rate-limit limiters for locally-generated ICMP
     /// Time-Exceeded / Hop-Limit-Exceeded replies, and for Packet-Too-Big /
     /// Frag-Needed PMTUD replies. Built in `populate_zones` from the SAME
@@ -489,9 +489,9 @@ pub(in crate::afxdp) struct ForwardingState {
     /// atomics must survive `ForwardingState::clone()` (fabric refresh). Cardin-
     /// ality is config-bounded (Go-capped ≤ 65533), never attacker-growable.
     pub(in crate::afxdp) time_exceeded_buckets:
-        FastMap<u16, std::sync::Arc<crate::afxdp::icmp_ratelimit::ZoneLimiter>>,
+        FastMap<u32, std::sync::Arc<crate::afxdp::icmp_ratelimit::ZoneLimiter>>,
     pub(in crate::afxdp) packet_too_big_buckets:
-        FastMap<u16, std::sync::Arc<crate::afxdp::icmp_ratelimit::ZoneLimiter>>,
+        FastMap<u32, std::sync::Arc<crate::afxdp::icmp_ratelimit::ZoneLimiter>>,
     pub(in crate::afxdp) egress: FastMap<i32, EgressInterface>,
     /// #16513: ifindexes whose merged egress primary came from an
     /// operator DESIGNATION (a marked address on some row sharing the
@@ -592,7 +592,7 @@ pub(in crate::afxdp) struct ForwardingState {
     /// `set_opening_overrides` alongside `session_timeouts`. Empty when no zone
     /// configures a syn-flood timeout (the common case), byte-identical to
     /// pre-#3527.
-    pub(in crate::afxdp) session_opening_overrides: FastMap<u16, u64>,
+    pub(in crate::afxdp) session_opening_overrides: FastMap<u32, u64>,
     pub(in crate::afxdp) policy: PolicyState,
     /// Configuration generation whose policy table is held by `policy`.
     /// RT_FLOW closes re-resolve a rule ID against this table and stamp the
@@ -1199,7 +1199,7 @@ impl ForwardingState {
     /// strict-SYN transit session-miss path to decide whether a non-SYN TCP
     /// packet whose ingress (from) zone is `zone_id` gets a TCP RST. An
     /// unconfigured / unknown zone (e.g. `0`) is always tcp-rst off.
-    pub(in crate::afxdp) fn zone_tcp_rst_enabled(&self, zone_id: u16) -> bool {
+    pub(in crate::afxdp) fn zone_tcp_rst_enabled(&self, zone_id: u32) -> bool {
         self.zone_tcp_rst.get(&zone_id).copied().unwrap_or(false)
     }
     /// #3651: the egress (to) zone id for `egress_ifindex`, or `0` when the
@@ -1351,7 +1351,7 @@ impl ForwardingState {
     }
 
     #[inline]
-    pub(in crate::afxdp) fn egress_zone_id(&self, egress_ifindex: i32) -> u16 {
+    pub(in crate::afxdp) fn egress_zone_id(&self, egress_ifindex: i32) -> u32 {
         self.ifindex_unambiguous_zone_id
             .get(&egress_ifindex)
             .copied()
@@ -1368,7 +1368,7 @@ impl ForwardingState {
     pub(in crate::afxdp) fn generated_error_bucket(
         &self,
         reason: crate::afxdp::icmp_ratelimit::GeneratedErrorReason,
-        from_zone_id: u16,
+        from_zone_id: u32,
     ) -> Option<&crate::afxdp::icmp_ratelimit::ZoneLimiter> {
         use crate::afxdp::icmp_ratelimit::GeneratedErrorReason;
         let buckets = match reason {

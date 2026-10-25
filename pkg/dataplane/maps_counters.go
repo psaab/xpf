@@ -144,7 +144,7 @@ func (m *Manager) ReadInterfaceCounters(ifindex int) (InterfaceCounterValue, err
 // slot capacity, and a merely idle zone alike. Surfaces must render "not
 // available" (or omit the sample) rather than a misleading 0, and must not
 // treat it as a read failure -- see pkg/api/README.md.
-func (m *Manager) ReadZoneCounters(zoneID uint16, direction int) (CounterValue, error) {
+func (m *Manager) ReadZoneCounters(zoneID uint32, direction int) (CounterValue, error) {
 	if direction != 0 && direction != 1 {
 		return CounterValue{}, fmt.Errorf("invalid zone counter direction %d", direction)
 	}
@@ -170,10 +170,10 @@ func (m *Manager) ReadZoneCounters(zoneID uint16, direction int) (CounterValue, 
 // row setter is retained for tests that seed one zone directly; production code
 // MUST use ReplaceZoneCounterOffsets, or a zone that disappears from the helper
 // snapshot keeps serving a frozen total.
-func (m *Manager) SetZoneCounterOffset(zoneID uint16, ingress, egress CounterValue) {
+func (m *Manager) SetZoneCounterOffset(zoneID uint32, ingress, egress CounterValue) {
 	m.mu.Lock()
 	if m.zoneCounterOffsets == nil {
-		m.zoneCounterOffsets = make(map[uint16][2]CounterValue)
+		m.zoneCounterOffsets = make(map[uint32][2]CounterValue)
 	}
 	m.zoneCounterOffsets[zoneID] = [2]CounterValue{ingress, egress}
 	m.mu.Unlock()
@@ -207,14 +207,14 @@ func (m *Manager) SetZoneCounterOffset(zoneID uint16, ingress, egress CounterVal
 // ErrCounterNotPopulated. The sole call site (syncBPFCountersLocked) runs only
 // on a successfully decoded ProcessStatus, so an empty set here is a real
 // observation and never a failed fetch.
-func (m *Manager) ReplaceZoneCounterOffsets(rows map[uint16][2]CounterValue) {
+func (m *Manager) ReplaceZoneCounterOffsets(rows map[uint32][2]CounterValue) {
 	m.mu.Lock()
 	if len(rows) == 0 {
 		m.zoneCounterOffsets = nil
 		m.mu.Unlock()
 		return
 	}
-	next := make(map[uint16][2]CounterValue, len(rows))
+	next := make(map[uint32][2]CounterValue, len(rows))
 	for id, vals := range rows {
 		next[id] = vals
 	}

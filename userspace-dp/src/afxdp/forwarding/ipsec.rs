@@ -306,7 +306,7 @@ const _: () = assert!(IKE_EXCHANGE_TABLE_CAP >= 1);
 /// second, IKE-denied zone (multihomed peer or spoof-capable
 /// ingress), and let an address configured only in another VRF be
 /// treated as the same local termination. `ingress_zone_id` is the
-/// host-inbound gate's from-zone (`u16`, 0 = unzoned/unknown, which
+/// host-inbound gate's from-zone (`u32`, 0 = unzoned/unknown, which
 /// never matches a zoned seed); `routing_domain` is the
 /// `SessionKey::routing_domain` stamp (`ingress_routing_domain`,
 /// 0 = default instance). A seed and a follow-up agree on both only
@@ -318,7 +318,7 @@ pub(in crate::afxdp) struct IkeExchangeKey {
     pub(in crate::afxdp) initiator_spi: u64,
     pub(in crate::afxdp) peer_ip: IpAddr,
     pub(in crate::afxdp) local_ip: IpAddr,
-    pub(in crate::afxdp) ingress_zone_id: u16,
+    pub(in crate::afxdp) ingress_zone_id: u32,
     pub(in crate::afxdp) routing_domain: u32,
 }
 
@@ -327,7 +327,7 @@ impl IkeExchangeKey {
         initiator_spi: u64,
         peer_ip: IpAddr,
         local_ip: IpAddr,
-        ingress_zone_id: u16,
+        ingress_zone_id: u32,
         routing_domain: u32,
     ) -> Self {
         Self {
@@ -635,7 +635,7 @@ pub(in crate::afxdp) fn maybe_seed_local_origin_ike(
     packet_frame: &[u8],
     l4_offset: usize,
     flow: &SessionFlow,
-    ingress_zone_id: u16,
+    ingress_zone_id: u32,
     routing_domain: u32,
     now_ns: u64,
 ) {

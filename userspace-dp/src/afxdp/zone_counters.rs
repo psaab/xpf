@@ -24,7 +24,7 @@
 //! [`ZoneCounterStore`] EVERY RX batch on EVERY worker, so all RX queues
 //! bounced one mutex cache line at line rate — cross-worker serialization on
 //! the hot path. The store now holds one [`ZoneTotalsAtomic`] block PER zone id
-//! (`Arc<Mutex<FxHashMap<u16, Arc<ZoneTotalsAtomic>>>>`) and the mutex guards
+//! (`Arc<Mutex<FxHashMap<u32, Arc<ZoneTotalsAtomic>>>>`) and the mutex guards
 //! only the MAP STRUCTURE — get-or-create at config-apply, and iterate at
 //! snapshot / clear / reconcile — all off the hot path (≤ once per commit or per
 //! 1 s status poll). Each configured slot caches its zone's `Arc<ZoneTotalsAtomic>`
@@ -89,7 +89,7 @@ pub(in crate::afxdp) const ZONE_COUNTER_LAYOUT_VERSION: u32 = 1;
 /// feasible where the cold-path 32-bit zone-PAIR key needed a `HashMap`.
 pub(in crate::afxdp) struct ZoneCounterSlotMap {
     slot_of: Box<[u8; 65536]>,
-    inverse: [u16; ZONE_COUNTER_SLOTS],
+    inverse: [u32; ZONE_COUNTER_SLOTS],
     /// #5163: per-slot handle to the assigned zone's shared atomic block,
     /// resolved from the zone-id-keyed [`ZoneCounterStore`] at build time. The
     /// per-batch fold reads `slot_totals[slot]` and `fetch_add`s directly, so
@@ -124,7 +124,7 @@ impl ZoneCounterSlotMap {
     pub(in crate::afxdp) fn empty() -> Self {
         Self {
             slot_of: Box::new([0u8; 65536]),
-            inverse: [0u16; ZONE_COUNTER_SLOTS],
+            inverse: [0u32; ZONE_COUNTER_SLOTS],
             slot_totals: std::array::from_fn(|_| None),
             overflow_active: false,
         }
@@ -142,18 +142,22 @@ impl ZoneCounterSlotMap {
     /// gets the SAME atomic block it had before (the store is zone-id keyed and
     /// carried forward), so counts never reset or double across a slot renumber;
     /// the per-batch fold then never touches the store's mutex.
-    pub(in crate::afxdp) fn build(zone_ids: &[u16], store: &ZoneCounterStore) -> Self {
-        let mut ids: Vec<u16> = zone_ids.iter().copied().filter(|&z| z != 0).collect();
+    pub(in crate::afxdp) fn build(zone_ids: &[u32], store: &ZoneCounterStore) -> Self {
+        let mut ids: Vec<u32> = zone_ids.iter().copied().filter(|&z| z != 0).collect();
         ids.sort_unstable();
         ids.dedup();
 
         let mut slot_of = Box::new([0u8; 65536]);
-        let mut inverse = [0u16; ZONE_COUNTER_SLOTS];
+        let mut inverse = [0u32; ZONE_COUNTER_SLOTS];
         let mut slot_totals: [Option<Arc<ZoneTotalsAtomic>>; ZONE_COUNTER_SLOTS] =
             std::array::from_fn(|_| None);
         let mut overflow_active = false;
         let mut next_slot = 1usize;
         for zid in ids {
+            if zid > u16::MAX as u32 {
+                overflow_active = true;
+                continue;
+            }
             if next_slot > ZONE_COUNTER_ASSIGNABLE_SLOTS {
                 overflow_active = true;
                 break;
@@ -173,7 +177,11 @@ impl ZoneCounterSlotMap {
 
     /// Resolve the hot-path slot for `zone_id` (0 = unassigned / uncounted).
     #[inline]
-    pub(in crate::afxdp) fn slot_of(&self, zone_id: u16) -> u8 {
+    pub(in crate::afxdp) fn slot_of(&self, zone_id: u32) -> u8 {
+        // #16557: dense array is u16-indexed; ids above it hold no slot.
+        if zone_id > u16::MAX as u32 {
+            return 0;
+        }
         self.slot_of[zone_id as usize]
     }
 
@@ -181,7 +189,7 @@ impl ZoneCounterSlotMap {
     /// (which is sorted zone-id order — see `build`). Published on the
     /// wire so consumers can distinguish a slotted-but-idle zone from a
     /// zone past capacity when overflow is active.
-    pub(in crate::afxdp) fn slotted_zone_ids(&self) -> Vec<u16> {
+    pub(in crate::afxdp) fn slotted_zone_ids(&self) -> Vec<u32> {
         self.inverse.iter().copied().filter(|&z| z != 0).collect()
     }
 }
@@ -212,7 +220,7 @@ impl ZoneCounterSlotMap {
 pub(in crate::afxdp) fn publishable_zone_rows(
     store: &ZoneCounterStore,
     slot_map: &ZoneCounterSlotMap,
-    is_configured: impl Fn(u16) -> bool,
+    is_configured: impl Fn(u32) -> bool,
 ) -> Vec<ZoneTrafficCounterStatus> {
     store
         .snapshot()
@@ -294,7 +302,7 @@ impl ZoneTotalsAtomic {
 /// (worker publish) keeps every generation pointing at the same totals.
 #[derive(Clone, Debug, Default)]
 pub(in crate::afxdp) struct ZoneCounterStore {
-    totals: Arc<Mutex<FxHashMap<u16, Arc<ZoneTotalsAtomic>>>>,
+    totals: Arc<Mutex<FxHashMap<u32, Arc<ZoneTotalsAtomic>>>>,
 }
 
 impl ZoneCounterStore {
@@ -302,7 +310,7 @@ impl ZoneCounterStore {
     /// map mutex. Config-apply path only (called from `ZoneCounterSlotMap::build`
     /// to cache the `Arc` per slot); NOT the hot path. A surviving zone gets the
     /// SAME `Arc` back across applies, so its totals never reset or double.
-    fn zone_totals(&self, zone_id: u16) -> Arc<ZoneTotalsAtomic> {
+    fn zone_totals(&self, zone_id: u32) -> Arc<ZoneTotalsAtomic> {
         let mut totals = self.totals.lock().expect("zone counter store poisoned");
         Arc::clone(totals.entry(zone_id).or_default())
     }
@@ -359,7 +367,7 @@ impl ZoneCounterStore {
     /// accessor also filters to configured zones — but it bounds the map to the
     /// live zone set. A `configured` zone's `Arc` is retained, so a slot map
     /// rebuilt in the same apply resolves the SAME block (no reset/double).
-    pub(in crate::afxdp) fn reconcile(&self, configured: &FxHashSet<u16>) {
+    pub(in crate::afxdp) fn reconcile(&self, configured: &FxHashSet<u32>) {
         self.totals
             .lock()
             .expect("zone counter store poisoned")
@@ -412,9 +420,9 @@ impl ZoneCounterStore {
     /// rejected build did not mutate the live store" has to look HERE rather
     /// than at the operator-visible snapshot.
     #[cfg(test)]
-    pub(in crate::afxdp) fn tracked_zone_ids_for_test(&self) -> Vec<u16> {
+    pub(in crate::afxdp) fn tracked_zone_ids_for_test(&self) -> Vec<u32> {
         let totals = self.totals.lock().expect("zone counter store poisoned");
-        let mut ids: Vec<u16> = totals.keys().copied().collect();
+        let mut ids: Vec<u32> = totals.keys().copied().collect();
         ids.sort_unstable();
         ids
     }
@@ -425,7 +433,7 @@ impl ZoneCounterStore {
     #[cfg(test)]
     fn lock_totals_for_test(
         &self,
-    ) -> std::sync::MutexGuard<'_, FxHashMap<u16, Arc<ZoneTotalsAtomic>>> {
+    ) -> std::sync::MutexGuard<'_, FxHashMap<u32, Arc<ZoneTotalsAtomic>>> {
         self.totals.lock().expect("zone counter store poisoned")
     }
 }
@@ -505,10 +513,10 @@ thread_local! {
 #[inline]
 pub(in crate::afxdp) fn counter_egress_zone(
     disposition: crate::afxdp::ForwardingDisposition,
-    admission_to_zone: u16,
-    computed_to_zone: u16,
-    fallback: u16,
-) -> u16 {
+    admission_to_zone: u32,
+    computed_to_zone: u32,
+    fallback: u32,
+) -> u32 {
     use crate::afxdp::ForwardingDisposition;
     if disposition == ForwardingDisposition::FabricRedirect && admission_to_zone != 0 {
         admission_to_zone
@@ -522,8 +530,8 @@ pub(in crate::afxdp) fn counter_egress_zone(
 #[inline]
 pub(in crate::afxdp) fn record_zone_traffic(
     slot_map: &ZoneCounterSlotMap,
-    ingress_zone_id: u16,
-    egress_zone_id: u16,
+    ingress_zone_id: u32,
+    egress_zone_id: u32,
     packet_bytes: u64,
 ) {
     let ingress_slot = slot_map.slot_of(ingress_zone_id);
@@ -700,14 +708,14 @@ mod tests {
     #[test]
     fn build_sets_overflow_past_capacity() {
         let store = ZoneCounterStore::default();
-        let ids: Vec<u16> = (1..=(ZONE_COUNTER_ASSIGNABLE_SLOTS as u16 + 5)).collect();
+        let ids: Vec<u32> = (1..=(ZONE_COUNTER_ASSIGNABLE_SLOTS as u32 + 5)).collect();
         let map = ZoneCounterSlotMap::build(&ids, &store);
         assert!(
             map.overflow_active,
             "exceeding {ZONE_COUNTER_ASSIGNABLE_SLOTS} assignable slots must set overflow_active"
         );
         // Exactly the capacity is assigned; the rest are slot 0.
-        let assigned = (1..=65535u16).filter(|&z| map.slot_of(z) != 0).count();
+        let assigned = (1..=65535u32).filter(|&z| map.slot_of(z) != 0).count();
         assert_eq!(assigned, ZONE_COUNTER_ASSIGNABLE_SLOTS);
     }
 
@@ -727,7 +735,7 @@ mod tests {
         let store = ZoneCounterStore::default();
 
         // Apply 1: one high-hash zone, alone and comfortably within capacity.
-        const Z: u16 = 50675; // config::StableZoneID("trust")
+        const Z: u32 = 50675; // config::StableZoneID("trust")
         let map1 = ZoneCounterSlotMap::build(&[Z], &store);
         assert_ne!(map1.slot_of(Z), 0, "Z must hold a slot in apply 1");
         record_zone_traffic(&map1, Z, 0, 1500);
@@ -741,9 +749,9 @@ mod tests {
         // Apply 2: add enough LOWER ids to consume every assignable slot. Z is
         // still configured, so reconcile keeps its accumulated totals — but
         // sorted-order slot assignment exhausts capacity before reaching it.
-        let mut ids: Vec<u16> = (1..=(ZONE_COUNTER_ASSIGNABLE_SLOTS as u16)).collect();
+        let mut ids: Vec<u32> = (1..=(ZONE_COUNTER_ASSIGNABLE_SLOTS as u32)).collect();
         ids.push(Z);
-        let configured: FxHashSet<u16> = ids.iter().copied().collect();
+        let configured: FxHashSet<u32> = ids.iter().copied().collect();
         store.reconcile(&configured);
         let map2 = ZoneCounterSlotMap::build(&ids, &store);
 
@@ -776,8 +784,8 @@ mod tests {
     #[test]
     fn slotted_zones_keep_publishing_while_a_sibling_overflows() {
         let store = ZoneCounterStore::default();
-        let mut ids: Vec<u16> = (1..=(ZONE_COUNTER_ASSIGNABLE_SLOTS as u16)).collect();
-        const OVERFLOWED: u16 = 65533;
+        let mut ids: Vec<u32> = (1..=(ZONE_COUNTER_ASSIGNABLE_SLOTS as u32)).collect();
+        const OVERFLOWED: u32 = 65533;
         ids.push(OVERFLOWED);
         let map = ZoneCounterSlotMap::build(&ids, &store);
         assert!(map.overflow_active);
@@ -793,7 +801,7 @@ mod tests {
         // predicates, not just the one the test is named for.
         record_zone_traffic(&map, 2, 0, 64);
         flush_recorded_zone_counters(&store, &map);
-        let configured: FxHashSet<u16> = [1u16, OVERFLOWED].into_iter().collect();
+        let configured: FxHashSet<u32> = [1u32, OVERFLOWED].into_iter().collect();
         let published = publishable_zone_rows(&store, &map, |z| configured.contains(&z));
         assert!(
             published.iter().any(|s| s.zone_id == 1),
@@ -816,8 +824,8 @@ mod tests {
         // Build over capacity so a THIRD zone (UNSLOTTED) also carries traffic.
         // With only slotted zones present, the slot predicate could be deleted
         // and this test would still pass — it must exercise both predicates.
-        const UNSLOTTED: u16 = 65533;
-        let mut ids: Vec<u16> = (1..=(ZONE_COUNTER_ASSIGNABLE_SLOTS as u16)).collect();
+        const UNSLOTTED: u32 = 65533;
+        let mut ids: Vec<u32> = (1..=(ZONE_COUNTER_ASSIGNABLE_SLOTS as u32)).collect();
         ids.push(UNSLOTTED);
         let map = ZoneCounterSlotMap::build(&ids, &store);
         assert_ne!(map.slot_of(10), 0, "10 must hold a slot");
@@ -922,7 +930,7 @@ mod tests {
         record_zone_traffic(&map, 100, 200, 64);
         flush_recorded_zone_counters(&store, &map);
         assert_eq!(store.snapshot().len(), 2);
-        let keep: FxHashSet<u16> = [100u16].into_iter().collect();
+        let keep: FxHashSet<u32> = [100u32].into_iter().collect();
         store.reconcile(&keep);
         let snap = store.snapshot();
         assert_eq!(snap.len(), 1);

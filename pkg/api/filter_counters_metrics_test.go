@@ -258,7 +258,7 @@ func TestCollectEmitsCounterReadErrorsAfterSubcollectors(t *testing.T) {
 		Manager: dataplane.New(),
 		status:  dpuserspace.ProcessStatus{},
 		apply: &dataplane.ApplyResult{
-			ZoneIDs:   map[string]uint16{"trust": 1, "untrust": 2},
+			ZoneIDs:   map[string]uint32{"trust": 1, "untrust": 2},
 			FilterIDs: map[string]uint32{"inet:fin": 0, "inet6:fin6": 100},
 		},
 	}}

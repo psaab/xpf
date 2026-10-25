@@ -89,11 +89,11 @@ type grpcRuntime interface {
 	// Counters (read).
 	ReadGlobalCounter(index uint32) (uint64, error)
 	ReadInterfaceCounters(ifindex int) (dataplane.InterfaceCounterValue, error)
-	ReadZoneCounters(zoneID uint16, direction int) (dataplane.CounterValue, error)
+	ReadZoneCounters(zoneID uint32, direction int) (dataplane.CounterValue, error)
 	ReadPolicyCounters(policyID uint32) (dataplane.CounterValue, error)
 	ReadFilterConfig(filterID uint32) (dataplane.FilterConfig, error)
 	ReadFilterCounters(ruleIdx uint32) (dataplane.CounterValue, error)
-	ReadFloodCounters(zoneID uint16) (dataplane.FloodState, error)
+	ReadFloodCounters(zoneID uint32) (dataplane.FloodState, error)
 	ReadNATRuleCounter(counterID uint32) (dataplane.CounterValue, error)
 
 	// Counters (clear) — diag/clear paths.

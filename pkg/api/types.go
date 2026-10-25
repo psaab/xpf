@@ -112,7 +112,7 @@ type InterfaceStats struct {
 // ZoneInfo holds zone configuration and counter data.
 type ZoneInfo struct {
 	Name string `json:"name"`
-	ID   uint16 `json:"id"`
+	ID   uint32 `json:"id"`
 	// Description carries the zone's `description` sub-stanza (#3329). gRPC
 	// GetZones already exposes it; REST omits it when unset (no behavior
 	// change for zones without a description). Security audits routinely use

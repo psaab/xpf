@@ -112,7 +112,7 @@ pub(super) struct CachedTxSelectionDescriptor {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct CachedInputFilterLog {
     pub(super) log_match: crate::filter::FilterLogMatch,
-    pub(super) ingress_zone_id: u16,
+    pub(super) ingress_zone_id: u32,
     // #14313: whether the evaluated packet carried a real L4 header. Carried
     // so the deferred filter-log AppID resolution skips port-constrained
     // catalog entries for a flowless fragment (synthetic ports 0,0).
@@ -501,7 +501,7 @@ impl FlowCacheEntry {
         validation: ValidationState,
         decision: SessionDecision,
         flow_owner_rg_id: i32,
-        ingress_zone: Option<u16>,
+        ingress_zone: Option<u32>,
         target_binding_index: Option<usize>,
         input_filter_log: Option<CachedInputFilterLog>,
         input_filter_counters: crate::filter::CachedFilterCounters,
@@ -830,8 +830,8 @@ impl FlowCacheEntry {
         validation: ValidationState,
         decision: SessionDecision,
         flow_owner_rg_id: i32,
-        ingress_zone: u16,
-        egress_zone: u16,
+        ingress_zone: u32,
+        egress_zone: u32,
         policy_counter_idx: u32,
         policy_counter: Option<Arc<crate::policy::PolicyRuleCounter>>,
         policy_deny: Option<CachedPolicyDeny>,

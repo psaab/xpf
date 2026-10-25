@@ -174,7 +174,12 @@ func (c *CLI) parseSessionFilterMode(args []string, clearMode bool) sessionFilte
 				// (display qualifies the name, #10530).
 				if !clearMode || f.cfg == nil || config.ZoneQuarantineExcludedReason(v, f.cfg) == "" {
 					if cr != nil {
-						f.zoneID = cr.ZoneIDs[v]
+						// #16557: session records carry the low 16
+						// bits of the u32 zone id; filter by that
+						// truncation (same key records carry).
+						if zid32, ok := cr.ZoneIDs[v]; ok && zid32 != 0 {
+							f.zoneID = uint16(zid32)
+						}
 					}
 				}
 			}
@@ -433,7 +438,7 @@ func (f *sessionFilter) populateIfaceMaps(c *CLI) {
 				// #4792: keep EVERY interface bound to the zone, not just
 				// the first — a zone with multiple member interfaces
 				// otherwise loses visibility into sessions on the 2nd+.
-				zoneIfaces[zid] = append(zoneIfaces[zid], zone.Interfaces...)
+				zoneIfaces[uint16(zid)] = append(zoneIfaces[uint16(zid)], zone.Interfaces...)
 			}
 		}
 	}

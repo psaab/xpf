@@ -93,11 +93,11 @@ func TestTunnelEndpointsDisabledUnzonedQuarantine13147(t *testing.T) {
 	// (3) quarantineCollidingZones must scrub TunnelEndpoints zones.
 	raw := &ConfigSnapshot{
 		Zones: []ZoneSnapshot{
-			{Name: "z174", ID: config.StableZoneID("z174")},
-			{Name: "z214", ID: config.StableZoneID("z214")},
+			{Name: "zzq17760", ID: config.StableZoneID("zzq17760")},
+			{Name: "zzq8100", ID: config.StableZoneID("zzq8100")},
 		},
-		Interfaces:      []InterfaceSnapshot{{Name: "wg0.0", Zone: "z214"}},
-		TunnelEndpoints: []TunnelEndpointSnapshot{{Interface: "wg0.0", Zone: "z214", Mode: "wireguard", WgListenPort: 51820}},
+		Interfaces:      []InterfaceSnapshot{{Name: "wg0.0", Zone: "zzq8100"}},
+		TunnelEndpoints: []TunnelEndpointSnapshot{{Interface: "wg0.0", Zone: "zzq8100", Mode: "wireguard", WgListenPort: 51820}},
 	}
 	quarantineCollidingZones(raw)
 	if raw.TunnelEndpoints[0].Zone != "" {

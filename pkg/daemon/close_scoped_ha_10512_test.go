@@ -22,7 +22,7 @@ func closeDelta10512(t *testing.T, id uint64, domain uint32) dpuserspace.Session
 func TestCloseRoutesScopedWhenCapable10512(t *testing.T) {
 	d, ss := primaryForRG1Daemon9752()
 	ss.SetScopedPolicyDeleteCapableForTesting(true)
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	delta := closeDelta10512(t, 0xA11CE, 100007)
 	key, _, ok := userspaceSessionFromDeltaV4(delta, zoneIDs)
 	if !ok {
@@ -45,7 +45,7 @@ func TestCloseRoutesScopedWhenCapable10512(t *testing.T) {
 func TestCloseFallsBackBareWhenIncapable10512(t *testing.T) {
 	d, ss := primaryForRG1Daemon9752()
 	ss.SetScopedPolicyDeleteCapableForTesting(false)
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	delta := closeDelta10512(t, 0xA11CE, 100007)
 	key, _, ok := userspaceSessionFromDeltaV4(delta, zoneIDs)
 	if !ok {
@@ -67,7 +67,7 @@ func TestCloseFallsBackBareWhenIncapable10512(t *testing.T) {
 func TestCloseKeepsBareForPurgeMarker10512(t *testing.T) {
 	d, ss := primaryForRG1Daemon9752()
 	ss.SetScopedPolicyDeleteCapableForTesting(true)
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	delta := closeDelta10512(t, 0xA11CE, 100007)
 	delta.PurgeRetirement = true
 	key, _, ok := userspaceSessionFromDeltaV4(delta, zoneIDs)
@@ -91,7 +91,7 @@ func TestCloseKeepsBareForPurgeMarker10512(t *testing.T) {
 func TestCloseRoutesScopedV6WhenCapable10512(t *testing.T) {
 	d, ss := primaryForRG1Daemon9752()
 	ss.SetScopedPolicyDeleteCapableForTesting(true)
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	delta := transitOpenV6_9767()
 	delta.Event = "close"
 	delta.RTFlowSessionID = 0xC10512

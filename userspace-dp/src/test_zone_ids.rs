@@ -22,11 +22,11 @@
 
 #![cfg(test)]
 
-pub(crate) const TEST_LAN_ZONE_ID: u16 = 1;
-pub(crate) const TEST_WAN_ZONE_ID: u16 = 2;
-pub(crate) const TEST_TRUST_ZONE_ID: u16 = 3;
-pub(crate) const TEST_UNTRUST_ZONE_ID: u16 = 4;
-pub(crate) const TEST_SFMIX_ZONE_ID: u16 = 5;
-pub(crate) const TEST_FABRIC_ZONE_ID: u16 = 6;
-pub(crate) const TEST_DMZ_ZONE_ID: u16 = 7;
-pub(crate) const TEST_MGMT_ZONE_ID: u16 = 8;
+pub(crate) const TEST_LAN_ZONE_ID: u32 = 1;
+pub(crate) const TEST_WAN_ZONE_ID: u32 = 2;
+pub(crate) const TEST_TRUST_ZONE_ID: u32 = 3;
+pub(crate) const TEST_UNTRUST_ZONE_ID: u32 = 4;
+pub(crate) const TEST_SFMIX_ZONE_ID: u32 = 5;
+pub(crate) const TEST_FABRIC_ZONE_ID: u32 = 6;
+pub(crate) const TEST_DMZ_ZONE_ID: u32 = 7;
+pub(crate) const TEST_MGMT_ZONE_ID: u32 = 8;

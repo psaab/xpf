@@ -25,8 +25,8 @@ import (
 // agree by construction and an earlier-sorting zone add/remove never renumbers
 // a surviving zone's in-flight session metadata (the sorted-positional defect
 // this replaces).
-func buildZoneIDs(cfg *config.Config) map[string]uint16 {
-	ids := make(map[string]uint16, len(cfg.Security.Zones))
+func buildZoneIDs(cfg *config.Config) map[string]uint32 {
+	ids := make(map[string]uint32, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		ids[name] = config.StableZoneID(name)
 	}
@@ -40,7 +40,7 @@ func buildZoneIDs(cfg *config.Config) map[string]uint16 {
 type userspaceZoneIDsCache struct {
 	gen uint64
 	cfg *config.Config
-	ids map[string]uint16
+	ids map[string]uint32
 }
 
 // cachedUserspaceZoneIDs returns the stable zone-id map for the current
@@ -58,7 +58,7 @@ type userspaceZoneIDsCache struct {
 // fails closed. Window bounded by next-delta rebuild; stable IDs for
 // surviving names only (see docs/log/9905.md; z174/z214 collide across
 // the boundary, so no cross-boundary aliasing guarantee).
-func (d *Daemon) cachedUserspaceZoneIDs() map[string]uint16 {
+func (d *Daemon) cachedUserspaceZoneIDs() map[string]uint32 {
 	if d.store == nil {
 		return nil
 	}
@@ -530,7 +530,7 @@ func userspaceSessionOriginFlags(origin string) uint16 {
 	}
 }
 
-func userspaceSessionFromDeltaV4(delta dpuserspace.SessionDeltaInfo, zoneIDs map[string]uint16) (dataplane.SessionKey, dataplane.SessionValue, bool) {
+func userspaceSessionFromDeltaV4(delta dpuserspace.SessionDeltaInfo, zoneIDs map[string]uint32) (dataplane.SessionKey, dataplane.SessionValue, bool) {
 	r := userspaceResolveV4(delta)
 	if !r.ok {
 		// #7171: these four conversion drops were SILENT while the V4
@@ -559,11 +559,16 @@ func userspaceSessionFromDeltaV4(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 	// emit JSON deltas only.
 	ingressZone := delta.IngressZoneID
 	if ingressZone == 0 {
-		ingressZone = zoneIDs[delta.IngressZone]
+		// #16557: session records carry the low 16 bits of the u32 id.
+		if zid, ok := zoneIDs[delta.IngressZone]; ok && zid != 0 {
+			ingressZone = uint16(zid)
+		}
 	}
 	egressZone := delta.EgressZoneID
 	if egressZone == 0 {
-		egressZone = zoneIDs[delta.EgressZone]
+		if zid, ok := zoneIDs[delta.EgressZone]; ok && zid != 0 {
+			egressZone = uint16(zid)
+		}
 	}
 	if ingressZone == 0 || egressZone == 0 {
 		if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
@@ -729,7 +734,7 @@ func userspaceForwardWireAliasV4(key dataplane.SessionKey, val dataplane.Session
 	return wireKey, val, true
 }
 
-func userspaceSessionFromDeltaV6(delta dpuserspace.SessionDeltaInfo, zoneIDs map[string]uint16) (dataplane.SessionKeyV6, dataplane.SessionValueV6, bool) {
+func userspaceSessionFromDeltaV6(delta dpuserspace.SessionDeltaInfo, zoneIDs map[string]uint32) (dataplane.SessionKeyV6, dataplane.SessionValueV6, bool) {
 	r := userspaceResolveV6(delta)
 	if !r.ok {
 		if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
@@ -749,11 +754,16 @@ func userspaceSessionFromDeltaV6(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 	// payload; fall back to legacy name-string lookup for JSON deltas.
 	ingressZone := delta.IngressZoneID
 	if ingressZone == 0 {
-		ingressZone = zoneIDs[delta.IngressZone]
+		// #16557: session records carry the low 16 bits of the u32 id.
+		if zid, ok := zoneIDs[delta.IngressZone]; ok && zid != 0 {
+			ingressZone = uint16(zid)
+		}
 	}
 	egressZone := delta.EgressZoneID
 	if egressZone == 0 {
-		egressZone = zoneIDs[delta.EgressZone]
+		if zid, ok := zoneIDs[delta.EgressZone]; ok && zid != 0 {
+			egressZone = uint16(zid)
+		}
 	}
 	if ingressZone == 0 || egressZone == 0 {
 		if slog.Default().Enabled(context.Background(), slog.LevelDebug) {

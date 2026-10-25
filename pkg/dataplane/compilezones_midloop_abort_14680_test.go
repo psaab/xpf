@@ -37,8 +37,8 @@ type midLoopDP14680 struct {
 }
 
 func (midLoopDP14680) IsLoaded() bool                                                  { return true }
-func (midLoopDP14680) SetZoneConfig(uint16, ZoneConfig) error                          { return nil }
-func (midLoopDP14680) SetZone(int, uint16, uint16, uint32, uint8, uint8, uint32) error { return nil }
+func (midLoopDP14680) SetZoneConfig(uint32, ZoneConfig) error                          { return nil }
+func (midLoopDP14680) SetZone(int, uint16, uint32, uint32, uint8, uint8, uint32) error { return nil }
 func (midLoopDP14680) AddTxPort(int) error                                             { return nil }
 func (midLoopDP14680) SetVlanIfaceInfo(int, int, uint16) error                         { return nil }
 func (midLoopDP14680) DeleteStaleIfaceZone(map[IfaceZoneKey]bool)                      {}

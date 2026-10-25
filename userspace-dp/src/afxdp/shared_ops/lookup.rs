@@ -1315,7 +1315,7 @@ pub(in crate::afxdp) struct DeferredForwardingRevalidation {
     /// leg. On a reverse hit that is the forward flow's ingress zone, not
     /// its egress; persist sites map it through
     /// `forward_egress_zone_for_hit` before handing it to the table.
-    pub(in crate::afxdp) new_egress_zone: Option<u16>,
+    pub(in crate::afxdp) new_egress_zone: Option<u32>,
 }
 
 /// #14941: map a re-resolve's `new_egress_zone` for the hit direction.
@@ -1343,14 +1343,14 @@ pub(in crate::afxdp) struct DeferredForwardingRevalidation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::afxdp) enum ForwardEgressZone {
     /// The zone to persist as the pair's forward egress zone.
-    Zone(u16),
+    Zone(u32),
     /// No forward-egress move is named; preserve the recorded pair.
     Preserve,
 }
 
 impl ForwardEgressZone {
     /// The persistable zone, or `None` to preserve the recorded pair.
-    pub(in crate::afxdp) fn as_option(self) -> Option<u16> {
+    pub(in crate::afxdp) fn as_option(self) -> Option<u32> {
         match self {
             Self::Zone(zone) => Some(zone),
             Self::Preserve => None,
@@ -1373,8 +1373,8 @@ impl ForwardEgressZone {
 /// refresh, and left the session to idle out (#14941/#14300).
 pub(in crate::afxdp) fn forward_egress_zone_for_hit(
     hit_is_reverse: bool,
-    resolved_zone: Option<u16>,
-    reverse_ingress_zone: u16,
+    resolved_zone: Option<u32>,
+    reverse_ingress_zone: u32,
 ) -> ForwardEgressZone {
     if !hit_is_reverse {
         return match resolved_zone {
@@ -1903,7 +1903,7 @@ pub(in crate::afxdp) enum ReverseIngress {
     /// and still be the same flow. Ifindex equality would reject those. Zone is
     /// also the granularity policy is written against, which is what the
     /// synthesized session's metadata gets wrong.
-    Zone(u16),
+    Zone(u32),
     /// The arrival interface has no zone mapping, so there is nothing to
     /// revalidate against. Fails CLOSED: no reverse match is synthesized.
     /// Distinct from `Unconstrained` precisely so an unmapped ifindex cannot

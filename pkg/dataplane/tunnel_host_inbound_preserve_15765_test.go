@@ -68,7 +68,7 @@ func TestApplyTunnelHostInboundPreservesScreenProfileAndSupportsIP6GRE(t *testin
 		},
 	}
 	result := &CompileResult{
-		ZoneIDs:   map[string]uint16{"untrust": 7, "poisoned": 8},
+		ZoneIDs:   map[string]uint32{"untrust": 7, "poisoned": 8},
 		ScreenIDs: map[string]uint16{"untrust-screen": 3},
 	}
 	dp := &tunnelHostInboundTestDP{}

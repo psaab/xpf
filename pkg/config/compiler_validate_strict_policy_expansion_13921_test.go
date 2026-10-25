@@ -22,7 +22,7 @@ import (
 
 // collisionFreeZoneNames14353 returns n zone names with distinct
 func collisionFreeZoneNames14353(n int) []string {
-	seen := map[uint16]struct{}{StableZoneID("trust"): {}, StableZoneID("untrust"): {}}
+	seen := map[uint32]struct{}{StableZoneID("trust"): {}, StableZoneID("untrust"): {}}
 	names := make([]string, 0, n)
 	for i := 0; len(names) < n; i++ {
 		name := fmt.Sprintf("z%d", i)

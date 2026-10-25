@@ -76,7 +76,7 @@ func (s *Server) showZonesDetail(cfg *config.Config, filter string, buf *strings
 		if zone == nil { // #3493: tolerant/HA-sync path may carry a nil zone value
 			continue
 		}
-		var zoneID uint16
+		var zoneID uint32
 		reason := ""
 		if _, excluded := quarantined[name]; excluded {
 			reason = config.ZoneQuarantineExcludedReason(name, cfg)
@@ -518,7 +518,7 @@ func (s *Server) zoneCounterLayoutVersion() uint32 {
 // zoneCounterSlotted reports whether zoneID holds a live traffic-counter
 // slot (#14619), through dpProbe() for the same #2114 reason as the
 // siblings above. Fails to false on any error (see the CLI twin).
-func (s *Server) zoneCounterSlotted(zoneID uint16) bool {
+func (s *Server) zoneCounterSlotted(zoneID uint32) bool {
 	if s == nil || zoneID == 0 {
 		return false
 	}
@@ -533,7 +533,7 @@ func (s *Server) zoneCounterSlotted(zoneID uint16) bool {
 		return false
 	}
 	for _, id := range status.ZoneCounterSlottedZoneIDs {
-		if id == zoneID {
+		if uint32(id) == zoneID {
 			return true
 		}
 	}

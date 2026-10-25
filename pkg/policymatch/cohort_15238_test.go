@@ -145,14 +145,14 @@ func TestTransitMartianAdvisory15238(t *testing.T) {
 }
 
 // #15238 A55-03: a host-inbound global scoped only to a quarantined zone
-// (z214, the StableZoneID collision loser vs z174) is dropped by the
+// (zzq8100, the StableZoneID collision loser vs zzq17760) is dropped by the
 // snapshot builder (globalScopeFullyQuarantined), so the published
 // snapshot has zero such rules. globalScopeSetMatches tested raw
 // cfg.Security.Zones membership and matched it, reporting the deny as
 // governing while the runtime applies none.
 func TestHostGlobalQuarantinedScopeDoesNotMatch15238(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatalf("test premise broken: z174/z214 no longer collide")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatalf("test premise broken: zzq17760/zzq8100 no longer collide")
 	}
 	hostDeny := &config.Policy{
 		Name:   "host-deny-quarantined-scope",
@@ -161,21 +161,21 @@ func TestHostGlobalQuarantinedScopeDoesNotMatch15238(t *testing.T) {
 			SourceAddresses:      []string{"any"},
 			DestinationAddresses: []string{"any"},
 			Applications:         []string{"any"},
-			FromZones:            []string{"z214"},
+			FromZones:            []string{"zzq8100"},
 			ToZones:              []string{"junos-host"},
 		},
 	}
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			DefaultPolicy:  config.PolicyDeny,
-			Zones:          zones("z174", "z214", "trust"),
+			Zones:          zones("zzq17760", "zzq8100", "trust"),
 			GlobalPolicies: []*config.Policy{hostDeny},
 		},
 		Applications: config.ApplicationsConfig{},
 	}
-	res := Match(cfg, Query{FromZone: "z214", ToZone: JunosHostZone})
+	res := Match(cfg, Query{FromZone: "zzq8100", ToZone: JunosHostZone})
 	if res.Matched {
-		t.Fatalf("host global scoped only to quarantined z214 matched; the published snapshot drops it (#15238 A55-03): %+v", res)
+		t.Fatalf("host global scoped only to quarantined zzq8100 matched; the published snapshot drops it (#15238 A55-03): %+v", res)
 	}
 	if !res.HostInboundUnmatched {
 		t.Fatalf("want HostInboundUnmatched for the dropped host global, got %+v", res)
@@ -186,7 +186,7 @@ func TestHostGlobalQuarantinedScopeDoesNotMatch15238(t *testing.T) {
 	cfg2 := &config.Config{
 		Security: config.SecurityConfig{
 			DefaultPolicy: config.PolicyDeny,
-			Zones:         zones("z174", "z214", "trust"),
+			Zones:         zones("zzq17760", "zzq8100", "trust"),
 			GlobalPolicies: []*config.Policy{{
 				Name:   "host-deny-trust-scope",
 				Action: config.PolicyDeny,
@@ -211,7 +211,7 @@ func TestHostGlobalQuarantinedScopeDoesNotMatch15238(t *testing.T) {
 	cfg3 := &config.Config{
 		Security: config.SecurityConfig{
 			DefaultPolicy: config.PolicyDeny,
-			Zones:         zones("z174", "z214", "trust", "untrust"),
+			Zones:         zones("zzq17760", "zzq8100", "trust", "untrust"),
 			GlobalPolicies: []*config.Policy{{
 				Name:   "transit-permit-quarantined-scope",
 				Action: config.PolicyPermit,
@@ -219,20 +219,20 @@ func TestHostGlobalQuarantinedScopeDoesNotMatch15238(t *testing.T) {
 					SourceAddresses:      []string{"any"},
 					DestinationAddresses: []string{"any"},
 					Applications:         []string{"any"},
-					FromZones:            []string{"z214"},
+					FromZones:            []string{"zzq8100"},
 					ToZones:              []string{"untrust"},
 				},
 			}},
 		},
 		Applications: config.ApplicationsConfig{},
 	}
-	res3 := Match(cfg3, Query{FromZone: "z214", ToZone: "untrust"})
+	res3 := Match(cfg3, Query{FromZone: "zzq8100", ToZone: "untrust"})
 	if res3.Matched || !res3.UnzonedIngress {
-		t.Fatalf("transit global scoped only to quarantined z214 must not match (want unzoned-ingress deny), got %+v", res3)
+		t.Fatalf("transit global scoped only to quarantined zzq8100 must not match (want unzoned-ingress deny), got %+v", res3)
 	}
-	// Survivor control: scoped to z174 (owns the colliding id) it matches.
-	cfg3.Security.GlobalPolicies[0].Match.FromZones = []string{"z174"}
-	res3 = Match(cfg3, Query{FromZone: "z174", ToZone: "untrust"})
+	// Survivor control: scoped to zzq17760 (owns the colliding id) it matches.
+	cfg3.Security.GlobalPolicies[0].Match.FromZones = []string{"zzq17760"}
+	res3 = Match(cfg3, Query{FromZone: "zzq17760", ToZone: "untrust"})
 	if !res3.Matched || !res3.Global || res3.PolicyName != "transit-permit-quarantined-scope" {
 		t.Fatalf("survivor-scoped transit global control must still match, got %+v", res3)
 	}

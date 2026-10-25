@@ -145,8 +145,8 @@ func (d *ifaceIdentity6960DP) DeleteDNATEntryV6(dataplane.DNATKeyV6) error { ret
 func ifaceIdentity6960Server(t *testing.T, dp *ifaceIdentity6960DP) *Server {
 	t.Helper()
 	dp.Manager = dataplane.New()
-	dp.apply = &dataplane.ApplyResult{ZoneIDs: map[string]uint16{
-		"trust": ifaceIdentity6960Trust, "untrust": ifaceIdentity6960Untrust,
+	dp.apply = &dataplane.ApplyResult{ZoneIDs: map[string]uint32{
+		"trust": uint32(ifaceIdentity6960Trust), "untrust": uint32(ifaceIdentity6960Untrust),
 	}}
 	return &Server{
 		store:         ifaceIdentity6960Store(t),

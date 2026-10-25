@@ -419,7 +419,7 @@ fn f035_fabric_parked_fragment_uses_encoded_zone_overlap_domain_10917() {
     let dst = Ipv4Addr::new(8, 8, 8, 8);
     let ident = 0x1091;
     let stamped = |mut frame: Vec<u8>| {
-        let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+        let [_, _, hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
         frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, 0xfe, hi, lo]);
         frame
     };

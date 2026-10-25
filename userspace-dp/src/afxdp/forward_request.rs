@@ -133,7 +133,7 @@ pub(super) fn build_live_forward_request(
     decision: &SessionDecision,
     forwarding: &ForwardingState,
     flow: Option<&SessionFlow>,
-    fabric_ingress_zone: Option<u16>,
+    fabric_ingress_zone: Option<u32>,
     apply_nat_on_fabric: bool,
     now_ns: u64,
 ) -> Option<PendingForwardRequest> {
@@ -172,7 +172,7 @@ pub(super) fn build_live_forward_request_from_frame(
     decision: &SessionDecision,
     forwarding: &ForwardingState,
     flow: Option<&SessionFlow>,
-    fabric_ingress_zone: Option<u16>,
+    fabric_ingress_zone: Option<u32>,
     apply_nat_on_fabric: bool,
     now_ns: u64,
     event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
@@ -214,7 +214,7 @@ pub(super) fn build_live_forward_request_from_frame_with_dynamic(
     decision: &SessionDecision,
     forwarding: &ForwardingState,
     flow: Option<&SessionFlow>,
-    fabric_ingress_zone: Option<u16>,
+    fabric_ingress_zone: Option<u32>,
     apply_nat_on_fabric: bool,
     now_ns: u64,
     event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
@@ -574,7 +574,7 @@ pub(super) struct CoSDropSideEffects<'a> {
     pub(super) meta: UserspaceDpMeta,
     pub(super) ingress_ifindex: i32,
     pub(super) egress_ifindex: i32,
-    pub(super) fabric_ingress_zone: Option<u16>,
+    pub(super) fabric_ingress_zone: Option<u32>,
     pub(super) now_ns: u64,
     /// #7656: the POST-NAT L3 flow for a FLOWLESS packet, or `None` when the
     /// packet has a `tx_selection_flow` (which already carries the post-NAT wire

@@ -49,8 +49,8 @@ pub(super) fn try_translate_nat64_icmp_error(
     scratch_forwards: &mut Vec<PendingForwardRequest>,
     now_ns: u64,
     now_secs: u64,
-    ingress_zone_override: Option<u16>,
-    ambiguous_zone: Option<u16>,
+    ingress_zone_override: Option<u32>,
+    ambiguous_zone: Option<u32>,
 ) -> EmbeddedIcmpReversal {
     let nat64_match = match try_nat64_icmp_error_match_from_frame(
         packet_frame,

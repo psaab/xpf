@@ -31,7 +31,7 @@ func (d *postPromoCancelDP) ApplyConfig(_ context.Context, _ *config.Config) (*d
 	if d.cancel != nil {
 		d.cancel() // daemon-stop arrives mid-apply (post-promotion)
 	}
-	return &dataplane.ApplyResult{ZoneIDs: map[string]uint16{}}, nil
+	return &dataplane.ApplyResult{ZoneIDs: map[string]uint32{}}, nil
 }
 
 // TestPostPromotionCancelRunsHostAuthorizationCloseout is the #5643 (M35)

@@ -9,9 +9,9 @@ import (
 )
 
 // mixedScopeGlobalsCLI12897 builds the #12897 decisive shape on the CLI store:
-// two scoped globals over a zone set with one collision survivor (z174) and
-// one collision loser (z214). mixed-global's from side is MIXED
-// ([trust z214]) so the runtime scrub (#5577) prunes z214 and keeps the rule
+// two scoped globals over a zone set with one collision survivor (zzq17760) and
+// one collision loser (zzq8100). mixed-global's from side is MIXED
+// ([trust zzq8100]) so the runtime scrub (#5577) prunes zzq8100 and keeps the rule
 // enforced for trust; dead-global's from side is EMPTIED by the prune, so the
 // scrub drops the whole rule. The fake dataplane seeds nonzero hits for BOTH
 // rule ids, so the mixed row can only show its number by actually reading it
@@ -20,23 +20,23 @@ func mixedScopeGlobalsCLI12897(t *testing.T) (*CLI, *config.Config) {
 	t.Helper()
 	store := newPolicyHitCountCLIStore(t, true)
 	cfg := store.ActiveConfig()
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatal("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatal("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
-		"trust":   {Name: "trust"},
-		"untrust": {Name: "untrust"},
-		"z174":    {Name: "z174"},
-		"z214":    {Name: "z214"},
+		"trust":    {Name: "trust"},
+		"untrust":  {Name: "untrust"},
+		"zzq17760": {Name: "zzq17760"},
+		"zzq8100":  {Name: "zzq8100"},
 	}
 	cfg.Security.GlobalPolicies = []*config.Policy{
 		{
 			Name: "mixed-global", Action: config.PolicyDeny,
-			Match: config.PolicyMatch{FromZones: []string{"trust", "z214"}, ToZones: []string{"untrust"}},
+			Match: config.PolicyMatch{FromZones: []string{"trust", "zzq8100"}, ToZones: []string{"untrust"}},
 		},
 		{
 			Name: "dead-global", Action: config.PolicyDeny,
-			Match: config.PolicyMatch{FromZones: []string{"z214"}, ToZones: []string{"untrust"}},
+			Match: config.PolicyMatch{FromZones: []string{"zzq8100"}, ToZones: []string{"untrust"}},
 		},
 	}
 	// The store carries one zone-pair set (trust->untrust), so the global
@@ -106,7 +106,7 @@ func TestCLIMixedScopeGlobalKeepsLiveCounters12897(t *testing.T) {
 	if !strings.Contains(mixed, "17") {
 		t.Errorf("mixed-global row lacks its live hit count 17:\n%s", mixed)
 	}
-	if !strings.Contains(mixed, "z214 "+config.ZoneQuarantinePoliciesQualifier) {
+	if !strings.Contains(mixed, "zzq8100 "+config.ZoneQuarantinePoliciesQualifier) {
 		t.Errorf("mixed-global row lost the per-member quarantine qualifier:\n%s", mixed)
 	}
 
@@ -142,7 +142,7 @@ func TestCLIMixedScopeGlobalDetailStatistics12897(t *testing.T) {
 	if strings.Contains(mixed, config.ZoneQuarantineLiveCountersUnavailable) {
 		t.Errorf("mixed-global detail block shows whole-rule unavailable disposition (#12897):\n%s", mixed)
 	}
-	if !strings.Contains(mixed, "z214 "+config.ZoneQuarantinePoliciesQualifier) {
+	if !strings.Contains(mixed, "zzq8100 "+config.ZoneQuarantinePoliciesQualifier) {
 		t.Errorf("mixed-global detail block lost the per-member quarantine qualifier:\n%s", mixed)
 	}
 

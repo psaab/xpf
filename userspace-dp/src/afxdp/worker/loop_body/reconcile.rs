@@ -96,9 +96,9 @@ mod policy_rebind_discriminator_tests {
 pub(super) fn ancestry_source_zone_matches(
     forwarding: &crate::afxdp::ForwardingState,
     name: &str,
-    id: u16,
+    id: u32,
     any: bool,
-    actual_id: u16,
+    actual_id: u32,
 ) -> bool {
     if actual_id == 0 {
         return false;
@@ -124,11 +124,11 @@ pub(super) fn ancestry_source_zone_matches(
 pub(super) fn ancestry_destination_zone_id(
     forwarding: &crate::afxdp::ForwardingState,
     name: &str,
-    id: u16,
+    id: u32,
     any: bool,
-    fallback_id: u16,
+    fallback_id: u32,
     require_fallback: bool,
-) -> Option<u16> {
+) -> Option<u32> {
     if fallback_id == 0 {
         return None;
     }

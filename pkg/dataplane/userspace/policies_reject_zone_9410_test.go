@@ -25,7 +25,7 @@ import (
 func zones9410(pairs ...any) []ZoneSnapshot {
 	var out []ZoneSnapshot
 	for i := 0; i+1 < len(pairs); i += 2 {
-		out = append(out, ZoneSnapshot{Name: pairs[i].(string), ID: uint16(pairs[i+1].(int))})
+		out = append(out, ZoneSnapshot{Name: pairs[i].(string), ID: uint32(pairs[i+1].(int))})
 	}
 	return out
 }

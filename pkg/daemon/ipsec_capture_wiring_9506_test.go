@@ -547,7 +547,7 @@ func TestIpsecCaptureZoneOnlyRezoneRotatesAuthorityWithoutQueueKeyChange11015(t 
 		}
 	}
 	resolution := staged.zoneSnapshot.ResolveSTN("st1.0")
-	if resolution.Reason != nfqueue.ZoneReasonZoned || resolution.ZoneID != config.StableZoneID("zone-b") {
+	if resolution.Reason != nfqueue.ZoneReasonZoned || uint32(resolution.ZoneID) != config.StableZoneID("zone-b") {
 		t.Fatalf("staged zone authority=%+v, want zone-b=%d", resolution, config.StableZoneID("zone-b"))
 	}
 	_ = daemon.rollbackIpsecCaptureStage(old, staged)

@@ -439,7 +439,7 @@ impl crate::afxdp::Coordinator {
 /// held across `push`.
 pub struct AllSessionsExport {
     handle: crate::event_stream::EventStreamWorkerHandle,
-    zone_name_to_id: FxHashMap<String, u16>,
+    zone_name_to_id: FxHashMap<String, u32>,
     deltas: Vec<crate::session::SessionDelta>,
 }
 

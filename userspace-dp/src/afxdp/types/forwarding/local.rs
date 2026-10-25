@@ -11,7 +11,7 @@ pub(in crate::afxdp) struct EgressInterface {
     pub(in crate::afxdp) vlan_id: u16,
     pub(in crate::afxdp) mtu: usize,
     pub(in crate::afxdp) src_mac: [u8; 6],
-    /// #921: u16 zone ID (was `zone: String`). `0` means "unknown".
+    /// #921: u32 zone ID (was `zone: String`). `0` means "unknown".
     ///
     /// #7025: THIS IS A DEBUG-ONLY MIRROR OF
     /// [`ForwardingState::ifindex_unambiguous_zone_id`], NOT a second opinion on
@@ -43,7 +43,7 @@ pub(in crate::afxdp) struct EgressInterface {
     /// specific expected zone values for specific shapes are pinned separately
     /// by the #6713/#6722 cells, and its own doc records which mutations each
     /// of them catches rather than assuming the new one is the only guard.
-    pub(in crate::afxdp) zone_id: u16,
+    pub(in crate::afxdp) zone_id: u32,
     pub(in crate::afxdp) redundancy_group: i32,
     pub(in crate::afxdp) primary_v4: Option<Ipv4Addr>,
     pub(in crate::afxdp) primary_v6: Option<Ipv6Addr>,

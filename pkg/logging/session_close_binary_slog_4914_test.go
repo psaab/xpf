@@ -59,7 +59,7 @@ func TestSessionCloseParity_PolicyIDAndActionAcrossSinks(t *testing.T) {
 
 	reader := NewEventReader(nil, NewEventBuffer(16))
 	reader.SetPolicyNames(map[uint32]string{admittingPolicy: policyName})
-	reader.SetZoneNames(map[uint16]string{ingressZone: "trust", egressZone: "untrust"})
+	reader.SetZoneNames(map[uint32]string{uint32(ingressZone): "trust", uint32(egressZone): "untrust"})
 
 	var cbRec EventRecord
 	var cbCalls int

@@ -97,19 +97,19 @@ func TestShowPoliciesFilteredScopesUnknownAndLiteralAnyZones12094(t *testing.T) 
 func TestShowPoliciesFilteredPreservesExactQuarantinedZonePair12094(t *testing.T) {
 	c := &ctl{client: &fakeBpfrxClient{
 		getPoliciesResp: &pb.GetPoliciesResponse{Policies: []*pb.PolicyInfo{
-			{FromZone: "z214", ToZone: "untrust", Rules: []*pb.PolicyRule{{Name: "quarantined-exact", Action: "permit"}}},
+			{FromZone: "zzq8100", ToZone: "untrust", Rules: []*pb.PolicyRule{{Name: "quarantined-exact", Action: "permit"}}},
 			{FromZone: "any", ToZone: "untrust", Rules: []*pb.PolicyRule{{Name: "quarantined-wildcard", Action: "deny"}}},
-			{FromZone: "z214", ToZone: "junos-host", Rules: []*pb.PolicyRule{{Name: "quarantined-host-exact", Action: "permit"}}},
+			{FromZone: "zzq8100", ToZone: "junos-host", Rules: []*pb.PolicyRule{{Name: "quarantined-host-exact", Action: "permit"}}},
 			{FromZone: "any", ToZone: "junos-host", Rules: []*pb.PolicyRule{{Name: "quarantined-host-wildcard", Action: "deny"}}},
 		}},
 		getZonesResp: &pb.GetZonesResponse{Zones: []*pb.ZoneInfo{
-			{Name: "z174", QuarantineState: pb.ZoneQuarantineState_ZONE_QUARANTINE_STATE_NOT_QUARANTINED},
-			{Name: "z214", QuarantineState: pb.ZoneQuarantineState_ZONE_QUARANTINE_STATE_QUARANTINED},
+			{Name: "zzq17760", QuarantineState: pb.ZoneQuarantineState_ZONE_QUARANTINE_STATE_NOT_QUARANTINED},
+			{Name: "zzq8100", QuarantineState: pb.ZoneQuarantineState_ZONE_QUARANTINE_STATE_QUARANTINED},
 			{Name: "untrust", QuarantineState: pb.ZoneQuarantineState_ZONE_QUARANTINE_STATE_NOT_QUARANTINED},
 		}},
 	}}
 	out := captureStdout(t, func() {
-		if err := c.showPoliciesFiltered("z214", "untrust", false); err != nil {
+		if err := c.showPoliciesFiltered("zzq8100", "untrust", false); err != nil {
 			t.Fatalf("showPoliciesFiltered(quarantined zone): %v", err)
 		}
 	})
@@ -120,7 +120,7 @@ func TestShowPoliciesFilteredPreservesExactQuarantinedZonePair12094(t *testing.T
 		t.Fatalf("quarantined zone filter expanded a wildcard policy:\n%s", out)
 	}
 	hostOut := captureStdout(t, func() {
-		if err := c.showPoliciesFiltered("z214", "junos-host", false); err != nil {
+		if err := c.showPoliciesFiltered("zzq8100", "junos-host", false); err != nil {
 			t.Fatalf("showPoliciesFiltered(quarantined host zone): %v", err)
 		}
 	})

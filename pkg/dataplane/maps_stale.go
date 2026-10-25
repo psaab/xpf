@@ -75,8 +75,8 @@ func (m *Manager) DeleteStaleZonePairPolicies(written map[ZonePairKey]bool) {
 		if val.NumRules == 0 {
 			continue // already empty
 		}
-		fromZone := uint16(key / MaxZones)
-		toZone := uint16(key % MaxZones)
+		fromZone := key / MaxZones
+		toZone := key % MaxZones
 		zpk := ZonePairKey{FromZone: fromZone, ToZone: toZone}
 		if !written[zpk] {
 			zm.Update(key, zeroPS, ebpf.UpdateAny)

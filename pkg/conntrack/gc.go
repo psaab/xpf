@@ -362,11 +362,11 @@ func (gc *GC) sweep() time.Duration {
 		if countSessions && (!isPrimary || saturatingDeadline(val.LastSeen, uint64(val.Timeout), nil) >= now) {
 			srcKey := dataplane.SessionCountKey{
 				IP:     binary.NativeEndian.Uint32(key.SrcIP[:]),
-				ZoneID: val.IngressZone,
+				ZoneID: uint32(val.IngressZone),
 			}
 			dstKey := dataplane.SessionCountKey{
 				IP:     binary.NativeEndian.Uint32(key.DstIP[:]),
-				ZoneID: val.IngressZone,
+				ZoneID: uint32(val.IngressZone),
 			}
 			srcCounts[srcKey]++
 			dstCounts[dstKey]++
@@ -457,11 +457,11 @@ func (gc *GC) sweep() time.Duration {
 					binary.NativeEndian.Uint32(key.DstIP[12:16])
 				srcKey := dataplane.SessionCountKey{
 					IP:     srcHash,
-					ZoneID: val.IngressZone,
+					ZoneID: uint32(val.IngressZone),
 				}
 				dstKey := dataplane.SessionCountKey{
 					IP:     dstHash,
-					ZoneID: val.IngressZone,
+					ZoneID: uint32(val.IngressZone),
 				}
 				srcCounts[srcKey]++
 				dstCounts[dstKey]++

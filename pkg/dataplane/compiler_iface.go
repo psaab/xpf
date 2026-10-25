@@ -846,7 +846,7 @@ func newZoneMapState() *zoneMapState {
 
 // buildZoneConfig compiles the per-zone dataplane ZoneConfig (screen-profile
 // ID, host-inbound-traffic flags, TCP-RST) for a single security zone.
-func buildZoneConfig(zone *config.ZoneConfig, name string, zid uint16, result *CompileResult) (ZoneConfig, error) {
+func buildZoneConfig(zone *config.ZoneConfig, name string, zid uint32, result *CompileResult) (ZoneConfig, error) {
 	// Write zone_config
 	zc := ZoneConfig{
 		ZoneID: zid,
@@ -1187,7 +1187,7 @@ func (st *zoneMapState) ensureBridgeDomainMemberVLANs(dp DataPlane, cfg *config.
 // (the accumulators persist across the whole zone loop) and returns an error
 // on a hard failure; a soft skip (interface not found, VLAN create failed)
 // returns nil so the caller advances to the next interface.
-func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, result *CompileResult, name string, zone *config.ZoneConfig, zid uint16, ifaceRef string, ifaceTableID map[string]uint32) error {
+func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, result *CompileResult, name string, zone *config.ZoneConfig, zid uint32, ifaceRef string, ifaceTableID map[string]uint32) error {
 	physName, cfgName, unitNum, vlanID := resolveInterfaceRef(ifaceRef, cfg)
 
 	// Get the physical interface (cached to avoid redundant syscalls)

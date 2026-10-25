@@ -61,13 +61,13 @@ func TestZonePairPolicyAppliesToFilterPair12094(t *testing.T) {
 
 func TestZonePairPolicyAppliesToQuarantinedFilter12094(t *testing.T) {
 	cfg := zoneQuarantineCfg(t)
-	filter := NewZonePairPolicyFilter(cfg, "z214", "trust")
+	filter := NewZonePairPolicyFilter(cfg, "zzq8100", "trust")
 	tests := []struct {
 		stanza [2]string
 		want   bool
 	}{
 		{stanza: [2]string{"any", "trust"}, want: false},
-		{stanza: [2]string{"z214", "trust"}, want: true},
+		{stanza: [2]string{"zzq8100", "trust"}, want: true},
 		{stanza: [2]string{"any", "any"}, want: false},
 	}
 	for _, tt := range tests {
@@ -76,11 +76,11 @@ func TestZonePairPolicyAppliesToQuarantinedFilter12094(t *testing.T) {
 				tt.stanza[0], tt.stanza[1], got, tt.want)
 		}
 	}
-	hostFilter := NewZonePairPolicyFilter(cfg, "z214", JunosHostZone)
+	hostFilter := NewZonePairPolicyFilter(cfg, "zzq8100", JunosHostZone)
 	if !ZonePairPolicyAppliesToFilterPair(hostFilter, "any", JunosHostZone) {
 		t.Error("quarantined host filter omitted the runtime from-any exception")
 	}
-	if !ZonePairPolicyAppliesToFilterPair(hostFilter, "z214", JunosHostZone) {
+	if !ZonePairPolicyAppliesToFilterPair(hostFilter, "zzq8100", JunosHostZone) {
 		t.Error("quarantined host filter hid the exact authored stanza")
 	}
 }

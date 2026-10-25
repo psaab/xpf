@@ -52,7 +52,7 @@ func (natShowWalkDP) IsLoaded() bool { return true }
 // The three zone ids are distinct: the renderers invert the map, so a
 // collision would silently make one rule-set key unreachable.
 func (natShowWalkDP) LastApplyResult() *dataplane.ApplyResult {
-	return &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"trust": 7, "untrust": 8, "dmz": 9}}
+	return &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 7, "untrust": 8, "dmz": 9}}
 }
 
 func (d natShowWalkDP) IterateSessions(fn func(dataplane.SessionKey, dataplane.SessionValue) bool) error {

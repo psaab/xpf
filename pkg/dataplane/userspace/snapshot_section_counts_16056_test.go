@@ -94,10 +94,10 @@ func TestBuildSnapshotQuarantinedZoneCountReconciled16056(t *testing.T) {
 			Units: map[int]*config.InterfaceUnit{0: {Number: 0, Addresses: []string{"192.0.2.1/24"}}},
 		},
 	}
-	// z174/z214 is the verified colliding pair (z214 later-sorting loser).
+	// zzq17760/zzq8100 is the verified colliding pair (zzq8100 later-sorting loser).
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
-		"z174": {Name: "z174", Interfaces: []string{"ge-0/0/0"}},
-		"z214": {Name: "z214"},
+		"zzq17760": {Name: "zzq17760", Interfaces: []string{"ge-0/0/0"}},
+		"zzq8100":  {Name: "zzq8100"},
 	}
 	cfg.Security.DefaultPolicy = config.PolicyDeny
 

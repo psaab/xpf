@@ -18,8 +18,8 @@ import (
 
 type heldDownDP16582 struct{ DataPlane }
 
-func (heldDownDP16582) SetZoneConfig(uint16, ZoneConfig) error { return nil }
-func (heldDownDP16582) SetZone(int, uint16, uint16, uint32, uint8, uint8, uint32) error {
+func (heldDownDP16582) SetZoneConfig(uint32, ZoneConfig) error { return nil }
+func (heldDownDP16582) SetZone(int, uint16, uint32, uint32, uint8, uint8, uint32) error {
 	return nil
 }
 func (heldDownDP16582) AddTxPort(int) error                     { return nil }

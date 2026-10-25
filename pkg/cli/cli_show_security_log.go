@@ -32,7 +32,7 @@ func (c *CLI) showSecurityLog(args []string) error {
 	// refusing it. The unknown/none/0 sentinels select the unassigned zone 0
 	// (#3338); a named zone filter requires the apply result for name -> ID
 	// resolution (M02).
-	var zoneIDs map[string]uint16
+	var zoneIDs map[string]uint32
 	if cr != nil {
 		zoneIDs = cr.ZoneIDs
 	}
@@ -77,7 +77,7 @@ func (c *CLI) showSecurityLog(args []string) error {
 	// only when the record carries no resolved name.
 	evZoneNames := make(map[uint16]string)
 	if cr != nil {
-		evZoneNames = config.SurvivorZoneNames(cr.ZoneIDs, cfg)
+		evZoneNames = survivorZoneNames16(cr.ZoneIDs, cfg)
 	}
 	zoneName := func(stored string, id uint16) string {
 		name := stored

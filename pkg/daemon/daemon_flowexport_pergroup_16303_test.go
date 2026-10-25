@@ -297,7 +297,7 @@ func TestPerGroupCloseBaselines16303(t *testing.T) {
 		t.Fatalf("want >=2 groups per family, v9=%v ipfix=%v", vb, ib)
 	}
 	trust, untrust := config.StableZoneID("trust"), config.StableZoneID("untrust")
-	if !d.eventReader.ProcessRawEvent(openRaw16303(45678, 11, 12, trust, untrust)) {
+	if !d.eventReader.ProcessRawEvent(openRaw16303(45678, 11, 12, uint16(trust), uint16(untrust))) {
 		t.Fatal("open rejected")
 	}
 	key := flowexport.FlowKey{SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 45678, DstPort: 443, Protocol: 6}
@@ -340,7 +340,7 @@ func TestPerGroupCloseBaselines16303(t *testing.T) {
 	// 80/40; slow groups the full 280/130 (decisive sum check is the
 	// flowexport remainder test; here record counts + per-group
 	// forgetting prove each group used its own baseline path).
-	closeBuf := buildSessionCloseRawEventV4(6, [4]byte{10, 0, 0, 102}, [4]byte{192, 0, 2, 200}, 45678, 443, [4]byte{}, 0, trust, untrust)
+	closeBuf := buildSessionCloseRawEventV4(6, [4]byte{10, 0, 0, 102}, [4]byte{192, 0, 2, 200}, 45678, 443, [4]byte{}, 0, uint16(trust), uint16(untrust))
 	binary.LittleEndian.PutUint64(closeBuf[56:64], 280)
 	binary.LittleEndian.PutUint64(closeBuf[64:72], 28000)
 	binary.LittleEndian.PutUint64(closeBuf[112:120], 130)

@@ -11,7 +11,7 @@
 use super::*;
 use crate::test_zone_ids::*;
 
-fn zones_9570() -> FxHashMap<String, u16> {
+fn zones_9570() -> FxHashMap<String, u32> {
     let mut m = FxHashMap::default();
     m.insert("lan".to_string(), TEST_LAN_ZONE_ID);
     m.insert("wan".to_string(), TEST_WAN_ZONE_ID);
@@ -37,13 +37,13 @@ fn any_rule_9570(name: &str, from_zone: &str, to_zone: &str, action: &str) -> Po
 fn parse_9570(
     default_policy: &str,
     rules: &[PolicyRuleSnapshot],
-    zones: &FxHashMap<String, u16>,
+    zones: &FxHashMap<String, u32>,
 ) -> Result<PolicyState, SnapshotIntegrityError> {
     let store = PolicyCounterStore::default();
     parse_policy_state_with_counters(default_policy, rules, zones, &[], &store)
 }
 
-fn eval_9570(state: &PolicyState, from_id: u16, to_id: u16) -> PolicyAction {
+fn eval_9570(state: &PolicyState, from_id: u32, to_id: u32) -> PolicyAction {
     evaluate_policy(
         state,
         from_id,

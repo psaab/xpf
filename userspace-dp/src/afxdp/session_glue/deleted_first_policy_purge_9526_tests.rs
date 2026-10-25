@@ -43,7 +43,7 @@ fn rule(name: &str, policy_id: u32) -> crate::PolicyRuleSnapshot {
 }
 
 fn policy(rules: &[crate::PolicyRuleSnapshot]) -> PolicyState {
-    let zones: FxHashMap<String, u16> = [("lan".to_string(), 1u16), ("wan".to_string(), 2u16)]
+    let zones: FxHashMap<String, u32> = [("lan".to_string(), 1u32), ("wan".to_string(), 2u32)]
         .into_iter()
         .collect();
     parse_policy_state_with_counters("deny", rules, &zones, &[], &PolicyCounterStore::default())

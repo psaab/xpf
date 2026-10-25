@@ -2804,8 +2804,8 @@ pub(in crate::afxdp) fn parse_ipv4_session_flow_from_frame(
 pub(in crate::afxdp) enum ZoneEncodedFabricStamp {
     Absent,
     Invalid,
-    Valid(u16),
-    ValidScoped { zone_id: u16, ifindex: i32 },
+    Valid(u32),
+    ValidScoped { zone_id: u32, ifindex: i32 },
     /// #15916: V1a holds and the zone is RG-bound, but every bound RG
     /// is forwarding-active locally — the co-moved legitimate punt
     /// and a forged clone are byte-identical here. NOT dropped at
@@ -2813,7 +2813,7 @@ pub(in crate::afxdp) enum ZoneEncodedFabricStamp {
     /// host-inbound consumers until the V2 owner-RG gate proves the
     /// packet's own resolution is locally owned. Carries the local
     /// logical ifindex for the V2 (scoped) form, `None` for V1.
-    Ambiguous { zone_id: u16, ifindex: Option<i32> },
+    Ambiguous { zone_id: u32, ifindex: Option<i32> },
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -2831,7 +2831,7 @@ pub(in crate::afxdp) fn parse_zone_encoded_fabric_ingress(
     parse_zone_encoded_fabric_ingress_from_frame(frame, meta, forwarding, ha_state, now_secs)
 }
 
-/// Decode a synthetic fabric source-MAC identity. V1 carries a u16 zone id
+/// Decode a synthetic fabric source-MAC identity. V1 carries a u32 zone id
 /// at frame[10..12]; V2 carries a stable 24-bit NAT-scope id in its last three
 /// bytes and resolves that id to this node's logical ifindex.
 ///
@@ -2903,10 +2903,10 @@ pub(in crate::afxdp) fn parse_zone_encoded_fabric_ingress_from_frame(
     if frame.len() < 12 {
         return ZoneEncodedFabricStamp::Invalid;
     }
-    // #3075: zone id is a u16 carried big-endian in frame[10] (high) /
+    // #3075: zone id is a u32 carried big-endian in frame[10] (high) /
     // frame[11] (low). The old u8 scheme hardcoded frame[10]=0x00, which still
     // decodes correctly here (id < 256 has a 0 high byte).
-    let id = u16::from_be_bytes([frame[10], frame[11]]);
+    let id = u32::from(u16::from_be_bytes([frame[10], frame[11]]));
     if id == 0 || !forwarding.zone_id_to_name.contains_key(&id) {
         return ZoneEncodedFabricStamp::Invalid;
     }

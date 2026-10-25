@@ -8,7 +8,6 @@ package dataplane
 // claims are likewise skipped from every non-quarantined zone.
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -21,25 +20,22 @@ type quarantineRecordingDP13164 struct {
 
 func (*quarantineRecordingDP13164) xpfValidationPass() bool { return false }
 
-func (d *quarantineRecordingDP13164) SetZoneConfig(_ uint16, zc ZoneConfig) error {
+func (d *quarantineRecordingDP13164) SetZoneConfig(_ uint32, zc ZoneConfig) error {
 	d.calls = append(d.calls, zc)
 	return nil
 }
 
 func collidingZoneName13164(t *testing.T) string {
 	t.Helper()
-	targetID := config.StableZoneID("trust")
-	for i := 0; i < 200000; i++ {
-		candidate := fmt.Sprintf("z-coll-%d", i)
-		if config.StableZoneID(candidate) == targetID {
-			return candidate
-		}
+	// #16557 residual pair vs zzq17760 (see collidingConfig).
+	candidate := "zzq8100"
+	if config.StableZoneID(candidate) != config.StableZoneID("zzq17760") {
+		t.Fatal("premise: zzq8100/zzq17760 no longer collide")
 	}
-	t.Fatal("failed to find colliding zone name")
-	return ""
+	return candidate
 }
 
-func collidingConfig13164(t *testing.T) (*config.Config, string, uint16) {
+func collidingConfig13164(t *testing.T) (*config.Config, string, uint32) {
 	t.Helper()
 	colliding := collidingZoneName13164(t)
 	cfg := &config.Config{
@@ -52,12 +48,12 @@ func collidingConfig13164(t *testing.T) (*config.Config, string, uint16) {
 			}},
 		}},
 		Security: config.SecurityConfig{Zones: map[string]*config.ZoneConfig{
-			"trust":   {Name: "trust", TCPRst: true, Interfaces: []string{"ge-0/0/0.0", "ge-0/0/1.0"}, HostInboundTraffic: &config.HostInboundTraffic{SystemServices: []string{"ssh"}}},
-			"untrust": {Name: "untrust", Interfaces: []string{"ge-0/0/1.0"}},
-			colliding: {Name: colliding, Interfaces: []string{"ge-0/0/1.0"}},
+			"zzq17760": {Name: "zzq17760", TCPRst: true, Interfaces: []string{"ge-0/0/0.0", "ge-0/0/1.0"}, HostInboundTraffic: &config.HostInboundTraffic{SystemServices: []string{"ssh"}}},
+			"untrust":  {Name: "untrust", Interfaces: []string{"ge-0/0/1.0"}},
+			colliding:  {Name: colliding, Interfaces: []string{"ge-0/0/1.0"}},
 		}},
 	}
-	return cfg, colliding, config.StableZoneID("trust")
+	return cfg, colliding, config.StableZoneID("zzq17760")
 }
 
 func TestProgramZoneMapsQuarantineCollision13164(t *testing.T) {
@@ -80,7 +76,7 @@ func TestProgramZoneMapsQuarantineCollision13164(t *testing.T) {
 	}
 
 	for i := range 50 {
-		res := &CompileResult{ZoneIDs: make(map[string]uint16)}
+		res := &CompileResult{ZoneIDs: make(map[string]uint32)}
 		assignZoneIDs(res, cfg)
 		dp := &quarantineRecordingDP13164{}
 		if _, err := programZoneMaps(dp, cfg, res); err != nil {
@@ -93,7 +89,7 @@ func TestProgramZoneMapsQuarantineCollision13164(t *testing.T) {
 				if zc.TCPRst != 1 || zc.HostInbound&HostInboundSSH == 0 {
 					t.Fatalf("run %d: quarantined zone overwrote survivor config: %+v", i, zc)
 				}
-			} else if zc.ZoneID != config.StableZoneID("untrust") {
+			} else if uint32(zc.ZoneID) != config.StableZoneID("untrust") {
 				t.Fatalf("run %d: unexpected zone config %+v", i, zc)
 			}
 		}

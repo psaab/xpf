@@ -93,7 +93,7 @@ func (d *descriptorCoverageDP) ReadInterfaceCounters(int) (dataplane.InterfaceCo
 	return dataplane.InterfaceCounterValue{}, nil
 }
 
-func (d *descriptorCoverageDP) ReadZoneCounters(uint16, int) (dataplane.CounterValue, error) {
+func (d *descriptorCoverageDP) ReadZoneCounters(uint32, int) (dataplane.CounterValue, error) {
 	return dataplane.CounterValue{}, nil
 }
 
@@ -533,7 +533,7 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		Manager: dataplane.New(),
 		status:  status,
 		apply: &dataplane.ApplyResult{
-			ZoneIDs:   map[string]uint16{"trust": 1, "untrust": 2},
+			ZoneIDs:   map[string]uint32{"trust": 1, "untrust": 2},
 			FilterIDs: map[string]uint32{"inet:fin": 0, "inet6:fin6": 100},
 			PoolIDs:   map[string]uint8{"p1": 0},
 		},

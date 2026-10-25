@@ -45,7 +45,7 @@ func TestGetEventsPrefersStoredZoneName(t *testing.T) {
 
 	// CURRENT config reuses those IDs for different zone names (#3075).
 	dp := &histZoneGRPCDP{result: &dataplane.ApplyResult{
-		ZoneIDs: map[string]uint16{"marketing": 3, "sales": 4},
+		ZoneIDs: map[string]uint32{"marketing": 3, "sales": 4},
 	}}
 	s := &Server{eventBuf: eb, dp: dp}
 
@@ -74,7 +74,7 @@ func TestGetEventsFallsBackToCurrentMapForLegacyRecord(t *testing.T) {
 	eb.Add(logging.EventRecord{Type: "SESSION_OPEN", InZone: 3, OutZone: 4}) // no stored names
 
 	dp := &histZoneGRPCDP{result: &dataplane.ApplyResult{
-		ZoneIDs: map[string]uint16{"trust": 3, "untrust": 4},
+		ZoneIDs: map[string]uint32{"trust": 3, "untrust": 4},
 	}}
 	s := &Server{eventBuf: eb, dp: dp}
 
@@ -115,7 +115,7 @@ func TestShowSecurityLogTextPrefersStoredZoneName(t *testing.T) {
 		OutZoneName: "untrust",
 	})
 	dp := &histZoneGRPCDP{result: &dataplane.ApplyResult{
-		ZoneIDs: map[string]uint16{"marketing": 3, "sales": 4},
+		ZoneIDs: map[string]uint32{"marketing": 3, "sales": 4},
 	}}
 	s := &Server{eventBuf: eb, dp: dp}
 
@@ -137,7 +137,7 @@ func TestShowSecurityLogTextFallsBackToCurrentMapForLegacyRecord(t *testing.T) {
 	eb := logging.NewEventBuffer(16)
 	eb.Add(logging.EventRecord{Type: "SESSION_CLOSE", InZone: 3, OutZone: 4})
 	dp := &histZoneGRPCDP{result: &dataplane.ApplyResult{
-		ZoneIDs: map[string]uint16{"trust": 3, "untrust": 4},
+		ZoneIDs: map[string]uint32{"trust": 3, "untrust": 4},
 	}}
 	s := &Server{eventBuf: eb, dp: dp}
 

@@ -16,7 +16,7 @@ import (
 // scheduler-driven Active-flag toggle, and the policy hit counters.
 
 // SetZoneConfig writes a zone configuration entry.
-func (m *Manager) SetZoneConfig(zoneID uint16, cfg ZoneConfig) error {
+func (m *Manager) SetZoneConfig(zoneID uint32, cfg ZoneConfig) error {
 	zm, present, st := m.lookupMapLocked("zone_configs")
 	if st == registryFresh {
 		return fmt.Errorf("%w: zone_configs", ErrDataplaneNotArmed)
@@ -30,7 +30,7 @@ func (m *Manager) SetZoneConfig(zoneID uint16, cfg ZoneConfig) error {
 // SetZonePairPolicy writes a zone-pair policy set entry.
 // The zone_pair_policies map is an ARRAY keyed by flat index:
 // from_zone * MaxZones + to_zone.
-func (m *Manager) SetZonePairPolicy(fromZone, toZone uint16, ps PolicySet) error {
+func (m *Manager) SetZonePairPolicy(fromZone, toZone uint32, ps PolicySet) error {
 	zm, present, st := m.lookupMapLocked("zone_pair_policies")
 	if st == registryFresh {
 		return fmt.Errorf("%w: zone_pair_policies", ErrDataplaneNotArmed)
@@ -38,7 +38,7 @@ func (m *Manager) SetZonePairPolicy(fromZone, toZone uint16, ps PolicySet) error
 	if !present {
 		return fmt.Errorf("zone_pair_policies map not found")
 	}
-	key := uint32(fromZone)*MaxZones + uint32(toZone)
+	key := fromZone*MaxZones + toZone
 	return zm.Update(key, ps, ebpf.UpdateAny)
 }
 

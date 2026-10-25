@@ -78,7 +78,7 @@ func installTableDelta9752(t *testing.T, event string) dpuserspace.SessionDeltaI
 }
 
 func TestConvertCarriesTheInstallTable9752(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	_, val, ok := userspaceSessionFromDeltaV4(installTableDelta9752(t, "open"), zoneIDs)
 	if !ok {
 		t.Fatal("FIXTURE: delta did not convert")
@@ -105,7 +105,7 @@ func primaryForRG1Daemon9752() (*Daemon, *cluster.SessionSync) {
 func TestAnOpenDeltaIsSyncedWithItsInstallTable9752(t *testing.T) {
 	d, ss := primaryForRG1Daemon9752()
 	sink := &installTableSink9752{}
-	n := d.walkUserspaceSessionDeltas(ss, map[string]uint16{"lan": 1, "wan": 2},
+	n := d.walkUserspaceSessionDeltas(ss, map[string]uint32{"lan": 1, "wan": 2},
 		[]dpuserspace.SessionDeltaInfo{installTableDelta9752(t, "open")}, sink)
 	if n != 1 || len(sink.opensV4) != 1 {
 		t.Fatalf("#9752 ACCEPTANCE: the helper reported an open for a session "+
@@ -144,7 +144,7 @@ func TestCloseWalkCarriesThePurgeRetirementBit9752(t *testing.T) {
 	sink := &purgeRetirementSink9752{}
 	delta := installTableDelta9752(t, "close")
 	delta.PurgeRetirement = true
-	n := d.walkUserspaceSessionDeltas(ss, map[string]uint16{"lan": 1, "wan": 2},
+	n := d.walkUserspaceSessionDeltas(ss, map[string]uint32{"lan": 1, "wan": 2},
 		[]dpuserspace.SessionDeltaInfo{delta}, sink)
 	if n != 1 || len(sink.deletesV4) != 1 {
 		t.Fatalf("#9752: the close reached %d deletes (n=%d); the marker bit has nowhere to ride", len(sink.deletesV4), n)

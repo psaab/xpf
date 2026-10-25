@@ -321,7 +321,7 @@ func (m *Manager) syncBPFCountersLocked(status *ProcessStatus) {
 	// slot capacity by a later config keeps its retained totals but stops being
 	// counted, so its row drops out while the zone stays configured. See
 	// ReplaceZoneCounterOffsets for the full disappearance taxonomy.
-	zoneRows := make(map[uint16][2]dataplane.CounterValue, len(status.ZoneTrafficCounters))
+	zoneRows := make(map[uint32][2]dataplane.CounterValue, len(status.ZoneTrafficCounters))
 	for i := range status.ZoneTrafficCounters {
 		z := &status.ZoneTrafficCounters[i]
 		zoneRows[z.ZoneID] = [2]dataplane.CounterValue{
@@ -348,7 +348,7 @@ func (m *Manager) syncBPFCountersLocked(status *ProcessStatus) {
 	// capacity by a later config keeps its retained counts but stops being
 	// counted, so its row drops out while the zone stays configured. See
 	// ReplaceFloodCounterOffsets for the full disappearance taxonomy.
-	floodRows := make(map[uint16]dataplane.FloodState, len(status.ZoneFloodCounters))
+	floodRows := make(map[uint32]dataplane.FloodState, len(status.ZoneFloodCounters))
 	for i := range status.ZoneFloodCounters {
 		f := &status.ZoneFloodCounters[i]
 		floodRows[f.ZoneID] = dataplane.FloodState{

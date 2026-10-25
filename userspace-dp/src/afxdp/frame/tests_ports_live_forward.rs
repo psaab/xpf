@@ -967,8 +967,8 @@ fn build_live_forward_request_emits_output_filter_log_event() {
     assert_eq!(filter_event.filter_id, 0);
     assert_eq!(filter_event.term_id, 0);
     assert_eq!(filter_event.reason, FilterLogSource::Output.wire_reason());
-    assert_eq!(filter_event.ingress_zone_id, TEST_LAN_ZONE_ID);
-    assert_eq!(filter_event.egress_zone_id, TEST_WAN_ZONE_ID);
+    assert_eq!(filter_event.ingress_zone_id, TEST_LAN_ZONE_ID as u16);
+    assert_eq!(filter_event.egress_zone_id, TEST_WAN_ZONE_ID as u16);
     assert_eq!(event_handle.dataplane_event_stats().filter_log.sent, 1);
 }
 
@@ -991,7 +991,7 @@ fn build_live_forward_request_emits_output_filter_log_event() {
 /// interface. It is the house style for every fixture in this file, the field is
 /// not on the path under test, and what these tests assert is the logged
 /// `egress_zone_id`.
-fn live_forward_filter_log_zones_6722(egress_ifindex: i32) -> (ForwardingState, u16, u16) {
+fn live_forward_filter_log_zones_6722(egress_ifindex: i32) -> (ForwardingState, u32, u32) {
     let src_ip = Ipv4Addr::new(10, 0, 0, 1);
     let dst_ip = Ipv4Addr::new(198, 51, 100, 20);
     let meta = UserspaceDpMeta {
@@ -1124,8 +1124,8 @@ fn live_forward_filter_log_zones_6722(egress_ifindex: i32) -> (ForwardingState, 
     assert_eq!(filter_event.kind, DataplaneEventKind::FilterLog);
     (
         forwarding,
-        filter_event.ingress_zone_id,
-        filter_event.egress_zone_id,
+        u32::from(filter_event.ingress_zone_id),
+        u32::from(filter_event.egress_zone_id),
     )
 }
 
@@ -1148,7 +1148,7 @@ fn build_live_forward_request_logs_a_macless_egress_zone_6713() {
     let (forwarding, ingress_zone_id, egress_zone_id) =
         live_forward_filter_log_zones_6722(ZONED_TUNNEL_IFINDEX_6722);
 
-    assert_eq!(ingress_zone_id, TEST_LAN_ZONE_ID);
+    assert_eq!(ingress_zone_id, TEST_LAN_ZONE_ID as u32);
     assert_eq!(
         egress_zone_id, TEST_SIBLING_VPN_ZONE_ID_6722,
         "the filter-log record for a flow egressing a MAC-less tunnel must carry \
@@ -1176,7 +1176,7 @@ fn build_live_forward_request_logs_no_zone_for_an_ambiguous_ifindex_6722() {
     let (forwarding, ingress_zone_id, egress_zone_id) =
         live_forward_filter_log_zones_6722(SHARED_TUNNEL_IFINDEX_6722);
 
-    assert_eq!(ingress_zone_id, TEST_LAN_ZONE_ID);
+    assert_eq!(ingress_zone_id, TEST_LAN_ZONE_ID as u32);
     // #7509 retarget of this cell's non-vacuity guard. It used to read "the map
     // this site must NOT read carries a nonzero zone for the shared ifindex",
     // which stopped holding once INGRESS refused the inherited zone too. The

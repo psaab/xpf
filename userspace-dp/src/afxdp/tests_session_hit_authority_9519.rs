@@ -1114,11 +1114,11 @@ fn established_foreign_and_owner_icmp_denies_emit_policy_events_without_session_
             "{name}: policy attribution"
         );
         assert_eq!(
-            event.ingress_zone_id, expected_from_zone,
+            u32::from(event.ingress_zone_id), expected_from_zone,
             "{name}: arrival zone"
         );
         assert_eq!(
-            event.egress_zone_id, expected_to_zone,
+            u32::from(event.egress_zone_id), expected_to_zone,
             "{name}: egress zone"
         );
         let (expected_src, expected_dst) = if is_reverse {

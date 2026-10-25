@@ -1055,7 +1055,7 @@ pub(crate) struct MirrorConfigSnapshot {
 pub(crate) struct ZoneSnapshot {
     pub name: String,
     #[serde(default)]
-    pub id: u16,
+    pub id: u32,
     /// #3070: whether the zone declared a `host-inbound-traffic` stanza. When
     /// false the dataplane preserves admit-all for host-bound (local-delivery)
     /// traffic on this zone; when true it default-denies host-bound traffic

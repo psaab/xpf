@@ -14,12 +14,12 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// nodeScopedZones12247 scopes z174 to groups node0 and z214 to groups node1.
+// nodeScopedZones12247 scopes zzq17760 to groups node0 and zzq8100 to groups node1.
 // The two names fold to one StableZoneID, so each node installs one side of a
 // colliding pair and only the cross-node runtime name set sees the collision.
 const nodeScopedZones12247 = `groups {
-  node0 { security { zones { security-zone z174 { interfaces { ge-0/0/0.0; } } } } }
-  node1 { security { zones { security-zone z214 { interfaces { ge-0/0/1.0; } } } } }
+  node0 { security { zones { security-zone zzq17760 { interfaces { ge-0/0/0.0; } } } } }
+  node1 { security { zones { security-zone zzq8100 { interfaces { ge-0/0/1.0; } } } } }
 }
 apply-groups "${node}";
 interfaces {
@@ -29,8 +29,8 @@ interfaces {
 
 func parseTree12247(t *testing.T, text string) *config.ConfigTree {
 	t.Helper()
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatal("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatal("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	tree, errs := config.NewParser(text).Parse()
 	if len(errs) != 0 {
@@ -71,8 +71,8 @@ func hermeticSnapshot12247(t *testing.T) {
 func TestNodeScopedZoneQuarantineUsesThreeViewUnion12247(t *testing.T) {
 	hermeticSnapshot12247(t)
 	tree := parseTree12247(t, `groups {
-  node0 { security { zones { security-zone z174; } } }
-  node1 { security { zones { security-zone z214; } } }
+  node0 { security { zones { security-zone zzq17760; } } }
+  node1 { security { zones { security-zone zzq8100; } } }
 }
 apply-groups "${node}";`)
 
@@ -82,28 +82,28 @@ apply-groups "${node}";`)
 		wantZone       string
 		wantQuarantine bool
 	}{
-		{name: "node0", nodeID: 0, wantZone: "z174"},
-		{name: "node1", nodeID: 1, wantZone: "z214", wantQuarantine: true},
+		{name: "node0", nodeID: 0, wantZone: "zzq17760"},
+		{name: "node1", nodeID: 1, wantZone: "zzq8100", wantQuarantine: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := lenientCompile12247(t, tree, tc.nodeID)
 			if len(cfg.ZoneQuarantineNames) != 2 ||
-				cfg.ZoneQuarantineNames[0] != "z174" ||
-				cfg.ZoneQuarantineNames[1] != "z214" {
-				t.Fatalf("node%d quarantine-name union = %v, want [z174 z214]",
+				cfg.ZoneQuarantineNames[0] != "zzq17760" ||
+				cfg.ZoneQuarantineNames[1] != "zzq8100" {
+				t.Fatalf("node%d quarantine-name union = %v, want [zzq17760 zzq8100]",
 					tc.nodeID, cfg.ZoneQuarantineNames)
 			}
 			excluded := config.ZoneQuarantineExclusionsForConfig(cfg)
-			if _, ok := excluded["z214"]; !ok {
-				t.Fatalf("node%d config exclusions = %v, want peer-union loser z214",
+			if _, ok := excluded["zzq8100"]; !ok {
+				t.Fatalf("node%d config exclusions = %v, want peer-union loser zzq8100",
 					tc.nodeID, excluded)
 			}
-			if _, ok := excluded["z174"]; ok {
-				t.Fatalf("node%d config exclusions = %v, want survivor z174 retained",
+			if _, ok := excluded["zzq17760"]; ok {
+				t.Fatalf("node%d config exclusions = %v, want survivor zzq17760 retained",
 					tc.nodeID, excluded)
 			}
-			if got := config.ZoneQuarantineExcludedReason("z214", cfg); got == "" {
-				t.Fatalf("node%d did not report peer-union loser z214 as quarantined", tc.nodeID)
+			if got := config.ZoneQuarantineExcludedReason("zzq8100", cfg); got == "" {
+				t.Fatalf("node%d did not report peer-union loser zzq8100 as quarantined", tc.nodeID)
 			}
 			if len(cfg.Security.Zones) != 1 || cfg.Security.Zones[tc.wantZone] == nil {
 				t.Fatalf("node%d zones = %v, want only %q", tc.nodeID, cfg.Security.Zones, tc.wantZone)
@@ -117,16 +117,16 @@ apply-groups "${node}";`)
 			}
 			collisions := snap.zoneIDCollisions
 			if tc.wantQuarantine {
-				if len(collisions) != 1 || collisions[0].Quarantined != "z214" || collisions[0].Survivor != "z174" {
-					t.Fatalf("node%d collision records = %+v, want z214 quarantined in favor of z174", tc.nodeID, collisions)
+				if len(collisions) != 1 || collisions[0].Quarantined != "zzq8100" || collisions[0].Survivor != "zzq17760" {
+					t.Fatalf("node%d collision records = %+v, want zzq8100 quarantined in favor of zzq17760", tc.nodeID, collisions)
 				}
 				if len(snap.Zones) != 0 {
-					t.Fatalf("node%d published zones = %+v, want z214 quarantined", tc.nodeID, snap.Zones)
+					t.Fatalf("node%d published zones = %+v, want zzq8100 quarantined", tc.nodeID, snap.Zones)
 				}
 				return
 			}
-			if len(collisions) != 0 || len(snap.Zones) != 1 || snap.Zones[0].Name != "z174" {
-				t.Fatalf("node%d published zones = %+v, collisions = %+v; want survivor z174", tc.nodeID, snap.Zones, collisions)
+			if len(collisions) != 0 || len(snap.Zones) != 1 || snap.Zones[0].Name != "zzq17760" {
+				t.Fatalf("node%d published zones = %+v, collisions = %+v; want survivor zzq17760", tc.nodeID, snap.Zones, collisions)
 			}
 		})
 	}
@@ -134,8 +134,8 @@ apply-groups "${node}";`)
 
 // TestNodeScopedQuarantineUnzonesLoserInterface12247 pins the interface->zone
 // map the interface and host-inbound builders read (buildInterfaceZoneMap).
-// node1's z214 loses to node0's z174, so z214's interface must resolve to no
-// zone on node1 (fail closed), while node0 keeps z174 on its own interface.
+// node1's zzq8100 loses to node0's zzq17760, so zzq8100's interface must resolve to no
+// zone on node1 (fail closed), while node0 keeps zzq17760 on its own interface.
 func TestNodeScopedQuarantineUnzonesLoserInterface12247(t *testing.T) {
 	tree := parseTree12247(t, nodeScopedZones12247)
 	for _, tc := range []struct {
@@ -144,8 +144,8 @@ func TestNodeScopedQuarantineUnzonesLoserInterface12247(t *testing.T) {
 		iface  string
 		want   string
 	}{
-		{nodeID: 0, zone: "z174", iface: "ge-0/0/0.0", want: "z174"},
-		{nodeID: 1, zone: "z214", iface: "ge-0/0/1.0", want: ""},
+		{nodeID: 0, zone: "zzq17760", iface: "ge-0/0/0.0", want: "zzq17760"},
+		{nodeID: 1, zone: "zzq8100", iface: "ge-0/0/1.0", want: ""},
 	} {
 		cfg := lenientCompile12247(t, tree, tc.nodeID)
 		// The authored claim must exist, or an empty result below would pass
@@ -163,8 +163,8 @@ func TestNodeScopedQuarantineUnzonesLoserInterface12247(t *testing.T) {
 // partial republish (UpdatePolicyScheduleState) on node1. It rebuilds policies
 // from raw cfg while inheriting the full build's reduced zones, so it must
 // re-scrub against the same runtime name set (quarantinedZoneNamesForConfig).
-// Scrubbing against node1's own zones alone would keep the trust->z214 rule
-// with z214 absent from the published zones, which the Rust
+// Scrubbing against node1's own zones alone would keep the trust->zzq8100 rule
+// with zzq8100 absent from the published zones, which the Rust
 // UnresolvableZoneReference preflight rejects as a whole snapshot (#6480).
 func TestSchedulerRepublishScrubsNodeScopedLoser12247(t *testing.T) {
 	hermeticSnapshot12247(t)
@@ -180,7 +180,7 @@ security {
         scheduler-name workhours;
       }
     }
-    from-zone trust to-zone z214 {
+    from-zone trust to-zone zzq8100 {
       policy peer-loser-allow {
         match { source-address any; destination-address any; application any; }
         then { permit; }
@@ -190,8 +190,8 @@ security {
   }
 }`)
 	cfg := lenientCompile12247(t, tree, 1)
-	if !schedPolicyPresentInConfig12247(cfg, "z214", "peer-loser-allow") {
-		t.Fatal("precondition: node1 config does not carry the trust->z214 scheduled permit")
+	if !schedPolicyPresentInConfig12247(cfg, "zzq8100", "peer-loser-allow") {
+		t.Fatal("precondition: node1 config does not carry the trust->zzq8100 scheduled permit")
 	}
 
 	dir, err := os.MkdirTemp("", "x12247")
@@ -212,13 +212,13 @@ security {
 	if err != nil {
 		t.Fatalf("build lastSnapshot: %v", err)
 	}
-	// Precondition: the full build already quarantined z214 and dropped its rule.
+	// Precondition: the full build already quarantined zzq8100 and dropped its rule.
 	assertNoDanglingZoneRef5328(t, m.lastSnapshot)
-	if len(m.lastSnapshot.zoneIDCollisions) != 1 || m.lastSnapshot.zoneIDCollisions[0].Quarantined != "z214" {
-		t.Fatalf("seed collisions = %+v, want z214 quarantined", m.lastSnapshot.zoneIDCollisions)
+	if len(m.lastSnapshot.zoneIDCollisions) != 1 || m.lastSnapshot.zoneIDCollisions[0].Quarantined != "zzq8100" {
+		t.Fatalf("seed collisions = %+v, want zzq8100 quarantined", m.lastSnapshot.zoneIDCollisions)
 	}
 	if schedPolicyPresent5328(m.lastSnapshot.Policies, "peer-loser-allow") {
-		t.Fatal("precondition: the full build kept the trust->z214 permit")
+		t.Fatal("precondition: the full build kept the trust->zzq8100 permit")
 	}
 
 	reqs := startArmControlServer(t, controlSock, 1)
@@ -236,7 +236,7 @@ security {
 	}
 	assertNoDanglingZoneRef5328(t, req.Snapshot)
 	if schedPolicyPresent5328(req.Snapshot.Policies, "peer-loser-allow") {
-		t.Fatal("scheduler republish reintroduced the trust->z214 permit for quarantined z214")
+		t.Fatal("scheduler republish reintroduced the trust->zzq8100 permit for quarantined zzq8100")
 	}
 	if !schedPolicyInactive5328(t, req.Snapshot.Policies, "local-allow") {
 		t.Fatal("scheduler republish did not apply the closed window to local-allow")
@@ -246,19 +246,19 @@ security {
 // TestPartialRepublishRefusesQuarantineOnlySkew12247 pins the #6480/#5680
 // skew guard (configsContentEqual) to the runtime zone-name set, which is
 // `json:"-"` and so invisible to the guard's marshal comparison. On node1,
-// config A keeps z174 in a group nothing applies and config B renames that
+// config A keeps zzq17760 in a group nothing applies and config B renames that
 // group to node0. Both compile to the same JSON (zones, policies and the
-// View-1 warning), yet B quarantines node1's z214 in favour of the peer's z174
+// View-1 warning), yet B quarantines node1's zzq8100 in favour of the peer's zzq17760
 // while A keeps it live. With A applied and B's full apply failed, a partial
-// republish of B would scrub z214's deny while inheriting A's live z214, so
-// z214 traffic would reach the global permit. Both partial-republish paths
+// republish of B would scrub zzq8100's deny while inheriting A's live zzq8100, so
+// zzq8100 traffic would reach the global permit. Both partial-republish paths
 // must refuse B, while a recompile of A stays content-equal.
 func TestPartialRepublishRefusesQuarantineOnlySkew12247(t *testing.T) {
 	hermeticSnapshot12247(t)
 	compileWithGroup := func(group string) *config.Config {
 		return lenientCompile12247(t, parseTree12247(t, `groups {
-  `+group+` { security { zones { security-zone z174; } } }
-  node1 { security { zones { security-zone z214 { interfaces { ge-0/0/1.0; } } } } }
+  `+group+` { security { zones { security-zone zzq17760; } } }
+  node1 { security { zones { security-zone zzq8100 { interfaces { ge-0/0/1.0; } } } } }
 }
 apply-groups "${node}";
 interfaces { ge-0/0/1 { unit 0 { family inet { address 10.0.1.1/24; } } } }
@@ -273,8 +273,8 @@ security {
         scheduler-name workhours;
       }
     }
-    from-zone trust to-zone z214 {
-      policy z214-deny {
+    from-zone trust to-zone zzq8100 {
+      policy zzq8100-deny {
         match { source-address any; destination-address any; application any; }
         then { deny; }
       }
@@ -304,11 +304,11 @@ security {
 	if string(jsonA) != string(jsonB) {
 		t.Fatal("fixture: renaming the unapplied group to node0 must leave node1's config JSON unchanged")
 	}
-	if reason := config.ZoneQuarantineExcludedReason("z214", cfgA); reason != "" {
-		t.Fatalf("fixture: A must keep z214 live on node1, got %s", reason)
+	if reason := config.ZoneQuarantineExcludedReason("zzq8100", cfgA); reason != "" {
+		t.Fatalf("fixture: A must keep zzq8100 live on node1, got %s", reason)
 	}
-	if config.ZoneQuarantineExcludedReason("z214", cfgB) == "" {
-		t.Fatal("fixture: B must quarantine node1's z214 in favour of the peer's z174")
+	if config.ZoneQuarantineExcludedReason("zzq8100", cfgB) == "" {
+		t.Fatal("fixture: B must quarantine node1's zzq8100 in favour of the peer's zzq17760")
 	}
 	if routeOnlyPublishHybrid(compileWithGroup("unused"), cfgA) {
 		t.Fatal("a distinct recompile of A was treated as a hybrid (false refusal)")
@@ -333,8 +333,8 @@ security {
 		t.Fatalf("build lastSnapshot: %v", err)
 	}
 	applied := m.lastSnapshot
-	if !zonePublished12247(applied, "z214") || !schedPolicyPresent5328(applied.Policies, "z214-deny") {
-		t.Fatal("precondition: applied A must install z214 together with its deny")
+	if !zonePublished12247(applied, "zzq8100") || !schedPolicyPresent5328(applied.Policies, "zzq8100-deny") {
+		t.Fatal("precondition: applied A must install zzq8100 together with its deny")
 	}
 
 	// One slot, so a regression ships its hybrid instead of failing to dial.
@@ -344,14 +344,14 @@ security {
 		select {
 		case req := <-reqs:
 			if req.Snapshot != nil {
-				shipped = fmt.Sprintf("z214 live=%v, z214-deny kept=%v",
-					zonePublished12247(req.Snapshot, "z214"),
-					schedPolicyPresent5328(req.Snapshot.Policies, "z214-deny"))
+				shipped = fmt.Sprintf("zzq8100 live=%v, zzq8100-deny kept=%v",
+					zonePublished12247(req.Snapshot, "zzq8100"),
+					schedPolicyPresent5328(req.Snapshot.Policies, "zzq8100-deny"))
 			}
 		case <-time.After(10 * time.Second):
 		}
 		t.Fatalf("scheduler republish of B over applied A was accepted (%s): B's "+
-			"quarantine scrubbed z214's deny while A's z214 stayed live (#6480)", shipped)
+			"quarantine scrubbed zzq8100's deny while A's zzq8100 stayed live (#6480)", shipped)
 	} else if !strings.Contains(err.Error(), "refusing scheduled-policy republish") {
 		t.Fatalf("scheduler republish error = %q, want the #6480 skew refusal", err)
 	}
@@ -404,10 +404,10 @@ func schedPolicyPresentInConfig12247(cfg *config.Config, toZone, name string) bo
 // therefore asserts strict acceptance, not the pre-#13113 collision
 // (#13361).
 func TestGroupOnlyZoneNameDoesNotQuarantineLiveZone12247(t *testing.T) {
+	// #16557: no short name folds to "<*>" under the u32 fold in test
+	// time; the wildcard row's point is structural (a template claims no
+	// id, #13113), so it needs no fold premise.
 	const wildcardCollider = "z65162"
-	if config.StableZoneID("<*>") != config.StableZoneID(wildcardCollider) {
-		t.Fatalf("test premise broken: %q no longer folds to the id of `<*>`", wildcardCollider)
-	}
 	hermeticSnapshot12247(t)
 	liveZone := func(name string) string {
 		return "security { zones { security-zone " + name + ` { interfaces { ge-0/0/0.0; } } } }
@@ -422,9 +422,9 @@ interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } } }`
 	}{
 		{
 			name:       "group nothing applies",
-			text:       "groups { unused { security { zones { security-zone z174; } } } }\n" + liveZone("z214"),
-			live:       "z214",
-			phantom:    "z174",
+			text:       "groups { unused { security { zones { security-zone zzq17760; } } } }\n" + liveZone("zzq8100"),
+			live:       "zzq8100",
+			phantom:    "zzq17760",
 			strictColl: true,
 		},
 		{
@@ -436,9 +436,9 @@ interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } } }`
 		},
 		{
 			name:       "group applied under another stanza",
-			text:       "groups { g1 { security { zones { security-zone z174; } } } }\nsystem { apply-groups g1; host-name p; }\n" + liveZone("z214"),
-			live:       "z214",
-			phantom:    "z174",
+			text:       "groups { g1 { security { zones { security-zone zzq17760; } } } }\nsystem { apply-groups g1; host-name p; }\n" + liveZone("zzq8100"),
+			live:       "zzq8100",
+			phantom:    "zzq17760",
 			strictColl: true,
 		},
 	} {
@@ -489,26 +489,26 @@ interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } } }`
 // which installs both names, still quarantines its own collision.
 func TestGenericOnlyZoneNameDoesNotQuarantineOnClusterNodes12247(t *testing.T) {
 	tree := parseTree12247(t, `groups {
-  "${node}" { security { zones { security-zone z174; } } }
+  "${node}" { security { zones { security-zone zzq17760; } } }
   node0 { system { host-name n0; } }
   node1 { system { host-name n1; } }
 }
 apply-groups "${node}";
-security { zones { security-zone z214; } }`)
+security { zones { security-zone zzq8100; } }`)
 	generic := lenientCompile12247(t, tree, -1)
-	if generic.Security.Zones["z174"] == nil || config.ZoneQuarantineExcludedReason("z214", generic) == "" {
-		t.Fatalf("generic compile: zones %v, want z174 installed and z214 quarantined by it", generic.Security.Zones)
+	if generic.Security.Zones["zzq17760"] == nil || config.ZoneQuarantineExcludedReason("zzq8100", generic) == "" {
+		t.Fatalf("generic compile: zones %v, want zzq17760 installed and zzq8100 quarantined by it", generic.Security.Zones)
 	}
 	for _, nodeID := range []int{0, 1} {
 		cfg := lenientCompile12247(t, tree, nodeID)
-		if cfg.Security.Zones["z174"] != nil || cfg.Security.Zones["z214"] == nil {
-			t.Fatalf("node%d precondition: zones %v, want z214 without z174", nodeID, cfg.Security.Zones)
+		if cfg.Security.Zones["zzq17760"] != nil || cfg.Security.Zones["zzq8100"] == nil {
+			t.Fatalf("node%d precondition: zones %v, want zzq8100 without zzq17760", nodeID, cfg.Security.Zones)
 		}
-		if slices.Contains(cfg.ZoneQuarantineNames, "z174") {
-			t.Fatalf("node%d runtime names %v include generic-only z174", nodeID, cfg.ZoneQuarantineNames)
+		if slices.Contains(cfg.ZoneQuarantineNames, "zzq17760") {
+			t.Fatalf("node%d runtime names %v include generic-only zzq17760", nodeID, cfg.ZoneQuarantineNames)
 		}
-		if reason := config.ZoneQuarantineExcludedReason("z214", cfg); reason != "" {
-			t.Fatalf("node%d quarantined live z214 for a zone no cluster node installs: %s", nodeID, reason)
+		if reason := config.ZoneQuarantineExcludedReason("zzq8100", cfg); reason != "" {
+			t.Fatalf("node%d quarantined live zzq8100 for a zone no cluster node installs: %s", nodeID, reason)
 		}
 	}
 }

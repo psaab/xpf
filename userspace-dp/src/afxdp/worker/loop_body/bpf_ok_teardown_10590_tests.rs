@@ -99,10 +99,10 @@ fn rule_with_zones(
 }
 
 fn policy(rules: &[crate::PolicyRuleSnapshot]) -> PolicyState {
-    let zones: FxHashMap<String, u16> = [
-        ("lan".to_string(), 1u16),
-        ("wan".to_string(), 2u16),
-        ("dmz".to_string(), 3u16),
+    let zones: FxHashMap<String, u32> = [
+        ("lan".to_string(), 1u32),
+        ("wan".to_string(), 2u32),
+        ("dmz".to_string(), 3u32),
     ]
     .into_iter()
     .collect();
@@ -241,8 +241,8 @@ fn record_for(
     key: &SessionKey,
     rule_id: &str,
     policy_id: u32,
-    ingress_zone: u16,
-    egress_zone: u16,
+    ingress_zone: u32,
+    egress_zone: u32,
 ) -> crate::protocol::PolicySessionRebind {
     crate::protocol::PolicySessionRebind {
         family: if key.addr_family as i32 == libc::AF_INET6 {

@@ -15,7 +15,7 @@ use crate::test_zone_ids::*;
 use rustc_hash::FxHashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-fn test_zone_map() -> FxHashMap<String, u16> {
+fn test_zone_map() -> FxHashMap<String, u32> {
     let mut m = FxHashMap::default();
     m.insert("trust".to_string(), 1);
     m.insert("untrust".to_string(), 2);
@@ -348,8 +348,8 @@ fn test_encode_session_close_rt_flow_v4_wire_layout() {
         None,
         40000,
         0,
-        TEST_TRUST_ZONE_ID,
-        TEST_UNTRUST_ZONE_ID,
+        TEST_TRUST_ZONE_ID as u16,
+        TEST_UNTRUST_ZONE_ID as u16,
         88, // #3056: admitting policy id (rides [136:140] on a close)
         41, // #11698: configuration generation paired with the policy ID
         1,
@@ -390,8 +390,8 @@ fn test_encode_session_close_rt_flow_v4_wire_layout() {
     assert_eq!(u16::from_be_bytes([p[40], p[41]]), 12345);
     assert_eq!(u16::from_be_bytes([p[42], p[43]]), 443);
     // zones — little-endian.
-    assert_eq!(u16::from_le_bytes([p[48], p[49]]), TEST_TRUST_ZONE_ID);
-    assert_eq!(u16::from_le_bytes([p[50], p[51]]), TEST_UNTRUST_ZONE_ID);
+    assert_eq!(u16::from_le_bytes([p[48], p[49]]), TEST_TRUST_ZONE_ID as u16);
+    assert_eq!(u16::from_le_bytes([p[50], p[51]]), TEST_UNTRUST_ZONE_ID as u16);
     // event type = SESSION_CLOSE (2); protocol; address family (RT_FLOW v4).
     assert_eq!(p[52], RT_FLOW_EVENT_SESSION_CLOSE);
     assert_eq!(p[52], 2, "must equal the Go eventTypeSessionClose value");
@@ -508,8 +508,8 @@ fn test_encode_session_close_rt_flow_carries_close_reason_13971() {
             None,
             0,
             0,
-            TEST_TRUST_ZONE_ID,
-            TEST_UNTRUST_ZONE_ID,
+            TEST_TRUST_ZONE_ID as u16,
+            TEST_UNTRUST_ZONE_ID as u16,
             0,
             0,
             0,
@@ -549,8 +549,8 @@ fn test_encode_session_close_rt_flow_v6() {
         None,
         0,
         0,
-        TEST_TRUST_ZONE_ID,
-        TEST_UNTRUST_ZONE_ID,
+        TEST_TRUST_ZONE_ID as u16,
+        TEST_UNTRUST_ZONE_ID as u16,
         0, // #3056: admitting policy id
         0, // #11698: configuration generation paired with the policy ID
         0,
@@ -601,8 +601,8 @@ fn test_session_close_rt_flow_log_gate_byte() {
             None,
             0,
             0,
-            TEST_TRUST_ZONE_ID,
-            TEST_UNTRUST_ZONE_ID,
+            TEST_TRUST_ZONE_ID as u16,
+            TEST_UNTRUST_ZONE_ID as u16,
             0, // #3056: admitting policy id
             0, // #11698: configuration generation paired with the policy ID
             0,
@@ -659,8 +659,8 @@ fn test_session_create_rt_flow_wire_layout() {
         None,
         40000,
         0,
-        TEST_TRUST_ZONE_ID,
-        TEST_UNTRUST_ZONE_ID,
+        TEST_TRUST_ZONE_ID as u16,
+        TEST_UNTRUST_ZONE_ID as u16,
         42,                        // #3056: admitting policy id
         41,                        // #11698: admitting policy generation
         77,                        // #2615: ingress ifindex
@@ -751,8 +751,8 @@ fn test_session_create_rt_flow_flowexport_only_gate_clear_16579() {
         None,
         0,
         0,
-        TEST_TRUST_ZONE_ID,
-        TEST_UNTRUST_ZONE_ID,
+        TEST_TRUST_ZONE_ID as u16,
+        TEST_UNTRUST_ZONE_ID as u16,
         7,
         41,
         77,
@@ -871,10 +871,10 @@ fn test_encode_session_open_v4() {
     assert_eq!(i32::from_le_bytes([p[14], p[15], p[16], p[17]]), 3); // EgressIfindex
     assert_eq!(i32::from_le_bytes([p[18], p[19], p[20], p[21]]), 3); // TXIfindex
     assert_eq!(p[26], 0); // Flags (no fabric redirect, no fabric ingress)
-    // #3075: IngressZoneID/EgressZoneID are u16 LE at [27:29]/[29:31];
+    // #3075: IngressZoneID/EgressZoneID are u32 LE at [27:29]/[29:31];
     // Disposition moved to [31].
-    assert_eq!(u16::from_le_bytes([p[27], p[28]]), TEST_TRUST_ZONE_ID); // IngressZoneID
-    assert_eq!(u16::from_le_bytes([p[29], p[30]]), TEST_UNTRUST_ZONE_ID); // EgressZoneID
+    assert_eq!(u16::from_le_bytes([p[27], p[28]]), TEST_TRUST_ZONE_ID as u16); // IngressZoneID
+    assert_eq!(u16::from_le_bytes([p[29], p[30]]), TEST_UNTRUST_ZONE_ID as u16); // EgressZoneID
     assert_eq!(p[31], DISP_FORWARD_CANDIDATE); // Disposition
 }
 
@@ -898,8 +898,8 @@ fn test_encode_session_open_zone_id_above_255() {
         0,
     );
     let p = &frame.data[FRAME_HEADER_SIZE..];
-    assert_eq!(u16::from_le_bytes([p[27], p[28]]), 300); // IngressZoneID u16
-    assert_eq!(u16::from_le_bytes([p[29], p[30]]), 1000); // EgressZoneID u16
+    assert_eq!(u16::from_le_bytes([p[27], p[28]]), 300); // IngressZoneID u32
+    assert_eq!(u16::from_le_bytes([p[29], p[30]]), 1000); // EgressZoneID u32
     assert_eq!(p[31], DISP_FORWARD_CANDIDATE); // Disposition unshifted
 }
 
@@ -909,7 +909,7 @@ fn test_encode_session_open_zone_id_above_255() {
 fn test_encode_session_close_zone_id_above_255() {
     let frame = EventFrame::encode_session_close(7, &test_key_v4(), 1, 0, 300, 1000, false);
     let p = &frame.data[FRAME_HEADER_SIZE..];
-    // [14:18] OwnerRGID i32, [18] Flags, [19:21]/[21:23] u16 zones (#3075).
+    // [14:18] OwnerRGID i32, [18] Flags, [19:21]/[21:23] u32 zones (#3075).
     assert_eq!(u16::from_le_bytes([p[19], p[20]]), 300);
     assert_eq!(u16::from_le_bytes([p[21], p[22]]), 1000);
 }
@@ -1548,8 +1548,8 @@ fn test_encode_session_close_v4() {
         &test_key_v4(),
         1,
         FLAG_FABRIC_REDIRECT,
-        TEST_TRUST_ZONE_ID,
-        TEST_UNTRUST_ZONE_ID,
+        TEST_TRUST_ZONE_ID as u16,
+        TEST_UNTRUST_ZONE_ID as u16,
         false,
     );
 
@@ -1566,9 +1566,9 @@ fn test_encode_session_close_v4() {
     assert_eq!(i32::from_le_bytes([p[14], p[15], p[16], p[17]]), 1);
     // p[18] Flags
     assert_eq!(p[18], FLAG_FABRIC_REDIRECT);
-    // #3075: p[19:21] IngressZoneID u16 LE, p[21:23] EgressZoneID u16 LE.
-    assert_eq!(u16::from_le_bytes([p[19], p[20]]), TEST_TRUST_ZONE_ID);
-    assert_eq!(u16::from_le_bytes([p[21], p[22]]), TEST_UNTRUST_ZONE_ID);
+    // #3075: p[19:21] IngressZoneID u32 LE, p[21:23] EgressZoneID u32 LE.
+    assert_eq!(u16::from_le_bytes([p[19], p[20]]), TEST_TRUST_ZONE_ID as u16);
+    assert_eq!(u16::from_le_bytes([p[21], p[22]]), TEST_UNTRUST_ZONE_ID as u16);
 }
 
 // #2467: high (>32767) ifindexes must survive the wire encode. With the old
@@ -1605,8 +1605,8 @@ fn test_encode_session_open_high_ifindex_v4() {
     assert_eq!(i32::from_le_bytes([p[18], p[19], p[20], p[21]]), 65536); // TXIfindex
     // Downstream fields must still land at their shifted offsets (#3075: zone
     // fields are u16 LE at [27:29]/[29:31], Disposition at [31]).
-    assert_eq!(u16::from_le_bytes([p[27], p[28]]), TEST_TRUST_ZONE_ID); // IngressZoneID
-    assert_eq!(u16::from_le_bytes([p[29], p[30]]), TEST_UNTRUST_ZONE_ID); // EgressZoneID
+    assert_eq!(u16::from_le_bytes([p[27], p[28]]), TEST_TRUST_ZONE_ID as u16); // IngressZoneID
+    assert_eq!(u16::from_le_bytes([p[29], p[30]]), TEST_UNTRUST_ZONE_ID as u16); // EgressZoneID
     assert_eq!(p[31], DISP_FORWARD_CANDIDATE); // Disposition
 }
 
@@ -1619,17 +1619,17 @@ fn test_encode_session_close_high_owner_rg_v4() {
         &test_key_v4(),
         40000, // owner_rg_id > i16::MAX
         FLAG_FABRIC_REDIRECT,
-        TEST_TRUST_ZONE_ID,
-        TEST_UNTRUST_ZONE_ID,
+        TEST_TRUST_ZONE_ID as u16,
+        TEST_UNTRUST_ZONE_ID as u16,
         false,
     );
     let p = &frame.data[FRAME_HEADER_SIZE..];
     // p[6..10] SrcIP, p[10..14] DstIP, p[14..18] OwnerRGID i32 LE.
     assert_eq!(i32::from_le_bytes([p[14], p[15], p[16], p[17]]), 40000);
     assert_eq!(p[18], FLAG_FABRIC_REDIRECT); // Flags
-    // #3075: p[19:21] IngressZoneID u16 LE, p[21:23] EgressZoneID u16 LE.
-    assert_eq!(u16::from_le_bytes([p[19], p[20]]), TEST_TRUST_ZONE_ID); // IngressZoneID
-    assert_eq!(u16::from_le_bytes([p[21], p[22]]), TEST_UNTRUST_ZONE_ID); // EgressZoneID
+    // #3075: p[19:21] IngressZoneID u32 LE, p[21:23] EgressZoneID u32 LE.
+    assert_eq!(u16::from_le_bytes([p[19], p[20]]), TEST_TRUST_ZONE_ID as u16); // IngressZoneID
+    assert_eq!(u16::from_le_bytes([p[21], p[22]]), TEST_UNTRUST_ZONE_ID as u16); // EgressZoneID
 }
 
 #[test]

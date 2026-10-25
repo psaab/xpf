@@ -6,7 +6,7 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #12854 (D4-08): a StableZoneID collision loser (z214) and a reserved zone
+// #12854 (D4-08): a StableZoneID collision loser (zzq8100) and a reserved zone
 // name (junos-host) are quarantined from the scoped view, so they must not
 // be reported as addressless-enforcing (which would latch
 // HostInboundPendingIntentFromSnapshots=true forever, even when every real
@@ -15,8 +15,8 @@ import (
 // produce a per-interface DHCP-pending entry: InterfaceZoneMap omits it.
 func quarantinedAddresslessCfg12854(t *testing.T) *config.Config {
 	t.Helper()
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatalf("premise: z174/z214 must collide")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatalf("premise: zzq17760/zzq8100 must collide")
 	}
 	cfg := &config.Config{}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
@@ -38,8 +38,8 @@ func quarantinedAddresslessCfg12854(t *testing.T) *config.Config {
 		}},
 	}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
-		"z174":       {Name: "z174", Interfaces: []string{"ge-0-0-0.0"}},
-		"z214":       {Name: "z214", Interfaces: []string{"ge-0-0-1.0"}},
+		"zzq17760":   {Name: "zzq17760", Interfaces: []string{"ge-0-0-0.0"}},
+		"zzq8100":    {Name: "zzq8100", Interfaces: []string{"ge-0-0-1.0"}},
 		"junos-host": {Name: "junos-host", Interfaces: []string{"ge-0-0-2.0"}},
 		"trust":      {Name: "trust", Interfaces: []string{"ge-0-0-3.0"}},
 		"untrust":    {Name: "untrust", Interfaces: []string{"ge-0-0-3.0"}},
@@ -52,12 +52,12 @@ func TestAddresslessQuarantinedZonesNotReported12854(t *testing.T) {
 	got := addresslessEnforcingZonesFromSnapshots(cfg, buildInterfaceSnapshots(cfg))
 	for _, z := range got {
 		switch z.Zone {
-		case "z214", "junos-host":
+		case "zzq8100", "junos-host":
 			t.Errorf("quarantined/reserved zone %q reported addressless: %+v", z.Zone, got)
 		case "trust", "untrust":
 			t.Errorf("zone with only a contested interface reported addressless: %+v", got)
-		case "z174":
-			t.Errorf("survivor z174 statically addressed must not be reported")
+		case "zzq17760":
+			t.Errorf("survivor zzq17760 statically addressed must not be reported")
 		}
 	}
 }
@@ -66,7 +66,7 @@ func TestAddresslessQuarantinedInterfacesNotReported12854(t *testing.T) {
 	cfg := quarantinedAddresslessCfg12854(t)
 	got := addresslessEnforcingInterfacesFromSnapshots(cfg, buildInterfaceSnapshots(cfg))
 	for _, e := range got {
-		if e.Zone == "z214" || e.Zone == "junos-host" {
+		if e.Zone == "zzq8100" || e.Zone == "junos-host" {
 			t.Errorf("quarantined/reserved zone interface reported: %+v", e)
 		}
 		if e.Interface == "ge-0-0-3.0" {

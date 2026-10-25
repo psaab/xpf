@@ -35,7 +35,7 @@ func wgAdmissionTestSnapshot(outerZone, tunnelZone string) *ConfigSnapshot {
 	}
 }
 
-func wgAdmissionTestKey(zoneID uint16, address [4]byte) userspaceWGAdmissionKey {
+func wgAdmissionTestKey(zoneID uint32, address [4]byte) userspaceWGAdmissionKey {
 	key := userspaceWGAdmissionKey{ZoneID: zoneID, Port: 51820, AddrFamily: 2}
 	copy(key.Addr[:4], address[:])
 	return key
@@ -135,13 +135,13 @@ func TestUserspaceXDPWireGuardZoneGate11574(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		arrivalZone   uint16
-		admissionZone uint16
+		admissionZone uint32
 		wantAction    uint32
 		wantRedirect  bool
 	}{
-		{name: "cross-zone returns to kernel", arrivalZone: zoneOne, admissionZone: zoneTwo, wantAction: xdpActionPass},
-		{name: "same-zone reaches worker redirect", arrivalZone: zoneTwo, admissionZone: zoneTwo, wantAction: xdpActionDrop, wantRedirect: true},
-		{name: "ambiguous ingress is denied", arrivalZone: 0, admissionZone: zoneTwo, wantAction: xdpActionPass},
+		{name: "cross-zone returns to kernel", arrivalZone: zoneOne, admissionZone: uint32(zoneTwo), wantAction: xdpActionPass},
+		{name: "same-zone reaches worker redirect", arrivalZone: zoneTwo, admissionZone: uint32(zoneTwo), wantAction: xdpActionDrop, wantRedirect: true},
+		{name: "ambiguous ingress is denied", arrivalZone: 0, admissionZone: uint32(zoneTwo), wantAction: xdpActionPass},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			coll := loadUserspaceXDPTestCollection(t)
@@ -203,7 +203,7 @@ func TestUserspaceXDPWireGuardSNATControlSteering12119(t *testing.T) {
 	for _, tc := range []struct {
 		name              string
 		arrivalZone       uint16
-		ownerZone         uint16
+		ownerZone         uint32
 		hasOwnerAdmission bool
 		interfaceSNAT     bool
 		wgType            byte

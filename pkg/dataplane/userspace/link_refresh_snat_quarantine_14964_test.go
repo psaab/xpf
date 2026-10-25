@@ -109,8 +109,8 @@ func TestRebuildDerivedSectionsPreservesSNATOverlapQuarantine14964(t *testing.T)
 }
 
 func TestInterfaceLinkRefreshZoneQuarantineControl14964(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatalf("test premise broken: z174/z214 no longer collide")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatalf("test premise broken: zzq17760/zzq8100 no longer collide")
 	}
 	cfg := &config.Config{
 		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
@@ -118,15 +118,15 @@ func TestInterfaceLinkRefreshZoneQuarantineControl14964(t *testing.T) {
 			"ge-0/0/1": {},
 		}},
 		Security: config.SecurityConfig{Zones: map[string]*config.ZoneConfig{
-			"z174": {Name: "z174", Interfaces: []string{"ge-0/0/0"}},
-			"z214": {Name: "z214", Interfaces: []string{"ge-0/0/1"}},
+			"zzq17760": {Name: "zzq17760", Interfaces: []string{"ge-0/0/0"}},
+			"zzq8100":  {Name: "zzq8100", Interfaces: []string{"ge-0/0/1"}},
 		}},
 	}
 	m, _, setLink := interfaceLinkRefreshManager11530(t, cfg, "ge-0-0-1", 17, 1500)
 	// Pre-quarantine retained shape: both zones present and validated.
 	m.lastSnapshot.Zones = []ZoneSnapshot{
-		{Name: "z174", ID: config.StableZoneID("z174")},
-		{Name: "z214", ID: config.StableZoneID("z214")},
+		{Name: "zzq17760", ID: config.StableZoneID("zzq17760")},
+		{Name: "zzq8100", ID: config.StableZoneID("zzq8100")},
 	}
 	m.lastSnapshot.zoneIDCollisions = nil
 	m.lastSnapshot.ZoneSetValidated = true
@@ -138,20 +138,20 @@ func TestInterfaceLinkRefreshZoneQuarantineControl14964(t *testing.T) {
 	if err != nil || !published {
 		t.Fatalf("refresh = (%t, %v), want publish", published, err)
 	}
-	if len(m.lastSnapshot.zoneIDCollisions) != 1 || m.lastSnapshot.zoneIDCollisions[0].Quarantined != "z214" {
-		t.Fatalf("zone collisions = %+v, want z214 quarantined", m.lastSnapshot.zoneIDCollisions)
+	if len(m.lastSnapshot.zoneIDCollisions) != 1 || m.lastSnapshot.zoneIDCollisions[0].Quarantined != "zzq8100" {
+		t.Fatalf("zone collisions = %+v, want zzq8100 quarantined", m.lastSnapshot.zoneIDCollisions)
 	}
 	if m.lastSnapshot.ZoneSetValidated {
 		t.Fatal("ZoneSetValidated must be false while a zone is quarantined")
 	}
 	for _, z := range m.lastSnapshot.Zones {
-		if z.Name == "z214" {
-			t.Fatalf("quarantined zone z214 still published: %+v", m.lastSnapshot.Zones)
+		if z.Name == "zzq8100" {
+			t.Fatalf("quarantined zone zzq8100 still published: %+v", m.lastSnapshot.Zones)
 		}
 	}
 	for _, row := range m.lastSnapshot.Interfaces {
-		if row.Zone == "z214" {
-			t.Fatalf("interface %q remains bound to quarantined zone z214", row.Name)
+		if row.Zone == "zzq8100" {
+			t.Fatalf("interface %q remains bound to quarantined zone zzq8100", row.Name)
 		}
 	}
 }
@@ -159,7 +159,7 @@ func TestInterfaceLinkRefreshZoneQuarantineControl14964(t *testing.T) {
 func TestInterfaceLinkRefreshPreservesPriorZoneQuarantine14964(t *testing.T) {
 	cfg := interfaceLinkRefreshConfig11530()
 	m, _, setLink := interfaceLinkRefreshManager11530(t, cfg, "ge-0-0-0", 17, 1500)
-	m.lastSnapshot.zoneIDCollisions = []ZoneIDCollision{{ID: config.StableZoneID("z214"), Survivor: "z174", Quarantined: "z214"}}
+	m.lastSnapshot.zoneIDCollisions = []ZoneIDCollision{{ID: config.StableZoneID("zzq8100"), Survivor: "zzq17760", Quarantined: "zzq8100"}}
 	m.lastSnapshot.ZoneSetValidated = false
 	if hash, ok := snapshotContentHash(m.lastSnapshot); ok {
 		m.lastSnapshotHash = hash
@@ -172,7 +172,7 @@ func TestInterfaceLinkRefreshPreservesPriorZoneQuarantine14964(t *testing.T) {
 	if m.lastSnapshot.ZoneSetValidated {
 		t.Fatal("ZoneSetValidated flipped true on an already-reduced quarantined snapshot (#14964)")
 	}
-	if len(m.lastSnapshot.zoneIDCollisions) != 1 || m.lastSnapshot.zoneIDCollisions[0].Quarantined != "z214" {
+	if len(m.lastSnapshot.zoneIDCollisions) != 1 || m.lastSnapshot.zoneIDCollisions[0].Quarantined != "zzq8100" {
 		t.Fatalf("zone collisions cleared: %+v", m.lastSnapshot.zoneIDCollisions)
 	}
 }

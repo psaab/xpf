@@ -57,7 +57,7 @@ func TestTranslationHitsAreNotRenderedUnarmed_7423(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dp := &unarmedReader{}
 			cr := &dataplane.ApplyResult{
-				ZoneIDs:       map[string]uint16{"trust": 7, "untrust": 8, "dmz": 9},
+				ZoneIDs:       map[string]uint32{"trust": 7, "untrust": 8, "dmz": 9},
 				NATCounterIDs: map[string]uint32{tc.key: 5},
 			}
 			var b strings.Builder
@@ -101,7 +101,7 @@ func TestZonePairSessionCountAppearsOncePerRuleSet_7423(t *testing.T) {
 			{IsReverse: 0, Flags: dataplane.SessFlagSNAT, IngressZone: 7, EgressZone: 8},
 		},
 	}
-	cr := &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"trust": 7, "untrust": 8}}
+	cr := &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 7, "untrust": 8}}
 	var b strings.Builder
 	RenderSourceRuleDetail(context.Background(), &b, cfg, dp, func() *dataplane.ApplyResult { return cr })
 	out := b.String()
@@ -168,7 +168,7 @@ func TestZonePairSessionCountAppearsOncePerRuleSetDest_7423(t *testing.T) {
 			{IsReverse: 0, Flags: dataplane.SessFlagDNAT, IngressZone: 8, EgressZone: 9},
 		},
 	}
-	cr := &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"untrust": 8, "dmz": 9}}
+	cr := &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"untrust": 8, "dmz": 9}}
 	var b strings.Builder
 	RenderDestRuleDetail(context.Background(), &b, cfg, dp, func() *dataplane.ApplyResult { return cr })
 	out := b.String()

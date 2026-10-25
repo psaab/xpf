@@ -2707,16 +2707,16 @@ fn per_zone_reject_isolation_at_call_site_3618() {
     let _g = global_bucket_test_lock();
     reset_bucket_for_test(GeneratedErrorReason::Reject, 0);
 
-    let zone_a = 4_321u16;
-    let zone_b = 8_765u16;
+    let zone_a = 4_321u32;
+    let zone_b = 8_765u32;
     let ifidx_a = 5i32; // ingress interface in zone A (the flooded zone)
     let ifidx_b = 6i32; // ingress interface in zone B (a quiet zone)
 
     // Ingress-ifindex → from-zone map + fresh per-zone Reject buckets.
-    let mut ifindex_to_zone_id: FastMap<i32, u16> = FastMap::default();
+    let mut ifindex_to_zone_id: FastMap<i32, u32> = FastMap::default();
     ifindex_to_zone_id.insert(ifidx_a, zone_a);
     ifindex_to_zone_id.insert(ifidx_b, zone_b);
-    let mut reject_buckets: FastMap<u16, Arc<ZoneLimiter>> = FastMap::default();
+    let mut reject_buckets: FastMap<u32, Arc<ZoneLimiter>> = FastMap::default();
     reject_buckets.insert(zone_a, Arc::new(ZoneLimiter::new()));
     reject_buckets.insert(zone_b, Arc::new(ZoneLimiter::new()));
     let forwarding = ForwardingState {
@@ -2818,11 +2818,11 @@ fn egress_filtered_reject_does_not_drain_zone_token_5569() {
     let _g = global_bucket_test_lock();
     reset_bucket_for_test(GeneratedErrorReason::Reject, 0);
 
-    let zone_a = 4_321u16;
+    let zone_a = 4_321u32;
     let ifidx = 5i32;
-    let mut ifindex_to_zone_id: FastMap<i32, u16> = FastMap::default();
+    let mut ifindex_to_zone_id: FastMap<i32, u32> = FastMap::default();
     ifindex_to_zone_id.insert(ifidx, zone_a);
-    let mut reject_buckets: FastMap<u16, Arc<ZoneLimiter>> = FastMap::default();
+    let mut reject_buckets: FastMap<u32, Arc<ZoneLimiter>> = FastMap::default();
     reject_buckets.insert(zone_a, Arc::new(ZoneLimiter::new()));
 
     // Output filter on ifindex 5: accept TCP (RST permitted), discard ICMP
@@ -2966,11 +2966,11 @@ fn token_exhausted_reject_after_classify_survives_still_rate_limited_5569() {
     let _g = global_bucket_test_lock();
     reset_bucket_for_test(GeneratedErrorReason::Reject, 0);
 
-    let zone_a = 4_321u16;
+    let zone_a = 4_321u32;
     let ifidx = 5i32;
-    let mut ifindex_to_zone_id: FastMap<i32, u16> = FastMap::default();
+    let mut ifindex_to_zone_id: FastMap<i32, u32> = FastMap::default();
     ifindex_to_zone_id.insert(ifidx, zone_a);
-    let mut reject_buckets: FastMap<u16, Arc<ZoneLimiter>> = FastMap::default();
+    let mut reject_buckets: FastMap<u32, Arc<ZoneLimiter>> = FastMap::default();
     reject_buckets.insert(zone_a, Arc::new(ZoneLimiter::new()));
     let forwarding = ForwardingState {
         ifindex_to_zone_id,
@@ -3337,12 +3337,12 @@ fn stamped_fabric_reject_flood_consumes_no_budget_or_token_12051() {
     // cannot perturb the fallback if any resolution falls through.
     let _g = global_bucket_test_lock();
     reset_bucket_for_test(GeneratedErrorReason::Reject, 0);
-    let zone_a = 4_321u16;
+    let zone_a = 4_321u32;
     let mut forwarding = stamped_fabric_reject_forwarding();
     forwarding.ifindex_to_zone_id.insert(21, zone_a);
     forwarding.ifindex_to_zone_id.insert(5, zone_a);
     let zone_bucket = Arc::new(ZoneLimiter::new());
-    let mut reject_buckets: FastMap<u16, Arc<ZoneLimiter>> = FastMap::default();
+    let mut reject_buckets: FastMap<u32, Arc<ZoneLimiter>> = FastMap::default();
     reject_buckets.insert(zone_a, zone_bucket.clone());
     forwarding.reject_buckets = reject_buckets;
     let arrival_before = zone_bucket.aggregate_arrival_ns();
@@ -3943,10 +3943,10 @@ fn reject_15268_forwarding() -> (ForwardingState, std::sync::Arc<crate::filter::
     use crate::afxdp::icmp_ratelimit::ZoneLimiter;
     use crate::afxdp::types::FastMap;
     use std::sync::Arc;
-    let zone_a = 4_321u16;
-    let mut ifindex_to_zone_id: FastMap<i32, u16> = FastMap::default();
+    let zone_a = 4_321u32;
+    let mut ifindex_to_zone_id: FastMap<i32, u32> = FastMap::default();
     ifindex_to_zone_id.insert(5, zone_a);
-    let mut reject_buckets: FastMap<u16, Arc<ZoneLimiter>> = FastMap::default();
+    let mut reject_buckets: FastMap<u32, Arc<ZoneLimiter>> = FastMap::default();
     reject_buckets.insert(zone_a, Arc::new(ZoneLimiter::new()));
     let filter_state = crate::filter::parse_filter_state(
         &[crate::FirewallFilterSnapshot {

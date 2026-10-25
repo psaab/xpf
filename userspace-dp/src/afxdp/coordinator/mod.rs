@@ -969,7 +969,7 @@ impl Coordinator {
 
     /// #919: zone name → ID lookup, used by main.rs's
     /// `build_synced_session_entry` to translate legacy
-    /// `SessionSyncRequest.ingress_zone` strings to u16 IDs when
+    /// `SessionSyncRequest.ingress_zone` strings to u32 IDs when
     /// older peers don't populate the new ID fields.
     /// #7209: the session-domain handle — a cloneable, lock-free view of
     /// everything the peer-synced import path touches.
@@ -1035,7 +1035,7 @@ impl Coordinator {
         self.session_domain.test_install_local_forward_session(idx)
     }
 
-    pub fn zone_name_to_id_ref(&self) -> &FastMap<String, u16> {
+    pub fn zone_name_to_id_ref(&self) -> &FastMap<String, u32> {
         &self.forwarding.zone_name_to_id
     }
 
@@ -2148,12 +2148,12 @@ impl Coordinator {
     }
 
     /// #14619: zone ids holding a live traffic-counter slot.
-    pub fn zone_counter_slotted_zone_ids(&self) -> Vec<u16> {
+    pub fn zone_counter_slotted_zone_ids(&self) -> Vec<u32> {
         self.forwarding.zone_counter_slot_map.slotted_zone_ids()
     }
 
     /// #14619: zone ids holding a live flood-counter slot.
-    pub fn flood_counter_slotted_zone_ids(&self) -> Vec<u16> {
+    pub fn flood_counter_slotted_zone_ids(&self) -> Vec<u32> {
         self.forwarding.flood_counter_slot_map.slotted_zone_ids()
     }
 
@@ -2233,7 +2233,7 @@ impl Coordinator {
     /// be opened deliberately rather than by moving the tests inward, which
     /// would have measured the coordinator again instead of its callers.
     #[cfg(test)]
-    pub(crate) fn seed_flood_counter_for_test(&mut self, zone: u16, name: &str) {
+    pub(crate) fn seed_flood_counter_for_test(&mut self, zone: u32, name: &str) {
         use crate::afxdp::flood_counters::{
             FloodCounterSlotMap, flush_recorded_flood_counters, record_zone_flood_drop,
         };
@@ -2251,7 +2251,7 @@ impl Coordinator {
     /// into `crate::afxdp` to record and flush a zone tally itself, so binding
     /// the status publication from the caller's side needs a seeder here.
     #[cfg(test)]
-    pub(crate) fn seed_zone_traffic_counter_for_test(&mut self, zone: u16, name: &str, bytes: u64) {
+    pub(crate) fn seed_zone_traffic_counter_for_test(&mut self, zone: u32, name: &str, bytes: u64) {
         use crate::afxdp::zone_counters::{
             ZoneCounterSlotMap, flush_recorded_zone_counters, record_zone_traffic,
         };

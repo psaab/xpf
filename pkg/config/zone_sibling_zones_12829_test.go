@@ -36,42 +36,42 @@ security {
 }
 
 func TestZoneIDCollisionAcrossSiblingZonesBlocks12829(t *testing.T) {
-	if StableZoneID("z174") != StableZoneID("z214") {
-		t.Fatalf("test premise broken: z174/z214 no longer collide")
+	if StableZoneID("zzq17760") != StableZoneID("zzq8100") {
+		t.Fatalf("test premise broken: zzq17760/zzq8100 no longer collide")
 	}
 	tree := parseHierText(t, `
 security {
-    zones { security-zone z174 { } }
-    zones { security-zone z214 { } }
+    zones { security-zone zzq17760 { } }
+    zones { security-zone zzq8100 { } }
 }
 `)
 	if _, _, err := validateZoneIDCollisionAST(tree, false); err == nil {
-		t.Fatalf("strict gate accepted colliding zones split across sibling zones blocks (z174/z214 fold to %d) (#12829)", StableZoneID("z174"))
-	} else if !strings.Contains(err.Error(), "z174") || !strings.Contains(err.Error(), "z214") {
+		t.Fatalf("strict gate accepted colliding zones split across sibling zones blocks (zzq17760/zzq8100 fold to %d) (#12829)", StableZoneID("zzq17760"))
+	} else if !strings.Contains(err.Error(), "zzq17760") || !strings.Contains(err.Error(), "zzq8100") {
 		t.Fatalf("collision error must name both zones, got: %v", err)
 	}
 	if _, err := CompileConfig(tree); err == nil {
 		t.Fatalf("CompileConfig accepted colliding zones split across sibling zones blocks (#12829)")
 	}
-	// Lenient: warn, and runtime set must contain both so quarantine drops z214.
+	// Lenient: warn, and runtime set must contain both so quarantine drops zzq8100.
 	_, runtime, err := validateZoneIDCollisionAST(tree, true)
 	if err != nil {
 		t.Fatalf("lenient gate errored: %v", err)
 	}
 	found174, found214 := false, false
 	for _, n := range runtime {
-		if n == "z174" {
+		if n == "zzq17760" {
 			found174 = true
 		}
-		if n == "z214" {
+		if n == "zzq8100" {
 			found214 = true
 		}
 	}
 	if !found174 || !found214 {
 		t.Fatalf("runtime quarantine set %v must contain both colliding zones from sibling blocks (#12829)", runtime)
 	}
-	if q := QuarantinedZoneNames(runtime); q["z214"] != struct{}{} || len(q) != 1 {
-		t.Fatalf("quarantine must drop only later-sorting z214, got %v", q)
+	if q := QuarantinedZoneNames(runtime); q["zzq8100"] != struct{}{} || len(q) != 1 {
+		t.Fatalf("quarantine must drop only later-sorting zzq8100, got %v", q)
 	}
 	// End-to-end lenient compile records both names.
 	cfg, err := CompileConfigLenient(tree)
@@ -80,15 +80,15 @@ security {
 	}
 	warned := false
 	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "collision") && strings.Contains(w, "z214") {
+		if strings.Contains(w, "collision") && strings.Contains(w, "zzq8100") {
 			warned = true
 		}
 	}
 	if !warned {
 		t.Fatalf("lenient compile carried no collision warning for sibling-block pair: %v", cfg.Warnings)
 	}
-	if q := ZoneQuarantineExclusionsForConfig(cfg); q["z214"] != struct{}{} {
-		t.Fatalf("ZoneQuarantineExclusionsForConfig must quarantine z214 from second zones block, got %v (recorded %v)", q, cfg.ZoneQuarantineNames)
+	if q := ZoneQuarantineExclusionsForConfig(cfg); q["zzq8100"] != struct{}{} {
+		t.Fatalf("ZoneQuarantineExclusionsForConfig must quarantine zzq8100 from second zones block, got %v (recorded %v)", q, cfg.ZoneQuarantineNames)
 	}
 }
 

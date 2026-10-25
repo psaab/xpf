@@ -728,7 +728,7 @@ fn poll_loop_adjudicates_wg_inner_plaintext_under_the_tunnel_zone_8274() {
         batch.host_inbound_denied_packets, 0,
         "the configured WG listener must not be denied as an ordinary host-inbound service"
     );
-    let mut tunnel_zones: Vec<u16> = Vec::new();
+    let mut tunnel_zones: Vec<u32> = Vec::new();
     let mut total = 0usize;
     sessions.iter_with_origin(|_k, _d, m, _o| {
         total += 1;

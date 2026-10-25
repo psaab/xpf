@@ -59,10 +59,10 @@ fn rule(name: &str, policy_id: u32, from_zone: &str, to_zone: &str) -> crate::Po
 }
 
 fn policy(rules: &[crate::PolicyRuleSnapshot]) -> PolicyState {
-    let zones: FxHashMap<String, u16> = [
-        ("lan".to_string(), 1u16),
-        ("wan".to_string(), 2u16),
-        ("dmz".to_string(), 3u16),
+    let zones: FxHashMap<String, u32> = [
+        ("lan".to_string(), 1u32),
+        ("wan".to_string(), 2u32),
+        ("dmz".to_string(), 3u32),
     ]
     .into_iter()
     .collect();
@@ -184,7 +184,7 @@ fn entry(key: SessionKey, is_reverse: bool, counter: Option<Arc<crate::policy::P
     source_nat_static: None, }
 }
 
-fn record(ingress_zone: u16, egress_zone: u16) -> crate::protocol::PolicySessionRebind {
+fn record(ingress_zone: u32, egress_zone: u32) -> crate::protocol::PolicySessionRebind {
     let fwd = key(40001);
     crate::protocol::PolicySessionRebind {
         family: "v4".to_string(),
@@ -301,7 +301,7 @@ impl Harness {
         wait_for_iterations(&self.heartbeat, 3);
     }
 
-    fn zones(&self) -> ((u16, u16), (u16, u16)) {
+    fn zones(&self) -> ((u32, u32), (u32, u32)) {
         let map = self.synced.lock().expect("shared synced map");
         let f = map.get(&self.fwd).expect("forward half must survive every rotation");
         let r = map.get(&self.rev).expect("reverse half must survive every rotation");

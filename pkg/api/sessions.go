@@ -1028,7 +1028,7 @@ func (s *Server) sessionZonePairHandler(w http.ResponseWriter, r *http.Request) 
 		cfg = s.store.ActiveConfig()
 	}
 	if cr := s.applyResult(); cr != nil {
-		zoneNames = config.SurvivorZoneNames(cr.ZoneIDs, cfg)
+		zoneNames = survivorZoneNames16(cr.ZoneIDs, cfg)
 	}
 
 	type zpKey struct{ from, to uint16 }
@@ -1259,7 +1259,7 @@ func (s *Server) buildSessionView() sessionView {
 	v.haActiveRGFn = s.haActiveRGFn
 	cr := s.applyResult()
 	if cr != nil {
-		v.zoneNames = config.SurvivorZoneNames(cr.ZoneIDs, v.cfg)
+		v.zoneNames = survivorZoneNames16(cr.ZoneIDs, v.cfg)
 		v.policyNames = cr.PolicyNames
 		v.appNames = cr.AppNames
 	}
@@ -1273,7 +1273,7 @@ func (s *Server) buildSessionView() sessionView {
 			}
 			if zid, ok := cr.ZoneIDs[zoneName]; ok && len(zone.Interfaces) > 0 {
 				// #6960: keep EVERY bound interface (mirrors grpcapi).
-				v.zoneIfaces[zid] = append(v.zoneIfaces[zid], zone.Interfaces...)
+				v.zoneIfaces[uint16(zid)] = append(v.zoneIfaces[uint16(zid)], zone.Interfaces...)
 			}
 		}
 		table := buildSessionTable(v.cfg, s.ifindexLookup())

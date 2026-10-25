@@ -147,7 +147,7 @@ pub(super) fn stage_flow_cache_hit(
     flow: &SessionFlow,
     packet_fabric_ingress: bool,
     // #10670: validated peer-zone stamp for stamped fabric; absent otherwise.
-    fabric_arrival_zone: Option<u16>,
+    fabric_arrival_zone: Option<u32>,
     // #10314: this is the actual parent-or-overlay arrival identity. It is
     // separate from the validated stamp/overlay flag above because an
     // unstamped parent frame must not serve a cached FabricRedirect.

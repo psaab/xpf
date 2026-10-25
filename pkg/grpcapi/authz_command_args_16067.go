@@ -784,10 +784,10 @@ func matchPoliciesArgumentForms(mp *pb.MatchPoliciesRequest, base string) ([]str
 // surfaces render from. ID 0 is the no-filter sentinel, which has no
 // on-box name.
 func zoneNameForID(cfg *config.Config, id uint32) (string, bool) {
-	if cfg == nil || id == 0 || id > 65535 {
+	if cfg == nil || id == 0 {
 		return "", false
 	}
-	name := config.StableZoneIDOwnerForConfig(cfg, uint16(id))
+	name := config.StableZoneIDOwnerForConfig(cfg, id)
 	return name, name != ""
 }
 

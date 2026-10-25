@@ -39,7 +39,7 @@ pub(super) fn stage_flow_cache_seed(
     decision: SessionDecision,
     request_target_binding_index: Option<usize>,
     flow_cache_owner_rg_id: i32,
-    session_ingress_zone: Option<u16>,
+    session_ingress_zone: Option<u32>,
     flow_cache_install_failed: bool,
     // #10566: true when a counted evaluator already charged this seed
     // packet. Hit-path static ACCEPTs return false; miss-path evaluation
@@ -48,11 +48,11 @@ pub(super) fn stage_flow_cache_seed(
     flow_cache_policy_counter_idx: u32,
     flow_cache_policy_counter: &Option<std::sync::Arc<crate::policy::PolicyRuleCounter>>,
     filter_match_extra: TermMatchExtra<'static>,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
     now_secs: u64,
     // #12865: the admission-resolved egress zone captured by the caller
     // before any fabric redirect replaced the resolution.
-    admission_egress_zone: u16,
+    admission_egress_zone: u32,
     apply_nat_on_fabric: bool,
     // #16217: true when this seed comes from the fabric-adoption resolve
     // (or an adopted session-hit re-resolve): the cached entry carries
@@ -268,13 +268,13 @@ pub(super) fn stage_flow_cache_deny_seed(
     validation: ValidationState,
     decision: SessionDecision,
     flow_cache_owner_rg_id: i32,
-    ingress_zone: u16,
-    egress_zone: u16,
+    ingress_zone: u32,
+    egress_zone: u32,
     policy_counter_idx: u32,
     policy_counter: Option<std::sync::Arc<crate::policy::PolicyRuleCounter>>,
     policy_deny: Option<CachedPolicyDeny>,
     filter_match_extra: TermMatchExtra<'static>,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
     now_ns: u64,
     now_secs: u64,
     worker_ctx: &WorkerContext,

@@ -8073,7 +8073,7 @@ fn owner_rg_collect_write_failure_arms_delta_loss_16584() {
 
 /// Seed a coordinator so one zone holds a recorded flood event, exactly as a
 /// worker would leave it after `record_zone_flood_drop` + a flush.
-fn seed_flood_counter(coord: &mut afxdp::Coordinator, zone: u16, name: &str) {
+fn seed_flood_counter(coord: &mut afxdp::Coordinator, zone: u32, name: &str) {
     coord.seed_flood_counter_for_test(zone, name);
 }
 
@@ -8085,7 +8085,7 @@ fn seed_flood_counter(coord: &mut afxdp::Coordinator, zone: u16, name: &str) {
 /// which is exactly how the gap survived.
 #[test]
 fn status_refresh_publishes_flood_counters_6938() {
-    const Z: u16 = 50675; // config::StableZoneID("trust")
+    const Z: u32 = 50675; // config::StableZoneID("trust")
 
     let state = new_state(ProcessStatus::default());
     {
@@ -8138,7 +8138,7 @@ fn status_refresh_publishes_flood_counters_6938() {
 /// within one poll).
 #[test]
 fn clear_flood_counters_request_empties_the_store_6938() {
-    const Z: u16 = 50675;
+    const Z: u32 = 50675;
 
     let state = new_state(ProcessStatus::default());
     {
@@ -8373,7 +8373,7 @@ fn flood_fold_guard_does_not_accept_the_sibling_fold_6938() {
 /// which is exactly how the gap survived.
 #[test]
 fn status_refresh_publishes_zone_traffic_counters_6983() {
-    const Z: u16 = 50675; // config::StableZoneID("trust")
+    const Z: u32 = 50675; // config::StableZoneID("trust")
     const BYTES: u64 = 1500;
 
     let state = new_state(ProcessStatus::default());
@@ -9008,7 +9008,7 @@ fn session_sync_import_stores_locally_resolved_ingress_7095() {
 /// that all want the same answer: a legacy peer that sent no wire field, an
 /// interface with no cluster-stable name, and a fabric-redirected session, whose
 /// ingress interface is not knowable on this node at all (#7096 — the fabric
-/// stamp carries a u16 zone id and nothing else).
+/// stamp carries a u32 zone id and nothing else).
 #[test]
 fn session_sync_import_keeps_zero_ingress_when_unknown_7095() {
     let zones = rustc_hash::FxHashMap::default();

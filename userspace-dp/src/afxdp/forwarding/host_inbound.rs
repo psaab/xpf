@@ -753,7 +753,7 @@ fn is_ndp_type(protocol: u8, is_v6: bool, icmp_type: u8) -> bool {
 /// ICMP/ICMPv6 packets and is ignored for every other protocol (pass 0).
 pub(in crate::afxdp) fn host_inbound_admits(
     state: &ForwardingState,
-    ingress_zone_id: u16,
+    ingress_zone_id: u32,
     protocol: u8,
     dst_port: u16,
     is_v6: bool,
@@ -859,7 +859,7 @@ pub(in crate::afxdp) fn host_inbound_admits(
 #[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn host_inbound_admits_for_destination(
     state: &ForwardingState,
-    ingress_zone_id: u16,
+    ingress_zone_id: u32,
     protocol: u8,
     dst_port: u16,
     is_v6: bool,
@@ -892,7 +892,7 @@ pub(in crate::afxdp) fn host_inbound_admits_for_destination(
 pub(in crate::afxdp) fn host_inbound_admits_iface_for_destination(
     state: &ForwardingState,
     ingress_ifindex: i32,
-    ingress_zone_id: u16,
+    ingress_zone_id: u32,
     protocol: u8,
     dst_port: u16,
     is_v6: bool,
@@ -943,7 +943,7 @@ pub(in crate::afxdp) fn host_inbound_admits_iface_for_destination(
 pub(in crate::afxdp) fn host_inbound_admits_iface(
     state: &ForwardingState,
     ingress_ifindex: i32,
-    ingress_zone_id: u16,
+    ingress_zone_id: u32,
     protocol: u8,
     dst_port: u16,
     is_v6: bool,

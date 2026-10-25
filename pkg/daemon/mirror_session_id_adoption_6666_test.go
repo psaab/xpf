@@ -34,7 +34,7 @@ func delta6666(rtFlowID uint64, v6 bool) dpuserspace.SessionDeltaInfo {
 // displayed id is identical to the id RT_FLOW emits for the same session, and
 // for a peer-synced session it was not.
 func TestMirrorAdoptsCrossNodeSessionID_6666(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	const peerID = uint64(7)<<48 | 0x1234_5678
 
 	t.Run("v4 adopts", func(t *testing.T) {
@@ -70,7 +70,7 @@ func TestMirrorAdoptsCrossNodeSessionID_6666(t *testing.T) {
 // byte-identical to pre-#6666 — a fresh node-local id — or a cluster mid-upgrade
 // stamps every synced session with 0, collapsing every row onto one id.
 func TestLegacyPeerStillMintsALocalID_6666(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 
 	_, a, ok := userspaceSessionFromDeltaV4(delta6666(0, false), zoneIDs)
 	if !ok {

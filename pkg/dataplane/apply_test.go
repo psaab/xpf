@@ -14,7 +14,7 @@ import (
 
 func TestApplyResultFromCompileResultCarriesDisplayMetadata(t *testing.T) {
 	compileResult := &CompileResult{
-		ZoneIDs: map[string]uint16{
+		ZoneIDs: map[string]uint32{
 			"trust": 1,
 		},
 		ManagedInterfaces: []networkd.InterfaceConfig{

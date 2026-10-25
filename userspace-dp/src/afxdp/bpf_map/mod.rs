@@ -475,7 +475,7 @@ fn live_session_rows(
 pub(super) struct ConntrackCtx<'a> {
     pub(super) v4_fd: c_int,
     pub(super) v6_fd: c_int,
-    pub(super) zone_name_to_id: &'a FastMap<String, u16>,
+    pub(super) zone_name_to_id: &'a FastMap<String, u32>,
     /// `security alg <proto> disable` bitfield (#2008 H3/H4), carried from
     /// ForwardingState so the mirrored conntrack entry's alg_type honours
     /// the operator's disable knobs.
@@ -746,15 +746,15 @@ enum ConntrackEntrySnapshotData {
 #[inline]
 fn restamp_bpf_value_v4(value: &mut BpfSessionValueV4, metadata: &SessionMetadata) {
     value.policy_id = metadata.policy_id;
-    value.ingress_zone = metadata.ingress_zone;
-    value.egress_zone = metadata.egress_zone;
+    value.ingress_zone = metadata.ingress_zone as u16;
+    value.egress_zone = metadata.egress_zone as u16;
 }
 
 #[inline]
 fn restamp_bpf_value_v6(value: &mut BpfSessionValueV6, metadata: &SessionMetadata) {
     value.policy_id = metadata.policy_id;
-    value.ingress_zone = metadata.ingress_zone;
-    value.egress_zone = metadata.egress_zone;
+    value.ingress_zone = metadata.ingress_zone as u16;
+    value.egress_zone = metadata.egress_zone as u16;
 }
 
 // #4983: WHERE the ingress-identity pair sits, not just how big the struct is.
@@ -860,8 +860,8 @@ pub(super) struct ConntrackPublishRecord {
     pub(super) is_reverse: bool,
     pub(super) ingress_ifindex: u32,
     pub(super) ingress_vlan_id: u16,
-    pub(super) ingress_zone: u16,
-    pub(super) egress_zone: u16,
+    pub(super) ingress_zone: u32,
+    pub(super) egress_zone: u32,
     pub(super) app_id: u16,
     pub(super) session_id: u64,
     pub(super) cluster_synced: bool,
@@ -1050,7 +1050,7 @@ pub(crate) fn publish_bpf_conntrack_entry(
     key: &SessionKey,
     decision: SessionDecision,
     metadata: &SessionMetadata,
-    zone_name_to_id: &FastMap<String, u16>,
+    zone_name_to_id: &FastMap<String, u32>,
     alg_disable_flags: u8,
     app_id: u16,
     session_id: u64,
@@ -1080,7 +1080,7 @@ pub(crate) fn publish_bpf_conntrack_entry_with_source_nat(
     key: &SessionKey,
     decision: SessionDecision,
     metadata: &SessionMetadata,
-    zone_name_to_id: &FastMap<String, u16>,
+    zone_name_to_id: &FastMap<String, u32>,
     alg_disable_flags: u8,
     app_id: u16,
     session_id: u64,
@@ -1115,7 +1115,7 @@ fn publish_bpf_conntrack_entry_raw(
     key: &SessionKey,
     decision: SessionDecision,
     metadata: &SessionMetadata,
-    _zone_name_to_id: &FastMap<String, u16>,
+    _zone_name_to_id: &FastMap<String, u32>,
     // `security alg <proto> disable` bitfield (#2008 H3/H4). Carried from
     // ForwardingState so the session's alg_type honours the operator's
     // disable knobs instead of being hardcoded to 0.
@@ -1159,7 +1159,7 @@ fn publish_bpf_conntrack_entry_raw(
             });
         });
     }
-    // #919: zones are now u16 in SessionMetadata; the round-trip
+    // #919: zones are now u32 in SessionMetadata; the round-trip
     // name→id lookup the old code did is gone.
     let ingress_zone_id = metadata.ingress_zone;
     let egress_zone_id = metadata.egress_zone;
@@ -1261,7 +1261,7 @@ pub(crate) fn publish_bpf_conntrack_entry_under_gate_with_source_nat(
     key: &SessionKey,
     decision: SessionDecision,
     metadata: &SessionMetadata,
-    zone_name_to_id: &FastMap<String, u16>,
+    zone_name_to_id: &FastMap<String, u32>,
     alg_disable_flags: u8,
     app_id: u16,
     session_id: u64,

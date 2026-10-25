@@ -33,9 +33,9 @@ pub(super) struct NoRoutePolicyAdjudication {
     /// arm's policy gate — the NAT translation fences and the
     /// `stage_flow_cache_deny_seed` call — must see THIS value, not the raw
     /// stamp (the same shadow discipline the session-miss block applies).
-    pub(super) gated_ingress_zone_override: Option<u16>,
-    pub(super) from_zone_id: u16,
-    pub(super) to_zone_id: u16,
+    pub(super) gated_ingress_zone_override: Option<u32>,
+    pub(super) from_zone_id: u32,
+    pub(super) to_zone_id: u32,
     /// The flow-backed/flowless distinction in ONE place, evaluated on the
     /// POST-translation destination port (`None` keeps the #7480/#3291
     /// flowless fail-closed contract: port-bearing terms do not match).
@@ -88,7 +88,7 @@ pub(super) fn noroute_policy_adjudication(
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     now_secs: u64,
     ingress_logical: i32,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
     resolution: ForwardingResolution,
     nat: crate::nat::NatDecision,
     flow_backed: bool,

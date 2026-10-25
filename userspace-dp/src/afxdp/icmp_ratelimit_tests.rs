@@ -209,8 +209,8 @@ use std::sync::Arc;
 
 /// Build a `ForwardingState` carrying a fresh per-zone Reject limiter for
 /// each given zone id (#3618 test helper; #9901 F-074: limiters, not buckets).
-fn forwarding_with_reject_zones(zone_ids: &[u16]) -> ForwardingState {
-    let mut reject_buckets: FastMap<u16, Arc<ZoneLimiter>> = FastMap::default();
+fn forwarding_with_reject_zones(zone_ids: &[u32]) -> ForwardingState {
+    let mut reject_buckets: FastMap<u32, Arc<ZoneLimiter>> = FastMap::default();
     for &id in zone_ids {
         reject_buckets.insert(id, Arc::new(ZoneLimiter::new()));
     }
@@ -223,10 +223,10 @@ fn forwarding_with_reject_zones(zone_ids: &[u16]) -> ForwardingState {
 /// #5856 test helper: build a `ForwardingState` carrying a fresh per-zone
 /// limiter for EVERY reason (Reject, Time-Exceeded, Packet-Too-Big) for each
 /// given zone id — the shape `populate_zones` produces for a configured zone.
-fn forwarding_with_all_zone_buckets(zone_ids: &[u16]) -> ForwardingState {
-    let mut reject_buckets: FastMap<u16, Arc<ZoneLimiter>> = FastMap::default();
-    let mut time_exceeded_buckets: FastMap<u16, Arc<ZoneLimiter>> = FastMap::default();
-    let mut packet_too_big_buckets: FastMap<u16, Arc<ZoneLimiter>> = FastMap::default();
+fn forwarding_with_all_zone_buckets(zone_ids: &[u32]) -> ForwardingState {
+    let mut reject_buckets: FastMap<u32, Arc<ZoneLimiter>> = FastMap::default();
+    let mut time_exceeded_buckets: FastMap<u32, Arc<ZoneLimiter>> = FastMap::default();
+    let mut packet_too_big_buckets: FastMap<u32, Arc<ZoneLimiter>> = FastMap::default();
     for &id in zone_ids {
         reject_buckets.insert(id, Arc::new(ZoneLimiter::new()));
         time_exceeded_buckets.insert(id, Arc::new(ZoneLimiter::new()));
@@ -275,8 +275,8 @@ fn time_exceeded_per_zone_flood_does_not_starve_other_zone_5856() {
     let _g = global_bucket_test_lock();
     let reason = GeneratedErrorReason::TimeExceeded;
     // Sparse, realistic stable-name-hash zone ids (NOT dense 1,2).
-    let zone_a = 41_337u16;
-    let zone_b = 9_002u16;
+    let zone_a = 41_337u32;
+    let zone_b = 9_002u32;
     let t0 = 3_100_000_000u64;
     let forwarding = forwarding_with_all_zone_buckets(&[zone_a, zone_b]);
     // Drain zone A at a frozen instant. #15248: burst 260 => fair share
@@ -315,8 +315,8 @@ fn time_exceeded_per_zone_flood_does_not_starve_other_zone_5856() {
 fn packet_too_big_per_zone_flood_does_not_starve_other_zone_5856() {
     let _g = global_bucket_test_lock();
     let reason = GeneratedErrorReason::PacketTooBig;
-    let zone_a = 41_337u16;
-    let zone_b = 9_002u16;
+    let zone_a = 41_337u32;
+    let zone_b = 9_002u32;
     let t0 = 3_200_000_000u64;
     let forwarding = forwarding_with_all_zone_buckets(&[zone_a, zone_b]);
     for i in 0..4 {
@@ -360,7 +360,7 @@ fn generated_error_unknown_and_unzoned_share_fallback_bucket_5856() {
         reset_bucket_for_test(reason, t0);
         // Empty map: every zone id resolves to the fallback.
         let forwarding = ForwardingState::default();
-        let unknown = 55_555u16;
+        let unknown = 55_555u32;
         // burst = 130 on the shared fallback (#15248: overflow fair share
         // exactly 2): an unknown-id and an unzoned (id 0) error each take
         // one token; the third is denied.
@@ -404,8 +404,8 @@ fn generated_error_aggregate_counter_sums_across_zones_5856() {
     ] {
         let t0 = 8_100_000_000u64;
         reset_bucket_for_test(reason, t0); // aggregate -> 0
-        let zone_a = 111u16;
-        let zone_b = 222u16;
+        let zone_a = 111u32;
+        let zone_b = 222u32;
         let forwarding = forwarding_with_all_zone_buckets(&[zone_a, zone_b]);
         let before = rate_limited_count(reason);
         let k1 = 3u64;
@@ -466,8 +466,8 @@ fn generated_error_aggregate_counter_sums_across_zones_5856() {
 #[test]
 fn generated_error_reason_and_zone_isolation_5856() {
     let _g = global_bucket_test_lock();
-    let zone_a = 700u16;
-    let zone_b = 701u16;
+    let zone_a = 700u32;
+    let zone_b = 701u32;
     let t0 = 10_100_000_000u64;
     let forwarding = forwarding_with_all_zone_buckets(&[zone_a, zone_b]);
     // Drain zone A's Time-Exceeded bucket (burst = 1).
@@ -539,8 +539,8 @@ fn generated_error_reason_and_zone_isolation_5856() {
 fn reject_per_zone_flood_does_not_starve_other_zone_3618() {
     let _g = global_bucket_test_lock();
     // Sparse, realistic stable-name-hash zone ids (NOT dense 1,2).
-    let zone_a = 41_337u16;
-    let zone_b = 9_002u16;
+    let zone_a = 41_337u32;
+    let zone_b = 9_002u32;
     let t0 = 3_000_000_000u64;
     let forwarding = forwarding_with_reject_zones(&[zone_a, zone_b]);
     // Drain zone A at a frozen instant. #15248: burst 260 => fair share 4.
@@ -574,7 +574,7 @@ fn reject_unknown_and_unzoned_share_fallback_bucket_3618() {
     reset_bucket_for_test(GeneratedErrorReason::Reject, t0);
     // Empty map: every zone id resolves to the fallback.
     let forwarding = ForwardingState::default();
-    let unknown = 55_555u16;
+    let unknown = 55_555u32;
     // burst = 130 on the shared fallback (#15248: overflow fair share 2):
     // an unknown-id reject and an unzoned (id 0) reject each take one
     // token; the third is denied.
@@ -614,8 +614,8 @@ fn reject_aggregate_counter_sums_across_zones_3618() {
     let _g = global_bucket_test_lock();
     let t0 = 8_000_000_000u64;
     reset_bucket_for_test(GeneratedErrorReason::Reject, t0); // aggregate -> 0
-    let zone_a = 111u16;
-    let zone_b = 222u16;
+    let zone_a = 111u32;
+    let zone_b = 222u32;
     let forwarding = forwarding_with_reject_zones(&[zone_a, zone_b]);
     let before = rate_limited_count(GeneratedErrorReason::Reject);
     let k1 = 3u64;
@@ -672,7 +672,7 @@ fn reject_per_zone_isolated_from_other_reasons_3618() {
     let _g = global_bucket_test_lock();
     let t0 = 10_000_000_000u64;
     reset_bucket_for_test(GeneratedErrorReason::TimeExceeded, t0);
-    let zone_a = 700u16;
+    let zone_a = 700u32;
     let forwarding = forwarding_with_reject_zones(&[zone_a]);
     // Drain zone A's Reject bucket (burst = 1).
     assert!(allow_generated_reject_at(
@@ -786,7 +786,7 @@ fn low_bit_neighbors_separate_under_most_seeds_9901() {
 fn per_source_flood_does_not_starve_other_source_9901() {
     let _g = global_bucket_test_lock();
     let reason = GeneratedErrorReason::Reject;
-    let zone = 41_337u16;
+    let zone = 41_337u32;
     let t0 = 13_100_000_000u64;
     reset_bucket_for_test(reason, t0); // aggregate -> 0
     let forwarding = forwarding_with_reject_zones(&[zone]);
@@ -823,7 +823,7 @@ fn per_source_flood_does_not_starve_other_source_9901() {
 fn zone_aggregate_cap_survives_many_sources_9901() {
     let _g = global_bucket_test_lock();
     let reason = GeneratedErrorReason::TimeExceeded;
-    let zone = 9_002u16;
+    let zone = 9_002u32;
     let t0 = 13_200_000_000u64;
     let forwarding = forwarding_with_all_zone_buckets(&[zone]);
     let sources = distinct_slot_sources(5);
@@ -848,7 +848,7 @@ fn zone_aggregate_cap_survives_many_sources_9901() {
 fn colliding_sources_share_one_slot_budget_9901() {
     let _g = global_bucket_test_lock();
     let reason = GeneratedErrorReason::PacketTooBig;
-    let zone = 7_700u16;
+    let zone = 7_700u32;
     let t0 = 13_300_000_000u64;
     let forwarding = forwarding_with_all_zone_buckets(&[zone]);
     let a = src_a();
@@ -884,7 +884,7 @@ fn fallback_limiter_keeps_per_source_fairness_9901() {
     let t0 = 13_400_000_000u64;
     reset_bucket_for_test(reason, t0);
     let forwarding = ForwardingState::default();
-    let unknown = 55_555u16;
+    let unknown = 55_555u32;
     let pair = distinct_slot_sources(2);
     let (a, b) = (pair[0], pair[1]);
     let (rate, burst) = agg_for_share(1000, 100);
@@ -914,7 +914,7 @@ fn fallback_limiter_keeps_per_source_fairness_9901() {
 fn source_deny_consumes_no_aggregate_token_9901() {
     let _g = global_bucket_test_lock();
     let reason = GeneratedErrorReason::TimeExceeded;
-    let zone = 8_800u16;
+    let zone = 8_800u32;
     let t0 = 13_500_000_000u64;
     let forwarding = forwarding_with_all_zone_buckets(&[zone]);
     let limiter = forwarding
@@ -1028,7 +1028,7 @@ fn distinct_slot_ipv4_sources(n: usize) -> Vec<IpAddr> {
 fn rotating_v6_iids_in_one_64_do_not_starve_victim_15248() {
     let _g = global_bucket_test_lock();
     let reason = GeneratedErrorReason::TimeExceeded;
-    let zone = 15_248u16;
+    let zone = 15_248u32;
     let t0 = 15_000_000_000u64;
     let forwarding = forwarding_with_all_zone_buckets(&[zone]);
     let attackers = rotation_sources_v6(16);
@@ -1094,7 +1094,7 @@ fn rotating_v6_iids_in_one_64_do_not_starve_victim_15248() {
 fn sixteen_distinct_ipv4_sources_do_not_starve_victim_15248() {
     let _g = global_bucket_test_lock();
     let reason = GeneratedErrorReason::Reject;
-    let zone = 15_249u16;
+    let zone = 15_249u32;
     let t0 = 16_000_000_000u64;
     let forwarding = forwarding_with_reject_zones(&[zone]);
     let attackers = distinct_slot_ipv4_sources(16);
@@ -1151,7 +1151,7 @@ fn sixteen_distinct_ipv4_sources_do_not_starve_victim_15248() {
 fn victim_survives_sustained_distinct_floods_15248() {
     let _g = global_bucket_test_lock();
     let reason = GeneratedErrorReason::PacketTooBig;
-    let zone = 15_250u16;
+    let zone = 15_250u32;
     // Far-future epoch: sibling tests share this zone's limiter only via
     // their own fresh ForwardingState, but the FALLBACK limiters are
     // process-global — a far-future t0 keeps this cell's injected clock
@@ -1209,7 +1209,7 @@ fn victim_survives_sustained_distinct_floods_15248() {
 fn single_v6_source_and_distinct_64s_unchanged_15248() {
     let _g = global_bucket_test_lock();
     let reason = GeneratedErrorReason::TimeExceeded;
-    let zone = 15_251u16;
+    let zone = 15_251u32;
     let t0 = 18_000_000_000u64;
     let forwarding = forwarding_with_all_zone_buckets(&[zone]);
     let a = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0xa, 0, 0, 0, 0, 1));
@@ -1288,7 +1288,7 @@ fn same_64_distinct_host_sources(n: usize) -> Vec<IpAddr> {
 fn two_hosts_one_64_keep_independent_budgets_16510() {
     let _g = global_bucket_test_lock();
     let reason = GeneratedErrorReason::TimeExceeded;
-    let zone = 16_510u16;
+    let zone = 16_510u32;
     let t0 = 20_000_000_000u64;
     let forwarding = forwarding_with_all_zone_buckets(&[zone]);
     let hosts = same_64_distinct_host_sources(2);
@@ -1352,7 +1352,7 @@ fn two_hosts_one_64_keep_independent_budgets_16510() {
 fn thirty_hosts_one_64_burst_keeps_ninety_percent_16510() {
     let _g = global_bucket_test_lock();
     let reason = GeneratedErrorReason::PacketTooBig;
-    let zone = 16_511u16;
+    let zone = 16_511u32;
     let t0 = 21_000_000_000u64;
     let forwarding = forwarding_with_all_zone_buckets(&[zone]);
     let hosts = same_64_distinct_host_sources(30);
@@ -1390,7 +1390,7 @@ fn thirty_hosts_one_64_burst_keeps_ninety_percent_16510() {
 fn rotating_v6_iids_saturate_at_prefix64_cap_16510() {
     let _g = global_bucket_test_lock();
     let reason = GeneratedErrorReason::Reject;
-    let zone = 16_512u16;
+    let zone = 16_512u32;
     let t0 = 22_000_000_000u64;
     let forwarding = forwarding_with_all_zone_buckets(&[zone]);
     let attackers = rotation_sources_v6(64);
@@ -1443,7 +1443,7 @@ fn rotating_v6_iids_saturate_at_prefix64_cap_16510() {
 fn two_ipv4_hosts_keep_independent_budgets_16510() {
     let _g = global_bucket_test_lock();
     let reason = GeneratedErrorReason::TimeExceeded;
-    let zone = 16_513u16;
+    let zone = 16_513u32;
     let t0 = 23_000_000_000u64;
     let forwarding = forwarding_with_all_zone_buckets(&[zone]);
     let pair = distinct_slot_sources(2);
@@ -1497,7 +1497,7 @@ fn two_ipv4_hosts_keep_independent_budgets_16510() {
 fn v4_mapped_shares_v4_host_budget_16510() {
     let _g = global_bucket_test_lock();
     let reason = GeneratedErrorReason::PacketTooBig;
-    let zone = 16_514u16;
+    let zone = 16_514u32;
     let t0 = 24_000_000_000u64;
     let forwarding = forwarding_with_all_zone_buckets(&[zone]);
     let v4 = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));

@@ -13243,8 +13243,8 @@ fn flush_session_deltas_session_close_reresolves_policy_id_after_reorder() {
     // Reverting emit_session_close_rt_flow / the flush re-resolution to read
     // `delta.metadata.policy_id` makes [136:140] read 5 → RED.
     let mut zone_map = FastMap::default();
-    zone_map.insert("lan".to_string(), 1u16);
-    zone_map.insert("wan".to_string(), 2u16);
+    zone_map.insert("lan".to_string(), 1u32);
+    zone_map.insert("wan".to_string(), 2u32);
 
     let store = crate::policy::PolicyCounterStore::default();
     let permit = |name: &str, policy_id: u32| crate::PolicyRuleSnapshot {

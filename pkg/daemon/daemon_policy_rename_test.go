@@ -67,17 +67,17 @@ func TestPolicyRulePathKeyRequiresTerminalPolicy(t *testing.T) {
 }
 
 func TestRenameZoneWireIdentityKeepsSpecialScopesExplicit(t *testing.T) {
-	zones := map[uint16]string{config.StableZoneID("trust"): "trust"}
+	zones := map[uint32]string{config.StableZoneID("trust"): "trust"}
 	tests := []struct {
 		name string
 		zone string
-		id   uint16
+		id   uint32
 		any  bool
 		ok   bool
 	}{
 		{name: "concrete", zone: "trust", id: config.StableZoneID("trust"), ok: true},
 		{name: "wildcard", zone: "any", any: true, ok: true},
-		{name: "global", zone: config.JunosGlobalZoneName, id: ^uint16(0), ok: true},
+		{name: "global", zone: config.JunosGlobalZoneName, id: ^uint32(0), ok: true},
 		{name: "host", zone: "junos-host", id: config.ZoneIDReservedMin, ok: true},
 		{name: "unknown concrete", zone: "missing", id: config.StableZoneID("missing")},
 	}
@@ -281,10 +281,10 @@ func TestRemappedQueryZonesSimultaneousPolicyAndZoneRename12881(t *testing.T) {
 		t.Fatalf("missing non-zero global-policy binding for ID %d", oldID)
 	}
 	from, to, ingress, egress, ok := remappedQueryZones(
-		oldCfg, newCfg, binding, config.StableZoneID("lan"), config.StableZoneID("wan"),
+		oldCfg, newCfg, binding, uint16(config.StableZoneID("lan")), uint16(config.StableZoneID("wan")),
 	)
 	if !ok || from != "lan2" || to != "wan" ||
-		ingress != config.StableZoneID("lan2") || egress != config.StableZoneID("wan") {
+		ingress != uint16(config.StableZoneID("lan2")) || egress != uint16(config.StableZoneID("wan")) {
 		t.Fatalf("global policy scope prevented concrete zone remap: %q/%q IDs=%d/%d ok=%v", from, to, ingress, egress, ok)
 	}
 	key := dataplane.SessionKey{
@@ -292,11 +292,11 @@ func TestRemappedQueryZonesSimultaneousPolicyAndZoneRename12881(t *testing.T) {
 		SrcPort: 1234, DstPort: 443,
 	}
 	value := dataplane.SessionValue{
-		PolicyID: oldID, IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+		PolicyID: oldID, IngressZone: uint16(config.StableZoneID("lan")), EgressZone: uint16(config.StableZoneID("wan")),
 	}
 	record, permitted := rematchRenamedV4(oldCfg, newCfg, binding, key, value)
-	if !permitted || record.IngressZone != config.StableZoneID("lan2") ||
-		record.EgressZone != config.StableZoneID("wan") {
+	if !permitted || record.IngressZone != uint16(config.StableZoneID("lan2")) ||
+		record.EgressZone != uint16(config.StableZoneID("wan")) {
 		t.Fatalf("session was not rebound into renamed concrete zones: %+v permitted=%v", record, permitted)
 	}
 }
@@ -328,10 +328,10 @@ func TestRemappedQueryZonesWildcardPolicyAndZoneRename12881(t *testing.T) {
 		t.Fatalf("missing wildcard-policy binding for ID %d", oldID)
 	}
 	from, to, ingress, egress, ok := remappedQueryZones(
-		oldCfg, newCfg, binding, config.StableZoneID("lan"), config.StableZoneID("wan"),
+		oldCfg, newCfg, binding, uint16(config.StableZoneID("lan")), uint16(config.StableZoneID("wan")),
 	)
 	if !ok || from != "lan2" || to != "wan" ||
-		ingress != config.StableZoneID("lan2") || egress != config.StableZoneID("wan") {
+		ingress != uint16(config.StableZoneID("lan2")) || egress != uint16(config.StableZoneID("wan")) {
 		t.Fatalf("wildcard policy scope prevented concrete zone remap: %q/%q IDs=%d/%d ok=%v", from, to, ingress, egress, ok)
 	}
 }
@@ -370,7 +370,7 @@ func TestRematchRenamedV4PreservesPortsExactly10592(t *testing.T) {
 		SrcPort: 0x3412, DstPort: 0x0015, Protocol: 6,
 	}
 	value := dataplane.SessionValue{
-		PolicyID: oldID, IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+		PolicyID: oldID, IngressZone: uint16(config.StableZoneID("lan")), EgressZone: uint16(config.StableZoneID("wan")),
 	}
 	record, permitted := rematchRenamedV4(oldCfg, newCfg, bindings[oldID], key, value)
 	if !permitted {
@@ -400,7 +400,7 @@ func TestRematchRenamedV6PreservesPortsExactly10592(t *testing.T) {
 		SrcPort: 0x3412, DstPort: 0x0015, Protocol: 6,
 	}
 	value := dataplane.SessionValueV6{
-		PolicyID: oldID, IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+		PolicyID: oldID, IngressZone: uint16(config.StableZoneID("lan")), EgressZone: uint16(config.StableZoneID("wan")),
 	}
 	record, permitted := rematchRenamedV6(oldCfg, newCfg, bindings[oldID], key, value)
 	if !permitted {
@@ -431,7 +431,7 @@ func TestRematchRenamedV4DNATPortQueriesTranslatedRecordsWire10592(t *testing.T)
 		SrcPort: 0x3412, DstPort: 0x0015, Protocol: 6,
 	}
 	value := dataplane.SessionValue{
-		PolicyID: oldID, IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+		PolicyID: oldID, IngressZone: uint16(config.StableZoneID("lan")), EgressZone: uint16(config.StableZoneID("wan")),
 		Flags: dataplane.SessFlagDNAT, NATDstIP: 0x0100000a, NATDstPort: userspaceHostToNetwork16(8443),
 	}
 	record, permitted := rematchRenamedV4(oldCfg, newCfg, bindings[oldID], key, value)
@@ -568,17 +568,12 @@ func TestExpandAnyZoneRenameSetsWireAnyFlags10592(t *testing.T) {
 // across hash changes — no magic constants.
 func findStableZoneIDCollision(t *testing.T) (string, string) {
 	t.Helper()
-	for i := 0; i < 100000; i++ {
-		a := "zone-a-" + string(rune(i))
-		for j := i + 1; j < 100000; j++ {
-			b := "zone-b-" + string(rune(j))
-			if config.StableZoneID(a) == config.StableZoneID(b) {
-				return a, b
-			}
-		}
+	// #16557: residual u32-fold collision pair (both 1679679597).
+	a, b := "zzq17760", "zzq8100"
+	if config.StableZoneID(a) != config.StableZoneID(b) {
+		t.Fatalf("fixture pair %q/%q no longer collides", a, b)
 	}
-	t.Fatal("no collision found in brute-force window")
-	return "", ""
+	return a, b
 }
 
 func TestExpandValidatorsRejectBranchTable10592(t *testing.T) {
@@ -814,7 +809,7 @@ func TestRematchDNATTranslatedPortScoped10592(t *testing.T) {
 			SrcPort: 40000, DstPort: wirePort, Protocol: 6,
 		}
 		value := dataplane.SessionValue{
-			PolicyID: oldID, IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+			PolicyID: oldID, IngressZone: uint16(config.StableZoneID("lan")), EgressZone: uint16(config.StableZoneID("wan")),
 			Flags: dataplane.SessFlagDNAT, NATDstIP: 0x0100000a, NATDstPort: xlatedPort,
 		}
 		return key, value
@@ -856,7 +851,7 @@ func TestRematchPortScopedV4V610592(t *testing.T) {
 	}
 	mkValue := func() dataplane.SessionValue {
 		return dataplane.SessionValue{
-			PolicyID: oldID, IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+			PolicyID: oldID, IngressZone: uint16(config.StableZoneID("lan")), EgressZone: uint16(config.StableZoneID("wan")),
 		}
 	}
 	// Wire-native ports (BPF yields network bytes read natively): host 443
@@ -883,7 +878,7 @@ func TestRematchPortScopedV4V610592(t *testing.T) {
 	}
 	v6value := func() dataplane.SessionValueV6 {
 		return dataplane.SessionValueV6{
-			PolicyID: oldID, IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+			PolicyID: oldID, IngressZone: uint16(config.StableZoneID("lan")), EgressZone: uint16(config.StableZoneID("wan")),
 		}
 	}
 	if record, permitted := rematchRenamedV6(oldCfg, newCfg, binding, v6key(0xBB01), v6value()); !permitted || record.RuleID != "lan->wan/p-new" {
@@ -917,16 +912,16 @@ func TestExpandAndRematchPolicyRenameEvaluator10511(t *testing.T) {
 	}
 	value := dataplane.SessionValue{
 		PolicyID:    oldID,
-		IngressZone: config.StableZoneID("lan"),
-		EgressZone:  config.StableZoneID("wan"),
+		IngressZone: uint16(config.StableZoneID("lan")),
+		EgressZone:  uint16(config.StableZoneID("wan")),
 	}
 	record, permitted := rematchRenamedV4(oldCfg, newCfg, binding, key, value)
 	if !permitted {
 		t.Fatal("matching renamed session was not retained")
 	}
 	if record.RuleID != "lan->wan/p-new" || record.PolicyID == 0 ||
-		record.IngressZone != config.StableZoneID("lan") ||
-		record.EgressZone != config.StableZoneID("wan") {
+		record.IngressZone != uint16(config.StableZoneID("lan")) ||
+		record.EgressZone != uint16(config.StableZoneID("wan")) {
 		t.Fatalf("renamed record lost identity: %+v", record)
 	}
 	if record.SrcIP != "10.0.0.10" || record.DstIP != "10.0.0.20" ||
@@ -952,7 +947,7 @@ func TestPolicyRenameEvaluatorHonorsInjectedSchedulerState10511(t *testing.T) {
 		SrcPort: 1234, DstPort: 443, Protocol: 6,
 	}
 	value := dataplane.SessionValue{
-		PolicyID: oldID, IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+		PolicyID: oldID, IngressZone: uint16(config.StableZoneID("lan")), EgressZone: uint16(config.StableZoneID("wan")),
 	}
 	binding := bindings[oldID]
 	binding.policyInactiveFn = func(string) bool { return true }
@@ -988,7 +983,7 @@ func TestPolicyRenameEvaluatorHandlesDNATV4AndV6Rows10511(t *testing.T) {
 		SrcPort: 1234, DstPort: 443, Protocol: 6,
 	}
 	v4Value := dataplane.SessionValue{
-		PolicyID: oldID, IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+		PolicyID: oldID, IngressZone: uint16(config.StableZoneID("lan")), EgressZone: uint16(config.StableZoneID("wan")),
 		Flags: dataplane.SessFlagDNAT, NATDstIP: 0x0100000a, NATDstPort: 8443,
 	}
 	record, permitted := rematchRenamedV4(oldCfg, newCfg, binding, v4Key, v4Value)
@@ -1009,7 +1004,7 @@ func TestPolicyRenameEvaluatorHandlesDNATV4AndV6Rows10511(t *testing.T) {
 		SrcPort: 1234, DstPort: 443, Protocol: 6,
 	}
 	v6Value := dataplane.SessionValueV6{
-		PolicyID: oldID, IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+		PolicyID: oldID, IngressZone: uint16(config.StableZoneID("lan")), EgressZone: uint16(config.StableZoneID("wan")),
 		Flags:      dataplane.SessFlagDNAT,
 		NATDstIP:   [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x30},
 		NATDstPort: 8443,
@@ -1059,7 +1054,7 @@ func TestPolicyRenameEvaluatorRematchesNPTv6ShapedRow10511(t *testing.T) {
 		SrcPort: 1234, DstPort: 443, Protocol: 6,
 	}
 	value := dataplane.SessionValueV6{
-		PolicyID: oldID, IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+		PolicyID: oldID, IngressZone: uint16(config.StableZoneID("lan")), EgressZone: uint16(config.StableZoneID("wan")),
 		Flags:    dataplane.SessFlagDNAT,
 		NATDstIP: [16]byte{0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x20},
 	}
@@ -1111,8 +1106,8 @@ func TestRematchRenamedV4RejectsUnknownGREDiscriminator10511(t *testing.T) {
 	oldID := dpuserspace.PolicyIDsByStableKey(oldCfg)["lan->wan/p-old"]
 	value := dataplane.SessionValue{
 		PolicyID:            oldID,
-		IngressZone:         config.StableZoneID("lan"),
-		EgressZone:          config.StableZoneID("wan"),
+		IngressZone:         uint16(config.StableZoneID("lan")),
+		EgressZone:          uint16(config.StableZoneID("wan")),
 		TunnelDiscriminator: 0,
 	}
 	key := dataplane.SessionKey{
@@ -1206,7 +1201,7 @@ func TestRematchRenamedV4FailsClosedOnICMPWhenDenyICMPTypePrecedesPermit14697(t 
 	}
 	value := dataplane.SessionValue{
 		PolicyID:    dpuserspace.PolicyIDsByStableKey(oldCfg)["lan->wan/p-old"],
-		IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+		IngressZone: uint16(config.StableZoneID("lan")), EgressZone: uint16(config.StableZoneID("wan")),
 	}
 	if rec, permitted := rematchRenamedV4(oldCfg, newCfg, binding, key, value); permitted {
 		t.Fatalf("ICMP session without captured type retained through broader permit: %+v", rec)
@@ -1252,7 +1247,7 @@ func TestRematchRenamedV6FailsClosedOnICMPv6WhenDenyICMPTypePrecedesPermit14697(
 	}
 	value := dataplane.SessionValueV6{
 		PolicyID:    dpuserspace.PolicyIDsByStableKey(oldCfg)["lan->wan/p-old"],
-		IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+		IngressZone: uint16(config.StableZoneID("lan")), EgressZone: uint16(config.StableZoneID("wan")),
 	}
 	if rec, permitted := rematchRenamedV6(oldCfg, newCfg, binding, key, value); permitted {
 		t.Fatalf("ICMPv6 session without captured type retained through broader permit: %+v", rec)
@@ -1271,8 +1266,8 @@ func TestRematchRenamedMatchFailsClosedOnICMPWhenDenyICMPTypePrecedesPermit14697
 			SrcIP: "10.0.0.10", DstIP: "10.0.0.20",
 			SrcPort: 0x1234, DstPort: 0x1234,
 		},
-		IngressZoneID: config.StableZoneID("lan"),
-		EgressZoneID:  config.StableZoneID("wan"),
+		IngressZoneID: uint16(config.StableZoneID("lan")),
+		EgressZoneID:  uint16(config.StableZoneID("wan")),
 	}
 	if rec, permitted := rematchRenamedMatch(oldCfg, newCfg, binding, match); permitted {
 		t.Fatalf("helper ICMP session without captured type retained: %+v", rec)
@@ -1303,7 +1298,7 @@ func TestRematchRenamedICMPControlUnconstrainedPermitStillFailsClosed14697(t *te
 	}
 	value := dataplane.SessionValue{
 		PolicyID:    dpuserspace.PolicyIDsByStableKey(oldCfg)["lan->wan/p-old"],
-		IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+		IngressZone: uint16(config.StableZoneID("lan")), EgressZone: uint16(config.StableZoneID("wan")),
 	}
 	if rec, permitted := rematchRenamedV4(oldCfg, newCfg, binding, key, value); permitted {
 		t.Fatalf("lossy ICMP tuple retained under unconstrained permit (guard missing): %+v", rec)
@@ -1318,7 +1313,7 @@ func TestRematchRenamedICMPControlUnconstrainedPermitStillFailsClosed14697(t *te
 	}
 	tcpValue := dataplane.SessionValue{
 		PolicyID:    dpuserspace.PolicyIDsByStableKey(anyOld)["lan->wan/p-old"],
-		IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+		IngressZone: uint16(config.StableZoneID("lan")), EgressZone: uint16(config.StableZoneID("wan")),
 	}
 	if _, permitted := rematchRenamedV4(anyOld, anyNew, anyBinding, tcpKey, tcpValue); !permitted {
 		t.Fatal("TCP control session was not retained — guard over-broad")
@@ -1608,8 +1603,8 @@ func TestExpandZoneRenameScopedGlobal12857(t *testing.T) {
 		t.Fatalf("binding zones = %q->%q, want lan->lan2", binding.sourceFromZone, binding.destinationFromZone)
 	}
 	_, _, newIngress, _, rok := remappedQueryZones(oldCfg, newCfg, binding,
-		config.StableZoneID("lan"), config.StableZoneID("wan"))
-	if !rok || newIngress != config.StableZoneID("lan2") {
+		uint16(config.StableZoneID("lan")), uint16(config.StableZoneID("wan")))
+	if !rok || newIngress != uint16(config.StableZoneID("lan2")) {
 		t.Fatalf("remappedQueryZones = ingress %d ok=%v, want lan2 id", newIngress, rok)
 	}
 	changed := build(true, "wan")

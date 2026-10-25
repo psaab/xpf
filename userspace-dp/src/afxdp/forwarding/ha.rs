@@ -940,7 +940,7 @@ pub(in crate::afxdp) fn finalize_new_flow_ha_resolution(
     fabric_ingress: bool,
     fabric_link_ingress: bool,
     ingress_ifindex: i32,
-    ingress_zone: u16,
+    ingress_zone: u32,
     ha_startup_grace_until_secs: u64,
 ) -> ForwardingResolution {
     let enforced = super::session_glue::enforce_session_ha_resolution(

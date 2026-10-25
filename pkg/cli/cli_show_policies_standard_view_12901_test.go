@@ -166,8 +166,8 @@ func Test_12901_StandardViewLogTokenGatesOnRealModes(t *testing.T) {
 	}
 }
 
-// briefQuarantineCLI12901 builds the #10530 collision fixture (z174/z214
-// fold to one StableZoneID, z214 loses and is quarantined) on a loaded
+// briefQuarantineCLI12901 builds the #10530 collision fixture (zzq17760/zzq8100
+// fold to one StableZoneID, zzq8100 loses and is quarantined) on a loaded
 // dataplane whose bulk snapshot is EMPTY (warmupPolicyCLIDP — the measured
 // warm-up state of the real userspace Manager): every read-eligible rule
 // returns ErrPolicyCounterUnpublished, which is exactly the signal the brief
@@ -177,16 +177,16 @@ func briefQuarantineCLI12901(t *testing.T) *CLI {
 	t.Helper()
 	store := newPolicyHitCountCLIStore(t, true)
 	cfg := store.ActiveConfig()
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatal("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatal("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
-		"trust": {Name: "trust"},
-		"z174":  {Name: "z174"},
-		"z214":  {Name: "z214"},
+		"trust":    {Name: "trust"},
+		"zzq17760": {Name: "zzq17760"},
+		"zzq8100":  {Name: "zzq8100"},
 	}
 	cfg.Security.Policies = []*config.ZonePairPolicies{
-		{FromZone: "trust", ToZone: "z214", Policies: []*config.Policy{{
+		{FromZone: "trust", ToZone: "zzq8100", Policies: []*config.Policy{{
 			Name: "loser-rule", Action: config.PolicyPermit, Count: true,
 		}}},
 		{FromZone: "trust", ToZone: "trust", Policies: []*config.Policy{{
@@ -195,7 +195,7 @@ func briefQuarantineCLI12901(t *testing.T) *CLI {
 	}
 	cfg.Security.GlobalPolicies = []*config.Policy{
 		{Name: "dropped-global", Action: config.PolicyDeny,
-			Match: config.PolicyMatch{ToZones: []string{"z214"}}},
+			Match: config.PolicyMatch{ToZones: []string{"zzq8100"}}},
 		{Name: "live-global", Action: config.PolicyDeny},
 	}
 	return &CLI{store: store, dp: &warmupPolicyCLIDP{}}
@@ -217,7 +217,7 @@ func Test_12901_BriefGuardsQuarantinedRulesBeforeCounterRead(t *testing.T) {
 		t.Fatalf("loser-rule brief row = %q, want the live-counter-unavailable disposition "+
 			"(brief read a quarantined rule's counter — #12901 regression)", loser)
 	}
-	if !strings.Contains(loser, "z214 "+config.ZoneQuarantinePoliciesQualifier) {
+	if !strings.Contains(loser, "zzq8100 "+config.ZoneQuarantinePoliciesQualifier) {
 		t.Fatalf("loser-rule brief row = %q, want the quarantined to-zone qualifier", loser)
 	}
 

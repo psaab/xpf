@@ -10,7 +10,7 @@ import (
 func TestZoneDetailCallerPrefixContract10530(t *testing.T) {
 	c := quarantinePolicyCLI10530(t)
 	out := captureStdout(t, func() {
-		if err := c.showZonesDisplay(c.store.ActiveConfig(), true, "z214"); err != nil {
+		if err := c.showZonesDisplay(c.store.ActiveConfig(), true, "zzq8100"); err != nil {
 			t.Fatalf("showZonesDisplay: %v", err)
 		}
 	})
@@ -69,6 +69,6 @@ func TestZoneDetailCallerPrefixContract10530(t *testing.T) {
 		t.Fatalf("live trust->trust row gained quarantine qualifier:\n%s", ordinaryRow)
 	}
 	if !strings.Contains(deadRow, config.ZoneQuarantinePoliciesQualifier) {
-		t.Fatalf("peer-quarantined trust->z214 row lacks the #12896 scrub qualifier:\n%s", deadRow)
+		t.Fatalf("peer-quarantined trust->zzq8100 row lacks the #12896 scrub qualifier:\n%s", deadRow)
 	}
 }

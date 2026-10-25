@@ -446,12 +446,12 @@ func qProtocol(proto string) uint8 {
 	return uint8(n)
 }
 
-func renameZoneWireIdentity(name string, zoneNames map[uint16]string) (uint16, bool, bool) {
+func renameZoneWireIdentity(name string, zoneNames map[uint32]string) (uint32, bool, bool) {
 	switch name {
 	case "any":
 		return 0, true, true
 	case config.JunosGlobalZoneName:
-		return ^uint16(0), false, true
+		return ^uint32(0), false, true
 	case "junos-host":
 		return config.ZoneIDReservedMin, false, true
 	default:
@@ -460,11 +460,11 @@ func renameZoneWireIdentity(name string, zoneNames map[uint16]string) (uint16, b
 	}
 }
 
-func zoneNamesByID(cfg *config.Config) (map[uint16]string, bool) {
+func zoneNamesByID(cfg *config.Config) (map[uint32]string, bool) {
 	if cfg == nil {
 		return nil, false
 	}
-	out := make(map[uint16]string, len(cfg.Security.Zones))
+	out := make(map[uint32]string, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		id := config.StableZoneID(name)
 		if prior, exists := out[id]; exists && prior != name {
@@ -473,6 +473,17 @@ func zoneNamesByID(cfg *config.Config) (map[uint16]string, bool) {
 		out[id] = name
 	}
 	return out, true
+}
+
+// oldNameByTruncatedID resolves a session record's u16 zone id (the low
+// 16 bits of the u32 StableZoneID, #16557) to its zone name.
+func oldNameByTruncatedID(names map[uint32]string, id uint16) (string, bool) {
+	for zid, name := range names {
+		if uint16(zid) == id {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 func remappedQueryZones(
@@ -485,8 +496,10 @@ func remappedQueryZones(
 	if !oldOK || !newOK {
 		return "", "", 0, 0, false
 	}
-	from, fromOK := oldNames[ingressID]
-	to, toOK := oldNames[egressID]
+	// #16557: session records carry the low 16 bits of the u32 zone
+	// id, so the recorded ids resolve through their truncation.
+	from, fromOK := oldNameByTruncatedID(oldNames, ingressID)
+	to, toOK := oldNameByTruncatedID(oldNames, egressID)
 	if !fromOK || !toOK {
 		return "", "", 0, 0, false
 	}
@@ -507,7 +520,7 @@ func remappedQueryZones(
 	if newNames[newIngress] != from || newNames[newEgress] != to {
 		return "", "", 0, 0, false
 	}
-	return from, to, newIngress, newEgress, true
+	return from, to, uint16(newIngress), uint16(newEgress), true
 }
 
 // Session tuples are lossy for two protocol classes:

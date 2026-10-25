@@ -319,19 +319,19 @@ func firstLine(s string) string {
 }
 
 func TestTopTalkerZoneLabelQuarantine10530(t *testing.T) {
-	id := config.StableZoneID("z174")
+	id := config.StableZoneID("zzq17760")
 	cfg := &config.Config{Security: config.SecurityConfig{Zones: map[string]*config.ZoneConfig{
-		"z174": {Name: "z174"},
-		"z214": {Name: "z214"},
+		"zzq17760": {Name: "zzq17760"},
+		"zzq8100":  {Name: "zzq8100"},
 	}}}
-	filter := sessionFilter{cfg: cfg, zoneName: "z214", zoneID: id}
-	zoneNames := map[uint16]string{id: "z174"}
-	if got := zoneLabel(filter, zoneNames, id, id); got !=
-		"z174 "+config.ZoneQuarantineReferenceQualifier+"->z174 "+config.ZoneQuarantineReferenceQualifier {
+	filter := sessionFilter{cfg: cfg, zoneName: "zzq8100", zoneID: uint16(id)}
+	zoneNames := map[uint16]string{uint16(id): "zzq17760"}
+	if got := zoneLabel(filter, zoneNames, uint16(id), uint16(id)); got !=
+		"zzq17760 "+config.ZoneQuarantineReferenceQualifier+"->zzq17760 "+config.ZoneQuarantineReferenceQualifier {
 		t.Fatalf("quarantined top-talker zone label = %q, want qualified survivor pair", got)
 	}
-	ordinary := sessionFilter{cfg: cfg, zoneName: "z174", zoneID: id}
-	if got := zoneLabel(ordinary, zoneNames, id, id); got != "z174->z174" {
+	ordinary := sessionFilter{cfg: cfg, zoneName: "zzq17760", zoneID: uint16(id)}
+	if got := zoneLabel(ordinary, zoneNames, uint16(id), uint16(id)); got != "zzq17760->zzq17760" {
 		t.Fatalf("ordinary top-talker zone label = %q, want unqualified pair", got)
 	}
 }

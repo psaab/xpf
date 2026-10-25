@@ -991,7 +991,7 @@ func (c *snapshotDeltaSink) snapshot() cluster.BulkSnapshot {
 // the number of sink calls made.
 func (d *Daemon) walkUserspaceSessionDeltas(
 	ss *cluster.SessionSync,
-	zoneIDs map[string]uint16,
+	zoneIDs map[string]uint32,
 	deltas []dpuserspace.SessionDeltaInfo,
 	sink userspaceDeltaSink,
 ) int {
@@ -1086,7 +1086,7 @@ func (d *Daemon) walkUserspaceSessionDeltas(
 // every producer — event-stream callback, fallback drain, and FullResync —
 // participate in one export/delta ordering domain.
 func (d *Daemon) queueUserspaceSessionDeltasLocked(
-	zoneIDs map[string]uint16,
+	zoneIDs map[string]uint32,
 	deltas []dpuserspace.SessionDeltaInfo,
 ) int {
 	// Snapshot the live session-sync object once for the whole batch (#4958):

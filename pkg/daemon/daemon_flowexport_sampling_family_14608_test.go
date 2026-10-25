@@ -157,7 +157,7 @@ func TestSessionCloseSamplingPerFamily14608(t *testing.T) {
 			var src, dst [16]byte
 			copy(src[:], []byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x65})
 			copy(dst[:], []byte{0x20, 0x01, 0x0d, 0xb8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xc8})
-			payload := buildSessionCloseRawEventV6(6, src, dst, 12345, 443, trust, untrust)
+			payload := buildSessionCloseRawEventV6(6, src, dst, 12345, 443, uint16(trust), uint16(untrust))
 
 			// Sanity: the payload decodes as an IPv6 SESSION_CLOSE.
 			var probe logging.EventRecord
@@ -232,7 +232,7 @@ func TestSessionCloseSamplingPerFamily14608(t *testing.T) {
 				// the deny above is family-scoped, not zone-scoped.
 				v4 := buildSessionCloseRawEventV4(6,
 					[4]byte{10, 0, 0, 102}, [4]byte{192, 0, 2, 200},
-					12345, 443, [4]byte{}, 0, trust, untrust)
+					12345, 443, [4]byte{}, 0, uint16(trust), uint16(untrust))
 				feedOpenThenClose15946(t, d, v4)
 				feedOpenThenClose15946(t, d, v4)
 				if got := waitFlows(t, b.firstExp().Stats); got < 1 {

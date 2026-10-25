@@ -310,7 +310,7 @@ fn build_nat64_reverse_rebuild(
 
 pub(crate) fn build_synced_session_entry(
     req: &SessionSyncRequest,
-    zone_name_to_id: &rustc_hash::FxHashMap<String, u16>,
+    zone_name_to_id: &rustc_hash::FxHashMap<String, u32>,
     routing_domain: u32,
 ) -> Result<SyncedSessionEntry, String> {
     let source_nat_static =

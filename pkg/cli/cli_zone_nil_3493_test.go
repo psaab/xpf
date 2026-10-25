@@ -90,7 +90,7 @@ func TestCLISessionFilterNilZoneNoPanic(t *testing.T) {
 		store: store,
 		dp: &nilZoneApplyCLIDP{
 			Manager: dataplane.New(),
-			apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint16{
+			apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint32{
 				"trust": 1, "untrust": 2, "zz-nil-zone": 9,
 			}},
 		},

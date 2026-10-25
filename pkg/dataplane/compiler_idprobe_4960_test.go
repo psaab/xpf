@@ -43,7 +43,7 @@ type idProbeDP struct{ DataPlane }
 
 func (idProbeDP) IsLoaded() bool { return true }
 
-func (idProbeDP) SetZonePairPolicy(fromZone, toZone uint16, ps PolicySet) error { return nil }
+func (idProbeDP) SetZonePairPolicy(fromZone, toZone uint32, ps PolicySet) error { return nil }
 func (idProbeDP) SetPolicyRule(policySetID uint32, ruleIndex uint32, rule PolicyRule) error {
 	return nil
 }
@@ -535,7 +535,7 @@ func TestPrePassDoesNotPerturbIDAssignment_4960(t *testing.T) {
 	// #6894 r9 F3: these two said "non-empty", which the paragraph above
 	// promises is NOT what a floor here does. A partial regression that dropped
 	// three of the four zones, or every user application, satisfied both.
-	zones := first["ZoneIDs"].(map[string]uint16)
+	zones := first["ZoneIDs"].(map[string]uint32)
 	for _, want := range []string{"trust", "untrust", "dmz", "egress"} {
 		if _, ok := zones[want]; !ok {
 			t.Errorf("zone %q is absent from ZoneIDs, so that zone contributes "+

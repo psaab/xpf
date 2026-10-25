@@ -304,7 +304,7 @@ func (c *ctl) showZones(filter string) error {
 		if quarantined {
 			// Same shared spellings the local/gRPC-text detail renderers use
 			// (config/zone_quarantine_show.go), so the surfaces stay identical.
-			fmt.Println(config.ZoneQuarantineHeadlineFor(uint16(z.Id), survivor))
+			fmt.Println(config.ZoneQuarantineHeadlineFor(z.Id, survivor))
 		}
 		if z.Description != "" {
 			fmt.Printf("  Description: %s\n", z.Description)

@@ -673,8 +673,8 @@ func TestCaptureRenameStampingSchedulerAndFeed10592(t *testing.T) {
 				key: {
 					State:       dataplane.SessStateEstablished,
 					PolicyID:    oldID,
-					IngressZone: config.StableZoneID("lan"),
-					EgressZone:  config.StableZoneID("wan"),
+					IngressZone: uint16(config.StableZoneID("lan")),
+					EgressZone:  uint16(config.StableZoneID("wan")),
 				},
 			},
 			v6: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
@@ -733,8 +733,8 @@ func TestCommitWindowArmApplySweepOrder10591(t *testing.T) {
 			key: {
 				State:       dataplane.SessStateEstablished,
 				PolicyID:    oldID,
-				IngressZone: config.StableZoneID("lan"),
-				EgressZone:  config.StableZoneID("wan"),
+				IngressZone: uint16(config.StableZoneID("lan")),
+				EgressZone:  uint16(config.StableZoneID("wan")),
 			},
 		},
 		v6: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
@@ -822,14 +822,14 @@ func TestCapturePolicyInvalidationRetainsRenamedAndLeavesFirstPolicy10511(t *tes
 			renamedKey: {
 				State:       dataplane.SessStateEstablished,
 				PolicyID:    oldID,
-				IngressZone: config.StableZoneID("lan"),
-				EgressZone:  config.StableZoneID("wan"),
+				IngressZone: uint16(config.StableZoneID("lan")),
+				EgressZone:  uint16(config.StableZoneID("wan")),
 			},
 			unboundKey: {
 				State:       dataplane.SessStateEstablished,
 				PolicyID:    0,
-				IngressZone: config.StableZoneID("lan"),
-				EgressZone:  config.StableZoneID("wan"),
+				IngressZone: uint16(config.StableZoneID("lan")),
+				EgressZone:  uint16(config.StableZoneID("wan")),
 			},
 		},
 		v6: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
@@ -883,12 +883,12 @@ func TestCaptureRoutesGreZeroRenameToWildcardDelete10511(t *testing.T) {
 		v4: map[dataplane.SessionKey]dataplane.SessionValue{
 			greKey: {
 				State: dataplane.SessStateEstablished, PolicyID: oldID,
-				IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+				IngressZone: uint16(config.StableZoneID("lan")), EgressZone: uint16(config.StableZoneID("wan")),
 				TunnelDiscriminator: 0,
 			},
 			tcpKey: {
 				State: dataplane.SessStateEstablished, PolicyID: oldID,
-				IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+				IngressZone: uint16(config.StableZoneID("lan")), EgressZone: uint16(config.StableZoneID("wan")),
 			},
 		},
 		v6: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
@@ -979,11 +979,11 @@ func TestPeerSyncRenameAncestryCaptureAndClearJointFixture10511(t *testing.T) {
 		v4: map[dataplane.SessionKey]dataplane.SessionValue{
 			renamedKey: {
 				State: dataplane.SessStateEstablished, PolicyID: oldID,
-				IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+				IngressZone: uint16(config.StableZoneID("lan")), EgressZone: uint16(config.StableZoneID("wan")),
 			},
 			idZeroKey: {
 				State: dataplane.SessStateEstablished, PolicyID: 0,
-				IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+				IngressZone: uint16(config.StableZoneID("lan")), EgressZone: uint16(config.StableZoneID("wan")),
 			},
 		},
 		v6: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
@@ -1103,8 +1103,8 @@ func TestCaptureRenameRetainsFeedBackedRowWithPopulatedFeed10623(t *testing.T) {
 		return dataplane.SessionValue{
 			State:       dataplane.SessStateEstablished,
 			PolicyID:    oldID,
-			IngressZone: config.StableZoneID("lan"),
-			EgressZone:  config.StableZoneID("wan"),
+			IngressZone: uint16(config.StableZoneID("lan")),
+			EgressZone:  uint16(config.StableZoneID("wan")),
 		}
 	}
 	dp := &policyInvalTestDP{
@@ -1198,8 +1198,8 @@ func TestCaptureExtensiveRematchIncludesLiveFeedStaticSibling12851(t *testing.T)
 			key: {
 				State:       dataplane.SessStateEstablished,
 				PolicyID:    oldID,
-				IngressZone: config.StableZoneID("trust"),
-				EgressZone:  config.StableZoneID("untrust"),
+				IngressZone: uint16(config.StableZoneID("trust")),
+				EgressZone:  uint16(config.StableZoneID("untrust")),
 			},
 		},
 		v6: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},

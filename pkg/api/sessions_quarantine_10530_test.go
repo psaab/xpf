@@ -17,20 +17,20 @@ func (d *quarantineSessionAPIDP10530) LastApplyResult() *dataplane.ApplyResult {
 }
 
 func TestBuildSessionViewQuarantineSurvivor10530(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatal("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatal("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	store := newDescriptorCoverageStore(t)
 	cfg := store.ActiveConfig()
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
-		"trust": {Name: "trust", Interfaces: []string{"if-trust"}},
-		"z174":  {Name: "z174", Interfaces: []string{"if-survivor"}},
-		"z214":  {Name: "z214", Interfaces: []string{"if-quarantined"}},
+		"trust":    {Name: "trust", Interfaces: []string{"if-trust"}},
+		"zzq17760": {Name: "zzq17760", Interfaces: []string{"if-survivor"}},
+		"zzq8100":  {Name: "zzq8100", Interfaces: []string{"if-quarantined"}},
 	}
-	result := &dataplane.ApplyResult{ZoneIDs: map[string]uint16{
-		"trust": config.StableZoneID("trust"),
-		"z174":  config.StableZoneID("z174"),
-		"z214":  config.StableZoneID("z214"),
+	result := &dataplane.ApplyResult{ZoneIDs: map[string]uint32{
+		"trust":    config.StableZoneID("trust"),
+		"zzq17760": config.StableZoneID("zzq17760"),
+		"zzq8100":  config.StableZoneID("zzq8100"),
 	}}
 	s := &Server{
 		store: store,
@@ -38,21 +38,21 @@ func TestBuildSessionViewQuarantineSurvivor10530(t *testing.T) {
 	}
 	for i := range 100 {
 		view := s.buildSessionView()
-		id := result.ZoneIDs["z174"]
-		if view.zoneNames[id] != "z174" {
-			t.Fatalf("iteration %d zone name[%d] = %q, want survivor z174", i, id, view.zoneNames[id])
+		id := result.ZoneIDs["zzq17760"]
+		if view.zoneNames[uint16(id)] != "zzq17760" {
+			t.Fatalf("iteration %d zone name[%d] = %q, want survivor zzq17760", i, id, view.zoneNames[uint16(id)])
 		}
-		if got := view.zoneIfaces[id]; len(got) != 1 || got[0] != "if-survivor" {
+		if got := view.zoneIfaces[uint16(id)]; len(got) != 1 || got[0] != "if-survivor" {
 			t.Fatalf("iteration %d survivor interfaces = %v, want only if-survivor", i, got)
 		}
 	}
 	view := s.buildSessionView()
 	if len(view.zoneNames) != 2 ||
-		view.zoneNames[result.ZoneIDs["trust"]] != "trust" ||
-		view.zoneNames[result.ZoneIDs["z174"]] != "z174" {
-		t.Fatalf("ordinary/survivor reverse-map controls = %v, want trust and z174", view.zoneNames)
+		view.zoneNames[uint16(result.ZoneIDs["trust"])] != "trust" ||
+		view.zoneNames[uint16(result.ZoneIDs["zzq17760"])] != "zzq17760" {
+		t.Fatalf("ordinary/survivor reverse-map controls = %v, want trust and zzq17760", view.zoneNames)
 	}
-	if got := view.zoneIfaces[result.ZoneIDs["trust"]]; len(got) != 1 || got[0] != "if-trust" {
+	if got := view.zoneIfaces[uint16(result.ZoneIDs["trust"])]; len(got) != 1 || got[0] != "if-trust" {
 		t.Fatalf("ordinary control interfaces = %v, want if-trust", got)
 	}
 }

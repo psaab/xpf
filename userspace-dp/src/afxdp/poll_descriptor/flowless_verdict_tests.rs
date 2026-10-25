@@ -165,7 +165,7 @@ mod flowless_local_delivery_tests {
 
     const GRE: u8 = 47;
     // Ingress zone id used by the host-inbound verdict tests.
-    const ZONE: u16 = 7;
+    const ZONE: u32 = 7;
     // Ingress ifindex + firewall-local interface IP used by the ordering test.
     const INGRESS_IF: i32 = 6;
 
@@ -211,7 +211,7 @@ mod flowless_local_delivery_tests {
         }
     }
 
-    fn fw_with_host_inbound(zone: u16, services: &[&str], protocols: &[&str]) -> ForwardingState {
+    fn fw_with_host_inbound(zone: u32, services: &[&str], protocols: &[&str]) -> ForwardingState {
         let mut fw = ForwardingState::default();
         let services: Vec<String> = services.iter().map(|s| s.to_string()).collect();
         let protocols: Vec<String> = protocols.iter().map(|s| s.to_string()).collect();
@@ -226,7 +226,7 @@ mod flowless_local_delivery_tests {
         fw: &ForwardingState,
         flow: &SessionFlow,
         meta: UserspaceDpMeta,
-        from_zone_id: u16,
+        from_zone_id: u32,
     ) -> FlowlessLocalVerdict {
         verdict_nat(
             fw,
@@ -244,7 +244,7 @@ mod flowless_local_delivery_tests {
         policy_flow: &SessionFlow,
         nat: crate::nat::NatDecision,
         meta: UserspaceDpMeta,
-        from_zone_id: u16,
+        from_zone_id: u32,
     ) -> FlowlessLocalVerdict {
         let mut counters = BatchCounters::default();
         flowless_local_delivery_verdict(
@@ -331,7 +331,7 @@ mod flowless_local_delivery_tests {
         assert_eq!(event.reason, 6);
         assert_eq!(event.action, 0, "host-inbound is a silent drop → DENY");
         assert_eq!(event.policy_id, 0);
-        assert_eq!(event.ingress_zone_id, ZONE);
+        assert_eq!(u32::from(event.ingress_zone_id), ZONE);
         assert_eq!(event.src_ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)));
         assert_eq!(event.dst_ip, IpAddr::V4(Ipv4Addr::new(10, 0, 99, 1)));
         assert_eq!(handle.dataplane_event_stats().policy_deny.sent, 1);
@@ -506,7 +506,7 @@ mod flowless_local_delivery_tests {
     fn flowless_junos_host_deny_not_delivered() {
         use crate::test_zone_ids::TEST_TRUST_ZONE_ID;
         let mut fw = fw_with_host_inbound(TEST_TRUST_ZONE_ID, &["any-service"], &[]);
-        let zone_name_to_id: rustc_hash::FxHashMap<String, u16> =
+        let zone_name_to_id: rustc_hash::FxHashMap<String, u32> =
             [("trust".to_string(), TEST_TRUST_ZONE_ID)]
                 .into_iter()
                 .collect();
@@ -530,8 +530,8 @@ mod flowless_local_delivery_tests {
         fw.app_catalog = crate::policy::AppCatalog::from_snapshot(&[crate::AppCatalogEntry {
             app_id: 42,
             protocol: PROTO_TCP,
-            dst_port_low: TEST_TRUST_ZONE_ID,
-            dst_port_high: TEST_TRUST_ZONE_ID,
+            dst_port_low: TEST_TRUST_ZONE_ID as u16,
+            dst_port_high: TEST_TRUST_ZONE_ID as u16,
             ..Default::default()
         }]);
         let (handle, rx) = crate::event_stream::test_worker_handle(
@@ -576,7 +576,7 @@ mod flowless_local_delivery_tests {
             .decode_dataplane_event()
             .expect("flowless junos-host deny payload");
         assert_eq!(event.reason, 5);
-        assert_eq!(event.ingress_zone_id, TEST_TRUST_ZONE_ID);
+        assert_eq!(u32::from(event.ingress_zone_id), TEST_TRUST_ZONE_ID);
         assert_eq!(
             event.application_id, 0,
             "flowless traffic has no L4 service port"
@@ -598,7 +598,7 @@ mod flowless_local_delivery_tests {
         let wire_dst = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
         let local_dst = IpAddr::V4(Ipv4Addr::new(10, 0, 99, 1));
         let mut fw = fw_with_host_inbound(TEST_TRUST_ZONE_ID, &["any-service"], &[]);
-        let zone_name_to_id: rustc_hash::FxHashMap<String, u16> =
+        let zone_name_to_id: rustc_hash::FxHashMap<String, u32> =
             [("trust".to_string(), TEST_TRUST_ZONE_ID)]
                 .into_iter()
                 .collect();

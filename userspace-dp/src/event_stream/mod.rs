@@ -716,7 +716,7 @@ impl EventStreamWorkerHandle {
     fn encode_delta_frame(
         seq: u64,
         delta: &SessionDelta,
-        zone_name_to_id: &FxHashMap<String, u16>,
+        zone_name_to_id: &FxHashMap<String, u32>,
     ) -> EventFrame {
         match delta.kind {
             SessionDeltaKind::Open => EventFrame::encode_session_open_with_handshake_state(
@@ -756,8 +756,8 @@ impl EventStreamWorkerHandle {
                 &delta.key,
                 delta.metadata.owner_rg_id,
                 close_flags(delta),
-                delta.metadata.ingress_zone,
-                delta.metadata.egress_zone,
+                delta.metadata.ingress_zone as u16,
+                delta.metadata.egress_zone as u16,
                 delta.purge_retirement,
                 delta.metadata.ingress_ifindex,
                 delta.metadata.ingress_vlan_id,
@@ -772,7 +772,7 @@ impl EventStreamWorkerHandle {
     pub(crate) fn push_delta(
         &self,
         delta: &SessionDelta,
-        zone_name_to_id: &FxHashMap<String, u16>,
+        zone_name_to_id: &FxHashMap<String, u32>,
     ) {
         let _ = self.send_sequenced(|seq| Self::encode_delta_frame(seq, delta, zone_name_to_id));
     }
@@ -785,7 +785,7 @@ impl EventStreamWorkerHandle {
     pub(crate) fn push_delta_lossless(
         &self,
         delta: &SessionDelta,
-        zone_name_to_id: &FxHashMap<String, u16>,
+        zone_name_to_id: &FxHashMap<String, u32>,
     ) -> Result<(), String> {
         self.push_delta_lossless_within(delta, zone_name_to_id, LOSSLESS_QUEUE_TIMEOUT)
     }
@@ -807,7 +807,7 @@ impl EventStreamWorkerHandle {
     pub(crate) fn push_delta_lossless_within(
         &self,
         delta: &SessionDelta,
-        zone_name_to_id: &FxHashMap<String, u16>,
+        zone_name_to_id: &FxHashMap<String, u32>,
         budget: Duration,
     ) -> Result<(), String> {
         self.push_delta_lossless_within_seq(delta, zone_name_to_id, budget)
@@ -821,7 +821,7 @@ impl EventStreamWorkerHandle {
     pub(crate) fn push_delta_lossless_within_seq(
         &self,
         delta: &SessionDelta,
-        zone_name_to_id: &FxHashMap<String, u16>,
+        zone_name_to_id: &FxHashMap<String, u32>,
         budget: Duration,
     ) -> Result<u64, String> {
         self.send_lossless_encoded(budget, || {

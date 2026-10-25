@@ -20,29 +20,29 @@ type quarantineRESTDP struct {
 	reads int
 }
 
-func (d *quarantineRESTDP) ReadZoneCounters(id uint16, dir int) (dataplane.CounterValue, error) {
+func (d *quarantineRESTDP) ReadZoneCounters(id uint32, dir int) (dataplane.CounterValue, error) {
 	d.reads++
 	return d.Manager.ReadZoneCounters(id, dir)
 }
 
 type quarantineRESTReadErrDP struct {
 	*quarantineRESTDP
-	errID uint16
+	errID uint32
 }
 
-func (d *quarantineRESTReadErrDP) ReadZoneCounters(id uint16, dir int) (dataplane.CounterValue, error) {
+func (d *quarantineRESTReadErrDP) ReadZoneCounters(id uint32, dir int) (dataplane.CounterValue, error) {
 	if id == d.errID {
 		return dataplane.CounterValue{}, errors.New("trust counter bridge unavailable")
 	}
 	return d.quarantineRESTDP.ReadZoneCounters(id, dir)
 }
 
-func newQuarantineRESTFixture(t *testing.T, names ...string) (*Server, *quarantineRESTDP, map[string]uint16) {
+func newQuarantineRESTFixture(t *testing.T, names ...string) (*Server, *quarantineRESTDP, map[string]uint32) {
 	t.Helper()
 	store := newDescriptorCoverageStore(t)
 	cfg := store.ActiveConfig()
 	cfg.Security.Zones = make(map[string]*config.ZoneConfig, len(names))
-	ids := make(map[string]uint16, len(names))
+	ids := make(map[string]uint32, len(names))
 	for _, name := range names {
 		cfg.Security.Zones[name] = &config.ZoneConfig{Name: name}
 		ids[name] = config.StableZoneID(name)
@@ -54,7 +54,7 @@ func newQuarantineRESTFixture(t *testing.T, names ...string) (*Server, *quaranti
 	return &Server{store: store, dp: dp}, dp, ids
 }
 
-func setQuarantineRESTCounters(dp *quarantineRESTDP, id uint16, inPackets, inBytes, outPackets, outBytes uint64) {
+func setQuarantineRESTCounters(dp *quarantineRESTDP, id uint32, inPackets, inBytes, outPackets, outBytes uint64) {
 	dp.SetZoneCounterOffset(id,
 		dataplane.CounterValue{Packets: inPackets, Bytes: inBytes},
 		dataplane.CounterValue{Packets: outPackets, Bytes: outBytes})
@@ -103,11 +103,11 @@ func rawRESTZoneByName10531(t *testing.T, raw []map[string]json.RawMessage, name
 }
 
 func TestZonesHandlerQuarantineCollision10531(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatal("test premise broken: z174/z214 no longer collide")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatal("test premise broken: zzq17760/zzq8100 no longer collide")
 	}
-	s, dp, ids := newQuarantineRESTFixture(t, "z174", "z214", "trust")
-	setQuarantineRESTCounters(dp, ids["z174"], 11, 1100, 22, 2200)
+	s, dp, ids := newQuarantineRESTFixture(t, "zzq17760", "zzq8100", "trust")
+	setQuarantineRESTCounters(dp, ids["zzq17760"], 11, 1100, 22, 2200)
 	setQuarantineRESTCounters(dp, ids["trust"], 33, 3300, 44, 4400)
 
 	rr := httptest.NewRecorder()
@@ -123,34 +123,34 @@ func TestZonesHandlerQuarantineCollision10531(t *testing.T) {
 		t.Fatal("REST wire contains a forbidden bool quarantined key")
 	}
 
-	loser := restZoneByName10531(t, zones, "z214")
-	if loser.Quarantine == nil || loser.Quarantine.State != ZoneQuarantineStateQuarantined || loser.Quarantine.SurvivorZone != "z174" {
-		t.Fatalf("z214 quarantine = %+v, want quarantined survivor z174", loser.Quarantine)
+	loser := restZoneByName10531(t, zones, "zzq8100")
+	if loser.Quarantine == nil || loser.Quarantine.State != ZoneQuarantineStateQuarantined || loser.Quarantine.SurvivorZone != "zzq17760" {
+		t.Fatalf("zzq8100 quarantine = %+v, want quarantined survivor zzq17760", loser.Quarantine)
 	}
 	if loser.PerZoneCountersAvailable || loser.IngressPackets != 0 || loser.IngressBytes != 0 || loser.EgressPackets != 0 || loser.EgressBytes != 0 {
-		t.Fatalf("z214 leaked survivor counters: available=%v counters=%d/%d %d/%d", loser.PerZoneCountersAvailable, loser.IngressPackets, loser.IngressBytes, loser.EgressPackets, loser.EgressBytes)
+		t.Fatalf("zzq8100 leaked survivor counters: available=%v counters=%d/%d %d/%d", loser.PerZoneCountersAvailable, loser.IngressPackets, loser.IngressBytes, loser.EgressPackets, loser.EgressBytes)
 	}
-	loserRaw := rawRESTZoneByName10531(t, raw, "z214")
+	loserRaw := rawRESTZoneByName10531(t, raw, "zzq8100")
 	var loserQuarantine map[string]json.RawMessage
 	if err := json.Unmarshal(loserRaw["quarantine"], &loserQuarantine); err != nil {
-		t.Fatalf("decode z214 quarantine: %v", err)
+		t.Fatalf("decode zzq8100 quarantine: %v", err)
 	}
 	var state, survivor string
 	if err := json.Unmarshal(loserQuarantine["state"], &state); err != nil {
-		t.Fatalf("decode z214 quarantine state: %v", err)
+		t.Fatalf("decode zzq8100 quarantine state: %v", err)
 	}
 	if err := json.Unmarshal(loserQuarantine["survivor_zone"], &survivor); err != nil {
-		t.Fatalf("decode z214 quarantine survivor: %v", err)
+		t.Fatalf("decode zzq8100 quarantine survivor: %v", err)
 	}
-	if state != ZoneQuarantineStateQuarantined || survivor != "z174" {
-		t.Fatalf("raw z214 quarantine = state %q survivor %q", state, survivor)
+	if state != ZoneQuarantineStateQuarantined || survivor != "zzq17760" {
+		t.Fatalf("raw zzq8100 quarantine = state %q survivor %q", state, survivor)
 	}
 	var available bool
 	if err := json.Unmarshal(loserRaw["per_zone_counters_available"], &available); err != nil || available {
-		t.Fatalf("raw z214 per_zone_counters_available = %s, want false", loserRaw["per_zone_counters_available"])
+		t.Fatalf("raw zzq8100 per_zone_counters_available = %s, want false", loserRaw["per_zone_counters_available"])
 	}
 
-	for _, name := range []string{"z174", "trust"} {
+	for _, name := range []string{"zzq17760", "trust"} {
 		zone := restZoneByName10531(t, zones, name)
 		if zone.Quarantine == nil || zone.Quarantine.State != ZoneQuarantineStateNotQuarantined || zone.Quarantine.SurvivorZone != "" {
 			t.Fatalf("%s quarantine = %+v, want not_quarantined without survivor", name, zone.Quarantine)
@@ -164,8 +164,8 @@ func TestZonesHandlerQuarantineCollision10531(t *testing.T) {
 			t.Fatalf("%s raw quarantine unexpectedly has survivor_zone: %s", name, q["survivor_zone"])
 		}
 	}
-	if survivor := restZoneByName10531(t, zones, "z174"); !survivor.PerZoneCountersAvailable || survivor.IngressPackets != 11 {
-		t.Fatalf("z174 counters/availability = %d/%v, want 11/true", survivor.IngressPackets, survivor.PerZoneCountersAvailable)
+	if survivor := restZoneByName10531(t, zones, "zzq17760"); !survivor.PerZoneCountersAvailable || survivor.IngressPackets != 11 {
+		t.Fatalf("zzq17760 counters/availability = %d/%v, want 11/true", survivor.IngressPackets, survivor.PerZoneCountersAvailable)
 	}
 	if trust := restZoneByName10531(t, zones, "trust"); !trust.PerZoneCountersAvailable || trust.IngressPackets != 33 {
 		t.Fatalf("trust counters/availability = %d/%v, want 33/true", trust.IngressPackets, trust.PerZoneCountersAvailable)
@@ -189,21 +189,21 @@ func TestZonesHandlerQuarantineCollision10531(t *testing.T) {
 	if len(aliasZones) != len(zones) || len(aliasRaw) != len(raw) {
 		t.Fatalf("statistics alias shape = %d/%d, want %d/%d", len(aliasZones), len(aliasRaw), len(zones), len(raw))
 	}
-	if aliasLoser := restZoneByName10531(t, aliasZones, "z214"); aliasLoser.Quarantine == nil || aliasLoser.Quarantine.State != ZoneQuarantineStateQuarantined || aliasLoser.PerZoneCountersAvailable {
-		t.Fatalf("statistics alias z214 = %+v, want same quarantine suppression", aliasLoser)
+	if aliasLoser := restZoneByName10531(t, aliasZones, "zzq8100"); aliasLoser.Quarantine == nil || aliasLoser.Quarantine.State != ZoneQuarantineStateQuarantined || aliasLoser.PerZoneCountersAvailable {
+		t.Fatalf("statistics alias zzq8100 = %+v, want same quarantine suppression", aliasLoser)
 	}
 }
 
 // TestZonesHandlerQuarantinePreservesCounterError10531 pins the conjunction
 // of quarantine suppression and #3408 fail-loud behavior. The quarantined
-// z214 row must skip the shared-id read, while a genuine trust read failure
+// zzq8100 row must skip the shared-id read, while a genuine trust read failure
 // still reaches HTTP 500.
 func TestZonesHandlerQuarantinePreservesCounterError10531(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatal("test premise broken: z174/z214 no longer collide")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatal("test premise broken: zzq17760/zzq8100 no longer collide")
 	}
-	s, dp, ids := newQuarantineRESTFixture(t, "z174", "z214", "trust")
-	setQuarantineRESTCounters(dp, ids["z174"], 11, 1100, 22, 2200)
+	s, dp, ids := newQuarantineRESTFixture(t, "zzq17760", "zzq8100", "trust")
+	setQuarantineRESTCounters(dp, ids["zzq17760"], 11, 1100, 22, 2200)
 	errDP := &quarantineRESTReadErrDP{
 		quarantineRESTDP: dp,
 		errID:            ids["trust"],
@@ -216,22 +216,22 @@ func TestZonesHandlerQuarantinePreservesCounterError10531(t *testing.T) {
 		t.Fatalf("zonesHandler status = %d, want 500; body=%s", rr.Code, rr.Body.String())
 	}
 	if dp.reads != 2 {
-		t.Fatalf("ReadZoneCounters calls before genuine error = %d, want 2 for survivor only; quarantined z214 must be skipped", dp.reads)
+		t.Fatalf("ReadZoneCounters calls before genuine error = %d, want 2 for survivor only; quarantined zzq8100 must be skipped", dp.reads)
 	}
 }
 
 // TestZonesHandlerReportsNodeScopedQuarantine12247 runs zonesHandler on node1's
-// compiled config, where z214 is the only local claimant of the stable ID it
-// shares with node0's z174. The runtime name set quarantines z214 on both
+// compiled config, where zzq8100 is the only local claimant of the stable ID it
+// shares with node0's zzq17760. The runtime name set quarantines zzq8100 on both
 // nodes, so the REST view must report it quarantined in favour of the peer's
-// z174 and skip the shared-ID counter read, matching the dataplane.
+// zzq17760 and skip the shared-ID counter read, matching the dataplane.
 func TestZonesHandlerReportsNodeScopedQuarantine12247(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatal("test premise broken: z174/z214 no longer collide")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatal("test premise broken: zzq17760/zzq8100 no longer collide")
 	}
 	tree, errs := config.NewParser(`groups {
-  node0 { security { zones { security-zone z174; } } }
-  node1 { security { zones { security-zone z214; } } }
+  node0 { security { zones { security-zone zzq17760; } } }
+  node1 { security { zones { security-zone zzq8100; } } }
 }
 apply-groups "${node}";
 security { zones { security-zone trust; } }`).Parse()
@@ -242,7 +242,7 @@ security { zones { security-zone trust; } }`).Parse()
 	if err != nil {
 		t.Fatalf("tolerant node1 compile: %v", err)
 	}
-	s, dp, ids := newQuarantineRESTFixture(t, "z214", "trust")
+	s, dp, ids := newQuarantineRESTFixture(t, "zzq8100", "trust")
 	cfg := s.store.ActiveConfig()
 	cfg.Security.Zones = node1.Security.Zones
 	cfg.ZoneQuarantineNames = node1.ZoneQuarantineNames
@@ -255,21 +255,21 @@ security { zones { security-zone trust; } }`).Parse()
 	}
 	zones, _ := decodeRESTZones10531(t, rr.Body.Bytes())
 	if len(zones) != 2 {
-		t.Fatalf("zonesHandler returned %d zones, want node1's z214 and trust", len(zones))
+		t.Fatalf("zonesHandler returned %d zones, want node1's zzq8100 and trust", len(zones))
 	}
-	loser := restZoneByName10531(t, zones, "z214")
-	if loser.Quarantine == nil || loser.Quarantine.State != ZoneQuarantineStateQuarantined || loser.Quarantine.SurvivorZone != "z174" {
-		t.Fatalf("z214 quarantine = %+v, want quarantined in favour of peer survivor z174", loser.Quarantine)
+	loser := restZoneByName10531(t, zones, "zzq8100")
+	if loser.Quarantine == nil || loser.Quarantine.State != ZoneQuarantineStateQuarantined || loser.Quarantine.SurvivorZone != "zzq17760" {
+		t.Fatalf("zzq8100 quarantine = %+v, want quarantined in favour of peer survivor zzq17760", loser.Quarantine)
 	}
 	if loser.PerZoneCountersAvailable {
-		t.Fatal("quarantined z214 reported per-zone counters")
+		t.Fatal("quarantined zzq8100 reported per-zone counters")
 	}
 	if trust := restZoneByName10531(t, zones, "trust"); trust.Quarantine == nil ||
 		trust.Quarantine.State != ZoneQuarantineStateNotQuarantined || trust.IngressPackets != 5 {
 		t.Fatalf("trust = %+v, want not quarantined with its counters", trust)
 	}
 	if dp.reads != 2 {
-		t.Fatalf("ReadZoneCounters calls = %d, want 2 (trust only; quarantined z214 skipped)", dp.reads)
+		t.Fatalf("ReadZoneCounters calls = %d, want 2 (trust only; quarantined zzq8100 skipped)", dp.reads)
 	}
 }
 
@@ -326,8 +326,8 @@ func TestZonesHandlerQuarantinePresenceSkew10531(t *testing.T) {
 		t.Fatalf("legacy REST ZoneInfo decoded quarantine = %+v, want nil/UNKNOWN", decoded.Quarantine)
 	}
 
-	s, dp, ids := newQuarantineRESTFixture(t, "z174", "z214", "trust")
-	setQuarantineRESTCounters(dp, ids["z174"], 19, 1900, 29, 2900)
+	s, dp, ids := newQuarantineRESTFixture(t, "zzq17760", "zzq8100", "trust")
+	setQuarantineRESTCounters(dp, ids["zzq17760"], 19, 1900, 29, 2900)
 	rr := httptest.NewRecorder()
 	s.zonesHandler(rr, httptest.NewRequest(http.MethodGet, "/api/v1/security/zones", nil))
 	if rr.Code != http.StatusOK {
@@ -343,11 +343,11 @@ func TestZonesHandlerQuarantinePresenceSkew10531(t *testing.T) {
 }
 
 func TestZoneQuarantineParityWithCollector10531(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatal("test premise broken: z174/z214 no longer collide")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatal("test premise broken: zzq17760/zzq8100 no longer collide")
 	}
-	s, dp, ids := newQuarantineRESTFixture(t, "z174", "z214", "trust")
-	setQuarantineRESTCounters(dp, ids["z174"], 11, 1100, 22, 2200)
+	s, dp, ids := newQuarantineRESTFixture(t, "zzq17760", "zzq8100", "trust")
+	setQuarantineRESTCounters(dp, ids["zzq17760"], 11, 1100, 22, 2200)
 	setQuarantineRESTCounters(dp, ids["trust"], 33, 3300, 44, 4400)
 
 	_, unpopulated := zoneSamples(t, newCollector(s), dp)

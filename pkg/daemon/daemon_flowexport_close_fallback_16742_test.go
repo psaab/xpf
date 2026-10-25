@@ -23,9 +23,9 @@ import (
 // closeRaw16742 extends the canonical close payload to the full
 // 168-byte SESSION_RT_FLOW frame (incl. the [148:152] egress ifindex)
 // and stamps both interface indexes.
-func closeRaw16742(srcPort uint16, trust, untrust uint16) []byte {
+func closeRaw16742(srcPort uint16, trust, untrust uint32) []byte {
 	buf := make([]byte, 168)
-	copy(buf, buildSessionCloseRawEventV4(6, [4]byte{10, 0, 0, 102}, [4]byte{192, 0, 2, 200}, srcPort, 443, [4]byte{}, 0, trust, untrust))
+	copy(buf, buildSessionCloseRawEventV4(6, [4]byte{10, 0, 0, 102}, [4]byte{192, 0, 2, 200}, srcPort, 443, [4]byte{}, 0, uint16(trust), uint16(untrust)))
 	binary.LittleEndian.PutUint32(buf[128:132], 11)
 	binary.LittleEndian.PutUint32(buf[148:152], 12)
 	return buf
@@ -43,7 +43,7 @@ func TestCloseAfterExporterReplacingReconcileExportsOnce16742(t *testing.T) {
 		t.Fatal("exporters must start")
 	}
 	trust, untrust := config.StableZoneID("trust"), config.StableZoneID("untrust")
-	if !d.eventReader.ProcessRawEvent(openRaw16303(23457, 11, 12, trust, untrust)) {
+	if !d.eventReader.ProcessRawEvent(openRaw16303(23457, 11, 12, uint16(trust), uint16(untrust))) {
 		t.Fatal("open rejected")
 	}
 	key := flowexport.FlowKey{SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 23457, DstPort: 443, Protocol: 6}
@@ -67,7 +67,7 @@ func TestCloseAfterExporterReplacingReconcileExportsOnce16742(t *testing.T) {
 		t.Fatal("#16742: replacement exporter must inherit the open state (same group key)")
 	}
 
-	closeBuf := buildSessionCloseRawEventV4(6, [4]byte{10, 0, 0, 102}, [4]byte{192, 0, 2, 200}, 23457, 443, [4]byte{}, 0, trust, untrust)
+	closeBuf := buildSessionCloseRawEventV4(6, [4]byte{10, 0, 0, 102}, [4]byte{192, 0, 2, 200}, 23457, 443, [4]byte{}, 0, uint16(trust), uint16(untrust))
 	binary.LittleEndian.PutUint32(closeBuf[128:132], 11)
 	if !d.eventReader.ProcessRawEvent(closeBuf) {
 		t.Fatal("close rejected")
@@ -163,7 +163,7 @@ func TestPromoteOpenFromSyncRegistersForExport16742(t *testing.T) {
 	d.trackFlowOpenFromSync(dpuserspace.SessionDeltaInfo{
 		Event: "open", AddrFamily: dataplane.AFInet, Protocol: 6,
 		SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 23461, DstPort: 443,
-		IngressZoneID: trust, EgressZoneID: untrust,
+		IngressZoneID: uint16(trust), EgressZoneID: uint16(untrust),
 		IngressIfindex: 11, EgressIfindex: 12,
 	})
 	key := flowexport.FlowKey{SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 23461, DstPort: 443, Protocol: 6}
@@ -174,7 +174,7 @@ func TestPromoteOpenFromSyncRegistersForExport16742(t *testing.T) {
 		t.Fatal("#16742: promote open from sync must be tracked in ipfix too")
 	}
 	// Its close then exports via the recorded open (no fallback slot).
-	closeBuf := buildSessionCloseRawEventV4(6, [4]byte{10, 0, 0, 102}, [4]byte{192, 0, 2, 200}, 23461, 443, [4]byte{}, 0, trust, untrust)
+	closeBuf := buildSessionCloseRawEventV4(6, [4]byte{10, 0, 0, 102}, [4]byte{192, 0, 2, 200}, 23461, 443, [4]byte{}, 0, uint16(trust), uint16(untrust))
 	binary.LittleEndian.PutUint32(closeBuf[128:132], 11)
 	if !d.eventReader.ProcessRawEvent(closeBuf) {
 		t.Fatal("close rejected")

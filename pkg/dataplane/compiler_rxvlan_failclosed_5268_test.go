@@ -311,8 +311,8 @@ type compileRxVlanTestDP struct {
 	stopIfindex int
 }
 
-func (compileRxVlanTestDP) SetZoneConfig(uint16, ZoneConfig) error { return nil }
-func (compileRxVlanTestDP) SetZone(int, uint16, uint16, uint32, uint8, uint8, uint32) error {
+func (compileRxVlanTestDP) SetZoneConfig(uint32, ZoneConfig) error { return nil }
+func (compileRxVlanTestDP) SetZone(int, uint16, uint32, uint32, uint8, uint8, uint32) error {
 	return nil
 }
 func (d compileRxVlanTestDP) AddTxPort(ifindex int) error {
@@ -387,7 +387,7 @@ func TestRxVlanFailClosedWiredIntoCompile_5268(t *testing.T) {
 	})
 
 	result := &CompileResult{
-		ZoneIDs:             map[string]uint16{"trust": 1},
+		ZoneIDs:             map[string]uint32{"trust": 1},
 		ScreenIDs:           make(map[string]uint16),
 		rxTagStripOffCache:  make(map[string]bool),
 		ifCache:             make(map[string]*net.Interface),

@@ -1570,8 +1570,8 @@ fn icmpv6_te_nptv6_reverse_lookup_uses_logical_vlan_unit_zone_not_physical_paren
     // the physical parent inherits ITS zone.
     const UNIT_B_IFINDEX: i32 = 13; // VLAN 80, "zone-b" — the traffic's real
     // unit; must NOT be shadowed by zone-a.
-    const ZONE_A_ID: u16 = 41;
-    const ZONE_B_ID: u16 = 42;
+    const ZONE_A_ID: u32 = 41;
+    const ZONE_B_ID: u32 = 42;
 
     let nptv6 = Nptv6State::from_snapshots(&[crate::Nptv6RuleSnapshot {
         name: "nptv6-zone-b".to_string(),

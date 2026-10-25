@@ -714,7 +714,7 @@ pub(in crate::afxdp) fn allow_generated_error_at(
 pub(in crate::afxdp) fn allow_generated_error_zoned(
     forwarding: &ForwardingState,
     reason: GeneratedErrorReason,
-    from_zone_id: u16,
+    from_zone_id: u32,
     src: Option<IpAddr>,
 ) -> bool {
     allow_generated_error_zoned_at(
@@ -736,7 +736,7 @@ pub(in crate::afxdp) fn allow_generated_error_zoned(
 pub(in crate::afxdp) fn allow_generated_error_zoned_at(
     forwarding: &ForwardingState,
     reason: GeneratedErrorReason,
-    from_zone_id: u16,
+    from_zone_id: u32,
     src: Option<IpAddr>,
     now_ns: u64,
     rate_per_sec: u64,
@@ -754,7 +754,7 @@ pub(in crate::afxdp) fn allow_generated_error_zoned_at(
 /// `allow_generated_error_zoned(_, Reject, _, _)`.
 pub(in crate::afxdp) fn allow_generated_reject(
     forwarding: &ForwardingState,
-    from_zone_id: u16,
+    from_zone_id: u32,
     src: Option<IpAddr>,
 ) -> bool {
     allow_generated_reject_at(
@@ -771,7 +771,7 @@ pub(in crate::afxdp) fn allow_generated_reject(
 /// zone-keyed gate with the Reject reason.
 pub(in crate::afxdp) fn allow_generated_reject_at(
     forwarding: &ForwardingState,
-    from_zone_id: u16,
+    from_zone_id: u32,
     src: Option<IpAddr>,
     now_ns: u64,
     rate_per_sec: u64,

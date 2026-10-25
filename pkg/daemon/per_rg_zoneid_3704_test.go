@@ -54,7 +54,7 @@ func TestZoneRGMapKeyedByStableZoneID(t *testing.T) {
 			t.Errorf("buildZoneIDs[%q] = %d, want StableZoneID %d",
 				tc.zone, zoneIDs[tc.zone], stable)
 		}
-		if rgs, ok := rgMap[stable]; !ok || len(rgs) != 1 || rgs[0] != tc.rg {
+		if rgs, ok := rgMap[uint16(stable)]; !ok || len(rgs) != 1 || rgs[0] != tc.rg {
 			t.Errorf("zoneRGMap[StableZoneID(%q)=%d] = (%v, %v), want ([%d], true)",
 				tc.zone, stable, rgs, ok, tc.rg)
 		}
@@ -68,12 +68,12 @@ func TestZoneRGMapKeyedByStableZoneID(t *testing.T) {
 	ss.SetZoneOwnership(rgMap, nil, nil)
 
 	// trust -> RG 1 (primary): syncs via per-RG ownership despite IsPrimaryFn=false.
-	if !ss.ShouldSyncZone(config.StableZoneID("trust")) {
+	if !ss.ShouldSyncZone(uint16(config.StableZoneID("trust"))) {
 		t.Error("ShouldSyncZone(StableZoneID(trust)) = false; per-RG ownership " +
 			"for RG 1 was not consulted (namespace split would cause this)")
 	}
 	// untrust -> RG 2 (not primary): must NOT sync.
-	if ss.ShouldSyncZone(config.StableZoneID("untrust")) {
+	if ss.ShouldSyncZone(uint16(config.StableZoneID("untrust"))) {
 		t.Error("ShouldSyncZone(StableZoneID(untrust)) = true; RG 2 is not primary")
 	}
 }

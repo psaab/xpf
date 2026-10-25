@@ -13,11 +13,20 @@ import (
 // z65162 folds to StableZoneID("<*>")==15527; z63256 folds to
 // StableZoneID("any")==29700.
 func TestZoneIDCollisionIgnoresWildcardAndReserved13113(t *testing.T) {
-	if StableZoneID("z65162") != StableZoneID("<*>") {
-		t.Fatalf("test premise broken: z65162 no longer folds to StableZoneID(\"<*>\")")
+	// #16557: under the u32 fold no short name colliding with "<*>" or
+	// "any" is findable in test time. The gate's exclusion is structural
+	// (collisionCandidateZoneName drops wildcard templates and reserved
+	// tokens before any fold comparison), so the premises are now
+	// asserted at that predicate plus the compile outcomes below: a
+	// wildcard template and a reserved token beside an ordinary zone
+	// must neither reject nor warn nor quarantine.
+	if collisionCandidateZoneName("<*>") || collisionCandidateZoneName("<z*>") ||
+		collisionCandidateZoneName("any") || collisionCandidateZoneName("junos-host") ||
+		collisionCandidateZoneName("junos-global") {
+		t.Fatal("premise: wildcard/reserved tokens must not be collision candidates (#13113)")
 	}
-	if StableZoneID("z63256") != StableZoneID("any") {
-		t.Fatalf("test premise broken: z63256 no longer folds to StableZoneID(\"any\")")
+	if !collisionCandidateZoneName("z65162") {
+		t.Fatal("premise: ordinary zone must be a collision candidate (#13113)")
 	}
 	cases := []struct {
 		name            string
@@ -77,8 +86,8 @@ func TestZoneIDCollisionIgnoresWildcardAndReserved13113(t *testing.T) {
 	// Positive control: a genuine concrete collision must still be rejected.
 	t.Run("concrete collision still rejected", func(t *testing.T) {
 		tree := buildTree(t, []string{
-			"set security zones security-zone z174",
-			"set security zones security-zone z214",
+			"set security zones security-zone zzq17760",
+			"set security zones security-zone zzq8100",
 		})
 		if _, err := CompileConfig(tree); err == nil ||
 			!strings.Contains(err.Error(), "collision") {

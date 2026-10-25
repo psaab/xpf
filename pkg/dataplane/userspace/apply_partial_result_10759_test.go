@@ -61,7 +61,7 @@ func TestApplyConfigPreservesPartialResultOnLateFailure10759(t *testing.T) {
 				Name:      "fxp0",
 				Addresses: []string{"192.0.2.2/24"},
 			}},
-			ZoneIDs: map[string]uint16{"trust": 3},
+			ZoneIDs: map[string]uint32{"trust": 3},
 		}
 		if err := preflight(result); err != nil {
 			return nil, err

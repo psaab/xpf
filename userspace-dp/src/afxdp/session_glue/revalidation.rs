@@ -165,7 +165,7 @@ worker_id: u32,) -> usize {
 /// snapshots because the id-keyed maps cannot distinguish quarantine from
 /// genuine disappearance.
 pub(in crate::afxdp) fn removed_zone_ids_for_rotation(old_forwarding: &ForwardingState,
-new_forwarding: &ForwardingState,) -> FastSet<u16> {
+new_forwarding: &ForwardingState,) -> FastSet<u32> {
     if !old_forwarding.zone_set_validated
         || !new_forwarding.zone_set_validated
         || old_forwarding.zone_id_to_name.is_empty()
@@ -197,7 +197,7 @@ pub(in crate::afxdp) fn purge_sessions_with_removed_zone_ids(sessions: &mut Sess
 session_map: SteeringMap<'_>,
 shared: SharedSessionRefs<'_>,
 forwarding: &ForwardingState,
-removed_zone_ids: &FastSet<u16>,
+removed_zone_ids: &FastSet<u32>,
 worker_id: u32,) -> usize {
     if removed_zone_ids.is_empty() {
         return 0;
@@ -292,7 +292,7 @@ pub(in crate::afxdp) fn synced_entry_is_stale_replay(
     if !(origin.is_peer_synced() || origin == SessionOrigin::SharedPromote) {
         return false;
     }
-    let zone_absent = |zone: u16| zone != 0 && !forwarding.zone_id_to_name.contains_key(&zone);
+    let zone_absent = |zone: u32| zone != 0 && !forwarding.zone_id_to_name.contains_key(&zone);
     if zone_absent(metadata.ingress_zone) || zone_absent(metadata.egress_zone) {
         return true;
     }
@@ -300,7 +300,7 @@ pub(in crate::afxdp) fn synced_entry_is_stale_replay(
     // under against the CURRENT name's check for the same id. A mismatch is
     // a stale generation (A's dead row under B's live id) and drops. The
     // `None` arm is unreachable (absence returned above) and fails open.
-    let vintage_stale = |zone: u16, stamped: u32| {
+    let vintage_stale = |zone: u32, stamped: u32| {
         if zone == 0 || stamped == 0 {
             return false;
         }

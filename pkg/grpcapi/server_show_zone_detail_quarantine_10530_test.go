@@ -11,7 +11,7 @@ func TestGRPCZoneDetailCallerPrefixContract10530(t *testing.T) {
 	s := &Server{store: quarantinePolicyTextStore10530(t)}
 	cfg := s.store.ActiveConfig()
 	var out strings.Builder
-	s.showZonesDetail(cfg, "z214", &out)
+	s.showZonesDetail(cfg, "zzq8100", &out)
 	if !strings.Contains(out.String(), config.ZoneQuarantinePoliciesQualifier) {
 		t.Fatalf("gRPC zones-detail quarantined policy block lacks caller qualifier:\n%s", out.String())
 	}
@@ -64,6 +64,6 @@ func TestGRPCZoneDetailCallerPrefixContract10530(t *testing.T) {
 		t.Fatalf("live trust->trust row gained quarantine qualifier:\n%s", ordinaryRow)
 	}
 	if !strings.Contains(deadRow, config.ZoneQuarantinePoliciesQualifier) {
-		t.Fatalf("peer-quarantined trust->z214 row lacks the #12896 scrub qualifier:\n%s", deadRow)
+		t.Fatalf("peer-quarantined trust->zzq8100 row lacks the #12896 scrub qualifier:\n%s", deadRow)
 	}
 }

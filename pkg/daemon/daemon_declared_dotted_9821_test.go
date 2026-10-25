@@ -444,7 +444,7 @@ func TestBuildZoneRGMapDeclaredDotted9821(t *testing.T) {
 		"zz": {Interfaces: []string{"p.0.1", "q.0.1"}},
 		"r":  {Interfaces: []string{"reth0.0"}},
 	}
-	zoneIDs := map[string]uint16{"z": 5, "zz": 6, "r": 7}
+	zoneIDs := map[string]uint32{"z": 5, "zz": 6, "r": 7}
 	got := buildZoneRGMap(cfg, zoneIDs)
 	if !reflect.DeepEqual(got[5], []int{1}) {
 		t.Errorf("zone z RG set = %v, want [1] (dotted owner resolves)", got[5])

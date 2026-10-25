@@ -17,10 +17,10 @@ type notPopulatedCLIDP struct {
 
 func (d *notPopulatedCLIDP) IsLoaded() bool                          { return true }
 func (d *notPopulatedCLIDP) LastApplyResult() *dataplane.ApplyResult { return d.apply }
-func (d *notPopulatedCLIDP) ReadZoneCounters(uint16, int) (dataplane.CounterValue, error) {
+func (d *notPopulatedCLIDP) ReadZoneCounters(uint32, int) (dataplane.CounterValue, error) {
 	return dataplane.CounterValue{}, dataplane.ErrCounterNotPopulated
 }
-func (d *notPopulatedCLIDP) ReadFloodCounters(uint16) (dataplane.FloodState, error) {
+func (d *notPopulatedCLIDP) ReadFloodCounters(uint32) (dataplane.FloodState, error) {
 	return dataplane.FloodState{}, dataplane.ErrCounterNotPopulated
 }
 
@@ -36,7 +36,7 @@ func (d *notPopulatedCLIDP) ReadFloodCounters(uint16) (dataplane.FloodState, err
 func TestShowZonesDisplayZoneCountersNotAvailable(t *testing.T) {
 	store := newPolicyHitCountCLIStore(t, true) // trust + untrust zones
 	c := &CLI{store: store, dp: &notPopulatedCLIDP{
-		apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"trust": 40000, "untrust": 41000}},
+		apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 40000, "untrust": 41000}},
 	}}
 
 	out := captureStdout(t, func() {
@@ -80,7 +80,7 @@ func TestShowZonesDisplayZoneCountersNotAvailable(t *testing.T) {
 func TestShowScreenStatisticsAllFloodNotAvailable(t *testing.T) {
 	store := newPolicyHitCountCLIStore(t, true)
 	c := &CLI{store: store, dp: &notPopulatedCLIDP{
-		apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"trust": 40000, "untrust": 41000}},
+		apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 40000, "untrust": 41000}},
 	}}
 
 	out := captureStdout(t, func() {
@@ -120,15 +120,15 @@ func TestShowScreenStatisticsAllFloodNotAvailable(t *testing.T) {
 type populatedFloodCLIDP struct {
 	dataplane.DataPlane
 	apply *dataplane.ApplyResult
-	rows  map[uint16]dataplane.FloodState
+	rows  map[uint32]dataplane.FloodState
 }
 
 func (d *populatedFloodCLIDP) IsLoaded() bool                          { return true }
 func (d *populatedFloodCLIDP) LastApplyResult() *dataplane.ApplyResult { return d.apply }
-func (d *populatedFloodCLIDP) ReadZoneCounters(uint16, int) (dataplane.CounterValue, error) {
+func (d *populatedFloodCLIDP) ReadZoneCounters(uint32, int) (dataplane.CounterValue, error) {
 	return dataplane.CounterValue{}, dataplane.ErrCounterNotPopulated
 }
-func (d *populatedFloodCLIDP) ReadFloodCounters(id uint16) (dataplane.FloodState, error) {
+func (d *populatedFloodCLIDP) ReadFloodCounters(id uint32) (dataplane.FloodState, error) {
 	fs, ok := d.rows[id]
 	if !ok {
 		return dataplane.FloodState{}, dataplane.ErrCounterNotPopulated
@@ -147,10 +147,10 @@ func (d *populatedFloodCLIDP) ReadFloodCounters(id uint16) (dataplane.FloodState
 func TestShowScreenStatisticsAllFloodPopulatedRendersLiveCounts(t *testing.T) {
 	store := newPolicyHitCountCLIStore(t, true) // trust + untrust zones
 	c := &CLI{store: store, dp: &populatedFloodCLIDP{
-		apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"trust": 40000, "untrust": 41000}},
+		apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 40000, "untrust": 41000}},
 		// trust publishes; untrust does NOT (it lost its hot-path slot, or has
 		// never tripped a flood check).
-		rows: map[uint16]dataplane.FloodState{
+		rows: map[uint32]dataplane.FloodState{
 			40000: {SynCount: 11, ICMPCount: 22, UDPCount: 33},
 		},
 	}}
@@ -191,7 +191,7 @@ func TestShowScreenStatisticsAllFloodPopulatedRendersLiveCounts(t *testing.T) {
 // a published zone renders live counts.
 func TestShowScreenStatisticsSingleZoneFlood(t *testing.T) {
 	store := newPolicyHitCountCLIStore(t, true) // trust + untrust zones
-	apply := &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"trust": 40000, "untrust": 41000}}
+	apply := &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 40000, "untrust": 41000}}
 
 	t.Run("unpopulated", func(t *testing.T) {
 		c := &CLI{store: store, dp: &notPopulatedCLIDP{apply: apply}}
@@ -214,7 +214,7 @@ func TestShowScreenStatisticsSingleZoneFlood(t *testing.T) {
 	t.Run("populated", func(t *testing.T) {
 		c := &CLI{store: store, dp: &populatedFloodCLIDP{
 			apply: apply,
-			rows:  map[uint16]dataplane.FloodState{40000: {SynCount: 11, ICMPCount: 22, UDPCount: 33}},
+			rows:  map[uint32]dataplane.FloodState{40000: {SynCount: 11, ICMPCount: 22, UDPCount: 33}},
 		}}
 		out := captureStdout(t, func() {
 			if err := c.showScreenStatistics("trust"); err != nil {

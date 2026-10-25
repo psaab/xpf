@@ -965,7 +965,7 @@ pub(crate) enum SnapshotIntegrityError {
     /// skipped by `populate_zones` (never installed) and so are NOT treated as
     /// collisions.
     DuplicateZoneId {
-        id: u16,
+        id: u32,
         first: String,
         second: String,
     },

@@ -1394,9 +1394,9 @@ pub(super) fn stamp_icmpv6_checksum(
 
 /// The zone the secure tunnel is put in. Aliases an existing id so nothing has
 /// to be added to `test_zone_ids`.
-pub(super) const TEST_SIBLING_VPN_ZONE_ID_6722: u16 = TEST_DMZ_ZONE_ID;
+pub(super) const TEST_SIBLING_VPN_ZONE_ID_6722: u32 = TEST_DMZ_ZONE_ID;
 /// A SECOND tunnel zone, for the two-units-in-different-zones shape.
-pub(super) const TEST_OTHER_VPN_ZONE_ID_6722: u16 = TEST_SFMIX_ZONE_ID;
+pub(super) const TEST_OTHER_VPN_ZONE_ID_6722: u32 = TEST_SFMIX_ZONE_ID;
 /// The LAN interface every transit in these fixtures ingresses on.
 pub(super) const LAN_IFINDEX_6722: i32 = 24;
 /// `st0` and `st0.0` share this ifindex (`snapshotLinuxName` collapses a

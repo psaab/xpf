@@ -163,7 +163,7 @@ pub(crate) struct IpsecInnerAdvisory {
     pub snapshot_generation: u64,
     pub config_generation: u64,
     pub fib_generation: u32,
-    pub zone_id: u16,
+    pub zone_id: u32,
     pub if_id: u32,
     pub pmech_inventory_generation: u64,
     pub pmech_inventory_fib_generation: u32,
@@ -703,7 +703,7 @@ mod tests {
         snapshot_generation: u64,
         config_generation: u64,
         fib_generation: u32,
-        zone_id: u16,
+        zone_id: u32,
         if_id: u32,
     ) -> IpsecInnerAdvisory {
         IpsecInnerAdvisory {
@@ -1144,7 +1144,7 @@ mod tests {
             (20, next_hop),
             crate::afxdp::NeighborEntry { mac: [0x02, 0, 0, 0, 0, 20] },
         );
-        let mut zones: rustc_hash::FxHashMap<String, u16> = Default::default();
+        let mut zones: rustc_hash::FxHashMap<String, u32> = Default::default();
         zones.insert("vpn".into(), 1);
         zones.insert("lan".into(), 2);
         forwarding.policy = crate::policy::parse_policy_state("permit", &[], &zones);
@@ -1198,7 +1198,7 @@ mod tests {
     #[test]
     fn h14_01_remote_to_local_lan_regression_13956() {
         let mut forwarding = local_lan_forwarding();
-        let mut zones: rustc_hash::FxHashMap<String, u16> = Default::default();
+        let mut zones: rustc_hash::FxHashMap<String, u32> = Default::default();
         zones.insert("vpn".into(), 1);
         zones.insert("lan".into(), 2);
         forwarding.policy = crate::policy::parse_policy_state("permit", &[], &zones);
@@ -1211,7 +1211,7 @@ mod tests {
     #[test]
     fn h14_02_default_deny_policy_denies_remote_to_lan_13956() {
         let mut forwarding = local_lan_forwarding();
-        let mut zones: rustc_hash::FxHashMap<String, u16> = Default::default();
+        let mut zones: rustc_hash::FxHashMap<String, u32> = Default::default();
         zones.insert("vpn".into(), 1);
         zones.insert("lan".into(), 2);
         forwarding.policy = crate::policy::parse_policy_state("deny", &[], &zones);
@@ -1221,7 +1221,7 @@ mod tests {
         assert_eq!(decision.reason(), Some(reason::LEGACY_POLICY_DENY), "{decision:?}");
     }
     fn port_term_policy(protocol: &str, destination_port: &str) -> crate::policy::PolicyState {
-        let mut zones: rustc_hash::FxHashMap<String, u16> = Default::default();
+        let mut zones: rustc_hash::FxHashMap<String, u32> = Default::default();
         zones.insert("vpn".into(), 1);
         zones.insert("lan".into(), 2);
         let rule = crate::PolicyRuleSnapshot {
@@ -1255,7 +1255,7 @@ mod tests {
         second_icmp_type: Option<u8>,
         default_action: &str,
     ) -> crate::policy::PolicyState {
-        let mut zones: rustc_hash::FxHashMap<String, u16> = Default::default();
+        let mut zones: rustc_hash::FxHashMap<String, u32> = Default::default();
         zones.insert("vpn".into(), 1);
         zones.insert("lan".into(), 2);
         let mut rules = vec![crate::PolicyRuleSnapshot {
@@ -1640,7 +1640,7 @@ mod tests {
     #[test]
     fn h14_02_explicit_vpn_to_lan_policy_permits_remote_to_lan_13956() {
         let mut forwarding = local_lan_forwarding();
-        let mut zones: rustc_hash::FxHashMap<String, u16> = Default::default();
+        let mut zones: rustc_hash::FxHashMap<String, u32> = Default::default();
         zones.insert("vpn".into(), 1);
         zones.insert("lan".into(), 2);
         let rule = crate::PolicyRuleSnapshot {

@@ -103,7 +103,7 @@ func (m *Manager) ClearSessionCounts() error {
 // helper with no per-zone flood accounting, a zone past the helper's slot
 // capacity, and a zone that has simply never tripped a flood check alike.
 // Surfaces must render "not available" rather than a misleading 0.
-func (m *Manager) ReadFloodCounters(zoneID uint16) (FloodState, error) {
+func (m *Manager) ReadFloodCounters(zoneID uint32) (FloodState, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	fs, ok := m.floodCounterOffsets[zoneID]
@@ -125,10 +125,10 @@ func (m *Manager) ReadFloodCounters(zoneID uint16) (FloodState, error) {
 // row setter is retained for tests that seed one zone directly; production code
 // MUST use ReplaceFloodCounterOffsets, or a zone that disappears from the helper
 // snapshot keeps serving a frozen total.
-func (m *Manager) SetFloodCounterOffset(zoneID uint16, fs FloodState) {
+func (m *Manager) SetFloodCounterOffset(zoneID uint32, fs FloodState) {
 	m.mu.Lock()
 	if m.floodCounterOffsets == nil {
-		m.floodCounterOffsets = make(map[uint16]FloodState)
+		m.floodCounterOffsets = make(map[uint32]FloodState)
 	}
 	m.floodCounterOffsets[zoneID] = fs
 	m.mu.Unlock()
@@ -165,14 +165,14 @@ func (m *Manager) SetFloodCounterOffset(zoneID uint16, fs FloodState) {
 // ErrCounterNotPopulated. The sole call site (syncBPFCountersLocked) runs only
 // on a successfully decoded ProcessStatus, so an empty set here is a real
 // observation and never a failed fetch.
-func (m *Manager) ReplaceFloodCounterOffsets(rows map[uint16]FloodState) {
+func (m *Manager) ReplaceFloodCounterOffsets(rows map[uint32]FloodState) {
 	m.mu.Lock()
 	if len(rows) == 0 {
 		m.floodCounterOffsets = nil
 		m.mu.Unlock()
 		return
 	}
-	next := make(map[uint16]FloodState, len(rows))
+	next := make(map[uint32]FloodState, len(rows))
 	for id, fs := range rows {
 		next[id] = fs
 	}

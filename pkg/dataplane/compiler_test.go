@@ -14,7 +14,7 @@ type policyScheduleSlotTestDP struct {
 	rules []PolicyRule
 }
 
-func (d *policyScheduleSlotTestDP) SetZonePairPolicy(fromZone, toZone uint16, ps PolicySet) error {
+func (d *policyScheduleSlotTestDP) SetZonePairPolicy(fromZone, toZone uint32, ps PolicySet) error {
 	return nil
 }
 
@@ -63,7 +63,7 @@ func TestCompilePoliciesRecordsExpandedPolicyScheduleSlots(t *testing.T) {
 		},
 	}}
 	result := &CompileResult{
-		ZoneIDs: map[string]uint16{
+		ZoneIDs: map[string]uint32{
 			"trust":   1,
 			"untrust": 2,
 		},
@@ -124,7 +124,7 @@ func TestCompilePoliciesContiguousIDs16560(t *testing.T) {
 		return cfg
 	}
 	result := func() *CompileResult {
-		return &CompileResult{ZoneIDs: map[string]uint16{"trust": 1, "untrust": 2}}
+		return &CompileResult{ZoneIDs: map[string]uint32{"trust": 1, "untrust": 2}}
 	}
 	for _, n := range []int{256, 257, 1000} {
 		dp := &policyScheduleSlotTestDP{}
@@ -842,12 +842,12 @@ func TestGREPerformanceAcceleration(t *testing.T) {
 type tunnelHostInboundTestDP struct {
 	DataPlane
 
-	zoneCfgs map[uint16]ZoneConfig
+	zoneCfgs map[uint32]ZoneConfig
 }
 
-func (d *tunnelHostInboundTestDP) SetZoneConfig(zoneID uint16, cfg ZoneConfig) error {
+func (d *tunnelHostInboundTestDP) SetZoneConfig(zoneID uint32, cfg ZoneConfig) error {
 	if d.zoneCfgs == nil {
-		d.zoneCfgs = map[uint16]ZoneConfig{}
+		d.zoneCfgs = map[uint32]ZoneConfig{}
 	}
 	d.zoneCfgs[zoneID] = cfg
 	return nil
@@ -900,7 +900,7 @@ func greHostInboundCfg() *config.Config {
 func TestApplyTunnelHostInboundSkipsNilZone(t *testing.T) {
 	cfg := greHostInboundCfg()
 	result := &CompileResult{
-		ZoneIDs: map[string]uint16{"trust": 1, "orphaned": 2},
+		ZoneIDs: map[string]uint32{"trust": 1, "orphaned": 2},
 	}
 	dp := &tunnelHostInboundTestDP{}
 
@@ -932,8 +932,8 @@ func TestApplyTunnelHostInboundSkipsNilZone(t *testing.T) {
 // programZoneMaps will never install that zone. Fail-closed is preserved:
 // a non-quarantined zone with the same bad reference must still be rejected.
 func TestValidateZoneScreenReferences_SkipsQuarantinedCollisionLoser(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatalf("test premise broken: z174/z214 no longer collide")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatalf("test premise broken: zzq17760/zzq8100 no longer collide")
 	}
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
@@ -941,16 +941,16 @@ func TestValidateZoneScreenReferences_SkipsQuarantinedCollisionLoser(t *testing.
 				"good-screen": {Name: "good-screen"},
 			},
 			Zones: map[string]*config.ZoneConfig{
-				"z174": {Name: "z174", ScreenProfile: "good-screen"},
-				"z214": {Name: "z214", ScreenProfile: "missing-screen"},
+				"zzq17760": {Name: "zzq17760", ScreenProfile: "good-screen"},
+				"zzq8100":  {Name: "zzq8100", ScreenProfile: "missing-screen"},
 			},
 		},
 	}
-	if _, excluded := config.ZoneQuarantineExclusionsForConfig(cfg)["z214"]; !excluded {
-		t.Fatalf("test premise broken: z214 not quarantined: %v", config.ZoneQuarantineExclusionsForConfig(cfg))
+	if _, excluded := config.ZoneQuarantineExclusionsForConfig(cfg)["zzq8100"]; !excluded {
+		t.Fatalf("test premise broken: zzq8100 not quarantined: %v", config.ZoneQuarantineExclusionsForConfig(cfg))
 	}
-	if _, excluded := config.ZoneQuarantineExclusionsForConfig(cfg)["z174"]; excluded {
-		t.Fatalf("test premise broken: survivor z174 quarantined")
+	if _, excluded := config.ZoneQuarantineExclusionsForConfig(cfg)["zzq17760"]; excluded {
+		t.Fatalf("test premise broken: survivor zzq17760 quarantined")
 	}
 	result := newValidationResult()
 	result.ScreenIDs["good-screen"] = 1
@@ -965,16 +965,16 @@ func TestValidateZoneScreenReferences_SkipsQuarantinedCollisionLoser(t *testing.
 				"good-screen": {Name: "good-screen"},
 			},
 			Zones: map[string]*config.ZoneConfig{
-				"z174": {Name: "z174", ScreenProfile: "missing-screen"},
-				"z214": {Name: "z214", ScreenProfile: "good-screen"},
+				"zzq17760": {Name: "zzq17760", ScreenProfile: "missing-screen"},
+				"zzq8100":  {Name: "zzq8100", ScreenProfile: "good-screen"},
 			},
 		},
 	}
-	if _, excluded := config.ZoneQuarantineExclusionsForConfig(cfg2)["z214"]; !excluded {
-		t.Fatalf("control premise broken: z214 not quarantined")
+	if _, excluded := config.ZoneQuarantineExclusionsForConfig(cfg2)["zzq8100"]; !excluded {
+		t.Fatalf("control premise broken: zzq8100 not quarantined")
 	}
 	err := validateZoneScreenReferences(cfg2, result)
-	if err == nil || !strings.Contains(err.Error(), `"missing-screen" not found for zone "z174"`) {
+	if err == nil || !strings.Contains(err.Error(), `"missing-screen" not found for zone "zzq17760"`) {
 		t.Fatalf("non-quarantined zone with missing screen must be rejected, got: %v", err)
 	}
 }

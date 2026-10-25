@@ -65,7 +65,7 @@ func TestProducerDeltaConvertsToSyncedValue9752(t *testing.T) {
 	}
 	d, ss := primaryForRG1Daemon9752()
 	sink := &chainSink9752{}
-	n := d.walkUserspaceSessionDeltas(ss, map[string]uint16{"lan": 1, "wan": 2}, []dpuserspace.SessionDeltaInfo{delta}, sink)
+	n := d.walkUserspaceSessionDeltas(ss, map[string]uint32{"lan": 1, "wan": 2}, []dpuserspace.SessionDeltaInfo{delta}, sink)
 	if n != 1 || len(sink.vals) != 1 {
 		t.Fatalf("walk synced %d values, want 1", len(sink.vals))
 	}

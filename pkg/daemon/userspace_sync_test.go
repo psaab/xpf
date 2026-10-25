@@ -197,7 +197,7 @@ func (f *fakeUserspaceSessionExporter) ExportOwnerRGSessionsPagedStream(rgIDs []
 // from the BPF-ABI SessionID) so it rides the cluster sync wire and the peer
 // adopts it. Reverting the stamp leaves it 0 and this fails RED.
 func TestUserspaceSessionFromDeltaCarriesRTFlowSessionID5212(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	wantID := uint64(7)<<48 | 0x1234_5678
 
 	deltaV4 := dpuserspace.SessionDeltaInfo{
@@ -242,7 +242,7 @@ func TestUserspaceSessionFromDeltaCarriesRTFlowSessionID5212(t *testing.T) {
 // A revert loses the only information needed for session-specific fabric
 // ownership and stable hit-counter rebinding.
 func TestUserspaceSessionFromDeltaCarriesIngressAndPolicyRuleID11070(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	for _, af := range []uint8{dataplane.AFInet, dataplane.AFInet6} {
 		delta := dpuserspace.SessionDeltaInfo{
 			Event: "open", AddrFamily: af, Protocol: 6,
@@ -268,7 +268,7 @@ func TestUserspaceSessionFromDeltaCarriesIngressAndPolicyRuleID11070(t *testing.
 }
 
 func TestUserspaceSessionFromDeltaV4(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	delta := dpuserspace.SessionDeltaInfo{
 		Event:         "open",
 		AddrFamily:    2,
@@ -476,7 +476,7 @@ func TestUserspaceHAProtocolMismatchReason(t *testing.T) {
 }
 
 func TestUserspaceSessionFromDeltaV4CarriesTunnelEndpointMetadata(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "sfmix": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "sfmix": 2}
 	delta := dpuserspace.SessionDeltaInfo{
 		Event:            "open",
 		AddrFamily:       2,
@@ -512,7 +512,7 @@ func TestUserspaceSessionFromDeltaV4CarriesTunnelEndpointMetadata(t *testing.T) 
 }
 
 func TestUserspaceForwardWireAliasFromDeltaV4UsesNATTuple(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	delta := dpuserspace.SessionDeltaInfo{
 		Event:       "open",
 		AddrFamily:  dataplane.AFInet,
@@ -544,7 +544,7 @@ func TestUserspaceForwardWireAliasFromDeltaV4UsesNATTuple(t *testing.T) {
 }
 
 func TestUserspaceSessionFromDeltaV6(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	delta := dpuserspace.SessionDeltaInfo{
 		Event:         "open",
 		AddrFamily:    10,
@@ -603,7 +603,7 @@ func TestUserspaceSessionFromDeltaV6(t *testing.T) {
 }
 
 func TestUserspaceSessionFromDeltaV6CarriesTunnelEndpointMetadata(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "sfmix": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "sfmix": 2}
 	delta := dpuserspace.SessionDeltaInfo{
 		Event:            "open",
 		AddrFamily:       10,
@@ -639,7 +639,7 @@ func TestUserspaceSessionFromDeltaV6CarriesTunnelEndpointMetadata(t *testing.T) 
 }
 
 func TestUserspaceForwardWireAliasFromDeltaV6UsesNATTuple(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	delta := dpuserspace.SessionDeltaInfo{
 		Event:       "open",
 		AddrFamily:  dataplane.AFInet6,
@@ -671,7 +671,7 @@ func TestUserspaceForwardWireAliasFromDeltaV6UsesNATTuple(t *testing.T) {
 }
 
 func TestUserspaceSessionFromDeltaUsesNetworkByteOrderPorts(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	delta := dpuserspace.SessionDeltaInfo{
 		Event:       "open",
 		AddrFamily:  2,
@@ -701,7 +701,7 @@ func TestUserspaceSessionFromDeltaUsesNetworkByteOrderPorts(t *testing.T) {
 }
 
 func TestUserspaceSessionFromDeltaV4PreservesPortForAddressOnlySNAT(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	delta := dpuserspace.SessionDeltaInfo{
 		Event:       "open",
 		AddrFamily:  2,
@@ -725,7 +725,7 @@ func TestUserspaceSessionFromDeltaV4PreservesPortForAddressOnlySNAT(t *testing.T
 }
 
 func TestUserspaceSessionFromDeltaV6PreservesPortForAddressOnlySNAT(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	delta := dpuserspace.SessionDeltaInfo{
 		Event:       "open",
 		AddrFamily:  10,
@@ -1426,7 +1426,7 @@ func TestShouldSyncUserspaceDeltaFabricRedirectUsesSessionIngressOwnership11070(
 // alias). Bind the walk, not just the predicate: an unowned-ingress delta must
 // contribute ZERO sessions, alias included.
 func TestWalkUserspaceSessionDeltasDropsUnownedFabricRedirect6599(t *testing.T) {
-	zoneIDs := map[string]uint16{"wan": 1, "lan": 5}
+	zoneIDs := map[string]uint32{"wan": 1, "lan": 5}
 	ss := &cluster.SessionSync{
 		IsPrimaryFn:      func() bool { return false },
 		IsPrimaryForRGFn: func(rgID int) bool { return rgID == 2 },
@@ -1481,7 +1481,7 @@ func TestWalkUserspaceSessionDeltasDropsUnownedFabricRedirect6599(t *testing.T) 
 // failover_before_rename_joint_purges_10589 assumes this n=0 precondition and
 // proves the receiver converges anyway via the removed-zone purge.
 func TestWalkDemotedOwnerCloseFilteredJointPrecondition10589(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	// No SetZoneRGMap: OwnerRGID>0 short-circuits through the owner-RG gate
 	// before the zone fallback is ever consulted.
 	ss := &cluster.SessionSync{

@@ -1611,7 +1611,7 @@ fn import_stamps_request_counters_16217() {
         rev_packets: 6789,
         ..crate::protocol::SessionSyncRequest::default()
     };
-    let zones: rustc_hash::FxHashMap<String, u16> = rustc_hash::FxHashMap::default();
+    let zones: rustc_hash::FxHashMap<String, u32> = rustc_hash::FxHashMap::default();
     let entry = crate::server::helpers::build_synced_session_entry(&req, &zones, 0)
         .expect("import builds");
     assert_eq!(entry.fwd_packets, 12345, "#16217: import must stamp fwd count");

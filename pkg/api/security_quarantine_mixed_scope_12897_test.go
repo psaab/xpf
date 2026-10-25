@@ -22,25 +22,25 @@ import (
 // RED on master: the any-member whole-rule marking suppresses mixed-global's
 // counters (hit_counters_unavailable=true, hit_packets=0).
 func TestPoliciesHandlerMixedScopeGlobalKeepsLiveCounters12897(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatal("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatal("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	store := newDescriptorCoverageStore(t)
 	cfg := store.ActiveConfig()
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
-		"trust":   {Name: "trust", Interfaces: []string{"if-trust"}},
-		"untrust": {Name: "untrust", Interfaces: []string{"if-untrust"}},
-		"z174":    {Name: "z174", Interfaces: []string{"if-survivor"}},
-		"z214":    {Name: "z214", Interfaces: []string{"if-quarantined"}},
+		"trust":    {Name: "trust", Interfaces: []string{"if-trust"}},
+		"untrust":  {Name: "untrust", Interfaces: []string{"if-untrust"}},
+		"zzq17760": {Name: "zzq17760", Interfaces: []string{"if-survivor"}},
+		"zzq8100":  {Name: "zzq8100", Interfaces: []string{"if-quarantined"}},
 	}
 	cfg.Security.GlobalPolicies = []*config.Policy{
 		{
 			Name: "mixed-global", Action: config.PolicyDeny, Count: true,
-			Match: config.PolicyMatch{FromZones: []string{"trust", "z214"}, ToZones: []string{"untrust"}},
+			Match: config.PolicyMatch{FromZones: []string{"trust", "zzq8100"}, ToZones: []string{"untrust"}},
 		},
 		{
 			Name: "dead-global", Action: config.PolicyDeny, Count: true,
-			Match: config.PolicyMatch{FromZones: []string{"z214"}, ToZones: []string{"untrust"}},
+			Match: config.PolicyMatch{FromZones: []string{"zzq8100"}, ToZones: []string{"untrust"}},
 		},
 	}
 	// The store carries one zone-pair set (trust->untrust), so the global

@@ -22,32 +22,32 @@ func fabricAmbiguityWarningFor13118(cfg *Config, zoneName string) (string, bool)
 	return "", false
 }
 
-// Quarantined-zone cell: z214 collides with z174 (frozen fold) and is the
+// Quarantined-zone cell: zzq8100 collides with zzq17760 (frozen fold) and is the
 // later-sorting loser, so ZoneQuarantineExclusionsForConfig quarantines it.
 // Its two members span RI-A and MAIN. Pre-fix the gate still warned about
-// z214 on CompileConfigLenient; post-fix it must stay silent for z214.
+// zzq8100 on CompileConfigLenient; post-fix it must stay silent for zzq8100.
 func TestFabricZoneQuarantinedByCollisionSkipsAmbiguityWarning13118(t *testing.T) {
-	if StableZoneID("z174") != StableZoneID("z214") {
-		t.Fatalf("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if StableZoneID("zzq17760") != StableZoneID("zzq8100") {
+		t.Fatalf("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	tree := buildTree(t, []string{
 		"set interfaces ge-0/0/1 unit 0 family inet address 10.0.0.1/24",
 		"set interfaces ge-0/0/2 unit 0 family inet address 10.0.1.1/24",
 		"set routing-instances RI-A instance-type virtual-router",
 		"set routing-instances RI-A interface ge-0/0/1.0",
-		"set security zones security-zone z174",
-		"set security zones security-zone z214 interfaces ge-0/0/1.0",
-		"set security zones security-zone z214 interfaces ge-0/0/2.0",
+		"set security zones security-zone zzq17760",
+		"set security zones security-zone zzq8100 interfaces ge-0/0/1.0",
+		"set security zones security-zone zzq8100 interfaces ge-0/0/2.0",
 	})
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("CompileConfigLenient rejected a quarantined cross-RI zone: %v", err)
 	}
-	if _, excluded := ZoneQuarantineExclusionsForConfig(cfg)["z214"]; !excluded {
-		t.Fatalf("test premise broken: z214 not quarantined: %v", ZoneQuarantineExclusionsForConfig(cfg))
+	if _, excluded := ZoneQuarantineExclusionsForConfig(cfg)["zzq8100"]; !excluded {
+		t.Fatalf("test premise broken: zzq8100 not quarantined: %v", ZoneQuarantineExclusionsForConfig(cfg))
 	}
-	if w, found := fabricAmbiguityWarningFor13118(cfg, "z214"); found {
-		t.Fatalf("quarantined zone z214 still emitted fabric routing-domain ambiguity warning: %q", w)
+	if w, found := fabricAmbiguityWarningFor13118(cfg, "zzq8100"); found {
+		t.Fatalf("quarantined zone zzq8100 still emitted fabric routing-domain ambiguity warning: %q", w)
 	}
 	// Strict mode is unaffected: the zone-ID collision gate itself rejects.
 	if _, err := CompileConfig(tree); err == nil {

@@ -21,7 +21,7 @@ impl EventFrame {
         key: &SessionKey,
         decision: &SessionDecision,
         metadata: &SessionMetadata,
-        zone_name_to_id: &FxHashMap<String, u16>,
+        zone_name_to_id: &FxHashMap<String, u32>,
         fabric_redirect_sync: bool,
         session_id: u64,
         tcp_close_class: u8,
@@ -49,7 +49,7 @@ impl EventFrame {
         key: &SessionKey,
         decision: &SessionDecision,
         metadata: &SessionMetadata,
-        zone_name_to_id: &FxHashMap<String, u16>,
+        zone_name_to_id: &FxHashMap<String, u32>,
         fabric_redirect_sync: bool,
         session_id: u64,
         tcp_close_class: u8,
@@ -84,7 +84,7 @@ impl EventFrame {
         key: &SessionKey,
         decision: &SessionDecision,
         metadata: &SessionMetadata,
-        zone_name_to_id: &FxHashMap<String, u16>,
+        zone_name_to_id: &FxHashMap<String, u32>,
         fabric_redirect_sync: bool,
         session_id: u64,
         tcp_close_class: u8,
@@ -112,7 +112,7 @@ impl EventFrame {
         key: &SessionKey,
         decision: &SessionDecision,
         metadata: &SessionMetadata,
-        zone_name_to_id: &FxHashMap<String, u16>,
+        zone_name_to_id: &FxHashMap<String, u32>,
         fabric_redirect_sync: bool,
         session_id: u64,
         tcp_close_class: u8,
@@ -147,7 +147,7 @@ impl EventFrame {
         key: &SessionKey,
         decision: &SessionDecision,
         metadata: &SessionMetadata,
-        _zone_name_to_id: &FxHashMap<String, u16>,
+        _zone_name_to_id: &FxHashMap<String, u32>,
         fabric_redirect_sync: bool,
         session_id: u64,
         tcp_close_class: u8,
@@ -261,19 +261,19 @@ impl EventFrame {
         buf[pos] = flags;
         pos += 1;
 
-        // [27:29] IngressZoneID u16 LE (#3075: widened from u8).
-        // SessionMetadata.ingress_zone is u16; the event-stream now carries the
-        // full u16 so a stable name-hash zone id > 255 (#3075) round-trips
+        // [27:29] IngressZoneID u32 LE (#3075: widened from u8).
+        // SessionMetadata.ingress_zone is u32; the event-stream now carries the
+        // full u32 so a stable name-hash zone id > 255 (#3075) round-trips
         // instead of truncating. This is same-host same-version IPC — xpfd
         // spawns the helper as a child and the #1917 STOP->FLIP->START kills the
         // helper before the new daemon starts (socket unlinked+recreated, a
         // FullResync drains the stream), so no frame straddles the width change
         // and no record-version negotiation is required.
-        buf[pos..pos + 2].copy_from_slice(&metadata.ingress_zone.to_le_bytes());
+        buf[pos..pos + 2].copy_from_slice(&(metadata.ingress_zone as u16).to_le_bytes());
         pos += 2;
 
-        // [29:31] EgressZoneID u16 LE (#3075).
-        buf[pos..pos + 2].copy_from_slice(&metadata.egress_zone.to_le_bytes());
+        // [29:31] EgressZoneID u32 LE (#3075).
+        buf[pos..pos + 2].copy_from_slice(&(metadata.egress_zone as u16).to_le_bytes());
         pos += 2;
 
         // [31] Disposition u8
@@ -556,7 +556,7 @@ impl EventFrame {
         buf[pos] = close_flags;
         pos += 1;
 
-        // #3075: IngressZoneID u16 LE, EgressZoneID u16 LE (widened from u8).
+        // #3075: IngressZoneID u32 LE, EgressZoneID u32 LE (widened from u8).
         buf[pos..pos + 2].copy_from_slice(&ingress_zone_id.to_le_bytes());
         pos += 2;
         buf[pos..pos + 2].copy_from_slice(&egress_zone_id.to_le_bytes());

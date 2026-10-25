@@ -78,7 +78,7 @@ func TestRESTSessionParityWithGRPC(t *testing.T) {
 	dp := &paritySessionDP{
 		Manager: dataplane.New(),
 		apply: &dataplane.ApplyResult{
-			ZoneIDs:     map[string]uint16{"trust": 2, "untrust": 3},
+			ZoneIDs:     map[string]uint32{"trust": 2, "untrust": 3},
 			PolicyNames: map[uint32]string{5: "allow-web"},
 		},
 		fwdKey: dataplane.SessionKey{

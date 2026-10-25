@@ -19,7 +19,7 @@ type quarantinePolicyDP14336 struct {
 	rules []PolicyRule
 }
 
-func (d *quarantinePolicyDP14336) SetZonePairPolicy(fromZone, toZone uint16, ps PolicySet) error {
+func (d *quarantinePolicyDP14336) SetZonePairPolicy(fromZone, toZone uint32, ps PolicySet) error {
 	d.pairs = append(d.pairs, ZonePairKey{FromZone: fromZone, ToZone: toZone})
 	d.sets = append(d.sets, ps)
 	return nil
@@ -32,15 +32,12 @@ func (d *quarantinePolicyDP14336) DeleteStaleZonePairPolicies(map[ZonePairKey]bo
 
 func collidingZone14336(t *testing.T) string {
 	t.Helper()
-	target := config.StableZoneID("trust")
-	for i := range 200000 {
-		c := fmt.Sprintf("z-coll-%d", i)
-		if config.StableZoneID(c) == target {
-			return c
-		}
+	// #16557 residual pair vs zzq17760.
+	c := "zzq8100"
+	if config.StableZoneID(c) != config.StableZoneID("zzq17760") {
+		t.Fatal("premise: zzq8100/zzq17760 no longer collide")
 	}
-	t.Fatal("no colliding zone found")
-	return ""
+	return c
 }
 
 func TestCompilePolicies_SkipsQuarantinedZoneStanzas(t *testing.T) {
@@ -60,7 +57,7 @@ func TestCompilePolicies_SkipsQuarantinedZoneStanzas(t *testing.T) {
 	}
 	cfg := &config.Config{}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
-		"trust": {Name: "trust"}, "untrust": {Name: "untrust"}, colliding: {Name: colliding},
+		"trust": {Name: "trust"}, "untrust": {Name: "untrust"}, "zzq17760": {Name: "zzq17760"}, colliding: {Name: colliding},
 	}
 	// Survivor first, quarantined second (would clobber same ZonePairKey pre-fix).
 	cfg.Security.Policies = []*config.ZonePairPolicies{
@@ -71,7 +68,7 @@ func TestCompilePolicies_SkipsQuarantinedZoneStanzas(t *testing.T) {
 	if _, ok := config.ZoneQuarantineExclusionsForConfig(cfg)[colliding]; !ok {
 		t.Fatalf("premise: %q not quarantined: %v", colliding, config.ZoneQuarantineExclusionsForConfig(cfg))
 	}
-	res := &CompileResult{ZoneIDs: make(map[string]uint16), AddrIDs: make(map[string]uint32), AppIDs: make(map[string]config.AssignedAppID)}
+	res := &CompileResult{ZoneIDs: make(map[string]uint32), AddrIDs: make(map[string]uint32), AppIDs: make(map[string]config.AssignedAppID)}
 	assignZoneIDs(res, cfg)
 	dp := &quarantinePolicyDP14336{}
 	if err := compilePolicies(dp, cfg, res); err != nil {
@@ -123,7 +120,7 @@ func TestCompilePolicies_SkipsQuarantinedZoneStanzas(t *testing.T) {
 		{FromZone: "any", ToZone: "untrust", Policies: []*config.Policy{mkPol("wild")}},
 		{FromZone: "trust", ToZone: "junos-host", Policies: []*config.Policy{mkPol("host")}},
 	}
-	res2 := &CompileResult{ZoneIDs: make(map[string]uint16), AddrIDs: make(map[string]uint32), AppIDs: make(map[string]config.AssignedAppID)}
+	res2 := &CompileResult{ZoneIDs: make(map[string]uint32), AddrIDs: make(map[string]uint32), AppIDs: make(map[string]config.AssignedAppID)}
 	assignZoneIDs(res2, cfg2)
 	dp2 := &quarantinePolicyDP14336{}
 	if err := compilePolicies(dp2, cfg2, res2); err != nil {
@@ -138,7 +135,7 @@ func TestCompilePolicies_SkipsQuarantinedZoneStanzas(t *testing.T) {
 	cfg3 := &config.Config{}
 	cfg3.Security.Zones = map[string]*config.ZoneConfig{"trust": {Name: "trust"}, "untrust": {Name: "untrust"}}
 	cfg3.Security.Policies = []*config.ZonePairPolicies{{FromZone: "trust", ToZone: "nope", Policies: []*config.Policy{mkPol("x")}}}
-	res3 := &CompileResult{ZoneIDs: make(map[string]uint16), AddrIDs: make(map[string]uint32), AppIDs: make(map[string]config.AssignedAppID)}
+	res3 := &CompileResult{ZoneIDs: make(map[string]uint32), AddrIDs: make(map[string]uint32), AppIDs: make(map[string]config.AssignedAppID)}
 	assignZoneIDs(res3, cfg3)
 	dp3 := &quarantinePolicyDP14336{}
 	if err := compilePolicies(dp3, cfg3, res3); err != nil {
@@ -151,7 +148,7 @@ func TestCompilePolicies_SkipsQuarantinedZoneStanzas(t *testing.T) {
 	cfg4 := &config.Config{}
 	cfg4.Security.Zones = map[string]*config.ZoneConfig{"trust": {Name: "trust"}, "untrust": {Name: "untrust"}}
 	cfg4.Security.Policies = []*config.ZonePairPolicies{{FromZone: "trust", ToZone: "untrust", Policies: big}}
-	res4 := &CompileResult{ZoneIDs: make(map[string]uint16), AddrIDs: make(map[string]uint32), AppIDs: make(map[string]config.AssignedAppID)}
+	res4 := &CompileResult{ZoneIDs: make(map[string]uint32), AddrIDs: make(map[string]uint32), AppIDs: make(map[string]config.AssignedAppID)}
 	assignZoneIDs(res4, cfg4)
 	if err := compilePolicies(&quarantinePolicyDP14336{}, cfg4, res4); err != nil {
 		t.Fatalf("non-quarantined >256 must compile (#16560): %v", err)

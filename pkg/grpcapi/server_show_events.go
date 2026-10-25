@@ -85,7 +85,7 @@ func (s *Server) GetEvents(_ context.Context, req *pb.GetEventsRequest) (*pb.Get
 	}
 	evZoneNames := make(map[uint16]string)
 	if cr := s.applyResult(); cr != nil {
-		evZoneNames = config.SurvivorZoneNames(cr.ZoneIDs, cfg)
+		evZoneNames = survivorZoneNames16(cr.ZoneIDs, cfg)
 	}
 	zoneName := func(stored string, id uint16) string {
 		if stored != "" {

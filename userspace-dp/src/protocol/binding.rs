@@ -1496,14 +1496,14 @@ pub(crate) struct SessionDeltaInfo {
     pub ingress_zone: String,
     #[serde(rename = "egress_zone", default)]
     pub egress_zone: String,
-    /// #919/#922: u16 zone-id mirrors. New peers populate these from
+    /// #919/#922: u32 zone-id mirrors. New peers populate these from
     /// `SessionMetadata`; the legacy string fields hold the resolved
     /// zone NAME (or empty when unknown). Older daemons that don't
     /// know about the IDs ignore the new fields and use the names.
     #[serde(rename = "ingress_zone_id", default)]
-    pub ingress_zone_id: u16,
+    pub ingress_zone_id: u32,
     #[serde(rename = "egress_zone_id", default)]
-    pub egress_zone_id: u16,
+    pub egress_zone_id: u32,
     /// The local ingress identity used by the session-level HA ownership gate.
     #[serde(rename = "ingress_ifindex", default)]
     pub ingress_ifindex: i32,

@@ -165,7 +165,7 @@ func TestRxVlanStagHwParseFailClosedWiredIntoCompile_10915(t *testing.T) {
 		0: {Number: 0, VlanID: 0},
 	}
 	result := &CompileResult{
-		ZoneIDs:             map[string]uint16{"trust": 1},
+		ZoneIDs:             map[string]uint32{"trust": 1},
 		ScreenIDs:           make(map[string]uint16),
 		rxTagStripOffCache:  make(map[string]bool),
 		ifCache:             make(map[string]*net.Interface),

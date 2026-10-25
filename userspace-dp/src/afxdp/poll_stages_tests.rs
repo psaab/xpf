@@ -383,7 +383,7 @@ fn session_miss_ack_stage_invokes_syn_cookie_runtime_validation() {
         .decode_dataplane_event()
         .expect("screen-drop payload");
     assert_eq!(screen_event.kind, DataplaneEventKind::ScreenDrop);
-    assert_eq!(screen_event.ingress_zone_id, TEST_LAN_ZONE_ID);
+    assert_eq!(screen_event.ingress_zone_id, TEST_LAN_ZONE_ID as u16);
     assert_eq!(screen_event.ingress_ifindex, 24);
     assert_eq!(screen_event.screen_id, 1 << 14);
     assert_eq!(event_handle.dataplane_event_stats().screen_drop.sent, 1);
@@ -873,7 +873,7 @@ fn screen_parse_fail_on_unscreened_zone_passes_12875() {
         .decode_dataplane_event()
         .expect("screen-drop payload");
     assert_eq!(screen_event.kind, DataplaneEventKind::ScreenDrop);
-    assert_eq!(screen_event.ingress_zone_id, TEST_LAN_ZONE_ID);
+    assert_eq!(screen_event.ingress_zone_id, TEST_LAN_ZONE_ID as u16);
 
     // CONTROL (tolerant doctrine stays fail-closed): `lan` carries an
     // UNRESOLVED reference while `wan` resolves. The #7168 substituted
@@ -1058,7 +1058,7 @@ fn syn_cookie_ack_stage_parse_fail_on_unscreened_zone_passes_12875() {
         .decode_dataplane_event()
         .expect("screen-drop payload");
     assert_eq!(screen_event.kind, DataplaneEventKind::ScreenDrop);
-    assert_eq!(screen_event.ingress_zone_id, TEST_LAN_ZONE_ID);
+    assert_eq!(screen_event.ingress_zone_id, TEST_LAN_ZONE_ID as u16);
 }
 
 /// #2145 regression: a priority-tagged VLAN-0 SYN
@@ -6751,7 +6751,7 @@ fn stage9_fabric_ingress_populates_scoped_ifindex_only_from_validated_v2_stamp_1
         frame
     };
     // V1 stamp for the same zone: valid zone claim, no scoped identity.
-    let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    let [_, _, hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
     let v1_src_mac = [0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo];
 
     with_neighbor_learn_ctx(&forwarding, |ctx, _neighbors| {
@@ -7088,7 +7088,7 @@ fn stage_ipsec_ambiguous_scope_parity_16047() {
     }
     // Stage-9 precondition: real stamped frames classify Ambiguous.
     let fwd = mk_forwarding("fabric");
-    let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    let [_, _, hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
     let mut stamped = vec![0u8; 64];
     stamped[..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     stamped[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
@@ -7409,7 +7409,7 @@ fn raw_audit_drop_does_not_suppress_enforcing_claimed_veto_16051() {
     );
     let events = rig.drain_events();
     assert_eq!(events.len(), 1, "claimed drop emits exactly one event");
-    assert_eq!(events[0].ingress_zone_id, TEST_WAN_ZONE_ID);
+    assert_eq!(events[0].ingress_zone_id, TEST_WAN_ZONE_ID as u16);
     assert_eq!(events[0].action, 0, "screen drop event action is DENY (0)");
 }
 
@@ -7668,7 +7668,7 @@ fn claimed_only_parse_error_drops_under_claimed_zone_16051() {
         let events = rig.drain_events();
         assert_eq!(events.len(), 1, "{label}: exactly one parse-drop event");
         assert_eq!(
-            events[0].ingress_zone_id, TEST_WAN_ZONE_ID,
+            events[0].ingress_zone_id, TEST_WAN_ZONE_ID as u16,
             "{label}: parse drop must attribute to the claimed zone, never zone 0"
         );
         assert_eq!(events[0].action, 0, "{label}: parse drop action is DENY (0)");

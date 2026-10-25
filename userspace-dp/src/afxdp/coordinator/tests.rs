@@ -208,7 +208,7 @@ fn test_main_route() -> crate::afxdp::types::RouteEntryV4 {
 
 fn pmech_advisory(
     view: &RuntimeView,
-    zone_id: u16,
+    zone_id: u32,
     if_id: u32,
 ) -> crate::afxdp::ipsec_inner::IpsecInnerAdvisory {
     let inventory = view.pmech_inventory();
@@ -7695,8 +7695,8 @@ fn validate_snapshot_buildable_does_not_prune_live_zone_counters_5171() {
     use crate::afxdp::zone_counters::{
         ZoneCounterSlotMap, flush_recorded_zone_counters, record_zone_traffic,
     };
-    const ZONE_A: u16 = 100;
-    const ZONE_B: u16 = 200;
+    const ZONE_A: u32 = 100;
+    const ZONE_B: u32 = 200;
 
     let coord = Coordinator::new();
     // Seed the LIVE forwarding zone-counter store with cumulative totals for
@@ -7709,7 +7709,7 @@ fn validate_snapshot_buildable_does_not_prune_live_zone_counters_5171() {
     record_zone_traffic(&seed_map, ZONE_A, ZONE_B, 1000);
     record_zone_traffic(&seed_map, ZONE_B, ZONE_A, 500);
     flush_recorded_zone_counters(&coord.forwarding.zone_counter_store, &seed_map);
-    let before: std::collections::HashSet<u16> = coord
+    let before: std::collections::HashSet<u32> = coord
         .forwarding
         .zone_counter_store
         .snapshot()
@@ -7746,7 +7746,7 @@ fn validate_snapshot_buildable_does_not_prune_live_zone_counters_5171() {
 
     // The live store must be UNTOUCHED — zone B's totals survive even though
     // the candidate does not configure zone B.
-    let after: std::collections::HashSet<u16> = coord
+    let after: std::collections::HashSet<u32> = coord
         .forwarding
         .zone_counter_store
         .snapshot()
@@ -7814,7 +7814,7 @@ fn zone_counter_live_coordinator(coord: &mut Coordinator) {
     );
 }
 
-fn zone_counter_zones(ids: &[u16]) -> Vec<crate::protocol::snapshot::ZoneSnapshot> {
+fn zone_counter_zones(ids: &[u32]) -> Vec<crate::protocol::snapshot::ZoneSnapshot> {
     ids.iter()
         .map(|&id| crate::protocol::snapshot::ZoneSnapshot {
             name: format!("zone{id}"),
@@ -7825,8 +7825,8 @@ fn zone_counter_zones(ids: &[u16]) -> Vec<crate::protocol::snapshot::ZoneSnapsho
 }
 
 /// Operator-visible rows, sorted — what `show security zones` reports.
-fn zone_counter_rows(coord: &Coordinator) -> Vec<u16> {
-    let mut rows: Vec<u16> = coord
+fn zone_counter_rows(coord: &Coordinator) -> Vec<u32> {
+    let mut rows: Vec<u32> = coord
         .zone_traffic_counters()
         .iter()
         .map(|r| r.zone_id)
@@ -7880,7 +7880,7 @@ fn rejected_apply_does_not_prune_live_zone_counters_6832() {
         "fixture: this apply must be rejected by the worker SPAWN arm — the arm \
          that leaves the candidate state published — got {result:?}"
     );
-    let mut surviving: Vec<u16> = live_store.snapshot().iter().map(|r| r.zone_id).collect();
+    let mut surviving: Vec<u32> = live_store.snapshot().iter().map(|r| r.zone_id).collect();
     surviving.sort_unstable();
     assert_eq!(
         surviving,
@@ -7933,8 +7933,8 @@ fn rule_counter_policy_snapshots() -> Vec<crate::PolicyRuleSnapshot> {
 /// `committed_reconcile_prunes_rule_counters_for_removed_rules_7010`.
 fn rule_counter_live_coordinator(coord: &mut Coordinator) {
     let mut zone_map = rustc_hash::FxHashMap::default();
-    zone_map.insert("zone100".to_string(), 100u16);
-    zone_map.insert("zone200".to_string(), 200u16);
+    zone_map.insert("zone100".to_string(), 100u32);
+    zone_map.insert("zone200".to_string(), 200u32);
     crate::policy::parse_policy_state_with_counters(
         "deny",
         &rule_counter_policy_snapshots(),
@@ -8227,7 +8227,7 @@ fn committed_reconcile_prunes_zone_counters_for_removed_zones_6832() {
         "fixture: this apply must COMMIT (workers up) — got {result:?}"
     );
 
-    let mut surviving: Vec<u16> = live_store.snapshot().iter().map(|r| r.zone_id).collect();
+    let mut surviving: Vec<u32> = live_store.snapshot().iter().map(|r| r.zone_id).collect();
     surviving.sort_unstable();
     assert_eq!(
         surviving,
@@ -8264,7 +8264,7 @@ fn committed_refresh_prunes_zone_counters_for_removed_zones_6832() {
         .refresh_runtime_snapshot(&candidate)
         .expect("fixture: the candidate must refresh cleanly");
 
-    let mut surviving: Vec<u16> = live_store.snapshot().iter().map(|r| r.zone_id).collect();
+    let mut surviving: Vec<u32> = live_store.snapshot().iter().map(|r| r.zone_id).collect();
     surviving.sort_unstable();
     assert_eq!(
         surviving,
@@ -8285,7 +8285,7 @@ fn zone_traffic_counters_drops_a_zone_that_lost_its_slot_6843() {
         ZONE_COUNTER_ASSIGNABLE_SLOTS, ZoneCounterSlotMap, flush_recorded_zone_counters,
         record_zone_traffic,
     };
-    const Z: u16 = 50675; // config::StableZoneID("trust")
+    const Z: u32 = 50675; // config::StableZoneID("trust")
 
     let mut coord = Coordinator::new();
 
@@ -8307,7 +8307,7 @@ fn zone_traffic_counters_drops_a_zone_that_lost_its_slot_6843() {
 
     // Apply 2: enough lower ids to exhaust capacity. Z stays CONFIGURED and
     // keeps its retained totals, but loses its slot.
-    let mut ids: Vec<u16> = (1..=(ZONE_COUNTER_ASSIGNABLE_SLOTS as u16)).collect();
+    let mut ids: Vec<u32> = (1..=(ZONE_COUNTER_ASSIGNABLE_SLOTS as u32)).collect();
     ids.push(Z);
     for id in &ids {
         coord
@@ -8333,7 +8333,7 @@ fn zone_traffic_counters_drops_a_zone_that_lost_its_slot_6843() {
 
     // Move traffic on a zone that KEPT its slot in apply 2, so the assertions
     // below constrain both directions.
-    const SURVIVOR: u16 = 1;
+    const SURVIVOR: u32 = 1;
     let survivor_map = ZoneCounterSlotMap::build(&ids, &coord.forwarding.zone_counter_store);
     record_zone_traffic(&survivor_map, SURVIVOR, 0, 64);
     flush_recorded_zone_counters(&coord.forwarding.zone_counter_store, &survivor_map);
@@ -8404,7 +8404,7 @@ fn zone_flood_counters_drops_a_zone_that_lost_its_slot_3651() {
         FLOOD_COUNTER_ASSIGNABLE_SLOTS, FloodCounterSlotMap, flush_recorded_flood_counters,
         record_zone_flood_drop,
     };
-    const Z: u16 = 50675; // config::StableZoneID("trust")
+    const Z: u32 = 50675; // config::StableZoneID("trust")
 
     let mut coord = Coordinator::new();
 
@@ -8427,7 +8427,7 @@ fn zone_flood_counters_drops_a_zone_that_lost_its_slot_3651() {
 
     // Apply 2: enough lower ids to exhaust capacity. Z stays CONFIGURED and
     // keeps its retained counts, but loses its slot.
-    let mut ids: Vec<u16> = (1..=(FLOOD_COUNTER_ASSIGNABLE_SLOTS as u16)).collect();
+    let mut ids: Vec<u32> = (1..=(FLOOD_COUNTER_ASSIGNABLE_SLOTS as u32)).collect();
     ids.push(Z);
     for id in &ids {
         coord
@@ -8454,7 +8454,7 @@ fn zone_flood_counters_drops_a_zone_that_lost_its_slot_3651() {
 
     // Trip a flood check on a zone that KEPT its slot in apply 2, so the
     // assertions below constrain both directions.
-    const SURVIVOR: u16 = 1;
+    const SURVIVOR: u32 = 1;
     let survivor_map = FloodCounterSlotMap::build(&ids, &coord.forwarding.flood_counter_store);
     record_zone_flood_drop(&survivor_map, SURVIVOR, "udp-flood");
     flush_recorded_flood_counters(&coord.forwarding.flood_counter_store, &survivor_map);
@@ -10227,7 +10227,7 @@ fn refresh_runtime_snapshot_publishes_every_sibling_before_the_view() {
 /// alone.
 #[test]
 fn no_snapshot_reconcile_leaves_no_reader_for_the_empty_table_6873() {
-    const ZONE: u16 = 7;
+    const ZONE: u32 = 7;
 
     let mut coordinator = Coordinator::new();
 
@@ -14389,8 +14389,8 @@ fn publish_runtime_view_shares_books_arc_15091() {
             })
             .collect(),
     }];
-    let zones: rustc_hash::FxHashMap<String, u16> =
-        [("lan".to_string(), 1u16), ("wan".to_string(), 2u16)]
+    let zones: rustc_hash::FxHashMap<String, u32> =
+        [("lan".to_string(), 1u32), ("wan".to_string(), 2u32)]
             .into_iter()
             .collect();
     let counter_store = crate::policy::PolicyCounterStore::default();

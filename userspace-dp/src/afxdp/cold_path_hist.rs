@@ -145,7 +145,7 @@ pub(in crate::afxdp) fn bucket_upper_bound_ns_48(idx: usize) -> u64 {
 /// zero "no sample yet" sentinel while preserving injectivity over
 /// distinct `(u16, u16)` pairs (Codex r3 finding 1).
 #[inline]
-pub(in crate::afxdp) fn zone_pair_packed_key(from_zone_id: u16, to_zone_id: u16) -> u64 {
+pub(in crate::afxdp) fn zone_pair_packed_key(from_zone_id: u32, to_zone_id: u32) -> u64 {
     (((from_zone_id as u64) << 16) | (to_zone_id as u64)) + 1
 }
 
@@ -176,9 +176,9 @@ pub(in crate::afxdp) struct ColdPathSlotMap {
     /// the old 65×65 flat table: stable name-hash ids span [1,65533], so
     /// a flat `from*65+to` index dropped every pair with an id ≥ 65. A
     /// pair absent from the map = no slot assigned.
-    pub(in crate::afxdp) slot_by_pair: std::collections::HashMap<(u16, u16), u8>,
+    pub(in crate::afxdp) slot_by_pair: std::collections::HashMap<(u32, u32), u8>,
     /// `slot → Some((from, to))` for assigned slots, `None` for free.
-    pub(in crate::afxdp) inverse: Vec<Option<(u16, u16)>>,
+    pub(in crate::afxdp) inverse: Vec<Option<(u32, u32)>>,
     /// True if some configured zone-pair could not be assigned a slot
     /// because the 255-slot capacity was exhausted. #15092: also set by
     /// the forwarding build when `configured_zone_pairs_bounded` capped
@@ -225,11 +225,11 @@ impl ColdPathSlotMap {
     /// deterministic for a given config.
     pub(in crate::afxdp) fn build(
         previous: Option<&ColdPathSlotMap>,
-        pairs: &[(u16, u16)],
+        pairs: &[(u32, u32)],
     ) -> (Self, Vec<u8>) {
-        let mut slot_by_pair: std::collections::HashMap<(u16, u16), u8> =
+        let mut slot_by_pair: std::collections::HashMap<(u32, u32), u8> =
             std::collections::HashMap::with_capacity(pairs.len());
-        let mut inverse: Vec<Option<(u16, u16)>> =
+        let mut inverse: Vec<Option<(u32, u32)>> =
             vec![None; POLICY_COLD_PATH_ZONE_PAIR_SLOTS];
         let mut used = [false; POLICY_COLD_PATH_ZONE_PAIR_SLOTS];
         let mut slots_to_zero: Vec<u8> = Vec::new();
@@ -237,7 +237,7 @@ impl ColdPathSlotMap {
 
         // Pass 1: retain slot assignments for pairs that survive from
         // the previous map (so their accumulated histogram is kept).
-        let mut pending: Vec<(u16, u16)> = Vec::with_capacity(pairs.len());
+        let mut pending: Vec<(u32, u32)> = Vec::with_capacity(pairs.len());
         for &(from, to) in pairs {
             // #3075: every (u16, u16) pair is representable — the stable
             // name-hash id space [1,65533] is keyed sparsely by the pair
@@ -303,10 +303,10 @@ impl ColdPathSlotMap {
 
 /// Look up the slot for `(from, to)` in the direct map. Returns `None`
 /// for unmapped pairs (capacity exhausted). #3075: one sparse hash-map
-/// probe keyed on the `(from, to)` pair (any u16 zone id), replacing the
+/// probe keyed on the `(from, to)` pair (any u32 zone id), replacing the
 /// old 65×65 flat-table index that dropped ids ≥ 65.
 #[inline]
-pub(in crate::afxdp) fn lookup_slot(map: &ColdPathSlotMap, from: u16, to: u16) -> Option<u8> {
+pub(in crate::afxdp) fn lookup_slot(map: &ColdPathSlotMap, from: u32, to: u32) -> Option<u8> {
     map.slot_by_pair.get(&(from, to)).copied()
 }
 
@@ -937,8 +937,8 @@ impl WorkerColdPathCounters {
     pub(in crate::afxdp) fn record_sample(
         &mut self,
         slot: u8,
-        from_zone_id: u16,
-        to_zone_id: u16,
+        from_zone_id: u32,
+        to_zone_id: u32,
         delta_ns: u64,
     ) {
         let slot = slot as usize;

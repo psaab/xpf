@@ -266,7 +266,7 @@ func (s *Server) showSessionsTop(ctx context.Context, cfg *config.Config, topic 
 	zoneNames := make(map[uint16]string)
 	var appNames map[config.AssignedAppID]string
 	if cr := s.applyResult(); cr != nil {
-		zoneNames = config.SurvivorZoneNames(cr.ZoneIDs, cfg)
+		zoneNames = survivorZoneNames16(cr.ZoneIDs, cfg)
 		appNames = cr.AppNames
 	}
 	var appFallback *appid.FallbackIndex

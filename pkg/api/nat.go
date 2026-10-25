@@ -456,7 +456,7 @@ func (s *Server) natPoolStatsHandler(w http.ResponseWriter, r *http.Request) {
 		// 0 rather than a wrong aggregate.
 		var zoneByID map[uint16]string
 		if cr != nil {
-			zoneByID = config.SurvivorZoneNames(cr.ZoneIDs, cfg)
+			zoneByID = survivorZoneNames16(cr.ZoneIDs, cfg)
 		}
 		if err := s.dp.IterateSessions(func(_ dataplane.SessionKey, val dataplane.SessionValue) bool {
 			if walkCtx.Err() != nil {

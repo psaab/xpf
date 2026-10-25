@@ -49,16 +49,16 @@ func schedPolicyPresent5328(policies []PolicyRuleSnapshot, name string) bool {
 }
 
 // collidingSchedCfg5328 builds a config whose zone-name set carries a verified
-// StableZoneID collision (z174/z214, later-sorting z214 quarantined) plus a
+// StableZoneID collision (zzq17760/zzq8100, later-sorting zzq8100 quarantined) plus a
 // non-colliding survivor zone "trust", with two scheduled zone-pair permits: one
-// survivor (trust->z174) and one whose to-zone is the quarantined z214. A FULL
-// build quarantines z214 and DROPS the trust->z214 permit; a partial republish
+// survivor (trust->zzq17760) and one whose to-zone is the quarantined zzq8100. A FULL
+// build quarantines zzq8100 and DROPS the trust->zzq8100 permit; a partial republish
 // that rebuilds policies from this cfg WITHOUT re-applying the quarantine would
-// reintroduce the trust->z214 permit as a dangling reference (#6480).
+// reintroduce the trust->zzq8100 permit as a dangling reference (#6480).
 func collidingSchedCfg5328(t *testing.T) *config.Config {
 	t.Helper()
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatalf("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatalf("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	mkPol := func(name string) *config.Policy {
 		return &config.Policy{
@@ -74,13 +74,13 @@ func collidingSchedCfg5328(t *testing.T) *config.Config {
 	}
 	cfg := &config.Config{}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
-		"trust": {Name: "trust"},
-		"z174":  {Name: "z174"},
-		"z214":  {Name: "z214"},
+		"trust":    {Name: "trust"},
+		"zzq17760": {Name: "zzq17760"},
+		"zzq8100":  {Name: "zzq8100"},
 	}
 	cfg.Security.Policies = []*config.ZonePairPolicies{
-		{FromZone: "trust", ToZone: "z174", Policies: []*config.Policy{mkPol("survivor-allow")}},
-		{FromZone: "trust", ToZone: "z214", Policies: []*config.Policy{mkPol("dangling-allow")}},
+		{FromZone: "trust", ToZone: "zzq17760", Policies: []*config.Policy{mkPol("survivor-allow")}},
+		{FromZone: "trust", ToZone: "zzq8100", Policies: []*config.Policy{mkPol("dangling-allow")}},
 	}
 	cfg.Schedulers = map[string]*config.SchedulerConfig{"workhours": {Name: "workhours"}}
 	return cfg
@@ -306,15 +306,15 @@ func TestPublishRouteOverlaySnapshotSchedulerFlipDefeatsDuplicateSkip5328(t *tes
 // hostile-review MAJOR: the route-overlay publish rebuilds next.Policies from raw
 // cfg under the scheduler map but inherits the already-reduced next.Zones (the
 // full build quarantined the later-sorting colliding zone). Without re-applying
-// the StableZoneID quarantine the rebuild reintroduces the trust->z214 permit,
-// which references the quarantined zone z214 absent from next.Zones — a dangling
+// the StableZoneID quarantine the rebuild reintroduces the trust->zzq8100 permit,
+// which references the quarantined zone zzq8100 absent from next.Zones — a dangling
 // reference the Rust UnresolvableZoneReference preflight rejects wholesale. On the
 // supported ip-monitoring path FRR is updated BEFORE this publish
 // (daemon_ipmon.go), so the reject strands the kernel/FRR on new routes while
 // userspace keeps the old FIB, unable to converge.
 //
 // FAIL-ON-REVERT: dropping the scrubPoliciesForQuarantinedZones re-application
-// from rebuildScheduledPolicySectionsLocked leaves the trust->z214 permit in the
+// from rebuildScheduledPolicySectionsLocked leaves the trust->zzq8100 permit in the
 // published snapshot, so assertNoDanglingZoneRef5328 goes RED (clean assertion).
 func TestPublishRouteOverlaySnapshotReappliesZoneQuarantine6480(t *testing.T) {
 	stubRuleListHermetic(t)
@@ -334,8 +334,8 @@ func TestPublishRouteOverlaySnapshotReappliesZoneQuarantine6480(t *testing.T) {
 	m.lastStatus.ConfigSnapshotProtocolVersion = ProtocolVersion
 
 	// Seed lastSnapshot via the FULL build with the scheduler ACTIVE: the full
-	// build quarantines z214 and drops the trust->z214 permit, so the seed carries
-	// the reduced Zones {trust, z174} and only the survivor permit. Reuse the SAME
+	// build quarantines zzq8100 and drops the trust->zzq8100 permit, so the seed carries
+	// the reduced Zones {trust, zzq17760} and only the survivor permit. Reuse the SAME
 	// cfg pointer so the #5680 route-only-hybrid guard's pointer fast path admits
 	// the publish.
 	m.lastSnapshot, err = buildSnapshotWithSchedulerState(
@@ -344,19 +344,19 @@ func TestPublishRouteOverlaySnapshotReappliesZoneQuarantine6480(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build lastSnapshot: %v", err)
 	}
-	// Precondition: the seed is already quarantined (z214 gone, dangling permit gone).
+	// Precondition: the seed is already quarantined (zzq8100 gone, dangling permit gone).
 	assertNoDanglingZoneRef5328(t, m.lastSnapshot)
 	if len(m.lastSnapshot.zoneIDCollisions) != 1 {
-		t.Fatalf("seed must record the z174/z214 collision, got %v", m.lastSnapshot.zoneIDCollisions)
+		t.Fatalf("seed must record the zzq17760/zzq8100 collision, got %v", m.lastSnapshot.zoneIDCollisions)
 	}
 	if schedPolicyPresent5328(m.lastSnapshot.Policies, "dangling-allow") {
-		t.Fatal("precondition: full-build seed must have dropped the trust->z214 permit")
+		t.Fatal("precondition: full-build seed must have dropped the trust->zzq8100 permit")
 	}
 
 	reqs := startArmControlServer(t, controlSock, 1)
 
 	// Route-overlay publish carrying the scheduler map: the rebuild reintroduces
-	// the trust->z214 permit from raw cfg and MUST re-quarantine it.
+	// the trust->zzq8100 permit from raw cfg and MUST re-quarantine it.
 	published, err := m.PublishRouteOverlaySnapshot(cfg, nil, map[string]bool{"workhours": true})
 	if err != nil {
 		t.Fatalf("PublishRouteOverlaySnapshot returned error: %v", err)
@@ -372,11 +372,11 @@ func TestPublishRouteOverlaySnapshotReappliesZoneQuarantine6480(t *testing.T) {
 	assertNoDanglingZoneRef5328(t, req.Snapshot)
 	// The survivor permit must remain (the scrub must not over-drop).
 	if !schedPolicyPresent5328(req.Snapshot.Policies, "survivor-allow") {
-		t.Fatal("survivor permit trust->z174 was wrongly dropped by the re-quarantine")
+		t.Fatal("survivor permit trust->zzq17760 was wrongly dropped by the re-quarantine")
 	}
 	// The dangling permit must be gone.
 	if schedPolicyPresent5328(req.Snapshot.Policies, "dangling-allow") {
-		t.Fatal("dangling permit trust->z214 survived the re-quarantine (references quarantined z214) (#6480)")
+		t.Fatal("dangling permit trust->zzq8100 survived the re-quarantine (references quarantined zzq8100) (#6480)")
 	}
 }
 
@@ -413,7 +413,7 @@ func TestUpdatePolicyScheduleStateReappliesZoneQuarantine6480(t *testing.T) {
 	reqs := startArmControlServer(t, controlSock, 1)
 
 	// A CLOSED-window scheduler republish: rebuilds policies from raw cfg (which
-	// reintroduces the trust->z214 permit) and MUST re-quarantine it.
+	// reintroduces the trust->zzq8100 permit) and MUST re-quarantine it.
 	if err := m.UpdatePolicyScheduleState(cfg, map[string]bool{"workhours": false}); err != nil {
 		t.Fatalf("UpdatePolicyScheduleState returned error: %v", err)
 	}
@@ -424,10 +424,10 @@ func TestUpdatePolicyScheduleStateReappliesZoneQuarantine6480(t *testing.T) {
 	}
 	assertNoDanglingZoneRef5328(t, req.Snapshot)
 	if !schedPolicyPresent5328(req.Snapshot.Policies, "survivor-allow") {
-		t.Fatal("survivor permit trust->z174 was wrongly dropped by the re-quarantine")
+		t.Fatal("survivor permit trust->zzq17760 was wrongly dropped by the re-quarantine")
 	}
 	if schedPolicyPresent5328(req.Snapshot.Policies, "dangling-allow") {
-		t.Fatal("dangling permit trust->z214 survived the re-quarantine (references quarantined z214) (#6480)")
+		t.Fatal("dangling permit trust->zzq8100 survived the re-quarantine (references quarantined zzq8100) (#6480)")
 	}
 }
 
@@ -511,20 +511,20 @@ func TestPublishRouteOverlaySnapshotReadsFreshSchedulerStateNotStale5328(t *test
 	}
 }
 
-// skewCfgA6480 builds config A: zones {trust, z214} with NO StableZoneID
-// collision (z214 alone folds to nothing else here), so a FULL build keeps z214
-// a live zone and keeps the scheduled trust->z214 DENY. This is the applied /
+// skewCfgA6480 builds config A: zones {trust, zzq8100} with NO StableZoneID
+// collision (zzq8100 alone folds to nothing else here), so a FULL build keeps zzq8100
+// a live zone and keeps the scheduled trust->zzq8100 DENY. This is the applied /
 // inherited config a scheduler republish copies its Zones/Interfaces from.
 func skewCfgA6480(t *testing.T) *config.Config {
 	t.Helper()
 	cfg := &config.Config{}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
-		"trust": {Name: "trust"},
-		"z214":  {Name: "z214"},
+		"trust":   {Name: "trust"},
+		"zzq8100": {Name: "zzq8100"},
 	}
 	cfg.Security.Policies = []*config.ZonePairPolicies{
-		{FromZone: "trust", ToZone: "z214", Policies: []*config.Policy{{
-			Name:          "trust-z214-deny",
+		{FromZone: "trust", ToZone: "zzq8100", Policies: []*config.Policy{{
+			Name:          "trust-zzq8100-deny",
 			SchedulerName: "workhours",
 			Match: config.PolicyMatch{
 				SourceAddresses:      []string{"any"},
@@ -538,20 +538,20 @@ func skewCfgA6480(t *testing.T) *config.Config {
 	return cfg
 }
 
-// skewCfgB6480 builds config B: config A PLUS the colliding zone z174. Under B,
-// z174/z214 fold to the SAME StableZoneID and the later-sorting z214 is
-// quarantined, so B's quarantine set is {z214} while A's is empty. B carries the
-// same scheduled trust->z214 deny; a full Compile of B would drop z214 from Zones
+// skewCfgB6480 builds config B: config A PLUS the colliding zone zzq17760. Under B,
+// zzq17760/zzq8100 fold to the SAME StableZoneID and the later-sorting zzq8100 is
+// quarantined, so B's quarantine set is {zzq8100} while A's is empty. B carries the
+// same scheduled trust->zzq8100 deny; a full Compile of B would drop zzq8100 from Zones
 // AND drop the deny (fail-closed). B content-differs from A only by the added
 // zone, so relative to a snapshot built from A it is a genuine config-generation
 // skew.
 func skewCfgB6480(t *testing.T) *config.Config {
 	t.Helper()
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatalf("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatalf("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	cfg := skewCfgA6480(t)
-	cfg.Security.Zones["z174"] = &config.ZoneConfig{Name: "z174"}
+	cfg.Security.Zones["zzq17760"] = &config.ZoneConfig{Name: "zzq17760"}
 	return cfg
 }
 
@@ -565,13 +565,13 @@ func skewCfgB6480(t *testing.T) *config.Config {
 // applying (store_commit.go), and daemon_apply_dataplane.go continues on a
 // dataplane apply error yet still reconciles the scheduler to B.
 //
-// A has zones {trust, z214} (no collision) with a live scheduled trust->z214
-// DENY; B adds colliding z174 so B's quarantine set is {z214}. WITHOUT the guard
-// the scheduler tick copies A's Zones {trust, z214} but scrubs the rebuilt
-// policies with B's {z214} quarantine, DROPPING the trust->z214 deny while z214
+// A has zones {trust, zzq8100} (no collision) with a live scheduled trust->zzq8100
+// DENY; B adds colliding zzq17760 so B's quarantine set is {zzq8100}. WITHOUT the guard
+// the scheduler tick copies A's Zones {trust, zzq8100} but scrubs the rebuilt
+// policies with B's {zzq8100} quarantine, DROPPING the trust->zzq8100 deny while zzq8100
 // stays a live zone in next.Zones — the Rust preflight accepts the snapshot and
-// traffic to z214 falls through to the inherited default PERMIT (fail-OPEN). A
-// full Compile of B would instead drop z214 from Zones + unzone its iface
+// traffic to zzq8100 falls through to the inherited default PERMIT (fail-OPEN). A
+// full Compile of B would instead drop zzq8100 from Zones + unzone its iface
 // (fail-closed). The route-overlay path already refuses this skew
 // (routeOnlyPublishHybrid, #5680); this fold mirrors that refusal inside the
 // shared rebuildScheduledPolicySectionsLocked so BOTH partial-republish paths are
@@ -603,7 +603,7 @@ func TestUpdatePolicyScheduleStateRefusesConfigSkew6480(t *testing.T) {
 	m.lastStatus.ConfigSnapshotProtocolVersion = ProtocolVersion
 
 	// Seed lastSnapshot from config A with the window OPEN: A has no collision, so
-	// z214 is a live zone and the trust->z214 deny is present + ACTIVE. The builder
+	// zzq8100 is a live zone and the trust->zzq8100 deny is present + ACTIVE. The builder
 	// stamps snapshot.Config = cfgA (pointer), which the same-config phase relies on.
 	m.lastSnapshot, err = buildSnapshotWithSchedulerState(
 		cfgA, config.UserspaceConfig{ControlSocket: controlSock}, 5, 0,
@@ -615,19 +615,19 @@ func TestUpdatePolicyScheduleStateRefusesConfigSkew6480(t *testing.T) {
 		t.Fatal("precondition: seeded snapshot must carry cfgA by pointer")
 	}
 	assertNoDanglingZoneRef5328(t, m.lastSnapshot)
-	if !schedPolicyPresent5328(m.lastSnapshot.Policies, "trust-z214-deny") {
-		t.Fatal("precondition: config-A seed must keep the trust->z214 deny (z214 not quarantined)")
+	if !schedPolicyPresent5328(m.lastSnapshot.Policies, "trust-zzq8100-deny") {
+		t.Fatal("precondition: config-A seed must keep the trust->zzq8100 deny (zzq8100 not quarantined)")
 	}
-	// z214 must be a LIVE zone in the seed — the fail-open hinges on it surviving
+	// zzq8100 must be a LIVE zone in the seed — the fail-open hinges on it surviving
 	// in the inherited next.Zones while B's quarantine would drop the deny.
-	z214Live := false
+	zzq8100Live := false
 	for _, z := range m.lastSnapshot.Zones {
-		if z.Name == "z214" {
-			z214Live = true
+		if z.Name == "zzq8100" {
+			zzq8100Live = true
 		}
 	}
-	if !z214Live {
-		t.Fatal("precondition: z214 must be a live zone in the config-A seed")
+	if !zzq8100Live {
+		t.Fatal("precondition: zzq8100 must be a live zone in the config-A seed")
 	}
 
 	// Arm the control server for exactly ONE publish — the same-config phase (b).
@@ -636,13 +636,13 @@ func TestUpdatePolicyScheduleStateRefusesConfigSkew6480(t *testing.T) {
 	// this slot, but the phase-(a) assertions fail first.
 	reqs := startArmControlServer(t, controlSock, 1)
 
-	// Phase (a): SKEW — call with cfgB (quarantines z214, a zone A still has live).
+	// Phase (a): SKEW — call with cfgB (quarantines zzq8100, a zone A still has live).
 	// The guard must REFUSE and retain the prior snapshot.
 	skewErr := m.UpdatePolicyScheduleState(cfgB, map[string]bool{"workhours": false})
 	if skewErr == nil {
 		t.Fatal("UpdatePolicyScheduleState accepted a config-skew republish: the rebuilt " +
-			"policies were scrubbed with cfgB's quarantine {z214} against cfgA's inherited " +
-			"Zones (z214 live), shipping a fail-open snapshot (#6480)")
+			"policies were scrubbed with cfgB's quarantine {zzq8100} against cfgA's inherited " +
+			"Zones (zzq8100 live), shipping a fail-open snapshot (#6480)")
 	}
 	if !strings.Contains(skewErr.Error(), "refusing scheduled-policy republish") {
 		t.Fatalf("skew refusal error = %q, want the #6480 scheduled-policy skew guard", skewErr)
@@ -668,11 +668,11 @@ func TestUpdatePolicyScheduleStateRefusesConfigSkew6480(t *testing.T) {
 		t.Fatal("same-config republish shipped no snapshot")
 	}
 	assertNoDanglingZoneRef5328(t, req.Snapshot)
-	if !schedPolicyPresent5328(req.Snapshot.Policies, "trust-z214-deny") {
-		t.Fatal("same-config republish dropped the trust->z214 deny (A has no quarantine)")
+	if !schedPolicyPresent5328(req.Snapshot.Policies, "trust-zzq8100-deny") {
+		t.Fatal("same-config republish dropped the trust->zzq8100 deny (A has no quarantine)")
 	}
 	// Scheduler bits refreshed: the CLOSED window must render the deny INACTIVE.
-	if !schedPolicyInactive5328(t, req.Snapshot.Policies, "trust-z214-deny") {
+	if !schedPolicyInactive5328(t, req.Snapshot.Policies, "trust-zzq8100-deny") {
 		t.Fatal("same-config republish did not refresh scheduler bits: the CLOSED-window deny " +
 			"is still ACTIVE (Inactive=false) (#6480 phase-b regression guard)")
 	}

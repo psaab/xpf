@@ -159,7 +159,7 @@ func TestApplyConfigRuntimeResultDrivesDownstreamConsumers(t *testing.T) {
 
 	dp := &runtimeOnlyApplyTestDP{
 		applyResult: &dataplane.ApplyResult{
-			ZoneIDs: map[string]uint16{"trust": 7},
+			ZoneIDs: map[string]uint32{"trust": 7},
 			ManagedInterfaces: []networkd.InterfaceConfig{{
 				Name:      "ge-0-0-0",
 				Addresses: []string{"192.0.2.1/24"},

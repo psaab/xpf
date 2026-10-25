@@ -30,7 +30,7 @@ pub(super) fn new_flow_session_limit_drop(
     forwarding: &ForwardingState,
     sessions: &SessionTable,
     from_zone: &str,
-    from_zone_id: u16,
+    from_zone_id: u32,
     src_ip: IpAddr,
     dst_ip: IpAddr,
 ) -> Option<&'static str> {

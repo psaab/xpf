@@ -17,10 +17,10 @@ import (
 // attack while looking alive.
 func TestReplaceFloodCounterOffsetsDropsAbsentZones(t *testing.T) {
 	m := &Manager{}
-	const kept uint16 = 50675 // config.StableZoneID("trust")
-	const gone uint16 = 20665 // config.StableZoneID("untrust")
+	const kept uint32 = 101 // synthetic slotted zone id (#16557: StableZoneID now exceeds dense slot space)
+	const gone uint32 = 102 // synthetic slotted zone id
 
-	m.ReplaceFloodCounterOffsets(map[uint16]FloodState{
+	m.ReplaceFloodCounterOffsets(map[uint32]FloodState{
 		kept: {SynCount: 1, ICMPCount: 2, UDPCount: 3},
 		gone: {SynCount: 90, ICMPCount: 91, UDPCount: 92},
 	})
@@ -30,7 +30,7 @@ func TestReplaceFloodCounterOffsetsDropsAbsentZones(t *testing.T) {
 
 	// Poll N+1: `gone` is no longer published — it lost its hot-path slot, was
 	// removed from the config, or the helper restarted/was cleared.
-	m.ReplaceFloodCounterOffsets(map[uint16]FloodState{
+	m.ReplaceFloodCounterOffsets(map[uint32]FloodState{
 		kept: {SynCount: 5, ICMPCount: 6, UDPCount: 7},
 	})
 
@@ -61,9 +61,9 @@ func TestReplaceFloodCounterOffsetsDropsAbsentZones(t *testing.T) {
 // cannot pass — the assertion is a transition, not a state.
 func TestReplaceFloodCounterOffsetsEmptyClearsAll(t *testing.T) {
 	m := &Manager{}
-	const id uint16 = 56918 // config.StableZoneID("dmz")
+	const id uint32 = 103 // synthetic slotted zone id
 
-	m.ReplaceFloodCounterOffsets(map[uint16]FloodState{id: {SynCount: 3}})
+	m.ReplaceFloodCounterOffsets(map[uint32]FloodState{id: {SynCount: 3}})
 	if fs, err := m.ReadFloodCounters(id); err != nil || fs.SynCount != 3 {
 		t.Fatalf("populated poll must be readable first: %+v err=%v", fs, err)
 	}
@@ -72,11 +72,11 @@ func TestReplaceFloodCounterOffsetsEmptyClearsAll(t *testing.T) {
 		t.Errorf("a nil published block must clear the offsets; err=%v", err)
 	}
 
-	m.ReplaceFloodCounterOffsets(map[uint16]FloodState{id: {SynCount: 4}})
+	m.ReplaceFloodCounterOffsets(map[uint32]FloodState{id: {SynCount: 4}})
 	if fs, err := m.ReadFloodCounters(id); err != nil || fs.SynCount != 4 {
 		t.Fatalf("re-populate after nil must work: %+v err=%v", fs, err)
 	}
-	m.ReplaceFloodCounterOffsets(map[uint16]FloodState{})
+	m.ReplaceFloodCounterOffsets(map[uint32]FloodState{})
 	if _, err := m.ReadFloodCounters(id); !errors.Is(err, ErrCounterNotPopulated) {
 		t.Errorf("an EMPTY (non-nil) published block must clear the offsets too; err=%v", err)
 	}
@@ -88,8 +88,8 @@ func TestReplaceFloodCounterOffsetsEmptyClearsAll(t *testing.T) {
 // rewrite live counters.
 func TestReplaceFloodCounterOffsetsCopiesInput(t *testing.T) {
 	m := &Manager{}
-	const id uint16 = 50675
-	rows := map[uint16]FloodState{id: {SynCount: 1}}
+	const id uint32 = 101
+	rows := map[uint32]FloodState{id: {SynCount: 1}}
 	m.ReplaceFloodCounterOffsets(rows)
 
 	rows[id] = FloodState{SynCount: 999}
@@ -112,9 +112,9 @@ func TestReplaceFloodCounterOffsetsCopiesInput(t *testing.T) {
 // replace-vs-set revert above — it is about scope, not about the fix.
 func TestReplaceFloodCounterOffsetsDoesNotTouchZoneTrafficOffsets(t *testing.T) {
 	m := &Manager{}
-	const id uint16 = 50675
+	const id uint32 = 101
 
-	m.ReplaceZoneCounterOffsets(map[uint16][2]CounterValue{
+	m.ReplaceZoneCounterOffsets(map[uint32][2]CounterValue{
 		id: {{Packets: 7, Bytes: 700}, {Packets: 8, Bytes: 800}},
 	})
 	// A flood replacement that publishes NOTHING — the most destructive shape.
@@ -131,7 +131,7 @@ func TestReplaceFloodCounterOffsetsDoesNotTouchZoneTrafficOffsets(t *testing.T) 
 	}
 
 	// And the reverse direction.
-	m.ReplaceFloodCounterOffsets(map[uint16]FloodState{id: {SynCount: 4}})
+	m.ReplaceFloodCounterOffsets(map[uint32]FloodState{id: {SynCount: 4}})
 	m.ReplaceZoneCounterOffsets(nil)
 	fs, err := m.ReadFloodCounters(id)
 	if err != nil || fs.SynCount != 4 {

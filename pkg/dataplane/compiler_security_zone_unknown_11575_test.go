@@ -12,7 +12,7 @@ type unknownZoneRecorder11575 struct {
 	writes int
 }
 
-func (d *unknownZoneRecorder11575) SetZoneConfig(uint16, ZoneConfig) error {
+func (d *unknownZoneRecorder11575) SetZoneConfig(uint32, ZoneConfig) error {
 	d.writes++
 	return nil
 }
@@ -49,7 +49,7 @@ security {
 	zone.Interfaces = []string{"ge-0/0/0.0"}
 	dp := &unknownZoneRecorder11575{}
 	result := &CompileResult{
-		ZoneIDs:   map[string]uint16{"trust": config.StableZoneID("trust")},
+		ZoneIDs:   map[string]uint32{"trust": config.StableZoneID("trust")},
 		ScreenIDs: map[string]uint16{"safe": 1},
 	}
 	if _, err := programZoneMaps(dp, cfg, result); err != nil {

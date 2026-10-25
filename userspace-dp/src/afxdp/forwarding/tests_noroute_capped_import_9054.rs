@@ -31,10 +31,10 @@ use crate::policy::{PolicyAction, parse_policy_state};
 use rustc_hash::FxHashMap;
 use std::net::IpAddr;
 
-const LAN: u16 = 11;
+const LAN: u32 = 11;
 /// A base NoRoute has `egress_ifindex: 0` and resolves this as the to-zone.
 /// A tunnel NoRoute may retain a logical egress ifindex.
-const UNZONED: u16 = 0;
+const UNZONED: u32 = 0;
 
 fn src() -> IpAddr {
     "10.0.61.100".parse().expect("src")

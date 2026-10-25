@@ -11,26 +11,26 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
-func quarantineIDs10530(t *testing.T) map[string]uint16 {
+func quarantineIDs10530(t *testing.T) map[string]uint32 {
 	t.Helper()
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatal("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatal("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
-	return map[string]uint16{
-		"trust": config.StableZoneID("trust"),
-		"z174":  config.StableZoneID("z174"),
-		"z214":  config.StableZoneID("z214"),
+	return map[string]uint32{
+		"trust":    config.StableZoneID("trust"),
+		"zzq17760": config.StableZoneID("zzq17760"),
+		"zzq8100":  config.StableZoneID("zzq8100"),
 	}
 }
 
-func quarantinedZonesConfig10530(t *testing.T) (*Server, map[string]uint16) {
+func quarantinedZonesConfig10530(t *testing.T) (*Server, map[string]uint32) {
 	t.Helper()
 	store := newDescriptorCoverageStore(t)
 	cfg := store.ActiveConfig()
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
-		"trust": {Name: "trust", Interfaces: []string{"if-trust"}},
-		"z174":  {Name: "z174", Interfaces: []string{"if-survivor"}},
-		"z214":  {Name: "z214", Interfaces: []string{"if-quarantined"}},
+		"trust":    {Name: "trust", Interfaces: []string{"if-trust"}},
+		"zzq17760": {Name: "zzq17760", Interfaces: []string{"if-survivor"}},
+		"zzq8100":  {Name: "zzq8100", Interfaces: []string{"if-quarantined"}},
 	}
 	ids := quarantineIDs10530(t)
 	return &Server{store: store}, ids
@@ -42,7 +42,7 @@ func quarantinedZonesConfig10530(t *testing.T) (*Server, map[string]uint16) {
 func TestZonesHandlerQuarantinedCountersUnavailable10530(t *testing.T) {
 	s, ids := quarantinedZonesConfig10530(t)
 	mgr := dataplane.New()
-	mgr.SetZoneCounterOffset(ids["z174"],
+	mgr.SetZoneCounterOffset(ids["zzq17760"],
 		dataplane.CounterValue{Packets: 17, Bytes: 1700},
 		dataplane.CounterValue{Packets: 23, Bytes: 2300})
 	mgr.SetZoneCounterOffset(ids["trust"],
@@ -72,11 +72,11 @@ func TestZonesHandlerQuarantinedCountersUnavailable10530(t *testing.T) {
 	for _, zone := range resp.Data {
 		byName[zone.Name] = zone
 	}
-	q, ok := byName["z214"]
+	q, ok := byName["zzq8100"]
 	if !ok {
-		t.Fatalf("quarantined z214 missing from desired inventory: %s", rr.Body.String())
+		t.Fatalf("quarantined zzq8100 missing from desired inventory: %s", rr.Body.String())
 	}
-	if q.ID != ids["z214"] || len(q.Interfaces) != 1 || q.Interfaces[0] != "if-quarantined" {
+	if q.ID != ids["zzq8100"] || len(q.Interfaces) != 1 || q.Interfaces[0] != "if-quarantined" {
 		t.Fatalf("quarantined desired row changed: %+v", q)
 	}
 	if q.PerZoneCountersAvailable {
@@ -85,7 +85,7 @@ func TestZonesHandlerQuarantinedCountersUnavailable10530(t *testing.T) {
 	if q.IngressPackets != 0 || q.IngressBytes != 0 || q.EgressPackets != 0 || q.EgressBytes != 0 {
 		t.Fatalf("quarantined row reused survivor volume: %+v", q)
 	}
-	survivor := byName["z174"]
+	survivor := byName["zzq17760"]
 	if !survivor.PerZoneCountersAvailable || survivor.IngressPackets != 17 || survivor.EgressPackets != 23 {
 		t.Fatalf("survivor counters changed: %+v", survivor)
 	}
@@ -105,7 +105,7 @@ func TestPoliciesHandlerQuarantinedRulesMarked10530(t *testing.T) {
 	s, _ := quarantinedZonesConfig10530(t)
 	cfg := s.store.ActiveConfig()
 	cfg.Security.Policies = []*config.ZonePairPolicies{
-		{FromZone: "trust", ToZone: "z214", Policies: []*config.Policy{{
+		{FromZone: "trust", ToZone: "zzq8100", Policies: []*config.Policy{{
 			Name: "loser-rule", Description: "authored", Action: config.PolicyPermit,
 		}}},
 		{FromZone: "trust", ToZone: "untrust", Policies: []*config.Policy{{
@@ -114,7 +114,7 @@ func TestPoliciesHandlerQuarantinedRulesMarked10530(t *testing.T) {
 	}
 	cfg.Security.GlobalPolicies = []*config.Policy{{
 		Name: "scoped-global", Action: config.PolicyDeny,
-		Match: config.PolicyMatch{FromZones: []string{"z214"}, ToZones: []string{"z214", "z174"}},
+		Match: config.PolicyMatch{FromZones: []string{"zzq8100"}, ToZones: []string{"zzq8100", "zzq17760"}},
 	}}
 	s.dp = &descriptorCoverageDP{
 		Manager: dataplane.New(),
@@ -139,7 +139,7 @@ func TestPoliciesHandlerQuarantinedRulesMarked10530(t *testing.T) {
 	var loser, ordinary, global *PolicyInfo
 	for i := range resp.Data {
 		switch {
-		case resp.Data[i].FromZone == "trust" && resp.Data[i].ToZone == "z214":
+		case resp.Data[i].FromZone == "trust" && resp.Data[i].ToZone == "zzq8100":
 			loser = &resp.Data[i]
 		case resp.Data[i].FromZone == "trust" && resp.Data[i].ToZone == "untrust":
 			ordinary = &resp.Data[i]
@@ -160,10 +160,10 @@ func TestPoliciesHandlerQuarantinedRulesMarked10530(t *testing.T) {
 		t.Fatalf("scoped global was not marked: %+v", global)
 	}
 	if len(global.Rules[0].MatchFromZones) != 0 || len(global.Rules[0].MatchToZones) != 1 ||
-		global.Rules[0].MatchToZones[0] != "z174" {
+		global.Rules[0].MatchToZones[0] != "zzq17760" {
 		t.Fatalf("scoped-global display scope was not pruned: %+v", global.Rules[0])
 	}
-	if global.Rules[0].MatchToZone != "z214" {
+	if global.Rules[0].MatchToZone != "zzq8100" {
 		t.Fatalf("singular scoped-global compatibility field changed: %+v", global.Rules[0])
 	}
 }
@@ -173,13 +173,13 @@ func TestPoliciesHandlerQuarantineQualifierWithoutCounterEligibility10530(t *tes
 	cfg := s.store.ActiveConfig()
 	cfg.Security.PolicyStatsEnabled = false
 	cfg.Security.Policies = []*config.ZonePairPolicies{{
-		FromZone: "trust", ToZone: "z214", Policies: []*config.Policy{{
+		FromZone: "trust", ToZone: "zzq8100", Policies: []*config.Policy{{
 			Name: "loser-no-count", Action: config.PolicyPermit,
 		}},
 	}}
 	cfg.Security.GlobalPolicies = []*config.Policy{{
 		Name: "scoped-global-no-count", Action: config.PolicyDeny,
-		Match: config.PolicyMatch{FromZones: []string{"z214"}, ToZones: []string{"z214", "z174"}},
+		Match: config.PolicyMatch{FromZones: []string{"zzq8100"}, ToZones: []string{"zzq8100", "zzq17760"}},
 	}}
 	s.dp = &descriptorCoverageDP{
 		Manager: dataplane.New(),
@@ -200,7 +200,7 @@ func TestPoliciesHandlerQuarantineQualifierWithoutCounterEligibility10530(t *tes
 	var loser, global *PolicyInfo
 	for i := range resp.Data {
 		switch {
-		case resp.Data[i].FromZone == "trust" && resp.Data[i].ToZone == "z214":
+		case resp.Data[i].FromZone == "trust" && resp.Data[i].ToZone == "zzq8100":
 			loser = &resp.Data[i]
 		case resp.Data[i].FromZone == "*":
 			global = &resp.Data[i]

@@ -423,8 +423,8 @@ func TestCompileZonesRecordsNoMutationWhenConverged(t *testing.T) {
 // record no mutation for the wrong reason and the assertion would be vacuous.
 type hostMutationTestDP struct{ DataPlane }
 
-func (hostMutationTestDP) SetZoneConfig(uint16, ZoneConfig) error { return nil }
-func (hostMutationTestDP) SetZone(int, uint16, uint16, uint32, uint8, uint8, uint32) error {
+func (hostMutationTestDP) SetZoneConfig(uint32, ZoneConfig) error { return nil }
+func (hostMutationTestDP) SetZone(int, uint16, uint32, uint32, uint8, uint8, uint32) error {
 	return nil
 }
 func (hostMutationTestDP) AddTxPort(int) error                     { return nil }

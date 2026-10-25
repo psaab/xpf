@@ -36,7 +36,7 @@ type apiRuntimeDataPlane interface {
 
 	ReadGlobalCounter(uint32) (uint64, error)
 	ReadInterfaceCounters(int) (dataplane.InterfaceCounterValue, error)
-	ReadZoneCounters(uint16, int) (dataplane.CounterValue, error)
+	ReadZoneCounters(uint32, int) (dataplane.CounterValue, error)
 	ReadPolicyCounters(uint32) (dataplane.CounterValue, error)
 	ReadFilterConfig(uint32) (dataplane.FilterConfig, error)
 	ReadFilterCounters(uint32) (dataplane.CounterValue, error)

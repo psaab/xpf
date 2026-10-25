@@ -25,10 +25,10 @@ type notPopulatedGRPCDP struct {
 
 func (d *notPopulatedGRPCDP) IsLoaded() bool                          { return true }
 func (d *notPopulatedGRPCDP) LastApplyResult() *dataplane.ApplyResult { return d.apply }
-func (d *notPopulatedGRPCDP) ReadZoneCounters(uint16, int) (dataplane.CounterValue, error) {
+func (d *notPopulatedGRPCDP) ReadZoneCounters(uint32, int) (dataplane.CounterValue, error) {
 	return dataplane.CounterValue{}, dataplane.ErrCounterNotPopulated
 }
-func (d *notPopulatedGRPCDP) ReadFloodCounters(uint16) (dataplane.FloodState, error) {
+func (d *notPopulatedGRPCDP) ReadFloodCounters(uint32) (dataplane.FloodState, error) {
 	return dataplane.FloodState{}, dataplane.ErrCounterNotPopulated
 }
 
@@ -38,7 +38,7 @@ func TestShowZonesDetailTextZoneCountersNotAvailable(t *testing.T) {
 		store: store,
 		dp: &notPopulatedGRPCDP{
 			Manager: dataplane.New(),
-			apply:   &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"trust": 40000, "untrust": 41000, "dmz": 42000}},
+			apply:   &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 40000, "untrust": 41000, "dmz": 42000}},
 		},
 	}
 	var buf strings.Builder
@@ -76,7 +76,7 @@ func TestShowScreenStatisticsAllTextFloodNotAvailable(t *testing.T) {
 		store: store,
 		dp: &notPopulatedGRPCDP{
 			Manager: dataplane.New(),
-			apply:   &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"trust": 40000, "untrust": 41000, "dmz": 42000}},
+			apply:   &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 40000, "untrust": 41000, "dmz": 42000}},
 		},
 	}
 	var buf strings.Builder
@@ -109,12 +109,12 @@ func TestShowScreenStatisticsAllTextFloodNotAvailable(t *testing.T) {
 type populatedFloodGRPCDP struct {
 	*dataplane.Manager
 	apply *dataplane.ApplyResult
-	rows  map[uint16]dataplane.FloodState
+	rows  map[uint32]dataplane.FloodState
 }
 
 func (d *populatedFloodGRPCDP) IsLoaded() bool                          { return true }
 func (d *populatedFloodGRPCDP) LastApplyResult() *dataplane.ApplyResult { return d.apply }
-func (d *populatedFloodGRPCDP) ReadFloodCounters(id uint16) (dataplane.FloodState, error) {
+func (d *populatedFloodGRPCDP) ReadFloodCounters(id uint32) (dataplane.FloodState, error) {
 	fs, ok := d.rows[id]
 	if !ok {
 		return dataplane.FloodState{}, dataplane.ErrCounterNotPopulated
@@ -128,7 +128,7 @@ func (d *populatedFloodGRPCDP) ReadFloodCounters(id uint16) (dataplane.FloodStat
 // a published zone renders live counts.
 func TestShowScreenStatisticsSingleZoneTextFlood(t *testing.T) {
 	store := newSchedulerCounterGRPCStore(t)
-	apply := &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"trust": 40000, "untrust": 41000, "dmz": 42000}}
+	apply := &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 40000, "untrust": 41000, "dmz": 42000}}
 
 	t.Run("unpopulated", func(t *testing.T) {
 		s := &Server{store: store, dp: &notPopulatedGRPCDP{Manager: dataplane.New(), apply: apply}}
@@ -154,7 +154,7 @@ func TestShowScreenStatisticsSingleZoneTextFlood(t *testing.T) {
 		s := &Server{store: store, dp: &populatedFloodGRPCDP{
 			Manager: dataplane.New(),
 			apply:   apply,
-			rows:    map[uint16]dataplane.FloodState{40000: {SynCount: 11, ICMPCount: 22, UDPCount: 33}},
+			rows:    map[uint32]dataplane.FloodState{40000: {SynCount: 11, ICMPCount: 22, UDPCount: 33}},
 		}}
 		var buf strings.Builder
 		if _, err := s.showScreenStatistics(

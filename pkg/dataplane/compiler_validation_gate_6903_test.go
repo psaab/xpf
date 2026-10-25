@@ -41,8 +41,8 @@ type censusDP6903 struct{ discardingDataPlane }
 
 func (censusDP6903) xpfValidationPass() bool { return false }
 
-func (censusDP6903) SetZoneConfig(uint16, ZoneConfig) error { return nil }
-func (censusDP6903) SetZone(int, uint16, uint16, uint32, uint8, uint8, uint32) error {
+func (censusDP6903) SetZoneConfig(uint32, ZoneConfig) error { return nil }
+func (censusDP6903) SetZone(int, uint16, uint32, uint32, uint8, uint8, uint32) error {
 	return nil
 }
 func (censusDP6903) AddTxPort(int) error                            { return nil }

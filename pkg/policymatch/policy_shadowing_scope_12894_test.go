@@ -19,11 +19,11 @@ import (
 //
 // The fixture is the issue's decisive check: a scoped global whose authored
 // scope carries a repeated member and a surviving/quarantined collision pair
-// (z214 loses the frozen StableZoneID fold to z174), compared against the
+// (zzq8100 loses the frozen StableZoneID fold to zzq17760), compared against the
 // surviving runtime scope the snapshot builder publishes.
 func TestCrossTierShadowingCountsSurvivingZoneScopeOnly12894(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatal("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatal("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	zpol := func(name string, action config.PolicyAction) *config.Policy {
 		return &config.Policy{Name: name, Action: action, Match: config.PolicyMatch{
@@ -37,7 +37,7 @@ func TestCrossTierShadowingCountsSurvivingZoneScopeOnly12894(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
 		"trust": {Name: "trust"}, "untrust": {Name: "untrust"},
-		"z174": {Name: "z174"}, "z214": {Name: "z214"},
+		"zzq17760": {Name: "zzq17760"}, "zzq8100": {Name: "zzq8100"},
 	}
 	// The surviving runtime scope the snapshot builder publishes: zones minus
 	// config.ZoneQuarantineExclusionsForConfig — the SAME SSOT
@@ -46,11 +46,11 @@ func TestCrossTierShadowingCountsSurvivingZoneScopeOnly12894(t *testing.T) {
 	// universe here (not to a hand-listed zone set) is the "compare analyzer
 	// pair set against the surviving runtime-snapshot scope" check.
 	excluded := config.ZoneQuarantineExclusionsForConfig(cfg)
-	if _, dead := excluded["z214"]; !dead {
-		t.Fatalf("test premise broken: z214 not quarantined for this zone set: %v", excluded)
+	if _, dead := excluded["zzq8100"]; !dead {
+		t.Fatalf("test premise broken: zzq8100 not quarantined for this zone set: %v", excluded)
 	}
-	if _, dead := excluded["z174"]; dead {
-		t.Fatalf("test premise broken: collision survivor z174 quarantined: %v", excluded)
+	if _, dead := excluded["zzq17760"]; dead {
+		t.Fatalf("test premise broken: collision survivor zzq17760 quarantined: %v", excluded)
 	}
 	var surviving []string
 	for name := range cfg.Security.Zones {
@@ -63,7 +63,7 @@ func TestCrossTierShadowingCountsSurvivingZoneScopeOnly12894(t *testing.T) {
 		{FromZone: "trust", ToZone: "untrust", Policies: []*config.Policy{zpol("exact-permit", config.PolicyPermit)}},
 		// Structurally bound to the quarantined zone: the runtime DROPS this
 		// rule, so it must never be credited as a coverer.
-		{FromZone: "z214", ToZone: "untrust", Policies: []*config.Policy{zpol("dead-permit", config.PolicyPermit)}},
+		{FromZone: "zzq8100", ToZone: "untrust", Policies: []*config.Policy{zpol("dead-permit", config.PolicyPermit)}},
 	}
 	cfg.Security.GlobalPolicies = []*config.Policy{
 		// The two SILENT-subject globals come first: the within-list pass
@@ -73,12 +73,12 @@ func TestCrossTierShadowingCountsSurvivingZoneScopeOnly12894(t *testing.T) {
 		//
 		// Quarantine-only scope: the runtime drops the rule outright; the
 		// analyzer must stay silent rather than invent coverage.
-		gpol("quarantine-only", config.PolicyPermit, []string{"z214"}, []string{"untrust"}),
-		// Surviving member with NO covering stanza for it: z174->untrust is
-		// not covered, and the z214 side is not in the surviving universe.
-		gpol("live-member", config.PolicyPermit, []string{"z174", "z214"}, []string{"untrust"}),
+		gpol("quarantine-only", config.PolicyPermit, []string{"zzq8100"}, []string{"untrust"}),
+		// Surviving member with NO covering stanza for it: zzq17760->untrust is
+		// not covered, and the zzq8100 side is not in the surviving universe.
+		gpol("live-member", config.PolicyPermit, []string{"zzq17760", "zzq8100"}, []string{"untrust"}),
 		// Repeated member + quarantined collision loser on the from side.
-		gpol("dup-dead-scope", config.PolicyPermit, []string{"trust", "trust", "z214"}, []string{"untrust"}),
+		gpol("dup-dead-scope", config.PolicyPermit, []string{"trust", "trust", "zzq8100"}, []string{"untrust"}),
 		// Undefined zone token (a tolerant load keeps it authored).
 		gpol("ghost-scope", config.PolicyPermit, []string{"trust", "ghost"}, []string{"untrust"}),
 		// Wildcard from-axis: must expand over the SURVIVING zones only.
@@ -110,8 +110,8 @@ func TestCrossTierShadowingCountsSurvivingZoneScopeOnly12894(t *testing.T) {
 
 	// Wildcard expansion excludes the quarantined zone: the rendered total
 	// must equal the surviving-zone count derived from the runtime SSOT
-	// (3 here: trust, untrust, z174), with only the exact pair covered.
-	// RED on master: z214 joins the expansion AND its dead stanza covers
+	// (3 here: trust, untrust, zzq17760), with only the exact pair covered.
+	// RED on master: zzq8100 joins the expansion AND its dead stanza covers
 	// that pair, printing "2 of 4" instead.
 	line := subject("wildcard-from")
 	if line == "" {
@@ -123,9 +123,9 @@ func TestCrossTierShadowingCountsSurvivingZoneScopeOnly12894(t *testing.T) {
 	}
 
 	// A pair that exists only in the quarantined namespace must not be
-	// creditable: z174->untrust has NO covering stanza, so the global scoped
+	// creditable: zzq17760->untrust has NO covering stanza, so the global scoped
 	// to the collision pair is NOT covered at all and must stay silent. RED
-	// on master: the runtime-dropped z214 stanza covers the (z214,untrust)
+	// on master: the runtime-dropped zzq8100 stanza covers the (zzq8100,untrust)
 	// pair and prints a false "PARTIALLY SHADOWED: 1 of 2".
 	for _, name := range []string{"quarantine-only", "live-member"} {
 		if line := subject(name); line != "" {

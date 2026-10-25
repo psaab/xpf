@@ -103,7 +103,7 @@ func (d *cursorlessClearDP) ReadGlobalCounter(uint32) (uint64, error) { return 0
 func (d *cursorlessClearDP) ReadInterfaceCounters(int) (dataplane.InterfaceCounterValue, error) {
 	return dataplane.InterfaceCounterValue{}, nil
 }
-func (d *cursorlessClearDP) ReadZoneCounters(uint16, int) (dataplane.CounterValue, error) {
+func (d *cursorlessClearDP) ReadZoneCounters(uint32, int) (dataplane.CounterValue, error) {
 	return dataplane.CounterValue{}, nil
 }
 func (d *cursorlessClearDP) ReadPolicyCounters(uint32) (dataplane.CounterValue, error) {
@@ -115,7 +115,7 @@ func (d *cursorlessClearDP) ReadFilterConfig(uint32) (dataplane.FilterConfig, er
 func (d *cursorlessClearDP) ReadFilterCounters(uint32) (dataplane.CounterValue, error) {
 	return dataplane.CounterValue{}, nil
 }
-func (d *cursorlessClearDP) ReadFloodCounters(uint16) (dataplane.FloodState, error) {
+func (d *cursorlessClearDP) ReadFloodCounters(uint32) (dataplane.FloodState, error) {
 	return dataplane.FloodState{}, nil
 }
 func (d *cursorlessClearDP) ReadNATPortCounter(uint32) (uint64, error) { return 0, nil }

@@ -101,7 +101,7 @@ func TestGRPCSessionFilterNilZoneNoPanic(t *testing.T) {
 			// Both the real zone and the nil zone are present in ZoneIDs so
 			// the `ok && len(zone.Interfaces)` branch is reached for the nil
 			// zone — panics on revert of the session_filter zone-nil guard.
-			apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint16{
+			apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint32{
 				"trust": 1, "untrust": 2, "zz-nil-zone": 9,
 			}},
 		},

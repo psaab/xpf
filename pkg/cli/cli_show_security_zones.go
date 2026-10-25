@@ -44,7 +44,7 @@ func (c *CLI) showZonesDisplay(cfg *config.Config, detail bool, filterZone strin
 		// quarantined name retains its stable ID for attribution, but that
 		// ID is not installed for this name and its live counters are not
 		// attributable.
-		var zoneID uint16
+		var zoneID uint32
 		reason := config.ZoneQuarantineExcludedReason(name, cfg)
 		if _, excluded := quarantined[name]; excluded {
 			zoneID = config.StableZoneID(name)
@@ -321,7 +321,7 @@ func zoneCounterOverflowActive(c *CLI) bool {
 // that yields the EXHAUSTED line only when overflow is actually reported;
 // without overflow the renderer treats unslotted as idle, so a failed
 // read never manufactures an "uncounted" claim.
-func zoneCounterSlotted(c *CLI, zoneID uint16) bool {
+func zoneCounterSlotted(c *CLI, zoneID uint32) bool {
 	if c == nil || zoneID == 0 {
 		return false
 	}
@@ -330,7 +330,7 @@ func zoneCounterSlotted(c *CLI, zoneID uint16) bool {
 		return false
 	}
 	for _, id := range status.ZoneCounterSlottedZoneIDs {
-		if id == zoneID {
+		if uint32(id) == zoneID {
 			return true
 		}
 	}

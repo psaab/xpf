@@ -39,7 +39,7 @@ func newLogCLI(withApply bool) *CLI {
 	if withApply {
 		c.dp = &applyCLIDP{
 			Manager: dataplane.New(),
-			apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint16{
+			apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint32{
 				"trust": 1, "untrust": 2,
 			}},
 		}

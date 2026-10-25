@@ -14,7 +14,7 @@ type dp13162 struct {
 	members [][2]uint32
 }
 
-func (d *dp13162) SetZonePairPolicy(uint16, uint16, PolicySet) error { return nil }
+func (d *dp13162) SetZonePairPolicy(uint32, uint32, PolicySet) error { return nil }
 func (d *dp13162) SetPolicyRule(_ uint32, _ uint32, r PolicyRule) error {
 	d.rules = append(d.rules, r)
 	return nil
@@ -60,7 +60,7 @@ func compile13162(t *testing.T, cfg *config.Config) (*dp13162, *CompileResult, e
 	t.Helper()
 	dp := &dp13162{}
 	res := &CompileResult{
-		ZoneIDs: make(map[string]uint16), AddrIDs: make(map[string]uint32),
+		ZoneIDs: make(map[string]uint32), AddrIDs: make(map[string]uint32),
 		AppIDs: make(map[string]config.AssignedAppID), implicitSets: make(map[string]uint32),
 		nextAddrID: 1,
 	}

@@ -34,7 +34,7 @@ func (z *zoneFloodOnlyCollector13293) Collect(ch chan<- prometheus.Metric) {
 
 func gatherZoneFlood13293(t *testing.T, status *dpuserspace.ProcessStatus, cfg *config.Config) (map[string]float64, float64, bool) {
 	t.Helper()
-	apply := &dataplane.ApplyResult{ZoneIDs: map[string]uint16{
+	apply := &dataplane.ApplyResult{ZoneIDs: map[string]uint32{
 		"trust": config.StableZoneID("trust"), "untrust": config.StableZoneID("untrust"),
 	}}
 	dp := &descriptorCoverageDP{Manager: dataplane.New(), apply: apply}

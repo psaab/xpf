@@ -8,13 +8,13 @@ import (
 )
 
 func TestShowVLANsQualifiesQuarantinedZone10489(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatal("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatal("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	cfg := &config.Config{
 		Security: config.SecurityConfig{Zones: map[string]*config.ZoneConfig{
-			"z174": {Name: "z174", Interfaces: []string{"ge-0/0/0"}},
-			"z214": {Name: "z214", Interfaces: []string{"ge-0/0/1"}},
+			"zzq17760": {Name: "zzq17760", Interfaces: []string{"ge-0/0/0"}},
+			"zzq8100":  {Name: "zzq8100", Interfaces: []string{"ge-0/0/1"}},
 		}},
 	}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
@@ -37,7 +37,7 @@ func TestShowVLANsQualifiesQuarantinedZone10489(t *testing.T) {
 			survivorLine = line
 		}
 	}
-	if !strings.Contains(loserLine, "z214") || !strings.Contains(loserLine, config.ZoneQuarantineInterfacesQualifier) {
+	if !strings.Contains(loserLine, "zzq8100") || !strings.Contains(loserLine, config.ZoneQuarantineInterfacesQualifier) {
 		t.Fatalf("quarantined VLAN row missing zone/qualifier: %q\n%s", loserLine, out)
 	}
 	if strings.Contains(survivorLine, config.ZoneQuarantineInterfacesQualifier) {

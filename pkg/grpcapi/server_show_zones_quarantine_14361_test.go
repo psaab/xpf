@@ -18,10 +18,10 @@ import (
 // that: it copied authored scope verbatim and read counters for
 // quarantined rules.
 //
-// Fixture: z174/z214 collide under the frozen StableZoneID fold, so z214
-// is the quarantined loser. mixed-global [trust z214]->[untrust z214]
-// keeps survivors on both sides; dead-global [z214]->[untrust] is emptied
-// on the from side; dead-pair is a zone-pair rule trust->z214. None of
+// Fixture: zzq17760/zzq8100 collide under the frozen StableZoneID fold, so zzq8100
+// is the quarantined loser. mixed-global [trust zzq8100]->[untrust zzq8100]
+// keeps survivors on both sides; dead-global [zzq8100]->[untrust] is emptied
+// on the from side; dead-pair is a zone-pair rule trust->zzq8100. None of
 // the quarantined/mixed rules carries `then count`, and the store has no
 // policy-stats enable (statsEnabled=false), so the counter-eligibility
 // gate alone would leave HitCountersUnavailable=false.
@@ -34,22 +34,22 @@ func quarantine14361Server(t *testing.T, seedDead bool) *Server {
 	// Direct config mutation mirrors the #12897 mixed-scope fixture.
 	store.ActiveConfig().Security.PolicyStatsEnabled = false
 	cfg := store.ActiveConfig()
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatal("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatal("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
-		"trust":   {Name: "trust"},
-		"untrust": {Name: "untrust"},
-		"dmz":     {Name: "dmz"},
-		"z174":    {Name: "z174"},
-		"z214":    {Name: "z214"},
+		"trust":    {Name: "trust"},
+		"untrust":  {Name: "untrust"},
+		"dmz":      {Name: "dmz"},
+		"zzq17760": {Name: "zzq17760"},
+		"zzq8100":  {Name: "zzq8100"},
 	}
-	if _, ok := config.ZoneQuarantineExclusionsForConfig(cfg)["z214"]; !ok {
-		t.Fatalf("test premise broken: z214 not quarantined: %v", config.ZoneQuarantineExclusionsForConfig(cfg))
+	if _, ok := config.ZoneQuarantineExclusionsForConfig(cfg)["zzq8100"]; !ok {
+		t.Fatalf("test premise broken: zzq8100 not quarantined: %v", config.ZoneQuarantineExclusionsForConfig(cfg))
 	}
-	// Zone-pair rules: one quarantined (trust->z214), no count.
+	// Zone-pair rules: one quarantined (trust->zzq8100), no count.
 	cfg.Security.Policies = append(cfg.Security.Policies, &config.ZonePairPolicies{
-		FromZone: "trust", ToZone: "z214",
+		FromZone: "trust", ToZone: "zzq8100",
 		Policies: []*config.Policy{{
 			Name: "dead-pair", Description: "pair-desc", Action: config.PolicyPermit,
 		}},
@@ -57,11 +57,11 @@ func quarantine14361Server(t *testing.T, seedDead bool) *Server {
 	cfg.Security.GlobalPolicies = []*config.Policy{
 		{
 			Name: "mixed-global", Description: "mixed-desc", Action: config.PolicyDeny,
-			Match: config.PolicyMatch{FromZones: []string{"trust", "z214"}, ToZones: []string{"untrust", "z214"}},
+			Match: config.PolicyMatch{FromZones: []string{"trust", "zzq8100"}, ToZones: []string{"untrust", "zzq8100"}},
 		},
 		{
 			Name: "dead-global", Description: "dead-desc", Action: config.PolicyDeny,
-			Match: config.PolicyMatch{FromZones: []string{"z214"}, ToZones: []string{"untrust"}},
+			Match: config.PolicyMatch{FromZones: []string{"zzq8100"}, ToZones: []string{"untrust"}},
 		},
 		{
 			Name: "live-global", Description: "live-desc", Action: config.PolicyDeny,
@@ -112,10 +112,10 @@ func TestGetPoliciesMixedScopeGlobalPrunesQuarantinedZones14361(t *testing.T) {
 		t.Error("mixed-global: Quarantined = true, want false (mixed scope stays enforced for survivors)")
 	}
 	if got := mixed.GetMatchFromZones(); len(got) != 1 || got[0] != "trust" {
-		t.Errorf("mixed-global: MatchFromZones = %v, want [trust] (z214 pruned)", got)
+		t.Errorf("mixed-global: MatchFromZones = %v, want [trust] (zzq8100 pruned)", got)
 	}
 	if got := mixed.GetMatchToZones(); len(got) != 1 || got[0] != "untrust" {
-		t.Errorf("mixed-global: MatchToZones = %v, want [untrust] (z214 pruned)", got)
+		t.Errorf("mixed-global: MatchToZones = %v, want [untrust] (zzq8100 pruned)", got)
 	}
 	if mixed.GetMatchFromZone() != "trust" {
 		t.Errorf("mixed-global: MatchFromZone = %q, want %q (first surviving zone)", mixed.GetMatchFromZone(), "trust")

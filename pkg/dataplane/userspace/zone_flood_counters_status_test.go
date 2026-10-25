@@ -105,7 +105,7 @@ func TestZoneFloodCounterStatusWireRoundTrip(t *testing.T) {
 // cross two of them. Three distinct values make any crossing observable.
 func TestSyncBPFCountersMapsFloodFamiliesToTheRightFloodStateFields3651(t *testing.T) {
 	m := New()
-	const id uint16 = 50675
+	const id uint32 = 101
 
 	m.mu.Lock()
 	m.syncBPFCountersLocked(&ProcessStatus{

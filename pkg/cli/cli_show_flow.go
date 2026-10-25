@@ -376,7 +376,7 @@ func (c *CLI) showFlowSession(args []string) error {
 	var policyNames map[uint32]string
 	cr := c.applyResult()
 	if cr != nil {
-		zoneNames = config.SurvivorZoneNames(cr.ZoneIDs, f.cfg)
+		zoneNames = survivorZoneNames16(cr.ZoneIDs, f.cfg)
 		policyNames = cr.PolicyNames
 	}
 
@@ -961,7 +961,7 @@ func (c *CLI) showFlowSession(args []string) error {
 func (c *CLI) showTopTalkers(f sessionFilter) error {
 	zoneNames := make(map[uint16]string)
 	if cr := c.applyResult(); cr != nil {
-		zoneNames = config.SurvivorZoneNames(cr.ZoneIDs, f.cfg)
+		zoneNames = survivorZoneNames16(cr.ZoneIDs, f.cfg)
 	}
 	now := monotonicSeconds()
 	collector := newTopTalkerCollector(topTalkerLimit)

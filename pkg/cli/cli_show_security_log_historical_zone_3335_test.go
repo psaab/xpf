@@ -32,7 +32,7 @@ func TestShowSecurityLogPrefersStoredZoneName(t *testing.T) {
 		dp: &applyCLIDP{
 			Manager: dataplane.New(),
 			// Current config reuses IDs 1/2 for renamed zones.
-			apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint16{
+			apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint32{
 				"marketing": 1, "sales": 2,
 			}},
 		},
@@ -66,7 +66,7 @@ func TestShowSecurityLogFallsBackToCurrentMapForLegacyRecord(t *testing.T) {
 		eventBuf: buf,
 		dp: &applyCLIDP{
 			Manager: dataplane.New(),
-			apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint16{
+			apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint32{
 				"trust": 1, "untrust": 2,
 			}},
 		},

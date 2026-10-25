@@ -1254,8 +1254,8 @@ fn record_screen_drop_attributes_flood_reasons_to_the_ingress_zone() {
     use crate::afxdp::flood_counters::{
         flush_recorded_flood_counters, FloodCounterSlotMap, FloodCounterStore,
     };
-    const TRUST: u16 = 50675; // config::StableZoneID("trust")
-    const UNTRUST: u16 = 12345;
+    const TRUST: u32 = 50675; // config::StableZoneID("trust")
+    const UNTRUST: u32 = 12345;
 
     let store = FloodCounterStore::default();
     let slots = FloodCounterSlotMap::build(&[TRUST, UNTRUST], &store);

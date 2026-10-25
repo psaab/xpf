@@ -3064,7 +3064,7 @@ fn forwarding_with_ingress_zone_9384(ingress_zone: &str, permit_lan: bool) -> Fo
 /// drive one packet of it arriving on `reth1.0` — which the live config now
 /// places in `live_ingress_zone`.
 fn drive_moved_interface_9384(
-    entry_ingress_zone: u16,
+    entry_ingress_zone: u32,
     live_ingress_zone: &str,
     permit_lan: bool,
 ) -> Outcome {
@@ -4075,7 +4075,7 @@ const DST6_9604: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0x80, 0, 0, 0, 0x200
 /// Production-shape reverse metadata: zones SWAPPED relative to the forward
 /// flow, and NO ingress identity of its own — the reply's ingress has not been
 /// observed at install (#4983).
-fn reverse_metadata_for_9604(fwd_ingress_zone: u16, fwd_egress_zone: u16) -> SessionMetadata {
+fn reverse_metadata_for_9604(fwd_ingress_zone: u32, fwd_egress_zone: u32) -> SessionMetadata {
     SessionMetadata {
         ingress_zone: fwd_egress_zone,
         egress_zone: fwd_ingress_zone,
@@ -6066,8 +6066,8 @@ fn fabric_admit_snapshot_9604() -> crate::ConfigSnapshot {
 
 /// The #7770 stamp shape, claiming `zone`: peer fabric MAC as dst (V1a),
 /// magic + zone id as src.
-fn stamp_fabric_zone_9604(frame: &mut [u8], zone: u16) {
-    let [hi, lo] = zone.to_be_bytes();
+fn stamp_fabric_zone_9604(frame: &mut [u8], zone: u32) {
+    let [_, _, hi, lo] = zone.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
 }
@@ -9950,7 +9950,7 @@ const FIB_MOVE_DST_12074: Ipv4Addr = Ipv4Addr::new(8, 8, 8, 8);
 fn add_fib_move_egress_12074(
     snapshot: &mut crate::ConfigSnapshot,
     zone_name: &str,
-    zone_id: u16,
+    zone_id: u32,
     address: &str,
     gateway: &str,
 ) {

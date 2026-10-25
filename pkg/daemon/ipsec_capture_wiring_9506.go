@@ -157,7 +157,7 @@ func ipsecCaptureQueueEpochSnapshot(handles []ipsecQueueHandle) []dpuserspace.Qu
 type pmechTunnelZone struct {
 	ifID    uint32
 	ifindex uint32
-	zoneID  uint16
+	zoneID  uint32
 	reason  nfqueue.ZoneReason
 }
 
@@ -301,7 +301,7 @@ func buildPMechZoneSnapshot(cfg *config.Config, handles []ipsecQueueHandle, gene
 			seenBind[ifID] = binds
 		}
 		binds[vpnName] = struct{}{}
-		owned := uint16(0)
+		owned := uint32(0)
 		claimSeen := false
 		ambiguous := false
 		for _, zoneName := range zoneNames {

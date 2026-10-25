@@ -155,8 +155,8 @@ pub(super) fn pptp_resolve_routing_domain(
     ingress_ifindex: i32,
     ingress_vlan_id: u16,
     packet_fabric_ingress: bool,
-    ingress_zone_override: Option<u16>,
-    ambiguous_zone: Option<u16>,
+    ingress_zone_override: Option<u32>,
+    ambiguous_zone: Option<u32>,
     absent_fabric_ingress_suspect: bool,
 ) -> u32 {
     if absent_fabric_ingress_suspect {
@@ -252,8 +252,8 @@ fn emit_session_hit_policy_deny_event(
     decision: SessionDecision,
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
-    ingress_zone_id: u16,
-    egress_zone_id: u16,
+    ingress_zone_id: u32,
+    egress_zone_id: u32,
     deny: HitPolicyDeny,
     now_ns: u64,
 ) {
@@ -321,7 +321,7 @@ pub(in crate::afxdp) fn transit_source_class_drop(
     source: IpAddr,
     flow_routing_domain: u32,
     meta: ForwardPacketMeta,
-    fabric_ingress_zone: Option<u16>,
+    fabric_ingress_zone: Option<u32>,
 ) -> bool {
     if !transit_source_class_disposition(disposition) {
         return false;
@@ -344,7 +344,7 @@ pub(in crate::afxdp) fn transit_destination_class_drop(
     translated_destination: Option<IpAddr>,
     flow_routing_domain: u32,
     meta: ForwardPacketMeta,
-    fabric_ingress_zone: Option<u16>,
+    fabric_ingress_zone: Option<u32>,
 ) -> bool {
     if !transit_source_class_disposition(disposition) {
         return false;
@@ -388,7 +388,7 @@ pub(super) fn syn_cookie_reply_admitted(
     flow: Option<&SessionFlow>,
     packet_frame: &[u8],
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
     now_ns: u64,
     now_secs: u64,
 ) -> bool {
@@ -500,7 +500,7 @@ pub(super) fn syn_cookie_final_admission(
     ha_state: &BTreeMap<i32, crate::afxdp::types::HAGroupRuntime>,
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
     resolution: ForwardingResolution,
     effective_dst: IpAddr,
     effective_dst_port: u16,
@@ -522,7 +522,7 @@ pub(super) fn syn_cookie_final_admission_with_fence(
     ha_state: &BTreeMap<i32, crate::afxdp::types::HAGroupRuntime>,
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
     resolution: ForwardingResolution,
     effective_dst: IpAddr,
     effective_dst_port: u16,
@@ -620,7 +620,7 @@ pub(super) fn syn_cookie_host_admission(
     flow: &SessionFlow,
     packet_frame: &[u8],
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
     effective_dst: IpAddr,
     effective_dst_port: u16,
     now_ns: u64,
@@ -1488,7 +1488,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // at each gated zone-pair computation before any fabric
                 // redirect replaces the resolution. Zone counters credit
                 // this, never the redirect transport's zone.
-                let mut admission_to_zone: u16 = 0;
+                let mut admission_to_zone: u32 = 0;
                 // Preserve only identities admitted by stage 9; local arrivals
                 // use their configured logical interface when creating a punt.
                 let fabric_nat_scope_ifindex_for_redirect =
@@ -2646,7 +2646,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 let mut debug = flow
                     .as_ref()
                     .map(|flow| ResolutionDebug::from_flow(meta.ingress_ifindex as i32, flow));
-                let mut session_ingress_zone: Option<u16> = None;
+                let mut session_ingress_zone: Option<u32> = None;
                 // #5606: the matched session's NAT64 reverse info (original v6
                 // src/dst), carried out of the session-hit resolve scope so the
                 // live forward request built below can thread it onto
@@ -10603,7 +10603,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     if flow_cache_owner_rg_id <= 0 {
                         flow_cache_owner_rg_id = egress_rg;
                     }
-                    // #919: prefer the cached u16 zone ID; fall back to
+                    // #919: prefer the cached u32 zone ID; fall back to
                     // looking up the ifindex's zone name and translating
                     // to an ID. resolve_zone_encoded_fabric_redirect_by_id
                     // skips the name round-trip.

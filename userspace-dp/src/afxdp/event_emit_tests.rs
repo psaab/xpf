@@ -975,7 +975,7 @@ fn unzoned_deny_rt_flow_agrees_with_policy_result_9989() {
     use crate::policy::{evaluate_policy_result_l3_aware, parse_policy_state};
     use crate::test_zone_ids::{TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID};
 
-    let mut zones: rustc_hash::FxHashMap<String, u16> = Default::default();
+    let mut zones: rustc_hash::FxHashMap<String, u32> = Default::default();
     zones.insert("lan".to_string(), TEST_LAN_ZONE_ID);
     zones.insert("wan".to_string(), TEST_WAN_ZONE_ID);
     let state = parse_policy_state(

@@ -156,7 +156,7 @@ pub(super) enum HitAuthority {
     /// `on_admitting_interface` is the #9384 re-zone case, the one foreign
     /// arrival allowed to revoke.
     Foreign {
-        arrival_zone: u16,
+        arrival_zone: u32,
         on_admitting_interface: bool,
     },
 }
@@ -172,7 +172,7 @@ pub(super) fn session_hit_authority(
     // call site), or `None` for unstamped fabric (overlay) and non-fabric
     // traffic. This is the arrival-zone proof: a stamped punt carries the
     // peer-ingress zone whether or not the peer adjudicated it.
-    fabric_arrival_zone: Option<u16>,
+    fabric_arrival_zone: Option<u32>,
 ) -> HitAuthority {
     if packet_fabric_ingress {
         // #10670: a stamped arrival is judged by its stamp, not trusted as
@@ -364,7 +364,7 @@ fn hit_egress_zone(
     forwarding: &ForwardingState,
     metadata: &SessionMetadata,
     decision: SessionDecision,
-) -> u16 {
+) -> u32 {
     if decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
         metadata.egress_zone
     } else {
@@ -384,7 +384,7 @@ pub(super) fn foreign_hit_verdict(
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
     packet_frame: &[u8],
-    arrival_zone: u16,
+    arrival_zone: u32,
     on_admitting_interface: bool,
     now_ns: u64,
 ) -> ForeignHitVerdict {

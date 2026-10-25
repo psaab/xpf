@@ -74,8 +74,8 @@ func TestPolicyInvalidationNestedRollbackKeepsRootDeniedCandidate12532(t *testin
 		row := &r.dp.rows[i]
 		rule := r.dp.ruleBySession[row.ExpectedRTFlowSessionID]
 		row.PolicyID = ids[rule]
-		row.IngressZoneID = config.StableZoneID("trust")
-		row.EgressZoneID = config.StableZoneID("untrust")
+		row.IngressZoneID = uint16(config.StableZoneID("trust"))
+		row.EgressZoneID = uint16(config.StableZoneID("untrust"))
 		row.Tuple.DstPort = variantDestinationPort12686(rule)
 	}
 	r.h.d.store.MarkActiveApplied()
@@ -94,8 +94,8 @@ func TestPolicyInvalidationNestedRollbackKeepsRootDeniedCandidate12532(t *testin
 			SrcPort: 1099, DstPort: variantDestinationPort12686("trust->untrust/x"),
 		},
 		PolicyID: xID, ExpectedRTFlowSessionID: 99,
-		IngressZoneID: config.StableZoneID("trust"),
-		EgressZoneID:  config.StableZoneID("untrust"),
+		IngressZoneID: uint16(config.StableZoneID("trust")),
+		EgressZoneID:  uint16(config.StableZoneID("untrust")),
 	})
 	r.dp.ruleBySession[99] = "trust->untrust/x"
 	r.dp.deleteErrOnce = true
@@ -353,8 +353,8 @@ func TestPolicyInvalidationNestedRollbackChecksRestoredRuleMatch12532(t *testing
 				SrcPort: uint16(2000 + session.id), DstPort: session.port,
 			},
 			PolicyID: aID, ExpectedRTFlowSessionID: session.id,
-			IngressZoneID: config.StableZoneID("trust"),
-			EgressZoneID:  config.StableZoneID("untrust"),
+			IngressZoneID: uint16(config.StableZoneID("trust")),
+			EgressZoneID:  uint16(config.StableZoneID("untrust")),
 		})
 		r.dp.ruleBySession[session.id] = "trust->untrust/a"
 	}
@@ -399,8 +399,8 @@ func TestPolicyInvalidationNestedRollbackKeepsOlderRecordedRule12532(t *testing.
 	for i := range r.dp.rows {
 		row := &r.dp.rows[i]
 		row.PolicyID = ids[r.dp.ruleBySession[row.ExpectedRTFlowSessionID]]
-		row.IngressZoneID = config.StableZoneID("trust")
-		row.EgressZoneID = config.StableZoneID("untrust")
+		row.IngressZoneID = uint16(uint16(config.StableZoneID("trust")))
+		row.EgressZoneID = uint16(uint16(config.StableZoneID("untrust")))
 	}
 	r.h.d.store.MarkActiveApplied()
 
@@ -416,8 +416,8 @@ func TestPolicyInvalidationNestedRollbackKeepsOlderRecordedRule12532(t *testing.
 			SrcPort: 1009, DstPort: 80,
 		},
 		PolicyID: dpuserspace.PolicyIDsByStableKey(c1)["trust->untrust/x"], ExpectedRTFlowSessionID: 9,
-		IngressZoneID: config.StableZoneID("trust"),
-		EgressZoneID:  config.StableZoneID("untrust"),
+		IngressZoneID: uint16(uint16(config.StableZoneID("trust"))),
+		EgressZoneID:  uint16(uint16(config.StableZoneID("untrust"))),
 	}
 	r.dp.rows = append(r.dp.rows, session9)
 	r.dp.ruleBySession[9] = "trust->untrust/x"
@@ -476,8 +476,8 @@ func TestPolicyInvalidationReauthorizationRefusesZoneIDCollision12532(t *testing
 				SrcPort: uint16(3000 + i), DstPort: variantDestinationPort12686("trust->untrust/a"),
 			},
 			ExpectedRTFlowSessionID: uint64(3000 + i),
-			IngressZoneID:           trustID,
-			EgressZoneID:            config.StableZoneID("untrust"),
+			IngressZoneID:           uint16(trustID),
+			EgressZoneID:            uint16(config.StableZoneID("untrust")),
 		}
 		capture.deleted.policy = append(capture.deleted.policy, match)
 		capture.candidateRuleIDs[policyInvalidationMatchID(match)] = "trust->untrust/a"
@@ -492,17 +492,13 @@ func TestPolicyInvalidationReauthorizationRefusesZoneIDCollision12532(t *testing
 			len(capture.deleted.policy), len(capture.candidateRuleIDs), candidates)
 	}
 
-	collider := ""
-	for i := 0; collider == "" && i < 1<<22; i++ {
-		if name := fmt.Sprintf("trust-collider-%d", i); config.StableZoneID(name) == trustID {
-			collider = name
-		}
-	}
-	if collider == "" {
-		t.Fatal("no StableZoneID collision with trust in the brute-force window")
-	}
+	// #16557: no trust collider is findable in the u32 space in test
+	// time; zoneNamesByID fails closed on ANY collision in the restored
+	// set, so add the residual colliding pair.
+	collider := "zzq8100"
 	restored := *c0
 	restored.Security.Zones = maps.Clone(c0.Security.Zones)
+	restored.Security.Zones["zzq17760"] = &config.ZoneConfig{Name: "zzq17760"}
 	restored.Security.Zones[collider] = &config.ZoneConfig{Name: collider}
 	kept, permitted = r.h.d.reauthorizePolicyCandidates(capture, &restored, false)
 	if permitted != nil || kept.candidateCount() != candidates {
@@ -529,8 +525,8 @@ func TestReauthorizeAllKeptDoesNotAliasCapture12797(t *testing.T) {
 				SrcPort: uint16(4000 + i), DstPort: 80,
 			},
 			ExpectedRTFlowSessionID: uint64(4000 + i),
-			IngressZoneID:           trustID,
-			EgressZoneID:            config.StableZoneID("untrust"),
+			IngressZoneID:           uint16(trustID),
+			EgressZoneID:            uint16(config.StableZoneID("untrust")),
 		}
 		source.deleted.policy = append(source.deleted.policy, match)
 		source.candidateRuleIDs[policyInvalidationMatchID(match)] = "trust->untrust/denied"

@@ -17,7 +17,7 @@ import (
 // takes precedence over the #5659 empty-zone deny sentinel in Rust
 // populate_interfaces).
 //
-// Fixture: the verified colliding pair z174 (survivor) / z214 (quarantined)
+// Fixture: the verified colliding pair zzq17760 (survivor) / zzq8100 (quarantined)
 // with an addressed interface and a per-interface override on each side, plus a
 // VRRP VIP on the quarantined side. Every cell is fail-on-revert: revert the
 // corresponding exclusion and the quarantined zone's addr/VIP/stamp/admit
@@ -25,20 +25,20 @@ import (
 // non-colliding configs (and the surviving side) are unchanged.
 func quarantineHostInboundCfg11011(t *testing.T) *config.Config {
 	t.Helper()
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatalf("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatalf("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	tree := &config.ConfigTree{}
 	for _, line := range []string{
 		"set interfaces ge-0/0/0 unit 0 family inet address 192.0.2.10/24",
 		"set interfaces ge-0/0/0 unit 0 family inet address 192.0.2.10/24 vrrp-group 1 virtual-address 192.0.2.1/32",
 		"set interfaces ge-0/0/1 unit 0 family inet address 198.51.100.10/24",
-		"set security zones security-zone z174 interfaces ge-0/0/1.0",
-		"set security zones security-zone z174 host-inbound-traffic system-services ssh",
-		"set security zones security-zone z174 interfaces ge-0/0/1.0 host-inbound-traffic system-services https",
-		"set security zones security-zone z214 interfaces ge-0/0/0.0",
-		"set security zones security-zone z214 host-inbound-traffic system-services ping",
-		"set security zones security-zone z214 interfaces ge-0/0/0.0 host-inbound-traffic system-services ssh",
+		"set security zones security-zone zzq17760 interfaces ge-0/0/1.0",
+		"set security zones security-zone zzq17760 host-inbound-traffic system-services ssh",
+		"set security zones security-zone zzq17760 interfaces ge-0/0/1.0 host-inbound-traffic system-services https",
+		"set security zones security-zone zzq8100 interfaces ge-0/0/0.0",
+		"set security zones security-zone zzq8100 host-inbound-traffic system-services ping",
+		"set security zones security-zone zzq8100 interfaces ge-0/0/0.0 host-inbound-traffic system-services ssh",
 	} {
 		path, err := config.ParseSetCommand(line)
 		if err != nil {
@@ -58,15 +58,15 @@ func quarantineHostInboundCfg11011(t *testing.T) *config.Config {
 
 func requireCollisionPremise11011(t *testing.T) {
 	t.Helper()
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatalf("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatalf("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
-	excl := config.ZoneQuarantineExclusions([]string{"z174", "z214"})
+	excl := config.ZoneQuarantineExclusions([]string{"zzq17760", "zzq8100"})
 	if len(excl) != 1 {
-		t.Fatalf("test premise broken: quarantine set = %v, want exactly {z214}", excl)
+		t.Fatalf("test premise broken: quarantine set = %v, want exactly {zzq8100}", excl)
 	}
-	if _, drop := excl["z214"]; !drop {
-		t.Fatalf("test premise broken: quarantine set = %v, want exactly {z214}", excl)
+	if _, drop := excl["zzq8100"]; !drop {
+		t.Fatalf("test premise broken: quarantine set = %v, want exactly {zzq8100}", excl)
 	}
 }
 
@@ -94,8 +94,8 @@ func TestQuarantinedZoneHasNoHostInboundView_11011(t *testing.T) {
 
 	views := BuildZoneHostInboundViews(cfg)
 	for _, v := range views {
-		if v.Zone == "z214" {
-			t.Errorf("quarantined zone z214 still has a host-inbound view: %+v", v)
+		if v.Zone == "zzq8100" {
+			t.Errorf("quarantined zone zzq8100 still has a host-inbound view: %+v", v)
 		}
 	}
 	for _, addr := range []string{"192.0.2.10", "192.0.2.1"} {
@@ -103,15 +103,15 @@ func TestQuarantinedZoneHasNoHostInboundView_11011(t *testing.T) {
 			t.Errorf("quarantined-zone address %s still scoped by zone %q's host-inbound view, want unzoned", addr, zone)
 		}
 	}
-	if got := ClassifyHostInbound(cfg, "z214", config.HostInboundProtoTCP, true, 22, nil, "ip"); got.Status == HostInboundTokenAdmit {
-		t.Errorf("quarantined zone z214 tcp/22 = %+v, want no token-admit (its ssh override is quarantined)", got)
+	if got := ClassifyHostInbound(cfg, "zzq8100", config.HostInboundProtoTCP, true, 22, nil, "ip"); got.Status == HostInboundTokenAdmit {
+		t.Errorf("quarantined zone zzq8100 tcp/22 = %+v, want no token-admit (its ssh override is quarantined)", got)
 	}
 
-	// Survivor control: z174 keeps its effective (override) view on its own
+	// Survivor control: zzq17760 keeps its effective (override) view on its own
 	// address, and the classifier still admits https there.
 	var survivorScoped bool
 	for _, v := range views {
-		if v.Zone != "z174" {
+		if v.Zone != "zzq17760" {
 			continue
 		}
 		for _, a := range v.V4Addrs {
@@ -130,10 +130,10 @@ func TestQuarantinedZoneHasNoHostInboundView_11011(t *testing.T) {
 		}
 	}
 	if !survivorScoped {
-		t.Errorf("survivor z174 lost its 198.51.100.10 host-inbound scope: %+v", views)
+		t.Errorf("survivor zzq17760 lost its 198.51.100.10 host-inbound scope: %+v", views)
 	}
-	if got := ClassifyHostInboundForInterface(cfg, "z174", "ge-0/0/1.0", config.HostInboundProtoTCP, true, 443, nil, "ip"); got.Status != HostInboundTokenAdmit {
-		t.Errorf("survivor z174 ge-0/0/1.0 tcp/443 = %+v, want token-admit via its https override", got)
+	if got := ClassifyHostInboundForInterface(cfg, "zzq17760", "ge-0/0/1.0", config.HostInboundProtoTCP, true, 443, nil, "ip"); got.Status != HostInboundTokenAdmit {
+		t.Errorf("survivor zzq17760 ge-0/0/1.0 tcp/443 = %+v, want token-admit via its https override", got)
 	}
 }
 
@@ -202,8 +202,8 @@ func TestQuarantineClearsHostInboundStamp_11011(t *testing.T) {
 		len(raw.HostInboundSystemServices) != 0 || len(raw.HostInboundProtocols) != 0 {
 		t.Fatalf("precondition: quarantined membership must already be unzoned and unstamped, got %+v", raw)
 	}
-	if !containsStr(cfg.Security.Zones["z214"].InterfaceHostInbound["ge-0/0/0.0"].SystemServices, "ssh") {
-		t.Fatal("precondition: quarantined z214 ssh override is absent from the authored config")
+	if !containsStr(cfg.Security.Zones["zzq8100"].InterfaceHostInbound["ge-0/0/0.0"].SystemServices, "ssh") {
+		t.Fatal("precondition: quarantined zzq8100 ssh override is absent from the authored config")
 	}
 
 	snap, err := buildSnapshot(cfg, config.UserspaceConfig{}, 0, 0)
@@ -235,8 +235,8 @@ func TestQuarantineClearsHostInboundStamp_11011(t *testing.T) {
 	if !ok {
 		t.Fatalf("fixture produced no ge-0/0/1.0 snapshot row: %+v", snap.Interfaces)
 	}
-	if survivor.Zone != "z174" {
-		t.Errorf("survivor ge-0/0/1.0 Zone = %q, want z174", survivor.Zone)
+	if survivor.Zone != "zzq17760" {
+		t.Errorf("survivor ge-0/0/1.0 Zone = %q, want zzq17760", survivor.Zone)
 	}
 	if !survivor.HostInboundConfigured {
 		t.Errorf("survivor ge-0/0/1.0 lost its host-inbound stamp (HostInboundConfigured=false)")

@@ -290,7 +290,7 @@ pub(super) fn evict_scan_limit_for_test() -> usize {
 }
 
 /// Per-zone scan/sweep tracker key: `(zone_id, src_ip)`.
-type ScanKey = (u16, IpAddr);
+type ScanKey = (u32, IpAddr);
 
 /// Per-source tracker record held in `per_src`. Carries the window state plus
 /// the source key's dense position in `key_ring` (`slot`) so the #6239 cursor
@@ -403,7 +403,7 @@ struct ScanCore<T: Copy + Eq + std::hash::Hash> {
     /// on eviction / cleanup. It is bounded by the same per-zone/source caps as
     /// `per_src` (at most `MAX_SOURCES_PER_ZONE` IPs per zone), so it adds no
     /// unbounded growth.
-    per_zone_srcs: FxHashMap<u16, FxHashSet<IpAddr>>,
+    per_zone_srcs: FxHashMap<u32, FxHashSet<IpAddr>>,
     /// Dense list of every live source key — the DOMAIN of the bounded #6239
     /// cleanup cursor and the #14673 eviction cursor. Each key's index is
     /// mirrored in `SrcEntry.slot`, so a removal is an O(1) swap-remove
@@ -528,7 +528,7 @@ impl<T: Copy + Eq + std::hash::Hash> ScanCore<T> {
     #[inline]
     fn check(
         &mut self,
-        zone_id: u16,
+        zone_id: u32,
         src_ip: IpAddr,
         entry_val: T,
         now_micros: u64,
@@ -637,7 +637,7 @@ impl<T: Copy + Eq + std::hash::Hash> ScanCore<T> {
 
     /// O(1) per-zone source count — the size of the per-zone source index.
     #[inline]
-    fn zone_count(&self, zone_id: u16) -> usize {
+    fn zone_count(&self, zone_id: u32) -> usize {
         self.per_zone_srcs.get(&zone_id).map_or(0, |s| s.len())
     }
 
@@ -694,7 +694,7 @@ impl<T: Copy + Eq + std::hash::Hash> ScanCore<T> {
     /// detection). Returns `true` if a victim was evicted (index updated,
     /// `evicted_pressure` bumped), `false` otherwise.
     #[inline]
-    fn evict_stalest_in_zone(&mut self, zone_id: u16, now_micros: u64, window_micros: u64) -> bool {
+    fn evict_stalest_in_zone(&mut self, zone_id: u32, now_micros: u64, window_micros: u64) -> bool {
         /// Hard cap on non-target-zone ring slots skipped in one eviction
         /// walk (#14673). Bounds the walk when zones interleave densely;
         /// 8x the sample is far beyond any legitimate interleave at
@@ -1037,7 +1037,7 @@ impl PortScanTracker {
     /// Junos `threshold` (a microsecond time window, #4114).
     pub(super) fn check(
         &mut self,
-        zone_id: u16,
+        zone_id: u32,
         src_ip: IpAddr,
         dst_port: u16,
         now_micros: u64,
@@ -1092,7 +1092,7 @@ impl IpSweepTracker {
     /// `threshold` (a microsecond time window, #4114).
     pub(super) fn check(
         &mut self,
-        zone_id: u16,
+        zone_id: u32,
         src_ip: IpAddr,
         dst_ip: IpAddr,
         now_micros: u64,
@@ -1484,7 +1484,7 @@ mod scan_tests {
     #[test]
     fn slow_scanner_survives_decoy_flood_eviction() {
         let mut core: ScanCore<u16> = ScanCore::default();
-        let zone = 9u16;
+        let zone = 9u32;
         let window = 1_000_000u64; // 1s — every seeded entry is LIVE below
                                    // The slow scanner opened its window FIRST (oldest start=100) and has
                                    // already probed SCAN_DETECT_COUNT-1 distinct ports (near threshold).
@@ -1551,8 +1551,8 @@ mod scan_tests {
     #[test]
     fn fresh_scanner_admitted_when_zone_entries_outside_global_prefix_4890() {
         let mut core: ScanCore<u16> = ScanCore::default();
-        let other_zone = 1u16;
-        let target_zone = 9u16;
+        let other_zone = 1u32;
+        let target_zone = 9u32;
         let window = 1_000_000u64;
         let start = 1_000u64;
         // `now` is inside the window for every seeded entry, so NOTHING is
@@ -1922,7 +1922,7 @@ mod scan_tests {
         // Spread the sources across several zones (the "attacker populates
         // sources across many zones" shape from the issue) — all LIVE.
         for i in 0..total {
-            let zone = (i % 4) as u16;
+            let zone = (i % 4) as u32;
             let src = IpAddr::V4(Ipv4Addr::from(0x0a00_0000u32 + i as u32));
             core.check(zone, src, (i & 0xffff) as u16, 1_000, 1_000_000);
         }
@@ -1959,7 +1959,7 @@ mod scan_tests {
         let total = CLEANUP_BUDGET * 2 + 5;
         let mut expected: FxHashSet<ScanKey> = FxHashSet::default();
         for i in 0..total {
-            let zone = (i % 4) as u16;
+            let zone = (i % 4) as u32;
             let src = IpAddr::V4(Ipv4Addr::from(0x0a10_0000u32 + i as u32));
             core.check(zone, src, (i & 0xffff) as u16, 1_000, 1_000_000);
             expected.insert((zone, src));
@@ -2001,7 +2001,7 @@ mod scan_tests {
         let total = CLEANUP_BUDGET + 128;
         let mut live_keys: FxHashSet<ScanKey> = FxHashSet::default();
         for i in 0..total {
-            let zone = (i % 3) as u16;
+            let zone = (i % 3) as u32;
             let src = IpAddr::V4(Ipv4Addr::from(0x0a20_0000u32 + i as u32));
             // Even entries open OLD windows (will be reaped); odd entries open
             // RECENT windows (stay live under the floor below).
@@ -2046,7 +2046,7 @@ mod scan_tests {
         let mut core: ScanCore<u16> = ScanCore::default();
         let total = CLEANUP_BUDGET * 3 + 7;
         for i in 0..total {
-            let zone = (i % 8) as u16;
+            let zone = (i % 8) as u32;
             let src = IpAddr::V4(Ipv4Addr::from(0x0a30_0000u32 + i as u32));
             core.check(zone, src, (i & 0xffff) as u16, 0, 1_000_000);
         }
@@ -2071,12 +2071,12 @@ mod scan_tests {
     }
     /// #14673 helpers: seed a core with `n` zone-`zone` entries of given
     /// `(src, count, window_start)` directly (O(few), bypasses the cap).
-    fn seed_core(seed: u64, zone: u16, specs: &[(IpAddr, u16, u64)]) -> ScanCore<u16> {
+    fn seed_core(seed: u64, zone: u32, specs: &[(IpAddr, u16, u64)]) -> ScanCore<u16> {
         let mut core: ScanCore<u16> = ScanCore::with_seed(seed);
         for (src, count, start) in specs {
             let mut set = FxHashSet::default();
             for p in 0..*count {
-                set.insert(8000 + p);
+                set.insert((8000 + p) as u16);
             }
             core.per_src.insert((zone, *src), seed_entry(*start, set));
         }
@@ -2233,7 +2233,7 @@ mod scan_tests {
     /// its 10th distinct port. RED on revert to the static prefix.
     #[test]
     fn pinned_prefix_scanner_not_self_evicted_14673() {
-        let zone = 1u16;
+        let zone = 1u32;
         let window = 10_000_000u64;
         // Attacker scene: 200 sources. Discover the static-prefix
         // iteration order with a probe core, pick the entry sitting
@@ -2297,7 +2297,7 @@ mod scan_tests {
     /// identical candidate set. Bounded: each sample <= EVICT_SCAN_LIMIT.
     #[test]
     fn eviction_sample_rotates_across_calls_14673() {
-        let zone = 7u16;
+        let zone = 7u32;
         let window = 1_000_000u64;
         let total = EVICT_SCAN_LIMIT * 4;
         let specs: Vec<(IpAddr, u16, u64)> = (0..total)
@@ -2337,7 +2337,7 @@ mod scan_tests {
     /// each eviction to keep the table size constant.
     #[test]
     fn eviction_eventually_covers_all_entries_14673() {
-        let zone = 8u16;
+        let zone = 8u32;
         let window = 1_000_000u64;
         let total = 200usize;
         let specs: Vec<(IpAddr, u16, u64)> = (0..total)
@@ -2380,8 +2380,8 @@ mod scan_tests {
     /// while a victim exists.
     #[test]
     fn eviction_bounded_under_other_zone_interleave_14673() {
-        let target = 9u16;
-        let other = 1u16;
+        let target = 9u32;
+        let other = 1u32;
         let window = 1_000_000u64;
         let mut core: ScanCore<u16> = ScanCore::with_seed(99);
         // Many other-zone entries then a few target entries at the tail.
@@ -2424,7 +2424,7 @@ mod scan_tests {
     /// different first-sample start under different pinned seeds.
     #[test]
     fn eviction_start_depends_on_seed_14673() {
-        let zone = 3u16;
+        let zone = 3u32;
         let window = 1_000_000u64;
         let specs: Vec<(IpAddr, u16, u64)> = (0..128u32)
             .map(|i| (IpAddr::V4(Ipv4Addr::from(0x0a03_0000u32 + i)), 3u16, 100))
@@ -2447,7 +2447,7 @@ mod scan_tests {
     /// #14673 expired-first preserved over the rotating sample.
     #[test]
     fn eviction_rotating_still_prefers_expired_14673() {
-        let zone = 5u16;
+        let zone = 5u32;
         let expired_src = IpAddr::V4(Ipv4Addr::new(10, 5, 0, 50));
         let mut specs: Vec<(IpAddr, u16, u64)> = (0..100u32)
             .map(|i| (IpAddr::V4(Ipv4Addr::from(0x0a05_1000u32 + i)), 1u16, 1_000))
@@ -2481,7 +2481,7 @@ mod scan_tests {
     #[test]
     fn scanner_detected_through_decoy_evictions_at_cap_14673() {
         let mut t = PortScanTracker::default();
-        let zone = 1u16;
+        let zone = 1u32;
         let window = 10_000_000u64;
         // Fill the zone exactly to the cap with count-1 background sources.
         for i in 0..MAX_SOURCES_PER_ZONE {

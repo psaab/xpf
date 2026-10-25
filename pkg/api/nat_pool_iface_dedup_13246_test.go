@@ -11,7 +11,7 @@ import (
 func TestNATPoolStatsHandlerDeduplicatesInterfaceRules13246(t *testing.T) {
 	s := &Server{store: newIfaceNATStatsAPIStore(t), dp: &natIfaceSNATSessionsDP{
 		Manager: dataplane.New(),
-		result:  &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"trust": 2, "wan": 5, "guest": 4}},
+		result:  &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 2, "wan": 5, "guest": 4}},
 	}}
 	rr := httptest.NewRecorder()
 	s.natPoolStatsHandler(rr, httptest.NewRequest("GET", "/api/v1/security/nat/source/pools", nil))

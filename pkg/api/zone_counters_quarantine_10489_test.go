@@ -9,23 +9,23 @@ import (
 )
 
 func TestCollectZoneCountersOmitsQuarantinedZone10489(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatal("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatal("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	store := newDescriptorCoverageStore(t)
 	cfg := store.ActiveConfig()
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
-		"z174":  {Name: "z174"},
-		"z214":  {Name: "z214"},
-		"trust": {Name: "trust"},
+		"zzq17760": {Name: "zzq17760"},
+		"zzq8100":  {Name: "zzq8100"},
+		"trust":    {Name: "trust"},
 	}
-	ids := map[string]uint16{
-		"z174":  config.StableZoneID("z174"),
-		"z214":  config.StableZoneID("z214"),
-		"trust": config.StableZoneID("trust"),
+	ids := map[string]uint32{
+		"zzq17760": config.StableZoneID("zzq17760"),
+		"zzq8100":  config.StableZoneID("zzq8100"),
+		"trust":    config.StableZoneID("trust"),
 	}
 	mgr := dataplane.New()
-	mgr.SetZoneCounterOffset(ids["z174"],
+	mgr.SetZoneCounterOffset(ids["zzq17760"],
 		dataplane.CounterValue{Packets: 11, Bytes: 1100},
 		dataplane.CounterValue{Packets: 22, Bytes: 2200})
 	mgr.SetZoneCounterOffset(ids["trust"],
@@ -41,12 +41,12 @@ func TestCollectZoneCountersOmitsQuarantinedZone10489(t *testing.T) {
 
 	got, unpopulated := zoneSamples(t, c, dp)
 	for k := range got {
-		if strings.Contains(k, "/z214/") {
+		if strings.Contains(k, "/zzq8100/") {
 			t.Fatalf("quarantined zone emitted metric sample %q (survivor volume under loser): %v", k, got)
 		}
 	}
 	for _, k := range []string{
-		"xpf_zone_packets_total/z174/ingress",
+		"xpf_zone_packets_total/zzq17760/ingress",
 		"xpf_zone_packets_total/trust/ingress",
 	} {
 		if _, ok := got[k]; !ok {
@@ -54,6 +54,6 @@ func TestCollectZoneCountersOmitsQuarantinedZone10489(t *testing.T) {
 		}
 	}
 	if unpopulated != 1 {
-		t.Fatalf("unpopulated gauge = %v, want 1 (quarantined z214 only)", unpopulated)
+		t.Fatalf("unpopulated gauge = %v, want 1 (quarantined zzq8100 only)", unpopulated)
 	}
 }
