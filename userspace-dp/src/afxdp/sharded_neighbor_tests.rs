@@ -1454,6 +1454,19 @@ fn mac_bound_probe_token_authorizes_only_the_probed_mac_15097() {
     map.clear_neighbor_probe(&key);
     assert!(!map.peek_arp_reply_solicited(&key, probe_at));
     assert!(!map.peek_arp_reply_solicited_for_mac(&key, Some(held), probe_at));
+
+    // #16505: the selective clear drops only MAC-bound tokens and
+    // preserves a key-only local-probe token.
+    map.record_neighbor_probe_for_mac(key, Some(held), probe_at);
+    map.clear_mac_bound_neighbor_probe(&key);
+    assert!(!map.peek_arp_reply_solicited(&key, probe_at), "MAC-bound token must be cleared");
+    map.record_neighbor_probe(key, probe_at);
+    map.clear_mac_bound_neighbor_probe(&key);
+    assert!(
+        map.peek_arp_reply_solicited_for_mac(&key, Some(refused), probe_at),
+        "key-only local-probe token must survive the selective clear (#16505)"
+    );
+    map.clear_neighbor_probe(&key);
 }
 
 #[test]
