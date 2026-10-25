@@ -30,6 +30,13 @@ import (
 // references pool `p1` in pool-mode, prefixed by the caller's pool `set` lines.
 // Mirrors snat5627Tree (ParseSetCommand + SetPath, never NewParser — the
 // flat-set testing gotcha).
+//
+// #17408: the scaffold source match is DUAL-family
+// (`[ 10.0.0.0/24 2001:db8:9::/64 ]`), not the previous v4-only
+// `10.0.0.0/24`. The subject of these tests is POOL scope/grammar; a
+// v4-only source scaffold paired with a v6-only pool is exactly the
+// proven #16600 WrongAddressFamily defect and is now strict-rejected,
+// which would mask the verdict these cases assert.
 func snat5875Tree(t *testing.T, poolCmds ...string) *ConfigTree {
 	t.Helper()
 	tree := &ConfigTree{}
@@ -38,7 +45,7 @@ func snat5875Tree(t *testing.T, poolCmds ...string) *ConfigTree {
 	cmds = append(cmds,
 		"set security nat source rule-set RS from zone trust",
 		"set security nat source rule-set RS to zone untrust",
-		"set security nat source rule-set RS rule R1 match source-address 10.0.0.0/24",
+		"set security nat source rule-set RS rule R1 match source-address [ 10.0.0.0/24 2001:db8:9::/64 ]",
 		"set security nat source rule-set RS rule R1 then source-nat pool p1",
 	)
 	for _, cmd := range cmds {
