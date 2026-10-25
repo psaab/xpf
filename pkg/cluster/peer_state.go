@@ -50,11 +50,25 @@ func (m *Manager) HeartbeatPeerAuthSeen() bool {
 }
 
 // noteSyncPeerAuthenticated records the peer's proof of the shared PSK from
-// the authenticated session-sync handshake. The same process-lifetime proof is
-// used by the fabric gRPC downgrade guard whether it arrives on heartbeat or
-// session sync.
-func (m *Manager) noteSyncPeerAuthenticated() {
+// the authenticated session-sync handshake, under the key that handshake
+// actually matched (#16859). The same process-lifetime proof is used by the
+// fabric gRPC downgrade guard whether it arrives on heartbeat or session
+// sync. The matched key also feeds the #6630 rotation observation: in
+// fabric-transport mode there is no heartbeat, so this is the ONLY proof that
+// the peer is currently signing with that key — without it the rotation line
+// stays UNKNOWN forever even while session sync authenticates the peer
+// continuously. matchedPSK is the raw PSK (never logged); it is stored only
+// as the derived controlLinkKeyID, exactly as heartbeat admission stores it.
+// A nil/empty key keeps the legacy no-key-id behaviour for providers that
+// cannot name the matched key.
+func (m *Manager) noteSyncPeerAuthenticated(matchedPSK ...[]byte) {
 	m.heartbeatAuthState().notePeerAuthenticated()
+	for _, k := range matchedPSK {
+		if len(k) > 0 {
+			m.notePeerControlKeyID(controlLinkKeyID(k))
+			break
+		}
+	}
 }
 
 // PeerNodeID returns the peer's node ID (valid only when PeerAlive is true).

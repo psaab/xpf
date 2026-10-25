@@ -29,7 +29,7 @@ type confirmRecorder15140 struct {
 	authenticated atomic.Int32
 }
 
-func (r *confirmRecorder15140) noteSyncPeerAuthenticated() { r.authenticated.Add(1) }
+func (r *confirmRecorder15140) noteSyncPeerAuthenticated(...[]byte) { r.authenticated.Add(1) }
 
 func newConfirmSync15140(t *testing.T, key []byte, node int) (*SessionSync, *confirmRecorder15140) {
 	t.Helper()

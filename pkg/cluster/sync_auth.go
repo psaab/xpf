@@ -160,15 +160,25 @@ type SyncAuthProvider interface {
 // syncPeerAuthRecorder is an optional capability for auth providers that retain
 // the process-lifetime proof that the peer holds the shared key. The Manager
 // uses the same sticky signal for the fabric gRPC downgrade guard when a keyed
-// fabric-transport cluster has no heartbeat.
+// fabric-transport cluster has no heartbeat. matchedPSK is the raw PSK the
+// handshake actually verified under (#16859); the Manager derives the
+// rotation key ID from it and never stores or logs the key itself.
 type syncPeerAuthRecorder interface {
-	noteSyncPeerAuthenticated()
+	noteSyncPeerAuthenticated(matchedPSK ...[]byte)
 }
 
-func (s *SessionSync) recordAuthenticatedPeer() {
+// recordAuthenticatedPeer records a completed authenticated handshake.
+// matchedPSK is the key that handshake matched: on the connect initiator it
+// is this node's signing key, on the connect responder the ring key it opened
+// msg1 under, and on the #6628 upgrade both sides know the round's key
+// (Hello's matched candidate at the responder, forPSK at the initiator).
+// Callers that authenticated under this node's own signing key pass that key;
+// it equals the peer's signing key by Noise construction, so deriving its ID
+// answers "which key is the peer signing with".
+func (s *SessionSync) recordAuthenticatedPeer(matchedPSK ...[]byte) {
 	if box := s.authProvider.Load(); box != nil && box.p != nil {
 		if recorder, ok := box.p.(syncPeerAuthRecorder); ok {
-			recorder.noteSyncPeerAuthenticated()
+			recorder.noteSyncPeerAuthenticated(matchedPSK...)
 		}
 	}
 }
@@ -561,7 +571,13 @@ func (s *SessionSync) performSyncHandshake(conn net.Conn, initiator bool, fabric
 	// ephemeral. This also arms the fabric gRPC downgrade guard when
 	// the selected transport is fabric and no control-link heartbeat
 	// is running.
-	s.recordAuthenticatedPeer()
+	// #16859: feed the matched key so the rotation line can answer in
+	// fabric-transport mode (no heartbeat). result.matchedPSK is, on the
+	// initiator, its signing key — which by Noise construction is the key
+	// the responder proved it accepts and the peer signs with; on the
+	// responder, the ring key msg1 verified under, i.e. the peer's signing
+	// key. Either way it is the peer's current signing key.
+	s.recordAuthenticatedPeer(result.matchedPSK)
 	return syncAuthAuthenticated, result, nil
 }
 
