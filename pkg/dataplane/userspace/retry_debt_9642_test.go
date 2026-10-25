@@ -1692,7 +1692,7 @@ func TestRetryDebtBlocksTakeoverReadiness9642(t *testing.T) {
 		m.lastSnapshot = snap
 		m.publishedSnapshot = 8
 		m.applySnapshotOutcomeUnknown = true
-		ready, reasons := m.takeoverReadyLocked()
+		ready, reasons := m.takeoverReadyLocked(true)
 		m.mu.Unlock()
 		if ready {
 			t.Fatal("TakeoverReady() = true with unpublished retry debt")
@@ -1717,7 +1717,7 @@ func TestRetryDebtBlocksTakeoverReadiness9642(t *testing.T) {
 		m.mu.Lock()
 		m.lastSnapshot = snap
 		m.publishedSnapshot = 9
-		ready, reasons := m.takeoverReadyLocked()
+		ready, reasons := m.takeoverReadyLocked(true)
 		m.mu.Unlock()
 		if !ready {
 			t.Fatalf("TakeoverReady() = false on a settled healthy node: %q", reasons)

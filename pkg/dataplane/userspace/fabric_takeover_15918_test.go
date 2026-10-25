@@ -142,3 +142,75 @@ func TestTakeoverReadyFabricInstallable15918(t *testing.T) {
 		}
 	})
 }
+
+// #16844: the #15918 fabric clause must not apply while the peer is down.
+// A lone surviving node whose peer is confirmed absent has no fabric
+// peer to resolve; pre-fix TakeoverReady (the only form) returned
+// fabric_peer_unresolved and the daemon held every data RG secondary
+// until the 2m degraded fallback. The peer-alive form must stay blocked.
+func TestTakeoverReadyFabricPeerDown16844(t *testing.T) {
+	unresolved := []FabricSnapshot{{Name: "fab1", ParentIfindex: 21, PeerAddress: peerV4_15918, LocalMAC: localMAC_15918, PeerMAC: ""}}
+	installable := []FabricSnapshot{{Name: "fab1", ParentIfindex: 21, PeerAddress: peerV4_15918, LocalMAC: localMAC_15918, PeerMAC: peerMAC_15918}}
+
+	t.Run("peer down unresolved fabric ready", func(t *testing.T) {
+		m := healthyFabricManager15918(t, unresolved)
+		if ready, reasons := m.TakeoverReadyForPeer(false); !ready {
+			t.Fatalf("peer-down ready=false with unresolved fabric, reasons=%v (#16844)", reasons)
+		}
+		if _, reasons := m.TakeoverReadyForPeer(false); strings.Contains(strings.Join(reasons, ";"), "fabric") {
+			t.Fatalf("peer-down reasons still name fabric: %v", reasons)
+		}
+	})
+
+	t.Run("peer alive unresolved fabric still blocked (control)", func(t *testing.T) {
+		m := healthyFabricManager15918(t, unresolved)
+		ready, reasons := m.TakeoverReadyForPeer(true)
+		if ready {
+			t.Fatalf("peer-alive ready=true with unresolved fabric, reasons=%v (#15918 must stay)", reasons)
+		}
+		if !strings.Contains(strings.Join(reasons, ";"), "fabric peer unresolved") {
+			t.Fatalf("peer-alive reasons=%v, want fabric peer unresolved", reasons)
+		}
+		// The no-arg form stays the peer-alive form.
+		if ready, _ := m.TakeoverReady(); ready {
+			t.Fatal("TakeoverReady() ready=true with unresolved fabric; want peer-alive default")
+		}
+	})
+
+	t.Run("peer down installable fabric ready (control)", func(t *testing.T) {
+		m := healthyFabricManager15918(t, installable)
+		if ready, reasons := m.TakeoverReadyForPeer(false); !ready {
+			t.Fatalf("peer-down ready=false with installable fabric, reasons=%v", reasons)
+		}
+	})
+
+	t.Run("peer down configured fabric zero rows ready", func(t *testing.T) {
+		m := healthyFabricManager15918(t, nil)
+		cfg := &config.Config{}
+		cfg.Chassis.Cluster = &config.ClusterConfig{FabricInterface: "fab0", FabricPeerAddress: peerV4_15918}
+		m.lastSnapshot.Config = cfg
+		if ready, reasons := m.TakeoverReadyForPeer(false); !ready {
+			t.Fatalf("peer-down ready=false with configured fab0 but zero rows, reasons=%v (#16844)", reasons)
+		}
+	})
+
+	t.Run("peer down partial fabrics debt ready", func(t *testing.T) {
+		m := healthyFabricManager15918(t, installable)
+		m.partialOutcomeUnknown = partialFabrics
+		if ready, reasons := m.TakeoverReadyForPeer(false); !ready {
+			t.Fatalf("peer-down ready=false with partialFabrics debt, reasons=%v (#16844)", reasons)
+		}
+		// Control: same debt still blocks while the peer is alive.
+		if ready, reasons := m.TakeoverReadyForPeer(true); ready {
+			t.Fatalf("peer-alive ready=true with partialFabrics debt, reasons=%v", reasons)
+		}
+	})
+
+	t.Run("peer down local gates still block (control)", func(t *testing.T) {
+		m := healthyFabricManager15918(t, unresolved)
+		m.sessionMirrorFailed = true
+		if ready, reasons := m.TakeoverReadyForPeer(false); ready {
+			t.Fatalf("peer-down ready=true with session mirror failed, reasons=%v — only the fabric clause is peer-exempt", reasons)
+		}
+	})
+}

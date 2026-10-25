@@ -1211,6 +1211,17 @@ func (a *LegacyDataPlaneAdapter) TakeoverReady() (bool, []string) {
 	return m.TakeoverReady()
 }
 
+// TakeoverReadyForPeer forwards the peer-liveness-aware readiness query
+// (#16844): with no live peer the #15918 fabric-installability clause
+// does not apply.
+func (a *LegacyDataPlaneAdapter) TakeoverReadyForPeer(peerAlive bool) (bool, []string) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return false, []string{err.Error()}
+	}
+	return m.TakeoverReadyForPeer(peerAlive)
+}
+
 // HATakeoverReadiness forwards the bounded HA readiness snapshot through the
 // adapter published by Boot, so Prometheus probes the production runtime type.
 func (a *LegacyDataPlaneAdapter) HATakeoverReadiness() HATakeoverReadiness {

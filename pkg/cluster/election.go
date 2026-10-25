@@ -861,8 +861,20 @@ func (m *Manager) electSingleNode() {
 		// conjunction: `IsReadyForTakeover` consults local interfaces
 		// (Monitor.RGInterfaceReady), local VRRP (RGVRRPReady /
 		// checkNoRethTakeoverReadiness) and the local userspace dataplane
-		// (checkUserspaceTakeoverReadinessFor) — all determinable with no peer —
-		// and `fabricReady` is already forced true when the peer is down.
+		// (checkUserspaceTakeoverReadinessFor) — and `fabricReady` is already
+		// forced true when the peer is down.
+		//
+		// #16844: that last premise has a second half inside the userspace
+		// term. The #15918 fabric-installability clause (no installable
+		// fabric link / PeerMAC="") was NOT peer-aware when added, so on a
+		// confirmed-absent cold boot it alone held every data RG secondary
+		// until the degraded fallback — fabric readiness was being demanded
+		// of a node with no peer to reach. The userspace query now takes
+		// peer liveness (TakeoverReadyForPeer) and applies that clause only
+		// while the peer is alive, exactly like `fabricReady`. The remaining
+		// userspace terms (helper, arming, XSK, mirror, inventory, snapshot)
+		// are all local and determinable with no peer, so the cold-boot
+		// gate's premise stands.
 		//
 		// peerEverSeen remains false on a confirmed-absent cold boot, so this
 		// gate still applies after the non-preempt hold is released. Only a
