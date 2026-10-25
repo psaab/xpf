@@ -897,11 +897,14 @@ type TunnelConfig struct {
 	// MTU is the config-desired link MTU for the tunnel device (#1884):
 	// the owning interface's `mtu` statement (unit-level overrides
 	// interface-level for unit tunnels, mirroring compiler_iface
-	// precedence). 0 means unconfigured — the tunnel manager then never
-	// writes MTU except the one-time TUN-default normalization when
-	// ADOPTING an anchor it did not create (wireguard→gre same-name flip
-	// repair). Populated by collectAppliedTunnels; the legacy
-	// standalone-CLI apply path leaves it 0.
+	// precedence). 0 means unconfigured — for a native-GRE AnchorOnly
+	// anchor the tunnel manager then derives the MTU from the underlay
+	// minus GRE overhead (#16517, see routing.anchorDesiredMTU); for
+	// other anchors it writes MTU only as the one-time TUN-default
+	// normalization when ADOPTING an anchor it did not create
+	// (wireguard→gre same-name flip repair). Populated by
+	// collectAppliedTunnels; the legacy standalone-CLI apply path
+	// leaves it 0.
 	MTU int
 	// ClearDontFragmentBit clears DF in a native GRE IPv4 outer.
 	// When false, GRE copies DF from an IPv4 inner (IPv6 inner => DF set).

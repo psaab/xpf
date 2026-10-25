@@ -36,7 +36,7 @@ which makes each domain unit-testable with a fake (see `rules_test.go`'s
 | `vrf_miss_terminator_9819.go` + `rule_l3mdev_linux.go` | (part of `vrfManager`) | the #9819 VRF miss terminator (`l3mdev unreachable`, pref 2000), installed before any VRF device exists; the raw FRA_L3MDEV request |
 | `routes.go` | `routeReader` | incremental and buffered kernel routing-table reads (`routeLister`) |
 | `routeformat.go` | free fns | Junos `show route` formatters |
-| `tunnel.go` | `tunnelManager` | GRE/IPIP + AnchorOnly TUN reconcile, VRF-claim, address, `Clear`/`GetStatus`; own `mu`. WireGuard and the keepalive runner are split into siblings below (#5661) |
+| `tunnel.go` | `tunnelManager` | GRE/IPIP + AnchorOnly TUN reconcile, VRF-claim, address, `Clear`/`GetStatus`; own `mu`. WireGuard and the keepalive runner are split into siblings below (#5661). Unconfigured native-GRE anchors default their MTU from the underlay minus GRE overhead (`anchorDesiredMTU`, #16517) |
 | `tunnel_wireguard.go` | (part of `tunnelManager`) | WireGuard persistent-TUN lifecycle: `applyWireguardTunLocked`, inner-MTU cap (`wgTunMTUForEndpoint`, WG overhead consts), `errWGIncompatibleLinkRetained` sentinel, `closeTuntapFiles` |
 | `tunnel_keepalive.go` | free fns | keepalive **prober** primitives (#1918): `tunnelProber`/`icmpProber`, `ProbeResult`, `UnsupportedKind`, ICMP-echo probe + errno classification |
 | `tunnel_keepalive_runner.go` | (part of `tunnelManager`) | keepalive **runner** half (#5661): `KeepaliveState`/`keepaliveRunner`, `startKeepalive`/`stopAll`, `keepaliveLoop`/`keepaliveTick`, `GetKeepaliveState` |
