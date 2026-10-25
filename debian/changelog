@@ -1,4 +1,14 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Daemon/mgmt-VRF: the #11362 cluster control/fabric classless
+    fence now resolves unit-spelled control/fabric interfaces
+    (#16806). mgmtVRFControlFabricInterfaces mapped the authored
+    ref with LinuxIfName (slash-only), so `control-interface
+    em0.0` never matched the vrf-mgmt member set and the fence
+    protected no interface; with the classless trust override
+    set, an fxp0 DHCP option-121 route inside the control
+    prefix was installed in table 999. It now resolves via
+    cfg.ResolveKernelIfName (unit-0 collapse, VLAN, aliases),
+    as transportVRFBinding already did since #15944.
   * Cluster/heartbeat: the duplicate-node-id heartbeat warning now
     drops a replay of this node's own heartbeat (#16789). The #14705
     gate verified only the HMAC, so an on-link spoofer replaying a
