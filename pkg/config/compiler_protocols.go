@@ -770,11 +770,12 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 					case "description":
 						groupDesc = nodeVal(child)
 					case "multihop":
-						if v := nodeVal(child); v != "" {
-							if n, err := strconv.Atoi(v); err == nil {
-								groupMultihop = n
-							}
-						}
+						// #16679: all Junos spellings resolve
+						// through the shared extractor (group
+						// helper normalises the flat-set child
+						// shape); the refused no-nexthop-change
+						// spelling keeps the prior group TTL.
+						groupMultihop = bgpGroupMultihop16679(child, groupMultihop)
 					case "export":
 						// Multi-value leaf (#2702): a bracket-list
 						// `export [ p1 p2 ]` collapses every policy onto

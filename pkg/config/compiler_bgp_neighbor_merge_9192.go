@@ -174,6 +174,25 @@ func fusedCutValid15137(keys []string, schema *schemaNode) bool {
 		if head == nil {
 			return false
 		}
+		// #16679: `multihop` may stand alone (bare presence form,
+		// no TTL token) or carry only the value-less
+		// `no-nexthop-change` modifier; with no TTL token after it
+		// the statement ends here. `multihop ttl N` consumes the
+		// ttl pair; `multihop N` falls through to consumeNodeKeys
+		// below (args:1) unchanged.
+		if keys[i] == "multihop" {
+			if i+1 >= len(keys) || keys[i+1] == "no-nexthop-change" {
+				i++
+				continue
+			}
+			if keys[i+1] == "ttl" {
+				if i+3 > len(keys) {
+					return false
+				}
+				i += 3
+				continue
+			}
+		}
 		n, _ := consumeNodeKeys(keys[i:], head)
 		if n <= 0 || i+n > len(keys) {
 			return false
@@ -308,10 +327,12 @@ func applyBGPNeighborProps9192(neighbor *BGPNeighbor, child *Node, ownExport, ow
 		case "description":
 			neighbor.Description = nodeVal(prop)
 		case "multihop":
-			if v := nodeVal(prop); v != "" {
-				if n, err := strconv.Atoi(v); err == nil {
-					neighbor.MultihopTTL = n
-				}
+			// #16679: all Junos spellings (bare, scalar, ttl
+			// modifier, blocked) resolve through the shared
+			// extractor; the refused no-nexthop-change spelling
+			// reports present=false and keeps the prior TTL.
+			if ttl, ok := bgpMultihopTTLOf16679(prop); ok {
+				neighbor.MultihopTTL = ttl
 			}
 		case "peer-as":
 			neighbor.peerASConfigured = true

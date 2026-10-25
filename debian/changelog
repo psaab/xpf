@@ -1,4 +1,5 @@
 xpf (0.0.0) unstable; urgency=medium
+
   * Cluster/session-sync: pre-auth logging on the sync listener is
     now bounded (#16748). The accept loop's "peer connected" line is
     Debug instead of Info (it fired before authentication, so a
@@ -246,6 +247,14 @@ xpf (0.0.0) unstable; urgency=medium
     Missing, non-numeric, duplicate, or trailing priority tokens are
     refused on the same gate; tolerant load warns and keeps the
     first node's own priority.
+  * Config/BGP: `multihop` now accepts the Junos spellings (#16679).
+    Bare `multihop;` commits at the Junos default TTL 64,
+    `multihop { ttl N; }` and flat-set `multihop ttl N` pin the TTL,
+    and the legacy `multihop <N>` form stays as an alias; all render
+    `neighbor X ebgp-multihop <ttl>`. Previously every Junos spelling
+    was rejected at commit. `multihop no-nexthop-change` is refused
+    by name until it can be rendered (FRR `ebgp-multihop` rewrites
+    the received next hop; the Junos flag retains it).
   * Feeds: a feed restored with a count baseline but no usable content
     epoch now re-establishes the epoch on its first guarded install
     (#16651). Legacy count-only records, records whose epoch digest was

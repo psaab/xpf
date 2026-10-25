@@ -1006,6 +1006,10 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, []uncoveredF
 	// them; a direct compile without SchemaValidate must still name
 	// the dropped statement, not only the generic #10707 advisory).
 	bgpAuthWarnings16621 := warnBGPAuth16621(tree)
+	// #16679: same treatment for the refused `multihop
+	// no-nexthop-change` spelling (strict gate refuses by name; the
+	// tolerant/direct compile paths must name the dropped statement).
+	bgpMultihopWarnings16679 := warnBGPMultihop16679(tree)
 
 	var warnings []string
 	warnings = append(warnings, ctrlCharWarnings...)
@@ -1062,6 +1066,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, []uncoveredF
 	warnings = append(warnings, staticRouteQNHWarnings...)
 	warnings = append(warnings, openWorldRoutingWarnings...)
 	warnings = append(warnings, bgpAuthWarnings16621...)
+	warnings = append(warnings, bgpMultihopWarnings16679...)
 	warnings = append(warnings, rootLoginDupWarnings...)
 	return warnings, uncovered16001, nil
 }

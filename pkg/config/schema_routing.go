@@ -538,7 +538,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 			// (BGPNeighbor.Disable).
 			"disable":                  {desc: "Disable this BGP group", children: nil},
 			"description":              {desc: "Description", args: 1, scalar: true, placeholder: "<text>", children: nil},
-			"multihop":                 {desc: "Multihop TTL", args: 1, valueType: ValueInteger, placeholder: "<ttl>", validator: ValidateInteger(1, 255), children: nil},
+			"multihop":                 bgpMultihopSchema16679(),
 			"export":                   {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
 			"import":                   {desc: "Import policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
 			"authentication-key":       {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
@@ -586,7 +586,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 				"passive":       {desc: "Passive mode (do not initiate connections)", children: nil},
 				// #16572: neighbor-level shut (BGPNeighbor.Disable).
 				"disable":                  {desc: "Disable this BGP neighbor", children: nil},
-				"multihop":                 {desc: "Multihop TTL", args: 1, valueType: ValueInteger, placeholder: "<ttl>", validator: ValidateInteger(1, 255), children: nil},
+				"multihop":                 bgpMultihopSchema16679(),
 				"export":                   {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
 				"import":                   {desc: "Import policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
 				"authentication-key":       {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
