@@ -379,7 +379,8 @@ pub(crate) use source::{
 // mint single-holder allocations.
 pub(crate) use source::retire_worker_from_pool_rules;
 pub(crate) use source::{
-    candidate_source_nat_translations, source_nat_translation_matches,
+    ChallengeSourceNat, challenge_source_nat_shape, pool_address_ranges_v4,
+    pool_address_ranges_v6, source_nat_translation_matches,
     source_nat_tuple_translation_possible,
 };
 #[cfg(test)]

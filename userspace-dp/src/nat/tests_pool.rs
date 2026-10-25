@@ -14649,3 +14649,146 @@ fn synced_still_draining_overlap_refuses_14674() {
         );
     }
 }
+
+#[test]
+fn pool_ranges_collapse_slash16_to_one_span_16537() {
+    let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "big-pool".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "big".to_string(),
+        pool_addresses: vec!["198.51.0.0/16".to_string()],
+        port_low: 1024,
+        port_high: 65535,
+        ..SourceNATRuleSnapshot::default()
+    }]);
+    assert_eq!(rules[0].pool_addresses_v4.len(), 65536);
+    assert_eq!(
+        rules[0].pool_ranges_v4,
+        vec![(
+            "198.51.0.0".parse::<Ipv4Addr>().unwrap(),
+            "198.51.255.255".parse::<Ipv4Addr>().unwrap()
+        )],
+        "a /16 pool must be one span, independent of pool size"
+    );
+    // Non-contiguous members stay separate spans, sorted.
+    let rules2 = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "split-pool".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "split".to_string(),
+        pool_addresses: vec![
+            "203.0.113.11".to_string(),
+            "203.0.113.10".to_string(),
+            "203.0.113.20".to_string(),
+        ],
+        port_low: 1024,
+        port_high: 65535,
+        ..SourceNATRuleSnapshot::default()
+    }]);
+    assert_eq!(
+        rules2[0].pool_ranges_v4,
+        vec![
+            (
+                "203.0.113.10".parse::<Ipv4Addr>().unwrap(),
+                "203.0.113.11".parse::<Ipv4Addr>().unwrap()
+            ),
+            (
+                "203.0.113.20".parse::<Ipv4Addr>().unwrap(),
+                "203.0.113.20".parse::<Ipv4Addr>().unwrap()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn challenge_shape_pool_is_span_not_enumeration_16537() {
+    let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "big-pool".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "big".to_string(),
+        pool_addresses: vec!["198.51.0.0/16".to_string()],
+        port_low: 1024,
+        port_high: 65535,
+        ..SourceNATRuleSnapshot::default()
+    }]);
+    let shape = crate::nat::challenge_source_nat_shape(
+        &rules,
+        &NatScopeCtx::default(),
+        "lan",
+        "wan",
+        "10.0.1.100".parse().unwrap(),
+        "8.8.8.8".parse().unwrap(),
+        PROTO_TCP,
+        12345,
+        443,
+        None,
+        None,
+        None,
+    )
+    .expect("pool rule must yield a shape");
+    match shape {
+        crate::nat::ChallengeSourceNat::Pool { ranges_v4, ranges_v6 } => {
+            assert_eq!(ranges_v4.len(), 1);
+            assert!(ranges_v6.is_empty());
+        }
+        other => panic!("expected Pool shape, got {other:?}"),
+    }
+    // Allocation-failure shape stays an error (NoCandidate upstream).
+    let failed = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "bad-pool".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "bad".to_string(),
+        pool_addresses: vec!["not-an-ip".to_string()],
+        port_low: 1024,
+        port_high: 65535,
+        ..SourceNATRuleSnapshot::default()
+    }]);
+    assert!(crate::nat::challenge_source_nat_shape(
+        &failed,
+        &NatScopeCtx::default(),
+        "lan",
+        "wan",
+        "10.0.1.100".parse().unwrap(),
+        "8.8.8.8".parse().unwrap(),
+        PROTO_TCP,
+        12345,
+        443,
+        None,
+        None,
+        None,
+    )
+    .is_err());
+    // Off rule wins as NoTranslation.
+    let off = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "off-rule".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        off: true,
+        ..SourceNATRuleSnapshot::default()
+    }]);
+    assert_eq!(
+        crate::nat::challenge_source_nat_shape(
+            &off,
+            &NatScopeCtx::default(),
+            "lan",
+            "wan",
+            "10.0.1.100".parse().unwrap(),
+            "8.8.8.8".parse().unwrap(),
+            PROTO_TCP,
+            12345,
+            443,
+            None,
+            None,
+            None,
+        ),
+        Ok(crate::nat::ChallengeSourceNat::NoTranslation)
+    );
+}

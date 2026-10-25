@@ -75,6 +75,8 @@ pub(crate) struct Nat64Prefix {
     pub(crate) source_constrained: bool,
     /// IPv4 source pool addresses for SNAT.
     pub(crate) pool_v4: Vec<Ipv4Addr>,
+    /// #16537: contiguous spans covering `pool_v4`, computed once at build.
+    pub(crate) pool_ranges_v4: Vec<(Ipv4Addr, Ipv4Addr)>,
     /// Live-drain allocators whose configured pool intersects this prefix's
     /// `pool_v4`; occupancy is time-varying, but this address relation is not.
     pub(crate) draining_pool_allocators: Vec<PortAllocator>,
@@ -179,6 +181,7 @@ impl Nat64Prefix {
             from_routing_instances: Vec::new(),
             source_prefixes: Vec::new(),
             source_constrained: false,
+            pool_ranges_v4: crate::nat::pool_address_ranges_v4(&pool_v4),
             pool_index_v4: nat64_pool_index(&pool_v4),
             pool_v4,
             pool_index: AtomicUsize::new(0),
@@ -206,6 +209,7 @@ impl Clone for Nat64Prefix {
             from_routing_instances: self.from_routing_instances.clone(),
             source_prefixes: self.source_prefixes.clone(),
             source_constrained: self.source_constrained,
+            pool_ranges_v4: self.pool_ranges_v4.clone(),
             pool_v4: self.pool_v4.clone(),
             pool_index_v4: self.pool_index_v4.clone(),
             pool_index: AtomicUsize::new(self.pool_index.load(Ordering::Relaxed)),
@@ -1192,6 +1196,7 @@ impl Nat64State {
                 from_routing_instances: scope_key.from_routing_instances.clone(),
                 source_prefixes,
                 source_constrained,
+                pool_ranges_v4: crate::nat::pool_address_ranges_v4(&pool_v4),
                 pool_v4,
                 pool_index_v4,
                 pool_index: AtomicUsize::new(0),

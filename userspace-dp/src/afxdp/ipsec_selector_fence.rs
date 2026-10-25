@@ -37,6 +37,10 @@ impl AddressRange {
             _ => false,
         }
     }
+
+    fn overlaps(self, other: AddressRange) -> bool {
+        self.family == other.family && self.start <= other.end && other.start <= self.end
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -111,6 +115,61 @@ impl BindlessIpsecSelectorFence {
             || self.matches(translated_source, translated_destination)
             || self.matches(source, translated_destination)
             || self.matches(translated_source, destination)
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn is_empty(&self) -> bool {
+        !self.enabled || self.rows.is_empty()
+    }
+
+    /// #16537: O(selector rows) pool fence check without enumerating pool
+    /// addresses. `pool_ranges` are the contiguous (start, end) spans of a
+    /// source-NAT pool (or NAT64 pool); `base` is the pre-pool decision
+    /// (DNAT/NPTv6-inbound dst rewrite). Returns true iff
+    /// `matches_with_nat(source, destination, base.merge(candidate))`
+    /// would be true for base alone, for some pool candidate, or for the
+    /// cross terms. Each candidate only sets `rewrite_src`, so the four
+    /// fence terms collapse to: base alone; (pool_addr, dst'); (src,
+    /// dst'); (pool_addr, dst) where dst' is the translated destination.
+    pub(in crate::afxdp) fn matches_with_pool_ranges(
+        &self,
+        source: IpAddr,
+        destination: IpAddr,
+        base: NatDecision,
+        pool_ranges_v4: &[(std::net::Ipv4Addr, std::net::Ipv4Addr)],
+        pool_ranges_v6: &[(std::net::Ipv6Addr, std::net::Ipv6Addr)],
+    ) -> bool {
+        if self.is_empty() {
+            return false;
+        }
+        if self.matches_with_nat(source, destination, base) {
+            return true;
+        }
+        if pool_ranges_v4.is_empty() && pool_ranges_v6.is_empty() {
+            return false;
+        }
+        let translated_destination = base.rewrite_dst.unwrap_or(destination);
+        self.rows.iter().any(|row| {
+            let pool_hits = |pool: AddressRange| {
+                ((row.local.overlaps(pool) && row.remote.contains(translated_destination))
+                    || (row.remote.overlaps(pool) && row.local.contains(translated_destination))
+                    || (row.local.overlaps(pool) && row.remote.contains(destination))
+                    || (row.remote.overlaps(pool) && row.local.contains(destination)))
+            };
+            pool_ranges_v4.iter().any(|&(start, end)| {
+                pool_hits(AddressRange {
+                    family: AddressFamily::V4,
+                    start: u32::from(start) as u128,
+                    end: u32::from(end) as u128,
+                })
+            }) || pool_ranges_v6.iter().any(|&(start, end)| {
+                pool_hits(AddressRange {
+                    family: AddressFamily::V6,
+                    start: u128::from(start),
+                    end: u128::from(end),
+                })
+            })
+        })
     }
 }
 
@@ -356,5 +415,51 @@ mod tests {
             "198.51.100.9".parse().unwrap(),
             nat
         ));
+    }
+
+    #[test]
+    fn pool_range_fence_detects_interior_and_last_pool_addresses_16537() {
+        let fence = BindlessIpsecSelectorFence::from_snapshot(&snapshot(
+            true,
+            vec![row("9.9.9.0/24", "203.0.113.11/32")],
+        ))
+        .expect("valid selector snapshot");
+        let src: IpAddr = "10.0.0.7".parse().unwrap();
+        let dst: IpAddr = "9.9.9.9".parse().unwrap();
+        let ranges = [(
+            "203.0.113.10".parse().unwrap(),
+            "203.0.113.11".parse().unwrap(),
+        )];
+        assert!(fence.matches_with_pool_ranges(src, dst, NatDecision::default(), &ranges, &[]));
+        let disjoint = [(
+            "203.0.113.20".parse().unwrap(),
+            "203.0.113.21".parse().unwrap(),
+        )];
+        assert!(!fence.matches_with_pool_ranges(src, dst, NatDecision::default(), &disjoint, &[]));
+        assert!(!fence.matches_with_pool_ranges(src, "8.8.8.8".parse().unwrap(), NatDecision::default(), &ranges, &[]));
+    }
+
+    #[test]
+    fn pool_range_fence_empty_fence_and_base_hit_16537() {
+        let empty = BindlessIpsecSelectorFence::from_snapshot(&snapshot(false, Vec::new()))
+            .expect("disabled fence");
+        let src: IpAddr = "10.0.0.7".parse().unwrap();
+        let dst: IpAddr = "9.9.9.9".parse().unwrap();
+        let ranges = [(
+            "203.0.113.10".parse().unwrap(),
+            "203.0.113.11".parse().unwrap(),
+        )];
+        assert!(empty.is_empty());
+        assert!(!empty.matches_with_pool_ranges(src, dst, NatDecision::default(), &ranges, &[]));
+        let fence = BindlessIpsecSelectorFence::from_snapshot(&snapshot(
+            true,
+            vec![row("10.0.0.0/8", "198.51.100.0/24")],
+        ))
+        .expect("valid selector snapshot");
+        let base = NatDecision {
+            rewrite_dst: Some("198.51.100.9".parse().unwrap()),
+            ..NatDecision::default()
+        };
+        assert!(fence.matches_with_pool_ranges(src, dst, base, &[], &[]));
     }
 }
