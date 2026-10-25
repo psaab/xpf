@@ -200,6 +200,7 @@ var errVLANCreateFailed = errors.New("VLAN sub-interface creation failed")
 // teardownCleanupFn in loader.go: the paired proof for #6893 part 2 needs a
 // CREATION FAILURE, which is not reachable in a unit test without netlink and
 // CAP_NET_ADMIN. Production leaves it pointing at the real function.
+// The disabled argument is the resolved unit/interface disable (#16590).
 var ensureVLANSubInterfaceFn = ensureVLANSubInterface
 
 // errVLANAdoptRefused marks a device that already occupies "<phys>.<vid>" but
@@ -235,6 +236,11 @@ var (
 
 // ensureVLANSubInterface creates a Linux VLAN sub-interface if it doesn't exist.
 // Returns the sub-interface's ifindex and whether this call CREATED it.
+// When disabled (#16590) it never brings the child up: an existing child is
+// left down (best-effort LinkSetDown) and a newly created child stays down,
+// so a disabled unit's segment cannot answer merely because its zone ref
+// was visited. Networkd also renders the child always-down, but this writer
+// must not fight it.
 //
 // #4960: the created bool is the host-mutation signal. This function runs in
 // compile Phase 2, and every later phase — plus preflightCheckIfindexCaps and
@@ -243,7 +249,7 @@ var (
 // the caller has to be able to say so. A flag that were merely "a VLAN was
 // configured" would be true on every apply of a VLAN config and would report
 // nothing; it is true only when this call actually added a link.
-func ensureVLANSubInterface(parentName string, vlanID int) (int, bool, error) {
+func ensureVLANSubInterface(parentName string, vlanID int, disabled bool) (int, bool, error) {
 	parent, err := vlanLinkByNameSeam(parentName)
 	if err != nil {
 		return 0, false, fmt.Errorf("parent interface %s: %w", parentName, err)
@@ -264,6 +270,15 @@ func ensureVLANSubInterface(parentName string, vlanID int) (int, bool, error) {
 		if why := vlanAdoptionRefusal(existing, parent.Attrs().Index, vlanID); why != "" {
 			return 0, false, fmt.Errorf("%w: %s: %s",
 				errVLANAdoptRefused, subName, why)
+		}
+		if disabled {
+			if existing.Attrs().OperState == netlink.OperUp {
+				if err := vlanLinkSetDownSeam(existing); err != nil {
+					slog.Warn("disabled VLAN sub-interface is UP and could not be brought down",
+						"name", subName, "parent", parentName, "vlan_id", vlanID, "err", err)
+				}
+			}
+			return existing.Attrs().Index, false, nil
 		}
 		// Already exists, ensure it's up
 		if existing.Attrs().OperState != netlink.OperUp {
@@ -331,6 +346,10 @@ func ensureVLANSubInterface(parentName string, vlanID int) (int, bool, error) {
 	if err != nil {
 		return 0, true, fmt.Errorf("find created VLAN sub-interface %s: %w: %w",
 			subName, errVLANBringUpFailed, err)
+	}
+	if disabled {
+		disableAcceptRA(subName)
+		return link.Attrs().Index, true, nil
 	}
 	if err := vlanLinkSetUpSeam(link); err != nil {
 		return 0, true, fmt.Errorf("set VLAN sub-interface %s up: %w: %w",
@@ -997,8 +1016,16 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 	// #9845: a refused child MTU write, retried once after the parent write below.
 	var mtuRetry9845 *vlanMTUPending9845
 	if vlanID > 0 {
+		vlanDisabled := false
+		if dc, ok := cfg.Interfaces.Interfaces[cfgName]; ok && dc != nil {
+			if dc.Disable {
+				vlanDisabled = true
+			} else if du, ok := dc.Units[unitNum]; ok && du != nil && du.Disable {
+				vlanDisabled = true
+			}
+		}
 		// VLAN sub-interface: create it, populate vlan_iface_map
-		subIfindex, vlanCreated, err := ensureVLANSubInterfaceFn(physName, vlanID)
+		subIfindex, vlanCreated, err := ensureVLANSubInterfaceFn(physName, vlanID, vlanDisabled)
 		if vlanCreated {
 			// #4960: recorded BEFORE the error branch. LinkAdd succeeded even
 			// on the paths that fail afterwards, so the host carries the new

@@ -604,7 +604,7 @@ func applyTaggedParent9761(t *testing.T, cfg *config.Config, parentMTU, sub50MTU
 	mockEthtool(t, func(...string) ([]byte, error) { return []byte("rx-vlan-offload: off\n"), nil })
 	origVLAN := ensureVLANSubInterfaceFn
 	t.Cleanup(func() { ensureVLANSubInterfaceFn = origVLAN })
-	ensureVLANSubInterfaceFn = func(parent string, vlanID int) (int, bool, error) {
+	ensureVLANSubInterfaceFn = func(parent string, vlanID int, _ bool) (int, bool, error) {
 		return h.index[fmt.Sprintf("%s.%d", parent, vlanID)], false, nil
 	}
 

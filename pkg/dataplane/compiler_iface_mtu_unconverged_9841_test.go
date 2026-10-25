@@ -77,7 +77,7 @@ func setupMTUApply9841(t *testing.T, cfg *config.Config, hostMTU map[string]int,
 	mockEthtool(t, func(...string) ([]byte, error) { return []byte("rx-vlan-offload: off\n"), nil })
 	origVLAN := ensureVLANSubInterfaceFn
 	t.Cleanup(func() { ensureVLANSubInterfaceFn = origVLAN })
-	ensureVLANSubInterfaceFn = func(parent string, vlanID int) (int, bool, error) {
+	ensureVLANSubInterfaceFn = func(parent string, vlanID int, _ bool) (int, bool, error) {
 		return h.index[fmt.Sprintf("%s.%d", parent, vlanID)], false, nil
 	}
 	if opts.byName != nil {

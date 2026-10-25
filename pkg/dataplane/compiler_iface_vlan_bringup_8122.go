@@ -65,8 +65,9 @@ var acceptRAWriteSeam = os.WriteFile
 // unbindable claim is one that will be believed exactly as long as nobody tries
 // it.
 var (
-	vlanLinkAddSeam   = netlink.LinkAdd
-	vlanLinkSetUpSeam = netlink.LinkSetUp
+	vlanLinkAddSeam     = netlink.LinkAdd
+	vlanLinkSetUpSeam   = netlink.LinkSetUp
+	vlanLinkSetDownSeam = netlink.LinkSetDown
 )
 
 // #8119/#8120: the netlink MUTATORS on the interface-reconcile path, behind

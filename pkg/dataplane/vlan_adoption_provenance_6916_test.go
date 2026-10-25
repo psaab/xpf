@@ -164,7 +164,7 @@ func TestEnsureVLANSubInterfaceBindsTheAdoptionGate_6916(t *testing.T) {
 			Name: provSubName6916(), Index: 6, ParentIndex: provParentIdx, NetNsID: netnsIDLocal,
 		}})
 
-		idx, created, err := ensureVLANSubInterface(provPhys6916, provVID6916)
+		idx, created, err := ensureVLANSubInterface(provPhys6916, provVID6916, false)
 		if err == nil {
 			t.Fatalf("adopted the squatter: returned ifindex %d, created=%v, no error (#6916)",
 				idx, created)
@@ -189,7 +189,7 @@ func TestEnsureVLANSubInterfaceBindsTheAdoptionGate_6916(t *testing.T) {
 	t.Run("the child xpf would have created is still adopted", func(t *testing.T) {
 		withLinks(t, goodVLAN6916())
 
-		idx, created, err := ensureVLANSubInterface(provPhys6916, provVID6916)
+		idx, created, err := ensureVLANSubInterface(provPhys6916, provVID6916, false)
 		if err != nil {
 			t.Fatalf("refused a legitimate existing VLAN child: %v.\n"+
 				"Without this row the gate could refuse everything and every cell above "+
@@ -254,7 +254,7 @@ func TestRefusedVLANNeverEntersTheDelegatedChildSet_6916(t *testing.T) {
 	t.Cleanup(func() { ensureVLANSubInterfaceFn = orig })
 
 	t.Run("refused: not delegated, and recorded as unarmed", func(t *testing.T) {
-		ensureVLANSubInterfaceFn = func(string, int) (int, bool, error) {
+		ensureVLANSubInterfaceFn = func(string, int, bool) (int, bool, error) {
 			return 0, false, fmt.Errorf("%w: %s: ifindex 6 is a %q link, not an 802.1Q vlan",
 				errVLANAdoptRefused, provSubName6916(), "veth")
 		}
@@ -286,7 +286,7 @@ func TestRefusedVLANNeverEntersTheDelegatedChildSet_6916(t *testing.T) {
 	})
 
 	t.Run("adopted: delegated, exactly as before", func(t *testing.T) {
-		ensureVLANSubInterfaceFn = func(string, int) (int, bool, error) {
+		ensureVLANSubInterfaceFn = func(string, int, bool) (int, bool, error) {
 			return provSubIdx6916, false, nil
 		}
 		st, result := newState(), newResult()

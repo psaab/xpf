@@ -66,7 +66,7 @@ func TestVLANCreateFailureFailsTheApply_6893(t *testing.T) {
 	t.Cleanup(func() { ensureVLANSubInterfaceFn = orig })
 
 	t.Run("creation failure fails the apply", func(t *testing.T) {
-		ensureVLANSubInterfaceFn = func(string, int) (int, bool, error) {
+		ensureVLANSubInterfaceFn = func(string, int, bool) (int, bool, error) {
 			return 0, false, errors.Join(errVLANCreateFailed, errors.New("operation not permitted"))
 		}
 		st := newState()
@@ -109,7 +109,7 @@ func TestVLANCreateFailureFailsTheApply_6893(t *testing.T) {
 	})
 
 	t.Run("a NON-create failure keeps its soft skip", func(t *testing.T) {
-		ensureVLANSubInterfaceFn = func(string, int) (int, bool, error) {
+		ensureVLANSubInterfaceFn = func(string, int, bool) (int, bool, error) {
 			// The absent-parent shape: no errVLANCreateFailed marker.
 			return 0, false, errors.New("parent interface ge-0-0-2: no such device")
 		}

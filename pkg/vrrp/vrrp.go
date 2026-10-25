@@ -217,7 +217,7 @@ func CollectRethInstances(cfg *config.Config, localPriority map[int]int) []*Inst
 		ifc := cfg.Interfaces.Interfaces[name]
 		// #6780: skip a present-but-nil interface, matching CollectInstances
 		// above and every RETH-ownership walk in pkg/daemon.
-		if ifc == nil {
+		if ifc == nil || ifc.Disable {
 			continue
 		}
 		rgID, owns := rgOwners[name]
@@ -269,9 +269,8 @@ func CollectRethInstances(cfg *config.Config, localPriority map[int]int) []*Inst
 		if ifc.TaggingEnabled() {
 			for _, n := range unitNums {
 				unit := ifc.Units[n]
-				// #6780: a present-but-nil unit reaches len(unit.Addresses) as
-				// a nil deref, not as a zero length.
-				if unit == nil || len(unit.Addresses) == 0 {
+				// #16590 (#14575 residual): a disabled unit owns no VIP.
+				if unit == nil || unit.Disable || len(unit.Addresses) == 0 {
 					continue
 				}
 				subIface := linuxName
@@ -293,7 +292,7 @@ func CollectRethInstances(cfg *config.Config, localPriority map[int]int) []*Inst
 			var vips []string
 			for _, n := range unitNums {
 				unit := ifc.Units[n]
-				if unit == nil { // #6780
+				if unit == nil || unit.Disable { // #6780 / #16590
 					continue
 				}
 				vips = append(vips, unit.Addresses...)

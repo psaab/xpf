@@ -61,7 +61,7 @@ func TestEnsureVLANSubInterfaceRefuses8021AD15215(t *testing.T) {
 		}
 		return nil, errors.New("no such link")
 	}
-	idx, created, err := ensureVLANSubInterface(provPhys6916, provVID6916)
+	idx, created, err := ensureVLANSubInterface(provPhys6916, provVID6916, false)
 	if err == nil {
 		t.Fatalf("adopted the 802.1ad squatter: ifindex %d created=%v (#15215 A28-02)", idx, created)
 	}
