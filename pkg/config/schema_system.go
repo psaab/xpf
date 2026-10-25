@@ -373,10 +373,10 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 		"class": {desc: "Login class definition", args: 1, placeholder: "<class-name>", closedWorld: true, children: map[string]*schemaNode{
 			"permissions":         {desc: "Permission bits granted to the class", args: 1, multi: true, placeholder: "<permission>", valueType: ValueEnumOf, valueExamples: LoginPermissionFlags(), validator: ValidateLoginPermission, children: nil},
 			"idle-timeout":        {desc: "Idle timeout (minutes)", args: 1, placeholder: "<minutes>", valueType: ValueInteger, validator: ValidateInteger(0, 4294967295), children: nil},
-			"allow-commands":      {desc: "Regex of operational commands to allow", args: 1, placeholder: "<regex>", children: nil},
-			"deny-commands":       {desc: "Regex of operational commands to deny", args: 1, placeholder: "<regex>", children: nil},
-			"allow-configuration": {desc: "Regex of configuration to allow", args: 1, placeholder: "<regex>", children: nil},
-			"deny-configuration":  {desc: "Regex of configuration to deny", args: 1, placeholder: "<regex>", children: nil},
+			"allow-commands":      {desc: "Regex of operational commands to allow", args: 1, scalar: true, allowEmptyValue: true, placeholder: "<regex>", children: nil},
+			"deny-commands":       {desc: "Regex of operational commands to deny", args: 1, scalar: true, allowEmptyValue: true, placeholder: "<regex>", children: nil},
+			"allow-configuration": {desc: "Regex of configuration to allow", args: 1, scalar: true, allowEmptyValue: true, placeholder: "<regex>", children: nil},
+			"deny-configuration":  {desc: "Regex of configuration to deny", args: 1, scalar: true, allowEmptyValue: true, placeholder: "<regex>", children: nil},
 			// #7971: modeled ONLY so they are REFUSED. Not a step toward
 			// implementing the family — see schema_login_regexps_7971.go.
 			"allow-commands-regexps":      unimplementedRegexpsLeaf("allow-commands-regexps"),
