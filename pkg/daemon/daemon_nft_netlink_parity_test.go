@@ -1,7 +1,7 @@
 package daemon
 
 // daemon_nft_netlink_parity_test.go is the #6387 PR-2 T1 ruleset-parity CI — the
-// SECURITY MERGE GATE. It proves the additive pkg/nftables netlink installer is
+// SECURITY MERGE GATE. It proves the production pkg/nftables netlink installer is
 // ruleset-equivalent to the CURRENT exec-`nft` payload builders in
 // daemon_nft.go (the ORACLE) for a construct-complete matrix (§9 / §12.1):
 //
@@ -18,8 +18,9 @@ package daemon
 // or `unshare` is absent it SKIPs with an explicit logged reason (memory rule:
 // no silent caps) — the parent runs it where `nft` exists.
 //
-// The converter below (daemon dpuserspace views/programs/terms -> pkg/nftables
-// spec) is the field-copy PR-3 will promote to production; here it is test-only.
+// The production converter in daemon_nft_netlink.go maps daemon dpuserspace
+// views/programs/terms to pkg/nftables specs. This test exercises that converter
+// while comparing the resulting ruleset with the retained exec-`nft` oracle.
 
 import (
 	"os"
