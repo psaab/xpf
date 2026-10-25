@@ -546,6 +546,9 @@ func (d *Daemon) handleClusterEvent(ctx context.Context, ev cluster.ClusterEvent
 	if clusterOwnershipEdge && !isPrimary {
 		d.scheduleFRRHAReconcile("cluster-state")
 		d.scheduleConnectedRGRepublish("cluster-state")
+		// #16690: the event already consumed the rg-state edge, so the
+		// reconcile safety net will see Changed=false and skip gating.
+		d.scheduleIPMonGating("cluster-state")
 	}
 	if isPrimary {
 		// #16270 (option a): republish the connected RG prefixes
@@ -781,6 +784,8 @@ func (d *Daemon) handleClusterEvent(ctx context.Context, ev cluster.ClusterEvent
 		// establish its restored sessions, so reconcile after ownership work.
 		d.scheduleFRRHAReconcile("cluster-state")
 		d.scheduleConnectedRGRepublish("cluster-state")
+		// #16690: re-gate probes + publish gate for the new owner.
+		d.scheduleIPMonGating("cluster-state")
 	}
 	return vrrpTimer
 }
@@ -1040,6 +1045,9 @@ func (d *Daemon) watchVRRPEvents(ctx context.Context) {
 					d.removeBlackholeRoutes(rgID)
 					d.addStableRethLinkLocal(rgID)
 					d.applyRethServicesForRG(rgID)
+					// #16690: legacy VRRP edge consumed the transition;
+					// reconcile will see Changed=false and skip gating.
+					d.scheduleIPMonGating("vrrp-master")
 				}
 				if d.cluster != nil && d.cluster.IsLocalPrimary(rgID) && s.AllVRRPMaster() {
 					d.setLocalFailoverCommitReady(rgID, true)
@@ -1070,6 +1078,8 @@ func (d *Daemon) watchVRRPEvents(ctx context.Context) {
 					}
 					d.removeStableRethLinkLocal(rgID)
 					d.clearRethServicesForRG(rgID)
+					// #16690: re-gate probes + close publish gate on standby.
+					d.scheduleIPMonGating("vrrp-backup")
 				}
 			}
 		}
