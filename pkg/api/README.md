@@ -2813,8 +2813,9 @@ the drop fails loudly instead of going quietly vacuous.
     bidirectional volume;
   - resolves `application` (`appid.ResolveSessionName`), `ingress_interface`/
     `egress_interface` (FIB ifindex+VLAN → unit name), `policy_name`,
-    `ingress_zone_name`/`egress_zone_name`, `session_id`, and `ha_active`
-    (wired from the daemon via `HAActiveFn`, default true standalone).
+    `ingress_zone_name`/`egress_zone_name`, `session_id`, `ha_active`, and
+    `ha_state` (#16697 tri-state "Active"/"Backup"/"unknown"; `ha_active`
+    is meaningful only for Active/Backup, default true standalone).
 
   It also accepts the gRPC filter set: `application=`, `interface=`,
   `nat_only=true`, and `source_nat_pool=<pool>` (an unresolved pool fails

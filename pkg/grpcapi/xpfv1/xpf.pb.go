@@ -3924,11 +3924,16 @@ type SessionEntry struct {
 	NatSrcPort       uint32 `protobuf:"varint,26,opt,name=nat_src_port,json=natSrcPort,proto3" json:"nat_src_port,omitempty"`                // SNAT translated source port
 	NatDstAddr       string `protobuf:"bytes,27,opt,name=nat_dst_addr,json=natDstAddr,proto3" json:"nat_dst_addr,omitempty"`                 // DNAT translated destination address
 	NatDstPort       uint32 `protobuf:"varint,28,opt,name=nat_dst_port,json=natDstPort,proto3" json:"nat_dst_port,omitempty"`                // DNAT translated destination port
-	HaActive         bool   `protobuf:"varint,29,opt,name=ha_active,json=haActive,proto3" json:"ha_active,omitempty"`                        // true if session is on HA primary node
+	HaActive         bool   `protobuf:"varint,29,opt,name=ha_active,json=haActive,proto3" json:"ha_active,omitempty"`                        // true if session is on HA primary node; meaningful only when ha_state == "Active" or "Backup"
 	// #16110: stored provenance of the row on the serving node:
 	// "local" or "cluster-synced". Empty from a pre-#16110
 	// peer (mixed-version window); the CLI then renders "unknown".
-	Origin        string `protobuf:"bytes,30,opt,name=origin,proto3" json:"origin,omitempty"`
+	Origin string `protobuf:"bytes,30,opt,name=origin,proto3" json:"origin,omitempty"`
+	// #16697: tri-state HA ownership: "Active", "Backup", or "unknown"
+	// (ownership unresolvable — no RETH owner or unknown RG). Empty from a
+	// pre-#16697 peer; renderers then treat ha_active as unknown rather than
+	// guessing Backup. ha_active is retained for compatibility.
+	HaState       string `protobuf:"bytes,31,opt,name=ha_state,json=haState,proto3" json:"ha_state,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4169,6 +4174,13 @@ func (x *SessionEntry) GetHaActive() bool {
 func (x *SessionEntry) GetOrigin() string {
 	if x != nil {
 		return x.Origin
+	}
+	return ""
+}
+
+func (x *SessionEntry) GetHaState() string {
+	if x != nil {
+		return x.HaState
 	}
 	return ""
 }
@@ -10313,7 +10325,7 @@ const file_xpf_proto_rawDesc = "" +
 	"\vpeer_status\x18\b \x01(\x0e2\x17.xpf.v1.PeerFetchStatusR\n" +
 	"peerStatus\x12\x1d\n" +
 	"\n" +
-	"peer_error\x18\t \x01(\tR\tpeerError\"\xd5\a\n" +
+	"peer_error\x18\t \x01(\tR\tpeerError\"\xf0\a\n" +
 	"\fSessionEntry\x12\x19\n" +
 	"\bsrc_addr\x18\x01 \x01(\tR\asrcAddr\x12\x19\n" +
 	"\bdst_addr\x18\x02 \x01(\tR\adstAddr\x12\x19\n" +
@@ -10355,7 +10367,8 @@ const file_xpf_proto_rawDesc = "" +
 	"\fnat_dst_port\x18\x1c \x01(\rR\n" +
 	"natDstPort\x12\x1b\n" +
 	"\tha_active\x18\x1d \x01(\bR\bhaActive\x12\x16\n" +
-	"\x06origin\x18\x1e \x01(\tR\x06origin\"\x9d\x03\n" +
+	"\x06origin\x18\x1e \x01(\tR\x06origin\x12\x19\n" +
+	"\bha_state\x18\x1f \x01(\tR\ahaState\"\x9d\x03\n" +
 	"\x18GetSessionSummaryRequest\x12!\n" +
 	"\finclude_peer\x18\x01 \x01(\bR\vincludePeer\x12\x12\n" +
 	"\x04zone\x18\x02 \x01(\rR\x04zone\x12\x1a\n" +

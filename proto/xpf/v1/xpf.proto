@@ -608,11 +608,16 @@ message SessionEntry {
   uint32 nat_src_port = 26;       // SNAT translated source port
   string nat_dst_addr = 27;       // DNAT translated destination address
   uint32 nat_dst_port = 28;       // DNAT translated destination port
-  bool ha_active = 29;            // true if session is on HA primary node
+  bool ha_active = 29;            // true if session is on HA primary node; meaningful only when ha_state == "Active" or "Backup"
   // #16110: stored provenance of the row on the serving node:
   // "local" or "cluster-synced". Empty from a pre-#16110
   // peer (mixed-version window); the CLI then renders "unknown".
   string origin = 30;
+  // #16697: tri-state HA ownership: "Active", "Backup", or "unknown"
+  // (ownership unresolvable — no RETH owner or unknown RG). Empty from a
+  // pre-#16697 peer; renderers then treat ha_active as unknown rather than
+  // guessing Backup. ha_active is retained for compatibility.
+  string ha_state = 31;
 }
 
 message GetSessionSummaryRequest {

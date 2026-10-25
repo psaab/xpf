@@ -210,6 +210,17 @@ func peerSessionOriginLabel(se *pb.SessionEntry) string {
 	return se.Origin
 }
 
+// peerSessionHAState renders the peer row's HA ownership as reported by
+// the peer itself (#16697). A pre-#16697 peer sends no ha_state; rendering
+// "unknown" is honest, re-deriving it from ha_active would guess Backup
+// for every unresolvable session. Mirrors peerSessionOriginLabel.
+func peerSessionHAState(se *pb.SessionEntry) string {
+	if se == nil || se.HaState == "" {
+		return "unknown"
+	}
+	return se.HaState
+}
+
 func (c *CLI) showStatistics(detail bool) error {
 	if c.dp == nil || !c.dp.IsLoaded() {
 		fmt.Println("Statistics: dataplane not loaded")
@@ -864,10 +875,7 @@ func (c *CLI) showFlowSession(args []string) error {
 					if peerFullSID == 0 {
 						peerFullSID = uint64(i + 1)
 					}
-					peerHAState := "Backup"
-					if se.HaActive {
-						peerHAState = "Active"
-					}
+					peerHAState := peerSessionHAState(se)
 					peerOrigin := peerSessionOriginLabel(se)
 					fmt.Printf("Session ID: %d, Policy name: %s/%d, HA State: %s, Timeout: %d, Origin: %s, Forwarding-ready: %s, Session State: Unknown (validity not tracked)\n",
 						peerFullSID, polDisplay, se.PolicyId, peerHAState, se.TimeoutSeconds, peerOrigin, sessionForwardingReady(se.FwdPackets))
