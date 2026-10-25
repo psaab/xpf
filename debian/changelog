@@ -40,6 +40,23 @@ xpf (0.0.0) unstable; urgency=medium
     total under every sibling unit label (family sum = real traffic).
     Directly bound interfaces and unit-0 rows collapsed onto the
     parent netdev are unaffected.
+  * Event-options: events arriving on a cooldown-parked (policy,event)
+    direction are now still windowed (#16641). Previously the parked
+    early-continue skipped the sliding-window append, so a
+    `within W { trigger until N }` window (N ≳ 4) never reached its
+    ceiling during a sustained storm and the remediation replayed
+    every 30 s cooldown. Parked events are appended and pruned as
+    usual and only their park/fire decision is skipped, so the
+    ceiling is reached and the storm stops re-firing; the parked
+    crossing itself still replays once at drain, and sparse
+    below-ceiling behaviour is unchanged. Parked deferred edges now
+    also carry the within-match verdict recorded at park time
+    (#16848): the drain replays that verdict under a
+    revision/liveness re-check instead of re-deciding it against
+    the decayed live window, so a genuine trigger-on crossing with
+    a `within` window shorter than the cooldown is no longer
+    silently discarded; synthetically parked legacy edges keep the
+    #15945 live-window re-check.
   * Config/firewall: all four `firewall three-color-policer` burst
     leaves now enforce a one-frame floor of 1514 bytes (#16610):
     `committed-burst-size`/`excess-burst-size` (single-rate) and

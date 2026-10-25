@@ -243,6 +243,15 @@ type deferredEdge struct {
 	action   plannedAction
 	evName   string
 	triggers bool
+	// matched is the evaluate-time withinMatches verdict recorded when
+	// this edge was parked (#16848). Legacy edges (the pre-#16848
+	// zero value, e.g. a test-constructed edge) carry matched=false; the
+	// drain falls back to a live-window re-check for them only.
+	matched bool
+	// hasMatched distinguishes a recorded verdict (including a
+	// recorded false, which cannot occur today because only matched
+	// crossings park) from a legacy edge with no recorded verdict.
+	hasMatched bool
 }
 
 // pendingDeferred bundles the deferred sets under one lock (#15021).
@@ -1078,24 +1087,34 @@ func (e *Engine) drainDeferred() {
 					delete(rt.suppressedDirection, de.evName)
 				}
 				e.counters.pendingDeferred.Add(-1)
-				// #15945 (H22-01): re-evaluate the within gate at drain
-				// time before replaying. The parked edge crossed when it
-				// was parked, but its window may have decayed below the
-				// threshold, crossed the trigger-until ceiling, or the
-				// policy may have been removed/redefined (semRev no
-				// longer matches) while it waited. A policy that no
-				// longer matches must not fire, and must not latch.
-				// staleReason in the worker remains the commit-time
-				// backstop for removed/redefined policies.
+				// #16848 (R3-F16-01): replay the crossing verdict
+				// recorded at park time; do NOT re-decide it with
+				// withinMatches at drain time. A genuine crossing
+				// parked early in the cooldown with a `within`
+				// window shorter than the 30 s cooldown decayed
+				// below its trigger-on threshold before the drain
+				// and was silently discarded; conversely (#16641)
+				// events windowed while parked can push a
+				// trigger-until window past its ceiling — the
+				// parked crossing still fired before/at the
+				// ceiling and must replay. #15945's live-window
+				// re-check is therefore narrowed to a
+				// revision/liveness re-check (policy still
+				// present at the same semantic revision);
+				// staleReason remains the commit-time backstop.
+				// Legacy edges with no recorded verdict
+				// (hasMatched=false) keep the pre-#16848
+				// live-window re-check so a synthetically
+				// parked decayed edge still cannot replay
+				// (#15945).
 				replay := false
 				if rt != nil && e.semRev[de.action.policyName] == de.action.semRev {
 					if pol := e.policyByNameLocked(de.action.policyName); pol != nil {
-						// The parked event is already in the window (it
-						// was appended at evaluate time); withinMatches
-						// counts it. A latched sustained level also
-						// returns false here, which is correct: that
-						// crossing already fired before the cooldown.
-						replay = e.withinMatches(pol, rt, de.evName, now)
+						if de.hasMatched {
+							replay = de.matched
+						} else {
+							replay = e.withinMatches(pol, rt, de.evName, now)
+						}
 					}
 				}
 				e.mu.Unlock()

@@ -97,8 +97,13 @@ func (e *Engine) cooldownRemainingLocked(rt *policyRuntime, now time.Time) time.
 }
 
 // maybeDeferCooldownLocked parks a cooldown-suppressed edge (#15021). Caller holds e.mu.
+// matched records the evaluate-time withinMatches verdict for this exact event
+// (#16848/#15945): the drain must replay the crossing verdict, not re-decide it
+// against a window that may have decayed (short window < cooldown) or filled
+// past the trigger-until ceiling (events windowed while parked, #16641) in the
+// 30 s wait. The drain still re-checks revision / liveness only.
 // It unlocks e.mu internally to take pendingMu, then relocks.
-func (e *Engine) maybeDeferCooldownLocked(pol *config.EventPolicy, rt *policyRuntime, ev rpm.Event, now time.Time) {
+func (e *Engine) maybeDeferCooldownLocked(pol *config.EventPolicy, rt *policyRuntime, ev rpm.Event, now time.Time, matched bool) {
 	e.counters.cooldownSuppressed.Add(1)
 	if rt.suppressedDirection == nil {
 		rt.suppressedDirection = make(map[string]struct{})
@@ -122,7 +127,7 @@ func (e *Engine) maybeDeferCooldownLocked(pol *config.EventPolicy, rt *policyRun
 		e.pending.cooldown = make(map[string]deferredEdge)
 	}
 	if _, exists := e.pending.cooldown[key]; !exists {
-		e.pending.cooldown[key] = deferredEdge{action: a, evName: ev.Name, triggers: trig}
+		e.pending.cooldown[key] = deferredEdge{action: a, evName: ev.Name, triggers: trig, matched: matched, hasMatched: true}
 		e.counters.pendingDeferred.Add(1)
 	}
 	e.pendingMu.Unlock()
@@ -177,12 +182,24 @@ func (e *Engine) evaluateEventMode(ev rpm.Event, live bool) []triggeredPolicy {
 		if rt.suppressedDirection == nil {
 			rt.suppressedDirection = make(map[string]struct{})
 		}
-		if _, parked := rt.suppressedDirection[ev.Name]; parked {
+		// #16641: a parked direction must still be WINDOWED. The old
+		// early-continue here skipped the append/prune below, so the
+		// window starved while the direction was parked: a
+		// `within W { trigger until N }` window (N ≳ 4) never
+		// reached its ceiling in a sustained storm and the
+		// remediation replayed every cooldown. Append and prune
+		// every matching event, then skip only the park/fire
+		// decision for an already-parked direction.
+		parked := false
+		if _, isParked := rt.suppressedDirection[ev.Name]; isParked {
+			parked = true
 			e.counters.cooldownSuppressed.Add(1)
-			continue
 		}
 		rt.windows[ev.Name] = append(rt.windows[ev.Name], now)
 		e.pruneWindow(pol, ev.Name, now)
+		if parked {
+			continue
+		}
 		// Figure deferral. Adoption: a pendingTrigger anchor means this edge
 		// was already deferred once; treat expiry as fireable.
 		deferIt := false
@@ -213,7 +230,7 @@ func (e *Engine) evaluateEventMode(ev rpm.Event, live bool) []triggeredPolicy {
 				// level). Only a genuine crossing is deferred.
 				continue
 			}
-			e.maybeDeferCooldownLocked(pol, rt, ev, now)
+			e.maybeDeferCooldownLocked(pol, rt, ev, now, matched)
 			continue
 		}
 		if !matched {

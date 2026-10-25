@@ -103,7 +103,18 @@ edge has its latch released, so a later edge can retry after budget capacity
 returns. Cooldown-suppressed edges are likewise parked per (policy,event)
 direction, counted by `xpf_event_cooldown_suppressed_total`, and replayed
 after the 30 s cooldown; a different-direction edge is never suppressed by
-the parked one.
+the parked one. Events on an already-parked direction are still appended
+to (and pruned from) the policy's sliding window — only their park/fire
+decision is skipped (#16641) — so a `within W { trigger until N }` window
+keeps filling during a sustained storm, reaches its ceiling, and refuses
+to re-fire after the drain; the sparse case below the ceiling is
+unchanged. The parked edge carries the `withinMatches` verdict recorded
+at park time (#16848): the drain replays that verdict under a
+revision/liveness re-check only, so a genuine `trigger on` crossing whose
+short `within` window decays during the 30 s cooldown still replays,
+while #15945's evaluate-time gate (only matched crossings park) and its
+legacy-edge live-window re-check keep sub-threshold/latched edges from
+replaying.
 
 The slot is reserved only when the action is ready to commit, and a commit
 that never promotes — a transient `commitFn` returning `(nil, err)`, a
