@@ -298,6 +298,23 @@ func (p *asPathParser) parseTermWithOperator() (frag string, nullable bool, err 
 	if strings.Contains(base, " ") || (strings.Contains(base, "|") && !(strings.HasPrefix(base, "(") && strings.HasSuffix(base, ")"))) {
 		wrapped = "(" + base + ")"
 	}
+	// grouped is base as a single ERE atom: a quantifier attached to it
+	// binds to the whole term, never to its last character. wrapped alone
+	// is not always an atom — a multi-digit AS number ("65000"), the "."
+	// token ("[0-9]+"), and a range fragment ending in a character class
+	// all take a trailing quantifier on their last character only, so
+	// "65000{0}" would zero the final "0" and match AS 6500 (#16551).
+	grouped := wrapped
+	if !(strings.HasPrefix(grouped, "(") && strings.HasSuffix(grouped, ")")) {
+		grouped = "(" + grouped + ")"
+	}
+	// oneToken strips the whole-path null marker "^$" that
+	// parseConcat/parseAlternation embed in a nullable term's fragment:
+	// it can never match inside a repetition, where an empty copy must
+	// instead contribute no token (and therefore no separator).
+	oneToken := func(frag string) string {
+		return strings.ReplaceAll(frag, "^$|", "")
+	}
 	lo, hi, exact := intervalBounds(op)
 	switch {
 	case op == "*":
@@ -306,24 +323,49 @@ func (p *asPathParser) parseTermWithOperator() (frag string, nullable bool, err 
 		return wrapped, true, nil
 	case op == "+":
 		return wrapped + "( " + wrapped + ")*", baseNullable, nil
-	case exact && lo == 0:
-		return wrapped + "{0}", true, nil
+	case exact && lo == 0, lo == 0 && hi == 0:
+		// {0} / {0,0}: exactly zero copies of the whole term.
+		return grouped + "{0}", true, nil
 	case exact && lo == 1:
+		if baseNullable {
+			return "(" + oneToken(wrapped) + ")?", true, nil
+		}
 		return wrapped, baseNullable, nil
 	case exact:
+		if baseNullable && !strings.Contains(wrapped, " ") {
+			// B{m} (m>=2) on a single-token nullable base: each copy is
+			// an optional token, so 0..m present tokens joined by single
+			// spaces is the same language. The "( B){m}" copy form with
+			// a demanded separator per non-first copy would reject
+			// paths where an early copy is empty (#16551). Multi-token
+			// nullable bases keep the copy form: collapsing them to a
+			// token count would admit cross-copy token mixes Junos
+			// forbids, so their separator handling is unchanged.
+			tok := oneToken(wrapped)
+			return "(" + tok + "( " + tok + ")" + repeatSuffix(0, lo-1) + ")?", true, nil
+		}
 		return fmt.Sprintf("%s( %s){%d}", wrapped, wrapped, lo-1), baseNullable, nil
 	case lo == 0 && hi < 0: // {0,}
 		return "(" + wrapped + "( " + wrapped + ")*)", true, nil
-	case lo == 0 && hi == 0: // {0,0}
-		return wrapped + "{0}", true, nil
 	case lo == 0: // {0,n}, n>=1: the optional element is 1..n occurrences
 		return "(" + wrapped + "( " + wrapped + ")" + repeatSuffix(0, hi-1) + ")", true, nil
 	case hi < 0: // {m,}, m>=1
 		if lo == 1 {
 			return wrapped + "( " + wrapped + ")*", baseNullable, nil
 		}
+		if baseNullable && !strings.Contains(wrapped, " ") {
+			tok := oneToken(wrapped)
+			// {m,} on a single-token nullable base (m>=2) imposes no
+			// positive lower bound on present tokens, so it is the
+			// "*" language over that token.
+			return "(" + tok + "( " + tok + ")*)?", true, nil
+		}
 		return fmt.Sprintf("%s( %s){%d,}", wrapped, wrapped, lo-1), baseNullable, nil
 	default: // {m,n}, m>=1
+		if baseNullable && !strings.Contains(wrapped, " ") {
+			tok := oneToken(wrapped)
+			return "(" + tok + "( " + tok + ")" + repeatSuffix(0, hi-1) + ")?", true, nil
+		}
 		if hi == lo {
 			return fmt.Sprintf("%s( %s){%d}", wrapped, wrapped, lo-1), baseNullable, nil
 		}
