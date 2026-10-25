@@ -3975,6 +3975,17 @@ Keys=[protocol tcp udp icmp]   IsLeaf=true   (no children)
   `20000`/`to`/`20003` is a sibling keyword), matching the hierarchical
   `Keys=[destination-port 20000 to 20003]`.
 
+**A wildcard parent normally ends a multi-leaf value run.** Source-NAT pool
+`port range` explicitly opts out with `absorbBeforeWildcard` (#16670):
+`range 1024 to 2048` and `range low 1024 high 2048` retain all operands on
+the `range` leaf, rather than re-homing `1024`/`low` as single-port wildcard
+children. Declared sibling keywords (for example `random-allocation`) still
+terminate that run. The direct `port 3000` wildcard remains supported and
+strict compilation validates every port specification. Other multi leaves
+under wildcard parents keep their existing behavior. Store-level tests cover
+`set`, `load set`, commit-check, commit, and display-set replay, alongside the
+hierarchical range control.
+
 **A nested BLOCK is a third shape, and it is not the flat-set chain (#6689).**
 The two shapes above are the ones the bracket-list contract is about. A leaf can
 also be authored as a brace block — `from { protocol { bgp; ospf; static; } }` —

@@ -21,6 +21,8 @@ func peerDivergentSNATTree(t *testing.T) *config.ConfigTree {
 	t.Helper()
 	tree := &config.ConfigTree{}
 	cmds := []string{
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
 		"set security nat source rule-set RS from zone trust",
 		"set security nat source rule-set RS to zone untrust",
 		"set security nat source rule-set RS rule R1 match source-address 10.0.0.0/24",
@@ -73,6 +75,8 @@ func TestCompileTreeStrict_RejectsPeerOnlySNAT_5876(t *testing.T) {
 func TestCompileTreeStrict_StandaloneCleanSNAT_5876(t *testing.T) {
 	tree := &config.ConfigTree{}
 	for _, cmd := range []string{
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
 		"set security nat source rule-set RS from zone trust",
 		"set security nat source rule-set RS to zone untrust",
 		"set security nat source rule-set RS rule R1 match source-address 10.0.0.0/24",
