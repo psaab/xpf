@@ -923,7 +923,7 @@ func (s *SessionSync) localProcessIdentity() peerProcessIdentity {
 
 func (s *SessionSync) sendCapabilities(conn net.Conn) {
 	v := s.localSnapshotProtocol.Load()
-	var buf [5 + bootIncarnationLen + 8 + 8]byte
+	var buf [5 + bootIncarnationLen + 8 + 8 + 1]byte
 	binary.LittleEndian.PutUint16(buf[:2], uint16(v))
 	buf[2] = localCapabilityFlags
 	// #7990: the sender's session-sync WIRE version, as a trailing u16 under
@@ -937,6 +937,9 @@ func (s *SessionSync) sendCapabilities(conn net.Conn) {
 	// compares it for exact equality, so the bump would refuse session sync
 	// across exactly the upgrade that first carries the field.
 	binary.LittleEndian.PutUint16(buf[3:5], SessionSyncWireVersion)
+	// #16756: flags2 rides AFTER the identity tail (see receiver for why
+	// it cannot sit at [5]): appending it shifts nothing a pre-#16756
+	// peer parses, and an old peer simply never reads the last byte.
 
 	// #9818: advertise the sender's process identity on EVERY installed
 	// connection, before the connection's BulkStart. The boot id distinguishes
@@ -967,6 +970,8 @@ func (s *SessionSync) sendCapabilities(conn net.Conn) {
 			n += 8
 		}
 	}
+	buf[n] = localCapabilityFlags2
+	n++
 	s.writeMu.Lock()
 	err := writeMsg(conn, syncMsgPeerCapabilities, buf[:n])
 	s.writeMu.Unlock()

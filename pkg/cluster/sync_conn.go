@@ -277,6 +277,7 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int, retiredOverr
 	// same set installConn and full disconnect clear.
 	var snapshotProtocol uint32
 	var capabilityFlags uint32
+	var capabilityFlags2 uint32
 	var sessionSyncWire uint32
 	var primingConn net.Conn
 	switch keepIdx {
@@ -290,10 +291,12 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int, retiredOverr
 		snapshotProtocol = uint32(ac.peerSnapshotVersion)
 		capabilityFlags = uint32(ac.peerCapabilityFlags)
 		sessionSyncWire = uint32(ac.peerSessionSyncWire)
+		capabilityFlags2 = uint32(ac.peerCapabilityFlags2)
 	}
 	s.peerSnaps.peerSnapshotProtocol.Store(snapshotProtocol)
 	s.peerSnaps.peerSnapshotProtocolGeneration++
 	s.peerCapabilityFlags.Store(capabilityFlags)
+	s.peerCapabilityFlags2.Store(capabilityFlags2)
 	s.peerSessionSyncWire.Store(sessionSyncWire)
 	s.scopedPolicySuppressionWarned.Store(false)
 	s.peerSnaps.peerSnapshotProtocolWriteMu.Unlock()
@@ -1184,6 +1187,9 @@ func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDec
 		// same learned set full disconnect clears, atomically with the
 		// advance (s.mu held throughout installConn).
 		s.peerCapabilityFlags.Store(0)
+		s.peerCapabilityFlags2.Store(0)
+		s.lastSentConfigAckCapable16756.Store(false)
+		s.peerConfigNackedGen16756.Store(0)
 		s.peerSessionSyncWire.Store(0)
 		s.scopedPolicySuppressionWarned.Store(false)
 		s.evictStaleIncarnationConnsLocked(fabricIdx, retiredIdentity)
@@ -1593,6 +1599,9 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		// retained version: it would make every confirmed-fence takeover wait
 		// out its full timeout against a downgraded peer that cannot answer.
 		s.peerCapabilityFlags.Store(0)
+		s.peerCapabilityFlags2.Store(0)
+		s.lastSentConfigAckCapable16756.Store(false)
+		s.peerConfigNackedGen16756.Store(0)
 		// #9714 F5: the delete-suppression warning latch is scoped to the
 		// same incarnation. Keeping it latched would silence the alarm
 		// through exactly the reconnect that matters — a downgrade that

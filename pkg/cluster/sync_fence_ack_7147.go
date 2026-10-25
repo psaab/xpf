@@ -193,6 +193,15 @@ const (
 	// IPsec-if_id wire class. Absent or not yet learned => an IPsec session
 	// tag may be read as an older tunnel class, so its installs are withheld.
 	capFlagIpsecTunnelDiscriminator uint8 = 1 << 7
+	// capFlag2ConfigApplyAck (#16756): the sender sends
+	// syncMsgConfigApplyAck (type 40) after a successful ordered config
+	// apply. It lives in the SECOND capability byte because the first
+	// byte is full (bits 0..7 above), and a pre-#16756 peer reading a
+	// 1-byte flags frame sees exactly 0 here — incapable, which is true
+	// of it. Absent => the peer predates the ACK (28556c2b19) and will
+	// never send one, so the #9569 gate falls back to NACK-only
+	// semantics for it rather than refusing forever.
+	capFlag2ConfigApplyAck uint8 = 1 << 0
 )
 
 // localCapabilityFlags is what this build advertises. It is a compile-time
@@ -200,6 +209,12 @@ const (
 // turn off. In particular it is deliberately independent of
 // localSnapshotProtocol — see sendCapabilities for why that mattered.
 const localCapabilityFlags = capFlagFenceAck | capFlagPeerDeleteOwnership | capFlagPurgeRetirementForwardOnly | capFlagInstallTableIdentity | capFlagConfigAncestry | capFlagConfigEpochReverseTag | capFlagIpsecTunnelDiscriminator
+
+// localCapabilityFlags2 is what this build advertises in the second
+// capability byte (#16756), appended after the wire-version field in
+// syncMsgPeerCapabilities. Compile-time for the same reason as
+// localCapabilityFlags: a property of the binary, not runtime state.
+const localCapabilityFlags2 = capFlag2ConfigApplyAck
 
 // FenceResult is what the local fence handler reports about what it achieved.
 // It is the daemon's answer to "how many RGs did you just drive to
@@ -413,6 +428,18 @@ func (s *SessionSync) IpsecTunnelDiscriminatorCapable() bool {
 		return false
 	}
 	return uint8(s.peerCapabilityFlags.Load())&capFlagIpsecTunnelDiscriminator != 0
+}
+
+// ConfigApplyAckCapable reports whether the peer advertised that it
+// sends syncMsgConfigApplyAck after a successful config apply (#16756).
+// A false reading means either a pre-ACK peer or an incarnation whose
+// advertisement has not landed yet; PeerConfigStale distinguishes the
+// two via peerConfigCapStaleKnown16756 and must not read this alone.
+func (s *SessionSync) ConfigApplyAckCapable() bool {
+	if s == nil {
+		return false
+	}
+	return uint8(s.peerCapabilityFlags2.Load())&capFlag2ConfigApplyAck != 0
 }
 
 // peerCapabilitiesLearned reports whether a syncMsgPeerCapabilities frame has been

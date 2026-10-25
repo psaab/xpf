@@ -1440,6 +1440,14 @@ type SessionSync struct {
 	// exists for.
 	peerSessionSyncWire atomic.Uint32
 
+	// peerCapabilityFlags2 holds the peer's SECOND advertised capability
+	// byte (#16756), carried after the wire-version field in
+	// syncMsgPeerCapabilities because the first flags byte is full. Bit 0
+	// (capFlag2ConfigApplyAck) means the peer sends syncMsgConfigApplyAck.
+	// Cleared on full disconnect and on incarnation advance alongside
+	// peerCapabilityFlags, for the identical incarnation-scoping reason.
+	peerCapabilityFlags2 atomic.Uint32
+
 	// fenceSeq numbers sequenced peer fences (#7147). Starts at 0 and is only
 	// ever read via Add(1), so the first fence is seq 1 — seq 0 is reserved on
 	// the wire to mean "no ack requested", which is how a pre-#7147 fence's
@@ -1717,6 +1725,19 @@ type SessionSync struct {
 	// Highest config generation the peer positively acknowledged as applied.
 	// PeerConfigStale compares this with lastSentConfigGen.
 	peerAppliedConfigGen atomic.Uint64
+	// lastSentConfigAckCapable16756 records, atomically with
+	// lastSentConfigGen, whether the peer incarnation that was current
+	// when the newest generation was sent advertised config-apply-ACK
+	// support (#16756). It lets PeerConfigStale charge a missing ACK
+	// only to a peer that promised one. Cleared when a new peer
+	// incarnation advances (the send that follows re-records it).
+	lastSentConfigAckCapable16756 atomic.Bool
+	// peerConfigNackedGen16756 is the generation of the newest
+	// current-send NACK (#16756 legacy fallback), or 0. A NACK whose
+	// generation is behind lastSentConfigGen is a straggler and is
+	// ignored by the fallback exactly as handleConfigApplyNack ignores
+	// it for the re-push marker.
+	peerConfigNackedGen16756 atomic.Uint64
 
 	configGenCounter     atomic.Uint64
 	lastAppliedConfigGen atomic.Uint64
