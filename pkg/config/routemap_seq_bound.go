@@ -9,14 +9,20 @@ import (
 
 // FRR route-map sequence numbers occupy the command range
 // `route-map WORD <permit|deny> (1-65535)`. The pkg/frr renderer numbers
-// sequences in steps of routeMapSeqStep. The pre-fallback count includes all
-// rendered term variants and an explicit policy default when `next policy`
-// can jump over it; one final fallback follows that count. A map with N
-// pre-fallback sequences therefore has highest sequence number
-// routeMapSeqStep*(N+1). Once that exceeds frrMaxRouteMapSeq FRR rejects the
-// `route-map` line with CMD_WARNING_CONFIG_FAILED, and a single failed line
-// makes the whole vtysh-batched frr-reload exit non-zero — poisoning the ENTIRE
-// managed-section reload, not just this policy (#5701).
+// sequences in steps of routeMapSeqStep. The pre-fallback count includes
+// all rendered term variants (including the #16835 community-chain
+// expansion), plus an explicit policy default when `next policy` can
+// jump over it (+2 with the #16869 carved-escape second sequence);
+// one final fallback follows that count. Carved no-default and
+// composed fall-off pairs render extra tail sequences this package
+// cannot see (per-instance/direction carve); the pkg/frr carved
+// render belts reserve those exactly where the carve is known. A map
+// with N pre-fallback sequences therefore has highest sequence number
+// routeMapSeqStep*(N+1) on every path this count itself gates. Once
+// that exceeds frrMaxRouteMapSeq FRR rejects the `route-map` line
+// with CMD_WARNING_CONFIG_FAILED, and a single failed line makes the
+// whole vtysh-batched frr-reload exit non-zero — poisoning the
+// ENTIRE managed-section reload, not just this policy (#5701).
 const (
 	frrMaxRouteMapSeq = 65535
 	routeMapSeqStep   = 10
@@ -66,14 +72,19 @@ func uniqueCanonicalProtocolCount(protos []string) int {
 
 // RouteMapSequenceCount returns the FRR route-map sequences before the final
 // fallback for ps: all rendered term variants, plus an explicit policy-default
-// sequence when `then next policy` can jump over it. It mirrors the renderer's
-// Cartesian expansion exactly: per term, (2 when the term's route-filters mix
-// IPv4 and IPv6 families, else 1) x max(1,|from prefix-list|) x
-// max(1,|from community|) x max(1,|from as-path|) x
-// max(1,|unique canonical from protocol|), summed over terms. `direct` and
-// `connected` are the same FRR source-protocol match and count only once.
-// Term count depends on each term's OR-set lengths, route-filter family mix,
-// referenced prefix-list families (not prefix entries), and source-protocol
+// sequence when `then next policy` can jump over it, plus one further
+// carved-escape sequence for an explicit-default policy with a valid
+// `then next policy` term (#16869; +2 total for that shape). The
+// no-default carved tail is NOT reserved here: it renders a pair
+// (plus a fallback past it) beyond the one reserved fallback, but
+// that carve is direction/instance-dependent and invisible to this
+// package — pkg/frr reserves it exactly where the carved flag is
+// known (carvedSingleExtraSeqs16869 / carvedComposedReserve16869 in
+// pkg/frr/carved_seq_reserve_16869.go, added with saturating
+// arithmetic at the render belts). The explicit-default +2 is
+// counted conservatively for every matching policy — matching how
+// the existing jump-over-default allowance already counts a jump
+// only some render sites use. It mirrors the renderer's Cartesian expansion
 // values. emitVariants emits one sequence per unique canonical protocol.
 // Every multiply and the running sum are overflow-checked (checkedMulU64 /
 // saturating add): a pathological crafted policy saturates to math.MaxUint64
@@ -105,6 +116,16 @@ func RouteMapSequenceCount(po *PolicyOptionsConfig, ps *PolicyStatement) uint64 
 		v = checkedMulU64(v, orOneU64(len(term.FromCommunity)))
 		v = checkedMulU64(v, orOneU64(len(term.FromASPath)))
 		v = checkedMulU64(v, orOneU64(uniqueCanonicalProtocolCount(term.FromProtocols)))
+		// #16835/#16869: a community-orphan term (only match is
+		// from-community, every distinct alternative a rendered
+		// multi-member expanded chain) emits 2k chain slots before
+		// its body per alternative, beyond the 1-per-alternative
+		// Cartesian charge above. Mirror pkg/frr's
+		// communityExtraTermSeqWeight16835 here (this package cannot
+		// import pkg/frr) so gate, belt, and renderer agree.
+		if w := communityOrphanExtraWeight16869(po, term); w > 0 {
+			v = checkedAddU64(v, uint64(w))
+		}
 		if total > math.MaxUint64-v {
 			return math.MaxUint64
 		}
@@ -112,10 +133,92 @@ func RouteMapSequenceCount(po *PolicyOptionsConfig, ps *PolicyStatement) uint64 
 	}
 	if policyStatementHasNextPolicy(ps) &&
 		(ps.DefaultAction == "accept" || ps.DefaultAction == "reject") {
+		// +1 for the explicit default the escape jumps over, +1 for the
+		// second sequence of the #16869 carved pair. The first carved
+		// sequence occupies the slot the final fallback would otherwise
+		// use, so the renderer can emit terms + default + pair and the
+		// highest sequence is step*(count+1). No-default carved tails
+		// are NOT reserved here: they are visible only in pkg/frr,
+		// whose carved render belts add the exact tail reserve where
+		// the carve is known (see carvedSingleExtraSeqs16869 /
+		// carvedComposedReserve16869 in pkg/frr), keeping this count
+		// exact for every non-carved shape the existing suites pin.
 		if total == math.MaxUint64 {
 			return total
 		}
-		total++
+		if total > math.MaxUint64-2 {
+			return math.MaxUint64
+		}
+		total += 2
+	}
+	return total
+}
+
+// communityChainWidth16869 mirrors pkg/frr's communityChainWidth16835:
+// the distinct-member count of a multi-member EXPANDED community
+// definition that actually renders its #16835 chain lists, else 0.
+// Renderable means every member passes ValidCommunityMember, the
+// distinct count is within the #15779 permutation bound (4), and at
+// least two distinct members exist. pkg/config cannot import pkg/frr,
+// so the predicates are re-derived from the shared config helpers
+// (CommunityMemberIsRegex, ValidCommunityMember) the frr predicates
+// themselves delegate to.
+func communityChainWidth16869(po *PolicyOptionsConfig, name string) int {
+	if po == nil {
+		return 0
+	}
+	cd := po.Communities[name]
+	if cd == nil {
+		return 0
+	}
+	seen := make(map[string]bool, len(cd.Members))
+	distinct := 0
+	expanded := false
+	for _, m := range cd.Members {
+		if CommunityMemberIsRegex(m) {
+			expanded = true
+		}
+		if !seen[m] {
+			seen[m] = true
+			distinct++
+		}
+	}
+	if distinct < 2 || !expanded || distinct > 4 {
+		return 0
+	}
+	for _, m := range cd.Members {
+		if ValidCommunityMember(m) != nil {
+			return 0
+		}
+	}
+	return distinct
+}
+
+// communityOrphanExtraWeight16869 mirrors pkg/frr's
+// communityExtraTermSeqWeight16835: for a community-orphan term (only
+// match dimension is from-community, every distinct alternative a
+// rendered chain, no route-filters/prefix-list/as-path/protocol), the
+// extra slots beyond the historical 1-per-alternative charge —
+// 2 per distinct member per distinct alternative.
+func communityOrphanExtraWeight16869(po *PolicyOptionsConfig, term *PolicyTerm) int {
+	if term == nil || len(term.FromCommunity) == 0 {
+		return 0
+	}
+	if len(term.RouteFilters) > 0 || len(term.PrefixList) > 0 || len(term.FromASPath) > 0 || len(term.FromProtocols) > 0 {
+		return 0
+	}
+	total := 0
+	seen := make(map[string]bool, len(term.FromCommunity))
+	for _, name := range term.FromCommunity {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		w := communityChainWidth16869(po, name)
+		if w == 0 {
+			return 0
+		}
+		total += 2 * w
 	}
 	return total
 }
@@ -125,6 +228,11 @@ func RouteMapSequenceCount(po *PolicyOptionsConfig, ps *PolicyStatement) uint64 
 // #5277): the sum of RouteMapSequenceCount over members, truncated after the
 // first explicit policy default with no `next policy` term. That default
 // terminates ordinary fall-through and no route can reach later members.
+// A carved composed fall-off pair renders one extra sequence beyond
+// the single fallback this count reserves; that carve is visible
+// only in pkg/frr, whose carved composed belt adds the exact +1
+// where the carved flag is known (carvedComposedReserve16869), so
+// this count stays exact for every non-carved chain.
 //
 // Like the single-policy RouteMapSequenceCount this EXCLUDES the final fallback
 // sequence, so the SAME MaxRouteMapSequences ceiling applies — the composed
