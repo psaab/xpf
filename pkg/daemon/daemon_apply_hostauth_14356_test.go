@@ -79,7 +79,8 @@ func (c *closeoutInstaller14356) InstallIpsecDivert(xnft.IpsecDivertSpec) error 
 	c.calls++
 	return nil
 }
-func (c *closeoutInstaller14356) RemoveIpsecDivert() error { c.calls++; return nil }
+func (c *closeoutInstaller14356) VerifyIpsecQuarantineGuard() error { return nil }
+func (c *closeoutInstaller14356) RemoveIpsecDivert() error          { c.calls++; return nil }
 
 // TestApplyConfigLockedRunsHostAuthCloseoutOnNonCancelDataplaneAbortAndBootstrapError
 // is the #14356 fail-on-revert guard. Both subtests drive the REAL

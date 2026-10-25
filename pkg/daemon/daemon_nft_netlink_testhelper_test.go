@@ -64,6 +64,7 @@ func (noopNftInstaller) InstallTransitBarrier() error                           
 func (noopNftInstaller) InstallArmedTransitFence(xnft.ForwardFenceSpec) error      { return nil }
 func (noopNftInstaller) RemoveTransitBarrier() error                               { return nil }
 func (noopNftInstaller) InstallIpsecDivert(xnft.IpsecDivertSpec) error             { return nil }
+func (noopNftInstaller) VerifyIpsecQuarantineGuard() error                         { return nil }
 func (noopNftInstaller) RemoveIpsecDivert() error                                  { return nil }
 func (noopNftInstaller) InstallLo0(s xnft.Lo0FilterSpec) (int, error)              { return fakeLo0Rules(s), nil }
 func (noopNftInstaller) DeleteTable(string) error                                  { return nil }
@@ -110,12 +111,15 @@ type fakeNftInstaller struct {
 	// #9506 F1 ambiguity fallback: this hook succeeds only after the fake has
 	// observed the guard candidate, mirroring the production installer’s
 	// install+readback contract.
-	quarantineGuard     func(xnft.IpsecDivertSpec) error
-	quarantineCalls     []string
-	overlayReadback     func(xnft.HostInputFenceOverlay) error
-	tableEnforcing      func(string) (bool, error)
-	tableEnforcingCalls []string
-	tableDropsInput     func(string) (bool, error)
+	quarantineGuard func(xnft.IpsecDivertSpec) error
+	quarantineCalls []string
+	// #16703: guard re-verification seam for the guarded-failure path.
+	quarantineVerify      func() error
+	quarantineVerifyCalls int
+	overlayReadback       func(xnft.HostInputFenceOverlay) error
+	tableEnforcing        func(string) (bool, error)
+	tableEnforcingCalls   []string
+	tableDropsInput       func(string) (bool, error)
 }
 
 func (f *fakeNftInstaller) TableEnforcing(name string) (bool, error) {
@@ -377,6 +381,14 @@ func (f *fakeNftInstaller) InstallIpsecQuarantineGuard(spec xnft.IpsecDivertSpec
 	return nil
 }
 
+func (f *fakeNftInstaller) VerifyIpsecQuarantineGuard() error {
+	f.quarantineVerifyCalls++
+	if f.quarantineVerify != nil {
+		return f.quarantineVerify()
+	}
+	return nil
+}
+
 func (f *fakeNftInstaller) RemoveIpsecDivert() error {
 	f.divertCalls = append(f.divertCalls, "remove")
 	if f.divertRemove != nil {
@@ -392,4 +404,5 @@ func (c *countingNftInstaller) InstallArmedTransitFence(xnft.ForwardFenceSpec) e
 }
 func (c *countingNftInstaller) RemoveTransitBarrier() error                   { return nil }
 func (c *countingNftInstaller) InstallIpsecDivert(xnft.IpsecDivertSpec) error { *c.calls++; return nil }
+func (c *countingNftInstaller) VerifyIpsecQuarantineGuard() error             { return nil }
 func (c *countingNftInstaller) RemoveIpsecDivert() error                      { *c.calls++; return nil }
