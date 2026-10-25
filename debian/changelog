@@ -1,4 +1,14 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Cluster/heartbeat: the duplicate-node-id heartbeat warning now
+    drops a replay of this node's own heartbeat (#16789). The #14705
+    gate verified only the HMAC, so an on-link spoofer replaying a
+    captured own heartbeat (valid MAC, same node-id) from the peer IP
+    forged the ERROR log, the EventRG history entry, and a refreshed
+    shared 30s limiter that can suppress the authenticated beacon
+    diagnostic. The gate now also requires the trailer session to
+    differ from this process's own heartbeat session; a genuine
+    duplicate chassis (different process, different session) still
+    warns, and the unkeyed legacy path is unchanged.
   * Cluster/config: an omitted `redundancy-group ip-monitoring
     global-weight` now defaults to 255, the Junos default (#16667).
     Previously it compiled to 0, so aggregate mode deducted nothing

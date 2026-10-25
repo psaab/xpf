@@ -752,7 +752,19 @@ correct runtime resolution; the only remedy is correcting
   the authenticated beacon below. Only the MAC is checked — the frame is
   discarded without touching liveness, election, or replay/epoch state.
   An unkeyed node cannot verify and keeps the legacy unauthenticated
-  warning (dual-accept, mirroring `admitFrame`).
+  warning (dual-accept, mirroring `admitFrame`). Since #16789 the keyed
+  gate additionally drops frames whose trailer session equals this
+  process's own heartbeat session (`Manager.ownHeartbeatSession`, the
+  per-incarnation session minted by `heartbeatNonce`): this node's own
+  heartbeats carry a valid MAC under the same PSK, so an on-link sender
+  replaying a captured own heartbeat from the peer IP would otherwise
+  forge the warning and keep the shared limiter fresh. This mirrors
+  the beacon path's own-sender exclusion below. A genuine duplicate
+  chassis runs a different process with a different random session and
+  still warns; the check never mints the local session on receipt, so
+  a node that has not yet sent is not made to create sender state by
+  a forged frame (an un-minted session reads zero and no genuine
+  own frame carries it).
   In the documented shared `${node}` shape (`ha-pair.conf` puts both `em0`
   and `peer-address` inside the selected node group) two chassis with the
   same node-id hold the same local address and point at a peer address held

@@ -743,8 +743,8 @@ func heartbeatAuthDecision(keyConfigured, present, macOK, nonceFresh bool) (bool
 // comment for why a per-sender session made the receiver's bounded ring
 // churnable within a single peer boot epoch.
 func (m *Manager) heartbeatNonce() (session, counter uint64) {
-	m.hbNonceOnce.Do(func() { m.hbSession = randomSessionID() })
-	return m.hbSession, m.hbCounter.Add(1)
+	m.hbNonceOnce.Do(func() { m.hbSession.Store(randomSessionID()) })
+	return m.hbSession.Load(), m.hbCounter.Add(1)
 }
 
 // LocalProcessToken returns the Manager-scoped random token for this daemon
@@ -755,8 +755,22 @@ func (m *Manager) LocalProcessToken() uint64 {
 	if m == nil {
 		return 0
 	}
-	m.hbNonceOnce.Do(func() { m.hbSession = randomSessionID() })
-	return m.hbSession
+	m.hbNonceOnce.Do(func() { m.hbSession.Store(randomSessionID()) })
+	return m.hbSession.Load()
+}
+
+// ownHeartbeatSession returns this process's heartbeat trailer session
+// without minting it: zero means this incarnation has not yet drawn a
+// session (it has never sent a signed heartbeat nor been asked for its
+// process token). #16789 uses it on the duplicate-node-id path, where
+// receipt of a forged frame must not mint sender state. The value is
+// written once under hbNonceOnce and read atomically thereafter, so
+// the receiver goroutine may read it concurrently with the sender.
+func (m *Manager) ownHeartbeatSession() uint64 {
+	if m == nil {
+		return 0
+	}
+	return m.hbSession.Load()
 }
 
 // randomSessionID returns a non-zero random 64-bit anti-replay session id. On
@@ -1200,21 +1214,51 @@ func (r *heartbeatReceiver) readLoop() {
 }
 
 // duplicateNodeIDAuthenticated reports whether a same-NodeID heartbeat may
-// trigger the duplicate-node-id warning (#14705). It verifies ONLY the HMAC
-// against every accepted key — deliberately without admitAuthed: the frame
-// is discarded either way, so it must not refresh liveness, drive election,
-// or consume replay/epoch state (a replayed genuine duplicate frame may
-// still warn, rate-limited by the shared 30s limiter; admitting it into the
-// replay ring would let a duplicate frame churn genuine peer replay state).
-// An unkeyed node cannot verify and returns true, preserving the legacy
-// unauthenticated warning under dual-accept.
+// trigger the duplicate-node-id warning (#14705, #16789). It verifies ONLY
+// the HMAC against every accepted key — deliberately without admitAuthed: the
+// frame is discarded either way, so it must not refresh liveness, drive
+// election, or consume replay/epoch state (a replayed genuine duplicate
+// frame may still warn, rate-limited by the shared 30s limiter; admitting
+// it into the replay ring would let a duplicate frame churn genuine peer
+// replay state). An unkeyed node cannot verify and returns true, preserving
+// the legacy unauthenticated warning under dual-accept.
+//
+// #16789: the HMAC alone does not prove another chassis sent the
+// frame. This node's own heartbeats carry a valid MAC under the same
+// PSK, so an on-link sender that captures one and replays it from the
+// peer IP would pass the #14705 gate and forge the warning/history
+// entry, refreshing the shared limiter that can suppress the richer
+// authenticated beacon diagnostic. The gate therefore also requires
+// the trailer session to differ from this process's own heartbeat
+// session (the per-Manager anti-replay session minted by heartbeatNonce;
+// see LocalProcessToken). This mirrors the beacon path's own-sender
+// exclusion (dupaddr_watch_10745.go handleBeacon compares the signed
+// sender-instance ID against w.instance). Only the trailer session
+// is compared: the session is random per daemon incarnation and is
+// never zero when minted (randomSessionID), so an attacker replaying
+// this node's frame cannot forge a different session without the PSK.
+// A genuine duplicate chassis has a different process, hence a
+// different session, and still warns. Frames without a trailer, or
+// signed under a different session but failing MAC, still fail.
+// The comparison is performed only on the keyed path after a trailer
+// is present; it does not mint the local session (LocalProcessToken
+// would) because a node that has never sent must not mint state on
+// receipt of a forged frame — an un-minted local session is zero and
+// no genuine trailer carries session zero from this sender's minter,
+// and a trailer session of zero can only warn if its MAC verifies,
+// which still requires the PSK. The read goes through
+// ownHeartbeatSession (hbSession is atomic), so the receiver
+// goroutine's read is race-free against the sender's one-time store.
 func (r *heartbeatReceiver) duplicateNodeIDAuthenticated(frame []byte) bool {
 	keys := r.mgr.controlLinkAcceptedKeys()
 	if len(keys) == 0 {
 		return true
 	}
-	_, _, present := heartbeatAuthTrailer(frame)
+	session, _, present := heartbeatAuthTrailer(frame)
 	if !present {
+		return false
+	}
+	if own := r.mgr.ownHeartbeatSession(); own != 0 && session == own {
 		return false
 	}
 	for _, k := range keys {
