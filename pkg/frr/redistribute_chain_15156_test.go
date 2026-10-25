@@ -152,13 +152,13 @@ func TestBGPOriginationAcrossNeighborChainsSingleRedistribute15156(t *testing.T)
 	// fall-through — a deny-before-permit flattening would let one
 	// neighbour's guard veto the other's accept. BGP context:
 	// unsuffixed name (the -ospf suffix applies only to OSPF).
-	composed := "NO-RFC1918-STATICS" + ReservedChainSuffix + "-static" + config.ReservedRedistSuffix
-	seqs := redistSeqs16864(t, got, composed)
-	if v := evalOrSeqs16868(t, seqs, "good"); v != "permit" {
-		t.Fatalf("OR map must permit a route NO-RFC1918 does not reject, evaluated %q over %v\n%s", v, seqs, got)
+	composed := "NO-RFC1918-STATICS-xpf-or" + ReservedChainSuffix + "-static" + config.ReservedRedistSuffix
+	seqs := parseOrSeqs16868(t, got, composed)
+	if v := evalRoute16868(t, seqs, "192.168.50.0/24", false); v != "permit" {
+		t.Fatalf("OR map must permit a route NO-RFC1918 does not reject, got %q over %v\n%s", v, seqs, got)
 	}
-	if v := evalOrSeqs16868(t, seqs, "bad"); v != "permit" {
-		t.Fatalf("OR map must permit RFC1918 statics via STATICS despite NO-RFC1918's chain, evaluated %q over %v\n%s", v, seqs, got)
+	if v := evalRoute16868(t, seqs, "10.99.0.0/16", false); v != "permit" {
+		t.Fatalf("OR map must permit RFC1918 statics via STATICS despite NO-RFC1918's chain, got %q over %v\n%s", v, seqs, got)
 	}
 	if !strings.Contains(staticLines[0], composed) {
 		t.Fatalf("BGP redistribute must reference composed map %q, got %q", composed, staticLines[0])

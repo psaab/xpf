@@ -563,35 +563,72 @@ func (m *Manager) renderRedistComposedMapVariant16864(po *config.PolicyOptionsCo
 	return b.String()
 }
 
+// redistOrSeqSpan16868 is one sequence span inside a scratch body.
+type redistOrSeqSpan16868 struct {
+	start, end, seq int
+	verb            string
+}
+
 // renderRedistOrComposedMap16868 renders a cross-chain OR map: the
 // union of several independent effective BGP export chains for one
-// source. Each chain renders first-terminal-wins internally via
-// renderRedistComposedMapVariant16864 into a scratch body, then the
-// bodies are spliced in chain order with deny sequences demoted to
-// fall-through, so a reject (term or policy default) in chain A
-// cannot veto an accept in chain B — only an accept is terminal
-// across chains, and the map ends in the usual trailing deny.
+// source. Each chain renders first-terminal-wins internally into a
+// scratch body; the bodies are spliced in chain order.
 //
-// Splice mechanics: the scratch render numbers sequences from 10 in
-// steps of 10 and the demotion needs one continuation target per
-// demoted deny. FRR permits `on-match goto` only on permit
-// sequences and requires the target to exceed the sequence number,
-// so each demoted deny becomes `permit <seq>` with its match/set
-// clauses replaced by a match-all `on-match goto <target>`: the
-// route jumps over the rest of its own chain to the next chain's
-// first sequence. Match clauses cannot ride on the permit (it must
-// match every route reaching it, including routes its own chain
-// rejected), so the demoted sequence is match-all by construction.
-// The final chain's rejects need no demotion: they fall into the
-// trailing deny, exactly the single-chain render. Set clauses from
-// a rejected route's earlier non-terminating terms still applied
-// before the jump; origination only reads the terminal verb, so
-// they are inert here (per-peer route-map out re-applies them).
-// A non-final chain whose scratch body is a quarantine deny (or
-// that ends in a terminal default-accept permit) keeps its body
-// verbatim: the quarantine must stay fail-closed and a default
-// accept is a genuine cross-chain accept.
+// Encoding (deny sequences cannot carry continuations in FRR, so a
+// reject that must not decide the OR is re-expressed as a permit):
+//   - non-final chain, any deny: `permit <seq> <same match clauses>
+//     on-match goto <next chain start>`. Matching routes jump to the
+//     next chain (this chain rejected them); non-matching routes
+//     fall through inside their own chain. A bare (match-all) deny
+//     legitimately becomes a match-all jump: every route reaching
+//     it matched it. Later sequences of that chain slice are reached
+//     only via fall-through, exactly as in the standalone render.
+//   - final chain, conditional deny: same demotion onto an appended
+//     trailing deny (the map's verdict for routes no chain
+//     accepted); bare denies stay terminal (policy defaults, the
+//     fail-closed fall-off).
+//   - Only a permit without a continuation settles origination.
+//
+// Set and call clauses are stripped from every emitted sequence:
+// origination acceptance is a pure match question, a rejected
+// chain's mutations must never leak into a later chain's matches
+// or the originated attributes, and per-peer route-map out
+// re-applies each peer's own sets for advertisement.
+//
+// Guards that stay map-wide and are never spliced: the cluster tag
+// deny (cluster static only) is emitted once at seq 5 and scratch
+// copies are dropped, never demoted/renumbered; an oversize chain
+// renders the whole map as the quarantine deny (detected
+// arithmetically, since the collapsed body is indistinguishable
+// from a genuine single-deny chain). Every kept sequence is
+// renumbered by its chain base and its continuations relocated
+// (relocateContinuation16868), so all gotos point strictly forward.
 func (m *Manager) renderRedistOrComposedMap16868(po *config.PolicyOptionsConfig, name string, chains [][]string, proto string, ctx redistVariantContext16864, clusterMode bool) string {
+	// Oversize pre-check mirroring the single-chain renderer's
+	// bound: a chain whose expansion exceeds the ceiling would
+	// render as a lone quarantine deny, indistinguishable from a
+	// genuine single-deny chain — detect it arithmetically so a
+	// non-final quarantine stays fail-closed for the whole map.
+	vpo := redistVariantPO16864(po, ctx)
+	for _, chain := range chains {
+		var total uint64
+		for _, pn := range chain {
+			ps := po.PolicyStatements[pn]
+			if ps == nil {
+				continue
+			}
+			src := redistPolicyForProtocol(ps, proto)
+			f, _, _ := redistPolicyForVariant16864(po, src, proto, ctx)
+			total += config.RouteMapSequenceCount(vpo, f)
+			if redistChainMemberTerminal16868(f, proto) {
+				break
+			}
+		}
+		if total > config.MaxRouteMapSequences {
+			m.noteQuarantined(name)
+			return renderQuarantineDenyRouteMap(name) + "!\n"
+		}
+	}
 	bodies := make([]string, len(chains))
 	totalSeqs := 0
 	for i, chain := range chains {
@@ -610,14 +647,13 @@ func (m *Manager) renderRedistOrComposedMap16868(po *config.PolicyOptionsConfig,
 		m.noteQuarantined(name)
 		return renderQuarantineDenyRouteMap(name) + "!\n"
 	}
+	clusterStatic := clusterMode && proto == "static"
 	var out strings.Builder
-	if clusterMode && proto == "static" {
+	if clusterStatic {
 		out.WriteString(clusterTagDeny15158(name))
 	}
-	// Prefix-list / ACL definitions from every scratch body come
-	// first (they are name-keyed globals; the scratch render keys
-	// them by the scratch map name, so rename them onto the real
-	// name to match the sequence bodies rewritten below).
+	// Definitions first, renamed onto the real map name, deduped.
+	seenDef := make(map[string]bool)
 	for ci, body := range bodies {
 		scratch := fmt.Sprintf("xpf-or-scratch-%d", ci)
 		for _, ln := range strings.Split(body, "\n") {
@@ -627,27 +663,22 @@ func (m *Manager) renderRedistOrComposedMap16868(po *config.PolicyOptionsConfig,
 			if strings.TrimSpace(ln) == "" || ln == "!" {
 				continue
 			}
-			out.WriteString(strings.ReplaceAll(ln, frrName(scratch), frrName(name)))
-			out.WriteString("\n")
+			renamed := strings.ReplaceAll(ln, frrName(scratch), frrName(name))
+			if !seenDef[renamed] {
+				seenDef[renamed] = true
+				out.WriteString(renamed)
+				out.WriteString("\n")
+			}
 		}
 	}
-	seqOffset := 0
-	for ci := range chains {
-		scratchBody := bodies[ci]
-		scratch := fmt.Sprintf("xpf-or-scratch-%d", ci)
-		last := ci == len(chains)-1
-		lines := strings.Split(scratchBody, "\n")
-		type seqSpan struct {
-			start, end, seq int
-			verb            string
-		}
-		var spans []seqSpan
+	parseSpans := func(lines []string) []redistOrSeqSpan16868 {
+		var spans []redistOrSeqSpan16868
 		for i, ln := range lines {
 			f := strings.Fields(ln)
 			if len(f) == 4 && f[0] == "route-map" {
 				var n int
 				if _, err := fmt.Sscanf(f[3], "%d", &n); err == nil {
-					spans = append(spans, seqSpan{start: i, seq: n, verb: f[2]})
+					spans = append(spans, redistOrSeqSpan16868{start: i, seq: n, verb: f[2]})
 				}
 			}
 		}
@@ -658,35 +689,136 @@ func (m *Manager) renderRedistOrComposedMap16868(po *config.PolicyOptionsConfig,
 				spans[j].end = len(lines)
 			}
 		}
+		return spans
+	}
+	// Layout: spliced seq = base + scratch seq, base starts at 0.
+	// Under cluster the map-wide tag deny at seq 5 owns no slot.
+	base := 0
+	for ci := range chains {
+		scratchBody := bodies[ci]
+		scratch := fmt.Sprintf("xpf-or-scratch-%d", ci)
+		last := ci == len(chains)-1
+		lines := strings.Split(scratchBody, "\n")
+		spans := parseSpans(lines)
 		if len(spans) == 0 {
 			continue
 		}
-		maxSeq := spans[len(spans)-1].seq
-		base := seqOffset
-		nextBase := base + maxSeq + 10
+		// Layout: kept sequences renumber by base; dropped scratch
+		// tag denies (seq 5 under cluster) do not consume a slot.
+		kept := make([]redistOrSeqSpan16868, 0, len(spans))
 		for _, sp := range spans {
-			newSeq := base + sp.seq
-			if !last && sp.verb == "deny" {
+			if clusterStatic && sp.seq == clusterNull0DenySeq15158 {
+				continue
+			}
+			kept = append(kept, sp)
+		}
+		if len(kept) == 0 {
+			continue
+		}
+		chainBase := base
+		nextBase := chainBase + kept[len(kept)-1].seq + 10
+		finalDemoted := false
+		for si, sp := range kept {
+			newSeq := chainBase + sp.seq
+			bodyLines := lines[sp.start+1 : sp.end]
+			// Classify the sequence body (excluding trailing "exit"/"!").
+			var clauses []string
+			for _, bl := range bodyLines {
+				t := strings.TrimSpace(bl)
+				if t == "exit" || t == "!" || t == "" {
+					continue
+				}
+				clauses = append(clauses, bl)
+			}
+			hasMatch := false
+			for _, c := range clauses {
+				if strings.HasPrefix(strings.TrimSpace(c), "match ") {
+					hasMatch = true
+				}
+			}
+			// Demotion (see the function comment): a deny in a
+			// non-final chain becomes permit+match+goto-next-chain
+			// (match clauses kept verbatim; a bare deny legitimately
+			// becomes a match-all jump because every route reaching
+			// it matched it). In the final chain only conditional
+			// denies demote, onto the trailing deny appended below;
+			// a bare final deny is the map's verdict and stays.
+			// Set/call clauses are stripped from every emitted
+			// sequence: origination acceptance is match-only, and
+			// per-peer route-map out re-applies each peer's sets.
+			demote := sp.verb == "deny" && (!last || hasMatch)
+			if demote {
+				if last {
+					finalDemoted = true
+				}
 				fmt.Fprintf(&out, "route-map %s permit %d\n", frrName(name), newSeq)
+				for _, c := range clauses {
+					ct := strings.TrimSpace(c)
+					if strings.HasPrefix(ct, "set ") || strings.HasPrefix(ct, "on-match ") || strings.HasPrefix(ct, "call ") {
+						continue
+					}
+					out.WriteString(strings.ReplaceAll(c, frrName(scratch), frrName(name)))
+					out.WriteString("\n")
+				}
 				fmt.Fprintf(&out, " on-match goto %d\n", nextBase)
 				out.WriteString("exit\n")
 				continue
 			}
-			for _, ln := range lines[sp.start:sp.end] {
-				if strings.HasPrefix(ln, "route-map ") {
-					fmt.Fprintf(&out, "route-map %s %s %d\n", frrName(name), sp.verb, newSeq)
+			fmt.Fprintf(&out, "route-map %s %s %d\n", frrName(name), sp.verb, newSeq)
+			for _, c := range clauses {
+				ct := strings.TrimSpace(c)
+				if strings.HasPrefix(ct, "set ") || strings.HasPrefix(ct, "call ") {
 					continue
 				}
-				// Sequence bodies before the first route-map header
-				// are definitions (already emitted above); skip
-				// any stray pre-header lines inside a span.
-				out.WriteString(strings.ReplaceAll(ln, frrName(scratch), frrName(name)))
+				rewritten := relocateContinuation16868(c, chainBase, newSeq, kept, si, nextBase, last)
+				out.WriteString(strings.ReplaceAll(rewritten, frrName(scratch), frrName(name)))
 				out.WriteString("\n")
 			}
+			out.WriteString("exit\n")
 		}
-		seqOffset = nextBase - 10
+		if last {
+			// If the final chain had a conditional deny demoted,
+			// its goto target (nextBase) needs a real sequence:
+			// the trailing deny every redist map ends with. When
+			// the final chain kept a bare terminal deny instead,
+			// nextBase was never a goto target and no extra
+			// sequence is emitted (the kept deny already ends it).
+			if finalDemoted {
+				fmt.Fprintf(&out, "route-map %s deny %d\n", frrName(name), nextBase) // trailing verdict for demoted final-chain rejects
+				out.WriteString("exit\n")
+			}
+		}
+		base = nextBase - 10
 	}
 	return out.String()
+}
+
+// relocateContinuation16868 rewrites a kept sequence's continuation
+// for its spliced position: `on-match goto N` shifts by the chain
+// base; `on-match next` becomes a goto to the next kept sequence
+// (or, for the last sequence of a non-final chain, to the next
+// chain's first sequence; for the final chain it stays `next`,
+// which FRR evaluates as fall-through past the map end = deny).
+// Non-continuation lines pass through unchanged.
+func relocateContinuation16868(line string, chainBase, newSeq int, kept []redistOrSeqSpan16868, si, nextBase int, last bool) string {
+	t := strings.TrimSpace(line)
+	if strings.HasPrefix(t, "on-match goto ") {
+		var n int
+		if _, err := fmt.Sscanf(strings.TrimSpace(t[len("on-match goto "):]), "%d", &n); err == nil {
+			return fmt.Sprintf(" on-match goto %d", chainBase+n)
+		}
+		return line
+	}
+	if t == "on-match next" {
+		if si+1 < len(kept) {
+			return fmt.Sprintf(" on-match goto %d", chainBase+kept[si+1].seq)
+		}
+		if !last {
+			return fmt.Sprintf(" on-match goto %d", nextBase)
+		}
+		return line
+	}
+	return line
 }
 
 // redistChainMapCollision15156 refuses (fail-closed) a composed
@@ -1291,7 +1423,7 @@ func redistOrRouteMapName16868(bgp *config.BGPConfig, po *config.PolicyOptionsCo
 	for _, chain := range chains {
 		parts = append(parts, strings.Join(chain, "-"))
 	}
-	return strings.Join(parts, "-") + ReservedChainSuffix + "-" + normalizedRedistProtocol(proto) + config.ReservedRedistSuffix
+	return strings.Join(parts, "-") + "-xpf-or" + ReservedChainSuffix + "-" + normalizedRedistProtocol(proto) + config.ReservedRedistSuffix
 }
 
 func (m *Manager) bgpPolicyRedistEntriesAt14586(policies []string, po *config.PolicyOptionsConfig, self, node string) []redistEntry {

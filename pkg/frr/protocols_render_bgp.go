@@ -286,7 +286,7 @@ func (m *Manager) renderBGP16125(b *strings.Builder, bgp *config.BGPConfig, vali
 		var bgpIPv6Redist strings.Builder
 		// #14586: defined-policy origination entries are already
 		// de-duplicated by (proto, routeMap) in
-		// bgpPolicyRedistEntries14586; a bare token (routeMap "") can
+		// bgpChainRedistEntriesCluster16868; a bare token (routeMap "") can
 		// never collide with a filtered policy entry.
 		for _, e := range bgp.Export {
 			if e == "" {
