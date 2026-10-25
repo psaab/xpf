@@ -1,20 +1,23 @@
 ---
 name: campaign
-description: Drive ALL open issues to terminal (MERGED / PLAN-KILLED / PLAN-DEFERRED-with-reason) — a drive-to-zero campaign. Ranks the backlog, fans out /research + /engineer agents (parallel route) or chains coupled work (serial route), PARENT-reviews every PR, files new issues found during audits, and stops when nothing driveable remains.
+description: Drive ALL open issues and PRs to zero — the single campaign skill. Research keeps filing issues, engineers convert them to PRs, triple hostile review (any 3 of Muse Wonder, Opus 5.5, Codex-6 Astra, GLM-5.3, Kimi K3.1 Pro) plus parallel forwarding/throughput gates on the loss, tcp, and udp clusters land or kill every item, a keeper monitor alerts the parent who alone dispatches to keep lanes full, and it stops only when both queues stay at zero.
 user_invocable: true
 ---
 
 # /campaign — drive-to-zero backlog campaign
 
-Drive **every** open issue to a terminal state — `MERGED`,
-`PLAN-KILLED`, or `PLAN-DEFERRED-needs-lab-or-operator-with-reason-recorded-on-the-issue`
-— and open new issues for real bugs/gaps found along the way, then drive
-those too. Stop only when no driveable work remains.
+Drive **every** open issue to a terminal state — `MERGED` or
+`PLAN-KILLED` (all three independent `/research` reviewers converge on
+rejecting the final reviewed approach; `plan-deferred-*` is a work queue,
+never terminal — see Step 1) — and open new issues for real bugs/gaps
+found along the way, then drive those too. Stop only when no
+driveable work remains.
 
 ## Standing user orders (2026-10-13, reaffirmed repeatedly — do not relitigate)
 
-- **Lowest number first**: always pick lanes from the smallest/lowest open
-  issue number upward. Do not cherry-pick interesting work over old debt.
+- **Bands first, lowest number within band**: rank into Step 1 bands,
+  then pick lanes from the smallest/lowest open issue number upward
+  within the band. Do not cherry-pick interesting work over old debt.
 - **PRs landing takes priority**: an open PR is unfinished work, not a queue
   to admire. Before starting NEW engineering, drain the landing queue:
   re-confirm folded heads, rebase, squash message violations, and MERGE.
@@ -26,31 +29,148 @@ those too. Stop only when no driveable work remains.
 - **Keep lanes full, parallelism high**: never let engineer or reviewer lanes
   idle while driveable work exists. Reap idle/dead agents and refill from the
   lowest-number queue. Parent does folds/small fixes inline when faster than
-  dispatching.
-- **Internal task runners only**: agents via the internal `task` tool with the
-  campaign reviewer/engineer agent types (Codex GPT-6 Astra, Opus 5.5/SMR,
-  GLM-5.3, Muse reviewers). NEVER external CLI model tools (codex/agy/claude
-  CLIs) to run other models.
-- **Full engineer + full reviews**: every PR gets the hostile review gate
-  (independent reviewer at the FINAL head, findings folded, re-review after
-  any fold that changes behavior). Message-shape gate first (see Step 3).
+  dispatching. A dedicated **keeper/monitor agent** (see "The keeper"
+  below) watches issue parallelism AND PR parallelism separately and
+  alerts the parent; the PARENT alone reaps and refills lanes (single
+  dispatch authority — keeper never dispatches). Always keep reserve
+  capacity for (a) landing PRs and (b) researching new issues/findings
+  from other LLMs — a review verdict or a new finding must never wait
+  for a free lane.
+- **Internal task runners only**: agents via the internal `task` tool only.
+  NEVER external CLI model tools (codex/agy/claude CLIs) to run other models.
+- **Full engineer + triple hostile reviews**: every PR that changes
+  shipped code or behaviour gets **three independent hostile
+  domain-expert reviews at the FINAL head** (findings folded, re-review
+  after any fold that changes behavior). Docs/test-only PRs with no
+  code or behaviour change still get three reviewers, but in short
+  form (scope/accuracy verdict, no cluster gate). Reviewer pool — pick
+  any 3 distinct models: **Muse Wonder (muse-wonder-1.0), Opus 5.5,
+  Codex-6 Astra, GLM-5.3, Kimi K3.1 Pro**. Only 3 verdicts are
+  required; the other two are the bench. This is a fail-closed veto,
+  not a vote: all three must clear, and any one real finding blocks.
+  The same three-reviewer requirement applies to research termination:
+  PLAN-KILL requires all three independent reviewers to converge on
+  rejecting the final reviewed approach. A single PLAN-KILL is
+  substantive dissent to investigate/revise, not a terminal verdict.
+  If a model runs out
+  of credits / is quota-blocked or unreachable, swap in the next pool
+  model immediately and note the swap on the PR — a blocked reviewer
+  never waives the gate and never idles a lane. Dispatch mechanics
+  and the auditable verdict stamp are in Step 3. Message-shape gate
+  first (see Step 3).
 - **Scratch discipline**: ALL temp files, intermediate files, tests, probes,
   and worktrees live in `/var/worktrees/` (NOT `/var/tmp`, NOT `/tmp`, NOT
   inside the repo checkout). `GOCACHE=/var/worktrees/.cache/go-build`,
   `GOTMPDIR=/var/worktrees/.cache/go-tmp`, per-lane `CARGO_TARGET_DIR` under
   `/var/worktrees/.cache/` too. Clean up `/var/worktrees` scratch (reviewer
   worktrees, merged lanes, stale probes) as work completes — prune merged
-  worktrees continuously, not in a final sweep.
+  worktrees continuously, not in a final sweep. NEVER prune mid-campaign:
+  `/var/worktrees/.cache/keeper/`, `/var/worktrees/.cache/tmpdir/` (lock/
+  owner/epoch state), or open gate cell scripts — that is the campaign's
+  live memory, not scratch. The gate-baselines directory is protected
+  except for indexed captures that have expired under the rule below.
+- **Disk guard — `/var/worktrees` must never fill up**: unbounded lanes
+  plus Go/Rust caches will fill the volume mid-campaign if nobody owns
+  it, so the keeper checks it every tick and the parent reaps. Measure
+  cheaply: `df -h /var/worktrees` (percent + free) on EVERY board; the
+  expensive `du -sh /var/worktrees/.cache/*` breakdown runs ONLY when
+  usage is ≥70% and a reap decision is actually being made (a full
+  metadata walk of a TB-scale cache on every tick is itself a disk
+  workload). Thresholds on volume usage: **≥70% = flag + breakdown;
+  ≥85% — OR growth projecting a full volume within one gate cycle
+  (~20 min) at the recent fill rate — = parent reaps the same tick,
+  before dispatching new lanes.** At the reap tier the parent FIRST
+  stops dispatching and accounts for every live build proc in its
+  lane registry: pause or finish-or-kill the youngest build lanes by
+  explicit decision, recorded on the tracking task. Only procs the
+  parent has not accounted for block cache cleanup — waiting for an
+  empty box is waiting for ENOSPC, which is the failure this guard
+  exists to preempt. Reap in this order, cheapest/safest first:
+  (1) worktrees whose PR is MERGED or CLOSED-with-disposition
+  (confirm via `gh` first): `git worktree remove <wt>`; delete the
+  lane's per-issue `CARGO_TARGET_DIR` ONLY if the remove succeeded —
+  if remove refuses (dirty), keep the target dir and route the
+  worktree to salvage; (2) gate cell scripts and smoke logs for
+  already-merged PRs; (3) gate baselines outside their validity
+  window (decidable from the baselines INDEX below, never by
+  guessing file contents under pressure); (4) stale lanes with no
+  live procs AND a clean `git -C <wt> status --short` (a dirty
+  worktree is salvage, never delete — flag it for Step 0 salvage);
+  (5) caches, at the reap tier after the proc accounting above:
+  Rust — remove `CARGO_TARGET_DIR`s of merged/dead lanes (per-lane,
+  so this is this campaign's own space; never a live lane's).
+  Go — the campaign `GOCACHE` (`/var/worktrees/.cache/go-build`) is
+  SHARED box infrastructure: `go clean -cache` cold-rebuilds every
+  other session on the box too. Treat it as a box-wide action: the
+  parent may run `GOCACHE=/var/worktrees/.cache/go-build go clean
+  -cache` at the reap tier only after the proc accounting, and must
+  log that it did so (path + freed size + collateral note) on the
+  tracking task. If the collateral is unacceptable, the alternative
+  is dispatching future lanes with a campaign-scoped
+  `GOCACHE=/var/worktrees/.cache/go-build-<campaign>` so later
+  cleanup is genuinely this campaign's — pick one and record it;
+  never pretend the shared cache is private.
+  NEVER reap, at any tier: live lane worktrees/target dirs the parent
+  has not accounted for, dirty worktrees, the never-prune list above,
+  or any lock / owner / epoch file for a cluster with a live holder.
+  Log every reap (path + size) on the tracking task so a missing
+  worktree is never a mystery. Baselines decidability: each baseline
+  capture writes a uniquely named record
+  `/var/worktrees/.cache/gate-baselines/<cluster>-<masterSHA>-<capture-epoch>.md`
+  and appends a one-line entry to
+  `/var/worktrees/.cache/gate-baselines/INDEX` (`<cluster> <masterSHA>
+  <capture-epoch> <file>`). Expiry at reap time: expired iff
+  `now > capture-epoch + 4h` OR merges since capture
+  (`git rev-list --count --merges <masterSHA>..origin/master` —
+  merges, not raw commits; merge-commit history makes raw counts
+  expire the window ~5× early) exceed 10 — both computed at reap
+  time, never guessed. Only those expired, INDEX-listed capture files
+  may be pruned; keep INDEX and all current captures.
 - **Relative-path edit hazard (recurring)**: lanes editing via relative paths
   have repeatedly spilled changes into the control checkout or lost them.
   Briefs MUST demand absolute paths + `git -C <worktree> status --short`
   proof after edits; parent restores control after confirming the worktree
   copy is complete.
-- **Loss smoke every wave**: after each merge wave, deploy current master to
-  the loss userspace cluster and run connectivity (`make
-  cluster-deploy-and-gate CLUSTER_GATE=test-connectivity`). Known-external
-  failures (e.g. upstream lab IPv6 target dead from the firewall itself) are
-  recorded as such, not chased.
+- **Three-cluster gates, in parallel**: we have THREE HA gate systems —
+  `loss`, `tcp`, and `udp` (`BPFRX_CLUSTER_ENV=test/incus/<name>-userspace-cluster.env`)
+  — so connectivity + transit-forwarding + throughput gates run in
+  parallel, never serialized behind one cluster. Parallelism requires
+  DISTINCT lock state per physical cluster and the SAME lock/owner/epoch
+  tuple for every gate and ordinary command using that cluster:
+  `loss` uses the exact `test/incus/cluster-lock.sh` defaults —
+  `/var/worktrees/.cache/tmpdir/xpf-cluster.lock`,
+  `/var/worktrees/.cache/tmpdir/xpf-cluster.owner`, and
+  `/var/worktrees/.cache/tmpdir/xpf-cluster-state/epoch`; ordinary
+  commands use these defaults and gates may only export the same tuple.
+  `tcp` uses `/var/worktrees/.cache/tmpdir/xpf-cluster-tcp.lock`,
+  `/var/worktrees/.cache/tmpdir/xpf-cluster-tcp.owner`, and
+  `/var/worktrees/.cache/tmpdir/xpf-cluster-state/epoch-tcp`; `udp`
+  uses `/var/worktrees/.cache/tmpdir/xpf-cluster-udp.lock`,
+  `/var/worktrees/.cache/tmpdir/xpf-cluster-udp.owner`, and
+  `/var/worktrees/.cache/tmpdir/xpf-cluster-state/epoch-udp`.
+  EVERY caller of a `tcp`/`udp` cluster — campaign gate, ordinary
+  deploy, failover, or smoke — MUST export that cluster's tuple before
+  invoking any self-locking command; without these exports the scripts
+  fall back to the loss tuple, so gates and ordinary commands could race
+  or serialize against the wrong cluster. With these canonical tuples,
+  all three clusters can run in parallel (workstation build CPU is still
+  shared; only cluster access parallelizes). **Assignment (stated once,
+  applies everywhere including Step 3): dataplane, forwarding, or
+  throughput changes gate on `loss` — mandatory, never least-busy
+  overflow; every other gated PR (or batch) goes to the least-busy
+  of `loss`/`tcp`/`udp`.** The clusters are NOT interchangeable
+  baselines: `tcp`/`udp` run a bridge-fabric fallback (see their env
+  files), so every throughput comparison is against `origin/master`
+  measured on the SAME cluster — never quote a loss number (~23 Gbit/s)
+  for `tcp`/`udp`. The trust/untrust directional matrix does NOT live
+  on these HA clusters; policy-directional PRs additionally run
+  `/security-matrix` directional cases on their proper topology.
+  **Do not regress max throughput**: the decidable rule is Step 3
+  item 4 (run 5x per head per family; block if the PR median is >10%
+  below the same-cluster master median, or PR multi-stream retransmits
+  (summed) exceed master's, or any forwarding failure). Known-external
+  failures (e.g. upstream lab IPv6 target dead from the firewall
+  itself) are recorded as such, not chased.
 - **Don't bail**: no yielding at phase boundaries, todo flips, or partial
   waves. Loop audits until they come back clean; file new issues found on
   the way and drive those too.
@@ -58,6 +178,89 @@ those too. Stop only when no driveable work remains.
 This skill is the orchestration layer ABOVE `/research` and `/engineer`.
 It does not re-implement them — it ranks the backlog, picks a route
 (parallel or serial), fans out agents, and enforces the merge discipline.
+It is the SINGLE skill for closing the repo out: research keeps filing
+issues (a large, growing open-issue count during research is normal),
+engineers convert them to PRs, and this skill lands or kills every one
+of both. Do not run a separate PR-closing pass — PR landing and issue
+work are fed from the same lane pool here.
+
+## The keeper — dedicated monitor agent (eyes only, no hands)
+
+The keeper is a MECHANISM, not a self-waking agent (background
+agents do not tick on timers). At campaign start the parent authors
+a small poll script under `/var/worktrees/.cache/keeper/keeper.sh`
+(Step 0 commands + lock-holder reads; the parent writes it once and
+shows it in the tracking task — there is no pre-existing keeper
+script in the repo) and starts it as a `Monitor` loop. The script
+polls every ~180s, atomically rewrites the board file
+`/var/worktrees/.cache/keeper/board.md` (write temp + `mv`),
+appends one `epoch,df-used-pct,df-free` line per tick to
+`/var/worktrees/.cache/keeper/df-history.log` (the fill-rate trigger
+in the disk guard is computed from this history — slope of the
+`df-free` BYTES over the last hour of samples; used-pct is too
+coarse at TB scale, 1% ≈ 40G here, and would read zero while tens
+of GB/hour are consumed; prune the history with the board
+rotation), AND
+prints exactly one summary line per tick to stdout (`keeper:
+prs=<n> issues=<total> oldest-verdict-age=<dur> stale-lanes=<n>`)
+— Monitor wakes the parent on stdout lines; a silent file rewrite
+alerts nobody. The keeper has exactly ONE power: observe and alert.
+It NEVER dispatches, reaps, refills, reviews, or merges — the
+PARENT is the single dispatch authority. It is the ONLY routine
+poller: the parent reads the board on each Monitor wake (and only
+re-polls directly to verify before dispatch/merge), so Step 0
+never runs twice per tick. Keeper death is DETECTABLE: if
+`board.md` is older than 10 min, the keeper is dead — the parent
+self-monitors with Step 0 and relaunches the Monitor the same tick.
+Every tick the keeper:
+
+1. Polls ground truth with the Step 0 commands (light fields only,
+   plus the total-count reconciliation there). Never trusts a
+   completion-notification body (they can be cross-wired between
+   agents) — verifies via `gh`/`git`.
+2. Publishes ONLY what `gh`/`git`/lock/disk state can prove:
+   `/var/worktrees` volume usage (`df` percent/free every tick; the
+   `.cache` `du` breakdown only at the ≥70% tier, with the disk-guard
+   tier from the standing orders), open PR
+   count by merge state including draft (`isDraft` is requested in
+   Step 0), open issue TOTAL (search `total_count`, authoritative)
+   plus per-band counts *where labels support it* and an `unbanded`
+   remainder (60-char titles cannot classify semantics — report the
+   remainder, never invent bands), per-cluster lock holder (from
+   the canonical owner file for that cluster, per the standing
+   orders), and the age of the oldest PR whose latest
+   reviewer record has no subsequent parent action comment. Cost
+   control: that verdict-age scan runs ONLY for PRs awaiting parent
+   action (a reviewer record newer than the last parent action),
+   using per-PR timestamps cached in
+   `/var/worktrees/.cache/keeper/verdict-ages.tsv` (bootstrap: one
+   full scan at keeper start seeds it; each tick evicts rows whose
+   PR is no longer open) and re-scanning
+   only PRs whose `updatedAt` changed — never an O(open-PRs)
+   comment scan of the whole queue every tick, which rate-limits
+   the keeper exactly when the backlog peaks. Read the paginated PR
+   conversation-comment endpoint
+   `gh api --paginate repos/$(gh repo view --json nameWithOwner
+   -q .nameWithOwner)/issues/<n>/comments`; parent reviewer stamps
+   and actions live there, not in `/pulls/<n>/comments` (which
+   contains inline review comments). `updatedAt` is requested in the
+   Step 0 PR field list and is the cache invalidation key. In-flight
+   reviews are invisible until posted. Lane busy/idle state is NOT
+   on the keeper board: the agent registry is parent-harness state,
+   so the PARENT appends its own lane table to the board each time
+   it acts.
+3. Flags (does not act on) refill/rebalance/disk needs: disk-guard
+   tier (≥70% flag, ≥85% reap-now), idle capacity
+   while either queue has driveable work (queued PRs/issues with no
+   linked lane), a gate queued on one cluster while another lock is
+   free, a reviewer out of credits, a lane that looks dead
+   (unreachable AND no worktree writes AND no live procs for several
+   minutes; liveness is commit-time + procs, never output-mtime),
+   and dead lanes possibly holding salvageable work. The parent
+   verifies against its lane registry and acts the same tick — PR
+   work first, then the lowest-numbered issue in band; if PRs drain,
+   convert closers to engineers/researchers, and vice-versa if
+   research floods in.
 
 ## Arguments
 
@@ -75,7 +278,10 @@ campaign; `CronDelete` when the backlog is terminal.
 ## Continuous smoke watch (standing, never blocking)
 
 Run a permanent smoke-feedback lane OUTSIDE the parallel agent lanes
-(it does not count against lane limits and never gates a merge):
+(it does not count against lane limits and never gates a merge). This
+watch is a background regression tripwire on `loss` only — it is NOT
+the per-PR gate (Step 3 item 4, which runs on the assigned cluster
+and DOES gate merges). Never cite a green watch as a passed gate:
 
 - A background service loops every ~15 min against the current master
   tip: (1) `test-connectivity.sh cluster`, (2) LIVE node CLI probes on
@@ -98,13 +304,20 @@ Run a permanent smoke-feedback lane OUTSIDE the parallel agent lanes
 
 ## The cardinal rule
 
-**You (the PARENT) own review and merge.** The companion lane (Codex/AGY)
-is infra-degraded and SERIAL (one Codex + one AGY globally), and spawned
-engineer agents CANNOT dispatch their own sub-reviewers. Therefore:
+**You (the PARENT) own review and merge.** Reviewer dispatch capacity
+is whatever the internal task runner provides — the three reviewers
+may run concurrently or queue; the gate requires three verdicts at
+the same final head, NOT simultaneity. Spawned engineer agents
+CANNOT dispatch their own sub-reviewers. Therefore:
 
-- **PARENT dispatches an independent hostile Claude reviewer for EVERY
-  PR** (a `general-purpose` agent, read-only, worktree-scoped, ends with a
-  verdict). See `/review-pr` for the hostile-review shape.
+- **PARENT dispatches THREE independent hostile reviewers for EVERY
+  PR** — three distinct models from the pool (Muse Wonder, Opus 5.5,
+  Codex-6 Astra, GLM-5.3, Kimi K3.1 Pro), each read-only,
+  worktree-scoped, primed as a hostile domain expert, ending with a
+  verdict at the FINAL head. All three must clear before merge; any
+  real finding from any one blocks. See `/review-pr` for the
+  hostile-review shape; Copilot (below) is a supplement, never a
+  substitute for one of the three.
 - **PARENT reads + EVALUATES Copilot inline on the FINAL head BEFORE
   every merge** — grep each cited line, decide real/stale, fold real
   findings. Printing Copilot is not evaluating it. (This rule exists
@@ -113,16 +326,28 @@ engineer agents CANNOT dispatch their own sub-reviewers. Therefore:
 - **PARENT merges**, never the spawned agent. Agents implement + test +
   open the PR and STOP.
 
-## Step 0: Reconcile ground truth (every tick)
+## Step 0: Reconcile ground truth (keeper every tick; parent verifies before dispatch/merge)
 
 ```bash
 git fetch origin master
 git rev-parse --short origin/master
-gh issue list --state open --limit 100 --json number,title,labels,body \
-  --jq '.[] | "#\(.number) [\(.labels|map(.name)|join(","))] \(.title[0:60]) | \(.body|length)c"' | sort -n
-gh pr list --state open --json number,title,headRefName,mergeable \
-  --jq '.[] | "\(.number) [\(.mergeable)] \(.headRefName)"'
+# Light fields only — never fetch full issue bodies for a board poll.
+gh issue list --state open --limit 1000 --json number,title,labels \
+  --jq '.[] | "#\(.number) [\(.labels|map(.name)|join(","))] \(.title[0:60])"' | sort -n
+# Total-count reconciliation: the list above silently caps at 1000.
+REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+gh api "search/issues?q=repo:${REPO}+state:open+type:issue" \
+  --jq '.total_count'
+gh pr list --state open --limit 200 \
+  --json number,title,headRefName,mergeable,isDraft,updatedAt \
+  --jq '.[] | "#\(.number) [\(.mergeable)] draft=\(.isDraft) \(.headRefName)"'
 ```
+
+The search `total_count` is authoritative for backlog size. If the
+listed issue count != `total_count`, the board is incomplete: say
+so on the board and page (`--limit 1000` with label/number filters)
+until they reconcile — never report a capped count as the backlog
+size.
 
 Then `TaskList` to read the tracking task (the campaign's state-of-record),
 and wedge-check any running agents. **Liveness = branch/PR commit-time AND
@@ -159,7 +384,9 @@ issue reaches MERGED or a rigorously reviewed PLAN-KILL — not a `plan-deferred
 label that leaves the issue open forever.** Deferring with a reason is a
 throughput failure, not a disposition. The correct response to a hard problem
 is to `/research` it to a converged plan and `/engineer` it to a merge (or a
-2-of-3-reviewed KILL), NOT to write "defer, revisit on demand" and move on.
+PLAN-KILL only when all three independent `/research` reviewers converge on
+rejecting the final reviewed approach), NOT to write "defer, revisit on demand"
+and move on.
 
 So on every campaign pass, **re-open the `plan-deferred` set and drive it**:
 
@@ -167,9 +394,11 @@ So on every campaign pass, **re-open the `plan-deferred` set and drive it**:
   MAIN queue. `/research` each to a converged plan, then `/engineer` it to a
   MERGE. A refactor whose premise is stale (file already under threshold, target
   already extracted, already-fixed) → CLOSE it as such (that IS terminal). A
-  refactor that survives review as genuinely-not-worth-it → PLAN-KILL with the
-  2-of-3 verdict (label `plan-kill`, close). "Unproven codegen risk" is a reason
-  to add an asm-diff gate and DO the extraction, not to defer it indefinitely.
+  refactor that survives review as genuinely-not-worth-it → PLAN-KILL only
+  after all three independent `/research` reviewers converge on rejecting the
+  final reviewed approach (label `plan-kill`, close). "Unproven codegen risk"
+  is a reason to add an asm-diff gate and DO the extraction, not to defer it
+  indefinitely.
 - **`plan-deferred-operator` / `plan-deferred-lab`** → **ship the CODE, defer
   only the external verify.** A "needs an operator decision" is a design
   question to resolve in `/research` (pick the safe default, document it) then
@@ -181,10 +410,12 @@ So on every campaign pass, **re-open the `plan-deferred` set and drive it**:
   do NOT touch held code.
 
 Never write a fresh `plan-deferred` label to escape a hard item. If `/research`
-converges on PLAN-KILL, that is terminal (label `plan-kill`, close). If it
-converges PLAN-READY, `/engineer` it to a merge. There is no third "deferred"
-outcome except a maintainer hold or a hard external dependency whose CODE is
-already shipped.
+converges on PLAN-KILL with all three reviewers rejecting the final reviewed
+approach, that is terminal (label `plan-kill`, close). One PLAN-KILL is
+substantive dissent: investigate/revise and re-review, never close. If the
+reviewers converge PLAN-READY, `/engineer` it to a merge. There is no third
+"deferred" outcome except a maintainer hold or a hard external dependency whose
+CODE is already shipped.
 
 ## Step 2: Pick a route
 
@@ -194,9 +425,10 @@ Fan out wide. For each disjoint issue, dispatch a `general-purpose`
 engineer agent (or `/research` first if the design needs human judgement).
 Run as many concurrently as the box allows.
 
-- **Unique `CARGO_TARGET_DIR=/dev/shm/cargo-<issue>` per Rust agent** — 8
-  concurrent `cargo --release` against one target dir thundering-herds and
-  starves them all. Cap concurrency to ~cores.
+- **Unique `CARGO_TARGET_DIR=/var/worktrees/.cache/cargo-<issue>` per Rust
+  agent** (scratch rule above — never `/dev/shm` or `/tmp`) — 8 concurrent
+  `cargo --release` against one target dir thundering-herds and starves
+  them all. Cap concurrency to ~cores.
 - Each agent: fresh worktree off CURRENT master
   (`git worktree add -b fix/<n>-campaign-pub /var/worktrees/campaign-pub/wt-<n> origin/master`),
   implement + fail-on-revert tests + build green + open PR ("Closes #<n>")
@@ -217,11 +449,18 @@ Run as many concurrently as the box allows.
   never `git checkout` in the main checkout.
 
 **Batch-smoke optimization (disjoint dataplane PRs):** integrate N
-disjoint dataplane PRs onto ONE integration branch and run ONE loss-cluster
-iperf smoke to validate them all, then merge them individually. Code in
-disjoint regions auto-merges; only `_Log.md` needs a union and a shared
-file touched by two PRs needs an additive merge (keep both — e.g. gre.rs
-`outer_ecn_bits` ‖ `inner_dst_ip`). This amortizes the shared cluster lock.
+disjoint dataplane PRs onto ONE integration branch and run ONE cluster
+gate (connectivity + transit throughput, Step 3 item 4) as a
+SUPPLEMENT — it never replaces per-PR review stamps or per-PR gate
+records at each PR's own head (Step 4 item 0). Record the integration
+result on each PR in the batch in addition to its own-head evidence,
+then merge them individually. Spread concurrent batches across
+`loss`, `tcp`, and `udp` — never queue every batch behind one
+cluster. Code in disjoint regions auto-merges; only `_Log.md` needs
+a union and a shared file touched by two PRs needs an additive merge
+(keep both — e.g. gre.rs `outer_ecn_bits` ‖ `inner_dst_ip`). This
+amortizes the shared cluster lock without serializing the campaign
+on a single gate system.
 
 ### Serial route (coupled issues)
 
@@ -242,30 +481,264 @@ For each PR an agent opens:
 
 1. **Message-shape gate (BOUNCE before any code review)** — run `git log origin/master..origin/<branch> --format='%h %s%n%b'` and `gh pr view <n> --json title -q .title`. EVERY branch commit MUST match `<area>: <imperative summary> (#NNNN)` + Why/What/Validation/Risk body (per the commit-message standard); the PR TITLE must match the same subject format (it becomes the merge-commit message). Bounce ANY violation back to the lane (amend + force-push) before reading a line of diff — title-only commits, bare `fix:`, missing refs, and malformed PR titles are all merge-blockers. No exceptions, no parent-side repair (the lane owns its history).
 2. **Re-verify the FINAL head** — `gh pr view <n> --json headRefOid`.
-   started). Always review/merge the current head, not the one you saw.
-3. **Dispatch an independent hostile Claude reviewer** (background
-   `general-purpose`, worktree-scoped, read-only, verdict-first). Bar by
-   risk:
-   - pure code-motion → reviewer + SMR + tests
+   Always review and merge the head you just polled, never the head
+   you saw when review started — heads move under folds and rebases.
+3. **Classify, then dispatch the triple hostile review.** The PARENT
+   classifies the PR from the diff (`git diff --stat origin/master...HEAD`),
+   never from the author's label: (a) `code/behaviour` — any shipped
+   code or behaviour change; (b) `docs/test-only` — diff touches only
+   docs, comments, or tests, with no shipped-code change. Test-only
+   still gets full test-suite validation; docs/test-only skips only
+   item 4, and the parent records the diff stat justifying the class
+   on the PR. Code-motion inside the packet/dataplane path is class
+   (a) and is gated — "pure move" exempts nothing on the hot path.
+   Then dispatch THREE background reviewers via the internal `task`
+   tool, each explicitly requesting a distinct model from the pool
+   (Muse Wonder, Opus 5.5, Codex-6 Astra, GLM-5.3, Kimi K3.1 Pro),
+   worktree-scoped, READ-ONLY (reviewers never write to the PR; they
+   return their verdict to the parent). Brief template (fill per
+   PR): "You are a hostile domain-expert reviewer (HPC networking /
+   OS / CPU / protocols; xpf is an eBPF firewall with a userspace
+   AF_XDP Rust dataplane). Review PR #<n> at head <SHA> in
+   <worktree>. Presume something is wrong. Verify every claim
+   against the code at this SHA and cite file:line; reproduce
+   findings where possible. Check: diff vs claimed scope,
+   API/caller impact, datastructure/BPF invariants, hot-path
+   allocation, concurrency, numerical edges, backward compat,
+   tests on real call sites, claimed vs actual smoke. Return
+   exactly one verdict line: VERDICT: MERGE-READY /
+   MERGE-NEEDS-MINOR / MERGE-NEEDS-MAJOR, preceded by findings."
+   **Authoritative channel + audit record:** the task RESULT
+   returned to the parent is authoritative in-session; the durable
+   record is what the parent — and only the parent — posts to the
+   PR: the reviewer's FULL findings text as a PR comment, headed by
+   `Reviewer: <model> | Task: <task-id> | Head: <SHA> | Verdict:
+   <verdict>`. Posting full text (not just the verdict word) is
+   required so a post-merge audit can reconstruct what was reviewed
+   after task results are gone. At merge time the parent checks the
+   record is PRESENT at the head being merged; resolving `<task-id>`
+   to a live task is required only while the session lives (task
+   results are ephemeral — never make a merged PR retroactively
+   fail its checklist because a task expired). A self-posted
+   reviewer comment without the parent header, or a verdict at a
+   different SHA, does not count. (This is a record of dispatch, not
+   cryptographic proof of model identity — if the runner cannot
+   honour the requested model, the result says so and the parent
+   records the substitution; never silently relabel.) If a model is out of
+   credits/quota, swap in the next pool model the same tick and note
+   it on the PR. Depth by risk (count is always three; docs/test-only
+   uses the same three records in short form and skips item 4):
+   - pure code-motion outside the packet path → triple review + tests
    - hot-path / failover / session / CoS / HA / RA / FRR / WG →
-     full review + loss-cluster smoke (`test-failover` for failover,
-     iperf for dataplane)
-   - upgrade / correctness / security → thorough review
-4. **Read + evaluate Copilot inline on the final head** as a SEPARATE step
-   before merge. Fold real findings.
-5. **Fold review findings** by resuming the engineer agent
+     triple review + cluster gate below (failover PRs add
+     `test-failover`; dataplane PRs add iperf throughput)
+   - upgrade / correctness / security → triple review, maximal depth
+   All three must reach MERGE-READY at the same final head; any real
+   finding from any one blocks (fail-closed veto, not majority vote).
+   Parent verifies every cited finding against the actual code before
+   folding — stale/disproven findings are recorded as such, never
+   folded. **Fold-loop cap:** at most 3 review/fold cycles per PR
+   (cycles count across rebases/folds for the same PR number; record
+   the count on the PR). On the 3rd unresolved cycle, stop folding
+   and escalate: parent chooses split-into-smaller-PRs or
+   re-`/research`, and LOGS the escalation (cycle count, reason,
+   chosen path) on the linked issue AND increments the campaign
+   split/escalation count on the tracking task, so a pathological
+   issue is visible as such at termination — exhaustion alone never
+   closes a PR; "superseded" requires naming the superseding PR.
+4. **Gate on forwarding + throughput (three clusters in parallel).**
+   Skipped only for parent-classified `docs/test-only` PRs (Step 3
+   item 3). Otherwise: dataplane/forwarding/throughput PRs MUST gate
+   on `loss`; every other gated PR uses the least-busy cluster `<C>`
+   (`loss` | `tcp` | `udp`) as defined once in the standing orders.
+   BUILD THE PR HEAD outside the lock (never the control checkout —
+   `make` in control builds clean master and gates the wrong code),
+   then run deploy + ALL measurement inside ONE lock cell. Every
+   cluster caller must use that cluster's canonical tuple from the
+   standing orders. For `loss`, use the exact `cluster-lock.sh`
+   defaults; for `tcp`/`udp`, export their stated tuple before
+   invoking `with-cluster.sh` (ordinary commands must do the same).
+   Pattern (per `docs/engineering-style.md`; the failover skill's
+   single-cell shape):
+   ```bash
+   WT=/var/worktrees/campaign-pub/wt-<n>          # PR worktree
+   export WT
+   C=<C>                                          # loss | tcp | udp
+   export BPFRX_CLUSTER_ENV="test/incus/${C}-userspace-cluster.env"
+   case "$C" in
+     loss)
+       export XPF_CLUSTER_LOCK=/var/worktrees/.cache/tmpdir/xpf-cluster.lock
+       export XPF_CLUSTER_OWNER=/var/worktrees/.cache/tmpdir/xpf-cluster.owner
+       export XPF_CLUSTER_EPOCH=/var/worktrees/.cache/tmpdir/xpf-cluster-state/epoch
+       ;;
+     tcp|udp)
+       export XPF_CLUSTER_LOCK="/var/worktrees/.cache/tmpdir/xpf-cluster-${C}.lock"
+       export XPF_CLUSTER_OWNER="/var/worktrees/.cache/tmpdir/xpf-cluster-${C}.owner"
+       export XPF_CLUSTER_EPOCH="/var/worktrees/.cache/tmpdir/xpf-cluster-state/epoch-${C}"
+       ;;
+     *) echo "unknown cluster: $C" >&2; exit 2 ;;
+   esac
+   # Ask this worktree's Makefile for its exact build version, then
+   # build that version outside the cluster lock.
+   BUILD_DEB_VERSION=$(make -s -C "$WT" \
+     --eval='campaign-print-deb-version:;@printf "%s\n" "$(DEB_VERSION)"' \
+     campaign-print-deb-version)
+   make -C "$WT" deb DEB_VERSION="$BUILD_DEB_VERSION"
+   PR_HEAD=$(git -C "$WT" rev-parse HEAD)         # record == PR head
+   # Select by explicit Debian version and exact package metadata, never
+   # mtime. The numeric xpf_[0-9]* glob excludes xpf-appliance_*; Package
+   # and Architecture checks fail closed if the filename is misleading.
+   DEB_FILE=
+   for candidate in "$WT"/dist-deb/xpf_[0-9]*_amd64.deb; do
+     [ -f "$candidate" ] || continue
+     [ "$(dpkg-deb -f "$candidate" Package)" = xpf ] || continue
+     [ "$(dpkg-deb -f "$candidate" Architecture)" = amd64 ] || continue
+     [ "$(dpkg-deb -f "$candidate" Version)" = "$BUILD_DEB_VERSION" ] || continue
+     DEB_FILE=$candidate
+     break
+   done
+   test -n "$DEB_FILE" || { echo "built xpf package not found" >&2; exit 1; }
+   DEB_VERSION=$(dpkg-deb -f "$DEB_FILE" Version)
+   test "$DEB_VERSION" = "$BUILD_DEB_VERSION"
+   export DEB_FILE                                  # exact path pin only
+   unset DEB_VERSION BUILD_DEB_VERSION             # never into locked make
+   # Write the whole gate as ONE cell script, then run it under ONE lock:
+   cat > /var/worktrees/.cache/gate-<n>-<C>.sh <<'CELL'
+   set -euo pipefail
+   cd "$WT"                                       # cell cwd = PR worktree
+   source test/incus/deploy-lib.sh
+   # deploy_gate_wave preserves the exact checkout fence. Deploy the
+   # prebuilt package by path; DO NOT pass DEB_VERSION to make while
+   # locked: Makefile prepare-deb treats an explicit version as a
+   # request to run make deb again. This bypasses that prerequisite
+   # without weakening artifact selection or build attestation.
+   deploy_gate_wave "$WT" test-connectivity make \
+     env BPFRX_CLUSTER_ENV="$BPFRX_CLUSTER_ENV" \
+       XPF_CLUSTER_SKIP_BUILD=1 XPF_DEPLOY_DEB_PATH="$DEB_FILE" \
+       "$WT/test/incus/cluster-setup.sh" deploy all
+   source test/incus/cluster-env.sh             # cluster host/iperf targets
+   source test/incus/cluster-build-identity.sh
+   xpf_cluster_rebaseline_build                 # sanctioned deploy in THIS cell
+   xpf_assert_cluster_build_unchanged           # fatal if measured != deployed
+   # Pre-check (labelled PRECHECK in the record; never a measured cell):
+   # target actually serves iperf3, else env failure, not PR failure:
+   sg incus-admin -c "incus exec $CLUSTER_LAN_HOST -- timeout 5 iperf3 -c $IPERF_TARGET4 -t 1 -p 5201" >/dev/null
+   sg incus-admin -c "incus exec $CLUSTER_LAN_HOST -- iperf3 -c $IPERF_TARGET4    -t 5 -p 5201"
+   sg incus-admin -c "incus exec $CLUSTER_LAN_HOST -- iperf3 -c $IPERF_TARGET4 -R -t 5 -p 5201"
+   sg incus-admin -c "incus exec $CLUSTER_LAN_HOST -- iperf3 -c $IPERF_TARGET6    -t 5 -p 5201"
+   sg incus-admin -c "incus exec $CLUSTER_LAN_HOST -- iperf3 -c $IPERF_TARGET6 -R -t 5 -p 5201"
+   # (multi-stream + CoS cells per pass/fail rules below, same cell)
+   CELL
+   ./test/incus/with-cluster.sh "gate PR #<n> on $C" -- bash /var/worktrees/.cache/gate-<n>-<C>.sh
+   Deploy from the PR worktree's prebuilt, path-pinned package and run
+   `test-connectivity` plus every required measurement in the same cell;
+   if deployed-SHA != PR-head-SHA, the gate has not run — record that
+   and do not substitute a master run. For CoS cells, apply config to
+   the ACTIVE RG primary (resolve it — `./test/incus/active-fw.sh`
+   / cluster status — never blindly `$FW0`, which may be secondary
+   after a failover), then sweep 5201–5206 in the same cell. HA PRs
+   add `test-failover` on the same env in the same cell. Connectivity
+   alone is not a passed gate, and never run iperf cells after the cell
+   exits — the next lane's deploy would invalidate them. Per-PR gate
+   budget: target ≤20 min inside the lock (excluding queue wait); when
+   the queue is deep, the baseline cache below is what keeps this
+   affordable — never cut reviewer count or skip the PR-head build to
+   save gate time.
+   Policy-directional changes additionally run `/security-matrix`
+   directional cases (trust→untrust ALLOW, untrust→trust BLOCK,
+   trust→trust ALLOW + negative control) on the security-matrix
+   topology — the HA clusters have no per-zone hosts and do not
+   substitute for it. If that topology cannot forward even on
+   unmodified master (known standalone black-hole), record
+   `directional: INCONCLUSIVE (env)` with the master control result;
+   never record it as pass or as a PR failure.
+   **Pass/fail per cell (decidable; accepted tradeoff stated):**
+   compare against a CACHED baseline per cluster with a VALIDITY
+   WINDOW (keying by master SHA alone invalidates on every merge —
+   the campaign's main activity — so the window is time/count
+   based): the first gate needing a baseline deploys master on that
+   cluster (clean master worktree, config reset) and measures. Capture
+   the epoch before writing the uniquely named record, then append its
+   index row only after the complete record exists:
+   ```bash
+   CAPTURE_EPOCH=$(date +%s)
+   BASELINE_FILE="/var/worktrees/.cache/gate-baselines/${C}-${MASTER_SHA}-${CAPTURE_EPOCH}.md"
+   # Write the measured baseline record (master SHA and every cell's data) to $BASELINE_FILE.
+   printf '%s %s %s %s\n' "$C" "$MASTER_SHA" "$CAPTURE_EPOCH" "$(basename "$BASELINE_FILE")" \
+     >> /var/worktrees/.cache/gate-baselines/INDEX
+   ```
+   `INDEX` rows have the form `<cluster> <masterSHA> <capture-epoch>
+   <file>`. It stays valid for 4 hours OR 10 subsequent merges,
+   whichever comes first; every PR record names the baseline SHA + its
+   age/merge-drift. Accepted drift risk: master content merged inside
+   the window is itself gated, so the baseline lags reality by at most
+   that window; re-baseline early if gate-relevant config/fixtures
+   change or the lab is visibly degraded. Never re-deploy master for
+   every PR (that doubles lock hold for zero information). PR
+   measurement always follows a config reset so prior-PR state cannot
+   leak in.
+   - Connectivity + single-stream cells (4: v4/v6 × push/reverse):
+     PASS iff traffic flows and PR retransmits ≤ master retransmits
+     for the same cell. Single-stream throughput is not rate-gated
+     (per-CPU caps make it a connectivity check, not a perf check).
+   - Multi-stream throughput cell (`-P 12 -t 10 -R`, v4 and v6):
+     run 5× per head per family. For each family, BLOCK if the PR
+     five-run median is more than 10% below the same-cluster master's
+     five-run median, regardless of how many individual runs are
+     below that median; otherwise PASS this rate check only if the
+     PR's summed retransmits are ≤ the master's summed retransmits.
+     Do not waive a median regression because of run consistency or
+     a 10–15% noise/retry clause. The accepted tradeoff is possible
+     false-blocking on a degraded-lab day; the 10% median tolerance
+     avoids blocking on a single outlier while rejecting sustained
+     median regressions. "Line rate" = the same-cluster master median
+     just measured (loss ≈23 Gbit/s historically; `tcp`/`udp`
+     baselines are whatever their master medians are — never import
+     loss numbers).
+   - CoS per-class cells (when applicable): PASS iff every unshaped
+     class matches its master-cell behaviour and shaped classes hit
+     their shaped rate with no buffer drops beyond master.
+   - Forwarding/connectivity failure on any cell that passes on
+     master = BLOCK, unconditionally.
+   Record on the PR: cluster, PR head SHA, master SHA, every cell's
+   numbers (including all multi-stream runs), directional result or
+   `N/A (not a policy PR)` / `INCONCLUSIVE (env)`, and the verdict.
+   "Smoke passed" without numbers is not a gate. Any
+   behavior-changing fold re-runs BOTH this gate and the triple
+   review at the new head (counts toward the fold-loop cap).
+5. **Read + evaluate Copilot inline on the final head** as a SEPARATE step
+   before merge (supplement to, never a substitute for, the triple
+   review). Fold real findings. If the latest Copilot response is
+   the quota message — or no review lands after one `@copilot
+   review` request plus one keeper tick — record `Copilot:
+   unavailable (quota)` on the PR; that SATISFIES this item and the
+   Step 4 checklist (load-bearing assurance is then the parent
+   RED-on-revert + triple review). Never wait indefinitely for
+   Copilot and never waive the item silently.
+6. **Fold review findings** by resuming the engineer agent
    (`SendMessage({to: "<agentId>", ...})` — resumes a COMPLETED agent with
    its context intact) OR inline if the agent's worktree is at a stale
    pre-rebase head that would overwrite your rebase.
 
-Copilot routinely catches substantive incompleteness the hostile reviewer
-passes (e.g. a fail-closed bound by slice length instead of the
-IP-declared length; a cmsg underflow). Both gates must clear.
+Copilot routinely catches substantive incompleteness the hostile reviewers
+pass (e.g. a fail-closed bound by slice length instead of the
+IP-declared length; a cmsg underflow). Every gate must clear: all three
+hostile verdicts, the cluster gate, and the Copilot evaluation.
 
 ## Step 4: Merge (PARENT)
 
 Per PR, in order:
 
+0. **Gate checklist (hard stop):** confirm on the PR, all at the head
+   you are about to merge — three reviewer records with full
+   findings text (Step 3 item 3) all MERGE-READY at this SHA
+   (records headed at older SHAs are history and never count
+   toward the three),
+   cluster-gate record with numbers (Step 3 item 4) or the parent's
+   recorded `docs/test-only` classification with diff stat, and the
+   Copilot evaluation (Step 3 item 5) with every real finding folded.
+   If any item is missing or recorded at a different SHA, do NOT
+   merge — return to Step 3.
 1. Re-poll `mergeable` THROUGH `UNKNOWN` (GitHub recomputes after every
    push) until `MERGEABLE`/`CLEAN` or `CONFLICTING`.
 2. If `CONFLICTING` (almost always `_Log.md` after master advanced): in a
@@ -278,7 +751,9 @@ Per PR, in order:
    `gh issue close <n>` with a comment citing the merge SHA + smoke result.
 5. Fetch master; the NEXT PR now needs its own `_Log` rebase vs the new
    master — repeat.
-**Control-cleanliness gate (2026-09-22 incident: 24 lane-leaked files sat in the control tree and silently wedged every `merge --ff-only`, leaving control 15 merges behind; 2026-09-24: scratch trees moved out of the repo to `/var/worktrees/` so no in-repo wipe can take them):** before EVERY merge-prep, run `git status --short` in control — it MUST show nothing at all: zero M/A/D/R lines AND zero `??` lines (worktrees no longer live under the repo, so any untracked entry is unexpected). If dirty: STOP; `git stash push -m control-rescue-<date>` (tracked only, NEVER `-u`); confirm with `git stash list` BEFORE resetting; `git fetch origin` then `git reset --hard origin/master`; triage the stash per-file (duplicate-of-branch → drop after lane confirms; unique → rescue to the owning lane); triage unexpected `??` paths individually (`mv` aside per-file …
+**Control-cleanliness gate (2026-09-22 incident: 24 lane-leaked files sat in the control tree and silently wedged every `merge --ff-only`, leaving control 15 merges behind; 2026-09-24: scratch trees moved out of the repo to `/var/worktrees/` so no in-repo wipe can take them):** before EVERY merge-prep, run `git status --short` in control — it MUST show nothing at all: zero M/A/D/R lines AND zero `??` lines (worktrees no longer live under the repo, so any untracked entry is unexpected). If dirty: STOP; `git stash push -m control-rescue-<date>` (tracked only, NEVER `-u`); confirm with `git stash list` BEFORE resetting; `git fetch origin` then `git reset --hard origin/master`; triage the stash per-file (duplicate-of-branch → drop after lane confirms; unique → rescue to the owning lane); triage unexpected `??` paths individually — `mv` each aside under
+`/var/worktrees/.cache/control-rescue-<date>/` (never `rm`), confirm
+`git status --short` is empty, and only then proceed with the merge.
 
 **NEVER backticks in `git commit -m`** — use `git commit -F -` heredoc (PR
 bodies + commit messages contain backticked identifiers).
@@ -311,7 +786,7 @@ proceed to Step 7.
 ## Step 7: Terminate
 
 **Termination requires EVERY open issue to be `MERGED` or `PLAN-KILLED`
-(2-of-3-reviewed, labeled `plan-kill`, closed).** A `plan-deferred` label is
+(all-three-reviewed, labeled `plan-kill`, closed).** A `plan-deferred` label is
 NOT a terminal state — see "`plan-deferred` is NOT a terminal state" above. If
 any open issue still carries a `plan-deferred-*` label, the campaign is NOT
 done: go back and drive it (`/research` → `/engineer` → merge, or `/research`
@@ -320,14 +795,32 @@ maintainer-held issue you were told not to touch, and (b) an issue whose CODE is
 already merged and whose ONLY remaining item is a hardware/live-capture verify
 you cannot perform — and that must say exactly that on the issue.
 
-When EVERY open issue (including newly-filed) is `MERGED` or `PLAN-KILLED` (per
-the above), and the final integration audit is clean:
+Termination additionally requires `gh pr list --state open` to be
+empty (except PRs explicitly held by a maintainer with the hold
+recorded on the PR). When EVERY open issue (including newly-filed)
+is `MERGED` or `PLAN-KILLED` (per the above), every open PR is
+merged or closed-with-disposition, and the final integration audit
+is clean:
 
-1. Update the tracking task to COMPLETE with the merged list + deferred set.
+1. Update the tracking task to COMPLETE with the merged list, the
+   plan-killed list, and any held/lab-verify-only exceptions (the
+   (a)/(b) cases above) — there is no other "deferred set".
 2. Write a campaign memory file (`project_campaign<N>_<date>.md`) + a
    one-line `MEMORY.md` index entry capturing the non-obvious lessons.
-3. If cron-driven: `CronDelete` the campaign cron.
-4. `PushNotification` a one-line outcome (the user may be away).
+3. Final disk sweep (termination only — mid-campaign protections no
+   longer apply): first ARCHIVE any keeper board + baseline records
+   cited by merged PRs into the campaign memory note (Step 7 item 2),
+   then remove all campaign worktrees and per-lane
+   `CARGO_TARGET_DIR`s, remaining baselines and gate scripts, stop
+   the keeper Monitor, and remove stale Rust target dirs (plus
+   `go clean -cache` only if the shared-cache collateral was already
+   accepted during the campaign) so the next campaign starts
+   cold-but-clean. Worktrees for held/lab-verify-only exceptions are
+   NOT removed if they hold the only copy of anything — verify clean
+   or already-pushed first. Log the final `df -h /var/worktrees` in
+   the tracking task.
+4. If cron-driven: `CronDelete` the campaign cron.
+5. `PushNotification` a one-line outcome (the user may be away).
 
 ## Standing rules (apply throughout)
 
@@ -377,24 +870,27 @@ the above), and the final integration audit is clean:
   uncommitted work (recover from the diff if you do).
 
 - **Cross-review when the reviewer pool is thin.** engineer≠reviewer does
-  NOT require idle spectator agents: the engineer of PR A reviews PR B and
-  vice-versa. Freeing idle agents for a "small workflow" is fine — refill
-  reviewers by cross-assigning the active engineers, or spawn one fresh
-  reviewer once panes free.
+  NOT require idle spectator agents: the engineer of PR A may give PR B an
+  ADVISORY review and vice-versa. Advisory cross-review never counts
+  toward the three stamped records (Step 3 item 3) — those require
+  parent-dispatched reviewers who did not implement any PR in the
+  current wave. Freeing idle agents for a "small workflow" is fine —
+  refill stamped reviewers from the model pool, not from implementers.
 
 - **Copilot is often quota-blocked for a whole window** ("reached their
   quota limit"). That does NOT waive the gate — it makes the Copilot-eval a
   no-op, so the load-bearing gate is the parent firsthand RED-on-revert PLUS
-  the independent hostile Claude review. Still read the Copilot review on
+  the triple hostile review (Step 3). Still read the Copilot review on
   the final head every merge; it is frequently just the quota message.
 
-- **A design fork surfaced mid-`/engineer` → STOP and defer to `/research`.**
-  If scoping reveals a real design decision (a data-model change, a
-  producer→facility mapping, a backward-compat behavior change, a
+- **A design fork surfaced mid-`/engineer` → STOP engineering and start
+  `/research` now.** If scoping reveals a real design decision (a data-model
+  change, a producer→facility mapping, a backward-compat behavior change, a
   multi-PR-sized "full" option vs a bounded one — e.g. #5797), do NOT pick a
-  scope blind. Record the scoping analysis on the issue, label it
-  `plan-deferred-research`, and let the plan-review gate + user decide. That
-  is a legitimate terminal-without-driving state, not a failure to drive.
+  scope blind. Record the scoping analysis on the issue and label it
+  `plan-deferred-research` while the issue remains open in the work queue.
+  The plan-review gate must resolve the fork; the deferral is explicitly
+  non-terminal, not a reason to stop campaign ownership.
 
 ## Anti-patterns this skill prevents
 
