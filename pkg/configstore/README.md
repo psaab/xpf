@@ -1969,6 +1969,17 @@ owned by the `journal/` subpackage.
   remote syslog — not on-box journal survival. `system_action` is deliberately
   EXCLUDED from `ListCommitHistory` (`show system commit` shows config commits
   only).
+- **Commit-history rows (#16721)** — `ListCommitHistoryRows` pairs each
+  filtered journal row with its Junos rollback label (live commit = 0
+  /`rollback 0`; k>=1 names the commit whose tree `rollback k`
+  restores, only while retained in the history ladder;
+  `commit_confirm` and `auto_rollback` rows have no label). Every
+  confirmation path (explicit confirm, plain commit, HA sync
+  supersede, RG demotion) journals one `commit_confirm` row with its
+  redacted principal. The shared `RenderCommitHistory` prints
+  most-recent-first with labels, principal, and a trailing
+  `<rollback pending>` line while `IsConfirmPending()`; both the CLI
+  and gRPC ShowText use it.
 - **`config_hash`** — sha256 hex of the post-action active tree's
   `Format()` text, the same text `saveRollbackFiles` writes: while a
   slot is retained, `sha256sum <config>.N` correlates the rollback

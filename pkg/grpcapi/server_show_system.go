@@ -31,6 +31,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/clockskew"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/dataplane/mgmtview"
 	dpformat "github.com/psaab/xpf/pkg/dataplane/userspace/format"
 	"github.com/psaab/xpf/pkg/sysservices"
@@ -98,24 +99,14 @@ func (s *Server) showStorage(buf *strings.Builder) {
 // Returns error when the underlying configstore lookup fails so the
 // dispatcher can re-raise as a gRPC status error.
 func (s *Server) showCommitHistory(buf *strings.Builder) error {
-	entries, err := s.store.ListCommitHistory(50)
+	rows, err := s.store.ListCommitHistoryRows(50)
 	if err != nil {
 		return status.Errorf(codes.Internal, "commit history: %v", err)
 	}
-	if len(entries) == 0 {
-		buf.WriteString("No commit history available\n")
-		return nil
-	}
-	for i, e := range entries {
-		detail := ""
-		if e.Detail != "" {
-			// #15144: legacy journal lines may carry control characters;
-			// escape Detail so one entry renders as one line (new
-			// descriptions are rejected at commit in configstore).
-			detail = "  " + termsafe.SanitizeForDisplay(e.Detail)
-		}
-		fmt.Fprintf(buf, "  %d  %s  %s%s\n", i, e.Timestamp.Format("2006-01-02 15:04:05"), e.Action, detail)
-	}
+	// #16721: shared renderer with the in-process CLI —
+	// most-recent-first, rollback-slot labels, principal, and
+	// <rollback pending> while a window is armed.
+	buf.WriteString(configstore.RenderCommitHistory(rows, s.store.IsConfirmPending()))
 	return nil
 }
 

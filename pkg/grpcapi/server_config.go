@@ -334,7 +334,7 @@ func (s *Server) Commit(ctx context.Context, req *pb.CommitRequest) (*pb.CommitR
 	// (CommitWithDescription, #3861) applies them AND clears the timer, so the
 	// edits are committed rather than silently dropped.
 	if s.store.ConfirmOnly() {
-		if err := s.store.ConfirmCommitAs(sessionID); err != nil {
+		if err := s.store.ConfirmCommitPrincipalAs(sessionID, journalPrincipalForContext(s, ctx, sessionID)); err != nil {
 			return nil, status.Errorf(codes.Internal, "%v", err)
 		}
 		return &pb.CommitResponse{}, nil
@@ -409,7 +409,7 @@ func (s *Server) CommitConfirmed(ctx context.Context, req *pb.CommitConfirmedReq
 func (s *Server) ConfirmCommit(ctx context.Context, _ *pb.ConfirmCommitRequest) (*pb.ConfirmCommitResponse, error) {
 	// #5059: only the config-lock holder may confirm (and cancel the auto-
 	// rollback of) the pending commit-confirmed.
-	if err := s.store.ConfirmCommitAs(connSessionID(ctx)); err != nil {
+	if err := s.store.ConfirmCommitPrincipalAs(connSessionID(ctx), journalPrincipalForContext(s, ctx, connSessionID(ctx))); err != nil {
 		if errors.Is(err, configstore.ErrConfigLockedByOther) {
 			return nil, status.Errorf(codes.PermissionDenied, "%v", err)
 		}

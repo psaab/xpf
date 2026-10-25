@@ -1287,6 +1287,13 @@ func (s *Store) SyncApply(content string, chassisPreserve func(*config.ConfigTre
 	syncSupersededConfirm := s.cancelPendingConfirmTimerLocked()
 	if syncSupersededConfirm {
 		s.notifyFirstCommitConfirmedLocked(firstCommitConfirm)
+		// #16721: an HA sync that supersedes a pending window is a
+		// confirmation path; journal it under the cluster-sync label.
+		s.journalLog(&JournalEntry{
+			Action:     "commit_confirm",
+			ConfigHash: journalConfigHash(s.active),
+			Principal:  "system:cluster-sync",
+		})
 		slog.Info("HA config-sync apply confirmed a pending commit-confirmed window")
 	}
 	// #9887: the sync ALSO supersedes the #8566 lost window. No timer was
