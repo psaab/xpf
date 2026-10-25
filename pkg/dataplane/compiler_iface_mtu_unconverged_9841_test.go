@@ -325,14 +325,18 @@ func TestPhysMTUNilLinkRecords9841(t *testing.T) {
 
 // A refused lower with a live VLAN child above the want grades
 // blocked-by-child-live and names the child; the parent sits at its old
-// MTU. The sub-1400 child must already be converged so zone order cannot
-// move the max between children.
+// MTU. The blocking child carries an explicit 1500 statement above the
+// 1400 plan, so no zone order can move it; the statement-less sibling
+// converges to the planned 1400 inline (it never exceeds the parent's
+// live 1500) and must not be named.
 func TestPhysLowerBlockedByLiveChild9841(t *testing.T) {
 	cfg := taggedOnlyConfig9761()
+	cfg.Interfaces.Interfaces[taggedParent9761].Units[50].MTU = 1500
+	cfg.Interfaces.Interfaces[taggedParent9761].Units[80].MTU = 1300
 	parent, sub50, sub80 := taggedParent9761, taggedParent9761+".50", taggedParent9761+".80"
 	var d *mtuDrive9841
 	d = setupMTUApply9841(t, cfg,
-		map[string]int{parent: 1500, sub50: 1300, sub80: 1500},
+		map[string]int{parent: 1500, sub50: 1500, sub80: 1300},
 		mtuDriveOpts9841{
 			seedCache: []string{parent, sub50, sub80},
 			seedIdx:   []string{parent, sub50, sub80},
@@ -355,11 +359,14 @@ func TestPhysLowerBlockedByLiveChild9841(t *testing.T) {
 	if got := d.h.mtu[parent]; got != 1500 {
 		t.Fatalf("parent MTU = %d, want the old 1500", got)
 	}
+	if got := d.h.mtu[sub50]; got != 1500 {
+		t.Fatalf("premise: blocking child MTU = %d, want its live 1500 in either zone order", got)
+	}
 	r := findRecord9841(t, d.records(), parent)
 	if r.Grade != MTUGradeBlockedByChildLive {
 		t.Fatalf("record = %+v, want blocked-by-child-live", r)
 	}
-	if !strings.Contains(r.Detail, sub80) || !strings.Contains(r.Detail, "1500") {
+	if !strings.Contains(r.Detail, sub50) || !strings.Contains(r.Detail, "1500") {
 		t.Errorf("detail %q must name the blocking child and its live MTU", r.Detail)
 	}
 }
@@ -551,7 +558,9 @@ func TestChildMTUFittingRefusalGradesWriteFailed9841(t *testing.T) {
 }
 
 // A child lookup failure on both attempts records lookup-failed with the
-// RESOLVED reset want: the parent read fine, only the child is missing.
+// RESOLVED reset want: since #16633 that is the parent's PLANNED MTU (the
+// fixture's interface-level 1400), not its live 1500 — only the child is
+// missing.
 func TestChildMTULookupFailureRecords9841(t *testing.T) {
 	cfg := taggedOnlyConfig9761()
 	parent, sub50, sub80 := taggedParent9761, taggedParent9761+".50", taggedParent9761+".80"
@@ -573,13 +582,13 @@ func TestChildMTULookupFailureRecords9841(t *testing.T) {
 		t.Fatalf("child drew %d writes without a resolved link, want 0", got)
 	}
 	r := findRecord9841(t, d.records(), sub80)
-	if r.WantMTU != 1500 || r.LiveMTU != mtuUnknown9841 || r.Grade != MTUGradeLookupFailed {
-		t.Errorf("record = %+v, want {want 1500 (reset target), live unknown, lookup-failed}", r)
+	if r.WantMTU != 1400 || r.LiveMTU != mtuUnknown9841 || r.Grade != MTUGradeLookupFailed {
+		t.Errorf("record = %+v, want {want 1400 (planned reset target), live unknown, lookup-failed}", r)
 	}
 }
 
-// A transient child-lookup failure healed by the retry resets and stays
-// silent.
+// A transient child-lookup failure healed by the retry resets (to the
+// parent's planned 1400, #16633) and stays silent.
 func TestChildMTURetrySuccessResets9841(t *testing.T) {
 	cfg := taggedOnlyConfig9761()
 	parent, sub50, sub80 := taggedParent9761, taggedParent9761+".50", taggedParent9761+".80"
@@ -601,40 +610,62 @@ func TestChildMTURetrySuccessResets9841(t *testing.T) {
 				return vlanLink9841(d.h, sub80, d.h.index[parent]), nil
 			},
 		})
+	// Skew the child stale AFTER seeding: the retry's fresh link reads the
+	// host's 1500, the value the reset must move to the planned 1400.
+	d.h.mtu[sub80] = 1500
 	d.run()
 
-	if got := d.h.mtu[sub80]; got != 1500 {
-		t.Fatalf("child MTU = %d, want the reset 1500: the retry must repair a transient failure", got)
+	if got := d.h.mtu[sub80]; got != 1400 {
+		t.Fatalf("child MTU = %d, want the planned reset 1400: the retry must repair a transient failure", got)
 	}
 	if got := d.records(); len(got) != 0 {
 		t.Fatalf("records = %+v, want none: a healed lookup warns about nothing", got)
 	}
 }
 
-// No MTU statement plus an unreadable parent records
+// No MTU statement, NO parent plan, plus an unreadable parent records
 // reset-target-unresolved with an UNKNOWN want: the required #9757 reset
 // cannot be aimed, and silence would reinstate the stale-device harm with
-// no trace. The parent is unseeded by name but seeded by index, so its own
-// write proceeds and this cell isolates the child's record.
+// no trace. #16633: with a same-pass plan the reset targets the planned
+// value and an unreadable parent no longer blocks it, so the no-plan arm is
+// exercised here through a fabric-owned parent (fab0's local member, whose
+// MTU planPhysDesired deliberately never plans — #9761): the member link is
+// unseeded by name, so its read fails through the seam while the child is
+// seeded. The fall-back live-parent read is the only target source left.
 func TestChildMTUResetTargetUnresolvedRecords9841(t *testing.T) {
-	cfg := taggedOnlyConfig9761()
-	parent, sub50, sub80 := taggedParent9761, taggedParent9761+".50", taggedParent9761+".80"
+	cfg := &config.Config{}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"fabric": {Name: "fabric", Interfaces: []string{"fab0.10"}},
+	}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"fab0": {
+			Name: "fab0", MTU: 1400, VlanTagging: true, LocalFabricMember: "ge-0/0/0",
+			Units: map[int]*config.InterfaceUnit{10: {Number: 10, VlanID: 10}},
+		},
+	}
+	parent, sub := "ge-0-0-0", "ge-0-0-0.10"
+	if phys, _, _, vlan := resolveInterfaceRef("fab0.10", cfg); phys != parent || vlan != 10 {
+		t.Fatalf("premise: fab0.10 resolves to phys %q vlan %d, want %s vlan 10", phys, vlan, parent)
+	}
+	if pd := planPhysDesired(cfg)[parent]; pd != nil && pd.mtu != 0 {
+		t.Fatalf("premise: fabric member plan = %+v, want no MTU plan (the #16633 fall-back arm)", pd)
+	}
 	var d *mtuDrive9841
 	d = setupMTUApply9841(t, cfg,
-		map[string]int{parent: 1500, sub50: 1300, sub80: 1400},
+		map[string]int{parent: 1500, sub: 1400},
 		mtuDriveOpts9841{
-			seedCache: []string{sub50, sub80},
-			seedIdx:   []string{parent, sub50, sub80},
+			seedCache: []string{sub},
+			seedIdx:   []string{parent, sub},
 			byName: func(name string) (netlink.Link, error) {
-				if name == sub80 {
-					return vlanLink9841(d.h, sub80, d.h.index[parent]), nil
+				if name == sub {
+					return vlanLink9841(d.h, sub, d.h.index[parent]), nil
 				}
 				return nil, fmt.Errorf("no such device")
 			},
 		})
 	d.run()
 
-	if got := d.h.mtu[sub80]; got != 1400 {
+	if got := d.h.mtu[sub]; got != 1400 {
 		t.Fatalf("child MTU = %d, want the stale 1400: an unresolvable reset must not invent a target", got)
 	}
 	recs := d.records()
@@ -642,7 +673,7 @@ func TestChildMTUResetTargetUnresolvedRecords9841(t *testing.T) {
 		t.Fatalf("records = %+v, want only the reset-target record", recs)
 	}
 	r := recs[0]
-	if r.Name != sub80 || r.WantMTU != mtuUnknown9841 || r.LiveMTU != 1400 || r.Grade != MTUGradeResetTargetUnresolved {
+	if r.Name != sub || r.WantMTU != mtuUnknown9841 || r.LiveMTU != 1400 || r.Grade != MTUGradeResetTargetUnresolved {
 		t.Errorf("record = %+v, want {child, want unknown, live 1400, reset-target-unresolved}", r)
 	}
 	if !strings.Contains(r.Detail, parent) {

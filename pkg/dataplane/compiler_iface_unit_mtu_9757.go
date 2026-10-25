@@ -29,11 +29,25 @@ import (
 // nine seconds after the commit. The only repair was to commit an explicit
 // `mtu 1500` and delete it again.
 //
-// THE RESET TARGET IS THE PARENT'S LIVE MTU, not a constant. That is what a
-// freshly created VLAN child inherits, so the device lands where it would have
-// been had the statement never existed. A constant would be wrong the moment an
-// interface-level `mtu` lowers the parent, and
+// THE RESET TARGET IS THE PARENT'S MTU AFTER THIS APPLY, not a constant. That
+// is what a freshly created VLAN child inherits, so the device lands where it
+// would have been had the statement never existed. A constant would be wrong
+// the moment an interface-level `mtu` lowers the parent, and
 // TestUnitMTUResetFollowsTheParent9757 is the cell that says so.
+//
+// #16633: when this same commit plans a parent MTU (mtuCtx.parentWant, from
+// st.physDesired), the reset targets THAT value, not the parent's cached
+// pre-write MTU. The child step runs before the parent write, so the cached
+// live value is still the OLD parent MTU: raising the parent (or deleting a
+// lowered interface mtu, which plans the 1500 default) left a statement-less
+// child at the old value — equal to the stale target, so no write and no
+// record — until the next commit. The raised target is refused by the kernel
+// while the parent is still low, so it takes the normal #9845 retry token and
+// converges on the retry after the parent write. With no plan (parentWant
+// <= 0 — fabric/tunnel-owned parent, or a direct call), the live parent MTU
+// remains the target and an unreadable parent records
+// MTUGradeResetTargetUnresolved as before; with a plan, an unreadable parent
+// no longer blocks the reset, because the target is already known.
 //
 // `family inet6 mtu` compiles into the same `unit.MTU`, so both families are
 // covered by this one branch.
@@ -87,17 +101,30 @@ func applyVLANSubInterfaceMTU9757(
 	wantMTU := 0
 	if unit, ok := ifCfg.Units[unitNum]; ok && unit != nil && unit.MTU > 0 {
 		wantMTU = unit.MTU
+	} else if mtuCtx.parentWant > 0 {
+		// #16633: no unit statement, but this apply plans a parent MTU.
+		// The child step runs BEFORE the parent write, so the cached live
+		// parent still reads the OLD value; resetting to it would no-op
+		// (child == stale target) and leave the child at the old MTU until
+		// the next commit, with no record. Target the planned value: a
+		// raised target is refused by the kernel while the parent is
+		// still low and converges on the caller's #9845 retry after the
+		// parent write; a lowered/defaulted target is accepted inline.
+		// The target is already known, so an unreadable parent cannot
+		// block (or mis-aim) the reset here.
+		wantMTU = mtuCtx.parentWant
 	} else {
 		parent, perr := result.cachedLinkByName(physName)
 		if perr != nil {
 			var rerr error
 			parent, rerr = result.retryLinkByName9841(physName, mtuCtx.parentIfindex, 0, false)
 			if rerr != nil {
-				// No statement and no readable parent. Leaving the device
-				// alone is still the only safe actuation — but it is now a
-				// RECORDED one: the reset is required convergence behavior,
-				// and silence here reinstates the exact #9757 harm (stale
-				// device, statement-less config) with no trace at all.
+				// No statement, no plan and no readable parent. Leaving
+				// the device alone is still the only safe actuation — but
+				// it is now a RECORDED one: the reset is required
+				// convergence behavior, and silence here reinstates the
+				// exact #9757 harm (stale device, statement-less config)
+				// with no trace at all.
 				slog.Warn("failed to resolve parent for VLAN MTU reset; leaving MTU unconverged",
 					"name", subName, "parent", physName, "first", perr, "retry", rerr)
 				result.recordMTUUnconverged(MTUUnconverged{
@@ -110,6 +137,20 @@ func applyVLANSubInterfaceMTU9757(
 				return nil
 			}
 			slog.Info("parent link resolved on retry", "name", physName)
+		}
+		if parent == nil || parent.Attrs() == nil {
+			// Defensive mirror of the nil-child guard below: a nil-seeded
+			// cache entry must record rather than panic.
+			slog.Warn("failed to resolve parent for VLAN MTU reset; leaving MTU unconverged",
+				"name", subName, "parent", physName, "err", "resolved to nil link")
+			result.recordMTUUnconverged(MTUUnconverged{
+				Name: subName, ConfigRef: configRef,
+				WantMTU: mtuUnknown9841, LiveMTU: liveChildMTU9841(result, subName, mtuCtx),
+				Grade:         MTUGradeResetTargetUnresolved,
+				Detail:        "no MTU statement; parent link lookup resolved to a nil link",
+				ExpectIfindex: mtuCtx.subIfindex, ExpectParentIfindex: mtuCtx.parentIfindex,
+			})
+			return nil
 		}
 		wantMTU = parent.Attrs().MTU
 	}
