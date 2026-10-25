@@ -1748,18 +1748,27 @@ func TestRenderConfig_GatewayNameNeverLeaks(t *testing.T) {
 		}
 	})
 
-	t.Run("inline dotted hostname is preserved", func(t *testing.T) {
+	t.Run("inline dotted hostname is skipped without remote identity (#16708)", func(t *testing.T) {
+		// An inline hostname endpoint is still a usable dial target at
+		// the endpoint layer (resolveRemoteAddr preserves it), but since
+		// #16708 a PSK VPN with no gateway object carrying a
+		// remote-identity has no peer selector, so the render belt skips
+		// it — pre-fix it rendered remote_addrs = peer.example.com with
+		// a local-owner-only secret.
 		cfg := &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
 				"tun": {Gateway: "peer.example.com", PSK: config.NewSecret("k")},
 			},
 		}
-		got, _, err := m.renderConfig(cfg)
+		got, rendered, err := m.renderConfig(cfg)
 		if err != nil {
 			t.Fatalf("renderConfig() error = %v", err)
 		}
-		if vals := remoteAddrsValues(t, got); len(vals) != 1 || vals[0] != "peer.example.com" {
-			t.Fatalf("remote_addrs = %v, want [peer.example.com]\n%s", vals, got)
+		if rendered["tun"] {
+			t.Fatalf("inline hostname PSK VPN must be skipped (#16708), rendered=%v\n%s", rendered, got)
+		}
+		if vals := remoteAddrsValues(t, got); len(vals) != 0 {
+			t.Fatalf("remote_addrs = %v, want none for skipped inline hostname\n%s", vals, got)
 		}
 	})
 

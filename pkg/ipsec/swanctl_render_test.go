@@ -545,10 +545,10 @@ func TestGenerateConfig_PSKIDSelectors_TwoVPNs(t *testing.T) {
 }
 
 // TestGenerateConfig_PSKIDSelectors_ExplicitIDs asserts that when a gateway
-// configures explicit remote/local IKE identities, the PSK secret is
-// scoped by those identities (the values the peer actually negotiates),
-// not the gateway address. The remote-id is the discriminator; the
-// local-id rides along as a harmless extra owner (#3952).
+// configures an explicit remote IKE identity, the PSK secret is scoped by
+// that identity (the value the peer actually negotiates), not the gateway
+// address. The local-id is NOT a secret owner since #16708: a box-shared
+// local identity matches every peer on the box.
 func TestGenerateConfig_PSKIDSelectors_ExplicitIDs(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
@@ -572,13 +572,9 @@ func TestGenerateConfig_PSKIDSelectors_ExplicitIDs(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing ike-gw secret block")
 	}
-	// Remote-id (formatted @fqdn) must be present as the peer selector.
-	if !containsStr(blk.ids, "@peer.example.com") {
-		t.Errorf("id selectors %v missing configured remote-id @peer.example.com", blk.ids)
-	}
-	// Local-id rides along.
-	if !containsStr(blk.ids, "@fw.example.com") {
-		t.Errorf("id selectors %v missing configured local-id @fw.example.com", blk.ids)
+	// Remote-id (formatted @fqdn) must be the sole peer selector.
+	if len(blk.ids) != 1 || !containsStr(blk.ids, "@peer.example.com") {
+		t.Errorf("id selectors %v, want exactly [@peer.example.com] (peer selector only, #16708)", blk.ids)
 	}
 	// The remote-id supersedes the address as the peer identity.
 	if containsStr(blk.ids, "203.0.113.9") {
