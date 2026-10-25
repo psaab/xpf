@@ -12,6 +12,24 @@ xpf (0.0.0) unstable; urgency=medium
     bracketed lists, collapsed leaf-lists) keep the guard, so the
     #4325/#4070 no-duplicate and union invariants are unchanged.
 
+  * NAT: surface the runtime interface-SNAT overlap quarantine on every
+    NAT show surface (#16547). The #7717 quarantine stamps
+    PoolUnusable/iface_snat_egress_overlap on the applied snapshot when a
+    runtime-learned (DHCP/netlink) interface address lands in a source
+    pool, refusing every new translation while CLI, gRPC, REST and
+    Prometheus — all deriving their verdict from config alone — reported
+    the rule armed with a 0 hit counter. The applied snapshot's per-rule
+    verdicts (Manager.AppliedNATSnapshotVerdicts, cached in-memory, no
+    control-socket I/O) now feed the shared NOT INSTALLED verdict for
+    the CLI rule/rule-set/summary/pool/detail and NAT64 views, the gRPC
+    GetNATSource/GetNATRuleStats/GetNATPoolStats and ShowText views,
+    and the REST source/rule/pool objects (config verdict keeps
+    precedence); iface_snat_egress_overlap (and the NAT64 twin, same
+    token) expands to operator prose; Prometheus exports
+    xpf_iface_snat_overlap_scans_total / _addresses (scans==0 means the
+    detector never ran) and xpf_iface_snat_overlap_quarantined{pool},
+    and a quarantined pool's capacity/usage samples are omitted like a
+    config-refused pool's.
   * Installer: stop creating the developer scratch tree on customer
     hosts (#16539). validate_archive_key pinned its temporary GnuPG
     home under /var/worktrees/.cache/tmpdir whenever TMPDIR was

@@ -244,6 +244,12 @@ type xpfCollector struct {
 	userspaceSNATPoolLiveLockContendedTotal       *prometheus.Desc
 	userspaceSNATPoolRecycleScanPopsTotal         *prometheus.Desc
 	userspaceSNATPoolRecycleScanWalksTotal        *prometheus.Desc
+	// #16547: the #7717 overlap detector's scans/addresses pair. Two
+	// series, deliberately: scans==0 means the detector never ran
+	// (unknown), distinct from a ran-and-clean 0 addresses.
+	ifaceSNATOverlapScansTotal  *prometheus.Desc
+	ifaceSNATOverlapAddresses   *prometheus.Desc
+	ifaceSNATOverlapQuarantined *prometheus.Desc
 
 	// DHCP lease gauge
 	dhcpLeasesActive *prometheus.Desc

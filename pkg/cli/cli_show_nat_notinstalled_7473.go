@@ -2,6 +2,8 @@ package cli
 
 import (
 	"github.com/psaab/xpf/pkg/config"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/natshow"
 )
 
 // #7473: the shared NOT-INSTALLED verdict for the NAT summary renderers.
@@ -45,6 +47,52 @@ func sourceNATPoolNotInstalled(pool *config.NATPool) string {
 		return ""
 	}
 	return config.SourceNATPoolUnusableReason(pool)
+}
+
+// natRuntimeVerdicts reads the applied snapshot's runtime disarm verdicts
+// through the published dataplane (#16547). Reads only cached manager
+// state — no control-socket I/O. An unavailable view yields empty maps,
+// so every surface falls back to the config-only verdict exactly.
+func (c *CLI) natRuntimeVerdicts() dpuserspace.AppliedNATSnapshotVerdicts {
+	if c == nil || c.dp == nil {
+		return dpuserspace.AppliedNATSnapshotVerdicts{}
+	}
+	provider, ok := c.dpProbe().(interface {
+		AppliedNATSnapshotVerdicts() dpuserspace.AppliedNATSnapshotVerdicts
+	})
+	if !ok {
+		return dpuserspace.AppliedNATSnapshotVerdicts{}
+	}
+	return provider.AppliedNATSnapshotVerdicts()
+}
+
+// sourceNATRuleNotInstalledRuntime is sourceNATRuleNotInstalled with the
+// applied snapshot's runtime quarantine folded in (#16547).
+func (c *CLI) sourceNATRuleNotInstalledRuntime(cfg *config.Config, rule *config.NATRule, v dpuserspace.AppliedNATSnapshotVerdicts) string {
+	var rt string
+	if v.Available && rule != nil {
+		rt = v.SourceNATRules[rule.Name]
+	}
+	return config.SourceNATRuleNotInstalledReasonWithRuntime(cfg, rule, rt)
+}
+
+// sourceNATPoolNotInstalledRuntime is the pool-level analogue (#16547):
+// config definition verdict wins, runtime quarantine fills the gap.
+func (c *CLI) sourceNATPoolNotInstalledRuntime(cfg *config.Config, pool *config.NATPool, poolName string, v dpuserspace.AppliedNATSnapshotVerdicts) string {
+	var rt string
+	if v.Available {
+		rt = v.SourceNATPools[poolName]
+	}
+	return config.SourceNATPoolNotInstalledReasonWithRuntime(cfg, pool, poolName, config.SourceNATAggregateOverBudgetPools(cfg), rt)
+}
+
+// natRuntimeVerdictsForShow adapts the snapshot verdicts to the
+// natshow detail renderer's runtime map.
+func natRuntimeVerdictsForShow(v dpuserspace.AppliedNATSnapshotVerdicts) natshow.RuntimeVerdicts {
+	if !v.Available || len(v.SourceNATRules) == 0 {
+		return nil
+	}
+	return natshow.RuntimeVerdicts(v.SourceNATRules)
 }
 
 // destNATRuleNotInstalled reports why a destination NAT rule is excluded, or "".

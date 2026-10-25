@@ -251,6 +251,9 @@ var collectorDescNAT = []int{
 	xpfCollectorDescFieldIndex("userspaceSNATPoolLiveLockContendedTotal"),
 	xpfCollectorDescFieldIndex("userspaceSNATPoolRecycleScanPopsTotal"),
 	xpfCollectorDescFieldIndex("userspaceSNATPoolRecycleScanWalksTotal"),
+	xpfCollectorDescFieldIndex("ifaceSNATOverlapScansTotal"),
+	xpfCollectorDescFieldIndex("ifaceSNATOverlapAddresses"),
+	xpfCollectorDescFieldIndex("ifaceSNATOverlapQuarantined"),
 }
 
 // initDHCPDescriptors (metrics_descriptors_dhcp.go).

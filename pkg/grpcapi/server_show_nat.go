@@ -144,7 +144,13 @@ func (s *Server) showNATSourceRuleDetail(ctx context.Context, cfg *config.Config
 		return err
 	}
 	defer release()
-	natshow.RenderSourceRuleDetail(walkCtx, buf, cfg, s.dp, s.applyResult)
+	natshow.RenderSourceRuleDetailWithRuntime(walkCtx, buf, cfg, s.dp, s.applyResult, func() natshow.RuntimeVerdicts {
+		v := s.natRuntimeVerdicts()
+		if !v.Available || len(v.SourceNATRules) == 0 {
+			return nil
+		}
+		return natshow.RuntimeVerdicts(v.SourceNATRules)
+	}())
 	return nil
 }
 
@@ -187,6 +193,21 @@ func (s *Server) showNAT64(cfg *config.Config, buf *strings.Builder) {
 		}
 		if rs.SourcePool != "" {
 			fmt.Fprintf(buf, "  Source pool:  %s\n", rs.SourcePool)
+		}
+		// #16547: NAT64 twin of the runtime quarantine (see CLI).
+		nat64Reason := ""
+		if rs.SourcePool != "" {
+			if pool, ok := cfg.Security.NAT.SourcePools[rs.SourcePool]; ok {
+				nat64Reason = config.SourceNATPoolUnusableReason(pool)
+			}
+		}
+		if nat64Reason == "" {
+			if v := s.natRuntimeVerdicts(); v.Available {
+				nat64Reason = v.NAT64Rules[rs.Name]
+			}
+		}
+		if nat64Reason != "" {
+			fmt.Fprintf(buf, "  NOT INSTALLED — %s\n", config.SourceNATDisarmReasonText(nat64Reason))
 		}
 		buf.WriteString("\n")
 	}

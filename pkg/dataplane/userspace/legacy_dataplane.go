@@ -107,6 +107,18 @@ func (a *LegacyDataPlaneAdapter) AppliedNATView() AppliedNATView {
 	return m.AppliedNATView()
 }
 
+// AppliedNATSnapshotVerdicts forwards the manager's runtime disarm
+// verdicts (#16547) through the adapter the daemon actually publishes, so
+// the CLI/gRPC/REST probes resolve them. Without this forwarder the
+// probe would miss on the only published type — the #9482 class.
+func (a *LegacyDataPlaneAdapter) AppliedNATSnapshotVerdicts() AppliedNATSnapshotVerdicts {
+	m := a.Manager()
+	if m == nil {
+		return AppliedNATSnapshotVerdicts{}
+	}
+	return m.AppliedNATSnapshotVerdicts()
+}
+
 // ReadAllPolicyCounters forwards the #3965 bulk policy-counter snapshot.
 //
 // Codex PR #6743 r7-N2: the bulk reader existed on *Manager only, and the

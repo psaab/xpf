@@ -162,6 +162,105 @@ func (m *Manager) AppliedConfig() *config.Config {
 	return m.appliedSnapshot.Config
 }
 
+// AppliedNATSnapshotVerdicts is the per-rule runtime NOT-INSTALLED verdict
+// carried by the helper's last reconciled snapshot (#16547). The snapshot
+// builder stamps PoolUnusable/PoolUnusableReason at build time — including
+// the #7717 runtime interface-SNAT overlap quarantine
+// (iface_snat_egress_overlap), which is invisible to the config-only verdict
+// (config.SourceNATRuleNotInstalledReason) because the overlapping address
+// is learned at runtime (DHCP/netlink), not configured. Show surfaces read
+// this view instead of re-deriving the quarantine from config.
+type AppliedNATSnapshotVerdicts struct {
+	Available bool
+	// SourceNATRules maps rule name -> PoolUnusableReason for every
+	// source-NAT snapshot row with PoolUnusable set.
+	SourceNATRules map[string]string
+	// SourceNATPools maps pool name -> PoolUnusableReason, derived from
+	// the snapshot rows referencing that pool. A pool is reported only
+	// when every snapshot row referencing it is unusable; a usable row
+	// referencing the same pool keeps the pool armed.
+	SourceNATPools map[string]string
+	// NAT64Rules maps NAT64 rule-set name -> PoolUnusableReason.
+	NAT64Rules map[string]string
+}
+
+// AppliedNATSnapshotVerdicts returns the runtime disarm verdicts from the
+// helper's last reconciled snapshot (m.appliedSnapshot's generation). It
+// reads only cached in-memory state under m.mu — no control-socket I/O —
+// so show surfaces may call it at operator-request rate without adding a
+// control-socket request above 1/s. Available is false before the first
+// reconciled apply lands; callers then fall back to the config-only
+// verdict (an unavailable runtime view must not manufacture a quarantine).
+func (m *Manager) AppliedNATSnapshotVerdicts() AppliedNATSnapshotVerdicts {
+	if m == nil {
+		return AppliedNATSnapshotVerdicts{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.appliedSnapshot.Generation == 0 || m.lastSnapshot == nil {
+		return AppliedNATSnapshotVerdicts{}
+	}
+	// The verdicts describe the snapshot the helper has reconciled, which
+	// is m.appliedSnapshot.Generation. m.lastSnapshot may be newer (a
+	// deferred publish the helper has not accepted yet); reading it would
+	// report a quarantine the dataplane is not yet enforcing. Only the
+	// retained snapshot whose generation matches the applied generation
+	// is authoritative here. When they differ, report unavailable rather
+	// than a stale-or-future verdict.
+	if m.lastSnapshot.Generation != m.appliedSnapshot.Generation {
+		return AppliedNATSnapshotVerdicts{}
+	}
+	snap := m.lastSnapshot
+	out := AppliedNATSnapshotVerdicts{
+		Available:      true,
+		SourceNATRules: make(map[string]string),
+		SourceNATPools: make(map[string]string),
+		NAT64Rules:     make(map[string]string),
+	}
+	poolBad := make(map[string]string)
+	poolUsable := make(map[string]bool)
+	for i := range snap.SourceNAT {
+		row := &snap.SourceNAT[i]
+		if row.PoolName != "" && !row.PoolUnusable {
+			poolUsable[row.PoolName] = true
+		}
+		if !row.PoolUnusable {
+			continue
+		}
+		reason := row.PoolUnusableReason
+		if reason == "" {
+			reason = "pool_unusable"
+		}
+		if _, exists := out.SourceNATRules[row.Name]; !exists {
+			out.SourceNATRules[row.Name] = reason
+		}
+		if row.PoolName != "" {
+			if _, exists := poolBad[row.PoolName]; !exists {
+				poolBad[row.PoolName] = reason
+			}
+		}
+	}
+	for name, reason := range poolBad {
+		if !poolUsable[name] {
+			out.SourceNATPools[name] = reason
+		}
+	}
+	for i := range snap.NAT64 {
+		row := &snap.NAT64[i]
+		if !row.PoolUnusable {
+			continue
+		}
+		reason := row.PoolUnusableReason
+		if reason == "" {
+			reason = "pool_unusable"
+		}
+		if _, exists := out.NAT64Rules[row.Name]; !exists {
+			out.NAT64Rules[row.Name] = reason
+		}
+	}
+	return out
+}
+
 // AppliedNATView returns the generation-coherent NAT view for the #2079
 // pool-utilization-alarm monitor: the helper's last-applied config paired
 // with the deduplicated pool counters from the same applied generation. It

@@ -117,7 +117,7 @@ func (c *CLI) showNATSource(cfg *config.Config, args []string) error {
 			// `sourceNATPoolNotInstalled`, the detail view via
 			// `SourceNATPoolReportablePorts`' reason — and this one, the view an
 			// operator reaches by typing the shortest command, did not.
-			if line := natNotInstalledLine(sourceNATPoolNotInstalled(pool), true); line != "" {
+			if line := natNotInstalledLine(c.sourceNATPoolNotInstalledRuntime(cfg, pool, name, c.natRuntimeVerdicts()), true); line != "" {
 				fmt.Println(line)
 			}
 			for _, addr := range pool.Addresses {
@@ -152,7 +152,7 @@ func (c *CLI) showNATSource(cfg *config.Config, args []string) error {
 				action := natshow.SourceRuleAction(rule)
 				fmt.Printf("  Rule: %s -> %s\n", rule.Name, action)
 				fmt.Printf("    Match source-address: %s\n", natshow.RuleMatchSource(rule))
-				if line := natNotInstalledLine(sourceNATRuleNotInstalled(cfg, rule), true); line != "" {
+				if line := natNotInstalledLine(c.sourceNATRuleNotInstalledRuntime(cfg, rule, c.natRuntimeVerdicts()), true); line != "" {
 					fmt.Println(line)
 				}
 			}
@@ -368,7 +368,7 @@ func (c *CLI) showNATSourceSummary(cfg *config.Config) error {
 		// live capacity.
 		poolDisarm := ""
 		if pl, ok := cfg.Security.NAT.SourcePools[p.name]; ok {
-			poolDisarm = sourceNATPoolNotInstalled(pl)
+			poolDisarm = c.sourceNATPoolNotInstalledRuntime(cfg, pl, p.name, c.natRuntimeVerdicts())
 		}
 		ports := "N/A"
 		avail := "N/A"
@@ -517,7 +517,15 @@ func (c *CLI) showNATSourcePool(cfg *config.Config, poolName string) error {
 			portHigh = 65535
 		}
 		// #7000: see the summary view above.
-		ports, unusable := config.SourceNATPoolReportablePorts(pool, name, portLow, portHigh, detailOverBudget)
+		ports, cfgUnusable := config.SourceNATPoolReportablePorts(pool, name, portLow, portHigh, detailOverBudget)
+		// #16547: fold in the runtime quarantine so the Unusable line and
+		// the counter gate below see it. Config verdict wins.
+		unusable := cfgUnusable
+		if unusable == "" {
+			if v := c.natRuntimeVerdicts(); v.Available {
+				unusable = v.SourceNATPools[name]
+			}
+		}
 		totalPorts := int(ports)
 		portUtilizationNA := pool.PortNoTranslation
 
@@ -635,7 +643,7 @@ func (c *CLI) showNATSourceRuleSet(cfg *config.Config, rsName string) error {
 			srcMatch := natshow.RuleMatchSource(rule)
 			dstMatch := natshow.RuleMatchDestination(rule)
 			fmt.Printf("    Match: source %s destination %s\n", srcMatch, dstMatch)
-			excludedReason := sourceNATRuleNotInstalled(cfg, rule)
+			excludedReason := c.sourceNATRuleNotInstalledRuntime(cfg, rule, c.natRuntimeVerdicts())
 			if line := natNotInstalledLine(excludedReason, true); line != "" {
 				fmt.Println("  " + line)
 			}
@@ -694,7 +702,7 @@ func (c *CLI) showNATSourceRuleAll(cfg *config.Config, ruleName string) error {
 			fmt.Printf("Rule-set: %-20s Rule: %-12s %s  Action: %s\n",
 				rs.Name, rule.Name, natshow.NATScopeLabelCLI(rs, false), action)
 			fmt.Printf("  Match: source %s destination %s\n", srcMatch, dstMatch)
-			excludedReason := sourceNATRuleNotInstalled(cfg, rule)
+			excludedReason := c.sourceNATRuleNotInstalledRuntime(cfg, rule, c.natRuntimeVerdicts())
 			if line := natNotInstalledLine(excludedReason, true); line != "" {
 				fmt.Println(line)
 			}
@@ -731,7 +739,7 @@ func (c *CLI) showNATSourceRuleDetail(cfg *config.Config) error {
 	// #7315: context.Background() — a local CLI render has no request to
 	// cancel and no admission lease (the CLI does not draw on the shared
 	// diagcmd.SessionWalkLimiter, which bounds the REST/gRPC surfaces).
-	natshow.RenderSourceRuleDetail(context.Background(), os.Stdout, cfg, c.dp, c.applyResult)
+	natshow.RenderSourceRuleDetailWithRuntime(context.Background(), os.Stdout, cfg, c.dp, c.applyResult, natRuntimeVerdictsForShow(c.natRuntimeVerdicts()))
 	return nil
 }
 
@@ -1236,6 +1244,23 @@ func (c *CLI) showNAT64(cfg *config.Config) error {
 		}
 		if rs.SourcePool != "" {
 			fmt.Printf("  Source pool:  %s\n", rs.SourcePool)
+		}
+		// #16547: the NAT64 twin of the runtime quarantine. Config-only
+		// pool verdict first; the applied snapshot's NAT64 verdict fills
+		// the runtime-only gap.
+		nat64Reason := ""
+		if rs.SourcePool != "" {
+			if pool, ok := cfg.Security.NAT.SourcePools[rs.SourcePool]; ok {
+				nat64Reason = config.SourceNATPoolUnusableReason(pool)
+			}
+		}
+		if nat64Reason == "" {
+			if v := c.natRuntimeVerdicts(); v.Available {
+				nat64Reason = v.NAT64Rules[rs.Name]
+			}
+		}
+		if nat64Reason != "" {
+			fmt.Printf("  NOT INSTALLED — %s\n", config.SourceNATDisarmReasonText(nat64Reason))
 		}
 		fmt.Println()
 	}
