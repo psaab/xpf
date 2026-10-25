@@ -597,6 +597,11 @@ type Config struct {
 	// of any vintage can observe it — the v21 STANDS entry in
 	// snapshot_shape_version_8892_test.go, not a version bump.
 	QuarantinedRoutingInstances []*RoutingInstanceConfig `json:"-"`
+	// QuarantinedBridgeDomains records bridge domains dropped by the #16792
+	// derived br-<name> device-name quarantine on tolerant paths, with their
+	// membership. Compile-time only; never serialized (`json:"-"`, same
+	// precedent as QuarantinedRoutingInstances).
+	QuarantinedBridgeDomains []*BridgeDomainConfig `json:"-"`
 	// QuarantinedRIMemberDeviceConflicts records tolerant-load #11060 device
 	// ownership conflicts after every ambiguous RI membership has been removed.
 	// The userspace snapshot builders use this compile-time evidence to assign
