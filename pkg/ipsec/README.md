@@ -914,10 +914,17 @@ all files stay in `package ipsec`, so the public API is unchanged.
   the `dynamic hostname` identity `@<fqdn>` for a dynamic peer (#14590),
   otherwise the concrete remote gateway address (strongSwan uses the peer
   IP as its default identity when no id is negotiated), and this is the
-  discriminator between two PSK VPNs to different peers. Since #15193
+  discriminator between two PSK VPNs to different peers. Since #16680
+  a hostname dial target (`address peer.example.test`, or an inline
+  hostname endpoint) contributes NO peer selector and NO default
+  `remote.id`: the hostname is a dial target strongSwan DNS-resolves,
+  never the identity the peer presents (Junos/strongSwan default to
+  the resolved/own IP), so pinning it refused default-identity peers
+  in both directions. The secret is then selected by its local owner
+  alone (the shared-owner isolation question is #16708). Since #15193
   the render ALSO pins the Junos default remote identity on fixed-address
   PSK gateways with no `remote-identity`/`local-identity` configured:
-  `remote { id = "<first gateway address>" }` (per-address PSK selectors
+  `remote { id = "<sole IP-literal gateway address>" }` (per-address PSK selectors
   still cover the whole multi-address list), and the secret gains a LOCAL
   owner so charon's initiator-side shared-key lookup selects it — the
   configured `local-id` when set, else the pinned local address, else
