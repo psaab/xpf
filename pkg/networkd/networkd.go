@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -39,6 +40,34 @@ var runNetworkctl = func(args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), networkctlTimeout)
 	defer cancel()
 	return exec.CommandContext(ctx, "networkctl", args...).Run()
+}
+
+// linkExists reports whether name resolves to a live kernel link. It is a
+// package var so tests can model present/absent netdevs without depending
+// on the sandbox's interfaces (#16791). The caller treats a non-nil error
+// as "presumed present" (fail-open toward attempting the reconfigure):
+// only a definitive (false, nil) absence may drop a name from the batch,
+// so a transient lookup failure never silently skips address application
+// for a real link.
+var linkExists = func(name string) (bool, error) {
+	if _, err := net.InterfaceByName(name); err != nil {
+		if isNoSuchInterface(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// isNoSuchInterface reports whether err from net.InterfaceByName means the
+// named netdev definitively does not exist, as opposed to a lookup failure
+// that proves nothing about existence. On Linux the cgo/netlink lookup
+// surfaces ENODEV; the message check covers the pure-Go resolver path,
+// whose wording is "no such network interface" on every platform Go
+// supports here.
+func isNoSuchInterface(err error) bool {
+	return errors.Is(err, syscall.ENODEV) ||
+		strings.Contains(err.Error(), "no such network interface")
 }
 
 const (
@@ -684,17 +713,46 @@ func (m *Manager) Apply(interfaces []InterfaceConfig) error {
 			// Verified against networkctl (systemd 261) rather than assumed:
 			// `networkctl list -- lo` and `networkctl list lo` produce
 			// identical output, so the separator is accepted and inert.
-			args := append([]string{"reconfigure", "--"}, reconf...)
-			// Best-effort (reload above already applied the files), but the
-			// failure is no longer silent AND no longer forgotten: record the
-			// debt so the next Apply retries even with unchanged files (#4954).
-			if err := runNetworkctl(args...); err != nil {
-				m.setReconfigurePending(reconf)
-				slog.Warn("networkctl reconfigure failed",
-					"interfaces", len(reconf), "err", err)
-			} else {
-				m.setReconfigurePending(nil)
+			// #16791: reconfigure PER INTERFACE, and skip names that
+			// definitively resolve to no live link. The single-batch form
+			// let ONE absent netdev — an unzoned VLAN unit such as
+			// `ge-0-0-1.60` (a managed row whose kernel child was never
+			// created), an over-IFNAMSIZ `br-*` row, or a transiently
+			// absent dynamically-created device — fail resolution for the
+			// WHOLE argv (`Failed to resolve interface ...: No such
+			// device`, rc=1, nothing reconfigured), so the forced
+			// reconfigure was lost box-wide and the #4954 debt recorded
+			// for every name could never clear while the absent row
+			// persisted. Per-interface calls isolate a failure to its own
+			// name, and absent names are dropped from the debt entirely:
+			// there is no link to apply addresses to, so nothing is owed
+			// for them — when the link later appears, its creating Apply
+			// (changed files) runs the tail for it then. An inconclusive
+			// existence lookup is NOT absence: the name is attempted and,
+			// on failure, kept in debt like any other failure.
+			var pending, absent []string
+			for _, name := range reconf {
+				exists, lookupErr := linkExists(name)
+				if lookupErr == nil && !exists {
+					absent = append(absent, name)
+					continue
+				}
+				if err := runNetworkctl("reconfigure", "--", name); err != nil {
+					pending = append(pending, name)
+					slog.Warn("networkctl reconfigure failed",
+						"interface", name, "err", err)
+				}
 			}
+			if len(absent) > 0 {
+				slog.Warn("networkctl reconfigure skipped: managed interface has no live link",
+					"interfaces", absent)
+			}
+			// Best-effort (reload above already applied the files), but a
+			// failure is no longer silent AND no longer forgotten: record
+			// the debt for exactly the attempted-and-failed names so the
+			// next Apply retries them even with unchanged files (#4954).
+			// Succeeded and absent names carry no debt.
+			m.setReconfigurePending(pending)
 		} else {
 			// Nothing managed to reconfigure — clear any stale debt.
 			m.setReconfigurePending(nil)

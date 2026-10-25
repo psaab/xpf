@@ -63,8 +63,8 @@ func TestExternalReloadSuccessOwesTheTail_6912(t *testing.T) {
 	if err := m.Apply(ifaces); err != nil {
 		t.Fatalf("setup: first Apply: %v", err)
 	}
-	if len(reconfigureArgs) != 1 {
-		t.Fatalf("setup: want one tail on the first Apply, got %d", len(reconfigureArgs))
+	if len(reconfigureArgs) != 2 {
+		t.Fatalf("setup: want one tail (2 per-interface calls) on the first Apply, got %d", len(reconfigureArgs))
 	}
 	if got := readRPFilter(); got != "0" {
 		t.Fatalf("setup: the first tail must restore rp_filter to 0, got %q", got)
@@ -83,15 +83,15 @@ func TestExternalReloadSuccessOwesTheTail_6912(t *testing.T) {
 		t.Fatalf("second Apply: %v", err)
 	}
 
-	if len(reconfigureArgs) != 2 {
+	if len(reconfigureArgs) != 4 {
 		t.Fatalf("an unchanged Apply after a successful EXTERNAL reload must still run the tail; "+
-			"want 2 reconfigure calls, got %d (%v)", len(reconfigureArgs), reconfigureArgs)
+			"want 4 reconfigure calls (2 tails x 2 interfaces), got %d (%v)", len(reconfigureArgs), reconfigureArgs)
 	}
 	// Assert WHICH interfaces, not merely that a call happened: a tail that
 	// reconfigured the wrong set would leave the real ones unapplied while
 	// making a call that looks correct.
-	if !slices.Equal(reconfigureArgs[1], wantActivationTailArgv) {
-		t.Fatalf("the owed tail ran %v, want %v", reconfigureArgs[1], wantActivationTailArgv)
+	if !slices.EqualFunc(reconfigureArgs[2:], wantActivationTailArgv, func(a, b []string) bool { return slices.Equal(a, b) }) {
+		t.Fatalf("the owed tail ran %v, want %v", reconfigureArgs[2:], wantActivationTailArgv)
 	}
 	// And assert what the value BECAME — the rp_filter half is the one that
 	// silently drops traffic, and it is invisible in the argv.

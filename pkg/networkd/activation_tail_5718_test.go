@@ -60,21 +60,27 @@ func activationTailIfaces() []InterfaceConfig {
 	)
 }
 
-// wantActivationTailArgv is the expected `networkctl reconfigure` argv for
-// activationTailIfaces(), SPELLED OUT rather than derived by filtering the
-// fixture with the production predicate. Deriving it would make the assertion
-// true by construction: the same predicate would decide both the expectation
-// and the behaviour, so deleting an arm would change them together and the test
-// could never red.
+// wantActivationTailArgv is the expected ordered set of `networkctl
+// reconfigure` argv for activationTailIfaces(), SPELLED OUT rather than
+// derived by filtering the fixture with the production predicate. Deriving
+// it would make the assertion true by construction: the same predicate
+// would decide both the expectation and the behaviour, so deleting an arm
+// would change them together and the test could never red.
 //
-// #9885 inserted `--` after the verb. That is not part of what this expectation
-// is about — the INTERFACE SET is — but it is spelled out here too, for the same
-// reason the names are: an expectation derived from the production argv builder
-// would be true by construction. `--` ends option parsing, so a name beginning
-// with `-` reaches networkctl as an OPERAND rather than as an option; without it
-// a name like `--help` exits 0 without acting and leaves the whole batch
-// unapplied while Apply reads success.
-var wantActivationTailArgv = []string{"reconfigure", "--", "trust0", "dmz0"}
+// #9885 inserted `--` after the verb, spelled out here too for the same
+// reason: an expectation derived from the production argv builder would be
+// true by construction. `--` ends option parsing, so a name beginning
+// with `-` reaches networkctl as an OPERAND rather than as an option;
+// without it a name like `--help` exits 0 without acting and leaves the
+// whole batch unapplied while Apply reads success.
+//
+// #16791 reconfigures PER INTERFACE (one single-name call per eligible
+// interface, in fixture order), so the expectation is the ordered list of
+// per-name argv, not one batch argv.
+var wantActivationTailArgv = [][]string{
+	{"reconfigure", "--", "trust0"},
+	{"reconfigure", "--", "dmz0"},
+}
 
 // rpFilterFixture points procSysNetRoot at a temp tree with the slow-path TUN's
 // rp_filter pre-set to networkd's post-reload default, and returns a reader for
@@ -213,8 +219,8 @@ func TestApplyTailSurvivesExternalDebtDischarge_5718(t *testing.T) {
 	// only non-circular option; `[]string{"reconfigure", ifaces[0].Name}` would
 	// also work. It is simply the clearest.)
 	wantArgs := wantActivationTailArgv
-	if len(reconfigureArgs) != 1 || !slices.Equal(reconfigureArgs[0], wantArgs) {
-		t.Fatalf("the activation tail must run %v exactly once; got %v. An address "+
+	if len(reconfigureArgs) != len(wantArgs) || !slices.EqualFunc(reconfigureArgs, wantArgs, func(a, b []string) bool { return slices.Equal(a, b) }) {
+		t.Fatalf("the activation tail must run %v exactly; got %v. An address "+
 			"application that names the wrong interfaces leaves the real ones unapplied "+
 			"while still making the call the count-only assertion was watching for",
 			wantArgs, reconfigureArgs)
@@ -264,16 +270,16 @@ func TestApplyTailNotRepeatedOnceComplete_5718(t *testing.T) {
 	if err := m.Apply(ifaces); err != nil {
 		t.Fatalf("first Apply: %v", err)
 	}
-	if reloadCalls != 1 || reconfigureCalls != 1 {
-		t.Fatalf("first Apply should reload once and reconfigure once, got %d/%d",
+	if reloadCalls != 1 || reconfigureCalls != 2 {
+		t.Fatalf("first Apply should reload once and reconfigure each eligible interface once (2), got %d/%d",
 			reloadCalls, reconfigureCalls)
 	}
 	// Same reasoning as TestApplyTailSurvivesExternalDebtDischarge_5718: this
 	// test's subject is repetition, so the call COUNT is load-bearing here —
 	// but a count alone still cannot see a tail that runs the right number of
 	// times against the wrong interfaces.
-	if want := wantActivationTailArgv; !slices.Equal(reconfigureArgs[0], want) {
-		t.Fatalf("first Apply ran %v, want %v", reconfigureArgs[0], want)
+	if want := wantActivationTailArgv; len(reconfigureArgs) != len(want) || !slices.EqualFunc(reconfigureArgs, want, func(a, b []string) bool { return slices.Equal(a, b) }) {
+		t.Fatalf("first Apply ran %v, want %v", reconfigureArgs, want)
 	}
 
 	// An identical Apply has nothing to do: files unchanged, no global debt,
@@ -281,9 +287,9 @@ func TestApplyTailNotRepeatedOnceComplete_5718(t *testing.T) {
 	if err := m.Apply(ifaces); err != nil {
 		t.Fatalf("steady-state Apply: %v", err)
 	}
-	if reloadCalls != 1 || reconfigureCalls != 1 {
+	if reloadCalls != 1 || reconfigureCalls != 2 {
 		t.Fatalf("a completed activation pass must not leave the Manager owing its tail "+
-			"forever; steady-state Apply re-ran networkctl (reload=%d reconfigure=%d, want 1/1)",
+			"forever; steady-state Apply re-ran networkctl (reload=%d reconfigure=%d, want 1/2)",
 			reloadCalls, reconfigureCalls)
 	}
 }
