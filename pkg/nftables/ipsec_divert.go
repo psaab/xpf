@@ -148,7 +148,13 @@ func normalizeIpsecQuarantineSpec(spec IpsecDivertSpec) IpsecDivertSpec {
 		spec.QuarantinePrimaryReason != IpsecQuarantineReasonUnknown
 	if !requested {
 		spec.CandidateIfindices = nil
-		spec.LifelineNetdevs = nil
+		// #16618: LifelineNetdevs on a normal spec is not a quarantine
+		// request, but it is the caller's management-lifeline intent for
+		// any QuarantineAll guard built FROM this spec (transition guard,
+		// recovery guard). Preserve it normalized so those guards can
+		// carry it; only quarantine input rendering consults it, so a
+		// normal divert generation is unaffected.
+		spec.LifelineNetdevs = normalizeIpsecLifelineNetdevs(spec.LifelineNetdevs)
 		return spec
 	}
 	spec.QuarantineAll = true
@@ -259,11 +265,13 @@ type IpsecDivertSpec struct {
 	// request was already closed). Normalized mask | raw describes the input.
 	QuarantineRawMask  IpsecQuarantineReasonMask
 	CandidateIfindices []uint32
-	// LifelineNetdevs (#14696) are linux netdev names whose input ingress
-	// quarantine must ACCEPT before the terminal drop (management lifeline:
-	// fxp0 plus configured control/fabric members). Only the input chains
-	// consult it; forward chains ignore it. Populated by the daemon from
-	// HostInboundLifelineIngressNetdevs; never carries a vrf-mgmt blanket.
+	// LifelineNetdevs (#14696/#16618) are linux netdev names whose input
+	// ingress quarantine must ACCEPT before the terminal drop (management
+	// lifeline: fxp0 plus configured control/fabric members). Only the
+	// input chains consult it; forward chains ignore it. Populated by the
+	// daemon from HostInboundLifelineIngressNetdevs; never carries a
+	// vrf-mgmt blanket. A normal (non-quarantine) spec also carries it
+	// normalized so guards built from that spec inherit the lifelines.
 	LifelineNetdevs []string
 }
 
@@ -689,15 +697,21 @@ func emitIpsecQuarantineRules(p *nlPlan, family, hook string, spec IpsecDivertSp
 	// cannot be spoofed from the wire; everything else still hits the
 	// candidate + base DROPs below and the chain DROP policy.
 	p.rule().iifname([]string{"lo"}).emit(verdictAccept()...)
-	// #14696: on input only, lifeline ingress survives quarantine so
-	// management (fxp0 / configured control/fabric) is not blackholed
-	// ahead of host-inbound. iifname covers unenslaved lifelines;
-	// sdifname covers VRF-enslaved members without admitting the whole
-	// VRF master (mirrors the gap-fence pair). Forward is transit and
-	// gets no lifeline exemption.
+	// #14696/#16618 (#16703): on input only, lifeline ingress survives
+	// quarantine so management (fxp0 / configured control/fabric) is not
+	// blackholed ahead of host-inbound. iifname covers unenslaved
+	// lifelines; sdifname covers VRF-enslaved members without admitting
+	// the whole VRF master (mirrors the gap-fence pair). Forward is
+	// transit and gets no lifeline exemption. The sdifname rule is
+	// inet-family only: the kernel rejects NFT_META_SDIFNAME outside
+	// ipv4/ipv6/inet (EOPNOTSUPP on bridge), which would fail the whole
+	// atomic two-family guard install. Bridge input keeps the iifname
+	// accept; host management ingress is judged on the inet input hook.
 	if hook == "input" && len(spec.LifelineNetdevs) > 0 {
 		p.rule().iifname(spec.LifelineNetdevs).emit(verdictAccept()...)
-		p.rule().sdifname(spec.LifelineNetdevs).emit(verdictAccept()...)
+		if family == "inet" {
+			p.rule().sdifname(spec.LifelineNetdevs).emit(verdictAccept()...)
+		}
 	}
 	generation := spec.QuarantineGeneration
 	for _, ifindex := range spec.CandidateIfindices {

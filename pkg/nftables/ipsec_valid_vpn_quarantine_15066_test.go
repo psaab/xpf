@@ -25,8 +25,10 @@ func TestIpsecCandidateOnlySpecIsNotQuarantine15066(t *testing.T) {
 	if len(spec.CandidateIfindices) != 0 {
 		t.Fatalf("candidate-only spec retained candidates %v, want cleared when not quarantined", spec.CandidateIfindices)
 	}
-	if len(spec.LifelineNetdevs) != 0 {
-		t.Fatalf("candidate-only spec retained lifelines %v, want cleared when not quarantined", spec.LifelineNetdevs)
+	// #16618: lifelines are retained (normalized) on a normal spec so a
+	// guard built from it inherits them; candidates alone are cleared.
+	if len(spec.LifelineNetdevs) != 1 || spec.LifelineNetdevs[0] != "fxp0" {
+		t.Fatalf("candidate-only spec lifelines = %v, want [fxp0] retained for guard inheritance", spec.LifelineNetdevs)
 	}
 	if len(spec.InetForward) != 1 || len(spec.InetInput) != 1 || len(spec.BridgeForward) != 1 || len(spec.BridgeInput) != 1 {
 		t.Fatalf("candidate-only spec lost divert rules: %+v", spec)
