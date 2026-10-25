@@ -1130,7 +1130,11 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 				*warnings = append(*warnings, warning)
 			}
 		}
-
+		// #16594: translate the authored Junos media MTU to the L3 MTU
+		// every downstream writer programmes. Must run after units are
+		// compiled (tagging flags and tunnel stanza are final here) and
+		// before the config is published. See media_mtu_16594.go.
+		translateInterfaceMediaMTU16594(ifName, ifc)
 		ifaces.Interfaces[ifName] = ifc
 	}
 	suppressInvalidRethAddresses(ifaces, invalidRethRG)

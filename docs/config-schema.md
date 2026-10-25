@@ -574,6 +574,32 @@ tolerant load / peer-sync path downgrades to a warning
 spelling (`ge-0/...` + `ge-7/...`) is unchanged, and slash/dash
 spellings of one port count as one child.
 
+### Interface `mtu` is a Junos media MTU (16594)
+
+Juniper's `[edit interfaces <if>] mtu` is the *media* MTU: it counts
+the Ethernet header, so the GE default `1514` carries an IP (protocol)
+MTU of 1500. `family inet/inet6 mtu` is the protocol MTU itself. xpf
+programmes Linux netdev MTU, which is an L3 value, so
+`compileInterfaces` translates the authored interface-level value at
+compile time (`media_mtu_16594.go`): the compiled `InterfaceConfig.MTU`
+— the single value the dataplane planner (`LinkSetMTU`), networkd
+(`MTUBytes=`), and the strict MTU gates judge — is
+`media − 14` untagged or `media − 18` when `vlan-tagging` /
+`flexible-vlan-tagging` is enabled (one admitted 802.1Q tag). Hence
+`mtu 1514` yields netdev 1500 untagged and 1496 tagged, matching a
+Junos peer with the same configured value. An unset `mtu` still
+materialises the 1500 L3 default; a media value at or below the header
+size clamps to L3 1 rather than collapsing to "unset". Tunnel,
+loopback, `fab*`, `reth*`, `ae*` and `irb*` devices have no Ethernet
+media on the named device and pass through untranslated; their
+physical parents translate on their own stanzas. Family `mtu` is
+already L3 and is never translated. Operators migrating a Junos
+config should keep the Junos number: copying `mtu 1514` now means
+the same thing on both boxes (before #16594 xpf applied it verbatim
+as L3, a silent +14/+18 shift that could black-hole DF packets in
+(N−14, N] toward a Junos neighbour).
+
+
 ### Bracketed lists: when to ACCUMULATE and when to REFUSE (9424)
 
 The lexer strips `[`/`]`, so a bracketed list collapses onto ONE leaf's `Keys`

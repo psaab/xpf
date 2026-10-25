@@ -45,18 +45,21 @@ package config
 // worse than doing nothing.
 var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &schemaNode{desc: "Interface name", valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", keyValidator: ValidateInterfaceName, children: map[string]*schemaNode{
 	"description": {desc: "Text description of interface", args: 1, scalar: true, children: nil},
-	// Compiled verbatim (compiler_interfaces.go:44, Atoi with the
-	// error swallowed → garbage silently means "MTU not set", the
-	// zero-value sentinel) and passed through to networkd MTUBytes=
-	// and the dataplane interface snapshot. Min-only per the
-	// no-schema-only-caps doctrine: the kernel/driver owns the real
-	// ceiling and rejects loudly.
+	// Compiled with the error swallowed → garbage silently means
+	// "MTU not set", the zero-value sentinel. #16594: the authored
+	// value is a Junos MEDIA MTU (counts the 14-byte Ethernet header,
+	// +4 when tagging); compileInterfaces translates it to the L3
+	// MTU programmed on the netdev (media - 14 - 4*tags), so
+	// `mtu 1514` yields netdev 1500 untagged. `family ... mtu` is
+	// already an L3/protocol MTU and is not translated. Min-only per
+	// the no-schema-only-caps doctrine: the kernel/driver owns the
+	// real ceiling and rejects loudly.
 	"mtu": {
-		desc:          "Maximum transmit packet size",
+		desc:          "Maximum transmit packet size (Junos media MTU; counts Ethernet header)",
 		args:          1,
 		valueType:     ValueInteger,
-		valueDesc:     "MTU in bytes (>= 1; kernel/driver enforces its own ceiling)",
-		valueExamples: []string{"1500", "9000"},
+		valueDesc:     "Media MTU in bytes (>= 1); L3 MTU programmed is value minus 14 (minus 18 when VLAN tagging) — e.g. 1514 gives IP MTU 1500; kernel/driver enforces its own ceiling",
+		valueExamples: []string{"1514", "9014"},
 		validator:     ValidateIntegerMin(1),
 		children:      nil,
 	},
@@ -195,12 +198,14 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 				"targeted-broadcast": {desc: "Forward directed broadcasts to the subnet (accepted-only, not yet enforced — #4308)", children: nil},
 				// Min-folded with the inet6 family mtu into unit.MTU
 				// (order-independent minimum wins, #10050); not verbatim.
+				// #16594: family mtu is a Junos PROTOCOL (L3/IP) MTU,
+				// unlike the interface-level media MTU — never translated.
 				"mtu": {
-					desc:          "Maximum transmit packet size",
+					desc:          "Maximum transmit packet size (protocol/L3 MTU)",
 					args:          1,
 					placeholder:   "<size>",
 					valueType:     ValueInteger,
-					valueDesc:     "MTU in bytes (>= 1; kernel/driver enforces its own ceiling)",
+					valueDesc:     "Protocol (L3/IP) MTU in bytes (>= 1; kernel/driver enforces its own ceiling)",
 					valueExamples: []string{"1500"},
 					validator:     ValidateIntegerMin(1),
 					children:      nil,
@@ -254,15 +259,16 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 				"dynamic-dns": interfaceDynamicDNSSchema(),
 			}},
 			"inet6": {desc: "IPv6 protocol", packedStatements: true, children: map[string]*schemaNode{
-				// Compiled at compiler_interfaces.go:578 (the lower of
-				// the per-family values wins); same pass-through
-				// contract as the interface-level mtu.
+				// Compiled at compiler_interfaces.go (the lower of
+				// the per-family values wins). #16594: family mtu is a
+				// Junos PROTOCOL (L3/IP) MTU, unlike the interface-level
+				// media MTU — never translated.
 				"mtu": {
-					desc:          "Maximum transmit packet size",
+					desc:          "Maximum transmit packet size (protocol/L3 MTU)",
 					args:          1,
 					placeholder:   "<size>",
 					valueType:     ValueInteger,
-					valueDesc:     "MTU in bytes (>= 1; kernel/driver enforces its own ceiling)",
+					valueDesc:     "Protocol (L3/IP) MTU in bytes (>= 1; kernel/driver enforces its own ceiling)",
 					valueExamples: []string{"1500"},
 					validator:     ValidateIntegerMin(1),
 					children:      nil,

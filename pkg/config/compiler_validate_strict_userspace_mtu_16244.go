@@ -77,7 +77,9 @@ func validateUserspaceRxMTUStrict(cfg *Config) error {
 			"Ethernet/VLAN header; AF_XDP is bound without multi-buffer support): frames "+
 			"larger than the budget cannot reach a worker, so this MTU would commit clean "+
 			"and then drop at line rate or refuse the AF_XDP bind. Lower the effective "+
-			"parent mtu to at most %d, or remove %s from its security zone (#16244)",
+			"parent mtu to at most %d (the effective MTU is the L3 value programmed on the "+
+			"netdev: the interface-level media mtu minus 14, or minus 18 when VLAN tagging, "+
+			"#16594; a family mtu is already L3), or remove %s from its security zone (#16244)",
 		parentName, device, parent.MTU, userspaceRxMTUBudget, userspaceUMEMFrameSize,
 		userspaceXDPacketHeadroom+userspaceUMEMHeadroom, userspaceXDPacketHeadroom,
 		userspaceUMEMHeadroom, userspaceRxMTUBudget, parentName)

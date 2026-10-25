@@ -65,8 +65,8 @@ func TestInterfaceDisableNonFirstPacked14442(t *testing.T) {
 		`interfaces { ge-0/0/0 description "uplink" disable; }`,
 		`interfaces { ge-0/0/0 disable description "uplink"; }`,
 		`interfaces { ge-0/0/0 { description "uplink" disable; } }`,
-		`interfaces { ge-0/0/0 mtu 9000 disable; }`,
-		`interfaces { ge-0/0/0 disable mtu 9000; }`,
+		`interfaces { ge-0/0/0 mtu 9014 disable; }`,
+		`interfaces { ge-0/0/0 disable mtu 9014; }`,
 		`interfaces { ge-0/0/0 description "uplink" disable unit 0 family inet address 10.0.0.1/24; }`,
 	}
 	for _, body := range packed {
@@ -95,10 +95,10 @@ func TestInterfaceDisableNonFirstPacked14442(t *testing.T) {
 		}
 	}
 	// Non-first leaf beyond disable: mtu after/before disable.
-	if ifc := compileBrace(t, `interfaces { ge-0/0/0 mtu 9000 disable; }`); ifc == nil || ifc.MTU != 9000 || !ifc.Disable {
+	if ifc := compileBrace(t, `interfaces { ge-0/0/0 mtu 9014 disable; }`); ifc == nil || ifc.MTU != 9000 || !ifc.Disable {
 		t.Errorf("mtu-then-disable packed: got %+v, want MTU=9000 Disable=true (#14442)", ifc)
 	}
-	if ifc := compileBrace(t, `interfaces { ge-0/0/0 disable mtu 9000; }`); ifc == nil || ifc.MTU != 9000 || !ifc.Disable {
+	if ifc := compileBrace(t, `interfaces { ge-0/0/0 disable mtu 9014; }`); ifc == nil || ifc.MTU != 9000 || !ifc.Disable {
 		t.Errorf("disable-then-mtu packed: got %+v, want MTU=9000 Disable=true (#14442)", ifc)
 	}
 	// Packed tail carrying a unit: unit + address survive beside disable.
@@ -144,7 +144,7 @@ func TestInterfaceDisableNonFirstPacked14442(t *testing.T) {
 	if ifc := compileBrace(t, `interfaces { ge-0/0/0 description "uplink"; }`); ifc == nil || ifc.Disable {
 		t.Errorf("no-disable braced control: got %+v, want present Disable=false (#14442)", ifc)
 	}
-	if ifc := compileBrace(t, `interfaces { ge-0/0/0 description "uplink" mtu 9000; }`); ifc == nil || ifc.Disable || ifc.MTU != 9000 {
+	if ifc := compileBrace(t, `interfaces { ge-0/0/0 description "uplink" mtu 9014; }`); ifc == nil || ifc.Disable || ifc.MTU != 9000 {
 		t.Errorf("no-disable packed control: got %+v, want present Disable=false MTU=9000 (#14442)", ifc)
 	}
 }

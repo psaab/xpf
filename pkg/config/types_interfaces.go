@@ -29,7 +29,7 @@ type InterfacesConfig struct {
 type InterfaceConfig struct {
 	Name                string
 	Description         string                  // free-text interface description
-	MTU                 int                     // interface-level MTU (overridden by unit MTU)
+	MTU                 int                     // L3 (IP) MTU to programme on the netdev; compileInterfaces translates the authored Junos media MTU (#16594). Family/unit MTU overrides it.
 	Speed               string                  // interface speed (10m..100g notation or "auto")
 	Duplex              string                  // "full", "half", "auto"
 	VlanTagging         bool                    // 802.1Q trunk mode

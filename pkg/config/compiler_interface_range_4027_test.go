@@ -16,9 +16,9 @@ func TestInterfaceRangeExpandsMembers(t *testing.T) {
 	tree := setTree(t,
 		"set interfaces interface-range uplinks member ge-0/0/1",
 		"set interfaces interface-range uplinks member ge-0/0/2",
-		"set interfaces interface-range uplinks mtu 9000",
+		"set interfaces interface-range uplinks mtu 9014",
 		// A normal interface, unrelated to the range: must be unaffected.
-		"set interfaces ge-0/0/3 mtu 1500",
+		"set interfaces ge-0/0/3 mtu 1514",
 	)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
@@ -65,10 +65,10 @@ func TestInterfaceRangeSharedUnitAndPrecedence(t *testing.T) {
 	tree := setTree(t,
 		"set interfaces interface-range R member ge-0/0/1",
 		"set interfaces interface-range R member ge-0/0/2",
-		"set interfaces interface-range R mtu 9000",
+		"set interfaces interface-range R mtu 9014",
 		"set interfaces interface-range R unit 0 family inet address 10.5.5.5/24",
 		// ge-0/0/1 overrides mtu and adds its own address.
-		"set interfaces ge-0/0/1 mtu 1400",
+		"set interfaces ge-0/0/1 mtu 1414",
 		"set interfaces ge-0/0/1 unit 0 family inet address 10.9.9.9/24",
 	)
 	cfg, err := CompileConfig(tree)
@@ -117,7 +117,7 @@ interfaces {
     interface-range R {
         member ge-0/0/1;
         member ge-0/0/2;
-        mtu 9000;
+        mtu 9014;
         unit 0 {
             family inet {
                 address 10.5.5.5/24;
@@ -125,7 +125,7 @@ interfaces {
         }
     }
     ge-0/0/3 {
-        mtu 1500;
+        mtu 1514;
     }
 }
 `
@@ -164,7 +164,7 @@ interfaces {
 func TestInterfaceRangeMemberRange(t *testing.T) {
 	tree := setTree(t,
 		"set interfaces interface-range R member-range ge-0/0/1 to ge-0/0/3",
-		"set interfaces interface-range R mtu 9000",
+		"set interfaces interface-range R mtu 9014",
 	)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
@@ -185,9 +185,9 @@ func TestInterfaceRangeMemberRange(t *testing.T) {
 func TestInterfaceRangeMultipleRangesFlatSet(t *testing.T) {
 	tree := setTree(t,
 		"set interfaces interface-range r1 member ge-0/0/1",
-		"set interfaces interface-range r1 mtu 9000",
+		"set interfaces interface-range r1 mtu 9014",
 		"set interfaces interface-range r2 member ge-0/0/2",
-		"set interfaces interface-range r2 mtu 1400",
+		"set interfaces interface-range r2 mtu 1414",
 	)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
@@ -212,7 +212,7 @@ func TestInterfaceRangeMultipleRangesFlatSet(t *testing.T) {
 // with no interface-range: a plain interface compiles bit-identically.
 func TestInterfaceRangeNoStanzaUnchanged(t *testing.T) {
 	tree := setTree(t,
-		"set interfaces ge-0/0/0 mtu 1500",
+		"set interfaces ge-0/0/0 mtu 1514",
 		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24",
 	)
 	cfg, err := CompileConfig(tree)
@@ -242,7 +242,7 @@ func TestInterfaceRangeNoStanzaUnchanged(t *testing.T) {
 func TestInterfaceRangeMemberRangeHugeEndOverflow(t *testing.T) {
 	tree := setTree(t,
 		"set interfaces interface-range R member-range ge-0/0/0 to ge-0/0/9223372036854775807",
-		"set interfaces interface-range R mtu 9000",
+		"set interfaces interface-range R mtu 9014",
 	)
 
 	cfg, err := CompileConfig(tree)

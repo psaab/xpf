@@ -208,7 +208,7 @@ func TestSchemaValidate_Interfaces_Matrix(t *testing.T) {
 func TestSchemaValidate_Interfaces_DeployedConfigShapeAccepted(t *testing.T) {
 	if err := schemaCheck(t, `interfaces {
     ge-0-0-1 {
-        mtu 9000;
+        mtu 9014;
         unit 0 {
             family inet {
                 address 10.0.61.1/24 {
@@ -311,7 +311,7 @@ func TestSchemaValidate_Interfaces_HierarchicalRejectsWrongFamily(t *testing.T) 
 func TestSchemaValidate_Interfaces_AcceptedValuesCompileAsWritten(t *testing.T) {
 	tree := &config.ConfigTree{}
 	for _, line := range []string{
-		"set interfaces ge-0-0-0 mtu 9000",
+		"set interfaces ge-0-0-0 mtu 9014",
 		"set interfaces ge-0-0-0 unit 0 family inet address 10.0.1.10/24",
 		"set interfaces ge-0-0-0 unit 0 family inet6 address 2001:db8::1/64",
 		// #15731: vlan-id 50 is only an accepted value under vlan-tagging —
@@ -338,7 +338,7 @@ func TestSchemaValidate_Interfaces_AcceptedValuesCompileAsWritten(t *testing.T) 
 	}
 	ifc := cfg.Interfaces.Interfaces["ge-0-0-0"]
 	if ifc == nil || ifc.MTU != 9000 {
-		t.Fatalf("mtu must compile verbatim, got %+v", ifc)
+		t.Fatalf("mtu 9014 must compile to L3 9000 (#16594 media translation), got %+v", ifc)
 	}
 	unit := ifc.Units[0]
 	if unit == nil || len(unit.Addresses) != 2 ||

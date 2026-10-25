@@ -27,14 +27,14 @@ func TestInterfaceRangeSecondRootExpands_5675(t *testing.T) {
 	input := `
 interfaces {
     ge-0/0/0 {
-        mtu 1500;
+        mtu 1514;
     }
 }
 interfaces {
     interface-range R {
         member ge-0/0/1;
         member ge-0/0/2;
-        mtu 9000;
+        mtu 9014;
     }
 }
 `

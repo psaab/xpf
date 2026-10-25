@@ -59,7 +59,7 @@ func TestIPv6UnitMTUInetFoldRejected13936(t *testing.T) {
 // interface-level `mtu` the untagged unit inherits is below 1280.
 func TestIPv6UnitMTUInterfaceLevelRejected13936(t *testing.T) {
 	assertCommitRejects(t, flatTreeFromSets(t,
-		"set interfaces ge-0-0-0 mtu 1000",
+		"set interfaces ge-0-0-0 mtu 1014",
 		"set interfaces ge-0-0-0 unit 0 family inet6 address 2001:db8::1/64",
 	), "#13936")
 }
@@ -68,7 +68,7 @@ func TestIPv6UnitMTUInterfaceLevelRejected13936(t *testing.T) {
 func TestIPv6TaggedUnitMTUBelowMinimumRejected13936(t *testing.T) {
 	assertCommitRejects(t, flatTreeFromSets(t,
 		"set interfaces ge-0-0-2 vlan-tagging",
-		"set interfaces ge-0-0-2 mtu 1500",
+		"set interfaces ge-0-0-2 mtu 1518",
 		"set interfaces ge-0-0-2 unit 50 vlan-id 50",
 		"set interfaces ge-0-0-2 unit 50 family inet6 address 2001:db8:50::1/64",
 		"set interfaces ge-0-0-2 unit 50 family inet6 mtu 1279",
@@ -91,7 +91,7 @@ func TestIPv6UnitMTUHierarchicalRejected13936(t *testing.T) {
         unit 0 {
             family inet6 {
                 address 2001:db8::1/64;
-                mtu 1000;
+                mtu 1014;
             }
         }
     }
@@ -132,7 +132,7 @@ func TestIPv6UnitMTUControlsAccepted13936(t *testing.T) {
 		},
 		// IPv4-only interface below 1280.
 		"ipv4-only interface below 1280": {
-			"set interfaces ge-0-0-0 mtu 1000",
+			"set interfaces ge-0-0-0 mtu 1014",
 			"set interfaces ge-0-0-0 unit 0 family inet address 10.0.0.1/24",
 		},
 		// No MTU statement anywhere: the commit cannot see the running
@@ -144,7 +144,7 @@ func TestIPv6UnitMTUControlsAccepted13936(t *testing.T) {
 		// interface level: the unit override is what the planner
 		// writes for the untagged unit.
 		"unit mtu overrides low interface mtu": {
-			"set interfaces ge-0-0-0 mtu 1000",
+			"set interfaces ge-0-0-0 mtu 1014",
 			"set interfaces ge-0-0-0 unit 0 family inet6 address 2001:db8::1/64",
 			"set interfaces ge-0-0-0 unit 0 family inet6 mtu 1500",
 			"set security zones security-zone trust interfaces ge-0-0-0.0",

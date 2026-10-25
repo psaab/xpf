@@ -120,8 +120,8 @@ func TestContestedTrunkZonesDottedTrueContest9821(t *testing.T) {
 // the override, and falsely refused vs 1400.
 func TestVlanUnitMTUDottedSiblingOverrideAccepted9821(t *testing.T) {
 	sets := []string{
-		"set interfaces p mtu 1500",
-		"set interfaces p.0 mtu 1400",
+		"set interfaces p mtu 1514",
+		"set interfaces p.0 mtu 1414",
 		"set interfaces p.0 unit 0 family inet address 10.0.0.1/24",
 		"set interfaces p.0 unit 0 family inet mtu 1500",
 		"set interfaces p.0 unit 10 vlan-id 10",
@@ -138,8 +138,8 @@ func TestVlanUnitMTUDottedSiblingOverrideAccepted9821(t *testing.T) {
 // refuses.
 func TestVlanUnitMTUDottedGenuineOverBudgetRefused9821(t *testing.T) {
 	sets := []string{
-		"set interfaces p mtu 1500",
-		"set interfaces p.0 mtu 1400",
+		"set interfaces p mtu 1514",
+		"set interfaces p.0 mtu 1414",
 		"set interfaces p.0 unit 0 family inet address 10.0.0.1/24",
 		"set interfaces p.0 unit 0 family inet mtu 1500",
 		"set interfaces p.0 unit 10 vlan-id 10",

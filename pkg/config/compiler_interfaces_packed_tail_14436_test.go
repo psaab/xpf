@@ -155,7 +155,7 @@ firewall { family inet { filter F { term t { then discard; } } } }
 // Packed interface-level leaves beside the unit must also survive.
 func TestInterfacePackedTailLeaves14436(t *testing.T) {
 	src := `interfaces {
-    ge-0/0/0 mtu 9000 bandwidth 1g unit 0 family inet {
+    ge-0/0/0 mtu 9014 bandwidth 1g unit 0 family inet {
         address 10.0.0.1/24;
     }
 }
@@ -182,7 +182,7 @@ func TestInterfaceBareLeafStillSkipped14436(t *testing.T) {
 		t.Errorf("unknown bare leaf: interface present %+v, want skipped", ifc)
 	}
 	// Modelled packed leaves compile (post-#14442 semantics).
-	cfg = compile14436(t, `interfaces { ge-0/0/0 mtu 9000; }`)
+	cfg = compile14436(t, `interfaces { ge-0/0/0 mtu 9014; }`)
 	if ifc := cfg.Interfaces.Interfaces["ge-0/0/0"]; ifc == nil || ifc.MTU != 9000 {
 		t.Errorf("packed mtu leaf: %+v, want MTU 9000", ifc)
 	}
