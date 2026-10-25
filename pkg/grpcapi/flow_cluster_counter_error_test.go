@@ -8,6 +8,7 @@
 package grpcapi
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -19,7 +20,9 @@ func TestShowFlowStatisticsTextWarnsOnCounterReadError(t *testing.T) {
 	s := newViewServer(t, dp)
 
 	var buf strings.Builder
-	s.showFlowStatistics(&buf)
+	if err := s.showFlowStatistics(context.Background(), &buf); err != nil {
+		t.Fatalf("showFlowStatistics: %v", err)
+	}
 
 	if !strings.Contains(buf.String(), "warning") {
 		t.Fatalf("showFlowStatistics output lacks a counter-read warning; got:\n%s", buf.String())

@@ -164,8 +164,9 @@ var DefaultLimiter = NewLimiter(MaxConcurrentDiagnostics)
 // "sessions-top:*" scan, the gRPC ClearSessions clear (both the clear-all
 // and filtered full-table walks, #5779), and the count-only SessionCount()
 // walk reachable via the gRPC GetStatus RPC + the ShowText
-// "buffers"/"buffers-detail" (`show system buffers[-detail]`) surfaces (#5782)
-// AND the REST /api/v1/status handler (#5939) — share the single
+// "buffers"/"buffers-detail" (`show system buffers[-detail]`) surfaces (#5782),
+// the ShowText "flow-statistics" surface (#16677), AND the REST
+// /api/v1/status handler (#5939) — share the single
 // SessionWalkLimiter below (#5708).
 //
 // SessionCount draws from the same budget, and #8312 measured it as MORE

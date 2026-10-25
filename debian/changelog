@@ -29,6 +29,16 @@ xpf (0.0.0) unstable; urgency=medium
     Stop runs cancel -> signal -> wg.Wait() -> close (in that order, so
     no recv is ever in flight on a closed/fd-reused descriptor), and
     rxLoop re-checks the context after every successful recv.
+  * gRPC ShowText: `flow-statistics` now admits its full v4+v6
+    session-table walk through the shared session-walk limiter
+    (AcquireCtx on the ShowText context) and returns walk failures
+    as errors (#16677). Previously it walked on
+    context.Background() outside the MaxConcurrentSessionWalks
+    budget — so a disconnecting client did not stop it and
+    concurrent view callers could stack unbounded walks — and it
+    discarded the walk error, printing "Current sessions: 0" on
+    failure. Over-cap calls now fail with ResourceExhausted and a
+    failed walk surfaces instead of a clean zero.
   * Feeds: a feed restored with a count baseline but no usable content
     epoch now re-establishes the epoch on its first guarded install
     (#16651). Legacy count-only records, records whose epoch digest was
