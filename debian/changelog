@@ -1,5 +1,13 @@
 xpf (0.0.0) unstable; urgency=medium
-
+  * Shim verifier provenance/headroom (#16701): the gate verdict is
+    now schema 3 and records provenance.kernel_release (the uname -r
+    the processed-insn count was measured on); freshness and release
+    retention gates fail closed without it. `xpfd verify-dataplane`
+    now prints the processed count, headroom, floor and running
+    kernel and enforces the 15% floor on the target kernel (new
+    exit 4 below floor, 5 unmeasured; no guest-side override), so a
+    guest kernel charging more than the build host (#15645, #15854:
+    +3.8-6.1%) refuses early instead of hiding a later REJECT.
   * Cluster/session-sync: pre-auth logging on the sync listener is
     now bounded (#16748). The accept loop's "peer connected" line is
     Debug instead of Info (it fired before authentication, so a

@@ -423,8 +423,8 @@ func TestShimverifyWritesGateVerdict(t *testing.T) {
 				t.Fatalf("decode verdict: %v", err)
 			}
 			sum := sha256.Sum256(object)
-			if got.SchemaVersion != 2 || got.ObjectSHA256 != hex.EncodeToString(sum[:]) {
-				t.Errorf("schema/object binding = (%d, %q), want schema 2 and candidate SHA-256", got.SchemaVersion, got.ObjectSHA256)
+			if got.SchemaVersion != 3 || got.ObjectSHA256 != hex.EncodeToString(sum[:]) {
+				t.Errorf("schema/object binding = (%d, %q), want schema 3 and candidate SHA-256", got.SchemaVersion, got.ObjectSHA256)
 			}
 			if got.Provenance.Toolchain != "nightly-2026-05-23" || !got.Provenance.Pinned ||
 				got.Provenance.BPFLinker != "0.10.2" || got.Provenance.CodegenEnvDigest != dataplane.ShimCodegenEnvDigest("65536", "nightly-2026-05-23") {

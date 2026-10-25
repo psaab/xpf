@@ -147,6 +147,7 @@ type userspaceXDPGateVerdictProvenance struct {
 	Pinned           bool   `json:"pinned"`
 	BPFLinker        string `json:"bpf_linker"`
 	CodegenEnvDigest string `json:"codegen_env_digest"`
+	KernelRelease    string `json:"kernel_release"`
 }
 
 // userspaceXDPGateVerdict is the subset of the #10909 gate-verdict
@@ -299,7 +300,7 @@ func verdictProvenanceClean(repoRoot string, v *userspaceXDPGateVerdict) bool {
 	if err != nil {
 		return false
 	}
-	return p.BPFLinker == ShimPinnedBPFLinkerVersion && p.CodegenEnvDigest == want
+	return p.BPFLinker == ShimPinnedBPFLinkerVersion && p.CodegenEnvDigest == want && p.KernelRelease != ""
 }
 
 // UserspaceXDPBuildDigest returns the canonical digest of all source and
