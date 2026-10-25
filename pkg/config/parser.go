@@ -455,7 +455,6 @@ func (p *Parser) parseStatements() []*Node {
 			p.noteNodeBudget(tok.Line, tok.Column)
 			break
 		}
-		before := p.nodes
 		node := p.parseStatement()
 		if node != nil {
 			// #15195 A01-05: parseKeys charged this statement's keys against
@@ -465,7 +464,13 @@ func (p *Parser) parseStatements() []*Node {
 			// no matter how many keys it carried, and each key pins three
 			// parallel slots (Keys + quoted/bracketed provenance), so a
 			// key-dense statement reached ~4x the documented bound.
-			p.nodes = before + 1 + len(node.Keys)
+			// #16519: the node's own charge is ADDED to whatever p.nodes
+			// already holds — parseStatement recursed into this node's
+			// children, and every unit they charged is already accumulated
+			// there. Assigning before+1+len(node.Keys) instead discarded
+			// all descendant charges, making the budget per-block: sibling
+			// blocks each just under the cap built an unbounded tree.
+			p.nodes += 1 + len(node.Keys)
 			nodes = append(nodes, node)
 		}
 	}
