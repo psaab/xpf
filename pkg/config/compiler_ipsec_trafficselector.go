@@ -81,7 +81,11 @@ func validateIPsecTrafficSelectorsStrict(nodes []*Node, lenient bool) ([]string,
 	walkErr := forEachChild(nodes, "security", func(security *Node) error {
 		return forEachChild(security.Children, "ipsec", func(ipsec *Node) error {
 			for _, vpnInst := range namedInstances(ipsec.FindChildren("vpn")) {
-				for _, tsInst := range namedInstances(vpnInst.node.FindChildren("traffic-selector")) {
+				// #16759: a selector chained after gateway/ipsec-policy/
+				// bind-interface in one flat run is nested inside the run;
+				// discover it through the same helper the compiler uses
+				// or its values bypass the #4098/#5692 gates entirely.
+				for _, tsInst := range trafficSelectorInstances16759(vpnInst.node) {
 					// #5692: count local-ip / remote-ip VALUES across all such
 					// leaves in the selector. Junos models each as a SINGLE-value
 					// leaf (schema_security.go: the traffic-selector grammar is
