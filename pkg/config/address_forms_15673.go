@@ -16,10 +16,12 @@ import (
 //   - `range-address <low> { to { <high>; } }` (hierarchical) or
 //     `range-address <low> to <high>` (flat) — expanded natively at compile
 //     time via expandAddressRange into Address.ExpandedPrefixes;
-//   - `wildcard-address <ip>/<wildcard-mask>` — the bits set in the wildcard
-//     mask are "don't care"; the entry enforces the single prefix formed by
-//     clearing those bits, with prefix length 32-popcount(wildcard) (v4) or
-//     128-popcount (v6), stored in ExpandedPrefixes;
+//   - `wildcard-address <ip>/<wildcard-mask>` — Junos polarity (#16544):
+//     the bits set in the wildcard mask are compared (care bits); a 0 bit
+//     is ignored ("don't care"). The entry enforces the single prefix
+//     formed by masking with the mask itself, with prefix length
+//     popcount(mask), stored in ExpandedPrefixes. Non-contiguous masks
+//     have no single CIDR equivalent and stay unimplemented.
 //   - `dns-name <fqdn> [ipv4-only|ipv6-only]` — modelled in Address.DNSName /
 //     DNSFamily; the current resolution lives in Address.DNSAddresses and is
 //     refreshed by the daemon (RefreshDNSAddressBooks). An unresolvable name
@@ -211,14 +213,18 @@ func cloneBookForDNSRefresh(b *AddressBook) *AddressBook {
 	return &out
 }
 
-// expandWildcardAddress converts `ip/wildcard-mask` (e.g.
-// 10.1.2.3/255.0.255.0, where set mask bits are don't-care) to the single
-// enforced prefix. Non-contiguous masks have no CIDR equivalent and are
-// rejected so the caller records the form as unimplemented.
+// expandWildcardAddress converts `ip/wildcard-mask` (Junos polarity:
+// set mask bits are compared, 0 bits are ignored; e.g.
+// 10.1.2.3/255.255.255.0 enforces 10.1.2.0/24) to the single enforced
+// prefix. Non-contiguous masks have no CIDR equivalent and are rejected
+// so the caller records the form as unimplemented.
 func expandWildcardAddress(spec string) (string, error) {
 	ipStr, maskStr, ok := strings.Cut(spec, "/")
 	if !ok {
 		return "", fmt.Errorf("wildcard-address %q: missing wildcard mask", spec)
+	}
+	if strings.Contains(maskStr, "/") {
+		return "", fmt.Errorf("wildcard-address %q: invalid address or mask", spec)
 	}
 	ip := net.ParseIP(ipStr)
 	maskIP := net.ParseIP(maskStr)
@@ -227,21 +233,22 @@ func expandWildcardAddress(spec string) (string, error) {
 	}
 	ip4, mask4 := ip.To4(), maskIP.To4()
 	var ipB, maskB []byte
-	if ip4 != nil && mask4 != nil {
+	switch {
+	case ip4 != nil && mask4 != nil:
 		ipB, maskB = ip4, mask4
-	} else {
+	case ip4 != nil || mask4 != nil:
+		return "", fmt.Errorf("wildcard-address %q: family mismatch", spec)
+	default:
 		ipB, maskB = ip.To16(), maskIP.To16()
 		if ipB == nil || maskB == nil {
 			return "", fmt.Errorf("wildcard-address %q: family mismatch", spec)
 		}
 	}
 	network := make([]byte, len(ipB))
-	care := make([]byte, len(maskB))
 	for i := range maskB {
-		care[i] = ^maskB[i]
-		network[i] = ipB[i] & care[i]
+		network[i] = ipB[i] & maskB[i]
 	}
-	ones, maskBits := net.IPMask(care).Size()
+	ones, maskBits := net.IPMask(maskB).Size()
 	if maskBits == 0 {
 		return "", fmt.Errorf("wildcard-address %q: non-contiguous wildcard mask has no CIDR equivalent", spec)
 	}
