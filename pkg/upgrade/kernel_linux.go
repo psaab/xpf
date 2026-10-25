@@ -1089,9 +1089,54 @@ func (s *realKernelSystem) PruneInactiveSlot(slot, knownGoodUnameR, candidateVer
 	return nil
 }
 
-// isPkgInstalled reports whether a dpkg package is in the "installed" state and
-// whether the query itself succeeded. It is TRI-STATE: (true, nil) installed,
-// (false, nil) confirmed NOT installed, (false, err) status UNKNOWN.
+// dpkgStatusInstalled reports whether a `${db:Status-Status}` word means the
+// package may still own files on disk. Only `installed` is fully installed;
+// half-installed / unpacked / half-configured / triggers-* are partial states
+// whose payload may be present, so on a destructive path they must be treated
+// as possibly-installed (purge attempted, sweep gated) rather than
+// confirmed-absent (#16807). `not-installed` and `config-files` own no payload
+// (config-files keeps only conffiles under /etc, never /boot or /lib/modules).
+func dpkgStatusInstalled(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "installed", "half-installed", "unpacked", "half-configured",
+		"triggers-awaited", "triggers-pending":
+		return true
+	default:
+		return false
+	}
+}
+
+// dpkgStatusWord queries dpkg for one package and returns its raw
+// `${db:Status-Status}` word (e.g. "installed", "config-files"). This is the
+// selection-word predicate bake.py already uses (#1930): unlike `${Status}`
+// ("hold ok installed" vs "install ok installed") it does not embed the
+// desired state, so a HELD installed package still reads as installed
+// (#16807). The tri-state error contract is shared with isPkgInstalled: a
+// genuinely unknown package ("no packages found matching") returns
+// ("", nil) — confirmed absent — while any other query failure returns a
+// non-nil error so destructive callers fail SAFE as possibly-installed
+// (#5428).
+func dpkgStatusWord(pkg string) (string, error) {
+	out, err := captureCmd("dpkg-query", "-W", "-f=${db:Status-Status}", pkg)
+	if err != nil {
+		if dpkgQueryAbsent(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// isPkgInstalled reports whether a dpkg package is in an installed (or
+// possibly-installed partial) state and whether the query itself succeeded.
+// It is TRI-STATE: (true, nil) installed, (false, nil) confirmed NOT
+// installed, (false, err) status UNKNOWN.
+//
+// Classification is by the `${db:Status-Status}` word, NOT by the full
+// `${Status}` triple: a held package reports "hold ok installed" and was
+// previously misread as confirmed-absent because the old predicate required
+// the literal "install ok installed" (#16807). Half-installed / unpacked /
+// half-configured / triggers-* also count as possibly-installed.
 //
 // dpkg-query exits non-zero in TWO very different situations, and they must not
 // be conflated (#5428):
@@ -1105,14 +1150,11 @@ func (s *realKernelSystem) PruneInactiveSlot(slot, knownGoodUnameR, candidateVer
 //     missing binary). The status is UNKNOWN; return the error so a destructive
 //     caller fails SAFE (possibly-installed) rather than deleting owned files.
 func isPkgInstalled(pkg string) (bool, error) {
-	out, err := captureCmd("dpkg-query", "-W", "-f=${Status}", pkg)
+	status, err := dpkgStatusWord(pkg)
 	if err != nil {
-		if dpkgQueryAbsent(err) {
-			return false, nil
-		}
 		return false, err
 	}
-	return strings.Contains(out, "install ok installed"), nil
+	return dpkgStatusInstalled(status), nil
 }
 
 // dpkgQueryAbsent reports whether a dpkg-query error means the package is
