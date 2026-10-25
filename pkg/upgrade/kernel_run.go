@@ -324,6 +324,22 @@ func (r *KernelRunner) preflight(j *KernelJournal, candidateVersion string) erro
 		return fmt.Errorf("kernel-upgrade preflight: candidate %s is already the running kernel", candidateVersion)
 	}
 
+	// Fail BEFORE any mutation if the installed kernel set is not fully
+	// held (#16812): previously such a box installed the candidate, ran
+	// update-initramfs/update-grub, and only then failed the fatal rehold,
+	// leaving a PREFLIGHT journal that blocks any other version. The fake
+	// defaults held=true, so existing preflight tests are unaffected; a
+	// KernelHeld error (e.g. apt-mark unreadable) likewise aborts here
+	// rather than after the install window.
+	held, err := sys.KernelHeld()
+	if err != nil {
+		return fmt.Errorf("kernel-upgrade preflight: check kernel hold: %w", err)
+	}
+	if !held {
+		return fmt.Errorf("%w: installed linux-* kernel packages are not all held (apt-mark showhold) — "+
+			"hold them before arming a kernel roll", ErrKernelChannelUnavailable)
+	}
+
 	j.CandidateVersion = candidateVersion
 	j.KnownGoodVersion = known
 	j.ActiveSlot = activeSlot

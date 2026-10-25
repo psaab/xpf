@@ -1169,10 +1169,13 @@ func aptPackageAvailable(pkg string) bool {
 	if out, err := captureCmd("apt-cache", "show", pkg); err == nil && strings.TrimSpace(out) != "" {
 		return true
 	}
-	if out, err := captureCmd("dpkg-query", "-W", "-f=${binary:Package}\n", pkg); err == nil && strings.TrimSpace(out) != "" {
-		return true
-	}
-	return false
+	// Fall back to dpkg's knowledge of the name, but only count it when
+	// dpkg reports it INSTALLED: ${db:Status-Status} for a name dpkg merely
+	// knows of (not-installed / config-files) must not make an unavailable
+	// candidate package look available (#16812). A query error or an
+	// unknown name (no output) is not available.
+	out, err := captureCmd("dpkg-query", "-W", "-f=${db:Status-Status}", pkg)
+	return err == nil && strings.TrimSpace(out) == "installed"
 }
 
 func unholdLinuxPackages() {
@@ -1214,18 +1217,47 @@ func isKernelPkg(pkg string) bool {
 	return false
 }
 
+// currentLinuxPackages enumerates the INSTALLED kernel-family packages.
+//
+// `dpkg-query -W 'linux-*'` matches every package dpkg KNOWS OF, not just
+// installed ones — purged and never-installed names (e.g. linux-headers-3.0,
+// linux-image-fb-generic on the Ubuntu 26.04 base, referenced only as
+// someone else's dependency) come back too (#16812, mirroring bake.py
+// #1930/6e85c28653). Passing those to `apt-mark hold` exits 100 ("Can't
+// select installed nor candidate version"), which made the rehold after a
+// candidate install fatal and KernelHeld unachievable, so the LANE-1
+// kernel channel could never complete. Filter on ${db:Status-Status} and
+// keep only "installed", exactly as the bake does. This single helper is
+// used by hold, unhold and KernelHeld, so the filter applies to all of
+// them; the prune path builds its explicit candidate list and gates each
+// entry through the tri-state pkgInstalled, so it never enumerates here.
 func currentLinuxPackages() []string {
-	out, err := captureCmd("dpkg-query", "-W", "-f=${binary:Package}\n", "linux-*")
+	out, err := captureCmd("dpkg-query", "-W", "-f=${db:Status-Status} ${binary:Package}\n", "linux-*")
 	if err != nil {
 		return nil
 	}
+	return parseInstalledLinuxPackages(out)
+}
+
+// parseInstalledLinuxPackages parses `status pkg` lines from
+// currentLinuxPackages' dpkg-query output, keeping only rows whose
+// ${db:Status-Status} is exactly "installed" and whose package is in the
+// kernel family (isKernelPkg). Pure, so the installed-only predicate can be
+// unit-tested without a dpkg DB.
+func parseInstalledLinuxPackages(out string) []string {
 	seen := map[string]bool{}
 	var pkgs []string
 	for _, line := range strings.Split(out, "\n") {
-		pkg := strings.TrimSpace(line)
-		// Only the kernel image/module/header families + metas — NOT the broad
-		// linux-* set (excludes linux-base / linux-libc-dev / firmware / tools).
-		if pkg == "" || !isKernelPkg(pkg) || seen[pkg] {
+		status, pkg, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		pkg = strings.TrimSpace(pkg)
+		// Only genuinely installed kernel packages — NOT not-installed /
+		// config-files names dpkg merely knows of, and NOT the broad
+		// linux-* set (excludes linux-base / linux-libc-dev / firmware /
+		// tools).
+		if status != "installed" || pkg == "" || !isKernelPkg(pkg) || seen[pkg] {
 			continue
 		}
 		seen[pkg] = true
