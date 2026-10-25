@@ -889,8 +889,7 @@ func (s *SessionSync) handleNewConnection(ctx context.Context, fabricIdx int, co
 	// connection is tracked for shutdown by conn0/conn1 instead.
 	s.finishSetup(conn)
 	if err != nil {
-		slog.Warn("cluster sync: auth handshake failed, dropping connection",
-			"fabric", fabricIdx, "remote", connRemoteAddrString(conn), "err", err)
+		s.notePreAuthHandshakeFailed(fabricIdx, conn, err)
 		conn.Close()
 		return
 	}
@@ -1392,7 +1391,13 @@ func (s *SessionSync) acceptLoop(ctx context.Context, ln net.Listener, fabricIdx
 				continue
 			}
 		}
-		slog.Info("cluster sync: peer connected", "remote", conn.RemoteAddr(), "fabric", fabricIdx)
+		// #16748: pre-auth, so Debug only — an unauthenticated host on
+		// the sync segment must not drive one INFO per connection
+		// ahead of the #5303 rate limiter. The post-auth
+		// "handling new connection" INFO (and, when keyed, the
+		// "connection authenticated" INFO) remains the operator
+		// signal that a peer actually connected.
+		slog.Debug("cluster sync: peer connected", "remote", conn.RemoteAddr(), "fabric", fabricIdx)
 		// #5303: admit the connection into the bounded pre-auth setup pool BEFORE
 		// spawning a setup goroutine, so a connection flood that stalls before
 		// authentication cannot exhaust FDs/goroutines/socket-memory. Excess

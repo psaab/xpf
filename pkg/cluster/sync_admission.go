@@ -149,6 +149,25 @@ func (s *SessionSync) notePreAuthRejected(conn net.Conn) {
 	}
 }
 
+// notePreAuthHandshakeFailed records a pre-auth handshake failure
+// (#16748) and logs at most ~1/sec so a sustained flood of garbage
+// connections cannot itself become a log flood — the same contract
+// notePreAuthRejected gives the admission cap (#5303). The
+// rate-independent observable is the PreAuthHandshakeFailed counter
+// (surfaced in sync stats), not this log line. It uses its own
+// limiter, independent of preAuthLogMono, so an admission-cap flood
+// cannot starve handshake-failure diagnostics and vice versa.
+func (s *SessionSync) notePreAuthHandshakeFailed(fabricIdx int, conn net.Conn, err error) {
+	s.stats.PreAuthHandshakeFailed.Add(1)
+	now := MonotonicNanos()
+	last := s.preAuthHandshakeLogMono.Load()
+	if now-last >= int64(time.Second) && s.preAuthHandshakeLogMono.CompareAndSwap(last, now) {
+		slog.Warn("cluster sync: auth handshake failed, dropping connection",
+			"fabric", fabricIdx, "remote", connRemoteAddrString(conn), "err", err,
+			"failed_total", s.stats.PreAuthHandshakeFailed.Load())
+	}
+}
+
 // lookupPeerHostIPs resolves a configured peer hostname to all its IPs.
 // It is a package var only so tests can stub DNS deterministically; production
 // uses the default resolver with a bounded context so a wedged resolver
