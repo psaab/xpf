@@ -12,6 +12,14 @@ xpf (0.0.0) unstable; urgency=medium
     node that does — that uplink's ip-monitoring failover dead
     while ownership was split. Unparseable or unrelated
     source-addresses still match nothing and keep the fallback.
+  * Test/denyaudit: the #9042 denial-site census now registers the
+    eighth bounded site — the fabric MonitorInterface handler's
+    args-bound token mismatch denial (#11082) in
+    pkg/grpcapi/server_diag_monitor.go — and pins the count at 8
+    (#16648). Previously the census pinned 7, so the package was red
+    on correct bounded code and would have gone green if that site's
+    bounding were removed, restoring the unbounded per-request Warn
+    #9042 eliminated. No production code changed.
   * Config/firewall: all four `firewall three-color-policer` burst
     leaves now enforce a one-frame floor of 1514 bytes (#16610):
     `committed-burst-size`/`excess-burst-size` (single-rate) and

@@ -14,7 +14,7 @@ import (
 // #9042 acceptance: no unbounded per-request Warn remains on an authorization
 // path, and every known denial site still routes through this package.
 //
-// SOURCE-LEVEL BY NECESSITY. Driving all seven behaviorally needs a live
+// SOURCE-LEVEL BY NECESSITY. Driving all eight behaviorally needs a live
 // fabric listener with a real PSK, a peer UID that resolves to an empty-Class
 // principal, cross-site HTTP, REST authorization, and REST credential failures
 // -- and the property is about the SHAPE of the call, which a behavioural test
@@ -28,6 +28,7 @@ func TestEveryDenialSiteIsBounded9042(t *testing.T) {
 		{"../grpcapi/fabric_auth.go", "checkFabricAuthRequest"},
 		{"../grpcapi/server.go", "fabricAllowlistUnaryInterceptor"},
 		{"../grpcapi/server.go", "fabricAllowlistStreamInterceptor"},
+		{"../grpcapi/server_diag_monitor.go", "MonitorInterface"},
 		{"../api/crosssite.go", "mutationCrossSiteGuard"},
 		{"../api/authz.go", "logRESTLoginDenial"},
 		{"../api/auth.go", "logRESTAPIAuthFailure"},
@@ -54,7 +55,7 @@ func TestEveryDenialSiteIsBounded9042(t *testing.T) {
 	}
 }
 
-// The seven are the WHOLE set. A new unguarded site is the same defect
+// The eight are the WHOLE set. A new unguarded site is the same defect
 // arriving somewhere new, and a site quietly dropped is the fix being undone.
 func TestDenialSiteCountIsPinned9042(t *testing.T) {
 	var found []string
@@ -78,7 +79,7 @@ func TestDenialSiteCountIsPinned9042(t *testing.T) {
 		}
 	}
 	sort.Strings(found)
-	const want = 7
+	const want = 8
 	if len(found) != want {
 		t.Errorf("#9042: %d denyaudit.Note call sites, want %d:\n  %s\n\n"+
 			"GREW: a new denial site was added — confirm it is on a per-request path and "+
