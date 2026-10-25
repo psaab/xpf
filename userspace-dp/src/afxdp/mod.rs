@@ -217,7 +217,7 @@ use self::frame::*;
 use self::gre::{encapsulate_native_gre_frame, try_native_gre_decap_from_frame};
 use self::icmp::{
     FABRIC_INGRESS_FLAG, GRE_DECAP_INGRESS_FLAG, build_local_time_exceeded_request, is_icmp_error,
-    packet_ttl_would_expire,
+    packet_ttl_would_expire, zero_hop_limit_local_drop,
 };
 #[cfg(test)]
 use self::icmp::{

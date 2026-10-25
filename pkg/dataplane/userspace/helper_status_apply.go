@@ -38,6 +38,9 @@ func (m *Manager) helperCtrlFlagsLocked() (uint32, uint32, [config.MaxSteeredWir
 	if snapshotHasNativeGRE(m.lastSnapshot) {
 		ctrlFlags |= userspaceCtrlFlagNativeGRE
 	}
+	if m.lastSnapshot != nil && m.lastSnapshot.NoIPv6RejectZeroHopLimit {
+		ctrlFlags |= userspaceCtrlFlagNoIPv6RejectZeroHopLimit
+	}
 	wgPortCount, wgPorts := encodeSteeredPortSet(snapshotWgListenPorts(m.lastSnapshot))
 	if wgPortCount != 0 {
 		ctrlFlags |= userspaceCtrlFlagWgRx

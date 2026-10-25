@@ -54,6 +54,12 @@ const userspaceCtrlFlagStrict = 8
 // port set is non-empty. The shim gates its per-packet WG steering branch
 // on this single bit so non-WG traffic never even loads the ports array.
 const userspaceCtrlFlagWgRx = 16
+
+// userspaceCtrlFlagNoIPv6RejectZeroHopLimit (#16841) is set iff
+// `system internet-options no-ipv6-reject-zero-hop-limit` is configured.
+// When clear (the Junos default) the shim drops hop-limit-0 IPv6 to a
+// firewall-local destination instead of passing it to the kernel.
+const userspaceCtrlFlagNoIPv6RejectZeroHopLimit = 32
 const bindingQueuesPerIface = 16 // must match BINDING_QUEUES_PER_IFACE in BPF
 
 const userspaceBindingReady = 1
@@ -347,6 +353,9 @@ func (m *Manager) programBootstrapMapsLocked(snapshot *ConfigSnapshot, cfg confi
 	if snapshotHasNativeGRE(snapshot) {
 		ctrlFlags |= userspaceCtrlFlagNativeGRE
 	}
+	if snapshot != nil && snapshot.NoIPv6RejectZeroHopLimit {
+		ctrlFlags |= userspaceCtrlFlagNoIPv6RejectZeroHopLimit
+	}
 	wgPortCount, wgPorts := encodeSteeredPortSet(snapshotWgListenPorts(snapshot))
 	if wgPortCount != 0 {
 		ctrlFlags |= userspaceCtrlFlagWgRx
@@ -629,6 +638,9 @@ func (m *Manager) blindFailClosedUserspaceCtrlLocked(
 		}
 		if snapshotHasNativeGRE(snapshot) {
 			disabled.Flags |= userspaceCtrlFlagNativeGRE
+		}
+		if snapshot.NoIPv6RejectZeroHopLimit {
+			disabled.Flags |= userspaceCtrlFlagNoIPv6RejectZeroHopLimit
 		}
 	}
 	if m.configuredMode == ModeUserspaceStrict {

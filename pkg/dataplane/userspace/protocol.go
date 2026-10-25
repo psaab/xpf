@@ -507,7 +507,14 @@ const (
 	// keeps treating the row as a kernel-model stage-1 leak whose target
 	// miss falls through to inet.0's default — the exact WAN leak the
 	// field exists to close — so the pairing must refuse, not degrade.
-	ProtocolVersion = 73
+	// v73 -> v74 (#16841): no_ipv6_reject_zero_hop_limit changes
+	// meaning: it now admits hop-limit-0 IPv6 to local addresses
+	// instead of suppressing transit Time Exceeded. A v73 helper
+	// ignores the corrected semantics and keeps the #15707 behaviour
+	// — accepting local hop-limit-0 by default and suppressing the
+	// RFC 4443 §3.3 error when set — so exact-equality versioning
+	// fences the pairing instead of degrading silently.
+	ProtocolVersion = 74
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -1064,10 +1071,12 @@ type ConfigSnapshot struct {
 	DefaultLogSessionInit  bool `json:"default_log_session_init,omitempty"`
 	DefaultLogSessionClose bool `json:"default_log_session_close,omitempty"`
 	// NoIPv6RejectZeroHopLimit carries `system internet-options
-	// no-ipv6-reject-zero-hop-limit` (#15707): when true the helper must
-	// not originate an ICMPv6 Time Exceeded for a packet that arrived
-	// with hop limit 0. Additive/omitempty: an old helper ignores it
-	// (pre-#15707 behaviour), an old Go binary leaves it false.
+	// no-ipv6-reject-zero-hop-limit` (#16841, correcting #15707): when
+	// true the helper admits hop-limit-0 IPv6 packets addressed to
+	// local host addresses; when false they are dropped at local
+	// delivery. Transit Time Exceeded is unconditional.
+	// Additive/omitempty: an old helper ignores it, an old Go binary
+	// leaves it false (the Junos default-reject behaviour).
 	NoIPv6RejectZeroHopLimit bool `json:"no_ipv6_reject_zero_hop_limit,omitempty"`
 	// ClearPolicies (#15937 authorized clear): set ONLY by Manager.Compile
 	// on a full build (never by partial publishers, which clone the

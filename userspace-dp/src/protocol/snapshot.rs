@@ -778,11 +778,12 @@ pub(crate) struct ConfigSnapshot {
     pub default_log_session_init: bool,
     #[serde(rename = "default_log_session_close", default)]
     pub default_log_session_close: bool,
-    /// #15707: `system internet-options no-ipv6-reject-zero-hop-limit`.
-    /// When true the userspace dataplane must not originate an ICMPv6
-    /// Time Exceeded (hop-limit exceeded) for a packet whose hop limit
-    /// has expired at zero. Additive: a missing field (old Go binary)
-    /// decodes to false, the pre-#15707 reject behaviour.
+    /// #16841 (correcting #15707): `system internet-options
+    /// no-ipv6-reject-zero-hop-limit`. When true, hop-limit-0 IPv6
+    /// packets addressed to the local host are admitted; when false
+    /// they are dropped at local delivery. Transit Time Exceeded is
+    /// unconditional. Additive: a missing field (old Go binary)
+    /// decodes to false, the Junos default-reject behaviour.
     #[serde(rename = "no_ipv6_reject_zero_hop_limit", default, skip_serializing_if = "crate::protocol::bool_is_false")]
     pub no_ipv6_reject_zero_hop_limit: bool,
     /// #15937 authorized clear: set ONLY by the Go full-Compile path on

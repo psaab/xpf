@@ -1616,6 +1616,52 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
                 }
+                // #16841: Junos zero-hop-limit local rejection. A
+                // hop-limit-0 IPv6 packet addressed to a local host
+                // address is dropped by default; `no-ipv6-reject-zero-
+                // hop-limit` admits it. The locality test is the
+                // table-scoped FIB verdict for the packet's destination
+                // (the same lookup the miss path uses to decide
+                // LocalDelivery), so a transit destination, a NAT
+                // external no rule claims, and a VRF-foreign address
+                // never trip this gate. Transit expiry keeps its
+                // unconditional ICMPv6 Time Exceeded (RFC 4443 §3.3).
+                // Placed before decap/session/cache so no session,
+                // flow-cache entry, or reinject can resurrect the
+                // packet; tunnel-decapped inners are judged on their
+                // own (inner) frame and hop limit.
+                if !worker_ctx.forwarding.no_ipv6_reject_zero_hop_limit {
+                    let zero_hop_dst = flow
+                        .as_ref()
+                        .map(|f| f.dst_ip)
+                        .or_else(|| {
+                            crate::afxdp::frame::parse_packet_destination_from_frame(
+                                packet_frame,
+                                meta,
+                            )
+                        });
+                    if let Some(dst) = zero_hop_dst {
+                        let dst_is_local = matches!(
+                            crate::afxdp::forwarding::lookup_forwarding_resolution(
+                                worker_ctx.forwarding,
+                                dst,
+                            )
+                            .resolution
+                            .disposition,
+                            ForwardingDisposition::LocalDelivery
+                        );
+                        if zero_hop_limit_local_drop(
+                            worker_ctx.forwarding,
+                            packet_frame,
+                            meta,
+                            dst_is_local,
+                        ) {
+                            telemetry.counters.touched = true;
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
+                    }
+                }
                 // #7160 (#2387) stage 9b: stamp the flow's ROUTING DOMAIN.
                 // The validated peer zone is the only remote ingress identity;
                 // the unencoded case temporarily remains domain 0 until the

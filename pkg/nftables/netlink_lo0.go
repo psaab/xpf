@@ -26,6 +26,7 @@ import (
 // into the plan, mirroring buildLo0FilterPayload. The caller has created the
 // table + `input` chain (priority nftLo0FilterPriority, policy accept).
 func buildLo0FilterNetlink(p *nlPlan, spec Lo0FilterSpec) {
+	EmitZeroHopLimitLocalDrop(p, spec.NoIPv6RejectZeroHopLimit)
 	// IPv4 is reassembled by the kernel at prerouting before packets reach
 	// the input hook. Therefore the fragment offset/MF field that the lo0
 	// input filter would inspect has already been cleared. Refuse the whole
