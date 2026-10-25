@@ -272,14 +272,15 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 
 	// #5701: route-map sequence-number overflow gate. A policy-statement whose
 	// per-term Cartesian expansion (families x from-prefix-list x from-community
-	// x from-as-path x from-protocol) produces more sequences than the FRR route-map
-	// sequence-number space (1..65535, step 10) renders a `route-map` line past
-	// seq 65535. FRR rejects it (CMD_WARNING_CONFIG_FAILED) and a single failed
-	// line makes the vtysh-batched frr-reload exit non-zero, poisoning the WHOLE
-	// managed-section reload. Strict on commit / commit-check (hard reject so the
-	// oversized policy is operator-visible); lenient on load / peer-sync (warn —
-	// #1960; the renderer's generatePolicyOptions SKIPS an over-ceiling policy so
-	// a leniently-loaded config renders nothing for it rather than poisoning the
+	// x from-as-path x from-protocol), plus any #15157 tail reserve for a carved
+	// BGP export, exceeds the FRR route-map sequence-number space (1..65535, step
+	// 10) would render a `route-map` line past seq 65535. FRR rejects it
+	// (CMD_WARNING_CONFIG_FAILED) and a single failed line makes the
+	// vtysh-batched frr-reload exit non-zero, poisoning the WHOLE managed-section
+	// reload. Strict on commit / commit-check (hard reject so the oversized
+	// policy is operator-visible); lenient on load / peer-sync (warn — #1960; the
+	// renderer's generatePolicyOptions SKIPS an over-ceiling policy so a
+	// leniently-loaded config renders nothing for it rather than poisoning the
 	// reload). Mirrors validateNextTableTargetReferencesStrict.
 	if err := validatePolicyRouteMapSequenceBoundStrict(cfg); err != nil {
 		if opts.lenientPolicyRouteMapSeq {
@@ -295,10 +296,11 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 	// concatenates an `export`/`import [ A B ... ]` chain (#5277) into ONE
 	// route-map with a running sequence number, so members that each pass the
 	// per-policy gate can still SUM past the FRR ceiling and emit a `route-map`
-	// line past seq 65535 — poisoning the whole frr-reload. Same strict/lenient
+	// line past seq 65535 — poisoning the whole frr-reload. This gate applies
+	// the shared #16869 tail reserve to carved export chains. Same strict/lenient
 	// doctrine and the SAME MaxRouteMapSequences ceiling; the renderer's
 	// renderComposedRouteMap independently skips an over-ceiling chain on the
-	// tolerant path (shared ComposedChainSequenceCount predicate).
+	// tolerant path (shared ComposedChainSequenceCount and carve-reserve helpers).
 	if err := validateBGPComposedChainSequenceBoundStrict(cfg); err != nil {
 		if opts.lenientPolicyRouteMapSeq {
 			cfg.Warnings = append(cfg.Warnings,

@@ -13,15 +13,13 @@ import (
 // all rendered term variants (including the #16835 community-chain
 // expansion), plus an explicit policy default when `next policy` can
 // jump over it (+2 with the #16869 carved-escape second sequence);
-// one final fallback follows that count. Carved no-default and
-// composed fall-off pairs render extra tail sequences this package
-// cannot see (per-instance/direction carve); the pkg/frr carved
-// render belts reserve those exactly where the carve is known. A map
-// with N pre-fallback sequences therefore has highest sequence number
-// routeMapSeqStep*(N+1) on every path this count itself gates. Once
-// that exceeds frrMaxRouteMapSeq FRR rejects the `route-map` line
-// with CMD_WARNING_CONFIG_FAILED, and a single failed line makes the
-// whole vtysh-batched frr-reload exit non-zero — poisoning the
+// one final fallback follows that count. Carved no-default and composed
+// fall-off pairs are context-dependent, so the strict BGP gates and the
+// pkg/frr render belts apply the shared reserve arithmetic only where a carve
+// is known. The carve-aware reserved total N gives highest sequence number
+// routeMapSeqStep*(N+1). Once that exceeds frrMaxRouteMapSeq, FRR rejects the
+// `route-map` line with CMD_WARNING_CONFIG_FAILED, and a single failed line
+// makes the whole vtysh-batched frr-reload exit non-zero — poisoning the
 // ENTIRE managed-section reload, not just this policy (#5701).
 const (
 	frrMaxRouteMapSeq = 65535
@@ -75,14 +73,12 @@ func uniqueCanonicalProtocolCount(protos []string) int {
 // sequence when `then next policy` can jump over it, plus one further
 // carved-escape sequence for an explicit-default policy with a valid
 // `then next policy` term (#16869; +2 total for that shape). The
-// no-default carved tail is NOT reserved here: it renders a pair
-// (plus a fallback past it) beyond the one reserved fallback, but
-// that carve is direction/instance-dependent and invisible to this
-// package — pkg/frr reserves it exactly where the carved flag is
-// known (carvedSingleExtraSeqs16869 / carvedComposedReserve16869 in
-// pkg/frr/carved_seq_reserve_16869.go, added with saturating
-// arithmetic at the render belts). The explicit-default +2 is
-// counted conservatively for every matching policy — matching how
+// no-default carved tail is NOT reserved in this base count: it renders a pair
+// (plus a fallback past it) beyond the one reserved fallback. The strict BGP
+// gates and pkg/frr render belts add the shared reserve at the carve-aware
+// call sites (CarvedSingleExtraSequences16869 /
+// CarvedComposedExtraSequences16869), using saturating arithmetic.
+// The explicit-default +2 is counted conservatively for every matching policy —
 // the existing jump-over-default allowance already counts a jump
 // only some render sites use. It mirrors the renderer's Cartesian expansion
 // values. emitVariants emits one sequence per unique canonical protocol.
@@ -137,12 +133,10 @@ func RouteMapSequenceCount(po *PolicyOptionsConfig, ps *PolicyStatement) uint64 
 		// second sequence of the #16869 carved pair. The first carved
 		// sequence occupies the slot the final fallback would otherwise
 		// use, so the renderer can emit terms + default + pair and the
-		// highest sequence is step*(count+1). No-default carved tails
-		// are NOT reserved here: they are visible only in pkg/frr,
-		// whose carved render belts add the exact tail reserve where
-		// the carve is known (see carvedSingleExtraSeqs16869 /
-		// carvedComposedReserve16869 in pkg/frr), keeping this count
-		// exact for every non-carved shape the existing suites pin.
+		// highest sequence is step*(count+1). No-default carved tails are
+		// not part of this base count because their reserve depends on the
+		// per-instance carve; the strict BGP gate and renderer apply the
+		// shared reserve only where that carve is known.
 		if total == math.MaxUint64 {
 			return total
 		}
@@ -229,10 +223,10 @@ func communityOrphanExtraWeight16869(po *PolicyOptionsConfig, term *PolicyTerm) 
 // first explicit policy default with no `next policy` term. That default
 // terminates ordinary fall-through and no route can reach later members.
 // A carved composed fall-off pair renders one extra sequence beyond
-// the single fallback this count reserves; that carve is visible
-// only in pkg/frr, whose carved composed belt adds the exact +1
-// where the carved flag is known (carvedComposedReserve16869), so
-// this count stays exact for every non-carved chain.
+// the single fallback this count reserves. The strict BGP chain gate
+// and pkg/frr render belt both apply CarvedComposedExtraSequences16869
+// where the carved flag is known, keeping the base count exact for
+// every non-carved chain.
 //
 // Like the single-policy RouteMapSequenceCount this EXCLUDES the final fallback
 // sequence, so the SAME MaxRouteMapSequences ceiling applies — the composed
@@ -301,8 +295,8 @@ func termRouteFiltersMixFamily(term *PolicyTerm) bool {
 }
 
 // validatePolicyRouteMapSequenceBoundStrict rejects a policy-statement whose
-// route-map term expansion would exceed the FRR route-map sequence-number
-// ceiling. Rendering such a policy emits a `route-map <name> <action> <seq>`
+// route-map term expansion, including any #15157 carved export tail, would
+// exceed the FRR sequence-number ceiling. Rendering such a policy emits a
 // line with seq > 65535, which FRR rejects (CMD_WARNING_CONFIG_FAILED); a
 // single failed line makes the vtysh add-batch of the frr-reload exit non-zero
 // and POISONS the whole managed-section reload (#5701) — every route/policy in
@@ -324,6 +318,7 @@ func validatePolicyRouteMapSequenceBoundStrict(cfg *Config) error {
 	if len(pss) == 0 {
 		return nil
 	}
+	carvedSingles, _ := carvedBGPExportShapes16890(cfg)
 	names := make([]string, 0, len(pss))
 	for name := range pss {
 		names = append(names, name)
@@ -334,9 +329,16 @@ func validatePolicyRouteMapSequenceBoundStrict(cfg *Config) error {
 		if ps == nil {
 			continue
 		}
-		if n := RouteMapSequenceCount(&cfg.PolicyOptions, ps); n > MaxRouteMapSequences {
+		base := RouteMapSequenceCount(&cfg.PolicyOptions, ps)
+		reserve := CarvedSingleExtraSequences16869(carvedSingles[name], ps)
+		n := AddCarvedSequenceReserve16869(base, reserve)
+		if n > MaxRouteMapSequences {
+			carved := ""
+			if reserve > 0 {
+				carved = " including the carved BGP export tail"
+			}
 			return fmt.Errorf(
-				"policy-statement %q expands to %d route-map sequences, over the "+
+				"policy-statement %q expands to %d route-map sequences%s, over the "+
 					"FRR ceiling of %d (route-map sequence numbers are 1..%d in steps "+
 					"of %d, one reserved for the trailing default) — rendering it would "+
 					"emit a `route-map` line past sequence %d, which FRR rejects and "+
@@ -344,7 +346,7 @@ func validatePolicyRouteMapSequenceBoundStrict(cfg *Config) error {
 					"protocol` / `from prefix-list` / `from community` / `from as-path` "+
 					"values (their Cartesian product per term drives the count) or split "+
 					"the policy across multiple policy-statements",
-				name, n, MaxRouteMapSequences, frrMaxRouteMapSeq, routeMapSeqStep, frrMaxRouteMapSeq)
+				name, n, carved, MaxRouteMapSequences, frrMaxRouteMapSeq, routeMapSeqStep, frrMaxRouteMapSeq)
 		}
 	}
 	return nil

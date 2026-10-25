@@ -805,10 +805,9 @@ func (m *Manager) generatePolicyOptionsWithRefNodes15158(po *config.PolicyOption
 		// route-map`, and independent of FRR's undefined-map behaviour. See
 		// renderQuarantineDenyRouteMap for why deny and not "drop the
 		// attachment".
-		// #16869: RouteMapSequenceCount cannot see the carve. A carved
-		// no-default map renders pair (+fallback) beyond the one
-		// fallback the count reserves — exact extra computed where
-		// carvedExport is known; explicit-default carved is already
+		// #16869: RouteMapSequenceCount is the base count; the strict
+		// BGP gate and this belt use the shared reserve helper for a
+		// carved no-default tail. Explicit-default carved is already
 		// reserved by the count's +2.
 		if n := beltTotal16869(config.RouteMapSequenceCount(po, ps), carvedSingleExtraSeqs16869(carvedExport[name], ps)); n > config.MaxRouteMapSequences {
 			slog.Warn("oversized route-map policy: expansion would overflow FRR sequence numbers "+
@@ -2072,7 +2071,7 @@ func (m *Manager) renderComposedRouteMapWithDefault(po *config.PolicyOptionsConf
 	// single-policy site (#5701); see renderQuarantineDenyRouteMap.
 	// #16869: a carved non-terminated chain renders one extra
 	// sequence (fall-off pair) beyond the count's reserved fallback;
-	// reserve it exactly where carvedBGPOnly is known.
+	// the strict chain gate and this belt use the same reserve helper.
 	if n := beltTotal16869(config.ComposedChainSequenceCount(po, po.PolicyStatements, chain), carvedComposedReserve16869(po, chain, carvedBGPOnly, fallbackAction)); n > config.MaxRouteMapSequences {
 		slog.Warn("oversized composed BGP policy-chain route-map: expansion would overflow FRR "+
 			"sequence numbers and poison the reload; rendering an explicit DENY under this name "+
