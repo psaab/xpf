@@ -1,6 +1,18 @@
 xpf (0.0.0) unstable; urgency=medium
+
+  * Config/dynamic-address: the #15685 dynamic-address/static
+    name-collision commit gate now also walks named address books
+    (#16838). `security address-book eng-book address blocked` attached
+    to a zone previously committed strict-clean when a
+    `dynamic-address address-name blocked` binding existed, folded to
+    zone-local/trust/blocked, and then refused the whole userspace
+    policy snapshot while the feed was unready (previous-good retained
+    or default-deny on a fresh boot). The gate names the book in the
+    error, rejects strict, and warns on tolerant load/peer-sync;
+    unattached named books are covered like every sibling pristine gate.
+
+xpf (0.0.0) unstable; urgency=medium
   * Policy simulator: a `from-zone junos-host` match-policies / test-policy
-    query now answers with a dedicated host-originated verdict (#16805).
     Locally-generated traffic egresses via the kernel TX path and is never
     evaluated by the security-policy RX gate (#3611/#4230), but the
     simulator fell into the unknown-ingress-zone unconditional deny
