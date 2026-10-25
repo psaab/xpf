@@ -1646,18 +1646,21 @@ fn wg_encap_in_place_matches_separate_buffer() {
 
 #[test]
 fn wg_mtu_guard_drops_oversize_inner() {
-    // At a 1500-byte v4 outer MTU the largest inner that fits is
-    // 1500 - 20 - 8 - 16 - 16 = 1440, padded to a 16-multiple. A
-    // 1441-byte inner pads to 1456 and overflows.
+    // #16499 capped pad: budget v4/1500 = 1440, full budget encapps to
+    // exactly 1500; 1441 exceeds the budget and is dropped.
     let mtu = 1500usize;
-    assert!(
-        wg_encapped_size(1440, false) <= mtu,
-        "1440-byte inner must fit a 1500 v4 outer MTU"
-    );
-    assert!(
-        wg_encapped_size(1441, false) > mtu,
-        "1441-byte inner (pads to 1456) must overflow and be dropped"
-    );
+    assert_eq!(wg_inner_budget(mtu, false), 1440);
+    assert_eq!(wg_encapped_size_with_outer_mtu(1440, false, mtu), mtu);
+    assert!(1441 > wg_inner_budget(mtu, false), "1441 exceeds the 1440 budget");
+    assert_eq!(wg_encapped_size_with_outer_mtu(1420, true, mtu), mtu);
+}
+
+#[test]
+fn wg_encapped_size_capped_at_budget_16499() {
+    assert_eq!(wg_encapped_size_with_outer_mtu(1420, true, 1500), 1500);
+    assert_eq!(wg_encapped_size_with_outer_mtu(1432, false, 1492), 1492);
+    assert_eq!(wg_encapped_size_with_outer_mtu(1390, false, 1450), 1450);
+    assert_eq!(wg_encapped_size_with_outer_mtu(1370, true, 1450), 1450);
 }
 
 // === #2651: the WG IPv6 outer UDP checksum optimization. The

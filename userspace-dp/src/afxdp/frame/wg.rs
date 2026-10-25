@@ -18,7 +18,7 @@
 //! `&str` already loaded for the GRE lookup — no new branch on the
 //! plain-forward path.
 
-use super::super::wg::{EncapError, POLY1305_TAG_LEN, WG_DATA_HEADER_LEN, pad_to_16};
+use super::super::wg::{EncapError, POLY1305_TAG_LEN, WG_DATA_HEADER_LEN, pad_to_16, padded_len_capped};
 use super::super::*;
 use super::checksum::checksum16_ipv6;
 use super::headers::{
@@ -26,15 +26,29 @@ use super::headers::{
 };
 use std::net::IpAddr;
 
-/// The exact pad-aware encapped wire size for an `inner_len`-byte inner
-/// packet plus the outer L3/L4 (IP + UDP). Used by the MTU guard so a
-/// frame that would exceed the egress MTU is dropped rather than forcing
-/// outer IP fragmentation (plan §7, Codex r3). Pulled out of
-/// `wg_encap_frame` so the arithmetic is unit-testable in isolation.
+/// Inner budget for `outer_mtu` (mirrors `wg_control::mtu::wg_inner_budget`).
+#[inline]
+fn wg_inner_budget(outer_mtu: usize, outer_v6: bool) -> usize {
+    let overhead = WG_DATA_HEADER_LEN + POLY1305_TAG_LEN + if outer_v6 { 40 } else { 20 } + 8;
+    outer_mtu.saturating_sub(overhead)
+}
+
+/// The exact encapped wire size for an `inner_len`-byte inner packet
+/// plus the outer L3/L4 (IP + UDP), pad capped at the inner budget for
+/// `outer_mtu` (#16499). Used by the MTU guard so a frame that would
+/// exceed the egress MTU is dropped rather than forcing outer IP
+/// fragmentation (plan §7, Codex r3). Pulled out of `wg_encap_frame` so
+/// the arithmetic is unit-testable in isolation.
 #[inline]
 fn wg_encapped_size(inner_len: usize, outer_v6: bool) -> usize {
+    wg_encapped_size_with_outer_mtu(inner_len, outer_v6, usize::MAX)
+}
+
+#[inline]
+fn wg_encapped_size_with_outer_mtu(inner_len: usize, outer_v6: bool, outer_mtu: usize) -> usize {
     let outer_ip_len = if outer_v6 { 40 } else { 20 };
-    let wg_record_len = WG_DATA_HEADER_LEN + pad_to_16(inner_len) + POLY1305_TAG_LEN;
+    let budget = wg_inner_budget(outer_mtu, outer_v6);
+    let wg_record_len = WG_DATA_HEADER_LEN + padded_len_capped(inner_len, budget) + POLY1305_TAG_LEN;
     wg_record_len + outer_ip_len + 8
 }
 
@@ -832,8 +846,11 @@ pub(super) fn wg_encap_frame_with_commit_and_dynamic(
     };
     let dst_mac = outer_resolution.resolution.neighbor_mac?;
     let outer_eth_len = if vlan_id > 0 { 18 } else { 14 };
-    let wg_record_len = WG_DATA_HEADER_LEN + pad_to_16(inner_packet.len()) + POLY1305_TAG_LEN;
-    if wg_encapped_size(inner_packet.len(), outer_v6) > outer_mtu {
+    let inner_budget = wg_inner_budget(outer_mtu, outer_v6);
+    let wg_record_len = WG_DATA_HEADER_LEN + padded_len_capped(inner_packet.len(), inner_budget) + POLY1305_TAG_LEN;
+    if inner_packet.len() > inner_budget
+        || wg_encapped_size_with_outer_mtu(inner_packet.len(), outer_v6, outer_mtu) > outer_mtu
+    {
         // #1865: the promised "follow-up" counter store — same
         // `encap_mtu_drops` counter as the control thread's symmetric
         // guard (the plan's both-guards requirement).
@@ -888,10 +905,11 @@ pub(super) fn wg_encap_frame_with_commit_and_dynamic(
     let max_frame_len = payload_start + wg_record_len;
     let mut out = vec![0u8; max_frame_len];
 
-    let outcome = match engine.try_encap(
+    let outcome = match engine.try_encap_capped(
         &peer_pubkey,
         inner_packet,
         out.get_mut(payload_start..payload_start + wg_record_len)?,
+        inner_budget,
     ) {
         Ok(o) => o,
         Err(EncapError::NoSession) => {

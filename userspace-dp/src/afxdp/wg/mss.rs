@@ -124,15 +124,13 @@ pub(crate) fn wg_tcp_mss_with_route_mtu(
     mss.min(route_max_mss)
 }
 
-/// #2330: the pad-aware WireGuard INNER-IP MTU for the given outer-link MTU
-/// and outer IP family — the largest inner IP packet length whose encapped
-/// outer frame is guaranteed to fit `outer_mtu`, accounting for the
-/// worst-case 15 bytes of WG §5.4.6 transport-padding the encap side may
-/// add. This is the inverse of the encap MTU guard
-/// (`frame::wg::wg_encapped_size`): `wg_encapped_size(inner, outer_v6) <=
-/// outer_mtu` iff `inner <= wg_inner_mtu(outer_family, outer_mtu)` for a
-/// 16-aligned inner (the conservative `WG_MAX_PADDING` subtraction makes the
-/// bound hold for ANY inner length).
+/// #2330/#16499: the WireGuard INNER-IP MTU for the given outer-link MTU
+/// and outer IP family — the largest inner IP packet length whose
+/// encapped outer frame fits `outer_mtu` when the §5.4.6 pad is capped
+/// at that inner budget (Linux/wireguard-go). This is the exact inverse
+/// of the capped encap guard. Before #16499 the guard used the uncapped
+/// pad, so this subtracted the worst-case 15 bytes; with the cap that
+/// would under-advertise and no longer be the guard's inverse.
 ///
 /// The advertised value is what a post-transform Packet-Too-Big / Frag-
 /// Needed back to the INNER source must carry so the inner sender shrinks
@@ -161,9 +159,8 @@ pub(crate) fn wg_inner_mtu(outer_family: i32, outer_mtu: usize) -> usize {
         x if x == libc::AF_INET6 => WG_OVERHEAD_V6,
         _ => return 0,
     };
-    let outer_derived = outer_mtu
-        .checked_sub(outer_overhead + WG_MAX_PADDING)
-        .unwrap_or(0);
+    // #16499: pad capped at this budget, so no worst-pad subtraction.
+    let outer_derived = outer_mtu.checked_sub(outer_overhead).unwrap_or(0);
     outer_derived.min(super::engine::WG_ENGINE_MAX_INNER_MTU)
 }
 
@@ -281,15 +278,15 @@ mod mss_tests {
 
     #[test]
     fn wg_inner_mtu_v4_outer_pad_aware() {
-        // #2330: inner MTU = outer_mtu - WG_OVERHEAD_V4(60) - max_pad(15).
-        assert_eq!(wg_inner_mtu(libc::AF_INET, 1500), 1425);
-        assert_eq!(wg_inner_mtu(libc::AF_INET, 1400), 1325);
+        // #16499 capped pad: inner MTU = outer_mtu - WG_OVERHEAD_V4(60).
+        assert_eq!(wg_inner_mtu(libc::AF_INET, 1500), 1440);
+        assert_eq!(wg_inner_mtu(libc::AF_INET, 1400), 1340);
     }
 
     #[test]
     fn wg_inner_mtu_v6_outer_pad_aware() {
-        // WG_OVERHEAD_V6 = 80. 1500 - 80 - 15 = 1405.
-        assert_eq!(wg_inner_mtu(libc::AF_INET6, 1500), 1405);
+        // WG_OVERHEAD_V6 = 80. 1500 - 80 = 1420 (#16499).
+        assert_eq!(wg_inner_mtu(libc::AF_INET6, 1500), 1420);
     }
 
     #[test]
@@ -307,10 +304,10 @@ mod mss_tests {
     // the engine's hard ceiling (PADDED_PLAINTEXT_MAX = 4096), the largest
     // inner IP packet the engine can encrypt. Remove the `.min(...)` clamp
     // in `wg_inner_mtu` and these go RED (the jumbo cases return the
-    // unclamped 8925 / 8905).
+    // unclamped 8940 / 8920).
     #[test]
     fn wg_inner_mtu_jumbo_clamped_to_engine_max() {
-        // 9000 - 60 - 15 = 8925 outer-derived, but the engine caps the
+        // 9000 - 60 = 8940 outer-derived (#16499), but the engine caps the
         // encryptable inner at 4096 → clamp to 4096.
         assert_eq!(
             wg_inner_mtu(libc::AF_INET, 9000),
@@ -321,7 +318,7 @@ mod mss_tests {
             4096,
             "engine ceiling drifted — update the #2457 clamp expectations"
         );
-        // 9000 - 80 - 15 = 8905 outer-derived (v6 outer), still clamped.
+        // 9000 - 80 = 8920 outer-derived (v6 outer), still clamped.
         assert_eq!(
             wg_inner_mtu(libc::AF_INET6, 9000),
             super::super::engine::WG_ENGINE_MAX_INNER_MTU
@@ -333,20 +330,20 @@ mod mss_tests {
         // A standard 1500 outer link is well under the engine ceiling, so
         // the clamp is a no-op and the pad-aware derivation is returned
         // unchanged (proves the clamp does not over-clamp the common case).
-        assert_eq!(wg_inner_mtu(libc::AF_INET, 1500), 1425);
+        assert_eq!(wg_inner_mtu(libc::AF_INET, 1500), 1440);
         // The exact MTU whose derived inner sits AT the engine ceiling:
-        // inner = outer - 60 - 15 = 4096 → outer = 4171. At-ceiling passes
+        // inner = outer - 60 = 4096 → outer = 4156 (#16499). At-ceiling passes
         // unchanged; one byte more is clamped back to the ceiling.
         assert_eq!(
-            wg_inner_mtu(libc::AF_INET, 4171),
+            wg_inner_mtu(libc::AF_INET, 4156),
             super::super::engine::WG_ENGINE_MAX_INNER_MTU
         );
         assert_eq!(
-            wg_inner_mtu(libc::AF_INET, 4170),
+            wg_inner_mtu(libc::AF_INET, 4155),
             super::super::engine::WG_ENGINE_MAX_INNER_MTU - 1
         );
         assert_eq!(
-            wg_inner_mtu(libc::AF_INET, 4172),
+            wg_inner_mtu(libc::AF_INET, 4157),
             super::super::engine::WG_ENGINE_MAX_INNER_MTU
         );
     }

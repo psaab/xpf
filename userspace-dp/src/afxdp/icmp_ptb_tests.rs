@@ -1300,7 +1300,7 @@ fn post_transform_inner_mtu_gre_counts_key_word() {
 fn post_transform_inner_mtu_wireguard_is_pad_aware() {
     // WG over an IPv4 outer: inner MTU = outer_mtu - WG_OVERHEAD_V4 - 15
     // (worst-case §5.4.6 padding). WG_OVERHEAD_V4 = 20 + 8 + 16 + 16 = 60.
-    // 1400 - 60 - 15 = 1325. The inverse of frame::wg::wg_encapped_size.
+    // 1400 - 60 = 1340 (#16499 capped pad). The inverse of frame::wg::wg_encapped_size.
     let mut fwd = forwarding_with_egress(1400);
     insert_tunnel_endpoint(&mut fwd, "wireguard", libc::AF_INET, 0);
     let inner = post_transform_inner_mtu(
@@ -1312,8 +1312,8 @@ fn post_transform_inner_mtu_wireguard_is_pad_aware() {
         None,
     );
     assert_eq!(
-        inner, 1325,
-        "WG inner MTU = outer_mtu - WG_OVERHEAD_V4 - max_pad"
+        inner, 1340,
+        "WG inner MTU = outer_mtu - WG_OVERHEAD_V4 (capped pad, #16499)"
     );
     assert_eq!(
         inner,
@@ -1424,8 +1424,8 @@ fn post_transform_gre_oversized_v4_df_emits_inner_ptb() {
 
 #[test]
 fn post_transform_wireguard_oversized_v6_emits_inner_ptb() {
-    // A 1300-payload inner v6 over a WG tunnel whose inner MTU is 1325
-    // (1400 - 60 - 15) — the inner L3 is 40 + 8 + 1300 = 1348 > 1325 — must
+    // A 1300-payload inner v6 over a WG tunnel whose inner MTU is 1340
+    // (1400 - 60, #16499) — the inner L3 is 40 + 8 + 1300 = 1348 > 1340 — must
     // emit a Packet-Too-Big advertising the WG inner MTU.
     let (frame, meta) = inbound_v6_udp(1300);
     let l3 = meta.l3_offset as usize;
@@ -1439,14 +1439,14 @@ fn post_transform_wireguard_oversized_v6_emits_inner_ptb() {
         1400,
         None,
     );
-    assert_eq!(inner_mtu, 1325);
+    assert_eq!(inner_mtu, 1340);
     let next_hop_mtu = match forwarded_egress_mtu_decision(&frame, l3, meta.addr_family, inner_mtu)
     {
         EgressMtuDecision::EmitPacketTooBig { next_hop_mtu } => next_hop_mtu,
         other => panic!("expected EmitPacketTooBig, got {other:?}"),
     };
     assert_eq!(
-        next_hop_mtu, 1325,
+        next_hop_mtu, 1340,
         "advertised MTU = WG pad-aware inner MTU"
     );
     let out = build_packet_too_big_v6(&frame, meta, PTB_IFINDEX, &fwd, next_hop_mtu as u32)
@@ -1455,7 +1455,7 @@ fn post_transform_wireguard_oversized_v6_emits_inner_ptb() {
     assert_eq!(out[icmp], 2, "ICMPv6 Packet Too Big");
     assert_eq!(
         u32::from_be_bytes([out[icmp + 4], out[icmp + 5], out[icmp + 6], out[icmp + 7]]),
-        1325,
+        1340,
     );
 }
 
@@ -1613,9 +1613,9 @@ fn truncated_ip_header_forwards_fail_open() {
 // `post_transform_inner_mtu` read `tunnel_outer_mtu`, which for a WG transit
 // flow (endpoint.destination zeroed) falls back to the LOGICAL egress_ifindex
 // MTU (~1420 = underlay − encap). Feeding that to `wg_inner_mtu` subtracts the
-// WG encap overhead a SECOND time → the PTB advertises ~1345 (v4) / ~1325 (v6),
+// WG encap overhead a SECOND time → the PTB advertises ~1360 (v4) / ~1340 (v6),
 // ~80-100B SMALLER than the encap drop guard actually admits
-// (`wg_inner_mtu(physical=1500)` = 1425 v4 / 1405 v6). These tests use the
+// (`wg_inner_mtu(physical=1500)` = 1440 v4 / 1420 v6, #16499). These tests use the
 // realistic `wg_outer_mtu_snapshot` (logical wg0.0 ifindex 400 MTU 1420 ≠
 // physical reth0.80 ifindex 12 MTU 1500, peer routed via reth0.80) so the
 // logical/physical split is real. They go RED if the WG arm reverts to
@@ -1656,8 +1656,8 @@ fn wg_logical_tunnel_decision(logical_ifindex: i32, tunnel_endpoint_id: u16) -> 
 fn post_transform_wg_inner_mtu_uses_physical_underlay_not_logical_v4() {
     // Fail-on-revert: with the fix the WG inner MTU is derived from the
     // PHYSICAL underlay (reth0.80 = 1500): wg_inner_mtu(AF_INET, 1500) =
-    // 1500 - 60 - 15 = 1425. Reverting to tunnel_outer_mtu reads the LOGICAL
-    // wg0.0 MTU (1420) → wg_inner_mtu = 1345 → this assertion fails red.
+    // 1500 - 60 = 1440 (#16499). Reverting to tunnel_outer_mtu reads the LOGICAL
+    // wg0.0 MTU (1420) → wg_inner_mtu = 1360 → this assertion fails red.
     let state = build_forwarding_state(&crate::afxdp::test_fixtures::wg_outer_mtu_snapshot());
     // Sanity: the fixture really carries the distinct logical/physical MTUs.
     assert_eq!(
@@ -1675,9 +1675,9 @@ fn post_transform_wg_inner_mtu_uses_physical_underlay_not_logical_v4() {
     let inner_mtu =
         post_transform_inner_mtu(&decision, &state, false, libc::AF_INET as u8, 0, None);
     assert_eq!(
-        inner_mtu, 1425,
-        "WG PTB inner MTU MUST be wg_inner_mtu(physical 1500) = 1425, NOT \
-         wg_inner_mtu(logical 1420) = 1345 (the #2684 double-subtract)"
+        inner_mtu, 1440,
+        "WG PTB inner MTU MUST be wg_inner_mtu(physical 1500) = 1440, NOT \
+         wg_inner_mtu(logical 1420) = 1360 (the #2684 double-subtract)"
     );
     // It MUST equal the encap-guard SSOT: the inverse of wg_encapped_size at
     // the physical MTU, so the PTB advertises exactly what the guard admits.
@@ -1687,10 +1687,10 @@ fn post_transform_wg_inner_mtu_uses_physical_underlay_not_logical_v4() {
         "WG PTB inner MTU MUST equal wg_inner_mtu(physical underlay)"
     );
 
-    // End-to-end: a 1400-byte inner v4 DF datagram (L3 = 1400 > 1425? no — it
-    // is 1400 <= 1425 so it FORWARDS; pick > 1425 to fire the PTB). A 1440-byte
-    // L3 (> 1425) must emit a Frag-Needed advertising 1425.
-    let (frame, meta) = inbound_v4_udp(1440 - 28, true); // L3 = 20 + 8 + payload = 1440
+    // End-to-end: a 1400-byte inner v4 DF datagram (L3 = 1400 > 1440? no — it
+    // is 1400 <= 1440 so it FORWARDS; pick > 1440 to fire the PTB). A 1460-byte
+    // L3 (> 1440) must emit a Frag-Needed advertising 1440.
+    let (frame, meta) = inbound_v4_udp(1460 - 28, true); // L3 = 20 + 8 + payload = 1460
     let l3 = meta.l3_offset as usize;
     let next_hop_mtu = match forwarded_egress_mtu_decision(&frame, l3, meta.addr_family, inner_mtu)
     {
@@ -1698,8 +1698,8 @@ fn post_transform_wg_inner_mtu_uses_physical_underlay_not_logical_v4() {
         other => panic!("expected EmitPacketTooBig, got {other:?}"),
     };
     assert_eq!(
-        next_hop_mtu, 1425,
-        "advertised v4 inner MTU = physical-derived 1425"
+        next_hop_mtu, 1440,
+        "advertised v4 inner MTU = physical-derived 1440"
     );
     // The ICMP source is the ingress interface primary; use reth0.80 (ifindex
     // 12, primary 172.16.80.8) which exists in the snapshot-built state.
@@ -1717,7 +1717,7 @@ fn post_transform_wg_inner_mtu_uses_physical_underlay_not_logical_v4() {
     assert_eq!(out[icmp + 1], 4, "ICMP Frag-Needed code");
     assert_eq!(
         u16::from_be_bytes([out[icmp + 6], out[icmp + 7]]),
-        1425,
+        1440,
         "Frag-Needed carries the physical-derived inner MTU"
     );
 }
@@ -1725,8 +1725,8 @@ fn post_transform_wg_inner_mtu_uses_physical_underlay_not_logical_v4() {
 #[test]
 fn post_transform_wg_inner_mtu_uses_physical_underlay_not_logical_v6() {
     // Same fixture, flipped to a v6 outer (peer + transport route in inet6).
-    // With the fix: wg_inner_mtu(AF_INET6, 1500) = 1500 - 80 - 15 = 1405.
-    // Reverting to tunnel_outer_mtu (logical 1420) → 1325 → fails red.
+    // With the fix: wg_inner_mtu(AF_INET6, 1500) = 1500 - 80 = 1420 (#16499).
+    // Reverting to tunnel_outer_mtu (logical 1420) → 1340 → fails red.
     let mut snap = crate::afxdp::test_fixtures::wg_outer_mtu_snapshot();
     // Flip the WG endpoint + its peer + the underlay route to IPv6.
     {
@@ -1769,9 +1769,9 @@ fn post_transform_wg_inner_mtu_uses_physical_underlay_not_logical_v6() {
     let inner_mtu =
         post_transform_inner_mtu(&decision, &state, false, libc::AF_INET6 as u8, 0, None);
     assert_eq!(
-        inner_mtu, 1405,
-        "WG PTB inner MTU (v6 outer) MUST be wg_inner_mtu(physical 1500) = 1405, \
-         NOT wg_inner_mtu(logical 1420) = 1325 (the #2684 double-subtract)"
+        inner_mtu, 1420,
+        "WG PTB inner MTU (v6 outer) MUST be wg_inner_mtu(physical 1500) = 1420, \
+         NOT wg_inner_mtu(logical 1420) = 1340 (the #2684 double-subtract)"
     );
     assert_eq!(
         inner_mtu,
@@ -1780,8 +1780,8 @@ fn post_transform_wg_inner_mtu_uses_physical_underlay_not_logical_v6() {
     );
 
     // End-to-end: a 1420-byte inner v6 datagram (L3 = 40 + 8 + payload) that
-    // exceeds 1405 must emit a Packet-Too-Big advertising 1405.
-    let (frame, meta) = inbound_v6_udp(1420 - 48); // L3 = 40 + 8 + payload = 1420
+    // exceeds 1420 must emit a Packet-Too-Big advertising 1420.
+    let (frame, meta) = inbound_v6_udp(1440 - 48); // L3 = 40 + 8 + payload = 1440
     let l3 = meta.l3_offset as usize;
     let next_hop_mtu = match forwarded_egress_mtu_decision(&frame, l3, meta.addr_family, inner_mtu)
     {
@@ -1789,8 +1789,8 @@ fn post_transform_wg_inner_mtu_uses_physical_underlay_not_logical_v6() {
         other => panic!("expected EmitPacketTooBig, got {other:?}"),
     };
     assert_eq!(
-        next_hop_mtu, 1405,
-        "advertised v6 inner MTU = physical-derived 1405"
+        next_hop_mtu, 1420,
+        "advertised v6 inner MTU = physical-derived 1420"
     );
     // ICMPv6 source = ingress interface primary v6; reth0.80 (ifindex 12) now
     // carries 2001:559:8585:80::8 (added to the snapshot above).
@@ -1806,7 +1806,7 @@ fn post_transform_wg_inner_mtu_uses_physical_underlay_not_logical_v6() {
     assert_eq!(out[icmp], 2, "ICMPv6 Packet Too Big");
     assert_eq!(
         u32::from_be_bytes([out[icmp + 4], out[icmp + 5], out[icmp + 6], out[icmp + 7]]),
-        1405,
+        1420,
         "Packet-Too-Big carries the physical-derived inner MTU"
     );
 }
@@ -1822,10 +1822,10 @@ fn post_transform_wg_inner_mtu_falls_back_to_logical_when_no_peer_endpoint() {
     let decision = wg_logical_tunnel_decision(400, 1);
     let inner_mtu =
         post_transform_inner_mtu(&decision, &state, false, libc::AF_INET as u8, 0, None);
-    // Logical egress (400) MTU 1420 → wg_inner_mtu(1420) = 1345.
+    // Logical egress (400) MTU 1420 → wg_inner_mtu(1420) = 1360 (#16499).
     assert_eq!(
-        inner_mtu, 1345,
-        "no peer endpoint → fall back to logical egress MTU (1420) → 1345, \
+        inner_mtu, 1360,
+        "no peer endpoint → fall back to logical egress MTU (1420) → 1360, \
          no worse than the pre-#2684 tunnel_outer_mtu behaviour"
     );
 }
@@ -2057,7 +2057,7 @@ fn post_transform_wg_inner_mtu_charges_selected_peer_family_14118() {
     assert_eq!(
         mtu,
         crate::afxdp::wg::mss::wg_inner_mtu(libc::AF_INET6, 1500),
-        "selected v6 peer PTB must charge v6 overhead (1405), not the flipped row-family v4 value (1425)"
+        "selected v6 peer PTB must charge v6 overhead (1420), not the flipped row-family v4 value (1440)"
     );
     assert_ne!(
         mtu,

@@ -277,6 +277,26 @@ overlays ~1450); with no operator MTU it derives the wgN inner MTU from
 deployment could not set a smaller wgN MTU. Both branches are clamped to the
 engine ceiling (#2457, below).
 
+**#16499 (pad capped at the inner budget).** The §5.4.6 pad is now
+capped at the inner budget (`outer_mtu − overhead`), matching Linux
+`calculate_skb_padding` (`min(mtu, ALIGN(last, 16))`) and wireguard-go
+`calculatePaddingSize`. Previously every record was padded to a full
+16-byte multiple with no cap, so an operator `mtu` set by the standard
+underlay-minus-overhead formula (1420 on IPv6/1500, 1432 on IPv4
+PPPoE 1492) made every full-size TUN-origin packet up to 15 bytes too
+big and it was dropped at `encap_mtu_drops` with no PTB. With the cap
+a full-budget inner packet encapps to exactly the outer MTU on both
+encap sites (TUN-origin `wg_control` and transit `frame/wg.rs`), the
+size models (`wg_control/mtu.rs`, `frame/wg.rs`) and the advertised
+inner MTU (`wg::mss::wg_inner_mtu`, now `outer − overhead` with no
+worst-pad subtraction) all agree. `wg_tcp_mss` stays worst-pad
+conservative (its contract is any sender alignment). The Go default
+wgN MTU likewise drops the worst-pad subtraction, and an operator
+`mtu` above the default-underlay budget logs a warning (the value is
+still honored; the Rust per-peer guard remains authoritative).
+Decap is unchanged: it truncates by the inner IP length field, so
+both capped and fully-padded records are accepted.
+
 **#2684 (PTB advertisement — the #2680 sibling on the same SSOT).** The
 post-transform PMTUD path (`post_transform_inner_mtu`, the TX dispatcher's
 inner-MTU derivation that turns an oversized DF-IPv4 / IPv6 inner into a
@@ -298,8 +318,9 @@ The WG arm now derives the outer MTU from the PHYSICAL underlay via
 `frame::wg_endpoint_physical_outer_mtu`, a thin wrapper over the same #2680
 `outer_physical_egress_mtu` SSOT the encap guard uses.
 Corrected formula: advertised inner MTU = `wg_inner_mtu(outer_family,
-physical_underlay_mtu)` = `physical_mtu − WG_OVERHEAD_{V4,V6} −
-WG_MAX_PADDING` — EXACTLY the inverse of `wg_encapped_size` the encap guard
+physical_underlay_mtu)` = `physical_mtu − WG_OVERHEAD_{V4,V6}` (the
+§5.4.6 pad is capped at that budget since #16499, so no worst-pad term)
+— EXACTLY the inverse of `wg_encapped_size` the encap guard
 admits against, so the PTB and the guard now agree. GRE is unaffected:
 its `endpoint.destination` is the real outer hop, so `tunnel_outer_mtu`
 already resolves to the physical underlay for `native_gre_inner_mtu`.

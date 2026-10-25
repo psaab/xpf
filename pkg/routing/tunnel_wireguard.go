@@ -22,11 +22,11 @@ var errWGIncompatibleLinkRetained = errors.New("wireguard tun: stale incompatibl
 
 // WG per-packet outer overhead (must mirror userspace-dp
 // afxdp/wg/mod.rs WG_OVERHEAD_V4/V6): outer IP + UDP(8) + WG data
-// header(16) + Poly1305 tag(16). Plus up to 15 bytes of §5.4.6 pad.
+// header(16) + Poly1305 tag(16). The §5.4.6 pad is capped at the inner
+// budget (#16499), so it adds no worst-case overhead to the MTU model.
 const (
 	wgOverheadV4 = 20 + 8 + 16 + 16 // 60
 	wgOverheadV6 = 40 + 8 + 16 + 16 // 80
-	wgPadWorst   = 15
 )
 
 // wgEngineMaxInnerMTU is the largest INNER IP packet (pre-§5.4.6 padding)
@@ -88,6 +88,20 @@ func wgTunMTUForEndpoint(tc *config.TunnelConfig) int {
 	// (`encap_mtu_drops`). Clamping keeps the configured device MTU at or
 	// below what the engine can actually encrypt.
 	if tc.MTU > 0 {
+		// #16499: warn (once per call site value) when an operator MTU
+		// exceeds even the default-underlay budget — the Rust capped-pad
+		// guard still protects the real underlay, but the operator's
+		// formula likely assumed a larger underlay than the 1500 default.
+		// The value itself is honored (only the engine ceiling clamps),
+		// matching the documented override contract.
+		overhead := wgOverheadV6
+		if !tc.WgOuterFamilyV6() && tc.WgHasEndpoint() {
+			overhead = wgOverheadV4
+		}
+		if tc.MTU > wgDefaultOuterMTU-overhead {
+			slog.Warn("wireguard operator mtu exceeds default-underlay inner budget; capped-pad encap guard will drop oversize TUN packets (encap_mtu_drops) if the real underlay is smaller",
+				"tunnel", tc.Name, "mtu", tc.MTU, "default_inner_budget", wgDefaultOuterMTU-overhead)
+		}
 		return min(tc.MTU, wgEngineMaxInnerMTU)
 	}
 	// A configured v4 endpoint uses the v4 overhead; a v6 endpoint (or a
@@ -105,8 +119,10 @@ func wgTunMTUForEndpoint(tc *config.TunnelConfig) int {
 	// #2457: the default-derived value also clamps to the engine ceiling
 	// so a jumbo wgDefaultOuterMTU (were it ever raised) cannot derive an
 	// inner budget the engine cannot encrypt. At the shipped 1500 default
-	// this is a no-op.
-	return min(wgDefaultOuterMTU-overhead-wgPadWorst, wgEngineMaxInnerMTU)
+	// this is a no-op. #16499: no wgPadWorst subtraction — the encap pad
+	// is now capped at this budget (Linux/wireguard-go), so a full-budget
+	// inner packet encapps to exactly wgDefaultOuterMTU.
+	return min(wgDefaultOuterMTU-overhead, wgEngineMaxInnerMTU)
 }
 
 // applyWireguardTunLocked creates (or reuses) the persistent wgN TUN

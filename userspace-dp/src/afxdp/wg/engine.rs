@@ -64,7 +64,7 @@ use super::session::{REJECT_AFTER_MESSAGES, ReplayDecision, WgSession};
 use super::tai64n::Tai64nClock;
 use super::{
     POLY1305_TAG_LEN, WG_DATA_HEADER_LEN, WG_KEY_LEN, WG_NOISE_PATTERN, WG_PROTOCOL_ID_BYTES,
-    WG_SMALL_ORDER_KEYS, WG_ZERO_PSK, pad_to_16,
+    WG_SMALL_ORDER_KEYS, WG_ZERO_PSK, pad_to_16, padded_len_capped,
 };
 use arc_swap::ArcSwap;
 use curve25519_dalek::MontgomeryPoint;
@@ -1630,7 +1630,23 @@ impl WgEngine {
         inner_ip: &[u8],
         out: &mut [u8],
     ) -> Result<EncapOutcome, EncapError> {
-        self.encap_inner(peer_pubkey, inner_ip, out, false)
+        self.encap_inner(peer_pubkey, inner_ip, out, false, PADDED_PLAINTEXT_MAX)
+    }
+
+    /// Encap with the §5.4.6 pad capped at `inner_budget` (the largest
+    /// inner packet the caller's outer MTU admits), matching Linux
+    /// `calculate_skb_padding` / wireguard-go `calculatePaddingSize`
+    /// (#16499). A full-budget inner packet therefore emits exactly at
+    /// budget instead of up to 15 bytes over the outer MTU. The cap never
+    /// truncates payload (see `padded_len_capped`).
+    pub(crate) fn try_encap_capped(
+        &self,
+        peer_pubkey: &[u8; 32],
+        inner_ip: &[u8],
+        out: &mut [u8],
+        inner_budget: usize,
+    ) -> Result<EncapOutcome, EncapError> {
+        self.encap_inner(peer_pubkey, inner_ip, out, false, inner_budget)
     }
 
     /// #1888 S5: build an authenticated EMPTY transport record — a WG
@@ -1645,7 +1661,7 @@ impl WgEngine {
         peer_pubkey: &[u8; 32],
         out: &mut [u8],
     ) -> Result<EncapOutcome, EncapError> {
-        self.encap_inner(peer_pubkey, &[], out, true)
+        self.encap_inner(peer_pubkey, &[], out, true, PADDED_PLAINTEXT_MAX)
     }
 
     fn encap_inner(
@@ -1654,6 +1670,7 @@ impl WgEngine {
         inner_ip: &[u8],
         out: &mut [u8],
         is_keepalive: bool,
+        inner_budget: usize,
     ) -> Result<EncapOutcome, EncapError> {
         // Cryptokey-routing safety: the forwarding decision tells
         // us which peer to encrypt to. We do NOT consult
@@ -1723,7 +1740,7 @@ impl WgEngine {
         // writes, so ordinary size/staging failures leave state untouched.
         // Once reserved, the nonce is permanently consumed even if AEAD
         // fails: gaps are safe, while reusing the nonce is not.
-        let padded_len = pad_to_16(inner_ip.len());
+        let padded_len = padded_len_capped(inner_ip.len(), inner_budget);
         let required = WG_DATA_HEADER_LEN + padded_len + POLY1305_TAG_LEN;
         if out.len() < required {
             return Err(self.counters.count_encap_err(EncapError::BufferTooSmall));

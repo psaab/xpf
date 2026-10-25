@@ -4,7 +4,7 @@
 //! contract, and the cryptokey-routed encap-and-send egress helper.
 
 use super::super::*;
-use super::mtu::wg_inner_fits_outer_mtu;
+use super::mtu::{wg_inner_budget, wg_inner_fits_outer_mtu};
 use super::sock::wg_send_to;
 use crate::afxdp::wg::counters::WgCounters;
 use std::net::{SocketAddr, UdpSocket};
@@ -440,7 +440,8 @@ pub(super) fn encap_and_send(
         )),
         _ => None,
     };
-    match engine.try_encap(peer_pubkey, inner_ip, out) {
+    let inner_budget = wg_inner_budget(outer_mtu, endpoint.is_ipv6());
+    match engine.try_encap_capped(peer_pubkey, inner_ip, out, inner_budget) {
         Ok(outcome) => {
             if let Err(e) = wg_send_to(
                 socket,
