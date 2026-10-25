@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -207,7 +208,9 @@ type IfData struct {
 
 // Agent is an SNMP v2c/v3 agent that serves the system MIB and ifTable.
 type Agent struct {
-	conn        *net.UDPConn
+	conn        *net.UDPConn // primary listener (main table, or the only socket when no VRF)
+	handleMu    sync.Mutex   // serializes handlePacketFrom across both listeners: lastPacket auth state is per-Agent (#16781)
+	inbandConn  *net.UDPConn // second listener: vrf-mgmt-bound when conn is main-table, else main-table (#16781)
 	startTime   time.Time
 	ifDataFn    func() []IfData // callback for live interface data
 	mu          sync.Mutex
@@ -215,7 +218,7 @@ type Agent struct {
 	engineID    []byte // SNMPv3 engine ID (immutable after initEngine)
 	engineBoots int    // SNMPv3 engine boots counter (immutable after initEngine)
 	lastPacket  []byte // raw packet for v3 auth verification
-	vrfDevice   string // SO_BINDTODEVICE scope, configured before Bind
+	vrfDevice   string // SO_BINDTODEVICE scope for the management listener + traps, configured before Bind
 
 	// engineBootsPath is the persistence seam for the engineBoots counter
 	// (RFC 3414 monotonicity across restarts). Empty means the default
@@ -740,9 +743,15 @@ func (a *Agent) SetIfDataFn(fn func() []IfData) {
 	a.ifDataFn = fn
 }
 
-// SetVRFDevice pins the listener and outgoing traps to the named Linux VRF
-// device. Call it before Bind; an empty device preserves the default routing
-// context.
+// SetVRFDevice names the Linux VRF device for the management leg. Call it
+// before Bind; an empty device serves everything from the main routing
+// table. When set, Bind opens TWO listeners (#16781): one pinned to the
+// device with SO_BINDTODEVICE so management polls reply through the
+// management VRF (and traps share that routing context, #11427), plus one
+// unbound main-table listener so in-band polls admitted by host-inbound
+// `system-services snmp` on data zones are answered too. Replies are sent
+// on the socket that received the request, with IP_PKTINFO/IPV6_PKTINFO
+// pinning the egress interface and source to the request's ingress.
 func (a *Agent) SetVRFDevice(device string) {
 	a.mu.Lock()
 	a.vrfDevice = device
@@ -904,15 +913,40 @@ func (a *Agent) Bind(ctx context.Context) error {
 		return fmt.Errorf("snmp: resolve address: %w", err)
 	}
 
-	listener := net.ListenConfig{Control: snmpVRFSocketControl(a.getVRFDevice())}
-	packetConn, err := listener.ListenPacket(ctx, "udp", addr.String())
-	if err != nil {
-		return fmt.Errorf("snmp: listen: %w", err)
-	}
-	conn, ok := packetConn.(*net.UDPConn)
-	if !ok {
-		packetConn.Close()
-		return fmt.Errorf("snmp: listener returned %T, want UDPConn", packetConn)
+	vrfDevice := a.getVRFDevice()
+
+	// #16781: when a management VRF is configured, open TWO listeners.
+	// The VRF-bound socket preserves #11427 (management polls reply via
+	// vrf-mgmt; SO_BINDTODEVICE pin). The unbound main-table socket serves
+	// in-band polls admitted on data zones, which a VRF-only listener can
+	// never receive. Both sockets set SO_REUSEPORT so the two wildcard
+	// :161 binds coexist; the kernel demultiplexes by L3 domain (a socket
+	// bound to vrf-mgmt only matches datagrams whose ingress is in that
+	// VRF when udp_l3mdev_accept=1, the main socket the rest). Without a
+	// VRF there is a single unbound listener, as before.
+	// The VRF socket is opened first so a missing vrf-mgmt device still
+	// fails the bind synchronously (#11427 risk note), before any socket
+	// is published.
+	var primary, secondary *net.UDPConn
+	if vrfDevice != "" {
+		vrfConn, err := listenSNMP(ctx, addr, snmpVRFPktinfoSocketControl(vrfDevice))
+		if err != nil {
+			return err
+		}
+		mainConn, err := listenSNMP(ctx, addr, snmpListenSocketControl())
+		if err != nil {
+			vrfConn.Close()
+			return err
+		}
+		// Primary is the main-table socket: Serve fans in from both, and
+		// the field name `conn` is what bare-struct tests inject.
+		primary, secondary = mainConn, vrfConn
+	} else {
+		mainConn, err := listenSNMP(ctx, addr, snmpListenSocketControl())
+		if err != nil {
+			return err
+		}
+		primary = mainConn
 	}
 	// Derive a lifecycle context so BOTH parent-context cancellation and an
 	// explicit day-2 Stop() unblock the watcher below (#4916). Stop calls
@@ -920,11 +954,12 @@ func (a *Agent) Bind(ctx context.Context) error {
 	lifeCtx, cancel := context.WithCancel(ctx)
 
 	a.mu.Lock()
-	a.conn = conn
+	a.conn = primary
+	a.inbandConn = secondary
 	a.lifeCancel = cancel
 	a.mu.Unlock()
 
-	slog.Info("SNMP agent listening", "addr", ":161")
+	slog.Info("SNMP agent listening", "addr", ":161", "vrf_device", vrfDevice, "dual_listener", secondary != nil)
 
 	go func() {
 		<-lifeCtx.Done()
@@ -933,21 +968,62 @@ func (a *Agent) Bind(ctx context.Context) error {
 	return nil
 }
 
-// Serve runs the request loop on the listener opened by a prior successful
-// Bind, blocking until the socket is closed (by Stop / ctx cancellation). It is
-// a no-op if no socket is open (Bind failed or was never called, or Stop
-// already ran), so it is safe to call unconditionally after Bind.
+// listenSNMP opens one UDP listener with the given socket control.
+func listenSNMP(ctx context.Context, addr *net.UDPAddr, control func(string, string, syscall.RawConn) error) (*net.UDPConn, error) {
+	listener := net.ListenConfig{Control: control}
+	packetConn, err := listener.ListenPacket(ctx, "udp", addr.String())
+	if err != nil {
+		return nil, fmt.Errorf("snmp: listen: %w", err)
+	}
+	conn, ok := packetConn.(*net.UDPConn)
+	if !ok {
+		packetConn.Close()
+		return nil, fmt.Errorf("snmp: listener returned %T, want UDPConn", packetConn)
+	}
+	return conn, nil
+}
+
+// Serve runs the request loop on the listener(s) opened by a prior
+// successful Bind, blocking until the socket(s) are closed (by Stop / ctx
+// cancellation). It is a no-op if no socket is open (Bind failed or was
+// never called, or Stop already ran), so it is safe to call unconditionally
+// after Bind.
+//
+// With two listeners (#16781) Serve fans in: one socket is served on a
+// helper goroutine and the other on the calling goroutine, both feeding
+// serveOne. Reads proceed concurrently so neither leg can starve the
+// other, but handlePacketFrom itself is serialized by handleMu — the
+// lastPacket auth pattern is per-Agent state, so cross-socket handling
+// must not interleave. Each reply is written on the socket that received
+// its request, with the request's pktinfo oob pinning egress interface
+// and source (#16781).
 func (a *Agent) Serve() {
 	a.mu.Lock()
 	conn := a.conn
+	second := a.inbandConn
 	a.mu.Unlock()
 	if conn == nil {
 		return
 	}
+	if second == nil {
+		a.serveOne(conn)
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.serveOne(second)
+	}()
+	a.serveOne(conn)
+	<-done
+}
 
+// serveOne is the serial request loop for one listener socket.
+func (a *Agent) serveOne(conn *net.UDPConn) {
 	buf := make([]byte, maxPacketSize)
+	oob := make([]byte, 256)
 	for {
-		n, remoteAddr, err := conn.ReadFromUDP(buf)
+		n, oobn, _, remoteAddr, err := conn.ReadMsgUDP(buf, oob)
 		if err != nil {
 			a.mu.Lock()
 			stopped := a.stopped
@@ -958,6 +1034,7 @@ func (a *Agent) Serve() {
 			slog.Error("SNMP read error", "err", err)
 			continue
 		}
+		ingress := parsePktinfo(oob[:oobn])
 
 		srcIP := sourceIPForUDP(remoteAddr)
 		// #9917 F-139: per-source request budget plus a global aggregate
@@ -974,15 +1051,17 @@ func (a *Agent) Serve() {
 			slog.Debug("SNMP: request shed: source over budget", "src", srcIP)
 			continue
 		}
+		a.handleMu.Lock()
 		start := a.serveBudget.clock()
 		resp := a.handlePacketFrom(buf[:n], srcIP)
+		a.handleMu.Unlock()
 		// Debit the loop time consumed: without the service charge the refill
 		// during handling would replenish the admission token of any request
 		// slower than 1/rate, letting back-to-back expensive PDUs hold the
 		// serial loop forever without depleting.
 		a.serveBudget.account(srcIP, a.serveBudget.clock().Sub(start))
 		if resp != nil {
-			if _, err := conn.WriteToUDP(resp, remoteAddr); err != nil {
+			if _, _, err := conn.WriteMsgUDP(resp, ingress.oob(), remoteAddr); err != nil {
 				slog.Error("SNMP write error", "err", err, "remote", remoteAddr)
 			}
 		}
@@ -1030,6 +1109,10 @@ func (a *Agent) Stop() {
 	if a.conn != nil {
 		a.conn.Close()
 		a.conn = nil
+	}
+	if a.inbandConn != nil {
+		a.inbandConn.Close()
+		a.inbandConn = nil
 	}
 	a.mu.Unlock()
 
