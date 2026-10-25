@@ -1430,3 +1430,61 @@ fn local_tunnel_delivery_try_send_enqueues_and_wakes() {
         libc::close(pipe[1]);
     }
 }
+
+// #16512: GRE-1300 budget/guard arithmetic the dispatcher diversion
+// keys on. A 1280-byte IPv6 inner (outer 1304) is refused whole; an
+// in-budget inner still builds.
+#[test]
+fn gre_encap_sub1280_v6_inner_clears_outer_df_16512() {
+    let mut state = gre1881_state();
+    {
+        let ep = state.tunnel_endpoints.get_mut(&1).expect("endpoint");
+        ep.outer_family = libc::AF_INET;
+        ep.source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        ep.destination = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    }
+    state.egress.insert(
+        12,
+        EgressInterface {
+            bind_ifindex: 11,
+            vlan_id: 0,
+            mtu: 1300,
+            src_mac: [0x02, 0xbf, 0x72, 0, 0, 1],
+            zone_id: 0,
+            redundancy_group: 0,
+            primary_v4: Some(Ipv4Addr::new(10, 0, 0, 1)),
+            primary_v6: None,
+        },
+    );
+    let decision = SessionDecision {
+        resolution: gre_encap_resolution(),
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    assert_eq!(native_gre_inner_mtu(&state, &decision), 1276, "GRE-1300 budget");
+    let mut inner6 = vec![0u8; 1280];
+    inner6[0] = 0x60;
+    inner6[4..6].copy_from_slice(&1240u16.to_be_bytes());
+    inner6[6] = PROTO_UDP;
+    inner6[7] = 64;
+    inner6[8..24].copy_from_slice(&"2001:db8::1".parse::<std::net::Ipv6Addr>().unwrap().octets());
+    inner6[24..40].copy_from_slice(&"2001:db8::2".parse::<std::net::Ipv6Addr>().unwrap().octets());
+    let frame6 = wrap_raw_ip_packet_for_tunnel(&inner6, libc::AF_INET6 as u8);
+    let mut meta6 = ForwardPacketMeta::default();
+    meta6.addr_family = libc::AF_INET6 as u8;
+    meta6.protocol = PROTO_UDP;
+    meta6.l3_offset = 14;
+    assert!(
+        encapsulate_native_gre_frame(&frame6, meta6, &decision, &state).is_none(),
+        "1304 outer over 1300 MTU refused whole; dispatcher fragments"
+    );
+    let mut small = inner6.clone();
+    small.truncate(1200);
+    small[4..6].copy_from_slice(&1160u16.to_be_bytes());
+    let frame_small = wrap_raw_ip_packet_for_tunnel(&small, libc::AF_INET6 as u8);
+    assert!(
+        encapsulate_native_gre_frame(&frame_small, meta6, &decision, &state).is_some(),
+        "in-budget inner builds whole"
+    );
+}

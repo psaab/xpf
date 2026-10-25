@@ -401,7 +401,14 @@ pub(super) fn encap_and_send(
     // inner rather than emitting an outer datagram the kernel must
     // fragment. The wgN TUN MTU (Go-side) is the first line; this is
     // defense-in-depth for a mis-set MTU or a jumbo inner read off the TUN.
-    if !wg_inner_fits_outer_mtu(inner_ip.len(), endpoint.is_ipv6(), outer_mtu) {
+    // #16512: host-originated IPv6 inners in (budget, 1280] on an IPv4
+    // outer are sent via the kernel UDP socket, whose IP stack
+    // fragments the outer datagram below IPv6 (RFC 8200 §5).
+    let sub1280_v6 = !endpoint.is_ipv6()
+        && inner_ip.first().is_some_and(|b| b >> 4 == 6)
+        && inner_ip.len() > wg_inner_budget(outer_mtu, false)
+        && inner_ip.len() <= 1280;
+    if !sub1280_v6 && !wg_inner_fits_outer_mtu(inner_ip.len(), endpoint.is_ipv6(), outer_mtu) {
         // #1865: the #1736 v4-mapped blackhole class — full-MSS inner
         // packets silently vanishing here moved ZERO bytes of forward
         // TCP while pings passed. Now release-visible.

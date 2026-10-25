@@ -2241,3 +2241,62 @@ fn post_transform_inner_destination_skips_parse_when_not_needed_14300() {
         "gate closed: destination must be skipped without parsing"
     );
 }
+
+// #16512: the sub-1280 tunnel predicate band.
+#[test]
+fn sub1280_tunnel_predicate_band_16512() {
+    use crate::afxdp::icmp_ptb::ipv6_tunnel_inner_below_link_minimum as below;
+    assert!(below(libc::AF_INET6 as u8, 1276, true), "GRE-1300 budget");
+    assert!(below(libc::AF_INET6 as u8, 1279, true));
+    assert!(!below(libc::AF_INET6 as u8, 1280, true), "1280 is the minimum itself");
+    assert!(!below(libc::AF_INET6 as u8, 1376, true), "normal GRE budget");
+    assert!(!below(libc::AF_INET6 as u8, 0, true), "unknown budget");
+    assert!(!below(libc::AF_INET as u8, 1276, true), "IPv4 inner");
+    assert!(!below(libc::AF_INET6 as u8, 1276, false), "plain link is not a tunnel");
+}
+
+// #16512 regression (RED pre-fix): a 1280-byte IPv6 inner over GRE-1300
+// (budget 1276) decided EmitPacketTooBig{1280} + drop.
+#[test]
+fn gre1300_ipv6_1280_ptb_is_unactionable_without_diversion_16512() {
+    let (frame, meta) = inbound_v6_udp(1232); // L3 = 1280 exactly
+    let l3 = meta.l3_offset as usize;
+    let mut fwd = forwarding_with_egress(1300);
+    insert_tunnel_endpoint(&mut fwd, "gre", libc::AF_INET, 0);
+    let inner = post_transform_inner_mtu(
+        &tunnel_decision(),
+        &fwd,
+        false,
+        meta.addr_family,
+        1300,
+        None,
+    );
+    assert_eq!(inner, 1276, "GRE-1300 inner budget = 1300 - 20 - 4");
+    assert!(
+        crate::afxdp::icmp_ptb::ipv6_tunnel_inner_below_link_minimum(
+            meta.addr_family, inner, true
+        ),
+        "GRE-1300/1280 shape must take the #16512 delivery diversion"
+    );
+    match forwarded_egress_mtu_decision(&frame, l3, meta.addr_family, inner) {
+        EgressMtuDecision::EmitPacketTooBig { next_hop_mtu } => {
+            assert_eq!(next_hop_mtu, 1280, "pre-diversion PTB advertises floored 1280");
+        }
+        other => panic!("expected EmitPacketTooBig, got {other:?}"),
+    }
+    let mut fwd1400 = forwarding_with_egress(1400);
+    insert_tunnel_endpoint(&mut fwd1400, "gre", libc::AF_INET, 0);
+    let inner1400 = post_transform_inner_mtu(
+        &tunnel_decision(),
+        &fwd1400,
+        false,
+        meta.addr_family,
+        1400,
+        None,
+    );
+    assert_eq!(
+        forwarded_egress_mtu_decision(&frame, l3, meta.addr_family, inner1400),
+        EgressMtuDecision::Forward,
+        "1280-byte inner fits the 1400 control budget"
+    );
+}
