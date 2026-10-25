@@ -14270,26 +14270,35 @@ at commit: locally generated traffic egresses via the kernel TX path, not the
 AF_XDP RX gate, so it could only ever silently never-match (#3611 Piece A,
 documented not built).
 
-**Zone-local address books in a scoped global (#3287).** A scoped global
-(`match from-zone <z>` / `match to-zone <z>`) resolves a zone-local
-address-book reference (#3061) against that zone's local book — the same
-zone-qualified resolution `resolveZoneLocalAddressBooks` already applied to
-zone-pair policies. It rewrites a scoped global's `source-address` tokens under
-its `match from-zone` scope and `destination-address` tokens under its `match
-to-zone` scope to the `zone-local/<zone>/<name>` qualified entry. Without this,
-the bare token kept pointing at the global book (which holds the entry only
-under its qualified name), so the constraint silently resolved to match-none and
-legitimate zone-scoped global traffic fell through to default-deny (or was
-rejected at commit as an undefined address). An UNSCOPED global (empty / `any`
-scope) names no single zone-local book and is left to resolve against the global
-book. Because the simulator (`pkg/policymatch`) and the dataplane snapshot
-builder both consume the post-fold compiled book, this keeps them in agreement.
+**Global-policy address books (#16596, superseding #3287).** A global policy's
+addresses must be defined in the GLOBAL address book — Junos: "Addresses used
+in a global policy must be defined in global address book." The `match
+from-zone`/`to-zone` scope narrows which flows the policy applies to; it does
+not rebind its address names to a zone's attached or zone-local book. xpf
+formerly rewrote a single-zone scoped global's tokens to that zone's book
+(#3287), so `deny BLOCKED` (global 10.0.0.0/8) silently enforced trust's
+BLOCKED (10.1.1.1/32) once `match from-zone trust` was added, and reverted when
+a second scope zone appeared. That rewrite is removed: scoped, multi-zone,
+and unscoped globals all keep the bare token and resolve against the global
+book, even when the scoped zone's book defines the same name (zone-pair
+policies are unchanged and still resolve zone-local first). A scoped-global
+token defined ONLY in the single scoped zone's book — including a member
+reachable only there through a global address-set — is a strict commit error
+(`validateScopedGlobalZoneLocalRefsStrict`, naming the policy, field, token,
+and zone); on the tolerant load / peer-sync path it downgrades to a warning
+and the referencing global policy is poisoned (`LenientContentDropped`), so
+neither the zone-local object nor a global twin is enforced and the simulator
+reports the same fail-closed snapshot retention as the dataplane. Because the
+simulator (`pkg/policymatch`) and the dataplane snapshot builder both consume
+the post-fold compiled book, this keeps them in agreement.
 
 Regression coverage:
 `pkg/config/compiler_policy_global_zone_3148_test.go`,
 `pkg/dataplane/userspace/policy_global_zone_3148_test.go`, the Rust
 `global_policy_*` tests in `userspace-dp/src/policy_tests.rs`, and
-`pkg/policymatch/scoped_global_zonelocal_test.go` (#3287).
+`pkg/policymatch/scoped_global_zonelocal_test.go` (#3287, updated by #16596),
+`pkg/config/scoped_global_zonelocal_16596_test.go` and
+`pkg/config/scoped_global_zoneset_4626_test.go` (#16596).
 
 ### #6526 — A policy `match` leaf with NO OPERAND widens the dimension to match-ANY
 

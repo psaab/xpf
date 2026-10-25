@@ -951,6 +951,22 @@ so a cross-zone spelling never enforces another zone's object. An own-zone
 authored name (e.g. `web` in a trust policy) still commits and is rewritten
 to the synthetic key by the fold.
 
+**Global policies resolve globally (#16596, superseding #3287):** the
+zone-local-first order above applies to ZONE-PAIR policies only. A global
+policy's addresses must be defined in the global address book (Junos), even
+when the policy carries a single-zone `match from-zone`/`to-zone` scope:
+the scope narrows which flows the policy applies to, it does not rebind its
+address names. `resolveZoneLocalAddressBooks` therefore never rewrites a
+global policy's tokens (scoped, multi-zone, and unscoped globals all keep
+the bare/global token, even when the scoped zone's book defines the same
+name), and `validateScopedGlobalZoneLocalRefsStrict` — run after the
+named-book fold and before the zone-local fold, `lenientScopedGlobalZoneLocal16596`
+on tolerant paths — rejects a single-zone scoped-global token defined only
+in that zone's attached/inline book (including a member reachable only
+there through a global address-set) at strict commit; the tolerant path
+warns and poisons the referencing policy (`LenientContentDropped`) so
+neither object enforces.
+
 Unknown direct entries in either address-book scope are now retained as
 compiler metadata instead of disappearing. Strict compilation rejects them;
 tolerant loads warn. An unknown zone-local entry makes the zone unbound and

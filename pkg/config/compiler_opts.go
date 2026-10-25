@@ -2119,6 +2119,18 @@ type compileOpts struct {
 	// to a warning on tolerant load / peer-sync; conflicting entries are
 	// quarantined via CollidingNames so references fail closed.
 	lenientNamedAddressBookAttach15672 bool
+	// lenientScopedGlobalZoneLocal16596 (#16596) downgrades the scoped-global
+	// zone-local address gate (validateScopedGlobalZoneLocalRefsStrict) from
+	// a hard compile error to a cfg.Warnings entry. Junos requires
+	// global-policy addresses to be defined in the global address book, so a
+	// single-zone scoped global whose token is defined only in that zone's
+	// (attached or inline) book — the #3287 extension xpf used to honour —
+	// is rejected at strict commit. The tolerant load / peer-sync paths keep
+	// an already-persisted config bootable (#1960 no-brick) but poison the
+	// referencing policy (LenientContentDropped) so the zone-local object is
+	// never enforced as the global policy's meaning. Same doctrine as
+	// lenientAddressBookNameCollision.
+	lenientScopedGlobalZoneLocal16596 bool
 	// lenientZoneInterfaceMembership (#3072) downgrades the zone-interface
 	// membership gate (validateZoneInterfaceMembershipStrict) from a hard
 	// compile error to a cfg.Warnings entry. The strict commit / commit-check
@@ -3910,6 +3922,7 @@ func lenientCompileOpts() compileOpts {
 		lenientAddressBookNameCollision:          true,
 		lenientAddressBookDuplicatePrefix:        true,
 		lenientNamedAddressBookAttach15672:       true,
+		lenientScopedGlobalZoneLocal16596:        true,
 		lenientRIDualClaim11060:                  true,
 		lenientRIMgmtMember11392:                 true,
 		lenientZoneInterfaceMembership:           true,
