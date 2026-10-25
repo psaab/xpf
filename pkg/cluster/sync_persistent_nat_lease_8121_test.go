@@ -176,15 +176,15 @@ func TestPersistentNatLeaseMintFromZoneProvenanceRoundTrip16877(t *testing.T) {
 			lease.DeterministicHostCount = 2
 		}
 		batch := sampleIdleLeaseBatch11486(lease)
-		frames, dropped, layoutDeterministic, err :=
+		frames, dropped, err :=
 			encodePersistentNatLeaseBatchFramesCountedLayoutWithProvenance(batch, true)
 		if err != nil || dropped != 0 || len(frames) != 1 {
 			t.Fatalf("provenance frames = %d, dropped=%d, err=%v", len(frames), dropped, err)
 		}
-		if layoutDeterministic != deterministic {
-			t.Fatalf("deterministic layout = %v, want %v", layoutDeterministic, deterministic)
+		if frames[0].deterministic != deterministic {
+			t.Fatalf("deterministic layout = %v, want %v", frames[0].deterministic, deterministic)
 		}
-		got, ok := decodePersistentNatLeaseBatchPayloadProvenance(frames[0], deterministic)
+		got, ok := decodePersistentNatLeaseBatchPayloadProvenance(frames[0].payload, deterministic)
 		if !ok || len(got.Leases) != 1 || !equalIdleLeaseWire(got.Leases[0], lease) {
 			t.Fatalf("provenance round-trip = %+v, ok=%v; want %+v", got, ok, lease)
 		}

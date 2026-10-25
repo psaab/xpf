@@ -67,16 +67,10 @@ func (m *Manager) ensurePersistentNatLeaseProtocolLocked(required int, feature s
 }
 
 func (m *Manager) ensurePersistentNatLeasePermissionProtocolLocked() error {
-	// #14322: lease verbs require the egress-scope fence too — an old helper
-	// would ignore EgressScope and merge two zones' permissions on import.
-	if err := m.ensurePersistentNatLeaseProtocolLocked(
-		MinProtocolPersistentNatLeaseEgressScope, "egress scope"); err != nil {
-		return err
-	}
-	if err := m.ensurePersistentNatLeaseProtocolLocked(
-		MinProtocolPersistentNatLeasePermissions, "permissions"); err != nil {
-		return err
-	}
+	// The newest idle-lease wire floor subsumes the earlier permission and
+	// egress-scope fields. Check it once: probing each floor in sequence can
+	// issue a redundant status request after an old helper has already been
+	// observed.
 	return m.ensurePersistentNatLeaseProtocolLocked(
 		MinProtocolPersistentNatLeaseMintFromZone, "mint-from-zone provenance")
 }
