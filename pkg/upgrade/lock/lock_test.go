@@ -520,6 +520,50 @@ func TestAcquireTightensPermissiveModes16050(t *testing.T) {
 	})
 }
 
+// openTestOwnedAncestors makes the directories this test created under
+// its dedicated temp root traversable (0755). It walks from base up to,
+// but NOT including, root — both created by t.TempDir()/os.MkdirTemp
+// for this test — and chmods only those. Pre-existing ancestors above
+// root (the GOTMPDIR/os.TempDir() root and everything above it) are
+// never touched (#16720): an earlier version walked to "/" with only
+// "/tmp" as a stop word, rewriting shared 0775/1777 ancestors to 0755
+// and failing on the first root-owned one (e.g. /var/tmp) under any
+// GOTMPDIR/TMPDIR other than /tmp. If a pre-existing ancestor is not
+// already traversable by the probe uid, the root-arm control probe in
+// the caller fails loudly — that is the correct signal, not a reason
+// to rewrite host state.
+func openTestOwnedAncestors(t *testing.T, root, base string) {
+	t.Helper()
+	rel, err := filepath.Rel(root, base)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		t.Fatalf("temp base %q is not strictly under dedicated root %q", base, root)
+	}
+	// Collect base..child-of-root, then chmod root-first.
+	var dirs []string
+	for d := base; d != root; d = filepath.Dir(d) {
+		dirs = append(dirs, d)
+		if filepath.Dir(d) == d {
+			t.Fatalf("walking ancestors of %q never reached root %q", base, root)
+		}
+	}
+	dirs = append(dirs, root)
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if err := os.Chmod(dirs[i], 0o755); err != nil {
+			t.Fatalf("chmod test-owned ancestor %s: %v", dirs[i], err)
+		}
+	}
+}
+
+// statPerm returns the permission bits of path.
+func statPerm(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.Mode().Perm()
+}
+
 // TestUnprivilegedCannotFlockUpgradeLock16050 is the decisive #16050
 // check at the syscall level: after Acquire, an O_RDONLY open+flock
 // attempt by a process that cannot read the 0600 file must fail, while
@@ -529,20 +573,49 @@ func TestAcquireTightensPermissiveModes16050(t *testing.T) {
 // cross-uid case) it asserts the mode bits that make that probe fail,
 // so the cell never silently passes for the wrong reason.
 func TestUnprivilegedCannotFlockUpgradeLock16050(t *testing.T) {
-	// Use the suite-shaped path (xpf/ subdir at 0750) and make every
-	// ancestor traversable by nobody: t.TempDir() itself is 0700, which
-	// would make the probe fail for the wrong reason (EACCES on the
-	// temp root, not on the lock), so open the ancestors up explicitly.
-	// The lock dir stays 0750 root-owned: nobody must fail there or at
-	// the 0600 file — either is the #16050 property.
-	// t.TempDir() nests 001/ under a 0700 root; open every ancestor so
-	// the nobody probe's only barrier is the lock dir/file itself.
+	// Use a dedicated temp root this test owns. GOTMPDIR/os.TempDir()
+	// only chooses where that root is created; the root and everything
+	// under it are created by this test (t.TempDir nests 001/ under a
+	// per-test MkdirTemp root) and removed by cleanup, so chmodding
+	// exactly those is safe under any temp root (#16720). Pre-existing
+	// ancestors above the root are never chmodded; their modes are
+	// asserted unchanged below. The lock dir stays 0750: nobody must
+	// fail there or at the 0600 file — either is the #16050 property.
+	//
+	// Snapshot the pre-existing ancestors (the temp root's parent
+	// chain up to the filesystem root) before any chmod, and verify
+	// afterwards that none changed. Under /tmp this chain is short;
+	// under GOTMPDIR=/var/tmp/x/y it includes /var/tmp/x and
+	// /var/tmp/x/y, the acceptance case from #16720. Ancestors may
+	// change concurrently for unrelated reasons in theory, but a
+	// 0775/1777 -> 0755 change on this exact chain during this short
+	// cell is the defect signature; the pre-fix loop produced it
+	// deterministically.
 	base := t.TempDir()
-	for anc := base; anc != "/" && anc != "/tmp" && anc != "."; anc = filepath.Dir(anc) {
-		if err := os.Chmod(anc, 0o755); err != nil {
-			t.Fatal(err)
+	tempRoot := filepath.Dir(base) // per-test MkdirTemp root; base is its 001/
+	type ancestorMode struct {
+		path string
+		perm os.FileMode
+	}
+	var preExisting []ancestorMode
+	for anc := filepath.Dir(tempRoot); ; anc = filepath.Dir(anc) {
+		preExisting = append(preExisting, ancestorMode{anc, statPerm(t, anc)})
+		if filepath.Dir(anc) == anc {
+			break
 		}
 	}
+	defer func() {
+		for _, a := range preExisting {
+			if got := statPerm(t, a.path); got != a.perm {
+				t.Errorf("pre-existing ancestor %s mode changed %04o -> %04o: test must not chmod directories it does not own (#16720)", a.path, a.perm, got)
+			}
+		}
+	}()
+	// Open only the test-owned directories: tempRoot (the MkdirTemp
+	// root, 0700) and base (its 001/ subdir). Without this the nobody
+	// probe would fail for the wrong reason (EACCES on the temp root,
+	// not on the lock).
+	openTestOwnedAncestors(t, tempRoot, base)
 	p := filepath.Join(base, "xpf", "upgrade.lock")
 	h, err := AcquireAt(p, "upgrade", "perms")
 	if err != nil {
