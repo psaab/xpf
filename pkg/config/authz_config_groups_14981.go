@@ -285,8 +285,126 @@ func AuthorizeExpandedTree(cfg *Config, class string, tree *ConfigTree) error {
 // denied subtree — is not a mutation this commit performs, and writing
 // it was already adjudicated by the per-line gate. Without a usable
 // active tree it behaves exactly like AuthorizeExpandedTree.
+//
+// #16784: the candidate − active direction alone prices only config
+// that EXISTS after the change, so a commit that REMOVES a denied
+// path (directly, through an ancestor, or by deleting an
+// apply-groups linker) sailed through. The active − candidate
+// removal difference is priced for EVERY tree here — not only
+// group-bearing ones — via authorizeRemovedLines16784.
 func AuthorizeExpandedCandidate(cfg *Config, class string, candidate, active *ConfigTree) error {
-	return authorizeExpandedTree14981(cfg, class, candidate, active)
+	if err := authorizeExpandedTree14981(cfg, class, candidate, active); err != nil {
+		return err
+	}
+	if active == nil || candidate == nil {
+		return nil
+	}
+	return authorizeRemovedLines16784(cfg, class, candidate, active)
+}
+
+// authorizeRemovedLines16784 prices the active − candidate difference
+// (#16784, folded R3-F04-01): a line present in active but gone from
+// candidate was REMOVED by this commit, and removal of a denied path
+// is a governed mutation (the same principle that refuses
+// load override / rollback n to regex classes because "the paths they
+// delete cannot be adjudicated one by one"). Both trees are compared
+// as GROUP-EXPANDED set lines, so a denied leaf that disappears
+// because an apply-groups linker (or its group) was deleted is priced
+// on its effective spelling, not only its literal one. Group
+// DEFINITION lines are skipped: an unapplied definition is not
+// effective config, and deleting one removes nothing effective.
+func authorizeRemovedLines16784(cfg *Config, class string, candidate, active *ConfigTree) error {
+	if candidate == nil || active == nil {
+		return nil
+	}
+	rules, restricted, err := ConfigurationLoginRegexesFor(cfg, class)
+	if err != nil {
+		return fmt.Errorf("permission denied: login class %q has an invalid configuration regex: %w", class, err)
+	}
+	fenced16080, ferr := CredentialSurchargeCheck16080(cfg, class)
+	if ferr != nil {
+		return ferr
+	}
+	if !restricted && !fenced16080 {
+		return nil
+	}
+	candSet, err := treeSetLines16784(candidate)
+	if err != nil {
+		return fmt.Errorf("permission denied: login class %q restricts configuration paths, and "+
+			"the candidate cannot be rendered for removal adjudication: %w", class, err)
+	}
+	activeSet, err := treeSetLines16784(active)
+	if err != nil {
+		return fmt.Errorf("permission denied: login class %q restricts configuration paths, and "+
+			"the active tree cannot be rendered for removal adjudication: %w", class, err)
+	}
+	for line := range activeSet {
+		if candSet[line] {
+			continue
+		}
+		if expandedLineIsGroupDefinition14981(line) {
+			continue
+		}
+		path := strings.TrimSpace(strings.TrimPrefix(line, "set "))
+		if path == "" {
+			continue
+		}
+		if !restricted {
+			// Surcharged-only class (#16080): only credential-touching
+			// removals are priced, through the mutation gate so the
+			// fence (including its ancestor leg) decides.
+			parts, quoted, _ := lexConfigMutationLineStrict15167(line)
+			paths, gated := configMutationPaths(nil, parts, quoted)
+			if !gated {
+				continue
+			}
+			touches := false
+			for _, p := range paths {
+				if CredentialPathTouches16080(p) {
+					touches = true
+					break
+				}
+			}
+			if !touches {
+				continue
+			}
+			if err := AuthorizeConfigMutation(cfg, class, nil, line); err != nil {
+				return err
+			}
+			continue
+		}
+		if decision := rules.Evaluate(path); !decision.Allowed {
+			return fmt.Errorf("permission denied: login class %q denies mutation under %q (%s); "+
+				"the commit removes that configuration (#16784)",
+				class, configAuditRoot(path), decision.Reason)
+		}
+	}
+	return nil
+}
+
+// treeSetLines16784 renders a tree as the set of set lines it stands
+// for: its literal FormatSet lines UNION its group-expanded lines
+// (plain + node views), so a removal is priced on every spelling the
+// tree effectively carries. Expansion failure fails closed.
+func treeSetLines16784(t *ConfigTree) (map[string]bool, error) {
+	set := make(map[string]bool)
+	if t == nil {
+		return set, nil
+	}
+	for _, l := range strings.Split(t.FormatSet(), "\n") {
+		l = strings.TrimSpace(l)
+		if l != "" {
+			set[l] = true
+		}
+	}
+	lines, err := ExpandedMutationLines(t)
+	if err != nil {
+		return nil, err
+	}
+	for _, l := range lines {
+		set[l] = true
+	}
+	return set, nil
 }
 
 func authorizeExpandedTree14981(cfg *Config, class string, tree, active *ConfigTree) error {
