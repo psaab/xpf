@@ -193,12 +193,22 @@ pub(crate) fn reserve_synced_source_nat_allocation(
     );
 }
 
-/// #15111: acquire the inbound persistent hold for a synced inbound session.
-/// Mirrors `release_persistent_inbound_for_session`: the synced decision
-/// carries only `rewrite_dst`, so the outbound reserve body (gated on
-/// `rewrite_src`) never touches the lease. Per-worker fan-out and the
+/// #15111/#16619: acquire the inbound persistent hold for a synced inbound session.
+/// Mirrors `release_persistent_inbound_for_session`. Per-worker fan-out and the
 /// coordinator untracked reserve each take one reference, matching the
 /// per-worker inbound release on teardown. No-op when no lease matches.
+///
+/// #16619: a synced decision carrying a source rewrite must NOT skip the
+/// hold. The reserve body joins the lease keyed by the session's source —
+/// for an inbound session that source is the *remote*, so its SNAT
+/// reservation joins (or mints) the remote's lease, never the internal
+/// host's lease derived from `rewrite_dst` below. An ordinary outbound
+/// synced decision is still excluded: in that direction the internal host
+/// IS the session source (`key.src_ip`), so the reserve body's persistent
+/// join already covers the lease this function would derive, and taking a
+/// second (inbound) hold would double-count it. The inbound arm is
+/// therefore distinguished structurally: the internal endpoint comes from
+/// `rewrite_dst` and differs from the session source.
 pub(crate) fn acquire_persistent_inbound_for_synced(
     rules: &[SourceNatRule],
     key: &crate::session::SessionKey,
@@ -206,12 +216,7 @@ pub(crate) fn acquire_persistent_inbound_for_synced(
     is_reverse: bool,
     now_ns: u64,
 ) {
-    // A synced decision carrying a source rewrite joins its lease via
-    // `active_flows` in the reserve body; only a pure inbound (DNAT-only)
-    // decision needs the separate inbound hold. `rewrite_dst` is present on
-    // ordinary outbound synced decisions too (post-DNAT), so it must not
-    // trigger an inbound acquire on its own.
-    if is_reverse || nat.rewrite_src.is_some() {
+    if is_reverse {
         return;
     }
     let Some(internal_ip) = nat.rewrite_dst else {
@@ -220,10 +225,17 @@ pub(crate) fn acquire_persistent_inbound_for_synced(
     if nat.nat64 || nat.nptv6 {
         return;
     }
+    // Outbound discriminator (see doc comment): the internal host is the
+    // session source and rewrite_dst is merely its post-DNAT destination;
+    // the reserve body's persistent join already holds that lease.
+    let internal_port = nat.rewrite_dst_port.unwrap_or(key.dst_port);
+    if internal_ip == key.src_ip && internal_port == key.src_port {
+        return;
+    }
     let lease_key = crate::nat::PersistentSourceKey {
         protocol: key.protocol,
         src_ip: internal_ip,
-        src_port: nat.rewrite_dst_port.unwrap_or(key.dst_port),
+        src_port: internal_port,
         routing_scope: key.routing_domain,
         remote: None,
     };

@@ -363,6 +363,7 @@ pub(crate) use source::{
     // production import path.
     reserve_synced_source_nat_allocation_untracked,
     reserve_synced_source_nat_allocation_untracked_with_holder_snapshot,
+    acquire_persistent_inbound_for_synced,
     retained_pool_index_map,
     retained_pool_index_map_v4,
     rollback_persistent_inbound_for_session,

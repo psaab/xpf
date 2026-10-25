@@ -2373,6 +2373,309 @@ fn persistent_inbound_permission_uses_remote_scope_not_mapping_key() {
 /// releasing the inbound hold must re-arm expiry so GC can reclaim it.
 /// Pre-fix there is no inbound reference, so the lookup after expiry is a
 /// Miss and a second internal host can be minted the same tuple.
+/// #16619 RED/GREEN: an inbound persistent session that is ALSO
+/// source-NATed (composed decision carries `rewrite_src` for the remote
+/// plus the persistent `rewrite_dst` for the internal host) must still
+/// take the #15111 inbound hold on the INTERNAL host's lease, and that
+/// hold must survive past the outbound inactivity expiry while the
+/// inbound session lives. The remote-keyed SNAT allocation joins (or
+/// mints) the remote's own flow/lease — it never touches the internal
+/// host's lease — so skipping the hold on `rewrite_src.is_some()`
+/// (pre-fix) lets the binding expire and its tuple be reissued.
+///
+/// This test drives the exact production seam: the allocator-level hold
+/// (`acquire_persistent_inbound`, the call `acquire_persistent_inbound_hold`
+/// makes once its gate passes) plus the release derivation
+/// (`release_persistent_inbound_for_session`, which is not gated on
+/// `rewrite_src`). The gate itself is pinned by
+/// `acquire_persistent_inbound_hold_16619` in poll_descriptor; here the
+/// composed decision is constructed exactly as the poll loop constructs
+/// it (`decision.nat.merge(snat_decision)` over the persistent DNAT).
+#[test]
+fn persistent_inbound_hold_with_snat_keeps_lease_past_expiry_16619() {
+    let rules = persistent_pool_rules(1, 40000, 40010);
+    let alloc = &rules[0].pool_allocator;
+    // Outbound mint for internal host X=10.0.1.100:12345 at t=1s
+    // (timeout 1s => idle expiry 2s), then release the outbound flow.
+    let first = expect_snat_decision(tuple_snat_lookup(
+        &rules,
+        12345,
+        "8.8.8.8",
+        53,
+        1_000_000_000,
+    ));
+    let public_ip = first.rewrite_src.unwrap();
+    let public_port = first.rewrite_src_port.unwrap();
+    crate::nat::release_source_nat_allocation(
+        &InterfaceNatAllocators::default(),
+        &rules,
+        &session_key(12345, "8.8.8.8", 53),
+        first,
+        false,
+        1_000_000_001,
+    );
+    // Inbound lookup from remote 8.8.8.8 admits X and yields its lease key.
+    let lease_key = match alloc.persistent_inbound_lookup(
+        6,
+        public_ip,
+        public_port,
+        "8.8.8.8".parse().unwrap(),
+        53,
+        1_500_000_000,
+        "",
+        "",
+    ) {
+        PersistentInbound::Permitted { lease_key, .. } => {
+            lease_key.expect("permitted inbound must carry its lease key")
+        }
+        other => panic!("idle lease must permit inbound, got {other:?}"),
+    };
+    assert_eq!(lease_key.src_ip.to_string(), "10.0.1.100");
+    assert_eq!(lease_key.src_port, 12345);
+
+    // Compose the final decision exactly as the poll loop does for an
+    // inbound flow that also matches an untrust->trust SNAT rule-set:
+    // persistent DNAT (rewrite_dst=X) merged with a source rewrite for
+    // the REMOTE (rewrite_src = SNAT pool address for 8.8.8.8).
+    let snat_of_remote = expect_snat_decision(tuple_snat_lookup_from_src(
+        &rules,
+        "8.8.8.8",
+        53,
+        "10.0.1.100",
+        12345,
+        1_500_000_000,
+    ));
+    assert!(
+        snat_of_remote.rewrite_src.is_some(),
+        "fixture: the remote's SNAT must compose a source rewrite"
+    );
+    let composed = NatDecision {
+        rewrite_dst: Some("10.0.1.100".parse().unwrap()),
+        rewrite_dst_port: Some(12345),
+        ..NatDecision::default()
+    }
+    .merge(snat_of_remote);
+    assert!(composed.rewrite_src.is_some(), "composed decision carries rewrite_src (#16619 arm)");
+    assert!(composed.rewrite_dst.is_some(), "composed decision still carries the persistent rewrite_dst");
+    assert!(!composed.nat64 && !composed.nptv6, "NAT64/NPTv6 exemptions untouched");
+
+    // This is the allocator call the production gate
+    // (`acquire_persistent_inbound_hold`, pinned directly by
+    // `acquire_persistent_inbound_hold_with_snat_takes_hold_16619` in
+    // poll_descriptor, which goes RED when the gate reverts) makes once
+    // it passes. Here we pin the lease-level consequence: the hold
+    // lands on X's lease, not on the remote's SNAT lease.
+    assert!(
+        alloc.acquire_persistent_inbound(lease_key, 1_500_000_000),
+        "#16619: inbound hold must be taken even when the composed decision carries rewrite_src"
+    );
+    let held = alloc
+        .debug_persistent_lease_for_flow(
+            &crate::nat::SourceNatFlowKey {
+                protocol: 6,
+                src_ip: "10.0.1.100".parse().unwrap(),
+                dst_ip: "8.8.8.8".parse().unwrap(),
+                src_port: 12345,
+                dst_port: 53,
+                routing_scope: 0,
+            },
+            PersistentNatPermit::AnyRemoteHost,
+        )
+        .expect("lease must survive while inbound-held");
+    assert_eq!(held.inbound_flows, 1, "#16619: internal host lease must carry the inbound hold");
+    assert_eq!(held.active_flows, 0, "the remote's SNAT must not join X's lease via active_flows");
+
+    // Past the original outbound expiry (2s): the held lease still
+    // permits inbound and a second host cannot steal its tuple.
+    match alloc.persistent_inbound_lookup(
+        6,
+        public_ip,
+        public_port,
+        "8.8.8.8".parse().unwrap(),
+        53,
+        3_000_000_000,
+        "",
+        "",
+    ) {
+        PersistentInbound::Permitted { .. } => {}
+        other => panic!(
+            "#16619: SNATed inbound-held lease must still permit after outbound expiry, got {other:?}"
+        ),
+    }
+    let second =
+        tuple_snat_lookup_from_src(&rules, "10.0.1.101", 12345, "8.8.8.8", 53, 3_000_000_000);
+    if let SourceNatLookup::Matched(d) = second {
+        assert_ne!(
+            (d.rewrite_src, d.rewrite_src_port),
+            (Some(public_ip), Some(public_port)),
+            "#16619: second host must not steal the inbound-held tuple"
+        );
+    }
+    assert_persistent_expiry_indexes_consistent(&rules[0]);
+
+    // Release via the production derivation (not gated on rewrite_src):
+    // the inbound session key is (remote -> public tuple), its decision
+    // carries rewrite_dst=X plus the remote's rewrite_src.
+    let inbound_key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: "8.8.8.8".parse().unwrap(),
+        dst_ip: public_ip,
+        src_port: 53,
+        dst_port: public_port,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    crate::nat::release_persistent_inbound_for_session(&rules, &inbound_key, composed, 3_000_000_000);
+    let released = alloc
+        .debug_persistent_lease_for_flow(
+            &crate::nat::SourceNatFlowKey {
+                protocol: 6,
+                src_ip: "10.0.1.100".parse().unwrap(),
+                dst_ip: "8.8.8.8".parse().unwrap(),
+                src_port: 12345,
+                dst_port: 53,
+                routing_scope: 0,
+            },
+            PersistentNatPermit::AnyRemoteHost,
+        )
+        .expect("lease remains until its re-armed expiry");
+    assert_eq!(released.inbound_flows, 0, "#16619: release must drop the inbound hold exactly once");
+    // After the re-armed expiry, GC reclaims the lease and frees its port.
+    let reclaimed = alloc.debug_gc_expired_chunked(5_000_000_000, 16);
+    assert!(
+        reclaimed >= 1,
+        "#16619: released inbound lease must be GC-reclaimable, reclaimed={reclaimed}"
+    );
+    assert_persistent_expiry_indexes_consistent(&rules[0]);
+}
+
+/// #16619 synced twin: a synced inbound session whose decision also
+/// carries `rewrite_src` (inbound SNAT of the remote) must take the
+/// inbound hold on the internal host's lease; an ordinary outbound
+/// synced session (internal host IS the session source) must NOT take
+/// a second inbound hold. Pre-fix, `acquire_persistent_inbound_for_synced`
+/// returned early on `rewrite_src.is_some()`, so the inbound arm never
+/// held and the binding expired under the live synced session.
+#[test]
+fn synced_inbound_hold_with_snat_16619() {
+    let rules = persistent_pool_rules(300, 40000, 40010);
+    let alloc = &rules[0].pool_allocator;
+    // Mint X's lease outbound, then release so it is idle.
+    let first = expect_snat_decision(tuple_snat_lookup(
+        &rules,
+        12345,
+        "8.8.8.8",
+        53,
+        1_000_000_000,
+    ));
+    crate::nat::release_source_nat_allocation(
+        &InterfaceNatAllocators::default(),
+        &rules,
+        &session_key(12345, "8.8.8.8", 53),
+        first,
+        false,
+        1_000_000_001,
+    );
+    let flow_x = crate::nat::SourceNatFlowKey {
+        protocol: 6,
+        src_ip: "10.0.1.100".parse().unwrap(),
+        dst_ip: "8.8.8.8".parse().unwrap(),
+        src_port: 12345,
+        dst_port: 53,
+        routing_scope: 0,
+    };
+    assert_eq!(
+        alloc
+            .debug_persistent_lease_for_flow(&flow_x, PersistentNatPermit::AnyRemoteHost)
+            .map(|l| l.inbound_flows),
+        Some(0),
+        "fixture: X's lease starts with no inbound hold"
+    );
+
+    // Synced INBOUND session: key is (remote -> public tuple), decision
+    // carries rewrite_dst=X AND rewrite_src (SNAT of the remote).
+    let inbound_key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: "8.8.8.8".parse().unwrap(),
+        dst_ip: "203.0.113.10".parse().unwrap(),
+        src_port: 53,
+        dst_port: 40000,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let inbound_nat = NatDecision {
+        rewrite_src: Some("198.51.100.1".parse().unwrap()),
+        rewrite_src_port: Some(50000),
+        rewrite_dst: Some("10.0.1.100".parse().unwrap()),
+        rewrite_dst_port: Some(12345),
+        ..NatDecision::default()
+    };
+    crate::nat::acquire_persistent_inbound_for_synced(
+        &rules, &inbound_key, inbound_nat, false, 2_000_000_000,
+    );
+    assert_eq!(
+        alloc
+            .debug_persistent_lease_for_flow(&flow_x, PersistentNatPermit::AnyRemoteHost)
+            .map(|l| l.inbound_flows),
+        Some(1),
+        "#16619: synced inbound+SNAT session must hold the internal host's lease"
+    );
+
+    // Release through the production pair drops exactly that hold.
+    crate::nat::release_persistent_inbound_for_session(
+        &rules, &inbound_key, inbound_nat, 3_000_000_000,
+    );
+    assert_eq!(
+        alloc
+            .debug_persistent_lease_for_flow(&flow_x, PersistentNatPermit::AnyRemoteHost)
+            .map(|l| l.inbound_flows),
+        Some(0),
+        "#16619: synced inbound hold must release exactly once"
+    );
+
+    // Ordinary OUTBOUND synced session: X is the session source and
+    // rewrite_dst is its post-DNAT destination. The reserve body's
+    // persistent join already covers X's lease; no inbound hold may be
+    // taken (would double-count).
+    let outbound_key = session_key(12345, "8.8.8.8", 53);
+    let outbound_nat = NatDecision {
+        rewrite_src: Some("203.0.113.10".parse().unwrap()),
+        rewrite_src_port: Some(40000),
+        rewrite_dst: Some("8.8.8.8".parse().unwrap()),
+        rewrite_dst_port: Some(53),
+        ..NatDecision::default()
+    };
+    crate::nat::acquire_persistent_inbound_for_synced(
+        &rules, &outbound_key, outbound_nat, false, 4_000_000_000,
+    );
+    assert_eq!(
+        alloc
+            .debug_persistent_lease_for_flow(&flow_x, PersistentNatPermit::AnyRemoteHost)
+            .map(|l| l.inbound_flows),
+        Some(0),
+        "#16619: outbound synced session must not take an inbound hold"
+    );
+
+    // NAT64/NPTv6 exemptions unchanged on the synced twin.
+    let nat64_nat = NatDecision { nat64: true, ..inbound_nat };
+    crate::nat::acquire_persistent_inbound_for_synced(
+        &rules, &inbound_key, nat64_nat, false, 5_000_000_000,
+    );
+    let nptv6_nat = NatDecision { nptv6: true, ..inbound_nat };
+    crate::nat::acquire_persistent_inbound_for_synced(
+        &rules, &inbound_key, nptv6_nat, false, 5_000_000_000,
+    );
+    assert_eq!(
+        alloc
+            .debug_persistent_lease_for_flow(&flow_x, PersistentNatPermit::AnyRemoteHost)
+            .map(|l| l.inbound_flows),
+        Some(0),
+        "#16619: NAT64/NPTv6 exemptions must stay exempt on the synced twin"
+    );
+}
+
 #[test]
 fn persistent_inbound_hold_keeps_lease_past_expiry_15111() {
     let rules = persistent_pool_rules(1, 40000, 40010);
