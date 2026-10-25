@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // ipsecQueueFamily/hook mirror the four provenance-specific queue classes in
@@ -73,7 +75,9 @@ type ipsecQueueAllocator struct {
 const (
 	// ipsecCaptureMaxTunnels is the supported route-based VPN count in one
 	// capture generation. Each tunnel owns four provenance classes.
-	ipsecCaptureMaxTunnels           = 32
+	// Aliased to the config constant (#16699) so the strict commit gate
+	// and the runtime bound can never drift apart.
+	ipsecCaptureMaxTunnels           = config.MaxRouteBasedVPNCaptureTunnels
 	ipsecCaptureQueuesPerTunnel      = 4
 	ipsecCaptureMaxGenerationHandles = ipsecCaptureMaxTunnels * ipsecCaptureQueuesPerTunnel
 	// The guarded commit keeps the old generation live while the staged

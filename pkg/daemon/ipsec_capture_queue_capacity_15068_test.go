@@ -10,6 +10,7 @@ package daemon
 // the supported 32 tunnels.
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -73,6 +74,31 @@ func stageIpsecCapture15068(t *testing.T, d *Daemon, cfg *config.Config) (old, s
 	old, staged, err := d.stageIpsecCapture(cfg)
 	if err != nil {
 		t.Fatalf("stage capture: %v", err)
+	}
+	if staged == nil {
+		t.Fatal("stage returned no staged runtime")
+	}
+	return old, staged
+}
+
+// stageIpsecCapture16699 stages expecting the #16699 QUEUE_OPEN stage
+// error: the over-cap generation must still stage a fail-closed
+// quarantine runtime, but stageIpsecCapture must return a non-nil error
+// naming the limit so the apply fails visibly instead of reporting
+// success over a box-wide quarantine.
+func stageIpsecCapture16699(t *testing.T, d *Daemon, cfg *config.Config) (old, staged *ipsecCaptureRuntime) {
+	t.Helper()
+	old, staged, err := d.stageIpsecCapture(cfg)
+	if err == nil {
+		t.Fatal("stage capture over the 32-tunnel limit returned nil error; want QUEUE_OPEN stage error (#16699)")
+	}
+	if !errors.Is(err, errIpsecQueueExhausted) {
+		t.Fatalf("stage error = %v, want wrap of errIpsecQueueExhausted", err)
+	}
+	for _, sub := range []string{"32", "#16699"} {
+		if !strings.Contains(err.Error(), sub) {
+			t.Fatalf("stage error %q missing substring %q", err.Error(), sub)
+		}
 	}
 	if staged == nil {
 		t.Fatal("stage returned no staged runtime")
@@ -147,11 +173,15 @@ func TestIpsecCaptureRezone32StagesWithoutQuarantine15068(t *testing.T) {
 // control: the supported bound is 32 tunnels per generation, so a 33-tunnel
 // generation must still refuse allocation as QUEUE_OPEN rather than admit
 // an unbounded generation (with or without a live old generation).
+// #16699: the stage must ALSO return a non-nil error naming the limit, so
+// the apply fails visibly instead of installing the quarantine under a
+// successful commit. Reverting the QUEUE_OPEN error return in
+// stageIpsecCapture makes stageIpsecCapture16699 fail (nil error) -> RED.
 func TestIpsecCaptureBeyond32TunnelsStillQuarantines15068(t *testing.T) {
 	installIpsecCaptureStageSeams15068(t)
 
 	fresh := &Daemon{eventBuf: logging.NewEventBuffer(8)}
-	_, stagedFresh := stageIpsecCapture15068(t, fresh, ipsecCaptureConfig15068(33, "zone-a"))
+	_, stagedFresh := stageIpsecCapture16699(t, fresh, ipsecCaptureConfig15068(33, "zone-a"))
 	if !stagedFresh.spec.QuarantineAll || stagedFresh.spec.QuarantinePrimaryReason != xnft.IpsecQuarantineReasonQueueOpen {
 		t.Fatalf("33 tunnels from empty = %+v, want QUEUE_OPEN quarantine", stagedFresh.spec)
 	}
@@ -163,7 +193,7 @@ func TestIpsecCaptureBeyond32TunnelsStillQuarantines15068(t *testing.T) {
 	_, first := stageIpsecCapture15068(t, d, ipsecCaptureConfig15068(32, "zone-a"))
 	assertStagedGeneration15068(t, first, 32)
 	d.ipsecCapture = first
-	_, stagedOver := stageIpsecCapture15068(t, d, ipsecCaptureConfig15068(33, "zone-a"))
+	_, stagedOver := stageIpsecCapture16699(t, d, ipsecCaptureConfig15068(33, "zone-a"))
 	if !stagedOver.spec.QuarantineAll || stagedOver.spec.QuarantinePrimaryReason != xnft.IpsecQuarantineReasonQueueOpen {
 		t.Fatalf("33 tunnels over a live 32 = %+v, want QUEUE_OPEN quarantine", stagedOver.spec)
 	}

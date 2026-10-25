@@ -1909,6 +1909,18 @@ so inherited bindings are covered. Its tolerant path warns
 (`lenientSecureTunnelBindIface`), while pkg/routing retains the runtime
 fail-closed backstop for an if_id collision.
 
+The same gate also enforces the route-based VPN capture limit (#16699):
+at most **32 distinct secure-tunnel capture tunnels** (distinct
+`bind-interface` XFRM if_ids, `MaxRouteBasedVPNCaptureTunnels`) are
+supported per IPsec capture generation, because each tunnel owns four
+NFQUEUE provenance classes in the daemon capture plan. A 33rd distinct
+tunnel cannot be represented, so strict commit / commit-check rejects it
+naming the limit, the tolerant load / peer-sync path warns and still
+boots (#1960), and the daemon QUEUE_OPEN capture stage returns a non-nil
+error so a runtime over-cap fails the apply visibly instead of silently
+installing a box-wide quarantine. VPNs sharing one bind-interface count
+once toward the limit.
+
 The same gate carries a DISTINCT `bind-interface` fail-closed arm (#5297): a
 NON-EMPTY bind-interface that `XFRMIfNameAndID` resolves to **if_id 0** (any name
 that is not the canonical `st<N>` / `st<N>.<unit>`, e.g. `secure0`, a bare `st`,
