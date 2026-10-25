@@ -153,6 +153,7 @@ var collectorDescGlobal = []int{
 	xpfCollectorDescFieldIndex("nat64XlateTotal"),
 	xpfCollectorDescFieldIndex("invalidLabelValuesTotal"),
 	xpfCollectorDescFieldIndex("collectorPanicsTotal"),
+	xpfCollectorDescFieldIndex("gatherErrorsTotal"),
 }
 
 // initHostInboundDescriptors (metrics_descriptors_hostinbound.go).

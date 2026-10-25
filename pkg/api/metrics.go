@@ -1157,10 +1157,10 @@ type xpfCollector struct {
 	flowExportSamplingEvaluatedTotal   *prometheus.Desc
 	flowExportSamplingSelectedTotal    *prometheus.Desc
 	flowExportZoneFilteredTotal        *prometheus.Desc
-	// #15086: scrape-health counters for the label-sanitize choke point
-	// (metrics_emit_15086.go) and the lane recover (metrics_handler.go).
+	// #15086/#16707: scrape-health counters for the label-sanitize choke
+	// point (metrics_emit_15086.go) and the lane recover (metrics_handler.go).
 	// invalidLabelValuesTotal counts label values that carried invalid
-	// UTF-8 and were folded to U+FFFD; collectorPanicsTotal counts
+	// UTF-8 and were escaped as \xNN; collectorPanicsTotal counts
 	// collector passes the lane recovered. Both samples are emitted via
 	// defers at the TOP of collectContext, so they appear on every return
 	// path — and, for a recovered panic, on the NEXT scrape, since a
@@ -1170,8 +1170,15 @@ type xpfCollector struct {
 	// skip the emit (the counters still accumulate for assertions).
 	invalidLabelValuesTotal *prometheus.Desc
 	collectorPanicsTotal    *prometheus.Desc
-	invalidLabelValues      atomic.Uint64
-	collectorPanics         atomic.Uint64
+	// #16707: cumulative scrapes whose Registry.Gather returned an
+	// error (duplicate series or otherwise) salvaged by promhttp
+	// ContinueOnError; the dropped family is not in that scrape, so
+	// this counter — emitted on the NEXT scrape — is the operator
+	// signal that a series is being dropped.
+	gatherErrorsTotal  *prometheus.Desc
+	invalidLabelValues atomic.Uint64
+	collectorPanics    atomic.Uint64
+	gatherErrors       atomic.Uint64
 }
 
 func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
@@ -1240,6 +1247,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// certified by the NEXT scrape's sample; the atomic accumulates
 	// regardless.
 	defer c.emitInvalidLabelValues(ch)
+	defer c.emitGatherErrors(ch)
 	defer c.emitCollectorPanics(ch)
 
 	// #1799: config-persist health is a control-plane signal — emit it
