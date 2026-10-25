@@ -340,6 +340,7 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 			Action:                   res.DisplayAction(),
 			DefaultUsed:              res.DefaultUsed,
 			UnzonedIngress:           res.UnzonedIngress,
+			HostOriginated:           res.HostOriginated,
 			UnzonedEgress:            res.UnzonedEgress,
 			UnsupportedTupleFamily:   res.UnsupportedTupleFamily,
 			FeedPublicationDebt:      res.FeedPublicationDebt,

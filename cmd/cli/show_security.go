@@ -787,6 +787,14 @@ func (c *ctl) showMatchPolicies(args []string) error {
 		fmt.Printf("  %s\n", policymatch.ContentRejectedShowLine)
 		return nil
 	}
+	if resp.GetHostOriginated() {
+		// #16805: from-zone junos-host is host-ORIGINATED — the traffic
+		// egresses via the kernel TX path and no security policy is
+		// consulted; it must not read as an unknown-ingress-zone deny.
+		fmt.Printf("Host-originated (from-zone junos-host -> %s): not evaluated by security policy\n", req.ToZone)
+		fmt.Printf("  %s\n", policymatch.HostOriginatedShowLine)
+		return nil
+	}
 	if resp.GetUnzonedIngress() {
 		fmt.Printf("Ingress zone unknown (%s -> %s): transit denied\n", req.FromZone, req.ToZone)
 		fmt.Printf("  %s\n", policymatch.UnzonedIngressShowLine)

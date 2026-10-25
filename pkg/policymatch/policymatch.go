@@ -819,6 +819,22 @@ type Result struct {
 	// to default-policy (#8318).
 	UnzonedIngress bool
 
+	// HostOriginated is true when the query's FROM zone is the reserved
+	// junos-host self-traffic zone (#16805): the query asks about
+	// host-ORIGINATED (locally-generated) traffic, which is never evaluated
+	// by the security-policy RX gate — it egresses via the kernel TX path
+	// (#3611 Piece A / #4230), and both `from-zone junos-host` policy forms
+	// are rejected at strict commit for exactly that reason. Before #16805
+	// this fell into UnzonedIngress (junos-host is not in cfg.Security.Zones),
+	// falsely telling the operator an unknown-ingress-zone unconditional deny
+	// blocks traffic no policy ever sees. When set, Matched / DefaultUsed /
+	// HostInboundUnmatched / UnzonedIngress / UnzonedEgress are all false and
+	// Action is the conservative PolicyDeny for a raw reader (it carries no
+	// enforced meaning; DisplayAction renders HostOriginatedActionString).
+	// It applies to EVERY to-zone, including junos-host itself: a
+	// junos-host -> junos-host query is still host-originated, not host-bound.
+	HostOriginated bool
+
 	// UnzonedEgress is true when the query's TO zone is not a known zone, so a
 	// resolved transit egress is denied rather than falling through to
 	// default-policy (#11067). Match has no FIB input and cannot distinguish a
@@ -1274,6 +1290,23 @@ const UnzonedIngressActionString = "deny (ingress zone unknown — transit on an
 // HostInboundShowLine is.
 const UnzonedIngressShowLine = "unzoned ingress: an interface in no zone resolves to the reserved zone id 0, which is ineligible for zone-pair, wildcard and junos-global policies; the dataplane denies rather than falling through to default-policy (#6682)"
 
+// HostOriginatedActionString is the operator-facing verdict rendered for a
+// `from-zone junos-host` (host-originated) query (#16805). Locally-generated
+// traffic egresses via the kernel TX path and never traverses the AF_XDP RX
+// policy gate (#3611 Piece A / #4230), so no security policy — transit,
+// global, or default — is consulted for it; strict commit rejects both
+// `from-zone junos-host` policy forms for exactly that reason. This must NOT
+// render as the UnzonedIngress deny: junos-host is a reserved, KNOWN
+// self-traffic context, not an unknown zone, and there is no enforcement
+// effect to deny. Rendered by DisplayAction so REST and gRPC cannot diverge.
+const HostOriginatedActionString = "not evaluated by security policy (host-originated: locally-generated traffic egresses via the kernel TX path, not the AF_XDP RX policy gate; transit/global/default policy NOT applied)"
+
+// HostOriginatedShowLine is the human-readable one-line explanation the CLI /
+// `show` / `request` match-policies surfaces print after a "Host-originated
+// (from-zone junos-host) ..." header, kept here as the SSOT for the same
+// reason HostInboundShowLine is (#16805).
+const HostOriginatedShowLine = "host-originated: from-zone junos-host traffic is locally generated and egresses via the kernel TX path; it never traverses the RX policy gate, so no security policy is consulted (#3611/#4230)"
+
 // UnzonedEgressActionString is the operator-facing verdict for a query whose
 // TO zone is unknown. A resolved zone-0 egress is denied before the configured
 // default-policy (#11067). The Match query has no FIB identity, so this string
@@ -1316,6 +1349,7 @@ const ContentRejectedShowLine = "policy content rejected: the dataplane fails th
 //     (#9993); this is the primary operator posture on every surface.
 //   - UnsupportedTupleFamily -> UnsupportedTupleFamilyActionString
 //   - HostInboundUnmatched -> HostInboundActionString
+//   - HostOriginated -> HostOriginatedActionString (#16805)
 //   - UnzonedIngress / UnzonedEgress -> their direction-specific deny strings
 //   - no match (default-policy verdict) -> "<action> (default)"
 //   - concrete policy match -> "<action>"
@@ -1329,6 +1363,8 @@ func (r Result) DisplayAction() string {
 		return UnsupportedTupleFamilyActionString
 	case r.HostInboundUnmatched:
 		return HostInboundActionString
+	case r.HostOriginated:
+		return HostOriginatedActionString
 	case r.UnzonedIngress:
 		return UnzonedIngressActionString
 	case r.UnzonedEgress:
@@ -1452,8 +1488,12 @@ func Match(cfg *config.Config, q Query) (res Result) {
 	// the helper's pre-policy src/dst gates. Stamp the advisory onto every
 	// Result via defer, without threading it through each construction.
 	// Host-bound (junos-host) queries use the local-delivery gate rather
-	// than transit routing and are exempt.
-	if q.ToZone != JunosHostZone {
+	// than transit routing and are exempt. Host-ORIGINATED queries
+	// (from-zone junos-host, #16805) are exempt too: locally-generated
+	// traffic egresses via the kernel TX path and is never routed at the
+	// RX gate, so stamping a route-drop advisory on its verdict would
+	// fabricate a forwarding stage that never runs.
+	if q.ToZone != JunosHostZone && q.FromZone != JunosHostZone {
 		if class := routeDropClassForQuery(cfg, q); class != "" {
 			defer func() {
 				res.RouteDropBeforePolicy = true
@@ -1514,6 +1554,21 @@ func Match(cfg *config.Config, q Query) (res Result) {
 		}()
 	}
 	addressMemoPtr := &addressMemo
+
+	// #16805: host-ORIGINATED traffic (from-zone junos-host) is never
+	// evaluated by the security-policy RX gate — it egresses via the kernel
+	// TX path (#3611 Piece A / #4230), and strict commit rejects both
+	// `from-zone junos-host` policy forms. This must be checked BEFORE the
+	// host-bound branch: a junos-host -> junos-host query is still
+	// host-originated (the from-axis governs), not an inbound host-gate
+	// query. It must also precede the zoneKnown gates below: junos-host is
+	// not in cfg.Security.Zones, so without this arm the query falls into
+	// UnzonedIngress and falsely reports an unknown-ingress-zone deny for
+	// traffic no policy ever sees. Only the config-wide retention posture
+	// (ContentRejected, stamped above) outranks it, as for every verdict.
+	if q.FromZone == JunosHostZone {
+		return Result{HostOriginated: true, Action: config.PolicyDeny}
+	}
 
 	// #3285: host-bound (LocalDelivery) traffic is governed by the dataplane's
 	// host gate, which does NOT apply transit global/default fallback. Branch

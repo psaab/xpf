@@ -741,6 +741,14 @@ func (c *CLI) showMatchPolicies(cfg *config.Config, args []string) error {
 	if note := res.FragmentDenyNote(); note != "" {
 		fmt.Printf("  %s\n", note)
 	}
+	if res.HostOriginated {
+		// #16805: from-zone junos-host is host-ORIGINATED — the traffic
+		// egresses via the kernel TX path and no security policy is
+		// consulted; it must not read as an unknown-ingress-zone deny.
+		fmt.Printf("Host-originated (from-zone junos-host -> %s): not evaluated by security policy\n", toZone)
+		fmt.Printf("  %s\n", policymatch.HostOriginatedShowLine)
+		return nil
+	}
 	if res.UnzonedIngress {
 		fmt.Printf("Ingress zone unknown (%s -> %s): transit denied\n", fromZone, toZone)
 		fmt.Printf("  %s\n", policymatch.UnzonedIngressShowLine)

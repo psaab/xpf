@@ -1,4 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Policy simulator: a `from-zone junos-host` match-policies / test-policy
+    query now answers with a dedicated host-originated verdict (#16805).
+    Locally-generated traffic egresses via the kernel TX path and is never
+    evaluated by the security-policy RX gate (#3611/#4230), but the
+    simulator fell into the unknown-ingress-zone unconditional deny
+    because `junos-host` is not a configured zone. Every surface (local and
+    remote CLI, REST `host_originated`, gRPC `MatchPolicies` proto field
+    35, and the `test-policy:` text bridge) now reports "not evaluated by
+    security policy (host-originated: ...)"; `from-zone nosuch` stays the
+    unzoned-ingress deny and `to-zone junos-host` stays the host-gate
+    verdict.
   * FRR/BFD: BFD profiles and peers now render only non-default
     timer lines, and an OSPFv3 BFD profile renders its bare
     `ipv6 ospf6 bfd` enable line first (#16813). bfdd elides
