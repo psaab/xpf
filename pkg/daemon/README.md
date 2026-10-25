@@ -322,11 +322,13 @@ always stays armed and the check runs twice:
     and attributes the refusal to DNS when the clone passes or still
     fails only with lookup-failed entries. At the cap the rollback
     *proceeds* instead of taking the safe state — promotion returns the
-    same object and the apply path re-resolves its dns-name entries in
-    place, so a recovered resolver yields the fresh answer and a
-    still-down resolver yields the per-entry fail-closed rendering
-    (#16595). The boot alarm names this class as waiting on dns-name
-    resolution rather than "refused by this build's dataplane".
+    target object and `executeConfirmedRollback` resolves its dns-name
+    entries into a private clone before the apply (#16687; published
+    configs are never written in place), so a recovered resolver yields
+    the fresh answer and a still-down resolver yields the per-entry
+    fail-closed rendering (#16595). The boot alarm names this class as
+    waiting on dns-name resolution rather than "refused by this build's
+    dataplane".
   - A target refused only because its feed producer is *absent* — the
     abandoned commit removed or renamed the feed, so its own apply
     cancelled the producer (#16661) — is not a late feed: nobody will

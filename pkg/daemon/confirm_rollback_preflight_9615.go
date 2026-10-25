@@ -237,10 +237,11 @@ func (d *Daemon) confirmRollbackTargetHandledAtFire(gen uint64) bool {
 		// #16612: bounded DNS deferral exhausted and DNS still has not
 		// produced a passing target. Do NOT enter bootstrap on the frozen
 		// Load-time answer: proceed with the normal rollback. PromoteRollback
-		// returns the same target object, and applyConfigLocked re-resolves
-		// its dns-name entries in place (#15673), so a recovered resolver
-		// yields the fresh answer and a still-down resolver yields the
-		// per-entry fail-closed rendering (#16595).
+		// returns the target object, and executeConfirmedRollback resolves
+		// its dns-name entries into a private clone before the apply
+		// (#16687), so a recovered resolver yields the fresh answer and a
+		// still-down resolver yields the per-entry fail-closed rendering
+		// (#16595).
 		slog.Warn("commit confirmed timed out and its rollback target is still refused only "+
 			"because dns-name resolution failed at load; proceeding with the rollback — the "+
 			"apply path re-resolves dns-name entries — rather than entering bootstrap on a "+
