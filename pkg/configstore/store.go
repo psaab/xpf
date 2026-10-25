@@ -576,10 +576,13 @@ type Store struct {
 	// among SaveRescueConfig writers themselves (#14722 D18-05). It is
 	// acquired AFTER rescueWriteBarrier, so a test holding a writer at
 	// the barrier never blocks a concurrent writer or deleter from
-	// superseding it. It does NOT serialize DeleteRescueConfig: delete
-	// bumps rescueSeq/rescueAppliedGen under s.mu (see store_persist.go)
-	// and unlinks immediately, so a delete issued during an in-flight
-	// save succeeds without waiting for that save's durable write.
+	// superseding it. DeleteRescueConfig also holds rescueMu across
+	// its applied-generation bump, unlink and dir fsync (#16783), so a
+	// save claiming a later generation cannot complete its write and
+	// report success between the delete's bump and its unlink and
+	// then be unlinked by that delete. A writer held at the barrier
+	// has not yet taken rescueMu, so a delete issued during such an
+	// in-flight save still succeeds without waiting for it.
 	rescueMu sync.Mutex
 
 	// rescueSeq is the monotonic generation source for rescue.conf
