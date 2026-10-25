@@ -15,6 +15,85 @@ const (
 	CanonicalAmbiguous
 )
 
+// ValidateOperationalLine is the keyword-only gate for the remote CLI
+// dispatcher (#16798). It reports a line that Canonicalize could not
+// fully resolve but that ends exactly at a keyword node (a node with
+// keyword children and no value slot of its own: no dynamic provider,
+// no typed leaf, no placeholder child, no AcceptsArgs free-form tail,
+// and not an Options container). Such a line's failure is solely the
+// trailing unknown/ambiguous token under that node — e.g.
+// `clear security ike security-associations` (ike is absent under
+// clear security), `request system software add`,
+// `request chassis cluster failover` misspelt as `failoverx`.
+// Returning its canonical prefix, the offending token and whether it
+// was ambiguous lets the dispatcher refuse with
+// `unknown <path> command: <token>` instead of printing help and
+// exiting 0, while a bare keyword node (no trailing token) stays
+// CanonicalOK and keeps its help listing.
+//
+// Lines whose failure involves a value slot (a value already filled,
+// a dangling/missing value, an Options walk, or trailing words after
+// a leaf/value) are NOT keyword-only failures: they return ok=false
+// so the dispatcher falls through to its existing strict handlers,
+// which already refuse those shapes with command-specific errors
+// (usage / unknown filter / exact-arity) and must not be pre-empted
+// by a mislabelled "unknown command" that would also break lawful
+// lines the tree models loosely (dynamic values, AcceptsArgs tails).
+// CanonicalAmbiguous under a keyword-only node is reported with
+// ambiguous=true so callers can name the ambiguity.
+func ValidateOperationalLine(words []string) (prefix []string, bad string, ambiguous bool, ok bool) {
+	if len(words) == 0 {
+		return nil, "", false, false
+	}
+	if _, res := Canonicalize(OperationalTree, words); res == CanonicalOK {
+		return nil, "", false, false
+	}
+	// Re-walk with the same prefix rule Canonicalize uses, tracking
+	// only keyword descents. Any value-slot consumption makes the
+	// failure not keyword-only.
+	current := OperationalTree
+	var node *Node
+	var canon []string
+	for i, w := range words {
+		if node != nil {
+			// The node we are under must be keyword-only for a
+			// trailing token beneath it to be a keyword failure.
+			// A childless node is a leaf: trailing words there are
+			// the handlers' exact-arity/usage domain, not a missing
+			// subcommand.
+			if len(current) == 0 || node.HasDynamic() || node.IsTypedLeaf() || node.AcceptsArgs || node.Options {
+				return nil, "", false, false
+			}
+			if findPlaceholder(current) != nil {
+				return nil, "", false, false
+			}
+		}
+		name, next, matches, resolved := resolveTreeWord(current, w)
+		if !resolved {
+			if i == 0 {
+				// Unknown/ambiguous top-level verb: the dispatcher's
+				// existing `unknown command: %s` already refuses it.
+				return nil, "", false, false
+			}
+			if len(current) == 0 || node == nil {
+				return nil, "", false, false
+			}
+			// Trailing token under a keyword-only node.
+			if len(matches) > 1 {
+				return canon, w, true, true
+			}
+			return canon, w, false, true
+		}
+		canon = append(canon, name)
+		node = next
+		current = next.Children
+	}
+	// Every word resolved as a keyword but Canonicalize still
+	// refused: an incomplete line (dangling value slot, ends inside
+	// an option subtree, repeated option, ...). Not keyword-only.
+	return nil, "", false, false
+}
+
 // Canonicalize expands an abbreviated operational command line to the one
 // spelling every consumer must agree on (#7172).
 //

@@ -152,7 +152,12 @@ func TestOptionsScopeIsPinned9505(t *testing.T) {
 			// #16472: the shared form walk reads Options to end a
 			// command form at an Options container, as the pkg/cli
 			// walk did before the move.
-			"CanonicalForms", "chargeTokens16472":
+			"CanonicalForms", "chargeTokens16472",
+			// #16798: ValidateOperationalLine reads Options only to
+			// classify a node as NOT keyword-only (an Options
+			// container's tokens are options/values, not missing
+			// subcommands). It does not parse options.
+			"ValidateOperationalLine":
 		default:
 			t.Errorf("Options is read in %s(); its scope is Canonicalize plus the single completion walk plus the #16472 form walk (#9505/#15720/#16151/#16472, sites %v)", fn, sites)
 		}
