@@ -516,6 +516,7 @@ pub(in crate::afxdp) fn retry_deferred_conntrack_deletes(
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
 ) {
     let mut pending = sessions.take_deferred_conntrack_deletes().into_iter();
     if pending.len() == 0 {
@@ -532,17 +533,37 @@ pub(in crate::afxdp) fn retry_deferred_conntrack_deletes(
             continue;
         };
         let local_id = sessions.session_id_for_bare_tuple(&delete.key);
-        let shared_id = shared_sessions
-            .lock()
-            .expect("shared sessions poisoned")
-            .values()
-            .find(|entry| entry.key.bare_tuple() == delete.key.bare_tuple())
-            .map(|entry| entry.session_id);
+        // #16491: O(1) shared check under poison recovery, mirroring
+        // close_delta_is_stale_incarnation. Acquire the primary map
+        // before its companion index (the order every writer uses) and
+        // hold both guards together so the check cannot combine
+        // different publish/removal generations. The kernel conntrack
+        // row is keyed by bare tuple alone, so a live shared session
+        // in ANY scope sharing the tuple fences the delete: an
+        // exact-scope hit fences by its session_id under the original
+        // guard (an id-0 row fences nothing), and an other-scope hit
+        // (has_other_scope) fences unconditionally, as in
+        // close_delta_is_stale_incarnation. The previous form scanned
+        // every shared value per retry (up to 64 O(N) scans per
+        // housekeeping pass under the contended cross-worker mutex)
+        // and was the sole `.expect` on a shared_sessions lock,
+        // re-panicking on poison where every other site recovers via
+        // lock_shared_recover (#2402).
+        let shared_fences = {
+            let sessions_guard = crate::afxdp::shared_ops::lock_shared_recover(shared_sessions);
+            let bare_tuple_index = crate::afxdp::shared_ops::lock_shared_recover(
+                &shared_owner_rg_indexes.bare_tuple_sessions,
+            );
+            bare_tuple_index.has_other_scope(&delete.key)
+                || sessions_guard.get(&delete.key).is_some_and(|entry| {
+                    entry.session_id != 0
+                        && (delete.session_id == 0 || entry.session_id != delete.session_id)
+                })
+        };
         if local_id.is_some_and(|session_id| {
             session_id != 0 && (delete.session_id == 0 || session_id != delete.session_id)
-        }) || shared_id.is_some_and(|session_id| {
-            session_id != 0 && (delete.session_id == 0 || session_id != delete.session_id)
-        }) {
+        }) || shared_fences
+        {
             continue;
         }
         match crate::afxdp::bpf_map::delete_bpf_conntrack_entry_for_session_under_gate(

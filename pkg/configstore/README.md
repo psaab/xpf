@@ -1264,6 +1264,29 @@ per-path:
     the alternative silently destroys the rollback safety net. With no
     confirm file, or a readable record, migration is unchanged.
 
+  - **A durable promotion supersedes a deferred api-auth migration
+    (#16492).** The #15273 deferral left
+    `.configdb/api-auth-migration.json` (staging: `OldHash`→`NewHash`)
+    and the pre-migration sidecar binding in place, but no commit path
+    retired them: a plain commit (the documented remedy for the
+    /health-503 lost-window alarm) or an HA `SyncApply` wrote a new
+    active generation and rebound the rollback sidecar to it, so the
+    next boot's staging-consistency gate saw a sidecar matching neither
+    staged side and failed fatally with `ErrConfigDBUnreadable` on every
+    boot until an operator deleted a file no message named. Now every
+    durable promotion that rebinds or shifts the sidecar to a new
+    generation — plain commit, commit-confirmed, `SyncApply`,
+    auto-rollback, boot-recovery rollback, and the persist-retry heal —
+    retires staging via `retireSupersededAPIAuthMigrationStaging`, and
+    `Load` re-checks supersession before the consistency gate so a
+    retirement lost to a crash or failed delete self-heals. Supersession
+    is exact: the sidecar must bind the on-disk active hash AND file
+    identity while naming neither staged hash. Any disagreement (a
+    tampered `active.json` against a stale sidecar, a missing sidecar)
+    is not supersession and stays fail-closed; the fatal error now names
+    the staging file so the operator is pointed at the artifact to
+    repair.
+
   - **The removal debt is KEYED to the record it is owed for (#7675).**
     The retry above re-drove `removeConfirmState()` UNCONDITIONALLY, so it
     deleted whatever `confirm.json` was on disk. An operator who armed a

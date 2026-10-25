@@ -99,20 +99,27 @@ purpose (#2749, so NetFlow's `tcpControlBits` reports the whole flow), so
 detector built on it would put every half-closed session straight into TIME_WAIT
 — and every single-FIN test would still pass.
 
-**Close state does NOT cross the HA session-sync wire (#9412, OPEN).** All four
-bits are node-local, so an imported session has `closing` / `reset` / `fin_own` /
-`fin_peer` FALSE regardless of what the primary's session was doing, and
-`install.rs` ages it on the ESTABLISHED window (300 s) instead of the close
-windows above. A flow that closed within its close window of a failover and then
-went SILENT therefore holds a table slot for up to 300 s on the new active.
+**Close state crosses the HA session-sync wire (#9412, closed).** It rides
+its own wire field, `SessionSyncRequest.tcp_close_class`
+(`TcpCloseClass::to_wire`: `0` = open or not carried, `1` = CLOSING,
+`2` = TIME_WAIT, `3` = RST) — never the synced `tcp_flags`, and never the
+BPF mirror's `TCPState`. On import, `upsert_synced_with_origin` applies a
+delivered class ahead of the per-protocol window: `closing` is set, `reset`
+only for RST, BOTH FIN bits for TIME_WAIT, and NEITHER FIN bit for CLOSING
+(the wire does not say which direction FINed, and a guess would misclassify
+the other side's later FIN), and the expiry comes from
+`tcp_close_window_ns_with_app` (`install.rs`). An absent/`0` class — an old
+peer, or a locally generated upsert — imports exactly as before and ages on
+the per-protocol window (TCP established 1800 s by default, #15127). The
+full contract — the `SessionDeltaKind::Update` push on the owner's close
+transition (the incremental sweep cannot carry a mid-life change), the Go
+hops, the monotone sender memo, companion/promote propagation, and the
+remaining replica bounds — is "TCP close class on the session-sync wire
+(#9412)" below; acceptance lives in
+`close_state_sync_9412_acceptance_tests.rs` and the Go
+`close_state_sync_9412_acceptance_test.go` files.
 
-Two things bound it, and they are why the severity is Low: the primary's own reap
-emits a Close delta that removes the standby copy in steady state, and the first
-post-promotion packet re-marks `closing` and recomputes the window through
-`tcp_close_window_ns` on the `lookup.rs` read path. The residual is the
-intersection — closed near a failover, then silent.
-
-Two traps recorded because both look like the fix and are not:
+Two traps recorded because both look like an alternative carrier and are not:
 
 - **Re-deriving from the synced `tcp_flags` is vacuous.** The production import
   constructor hardcodes `tcp_flags: 0`
@@ -121,15 +128,18 @@ Two traps recorded because both look like the fix and are not:
   "install-time flags", which reads as though real flags arrive and #3152 declines
   to trust them; that wording is corrected, and
   `tcp_flags_zero_on_sync_path_9412_tests.rs` pins the hard zero so it cannot
-  drift back. That cell is deliberately TWO-SIDED: it FAILS when #9412 is fixed,
-  so the fix cannot land while the code still claims close-state cannot cross.
+  drift back. That cell now defends the carrier separation: it FAILS if
+  `tcp_flags` ever starts carrying real flags on this path, because close
+  state would then have two carriers that can disagree — the #9412 carrier
+  is `tcp_close_class` alone (see that file's header).
 - **Carrying close-state on the existing delta is not sufficient by itself.** The
   close transition happens on the `lookup.rs` read path, which pushes NO delta,
   and the incremental sweep re-sends only sessions whose `Created` is newer than
   the last tick (`pkg/cluster/sync_conn_sweep.go`) — so a mid-life state change is
-  never re-sent. A working fix needs a state-update push as well as a wire field,
-  and that push must not emit a spurious `RT_FLOW_SESSION_CREATE` (SessionDelta
-  feeds the RT_FLOW exporter too) or overrun the #8593 loss-of-sync latch.
+  never re-sent. The shipped fix therefore adds a state-update push as well as
+  the wire field, and that push must not emit a spurious
+  `RT_FLOW_SESSION_CREATE` (SessionDelta feeds the RT_FLOW exporter too) or
+  overrun the #8593 loss-of-sync latch.
 
 **Compatibility.** `tcp_closing_ns` and `tcp_time_wait_ns` both default to the
 window every post-FIN close already used, `0` on the wire means unset, and the
@@ -203,14 +213,14 @@ the correct value for self-originated traffic, not the #5153 forward-has-value
 bare SYN (SYN set, ACK clear) or a SYN-ACK-first asymmetric pickup starts in
 the OPENING state (`SessionEntry.established == false`) and is reaped on the
 short `SessionTimeouts.tcp_opening_ns` window (20 s by default), not the full
-300 s established timeout. For a normal SYN-first flow, only a genuine reverse
+1800 s established timeout. For a normal SYN-first flow, only a genuine reverse
 SYN-ACK promotes the two halves to ESTABLISHED (**#4109**; not merely any
 ACK-bearing segment). A SYN-ACK-first pickup remains OPENING until its reverse
 half receives a non-SYN ACK, which promotes both halves. The `syn_ack_first`
 marker distinguishes that completion from a retransmitted SYN-ACK in the
 installing direction. A client-only forward ACK never promotes a SYN-first
 session — before #4109 any ACK did, so a bare SYN followed by a bare ACK pinned
-a 300 s established entry without a server reply, bypassing the #3152 reap.
+a 1800 s established entry without a server reply, bypassing the #3152 reap.
 
 **The established idle window applies only once the handshake COMPLETES
 (#6752),** which is a strictly later moment than the promotion above. For a
@@ -457,9 +467,9 @@ matched entry's OWN canonical key + nat, which is its own inverse — and
 carries two things across:
 
 - **Close (F17):** a FIN/RST advances only the entry it lands on into the
-  short close window; the other half kept the 300 s established timeout, so
+  short close window; the other half kept the established timeout, so
   a unidirectional RST left the dead flow's forward half lingering up to
-  300 s (the #3046 2 s reset-reap was ~50 % effective under a reset
+  the full established window (1800 s by default, #15127) (the #3046 2 s reset-reap was ~50 % effective under a reset
   workload; symmetric for a one-sided FIN vs #3489's 30 s). The companion
   now inherits `closing` (and `reset` if RST, sticky) and is pulled onto
   the same short window (2 s RST / 30 s FIN) and re-bucketed in the wheel,
@@ -1515,7 +1525,7 @@ A TCP session that closed on the node that owns it used to stay OPEN on the peer
   and at removal. The incremental sweep re-sends only sessions created since its
   last tick. So the standby's copy kept its install-time state.
 - **What that did at failover.** With no further traffic, the copy reaped on the
-  ESTABLISHED window (300 s by default) instead of its close window.
+  ESTABLISHED window (1800 s by default, #15127) instead of its close window.
 - **Why the import could not recover it.** It had nothing to derive close state
   from: the production constructor carries `tcp_flags: 0`.
 

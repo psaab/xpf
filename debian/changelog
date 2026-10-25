@@ -12,6 +12,67 @@ xpf (0.0.0) unstable; urgency=medium
     live walks charge inline exactly as before and collect nothing,
     and the deferred replay still charges exactly once after
     admission. No enforcement or accounting behaviour changes.
+
+  * Docs: correct the session module contract for #9412 and the
+    established timeout (#16493). The session README still documented
+    #9412 as OPEN — close state "does NOT cross" the HA session-sync
+    wire, imported sessions ageing on a 300 s established window, and a
+    two-sided guard cell that "FAILS when #9412 is fixed" — although
+    #9412 closed with close state riding
+    `SessionSyncRequest.tcp_close_class` and the established default
+    has been 1800 s since #15127. The README now describes the shipped
+    carrier and import semantics, matches the guard cell's current
+    header, and uses 1800 s for the present-tense established figures;
+    a new pkg/docsref gate pins the contract (including the #16486
+    OSPF 60 s / Other-protocols 1800 s rows). Documentation only; no
+    runtime behaviour changes.
+  * Build/test: shorten the pinned GOTMPDIR root to /wtgt (#16494).
+    The #14833 pin used /var/worktrees/.cache/go-tmp (28 chars); Go
+    test TempDir paths under it exceed the 107-octet AF_UNIX
+    sun_path limit (120 octets for a worst-case control.sock), so
+    45+ socket tests failed with "bind: invalid argument" under
+    `make test-go`. GOTMPDIR (Makefile, run-selftests.sh, and the
+    memlock-guards leg) now defaults to /wtgt (5 chars, 97-octet
+    worst case), and scratch-pinning-selftest replaces its modelled
+    71-byte path check with the executed scripts/sunpath-canary
+    bind, required to pass under /wtgt and fail under a long root.
+  * Userspace DP: stop refusing admissible D11 IPsec-inner frames on
+    lock contention (#16495). Router in-flight, worker-set authority
+    and tombstone admission took try_lock and refused as
+    WORKER_QUEUE_FULL / EVALUATOR_UNAVAILABLE / LEASE_EPOCH (mapped to
+    ADMIT_FULL / ADMIT_SHUTDOWN / ADMIT_BAD_LEASE drops and a false
+    attestation FAIL); they now take blocking locks with bounded holds,
+    so E23 moves only at genuine queue/per-flow capacity.
+
+  * Userspace DP: make deferred conntrack-delete retries O(1) and
+    poison-recovering (#16491). The housekeeping retry locked the
+    shared-session map with .expect (re-panicking on a poisoned
+    mutex where every other site recovers) and scanned every shared
+    value per retry, up to 64 O(N) scans per pass under the
+    cross-worker mutex. It now uses the maintained bare-tuple index
+    plus an exact-scope lookup under lock_shared_recover, mirroring
+    close_delta_is_stale_incarnation; a shared row in any scope
+    sharing the bare tuple still fences the delete (the kernel
+    conntrack row is bare-tuple keyed).
+
+
+  * Configstore: retire a #15273-deferred api-auth migration staging
+    record when a durable promotion supersedes it (#16492). The
+    deferred boot left `.configdb/api-auth-migration.json` and the
+    pre-migration rollback-sidecar binding in place; the next plain
+    commit (the documented remedy for the /health-503 lost-window
+    alarm) or HA config sync wrote a new active generation and rebound
+    the sidecar, so the following boot's staging-consistency gate
+    matched neither staged generation and xpfd refused to start
+    (ErrConfigDBUnreadable) on every boot until an operator deleted a
+    file no message named. Plain commit, commit-confirmed, SyncApply,
+    rollback, boot-recovery, and persist-retry heal now retire staging
+    once the sidecar binds the new disk generation exactly, Load
+    re-checks supersession before the gate so a lost retirement
+    self-heals, and the fatal error names the staging file. Genuinely
+    mismatched generations stay fail-closed.
+
+
   * API/daemon: surface journal legacy-scrub degradation on /health
     and Prometheus (#16490). The #15143 `JournalLegacyScrubDegraded`
     flag latched when a pre-#1896 journal segment could not be
@@ -59,6 +120,18 @@ xpf (0.0.0) unstable; urgency=medium
     and HA-promote stamps) and from the carried wire total for a
     synced import that arrives CLOSING; genuine post-close traffic
     still retains, and TIME_WAIT/RST keep their fixed fuse.
+  * Config: render the enforced close windows under time-wait-state
+    (#16485). `RenderFlowTimeouts` (the CLI/gRPC/REST SSOT) printed
+    `closing-timeout` / `time-wait-timeout` even when
+    `time-wait-state session-ageout` held closed sessions for the
+    established/service window (1800s by default) or
+    `apply-to-half-closed-state` governed CLOSING sessions with the
+    TIME_WAIT window. Both rows now derive from the dataplane's
+    close-window selector with "service/established timeout
+    (session-ageout)" / "time-wait window (apply-to-half-closed-state)"
+    annotations; `session-ageout` together with `session-timeout` is
+    rejected at strict commit and warned on tolerant loads, where
+    ageout wins and show reports it.
   * Userspace DP: count a Stage-11 IPsec pre-claim PBR drop exactly once
     (#16480). The #14314 pre-claim probe resolved the input-filter PBR
     override uncounted and recycled on `RouteOverride::Drop`, but that

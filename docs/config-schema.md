@@ -15090,7 +15090,20 @@ the value sits in a single typed slot:
     `time-wait-state { session-timeout; session-ageout;
     apply-to-half-closed-state; }` are schema-accepted (#15753) and
     enforced since #15946 (protocol v67; `show` renders the effective
-    TIME_WAIT including the session-timeout override).
+    TIME_WAIT including the session-timeout override). #16485: `show`
+    now derives the closing and TIME_WAIT rows from the same selector
+    as the dataplane (`tcp_close_window_ns_with_app`): with
+    `session-ageout` both rows render the effective established window
+    annotated "service/established timeout (session-ageout)" (per
+    session the dataplane uses the session's application inactivity
+    timeout, falling back to that window), and with
+    `apply-to-half-closed-state` alone the closing row renders the
+    TIME_WAIT window annotated "time-wait window
+    (apply-to-half-closed-state)". `session-ageout` together with
+    `session-timeout` is rejected at strict commit
+    (`validateTimeWaitStateAgeoutStrict`) and warned on the tolerant
+    load / peer-sync path, where the dataplane's ageout-wins
+    precedence applies and is what `show` reports.
     (**#6539** narrowed an older sentence: the dataplane does have TCP state —
     #3152 adds OPENING vs established and #3046 distinguishes RST vs FIN close.
     Those states are precisely why the TIMEOUT leaves need a differently-worded

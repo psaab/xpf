@@ -824,6 +824,60 @@ func apiAuthMigrationAliasMatches(file apiAuthMigrationStagingFile, ok bool, sid
 	return diskHash == file.NewHash
 }
 
+// apiAuthMigrationStagingSuperseded reports whether the on-disk sidecar and
+// active file agree exactly with each other (same hash and file identity)
+// while naming a generation the staging record does not describe (#16492).
+// A durable promotion that shifted history (plain commit, commit-confirmed,
+// SyncApply, rollback) or rebound the sidecar to the new active (persist-
+// retry heal) supersedes the deferred migration by construction: the new
+// sidecar/disk pair is internally consistent and is no longer either side
+// of the staged transition, so the staging record can authorize nothing.
+// The check stays exact — any sidecar/disk disagreement (including a
+// missing or empty sidecar) is NOT supersession and keeps failing closed.
+func (s *Store) apiAuthMigrationStagingSuperseded() bool {
+	file, ok := s.readAPIAuthMigrationStaging()
+	if !ok {
+		// No usable staging record: consistency (checked by the caller
+		// first) already distinguishes an absent file from a malformed
+		// one; a malformed record is never "superseded".
+		return false
+	}
+	generation, sidecarHash, sidecarIdentity, _ := s.readRollbackMetadataSnapshot()
+	if generation == 0 || sidecarHash == "" || sidecarIdentity.Inode == 0 {
+		return false
+	}
+	diskHash, diskIdentity, diskOK := s.rollbackActiveBindingFromDisk()
+	if !diskOK {
+		return false
+	}
+	if sidecarHash != diskHash || sidecarIdentity.Device != diskIdentity.Device ||
+		sidecarIdentity.Inode != diskIdentity.Inode ||
+		!sidecarIdentity.ModTime.Equal(diskIdentity.ModTime) {
+		return false
+	}
+	// The sidecar binds the current disk generation exactly. When that
+	// generation is also a staged side, convergence (not supersession) is
+	// the correct retirement; leave it to convergeAPIAuthMigrationStaging.
+	return sidecarHash != file.OldHash && sidecarHash != file.NewHash
+}
+
+// retireSupersededAPIAuthMigrationStaging deletes the staging record once a
+// durable promotion has superseded the staged transition (#16492). Callers
+// invoke it only after the new active generation is durable AND the
+// rollback sidecar has been rebound (or shifted) to bind it, so the exact
+// sidecar==disk agreement the helper requires is already on disk. A failed
+// delete is warning-only: the next boot's Load-side supersession check
+// retires the record before the consistency gate can brick the boot, so
+// the deletion is self-healing. Caller must hold s.mu.
+func (s *Store) retireSupersededAPIAuthMigrationStaging() {
+	if !s.apiAuthMigrationStagingSuperseded() {
+		return
+	}
+	slog.Info("retiring api-auth migration staging superseded by a newer durable active generation",
+		"path", s.apiAuthMigrationStagingPath(), "issue", "#16492")
+	s.deleteAPIAuthMigrationStaging()
+}
+
 func (s *Store) apiAuthMigrationStagingConsistent() bool {
 	file, ok := s.readAPIAuthMigrationStaging()
 	if !ok {

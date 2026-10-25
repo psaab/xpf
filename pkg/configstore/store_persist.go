@@ -137,6 +137,9 @@ func (s *Store) Load() error {
 			}
 			purgeAPIAuthArchives(s.apiAuthArchiveMigrationDir)
 			s.journal.ScrubLegacyPayloads() // #15143 journal arm of #10826
+			// #16492: a durable promotion already superseded the staged
+			// transition — retire it instead of stranding the boot.
+			s.retireSupersededAPIAuthMigrationStaging()
 			if !s.apiAuthMigrationStagingConsistent() {
 				slog.Warn("cannot safely migrate staged api-auth rollback history without its matching active config; preserving recovery files",
 					"path", s.apiAuthMigrationStagingPath(), "issue", "#10826")
@@ -208,8 +211,16 @@ func (s *Store) Load() error {
 	// rollback manifest is rebound.
 	s.active = tree
 	s.loadRollbackHistory()
+	// #16492: a durable promotion between the deferred boot and this one
+	// (plain commit, commit-confirmed, SyncApply, rollback) supersedes the
+	// staged transition: its sidecar now binds the new disk generation
+	// exactly, so retire the staging record instead of bricking this boot.
+	// A promotion that could not retire it in-process (crash, failed
+	// delete) is healed here, before the consistency gate below.
+	s.retireSupersededAPIAuthMigrationStaging()
 	if !s.apiAuthMigrationStagingConsistent() {
-		return fmt.Errorf("staged api-auth migration does not match active rollback generation: %w", ErrConfigDBUnreadable)
+		return fmt.Errorf("staged api-auth migration in %s does not match active rollback generation: %w",
+			s.apiAuthMigrationStagingPath(), ErrConfigDBUnreadable)
 	}
 
 	rollbackChanged, err := s.hashRollbackAPIAuthSecrets()
@@ -1320,6 +1331,9 @@ func (s *Store) recoverPendingConfirmLocked(rawActiveHash string) error {
 			// tombstones the ladder. History was loaded at the top of Load, so
 			// s.history already holds the on-disk slots (tombstones included).
 			s.rebindRollbackMetadataLocked()
+			// #16492: the durable boot-recovery rollback supersedes a
+			// deferred api-auth migration; retire its staging record.
+			s.retireSupersededAPIAuthMigrationStaging()
 			if rec.FirstCommit {
 				// #12155: confirm.json is the retry source until teardown debt
 				// is durable. Do not remove it if the marker write fails.
@@ -1844,6 +1858,10 @@ func (s *Store) retryActiveConfigPersistLocked(backoff time.Duration) {
 			} else {
 				s.rebindRollbackMetadataLocked()
 			}
+			// #16492: the healed generation is now durable with its
+			// sidecar rebound (or its deferred ladder saved); retire a
+			// deferred api-auth migration it superseded.
+			s.retireSupersededAPIAuthMigrationStaging()
 			// resolution (rollback / boot recovery / sync supersede) deferred
 			// its confirm.json removal because the resolving write failed, that
 			// replacement target is exactly what just landed durably — drop the
