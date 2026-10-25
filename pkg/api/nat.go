@@ -75,6 +75,36 @@ func (s *Server) appliedNATView() nat.AppliedView {
 	return nat.AppliedView{Config: v.Config, Generation: v.AppliedGeneration, Available: true}
 }
 
+// natRuntimeVerdicts reads the applied snapshot's runtime disarm verdicts
+// (#16547). Cached in-memory read only; unavailable yields empty maps so
+// handlers fall back to the config-only verdict exactly.
+func (s *Server) natRuntimeVerdicts() dpuserspace.AppliedNATSnapshotVerdicts {
+	if s == nil || s.dp == nil {
+		return dpuserspace.AppliedNATSnapshotVerdicts{}
+	}
+	provider, ok := s.dpProbe().(interface {
+		AppliedNATSnapshotVerdicts() dpuserspace.AppliedNATSnapshotVerdicts
+	})
+	if !ok {
+		return dpuserspace.AppliedNATSnapshotVerdicts{}
+	}
+	return provider.AppliedNATSnapshotVerdicts()
+}
+
+func natRuleRuntimeReason(v dpuserspace.AppliedNATSnapshotVerdicts, ruleName string) string {
+	if !v.Available {
+		return ""
+	}
+	return v.SourceNATRules[ruleName]
+}
+
+func natPoolRuntimeReason(v dpuserspace.AppliedNATSnapshotVerdicts, poolName string) string {
+	if !v.Available {
+		return ""
+	}
+	return v.SourceNATPools[poolName]
+}
+
 // natDeterministicHandler resolves a deterministic source-NAT mapping
 // (#5794). Forward:  GET .../deterministic?internal-host=<ip>[&pool=<name>].
 // Reverse:  GET .../deterministic?nat-ip=<ip>&nat-port=<n>[&pool=<name>].
@@ -193,7 +223,7 @@ func (s *Server) natSourceHandler(w http.ResponseWriter, _ *http.Request) {
 			}
 			// #7473: carry the builder's verdict. Without it this object says
 			// "type: pool, pool: p1" for a rule that translates nothing.
-			if reason := config.SourceNATRuleNotInstalledReason(cfg, rule); reason != "" {
+			if reason := config.SourceNATRuleNotInstalledReasonWithRuntime(cfg, rule, natRuleRuntimeReason(s.natRuntimeVerdicts(), rule.Name)); reason != "" {
 				info.NotInstalled = true
 				info.NotInstalledReason = config.SourceNATDisarmReasonText(reason)
 			}
@@ -299,14 +329,24 @@ func (s *Server) natPoolStatsHandler(w http.ResponseWriter, r *http.Request) {
 		// survived even once the helper was running and had told us it installed
 		// nothing. It also under-reported every prefix member and missed the
 		// singular `address` field.
-		addrCount, poolDisarm := config.SourceNATPoolReportableAddresses(pool, name, overBudgetPools)
+		addrCount, cfgPoolDisarm := config.SourceNATPoolReportableAddresses(pool, name, overBudgetPools)
+		// #16547: runtime quarantine fills the config gap; when it fires
+		// the pool installs nothing, so capacity must read 0 like the
+		// config-refused case.
+		poolDisarm := cfgPoolDisarm
+		if poolDisarm == "" {
+			poolDisarm = natPoolRuntimeReason(s.natRuntimeVerdicts(), name)
+			if poolDisarm != "" {
+				addrCount = 0
+			}
+		}
 		used := 0
 		usedKnown := false
 
 		if rp, ok := runtime[name]; ok {
 			// Runtime SSOT: the helper's applied address count, port window,
 			// and live used-port occupancy.
-			if rp.AddressCount > 0 {
+			if rp.AddressCount > 0 && poolDisarm == "" {
 				addrCount = rp.AddressCount
 			}
 			if rp.PortLow != 0 {
@@ -545,7 +585,7 @@ func (s *Server) natRuleStatsHandler(w http.ResponseWriter, r *http.Request) {
 				HitPackets:          hitPkts,
 				HitBytes:            hitBytes,
 			}
-			if reason := config.SourceNATRuleNotInstalledReason(cfg, rule); reason != "" {
+			if reason := config.SourceNATRuleNotInstalledReasonWithRuntime(cfg, rule, natRuleRuntimeReason(s.natRuntimeVerdicts(), rule.Name)); reason != "" {
 				info.NotInstalled = true
 				info.NotInstalledReason = config.SourceNATDisarmReasonText(reason)
 			}

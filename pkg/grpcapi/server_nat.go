@@ -30,6 +30,36 @@ func clampInt32(v int64) int32 {
 	return int32(v)
 }
 
+// natRuntimeVerdicts reads the applied snapshot's runtime disarm verdicts
+// (#16547). Cached in-memory read only; unavailable yields empty maps so
+// getters fall back to the config-only verdict exactly.
+func (s *Server) natRuntimeVerdicts() dpuserspace.AppliedNATSnapshotVerdicts {
+	if s == nil {
+		return dpuserspace.AppliedNATSnapshotVerdicts{}
+	}
+	provider, ok := s.dpProbe().(interface {
+		AppliedNATSnapshotVerdicts() dpuserspace.AppliedNATSnapshotVerdicts
+	})
+	if !ok {
+		return dpuserspace.AppliedNATSnapshotVerdicts{}
+	}
+	return provider.AppliedNATSnapshotVerdicts()
+}
+
+func natRuleRuntimeReason(v dpuserspace.AppliedNATSnapshotVerdicts, ruleName string) string {
+	if !v.Available {
+		return ""
+	}
+	return v.SourceNATRules[ruleName]
+}
+
+func natPoolRuntimeReason(v dpuserspace.AppliedNATSnapshotVerdicts, poolName string) string {
+	if !v.Available {
+		return ""
+	}
+	return v.SourceNATPools[poolName]
+}
+
 func (s *Server) GetNATSource(_ context.Context, _ *pb.GetNATSourceRequest) (*pb.GetNATSourceResponse, error) {
 	cfg := s.store.ActiveConfig()
 	if cfg == nil {
@@ -57,7 +87,7 @@ func (s *Server) GetNATSource(_ context.Context, _ *pb.GetNATSourceRequest) (*pb
 			// #7473: carry the builder's verdict, from the same pkg/config
 			// composition the CLI and REST surfaces use, so the three cannot
 			// disagree about which rules are armed.
-			if reason := config.SourceNATRuleNotInstalledReason(cfg, rule); reason != "" {
+			if reason := config.SourceNATRuleNotInstalledReasonWithRuntime(cfg, rule, natRuleRuntimeReason(s.natRuntimeVerdicts(), rule.Name)); reason != "" {
 				info.NotInstalled = true
 				info.NotInstalledReason = config.SourceNATDisarmReasonText(reason)
 			}
@@ -239,7 +269,16 @@ func (s *Server) GetNATPoolStats(ctx context.Context, _ *pb.GetNATPoolStatsReque
 		// under-reported a prefix member (a /24 installs 256, not 1), and
 		// missed the singular `address` field. The compiler's verdict answers
 		// all three; the shared multiplication above is unchanged.
-		totalPorts64, poolDisarm := config.SourceNATPoolReportablePorts(pool, name, portLow, portHigh, grpcOverBudget)
+		totalPorts64, cfgPoolDisarm := config.SourceNATPoolReportablePorts(pool, name, portLow, portHigh, grpcOverBudget)
+		// #16547: runtime quarantine fills the config gap; a quarantined
+		// pool installs nothing, so capacity reads 0 like a refused pool.
+		poolDisarm := cfgPoolDisarm
+		if poolDisarm == "" {
+			poolDisarm = natPoolRuntimeReason(s.natRuntimeVerdicts(), name)
+			if poolDisarm != "" {
+				totalPorts64 = 0
+			}
+		}
 		var used64 int64
 		usedKnown := false
 		if rp, ok := poolOccupancy[name]; ok {
@@ -467,7 +506,7 @@ func (s *Server) GetNATRuleStats(_ context.Context, req *pb.GetNATRuleStatsReque
 				if pool, ok := cfg.Security.NAT.SourcePools[rule.Then.PoolName]; ok && pool != nil && pool.PortNoTranslation {
 					srcInfo.PortNoTranslation = true
 				}
-				if reason := config.SourceNATRuleNotInstalledReason(cfg, rule); reason != "" {
+				if reason := config.SourceNATRuleNotInstalledReasonWithRuntime(cfg, rule, natRuleRuntimeReason(s.natRuntimeVerdicts(), rule.Name)); reason != "" {
 					srcInfo.NotInstalled = true
 					srcInfo.NotInstalledReason = config.SourceNATDisarmReasonText(reason)
 				}

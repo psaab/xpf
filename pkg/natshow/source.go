@@ -24,7 +24,29 @@ import (
 // the guard (so an empty config never touches dataplane state). A nil
 // crFn, or a crFn returning nil, reproduces the "not loaded" path (no
 // session counts, no translation hits).
+// RuntimeVerdicts carries the applied snapshot's per-rule runtime disarm
+// reasons (#16547): rule name -> PoolUnusableReason token for rules the
+// snapshot builder quarantined for a runtime-only cause (the #7717
+// iface_snat_egress_overlap quarantine). A nil/empty map reproduces the
+// config-only rendering exactly.
+type RuntimeVerdicts map[string]string
+
 func RenderSourceRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config, dp Reader, crFn func() *dataplane.ApplyResult) {
+	renderSourceRuleDetail(ctx, w, cfg, dp, crFn, nil)
+}
+
+// RenderSourceRuleDetailWithRuntime is RenderSourceRuleDetail with the
+// applied snapshot's runtime verdicts folded in (#16547). The config
+// verdict keeps precedence (see
+// config.SourceNATRuleNotInstalledReasonWithRuntime); the runtime token
+// only annotates a rule the config verdict calls armed but the applied
+// snapshot has quarantined, and suppresses its translation-hits line —
+// a refused rule owning a 0 counter is the #7473 lie.
+func RenderSourceRuleDetailWithRuntime(ctx context.Context, w io.Writer, cfg *config.Config, dp Reader, crFn func() *dataplane.ApplyResult, runtime RuntimeVerdicts) {
+	renderSourceRuleDetail(ctx, w, cfg, dp, crFn, runtime)
+}
+
+func renderSourceRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config, dp Reader, crFn func() *dataplane.ApplyResult, runtime RuntimeVerdicts) {
 	if cfg == nil || len(cfg.Security.NAT.Source) == 0 {
 		io.WriteString(w, "No source NAT rules configured\n")
 		return
@@ -153,13 +175,25 @@ func RenderSourceRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config
 				// rule were armed. Interface-mode NAT has no pool, so gate on a
 				// non-empty pool name exactly as the builder does.
 				if rule.Then.PoolName != "" {
-					noteNotInstalled(w, config.SourceNATDisarmReasonText(
-						config.SourceNATPoolDisarmedReason(
-							cfg.Security.NAT.SourcePools[rule.Then.PoolName],
-							rule.Then.PoolName, overBudgetPools)))
+					configReason := config.SourceNATPoolDisarmedReason(
+						cfg.Security.NAT.SourcePools[rule.Then.PoolName],
+						rule.Then.PoolName, overBudgetPools)
+					// #16547: fold in the applied snapshot's runtime
+					// quarantine. Config wins; the runtime token only
+					// fills the gap (iface_snat_egress_overlap) the
+					// config verdict cannot see.
+					reason := configReason
+					if reason == "" {
+						reason = runtime[rule.Name]
+					}
+					noteNotInstalled(w, config.SourceNATDisarmReasonText(reason))
 				}
 				noteLenientTerminalAction(w, cfg, "source", rs.Name, rule.Name)
 			}
+			// #16547: a runtime-quarantined rule owns no live counter
+			// either — gate the hits line on the runtime verdict as well
+			// as the config exclusion above.
+			runtimeDisarmed := excludedReason == "" && runtime[rule.Name] != ""
 
 			if rule.Then.PoolName != "" && cfg.Security.NAT.SourcePools != nil {
 				if pool, ok := cfg.Security.NAT.SourcePools[rule.Then.PoolName]; ok {
@@ -205,7 +239,7 @@ func RenderSourceRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config
 			// #9877: a rule the builder skipped owns no counter — printing
 			// `Translation hits: 0` for one would read as armed-but-idle (the
 			// #7473 lie). The NOT INSTALLED line above is its whole story.
-			if armed && excludedReason == "" {
+			if armed && excludedReason == "" && !runtimeDisarmed {
 				ruleKey := dataplane.NATCounterKey(dataplane.NATCounterTypeSource, rs.Name, rule.Name)
 				if cid, ok := cr.NATCounterIDs[ruleKey]; ok {
 					cnt, err := dp.ReadNATRuleCounter(uint32(cid))
@@ -218,7 +252,7 @@ func RenderSourceRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config
 				} else {
 					fmt.Fprintf(w, "    Translation hits:        %s\n", natCounterNoID)
 				}
-			} else if dp != nil && excludedReason == "" {
+			} else if dp != nil && excludedReason == "" && !runtimeDisarmed {
 				fmt.Fprintf(w, "    Translation hits:        %s\n", natCounterUnarmed)
 			}
 			fmt.Fprint(w, "\n")

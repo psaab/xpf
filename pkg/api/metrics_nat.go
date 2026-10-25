@@ -8,6 +8,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/dataplane/mgmtview"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
@@ -42,6 +43,24 @@ func (c *xpfCollector) collectNATPoolMetrics(ch chan<- prometheus.Metric, dp api
 	} else {
 		poolOccupancy = dpuserspace.SourceNATPoolOccupancy(*userspaceStatus)
 	}
+	// #16547: the overlap detector's scans/addresses pair. Emitted on
+	// every scrape (even with no pools) so scans==0 reads as "never ran".
+	if c.ifaceSNATOverlapScansTotal != nil && c.ifaceSNATOverlapAddresses != nil {
+		scans, addrs := dpuserspace.InterfaceSNATPoolOverlapStats()
+		c.emitConstMetric(ch, c.ifaceSNATOverlapScansTotal, prometheus.CounterValue, float64(scans))
+		c.emitConstMetric(ch, c.ifaceSNATOverlapAddresses, prometheus.GaugeValue, float64(addrs))
+	}
+	// Runtime quarantine verdicts from the applied snapshot (#16547):
+	// a quarantined pool installs nothing, so its capacity/usage samples
+	// are omitted exactly like a config-refused pool's.
+	var runtimePools map[string]string
+	if provider, ok := mgmtview.Probe(dp).(interface {
+		AppliedNATSnapshotVerdicts() dpuserspace.AppliedNATSnapshotVerdicts
+	}); ok {
+		if v := provider.AppliedNATSnapshotVerdicts(); v.Available {
+			runtimePools = v.SourceNATPools
+		}
+	}
 	for name, pool := range cfg.Security.NAT.SourcePools {
 		if pool == nil {
 			// Tolerant restore and HA peer-sync may preserve nil map values.
@@ -55,8 +74,24 @@ func (c *xpfCollector) collectNATPoolMetrics(ch chan<- prometheus.Metric, dp api
 		if portHigh == 0 {
 			portHigh = 65535
 		}
-		ports, unusable := config.SourceNATPoolReportablePorts(pool, name, portLow, portHigh, overBudget)
+		ports, cfgUnusable := config.SourceNATPoolReportablePorts(pool, name, portLow, portHigh, overBudget)
+		unusable := cfgUnusable
+		if unusable == "" {
+			unusable = runtimePools[name]
+		}
+		// #16547: per-pool quarantine gauge (1 = quarantined). Emitted for
+		// every configured pool so a cleared quarantine reads 0, not absent.
+		if c.ifaceSNATOverlapQuarantined != nil {
+			q := 0.0
+			if runtimePools[name] == "iface_snat_egress_overlap" {
+				q = 1.0
+			}
+			c.emitConstMetric(ch, c.ifaceSNATOverlapQuarantined, prometheus.GaugeValue, q, name)
+		}
 		totalPorts := int(ports)
+		if cfgUnusable == "" && unusable != "" {
+			totalPorts = 0
+		}
 		if !pool.PortNoTranslation || unusable != "" {
 			c.emitConstMetric(ch, c.natPoolTotalPorts, prometheus.GaugeValue,
 				float64(totalPorts), name)

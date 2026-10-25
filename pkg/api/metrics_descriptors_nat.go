@@ -122,4 +122,23 @@ func (c *xpfCollector) initNATDescriptors() {
 		"Total recycled-phase port-allocation walks across pool addresses.",
 		[]string{"pool", "rule"}, nil,
 	)
+	// #16547: export InterfaceSNATPoolOverlapStats as the scans/addresses
+	// pair its contract requires (scans==0 = detector never ran = unknown,
+	// not healthy), plus a per-pool quarantined gauge fed from the applied
+	// snapshot verdicts.
+	c.ifaceSNATOverlapScansTotal = prometheus.NewDesc(
+		"xpf_iface_snat_overlap_scans_total",
+		"Total interface source-NAT pool overlap detector scans (#7717). Zero means the detector has never run (unknown, not healthy).",
+		nil, nil,
+	)
+	c.ifaceSNATOverlapAddresses = prometheus.NewDesc(
+		"xpf_iface_snat_overlap_addresses",
+		"Overlapping (pool, interface-SNAT egress) addresses found at the most recent overlap scan (#7717). Meaningful only when xpf_iface_snat_overlap_scans_total > 0.",
+		nil, nil,
+	)
+	c.ifaceSNATOverlapQuarantined = prometheus.NewDesc(
+		"xpf_iface_snat_overlap_quarantined",
+		"1 while this source-NAT pool is quarantined by the runtime interface-SNAT egress overlap (#7717/#16547), 0 otherwise.",
+		[]string{"pool"}, nil,
+	)
 }

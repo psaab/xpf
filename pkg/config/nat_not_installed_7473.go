@@ -73,6 +73,37 @@ func SourceNATRuleNotInstalledReason(cfg *Config, rule *NATRule) string {
 	return SourceNATPoolUnusableReason(cfg.Security.NAT.SourcePools[rule.Then.PoolName])
 }
 
+// SourceNATRuleNotInstalledReasonWithRuntime is SourceNATRuleNotInstalledReason
+// with the runtime verdict folded in (#16547). The config-only verdict
+// cannot see the #7717 interface-SNAT overlap quarantine: the overlapping
+// address is learned at runtime (DHCP/netlink) and stamped as
+// PoolUnusable/iface_snat_egress_overlap on the applied snapshot only.
+// runtimeReason is that snapshot's reason for this rule ("" when the
+// runtime view is unavailable or the rule is usable there). Precedence:
+// the config verdict wins when it already disarms the rule — it is the
+// more specific, definition-level diagnosis, and the builder preserves
+// an existing PoolUnusableReason over the overlap token for the same
+// reason. The runtime token only fills the gap the config cannot see.
+func SourceNATRuleNotInstalledReasonWithRuntime(cfg *Config, rule *NATRule, runtimeReason string) string {
+	if reason := SourceNATRuleNotInstalledReason(cfg, rule); reason != "" {
+		return reason
+	}
+	return runtimeReason
+}
+
+// SourceNATPoolNotInstalledReasonWithRuntime is the pool-level analogue:
+// the config definition verdict (SourceNATPoolUnusableReason / aggregate
+// budget via SourceNATPoolDisarmedReason) wins; the runtime quarantine
+// reason fills the gap when the pool definition is usable but every
+// applied snapshot row referencing it is quarantined. runtimeReason is
+// "" when the runtime view is unavailable or the pool has a usable row.
+func SourceNATPoolNotInstalledReasonWithRuntime(cfg *Config, pool *NATPool, poolName string, overBudget map[string]bool, runtimeReason string) string {
+	if reason := SourceNATPoolDisarmedReason(pool, poolName, overBudget); reason != "" {
+		return reason
+	}
+	return runtimeReason
+}
+
 // DestinationNATRuleNotInstalledReason reports why the snapshot builder will
 // not install this destination-NAT rule, or "" when it is armed.
 //

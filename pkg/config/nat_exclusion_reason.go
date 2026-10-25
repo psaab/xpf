@@ -348,6 +348,14 @@ func SourceNATDisarmReasonText(reason string) string {
 		return "pool has a zone-qualified address the dataplane cannot represent"
 	case "aggregate_over_budget":
 		return "pool does not fit the aggregate pool-cardinality budget"
+	case "iface_snat_egress_overlap":
+		// #16547: the #7717 runtime quarantine. The overlapping address is
+		// learned at runtime (DHCP/netlink), so this token never comes from
+		// the config-only verdict — it arrives only via the applied
+		// snapshot's PoolUnusableReason. The NAT64 twin carries the same
+		// token (reportInterfaceSNATPoolOverlaps stamps both slices with
+		// poolUnusableReasonIfaceOverlap), so one case covers both.
+		return "pool address overlaps an interface source-NAT egress address (runtime quarantine; new translations refused, live flows drain)"
 	default:
 		return reason
 	}
