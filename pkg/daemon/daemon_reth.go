@@ -9,11 +9,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/psaab/xpf/pkg/netname"
 	"github.com/psaab/xpf/pkg/rendersafe"
@@ -244,6 +246,108 @@ var rethLinkOpsFn = rethLinkOps{
 	setUp:           netlink.LinkSetUp,
 	setName:         netlink.LinkSetName,
 	setHardwareAddr: netlink.LinkSetHardwareAddr,
+}
+
+// formerRethMembers returns the sorted Linux names that were RETH members in
+// prev but are not RETH members in the current set (#16860).
+func formerRethMembers(prev, current map[string]struct{}) []string {
+	var former []string
+	for name := range prev {
+		if _, ok := current[name]; !ok {
+			former = append(former, name)
+		}
+	}
+	sort.Strings(former)
+	return former
+}
+
+// restoreFormerRethMemberMAC returns a former RETH member to its permanent
+// hardware address, propagating to VLAN children, via programRethMAC so the
+// worker-join/link-cycle discipline is identical to virtual-MAC programming
+// (programRethMACWithWorkerJoin remains the sole wrapper call site, #5103).
+// It returns (cycled, leaseKept, commitErr): leaseKept mirrors
+// programRethMemberMAC's accumulator — an aborted restore's rollback rebound
+// without releasing, so the caller must arm the end-of-apply release. A
+// former member with no PermHWAddr, or already on it, is a no-op success.
+//
+// The join hook mirrors programRethMACWithWorkerJoin's: it records that it
+// ran, and on a post-join failure rebinds with NotifyLinkCycleKeepingLease
+// and classifies the error as errRethPrepareLinkCycle, rather than leaving a
+// half-applied prepare under a green commit.
+func (d *Daemon) restoreFormerRethMemberMAC(linuxName string) (bool, bool, error) {
+	link, err := rethLinkOpsFn.byName(linuxName)
+	if err != nil {
+		slog.Warn("former RETH member not present; cannot restore permanent MAC",
+			"iface", linuxName, "err", err)
+		return false, false, nil
+	}
+	perm := link.Attrs().PermHWAddr
+	if len(perm) == 0 {
+		slog.Warn("former RETH member has no permanent MAC to restore",
+			"iface", linuxName)
+		return false, false, nil
+	}
+	perm = append(net.HardwareAddr(nil), perm...)
+	if bytes.Equal(link.Attrs().HardwareAddr, perm) {
+		return false, false, nil
+	}
+	slog.Info("restoring permanent MAC on former RETH member",
+		"iface", linuxName, "mac", perm)
+	joinRan := false
+	var joined dataplane.RuntimeDataPlane
+	beforeCycle := func() error {
+		rt := d.dataplane()
+		if rt == nil {
+			return nil
+		}
+		joined = rt
+		joinRan = true
+		slog.Info("userspace: stopping workers before former RETH member MAC restore", "iface", linuxName)
+		return rt.Link().PrepareLinkCycle()
+	}
+	cycled, _, macErr := programRethMAC(linuxName, perm, beforeCycle)
+	// Propagate to VLAN children even on a partial cycle, mirroring
+	// finishRethMemberLinkTail: children keep the stale virtual MAC otherwise.
+	d.propagateMACToVLANChildren(linuxName, perm)
+	d.renewLinkCycleLease()
+	if macErr == nil || !joinRan {
+		return cycled, false, nil
+	}
+	if cycled {
+		return cycled, false, fmt.Errorf("%w: %w", errRethPrepareLinkCycle, macErr)
+	}
+	if rebindErr := joined.Link().NotifyLinkCycleKeepingLease(); rebindErr != nil {
+		return cycled, true, fmt.Errorf("%w: %w", errRethPrepareLinkCycle, errors.Join(macErr, rebindErr))
+	}
+	return cycled, true, fmt.Errorf("%w: %w", errRethPrepareLinkCycle, macErr)
+}
+
+// propagateMACToVLANChildren sets mac on every VLAN child of parent. Shared by
+// the former-member restore; the current-member tail keeps its inline loop
+// (it also repairs link-locals per child).
+func (d *Daemon) propagateMACToVLANChildren(parent string, mac net.HardwareAddr) {
+	parentLink, err := rethParentLinkByName(parent)
+	if err != nil {
+		return
+	}
+	links, err := rethLinkLister()
+	if err != nil {
+		slog.Warn("failed to enumerate links for former RETH member VLAN MAC restore",
+			"parent", parent, "err", err)
+		return
+	}
+	for _, l := range links {
+		if l.Attrs().ParentIndex != parentLink.Attrs().Index {
+			continue
+		}
+		if bytes.Equal(l.Attrs().HardwareAddr, mac) {
+			continue
+		}
+		if err := netlink.LinkSetHardwareAddr(l, mac); err != nil {
+			slog.Warn("failed to restore MAC on VLAN sub-interface of former RETH member",
+				"iface", l.Attrs().Name, "err", err)
+		}
+	}
 }
 
 // renameRethMember finds a RETH member by its indexed virtual MAC, with the

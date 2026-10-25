@@ -14,6 +14,21 @@ func LinuxIfName(name string) string {
 	return strings.ReplaceAll(name, "/", "-")
 }
 
+// ConfiguredLinuxNames returns the Linux names of every interface stanza in
+// the config. RETH member recovery must exclude all of them (#16860): a
+// configured standalone port that happens to carry a stale RETH virtual MAC
+// is the operator's port, not an unnamed kernel device awaiting recovery.
+func (c *Config) ConfiguredLinuxNames() map[string]struct{} {
+	names := make(map[string]struct{})
+	if c == nil {
+		return names
+	}
+	for name := range c.Interfaces.Interfaces {
+		names[LinuxIfName(name)] = struct{}{}
+	}
+	return names
+}
+
 // SplitIfaceRef splits an interface reference at the FIRST dot into
 // (name, suffix, hasSuffix), returning the suffix RAW and uninterpreted
 // (#16144). It is the single first-dot split shared by the resolvers in

@@ -27,8 +27,9 @@ import (
 // derived from the directory, not one named file (#6871 round 15; see
 // packageGoFiles for the escape that forced the widening):
 //
-//  1. exactly one programRethMAC call site, taking 3 args, the third not the
-//     literal `nil` (the hook is really passed);
+//  1. exactly two programRethMAC call sites (the wrapper's, and #16860's
+//     former-member restore in daemon_reth.go), each taking 3 args with the
+//     third not the literal `nil` (the hook is really passed);
 //  2. exactly one programRethMACWithWorkerJoin call site — which lives inside
 //     programRethMemberMAC, so the apply loop cannot reach the wrapper any other
 //     way without tripping this count; and
@@ -74,9 +75,9 @@ func TestDaemonPassesRethBeforeCycleHook_5103(t *testing.T) {
 	const where = "package daemon"
 	// Guard the guard: a rename or a move would otherwise make this pass by
 	// finding nothing to check.
-	if calls != 1 {
-		t.Fatalf("expected exactly 1 programRethMAC call site in %s, found %d — this canary "+
-			"is keyed to that call site and is not checking anything otherwise", where, calls)
+	if calls != 2 {
+		t.Fatalf("expected exactly 2 programRethMAC call sites in %s, found %d — this canary "+
+			"is keyed to those call sites and is not checking anything otherwise", where, calls)
 	}
 	// The apply loop must go through the wrapper, not around it: calling
 	// programRethMAC directly from the loop would keep the hook and lose the

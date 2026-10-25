@@ -416,12 +416,37 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	// deferred abandon, turning that backstop's ERROR into routine noise for
 	// exactly the reason the issue rejects a refcount.
 	rethRollbackKeptLease := false
+	// #16860: restore former members BEFORE recovery/programming the current
+	// set, so a swapped-out port no longer carries the virtual MAC that the
+	// missing-member search (or a sibling) could match, and no two local
+	// ports share one MAC after this apply.
+	currentRethMembers := make(map[string]struct{}, len(rethToPhys))
+	for _, physName := range rethToPhys {
+		currentRethMembers[config.LinuxIfName(physName)] = struct{}{}
+	}
+	if d.cluster != nil && cfg.Chassis.Cluster != nil {
+		for _, former := range formerRethMembers(d.lastRethMembers, currentRethMembers) {
+			cycled, keptLease, restoreErr := d.restoreFormerRethMemberMAC(former)
+			if restoreErr != nil {
+				result.Phase.Networkd = errors.Join(result.Phase.Networkd, restoreErr)
+			}
+			if keptLease {
+				rethRollbackKeptLease = true
+			}
+			if cycled {
+				needLinkCycleRecovery = true
+			}
+		}
+		d.lastRethMembers = currentRethMembers
+	} else {
+		// Advance the record even when this apply is not clustered: a later
+		// clustered apply must not treat members from before a non-clustered
+		// generation as former members of the clustered one.
+		d.lastRethMembers = nil
+	}
 	if d.cluster != nil && cfg.Chassis.Cluster != nil {
 		cc := cfg.Chassis.Cluster
-		rethMemberNames := make(map[string]struct{}, len(rethToPhys))
-		for _, physName := range rethToPhys {
-			rethMemberNames[config.LinuxIfName(physName)] = struct{}{}
-		}
+		rethMemberNames := cfg.ConfiguredLinuxNames()
 
 		// #5103: the AF_XDP worker join is handed to programRethMAC as a
 		// beforeCycle hook rather than run after it returns. Whether a cycle

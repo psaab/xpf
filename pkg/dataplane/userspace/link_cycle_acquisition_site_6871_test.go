@@ -82,6 +82,15 @@ var linkCycleAcquisitionSites = map[string]acquisitionSite{
 		"containment is a property of renameRethMember invoking it synchronously, " +
 		"which no AST fact establishes. The proof is behavioural and lives in the " +
 		"test named by linkCycleUnprovenFormBindings"},
+	"pkg/daemon/daemon_reth.go:(*Daemon).restoreFormerRethMemberMAC: " +
+		"rt.Link().PrepareLinkCycle [in a func literal beforeCycle]": {occurrences: 1, reason: "" +
+		"#16860: restoring a former RETH member's permanent MAC cycles the link " +
+		"the same way, so it takes the same worker join. It runs inside step 2.6 " +
+		"of applyDataplaneAndHACore, inside the deferred abandonLinkCycleLease — " +
+		"but it is written in the beforeCycle CALLBACK, so containment is a " +
+		"property of programRethMAC invoking it synchronously, which no AST fact " +
+		"establishes. The proof is behavioural and lives in the test named by " +
+		"linkCycleUnprovenFormBindings"},
 	"pkg/dataplane/userspace/controllers.go:(userspaceLinkController).PrepareLinkCycle: " +
 		"c.manager.PrepareLinkCycle": {occurrences: 1, reason: "" +
 		"adapter hop: userspaceLinkController forwards to Manager"},
@@ -133,6 +142,9 @@ var linkCycleUnprovenFormBindings = map[string]string{
 	"pkg/daemon/daemon_apply_dataplane.go:(*Daemon).applyDataplaneAndHACore: " +
 		"rt.Link().PrepareLinkCycle [in a func literal renameJoin]": "" +
 		"TestRenameRethMemberHookRunsOnTheCallersGoroutine_6911",
+	"pkg/daemon/daemon_reth.go:(*Daemon).restoreFormerRethMemberMAC: " +
+		"rt.Link().PrepareLinkCycle [in a func literal beforeCycle]": "" +
+		"TestRestoreFormerHookRunsOnTheCallersGoroutine_16860",
 }
 
 // repoRootFromPackage walks up from the test's working directory to the module
