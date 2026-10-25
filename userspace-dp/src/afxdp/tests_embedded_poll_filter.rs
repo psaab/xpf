@@ -14652,6 +14652,109 @@ fn unfenced_challenge_does_not_retain_snat_allocation_15947() {
 }
 
 #[test]
+fn large_pool_unfenced_challenge_still_replies_16537() {
+    // #16537 bound cell: a /16 pool with NO fence must still earn its
+    // SYN-ACK (the fix must not suppress unfenced challenges) and must
+    // retain no allocation. Cost independence is pinned structurally by
+    // pool_ranges_collapse_slash16_to_one_span_16537.
+    let (forwarding, mut screen) = {
+        let forwarding = build_forwarding_state(&{
+            let mut snapshot = nat_snapshot();
+            snapshot.source_nat_rules = vec![crate::SourceNATRuleSnapshot {
+                name: "big-pool".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec!["0.0.0.0/0".to_string()],
+                pool_addresses: vec!["198.51.0.0/16".to_string()],
+                port_low: 5000,
+                port_high: 6000,
+                ..Default::default()
+            }];
+            snapshot
+        });
+        let mut profiles = FxHashMap::default();
+        profiles.insert("lan".to_string(), crate::screen::ScreenProfile { syn_flood_threshold: 1, syn_cookie: true, ..crate::screen::ScreenProfile::default() });
+        let mut screen = ScreenState::new();
+        screen.update_profiles(profiles);
+        screen.update_syn_cookie_master_key(Some([0x42; 16]));
+        (forwarding, screen)
+    };
+    assert_eq!(forwarding.source_nat_rules[0].pool_addresses_v4.len(), 65536);
+    assert_eq!(forwarding.source_nat_rules[0].pool_ranges_v4.len(), 1);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let src = Ipv4Addr::new(10, 0, 61, 103);
+    let dst = Ipv4Addr::new(9, 9, 9, 9);
+    for (idx, port) in [49200u16, 49201].iter().enumerate() {
+        let frame = build_txn_tcp_syn_frame_v4(src, dst, *port, 443, 0x02, crate::afxdp::tests_support::TEST_LAN_MAC);
+        let mut m = txn_meta_v4(24, 0x02, frame.len() as u16);
+        m.flow_src_addr[..4].copy_from_slice(&src.octets());
+        m.flow_dst_addr[..4].copy_from_slice(&dst.octets());
+        m.flow_src_port = *port;
+        let (batch, _) = txn_run_descriptor_with_screen_state(&mut binding, &mut sessions, &forwarding, &txn_ha_state(), &frame, m, &mut screen);
+        if idx == 1 {
+            assert_eq!(batch.syn_cookie_challenges, 1, "threshold tuple must challenge");
+            assert_eq!(batch.syn_cookie_syn_ack_sent, 1, "unfenced /16 challenged SYN must still get its SYN-ACK");
+        }
+        binding.tx_pipeline.pending_tx_local.clear();
+    }
+    let snap = forwarding.source_nat_rules[0].pool_allocator.snapshot();
+    assert_eq!(snap.allocations_total, 1, "only the first real flow minted; challenged SYN minted none");
+}
+
+#[test]
+fn large_pool_fence_on_last_address_suppresses_challenge_16537() {
+    // Selector matches only the LAST address of the /16 (198.51.255.255).
+    // Range intersection must suppress without enumerating 65536 addrs.
+    let (forwarding, mut screen) = {
+        let forwarding = build_forwarding_state(&{
+            let mut snapshot = nat_snapshot();
+            snapshot.source_nat_rules = vec![crate::SourceNATRuleSnapshot {
+                name: "big-pool".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec!["0.0.0.0/0".to_string()],
+                pool_addresses: vec!["198.51.0.0/16".to_string()],
+                port_low: 5000,
+                port_high: 6000,
+                ..Default::default()
+            }];
+            snapshot.bindless_selector_fence_enabled = true;
+            snapshot.bindless_selector_rows = vec![crate::protocol::IpsecBindlessSelectorSnapshot {
+                local_ts: "9.9.9.0/24".to_string(),
+                remote_ts: "198.51.255.255/32".to_string(),
+            }];
+            snapshot
+        });
+        let mut profiles = FxHashMap::default();
+        profiles.insert("lan".to_string(), crate::screen::ScreenProfile { syn_flood_threshold: 1, syn_cookie: true, ..crate::screen::ScreenProfile::default() });
+        let mut screen = ScreenState::new();
+        screen.update_profiles(profiles);
+        screen.update_syn_cookie_master_key(Some([0x42; 16]));
+        (forwarding, screen)
+    };
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let src = Ipv4Addr::new(10, 0, 61, 103);
+    let dst = Ipv4Addr::new(9, 9, 9, 9);
+    for (idx, port) in [49210u16, 49211].iter().enumerate() {
+        let frame = build_txn_tcp_syn_frame_v4(src, dst, *port, 443, 0x02, crate::afxdp::tests_support::TEST_LAN_MAC);
+        let mut m = txn_meta_v4(24, 0x02, frame.len() as u16);
+        m.flow_src_addr[..4].copy_from_slice(&src.octets());
+        m.flow_dst_addr[..4].copy_from_slice(&dst.octets());
+        m.flow_src_port = *port;
+        let (batch, _) = txn_run_descriptor_with_screen_state(&mut binding, &mut sessions, &forwarding, &txn_ha_state(), &frame, m, &mut screen);
+        if idx == 1 {
+            assert_eq!(batch.syn_cookie_challenges, 1, "threshold tuple must challenge (non-vacuous)");
+        }
+        assert_eq!(batch.syn_cookie_syn_ack_sent, 0, "fence on last /16 address must suppress SYN {idx}");
+        assert!(binding.tx_pipeline.pending_tx_local.is_empty());
+    }
+}
+
+#[test]
 fn filtered_cookie_ack_cannot_reflect_rst_before_input_filter_11332() {
     let denied_source = Ipv4Addr::new(203, 0, 113, 12);
     let server = Ipv4Addr::new(198, 51, 100, 20);

@@ -5963,61 +5963,39 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // is the single reply decision point; no earlier
                         // stage has emitted a challenge reply.
                         if let Some(challenge) = deferred_syn_cookie_challenge.take() {
-                            // Predicate-only rework (#15947 Codex7/Opus7):
-                            // decide the challenge HERE, before any NAT
-                            // allocation, from a candidate NAT decision.
-                            // The candidate mirrors the allocating path's
-                            // composition (pre-routing DNAT/NPTv6-inbound in
-                            // `decision.nat`, then NAT64/NPTv6-outbound/
-                            // static/pool/interface source translation)
-                            // without minting pool/interface/persistent
-                            // state, so an emitted SYN-ACK never retains an
-                            // allocation and a fenced tuple is suppressed
-                            // before any resource is consumed. A candidate
-                            // allocation-failure shape yields no candidate
-                            // and suppresses the reply (the real path drops
-                            // there). L2 group-unicast stays a hard gate.
-                            let candidate_nats =
-                                nat_exception::candidate_source_nats_for_challenge(
-                                    worker_ctx.forwarding,
-                                    meta.ingress_ifindex as i32,
-                                    meta.ingress_vlan_id,
-                                    ingress_nat_scope_ifindex,
-                                    from_zone,
-                                    to_zone,
-                                    decision.resolution.egress_ifindex,
-                                    flow,
-                                    effective_resolution_target,
-                                    policy_dst_port,
-                                    decision.nat,
-                                    nat64_match,
-                                    policy_packet_icmp(packet_frame, meta),
-                                );
-                            // Fence over EVERY candidate: suppress if the
-                            // untranslated tuple or ANY candidate source
-                            // translation (incl. pre-routing DNAT dst)
-                            // matches a selector. Empty candidate list =
-                            // no source translation, fence sees base only.
-                            let fence_candidates: Vec<NatDecision> =
-                                match &candidate_nats {
-                                    Some(list) if !list.is_empty() => list.clone(),
-                                    _ => vec![decision.nat],
-                                };
+                            // Predicate-only rework (#15947, #16537):
+                            // O(1)-in-pool-size fence predicate; pool
+                            // addresses are never enumerated per SYN.
+                            let l3 = ForwardPacketMeta::from(meta).l3_addrs_unfiltered();
+                            let fence_outcome = match l3 {
+                                Some((source, destination)) => {
+                                    nat_exception::syn_cookie_challenge_fence(
+                                        worker_ctx.forwarding,
+                                        meta.ingress_ifindex as i32,
+                                        meta.ingress_vlan_id,
+                                        ingress_nat_scope_ifindex,
+                                        from_zone,
+                                        to_zone,
+                                        decision.resolution.egress_ifindex,
+                                        flow,
+                                        effective_resolution_target,
+                                        policy_dst_port,
+                                        decision.nat,
+                                        nat64_match,
+                                        policy_packet_icmp(packet_frame, meta),
+                                        source,
+                                        destination,
+                                    )
+                                }
+                                None => nat_exception::ChallengeFence::Fenced,
+                            };
+                            let candidate_ok =
+                                fence_outcome != nat_exception::ChallengeFence::NoCandidate;
                             let fence_dropped = (l2_group_unicast_ip
                                 && owned_packet_frame.is_none())
-                                || ForwardPacketMeta::from(meta)
-                                    .l3_addrs_unfiltered()
-                                    .is_some_and(|(source, destination)| {
-                                        fence_candidates.iter().any(|candidate| {
-                                            worker_ctx
-                                                .forwarding
-                                                .bindless_ipsec_selector_fence
-                                                .matches_with_nat(
-                                                    source, destination, *candidate,
-                                                )
-                                        })
-                                    });
-                            let admitted = candidate_nats.is_some()
+                                || fence_outcome == nat_exception::ChallengeFence::Fenced;
+                            let admitted = candidate_ok
+                                && l3.is_some()
                                 && !fence_dropped
                                 && if decision.resolution.disposition
                                     == ForwardingDisposition::LocalDelivery
