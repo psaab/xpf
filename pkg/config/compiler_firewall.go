@@ -779,6 +779,22 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					for _, thenNode := range termBody.FindChildren("then") {
 						compileFilterThen(thenNode, term)
 					}
+					// #16533: when packedBody declined the term tail (an
+					// unmodelled `then` token such as a `dicsard` typo or
+					// `sample`), termBody carries no `then` child at all, so
+					// the loop above never ran and the term compiled with
+					// Action "" — terminating Accept in Rust. Re-scan the raw
+					// packed `then` segment(s) exactly as the #10071 `from`
+					// re-scan does, so every unrecognised token lands in
+					// UnknownActions (strict rejects naming it; tolerant
+					// failClosedUnknownFilterAction forces discard). Only
+					// when the packed expansion declined: if it succeeded,
+					// the `then` nodes above already own the tail.
+					if termBody == termInst.node {
+						for _, thenNode := range firewallPackedTermThenNodes(termInst.node, termSchema) {
+							compileFilterThen(thenNode, term)
+						}
+					}
 					// An unknown action must dominate a recognized terminal action
 					// in any later duplicate then block, so fail closed only after
 					// all blocks have contributed their tokens and actions.
@@ -2149,6 +2165,49 @@ func firewallPackedTermFromStatements(termNode *Node, termSchema *schemaNode, wa
 	return froms, next
 }
 
+// firewallPackedTermThenNodes extracts every packed `then` statement from a
+// firewall term whose packed tail the generic expander declined (#16533).
+// It mirrors firewallPackedTermFromStatements: `from` is a term-level
+// sibling, so it bounds each then tail (and a later `then` starts a new
+// segment). The returned nodes are fresh, carry quote/bracket provenance,
+// and are shaped exactly like a packed `then` leaf (`Keys=["then", ...]`)
+// so compileFilterThen's leaf arm — including its UnknownActions default —
+// reads them with no second parser. Quoted/bracketed tokens are values,
+// never segment boundaries.
+func firewallPackedTermThenNodes(termNode *Node, termSchema *schemaNode) []*Node {
+	if termNode == nil || termSchema == nil || len(termNode.Keys) == 0 {
+		return nil
+	}
+	consumed, _ := consumeNodeKeys(termNode.Keys, termSchema)
+	var thens []*Node
+	for i := consumed; i < len(termNode.Keys); i++ {
+		if termNode.KeyQuoted(i) || termNode.KeyBracketed(i) || termNode.Keys[i] != "then" {
+			continue
+		}
+		end := i + 1
+		for end < len(termNode.Keys) {
+			if !termNode.KeyQuoted(end) && !termNode.KeyBracketed(end) &&
+				(termNode.Keys[end] == "from" || termNode.Keys[end] == "then") {
+				break
+			}
+			end++
+		}
+		keys := append([]string{"then"}, termNode.Keys[i+1:end]...)
+		then := &Node{Keys: keys, IsLeaf: true, InheritedFrom: termNode.InheritedFrom}
+		quoted := make([]bool, len(keys))
+		bracketed := make([]bool, len(keys))
+		for j := i + 1; j < end; j++ {
+			quoted[j-i] = termNode.KeyQuoted(j)
+			bracketed[j-i] = termNode.KeyBracketed(j)
+		}
+		then.setKeysQuoted(quoted)
+		then.setKeysBracketed(bracketed)
+		thens = append(thens, then)
+		i = end - 1
+	}
+	return thens
+}
+
 // firewallTermFromNodes lowers every `from` statement carried by a term. A
 // leaf term can have several packed segments; packedBody may absorb a later
 // `from` marker as the preceding leaf's operand, so the raw segment view must
@@ -3010,6 +3069,17 @@ func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 		case "next":
 			// `then next term` / bare `then next` — explicit fall-through.
 			term.NextTerm = true
+			// #16533: a fused token past `next` other than the `term`
+			// qualifier (`[next term]`, or `next { term; }` lowered to a
+			// fused key) is not the qualifier — record it unknown rather
+			// than silently treating the term as a clean fall-through.
+			// The `term` child form is consumed by
+			// compileFilterThenTail11355 below.
+			for _, extra := range child.Keys[1:] {
+				if extra != "term" {
+					term.UnknownActions = append(term.UnknownActions, extra)
+				}
+			}
 		case "log":
 			term.Log = true
 		case "syslog":
