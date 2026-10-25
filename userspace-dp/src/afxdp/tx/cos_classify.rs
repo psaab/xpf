@@ -2346,6 +2346,9 @@ fn enqueue_cos_item(
         // Shared_exact queues partition their configured base among workers,
         // then restore the prospective-flow expansion (#707) over that share.
         // Owner-local queues keep the unchanged flow-aware buffer limit.
+        // #16536: hoist active_shards so the per-flow BDP floor below
+        // uses the same per-worker partition as buffer_limit.
+        let mut active_shards = 1usize;
         let buffer_limit = if queue.shared_exact() {
             // #13073: read the shard count from the runtime's own lease
             // snapshot (attached at materialization, refreshed on fast-map
@@ -2353,7 +2356,7 @@ fn enqueue_cos_item(
             // is already in scope here, so this drops a per-packet FastMap
             // hash lookup + `Arc` pointer chase from every shared_exact
             // admission. A missing lease keeps owner-local semantics.
-            let active_shards = root
+            active_shards = root
                 .shared_root_lease
                 .as_ref()
                 .map(|lease| lease.active_shards())
@@ -2374,7 +2377,12 @@ fn enqueue_cos_item(
         // whose per-flow arm is discarded outright. Non-flow-fair
         // queues early-return `buffer_limit` inside the (inlined)
         // helper, so the unconditional call is free there.
-        let flow_share_limit = cos_queue_flow_share_limit(queue, buffer_limit, flow_bucket);
+        let flow_share_limit = cos_queue_flow_share_limit_with_active_shards(
+            queue,
+            buffer_limit,
+            flow_bucket,
+            active_shards,
+        );
         let flow_share_exceeded = if queue.flow_fair() {
             let ff = queue
                 .flow_fair_state
