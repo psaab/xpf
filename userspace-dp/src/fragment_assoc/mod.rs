@@ -50,12 +50,17 @@
 //!     Shards are selected by the seeded source hash, and one admitting session
 //!     (tuple plus incarnation) has a smaller 32-entry quota within each shard.
 //!     Quotas do not trust claimed source addresses, so a spoofing session cannot
-//!     spend another session's quota. Reaching a quota refuses new keys rather
-//!     than evicting a live association; the shard cap bounds aggregate memory.
-//!   * PRUNE-BEFORE-REFUSE (#5447): before refusing an install at the per-session
-//!     shard quota or a full shard, it reclaims EXPIRED entries FIRST (same
-//!     monotonic clock `lookup` prunes with). Expired slots are reclaimed
-//!     before capacity checks, so they cannot alone cause a refusal.
+//!     spend another session's quota. At its own per-session quota a session
+//!     recycles its OWN oldest association (#16593, restoring the pre-#11058
+//!     behaviour): the victim is always that session's entry, never another
+//!     session's, so the #11058 anti-spoof property is kept exactly. At the
+//!     per-zone quota or a full shard a new key is refused rather than evicting
+//!     a live association; the shard cap bounds aggregate memory.
+//!   * PRUNE-BEFORE-REFUSE (#5447): before refusing an install at the per-zone
+//!     shard quota or a full shard, or recycling at the per-session quota, it
+//!     reclaims EXPIRED entries FIRST (same monotonic clock `lookup` prunes
+//!     with). Expired slots are reclaimed before capacity checks, so they
+//!     cannot alone cause a refusal or a live recycle.
 //!   * SESSION-BOUND: each entry carries the admitting session key and unique
 //!     incarnation id. Consult removes the entry as soon as that exact session
 //!     is no longer live, including a same-tuple replacement session.
@@ -115,7 +120,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 mod key;
-pub(crate) use key::{first_fragment_key, nonfirst_fragment_key};
+pub(crate) use key::{final_fragment_key, first_fragment_key, nonfirst_fragment_key};
 
 /// Number of independent shards. Power of two so the shard index is a mask.
 /// #7056 (#5798 required-fix #5): fragment-association misses caused by the
@@ -156,6 +161,14 @@ pub(crate) static NAT64_FRAG_CROSS_DOMAIN_MISSES: AtomicU64 = AtomicU64::new(0);
 
 /// See `NAT64_FRAG_CROSS_DOMAIN_MISSES`.
 pub(crate) static NAT64_FRAG_PROTOCOL_ALIAS_MISSES: AtomicU64 = AtomicU64::new(0);
+
+/// #16593: first-fragment installs refused at the per-zone quota or at a
+/// full shard AFTER expired entries were reclaimed and after the installing
+/// session's own-oldest recycle was considered. Unlike a recycle, the
+/// refused datagram's tails will miss and drop fail-closed, so this is the
+/// operator signal that shard/zone capacity \u2014 not one busy flow \u2014 is
+/// the problem. Process-global; read as a delta in tests.
+pub(crate) static FRAG_QUOTA_REFUSALS: AtomicU64 = AtomicU64::new(0);
 
 /// #9901 (F-010): associations reclaimed by the ABSOLUTE lifetime bound rather
 /// than the idle TTL. An idle-TTL expiry is routine churn; an absolute expiry
@@ -493,8 +506,14 @@ impl FragAssoc {
 
     /// Install (or refresh) an association for a committed FIRST fragment.
     /// Within a shard, the cap is charged to the admitting session tuple and
-    /// incarnation, not the untrusted packet source claim. A new key at quota
-    /// is refused rather than replacing any live entry.
+    /// incarnation, not the untrusted packet source claim.
+    ///
+    /// Returns `true` iff this install evicted a still-LIVE association
+    /// (#7054): either the installing session's own oldest entry recycled at
+    /// its per-session quota (#16593), or \u2014 for a foreign fill \u2014 never.
+    /// Zone/shard refusals return `false` and bump `FRAG_QUOTA_REFUSALS`
+    /// instead, so callers counting only the bool keep the #7054
+    /// live-eviction signal without conflating it with a refusal.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn install_with_session(
         &self,
@@ -527,21 +546,21 @@ impl FragAssoc {
             // #6857: refresh the owner RG too. A refresh happens when a LATER
             // first fragment of the same datagram re-admits under current
             // state, so the entry must carry THAT admission's entitlement, not
-            // the original one — otherwise a refresh under a now-active RG
+            // the original one \u2014 otherwise a refresh under a now-active RG
             // would leave the entry stamped with the old value.
             e.owner_rg = owner_rg;
-            // #9901 (F-010): a re-install is a FRESH admission — the new first
-            // fragment re-ran enforcement under current config/state — so the
+            // #9901 (F-010): a re-install is a FRESH admission \u2014 the new first
+            // fragment re-ran enforcement under current config/state \u2014 so the
             // absolute clock restarts here. Only a consult never re-stamps it.
             e.created_ns = now_ns;
             shard.push(e);
             return false;
         }
         // #14321: per-zone quota beside the per-session quota. Both are
-        // counted, then expired entries are pruned before any refusal, then
-        // both are re-counted — a zone at its bound refuses new keys
-        // fail-closed without evicting a live association, and cannot
-        // consume the other zone's half of the shard.
+        // counted, then expired entries are pruned before any refusal or
+        // recycle, then both are re-counted \u2014 a zone at its bound refuses
+        // new keys fail-closed without evicting a live association, and
+        // cannot consume the other zone's half of the shard.
         let zone_len = |shard: &[FragEntry]| {
             shard
                 .iter()
@@ -551,30 +570,49 @@ impl FragAssoc {
                 })
                 .count()
         };
-        let session_len = shard
-            .iter()
-            .filter(|e| {
+        let session_pos = |shard: &[FragEntry]| {
+            shard.iter().position(|e| {
                 e.admitting_session == admitting_session
                     && e.admitting_session_id == admitting_session_id
             })
-            .count();
-        if session_len >= FRAG_CAP_PER_SESSION_PER_SHARD
-            || zone_len(&shard) >= FRAG_CAP_PER_ZONE_PER_SHARD
-            || shard.len() >= FRAG_CAP_PER_SHARD
-        {
-            // Prune before refusing a live session/zone quota or a full shard.
-            shard.retain(|e| frag_entry_live(e, now_ns));
-            let session_len = shard
+        };
+        let session_len = |shard: &[FragEntry]| {
+            shard
                 .iter()
                 .filter(|e| {
                     e.admitting_session == admitting_session
                         && e.admitting_session_id == admitting_session_id
                 })
-                .count();
-            if session_len >= FRAG_CAP_PER_SESSION_PER_SHARD
-                || zone_len(&shard) >= FRAG_CAP_PER_ZONE_PER_SHARD
-                || shard.len() >= FRAG_CAP_PER_SHARD
+                .count()
+        };
+        let mut evicted_live = false;
+        if session_len(&shard) >= FRAG_CAP_PER_SESSION_PER_SHARD
+            || zone_len(&shard) >= FRAG_CAP_PER_ZONE_PER_SHARD
+            || shard.len() >= FRAG_CAP_PER_SHARD
+        {
+            shard.retain(|e| frag_entry_live(e, now_ns));
+            // #16593: at its OWN quota a session recycles its own oldest
+            // entry (front of the shard Vec; installs and hits both push to
+            // the back, so the front is the least-recently-touched own
+            // entry). The victim always belongs to the installing session,
+            // so a spoofing session can never displace another session's
+            // association \u2014 the #11058 property is preserved.
+            // Recycling the session's own oldest keeps every count
+            // (session, zone, shard) unchanged after the push, so it is
+            // safe even at the zone quota or a full shard: no quota is
+            // exceeded and no foreign entry is touched.
+            if session_len(&shard) >= FRAG_CAP_PER_SESSION_PER_SHARD {
+                if let Some(pos) = session_pos(&shard) {
+                    shard.remove(pos);
+                    evicted_live = true;
+                }
+            }
+            if !evicted_live
+                && (session_len(&shard) >= FRAG_CAP_PER_SESSION_PER_SHARD
+                    || zone_len(&shard) >= FRAG_CAP_PER_ZONE_PER_SHARD
+                    || shard.len() >= FRAG_CAP_PER_SHARD)
             {
+                FRAG_QUOTA_REFUSALS.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
         }
@@ -589,7 +627,7 @@ impl FragAssoc {
             generation,
             owner_rg,
         });
-        false
+        evicted_live
     }
 
     #[cfg(test)]
@@ -729,6 +767,29 @@ impl FragAssoc {
         shard.push(e);
         Some(value)
     }
+
+    /// #16593: release the association for `key` because its datagram is
+    /// complete (the MF=0 tail has been seen). A completed datagram will
+    /// send no more fragments, so holding the entry until its idle TTL only
+    /// spends the admitting session's quota against newer datagrams.
+    /// Removes at most the exact-key entry; returns whether one was present.
+    /// This is an optimisation on top of own-oldest recycling, not a
+    /// correctness gate: a tail that arrives before its head, or a release
+    /// racing a re-install of the same key, simply leaves quota recycling
+    /// to handle capacity.
+    pub(crate) fn release(&self, key: &FragKey) -> bool {
+        let idx = frag_shard_index(key);
+        let mut shard = self.shards[idx]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(pos) = shard.iter().position(|e| e.key == *key) {
+            shard.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn lookup(
         &self,

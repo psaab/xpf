@@ -694,6 +694,7 @@ type xpfCollector struct {
 	// and subminimal-quote refusals plus per-session error-budget suppressions
 	// (#9901).
 	userspaceFragMaxLifetimeEvictions          *prometheus.Desc
+	userspaceFragQuotaRefusals                 *prometheus.Desc
 	userspaceEgressMTUUnknownForward           *prometheus.Desc
 	userspacePTBUnbuildable                    *prometheus.Desc
 	userspaceEmbeddedQuoteSubminimalRefused    *prometheus.Desc

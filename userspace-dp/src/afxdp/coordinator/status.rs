@@ -665,6 +665,11 @@ impl super::Coordinator {
     pub fn frag_max_lifetime_evictions_total(&self) -> u64 {
         crate::fragment_assoc::FRAG_MAX_LIFETIME_EVICTIONS.load(Ordering::Relaxed)
     }
+    /// #16593: quota refusals at the zone/shard bound. Surfaced as
+    /// `xpf_userspace_frag_quota_refusals_total`.
+    pub fn frag_quota_refusals_total(&self) -> u64 {
+        crate::fragment_assoc::FRAG_QUOTA_REFUSALS.load(Ordering::Relaxed)
+    }
     /// #9901 (F-074): forwarded frames whose egress-MTU decision ran with NO
     /// known MTU (`mtu == 0`) and took the documented fail-open `Forward` arm.
     /// The decision is deliberate, but silence about it hid unknown-MTU

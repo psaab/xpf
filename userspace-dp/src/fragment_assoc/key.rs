@@ -102,3 +102,20 @@ pub(crate) fn nonfirst_fragment_key(
     let (key, _more, offset_units) = fragment_fields(packet, addr_family, authority)?;
     if offset_units != 0 { Some(key) } else { None }
 }
+
+/// #16593: association key for the FINAL fragment of a datagram
+/// (offset > 0, MF=0) \u2014 the fragment whose arrival completes the
+/// datagram, so the caller can release the association instead of letting
+/// it spend quota until its idle TTL. Returns `None` for a first fragment,
+/// a non-final non-first fragment (MF=1), or a non-fragmented packet, so
+/// an ordinary mid-train consult never releases early: a fragmented
+/// datagram has exactly one MF=0 non-first fragment, and it is last by
+/// definition (no fragment can follow the one that ends the datagram).
+pub(crate) fn final_fragment_key(
+    packet: &[u8],
+    addr_family: i32,
+    authority: FragAuthority,
+) -> Option<FragKey> {
+    let (key, more, offset_units) = fragment_fields(packet, addr_family, authority)?;
+    if !more && offset_units != 0 { Some(key) } else { None }
+}

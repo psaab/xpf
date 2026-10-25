@@ -1177,6 +1177,12 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			nil,
 			nil,
 		),
+		userspaceFragQuotaRefusals: prometheus.NewDesc(
+			"xpf_userspace_frag_quota_refusals_total",
+			"frag quota refusals",
+			nil,
+			nil,
+		),
 		userspaceEgressMTUUnknownForward: prometheus.NewDesc(
 			"xpf_userspace_egress_mtu_unknown_forward_total",
 			"egress mtu unknown forwards",
@@ -1845,6 +1851,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		// #9901: DISTINCT fixture values, so an emit wired to the wrong
 		// field swaps two numbers that differ.
 		FragMaxLifetimeEvictionsTotal:               37,
+		FragQuotaRefusalsTotal:                      53,
 		EgressMTUUnknownForwardTotal:                43,
 		PTBUnbuildableTotal:                         61,
 		EmbeddedQuoteSubminimalRefusedTotal:         47,
@@ -1988,13 +1995,13 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// for 110. (The base census already drifted by +2 on origin/master:
 	// want 109, got 111 there.) #15249 adds the GRE transport-egress
 	// refusal counter, for 113. #16215 adds the SNAT-revoked-sessions
-	// counter, for 114.
+	// counter, for 114. #16593 adds the frag-quota-refusals counter, for 115.
 	// RE-ANCHORED, not relaxed: this count is a deliberate gate — it catches a
 	// series that is emitted but never asserted, which is how a collector grows
 	// an unverified metric. All new series ARE asserted below, so the original
 	// claim still holds and the number moves with the population.
-	if len(got) != 114 {
-		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 114 metrics, got %d", len(got))
+	if len(got) != 115 {
+		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 115 metrics, got %d", len(got))
 	}
 
 	// #8447: DISTINCT values, so a collector that emitted one of the quartet
@@ -2030,6 +2037,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// #9901: assert the VALUES, not merely the census — a census bump
 	// alone would pass against emits wired to the wrong field.
 	assertCounterClose(t, got, c.userspaceFragMaxLifetimeEvictions, nil, 37)
+	assertCounterClose(t, got, c.userspaceFragQuotaRefusals, nil, 53)
 	assertCounterClose(t, got, c.userspaceEgressMTUUnknownForward, nil, 43)
 	assertCounterClose(t, got, c.userspacePTBUnbuildable, nil, 61)
 	assertCounterClose(t, got, c.userspaceEmbeddedQuoteSubminimalRefused, nil, 47)

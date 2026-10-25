@@ -189,6 +189,10 @@ pub(super) fn nat64_consult_forward_fragment_assoc(
     now_secs: u64,
 ) -> Option<(SessionDecision, Option<Nat64ReverseInfo>)> {
     let key = crate::fragment_assoc::nonfirst_fragment_key(l3_packet, addr_family, authority)?;
+    // #16593: this fragment completes its datagram (MF=0 tail) \u2014 after a
+    // successful consult the association has no more fragments to serve.
+    let is_final =
+        crate::fragment_assoc::final_fragment_key(l3_packet, addr_family, authority).is_some();
     // #5624: consult under the CURRENT forwarding state's generation. An
     // association installed under a prior generation (before a config commit
     // changed deny/NAT64 rules) is treated as a miss + evicted here, so the
@@ -208,6 +212,9 @@ pub(super) fn nat64_consult_forward_fragment_assoc(
     // Only a genuine NAT64 decision routes to the NAT64 frame builder.
     if !decision.nat.nat64 {
         return None;
+    }
+    if is_final {
+        forwarding.nat64.frag_assoc.release(&key);
     }
     Some((decision, reverse))
 }
@@ -328,6 +335,9 @@ pub(super) fn same_family_or_plain_consult_forward_fragment_assoc(
     now_secs: u64,
 ) -> Option<SessionDecision> {
     let key = crate::fragment_assoc::nonfirst_fragment_key(l3_packet, addr_family, authority)?;
+    // #16593: MF=0 tail completes the datagram; release after a valid hit.
+    let is_final =
+        crate::fragment_assoc::final_fragment_key(l3_packet, addr_family, authority).is_some();
     let (decision, _reverse) = forwarding.nat64.frag_assoc.lookup_with_session(
         &key,
         now_ns,
@@ -351,6 +361,9 @@ pub(super) fn same_family_or_plain_consult_forward_fragment_assoc(
         && (decision.nat.rewrite_src.is_some() || decision.nat.rewrite_dst.is_some());
     if !plain && !same_family_address_rewrite {
         return None;
+    }
+    if is_final {
+        forwarding.nat64.frag_assoc.release(&key);
     }
     Some(decision)
 }

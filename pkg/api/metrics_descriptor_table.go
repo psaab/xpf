@@ -491,6 +491,7 @@ var collectorDescUserspaceSession = []int{
 	xpfCollectorDescFieldIndex("userspaceIPv6AHFlowlessTotal"),
 	xpfCollectorDescFieldIndex("userspaceNAT64FragProtocolAliasMisses"),
 	xpfCollectorDescFieldIndex("userspaceFragMaxLifetimeEvictions"),
+	xpfCollectorDescFieldIndex("userspaceFragQuotaRefusals"),
 	xpfCollectorDescFieldIndex("userspaceEgressMTUUnknownForward"),
 	xpfCollectorDescFieldIndex("userspacePTBUnbuildable"),
 	xpfCollectorDescFieldIndex("userspaceInterfaceSNATPATCollisions"),
