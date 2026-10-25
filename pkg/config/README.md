@@ -862,7 +862,16 @@ aggregate deadline, per-name 5s cap) runs only outside `configstore`
 semaphore and applies it without re-resolving. `RefreshDNSAddressBooks`
 mutates its argument in place, so it must never be given the published
 active config (#15933); refreshed answers publish as a new store
-generation (#16606).
+generation (#16606). #16687: the daemon's pre-apply resolver
+(`resolveDNSBeforeApply`) now resolves EVERY config into a private
+`CloneForDNSRefresh` clone and returns the clone — no arm writes
+through its argument, whatever the caller's provenance (published
+active, frozen rollback target, or owned) — and the #9811 debt retry
+resolves the same way. `policymatch`'s query-snapshot cache keys on
+`DNSAnswersDigest` (scoped identity + prefixes + `DNSLookupFailed`)
+in addition to the config pointer and feed digest, so even a future
+in-place write cannot leave a stale `ContentRejected` verdict
+resident on the same pointer.
 These expansions live in `Address.ExpandedPrefixes` /
 `DNSAddresses` and are returned by `Address.UsableValues()`, which every
 resolver (policy, NAT, junos-host, userspace book table) now consumes so a

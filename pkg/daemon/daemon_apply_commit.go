@@ -390,6 +390,13 @@ func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 	// from. applyConfigLocked takes that capture at the publication boundary;
 	// without the plan it falls back to the pre-#6948 post-apply scan, which
 	// sweeps the sessions of whichever policy inherited a deleted policy's id.
+	// #16687: resolve DNS into a private clone BEFORE arming the
+	// invalidation plan, so the plan, the debt checks below, and the
+	// apply all key on the same (cloned) pointer the dataplane will
+	// publish. Arming with the pre-resolve pointer and applying the
+	// clone would make capturePolicyInvalidationLocked drop the plan
+	// as stale (plan.newCfg != cfg).
+	compiled = d.resolveDNSBeforeApply(compiled)
 	d.armPolicyInvalidationPlanWithRename(oldActive, compiled, renameApplyPtr)
 	// #9841: the committing wrapper, not the bare apply — it returns the
 	// response object projecting this attempt's unconverged-MTU records
@@ -404,7 +411,6 @@ func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 	// apply; the flush sweep inside repopulates it, and the projection
 	// below reads it alongside the old-vs-new full-admit comparison.
 	d.clearKeptSuspicious10752()
-	compiled = d.resolveDNSBeforeApply(compiled)
 	respCfg, applyErr := d.applyConfigLockedForCommit(d.applyCancelCtx(), compiled)
 	if applyErr != nil && !d.policyInvalidationPublishLanded {
 		if debt := d.policyInvalidationDebt; debt != nil &&
@@ -869,6 +875,9 @@ func (d *Daemon) syncAndApplyWithAncestry(
 	// from. applyConfigLocked takes that capture at the publication boundary;
 	// without the plan it falls back to the pre-#6948 post-apply scan, which
 	// sweeps the sessions of whichever policy inherited a deleted policy's id.
+	// #16687: resolve first, arm second — same pointer discipline as
+	// the commit path (see applyAndSyncCommittedWithPeerSnapshotAuthorization).
+	compiled = d.resolveDNSBeforeApply(compiled)
 	if len(ancestry) > 0 {
 		d.armPolicyInvalidationPlanWithRename(oldActive, compiled, &pendingRenameApply{
 			descriptors: append([]configstore.RenameDescriptor(nil), ancestry...),
@@ -876,7 +885,6 @@ func (d *Daemon) syncAndApplyWithAncestry(
 	} else {
 		d.armPolicyInvalidationPlan(oldActive, compiled)
 	}
-	compiled = d.resolveDNSBeforeApply(compiled)
 	applyErr := d.applyConfigLocked(d.applyCancelCtx(), compiled)
 	if applyErrSkipsPeerSync(applyErr) {
 		return nil, applyErr
@@ -1273,6 +1281,11 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 	// from. applyConfigLocked takes that capture at the publication boundary;
 	// without the plan it falls back to the pre-#6948 post-apply scan, which
 	// sweeps the sessions of whichever policy inherited a deleted policy's id.
+	// #16687: resolve first, arm second — same pointer discipline as
+	// the commit path. prevCfg here is the store's promoted rollback
+	// target (ActiveConfig()/confirmPrevCfg), a published pointer that
+	// must never be written through.
+	prevCfg = d.resolveDNSBeforeApply(prevCfg)
 	d.armPolicyInvalidationRollbackPlan(oldActive, prevCfg)
 	// #9811: latch the outcome. The log alone left the node ENFORCING the
 	// abandoned config C2 while the store, `show configuration`, the peer
@@ -1280,7 +1293,6 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 	// timer callback with no caller to report to, unlike the commit path where
 	// the operator sees the error and re-commits. noteConfigApplyResult also
 	// DISCHARGES on success, so an apply that works needs no separate site.
-	prevCfg = d.resolveDNSBeforeApply(prevCfg)
 	applyErr := d.applyConfigLocked(context.Background(), prevCfg)
 	d.noteConfigApplyResult(applyErr)
 	if applyErr != nil {

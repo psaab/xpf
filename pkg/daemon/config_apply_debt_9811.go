@@ -57,6 +57,13 @@ var configApplyReassertFn = func(d *Daemon) error {
 	if cfg == nil {
 		return nil
 	}
+	// #16687: resolve DNS into a private clone before the apply, like
+	// every other background applier. reassertConfigApplyOnce already
+	// holds applySem here (via beginBackgroundApply), so the network
+	// work runs under the semaphore on this retry path — the same
+	// trade-off the refresher's snapshot phase makes — but the
+	// published ActiveConfig() pointer is never written through.
+	cfg = d.resolveDNSBeforeApply(cfg)
 	return d.applyConfigLocked(d.applyCancelCtx(), cfg)
 }
 

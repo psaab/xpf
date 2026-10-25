@@ -100,8 +100,8 @@ func (s *Store) publishActiveLocked() {
 //
 // Returns false (no swap) when base is no longer active, so a stale tick
 // cannot overwrite a newer generation. MUST be called under the caller's
-// apply serialization (daemon applySem), which is the only writer of the
-// compiled config's DNS fields.
+// apply serialization (daemon applySem). Published configs are immutable
+// (#16687): this swap is how refreshed DNS answers become visible.
 func (s *Store) PublishRefreshedDNS(base, refreshed *config.Config) bool {
 	if s == nil || base == nil || refreshed == nil {
 		return false

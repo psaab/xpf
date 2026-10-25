@@ -53,11 +53,20 @@ func (d *Daemon) consumeDNSResolved(cfg *config.Config) bool {
 
 // resolveDNSBeforeApply resolves dns-name entries OUTSIDE applySem
 // (#16601) and returns the config to apply. Marked configs (refresher
-// clone) return as-is. Published active configs are cloned first so
-// the published generation is never mutated. Owned configs are
-// resolved via a throwaway clone for the network work, then their
-// entries are populated from the cache — the applied pointer stays
-// the caller's pointer (digest/stamp identity kept).
+// clone) return as-is. Every other config is resolved into a private
+// CloneForDNSRefresh clone and that clone is returned: the argument is
+// NEVER written through (#16687). Before #16687 the owned-config arm
+// resolved a throwaway clone for the network work and then called
+// PopulateDNSFromCache(cfg) on the caller's pointer — safe only while
+// every caller owned its pointer, and a published-config race the
+// moment any caller (commit, sync, rollback, debt retry) handed in the
+// store's ActiveConfig() or the frozen confirmPrevCfg, both of which
+// several callers do. Returning the clone for every arm makes the
+// no-write-through-published-pointer contract hold by construction,
+// independent of caller provenance. Callers that need the caller's
+// pointer identity (digest/stamp keying) already tolerate a DNS clone:
+// recordAppliedDNSBaseline re-keys a clone of the active config onto
+// the active pointer, and text digests hash the tree, not the pointer.
 func (d *Daemon) resolveDNSBeforeApply(cfg *config.Config) *config.Config {
 	if cfg == nil || !config.HasDNSNames(cfg) {
 		return cfg
@@ -65,17 +74,10 @@ func (d *Daemon) resolveDNSBeforeApply(cfg *config.Config) *config.Config {
 	if d.consumeDNSResolved(cfg) {
 		return cfg
 	}
-	if d.store != nil && d.store.ActiveConfig() == cfg {
-		clone := cfg.CloneForDNSRefresh()
-		config.RefreshDNSAddressBooks(clone)
-		d.markDNSResolved(clone)
-		return clone
-	}
-	probe := cfg.CloneForDNSRefresh()
-	config.RefreshDNSAddressBooks(probe)
-	config.PopulateDNSFromCache(cfg)
-	d.markDNSResolved(cfg)
-	return cfg
+	clone := cfg.CloneForDNSRefresh()
+	config.RefreshDNSAddressBooks(clone)
+	d.markDNSResolved(clone)
+	return clone
 }
 
 // dnsBookHasNames reports whether cfg carries any dns-name entry.
@@ -109,10 +111,10 @@ func dnsBookHasNames(cfg *config.Config) bool {
 }
 
 // snapshotDNSAnswers captures identity->prefixes for every dns-name entry,
-// for change detection across a refresh (#15933, #15962 fold). Callers
-// that read a published config's DNS fields must hold applySem (or own
-// the config), because the apply path re-resolves in place under applySem.
-// The enumeration itself lives in config.DNSAnswersSnapshot so the
+// for change detection across a refresh (#15933, #15962 fold). Published
+// configs are immutable (#16687): their DNS fields change only by
+// publishing a new generation, so readers need no applySem. The
+// enumeration itself lives in config.DNSAnswersSnapshot so the
 // userspace hybrid guard compares exactly the same identities (#16606).
 func snapshotDNSAnswers(cfg *config.Config) map[string][]string {
 	return config.DNSAnswersSnapshot(cfg)
@@ -150,17 +152,16 @@ func cloneDNSAnswers(in map[string][]string) map[string][]string {
 // Protocol (deliberately simple — #15962 round-2 removed the lease
 // design): the tick takes a coherent snapshot of the published
 // generation's DNS state (DNS-field reads and CloneForDNSRefresh) UNDER
-// applySem — the only place the apply path may write those fields, and
-// short, with no I/O — then releases the semaphore before any network
-// resolution. Resolution runs outside the lock into the private clone.
-// Publication re-acquires applySem and applies ONLY if the base
-// generation is still active, else discards; the apply path's own
-// in-place re-resolution under the same semaphore may move the
-// published answers between snapshot and publish, which is harmless:
-// the generation check, not answer stability, decides publication.
-// Baseline = actually-applied answers read back under applySem at
-// applyConfigLocked exit (B2), so a background re-apply of the same
-// generation reconciles it and a flap-back is detected next tick.
+// applySem — short, with no I/O — then releases the semaphore before
+// any network resolution. Resolution runs outside the lock into the
+// private clone. Publication re-acquires applySem and applies ONLY if
+// the base generation is still active, else discards; a background
+// apply may publish a newer clone of the same generation in between,
+// which is harmless: the generation check, not answer stability,
+// decides publication. Baseline = actually-applied answers read back
+// under applySem at applyConfigLocked exit (B2), so a background
+// re-apply of the same generation reconciles it and a flap-back is
+// detected next tick.
 func (d *Daemon) refreshDNSOnce() {
 	if d.store == nil || d.applySem == nil {
 		return
@@ -301,11 +302,9 @@ func (d *Daemon) recordDNSBaselineForce(cfg *config.Config, answers map[string][
 // Before this, the clone lived only in the dataplane's lastSnapshot:
 // store.ActiveConfig() kept the stale answers, so the next scheduler
 // edge or route-overlay republish rebuilt address-book rows from the
-// stale generation and silently re-shipped the old answer — and
-// because apply-time re-resolution had already mutated the clone to
-// the actually-applied answers, publishing the clone (not the tick's
-// proposal) keeps the store, the baseline, and the helper on exactly
-// the same answers. The baseline is keyed to the published clone.
+// stale generation and silently re-shipped the old answer. Publishing
+// the applied clone keeps the store, the baseline, and the helper on
+// exactly the same answers. The baseline is keyed to the published clone.
 func (d *Daemon) applyDNSRefreshedConfig(base, refreshed *config.Config) (bool, error) {
 	if !d.beginBackgroundApply(context.Background(), "dnsAddressRefresh") {
 		return false, nil
@@ -339,7 +338,7 @@ func (d *Daemon) applyDNSRefreshedConfig(base, refreshed *config.Config) (bool, 
 	// Publish AFTER the real apply: applyConfigLocked's deferred
 	// recordAppliedDNSBaseline(refreshed) ran during the apply (its
 	// store-active check fails pre-publish, so it correctly did not
-	// record) and its in-place re-resolution is what the baseline and
+	// record); the applied clone's answers are what the baseline and
 	// the store must both reflect.
 	if !d.store.PublishRefreshedDNS(base, refreshed) {
 		// A newer generation was promoted concurrently; the refreshed

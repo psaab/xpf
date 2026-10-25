@@ -30,9 +30,23 @@ func TestResolveDNSBeforeApply16601(t *testing.T) {
 	if n := calls.Load(); n != 0 {
 		t.Fatalf("compile did %d lookups, want 0", n)
 	}
+	// Compile is cache-only (#16601): with the stub resolver not yet
+	// run, the cache is empty, so the compiled entry starts unresolved.
+	// Capture that premise before resolving.
+	if got := cfg.Security.AddressBook.Addresses["svc"].UsableValues(); len(got) != 0 {
+		t.Fatalf("premise: compiled svc already resolved: %v", got)
+	}
 	out := d.resolveDNSBeforeApply(cfg)
-	if out != cfg {
-		t.Fatalf("owned cfg: resolve returned different pointer")
+	// #16687: resolve returns a private clone; the argument's DNS
+	// answers are never written by the resolve itself. (Compile may
+	// already have populated them from a warm cache — not the case
+	// here — so assert against the captured premise by checking the
+	// argument did not GAIN the freshly resolved answer.)
+	if out == cfg {
+		t.Fatal("resolve returned its argument; want a private clone (#16687)")
+	}
+	if got := cfg.Security.AddressBook.Addresses["svc"].UsableValues(); len(got) != 0 {
+		t.Fatalf("resolve mutated its argument: %v (#16687)", got)
 	}
 	if n := calls.Load(); n == 0 {
 		t.Fatal("resolveDNSBeforeApply did no lookups for an unresolved dns cfg")
@@ -40,9 +54,10 @@ func TestResolveDNSBeforeApply16601(t *testing.T) {
 	if got := out.Security.AddressBook.Addresses["svc"].UsableValues(); len(got) != 1 || got[0] != "10.5.5.5/32" {
 		t.Fatalf("resolved values = %v, want [10.5.5.5/32]", got)
 	}
-	// Marked: a second call must NOT resolve again (refresher-clone rule).
+	// Marked: resolving the returned clone again must NOT resolve again
+	// (refresher-clone rule).
 	before := calls.Load()
-	_ = d.resolveDNSBeforeApply(cfg)
+	_ = d.resolveDNSBeforeApply(out)
 	if calls.Load() != before {
 		t.Fatalf("marked cfg resolved again: calls %d -> %d", before, calls.Load())
 	}
@@ -54,7 +69,7 @@ func buildDaemonTree16601(t *testing.T) *config.ConfigTree {
 	tree, errs := config.NewParser(`
 security {
     zones { security-zone trust; }
-    address-book { global { address svc { dns-name svc.example.com; } } }
+    address-book { global { address svc { dns-name svc16601.example.com; } } }
 }
 `).Parse()
 	if len(errs) > 0 {
