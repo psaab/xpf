@@ -8,6 +8,12 @@ xpf (0.0.0) unstable; urgency=medium
     replaceable by a less-privileged user.
 
 xpf (0.0.0) unstable; urgency=medium
+  * IPsec: a total `swanctl --load-all` failure with charon down no
+    longer restores the prior file (#16853). Charon runs nothing
+    then, so the candidate (or the clear's removed file) stays on
+    disk and its set is promoted; charon's next start loads the
+    committed generation instead of resurrecting a deleted/rotated
+    VPN. Charon-up rejections still restore the prior file (#10712).
   * Cluster/session-sync: the #15176 NAT-scope fold now carries the
     tagged RETH unit (#16826). It folded the logical child's ifindex
     with vlan 0, truncating `reth0.80` to `reth0`, and the receiver

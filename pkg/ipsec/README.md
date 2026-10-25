@@ -19,10 +19,14 @@ the apply path pays no fsync (the file is regenerated on every apply).
   whether the operator DELETED it (#3941) or it became UNRENDERABLE and was
   omitted from the render (#5494). **The returned error is
   load-bearing (#4433):** a render/write failure leaves the prior file
-  untouched. A total `swanctl --load-all` failure (vici/exec, no partial
-  summary) leaves the previously-loaded config active and restores the
-  prior swanctl file before returning (#10712), so a later service restart
-  cannot activate the rejected candidate. A **partial** load — a parseable
+  untouched. A total `swanctl --load-all` failure with charon answering
+  (no partial summary) leaves the previously-loaded config active and
+  restores the prior swanctl file before returning (#10712), so a later
+  service restart cannot activate the rejected candidate. A total
+  failure with charon unreachable (#16853) is different: charon runs
+  nothing, so the candidate stays on disk, its set is promoted, the
+  error still propagates, and charon's next start loads the committed
+  generation. A **partial** load — a parseable
   `loaded N of M ..., F failed to load` summary for connections, pools, or
   authorities, with any exit code including 0 — is different (#14589):
   charon already runs a subset, so restoring the prior file would name a
@@ -62,17 +66,22 @@ the apply path pays no fsync (the file is regenerated on every apply).
   (#4898/#10712):** deleting the last VPN routes `Apply(nil)` → `clearConfig`, which
   now RETURNS the `swanctl --load-all` error (it previously did `_ = m.reload()` and
   `prevConnNames`, rendered-content fingerprints, and stale-SA teardown are gated on
-  reload SUCCESS — a total reload failure leaves the OLD config effective, so the applied
-  state is preserved and no SA is torn down; the next successful Apply/Clear retries
-  the diff + teardown. (A partial load is the #14589 exception above: the recovered
-  set charon actually runs is promoted and its departed SAs torn down, while the
-  error still propagates.) **A FAILED terminate is also load-bearing (#6542/#10878):**
+  reload SUCCESS — a total reload failure with charon answering leaves the OLD config
+  effective, so the applied state is preserved and no SA is torn down; the next
+  successful Apply/Clear retries the diff + teardown. With charon unreachable
+  (#16853) the removed file stays removed, the empty set is promoted, teardown is
+  attempted, and the error still propagates. (A partial load is the #14589 exception
+  above: the recovered set charon actually runs is promoted and its departed SAs
+  torn down, while the error still propagates.) **A FAILED terminate is also load-bearing (#6542/#10878):**
   failed removals become `pendingTerminate` debt, while failed same-name changes
   become `pendingChanged` debt. Apply RETURNS a failed termination or reinitiation
   error instead of reporting success over a stale SA or an un-reestablished tunnel.
 - `Clear() error` — `manager.go`. Remove the xpf snippet, reload, and
   terminate every previously-applied connection's live SAs (#3941). Like Apply,
-  a total reload failure is returned and skips promotion/termination (#4898); a
+  a total reload failure with charon answering is returned and skips
+  promotion/termination (#4898); with charon unreachable (#16853) the removed
+  file stays removed, the empty set is promoted, teardown is attempted, and
+  the error is still returned; a
   partial clear (#14589) restores and re-loads the prior file when charon still
   holds prior connections (or promotes the empty set when it holds none),
   promotes that recovered set, and still returns the error. The commit path
