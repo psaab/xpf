@@ -240,6 +240,7 @@ var (
 	// security
 	refSecurityFlow                 = regRef("refSecurityFlow", ref("security", "flow"))
 	refFlowTCPSession               = regRef("refFlowTCPSession", ref("security", "flow", "tcp-session"))
+	refFlowTimeWaitState            = regRef("refFlowTimeWaitState", ref("security", "flow", "tcp-session", "time-wait-state"))
 	refFlowAging                    = regRef("refFlowAging", ref("security", "flow", "aging"))
 	refFlowTraceoptionsPacketFilter = regRef("refFlowTraceoptionsPacketFilter", ref("security", "flow", "traceoptions", "packet-filter"))
 	refSecurityLog                  = regRef("refSecurityLog", ref("security", "log"))

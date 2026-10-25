@@ -705,6 +705,15 @@ var filedFixed = map[string]string{
 	"system services ssh no-password-authentication":               "#16538",
 	"system services ssh no-passwords":                             "#16538",
 	"system services web-management api-auth metrics-require-auth": "#16538",
+	// #16662: the time-wait-state reader now expands the packed
+	// hierarchical tail (`time-wait-state session-timeout 120;`),
+	// so all three census sites (the deprecated alias spelling is
+	// the one the census enumerates) compile identically to the
+	// braced form. Moved here rather than deleted so the census
+	// keeps checking them in both directions.
+	"security flow tcp-session time-wait-state session-timeout":            "#16662",
+	"security flow tcp-session time-wait-state session-ageout":             "#16662",
+	"security flow tcp-session time-wait-state apply-to-half-closed-state": "#16662",
 }
 
 // filedByDesign is the category the inventory did not previously distinguish:
