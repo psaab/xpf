@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"sort"
 	"strings"
@@ -255,6 +256,31 @@ func validateDynamicAddressFeedServerEndpointStrict(cfg *Config) error {
 				"resolves to https://)",
 				display, RedactURL(resolved))
 		}
+		// #16656: an IP-literal host that the shared feed destination
+		// predicate would refuse can never be fetched — the runtime SSRF
+		// guard (#10177/#14177) refuses every fetch, so the server
+		// registers no content and any bound name fails CLOSED at runtime
+		// (#5645 whole-snapshot reject). Reject it at commit (strict) /
+		// warn (lenient, via the shared wrapper) unless this server's
+		// `allow-destination` leaves cover the literal. Hostnames are NOT
+		// gated here: their answers are unknowable at commit and stay
+		// runtime-enforced.
+		if cls, ip, blocked := feedServerBlockedDestinationLiteral(fs); blocked {
+			display := fs.Name
+			if display == "" {
+				display = name
+			}
+			return fmt.Errorf("security dynamic-address feed-server %q host "+
+				"%s is a %s address — the feed destination policy "+
+				"(#10177/#14177) refuses every fetch to it, so it registers "+
+				"no feeds and any address-name bound to it is unresolvable "+
+				"and fails CLOSED at runtime (omitted -> "+
+				"__unsupported_address__ -> whole-snapshot preflight "+
+				"reject, #5645), not silently match-none; use a public "+
+				"destination or add `allow-destination <prefix>` covering "+
+				"it on this feed-server (#16656)",
+				display, ip.String(), cls)
+		}
 		// #14723: a malformed or mistakable per-feed path (unparseable,
 		// //network-path, or scheme:opaque / absolute) must reject at
 		// commit. The runtime join previously fell back to fetching the
@@ -282,6 +308,54 @@ func validateDynamicAddressFeedServerEndpointStrict(cfg *Config) error {
 		}
 	}
 	return nil
+}
+
+// feedServerBlockedDestinationLiteral reports (class, ip, true) when the
+// feed-server's resolved base URL host — or a bare `hostname` leaf — is an
+// IP literal that FeedDestinationBlocked refuses and that none of the
+// server's AllowedDestinationPrefixes covers (#16656). Hostname hosts
+// return blocked=false: their DNS answers are only knowable (and only
+// enforced) at fetch time.
+func feedServerBlockedDestinationLiteral(fs *FeedServer) (string, netip.Addr, bool) {
+	if fs == nil {
+		return "", netip.Addr{}, false
+	}
+	host := ""
+	if resolved := feedServerResolvedBaseURL(fs); resolved != "" {
+		if u, err := url.Parse(resolved); err == nil {
+			host = u.Hostname()
+		}
+	}
+	if host == "" {
+		host = fs.Hostname
+		// A hostname leaf may carry userinfo or a port; strip both the
+		// way url.URL.Hostname would on the resolved https:// form.
+		if i := strings.LastIndex(host, "@"); i >= 0 {
+			host = host[i+1:]
+		}
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		host = strings.Trim(host, "[]")
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return "", netip.Addr{}, false
+	}
+	ip = ip.Unmap()
+	if !FeedDestinationBlocked(ip) {
+		return "", ip, false
+	}
+	allowlist := make([]netip.Prefix, 0, len(fs.AllowedDestinationPrefixes))
+	for _, raw := range fs.AllowedDestinationPrefixes {
+		if p, perr := netip.ParsePrefix(raw); perr == nil {
+			allowlist = append(allowlist, p)
+		}
+	}
+	if FeedDestinationAllowed(ip, allowlist) {
+		return "", ip, false
+	}
+	return FeedDestinationClass(ip), ip, true
 }
 
 // feedEntryPathMalformed mirrors the rejection in feeds.joinFeedURL

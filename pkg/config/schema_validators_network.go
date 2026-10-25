@@ -244,6 +244,25 @@ func ValidateIPv6CIDROrBare(raw string) error {
 	return ValidateIPv6CIDR(raw)
 }
 
+// ValidateFeedDestinationPrefix accepts any IPv4 or IPv6 CIDR for the
+// dynamic-address feed-server `allow-destination` override leaf (#16656).
+// A bare IP is rejected: the runtime matches destinations against masked
+// prefixes, so an unmasked value would silently widen or narrow the
+// operator's intent.
+func ValidateFeedDestinationPrefix(raw string) error {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return fmt.Errorf("missing value (expected a destination prefix, e.g. 10.0.0.0/8)")
+	}
+	if _, err := netip.ParsePrefix(trimmed); err != nil {
+		if _, parseErr := netip.ParseAddr(trimmed); parseErr == nil {
+			return fmt.Errorf("missing /prefix-length (got %q; write e.g. %s/32 or the containing prefix)", raw, trimmed)
+		}
+		return fmt.Errorf("not a valid destination prefix (expected e.g. 10.0.0.0/8): %v", err)
+	}
+	return nil
+}
+
 // parseCIDRStrict is the shared require-a-prefix CIDR parse for the two
 // family validators. It upgrades the two common operator mistakes to
 // targeted messages: a bare IP (missing /prefix-length) and outright

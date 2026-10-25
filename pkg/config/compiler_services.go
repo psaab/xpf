@@ -1010,6 +1010,19 @@ func compileDynamicAddress(node *Node, sec *SecurityConfig) error {
 						fs.ShrinkGuardMinDrop = n
 					}
 				}
+			case "allow-destination":
+				// #16656: multi leaf — repeated statements and bracketed
+				// lists both land here; accumulate every value token.
+				for _, k := range prop.Keys[1:] {
+					if k != "" {
+						fs.AllowedDestinationPrefixes = append(fs.AllowedDestinationPrefixes, k)
+					}
+				}
+				for _, vn := range prop.Children {
+					if vn.IsLeaf && len(vn.Keys) >= 1 && vn.Keys[0] != "" {
+						fs.AllowedDestinationPrefixes = append(fs.AllowedDestinationPrefixes, vn.Keys[0])
+					}
+				}
 			case "feed-name":
 				appendFeedEntry := func(entry FeedEntry) {
 					// #15682: upsert by feed name within this server. A
