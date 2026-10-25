@@ -700,6 +700,23 @@ func (m *Manager) ApplyFull(fc *FullConfig) error {
 		if err := communityListCollision(fc.PolicyOptions); err != nil {
 			return err
 		}
+		// #16867 render-side belt, same posture: frrName aliases unsafe
+		// and overlong (>128-byte) names, so a literal alias spelling and
+		// its raw source name would render as one FRR object and silently
+		// fuse two distinct policies. The commit gate reserves the alias
+		// marker; a tolerant-path pair fails the apply CLOSED here.
+		if err := frrNameAliasCollision(fc.PolicyOptions); err != nil {
+			return err
+		}
+		// #16867 Gate5 cross-family belt, same posture: the bounded
+		// alias erases generated-family suffix separation, so a composed
+		// BGP chain final and a per-source redist final (and narrowed /
+		// QNH / fixed generated finals) can coincide across families —
+		// a collision no per-family guard compares. Refuse before any
+		// write or reload; FRR keeps its last-good config.
+		if err := emittedRouteMapFinalCollision16867(fc); err != nil {
+			return err
+		}
 	}
 
 	section, overlays := m.buildManagedSectionWithQNH11447(fc)

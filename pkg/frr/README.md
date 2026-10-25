@@ -291,6 +291,43 @@ The render belts cover the path the gate cannot reach:
   omitting `neighbor X route-map NAME out` REMOVES the outbound filter.
   Access-list names are already hashed and sanitized by `routeFilterACLName`.
 
+  #16867: a single-token name over FRR's 128-byte YANG `list-name` bound
+  (`config.FRRNameMaxLen`, the `ip|ipv6 prefix-list` leaf — measured
+  accepted at 128 bytes, rejected at 129) takes the same alias, with its
+  fragment truncated so the alias stays within the bound; FRR otherwise
+  rejects the leaf with "Unsatisfied length", leaves a half-built
+  match-condition node, and aborts five routing daemons on the next
+  `show running-config`. At commit the bound is enforced only on the
+  prefix-list definition leaf (`ValidateFRRPrefixListName`): route-map,
+  community-list names were measured NOT length-bounded. AS-path
+  definition names are likewise unbounded, but `match as-path`
+  references land in the YANG `filter:access-list-name` leaf
+  (length 1..128), so the belt aliases every class over the bound at
+  match sites too. YANG counts characters; the bound here is bytes —
+  the conservative direction against the measured 129-byte rejection.
+  The alias infix (`-xpfesc-`, `config.FRRNameEscapeMarker`) is a
+  RESERVED namespace: `ValidateFRRObjectName` refuses any operator name
+  carrying it, so a literal alias A = frrName(L) can never be committed
+  beside its overlong/unsafe source L and merge with it in FRR. Two
+  fail-closed pair belts cover what the leaf gate cannot: the compiled-
+  config gate (`validateFRRNameAliasCollisionStrict`, strict reject /
+  lenient warn) and the render belt (`frrNameAliasCollision`, wired
+  into `ApplyFull`) refuse any same-class pair whose final rendered
+  names coincide; `bgpComposedChainCollision` likewise compares
+  composed chain names AFTER `frrName`.
+  Gate5: the bounded alias also erases GENERATED-family suffix
+  separation (a composed `-xpf-chain` final can equal a per-source
+  `-xpf-redist` final), so `emittedRouteMapFinalCollision16867`
+  (ApplyFull, after every per-family belt) compares final identities
+  ACROSS all emitted route-map populations — operator, composed BGP,
+  composed redist, per-source/variant redist, narrowed aliases, QNH
+  metric maps, and the fixed generated maps (derived from the #16871
+  registry) — over exactly the emitter's enumerated sets
+  (`redistReferencedProtocols14380` for per-source maps; Gate6: no
+  unfiltered whole-domain phantom enumeration) — and refuses before
+  any write or reload. The per-family guards and the #16871 registry are
+  unchanged; this belt only adds the cross-family union.
+
 `TestEveryRenderedObjectNameIsOneTokenAndResolves9493` is a behavioural census,
 not a list of sites. It renders a config whose every name carries a space and
 checks every reference against the definitions. A missed definition or

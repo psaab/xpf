@@ -440,6 +440,24 @@ func runUniformGatesLogFeedRouting(tree *ConfigTree, cfg *Config, opts compileOp
 		}
 	}
 
+	// #16867: frrName-alias pair-collision gate. frrName aliases unsafe
+	// and overlong (>128-byte) names to a literal "-xpfesc-" alias, so
+	// an operator name spelled identically to another name's alias
+	// renders as the same FRR object and FRR merges the two distinct
+	// policies. The leaf validator reserves the alias marker (no
+	// literal alias can be authored); this pair-level backstop runs on
+	// the fully-compiled *Config so authoring order cannot hide a pair.
+	// Strict on commit / commit-check, lenient-warn on load / peer-sync
+	// (#1960; pkg/frr frrNameAliasCollision fails the apply CLOSED).
+	if err := validateFRRNameAliasCollisionStrict(cfg); err != nil {
+		if opts.lenientFRRNameAliasCollision16867 {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("FRR name alias collision (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #16567: BGP group type internal|external cross-check. A typo'd type
 	// or a type contradicting the effective peer-as/local AS previously
 	// committed with only the generic advisory while FRR followed peer-as.

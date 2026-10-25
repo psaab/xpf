@@ -334,6 +334,10 @@ func bgpComposedChainCollision(fc *FullConfig) error {
 				return
 			}
 			name := composedChainName(chain)
+			// #16867: the final emitted identity is frrName(name) — an
+			// overlong composed name aliases at render. The operator and
+			// seen comparisons below therefore run in that final space.
+			finalName := frrName(name)
 			// #8362 follow-up / #16871: a composed name can also collide with a
 			// RESERVED generated route-map (see reservedGeneratedRouteMaps16871).
 			// The reserved ReservedChainSuffix does NOT make those names
@@ -349,7 +353,7 @@ func bgpComposedChainCollision(fc *FullConfig) error {
 			// below. The table is the single place a future generated name is
 			// registered; do not add another hand-written comparison here.
 			for _, reserved := range reservedGeneratedRouteMaps16871 {
-				if name == reserved.name {
+				if name == reserved.name || finalName == frrName(reserved.name) {
 					firstErr = fmt.Errorf(
 						"composed BGP policy-chain route-map %q (from chain %v) collides "+
 							"with the reserved %s route-map of that exact name; FRR merges "+
@@ -360,24 +364,26 @@ func bgpComposedChainCollision(fc *FullConfig) error {
 					return
 				}
 			}
-			if _, ok := fc.PolicyOptions.PolicyStatements[name]; ok {
-				firstErr = fmt.Errorf(
-					"composed BGP policy-chain route-map %q (from chain %v) "+
-						"collides with an operator policy-statement of that exact "+
-						"name; FRR merges same-named route-maps, so the collision "+
-						"could silently alter BGP filtering — refusing to render "+
-						"(rename the operator policy-statement or a chain member, "+
-						"#5277)", name, chain)
-				return
+			for opName := range fc.PolicyOptions.PolicyStatements {
+				if frrName(opName) == finalName {
+					firstErr = fmt.Errorf(
+						"composed BGP policy-chain route-map %q (from chain %v) "+
+							"collides with an operator policy-statement %q of the "+
+							"same rendered name %q; FRR merges same-named route-maps, so the collision "+
+							"could silently alter BGP filtering — refusing to render "+
+							"(rename the operator policy-statement or a chain member, "+
+							"#5277/#16867)", name, chain, opName, finalName)
+					return
+				}
 			}
-			if prev, ok := seen[name]; ok && !equalStringSlice(prev, chain) {
+			if prev, ok := seen[finalName]; ok && !equalStringSlice(prev, chain) {
 				firstErr = fmt.Errorf(
 					"BGP policy-chains %v and %v derive the same composed "+
 						"route-map name %q; FRR would merge them — rename a "+
-						"policy-statement to disambiguate (#5277)", prev, chain, name)
+						"policy-statement to disambiguate (#5277)", prev, chain, finalName)
 				return
 			}
-			seen[name] = chain
+			seen[finalName] = chain
 		})
 	}
 	check(fc.BGP)

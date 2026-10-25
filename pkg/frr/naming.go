@@ -291,6 +291,62 @@ func routeFilterACLNameCollision(po *config.PolicyOptionsConfig) error {
 // collisions need no gate: names embed a 64-bit digest over the full
 // structured identity, so distinct identities collide with probability
 // 2^-64 (Opus review, PR #12321).
+// frrNameAliasCollision fails the apply CLOSED when two distinct operator
+// names in the same FRR object class render to the SAME final FRR name,
+// or an operator name is spelled identically to another name's frrName
+// alias (#16867). frrName is deliberately lossy — it aliases whitespace /
+// control-bearing names and, since #16867, single-token names over FRR's
+// 128-byte list-name bound — so a literal alias A = frrName(L) of an
+// overlong (or unsafe) raw name L renders byte-identically to L itself.
+// FRR keys prefix-lists, community-lists, as-path access-lists and
+// route-maps by name within each class and MERGES same-named objects, so
+// the pair would silently fuse two distinct policies into one. The
+// commit gate makes the pair uncommittable (ValidateFRRObjectName
+// rejects the reserved alias marker); this belt covers the tolerant
+// load / peer-sync / rollback path, where both spellings can arrive
+// already-persisted. Mirrors communityListCollision; deterministic
+// sorted order so the first offending pair is reported stably.
+func frrNameAliasCollision(po *config.PolicyOptionsConfig) error {
+	if po == nil {
+		return nil
+	}
+	classes := []struct {
+		kind  string
+		names []string
+	}{
+		{"prefix-list", sortedKeys16867(po.PrefixLists)},
+		{"community", sortedKeys16867(po.Communities)},
+		{"as-path", sortedKeys16867(po.ASPaths)},
+		{"policy-statement", sortedKeys16867(po.PolicyStatements)},
+	}
+	for _, class := range classes {
+		seen := make(map[string]string, len(class.names))
+		for _, name := range class.names {
+			final := frrName(name)
+			if prev, ok := seen[final]; ok && prev != name {
+				return fmt.Errorf(
+					"%s names %q and %q render as the same FRR name %q; "+
+						"FRR merges same-named objects and would silently fuse "+
+						"two distinct policies (#16867) — refusing to render",
+					class.kind, prev, name, final)
+			}
+			seen[final] = name
+		}
+	}
+	return nil
+}
+
+// sortedKeys16867 returns the keys of a PolicyOptions name map in sorted
+// order (deterministic first-error reporting for the collision belts).
+func sortedKeys16867[V any](m map[string]V) []string {
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func inlinePrefixListNameCollision(po *config.PolicyOptionsConfig) error {
 	names := make([]string, 0, len(po.PrefixLists))
 	for name := range po.PrefixLists {
