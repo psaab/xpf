@@ -147,9 +147,11 @@ the apply path pays no fsync (the file is regenerated on every apply).
 - `ConnectionNamesForVPN(cfg *config.Config) map[string]string`,
   `RenderedVPNSet(cfg *config.Config) map[string]bool` — `policy.go` (#15024).
   `ConnectionNamesForVPN` maps each surviving VPN to its swanctl connection
-  name (the gateway name for a named-gateway group, else the VPN name);
-  `RenderedVPNSet` is the VPN-keyed set built on it, so selector fences count
-  every grouped member. Nil means the render failed (UNKNOWN — fail closed).
+  name (the gateway name for a named-gateway group, else the VPN name —
+  or the `inline-<name>` prefixed name when an inline VPN's name collides
+  with a referenced gateway object, #16676); `RenderedVPNSet` is the
+  VPN-keyed set built on it, so selector fences count every grouped
+  member. Nil means the render failed (UNKNOWN — fail closed).
 - `SANameIndex`, `BuildSANameIndex(ipsecCfg) SANameIndex`,
   `(SANameIndex).VPNs(saName) []string`, `(SANameIndex).Collisions() []string` —
   `policy.go`. The inverse of the render (#9511): every SA name
@@ -345,7 +347,11 @@ all files stay in `package ipsec`, so the public API is unchanged.
   secret comma-joining the members' distinct PSKs. Two per-VPN connections
   made a peer that runs both VPNs as children of one IKE SA reject the
   second child's traffic selectors (TS_UNACCEPTABLE). Inline
-  literal/hostname and empty endpoints keep per-VPN connections. Child SA
+  literal/hostname and empty endpoints keep per-VPN connections — except
+  when an inline VPN's name equals a gateway object another VPN
+  references (#16676): strict commit rejects that naming, and the
+  tolerant render separates it as `inline-<name>` so each peer keeps
+  its own connection instead of folding into the gateway's. Child SA
   names are unchanged, so `--initiate --child` and the #9624 gate are
   unaffected; the IKE SA name in `--list-sas` is now the gateway name.
 - IKE version negotiation supports v1-only, v2-only, or dual (default).

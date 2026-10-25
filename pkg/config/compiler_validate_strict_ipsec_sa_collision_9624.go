@@ -71,3 +71,74 @@ func validateIPsecSANameCollisionsStrict(cfg *Config) error {
 	}
 	return nil
 }
+
+// validateIPsecGatewayNameCollisionStrict rejects a config in which a
+// VPN with an inline/empty endpoint (no gateway object) has the same
+// (sanitized) name as a gateway object that at least one other VPN
+// references (#16676, R3-A16-01).
+//
+// Since #15024 a VPN referencing a defined gateway renders under the
+// gateway name, while an inline VPN renders under its own name. Both
+// share one swanctl connection namespace. When an inline VPN named
+// "siteA" coexists with gateway "siteA" referenced by VPN "zzz", the
+// two would fold into one connection "siteA": the first sorted member
+// supplies remote_addrs/auth/proposals and the other's peer is dropped
+// silently, so its children (including the st0 if_id) negotiate with
+// the wrong peer. The render belt (gatewayKeyFor's "inline-" prefix
+// in pkg/ipsec) separates them by construction on tolerant load; this
+// gate makes strict commit reject the ambiguous naming so the
+// operator renames one object. VPNs sharing the SAME gateway object
+// intentionally share a connection (#15024) and are not rejected; a
+// gateway object no VPN references, and a VPN whose name equals its
+// OWN referenced gateway, fold with no second peer and are accepted.
+func validateIPsecGatewayNameCollisionStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	ipsec := &cfg.Security.IPsec
+	if len(ipsec.VPNs) == 0 || len(ipsec.Gateways) == 0 {
+		return nil
+	}
+	// Gateway names (sanitized, as rendered) referenced as a gateway
+	// object by at least one VPN.
+	referenced := make(map[string]string) // sanitized gateway name -> gateway name
+	for _, vpn := range ipsec.VPNs {
+		if vpn == nil || vpn.Gateway == "" {
+			continue
+		}
+		if _, ok := ipsec.Gateways[vpn.Gateway]; ok {
+			referenced[ipsecname.SwanctlValue(vpn.Gateway)] = vpn.Gateway
+		}
+	}
+	if len(referenced) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(ipsec.VPNs))
+	for name := range ipsec.VPNs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		vpn := ipsec.VPNs[name]
+		if vpn == nil {
+			continue
+		}
+		// Named-gateway VPNs intentionally share their gateway's
+		// connection; only inline/empty (non-gateway-object) VPNs
+		// key by their own name and can fold into it.
+		if vpn.Gateway != "" {
+			if _, ok := ipsec.Gateways[vpn.Gateway]; ok {
+				continue
+			}
+		}
+		key := ipsecname.SwanctlValue(name)
+		if gwName, clash := referenced[key]; clash {
+			return fmt.Errorf("security ipsec vpn %q has an inline ike gateway endpoint but its name "+
+				"collides with ike gateway %q referenced by another vpn: both would render as the "+
+				"single swanctl connection %q, so one peer would be dropped and its traffic "+
+				"negotiated with the wrong peer — rename the vpn or the gateway (#16676)",
+				name, gwName, key)
+		}
+	}
+	return nil
+}
