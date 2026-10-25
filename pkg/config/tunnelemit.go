@@ -257,6 +257,8 @@ func mergeWireguardUnitPeers(iface *InterfaceConfig, unitNums []int) *TunnelConf
 	// share the parent's WgPeers backing array, so appending here would write
 	// into the interface-level tunnel every sibling also reads. The name is
 	// preserved -- this endpoint is still the interface-level device.
+	// cloneForUnit also clears Addresses (#16588); this merge only reads
+	// WgPeers and RoutingInstance, so that is inert here.
 	merged := iface.Tunnel.cloneForUnit(iface.Tunnel.Name)
 	if effectiveRI != "" {
 		merged.RoutingInstance = effectiveRI
