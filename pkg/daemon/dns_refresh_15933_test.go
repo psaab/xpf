@@ -332,32 +332,29 @@ writerLanded:
 	}
 }
 
-// B2 (#15962, round-3): order is tick-publish-first (baseline =
-// actually-applied seed) -> same-generation background apply via the
+// B2 (#15962, round-3; #16606 update): order is tick-publish-first
+// (baseline = actually-applied seed, store now publishes the refreshed
+// generation) -> background apply of that published generation via the
 // REAL applyConfigLocked exit lands divergent B -> DNS flaps back to
 // seed. Removing the applyConfigLocked-exit reconcile defer
 // (daemon_apply.go) leaves baseline=seed, flap-back compares equal,
-// and this cell REDs. The steady-state assert is on the baseline
-// (the tick compares clone-vs-baseline; after the flap the applied
-// clone state is seed, so no further publish is owed — verified by
-// baseline value, since cfg DNS fields legitimately stay at B on the
-// store copy which the tick never mutates).
+// and this cell REDs.
 func TestDNSRefreshBaselineReconciledAfterBackgroundReapply15962(t *testing.T) {
 	set := stubDNS15933(t, map[string][]string{
 		"global.example.com": {"10.0.0.1"},
 		"local.example.com":  {"10.0.0.2"},
 	})
 	d, dp, s := dnsRealDaemon15962(t)
-	cfg := s.ActiveConfig()
 
-	// 1) Tick-publish-first: baseline = seed actually applied.
+	// 1) Tick-publish-first: baseline = seed actually applied, and the
+	// store publishes the refreshed generation (#16606).
 	set(map[string][]string{"global.example.com": {"10.1.1.1"}, "local.example.com": {"10.0.0.2"}})
 	d.refreshDNSOnce()
 	if dp.applyCalls != 1 {
 		t.Fatalf("seed tick applies = %d, want 1", dp.applyCalls)
 	}
-	// (seed digest asserted via the flap-back apply count below)
-	// 2) Background apply of the SAME generation (real exit) lands B.
+	cfg := s.ActiveConfig()
+	// 2) Background apply of the SAME (published) generation (real exit) lands B.
 	set(map[string][]string{"global.example.com": {"10.9.9.9"}, "local.example.com": {"10.0.0.2"}})
 	if err := d.applyActiveConfigResult(); err != nil {
 		t.Fatalf("background apply: %v", err)
@@ -375,7 +372,7 @@ func TestDNSRefreshBaselineReconciledAfterBackgroundReapply15962(t *testing.T) {
 	if dp.applyCalls != 3 {
 		t.Fatalf("flap-back applies = %d, want 3 (baseline not reconciled by background apply; removing daemon_apply.go reconcile defer REDs this)", dp.applyCalls)
 	}
-	if got := d.dnsBaselineFor(cfg); got == nil {
+	if got := d.dnsBaselineFor(s.ActiveConfig()); got == nil {
 		t.Fatal("baseline vanished after flap")
 	}
 }
@@ -416,14 +413,16 @@ func TestDNSRefreshInterleavedSameGenApplyFlapBack15962(t *testing.T) {
 	t.Cleanup(restore)
 	phase.Store(99) // compile-time inside dnsRealDaemon15962: default arm (W)
 	d, dp, s := dnsRealDaemon15962(t)
-	cfg := s.ActiveConfig()
 
-	// Seed baseline B via a real tick publish.
+	// Seed baseline B via a real tick publish. #16606: the store
+	// publishes the refreshed generation, so re-read it for baseline
+	// lookups below.
 	phase.Store(0)
 	d.refreshDNSOnce()
 	if dp.applyCalls != 1 {
 		t.Fatalf("seed tick applies = %d, want 1", dp.applyCalls)
 	}
+	cfg := s.ActiveConfig()
 	if got := d.dnsBaselineFor(cfg); got == nil {
 		t.Fatal("no baseline after seed tick")
 	}
@@ -456,6 +455,8 @@ func TestDNSRefreshInterleavedSameGenApplyFlapBack15962(t *testing.T) {
 	}
 	// Baseline must be the actually-applied T2, not the surviving W:
 	// assert the global identity directly (identity keys are scoped).
+	// #16606: re-read the published generation (T2's clone is active).
+	cfg = s.ActiveConfig()
 	base := d.dnsBaselineFor(cfg)
 	foundT2 := false
 	for _, vs := range base {
@@ -476,7 +477,7 @@ func TestDNSRefreshInterleavedSameGenApplyFlapBack15962(t *testing.T) {
 	phase.Store(4)
 	d.refreshDNSOnce()
 	if dp.applyCalls != 4 {
-		t.Fatalf("flap-back stuck: applies = %d, want 4 (dataplane T2 vs baseline W suppressed) baseline=%v", dp.applyCalls, d.dnsBaselineFor(cfg))
+		t.Fatalf("flap-back stuck: applies = %d, want 4 (dataplane T2 vs baseline W suppressed) baseline=%v", dp.applyCalls, d.dnsBaselineFor(s.ActiveConfig()))
 	}
 	d.refreshDNSOnce()
 	if dp.applyCalls != 4 {

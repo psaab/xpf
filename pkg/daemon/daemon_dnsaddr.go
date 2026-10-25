@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"time"
 
@@ -45,46 +44,14 @@ func dnsBookHasNames(cfg *config.Config) bool {
 	return has
 }
 
-// dnsIdentityKey builds a collision-free snapshot key for one dns-name
-// entry. The scope is length-prefixed so no operator-authored name (which
-// may legally contain '/', e.g. "address-book/eng-book/svc") can alias
-// another scope — change detection must merge views on identity, not on
-// name shadowing (#15933 C4, #15962 fold).
-func dnsIdentityKey(scope, name string) string {
-	return fmt.Sprintf("%d:%s%s", len(scope), scope, name)
-}
-
 // snapshotDNSAnswers captures identity->prefixes for every dns-name entry,
 // for change detection across a refresh (#15933, #15962 fold). Callers
 // that read a published config's DNS fields must hold applySem (or own
 // the config), because the apply path re-resolves in place under applySem.
+// The enumeration itself lives in config.DNSAnswersSnapshot so the
+// userspace hybrid guard compares exactly the same identities (#16606).
 func snapshotDNSAnswers(cfg *config.Config) map[string][]string {
-	out := map[string][]string{}
-	if cfg == nil {
-		return out
-	}
-	scan := func(scope string, b *config.AddressBook) {
-		if b == nil {
-			return
-		}
-		for name, a := range b.Addresses {
-			if a != nil && a.DNSName != "" {
-				out[dnsIdentityKey(scope, name)] = append([]string(nil), a.DNSAddresses...)
-			}
-		}
-	}
-	scan("global/", cfg.Security.AddressBook)
-	for bookName, nb := range cfg.Security.NamedAddressBooks {
-		if nb != nil {
-			scan("address-book/"+bookName+"/", &nb.AddressBook)
-		}
-	}
-	for zoneName, z := range cfg.Security.Zones {
-		if z != nil {
-			scan(config.ZoneLocalQualify(zoneName, ""), z.AddressBook)
-		}
-	}
-	return out
+	return config.DNSAnswersSnapshot(cfg)
 }
 
 func dnsAnswersEqual(a, b map[string][]string) bool {
@@ -232,6 +199,18 @@ func (d *Daemon) recordDNSBaselineForce(cfg *config.Config, answers map[string][
 // has just been superseded on the dataplane), so a CAS would only ever
 // drop the newest record (round-4 B1). Returns (true,nil) only when
 // actually applied.
+//
+// #16606: on success the refreshed clone is ALSO published as the
+// store's compiled active config (Store.PublishRefreshedDNS, still
+// under this same applySem hold and only if base is still active).
+// Before this, the clone lived only in the dataplane's lastSnapshot:
+// store.ActiveConfig() kept the stale answers, so the next scheduler
+// edge or route-overlay republish rebuilt address-book rows from the
+// stale generation and silently re-shipped the old answer — and
+// because apply-time re-resolution had already mutated the clone to
+// the actually-applied answers, publishing the clone (not the tick's
+// proposal) keeps the store, the baseline, and the helper on exactly
+// the same answers. The baseline is keyed to the published clone.
 func (d *Daemon) applyDNSRefreshedConfig(base, refreshed *config.Config) (bool, error) {
 	if !d.beginBackgroundApply(context.Background(), "dnsAddressRefresh") {
 		return false, nil
@@ -243,7 +222,10 @@ func (d *Daemon) applyDNSRefreshedConfig(base, refreshed *config.Config) (bool, 
 	if d.applyBodyForTest != nil {
 		d.applyBodyForTest(refreshed)
 		d.policyInvalidationPublishLanded = true
-		d.recordDNSBaselineForce(base, snapshotDNSAnswers(refreshed))
+		if !d.store.PublishRefreshedDNS(base, refreshed) {
+			return false, nil
+		}
+		d.recordDNSBaselineForce(refreshed, snapshotDNSAnswers(refreshed))
 		// Test hook: PublishLanded was forced true just above, so this
 		// stamps exactly when the pre-helper hook gate did (store is
 		// already known non-nil here; the helper re-checks it).
@@ -254,7 +236,17 @@ func (d *Daemon) applyDNSRefreshedConfig(base, refreshed *config.Config) (bool, 
 	if err != nil {
 		return false, err
 	}
-	d.recordDNSBaselineForce(base, snapshotDNSAnswers(refreshed))
+	// Publish AFTER the real apply: applyConfigLocked's deferred
+	// recordAppliedDNSBaseline(refreshed) ran during the apply (its
+	// store-active check fails pre-publish, so it correctly did not
+	// record) and its in-place re-resolution is what the baseline and
+	// the store must both reflect.
+	if !d.store.PublishRefreshedDNS(base, refreshed) {
+		// A newer generation was promoted concurrently; the refreshed
+		// apply was superseded. Do not claim this generation's baseline.
+		return false, nil
+	}
+	d.recordDNSBaselineForce(refreshed, snapshotDNSAnswers(refreshed))
 	d.stampActiveAppliedIfConvergedUnderSem(nil)
 	return true, nil
 }
