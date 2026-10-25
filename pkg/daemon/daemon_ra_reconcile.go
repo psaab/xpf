@@ -226,18 +226,22 @@ func (d *Daemon) desiredClusterRA(cfg *config.Config) []*config.RAInterfaceConfi
 // clusterRAConfigSets derives the active desired set and the inactive shared-
 // identity interfaces that must be stopped silently. A stable RETH link-local
 // is the cluster's router identity, not a node's: sending a demotion goodbye
-// would also withdraw the peer's live default route. If both nodes are BACKUP,
-// the stale route may persist until Router Lifetime expiry; a later MASTER's
-// RA refresh repairs it. The shared-identity check runs on the CONFIGURED
-// source of every active sender (Status reports an empty source until the
-// conn opens), and on configured senders with no live sender at all, so an
-// unopened shared-identity sender cannot fall through to Apply's graceful
-// goodbye (D34-01).
+// would also withdraw the peer's live default route. A configured RETH-unit
+// link-local installed as an RG VIP (e.g. a shared-section fe80::1/64 on
+// reth0.50) is the same shared identity even though it does not match the
+// auto fe80::…bf72… pattern (#16624, residual of #14978). If both nodes are
+// BACKUP, the stale route may persist until Router Lifetime expiry; a later
+// MASTER's RA refresh repairs it. The shared-identity check runs on the
+// CONFIGURED source of every active sender (Status reports an empty source
+// until the conn opens), and on configured senders with no live sender at
+// all, so an unopened shared-identity sender cannot fall through to Apply's
+// graceful goodbye (D34-01).
 func (d *Daemon) clusterRAConfigSets(cfg *config.Config) ([]*config.RAInterfaceConfig, []string) {
 	masters := d.snapshotRethMasterState()
 	ownedIfaces := make(map[string]bool)
 	inactiveIfaces := make(map[string]bool)
 	rgScopedIfaces := make(map[string]bool)
+	rgByIface := make(map[string]int)
 	for _, name := range rethInterfacesMatchingRG(cfg, func(rgID int) bool { return masters[rgID] }) {
 		ownedIfaces[name] = true
 	}
@@ -246,6 +250,13 @@ func (d *Daemon) clusterRAConfigSets(cfg *config.Config) ([]*config.RAInterfaceC
 	}
 	for _, name := range rethInterfacesMatchingRG(cfg, func(int) bool { return true }) {
 		rgScopedIfaces[name] = true
+	}
+	// iface -> owning RG, for the per-RG VIP check below. Walk each RG that
+	// owns any interface once; kernel names match buildRAConfigs output.
+	for _, rgID := range rgIDsForIfaces(cfg) {
+		for _, name := range rethInterfacesForRG(cfg, rgID) {
+			rgByIface[name] = rgID
+		}
 	}
 
 	// Node-local RA interfaces (no redundancy group) are kept on every node,
@@ -256,6 +267,10 @@ func (d *Daemon) clusterRAConfigSets(cfg *config.Config) ([]*config.RAInterfaceC
 	// sender, because Status reports an empty source until its conn opens and
 	// would otherwise miss an unopened shared-identity sender and let Apply
 	// withdraw the peer's router with a goodbye.
+	peerCfgOnce16624, _ := d.peerRAConfig(cfg)
+	sharedCheck := func(rgID int, source string) bool {
+		return isSharedRASourceBothViews(cfg, peerCfgOnce16624, rgID, source)
+	}
 	allRA := d.buildRAConfigs(cfg)
 	byIface := make(map[string]*config.RAInterfaceConfig, len(allRA))
 	for _, cfgRA := range allRA {
@@ -287,7 +302,7 @@ func (d *Daemon) clusterRAConfigSets(cfg *config.Config) ([]*config.RAInterfaceC
 		if cfgRA := byIface[sender.Interface]; cfgRA != nil && cfgRA.SourceLinkLocal != "" {
 			source = cfgRA.SourceLinkLocal
 		}
-		if isSharedStableRASource(source) {
+		if sharedCheck(rgByIface[sender.Interface], source) {
 			silentStop = append(silentStop, sender.Interface)
 		}
 	}
@@ -301,7 +316,7 @@ func (d *Daemon) clusterRAConfigSets(cfg *config.Config) ([]*config.RAInterfaceC
 		}
 		if inactiveIfaces[cfgRA.Interface] &&
 			!ownedIfaces[cfgRA.Interface] &&
-			isSharedStableRASource(cfgRA.SourceLinkLocal) {
+			sharedCheck(rgByIface[cfgRA.Interface], cfgRA.SourceLinkLocal) {
 			silentStop = append(silentStop, cfgRA.Interface)
 		}
 	}
@@ -342,6 +357,106 @@ func (d *Daemon) raSenderStatuses() []ra.SenderInfo {
 func isSharedStableRASource(source string) bool {
 	return cluster.IsStableRethLinkLocal(net.ParseIP(source))
 }
+
+// rgIDsForIfaces returns the distinct redundancy-group ids (>0) that own
+// at least one interface in cfg.
+func rgIDsForIfaces(cfg *config.Config) []int {
+	seen := make(map[int]bool)
+	var ids []int
+	for _, rgID := range cfg.RethRGOwners() {
+		if rgID > 0 && !seen[rgID] {
+			seen[rgID] = true
+			ids = append(ids, rgID)
+		}
+	}
+	sort.Ints(ids)
+	return ids
+}
+
+func ipInVIPSet(cidrs []string, srcIP net.IP) bool {
+	for _, cidr := range cidrs {
+		ip, _, err := net.ParseCIDR(cidr)
+		if err != nil {
+			ip = net.ParseIP(cidr)
+		}
+		if ip != nil && ip.Equal(srcIP) {
+			return true
+		}
+	}
+	return false
+}
+
+// isSharedRASource reports whether source is a shared router identity for
+// the given RG in cfg's own effective view: either the auto stable
+// pattern, or an address installed as an RG VIP for that group
+// (cfg.RethVIPsForRG). A shared-section RETH-unit link-local such as
+// fe80::1/64 is VIP-managed on the primary, so a demoted or cold-boot
+// standby must never goodbye it (#16624). VIPs are compared as canonical
+// IPs (CIDR-stripped). A source with no RG (rgID <= 0) can only match the
+// stable pattern. This is the single-view predicate; the production
+// paths use isSharedRASourceBothViews, which additionally requires the
+// peer node's effective view to install the same address — the fact that
+// distinguishes a shared-section address (identical on both nodes) from
+// a `groups nodeN` per-node address (different on each node).
+func isSharedRASource(cfg *config.Config, rgID int, source string) bool {
+	if isSharedStableRASource(source) {
+		return true
+	}
+	if cfg == nil || rgID <= 0 || source == "" {
+		return false
+	}
+	srcIP := net.ParseIP(source)
+	if srcIP == nil {
+		return false
+	}
+	for _, cidrs := range cfg.RethVIPsForRG(rgID) {
+		if ipInVIPSet(cidrs, srcIP) {
+			return true
+		}
+	}
+	return false
+}
+
+// isSharedRASourceBothViews is the production predicate. local must
+// classify the source as shared; when peer is non-nil the peer's
+// effective view must also install the source as a VIP of the same RG.
+// A nil peer (view unavailable) keeps the local verdict — fail-safe
+// toward silent clear for a locally VIP-managed source, preserving
+// #16624 when no tree is at hand (the clearRethRASendersWithoutGoodbye
+// synthetic-config tests).
+func isSharedRASourceBothViews(local, peer *config.Config, rgID int, source string) bool {
+	if !isSharedRASource(local, rgID, source) {
+		return false
+	}
+	if isSharedStableRASource(source) || peer == nil {
+		return true
+	}
+	return isSharedRASource(peer, rgID, source)
+}
+
+// peerRAConfig derives the peer node's effective compiled config from
+// the local store's active tree (a deep copy). ok=false when the local
+// config is not a two-node cluster config, the store/tree is
+// unavailable, or the peer view fails to compile.
+func (d *Daemon) peerRAConfig(localCfg *config.Config) (*config.Config, bool) {
+	if localCfg == nil || localCfg.Chassis.Cluster == nil || d == nil || d.store == nil {
+		return nil, false
+	}
+	peerID, ok := config.PeerNodeID(localCfg.Chassis.Cluster.NodeID)
+	if !ok {
+		return nil, false
+	}
+	tree := d.store.ActiveTree()
+	if tree == nil {
+		return nil, false
+	}
+	peerCfg, err := config.CompileConfigForNodeLenient(tree, peerID)
+	if err != nil || peerCfg == nil {
+		return nil, false
+	}
+	return peerCfg, true
+}
+
 
 // sortRAPrefixes orders an RA interface's advertised prefixes by a stable, total
 // key so the desired-set digest and ra.configEqual observe a deterministic order
