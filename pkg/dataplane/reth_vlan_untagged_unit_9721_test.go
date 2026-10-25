@@ -137,22 +137,37 @@ func TestVRRPRethVLANParentCarriesTheAdvertSourceForAnUntaggedUnit_9721(t *testi
 
 func TestVLANParentSourceIsOnlyForAnAddressedUntaggedUnitOfAVRRPReth_9721(t *testing.T) {
 	models := models9721(t, rethVLANUntaggedCfg9721(t))
-	for _, tc := range []struct{ name, why string }{
-		{"ge-0-0-4", "reth1's only untagged unit has no address, so it builds no VRRP instance"},
-		{"ge-0-0-3", "ge-0/0/3 is not a RETH, so nothing advertises from it"},
-	} {
-		m, ok := models[tc.name]
-		if !ok {
-			t.Errorf("no model for %s (the control would be vacuous); models=%v", tc.name, modelNames9721(models))
-			continue
-		}
-		if !m.IsVLANParent {
-			t.Errorf("%s is not rendered as a VLAN parent: %+v", tc.name, m)
-		}
-		if len(m.VLANParentAddresses) != 0 || m.KeepAddresses {
-			t.Errorf("%s carries VLANParentAddresses=%v KeepAddresses=%v, want neither: %s",
-				tc.name, m.VLANParentAddresses, m.KeepAddresses, tc.why)
-		}
+	// reth1: VRRP-backed, but its only untagged unit has no address, so it
+	// builds no VRRP instance and carries no advert source.
+	m, ok := models["ge-0-0-4"]
+	if !ok {
+		t.Fatalf("no model for ge-0-0-4 (the control would be vacuous); models=%v", modelNames9721(models))
+	}
+	if !m.IsVLANParent {
+		t.Errorf("ge-0-0-4 is not rendered as a VLAN parent: %+v", m)
+	}
+	if len(m.VLANParentAddresses) != 0 || m.KeepAddresses {
+		t.Errorf("ge-0-0-4 carries VLANParentAddresses=%v KeepAddresses=%v, want neither: "+
+			"reth1's only untagged unit has no address, so it builds no VRRP instance",
+			m.VLANParentAddresses, m.KeepAddresses)
+	}
+	// ge-0/0/3 is not a RETH, so nothing advertises from it: it must carry
+	// no advert source. Since #16795 it DOES carry its untagged unit's real
+	// address (10.0.3.1/24) with KeepAddresses — the two producers share the
+	// field, so this cell pins that only the real address is present.
+	m3, ok := models["ge-0-0-3"]
+	if !ok {
+		t.Fatalf("no model for ge-0-0-3 (the control would be vacuous); models=%v", modelNames9721(models))
+	}
+	if !m3.IsVLANParent {
+		t.Errorf("ge-0-0-3 is not rendered as a VLAN parent: %+v", m3)
+	}
+	if len(m3.VLANParentAddresses) != 1 || m3.VLANParentAddresses[0] != "10.0.3.1/24" {
+		t.Errorf("ge-0-0-3 carries VLANParentAddresses=%v, want only its untagged unit's real "+
+			"address [10.0.3.1/24] (#16795) and no advert source: it is not a RETH", m3.VLANParentAddresses)
+	}
+	if !m3.KeepAddresses {
+		t.Errorf("ge-0-0-3 carries its untagged unit's address but not KeepAddresses (#16795)")
 	}
 	// Non-vacuity for the reth1 control: it IS VRRP-backed.
 	if sub, ok := models["ge-0-0-4.50"]; !ok || len(sub.Addresses) != 1 || sub.Addresses[0] != src9721 {

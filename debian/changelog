@@ -9,6 +9,16 @@ xpf (0.0.0) unstable; urgency=medium
     differ from this process's own heartbeat session; a genuine
     duplicate chassis (different process, different session) still
     warns, and the unkeyed legacy path is unchanged.
+  * Interfaces/networkd: an untagged unit's address on a tagged
+    non-RETH parent is now rendered on the VLAN-parent .network
+    (#16795). The netlink reconcile installed it on the parent, but
+    the parent row rendered no address and no keep, so the
+    reconfigure tail stripped it as foreign on every apply whose
+    files changed. The parent row now carries the untagged units'
+    real addresses (Address= plus KeepConfiguration=static); RETH
+    parents keep only the VRRP advert source, standalone-vrrp-group
+    units stay foreign-kept and unrendered, and tagged-only parents
+    render exactly as before.
   * Cluster/config: an omitted `redundancy-group ip-monitoring
     global-weight` now defaults to 255, the Junos default (#16667).
     Previously it compiled to 0, so aggregate mode deducted nothing

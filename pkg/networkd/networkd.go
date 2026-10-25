@@ -116,9 +116,11 @@ type InterfaceConfig struct {
 
 	// VLANParentAddresses are addresses a VLAN parent carries ITSELF. Addresses
 	// is ignored for a VLAN parent, so a sub-interface's addresses cannot leak
-	// onto it; this field is the explicit exception. Its one producer is the
+	// onto it; this field is the explicit exception. Its producers are the
 	// VRRP advert source of a VRRP-backed RETH whose untagged unit binds its
-	// instance to the parent device (#9721).
+	// instance to the parent device (#9721) and the real addresses of
+	// untagged units on a non-RETH parent, which the dataplane installs on
+	// the parent device (#16795).
 	VLANParentAddresses []string
 
 	// KeepForeignStatic is true when an externally-owned static address
