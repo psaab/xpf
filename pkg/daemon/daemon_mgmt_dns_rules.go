@@ -286,15 +286,27 @@ type mgmtDNSRulePair struct {
 // main-table route. Tenant-VRF local traffic reaches the existing l3mdev
 // miss terminator at priority 2000 before these rules can match.
 
+// rtprotZStatic16782 is FRR's private rtnetlink protocol value for
+// staticd-installed routes (RTPROT_ZSTATIC, 196). It has no
+// golang.org/x/sys/unix counterpart; see pkg/routing/routes.go
+// rtprotZStatic and pkg/routing/fibimport.go clusterStaticProtocol.
+// Every operator static in the main table arrives with this spelling,
+// not RTPROT_STATIC (4), which only names manual ip-route statics.
+const rtprotZStatic16782 = 196
+
 // mgmtDNSRefusedNameserver reports whether a management-DHCP nameserver
-// must be refused steering/publication (#15059, A36-01 residual). Even
+// must be refused steering/publication (#15059, #16782). Even
 // DNS-scoped steering is wrong when the address is already reachable via
 // the default context: a main-table connected (RTPROT_KERNEL, no gateway)
-// or static (RTPROT_STATIC) route covering it, or an exact configured
-// control-plane peer (cluster control/fabric peers). Refusing keeps its
-// DNS on the main route the operator/peer topology already selected,
-// instead of diverting it into table 999. Peer matching is exact-address
-// only — a peer's connected prefix does not refuse unrelated hosts.
+// or static (RTPROT_STATIC manual / RTPROT_ZSTATIC FRR) non-default route
+// covering it, or an exact configured control-plane peer (cluster
+// control/fabric peers). Refusing keeps its DNS on the main route the
+// operator/peer topology already selected, instead of diverting it into
+// table 999. Peer matching is exact-address only — a peer's connected
+// prefix does not refuse unrelated hosts. The non-default bound is
+// load-bearing: FRR also renders the DHCP-learned default as 196, and
+// refusing every nameserver merely because a default exists would
+// disable all management DNS steering.
 func mgmtDNSRefusedNameserver(ip netip.Addr, mainRoutes []netlink.Route, cfg *config.Config) (string, bool) {
 	if !ip.IsValid() {
 		return "", false
@@ -307,7 +319,9 @@ func mgmtDNSRefusedNameserver(ip netip.Addr, mainRoutes []netlink.Route, cfg *co
 		if route.Table != unix.RT_TABLE_MAIN && route.Table != 0 {
 			continue
 		}
-		if route.Protocol != unix.RTPROT_KERNEL && route.Protocol != unix.RTPROT_STATIC {
+		isStatic := route.Protocol == unix.RTPROT_STATIC ||
+			int(route.Protocol) == rtprotZStatic16782
+		if route.Protocol != unix.RTPROT_KERNEL && !isStatic {
 			continue
 		}
 		if route.Protocol == unix.RTPROT_KERNEL && !mgmtRouteIsConnected(route, family) {
@@ -315,6 +329,9 @@ func mgmtDNSRefusedNameserver(ip netip.Addr, mainRoutes []netlink.Route, cfg *co
 		}
 		prefix, ok := mgmtRoutePrefix(route, family)
 		if !ok || !prefix.Contains(ip) {
+			continue
+		}
+		if isStatic && prefix.Bits() == 0 {
 			continue
 		}
 		kind := "static"

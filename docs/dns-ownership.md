@@ -111,15 +111,23 @@ withdrawing the lease removes the old nameserver rules. They run after the
 priority-2000 VRF-miss terminator: a tenant-VRF-bound local lookup cannot
 escape its VRF through a management nameserver rule.
 
-Refusal (#15059): a nameserver already covered by a main-table connected or
-static route, or exactly matching a configured control-plane peer
-(`chassis cluster peer-address` / `fabric-peer-address` /
-`fabric1-peer-address`), is refused with a `SECURITY:` warning — no steering
-rules are installed (stale ones are removed) and it is not published as a
-management-steered resolver, so its DNS follows the main route the existing
-topology already selected instead of being diverted into table 999. If the
-main-table inventory cannot be read, steering and publication fail closed.
-Peer matching is exact-address only; neighbouring hosts are unaffected.
+Refusal (#15059, #16782): a nameserver already covered by a main-table
+connected or non-default static route, or exactly matching a configured
+control-plane peer (`chassis cluster peer-address` /
+`fabric-peer-address` / `fabric1-peer-address`), is refused with a
+`SECURITY:` warning — no steering rules are installed (stale ones are
+removed) and it is not published as a management-steered resolver, so
+its DNS follows the main route the existing topology already selected
+instead of being diverted into table 999. Static coverage accepts both
+spellings: manual `RTPROT_STATIC` (4) and FRR/staticd
+`RTPROT_ZSTATIC` (196), which is how every operator
+`routing-options static` route is installed. A default (`/0`) static
+in either spelling never refuses — FRR renders the DHCP default that
+way and it would otherwise disable all management DNS steering. The
+commit path re-runs the reconcile after FRR converges so statics
+installed by that same commit are honoured. If the main-table
+inventory cannot be read, steering and publication fail closed. Peer
+matching is exact-address only; neighbouring hosts are unaffected.
 
 ### Input-validation render belt (#4902, #5010)
 
