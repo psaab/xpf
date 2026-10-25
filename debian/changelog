@@ -20,6 +20,15 @@ xpf (0.0.0) unstable; urgency=medium
     on correct bounded code and would have gone green if that site's
     bounding were removed, restoring the unbounded per-request Warn
     #9042 eliminated. No production code changed.
+  * Packaging/test: `postinst triggered` now resolves the UEFI slot
+    helper via `XPF_UEFI_SLOTS_BIN` defaulting to
+    `/usr/local/sbin/xpf-uefi-slots` (#16644). Previously the test cell
+    `test_postinst_triggered_runs_refresh_and_exits_zero` asserted only
+    rc 0 on hosts without the installed helper, so a broken or disabled
+    helper invocation in the triggered arm passed undetected; the cell
+    now points the override at the in-tree helper and asserts both A/B
+    slots are refreshed from the stale fixture, and the no-helper
+    control injects a missing path explicitly.
   * Config/firewall: all four `firewall three-color-policer` burst
     leaves now enforce a one-frame floor of 1514 bytes (#16610):
     `committed-burst-size`/`excess-burst-size` (single-rate) and
