@@ -1702,6 +1702,9 @@ func validLeaseIdentityForFamily(msgFamily int, l dhcpserver.SyncLease) bool {
 	if l.Family != msgFamily {
 		return false
 	}
+	if l.IsDeclined() {
+		return true
+	}
 	switch msgFamily {
 	case 4:
 		return l.HWAddress != "" || l.ClientID != ""

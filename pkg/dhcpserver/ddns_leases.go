@@ -30,6 +30,29 @@ const (
 	keaStateExpired  = 2 // expired-reclaimed
 )
 
+// State is the Kea lease state carried across the memfile parse.
+type State int
+
+const (
+	StateDefault  State = keaStateDefault
+	StateDeclined State = keaStateDeclined
+	StateExpired  State = keaStateExpired
+)
+
+// Name returns the canonical name for a Kea lease state.
+func (s State) Name() string {
+	switch s {
+	case StateDefault:
+		return "default"
+	case StateDeclined:
+		return "declined"
+	case StateExpired:
+		return "expired-reclaimed"
+	default:
+		return "unknown"
+	}
+}
+
 // requiredLeaseColumns lists, per family, the Kea memfile header columns the
 // reconciler MUST be able to read to compute the desired DNS state and run a
 // SAFE destructive diff. The mass-delete / record-loss class is NOT specific
@@ -119,6 +142,7 @@ type ddnsLease struct {
 	ValidLifetime  int  // memfile valid_lifetime column (seconds), 0 if absent
 	PrefLifetime   int  // memfile pref_lifetime column (seconds), 0 if absent
 	PrefLifetimeOK bool // true ⇒ pref_lifetime column present AND parseable
+	State          State
 }
 
 // Kea memfile lease_type column values (v6 only).
@@ -182,57 +206,65 @@ func (a *ddnsLeaseAccum) note(addr string) {
 // (nil, nil) is returned only when every selected existing file validates AND
 // the merged active set is empty — a genuinely-missing generation file simply
 // contributes nothing.
-func parseActiveLeases(path string, family int, now time.Time) ([]ddnsLease, error) {
+func parseLeases(path string, family int, now time.Time, includeDeclined bool) ([]ddnsLease, error) {
 	allPaths := keaLFCLeaseFileSetPaths(path)
 	before := leaseSetIdentity(allPaths)
 	paths := keaLFCLeaseFilePathsFromIdentity(allPaths, before)
-
-	// #8597 (muse-004 K52): the complete four-name file set is opened
-	// SEQUENTIALLY, so a SUCCESSFUL kea-lfc rotation landing mid-read silently
-	// drops rows unless the post-read identity check sees it.
-	//
-	// The snapshot includes `.completed` even when it was absent during source
-	// selection. This is deliberate: a rotation can create `.completed` and
-	// remove `.2`/`.1` after the selection snapshot; comparing all four names
-	// afterward catches that transition and refuses a potentially incomplete
-	// trusted set.
-	//
-	// This is NOT the case §Invariant-3 argues about. That argument is about a
-	// CRASH-interrupted cleanup, where `.1` stays intact and is read, and it is
-	// sound — I am not disputing it. The gap is the SUCCESSFUL rotation, where
-	// `.1` is deliberately removed. Detection closes the harmful outcome
-	// outright, and a skipped reconcile cycle self-heals on the next one.
-
 	acc := newDDNSLeaseAccum()
+	prevFn := parseLeaseFileFn
 	for _, f := range paths {
-		if err := parseLeaseFileFn(f, family, now, acc); err != nil {
+		var err error
+		if !includeDeclined && prevFn != nil {
+			err = prevFn(f, family, now, acc)
+		} else {
+			err = parseLeaseFile(f, family, now, acc, includeDeclined)
+		}
+		if err != nil {
 			return nil, err
 		}
 	}
-
 	if after := leaseSetIdentity(allPaths); !leaseSetIdentityStable(before, after) {
 		return nil, fmt.Errorf(
 			"kea lease file set rotated during read (%s): a successful kea-lfc swap "+
 				"landed mid-read, so the merged set may be missing every lease appended "+
-				"since the last compaction — refusing to treat it as authoritative "+
+				"since the last compaction \u2014 refusing to treat it as authoritative "+
 				"(#8597)", path)
 	}
 	out := make([]ddnsLease, 0, len(acc.order))
 	for _, addr := range acc.order {
 		l, ok := acc.latest[addr]
 		if !ok || l.Address == "" {
-			continue // tombstoned by the FINAL inactive/expired row across the set
+			continue
 		}
 		out = append(out, l)
 	}
 	if len(out) == 0 {
-		// Trusted-empty: every existing file in the set validated (no error
-		// above) and the merged active set is empty. Return nil (not a
-		// non-nil empty slice) to match the pre-#5796 os.IsNotExist /
-		// header-only trusted-empty contract the DDNS reconciler relies on.
 		return nil, nil
 	}
 	return out, nil
+}
+
+func parseActiveLeases(path string, family int, now time.Time) ([]ddnsLease, error) {
+	return parseLeases(path, family, now, false)
+}
+
+// parseSyncLeases returns active leases plus declined (state=1) rows with
+// remaining probation for lease sync (#16856). Expired-reclaimed (state=2)
+// rows remain tombstones.
+func parseSyncLeases(path string, family int, now time.Time) ([]ddnsLease, error) {
+	return parseLeases(path, family, now, true)
+}
+
+func parseSyncLeases4(path string, now time.Time) ([]ddnsLease, error) {
+	return parseSyncLeases(path, 4, now)
+}
+
+func parseSyncLeases6(path string, now time.Time) ([]ddnsLease, error) {
+	return parseSyncLeases(path, 6, now)
+}
+
+func parseLeaseFile(path string, family int, now time.Time, acc *ddnsLeaseAccum, includeDeclined bool) error {
+	return parseActiveLeasesFileIntoMode(path, family, now, acc, includeDeclined)
 }
 
 // parseActiveLeasesFileInto parses ONE Kea LFC-set file into acc, applying the
@@ -240,6 +272,10 @@ func parseActiveLeases(path string, family int, now time.Time) ([]ddnsLease, err
 // error). An EXISTING file that is anomalous (headerless / mangled header /
 // ragged row) returns an error so the whole family is treated as untrusted.
 func parseActiveLeasesFileInto(path string, family int, now time.Time, acc *ddnsLeaseAccum) error {
+	return parseActiveLeasesFileIntoMode(path, family, now, acc, false)
+}
+
+func parseActiveLeasesFileIntoMode(path string, family int, now time.Time, acc *ddnsLeaseAccum, includeDeclined bool) error {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -410,44 +446,51 @@ func parseActiveLeasesFileInto(path string, family int, now time.Time, acc *ddns
 		}
 		acc.note(addr)
 
-		// State filter: only "default" (active) rows are publishable;
-		// declined / expired-reclaimed rows must NOT have DNS records.
-		// An unparseable/absent state is treated as active (Kea's
-		// default), matching the display parser's lenient stance.
+		// State: active rows always kept. Declined (state=1) rows are kept
+		// only for lease sync (#16856) with remaining probation; state=2
+		// and expired rows remain tombstones. DDNS (includeDeclined=false)
+		// never publishes declined rows.
+		rowState := StateDefault
 		if s := get(fields, "state"); s != "" {
-			if st, e := strconv.Atoi(s); e == nil && st != keaStateDefault {
-				// A non-default state for an address supersedes any earlier
-				// row for it: write a tombstone (the address stays in
-				// acc.order so a LATER active row can reclaim it).
-				acc.latest[addr] = ddnsLease{}
-				continue
+			if st, e := strconv.Atoi(s); e == nil {
+				rowState = State(st)
 			}
 		}
-
+		if rowState != StateDefault && !(includeDeclined && rowState == StateDeclined) {
+			acc.latest[addr] = ddnsLease{}
+			continue
+		}
 		var expire int64
 		if e := get(fields, "expire"); e != "" {
 			if v, err := strconv.ParseInt(e, 10, 64); err == nil {
 				expire = v
 			}
 		}
-		// Expiry filter: a lease whose expire epoch is in the past is
-		// stale regardless of state column lag. Tombstone it (a later
-		// active row with a future expire can still reclaim the address).
 		if expire > 0 && now.Unix() >= expire {
 			acc.latest[addr] = ddnsLease{}
 			continue
 		}
-
+		// valid_lifetime is present in both families; recover it for v4 too
+		// so merged-lease recency (moreRecentGrant9791) is exact on the
+		// memfile fallback, and for declined probation re-anchoring.
+		validLifetime := 0
+		if vl := get(fields, "valid_lifetime"); vl != "" {
+			if v, e := strconv.Atoi(strings.TrimSpace(vl)); e == nil {
+				validLifetime = v
+			}
+		}
 		hostName, clientFQDN := splitLeaseNames(get(fields, "hostname"), get(fields, "fqdn_fwd"))
 		l := ddnsLease{
-			Family:      family,
-			Address:     addr,
-			SubnetID:    get(fields, "subnet_id"),
-			HostName:    hostName,
-			ClientFQDN:  clientFQDN,
-			Expire:      expire,
-			LeaseType:   keaLeaseTypeIANA, // address lease by default (v4, or v6 sans column)
-			LeaseTypeOK: true,
+			Family:        family,
+			Address:       addr,
+			SubnetID:      get(fields, "subnet_id"),
+			HostName:      hostName,
+			ClientFQDN:    clientFQDN,
+			Expire:        expire,
+			State:         rowState,
+			ValidLifetime: validLifetime,
+			LeaseType:     keaLeaseTypeIANA,
+			LeaseTypeOK:   true,
 		}
 		if family == 6 {
 			l.Identity = identity6(get(fields, "duid"), get(fields, "iaid"))
@@ -469,16 +512,7 @@ func parseActiveLeasesFileInto(path string, family int, now time.Time, acc *ddns
 					l.PrefixLen = v
 				}
 			}
-			// #5073: recover valid_lifetime + pref_lifetime so the lease-sync
-			// memfile fallback can derive a preferred remaining that does NOT
-			// revive a deprecated (pref_lifetime=0) binding on takeover. Both
-			// columns are OPTIONAL; an absent/unparseable pref_lifetime leaves
-			// PrefLifetimeOK false so the sync path defaults preferred==valid.
-			if vl := get(fields, "valid_lifetime"); vl != "" {
-				if v, e := strconv.Atoi(strings.TrimSpace(vl)); e == nil {
-					l.ValidLifetime = v
-				}
-			}
+			// valid_lifetime already parsed above for both families.
 			if pf := get(fields, "pref_lifetime"); pf != "" {
 				if v, e := strconv.Atoi(strings.TrimSpace(pf)); e == nil {
 					l.PrefLifetime = v

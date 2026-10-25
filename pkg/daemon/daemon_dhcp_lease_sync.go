@@ -390,13 +390,10 @@ func dhcpLeaseSetFingerprint(leases []dhcpserver.SyncLease) string {
 	}
 	keys := make([]string, 0, len(leases))
 	for _, l := range leases {
-		// Quote strings to keep delimiters unambiguous even for arbitrary
-		// hostnames. State is intentionally omitted: reads filter to active
-		// leases and both seed paths write Kea's default state.
-		keys = append(keys, fmt.Sprintf("%d|%q|%d|%q|%q|%q|%d|%q|%d|%q|%t|%t|%d",
+		keys = append(keys, fmt.Sprintf("%d|%q|%d|%q|%q|%q|%d|%q|%d|%q|%t|%t|%d|%d",
 			l.Family, l.Address, l.SubnetID, l.HWAddress, l.ClientID, l.DUID,
 			l.IAID, l.LeaseType, l.PrefixLen, l.Hostname, l.FQDNFwd, l.FQDNRev,
-			l.ValidLife))
+			l.ValidLife, l.State))
 	}
 	sort.Strings(keys)
 	return strings.Join(keys, "|")
@@ -431,10 +428,10 @@ func (d *Daemon) nudgeDHCPLeaseSync() {
 // The merge (PreSeedMemfileMerged{4,6}) reads the local set and fails closed on
 // an untrusted local source rather than replacing it. If Kea is down while
 // another RG remains MASTER, stillMastering preserves the fallback union
-// (instead of a peer-only replacement). Since #14730 every merged write is
-// an active-only snapshot that also removes stale LFC generations, because
-// the snapshot erases current-file tombstones and a retained generation
-// would resurrect released/declined leases on the Kea reload.
+// (instead of a peer-only replacement). Since #14730/#16856 every merged
+// write is an active+declined snapshot that also removes stale LFC
+// generations, because a retained generation would resurrect state=2
+// rows on the Kea reload; declined rows are preserved with state=1.
 //
 // Called from the MASTER-takeover path BEFORE dhcpServer.ApplyAsync(start).
 // The VRRP event loop holds no applySem, so factory reset cannot block this

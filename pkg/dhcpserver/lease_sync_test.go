@@ -129,10 +129,15 @@ func TestGetSyncLeases4_ViaSocket(t *testing.T) {
 				IPAddress: "10.0.61.51", HWAddress: "aa:bb:cc:dd:ee:02",
 				SubnetID: 1, ValidLft: 100, CLTT: now.Unix() - 1000, State: keaStateDefault,
 			},
-			// A declined lease (non-default state) must be dropped.
+			// A declined lease (state=1) is carried for HA (#16856).
 			{
 				IPAddress: "10.0.61.52", HWAddress: "aa:bb:cc:dd:ee:03",
 				SubnetID: 1, ValidLft: 3600, CLTT: now.Unix(), State: keaStateDeclined,
+			},
+			// An expired-reclaimed lease (state=2) must be dropped.
+			{
+				IPAddress: "10.0.61.53", HWAddress: "aa:bb:cc:dd:ee:04",
+				SubnetID: 1, ValidLft: 3600, CLTT: now.Unix(), State: keaStateExpired,
 			},
 		})
 	}}
@@ -146,19 +151,21 @@ func TestGetSyncLeases4_ViaSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSyncLeases4: %v", err)
 	}
-	if len(leases) != 1 {
-		t.Fatalf("expected 1 active lease, got %d: %+v", len(leases), leases)
+	if len(leases) != 2 {
+		t.Fatalf("expected 2 leases (active+declined), got %d: %+v", len(leases), leases)
 	}
 	l := leases[0]
 	if l.Address != "10.0.61.50" {
 		t.Errorf("address = %q", l.Address)
 	}
-	// Remaining = (cltt+valid-lft) - now = (now-600+3600) - now = 3000.
 	if l.Remaining != 3000 {
 		t.Errorf("remaining = %d, want 3000", l.Remaining)
 	}
 	if l.Hostname != "host-a" {
 		t.Errorf("hostname = %q", l.Hostname)
+	}
+	if leases[1].Address != "10.0.61.52" || leases[1].State != keaStateDeclined {
+		t.Errorf("declined lease not carried: %+v", leases[1])
 	}
 }
 
