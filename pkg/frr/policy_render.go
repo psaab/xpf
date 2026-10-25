@@ -70,9 +70,12 @@ const communityRegexChars = config.CommunityRegexChars
 // between their communities instead of each consuming one — the
 // adjacent-literal row of #16835 is covered here as a consequence
 // of expressing per-community boundaries once. The shared-token row
-// (one community satisfying two regex members) still under-matches,
-// because a sequence consumes at least one token per factor; that
-// row remains #16835's, and #16788 does not claim it.
+// (one community satisfying two regex members) still under-matches
+// at this list layer, because a sequence consumes at least one
+// token per factor (no finite single whole-string pattern can
+// express the sharing; docs/log/16835.md); it is evaluated instead
+// by the #16835 continuation chain in community_chain_16835.go,
+// and this sequencer must never claim it.
 //
 // #15008 (A11-02): Junos names a community by its MEMBERS and requires
 // EVERY member to match a route: "The evaluation of all members must
@@ -165,6 +168,18 @@ func communityDeleteListName(name string) string {
 		base = base[:budget]
 	}
 	return base + communityDeleteNamespace + string(hashHex[:])
+}
+
+// communityListNameDigest is the digest component the generated
+// list names embed; communityDeleteListName hashes the public name
+// and communityChainListName16835 (community_chain_16835.go) hashes
+// (public name, distinct member) so two generated lists for one
+// definition never collide.
+func communityListNameDigest(parts ...string) string {
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	var hashHex [16]byte
+	hex.Encode(hashHex[:], sum[:8])
+	return string(hashHex[:])
 }
 
 // maxExpandedCommunityConjunctionMembers bounds the #15779 expanded
@@ -303,8 +318,12 @@ func communityExpandedConjunctionPatterns(members []string) []string {
 // names normalizing to one FRR name, a generated delete backing
 // colliding with any operator list name, or two backings colliding.
 // Only multi-member definitions that actually render (renderable,
-// deduplicated non-empty) own a backing. Mirrors
-// routeFilterACLNameCollision; deterministic sorted order.
+// deduplicated non-empty) own a backing. #16835 extends the gate to
+// the generated per-member chain lists of multi-member expanded
+// definitions: a chain list colliding with an operator list, a
+// delete backing, or another definition's chain list refuses the
+// apply. Mirrors routeFilterACLNameCollision; deterministic sorted
+// order.
 func communityListCollision(po *config.PolicyOptionsConfig) error {
 	if po == nil || len(po.Communities) == 0 {
 		return nil
@@ -326,6 +345,7 @@ func communityListCollision(po *config.PolicyOptionsConfig) error {
 		seenFRR[fn] = name
 	}
 	seenBacking := make(map[string]string, len(names))
+	seenChain := make(map[string]string, len(names))
 	for _, name := range names {
 		cd := po.Communities[name]
 		if cd == nil {
@@ -349,6 +369,33 @@ func communityListCollision(po *config.PolicyOptionsConfig) error {
 				prev, name, backing)
 		}
 		seenBacking[backing] = name
+		// #16835: the generated per-member chain lists share FRR's flat
+		// namespace with the public and delete-backing lists.
+		if communityListKind(cd.Members) != "expanded" {
+			continue
+		}
+		for _, member := range uniq {
+			chain := communityChainListName16835(name, member)
+			if prev, ok := seenFRR[chain]; ok {
+				return fmt.Errorf(
+					"community %q uses the generated community-chain list name %q reserved for community %q (#16835); "+
+						"FRR merges same-named lists and would silently alter a routing policy — rename the community",
+					prev, chain, name)
+			}
+			if prev, ok := seenBacking[chain]; ok {
+				return fmt.Errorf(
+					"generated community-chain list %q for community %q collides with the generated delete-backing list of community %q (#16835); "+
+						"FRR would merge them and silently alter a routing policy — refusing to render",
+					chain, name, prev)
+			}
+			if prev, ok := seenChain[chain]; ok && prev != name {
+				return fmt.Errorf(
+					"communities %q and %q map to the same generated community-chain list %q (#16835); "+
+						"FRR would merge them and silently alter a routing policy — refusing to render",
+					prev, name, chain)
+			}
+			seenChain[chain] = name
+		}
 	}
 	return nil
 }
@@ -373,7 +420,10 @@ func dedupStrings(in []string) []string {
 // permutation bound — such a definition also emits no delete
 // backing, and communityListMissingAtRender reports it missing so
 // referencing terms fail closed). Empty/duplicate-collapsed single
-// entries keep the historical single-line render.
+// entries keep the historical single-line render. #16835 additionally
+// emits one single-factor generated chain list per distinct member
+// of a multi-member expanded definition; the chain lists are pure
+// definitions (never referenced by a `then community delete` clause).
 func renderCommunityListDefinitions(b *strings.Builder, name string, cd *config.CommunityDef) {
 	if cd == nil || !communityListRenderable(cd.Members) {
 		return
@@ -399,6 +449,22 @@ func renderCommunityListDefinitions(b *strings.Builder, name string, cd *config.
 			vals[i] = sanitizeFRRValue(member)
 		}
 		fmt.Fprintf(b, "bgp community-list standard %s permit %s\n", fn, strings.Join(vals, " "))
+	}
+	if kind == "expanded" && len(members) >= 2 {
+		// #16835: one single-factor generated list per distinct member;
+		// community_chain_16835.go chains them with on-match next.
+		for _, member := range members {
+			backing := communityChainListName16835(name, member)
+			if communityMemberIsRegex(member) {
+				pattern, err := config.TranslateCommunityMemberRegex(sanitizeFRRValue(member))
+				if err != nil {
+					continue
+				}
+				fmt.Fprintf(b, "bgp community-list expanded %s permit %s\n", backing, pattern)
+				continue
+			}
+			fmt.Fprintf(b, "bgp community-list expanded %s permit %s\n", backing, communityLiteralFactorPattern16835(member))
+		}
 	}
 	if len(members) < 2 {
 		return
