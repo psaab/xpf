@@ -66,6 +66,17 @@ func NewManagerForTesting(runClient func(ctx context.Context, ifaceName string, 
 // gateway-change hook wired (#1844). A constructor variant — not a
 // setter — so the production immutability of onGatewayChange holds in
 // tests too.
+// SetStateDirForTesting points a test manager at a lease/DUID state
+// directory (#16566), so persistence and re-adoption can be exercised
+// without New()'s netlink handle.
+func (m *Manager) SetStateDirForTesting(dir string) { m.stateDir = dir }
+
+// SetKernelHasAddressForTesting installs the kernel-address seam used
+// by lease re-adoption (#16566).
+func (m *Manager) SetKernelHasAddressForTesting(fn func(ifaceName string, lease *Lease) bool) {
+	m.kernelHasAddressForTest = fn
+}
+
 func NewManagerForTestingWithHooks(runClient func(ctx context.Context, ifaceName string, af AddressFamily), onGatewayChange func()) *Manager {
 	return &Manager{
 		clients:          make(map[clientKey]*dhcpClient),

@@ -350,6 +350,7 @@ func (m *Manager) commitLease(key clientKey, lease, prev *Lease, prefixes, prevP
 	}
 	m.mu.Unlock()
 
+	m.persistLease(key, lease)
 	m.notifyLeaseStateChanged(prev, lease, applyPDs && delegatedPrefixesChanged(prevPDs, prefixes), true)
 	return nil
 }
@@ -361,6 +362,7 @@ func (m *Manager) commitRouterAdvertisementState(key clientKey, lease, prev *Lea
 	m.mu.Lock()
 	m.leases[key] = lease
 	m.mu.Unlock()
+	m.persistLease(key, lease)
 	m.notifyLeaseStateChanged(prev, lease, false, false)
 }
 

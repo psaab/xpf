@@ -114,6 +114,20 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 		leaseExpiryAt      time.Time
 		leaseExpiryPending bool
 	)
+	// #16566: a lease re-adopted by Start after a restart seeds
+	// committed/committedPDs; enter the renewal cycle directly so the
+	// first wire message is a RENEW (not a SOLICIT). Stateless leases
+	// have no binding to renew — they fall through to Information-Request.
+	if adopted, adoptedPDs := m.adoptedLease(key); adopted != nil && !stateless {
+		committed = adopted
+		committedPDs = adoptedPDs
+		slog.Info("DHCPv6: resuming re-adopted lease in renewal cycle",
+			"interface", ifaceName, "address", adopted.Address,
+			"delegated_prefixes", len(adoptedPDs), "expires", adopted.ExpiresAt())
+		if !m.runV6RenewalCycle(ctx, ifaceName, key, &committed, &committedPDs, &leaseExpiryAt, &leaseExpiryPending, stateless) {
+			return
+		}
+	}
 
 	for {
 		if ctx.Err() != nil {
@@ -227,6 +241,7 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 			delete(m.leases, key)
 			delete(m.delegatedPDs, ifaceName)
 			m.mu.Unlock()
+			m.deletePersistedLease(key)
 			return
 		}
 		if !stateless && leaseExpiryPending &&
@@ -279,329 +294,348 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 
 		// Renewal cycle: stay in this loop while T1 renews / T2 rebinds
 		// keep succeeding; break out only to re-acquire from scratch.
-	renewalLoop:
-		for {
-			t1, t2Remaining, ok := renewalSchedule(committed.LeaseTime, committedPDs, committed.RenewAt, committed.RebindAt)
-			if !ok {
-				// See runDHCPv4: a non-positive lease time is invalid and
-				// must not schedule a renewal past an already-lapsed lease.
-				// Abandon the cycle and re-acquire, paced by
-				// reacquireBackstop (#5795).
-				slog.Warn("DHCPv6: non-positive lease time, re-acquiring",
-					"interface", ifaceName, "lease_time", committed.LeaseTime)
-				select {
-				case <-m.after(reacquireBackstop):
-				case <-ctx.Done():
-					if committed.Address.IsValid() {
-						m.removeAddress(ifaceName, committed)
-					}
-					m.mu.Lock()
-					delete(m.leases, key)
-					delete(m.delegatedPDs, ifaceName)
-					m.mu.Unlock()
-					return
-				}
-				break renewalLoop
-			}
-
-			deadline := committed.Obtained.Add(committed.LeaseTime)
-			if !stateless && !time.Now().Before(deadline) {
-				m.abandonLeaseAfterExpiry(key, committed)
-				committed = nil
-				committedPDs = nil
-				break renewalLoop
-			}
-			leaseCtx := ctx
-			cancelLease := func() {}
-			if !stateless {
-				leaseCtx, cancelLease = context.WithDeadline(ctx, deadline)
-			}
-
-			// #14998 Path A: anchor T1/T2 to absolute instants derived from
-			// Obtained so a PD-expiry prune resumes with the remaining time,
-			// never a fresh full-tier wait. Past-expiry safety stays bounded
-			// by the lease deadline (leaseCtx) — unchanged.
-			t1At := committed.Obtained.Add(t1)
-			t2At := t1At.Add(t2Remaining)
-
-			// #14598: wake at the earliest PD expiry as well as T1. A PD
-			// prune loops (re-derive timers, recompute T1 wait) without
-			// renewing the still-live IA_NA lease or abandoning it. Loop
-			// with a fresh T1 wait until T1 actually expires.
-		t1WaitLoop:
-			for {
-				t1Wait := m.after(remainingTimer(t1At, time.Now()))
-				var outcome pdWaitOutcome
-				committed, committedPDs, outcome = m.waitForIPv6TimerOrRAWithPD(
-					leaseCtx, t1Wait, key, ifaceName, committed, committedPDs,
-				)
-				switch outcome {
-				case waitOutcomePDExpired:
-					continue t1WaitLoop
-				case waitOutcomeTimer:
-					break t1WaitLoop
-				default: // waitOutcomeDone
-					if ctx.Err() != nil {
-						cancelLease()
-						if committed.Address.IsValid() {
-							m.removeAddress(ifaceName, committed)
-						}
-						m.mu.Lock()
-						delete(m.leases, key)
-						delete(m.delegatedPDs, ifaceName)
-						m.mu.Unlock()
-						return
-					}
-					m.abandonLeaseAfterExpiry(key, committed)
-					committed = nil
-					committedPDs = nil
-					cancelLease()
-					break renewalLoop
-				}
-			}
-			slog.Info("DHCPv6: T1 expired, renewing", "interface", ifaceName)
-			// T1 renewal attempt — RENEW to the granting server, NOT a
-			// fresh Solicit (#2994).
-			renewed, rerr := m.v6Exchange(leaseCtx, ifaceName, exchangeRenew, committed, committedPDs)
-			if rerr == nil {
-				if ctx.Err() != nil {
-					cancelLease()
-					if committed.Address.IsValid() {
-						m.removeAddress(ifaceName, committed)
-					}
-					m.mu.Lock()
-					delete(m.leases, key)
-					delete(m.delegatedPDs, ifaceName)
-					m.mu.Unlock()
-					return
-				}
-				if !stateless && leaseCtx.Err() != nil {
-					m.abandonLeaseAfterExpiry(key, committed)
-					committed = nil
-					committedPDs = nil
-					cancelLease()
-					break renewalLoop
-				}
-				reconciledPDs, applyPDs := reconcileDelegatedPDs(committedPDs, renewed.prefixes, renewed.withdrawnPDs)
-				if renewed.pdRefused {
-					reconciledPDs, applyPDs = nil, true
-				}
-				if cerr := m.commitLease(key, renewed.lease, committed, reconciledPDs, committedPDs, applyPDs); cerr != nil {
-					slog.Warn("DHCPv6: failed to apply renewed lease, re-acquiring",
-						"interface", ifaceName, "err", cerr)
-					if !stateless {
-						leaseExpiryAt = deadline
-						leaseExpiryPending = true
-					}
-					cancelLease()
-					break renewalLoop
-				}
-				committed = renewed.lease
-				committedPDs = reconciledPDs
-				leaseExpiryPending = false
-				cancelLease()
-				slog.Info("DHCPv6: lease renewed",
-					"interface", ifaceName,
-					"address", committed.Address,
-					"delegated_prefixes", len(renewed.prefixes),
-					"lease_time", committed.LeaseTime)
-				continue
-			}
-			if ctx.Err() == nil && leaseCtx.Err() != nil {
-				m.abandonLeaseAfterExpiry(key, committed)
-				committed = nil
-				committedPDs = nil
-				cancelLease()
-				break renewalLoop
-			}
-			if errors.Is(rerr, errV6AddrInvalidated) {
-				// #5927: the server EXPLICITLY invalidated the held IA_NA
-				// address (valid-lifetime 0). RFC 8415 §18.2.10.1: stop using
-				// it NOW — deconfigure + re-acquire, do NOT keep it and wait for
-				// T2 (which would keep a server-withdrawn address in service).
-				// This is the IA_NA analog of the IA_PD withdrawal reconcile
-				// above. A merely absent/transient renew reply keeps the
-				// generic error and the keep-and-wait-T2 path below (#4874).
-				slog.Info("DHCPv6: server invalidated held address (valid-lifetime 0), deconfiguring and re-acquiring",
-					"interface", ifaceName, "address", committed.Address)
-				m.abandonLeaseAfterExpiry(key, committed)
-				committed = nil
-				committedPDs = nil
-				leaseExpiryPending = false
-				cancelLease()
-				break renewalLoop
-			}
-			if errors.Is(rerr, errV6NoBinding) {
-				// #15071: the granting server has no binding for the held
-				// IA_NA (RFC 8415 §18.2.4) — send Request via a fresh
-				// Solicit/Request cycle. The held address stays installed
-				// until re-acquisition replaces it or its kernel/lease
-				// lifetime expires; do not wait for T2 against a server
-				// that has already said it holds no binding.
-				slog.Info("DHCPv6: server reports NoBinding for held IA_NA, re-acquiring via Request",
-					"interface", ifaceName, "address", committed.Address)
-				if !stateless {
-					leaseExpiryAt = deadline
-					leaseExpiryPending = true
-				}
-				cancelLease()
-				break renewalLoop
-			}
-			if errors.Is(rerr, errV6PDRefused) {
-				// #15224 (A39-02): the granting server explicitly refused
-				// the IA_PD delegation on RENEW and granted nothing else.
-				// Clear the delegated set NOW so DelegatedPrefixesForRA
-				// stops advertising the refused prefix, then re-acquire
-				// (which re-requests the PD via Solicit). Only PD state
-				// is cleared; a held IA_NA address is untouched (the
-				// PD-only shape that reaches here holds none, and the
-				// lease record stays until re-acquisition or expiry).
-				slog.Info("DHCPv6: server refused IA_PD delegation on renew, clearing delegated prefixes and re-acquiring",
-					"interface", ifaceName)
-				m.clearDelegatedPDs(key, committed)
-				committedPDs = nil
-				if !stateless {
-					leaseExpiryAt = deadline
-					leaseExpiryPending = true
-				}
-				cancelLease()
-				break renewalLoop
-			}
-			slog.Warn("DHCPv6: T1 renewal failed, waiting for T2",
-				"interface", ifaceName, "err", rerr)
-
-			// Keep RA state current until T2; also wake at PD expiry (#14598).
-			// #14998: resume with remainingTimer(t2At), not a fresh t2Remaining.
-		t2WaitLoop:
-			for {
-				t2Wait := m.after(remainingTimer(t2At, time.Now()))
-				var outcome pdWaitOutcome
-				committed, committedPDs, outcome = m.waitForIPv6TimerOrRAWithPD(
-					leaseCtx, t2Wait, key, ifaceName, committed, committedPDs,
-				)
-				switch outcome {
-				case waitOutcomePDExpired:
-					continue t2WaitLoop
-				case waitOutcomeTimer:
-					break t2WaitLoop
-				default:
-					if ctx.Err() != nil {
-						cancelLease()
-						if committed.Address.IsValid() {
-							m.removeAddress(ifaceName, committed)
-						}
-						m.mu.Lock()
-						delete(m.leases, key)
-						delete(m.delegatedPDs, ifaceName)
-						m.mu.Unlock()
-						return
-					}
-					m.abandonLeaseAfterExpiry(key, committed)
-					committed = nil
-					committedPDs = nil
-					cancelLease()
-					break renewalLoop
-				}
-			}
-
-			// T2 rebind attempt — REBIND (multicast, no server DUID) (#2994),
-			// bounded by the absolute lease deadline.
-			renewed, rerr = m.v6Exchange(leaseCtx, ifaceName, exchangeRebind, committed, committedPDs)
-			if rerr == nil {
-				if ctx.Err() != nil {
-					cancelLease()
-					if committed.Address.IsValid() {
-						m.removeAddress(ifaceName, committed)
-					}
-					m.mu.Lock()
-					delete(m.leases, key)
-					delete(m.delegatedPDs, ifaceName)
-					m.mu.Unlock()
-					return
-				}
-				if !stateless && leaseCtx.Err() != nil {
-					m.abandonLeaseAfterExpiry(key, committed)
-					committed = nil
-					committedPDs = nil
-					cancelLease()
-					break renewalLoop
-				}
-				reconciledPDs, applyPDs := reconcileDelegatedPDs(committedPDs, renewed.prefixes, renewed.withdrawnPDs)
-				if renewed.pdRefused {
-					reconciledPDs, applyPDs = nil, true
-				}
-				if cerr := m.commitLease(key, renewed.lease, committed, reconciledPDs, committedPDs, applyPDs); cerr != nil {
-					slog.Warn("DHCPv6: failed to apply rebound lease, re-acquiring",
-						"interface", ifaceName, "err", cerr)
-					if !stateless {
-						leaseExpiryAt = deadline
-						leaseExpiryPending = true
-					}
-					cancelLease()
-					break renewalLoop
-				}
-				committed = renewed.lease
-				committedPDs = reconciledPDs
-				leaseExpiryPending = false
-				cancelLease()
-				slog.Info("DHCPv6: lease rebound",
-					"interface", ifaceName,
-					"address", committed.Address,
-					"delegated_prefixes", len(renewed.prefixes),
-					"lease_time", committed.LeaseTime)
-				continue
-			}
-			if ctx.Err() == nil && leaseCtx.Err() != nil {
-				m.abandonLeaseAfterExpiry(key, committed)
-				committed = nil
-				committedPDs = nil
-				cancelLease()
-				break renewalLoop
-			}
-			if errors.Is(rerr, errV6AddrInvalidated) {
-				// #5927: explicit invalidation on REBIND too — deconfigure the
-				// held address before falling back to a fresh solicit (the
-				// generic rebind-failure break below keeps it in service until
-				// re-acquire, which is correct only for a transient failure).
-				slog.Info("DHCPv6: server invalidated held address on rebind (valid-lifetime 0), deconfiguring and re-acquiring",
-					"interface", ifaceName, "address", committed.Address)
-				m.abandonLeaseAfterExpiry(key, committed)
-				committed = nil
-				committedPDs = nil
-				leaseExpiryPending = false
-				cancelLease()
-				break renewalLoop
-			}
-			if errors.Is(rerr, errV6NoBinding) {
-				// #15071: NoBinding on REBIND — same Request re-acquisition
-				// as at T1; the generic break below already re-acquires,
-				// this arm only makes the reason explicit in the log.
-				slog.Info("DHCPv6: server reports NoBinding for held IA_NA on rebind, re-acquiring via Request",
-					"interface", ifaceName, "address", committed.Address)
-			}
-			if errors.Is(rerr, errV6PDRefused) {
-				// #15224 (A39-02): explicit IA_PD refusal on REBIND —
-				// clear the delegated set before the generic re-acquire
-				// below so the refused prefix stops being advertised
-				// immediately, not at its own lifetime end.
-				slog.Info("DHCPv6: server refused IA_PD delegation on rebind, clearing delegated prefixes and re-acquiring",
-					"interface", ifaceName)
-				m.clearDelegatedPDs(key, committed)
-				committedPDs = nil
-			}
-			if stateless {
-				slog.Warn("DHCPv6: T2 information-request failed, retrying options",
-					"interface", ifaceName, "err", rerr)
-			} else {
-				slog.Warn("DHCPv6: T2 rebind failed, lease will expire, re-acquiring",
-					"interface", ifaceName, "err", rerr)
-				leaseExpiryAt = deadline
-				leaseExpiryPending = true
-			}
-			cancelLease()
-			break renewalLoop
+		if !m.runV6RenewalCycle(ctx, ifaceName, key, &committed, &committedPDs, &leaseExpiryAt, &leaseExpiryPending, stateless) {
+			return
 		}
 	}
+}
+
+// runV6RenewalCycle runs the T1/T2 renewal cycle for a committed v6
+// lease until it breaks to re-acquire or the client is cancelled.
+// Returns false when the client goroutine must return (cancellation
+// teardown already performed); true when the caller should loop back
+// to INIT (Solicit). Extracted from runDHCPv6 so a lease re-adopted
+// after restart (#16566) can enter the cycle directly — its first
+// wire message is a RENEW, not a SOLICIT. State is threaded by
+// pointer because the cycle replaces and clears it.
+func (m *Manager) runV6RenewalCycle(ctx context.Context, ifaceName string, key clientKey, committed **Lease, committedPDs *[]DelegatedPrefix, leaseExpiryAt *time.Time, leaseExpiryPending *bool, stateless bool) bool {
+	for {
+		t1, t2Remaining, ok := renewalSchedule((*committed).LeaseTime, (*committedPDs), (*committed).RenewAt, (*committed).RebindAt)
+		if !ok {
+			// See runDHCPv4: a non-positive lease time is invalid and
+			// must not schedule a renewal past an already-lapsed lease.
+			// Abandon the cycle and re-acquire, paced by
+			// reacquireBackstop (#5795).
+			slog.Warn("DHCPv6: non-positive lease time, re-acquiring",
+				"interface", ifaceName, "lease_time", (*committed).LeaseTime)
+			select {
+			case <-m.after(reacquireBackstop):
+			case <-ctx.Done():
+				if (*committed).Address.IsValid() {
+					m.removeAddress(ifaceName, (*committed))
+				}
+				m.mu.Lock()
+				delete(m.leases, key)
+				delete(m.delegatedPDs, ifaceName)
+				m.mu.Unlock()
+				m.deletePersistedLease(key)
+				return false
+			}
+			break
+		}
+
+		deadline := (*committed).Obtained.Add((*committed).LeaseTime)
+		if !stateless && !time.Now().Before(deadline) {
+			m.abandonLeaseAfterExpiry(key, (*committed))
+			(*committed) = nil
+			(*committedPDs) = nil
+			break
+		}
+		leaseCtx := ctx
+		cancelLease := func() {}
+		if !stateless {
+			leaseCtx, cancelLease = context.WithDeadline(ctx, deadline)
+		}
+
+		// #14998 Path A: anchor T1/T2 to absolute instants derived from
+		// Obtained so a PD-expiry prune resumes with the remaining time,
+		// never a fresh full-tier wait. Past-expiry safety stays bounded
+		// by the lease deadline (leaseCtx) — unchanged.
+		t1At := (*committed).Obtained.Add(t1)
+		t2At := t1At.Add(t2Remaining)
+
+		// #14598: wake at the earliest PD expiry as well as T1. A PD
+		// prune loops (re-derive timers, recompute T1 wait) without
+		// renewing the still-live IA_NA lease or abandoning it. Loop
+		// with a fresh T1 wait until T1 actually expires.
+	t1WaitLoop:
+		for {
+			t1Wait := m.after(remainingTimer(t1At, time.Now()))
+			var outcome pdWaitOutcome
+			(*committed), (*committedPDs), outcome = m.waitForIPv6TimerOrRAWithPD(
+				leaseCtx, t1Wait, key, ifaceName, (*committed), (*committedPDs),
+			)
+			switch outcome {
+			case waitOutcomePDExpired:
+				continue t1WaitLoop
+			case waitOutcomeTimer:
+				break t1WaitLoop
+			default: // waitOutcomeDone
+				if ctx.Err() != nil {
+					cancelLease()
+					if (*committed).Address.IsValid() {
+						m.removeAddress(ifaceName, (*committed))
+					}
+					m.mu.Lock()
+					delete(m.leases, key)
+					delete(m.delegatedPDs, ifaceName)
+					m.mu.Unlock()
+					m.deletePersistedLease(key)
+					return false
+				}
+				m.abandonLeaseAfterExpiry(key, (*committed))
+				(*committed) = nil
+				(*committedPDs) = nil
+				cancelLease()
+				break
+			}
+		}
+		slog.Info("DHCPv6: T1 expired, renewing", "interface", ifaceName)
+		// T1 renewal attempt — RENEW to the granting server, NOT a
+		// fresh Solicit (#2994).
+		renewed, rerr := m.v6Exchange(leaseCtx, ifaceName, exchangeRenew, (*committed), (*committedPDs))
+		if rerr == nil {
+			if ctx.Err() != nil {
+				cancelLease()
+				if (*committed).Address.IsValid() {
+					m.removeAddress(ifaceName, (*committed))
+				}
+				m.mu.Lock()
+				delete(m.leases, key)
+				delete(m.delegatedPDs, ifaceName)
+				m.mu.Unlock()
+				m.deletePersistedLease(key)
+				return false
+			}
+			if !stateless && leaseCtx.Err() != nil {
+				m.abandonLeaseAfterExpiry(key, (*committed))
+				(*committed) = nil
+				(*committedPDs) = nil
+				cancelLease()
+				break
+			}
+			reconciledPDs, applyPDs := reconcileDelegatedPDs((*committedPDs), renewed.prefixes, renewed.withdrawnPDs)
+			if renewed.pdRefused {
+				reconciledPDs, applyPDs = nil, true
+			}
+			if cerr := m.commitLease(key, renewed.lease, (*committed), reconciledPDs, (*committedPDs), applyPDs); cerr != nil {
+				slog.Warn("DHCPv6: failed to apply renewed lease, re-acquiring",
+					"interface", ifaceName, "err", cerr)
+				if !stateless {
+					(*leaseExpiryAt) = deadline
+					(*leaseExpiryPending) = true
+				}
+				cancelLease()
+				break
+			}
+			(*committed) = renewed.lease
+			(*committedPDs) = reconciledPDs
+			(*leaseExpiryPending) = false
+			cancelLease()
+			slog.Info("DHCPv6: lease renewed",
+				"interface", ifaceName,
+				"address", (*committed).Address,
+				"delegated_prefixes", len(renewed.prefixes),
+				"lease_time", (*committed).LeaseTime)
+			continue
+		}
+		if ctx.Err() == nil && leaseCtx.Err() != nil {
+			m.abandonLeaseAfterExpiry(key, (*committed))
+			(*committed) = nil
+			(*committedPDs) = nil
+			cancelLease()
+			break
+		}
+		if errors.Is(rerr, errV6AddrInvalidated) {
+			// #5927: the server EXPLICITLY invalidated the held IA_NA
+			// address (valid-lifetime 0). RFC 8415 §18.2.10.1: stop using
+			// it NOW — deconfigure + re-acquire, do NOT keep it and wait for
+			// T2 (which would keep a server-withdrawn address in service).
+			// This is the IA_NA analog of the IA_PD withdrawal reconcile
+			// above. A merely absent/transient renew reply keeps the
+			// generic error and the keep-and-wait-T2 path below (#4874).
+			slog.Info("DHCPv6: server invalidated held address (valid-lifetime 0), deconfiguring and re-acquiring",
+				"interface", ifaceName, "address", (*committed).Address)
+			m.abandonLeaseAfterExpiry(key, (*committed))
+			(*committed) = nil
+			(*committedPDs) = nil
+			(*leaseExpiryPending) = false
+			cancelLease()
+			break
+		}
+		if errors.Is(rerr, errV6NoBinding) {
+			// #15071: the granting server has no binding for the held
+			// IA_NA (RFC 8415 §18.2.4) — send Request via a fresh
+			// Solicit/Request cycle. The held address stays installed
+			// until re-acquisition replaces it or its kernel/lease
+			// lifetime expires; do not wait for T2 against a server
+			// that has already said it holds no binding.
+			slog.Info("DHCPv6: server reports NoBinding for held IA_NA, re-acquiring via Request",
+				"interface", ifaceName, "address", (*committed).Address)
+			if !stateless {
+				(*leaseExpiryAt) = deadline
+				(*leaseExpiryPending) = true
+			}
+			cancelLease()
+			break
+		}
+		if errors.Is(rerr, errV6PDRefused) {
+			// #15224 (A39-02): the granting server explicitly refused
+			// the IA_PD delegation on RENEW and granted nothing else.
+			// Clear the delegated set NOW so DelegatedPrefixesForRA
+			// stops advertising the refused prefix, then re-acquire
+			// (which re-requests the PD via Solicit). Only PD state
+			// is cleared; a held IA_NA address is untouched (the
+			// PD-only shape that reaches here holds none, and the
+			// lease record stays until re-acquisition or expiry).
+			slog.Info("DHCPv6: server refused IA_PD delegation on renew, clearing delegated prefixes and re-acquiring",
+				"interface", ifaceName)
+			m.clearDelegatedPDs(key, (*committed))
+			(*committedPDs) = nil
+			if !stateless {
+				(*leaseExpiryAt) = deadline
+				(*leaseExpiryPending) = true
+			}
+			cancelLease()
+			break
+		}
+		slog.Warn("DHCPv6: T1 renewal failed, waiting for T2",
+			"interface", ifaceName, "err", rerr)
+
+		// Keep RA state current until T2; also wake at PD expiry (#14598).
+		// #14998: resume with remainingTimer(t2At), not a fresh t2Remaining.
+	t2WaitLoop:
+		for {
+			t2Wait := m.after(remainingTimer(t2At, time.Now()))
+			var outcome pdWaitOutcome
+			(*committed), (*committedPDs), outcome = m.waitForIPv6TimerOrRAWithPD(
+				leaseCtx, t2Wait, key, ifaceName, (*committed), (*committedPDs),
+			)
+			switch outcome {
+			case waitOutcomePDExpired:
+				continue t2WaitLoop
+			case waitOutcomeTimer:
+				break t2WaitLoop
+			default:
+				if ctx.Err() != nil {
+					cancelLease()
+					if (*committed).Address.IsValid() {
+						m.removeAddress(ifaceName, (*committed))
+					}
+					m.mu.Lock()
+					delete(m.leases, key)
+					delete(m.delegatedPDs, ifaceName)
+					m.mu.Unlock()
+					m.deletePersistedLease(key)
+					return false
+				}
+				m.abandonLeaseAfterExpiry(key, (*committed))
+				(*committed) = nil
+				(*committedPDs) = nil
+				cancelLease()
+				break
+			}
+		}
+
+		// T2 rebind attempt — REBIND (multicast, no server DUID) (#2994),
+		// bounded by the absolute lease deadline.
+		renewed, rerr = m.v6Exchange(leaseCtx, ifaceName, exchangeRebind, (*committed), (*committedPDs))
+		if rerr == nil {
+			if ctx.Err() != nil {
+				cancelLease()
+				if (*committed).Address.IsValid() {
+					m.removeAddress(ifaceName, (*committed))
+				}
+				m.mu.Lock()
+				delete(m.leases, key)
+				delete(m.delegatedPDs, ifaceName)
+				m.mu.Unlock()
+				m.deletePersistedLease(key)
+				return false
+			}
+			if !stateless && leaseCtx.Err() != nil {
+				m.abandonLeaseAfterExpiry(key, (*committed))
+				(*committed) = nil
+				(*committedPDs) = nil
+				cancelLease()
+				break
+			}
+			reconciledPDs, applyPDs := reconcileDelegatedPDs((*committedPDs), renewed.prefixes, renewed.withdrawnPDs)
+			if renewed.pdRefused {
+				reconciledPDs, applyPDs = nil, true
+			}
+			if cerr := m.commitLease(key, renewed.lease, (*committed), reconciledPDs, (*committedPDs), applyPDs); cerr != nil {
+				slog.Warn("DHCPv6: failed to apply rebound lease, re-acquiring",
+					"interface", ifaceName, "err", cerr)
+				if !stateless {
+					(*leaseExpiryAt) = deadline
+					(*leaseExpiryPending) = true
+				}
+				cancelLease()
+				break
+			}
+			(*committed) = renewed.lease
+			(*committedPDs) = reconciledPDs
+			(*leaseExpiryPending) = false
+			cancelLease()
+			slog.Info("DHCPv6: lease rebound",
+				"interface", ifaceName,
+				"address", (*committed).Address,
+				"delegated_prefixes", len(renewed.prefixes),
+				"lease_time", (*committed).LeaseTime)
+			continue
+		}
+		if ctx.Err() == nil && leaseCtx.Err() != nil {
+			m.abandonLeaseAfterExpiry(key, (*committed))
+			(*committed) = nil
+			(*committedPDs) = nil
+			cancelLease()
+			break
+		}
+		if errors.Is(rerr, errV6AddrInvalidated) {
+			// #5927: explicit invalidation on REBIND too — deconfigure the
+			// held address before falling back to a fresh solicit (the
+			// generic rebind-failure break below keeps it in service until
+			// re-acquire, which is correct only for a transient failure).
+			slog.Info("DHCPv6: server invalidated held address on rebind (valid-lifetime 0), deconfiguring and re-acquiring",
+				"interface", ifaceName, "address", (*committed).Address)
+			m.abandonLeaseAfterExpiry(key, (*committed))
+			(*committed) = nil
+			(*committedPDs) = nil
+			(*leaseExpiryPending) = false
+			cancelLease()
+			break
+		}
+		if errors.Is(rerr, errV6NoBinding) {
+			// #15071: NoBinding on REBIND — same Request re-acquisition
+			// as at T1; the generic break below already re-acquires,
+			// this arm only makes the reason explicit in the log.
+			slog.Info("DHCPv6: server reports NoBinding for held IA_NA on rebind, re-acquiring via Request",
+				"interface", ifaceName, "address", (*committed).Address)
+		}
+		if errors.Is(rerr, errV6PDRefused) {
+			// #15224 (A39-02): explicit IA_PD refusal on REBIND —
+			// clear the delegated set before the generic re-acquire
+			// below so the refused prefix stops being advertised
+			// immediately, not at its own lifetime end.
+			slog.Info("DHCPv6: server refused IA_PD delegation on rebind, clearing delegated prefixes and re-acquiring",
+				"interface", ifaceName)
+			m.clearDelegatedPDs(key, (*committed))
+			(*committedPDs) = nil
+		}
+		if stateless {
+			slog.Warn("DHCPv6: T2 information-request failed, retrying options",
+				"interface", ifaceName, "err", rerr)
+		} else {
+			slog.Warn("DHCPv6: T2 rebind failed, lease will expire, re-acquiring",
+				"interface", ifaceName, "err", rerr)
+			(*leaseExpiryAt) = deadline
+			(*leaseExpiryPending) = true
+		}
+		cancelLease()
+		break
+	}
+	return true
 }
 
 // dhcpv6Result holds results from a DHCPv6 exchange including both IA_NA and IA_PD.
