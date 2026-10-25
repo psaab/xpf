@@ -74,9 +74,9 @@ func TestResolveRedistributePolicyTermAddressFamily_9510(t *testing.T) {
 	for _, tc := range []struct {
 		policy, self, want string
 	}{
-		{"mixed", "ospf", " redistribute rip route-map mixed-rip-xpf-redist\n redistribute static route-map mixed-static-xpf-redist\n"},
-		{"mixed", "ospf6", " redistribute ripng route-map mixed-ripng-xpf-redist\n redistribute static route-map mixed-static-xpf-redist\n"},
-		{"mixed", "rip", " redistribute static route-map mixed-static-xpf-redist\n"},
+		{"mixed", "ospf", " redistribute rip route-map mixed-rip-xpf-redist-ospf\n redistribute static route-map mixed-static-xpf-redist-ospf\n"},
+		{"mixed", "ospf6", " redistribute ripng route-map mixed-ripng-xpf-redist-ospf6\n redistribute static route-map mixed-static-xpf-redist-ospf6\n"},
+		{"mixed", "rip", " redistribute static route-map mixed-static-xpf-redist-rip\n"},
 		// Control: no enclosing router, so nothing is filtered.
 		{"mixed", "", " redistribute ospf6 route-map mixed-ospf6-xpf-redist\n redistribute rip route-map mixed-rip-xpf-redist\n" +
 			" redistribute ripng route-map mixed-ripng-xpf-redist\n redistribute static route-map mixed-static-xpf-redist\n"},
@@ -86,7 +86,7 @@ func TestResolveRedistributePolicyTermAddressFamily_9510(t *testing.T) {
 		// Control for the rows above: the same policy under a router whose
 		// grammar lists the source. (No row pins a `router isis` literal: the
 		// plain form is not IS-IS grammar at all: #9666.)
-		{"v6only", "ospf6", " redistribute ripng route-map v6only-ripng-xpf-redist\n"},
+		{"v6only", "ospf6", " redistribute ripng route-map v6only-ripng-xpf-redist-ospf6\n"},
 	} {
 		if got := m.resolveRedistribute(tc.policy, po, tc.self, nil); got != tc.want {
 			t.Errorf("policy %q under router %q: got %q, want %q", tc.policy, tc.self, got, tc.want)
@@ -319,7 +319,7 @@ func TestResolveRedistributeAllFilteredWarnsAccurately_9510(t *testing.T) {
 	buf.Reset()
 	got := m.resolveRedistribute("commonly", po, "ospf", nil)
 	for _, proto := range []string{"bgp", "connected", "isis", "kernel", "rip", "static"} {
-		want := " redistribute " + proto + " route-map commonly-" + proto + "-xpf-redist\n"
+		want := " redistribute " + proto + " route-map commonly-" + proto + "-xpf-redist-ospf\n"
 		if !strings.Contains(got, want) {
 			t.Errorf("protocol-less policy missing %q, got %q", want, got)
 		}

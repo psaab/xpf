@@ -76,7 +76,7 @@ func TestBuildManagedSection_CrossContextRouteMapNoLeak_4481(t *testing.T) {
 
 	// #12065 fix: the OSPF redistribute references the static-specific map,
 	// whose term set excludes other source protocols and whose default denies.
-	redistMap := "SHARED-static-xpf-redist"
+	redistMap := "SHARED-static-xpf-redist-ospf"
 	if !strings.Contains(got, "redistribute static route-map "+redistMap+"\n") {
 		t.Errorf("OSPF redistribute must reference the static-specific map %s, got:\n%s", redistMap, got)
 	}

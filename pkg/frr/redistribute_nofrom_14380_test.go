@@ -44,13 +44,13 @@ func TestRedistributeNoFromRouteFilterUnderOSPF14380(t *testing.T) {
 	}
 	got := m.buildManagedSection(fc)
 	for _, proto := range []string{"bgp", "connected", "isis", "kernel", "rip", "static"} {
-		want := " redistribute " + proto + " route-map P-" + proto + "-xpf-redist\n"
+		want := " redistribute " + proto + " route-map P-" + proto + "-xpf-redist-ospf\n"
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q, got:\n%s", want, got)
 		}
 		// Every referenced per-source route-map must be DEFINED,
 		// carrying the route-filter match.
-		if !strings.Contains(got, "route-map P-"+proto+"-xpf-redist permit") {
+		if !strings.Contains(got, "route-map P-"+proto+"-xpf-redist-ospf permit") {
 			t.Errorf("route-map P-%s-xpf-redist not defined, got:\n%s", proto, got)
 		}
 	}
@@ -92,16 +92,16 @@ func TestRedistributeMixedNoFromUnderOSPF14380(t *testing.T) {
 	got := m.buildManagedSection(fc)
 	// Union, not just the explicit static source.
 	for _, proto := range []string{"bgp", "connected", "isis", "kernel", "rip", "static"} {
-		want := " redistribute " + proto + " route-map P-" + proto + "-xpf-redist\n"
+		want := " redistribute " + proto + " route-map P-" + proto + "-xpf-redist-ospf\n"
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q, got:\n%s", want, got)
 		}
 	}
 	// The no-from term must ride in a non-static per-source map (here
 	// connected), not only in the map for its sibling's explicit source.
-	seq := routeMapSequenceContaining(got, "P-connected-xpf-redist", "match ip address prefix-list")
+	seq := routeMapSequenceContaining(got, "P-connected-xpf-redist-ospf", "match ip address prefix-list")
 	if seq == "" {
-		t.Errorf("no-from term missing from P-connected-xpf-redist map, got:\n%s", got)
+		t.Errorf("no-from term missing from P-connected-xpf-redist-ospf map, got:\n%s", got)
 	}
 }
 

@@ -87,7 +87,7 @@ func TestOSPFExportChainSingleRedistribute15156(t *testing.T) {
 	}
 	// NO-RFC1918-static as a standalone token must not be the attachment;
 	// the composed name contains it as a prefix, so check the exact map.
-	composed := "NO-RFC1918-STATICS" + ReservedChainSuffix + "-static" + config.ReservedRedistSuffix
+	composed := "NO-RFC1918-STATICS" + ReservedChainSuffix + "-static" + config.ReservedRedistSuffix + "-ospf"
 	if !strings.Contains(staticLines[0], "route-map "+composed) {
 		t.Fatalf("redistribute must reference the composed chain map %q, got %q", composed, staticLines[0])
 	}
@@ -97,7 +97,7 @@ func TestOSPFExportChainSingleRedistribute15156(t *testing.T) {
 		t.Fatalf("composed map must deny (NO-RFC1918) before permitting (STATICS): deny@%d permit@%d\n%s", firstDeny, firstPermit, got)
 	}
 	// Single-policy control maps still defined (used elsewhere / standalone).
-	if !strings.Contains(got, "route-map NO-RFC1918-static-xpf-redist deny") {
+	if !strings.Contains(got, "route-map NO-RFC1918-static-xpf-redist-ospf deny") {
 		t.Fatalf("single-policy per-source map must remain defined\n%s", got)
 	}
 }
@@ -115,7 +115,7 @@ func TestOSPFExportSinglePolicyUnchanged15156(t *testing.T) {
 		},
 	}
 	got := New().buildManagedSection(fc)
-	if !strings.Contains(got, " redistribute static route-map STATICS-static-xpf-redist\n") {
+	if !strings.Contains(got, " redistribute static route-map STATICS-static-xpf-redist-ospf\n") {
 		t.Fatalf("single-policy export must keep per-source map\n%s", got)
 	}
 	if strings.Contains(got, ReservedChainSuffix) {
@@ -148,6 +148,8 @@ func TestBGPOriginationAcrossNeighborChainsSingleRedistribute15156(t *testing.T)
 		t.Fatalf("BGP origination across neighbours must render exactly ONE redistribute static, got %v\n%s", staticLines, got)
 	}
 	// OR composition: NO-RFC1918 denies precede STATICS permit.
+	// BGP context: unsuffixed composed name (the -ospf suffix applies
+	// only to the OSPF-attached variant in the sibling test).
 	composed := "NO-RFC1918-STATICS" + ReservedChainSuffix + "-static" + config.ReservedRedistSuffix
 	firstDeny := strings.Index(got, "route-map "+composed+" deny")
 	firstPermit := strings.Index(got, "route-map "+composed+" permit")

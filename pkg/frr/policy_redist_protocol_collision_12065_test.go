@@ -51,9 +51,9 @@ func TestRedistProtocolMapNoCollisionRenders12065(t *testing.T) {
 	}
 	got := New().buildManagedSection(fc)
 	for _, want := range []string{
-		"redistribute static route-map SHARED-static-xpf-redist\n",
-		"route-map SHARED-static-xpf-redist permit 10\n",
-		"route-map SHARED-static-xpf-redist deny 20\n",
+		"redistribute static route-map SHARED-static-xpf-redist-ospf\n",
+		"route-map SHARED-static-xpf-redist-ospf permit 10\n",
+		"route-map SHARED-static-xpf-redist-ospf deny 20\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q:\n%s", want, got)
