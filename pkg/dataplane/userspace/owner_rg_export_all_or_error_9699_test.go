@@ -73,11 +73,23 @@ func requireNoDeltasOnError9699(t *testing.T, site string, n int, err error) {
 	}
 }
 
+// #16518: the paged path no longer applies an attached page status at all
+// (SuppressStatus), so a status-bearing helper reply must NOT fail the
+// window with the shim-map error the unpaged verb still surfaces. Pre-fix
+// this cell drove the pager's applyHelperStatusLocked and expected that
+// error; post-fix the same reply completes with all deltas.
 func TestPagedOwnerRGExportReturnsNoDeltasWithAStatusError9699(t *testing.T) {
 	m, _, sock := pagingManager9344(t, MinProtocolOwnerRGExportPaging)
-	startStatusHelper9699(t, sock, 3, true)
+	startStatusHelper9699(t, sock, 3, false)
 	deltas, _, err := m.ExportOwnerRGSessionsPaged([]int{1})
-	requireNoDeltasOnError9699(t, "ExportOwnerRGSessionsPaged (paged)", len(deltas), err)
+	if err != nil {
+		t.Fatalf("ExportOwnerRGSessionsPaged (paged): %v — #16518 must not "+
+			"apply the page status, so the map-free status error must not "+
+			"fail the window", err)
+	}
+	if len(deltas) != 3 {
+		t.Fatalf("ExportOwnerRGSessionsPaged (paged) returned %d deltas, want 3", len(deltas))
+	}
 }
 
 func TestExportOwnerRGSessionsReturnsNoDeltasWithAStatusError9699(t *testing.T) {

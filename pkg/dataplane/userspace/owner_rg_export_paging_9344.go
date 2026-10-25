@@ -107,6 +107,16 @@ var ErrOwnerRGExportIncomplete = errors.New("owner-RG session export incomplete"
 // buffers, so the export lease can release the Manager mutex between pages.
 // ownerRGExportLease still serializes windows: a second export must not start
 // while the first one is carrying a continuation token.
+//
+// #16518: every page request sets SuppressStatus and the pager never applies
+// an attached page status. The pager drops m.mu for each RPC; a disarm that
+// queues behind the page on controlReqMu can apply a fresh DISARMED status
+// before the pager re-locks, and the page's older ARMED status would then
+// overwrite it (ctrl=1 / ForwardingArmed=true into a disarmed helper) until
+// the next page or poll. Both production callers discard the returned
+// status, and helper truth keeps flowing through the 1 Hz poll and the
+// explicit state verbs, so suppressing the per-page status loses nothing
+// and keeps applyHelperStatusLocked the single writer in RPC order.
 func (m *Manager) ExportOwnerRGSessionsPaged(rgIDs []int) ([]SessionDeltaInfo, ProcessStatus, error) {
 	ownerRGExportLease.Lock()
 	defer ownerRGExportLease.Unlock()
@@ -164,9 +174,14 @@ func (m *Manager) ExportOwnerRGSessionsPaged(rgIDs []int) ([]SessionDeltaInfo, P
 			)
 		}
 		m.mu.Unlock()
+		// #16518: SuppressStatus — see the doc comment above. Without it the
+		// helper attaches its status at page-answer time, and applying that
+		// snapshot after re-locking can undo a newer disarm that landed
+		// while this page's RPC was in flight.
 		resp, err := m.requestDetailedAtSocket(ControlRequest{
-			Type:          "export_owner_rg_sessions",
-			SessionExport: &req,
+			Type:           "export_owner_rg_sessions",
+			SuppressStatus: true,
+			SessionExport:  &req,
 		}, controlSocket)
 		m.mu.Lock()
 		if m.proc == nil ||
@@ -180,17 +195,10 @@ func (m *Manager) ExportOwnerRGSessionsPaged(rgIDs []int) ([]SessionDeltaInfo, P
 				ErrOwnerRGExportIncomplete,
 			)
 		}
-		var statusErr error
-		if err == nil && resp.Status != nil {
-			status = *resp.Status
-			statusErr = m.applyHelperStatusLocked(&status)
-		}
+		status = m.lastStatus
 		m.mu.Unlock()
 		if err != nil {
 			return nil, ProcessStatus{}, err
-		}
-		if statusErr != nil {
-			return nil, status, statusErr
 		}
 		if resp.SessionExportDropped != 0 {
 			return nil, status, fmt.Errorf(
