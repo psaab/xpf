@@ -846,6 +846,10 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, []uncoveredF
 	// raw AST because only that walk retains malformed tokens—including a
 	// quoted-empty token—for the warning/rejection before tolerant compilation
 	// drops or ignores them; a valid numeric zero remains distinguishable.
+	// #16663: the four chassis gates below resolve the cluster body through
+	// normalizedClusterNode (the compiler's own view), so the
+	// `chassis cluster { ... }` brace-top-level and packed spellings are
+	// judged exactly like the container spelling.
 	chassisIdentityWarnings, err := validateChassisClusterIdentitiesAST(
 		tree.Children, opts.lenientChassisClusterIdentities)
 	if err != nil {

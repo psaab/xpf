@@ -1,4 +1,17 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Config/chassis-cluster: the four raw-AST commit gates (monitor
+    weight #6588, RG/node identity #5694, no-argument RG statement
+    arity #6588, gratuitous-arp-count #5695) now resolve the cluster
+    body through normalizedClusterNode — the same view compileChassis
+    reads — instead of walking only `chassis { cluster { } }`
+    children (#16663). Previously the `chassis cluster { }`
+    brace-top-level and packed spellings #6672 made compile bypassed
+    every gate: a typo'd interface-monitor weight committed as weight
+    0 (link-down deducts nothing, the RG never demotes), duplicate
+    monitors, malformed redundancy-group / node ids and
+    `preempt delay` all committed while the container spelling
+    rejected them. Strict commit now rejects identically in every
+    spelling; the tolerant load path warns as before (#1960).
   * Daemon/bootstrap: the #9615 refused-target bootstrap safe state
     now has a commit exit (#16665). Previously bootstrap refused
     plain `commit` and the #6707 gate refused `commit confirmed`
