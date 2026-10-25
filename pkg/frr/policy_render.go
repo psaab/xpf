@@ -48,6 +48,32 @@ import (
 // the real value rather than being quietly decommissioned.
 const communityRegexChars = config.CommunityRegexChars
 
+// #16788 (R3-A11-05): Junos matches each community member regex
+// against each community on the route, but FRR matches an expanded
+// list against the whole space-joined, numerically sorted community
+// string. Rendering a member verbatim therefore made an anchored
+// member such as ^666:.*$ match only when the 666 community sorted
+// first — a peer could bypass a reject by adding any lower-sorting
+// community. config.TranslateCommunityMemberRegex now rewrites every
+// regex member into a per-community pattern (strip one leading ^ /
+// trailing $, wrap as (^|[ ])(…)([ ]|$), confine "." to [^ ]), and
+// strict-rejects members that cannot be confined; on the tolerant
+// path communityListRenderable reports such a definition
+// unrenderable, so it renders nothing and referencing terms fail
+// closed (#10822). The wrapping is pipe-free ((^|[ ]), never (^| ))
+// so no rendered line carries the "| " FRR's vty pipe hook refuses
+// (R3-A11-04).
+//
+// #16835 interaction: the conjunction sequencer
+// (communitySequencePattern16788) builds token boundaries
+// structurally, so adjacent factors share the single separator
+// between their communities instead of each consuming one — the
+// adjacent-literal row of #16835 is covered here as a consequence
+// of expressing per-community boundaries once. The shared-token row
+// (one community satisfying two regex members) still under-matches,
+// because a sequence consumes at least one token per factor; that
+// row remains #16835's, and #16788 does not claim it.
+//
 // #15008 (A11-02): Junos names a community by its MEMBERS and requires
 // EVERY member to match a route: "The evaluation of all members must
 // be successful for the named community evaluation to be successful"
@@ -64,39 +90,19 @@ const communityRegexChars = config.CommunityRegexChars
 //     bgpd parses the value with community_str2com into a SET and
 //     community_match requires every value of that set to be present
 //     in the route — exact AND over the literals.
-//   - any-regex (expanded): #15779 — POSIX ERE (FRR regcomp
-//     REG_EXTENDED) has no lookahead, so the pre-#15779
-//     `(?=.*factor)` conjunction was rejected with
-//     CMD_WARNING_CONFIG_FAILED and aborted the whole frr-reload.
-//     POSIX ERE also cannot express an unordered conjunction in one
-//     consuming pattern. The conjunction is therefore rendered as
-//     the disjunction of its ORDERED sequences: one expanded permit
-//     entry per permutation of the member factors, factors joined
-//     with ".*". FRR matches a list when ANY permit entry matches,
-//     and a sequence entry matches only when every factor matches,
-//     in that order, against the joined, sorted community string
-//     FRR matches expanded entries against (community_str joins the
-//     numerically sorted values with single spaces) — so the
-//     permutation set matches exactly the routes satisfying every
-//     member, in whatever position. A literal member, whose textual
-//     form could appear as a substring of a longer value (65000:100
-//     inside 65000:1000) or split across a token boundary (1:2
-//     inside the two tokens "65000:1 2:3"), is first anchored to a
-//     whole token — `(^| )member( |$)` — before sequencing. A regex
-//     member is sequenced directly; its author-written anchors keep
-//     their meaning when the member lands first/last in a
-//     permutation. This preserves the documented unanchored-regex
-//     semantics of single regex members (#2643) while requiring
-//     every member to be satisfied. Operational caveat: members
-//     that use backreferences interact with sequencing as they did
-//     with the lookahead wrapping; such members are vanishingly
-//     rare and the strict ValidCommunityMember gate still applies.
-//     The permutation count is factorial, so expanded conjunctions
-//     are bounded (maxExpandedCommunityConjunctionMembers); a
-//     definition past the bound renders nothing and is reported
-//     missing at render, so referencing terms fail closed (#10822
-//     posture) instead of emitting an unbounded pattern set or a
-//     silently ANY-widened list.
+//   - any-regex (expanded): #15779 — POSIX ERE has no lookahead, so
+//     the conjunction is the disjunction of its ORDERED sequences:
+//     one expanded permit entry per permutation of the member
+//     factors. #16788 builds each sequence structurally
+//     (communitySequencePattern16788): token boundaries are expressed
+//     once per factor position, anchored member edges become token
+//     boundaries, and "." inside a member is confined to [^ ] — so a
+//     sequence entry matches only when every member matches some
+//     community, in that order. The permutation count is factorial,
+//     so expanded conjunctions are bounded
+//     (maxExpandedCommunityConjunctionMembers); a definition past
+//     the bound renders nothing and is reported missing at render,
+//     so referencing terms fail closed (#10822 posture).
 //
 // `then community delete <name>` CANNOT reuse that AND entry: FRR's
 // community_list_match_delete strips a route value only when ONE
@@ -189,50 +195,106 @@ func expandedCommunityConjunctionRenderable(members []string) bool {
 	return len(dedupStrings(members)) <= maxExpandedCommunityConjunctionMembers
 }
 
+type communityFactor16788 struct {
+	core          string // per-community core: no ^/$ edges (anchored edges are the sequence's token boundaries)
+	anchoredStart bool
+	anchoredEnd   bool
+}
+
+// communityFactorForMember builds one conjunction factor. A regex
+// member is classified by whether its edges were Junos-anchored:
+// anchored edges become the sequence's token boundaries, unanchored
+// edges stay substring-within-token. A literal member is a fully
+// anchored core.
+func communityFactorForMember(member string) (communityFactor16788, error) {
+	if !communityMemberIsRegex(member) {
+		return communityFactor16788{core: member, anchoredStart: true, anchoredEnd: true}, nil
+	}
+	core, start, end, err := config.TranslateCommunityMemberCore(member)
+	if err != nil {
+		return communityFactor16788{}, err
+	}
+	return communityFactor16788{core: core, anchoredStart: start, anchoredEnd: end}, nil
+}
+
+// communitySequencePattern16788 renders one ordered factor sequence
+// as a single POSIX ERE over the joined community string. Token
+// boundaries are structural: the sequence opens at a token start,
+// each later factor opens after exactly one separator plus any
+// number of intervening tokens, and an anchored final factor closes
+// at a token end — so adjacent tokens share their one separator
+// instead of each consuming it (#16835 row isolated to this join).
+func communitySequencePattern16788(seq []communityFactor16788) string {
+	var b strings.Builder
+	b.WriteString("(^|[ ])")
+	for i, f := range seq {
+		if i > 0 {
+			prev := seq[i-1]
+			if prev.anchoredEnd {
+				b.WriteString("([ ][^ ]+)*[ ]")
+			} else {
+				b.WriteString("[^ ]*([ ][^ ]+)*[ ]")
+			}
+			if !f.anchoredStart {
+				b.WriteString("[^ ]*")
+			}
+		}
+		b.WriteString(f.core)
+	}
+	if seq[len(seq)-1].anchoredEnd {
+		b.WriteString("([ ]|$)")
+	}
+	return b.String()
+}
+
 // communityExpandedConjunctionPatterns builds the expanded permit
 // patterns requiring EVERY member (see the #15008/#15779 note
 // above): one ordered sequence per permutation of the distinct
-// member factors, factors joined with ".*". Duplicate members
-// collapse to one factor. A single member returns itself unchanged,
-// preserving the pre-#15008 expanded render. Callers gate the
-// member count with expandedCommunityConjunctionRenderable.
+// member factors. Duplicate members collapse to one factor. A
+// single regex member returns its #16788 per-community translation
+// (the config translator's wrapped form, not a sequence). Callers
+// gate the member count with expandedCommunityConjunctionRenderable
+// and the members with communityListRenderable, so translation
+// cannot fail here; a (defensive) translation failure yields no
+// patterns, which the caller treats as an omitted, missing list.
 func communityExpandedConjunctionPatterns(members []string) []string {
 	if len(members) == 1 {
-		return []string{sanitizeFRRValue(members[0])}
+		pattern, err := config.TranslateCommunityMemberRegex(sanitizeFRRValue(members[0]))
+		if err != nil {
+			return nil
+		}
+		return []string{pattern}
 	}
 	seen := make(map[string]bool, len(members))
-	factors := make([]string, 0, len(members))
+	factors := make([]communityFactor16788, 0, len(members))
 	for _, member := range members {
 		member = sanitizeFRRValue(member)
 		if seen[member] {
 			continue
 		}
 		seen[member] = true
-		factor := member
-		if !communityMemberIsRegex(member) {
-			factor = `(^| )` + factor + `( |$)`
+		factor, err := communityFactorForMember(member)
+		if err != nil {
+			return nil
 		}
 		factors = append(factors, factor)
 	}
 	patterns := make([]string, 0, 24)
-	var permute func(prefix string, rest []string)
-	permute = func(prefix string, rest []string) {
+	var permute func(prefix []communityFactor16788, rest []communityFactor16788)
+	permute = func(prefix []communityFactor16788, rest []communityFactor16788) {
 		if len(rest) == 0 {
-			patterns = append(patterns, prefix)
+			patterns = append(patterns, communitySequencePattern16788(prefix))
 			return
 		}
 		for i, factor := range rest {
-			next := make([]string, 0, len(rest)-1)
+			next := make([]communityFactor16788, 0, len(rest)-1)
 			next = append(next, rest[:i]...)
 			next = append(next, rest[i+1:]...)
-			joined := factor
-			if prefix != "" {
-				joined = prefix + ".*" + factor
-			}
-			permute(joined, next)
+			seq := append(append([]communityFactor16788{}, prefix...), factor)
+			permute(seq, next)
 		}
 	}
-	permute("", factors)
+	permute(nil, factors)
 	return patterns
 }
 
@@ -343,6 +405,19 @@ func renderCommunityListDefinitions(b *strings.Builder, name string, cd *config.
 	}
 	backing := communityDeleteListName(name)
 	for _, member := range members {
+		if kind == "expanded" && communityMemberIsRegex(member) {
+			// #16788: the backing entry is matched by FRR against one
+			// community value at a time for delete, so it carries the
+			// same per-community translation as the match-facing
+			// pattern; emitting the raw member would reintroduce the
+			// whole-string anchor divergence on the delete path.
+			pattern, err := config.TranslateCommunityMemberRegex(sanitizeFRRValue(member))
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(b, "bgp community-list %s %s permit %s\n", kind, backing, pattern)
+			continue
+		}
 		fmt.Fprintf(b, "bgp community-list %s %s permit %s\n", kind, backing, sanitizeFRRValue(member))
 	}
 }

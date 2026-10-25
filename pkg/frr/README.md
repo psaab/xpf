@@ -1722,7 +1722,7 @@ step. Both are required — neither sees the other's case:
   disjunction of its ordered sequences: one permit entry per
   permutation of the member factors (joined with `.*`) over the
   joined sorted community string, with literal members first
-  anchored to a whole token (`(^| )m( |$)`) so `65000:100` cannot
+  anchored to a whole token (`(^|[ ])m([ ]|$)`) so `65000:100` cannot
   match inside `65000:1000` or across a token boundary. A list
   matches when ANY entry matches, and each entry requires every
   factor in its order, so the set matches exactly the routes
@@ -1731,20 +1731,37 @@ step. Both are required — neither sees the other's case:
   `maxExpandedCommunityConjunctionMembers` (4 members, 24 entries);
   a definition past the bound renders nothing and is reported
   missing at render, so referencing terms fail closed (#10822
-  posture). Single-member and empty definitions render
-  byte-identically to before; duplicate members collapse. `then
-  community delete X` cannot use the AND entries (FRR's
-  `community_list_match_delete` strips a value only when one entry
-  matches that single value), so delete targets a generated
+  posture). Single-member and empty definitions render their
+  #16788 per-community translation (below); duplicate members
+  collapse. `then community delete X` cannot use the AND entries
+  (FRR's `community_list_match_delete` strips a value only when one
+  entry matches that single value), so delete targets a generated
   per-member backing (`<frrName>-xpf-del-<digest>`,
-  `communityDeleteListName`) whose per-member lines strip each
-  value; `communityListCollision` (wired into `ApplyFull`) fails
-  the apply closed when two operator names normalize to one FRR
-  name or an operator name forges a backing. Caveat: regex members
-  using backreferences interact with sequencing; author-written
-  `^`/`$` keep whole-string meaning when the member lands
-  first/last in a permutation, which can be stricter than Junos's
-  per-value match for anchored multi-member regexes.
+  `communityDeleteListName`) whose per-member lines (regex members
+  in their #16788 translation) strip each value;
+  `communityListCollision` (wired into `ApplyFull`) fails the apply
+  closed when two operator names normalize to one FRR name or an
+  operator name forges a backing. Caveat: regex members using
+  backreferences interact with sequencing. The #16788 sequencer
+  shares the single separator between adjacent factors (the
+  #16835 adjacent-literal row); one community satisfying two
+  members (the #16835 shared-token row) still under-matches.
+- **Community member regexes match per community (#16788, R3-A11-05).**
+  Junos evaluates each member against each community on the route,
+  but FRR matches an expanded list against the whole space-joined
+  sorted community string, so a verbatim `^666:.*$` matched only
+  when the 666 community sorted first — a peer could bypass a
+  community reject by adding any lower-sorting community.
+  `config.TranslateCommunityMemberRegex` strips one leading `^` /
+  trailing `$`, wraps as `(^|[ ])(…)([ ]|$)` (pipe-free; `| ` is
+  refused by FRR's vty pipe hook, R3-A11-04), and confines `.` to
+  `[^ ]` so a match cannot span communities. Members that cannot be
+  confined (interior `^`/`$`, a literal space or space-matching
+  bracket, `\s`/`\d`/`\w` escapes, `(?...)`, an alternation spelled
+  `| `) are strict-rejected by `ValidCommunityMember` and omitted
+  whole-definition at render, so referencing terms fail closed
+  (#10822). Unanchored edges keep Junos substring meaning inside
+  one token.
 - **Policy community references are validated at commit (#2881).** A
   policy-statement term's `from community <name>` renders `match community
   <name>` and `then community delete <name>` (the strip-by-list operation
