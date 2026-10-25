@@ -14,7 +14,7 @@ import (
 //     order; reordering, inserting, or dropping an entry fails here, so
 //     the strict first-error slot (invariant #6) and the tolerant
 //     warning-accumulation order (invariant #7) cannot drift silently.
-//   - per-gate fail-on-revert: every one of the 18 registry entries is
+//   - per-gate fail-on-revert: every one of the 19 registry entries is
 //     driven directly with a config that trips it, in strict and
 //     tolerant modes; gutting an entry's validator call turns that
 //     gate's subtest RED — the fourth-link wiring proof PR-0
@@ -41,9 +41,10 @@ import (
 // port, unknown match leaves, unconstrained match, DNAT pool, the two
 // pool unknown-leaf gates, deterministic, source pool port-range,
 // pool address-range, pool references, rule persistent-NAT, pool
-// address scope, pool address grammar, aggregate cardinality, and the
-// DNAT off-shadow gate. appendDNATOffShadowPotentialWarnings is not a
-// gate (warning-only, no strict error) and stays outside the census.
+// address scope, pool address grammar, pool family (#16600), aggregate
+// cardinality, and the DNAT off-shadow gate.
+// appendDNATOffShadowPotentialWarnings is not a gate (warning-only, no
+// strict error) and stays outside the census.
 var natGateOrderCensus16145 = []string{
 	"destNATAddresses",
 	"natMatchAddressLiterals",
@@ -61,6 +62,7 @@ var natGateOrderCensus16145 = []string{
 	"sourceNATRulePersistentNAT",
 	"sourceNATPoolAddressScope",
 	"sourceNATPoolAddressGrammar",
+	"sourceNATPoolFamily",
 	"sourceNATAggregateCardinality",
 	"dnatOffShadow",
 }
@@ -263,6 +265,22 @@ func TestNATGateRegistryFailOnRevert16145(t *testing.T) {
 			},
 			strictSubstr: "not-an-ip",
 			warnPrefix:   "source-nat pool address (downgraded to warning on tolerant path): ",
+		},
+		{
+			name: "sourceNATPoolFamily",
+			build: func(t *testing.T) *Config {
+				return mustCompileShape16145(t, []string{
+					"set security zones security-zone trust",
+					"set security zones security-zone untrust",
+					"set security nat source pool sp address 2001:db8::5",
+					"set security nat source rule-set rs1 from zone trust",
+					"set security nat source rule-set rs1 to zone untrust",
+					"set security nat source rule-set rs1 rule r1 match source-address 10.0.0.0/24",
+					"set security nat source rule-set rs1 rule r1 then source-nat pool sp",
+				})
+			},
+			strictSubstr: "WrongAddressFamily",
+			warnPrefix:   "source-nat pool family (downgraded to warning on tolerant path): ",
 		},
 		{
 			name: "natUnknownMatchLeaves",

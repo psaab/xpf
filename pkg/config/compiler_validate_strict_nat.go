@@ -1540,6 +1540,240 @@ func validateSourceNATPoolAddressScopeStrict(cfg *Config) error {
 	return nil
 }
 
+// validateSourceNATPoolFamilyStrict (#16600) hard-rejects a pool-mode
+// source-NAT rule whose authored source match is single-family F while
+// the referenced pool has zero family-F members. The Rust allocator
+// splits pool members by IpAddr variant (nat/source/expand.rs), so a
+// v4 flow reaching such a rule finds pool_addresses_v4 empty and is
+// refused WrongAddressFamily (nat/source/match_rules.rs) — the packet
+// is not forwarded. Before this gate the rule committed clean and
+// every matching flow failed only at runtime, discoverable through
+// allocation-failure counters. This is the SNAT twin of the #13922
+// DNAT/static cross-family strict reject.
+//
+// Single-family determination considers BOTH authored source axes:
+// literal `match source-address` values and `match source-address-name`
+// references resolved through their static address-book closure (the
+// #16550 nat64NameClosureNoIPv6 precedent generalized to a two-family
+// provenance). Wildcard keywords contribute their families
+// (PolicyAddressWildcardFamilies: `any` both, `any-ipv4` v4-only,
+// `any6` v6-only). A rule is single-family F only when every decidable
+// authored source value is family F and at least one is. Hence an
+// unconstrained rule (no source-address / source-address-name), a
+// dual-family rule (mixed literals, a mixed book closure, or `any`),
+// and a rule whose only source constraint is not statically decidable
+// (a direct dynamic-address feed binding, or a dns-name / tainted /
+// dangling closure) are NOT rejected: they can match family-F traffic
+// the pool can translate, or their family is not proven. Rules that
+// are `off`, interface-mode, or reference an undefined pool are out
+// of scope (validateNATPoolReferencesStrict owns the last).
+//
+// Family classification is the colon-strict natAddrFamily on the
+// un-parsed text (natCIDRIPPart), never net.IP.To4: an IPv4-mapped
+// `::ffff:192.0.2.1` pool member is v6 (Rust IpAddr::V6), so it does
+// NOT satisfy a v4 rule — the #10686 identity rule. Pool membership
+// uses the same member texts the grammar gate enumerates
+// (pool.Address + pool.Addresses, ranges already expanded); members
+// that do not parse are skipped here because the grammar/scope gates
+// own them. Strict on commit / commit-check (hard reject); the call
+// site downgrades to a warning on the tolerant load / peer-sync path
+// (#1960 no-brick) — the dataplane already fails such flows closed
+// (WrongAddressFamily), so a leniently-loaded rule installs and
+// refuses rather than translating to the wrong family. Rule-sets are
+// walked in sorted name order, rules in configured order, for a
+// deterministic first-reported offender.
+func validateSourceNATPoolFamilyStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	pools := cfg.Security.NAT.SourcePools
+	rulesets := append([]*NATRuleSet(nil), cfg.Security.NAT.Source...)
+	sort.SliceStable(rulesets, func(i, j int) bool {
+		if rulesets[i] == nil || rulesets[j] == nil {
+			return rulesets[i] != nil
+		}
+		return rulesets[i].Name < rulesets[j].Name
+	})
+	for _, rs := range rulesets {
+		if rs == nil {
+			continue
+		}
+		for _, rule := range rs.Rules {
+			if rule == nil || rule.Then.Off || rule.Then.PoolName == "" {
+				continue
+			}
+			pool, ok := pools[rule.Then.PoolName]
+			if !ok || pool == nil {
+				// Undefined reference — validateNATPoolReferencesStrict (#5626).
+				continue
+			}
+			family, single := sourceNATRuleSingleFamily16600(cfg, rule)
+			if !single {
+				continue
+			}
+			var addrs []string
+			if pool.Address != "" {
+				addrs = append(addrs, pool.Address)
+			}
+			addrs = append(addrs, pool.Addresses...)
+			hasFamily := false
+			for _, a := range addrs {
+				if natAddrFamily(natCIDRIPPart(a)) == family {
+					hasFamily = true
+					break
+				}
+			}
+			if hasFamily {
+				continue
+			}
+			familyName := "IPv4"
+			if family == "v6" {
+				familyName = "IPv6"
+			}
+			return fmt.Errorf(
+				"source-nat rule-set %q rule %q: match source-address is "+
+					"%s-only but pool %q has no %s pool address; the rule "+
+					"would commit but every matching flow is refused by the "+
+					"dataplane (WrongAddressFamily) and not forwarded — add "+
+					"an %s address to pool %q or widen the rule's source match",
+				rs.Name, rule.Name, familyName, rule.Then.PoolName,
+				familyName, familyName, rule.Then.PoolName)
+		}
+	}
+	return nil
+}
+
+// sourceNATRuleSingleFamily16600 reports whether a source-NAT rule's
+// authored source match is proven single-family, and which family
+// ("v4" or "v6"). See validateSourceNATPoolFamilyStrict for the
+// provenance rules. A direct feed binding or an undecidable name
+// closure makes the whole rule undecidable (not single-family),
+// because such a rule may match either family at runtime.
+func sourceNATRuleSingleFamily16600(cfg *Config, rule *NATRule) (string, bool) {
+	family := ""
+	merge := func(f string) bool {
+		if family == "" {
+			family = f
+			return true
+		}
+		return family == f
+	}
+	for _, raw := range rule.Match.SourceAddressList() {
+		if v4, v6, ok := PolicyAddressWildcardFamilies(raw); ok {
+			if v4 && v6 {
+				return "", false
+			}
+			f := "v6"
+			if v4 {
+				f = "v4"
+			}
+			if !merge(f) {
+				return "", false
+			}
+			continue
+		}
+		f := natAddrFamily(natCIDRIPPart(raw))
+		if f == "" {
+			// Unparseable literal — validateNATMatchAddressLiteralsStrict
+			// owns it; it proves no family.
+			continue
+		}
+		if !merge(f) {
+			return "", false
+		}
+	}
+	for _, name := range rule.Match.SourceAddressNameList() {
+		if v4, v6, ok := PolicyAddressWildcardFamilies(name); ok {
+			if v4 && v6 {
+				return "", false
+			}
+			f := "v6"
+			if v4 {
+				f = "v4"
+			}
+			if !merge(f) {
+				return "", false
+			}
+			continue
+		}
+		if _, isFeed := cfg.Security.DynamicAddress.AddressBindings[name]; isFeed {
+			// Direct feed binding: prefixes arrive via the live
+			// overlay, so the family is not statically decidable.
+			return "", false
+		}
+		f, decidable := addressBookNameFamily16600(cfg.Security.AddressBook, name)
+		if !decidable {
+			return "", false
+		}
+		if !merge(f) {
+			return "", false
+		}
+	}
+	if family == "" {
+		return "", false
+	}
+	return family, true
+}
+
+// addressBookNameFamily16600 resolves one address-book name's static
+// closure to a single family. decidable is false when the closure is
+// empty, mixed-family, tainted, dangling, or otherwise not statically
+// resolvable (dns-name without a snapshot, wildcard members) — the
+// same conservative posture as nat64NameClosureNoIPv6 (#16550), using
+// the colon-strict natAddrFamily so a `::ffff:` member is v6.
+func addressBookNameFamily16600(ab *AddressBook, name string) (string, bool) {
+	if ab == nil {
+		return "", false
+	}
+	var values []string
+	if addr, ok := ab.Addresses[name]; ok && addr != nil {
+		values = addr.UsableValues()
+	} else {
+		leaves, err := expandAddressSetLeaves(name, ab)
+		if err != nil || len(leaves) == 0 {
+			return "", false
+		}
+		for _, leaf := range leaves {
+			if v4, v6, ok := PolicyAddressWildcardFamilies(leaf); ok {
+				if v4 && v6 {
+					return "", false
+				}
+				if v4 {
+					values = append(values, "0.0.0.0/0")
+				} else {
+					values = append(values, "::/0")
+				}
+				continue
+			}
+			member, ok := ab.Addresses[leaf]
+			if !ok || member == nil {
+				return "", false
+			}
+			vals := member.UsableValues()
+			if len(vals) == 0 {
+				return "", false
+			}
+			values = append(values, vals...)
+		}
+	}
+	if len(values) == 0 {
+		return "", false
+	}
+	family := ""
+	for _, v := range values {
+		f := natAddrFamily(natCIDRIPPart(v))
+		if f == "" {
+			return "", false
+		}
+		if family == "" {
+			family = f
+		} else if family != f {
+			return "", false
+		}
+	}
+	return family, true
+}
+
 // validateNATSourceAddressNameReferencesStrict hard-rejects a source or
 // destination NAT rule whose `match source-address-name <name>` OR `match
 // destination-address-name <name>` (#3229) names an address-book entry that
