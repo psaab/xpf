@@ -497,6 +497,42 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 				baseRoutingDomain = claim.domain
 			}
 		}
+		// #16513: a collapsing unit 0 IS this base row for primary
+		// purposes too. The unit row below merges the configured
+		// `primary` marker over the kernel listing, but the base row
+		// is built from the kernel listing alone and never carried
+		// it, so the helper's shared-ifindex merge compared the base
+		// row's order-based pick against the unit's designated pick
+		// and refused the snapshot (or, off the consistently-zoned
+		// path, kept the order-based pick and silently ignored the
+		// designation). Carry ONLY the marker onto the base row's
+		// existing addresses, using the same collapse predicate as
+		// the routing-domain inheritance above: the base row must
+		// not gain configured addresses the kernel does not report
+		// (its connected prefixes are the kernel's — see
+		// TestAUnitRefMustNotDragTheBaseIntoTheVRF9132), so this is a
+		// flag overlay, not an address merge. A cross-interface claim
+		// on this netdev (a RETH unit collapsing onto a member) is
+		// NOT overlaid here: that unit's own row carries the marker
+		// and the helper's designated-wins merge honours it without
+		// rewriting a foreign interface's row.
+		if u0, ok := iface.Units[0]; ok && u0 != nil && !iface.Disable && !u0.Disable &&
+			snapshotLinuxName(cfg, name, iface, u0) == linuxName {
+			for _, primary := range []string{u0.PrimaryAddressForFamily(false), u0.PrimaryAddressForFamily(true)} {
+				if primary == "" {
+					continue
+				}
+				if ip, netw, err := net.ParseCIDR(primary); err == nil && netw != nil {
+					netw.IP = ip
+					want := netw.String()
+					for i := range addresses {
+						if addresses[i].Address == want {
+							addresses[i].Primary = true
+						}
+					}
+				}
+			}
+		}
 		out = append(out, InterfaceSnapshot{
 			Name: name,
 			// #9821 #22: structural row identity, stated explicitly — a

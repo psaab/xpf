@@ -115,3 +115,185 @@ fn pick_without_marker_keeps_order_rule_15155() {
         "pure link-local control keeps the fallback"
     );
 }
+
+// #16513 helpers: shared-ifindex rows as the Go builder emits them for
+// a zoned untagged unit 0. The base row carries the kernel addresses
+// (unmarked, order pick .10/::10); the unit row carries the configured
+// marker (designated .9/::9). Both share ifindex 42 and zone "trust".
+fn shared_row_16513(
+    name: &str,
+    zone: &str,
+    egress_zone: &str,
+    tunnel: bool,
+    addresses: Vec<InterfaceAddressSnapshot>,
+) -> InterfaceSnapshot {
+    InterfaceSnapshot {
+        name: name.into(),
+        linux_name: "ge-0-0-1".into(),
+        ifindex: 42,
+        zone: zone.into(),
+        egress_zone: egress_zone.into(),
+        tunnel,
+        hardware_addr: "02:00:00:00:00:2a".into(),
+        addresses,
+        ..Default::default()
+    }
+}
+
+fn kernel_addrs_16513() -> Vec<InterfaceAddressSnapshot> {
+    vec![
+        addr("inet", "10.0.0.10/24", false),
+        addr("inet", "10.0.0.9/24", false),
+        addr("inet6", "2001:db8::10/64", false),
+        addr("inet6", "2001:db8::9/64", false),
+    ]
+}
+
+fn marked_addrs_16513() -> Vec<InterfaceAddressSnapshot> {
+    vec![
+        addr("inet", "10.0.0.10/24", false),
+        addr("inet", "10.0.0.9/24", true),
+        addr("inet6", "2001:db8::10/64", false),
+        addr("inet6", "2001:db8::9/64", true),
+    ]
+}
+
+fn snapshot_16513(interfaces: Vec<InterfaceSnapshot>) -> ConfigSnapshot {
+    crate::afxdp::test_fixtures::v5(ConfigSnapshot {
+        interfaces,
+        zones: vec![ZoneSnapshot {
+            name: "trust".into(),
+            id: 1,
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+}
+
+/// #16513: base row (unmarked) + unit row (marked) on one consistently
+/// zoned ifindex must build Ok and the egress primary must be the
+/// DESIGNATED address, in either row order.
+///
+/// FAIL-ON-REVERT: restore the #13181 per-row-pick comparison and the
+/// base-first order returns InterfaceSharedIfindexAttributeConflict
+/// {primary_v4: 10.0.0.10 vs 10.0.0.9}; restore first-row-wins merging
+/// and the base-first order silently yields .10/::10.
+#[test]
+fn shared_ifindex_designated_primary_wins_over_base_row_16513() {
+    for base_first in [true, false] {
+        let base = shared_row_16513("ge-0/0/1", "trust", "trust", false, kernel_addrs_16513());
+        let unit = shared_row_16513("ge-0/0/1.0", "trust", "trust", false, marked_addrs_16513());
+        let interfaces = if base_first {
+            vec![base, unit]
+        } else {
+            vec![unit, base]
+        };
+        let snapshot = snapshot_16513(interfaces);
+        let state = try_build_forwarding_state_with_policy_counters(
+            &snapshot,
+            &PolicyCounterStore::default(),
+        )
+        .unwrap_or_else(|e| {
+            panic!("base_first={base_first}: designated primary must build, got {e:?}")
+        });
+        let egress = state.egress.get(&42).expect("egress row for ifindex 42");
+        assert_eq!(
+            egress.primary_v4,
+            Some(Ipv4Addr::new(10, 0, 0, 9)),
+            "base_first={base_first}: designated v4 primary must win the merge"
+        );
+        assert_eq!(
+            egress.primary_v6,
+            Some(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 9)),
+            "base_first={base_first}: designated v6 primary must win the merge"
+        );
+    }
+}
+
+/// #16513 control: no marker on either row — the merge keeps the
+/// order-based pick (.10/::10) exactly as before.
+#[test]
+fn shared_ifindex_unmarked_control_keeps_order_pick_16513() {
+    let snapshot = snapshot_16513(vec![
+        shared_row_16513("ge-0/0/1", "trust", "trust", false, kernel_addrs_16513()),
+        shared_row_16513("ge-0/0/1.0", "trust", "trust", false, kernel_addrs_16513()),
+    ]);
+    let state = build_forwarding_state(&snapshot);
+    let egress = state.egress.get(&42).expect("egress row for ifindex 42");
+    assert_eq!(egress.primary_v4, Some(Ipv4Addr::new(10, 0, 0, 10)));
+    assert_eq!(
+        egress.primary_v6,
+        Some(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x10))
+    );
+}
+
+/// #16513: on a shape that is NOT consistently zoned (base row unzoned,
+/// unit zoned — the RETH-member / fan-up shape), the designation must
+/// still win instead of being silently dropped by first-row-wins.
+#[test]
+fn shared_ifindex_designated_primary_wins_when_not_consistently_zoned_16513() {
+    let snapshot = snapshot_16513(vec![
+        shared_row_16513("ge-0/0/1", "", "trust", false, kernel_addrs_16513()),
+        shared_row_16513("ge-0/0/1.0", "trust", "trust", false, marked_addrs_16513()),
+    ]);
+    let state = build_forwarding_state(&snapshot);
+    let egress = state.egress.get(&42).expect("egress row for ifindex 42");
+    assert_eq!(egress.primary_v4, Some(Ipv4Addr::new(10, 0, 0, 9)));
+    assert_eq!(
+        egress.primary_v6,
+        Some(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 9))
+    );
+}
+
+/// #16513: two DIFFERENT designated primaries on one consistently
+/// zoned non-tunnel ifindex are a genuine config conflict and must
+/// still fail closed — the designated-wins merge must not degenerate
+/// into last-designation-wins.
+#[test]
+fn shared_ifindex_conflicting_designations_still_fail_closed_16513() {
+    let other_marked = vec![
+        addr("inet", "10.0.0.10/24", true),
+        addr("inet", "10.0.0.9/24", false),
+        addr("inet6", "2001:db8::10/64", false),
+        addr("inet6", "2001:db8::9/64", false),
+    ];
+    let snapshot = snapshot_16513(vec![
+        shared_row_16513("ge-0/0/1.0", "trust", "trust", false, marked_addrs_16513()),
+        shared_row_16513("ge-0/0/1.1", "trust", "trust", false, other_marked),
+    ]);
+    let result =
+        try_build_forwarding_state_with_policy_counters(&snapshot, &PolicyCounterStore::default());
+    assert!(
+        matches!(
+            result,
+            Err(
+                crate::policy::SnapshotIntegrityError::InterfaceSharedIfindexAttributeConflict {
+                    attribute: "primary_v4",
+                    ..
+                }
+            )
+        ),
+        "conflicting designations must reject the snapshot, got {result:?}"
+    );
+}
+
+/// #16513 acceptance: tunnel units sharing one netdev with genuinely
+/// different designated primaries are still accepted (the #13181
+/// tunnel exemption is preserved).
+#[test]
+fn shared_ifindex_tunnel_designations_still_accepted_16513() {
+    let other_marked = vec![
+        addr("inet", "10.0.0.10/24", true),
+        addr("inet", "10.0.0.9/24", false),
+    ];
+    let snapshot = snapshot_16513(vec![
+        shared_row_16513("gr-0/0/0.0", "trust", "trust", true, marked_addrs_16513()),
+        shared_row_16513("gr-0/0/0.1", "trust", "trust", true, other_marked),
+    ]);
+    let result =
+        try_build_forwarding_state_with_policy_counters(&snapshot, &PolicyCounterStore::default());
+    assert!(
+        result.is_ok(),
+        "tunnel units with different primaries must stay accepted, got {result:?}"
+    );
+}

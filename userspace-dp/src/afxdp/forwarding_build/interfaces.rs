@@ -2110,6 +2110,16 @@ pub(super) fn populate_egress(
             .unwrap_or(0);
         let primary_v4 = pick_interface_v4(iface);
         let primary_v6 = pick_interface_v6(iface);
+        // #16513: was this row's pick the operator's DESIGNATED primary
+        // (a marked address on the row), as opposed to the fallback
+        // first-in-order pick? The helpers re-scan for the marked
+        // address so the merge below can tell a designation (which must
+        // win the shared-ifindex merge) from an order-based pick (which
+        // must not veto a designation on a sibling row). Two different
+        // designated picks on one ifindex are a genuine config conflict
+        // and keep the #13181 fail-closed gate.
+        let designated_v4 = designated_interface_v4(iface);
+        let designated_v6 = designated_interface_v6(iface);
         if let Some(existing) = state.egress.get_mut(&iface.ifindex) {
             if existing.redundancy_group != 0
                 && iface.redundancy_group != 0
@@ -2171,33 +2181,70 @@ pub(super) fn populate_egress(
             } else if existing.src_mac == [0; 6] {
                 existing.src_mac = src_mac;
             }
-            // Tunnel logical units sharing a netdev legitimately carry
-            // different primary addresses; the runtime egress row represents
-            // the shared device and keeps the first available family address.
+            // #16513: a DESIGNATED primary wins the shared-ifindex
+            // merge. The Go builder marks the designation only on the
+            // unit row; the base row it collapses onto (same ifindex,
+            // kernel addresses, unmarked) picks by order, so comparing
+            // per-row picks as #13181 did refused every snapshot whose
+            // designated address was not the string-first one, and on
+            // non-consistently-zoned shapes the first-row-wins merge
+            // silently dropped the designation. Now: a designated pick
+            // replaces an undesignated incumbent and beats a later
+            // undesignated row; only two DIFFERENT designated picks on
+            // one non-tunnel ifindex are a genuine conflict and keep
+            // the fail-closed gate. Tunnel rows keep the #13181
+            // exemption (they legitimately carry different primaries).
+            let incumbent_v4_designated =
+                state.egress_primary_v4_designated.contains(&iface.ifindex);
+            let incumbent_v6_designated =
+                state.egress_primary_v6_designated.contains(&iface.ifindex);
             if consistent_zoned_ifindexes.contains(&iface.ifindex) && !iface.tunnel {
-                if let (Some(first), Some(second)) = (existing.primary_v4, primary_v4) {
-                    ensure_shared_ifindex_value(
-                        iface.ifindex,
-                        &iface.name,
-                        "primary_v4",
-                        &first,
-                        &second,
-                    )?;
+                if let (Some(first), Some(second)) = (existing.primary_v4, designated_v4) {
+                    if incumbent_v4_designated {
+                        ensure_shared_ifindex_value(
+                            iface.ifindex,
+                            &iface.name,
+                            "primary_v4",
+                            &first,
+                            &second,
+                        )?;
+                    }
                 }
-                if let (Some(first), Some(second)) = (existing.primary_v6, primary_v6) {
-                    ensure_shared_ifindex_value(
-                        iface.ifindex,
-                        &iface.name,
-                        "primary_v6",
-                        &first,
-                        &second,
-                    )?;
+                if let (Some(first), Some(second)) = (existing.primary_v6, designated_v6) {
+                    if incumbent_v6_designated {
+                        ensure_shared_ifindex_value(
+                            iface.ifindex,
+                            &iface.name,
+                            "primary_v6",
+                            &first,
+                            &second,
+                        )?;
+                    }
                 }
             }
-            // Merge available family primaries; a row without a family cannot
-            // erase the first address selected for that family.
-            existing.primary_v4 = existing.primary_v4.or(primary_v4);
-            existing.primary_v6 = existing.primary_v6.or(primary_v6);
+            // Merge: designated wins over undesignated; otherwise the
+            // first available family address is kept and a row without
+            // a family cannot erase it.
+            match (designated_v4, primary_v4) {
+                (Some(d), _) => {
+                    existing.primary_v4 = Some(d);
+                    state.egress_primary_v4_designated.insert(iface.ifindex);
+                }
+                (None, Some(p)) if !incumbent_v4_designated => {
+                    existing.primary_v4 = existing.primary_v4.or(Some(p));
+                }
+                _ => {}
+            }
+            match (designated_v6, primary_v6) {
+                (Some(d), _) => {
+                    existing.primary_v6 = Some(d);
+                    state.egress_primary_v6_designated.insert(iface.ifindex);
+                }
+                (None, Some(p)) if !incumbent_v6_designated => {
+                    existing.primary_v6 = existing.primary_v6.or(Some(p));
+                }
+                _ => {}
+            }
             if existing.redundancy_group == 0 {
                 existing.redundancy_group = iface.redundancy_group;
             }
@@ -2217,6 +2264,15 @@ pub(super) fn populate_egress(
                 primary_v6,
             },
         );
+        // #16513: seed the designated-incumbent flags for the first
+        // row so a later row's designation/conflict is judged against
+        // the right incumbent kind.
+        if designated_v4.is_some() {
+            state.egress_primary_v4_designated.insert(iface.ifindex);
+        }
+        if designated_v6.is_some() {
+            state.egress_primary_v6_designated.insert(iface.ifindex);
+        }
     }
     // Resolve each configured native VLAN only when exactly one logical unit
     // on that parent has the selected VID. A missing or conflicting unit must
@@ -2637,6 +2693,43 @@ pub(in crate::afxdp) fn pick_interface_v6(iface: &InterfaceSnapshot) -> Option<I
         |address| address.parse::<ipnet::Ipv6Net>().ok().map(|net| net.addr()),
         |ip| ip.is_unicast_link_local(),
     )
+}
+
+/// #16513: the address the operator DESIGNATED `primary` on this row
+/// (a marked address), or None when the row carries no marker. Unlike
+/// `pick_interface_*`, there is no fallback: an unmarked row has no
+/// designation to contribute to the shared-ifindex merge, and its
+/// order-based pick must neither veto nor override a sibling row's
+/// designation. A disabled row designates nothing (mirrors the pick).
+fn designated_interface_generic<A: Copy>(
+    iface: &InterfaceSnapshot,
+    family: &str,
+    parse: fn(&str) -> Option<A>,
+) -> Option<A> {
+    if iface.admin_disabled {
+        return None;
+    }
+    for addr in &iface.addresses {
+        if addr.family != family || !addr.primary {
+            continue;
+        }
+        if let Some(ip) = parse(&addr.address) {
+            return Some(ip);
+        }
+    }
+    None
+}
+
+fn designated_interface_v4(iface: &InterfaceSnapshot) -> Option<Ipv4Addr> {
+    designated_interface_generic(iface, "inet", |address| {
+        address.parse::<ipnet::Ipv4Net>().ok().map(|net| net.addr())
+    })
+}
+
+fn designated_interface_v6(iface: &InterfaceSnapshot) -> Option<Ipv6Addr> {
+    designated_interface_generic(iface, "inet6", |address| {
+        address.parse::<ipnet::Ipv6Net>().ok().map(|net| net.addr())
+    })
 }
 
 #[cfg(test)]
