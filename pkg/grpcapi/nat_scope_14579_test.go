@@ -15,7 +15,11 @@ func TestNATStructuredScope14579(t *testing.T) {
 	if err := store.EnterConfigure(); err != nil {
 		t.Fatalf("EnterConfigure: %v", err)
 	}
-	if _, err := store.LoadSet(`set security nat source rule-set rs-iface from interface ge-0/0/1.0
+	if _, err := store.LoadSet(`set routing-instances blue instance-type virtual-router
+set interfaces ge-0/0/1 unit 0 family inet address 10.1.0.1/24
+set security zones security-zone trust
+set security zones security-zone untrust
+set security nat source rule-set rs-iface from interface ge-0/0/1.0
 set security nat source rule-set rs-iface to zone untrust
 set security nat source rule-set rs-iface rule r1 match source-address 0.0.0.0/0
 set security nat source rule-set rs-iface rule r1 then source-nat interface

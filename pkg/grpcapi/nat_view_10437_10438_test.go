@@ -73,6 +73,7 @@ func natViewGRPC10438FindSourceRule(t *testing.T, cfg *config.Config, name strin
 // for #10437: GetNATDestination copied only the singular destination CIDR.
 func TestGetNATDestinationCarriesCompleteMatch_10437(t *testing.T) {
 	store := natViewGRPC10437CommitStore(t, []string{
+		"set security zones security-zone untrust",
 		"set security address-book global address web-net 203.0.113.0/24",
 		"set security nat destination pool dp1 address 10.0.0.5",
 		"set security nat destination rule-set drs from zone untrust",
@@ -145,6 +146,8 @@ func TestGetNATDestinationCarriesCompleteMatch_10437(t *testing.T) {
 // TestGetNATSourceActionAndMatch_10438 is the fail-on-revert guard for #10438.
 func TestGetNATSourceActionAndMatch_10438(t *testing.T) {
 	committed := natViewGRPC10437CommitStore(t, []string{
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
 		"set security address-book global address trusted 10.0.0.0/8",
 		"set security address-book global address corp 172.16.0.0/12",
 		"set security nat source pool p1 address 203.0.113.10/32",

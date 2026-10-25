@@ -95,10 +95,13 @@ func TestBuildInterfacesInputLocalMonitorFallbackHonest(t *testing.T) {
 //   - The PEER config-only fill still honestly reports Up=false for a
 //     peer-owned monitor interface (unchanged by #4480).
 func TestBuildInterfacesInputLiveStatusFaithfulAndPeerHonest(t *testing.T) {
-	// "lo" resolves locally and is operationally up; "ge-7/0/9" is the
-	// peer node's interface and never resolves locally.
+	// The strict gate (#15037) rejects a monitor naming "lo" (no FPC
+	// slot, no netdev attribution), so the live local monitor is
+	// ge-0/0/0; where no such netdev exists the sweep reports no
+	// status and the test skips, as it did for a down loopback.
+	// "ge-7/0/9" is the peer node's interface and never resolves locally.
 	store := clusterMonitorStore(t,
-		"                lo weight 255;\n                ge-7/0/9 weight 200;")
+		"                ge-0/0/0 weight 255;\n                ge-7/0/9 weight 200;")
 
 	rm, err := routing.New()
 	if err != nil {
@@ -111,22 +114,21 @@ func TestBuildInterfacesInputLiveStatusFaithfulAndPeerHonest(t *testing.T) {
 	}
 	rm.ApplyInterfaceMonitors(cfg.Chassis.Cluster.RedundancyGroups)
 
-	// Establish the live truth for "lo" from the routing sweep itself.
 	var liveLoUp bool
 	var sawLo bool
 	for _, sts := range rm.InterfaceMonitorStatuses() {
 		for _, st := range sts {
-			if st.Interface == "lo" {
+			if st.Interface == "ge-0/0/0" {
 				sawLo = true
 				liveLoUp = st.Up
 			}
 		}
 	}
 	if !sawLo {
-		t.Skip("loopback 'lo' not resolvable as a live monitor in this environment")
+		t.Skip("ge-0/0/0 not resolvable as a live monitor in this environment")
 	}
 	if !liveLoUp {
-		t.Skip("loopback 'lo' reported operationally down in this environment")
+		t.Skip("ge-0/0/0 reported operationally down in this environment")
 	}
 
 	s := &Server{
@@ -137,15 +139,14 @@ func TestBuildInterfacesInputLiveStatusFaithfulAndPeerHonest(t *testing.T) {
 
 	input := s.buildInterfacesInput()
 
-	// Local live path: "lo" is up and must render as up.
 	var loMon *cluster.InterfaceMonitorInfo
 	for i := range input.Monitors {
-		if input.Monitors[i].Interface == "lo" {
+		if input.Monitors[i].Interface == "ge-0/0/0" {
 			loMon = &input.Monitors[i]
 		}
 	}
 	if loMon == nil {
-		t.Fatalf("local monitor for 'lo' missing; Monitors=%+v", input.Monitors)
+		t.Fatalf("local monitor for 'ge-0/0/0' missing; Monitors=%+v", input.Monitors)
 	}
 	if !loMon.Up {
 		t.Errorf("live-up local monitor Up = false, want true (fix must not force live status down); mon=%+v", *loMon)

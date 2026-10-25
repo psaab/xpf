@@ -502,7 +502,7 @@ func (s *Server) showRootAuthentication(cfg *config.Config, buf *strings.Builder
 		buf.WriteString("No root authentication configured\n")
 	} else {
 		ra := cfg.System.RootAuthentication
-		if ra.EncryptedPassword.Reveal() != "" {
+		if ra.EncryptedPassword.String() != "" {
 			buf.WriteString("Root password: configured (encrypted)\n")
 		}
 		if len(ra.SSHKeys) > 0 {

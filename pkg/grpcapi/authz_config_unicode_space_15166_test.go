@@ -113,14 +113,26 @@ func TestUnicodeSpaceControlsUnchanged15166(t *testing.T) {
 			}
 		}
 	}
-	// Unrestricted class: a malformed/Unicode line must keep its ordinary
-	// (non-permission) behaviour — the fail-closed arm applies only to a
-	// regex-restricted class.
+	// Unrestricted-by-regex class: #16080 fences every non-superuser
+	// class out of credential ancestors (system login), and the
+	// Unicode-spelled line still names that ancestor once the
+	// handler's strings.Fields split is considered — so it is denied
+	// here too, not merely for regex-restricted classes.
 	open := cfgCfg9154(t, "", "")
 	for _, verb := range []string{"deactivate", "activate"} {
 		input := verb + "\u00a0" + "system login"
-		if err := decideConfig9154(t, open, "Set", &pb.SetRequest{Input: input}); err != nil {
-			t.Errorf("unrestricted class %q was denied: %v (#15166)", input, err)
+		if err := decideConfig9154(t, open, "Set", &pb.SetRequest{Input: input}); err == nil {
+			t.Errorf("non-superuser class %q was allowed: mutation of a credential ancestor requires PermAll (#16080)", input)
+		}
+	}
+	// A Unicode line's path cannot be lexed at all, so for a
+	// non-superuser class the gate fails closed on the unlexable
+	// remainder regardless of the intended path (#15166+#16080):
+	// it cannot prove the target is not a credential ancestor.
+	for _, verb := range []string{"deactivate", "activate"} {
+		input := verb + "\u00a0" + "system services ssh"
+		if err := decideConfig9154(t, open, "Set", &pb.SetRequest{Input: input}); err == nil {
+			t.Errorf("non-superuser class %q was allowed though its path is unlexable (#15166)", input)
 		}
 	}
 	// Verb with no path at all stays ungated (handler usage error) even for

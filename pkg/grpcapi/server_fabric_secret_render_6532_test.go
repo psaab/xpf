@@ -80,7 +80,15 @@ var fabricSecretConfig = []string{
 	// config: global autonomous-system satisfies the current router-AS gate.
 	"set routing-options autonomous-system 65000",
 	"set security ike policy pol1 pre-shared-key ascii-text FAB6532-IKE-PSK",
+	"set security ike proposal prop1 authentication-method pre-shared-keys",
+	"set security ike proposal prop1 encryption-algorithm aes-256-cbc",
+	"set security ike proposal prop1 authentication-algorithm sha-256",
+	"set security ike proposal prop1 dh-group group14",
+	"set security ike policy pol1 proposals prop1",
+	"set security ike gateway gw1 address 198.51.100.1",
+	"set security ike gateway gw1 ike-policy pol1",
 	"set security ipsec vpn site-a pre-shared-key FAB6532-IPSEC-VPN-PSK",
+	"set security ipsec vpn site-a ike gateway gw1",
 	"set security ipsec vpn site-a bind-interface st0",
 	"set protocols ospf area 0.0.0.0 interface ge-0-0-1 authentication md5 1 key FAB6532-OSPF-MD5KEY",
 	"set protocols ospf area 0.0.0.0 interface ge-0-0-9 authentication simple-password FAB6532-OSPF-SIMPLE",
@@ -89,7 +97,7 @@ var fabricSecretConfig = []string{
 	// site from a chosen PLAINTEXT one, and this fixture's whole subject is
 	// that these secrets must not be rendered — so `md5` is the spelling that
 	// matches its intent.
-	"set protocols rip authentication-key FAB6532-RIP-AUTHKEY",
+	"set protocols rip authentication-key FAB6532-RIPKEY",
 	"set protocols rip authentication-type md5",
 	"set protocols isis authentication-key FAB6532-ISIS-AREA-AUTHKEY",
 	"set protocols isis authentication-type md5",
@@ -119,7 +127,7 @@ var fabricSecretConfig = []string{
 // these appearing in a fabric-reachable render is a credential disclosure.
 var fabricSecretSentinels = []string{
 	"FAB6532-IKE-PSK", "FAB6532-IPSEC-VPN-PSK", "FAB6532-OSPF-MD5KEY",
-	"FAB6532-OSPF-SIMPLE", "FAB6532-RIP-AUTHKEY", "FAB6532-ISIS-AREA-AUTHKEY",
+	"FAB6532-OSPF-SIMPLE", "FAB6532-RIPKEY", "FAB6532-ISIS-AREA-AUTHKEY",
 	"FAB6532-ISIS-IFACE-AUTHKEY", "FAB6532-BGP-AUTHPW", fabricAPIAuthUserPasswordSentinel,
 	fabricAPIAuthLegacyKeySentinel, "FAB6532-SNMPV3-AUTHPW", "FAB6532-SNMPV3-PRIVPW",
 	"FAB6532-SNMP-COMMUNITY", "FAB6532-TSIG-SECRET", "FAB6532-DDNS-APITOKEN",
@@ -134,7 +142,7 @@ var fabricSecretSentinels = []string{
 var showTextAuditTopics = []string{
 	"address-book", "alarms", "alg", "application-identification-status",
 	"security-user-identification-status", "user-identification-status",
-	"applications", "backup-router", "bfd-peers", "bootstrap-import",
+	"applications", "applications:", "backup-router", "bfd-peers", "bootstrap-import",
 	"buffers", "buffers-detail",
 	"chassis", "chassis-cluster", "chassis-cluster-control-plane-statistics",
 	"chassis-cluster-data-plane-fairness", "chassis-cluster-data-plane-flows",
@@ -151,7 +159,7 @@ var showTextAuditTopics = []string{
 	"forwarding-options-port-mirroring", "ike", "interfaces-detail",
 	"interfaces-extensive", "interfaces-statistics", "internet-options",
 	"ipsec-statistics", "ipv6-router-advertisement", "kernel-upgrade",
-	"lldp", "lldp-neighbors",
+	"license", "lldp", "lldp-neighbors",
 	"log", "login", "nat-static", "nat-static-rule", "nat-static-rule-detail",
 	"nat64", "nat-dest-rule-detail", "nat-nptv6", "nat-source-rule-detail",
 	"ntp", "persistent-nat", "persistent-nat-detail", "policies-check",
@@ -770,7 +778,7 @@ func TestSecretUnwrapScannerDetectsBothForms(t *testing.T) {
 		},
 		{
 			name: "string conversion",
-			src:  "package p\nfunc f(x T) { _ = x.PSK.Reveal() }\n",
+			src:  "package p\nfunc f(x T) { _ = string(x.PSK) }\n",
 			want: `field "PSK" to string(...)`,
 		},
 		{
@@ -790,7 +798,7 @@ func TestSecretUnwrapScannerDetectsBothForms(t *testing.T) {
 		},
 		{
 			name: "conversion nested in a call argument",
-			src:  "package p\nfunc f(x T) { g(\"%s\", x.PSK.Reveal()) }\n",
+			src:  "package p\nfunc f(x T) { g(string(x.PSK)) }\n",
 			want: `"PSK"`,
 		},
 		{

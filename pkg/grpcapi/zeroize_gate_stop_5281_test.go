@@ -265,7 +265,13 @@ func commitHelperPaths(t *testing.T, store *configstore.Store, sets ...string) {
 // Without this, a custom path survives while boot repair re-derives the
 // default and clears post-reboot.
 func TestUngatedFallbackErasesDerivedHelperState10769(t *testing.T) {
-	root := t.TempDir()
+	// GOTMPDIR can make t.TempDir() exceed the 107-octet AF_UNIX limit
+	// once /custom-xpf/control.sock is appended; use a short root.
+	root, err := os.MkdirTemp("/tmp", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(root) })
 	t.Cleanup(factoryreset.RedirectWipePathsForTesting(root))
 	configDir := filepath.Join(root, "etc-xpf")
 	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))

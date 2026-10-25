@@ -436,8 +436,8 @@ func candidateReadingStoreMethods9889(t *testing.T) map[string]bool {
 	// set (which would make hop 1 vacuous for the missing family).
 	for _, want := range []string{
 		"ShowCandidateRedacted",
-		"ShowCompareRedacted",
-		"ShowCompareRollbackRedacted",
+		"ShowCompareRedactedAtPath",
+		"ShowCompareRollbackRedactedAtPath",
 		"CommitCheckAs",
 		"CompileCandidate",
 	} {

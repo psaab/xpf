@@ -433,7 +433,8 @@ func (s *Server) ShowConfig(ctx context.Context, req *pb.ShowConfigRequest) (*pb
 		path = req.Path
 	}
 	if snaps, ok := configReadSnapshotsFrom(ctx); ok && snaps.Present {
-		return showConfigSnapshotResponse(snaps.Primary, snaps.NodeID, path, req.Format)
+		resp, err := showConfigSnapshotResponse(snaps.Primary, snaps.NodeID, path, req.Format)
+		return resp, rpcStatus(err)
 	}
 	var output string
 	var inhErr error
@@ -460,7 +461,7 @@ func (s *Server) ShowConfig(ctx context.Context, req *pb.ShowConfigRequest) (*pb
 		output = s.store.ShowCandidateRedacted(path)
 	}
 	if inhErr != nil {
-		return nil, inhErr
+		return nil, rpcStatus(inhErr)
 	}
 	return &pb.ShowConfigResponse{Output: output}, nil
 }

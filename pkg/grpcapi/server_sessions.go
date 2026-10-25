@@ -1065,7 +1065,7 @@ func (s *Server) GetSessionSummary(ctx context.Context, req *pb.GetSessionSummar
 	// only matching sessions instead of the whole table.
 	summaryFilter := s.buildSessionSummaryFilter(req)
 	if err := summaryFilter.validate(); err != nil {
-		return nil, err
+		return nil, rpcStatus(err)
 	}
 	cancelled := newSessionWalkCancelSampler(ctx, sessionWalkCancelInterval9060)
 	if err := s.dp.IterateSessions(func(key dataplane.SessionKey, val dataplane.SessionValue) bool {

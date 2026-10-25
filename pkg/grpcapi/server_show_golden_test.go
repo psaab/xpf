@@ -196,9 +196,17 @@ var showGoldenConfigCommands = []string{
 	"security address-book global address host1 10.0.1.1/32",
 	"security ipsec vpn v1 vpn-monitor optimized",
 	"security ipsec vpn v1 bind-interface st0",
+	"security ipsec vpn v1 pre-shared-key golden-psk",
+	"security ipsec vpn v1 ike gateway gw1",
 	"security ike gateway gw1 address 198.51.100.1",
 	"security ike gateway gw1 external-interface ge-0-0-1.0",
 	"security ike gateway gw1 ike-policy pol1",
+	"security ike policy pol1 pre-shared-key ascii-text golden-ike-psk",
+	"security ike proposal prop1 authentication-method pre-shared-keys",
+	"security ike proposal prop1 encryption-algorithm aes-256-cbc",
+	"security ike proposal prop1 authentication-algorithm sha-256",
+	"security ike proposal prop1 dh-group group14",
+	"security ike policy pol1 proposals prop1",
 	"firewall family inet filter bandwidth-output term 0 from destination-port 80",
 	"firewall family inet filter bandwidth-output term 0 then accept",
 	"system backup-router 192.0.2.1 destination 10.0.0.0/8",
@@ -221,8 +229,8 @@ var showGoldenConfigCommands = []string{
 	"interfaces ge-0-0-1 unit 100 vlan-id 100",
 	"interfaces ge-0-0-1 unit 100 family inet address 10.0.100.1/24",
 	"policy-options policy-statement export-statics term t1 then accept",
-	"event-options policy ep1 events SNMP_TRAP_LINK_DOWN",
-	"event-options policy ep1 then execute-commands commands \"show interfaces\"",
+	"event-options policy ep1 events ping_probe_failed",
+	"event-options policy ep1 then change-configuration commands \"set system host-name golden\"",
 }
 
 func newShowGoldenServer(t *testing.T) *Server {
