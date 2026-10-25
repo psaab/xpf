@@ -95,10 +95,12 @@ func (d *Daemon) flowLiveFeedLoop(ctx context.Context) {
 }
 
 // feedFlowLiveCounters polls the live counter source once per tracked
-// key per exporter group and touches that group's tracker. Keys are
-// unioned per group so a flow tracked by several template groups of one
-// instance is read once and fed to each. A key the source no longer
-// holds is skipped (its close or inactive expiry will forget it).
+// key per exporter group and touches that group's tracker. TrackedKeys
+// includes sampled-idle marker keys (#16747), so a flow that resumed
+// after inactive expiry is observed and re-armed. Keys are unioned per
+// group so a flow tracked by several template groups of one instance is
+// read once and fed to each. A key the source no longer holds is
+// skipped (its close or inactive expiry will forget it).
 func (d *Daemon) feedFlowLiveCounters(now time.Time) {
 	if b := d.flowBundle.Load(); b != nil {
 		for _, g := range b.groups {

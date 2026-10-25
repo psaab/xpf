@@ -62,12 +62,22 @@ func TestLiveFeedActiveInactiveNoDoubleCount16303(t *testing.T) {
 	if due[0].Packets != 10 || due[0].RevPackets != 5 {
 		t.Fatalf("final must carry only the unexported remainder, got %+v", due[0])
 	}
-	if e.Tracked(key) {
-		t.Fatal("inactive-expired flow must be forgotten")
+	// #16747: the expired flow leaves the live tracker but keeps a
+	// sampled-idle marker, so it stays Tracked (pollable) and its real
+	// close reports sampled with the final baselines — exporting only
+	// post-expiry progress, here zero, instead of dropping. Deltas
+	// still sum to the session totals (200+70+10, 90+35+5).
+	if e.tracker.Len() != 0 {
+		t.Fatal("inactive-expired flow must leave the live tracker")
 	}
-	// Deltas sum to the session totals (200+70+10, 90+35+5): no
-	// double count across interim + final records.
-	if got, _, _, _, _ := e.CloseFlow(key); got {
-		t.Fatal("close after inactive expiry must report not-tracked (no duplicate final)")
+	if !e.Tracked(key) {
+		t.Fatal("inactive-expired flow must remain Tracked via its idle marker")
+	}
+	got, bp, bb, brp, brb := e.CloseFlow(key)
+	if !got || bp != 280 || bb != 28000 || brp != 130 || brb != 13000 {
+		t.Fatalf("close after inactive expiry = sampled=%v baselines %d/%d/%d/%d, want true 280/28000/130/13000 (post-expiry remainder is zero)", got, bp, bb, brp, brb)
+	}
+	if got2, _, _, _, _ := e.CloseFlow(key); got2 {
+		t.Fatal("duplicate close after inactive expiry must report not-sampled (no duplicate final)")
 	}
 }

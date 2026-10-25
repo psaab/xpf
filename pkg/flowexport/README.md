@@ -1250,6 +1250,27 @@ moment any caller sampled off the copy (#2224).
 
 `pkg/config`, `pkg/logging`.
 
+## Sampled-idle markers after inactive expiry (#16747)
+
+Inactive expiry emits a flow's final record and removes it from the live
+tracker, but the session itself may still be alive in the dataplane
+(SSH, DB pools, keepalives routinely idle past the 15 s default). The
+tracker therefore retains a **bounded sampled-idle marker**
+(`idleMarkerMax` = 8192 per tracker, cleared wholesale at the cap) holding
+the final record's cumulative baselines and the record template.
+`Keys()`/`Has()` include marker keys, so the daemon live feed keeps
+polling them: a `Touch`/`TouchBidirectional` showing cumulative progress
+re-arms a live entry whose export baselines are the marker's (the final
+span is never recounted), and the real `SESSION_CLOSE` — via
+`CloseWithBaseline` — reports sampled with those baselines whether or
+not a resumed poll landed first, so `ExportSessionCloseRemainder`
+exports exactly the post-expiry remainder (lifetime minus final
+baselines, saturating to zero when nothing resumed) exactly once.
+Markers are created only for flows that were tracked at expiry (never
+for unsampled or never-opened flows), are dropped on re-open or close,
+and are the only post-expiry state: no second sampling decision is made.
+
+
 ## Gotchas
 
 - 1-in-N sampling uses a monotonic counter on `ExportConfig`. With small
