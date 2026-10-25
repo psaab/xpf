@@ -51,6 +51,7 @@ import (
 //	private-key               WireGuard local static private key
 //	preshared-key             WireGuard per-peer PSK
 //	community (under snmp)     SNMP v1/v2c community string (the identity token)
+//	trap-group (under snmp)    trap-group name = v1/v2c trap community (#16728)
 //	secret (under radius-server | tacplus-server | accounting)
 //	                          RADIUS/TACACS+ shared secret (#15019)
 //	user-password              AD bind credential under active-directory-access
@@ -968,9 +969,41 @@ func secretIndices(fp []string) []int {
 			if i >= 1 && fp[i-1] == "snmp" && i+1 < len(fp) {
 				out = append(out, i+1)
 			}
+		case "trap-group":
+			// #16728: since #15052 the trap-group name IS the v1/v2c trap
+			// community sent on the wire (pkg/snmp trapCommunityForGroup
+			// returns tg.Name), so the identity token directly under
+			// `snmp trap-group` is a credential exactly like the query
+			// community above. Gate on the exact `snmp trap-group`
+			// adjacency (allowing a `groups <name>` config-group prefix,
+			// whose raw render is itself a PermView surface) so no other
+			// `trap-group` spelling can arm it.
+			if isSNMPTrapGroupIdentity(fp, i) && i+1 < len(fp) {
+				out = append(out, i+1)
+			}
 		}
 	}
 	return out
+}
+
+// isSNMPTrapGroupIdentity reports whether fp[i] (a `trap-group` token) is
+// the SNMP trap-group container whose next token is the trap community
+// (#16728). Structural position — the exact `snmp trap-group` adjacency,
+// optionally behind one `groups <name>` config-group prefix (with an
+// optional leading `set` verb from embedded commands) — so a subtree
+// merely NAMED trap-group cannot arm it.
+func isSNMPTrapGroupIdentity(fp []string, i int) bool {
+	if i < 1 || fp[i] != "trap-group" || fp[i-1] != "snmp" {
+		return false
+	}
+	off := 0
+	if len(fp) > 0 && fp[0] == "set" {
+		off = 1
+	}
+	if off+1 < len(fp) && fp[off] == "groups" {
+		off += 2
+	}
+	return i-1 == off
 }
 
 // isADUserPasswordLeaf15996 reports whether fp[i] (a `user-password` token)

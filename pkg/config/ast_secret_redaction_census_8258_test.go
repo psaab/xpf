@@ -186,6 +186,13 @@ var astLeafForSecretField = map[string]secretLeafClaim{
 	"SNMPCommunity.Name": {
 		set: `set snmp community "%s" authorization read-only`,
 	},
+	// #16728: same coercion route as SNMPCommunity.Name. Since #15052 the
+	// trap-group name IS the v1/v2c trap community, so SNMPTrapGroup.Name
+	// converts to Secret at marshal time and secretIndices masks the token
+	// after `snmp trap-group`.
+	"SNMPTrapGroup.Name": {
+		set: `set snmp trap-group "%s" targets 192.0.2.1`,
+	},
 	"SNMPv3User.AuthPassword": {
 		set: `set snmp v3 usm local-engine user u1 authentication-sha authentication-password "%s"`,
 	},

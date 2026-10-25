@@ -746,14 +746,16 @@ type SNMPConfig struct {
 }
 
 // MarshalJSON redacts the SNMPv1/v2c community strings on the JSON surface
-// (#2053). The community string is the secret AND the Communities map key,
-// so a plain map marshal would leak it as a JSON object key regardless of
-// SNMPCommunity.MarshalJSON (which only redacts the value's Name field). To
-// avoid emitting secret keys, the Communities map is rendered as a sorted
-// slice of (already-redacting) SNMPCommunity values — dropping the
-// secret-equals-the-key. V3Users/TrapGroups keys are usernames/group names
-// (not secrets) and pass through unchanged. The in-memory map (and its
-// lookup-by-community-string in pkg/snmp) is untouched.
+// (#2053), and since #16728 the trap-group names too: since #15052 a
+// trap-group name IS the v1/v2c trap community sent on the wire
+// (pkg/snmp trapCommunityForGroup returns tg.Name), so it is a credential
+// exactly like a query community. Both strings are the secret AND their
+// map keys, so a plain map marshal would leak them as JSON object keys
+// regardless of the value marshalers. To avoid emitting secret keys, both
+// maps are rendered as sorted slices of (already-redacting) values —
+// dropping the secret-equals-the-key. V3Users keys are usernames (not
+// secrets) and pass through unchanged. The in-memory maps (and their
+// lookup-by-community-string in pkg/snmp) are untouched.
 func (s SNMPConfig) MarshalJSON() ([]byte, error) {
 	// NOTE: the snmpAlias projection below is intentionally duplicated in
 	// MarshalYAML; the two MUST stay in sync. If you add/rename a field here,
@@ -763,7 +765,7 @@ func (s SNMPConfig) MarshalJSON() ([]byte, error) {
 		Contact     string
 		Description string
 		Communities []*SNMPCommunity
-		TrapGroups  map[string]*SNMPTrapGroup
+		TrapGroups  []*SNMPTrapGroup
 		V3Users     map[string]*SNMPv3User
 		// #9416: the alias enumerates fields EXPLICITLY, so a field added to
 		// SNMPConfig and not added here silently vanishes from the API surface.
@@ -776,7 +778,6 @@ func (s SNMPConfig) MarshalJSON() ([]byte, error) {
 		Location:    s.Location,
 		Contact:     s.Contact,
 		Description: s.Description,
-		TrapGroups:  s.TrapGroups,
 		V3Users:     s.V3Users,
 		ClientLists: s.ClientLists,
 	}
@@ -791,6 +792,7 @@ func (s SNMPConfig) MarshalJSON() ([]byte, error) {
 			a.Communities = append(a.Communities, s.Communities[name])
 		}
 	}
+	a.TrapGroups = redactedTrapGroupSlice(s.TrapGroups)
 	return json.Marshal(a)
 }
 
@@ -806,7 +808,7 @@ func (s SNMPConfig) MarshalYAML() (any, error) {
 		Contact     string
 		Description string
 		Communities []*SNMPCommunity
-		TrapGroups  map[string]*SNMPTrapGroup
+		TrapGroups  []*SNMPTrapGroup
 		V3Users     map[string]*SNMPv3User
 		// #9416: the alias enumerates fields EXPLICITLY, so a field added to
 		// SNMPConfig and not added here silently vanishes from the API surface.
@@ -819,7 +821,6 @@ func (s SNMPConfig) MarshalYAML() (any, error) {
 		Location:    s.Location,
 		Contact:     s.Contact,
 		Description: s.Description,
-		TrapGroups:  s.TrapGroups,
 		V3Users:     s.V3Users,
 		ClientLists: s.ClientLists,
 	}
@@ -834,6 +835,7 @@ func (s SNMPConfig) MarshalYAML() (any, error) {
 			a.Communities = append(a.Communities, s.Communities[name])
 		}
 	}
+	a.TrapGroups = redactedTrapGroupSlice(s.TrapGroups)
 	return a, nil
 }
 
@@ -856,6 +858,10 @@ func (s SNMPConfig) MarshalYAML() (any, error) {
 // handler (#5315) and the pkg/grpcapi ShowText snmp topic (#6532). The raw-AST
 // `show configuration` render paths are masked separately by RedactedClone
 // (ast_redact.go, #4051), which matches the community on the AST key path.
+// SNMPTrapGroup.Name carries the same burden since #16728: it is the
+// v1/v2c trap community (#15052), so the same three renders mask it with
+// the same helper and predicate, and its JSON/YAML form redacts via
+// SNMPTrapGroup.MarshalJSON/MarshalYAML.
 type SNMPCommunity struct {
 	Name          string
 	Authorization string // "read-only" or "read-write"
@@ -986,6 +992,52 @@ type SNMPTrapGroup struct {
 	// a group scoped to exclude a category (e.g. `link`) still received every
 	// linkUp/linkDown notification (a silent filter bypass).
 	Categories []string
+}
+
+// redactedTrapGroupSlice renders the TrapGroups map as a name-sorted
+// slice for the JSON/YAML surface (#16728). The map key IS the trap
+// community, so emitting the map would leak it as an object key even
+// with SNMPTrapGroup.MarshalJSON redacting the value's Name. Nil slots
+// (#10439 lenient loads) render as redacted empty groups, never a panic.
+func redactedTrapGroupSlice(m map[string]*SNMPTrapGroup) []*SNMPTrapGroup {
+	if len(m) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]*SNMPTrapGroup, 0, len(names))
+	for _, name := range names {
+		out = append(out, m[name])
+	}
+	return out
+}
+
+// MarshalJSON redacts the trap-group name (the v1/v2c trap community,
+// #16728) on the JSON surface while leaving Targets, Version and
+// Categories in the clear. See the SNMPCommunity type doc for why Name
+// stays a plain string (#2053).
+func (g SNMPTrapGroup) MarshalJSON() ([]byte, error) {
+	type alias struct {
+		Name       Secret
+		Targets    []string
+		Version    string
+		Categories []string `json:",omitempty"`
+	}
+	return json.Marshal(alias{Name: NewSecret(g.Name), Targets: g.Targets, Version: g.Version, Categories: g.Categories})
+}
+
+// MarshalYAML mirrors MarshalJSON for the gopkg.in/yaml.v3 marshaller
+// (future-proofing; no config YAML marshaller exists today — #2053).
+func (g SNMPTrapGroup) MarshalYAML() (any, error) {
+	return struct {
+		Name       Secret
+		Targets    []string
+		Version    string
+		Categories []string `yaml:",omitempty"`
+	}{Name: NewSecret(g.Name), Targets: g.Targets, Version: g.Version, Categories: g.Categories}, nil
 }
 
 // SNMPv3User defines an SNMPv3 USM user with authentication and privacy.

@@ -93,8 +93,10 @@ func TestAPIShowTextNilSNMPTrapGroup10439(t *testing.T) {
 	cfg.System.SNMP.TrapGroups["zz-nil-tg"] = nil
 
 	out := renderShowTextNoPanic(t, s, "snmp", "trap-group value")
-	if !strings.Contains(out, "primary") || !strings.Contains(out, "192.0.2.10") {
-		t.Fatalf("show-text snmp missing the real trap-group; got:\n%s", out)
+	// #16728: the trap-group name is the trap community and now renders
+	// masked; the real group's TARGET is the visible proof it rendered.
+	if strings.Contains(out, "primary") || !strings.Contains(out, "192.0.2.10") {
+		t.Fatalf("show-text snmp missing the real trap-group (masked name + target); got:\n%s", out)
 	}
 	if strings.Contains(out, "zz-nil-tg") {
 		t.Fatalf("show-text snmp rendered the nil trap-group slot; got:\n%s", out)

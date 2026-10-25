@@ -60,8 +60,25 @@ func (c *CLI) showSNMP() error {
 
 	if len(snmpCfg.TrapGroups) > 0 {
 		fmt.Println("Trap groups:")
-		for name, tg := range snmpCfg.TrapGroups {
-			fmt.Printf("  %s: %s\n", name, strings.Join(tg.Targets, ", "))
+		// #16728: since #15052 the trap-group name IS the v1/v2c trap
+		// community, so it masks under the same per-class predicate and
+		// shared helper as the query communities above. Targets stay
+		// visible; only the credential is masked. Sorted over the real
+		// keys so the render stays deterministic once every displayed
+		// name is the same placeholder (#6532).
+		redactTrap := c.showConfigRedacted()
+		names := make([]string, 0, len(snmpCfg.TrapGroups))
+		for name := range snmpCfg.TrapGroups {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			tg := snmpCfg.TrapGroups[name]
+			if tg == nil {
+				continue
+			}
+			fmt.Printf("  %s: %s\n",
+				config.SNMPCommunityDisplayName(name, redactTrap), strings.Join(tg.Targets, ", "))
 		}
 	}
 
