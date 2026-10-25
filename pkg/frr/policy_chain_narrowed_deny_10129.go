@@ -211,9 +211,10 @@ func (m *Manager) renderNarrowedChainAlias10129(po *config.PolicyOptionsConfig, 
 }
 
 // narrowedAliasCollision10129 is the render-side collision belt for the
-// production narrowed alias attachment. It checks all four same-name merge
-// hazards: operator policy, composed chain, the #7625 emptied deny, and two
-// distinct narrowed survivors.
+// production narrowed alias attachment. It checks the same-name merge
+// hazards: operator policy, every reserved generated name
+// (reservedGeneratedRouteMaps16871, which includes the #7625 emptied deny),
+// two distinct narrowed survivors, and composed chains (checked below).
 func narrowedAliasCollision10129(fc *FullConfig) error {
 	if fc == nil || fc.PolicyOptions == nil {
 		return nil
@@ -255,8 +256,10 @@ func narrowedAliasCollision10129(fc *FullConfig) error {
 				return fmt.Errorf("narrowed BGP policy-chain alias %q (rendered %q) collides with operator policy-statement %q", alias, final, operatorName)
 			}
 		}
-		if final == frrName(emptiedChainDenyName) {
-			return fmt.Errorf("narrowed BGP policy-chain alias %q (rendered %q) collides with emptied-chain deny", alias, final)
+		for _, reserved := range reservedGeneratedRouteMaps16871 {
+			if final == frrName(reserved.name) {
+				return fmt.Errorf("narrowed BGP policy-chain alias %q (rendered %q) collides with reserved %s route-map (%s)", alias, final, reserved.kind, reserved.ref)
+			}
 		}
 		if prev, ok := aliases[final]; ok && !equalStringSlice(prev.kept, site.Kept) {
 			return fmt.Errorf("narrowed BGP policy-chain alias %q (rendered %q) collides for distinct surviving chains %q and %q", alias, final, strings.Join(prev.kept, ","), strings.Join(site.Kept, ","))

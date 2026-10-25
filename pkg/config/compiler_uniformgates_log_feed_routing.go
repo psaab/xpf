@@ -399,6 +399,23 @@ func runUniformGatesLogFeedRouting(tree *ConfigTree, cfg *Config, opts compileOp
 		}
 	}
 
+	// #16871: composed-chain forgery of a reserved GENERATED route-map. The
+	// suffix gate above forbids NAMING a policy-statement into the reserved
+	// namespace, but several legally named policies JOIN into a fixed
+	// generated name: [xpf default-export] composes to the #15157
+	// xpf-default-export-xpf-chain map (and [xpf emptied chain] to the #7625
+	// deny), and FRR merges the composed map with the generated one. Reject
+	// the join at commit; lenient-warn on load / peer-sync (#1960), where
+	// pkg/frr's bgpComposedChainCollision fails the apply CLOSED.
+	if err := validateBGPComposedChainReservedNameStrict(cfg); err != nil {
+		if opts.lenientPolicyReservedChainName {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("reserved generated route-map chain (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #16567: BGP group type internal|external cross-check. A typo'd type
 	// or a type contradicting the effective peer-as/local AS previously
 	// committed with only the generic advisory while FRR followed peer-as.

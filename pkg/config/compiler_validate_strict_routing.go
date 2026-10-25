@@ -1991,6 +1991,89 @@ func validatePolicyReservedChainNameStrict(cfg *Config) error {
 	return nil
 }
 
+// Reserved generated route-map names (#16871). pkg/frr generates the
+// fixed route-maps named by ReservedGeneratedRouteMaps16871 below into
+// FRR's global name-keyed namespace — currently:
+//
+//   - EmptiedChainDenyName — the #7625 bounded deny an emptied chain attaches;
+//   - BGPDefaultExportName — the #15157 Junos default export.
+//
+// Both end in ReservedChainSuffix, so validatePolicyReservedChainNameStrict
+// already forbids an operator policy-statement from being NAMED either. What
+// that suffix gate cannot see is a COMPOSED chain: several legally named
+// policies join with "-" + ReservedChainSuffix, and
+// composedChainName(["xpf","default-export"]) is byte-identical to
+// BGPDefaultExportName exactly as (["xpf","emptied","chain"]) is to
+// EmptiedChainDenyName. FRR merges the composed map with the generated map,
+// corrupting both filters with a clean commit and a clean apply.
+//
+// ReservedGeneratedRouteMaps16871 is the single enumeration of these names:
+// pkg/frr imports pkg/config (never the reverse), so the render-side
+// constants there alias these values and its registry is DERIVED from this
+// list (see reservedMeta16871 in pkg/frr) instead of re-enumerating it.
+// Adding a future fixed generated name means one new constant + one entry
+// here; the frr derivation then picks it up structurally.
+const (
+	EmptiedChainDenyName = "xpf-emptied-chain" + ReservedChainSuffix
+	BGPDefaultExportName = "xpf-default-export" + ReservedChainSuffix
+)
+
+// ReservedGeneratedRouteMaps16871 is the single enumeration of the fixed
+// generated route-map names a composed BGP chain must never derive.
+// Consulted by validateBGPComposedChainReservedNameStrict below; pkg/frr
+// derives its render-side registry from this same list.
+var ReservedGeneratedRouteMaps16871 = []string{
+	EmptiedChainDenyName,
+	BGPDefaultExportName,
+}
+
+// validateBGPComposedChainReservedNameStrict hard-rejects a referenced BGP
+// import/export chain (length >= 2, resolved exactly as the renderer resolves
+// it via bgpComposedChains) whose composed name IS one of the reserved
+// generated route-maps. The members are individually legal — neither ends in
+// the reserved suffix — so the suffix gate above passes them; only their
+// JOIN is reserved. Strict on commit / commit-check; the call site downgrades
+// to a warning on the tolerant load / peer-sync path (#1960), where
+// pkg/frr's bgpComposedChainCollision fails the apply CLOSED instead.
+func validateBGPComposedChainReservedNameStrict(cfg *Config) error {
+	if cfg == nil || len(cfg.PolicyOptions.PolicyStatements) == 0 {
+		return nil
+	}
+	pss := cfg.PolicyOptions.PolicyStatements
+	chains := make(map[string][]string)
+	bgpComposedChains(cfg.Protocols.BGP, pss, chains)
+	for _, ri := range cfg.RoutingInstances {
+		if ri != nil {
+			bgpComposedChains(ri.BGP, pss, chains)
+		}
+	}
+	if len(chains) == 0 {
+		return nil
+	}
+	reserved := make(map[string]bool, len(ReservedGeneratedRouteMaps16871))
+	for _, name := range ReservedGeneratedRouteMaps16871 {
+		reserved[name] = true
+	}
+	names := make([]string, 0, len(chains))
+	for name := range chains {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if !reserved[name] {
+			continue
+		}
+		return fmt.Errorf(
+			"BGP policy chain [ %s ] composes into the reserved generated "+
+				"route-map %q; xpf owns that exact name for a generated map "+
+				"(#16871) and FRR merges same-named route-maps in its global "+
+				"namespace, which would fuse the chain with the generated map "+
+				"and corrupt both filters — rename a chain member",
+			strings.Join(chains[name], " "), name)
+	}
+	return nil
+}
+
 // validatePolicyASPathRegexStrict hard-rejects a `policy-options as-path
 // <name>` whose Junos regular expression cannot be translated to FRR —
 // an EMPTY regex, a malformed one, or one outside the Junos AS-path

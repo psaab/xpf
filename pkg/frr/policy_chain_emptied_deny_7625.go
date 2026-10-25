@@ -66,7 +66,7 @@ import (
 // apply CLOSED on that derivation; emptiedChainDenyCollision covers the direct
 // operator-policy-statement spelling. Both are required: neither sees the other's
 // case.
-const emptiedChainDenyName = "xpf-emptied-chain" + ReservedChainSuffix
+const emptiedChainDenyName = config.EmptiedChainDenyName
 
 // isProtocolToken7625 reports whether n is a bare protocol token (`static`,
 // `direct`, ...) — the Junos spelling `direct` counts via its FRR
