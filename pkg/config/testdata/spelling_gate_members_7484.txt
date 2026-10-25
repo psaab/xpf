@@ -337,6 +337,8 @@ flag (read, but value-less)	interfaces <*> unit <*> family inet6 address <*> pre
 flag (read, but value-less)	interfaces <*> unit <*> family inet6 address <*> primary
 flag (read, but value-less)	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> accept-data
 COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> advertise-interval
+COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> inet6-advertise-interval
+COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> virtual-link-local-address
 COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> authentication-key
 COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> authentication-type
 flag (read, but value-less)	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> no-preempt
@@ -349,6 +351,8 @@ COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> virtual
 COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> virtual-inet6-address
 flag (read, but value-less)	interfaces <*> unit <*> family inet6 address <*> vrrp-inet6-group <*> accept-data
 COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-inet6-group <*> advertise-interval
+COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-inet6-group <*> inet6-advertise-interval
+COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-inet6-group <*> virtual-link-local-address
 COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-inet6-group <*> authentication-key
 COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-inet6-group <*> authentication-type
 flag (read, but value-less)	interfaces <*> unit <*> family inet6 address <*> vrrp-inet6-group <*> no-preempt

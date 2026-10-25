@@ -45,11 +45,17 @@ func compiledBareVIPs15050(t *testing.T, cfg *Config) []string {
 	return out
 }
 
-// TestPackedBareVRRPVIPFailsStrict15050 is the #15050 gate: a prefix-less
-// virtual-address carried by the packed hierarchical one-liner must fail
-// strict compile, because netlink.ParseAddr rejects it at runtime and
-// #5082 fail-closed reverts every promotion. The CIDR controls in the same
-// table are what distinguish the gate from an all-reject one.
+// TestPackedBareVRRPVIPFailsStrict15050 is the #15050 gate as narrowed
+// by #16558: a bare VIP WITH a same-family enclosing prefix now commits
+// (normalized to that prefix — the Juniper spelling), while a bare VIP
+// with NO enclosing prefix still strict-rejects. The with-enclosing
+// rows live in the #16558 test; here the fixture unit is 10.0.1.1/24,
+// so `10.0.1.100` HAS an enclosing prefix and commits — the reject
+// rows below use an out-of-subnet bare VIP whose family still has an
+// enclosing address, so they exercise the #3013 subnet gate, and the
+// dedicated no-enclosing reject is pinned in the #16558 test with a
+// cross-family bare VIP. CIDR controls distinguish the gates from
+// all-reject ones.
 func TestPackedBareVRRPVIPFailsStrict15050(t *testing.T) {
 	rows := []struct {
 		name    string
@@ -57,19 +63,16 @@ func TestPackedBareVRRPVIPFailsStrict15050(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "packed bare IPv4 VIP is rejected",
-			inner:   `vrrp-group 1 virtual-address 10.0.1.100;`,
-			wantErr: "virtual-address 10.0.1.100",
+			name:  "packed bare IPv4 VIP with enclosing prefix commits normalized (#16558)",
+			inner: `vrrp-group 1 virtual-address 10.0.1.100;`,
 		},
 		{
-			name:    "packed bare VIP first in bracketed run is rejected",
-			inner:   `vrrp-group 1 virtual-address [ 10.0.1.100 10.0.1.101/24 ];`,
-			wantErr: "virtual-address 10.0.1.100",
+			name:  "packed bare VIP first in bracketed run commits normalized (#16558)",
+			inner: `vrrp-group 1 virtual-address [ 10.0.1.100 10.0.1.101/24 ];`,
 		},
 		{
-			name:    "braced bare VIP is also rejected by the compiled gate",
-			inner:   `vrrp-group 1 { virtual-address 10.0.1.100; priority 200; }`,
-			wantErr: "virtual-address 10.0.1.100",
+			name:  "braced bare VIP with enclosing prefix commits normalized (#16558)",
+			inner: `vrrp-group 1 { virtual-address 10.0.1.100; priority 200; }`,
 		},
 		{
 			name:  "packed CIDR VIP still commits",
@@ -114,10 +117,12 @@ func TestPackedBareVRRPVIPFailsStrict15050(t *testing.T) {
 
 func TestPackedBareVRRPV6VIPFailsStrict15050(t *testing.T) {
 	tree := vrrpBareVIPTreeV6_15050(t, `vrrp-group 1 virtual-address 2001:db8::100;`)
-	if _, err := CompileConfig(tree); err == nil {
-		t.Fatal("must reject a bare IPv6 virtual-address, but committed clean")
-	} else if !strings.Contains(err.Error(), "2001:db8::100") {
-		t.Fatalf("rejected for the wrong reason: %v", err)
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("bare v6 VIP with enclosing prefix must commit (#16558): %v", err)
+	}
+	if vips := compiledBareVIPs15050(t, cfg); len(vips) != 1 || vips[0] != "2001:db8::100/64" {
+		t.Fatalf("bare v6 VIP must normalize to enclosing /64, got %v", vips)
 	}
 	// CIDR control.
 	treeOK := vrrpBareVIPTreeV6_15050(t, `vrrp-group 1 virtual-address 2001:db8::100/64;`)
@@ -134,21 +139,19 @@ func TestPackedBareVRRPV6VIPFailsStrict15050(t *testing.T) {
 // promotion forever.
 func TestPackedBareVRRPVIPLenientNormalizes15050(t *testing.T) {
 	tree := vrrpBareVIPTree15050(t, `vrrp-group 1 virtual-address 10.0.1.100;`)
-	if _, err := CompileConfig(tree); err == nil {
-		t.Fatal("control failed: strict path must reject, or the lenient assertion proves nothing")
+	// #16558: strict now commits the with-enclosing bare VIP normalized
+	// to the same value, so strict and tolerant AGREE (the control the
+	// pre-#16558 test inverted).
+	scfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("strict must commit bare VIP with enclosing prefix (#16558): %v", err)
+	}
+	if vips := compiledBareVIPs15050(t, scfg); len(vips) != 1 || vips[0] != "10.0.1.100/24" {
+		t.Fatalf("strict must normalize to enclosing /24, got %v", vips)
 	}
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("tolerant path must not brick the node: %v", err)
-	}
-	var warned bool
-	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "virtual-address 10.0.1.100") {
-			warned = true
-		}
-	}
-	if !warned {
-		t.Fatalf("tolerant path must WARN, not swallow; warnings: %v", cfg.Warnings)
 	}
 	vips := compiledBareVIPs15050(t, cfg)
 	if len(vips) != 1 || vips[0] != "10.0.1.100/24" {
@@ -168,7 +171,7 @@ func TestBareVRRPVIPWithoutEnclosingPrefixNormalizesToHost15050(t *testing.T) {
 	if err := validateVRRPVIPPrefixStrict(cfg); err == nil {
 		t.Fatal("strict gate must reject bare VIPs")
 	}
-	normalizeBareVRRPVIPs(cfg)
+	normalizeBareVRRPVIPs(cfg, true)
 	ifc := cfg.Interfaces.Interfaces["ge-0/0/0"]
 	for _, vg := range ifc.Units[0].VRRPGroups {
 		got := strings.Join(vg.VirtualAddresses, ",")

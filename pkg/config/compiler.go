@@ -1062,6 +1062,23 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	// validators inspect one collection at a time.
 	canonicalizeStaticRoutesAcrossTables(cfg)
 
+	// #16558: normalize bare Junos VRRP virtual-addresses BEFORE the
+	// uniform gates. The strict validateVRRPVIPPrefixStrict gate (in
+	// runUniformGates) must see the normalized form for a bare VIP with
+	// a same-family enclosing prefix — otherwise it would reject the
+	// Juniper spelling the schema now accepts — while a bare VIP with
+	// no enclosing prefix stays bare (strict: hostFallback=false) for
+	// that gate to reject by name, or gains a host prefix on the
+	// tolerant path (hostFallback=true, warned in the tail gates; the
+	// warnings returned here on the tolerant path are appended there
+	// too — normalize is idempotent, so the second pass is a no-op and
+	// emits none).
+	if opts.lenientVRRPVIPPrefix {
+		_ = normalizeBareVRRPVIPs(cfg, true)
+	} else {
+		_ = normalizeBareVRRPVIPs(cfg, false)
+	}
+
 	// P6b (#4406 step 4): uniform fail-open validation gates. Extracted into
 	// runUniformGates (compiler_uniformgates.go) — the long contiguous run of
 	// ~75 independent validators, each of which returns the FIRST strict error

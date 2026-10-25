@@ -214,6 +214,36 @@ func ValidateIPv6CIDR(raw string) error {
 	return nil
 }
 
+// ValidateIPv4CIDROrBare accepts an IPv4 CIDR or a bare IPv4 literal
+// (#16558). Used only for the VRRP virtual-address leaves: Junos accepts
+// the bare form and the compiler normalizes it to CIDR with the
+// enclosing unit prefix (or a host prefix) before the runtime sees it,
+// so the netlink.ParseAddr CIDR contract is still honoured downstream.
+// Wrong-family and garbage literals reject exactly as ValidateIPv4CIDR.
+func ValidateIPv4CIDROrBare(raw string) error {
+	if err := ValidateIPv4CIDR(raw); err == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(raw)
+	if ip := net.ParseIP(trimmed); ip != nil && ip.To4() != nil && !strings.Contains(trimmed, "/") {
+		return nil
+	}
+	return ValidateIPv4CIDR(raw)
+}
+
+// ValidateIPv6CIDROrBare is the IPv6 sibling of ValidateIPv4CIDROrBare
+// (#16558) for `virtual-address` / `virtual-inet6-address` under inet6.
+func ValidateIPv6CIDROrBare(raw string) error {
+	if err := ValidateIPv6CIDR(raw); err == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(raw)
+	if ip := net.ParseIP(trimmed); ip != nil && ip.To4() == nil && !strings.Contains(trimmed, "/") {
+		return nil
+	}
+	return ValidateIPv6CIDR(raw)
+}
+
 // parseCIDRStrict is the shared require-a-prefix CIDR parse for the two
 // family validators. It upgrades the two common operator mistakes to
 // targeted messages: a bare IP (missing /prefix-length) and outright

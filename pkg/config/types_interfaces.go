@@ -241,14 +241,24 @@ type VRRPGroup struct {
 	// PreemptSet records that preemption was explicitly authored
 	// (`preempt` or Junos `no-preempt`, #15046) so the emitter can
 	// round-trip `no-preempt` instead of dropping it as the default.
-	PreemptSet         bool
-	PreemptHoldTime    int // seconds a higher-priority backup waits before preempting a live lower-priority master; 0 = immediate (Junos `preempt hold-time`)
-	AcceptData         bool
-	AdvertiseInterval  int    // seconds, default 1
-	AuthType           string // "md5" or ""
-	AuthKey            Secret // VRRP auth key; redacted on JSON/YAML marshal (#2053)
-	TrackInterface     string // lower priority if interface is down
-	TrackPriorityDelta int    // how much to lower priority
+	PreemptSet        bool
+	PreemptHoldTime   int // seconds a higher-priority backup waits before preempting a live lower-priority master; 0 = immediate (Junos `preempt hold-time`)
+	AcceptData        bool
+	AdvertiseInterval int // seconds, default 1
+	// Inet6AdvertiseIntervalMS is the Junos `inet6-advertise-interval`
+	// in milliseconds (100..40000, #16558), kept distinct from the
+	// seconds AdvertiseInterval so sub-second IPv6 cadence survives to
+	// pkg/vrrp (which works in ms). 0 = unset.
+	Inet6AdvertiseIntervalMS int
+	// VirtualLinkLocalAddress records a Junos
+	// `virtual-link-local-address` value (#16558) so the strict gate can
+	// name-refuse it and the tolerant path can warn; xpf auto-derives
+	// the virtual-router link-local (#5089) and never actuates this.
+	VirtualLinkLocalAddress string
+	AuthType                string // "md5" or ""
+	AuthKey                 Secret // VRRP auth key; redacted on JSON/YAML marshal (#2053)
+	TrackInterface          string // lower priority if interface is down
+	TrackPriorityDelta      int    // how much to lower priority
 }
 
 // DHCPv6ClientConfig holds DHCPv6 client options (dhcpv6-client stanza).

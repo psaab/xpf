@@ -143,7 +143,12 @@ func CollectInstances(cfg *config.Config) []*Instance {
 					TrackInterface:    resolveTrackInterface(cfg, vg.TrackInterface),
 					TrackPriorityCost: vg.TrackPriorityDelta,
 				}
-				if inst.AdvertiseInterval == 0 {
+				// #16558: Junos inet6-advertise-interval is already ms
+				// and takes precedence for the IPv6 cadence; the shared
+				// seconds AdvertiseInterval is the fallback.
+				if vg.Inet6AdvertiseIntervalMS > 0 && inst.Family == "inet6" {
+					inst.AdvertiseInterval = vg.Inet6AdvertiseIntervalMS
+				} else if inst.AdvertiseInterval == 0 {
 					inst.AdvertiseInterval = 1000 // default 1s
 				} else {
 					inst.AdvertiseInterval *= 1000 // config seconds → ms
