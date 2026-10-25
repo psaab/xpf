@@ -267,14 +267,19 @@ func (s *Server) showSystemServices(buf *strings.Builder) {
 	for _, line := range ls.Lines() {
 		fmt.Fprintln(buf, line)
 	}
+	if cfg.System.Services != nil && cfg.System.Services.SSH != nil {
+		// #16735: same effective-policy helper as the local CLI so
+		// the surfaces cannot diverge; unset leaf is the factory
+		// prohibit-password posture, not "deny".
+		fmt.Fprintf(buf, "  SSH:            enabled (root-login: %s)\n",
+			config.SSHRootLoginDisplayName(cfg.System.Services.SSH.RootLogin))
+	} else {
+		// #16737: sshd is not owned by the stanza — removing it only
+		// removes the xpf drop-in and sshd keeps serving under
+		// base-image defaults. Never drop the row silently.
+		fmt.Fprintln(buf, "  SSH:            running (not managed — no system services ssh; sshd serves under base-image defaults)")
+	}
 	if cfg.System.Services != nil {
-		if cfg.System.Services.SSH != nil {
-			// #16735: same effective-policy helper as the local CLI so
-			// the surfaces cannot diverge; unset leaf is the factory
-			// prohibit-password posture, not "deny".
-			fmt.Fprintf(buf, "  SSH:            enabled (root-login: %s)\n",
-				config.SSHRootLoginDisplayName(cfg.System.Services.SSH.RootLogin))
-		}
 		if cfg.System.Services.NetconfSSH {
 			fmt.Fprintln(buf, "  NETCONF SSH:    configured but NOT served (no NETCONF daemon; tcp/830 not served)")
 		}

@@ -296,6 +296,14 @@ type compileOpts struct {
 	// callers that relax cluster-key validation must not accidentally suppress
 	// the fabric trust-boundary warning.
 	suppressFabricStampAdvisory bool
+	// suppressSSHUnmanagedAdvisory16737 (#16737) suppresses the commit-time
+	// advisory that a zone admits SSH with no `system services ssh` stanza
+	// (sshd keeps serving under base-image defaults). Set on the TOLERANT
+	// paths (Store.Load, Store.SyncApply) for the same reason as its
+	// siblings above: the condition is a property of a config already
+	// committed, so firing on every boot and peer sync trains the operator
+	// to skip it.
+	suppressSSHUnmanagedAdvisory16737 bool
 	// lenientIPsecPolicyProposalRef (#2073, #9919 F-090) downgrades the IPsec
 	// (Phase 2) reference-chain check from a hard error to a warning on the
 	// tolerant load / peer-sync paths. A dangling `proposals` reference, a
@@ -3851,6 +3859,7 @@ func lenientCompileOpts() compileOpts {
 		suppressContestedTrunkZoneAdvisory:       true,
 		suppressFabricStampAdvisory:              true,
 		suppressDPDThresholdIKEv2Advisory:        true,
+		suppressSSHUnmanagedAdvisory16737:        true,
 		lenientIPsecPolicyProposalRef:            true,
 		lenientPolicySchedulerRef:                true,
 		lenientSchedulerMapRef:                   true,

@@ -402,6 +402,11 @@ func (c *CLI) showSystemServices() error {
 		// prohibit-password posture applies — not "deny".
 		fmt.Printf("  SSH:            enabled (root-login: %s)\n",
 			config.SSHRootLoginDisplayName(cfg.System.Services.SSH.RootLogin))
+	} else {
+		// #16737: sshd is not owned by the stanza — removing it only
+		// removes the xpf drop-in and sshd keeps serving under
+		// base-image defaults. Never drop the row silently.
+		fmt.Println("  SSH:            running (not managed — no system services ssh; sshd serves under base-image defaults)")
 	}
 	if cfg.System.Services != nil && cfg.System.Services.NetconfSSH {
 		fmt.Println("  NETCONF SSH:    configured but NOT served (no NETCONF daemon; tcp/830 not served)")
