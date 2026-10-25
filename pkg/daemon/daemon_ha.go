@@ -896,8 +896,10 @@ func (d *Daemon) applyRG0OwnershipTransition(newState cluster.NodeState, demotio
 		d.reconcileConfigSyncToPeer("rg0-promotion")
 
 		// On failover to primary: re-initiate synced IPsec SAs.
+		// #16710: scoped to RG0 — a later data-RG edge must not re-run
+		// (and belt-terminate) the names this edge just raised.
 		if cc := d.clusterConfig(); cc != nil && cc.IPsecSASync && d.ipsec != nil && d.getSessionSync() != nil {
-			go d.reinitiateIPsecSAs()
+			go d.reinitiateIPsecSAsForRG(0)
 		}
 
 		// #2239: on failover to primary, nudge the lease-sync push loop so
@@ -1915,7 +1917,7 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 
 	// #9139: re-initiate the peer's IPsec SAs that belong to THIS RG.
 	//
-	// This leg did not exist. reinitiateIPsecSAs was wired ONLY to
+	// This leg did not exist. reinitiateIPsecSAsForRG was wired ONLY to
 	// applyRG0OwnershipTransition(StatePrimary), so on a DATA-RG failover it
 	// never ran — and in the asymmetric case (this node already RG0 primary,
 	// taking RG1 from a dead peer) there is no RG0 transition at all, so
@@ -1924,15 +1926,17 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 	// charon emits no eager `start_action = start` (the unset default
 	// renders `trap`, #14592), so the tunnel then waits for traffic.
 	//
-	// ownsIPsecConn scopes the set to this RG, so this is not a second
-	// unconditional initiate-everything: RG0's own transition still handles
-	// RG0-anchored connections, and neither leg touches the other's.
+	// #16710: scoped to rgID — this leg initiates/belts only names whose
+	// whole RG set is rgID. The RG0 leg handles RG0/unanchored names, and
+	// neither leg touches the other's: a later edge no longer terminates
+	// the healthy SAs an earlier edge of the same takeover sequence just
+	// raised via the #15194 stale-duplicate belt.
 	//
 	// ASYNC for the reason the DHCP lease seed above is async: this runs on the
 	// VRRP event loop, and InitiateConnection shells out to swanctl per
 	// connection. Blocking here delays every subsequent VRRP event on the node.
 	if cc := d.clusterConfig(); cc != nil && cc.IPsecSASync && d.getSessionSync() != nil {
-		go d.reinitiateIPsecSAs()
+		go d.reinitiateIPsecSAsForRG(rgID)
 	}
 }
 
@@ -2676,16 +2680,29 @@ func (d *Daemon) syncIPsecSAPeriodic(ctx context.Context) {
 	}
 }
 
-// reinitiateIPsecSAs re-initiates the IPsec connections synced from the peer
-// that belong to a redundancy group THIS node now owns.
+// reinitiateIPsecSAsForRG re-initiates the IPsec connections synced from
+// the peer that belong to redundancy group rg AND are owned by this node.
 //
-// Called from BOTH takeover edges (#9139): applyRG0OwnershipTransition for RG0
-// and applyRethServicesForRG for a data RG. It used to be wired to the RG0 edge
-// alone, which never fires on an asymmetric per-RG failover — the node taking
-// RG1 was already RG0 primary, so there was no RG0 transition and no tunnel came
-// back. Both legs call this same function; ownsIPsecConn is what keeps them from
-// initiating each other's connections.
-func (d *Daemon) reinitiateIPsecSAs() {
+// Called from BOTH takeover edges (#9139): applyRG0OwnershipTransition with
+// rg=0 and applyRethServicesForRG with rg=rgID. It used to be wired to the
+// RG0 edge alone, which never fires on an asymmetric per-RG failover — the
+// node taking RG1 was already RG0 primary, so there was no RG0 transition
+// and no tunnel came back.
+//
+// #16710: the pass is scoped to the TRANSITIONING rg, not merely to
+// "everything this node currently owns". Before, every edge re-ran the
+// same unscoped owned set, so a later edge's #15194 belt
+// (--terminate --ike --force on any owned name already live locally)
+// tore down the healthy tunnels an earlier edge of the same takeover
+// sequence had just raised, whenever the peer's advertised set still
+// listed them. Now each edge initiates/belts only names whose whole RG
+// set (ipsecConnRedundancyGroups — every candidate must match, the same
+// all-candidates rule ipsecSAsForRG uses) is that rg: on the RG0 edge
+// only RG0/unanchored names, on a data-RG edge only that RG's names.
+// A name spanning several RGs is raised by no single-RG edge until an
+// edge for one of its groups fires while this node owns every candidate
+// (the ownsIPsecConn rule); the old code belt-terminated it on every edge.
+func (d *Daemon) reinitiateIPsecSAsForRG(rg int) {
 	ss := d.getSessionSync()
 	if ss == nil {
 		return
@@ -2694,7 +2711,7 @@ func (d *Daemon) reinitiateIPsecSAs() {
 	if len(names) == 0 {
 		return
 	}
-	owned := d.ipsecSAsToReinitiate(names)
+	owned := d.ipsecSAsToReinitiateForRG(names, rg)
 	if len(owned) == 0 {
 		return
 	}
@@ -2705,7 +2722,8 @@ func (d *Daemon) reinitiateIPsecSAs() {
 	// CHILD_SA ... due to existing duplicate" — the failback black hole.
 	// Only names present in the LOCAL live set are terminated; a name with
 	// no local SA initiates directly. A failed live read skips the belt
-	// (initiate proceeds as before) rather than guessing.
+	// (initiate proceeds as before) rather than guessing. #16710: the belt
+	// inherits the edge scope above — it can only touch this edge's names.
 	local := map[string]bool{}
 	if names2, err := d.ipsecActiveNames(); err == nil {
 		for _, n := range names2 {
@@ -2714,7 +2732,7 @@ func (d *Daemon) reinitiateIPsecSAs() {
 	} else {
 		slog.Warn("cluster: failed to list local IPsec SAs before re-initiation; duplicate belt skipped", "err", err)
 	}
-	slog.Info("cluster: re-initiating IPsec SAs after failover", "count", len(owned))
+	slog.Info("cluster: re-initiating IPsec SAs after failover", "count", len(owned), "rg", rg)
 	initiate := d.ipsecInitiate
 	for _, name := range owned {
 		if local[name] {
@@ -2740,6 +2758,9 @@ func (d *Daemon) reinitiateIPsecSAs() {
 // tightens the pre-#9139 RG0 path, which initiated everything the peer
 // advertised regardless of what this node holds.
 //
+// Kept as the unscoped (all currently-owned) form for decision-only tests;
+// production takeover passes go through ipsecSAsToReinitiateForRG (#16710).
+//
 // Split from the effect so the DECISION can be driven without swanctl.
 func (d *Daemon) ipsecSAsToReinitiate(names []string) []string {
 	// #9511: attribute against the generation strongSwan has LOADED, not the
@@ -2763,6 +2784,48 @@ func (d *Daemon) ipsecSAsToReinitiate(names []string) []string {
 		// that did not come back is the first thing an operator looks for, and
 		// "we deliberately did not initiate it, the peer still owns its RG" is
 		// the answer they need.
+		slog.Info("cluster: skipping peer IPsec SAs whose redundancy group this "+
+			"node does not own", "skipped", skipped)
+	}
+	return owned
+}
+
+// ipsecSAsToReinitiateForRG is ipsecSAsToReinitiate additionally scoped to
+// one transitioning redundancy group rg (#16710): a name is in scope only
+// when EVERY candidate group from ipsecConnRedundancyGroups equals rg
+// (the all-candidates rule ipsecSAsForRG uses). On the RG0 edge only
+// RG0/unanchored names are in scope; on a data-RG edge only that RG's
+// names. Out-of-scope names are neither initiated nor belt-terminated by
+// this edge.
+func (d *Daemon) ipsecSAsToReinitiateForRG(names []string, rg int) []string {
+	cfg := d.ipsecAttributionConfig()
+	idx := d.cachedIPsecSANameIndex(cfg)
+	owned := make([]string, 0, len(names))
+	var skipped, outOfScope []string
+	for _, name := range names {
+		rgs := ipsecConnRedundancyGroups(cfg, idx, name)
+		inScope := len(rgs) > 0
+		for _, g := range rgs {
+			if g != rg {
+				inScope = false
+				break
+			}
+		}
+		if !inScope {
+			outOfScope = append(outOfScope, name)
+			continue
+		}
+		if d.ownsIPsecConn(cfg, idx, name) {
+			owned = append(owned, name)
+		} else {
+			skipped = append(skipped, name)
+		}
+	}
+	if len(outOfScope) > 0 {
+		slog.Debug("cluster: skipping peer IPsec SAs outside this takeover edge's redundancy group",
+			"rg", rg, "skipped", outOfScope)
+	}
+	if len(skipped) > 0 {
 		slog.Info("cluster: skipping peer IPsec SAs whose redundancy group this "+
 			"node does not own", "skipped", skipped)
 	}
@@ -2799,8 +2862,9 @@ func (d *Daemon) ipsecSAsForRG(names []string, rg int) []string {
 // node with SA sync off still holds them. A failed live-SA read terminates
 // nothing — guessing connection names could tear down a tunnel another RG
 // still owns. Individual terminate failures are logged, not latched: the
-// takeover belt in reinitiateIPsecSAs retries the same name before
-// initiating, and the next demotion edge re-reads the live set.
+// takeover belt in reinitiateIPsecSAsForRG retries the same name before
+// initiating (only on an edge for that name's RG, #16710), and the next
+// demotion edge re-reads the live set.
 func (d *Daemon) terminateDemotedRGIPsecSAs(rg int) {
 	if d.ipsec == nil && d.ipsecTerminateFn == nil {
 		return
