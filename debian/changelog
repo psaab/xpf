@@ -1,4 +1,13 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Userspace helper: findBinary now execs the symlink-resolved helper
+    it validated and refuses replaceable path components as root
+    (#16846). A planted ./xpf-userspace-dp symlink to a root-owned
+    binary previously passed the #16054 target check and could be
+    flipped to attacker content before exec; every symlink and
+    containing-directory component must now be root-owned and not
+    replaceable by a less-privileged user.
+
+xpf (0.0.0) unstable; urgency=medium
   * Cluster/session-sync: the #15176 NAT-scope fold now carries the
     tagged RETH unit (#16826). It folded the logical child's ifindex
     with vlan 0, truncating `reth0.80` to `reth0`, and the receiver
