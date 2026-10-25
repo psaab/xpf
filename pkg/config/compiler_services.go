@@ -359,8 +359,9 @@ func validateRPMHTTPGetSchemeStrict(cfg *Config) error {
 }
 
 // validateRPMRoutingInstanceStrict rejects an RPM test whose
-// `routing-instance` does not name a CONFIGURED routing instance (#2496).
-// The runtime binds the probe DATA socket to the instance's VRF device
+// `routing-instance` does not name a CONFIGURED routing instance (#2496),
+// or names one that has no VRF device (#16629). The runtime binds the
+// probe DATA socket to the instance's VRF device
 // via SO_BINDTODEVICE — vrfDeviceName(ri) synthesizes "vrf-<name>"
 // (pkg/rpm/rpm.go). A typo'd / nonexistent instance has no such kernel
 // device, so the bind fails with ENODEV: the probe never sends a packet
@@ -370,18 +371,33 @@ func validateRPMHTTPGetSchemeStrict(cfg *Config) error {
 // config should have been rejected at commit so the operator sees the
 // typo rather than a permanently dead probe.
 //
+// A forwarding instance is the same dead probe with a valid spelling:
+// the daemon deliberately creates no VRF device for it
+// (daemon_apply_interfaces.go skips VRF creation), so vrf-<name> never
+// exists even though the instance does. destination-interface takes
+// precedence over the VRF fallback in probeOpts, so a test that also
+// pins destination-interface never binds vrf-<name> and is not dead —
+// it is accepted even when its routing-instance names a forwarding
+// instance. Without that pin the forwarding test is rejected naming
+// the instance type, mirroring the WireGuard (#9909) and tunnel
+// keepalive (#12520) forwarding rejections. Reserved names are refused
+// earlier (#9622) and quarantined instances are absent from
+// cfg.RoutingInstances, so both surface here as "does not exist".
+//
 // An EMPTY routing-instance means the default (master) context and is NOT
 // scoped to a VRF device — it is always accepted. Only a non-empty name
-// that does not match a configured instance is the error. The configured-
+// that does not match a configured instance, or matches a forwarding
+// instance without a destination-interface pin, is the error. The configured-
 // instance enumeration mirrors validateIPMonitoringStrict's preferred-route
 // routing-instance check exactly (same cfg.RoutingInstances source, same
 // empty-is-default handling, same "does not exist" error shape).
 //
 // Strict on commit / commit-check (hard reject so the typo is
 // operator-visible); lenient on load / peer-sync (warn — #1960 no-brick;
-// the runtime bind returns ENODEV for the same nonexistent instance, so a
-// leniently-loaded test HOLDS state instead of actuating routes off a dead
-// measurement). Mirrors validateRPMHTTPGetSchemeStrict.
+// the runtime bind returns ENODEV for the same nonexistent or
+// device-less instance, so a leniently-loaded test HOLDS state instead
+// of actuating routes off a dead measurement). Mirrors
+// validateRPMHTTPGetSchemeStrict.
 func validateRPMRoutingInstanceStrict(cfg *Config) error {
 	if cfg == nil || cfg.Services.RPM == nil {
 		return nil
@@ -400,10 +416,18 @@ func validateRPMRoutingInstanceStrict(cfg *Config) error {
 			if test == nil || test.RoutingInstance == "" {
 				continue
 			}
-			if _, ok := instances[test.RoutingInstance]; !ok {
+			ri, ok := instances[test.RoutingInstance]
+			if !ok {
 				return fmt.Errorf(
 					"services rpm probe %q test %q: routing-instance %q does not exist "+
 						"(the probe would bind a nonexistent vrf-%s device and never run)",
+					probe.Name, test.Name, test.RoutingInstance, test.RoutingInstance)
+			}
+			if ri.InstanceType == "forwarding" && test.DestinationInterface == "" {
+				return fmt.Errorf(
+					"services rpm probe %q test %q: routing-instance %q is a forwarding instance with no VRF device "+
+						"(the probe would bind a nonexistent vrf-%s device and never run); "+
+						"use a virtual-router or vrf instance, or set destination-interface to pin the probe egress",
 					probe.Name, test.Name, test.RoutingInstance, test.RoutingInstance)
 			}
 		}

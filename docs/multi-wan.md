@@ -224,20 +224,28 @@ Deployment guidance:
   the runtime `canonicalizeHTTPTarget` guard returns the same error for the
   bad scheme, so the test **holds state** rather than actuating off a probe
   that can never run.
-- **`routing-instance` must name a configured instance (#2496).** When a
-  test sets `routing-instance <name>`, the runtime binds the probe data
-  socket to that instance's VRF device (`vrf-<name>`) via
+- **`routing-instance` must name a configured VRF instance (#2496/#16629).**
+  When a test sets `routing-instance <name>`, the runtime binds the probe
+  data socket to that instance's VRF device (`vrf-<name>`) via
   `SO_BINDTODEVICE`. A typo'd / nonexistent instance has no such kernel
   device, so the bind fails `ENODEV`: the probe never sends a packet and
   the test **holds its state forever** (no PASS, no FAIL), starving any
   ip-monitoring / event-options policy keyed off it of a failover signal.
-  A non-empty `routing-instance` that does not match a configured instance
-  is therefore **rejected at commit** (`validateRPMRoutingInstanceStrict`,
-  mirroring the ip-monitoring preferred-route `routing-instance` check in
-  `validateIPMonitoringStrict`). An empty `routing-instance` is the default
-  (master) context and is always accepted. On the tolerant load / peer-sync
-  path the rejection is downgraded to a warning (#1960 no-brick); the
-  runtime VRF bind returns the same `ENODEV`, so the test holds state.
+  A forwarding instance is the same dead probe with a valid spelling: it
+  has no VRF device (see the FBF recipe below), so binding to it can never
+  run either. A non-empty `routing-instance` that does not match a
+  configured instance, or that names a forwarding instance, is therefore
+  **rejected at commit** (`validateRPMRoutingInstanceStrict`, mirroring the
+  ip-monitoring preferred-route `routing-instance` check in
+  `validateIPMonitoringStrict`) — unless the test also sets
+  `destination-interface`, which takes precedence over the VRF fallback and
+  pins the probe to a real egress device. An empty `routing-instance` is
+  the default (master) context and is always accepted. On the tolerant
+  load / peer-sync path the rejection is downgraded to a warning (#1960
+  no-brick); the runtime VRF bind returns the same `ENODEV`, so the test
+  holds state. To probe through a forwarding (FBF) uplink, either scope
+  the test with `destination-interface` or probe from a `virtual-router`
+  / `vrf` instance that has a VRF device.
 - Probe config re-applies on commit, gated on the rendered RPM stanza
   hash — unrelated commits never reset probe state.
 - **Environment errors never move routes**: a probe-socket setup
