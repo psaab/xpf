@@ -90,12 +90,17 @@ func TestNextPolicySequenceCountsIncludeSkippedDefaults11780(t *testing.T) {
 		Name:  "second",
 		Terms: []*PolicyTerm{{Name: "accept", Action: "accept"}},
 	}
-	if got := RouteMapSequenceCount(&PolicyOptionsConfig{}, first); got != 2 {
-		t.Fatalf("single-policy term/default sequence count = %d, want 2", got)
+	// #16869: the count is terms + bypassable explicit default + the
+	// extra carved-escape sequence. pkg/config cannot see whether the
+	// policy will render as a carved single-policy BGP export, so it
+	// reserves the sequence conservatively for every explicit-default
+	// policy with a valid next-policy term.
+	if got := RouteMapSequenceCount(&PolicyOptionsConfig{}, first); got != 3 {
+		t.Fatalf("single-policy term/default/carved-escape sequence count = %d, want 3", got)
 	}
 	chain := map[string]*PolicyStatement{"first": first, "second": second}
-	if got := ComposedChainSequenceCount(&PolicyOptionsConfig{}, chain, []string{"first", "second"}); got != 3 {
-		t.Fatalf("chain count = %d, want first term + bypassable default + second term", got)
+	if got := ComposedChainSequenceCount(&PolicyOptionsConfig{}, chain, []string{"first", "second"}); got != 4 {
+		t.Fatalf("chain count = %d, want first term + bypassable default + carved-escape allowance + second term", got)
 	}
 
 	first.Terms[0].NextPolicy = false

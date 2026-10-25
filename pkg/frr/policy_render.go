@@ -805,7 +805,12 @@ func (m *Manager) generatePolicyOptionsWithRefNodes15158(po *config.PolicyOption
 		// route-map`, and independent of FRR's undefined-map behaviour. See
 		// renderQuarantineDenyRouteMap for why deny and not "drop the
 		// attachment".
-		if n := config.RouteMapSequenceCount(po, ps); n > config.MaxRouteMapSequences {
+		// #16869: RouteMapSequenceCount cannot see the carve. A carved
+		// no-default map renders pair (+fallback) beyond the one
+		// fallback the count reserves — exact extra computed where
+		// carvedExport is known; explicit-default carved is already
+		// reserved by the count's +2.
+		if n := beltTotal16869(config.RouteMapSequenceCount(po, ps), carvedSingleExtraSeqs16869(carvedExport[name], ps)); n > config.MaxRouteMapSequences {
 			slog.Warn("oversized route-map policy: expansion would overflow FRR sequence numbers "+
 				"and poison the reload; rendering an explicit DENY under this name instead — "+
 				"routes matched by its attachments are withdrawn until the policy is reduced",
@@ -1904,10 +1909,16 @@ func (m *Manager) renderRouteMapForPolicy(po *config.PolicyOptionsConfig, emitNa
 }
 
 // renderRouteMapForPolicyExport15157 renders a single-policy BGP export
-// map: when carved is true and the policy has NO explicit default, the
-// #2998 plain permit tail becomes the #15157 carved pair (permit
-// `match source-protocol bgp`, then deny). Explicit defaults keep the
-// plain tail. Callers pass carved only for export-direction maps.
+// map: when carved is true the escape paths that must reach the Junos
+// BGP default export (#15157) become the carved pair (permit
+// `match source-protocol bgp`, then deny). With NO explicit default the
+// #2998 plain permit tail itself is that escape, so the pair replaces
+// the tail. With an explicit default the tail stays plain (accept/reject
+// as authored) and the pair is appended after it, where the
+// `next policy` escape targets it — mirroring
+// renderComposedRouteMapWithDefault, where the last member's escape and
+// the fall-off tail both land on the carved pair. Callers pass carved
+// only for export-direction maps.
 func (m *Manager) renderRouteMapForPolicyExport15157(po *config.PolicyOptionsConfig, emitName string, ps *config.PolicyStatement, trailingAction string, carved bool) string {
 	return m.renderRouteMapForPolicyWithFallback(po, emitName, ps, trailingAction, trailingAction, carved)
 }
@@ -1915,9 +1926,31 @@ func (m *Manager) renderRouteMapForPolicyExport15157(po *config.PolicyOptionsCon
 func (m *Manager) renderRouteMapForPolicyWithFallback(po *config.PolicyOptionsConfig, emitName string, ps *config.PolicyStatement, trailingAction, fallbackAction string, carvedBGPOnly bool) string {
 	body, seq := m.renderPolicyTermSequences(po, emitName, emitName, ps, 10)
 	hasNextPolicy := policyHasNextPolicyTerm(ps)
+	hasExplicitDefault := ps.DefaultAction == "accept" || ps.DefaultAction == "reject"
+	// #16869: in a carved export map with an explicit default, a
+	// `next policy` term skips the default and must land on the Junos
+	// BGP default export, not on the policy's own default. The carved
+	// pair therefore goes after the plain tail at seq+10/seq+20 and the
+	// escape targets its permit. Without a next-policy term nothing can
+	// reach past the terminating default, so no pair is emitted and the
+	// layout is byte-identical to before (#15157 explicit-default
+	// control). The pair's second sequence is why
+	// config.RouteMapSequenceCount conservatively reserves one extra
+	// sequence for every explicit-default + next-policy policy: this
+	// render can therefore never pass 65535 for an admitted policy.
+	// Shared-name tradeoff (accepted, as in the composed renderer):
+	// the standalone map is one FRR object, so a policy used as both a
+	// carved export and an import serves its import attachment with
+	// this same carved escape — fail-closed for import, never
+	// fail-open for export (pinned by
+	// TestBGPCarvedDualUseImportSharesCarvedEscape16869).
+	carvedEscape := carvedBGPOnly && hasNextPolicy && hasExplicitDefault
 	if hasNextPolicy {
+		// With an explicit default the escape jumps over the default
+		// sequence; carvedEscape targets that same slot's successor —
+		// the carved permit — which is the identical number.
 		nextPolicySequence := seq
-		if ps.DefaultAction == "accept" || ps.DefaultAction == "reject" {
+		if hasExplicitDefault {
 			nextPolicySequence += 10
 		}
 		body = renderNextPolicyTarget(body, nextPolicySequence)
@@ -1954,7 +1987,15 @@ func (m *Manager) renderRouteMapForPolicyWithFallback(po *config.PolicyOptionsCo
 	}
 	fmt.Fprintf(&b, "route-map %s %s %d\n", frrName(emitName), trailingAction, seq)
 	b.WriteString("exit\n")
-	if hasNextPolicy && (ps.DefaultAction == "accept" || ps.DefaultAction == "reject") {
+	if carvedEscape {
+		fmt.Fprintf(&b, "route-map %s permit %d\n", frrName(emitName), seq+10)
+		b.WriteString(" match source-protocol bgp\n")
+		b.WriteString("exit\n")
+		fmt.Fprintf(&b, "route-map %s deny %d\n", frrName(emitName), seq+20)
+		b.WriteString("exit\n")
+		return b.String()
+	}
+	if hasNextPolicy && hasExplicitDefault {
 		fmt.Fprintf(&b, "route-map %s %s %d\n", frrName(emitName), fallbackAction, seq+10)
 		b.WriteString("exit\n")
 	}
@@ -2027,7 +2068,10 @@ func (m *Manager) renderComposedRouteMapWithDefault(po *config.PolicyOptionsConf
 	// (RMAP_DENY on a failed route_map_lookup_by_name, stable/10.6), not
 	// permits as the previous comment claimed. Same tradeoff as the
 	// single-policy site (#5701); see renderQuarantineDenyRouteMap.
-	if n := config.ComposedChainSequenceCount(po, po.PolicyStatements, chain); n > config.MaxRouteMapSequences {
+	// #16869: a carved non-terminated chain renders one extra
+	// sequence (fall-off pair) beyond the count's reserved fallback;
+	// reserve it exactly where carvedBGPOnly is known.
+	if n := beltTotal16869(config.ComposedChainSequenceCount(po, po.PolicyStatements, chain), carvedComposedReserve16869(po, chain, carvedBGPOnly, fallbackAction)); n > config.MaxRouteMapSequences {
 		slog.Warn("oversized composed BGP policy-chain route-map: expansion would overflow FRR "+
 			"sequence numbers and poison the reload; rendering an explicit DENY under this name "+
 			"instead — routes on neighbors carrying this chain are withdrawn until it is reduced",
