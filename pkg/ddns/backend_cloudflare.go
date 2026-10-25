@@ -3,8 +3,11 @@ package ddns
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -42,11 +45,15 @@ type cloudflareBackend struct {
 	token   string // revealed at construction; never logged
 	zone    string // zone NAME (e.g. example.net); id resolved at update time
 	client  *http.Client
-	// ownerID is this backend's stable instance identity ("prov/<hex>",
+	// ownerID is this backend's stable instance identity ("inst/<hex>",
 	// see cfOwnerID); instanceTag is the full comment this instance
-	// stamps and owns.
+	// stamps and owns. legacyTag is the pre-#16585 zone-hash tag
+	// ("xpf-managed:prov/<endpoint-fingerprint>") this install stamped
+	// before the per-install component existed; rows carrying it are
+	// read as legacy (value-scoped fallback only, never owned).
 	ownerID     string
 	instanceTag string
+	legacyTag   string
 	// created tracks the (zoneID, recordID) of rows THIS backend instance
 	// POSTed, keyed "zoneID/id" (#16086 A10-16). It is the "self-created"
 	// half of the withdraw ownership test for rows that predate the
@@ -116,6 +123,7 @@ func newCloudflareBackend(p *config.DDNSProvider, client *http.Client) (*cloudfl
 		client:      client,
 		ownerID:     ownerID,
 		instanceTag: cfInstanceTag(ownerID),
+		legacyTag:   cfLegacyZoneTag(p),
 	}, nil
 }
 
@@ -158,53 +166,98 @@ type cfRecord struct {
 }
 
 // Cloudflare record-comment ownership (#16086 A10-16, folded per the
-// PR #16114 hostile reviews).
+// PR #16114 hostile reviews; per-install component #16585).
 //
 // A record comment is the only durable per-row ownership proof Cloudflare
 // offers: unlike a Route 53 RRset member, a Cloudflare row is individually
 // addressable and its comment rides with the row. A bare product marker
 // ("xpf-managed") is NOT ownership: every xpf instance stamps the same
 // literal, so one xpf would adopt and withdraw another independent xpf's
-// record. The comment therefore carries a STABLE PER-INSTANCE identity:
+// record. The comment therefore carries a STABLE PER-INSTALL identity:
 //
-//	xpf-managed:<instance>     instance-owned (cfInstanceTagPrefix)
-//	xpf-managed                legacy bare tag (pre-fold records)
+//	xpf-managed:inst/<install-hash>   instance-owned (cfInstanceTagPrefix)
+//	xpf-managed:prov/<endpoint-hash>  legacy zone-hash tag (pre-#16585)
+//	xpf-managed                       legacy bare tag (pre-fold records)
 //
-// <instance> is "prov/<hex>" — an FNV-1a hash of the provider's stable
-// endpoint identity (backendFingerprint: backend type + server/zone —
-// credential-free, the same identity Surface A persists for endpoint
-// change detection). It is deliberately NOT random per construction
-// (backends are rebuilt every reconcile, so a random id would orphan
-// every record xpf creates) and NOT per-process state. Two INDEPENDENT
-// xpf instances have different providers/zones (different instance ids);
-// a coordinated HA pair shares the committed provider config, hence the
-// same id — which is correct, because the pair is one logical writer.
-// Routers that deliberately share one provider identity ARE one owner by
-// construction; that residual is documented, not silently assumed.
+// <install-hash> is an FNV-1a hash of "inst1|<install-id>|<endpoint-
+// fingerprint>". The install-id is a durable random id minted once per
+// install (see EnsureInstallID / the `install-id` provider leaf): it
+// lives in committed config, so an HA pair that shares the committed
+// config shares the id — one logical writer — while two INDEPENDENT
+// installs on the SAME zone (same endpoint fingerprint, the shape the
+// pre-#16585 zone-hash tag could not distinguish) mint different ids
+// and therefore different tags. It is deliberately NOT random per
+// construction (backends are rebuilt every reconcile, so a per-construction
+// random would orphan every record xpf creates) and NOT per-process state.
 //
-// Ownership test (cfOwnedByTag, b.ownsRow): a row is xpf-owned ONLY when
-// its comment is exactly THIS instance's tag, or this backend instance
-// created it in-process (b.created). A row tagged by a DIFFERENT instance,
-// a bare legacy "xpf-managed" row, and an untagged row are all FOREIGN for
-// ownership purposes: never adopted, never PATCHed, never silently
-// deleted. Legacy rows (bare tag or untagged) are withdrawn only through
-// the logged value-scoped fallback (see DeleteLease / deleteStalePrev).
+// LEGACY READ (#16585): rows stamped with the pre-#16585 zone-hash tag
+// (this provider's exact legacy tag, cfLegacyZoneTag) are classified
+// cfTagLegacy, NOT cfTagOtherXPF: they were published by THIS endpoint
+// identity before the per-install component existed, so withdrawing
+// them only through the logged value-scoped fallback (DeleteLease /
+// deleteStalePrev) keeps them reachable without granting ownership.
+// They are never adopted, never PATCHed, and never silently deleted.
+// Any OTHER "xpf-managed:..." tag (a different install's inst/ tag, or
+// another endpoint's prov/ tag) stays cfTagOtherXPF — foreign, never a
+// fallback candidate. Routers that deliberately share one install-id
+// ARE one owner by construction; that residual is documented, not
+// silently assumed.
+//
+// Ownership test (b.ownsRow): a row is xpf-owned ONLY when its comment
+// is exactly THIS install's tag, or this backend instance created it
+// in-process (b.created). A row tagged by a DIFFERENT install, a legacy
+// row, and an untagged row are all FOREIGN for ownership purposes:
+// never adopted, never PATCHed, never silently deleted. Legacy rows
+// are withdrawn only through the logged value-scoped fallback (see
+// DeleteLease / deleteStalePrev).
 const (
 	cfLegacyComment       = "xpf-managed"
 	cfInstanceTagPrefix   = "xpf-managed:"
+	cfInstanceTagInstall  = "inst/"
 	cfInstanceTagProvider = "prov/"
 )
 
-// cfOwnerID derives the stable per-instance identity for a provider
-// catalog entry: "prov/" + the credential-free endpoint fingerprint.
+// cfOwnerID derives the stable per-install identity for a provider
+// catalog entry: "inst/" + a hash of the durable install-id and the
+// credential-free endpoint fingerprint. Two installs with different
+// InstallIDs on one zone derive different ids; an HA pair sharing the
+// committed InstallID derives the same id. A provider with no
+// InstallID (direct construction without EnsureInstallID, e.g. unit
+// tests) hashes the empty install component deterministically, so
+// rebuilt backends still agree.
 func cfOwnerID(p *config.DDNSProvider) string {
 	if p == nil {
-		return cfInstanceTagProvider + "unknown"
+		return cfInstanceTagInstall + "unknown"
 	}
-	return cfInstanceTagProvider + backendFingerprint(p)
+	return cfInstanceTagInstall + installFingerprint(p.InstallID, backendFingerprint(p))
 }
 
-// cfInstanceTag is the exact comment an instance stamps on CREATE.
+// installFingerprint hashes the install-id together with the endpoint
+// fingerprint under a versioned domain separator, length-prefixed so
+// no pair of adjacent fields can alias across the boundary.
+func installFingerprint(installID, endpointFP string) string {
+	var sb strings.Builder
+	writeField := func(s string) { fmt.Fprintf(&sb, "%d:%s|", len(s), s) }
+	writeField("inst1")
+	writeField(installID)
+	writeField(endpointFP)
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(sb.String()))
+	return fmt.Sprintf("fp1-%016x", h.Sum64())
+}
+
+// cfLegacyZoneTag is the exact pre-#16585 tag this provider stamped:
+// "xpf-managed:prov/<endpoint-fingerprint>". It is computed purely
+// from the endpoint fingerprint (no install component) so a backend
+// built after the upgrade recognises rows its predecessor published.
+func cfLegacyZoneTag(p *config.DDNSProvider) string {
+	if p == nil {
+		return cfInstanceTagPrefix + cfInstanceTagProvider + "unknown"
+	}
+	return cfInstanceTagPrefix + cfInstanceTagProvider + backendFingerprint(p)
+}
+
+// cfInstanceTag is the exact comment an install stamps on CREATE.
 func cfInstanceTag(ownerID string) string { return cfInstanceTagPrefix + ownerID }
 
 // cfTagKind classifies a row's comment for ownership decisions.
@@ -212,9 +265,9 @@ type cfTagKind int
 
 const (
 	cfTagForeign  cfTagKind = iota // untagged, other-instance, or unrelated comment
-	cfTagMine                      // exactly this instance's tag
-	cfTagLegacy                    // bare pre-fold "xpf-managed"
-	cfTagOtherXPF                  // another instance's "xpf-managed:..." tag
+	cfTagMine                      // exactly this install's tag
+	cfTagLegacy                    // bare pre-fold tag, or this endpoint's pre-#16585 zone-hash tag
+	cfTagOtherXPF                  // another install's or another endpoint's "xpf-managed:..." tag
 )
 
 func (b *cloudflareBackend) tagKind(r cfRecord) cfTagKind {
@@ -222,6 +275,8 @@ func (b *cloudflareBackend) tagKind(r cfRecord) cfTagKind {
 	case r.Comment == b.instanceTag:
 		return cfTagMine
 	case r.Comment == cfLegacyComment:
+		return cfTagLegacy
+	case b.legacyTag != "" && r.Comment == b.legacyTag:
 		return cfTagLegacy
 	case strings.HasPrefix(r.Comment, cfInstanceTagPrefix):
 		return cfTagOtherXPF
@@ -235,6 +290,57 @@ func (b *cloudflareBackend) tagKind(r cfRecord) cfTagKind {
 // in-process. Legacy/other-instance/foreign rows are NOT owned.
 func (b *cloudflareBackend) ownsRow(zoneID string, r cfRecord) bool {
 	return b.tagKind(r) == cfTagMine || b.selfCreated(zoneID, r.ID)
+}
+
+// cfInstallIDLen is the hex length of a durable install-id: 16 random
+// bytes, hex-encoded (see config.ValidateDDNSInstallID).
+const cfInstallIDLen = 32
+
+// validInstallID reports whether s is a well-formed install-id. It
+// mirrors config.ValidateDDNSInstallID (this package cannot call the
+// schema validator without a cycle in intent: the validator gates
+// commit, this gates runtime minting).
+func validInstallID(s string) bool {
+	if len(s) != cfInstallIDLen {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// EnsureInstallID returns p.InstallID when it is already well-formed,
+// otherwise mints a fresh durable install-id (16 crypto/rand bytes,
+// hex), stamps it onto p, and returns it (#16585). It NEVER replaces a
+// valid existing id, so an HA pair that shares the committed config
+// keeps one id and rebuilt backends keep owning their records. The
+// SurfaceAManager caches each mint per provider for the process
+// lifetime (providerWithInstallID), so every backend one daemon builds
+// shares it; durability across restarts comes from the operator
+// pinning the value via the `install-id` leaf (committed config syncs
+// it to the HA peer). Until pinned, a restart re-mints — pre-restart
+// rows stay reachable via the legacy value-scoped fallback, never
+// adopted from another install. A crypto/rand failure returns an
+// error rather than a predictable id: a guessable ownership tag would
+// let a stranger pre-stamp rows this install would then treat as its
+// own.
+func EnsureInstallID(p *config.DDNSProvider) (string, error) {
+	if p == nil {
+		return "", fmt.Errorf("ddns cloudflare: nil provider")
+	}
+	if validInstallID(p.InstallID) {
+		return p.InstallID, nil
+	}
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", fmt.Errorf("ddns cloudflare: mint install-id: %w", err)
+	}
+	id := hex.EncodeToString(buf[:])
+	p.InstallID = id
+	return id, nil
 }
 
 // maxCFErrors bounds how many envelope errors are rendered. The array length is

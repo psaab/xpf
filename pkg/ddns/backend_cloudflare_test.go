@@ -147,12 +147,250 @@ func newCFTestBackend(t *testing.T, srv *httptest.Server, fake *cfFakeAPI) *clou
 	t.Helper()
 	b, err := newCloudflareBackend(&config.DDNSProvider{
 		Name: "cf", Backend: "cloudflare", APIToken: config.NewSecret(fake.token),
-		Zone: fake.zoneName, Server: srv.URL,
+		Zone: fake.zoneName, Server: srv.URL, InstallID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	}, nil)
 	if err != nil {
 		t.Fatalf("newCloudflareBackend: %v", err)
 	}
 	return b
+}
+
+// TestCloudflareSameZoneDifferentInstall16585 is the #16585 decisive
+// cell: two independent installs publish into the SAME Cloudflare zone
+// (same zone name, same API base, same token — the production shape).
+// Pre-fix both derived the identical zone-hash tag, so install B's
+// withdraw deleted install A's row. Post-fix the tags differ by the
+// durable install-id, B POSTs its own row alongside A's, and B's
+// withdraw leaves A's row untouched.
+//
+// FAIL-ON-REVERT: reverting cfOwnerID to the zone-hash-only form makes
+// aTag == bTag, B adopts A's row (posted=0), and B's withdraw deletes
+// A's row — every assertion below reds.
+func TestCloudflareSameZoneDifferentInstall16585(t *testing.T) {
+	logs := captureWarn16086(t)
+	fake := newCFFakeAPI(t)
+	srv := httptest.NewServer(fake.handler())
+	defer srv.Close()
+
+	mk := func(name, installID string) *cloudflareBackend {
+		b, err := newCloudflareBackend(&config.DDNSProvider{
+			Name: name, Backend: "cloudflare", APIToken: config.NewSecret(fake.token),
+			Zone: fake.zoneName, Server: srv.URL, InstallID: installID,
+		}, nil)
+		if err != nil {
+			t.Fatalf("backend %s: %v", name, err)
+		}
+		return b
+	}
+	a := mk("cf-a", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	b := mk("cf-b", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	if a.instanceTag == b.instanceTag {
+		t.Fatalf("#16585: same-zone installs with different install-ids must derive different tags, both %q", a.instanceTag)
+	}
+	if !strings.HasPrefix(a.instanceTag, cfInstanceTagPrefix+cfInstanceTagInstall) {
+		t.Fatalf("#16585: tag must carry the inst/ owner prefix, got %q", a.instanceTag)
+	}
+
+	const fqdn = "wan.example.net"
+	const addr = "203.0.113.5"
+	rec := hostRecord(t, fqdn, addr)
+
+	// A publishes; exactly one row, stamped with A's tag.
+	if err := a.UpsertLease(context.Background(), rec); err != nil {
+		t.Fatalf("A publish: %v", err)
+	}
+	if fake.posted != 1 || len(fake.records) != 1 {
+		t.Fatalf("#16585: A publish must POST one row, posted=%d records=%d", fake.posted, len(fake.records))
+	}
+	var aID string
+	for id, r := range fake.records {
+		aID = id
+		if r.Comment != a.instanceTag {
+			t.Fatalf("#16585: A's row must carry A's tag, got %q want %q", r.Comment, a.instanceTag)
+		}
+	}
+
+	// B publishes the same name+IP: it must NOT adopt A's row; it POSTs
+	// its own tagged row alongside.
+	if err := b.UpsertLease(context.Background(), rec); err != nil {
+		t.Fatalf("B publish: %v", err)
+	}
+	if fake.posted != 2 || fake.patched != 0 {
+		t.Fatalf("#16585: B must POST its own row beside A's (posted=%d patched=%d); adopting A's row makes it B's withdraw target", fake.posted, fake.patched)
+	}
+	if got := fake.records[aID]; got.Comment != a.instanceTag {
+		t.Fatalf("#16585: B's publish rewrote A's row: %+v", got)
+	}
+
+	// B withdraws: only B's row goes; A's row survives, no fallback.
+	if err := b.DeleteLease(context.Background(), rec); err != nil {
+		t.Fatalf("B withdraw: %v", err)
+	}
+	if _, ok := fake.records[aID]; !ok {
+		t.Fatal("#16585: B's withdraw deleted install A's record on the same zone")
+	}
+	if len(fake.records) != 1 || fake.deleted != 1 {
+		t.Fatalf("#16585: B's withdraw must delete exactly its own row, records=%d deleted=%d", len(fake.records), fake.deleted)
+	}
+	if strings.Contains(logs.String(), "value-scoped fallback") {
+		t.Fatalf("#16585: B's withdraw must not take the fallback, logs: %s", logs.String())
+	}
+
+	// A still owns its row: A's withdraw removes it.
+	if err := a.DeleteLease(context.Background(), rec); err != nil {
+		t.Fatalf("A withdraw: %v", err)
+	}
+	if len(fake.records) != 0 || fake.deleted != 2 {
+		t.Fatalf("#16585: A withdraw must remove the last row, records=%d deleted=%d", len(fake.records), fake.deleted)
+	}
+}
+
+// TestCloudflareHAPairSharesInstall16585 pins the HA half of #16585:
+// two backends built from the SAME provider (same committed
+// install-id, as config-sync delivers to both peers) derive the SAME
+// tag, so the peer that takes over owns the rows the first peer
+// published — one logical writer.
+func TestCloudflareHAPairSharesInstall16585(t *testing.T) {
+	fake := newCFFakeAPI(t)
+	srv := httptest.NewServer(fake.handler())
+	defer srv.Close()
+	p := &config.DDNSProvider{
+		Name: "cf", Backend: "cloudflare", APIToken: config.NewSecret(fake.token),
+		Zone: fake.zoneName, Server: srv.URL, InstallID: "cccccccccccccccccccccccccccccccc",
+	}
+	b1, err := newCloudflareBackend(p, nil)
+	if err != nil {
+		t.Fatalf("peer1: %v", err)
+	}
+	b2, err := newCloudflareBackend(p, nil)
+	if err != nil {
+		t.Fatalf("peer2: %v", err)
+	}
+	if b1.instanceTag != b2.instanceTag {
+		t.Fatalf("#16585: HA peers sharing one install-id must share the tag: %q vs %q", b1.instanceTag, b2.instanceTag)
+	}
+	const fqdn = "wan.example.net"
+	const addr = "203.0.113.5"
+	rec := hostRecord(t, fqdn, addr)
+	if err := b1.UpsertLease(context.Background(), rec); err != nil {
+		t.Fatalf("peer1 publish: %v", err)
+	}
+	// Peer2 sees peer1's row as its own: republish is a no-write, and
+	// peer2's withdraw removes it.
+	if err := b2.UpsertLease(context.Background(), rec); err != nil {
+		t.Fatalf("peer2 republish: %v", err)
+	}
+	if fake.posted != 1 || fake.patched != 0 {
+		t.Fatalf("#16585: HA peer republish must be a no-write, posted=%d patched=%d", fake.posted, fake.patched)
+	}
+	if err := b2.DeleteLease(context.Background(), rec); err != nil {
+		t.Fatalf("peer2 withdraw: %v", err)
+	}
+	if len(fake.records) != 0 {
+		t.Fatalf("#16585: HA peer withdraw must remove the shared row, records=%d", len(fake.records))
+	}
+}
+
+// TestCloudflareLegacyZoneTagFallback16585 pins the #16585 legacy read:
+// a row stamped with THIS endpoint's pre-#16585 zone-hash tag is legacy
+// (value-scoped fallback only), while the same zone-hash shape for a
+// DIFFERENT endpoint stays foreign and is never fallback-deleted.
+func TestCloudflareLegacyZoneTagFallback16585(t *testing.T) {
+	const fqdn = "wan.example.net"
+	const addr = "203.0.113.5"
+
+	t.Run("own endpoint legacy tag uses logged fallback", func(t *testing.T) {
+		logs := captureWarn16086(t)
+		fake := newCFFakeAPI(t)
+		srv := httptest.NewServer(fake.handler())
+		defer srv.Close()
+		b := newCFTestBackend(t, srv, fake)
+		if b.legacyTag == b.instanceTag || b.legacyTag == "" {
+			t.Fatalf("setup: legacy tag %q must differ from instance tag %q", b.legacyTag, b.instanceTag)
+		}
+		legacyID := fake.seedRecordComment("A", fqdn, addr, b.legacyTag)
+		if err := b.DeleteLease(context.Background(), hostRecord(t, fqdn, addr)); err != nil {
+			t.Fatalf("legacy withdraw: %v", err)
+		}
+		if _, ok := fake.records[legacyID]; ok {
+			t.Fatal("#16585: own-endpoint zone-hash row must be withdrawn via the fallback, not orphaned")
+		}
+		if fake.deleted != 1 || !strings.Contains(logs.String(), "value-scoped fallback") {
+			t.Fatalf("#16585: legacy fallback must delete once and warn, deleted=%d logs=%q", fake.deleted, logs.String())
+		}
+		// Legacy rows are never adopted on publish either: a fresh
+		// publish beside a legacy same-content row POSTs its own row.
+		fake2 := newCFFakeAPI(t)
+		srv2 := httptest.NewServer(fake2.handler())
+		defer srv2.Close()
+		b2 := newCFTestBackend(t, srv2, fake2)
+		legacyID2 := fake2.seedRecordComment("A", fqdn, addr, b2.legacyTag)
+		if err := b2.UpsertLease(context.Background(), hostRecord(t, fqdn, addr)); err != nil {
+			t.Fatalf("publish beside legacy row: %v", err)
+		}
+		if fake2.posted != 1 || fake2.patched != 0 {
+			t.Fatalf("#16585: publish beside a legacy row must POST its own, posted=%d patched=%d", fake2.posted, fake2.patched)
+		}
+		if got := fake2.records[legacyID2]; got.Comment != b2.legacyTag {
+			t.Fatalf("#16585: legacy row was claimed by publish: %+v", got)
+		}
+	})
+
+	t.Run("other endpoint zone-hash tag stays foreign", func(t *testing.T) {
+		captureWarn16086(t)
+		fake := newCFFakeAPI(t)
+		srv := httptest.NewServer(fake.handler())
+		defer srv.Close()
+		b := newCFTestBackend(t, srv, fake)
+		other, err := newCloudflareBackend(&config.DDNSProvider{
+			Name: "cf-other", Backend: "cloudflare", APIToken: config.NewSecret(fake.token),
+			Zone: "other.example.net", Server: srv.URL, InstallID: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		}, nil)
+		if err != nil {
+			t.Fatalf("other backend: %v", err)
+		}
+		otherID := fake.seedRecordComment("A", fqdn, addr, other.legacyTag)
+		if err := b.DeleteLease(context.Background(), hostRecord(t, fqdn, addr)); err != nil {
+			t.Fatalf("withdraw: %v", err)
+		}
+		if _, ok := fake.records[otherID]; !ok {
+			t.Fatal("#16585: another endpoint's zone-hash row was fallback-deleted")
+		}
+		if fake.deleted != 0 {
+			t.Fatalf("#16585: expected no deletes, deleted=%d", fake.deleted)
+		}
+	})
+}
+
+// TestEnsureInstallID16585 pins the minting contract: a valid id is
+// kept verbatim (HA stability), an absent or malformed id is replaced
+// with a fresh well-formed one, and two mints differ.
+func TestEnsureInstallID16585(t *testing.T) {
+	p := &config.DDNSProvider{InstallID: "dddddddddddddddddddddddddddddddd"}
+	got, err := EnsureInstallID(p)
+	if err != nil || got != p.InstallID {
+		t.Fatalf("#16585: valid id must be kept, got %q err %v", got, err)
+	}
+	for _, bad := range []string{"", "not-hex", "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD", "dddd"} {
+		q := &config.DDNSProvider{InstallID: bad}
+		id1, err := EnsureInstallID(q)
+		if err != nil {
+			t.Fatalf("mint for %q: %v", bad, err)
+		}
+		if !validInstallID(id1) || q.InstallID != id1 {
+			t.Fatalf("#16585: minted id %q (stored %q) must be well-formed", id1, q.InstallID)
+		}
+		id2, err := EnsureInstallID(&config.DDNSProvider{})
+		if err != nil {
+			t.Fatalf("second mint: %v", err)
+		}
+		if id1 == id2 {
+			t.Fatal("#16585: two mints must differ (per-install uniqueness)")
+		}
+	}
+	if _, err := EnsureInstallID(nil); err == nil {
+		t.Fatal("#16585: nil provider must error")
+	}
 }
 
 func TestCloudflareCreateThenUpdate(t *testing.T) {

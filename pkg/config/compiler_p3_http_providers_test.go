@@ -73,6 +73,55 @@ func TestP3HTTPProvidersCompile(t *testing.T) {
 	}
 }
 
+// TestDDNSInstallIDRoundTrip16585 pins the #16585 leaf plumbing: a
+// well-formed install-id compiles into DDNSProvider.InstallID, and the
+// schema validator accepts exactly 32 lowercase hex chars.
+func TestDDNSInstallIDRoundTrip16585(t *testing.T) {
+	const id = "0123456789abcdef0123456789abcdef"
+	tree := buildTree(t, []string{
+		"set system services dynamic-dns provider cf backend cloudflare",
+		"set system services dynamic-dns provider cf api-token cf-secret-b",
+		"set system services dynamic-dns provider cf zone example.net",
+		"set system services dynamic-dns provider cf install-id " + id,
+	})
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("CompileConfig: %v", err)
+	}
+	p := cfg.System.Services.DynamicDNS.Providers["cf"]
+	if p == nil || p.InstallID != id {
+		t.Fatalf("#16585: install-id did not compile, provider=%+v", p)
+	}
+	if err := ValidateDDNSInstallID(id); err != nil {
+		t.Fatalf("#16585: valid id rejected: %v", err)
+	}
+	for _, bad := range []string{"", "xyz", "0123456789ABCDEF0123456789abcdef", "0123456789abcdef", "0123456789abcdef0123456789abcdeg"} {
+		if err := ValidateDDNSInstallID(bad); err == nil {
+			t.Fatalf("#16585: malformed install-id %q must be rejected", bad)
+		}
+		if bad != "" {
+			badTree := buildTree(t, []string{
+				"set system services dynamic-dns provider cf backend cloudflare",
+				"set system services dynamic-dns provider cf install-id " + bad,
+			})
+			if err := SchemaValidate(badTree); err == nil {
+				t.Fatalf("#16585: SchemaValidate must reject install-id %q", bad)
+			}
+		}
+	}
+	// A provider carrying ONLY an install-id must still materialise.
+	solo := buildTree(t, []string{
+		"set system services dynamic-dns provider solo install-id " + id,
+	})
+	cfg2, err := CompileConfig(solo)
+	if err != nil {
+		t.Fatalf("CompileConfig solo: %v", err)
+	}
+	if p := cfg2.System.Services.DynamicDNS.Providers["solo"]; p == nil || p.InstallID != id {
+		t.Fatalf("#16585: install-id-only provider must materialise, got %+v", p)
+	}
+}
+
 func TestP3HTTPProviderHierarchicalCompiles(t *testing.T) {
 	// The brace form must compile identically to flat-set.
 	const cfgText = `system {

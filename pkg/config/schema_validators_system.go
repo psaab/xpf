@@ -897,3 +897,26 @@ func ValidateTimeZone(raw string) error {
 	}
 	return nil
 }
+
+// ValidateDDNSInstallID validates a `system services dynamic-dns provider
+// <n> install-id` value (#16585): the durable per-install Cloudflare
+// ownership component carried in committed config. It must be exactly
+// 32 lowercase hex chars (16 random bytes, hex-encoded) so the value
+// round-trips through the Cloudflare comment tag without ambiguity and
+// two installs cannot alias by case or separator tricks. Empty is
+// rejected here (the schema only calls the validator when a value is
+// present); an unset leaf means "auto-mint at first use".
+func ValidateDDNSInstallID(raw string) error {
+	if raw == "" {
+		return fmt.Errorf("missing value (expected a 32-char lowercase hex install-id, or omit the leaf to auto-mint one)")
+	}
+	if len(raw) != 32 {
+		return fmt.Errorf("install-id %q must be exactly 32 lowercase hex characters", raw)
+	}
+	for _, c := range raw {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return fmt.Errorf("install-id %q must be lowercase hex (0-9, a-f)", raw)
+		}
+	}
+	return nil
+}
