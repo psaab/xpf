@@ -58,19 +58,20 @@ func validateThreeColorPolicersStrict(policers map[string]*ThreeColorPolicerConf
 	return nil
 }
 
-// validateThreeColorBurstFloor16610 enforces the #16610 one-frame floor on
-// the ceiling bucket that decides whether a maximum-sized frame can ever
-// be admitted non-Red: max(CBS, EBS) for single-rate (a large EBS rescues
-// a frame as Yellow even when CBS is tiny, per RFC 2697 srTCM) and PBS
-// for two-rate (RFC 2698 trTCM; PBS >= CBS is separately gated, so PBS is
-// the ceiling). A ceiling below minThreeColorBurstBytes16610 colours every
+// validateThreeColorBurstFloor16610 enforces the shared one-frame floor
+// (#16610; #16714 shared constant) on the ceiling bucket that decides
+// whether a maximum-sized frame can ever be admitted non-Red:
+// max(CBS, EBS) for single-rate (a large EBS rescues a frame as Yellow
+// even when CBS is tiny, per RFC 2697 srTCM) and PBS for two-rate
+// (RFC 2698 trTCM; PBS >= CBS is separately gated, so PBS is the
+// ceiling). A ceiling below minPolicerBurstBytes16714 colours every
 // full-size frame Red at any rate. Zero buckets are the caller's
 // "requires positive ..." case and are skipped here. Sorted iteration is
 // unnecessary: the caller returns the first policer error.
 func validateThreeColorBurstFloor16610(displayName string, pol *ThreeColorPolicerConfig) error {
 	if pol.TwoRate {
-		if pol.PBS != 0 && pol.PBS < minThreeColorBurstBytes16610 {
-			return fmt.Errorf("firewall three-color-policer %q peak-burst-size must be at least one maximum-sized frame (%d bytes: 1500-byte packet plus 14-byte Ethernet header, the meter's frame-byte cost unit), got %d", displayName, minThreeColorBurstBytes16610, pol.PBS)
+		if pol.PBS != 0 && pol.PBS < minPolicerBurstBytes16714 {
+			return fmt.Errorf("firewall three-color-policer %q peak-burst-size must be at least one maximum-sized frame (%d bytes: 1500-byte packet plus 14-byte Ethernet header, the meter's frame-byte cost unit), got %d", displayName, minPolicerBurstBytes16714, pol.PBS)
 		}
 		return nil
 	}
@@ -80,8 +81,8 @@ func validateThreeColorBurstFloor16610(displayName string, pol *ThreeColorPolice
 		ceiling = pol.PBS
 		ceilingLeaf = "excess-burst-size"
 	}
-	if ceiling != 0 && ceiling < minThreeColorBurstBytes16610 {
-		return fmt.Errorf("firewall three-color-policer %q %s must be at least one maximum-sized frame (%d bytes: 1500-byte packet plus 14-byte Ethernet header, the meter's frame-byte cost unit) when it is the larger of committed-burst-size/excess-burst-size, got %d (committed-burst-size %d, excess-burst-size %d)", displayName, ceilingLeaf, minThreeColorBurstBytes16610, ceiling, pol.CBS, pol.PBS)
+	if ceiling != 0 && ceiling < minPolicerBurstBytes16714 {
+		return fmt.Errorf("firewall three-color-policer %q %s must be at least one maximum-sized frame (%d bytes: 1500-byte packet plus 14-byte Ethernet header, the meter's frame-byte cost unit) when it is the larger of committed-burst-size/excess-burst-size, got %d (committed-burst-size %d, excess-burst-size %d)", displayName, ceilingLeaf, minPolicerBurstBytes16714, ceiling, pol.CBS, pol.PBS)
 	}
 	return nil
 }
@@ -91,12 +92,20 @@ func validateThreeColorBurstFloor16610(displayName string, pol *ThreeColorPolice
 // tolerant path can downgrade only that violation to a warning while
 // keeping every other three-color defect strict (#1960).
 func threeColorBurstFloorError16610(err error) bool {
+	return policerBurstFloorError16714(err)
+}
+
+// policerBurstFloorError16714 reports whether err contains a shared
+// one-frame burst-floor violation (#16714), so tolerant paths can
+// downgrade only that violation to a warning (#1960).
+func policerBurstFloorError16714(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "maximum-sized frame")
 }
 
 // validateFirewallPolicerLimitsStrict hard-rejects a single-rate policer
 // missing either `if-exceeding bandwidth-limit` or `burst-size-limit`
-// (#15125, A85-06).
+// (#15125, A85-06), or whose burst is below the shared one-frame floor
+// (#16714).
 //
 // Before this gate a policer with no if-exceeding, an empty one, or only
 // one of the two limits compiled clean: the missing limit stayed 0, and
@@ -134,6 +143,9 @@ func validateFirewallPolicerLimitsStrict(cfg *Config) error {
 		}
 		if pol.BurstSizeLimit == 0 {
 			return fmt.Errorf("firewall policer %q requires `if-exceeding burst-size-limit` (missing burst-size-limit compiles to a 0-burst policer that drops all policed traffic)", displayName)
+		}
+		if pol.BurstSizeLimit < minPolicerBurstBytes16714 {
+			return fmt.Errorf("firewall policer %q burst-size-limit must be at least one maximum-sized frame (%d bytes: 1500-byte packet plus 14-byte Ethernet header, the meter's frame-byte cost unit), got %d", displayName, minPolicerBurstBytes16714, pol.BurstSizeLimit)
 		}
 	}
 	return nil

@@ -167,30 +167,37 @@ func TestPolicer5299_Reject_BurstSizeLimit(t *testing.T) {
 	}
 }
 
-// #10310: a policer burst smaller than one maximum-sized packet cannot admit
-// any ordinary MTU frame. The strict commit gate must reject it rather than
-// installing a bucket that silently marks every packet yellow/red.
+// #10310 / #16714: a policer burst smaller than one maximum-sized frame
+// cannot admit any ordinary MTU frame. The meter charges the full
+// Ethernet frame (1500-byte MTU payload + 14-byte header = 1514 untagged;
+// 1518 tagged), so the strict commit gate must reject 1500..1513 rather
+// than installing a bucket that silently marks every full-size packet
+// yellow/red. The floor is shared with the three-color leaves
+// (minPolicerBurstBytes16714).
 func TestPolicer10310_RejectsSubPacketBurst(t *testing.T) {
-	for _, value := range []string{"1", "100", "1499"} {
+	for _, value := range []string{"1", "100", "1499", "1500", "1513", "1k"} {
 		t.Run(value, func(t *testing.T) {
 			err := policer5299SchemaCheck(t,
 				"set firewall policer p-subpacket if-exceeding burst-size-limit "+value)
 			if err == nil {
 				t.Fatalf(
-					"burst-size-limit %q: expected rejection below one 1500-byte packet",
+					"burst-size-limit %q: expected rejection below one maximum-sized frame (1514 bytes)",
 					value,
 				)
 			}
 			if !strings.Contains(err.Error(), "burst-size-limit") {
 				t.Fatalf("burst-size-limit %q: error should name the leaf: %v", value, err)
 			}
+			if !strings.Contains(err.Error(), "maximum-sized frame") || !strings.Contains(err.Error(), "1514") {
+				t.Fatalf("burst-size-limit %q: error should name the 1514-byte frame floor: %v", value, err)
+			}
 		})
 	}
 	if err := policer5299SchemaCheck(
 		t,
-		"set firewall policer p-one-packet if-exceeding burst-size-limit 1500",
+		"set firewall policer p-one-packet if-exceeding burst-size-limit 1514",
 	); err != nil {
-		t.Fatalf("exactly one 1500-byte packet must remain valid: %v", err)
+		t.Fatalf("exactly one maximum-sized frame (1514 bytes) must remain valid: %v", err)
 	}
 }
 

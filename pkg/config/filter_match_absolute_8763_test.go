@@ -201,7 +201,7 @@ func absCases8763() []absCase8763 {
 
 const absPreamble8763 = "class-of-service {\n forwarding-classes {\n  class fcprobe77 queue-num 3;\n }\n}\n" +
 	"routing-instances {\n riprobe77 {\n  instance-type virtual-router;\n }\n}\n" +
-	"firewall {\n policer polprobe77 {\n  if-exceeding { bandwidth-limit 10m; burst-size-limit 1500; }\n  then { discard; }\n }\n}\n"
+	"firewall {\n policer polprobe77 {\n  if-exceeding { bandwidth-limit 10m; burst-size-limit 1514; }\n  then { discard; }\n }\n}\n"
 
 // hierarchical builds the BRACED compound-key shape an operator writes:
 // `firewall { family inet { filter f1 { term t1 { … } } } }`.
@@ -223,7 +223,7 @@ func absFlat8763(t *testing.T, prereq, stmtSuffix string) *ConfigTree {
 		"set class-of-service forwarding-classes class fcprobe77 queue-num 3",
 		"set routing-instances riprobe77 instance-type virtual-router",
 		"set firewall policer polprobe77 if-exceeding bandwidth-limit 10m",
-		"set firewall policer polprobe77 if-exceeding burst-size-limit 1500",
+		"set firewall policer polprobe77 if-exceeding burst-size-limit 1514",
 		"set firewall policer polprobe77 then discard",
 		"set firewall family inet filter f1 term t1 " + stmtSuffix,
 	}
