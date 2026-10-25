@@ -11,7 +11,15 @@
 //! - Slab pool, hard cap [`IPSEC_INNER_SLAB_CAP`]: socket recv writes directly
 //!   into an acquired slab; no hot-path allocation once warm.
 //! - Per-worker ingress queue, hard cap [`IPSEC_INNER_QUEUE_DEPTH`]: full then
-//!   DROP-and-count E23; the producer never blocks.
+//!   DROP-and-count E23; the producer never blocks on the per-worker queue.
+//! - #16495: E23 (`WORKER_QUEUE_FULL`) moves only at genuine capacity —
+//!   per-worker queue depth ([`IPSEC_INNER_QUEUE_DEPTH`]) or the per-flow
+//!   in-flight bound ([`IPSEC_INNER_MAX_INFLIGHT_PER_FLOW`]) — never on lock
+//!   contention. Router in-flight, worker-set authority and tombstone
+//!   admission take blocking locks whose holds are bounded (O(1) map entry,
+//!   short CONTROL set operation, O(cap) tombstone scan), so contention
+//!   delays admission briefly instead of refusing an admissible frame as
+//!   FULL / SHUTDOWN (`EVALUATOR_UNAVAILABLE`) / BAD_LEASE (`LEASE_EPOCH`).
 //! - Per-flow in-flight descriptors bounded at
 //!   [`IPSEC_INNER_MAX_INFLIGHT_PER_FLOW`]: refusals count E23, never grow an
 //!   unbounded list.
@@ -1558,7 +1566,7 @@ impl WorkerSetAuthority {
 
     /// CONTROL-plane startup publication for a worker joining the shared set.
     /// Idempotent for retries; packet producers only observe the resulting
-    /// generation through `try_route`.
+    /// generation through `authoritative_route`.
     pub(crate) fn add_worker(&self, worker: u32) {
         let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
         if live.insert(worker) {
@@ -1571,21 +1579,21 @@ impl WorkerSetAuthority {
         self.generation.load(Ordering::Acquire)
     }
 
-    pub(crate) fn try_is_authoritative(&self) -> Result<bool, ()> {
+    /// #16495: blocking authoritative route for admission. Returns
+    /// `None` only when no set is published or the live set is empty
+    /// (genuine E28); lock contention waits out the bounded CONTROL
+    /// hold (a `BTreeSet` replace/insert/contains) instead of refusing
+    /// an admissible frame as EVALUATOR_UNAVAILABLE.
+    pub(crate) fn authoritative_route(&self, flow_tag: u64) -> Option<u32> {
         if self.published.load(Ordering::Acquire) == 0 {
-            return Ok(false);
+            return None;
         }
-        let live = self.live.try_lock().map_err(|_| ())?;
-        Ok(!live.is_empty())
-    }
-
-    pub(crate) fn try_route(&self, flow_tag: u64) -> Result<Option<u32>, ()> {
-        let live = self.live.try_lock().map_err(|_| ())?;
+        let live = self.live.lock().unwrap_or_else(|e| e.into_inner());
         if live.is_empty() {
-            return Ok(None);
+            return None;
         }
         let idx = (flow_tag % live.len() as u64) as usize;
-        Ok(live.iter().nth(idx).copied())
+        live.iter().nth(idx).copied()
     }
 
     pub(crate) fn is_authoritative(&self) -> bool {
@@ -1644,26 +1652,26 @@ impl IpsecInnerRouter {
         }
     }
 
-    /// Admit one frame for routing without waiting on authority or inflight
-    /// locks. Contention is an E23/E28 refusal; callers must release the
-    /// acquired slab when this returns `Err`.
+    /// #16495: admit one frame for routing. Authority and in-flight
+    /// contention wait out bounded holds instead of refusing: the
+    /// authority hold is a short CONTROL `BTreeSet` operation, and the
+    /// in-flight hold is an O(1) entry update in `admit`/`release`.
+    /// Only genuine reasons refuse: no published/live worker
+    /// (EVALUATOR_UNAVAILABLE) or the per-flow in-flight bound
+    /// (WORKER_QUEUE_FULL, the sole E23 increment in `admit`).
+    /// Callers must release the acquired slab when this returns `Err`.
     pub(crate) fn admit(
         &self,
         authority: &WorkerSetAuthority,
         flow_tag: u64,
     ) -> Result<u32, u8> {
-        match authority.try_is_authoritative() {
-            Ok(true) => {}
-            Ok(false) | Err(()) => return Err(reason::EVALUATOR_UNAVAILABLE),
-        }
-        let worker = match authority.try_route(flow_tag) {
-            Ok(Some(worker)) => worker,
-            Ok(None) | Err(()) => return Err(reason::EVALUATOR_UNAVAILABLE),
+        let Some(worker) = authority.authoritative_route(flow_tag) else {
+            return Err(reason::EVALUATOR_UNAVAILABLE);
         };
-        let Ok(mut inflight) = self.inflight_by_flow.try_lock() else {
-            IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.fetch_add(1, Ordering::Relaxed);
-            return Err(reason::WORKER_QUEUE_FULL);
-        };
+        let mut inflight = self
+            .inflight_by_flow
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let count = inflight.entry(flow_tag).or_insert(0);
         if *count >= IPSEC_INNER_MAX_INFLIGHT_PER_FLOW {
             IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -1734,7 +1742,9 @@ struct ActiveIpsecDescriptor {
 
 /// Fixed-capacity tombstone table shared by the socket producer, worker
 /// completion drain, and worker-death reaper. Its backing Vec is allocated at
-/// construction; admission uses try_lock and never grows it on the hot path.
+/// construction and never grows on the hot path. #16495: admission takes a
+/// blocking lock; competing `complete`/`claim_stale` holds are bounded
+/// O(cap) scans, so contention must not refuse as LEASE_EPOCH.
 struct IpsecInnerTombstones {
     entries: Mutex<Vec<(u64, RequestTombstone)>>,
 }
@@ -1746,10 +1756,8 @@ impl IpsecInnerTombstones {
         }
     }
 
-    fn try_insert(&self, request_id: u64, generation: u64) -> bool {
-        let Ok(mut entries) = self.entries.try_lock() else {
-            return false;
-        };
+    fn insert(&self, request_id: u64, generation: u64) -> bool {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         if request_id == 0
             || entries.iter().any(|(existing, _)| *existing == request_id)
             || entries.len() == IPSEC_INNER_SLAB_CAP
@@ -1967,7 +1975,10 @@ impl IpsecInnerWorkerTransport {
     /// the per-flow reservation. #15151: a missing queue in the lock-free
     /// snapshot or per-queue lock contention is BUSY (distinct retryable
     /// reason, BUSY counter), never WORKER_QUEUE_FULL; only genuine depth
-    /// exhaustion / closed queues count FULL.
+    /// exhaustion / closed queues count FULL. #16495: router, worker-set
+    /// authority and tombstone contention no longer refuse at all (blocking
+    /// bounded holds); LEASE_EPOCH now means only a genuine duplicate /
+    /// zero / at-cap tombstone insert.
     pub(crate) fn admit_descriptor(&self, desc: IpsecInnerDescriptor) -> Result<u32, u8> {
         let generation = self.authority.generation();
         if generation == 0 {
@@ -1987,7 +1998,7 @@ impl IpsecInnerWorkerTransport {
         };
         if !self
             .tombstones
-            .try_insert(desc.request_id, desc.worker_set_generation)
+            .insert(desc.request_id, desc.worker_set_generation)
         {
             self.router.release(desc.flow_tag);
             self.pool.force_release(desc.slab_id);
@@ -3420,5 +3431,148 @@ mod tests {
         for _ in 0..16 {
             assert_eq!(authority.route(12345), Some(a), "same flow same worker");
         }
+    }
+
+    // #16495 (R3-B12-01): deterministic contention cells. Each holds the
+    // competing lock from another thread and requires admission to wait
+    // and then succeed — pre-fix each returned 47/52/50 respectively.
+    // The admit runs on a spawned thread so a still-try_lock build fails
+    // (wrong reason) instead of deadlocking, and a regression to
+    // refusing is caught by the exact reason/counter assertions.
+    #[test]
+    fn contended_inflight_admits_not_full_16495() {
+        let transport = std::sync::Arc::new(IpsecInnerWorkerTransport::new([0]));
+        let pool = transport.pool().clone();
+        let generation = transport.authority().generation();
+        let before_full = IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.load(Ordering::Relaxed);
+        // Positive control: uncontended admit works.
+        let ctl_id = pool.acquire().expect("control slab");
+        let mut ctl = test_desc(164_950, ctl_id);
+        ctl.worker_set_generation = generation;
+        assert_eq!(transport.admit_descriptor(ctl), Ok(0));
+        // Hold inflight_by_flow on another thread across the admit.
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let transport = transport.clone();
+            std::thread::spawn(move || {
+                let _guard = transport
+                    .router
+                    .inflight_by_flow
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let _ = held_tx.send(());
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            })
+        };
+        held_rx.recv().expect("holder holds inflight lock");
+        let slab_id = pool.acquire().expect("slab");
+        let mut desc = test_desc(164_951, slab_id);
+        desc.worker_set_generation = generation;
+        let desc_flow = desc.flow_tag;
+        let result = {
+            let transport = transport.clone();
+            std::thread::spawn(move || transport.admit_descriptor(desc))
+                .join()
+                .expect("admit thread")
+        };
+        holder.join().expect("holder thread");
+        assert_eq!(result, Ok(0), "contended inflight must admit, not FULL");
+        assert_eq!(
+            IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.load(Ordering::Relaxed) - before_full,
+            0,
+            "E23 must not move on inflight contention"
+        );
+        let _ = desc_flow;
+        assert_eq!(pool.free_count(), IPSEC_INNER_SLAB_CAP - 2);
+    }
+
+    #[test]
+    fn contended_authority_admits_not_shutdown_16495() {
+        let transport = std::sync::Arc::new(IpsecInnerWorkerTransport::new([0]));
+        let pool = transport.pool().clone();
+        let generation = transport.authority().generation();
+        let ctl_id = pool.acquire().expect("control slab");
+        let mut ctl = test_desc(164_952, ctl_id);
+        ctl.worker_set_generation = generation;
+        assert_eq!(transport.admit_descriptor(ctl), Ok(0));
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let transport = transport.clone();
+            std::thread::spawn(move || {
+                let _guard = transport
+                    .authority()
+                    .live
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let _ = held_tx.send(());
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            })
+        };
+        held_rx.recv().expect("holder holds authority lock");
+        let slab_id = pool.acquire().expect("slab");
+        let mut desc = test_desc(164_953, slab_id);
+        desc.worker_set_generation = generation;
+        let result = {
+            let transport = transport.clone();
+            std::thread::spawn(move || transport.admit_descriptor(desc))
+                .join()
+                .expect("admit thread")
+        };
+        holder.join().expect("holder thread");
+        assert_eq!(
+            result,
+            Ok(0),
+            "contended authority must admit, not EVALUATOR_UNAVAILABLE"
+        );
+        assert_eq!(pool.free_count(), IPSEC_INNER_SLAB_CAP - 2);
+    }
+
+    #[test]
+    fn contended_tombstone_admits_not_bad_lease_16495() {
+        let transport = std::sync::Arc::new(IpsecInnerWorkerTransport::new([0]));
+        let pool = transport.pool().clone();
+        let generation = transport.authority().generation();
+        let ctl_id = pool.acquire().expect("control slab");
+        let mut ctl = test_desc(164_954, ctl_id);
+        ctl.worker_set_generation = generation;
+        assert_eq!(transport.admit_descriptor(ctl), Ok(0));
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let transport = transport.clone();
+            std::thread::spawn(move || {
+                let _guard = transport
+                    .tombstones
+                    .entries
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let _ = held_tx.send(());
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            })
+        };
+        held_rx.recv().expect("holder holds tombstone lock");
+        let slab_id = pool.acquire().expect("slab");
+        let mut desc = test_desc(164_955, slab_id);
+        desc.worker_set_generation = generation;
+        let result = {
+            let transport = transport.clone();
+            std::thread::spawn(move || transport.admit_descriptor(desc))
+                .join()
+                .expect("admit thread")
+        };
+        holder.join().expect("holder thread");
+        assert_eq!(
+            result,
+            Ok(0),
+            "contended tombstone must admit, not LEASE_EPOCH"
+        );
+        // Genuine duplicate still refuses LEASE_EPOCH (control).
+        let dup_id = pool.acquire().expect("dup slab");
+        let mut dup = test_desc(164_955, dup_id);
+        dup.worker_set_generation = generation;
+        assert_eq!(
+            transport.admit_descriptor(dup),
+            Err(reason::LEASE_EPOCH),
+            "duplicate request_id remains a genuine LEASE_EPOCH refusal"
+        );
     }
 }

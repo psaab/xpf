@@ -22,6 +22,13 @@ xpf (0.0.0) unstable; urgency=medium
     worst case), and scratch-pinning-selftest replaces its modelled
     71-byte path check with the executed scripts/sunpath-canary
     bind, required to pass under /wtgt and fail under a long root.
+  * Userspace DP: stop refusing admissible D11 IPsec-inner frames on
+    lock contention (#16495). Router in-flight, worker-set authority
+    and tombstone admission took try_lock and refused as
+    WORKER_QUEUE_FULL / EVALUATOR_UNAVAILABLE / LEASE_EPOCH (mapped to
+    ADMIT_FULL / ADMIT_SHUTDOWN / ADMIT_BAD_LEASE drops and a false
+    attestation FAIL); they now take blocking locks with bounded holds,
+    so E23 moves only at genuine queue/per-flow capacity.
   * API/daemon: surface journal legacy-scrub degradation on /health
     and Prometheus (#16490). The #15143 `JournalLegacyScrubDegraded`
     flag latched when a pre-#1896 journal segment could not be
