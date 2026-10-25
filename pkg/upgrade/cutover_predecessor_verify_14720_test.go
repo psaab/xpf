@@ -69,6 +69,38 @@ func stagePredecessor14720(t *testing.T, r *Runner, cfg Config, fs *fakeSystem, 
 	return genid
 }
 
+// predecessorDBSnap14720 returns the .<ver>.dbsnap/active.json bytes.
+func predecessorDBSnap14720(t *testing.T, cfg Config, ver string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(cfg.VersionsDir, "."+ver+".dbsnap", "active.json"))
+	if err != nil {
+		t.Fatalf("read .%s.dbsnap/active.json: %v", ver, err)
+	}
+	return b
+}
+
+// predecessorStampRaw14720 returns the raw committed-stamp bytes.
+func predecessorStampRaw14720(t *testing.T, r *Runner, ver string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(r.committedStampPath(ver))
+	if err != nil {
+		t.Fatalf("read committed stamp %s: %v", ver, err)
+	}
+	return b
+}
+
+// assertNoPredbakLeftover14720 proves no .predbak-* backup tree leaks.
+func assertNoPredbakLeftover14720(t *testing.T, cfg Config) {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(cfg.VersionsDir, ".predbak-*"))
+	if err != nil {
+		t.Fatalf("glob .predbak-*: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf(".predbak-* left behind: %v", matches)
+	}
+}
+
 // assertPredecessorDirSurvives14720 checks the physical rollback artifacts
 // (version dir, binaries, DB snapshot) and the live version survive. It does
 // not check the committed stamp: a changed-byte replacement legitimately
@@ -88,6 +120,16 @@ func assertPredecessorDirSurvives14720(t *testing.T, r *Runner, cfg Config) {
 	}
 	if got := currentTarget(t, cfg); got != "2.0.0" {
 		t.Fatalf("current -> %q, want live 2.0.0 untouched", got)
+	}
+}
+
+// assertPredecessorSnapshotContent14720 requires the predecessor's
+// .dbsnap/active.json to be byte-identical to want (#16765: PREFLIGHT
+// must not have replaced it with the live DB's content).
+func assertPredecessorSnapshotContent14720(t *testing.T, cfg Config, want []byte) {
+	t.Helper()
+	if got := predecessorDBSnap14720(t, cfg, "1.0.0"); string(got) != string(want) {
+		t.Fatalf("predecessor .1.0.0.dbsnap/active.json = %q, want pre-cut content %q", got, want)
 	}
 }
 
@@ -128,7 +170,15 @@ func TestVerifyFailure_PreservesCommittedPredecessor14720(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r, cfg, fs := setupCommittedPredecessor14720(t)
 			before, _ := r.readCommittedStamp("1.0.0")
+			origSnap := predecessorDBSnap14720(t, cfg, "1.0.0")
+			origStamp := predecessorStampRaw14720(t, r, "1.0.0")
 			stagePredecessor14720(t, r, cfg, fs, tc.identical)
+			// Distinctive live-DB marker: PREFLIGHT snapshots the live DB
+			// into .1.0.0.dbsnap; without the #16765 fix the marker lands
+			// in the predecessor's rollback snapshot.
+			const liveMarker = "{\"marker\":\"LIVE-2.0.0-ERA-DB\"}"
+			mkfile(t, filepath.Join(cfg.ConfigDBDir, "active.json"),
+				"#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n"+liveMarker)
 			fs.verifyPass = false
 			fs.calls = nil
 
@@ -136,8 +186,13 @@ func TestVerifyFailure_PreservesCommittedPredecessor14720(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "verify-dataplane") {
 				t.Fatalf("Run error = %v, want verify-dataplane failure", err)
 			}
+			assertPredecessorSnapshotContent14720(t, cfg, origSnap)
+			assertNoPredbakLeftover14720(t, cfg)
 			if tc.identical {
 				assertPredecessorSurvives14720(t, r, cfg, before)
+				if got := predecessorStampRaw14720(t, r, "1.0.0"); string(got) != string(origStamp) {
+					t.Fatalf("predecessor stamp bytes = %q, want %q", got, origStamp)
+				}
 			} else {
 				assertPredecessorDirSurvives14720(t, r, cfg)
 				stamp, present := r.readCommittedStamp("1.0.0")
@@ -155,10 +210,14 @@ func TestVerifyFailure_PreservesCommittedPredecessor14720(t *testing.T) {
 func TestVerifyFailure_SameGenerationReusePreservesPredecessor14720(t *testing.T) {
 	r, cfg, fs := setupCommittedPredecessor14720(t)
 	before, _ := r.readCommittedStamp("1.0.0")
+	origSnap := predecessorDBSnap14720(t, cfg, "1.0.0")
 	genid := stagePredecessor14720(t, r, cfg, fs, true)
 	// Falsify the installed .srcgen so COPY takes the same-generation resume
 	// path (mirrors stageDowngradeTarget12177).
 	mkfile(t, r.srcGenPath("1.0.0"), genid+"\n")
+	const liveMarker = "{\"marker\":\"LIVE-2.0.0-ERA-DB\"}"
+	mkfile(t, filepath.Join(cfg.ConfigDBDir, "active.json"),
+		"#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n"+liveMarker)
 	fs.verifyPass = false
 	fs.calls = nil
 
@@ -167,6 +226,8 @@ func TestVerifyFailure_SameGenerationReusePreservesPredecessor14720(t *testing.T
 		t.Fatalf("Run error = %v, want verify-dataplane failure", err)
 	}
 	assertPredecessorSurvives14720(t, r, cfg, before)
+	assertPredecessorSnapshotContent14720(t, cfg, origSnap)
+	assertNoPredbakLeftover14720(t, cfg)
 }
 
 // TestStartFailure_PredecessorDirSurvives14720 covers the FLIP/START arm:
@@ -187,6 +248,14 @@ func TestStartFailure_PredecessorDirSurvives14720(t *testing.T) {
 		t.Fatalf("Run error = %v, want failed target auto-rollback to 2.0.0", err)
 	}
 	assertPredecessorDirSurvives14720(t, r, cfg)
+	// #16765: the cut-boundary snapshot this cut took for the re-staged
+	// predecessor (live-DB content) is what the auto-rollback restored;
+	// the predecessor's own .1.0.0.dbsnap was stashed pre-COPY and must
+	// not be adopted as the rollback source. Assert it still survives as
+	// a file; content equality is NOT required here (the auto-rollback
+	// consumed the cut's snapshot) — content is asserted on the pre-STOP
+	// and verify arms where no rollback runs.
+	assertNoPredbakLeftover14720(t, cfg)
 	stamp, present := r.readCommittedStamp("1.0.0")
 	if !present || stamp == nil || stamp.Committed {
 		t.Fatalf("start-failed predecessor stamp = (%+v,present=%v), want non-committed", stamp, present)

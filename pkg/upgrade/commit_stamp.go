@@ -103,7 +103,11 @@ func (r *Runner) committedPredecessorStamp(j *Journal, target string) *committed
 
 // predecessorStampBackup captures a committed predecessor's stamp file and
 // DB snapshot so a failed recopy can restore them. A nil field means the
-// corresponding artifact did not exist when the backup was taken.
+// corresponding artifact did not exist when the backup was taken. The
+// backup must be taken BEFORE PREFLIGHT (and before any resume or
+// cut-boundary re-snapshot): each of those rewrites .<target>.dbsnap from
+// the live DB, so a backup taken afterwards would preserve the wrong-era
+// DB (#16765).
 type predecessorStampBackup struct {
 	version   string
 	stampData []byte
@@ -114,6 +118,11 @@ type predecessorStampBackup struct {
 	// longer describes the bytes on disk, so a later failure must NOT
 	// resurrect it (#12177 demotion survives; #14720 Case C).
 	demotedByReplacement bool
+	// stashImmune is set on a backup taken before PREFLIGHT: any
+	// snapshotConfigDB call during the run may stash and adopt this backup
+	// in place of the wrong-era .<target>.dbsnap it just wrote in
+	// applySnapshotStash. A COPY-demoted backup is never stashed (#12177).
+	stashImmune bool
 }
 
 // backupCommittedPredecessor preserves the committed stamp bytes and the
@@ -147,28 +156,78 @@ func (r *Runner) backupCommittedPredecessor(j *Journal, target string) *predeces
 	return b
 }
 
+// discardPredecessorBackup removes the temporary backup copy without
+// restoring it. Called on every Run exit that does not restore (COMMIT,
+// copy-stage failures, pre-STOP refusals past the backup's scope) so a
+// .predbak-* tree is never left behind in VersionsDir.
+func (r *Runner) discardPredecessorBackup(b *predecessorStampBackup) {
+	if b == nil || b.backupDir == "" {
+		return
+	}
+	_ = os.RemoveAll(b.backupDir)
+	b.backupDir = ""
+	b.dbsnapDir = ""
+}
+
+// discardAdoptedSnapshotDir clears dbsnapDir WITHOUT touching backupDir:
+// after applySnapshotStash installs the backup copy at .<ver>.dbsnap,
+// dbsnapDir keeps aliasing that live path while backupDir still names the
+// private copy. A later unconditional restore must first drop the alias
+// (it would otherwise copyTree the live dir onto itself); the private
+// copy in backupDir remains the source of truth.
+func (b *predecessorStampBackup) discardAdoptedSnapshotDir() {
+	b.dbsnapDir = ""
+}
+
+// applySnapshotStash replaces a just-written config-DB snapshot with the
+// backed-up predecessor snapshot, so the journal's DBSnapshotPath keeps
+// pointing at the canonical .<target>.dbsnap while its CONTENT stays the
+// pre-cut (pre-PREFLIGHT) bytes. Called from snapshotConfigDB whenever this
+// run is re-staging the committed predecessor. The backup's private copy
+// is RETAINED (backupDir) so a later unconditional restore on a failure arm
+// can still reinstall it; dbsnapDir is repointed at the canonical snapshot
+// so the restore's copy source and the journal agree. A copy failure is
+// logged and leaves the just-written snapshot in place — the failure-arm
+// restore will overwrite it.
+func (r *Runner) applySnapshotStash(b *predecessorStampBackup, snapDir string) {
+	if b == nil || b.backupDir == "" || b.demotedByReplacement {
+		return
+	}
+	src := filepath.Join(b.backupDir, "dbsnap")
+	if _, err := os.Stat(src); err != nil {
+		return
+	}
+	_ = os.RemoveAll(snapDir)
+	if _, err := copyTree(src, snapDir); err != nil {
+		r.logf("upgrade: WARN stash committed predecessor %s snapshot: %v", b.version, err)
+		return
+	}
+	if serr := partialSweepSyncDir(r.cfg.VersionsDir); serr != nil {
+		r.logf("upgrade: WARN fsync versions dir after predecessor snapshot stash: %v", serr)
+	}
+	b.dbsnapDir = snapDir
+}
+
 // restoreCommittedPredecessorBackup restores the backed-up committed stamp
-// (and DB snapshot, when the live one is gone) after a failed recopy of the
-// predecessor. A backup whose bytes were replaced (demotedByReplacement) is
-// never restored: the old committed history does not describe the
-// replacement bytes. Best-effort: failures are logged, never masking the
-// cut error that triggered restore.
+// and DB snapshot after a failed recopy of the predecessor. The snapshot
+// is restored UNCONDITIONALLY (#16765): PREFLIGHT/resume re-snapshots
+// overwrite it with the live DB's content, so an existence-only check
+// would keep the wrong-era copy. Restoring unconditionally replaces
+// whatever this cut wrote with the pre-cut bytes; when the backup has no
+// snapshot (none existed at backup time) a snapshot written by this cut
+// for the predecessor's version is removed. A backup whose bytes were
+// replaced (demotedByReplacement) is never restored in full: the old
+// committed history does not describe the replacement bytes (#12177),
+// but the snapshot is still restored unconditionally — demotion is about
+// stamp candidacy, not DB-snapshot ownership, and the wrong-era snapshot
+// was written by this cut, not by the replacement. Best-effort: failures
+// are logged, never masking the cut error that triggered restore.
 func (r *Runner) restoreCommittedPredecessorBackup(b *predecessorStampBackup) {
 	if b == nil || b.version == "" {
 		return
 	}
-	if b.demotedByReplacement {
-		if b.backupDir != "" {
-			_ = os.RemoveAll(b.backupDir)
-		}
-		return
-	}
-	defer func() {
-		if b.backupDir != "" {
-			_ = os.RemoveAll(b.backupDir)
-		}
-	}()
-	if len(b.stampData) > 0 {
+	defer r.discardPredecessorBackup(b)
+	if !b.demotedByReplacement && len(b.stampData) > 0 {
 		if _, err := os.Stat(r.versionDir(b.version)); err == nil {
 			var stamp committedStamp
 			if err := json.Unmarshal(b.stampData, &stamp); err == nil {
@@ -178,15 +237,26 @@ func (r *Runner) restoreCommittedPredecessorBackup(b *predecessorStampBackup) {
 			}
 		}
 	}
-	if b.dbsnapDir != "" {
-		snap := filepath.Join(r.cfg.VersionsDir, "."+b.version+".dbsnap")
-		if _, err := os.Stat(snap); os.IsNotExist(err) {
-			if _, err := copyTree(b.dbsnapDir, snap); err != nil {
+	snap := filepath.Join(r.cfg.VersionsDir, "."+b.version+".dbsnap")
+	if b.dbsnapDir != "" || b.backupDir != "" {
+		// The private copy under backupDir is the source of truth.
+		// dbsnapDir may alias the live .<ver>.dbsnap after a stash, so it
+		// must not be copied onto itself; discard that alias first.
+		b.discardAdoptedSnapshotDir()
+		src := filepath.Join(b.backupDir, "dbsnap")
+		if _, err := os.Stat(src); err == nil {
+			_ = os.RemoveAll(snap)
+			if _, err := copyTree(src, snap); err != nil {
 				r.logf("upgrade: WARN restore committed predecessor %s snapshot: %v", b.version, err)
 			} else if serr := partialSweepSyncDir(r.cfg.VersionsDir); serr != nil {
 				r.logf("upgrade: WARN fsync versions dir after predecessor snapshot restore: %v", serr)
 			}
 		}
+	} else {
+		// No snapshot existed when the backup was taken: drop any
+		// wrong-era snapshot this cut's PREFLIGHT wrote for the
+		// predecessor's version (#16765).
+		_ = os.RemoveAll(snap)
 	}
 }
 
