@@ -9,6 +9,7 @@ func TestChassisCluster(t *testing.T) {
 	input := `chassis {
     cluster {
         authentication-key test-cluster-psk-6611;
+        no-private-rg-election;
         reth-count 5;
         redundancy-group 0 {
             node 0 priority 100;
@@ -70,7 +71,7 @@ func TestChassisCluster(t *testing.T) {
 }
 
 func TestChassisClusterSetSyntax(t *testing.T) {
-	commands := []string{"set chassis cluster authentication-key test-cluster-psk-6611", "set chassis cluster reth-count 3", "set chassis cluster redundancy-group 0 node 0 priority 100", "set chassis cluster redundancy-group 0 node 1 priority 50", "set chassis cluster redundancy-group 1 node 0 priority 200", "set chassis cluster redundancy-group 1 gratuitous-arp-count 16"}
+	commands := []string{"set chassis cluster authentication-key test-cluster-psk-6611", "set chassis cluster no-private-rg-election", "set chassis cluster reth-count 3", "set chassis cluster redundancy-group 0 node 0 priority 100", "set chassis cluster redundancy-group 0 node 1 priority 50", "set chassis cluster redundancy-group 1 node 0 priority 200", "set chassis cluster redundancy-group 1 gratuitous-arp-count 16"}
 	tree := &ConfigTree{}
 	for _, cmd := range commands {
 		path, err := ParseSetCommand(cmd)
@@ -111,6 +112,7 @@ func TestChassisClusterExtendedFields(t *testing.T) {
 	input := `chassis {
     cluster {
         authentication-key test-cluster-psk-6611;
+        no-private-rg-election;
         cluster-id 1;
         node 0;
         heartbeat-interval 500;
@@ -176,7 +178,7 @@ func TestChassisClusterExtendedFields(t *testing.T) {
 }
 
 func TestChassisClusterExtendedFieldsSet(t *testing.T) {
-	commands := []string{"set chassis cluster authentication-key test-cluster-psk-6611", "set chassis cluster cluster-id 1", "set chassis cluster node 0", "set chassis cluster heartbeat-interval 500", "set chassis cluster heartbeat-threshold 5", "set chassis cluster reth-count 2", "set chassis cluster redundancy-group 0 node 0 priority 200", "set chassis cluster redundancy-group 0 node 1 priority 100", "set chassis cluster redundancy-group 1 node 0 priority 200", "set chassis cluster redundancy-group 1 node 1 priority 100", "set chassis cluster redundancy-group 1 preempt", "set chassis cluster redundancy-group 1 gratuitous-arp-count 4"}
+	commands := []string{"set chassis cluster authentication-key test-cluster-psk-6611", "set chassis cluster no-private-rg-election", "set chassis cluster cluster-id 1", "set chassis cluster node 0", "set chassis cluster heartbeat-interval 500", "set chassis cluster heartbeat-threshold 5", "set chassis cluster reth-count 2", "set chassis cluster redundancy-group 0 node 0 priority 200", "set chassis cluster redundancy-group 0 node 1 priority 100", "set chassis cluster redundancy-group 1 node 0 priority 200", "set chassis cluster redundancy-group 1 node 1 priority 100", "set chassis cluster redundancy-group 1 preempt", "set chassis cluster redundancy-group 1 gratuitous-arp-count 4"}
 	tree := &ConfigTree{}
 	for _, cmd := range commands {
 		path, err := ParseSetCommand(cmd)
@@ -230,7 +232,7 @@ func TestChassisClusterExtendedFieldsSet(t *testing.T) {
 }
 
 func TestChassisClusterSyncOptions(t *testing.T) {
-	commands := []string{"set chassis cluster authentication-key test-cluster-psk-6611", "set chassis cluster cluster-id 1", "set chassis cluster node 0", "set chassis cluster configuration-synchronize", "set chassis cluster redundancy-group 0 node 0 priority 200", "set chassis cluster redundancy-group 0 node 1 priority 100", "set chassis cluster nat-state-synchronization", "set chassis cluster ipsec-session-synchronization", "set chassis cluster dhcp-lease-synchronization"}
+	commands := []string{"set chassis cluster authentication-key test-cluster-psk-6611", "set chassis cluster no-private-rg-election", "set chassis cluster cluster-id 1", "set chassis cluster node 0", "set chassis cluster configuration-synchronize", "set chassis cluster redundancy-group 0 node 0 priority 200", "set chassis cluster redundancy-group 0 node 1 priority 100", "set chassis cluster nat-state-synchronization", "set chassis cluster ipsec-session-synchronization", "set chassis cluster dhcp-lease-synchronization"}
 	tree := &ConfigTree{}
 	for _, cmd := range commands {
 		path, err := ParseSetCommand(cmd)
@@ -267,6 +269,7 @@ func TestChassisClusterSyncOptionsHierarchical(t *testing.T) {
 	input := `chassis {
     cluster {
         authentication-key test-cluster-psk-6611;
+        no-private-rg-election;
         cluster-id 1;
         node 0;
         configuration-synchronize;
@@ -474,6 +477,7 @@ func TestChassisClusterPeerFencingDefault(t *testing.T) {
 	input := `chassis {
     cluster {
         authentication-key test-cluster-psk-6611;
+        no-private-rg-election;
         cluster-id 1;
     }
 }`
@@ -497,6 +501,7 @@ func TestChassisClusterIPMonitoring(t *testing.T) {
 	input := `chassis {
     cluster {
         authentication-key test-cluster-psk-6611;
+        no-private-rg-election;
         cluster-id 1;
         node 0;
         redundancy-group 0 {
@@ -554,7 +559,7 @@ func TestChassisClusterIPMonitoring(t *testing.T) {
 }
 
 func TestChassisClusterIPMonitoringSetSyntax(t *testing.T) {
-	commands := []string{"set chassis cluster authentication-key test-cluster-psk-6611", "set chassis cluster cluster-id 1", "set chassis cluster node 0", "set chassis cluster redundancy-group 0 node 0 priority 200", "set chassis cluster redundancy-group 0 ip-monitoring global-weight 255", "set chassis cluster redundancy-group 0 ip-monitoring global-threshold 200", "set chassis cluster redundancy-group 0 ip-monitoring family inet 10.0.1.1 weight 100", "set chassis cluster redundancy-group 0 ip-monitoring family inet 10.0.2.1 weight 80"}
+	commands := []string{"set chassis cluster authentication-key test-cluster-psk-6611", "set chassis cluster no-private-rg-election", "set chassis cluster cluster-id 1", "set chassis cluster node 0", "set chassis cluster redundancy-group 0 node 0 priority 200", "set chassis cluster redundancy-group 0 ip-monitoring global-weight 255", "set chassis cluster redundancy-group 0 ip-monitoring global-threshold 200", "set chassis cluster redundancy-group 0 ip-monitoring family inet 10.0.1.1 weight 100", "set chassis cluster redundancy-group 0 ip-monitoring family inet 10.0.2.1 weight 80"}
 	tree := &ConfigTree{}
 	for _, cmd := range commands {
 		path, err := ParseSetCommand(cmd)
@@ -603,6 +608,7 @@ func TestStrictVIPOwnershipHierarchical(t *testing.T) {
 	input := `chassis {
     cluster {
         authentication-key test-cluster-psk-6611;
+        no-private-rg-election;
         cluster-id 1;
         reth-count 2;
         redundancy-group 0 {
@@ -641,7 +647,7 @@ func TestStrictVIPOwnershipHierarchical(t *testing.T) {
 }
 
 func TestStrictVIPOwnershipSetSyntax(t *testing.T) {
-	commands := []string{"set chassis cluster authentication-key test-cluster-psk-6611", "set chassis cluster cluster-id 1", "set chassis cluster reth-count 2", "set chassis cluster redundancy-group 0 node 0 priority 200", "set chassis cluster redundancy-group 0 node 1 priority 100", "set chassis cluster redundancy-group 1 node 0 priority 200", "set chassis cluster redundancy-group 1 node 1 priority 100", "set chassis cluster redundancy-group 1 strict-vip-ownership"}
+	commands := []string{"set chassis cluster authentication-key test-cluster-psk-6611", "set chassis cluster no-private-rg-election", "set chassis cluster cluster-id 1", "set chassis cluster reth-count 2", "set chassis cluster redundancy-group 0 node 0 priority 200", "set chassis cluster redundancy-group 0 node 1 priority 100", "set chassis cluster redundancy-group 1 node 0 priority 200", "set chassis cluster redundancy-group 1 node 1 priority 100", "set chassis cluster redundancy-group 1 strict-vip-ownership"}
 	tree := &ConfigTree{}
 	for _, cmd := range commands {
 		path, err := ParseSetCommand(cmd)
@@ -674,6 +680,7 @@ func TestStrictVIPOwnershipSetSyntax(t *testing.T) {
 func TestAllowDegradedRoutingTakeoverSetSyntax(t *testing.T) {
 	commands := []string{
 		"set chassis cluster authentication-key test-cluster-psk-6611",
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster reth-count 2",
 		"set chassis cluster redundancy-group 1 allow-degraded-routing-takeover",
@@ -721,6 +728,7 @@ func TestStrictVIPOwnershipDefaultFalse(t *testing.T) {
 	input := `chassis {
     cluster {
         authentication-key test-cluster-psk-6611;
+        no-private-rg-election;
         redundancy-group 1 {
             node 0 priority 200;
         }

@@ -116,6 +116,7 @@ func TestUserspaceMTUTaggedRETHParentRejected16244(t *testing.T) {
 	tree := flatTreeFromSets(t,
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster authentication-key aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 		"set chassis cluster redundancy-group 1 node 1 priority 100",
 		"set interfaces ge-0/0/2 gigether-options redundant-parent reth0",

@@ -42,6 +42,7 @@ func TestDuplicateDHCPGroupInterfaceIsRefusedAtCommit15028(t *testing.T) {
 		"set chassis cluster authentication-key test-cluster-psk-15028",
 		"set chassis cluster node 0",
 		"set chassis cluster reth-count 2",
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 		"set chassis cluster redundancy-group 1 node 1 priority 100",
 		"set interfaces ge-0/0/1 gigether-options redundant-parent reth1",
@@ -155,6 +156,7 @@ func TestDuplicateDHCPGroupInterfaceLenientGate15028(t *testing.T) {
 		[]string{
 			"set chassis cluster authentication-key test-cluster-psk-15028",
 			"set chassis cluster reth-count 2",
+			"set chassis cluster no-private-rg-election",
 			"set chassis cluster redundancy-group 1 node 0 priority 200",
 			"set chassis cluster redundancy-group 1 node 1 priority 100",
 			"set interfaces ge-0/0/1 gigether-options redundant-parent reth1",

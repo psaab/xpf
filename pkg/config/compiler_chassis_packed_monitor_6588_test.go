@@ -40,6 +40,7 @@ func packedMonitorConfig(rgBody string) string {
     cluster {
         authentication-key test-cluster-psk-6588;
         cluster-id 1;
+        no-private-rg-election;
         redundancy-group 1 {
             node 0 priority 200;
 ` + rgBody + `
@@ -96,6 +97,7 @@ func TestChassisInterfaceMonitorAllThreeSpellings_6588(t *testing.T) {
 		tree := buildTree(t, []string{
 			"set chassis cluster cluster-id 1",
 			"set chassis cluster authentication-key test-cluster-psk-6588",
+			"set chassis cluster no-private-rg-election",
 			"set chassis cluster redundancy-group 1 node 0 priority 200",
 			"set chassis cluster redundancy-group 1 interface-monitor ge-0/0/0 weight 255",
 		})
@@ -350,6 +352,7 @@ func flatMonitorTree(t *testing.T, extra ...string) *ConfigTree {
 	return buildTree(t, append([]string{
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster authentication-key test-cluster-psk-6588",
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 	}, extra...))
 }
@@ -472,6 +475,7 @@ func TestChassisInterfaceMonitorBracketList_6588(t *testing.T) {
 
 	t.Run("FlatSet", func(t *testing.T) {
 		cfg, err := CompileConfig(flatMonitorTree(t,
+			"set chassis cluster no-private-rg-election",
 			"set chassis cluster redundancy-group 1 interface-monitor [ ge-0/0/0 ge-0/0/1 ge-0/0/2 ]"))
 		if err != nil {
 			t.Fatalf("compile: %v", err)
@@ -536,6 +540,7 @@ func TestChassisInterfaceMonitorBracketListWeight_6588(t *testing.T) {
 	})
 	t.Run("FlatSetInline", func(t *testing.T) {
 		cfg, err := CompileConfig(flatMonitorTree(t,
+			"set chassis cluster no-private-rg-election",
 			"set chassis cluster redundancy-group 1 interface-monitor [ ge-0/0/0 ge-0/0/1 ] weight 255"))
 		if err != nil {
 			t.Fatalf("compile: %v", err)
@@ -732,6 +737,7 @@ func TestChassisInterfaceMonitorSingleEntryNotSplit_6588(t *testing.T) {
 	})
 	t.Run("FlatSetWithWeight", func(t *testing.T) {
 		cfg, err := CompileConfig(flatMonitorTree(t,
+			"set chassis cluster no-private-rg-election",
 			"set chassis cluster redundancy-group 1 interface-monitor ge-0/0/0 weight 255"))
 		if err != nil {
 			t.Fatalf("compile: %v", err)
@@ -1322,6 +1328,7 @@ func packedRGConfig(clusterBody string) string {
     cluster {
         authentication-key test-cluster-psk-6588;
         cluster-id 1;
+        no-private-rg-election;
 ` + clusterBody + `
     }
 }`

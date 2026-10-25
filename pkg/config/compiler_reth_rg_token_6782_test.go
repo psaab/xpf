@@ -31,6 +31,7 @@ func rethRGSet(tok string, extra ...string) []string {
 		"set chassis cluster cluster-id 1",
 		`set chassis cluster authentication-key "Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiY2Rl"`,
 		"set chassis cluster node 0",
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 		"set chassis cluster redundancy-group 1 node 1 priority 100",
 		"set interfaces reth0 unit 0 family inet address 10.0.61.1/24",
@@ -133,6 +134,7 @@ func TestRethRedundancyGroupValidTokensStillCommit6782(t *testing.T) {
 			} else if tc.want != 1 {
 				// #15199: a valid token must also name a configured group.
 				lines = append(lines,
+					"set chassis cluster no-private-rg-election",
 					"set chassis cluster redundancy-group "+tc.tok+" node 0 priority 200",
 					"set chassis cluster redundancy-group "+tc.tok+" node 1 priority 100")
 			}
@@ -380,6 +382,7 @@ func TestSuppressionIsScopedToTheOffendingReth6782(t *testing.T) {
 		"set chassis cluster cluster-id 1",
 		`set chassis cluster authentication-key "Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiY2Rl"`,
 		"set chassis cluster node 0",
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 		"set chassis cluster redundancy-group 2 node 0 priority 200",
 		// The offender.

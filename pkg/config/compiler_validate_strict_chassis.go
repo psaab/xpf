@@ -413,8 +413,13 @@ func isClusterKeywordName(name string) bool {
 // whose per-RG node priority is out of the VRRP range (#4880), whose RG0 has
 // unsupported `preempt` configured (#10754), whose interface-monitor weight
 // (#6549) or ip-monitoring global-weight / global-threshold / per-target weight
-// (#6588) is out of the [0,255] heartbeat weight domain, or which enables
-// `configuration-synchronize` without redundancy-group 0 (#15040).
+// (#6588) is out of the [0,255] heartbeat weight domain, which enables
+// `configuration-synchronize` without redundancy-group 0 (#15040), or which
+// runs private-RG election (the default) with redundancy groups but without
+// a complete control link (#16746: control-interface and peer-address must
+// both be set, else no heartbeat starts and the cluster has no peer detector
+// — dual-primary when control-interface is absent, permanent no-primary when
+// only peer-address is absent).
 //
 // The heartbeat count byte and per-group id byte are both uint8. There is
 // no schema-level value validation on the `redundancy-group <id>` instance
@@ -482,6 +487,71 @@ func validateChassisClusterStrict(cfg *Config) error {
 				"standby read-only gate; without it a commit succeeds but is never " +
 				"pushed to the peer and both nodes stay writable) — add " +
 				"`redundancy-group 0` or remove `configuration-synchronize`")
+		}
+	}
+
+	// #16746 (R3-A22-02): private-RG election elects over the control
+	// link ONLY — RETH VRRP is suppressed (compiler_chassis.go sets
+	// PrivateRGElection by default) and the heartbeat is the sole peer
+	// detector: daemon startClusterComms starts it only when BOTH
+	// control-interface and peer-address are set. A cluster with
+	// redundancy groups and private-RG election but an incomplete pair
+	// therefore has NO arbitration at all, in two opposite directions:
+	//
+	//   - control-interface empty (no link, or peer-address only): the
+	//     election treats controlInterface=="" as standalone
+	//     ("only node present"), so BOTH nodes elect PRIMARY for every
+	//     RG — dual-primary with duplicate VIPs / RETH MACs / NAT and
+	//     two session-sync owners.
+	//   - control-interface set, peer-address empty: the heartbeat
+	//     never starts, peerConfirmedAbsent is never set, and the
+	//     non-preempt never-seen hold in election.go keeps every RG
+	//     SECONDARY with no timer — permanent no-primary.
+	//
+	// Neither shape can ever elect correctly, so strict commit rejects
+	// it and names the missing leaf plus the escape hatch. Opting out
+	// with no-private-rg-election restores RETH VRRP arbitration and is
+	// legitimate without a control link, so this gate fires only when
+	// PrivateRGElection is in effect; a cluster with no redundancy
+	// groups has no RG to mis-elect and is left alone. The tolerant
+	// load / peer-sync paths downgrade this to a warning via
+	// lenientChassisRG (#1960 no-brick): a config persisted by an older
+	// binary still boots (arm (b) is additionally bounded at runtime
+	// by the Manager-owned never-seen clock, #16751).
+	if cfg.Chassis.Cluster.PrivateRGElection {
+		hasRG := false
+		for _, rg := range cfg.Chassis.Cluster.RedundancyGroups {
+			if rg != nil {
+				hasRG = true
+				break
+			}
+		}
+		if hasRG {
+			cc := cfg.Chassis.Cluster
+			switch {
+			case cc.ControlInterface == "" && cc.PeerAddress == "":
+				return fmt.Errorf("chassis cluster: private-rg-election (the default) elects " +
+					"redundancy-groups over the control link only and suppresses RETH VRRP, " +
+					"but neither control-interface nor peer-address is set, so no heartbeat " +
+					"can start and no peer detector exists — both nodes would elect primary " +
+					"for every redundancy-group (dual-primary with duplicate VIPs) — set " +
+					"`control-interface <if>` and `peer-address <ip>`, or set " +
+					"`no-private-rg-election` to arbitrate with RETH VRRP instead")
+			case cc.ControlInterface == "":
+				return fmt.Errorf("chassis cluster: peer-address is set but control-interface " +
+					"is not — private-rg-election (the default) starts the control-link " +
+					"heartbeat only when both are set, so no peer detector exists and both " +
+					"nodes would elect primary for every redundancy-group (dual-primary " +
+					"with duplicate VIPs) — set `control-interface <if>`, or set " +
+					"`no-private-rg-election` to arbitrate with RETH VRRP instead")
+			case cc.PeerAddress == "":
+				return fmt.Errorf("chassis cluster: control-interface is set but peer-address " +
+					"is not — private-rg-election (the default) starts the control-link " +
+					"heartbeat only when both are set, so peer absence can never be " +
+					"confirmed and every non-preempt redundancy-group would stay secondary " +
+					"forever (no primary) — set `peer-address <ip>`, or set " +
+					"`no-private-rg-election` to arbitrate with RETH VRRP instead")
+			}
 		}
 	}
 

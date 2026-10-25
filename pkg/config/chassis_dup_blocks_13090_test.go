@@ -43,6 +43,7 @@ func TestRGIPMonitoringAccumulatesAcrossFoldedBlocks_13090(t *testing.T) {
 		cluster-id 1;
 		node 0;
 		authentication-key aaaaaaaaaaaaaaaa;
+		no-private-rg-election;
 		redundancy-group 1 {
 			ip-monitoring {
 				global-weight 255;
@@ -92,6 +93,7 @@ func TestRGIPMonitoringTwoStatementsAccumulate_13090(t *testing.T) {
 		cluster-id 1;
 		authentication-key aaaaaaaaaaaaaaaa;
 		node 0;
+		no-private-rg-election;
 		redundancy-group 1 {
 			ip-monitoring {
 				global-weight 255;
@@ -129,6 +131,7 @@ func TestChassisSecondClusterBlockSurvives_13090(t *testing.T) {
 	cluster {
 		heartbeat-interval 500;
 		heartbeat-threshold 3;
+		no-private-rg-election;
 		redundancy-group 1 { node 0 priority 200; }
 	}
 }`)

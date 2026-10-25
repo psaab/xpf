@@ -85,14 +85,17 @@ func TestChassisIdentity5694_ValidCommits(t *testing.T) {
 		// RG 0 is a legitimate id — must NOT be rejected just because 0 is also
 		// the malformed-token default.
 		{"set chassis cluster authentication-key test-cluster-psk-6611",
+			"set chassis cluster no-private-rg-election",
 			"set chassis cluster redundancy-group 0 node 0 priority 100",
 			"set chassis cluster redundancy-group 0 node 1 priority 1"},
 		// Positive RG id + both node ids.
 		{"set chassis cluster authentication-key test-cluster-psk-6611",
+			"set chassis cluster no-private-rg-election",
 			"set chassis cluster redundancy-group 1 node 0 priority 200",
 			"set chassis cluster redundancy-group 1 node 1 priority 100"},
 		// An RG with no per-RG node stanza at all.
 		{"set chassis cluster authentication-key test-cluster-psk-6611",
+			"set chassis cluster no-private-rg-election",
 			"set chassis cluster redundancy-group 2"},
 	}
 	for _, cmds := range cases {
@@ -125,6 +128,7 @@ func TestChassisIdentity5694_PackedOneLinerCovered(t *testing.T) {
 	tree := hierTree(t, `chassis {
     cluster {
         authentication-key test-cluster-psk-6611;
+        no-private-rg-election;
         redundancy-group 1 {
             node foo priority 100;
         }

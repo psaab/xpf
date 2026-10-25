@@ -19,6 +19,9 @@ func rg0SyncLines15040(extra ...string) []string {
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster authentication-key test-cluster-psk-6611",
 		"set chassis cluster configuration-synchronize",
+		// #16746: opt out of private-RG election so the RG0 gate is
+		// the error under test, not the control-link gate.
+		"set chassis cluster no-private-rg-election",
 	}
 	return append(lines, extra...)
 }
@@ -74,6 +77,7 @@ func TestConfigSyncControlsCommit15040(t *testing.T) {
 	tree = buildTree(t, []string{
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster authentication-key test-cluster-psk-6611",
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 		"set chassis cluster redundancy-group 1 node 1 priority 100",
 	})
