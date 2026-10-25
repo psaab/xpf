@@ -1885,9 +1885,15 @@ pub(super) fn encapsulate_native_gre_frame(
                 _ => return None,
             };
             let total_len = u16::try_from(outer_ip_len + gre_len + inner_packet.len()).ok()?;
-            // Copy inner IPv4 DF by default; IPv6 has no DF bit, so its GRE
-            // outer remains DF-set unless the explicit clear knob is enabled.
-            let outer_df = !endpoint.clear_dont_fragment_bit
+            // Copy inner IPv4 DF by default; IPv6 inners force DF except
+            // on the #16512 sub-1280 delivery path, where the outer must
+            // be fragmentable below IPv6 (RFC 8200 §5).
+            let inner_budget = native_gre_inner_mtu(forwarding, decision);
+            let sub1280_v6 = inner_meta.addr_family as i32 == libc::AF_INET6
+                && inner_packet.len() > inner_budget
+                && inner_packet.len() <= 1280;
+            let outer_df = !sub1280_v6
+                && !endpoint.clear_dont_fragment_bit
                 && (inner_meta.addr_family as i32 != libc::AF_INET
                     || inner_packet.get(6).is_some_and(|flags| flags & 0x40 != 0));
             write_ipv4_tunnel_header(

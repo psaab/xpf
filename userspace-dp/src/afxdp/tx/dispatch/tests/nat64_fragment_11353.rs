@@ -353,7 +353,7 @@ fn nat64_icmpv6_nonfirst_fragment_does_not_take_generic_ptb_path_11720() {
 
     let ingress = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
-    let (ptb, mtu_signalled) = compute_forwarded_egress_ptb(
+    let ptb_out = compute_forwarded_egress_ptb(
         &frame,
         request.meta,
         &request.decision,
@@ -364,7 +364,7 @@ fn nat64_icmpv6_nonfirst_fragment_does_not_take_generic_ptb_path_11720() {
         &recent_exceptions,
     );
     assert!(
-        !mtu_signalled && ptb.is_none(),
+        !ptb_out.mtu_signalled && ptb_out.ptb_reply.is_none(),
         "the NAT64 Fragment Header means this ICMPv6 tail must skip generic IPv6 PTB signaling"
     );
 }
@@ -420,7 +420,7 @@ fn nat64_wg_fragment_budget_uses_translated_allowedips_peer_11722() {
     let _rate_limit = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
     let ingress = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
-    let (ptb, mtu_signalled) = compute_forwarded_egress_ptb(
+    let ptb_out = compute_forwarded_egress_ptb(
         &frame,
         request.meta,
         &decision,
@@ -430,8 +430,8 @@ fn nat64_wg_fragment_budget_uses_translated_allowedips_peer_11722() {
         &ingress.identity(),
         &recent_exceptions,
     );
-    assert!(mtu_signalled, "the 1400-byte inner exceeds peer B's MTU");
-    let ptb = ptb.expect("oversized NAT64 inner must emit a Packet Too Big");
+    assert!(ptb_out.mtu_signalled, "the 1400-byte inner exceeds peer B's MTU");
+    let ptb = ptb_out.ptb_reply.expect("oversized NAT64 inner must emit a Packet Too Big");
     let icmp = 14 + 40;
     assert_eq!(ptb[icmp], 2, "ICMPv6 Packet Too Big");
     assert_eq!(
@@ -476,12 +476,12 @@ fn nat64_reverse_df_oversize_still_emits_ipv4_ptb_13943() {
     request.meta.l3_offset = 14;
     let ingress = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
-    let (ptb, mtu_signalled) = compute_forwarded_egress_ptb(
+    let ptb_out = compute_forwarded_egress_ptb(
         &frame, request.meta, &request.decision, &forwarding, true, false,
         &ingress.identity(), &recent_exceptions,
     );
-    assert!(mtu_signalled, "DF-set oversized reply must not be fragmented");
-    let ptb = ptb.expect("DF-set reverse NAT64 must emit IPv4 Fragmentation Needed");
+    assert!(ptb_out.mtu_signalled, "DF-set oversized reply must not be fragmented");
+    let ptb = ptb_out.ptb_reply.expect("DF-set reverse NAT64 must emit IPv4 Fragmentation Needed");
     assert_eq!(ptb[23], PROTO_ICMP);
     assert_eq!(ptb[34], 3);
     assert_eq!(ptb[35], 4);

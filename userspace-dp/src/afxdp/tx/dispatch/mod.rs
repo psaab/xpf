@@ -165,6 +165,17 @@ fn recycle_ingress_frame(ingress_binding: &mut BindingWorker, source_offset: u64
 /// - `mtu_signalled` — `true` when the oversized original MUST be dropped (a
 ///   PTB decision fired, whether or not a reply could be built). A `None`
 ///   `ptb_reply` with `mtu_signalled == true` is the fail-closed silent drop.
+/// #16512: outcome of the egress-MTU decision. `outer_fragments` carries
+/// built outer frames (GRE/WG, already fragmented below IPv6) that the
+/// caller enqueues on the EGRESS binding instead of forwarding the
+/// original; non-empty implies `mtu_signalled == false` (delivery, not
+/// a PTB drop) and `ptb_reply == None`.
+pub(in crate::afxdp) struct EgressPtbOutcome {
+    pub(in crate::afxdp) ptb_reply: Option<Vec<u8>>,
+    pub(in crate::afxdp) mtu_signalled: bool,
+    pub(in crate::afxdp) outer_fragments: Vec<Vec<u8>>,
+}
+
 #[inline]
 pub(in crate::afxdp) fn compute_forwarded_egress_ptb(
     source_frame: &[u8],
@@ -175,7 +186,7 @@ pub(in crate::afxdp) fn compute_forwarded_egress_ptb(
     uses_native_tunnel: bool,
     ingress_ident: &BindingIdentity,
     recent_exceptions: &Arc<Mutex<ExceptionEventRing>>,
-) -> (Option<Vec<u8>>, bool) {
+) -> EgressPtbOutcome {
     compute_forwarded_egress_ptb_with_dynamic(
         source_frame,
         meta,
@@ -199,7 +210,7 @@ pub(in crate::afxdp) fn compute_forwarded_egress_ptb_with_dynamic(
     ingress_ident: &BindingIdentity,
     recent_exceptions: &Arc<Mutex<ExceptionEventRing>>,
     dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
-) -> (Option<Vec<u8>>, bool) {
+) -> EgressPtbOutcome {
     let mut ptb_reply: Option<Vec<u8>> = None;
     let mut mtu_signalled = false;
     let egress_mtu = forwarded_egress_mtu(decision, forwarding);
@@ -333,6 +344,29 @@ pub(in crate::afxdp) fn compute_forwarded_egress_ptb_with_dynamic(
                 None,
                 forwarding,
             );
+        }
+        // #16512: an IPv6 inner in (budget, 1280] on a sub-1280 tunnel
+        // must be DELIVERED by outer fragmentation, never PTB(1280)+drop.
+        let sub1280_tunnel = crate::afxdp::icmp_ptb::ipv6_tunnel_inner_below_link_minimum(
+            meta.addr_family,
+            mtu,
+            uses_native_tunnel,
+        );
+        if sub1280_tunnel && matches!(egress_decision, EgressMtuDecision::EmitPacketTooBig { .. }) {
+            if let Some(fragments) = build_sub1280_tunnel_outer_fragments(
+                source_frame,
+                meta,
+                decision,
+                forwarding,
+                dynamic_neighbors,
+            ) {
+                return EgressPtbOutcome {
+                    ptb_reply: None,
+                    mtu_signalled: false,
+                    outer_fragments: fragments,
+                };
+            }
+            // Fragmentation unavailable: fall through to PTB+drop.
         }
         if let EgressMtuDecision::EmitPacketTooBig { next_hop_mtu } = egress_decision {
             // RFC 792 / RFC 4443 suppression: never reply to
@@ -469,7 +503,88 @@ pub(in crate::afxdp) fn compute_forwarded_egress_ptb_with_dynamic(
             );
         }
     }
-    (ptb_reply, mtu_signalled)
+    EgressPtbOutcome {
+        ptb_reply,
+        mtu_signalled,
+        outer_fragments: Vec::new(),
+    }
+}
+
+/// #16512: build the tunnel outer for a sub-1280 IPv6 inner and fragment
+/// it at the outer MTU (RFC 8200 §5). Returns the outer fragments, or
+/// `None` when delivery is impossible here (IPv6 outer, DF outer, encap
+/// failure, inner already fragmented) — the caller then keeps PTB+drop.
+fn build_sub1280_tunnel_outer_fragments(
+    source_frame: &[u8],
+    meta: ForwardPacketMeta,
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+) -> Option<Vec<Vec<u8>>> {
+    let l3 =
+        crate::afxdp::frame::nibble_trusted_stamp(source_frame, meta.l3_offset, meta.addr_family)
+            .or_else(|| frame_l3_offset(source_frame))?;
+    let inner = source_frame.get(l3..)?;
+    if crate::afxdp::frame::ipv6_is_any_fragment(inner) {
+        return None;
+    }
+    let (built, wg_commit) =
+        crate::afxdp::frame::build_forwarded_frame_from_frame_with_commit_and_dynamic(
+            source_frame,
+            meta,
+            decision,
+            forwarding,
+            false,
+            None,
+            dynamic_neighbors,
+        )?;
+    if let Some(commit) = wg_commit {
+        if let Some(engine) = forwarding
+            .wg_engines
+            .get(&decision.resolution.tunnel_endpoint_id)
+        {
+            engine.note_encap_sent(&commit.peer_pubkey, commit.outcome);
+        }
+    }
+    let outer_l3 = frame_l3_offset(&built)?;
+    let outer_ip = built.get(outer_l3..)?;
+    if outer_ip.len() < 20 || outer_ip[0] >> 4 != 4 {
+        return None;
+    }
+    let outer_total = u16::from_be_bytes([outer_ip[2], outer_ip[3]]) as usize;
+    let outer_mtu = tunnel_outer_mtu_for_frag(decision, forwarding)?;
+    if outer_total <= outer_mtu {
+        return Some(vec![built.to_vec()]);
+    }
+    crate::afxdp::outer_frag::fragment_outer_ipv4_frame(&built, outer_l3, outer_mtu)
+}
+
+fn tunnel_outer_mtu_for_frag(
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+) -> Option<usize> {
+    let endpoint = forwarding
+        .tunnel_endpoints
+        .get(&decision.resolution.tunnel_endpoint_id)?;
+    match crate::afxdp::forwarding_build::tunnel_mode_kind(&endpoint.mode) {
+        crate::afxdp::forwarding_build::TunnelKind::Gre => Some(
+            crate::afxdp::forwarding::tunnel_outer_mtu(forwarding, decision, endpoint),
+        ),
+        crate::afxdp::forwarding_build::TunnelKind::WireGuard => {
+            let mtu = forwarding
+                .egress
+                .get(&decision.resolution.egress_ifindex)
+                .or_else(|| forwarding.egress.get(&decision.resolution.tx_ifindex))
+                .map(|e| e.mtu)
+                .filter(|m| *m > 0)
+                .unwrap_or(1500);
+            Some(crate::afxdp::forwarding::min_nonzero_mtu(
+                mtu,
+                decision.resolution.transport_route_mtu as usize,
+            ))
+        }
+        _ => None,
+    }
 }
 /// Classify and queue a generated egress-MTU reply back out the ingress
 /// interface. Shared by the ordinary forward finalizer and resolved-neighbor
@@ -709,7 +824,10 @@ fn enqueue_copy_fallback_frame(
             // fragment 0 already on the wire, state committed, and
             // fallback_to_slow_path=false (enqueued != 0), so the partial
             // datagram could never be retried whole.
-            if frames.iter().any(|(frame, _)| copy_frame_is_oversized(frame.len())) {
+            if frames
+                .iter()
+                .any(|(frame, _)| copy_frame_is_oversized(frame.len()))
+            {
                 for (frame, _) in frames {
                     let copy_len = frame.len();
                     if copy_frame_is_oversized(copy_len) {
@@ -806,8 +924,7 @@ fn enqueue_copy_fallback_frame(
                     },
                     enqueue_ns: 0,
                 };
-                if let Err(rejected) =
-                    enqueue_local_request_to_target_or_owner(target_binding, req)
+                if let Err(rejected) = enqueue_local_request_to_target_or_owner(target_binding, req)
                 {
                     crate::afxdp::cos::redirect_pool::recycle(rejected.bytes);
                     // #2208: cross-binding CoS-owner queue full (TX
@@ -1403,6 +1520,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
         // borrow ends. `mtu_signalled` suppresses the oversized build.
         let mut ptb_reply: Option<Vec<u8>> = None;
         let mut mtu_signalled = false;
+        let mut outer_fragments: Vec<Vec<u8>> = Vec::new();
         let mut flow_key = request.flow_key.take();
         {
             let tcp_segmentation_needed = forwarded_tcp_may_need_segmentation(
@@ -1581,7 +1699,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                 // doc comment for the full rationale. Pure code-motion: same
                 // inner-MTU derivation, `forwarded_egress_mtu_decision`, PTB
                 // build, and `egress_mtu_exceeded` exception recording.
-                (ptb_reply, mtu_signalled) = compute_forwarded_egress_ptb_with_dynamic(
+                let ptb_outcome = compute_forwarded_egress_ptb_with_dynamic(
                     source_frame,
                     request.meta,
                     &request.decision,
@@ -1592,6 +1710,9 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                     recent_exceptions,
                     dynamic_neighbors,
                 );
+                ptb_reply = ptb_outcome.ptb_reply;
+                mtu_signalled = ptb_outcome.mtu_signalled;
+                outer_fragments = ptb_outcome.outer_fragments;
                 // Skip the oversized-frame build/forward entirely when an
                 // egress-MTU PTB was signalled; the finalizer enqueues
                 // `ptb_reply` (if any) and recycles the ingress descriptor.
@@ -1978,6 +2099,52 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                 dbg,
                 counters,
             );
+        }
+        // #16512: deliver sub-1280 tunnel inners as fragmented outers on
+        // the EGRESS (target) binding.
+        if !outer_fragments.is_empty() {
+            let fragments = std::mem::take(&mut outer_fragments);
+            if let Some(target_binding) = resolve_pending_forward_target_binding(
+                left,
+                ingress_index,
+                ingress_binding,
+                request.ingress_queue_id,
+                right,
+                binding_lookup,
+                target_binding_index,
+                request.target_ifindex,
+            ) {
+                for frag in fragments {
+                    let frag_len = frag.len();
+                    let req = TxRequest {
+                        bytes: frag.into(),
+                        expected_ports: None,
+                        expected_addr_family: request.meta.addr_family,
+                        expected_protocol: request.meta.protocol,
+                        flow_key: flow_key.clone(),
+                        egress_ifindex: request.decision.resolution.egress_ifindex,
+                        cos_queue_id: request.cos_queue_id,
+                        dscp_rewrite: request.dscp_rewrite,
+                        mirror_clone: false,
+                        overlap_admissions: None,
+                        enqueue_ns: 0,
+                    };
+                    if enqueue_local_request_to_target_or_owner(target_binding, req).is_ok() {
+                        dbg.enqueue_ok += 1;
+                        dbg.enqueue_copy += 1;
+                        target_binding.tx_counters.pending_copy_tx_packets += 1;
+                        dbg.tx_bytes_total += frag_len as u64;
+                        if (frag_len as u32) > dbg.tx_max_frame {
+                            dbg.tx_max_frame = frag_len as u32;
+                        }
+                    } else {
+                        build_failed = true;
+                    }
+                }
+            } else {
+                build_failed = true;
+            }
+            copied_source_frame = true;
         }
         if build_failed {
             handle_forward_build_failure(

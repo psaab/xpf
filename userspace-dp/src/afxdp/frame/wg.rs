@@ -848,8 +848,17 @@ pub(super) fn wg_encap_frame_with_commit_and_dynamic(
     let outer_eth_len = if vlan_id > 0 { 18 } else { 14 };
     let inner_budget = wg_inner_budget(outer_mtu, outer_v6);
     let wg_record_len = WG_DATA_HEADER_LEN + padded_len_capped(inner_packet.len(), inner_budget) + POLY1305_TAG_LEN;
-    if inner_packet.len() > inner_budget
-        || wg_encapped_size_with_outer_mtu(inner_packet.len(), outer_v6, outer_mtu) > outer_mtu
+    // #16512: an IPv6 inner in (budget, 1280] on a sub-1280 tunnel is
+    // delivered by fragmenting the OUTER IPv4 datagram below IPv6
+    // (RFC 8200 §5), not dropped. Admit exactly that band (IPv4 outer
+    // only); every other oversize keeps the drop.
+    let sub1280_v6 = inner_meta.addr_family as i32 == libc::AF_INET6
+        && !outer_v6
+        && inner_packet.len() > inner_budget
+        && inner_packet.len() <= 1280;
+    if !sub1280_v6
+        && (inner_packet.len() > inner_budget
+            || wg_encapped_size_with_outer_mtu(inner_packet.len(), outer_v6, outer_mtu) > outer_mtu)
     {
         // #1865: the promised "follow-up" counter store — same
         // `encap_mtu_drops` counter as the control thread's symmetric

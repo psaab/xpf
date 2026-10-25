@@ -186,6 +186,26 @@ pub(in crate::afxdp) fn clamp_next_hop_mtu(mtu: usize, addr_family: u8) -> u16 {
     mtu.max(floor).min(u16::MAX as usize) as u16
 }
 
+/// #16512: an IPv6 inner whose tunnel inner budget is below the RFC 8200
+/// §5 link minimum (1280). For such a packet a PTB advertising the floored
+/// 1280 can never help: RFC 8201 §4 forbids the sender reducing below
+/// 1280, so `EmitPacketTooBig{1280}` + drop is a permanent blackhole for
+/// every non-TCP IPv6 datagram in `(budget, 1280]` (1280-byte DNS-EDNS /
+/// QUIC included). The dispatch must instead deliver such packets up to
+/// 1280 by fragmenting the OUTER datagram (RFC 8200 §5 link-specific
+/// fragmentation below IPv6), which the tunnel peer reassembles before
+/// decap (#14645/#15102). Only the tunnel path is eligible: a plain
+/// sub-1280 egress is a link that cannot carry IPv6 at all and keeps the
+/// floored PTB (the #13936 commit gate rejects such links).
+#[inline]
+pub(in crate::afxdp) fn ipv6_tunnel_inner_below_link_minimum(
+    addr_family: u8,
+    inner_mtu: usize,
+    uses_native_tunnel: bool,
+) -> bool {
+    uses_native_tunnel && addr_family as i32 == libc::AF_INET6 && inner_mtu > 0 && inner_mtu < 1280
+}
+
 /// Destination key consumed by WireGuard's AllowedIPs peer lookup when
 /// calculating the transformed packet's underlay MTU. NAT64's source frame
 /// still carries the original-family destination, while the builder selects

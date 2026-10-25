@@ -93,6 +93,7 @@ pub(crate) mod frame;
 mod gre;
 mod gre_discriminator;
 mod gre_reassembly;
+mod outer_frag;
 mod ha;
 pub(crate) mod ipsec_inner;
 pub(crate) mod ipsec_inner_queue;

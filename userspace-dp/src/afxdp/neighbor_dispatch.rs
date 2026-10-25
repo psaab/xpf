@@ -1048,7 +1048,7 @@ pub(super) fn retry_pending_neigh(
         // discard/reject or missing target binding must not trigger a PTB.
         // Only permitted, deliverable candidates reach this PMTU decision.
         let ingress_ident = binding.identity();
-        let (ptb_reply, mtu_signalled) =
+        let ptb_outcome =
             super::tx::dispatch::compute_forwarded_egress_ptb_with_dynamic(
                 source_frame,
                 pkt.meta.into(),
@@ -1060,6 +1060,9 @@ pub(super) fn retry_pending_neigh(
                 recent_exceptions,
                 Some(dynamic_neighbors),
             );
+        let ptb_reply = ptb_outcome.ptb_reply;
+        let mtu_signalled = ptb_outcome.mtu_signalled;
+        let outer_fragments = ptb_outcome.outer_fragments;
         if let Some(ptb_bytes) = ptb_reply {
             super::tx::dispatch::enqueue_forwarded_ptb_reply(
                 binding,
@@ -1072,6 +1075,67 @@ pub(super) fn retry_pending_neigh(
                 dbg,
                 counters,
             );
+        }
+
+        // #16512: sub-1280 tunnel delivery via fragmented outers.
+        if !outer_fragments.is_empty() {
+            let mut delivered = false;
+            if target_idx == binding_index {
+                for frag in &outer_fragments {
+                    let len = frag.len();
+                    binding.tx_pipeline.pending_tx_local.push_back(TxRequest {
+                        bytes: frag.clone().into(),
+                        expected_ports: None,
+                        expected_addr_family: pkt.meta.addr_family,
+                        expected_protocol: pkt.meta.protocol,
+                        flow_key: pkt.flow_key.clone(),
+                        egress_ifindex: decision.resolution.egress_ifindex,
+                        cos_queue_id: cos.queue_id,
+                        dscp_rewrite: cos.dscp_rewrite,
+                        mirror_clone: false,
+                        overlap_admissions: None,
+                        enqueue_ns: 0,
+                    });
+                    bound_pending_tx_local(binding);
+                    binding.tx_counters.pending_copy_tx_packets += 1;
+                    dbg.enqueue_ok += 1;
+                    dbg.enqueue_copy += 1;
+                    dbg.tx_bytes_total += len as u64;
+                    dbg.tx_max_frame = dbg.tx_max_frame.max(len as u32);
+                }
+                delivered = true;
+            } else if let Some(target) =
+                binding_by_index_mut(left, binding_index, binding, right, target_idx)
+            {
+                for frag in &outer_fragments {
+                    let len = frag.len();
+                    target.tx_pipeline.pending_tx_local.push_back(TxRequest {
+                        bytes: frag.clone().into(),
+                        expected_ports: None,
+                        expected_addr_family: pkt.meta.addr_family,
+                        expected_protocol: pkt.meta.protocol,
+                        flow_key: pkt.flow_key.clone(),
+                        egress_ifindex: decision.resolution.egress_ifindex,
+                        cos_queue_id: cos.queue_id,
+                        dscp_rewrite: cos.dscp_rewrite,
+                        mirror_clone: false,
+                        overlap_admissions: None,
+                        enqueue_ns: 0,
+                    });
+                    bound_pending_tx_local(target);
+                    target.tx_counters.pending_copy_tx_packets += 1;
+                    dbg.enqueue_ok += 1;
+                    dbg.enqueue_copy += 1;
+                    dbg.tx_bytes_total += len as u64;
+                    dbg.tx_max_frame = dbg.tx_max_frame.max(len as u32);
+                }
+                delivered = true;
+            }
+            if delivered {
+                counters.touched = true;
+                binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
+                continue;
+            }
         }
         if mtu_signalled {
             counters.touched = true;

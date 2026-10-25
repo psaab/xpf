@@ -1006,7 +1006,7 @@ fn tcp_auth_options_decline_segmentation_and_reach_ptb_15119() {
         );
         let ingress = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
         let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
-        let (ptb, mtu_signalled) = compute_forwarded_egress_ptb(
+        let ptb_out = compute_forwarded_egress_ptb(
             &frame,
             meta.into(),
             &decision,
@@ -1016,8 +1016,8 @@ fn tcp_auth_options_decline_segmentation_and_reach_ptb_15119() {
             &ingress.identity(),
             &recent_exceptions,
         );
-        assert!(mtu_signalled, "{name}: DF oversize must signal MTU");
-        let ptb = ptb.expect("DF oversize must emit Frag-Needed");
+        assert!(ptb_out.mtu_signalled, "{name}: DF oversize must signal MTU");
+        let ptb = ptb_out.ptb_reply.expect("DF oversize must emit Frag-Needed");
         let icmp = 14 + 20;
         assert_eq!(ptb[icmp], 3, "{name}: ICMP type 3");
         assert_eq!(ptb[icmp + 1], 4, "{name}: code 4 Frag Needed");
