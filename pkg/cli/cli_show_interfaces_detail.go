@@ -22,10 +22,11 @@ func (c *CLI) showInterfacesDetail(filterName string) error {
 
 	// Build zone + description lookup from active config, keyed by the AUTHORED
 	// Junos name (#4984). The netlink walk below yields kernel dash-form names,
-	// so kernelToAuthored maps them back to the authored identity; the zone /
-	// description maps are keyed by that authored form (zone bindings are
-	// logical refs like "ge-0/0/9.0" — strip the unit to a base key) so the
-	// joins actually match instead of being silently blanked.
+	// so kernelToAuthored maps them back to the authored identity; only a bare
+	// or unit-0 member governs the physical row (config.PhysicalRowZoneKey,
+	// #14364/#16562): a non-zero VLAN unit's zone belongs to that logical unit,
+	// not this row, so keying by baseIfName would misattribute it
+	// (map-order-random when units sit in different zones).
 	ifZoneMap := make(map[string]string)
 	ifDescMap := make(map[string]string)
 	cfg := c.store.ActiveConfig()
@@ -42,7 +43,9 @@ func (c *CLI) showInterfacesDetail(filterName string) error {
 				continue
 			}
 			for _, ifName := range z.Interfaces {
-				ifZoneMap[baseIfName(ifName)] = z.Name
+				if base, ok := config.PhysicalRowZoneKey(cfg, ifName); ok {
+					ifZoneMap[base] = z.Name
+				}
 			}
 		}
 		for _, ifc := range cfg.Interfaces.Interfaces {

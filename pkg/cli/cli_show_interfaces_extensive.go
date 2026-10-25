@@ -29,8 +29,11 @@ func (c *CLI) showInterfacesExtensiveFiltered(filterName string) error {
 
 	// Build zone lookup from active config, keyed by the AUTHORED Junos name
 	// (#4984) — the netlink walk yields kernel dash-form names, so kernelToAuthored
-	// maps them back and the joins key by the authored form (zone bindings are
-	// logical refs, so strip the unit to a base key) instead of silently blanking.
+	// maps them back and the joins key by the authored form instead of silently
+	// blanking. Only a bare or unit-0 member governs the physical row
+	// (config.PhysicalRowZoneKey, #14364/#16562): a non-zero VLAN unit's zone
+	// belongs to that logical unit, not this row, so keying by baseIfName
+	// would misattribute it (map-order-random when units sit in different zones).
 	ifZoneMap := make(map[string]string)
 	ifDescMap := make(map[string]string)
 	ifCfgMap := make(map[string]*config.InterfaceConfig)
@@ -46,7 +49,9 @@ func (c *CLI) showInterfacesExtensiveFiltered(filterName string) error {
 				continue
 			}
 			for _, ifName := range z.Interfaces {
-				ifZoneMap[baseIfName(ifName)] = z.Name
+				if base, ok := config.PhysicalRowZoneKey(cfg, ifName); ok {
+					ifZoneMap[base] = z.Name
+				}
 			}
 		}
 		for _, ifc := range cfg.Interfaces.Interfaces {

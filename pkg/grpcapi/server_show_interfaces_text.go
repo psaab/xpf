@@ -71,15 +71,14 @@ func (s *Server) showInterfacesExtensive(cfg *config.Config, filter string, buf 
 				continue
 			}
 			for _, ifName := range z.Interfaces {
-				// #14364: a zone binds a LOGICAL member ("ge-0/0/1.0",
-				// "eth0.0"), but the walk below queries the BARE kernel
-				// name (attrs.Name) — keying by the raw member missed
-				// every unit-qualified binding. The physical row stands
-				// for the base interface, so only a unit-0 (or bare)
-				// binding is attributed to it; a non-zero unit's zone
-				// belongs to that logical unit, not this row (the CLI
-				// twins key by baseIfName, #5325).
-				if base, ok := physicalRowZoneKey(cfg, ifName); ok {
+				// #14364/#16562: a zone binds a LOGICAL member
+				// ("ge-0/0/1.0", "eth0.0"), but the walk below queries
+				// the BARE kernel name (attrs.Name) — keying by the raw
+				// member missed every unit-qualified binding. Only a
+				// unit-0 (or bare) binding is attributed to the physical
+				// row via the shared config.PhysicalRowZoneKey; a
+				// non-zero unit's zone belongs to that logical unit.
+				if base, ok := config.PhysicalRowZoneKey(cfg, ifName); ok {
 					ifZoneMap[base] = z.Name
 				}
 			}
@@ -218,10 +217,10 @@ func (s *Server) showInterfacesDetail(cfg *config.Config, filter string, buf *st
 				continue
 			}
 			for _, ifName := range z.Interfaces {
-				// #14364: see showInterfacesExtensive — only a unit-0
-				// (or bare) binding is attributed to the physical row
-				// the bare kernel-name query below renders.
-				if base, ok := physicalRowZoneKey(cfg, ifName); ok {
+				// #14364/#16562: see showInterfacesExtensive — only a
+				// unit-0 (or bare) binding is attributed to the physical
+				// row via the shared config.PhysicalRowZoneKey.
+				if base, ok := config.PhysicalRowZoneKey(cfg, ifName); ok {
 					ifZoneMap[base] = z.Name
 				}
 			}
@@ -550,31 +549,6 @@ func (s *Server) showVLANs(cfg *config.Config, buf *strings.Builder) {
 			}
 		}
 	}
-}
-
-// physicalRowZoneKey returns the bare base name under which a zone member
-// is attributed to a physical-interface row in showInterfacesExtensive /
-// showInterfacesDetail (#14364). Those views render ONE zone line per
-// physical (kernel) interface, queried by the bare kernel name, so a
-// member resolves only when it names the base itself or its unit 0
-// ("ge-0/0/1.0" / "eth0.0" govern the physical interface's default unit).
-// A non-zero unit member ("ge-0/0/9.50") is NOT attributed to the
-// physical row — that zone belongs to the logical unit (rendered per-unit
-// by showVLANs) and claiming it here would misattribute a VLAN unit.
-// Malformed suffixes (rejected at commit by the strict #5933 gate) never
-// resolve. Splitting routes through the shared declared-name-aware
-// SplitInterfaceUnitRef (#9821) and CanonicalLogicalUnit (#5878), so
-// spellings like ".00" fold to unit 0 exactly as the binders do.
-func physicalRowZoneKey(cfg *config.Config, member string) (string, bool) {
-	s := cfg.SplitInterfaceUnitRef(member)
-	if !s.HasUnit {
-		return s.Base, true
-	}
-	u, _, err := config.CanonicalLogicalUnit(s.UnitTok)
-	if err != nil || u != 0 {
-		return "", false
-	}
-	return s.Base, true
 }
 
 func (s *Server) showIPv6RouterAdvertisement(cfg *config.Config, buf *strings.Builder) {
