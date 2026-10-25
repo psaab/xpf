@@ -2171,6 +2171,20 @@ never lock an operator out of a remote box it manages.
   PCI, survives rename/restart/rollback), and — only if that NIC is
   enumeration index 0 — renames just it to fxp0 and snapshots its addressing
   into the bootstrap `.network`.
+  - **Committed boxes never learn a lifeline from the route (#16671).** On a
+    committed xpf box fxp0 lives in vrf-mgmt, which networkd renders without
+    a main-table gateway, so the NIC carrying the main-table default route
+    is the WAN — not management. `setupBootstrapLifeline` therefore returns
+    early when `EverCommitted()` is true: it never overwrites the persisted
+    `/etc/xpf/lifeline-interface` record from route detection and never
+    renames the WAN to fxp0; the box stays reachable at its EXISTING
+    management address on the retained last-known-good networkd state (the
+    #1960 freeze above). Only never-committed boxes record a lifeline from
+    route detection. For the same reason `installFailClosedBootHostFences`
+    derives management only from the persisted record plus the explicit
+    management leaf and management-class names (`fxp*/fab*/em*`, #6731) —
+    never from a main-table default route — so WAN addresses are fenced on
+    a fail-closed cold boot instead of being withheld as "management".
   - **Appliance factory boot (#7114).** The default-route signal does not
     exist on the appliance image: `scripts/image/bake.py` purges cloud-init
     and deletes every netplan / `interfaces.d` file, so a factory boot (no

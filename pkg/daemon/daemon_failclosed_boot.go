@@ -5,6 +5,7 @@ import (
 	"net"
 	"sort"
 
+	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/vishvananda/netlink"
 )
@@ -33,10 +34,18 @@ func (d *Daemon) installFailClosedBootHostFences(failClosedLoad bool) {
 		return
 	}
 
-	// The fail-closed load suppresses takeover, so retain the same lifeline
-	// identity used by bootstrap naming. A route-observation error means we
-	// cannot safely identify a non-fxp0 management interface; do not risk
-	// fencing an unknown management address.
+	// #16671: management identity for the fence is derived ONLY from
+	// verified sources — the persisted lifeline record plus the explicit
+	// management leaf (via resolveProtectedInterfaces) and management-class
+	// names (fxp*/fab*/em*, #6731) that may not have been renamed yet.
+	// NEVER from a main-table default route: on a committed xpf box fxp0
+	// lives in vrf-mgmt, so the main-table default is the WAN, and treating
+	// it as management would withhold the WAN addresses from the fence and
+	// leave host services exposed on the untrust side. The preserved
+	// skip-on-unknown discipline is kept in verified form: a detected
+	// route NIC that is management-class but NOT in the verified set could
+	// be an unrecorded management NIC, so fencing on guesswork could drop
+	// management — skip. A route error likewise leaves that unknown, skip.
 	lifeline, found, err := detectLifelineInterfaceFn()
 	if err != nil {
 		slog.Error("fail-closed boot: cannot identify management interface; skipping live-address host fences to preserve reachability",
@@ -51,29 +60,31 @@ func (d *Daemon) installFailClosedBootHostFences(failClosedLoad bool) {
 		return
 	}
 	protected := d.resolveProtectedInterfaces()
-	if found && lifeline != "" {
-		protected[lifeline] = true
+	// Management-class names are verified by class (#6731), not by route:
+	// an fxp*/fab*/em* link is management even before rename/record.
+	for _, link := range links {
+		if link == nil || link.Attrs() == nil {
+			continue
+		}
+		if name := link.Attrs().Name; config.IsManagementIfName(name) {
+			protected[name] = true
+		}
 	}
-
-	seenLinks := make(map[string]bool, len(links))
+	if found && lifeline != "" && !protected[lifeline] && config.IsManagementIfName(lifeline) {
+		slog.Error("fail-closed boot: detected management-class interface is not a verified management identity; skipping live-address host fences",
+			"interface", lifeline)
+		return
+	}
 	for _, link := range links {
 		if link == nil || link.Attrs() == nil {
 			slog.Error("fail-closed boot: interface enumeration returned an incomplete link; skipping live-address host fences")
 			return
 		}
-		attrs := link.Attrs()
-		if attrs.Name == "" {
+		if link.Attrs().Name == "" {
 			slog.Error("fail-closed boot: interface enumeration returned a nameless link; skipping live-address host fences")
 			return
 		}
-		seenLinks[attrs.Name] = true
 	}
-	if found && lifeline != "" && !seenLinks[lifeline] {
-		slog.Error("fail-closed boot: detected management interface is absent from the interface snapshot; skipping live-address host fences",
-			"interface", lifeline)
-		return
-	}
-
 	// Address reads must be complete before replacing either table. In
 	// particular, an unreadable protected interface means the shared-address
 	// exclusion is unknown, so proceeding could drop the management IP.

@@ -1583,6 +1583,20 @@ func (d *Daemon) setupBootstrapLifeline() {
 			"interface", lifeline, "marker", applianceMarkerFile)
 	}
 
+	// #16671: on a committed box the main-table default route is the WAN
+	// (fxp0 lives in vrf-mgmt, which networkd renders without a main-table
+	// gateway), so route detection must NEVER overwrite the verified
+	// persisted lifeline record — nor rename the WAN to fxp0. Only a
+	// never-committed box may learn its lifeline from route detection.
+	everCommitted := d.store != nil && d.store.EverCommitted()
+	if everCommitted {
+		slog.Warn("bootstrap lifeline: box has committed before; refusing to overwrite the "+
+			"persisted lifeline record or rename from main-table default-route detection "+
+			"(on a committed xpf box the main-table default is the WAN, not management)",
+			"interface", lifeline)
+		return
+	}
+
 	// Record PCI identity (keyed by PCI, MAC tiebreaker) so the protected
 	// set resolves the lifeline to its post-rename name (Item 4).
 	if rec, ok := pciAddrForInterface(lifeline); ok {

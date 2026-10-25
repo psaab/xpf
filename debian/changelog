@@ -52,6 +52,15 @@ xpf (0.0.0) unstable; urgency=medium
     discarded the walk error, printing "Current sessions: 0" on
     failure. Over-cap calls now fail with ResourceExhausted and a
     failed walk surfaces instead of a clean zero.
+  * Daemon: a fail-closed boot of a committed firewall no longer treats
+    the main-table default-route NIC (the WAN, since fxp0 lives in
+    vrf-mgmt) as the management lifeline (#16671). The persisted
+    lifeline record is never overwritten from route detection once a
+    config has committed, the WAN is not renamed to fxp0, and the
+    cold-boot live-address fences derive management only from the
+    persisted record, the management leaf, and management-class names
+    — so WAN addresses are fenced instead of exposing host services
+    (sshd/IKE) on the untrust side until a compilable commit.
   * Feeds: a feed restored with a count baseline but no usable content
     epoch now re-establishes the epoch on its first guarded install
     (#16651). Legacy count-only records, records whose epoch digest was
