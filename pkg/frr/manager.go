@@ -152,6 +152,11 @@ type Manager struct {
 	// surviving shared map per the #10129 discriminator.
 	narrowedMu sync.Mutex
 	narrowed   []narrowedChainSite
+	// ripGroupIdx16625 counts grouped RIP renders within one
+	// managed-section build so prefix-list names are unique
+	// across the global and per-VRF stanzas (#16625). Reset in
+	// buildManagedSectionWithQNH11447.
+	ripGroupIdx16625 int
 
 	// retryMu guards the degraded-retry episode fields below. Lock
 	// order: reloadMu → retryMu (retryMu is a leaf).
@@ -737,6 +742,7 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 	// #6807: the quarantine set describes the section this call produces, so
 	// clear it before rendering rather than accumulating across applies.
 	m.resetQuarantined()
+	m.ripGroupIdx16625 = 0
 	var b strings.Builder
 	b.WriteString("! xpf managed config - do not edit\n")
 	b.WriteString("!\n")

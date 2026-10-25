@@ -59,6 +59,15 @@ func runUniformGatesLogFeedRouting(tree *ConfigTree, cfg *Config, opts compileOp
 	} else {
 		cfg.Warnings = append(cfg.Warnings, w...)
 	}
+	// #16625 (R3-A12-03): an interface in two RIP groups with
+	// different exports cannot be rendered (one outbound filter
+	// per interface). Strict refuses; lenient warns (#1960) and
+	// the renderer withholds the contested interfaces.
+	if w, err := validateRIPGroupExportStrict(cfg, opts.lenientRIPGroupExport16625); err != nil {
+		return err
+	} else {
+		cfg.Warnings = append(cfg.Warnings, w...)
+	}
 	// #2008 H7 security log profile -> stream cross-reference. A
 	// `security log profile <name> stream-name <stream>` that names a
 	// stream which is not configured would route to nowhere — the operator

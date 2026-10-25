@@ -1162,6 +1162,29 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 				// neighbor I;`) instead packs neighbor/export onto the
 				// group's own Keys; read that tail too, filtered to the
 				// two multi leaves the group reader knows.
+				// #16625: preserve the group->export association.
+				// Previously neighbor/export were flattened into the
+				// global Interfaces/Redistribute unions, erasing the
+				// per-group boundary. Groups carries the association
+				// to the renderer; the unions are still populated for
+				// legacy consumers.
+				groupName := ""
+				if len(child.Keys) > 1 {
+					groupName = child.Keys[1]
+				}
+				// Merge repeated stanzas for the same group name
+				// (Junos permits splitting a group across lines).
+				var grp *RIPGroup
+				for _, existing := range proto.RIP.Groups {
+					if existing != nil && existing.Name == groupName {
+						grp = existing
+						break
+					}
+				}
+				if grp == nil {
+					grp = &RIPGroup{Name: groupName}
+					proto.RIP.Groups = append(proto.RIP.Groups, grp)
+				}
 				groupBody := child.Children
 				if len(child.Keys) > 2 {
 					groupBody = packedBodyChildren(child, resolveSchemaChild(ripSchema, "group"))
@@ -1174,9 +1197,13 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 					// first entry.
 					switch gc.Name() {
 					case "neighbor":
-						proto.RIP.Interfaces = append(proto.RIP.Interfaces, firewallMatchValues(gc)...)
+						vals := firewallMatchValues(gc)
+						grp.Interfaces = append(grp.Interfaces, vals...)
+						proto.RIP.Interfaces = append(proto.RIP.Interfaces, vals...)
 					case "export":
-						proto.RIP.Redistribute = append(proto.RIP.Redistribute, firewallMatchValues(gc)...)
+						vals := firewallMatchValues(gc)
+						grp.Export = append(grp.Export, vals...)
+						proto.RIP.Redistribute = append(proto.RIP.Redistribute, vals...)
 					}
 				}
 			case "neighbor":

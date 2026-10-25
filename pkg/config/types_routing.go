@@ -582,6 +582,16 @@ type OSPFv3Interface struct {
 	BFDMultiplier int  // BFD detect-multiplier (0 = default)
 }
 
+// RIPGroup is one `protocols rip group <name>` stanza (#16625).
+// Junos groups share an export policy per neighbor set; the
+// association must survive compilation or the renderer cannot
+// enforce it per interface.
+type RIPGroup struct {
+	Name       string
+	Interfaces []string // neighbor interfaces in this group
+	Export     []string // per-group export chain (policy names / protocol tokens)
+}
+
 // RIPConfig holds RIP routing configuration.
 type RIPConfig struct {
 	Interfaces   []string // interfaces participating in RIP
@@ -589,6 +599,10 @@ type RIPConfig struct {
 	Redistribute []string // "connected", "static", "ospf"
 	AuthKey      Secret   // authentication key/password; redacted on marshal (#2053)
 	AuthType     string   // "md5" or "simple"
+	// Groups (#16625): per-group neighbor/export association.
+	// Interfaces/Redistribute remain the union for legacy
+	// consumers; renderers MUST use Groups when non-empty.
+	Groups []*RIPGroup
 	// Disable (#16572): `protocols rip disable` shuts the protocol.
 	Disable bool
 }
