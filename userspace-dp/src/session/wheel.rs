@@ -58,6 +58,9 @@ pub(super) struct WheelEntry {
 
 pub(super) struct SessionWheel {
     pub(super) buckets: Box<[VecDeque<WheelEntry>]>,
+    /// Held sessions are rechecked through a separate bounded queue so their
+    /// one-second HOLD cadence cannot monopolize the ordinary expiry wheel.
+    pub(super) held_entries: VecDeque<WheelEntry>,
     /// Absolute tick of the next bucket to pop. Advances 1 per
     /// elapsed wheel tick during `expire_stale_entries`. The bucket
     /// index is `cursor_tick & WHEEL_MASK`.
@@ -73,6 +76,7 @@ impl SessionWheel {
         }
         Self {
             buckets: buckets.into_boxed_slice(),
+            held_entries: VecDeque::new(),
             cursor_tick: 0,
             initialized: false,
         }

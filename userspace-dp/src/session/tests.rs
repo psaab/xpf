@@ -7428,6 +7428,211 @@ fn expire_holds_peer_synced_when_rg_inactive() {
     assert_eq!(s.reaped_stale_synced, 0);
 }
 
+/// Repeated HOLD checks use a separate fixed-budget queue, while the
+/// stale-synced ceiling remains anchored to the first HOLD observation.
+#[test]
+fn held_synced_entries_use_bounded_rechecks_without_sliding_deadline_16881() {
+    const HELD_BUDGET: usize = super::expire::HELD_RECHECK_BUDGET;
+    const ENTRY_COUNT: u16 = (HELD_BUDGET * 2 + 13) as u16;
+    const SEC: u64 = WHEEL_TICK_NS;
+    const CEILING_NS: u64 = TEST_CEIL_MULT * 300_000_000_000;
+
+    let mut table = SessionTable::new();
+    let installed_at = SEC;
+    for port in 10_000..10_000 + ENTRY_COUNT {
+        install_synced_tcp(&mut table, &key_with_port(port), 1, installed_at);
+    }
+
+    let held_at = installed_at + 302 * SEC;
+    table.last_gc_ns = installed_at;
+    assert!(run_expire_ha(&mut table, held_at, &[], &|_| 0).is_empty());
+    assert_eq!(table.last_pop_stats().scanned, ENTRY_COUNT as usize);
+    assert_eq!(table.last_pop_stats().held_standby, ENTRY_COUNT as usize);
+
+    let first_key = key_with_port(10_000);
+    assert_eq!(table.first_held_ns_for(&first_key), Some(held_at));
+    let first_held_tick = table.entry_by_key(&first_key).unwrap().held_wheel_tick;
+    assert_ne!(first_held_tick, 0);
+
+    // Repeated scheduler calls while held must not move the pending check or
+    // the first-hold deadline.
+    for offset in 1..=100 {
+        table.push_to_wheel(&first_key, held_at + offset * SEC);
+        let entry = table.entry_by_key(&first_key).unwrap();
+        assert_eq!(entry.held_wheel_tick, first_held_tick);
+        assert_eq!(entry.first_held_ns, held_at);
+    }
+
+    let original_deadline = held_at + CEILING_NS;
+    let mut expired_count = 0;
+    let mut last_check = held_at;
+    while last_check < original_deadline + 10 * SEC {
+        let check_at = last_check + SEC;
+        table.last_gc_ns = last_check;
+        expired_count += run_expire_ha(&mut table, check_at, &[], &|_| 0).len();
+        assert!(
+            table.last_pop_stats().held_standby <= HELD_BUDGET,
+            "each pass rechecks at most one held batch"
+        );
+        assert!(
+            table.last_pop_stats().scanned <= HELD_BUDGET * 3,
+            "held staging, gate checks, and ordinary reaps stay separately bounded"
+        );
+        if table.entry_by_key(&first_key).is_some() {
+            assert_eq!(
+                table.first_held_ns_for(&first_key),
+                Some(held_at),
+                "repeated HOLD scheduling must retain the original anchor"
+            );
+        }
+        last_check = check_at;
+        if table.len() == 0 {
+            break;
+        }
+    }
+    assert_eq!(
+        expired_count,
+        ENTRY_COUNT as usize,
+        "all held entries must reap shortly after the original ceiling"
+    );
+    assert!(
+        last_check <= original_deadline + 4 * SEC,
+        "bounded rechecks must not grant another HOLD interval"
+    );
+}
+
+/// Same-ID snapshot replacement retains one pending held-queue hint; repeated
+/// imports cannot re-arm the original stale-synced deadline (#16881).
+#[test]
+fn held_same_id_reimports_keep_one_pending_recheck_16881() {
+    use crate::SessionSyncRequest;
+    use crate::server::helpers::build_synced_session_entry;
+
+    const SEC: u64 = WHEEL_TICK_NS;
+    const HOLD_CEILING_NS: u64 = TEST_CEIL_MULT * 300 * SEC;
+
+    let mut table = SessionTable::new();
+    table.set_timeouts(SessionTimeouts::from_seconds(300, 300, 0));
+    let request = SessionSyncRequest {
+        operation: "upsert".to_string(),
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_UDP,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "8.8.8.8".to_string(),
+        src_port: 12_345,
+        dst_port: 443,
+        ingress_zone_id: TEST_LAN_ZONE_ID,
+        egress_zone_id: TEST_WAN_ZONE_ID,
+        owner_rg_id: 1,
+        session_id: 77,
+        ..SessionSyncRequest::default()
+    };
+    let zones = rustc_hash::FxHashMap::default();
+    let import = |table: &mut SessionTable, now_ns| {
+        let entry =
+            build_synced_session_entry(&request, &zones, 0).expect("FIXTURE: synced request");
+        let key = entry.key.clone();
+        assert!(table.upsert_synced_with_origin(
+            entry.into_session_install(now_ns),
+            false,
+        ));
+        key
+    };
+
+    let installed_at = SEC;
+    let key = import(&mut table, installed_at);
+    let held_at = installed_at + 302 * SEC;
+    table.last_gc_ns = installed_at;
+    assert!(run_expire_ha(&mut table, held_at, &[], &|_| 0).is_empty());
+    assert_eq!(table.first_held_ns_for(&key), Some(held_at));
+    let first_held_tick = table.entry_by_key(&key).unwrap().held_wheel_tick;
+    assert_ne!(first_held_tick, 0);
+
+    for step in 1..=100u64 {
+        let reimported_key = import(&mut table, held_at + step * SEC);
+        assert_eq!(reimported_key, key);
+        let entry = table.entry_by_key(&key).unwrap();
+        assert_eq!(entry.first_held_ns, held_at);
+        assert_eq!(
+            entry.held_wheel_tick, first_held_tick,
+            "same-ID re-import must preserve one pending held hint"
+        );
+    }
+
+    table.last_gc_ns = held_at;
+    assert!(run_expire_ha(&mut table, held_at + SEC, &[], &|_| 0).is_empty());
+    assert_eq!(table.last_pop_stats().scanned, 2);
+    assert_eq!(table.last_pop_stats().held_standby, 1);
+    assert_eq!(
+        table.entry_by_key(&key).unwrap().held_wheel_tick,
+        first_held_tick + 1
+    );
+
+    let original_deadline = held_at + HOLD_CEILING_NS;
+    let mut last_check = held_at + SEC;
+    let mut expired_count = 0;
+    while last_check < original_deadline + 5 * SEC {
+        let check_at = last_check + SEC;
+        table.last_gc_ns = last_check;
+        expired_count += run_expire_ha(&mut table, check_at, &[], &|_| 0).len();
+        last_check = check_at;
+        if table.len() == 0 {
+            break;
+        }
+    }
+    assert_eq!(expired_count, 1);
+    assert_eq!(table.len(), 0);
+    assert!(last_check <= original_deadline + 3 * SEC);
+}
+
+/// A populated held queue cannot defer an ordinary active-session expiry.
+#[test]
+fn held_recheck_budget_does_not_delay_active_expiry_16881() {
+    const HELD_BUDGET: usize = super::expire::HELD_RECHECK_BUDGET;
+    const ENTRY_COUNT: u16 = (HELD_BUDGET * 2 + 13) as u16;
+    const SEC: u64 = WHEEL_TICK_NS;
+
+    let mut table = SessionTable::new();
+    let installed_at = SEC;
+    for port in 20_000..20_000 + ENTRY_COUNT {
+        install_synced_tcp(&mut table, &key_with_port(port), 1, installed_at);
+    }
+    let held_at = installed_at + 302 * SEC;
+    let active_key = key_with_port(30_000);
+    let active_seen_at = held_at - 299 * SEC;
+    let mut active_metadata = metadata();
+    active_metadata.owner_rg_id = 2;
+    assert!(table.install_with_protocol_with_origin(
+        active_key.clone(),
+        decision(),
+        active_metadata,
+        SessionOrigin::ForwardFlow,
+        active_seen_at,
+        PROTO_TCP,
+        0x10,
+    ));
+    let _ = table.drain_deltas(8);
+
+    table.last_gc_ns = installed_at;
+    assert!(run_expire_ha(&mut table, held_at, &[2], &|_| 0).is_empty());
+    assert!(table.entry_by_key(&active_key).is_some());
+
+    table.last_gc_ns = held_at;
+    assert!(run_expire_ha(&mut table, held_at + SEC, &[2], &|_| 0).is_empty());
+    assert_eq!(table.last_pop_stats().held_standby, HELD_BUDGET);
+    assert!(table.entry_by_key(&active_key).is_some());
+
+    table.last_gc_ns = held_at + SEC;
+    let expired = run_expire_ha(&mut table, held_at + 2 * SEC, &[2], &|_| 0);
+    assert_eq!(expired.len(), 1);
+    assert_eq!(expired[0].key, active_key);
+    assert_eq!(table.last_pop_stats().held_standby, HELD_BUDGET);
+    assert!(
+        table.last_pop_stats().scanned <= HELD_BUDGET * 2 + 1,
+        "the ordinary wheel processes active expiry independently of held work"
+    );
+}
+
 #[test]
 fn expire_ages_peer_synced_when_rg_active() {
     let mut table = SessionTable::new();
@@ -7791,18 +7996,11 @@ fn expire_reaps_held_at_abs_cap_for_long_timeout() {
         expired.is_empty(),
         "idle-crossed long session held on first observation, not reaped"
     );
-    // held_standby may be > 1: this single synthetic 30-day jump makes the
-    // wheel cursor sweep millions of ticks, and a held entry is re-bucketed
-    // to the current tick on each rotation (the same multi-rotation
-    // re-processing the existing long-timeout Case-4 exhibits under a huge
-    // jump). Production advances ~1 tick per call, so this is a test-only
-    // artifact; the load-bearing assertions are "not reaped" + "still
-    // present". first_held_ns is armed on the first observation so the cap
-    // measures from there, not from the stale install-time last_seen.
-    assert!(
-        table.last_pop_stats().held_standby >= 1,
-        "held at least once"
-    );
+    // This synthetic 30-day jump makes the ordinary wheel cursor sweep many
+    // ticks, but the first HOLD transfers the row to its separate queue, so it
+    // is classified once. Production advances about one tick per call; the
+    // load-bearing checks are retention and the first-hold deadline anchor.
+    assert_eq!(table.last_pop_stats().held_standby, 1);
     assert_eq!(
         table.last_pop_stats().reaped_stale_synced,
         0,

@@ -13,6 +13,11 @@
 use super::wheel::{WHEEL_TICK_NS, WheelEntry, bucket_for_tick, target_tick_for};
 use super::*;
 
+// Limit repeated HOLD gate checks independently from ordinary expiry work.
+// Active AGE/Close entries stay on the main wheel and cannot sit behind a
+// population of held peer-synced sessions.
+pub(super) const HELD_RECHECK_BUDGET: usize = 256;
+
 impl SessionTable {
     /// #965: stats from the most-recent `expire_stale_entries` call.
     /// Used by tests to validate K-bounds and entry classification.
@@ -54,30 +59,36 @@ impl SessionTable {
     }
 
     /// #965: schedule (or re-schedule) `key` for an expiration check
-    /// at the tick implied by its `last_seen_ns + expires_after_ns`.
-    /// Throttled: only pushes when the canonical wheel tick changes,
-    /// so per-second touches within the same tick produce zero new
-    /// wheel entries.
+    /// at the tick implied by its idle deadline. Throttled: only pushes
+    /// when the canonical wheel tick changes, so per-second touches within
+    /// the same tick produce zero new wheel entries.
+    ///
+    /// A held row uses the separate recheck queue. Its pending marker is
+    /// preserved across same-id snapshot imports, so rescheduling cannot
+    /// slide its original HOLD deadline or create duplicate hints.
     ///
     /// MUST be called only AFTER `last_seen_ns` / `expires_after_ns`
     /// have been written and the `&mut` borrow on `self.entries` has
     /// dropped — otherwise the borrow checker will reject the
-    /// `self.wheel.buckets[bucket].push_back(...)` line because it
-    /// aliases `self` through both `self.entries` and `self.wheel`.
+    /// wheel queue push because it aliases `self` through entries and wheel.
     #[inline]
     pub(in crate::session) fn push_to_wheel(&mut self, key: &SessionKey, now_ns: u64) {
         self.wheel_observe(now_ns);
         let new_tick = match self.entry_by_key_mut(key) {
             Some(entry) => {
-                let nt = target_tick_for(
-                    now_ns,
-                    entry.last_seen_ns.saturating_add(entry.expires_after_ns),
-                );
-                if nt != entry.wheel_tick {
-                    entry.wheel_tick = nt;
-                    Some(nt)
-                } else {
+                if entry.first_held_ns != 0 && entry.held_wheel_tick != 0 {
                     None
+                } else {
+                    entry.held_wheel_tick = 0;
+                    let expiration_ns =
+                        entry.last_seen_ns.saturating_add(entry.expires_after_ns);
+                    let tick = target_tick_for(now_ns, expiration_ns);
+                    if tick != entry.wheel_tick {
+                        entry.wheel_tick = tick;
+                        Some(tick)
+                    } else {
+                        None
+                    }
                 }
             }
             None => return,
@@ -171,15 +182,10 @@ impl SessionTable {
 
         self.wheel_observe(now_ns);
         let now_tick = now_ns / WHEEL_TICK_NS;
-        let mut expired_entries: Vec<ExpiredSession> = Vec::new();
+        let mut expired_entries = Vec::new();
+        self.process_held_rechecks(now_ns);
         while self.wheel.cursor_tick < now_tick {
             let bucket_idx = bucket_for_tick(self.wheel.cursor_tick);
-            // Drain the bucket allocation-free: snapshot the length
-            // before iterating, then `pop_front` exactly that many
-            // times. Re-pushes targeting THIS bucket land at the back
-            // of the VecDeque and are not popped during this BUCKET
-            // drain (re-pushes into LATER buckets the outer loop
-            // visits will be popped within the same call — by design).
             let due_count = self.wheel.buckets[bucket_idx].len();
             for _ in 0..due_count {
                 let WheelEntry {
@@ -187,7 +193,7 @@ impl SessionTable {
                     scheduled_tick,
                 } = self.wheel.buckets[bucket_idx]
                     .pop_front()
-                    .expect("len snapshot bounds the iteration");
+                    .expect("bucket length snapshot bounds the iteration");
                 self.last_pop_stats.scanned += 1;
                 // Case 1: entry already removed elsewhere — drop hint.
                 let Some(entry) = self.entry_by_key(&key) else {
@@ -290,11 +296,13 @@ impl SessionTable {
                                 // invariant break loud instead of silently
                                 // skipping the hold-clock stamp and the
                                 // re-bucket.
-                                let em = self
-                                    .entry_by_key_mut(&key)
-                                    .expect("HOLD: entry was just read via entry_by_key in Case 3; no concurrent mutation");
-                                if em.first_held_ns == 0 {
-                                    em.first_held_ns = now_ns;
+                                {
+                                    let em = self
+                                        .entry_by_key_mut(&key)
+                                        .expect("HOLD: entry was just read via entry_by_key in Case 3; no concurrent mutation");
+                                    if em.first_held_ns == 0 {
+                                        em.first_held_ns = now_ns;
+                                    }
                                 }
                                 // #2120 (Codex MAJOR): do NOT stamp
                                 // seen_rg_epoch here. The worker reads the
@@ -315,7 +323,7 @@ impl SessionTable {
                                 // arm then records the epoch so it does not
                                 // re-fire perpetually.
                                 self.last_pop_stats.held_standby += 1;
-                                self.rebucket_alive_entry(&key, now_ns);
+                                self.schedule_held_recheck(key, now_tick.saturating_add(1));
                                 continue;
                             }
                             StandbyGateDecision::ReapStaleSynced => {
@@ -516,6 +524,7 @@ impl SessionTable {
                         .entry_by_key_mut(&key)
                         .expect("entry was just read via entry_by_key; no concurrent mutation");
                     entry_mut.wheel_tick = new_target_tick;
+                    entry_mut.held_wheel_tick = 0;
                     self.wheel.buckets[new_bucket].push_back(WheelEntry {
                         key,
                         scheduled_tick: new_target_tick,
@@ -536,36 +545,15 @@ impl SessionTable {
         self.expire_stale_entries(now_ns).len() as u64
     }
 
-    /// #2120: re-bucket an entry the expire pass decided to keep alive
-    /// (SELF-HEAL or HOLD) so it is re-examined on a future tick.
-    ///
-    /// For a SELF-HEAL re-stamp, `last_seen_ns` is now fresh, so the
-    /// entry schedules to its natural full-timeout tick (FAR_FUTURE for
-    /// long timeouts, exactly like Case-4).
-    ///
-    /// For a HOLD (no re-stamp, expiration already at/before `now`) we
-    /// schedule the entry at exactly the CURRENT tick (`now_tick`). The
-    /// drain loop runs `while cursor_tick < now_tick`, so a WheelEntry
-    /// placed at `now_tick` is NOT re-drained during THIS call (the loop
-    /// terminates at `now_tick`); the NEXT expire pass (with an advanced
-    /// `now_ns`) drains it. This is the only safe re-bucket target for a
-    /// still-due entry: the wheel has only WHEEL_BUCKETS physical buckets,
-    /// so scheduling at any tick the cursor has not yet passed
-    /// (`< now_tick`) collides with a bucket the cursor re-visits within
-    /// this call — re-draining (and re-holding) the entry repeatedly under
-    /// a multi-tick jump. Scheduling at `now_tick` re-examines a held
-    /// entry every interval (re-checking the self-heal edge + the ceiling)
-    /// without any in-call re-drain. Self-healed entries (fresh
-    /// `last_seen`) schedule to their natural expiration tick, exactly
-    /// like Case-4 (FAR_FUTURE for long timeouts).
+    /// Re-bucket an entry whose `last_seen_ns` was refreshed by real
+    /// activity, a companion keepalive, or SELF-HEAL. Held rows stay in
+    /// their separate queue until their bounded gate recheck decides to
+    /// self-heal, age, or reap them.
     fn rebucket_alive_entry(&mut self, key: &SessionKey, now_ns: u64) {
         let Some(entry) = self.entry_by_key(key) else {
             return;
         };
         let natural_expiration = entry.last_seen_ns.saturating_add(entry.expires_after_ns);
-        // Held entries (past expiration) clamp to `now_ns` so
-        // `target_tick_for` yields `now_tick` (delta 0). Self-healed
-        // entries keep their future natural expiration.
         let expiration_for_schedule = natural_expiration.max(now_ns);
         let new_target_tick = target_tick_for(now_ns, expiration_for_schedule);
         let new_bucket = bucket_for_tick(new_target_tick);
@@ -573,12 +561,74 @@ impl SessionTable {
             return;
         };
         entry_mut.wheel_tick = new_target_tick;
+        entry_mut.held_wheel_tick = 0;
         self.wheel.buckets[new_bucket].push_back(WheelEntry {
             key: key.clone(),
             scheduled_tick: new_target_tick,
         });
         self.last_pop_stats.re_bucketed += 1;
     }
+
+    fn schedule_held_recheck(&mut self, key: SessionKey, scheduled_tick: u64) {
+        let entry_mut = self
+            .entry_by_key_mut(&key)
+            .expect("HOLD: entry was just read via entry_by_key; no concurrent mutation");
+        entry_mut.held_wheel_tick = scheduled_tick;
+        self.wheel.held_entries.push_back(WheelEntry {
+            key,
+            scheduled_tick,
+        });
+        self.last_pop_stats.re_bucketed += 1;
+    }
+
+    /// Requeue at most one fixed batch of held sessions onto the ordinary
+    /// wheel before draining it. The existing expiry path then makes the
+    /// SELF-HEAL / HOLD / AGE decision, preserving same-pass expiry behavior
+    /// without putting the full held population back onto the main wheel.
+    /// Ordinary AGE/Close work remains independent of this held-session cap.
+    fn process_held_rechecks(&mut self, now_ns: u64) {
+        let now_tick = now_ns / WHEEL_TICK_NS;
+        for _ in 0..HELD_RECHECK_BUDGET {
+            let Some(front) = self.wheel.held_entries.front() else {
+                break;
+            };
+            if front.scheduled_tick > now_tick {
+                break;
+            }
+            let WheelEntry {
+                key,
+                scheduled_tick,
+            } = self
+                .wheel
+                .held_entries
+                .pop_front()
+                .expect("front check guarantees a queued held recheck");
+            self.last_pop_stats.scanned += 1;
+
+            let Some(entry) = self.entry_by_key(&key) else {
+                self.last_pop_stats.dropped_gone += 1;
+                continue;
+            };
+            if entry.held_wheel_tick != scheduled_tick {
+                self.last_pop_stats.dropped_stale += 1;
+                continue;
+            }
+
+            let target_tick = self.wheel.cursor_tick;
+            let bucket = bucket_for_tick(target_tick);
+            let entry_mut = self
+                .entry_by_key_mut(&key)
+                .expect("held queue row was just read via entry_by_key; no concurrent mutation");
+            entry_mut.held_wheel_tick = 0;
+            entry_mut.wheel_tick = target_tick;
+            self.wheel.buckets[bucket].push_back(WheelEntry {
+                key,
+                scheduled_tick: target_tick,
+            });
+            self.last_pop_stats.re_bucketed += 1;
+        }
+    }
+
 
     /// #14937: keep a CLOSING entry alive when its forward counters
     /// ADVANCED since the pair first became CLOSING (or since the

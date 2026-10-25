@@ -379,10 +379,11 @@ pub(crate) const STALE_SYNCED_CEILING_ABS_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000
 /// Per-call statistics for `expire_stale_entries` pop work, used by
 /// the timer-wheel unit tests to assert K-bounds and entry
 /// classification under specific synthetic workloads. Fields are
-/// accumulated over all buckets popped in a single call.
+/// accumulated across ordinary-wheel buckets and held-queue entries
+/// processed during a single call.
 #[derive(Default, Debug, Clone, Copy)]
 pub(crate) struct WheelPopStats {
-    /// Total `WheelEntry`s scanned (popped from a bucket and
+    /// Total `WheelEntry`s scanned (popped from a bucket or held queue and
     /// classified) during the call.
     pub(crate) scanned: usize,
     /// Entries dropped because the canonical key is no longer in
@@ -1278,11 +1279,15 @@ struct SessionEntry {
     /// clearing `handshake_pending`.
     syn_ack_first: bool,
     /// #10888 carries this marker as the distinct SynAckFirstPending wire state.
-    /// #965: absolute wheel tick at which this session is scheduled to
-    /// be checked for expiration. Updated on every push to the wheel.
+    /// #965: absolute tick in the ordinary expiry wheel. Updated when a
+    /// non-held deadline changes; held rechecks use `held_wheel_tick`.
     /// A WheelEntry whose `scheduled_tick != entry.wheel_tick` is a
     /// stale duplicate (lazy-delete discriminator).
     wheel_tick: u64,
+    /// #16881: canonical tick for the separate budgeted HOLD recheck queue.
+    /// Zero means no held recheck is pending; unlike `wheel_tick`, this
+    /// remains set while a held row is queued for its next gate evaluation.
+    held_wheel_tick: u64,
     /// #7212: the `(config generation, logical ingress interface)` this
     /// direction's static input-filter verdict was last derived under, or
     /// [`FilterRevalidationStamp::UNVALIDATED`].
