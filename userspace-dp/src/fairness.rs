@@ -75,6 +75,21 @@ pub fn compute_observed_cov(per_flow_throughputs: &[u64]) -> f64 {
 /// contract: "A flow that drops below 1% transiently but recovers
 /// does not count."
 ///
+/// Zero-throughput window (#16540): when `total_bytes == 0` every
+/// flow delivered nothing for the whole window. That is the
+/// canonical starved case — the contract names the metric
+/// "starved" rather than "zero-throughput" only to avoid implying
+/// strict 0 Mb/s, which makes 0 the extreme of the `< 1% of mean`
+/// rule, not an exception to it. The arithmetic threshold cannot
+/// express it (mean is 0, and `0 < 0` is false), so it is handled
+/// explicitly: every flow counts as starved. Without this, a run
+/// that blackholes the class scores CoV 0 / 0 starved and PASSes
+/// the merge gate — a false green automation keyed on `verdict`
+/// would accept. Streams seeded with an empty bucket vec (never
+/// present in any steady-state interval) delivered zero bytes too
+/// and likewise count. An empty flow set (`&[]`) still returns 0:
+/// there is no flow to starve.
+///
 /// `per_flow_buckets[i]` is flow i's per-second-bucket throughput
 /// vector across the steady-state window.
 pub fn starved_flow_count(per_flow_buckets: &[Vec<u64>]) -> u32 {
@@ -86,7 +101,10 @@ pub fn starved_flow_count(per_flow_buckets: &[Vec<u64>]) -> u32 {
         .iter()
         .flat_map(|v| v.iter().copied())
         .sum();
-    if total_cells == 0 || total_bytes == 0 {
+    if total_bytes == 0 {
+        return per_flow_buckets.len() as u32;
+    }
+    if total_cells == 0 {
         return 0;
     }
     let mean_per_cell = total_bytes as f64 / total_cells as f64;

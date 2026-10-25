@@ -401,7 +401,12 @@ A measurement run **PASSES** iff ALL of:
    warmup and final-burst excluded). A flow that drops below 1%
    transiently but recovers does not count. The metric is named
    "starved" rather than "zero-throughput" to avoid implying
-   strict 0 Mb/s.
+   strict 0 Mb/s. The zero-throughput window is the canonical
+   starved case, not an exception (#16540): if every flow delivered
+   zero bytes across the whole window, `starved_flow_count` counts
+   every flow (the `< 1% of mean` test cannot express it when the
+   mean is 0), Gate 1 FAILs with a "no throughput in steady-state
+   window" reason, and the run must not PASS on CoV 0 alone.
 
 2. **Per-flow fairness**: `observed_CoV ≤ Cstruct + 0.05`, where
    `Cstruct` is computed from the per-worker active-flow

@@ -122,6 +122,23 @@ fn starved_empty() {
 }
 
 #[test]
+fn starved_all_zero_counts_every_flow() {
+    // #16540: total_bytes == 0 is the canonical starved case (mean is
+    // 0, so 0 is not `< 1% of mean` arithmetically). Every flow in the
+    // window delivered nothing, so every flow counts as starved.
+    let buckets = vec![vec![0u64; 60]; 6];
+    assert_eq!(starved_flow_count(&buckets), 6);
+}
+
+#[test]
+fn starved_all_empty_buckets_counts_every_flow() {
+    // Seeded streams that never appear in any steady-state interval
+    // carry an empty bucket vec and also delivered zero bytes.
+    let buckets: Vec<Vec<u64>> = vec![Vec::new(), Vec::new(), Vec::new()];
+    assert_eq!(starved_flow_count(&buckets), 3);
+}
+
+#[test]
 fn saturated_at_cap() {
     let buckets = vec![1_000u64; 60];
     assert!(is_saturated(&buckets, 1_000));
