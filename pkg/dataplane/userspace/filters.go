@@ -13,15 +13,19 @@ import (
 // flexMatchStartUnrepresentable is the sentinel match-start emitted for a term
 // whose flexible-match-range is UNREPRESENTABLE on the wire. It is deliberately
 // NOT "layer-3" / "layer-4", so the Rust filter compiler lowers it to
-// FlexMatchStart::Unsupported and flex_matches() returns false — the term
-// matches NOTHING (fail-closed) rather than enforcing something the operator
-// did not write.
+// FlexMatchStart::Unsupported and flex_matches() returns false — retained as
+// defense-in-depth for hand-built snapshots. For compiled configs the
+// builder ALSO sets FromUnrepresentable on any FlexMatchValid failure
+// (#16849), so the Rust preflight refuses the whole candidate snapshot and
+// prior-good state is retained — poisoning a discard/reject term to
+// match-nothing would let its traffic fall through to later terms or the
+// implicit accept.
 //
-// TWO CAUSES REACH IT:
+// CAUSES THAT REACH THE SENTINEL:
 //   - #5823: more than one range named for a single term.
 //   - #9020: parameters the compiler could not represent (UnknownFlexMatch) —
 //     a bad byte-offset, an unparseable match-value, a match-start outside
-//     {layer-3, layer-4}.
+//     {layer-3, layer-4}, and (#16849) a value-less or out-of-width range.
 //
 // The value was "unrepresentable-multi-range" while #5823 was the only cause.
 // It is renamed because it reaches `show firewall ... effective`, and telling
@@ -234,6 +238,7 @@ func buildFilterTermSnapshots(filterName string, filter *config.FirewallFilter, 
 			hasUnresolvedPrefixListRef(term.SourcePrefixLists, cfg) ||
 			hasUnresolvedPrefixListRef(term.DestPrefixLists, cfg) ||
 			term.UncoveredFamilyExcept16001 ||
+			(term.FlexMatch != nil && !config.FlexMatchValid(term.FlexMatch)) ||
 			config.FilterHasConflictingTerminalActions(term.TerminalActions) {
 			snap.FromUnrepresentable = true
 		}
@@ -375,44 +380,25 @@ func buildFilterTermSnapshots(filterName string, filter *config.FirewallFilter, 
 		// the compiler emits). A zero effective length is dropped (no
 		// constraint) rather than emitted as a degenerate always-fail match.
 		if len(term.FlexMatchRangeNames) > 1 || len(term.UnknownFlexMatch) > 0 || !config.FlexMatchValid(term.FlexMatch) {
-			// #5823: the term names more than one flexible-match-range range;
-			// the wire matcher supports exactly one. The strict commit gate
-			// (validateFilterFlexMatchStrict) already rejects this, so a term
-			// reaches here ONLY on the tolerant load / peer-sync path (#1960).
-			// Silently enforcing just the first range is fail-OPEN — the packets
-			// the other ranges covered escape the intended match (an accept term
-			// over-permits, a discard/reject over-drops). Fail CLOSED: emit an
-			// UNREPRESENTABLE flex-match so the term matches NOTHING. A
-			// non-{layer-3,layer-4} match-start lowers to
-			// FlexMatchStart::Unsupported in the Rust matcher, whose
-			// flex_matches() returns false for the term (never the wrong-base
-			// match) — the existing per-term fail-closed channel, so no
-			// multi-range support is added to the wire/matcher. Length stays
-			// 1..=4 so flex_enabled is true (a length outside that range would
-			// instead reject the WHOLE snapshot); Value/Mask are unread once the
-			// start is Unsupported.
-			// #9020: the SAME fail-closed channel now also covers a term whose
-			// flexible-match-range parameters could not be represented.
-			//
-			// The compiler records those in UnknownFlexMatch and then assigns
-			// term.FlexMatch anyway, so the tolerant load / peer-sync path
-			// shipped a DEFAULTED live match: `byte-offset 999` became offset 0,
-			// an unparseable `match-value` became 0, and a non-{layer-3,layer-4}
-			// `match-start` was evaluated at the L3 base. A discard term then
-			// enforced "the first bytes at offset 0 equal zero" instead of the
-			// pattern the operator wrote -- dropping traffic it should not and
-			// admitting the traffic it was written to drop.
-			//
-			// The nftables sibling has always checked BOTH conditions
-			// (daemon_nft.go:2248, daemon_nft_netlink.go:231); only this path
-			// checked one. Same defect class as the multi-range case above and
-			// the same remedy, so it reuses the channel rather than adding one.
+			// #5823/#9020/#16849: an unrepresentable flexible-match-range.
+			// The strict commit gate already rejects these shapes, so a
+			// compiled term reaches here ONLY on the tolerant load /
+			// peer-sync path (#1960). The builder ALSO sets
+			// FromUnrepresentable above for any FlexMatchValid failure, so
+			// the Rust preflight refuses the WHOLE candidate snapshot and
+			// prior-good state is retained — poisoning alone would let a
+			// discard/reject term's traffic fall through to later terms
+			// or the implicit accept (#16849). The sentinel below is
+			// retained as defense-in-depth: Length stays 1..=4 so
+			// flex_enabled is true and an older helper that ignores
+			// FromUnrepresentable still fails the term closed via
+			// FlexMatchStart::Unsupported.
 			slog.Warn("firewall filter term has an unrepresentable flexible-match-range; "+
-				"poisoning the term to match nothing (fail-closed) until the config is corrected",
+				"refusing the candidate snapshot (prior-good retained) until the config is corrected",
 				"filter_term", term.Name,
 				"ranges", strings.Join(term.FlexMatchRangeNames, ","),
 				"unrepresentable", strings.Join(term.UnknownFlexMatch, ","),
-				"issue", "#5823/#9020")
+				"issue", "#5823/#9020/#16849")
 			snap.FlexMatch = &FlexMatchSnapshot{
 				Offset:     0,
 				Length:     1,

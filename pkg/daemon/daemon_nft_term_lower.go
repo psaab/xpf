@@ -311,6 +311,15 @@ func nftRulesFromTerm(term *config.FirewallFilterTerm, family string, prefixList
 			"term", term.Name, "family", family)
 		return []string{nftRefuseUnrepresentableFrom}
 	}
+	// #16849: an invalid flexible-match-range (value-less or out-of-width,
+	// FlexMatchValid false) must refuse the whole load — the per-term
+	// match-nothing disposition below would let a discard/reject term's
+	// traffic fall through to later terms or the implicit accept.
+	if term.FlexMatch != nil && !config.FlexMatchValid(term.FlexMatch) {
+		slog.Warn("lo0 kernel nftables mirror: refusing load over invalid flexible-match-range",
+			"term", term.Name)
+		return []string{nftRefuseUnrepresentableFrom}
+	}
 
 	addrParts, emitNoRule := nftTermAddrPredicates(term, family, prefixLists)
 	if emitNoRule {
@@ -433,11 +442,12 @@ func nftRulesFromTerm(term *config.FirewallFilterTerm, family string, prefixList
 	// this file was hardened). Record the unrepresentable expression and fail
 	// THIS term closed below (drop its scoped traffic) instead of appending a
 	// flag predicate.
-	// #6804: an unrepresentable flexible-match-range makes the term match
-	// NOTHING, mirroring userspace (which poisons it to
-	// FlexMatchStart::Unsupported so flex_matches() returns false and later
-	// terms still run). Returning "" makes buildLo0FilterPayload skip the rule,
-	// which is the kernel equivalent.
+	// #6804/#16849: an unrepresentable flexible-match-range. A
+	// FlexMatchValid failure was already refused whole above (#16849);
+	// this arm covers the remaining causes (multi-range, UnknownFlexMatch,
+	// bad match-start/width) and makes the term match NOTHING — retained
+	// as the kernel equivalent of the userspace sentinel. Returning nil
+	// makes buildLo0FilterPayload skip the rule.
 	//
 	// Deliberately NOT the #5512 tcp-flags drop: a tcp-flags constraint only
 	// ever matches TCP, so that drop can be scoped with `meta l4proto 6`. A
@@ -446,8 +456,7 @@ func nftRulesFromTerm(term *config.FirewallFilterTerm, family string, prefixList
 	// host-inbound traffic — turning a fail-open into a lockout.
 	if lo0FlexMatchUnrepresentable(term) {
 		slog.Warn("lo0 kernel nftables mirror: unrepresentable flexible-match-range; "+
-			"the term matches NOTHING (mirroring the userspace fail-closed) so its "+
-			"narrowing is never silently dropped", "term", term.Name)
+			"the term matches NOTHING so its narrowing is never silently dropped", "term", term.Name)
 		return nil
 	}
 

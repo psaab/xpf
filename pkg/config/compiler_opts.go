@@ -1319,9 +1319,7 @@ type compileOpts struct {
 	// commit. The tolerant load / peer-sync paths downgrade to a warning so an
 	// already-persisted or peer-synced config still BOOTS (#1960 no-brick).
 	// Same doctrine as lenientFilterMatchValues.
-	// lenientFlexMatchValueMissing allows a range omitting match-value on every compile path (#16296 fold). It is separate from width validity: width remains hard.
-	lenientFlexMatchValueMissing bool
-	lenientFlexMatch             bool
+	lenientFlexMatch bool
 	// lenientFilterPortExcept (#3297) downgrades the firewall-filter
 	// positive-vs-except port mutual-exclusion gate
 	// (validateFilterPortExceptStrict) from a hard compile error to a
@@ -3994,7 +3992,6 @@ func lenientCompileOpts() compileOpts {
 		lenientFilterActions:                     true,
 		lenientFilterMatchValues:                 true,
 		lenientFlexMatch:                         true,
-		lenientFlexMatchValueMissing:             true,
 		lenientFilterPortExcept:                  true,
 		lenientFilterAddressExcept:               true,
 		lenientFilterFromMatch:                   true,

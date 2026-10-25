@@ -265,6 +265,7 @@ func toNftLo0Term(term *config.FirewallFilterTerm, pl map[string]*config.PrefixL
 		FromUnrepresentable: len(term.UnknownFrom) > 0 || len(term.ValuelessFrom) > 0 ||
 			lo0HasUnresolvedPrefixListRef(term, pl) ||
 			term.UncoveredFamilyExcept16001 ||
+			(term.FlexMatch != nil && !config.FlexMatchValid(term.FlexMatch)) ||
 			config.FilterHasConflictingTerminalActions(term.TerminalActions),
 		TCPFlags: term.TCPFlags,
 		// #6804: carry the flexible-match-range so the kernel mirror renders the

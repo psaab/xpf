@@ -397,6 +397,19 @@ pub(crate) enum SnapshotIntegrityError {
         term: String,
         length: u8,
     },
+    /// #16849: a firewall-filter term's `flex_match` carried a `match_start`
+    /// outside {"", "layer-3", "layer-4"} — the Go builder's
+    /// "unrepresentable" sentinel for a value-less / out-of-width /
+    /// multi-range range, or any other unsupported base from a hand-built /
+    /// version-drifted snapshot. Per-term match-nothing would let a
+    /// discard/reject term's traffic fall through to the implicit accept;
+    /// rejecting the whole snapshot retains prior-good state.
+    UnrepresentableFilterFlexMatchStart {
+        family: String,
+        filter: String,
+        term: String,
+        match_start: String,
+    },
     /// #3715: a firewall-filter term carried a raw DSCP wire value outside the
     /// semantic 0..=63 range (DSCP is a 6-bit field). `dimension` is "match" for a
     /// `snap.dscp_values` entry >= 64 and "rewrite" for a `snap.dscp_rewrite` byte
@@ -1195,6 +1208,16 @@ impl std::fmt::Display for SnapshotIntegrityError {
                 f,
                 "firewall family {:?} filter {:?} term {:?} has a flexible-match-range byte length {} outside the representable 1..=4 range — refusing to truncate it to a 4-byte window (which would broaden the match)",
                 family, filter, term, length
+            ),
+            Self::UnrepresentableFilterFlexMatchStart {
+                family,
+                filter,
+                term,
+                match_start,
+            } => write!(
+                f,
+                "firewall family {:?} filter {:?} term {:?} has a flexible-match-range match-start {:?} outside the representable layer-3/layer-4 set — refusing the candidate snapshot (a match-nothing term would fall through to the implicit accept)",
+                family, filter, term, match_start
             ),
             Self::FilterDSCPOutOfRange {
                 family,

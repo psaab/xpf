@@ -33,6 +33,15 @@ xpf (0.0.0) unstable; urgency=medium
     rendered `<none>`); uniform names and single-unit devices stay
     valid, GRE input keeps its #10816 first-wins exemption, and the Go
     commit advisory warns for the single-claimant shape as well.
+  * Config/firewall: a value-less flexible-match-range on a
+    `then discard`/`reject` term now hard-rejects at strict commit
+    and commit-check (#16849). It previously committed with a
+    warning claiming it fails closed while the dataplane poisoned
+    the term to match-nothing, so the drop fell through to the
+    implicit accept. Tolerant load warns and every dataplane
+    builder now refuses the candidate whole (prior-good retained).
+
+xpf (0.0.0) unstable; urgency=medium
   * Cluster/session-sync: the #15176 NAT-scope fold now carries the
     tagged RETH unit (#16826). It folded the logical child's ifindex
     with vlan 0, truncating `reth0.80` to `reth0`, and the receiver

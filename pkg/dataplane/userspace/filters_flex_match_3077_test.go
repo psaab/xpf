@@ -292,6 +292,8 @@ func TestFilterSnapshotFlexMatchSubByteMSBAligned14634(t *testing.T) {
 						BitLength:  tc.bits,
 						Value:      tc.value,
 						Mask:       tc.mask,
+						ValueSet:   true,
+						MaskSet:    true,
 					},
 				}}},
 			}

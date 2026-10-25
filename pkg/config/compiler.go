@@ -136,10 +136,7 @@ func diagnosticMergeName9023(name string) string {
 // CompileConfig converts a parsed ConfigTree AST into a typed Config struct.
 // It clones the tree before expansion so the original tree is not mutated.
 func CompileConfig(tree *ConfigTree) (*Config, error) {
-	// #16296 fold: preserve packed/fused flex grammar controls that carry
-	// only byte-offset/bit-length and pin accepted compile behavior. The
-	// missing-value case downgrades to warning below; width stays hard.
-	return compileTree(tree, compileOpts{lenientFlexMatchValueMissing: true}, nil)
+	return compileTree(tree, compileOpts{}, nil)
 }
 
 // CompileConfigWithCurrentClusterPrimary is CompileConfig with the
@@ -148,14 +145,14 @@ func CompileConfig(tree *ConfigTree) (*Config, error) {
 // the candidate (configstore passes its compiled active config), or nil
 // for a fresh candidate. Only the cluster-auth gate reads it.
 func CompileConfigWithCurrentClusterPrimary(tree *ConfigTree, current *Config) (*Config, error) {
-	opts := compileOpts{lenientFlexMatchValueMissing: true}
+	opts := compileOpts{}
 	opts.currentClusterPrimary16025 = currentClusterPrimary(current)
 	return compileTree(tree, opts, nil)
 }
 
 // CompileConfigForNodeWithCurrentClusterPrimary is the node-aware form.
 func CompileConfigForNodeWithCurrentClusterPrimary(tree *ConfigTree, nodeID int, current *Config) (*Config, error) {
-	opts := compileOpts{lenientFlexMatchValueMissing: true}
+	opts := compileOpts{}
 	opts.currentClusterPrimary16025 = currentClusterPrimary(current)
 	return compileTree(tree, opts, &nodeID)
 }
@@ -926,7 +923,7 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 // resolves to group "node0"). This supports a single shared config for both
 // nodes in a chassis cluster.
 func CompileConfigForNode(tree *ConfigTree, nodeID int) (*Config, error) {
-	return compileTree(tree, compileOpts{lenientFlexMatchValueMissing: true}, &nodeID)
+	return compileTree(tree, compileOpts{}, &nodeID)
 }
 
 // CompileConfigForNodeLenient is CompileConfigForNode with the
