@@ -18,6 +18,16 @@ import (
 type bondManager struct {
 	ops linkOps
 
+	// cluster/clusterNode carry the local chassis-cluster identity
+	// (cluster false outside a cluster). They let Apply distinguish a
+	// peer-owned fab (all members on the peer, LocalFabricMember empty
+	// because the fab is not ours) from a standalone multi-member LAG
+	// (no cluster, LocalFabricMember also empty) — #16587. Set by
+	// ApplyCluster; plain Apply leaves them zero, and shouldBond gates
+	// only when cluster is true.
+	cluster     bool
+	clusterNode int
+
 	mu sync.Mutex
 	// bonds tracks the currently created bond devices by name, each mapped
 	// to the signature (mode, MTU, resolved member set) it was realized
@@ -116,6 +126,32 @@ func bondSigOf(ifc *config.InterfaceConfig) bondSig {
 // reported success. LinkSetDown (best-effort pre-enslave step) and a
 // not-yet-present member link (LinkByName on a FabricMembers entry —
 // routine during interface enumeration ordering) remain log-only.
+
+// shouldBond reports whether ifc's fabric members justify a local bond.
+// Outside a cluster every multi-member fab bonds (the #9872 standalone
+// shape). In a cluster a fab bonds only when at least two members are
+// LOCAL (slot maps to this node): zero local members is the peer's fab
+// (#16587 phantom) and exactly one is the vSRX IPVLAN mode already
+// skipped via LocalFabricMember. Members whose slot cannot be parsed
+// (InterfaceSlot < 0) count as local so an unclassifiable member never
+// silently suppresses a bond.
+func (b *bondManager) shouldBond(ifc *config.InterfaceConfig) bool {
+	if len(ifc.FabricMembers) == 0 || ifc.LocalFabricMember != "" {
+		return false
+	}
+	if !b.cluster {
+		return true
+	}
+	local := 0
+	for _, m := range ifc.FabricMembers {
+		slot := config.InterfaceSlot(m)
+		if slot < 0 || config.SlotToNodeID(slot) == b.clusterNode {
+			local++
+		}
+	}
+	return local >= 2
+}
+
 func (b *bondManager) Apply(interfaces []*config.InterfaceConfig) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -125,13 +161,14 @@ func (b *bondManager) Apply(interfaces []*config.InterfaceConfig) error {
 	}
 
 	// Build the desired name -> signature set. Skip interfaces with no
-	// fabric members and vSRX single-local-member fabric-options mode
-	// (LocalFabricMember resolved via .link rename — no bond device).
+	// fabric members, vSRX single-local-member fabric-options mode
+	// (LocalFabricMember resolved via .link rename — no bond device),
+	// and — in a cluster — peer-owned fabs (#16587, shouldBond).
 	desired := make(map[string]bondSig, len(interfaces))
 	order := make([]string, 0, len(interfaces))
 	ifcByName := make(map[string]*config.InterfaceConfig, len(interfaces))
 	for _, ifc := range interfaces {
-		if len(ifc.FabricMembers) == 0 || ifc.LocalFabricMember != "" {
+		if ifc == nil || !b.shouldBond(ifc) {
 			continue
 		}
 		if _, dup := desired[ifc.Name]; dup {
@@ -268,6 +305,62 @@ func (b *bondManager) Apply(interfaces []*config.InterfaceConfig) error {
 		if err := b.createLocked(name, ifcByName[name], sig); err != nil {
 			errs = append(errs, err)
 		}
+	}
+	return errors.Join(errs...)
+}
+
+// ApplyCluster is Apply with the local chassis-cluster identity (#16587):
+// in a cluster a fab bonds only when >=2 members are local. It also reaps
+// a pre-fix ghost bond: a kernel bond named for a now-undesired interface
+// that this daemon created before the fix (hence slave-less) is deleted
+// even though it was never tracked in this process. Only undesired,
+// zero-member bonds are reaped, and only when the caller declares an
+// upgrade reap (reapGhosts) so a restart adoption that must not flap a
+// live LAG is never disturbed; a same-name foreign non-bond link is
+// never touched. Caller need not hold mu.
+func (b *bondManager) ApplyCluster(interfaces []*config.InterfaceConfig, inCluster bool, nodeID int, reapGhosts bool) error {
+	b.mu.Lock()
+	b.cluster = inCluster
+	b.clusterNode = nodeID
+	b.mu.Unlock()
+	if err := b.Apply(interfaces); err != nil {
+		return err
+	}
+	if !reapGhosts {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	desired := make(map[string]bool, len(interfaces))
+	for _, ifc := range interfaces {
+		if ifc != nil && b.shouldBond(ifc) {
+			desired[ifc.Name] = true
+		}
+	}
+	var errs []error
+	for _, ifc := range interfaces {
+		if ifc == nil || len(ifc.FabricMembers) == 0 || desired[ifc.Name] {
+			continue
+		}
+		if _, tracked := b.bonds[ifc.Name]; tracked {
+			continue // tracked undesired bonds are deleted by Apply's delete pass
+		}
+		link, err := b.ops.LinkByName(ifc.Name)
+		if err != nil {
+			continue
+		}
+		bond, isBond := link.(*netlink.Bond)
+		if !isBond {
+			continue
+		}
+		if observed, ok := b.observedMembers(bond); ok && len(observed) > 0 {
+			continue
+		}
+		if err := b.ops.LinkDel(link); err != nil {
+			errs = append(errs, fmt.Errorf("reap ghost bond %s: %w", ifc.Name, err))
+			continue
+		}
+		slog.Info("reaped peer-fabric ghost bond", "name", ifc.Name)
 	}
 	return errors.Join(errs...)
 }

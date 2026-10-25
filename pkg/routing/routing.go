@@ -310,6 +310,13 @@ func (m *Manager) ApplyBonds(interfaces []*config.InterfaceConfig) error {
 	return m.bond.Apply(interfaces)
 }
 
+// ApplyClusterBonds is ApplyBonds with the local chassis-cluster identity
+// (#16587): peer-owned fabs are not bonded, and — when reapGhosts is set —
+// a pre-fix slave-less ghost bond left by an older binary is removed.
+func (m *Manager) ApplyClusterBonds(interfaces []*config.InterfaceConfig, inCluster bool, nodeID int, reapGhosts bool) error {
+	return m.bond.ApplyCluster(interfaces, inCluster, nodeID, reapGhosts)
+}
+
 // ClearBonds removes all previously created bond devices.
 func (m *Manager) ClearBonds() error { return m.bond.Clear() }
 
