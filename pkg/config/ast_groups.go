@@ -1210,15 +1210,27 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 				if !matches && zoneLeafHasApplyMacroTail13112(d) && len(s.Keys) == 2 {
 					matches = keysMatchWildcard(d.Keys[:2], s.Keys)
 				}
-				if matches && (!d.IsLeaf || zoneLeafTakesWildcard9801(ancestorPath, d)) {
+				// #16543: generalize #9801 — a bare named-instance leaf
+				// whose schema slot is a container that compiles from a
+				// leaf (OSPF interface, BGP neighbor, RA interface, ...)
+				// takes the wildcard exactly like its braced spelling.
+				// Top-level interfaces / routing-instances stay excluded
+				// (#9838 compiles no instance from their bare leaves).
+				bare16543 := bareInstanceLeaf16543(ancestorPath, d)
+				if matches && (!d.IsLeaf || bare16543 || zoneLeafTakesWildcard9801(ancestorPath, d)) {
 					// #9801: a zone written as a leaf becomes the empty container its
 					// braced spelling is, and takes the group the same way.
+					// #16543: the same flip for every bare instance leaf
+					// that compiles from a leaf (bareInstanceLeaf16543).
 					// #9862: when filtering is active the flip waits for an
 					// adoption (growth-detect): an all-filtered merge must not
 					// reshape the leaf it adds nothing to. mergeNodes only
 					// appends, so growth is exactly adoption. Unconditional
 					// when filtering is off, exactly as before.
 					promoteZoneMacroLeaf13112(d)
+					if bare16543 {
+						promoteBareInstanceLeaf16543(d)
+					}
 					leafKids := -1
 					if haveExcept {
 						leafKids = len(d.Children)
