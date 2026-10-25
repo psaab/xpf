@@ -611,14 +611,17 @@ func (t *tunnelManager) applyAnchorLocked(tc *config.TunnelConfig, adopting bool
 			closeTuntapFiles(anchor.Fds)
 			link = anchor
 			created = true
-			if tc.MTU > 0 {
-				// TUNSETIFF may ignore LinkAttrs.MTU (#1432 Codex r4
-				// precedent), and the compiler MTU stage restores only
-				// ZONED interfaces — set explicitly so a configured MTU
-				// on an unzoned tunnel is live too (#1884 r2/r4).
-				if mtuErr := t.ops.LinkSetMTU(link, tc.MTU); mtuErr != nil {
+			// TUNSETIFF may ignore LinkAttrs.MTU (#1432 Codex r4
+			// precedent), and the compiler MTU stage restores only
+			// ZONED interfaces — set explicitly so the derived (or
+			// configured) MTU on an unzoned tunnel is live too
+			// (#1884 r2/r4). #16517: an unconfigured native-GRE anchor
+			// never keeps the kernel TUN default 1500; it is created
+			// at anchorDesiredMTU (underlay minus GRE overhead).
+			if want, ok := anchorDesiredMTU(tc); ok {
+				if mtuErr := t.ops.LinkSetMTU(link, want); mtuErr != nil {
 					slog.Warn("failed to set tunnel anchor mtu",
-						"name", tc.Name, "mtu", tc.MTU, "err", mtuErr)
+						"name", tc.Name, "mtu", want, "err", mtuErr)
 				}
 			}
 			slog.Info("tunnel anchor created", "name", tc.Name, "mode", "tun")
@@ -678,6 +681,76 @@ func (t *tunnelManager) applyAnchorLocked(tc *config.TunnelConfig, adopting bool
 	return finishErr
 }
 
+// greAnchorOverheadV4/V6 is the per-packet outer encapsulation overhead
+// a native-GRE encap adds before the optional GRE key bytes: outer IP
+// header + base GRE header. Must mirror userspace-dp forwarding/mss.rs
+// native_gre_inner_mtu: transport MTU minus outer IP (20 v4 / 40 v6)
+// minus GRE (4, +4 more when keyed — added in anchorDesiredMTU).
+const (
+	greOverheadV4 = 20 + 4 // 24
+	greOverheadV6 = 40 + 4 // 44
+)
+
+// greDefaultOuterMTU is the assumed underlay MTU for the GRE anchor
+// default when no MTU is configured, mirroring wgDefaultOuterMTU and
+// the Rust tunnel_outer_mtu 1500 fallback. The Rust encap guard still
+// enforces the REAL resolved transport MTU per packet, so on a
+// non-1500 underlay the guard remains authoritative; for LOCAL-origin
+// traffic this anchor MTU is the signal the kernel uses for PMTUD/MSS,
+// so it must be the overhead-aware value, not 1500.
+const greDefaultOuterMTU = 1500
+
+// anchorDesiredMTU returns the MTU an AnchorOnly TUN should carry and
+// whether it should be written at all (#16517):
+//   - tc.MTU > 0: the operator value wins verbatim (the 1400 control).
+//   - tc.MTU == 0 && native GRE ("" / gre / ip6gre): derive from
+//     greDefaultOuterMTU minus the family overhead, where the family
+//     comes from the outer endpoints exactly as the snapshot emitter
+//     derives OuterFamily (destination first, then source; v6 if that
+//     endpoint parses as v6). A keyed tunnel charges the extra 4 GRE
+//     key bytes. This mirrors native_gre_inner_mtu for a 1500
+//     transport: 1476/1472 (v4 unkeyed/keyed), 1456/1452 (v6).
+//   - Otherwise (IPIP — no native encap in the dataplane — or an
+//     unparseable/missing endpoint pair): no derived value; ok=false
+//     so callers preserve the pre-#16517 ownership behaviour exactly
+//     (created anchors keep the kernel default, owned reuse untouched,
+//     adoption normalized by the caller where it previously was).
+func anchorDesiredMTU(tc *config.TunnelConfig) (int, bool) {
+	if tc == nil {
+		return 0, false
+	}
+	if tc.MTU > 0 {
+		return tc.MTU, true
+	}
+	switch tc.Mode {
+	case config.TunnelModeUnset, config.TunnelModeGRE, config.TunnelModeIP6GRE:
+	default:
+		return 0, false
+	}
+	isV6 := false
+	seen := false
+	for _, s := range []string{tc.Destination, tc.Source} {
+		ip := net.ParseIP(s)
+		if ip == nil {
+			continue
+		}
+		seen = true
+		isV6 = ip.To4() == nil
+		break
+	}
+	if !seen {
+		return 0, false
+	}
+	overhead := greOverheadV4
+	if isV6 {
+		overhead = greOverheadV6
+	}
+	if tc.Key != 0 {
+		overhead += 4
+	}
+	return greDefaultOuterMTU - overhead, true
+}
+
 // reconcileAnchorMTULocked applies the #1884 MTU ownership rule to a
 // reused/adopted anchor:
 //   - tc.MTU > 0: the config value is reconciled on EVERY reuse. The
@@ -685,20 +758,43 @@ func (t *tunnelManager) applyAnchorLocked(tc *config.TunnelConfig, adopting bool
 //     path, so an UNZONED tunnel's configured MTU has no other writer;
 //     for zoned tunnels both writers derive the same value from the
 //     same config and both guard with !=, so there is no fighting.
-//   - tc.MTU == 0 && adopting: one-time normalization to the TUN
-//     default 1500 — repairs the wireguard→gre same-name flip, where
-//     the leftover WG device carries the reduced WG MTU that the
-//     userspace snapshot would otherwise publish into tunnel
-//     endpoints.
-//   - tc.MTU == 0 && owned: never touched.
+//   - tc.MTU == 0 && adopting: normalize to anchorDesiredMTU for a
+//     native-GRE anchor (#16517 — was a literal 1500, which reset a
+//     correctly reduced 1476 device back into the silent-drop band);
+//     for other modes keep the one-time TUN-default 1500 normalization
+//     that repairs the wireguard→gre same-name flip, where the leftover
+//     WG device carries the reduced WG MTU that the userspace snapshot
+//     would otherwise publish into tunnel endpoints.
+//   - tc.MTU == 0 && owned: for a native-GRE anchor whose live MTU
+//     still exceeds the derived inner MTU, lower it once to the derived
+//     value (#16517 upgrade path: anchors created before the fix sit
+//     at 1500 and would never be adopted again, so owned reuse is the
+//     only repair). The write is LOWER-ONLY and fires only while the
+//     live value is above the budget, so an operator/out-of-band
+//     smaller MTU (e.g. a hand-set 1400) is never raised and there is
+//     no per-commit fighting: once lowered, live == derived.
+//   - tc.MTU == 0 && owned && non-GRE: never touched.
 func (t *tunnelManager) reconcileAnchorMTULocked(tc *config.TunnelConfig, link netlink.Link, adopting bool) {
 	want := 0
+	lowerOnly := false
 	switch {
 	case tc.MTU > 0:
 		want = tc.MTU
 	case adopting:
-		want = 1500
-	default:
+		if derived, ok := anchorDesiredMTU(tc); ok {
+			want = derived
+		} else {
+			want = 1500
+		}
+	default: // owned, unconfigured
+		derived, ok := anchorDesiredMTU(tc)
+		if !ok {
+			return
+		}
+		want = derived
+		lowerOnly = true
+	}
+	if lowerOnly && link.Attrs().MTU <= want {
 		return
 	}
 	if link.Attrs().MTU == want {

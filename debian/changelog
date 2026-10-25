@@ -1,4 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Routing: default the native-GRE anchor TUN MTU from the underlay
+    minus GRE overhead when no MTU is configured (#16517). An
+    unconfigured GRE anchor previously kept the kernel TUN default
+    1500 (and adoption reset it to 1500), so the local-origin encap
+    guard silently dropped every self-originated packet whose outer
+    would exceed the transport MTU (inner 1477-1500 IPv4-outer,
+    1457-1500 IPv6-outer) with no Frag-Needed/PTB back into the TUN.
+    Created, adopted, and stale owned GRE anchors now carry
+    1500-overhead (1476/1472 IPv4 unkeyed/keyed, 1456/1452 IPv6),
+    mirroring native_gre_inner_mtu; a configured MTU is unchanged
+    and a smaller hand-set MTU is never raised.
+
   * Daemon-kernel probe selftest: kill the -json=false, SKIP-guard
     and go-exit mutants (#16507). Cell 9 asserted only the leg PASS
     line, and its fake go's argv line was discarded by the leg's
