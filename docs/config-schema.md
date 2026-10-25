@@ -17842,3 +17842,32 @@ rejecting), are:
 Quarantined zone sets (StableZoneID collision losers / poisoned zones)
 and fully-quarantined scoped global rules are excluded from both counts,
 matching the snapshot builder.
+
+## SSH authorized-key leaves are commit-validated (#16740)
+
+The `ssh-ed25519` / `ssh-rsa` / `ssh-dsa` leaves under
+`system root-authentication` and `system login user <name>
+authentication` are typed leaves (`valueType: ValueString`,
+`validator: ValidateAuthorizedSSHKey` in
+`pkg/config/schema_validators_sshkey_16740.go`). The validator runs
+on EVERY value of the multi leaf at strict commit (`SchemaValidate`
+→ `validateMultiValueLeaf`), so a trailing token such as
+`from 10.1.1.1` (an authorized_keys option, not a key), a bare blob,
+an unknown key type, or a malformed blob is refused naming the leaf
+instead of committing durable and failing at apply — where the
+refusal previously skipped both install and revoke for that
+principal and left the previously installed key live.
+
+The accepted set is the OpenSSH authorized_keys key-type vocabulary
+(`SSHAuthorizedKeyTypes`: the ssh-* family plus ecdsa-sha2-nistp*,
+the FIDO sk-* variants, and the *-cert-v01@openssh.com forms), NOT
+the leaf name: an ecdsa key filed under an `ssh-*` leaf commits, as
+it applies (#14111). The single-key predicate lives in `pkg/config`
+(`ValidAuthorizedSSHKey`) and the daemon apply belt
+(`validateAuthorizedSSHKeys`) delegates to it, so commit-accepts and
+apply-accepts are one set by construction. The commit error names
+only the defect class and never echoes the submitted value (#16066).
+Strict on commit / commit-check; the tolerant `Store.Load` /
+`SyncApply` path downgrades the violation to a warning and the
+apply belt still refuses the bad key before any credential mutation
+(#1960).
