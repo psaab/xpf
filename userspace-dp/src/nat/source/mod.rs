@@ -643,6 +643,15 @@ struct PendingPoolAllocator {
     port_low: u16,
     port_high: u16,
     total_pool: usize,
+    /// #16840: every referencing rule is `port no-translation`. Such rules
+    /// take the address-only path and never claim a port bit, so this
+    /// allocator must carry no port bitmap and charge 0 port slots (the Go
+    /// #15675 walk already charges 0). It is still built: address-only
+    /// reverse-identity tokens, persistent leases and flow tracking live
+    /// in it. Keyed/built with range 0/0 (see `key_for`/`build_range`).
+    /// A pending shared with any PAT rule has this false and keeps the
+    /// configured range, so the #10190 shared-allocator guard is unchanged.
+    no_translation: bool,
 }
 
 impl PendingPoolAllocator {
@@ -652,11 +661,32 @@ impl PendingPoolAllocator {
             addresses: self.total_pool as u64,
             // One formula for "port slots this allocator materialises" —
             // shared with PortAllocator::new's own capacity arithmetic.
-            port_capacity: super::allocator::allocator_capacity(
-                self.total_pool,
-                self.port_low,
-                self.port_high,
-            ) as u64,
+            // #16840: a pure no-translation pending materialises no bitmap.
+            port_capacity: if self.no_translation {
+                0
+            } else {
+                super::allocator::allocator_capacity(
+                    self.total_pool,
+                    self.port_low,
+                    self.port_high,
+                ) as u64
+            },
+        }
+    }
+
+    fn key_for(&self, rule: &SourceNatRule) -> SourceNatPoolAllocatorKey {
+        if self.no_translation {
+            rule.allocator_key_for(0, 0)
+        } else {
+            rule.allocator_key_for(self.port_low, self.port_high)
+        }
+    }
+
+    fn build_range(&self) -> (u16, u16) {
+        if self.no_translation {
+            (0, 0)
+        } else {
+            (self.port_low, self.port_high)
         }
     }
 }
@@ -875,6 +905,40 @@ fn resolve_pool_allocators(
     budget: &SourceNatAggregateBudget,
     now_ns: u64,
 ) {
+    // #16840: honour the legacy port-bearing allocator from pre-fix applies
+    // for a pure no-translation key: the first post-fix apply must reuse it,
+    // not orphan its live tokens. Alias it under the new 0/0 key; an
+    // already-0/0 key wins. Subsequent calls receive the shadowed map.
+    let mut previous_allocators_owned;
+    let previous_allocators = {
+        let needs_alias = out.iter().zip(pendings.iter()).any(|(rule, pending)| {
+            matches!(pending, Some(p) if p.no_translation)
+                && !previous_allocators.contains_key(&rule.allocator_key_for(0, 0))
+                && previous_allocators
+                    .contains_key(&rule.allocator_key_for(rule.pool_port_low, rule.pool_port_high))
+        });
+        if needs_alias {
+            previous_allocators_owned = previous_allocators.clone();
+            for (rule, pending) in out.iter().zip(pendings.iter()) {
+                let Some(p) = pending else { continue };
+                if !p.no_translation {
+                    continue;
+                }
+                let new_key = rule.allocator_key_for(0, 0);
+                if previous_allocators_owned.contains_key(&new_key) {
+                    continue;
+                }
+                let legacy_key =
+                    rule.allocator_key_for(rule.pool_port_low, rule.pool_port_high);
+                if let Some(existing) = previous_allocators.get(&legacy_key) {
+                    previous_allocators_owned.insert(new_key, existing.clone());
+                }
+            }
+            &previous_allocators_owned
+        } else {
+            previous_allocators
+        }
+    };
     let mut pool_allocators = FxHashMap::<SourceNatPoolAllocatorKey, PortAllocator>::default();
     let mut refused_keys = FxHashMap::<SourceNatPoolAllocatorKey, ()>::default();
     let mut used = SourceNatAggregateUse::default();
@@ -887,7 +951,7 @@ fn resolve_pool_allocators(
         let Some(pending) = pending else {
             continue;
         };
-        let key = rule.allocator_key_for(pending.port_low, pending.port_high);
+        let key = pending.key_for(rule);
         if !previous_allocators.contains_key(&key) || reserved.contains_key(&key) {
             continue;
         }
@@ -925,6 +989,9 @@ fn resolve_pool_allocators(
                 port_low: rule.pool_port_low,
                 port_high: rule.pool_port_high,
                 total_pool: rule.pool_addresses_v4.len() + rule.pool_addresses_v6.len(),
+                // #16840: a draining no-translation pool materialised no
+                // bitmap, so it charges 0 port slots like a healthy one.
+                no_translation: rule.no_translation,
             }
             .charge(),
         );
@@ -963,7 +1030,7 @@ fn resolve_pool_allocators(
         let Some(pending) = pending else {
             continue;
         };
-        let key = rule.allocator_key_for(pending.port_low, pending.port_high);
+        let key = pending.key_for(rule);
         if refused_keys.contains_key(&key) {
             rule.pool_failure = Some(SourceNatFailureReason::OverBudget);
             rule.deterministic_v4 = None;
@@ -1010,8 +1077,8 @@ fn resolve_pool_allocators(
         match used.admitted_with(charge, budget) {
             Some(next) => {
                 used = next;
-                let allocator =
-                    PortAllocator::new(pending.total_pool, pending.port_low, pending.port_high);
+                let (build_low, build_high) = pending.build_range();
+                let allocator = PortAllocator::new(pending.total_pool, build_low, build_high);
                 // #6765: a FRESH allocator over a pool that RETAINS addresses
                 // would reissue `(retained_addr, port_low)` — the occupancy
                 // bitmap that was the sole ownership token is all-zero and the
@@ -2168,9 +2235,35 @@ fn parse_source_nat_rules_inner(
                     port_low,
                     port_high,
                     total_pool,
+                    // Provisional: true only if this rule is no-translation.
+                    // Downgraded below when a PAT sibling shares the key.
+                    no_translation: snap.pool_no_translation,
                 }),
         );
         out.push(rule);
+    }
+    // #16840: a pending stays pure no-translation only when EVERY rule that
+    // will resolve under the same configured-range key is no-translation.
+    // A PAT sibling downgrades the whole group to the port-bearing key /
+    // bitmap / charge, preserving the #10190 shared allocator.
+    {
+        let mut groups: FxHashMap<SourceNatPoolAllocatorKey, bool> = FxHashMap::default();
+        for (rule, pending) in out.iter().zip(pendings.iter()) {
+            let Some(p) = pending else { continue };
+            let key = rule.allocator_key_for(p.port_low, p.port_high);
+            let entry = groups.entry(key).or_insert(true);
+            *entry = *entry && p.no_translation;
+        }
+        for (rule, pending) in out.iter_mut().zip(pendings.iter_mut()) {
+            let Some(p) = pending.as_mut() else { continue };
+            if !p.no_translation {
+                continue;
+            }
+            let key = rule.allocator_key_for(p.port_low, p.port_high);
+            if groups.get(&key) == Some(&false) {
+                p.no_translation = false;
+            }
+        }
     }
     resolve_pool_allocators(
         &mut out,

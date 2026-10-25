@@ -1453,3 +1453,77 @@ fn exact_fit_on_the_port_capacity_budget_installs_7032() {
     );
     assert_eq!(rules[1].pool_allocator.debug_occupancy_words(), 0);
 }
+
+// #16840: `port no-translation` pools charge 0 port slots in Rust, matching
+// Go #15675. Pre-fix the parse defaulted wire 0/0 to 1024-65535, charged
+// 64512/address and built the full bitmap, so later pools were refused
+// OverBudget on a strict-clean config.
+fn notrans_snap(rule: &str, pool: &str, members: &[&str]) -> SourceNATRuleSnapshot {
+    SourceNATRuleSnapshot {
+        pool_no_translation: true,
+        ..pool_snap(rule, pool, members, 0, 0)
+    }
+}
+
+#[test]
+fn no_translation_pools_charge_zero_and_build_no_bitmap_16840() {
+    // Scaled budget: 2 x 8 x 64512 would fit two PAT pools but not three.
+    // Go charges these 0, so all three must install with no bitmap.
+    let budget = SourceNatAggregateBudget {
+        max_pools: 1024,
+        max_addresses: 1_048_576,
+        max_port_capacity: 2 * 8 * 64512,
+    };
+    let snaps = vec![
+        notrans_snap("r0", "p0", SMALL_POOL),
+        notrans_snap("r1", "p1", SMALL_POOL),
+        notrans_snap("r2", "p2", SMALL_POOL),
+    ];
+    let rules =
+        parse_source_nat_rules_with_budget(&snaps, None, &NatCounterStore::default(), &budget);
+    for (i, r) in rules.iter().enumerate() {
+        assert_eq!(r.pool_failure, None, "no-translation rule {i} must not be OverBudget");
+        assert_eq!(
+            r.pool_allocator.debug_occupancy_words(),
+            0,
+            "no-translation rule {i} must build no port bitmap"
+        );
+        assert_eq!(r.pool_allocator.snapshot().max_tracked_flows, 262_144);
+    }
+    // PAT control at same budget: third pool refused.
+    let pat = vec![
+        pool_snap("r0", "p0", SMALL_POOL, 1024, 65535),
+        pool_snap("r1", "p1", SMALL_POOL, 1024, 65535),
+        pool_snap("r2", "p2", SMALL_POOL, 1024, 65535),
+    ];
+    let pat_rules =
+        parse_source_nat_rules_with_budget(&pat, None, &NatCounterStore::default(), &budget);
+    assert_eq!(pat_rules[2].pool_failure, Some(SourceNatFailureReason::OverBudget));
+}
+
+#[test]
+fn no_translation_reapply_reuses_zero_range_allocator_16840() {
+    let snaps = vec![notrans_snap("r0", "p0", SMALL_POOL)];
+    let gen1 = parse_with_test_budget(&snaps, None);
+    let id = gen1[0].pool_allocator.debug_shared_identity();
+    let gen2 = parse_with_test_budget(&snaps, Some(&gen1));
+    assert_eq!(gen2[0].pool_allocator.debug_shared_identity(), id);
+    assert_eq!(gen2[0].pool_failure, None);
+}
+
+#[test]
+fn mixed_notrans_and_pat_share_port_bearing_allocator_16840() {
+    let mut notrans = notrans_snap("r0", "shared", SMALL_POOL);
+    notrans.port_low = 20000;
+    notrans.port_high = 20009;
+    let pat = pool_snap("r1", "shared", SMALL_POOL, 20000, 20009);
+    let rules = parse_with_test_budget(&[notrans, pat], None);
+    assert_eq!(rules[0].pool_failure, None);
+    assert_eq!(rules[1].pool_failure, None);
+    assert_eq!(
+        rules[0].pool_allocator.debug_shared_identity(),
+        rules[1].pool_allocator.debug_shared_identity(),
+        "mixed pool must keep one shared allocator (#10190)"
+    );
+    assert_eq!(rules[0].pool_allocator.debug_occupancy_words(), 8);
+}
