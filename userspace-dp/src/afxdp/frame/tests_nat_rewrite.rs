@@ -1780,6 +1780,7 @@ fn gre_forwarding_8896(id: u16) -> ForwardingState {
         TunnelEndpoint {
             id,
             logical_ifindex: 12,
+            mtu: 0,
             interface_label: "gr-0/0/0".into(),
             interface: "gr-0/0/0.0".into(),
             redundancy_group: 0,

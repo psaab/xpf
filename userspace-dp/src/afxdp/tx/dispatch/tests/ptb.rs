@@ -911,6 +911,7 @@ fn forwarding_for_ptb_with_unknown_tunnel(mtu: usize) -> ForwardingState {
         TunnelEndpoint {
             id: 7,
             logical_ifindex: 24,
+            mtu: 0,
             interface_label: "tun0".into(),
             interface: "tun0.0".into(),
             redundancy_group: 0,
@@ -980,6 +981,7 @@ fn forwarding_for_ptb_with_tunnel(mtu: usize, mode: &str) -> ForwardingState {
         TunnelEndpoint {
             id: 7,
             logical_ifindex: 24,
+            mtu: 0,
             interface_label: "tun0".into(),
             interface: "tun0.0".into(),
             redundancy_group: 0,

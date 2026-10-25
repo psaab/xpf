@@ -403,6 +403,7 @@ impl Coordinator {
             TunnelEndpoint {
                 id: 7,
                 logical_ifindex: 42,
+                mtu: 0,
                 interface_label: "gr-0/0/0".into(),
                 interface: "gr-0/0/0".into(),
                 redundancy_group: 1,

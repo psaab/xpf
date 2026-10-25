@@ -195,3 +195,34 @@ impl InterfaceMtu {
         self.0
     }
 }
+
+/// A validated tunnel-endpoint logical MTU (#16514).
+///
+/// Same contract as `InterfaceMtu` (#2706): `0` is the legitimate
+/// "unknown" sentinel (non-limiting for `native_gre_inner_mtu`), a
+/// positive value passes through, and a NEGATIVE value is REJECTED
+/// rather than collapsed to 0 — collapsing would silently disable the
+/// gr- MTU cap the operator configured. Reuses the
+/// `InterfaceMtuInvalid` error (keyed by the endpoint's interface
+/// name) so no new wire/error variant is needed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::afxdp) struct TunnelMtu(usize);
+
+impl TunnelMtu {
+    pub(in crate::afxdp) fn try_from_snapshot(
+        mtu: i32,
+        interface: &str,
+    ) -> Result<Self, SnapshotIntegrityError> {
+        usize::try_from(mtu).map(Self).map_err(|_| {
+            SnapshotIntegrityError::InterfaceMtuInvalid {
+                interface: interface.to_string(),
+                mtu,
+            }
+        })
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn get(self) -> usize {
+        self.0
+    }
+}

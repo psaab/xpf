@@ -183,7 +183,11 @@ pub(in crate::afxdp) static WG_DECAP_ECN_ILLEGAL_DROPS: AtomicU64 = AtomicU64::n
 /// flags inner flows whose encapped size exceeds the local tunnel
 /// transport MTU — most often a missing/too-high inner MSS clamp
 /// (`native_gre_tcp_mss`) or a non-TCP inner (UDP/ICMP/ESP) with no
-/// segmentation lever.
+/// segmentation lever. This guard is intentionally PHYSICAL-only
+/// (#16514): it compares against `tunnel_outer_mtu`, not the gr-
+/// logical MTU — the logical MTU is enforced earlier by the PTB /
+/// MSS-clamp / re-segmentation SSOT (`native_gre_inner_mtu`), and
+/// this site only refuses outer frames the NIC cannot transmit.
 ///
 /// PMTUD (ICMP Frag-Needed / PTB) signalling back to the inner source is
 /// NOT generated at THIS site — it lives in the TX dispatcher

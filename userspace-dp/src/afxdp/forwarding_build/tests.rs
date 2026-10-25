@@ -7962,6 +7962,37 @@ fn tunnel_ttl_out_of_range_fails_closed() {
     }
 }
 
+/// #16514: a negative tunnel-endpoint MTU fails the snapshot CLOSED
+/// via `InterfaceMtuInvalid`. A `.max(0)` collapse would silently
+/// disable the gr- logical-MTU cap (0 = non-limiting).
+#[test]
+fn tunnel_mtu_negative_fails_closed_16514() {
+    let snapshot = ConfigSnapshot {
+        tunnel_endpoints: vec![crate::protocol::snapshot::TunnelEndpointSnapshot {
+            id: 9,
+            interface: "gr-0/0/0".into(),
+            ifindex: 50,
+            mode: "gre".into(),
+            source: "203.0.113.1".into(),
+            destination: "198.51.100.1".into(),
+            mtu: -1,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let err = try_build_forwarding_state_with_policy_counters(
+        &snapshot,
+        &crate::policy::PolicyCounterStore::default(),
+    )
+    .expect_err("a negative tunnel MTU must fail closed, not collapse to 0");
+    match err {
+        crate::policy::SnapshotIntegrityError::InterfaceMtuInvalid { mtu, .. } => {
+            assert_eq!(mtu, -1);
+        }
+        other => panic!("expected InterfaceMtuInvalid, got {other:?}"),
+    }
+}
+
 /// #5193 (A1-b7-F1): two tunnel-endpoint rows sharing one nonzero id fail the
 /// snapshot CLOSED via `TunnelEndpointDuplicateId`. Pre-fix, `tunnel_endpoints`
 /// (keyed by id) kept only the LAST row while `tunnel_endpoint_by_ifindex`

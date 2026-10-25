@@ -60,6 +60,13 @@ pub(super) fn populate_tunnel_endpoints(
         // tunnel).
         let ttl = super::validated::TunnelTtl::try_from_snapshot(endpoint.ttl, endpoint.id)?.get();
         let is_wireguard = endpoint.mode == "wireguard";
+        // #16514: carry the tunnel logical MTU (configured
+        // `interfaces gr-… [unit N] mtu`) into the runtime endpoint so
+        // `native_gre_inner_mtu` can cap the physical-derived budget.
+        // Validated like an interface MTU: negative fails the snapshot
+        // closed, 0 stays the non-limiting "unknown" sentinel.
+        let mtu = super::validated::TunnelMtu::try_from_snapshot(endpoint.mtu, &endpoint.interface)?
+            .get();
         let (source, destination) = if is_wireguard {
             // #11574: the configured outer source address is the worker's
             // listener owner-zone identity. Parse it when present and fall
@@ -141,6 +148,7 @@ pub(super) fn populate_tunnel_endpoints(
             TunnelEndpoint {
                 id: endpoint.id,
                 logical_ifindex: endpoint.ifindex,
+                mtu: mtu as i32,
                 // #1865: attachment label for the telemetry-row name
                 // fallback (linux_name, else logical name — mirrors
                 // wg_tombstone_respawn_coherent's row_label).

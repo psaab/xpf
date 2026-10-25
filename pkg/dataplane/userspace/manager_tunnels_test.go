@@ -55,6 +55,13 @@ func TestBuildTunnelEndpointSnapshotsBuildsUnitEndpoint(t *testing.T) {
 	if !endpoints[0].ClearDontFragmentBit {
 		t.Fatal("explicit GRE clear-dont-fragment-bit setting was not carried to the endpoint snapshot")
 	}
+	// #16514: the interface row's MTU (the configured gr- unit MTU,
+	// else the kernel anchor MTU) must reach the endpoint snapshot —
+	// the Rust `native_gre_inner_mtu` caps its physical-derived
+	// budget by this value.
+	if endpoints[0].MTU != 1476 {
+		t.Fatalf("endpoint MTU = %d, want 1476 (interface row MTU)", endpoints[0].MTU)
+	}
 }
 
 func TestBuildTunnelEndpointSnapshotsCarriesLinkState11423(t *testing.T) {
