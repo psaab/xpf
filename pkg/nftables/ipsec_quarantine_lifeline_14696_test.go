@@ -63,9 +63,14 @@ func TestIpsecQuarantineInputAdmitsLifeline14696(t *testing.T) {
 		name   string
 		family string
 		hook   string
+		// wantRules: inet gets lo+iif+sdif+candidate+base (5); bridge
+		// gets lo+iif+candidate+base (4) — #16703: sdifname is
+		// inet-only, the kernel rejects it on bridge with EOPNOTSUPP.
+		wantRules int
+		wantSdif  bool
 	}{
-		{"inet-input", "inet", "input"},
-		{"bridge-input", "bridge", "input"},
+		{"inet-input", "inet", "input", 5, true},
+		{"bridge-input", "bridge", "input", 4, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tbl := &gnft.Table{Family: gnft.TableFamilyINet, Name: IpsecQuarantineTableName}
@@ -79,17 +84,26 @@ func TestIpsecQuarantineInputAdmitsLifeline14696(t *testing.T) {
 			if p.err != nil {
 				t.Fatalf("render: %v", p.err)
 			}
-			// lo + lifeline iif + lifeline sdif + candidate + base = 5
-			if len(p.rules) != 5 {
-				t.Fatalf("rule count = %d, want 5 (lo, lifeline iif, lifeline sdif, candidate, base): %#v", len(p.rules), p.rules)
+			if len(p.rules) != tc.wantRules {
+				t.Fatalf("rule count = %d, want %d: %#v", len(p.rules), tc.wantRules, p.rules)
 			}
 			assertIpsecQuarantineLoopbackAccept9506(t, p.rules[0])
 			assertIpsecQuarantineLifelineAccept14696(t, p.rules[1], spec.LifelineNetdevs)
-			assertIpsecQuarantineLifelineAccept14696(t, p.rules[2], spec.LifelineNetdevs)
-			// sdif rule must use sdif key
-			meta, ok := p.rules[2][0].(*expr.Meta)
-			if !ok || meta.Key != expr.MetaKey(metaKeySDIFNAME) {
-				t.Fatalf("sdif rule first expr = %#v, want sdifname meta", p.rules[2][0])
+			if tc.wantSdif {
+				assertIpsecQuarantineLifelineAccept14696(t, p.rules[2], spec.LifelineNetdevs)
+				meta, ok := p.rules[2][0].(*expr.Meta)
+				if !ok || meta.Key != expr.MetaKey(metaKeySDIFNAME) {
+					t.Fatalf("sdif rule first expr = %#v, want sdifname meta", p.rules[2][0])
+				}
+			} else {
+				// Bridge: no rule may carry the sdifname meta key.
+				for i, rule := range p.rules {
+					for _, e := range rule {
+						if m, ok := e.(*expr.Meta); ok && m.Key == expr.MetaKey(metaKeySDIFNAME) {
+							t.Fatalf("bridge rule %d carries sdifname (kernel EOPNOTSUPP): %#v", i, rule)
+						}
+					}
+				}
 			}
 			// Last rule remains terminal DROP
 			last := p.rules[len(p.rules)-1]
@@ -141,9 +155,14 @@ func TestIpsecQuarantineNormalizeLifelines14696(t *testing.T) {
 	if len(spec.LifelineNetdevs) != 2 || spec.LifelineNetdevs[0] != "em0" || spec.LifelineNetdevs[1] != "fxp0" {
 		t.Fatalf("normalized lifelines = %v, want sorted unique [em0 fxp0]", spec.LifelineNetdevs)
 	}
-	// Non-quarantine spec must not have lifelines forced.
-	plain := normalizeIpsecQuarantineSpec(IpsecDivertSpec{LifelineNetdevs: []string{"fxp0"}})
-	if len(plain.LifelineNetdevs) != 0 {
-		t.Fatalf("non-quarantine spec retained lifelines %v, want cleared", plain.LifelineNetdevs)
+	// #16618: a non-quarantine spec retains its lifelines normalized so
+	// a QuarantineAll guard built from it can inherit them; the lifelines
+	// alone must not turn it into a quarantine request.
+	plain := normalizeIpsecQuarantineSpec(IpsecDivertSpec{LifelineNetdevs: []string{"fxp0", "fxp0", "", "em0"}})
+	if plain.QuarantineAll {
+		t.Fatalf("lifeline-only spec quarantined: %+v", plain)
+	}
+	if len(plain.LifelineNetdevs) != 2 || plain.LifelineNetdevs[0] != "em0" || plain.LifelineNetdevs[1] != "fxp0" {
+		t.Fatalf("non-quarantine lifelines = %v, want normalized [em0 fxp0] retained for guard inheritance", plain.LifelineNetdevs)
 	}
 }

@@ -1020,6 +1020,30 @@ func (p *ipsecCaptureQueuePlan) addQuarantine(reason xnft.IpsecQuarantineReason)
 	}
 }
 
+// ipsecLifelinesForQuarantine16618 returns the management lifelines a
+// QuarantineAll guard built from spec must carry (#16618). Lifelines
+// already on the spec (stamped at plan finalize) win; otherwise they are
+// derived from cfg, then from the daemon's live config. HostInbound-
+// LifelineIngressNetdevs always contains fxp0, so even a nil config
+// yields the management lifeline rather than a lifeline-free guard.
+func ipsecLifelinesForQuarantine16618(d *Daemon, spec xnft.IpsecDivertSpec, cfg *config.Config) []string {
+	if len(spec.LifelineNetdevs) > 0 {
+		return append([]string(nil), spec.LifelineNetdevs...)
+	}
+	if cfg == nil && d != nil {
+		cfg = d.liveConfig12169()
+	}
+	return dpuserspace.HostInboundLifelineIngressNetdevs(cfg)
+}
+
+// withIpsecQuarantineLifelines16618 returns spec forced to QuarantineAll
+// with lifelines stamped per ipsecLifelinesForQuarantine16618.
+func (d *Daemon) withIpsecQuarantineLifelines16618(spec xnft.IpsecDivertSpec, cfg *config.Config) xnft.IpsecDivertSpec {
+	spec.QuarantineAll = true
+	spec.LifelineNetdevs = ipsecLifelinesForQuarantine16618(d, spec, cfg)
+	return spec
+}
+
 func (p *ipsecCaptureQueuePlan) finalize(generation uint64) {
 	if p == nil {
 		return
@@ -1029,7 +1053,11 @@ func (p *ipsecCaptureQueuePlan) finalize(generation uint64) {
 		p.Quarantine.LifelineNetdevs = dpuserspace.HostInboundLifelineIngressNetdevs(p.cfg)
 	}
 	if !p.Quarantine.QuarantineAll {
-		p.Quarantine.LifelineNetdevs = nil
+		// #16618: keep the lifelines on the normal spec. They are not a
+		// quarantine request and no normal divert rendering consults
+		// them, but a QuarantineAll guard built from this spec (guarded
+		// transition / recovery guard in the nftables installer) must
+		// inherit them or the retained guard blackholes fxp0 input.
 		// #15066: candidates collected from valid tunnels are deny-list
 		// bookkeeping for a quarantine that a later reason may request.
 		// With no quarantine reason they must not survive finalize, or
@@ -1719,6 +1747,9 @@ func (d *Daemon) commitIpsecCaptureStage(old, staged *ipsecCaptureRuntime) error
 				if old != nil {
 					fallbackSpec = old.spec
 				}
+				// #16618: the fallback guard must carry lifelines even
+				// when old.spec is a lifeline-free normal spec.
+				fallbackSpec = d.withIpsecQuarantineLifelines16618(fallbackSpec, nil)
 				guardErr := installIpsecQuarantine9506(fallbackSpec)
 				d.restoreIpsecCaptureRuntime(old)
 				d.ipsecCaptureRemovalPending.Store(true)
@@ -1802,7 +1833,7 @@ func (d *Daemon) commitIpsecCaptureStage(old, staged *ipsecCaptureRuntime) error
 				} else {
 					// Never restore old as an authority after a failed
 					// kernel reinstall. Keep/attempt deny-first authority.
-					if quarantineErr := installIpsecQuarantine9506(staged.spec); quarantineErr != nil {
+					if quarantineErr := d.installIpsecQuarantineForDaemon16618(staged.spec); quarantineErr != nil {
 						slog.Warn("ipsec capture: quarantine fallback after rollback failure failed", "err", quarantineErr)
 					}
 					d.markIpsecKernelQuarantineOrphaned()
@@ -1810,7 +1841,7 @@ func (d *Daemon) commitIpsecCaptureStage(old, staged *ipsecCaptureRuntime) error
 					_ = staged.close()
 				}
 			} else {
-				if quarantineErr := installIpsecQuarantine9506(staged.spec); quarantineErr != nil {
+				if quarantineErr := d.installIpsecQuarantineForDaemon16618(staged.spec); quarantineErr != nil {
 					slog.Warn("ipsec capture: quarantine fallback identity allocation failed", "err", quarantineErr)
 				}
 				d.markIpsecKernelQuarantineOrphaned()
@@ -1923,7 +1954,7 @@ func (d *Daemon) shutdownIpsecCapture() {
 						slog.Warn("ipsec capture shutdown: fence re-readback failed after divert removal error; installing quarantine",
 							"err", verifyErr)
 						d.ipsecOverlayAcked.Store(nil)
-						if guardErr := installIpsecQuarantine9506(active.spec); guardErr != nil {
+						if guardErr := d.installIpsecQuarantineForDaemon16618(active.spec); guardErr != nil {
 							slog.Warn("ipsec capture shutdown: verified quarantine fallback failed after ambiguous removal",
 								"err", guardErr)
 						}

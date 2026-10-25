@@ -139,3 +139,12 @@ func installIpsecQuarantine9506(spec xnft.IpsecDivertSpec) error {
 	}
 	return nftInstaller.InstallIpsecDivert(stamped)
 }
+
+// installIpsecQuarantineForDaemon16618 is installIpsecQuarantine9506 with
+// #16618 lifelines stamped from the daemon's live config when the spec
+// does not already carry them. Every daemon fallback that builds a
+// QuarantineAll guard from a normal (lifeline-free) staged/old/active
+// spec must go through here so the retained guard admits fxp0 input.
+func (d *Daemon) installIpsecQuarantineForDaemon16618(spec xnft.IpsecDivertSpec) error {
+	return installIpsecQuarantine9506(d.withIpsecQuarantineLifelines16618(spec, nil))
+}
