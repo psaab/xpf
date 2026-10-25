@@ -2203,6 +2203,21 @@ func (d *Daemon) reconcileClusterDHCPServices(reason string) {
 // The two sets are derived from ONE walker (rethInterfacesMatchingRG) so
 // "RG-scoped" and "mastered" cannot resolve a RETH member differently.
 
+// isPeerSlotInterface16685 reports whether norm (a resolved, untagged-unit-
+// normalized kernel name) belongs to the PEER node's FPC slot. In a chassis
+// cluster node0 names its ports ge-0-0-* and node1 names its ports ge-7-0-*,
+// so a shared-section member on the peer's slot does not exist on this node
+// (#16685). Names with no FPC slot (reth members resolved to the local member,
+// fxp0, fab0, lo, st0, irb) are never peer-slot. When the local node id is
+// unknown (no cluster config) nothing is peer-slot.
+func isPeerSlotInterface16685(norm string, localNodeID int) bool {
+	if localNodeID < 0 {
+		return false
+	}
+	slot := config.InterfaceSlot(norm)
+	return slot >= 0 && config.SlotToNodeID(slot) != localNodeID
+}
+
 func (d *Daemon) filterDHCPConfigForMasterRGsWithMasters(cfg *config.Config, masters map[int]bool) *config.DHCPServerConfig {
 	// Collect all interfaces belonging to master RGs. Normalize the untagged
 	// ".0" suffix (#4647) so the set is keyed by the bare member name that the
@@ -2223,6 +2238,12 @@ func (d *Daemon) filterDHCPConfigForMasterRGsWithMasters(cfg *config.Config, mas
 	for _, n := range rethInterfacesMatchingRG(cfg, func(int) bool { return true }) {
 		rgScoped[stripUntaggedUnitSuffix(n)] = true
 	}
+	// #16685: the local node id for the peer-slot test. -1 (no cluster
+	// config / unknown) disables the test, preserving prior behaviour.
+	localNodeID := -1
+	if cfg.Chassis.Cluster != nil {
+		localNodeID = cfg.Chassis.Cluster.NodeID
+	}
 
 	dhcpCfg := resolveDHCPRethInterfaces(cfg.System.DHCPServer, cfg)
 
@@ -2241,6 +2262,18 @@ func (d *Daemon) filterDHCPConfigForMasterRGsWithMasters(cfg *config.Config, mas
 				// "ge-0-0-1.0" is not a device. Tagged units keep their
 				// ".<vlan>" and match only the tagged member.
 				norm := stripUntaggedUnitSuffix(iface)
+				// #16685: a non-RG member on the PEER's FPC slot does not
+				// exist on this node. Keeping it makes Kea refuse the whole
+				// family file, so the peer serves nothing — including RETH
+				// segments after failover. #6520's "node-local is kept
+				// unconditionally" holds only for interfaces that exist
+				// here: a peer-slot port is node-local to the OTHER node.
+				// RG-scoped members are already resolved to the local
+				// member, so their slot is local and this test is inert
+				// for them.
+				if !rgScoped[norm] && isPeerSlotInterface16685(norm, localNodeID) {
+					continue
+				}
 				// #6520: node-local members (no redundancy group) are not
 				// mastership-scoped and are always kept; RG-scoped members are
 				// kept only while this node masters their RG.

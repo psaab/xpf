@@ -1504,6 +1504,28 @@ per-subnet selector for a narrowed group, and still emits one for an authored
 singleton). The two files name their own side of the agreement so a failure says
 which half broke.
 
+**A node-local member must exist on THIS node (#16685).** The #6520 rule
+above kept every non-RG member on both nodes. That is correct for an
+interface both nodes have (`fxp0`), and wrong for a shared-section port on
+the PEER's FPC slot: node0 names its ports `ge-0-0-*`, node1 names its
+ports `ge-7-0-*`, so a shared `ge-0/0/3` DHCP group resolved to `ge-0-0-3`
+on node1, where no such device exists. The #15206 belt kept it (the name
+IS declared — on the peer), Kea refused the whole family file, and the
+peer served no DHCP at all, including RETH segments after failover.
+`filterDHCPConfigForMasterRGsWithMasters` now drops a non-RG member whose
+`config.InterfaceSlot` maps via `config.SlotToNodeID` to the other node
+(`isPeerSlotInterface16685`), marking `MembersFiltered` when a group
+shrinks; a peer-slot-only group disappears. RG-scoped members are already
+resolved to the local member, so the test is inert for them, and slot-less
+names (`fxp0`, `fab0`, `lo`) are never dropped. `clusterRAConfigSets`
+applies the same rule to node-local RA interfaces, whose sender would
+otherwise fail to bind a nonexistent device on every reconcile.
+
+Guards: `pkg/daemon/dhcp_peer_slot_16685_test.go` (shared shape compiled
+per node via `CompileConfigForNode`: peer drops the peer-slot member in
+v4 and v6, owner unchanged, mixed group marked, grouped `nodeN` shape
+unchanged, RA sibling on both nodes and both masterships).
+
 ### DHCP-learned routes and their routing instance: the key shape (#9135)
 
 `collectDHCPRoutes` (`daemon_flow.go`) tags each DHCP-learned route with the
