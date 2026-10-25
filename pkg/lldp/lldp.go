@@ -7,11 +7,13 @@ package lldp
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -44,11 +46,23 @@ const (
 	tlvSystemCap      = 7
 	tlvManagementAddr = 8
 
-	// Chassis ID subtypes.
-	chassisSubtypeMACAddr = 4
+	// Chassis ID subtypes (IEEE 802.1AB Table 8-2).
+	chassisSubtypeChassisComponent = 1
+	chassisSubtypeInterfaceAlias   = 2
+	chassisSubtypePortComponent    = 3
+	chassisSubtypeMACAddr          = 4
+	chassisSubtypeNetworkAddr      = 5
+	chassisSubtypeInterfaceName    = 6
+	chassisSubtypeLocallyAssigned  = 7
 
-	// Port ID subtypes.
-	portSubtypeIfName = 5
+	// Port ID subtypes (IEEE 802.1AB Table 8-3).
+	portSubtypeInterfaceAlias  = 1
+	portSubtypePortComponent   = 2
+	portSubtypeMACAddr         = 3
+	portSubtypeNetworkAddr     = 4
+	portSubtypeInterfaceName   = 5
+	portSubtypeAgentCircuitID  = 6
+	portSubtypeLocallyAssigned = 7
 
 	// Default LLDP transmit interval and hold multiplier.
 	defaultInterval       = 30 * time.Second
@@ -59,16 +73,36 @@ const (
 )
 
 // Neighbor represents a discovered LLDP neighbor on an interface.
+//
+// ChassisID/PortID hold the CANONICAL DISPLAY form of the identifier (see
+// decodeChassisID/decodePortID): a MAC renders colon-separated, a network
+// address renders as its IP literal (or an iana-<family>:<hex> form for a
+// non-IP family), other binary or non-printable identifiers render hex, and
+// printable text is stored sanitized verbatim. ChassisSubtype/PortSubtype
+// carry the wire subtype byte alongside, and the neighbor TABLE KEY is built
+// from the RAW identity bytes, never from these display strings — two
+// identifiers that merely LOOK alike (or that lossy sanitization used to fold
+// together) are distinct MSAPs (#16673).
 type Neighbor struct {
-	ChassisID  string // chassis identifier (MAC or string)
-	PortID     string // port identifier (interface name)
-	TTL        int    // advertised hold time in seconds
-	SystemName string
-	SystemDesc string
-	PortDesc   string
-	LastSeen   time.Time
-	ExpiresAt  time.Time
-	Interface  string // local interface where neighbor was seen
+	ChassisID      string // canonical display form of the chassis identifier
+	ChassisSubtype int    // wire Chassis ID subtype (IEEE 802.1AB Table 8-2)
+	PortID         string // canonical display form of the port identifier
+	PortSubtype    int    // wire Port ID subtype (IEEE 802.1AB Table 8-3)
+	TTL            int    // advertised hold time in seconds
+	SystemName     string
+	SystemDesc     string
+	PortDesc       string
+	LastSeen       time.Time
+	ExpiresAt      time.Time
+	Interface      string // local interface where neighbor was seen
+
+	// rawChassis/rawPort are the post-subtype wire bytes of the Chassis/Port
+	// ID TLVs. They are the identity the neighbor is keyed by; the display
+	// strings above are derived from them and must never be keyed on, because
+	// distinct raw values can share one display string. Unexported: only
+	// ParseTLVs populates them, and only rxLoop turns them into a table key.
+	rawChassis []byte
+	rawPort    []byte
 }
 
 // LLDPInterface holds per-interface LLDP configuration.
@@ -117,11 +151,13 @@ func dedupInterfaces15776(ifaces []LLDPInterface) []LLDPInterface {
 	return out
 }
 
-// neighborKey identifies a learned LLDP neighbor.
+// neighborKey identifies a learned LLDP neighbor: the MSAP identity of
+// IEEE 802.1AB — (chassis ID subtype, chassis ID) + (port ID subtype, port
+// ID) — scoped to the local interface the frame arrived on.
 //
-// It is a STRUCT rather than a separator-joined string, and that is the whole
-// point (#7176 C179-026). Two of its three components — ChassisID and PortID —
-// are peer-controlled TLV strings taken straight off the wire by ParseTLVs, and
+// It is a STRUCT of the RAW identity components rather than a separator-joined
+// string, and that is the whole point (#7176 C179-026). Two of its components
+// are peer-controlled TLV bytes taken straight off the wire by ParseTLVs, and
 // port IDs legitimately contain "/" (a Junos-style `ge-0/0/1`). A
 // "%s/%s/%s"-formatted key therefore cannot represent them unambiguously:
 // chassis="a/b" port="c" and chassis="a" port="b/c" format to the same string.
@@ -132,24 +168,61 @@ func dedupInterfaces15776(ifaces []LLDPInterface) []LLDPInterface {
 // evict an entry it does not own — remote-input-driven deletion of another
 // peer's state.
 //
-// A comparable struct makes the collision UNREPRESENTABLE rather than escaped:
-// there is no separator to smuggle, so no escaping rule to get wrong later and
-// no encoder/decoder pair that can drift apart.
+// The key carries the raw post-subtype bytes (as strings, Go's byte-string
+// map-key form) and the subtype bytes — NOT the canonical display strings
+// (#16673). Before #16673 the display strings WERE the key components, after
+// lossy sanitization: binary port/chassis IDs (MAC-address port ID, network-
+// address chassis ID) were folded through sanitizeTLVString, which maps
+// controls to spaces and invalid UTF-8 to U+FFFD, so genuinely distinct
+// neighbours under one chassis (two NICs of one host, say) collapsed onto one
+// key, flapped over each other, and either one's TTL=0 withdrawal removed the
+// other. Keying the raw bytes plus subtype makes that collision
+// unrepresentable while leaving the display form free to be canonical.
+//
+// A comparable struct makes each collision UNREPRESENTABLE rather than
+// escaped: there is no separator to smuggle, so no escaping rule to get wrong
+// later and no encoder/decoder pair that can drift apart.
 type neighborKey struct {
-	Iface     string
-	ChassisID string
-	PortID    string
+	Iface          string
+	ChassisSubtype int
+	ChassisID      string // raw post-subtype wire bytes
+	PortSubtype    int
+	PortID         string // raw post-subtype wire bytes
 }
 
 // neighborKeyFor builds the table key for a neighbor learned on ifaceName.
 //
 // Split out of the receive loop so the REAL construction is drivable by a test.
-// The collision this key type exists to prevent is created exactly here — where
-// peer-controlled TLV strings become a key — and a test that assembles keys by
-// hand cannot observe a regression at this site: it would keep passing while the
-// production path went back to joining the components into one string.
+// The collisions this key type exists to prevent are created exactly here —
+// where peer-controlled TLV bytes become a key — and a test that assembles keys
+// by hand cannot observe a regression at this site: it would keep passing while
+// the production path went back to keying the display strings.
+//
+// Neighbor values built by hand (tests, table seeds) carry subtypes and raw
+// bytes directly. When raw bytes are absent but a subtype is set — a dormant
+// subtype-only key over display text — the display string stands in for the raw
+// identity, so same-subtype display-distinct neighbors still key distinctly.
+// A zero subtype means the caller holds legacy display-only identity, which
+// keys on the display strings exactly as before.
 func neighborKeyFor(ifaceName string, n *Neighbor) neighborKey {
-	return neighborKey{Iface: ifaceName, ChassisID: n.ChassisID, PortID: n.PortID}
+	k := neighborKey{
+		Iface:          ifaceName,
+		ChassisSubtype: n.ChassisSubtype,
+		ChassisID:      string(n.rawChassis),
+		PortSubtype:    n.PortSubtype,
+		PortID:         string(n.rawPort),
+	}
+	if len(n.rawChassis) == 0 && n.ChassisSubtype != 0 {
+		k.ChassisID = n.ChassisID
+	}
+	if len(n.rawPort) == 0 && n.PortSubtype != 0 {
+		k.PortID = n.PortID
+	}
+	if n.ChassisSubtype == 0 && n.PortSubtype == 0 {
+		k.ChassisID = n.ChassisID
+		k.PortID = n.PortID
+	}
+	return k
 }
 
 // Manager runs LLDP transmit/receive goroutines and maintains the neighbor table.
@@ -780,16 +853,23 @@ func (m *Manager) Neighbors() []*Neighbor {
 	for k := range m.neighbors {
 		keys = append(keys, k)
 	}
-	// Deterministic order, field by field. The previous sort.Strings over the
-	// joined key ordered by the same components in the same precedence; sorting
-	// the fields directly keeps that without reintroducing a separator.
+	// Deterministic order, field by field over the full MSAP key (interface,
+	// chassis subtype+raw bytes, port subtype+raw bytes). Sorting the fields
+	// directly keeps that without reintroducing a separator, and ordering by
+	// the raw identity keeps display-equal neighbours in a stable order.
 	sort.Slice(keys, func(i, j int) bool {
 		a, b := keys[i], keys[j]
 		if a.Iface != b.Iface {
 			return a.Iface < b.Iface
 		}
+		if a.ChassisSubtype != b.ChassisSubtype {
+			return a.ChassisSubtype < b.ChassisSubtype
+		}
 		if a.ChassisID != b.ChassisID {
 			return a.ChassisID < b.ChassisID
+		}
+		if a.PortSubtype != b.PortSubtype {
+			return a.PortSubtype < b.PortSubtype
 		}
 		return a.PortID < b.PortID
 	})
@@ -1240,7 +1320,7 @@ func encodeChassisID(mac net.HardwareAddr) []byte {
 func encodePortID(name string) []byte {
 	// Subtype (1 byte) + interface name.
 	val := make([]byte, 1+len(name))
-	val[0] = portSubtypeIfName
+	val[0] = portSubtypeInterfaceName
 	copy(val[1:], name)
 	return val
 }
@@ -1323,33 +1403,27 @@ func ParseTLVs(data []byte) *Neighbor {
 			goto done
 		case tlvChassisID:
 			// Mark the Chassis ID present ONLY when the value is long enough
-			// to yield a real identifier. A subtype byte alone (len < 2) or a
-			// MAC-subtype value short of the 6-byte address (len < 7) is a
-			// truncated TLV: leaving hasChassis false makes the terminal check
-			// reject the frame rather than caching it under an empty key
-			// (#2551).
-			if len(value) >= 2 && value[0] == chassisSubtypeMACAddr {
-				if len(value) >= 7 {
-					n.ChassisID = net.HardwareAddr(value[1:7]).String()
+			// to yield a real identifier for its subtype. A subtype byte alone
+			// (len < 2), a MAC-subtype value short of the 6-byte address
+			// (len < 7), or a network-address value short of family+address
+			// (len < 3) is a truncated TLV: leaving hasChassis false makes the
+			// terminal check reject the frame rather than caching it under an
+			// empty key (#2551, #16673).
+			if len(value) >= 2 {
+				if id, raw, ok := decodeChassisID(value[0], value[1:]); ok {
+					n.ChassisID, n.ChassisSubtype, n.rawChassis = id, int(value[0]), raw
 					hasChassis = true
 				}
-				// MAC subtype with len 2..6 is truncated for its own subtype —
-				// do not accept it.
-			} else if len(value) >= 2 {
-				// Non-MAC chassis-id subtypes carry a free-text identifier
-				// straight off the wire — sanitize display controls (#4043, #10899).
-				n.ChassisID = sanitizeTLVString(string(value[1:]))
-				hasChassis = true
 			}
 		case tlvPortID:
 			// Same gating as Chassis ID: a subtype byte with no identifier
-			// (len < 2) is truncated, so leave hasPort false (#2551).
+			// (len < 2), or a subtype-truncated binary identifier, is
+			// truncated, so leave hasPort false (#2551, #16673).
 			if len(value) >= 2 {
-				// Port-id is untrusted L2 input — sanitize display controls so a
-				// crafted TLV can't inject ANSI/CRLF or bidi/format controls into
-				// the log or `show lldp neighbors` table (#4043, #10899).
-				n.PortID = sanitizeTLVString(string(value[1:]))
-				hasPort = true
+				if id, raw, ok := decodePortID(value[0], value[1:]); ok {
+					n.PortID, n.PortSubtype, n.rawPort = id, int(value[0]), raw
+					hasPort = true
+				}
 			}
 		case tlvTTL:
 			// hasTTL gates on the 2-byte PARSE succeeding, not on a non-zero
@@ -1376,6 +1450,108 @@ done:
 		return nil
 	}
 	return n
+}
+
+// ianaAFIPv4/ianaAFIPv6 are the IANA address-family numbers that prefix a
+// network-address Chassis/Port ID (IEEE 802.1AB: the first octet after the
+// subtype is an IANA address family, the rest is the address in that family).
+const (
+	ianaAFIPv4 = 1
+	ianaAFIPv6 = 2
+)
+
+// printableTLVText reports whether b reads as display text: valid UTF-8 with
+// no unsafe display rune (the same bar sanitizeTLVString enforces). Only such
+// values keep their text display form; anything else is binary and renders hex.
+func printableTLVText(b []byte) bool {
+	s := string(b)
+	return utf8.ValidString(s) && strings.IndexFunc(s, isUnsafeTLVStringRune) < 0
+}
+
+// canonicalTextOrHex renders an identifier that is not decoded by a
+// subtype-specific rule: printable text is stored sanitized verbatim (the
+// historic display form, #4043/#10899), anything else renders as lowercase hex
+// so no byte is lost to control-folding or U+FFFD replacement (#16673). The
+// hex form is display-only; identity never depends on it — the key holds the
+// raw bytes.
+func canonicalTextOrHex(b []byte) string {
+	if printableTLVText(b) {
+		return sanitizeTLVString(string(b))
+	}
+	return hex.EncodeToString(b)
+}
+
+// canonicalNetworkAddr renders a network-address identifier body (IANA family
+// octet + address bytes). IPv4/IPv6 families with the exact address length
+// render as the plain IP literal — the form operators read in
+// `show lldp neighbors`. Any other family, or a malformed length for a known
+// family, renders iana-<family>:<hex> so the family and every address byte
+// survive. ok=false only when the body cannot hold family+address at all.
+func canonicalNetworkAddr(body []byte) (string, bool) {
+	if len(body) < 2 {
+		return "", false
+	}
+	family, addr := int(body[0]), body[1:]
+	switch family {
+	case ianaAFIPv4:
+		if len(addr) == net.IPv4len {
+			return net.IP(addr).String(), true
+		}
+	case ianaAFIPv6:
+		if len(addr) == net.IPv6len {
+			return net.IP(addr).String(), true
+		}
+	}
+	return "iana-" + strconv.Itoa(family) + ":" + hex.EncodeToString(addr), true
+}
+
+// decodeChassisID converts a Chassis ID TLV body (subtype already split off)
+// to its canonical display form plus the raw identity bytes to key on. Binary
+// subtypes decode structurally — MAC as colon-separated, network address via
+// canonicalNetworkAddr — and every other subtype keeps printable text
+// sanitized or falls back to hex, so no identifier byte is silently folded
+// away. ok=false means the body is truncated for its subtype (#2551).
+// A MAC-subtype body longer than 6 bytes keys on ALL its bytes while the
+// display keeps the first 6, the historic parse.
+func decodeChassisID(subtype byte, body []byte) (display string, raw []byte, ok bool) {
+	raw = append([]byte(nil), body...)
+	switch subtype {
+	case chassisSubtypeMACAddr:
+		if len(body) < 6 {
+			return "", nil, false
+		}
+		return net.HardwareAddr(body[:6]).String(), raw, true
+	case chassisSubtypeNetworkAddr:
+		display, ok = canonicalNetworkAddr(body)
+		if !ok {
+			return "", nil, false
+		}
+		return display, raw, true
+	default:
+		return canonicalTextOrHex(body), raw, true
+	}
+}
+
+// decodePortID is decodeChassisID for the Port ID TLV. Port subtype 3 is the
+// MAC-address form (the #16673 acceptance case: 52:54:00:aa:bb:01 must render
+// as a MAC, not sanitized garbage) and subtype 4 the network-address form.
+func decodePortID(subtype byte, body []byte) (display string, raw []byte, ok bool) {
+	raw = append([]byte(nil), body...)
+	switch subtype {
+	case portSubtypeMACAddr:
+		if len(body) < 6 {
+			return "", nil, false
+		}
+		return net.HardwareAddr(body[:6]).String(), raw, true
+	case portSubtypeNetworkAddr:
+		display, ok = canonicalNetworkAddr(body)
+		if !ok {
+			return "", nil, false
+		}
+		return display, raw, true
+	default:
+		return canonicalTextOrHex(body), raw, true
+	}
 }
 
 func htons(v uint16) uint16 {

@@ -22,19 +22,22 @@ func TestNeighborKeyCollisionCannotEvictAnotherPeer_7176(t *testing.T) {
 
 	// Built through the PRODUCTION constructor, not by hand. A hand-assembled
 	// key cannot see the receive path revert to joining the components, which is
-	// where the collision is actually created.
-	victim := neighborKeyFor("eth0", &Neighbor{ChassisID: "aa", PortID: "bb/cc"})
-	attacker := neighborKeyFor("eth0", &Neighbor{ChassisID: "aa/bb", PortID: "cc"})
+	// where the collision is actually created. Learning is keyed by the same
+	// constructor so the stored entry and the lookup cannot drift apart.
+	victim := &Neighbor{ChassisID: "aa", PortID: "bb/cc", Interface: "eth0"}
+	attacker := &Neighbor{ChassisID: "aa/bb", PortID: "cc", Interface: "eth0"}
+	victimKey := neighborKeyFor("eth0", victim)
+	attackerKey := neighborKeyFor("eth0", attacker)
 
 	// The two keys must be DISTINCT. Under the old joined-string key they were
 	// byte-identical, so this is the property the struct buys and asserting it
 	// directly means the test still means something if the withdraw path moves.
-	if victim == attacker {
+	if victimKey == attackerKey {
 		t.Fatal("the two keys are equal — the peer-controlled components are still " +
 			"joined ambiguously, so a crafted frame can address another neighbor's entry")
 	}
 
-	if !m.learnNeighbor(victim, mkNeighbor("eth0", "aa", "bb/cc")) {
+	if !m.learnNeighbor(victimKey, victim) {
 		t.Fatal("precondition: the victim neighbor must be admitted")
 	}
 	if got := len(m.Neighbors()); got != 1 {
@@ -43,7 +46,7 @@ func TestNeighborKeyCollisionCannotEvictAnotherPeer_7176(t *testing.T) {
 
 	// The attacker's TTL=0 shutdown frame. Same interface, chosen ChassisID and
 	// PortID, and it addresses a key that does not exist — so it must be a no-op.
-	m.withdrawNeighbor(attacker)
+	m.withdrawNeighbor(attackerKey)
 
 	if got := len(m.Neighbors()); got != 1 {
 		t.Fatalf("a crafted TTL=0 frame from a peer evicted a DIFFERENT peer's neighbor "+
