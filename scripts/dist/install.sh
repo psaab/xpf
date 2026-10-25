@@ -193,10 +193,10 @@ is_placeholder_key() {
 validate_archive_key() {
     command -v gpg >/dev/null 2>&1 \
         || die "gpg is required to validate the embedded archive public key."
-    # TMPDIR set: use it as-is (no /var/worktrees dependency). Unset: fall
-    # back to the pinned scratch dir, creating it on first use (#14833).
-    if [ -z "${TMPDIR:-}" ]; then mkdir -p /var/worktrees/.cache/tmpdir || die "cannot create scratch dir."; fi
-    _key_home=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-archive-key-check.XXXXXX") \
+    # Shipped installer (#16539): never create the developer scratch tree
+    # on customer hosts. mktemp -t honours TMPDIR when set and otherwise
+    # falls back to /tmp, so no /var/worktrees parent is needed.
+    _key_home=$(mktemp -d -t xpf-archive-key-check.XXXXXX) \
         || die "cannot create temporary home to validate archive key."
     _key_info=$(printf '%s\n' "$ARCHIVE_KEY" |
         GNUPGHOME="$_key_home" gpg --batch --quiet --with-colons --show-keys - 2>/dev/null) || {
