@@ -88,7 +88,7 @@ func (rg *ribGroupManager) addRibGroupReturnRules(inst *config.RoutingInstanceCo
 // of a failed clear) counts as installed, mirroring next-table handling
 // (#9810); every other add failure is aggregated.
 func installDestinationScopedReturnRules(ops ruleOps, kind, instName string, prefixes map[int][]ribGroupPeerReturnPrefix) []error {
-	vrfName := "vrf-" + instName
+	vrfName := VRFDeviceName(instName)
 	var errs []error
 	seen := make(map[struct {
 		family int

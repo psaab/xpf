@@ -791,6 +791,7 @@ fn closing_synced_import_baselines_at_carried_total_16489() {
         session_id: 0,
         tcp_close_class: TcpCloseClass::Closing.to_wire(),
         tcp_handshake_state: 0,
+            persistent_lease_hold: None,
         fwd_packets: 5,
         rev_packets: 3,
     };

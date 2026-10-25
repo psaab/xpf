@@ -2132,6 +2132,8 @@ func (s *SessionSync) initGenState() {
 	s.genState.sourceNatICMPSentV6 = make(map[dataplane.SessionKeyV6]sourceNatICMPMemo)
 	s.genState.policyIdentitySentV4 = make(map[dataplane.SessionKey]policyIdentityMemo)
 	s.genState.policyIdentitySentV6 = make(map[dataplane.SessionKeyV6]policyIdentityMemo)
+	s.genState.appTimeoutLogSentV4 = make(map[dataplane.SessionKey]appTimeoutLogMemo)
+	s.genState.appTimeoutLogSentV6 = make(map[dataplane.SessionKeyV6]appTimeoutLogMemo)
 	s.genState.recvGenV4 = make(map[dataplane.SessionKey]uint64)
 	s.genState.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
 	s.genState.installTableRecvV4 = make(map[dataplane.SessionKey]recvInstallTable)
@@ -2140,6 +2142,8 @@ func (s *SessionSync) initGenState() {
 	s.genState.sourceNatICMPRecvV6 = make(map[dataplane.SessionKeyV6]sourceNatICMPMemo)
 	s.genState.policyIdentityRecvV4 = make(map[dataplane.SessionKey]policyIdentityMemo)
 	s.genState.policyIdentityRecvV6 = make(map[dataplane.SessionKeyV6]policyIdentityMemo)
+	s.genState.appTimeoutLogRecvV4 = make(map[dataplane.SessionKey]appTimeoutLogMemo)
+	s.genState.appTimeoutLogRecvV6 = make(map[dataplane.SessionKeyV6]appTimeoutLogMemo)
 	s.genState.recvGenScopedV4 = make(map[scopedDeleteKeyV4]uint64)
 	s.genState.recvGenScopedV6 = make(map[scopedDeleteKeyV6]uint64)
 	// #3931: seed the config generation from the same monotonic base so the

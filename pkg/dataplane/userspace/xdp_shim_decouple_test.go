@@ -443,6 +443,12 @@ func injectUserspaceBootstrapMaps(t *testing.T, m *Manager) {
 		ValueSize:  1,
 		MaxEntries: 8192,
 	})
+	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceProxyNDPv6, &ebpf.MapSpec{
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(userspaceLocalV6Key{})),
+		ValueSize:  1,
+		MaxEntries: 8192,
+	})
 	injectUserspaceWGZoneMaps(t, m)
 	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceLandScreen, &ebpf.MapSpec{
 		Type:       ebpf.Hash,

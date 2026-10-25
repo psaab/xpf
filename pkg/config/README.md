@@ -862,7 +862,16 @@ aggregate deadline, per-name 5s cap) runs only outside `configstore`
 semaphore and applies it without re-resolving. `RefreshDNSAddressBooks`
 mutates its argument in place, so it must never be given the published
 active config (#15933); refreshed answers publish as a new store
-generation (#16606).
+generation (#16606). #16687: the daemon's pre-apply resolver
+(`resolveDNSBeforeApply`) now resolves EVERY config into a private
+`CloneForDNSRefresh` clone and returns the clone — no arm writes
+through its argument, whatever the caller's provenance (published
+active, frozen rollback target, or owned) — and the #9811 debt retry
+resolves the same way. `policymatch`'s query-snapshot cache keys on
+`DNSAnswersDigest` (scoped identity + prefixes + `DNSLookupFailed`)
+in addition to the config pointer and feed digest, so even a future
+in-place write cannot leave a stale `ContentRejected` verdict
+resident on the same pointer.
 These expansions live in `Address.ExpandedPrefixes` /
 `DNSAddresses` and are returned by `Address.UsableValues()`, which every
 resolver (policy, NAT, junos-host, userspace book table) now consumes so a
@@ -1908,6 +1917,18 @@ device can carry that id. It runs over the group-expanded, inactive-pruned AST
 so inherited bindings are covered. Its tolerant path warns
 (`lenientSecureTunnelBindIface`), while pkg/routing retains the runtime
 fail-closed backstop for an if_id collision.
+
+The same gate also enforces the route-based VPN capture limit (#16699):
+at most **32 distinct secure-tunnel capture tunnels** (distinct
+`bind-interface` XFRM if_ids, `MaxRouteBasedVPNCaptureTunnels`) are
+supported per IPsec capture generation, because each tunnel owns four
+NFQUEUE provenance classes in the daemon capture plan. A 33rd distinct
+tunnel cannot be represented, so strict commit / commit-check rejects it
+naming the limit, the tolerant load / peer-sync path warns and still
+boots (#1960), and the daemon QUEUE_OPEN capture stage returns a non-nil
+error so a runtime over-cap fails the apply visibly instead of silently
+installing a box-wide quarantine. VPNs sharing one bind-interface count
+once toward the limit.
 
 The same gate carries a DISTINCT `bind-interface` fail-closed arm (#5297): a
 NON-EMPTY bind-interface that `XFRMIfNameAndID` resolves to **if_id 0** (any name

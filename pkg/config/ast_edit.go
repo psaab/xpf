@@ -895,7 +895,10 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool,
 			}
 			// #9685: after an apply statement the remaining tokens are group
 			// names, never an instance under this node's wildcard slot.
-			if !nextIsSibling && schema.wildcard != nil && childSchema != applyStatementSchema {
+			// #16670: a leaf explicitly owning a value tail (source-pool
+			// port range) also retains its operands ahead of the wildcard.
+			// Other wildcard sibling handling remains unchanged.
+			if !nextIsSibling && schema.wildcard != nil && childSchema != applyStatementSchema && !childSchema.absorbBeforeWildcard {
 				nextIsSibling = true
 			}
 			// When the next token names a known child of THIS node (only
@@ -909,9 +912,9 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool,
 					// Trailing values for this leaf: absorb every following
 					// token that is neither a sibling keyword nor a known
 					// child so the flat-set list collapses onto one node,
-					// matching the hierarchical AST. (case (b) only runs when
-					// schema.wildcard == nil — the wildcard check above forces
-					// nextIsSibling=true otherwise.)
+					// matching the hierarchical AST. Wildcard parents reach
+					// this path only for apply statements or a leaf explicitly
+					// opting into value absorption ahead of that wildcard.
 					nodeKeys = append([]string(nil), nodeKeys...)
 					for i < len(path) {
 						if schema.packedValueSibling == path[i] && childSchema.groupReplace {

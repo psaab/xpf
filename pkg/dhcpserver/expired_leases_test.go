@@ -3,6 +3,7 @@ package dhcpserver
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -303,5 +304,103 @@ func TestKeaExpiredLeasesPerFamilyIndependence(t *testing.T) {
 	wantInt(t, elp4, "reclaim-timer-wait-time", 11)
 	if raw := readELPRaw(t, m.confPath6, 6); raw != nil {
 		t.Errorf("v6 has no block configured; key must be absent under Dhcp6, got %s", raw)
+	}
+}
+
+// TestKeaExpiredLeasesOutOfRangeKnobsOmittedWithWarning pins #16691's
+// tolerant-path behaviour: a stored or peer-synced config can carry a
+// knob above Kea's hard maximum (the schema gate only warns there),
+// and rendering it verbatim would make Kea refuse the whole family
+// file. The renderer must omit ONLY the offending knob, warn naming
+// the leaf, and keep the in-range knobs — and the family must still
+// apply. Boundary values render verbatim with no warning.
+func TestKeaExpiredLeasesOutOfRangeKnobsOmittedWithWarning(t *testing.T) {
+	m, _ := testManager(t, map[string]bool{}, "")
+	var warns []string
+	m.SetWarnForTesting(func(msg string, args ...any) {
+		warns = append(warns, msg)
+		for i := 0; i+1 < len(args); i += 2 {
+			if s, ok := args[i+1].(string); ok {
+				warns = append(warns, s)
+			}
+		}
+	})
+	cfg := v4Config("ge-0-0-0")
+	cfg.DHCPLocalServer.ExpiredLeases = &config.DHCPExpiredLeasesConfig{
+		Enabled:                 true,
+		ReclaimTimerWait:        65536,      // above Kea max 65535
+		FlushReclaimedTimerWait: 25,         // in range
+		HoldReclaimedTime:       4294967296, // above Kea max
+		MaxReclaimLeases:        4294967296, // above Kea max
+		MaxReclaimLeasesSet:     true,
+		MaxReclaimTime:          30000, // above Kea max 10000 (issue probe)
+		MaxReclaimTimeSet:       true,
+		UnwarnedReclaimCycles:   65536, // above Kea max 65535
+	}
+	if err := m.Apply(cfg); err != nil {
+		t.Fatalf("Apply with out-of-range knobs must still serve the family, got %v", err)
+	}
+	elp := readELPMap(t, m.confPath4, 4)
+	wantInt(t, elp, "flush-reclaimed-timer-wait-time", 25)
+	for _, k := range []string{
+		"reclaim-timer-wait-time", "hold-reclaimed-time",
+		"max-reclaim-leases", "max-reclaim-time", "unwarned-reclaim-cycles",
+	} {
+		wantAbsent(t, elp, k)
+	}
+	joined := strings.Join(warns, " ")
+	for _, leaf := range []string{"reclaim-timer", "hold-time", "max-leases", "max-time", "unwarned-cycles"} {
+		if !strings.Contains(joined, leaf) {
+			t.Errorf("warning must name omitted leaf %q, warnings: %v", leaf, warns)
+		}
+	}
+	if strings.Contains(joined, "flush-timer") {
+		t.Errorf("in-range flush-timer must not warn, warnings: %v", warns)
+	}
+}
+
+// TestKeaExpiredLeasesBoundaryKnobsRenderVerbatim is the #16691
+// boundary control: every knob at Kea's maximum renders exactly, with
+// no warning, on both families.
+func TestKeaExpiredLeasesBoundaryKnobsRenderVerbatim(t *testing.T) {
+	for _, family := range []int{4, 6} {
+		m, _ := testManager(t, map[string]bool{}, "")
+		warned := false
+		m.SetWarnForTesting(func(msg string, args ...any) { warned = true })
+		elpCfg := &config.DHCPExpiredLeasesConfig{
+			Enabled:                 true,
+			ReclaimTimerWait:        65535,
+			FlushReclaimedTimerWait: 65535,
+			HoldReclaimedTime:       4294967295,
+			MaxReclaimLeases:        4294967295,
+			MaxReclaimLeasesSet:     true,
+			MaxReclaimTime:          10000,
+			MaxReclaimTimeSet:       true,
+			UnwarnedReclaimCycles:   65535,
+		}
+		var cfg *config.DHCPServerConfig
+		var path string
+		if family == 4 {
+			cfg = v4Config("ge-0-0-0")
+			cfg.DHCPLocalServer.ExpiredLeases = elpCfg
+			path = m.confPath4
+		} else {
+			cfg = v6Config("ge-0-0-0")
+			cfg.DHCPv6LocalServer.ExpiredLeases = elpCfg
+			path = m.confPath6
+		}
+		if err := m.Apply(cfg); err != nil {
+			t.Fatalf("family %d Apply: %v", family, err)
+		}
+		if warned {
+			t.Errorf("family %d: boundary knobs must not warn", family)
+		}
+		elp := readELPMap(t, path, family)
+		wantInt(t, elp, "reclaim-timer-wait-time", 65535)
+		wantInt(t, elp, "flush-reclaimed-timer-wait-time", 65535)
+		wantInt(t, elp, "hold-reclaimed-time", 4294967295)
+		wantInt(t, elp, "max-reclaim-leases", 4294967295)
+		wantInt(t, elp, "max-reclaim-time", 10000)
+		wantInt(t, elp, "unwarned-reclaim-cycles", 65535)
 	}
 }

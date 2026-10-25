@@ -690,7 +690,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 					// #3906: `range <low> to <high>` (Junos) and the legacy
 					// `range low <lo> high <hi>` both collapse onto this multi
 					// leaf; the compiler parses both via parseSourcePoolPortRange.
-					"range": {desc: "Explicit source port range for the pool (<low> to <high>)", multi: true, children: nil},
+					"range": {desc: "Explicit source port range for the pool (<low> to <high>)", multi: true, absorbBeforeWildcard: true, children: nil},
 					// #3906: preserve the original source port (1:1) — the
 					// pool translates the address only. Value-less leaf.
 					"no-translation": {desc: "Preserve the source port (translate the address only)", children: nil},
@@ -1306,7 +1306,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 			"maximum-window": {desc: "Maximum TCP receive window for sequence checking in bytes (#15753)", args: 1, placeholder: "<bytes>",
 				valueType: ValueInteger, valueDesc: "Maximum TCP window in bytes (1024..1048576)",
 				valueExamples: []string{"65536"}, validator: ValidateInteger(1024, 1048576), children: nil},
-			"time-wait-state": {desc: "TIME_WAIT state options (#15753)", closedWorld: true, children: map[string]*schemaNode{
+			"time-wait-state": {desc: "TIME_WAIT state options (#15753)", closedWorld: true, packedTail: true, children: map[string]*schemaNode{
 				"session-timeout": {desc: "TIME_WAIT session timeout in seconds", args: 1, placeholder: "<seconds>",
 					valueType: ValueInteger, valueDesc: "TIME_WAIT session timeout in seconds (0..9223372036)",
 					valueExamples: []string{"150"}, validator: ValidateInteger(0, MaxDurationSeconds), children: nil},

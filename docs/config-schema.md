@@ -1887,6 +1887,29 @@ warns once per distinct finding and keeps the pre-existing compiled
 shape (#1960). Coverage:
 `pkg/config/applications_level_16459_test.go` (flat + hierarchical,
 packed, group-inherited, controls for term bodies and apply-macro).
+### IP-monitoring `then` — unknown children are gated (#16712)
+
+`services ip-monitoring policy <p> then` was open-world and
+`compileIPMonitoring` reads only `preferred-route` under it, so the
+Junos interface action `then interface <if> enable|disable`
+committed clean with no warning and never ran — the backup
+interface was never enabled (or the primary never disabled) on
+probe failure, while the preferred-route half of the same policy
+still worked. The scoped pre-walk gate
+`validateIPMonThenChildrenAST16712` (in `runPreWalkGates`) judges
+exactly the `then` level against the schema-declared children
+(`preferred-route`), reading the permitted set from the schema,
+across flat-set, hierarchical, packed and group-inherited shapes.
+It is deliberately NOT `closedWorld` on `then`, which inherits
+into `preferred-route`/`route` and fires only on `SchemaValidate`;
+the gate covers both compile paths. Apply statements (#7029) are
+never judged. Strict commit rejects naming the policy and the
+unsupported interface action; tolerant load/peer-sync warns once
+per distinct finding and keeps the pre-existing compiled shape
+(#1960). Coverage: `pkg/config/ipmon_then_children_16712_test.go`
+and `pkg/configstore/ipmon_then_commit_16712_test.go` (flat +
+hierarchical + packed + group-inherited, CheckText and Store
+Commit, preferred-route-only control).
 ### Chassis cluster / redundancy-group levels — unknown statements are gated (#16456)
 
 The `chassis cluster` body and the `chassis cluster redundancy-group <n>`
@@ -3974,6 +3997,17 @@ Keys=[protocol tcp udp icmp]   IsLeaf=true   (no children)
   (`destination-port 20000 to 20003`) is absorbed identically (none of
   `20000`/`to`/`20003` is a sibling keyword), matching the hierarchical
   `Keys=[destination-port 20000 to 20003]`.
+
+**A wildcard parent normally ends a multi-leaf value run.** Source-NAT pool
+`port range` explicitly opts out with `absorbBeforeWildcard` (#16670):
+`range 1024 to 2048` and `range low 1024 high 2048` retain all operands on
+the `range` leaf, rather than re-homing `1024`/`low` as single-port wildcard
+children. Declared sibling keywords (for example `random-allocation`) still
+terminate that run. The direct `port 3000` wildcard remains supported and
+strict compilation validates every port specification. Other multi leaves
+under wildcard parents keep their existing behavior. Store-level tests cover
+`set`, `load set`, commit-check, commit, and display-set replay, alongside the
+hierarchical range control.
 
 **A nested BLOCK is a third shape, and it is not the flat-set chain (#6689).**
 The two shapes above are the ones the bracket-list contract is about. A leaf can
@@ -15325,7 +15359,12 @@ the value sits in a single typed slot:
     `session-timeout` is rejected at strict commit
     (`validateTimeWaitStateAgeoutStrict`) and warned on the tolerant
     load / peer-sync path, where the dataplane's ageout-wins
-    precedence applies and is what `show` reports.
+    precedence applies and is what `show` reports. #16662: the packed
+    hierarchical spelling (`time-wait-state session-timeout 120;`,
+    `time-wait-state session-ageout;`, and the half-close leaves,
+    including multi-leaf packed runs) now compiles to the same fields
+    as the braced spelling; previously it passed strict commit and
+    compiled to nothing.
     (**#6539** narrowed an older sentence: the dataplane does have TCP state —
     #3152 adds OPENING vs established and #3046 distinguishes RST vs FIN close.
     Those states are precisely why the TIMEOUT leaves need a differently-worded

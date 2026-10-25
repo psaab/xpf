@@ -10940,6 +10940,7 @@ fn f4_seed_shared_only(
     generation: 0,
     session_id: 0,
     tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            persistent_lease_hold: None,
     source_nat_static: None, };
     crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
         .insert(key.clone(), entry);
@@ -11157,6 +11158,7 @@ fn nat64_14961_seed(coordinator: &mut Coordinator, worker_id: u32, port: u16) {
     generation: 0,
     session_id: 0,
     tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            persistent_lease_hold: None,
     source_nat_static: None, };
     crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
         .insert(key.clone(), entry);
@@ -11497,6 +11499,7 @@ fn import_entry_9718(
     generation: 0,
     session_id: 0,
     tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            persistent_lease_hold: None,
     source_nat_static: None, }
 }
 
@@ -11849,6 +11852,7 @@ fn late_reconciler_maps_shared_promote_for_worker_reserve_9718() {
             session_id: LIVE_SESSION_ID,
             tcp_close_class: LIVE_CLOSE_CLASS,
             tcp_handshake_state: 0,
+            persistent_lease_hold: None,
             fwd_packets: 0,
             rev_packets: 0,
             source_nat_static: None,
@@ -13978,6 +13982,7 @@ fn delete_synced_tunnel_variants_removes_discriminator_siblings_only_10511() {
         generation: 0,
         session_id: 0,
         tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            persistent_lease_hold: None,
         source_nat_static: None, };
         crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
             .insert(key.clone(), entry);
@@ -14079,6 +14084,7 @@ fn delete_synced_tunnel_variants_strict_reports_mirror_failure_12886() {
     generation: 0,
     session_id: 0,
     tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            persistent_lease_hold: None,
     source_nat_static: None, };
     crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
         .insert(target.clone(), entry);

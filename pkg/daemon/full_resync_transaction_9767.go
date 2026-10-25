@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -69,6 +70,67 @@ func (d *Daemon) drainUserspaceSessionDeltasLocked(drainer userspaceSessionDelta
 	d.userspaceDeltaSyncMu.Lock()
 	defer d.userspaceDeltaSyncMu.Unlock()
 	return d.drainUserspaceSessionDeltasWithConfigLocked(drainer, cfg, 1)
+}
+
+// discardUserspaceSessionDeltasLocked (#16627) runs one drain batch under
+// userspaceDeltaSyncMu and discards ONLY the drained deltas the event
+// stream has already applied: those whose StreamSeq is non-zero and at
+// or below appliedSeq (the stream's LastAppliedSequence watermark from
+// eventstream.go). It is the connected-arm counterpart of
+// drainUserspaceSessionDeltasLocked. Queueing an already-streamed copy
+// re-stamps it with a fresh generation, so a replayed open resurrects a
+// session the stream already closed and a replayed close transiently
+// deletes a live same-tuple successor. Deltas the stream never carried
+// (StreamSeq 0: stream-down production, CommandExport, a failed lossless
+// enqueue, or an older helper) and deltas ahead of the watermark are
+// NOT duplicates — they are queued through the normal locked path, so
+// discarding never happens on mere connectedness. The drain still runs
+// so any covered backlog is cleared instead of being replayed minutes
+// later after a disconnect. It returns the number of DISCARDED deltas.
+//
+// The helper's delta-schema fingerprint is recorded ONLY on a valid
+// status (err == nil): a status that arrived with an error may be
+// partial or zero, and recording it could clear a real mismatch (0 is
+// "unknown") or invent one.
+func (d *Daemon) discardUserspaceSessionDeltasLocked(drainer userspaceSessionDeltaDrainer, cfg *config.Config, appliedSeq uint64) (int, error) {
+	d.userspaceDeltaSyncMu.Lock()
+	defer d.userspaceDeltaSyncMu.Unlock()
+	if drainer == nil || cfg == nil {
+		return 0, nil
+	}
+	deltas, status, err := drainer.DrainSessionDeltas(256)
+	if err == nil {
+		d.recordUserspaceDeltaSchema(status.SessionDeltaSchemaFingerprint)
+	}
+	var keep []dpuserspace.SessionDeltaInfo
+	discarded := 0
+	for _, delta := range deltas {
+		if delta.StreamSeq != 0 && delta.StreamSeq <= appliedSeq {
+			discarded++
+			continue
+		}
+		keep = append(keep, delta)
+	}
+	if len(keep) > 0 {
+		d.queueUserspaceSessionDeltasLocked(buildZoneIDs(cfg), keep)
+	}
+	if err != nil {
+		if len(deltas) == 0 {
+			return 0, err
+		}
+		// The batch was destructively popped by the helper (#15217 shape):
+		// the covered part is discarded and the rest queued above, but
+		// the status error must still surface (counted + propagated)
+		// rather than being silently swallowed with the deltas.
+		errTotal := d.userspaceDeltaDrainStatusErrors.Add(1)
+		if emit, suppressed := d.userspaceDeltaDrainStatusWarn.shouldLog(time.Now(), userspaceDeltaDrainStatusWarnInterval); emit {
+			slog.Warn("userspace: session-delta discard-drain handled deltas despite helper status-apply error",
+				"err", err, "deltas_in_batch", len(deltas), "discarded", discarded,
+				"error_total", errTotal, "suppressed_since_last", suppressed)
+		}
+		return discarded, err
+	}
+	return discarded, nil
 }
 
 // queueUserspaceSessionDeltasComplete queues deltas through the same schema

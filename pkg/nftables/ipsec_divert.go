@@ -506,6 +506,15 @@ func (in *netlinkInstaller) InstallIpsecQuarantineGuard(spec IpsecDivertSpec) er
 	return nil
 }
 
+// VerifyIpsecQuarantineGuard re-verifies that the two-family quarantine
+// guard table is present with DROP forward/input chains in both families
+// (#16703). It is the exported form of verifyIpsecQuarantineTable for the
+// guard table, so the daemon can confirm a guard actually exists after a
+// failed guarded transition before retiring the old actor.
+func (in *netlinkInstaller) VerifyIpsecQuarantineGuard() error {
+	return in.verifyIpsecQuarantineTable(IpsecQuarantineTableName, true)
+}
+
 // InstallIpsecDivertWithDrain is the guarded transition seam used by the
 // daemon. The callback runs only after both quarantine guard families have
 // ACKed/read back; a callback or replacement failure deliberately retains the

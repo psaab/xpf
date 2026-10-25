@@ -113,6 +113,11 @@ type Installer interface {
 	TableDropsInput(name string) (bool, error)
 	// inet and bridge families. Queue rules are fail-closed (no bypass).
 	InstallIpsecDivert(spec IpsecDivertSpec) error
+	// VerifyIpsecQuarantineGuard re-verifies that the two-family
+	// quarantine guard table is present with DROP forward/input chains
+	// in both families (#16703). The daemon consults it after a failed
+	// guarded transition before retiring the old actor.
+	VerifyIpsecQuarantineGuard() error
 	// RemoveIpsecDivert removes the S3 capture table from both families.
 	RemoveIpsecDivert() error
 

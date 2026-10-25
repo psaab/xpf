@@ -2,6 +2,8 @@ package config
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"sort"
@@ -663,6 +665,79 @@ func DNSAnswersSnapshot(cfg *Config) map[string][]string {
 		}
 	}
 	return out
+}
+
+// DNSAnswersDigest returns a content digest of cfg's runtime DNS state:
+// every dns-name entry's scoped identity, its current prefixes (in order),
+// and its DNSLookupFailed flag (#16687). Derived caches that build from a
+// config's DNS answers (policymatch's query snapshot) key on this digest
+// in addition to the config pointer, so an in-place answer change on the
+// same published pointer cannot leave a stale verdict resident. A config
+// with no dns-name entries digests to the empty-config digest.
+func DNSAnswersDigest(cfg *Config) [sha256.Size]byte {
+	h := sha256.New()
+	var length [8]byte
+	writeCount := func(count int) {
+		binary.BigEndian.PutUint64(length[:], uint64(count))
+		_, _ = h.Write(length[:])
+	}
+	write := func(value string) {
+		writeCount(len(value))
+		_, _ = h.Write([]byte(value))
+	}
+	if cfg == nil {
+		var digest [sha256.Size]byte
+		copy(digest[:], h.Sum(nil))
+		return digest
+	}
+	type dnsEntry struct {
+		key      string
+		prefixes []string
+		failed   bool
+	}
+	var entries []dnsEntry
+	scan := func(scope string, b *AddressBook) {
+		if b == nil {
+			return
+		}
+		for name, a := range b.Addresses {
+			if a != nil && a.DNSName != "" {
+				entries = append(entries, dnsEntry{
+					key:      dnsIdentityKey(scope, name),
+					prefixes: append([]string(nil), a.DNSAddresses...),
+					failed:   a.DNSLookupFailed,
+				})
+			}
+		}
+	}
+	scan("global/", cfg.Security.AddressBook)
+	for bookName, nb := range cfg.Security.NamedAddressBooks {
+		if nb != nil {
+			scan("address-book/"+bookName+"/", &nb.AddressBook)
+		}
+	}
+	for zoneName, z := range cfg.Security.Zones {
+		if z != nil {
+			scan(ZoneLocalQualify(zoneName, ""), z.AddressBook)
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].key < entries[j].key })
+	writeCount(len(entries))
+	for _, e := range entries {
+		write(e.key)
+		writeCount(len(e.prefixes))
+		for _, p := range e.prefixes {
+			write(p)
+		}
+		if e.failed {
+			_, _ = h.Write([]byte{1})
+		} else {
+			_, _ = h.Write([]byte{0})
+		}
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], h.Sum(nil))
+	return digest
 }
 
 // dnsIdentityKey builds a collision-free snapshot key for one dns-name

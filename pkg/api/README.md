@@ -2426,25 +2426,35 @@ the drop fails loudly instead of going quietly vacuous.
     report 0/stale while `show firewall filter` shows real hits (#3461); the
     per-term counter-slot stride is the shared
     `config.FilterTermExpansionCount` SSOT (#3459).
-  - **Invalid-UTF-8 label values cannot crash a scrape** (#15086): every
+  - **Invalid-UTF-8 label values cannot crash a scrape** (#15086, #16707): every
     const-metric emit in this package goes through the single choke point
-    `emitConstMetric` (`metrics_emit_15086.go`), which folds any label
-    value carrying invalid UTF-8 to U+FFFD before calling the
-    error-returning `prometheus.NewConstMetric` — never the panicking
-    `Must*` form. A committed identifier with raw non-UTF-8 bytes (the
-    A44-01 probe's `web\xffallow` policy name) is therefore still
-    published, sanitized, instead of panicking inside
-    `Registry.Gather`'s goroutine and killing the daemon. Each sanitized
-    value bumps `xpf_metrics_invalid_label_values_total`; any residual
-    construction error (arity, invalid descriptor) skips the sample and
-    bumps `xpf_counter_read_errors_total` under the omit-plus-error
-    contract above. Legitimate values pass through byte-identical. As a
+    `emitConstMetric` (`metrics_emit_15086.go`), which escapes each invalid
+    byte in a label value as `\xNN` before calling the error-returning
+    `prometheus.NewConstMetric` — never the panicking `Must*` form. A
+    committed identifier with raw non-UTF-8 bytes (the A44-01 probe's
+    `web\xffallow` policy name) is therefore still published, sanitized,
+    instead of panicking inside `Registry.Gather`'s goroutine and killing
+    the daemon. The `\xNN` spelling is injective (#16707): the original
+    U+FFFD fold mapped `web\xffallow` and `web\xfeallow` to the same
+    series, and the resulting duplicate made every scrape answer 500.
+    Each sanitized value bumps `xpf_metrics_invalid_label_values_total`;
+    any residual construction error (arity, invalid descriptor) skips the
+    sample and bumps `xpf_counter_read_errors_total` under the
+    omit-plus-error contract above. Legitimate values pass through
+    byte-identical. As a systemic backstop for any remaining
+    duplicate-series source (e.g. a zone-pair rule and a scoped global
+    with the same name in the same zone pair), the metrics handler now
+    serves with `promhttp.ContinueOnError` (#16707): the offending series
+    is dropped from that scrape, the rest of the exposition answers 200,
+    and the drop is counted in `xpf_metrics_gather_errors_total` on the
+    next scrape (a wholly empty gather still answers 500). As a
     fail-closed backstop, `metricsLane.Collect` recovers any residual
     collector panic, bumps `xpf_metrics_collector_panics_total`, returns
     the lane to the pool, and lets that scrape fail instead of crashing
     the process; the bumped count is certified by the next scrape's
-    sample. Both health counters are always emitted, including at zero.
-    Pinned by `metrics_invalid_utf8_15086_test.go`.
+    sample. All health counters are always emitted, including at zero.
+    Pinned by `metrics_invalid_utf8_15086_test.go` and
+    `metrics_sanitize_collision_16707_test.go`.
   - **Text commands** print a `warning: ... counter read failed ...` line
     instead of a clean zero: `show security screen` / `show security
     alarms` / `show security flow statistics` / `show chassis cluster
@@ -2789,10 +2799,14 @@ the drop fails loudly instead of going quietly vacuous.
   HTTP 400; gRPC and local CLI reject them with an invalid-argument/parse
   error, while peer requests preserve numeric protocol `0` rather than
   turning it into clear-all. The event filter (`pkg/logging`
-  `EventFilter.matches`) matches protocol/action
+  `EventFilter.matches`) matches protocol by resolved NUMBER and action
   EXACTLY (case-insensitive), not by substring — `protocol=C` no longer
-  over-matches TCP/ICMP/ICMPv6. These contracts are pinned by
-  `rest_filter_failclosed_test.go` (and, for the events `limit`,
+  over-matches TCP/ICMP/ICMPv6, and `protocol=6`/`58`/`50`/`icmp6` match
+  the same records as `tcp`/`icmpv6`/`esp` (#16688). REST resolves the
+  token via `logging.ResolveEventProtocol` (the `appid` SSOT) and
+  rejects an unknown token with HTTP 400. These contracts are pinned by
+  `rest_filter_failclosed_test.go`, `rest_events_protocol_16688_test.go`
+  (and, for the events `limit`,
   `rest_events_limit_failclosed_4926_test.go`) in this package.
 - The `GET /api/v1/security/sessions` view mirrors the gRPC `GetSessions`
   session contract (#3419). The REST `SessionEntry` previously diverged from
@@ -2809,8 +2823,9 @@ the drop fails loudly instead of going quietly vacuous.
     bidirectional volume;
   - resolves `application` (`appid.ResolveSessionName`), `ingress_interface`/
     `egress_interface` (FIB ifindex+VLAN → unit name), `policy_name`,
-    `ingress_zone_name`/`egress_zone_name`, `session_id`, and `ha_active`
-    (wired from the daemon via `HAActiveFn`, default true standalone).
+    `ingress_zone_name`/`egress_zone_name`, `session_id`, `ha_active`, and
+    `ha_state` (#16697 tri-state "Active"/"Backup"/"unknown"; `ha_active`
+    is meaningful only for Active/Backup, default true standalone).
 
   It also accepts the gRPC filter set: `application=`, `interface=`,
   `nat_only=true`, and `source_nat_pool=<pool>` (an unresolved pool fails

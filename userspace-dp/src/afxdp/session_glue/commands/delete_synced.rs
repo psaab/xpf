@@ -183,6 +183,7 @@ pub(in crate::afxdp::session_glue) fn handle_probe_policy_tuples(
             generation: 0,
             session_id: sessions.session_id_for(key),
             tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            persistent_lease_hold: None,
             source_nat_static: None, },
         ));
     });
@@ -381,6 +382,7 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced_with_guard(
     // buffered segments). Data-session (Pptp handle) deletes leave calls.
     let pptp_control_channel =
         crate::session::SessionTable::pptp_control_channel_for_key(&key);
+    let persistent_hold_16615 = sessions.take_persistent_lease_hold(&key);
     // Locally initiated clears/policy removals emit one harvested close;
     // peer-driven deletes remain silent to avoid duplicate records.
     if !enforce_peer_owner {
@@ -404,7 +406,7 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced_with_guard(
         // allocator can reuse it. This is the same-key mirror of the
         // reservation and a no-op for a non-pool / non-reserved session
         // (`release_flow` returns false when the flow was never tracked).
-        release_source_nat_allocation_for_worker(
+        crate::nat::release_source_nat_allocation_for_worker_with_hold(
             &forwarding.iface_nat_allocators,
             &forwarding.source_nat_rules,
             &key,
@@ -412,6 +414,7 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced_with_guard(
             lookup.metadata.is_reverse,
             now_ns,
             worker_id,
+            persistent_hold_16615,
         );
         // #4512: mirror for NAT64. `handle_upsert_synced` now RESERVES a
         // peer-synced NAT64 forward flow's translated pool port in this node's

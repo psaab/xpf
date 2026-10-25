@@ -799,8 +799,17 @@ func compileFlow(node *Node, sec *SecurityConfig) error {
 		}
 		// #15753: nested time-wait-state hierarchy (not flattened by
 		// expandFlatRun when written as braces).
+		// #16662: the packed hierarchical spelling
+		// `time-wait-state session-timeout 120;` carries the leaf on
+		// twNode.Keys[1:] with no Children, so a Children-only reader
+		// compiled it to nothing while strict commit accepted it.
+		// packedBodyChildren expands that packed tail against the
+		// time-wait-state schema (and returns Children unchanged for
+		// the braced spelling); expandFlatRun then splits a packed
+		// run carrying several leaves (`session-timeout 120
+		// session-ageout`) into one node per leaf.
 		for _, twNode := range tcpNode.FindChildren("time-wait-state") {
-			for _, twOpt := range twNode.Children {
+			for _, twOpt := range expandFlatRun(packedBodyChildren(twNode, refFlowTimeWaitState.resolve()), refFlowTimeWaitState.resolve()) {
 				switch twOpt.Name() {
 				case "session-ageout":
 					sec.Flow.TCPSession.TimeWaitStateSessionAgeout = true

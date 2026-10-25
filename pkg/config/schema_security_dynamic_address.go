@@ -27,6 +27,7 @@ func dynamicAddressSchema() *schemaNode {
 			"shrink-guard-min-old-count":      {desc: "Minimum prior prefix count before drastic-shrink protection applies (default 32)", args: 1, valueType: ValueInteger, valueDesc: "Prefix count", valueExamples: []string{"32"}, validator: ValidateInteger(1, MaxDynamicAddressFeedPrefixes), placeholder: "<count>", children: nil},
 			"shrink-guard-min-retain-percent": {desc: "Minimum candidate retention ratio before a shrink is refused (default 50)", args: 1, valueType: ValueInteger, valueDesc: "Percent (1-100)", valueExamples: []string{"50"}, validator: ValidateInteger(1, 100), placeholder: "<percent>", children: nil},
 			"shrink-guard-min-drop":           {desc: "Minimum absolute prefix decrease before a shrink is refused (default 16)", args: 1, valueType: ValueInteger, valueDesc: "Prefix count", valueExamples: []string{"16"}, validator: ValidateInteger(1, MaxDynamicAddressFeedPrefixes-1), placeholder: "<count>", children: nil},
+			"allow-destination":               {desc: "Allow this feed-server to fetch from a non-public destination inside this prefix (SSRF override, #16656)", args: 1, multi: true, valueType: ValueCIDR, valueDesc: "Destination prefix (CIDR, e.g. 10.0.0.0/8 or fd00::/8)", valueExamples: []string{"10.0.0.0/8", "192.168.0.0/16"}, validator: ValidateFeedDestinationPrefix, placeholder: "<prefix>", children: nil},
 			"feed-name": {desc: "Named feed on this server", args: 1, placeholder: "<feed-name>", children: map[string]*schemaNode{
 				"path": {desc: "Path on the feed server for this feed", args: 1, placeholder: "<path>", children: nil},
 			}},
@@ -56,7 +57,7 @@ func dynamicAddressShrinkGuardCompactProps(tail []string) []*Node {
 	var props []*Node
 	for _, prop := range expanded {
 		switch prop.Name() {
-		case "shrink-guard-min-old-count", "shrink-guard-min-retain-percent", "shrink-guard-min-drop":
+		case "shrink-guard-min-old-count", "shrink-guard-min-retain-percent", "shrink-guard-min-drop", "allow-destination":
 			props = append(props, prop)
 		}
 	}

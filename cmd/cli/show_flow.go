@@ -237,6 +237,16 @@ func printNodeSessionHeader(nodeID int) {
 	fmt.Println("--------------------------------------------------------------------------")
 }
 
+// sessionHAStateLabel renders HA ownership from the tri-state ha_state
+// (#16697). Empty (pre-#16697 peer) renders "unknown" rather than guessing
+// Backup from the retained ha_active bool.
+func sessionHAStateLabel(se *pb.SessionEntry) string {
+	if se == nil || se.GetHaState() == "" {
+		return "unknown"
+	}
+	return se.GetHaState()
+}
+
 func printSessionEntries(resp *pb.GetSessionsResponse, brief bool) {
 	if brief {
 		fmt.Printf("%-5s %-22s %-22s %-5s %-20s %-3s %-5s %5s %s\n",
@@ -289,12 +299,7 @@ func printSessionEntries(resp *pb.GetSessionsResponse, brief bool) {
 			sid = uint64(resp.Offset) + uint64(i) + 1
 		}
 
-		haStr := ""
-		if se.HaActive {
-			haStr = "Active"
-		} else {
-			haStr = "Backup"
-		}
+		haStr := sessionHAStateLabel(se)
 		fmt.Printf("Session ID: %d, Policy name: %s/%d, HA State: %s, Timeout: %d, Session State: Unknown (validity not tracked)\n",
 			sid, polDisplay, se.PolicyId, haStr, se.TimeoutSeconds)
 
@@ -393,7 +398,6 @@ func printSessionSummaryBlock(resp *pb.GetSessionSummaryResponse) {
 		fmt.Printf("Maximum-sessions: unknown\n")
 	}
 }
-
 
 // resolveSessionZone binds `show security flow session zone <name>` to the zone
 // id GetSessions filters on (#9065).

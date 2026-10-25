@@ -279,9 +279,21 @@ func (d *Daemon) clusterRAConfigSets(cfg *config.Config) ([]*config.RAInterfaceC
 		}
 	}
 
+	// #16685: the RA sibling of the DHCP peer-slot rule. A node-local RA
+	// interface on the PEER's FPC slot does not exist on this node; keeping
+	// it makes the RA sender fail to bind (ndp.Listen) on every reconcile.
+	// Only interfaces that exist here may be served locally. RG-scoped
+	// interfaces are resolved to the local member, so this is inert for them.
+	localNodeID := -1
+	if cfg.Chassis.Cluster != nil {
+		localNodeID = cfg.Chassis.Cluster.NodeID
+	}
 	var desired []*config.RAInterfaceConfig
 	for _, cfgRA := range allRA {
 		if cfgRA == nil {
+			continue
+		}
+		if !rgScopedIfaces[cfgRA.Interface] && isPeerSlotInterface16685(stripUntaggedUnitSuffix(cfgRA.Interface), localNodeID) {
 			continue
 		}
 		if ownedIfaces[cfgRA.Interface] || !rgScopedIfaces[cfgRA.Interface] {

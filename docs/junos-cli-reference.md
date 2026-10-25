@@ -2160,7 +2160,16 @@ The `show configuration security log` was also permission-denied.
 [action <action>]`. Argument parsing fails **closed** (#3347): an unknown
 token (e.g. a typo `zon trust`), a filter keyword with no value (`action`
 with nothing after it), or a non-positive count returns a usage error rather
-than silently dropping the filter and dumping every event. A `zone <name>`
+than silently dropping the filter and dumping every event. The `protocol`
+selector accepts a name, alias, or numeric 0–255 (`tcp`/`6`, `icmp6`/`58`,
+`esp`/`50` — including the `protocol-id="6"` form the output itself prints)
+resolved through the shared `appid` table; an unknown protocol token
+(`tcpx`, `256`) is likewise a usage error, never a silently empty result
+(#16688). Matching compares the resolved protocol number against each
+record's raw protocol number, falling back to the rendered name only for
+legacy records that carry no number. The same resolution and fail-closed
+rejection applies on gRPC `GetEvents` (`InvalidArgument`) and REST
+`GET /api/v1/security/events?protocol=` (HTTP 400). A `zone <name>`
 filter requested before a successful dataplane apply exists (early startup or
 after a failed commit, when zone-name→ID mapping is unavailable) is likewise
 refused instead of widening to all zones — in incident response, silently

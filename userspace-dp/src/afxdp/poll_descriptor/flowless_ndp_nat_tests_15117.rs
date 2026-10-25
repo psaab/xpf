@@ -183,3 +183,15 @@ fn shim_nat_external_ndp_predicate_15117() {
         assert!(!shim_ndp_15117::is_nat_external_ndp_control(ty, 255, true));
     }
 }
+
+#[test]
+fn shim_proxy_ndp_predicate_16660() {
+    for ty in 133..=137u8 {
+        assert!(shim_ndp_15117::is_proxy_ndp_ndp_control(ty, 255, true));
+        assert!(!shim_ndp_15117::is_proxy_ndp_ndp_control(ty, 64, true));
+        assert!(!shim_ndp_15117::is_proxy_ndp_ndp_control(ty, 255, false));
+    }
+    for ty in [128u8, 129, 1, 4] {
+        assert!(!shim_ndp_15117::is_proxy_ndp_ndp_control(ty, 255, true));
+    }
+}

@@ -489,6 +489,7 @@ impl SessionTable {
                             key,
                             decision,
                             metadata,
+                            persistent_lease_hold: removed.persistent_lease_hold,
                             origin: removed.origin,
                             session_id: removed.session_id,
                             close_class,

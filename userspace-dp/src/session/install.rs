@@ -738,6 +738,7 @@ impl SessionTable {
                 tcp_ws_negotiated: false,
                 fabric_established: false,
                 last_icmp_error_tat: 0,
+                persistent_lease_hold: None,
             },
         };
         // #6297: route every slab insert through `insert_record` so the
@@ -847,6 +848,7 @@ impl SessionTable {
                 // #9412: nor a close class; the real HA path threads it the same way.
                 tcp_close_class: 0,
                 tcp_handshake_state: 0,
+            persistent_lease_hold: None,
                 fwd_packets: 0,
                 rev_packets: 0,
                 source_nat_static: None,
@@ -909,6 +911,7 @@ impl SessionTable {
             session_id: wire_session_id,
             tcp_close_class: wire_close_class,
             tcp_handshake_state: wire_handshake_state,
+            persistent_lease_hold,
             fwd_packets: wire_fwd_packets,
             rev_packets: wire_rev_packets,
         } = req;
@@ -1190,6 +1193,7 @@ impl SessionTable {
                 fabric_established: false,
                 // #9901 (F-077): a re-imported copy starts with a FULL error
                 last_icmp_error_tat: 0,
+                persistent_lease_hold,
             },
         };
         // #6297: route every slab insert through `insert_record` so the

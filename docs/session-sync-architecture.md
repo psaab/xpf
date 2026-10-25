@@ -357,7 +357,18 @@ userspace sessions do **not** flow back through `SetClusterSyncedSession*`.
 They are exported through:
 
 - the continuous userspace event stream (steady state), or its
-  `DrainSessionDeltas(...)` fallback poll when the stream is down
+  `DrainSessionDeltas(...)` fallback poll when the stream is down.
+  The two legs are alternatives, never both authoritative for one delta
+  (#16627): the helper mirrors a delta into the RPC-fallback buffer only
+  when its lossless event-stream enqueue did not succeed (the delta
+  carries its assigned stream sequence in `stream_seq` on the stream
+  leg; a fallback-only copy carries 0); and the daemon's 5 s connected
+  tick discards only
+  fallback copies at or below the stream's applied watermark
+  (`LastAppliedSequence`), queueing any copy the stream never carried,
+  so an already-streamed delta can never be replayed with a fresh
+  generation that would resurrect a closed session or delete a live
+  successor on the standby
 - a one-shot `ExportOwnerRGSessions(...)` bulk republish, triggered by an
   event-stream **FullResync** (a #2874 sequence gap or a #2442 delta-ring
   overflow) — **not** by the demotion-prep path

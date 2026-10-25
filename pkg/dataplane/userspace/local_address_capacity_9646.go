@@ -62,6 +62,12 @@ func checkInterfaceNATAddressCapacity(v4, v6 int) error {
 	return checkAddressMapCapacity(mapNameUserspaceInterfaceNATv6, v6)
 }
 
+// checkProxyNDPAddressCapacity applies the same shim limit to the
+// #16660 proxy-NDP map.
+func checkProxyNDPAddressCapacity(v6 int) error {
+	return checkAddressMapCapacity(mapNameUserspaceProxyNDPv6, v6)
+}
+
 func checkAddressMapCapacity(mapName string, desired int) error {
 	if desired > userspaceLocalAddressMapCapacity {
 		return &localAddressCapacityError{Map: mapName, Desired: desired, Capacity: userspaceLocalAddressMapCapacity}

@@ -276,6 +276,18 @@ func (d *Daemon) directRemoveVIPs(rgID int) int {
 	return removed
 }
 
+// stableRethUnitNetdev returns the kernel netdev carrying unit's addresses:
+// the VLAN sub-interface when the unit is tagged (VlanID > 0), otherwise the
+// bare member. This is the RethVIPsForRG/ResolveKernelIfName rule (#16686);
+// keying on unitNum > 0 instead puts a tagged unit 0 on the bare member,
+// where its RA sender never binds.
+func stableRethUnitNetdev(linuxName string, unit *config.InterfaceUnit) string {
+	if unit != nil && unit.VlanID > 0 {
+		return fmt.Sprintf("%s.%d", linuxName, unit.VlanID)
+	}
+	return linuxName
+}
+
 // addStableRethLinkLocal adds the stable router link-local address to all
 // RETH interfaces for the given RG. This address is shared across cluster
 // nodes (no nodeID component) so hosts see the same IPv6 router identity
@@ -305,36 +317,40 @@ func (d *Daemon) addStableRethLinkLocal(rgID int) {
 		if owns, ok := rgOwners[ifName]; !ok || owns != rgID {
 			continue
 		}
-		// Per-unit (#15684): a configured link-local on one unit replaces the
-		// stable LL on THAT unit only. The pre-fix unit-0-only predicate
-		// suppressed the stable LL on every VLAN unit when unit 0 carried
-		// one, and added it on top of a VLAN unit's own configured LL.
+		// Per-unit (#15684, #16686): a configured link-local on one unit
+		// replaces the stable LL on THAT unit only, and the netdev is
+		// selected by unit.VlanID > 0 — a tagged unit 0 lives on
+		// <member>.<vlan-id>, not the bare member. An untagged unit 0 is
+		// the only unit installed on the parent, and only when it has IPv6.
 		physName := ifc.Name
 		if phys, ok := rethToPhys[ifc.Name]; ok {
 			physName = phys
 		}
 		linuxName := config.LinuxIfName(physName)
-		if !rethUnitHasConfiguredLinkLocal(ifc, 0) {
-			addStableLLToInterfaceFn(linuxName, stableLL)
-		} else {
-			slog.Debug("skipping stable LL on unit 0 (explicit LL configured)", "iface", ifName)
-		}
+		unitNums := make([]int, 0, len(ifc.Units))
 		for unitNum := range ifc.Units {
-			if unitNum > 0 && rethUnitHasIPv6(ifc, unitNum) {
-				unit := ifc.Units[unitNum]
-				if unit == nil { // #6780
-					continue
-				}
-				if rethUnitHasConfiguredLinkLocal(ifc, unitNum) {
-					slog.Debug("skipping stable LL on VLAN unit (explicit LL configured)", "iface", ifName, "unit", unitNum)
-					continue
-				}
-				subIface := linuxName
-				if unit.VlanID > 0 {
-					subIface = fmt.Sprintf("%s.%d", linuxName, unit.VlanID)
-				}
-				addStableLLToInterfaceFn(subIface, stableLL)
+			unitNums = append(unitNums, unitNum)
+		}
+		sort.Ints(unitNums)
+		seen := make(map[string]bool)
+		for _, unitNum := range unitNums {
+			unit := ifc.Units[unitNum]
+			if unit == nil { // #6780
+				continue
 			}
+			if !rethUnitHasIPv6(ifc, unitNum) {
+				continue
+			}
+			if rethUnitHasConfiguredLinkLocal(ifc, unitNum) {
+				slog.Debug("skipping stable LL on unit (explicit LL configured)", "iface", ifName, "unit", unitNum)
+				continue
+			}
+			netdev := stableRethUnitNetdev(linuxName, unit)
+			if seen[netdev] {
+				continue
+			}
+			seen[netdev] = true
+			addStableLLToInterfaceFn(netdev, stableLL)
 		}
 	}
 }
@@ -388,19 +404,23 @@ func (d *Daemon) removeStableRethLinkLocal(rgID int) {
 			physName = phys
 		}
 		linuxName := config.LinuxIfName(physName)
-		removeStableLLFromInterfaceFn(linuxName, stableLL)
-		for unitNum := range ifc.Units {
-			if unitNum > 0 {
-				unit := ifc.Units[unitNum]
-				if unit == nil { // #6780
-					continue
-				}
-				subIface := linuxName
-				if unit.VlanID > 0 {
-					subIface = fmt.Sprintf("%s.%d", linuxName, unit.VlanID)
-				}
-				removeStableLLFromInterfaceFn(subIface, stableLL)
+		// #16686: mirror add — remove from every unit's VlanID-selected
+		// netdev, plus the bare member so a stable LL installed by the
+		// pre-fix code on the parent of a tagged unit 0 is cleaned up.
+		targets := map[string]bool{linuxName: true}
+		for _, unit := range ifc.Units {
+			if unit == nil { // #6780
+				continue
 			}
+			targets[stableRethUnitNetdev(linuxName, unit)] = true
+		}
+		sorted := make([]string, 0, len(targets))
+		for t := range targets {
+			sorted = append(sorted, t)
+		}
+		sort.Strings(sorted)
+		for _, t := range sorted {
+			removeStableLLFromInterfaceFn(t, stableLL)
 		}
 	}
 }
@@ -645,11 +665,12 @@ func (d *Daemon) directSendGARPs(rgID int) {
 		}
 	}
 
-	// Per-unit router link-local NA (#15684): each unit announces its own
-	// configured link-local if present, otherwise the stable LL — never
-	// unit 0's address on a VLAN sub-interface. A unit with no IPv6 gets no
-	// NA at all; the pre-fix code announced unit 0's LL on every VLAN
-	// sub-interface, including IPv4-only units.
+	// Per-unit router link-local NA (#15684, #16686): each unit announces
+	// its own configured link-local if present, otherwise the stable LL,
+	// on the netdev selected by unit.VlanID > 0 — a tagged unit 0
+	// announces on <member>.<vlan-id>, not the bare member. A unit with
+	// no IPv6 gets no NA at all; the pre-fix code announced unit 0's LL
+	// on every VLAN sub-interface, including IPv4-only units.
 	if cfg.Chassis.Cluster != nil {
 		stableLL := cluster.StableRethLinkLocal(cfg.Chassis.Cluster.ClusterID, rgID)
 		rethToPhys := cfg.RethToPhysical()
@@ -684,9 +705,6 @@ func (d *Daemon) directSendGARPs(rgID int) {
 						"iface", iface, "ip", routerLL, "err", err)
 				}
 			}
-			// Base interface announces unit 0's router identity.
-			sendRouterNA(linuxName, 0, ifc.Units[0])
-			// Each VLAN sub-interface announces its own unit's identity.
 			unitNums := make([]int, 0, len(ifc.Units))
 			for n := range ifc.Units {
 				unitNums = append(unitNums, n)
@@ -697,9 +715,7 @@ func (d *Daemon) directSendGARPs(rgID int) {
 				if unit == nil { // #6780
 					continue
 				}
-				if unit.VlanID > 0 {
-					sendRouterNA(fmt.Sprintf("%s.%d", linuxName, unit.VlanID), unitNum, unit)
-				}
+				sendRouterNA(stableRethUnitNetdev(linuxName, unit), unitNum, unit)
 			}
 		}
 	}

@@ -77,7 +77,11 @@ const policyQuerySnapshotCacheCapacity = 16
 // policyQuerySnapshot contains immutable config-derived data used before each
 // query walks a tuple. A compiled *config.Config is immutable after publication,
 // so its pointer is the config-generation identity; dynamic feed prefixes are
-// separately keyed by their content digest.
+// separately keyed by their content digest. #16687: the runtime DNS answers
+// inside the config are ALSO keyed by content digest (config.DNSAnswersDigest),
+// because a published config's DNSAddresses must never be written in place —
+// if a future writer bug reintroduces such a write, the digest changes and
+// the stale rejection verdict is rebuilt instead of served forever.
 type policyQuerySnapshot struct {
 	rejectionReasons []string
 	policyIDs        map[[2]uint32]uint32
@@ -86,6 +90,7 @@ type policyQuerySnapshot struct {
 type policyQuerySnapshotEntry struct {
 	cfg        *config.Config
 	feedDigest [sha256.Size]byte
+	dnsDigest  [sha256.Size]byte
 	snapshot   *policyQuerySnapshot
 }
 
@@ -130,9 +135,10 @@ func feedOverlayDigest(overlay map[string][]string) [sha256.Size]byte {
 
 func querySnapshotFor(cfg *config.Config, overlay map[string][]string) (*policyQuerySnapshot, bool) {
 	digest := feedOverlayDigest(overlay)
+	dnsDigest := config.DNSAnswersDigest(cfg)
 	policyQuerySnapshotCache.Lock()
 	for i, entry := range policyQuerySnapshotCache.entries {
-		if entry.cfg != cfg || entry.feedDigest != digest {
+		if entry.cfg != cfg || entry.feedDigest != digest || entry.dnsDigest != dnsDigest {
 			continue
 		}
 		// Keep recently used config generations resident in the bounded cache.
@@ -152,7 +158,7 @@ func querySnapshotFor(cfg *config.Config, overlay map[string][]string) (*policyQ
 	// Another concurrent query may have built this exact generation while the
 	// lock was released; use the already-published immutable result in that case.
 	for i, entry := range policyQuerySnapshotCache.entries {
-		if entry.cfg == cfg && entry.feedDigest == digest {
+		if entry.cfg == cfg && entry.feedDigest == digest && entry.dnsDigest == dnsDigest {
 			copy(policyQuerySnapshotCache.entries[1:i+1], policyQuerySnapshotCache.entries[0:i])
 			policyQuerySnapshotCache.entries[0] = entry
 			cached := entry.snapshot
@@ -162,7 +168,7 @@ func querySnapshotFor(cfg *config.Config, overlay map[string][]string) (*policyQ
 	}
 	policyQuerySnapshotCache.entries = append(policyQuerySnapshotCache.entries, policyQuerySnapshotEntry{})
 	copy(policyQuerySnapshotCache.entries[1:], policyQuerySnapshotCache.entries[:len(policyQuerySnapshotCache.entries)-1])
-	policyQuerySnapshotCache.entries[0] = policyQuerySnapshotEntry{cfg: cfg, feedDigest: digest, snapshot: snapshot}
+	policyQuerySnapshotCache.entries[0] = policyQuerySnapshotEntry{cfg: cfg, feedDigest: digest, dnsDigest: dnsDigest, snapshot: snapshot}
 	if len(policyQuerySnapshotCache.entries) > policyQuerySnapshotCacheCapacity {
 		policyQuerySnapshotCache.entries = policyQuerySnapshotCache.entries[:policyQuerySnapshotCacheCapacity]
 	}

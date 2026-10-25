@@ -44,6 +44,11 @@ pub(super) const IPV6_MIN_MTU: u32 = 1280;
 /// the smaller translated datagram.
 pub(super) const NAT64_HEADER_DELTA: u32 = 20;
 
+/// #16666: the IPv6 Fragment Header (RFC 8200 §4.5) is 8 bytes. A translated
+/// fragment is therefore `v4_len + 20 + 8`, so the RFC 7915 §5.2 / §4.2 MTU
+/// adjustment for a packet in error that carries one is 28, not 20.
+pub(super) const NAT64_FRAGMENT_HEADER_LEN: u32 = 8;
+
 /// RFC 1191 Table 7-1 plateaus (lowest MTU of each group), descending.
 /// Used only when a pre-RFC 1191 router reports Next-Hop MTU 0 in a
 /// Fragmentation-Needed message: RFC 7915 §4.2 requires the greatest

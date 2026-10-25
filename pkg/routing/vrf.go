@@ -17,6 +17,24 @@ type VRFSpec struct {
 	TableID int
 }
 
+// VRFDeviceName maps a Junos routing-instance name to the kernel VRF
+// master device name the daemon creates for it: "vrf-" + name,
+// unconditionally (#16664). An instance literally named "vrf-cust" is
+// realised as "vrf-vrf-cust", never as "vrf-cust" — every creator in
+// this package (createLocked, BindInterfaceToVRF, Reconcile) and the
+// FRR render prepend without canonicalisation, so a consumer that
+// skipped the prefix for an already-prefixed name silently addressed
+// a sibling instance "cust" (or a nonexistent device). An empty name
+// yields "" so callers can branch on "no routing-instance requested".
+// This is the single source of truth; diagcmd, frr and ddns resolve
+// through it.
+func VRFDeviceName(instanceName string) string {
+	if instanceName == "" {
+		return ""
+	}
+	return "vrf-" + instanceName
+}
+
 // VRFInterfaceMember is a link currently enslaved to a named routing-instance
 // VRF device.
 type VRFInterfaceMember struct {
@@ -86,7 +104,7 @@ func (v *vrfManager) Create(name string, tableID int) error {
 // hold mu. If the named VRF already exists in the kernel, it is checked
 // against the requested type and table before it is brought up and adopted.
 func (v *vrfManager) createLocked(name string, tableID int) error {
-	vrfName := "vrf-" + name
+	vrfName := VRFDeviceName(name)
 	existing, err := v.ops.LinkByName(vrfName)
 	if err != nil {
 		if !isLinkNotFound(err) {
@@ -138,7 +156,7 @@ func containsVRFName(names []string, name string) bool {
 // IsManaged reports whether the given logical VRF name (e.g. "mgmt",
 // "sfmix") is currently in the manager's tracked set.
 func (v *vrfManager) IsManaged(name string) bool {
-	vrfName := "vrf-" + name
+	vrfName := VRFDeviceName(name)
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	for _, n := range v.vrfs {
@@ -255,7 +273,7 @@ func (v *vrfManager) MissTerminatorNeedsReconcile() bool {
 // The type check and LinkSetMaster are separate syscalls, so out-of-band
 // replacement between them remains outside the daemon's applySem guarantee.
 func (v *vrfManager) BindInterfaceToVRF(ifaceName, instanceName string) error {
-	vrfName := "vrf-" + instanceName
+	vrfName := VRFDeviceName(instanceName)
 
 	iface, err := v.ops.LinkByName(ifaceName)
 	if err != nil {
@@ -364,7 +382,7 @@ func (v *vrfManager) UnbindInterfaceFromVRFs(ifaceName string, instanceNames []s
 		if instanceName == "" {
 			continue
 		}
-		vrf, err := v.ops.LinkByName("vrf-" + instanceName)
+		vrf, err := v.ops.LinkByName(VRFDeviceName(instanceName))
 		if err != nil {
 			if !isLinkNotFound(err) {
 				lookupErrs = append(lookupErrs, fmt.Errorf("VRF %s lookup: %w", instanceName, err))
@@ -404,7 +422,7 @@ func (v *vrfManager) InterfaceMembers(instanceNames []string) ([]VRFInterfaceMem
 		if instanceName == "" {
 			continue
 		}
-		link, err := v.ops.LinkByName("vrf-" + instanceName)
+		link, err := v.ops.LinkByName(VRFDeviceName(instanceName))
 		if err != nil {
 			if !isLinkNotFound(err) {
 				lookupErrs = append(lookupErrs, fmt.Errorf("lookup VRF vrf-%s for members: %w", instanceName, err))
@@ -481,7 +499,7 @@ func isLinkNotFound(err error) bool {
 func reconcileVRFs(ops vrfOps, tracked []string, desired []VRFSpec) ([]string, error) {
 	desiredByName := make(map[string]int, len(desired))
 	for _, spec := range desired {
-		desiredByName["vrf-"+spec.Name] = spec.TableID
+		desiredByName[VRFDeviceName(spec.Name)] = spec.TableID
 	}
 	managed := make(map[string]bool, len(tracked))
 	for _, name := range tracked {
@@ -497,7 +515,7 @@ func reconcileVRFs(ops vrfOps, tracked []string, desired []VRFSpec) ([]string, e
 	newTracked := make([]string, 0, len(desired))
 
 	for _, spec := range desired {
-		vrfName := "vrf-" + spec.Name
+		vrfName := VRFDeviceName(spec.Name)
 		link, kerErr := ops.LinkByName(vrfName)
 
 		if kerErr != nil {

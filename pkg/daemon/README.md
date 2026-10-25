@@ -322,11 +322,24 @@ always stays armed and the check runs twice:
     and attributes the refusal to DNS when the clone passes or still
     fails only with lookup-failed entries. At the cap the rollback
     *proceeds* instead of taking the safe state — promotion returns the
-    same object and the apply path re-resolves its dns-name entries in
-    place, so a recovered resolver yields the fresh answer and a
-    still-down resolver yields the per-entry fail-closed rendering
-    (#16595). The boot alarm names this class as waiting on dns-name
-    resolution rather than "refused by this build's dataplane".
+    target object and `executeConfirmedRollback` resolves its dns-name
+    entries into a private clone before the apply (#16687; published
+    configs are never written in place), so a recovered resolver yields
+    the fresh answer and a still-down resolver yields the per-entry
+    fail-closed rendering (#16595). The boot alarm names this class as
+    waiting on dns-name resolution rather than "refused by this build's
+    dataplane".
+  - A target refused only because its feed producer is *absent* — the
+    abandoned commit removed or renamed the feed, so its own apply
+    cancelled the producer (#16661) — is not a late feed: nobody will
+    install the snapshot while the abandoned config stays enforced. The
+    fire reconciles the feed producers FOR THE TARGET
+    (`reconcileFeeds(target)`, the same step a normal target apply runs),
+    restarts the bounded deferral, and lets the async fetch converge
+    through `onUpdate` / the next deferred fire. Bootstrap is never
+    reached for a feed-only refusal whose producer was absent; a producer
+    that exists but never installs (server down) still takes the bounded
+    safe state above.
   - Any other refusal, or a feed still unready at the cap, promotes the store to
     the target (persisted as committed, as #6538 does for a recovered target
     that no longer compiles). The daemon then re-syncs the promoted target to
@@ -388,7 +401,12 @@ Both branches of `executeConfirmedRollback` are reachable in that window:
   `enterBootstrapMode` + `reconcileManagementAfterPromotion` instead of an
   apply. Its teardown steps are individually nil-guarded
   (`relinquishClusterForBootstrap` on `d.cluster`, the FRR and dataplane steps
-  on theirs).
+  on theirs). #16678: `enterBootstrapMode` also withdraws the abandoned
+  config's LAN-facing service claims (`withdrawAbandonedServicesForBootstrap`:
+  RA lifetime-0 goodbye, Kea `Apply(nil)`, DHCP relay to nil) — those owners
+  are otherwise reached only from the apply path and shutdown, so without
+  that step the rollback kept advertising/leasing on segments it no longer
+  forwards for while logging "config-driven takeover removed".
 
 **Coverage is at the DISPATCH, not just at the guarded function.** The cell that
 enters `applyTailReconciles` directly binds the guard but cannot see an
@@ -1499,6 +1517,28 @@ per-subnet selector for a narrowed group, and still emits one for an authored
 singleton). The two files name their own side of the agreement so a failure says
 which half broke.
 
+**A node-local member must exist on THIS node (#16685).** The #6520 rule
+above kept every non-RG member on both nodes. That is correct for an
+interface both nodes have (`fxp0`), and wrong for a shared-section port on
+the PEER's FPC slot: node0 names its ports `ge-0-0-*`, node1 names its
+ports `ge-7-0-*`, so a shared `ge-0/0/3` DHCP group resolved to `ge-0-0-3`
+on node1, where no such device exists. The #15206 belt kept it (the name
+IS declared — on the peer), Kea refused the whole family file, and the
+peer served no DHCP at all, including RETH segments after failover.
+`filterDHCPConfigForMasterRGsWithMasters` now drops a non-RG member whose
+`config.InterfaceSlot` maps via `config.SlotToNodeID` to the other node
+(`isPeerSlotInterface16685`), marking `MembersFiltered` when a group
+shrinks; a peer-slot-only group disappears. RG-scoped members are already
+resolved to the local member, so the test is inert for them, and slot-less
+names (`fxp0`, `fab0`, `lo`) are never dropped. `clusterRAConfigSets`
+applies the same rule to node-local RA interfaces, whose sender would
+otherwise fail to bind a nonexistent device on every reconcile.
+
+Guards: `pkg/daemon/dhcp_peer_slot_16685_test.go` (shared shape compiled
+per node via `CompileConfigForNode`: peer drops the peer-slot member in
+v4 and v6, owner unchanged, mixed group marked, grouped `nodeN` shape
+unchanged, RA sibling on both nodes and both masterships).
+
 ### DHCP-learned routes and their routing instance: the key shape (#9135)
 
 `collectDHCPRoutes` (`daemon_flow.go`) tags each DHCP-learned route with the
@@ -1767,6 +1807,17 @@ live source alone would let an unopened shared-identity sender fall through
 to `Apply`'s graceful goodbye (#14978). If both nodes are BACKUP, a stale
 host route may remain until Router Lifetime expiry; a later MASTER's RA
 refresh repairs it.
+
+**Stable-LL placement (#16686).** `addStableRethLinkLocal` installs the
+stable router link-local on the netdev selected by `unit.VlanID > 0`
+(the `RethVIPsForRG`/`ResolveKernelIfName` rule): a tagged unit 0 lives
+on `<member>.<vlan-id>`, an untagged unit 0 on the bare member, and only
+IPv6-bearing units without their own configured link-local receive it.
+Keying on `unitNum > 0` instead left a tagged unit 0's RA sender bound
+to an address never installed on its VLAN sub-interface, so no RAs were
+sent on that VLAN. `removeStableRethLinkLocal`, the direct-mode router
+NA, and `stableRethLinkLocalTargets` (userspace host-inbound) use the
+same rule.
 
 **Idempotence.** A stable digest of the desired set (`lastRAReconcileHash`,
 updated only on a successful apply) gates the actual `ra.Apply`, so the
@@ -2171,6 +2222,20 @@ never lock an operator out of a remote box it manages.
   PCI, survives rename/restart/rollback), and — only if that NIC is
   enumeration index 0 — renames just it to fxp0 and snapshots its addressing
   into the bootstrap `.network`.
+  - **Committed boxes never learn a lifeline from the route (#16671).** On a
+    committed xpf box fxp0 lives in vrf-mgmt, which networkd renders without
+    a main-table gateway, so the NIC carrying the main-table default route
+    is the WAN — not management. `setupBootstrapLifeline` therefore returns
+    early when `EverCommitted()` is true: it never overwrites the persisted
+    `/etc/xpf/lifeline-interface` record from route detection and never
+    renames the WAN to fxp0; the box stays reachable at its EXISTING
+    management address on the retained last-known-good networkd state (the
+    #1960 freeze above). Only never-committed boxes record a lifeline from
+    route detection. For the same reason `installFailClosedBootHostFences`
+    derives management only from the persisted record plus the explicit
+    management leaf and management-class names (`fxp*/fab*/em*`, #6731) —
+    never from a main-table default route — so WAN addresses are fenced on
+    a fail-closed cold boot instead of being withheld as "management".
   - **Appliance factory boot (#7114).** The default-route signal does not
     exist on the appliance image: `scripts/image/bake.py` purges cloud-init
     and deletes every netplan / `interfaces.d` file, so a factory boot (no
@@ -2269,6 +2334,24 @@ never lock an operator out of a remote box it manages.
     unprotected. Both sites now share `isDefaultRoute`, which requires a nil
     destination or an unspecified destination with prefix length 0
     (`0.0.0.0/0` / `::/0`); a non-zero mask is never a default route.
+  - **A failed `.network` write refuses (#16682).** The writer above
+    returned its errors, but its own `fsatomic.WriteFileAtomic` failure
+    was laundered into `(false, nil)` — the #5842 shape, where
+    `(false, nil)` already means "already correct". So on a storage
+    fault (ENOSPC/EROFS/EIO) under `/etc/systemd/network`,
+    `setupBootstrapLifeline` proceeded to write the `.link`, rename
+    (cycle) the management NIC to fxp0 and reload, with no fxp0
+    `.network` to re-address it: the name-keyed host config no longer
+    matched and the link cycle flushed the default route on a bootstrap
+    box with nothing committed to roll back to. The writer now returns
+    the wrapped write error (mirroring `writeLinkFile` /
+    `writeBootstrapFxp0Network`), and the caller refuses before the
+    `.link` write, the rename and the reload — exactly as for an
+    observation failure. The refusal is unconditional: unlike the
+    #6789 observation refusal it is not scoped by provenance, because a
+    failed write means no correct `.network` exists for either
+    provenance, and the appliance factory DHCP content is exactly what
+    failed to land.
 - **Protected set** (`resolveProtectedInterfaces` →
   `dataplane.SetProtectedInterfaceResolver`): fxp0 + the lifeline NIC are NEVER
   marked Unmanaged / always-down / address-stripped, even on an
@@ -2284,11 +2367,25 @@ never lock an operator out of a remote box it manages.
   calls into a backend the rollback has just torn down. The monitor is
   rebuilt fresh on a corrected re-arm because it is not restartable after
   `Stop`), stops the abandoned config's DHCP clients, and retires
-  config-driven `.network` files while keeping `.link` rename files. Bootstrap
-  exit snapshots `fxp0.network` before the first config's networkd reconcile —
-  the exact bytes whatever they are, including an absent or unmarked file
-  (captured/present flags distinguish the shapes). That snapshot is restored
-  only for the genuine first-commit rollback; a later #9615 safe-state entry on
+  config-driven `.network` files while keeping `.link` rename files — with
+  one exception (#16675): bootstrap exit first captures the pre-takeover
+  kernel name of a non-index-0 lifeline that positional naming is about to
+  rename (`captureBootstrapLifelineRenamePreExit`, persisted in the same
+  generation-bound record), and the first-commit rollback removes that
+  NIC's takeover `.link` and renames it back, so the host's own
+  kernel-name-keyed configuration matches again. Without that, the
+  rollback reported success while the management NIC stayed renamed and
+  unaddressed across reboots — console-only. The rename restore is
+  fail-closed on provenance (a `.link` whose `OriginalName=` disagrees
+  with the captured kernel name, or no captured pair at all, retains the
+  file and the live name and reports DEGRADED) and renames before it
+  removes the file, so a failed rename-back never destroys the evidence.
+  Index-0 fxp0 renames are untouched: the `.network` restore below
+  already covers them. Bootstrap exit snapshots `fxp0.network` before
+  the first config's networkd reconcile — the exact bytes whatever they
+  are, including an absent or unmarked file (captured/present flags
+  distinguish the shapes). That snapshot is restored only for the
+  genuine first-commit rollback; a later #9615 safe-state entry on
   a committed box never rewrites `fxp0` from the day-0 snapshot. Confirmation
   of the first-commit window clears the in-memory snapshot.
 
@@ -4269,7 +4366,11 @@ never lock an operator out of a remote box it manages.
   via `PublishRouteOverlaySnapshot` → `BumpFIBGeneration` ONLY after
   publish success, under `applySem`). The ip-monitoring engine lives
   in `pkg/ipmon`; RG transitions re-evaluate gating via
-  `reconcileIPMonGating` from `reconcileRGState`.
+  `reconcileIPMonGating` from `reconcileRGState` and, off the event
+  goroutine via `scheduleIPMonGating` (#16690), from the
+  `handleClusterEvent` ownership edges and the `tr.Changed` arms of
+  `watchVRRPEvents` — the event paths consume the rg-state edge, so
+  the reconcile safety net alone would see `Changed=false` and skip it.
 - `daemon_route_listener.go` filters kernel route events through
   `routing.LearnedRouteTableIDs` and marks a `pkg/coalesce` loop rather than
   publishing per event; subscription gaps and errors mark it as well. Coalesced

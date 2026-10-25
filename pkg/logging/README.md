@@ -881,6 +881,23 @@ with no valueType and no validator, so any string reached the dialer's resolver.
   upper-cases, keeping ICMPv6 mixed-case for the trace-filter contract);
   unknown protocols still fall back to the numeric form. Pin:
   `protoname_test.go`.
+- **Event protocol filters compare resolved NUMBERS (#16688).**
+  `EventFilter` carries `ProtocolNum`/`HasProtocol` alongside the raw
+  `Protocol` token. Every builder — `ParseEventFilterArgs` (local CLI +
+  remote ShowText), gRPC `GetEvents`, REST `eventsHandler` — resolves the
+  token once via `ResolveEventProtocol` (the `appid.ProtocolNumber`
+  SSOT) and rejects an unknown token with an error, so `6`/`58`/`50`/
+  `icmp6` match the records rendered `TCP`/`ICMPv6`/`ESP` and a typo
+  like `tcpx` fails closed instead of silently returning no events.
+  `matches` compares the number against `rec.ProtocolNum`, falling back
+  to resolving the rendered name only when `ProtocolNum==0` (mirrors
+  `monitorFlowFilter`, #13553); a directly-constructed filter that only
+  sets `Protocol` resolves through the same table, and an unresolvable
+  one matches nothing. Protocol `0` (HOPOPT) is a real filter via
+  `HasProtocol`. NOT changed: action matching stays exact
+  case-insensitive (#2939). Pins: `event_filter_protocol_16688_test.go`,
+  `server_show_events_protocol_16688_test.go` (grpcapi),
+  `rest_events_protocol_16688_test.go` (api).
 - **Zone names are resolved AS-OF the event, not recomputed live (#3335).**
   `EventReader.ProcessRawEvent` (`ringbuf.go`) stamps `EventRecord.InZoneName`
   / `OutZoneName` from the dataplane's zone-ID→name table at the instant the

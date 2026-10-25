@@ -863,6 +863,7 @@ func isExactRegistryMapName(s string) bool {
 		mapNameUserspaceLocalV6,
 		mapNameUserspaceInterfaceNATv4,
 		mapNameUserspaceInterfaceNATv6,
+		mapNameUserspaceProxyNDPv6,
 		mapNameUserspaceShimDegradedStats:
 		return true
 	}

@@ -141,7 +141,13 @@ type sessionGenState struct {
 	// ""/0. Guarded by genSentMu; see stampPolicyIdentityLocked.
 	policyIdentitySentV4 map[dataplane.SessionKey]policyIdentityMemo
 	policyIdentitySentV6 map[dataplane.SessionKeyV6]policyIdentityMemo
-	recvGenMu            sync.Mutex
+	// #16700: per tuple, the per-app timeout (seconds, 86401=never) and
+	// then-log flags this node last SENT for one session incarnation
+	// (matched on SessionID), so a mirror-sourced resend cannot wipe
+	// them to 0. Guarded by genSentMu; see stampAppTimeoutLogLocked.
+	appTimeoutLogSentV4 map[dataplane.SessionKey]appTimeoutLogMemo
+	appTimeoutLogSentV6 map[dataplane.SessionKeyV6]appTimeoutLogMemo
+	recvGenMu           sync.Mutex
 	// #9752 round 3: per tuple, the installing-table identity this node last
 	// RECEIVED for one session incarnation (matched on SessionID), so a
 	// stamp-less resend from an old sender cannot erase it. The BPF mirror
@@ -160,8 +166,13 @@ type sessionGenState struct {
 	// can resend the same binding. Guarded by recvGenMu.
 	policyIdentityRecvV4 map[dataplane.SessionKey]policyIdentityMemo
 	policyIdentityRecvV6 map[dataplane.SessionKeyV6]policyIdentityMemo
-	recvGenV4            map[dataplane.SessionKey]uint64
-	recvGenV6            map[dataplane.SessionKeyV6]uint64
+	// #16700: last RECEIVED app timeout / log flags, kept outside the
+	// mirror so a stamp-less resend cannot erase them and a promoted
+	// standby can resend the same values. Guarded by recvGenMu.
+	appTimeoutLogRecvV4 map[dataplane.SessionKey]appTimeoutLogMemo
+	appTimeoutLogRecvV6 map[dataplane.SessionKeyV6]appTimeoutLogMemo
+	recvGenV4           map[dataplane.SessionKey]uint64
+	recvGenV6           map[dataplane.SessionKeyV6]uint64
 	// recvGenScopedV4/V6 + recvTombScopedV4/V6 are the #10512 scoped
 	// policy-delete receiver spaces, keyed by (domain, tuple). #14358
 	// couples deletes across spaces (a delete in either space tombstones

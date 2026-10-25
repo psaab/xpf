@@ -107,8 +107,8 @@ func TestEncodePortID(t *testing.T) {
 	if len(val) != 5 {
 		t.Fatalf("expected 5 bytes, got %d", len(val))
 	}
-	if val[0] != portSubtypeIfName {
-		t.Errorf("expected subtype %d, got %d", portSubtypeIfName, val[0])
+	if val[0] != portSubtypeInterfaceName {
+		t.Errorf("expected subtype %d, got %d", portSubtypeInterfaceName, val[0])
 	}
 	if string(val[1:]) != "eth0" {
 		t.Errorf("expected 'eth0', got %q", string(val[1:]))
@@ -299,7 +299,7 @@ func TestParseTLVs_TruncatedMandatory(t *testing.T) {
 		{
 			// Port ID = subtype byte only, no identifier.
 			name: "port-id-len-1",
-			data: concat(goodChassis, rawTLV(tlvPortID, []byte{portSubtypeIfName}), goodTTL, end),
+			data: concat(goodChassis, rawTLV(tlvPortID, []byte{portSubtypeInterfaceName}), goodTTL, end),
 		},
 		{
 			// TTL value is 1 byte, can't form the 2-byte hold time.
@@ -470,8 +470,13 @@ func TestParseTLVs_SanitizesControlChars(t *testing.T) {
 	if strings.ContainsAny(n.PortID, "\x1b\n") {
 		t.Errorf("PortID still carries ESC/LF: %q", n.PortID)
 	}
-	if !strings.HasPrefix(n.ChassisID, "host") {
-		t.Errorf("ChassisID lost readable text: %q", n.ChassisID)
+	// #16673: an identifier carrying controls is BINARY, not text — it now
+	// renders as lowercase hex of the raw bytes (host.. = 68 6f 73 74 ..) so
+	// no byte is folded away; the old "host"-prefix sanitized-text form was
+	// exactly the lossy behaviour the issue removes. The control scan above
+	// still holds: hex is plain ASCII.
+	if n.ChassisID != "686f73740d0a41e281a6" {
+		t.Errorf("ChassisID = %q, want hex of the raw identifier %q", n.ChassisID, "686f73740d0a41e281a6")
 	}
 }
 

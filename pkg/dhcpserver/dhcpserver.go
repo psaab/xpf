@@ -1117,6 +1117,38 @@ func canonicalMAC(mac string) (string, bool) {
 	return hw.String(), true
 }
 
+// Kea's hard maxima for the expired-leases-processing knobs (#16691).
+// These mirror the commit-gate ranges in dhcpExpiredLeasesSchema
+// (pkg/config/schema_system.go): the deployed Kea parser rejects a
+// value above its bound and then refuses the whole family file, so the
+// renderer must never emit one. They live here as untyped constants so
+// both sides can be checked against each other in review; the schema
+// ranges are pinned by TestDHCPExpiredLeasesSchemaRejectsAboveKeaMax
+// and these by TestKeaExpiredLeasesOutOfRangeKnobsOmittedWithWarning.
+const (
+	maxKeaReclaimTimer     = 65535
+	maxKeaFlushTimer       = 65535
+	maxKeaHoldTime         = 4294967295
+	maxKeaMaxReclaimLeases = 4294967295
+	maxKeaMaxReclaimTime   = 10000
+	maxKeaUnwarnedCycles   = 65535
+)
+
+// clampKeaExpiredLeaseKnob bounds one rendered knob to [min, max].
+// An in-range value is returned unchanged with keep=true. An
+// out-of-range value that arrived via the tolerant load / peer-sync
+// path (where the schema gate only warns, invariant H7) is dropped
+// with keep=false so Kea falls back to its default for that knob
+// instead of refusing the whole family file; the caller warns naming
+// the leaf, the value, and the bound. Dropping one knob keeps the
+// rest of the block and every pool of the family serving (#16691).
+func clampKeaExpiredLeaseKnob(v, min, max int) (int, bool) {
+	if v < min || v > max {
+		return 0, false
+	}
+	return v, true
+}
+
 // keaExpiredLeasesMap renders the per-family `expired-leases-processing`
 // reclamation block (#1387 stale-lease-cleanup slice / Path S), or nil
 // when the block is absent OR disabled. Returning nil makes the caller
@@ -1130,33 +1162,50 @@ func canonicalMAC(mac string) (string, bool) {
 // NOT on `> 0`, because 0 means UNLIMITED in Kea — a value distinct from
 // "omit -> Kea default" (invariant H2).
 //
+// Out-of-range knobs (#16691) are omitted with a warning via warn
+// rather than rendered: a stored or peer-synced config can carry a
+// value the strict commit gate would now refuse (it only warns on the
+// tolerant path), and rendering it verbatim would make Kea refuse the
+// whole family file. warn may be nil (pure-render callers); the omit
+// still happens.
+//
 // When Enabled is true but no knob is configured this returns a non-nil
 // empty map, so the caller emits `"expired-leases-processing": {}` — Kea
 // reads an empty block as "reclamation with built-in defaults," and
 // surfacing the empty block lets an operator see the feature is on in the
 // rendered config.
-func keaExpiredLeasesMap(c *config.DHCPExpiredLeasesConfig) map[string]any {
+func keaExpiredLeasesMap(c *config.DHCPExpiredLeasesConfig, warn func(msg string, args ...any)) map[string]any {
 	if c == nil || !c.Enabled {
 		return nil
 	}
 	m := map[string]any{}
-	if c.ReclaimTimerWait > 0 {
-		m["reclaim-timer-wait-time"] = c.ReclaimTimerWait
+	emit := func(keaKey, leaf string, v, min, max int) {
+		if cv, ok := clampKeaExpiredLeaseKnob(v, min, max); ok {
+			m[keaKey] = cv
+			return
+		}
+		if warn != nil {
+			warn("omitting expired-leases-processing knob Kea would refuse (whole family file would be rejected)",
+				"leaf", leaf, "value", v, "min", min, "max", max)
+		}
 	}
-	if c.FlushReclaimedTimerWait > 0 {
-		m["flush-reclaimed-timer-wait-time"] = c.FlushReclaimedTimerWait
+	if c.ReclaimTimerWait != 0 {
+		emit("reclaim-timer-wait-time", "reclaim-timer", c.ReclaimTimerWait, 1, maxKeaReclaimTimer)
 	}
-	if c.HoldReclaimedTime > 0 {
-		m["hold-reclaimed-time"] = c.HoldReclaimedTime
+	if c.FlushReclaimedTimerWait != 0 {
+		emit("flush-reclaimed-timer-wait-time", "flush-timer", c.FlushReclaimedTimerWait, 1, maxKeaFlushTimer)
+	}
+	if c.HoldReclaimedTime != 0 {
+		emit("hold-reclaimed-time", "hold-time", c.HoldReclaimedTime, 1, maxKeaHoldTime)
 	}
 	if c.MaxReclaimLeasesSet {
-		m["max-reclaim-leases"] = c.MaxReclaimLeases // 0 == unlimited, intentional (H2)
+		emit("max-reclaim-leases", "max-leases", c.MaxReclaimLeases, 0, maxKeaMaxReclaimLeases) // 0 == unlimited, intentional (H2)
 	}
 	if c.MaxReclaimTimeSet {
-		m["max-reclaim-time"] = c.MaxReclaimTime // 0 == unlimited, intentional (H2)
+		emit("max-reclaim-time", "max-time", c.MaxReclaimTime, 0, maxKeaMaxReclaimTime) // 0 == unlimited, intentional (H2)
 	}
-	if c.UnwarnedReclaimCycles > 0 {
-		m["unwarned-reclaim-cycles"] = c.UnwarnedReclaimCycles
+	if c.UnwarnedReclaimCycles != 0 {
+		emit("unwarned-reclaim-cycles", "unwarned-cycles", c.UnwarnedReclaimCycles, 0, maxKeaUnwarnedCycles)
 	}
 	return m
 }
@@ -1604,7 +1653,7 @@ func (m *Manager) generateKea4Config(cfg *config.DHCPServerConfig) error {
 	}
 	// #1387: opt-in expired-lease reclamation tuning. nil/disabled -> key
 	// omitted -> byte-identical to pre-#1387 (H1).
-	if elp := keaExpiredLeasesMap(cfg.DHCPLocalServer.ExpiredLeases); elp != nil {
+	if elp := keaExpiredLeasesMap(cfg.DHCPLocalServer.ExpiredLeases, m.warn); elp != nil {
 		dhcp4["expired-leases-processing"] = elp
 	}
 	m.addLeaseSyncStanza(dhcp4, 4)
@@ -1748,7 +1797,7 @@ func (m *Manager) generateKea6Config(cfg *config.DHCPServerConfig) error {
 	}
 	// #1387: opt-in expired-lease reclamation tuning. nil/disabled -> key
 	// omitted -> byte-identical to pre-#1387 (H1).
-	if elp := keaExpiredLeasesMap(cfg.DHCPv6LocalServer.ExpiredLeases); elp != nil {
+	if elp := keaExpiredLeasesMap(cfg.DHCPv6LocalServer.ExpiredLeases, m.warn); elp != nil {
 		dhcp6["expired-leases-processing"] = elp
 	}
 	m.addLeaseSyncStanza(dhcp6, 6)

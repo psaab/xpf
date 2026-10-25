@@ -255,7 +255,12 @@ func (s *Server) showText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 
 	case "flow-statistics":
 		// #1043 Phase 5: case body extracted to server_show_flow.go
-		s.showFlowStatistics(&buf)
+		// #16677: admission-gated full-table walk; error propagated so
+		// contention surfaces as ResourceExhausted and a walk failure
+		// is never rendered as "Current sessions: 0".
+		if err := s.showFlowStatistics(ctx, &buf); err != nil {
+			return nil, err
+		}
 
 	case "sessions-top:bytes", "sessions-top:packets":
 		// #1043 Phase 5: case body extracted to server_show_flow.go

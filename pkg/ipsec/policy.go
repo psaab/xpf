@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"sort"
 	"strings"
 
@@ -66,18 +67,76 @@ type pskValue struct {
 	hex   bool
 }
 
-func gatewayKeyFor(ipsecCfg *config.IPsecConfig, name string, vpn *config.IPsecVPN, gw *config.IPsecGateway) string {
-	if gw != nil && ipsecCfg != nil {
-		if _, ok := ipsecCfg.Gateways[vpn.Gateway]; ok && vpn.Gateway != "" {
-			// A named gateway is the shared IKE endpoint. Inline endpoints
-			// (gw==nil shape) and the empty endpoint keep per-VPN conns.
-			if vpn.Gateway == name {
-				// Degenerate self-named gateway: unchanged.
+// isNamedGatewayVPN reports whether vpn references a defined gateway
+// object (the #15024 grouped shape), as opposed to an inline endpoint
+// or the empty endpoint, which keep per-VPN connections.
+func isNamedGatewayVPN(ipsecCfg *config.IPsecConfig, vpn *config.IPsecVPN) bool {
+	if ipsecCfg == nil || vpn == nil || vpn.Gateway == "" {
+		return false
+	}
+	_, ok := ipsecCfg.Gateways[vpn.Gateway]
+	return ok
+}
+
+// gatewayKeyCollision reports whether the sanitized key is claimed by
+// both a named-gateway connection and an inline/empty-endpoint VPN
+// connection (#16676). Only that cross-kind fold is unsafe: two VPNs
+// referencing the SAME gateway object intentionally share one
+// connection, and two VPNs referencing DIFFERENT gateway objects can
+// never share a key because the key IS the gateway name. An
+// inline/empty VPN keys by its own name, so it collides with a
+// gateway connection exactly when its name equals a gateway name
+// that at least one other VPN references as a gateway object.
+func gatewayKeyCollision(ipsecCfg *config.IPsecConfig, key string) bool {
+	if ipsecCfg == nil || key == "" {
+		return false
+	}
+	if _, isGateway := ipsecCfg.Gateways[key]; !isGateway {
+		return false
+	}
+	hasGatewayMember, hasInlineMember := false, false
+	for name, vpn := range ipsecCfg.VPNs {
+		if vpn == nil {
+			continue
+		}
+		if isNamedGatewayVPN(ipsecCfg, vpn) {
+			if sanitizeSwanctlValue(vpn.Gateway) == key {
+				hasGatewayMember = true
 			}
-			return sanitizeSwanctlValue(vpn.Gateway)
+		} else if sanitizeSwanctlValue(name) == key {
+			hasInlineMember = true
 		}
 	}
-	return sanitizeSwanctlValue(name)
+	return hasGatewayMember && hasInlineMember
+}
+
+// gatewayKeyFor returns the swanctl connection name for vpn. A VPN
+// referencing a defined gateway renders under the gateway name
+// (#15024, shared by every VPN referencing that gateway); any other
+// VPN (inline endpoint, empty endpoint, dangling reference) renders
+// under its own name — EXCEPT when that key is cross-kind colliding
+// (#16676): an inline/empty VPN whose name equals a gateway name
+// used by another VPN. Folding those would drop the later member's
+// peer/auth/proposals and negotiate its children (including the
+// st0 if_id) with the wrong peer, so the inline VPN is prefixed
+// with "inline-" to keep two distinct connections. The gateway
+// connection keeps the bare gateway name (CONTROL unchanged). The
+// prefix cannot itself collide: gateway and VPN names are
+// section-safe (letters/digits/'-'/'_' via the #9495 gate), and a
+// gateway literally named "inline-<x>" keys bare as "inline-<x>"
+// while an inline VPN named "<x>" colliding with gateway "<x>"
+// keys as "inline-<x>" — distinct gateway names give distinct
+// prefixed keys, and an inline VPN can only collide with the
+// gateway whose name equals its own.
+func gatewayKeyFor(ipsecCfg *config.IPsecConfig, name string, vpn *config.IPsecVPN, gw *config.IPsecGateway) string {
+	if gw != nil && isNamedGatewayVPN(ipsecCfg, vpn) {
+		return sanitizeSwanctlValue(vpn.Gateway)
+	}
+	key := sanitizeSwanctlValue(name)
+	if gatewayKeyCollision(ipsecCfg, key) {
+		return "inline-" + key
+	}
+	return key
 }
 
 func (m *Manager) generateConfig(ipsecCfg *config.IPsecConfig) string {
@@ -300,6 +359,26 @@ func (m *Manager) renderConfigMembersWithExternalInterfaceFailClosed(
 				"or non-ASCII); rename the VPN to letters, digits, '-' and '_' (#9495)",
 				"vpn", name)
 			continue
+		}
+
+		// #16676 render belt: a surviving VPN whose gatewayKeyFor key
+		// is already owned by a group with different IKE parameters
+		// (resolved gateway object, remote/local address, or auth
+		// method) must never fold silently — the first member would
+		// supply the peer and this VPN's children would negotiate
+		// with the wrong peer. gatewayKeyFor already separates the
+		// known cross-kind (inline-vs-gateway-name) collision by
+		// construction; this belt catches any residual same-key
+		// different-peer fold (e.g. sanitized-name aliasing) on the
+		// tolerant load / peer-sync path: skip the later VPN, keep
+		// the first, never drop its peer silently.
+		if existing, ok := groups[connKey]; ok {
+			if existing.gw != gw || existing.remoteAddr != remoteAddr || existing.localAddr != localAddr || existing.authMethod != authMethod {
+				skipped[name] = true
+				slog.Warn("skipping IPsec VPN: its swanctl connection name is already claimed by a VPN with a different gateway endpoint — rename the VPN or the gateway so each peer gets its own connection (#16676)",
+					"vpn", name, "connection", connKey)
+				continue
+			}
 		}
 
 		// #10681: a NON-EMPTY bind-interface that resolves to no XFRM if_id
@@ -641,6 +720,11 @@ func (m *Manager) renderConfigMembersWithExternalInterfaceFailClosed(
 			// the PSK stays scoped by one id-<n> selector per peer
 			// address (pskIDSelectorsLocal, #14139), so no unscoped
 			// secret results.
+			//
+			// #16680: a single HOSTNAME address likewise yields no
+			// default id — the hostname is a dial target, never the
+			// identity a default-identity peer presents (its resolved
+			// IP). defaultRemoteID enforces the IP-literal check.
 			if gw != nil {
 				if id := defaultRemoteID(gw); id != "" {
 					fmt.Fprintf(&b, "      id = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(id)))
@@ -648,8 +732,12 @@ func (m *Manager) renderConfigMembersWithExternalInterfaceFailClosed(
 			} else if addrs := config.SplitIPsecEndpointList(gc.remoteAddr); len(addrs) == 1 && addrs[0] != "%any" {
 				// Inline endpoint (no gateway object): the dialed
 				// address is likewise the default peer identity — for
-				// a single-address endpoint only (#15766).
-				fmt.Fprintf(&b, "      id = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(addrs[0])))
+				// a single-address endpoint only (#15766), and only
+				// when it is an IP literal (#16680): a hostname dial
+				// target is never the identity the peer presents.
+				if _, err := netip.ParseAddr(addrs[0]); err == nil {
+					fmt.Fprintf(&b, "      id = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(addrs[0])))
+				}
 			}
 		}
 		b.WriteString("    }\n")
@@ -1230,9 +1318,13 @@ func escapeSwanctlQuoted(s string) string {
 //     the `dynamic hostname` identity (@FQDN, #14590) for a dynamic peer,
 //     otherwise the concrete remote gateway address (strongSwan uses the
 //     peer IP as its default identity when no id is negotiated) — one
-//     selector per address when the gateway carries a comma-separated
-//     multi-address list (#14139). This is the discriminator between
-//     two PSK VPNs to different peers;
+//     selector per IP-literal address when the gateway carries a
+//     comma-separated multi-address list (#14139). A hostname dial
+//     target contributes NO peer selector (#16680): it is not an IKE
+//     identity (the peer presents its resolved IP), so the secret is
+//     then selected by its local owner alone (see below; the shared-
+//     owner isolation question is #16708). This is the discriminator
+//     between two PSK VPNs to different peers;
 //   - the local owner, so the secret is also selected when strongSwan
 //     looks it up from the initiator side (#15193): the configured
 //     local-id when set, else the pinned local address / %any (below).
@@ -1295,8 +1387,26 @@ func pskIDSelectorsLocal(remoteAddr, localAddr string, gw *config.IPsecGateway) 
 		// bare hostname as a dial address.
 		add(formatIdentity("hostname", gw.DynamicHostname))
 	} else {
+		// #16680: a hostname dial target is not an IKE identity. Junos
+		// defaults the peer identity to the resolved IP, and strongSwan
+		// likewise presents its IP when no id is negotiated, so a
+		// hostname string can never match the peer that actually
+		// presents. Skip non-IP entries here; the local owner below
+		// still lets charon's initiator lookup select the secret (via
+		// %any / the pinned local address / local-id), and when the
+		// peer initiates charon matches the secret by that local side
+		// as well — the hostname string itself scoping nothing is
+		// strictly better than pinning an identity nobody presents.
+		// IP literals keep the #3952/#14139 per-address discriminator.
+		// NOTE: the shared-local-owner isolation concern is tracked
+		// separately as #16708 (R3-VA16-S1); widening/narrowing THAT
+		// mechanism is out of scope here.
 		for _, addr := range strings.Split(remoteAddr, ",") {
-			add(strings.TrimSpace(addr))
+			addr = strings.TrimSpace(addr)
+			if _, err := netip.ParseAddr(addr); err != nil {
+				continue
+			}
+			add(addr)
 		}
 	}
 	// Local owner (#15193): the identity/address charon presents for this
@@ -1333,12 +1443,25 @@ func pskIDSelectorsLocal(remoteAddr, localAddr string, gw *config.IPsecGateway) 
 // presenting from any other configured address. The caller then omits
 // remote.id; the PSK selectors still carry one entry per peer address.
 // An empty gateway address likewise yields "".
+//
+// #16680: a single HOSTNAME address yields "" as well. The hostname is
+// a dial target (remote_addrs, which strongSwan DNS-resolves at
+// initiate time), never the identity the peer presents: Junos defaults
+// the peer identity to the resolved IP and strongSwan defaults to its
+// own IP, so pinning id = "<hostname>" fails charon's identity check
+// in both directions (AUTH_FAILED) against a default-identity peer.
+// No DNS lookup runs here — render stays synchronous and pure — so
+// the resolved IP cannot be pinned either; omitting remote.id lets
+// charon negotiate the peer's presented (IP) identity instead.
 func defaultRemoteID(gw *config.IPsecGateway) string {
 	if gw == nil || gw.RemoteIDValue != "" || gw.DynamicHostname != "" {
 		return ""
 	}
 	addrs := config.SplitIPsecEndpointList(gw.Address)
 	if len(addrs) != 1 {
+		return ""
+	}
+	if _, err := netip.ParseAddr(addrs[0]); err != nil {
 		return ""
 	}
 	return addrs[0]

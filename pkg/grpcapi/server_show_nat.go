@@ -1,13 +1,14 @@
 // NAT-related ShowText case bodies.
 //
-// #1687: the six byte-identical NAT renderers (static, nptv6,
+// #1687: the byte-identical NAT renderers (static, nptv6,
 // persistent-nat, persistent-nat-detail, source-rule-detail,
-// dest-rule-detail) were extracted to the shared pkg/natshow package so
-// the gRPC ShowText path and the CLI show path single-source them. The
-// methods below are thin sink-binding wrappers that pass the gRPC
-// *strings.Builder as the io.Writer. showNAT64 stays here: its empty
-// message diverges from the CLI ("...configured" vs "...configured."),
-// so it is intentionally NOT shared.
+// dest-rule-detail, nat64) are extracted to the shared pkg/natshow
+// package so the gRPC ShowText path and the CLI show path single-source
+// them. The methods below are thin sink-binding wrappers that pass the
+// gRPC *strings.Builder as the io.Writer. NAT64 joined the shared set
+// in #16681: the two copies had diverged (gRPC omitted zone/RI scope,
+// both omitted source-address scope), and they now single-source
+// natshow.RenderNAT64 with the gRPC empty message as canonical.
 //
 // History: Phase 3 of #1043 first extracted these case bodies from the
 // ShowText switch into dedicated methods (verbatim, no behavior change).
@@ -16,7 +17,6 @@ package grpcapi
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"google.golang.org/grpc/codes"
@@ -182,33 +182,10 @@ func (s *Server) showPersistentNATDetail(ctx context.Context, buf *strings.Build
 // showNAT64 renders `cli show security nat nat64` — NAT64 rule-sets
 // from configuration.
 func (s *Server) showNAT64(cfg *config.Config, buf *strings.Builder) {
-	if cfg == nil || len(cfg.Security.NAT.NAT64) == 0 {
-		buf.WriteString("No NAT64 rule-sets configured\n")
-		return
+	v := s.natRuntimeVerdicts()
+	var runtime natshow.RuntimeVerdicts
+	if v.Available && len(v.NAT64Rules) > 0 {
+		runtime = natshow.RuntimeVerdicts(v.NAT64Rules)
 	}
-	for _, rs := range cfg.Security.NAT.NAT64 {
-		fmt.Fprintf(buf, "NAT64 rule-set: %s\n", rs.Name)
-		if rs.Prefix != "" {
-			fmt.Fprintf(buf, "  Prefix:      %s\n", rs.Prefix)
-		}
-		if rs.SourcePool != "" {
-			fmt.Fprintf(buf, "  Source pool:  %s\n", rs.SourcePool)
-		}
-		// #16547: NAT64 twin of the runtime quarantine (see CLI).
-		nat64Reason := ""
-		if rs.SourcePool != "" {
-			if pool, ok := cfg.Security.NAT.SourcePools[rs.SourcePool]; ok {
-				nat64Reason = config.SourceNATPoolUnusableReason(pool)
-			}
-		}
-		if nat64Reason == "" {
-			if v := s.natRuntimeVerdicts(); v.Available {
-				nat64Reason = v.NAT64Rules[rs.Name]
-			}
-		}
-		if nat64Reason != "" {
-			fmt.Fprintf(buf, "  NOT INSTALLED — %s\n", config.SourceNATDisarmReasonText(nat64Reason))
-		}
-		buf.WriteString("\n")
-	}
+	natshow.RenderNAT64(buf, cfg, runtime)
 }

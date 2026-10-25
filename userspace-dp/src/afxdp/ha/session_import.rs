@@ -389,7 +389,7 @@ impl crate::afxdp::ha::SessionDomain {
 
     fn reserve_synced_translation(
         &self,
-        entry: &SyncedSessionEntry,
+        entry: &mut SyncedSessionEntry,
         capture_holder_snapshot: bool,
     ) -> Result<AllocatorHolderSnapshot, ()> {
         let now_ns = monotonic_nanos();
@@ -432,8 +432,8 @@ impl crate::afxdp::ha::SessionDomain {
                 .synced_import_zone_unresolved
                 .fetch_add(1, Ordering::Relaxed);
         }
-        let (source_nat_reserved, source_nat_holders) = if capture_holder_snapshot {
-            crate::nat::reserve_synced_source_nat_allocation_untracked_with_holder_snapshot(
+        let (source_nat_reserved, source_nat_holders, persistent_hold_16615) = if capture_holder_snapshot {
+            crate::nat::reserve_synced_source_nat_allocation_untracked_with_holder_snapshot_and_hold(
                 &forwarding.iface_nat_allocators,
                 &forwarding.source_nat_rules,
                 &entry.key,
@@ -444,20 +444,21 @@ impl crate::afxdp::ha::SessionDomain {
                 domains,
             )
         } else {
-            (
-                crate::nat::reserve_synced_source_nat_allocation_untracked(
-                    &forwarding.iface_nat_allocators,
-                    &forwarding.source_nat_rules,
-                    &entry.key,
-                    entry.decision.nat,
-                    entry.metadata.is_reverse,
-                    zones,
-                    now_ns,
-                    domains,
-                ),
-                None,
-            )
+            let (reserved, hold) = crate::nat::reserve_synced_source_nat_allocation_untracked_with_hold(
+                &forwarding.iface_nat_allocators,
+                &forwarding.source_nat_rules,
+                &entry.key,
+                entry.decision.nat,
+                entry.metadata.is_reverse,
+                zones,
+                now_ns,
+                domains,
+            );
+            (reserved, None, hold)
         };
+        if persistent_hold_16615.is_some() {
+            entry.persistent_lease_hold = persistent_hold_16615;
+        }
         if !source_nat_reserved {
             return Err(());
         }
@@ -482,13 +483,14 @@ impl crate::afxdp::ha::SessionDomain {
             )
         };
         if !nat64_reserved {
-            crate::nat::release_synced_source_nat_allocation_untracked(
+            crate::nat::release_synced_source_nat_allocation_untracked_with_hold(
                 &forwarding.iface_nat_allocators,
                 &forwarding.source_nat_rules,
                 &entry.key,
                 entry.decision.nat,
                 entry.metadata.is_reverse,
                 now_ns,
+                persistent_hold_16615,
             );
             return Err(());
         }
@@ -528,13 +530,14 @@ impl crate::afxdp::ha::SessionDomain {
             entry.metadata.is_reverse,
             now_ns,
         );
-        let current_snat_released = crate::nat::release_synced_source_nat_allocation_untracked(
+        let current_snat_released = crate::nat::release_synced_source_nat_allocation_untracked_with_hold(
             &forwarding.iface_nat_allocators,
             &forwarding.source_nat_rules,
             &entry.key,
             entry.decision.nat,
             entry.metadata.is_reverse,
             now_ns,
+            entry.persistent_lease_hold,
         );
         // A same-key replacement can have retired its previous allocator
         // tuple while reserving the import. Restore that reservation when the
@@ -1272,7 +1275,7 @@ impl crate::afxdp::ha::SessionDomain {
             && !entry.metadata.is_reverse
             && !worker_records.is_empty();
         let holder_snapshot = if translation_reserved {
-            match self.reserve_synced_translation(&entry, strict_mirror) {
+            match self.reserve_synced_translation(&mut entry, strict_mirror) {
                 Ok(snapshot) => snapshot,
                 Err(()) => {
                     self.sessions
@@ -2620,13 +2623,14 @@ impl crate::afxdp::ha::SessionDomain {
             return false;
         }
         let now_ns = crate::afxdp::wg::counters::monotonic_now_ns();
-        let snat_freed = crate::nat::release_synced_source_nat_allocation_untracked(
+        let snat_freed = crate::nat::release_synced_source_nat_allocation_untracked_with_hold(
             &forwarding.iface_nat_allocators,
             &forwarding.source_nat_rules,
             key,
             entry.decision.nat,
             entry.metadata.is_reverse,
             now_ns,
+            entry.persistent_lease_hold,
         );
         let nat64_freed = crate::nat64::release_synced_nat64_allocation_untracked_for_purge(
             &forwarding.nat64,
@@ -2705,6 +2709,7 @@ impl crate::afxdp::ha::SessionDomain {
         generation: 0,
         session_id: 0,
         tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            persistent_lease_hold: None,
         source_nat_static: None, });
     }
 }
@@ -2859,6 +2864,7 @@ mod rejected_mirror_reservation_10790_tests {
         generation,
         session_id,
         tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            persistent_lease_hold: None,
         source_nat_static: None, }
     }
 
@@ -2992,6 +2998,7 @@ mod rejected_mirror_reservation_10790_tests {
         generation: 0,
         session_id: 0,
         tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            persistent_lease_hold: None,
         source_nat_static: None, };
         let allocator = &coordinator.forwarding.source_nat_rules[0].pool_allocator;
         assert!(

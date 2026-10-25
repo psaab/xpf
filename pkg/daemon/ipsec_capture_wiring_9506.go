@@ -1370,10 +1370,25 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 			_ = d.ipsecS4.retireQueue(handle, true, true)
 		}
 	}
+	// quarantineWith builds the fail-closed QUEUE_OPEN/Unknown runtime.
+	// #16699: the wrapped stage error is RETURNED (not discarded) when the
+	// reason is QueueOpen, so an over-cap or queue-alloc/open/submit
+	// failure fails the apply visibly via captureStageErr instead of
+	// silently installing a box-wide quarantine under a successful
+	// commit. The staged quarantine runtime is still installed by
+	// commitIpsecCaptureStage (fail-closed); only the error propagation
+	// changes. Unknown-reason quarantines (origin registry / pipeline /
+	// divert-spec construction) keep their nil return: they are not the
+	// QUEUE_OPEN capacity/queue-open class the issue scopes, and their
+	// staged runtime already carries the quarantine reason.
 	quarantineWith := func(reason xnft.IpsecQuarantineReason, stageErr error) (*ipsecCaptureRuntime, error) {
 		plan.addQuarantine(reason)
 		plan.finalize(generation)
-		return stagedIpsecQuarantineRuntime(d, generation, plan.Quarantine), nil
+		rt := stagedIpsecQuarantineRuntime(d, generation, plan.Quarantine)
+		if reason == xnft.IpsecQuarantineReasonQueueOpen && stageErr != nil {
+			return rt, fmt.Errorf("ipsec capture: queue-open quarantine (generation %d): %w", generation, stageErr)
+		}
+		return rt, nil
 	}
 	// A single generation is bounded to the supported tunnel count. The
 	// allocator holds two generations (old + staged), so without this
@@ -1383,18 +1398,18 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 	for _, key := range keys {
 		if stagedGenerationHandles >= ipsecCaptureMaxGenerationHandles {
 			cleanupHandles()
-			staged, _ = quarantineWith(xnft.IpsecQuarantineReasonQueueOpen, errIpsecQueueExhausted)
+			staged, err = quarantineWith(xnft.IpsecQuarantineReasonQueueOpen, fmt.Errorf("%w: %d distinct route-based VPN capture tunnels exceed the supported limit of %d per capture generation (#16699)", errIpsecQueueExhausted, len(keys)/ipsecCaptureQueuesPerTunnel, ipsecCaptureMaxTunnels))
 			d.ipsecCaptureStaged = staged
 			d.ipsecCaptureStagePending = true
-			return old, staged, nil
+			return old, staged, err
 		}
 		handle, allocErr := d.ipsecS4.allocateQueue(key)
 		if allocErr != nil {
 			cleanupHandles()
-			staged, _ = quarantineWith(xnft.IpsecQuarantineReasonQueueOpen, allocErr)
+			staged, err = quarantineWith(xnft.IpsecQuarantineReasonQueueOpen, allocErr)
 			d.ipsecCaptureStaged = staged
 			d.ipsecCaptureStagePending = true
-			return old, staged, nil
+			return old, staged, err
 		}
 		handles = append(handles, handle)
 		stagedGenerationHandles++
@@ -1413,10 +1428,10 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 		if openErr != nil {
 			closeStagedCaptureQueues(queues)
 			cleanupHandles()
-			staged, _ = quarantineWith(xnft.IpsecQuarantineReasonQueueOpen, openErr)
+			staged, err = quarantineWith(xnft.IpsecQuarantineReasonQueueOpen, openErr)
 			d.ipsecCaptureStaged = staged
 			d.ipsecCaptureStagePending = true
-			return old, staged, nil
+			return old, staged, err
 		}
 		queues = append(queues, IpsecCaptureQueue{
 			Queue:              queue,
@@ -1435,10 +1450,10 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 	if submitErr != nil {
 		closeStagedCaptureQueues(queues)
 		cleanupHandles()
-		staged, _ = quarantineWith(xnft.IpsecQuarantineReasonQueueOpen, submitErr)
+		staged, err = quarantineWith(xnft.IpsecQuarantineReasonQueueOpen, submitErr)
 		d.ipsecCaptureStaged = staged
 		d.ipsecCaptureStagePending = true
-		return old, staged, nil
+		return old, staged, err
 	}
 	queueEpochs := make(map[uint16]uint64, len(handles))
 	for _, handle := range handles {
@@ -1704,6 +1719,17 @@ type ipsecCaptureQuarantineInstaller interface {
 	InstallIpsecQuarantineGuard(xnft.IpsecDivertSpec) error
 }
 
+// ipsecCaptureGuardVerifier re-verifies that a two-family quarantine
+// guard table actually exists (#16703). The guarded-failure path
+// consults it before retiring the old actor: the installer contract
+// claims a guard is retained on post-ACK failures, but a guard install
+// that itself failed (e.g. a kernel-rejected ruleset) leaves no guard,
+// and retiring the old actor then orphans the old divert table onto
+// stopped NFQUEUE listeners with no deny authority replacing it.
+type ipsecCaptureGuardVerifier interface {
+	VerifyIpsecQuarantineGuard() error
+}
+
 // commitIpsecCaptureStage installs the divert atomically before starting the
 // actor. The old generation remains live until the new nftables transaction and
 // receive loops are both ready; every failure restores the old pointer and
@@ -1797,12 +1823,40 @@ func (d *Daemon) commitIpsecCaptureStage(old, staged *ipsecCaptureRuntime) error
 			// The guarded installer retains its deny authority on every
 			// post-ACK failure. Never restore old as an authority after the
 			// transition has been touched.
+			//
+			// #16703: that contract holds only when a guard table
+			// actually exists. If the guard install itself failed (the
+			// #14696 bridge sdifname EOPNOTSUPP class), no guard was
+			// ever installed, so re-verify before retiring the old
+			// actor. When no guard verifies, attempt one explicit
+			// guard install from the staged spec; only if that also
+			// fails is there no deny authority to retain, and the old
+			// actor is still retired (its divert table stays orphaned
+			// and the failure is reported, never silent).
+			guardVerified := false
+			if verifier, ok := nftInstaller.(ipsecCaptureGuardVerifier); ok {
+				if verifyErr := verifier.VerifyIpsecQuarantineGuard(); verifyErr == nil {
+					guardVerified = true
+				} else {
+					slog.Warn("ipsec capture: quarantine guard absent after failed guarded transition; attempting explicit guard install", "err", verifyErr)
+				}
+			}
+			if !guardVerified {
+				if guardErr := d.installIpsecQuarantineForDaemon16618(staged.spec); guardErr != nil {
+					slog.Warn("ipsec capture: explicit quarantine guard install after failed guarded transition failed", "err", guardErr)
+				} else {
+					guardVerified = true
+				}
+			}
 			if !oldRetired {
 				_ = old.close()
 			}
 			d.markIpsecKernelQuarantineOrphaned()
 			d.restoreIpsecCaptureRuntime(nil)
 			_ = staged.close()
+			if !guardVerified {
+				return fmt.Errorf("ipsec capture: guarded divert transition: %w (no quarantine guard verified)", err)
+			}
 			return fmt.Errorf("ipsec capture: guarded divert transition: %w", err)
 		}
 	} else {

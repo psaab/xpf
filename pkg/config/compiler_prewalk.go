@@ -422,6 +422,22 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, []uncoveredF
 	}
 	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, eventInertWarnings...)
 
+	// #16712 ip-monitoring `then` gate. compileIPMonitoring reads only
+	// `preferred-route` under `then`, so the Junos interface action
+	// `then interface <if> enable|disable` (and any other undeclared
+	// `then` child) compiled to nothing with no warning — the backup
+	// interface was never enabled/disabled on probe failure. Scoped
+	// AST pre-walk (NOT closedWorld on `then`, which would inherit
+	// into preferred-route/route and only fire on SchemaValidate),
+	// permitted set read from the schema. Strict: hard-reject;
+	// lenient: warn so a persisted config still boots (#1960).
+	ipMonThenWarnings16712, err := validateIPMonThenChildrenAST16712(
+		tree.Children, opts.lenientIPMonThenChildren16712)
+	if err != nil {
+		return nil, nil, err
+	}
+	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, ipMonThenWarnings16712...)
+
 	// #4296 firewall-filter family-any specific-match gate. #4287 dual-compiles a
 	// `family any` filter into BOTH the inet and inet6 pools; a family-specific
 	// match under `family any` (a v4/v6 source/destination-address literal or a
@@ -846,6 +862,10 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, []uncoveredF
 	// raw AST because only that walk retains malformed tokens—including a
 	// quoted-empty token—for the warning/rejection before tolerant compilation
 	// drops or ignores them; a valid numeric zero remains distinguishable.
+	// #16663: the four chassis gates below resolve the cluster body through
+	// normalizedClusterNode (the compiler's own view), so the
+	// `chassis cluster { ... }` brace-top-level and packed spellings are
+	// judged exactly like the container spelling.
 	chassisIdentityWarnings, err := validateChassisClusterIdentitiesAST(
 		tree.Children, opts.lenientChassisClusterIdentities)
 	if err != nil {

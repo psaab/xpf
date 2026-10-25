@@ -2464,6 +2464,40 @@ impl PortAllocator {
             None => PersistentInbound::Miss,
         }
     }
+    /// #16615: find the lease key owning a translated tuple, regardless of
+    /// routing scope. Used by HA synced acquire, which must not re-derive
+    /// scope from the synced session's arrival domain.
+    pub(crate) fn persistent_lease_key_for_translated(
+        &self,
+        protocol: u8,
+        translated_ip: std::net::IpAddr,
+        translated_port: u16,
+        now_ns: u64,
+    ) -> Option<PersistentSourceKey> {
+        let reverse = ReverseIdentityBaseKey {
+            protocol,
+            translated_ip,
+            translated_port,
+        };
+        let live = self.lock_live();
+        let keys = live.persistent_by_translated.get(&reverse)?;
+        // Prefer a live (non-revoked, non-expired-idle) lease; if multiple,
+        // the first live one wins — cross-tenant ambiguity is resolved by
+        // the caller acquiring only on the allocator that holds it.
+        for key in keys {
+            if let Some(lease) = live.persistent_by_source.get(key) {
+                if !lease.revoked
+                    && !(lease.active_flows == 0
+                        && lease.inbound_flows == 0
+                        && lease.expires_at_ns <= now_ns)
+                {
+                    return Some(*key);
+                }
+            }
+        }
+        keys.iter().next().copied()
+    }
+
     /// #15111: take an inbound reference on a persistent lease. Returns
     /// false if the lease is gone/revoked/expired-idle. On the 0->1 inbound
     /// edge with no outbound flows, removes the idle expiry index entry.

@@ -356,13 +356,14 @@ fn teardown_purge_forward(
     );
     let close_snapshot = sessions.close_snapshot_for(key).unwrap_or_default();
     let closed_id = sessions.session_id_for(key);
+    let persistent_hold_16615 = sessions.take_persistent_lease_hold(key);
     sessions.delete(key);
     // A declined fence preserves shared authority; do not release NAT or
     // delete BPF state that may still serve the replacement incarnation.
     if matches!(removed, SharedRemoval::Declined) {
         return false;
     }
-    release_source_nat_allocation_for_worker(
+    crate::nat::release_source_nat_allocation_for_worker_with_hold(
         &forwarding.iface_nat_allocators,
         &forwarding.source_nat_rules,
         key,
@@ -370,6 +371,7 @@ fn teardown_purge_forward(
         metadata.is_reverse,
         now_ns,
         worker_id,
+        persistent_hold_16615,
     );
     crate::nat64::release_nat64_allocation_for_worker(
         &forwarding.nat64,
@@ -450,12 +452,13 @@ fn teardown_purge_companion(
     );
     let close_snapshot = sessions.close_snapshot_for(companion_key).unwrap_or_default();
     let closed_companion_id = sessions.session_id_for(companion_key);
+    let companion_persistent_hold_16615 = sessions.take_persistent_lease_hold(companion_key);
     sessions.delete(companion_key);
     // A declined linkage fence preserves a newer companion incarnation.
     if matches!(removed, SharedRemoval::Declined) {
         return;
     }
-    release_source_nat_allocation_for_worker(
+    crate::nat::release_source_nat_allocation_for_worker_with_hold(
         &forwarding.iface_nat_allocators,
         &forwarding.source_nat_rules,
         companion_key,
@@ -463,6 +466,7 @@ fn teardown_purge_companion(
         companion_metadata.is_reverse,
         now_ns,
         worker_id,
+        companion_persistent_hold_16615,
     );
     crate::nat64::release_nat64_allocation_for_worker(
         &forwarding.nat64,

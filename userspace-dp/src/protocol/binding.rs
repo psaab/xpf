@@ -1724,4 +1724,16 @@ pub(crate) struct SessionDeltaInfo {
     pub fwd_packets: u64,
     #[serde(rename = "rev_packets", default)]
     pub rev_packets: u64,
+    /// #16627: the event-stream sequence assigned to this delta when its
+    /// lossless enqueue succeeded, carried on this JSON RPC-fallback leg
+    /// so the daemon can tell an already-streamed copy from a
+    /// fallback-only delta. 0 means never carried by the stream (stream
+    /// down, no handle, CommandExport, or a failed lossless enqueue) and
+    /// the fallback copy is authoritative. Additive: an old daemon
+    /// ignores the key, an old helper omits it and `default` decodes 0.
+    ///
+    /// The rename MUST match the Go struct tag
+    /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionDeltaInfo`).
+    #[serde(rename = "stream_seq", default)]
+    pub stream_seq: u64,
 }

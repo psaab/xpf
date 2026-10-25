@@ -161,6 +161,10 @@ func (g guardedNftInstaller14969) InstallIpsecDivert(spec xnft.IpsecDivertSpec) 
 	return g.inner.InstallIpsecDivert(spec)
 }
 
+func (g guardedNftInstaller14969) VerifyIpsecQuarantineGuard() error {
+	return g.inner.VerifyIpsecQuarantineGuard()
+}
+
 func (g guardedNftInstaller14969) RemoveIpsecDivert() error {
 	if err := checkHostAuthSeam14969(); err != nil {
 		return err

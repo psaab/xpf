@@ -1372,7 +1372,7 @@ func (t *tunnelManager) unbindVRFClaimLocked(name string, link netlink.Link) (re
 		}
 	} else {
 		var err error
-		vrf, err = t.ops.LinkByName("vrf-" + claim)
+		vrf, err = t.ops.LinkByName(VRFDeviceName(claim))
 		if err != nil {
 			if isLinkNotFound(err) {
 				// The VRF device is gone; deleting a master frees its
@@ -1417,7 +1417,7 @@ func (t *tunnelManager) observeListClaimLocked(tc *config.TunnelConfig, link net
 	if master == 0 {
 		return // 0a bind absent or failed: no observation, retain prior
 	}
-	vrf, err := t.ops.LinkByName("vrf-" + tc.RIListMember)
+	vrf, err := t.ops.LinkByName(VRFDeviceName(tc.RIListMember))
 	if err != nil {
 		return // retain prior claim
 	}

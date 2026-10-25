@@ -109,6 +109,7 @@ fn entry(key: SessionKey, origin: SessionOrigin, session_id: u64) -> SyncedSessi
     generation: 0,
     session_id,
     tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            persistent_lease_hold: None,
     source_nat_static: None, }
 }
 
@@ -117,6 +118,7 @@ fn expired(entry: &SyncedSessionEntry) -> ExpiredSession {
         key: entry.key.clone(),
         decision: entry.decision,
         metadata: entry.metadata.clone(),
+        persistent_lease_hold: None,
         origin: entry.origin,
         session_id: entry.session_id,
         close_class: 0,

@@ -396,12 +396,16 @@ pub(crate) use source::{
     parse_source_nat_rules_with_previous,
     peer_owns_identity_in,
     release_nat64_pool_port,
-    release_persistent_inbound_for_session,
-    release_source_nat_allocation_for_worker,
+    release_persistent_inbound_for_session, release_persistent_inbound_with_hold,
+    release_recorded_persistent_inbound,
+    release_source_nat_allocation_for_worker, release_source_nat_allocation_for_worker_with_hold,
+    release_synced_source_nat_allocation_untracked_with_hold,
+    rollback_recorded_persistent_inbound, rollback_source_nat_allocation_for_worker_with_hold,
     release_synced_source_nat_allocation_untracked,
     reserve_nat64_pool_port,
     reserve_nat64_pool_port_capture_and_replace,
-    reserve_synced_source_nat_allocation_for_worker,
+    reserve_synced_source_nat_allocation_for_worker, reserve_synced_source_nat_allocation_for_worker_with_hold,
+    reserve_synced_source_nat_allocation_untracked_with_hold, reserve_synced_source_nat_allocation_untracked_with_holder_snapshot_and_hold,
     // #6600: the coordinator's pre-publish reservation and its rollback. NOT
     // test-only, unlike the untracked entry points below — these are the
     // production import path.

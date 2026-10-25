@@ -655,6 +655,7 @@ func sessionEntryFromPB(e *pb.SessionEntry) SessionEntry {
 		Timeout:          e.GetTimeoutSeconds(),
 		SessionID:        e.GetSessionId(),
 		HAActive:         e.GetHaActive(),
+		HAState:          e.GetHaState(),
 		Origin:           e.GetOrigin(),
 	}
 }
@@ -1707,17 +1708,24 @@ func zoneDisplayIface(zoneMembers []string) string {
 	return ""
 }
 
-// sessionHAActiveForView derives ha_active from the owning data RG when an
-// RG-aware probe is wired (#15236 A52-03); otherwise it keeps view.haActive.
-func sessionHAActiveForView(view sessionView, inIf, outIf string, inZone, outZone uint16) bool {
+// sessionHAStateForView derives the tri-state HA ownership (#16697) from
+// the owning data RG when an RG-aware probe is wired (#15236 A52-03);
+// otherwise it keeps view.haActive as Active/Backup. "unknown" is never
+// collapsed to Backup.
+func sessionHAStateForView(view sessionView, inIf, outIf string, inZone, outZone uint16) string {
 	if view.haActiveRGFn == nil {
-		return view.haActive
+		if view.haActive {
+			return "Active"
+		}
+		return "Backup"
 	}
-	state := config.SessionHAState(view.cfg, inIf, outIf, inZone, outZone, view.zoneNames, view.haActiveRGFn)
-	if state == "unknown" {
-		return false
-	}
-	return state == "Active"
+	return config.SessionHAState(view.cfg, inIf, outIf, inZone, outZone, view.zoneNames, view.haActiveRGFn)
+}
+
+// sessionHAActiveForView derives ha_active from sessionHAStateForView for
+// compat; it is meaningful only when the state is Active/Backup.
+func sessionHAActiveForView(view sessionView, inIf, outIf string, inZone, outZone uint16) bool {
+	return sessionHAStateForView(view, inIf, outIf, inZone, outZone) == "Active"
 }
 
 // sessionOriginLabel renders a row's stored provenance (#16110), mirroring
@@ -1780,6 +1788,7 @@ func sessionEntryV4(key dataplane.SessionKey, val dataplane.SessionValue, now ui
 		Timeout:          val.Timeout,
 		SessionID:        val.SessionID,
 		HAActive:         sessionHAActiveForView(view, inIf, outIf, val.IngressZone, val.EgressZone),
+		HAState:          sessionHAStateForView(view, inIf, outIf, val.IngressZone, val.EgressZone),
 		Origin:           sessionOriginLabel(val.Flags),
 	}
 	if val.Created > 0 && now > val.Created {
@@ -1838,6 +1847,7 @@ func sessionEntryV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, no
 		Timeout:          val.Timeout,
 		SessionID:        val.SessionID,
 		HAActive:         sessionHAActiveForView(view, inIf, outIf, val.IngressZone, val.EgressZone),
+		HAState:          sessionHAStateForView(view, inIf, outIf, val.IngressZone, val.EgressZone),
 		Origin:           sessionOriginLabel(val.Flags),
 	}
 	if val.Created > 0 && now > val.Created {

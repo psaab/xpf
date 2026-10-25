@@ -32,36 +32,53 @@ import (
 // within [1, GratuitousARPBurstClamp] (which includes the whole Junos 1..16
 // range) is unaffected. A malformed / non-integer token is left to the schema
 // validator (ValidateIntegerMin) and skipped here.
+//
+// #16663: the cluster body is resolved through normalizedClusterNode — the
+// same view compileChassis reads — so every spelling (container, packed on
+// the cluster line, packed on the chassis line, brace-top-level) is judged.
+
+// chassisNodes returns the top-level `chassis` nodes in source order (#16663).
+func chassisNodes(nodes []*Node) []*Node {
+	var out []*Node
+	for _, n := range nodes {
+		if n != nil && n.Name() == "chassis" {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 func validateGratuitousARPCountAST(nodes []*Node) []string {
 	var warnings []string
-	_ = forEachChild(nodes, "chassis", func(chassis *Node) error {
-		return forEachChild(chassis.Children, "cluster", func(cluster *Node) error {
-			for _, rgInst := range namedInstances(cluster.FindChildren("redundancy-group")) {
-				// #6588: the body may be packed onto the RG instance's own Keys.
-				gc := findNamedNode(redundancyGroupBody(rgInst.node), "gratuitous-arp-count")
-				if gc == nil {
-					continue
-				}
-				v := nodeVal(gc)
-				if v == "" {
-					continue
-				}
-				n, err := strconv.Atoi(v)
-				if err != nil {
-					continue
-				}
-				if n > GratuitousARPBurstClamp {
-					warnings = append(warnings, fmt.Sprintf(
-						"chassis cluster redundancy-group %s gratuitous-arp-count %d exceeds the "+
-							"runtime safety maximum %d and will be clamped to %d per VIP on failover "+
-							"(a burst beyond the Junos 1..16 range adds no neighbor-cache benefit); "+
-							"reduce it to <= %d to silence this warning (#5695)",
-						rgInst.name, n, GratuitousARPBurstClamp, GratuitousARPBurstClamp,
-						GratuitousARPBurstClamp))
-				}
+	for _, chassis := range chassisNodes(nodes) {
+		cluster := normalizedClusterNode(chassis)
+		if cluster == nil {
+			continue
+		}
+		for _, rgInst := range namedInstances(cluster.FindChildren("redundancy-group")) {
+			// #6588: the body may be packed onto the RG instance's own Keys.
+			gc := findNamedNode(redundancyGroupBody(rgInst.node), "gratuitous-arp-count")
+			if gc == nil {
+				continue
 			}
-			return nil
-		})
-	})
+			v := nodeVal(gc)
+			if v == "" {
+				continue
+			}
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				continue
+			}
+			if n > GratuitousARPBurstClamp {
+				warnings = append(warnings, fmt.Sprintf(
+					"chassis cluster redundancy-group %s gratuitous-arp-count %d exceeds the "+
+						"runtime safety maximum %d and will be clamped to %d per VIP on failover "+
+						"(a burst beyond the Junos 1..16 range adds no neighbor-cache benefit); "+
+						"reduce it to <= %d to silence this warning (#5695)",
+					rgInst.name, n, GratuitousARPBurstClamp, GratuitousARPBurstClamp,
+					GratuitousARPBurstClamp))
+			}
+		}
+	}
 	return warnings
 }

@@ -888,6 +888,8 @@ pub(crate) struct ExpiredSession {
     pub(crate) key: SessionKey,
     pub(crate) decision: SessionDecision,
     pub(crate) metadata: SessionMetadata,
+    /// #16615: exact persistent lease hold recorded on the removed entry.
+    pub(crate) persistent_lease_hold: Option<(crate::nat::PersistentSourceKey, usize)>,
     pub(crate) origin: SessionOrigin,
     /// Stable session id harvested pre-removal (`0` if none).
     pub(crate) session_id: u64,

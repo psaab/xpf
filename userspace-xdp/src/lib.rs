@@ -130,7 +130,8 @@ const USERSPACE_BRANCH_ARM_ADJUST_META_FAIL: u32 = 23;
 const USERSPACE_BRANCH_ARM_META_BOUNDS_FAIL: u32 = 24;
 const USERSPACE_BRANCH_ARM_CTRL_DISABLED_DROP: u32 = 25;
 const USERSPACE_BRANCH_ARM_CTRL_DISABLED_LOCAL: u32 = 26;
-const USERSPACE_BRANCH_ARM_MAX: u32 = 27;
+const USERSPACE_BRANCH_ARM_SESSION_MISS_PROXY_NDP: u32 = 27;
+const USERSPACE_BRANCH_ARM_MAX: u32 = 28;
 const USERSPACE_INGRESS_IFACE_FLAG_ADJUDICATED: u8 =
     degraded_ctrl_disabled::INGRESS_IFACE_FLAG_ADJUDICATED;
 const USERSPACE_INGRESS_IFACE_FLAG_TAGGED_ONLY: u8 = 2;
@@ -339,6 +340,12 @@ struct UserspaceInterfaceNatV4Key {
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct UserspaceInterfaceNatV6Key {
+    domain: u32,
+    addr: [u8; 16],
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UserspaceProxyNdpV6Key {
     domain: u32,
     addr: [u8; 16],
 }
@@ -589,6 +596,15 @@ static USERSPACE_INTERFACE_NAT_V4: HashMap<UserspaceInterfaceNatV4Key, u8> = Has
 
 #[map(name = "userspace_interface_nat_v6_domain")]
 static USERSPACE_INTERFACE_NAT_V6: HashMap<UserspaceInterfaceNatV6Key, u8> =
+    HashMap::with_max_entries(8192, 0);
+
+// #16660: v6 proxy-NDP targets (configured `proxy-arp`/`proxy-ndp` IPv6
+// addresses, keyed by routing domain). The kernel's pneigh entry for each
+// sits on the configured interface's netdev, so an on-link unicast NS to
+// one must XDP_PASS on its ingress netdev (see degraded_ndp). IPv6-only:
+// IPv4 proxy-ARP has the userspace responder (#8621); there is no v4 arm.
+#[map(name = "userspace_proxy_ndp_v6_domain")]
+static USERSPACE_PROXY_NDP_V6: HashMap<UserspaceProxyNdpV6Key, u8> =
     HashMap::with_max_entries(8192, 0);
 
 // NOTE: This map MUST be pinned/reused from the main eBPF pipeline's
@@ -1085,6 +1101,21 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                     )
                 {
                     incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_SESSION_MISS_NAT_NDP);
+                    return Ok(cpumap_or_pass(ctrl));
+                }
+                // #16660: on-link NDP (133-137, hop 255) to a v6 proxy-NDP
+                // target (not an interface address) belongs to the kernel
+                // proxy-NDP on THIS ingress netdev; the worker would
+                // LocalDeliver it into the xpf-usp0 TUN, whose per-device
+                // pneigh lookup misses the WAN entry.
+                if parsed.protocol == PROTO_ICMPV6
+                    && degraded_ndp::is_proxy_ndp_ndp_control(
+                        parsed.icmp_type,
+                        parsed.hop_limit,
+                        is_proxy_ndp_destination(&parsed, ingress_domain),
+                    )
+                {
+                    incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_SESSION_MISS_PROXY_NDP);
                     return Ok(cpumap_or_pass(ctrl));
                 }
                 if is_icmp_to_interface_nat_local(&parsed, ingress_domain) {
@@ -1912,6 +1943,16 @@ fn is_degraded_local_or_control(
     {
         return true;
     }
+    // #16660: degraded twin of the healthy proxy-NDP arm.
+    if parsed.protocol == PROTO_ICMPV6
+        && degraded_ndp::is_proxy_ndp_ndp_control(
+            parsed.icmp_type,
+            parsed.hop_limit,
+            is_proxy_ndp_destination(parsed, ingress_domain),
+        )
+    {
+        return true;
+    }
     // #15946: degraded PASS_TO_KERNEL session + WG steer (healthy :1049/:982).
     if live_userspace_session_action(parsed) == USERSPACE_SESSION_ACTION_PASS_TO_KERNEL {
         return true;
@@ -2705,6 +2746,21 @@ fn is_interface_nat_destination(pkt: &ParsedPacket, domain: u32) -> bool {
             unsafe { USERSPACE_INTERFACE_NAT_V6.get(&UserspaceInterfaceNatV6Key { domain, addr: pkt.dst_addr }) }
                 .is_some()
         }
+        _ => false,
+    }
+}
+
+// #16660: is this packet's destination a configured v6 proxy-NDP target
+// in this routing domain? IPv6-only by construction (the map has no v4
+// sibling); outlined like is_interface_nat_destination (#14851).
+#[inline(never)]
+fn is_proxy_ndp_destination(pkt: &ParsedPacket, domain: u32) -> bool {
+    match pkt.addr_family {
+        AF_INET6 => unsafe {
+            USERSPACE_PROXY_NDP_V6
+                .get(&UserspaceProxyNdpV6Key { domain, addr: pkt.dst_addr })
+                .is_some()
+        },
         _ => false,
     }
 }

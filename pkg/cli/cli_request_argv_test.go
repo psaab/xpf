@@ -9,11 +9,10 @@ import (
 	"github.com/psaab/xpf/pkg/diagcmd"
 )
 
-// assertVRFDeviceOnce checks the #2143 invariant on a VRF-wrapped argv:
-// when a routing-instance is requested the device argument (the element
-// after `ip vrf exec`) must equal wantDev exactly — in particular it
-// must never be double-prefixed (vrf-vrf-red), and the literal "vrf-"
-// must appear at most once anywhere in the argv.
+// assertVRFDevice checks the VRF device on a VRF-wrapped argv: when a
+// routing-instance is requested the device argument (the element after
+// `ip vrf exec`) must equal wantDev exactly (#16664: instance N maps to
+// "vrf-"+N unconditionally, so instance "vrf-red" wants "vrf-vrf-red").
 func assertVRFDeviceOnce(t *testing.T, argv []string, wantDev string) {
 	t.Helper()
 	exec := indexOf(argv, "exec")
@@ -21,7 +20,7 @@ func assertVRFDeviceOnce(t *testing.T, argv []string, wantDev string) {
 		t.Fatalf("argv %v: missing `ip vrf exec <device>` wrapper", argv)
 	}
 	if got := argv[exec+1]; got != wantDev {
-		t.Fatalf("argv %v: VRF device = %q, want %q (double-prefix regression?)", argv, got, wantDev)
+		t.Fatalf("argv %v: VRF device = %q, want %q (wrong-instance regression?)", argv, got, wantDev)
 	}
 }
 
@@ -96,13 +95,11 @@ func TestBuildPingArgvVRFInnerSeparator(t *testing.T) {
 	assertSeparatorBeforeTarget(t, argv, "-bad")
 }
 
-// TestBuildPingArgvVRFNoDoublePrefix is the direct #2143 regression
-// guard on the CLI entry point: the local CLI buildPingArgv must apply
-// the "vrf-" prefix exactly once. A bare "red" becomes "vrf-red"; an
-// already-prefixed "vrf-red" stays "vrf-red" (NOT "vrf-vrf-red"). Before
-// the fix the CLI unconditionally prepended "vrf-", producing a
-// non-existent device for the already-prefixed case while REST and gRPC
-// produced the correct one.
+// TestBuildPingArgvVRFPrefixedInstance is the #16664 guard on the CLI
+// entry point: the routing-instance argument is an instance name, and
+// instance N is realised as "vrf-"+N. A bare "red" becomes "vrf-red";
+// instance "vrf-red" becomes "vrf-vrf-red" (the #2143 exactly-once
+// guard probed sibling instance "red" instead).
 func TestBuildPingArgvVRFNoDoublePrefix(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -110,7 +107,7 @@ func TestBuildPingArgvVRFNoDoublePrefix(t *testing.T) {
 		wantDev string
 	}{
 		{"bare name gets one prefix", "red", "vrf-red"},
-		{"already-prefixed name not doubled", "vrf-red", "vrf-red"},
+		{"vrf-prefixed instance gets prefix again", "vrf-red", "vrf-vrf-red"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -125,7 +122,7 @@ func TestBuildPingArgvVRFNoDoublePrefix(t *testing.T) {
 // shape, not just the device token).
 func TestBuildPingArgvParityWithVRF(t *testing.T) {
 	got := buildPingArgv("192.0.2.1", "5", "", "", "vrf-red")
-	want := []string{"ip", "vrf", "exec", "vrf-red", "ping", "-c", "5", "--", "192.0.2.1"}
+	want := []string{"ip", "vrf", "exec", "vrf-vrf-red", "ping", "-c", "5", "--", "192.0.2.1"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("buildPingArgv =\n  %v\nwant\n  %v", got, want)
 	}
@@ -243,8 +240,8 @@ func TestHandlePingRejectsOverlongFields_10727(t *testing.T) {
 	}
 }
 
-// TestBuildTracerouteArgvVRFNoDoublePrefix is the #2143 regression guard
-// on the CLI traceroute builder.
+// TestBuildTracerouteArgvVRFNoDoublePrefix is the #16664 guard on the
+// CLI traceroute builder (instance "vrf-green" -> "vrf-vrf-green").
 func TestBuildTracerouteArgvVRFNoDoublePrefix(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -252,7 +249,7 @@ func TestBuildTracerouteArgvVRFNoDoublePrefix(t *testing.T) {
 		wantDev string
 	}{
 		{"bare name gets one prefix", "green", "vrf-green"},
-		{"already-prefixed name not doubled", "vrf-green", "vrf-green"},
+		{"vrf-prefixed instance gets prefix again", "vrf-green", "vrf-vrf-green"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
