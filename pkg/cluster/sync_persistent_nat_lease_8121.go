@@ -58,9 +58,9 @@ const (
 	// successor to syncMsgPersistentNatLeaseGeneration: same origin/generation
 	// envelope and lease-count framing, but each record carries the seven
 	// Deterministic* fields after TimeoutNs. Value 43 is the next free
-	// post-install type (42 is syncMsgBulkRequest). Senders choose this type
-	// only when a batch contains a deterministic lease; receivers sharing
-	// its handler with type 41 keep generation/sequence semantics identical.
+	// post-install type (42 is syncMsgBulkRequest). Type-43 frames carry only
+	// deterministic records; mixed exports send other leases separately as
+	// type 41, while an all-dropped batch retains its detected layout.
 	syncMsgPersistentNatLeaseDeterministic = 43
 )
 
