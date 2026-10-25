@@ -256,9 +256,9 @@ const (
 	syncMsgDHCPLeaseV4Chunk = 45
 	syncMsgDHCPLeaseV6Chunk = 46
 	// syncMsgFailoverAbort / syncMsgFailoverBatchAbort (#15164) carry the
-	// reqID-bound abort of a previously acknowledged transfer-out: the
-	// requester abandoned the transfer locally after the ACK, so the owner
-	// restores promptly instead of waiting for its #5079 lease. Payloads
+	// reqID-bound abort of a requested transfer-out: the requester abandoned
+	// it, including after ACK failure/timeout (#16592), so the owner restores
+	// promptly instead of waiting for its #5079 lease. Payloads
 	// mirror the commit frames ({rg u8, reqID u64} / batch encoding).
 	// ADDITIVE and version-bump-free on the #2239 precedent: an old peer
 	// hits the default receive case and ignores it, and the lease remains
@@ -1150,9 +1150,9 @@ type SessionSync struct {
 	// reqID identifies the request being committed so the owner can clear the
 	// matching auto-restore lease (#5079).
 	OnRemoteFailoverCommit func(rgID int, reqID uint64) error
-	// OnRemoteFailoverAbort restores this node after the requester aborted a
-	// previously acknowledged transfer-out (#15164). reqID-bound like the
-	// commit, so a stale abort cannot restore a newer request's hold.
+	// OnRemoteFailoverAbort restores this node after an abandoned transfer,
+	// including a failed fence or request-ACK timeout (#15164/#16592).
+	// reqID-bound, so a stale abort cannot restore a newer request's hold.
 	OnRemoteFailoverAbort func(rgID int, reqID uint64) error
 	// OnRemoteFailoverAbortBatch is the multi-RG form.
 	OnRemoteFailoverAbortBatch func(rgIDs []int, reqID uint64) error
@@ -1167,13 +1167,16 @@ type SessionSync struct {
 	// ownership reconciled away, plus rg_active cleared). On the RETH-VRRP
 	// path the physical VIP removal runs on the VRRP instance's own loop and
 	// is NOT waited for here (#6177 item 1). It gates the failoverAckApplied
-	// reply so the peer cannot promote while this node still externally owns
-	// the RG. OnRemoteFailover only ENQUEUES the demotion event and returns;
-	// acking before this barrier opened a two-owner window (duplicate GARP /
-	// VIP ownership / traffic) — #5640. A non-nil error (fence not actuated
-	// within the daemon's bounded timeout) downgrades the ack to
-	// failoverAckFailed so the peer holds instead of promoting into the
-	// two-owner window.
+	// reply: the applied-ack is the requester's authorization to run
+	// commitRequestedPeerFailover, so acking applied before this barrier
+	// opened a two-owner window (duplicate GARP / VIP ownership / traffic)
+	// — #5640. OnRemoteFailover only ENQUEUES the demotion event and
+	// returns. A non-nil error (fence not actuated within the daemon's
+	// bounded timeout) downgrades the ack to failoverAckFailed; the sync
+	// layer restores this owner and the requester records the aborted
+	// request so its election refuses "Peer transfer out" for that hold
+	// (#16592 — a failed ack alone never held the requester, which
+	// promotes on the secondary-hold heartbeat).
 	//
 	// reqID is the same request identifier passed to OnRemoteFailover, so the
 	// daemon can wait on the barrier THAT request armed rather than on

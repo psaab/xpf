@@ -28,7 +28,8 @@ func (m *Manager) SetLocalTransferCommitReadyHook(fn func(rgIDs []int) error) {
 }
 
 // SetPeerFailoverFunc sets the callback used to send remote failover requests
-// to the peer via the fabric sync connection.
+// to the peer via the fabric sync connection. A sent request's ID must be
+// returned even on ACK failure/timeout so the manager can send a bound abort.
 func (m *Manager) SetPeerFailoverFunc(fn func(rgID int) (uint64, error)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -44,8 +45,8 @@ func (m *Manager) SetPeerFailoverCommitFunc(fn func(rgID int, reqID uint64) erro
 }
 
 // SetPeerFailoverAbortFunc sets the callback used to send a reqID-bound
-// abort for a previously acknowledged transfer-out this node is abandoning
-// locally (#15164). Fire-and-forget: the owner lease stays as fallback.
+// abort for a requested transfer-out this node is abandoning, including
+// failed/timed-out ACKs. Fire-and-forget: the owner lease stays as fallback.
 func (m *Manager) SetPeerFailoverAbortFunc(fn func(rgID int, reqID uint64) error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

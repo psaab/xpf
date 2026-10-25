@@ -4025,6 +4025,29 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   secondary-hold, on commit, on `ResetFailover`, on peer loss, and on RG
   removal, so a later legitimate transfer-out still promotes. The abort
   send is best-effort and never masks the original failover error.
+- **The applied-ack is the promotion gate, not the heartbeat (#16592,
+  R3-B22-01 — #15164 residual).** The #15164 fix above covered only the
+  post-ACK abort exits: the request-ACK error exit (`reqID, err := fn(...)`)
+  returned bare, so a FAILED ack (owner fence not actuated) or a 20s ack
+  timeout left no abort marker, and the owner's secondary-hold heartbeat
+  promoted the requester via "Peer transfer out" anyway — including
+  mid-request, before any ack, while the fence was still pending. Three
+  parts close it: (a) `electRG` refuses "Peer transfer out" while
+  `failoverInProgress[rg]` is held by an in-flight `RequestPeerFailover`
+  (promotion happens only in `commitRequestedPeerFailover` after
+  `failoverAckApplied`); (b) every `fn` error exit, single and batch,
+  records `abortedPeerTransferReqID` and sends the reqID-bound abort —
+  `SendFailover`/`SendFailoverBatch` return the reqID on ack timeout (and
+  on a failed ack) so the abort can be bound; zero denotes a request
+  rejected locally or a failed send. The abort marker blocks every
+  promotion arm, not just "Peer transfer out": falling through to ordinary
+  election would promote a higher-priority non-preempt requester on the
+  same stale hold. (c) When the owner's fence barrier downgrades the ack
+  to failed, `handleRemoteFailover` restores the owner via the same
+  reqID-bound abort path before replying, so failure is symmetric and the
+  owner returns toward primary instead of waiting out its lease. The
+  stale #5640/#6177/#6371 "the peer holds" comments were corrected: a
+  failed ack alone never held the requester.
 - **Every requester-side failure after `applyPeerTransferOutOverrideLocked`
   must roll the override back — including the commit's own election failure
   (#6527).** `commitRequestedPeerFailover` /

@@ -67,7 +67,10 @@ func (s *SessionSync) failoverRGInUseLocked(rgIDs []int) bool {
 }
 
 // SendFailover sends a remote failover request to the peer and waits for an
-// explicit applied or rejected acknowledgement.
+// explicit applied or rejected acknowledgement. The returned reqID is
+// non-zero whenever the request was sent (including on an ack failure or
+// ack timeout), so the caller can bind a reqID-scoped abort to it (#16592);
+// it is zero on local rejection or a failed send.
 func (s *SessionSync) SendFailover(rgID int) (uint64, error) {
 	if err := validateFailoverProtocolRGID(rgID); err != nil {
 		return 0, err
@@ -119,7 +122,7 @@ func (s *SessionSync) SendFailover(rgID int) (uint64, error) {
 			delete(s.failoverWaiters, rgID)
 		}
 		s.failoverWaitMu.Unlock()
-		return 0, fmt.Errorf("timed out waiting for peer failover ack for redundancy group %d", rgID)
+		return reqID, fmt.Errorf("timed out waiting for peer failover ack for redundancy group %d", rgID)
 	}
 }
 
@@ -170,14 +173,14 @@ func (s *SessionSync) SendFailoverBatch(rgIDs []int) (uint64, error) {
 	select {
 	case ack := <-waitCh:
 		if err := failoverAckError(ids, ack); err != nil {
-			return 0, err
+			return reqID, err
 		}
 		return reqID, nil
 	case <-timer.C:
 		select {
 		case ack := <-waitCh:
 			if err := failoverAckError(ids, ack); err != nil {
-				return 0, err
+				return reqID, err
 			}
 			return reqID, nil
 		default:
@@ -187,7 +190,7 @@ func (s *SessionSync) SendFailoverBatch(rgIDs []int) (uint64, error) {
 			delete(s.failoverBatchWaiters, key)
 		}
 		s.failoverWaitMu.Unlock()
-		return 0, fmt.Errorf("timed out waiting for peer failover ack for redundancy groups %v", ids)
+		return reqID, fmt.Errorf("timed out waiting for peer failover ack for redundancy groups %v", ids)
 	}
 }
 func failoverAckError(rgIDs []int, ack failoverAck) error {
@@ -415,11 +418,19 @@ func (s *SessionSync) handleRemoteFailover(conn net.Conn, rgID int, reqID uint64
 	// event consumer actuates it. Acking applied here let the peer promote
 	// while this node still owned the RG → a two-owner window. Gate the
 	// applied-ack on the fence-completion barrier; if the fence does not
-	// actuate within the bounded timeout, downgrade to failed so the peer
-	// holds rather than joining a split-brain.
+	// actuate within the bounded timeout, downgrade to failed. #16592: a
+	// failed ack alone does NOT hold the requester — its election promotes
+	// on our secondary-hold heartbeat — so also restore this owner
+	// (reqID-bound, best-effort) before replying, making failure symmetric:
+	// the requester records the abort and this node becomes primary again.
 	if s.WaitFailoverApplied != nil {
 		if err := s.WaitFailoverApplied(rgID, reqID); err != nil {
 			slog.Warn("cluster sync: remote failover fence barrier failed", "rg", rgID, "req_id", reqID, "err", err)
+			if s.OnRemoteFailoverAbort != nil {
+				if aerr := s.OnRemoteFailoverAbort(rgID, reqID); aerr != nil {
+					slog.Warn("cluster sync: restore after failed fence failed; lease remains as fallback", "rg", rgID, "req_id", reqID, "err", aerr)
+				}
+			}
 			s.sendFailoverResult(conn, syncMsgFailoverAck, rgID, reqID, failoverAckFailed, err.Error())
 			return
 		}
@@ -445,6 +456,11 @@ func (s *SessionSync) handleRemoteFailoverBatch(conn net.Conn, rgIDs []int, reqI
 	if s.WaitFailoverAppliedBatch != nil {
 		if err := s.WaitFailoverAppliedBatch(rgIDs, reqID); err != nil {
 			slog.Warn("cluster sync: remote batch failover fence barrier failed", "rgs", rgIDs, "req_id", reqID, "err", err)
+			if s.OnRemoteFailoverAbortBatch != nil {
+				if aerr := s.OnRemoteFailoverAbortBatch(rgIDs, reqID); aerr != nil {
+					slog.Warn("cluster sync: batch restore after failed fence failed; lease remains as fallback", "rgs", rgIDs, "req_id", reqID, "err", aerr)
+				}
+			}
 			s.sendFailoverBatchResult(conn, syncMsgFailoverBatchAck, rgIDs, reqID, failoverAckFailed, err.Error())
 			return
 		}
@@ -482,8 +498,8 @@ func (s *SessionSync) handleRemoteFailoverCommitBatch(conn net.Conn, rgIDs []int
 	s.sendFailoverBatchResult(conn, syncMsgFailoverBatchCommitAck, rgIDs, reqID, failoverAckApplied, "")
 }
 
-// SendFailoverAbort notifies the owner that a previously acknowledged
-// transfer-out is abandoned (#15164). Fire-and-forget: there is no abort
+// SendFailoverAbort notifies the owner that a requested transfer-out is
+// abandoned (#15164/#16592). Fire-and-forget: there is no abort
 // ack, and the owner's #5079 lease restores it if this frame is lost.
 func (s *SessionSync) SendFailoverAbort(rgID int, reqID uint64) error {
 	if err := validateFailoverProtocolRGID(rgID); err != nil {

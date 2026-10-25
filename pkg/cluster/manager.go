@@ -252,10 +252,10 @@ type Manager struct {
 	// SetRemoteTransferOutLeaseDuration.
 	remoteTransferOutLease time.Duration
 	// abortedPeerTransferReqID records, per RG, the reqID of a peer-transfer
-	// request this node aborted locally after the owner ACKed (#15164). While
-	// the peer still advertises StateSecondaryHold, electRG must not take its
-	// "Peer transfer out" arm for that hold: the requester already reported
-	// the failover as failed and demoted. The entry is cleared when the peer
+	// request this node aborted, including failed/timed-out ACKs (#16592).
+	// While present, electRG blocks all promotion paths: skipping only
+	// "Peer transfer out" would let a higher-priority requester promote
+	// through ordinary election. The entry is cleared when the peer
 	// stops advertising secondary-hold, on a committed transfer, on
 	// ResetFailover, on peer loss, and on RG removal. Read/written under m.mu.
 	abortedPeerTransferReqID map[int]uint64
@@ -553,15 +553,15 @@ type Manager struct {
 	syncStats SyncStatsProvider
 
 	// peerFailoverFn sends a remote failover request to the peer and returns
-	// the acknowledged request ID for the transfer.
+	// sent request ID even on an ACK error/timeout, so aborts can be bound.
 	peerFailoverFn func(rgID int) (uint64, error)
 
 	// peerFailoverCommitFn sends the transfer-commit message after the local
 	// node has explicitly assumed primary ownership.
 	peerFailoverCommitFn func(rgID int, reqID uint64) error
 
-	// peerFailoverAbortFn sends a reqID-bound abort for a previously
-	// acknowledged transfer-out this node is abandoning locally (#15164).
+	// peerFailoverAbortFn sends a reqID-bound abort for a requested
+	// transfer-out this node is abandoning (#15164/#16592).
 	// Best-effort and fire-and-forget: the owner lease remains the crash
 	// fallback when it cannot be delivered.
 	peerFailoverAbortFn func(rgID int, reqID uint64) error

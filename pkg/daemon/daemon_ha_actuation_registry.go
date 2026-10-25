@@ -48,9 +48,12 @@ type failoverActuationKey struct {
 // Both returned nil, and sync_failover.go sends failoverAckApplied EXACTLY when
 // this returns nil. So the peer promoted on no evidence that this node fenced.
 //
-// Both are now errors, so the ack downgrades to `failed` and the peer HOLDS.
-// The trade is deliberate and asymmetric: holding costs a failover attempt,
-// while the previous default cost the one-owner-per-RG property (#5640).
+// Both are now errors, so the ack downgrades to `failed`; the sync layer
+// restores this owner and the requester records the aborted request so its
+// election holds instead of promoting on the secondary-hold heartbeat
+// (#16592 — a failed ack alone never held the requester). The trade is
+// deliberate and asymmetric: holding costs a failover attempt, while the
+// previous default cost the one-owner-per-RG property (#5640).
 //
 // SAFE FOR THE NORMAL PATH, checked rather than assumed. handleRemoteFailover
 // calls WaitFailoverApplied only after OnRemoteFailover returned nil, and that
