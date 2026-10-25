@@ -28,7 +28,7 @@ import (
 //
 //   - GetSyncLeases4/6 — read the live, active lease set, preferring the Kea
 //     lease_cmds control socket (lease{4,6}-get-all) and falling back to the
-//     append-only memfile parser (parseActiveLeases4/6) when the socket is not
+//     authoritative memfile parser (parseSyncLeases4/6) when the socket is not
 //     yet up. Used by the MASTER's periodic + on-grant push.
 //   - SeedSyncLeases4/6 — write held peer leases into a just-started Kea via
 //     lease_cmds (lease{4,6}-add, falling back to lease{4,6}-update on an
@@ -583,7 +583,7 @@ func readSyncLeasesViaSocket(ctx context.Context, dial keaSocketDialer, socketPa
 	}
 	out := make([]SyncLease, 0, len(args.Leases))
 	for _, kl := range args.Leases {
-		l := keaLeaseToSync(kl, family, now)
+		l := keaLeaseRowFromSocket(kl, family).toSync(now)
 		if l.State != keaStateDefault && l.State != keaStateDeclined {
 			continue
 		}
@@ -595,159 +595,40 @@ func readSyncLeasesViaSocket(ctx context.Context, dial keaSocketDialer, socketPa
 	return out, nil
 }
 
-// keaLeaseToSync converts a get-all lease record into the clock-skew-safe
-// SyncLease (computing Remaining from cltt+valid-lft on the SENDER clock).
-func keaLeaseToSync(kl keaLeaseJSON, family int, now time.Time) SyncLease {
-	l := SyncLease{
-		Family:    family,
-		Address:   kl.IPAddress,
-		SubnetID:  kl.SubnetID,
-		HWAddress: kl.HWAddress,
-		ClientID:  kl.ClientID,
-		DUID:      kl.DUID,
-		IAID:      kl.IAIDVal(),
-		LeaseType: kl.Type,
-		PrefixLen: kl.PrefixLen,
-		Hostname:  kl.Hostname,
-		FQDNFwd:   kl.FQDNFwd,
-		FQDNRev:   kl.FQDNRev,
-		ValidLife: kl.ValidLft,
-		State:     kl.State,
-	}
-	// Remaining = (cltt + valid-lft) - now, computed on the sender's clock.
-	expire := kl.Expire
-	if expire == 0 {
-		expire = kl.CLTT + int64(kl.ValidLft)
-	}
-	rem := expire - now.Unix()
-	if rem < 0 {
-		rem = 0
-	}
-	l.Remaining = int(rem)
-	// #5073: preferred remaining is anchored to the SAME expire epoch as the
-	// valid remaining. Both lifetimes count from cltt, so
-	//   preferred_remaining = valid_remaining - (valid-lft - preferred-lft).
-	// A DEPRECATED lease (preferred-lft=0) yields a negative remainder that
-	// clamps to 0; a lease with preferred==valid yields exactly Remaining. When
-	// Kea reports no preferred-lft (nil — an older Kea or a v4 lease) default to
-	// preferred==valid (PreferredRemaining=Remaining), the pre-#5073 behavior.
-	if kl.PreferredLft != nil {
-		l.PreferredRemaining = clampPreferredRemaining(l.Remaining-(kl.ValidLft-*kl.PreferredLft), l.Remaining)
-	} else {
-		l.PreferredRemaining = l.Remaining
-	}
-	return l
-}
-
-// IAIDVal unwraps the optional IAID (absent ⇒ 0, a valid IAID).
-func (kl keaLeaseJSON) IAIDVal() uint32 {
-	if kl.IAID == nil {
-		return 0
-	}
-	return *kl.IAID
-}
-
-// readSyncLeasesViaMemfile is the fallback read path: parse the append-only
-// memfile via the destructive-safe parser and convert to SyncLeases. Used when
-// the control socket is not (yet) up. The memfile holds an absolute Expire
-// epoch (Kea writes cltt+valid-lft); Remaining is computed from it on the
-// local clock, same as the socket path.
+// readSyncLeasesViaMemfile is the fallback reader. It decodes authoritative
+// Kea rows through the destructive-safe parser and uses the same SyncLease
+// projection as the socket path.
 func readSyncLeasesViaMemfile(path string, family int, now time.Time) ([]SyncLease, error) {
-	active, err := parseSyncLeases(path, family, now)
+	rows, err := parseSyncLeases(path, family, now)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]SyncLease, 0, len(active))
-	for _, a := range active {
-		l := SyncLease{
-			Family:    family,
-			Address:   a.Address,
-			Hostname:  a.HostName,
-			State:     int(a.State),
-			ValidLife: a.ValidLifetime,
-		}
-		if a.ClientFQDN != "" {
-			l.Hostname = a.ClientFQDN
-			l.FQDNFwd = true
-		}
-		if a.SubnetID != "" {
-			// #6218 item 11: strconv.Atoi parses with the PLATFORM int
-			// bit-size (bitSize=0 -> 64-bit on amd64/arm64, but 32-bit on a
-			// 32-bit target), so a Kea subnet-id near keaSubnetIDMax
-			// (0xFFFFFFFE, dhcpserver.go) would silently fail to parse (and
-			// so silently drop the subnet-id) on a 32-bit build even though
-			// it is a perfectly valid Kea subnet-id. ParseUint(...,32) is
-			// exact and portable: it accepts every value up to 2^32-1
-			// regardless of the host's native int width.
-			if sid, e := strconv.ParseUint(a.SubnetID, 10, 32); e == nil {
-				l.SubnetID = int(sid)
-			}
-		}
+	out := make([]SyncLease, 0, len(rows))
+	for _, row := range rows {
 		if family == 6 {
-			duid, iaid, idErr := splitV6Identity(a.Identity)
-			if idErr != nil {
-				// #2379: a PRESENT but unparseable IAID would silently seed
-				// IAID 0 into the peer's Kea lease DB on takeover. Skip the
-				// lease (logged) rather than mis-seed it — fail-closed, the
-				// same posture as the unparseable lease_type / missing expire
-				// rows below.
+			if !row.IAIDOK {
+				_, idErr := strconv.ParseUint(row.IAIDRaw, 10, 32)
 				slog.Warn("dhcpserver: skipping v6 memfile lease with unparseable IAID",
-					"address", a.Address, "identity", a.Identity, "error", idErr)
+					"address", row.Address, "identity", identity6(row.DUID, row.IAIDRaw), "error", idErr)
 				continue
 			}
-			l.DUID = duid
-			l.IAID = iaid
-			// #2262: preserve the v6 lease kind from the memfile instead of
-			// hardcoding IA_NA, which mis-seeded an IA_PD (prefix-delegation)
-			// lease as an address lease on the peer. A PRESENT but unparseable
-			// lease_type column flips LeaseTypeOK=false: skip (logged) rather
-			// than mis-type — fail-closed, mirroring the socket path which
-			// reports the kind faithfully.
-			if !a.LeaseTypeOK {
+			if !row.LeaseTypeOK {
 				slog.Warn("dhcpserver: skipping v6 memfile lease with unparseable lease_type",
-					"address", a.Address, "duid", duid, "iaid", iaid)
+					"address", row.Address, "duid", row.DUID, "iaid", row.IAID)
 				continue
 			}
-			lt, ok := keaLeaseTypeToString(a.LeaseType)
-			if !ok {
+			if _, ok := stringToKeaLeaseType(row.LeaseType); !ok {
 				slog.Warn("dhcpserver: skipping v6 memfile lease with unknown lease_type",
-					"address", a.Address, "lease_type", a.LeaseType)
+					"address", row.Address, "lease_type", row.LeaseType)
 				continue
 			}
-			l.LeaseType = lt
-			if a.LeaseType == keaLeaseTypeIAPD {
-				l.PrefixLen = a.PrefixLen
-			}
-		} else {
-			// The memfile parser retains client-id and hwaddr separately.
-			// Identity is the DDNS owner key and intentionally remains
-			// client-id-preferred, so it cannot be used as a lossless
-			// transport for the two v4 fields (#10428).
-			l.HWAddress = a.HWAddress
-			l.ClientID = a.ClientID
 		}
-		rem := a.Expire - now.Unix()
-		if a.Expire == 0 {
-			// memfile lacked an expire column; treat as full lifetime unknown,
-			// skip (cannot compute a safe remaining).
+		lease := row.toSync(now)
+		if lease.Remaining <= 0 {
+			// Without an expire epoch there is no safe remaining lifetime.
 			continue
 		}
-		if rem <= 0 {
-			continue
-		}
-		l.Remaining = int(rem)
-		// #5073: preferred remaining, re-anchored the SAME way as Remaining. The
-		// memfile expire epoch is cltt+valid_lifetime, so the preferred deadline
-		// is expire-valid_lifetime+pref_lifetime and
-		//   preferred_remaining = Remaining - (valid_lifetime - pref_lifetime),
-		// clamped [0, Remaining]. A DEPRECATED binding (pref_lifetime=0) floors
-		// to 0 and is not revived. When the pref_lifetime/valid_lifetime columns
-		// are absent (v4, or an old memfile) default preferred==valid.
-		l.PreferredRemaining = l.Remaining
-		if family == 6 && a.PrefLifetimeOK && a.ValidLifetime > 0 {
-			l.PreferredRemaining = clampPreferredRemaining(l.Remaining-(a.ValidLifetime-a.PrefLifetime), l.Remaining)
-		}
-		out = append(out, l)
+		out = append(out, lease)
 	}
 	return out, nil
 }
@@ -794,30 +675,6 @@ func stringToKeaLeaseType(s string) (int, bool) {
 		return keaLeaseTypeIAPD, true
 	}
 	return keaLeaseTypeIANA, false
-}
-
-// splitV6Identity inverts identity6 ("duid:DUID/IAID") back into DUID + IAID.
-//
-// The "no slash / no IAID" form ("duid:DUID") is a legitimate identity and
-// returns iaid=0 with a nil error. When the "/IAID" portion IS present it must
-// parse as a decimal uint32: a parse failure returns a non-nil error rather
-// than silently swallowing to iaid=0. Because 0 is a valid IAID, swallowing
-// would make a malformed identity indistinguishable from a real zero IAID and
-// would seed the peer's Kea lease DB with the wrong IAID on takeover, so a
-// non-zero-IAID client could fail to renew with nothing logged (#2379). The
-// callers (memfile takeover-seed loop) log+skip the lease on error, matching
-// how they already handle an unparseable lease_type / missing expire.
-func splitV6Identity(identity string) (duid string, iaid uint32, err error) {
-	s := strings.TrimPrefix(identity, "duid:")
-	if i := strings.LastIndex(s, "/"); i >= 0 {
-		duid = s[:i]
-		v, perr := strconv.ParseUint(s[i+1:], 10, 32)
-		if perr != nil {
-			return duid, 0, fmt.Errorf("unparseable IAID %q in v6 identity %q: %w", s[i+1:], identity, perr)
-		}
-		return duid, uint32(v), nil
-	}
-	return s, 0, nil
 }
 
 // GetSyncLeases4 returns the active v4 leases this node is serving, preferring

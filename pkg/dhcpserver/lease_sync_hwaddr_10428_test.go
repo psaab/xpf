@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -75,7 +76,7 @@ func leaseByAddr10428(t *testing.T, leases []SyncLease, addr string) SyncLease {
 // Cell A: a memfile row carrying BOTH client_id and hwaddr must yield a
 // SyncLease carrying both — the fallback path must be equivalent to the
 // primary (control-socket) path, which copies both fields verbatim
-// (keaLeaseToSync). The hwaddr-only row pins the "mac:" branch against
+// (keaLeaseRowFromSocket). The hwaddr-only row pins the "mac:" branch against
 // regression in the other direction.
 func TestGetSyncLeases4_MemfileFallback_PreservesHWAddress10428(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
@@ -111,11 +112,8 @@ func TestGetSyncLeases4_MemfileFallback_PreservesHWAddress10428(t *testing.T) {
 }
 
 // Cell A (equivalence half): the same binding read via the live control
-// socket (primary) and via the memfile (fallback) must agree on every
-// identity-carrying field. ValidLife is intentionally excluded: the memfile
-// fallback does not consume the valid_lifetime column for v4 (Remaining is
-// derived from the absolute expire epoch), while the socket path reports
-// Kea's configured valid-lft — a pre-existing, out-of-scope difference.
+// socket (primary) and via the memfile (fallback) must produce identical
+// SyncLease records, including configured lifetime and all identity fields.
 func TestMemfileFallbackMatchesSocketPrimary10428(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	expire := now.Unix() + 1800
@@ -153,11 +151,8 @@ func TestMemfileFallbackMatchesSocketPrimary10428(t *testing.T) {
 	}
 
 	fb, pr := fallback[0], primary[0]
-	if fb.Address != pr.Address || fb.HWAddress != pr.HWAddress || fb.ClientID != pr.ClientID {
-		t.Errorf("fallback identity %+v != primary identity %+v", fb, pr)
-	}
-	if fb.SubnetID != pr.SubnetID || fb.Hostname != pr.Hostname || fb.Remaining != pr.Remaining {
-		t.Errorf("fallback meta %+v != primary meta %+v", fb, pr)
+	if !reflect.DeepEqual(fb, pr) {
+		t.Errorf("fallback lease %+v != primary lease %+v", fb, pr)
 	}
 }
 
