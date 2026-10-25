@@ -52,12 +52,81 @@ func rollbackTargetRefusedOnlyForFeeds(target *config.Config) bool {
 	return len(dpuserspace.PolicyContentRejectionReasons(target, overlay)) == 0
 }
 
+// rollbackTargetRefusedOnlyForDNS reports whether target's refusal is
+// attributable to dns-name entries whose resolution failed when the
+// target was compiled at Store.Load (#16612). It re-resolves a private
+// clone with current DNS. When DNS has recovered, the refreshed clone
+// carries usable answers; when DNS is still failing, the refreshed clone
+// still carries DNSLookupFailed entries. Either way the refusal is tied
+// to the frozen answer — but ONLY if the refreshed clone's refusal is
+// itself DNS-caused. A refreshed clone that carries a refusal while its
+// dns-name entries resolved successfully (or that still refuses for an
+// unrelated static reason, e.g. a lenient-dropped constraint that fresh
+// DNS does not repair) is NOT DNS-only, so a genuinely refused target
+// whose dns-name happens to have failed is not smuggled past the gate.
+func rollbackTargetRefusedOnlyForDNS(target *config.Config) bool {
+	if target == nil || !targetHasFailedDNSLookup(target) {
+		return false
+	}
+	refreshed := config.RefreshDNSForPreflight(target)
+	if refreshed == nil {
+		return false
+	}
+	if len(dpuserspace.PolicyContentRejectionReasons(refreshed, nil)) == 0 {
+		return true
+	}
+	// Still refused after refresh. DNS-only iff the refreshed refusal is
+	// itself attributable to a still-failing lookup: the refreshed clone
+	// still carries a failed lookup. When DNS is still down this cannot
+	// distinguish a co-incident static refusal, so the caller defers
+	// (bounded) and, at the cap, proceeds so the apply path's own
+	// re-resolution renders each entry fail-closed (#16595) rather than
+	// entering bootstrap on the frozen answer. A target whose refreshed
+	// clone resolved successfully but still refuses never reaches here.
+	return targetHasFailedDNSLookup(refreshed)
+}
+
+// targetHasFailedDNSLookup reports whether cfg carries any dns-name
+// entry whose latest resolution failed (#16595).
+func targetHasFailedDNSLookup(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	found := false
+	scan := func(b *config.AddressBook) {
+		if b == nil {
+			return
+		}
+		for _, a := range b.Addresses {
+			if a != nil && a.DNSName != "" && a.DNSLookupFailed {
+				found = true
+			}
+		}
+	}
+	scan(cfg.Security.AddressBook)
+	for _, nb := range cfg.Security.NamedAddressBooks {
+		if nb != nil {
+			scan(&nb.AddressBook)
+		}
+	}
+	for _, z := range cfg.Security.Zones {
+		if z != nil {
+			scan(z.AddressBook)
+		}
+	}
+	return found
+}
+
 // confirmRollbackTargetHandledAtFire runs the appliability pre-flight on the
 // pending rollback target before anything is promoted. It returns false when the
 // normal rollback should proceed (the target is appliable, or there is no
 // non-nil target to check). It returns true when it handled the fire itself:
-//   - a target that waits only on a feed is deferred, up to
-//     confirmRollbackFeedRetryMax attempts, without promoting;
+//   - a target that waits only on a feed, or only on a dns-name resolution
+//     that failed when the target was compiled at Store.Load (#16612), is
+//     deferred, up to confirmRollbackFeedRetryMax attempts, without
+//     promoting; at the DNS cap the rollback proceeds (return false) so
+//     the normal promotion + apply path re-resolves and decides each
+//     entry, while at the feed cap the safe state is taken;
 //   - any other refusal, or a feed still unready at the cap, promotes the store
 //     to the target (persisted as committed, as #6538 does for a recovered
 //     target that no longer compiles) and enters the bootstrap/lifeline safe
@@ -84,19 +153,44 @@ func (d *Daemon) confirmRollbackTargetHandledAtFire(gen uint64) bool {
 		delete(d.confirmFeedDeferrals, gen)
 		return false
 	}
-	if rollbackTargetRefusedOnlyForFeeds(target) && d.confirmFeedDeferrals[gen] < confirmRollbackFeedRetryMax {
+	feedOnly := rollbackTargetRefusedOnlyForFeeds(target)
+	dnsOnly := !feedOnly && rollbackTargetRefusedOnlyForDNS(target)
+	if (feedOnly || dnsOnly) && d.confirmFeedDeferrals[gen] < confirmRollbackFeedRetryMax {
 		if d.store.DeferConfirmTimer(gen, confirmRollbackFeedRetryInterval) {
 			if d.confirmFeedDeferrals == nil {
 				d.confirmFeedDeferrals = make(map[uint64]int)
 			}
 			d.confirmFeedDeferrals[gen]++
-			slog.Warn("commit confirmed timed out, but its rollback target binds a dynamic-address "+
-				"feed that has not installed a snapshot yet; deferring the rollback so it is not "+
-				"applied to a refused snapshot",
-				"attempt", d.confirmFeedDeferrals[gen], "max", confirmRollbackFeedRetryMax,
-				"retry_in", confirmRollbackFeedRetryInterval.String(), "err", rerr, "issue", "#9615")
+			if dnsOnly {
+				slog.Warn("commit confirmed timed out, but its rollback target's dns-name "+
+					"resolution failed when the target was compiled at load; deferring the "+
+					"rollback so it is not refused on a frozen answer",
+					"attempt", d.confirmFeedDeferrals[gen], "max", confirmRollbackFeedRetryMax,
+					"retry_in", confirmRollbackFeedRetryInterval.String(), "err", rerr, "issue", "#16612")
+			} else {
+				slog.Warn("commit confirmed timed out, but its rollback target binds a dynamic-address "+
+					"feed that has not installed a snapshot yet; deferring the rollback so it is not "+
+					"applied to a refused snapshot",
+					"attempt", d.confirmFeedDeferrals[gen], "max", confirmRollbackFeedRetryMax,
+					"retry_in", confirmRollbackFeedRetryInterval.String(), "err", rerr, "issue", "#9615")
+			}
 			return true
 		}
+	}
+	if dnsOnly {
+		// #16612: bounded DNS deferral exhausted and DNS still has not
+		// produced a passing target. Do NOT enter bootstrap on the frozen
+		// Load-time answer: proceed with the normal rollback. PromoteRollback
+		// returns the same target object, and applyConfigLocked re-resolves
+		// its dns-name entries in place (#15673), so a recovered resolver
+		// yields the fresh answer and a still-down resolver yields the
+		// per-entry fail-closed rendering (#16595).
+		slog.Warn("commit confirmed timed out and its rollback target is still refused only "+
+			"because dns-name resolution failed at load; proceeding with the rollback — the "+
+			"apply path re-resolves dns-name entries — rather than entering bootstrap on a "+
+			"frozen answer", "err", rerr, "issue", "#16612")
+		delete(d.confirmFeedDeferrals, gen)
+		return false
 	}
 	delete(d.confirmFeedDeferrals, gen)
 	d.pendingRenameMu.Lock()
@@ -154,6 +248,8 @@ func (d *Daemon) checkRecoveredConfirmTarget() {
 	state := "refused by this build's dataplane"
 	if rollbackTargetRefusedOnlyForFeeds(target) {
 		state = "waiting on a dynamic-address feed that has not installed a snapshot"
+	} else if rollbackTargetRefusedOnlyForDNS(target) {
+		state = "waiting on dns-name resolution that failed when the target was compiled at load"
 	}
 	msg := fmt.Sprintf("recovered commit-confirmed window, deadline %s: the rollback target is %s (%v); "+
 		"confirm with `commit` or re-commit before the deadline", deadline.Format(time.RFC3339), state, rerr)

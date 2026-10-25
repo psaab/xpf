@@ -189,6 +189,24 @@ func RefreshDNSAddressBooks(cfg *Config) {
 	}
 }
 
+// RefreshDNSForPreflight returns a private copy of cfg with every
+// dns-name entry re-resolved against current DNS (#16612). It never
+// mutates cfg: the copy is made via CloneForDNSRefresh, so callers may
+// evaluate a frozen compiled config (e.g. a commit-confirmed rollback
+// target compiled once at Store.Load) without disturbing the published
+// object the store still holds.
+func RefreshDNSForPreflight(cfg *Config) *Config {
+	if cfg == nil {
+		return nil
+	}
+	clone := cfg.CloneForDNSRefresh()
+	if clone == nil {
+		return nil
+	}
+	RefreshDNSAddressBooks(clone)
+	return clone
+}
+
 // CloneForDNSRefresh returns a copy of cfg that shares everything with the
 // original EXCEPT the mutable DNS-resolution state: every dns-name Address
 // (global, named, and zone-local books, including the folded

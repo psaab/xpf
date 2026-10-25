@@ -315,6 +315,18 @@ always stays armed and the check runs twice:
   - A target refused only because a feed has no snapshot (the refusal
     disappears once every binding resolves) is deferred: `Store.DeferConfirmTimer`
     re-arms the same generation for 5 s, at most 24 times.
+  - A target refused only because a dns-name resolution failed when the
+    target was compiled at `Store.Load` (#16612) is deferred the same
+    way: `rollbackTargetRefusedOnlyForDNS` re-resolves a private clone
+    (`config.RefreshDNSForPreflight`, never mutating the frozen target)
+    and attributes the refusal to DNS when the clone passes or still
+    fails only with lookup-failed entries. At the cap the rollback
+    *proceeds* instead of taking the safe state — promotion returns the
+    same object and the apply path re-resolves its dns-name entries in
+    place, so a recovered resolver yields the fresh answer and a
+    still-down resolver yields the per-entry fail-closed rendering
+    (#16595). The boot alarm names this class as waiting on dns-name
+    resolution rather than "refused by this build's dataplane".
   - Any other refusal, or a feed still unready at the cap, promotes the store to
     the target (persisted as committed, as #6538 does for a recovered target
     that no longer compiles). The daemon then re-syncs the promoted target to
