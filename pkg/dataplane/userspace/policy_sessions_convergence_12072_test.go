@@ -439,10 +439,15 @@ func deferredPolicyRecoveryFixture12072(
 
 	targetCfg := &config.Config{}
 	f.cfg = targetCfg
-	target := f.snap9824(7, zones, neighbors, fabrics)
-	target.Policies = []PolicyRuleSnapshot{{
+	// #16843: the target carries one policy, so every snap9824 shell
+	// (including the seed) must declare PolicyCount=1 or the #15742
+	// send-site gate refuses the deferred publish before the property
+	// under test. Setting it on the fixture keeps Summary welded to
+	// Policies at the single builder point.
+	f.extraPolicies9824 = []PolicyRuleSnapshot{{
 		PolicyID: 2, Name: "web", FromZone: "trust", ToZone: "untrust", Action: "permit",
 	}}
+	target := f.snap9824(7, zones, neighbors, fabrics)
 	target.PolicyRematchExtensive = true
 	ancestry := []PolicyRenameAncestry{{
 		SourceRuleID: "old", DestinationRuleID: "new",

@@ -36,7 +36,7 @@ func TestSyncFabricStatePersistsResolvedFabricsIntoLastSnapshot(t *testing.T) {
 	t.Cleanup(func() { ruleListFn = origRuleList })
 	ruleListFn = func(int) ([]netlink.Rule, error) { return nil, nil }
 
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	controlSock := filepath.Join(dir, "control.sock")
 	ln, err := net.Listen("unix", controlSock)
 	if err != nil {
@@ -88,6 +88,10 @@ func TestSyncFabricStatePersistsResolvedFabricsIntoLastSnapshot(t *testing.T) {
 	m := New()
 	m.proc = &exec.Cmd{Process: proc}
 	m.cfg.ControlSocket = controlSock
+	// #16843: cfg is clustered, so wire the RG provider (as the daemon
+	// does) or the #15919 send-site gate refuses the overlay publish
+	// this cell asserts on.
+	m.SetRGPrimaryProvider(func(int) (bool, bool) { return true, true })
 
 	// Baseline published snapshot: the fabric peer MAC is UNRESOLVED (empty), as
 	// it would be at the first full apply during HA startup before neighbor

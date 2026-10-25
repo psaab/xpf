@@ -274,6 +274,11 @@ type fixture9824 struct {
 	neighborFunc  func(cfg *config.Config) []NeighborSnapshot
 	fabricCalls   int
 	fabricFunc    func(cfg *config.Config) []FabricSnapshot
+	// extraPolicies9824 (#16843): policies snap9824 stamps (with matching
+	// Summary.PolicyCount) into every built snapshot. Empty by default, so
+	// existing cells are byte-identical; the #12072 deferred-policy cells
+	// set it to the one rule their target snapshot carries.
+	extraPolicies9824 []PolicyRuleSnapshot
 
 	mu       sync.Mutex
 	syncedTo []*ConfigSnapshot
@@ -351,14 +356,17 @@ func newFixture9824(t *testing.T) *fixture9824 {
 // on every snapshot so the binding-plan contribution is identical; plan halves
 // of fabric rows are the caller's responsibility (alpha/beta share them).
 func (f *fixture9824) snap9824(gen uint64, zones []ZoneSnapshot, neighbors []NeighborSnapshot, fabrics []FabricSnapshot) *ConfigSnapshot {
+	policies := append([]PolicyRuleSnapshot(nil), f.extraPolicies9824...)
 	return &ConfigSnapshot{
 		Version:    ProtocolVersion,
 		Generation: gen,
 		Config:     f.cfg,
-		// #16056: synthetic snapshots must declare counts matching
-		// their sections or the send gate refuses them.
-		Summary:   SnapshotSummary{ZoneCount: len(zones)},
+		// #16056/#16843: synthetic snapshots must declare counts matching
+		// their sections or the send gate refuses them. PolicyCount must
+		// follow Policies for the same reason (the #15742 arm).
+		Summary:   SnapshotSummary{ZoneCount: len(zones), PolicyCount: len(policies)},
 		Zones:     append([]ZoneSnapshot(nil), zones...),
+		Policies:  policies,
 		Neighbors: append([]NeighborSnapshot(nil), neighbors...),
 		Fabrics:   append([]FabricSnapshot(nil), fabrics...),
 	}
