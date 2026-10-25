@@ -91,11 +91,11 @@ import (
 //     is the only genuine rejection.
 type CommitFn func(ctx context.Context, comment string) (*config.Config, error)
 
-// Maximum event-options commit attempts in a rolling window, shared across all
-// policies. This caps the committed/remediation-attempt rate at four per
-// minute while preserving a four-action burst for simultaneous legitimate
-// failures. A budget-denied action is deferred until the oldest slot expires
-// instead of being dropped (#15021).
+// Maximum promoted event-options commits in a rolling window, shared
+// across all policies (#10871). A budget-denied action is deferred until
+// the oldest slot expires instead of being dropped (#15021).
+// Non-promoting attempts are separately bounded per policy by
+// failureBackoff (#16774).
 const (
 	globalActionBudget       = 4
 	globalActionBudgetWindow = time.Minute
@@ -103,6 +103,20 @@ const (
 
 // Minimum time between successive triggers of the same policy.
 const policyCooldown = 30 * time.Second
+
+// Per-policy failure backoff (#16774): a non-promoting post-CommitCheck
+// commit failure (commitFn/standalone commit returning an error without
+// promoting, excluding the HA read-only deferral) arms this cooldown for
+// that policy. While it is active, evaluate suppresses (and parks, when
+// the edge is a genuine crossing) further triggers of the policy and the
+// commit-time gate drops queued duplicates as stale — exactly the
+// successful-commit cooldown path, with its own anchor so a failure never
+// masquerades as a commit. One failing policy therefore attempts at most
+// one commit per failureBackoff plus one per global-budget refill, instead
+// of one per event edge, while the refunded global slot (#14724) remains
+// available to healthy policies immediately. The duration reuses
+// policyCooldown so both throttles share one operator-visible cadence.
+const failureBackoff = policyCooldown
 
 // Backoff schedule for a held config lock (#2157). The worker retries an
 // action whose EnterConfigure fails with ErrConfigLocked — or whose
@@ -272,6 +286,14 @@ type policyRuntime struct {
 	// optimistic stamp from a deferred edge, adopted on committed replay.
 	committedTrigger time.Time
 	pendingTrigger   time.Time
+	// failedTrigger is the per-policy failure-backoff anchor (#16774):
+	// stamped by the worker when a post-CommitCheck commit fails without
+	// promoting (excluding the HA read-only deferral, which refunds and
+	// defers without backing off). Kept separate from committedTrigger so
+	// a failure never masquerades as a commit; cleared on a successful
+	// commit so a recovered policy is throttled only by its commit
+	// cooldown.
+	failedTrigger time.Time
 	// event name -> edge latch for a `within { trigger on N }` clause
 	// (#3756 M1). Set (true) after the policy fires on a threshold CROSSING;
 	// cleared (re-armed) by withinMatches the moment the in-window count
@@ -285,12 +307,21 @@ type policyRuntime struct {
 	suppressedDirection map[string]struct{}
 }
 
-// lastTrigger returns the effective cooldown anchor (committed wins).
+// lastTrigger returns the effective throttle anchor: the latest of the
+// committed-commit cooldown and the failure backoff (#16774), falling
+// back to the optimistic deferred-edge stamp. Evaluate, the deferred
+// drain, and the commit-time stale gate all consult this one anchor, so
+// a failure suppresses re-fire for failureBackoff exactly as a commit
+// suppresses it for policyCooldown.
 func (rt *policyRuntime) lastTrigger() time.Time {
-	if !rt.committedTrigger.IsZero() {
-		return rt.committedTrigger
+	anchor := rt.committedTrigger
+	if rt.failedTrigger.After(anchor) {
+		anchor = rt.failedTrigger
 	}
-	return rt.pendingTrigger
+	if anchor.IsZero() {
+		anchor = rt.pendingTrigger
+	}
+	return anchor
 }
 func newPolicyRuntime() *policyRuntime {
 	return &policyRuntime{
@@ -561,12 +592,16 @@ func (e *Engine) reserveGlobalCommit(policyOrder int) (time.Time, bool) {
 }
 
 // refundGlobalCommit removes the slot reserved at ts (#14724). Failure to
-// promote must not consume the rolling budget: a transient commitFn
-// (nil, err) or an ErrClusterReadOnly deferral otherwise burns all four
-// slots and dropGlobalBudget then discards healthy policies' actions.
-// The newest matching slot is removed so interleaved successes keep
-// theirs; a slot already pruned (window expired) or refunded is a no-op.
-// budgetCursor is not rewound: it is a fairness hint, not accounting.
+// promote must not consume the rolling promoted-commit budget: a transient
+// commitFn (nil, err) or an ErrClusterReadOnly deferral otherwise burns all
+// four slots and dropGlobalBudget then discards healthy policies' actions.
+// #16774: the refund is paired with a per-policy failure backoff (armed by
+// the caller for non-read-only failures), so the refunded slot stays
+// available to healthy policies without letting the failing policy retry
+// on every edge. The newest matching slot is removed so interleaved
+// successes keep theirs; a slot already pruned (window expired) or
+// refunded is a no-op. budgetCursor is not rewound: it is a fairness
+// hint, not accounting.
 func (e *Engine) refundGlobalCommit(ts time.Time) {
 	if ts.IsZero() {
 		return
@@ -1392,11 +1427,15 @@ func (e *Engine) runAction(a plannedAction) {
 			}
 			continue
 		}
-		// Permanent failure (bad apply / CommitCheck reject): do not retry.
-		// #14724: release the latch — a transient commitFn (nil, err) is
-		// classed permanent here, and wedging the latch would suppress every
-		// later sustained-fault event. Deterministic rejections re-attempt
-		// (and re-count) per event, which is the accepted churn.
+		// Permanent failure (bad apply / CommitCheck reject): do not retry
+		// this action. #14724: release the latch — a transient commitFn
+		// (nil, err) is classed permanent here, and wedging the latch would
+		// suppress every later sustained-fault event. #16774: a
+		// post-CommitCheck commit failure additionally armed the
+		// per-policy failure backoff in applyOnce, so later edges are
+		// cooldown-suppressed/parked for failureBackoff instead of
+		// re-attempting a full commit per edge; pre-reservation failures
+		// (bad apply / CommitCheck reject) keep the per-event re-count.
 		e.counters.rejected.Add(1)
 		e.releaseEdgeLatch(a.policyName, a.event, a.semRev)
 		slog.Warn("event-options: remediation rejected",
@@ -1568,8 +1607,10 @@ func (e *Engine) applyOnce(ctx context.Context, a plannedAction) error {
 			if errors.Is(err, configstore.ErrClusterReadOnly) {
 				// Preserve HA deferral on the standalone path too (#14724):
 				// wrapped, the read-only error classified the action rejected.
+				// #16774: the read-only refund keeps deferral without backoff.
 				return fmt.Errorf("commit: %w", configstore.ErrClusterReadOnly)
 			}
+			e.armFailureBackoff(a.policyName, a.semRev)
 			return errBatch("commit: %w", err)
 		}
 		e.store.ExitConfigure()
@@ -1598,6 +1639,7 @@ func (e *Engine) applyOnce(ctx context.Context, a plannedAction) error {
 			// errBatch would hide it and class the standby action rejected.
 			return fmt.Errorf("commit: %w", configstore.ErrClusterReadOnly)
 		}
+		e.armFailureBackoff(a.policyName, a.semRev)
 		return errBatch("commit: %w", err)
 	}
 	return nil
@@ -1737,8 +1779,25 @@ func (e *Engine) armCooldown(name, authRev string) {
 	}
 	if rt := e.runtime[name]; rt != nil {
 		rt.committedTrigger = e.now()
+		rt.failedTrigger = time.Time{}
 		if !rt.pendingTrigger.IsZero() && rt.pendingTrigger.Before(rt.committedTrigger) {
 			rt.pendingTrigger = time.Time{}
 		}
+	}
+}
+
+// armFailureBackoff stamps the per-policy failure-backoff anchor (#16774)
+// after a non-promoting post-CommitCheck commit failure. The same
+// revision-aware ABA guard as armCooldown applies: a successor generation
+// installed while this action failed keeps its fresh, unthrottled runtime.
+// The stamp and check run together under e.mu.
+func (e *Engine) armFailureBackoff(name, authRev string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.semRev[name] != authRev {
+		return
+	}
+	if rt := e.runtime[name]; rt != nil {
+		rt.failedTrigger = e.now()
 	}
 }

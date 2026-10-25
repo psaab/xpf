@@ -154,6 +154,21 @@ the shared budget and starve healthy remediations. Only a promoted commit
 The read-only error is preserved across the commit wrap so `runAction`
 still defers instead of classing the standby action rejected.
 
+A non-promoting post-CommitCheck commit failure (the `commitFn` /
+standalone arms above, excluding the read-only deferral) also arms a
+per-policy **failure backoff** (#16774, `failureBackoff` = the 30 s
+`policyCooldown`): while it is active, further edges for that policy are
+cooldown-suppressed and parked for replay after the backoff exactly as
+after a successful commit, and queued duplicates drop as stale at commit
+time. The refund therefore no longer lets a persistently failing policy
+retry a full commit under the config lock on every edge: each policy
+makes at most one non-promoting attempt per backoff window (plus the
+parked replay), while the refunded slot stays immediately available to
+healthy policies. The read-only deferral refunds without backoff, so a
+standby still commits promptly once publication reopens. Pre-reservation
+failures (bad apply / CommitCheck reject) never reserved a slot and keep
+their per-event rejected re-count; they are not backoff-armed.
+
 Admission order rotates from the policy after the last budgeted commit. This
 prevents the first four policies in config order from consuming every refill
 while later planted policies starve.
@@ -161,13 +176,21 @@ while later planted policies starve.
 **Throughput bound:** for 64 policies matching the same `ping_test_failed`
 event, with no `within` threshold and failure edges every 3 seconds, the old
 30-second per-policy cooldown could allow 64 serialized commits per edge and
-up to 128 commits/minute. The global budget caps this at four commit attempts
-per rolling minute (a 32× reduction); further actions are shed until an older
-attempt ages out. `TestFlappingTargetGlobalBudgetAndOperatorLatency10871`
-exercises this profile, verifies the 59-second boundary and next refill, and
+up to 128 commits/minute. What is bounded is stated precisely: **promoted
+commits** are capped at four per rolling minute by the global budget (a 32×
+reduction), with further promoted actions deferred until an older slot ages
+out; **non-promoting attempts** are capped per policy at one per 30 s failure
+backoff (plus its parked replay), regardless of edge rate. No single
+"attempts per minute" number caps both classes together — a failing policy
+and a healthy policy are throttled by different mechanisms, by design.
+`TestFlappingTargetGlobalBudgetAndOperatorLatency10871` exercises the
+promoted-commit profile, verifies the 59-second boundary and next refill, and
 holds an operator commit to a 500 ms SLO while the flapping actions are being
-dropped. The test models a 25 ms per-action apply interval; it does not claim a
+deferred. The test models a 25 ms per-action apply interval; it does not claim a
 universal latency bound for a real apply that itself exceeds the SLO.
+`TestProbeFailingCommitsBoundedByFailureBackoff16774` exercises the failing
+profile (16 policies, frozen minute, persistent commit failure): 16 attempts
+total instead of one per policy per edge.
 
 ## Transactional batch (#2139)
 
