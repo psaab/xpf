@@ -514,8 +514,37 @@ func configsContentEqual(a, b *config.Config) bool {
 	if !slices.Equal(config.ZoneQuarantineNamesForConfig(a), config.ZoneQuarantineNamesForConfig(b)) {
 		return false
 	}
+	// #16606: Address.DNSAddresses is json:"-" runtime state the helper
+	// DOES enforce (address-book rows are built from UsableValues), so a
+	// DNS answer change is invisible to the marshal exactly like the
+	// zone-quarantine set. Compare the scoped answer snapshots through
+	// the same enumeration the daemon refresher uses; any divergence
+	// means a partial republish would rebuild rows from stale answers
+	// and must be refused as a hybrid.
+	if !dnsAnswersContentEqual16606(a, b) {
+		return false
+	}
 	// #9161: the redacted marshal cannot see a secret the helper CAN see.
 	return helperVisibleSecretDigest9161(a) == helperVisibleSecretDigest9161(b)
+}
+
+// dnsAnswersContentEqual16606 compares the runtime DNS answers of two
+// configs by scoped identity (#16606). Order within an entry is
+// significant, matching the refresher's change detection: a reordered
+// answer set is a different enforced prefix order.
+func dnsAnswersContentEqual16606(a, b *config.Config) bool {
+	sa := config.DNSAnswersSnapshot(a)
+	sb := config.DNSAnswersSnapshot(b)
+	if len(sa) != len(sb) {
+		return false
+	}
+	for k, va := range sa {
+		vb, ok := sb[k]
+		if !ok || !slices.Equal(va, vb) {
+			return false
+		}
+	}
+	return true
 }
 
 // helperVisibleSecretDigest9161 digests exactly the secret material that reaches

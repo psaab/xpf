@@ -214,6 +214,55 @@ func cloneBookForDNSRefresh(b *AddressBook) *AddressBook {
 	return &out
 }
 
+// DNSAnswersSnapshot returns identity->prefixes for every dns-name entry,
+// using the same scoped identities as the daemon refresher (#16606): the
+// global book, each named book, and each zone-local book (including the
+// folded zone-local/<zone>/<name> copies in the global book, which carry
+// the same scoped identity as their zone-local source). It is the shared
+// enumeration every consumer that needs to see runtime DNS state must
+// use — the refresher baseline and the userspace hybrid guard — so the
+// two cannot drift on scope or ordering. Prefix slices are copied.
+// Ordering within an entry is preserved (resolver order); callers that
+// compare snapshots must treat order as significant, matching the
+// refresher's change detection.
+func DNSAnswersSnapshot(cfg *Config) map[string][]string {
+	out := map[string][]string{}
+	if cfg == nil {
+		return out
+	}
+	scan := func(scope string, b *AddressBook) {
+		if b == nil {
+			return
+		}
+		for name, a := range b.Addresses {
+			if a != nil && a.DNSName != "" {
+				out[dnsIdentityKey(scope, name)] = append([]string(nil), a.DNSAddresses...)
+			}
+		}
+	}
+	scan("global/", cfg.Security.AddressBook)
+	for bookName, nb := range cfg.Security.NamedAddressBooks {
+		if nb != nil {
+			scan("address-book/"+bookName+"/", &nb.AddressBook)
+		}
+	}
+	for zoneName, z := range cfg.Security.Zones {
+		if z != nil {
+			scan(ZoneLocalQualify(zoneName, ""), z.AddressBook)
+		}
+	}
+	return out
+}
+
+// dnsIdentityKey builds a collision-free snapshot key for one dns-name
+// entry. The scope is length-prefixed so no operator-authored name (which
+// may legally contain '/', e.g. "address-book/eng-book/svc") can alias
+// another scope — change detection must merge views on identity, not on
+// name shadowing (#15933 C4, #15962 fold).
+func dnsIdentityKey(scope, name string) string {
+	return fmt.Sprintf("%d:%s%s", len(scope), scope, name)
+}
+
 // expandWildcardAddress converts `ip/wildcard-mask` (Junos polarity:
 // set mask bits are compared, 0 bits are ignored; e.g.
 // 10.1.2.3/255.255.255.0 enforces 10.1.2.0/24) to the single enforced

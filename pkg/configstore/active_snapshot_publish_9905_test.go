@@ -340,8 +340,10 @@ func TestActiveSnapshotPublishCoversEverySwap9905(t *testing.T) {
 	// must be followed by publication. An additional swap WITH a publish still
 	// fails here until a human extends the count — adding a promotion path must
 	// be a conscious, reviewed act, not a silent drift.
-	if swaps != 8 {
-		t.Errorf("found %d compiled swaps, want exactly 8 (update the count + review when adding a promotion path)", swaps)
+	// #16606: PublishRefreshedDNS is the 9th swap — a runtime-only DNS
+	// re-publication of the same operator tree, reviewed with this count.
+	if swaps != 9 {
+		t.Errorf("found %d compiled swaps, want exactly 9 (update the count + review when adding a promotion path)", swaps)
 	}
 }
 

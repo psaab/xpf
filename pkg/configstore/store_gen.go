@@ -87,6 +87,35 @@ func (s *Store) publishActiveLocked() {
 	s.activeSnap.Store(&activeSnapshot{gen: s.activeGen.Add(1), cfg: s.compiled})
 }
 
+// PublishRefreshedDNS swaps the compiled active config to refreshed ONLY
+// if base is still the compiled active config, and publishes the new
+// generation via publishActiveLocked (#16606). It deliberately does NOT
+// touch s.active (the persisted operator tree): DNS answers are runtime
+// state (json:"-"), never persisted, and the tree/hash/digest identity of
+// the operator config is unchanged. Without this swap the refreshed clone
+// the daemon applied to the dataplane is invisible to every reader of
+// ActiveConfig — scheduler and route-overlay republishes rebuild
+// address-book rows from the stale generation and silently re-ship the
+// old answer, and show surfaces render the stale answer too.
+//
+// Returns false (no swap) when base is no longer active, so a stale tick
+// cannot overwrite a newer generation. MUST be called under the caller's
+// apply serialization (daemon applySem), which is the only writer of the
+// compiled config's DNS fields.
+func (s *Store) PublishRefreshedDNS(base, refreshed *config.Config) bool {
+	if s == nil || base == nil || refreshed == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.compiled != base {
+		return false
+	}
+	s.compiled = refreshed
+	s.publishActiveLocked()
+	return true
+}
+
 // CandidateGeneration returns the current candidate generation token. Used by
 // the daemon's commit transaction (paired with CompileCandidateGen) and by
 // tests asserting that mutating ops advance the token.
