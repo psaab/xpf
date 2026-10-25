@@ -63,7 +63,13 @@ func dataplaneRaceRunPattern(t *testing.T) string {
 		if line != "" && !strings.HasPrefix(line, "\t") {
 			break // the recipe ends at the first non-indented, non-blank line
 		}
-		if !strings.Contains(line, "./pkg/dataplane/") || !strings.Contains(line, "-run") {
+		// #16715: only a `test -race` line is the race leg. The #15241
+		// `go test -list` pre-check lines also name ./pkg/dataplane/
+		// and mention -run in their echo text, and since ce649fc they
+		// precede the race line — selecting the first -run line made
+		// this canary fatal on the pre-check. Sibling canaries
+		// (pkg/daemon #6743, pkg/cluster #6550) already require this.
+		if !strings.Contains(line, "./pkg/dataplane/") || !strings.Contains(line, "test -race") {
 			continue
 		}
 		m := regexp.MustCompile(`-run\s+'([^']*)'`).FindStringSubmatch(line)

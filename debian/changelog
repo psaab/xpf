@@ -9,6 +9,14 @@ xpf (0.0.0) unstable; urgency=medium
     so every full-size frame was discarded at any rate. A burst at
     exactly 1514 still commits; tagged (1518) or jumbo traffic
     needs a proportionally larger burst.
+  * Build/test: `make test-go` now races every Race/Concurrent-named
+    Go test in pkg/ and cmd/ via a property leg in test-race-dp
+    (#16715). Previously only three name-filtered legs ran under
+    -race, so the SNMP #13127 and syslog #9916 race cells (and ~100
+    others) passed without the race detector. The pkg/dataplane
+    #9045 canary again parses the real race line (not the -list
+    pre-check), and a new pkg/docsref census fails when any
+    race-named test falls outside every -race leg.
   * Config: packed hierarchical `security flow tcp-session
     time-wait-state session-timeout N;` / `session-ageout;` (and the
     half-close leaves, including multi-leaf packed runs) now compile
