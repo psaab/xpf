@@ -345,9 +345,18 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
 
 - Each DHCP client uses `context.Background()`, not the daemon context.
   On graceful SIGTERM the daemon exits without calling `StopAll()`,
-  intentionally leaving the lease in place so the next daemon process
-  reuses it (no DAD storm, no DHCP renew at startup). Only an explicit
-  stop — `Reconcile` removal/option change, `Renew`, `StopAll` —
+  intentionally leaving the kernel address in place. Since #16566 every
+  committed lease (address, gateway, classless routes, DNS, server
+  identity, `Obtained`/`LeaseTime`, delegated prefixes) is also persisted
+  durably in the state dir (`dhcp-lease-<iface>-v4|v6`, DurableState), so
+  the next daemon process re-adopts an unexpired lease whose kernel
+  address is still present, renders it in the startup apply, and resumes
+  in the renewal cycle (v4 RENEWING REQUEST / v6 RENEW) instead of
+  DISCOVER/SOLICIT. Expired or kernel-missing leases are discarded (and
+  their state file removed); NAK/NoBinding/expiry delete the persisted
+  state. `force-discover` opts the resumed v4 client out of the RENEW
+  (a full DORA runs; the adopted lease only bridges rendering). Only an
+  explicit stop — `Reconcile` removal/option change, `Renew`, `StopAll` —
   cancels a client.
 - The lease-change callback is debounced 2 seconds to avoid floods during
   config apply. **That 2s is long enough to outlive daemon shutdown's only

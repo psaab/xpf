@@ -296,6 +296,12 @@ type Manager struct {
 	// arms nothing and an already-elapsed timer's callback returns without
 	// dispatching. Guarded by mu.
 	quiesced bool
+	// adoptedOnce latches the one-shot boot re-adoption (#16566):
+	// AdoptPersistedLeases runs on every apply via reconcileDHCPClients,
+	// but only the first pass may install persisted leases — a later
+	// pass must never resurrect a lease the live client has since
+	// abandoned (expiry/NAK). Guarded by mu.
+	adoptedOnce bool
 	// recompileWG tracks an in-flight recompile callback so Quiesce can JOIN
 	// one that started before the latch. Add(1) happens under mu in
 	// scheduleRecompile (so it cannot race the latch), Done in the timer func.
@@ -346,6 +352,9 @@ type Manager struct {
 	// discovery tests. nil in production.
 	routerAdvertisementsForTest func(ctx context.Context, ifaceName string) []observedRouter
 	raAfterForTest              func(time.Duration) <-chan time.Time
+	// kernelHasAddressForTest replaces the netlink AddrList check in
+	// lease re-adoption (#16566). nil in production.
+	kernelHasAddressForTest func(ifaceName string, lease *Lease) bool
 }
 
 // RenewalBindingStats reports renewal replies that were ignored because
@@ -518,6 +527,27 @@ func (m *Manager) DelegatedPrefixesForRA() []PDRAMapping {
 	return result
 }
 
+// AdoptPersistedLeases re-adopts persisted unexpired leases for the
+// given specs (#16566), installing them into Leases() /
+// DelegatedPrefixesForRA() so the startup apply renders the DHCP
+// default/classless routes, DNS and PD-RA before any client starts.
+// Callers (the daemon) invoke it once at boot, before the first
+// applyConfig; Start re-checks per client as a backstop. Specs whose
+// persisted lease is expired or whose kernel address is gone are
+// skipped (and their state file removed).
+func (m *Manager) AdoptPersistedLeases(specs []ClientSpec) {
+	m.mu.Lock()
+	adopted := m.adoptedOnce
+	m.adoptedOnce = true
+	m.mu.Unlock()
+	if adopted {
+		return
+	}
+	for _, s := range specs {
+		m.adoptPersistedLease(clientKey{iface: s.Iface, family: s.Family})
+	}
+}
+
 // SetProtectedIPv6Prefixes installs the configured-prefix set an IA_PD
 // delegation must not overlap (#10856). The daemon calls it on every config
 // apply, before the client reconcile, so renewals always validate against the
@@ -611,12 +641,26 @@ func (m *Manager) Start(ctx context.Context, ifaceName string, af AddressFamily)
 			"interface", ifaceName, "family", af)
 		return false
 	}
+	m.mu.Unlock()
+
+	// #16566: re-adopt a persisted unexpired lease before spawning the
+	// client, so Leases()/DelegatedPrefixesForRA() render it in the
+	// startup apply that precedes/contends with this Start, and the run
+	// loop resumes in the renewal cycle instead of DISCOVER/SOLICIT.
+	// Adoption confirms the kernel still holds the address (the #15071
+	// kernel lifetime may have expired it during the outage). Done
+	// OUTSIDE m.mu: adoption does file I/O and a netlink AddrList, and
+	// takes m.mu itself to install the lease.
+	m.adoptPersistedLease(key)
+
+	m.mu.Lock()
 
 	// Use an independent context so DHCP clients are decoupled from the
 	// daemon lifecycle. Only an explicit stop (Reconcile removal, Renew,
 	// StopAll) cancels a client. During graceful restart (SIGTERM), the
 	// process exits without calling StopAll(), so addresses stay on
-	// interfaces for the next daemon to reuse.
+	// interfaces for the next daemon to reuse — and, since #16566, the
+	// persisted lease is re-adopted above so routes/DNS/PD survive too.
 	cctx, cancel := context.WithCancel(context.Background())
 	dc := &dhcpClient{
 		cancel:      cancel,
@@ -691,6 +735,9 @@ func (m *Manager) finishClient(key clientKey, dc *dhcpClient) {
 	}
 	m.mu.Unlock()
 
+	if lease != nil {
+		m.deletePersistedLease(key)
+	}
 	if lease != nil && lease.Address.IsValid() {
 		m.removeAddress(key.iface, lease)
 	}
@@ -733,6 +780,7 @@ func (m *Manager) abandonLeaseAfterExpiry(key clientKey, expected *Lease) {
 	}
 	m.mu.Unlock()
 
+	m.deletePersistedLease(key)
 	if expected.Address.IsValid() {
 		m.removeAddress(key.iface, expected)
 	}
@@ -759,6 +807,9 @@ func (m *Manager) clearDelegatedPDs(key clientKey, expected *Lease) {
 	}
 	m.mu.Unlock()
 	if had {
+		if cur := m.LeaseFor(key.iface, key.family); cur != nil {
+			m.persistLease(key, cur)
+		}
 		m.scheduleRecompile()
 	}
 }

@@ -403,6 +403,11 @@ func (d *Daemon) reconcileDHCPClients(cfg *config.Config) {
 	// #14728: v4 analogue — keep the DHCPv4 protected set current on the
 	// same apply, before reconcile, with the same non-fingerprint rule.
 	d.dhcp.SetProtectedIPv4Prefixes(config.ConfiguredIPv4Prefixes(cfg))
+	// #16566: re-adopt persisted leases before the first client start so
+	// this apply's FRR/DNS/RA rendering (which precedes or contends with
+	// the Reconcile below) sees the pre-restart lease. Idempotent:
+	// adoption installs each lease once and later applies find it live.
+	d.dhcp.AdoptPersistedLeases(buildDHCPClientSpecs(cfg))
 	specs := buildDHCPClientSpecs(cfg)
 	if len(specs) == 0 {
 		// Reconcile(nil) stops any running clients; with none running
