@@ -1394,6 +1394,23 @@ func (m *Manager) syncInterfaceAttachments(result *dataplane.CompileResult, snap
 	for _, ifindex := range buildUserspaceIngressIfindexes(snapshot) {
 		allowed[int(ifindex)] = true
 	}
+	// #16637: the raw ingress set still names a netdev compileZones
+	// refused (raw-L3 wgN, a disabled interface) — its base row is
+	// adjudicated, so it never leaves this set. A shim the refresh
+	// reconcile attached before this fix (or any other stale attach on
+	// such a netdev) would therefore survive every Compile. Drop
+	// non-VLAN-child ifindexes the shared admission predicate refuses;
+	// VLAN children stay allowed because the attach loops deliberately
+	// keep delegated children tracked (their parent carries the traffic).
+	for ifindex := range allowed {
+		owner := interfaceOwnerRowForIfindex(snapshot, uint32(ifindex))
+		if owner != nil && owner.VLANID > 0 && owner.ParentIfindex > 0 {
+			continue
+		}
+		if !refreshAttachAdmission(snapshot, uint32(ifindex), interfaceRowForIfindex(snapshot, uint32(ifindex))) {
+			delete(allowed, ifindex)
+		}
+	}
 	// The retained snapshot is now authoritative at both call sites. If an
 	// older arm-(a) failure left debt for an interface this snapshot accepts,
 	// clear it only here — after acceptance. AttachXDP runs before acceptance
