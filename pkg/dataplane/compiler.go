@@ -34,6 +34,54 @@ var (
 	rssHashKeyErr  error
 )
 
+// ethtoolForcedLive is the process-lifetime set of netdevs xpf has
+// successfully forced a link mode on (#16787). It must survive the
+// per-compile CompileResult: deleting speed/duplex on a later commit is
+// compiled into a fresh result, so only state outside it can record that
+// the earlier force is still owed an `autoneg on` revert. Process lifetime
+// is the right bound — a daemon restart does not clear the NIC's forced
+// mode, but the next auto-shaped compile after a restart cannot know the
+// force was xpf's; that residual is accepted (see docs/log/16787.md)
+// because probing live autoneg state misses the restricted-advertisement
+// state a forced write can leave behind. Guarded by its own mutex; the
+// only writers/readers run under the daemon's applySem, but tests drive
+// applyEthtool directly.
+var (
+	ethtoolForcedMu   sync.Mutex
+	ethtoolForcedLive = make(map[string]bool)
+)
+
+func markEthtoolForced(ifaceName string) {
+	ethtoolForcedMu.Lock()
+	defer ethtoolForcedMu.Unlock()
+	ethtoolForcedLive[ifaceName] = true
+}
+
+func forgetEthtoolForced(ifaceName string) {
+	ethtoolForcedMu.Lock()
+	defer ethtoolForcedMu.Unlock()
+	delete(ethtoolForcedLive, ifaceName)
+}
+
+func ethtoolForcedSnapshot() map[string]bool {
+	ethtoolForcedMu.Lock()
+	defer ethtoolForcedMu.Unlock()
+	out := make(map[string]bool, len(ethtoolForcedLive))
+	for k, v := range ethtoolForcedLive {
+		out[k] = v
+	}
+	return out
+}
+
+// resetEthtoolForcedForTest clears the #16787 forced registry. Tests that
+// drive applyEthtool through successive compiles must start from a clean
+// process set; production code never calls this.
+func resetEthtoolForcedForTest() {
+	ethtoolForcedMu.Lock()
+	defer ethtoolForcedMu.Unlock()
+	ethtoolForcedLive = make(map[string]bool)
+}
+
 // readRSSHashKey is separated from the CSPRNG source so tests can supply a
 // deterministic reader without pinning production's per-boot key.
 func readRSSHashKey(source io.Reader) ([rssHashKeySize]byte, error) {
@@ -2180,10 +2228,35 @@ func rxVlanOffloadActivationError(cfg *config.Config, cfgName, physName string, 
 // Results are cached to skip redundant calls for the same settings.
 // Errors are logged as warnings since virtual interfaces (virtio-net) don't
 // support ethtool speed/duplex changes.
+//
+// #16787: when the committed config carries no explicit speed/duplex (both
+// deleted, or `duplex auto` with no explicit speed), a netdev xpf previously
+// forced must be returned to autonegotiation with `ethtool -s <if> autoneg
+// on` once. The .link rewrite to AutoNegotiation=yes is not applied by
+// networkd reload/reconfigure, so without this write the NIC stays forced
+// until reboot. A netdev never forced gets no write. The revert is issued
+// only for the previously-forced set; live-autoneg probing is deliberately
+// not used — a forced write that restricted advertised modes leaves autoneg
+// on, so a probe would miss exactly the restricted-advertisement state,
+// while an unconditional revert on every auto interface would ethtool-write
+// interfaces xpf never touched.
 func (r *CompileResult) applyEthtool(ifaceName string, ifCfg *config.InterfaceConfig) {
 	speed := parseSpeed(ifCfg.Speed)
 	duplex := parseDuplex(ifCfg.Duplex)
 	if speed == "" && duplex == "" {
+		if !ethtoolForcedSnapshot()[ifaceName] {
+			return
+		}
+		if out, err := runEthtool("-s", ifaceName, "autoneg", "on"); err != nil {
+			slog.Warn("failed to restore ethtool autonegotiation",
+				"name", ifaceName,
+				"err", fmt.Sprintf("%v: %s", err, strings.TrimSpace(string(out))))
+			// Keep the forced mark: the NIC is still forced, so a later
+			// auto compile must retry rather than assume convergence.
+			return
+		}
+		forgetEthtoolForced(ifaceName)
+		slog.Info("restored ethtool autonegotiation", "name", ifaceName)
 		return
 	}
 	cacheKey := ifaceName + ":" + speed + ":" + duplex
@@ -2203,6 +2276,7 @@ func (r *CompileResult) applyEthtool(ifaceName string, ifCfg *config.InterfaceCo
 			"err", fmt.Sprintf("%v: %s", err, strings.TrimSpace(string(out))))
 	} else {
 		r.ethtoolApplied[cacheKey] = true
+		markEthtoolForced(ifaceName)
 		slog.Info("applied ethtool settings", "name", ifaceName,
 			"speed", ifCfg.Speed, "duplex", ifCfg.Duplex)
 	}
