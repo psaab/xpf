@@ -192,9 +192,8 @@ func TestCommunityChainPolicyRender16835(t *testing.T) {
 	got := New().generatePolicyOptions(po)
 	for _, want := range []string{
 		"bgp community-list expanded SH permit ",
-		" match community SH\n",
-		"route-map P deny 10\n",
-		"route-map P permit 20\n",
+		"route-map P deny 50\n",
+		"route-map P permit 60\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("policy render missing %q:\n%s", want, got)
@@ -206,14 +205,21 @@ func TestCommunityChainPolicyRender16835(t *testing.T) {
 	if communityChainWidth16835(po, "SH") != 2 {
 		t.Errorf("SH must resolve to a 2-member chain")
 	}
-	if communityExtraTermSeqWeight16835(po, "SH") != 1 {
-		t.Errorf("a 2-member chain must reserve exactly 1 continuation sequence")
+	if communityExtraTermSeqWeight16835(po, po.PolicyStatements["P"].Terms[0]) != 4 {
+		t.Errorf("a 2-member chain must reserve 4 slots (member+guard per member)")
 	}
 	if !communityOrphanTerm16835(po, po.PolicyStatements["P"].Terms[0]) {
 		t.Errorf("reject term over SH only must be chain-eligible (orphan shape)")
 	}
-	if communityTermSeqCount16835(po, []string{"SH"}, 10) != 30 {
-		t.Errorf("next term must start past the reserved chain slot")
+	for _, want := range []string{
+		"route-map P permit 10\n match community " + communityChainListName16835("SH", "65000:.*") + "\n on-match goto 30\n",
+		"route-map P permit 30\n match community " + communityChainListName16835("SH", ".*:100") + "\n on-match goto 50\n",
+		"route-map P deny 50\n",
+		"route-map P permit 60\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("chain render missing %q:\n%s", want, got)
+		}
 	}
 }
 
@@ -415,5 +421,25 @@ func TestCommunityChainLiveBgpd16835(t *testing.T) {
 	rm, err := runVTY(3*time.Second, "-d", "bgpd", "-c", "show route-map P")
 	if err != nil || !strings.Contains(rm, "community SH") {
 		t.Errorf("route-map P does not reference installed SH: err=%v\n%s", err, rm)
+	}
+}
+
+func TestCommunityChainMixedTermStaysHistorical16835(t *testing.T) {
+	po := communityPolicyPO(
+		map[string]*config.CommunityDef{
+			"SH": {Name: "SH", Members: []string{"65000:.*", ".*:100"}},
+			"PL": {Name: "PL"},
+		},
+		[]*config.PolicyTerm{
+			{Name: "t-mixed", FromCommunity: []string{"SH"}, PrefixList: []string{"PL"}, Action: "reject"},
+			{Name: "t-accept", Action: "accept"},
+		}, "accept")
+	po.PrefixLists = map[string]*config.PrefixList{"PL": {Name: "PL", Prefixes: []string{"10.0.0.0/8"}}}
+	got := New().generatePolicyOptions(po)
+	if !strings.Contains(got, " match community SH\n") {
+		t.Fatalf("mixed community+prefix-list term must keep the public-list match:\n%s", got)
+	}
+	if strings.Contains(got, "on-match goto") {
+		t.Fatalf("mixed term unexpectedly took the chain path:\n%s", got)
 	}
 }

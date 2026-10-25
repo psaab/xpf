@@ -1013,6 +1013,22 @@ func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, rout
 	return definitions + body, next
 }
 
+// dedupStringsKeepOrder collapses duplicates keeping authored order.
+// The community variant loop and the #16835 count weight must agree on
+// the alternative set.
+func dedupStringsKeepOrder(vs []string) []string {
+	seen := make(map[string]bool, len(vs))
+	out := make([]string, 0, len(vs))
+	for _, v := range vs {
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
+}
+
 func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOptionsConfig, routeMapName, plPrefix string, ps *config.PolicyStatement, startSeq int) (string, string, int) {
 	var definitions strings.Builder
 	var b strings.Builder
@@ -1705,6 +1721,35 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 				return []string{""}
 			}
 			return vs
+		}
+
+		// #16835 orphan chain (permit-only goto encoding; see
+		// community_chain_16835.go): a term whose only match
+		// dimension is chains — every distinct community alternative
+		// a rendered chain, no sibling dimension — renders per-member
+		// goto slots plus the term body, instead of the Cartesian
+		// variant loop below. Checked before the dangling arms so a
+		// taken chain never lowers to deny-all; its lists are
+		// rendered by construction. Mixed/untaken terms fall through
+		// to the historical dispatch untouched.
+		if communityOrphanTerm16835(po, term) {
+			chainStart := seq
+			alternatives := dedupStringsKeepOrder(term.FromCommunity)
+			totalSlots := 0
+			for _, alt := range alternatives {
+				totalSlots += communityChainSlots16835(po, alt)
+			}
+			bodySeq := chainStart + totalSlots*10
+			nextSeq := bodySeq + 10
+			for _, alt := range alternatives {
+				communityMemberChainSequences16835(&b, routeMapName, alt, communityChainMembers16835(po, alt), chainStart, bodySeq, nextSeq)
+				chainStart += communityChainSlots16835(po, alt) * 10
+			}
+			// The body is the historical term sequence minus its
+			// `match community` line (already split per member).
+			emitTermBody("", bodySeq, nil, inlinePrefixListName(routeMapName, plPrefix, term.Name, ""), fromPrefixListRef{}, "", "", "")
+			seq = nextSeq
+			continue
 		}
 
 		// emitVariants emits the cross-product of the from-* OR sets for one
