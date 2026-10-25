@@ -466,11 +466,20 @@ func TestMappedCompatGateWitnesses16875(t *testing.T) {
 		{"static block compat external", staticNATSet("::/126", "2001:db8::/126")},
 		{"static block compat target", staticNATSet("2001:db8::/126", "::/126")},
 		{"static block straddle target", staticNATSet("2001:db8::/95", "::fffe:0:0/95")},
+		{"static block straddle external /95", staticNATSet("::fffe:0:0/95", "2001:db8::/95")},
+		{"static block straddle external /94", staticNATSet("::fffc:0:0/94", "2001:db8::/94")},
+		{"static block straddle external /88", staticNATSet("::ff00:0:0/88", "2001:db8::/88")},
 		{"nptv6 compat target", []string{
 			"set security zones security-zone trust",
 			"set security nat static rule-set rs1 from zone trust",
 			"set security nat static rule-set rs1 rule r1 match destination-address 2001:db8::/64",
 			"set security nat static rule-set rs1 rule r1 then static-nat nptv6-prefix ::/64",
+		}},
+		{"nptv6 compat external", []string{
+			"set security zones security-zone trust",
+			"set security nat static rule-set rs1 from zone trust",
+			"set security nat static rule-set rs1 rule r1 match destination-address ::/64",
+			"set security nat static rule-set rs1 rule r1 then static-nat nptv6-prefix 2001:db8:1::/64",
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -481,8 +490,9 @@ func TestMappedCompatGateWitnesses16875(t *testing.T) {
 		})
 	}
 	// Controls that must stay viable: broad match selectors,
-	// host-bits spellings, native block pairs, NPTv6 native pair
-	// and a compat-rooted NPTv6 MATCH (subset spans native ::/64).
+	// host-bits spellings and native block pairs. (The former
+	// compat-rooted NPTv6 external control moved to the reject rows
+	// above: the external is a reverse translation endpoint.)
 	for _, tc := range []struct {
 		name  string
 		lines []string
@@ -495,12 +505,6 @@ func TestMappedCompatGateWitnesses16875(t *testing.T) {
 			"set security nat static rule-set rs1 from zone trust",
 			"set security nat static rule-set rs1 rule r1 match destination-address 2001:db8::/64",
 			"set security nat static rule-set rs1 rule r1 then static-nat nptv6-prefix fd00:1::/64",
-		}},
-		{"nptv6 compat-rooted match native target", []string{
-			"set security zones security-zone trust",
-			"set security nat static rule-set rs1 from zone trust",
-			"set security nat static rule-set rs1 rule r1 match destination-address ::/64",
-			"set security nat static rule-set rs1 rule r1 then static-nat nptv6-prefix 2001:db8:1::/64",
 		}},
 		{"book straddle selector", []string{
 			"set security address-book global address c1 ::fffe:0:0/95",
@@ -535,6 +539,54 @@ func TestMappedCompatGateWitnesses16875(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestMappedCompatBookUnionExemptFragment16875(t *testing.T) {
+	// An exempt fragment must not excuse compat siblings: the
+	// merged union is compat-only in each row (gate3 F2).
+	for _, tc := range []struct{ name, line string }{
+		{"range ::1 to ::3", "set security address-book global address c1 range-address ::1 to ::3"},
+		{"range :: to ::2", "set security address-book global address c1 range-address :: to ::2"},
+		{"range ::1 to compat end", "set security address-book global address c1 range-address ::1 to ::255.255.255.255"},
+		{"named range ::1 to ::3", "set security address-book book1 address c1 range-address ::1 to ::3"},
+		{"zone-local range ::1 to ::3", "set security zones security-zone trust address-book address c1 range-address ::1 to ::3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := CompileConfig(buildTree(t, []string{tc.line}))
+			if err == nil || !strings.Contains(err.Error(), "IPv4-") {
+				t.Fatalf("compat-only union (%s) must reject, got: %v", tc.name, err)
+			}
+			cfg, err := CompileConfigLenient(buildTree(t, []string{tc.line}))
+			if err != nil {
+				t.Fatalf("lenient must not fail: %v", err)
+			}
+			if !hasWarningContaining(cfg.Warnings, "IPv4-") {
+				t.Fatalf("lenient must warn for compat-only union (%s), got: %v", tc.name, cfg.Warnings)
+			}
+		})
+	}
+	// DNAT name reference to a compat-only union rejects too.
+	_, err := CompileConfig(buildTree(t, []string{
+		"set security zones security-zone untrust",
+		"set security address-book global address c1 range-address ::1 to ::3",
+		"set security nat destination pool dp address 2001:db8::5",
+		"set security nat destination rule-set rs1 from zone untrust",
+		"set security nat destination rule-set rs1 rule r1 match destination-address-name c1",
+		"set security nat destination rule-set rs1 rule r1 then destination-nat pool dp",
+	}))
+	if err == nil {
+		t.Fatal("DNAT reference to compat-only union must reject")
+	}
+	// Controls: exempt-only union and native-spanning union compile.
+	for _, line := range []string{
+		"set security address-book global address c1 range-address :: to ::1",
+		"set security address-book global address c1 range-address ::1 to ::1",
+		"set security address-book global address c1 range-address ::2 to 2001:db8::9",
+	} {
+		if _, err := CompileConfig(buildTree(t, []string{line})); err != nil {
+			t.Fatalf("control union %q must compile, got: %v", line, err)
+		}
 	}
 }
 

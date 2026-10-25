@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"sort"
 	"strings"
 )
@@ -321,17 +322,18 @@ func addressBookNameCollision(scope string, ab *AddressBook) error {
 }
 
 // validateAddressBookMappedPrefixesStrict rejects IPv4-mapped IPv6 address-book
-// values (#10688) and IPv4-compatible values (#16875). Go's net.IP.To4 folds
-// mapped prefixes into the IPv4 wire array, while the userspace helper parses
-// the colon-bearing token as IPv6 and rejects the whole snapshot's
-// wrong-family prefix; a compat prefix is filed IPv6 on both sides but keys
-// an identity the helper drops at ingress before any NAT/policy match
+// values (#10688) and mapped/compatible-only values (#16875). Go's net.IP.To4
+// folds mapped prefixes into the IPv4 wire array, while the userspace helper
+// parses the colon-bearing token as IPv6 and rejects the whole snapshot's
+// wrong-family prefix; a compat-only prefix is filed IPv6 on both sides but
+// keys an identity the helper drops at ingress before any NAT/policy match
 // (#10686), so a NAT rule resolving to it via an address-book name could
 // never match — the #16875 smuggle path. A strict commit must not
-// create either silent refusal. The compat arm goes through
-// natAddrIsV4MappedOrCompat, which excludes only the exact :: and ::1
-// identities (mapped 127/8 included); the mapped arm keeps
-// FRRAddrIsMapped so padded-mask spellings netip rejects still fire.
+// create either silent refusal. The mapped arm keeps FRRAddrIsMapped
+// so padded-mask spellings netip rejects still fire; the
+// mapped/compatible arm judges the entry's merged union with the
+// subset question (natIntervalSubsetOfDropped), excluding only the
+// exact :: and ::1 identities (mapped 127/8 included as dropped).
 func validateAddressBookMappedPrefixesStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -344,13 +346,19 @@ func validateAddressBookMappedPrefixesStrict(cfg *Config) error {
 	// reference (review finding on #17697). DNS-resolved values are
 	// runtime data, not authored literals, and stay out of scope.
 	//
-	// Viability is judged on the entry's UNION, not per fragment: a
-	// native-spanning range whose CIDR cover starts in compat space
-	// (range ::2 to 2001:db8::9, first fragment ::2/127) still
-	// matches native traffic, so rejecting on ANY fragment is a
-	// false reject (gate review on #17697). The entry rejects as
-	// never-matching only when EVERY enforced value is subset-of-
-	// dropped; the mapped wire-family arm stays per-value.
+	// Viability is judged on the entry's MERGED UNION, not per
+	// fragment: a native-spanning range whose CIDR cover starts in
+	// compat space (range ::2 to 2001:db8::9) still matches native
+	// traffic, so rejecting on ANY fragment is a false reject — but
+	// an exempt-only fragment (::1/128) must not excuse compat
+	// siblings either (range ::1 to ::3 is compat-only overall).
+	// Merge all fragment intervals first, then ask the subset
+	// question of the union: viable iff some merged interval is
+	// not subset-of-dropped, where an interval of ONLY exempt
+	// points ({::}, {::1}, {::,::1}) does not by itself prove
+	// viability (gate3 review on #17697). Unparseable values defer
+	// to their own gates (viable here). The mapped wire-family arm
+	// stays per-value.
 	valuesOf := func(address *Address) []string {
 		var vals []string
 		if address.Value != "" {
@@ -359,19 +367,56 @@ func validateAddressBookMappedPrefixesStrict(cfg *Config) error {
 		vals = append(vals, address.ExpandedPrefixes...)
 		return vals
 	}
-	// bookEntryViable reports whether any enforced value matches
-	// native (non-dropped) traffic: a subset-false value, or an
-	// unparseable value whose verdict belongs to another gate.
 	bookEntryViable := func(vals []string) bool {
+		type interval struct{ lo, hi netip.Addr }
+		var ivs []interval
 		for _, v := range vals {
-			if _, _, ok := natPrefixInterval(v); !ok {
-				return true
+			lo, hi, ok := natPrefixInterval(v)
+			if !ok {
+				return true // other gates own unparseable values
 			}
-			if !natPrefixIsV4MappedOrCompatOnly(v) {
-				return true
+			ivs = append(ivs, interval{lo, hi})
+		}
+		if len(ivs) == 0 {
+			return true
+		}
+		sort.Slice(ivs, func(i, j int) bool { return ivs[i].lo.Compare(ivs[j].lo) < 0 })
+		merged := []interval{ivs[0]}
+		for _, iv := range ivs[1:] {
+			last := &merged[len(merged)-1]
+			next := last.hi.Next()
+			if iv.lo.Compare(last.hi) <= 0 || (next.IsValid() && iv.lo.Compare(next) <= 0) {
+				if iv.hi.Compare(last.hi) > 0 {
+					last.hi = iv.hi
+				}
+				continue
+			}
+			merged = append(merged, iv)
+		}
+		// Track whether every merged interval is exempt-only or
+		// dropped: a union consisting SOLELY of exempt points is an
+		// accepted native selector (the :: / ::1 controls), not a
+		// never-match — it is viable in the acceptance sense, which
+		// here means "do not reject". A union mixing exempt points
+		// with dropped non-exempt members and nothing native is NOT
+		// viable (gate3 F2).
+		for _, m := range merged {
+			if m.lo.Compare(netip.IPv6Unspecified()) >= 0 && m.hi.Compare(netip.IPv6Loopback()) <= 0 {
+				continue
+			}
+			if !natIntervalSubsetOfDropped(m.lo, m.hi) {
+				return true // genuine native member: viable
 			}
 		}
-		return false
+		// No native member found. Accept only when the union
+		// contains no dropped NON-EXEMPT address at all (the
+		// exempt-only union); otherwise it is compat/mapped-only.
+		for _, m := range merged {
+			if natIntervalIntersectsDroppedNonExempt(m.lo, m.hi) {
+				return false
+			}
+		}
+		return true
 	}
 	check := func(scope string, book *AddressBook) error {
 		if book == nil {

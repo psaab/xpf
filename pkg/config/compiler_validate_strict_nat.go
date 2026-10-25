@@ -600,39 +600,39 @@ func natMatchEmptyAppSetError(natKind, ruleSet, ruleName, name string) error {
 //
 // Judging is interval arithmetic on the masked represented set
 // (see natPrefixInterval): dropped space D1=::/96 (compat) and
-// D2=::ffff:0:0/96 (mapped), exempt points :: and ::1. MATCH slots
-// (static/SNAT/DNAT source+destination, NAT64 source, book values)
-// reject iff the whole interval is dropped (subset question,
-// natPrefixIsV4MappedOrCompatOnly); ALLOCATION slots (SNAT/DNAT
-// pools, static `then` target, NAT64 translation prefix) reject
-// iff the interval intersects dropped-non-exempt space
-// (natPrefixContainsV4MappedOrCompat). Straddles (::fffe:0:0/95)
-// therefore pass match viability but reject as translation
-// endpoints; host-bits spellings (::2/0) mask first. Sites, in
-// deterministic order (static rule-sets in slice order, DNAT/SNAT
-// rule-sets sorted by name, DNAT pools sorted by name, SNAT pools
-// sorted by name):
+// D2=::ffff:0:0/96 (mapped), exempt points :: and ::1. Two
+// questions: SUBSET (reject iff the whole interval is dropped —
+// natPrefixIsV4MappedOrCompatOnly) for genuinely selector-only
+// slots, and INTERSECTION (reject iff the interval meets
+// dropped-non-exempt space — natPrefixContainsV4MappedOrCompat)
+// for translation/allocation endpoints. BIDIRECTIONAL slots
+// (static and NPTv6 external prefixes) must pass BOTH: the
+// external is the forward match and the reverse translation
+// endpoint, so a straddle (::fffe:0:0/95) that is viable as a
+// pure selector still rejects there, while it passes at
+// selector-only slots. Host-bits spellings (::2/0) mask first.
+// Sites, in deterministic order (static rule-sets in slice
+// order, DNAT/SNAT rule-sets sorted by name, DNAT pools sorted
+// by name, SNAT pools sorted by name):
 //
-//   - static-NAT: match destination (subset), match source
-//     (subset, SourceAddresses fallback SourceAddress — honored as
-//     SourceConstraint; the Rust drop checks SRC or DST), and the
-//     `then` target (intersection — including NPTv6's nptv6-prefix
-//     target; an NPTv6 compat-rooted ::/64 MATCH spans native
-//     space beyond ::/96 so its subset verdict passes, while a
-//     ::/64 target intersects dropped space). The static `inet`
-//     sentinel keeps its own gate.
+//   - static-NAT (incl. NPTv6): external match destination
+//     (BOTH questions), match source (subset, SourceAddresses
+//     fallback SourceAddress — SourceConstraint; the Rust drop
+//     checks SRC or DST), `then` target incl. nptv6-prefix
+//     (intersection). The static `inet` sentinel keeps its gate.
 //   - destination/source-NAT: match source+destination (subset),
 //     destination pool address (intersection).
-//   - source-NAT pools: every member of every pool, referenced or
-//     not (intersection).
+//   - source-NAT pools: every member of every pool, referenced
+//     or not (intersection).
 //   - NAT64: translation prefix (intersection), match
-//     source-address (subset; ::/0 spellings are viable subset-false).
+//     source-address (subset; ::/0 spellings are subset-false).
 //
-// Address-book names are not literals here — the book gate judges
-// them on their union with subset semantics (Value +
-// ExpandedPrefixes), so a native-spanning range compiles even
-// when its cover starts in compat space. Unparseable tokens are
-// left to their existing gates.
+// Address-book names are not literals here — the book gate
+// judges them on their MERGED union with subset semantics
+// (Value + ExpandedPrefixes): a native-spanning range compiles
+// even when its cover starts in compat space, while a
+// compat-only union rejects even when one fragment is exempt.
+// Unparseable tokens are left to their existing gates.
 //
 // Strict on commit / commit-check (hard reject naming the NAT kind,
 // rule-set/rule or pool, slot, and offending value); the registry
@@ -653,16 +653,18 @@ func validateNATMappedCompatStrict(cfg *Config) error {
 		"IPv6-keyed entry, so a rule matching on it can never match and " +
 		"a translation onto it cannot carry return traffic — author " +
 		"the address in native IPv4 or native IPv6 form instead"
-	// Static NAT. Match slots (src+dst) use the subset (match)
-	// question; the `then` target is a translation endpoint and uses
-	// the intersection (allocation) question. NPTv6 rules get the
-	// same treatment instead of a blanket exemption: their match
-	// prefix is a selector (subset) and their nptv6-prefix is a
-	// translation endpoint (intersection) — a compat-rooted ::/64
-	// external is NOT subset (it spans native space beyond ::/96,
-	// so viability passes), while a ::/64 TARGET interval intersects
-	// dropped space and rejects. The static `inet` sentinel keeps
-	// its own gate.
+	// Static NAT is BIDIRECTIONAL: the external (match destination)
+	// prefix is both the forward match AND the reverse-direction
+	// translation endpoint (outbound sources are rewritten onto
+	// it), so it must pass BOTH questions — subset (forward match
+	// viable) and intersection (reverse target not dropped). The
+	// `then` prefix likewise. NPTv6 gets the same treatment: its
+	// external is also a reverse endpoint, so a compat-rooted ::/64
+	// external — viable as a pure selector because it spans native
+	// space — still rejects on intersection, exactly as a ::/64
+	// target does. Genuinely selector-only slots (source
+	// constraints, SNAT/DNAT matches, NAT64 sources, book values)
+	// keep subset only. The static `inet` sentinel keeps its gate.
 	for _, rs := range cfg.Security.NAT.Static {
 		if rs == nil {
 			continue
@@ -679,7 +681,7 @@ func validateNATMappedCompatStrict(cfg *Config) error {
 				if addr == "" {
 					continue
 				}
-				if natPrefixIsV4MappedOrCompatOnly(addr) {
+				if natPrefixIsV4MappedOrCompatOnly(addr) || natPrefixContainsV4MappedOrCompat(addr) {
 					return fmt.Errorf(
 						"static-nat rule-set %q rule %q: match destination-address %q %s (#16875)",
 						rs.Name, rule.Name, addr, cause)
