@@ -47,21 +47,24 @@ pub(crate) const MSG_FILTER_LOG: u8 = 13;
 // close, never substituting for each other.
 pub(crate) const MSG_SESSION_CLOSE_RT_FLOW: u8 = 14;
 
-// #2508: RT_FLOW SESSION_CREATE on the raw dataplane-event channel. Same
-// 168-byte payload shape as the close frame but with the event-type byte set
-// to RT_FLOW SESSION_CREATE (1). Emitted ONLY for sessions admitted by a
-// policy with `then log session-init`; there is no flowexport consumer of
-// session opens, so this frame is gated at the producer (the caller checks
-// metadata.log_session_init). The Go logEvent path formats it as an
-// RT_FLOW_SESSION_CREATE syslog record.
+// #2508/#15946: RT_FLOW SESSION_CREATE on the raw dataplane-event
+// channel. Same 168-byte payload shape as the close frame but with the
+// event-type byte set to RT_FLOW SESSION_CREATE (1). Emitted for every
+// fresh admission (flowexport consumes SESSION_OPEN for its tracker and
+// open-side sampling decision); the per-policy SYSLOG gate at [135]
+// reflects `metadata.log_session_init` and is enforced on the Go side.
+// The Go logEvent path formats it as an RT_FLOW_SESSION_CREATE syslog
+// record when the gate is set.
 pub(crate) const MSG_SESSION_CREATE_RT_FLOW: u8 = 15;
 
 // #2749: 152 bytes (was 144). The trailing [144:152] block carries the
 // class-of-service / interface-attribution fields the NetFlow v9 + IPFIX
-// SESSION_CLOSE exporters re-introduce: [144] src ToS byte (DSCP<<2),
+// exporters use: [144] src ToS byte (DSCP<<2),
 // [145] accumulated TCP control bits, [146] flow direction (reserved, 0 —
 // deferred follow-up), [147] reserved, [148:152] egress ifindex (LE u32).
-// Only the SESSION_CLOSE frame populates these; every other frame leaves
+// The SESSION_CLOSE frame populates the whole block; the SESSION_CREATE
+// frame populates only [148:152] (#16303, so the open can name its output
+// interface) and leaves [144:148] zero; every other frame leaves
 // [144:152] zero. The growth is purely ADDITIVE: the Go side keeps its
 // minimum-frame acceptance at the legacy 144 bytes (`rawEventWireSize`) and
 // reads [144:152] only when the frame actually carries them

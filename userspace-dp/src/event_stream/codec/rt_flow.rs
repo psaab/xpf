@@ -369,15 +369,18 @@ impl EventFrame {
         }
     }
 
-    /// #2508: encode an RT_FLOW SESSION_CREATE (type 15) frame for a session
-    /// admitted by a policy with `then log session-init`. Identical payload
+    /// #2508/#15946: encode an RT_FLOW SESSION_CREATE (type 15) frame for
+    /// a session on its fresh admission. Identical payload
     /// shape to `encode_session_close_rt_flow` except: the event-type byte is
     /// RT_FLOW SESSION_CREATE (1); there is no close reason; counters are 0
     /// (a create has no volume yet); and the per-policy SYSLOG gate byte
-    /// (offset 135) is always set, because the helper only ever produces this
-    /// frame when the gate is open (no flowexport consumer of opens — there is
-    /// nothing to keep unconditional). The Go logEvent path renders it as the
-    /// RT_FLOW_SESSION_CREATE syslog record.
+    /// (offset 135) reflects the caller's `log_syslog` argument — set only
+    /// when the admitting policy requested `then log session-init`, clear
+    /// for a flowexport-only open (#15946: the helper now produces this
+    /// frame for every fresh admission, and the Go side suppresses the
+    /// human-facing record when the gate is clear while flowexport
+    /// callbacks still run). The Go logEvent path renders it as the
+    /// RT_FLOW_SESSION_CREATE syslog record when the gate is set.
     ///
     /// #2615: the create frame now also threads the ingress ifindex (the
     /// admitting binding's interface, written to [128:132]) and the resolved
@@ -396,8 +399,7 @@ impl EventFrame {
     /// resolves a policy name from it. So this is a render-only fix: the
     /// RT_FLOW_SESSION_CREATE syslog record now names the admitting policy
     /// instead of policy `0`. A 0 keeps the prior behavior for sessions with
-    /// no admitting policy, e.g. host-local/seed sessions never emit this
-    /// producer-gated frame).
+    /// no admitting policy.
     ///
     /// #11698: the create frame carries the session's admission generation at
     /// [160:168], paired with its frozen install-time policy ID at [44:48].

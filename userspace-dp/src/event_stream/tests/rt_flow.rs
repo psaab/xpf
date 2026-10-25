@@ -664,6 +664,34 @@ fn test_emit_session_create_rt_flow_zero_created_stays_zero() {
 }
 
 #[test]
+fn test_emit_session_create_rt_flow_flowexport_only_16579() {
+    // #16579 fail-on-revert: emit_session_create_rt_flow must deliver a
+    // frame for a flowexport-only open (log_session_init=false, the
+    // test_close_delta default) with [135] clear — not suppress it as
+    // the pre-#15946 producer gate did. Re-adding a log_session_init
+    // early-return makes try_recv fail; forcing the gate byte in the
+    // encoder fails the [135] assertion.
+    let (handle, rx) = test_worker_handle(
+        8,
+        DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
+        },
+    );
+    let delta = test_close_delta(crate::session::SessionDeltaKind::Open);
+    assert!(!delta.metadata.log_session_init);
+    handle.emit_session_create_rt_flow(&delta, 0, 0);
+    let frame = rx
+        .try_recv()
+        .expect("flowexport-only SESSION_CREATE frame must be emitted");
+    assert_eq!(frame.data[4], MSG_SESSION_CREATE_RT_FLOW);
+    let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
+    assert_eq!(p[135], 0, "flowexport-only open must keep [135] clear");
+}
+
+#[test]
 fn test_session_close_survives_production_rate_14609() {
     // #14609 acceptance (z4): with the PRODUCTION limiter config
     // (DataplaneEventRateLimitConfig::default()) a burst of 5000

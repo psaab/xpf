@@ -794,7 +794,8 @@ impl SessionTable {
                 // forwarding pass).
                 counters: SessionCounters::default(),
                 // #2749: mirror the entry's seed flags on the Open delta
-                // (informational — Open deltas have no flowexport consumer).
+                // (the create frame leaves [144:148] zero; only the
+                // resolved egress ifindex rides [148:152], #16303).
                 observed_tos: 0,
                 observed_tcp_flags: tcp_flags,
                 pptp_call_ids,

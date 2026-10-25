@@ -623,11 +623,13 @@ fn test_session_close_rt_flow_log_gate_byte() {
     assert_eq!(p_on[52], RT_FLOW_EVENT_SESSION_CLOSE);
 }
 
-// #2508 fail-on-revert: the SESSION_CREATE frame is the new per-policy
-// session-init producer. It must use frame type 15, event-type byte 1
-// (SESSION_OPEN, renders as RT_FLOW_SESSION_CREATE on the Go side), and set
-// the SYSLOG gate byte (it is producer-gated, only emitted when logging is
-// requested). It must carry the 5-tuple and NAT slots.
+// #2508/#15946 fail-on-revert: the SESSION_CREATE frame carries the
+// per-policy session-init gate. It must use frame type 15, event-type
+// byte 1 (SESSION_OPEN, renders as RT_FLOW_SESSION_CREATE on the Go
+// side), and reflect the caller's log_syslog argument in the SYSLOG
+// gate byte (set only when logging is requested; the frame itself is
+// emitted for every fresh admission). It must carry the 5-tuple and
+// NAT slots.
 #[test]
 fn test_session_create_rt_flow_wire_layout() {
     let frame = EventFrame::encode_session_create_rt_flow(
@@ -662,7 +664,7 @@ fn test_session_create_rt_flow_wire_layout() {
     assert_eq!(p[52], 1, "must equal the Go eventTypeSessionOpen value");
     assert_eq!(p[53], 6); // protocol
     assert_eq!(p[55], RT_FLOW_AF_INET);
-    // gate byte set — producer only emits the frame when logging is requested.
+    // gate byte set — this specimen requested session-init logging.
     assert_eq!(p[135], RT_FLOW_LOG_SYSLOG);
     // 5-tuple: v4 src/dst left-aligned in the 16-byte slots, BE ports.
     assert_eq!(&p[8..12], &Ipv4Addr::new(10, 0, 1, 102).octets());
@@ -713,6 +715,48 @@ fn test_session_create_rt_flow_wire_layout() {
         u64::from_le_bytes(p[0..8].try_into().unwrap()),
         1_700_000_123_456_789_012
     );
+}
+
+// #16579 fail-on-revert: a flowexport-only open (log_syslog=false) must
+// still encode as a full SESSION_CREATE frame with [135] clear and the
+// #16303 egress ifindex at [148:152]. Reverting the encoder to always
+// set the gate byte (the pre-#15946 premise) fails the
+// [135] assertion; reverting [148:152] fails the egress assertion.
+#[test]
+fn test_session_create_rt_flow_flowexport_only_gate_clear_16579() {
+    let frame = EventFrame::encode_session_create_rt_flow(
+        43,
+        libc::AF_INET as u8,
+        6,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 1, 103)),
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 201)),
+        23456,
+        443,
+        None,
+        None,
+        0,
+        0,
+        TEST_TRUST_ZONE_ID,
+        TEST_UNTRUST_ZONE_ID,
+        7,
+        41,
+        77,
+        9,
+        88,
+        0x0102_0304_0506_0708,
+        1_700_000_123_456_789_013,
+        false,
+    );
+    assert_eq!(frame.data[4], MSG_SESSION_CREATE_RT_FLOW);
+    let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
+    assert_eq!(p[52], RT_FLOW_EVENT_SESSION_OPEN);
+    assert_eq!(p[135], 0, "flowexport-only open must keep [135] clear");
+    assert_eq!(
+        u32::from_le_bytes(p[148..152].try_into().unwrap()),
+        88,
+        "flowexport-only open must still stamp egress ifindex at [148:152]"
+    );
+    assert_eq!(&p[144..148], &[0, 0, 0, 0], "[144:148] stay zero on a create");
 }
 
 #[test]
