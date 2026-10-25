@@ -197,6 +197,7 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosedProvider(cfg *con
 			Userspace:               ucfg,
 			schedulerActiveState:    copyPolicySchedulerActiveState(activeState),
 			schedulerActiveStateSet: true,
+			builtRouteOverlay:       cloneRouteOverlay(routeOverlay),
 		}, nil
 	}
 	// ONE kernel xfrm sample for the whole snapshot (#6691 round 10). The
@@ -346,6 +347,7 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosedProvider(cfg *con
 	// netdev is absent. See ConfigSnapshot.WgSteeredListenPorts.
 	_, snap.WgSteeredListenPorts, _ = config.SplitSteeredPorts(config.SteeredWireGuardListenPorts(cfg))
 	snap.xfrmDumpFailed = xfrmDumpFailed
+	snap.builtRouteOverlay = cloneRouteOverlay(routeOverlay)
 	snap.zoneIDCollisions = quarantineCollidingZones(snap)
 	// Removed-zone derivation is valid only for a populated, collision-free
 	// producer snapshot. A quarantined collision intentionally leaves the

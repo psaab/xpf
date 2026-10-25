@@ -20,15 +20,27 @@ func (m *Manager) routeOverlaySnapshot() []config.RouteOverlayEntry {
 	return cloneRouteOverlay(m.routeOverlay)
 }
 
-// routeOverlayForSnapshot returns the route overlay a snapshot built from
-// cfg was derived with, for the apply-time derived-section rebuild
-// (#14209). A snapshot whose Config is the retained applied config was
-// built with m.routeOverlay; any other snapshot (a fresh Compile build)
-// already carries routes built with the overlay its builder was given,
-// and m.routeOverlay may have moved since, so it must not be re-applied.
-// Caller holds m.mu (every prepareSnapshotForApply caller does).
+// routeOverlayForSnapshot returns the route overlay this snapshot's
+// Routes were built with, for the apply-time derived-section rebuild
+// (#14209, #16640). The full builder records it on the snapshot
+// (builtRouteOverlay), so a fresh Compile snapshot — whose Config is
+// not yet the retained applied config — rebuilds with the overlay it
+// was actually built with, not nil. A snapshot with no recorded build
+// (hand-built, or a retained clone whose Routes a partial publisher
+// rebuilt from an explicit overlay that publisher records itself)
+// falls back to the retained-config identity check: only a snapshot
+// whose Config is the retained applied config may re-apply the
+// manager's current overlay, because m.routeOverlay may have moved
+// since any other snapshot was built. Caller holds m.mu (every
+// prepareSnapshotForApply caller does).
 func (m *Manager) routeOverlayForSnapshot(snap *ConfigSnapshot) []config.RouteOverlayEntry {
-	if m == nil || snap == nil || m.lastSnapshot == nil || snap.Config != m.lastSnapshot.Config {
+	if snap == nil {
+		return nil
+	}
+	if snap.builtRouteOverlay != nil {
+		return cloneRouteOverlay(snap.builtRouteOverlay)
+	}
+	if m == nil || m.lastSnapshot == nil || snap.Config != m.lastSnapshot.Config {
 		return nil
 	}
 	return cloneRouteOverlay(m.routeOverlay)
@@ -208,6 +220,7 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 		if routeErr != nil {
 			return false, fmt.Errorf("build route overlay snapshot: %w", routeErr)
 		}
+		next.builtRouteOverlay = cloneRouteOverlay(desiredOverlay)
 		next.Interfaces = markConnectedRGPeerOwned(cfg, next.Interfaces, m.rgPrimaryProvider)
 		if schedulerState != nil {
 			if err := m.rebuildScheduledPolicySectionsWithLatchLocked(&next, cfg, schedulerCopy, failClosed); err != nil {
@@ -310,6 +323,7 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 	if err != nil {
 		return false, fmt.Errorf("build route overlay snapshot: %w", err)
 	}
+	next.builtRouteOverlay = cloneRouteOverlay(desiredOverlay)
 	next.Interfaces = markConnectedRGPeerOwned(cfg, next.Interfaces, m.rgPrimaryProvider)
 
 	// #5328 (A6-b2-F4): when the caller supplies a policy-scheduler active-state
