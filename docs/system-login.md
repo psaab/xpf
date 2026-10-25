@@ -1167,6 +1167,16 @@ adjudicated on its group-expanded paths on every surface:
   justification did not cover them. `commit check` / `CommitCheck` only
   compile and write nothing, so they are not gated this way.
 
+The commit verdict is bound to the candidate it priced (#16611): the
+gRPC/REST handlers stamp the priced candidate generation (and the priced
+class rules) into the commit authority, and promotion re-prices the
+candidate under the store lock if it changed in between. A same-session
+`copy`/`rename`/`apply-groups` landing while the commit waits for the
+daemon's apply lock therefore cannot be promoted unadjudicated — a
+denied changed candidate is refused, and any changed candidate must be
+re-committed so the new tree is priced. Unchanged candidates and
+unrestricted classes are unaffected.
+
 An unrestricted class (no `*-configuration` leaves) is never affected, and
 a group whose expanded paths are all allowed inherits exactly as before.
 

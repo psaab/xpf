@@ -167,6 +167,12 @@ func (d *Daemon) commitWithGenBinding(
 			return oldActive, compiled, nil
 		}
 		d.pendingRenameMu.Unlock()
+		if errors.Is(err, configstore.ErrCommitCandidateChanged) {
+			// #16611: the candidate moved after the transport gate
+			// priced it for the committing class. Retrying would
+			// adopt the changed candidate unpriced — refuse.
+			return nil, nil, err
+		}
 		if errors.Is(err, configstore.ErrCandidateGenerationConflict) && attempt < maxCommitPreflightRetries {
 			slog.Warn("commit: candidate configuration changed during pre-flight; re-validating on the new generation",
 				"attempt", attempt+1)

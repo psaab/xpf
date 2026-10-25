@@ -1,6 +1,7 @@
 package grpcapi
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -36,6 +37,55 @@ import (
 // applies arbitrary content whose paths are not known until parsed, so
 // enforcing a path regex against it is a different mechanism. Recorded rather
 // than quietly implied.
+
+// commitGatePriceKey carries the #16611 priced-gate snapshot from the
+// interceptor (which adjudicates the expanded candidate for Commit /
+// CommitConfirmed) to the Commit handler, so the handler binds the
+// commit authority to the generation that was actually priced — not
+// to whatever generation exists when the handler later runs.
+type commitGatePriceKey struct{}
+
+type commitGatePrice struct {
+	cfg          *config.Config
+	class        string
+	candidateGen uint64
+	active       *config.ConfigTree
+}
+
+func commitGatePriceFrom(ctx context.Context) (commitGatePrice, bool) {
+	p, ok := ctx.Value(commitGatePriceKey{}).(commitGatePrice)
+	return p, ok
+}
+
+// authorizeRPCCommitGate16611 prices Commit/CommitConfirmed and, on
+// success, returns the context carrying the priced snapshot for the
+// handler's authority binding (#16611). Non-commit methods return ctx
+// unchanged. It reuses authorizeRPCConfigMutation so the verdict is
+// the interceptor's single verdict, never a second pricing.
+func (s *Server) authorizeRPCCommitGate16611(ctx context.Context, cfg *config.Config, class, fullMethod string, req any) (context.Context, error) {
+	if err := s.authorizeRPCConfigMutation(cfg, class, fullMethod, req); err != nil {
+		return ctx, err
+	}
+	if _, method, okM := splitFullMethod(fullMethod); !okM || (method != "Commit" && method != "CommitConfirmed") {
+		return ctx, nil
+	}
+	if s.store == nil || class == "" {
+		return ctx, nil
+	}
+	// Only bind classes the expanded gate actually restricts (regex or
+	// credential surcharge); unrestricted classes stay unbound.
+	if _, restricted, rerr := config.ConfigurationLoginRegexesFor(cfg, class); rerr == nil && !restricted {
+		if fenced, ferr := config.CredentialSurchargeCheck16080(cfg, class); ferr == nil && !fenced {
+			return ctx, nil
+		}
+	}
+	price := commitGatePrice{
+		cfg: cfg, class: class,
+		candidateGen: s.store.CandidateGeneration(),
+		active:       s.store.ActiveTree(),
+	}
+	return context.WithValue(ctx, commitGatePriceKey{}, price), nil
+}
 func (s *Server) authorizeRPCConfigMutation(cfg *config.Config, class, fullMethod string, req any) error {
 	if class == "" {
 		return nil

@@ -42,6 +42,19 @@ func journalPrincipalForContext(_ *Server, ctx context.Context, sessionID string
 	return configstore.FormatJournalPrincipal(p.Source.String(), p.UID, p.Username, p.Class, sessionID)
 }
 
+// bindCommitGate attaches the #16611 priced-gate binding captured by
+// the interceptor (authorizeRPCCommitGate16611) to authority. Absent
+// a priced snapshot — a direct handler call, a superuser, or an
+// unrestricted class whose commit gate priced nothing to bind — the
+// authority is left unbound and promotion is unaffected.
+func (s *Server) bindCommitGate(ctx context.Context, authority configstore.CommitAuthority) configstore.CommitAuthority {
+	price, ok := commitGatePriceFrom(ctx)
+	if !ok {
+		return authority
+	}
+	return authority.WithCommitGate(price.cfg, price.class, price.candidateGen, price.active)
+}
+
 // commitApplyStatus maps a non-nil commit-callback error (commitFn /
 // commitConfirmedFn) to the right gRPC status code (#5742). The
 // structural (compiled, err) classification is shared with REST via
@@ -308,6 +321,12 @@ func (s *Server) Commit(ctx context.Context, req *pb.CommitRequest) (*pb.CommitR
 	if err != nil {
 		return nil, configMutationStatus(err)
 	}
+	// #16611: bind the authority to the candidate generation the
+	// interceptor priced for the admitted class, so a same-holder
+	// copy/rename landing between the gate and promotion is refused
+	// (or re-priced and refused) at promotion instead of being
+	// adopted by the daemon's generation-retry loop.
+	authority = s.bindCommitGate(ctx, authority)
 
 	// Bare commit during a pending commit-confirmed window (#4000). Confirm
 	// the pending config only when the candidate is UNCHANGED; new staged
@@ -373,6 +392,7 @@ func (s *Server) CommitConfirmed(ctx context.Context, req *pb.CommitConfirmedReq
 	if err != nil {
 		return nil, configMutationStatus(err)
 	}
+	authority = s.bindCommitGate(ctx, authority)
 	if s.commitConfirmedFn == nil {
 		return nil, status.Errorf(codes.Internal, "commit-confirmed handler not wired")
 	}
