@@ -341,43 +341,11 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case "address-book":
+		// #16552: shared renderer with CLI/gRPC (config.RenderAddressBook).
 		if cfg == nil || cfg.Security.AddressBook == nil {
 			buf.WriteString("No address book configured\n")
 		} else {
-			ab := cfg.Security.AddressBook
-			if len(ab.Addresses) > 0 {
-				buf.WriteString("Addresses:\n")
-				for _, name := range sortedKeys(ab.Addresses) {
-					addr := ab.Addresses[name]
-					if addr == nil {
-						// #10439: tolerate present-but-nil slots from lenient
-						// restore/peer-sync loads.
-						continue
-					}
-					fmt.Fprintf(&buf, "  %-20s %s\n", name, addr.Value)
-				}
-			}
-			if len(ab.AddressSets) > 0 {
-				buf.WriteString("Address sets:\n")
-				for _, name := range sortedKeys(ab.AddressSets) {
-					as := ab.AddressSets[name]
-					if as == nil {
-						// #10439: tolerate present-but-nil slots from lenient
-						// restore/peer-sync loads.
-						continue
-					}
-					// #15725: nested address-set members, rendered with the
-					// `set:` prefix the gRPC showAddressBook and local CLI
-					// use, so a set grouping other sets no longer reads as
-					// empty.
-					parts := make([]string, 0, len(as.Addresses)+len(as.AddressSets))
-					parts = append(parts, as.Addresses...)
-					for _, nested := range as.AddressSets {
-						parts = append(parts, "set:"+nested)
-					}
-					fmt.Fprintf(&buf, "  %-20s members: %s\n", name, strings.Join(parts, ", "))
-				}
-			}
+			config.RenderAddressBook(&buf, cfg.Security.AddressBook)
 		}
 
 	case "applications":

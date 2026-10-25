@@ -426,6 +426,8 @@ func resolveZoneLocalAddressBooks(sec *SecurityConfig) {
 				DNSFamily:          addr.DNSFamily,
 				DNSAddresses:       append([]string(nil), addr.DNSAddresses...),
 				ExpandedPrefixes:   append([]string(nil), addr.ExpandedPrefixes...),
+				RangeSpec:          addr.RangeSpec,
+				WildcardSpec:       addr.WildcardSpec,
 				OversizedRange:     addr.OversizedRange}
 		}
 		for name, set := range z.AddressBook.AddressSets {

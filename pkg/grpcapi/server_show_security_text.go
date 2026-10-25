@@ -1301,47 +1301,12 @@ func renderDynamicAddressFeedStatusText(buf *strings.Builder, indent string, fi 
 }
 
 func (s *Server) showAddressBook(cfg *config.Config, buf *strings.Builder) {
+	// #16552: shared renderer with CLI/REST (config.RenderAddressBook).
 	if cfg == nil || cfg.Security.AddressBook == nil {
 		buf.WriteString("No address book configured\n")
-	} else {
-		ab := cfg.Security.AddressBook
-		if len(ab.Addresses) > 0 {
-			buf.WriteString("Addresses:\n")
-			for name, addr := range ab.Addresses {
-				if addr == nil {
-					// #12903: a present-but-nil *Address map value is admitted
-					// by the tolerant-load / peer-sync path (#1960) — the SAME
-					// nil-tolerant class the local CLI already skips (#7197).
-					// Skip it rather than dereferencing addr.Value and
-					// panicking the display handler.
-					continue
-				}
-				fmt.Fprintf(buf, "  %-20s %s\n", name, addr.Value)
-			}
-		}
-		if len(ab.AddressSets) > 0 {
-			buf.WriteString("Address sets:\n")
-			for name, as := range ab.AddressSets {
-				if as == nil {
-					// #12903: same nil-tolerant contract as the address rows
-					// above (#7197); skip rather than dereferencing
-					// as.Addresses.
-					continue
-				}
-				// #12903: render nested address-set members with the same
-				// `set:` prefix the local CLI uses, so a set that groups other
-				// sets no longer presents as holding only its direct address
-				// members — an operator auditing a deny set would otherwise
-				// under-count what it matches.
-				parts := make([]string, 0, len(as.Addresses)+len(as.AddressSets))
-				parts = append(parts, as.Addresses...)
-				for _, nested := range as.AddressSets {
-					parts = append(parts, "set:"+nested)
-				}
-				fmt.Fprintf(buf, "  %-20s members: %s\n", name, strings.Join(parts, ", "))
-			}
-		}
+		return
 	}
+	config.RenderAddressBook(buf, cfg.Security.AddressBook)
 }
 
 func (s *Server) showIKE(cfg *config.Config, buf *strings.Builder) {
