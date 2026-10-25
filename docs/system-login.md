@@ -1011,7 +1011,14 @@ allow such as `^show.*` cannot outgrow an end-anchored deny
 allow phrase that occurs only inside pipe filter text
 (`show configuration | except show interfaces` under
 `allow-commands "show interfaces"`) authorizes nothing — the pipe-less
-spelling affirms no allow, so the allowlist denies it. The one escape from
+spelling affirms no allow, so the allowlist denies it. The converse
+holds too (#16780): a deny that matches only pipe or format text
+(`deny-commands "display set"`, `"\| match"`, or an anchored
+`show configuration security \| display set` spelling) vetoes the
+piped command even when the class's allow matches the pipe-less core
+(`allow-commands "^show"`) — the pipe is matched as typed, so that
+denial is not the pipe-inflated reading of a core deny and no core
+allow saves it. The one escape from
 a truncated-spelling veto is the deny-with-exceptions geometry itself:
 the vetoing deny matches only the truncated spelling and the allow that
 carries the full spelling matches only there (`^show log 100$` beside

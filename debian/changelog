@@ -106,6 +106,16 @@ xpf (0.0.0) unstable; urgency=medium
     and a stamped mismatch is suppressed on both the stream and
     system-syslog sinks. The local `show security log` buffer is
     unchanged. Same-generation `then syslog` forwarding is unchanged.
+  * CLI/login-class: a deny-commands pattern matching only pipe or
+    format text (`display set`, `| match`, an anchored
+    `… \| display set` spelling) now vetoes the piped command even
+    when the class's allow matches the pipe-less core (#16780).
+    Previously the #14686 pipe-boundary save overturned the full-form
+    denial whenever the bare command was allowed, so the documented
+    Junos-style "may run show but not `| display set`" rule silently
+    had no effect on the on-box CLI. The deny-with-exceptions idiom
+    (`^show log 100$` beside `^show log$`, public-vrf) still runs
+    through a benign pipe.
   * Shim verifier provenance/headroom (#16701): the gate verdict is
     now schema 3 and records provenance.kernel_release (the uname -r
     the processed-insn count was measured on); freshness and release
