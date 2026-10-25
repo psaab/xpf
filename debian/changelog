@@ -19,6 +19,13 @@ xpf (0.0.0) unstable; urgency=medium
     differ from this process's own heartbeat session; a genuine
     duplicate chassis (different process, different session) still
     warns, and the unkeyed legacy path is unchanged.
+  * Kernel upgrade: a candidate prune deferred because the failed
+    candidate is still the running kernel (#16811) is now persisted
+    in a prune-owed sidecar and collected exactly once on the next
+    boot that is positively off the candidate (or discharged when
+    the same version is re-armed and promoted). Previously the
+    revert cleared the journal, so every failed candidate kernel
+    stayed installed and on disk permanently.
   * Interfaces/networkd: an untagged unit's address on a tagged
     non-RETH parent is now rendered on the VLAN-parent .network
     (#16795). The netlink reconcile installed it on the parent, but

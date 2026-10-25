@@ -133,6 +133,28 @@ func (r *KernelRunner) Arm(candidateVersion string) error {
 			"clear %s to start over", j.CandidateVersion, j.State, candidateVersion, r.cfg.JournalPath)
 	}
 
+	// A FRESH arm of the SAME version a prune-owed record names supersedes
+	// that record (#16811): the re-armed trial re-installs and re-tests the
+	// candidate, so the deferred "un-promoted candidate" debt is void — if
+	// this trial also fails, its own revert writes a fresh record. A record
+	// for a DIFFERENT version is preserved: it must never be pruned from
+	// here (pruning rewrites a slot selector an in-flight arm may depend
+	// on), and the next ordinary boot settles it. FATAL on a read failure,
+	// like the stale-marker clear below: an unreadable record means the
+	// debt's state is unknown, and arming over it could strand it.
+	if !j.State.atLeast(KernelStatePreflight) {
+		if rec, rerr := r.readPruneOwed(); rerr != nil {
+			return fmt.Errorf("kernel-upgrade arm: read prune-owed record (refusing "+
+				"to arm over an unknown prune debt): %w", rerr)
+		} else if rec.CandidateVersion == candidateVersion {
+			if cerr := r.clearPruneOwed(); cerr != nil {
+				return fmt.Errorf("kernel-upgrade arm: clear superseded prune-owed "+
+					"record for %s: %w", candidateVersion, cerr)
+			}
+			r.logf("kernel-upgrade: re-arming %s supersedes its deferred prune; prune-owed record cleared", candidateVersion)
+		}
+	}
+
 	// Clear any STALE promotion marker from a PRIOR roll BEFORE arming a fresh
 	// one (r1 Codex High): otherwise the external orchestrator's post-reboot
 	// `promoted==<ver>` check could be satisfied by a previous successful roll
@@ -638,10 +660,20 @@ func (r *KernelRunner) Promote() (KernelRollOutcome, error) {
 	}
 	if !j.State.atLeast(KernelStateArmed) {
 		// Nothing armed -> this is an ordinary boot, not a candidate trial.
+		// A prune deferred by an earlier revert survives the journal clear
+		// that ended that roll in its own sidecar (#16811); this ordinary
+		// boot is where it is collected, exactly once, now that the running
+		// kernel can be proven not to be the deferred candidate.
+		if err := r.settlePruneOwed(); err != nil {
+			return KernelRollOutcome{}, err
+		}
 		r.logf("kernel-upgrade: no armed candidate (state=%s); ordinary boot, nothing to promote", j.State)
 		return KernelRollOutcome{}, nil
 	}
 	if j.State == KernelStatePromoted || j.State == KernelStateReverted {
+		// The trial is terminal but its journal clear has not landed (or
+		// failed). Defer to that trial: settling here could race the
+		// terminal logic on the next pass that finishes clearing it.
 		r.logf("kernel-upgrade: already terminal (%s); nothing to do", j.State)
 		return KernelRollOutcome{}, nil
 	}
@@ -841,6 +873,16 @@ func (r *KernelRunner) verifyAndPromote(j *KernelJournal, candID, running string
 	if err := r.clearKernelJournal(); err != nil {
 		return KernelRollOutcome{}, err
 	}
+	// Safety net for a prune-owed record naming the version just promoted
+	// (#16811) — e.g. one a failed journal clear left behind across a
+	// re-arm. The normal supersession happens at re-arm (see Arm). Without
+	// this, such a record would be refused forever (running == that
+	// candidate on every later boot). Best-effort: the promotion is already
+	// committed and its journal cleared, so a settle failure is logged,
+	// never reported against it.
+	if err := r.settlePruneOwedAfterPromote(running); err != nil {
+		r.logf("kernel-upgrade: WARNING settle prune owed after promote: %v", err)
+	}
 	return outcome, nil
 }
 
@@ -934,10 +976,19 @@ func (r *KernelRunner) revert(j *KernelJournal, reason error) error {
 // So the destructive prune is gated on a fresh RunningKernel read: equal to
 // the candidate, or unreadable (cannot prove we are off it), DEFERS the prune
 // — the selector + BootOrder restore above still runs, so the next boot lands
-// on known-good and a later gate pass (journal still armed if the clear
-// failed, or the operator) can prune safely. Only positive evidence of a
-// non-candidate running kernel prunes in place. The real PruneInactiveSlot
-// re-checks uname -r itself as a second, independent fail-closed layer.
+// on known-good. Only positive evidence of a non-candidate running kernel
+// prunes in place. The real PruneInactiveSlot re-checks uname -r itself as a
+// second, independent fail-closed layer.
+//
+// #16811: the deferral is persisted. restoreKnownGood's callers clear the
+// journal on every terminal exit (revert's exit-3 path, its attempt-cap
+// exit, and cleanupAlreadyOnKnownGood), so without a record of its own the
+// deferred prune was forgotten and the candidate leaked on disk forever.
+// The deferral now writes a prune-owed sidecar (kernel_prune_owed.go); the
+// next ordinary boot — or a superseding promote — collects it exactly once
+// via settlePruneOwed. A same-boot exit that reaches here ALREADY off the
+// candidate (cleanupAlreadyOnKnownGood) prunes in place below and clears
+// any stale record for THIS candidate, so its debt never double-fires.
 func (r *KernelRunner) restoreKnownGood(j *KernelJournal) {
 	sys := r.cfg.Sys
 	if entries, err := sys.BootEntries(); err == nil {
@@ -963,12 +1014,23 @@ func (r *KernelRunner) restoreKnownGood(j *KernelJournal) {
 	running, rkErr := sys.RunningKernel()
 	switch {
 	case rkErr != nil:
-		r.logf("kernel-upgrade: WARNING running kernel unreadable (%v); DEFER prune of candidate %s until a boot can prove it is not running", rkErr, j.CandidateVersion)
+		// #16811: persist the owed prune BEFORE any terminal journal clear
+		// by the caller, so the next off-candidate boot collects it.
+		r.recordPruneOwed(j)
+		r.logf("kernel-upgrade: WARNING running kernel unreadable (%v); DEFER prune of candidate %s until a boot can prove it is not running (prune-owed record written)", rkErr, j.CandidateVersion)
 	case running == j.CandidateVersion:
-		r.logf("kernel-upgrade: candidate %s is the RUNNING kernel; DEFER prune (selector + BootOrder restored for next boot)", running)
+		r.recordPruneOwed(j)
+		r.logf("kernel-upgrade: candidate %s is the RUNNING kernel; DEFER prune (selector + BootOrder restored for next boot, prune-owed record written)", running)
 	default:
 		if err := sys.PruneInactiveSlot(j.InactiveSlot, j.KnownGoodVersion, j.CandidateVersion); err != nil {
 			r.logf("kernel-upgrade: WARNING prune inactive slot: %v", err)
+		} else if rec, rerr := r.readPruneOwed(); rerr == nil && rec.CandidateVersion == j.CandidateVersion {
+			// The in-place prune just discharged any record owed for THIS
+			// candidate (e.g. written by an earlier pass whose journal
+			// clear failed); a different candidate's debt is untouched.
+			if cerr := r.clearPruneOwed(); cerr != nil {
+				r.logf("kernel-upgrade: WARNING clear discharged prune-owed record: %v", cerr)
+			}
 		}
 	}
 	// Clear the durable promotion marker (r2 AGY #6: a reverted node must not
