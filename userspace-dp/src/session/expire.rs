@@ -613,9 +613,9 @@ impl SessionTable {
         let ceiling_ns = expires_after_ns
             .saturating_mul(STALE_SYNCED_CEILING_MULT)
             .min(STALE_SYNCED_CEILING_ABS_NS);
-        let deadline_ns = first_held_ns
-            .saturating_add(ceiling_ns)
-            .saturating_add(WHEEL_TICK_NS);
+        let deadline_ns = first_held_ns.saturating_add(ceiling_ns);
+        // The wheel processes the target tick on the next GC call, so its
+        // existing strict-`>` gate crosses the ceiling at deadline + one tick.
         let horizon_index = now_ns.saturating_sub(first_held_ns) / HELD_RECHECK_HORIZON_NS;
         let horizon_index = horizon_index.saturating_add(1);
         let next_horizon_ns = first_held_ns

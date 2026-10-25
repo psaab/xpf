@@ -1106,9 +1106,9 @@ every idle entry ages, exactly as before):
 
 Held entries are rechecked on the far edge of the timer-wheel window
 (255 seconds), not on each worker tick. Each next recheck is aligned to
-`first_held_ns` and capped at the original stale-synced deadline (plus one
-wheel tick for the existing strict-`>` expiry rule). Same-ID imports preserve
-both the first-HOLD anchor and pending tick, so they cannot slide expiry.
+`first_held_ns` and capped at the original stale-synced deadline. The wheel
+processes that target on the following GC pass, preserving the gate's strict
+`>` ceiling check. Same-ID imports preserve the first-HOLD anchor and tick.
 
 The HOLD keys on FORWARDING, not origin, so a still-`ForwardFlow`
 demotion-window entry (the demote flip not yet applied) is held too.
