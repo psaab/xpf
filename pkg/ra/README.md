@@ -575,7 +575,12 @@ never retried and the stale IPv6 default-router identity lingered on hosts
     The expiries — not a decayed remaining value — are compared in
     `configEqual`, so the sender is NOT restarted as time advances, but
     IS restarted when a renewal moves the expiry. Prefixes without an
-    expiry keep the granted/default path verbatim.
+    expiry keep the granted/default path verbatim. (#16773: the restart
+    on a moved expiry is driven in cluster mode by the 2s digest
+    reconcile and in standalone mode by the digest-gated RA-only
+    reconcile woken from the unchanged-lease hook; before that fix a
+    standalone same-lifetime renewal restarted nothing and the PIO
+    decayed on the first lease's expiry.)
   - **The converse also holds: CIDR fields compare by parsed value, not raw
     text (#4590 A5-03).** `buildRA` re-parses `NAT64Prefix` and each advertised
     `Prefixes[i].Prefix` via `netip.ParsePrefix`, so two strings that parse to

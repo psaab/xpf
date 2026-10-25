@@ -693,6 +693,18 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.raDeadSenderReassertLoop(ctx)
 	}()
 
+	// #16773: the standalone PD-renewal RA owner. Started unconditionally
+	// (it only wakes on nudgeStandaloneRARenew from a content-identical
+	// lease renewal and is digest-gated, so it costs nothing otherwise);
+	// without it a fixed-lifetime PD renewal never reaches any RA applier
+	// in standalone mode and the live sender omits the LAN PIO at the first
+	// lease's valid expiry while the delegation is still held.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		d.standaloneRARenewLoop(ctx)
+	}()
+
 	// #6802: the always-on retry owner for a FAILED host-inbound conntrack
 	// revocation. Started unconditionally, alongside the proxy-ARP and RA
 	// re-assert loops and for the same reason: no ticker under pkg/daemon

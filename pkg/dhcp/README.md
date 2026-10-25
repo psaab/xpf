@@ -487,6 +487,21 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   the expiry and does restart. Pinned by
   `pkg/daemon/ra_pd_expiry_15057_test.go` and
   `pkg/ra/sender_expiry_15057_test.go`.
+- **A same-lifetime PD renewal still re-applies STANDALONE RA** (#16773):
+  the paragraph above's "a renewal moves the expiry and does restart" held
+  only in cluster mode, where the 2s `reconcileClusterRAServices` digest
+  sees the moved expiry. In standalone mode no applier ran on a
+  content-identical renewal (`delegatedPrefixesChanged` excludes Obtained,
+  and `commitLease` then fired only the unchanged-lease hook), so the live
+  sender kept `ValidExpiresAt=T0+valid`, deprecated the LAN PIO at
+  `T0+preferred` and omitted it at `T0+valid` while the delegation was
+  still held. `onDHCPUnchangedLease` now also nudges a digest-gated,
+  RA-only standalone reconcile (`reconcileStandaloneRAServices`, woken via
+  `raRenewWakeCh` / `standaloneRARenewLoop` under `applySem`, never inline
+  on the client goroutine — #16559); a renewal that moves only Obtained
+  moves the digest and re-applies with the renewed expiry, while a v4 or
+  non-PD renewal leaves it unchanged and restarts nothing. Pinned by
+  `pkg/daemon/ra_pd_renew_standalone_16773_test.go`.
 - **PD-only NoPrefixAvail refusal clears the delegation; wire infinite lifetime is infinite** (#15224): on a PD-only client (`ia-pd` without `ia-na`), a RENEW/REBIND Reply whose IA_PD carries `NoPrefixAvail` and grants nothing usable returns the typed `errV6PDRefused` from `parseV6ReplyChecked` instead of the generic transient error; the run loop clears the stored delegation (`clearDelegatedPDs`, recompile armed) and re-acquires, so `DelegatedPrefixesForRA` stops advertising the refused prefix immediately rather than at its lifetime end. Silence (no IA_PD) keeps the generic keep-and-retry path. The mixed `ia-na`+`ia-pd` path is unchanged (the address makes parse succeed and the `pdRefused` commit arm clears). Separately, `infiniteLifetime` is the RFC 8415 wire value `time.Duration(math.MaxUint32) * time.Second`; the previous `1<<62` threshold sat above the decoded wire value, so infinite grants decayed and acquired a finite `ExpiresAt`. Pinned by `dhcp_cohort_15224_test.go`.
 - **DHCPv6 IA_PD prefix-length is validated at the DECODER** (#6531). The
   wire prefix-length is a single byte, and insomniacslk/dhcp decodes it

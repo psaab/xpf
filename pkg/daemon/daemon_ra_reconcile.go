@@ -98,6 +98,97 @@ func (d *Daemon) reconcileClusterRAServices(reason string) {
 	d.lastRAReconcileHash = newHash
 }
 
+// syncStandaloneRAHash records the digest of a standalone desired set that
+// applyServicesReconcile just applied successfully (#16773), so the renew
+// reconcile's gate compares against the state the sender actually holds.
+// The input is cloned before sorting: buildRAConfigs returns fresh configs,
+// but the caller keeps using the slice after this call (ra.Apply already
+// consumed it), and sortRAPrefixes mutates prefix order in place.
+func (d *Daemon) syncStandaloneRAHash(desired []*config.RAInterfaceConfig) {
+	cloned := make([]*config.RAInterfaceConfig, 0, len(desired))
+	for _, c := range desired {
+		if c == nil {
+			continue
+		}
+		cp := *c
+		cp.Prefixes = append([]*config.RAPrefix(nil), c.Prefixes...)
+		cloned = append(cloned, &cp)
+	}
+	sort.Slice(cloned, func(i, j int) bool { return cloned[i].Interface < cloned[j].Interface })
+	for _, c := range cloned {
+		sortRAPrefixes(c.Prefixes)
+	}
+	d.raReconcileMu.Lock()
+	d.lastStandaloneRAHash = raDesiredHash(cloned)
+	d.raReconcileMu.Unlock()
+}
+
+// #16773: standalone RA reconcile for a PD renewal that moved the absolute
+// expiry. On a fixed-lifetime server a Renew Reply stores Obtained=T1 with
+// identical granted lifetimes, so delegatedPrefixesChanged stays false and
+// commitLease fires only the unchanged-lease hook — no full recompile, and
+// therefore no standalone RA applier runs. The live sender keeps
+// ValidExpiresAt=T0+valid and omits the PIO at that instant while the
+// delegation is still held. The unchanged-lease callback therefore nudges
+// this RA-scoped reconcile (never an inline apply: that hook runs on the
+// DHCP client goroutine and parking on applySem there deadlocks, #16559).
+// This reconcile owns ONLY the standalone branch; cluster mode keeps using
+// reconcileClusterRAServices (whose 2s digest already moves on renewal).
+// The standalone hash is kept separate so a standalone apply never poisons
+// the cluster digest (and vice versa) across a mode transition.
+// lastStandaloneRAHash is guarded by raReconcileMu, like lastRAReconcileHash.
+func (d *Daemon) reconcileStandaloneRAServices(reason string) {
+	d.raReconcileMu.Lock()
+	defer d.raReconcileMu.Unlock()
+	if d.store == nil {
+		return
+	}
+	cfg := d.store.ActiveConfig()
+	if cfg == nil || cfg.Chassis.Cluster != nil {
+		return
+	}
+	apply := d.raApplyFn
+	if apply == nil {
+		if d.ra == nil {
+			return
+		}
+		apply = d.ra.Apply
+	}
+	desired := d.buildRAConfigs(cfg)
+	// Sort prefixes so map-iteration order in DelegatedPrefixesForRA cannot
+	// flap the digest (same discipline as desiredClusterRA, #6036).
+	sort.Slice(desired, func(i, j int) bool { return desired[i].Interface < desired[j].Interface })
+	for _, c := range desired {
+		if c != nil {
+			sortRAPrefixes(c.Prefixes)
+		}
+	}
+	newHash := raDesiredHash(desired)
+	if newHash == d.lastStandaloneRAHash && !d.raHasDeadSenders() {
+		return
+	}
+	if len(desired) == 0 {
+		// No RA desired: withdraw through the applier seam so a test spy
+		// sees the same shape as the cluster empty case. ra.Apply(nil)
+		// retires every sender with a goodbye (#5092).
+		if err := apply(nil); err != nil {
+			slog.Warn("ra: standalone RA renew reconcile failed; will retry on next renewal",
+				"reason", reason, "err", err)
+			return
+		}
+		d.lastStandaloneRAHash = newHash
+		return
+	}
+	if err := apply(desired); err != nil {
+		slog.Warn("ra: standalone RA renew reconcile failed; will retry on next renewal",
+			"reason", reason, "err", err)
+		return
+	}
+	slog.Info("ra: standalone RA reconciled after PD renewal",
+		"reason", reason, "interfaces", len(desired))
+	d.lastStandaloneRAHash = newHash
+}
+
 // raHasDeadSenders reports whether the RA manager holds a sender whose
 // asynchronous conn open failed (#6793). Routed through a daemon method rather
 // than touching d.ra directly at the call sites so the nil-manager case (no RA
@@ -210,6 +301,46 @@ func (d *Daemon) reassertDeadRASendersOnce(ctx context.Context) {
 		slog.Warn("ra: dead-sender rebuild failed; will retry",
 			"interfaces", dead, "err", err)
 	}
+}
+
+// standaloneRARenewLoop is the #16773 owner for the standalone PD-renewal
+// RA refresh. It wakes promptly on nudgeStandaloneRARenew (fired by every
+// content-identical lease renewal) and otherwise does no periodic work:
+// a renewal is the only event that moves Obtained without a recompile, so
+// no ticker is needed and a healthy box pays nothing between renewals.
+// Each wake runs one digest-gated reconcileStandaloneRAOnce; a v4 or
+// non-PD renewal leaves the digest unchanged, so the wake costs one
+// buildRAConfigs and no sender restart (preserving #15057's no-churn rule
+// and #1777's quiet-renewal rule for the full-compile path). Joined by
+// Run's WaitGroup on shutdown.
+func (d *Daemon) standaloneRARenewLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-d.raRenewWakeCh:
+			d.reconcileStandaloneRAOnce(ctx)
+		}
+	}
+}
+
+// reconcileStandaloneRAOnce re-drives the standalone RA desired set once,
+// under applySem. It mirrors reassertDeadRASendersOnce's semaphore
+// discipline (#4001): reading ActiveConfig outside the semaphore could
+// capture a pre-commit snapshot and re-assert state a concurrent commit
+// just removed; the digest is therefore computed inside the hold. A commit
+// landing while this pass waits already applied the fresh RA state via
+// applyServicesReconcile and synced lastStandaloneRAHash, so the pass then
+// finds a matching digest and does nothing (no gratuitous restart).
+func (d *Daemon) reconcileStandaloneRAOnce(ctx context.Context) {
+	if d.applySem == nil {
+		return
+	}
+	if err := d.applySem.Acquire(ctx, 1); err != nil {
+		return
+	}
+	defer d.applySem.Release(1)
+	d.reconcileStandaloneRAServices("pd-renewal")
 }
 
 // desiredClusterRA returns the desired cluster RA set: buildRAConfigs entries
@@ -468,7 +599,6 @@ func (d *Daemon) peerRAConfig(localCfg *config.Config) (*config.Config, bool) {
 	}
 	return peerCfg, true
 }
-
 
 // sortRAPrefixes orders an RA interface's advertised prefixes by a stable, total
 // key so the desired-set digest and ra.configEqual observe a deterministic order

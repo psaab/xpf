@@ -1649,7 +1649,12 @@ type Daemon struct {
 	// applied desired set. Nil means use d.ra.Apply.
 	raReconcileMu       sync.Mutex
 	lastRAReconcileHash string
-	raApplyFn           func([]*config.RAInterfaceConfig) error
+	// #16773: digest of the last successfully applied STANDALONE desired
+	// set, guarded by raReconcileMu. Separate from lastRAReconcileHash so a
+	// standalone apply (applyServicesReconcile / the renew reconcile) never
+	// poisons the cluster digest across a mode transition.
+	lastStandaloneRAHash string
+	raApplyFn            func([]*config.RAInterfaceConfig) error
 	// raStatusFn supplies live sender source addresses so ownership changes can
 	// silently stop a sender even after its RA config was removed. Nil means
 	// use d.ra.Status.
@@ -1685,6 +1690,12 @@ type Daemon struct {
 	// coalescing; see nudgeHostInboundGapReassert for why the send must stay
 	// non-blocking. Nil on a Daemon built without New, which the nudge tolerates.
 	hostInboundGapWakeCh chan struct{}
+	// #16773: wakes the standalone RA renew loop promptly when a
+	// content-identical PD renewal moves the absolute expiry the live
+	// sender holds. Depth 1, coalescing, non-blocking for the same
+	// #16559 client-goroutine reason as hostInboundGapWakeCh. Nil on a
+	// Daemon built without New, which the nudge tolerates.
+	raRenewWakeCh chan struct{}
 	// #9811: the caller-less auto-rollback apply's retry owner. Zero value
 	// owes nothing.
 	configDebt configApplyDebt
@@ -2247,6 +2258,7 @@ func New(opts Options) (*Daemon, error) {
 		ipsecSANudgeCh:             make(chan struct{}, 1),
 		proxyARPNudgeCh:            make(chan struct{}, 1),
 		hostInboundGapWakeCh:       make(chan struct{}, 1),
+		raRenewWakeCh:              make(chan struct{}, 1),
 		syncReadyTimeout:           5 * time.Second,
 		linkByNameFn:               netlink.LinkByName,
 		neighListFn:                netlink.NeighList,
